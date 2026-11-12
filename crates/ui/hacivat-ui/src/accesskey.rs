@@ -118,7 +118,9 @@ pub fn typed_matches(shown: char, typed: char, turkic: bool) -> bool {
     {
         return true;
     }
-    if turkic {
+    let is_dotted_letter = |c: char| matches!(c, 'I' | 'i' | 'İ' | 'ı');
+    if turkic && (is_dotted_letter(shown) || is_dotted_letter(typed)) {
+        // Only the Turkic pairing; I<->i does not match here.
         return is_pair('İ', 'i') || is_pair('I', 'ı');
     }
     shown.is_ascii() && typed.is_ascii() && shown.eq_ignore_ascii_case(&typed)

@@ -74,6 +74,37 @@ fn typed_keys_fold_with_an_explicit_table() {
     assert!(!typed_matches('S', 'ş', false));
 }
 
+/// Assigns keys to `label` alone and reports whether typing `typed` selects it.
+fn selects(label: &str, typed: char, turkic: bool) -> bool {
+    use hacivat_ui::accesskey::typed_matches;
+    match AccessKeyAssigner::assign(&[(label, None, None)])[0] {
+        AccessKey::InLabel(at) => typed_matches(label[at..].chars().next().unwrap(), typed, turkic),
+        AccessKey::Suffix(c) => typed_matches(c, typed, turkic),
+        AccessKey::None => false,
+    }
+}
+
+#[test]
+fn typed_keys_select_assigned_labels_in_both_modes() {
+    for turkic in [false, true] {
+        assert!(selects("Çık", 'ç', turkic), "Çık / ç, turkic={turkic}");
+        assert!(selects("Save", 's', turkic), "Save / s, turkic={turkic}");
+        assert!(selects("Sil", 's', turkic), "Sil / s, turkic={turkic}");
+        assert!(selects("Şifre", 'ş', turkic), "Şifre / ş, turkic={turkic}");
+    }
+    assert!(selects("İptal", 'i', true));
+    assert!(selects("Işık", 'ı', true));
+    assert!(selects("Info", 'i', false));
+    assert!(
+        !selects("Info", 'i', true),
+        "I is dotless in Turkic locales"
+    );
+    assert!(
+        !selects("İptal", 'i', false),
+        "İ is exact outside Turkic locales"
+    );
+}
+
 #[test]
 fn access_key_none_when_nothing_is_left() {
     assert_eq!(

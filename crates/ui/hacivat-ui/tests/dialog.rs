@@ -168,6 +168,51 @@ fn turkic_alt_keys_fold_dotted_and_dotless_i(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn turkic_mode_still_matches_ordinary_letters_in_a_dialog(cx: &mut TestAppContext) {
+    use hacivat_ui::accesskey::AccessKeyLocale;
+    let (d, vcx, events) = open_test_dialog(cx, spec_titled("T", &["Çık", "Save"], 0, 1));
+    d.update(vcx, |d, _| d.set_access_keys(true));
+    for turkic in [false, true] {
+        vcx.update(|_, cx| cx.set_global(AccessKeyLocale { turkic }));
+        vcx.simulate_keystrokes("alt-ç");
+        assert_eq!(
+            events.take(),
+            vec![DialogEvent::Pressed(0)],
+            "turkic={turkic}"
+        );
+        vcx.simulate_keystrokes("alt-s");
+        assert_eq!(
+            events.take(),
+            vec![DialogEvent::Pressed(1)],
+            "turkic={turkic}"
+        );
+    }
+}
+
+#[gpui::test]
+fn info_matches_i_only_outside_turkic_mode(cx: &mut TestAppContext) {
+    use hacivat_ui::accesskey::AccessKeyLocale;
+    let (d, vcx, events) = open_test_dialog(cx, spec_titled("T", &["Info", "Tamam"], 0, 1));
+    d.update(vcx, |d, _| d.set_access_keys(true));
+    vcx.update(|_, cx| cx.set_global(AccessKeyLocale { turkic: false }));
+    vcx.simulate_keystrokes("alt-i");
+    assert_eq!(events.take(), vec![DialogEvent::Pressed(0)]);
+    vcx.update(|_, cx| cx.set_global(AccessKeyLocale { turkic: true }));
+    vcx.simulate_keystrokes("alt-i");
+    assert_eq!(events.take(), vec![]);
+}
+
+#[gpui::test]
+fn dotless_i_selects_isik_in_turkic_mode(cx: &mut TestAppContext) {
+    use hacivat_ui::accesskey::AccessKeyLocale;
+    let (d, vcx, events) = open_test_dialog(cx, spec_titled("T", &["Işık", "Tamam"], 0, 1));
+    d.update(vcx, |d, _| d.set_access_keys(true));
+    vcx.update(|_, cx| cx.set_global(AccessKeyLocale { turkic: true }));
+    vcx.simulate_keystrokes("alt-ı");
+    assert_eq!(events.take(), vec![DialogEvent::Pressed(0)]);
+}
+
+#[gpui::test]
 fn clicking_a_button_presses_it(cx: &mut TestAppContext) {
     let (_, vcx, events) = open_test_dialog(cx, spec_two_buttons(0, 1));
     let cancel = vcx.debug_bounds("button-dialog-button-0").unwrap();
