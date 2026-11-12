@@ -1,4 +1,4 @@
-//! Auth providers: where a connect's credentials come from (HV-SEC-04). Bodies in Task 8.
+//! Auth providers: where a connect's credentials come from (HV-SEC-04).
 
 use std::path::PathBuf;
 
@@ -6,8 +6,8 @@ use hacivat_proto::{DbmsKind, ProfileId};
 use secrecy::SecretString;
 
 use crate::backend::SecretError;
-use crate::files::PgPassWarning;
-use crate::store::{Retention, SecretStore};
+use crate::files::{PgPassWarning, pg_service_path, pgpass_lookup, pgpass_path};
+use crate::store::{Retention, SecretKey, SecretSlot, SecretStore};
 
 /// How a profile authenticates (HV-SEC-04).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,9 +71,13 @@ pub struct CredentialFiles {
 }
 
 impl CredentialFiles {
-    /// The files the environment points at (`pgpass_path`, `pg_service_path`; Task 8).
+    /// The files the environment points at ([`pgpass_path`], [`pg_service_path`]). Blocking:
+    /// it checks which `pg_service.conf` exists.
     pub fn from_env() -> Self {
-        CredentialFiles::default()
+        CredentialFiles {
+            pgpass: pgpass_path(),
+            pg_service: pg_service_path(),
+        }
     }
 }
 
@@ -108,14 +112,73 @@ pub enum AuthError {
     Store(SecretError),
 }
 
-/// Draft, then `.pgpass` (provider `PgPass`), then the store, then `NeedsPrompt`; `None` needs
-/// nothing (Task 8). Blocking.
+/// Resolves a connect's credentials (HV-SEC-04), in this order:
+///
+/// 1. `None` and `ClientCert` need no password: `NotNeeded`, without reading anything.
+/// 2. The dialog's draft, when there is one.
+/// 3. `.pgpass`, when the provider is `PgPass`. No match (or no file) is `PgPassNoMatch`; an
+///    ignored file is `PgPassFile`. The database defaults to the user name, as in libpq.
+/// 4. The store, under the request's retention.
+/// 5. `NeedsPrompt`.
+///
+/// A failure is returned as is, never retried with another source. Blocking: it reads files
+/// and may call the keyring; run it on the core runtime's blocking pool.
 pub fn resolve_auth(
-    _req: &AuthRequest<'_>,
-    _store: &SecretStore,
-    _files: &CredentialFiles,
+    req: &AuthRequest<'_>,
+    store: &SecretStore,
+    files: &CredentialFiles,
 ) -> AuthOutcome {
-    AuthOutcome::Failed(AuthError::Store(SecretError::Unavailable))
+    let user = req.user.map(str::to_string);
+    if matches!(
+        req.provider,
+        AuthProviderId::None | AuthProviderId::ClientCert
+    ) {
+        return AuthOutcome::Ready(AuthMaterial {
+            user,
+            password: None,
+            source: SecretSource::NotNeeded,
+        });
+    }
+    if let Some(draft) = req.draft {
+        return AuthOutcome::Ready(AuthMaterial {
+            user,
+            password: Some(draft.clone()),
+            source: SecretSource::Draft,
+        });
+    }
+    if req.provider == AuthProviderId::PgPass {
+        let Some(path) = &files.pgpass else {
+            return AuthOutcome::Failed(AuthError::PgPassNoMatch);
+        };
+        let database = req.database.or(req.user).unwrap_or_default();
+        return match pgpass_lookup(path, req.host, req.port, database, req.user) {
+            Ok(Some(m)) => AuthOutcome::Ready(AuthMaterial {
+                user: m.user,
+                password: Some(m.password),
+                source: SecretSource::PgPass {
+                    path: path.clone(),
+                    line: m.line,
+                },
+            }),
+            Ok(None) => AuthOutcome::Failed(AuthError::PgPassNoMatch),
+            Err(warning) => AuthOutcome::Failed(AuthError::PgPassFile(warning)),
+        };
+    }
+    let key = SecretKey {
+        profile: req.profile,
+        slot: SecretSlot::DbPassword,
+    };
+    match store.get(&key, req.retention) {
+        Ok(Some(password)) => AuthOutcome::Ready(AuthMaterial {
+            user,
+            password: Some(password),
+            source: SecretSource::Store(req.retention),
+        }),
+        Ok(None) => AuthOutcome::NeedsPrompt {
+            user: user.unwrap_or_default(),
+        },
+        Err(e) => AuthOutcome::Failed(AuthError::Store(e)),
+    }
 }
 
 #[cfg(test)]
