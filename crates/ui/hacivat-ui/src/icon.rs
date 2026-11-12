@@ -1,6 +1,8 @@
 //! Lucide icons at the two design sizes (DESIGN.md Components: 12 px inside chrome and
 //! controls, 14 px by default). The files are bundled by `hacivat_ui_core::assets`.
 
+use std::cell::RefCell;
+
 use hacivat_ui_core::gpui_surface::{AnyElement, Hsla, IntoElement, Styled, px, svg};
 use hacivat_ui_core::theme::Theme;
 
@@ -148,6 +150,37 @@ impl Icon {
     }
 }
 
+/// One icon a widget drew (recorded between [`icon_record`] and [`icon_take`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrawnIcon {
+    pub name: IconName,
+    pub color: Hsla,
+    pub size_px: f32,
+}
+
+thread_local! {
+    static DRAWN: RefCell<Option<Vec<DrawnIcon>>> = const { RefCell::new(None) };
+}
+
+/// Starts (or restarts) recording every icon drawn on this thread. GPUI's test platform does
+/// not rasterize SVGs, so tests assert on what the widgets asked for: the glyph and its ink.
+pub fn icon_record() {
+    DRAWN.with(|d| *d.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stops recording and returns the icons drawn since [`icon_record`], in drawing order.
+pub fn icon_take() -> Vec<DrawnIcon> {
+    DRAWN.with(|d| d.borrow_mut().take().unwrap_or_default())
+}
+
+fn icon_note(icon: DrawnIcon) {
+    DRAWN.with(|d| {
+        if let Some(log) = d.borrow_mut().as_mut() {
+            log.push(icon);
+        }
+    });
+}
+
 impl IntoElement for Icon {
     type Element = AnyElement;
 
@@ -156,6 +189,11 @@ impl IntoElement for Icon {
             let color = self
                 .color
                 .unwrap_or_else(|| Theme::get(cx).tokens.colors.text_2.to_hsla());
+            icon_note(DrawnIcon {
+                name: self.name,
+                color,
+                size_px: self.size.px(),
+            });
             svg()
                 .path(self.name.path())
                 .size(px(self.size.px()))

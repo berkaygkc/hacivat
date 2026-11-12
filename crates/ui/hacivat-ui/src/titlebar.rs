@@ -81,7 +81,6 @@ pub struct TitleBar {
     right: Vec<AnyElement>,
     app_menu: Option<ClickHandler>,
     fit: Option<FitInputs>,
-    #[allow(dead_code, reason = "Task 9")]
     inert: bool,
 }
 
@@ -99,8 +98,10 @@ impl TitleBar {
         }
     }
 
-    /// Whether a modal layer covers the window: the bar's controls then ignore the pointer,
-    /// while the window can still be moved (M2a; Task 9 makes it take effect).
+    /// Whether a modal layer is open (M2a): the palette field, the capsule, the trailing
+    /// segments, the overflow button and the app menu then ignore the pointer. The drag
+    /// regions, the traffic lights and the window controls stay live, and the bar is drawn as
+    /// usual (the scrim starts below it, NOTES cross-cutting #1).
     pub fn inert(mut self, inert: bool) -> Self {
         self.inert = inert;
         self
@@ -164,6 +165,23 @@ impl TitleBar {
     }
 }
 
+/// Lays a transparent cover over `el` that takes every press, so the controls under it do
+/// nothing while the bar is inert (and show no hover).
+fn inert_cover(el: Div, inert: bool) -> Div {
+    if !inert {
+        return el;
+    }
+    el.relative().child(
+        div()
+            .debug_selector(|| "titlebar-inert-cover".to_string())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude(),
+    )
+}
+
 /// Makes `el` start a window drag on press and zoom on a double click.
 fn drag_region(el: Div) -> Div {
     el.window_control_area(WindowControlArea::Drag)
@@ -194,6 +212,7 @@ impl TitleBar {
         let t = theme.tokens;
         let c = &t.colors;
         let chrome = self.chrome;
+        let inert = self.inert;
         let width = f32::from(window.viewport_size().width);
         let fit = self
             .fit
@@ -257,7 +276,10 @@ impl TitleBar {
                 );
         }
         if let Some(capsule) = self.capsule {
-            bar = bar.child(div().ml(px(t.spacing.xl)).child(capsule));
+            bar = bar.child(inert_cover(
+                div().ml(px(t.spacing.xl)).child(capsule),
+                inert,
+            ));
         }
         bar = bar.child(drag_region(div().flex_1().h_full()));
 
@@ -266,7 +288,7 @@ impl TitleBar {
             let mut label_style = t.type_ramp.body;
             label_style.size_px = label_style.size_px.max(11.0);
             let on_click = palette.on_click;
-            let field = div()
+            let mut field = div()
                 .id(ElementId::from("palette-field"))
                 .debug_selector(|| "palette-field".to_string())
                 .declare(Role::Button, palette.placeholder.clone(), None)
@@ -284,8 +306,6 @@ impl TitleBar {
                 .border_1()
                 .border_color(c.seam.to_hsla())
                 .rounded(px(t.radii.sm))
-                .cursor_pointer()
-                .on_click(move |event, window, cx| on_click(event, window, cx))
                 .child(
                     Icon::new(IconName::Search)
                         .size(IconSize::Chrome)
@@ -312,6 +332,11 @@ impl TitleBar {
                     t.type_ramp.mono_kbd,
                     c.text_3.to_hsla(),
                 ));
+            if !inert {
+                field = field
+                    .cursor_pointer()
+                    .on_click(move |event, window, cx| on_click(event, window, cx));
+            }
             bar = bar.child(field).child(drag_region(div().flex_1().h_full()));
         }
 
@@ -319,36 +344,41 @@ impl TitleBar {
         if overflowed {
             if let Some(f) = &self.fit {
                 let on_overflow = f.on_overflow.clone();
-                bar = bar.child(
-                    Button::new("titlebar-overflow", ui_text(cx, "hui-menu-more"))
-                        .kind(ButtonKind::Icon)
-                        .fixed_width(OVERFLOW_BUTTON_PX)
-                        .icon(IconName::Ellipsis)
-                        .on_click_rc(on_overflow),
-                );
+                bar = bar.child(inert_cover(
+                    div().child(
+                        Button::new("titlebar-overflow", ui_text(cx, "hui-menu-more"))
+                            .kind(ButtonKind::Icon)
+                            .fixed_width(OVERFLOW_BUTTON_PX)
+                            .icon(IconName::Ellipsis)
+                            .on_click_rc(on_overflow),
+                    ),
+                    inert,
+                ));
             }
         } else if !self.right.is_empty() {
-            bar = bar.child(
+            bar = bar.child(inert_cover(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(t.spacing.md))
                     .children(self.right),
-            );
+                inert,
+            ));
         }
 
         let controls = matches!(chrome, ChromeKind::WindowsCaption | ChromeKind::LinuxClient);
         if controls {
             if let Some(on_click) = self.app_menu {
-                bar = bar.child(
+                bar = bar.child(inert_cover(
                     div().ml(px(t.spacing.md)).child(
                         Button::new("titlebar-app-menu", ui_text(cx, "hui-menu-app"))
                             .kind(ButtonKind::Icon)
                             .icon(IconName::Menu)
                             .on_click_rc(on_click),
                     ),
-                );
+                    inert,
+                ));
             }
             bar = bar.child(caption_buttons(chrome, window, cx));
         }

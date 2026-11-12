@@ -3,19 +3,27 @@
 //! animates (named rule). The text is a [`TextFn`], so a visible toast follows a language
 //! switch (F16).
 //!
+//! A sticky toast (NOTES "NEW primitives": toast, sticky + actions) has no TTL and is announced
+//! as an alert. It may carry a title (weight 600), the text as a `text-2` body line, a list of
+//! `text-2` bullets with 3 px square marks, and a row of buttons; an action runs, then dismisses
+//! the toast. A `wide` toast is 380 px instead of 320.
+//!
 //! [`ToastQueue`] is the model (a `Global`); [`ToastStack`] draws it and is placed by the host
-//! (Task 13's `Layers`).
+//! (Task 13's `Layers`). Debug selectors: `toast-<id>`, `toast-bullet-<id>-<i>` and the action
+//! buttons `button-toast-action-<id>-<i>`.
 
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::time::Duration;
 
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, ElementId, Global, InteractiveElement, IntoElement, ParentElement, Role,
-    SharedString, StatefulInteractiveElement, Styled, accesskit, div, px,
+    SharedString, StatefulInteractiveElement, Styled, Window, accesskit, div, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
 use crate::actions::ActionFn;
+use crate::button::{Button, ButtonKind};
 use crate::icon::{Icon, IconName, IconSize};
 use crate::l10n::ui_text;
 use crate::popover::{A11yNode, Declare, lazy};
@@ -27,6 +35,11 @@ pub const MAX_VISIBLE_TOASTS: usize = 3;
 pub const DEFAULT_TOAST_TTL: Duration = Duration::from_secs(6);
 /// Gap between the toast stack and the window edge, and above the status bar.
 const EDGE_PX: f32 = 12.0;
+/// The toast widths (NOTES: 320 px; 380 px when the content is wide).
+const WIDTH_PX: f32 = 320.0;
+const WIDE_WIDTH_PX: f32 = 380.0;
+/// The square bullet of a list line (NOTES: 3 px, `text-2`).
+const BULLET_PX: f32 = 3.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastKind {
@@ -38,11 +51,12 @@ pub enum ToastKind {
 
 #[derive(Clone)]
 pub struct Toast {
+    /// The message; with a `title`, the body line under it (left out when empty).
     pub text: TextFn,
     pub kind: ToastKind,
     pub ttl: Duration,
     // M2a (Task 1; drawn from Task 9 on).
-    /// Stays until dismissed or an action runs (no TTL).
+    /// Stays until dismissed or an action runs (no TTL), announced as an alert.
     pub sticky: bool,
     pub title: Option<TextFn>,
     pub bullets: Vec<TextFn>,
@@ -73,6 +87,33 @@ impl Toast {
             wide: false,
         }
     }
+
+    /// How long the toast lives on its own; `None` for a sticky toast.
+    fn lifetime(&self) -> Option<Duration> {
+        (!self.sticky).then_some(self.ttl)
+    }
+}
+
+/// Pushes one wide sticky toast with `title`, `bullets` and one `action` (which only dismisses
+/// it), for the screenshot harness (R28, P19): the caller passes the app's strings, so the
+/// widget owns no copy.
+pub fn sticky_demo_fixture(
+    title: TextFn,
+    bullets: Vec<TextFn>,
+    action: TextFn,
+    _window: &mut Window,
+    cx: &mut App,
+) {
+    let mut toast = Toast::new(ToastKind::Info, Rc::new(|_: &App| SharedString::default()));
+    toast.sticky = true;
+    toast.wide = true;
+    toast.title = Some(title);
+    toast.bullets = bullets;
+    toast.actions = vec![ToastAction {
+        label: action,
+        run: Rc::new(|_, _| {}),
+    }];
+    ToastQueue::push(cx, toast);
 }
 
 struct Entry {
@@ -101,7 +142,7 @@ impl ToastQueue {
                 toast,
             };
             if q.visible.len() < MAX_VISIBLE_TOASTS {
-                let started = (entry.id, entry.toast.ttl);
+                let started = (entry.id, entry.toast.lifetime());
                 q.visible.push(entry);
                 Some(started)
             } else {
@@ -109,13 +150,14 @@ impl ToastQueue {
                 None
             }
         };
-        if let Some((id, ttl)) = started {
+        if let Some((id, Some(ttl))) = started {
             Self::start_timer(cx, id, ttl);
         }
         cx.refresh_windows();
     }
 
-    /// Removes a toast (its TTL ran out or the user dismissed it) and promotes a waiting one.
+    /// Removes a toast (its TTL ran out, the user dismissed it or one of its actions ran) and
+    /// promotes a waiting one.
     pub fn dismiss(cx: &mut App, id: u64) {
         let promoted = {
             let q = cx.default_global::<ToastQueue>();
@@ -128,14 +170,14 @@ impl ToastQueue {
             if q.visible.len() < MAX_VISIBLE_TOASTS
                 && let Some(entry) = q.waiting.pop_front()
             {
-                let started = (entry.id, entry.toast.ttl);
+                let started = (entry.id, entry.toast.lifetime());
                 q.visible.push(entry);
                 Some(started)
             } else {
                 None
             }
         };
-        if let Some((id, ttl)) = promoted {
+        if let Some((id, Some(ttl))) = promoted {
             Self::start_timer(cx, id, ttl);
         }
         cx.refresh_windows();
@@ -186,6 +228,18 @@ impl Default for ToastStack {
     }
 }
 
+/// One visible toast, with its texts read for this frame.
+struct Shown {
+    id: u64,
+    kind: ToastKind,
+    sticky: bool,
+    wide: bool,
+    title: Option<SharedString>,
+    text: SharedString,
+    bullets: Vec<SharedString>,
+    actions: Vec<(SharedString, ActionFn)>,
+}
+
 impl IntoElement for ToastStack {
     type Element = AnyElement;
 
@@ -195,12 +249,26 @@ impl IntoElement for ToastStack {
             let t = theme.tokens;
             let c = &t.colors;
             let dismiss = ui_text(cx, "hui-toast-dismiss");
-            let entries: Vec<(u64, ToastKind, SharedString)> = cx
+            let entries: Vec<Shown> = cx
                 .try_global::<ToastQueue>()
                 .map(|q| {
                     q.visible
                         .iter()
-                        .map(|e| (e.id, e.toast.kind, (e.toast.text)(cx)))
+                        .map(|e| Shown {
+                            id: e.id,
+                            kind: e.toast.kind,
+                            sticky: e.toast.sticky,
+                            wide: e.toast.wide,
+                            title: e.toast.title.as_ref().map(|f| f(cx)),
+                            text: (e.toast.text)(cx),
+                            bullets: e.toast.bullets.iter().map(|f| f(cx)).collect(),
+                            actions: e
+                                .toast
+                                .actions
+                                .iter()
+                                .map(|a| ((a.label)(cx), a.run.clone()))
+                                .collect(),
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -212,43 +280,131 @@ impl IntoElement for ToastStack {
                 .flex()
                 .flex_col()
                 .gap(px(t.spacing.md))
-                .children(entries.into_iter().map(|(id, kind, text)| {
-                    let (role, live, icon, tint) = match kind {
-                        ToastKind::Info => (
-                            Role::Status,
-                            accesskit::Live::Polite,
-                            IconName::Info,
-                            // Hue Is Meaning: info is no selection, so its icon is text-2.
-                            c.text_2,
-                        ),
-                        ToastKind::Error => (
-                            Role::Alert,
-                            accesskit::Live::Assertive,
-                            IconName::TriangleAlert,
-                            c.red,
-                        ),
+                .children(entries.into_iter().map(|shown| {
+                    let id = shown.id;
+                    let (role, live) = if shown.sticky || shown.kind == ToastKind::Error {
+                        (Role::Alert, accesskit::Live::Assertive)
+                    } else {
+                        (Role::Status, accesskit::Live::Polite)
                     };
-                    let card = popover_surface(&theme)
+                    let (icon, tint) = match shown.kind {
+                        // Hue Is Meaning: info is no selection, so its icon is text-2.
+                        ToastKind::Info => (IconName::Info, c.text_2),
+                        ToastKind::Error => (IconName::TriangleAlert, c.red),
+                    };
+                    let rich = shown.title.is_some()
+                        || !shown.bullets.is_empty()
+                        || !shown.actions.is_empty();
+                    let headline = shown.title.clone().unwrap_or_else(|| shown.text.clone());
+                    let mut content = div().flex().flex_col().flex_1().min_w(px(0.0));
+                    match &shown.title {
+                        Some(title) => {
+                            content = content.child(Label::new(
+                                title.clone(),
+                                TextSource::Fluent,
+                                t.type_ramp.body_strong,
+                                c.text.to_hsla(),
+                            ));
+                            if !shown.text.is_empty() {
+                                // Raised Ink Rule: secondary lines on the card are text-2.
+                                content = content.child(Label::new(
+                                    shown.text.clone(),
+                                    TextSource::Fluent,
+                                    t.type_ramp.body,
+                                    c.text_2.to_hsla(),
+                                ));
+                            }
+                        }
+                        None => {
+                            content = content.child(Label::new(
+                                shown.text.clone(),
+                                TextSource::Fluent,
+                                t.type_ramp.body,
+                                c.text.to_hsla(),
+                            ));
+                        }
+                    }
+                    if !shown.bullets.is_empty() {
+                        content =
+                            content.child(div().flex().flex_col().mt(px(t.spacing.xs)).children(
+                                shown.bullets.iter().enumerate().map(|(i, bullet)| {
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(t.spacing.sm))
+                                        .child(
+                                            div()
+                                                .debug_selector(move || {
+                                                    format!("toast-bullet-{id}-{i}")
+                                                })
+                                                .size(px(BULLET_PX))
+                                                .flex_none()
+                                                .bg(c.text_2.to_hsla()),
+                                        )
+                                        .child(Label::new(
+                                            bullet.clone(),
+                                            TextSource::Fluent,
+                                            t.type_ramp.body,
+                                            c.text_2.to_hsla(),
+                                        ))
+                                }),
+                            ));
+                    }
+                    if !shown.actions.is_empty() {
+                        content = content.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(t.spacing.sm))
+                                .mt(px(t.spacing.md))
+                                .children(shown.actions.into_iter().enumerate().map(
+                                    |(i, (label, run))| {
+                                        // One emphasised action; the rest are ghosts (mock).
+                                        let kind = if i == 0 {
+                                            ButtonKind::Default
+                                        } else {
+                                            ButtonKind::Ghost
+                                        };
+                                        Button::new(
+                                            ElementId::Name(
+                                                format!("toast-action-{id}-{i}").into(),
+                                            ),
+                                            label,
+                                        )
+                                        .kind(kind)
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                run(window, cx);
+                                                ToastQueue::dismiss(cx, id);
+                                            },
+                                        )
+                                    },
+                                )),
+                        );
+                    }
+                    let mut card = popover_surface(&theme)
                         .id(ElementId::from(("toast", id)))
                         .debug_selector(move || format!("toast-{id}"))
                         .flex()
                         .flex_row()
-                        .items_center()
                         .gap(px(t.spacing.md))
-                        .w(px(320.0))
+                        .w(px(if shown.wide { WIDE_WIDTH_PX } else { WIDTH_PX }))
                         .px(px(t.spacing.xl))
-                        .py(px(t.spacing.md))
+                        .py(px(t.spacing.md));
+                    // A one-line toast centres its icon; a rich one keeps it on the first line.
+                    card = if rich {
+                        card.items_start()
+                    } else {
+                        card.items_center()
+                    };
+                    let card = card
                         .child(
                             Icon::new(icon)
                                 .size(IconSize::Default)
                                 .color(tint.to_hsla()),
                         )
-                        .child(div().flex_1().min_w(px(0.0)).child(Label::new(
-                            text.clone(),
-                            TextSource::Fluent,
-                            t.type_ramp.body,
-                            c.text.to_hsla(),
-                        )))
+                        .child(content)
                         .child(
                             div()
                                 .id(ElementId::from(("toast-dismiss", id)))
@@ -266,9 +422,14 @@ impl IntoElement for ToastStack {
                         );
                     // Announced by screen readers: the node's value changes with a live region
                     // (macOS speaks only valued, live nodes).
-                    A11yNode::new(("toast-node", id), role, text.clone(), false, card)
-                        .live(live)
-                        .value(text)
+                    let mut node =
+                        A11yNode::new(("toast-node", id), role, headline.clone(), false, card)
+                            .live(live)
+                            .value(headline);
+                    if shown.title.is_some() && !shown.text.is_empty() {
+                        node = node.description(shown.text);
+                    }
+                    node
                 }))
                 .into_any_element()
         })
