@@ -640,3 +640,122 @@ pub fn sample_arg_values(id: &str) -> Vec<(&'static str, ArgValue)> {
         })
         .collect()
 }
+
+// ## m2a-t12-profiles
+
+/// The secret backend under a `shell_with_connections*` shell, for tests to read back.
+struct TestSecretBackend(std::sync::Arc<dyn hacivat_secrets::SecretBackend>);
+
+impl Global for TestSecretBackend {}
+
+/// A shell started with `ConnectionsBoot::for_tests` (a memory secret backend) and a
+/// `FakeDriver` registry (PostgreSQL, MySQL, MariaDB, SQLite), over a fresh temp root.
+pub fn shell_with_connections(
+    cx: &mut TestAppContext,
+    lang: &str,
+) -> &'static mut VisualTestContext {
+    shell_with_backend(
+        cx,
+        lang,
+        None,
+        std::sync::Arc::new(hacivat_secrets::MemoryBackend::new()),
+    )
+}
+
+/// Like [`shell_with_connections`], with `connections.toml` holding `text` before boot.
+pub fn shell_with_connections_file(
+    cx: &mut TestAppContext,
+    lang: &str,
+    text: &str,
+) -> &'static mut VisualTestContext {
+    shell_with_backend(
+        cx,
+        lang,
+        Some(text),
+        std::sync::Arc::new(hacivat_secrets::MemoryBackend::new()),
+    )
+}
+
+/// A connections shell whose secret store uses `backend`, with `connections.toml` holding
+/// `file` (when given) before boot.
+pub fn shell_with_backend(
+    cx: &mut TestAppContext,
+    lang: &str,
+    file: Option<&str>,
+    backend: std::sync::Arc<dyn hacivat_secrets::SecretBackend>,
+) -> &'static mut VisualTestContext {
+    use hacivat_driver::DriverRegistry;
+    use hacivat_driver::fake::FakeDriver;
+    use hacivat_proto::DbmsKind;
+
+    let root = tempfile::tempdir().expect("temp dir");
+    let path = root.path().to_path_buf();
+    cx.update(|cx| cx.default_global::<TempRoots>().0.push(root));
+    let paths = LocalPaths::under(&path);
+    paths.ensure_dirs().expect("test dirs");
+    if let Some(text) = file {
+        write(paths.connections_toml(), text);
+    }
+    let mut drivers = DriverRegistry::new();
+    for kind in [
+        DbmsKind::Postgres,
+        DbmsKind::MySql,
+        DbmsKind::MariaDb,
+        DbmsKind::Sqlite,
+    ] {
+        drivers.register(std::sync::Arc::new(FakeDriver::new(kind)));
+    }
+    let mut boot = hacivat_app::connections::ConnectionsBoot::for_tests(&paths, drivers);
+    boot.secrets = std::sync::Arc::new(hacivat_secrets::SecretStore::new(Some(backend.clone())));
+    let mut outcome = hacivat_settings::load(&paths.settings_toml());
+    outcome.settings.ui.language = LanguagePref::Tag(lang.to_string());
+    let mut startup = Startup::new(paths, outcome, OsLocale::default());
+    startup.connections = Some(boot);
+    let window = cx.update(|cx| {
+        cx.set_global(TestSecretBackend(backend));
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+        start(cx, startup, None).expect("open the workspace").into()
+    });
+    finish(cx, window)
+}
+
+/// The secret backend of a connections shell.
+pub fn secret_backend(
+    vcx: &VisualTestContext,
+) -> std::sync::Arc<dyn hacivat_secrets::SecretBackend> {
+    vcx.cx.read(|cx| cx.global::<TestSecretBackend>().0.clone())
+}
+
+/// Waits `d` of real time for core work (Tokio, FakeDriver delays), then runs the GPUI tasks
+/// it woke (P22).
+pub fn settle(vcx: &VisualTestContext, d: std::time::Duration) {
+    vcx.executor().allow_parking();
+    std::thread::sleep(d);
+    vcx.run_until_parked();
+}
+
+/// The app's local paths.
+pub fn paths(vcx: &VisualTestContext) -> LocalPaths {
+    vcx.cx.read(|cx| cx.global::<AppState>().paths.clone())
+}
+
+/// The message IDs of the visible toasts, oldest first: the frame is drawn once without the
+/// localization (every message then renders as its ID), then redrawn as it was.
+pub fn toast_ids(vcx: &VisualTestContext) -> Vec<String> {
+    let l10n = vcx.cx.update(|cx| {
+        let l10n = cx.remove_global::<L10nGlobal>();
+        cx.refresh_windows();
+        l10n
+    });
+    vcx.run_until_parked();
+    let ids = toast_texts(vcx);
+    vcx.cx.update(|cx| {
+        cx.set_global(l10n);
+        cx.refresh_windows();
+    });
+    vcx.run_until_parked();
+    ids
+}

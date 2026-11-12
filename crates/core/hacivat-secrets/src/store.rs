@@ -320,6 +320,16 @@ impl SecretStore {
         })
     }
 
+    // ## m2a-t12-profiles
+    /// Labels `key`'s backend entry with `label`, the profile name (HV-SEC-05, P44). Call it
+    /// after a `Forever` put that landed `AsRequested`; without a backend it does nothing.
+    pub fn set_label(&self, key: &SecretKey, label: &str) -> Result<(), SecretError> {
+        match &self.backend {
+            Some(backend) => backend.set_label(key, label),
+            None => Ok(()),
+        }
+    }
+
     /// Deletes `key`'s backend entry. With no backend, or an `Unavailable` one, nothing is
     /// stored there, so there is nothing to delete.
     fn backend_delete(&self, key: &SecretKey) -> Result<(), SecretError> {
@@ -396,5 +406,54 @@ mod tests {
             assert_eq!(Retention::from_id(r.id()), Some(r));
         }
         assert_eq!(Retention::default(), Retention::Forever);
+    }
+}
+
+// ## m2a-t12-profiles
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+    use crate::backend::MemoryBackend;
+
+    /// A memory backend that records the labels it is given.
+    #[derive(Default)]
+    struct Labelling {
+        inner: MemoryBackend,
+        labels: Mutex<Vec<(SecretKey, String)>>,
+    }
+
+    impl SecretBackend for Labelling {
+        fn get(&self, key: &SecretKey) -> Result<Option<SecretString>, SecretError> {
+            self.inner.get(key)
+        }
+        fn put(&self, key: &SecretKey, value: &SecretString) -> Result<(), SecretError> {
+            self.inner.put(key, value)
+        }
+        fn delete(&self, key: &SecretKey) -> Result<(), SecretError> {
+            self.inner.delete(key)
+        }
+        fn name(&self) -> &'static str {
+            "labelling"
+        }
+        fn set_label(&self, key: &SecretKey, label: &str) -> Result<(), SecretError> {
+            self.labels.lock().unwrap().push((*key, label.to_string()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn set_label_reaches_the_backend_and_is_a_no_op_without_one() {
+        let backend = Arc::new(Labelling::default());
+        let store = SecretStore::new(Some(backend.clone()));
+        let key = SecretKey {
+            profile: ProfileId::new(),
+            slot: SecretSlot::DbPassword,
+        };
+        store.set_label(&key, "orders-prod").unwrap();
+        assert_eq!(
+            *backend.labels.lock().unwrap(),
+            vec![(key, "orders-prod".to_string())]
+        );
+        assert_eq!(SecretStore::new(None).set_label(&key, "x"), Ok(()));
     }
 }

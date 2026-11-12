@@ -140,3 +140,18 @@ hv-settings-keymap-collision = { $chord } → { $char }
 
 # Review: PO
 hv-menu-file = Dosya
+
+## m2a-t12-profiles
+
+# Review: PO
+hv-conn-keyring-unavailable = Parolalar şu an sistemin anahtar deposuna kaydedilemiyor. Hacivat onları kapanana kadar saklar.
+# Review: PO
+hv-conn-store-read-only = Bağlantılar dosyanız daha yeni bir Hacivat sürümünden. Bu sürümde bağlantı eklenemez ya da değiştirilemez.
+# Review: PO
+hv-conn-file-quarantined = Bağlantılar dosyanız okunamadı. { $file } olarak kaydedildi ve hiçbir bağlantı yüklenmedi.
+# Review: PO
+hv-conn-file-entries-skipped = Bağlantılar dosyanızdaki { $count } bağlantı okunamadı ve atlandı.
+# Review: PO
+hv-conn-file-password-ignored = Bağlantılar dosyanızdaki bir parola yok sayıldı. Hacivat parolaları o dosyada değil, sistemin anahtar deposunda saklar.
+# Review: PO
+hv-conn-toast-dup = { $name } olarak çoğaltıldı

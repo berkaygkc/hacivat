@@ -139,3 +139,27 @@ hv-settings-keymap-collision = { $chord } → { $char }
 
 # The File menu title (the macOS menu bar and the Windows/Linux in-window menu).
 hv-menu-file = File
+
+## m2a-t12-profiles
+
+# Toast when a password could not be saved to the system keyring; it is kept in memory until quit.
+hv-conn-keyring-unavailable = Passwords can't be saved to the system keyring right now. Hacivat keeps them until it quits.
+# Toast at startup when connections.toml was written by a newer Hacivat: connections can't be changed.
+hv-conn-store-read-only = Your connections file is from a newer Hacivat. Connections can't be added or changed in this version.
+# Error toast at startup when connections.toml could not be parsed and was set aside.
+# Variables:
+#   $file (String) - the name the unreadable file was saved under, e.g. "connections.toml.corrupt-1731400000".
+hv-conn-file-quarantined = Your connections file could not be read. It was saved as { $file } and no connections are loaded.
+# Toast at startup when some entries of connections.toml could not be read (invalid, duplicate or for an unknown engine).
+# Variables:
+#   $count (Number) - how many entries were skipped, e.g. 2.
+hv-conn-file-entries-skipped = { $count ->
+        [one] One connection in your connections file couldn't be read and was skipped.
+       *[other] { $count } connections in your connections file couldn't be read and were skipped.
+    }
+# Toast at startup when connections.toml contained a password; the value is never shown.
+hv-conn-file-password-ignored = A password in your connections file was ignored. Hacivat keeps passwords in the system keyring, never in that file.
+# Toast after duplicating a connection.
+# Variables:
+#   $name (String) - the new connection's name, e.g. "orders-prod-2".
+hv-conn-toast-dup = Duplicated as { $name }
