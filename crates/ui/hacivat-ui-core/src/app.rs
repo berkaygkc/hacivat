@@ -4,10 +4,15 @@ use gpui::{
     App, Bounds, Entity, Render, Window, WindowBounds, WindowHandle, WindowOptions, px, size,
 };
 
-/// Runs the GPUI application. Font registration and the theme global are installed here
-/// by later tasks.
+/// Runs the GPUI application. Bundled fonts are registered before `f` runs; the theme global
+/// is installed here by a later task.
 pub fn run_app(f: impl FnOnce(&mut App) + 'static) {
-    gpui_platform::application().run(f);
+    gpui_platform::application().run(move |cx| {
+        if let Err(err) = crate::fonts::register_fonts(cx) {
+            eprintln!("failed to register bundled fonts: {err:#}");
+        }
+        f(cx);
+    });
 }
 
 /// Opens a centered window with the given title and logical size.
