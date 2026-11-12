@@ -545,7 +545,8 @@ Keyword (lilac / indigo), function (cyan / teal), string (green), number (amber 
 
 **The 11px Floor Rule.** No text renders below 11px, including key hints, inlays and column-type subtitles.
 
-**The Real Small Caps Rule.** Section labels use the font's small-caps features with 0.075em tracking at weight 600, never uppercased body text.
+**The Synthesized Small Caps Rule.** Section labels are small caps at weight 600 with 0.075em tracking, drawn as pre-cased capitals at 0.7× size. They are never uppercased body text at full size.
+
 **PO decision (M0, 2026-11-12): small caps are synthesized, like the approved mock.** Tokens marked `fontVariantCaps: synthesized` render pre-cased capitals at 0.7× size with the token's tracking (`hacivat_ui_core::fonts::small_caps`), not the font's `smcp`/`c2sc`; casing (including Turkish İ) happens upstream, never in the renderer.
 
 ## Layout

@@ -1617,8 +1617,8 @@
         "section": "typography"
       },
       {
-        "name": "The Real Small Caps Rule",
-        "body": "Section labels use the font's small-caps features with 0.075em tracking at weight 600, never uppercased body text.",
+        "name": "The Synthesized Small Caps Rule",
+        "body": "Section labels are small caps at weight 600 with 0.075em tracking, drawn as pre-cased capitals at 0.7x size (PO decision, M0). Never uppercased body text at full size; casing happens upstream, never in the renderer.",
         "section": "typography"
       },
       {
