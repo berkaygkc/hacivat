@@ -11,6 +11,8 @@ Host: ______ (OS version, input source versions, VM or bare metal)
 3. Candidate window placement: the candidate window sits directly under the composition, and follows it when the line scrolls or the window moves.
 4. Mid-composition click-away (Review Focus 4): start a composition (for example `kanji`, do not commit), then click another window or app. The marked text must be committed as plain text exactly once: not lost, not duplicated, no stuck underline when you return.
 5. The completion popup must not open during a composition.
+6. CJK rows (Japanese and Chinese): right after each composition keystroke, before the next frame is drawn, the candidate window x is estimated from monospace character widths, not the exact shaped line. Watch whether the candidate window jumps or sits visibly misplaced (horizontally off the composition) and record it in Observed.
+7. Tab: press Tab outside a composition; a tab character must be inserted.
 
 ## macOS (Apple M4 Pro, macOS 26.6.2)
 

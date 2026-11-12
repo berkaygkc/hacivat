@@ -297,6 +297,11 @@ fn frame_shows_last_input(last_mark: Option<Instant>, painted_at: Instant) -> bo
     last_mark.is_none_or(|mark| mark <= painted_at)
 }
 
+/// Text for keys the platform does not deliver through the input handler.
+fn control_key_text(key: &str) -> Option<&'static str> {
+    (key == "tab").then_some("\t")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditKind {
     Identifier,
@@ -458,6 +463,12 @@ impl EditorView {
             }
             "enter" => {
                 self.replace(caret..caret, "\n");
+                EditKind::Other
+            }
+            // Tab is not delivered through `insertText` on macOS, so insert it here.
+            key if control_key_text(key).is_some() => {
+                let text = control_key_text(key).unwrap_or_default();
+                self.replace(self.ime.selection.clone(), text);
                 EditKind::Other
             }
             "escape" => EditKind::Move,
@@ -871,6 +882,13 @@ impl Element for EditorElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_inserts_a_tab_character() {
+        assert_eq!(control_key_text("tab"), Some("\t"));
+        assert_eq!(control_key_text("a"), None);
+        assert_eq!(control_key_text("enter"), None);
+    }
 
     #[test]
     fn column_window_never_shapes_more_than_512_and_covers_viewport() {
