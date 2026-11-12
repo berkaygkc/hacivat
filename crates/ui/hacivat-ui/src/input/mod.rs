@@ -122,6 +122,10 @@ pub struct TextInput {
     paste_filter: Option<PasteFilter>,
     /// The text of the line last painted (the bullets when masked, the placeholder when empty).
     painted: SharedString,
+    // ## m2a-t17-dialog
+    /// Where the placeholder text comes from: a Fluent message (default) or data, such as a
+    /// suggested name or an example host.
+    placeholder_source: TextSource,
 }
 
 /// Sees a paste's clipboard text before a non-masked input inserts it; returning `true`
@@ -164,7 +168,15 @@ impl TextInput {
             well: false,
             paste_filter: None,
             painted: SharedString::default(),
+            placeholder_source: TextSource::Fluent,
         }
+    }
+
+    // ## m2a-t17-dialog
+    /// Marks the placeholder as data (`TextSource::Data`): a suggestion or an example, not a
+    /// message (pseudo-locales leave it alone).
+    pub fn set_placeholder_source(&mut self, source: TextSource) {
+        self.placeholder_source = source;
     }
 
     /// Paints `•` per grapheme, refuses copy and cut, is announced as a password field with an
@@ -622,6 +634,7 @@ impl Element for InputText {
         let marked = input.ime.marked().map(|m| painted(m.start)..painted(m.end));
         let focused = input.focus_handle.is_focused(window);
         let placeholder = value.is_empty().then(|| (input.placeholder)(cx));
+        let placeholder_source = input.placeholder_source;
         let mut scroll_x = input.scroll_x;
 
         let (ink, placeholder_ink) = (t.colors.text.to_hsla(), t.colors.text_3.to_hsla());
@@ -695,7 +708,7 @@ impl Element for InputText {
         if let Some(p) = &placeholder {
             TextRegistry::record(cx, || RenderedText {
                 text: p.clone(),
-                source: TextSource::Fluent,
+                source: placeholder_source,
                 size_px: style.size_px,
                 painted_px: f32::from(shown.width),
                 clipped: shown.width > width + px(0.5),

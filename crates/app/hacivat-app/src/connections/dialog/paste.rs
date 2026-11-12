@@ -1,1 +1,440 @@
-//! Pasting connection text into the dialog through the input paste filter (R21, P16, Task 17).
+//! Pasting connection text into the dialog through the input paste filter (R21, P16, Task 17;
+//! NOTES surface 2).
+//!
+//! - **Where.** Every text field that is not masked installs a filter. The URL field's filter
+//!   takes every paste; the other fields' filters take a paste only when
+//!   `looks_like_connection` matches it, and leave any other text to the field. A masked field
+//!   (the password, the key passphrase) never calls its filter: its paste is always literal.
+//! - **How.** The filter runs while its field is being updated, so it never touches the field:
+//!   it carries the text as a secret (it may hold a password) into a deferred step, which parses
+//!   it and applies it with `apply_parse` (T12).
+//! - **What the user sees.** The filled fields keep the `blue-tint` for 1.6 s, then fade over
+//!   240 ms. An inline notice lists exactly what happened (the password moved out, parameters
+//!   mapped, unknown ones kept) with Undo; a URL for another engine asks before switching a form
+//!   that already has input; text that is no connection changes nothing and lists the formats.
+
+use std::collections::BTreeSet;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+use hacivat_driver::url::{
+    FieldId, MappedParam, MappedTo, ParseOutcome, ParseResult, ParseWarning, looks_like_connection,
+    parse,
+};
+use hacivat_l10n::{Count, NoArgs, Text, ids};
+use hacivat_proto::DbmsKind;
+use hacivat_secrets::Retention;
+use hacivat_session::profile::{EngineChange, Profile, apply_parse};
+use hacivat_ui::button::{Button, ButtonKind};
+use hacivat_ui::icon::IconName;
+use hacivat_ui::input::PasteFilter;
+use hacivat_ui::notice::{InlineNotice, NoticeIcon};
+use hacivat_ui_core::gpui_surface::{
+    AnyElement, App, Context, IntoElement, SharedString, Task, WeakEntity, Window,
+};
+use hacivat_ui_core::theme::Theme;
+use secrecy::{ExposeSecret, SecretString};
+
+use super::ConnectionDialog;
+use super::form::{Field, tls_label};
+use crate::l10n_global::tr;
+
+/// How long pasted fields keep the tint before it fades (NOTES cross-cutting #7).
+pub(crate) const TINT_HOLD: Duration = Duration::from_millis(1600);
+/// How long the tint takes to fade.
+pub(crate) const TINT_FADE: Duration = Duration::from_millis(240);
+
+/// The paste filter of `field` (P16).
+pub(crate) fn paste_filter(field: Field, dialog: WeakEntity<ConnectionDialog>) -> PasteFilter {
+    Rc::new(move |text: &str, window: &mut Window, cx: &mut App| {
+        if field != Field::Url && !looks_like_connection(text) {
+            return false;
+        }
+        // The text may carry a password: it travels as a secret, and the field (leased while
+        // its filter runs) is left alone; the edit lands in a deferred step.
+        let text = SecretString::from(text.to_string());
+        let dialog = dialog.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = dialog.update(cx, |d, cx| d.apply_text(text.expose_secret(), window, cx));
+        });
+        true
+    })
+}
+
+/// The form before a paste, for Undo. Holds secrets, so `Debug` is not derived.
+pub(crate) struct Snapshot {
+    profile: Profile,
+    password: Option<SecretString>,
+    passphrase: Option<SecretString>,
+    touched: BTreeSet<FieldId>,
+    env_touched: bool,
+    password_from_url: bool,
+}
+
+/// The inline notice under the URL row.
+pub(crate) enum Notice {
+    /// The form was filled from a URL.
+    Filled {
+        engine_set: Option<DbmsKind>,
+        secret: bool,
+        retention: Retention,
+        mapped: Vec<MappedParam>,
+        extras: Vec<(String, String)>,
+        /// The host used and how many the URL named.
+        multihost: Option<(String, usize)>,
+    },
+    /// A URL for another engine, held until the user decides.
+    Switch {
+        url: DbmsKind,
+        form: DbmsKind,
+        outcome: Box<ParseOutcome>,
+    },
+    /// Text that is not a connection: nothing changed.
+    Unrecognised,
+}
+
+/// The paste tint on the filled fields.
+pub(crate) struct Tint {
+    pub(crate) fields: Vec<Field>,
+    /// When the fade began (after [`TINT_HOLD`]).
+    fade_from: Option<Instant>,
+    _timers: [Task<()>; 2],
+}
+
+impl Tint {
+    pub(crate) fn fading(&self) -> bool {
+        self.fade_from.is_some()
+    }
+
+    /// How far the fade is, 0 (tinted) to 1 (back to the well).
+    pub(crate) fn progress(&self, cx: &App) -> f32 {
+        match self.fade_from {
+            None => 0.0,
+            Some(from) => {
+                let gone = cx
+                    .background_executor()
+                    .now()
+                    .saturating_duration_since(from);
+                (gone.as_secs_f32() / TINT_FADE.as_secs_f32()).clamp(0.0, 1.0)
+            }
+        }
+    }
+}
+
+impl ConnectionDialog {
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            profile: self.draft.profile.clone(),
+            password: self.draft.password.clone(),
+            passphrase: self.draft.tls_key_passphrase.clone(),
+            touched: self.draft.touched.clone(),
+            env_touched: self.env_touched,
+            password_from_url: self.password_from_url,
+        }
+    }
+
+    /// Applies pasted (or typed) connection text: fills the form, asks before switching the
+    /// engine of a form with input, or says the text is not a connection.
+    pub(crate) fn apply_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match parse(text, Some(self.draft.profile.engine)) {
+            ParseResult::Unrecognised(_) => self.notice = Some(Notice::Unrecognised),
+            ParseResult::Recognised(outcome) => {
+                let form = self.draft.profile.engine;
+                if outcome.kind != form && !self.draft.touched.is_empty() {
+                    // HV-DRV-04: never switch a form with input silently.
+                    self.notice = Some(Notice::Switch {
+                        url: outcome.kind,
+                        form,
+                        outcome: Box::new(outcome),
+                    });
+                } else {
+                    self.fill(outcome, false, window, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Fills the form from `outcome` (`force`: the user accepted another engine).
+    fn fill(
+        &mut self,
+        outcome: ParseOutcome,
+        force: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.snapshot();
+        let mapped = outcome.mapped.clone();
+        let extras = outcome.extra.clone();
+        let multihost = outcome.warnings.iter().find_map(|w| match w {
+            ParseWarning::MultipleHosts { used, dropped } => Some((used.clone(), dropped + 1)),
+            _ => None,
+        });
+        let report = apply_parse(&mut self.draft, outcome, force);
+        let engine_set = match report.engine {
+            Some(EngineChange::Switched { to, .. }) => Some(to),
+            _ => None,
+        };
+        if report.password_moved {
+            self.password_from_url = true;
+        }
+        if let Some(kind) = engine_set {
+            let options = super::form::tls_options(kind);
+            self.tls_mode.update(cx, |s, cx| s.set_options(options, cx));
+        }
+        self.undo = Some(before);
+        self.issues.clear();
+        self.write_fields(cx);
+        self.rebuild_extra_rows(window, cx);
+        self.start_tint(
+            report.filled.iter().filter_map(|f| Field::of(*f)).collect(),
+            cx,
+        );
+        self.notice = Some(Notice::Filled {
+            engine_set,
+            secret: report.password_moved,
+            retention: self.draft.profile.retention,
+            mapped,
+            extras,
+            multihost,
+        });
+        self.after_edit(window, cx);
+        // The URL row shows the result even when the paste went into it.
+        self.write_url(cx);
+    }
+
+    /// "Switch to <engine> and fill": the held URL replaces what the form had.
+    pub(crate) fn accept_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Notice::Switch { outcome, .. }) = self.notice.take() else {
+            return;
+        };
+        let before = self.snapshot();
+        self.draft.touched.clear();
+        self.fill(*outcome, true, window, cx);
+        // Undo goes back to the form as it was before the switch.
+        self.undo = Some(before);
+    }
+
+    /// Undo of a paste: the form as it was before.
+    pub(crate) fn undo_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.undo.take() else {
+            return;
+        };
+        let engine_changed = s.profile.engine != self.draft.profile.engine;
+        self.draft.profile = s.profile;
+        self.draft.password = s.password;
+        self.draft.tls_key_passphrase = s.passphrase;
+        self.draft.touched = s.touched;
+        self.env_touched = s.env_touched;
+        self.password_from_url = s.password_from_url;
+        if engine_changed {
+            let options = super::form::tls_options(self.draft.profile.engine);
+            self.tls_mode
+                .update(cx, |sel, cx| sel.set_options(options, cx));
+        }
+        self.notice = None;
+        self.tint = None;
+        self.issues.clear();
+        self.write_fields(cx);
+        self.rebuild_extra_rows(window, cx);
+        self.after_edit(window, cx);
+        self.write_url(cx);
+    }
+
+    pub(crate) fn dismiss_notice(&mut self, cx: &mut Context<Self>) {
+        self.notice = None;
+        cx.notify();
+    }
+
+    /// Tints `fields` for [`TINT_HOLD`], then fades them over [`TINT_FADE`]. Both timers start
+    /// now, so the tint is gone exactly 1.84 s after the paste.
+    fn start_tint(&mut self, fields: Vec<Field>, cx: &mut Context<Self>) {
+        if fields.is_empty() {
+            self.tint = None;
+            return;
+        }
+        let fade = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TINT_HOLD).await;
+            let _ = this.update(cx, |d, cx| {
+                let now = cx.background_executor().now();
+                if let Some(tint) = &mut d.tint {
+                    tint.fade_from = Some(now);
+                }
+                cx.notify();
+            });
+        });
+        let clear = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TINT_HOLD + TINT_FADE).await;
+            let _ = this.update(cx, |d, cx| {
+                d.tint = None;
+                cx.notify();
+            });
+        });
+        self.tint = Some(Tint {
+            fields,
+            fade_from: None,
+            _timers: [fade, clear],
+        });
+    }
+
+    /// The notice element (NOTES surface 2), with its buttons.
+    pub(crate) fn render_notice(
+        &self,
+        _theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let notice = self.notice.as_ref()?;
+        let engine = |k: &DbmsKind| Text(k.display_name().to_string());
+        let el = match notice {
+            Notice::Filled {
+                engine_set,
+                secret,
+                retention,
+                mapped,
+                extras,
+                multihost,
+            } => {
+                let mut n = InlineNotice::new(NoticeIcon::Done).line(tr(
+                    cx,
+                    ids::hv::CONN_URL_FILLED,
+                    NoArgs,
+                ));
+                if let Some(kind) = engine_set {
+                    n = n.secondary(tr(
+                        cx,
+                        ids::hv::CONN_URL_ENGINE_SET,
+                        ids::hv::HvConnUrlEngineSet {
+                            engine: engine(kind),
+                        },
+                    ));
+                }
+                if *secret {
+                    n = n.secondary(secret_line(cx, *retention));
+                }
+                if let Some((host, count)) = multihost {
+                    n = n.secondary(tr(
+                        cx,
+                        ids::hv::CONN_URL_MULTIHOST,
+                        ids::hv::HvConnUrlMultihost {
+                            count: Count(*count as u64),
+                            host: Text(host.clone()),
+                        },
+                    ));
+                }
+                for m in mapped {
+                    if let Some(setting) = mapped_setting(cx, m) {
+                        n = n.param(
+                            param_text(&m.key, &m.value),
+                            tr(
+                                cx,
+                                ids::hv::CONN_URL_MAPPED,
+                                ids::hv::HvConnUrlMapped {
+                                    setting: Text(setting.to_string()),
+                                },
+                            ),
+                        );
+                    }
+                }
+                for (k, v) in extras {
+                    n = n.param(param_text(k, v), tr(cx, ids::hv::CONN_URL_EXTRA, NoArgs));
+                }
+                n.trailing(
+                    Button::new("notice-undo", tr(cx, ids::hv::CONN_URL_UNDO, NoArgs))
+                        .kind(ButtonKind::Ghost)
+                        .focus_handle(self.focus.notice_primary.clone())
+                        .on_click(cx.listener(|this, _, window, cx| this.undo_paste(window, cx))),
+                )
+            }
+            Notice::Switch { url, form, .. } => InlineNotice::new(NoticeIcon::Info)
+                .line(tr(
+                    cx,
+                    ids::hv::CONN_URL_SWITCH,
+                    ids::hv::HvConnUrlSwitch {
+                        engine: engine(url),
+                        current: engine(form),
+                    },
+                ))
+                .secondary(tr(cx, ids::hv::CONN_URL_SWITCH_L2, NoArgs))
+                .action(
+                    Button::new(
+                        "notice-switch",
+                        tr(
+                            cx,
+                            ids::hv::CONN_URL_SWITCH_BTN,
+                            ids::hv::HvConnUrlSwitchBtn {
+                                engine: engine(url),
+                            },
+                        ),
+                    )
+                    .focus_handle(self.focus.notice_primary.clone())
+                    .on_raised(true)
+                    .on_click(cx.listener(|this, _, window, cx| this.accept_switch(window, cx))),
+                )
+                .action(
+                    Button::new(
+                        "notice-keep",
+                        tr(
+                            cx,
+                            ids::hv::CONN_URL_KEEP,
+                            ids::hv::HvConnUrlKeep {
+                                current: engine(form),
+                            },
+                        ),
+                    )
+                    .kind(ButtonKind::Ghost)
+                    .focus_handle(self.focus.notice_secondary.clone())
+                    .on_click(cx.listener(|this, _, _, cx| this.dismiss_notice(cx))),
+                ),
+            Notice::Unrecognised => InlineNotice::new(NoticeIcon::Info)
+                .line(tr(cx, ids::hv::CONN_URL_UNREC, NoArgs))
+                .secondary(tr(cx, ids::hv::CONN_URL_FORMATS, NoArgs))
+                .trailing(
+                    Button::new("notice-dismiss", tr(cx, ids::hv::CONN_URL_DISMISS, NoArgs))
+                        .kind(ButtonKind::Icon)
+                        .icon(IconName::X)
+                        .focus_handle(self.focus.notice_primary.clone())
+                        .on_click(cx.listener(|this, _, _, cx| this.dismiss_notice(cx))),
+                ),
+        };
+        Some(el.into_any_element())
+    }
+}
+
+/// `key=value` as the URL had it (machine text, shown in mono).
+fn param_text(key: &str, value: &str) -> SharedString {
+    [key, value].join("=").into()
+}
+
+/// The password line: honest that the Keychain is used only on save, or how long it is kept.
+fn secret_line(cx: &App, retention: Retention) -> SharedString {
+    use ids::hv::HvConnUrlSecretOtherRet as Ret;
+    let ret = match retention {
+        Retention::Forever => return tr(cx, ids::hv::CONN_URL_SECRET, NoArgs),
+        Retention::Never => Ret::Never,
+        Retention::UntilRestart => Ret::UntilRestart,
+        Retention::ForSession => Ret::ForSession,
+    };
+    tr(
+        cx,
+        ids::hv::CONN_URL_SECRET_OTHER,
+        ids::hv::HvConnUrlSecretOther { ret },
+    )
+}
+
+/// The form setting a mapped parameter became (`None` for `options`, which also stays an extra
+/// and is listed there).
+fn mapped_setting(cx: &App, m: &MappedParam) -> Option<SharedString> {
+    Some(match &m.to {
+        MappedTo::TlsMode(mode) => tr(
+            cx,
+            ids::hv::CONN_URL_SETTING_TLS,
+            ids::hv::HvConnUrlSettingTls {
+                mode: Text(tr(cx, tls_label(*mode), NoArgs).to_string()),
+            },
+        ),
+        MappedTo::ApplicationName => tr(cx, ids::hv::CONN_ADV_APP, NoArgs),
+        MappedTo::ConnectTimeout(_) => tr(cx, ids::hv::CONN_ADV_TIMEOUT, NoArgs),
+        MappedTo::ReadOnly(_) => tr(cx, ids::hv::CONN_DLG_SQLITE_RO, NoArgs),
+        MappedTo::PgOptions => return None,
+    })
+}

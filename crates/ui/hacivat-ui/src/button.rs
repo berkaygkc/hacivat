@@ -48,6 +48,8 @@ pub struct Button {
     access_key: Option<AccessKey>,
     fixed_width: Option<f32>,
     inert: bool,
+    // ## m2a-t17-dialog
+    on_raised: bool,
 }
 
 impl Button {
@@ -64,6 +66,7 @@ impl Button {
             access_key: None,
             fixed_width: None,
             inert: false,
+            on_raised: false,
         }
     }
 
@@ -124,6 +127,14 @@ impl Button {
     /// Shows the access key in the label (Windows and Linux dialogs).
     pub fn access_key(mut self, key: AccessKey) -> Self {
         self.access_key = Some(key);
+        self
+    }
+
+    // ## m2a-t17-dialog
+    /// The button sits on a raised surface (a dialog): its key hint is `text-2`, never text-3
+    /// (DESIGN.md Raised Ink Rule; the mock's `.dlg` maps text-3 to text-2).
+    pub fn on_raised(mut self, on_raised: bool) -> Self {
+        self.on_raised = on_raised;
         self
     }
 }
@@ -298,6 +309,7 @@ impl Button {
             access_key,
             fixed_width,
             inert,
+            on_raised,
         } = self;
 
         // Hover and focus state live with the element across frames.
@@ -348,7 +360,12 @@ impl Button {
             body = body.child(key_label(&label, access_key, style, look.ink));
         }
         if let Some(hint) = key_hint {
-            let dim = t.colors.text_3.to_hsla();
+            // On a raised surface: the primary's own ink, else text-2 (never text-3).
+            let dim = match (on_raised, kind) {
+                (true, ButtonKind::Primary) => look.ink,
+                (true, _) => t.colors.text_2.to_hsla(),
+                (false, _) => t.colors.text_3.to_hsla(),
+            };
             body = body.child(Label::new(
                 hint,
                 TextSource::Shortcut,

@@ -32,8 +32,9 @@ pub use model::{ConnectionsModel, SaveError};
 use hacivat_ui_core::gpui_surface::App;
 
 /// Registers the connection actions (called from `crate::init`). Actions only, never hooks.
-pub fn install(_cx: &mut App) {
+pub fn install(cx: &mut App) {
     // ## registrations (append-only: Tasks 17, 18 and 20 add one line each)
+    dialog::install(cx); // ## m2a-t17-dialog
 }
 
 /// Boots the connections: the `ConnectionsModel` Global and its store diagnostics (Task 12),

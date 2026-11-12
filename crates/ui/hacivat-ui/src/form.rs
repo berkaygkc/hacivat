@@ -24,12 +24,18 @@ pub fn form_row(theme: &Theme, label: SharedString, control: impl IntoElement) -
         .gap(px(t.spacing.xl))
         .w_full()
         .min_h(px(t.spacing.field_height))
-        .child(div().flex_none().w(px(FORM_LABEL_PX)).child(Label::new(
-            label,
-            TextSource::Fluent,
-            t.type_ramp.body,
-            t.colors.text_2.to_hsla(),
-        )))
+        // m2a-t17-dialog: a label longer than the column truncates (never clips).
+        .child(
+            div().flex_none().w(px(FORM_LABEL_PX)).child(
+                Label::new(
+                    label,
+                    TextSource::Fluent,
+                    t.type_ramp.body,
+                    t.colors.text_2.to_hsla(),
+                )
+                .truncate(true),
+            ),
+        )
         .child(
             div()
                 .flex()
