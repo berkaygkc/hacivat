@@ -581,3 +581,36 @@ fn render_then_match_round_trips_on_these_templates() {
     assert_eq!(m.values, fields.values, "{url}");
     assert_eq!(e, extra, "{url}");
 }
+
+#[test]
+fn prefixed_and_suffixed_secret_keys_are_masked_and_dropped() {
+    let t = pg_uri();
+    let fm = f(&[("host", "db"), ("database", "app")]);
+    let extra = extras(&[
+        ("sslmode", "require"),
+        ("PGPASSWORD", "s3cret"),
+        ("mysql_pwd", "s3cret"),
+        ("--password", "s3cret"),
+        ("-pwd", "s3cret"),
+        ("x_password", "s3cret"),
+        ("a-password", "s3cret"),
+        ("db_PWD", "s3cret"),
+        ("password_db", "keep"),
+    ]);
+    assert_eq!(
+        render(&t, &fm, &extra, RenderTarget::Copy).unwrap(),
+        "postgresql://db/app?sslmode=require&password_db=keep"
+    );
+    let display = render(
+        &t,
+        &fm,
+        &extra,
+        RenderTarget::Display {
+            has_password: false,
+        },
+    )
+    .unwrap();
+    assert!(!display.contains("s3cret"), "{display}");
+    assert!(display.contains("PGPASSWORD=****"), "{display}");
+    assert!(display.contains("password_db=keep"), "{display}");
+}
