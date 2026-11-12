@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["crates/ui/*", "xtask", "spikes/*"]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# GPUI pin (zed-industries/zed @ 912159c). Only crates/ui/hacivat-ui-core may depend on these.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "912159c7ad77ce6296a93be77efc298b0b00fd50" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "912159c7ad77ce6296a93be77efc298b0b00fd50", features = ["font-kit", "wayland", "x11"] }
+anyhow = "1"
+cargo_metadata = "0.19"
+
+[patch.crates-io]
+# zed Cargo.toml:1045
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+# zed Cargo.toml:1046
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
