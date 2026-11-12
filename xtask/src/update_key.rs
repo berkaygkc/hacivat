@@ -56,41 +56,40 @@ pub fn run() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// Writes a minisign-shaped secret key file with the given algorithm bytes and returns its path.
-    fn sk_fixture(sig_alg: [u8; 2], kdf_alg: [u8; 2]) -> String {
-        static N: AtomicU32 = AtomicU32::new(0);
+    /// Writes a minisign-shaped secret key file with the given algorithm bytes; the temp file is
+    /// removed when the returned handle drops.
+    fn sk_fixture(sig_alg: [u8; 2], kdf_alg: [u8; 2]) -> tempfile::NamedTempFile {
         let mut raw = Vec::new();
         raw.extend_from_slice(&sig_alg);
         raw.extend_from_slice(&kdf_alg);
         raw.extend_from_slice(b"B2");
         raw.extend_from_slice(&[7u8; 32 + 8 + 8 + 104]);
-        let path = std::env::temp_dir().join(format!(
-            "hacivat-update-key-{}-{}.key",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
+        let file = tempfile::NamedTempFile::new().unwrap();
         let body = format!("untrusted comment: fixture\n{}\n", STANDARD.encode(raw));
-        std::fs::write(&path, body).unwrap();
-        path.to_string_lossy().into_owned()
+        std::fs::write(file.path(), body).unwrap();
+        file
+    }
+
+    fn path_of(f: &tempfile::NamedTempFile) -> String {
+        f.path().to_string_lossy().into_owned()
     }
 
     #[test]
     fn unencrypted_key_is_refused() {
-        assert!(!key_is_encrypted(&sk_fixture(*b"Ed", [0, 0])).unwrap());
+        assert!(!key_is_encrypted(&path_of(&sk_fixture(*b"Ed", [0, 0]))).unwrap());
     }
 
     #[test]
     fn scrypt_key_is_accepted() {
-        assert!(key_is_encrypted(&sk_fixture(*b"Ed", *b"Sc")).unwrap());
+        assert!(key_is_encrypted(&path_of(&sk_fixture(*b"Ed", *b"Sc"))).unwrap());
     }
 
     #[test]
     fn garbage_is_an_error() {
-        let path = std::env::temp_dir().join(format!("hacivat-garbage-{}.key", std::process::id()));
-        std::fs::write(&path, "untrusted comment: x\n!!!\n").unwrap();
-        assert!(key_is_encrypted(&path.to_string_lossy()).is_err());
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "untrusted comment: x\n!!!\n").unwrap();
+        assert!(key_is_encrypted(&path_of(&file)).is_err());
     }
 
     #[test]

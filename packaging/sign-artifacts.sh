@@ -14,9 +14,12 @@ ROOT="$PWD"
 
 require_encrypted_key "$ROOT"
 
-shopt -s nullglob
-FILES=("$DIR"/*-setup.exe "$DIR"/*.AppImage "$DIR"/*.deb)
-[ "${#FILES[@]}" -gt 0 ] || { echo "no Windows or Linux packages in $DIR" >&2; exit 1; }
+# Downloaded CI artifacts keep their per-artifact subdirectories, so search recursively.
+FILES=()
+while IFS= read -r f; do FILES+=("$f"); done < <(
+  find "$DIR" -type f \( -name '*-setup.exe' -o -name '*.AppImage' -o -name '*.deb' \
+    -o -name '*.dmg' -o -name '*.tar.gz' \) | sort)
+[ "${#FILES[@]}" -gt 0 ] || { echo "no packages found under $DIR" >&2; exit 1; }
 
 SUMS="$DIR/SHA256SUMS"
 : > "$SUMS"

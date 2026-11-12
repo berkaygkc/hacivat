@@ -211,8 +211,28 @@ jobs:
           fi
           xcrun -sdk macosx metal --version
       - uses: Swatinem/rust-cache@v2
+      - name: Detect the shell tests
+        id: guard
+        env:
+          SHELL_TESTS_HASH: ${{ hashFiles('crates/app/hacivat-app/tests/shell.rs') }}
+        run: |
+          if [ -n "$SHELL_TESTS_HASH" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::tests/shell.rs is absent; switch tests skipped until Task 13 merges"
+          fi
+      # Once the tests exist, a filter that matches nothing must fail rather than pass vacuously.
       - name: Language switching tests
-        run: cargo test --locked -p hacivat-app --features scene-check,pseudo -- switch language
+        if: steps.guard.outputs.present == 'true'
+        run: |
+          set -o pipefail
+          cargo test --locked -p hacivat-app --features scene-check,pseudo -- switch language | tee switch.log
+          ran="$(grep -Eo '[0-9]+ passed' switch.log | awk '{s += $1} END {print s + 0}')"
+          if [ "$ran" -lt 1 ]; then
+            echo "::error::the switch/language filter matched 0 tests"
+            exit 1
+          fi
 
   # Needs the `hacivat` binary's --smoke flag (Task 13, F17). Skips until crates/bin/hacivat/src/smoke.rs
   # exists, so this job stays green on a branch that predates the app shell.
@@ -468,9 +488,9 @@ jobs:
         if: steps.guard.outputs.present == 'true'
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a cargo test --locked -p hacivat-app --features scene-check,pseudo --test shots -- --nocapture
+            xvfb-run -a cargo test --locked -p hacivat-app --features scene-check,pseudo,shots --test shots -- --ignored --nocapture
           else
-            cargo test --locked -p hacivat-app --features scene-check,pseudo --test shots -- --nocapture
+            cargo test --locked -p hacivat-app --features scene-check,pseudo,shots --test shots -- --ignored --nocapture
           fi
       - name: Upload screens
         if: steps.guard.outputs.present == 'true'

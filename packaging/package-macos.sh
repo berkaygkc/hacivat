@@ -10,7 +10,7 @@
 #   RELEASE                  1 turns on signing, notarization and minisign
 #   NOTARY_PROFILE           notarytool keychain profile (default: hacivat-notary)
 #   APPLE_SIGNING_IDENTITY   codesign identity (default: the first Developer ID Application in the keychain)
-#   REQUIRE_NOTARIZATION     1|true|yes makes an unusable notary profile fatal (default: on when RELEASE=1)
+#   REQUIRE_NOTARIZATION     1|true|yes makes an unusable notary profile fatal (always on when RELEASE=1; a falsy override fails)
 #   UPDATE_KEY               minisign secret key (default: ~/.hacivat-keys/update.key)
 # Output: target/packager/<version>/Hacivat_<version>_universal.dmg
 set -euo pipefail
@@ -30,7 +30,12 @@ if truthy "${RELEASE:-0}"; then
   require_encrypted_key "$ROOT"
   IDENT="${APPLE_SIGNING_IDENTITY:-$(security find-identity -v -p codesigning | awk '/Developer ID Application/ {print $2; exit}')}"
   [ -n "$IDENT" ] || { echo "no Developer ID Application identity found" >&2; exit 1; }
-  REQUIRE_NOTARIZATION="${REQUIRE_NOTARIZATION:-1}"
+  # A release is always notarized: an override that turns it off is an error, not a downgrade.
+  if [ -n "${REQUIRE_NOTARIZATION:-}" ] && ! truthy "$REQUIRE_NOTARIZATION"; then
+    echo "RELEASE=1 requires notarization; REQUIRE_NOTARIZATION=$REQUIRE_NOTARIZATION is not allowed" >&2
+    exit 1
+  fi
+  REQUIRE_NOTARIZATION=1
 fi
 
 rm -rf "$OUT"; mkdir -p "$OUT"

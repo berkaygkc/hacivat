@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         Some("check-update-key") => update_key::run(),
         Some("vf") => vf::run(),
         other => {
-            eprintln!("unknown xtask command: {other:?}\navailable: bench-report, check-deps");
+            eprintln!("unknown xtask command: {other:?}\navailable: bench-report, check-deps, check-update-key, gen-sql, l10n, tokens, vf");
             ExitCode::from(2)
         }
     }

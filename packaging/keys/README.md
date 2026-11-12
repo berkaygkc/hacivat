@@ -11,6 +11,8 @@ Generate a keypair (no `-W`: minisign prompts for a password):
     mkdir -p ~/.hacivat-keys && chmod 700 ~/.hacivat-keys
     minisign -G -p packaging/keys/update.pub -s ~/.hacivat-keys/update.key
 
+minisign prompts for the key password once per file, so signing N packages asks N times.
+
 Both release scripts run `cargo xtask check-update-key ~/.hacivat-keys/update.key` first and refuse
 an unencrypted key. Check one by hand the same way.
 
