@@ -34,3 +34,60 @@ hv-settings-invalid-value = Bazı ayarlar okunamadı, varsayılanları kullanıl
 hv-settings-newer-version = Ayarlar dosyanız Hacivat'ın daha yeni bir sürümünden. Bu sürümün tanımadığı ayarlar korunur.
 # Review: PO
 hv-settings-file-quarantined = Ayarlar dosyanız okunamadı. { $file } olarak kaydedildi, varsayılanlar kullanılıyor.
+
+## Task 17
+
+# Review: PO
+hv-settings-title = Ayarlar
+# Review: PO
+hv-settings-nav-general = Genel
+# Review: PO
+hv-settings-nav-appearance = Görünüm
+# Review: PO
+hv-settings-nav-keyboard = Klavye
+# Review: PO
+hv-settings-search = Ayarlarda ara
+# Review: PO
+hv-settings-no-results = Eşleşen ayar yok
+# Review: PO
+hv-settings-language = Dil
+# Review: PO
+hv-settings-regional-format = Bölgesel biçim
+# Review: PO
+hv-settings-theme = Tema
+# Review: PO
+hv-settings-text-rendering = Metin işleme
+# Review: PO
+hv-settings-keymap = Klavye kısayolları
+# Review: PO
+hv-settings-system = Sistem
+# Review: PO
+hv-settings-text-rendering-crisp = Net
+# Review: PO
+hv-settings-text-rendering-standard = macOS standardı
+# Review: PO
+hv-settings-restart-note = Yeniden başlatınca uygulanır
+# Review: PO
+hv-settings-restart-now = Şimdi yeniden başlat
+# Review: PO
+hv-settings-restart-title = Hacivat yeniden başlatılsın mı?
+# Review: PO
+hv-settings-restart-body = Yeni metin işleme için Hacivat kapanıp yeniden açılır. Ayarlarınız ve düzeniniz önce kaydedilir.
+# Review: PO
+hv-settings-restart-later = Sonra
+# Review: PO
+hv-settings-regional-preview = { NUMBER($number) } · { DATETIME($when, dateStyle: "short", timeStyle: "short") }
+# Review: PO
+hv-settings-keymap-collisions = Bu klavye düzeninde şu kısayollar bunun yerine bir karakter yazar: { $chords }
+# Review: PO
+hv-settings-section-general = GENEL
+# Review: PO
+hv-settings-section-appearance = GÖRÜNÜM
+# Review: PO
+hv-settings-section-keyboard = KLAVYE
+# Review: PO
+hv-settings-keymap-hacivat = { -brand-hacivat }
+# Review: PO
+hv-settings-keymap-datagrip = DataGrip
+# Review: PO
+hv-settings-keymap-collision = { $chord } → { $char }

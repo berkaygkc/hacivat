@@ -47,3 +47,55 @@ hv-settings-file-quarantined = Your settings file could not be read. It was save
 hv-settings-invalid-value = Some settings could not be read and use their defaults: { $keys }
 # Warning toast at startup when settings.toml was written by a newer version.
 hv-settings-newer-version = Your settings file is from a newer Hacivat. Settings this version does not know are kept.
+
+## Task 17
+
+# The settings tab's title, and the title of its tab.
+hv-settings-title = Settings
+# Left navigation of the settings tab.
+hv-settings-nav-general = General
+hv-settings-nav-appearance = Appearance
+hv-settings-nav-keyboard = Keyboard
+# Placeholder of the settings search field.
+hv-settings-search = Search settings
+# Shown when the search matches no setting.
+hv-settings-no-results = No settings match
+# Setting titles.
+hv-settings-language = Language
+hv-settings-regional-format = Regional format
+hv-settings-theme = Theme
+hv-settings-text-rendering = Text rendering
+hv-settings-keymap = Keyboard shortcuts
+# The choice that follows the operating system (language, regional format, theme).
+hv-settings-system = System
+# The two text rendering choices; "macOS standard" is the system's own font smoothing.
+hv-settings-text-rendering-crisp = Crisp
+hv-settings-text-rendering-standard = macOS standard
+# Shown under a setting that only applies once the app restarts.
+hv-settings-restart-note = Applies after restart
+# The button next to the restart note, and the dialog it opens.
+hv-settings-restart-now = Restart now
+hv-settings-restart-title = Restart Hacivat?
+hv-settings-restart-body = Hacivat closes and opens again to apply the new text rendering. Your settings and layout are saved first.
+hv-settings-restart-later = Later
+# A sample of the regional format: a number and a date with time, as the chosen format shows them.
+# Variables:
+#   $number (Number) - a sample number, 1234.5.
+#   $when (DateTime) - a sample wall-clock time, 2026-11-11 14:05.
+hv-settings-regional-preview = { NUMBER($number) } · { DATETIME($when, dateStyle: "short", timeStyle: "short") }
+# Warning toast after choosing a keymap preset whose shortcuts type characters on this keyboard layout.
+# Variables:
+#   $chords (List) - the shortcuts and the character each types, e.g. "Ctrl+Alt+S → ś".
+hv-settings-keymap-collisions = On this keyboard layout these shortcuts type a character instead: { $chords }
+# Section headings of the settings page, in small caps: pre-cased here, never cased in code.
+hv-settings-section-general = GENERAL
+hv-settings-section-appearance = APPEARANCE
+hv-settings-section-keyboard = KEYBOARD
+# The two keymap presets: the brand, and the product whose shortcuts the preset follows.
+hv-settings-keymap-hacivat = { -brand-hacivat }
+hv-settings-keymap-datagrip = DataGrip
+# One shortcut in the collision warning: the shortcut and the character it types instead.
+# Variables:
+#   $chord (String) - the shortcut as the keyboard shows it, e.g. "Ctrl+Alt+S".
+#   $char (String) - the character it types on this layout, e.g. "ś".
+hv-settings-keymap-collision = { $chord } → { $char }

@@ -119,12 +119,14 @@ fn buttons_and_segments_have_the_design_heights(cx: &mut TestAppContext) {
                         content: SegmentContent::Label("EN".into()),
                         pressed: true,
                         tooltip: "English".into(),
+                        a11y_name: None,
                         on_click: Rc::new(|_, _, _| {}),
                     })
                     .item(SegmentItem {
                         content: SegmentContent::Icon(IconName::Moon),
                         pressed: false,
                         tooltip: "Dark".into(),
+                        a11y_name: None,
                         on_click: Rc::new(|_, _, _| {}),
                     }),
             )
@@ -363,6 +365,7 @@ fn pseudo_locale_brackets_fluent_segments_but_not_verbatim_ones_or_the_capsule_n
         content,
         pressed,
         tooltip: "[Language]".into(),
+        a11y_name: None,
         on_click: Rc::new(|_, _, _| {}),
     };
     let vcx = host(cx, move |_, _| {

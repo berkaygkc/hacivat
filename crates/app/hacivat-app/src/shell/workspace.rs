@@ -18,7 +18,6 @@ use hacivat_ui::menu::{MenuItemSpec, PopupMenu, PopupMenuEvent};
 use hacivat_ui::panes::{
     Axis, MAX_RATIO, MIN_RATIO, PaneId, PaneNode, PaneTree, TabId, TabSpec, TabStrip,
 };
-use hacivat_ui::popover::Declare as _;
 use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
 use hacivat_ui::statusbar::{StatusBar, status_label};
 use hacivat_ui::text::{Label, TextSource};
@@ -27,9 +26,9 @@ use hacivat_ui::toast::ToastStack;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, Context, Decorations, Div, Entity, EntityId,
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ResizeEdge, Role,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window, WindowHandle,
-    div, point, px, relative,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ResizeEdge, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Task, Window, WindowHandle, div, point, px,
+    relative,
 };
 use hacivat_ui_core::keymap::ContextStack;
 use hacivat_ui_core::theme::{Theme, ThemeMode, popover_surface};
@@ -283,6 +282,11 @@ impl Workspace {
 
     pub fn active_tab_kind(&self) -> Option<TabKind> {
         self.active_tab().and_then(|t| self.tabs.get(&t).copied())
+    }
+
+    /// Writes a pending `workspace.json` now (before a restart; quit and close do it themselves).
+    pub fn flush_layout(&self) {
+        self.saver.flush();
     }
 
     /// The title of `tab` in the current language.
@@ -794,7 +798,7 @@ impl Workspace {
                     ActionRegistry::run(PALETTE_ACTION, window, cx);
                 },
             )
-            .right(vec![language_switch(theme, cx), theme_switch(theme, cx)]);
+            .right(vec![language_switch(cx), theme_switch(theme, cx)]);
         if matches!(chrome, ChromeKind::WindowsCaption | ChromeKind::LinuxClient) {
             bar = bar.app_menu(|_, window, cx| {
                 ActionRegistry::run(APP_MENU_ACTION, window, cx);
@@ -1109,73 +1113,32 @@ fn language_choices(cx: &App) -> Vec<LanguageChoice> {
 }
 
 /// Switches the UI language to `tag` and saves it as `ui.language`.
-fn set_language(cx: &mut App, tag: &str) {
+pub(crate) fn set_language(cx: &mut App, tag: &str) {
     let settings = update_settings(cx, |s| s.ui.language = LanguagePref::Tag(tag.to_string()));
     switch_locale(cx, &settings).detach();
 }
 
 /// Applies `pref` and saves it as `ui.theme`.
-fn set_theme(cx: &mut App, pref: ThemePref) {
+pub(crate) fn set_theme(cx: &mut App, pref: ThemePref) {
     update_settings(cx, |s| s.ui.theme = pref);
     apply_theme(cx, pref);
 }
 
-/// The title bar's language control: one segment per catalog `short_name` (DESIGN.md Segmented
-/// Controls; language segments in 11.5 px mono). The names are catalog data, not messages.
-fn language_switch(theme: &Theme, cx: &App) -> AnyElement {
-    let t = theme.tokens;
-    let c = &t.colors;
-    let pressed_fill = match theme.mode {
-        ThemeMode::Dark => c.raised,
-        ThemeMode::Light => c.panel,
-    };
-    let mut group = div()
-        .debug_selector(|| "language-switch".to_string())
-        .flex()
-        .flex_row()
-        .items_center()
-        .flex_none()
-        .h(px(t.spacing.field_height))
-        .border_1()
-        .border_color(c.seam_strong.to_hsla())
-        .rounded(px(t.radii.sm))
-        .overflow_hidden();
-    for (i, choice) in language_choices(cx).into_iter().enumerate() {
-        let mut style = t.type_ramp.mono_data;
-        if choice.active {
-            style.weight = 600;
-        }
-        let ink = if choice.active { c.text } else { c.text_2 };
-        let tag = choice.tag.clone();
-        let mut segment = div()
-            .id(("language-segment", i))
-            .declare(
-                Role::Button,
-                choice.native_name.clone(),
-                Some(choice.active),
-            )
-            .flex()
-            .flex_row()
-            .items_center()
-            .h_full()
-            .px(px(t.spacing.md))
-            .cursor_pointer()
-            .on_click(move |_, _, cx| set_language(cx, &tag))
-            .child(Label::new(
-                choice.short_name,
-                TextSource::Data,
-                style,
-                ink.to_hsla(),
-            ));
-        if i > 0 {
-            segment = segment.border_l_1().border_color(c.seam_strong.to_hsla());
-        }
-        segment = if choice.active {
-            segment.bg(pressed_fill.to_hsla())
-        } else {
-            segment.hover(|s| s.bg(c.hover.to_hsla()))
-        };
-        group = group.child(segment);
+/// The title bar's language control: a `Segmented` with one segment per catalog `short_name`
+/// (11.5 px mono, DESIGN.md Segmented Controls). The names are catalog data, not messages, so the
+/// segments are `Verbatim`; the tooltip and the accessible name of a segment is the language's
+/// native name (the visible short name `TR` is announced as `Türkçe`). Focusable and keyboard-operable like every `Segmented`.
+fn language_switch(cx: &App) -> AnyElement {
+    let mut group = Segmented::new("language-switch").mono(true);
+    for choice in language_choices(cx) {
+        let tag = choice.tag;
+        group = group.item(SegmentItem {
+            content: SegmentContent::Verbatim(choice.short_name),
+            pressed: choice.active,
+            a11y_name: Some(choice.native_name.clone()),
+            tooltip: choice.native_name,
+            on_click: Rc::new(move |_, _, cx| set_language(cx, &tag)),
+        });
     }
     group.into_any_element()
 }
@@ -1186,6 +1149,7 @@ fn theme_switch(theme: &Theme, cx: &App) -> AnyElement {
         content: SegmentContent::Icon(icon),
         pressed,
         tooltip,
+        a11y_name: None,
         on_click: Rc::new(move |_, _, cx| set_theme(cx, pref)),
     };
     Segmented::new("theme-switch")
