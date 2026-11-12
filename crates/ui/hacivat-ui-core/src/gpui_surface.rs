@@ -8,3 +8,8 @@ pub use gpui::{
     IntoElement, KeyDownEvent, ParentElement, Pixels, Point, Render, SharedString, Size, Styled,
     UTF16Selection, Window, canvas, div, px,
 };
+// Task 5 (spike-grid): custom painting, text shaping and scroll input.
+pub use gpui::{
+    AppContext, ContentMask, Font, FontId, InteractiveElement, ShapedLine, TextAlign, TextRun,
+    fill, point,
+};
