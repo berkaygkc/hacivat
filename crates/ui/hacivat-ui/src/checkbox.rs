@@ -9,13 +9,13 @@ use std::rc::Rc;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, ClickEvent, ElementId, FocusHandle, InteractiveElement, IntoElement,
     KeyDownEvent, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled, Window,
-    accesskit, div, px,
+    div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 
 use crate::button::{focus_visible, interaction_state};
 use crate::icon::{Icon, IconName, IconSize};
-use crate::popover::{A11yNode, Declare, lazy};
+use crate::popover::{A11yDecl, A11yNode, Declare, lazy};
 use crate::text::{Label, TextSource};
 
 type ToggleHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
@@ -144,7 +144,7 @@ impl Checkbox {
                 t.type_ramp.body,
                 ink.to_hsla(),
             ));
-        if let Some(sub) = sub_label {
+        if let Some(sub) = sub_label.clone() {
             row = row.child(Label::new(
                 sub,
                 TextSource::Fluent,
@@ -153,10 +153,20 @@ impl Checkbox {
             ));
         }
 
+        // Assistive technology hears the state (also when disabled) and the sub-label as the
+        // description.
         if disabled {
-            return A11yNode::new((id, "node"), Role::CheckBox, label, false, row)
+            let mut node = A11yNode::new((id, "node"), Role::CheckBox, label, false, row)
                 .disabled(true)
-                .into_any_element();
+                .toggled(checked);
+            if let Some(sub) = sub_label {
+                node = node.description(sub);
+            }
+            return node.into_any_element();
+        }
+        let mut decl = A11yDecl::new(Role::CheckBox, label).toggled(checked);
+        if let Some(sub) = sub_label {
+            decl = decl.description(sub);
         }
 
         let (_, keyed) = interaction_state(&id, window, cx);
@@ -164,8 +174,7 @@ impl Checkbox {
         let focused = focus_visible(&handle, window);
         let toggle_on_key = on_toggle.clone();
         let row = focus_outline(row.track_focus(&handle), &theme, focused)
-            .declare(Role::CheckBox, label, None)
-            .aria_toggled(accesskit::Toggled::from(checked))
+            .declare_full(decl)
             .cursor_pointer()
             // Space toggles on key down, in the capture phase, and prevents the default so GPUI
             // does not turn its key-up into a second (click) toggle.

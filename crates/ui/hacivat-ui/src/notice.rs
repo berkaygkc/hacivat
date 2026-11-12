@@ -14,8 +14,11 @@ use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::{A11yNode, lazy};
 use crate::text::{Label, TextSource};
 
-/// The gap between the icon and the text column.
+/// The gap between the icon and the text column: 9 px, between the `md` (8) and `lg` (10)
+/// tokens (NOTES "NEW primitives": inline notice; mock `.notice { gap: 9px }`).
 const ICON_GAP_PX: f32 = 9.0;
+/// Drops the 14 px icon onto the first line's cap height (mock `.notice > svg { margin-top: 1px }`).
+const ICON_NUDGE_PX: f32 = 1.0;
 
 /// The notice's icon (NOTES "NEW primitives").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -138,7 +141,7 @@ impl IntoElement for InlineNotice {
                 .border_1()
                 .border_color(c.seam_strong.to_hsla())
                 .bg(well.to_hsla())
-                .child(div().flex_none().mt(px(1.0)).child(icon))
+                .child(div().flex_none().mt(px(ICON_NUDGE_PX)).child(icon))
                 .child(body);
             A11yNode::new("inline-notice", Role::Status, name, false, card).into_any_element()
         })

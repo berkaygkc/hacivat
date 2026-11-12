@@ -16,6 +16,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use hacivat_ui_core::fonts::font_for;
+use hacivat_ui_core::gpui_surface::FluentBuilder as _;
 use hacivat_ui_core::gpui_surface::{
     App, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId, ElementInputHandler,
     Entity, EntityId, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Global,
@@ -24,7 +25,7 @@ use hacivat_ui_core::gpui_surface::{
     ShapedLine, SharedString, Style, Styled as _, Subscription, TextAlign, TextRun, UTF16Selection,
     UnderlineStyle, Window, div, fill, point, px, relative, size,
 };
-use hacivat_ui_core::theme::{Theme, focus_outline};
+use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::popover::A11yNode;
@@ -54,9 +55,9 @@ impl Global for FocusedInput {}
 /// What a masked input paints for each grapheme.
 const MASK: char = '•';
 
-/// DESIGN.md `palette-field` padding (`0 6px 0 9px`); fields share it.
-const PADDING_LEFT_PX: f32 = 9.0;
-const PADDING_RIGHT_PX: f32 = 6.0;
+/// DESIGN.md `palette-field` padding (`0 6px 0 9px`); fields share it (`TextInput`, `Select`).
+pub(crate) const FIELD_PADDING_LEFT_PX: f32 = 9.0;
+pub(crate) const FIELD_PADDING_RIGHT_PX: f32 = 6.0;
 const CARET_WIDTH_PX: f32 = 1.0;
 
 /// The text line as last painted: what `bounds_for_range` and hit-testing measure against.
@@ -116,6 +117,8 @@ pub struct TextInput {
     /// Focus and blur listeners, installed by the first render (they need the window).
     focus_subscriptions: Vec<Subscription>,
     masked: bool,
+    /// Draws the field on its own well (`panel` / `ground`).
+    well: bool,
     paste_filter: Option<PasteFilter>,
     /// The text of the line last painted (the bullets when masked, the placeholder when empty).
     painted: SharedString,
@@ -124,8 +127,8 @@ pub struct TextInput {
 /// Sees a paste's clipboard text before a non-masked input inserts it; returning `true`
 /// consumes the paste (nothing is inserted). A masked input never calls it (P16).
 ///
-/// The filter runs while the input is being updated: it must not update this input itself
-/// (defer such edits, e.g. with `Window::defer`).
+/// The filter runs while the input is being updated: it must not read or update this input (it
+/// is leased); defer edits with `window.defer`.
 pub type PasteFilter = Rc<dyn Fn(&str, &mut Window, &mut App) -> bool>;
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -158,15 +161,28 @@ impl TextInput {
             reported_composing: false,
             focus_subscriptions: Vec::new(),
             masked: false,
+            well: false,
             paste_filter: None,
             painted: SharedString::default(),
         }
     }
 
-    /// Paints `•` per grapheme, refuses copy and cut and exposes an empty accessible value;
+    /// Paints `•` per grapheme, refuses copy and cut, is announced as a password field with an
+    /// empty value, and hands the platform text services (IME, dictation) only bullets;
     /// `value()` is unchanged. Call it inside an `update` and `cx.notify()` to repaint.
+    ///
+    /// Secure event input (macOS `EnableSecureEventInput`, which hides keystrokes from other
+    /// processes while the field is focused) is not enabled yet: deferred to a later security
+    /// pass by controller ruling (M2a T6 fix round 1).
     pub fn set_masked(&mut self, masked: bool) {
         self.masked = masked;
+    }
+
+    /// Draws the field on its own well (`panel` in dark, `ground` in light), so its text-3
+    /// placeholder never sits on a raised surface (DESIGN.md Raised Ink Rule, NOTES cross-cutting
+    /// #4). Inputs inside a dialog or any other raised surface must enable it.
+    pub fn set_well(&mut self, well: bool) {
+        self.well = well;
     }
 
     pub fn is_masked(&self) -> bool {
@@ -358,7 +374,13 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
-        Some(self.ime.text_for_range_utf16(range, adjusted_range))
+        let text = self.ime.text_for_range_utf16(range, adjusted_range);
+        if self.masked {
+            // Platform text services get one bullet per UTF-16 unit: the same length, so the
+            // IME's range arithmetic holds, and never the password.
+            return Some(std::iter::repeat_n(MASK, text.encode_utf16().count()).collect());
+        }
+        Some(text)
     }
 
     fn selected_text_range(
@@ -503,16 +525,28 @@ impl Render for TextInput {
             .flex()
             .items_center()
             .h(px(t.spacing.field_height))
-            .pl(px(PADDING_LEFT_PX))
-            .pr(px(PADDING_RIGHT_PX))
+            .pl(px(FIELD_PADDING_LEFT_PX))
+            .pr(px(FIELD_PADDING_RIGHT_PX))
             .rounded(px(t.radii.sm))
             .border_1()
             .border_color(t.colors.seam_strong.to_hsla())
             .cursor_text()
+            .when(self.well, |field| {
+                let fill = match theme.mode {
+                    ThemeMode::Dark => t.colors.panel,
+                    ThemeMode::Light => t.colors.ground,
+                };
+                field.bg(fill.to_hsla())
+            })
             .child(InputText { input: cx.entity() });
+        let role = if self.masked {
+            Role::PasswordInput
+        } else {
+            Role::TextInput
+        };
         A11yNode::new(
             ("text-input-node", cx.entity_id()),
-            Role::TextInput,
+            role,
             placeholder,
             false,
             focus_outline(field, &theme, focused),

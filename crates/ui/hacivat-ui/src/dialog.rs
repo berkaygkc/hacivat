@@ -5,11 +5,16 @@
 //! initial focus, Escape cancels, Enter presses the focused button, and on Windows and Linux
 //! Alt plus a button's access key presses it. Every string is a [`TextFn`] re-read on each
 //! render, so an open dialog follows a language switch (F16).
+//!
+//! Keys are handled in the bubble phase, after the focused widget: a widget inside the dialog
+//! (an open `Select` menu) that handles Escape or Enter stops them, and the dialog stays open.
+//! Enter presses a button only on key down; the dialog prevents the default on Enter's key up so
+//! GPUI's keyboard click on the focused `Button` never presses it a second time.
 
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, AppContext, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, Role,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, AnyView, App, AppContext, Context, Div, Entity, EventEmitter, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
+    Role, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
@@ -140,6 +145,7 @@ pub struct Dialog {
     buttons: Vec<FocusHandle>,
     root: FocusHandle,
     access_keys: bool,
+    content: Option<AnyView>,
 }
 
 impl EventEmitter<DialogEvent> for Dialog {}
@@ -183,6 +189,7 @@ impl Dialog {
                 buttons,
                 root: cx.focus_handle(),
                 access_keys: !cfg!(target_os = "macos"),
+                content: None,
             }
         })
     }
@@ -190,6 +197,11 @@ impl Dialog {
     /// Whether access keys are shown and accepted (default: Windows and Linux).
     pub fn set_access_keys(&mut self, on: bool) {
         self.access_keys = on;
+    }
+
+    /// A view drawn between the body text and the buttons (a control the answer needs).
+    pub fn set_content(&mut self, content: AnyView) {
+        self.content = Some(content);
     }
 
     /// The index of the focused button, if one is.
@@ -329,9 +341,17 @@ impl Render for Dialog {
                 .id("dialog")
                 .debug_selector(|| "dialog".to_string())
                 .track_focus(&self.root)
-                .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     this.on_key(event, window, cx)
                 }))
+                // Enter acts on key down only (`on_key`, with its held, modifier and destructive
+                // guards); the key-up keyboard click of the focused button is suppressed.
+                .capture_key_up(|event, window, _| {
+                    let stroke = &event.keystroke;
+                    if stroke.key == "enter" && !stroke.modifiers.modified() {
+                        window.prevent_default();
+                    }
+                })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
                     div()
@@ -354,6 +374,7 @@ impl Render for Dialog {
                     t.type_ramp.body,
                     c.text_2.to_hsla(),
                 )))
+                .children(self.content.clone())
                 .child(
                     div()
                         .flex()

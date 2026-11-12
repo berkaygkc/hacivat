@@ -14,22 +14,20 @@
 
 use hacivat_ui_core::gpui_surface::{
     Anchor, App, Bounds, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Pixels, Render, Role,
-    StatefulInteractiveElement, Styled, Subscription, Window, anchored, canvas, deferred, div,
-    point, px,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Render,
+    Role, StatefulInteractiveElement, Styled, Subscription, Window, anchored, canvas, deferred,
+    div, point, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 
 use crate::icon::{Icon, IconName, IconSize};
+use crate::input::{FIELD_PADDING_LEFT_PX, FIELD_PADDING_RIGHT_PX};
 use crate::menu::{MenuItemSpec, PopupMenu, PopupMenuEvent};
 use crate::popover::A11yNode;
 use crate::text::{Label, TextFn, TextSource};
 
 /// The gap between the field and its menu.
 const MENU_GAP_PX: f32 = 4.0;
-/// DESIGN.md `palette-field` padding (`0 6px 0 9px`), shared with `TextInput`.
-const PADDING_LEFT_PX: f32 = 9.0;
-const PADDING_RIGHT_PX: f32 = 6.0;
 
 /// One choice of a [`Select`] (NOTES "NEW primitives").
 #[derive(Clone)]
@@ -58,7 +56,10 @@ pub struct Select {
     menu_subscriptions: Vec<Subscription>,
     /// The field as last painted: the menu's anchor and minimum width.
     field_bounds: Option<Bounds<Pixels>>,
-    /// A press on the field closed the menu; the click that follows must not reopen it.
+    /// A press on the field dismissed the menu: the click that press finishes must not reopen
+    /// it. `Dismissed` arrives when the press's effects flush, after the field's own mouse-down
+    /// handler, which clears the flag first; so a press released off the field (no click) never
+    /// leaves it set for the next one.
     swallow_click: bool,
 }
 
@@ -257,6 +258,10 @@ impl Render for Select {
             .debug_selector(|| "select-field".to_string())
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.swallow_click = false),
+            )
             .on_click(cx.listener(Self::on_field_click))
             .flex()
             .flex_row()
@@ -265,8 +270,8 @@ impl Render for Select {
             .w_full()
             .min_w_0()
             .h(px(t.spacing.field_height))
-            .pl(px(PADDING_LEFT_PX))
-            .pr(px(PADDING_RIGHT_PX))
+            .pl(px(FIELD_PADDING_LEFT_PX))
+            .pr(px(FIELD_PADDING_RIGHT_PX))
             .rounded(px(t.radii.sm))
             .border_1()
             .border_color(c.seam_strong.to_hsla())
@@ -295,7 +300,11 @@ impl Render for Select {
         let mut root = div()
             .relative()
             .w_full()
-            .child(A11yNode::new("select-node", Role::ComboBox, name, false, field).value(value))
+            .child(
+                A11yNode::new("select-node", Role::ComboBox, name, false, field)
+                    .value(value)
+                    .expanded(self.menu.is_some()),
+            )
             .child(
                 canvas(
                     move |bounds, _, cx| {

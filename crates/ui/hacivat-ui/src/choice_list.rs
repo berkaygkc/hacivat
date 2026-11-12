@@ -7,13 +7,12 @@
 
 use hacivat_ui_core::gpui_surface::{
     App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, Role, StatefulInteractiveElement, Styled, Window,
-    accesskit, div, px,
+    KeyDownEvent, ParentElement, Render, Role, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 
 use crate::capsule::{EnvKind, env_swatch};
-use crate::popover::Declare;
+use crate::popover::{A11yDecl, Declare};
 use crate::text::{Label, TextFn, TextSource};
 
 /// The minimum row height.
@@ -42,6 +41,8 @@ pub struct ChoiceList {
     choices: Vec<Choice>,
     selected: Option<usize>,
     focus: FocusHandle,
+    /// The radio group's accessible name.
+    label: Option<TextFn>,
 }
 
 impl EventEmitter<ChoiceEvent> for ChoiceList {}
@@ -58,7 +59,13 @@ impl ChoiceList {
             choices,
             selected,
             focus: cx.focus_handle().tab_stop(true),
+            label: None,
         }
+    }
+
+    /// Names the radio group for assistive technology (the question it answers).
+    pub fn set_label(&mut self, label: TextFn) {
+        self.label = Some(label);
     }
 
     pub fn selected(&self) -> Option<usize> {
@@ -107,7 +114,11 @@ impl Render for ChoiceList {
             .id("choice-list")
             .debug_selector(|| "choice-list".to_string())
             .track_focus(&self.focus)
-            .role(Role::RadioGroup)
+            .declare(
+                Role::RadioGroup,
+                self.label.as_ref().map(|l| l(cx)).unwrap_or_default(),
+                None,
+            )
             .on_key_down(cx.listener(Self::on_key))
             .flex()
             .flex_col()
@@ -142,8 +153,11 @@ impl Render for ChoiceList {
             let mut row = div()
                 .id(("choice", i))
                 .debug_selector(move || format!("choice-{i}"))
-                .declare(Role::RadioButton, label.clone(), Some(selected))
-                .aria_toggled(accesskit::Toggled::from(selected))
+                .declare_full(
+                    A11yDecl::new(Role::RadioButton, label.clone())
+                        .selected(Some(selected))
+                        .toggled(selected),
+                )
                 .flex()
                 .flex_row()
                 .items_center()

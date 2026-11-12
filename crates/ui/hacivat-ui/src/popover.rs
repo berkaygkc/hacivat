@@ -96,6 +96,10 @@ pub struct A11yDecl {
     pub disabled: bool,
     pub modal: bool,
     pub active_descendant: bool,
+    /// Expanded (`true`) or collapsed (`false`); `None` where the state does not apply.
+    pub expanded: Option<bool>,
+    /// Checked state of a checkbox, radio or toggle button; `None` where it does not apply.
+    pub toggled: Option<bool>,
 }
 
 impl A11yDecl {
@@ -119,6 +123,16 @@ impl A11yDecl {
 
     pub fn active_descendant(mut self) -> Self {
         self.active_descendant = true;
+        self
+    }
+
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.expanded = Some(expanded);
+        self
+    }
+
+    pub fn toggled(mut self, toggled: bool) -> Self {
+        self.toggled = Some(toggled);
         self
     }
 }
@@ -167,6 +181,12 @@ pub trait Declare: StatefulInteractiveElement + Sized {
         }
         if decl.active_descendant {
             el = el.aria_active_descendant();
+        }
+        if let Some(expanded) = decl.expanded {
+            el = el.aria_expanded(expanded);
+        }
+        if let Some(toggled) = decl.toggled {
+            el = el.aria_toggled(accesskit::Toggled::from(toggled));
         }
         el
     }
@@ -222,6 +242,18 @@ impl A11yNode {
 
     pub fn selected(mut self, selected: Option<bool>) -> Self {
         self.decl.selected = selected;
+        self
+    }
+
+    /// Expanded (`true`) or collapsed (`false`): a combo box with its list open.
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.decl.expanded = Some(expanded);
+        self
+    }
+
+    /// The checked state (a disabled checkbox still reports it).
+    pub fn toggled(mut self, toggled: bool) -> Self {
+        self.decl.toggled = Some(toggled);
         self
     }
 }
@@ -298,6 +330,12 @@ impl Element for A11yNode {
         }
         if let Some(live) = d.live {
             node.set_live(live);
+        }
+        if let Some(expanded) = d.expanded {
+            node.set_expanded(expanded);
+        }
+        if let Some(toggled) = d.toggled {
+            node.set_toggled(accesskit::Toggled::from(toggled));
         }
     }
 }

@@ -10,21 +10,22 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, Entity, Focusable, Font,
-    FontId, FontMetrics, FontRun, GlyphId, InteractiveElement, IntoElement, LineLayout, Modifiers,
-    MouseButton, NoopTextSystem, ParentElement, Pixels, PlatformTextSystem, Render,
-    RenderGlyphParams, Role, SharedString, Size, Styled, TestAppContext, TestDispatcher,
+    AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, Entity, EntityInputHandler,
+    Focusable, Font, FontId, FontMetrics, FontRun, GlyphId, InteractiveElement, IntoElement,
+    LineLayout, Modifiers, MouseButton, NoopTextSystem, ParentElement, Pixels, PlatformTextSystem,
+    Render, RenderGlyphParams, Role, SharedString, Size, Styled, TestAppContext, TestDispatcher,
     TextRenderingMode, VisualTestContext, Window, div, px,
 };
 use hacivat_ui::button::ButtonKind;
 use hacivat_ui::capsule::EnvKind;
 use hacivat_ui::checkbox::Checkbox;
 use hacivat_ui::choice_list::{Choice, ChoiceEvent, ChoiceList};
+use hacivat_ui::dialog::DialogEvent;
 use hacivat_ui::dialog::{Dialog, DialogButton, DialogSize, DialogSpec, form_dialog};
 use hacivat_ui::disclosure::Disclosure;
 use hacivat_ui::input::TextInput;
 use hacivat_ui::notice::{InlineNotice, NoticeIcon};
-use hacivat_ui::popover::{a11y_record, a11y_take};
+use hacivat_ui::popover::{A11yDecl, a11y_record, a11y_take};
 use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
 use hacivat_ui::select::{Select, SelectEvent, SelectOption};
 use hacivat_ui::text::{Label, TextFn, TextRegistry, TextSource};
@@ -677,15 +678,23 @@ fn clipboard_text(vcx: &mut VisualTestContext) -> Option<String> {
         .and_then(|item| item.text())
 }
 
-fn a11y_value(vcx: &mut VisualTestContext, _input: &Entity<TextInput>) -> Option<String> {
+/// Every accessibility declaration of the next frame.
+fn a11y_frame(vcx: &mut VisualTestContext) -> Vec<A11yDecl> {
     a11y_record();
     vcx.update(|window, _| window.refresh());
     vcx.run_until_parked();
     a11y_take()
+}
+
+fn a11y_input(vcx: &mut VisualTestContext) -> A11yDecl {
+    a11y_frame(vcx)
         .into_iter()
-        .find(|d| d.role == Some(Role::TextInput))
-        .and_then(|d| d.value)
-        .map(|v| v.to_string())
+        .find(|d| matches!(d.role, Some(Role::TextInput | Role::PasswordInput)))
+        .expect("the input declared itself")
+}
+
+fn a11y_value(vcx: &mut VisualTestContext, _input: &Entity<TextInput>) -> Option<String> {
+    a11y_input(vcx).value.map(|v| v.to_string())
 }
 
 #[gpui::test]
@@ -924,5 +933,254 @@ fn notice_params_use_mono(cx: &mut TestAppContext) {
     assert_ne!(
         label_style(&probe, "Filled from the URL").font_family,
         mono_family()
+    );
+}
+
+// ---- fix round 1 ------------------------------------------------------------------------------
+
+fn release_key(vcx: &mut VisualTestContext, key: &'static str) {
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse(key).unwrap(),
+    });
+    vcx.run_until_parked();
+}
+
+/// Enter down and up, as a keyboard sends it.
+fn press_enter(vcx: &mut VisualTestContext) {
+    vcx.simulate_keystrokes("enter");
+    release_key(vcx, "enter");
+}
+
+struct NestedHost {
+    dialog: Entity<Dialog>,
+    select: Entity<Select>,
+}
+
+impl Render for NestedHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(self.dialog.clone())
+    }
+}
+
+#[gpui::test]
+fn a_select_inside_a_dialog_keeps_escape_and_enter_to_itself(cx: &mut TestAppContext) {
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    let (host_view, vcx) = cx.add_window_view(|window, cx| {
+        let spec = DialogSpec {
+            title: text("Remember the password?"),
+            body: text("Choose how long."),
+            buttons: ["Cancel", "Save"]
+                .into_iter()
+                .map(|l| DialogButton {
+                    label: text(l),
+                    kind: ButtonKind::Default,
+                    accesskey: None,
+                    english_accesskey: None,
+                })
+                .collect(),
+            cancel: 0,
+            primary: 1,
+            size: DialogSize::Wide,
+        };
+        let dialog = Dialog::new(spec, window, cx);
+        let options = RETENTION
+            .iter()
+            .map(|l| SelectOption {
+                label: text(l),
+                hint: None,
+                disabled: false,
+            })
+            .collect();
+        let select = cx.new(|cx| Select::new(options, 3, cx));
+        dialog.update(cx, |d, _| d.set_content(select.clone().into()));
+        NestedHost { dialog, select }
+    });
+    vcx.simulate_resize(gpui::size(px(900.0), px(700.0)));
+    vcx.run_until_parked();
+    let (dialog, select) = host_view.read_with(vcx, |h, _| (h.dialog.clone(), h.select.clone()));
+    let pressed: Rc<RefCell<Vec<DialogEvent>>> = Rc::default();
+    let sink = pressed.clone();
+    vcx.update(|_, cx| {
+        cx.subscribe(&dialog, move |_, e: &DialogEvent, _| {
+            sink.borrow_mut().push(*e)
+        })
+        .detach()
+    });
+    record(vcx, &select);
+
+    focus_select(vcx, &select);
+    // Enter on the closed select opens it; it is not the dialog's default button.
+    press_enter(vcx);
+    assert!(read(vcx, &select, Select::is_open));
+    assert_eq!(*pressed.borrow(), []);
+    // Escape closes only the menu.
+    vcx.simulate_keystrokes("escape");
+    assert!(!read(vcx, &select, Select::is_open));
+    assert_eq!(*pressed.borrow(), []);
+    // Enter in the open menu picks a row and presses no dialog button.
+    vcx.simulate_keystrokes("space up up");
+    press_enter(vcx);
+    assert_eq!(read(vcx, &select, Select::selected), 1);
+    assert!(!read(vcx, &select, Select::is_open));
+    assert_eq!(*pressed.borrow(), []);
+    assert_eq!(events(vcx, &select), [SelectEvent::Changed(1)]);
+    // With the menu closed, Escape belongs to the dialog again.
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(*pressed.borrow(), [DialogEvent::Cancelled]);
+}
+
+#[gpui::test]
+fn masked_input_gives_text_services_only_bullets(cx: &mut TestAppContext) {
+    let (vcx, input) = mount_input(cx, true);
+    type_text(vcx, "s3cret");
+    let mut adjusted = None;
+    let services = input
+        .update_in(vcx, |i, window, cx| {
+            i.text_for_range(0..6, &mut adjusted, window, cx)
+        })
+        .unwrap();
+    assert!(!services.contains("s3cret") && !services.contains('s'));
+    assert_eq!(services, "••••••");
+    // One bullet per UTF-16 unit, so the IME's range arithmetic holds.
+    let (vcx, input) = mount_input(cx, true);
+    type_text(vcx, "a😀");
+    let services = input
+        .update_in(vcx, |i, window, cx| {
+            i.text_for_range(0..3, &mut None, window, cx)
+        })
+        .unwrap();
+    assert_eq!(services.chars().count(), 3);
+    assert!(services.chars().all(|c| c == '•'));
+    assert_eq!(a11y_input(vcx).role, Some(Role::PasswordInput));
+
+    let (vcx, input) = mount_input(cx, false);
+    type_text(vcx, "orders");
+    let services = input
+        .update_in(vcx, |i, window, cx| {
+            i.text_for_range(0..6, &mut None, window, cx)
+        })
+        .unwrap();
+    assert_eq!(services, "orders");
+    assert_eq!(a11y_input(vcx).role, Some(Role::TextInput));
+}
+
+#[gpui::test]
+fn select_reports_expanded_state(cx: &mut TestAppContext) {
+    let (vcx, select, _) = mount_select(cx, RETENTION, 3);
+    let combo = |vcx: &mut VisualTestContext| {
+        a11y_frame(vcx)
+            .into_iter()
+            .find(|d| d.role == Some(Role::ComboBox))
+            .expect("the select declared itself")
+    };
+    let closed = combo(vcx);
+    assert_eq!(closed.expanded, Some(false));
+    assert_eq!(closed.value.as_deref(), Some("Forever (Keychain)"));
+    focus_select(vcx, &select);
+    vcx.simulate_keystrokes("space");
+    assert_eq!(combo(vcx).expanded, Some(true));
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(combo(vcx).expanded, Some(false));
+}
+
+#[gpui::test]
+fn select_press_released_off_the_field_does_not_eat_the_next_click(cx: &mut TestAppContext) {
+    let (vcx, select, _) = mount_select(cx, RETENTION, 0);
+    let field = center(vcx, "select-field");
+    vcx.simulate_click(field, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(read(vcx, &select, Select::is_open));
+    // Press on the field (closes the menu), release far away: no click.
+    vcx.simulate_mouse_down(field, MouseButton::Left, Modifiers::none());
+    let away = gpui::point(px(700.0), px(500.0));
+    vcx.simulate_mouse_move(away, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_up(away, MouseButton::Left, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(!read(vcx, &select, Select::is_open));
+    // The next click on the field opens it.
+    vcx.simulate_click(field, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(read(vcx, &select, Select::is_open));
+}
+
+#[gpui::test]
+fn paste_filter_may_defer_an_edit_of_its_own_input(cx: &mut TestAppContext) {
+    let (vcx, input) = mount_input(cx, false);
+    let target = input.downgrade();
+    input.update(vcx, |i, _| {
+        i.set_paste_filter(Some(Rc::new(
+            move |text: &str, window: &mut Window, cx: &mut App| {
+                let Some(host) = text.strip_prefix("postgres://") else {
+                    return false;
+                };
+                let host = host.split('/').next().unwrap_or_default().to_string();
+                let target = target.clone();
+                window.defer(cx, move |_, cx| {
+                    target
+                        .update(cx, |i, cx| {
+                            i.set_value(host);
+                            cx.notify();
+                        })
+                        .ok();
+                });
+                true
+            },
+        )));
+    });
+    paste(vcx, &input, "postgres://db.internal/orders");
+    vcx.run_until_parked();
+    assert_eq!(read(vcx, &input, |i| i.value().to_string()), "db.internal");
+}
+
+#[gpui::test]
+fn checkbox_and_choice_list_accessibility(cx: &mut TestAppContext) {
+    // A checked, disabled checkbox still reports its state; the sub-label is the description.
+    let vcx = host(cx, |_, _| {
+        div()
+            .child(
+                Checkbox::new("ro", "Read-only".into())
+                    .sub_label("blocks writes".into())
+                    .checked(true)
+                    .disabled(true),
+            )
+            .child(
+                Checkbox::new("tls", "Verify".into())
+                    .sub_label("the server certificate".into())
+                    .checked(false),
+            )
+            .into_any_element()
+    });
+    let decls = a11y_frame(vcx);
+    let find = |name: &str| {
+        decls
+            .iter()
+            .find(|d| d.role == Some(Role::CheckBox) && d.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("no checkbox {name}: {decls:?}"))
+            .clone()
+    };
+    let ro = find("Read-only");
+    assert!(ro.disabled);
+    assert_eq!(ro.toggled, Some(true));
+    assert_eq!(ro.description.as_deref(), Some("blocks writes"));
+    let tls = find("Verify");
+    assert_eq!(tls.toggled, Some(false));
+    assert_eq!(tls.description.as_deref(), Some("the server certificate"));
+
+    let (vcx, list) = mount_choices(cx, Some(1));
+    list.update(vcx, |l, _| l.set_label(text("Environment")));
+    let decls = a11y_frame(vcx);
+    assert!(
+        decls
+            .iter()
+            .any(|d| d.role == Some(Role::RadioGroup) && d.name.as_ref() == "Environment"),
+        "{decls:?}"
+    );
+    let staging = decls
+        .iter()
+        .find(|d| d.role == Some(Role::RadioButton) && d.name.as_ref() == "Staging")
+        .unwrap();
+    assert_eq!(
+        (staging.selected, staging.toggled),
+        (Some(true), Some(true))
     );
 }
