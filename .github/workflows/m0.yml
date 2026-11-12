@@ -95,14 +95,24 @@ jobs:
       - name: Build spikes
         run: cargo build --release -p spike-grid -p spike-editor
 
-      - name: Bench (software rendering under a virtual display)
-        run: |
-          mkdir -p bench-out
-          xvfb-run -a cargo run --release -p spike-grid -- --bench fling > bench-out/spike-grid-fling.json
-          xvfb-run -a cargo run --release -p spike-editor -- --bench > bench-out/spike-editor.json
+      - name: Generate B3 fixture
+        run: cargo xtask gen-sql --lines 50000 --long-line 100000 --out target/fixtures/b3-50k.sql
+
+      - name: Bench spike-grid fling (software rendering under a virtual display)
+        run: xvfb-run -a cargo run -p spike-grid --release -- --bench fling
+
+      - name: Bench spike-editor typing
+        run: xvfb-run -a cargo run -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench typing
+
+      - name: Bench spike-editor typing-long-line
+        run: xvfb-run -a cargo run -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench typing-long-line
+
+      - name: Bench spike-editor completion
+        run: xvfb-run -a cargo run -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench completion
 
       - name: Upload bench JSON (regression signal only, not authoritative)
         uses: actions/upload-artifact@v4
         with:
           name: bench-regression-signal-only-not-authoritative
-          path: bench-out/*.json
+          path: target/bench/*.json
+          if-no-files-found: error
