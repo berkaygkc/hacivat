@@ -76,6 +76,17 @@ jobs:
             exit 1
           fi
 
+      - name: Lint VF capture script (PSScriptAnalyzer)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
+            Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          }
+          $issues = Invoke-ScriptAnalyzer -Path design/vf/capture.ps1 -Severity Warning,Error
+          $issues | Format-Table -AutoSize
+          if ($issues) { exit 1 }
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Build

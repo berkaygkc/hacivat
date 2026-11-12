@@ -54,6 +54,16 @@ fn parse_args() -> Result<Args> {
     Ok(a)
 }
 
+/// The window title (also how `design/vf/capture.sh` finds the window on Linux).
+fn window_title() -> String {
+    format!("Hacivat Spike {}", update::VERSION)
+}
+
+/// Printed with `--print-window-id` so capture scripts can find the window by title.
+fn window_title_line() -> String {
+    format!("WINDOW_TITLE={}", window_title())
+}
+
 struct Harman {
     lang: Lang,
     scale: f32,
@@ -115,7 +125,10 @@ fn main() {
         let sizes = display_sizes(cx);
         let display = args.display.or_else(|| sizes.iter().position(|s| s.0 <= 2200.0 && s.0 >= 1440.0));
         eprintln!("spike-harman: displays {sizes:?}, using {display:?}");
-        let opened = open_unified_window(cx, &format!("Hacivat Spike {}", update::VERSION), screen::WINDOW, lights, display, move |_, cx| {
+        if print_window_id {
+            println!("{}", window_title_line());
+        }
+        let opened = open_unified_window(cx, &window_title(), screen::WINDOW, lights, display, move |_, cx| {
             cx.new(|_| Harman { lang, scale, print_window_id, reported: false })
         });
         if let Err(e) = opened {
@@ -124,4 +137,15 @@ fn main() {
         }
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_title_line_names_the_window_capture_sh_looks_for() {
+        assert_eq!(window_title(), format!("Hacivat Spike {}", update::VERSION));
+        assert_eq!(window_title_line(), format!("WINDOW_TITLE={}", window_title()));
+    }
 }
