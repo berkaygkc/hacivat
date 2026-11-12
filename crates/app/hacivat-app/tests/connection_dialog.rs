@@ -1191,3 +1191,34 @@ fn sslpassword_mask_in_the_url_row_never_replaces_the_stored_passphrase(cx: &mut
     );
     assert_eq!(read_port(vcx), Some(6000));
 }
+
+#[gpui::test]
+fn english_keeps_the_environment_segments(cx: &mut TestAppContext) {
+    // English: every environment label fits the row, so the segmented control stays.
+    let vcx = open_new(cx, "en");
+    vcx.run_until_parked();
+    assert!(!read(vcx, |d, _| d.environment_is_select()));
+    assert!(vcx.debug_bounds("segmented-conn-env").is_some());
+    assert!(vcx.debug_bounds("conn-env-select").is_none());
+}
+
+#[gpui::test]
+fn the_environment_select_sets_the_tag_like_the_segments(cx: &mut TestAppContext) {
+    // The pseudo-locale's labels are some 40 % longer: the row takes a Select.
+    let vcx = open_new(cx, "tr-XT");
+    vcx.run_until_parked();
+    assert!(read(vcx, |d, _| d.environment_is_select()));
+    assert!(vcx.debug_bounds("conn-env-select").is_some());
+    assert!(vcx.debug_bounds("segmented-conn-env").is_none());
+    // "Choose…" while no tag is set; picking Staging (index 4) sets it.
+    let select = read(vcx, |d, _| d.env_select());
+    assert_eq!(vcx.cx.read(|cx| select.read(cx).selected()), 0);
+    vcx.cx.update(|cx| {
+        select.update(cx, |s, cx| {
+            s.set_selected(4, cx);
+            cx.emit(SelectEvent::Changed(4));
+        })
+    });
+    vcx.run_until_parked();
+    assert_eq!(env_pressed(vcx), Some(EnvTag::Staging));
+}

@@ -17,15 +17,15 @@ use hacivat_session::profile::{Profile, ProfileEndpoint, suggest_name};
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::capsule::{EnvKind, env_swatch_on_raised};
 use hacivat_ui::checkbox::Checkbox;
-use hacivat_ui::dialog::form_dialog;
+use hacivat_ui::dialog::{DialogSize, form_dialog};
 use hacivat_ui::disclosure::Disclosure;
-use hacivat_ui::form::{form_row, hint_row};
+use hacivat_ui::form::{FORM_LABEL_PX, form_row, hint_row};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::input::TextInput;
 use hacivat_ui::l10n::ui_text;
 use hacivat_ui::notice::{InlineNotice, NoticeIcon};
 use hacivat_ui::popover::A11yNode;
-use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
+use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented, natural_width};
 use hacivat_ui::select::SelectOption;
 use hacivat_ui::text::{Label, TextFn, TextSource};
 use hacivat_ui_core::gpui_surface::{
@@ -408,6 +408,36 @@ fn unsupported_mode(cx: &App, mode: TlsMode) -> SharedString {
     )
 }
 
+// ## m2a-t21-shots
+/// The Environment Select's options: "Choose…" (disabled; shown while no tag is set), then
+/// the tags in the segmented control's order.
+pub(crate) fn env_options() -> Vec<SelectOption> {
+    std::iter::once(SelectOption {
+        label: text_fn(ids::hv::CONN_IMPORT_CHOOSE),
+        hint: None,
+        disabled: true,
+    })
+    .chain(EnvTag::ALL.iter().map(|tag| SelectOption {
+        label: text_fn(env_label(*tag)),
+        hint: None,
+        disabled: false,
+    }))
+    .collect()
+}
+
+/// The Environment Select's index for `env` (0: "Choose…").
+pub(crate) fn env_index(env: Option<EnvTag>) -> usize {
+    env.and_then(|e| EnvTag::ALL.iter().position(|t| *t == e))
+        .map_or(0, |i| i + 1)
+}
+
+/// The width of a form row's control column in the 640 px form dialog: the card less its
+/// border, the body's side padding, the label column and the gap after it.
+fn control_room(theme: &Theme) -> f32 {
+    let t = theme.tokens;
+    DialogSize::Form.width_px() - 2.0 - 2.0 * t.spacing.s_3xl - FORM_LABEL_PX - t.spacing.xl
+}
+
 pub(crate) fn keepalive_options() -> Vec<SelectOption> {
     KEEPALIVES
         .iter()
@@ -498,6 +528,8 @@ pub(crate) fn set_sqlite_mode_ro(p: &mut Profile, on: bool) {
 // ## m2a-t21-shots: where the password field's "from the pasted URL" tail may start (a share of
 // the field), so the dots before it stay visible.
 const TAIL_LEFT: f32 = 0.35;
+/// The Environment Select's width (the TLS mode Select's).
+const ENV_SELECT_PX: f32 = 200.0;
 
 const SQLITE_MODE: &str = "mode";
 const SQLITE_RO: &str = "ro";
@@ -1151,6 +1183,25 @@ impl ConnectionDialog {
                 })
             },
         );
+        // ## m2a-t21-shots: when the row cannot show every label whole, a Select instead of
+        // five ellipsized segments (the Overflow Rule: no label truncates while a whole
+        // control is possible).
+        let labels: Vec<(SharedString, bool)> = EnvTag::ALL
+            .iter()
+            .map(|tag| (tr(cx, env_label(*tag), NoArgs), true))
+            .collect();
+        let as_select = natural_width(&labels, theme, window) > px(control_room(theme));
+        self.env_as_select.set(as_select);
+        let control = if as_select {
+            div()
+                .debug_selector(|| "conn-env-select".to_string())
+                .w(px(ENV_SELECT_PX))
+                .max_w_full()
+                .child(self.env_select.clone())
+                .into_any_element()
+        } else {
+            envs.into_any_element()
+        };
         rows.push(
             Kind::Row,
             form_row(
@@ -1160,7 +1211,7 @@ impl ConnectionDialog {
                     .track_focus(&self.focus.environment)
                     .flex()
                     .min_w_0()
-                    .child(envs),
+                    .child(control),
             ),
         );
         let has_host = !host_text(&p).trim().is_empty();

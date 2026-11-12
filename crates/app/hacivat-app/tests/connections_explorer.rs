@@ -485,7 +485,7 @@ fn f6_moves_the_focus_to_the_newest_sticky_toast(cx: &mut TestAppContext) {
     vcx.cx.update(|cx| {
         let mut toast = Toast::new(
             ToastKind::Info,
-            hacivat_app::l10n_global::text_fn_id("hv-explorer-copied"),
+            hacivat_app::l10n_global::text_fn_id("hv-conn-toast-copied"),
         );
         toast.sticky = true;
         toast.actions = vec![ToastAction {
@@ -632,4 +632,87 @@ fn only_delete_is_red_in_the_connection_menu(cx: &mut TestAppContext) {
             ("Delete…".to_string(), true),
         ]
     );
+}
+
+/// A shell with one production profile `name` (read-only), connected to a PostgreSQL 16.4
+/// fake, its row drawn in the 276 px explorer.
+fn connected_row(cx: &mut TestAppContext, name: &str) -> &'static mut VisualTestContext {
+    use hacivat_driver::fake::FakeDriver;
+    use hacivat_driver::{SemVerLoose, ServerInfo};
+    use hacivat_proto::DbmsKind;
+    let fake = FakeDriver::new(DbmsKind::Postgres).server(ServerInfo {
+        kind: DbmsKind::Postgres,
+        product: "PostgreSQL".to_string(),
+        version: SemVerLoose::parse("16.4"),
+        raw_version: "16.4".to_string(),
+        is_replica: Some(false),
+    });
+    let vcx = shell_with_fake(cx, "en", fake);
+    let mut p = test_profile(name, Some(EnvTag::Production), "10.0.4.12");
+    p.read_only = true;
+    add_profile(vcx, p);
+    connect(vcx, name);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !matches!(live(vcx, name), hacivat_session::LiveState::Connected(_)) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the connect never finished"
+        );
+        settle(vcx, ms(10));
+    }
+    vcx.run_until_parked();
+    vcx
+}
+
+fn drawn(vcx: &VisualTestContext, id: &str) -> hacivat_ui::text::RenderedText {
+    let needle = format!("#{id}");
+    registry_frame(vcx)
+        .into_iter()
+        .find(|r| r.path.ends_with(&needle))
+        .unwrap_or_else(|| panic!("{id} drawn"))
+}
+
+#[gpui::test]
+fn a_crowded_row_ellipsizes_its_meta_before_its_name(cx: &mut TestAppContext) {
+    let vcx = connected_row(cx, "orders-prod");
+    let name = drawn(vcx, "explorer-row-name-0");
+    assert!(!name.truncated && !name.clipped, "{name:?}");
+    let engine = drawn(vcx, "explorer-row-engine-0");
+    // The row is crowded (a lock, a latency and a versioned engine at 276 px): the engine
+    // gives way while the name stays whole.
+    assert!(engine.truncated && !engine.clipped, "{engine:?}");
+}
+
+#[gpui::test]
+fn a_long_name_keeps_about_six_characters(cx: &mut TestAppContext) {
+    let name = "orders-production-replica-eu-west-1-standby";
+    let vcx = connected_row(cx, name);
+    let drawn_name = drawn(vcx, "explorer-row-name-0");
+    assert!(
+        drawn_name.truncated && !drawn_name.clipped,
+        "{drawn_name:?}"
+    );
+    // At least "orders…" in the row's type.
+    let six = vcx.update(|window, cx| {
+        let style = hacivat_ui_core::theme::Theme::get(cx).tokens.type_ramp.body;
+        let run = gpui::TextRun {
+            len: "orders…".len(),
+            font: hacivat_ui_core::fonts::font_for(&style),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line("orders…".into(), gpui::px(style.size_px), &[run], None)
+            .width
+    });
+    assert!(
+        gpui::px(drawn_name.painted_px) >= six - gpui::px(0.5),
+        "{} < {six:?}",
+        drawn_name.painted_px
+    );
+    // The meta gave way first: the engine is ellipsized too.
+    assert!(drawn(vcx, "explorer-row-engine-0").truncated);
 }

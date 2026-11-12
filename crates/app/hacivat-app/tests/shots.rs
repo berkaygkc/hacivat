@@ -27,7 +27,9 @@
 //! Every frame is checked before it is written:
 //! - (a) in the pseudo locales (`en-XA`, `tr-XT`) every `TextSource::Fluent` label is bracketed;
 //! - (b) no label is clipped: wider than its box, or cut at its container's clip (a control
-//!   row running past its card), wrapping paragraphs included;
+//!   row running past its card, a tile cutting its last row), wrapping paragraphs included;
+//!   text partly scrolled out of a marked scroll viewport is not clipped (`text.rs`,
+//!   `cut_by_clip`, has the policy and its limits);
 //! - (c) every label is at least 11 px nominal (synthesized small caps record their nominal
 //!   size; their 0.7x glyph runs are the one exception);
 //! - (d) the One Filled Badge rule holds inside the title-bar capsule, expecting production

@@ -1189,3 +1189,17 @@ fn the_public_secret_key_rule_covers_the_import_names() {
         assert!(!is_secret_param(key), "{key}");
     }
 }
+
+#[test]
+fn a_url_carrying_sslkeypassword_is_refused_and_never_shows_it() {
+    for preferred in ENGINES {
+        let r = parse("postgres://h/db?sslkeypassword=SECRETPW", preferred);
+        assert_eq!(
+            r.unrecognised(),
+            Some(UnrecognisedReason::NoMatch),
+            "{preferred:?}"
+        );
+        assert!(!format!("{r:?}").contains("SECRETPW"));
+        assert!(!format!("{r:#?}").contains("SECRETPW"));
+    }
+}

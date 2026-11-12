@@ -13,8 +13,8 @@ use hacivat_ui::capsule::env_swatch;
 use hacivat_ui::text::{Label, TextSource};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, Context, InteractiveElement as _, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, div, px,
+    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, Window, div, px,
 };
 use hacivat_ui_core::theme::Theme;
 
@@ -22,20 +22,29 @@ use crate::connections::capsule::{encryption_label, engine_label, env_kind, env_
 use crate::connections::explorer::endpoint_text;
 use crate::connections::model::ConnectionsModel;
 use crate::l10n_global::tr;
-use crate::shell::tiles::{self, empty_state, panel_header, panel_title};
+use crate::shell::tiles::{self, empty_state_wrapping, panel_header, panel_title};
+use hacivat_ui::text::scroll_viewport;
 
 /// The width of the key column.
 const KEY_PX: f32 = 92.0;
 
 /// The sheet view (the `connection_panel` hook).
+/// The scroll thumb's width and shortest length.
+const THUMB_PX: f32 = 4.0;
+const THUMB_MIN_PX: f32 = 16.0;
+
 pub struct SheetView {
     _subscription: Subscription,
+    // ## m2a-t21-shots
+    /// The rows' scroll position, for the scroll thumb.
+    scroll: ScrollHandle,
 }
 
 /// The `connection_panel` hook.
 pub fn build(_window: &mut Window, cx: &mut App) -> AnyView {
     cx.new(|cx| SheetView {
         _subscription: cx.observe_global::<ConnectionsModel>(|_, cx| cx.notify()),
+        scroll: ScrollHandle::new(),
     })
     .into()
 }
@@ -56,6 +65,33 @@ fn secret_label(cx: &App, p: &Profile) -> SharedString {
 }
 
 impl SheetView {
+    // ## m2a-t21-shots
+    /// The scroll thumb (DESIGN.md: 3 px radius, on the scroll track's tone) while the rows are
+    /// taller than the tile: 4 px wide at the right edge, its length and place in proportion.
+    /// Read from the last layout, so it shows from the frame after the rows overflow.
+    fn thumb(theme: &Theme, scroll: &ScrollHandle) -> Option<AnyElement> {
+        let max = f32::from(scroll.max_offset().y);
+        let view = f32::from(scroll.bounds().size.height);
+        if max < 0.5 || view <= 0.0 {
+            return None;
+        }
+        let t = theme.tokens;
+        let length = (view * view / (view + max)).max(THUMB_MIN_PX);
+        let at = (-f32::from(scroll.offset().y) / max).clamp(0.0, 1.0) * (view - length);
+        Some(
+            div()
+                .debug_selector(|| "sheet-scroll-thumb".to_string())
+                .absolute()
+                .right(px(2.0))
+                .top(px(at))
+                .w(px(THUMB_PX))
+                .h(px(length))
+                .rounded(px(t.radii.xs))
+                .bg(t.colors.seam_strong.to_hsla())
+                .into_any_element(),
+        )
+    }
+
     fn kv(theme: &Theme, index: usize, key: SharedString, value: AnyElement) -> impl IntoElement {
         let t = theme.tokens;
         let c = &t.colors;
@@ -176,7 +212,7 @@ impl Render for SheetView {
             "panel-connection-title",
         ));
         let body = match m.selected().and_then(|id| m.get(id)) {
-            None => empty_state(
+            None => empty_state_wrapping(
                 &theme,
                 tr(cx, ids::hv::CONN_SHEET_NONE, NoArgs),
                 "sheet-none",
@@ -204,13 +240,20 @@ impl Render for SheetView {
                     body = body.child(Self::kv(&theme, i, key, value));
                 }
                 // ## m2a-t21-shots: a short tile scrolls its rows instead of cutting the last
-                // ones off under the status bar.
-                div()
+                // ones off under the status bar, and a scroll thumb says there is more.
+                let rows = div()
                     .id("sheet-rows")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(scroll_viewport())
+                    .child(body);
+                div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .child(body)
+                    .child(rows)
+                    .children(Self::thumb(&theme, &self.scroll))
                     .into_any_element()
             }
         };

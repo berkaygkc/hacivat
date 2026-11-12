@@ -232,9 +232,11 @@ fn bounds_probe(slot: Rc<Cell<Bounds<Pixels>>>, left: f32, rest: f32) -> impl In
 }
 
 // ## m2a-t21-shots
-/// Where the capsule was last painted (its frame, border included), recorded only while this
-/// global is installed: the shots harness and tests scope the One Filled Badge check to it
-/// (`named_rules::assert_one_filled_badge_in`). The app never installs it.
+/// Where the capsule was painted in the current frame (its frame, border included; `None` when
+/// this frame has not drawn it), recorded only while this global is installed: the shots
+/// harness and tests scope the One Filled Badge check to it
+/// (`named_rules::assert_one_filled_badge_in`). It is reset with each frame's first debug
+/// record (`text::begin_record`). The app never installs it.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CapsuleProbe {
     pub bounds: Option<Bounds<Pixels>>,
@@ -247,6 +249,9 @@ fn record_frame() -> impl IntoElement {
     canvas(
         |bounds, _, cx| {
             if cx.has_global::<CapsuleProbe>() {
+                // The probe starts empty with each frame's first record, so a frame without
+                // the capsule never reports the bounds of an earlier one.
+                crate::text::begin_record(cx);
                 cx.global_mut::<CapsuleProbe>().bounds = Some(bounds);
             }
         },
