@@ -106,9 +106,13 @@ impl IntoElement for Capsule {
                 weight: 600,
                 ..body
             };
-            let text = |s: &SharedString, style, color: hacivat_ui_core::gpui_surface::Hsla| {
-                Label::new(s.clone(), TextSource::Fluent, style, color)
-            };
+            let label =
+                |source, s: &SharedString, style, color: hacivat_ui_core::gpui_surface::Hsla| {
+                    Label::new(s.clone(), source, style, color)
+                };
+            // Chrome text is Fluent; the connection's name and engine are user data.
+            let text = |s: &SharedString, style, color| label(TextSource::Fluent, s, style, color);
+            let data = |s: &SharedString, style, color| label(TextSource::Data, s, style, color);
             let mut frame = div()
                 .id(ElementId::from("capsule"))
                 .group("capsule")
@@ -186,8 +190,8 @@ impl IntoElement for Capsule {
                     frame = frame
                         .child(
                             cell(t)
-                                .child(text(name, strong, c.text.to_hsla()))
-                                .child(text(engine, body, c.text_2.to_hsla())),
+                                .child(data(name, strong, c.text.to_hsla()))
+                                .child(data(engine, body, c.text_2.to_hsla())),
                         )
                         .child(
                             cell(t)

@@ -15,8 +15,11 @@ use crate::popover::{Tip, lazy};
 use crate::text::{Label, TextSource};
 
 pub enum SegmentContent {
-    /// A rendered label.
+    /// A rendered Fluent message ([`TextSource::Fluent`]): bracketed under pseudo-locales.
     Label(SharedString),
+    /// Text shown as is, never translated: a language's short name (`EN`, `TR`). Marked
+    /// [`TextSource::Data`], so pseudo-locales leave it alone and the registry check accepts it.
+    Verbatim(SharedString),
     Icon(IconName),
 }
 
@@ -86,11 +89,15 @@ impl IntoElement for Segmented {
                 let ink = if item.pressed { c.text } else { c.text_2 }.to_hsla();
                 let is_icon = matches!(item.content, SegmentContent::Icon(_));
                 let name = match &item.content {
-                    SegmentContent::Label(label) => label.clone(),
+                    SegmentContent::Label(label) | SegmentContent::Verbatim(label) => label.clone(),
                     SegmentContent::Icon(_) => item.tooltip.clone(),
                 };
+                let source = match item.content {
+                    SegmentContent::Verbatim(_) => TextSource::Data,
+                    _ => TextSource::Fluent,
+                };
                 let content: AnyElement = match item.content {
-                    SegmentContent::Label(label) => {
+                    SegmentContent::Label(text) | SegmentContent::Verbatim(text) => {
                         let mut style = if self.mono {
                             t.type_ramp.mono_data
                         } else {
@@ -99,7 +106,7 @@ impl IntoElement for Segmented {
                         if item.pressed && self.mono {
                             style.weight = 600;
                         }
-                        Label::new(label, TextSource::Fluent, style, ink).into_any_element()
+                        Label::new(text, source, style, ink).into_any_element()
                     }
                     SegmentContent::Icon(name) => Icon::new(name)
                         .size(IconSize::Chrome)

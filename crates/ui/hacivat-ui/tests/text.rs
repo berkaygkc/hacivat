@@ -1,8 +1,8 @@
 //! UI text provider and the `Label` text registry (Task 11).
 
 use gpui::{
-    Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext, Window, div,
-    point, px, size,
+    Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _,
+    TestAppContext, Window, div, point, px, size,
 };
 use hacivat_ui::l10n::{EnglishDefaults, UiTextProvider};
 use hacivat_ui::text::{Label, RenderedText, TextRegistry, TextSource};
@@ -184,4 +184,67 @@ fn each_frame_replaces_the_previous_one(cx: &mut TestAppContext) {
             .collect()
     });
     assert_eq!(texts, ["Run", "Stop"]);
+}
+
+/// A shrink-wrapped small-caps label in a row, with a selector on its wrapper.
+struct NaturalHost {
+    text: &'static str,
+    style: TypeStyle,
+    /// `Some(w)`: a fixed `w`-px box; `None`: natural width.
+    width: Option<f32>,
+}
+
+impl Render for NaturalHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let label = Label::new(
+            self.text,
+            TextSource::Data,
+            self.style,
+            DARK.colors.text.to_hsla(),
+        )
+        .truncate(true);
+        let mut row = div().flex().flex_row().debug_selector(|| "natural".into());
+        if let Some(w) = self.width {
+            row = row.w(px(w));
+        }
+        div().flex().child(row.child(label))
+    }
+}
+
+fn draw_natural(
+    cx: &mut TestAppContext,
+    text: &'static str,
+    style: TypeStyle,
+    width: Option<f32>,
+) -> (f32, TextRegistry) {
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        hacivat_ui_core::fonts::register_fonts(cx).unwrap();
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let (_, vcx) = cx.add_window_view(|_, _| NaturalHost { text, style, width });
+    vcx.run_until_parked();
+    let w = f32::from(vcx.debug_bounds("natural").unwrap().size.width);
+    (w, vcx.read(|cx| cx.global::<TextRegistry>().clone()))
+}
+
+#[gpui::test]
+fn small_caps_given_their_measured_width_paint_whole(cx: &mut TestAppContext) {
+    for style in [
+        DARK.type_ramp.label_sc,
+        DARK.type_ramp.panel_title,
+        DARK.type_ramp.capsule_env,
+    ] {
+        for text in ["HACIVAT", "PROD", "GEZGİN", "BAĞLANTI"] {
+            let (natural, _) = draw_natural(cx, text, style, None);
+            // The painted run is exactly as wide as the measured one: handing the label its own
+            // width neither ellipsizes nor clips it.
+            let (_, reg) = draw_natural(cx, text, style, Some(natural));
+            let r = &reg.frame[0];
+            assert!(!r.truncated && !r.clipped, "{text} at {natural}px: {r:?}");
+        }
+    }
 }

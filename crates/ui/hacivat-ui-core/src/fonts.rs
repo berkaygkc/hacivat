@@ -120,6 +120,10 @@ pub fn small_caps_tracking_px(style: &TypeStyle) -> f32 {
 /// pre-cased `text` in `style`'s face, letters at [`SYNTH_SCALE`] x `style.size_px`, each glyph
 /// followed by [`small_caps_tracking_px`] (GPUI has no `letter-spacing`, so every glyph is its
 /// own flex item; Chrome also adds the spacing after each glyph). Never calls `to_uppercase`.
+///
+/// Flex layout rounds every glyph box to the pixel grid, so this row is wider than the sum of
+/// its glyph advances. `hacivat_ui::text::Label` therefore does not use it: it shapes and paints
+/// the [`small_caps_glyphs`] itself, so measured and painted widths are the same numbers.
 pub fn small_caps(style: &TypeStyle, color: Hsla, text: &str) -> Div {
     let font = font_for(style);
     let gap = small_caps_tracking_px(style);

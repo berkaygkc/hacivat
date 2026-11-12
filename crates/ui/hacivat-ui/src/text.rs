@@ -10,13 +10,13 @@ use std::ops::Range;
 use std::panic::Location;
 use std::rc::Rc;
 
-use hacivat_ui_core::fonts::{font_for, small_caps, small_caps_glyphs, small_caps_tracking_px};
+use hacivat_ui_core::fonts::{font_for, small_caps_glyphs, small_caps_tracking_px};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, AnyView, App, AppContext as _, AvailableSpace, Bounds, ContentMask, Context,
-    Element, ElementId, Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement,
-    IntoElement, LayoutId, ParentElement, Pixels, Render, ShapedLine, SharedString,
+    AnyElement, AnyView, App, AppContext as _, Bounds, ContentMask, Context, Element, ElementId,
+    Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
+    ParentElement, Pixels, Point, Render, ShapedLine, SharedString,
     StatefulInteractiveElement as _, Style, Styled, TextAlign, TextRun, UnderlineStyle, Window,
-    div, px, relative, size,
+    div, point, px, relative,
 };
 use hacivat_ui_core::theme::{Caps, Theme, TypeStyle, popover_surface};
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -242,13 +242,23 @@ struct Measured {
     width: Pixels,
     /// The full line, for plain styles.
     line: Option<ShapedLine>,
-    /// Per-char advance including tracking, for synthesized small caps.
-    glyphs: Vec<(char, Pixels)>,
+    /// Per-glyph runs of synthesized small caps; their advances are the single source of the
+    /// run's width, for measuring, ellipsizing and painting alike.
+    glyphs: Vec<CapsGlyph>,
+}
+
+/// One glyph of a synthesized small-caps run.
+struct CapsGlyph {
+    ch: char,
+    line: ShapedLine,
+    /// Glyph width plus the tracking gap after it.
+    advance: Pixels,
 }
 
 enum Painted {
     Line(Box<ShapedLine>),
-    Caps(AnyElement),
+    /// Small-caps glyph lines with their offsets from the label origin.
+    Caps(Vec<(Point<Pixels>, ShapedLine)>, Pixels),
 }
 
 const ELLIPSIS: &str = "…";
@@ -351,13 +361,91 @@ impl LabelElement {
             .shape_line(text, px(self.label.style.size_px), &runs, None)
     }
 
+    /// Decides what gets painted: the full run, or its ellipsized prefix. The glyph lines
+    /// shaped for measuring are the ones painted.
+    fn plan(
+        &self,
+        bounds: Bounds<Pixels>,
+        measured: &mut Measured,
+        ellipsize: bool,
+        window: &mut Window,
+    ) -> Option<Painted> {
+        let style = self.label.style;
+        if style.caps == Caps::SynthesizedSmallCaps {
+            let glyphs = std::mem::take(&mut measured.glyphs);
+            let mut kept = glyphs.len();
+            let mut ellipsis_glyph = None;
+            if ellipsize {
+                let x_for = |byte: usize| {
+                    let mut x = px(0.0);
+                    let mut at = 0;
+                    for g in &glyphs {
+                        if at >= byte {
+                            break;
+                        }
+                        x += g.advance;
+                        at += g.ch.len_utf8();
+                    }
+                    x
+                };
+                // `…` is not alphabetic: it keeps the full size, like digits and punctuation.
+                let ellipsis = self.shape(ELLIPSIS.into(), 0, window);
+                let gap = px(small_caps_tracking_px(&style));
+                let end = fitting_prefix(
+                    &self.label.text,
+                    bounds.size.width,
+                    ellipsis.width + gap,
+                    x_for,
+                );
+                kept = self.label.text[..end].chars().count();
+                ellipsis_glyph = Some(ellipsis);
+            }
+            let baseline =
+                |l: &ShapedLine| (px(style.line_height) - l.ascent - l.descent) / 2.0 + l.ascent;
+            let lines: Vec<ShapedLine> = glyphs
+                .into_iter()
+                .take(kept)
+                .map(|g| g.line)
+                .chain(ellipsis_glyph)
+                .collect();
+            // Baseline-align the glyphs of different sizes, like a baseline-aligned flex row.
+            let top = lines.iter().map(baseline).fold(px(0.0), |a, b| a.max(b));
+            let mut x = px(0.0);
+            let gap = px(small_caps_tracking_px(&style));
+            let placed: Vec<_> = lines
+                .into_iter()
+                .map(|l| {
+                    let at = point(x, top - baseline(&l));
+                    x += l.width + gap;
+                    (at, l)
+                })
+                .collect();
+            return Some(Painted::Caps(placed, x));
+        }
+
+        let line = measured.line.take()?;
+        if !ellipsize {
+            return Some(Painted::Line(Box::new(line)));
+        }
+        let ellipsis = self.shape(ELLIPSIS.into(), 0, window).width;
+        let text = &self.label.text;
+        let end = fitting_prefix(text, bounds.size.width, ellipsis, |b| line.x_for_index(b));
+        let shown = format!("{}{ELLIPSIS}", &text[..end]);
+        Some(Painted::Line(Box::new(self.shape(
+            shown.into(),
+            end,
+            window,
+        ))))
+    }
+
     fn measure(&self, window: &mut Window) -> Measured {
         let style = &self.label.style;
         if style.caps == Caps::SynthesizedSmallCaps {
-            // `fonts::small_caps` lays every glyph out as its own box followed by the tracking.
+            // Every glyph is its own shaped line followed by the tracking (GPUI has no letter-spacing).
+            // Painting places these same lines, so measure and paint cannot drift apart.
             let gap = px(small_caps_tracking_px(style));
             let font = font_for(style);
-            let glyphs: Vec<(char, Pixels)> = small_caps_glyphs(&self.label.text, style.size_px)
+            let glyphs: Vec<CapsGlyph> = small_caps_glyphs(&self.label.text, style.size_px)
                 .into_iter()
                 .map(|(ch, size_px)| {
                     let run = TextRun {
@@ -368,14 +456,20 @@ impl LabelElement {
                         underline: None,
                         strikethrough: None,
                     };
-                    let w = window
-                        .text_system()
-                        .shape_line(ch.to_string().into(), px(size_px), &[run], None)
-                        .width;
-                    (ch, w + gap)
+                    let line = window.text_system().shape_line(
+                        ch.to_string().into(),
+                        px(size_px),
+                        &[run],
+                        None,
+                    );
+                    CapsGlyph {
+                        ch,
+                        advance: line.width + gap,
+                        line,
+                    }
                 })
                 .collect();
-            let width = glyphs.iter().map(|g| g.1).fold(px(0.0), |a, b| a + b);
+            let width = glyphs.iter().map(|g| g.advance).fold(px(0.0), |a, b| a + b);
             Measured {
                 width,
                 line: None,
@@ -437,66 +531,23 @@ impl Element for LabelElement {
         if let Some(flag) = &self.truncated {
             flag.set(ellipsize);
         }
+        let painted = self.plan(bounds, measured, ellipsize, window);
+        // What is recorded as clipped is what the painted run really overflows by, not what
+        // was measured: the two are the same widths by construction, and this keeps it so.
+        let painted_width = match &painted {
+            Some(Painted::Line(line)) => line.width,
+            Some(Painted::Caps(_, width)) => *width,
+            None => px(0.0),
+        };
         TextRegistry::record(cx, || RenderedText {
             text: self.label.text.clone(),
             source: self.label.source,
             size_px: self.label.style.size_px,
-            clipped: overflows && !self.label.truncate,
+            clipped: painted_width > bounds.size.width + px(0.5),
             truncated: ellipsize,
             path: self.label.path(),
         });
-
-        let style = self.label.style;
-        if style.caps == Caps::SynthesizedSmallCaps {
-            let text = if ellipsize {
-                let glyphs = &measured.glyphs;
-                let x_for = |byte: usize| {
-                    let mut x = px(0.0);
-                    let mut at = 0;
-                    for (ch, w) in glyphs {
-                        if at >= byte {
-                            break;
-                        }
-                        x += *w;
-                        at += ch.len_utf8();
-                    }
-                    x
-                };
-                // `…` is not alphabetic: it keeps the full size, like digits and punctuation.
-                let ellipsis = self.shape(ELLIPSIS.into(), 0, window).width
-                    + px(small_caps_tracking_px(&style));
-                let text = &self.label.text;
-                let end = fitting_prefix(text, bounds.size.width, ellipsis, x_for);
-                format!("{}{ELLIPSIS}", &text[..end])
-            } else {
-                self.label.text.to_string()
-            };
-            let mut child = small_caps(&style, self.label.color, &text).into_any_element();
-            child.layout_as_root(
-                size(
-                    AvailableSpace::MinContent,
-                    AvailableSpace::Definite(px(style.line_height)),
-                ),
-                window,
-                cx,
-            );
-            child.prepaint_at(bounds.origin, window, cx);
-            return Some(Painted::Caps(child));
-        }
-
-        let line = measured.line.take()?;
-        if !ellipsize {
-            return Some(Painted::Line(Box::new(line)));
-        }
-        let ellipsis = self.shape(ELLIPSIS.into(), 0, window).width;
-        let text = &self.label.text;
-        let end = fitting_prefix(text, bounds.size.width, ellipsis, |b| line.x_for_index(b));
-        let shown = format!("{}{ELLIPSIS}", &text[..end]);
-        Some(Painted::Line(Box::new(self.shape(
-            shown.into(),
-            end,
-            window,
-        ))))
+        painted
     }
 
     fn paint(
@@ -524,7 +575,18 @@ impl Element for LabelElement {
                     cx,
                 );
             }
-            Painted::Caps(child) => child.paint(window, cx),
+            Painted::Caps(glyphs, _) => {
+                for (offset, line) in glyphs {
+                    let _ = line.paint(
+                        bounds.origin + *offset,
+                        line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
+            }
         });
     }
 }
@@ -532,7 +594,7 @@ impl Element for LabelElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, point};
+    use gpui::{TestAppContext, point, size};
     use hacivat_ui_core::theme::DARK;
 
     #[gpui::test]
