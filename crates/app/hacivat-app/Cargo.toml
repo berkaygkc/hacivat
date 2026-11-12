@@ -19,6 +19,8 @@ hacivat-settings.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+# Save failures and keymap diagnostics (Task 13 fix round 1).
+tracing.workspace = true
 
 [dev-dependencies]
 # F1: `#[gpui::test]` expands to `gpui::` paths; production code uses `gpui_surface` only.

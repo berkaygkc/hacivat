@@ -8,6 +8,8 @@ pub mod settings_ui;
 pub mod shell;
 pub mod theme_pref;
 
+pub use shell::{AppState, SessionOverrides, Startup, start};
+
 use hacivat_ui_core::gpui_surface::{App, Global, SharedString};
 
 /// The pending first chord of a multi-key binding, shown in the status bar (`None` when idle).
@@ -16,9 +18,12 @@ pub struct PendingChord(pub Option<SharedString>);
 
 impl Global for PendingChord {}
 
-/// Installs the app's globals, then runs every task's registration.
+/// Installs the app's globals (the pending chord, the tab-content registry, the shell hooks,
+/// the action registry and the toast queue), then runs every task's registration. Settings,
+/// localization, theme and keymap come from [`start`], which calls this once per app.
 pub fn init(cx: &mut App) {
     cx.set_global(PendingChord::default());
+    shell::install_globals(cx);
     // registrations (append-only)
 }
 
@@ -33,6 +38,8 @@ mod tests {
             init(cx);
             menus::rebuild(cx);
             assert_eq!(cx.global::<PendingChord>(), &PendingChord(None));
+            assert!(cx.has_global::<shell::TabContentRegistry>());
+            assert!(cx.has_global::<shell::ShellHooks>());
         });
     }
 }
