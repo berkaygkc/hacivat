@@ -21,6 +21,7 @@ jobs:
   build:
     name: build-test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -43,17 +44,45 @@ jobs:
             libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libvulkan-dev mesa-vulkan-drivers libxcb1-dev xvfb
 
+      # The runner's default Xcode may predate `-downloadComponent` (exit 64,
+      # "invalid option"); select the newest installed Xcode first.
+      - name: Select newest Xcode
+        if: runner.os == 'macOS'
+        run: |
+          xcode="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+          if [ -z "$xcode" ]; then
+            echo "::error::no /Applications/Xcode_*.app on this runner"
+            exit 1
+          fi
+          echo "selecting $xcode"
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+
+      # Xcode 26+ ships the Metal compiler as a separate component. Download it
+      # only when this xcodebuild supports that; then insist the compiler exists,
+      # so a missing toolchain fails here and not deep inside the GPUI build.
       - name: macOS Metal Toolchain
         if: runner.os == 'macOS'
-        run: xcodebuild -downloadComponent MetalToolchain
+        run: |
+          if xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            echo "Metal compiler already present"
+          elif xcodebuild -help 2>&1 | grep -q -- '-downloadComponent'; then
+            xcodebuild -downloadComponent MetalToolchain
+          else
+            echo "xcodebuild has no -downloadComponent; relying on the bundled Metal compiler"
+          fi
+          if ! xcrun -sdk macosx metal --version; then
+            echo "::error::Metal compiler (xcrun metal) is missing after toolchain setup"
+            exit 1
+          fi
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --locked
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Token staleness check
         run: cargo xtask tokens --check
@@ -64,6 +93,7 @@ jobs:
   deny:
     name: cargo-deny
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # deny.toml [graph] targets cover macOS, Windows and Linux.
@@ -75,6 +105,7 @@ jobs:
     name: bench (regression signal only)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -93,22 +124,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build spikes
-        run: cargo build --release -p spike-grid -p spike-editor
+        run: cargo build --release --locked -p spike-grid -p spike-editor
 
       - name: Generate B3 fixture
         run: cargo xtask gen-sql --lines 50000 --long-line 100000 --out target/fixtures/b3-50k.sql
 
       - name: Bench spike-grid fling (software rendering under a virtual display)
-        run: xvfb-run -a cargo run -p spike-grid --release -- --bench fling
+        run: xvfb-run -a cargo run --locked -p spike-grid --release -- --bench fling
 
       - name: Bench spike-editor typing
-        run: xvfb-run -a cargo run -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench typing
+        run: xvfb-run -a cargo run --locked -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench typing
 
       - name: Bench spike-editor typing-long-line
-        run: xvfb-run -a cargo run -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench typing-long-line
+        run: xvfb-run -a cargo run --locked -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench typing-long-line
 
       - name: Bench spike-editor completion
-        run: xvfb-run -a cargo run -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench completion
+        run: xvfb-run -a cargo run --locked -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench completion
 
       - name: Upload bench JSON (regression signal only, not authoritative)
         uses: actions/upload-artifact@v4
