@@ -5,6 +5,7 @@
 #
 # Env (all optional; nothing is ever written into the repo):
 #   APPLE_SIGNING_IDENTITY   codesign identity (default: the first Developer ID Application in the keychain)
+#   REQUIRE_NOTARIZATION     1 makes a missing/failing notary profile fatal (default: 1 when RELEASE=1, else 0)
 #   NOTARY_PROFILE           notarytool keychain profile (default: hacivat-notary)
 #   UPDATE_KEY               minisign secret key (default: ~/.hacivat-keys/update.key)
 # Output: target/packager/<version>/ (.dmg, .app.tar.gz + .minisig)
@@ -33,12 +34,18 @@ CFG="$ROOT/packaging/.Packager.generated.toml"   # git-ignored; holds the identi
 trap 'rm -f "$CFG"' EXIT
 sed -e "s/@VERSION@/$VERSION/" -e "s/@SIGNING_IDENTITY@/$IDENT/" packaging/Packager.toml > "$CFG"
 
+REQUIRE_NOTARIZATION="${REQUIRE_NOTARIZATION:-${RELEASE:-0}}"   # RELEASE=1 implies it
 NOTARIZE=0
-if xcrun notarytool history --keychain-profile "$PROFILE" >/dev/null 2>&1; then
+if PROBE_ERR="$(xcrun notarytool history --keychain-profile "$PROFILE" 2>&1 >/dev/null)"; then
   NOTARIZE=1
   export APPLE_KEYCHAIN_PROFILE="$PROFILE"   # cargo-packager then notarizes + staples the .app
+elif [ "$REQUIRE_NOTARIZATION" = 1 ]; then
+  echo "FATAL: notarization required but notarytool profile '$PROFILE' is unusable:" >&2
+  echo "$PROBE_ERR" >&2
+  exit 1
 else
-  echo "WARNING: notarytool profile '$PROFILE' missing: building signed but NOT notarized" >&2
+  echo "WARNING: notarytool profile '$PROFILE' unusable: building signed but NOT notarized:" >&2
+  echo "$PROBE_ERR" >&2
 fi
 cargo packager -c "$CFG" --formats app,dmg --out-dir "$OUT"
 
