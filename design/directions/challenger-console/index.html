@@ -1,0 +1,1049 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1440, initial-scale=1">
+<title>Hacivat Graphite Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Fragment+Mono:ital@0;1&display=block" rel="stylesheet">
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<style>
+/* ───────────────────────── Tokens ───────────────────────── */
+:root, :root[data-theme="dark"] {
+  --ground:   #16181D;
+  --panel:    #1E2127;
+  --gutter:   #1A1D22;
+  --raised:   #252931;
+  --hover:    #23272E;
+  --seam:     #2A2E36;
+  --seam-2:   #363B45;
+  --seam-soft:#23262D;
+  --mark:     #535A66;
+  --text:     #C9D1D9;
+  --text-2:   #8B949E;
+  --text-3:   #687180;
+  --on-accent:#10141C;
+
+  --blue:   #7AA2F7;
+  --blue-a: rgba(122,162,247,.12);
+  --blue-a2:rgba(122,162,247,.22);
+  --red:    #E06C75;
+  --red-a:  rgba(224,108,117,.13);
+  --red-line: rgba(224,108,117,.55);
+  --green:  #98C379;
+  --green-a:rgba(152,195,121,.12);
+  --amber:  #E5C07B;
+  --amber-a:rgba(229,192,123,.13);
+
+  --syn-kw:  #B4A7F2;
+  --syn-fn:  #7DCFDB;
+  --syn-str: #98C379;
+  --syn-num: #E5C07B;
+  --syn-com: #687180;
+  --syn-op:  #8B949E;
+  --syn-id:  #C9D1D9;
+  --syn-al:  #DCE2E9;
+
+  --shadow-pop: 0 10px 28px rgba(0,0,0,.34), 0 1px 2px rgba(0,0,0,.30);
+  --tl-close:#FF5F57; --tl-min:#FEBC2E; --tl-max:#28C840;
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --ground:   #DCDFE5;
+  --panel:    #F1F2F4;
+  --gutter:   #E9EBEE;
+  --raised:   #FBFBFC;
+  --hover:    #E6E8EC;
+  --seam:     #C5CAD3;
+  --seam-2:   #B1B7C2;
+  --seam-soft:#E1E4E8;
+  --mark:     #8C94A0;
+  --text:     #1A1E24;
+  --text-2:   #545D69;
+  --text-3:   #78808C;
+  --on-accent:#FFFFFF;
+
+  --blue:   #3A62C9;
+  --blue-a: rgba(58,98,201,.10);
+  --blue-a2:rgba(58,98,201,.18);
+  --red:    #C0354B;
+  --red-a:  rgba(192,53,75,.09);
+  --red-line: rgba(192,53,75,.55);
+  --green:  #3B7A2A;
+  --green-a:rgba(59,122,42,.10);
+  --amber:  #8E6300;
+  --amber-a:rgba(196,140,20,.14);
+
+  --syn-kw:  #6A4FC4;
+  --syn-fn:  #0D7486;
+  --syn-str: #3B7A2A;
+  --syn-num: #985B00;
+  --syn-com: #858D99;
+  --syn-op:  #5F6873;
+  --syn-id:  #1A1E24;
+  --syn-al:  #0F1217;
+
+  --shadow-pop: 0 10px 26px rgba(28,34,44,.16), 0 1px 2px rgba(28,34,44,.14);
+  color-scheme: light;
+}
+
+/* ───────────────────────── Base ───────────────────────── */
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--ground);
+  color: var(--text);
+  font: 400 13px/1.35 "Source Sans 3", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+::selection { background: var(--blue-a2); color: inherit; }
+button { font: inherit; color: inherit; }
+input { font: inherit; color: inherit; caret-color: var(--blue); }
+.mono { font-family: "Fragment Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.sc { font-variant-caps: all-small-caps; letter-spacing: .075em; font-weight: 600; }
+svg.lucide { width: 14px; height: 14px; stroke-width: 1.6; flex: none; display: block; }
+.i12 svg.lucide, svg.lucide.i12 { width: 12px; height: 12px; }
+.i16 svg.lucide { width: 16px; height: 16px; }
+:focus { outline: none; }
+:focus-visible { outline: 1px solid var(--blue); outline-offset: 1px; }
+
+kbd {
+  font: 400 10.5px/1 "Fragment Mono", monospace;
+  color: var(--text-3);
+  border: 1px solid var(--seam);
+  border-radius: 3px;
+  padding: 2px 4px 2px;
+  display: inline-flex; align-items: center; height: 16px;
+  background: transparent;
+}
+
+/* Swatches: state-only colour. Only production carries hue. */
+.env { width: 7px; height: 7px; border-radius: 1.5px; flex: none; display: inline-block; }
+.env.prod { background: var(--red); }
+.env.stg  { box-shadow: inset 0 0 0 1px var(--text-2); }
+.env.loc  { box-shadow: inset 0 0 0 1px var(--text-3); border-radius: 50%; }
+
+/* ───────────────────────── Window ───────────────────────── */
+.win {
+  position: relative; width: 100vw; height: 100vh;
+  display: grid; grid-template-rows: 38px 1fr 24px;
+  background: var(--ground);
+}
+
+/* Title / unified toolbar */
+.titlebar {
+  display: flex; align-items: center; gap: 0;
+  padding: 0 10px 0 14px;
+  border-bottom: 1px solid var(--seam);
+  background: var(--ground);
+  user-select: none;
+  white-space: nowrap;
+}
+.lights { display: flex; gap: 8px; margin-right: 18px; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; display: block; box-shadow: inset 0 0 0 .5px rgba(0,0,0,.25); }
+.lights i:nth-child(1){ background: var(--tl-close);} .lights i:nth-child(2){ background: var(--tl-min);} .lights i:nth-child(3){ background: var(--tl-max);}
+.brand { display: flex; align-items: center; gap: 8px; color: var(--text); padding-right: 14px; }
+.brand .word { font-size: 14.5px; letter-spacing: .09em; }
+.mark { width: 15px; height: 15px; display: block; }
+.vsep { width: 1px; height: 18px; background: var(--seam); flex: none; }
+
+.switcher {
+  display: flex; align-items: center; gap: 8px; height: 26px; margin-left: 12px;
+  padding: 0 8px 0 9px; border: 1px solid var(--seam-2); border-radius: 5px;
+  background: var(--panel); cursor: pointer;
+}
+.switcher:hover { background: var(--hover); }
+.switcher .name { font-weight: 600; color: var(--text); }
+.switcher .dim { color: var(--text-2); }
+.switcher .ro { display: flex; align-items: center; gap: 4px; color: var(--text-2); }
+.switcher .dir { display: flex; align-items: center; gap: 4px; color: var(--text-2); }
+.switcher .dir svg { color: var(--green); }
+.switcher .prodtag { color: var(--red); font-size: 13px; }
+.switcher .vsep { height: 14px; }
+
+.palette {
+  margin: 0 auto; width: 320px; height: 26px;
+  display: flex; align-items: center; gap: 8px; padding: 0 6px 0 9px;
+  border: 1px solid var(--seam); border-radius: 5px; color: var(--text-3);
+  background: transparent;
+}
+.palette span { flex: 1; text-align: left; }
+.tb-right { display: flex; align-items: center; gap: 8px; }
+.seg { display: flex; height: 26px; border: 1px solid var(--seam-2); border-radius: 5px; overflow: hidden; }
+.seg button { border: 0; background: transparent; padding: 0 10px; color: var(--text-2); cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.seg button + button { border-left: 1px solid var(--seam-2); }
+.seg button[aria-pressed="true"] { background: var(--raised); color: var(--text); }
+.seg button:hover { color: var(--text); }
+.tbtn { height: 26px; min-width: 26px; padding: 0 7px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--seam-2); border-radius: 5px; background: transparent; color: var(--text-2); cursor: pointer; }
+.tbtn:hover { color: var(--text); background: var(--hover); }
+
+/* Tiles */
+.tiles {
+  position: relative;
+  display: grid; grid-template-columns: 276px 1fr; gap: 1px;
+  background: var(--seam);
+  min-height: 0;
+}
+.col { display: grid; gap: 1px; min-height: 0; background: var(--seam); }
+.col.left { grid-template-rows: 1fr 205px; }
+.col.center { grid-template-rows: 330px 1fr; }
+.panel { background: var(--panel); min-height: 0; min-width: 0; display: flex; flex-direction: column; position: relative; overflow: hidden; }
+
+/* registration marks at seam junctions */
+.reg { position: absolute; width: 9px; height: 9px; pointer-events: none; z-index: 5; transform: translate(-4px,-4px); }
+.reg::before, .reg::after { content: ""; position: absolute; background: var(--mark); }
+.reg::before { left: 4px; top: 0; width: 1px; height: 9px; }
+.reg::after { top: 4px; left: 0; height: 1px; width: 9px; }
+
+/* Panel header (small caps) */
+.ph {
+  height: 30px; flex: none; display: flex; align-items: center; gap: 10px;
+  padding: 0 10px 0 12px; border-bottom: 1px solid var(--seam);
+  white-space: nowrap;
+}
+.ph .t { color: var(--text-2); font-size: 13.5px; }
+.ph .meta { color: var(--text-3); font-size: 12px; }
+.ph .grow { flex: 1; }
+
+/* ───────────────────────── Explorer ───────────────────────── */
+.xfilter { display: flex; align-items: center; gap: 7px; height: 28px; margin: 8px 8px 4px; padding: 0 6px 0 8px; border: 1px solid var(--seam); border-radius: 4px; color: var(--text-3); }
+.xfilter input { flex: 1; min-width: 0; border: 0; background: transparent; outline: none; font-size: 12.5px; }
+.xfilter input::placeholder { color: var(--text-3); }
+.tree { padding: 2px 0 8px; overflow: hidden; flex: 1; }
+.grp { height: 26px; display: flex; align-items: center; gap: 7px; padding: 6px 10px 0 12px; color: var(--text-3); font-size: 13px; }
+.grp .grow { flex: 1; height: 1px; background: var(--seam-soft); }
+.grp .n { font-size: 11px; color: var(--text-3); }
+.row {
+  height: 23px; display: flex; align-items: center; gap: 6px; padding-right: 10px;
+  cursor: default; white-space: nowrap; color: var(--text); position: relative;
+}
+.row:hover { background: var(--hover); }
+.row.sel { background: var(--blue-a); }
+.row.sel::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--blue); }
+.row .chev { width: 12px; color: var(--text-3); display: flex; justify-content: center; }
+.row .ic { color: var(--text-2); }
+.row.sel .ic { color: var(--blue); }
+.row .lbl { overflow: hidden; text-overflow: ellipsis; }
+.row .lbl.strong { font-weight: 600; }
+.row .lbl.dim { color: var(--text-2); }
+.row .grow { flex: 1; }
+.row .meta { color: var(--text-3); font-size: 11px; }
+.row .cnt { color: var(--text-3); font-size: 11.5px; }
+.row .flags { display: flex; align-items: center; gap: 5px; color: var(--text-2); }
+.row .flags .p2p { color: var(--green); }
+
+/* connection sheet */
+.sheet { padding: 6px 0 0; }
+.kv { display: grid; grid-template-columns: 92px 1fr; align-items: center; height: 22px; padding: 0 12px; column-gap: 10px; font-size: 12.5px; white-space: nowrap; }
+.kv dt { color: var(--text-3); margin: 0; overflow: hidden; text-overflow: ellipsis; }
+.kv dd { margin: 0; display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.kv dd .mono { font-size: 11.5px; }
+.kv .r { color: var(--red); font-weight: 600; }
+.kv .g { color: var(--green); }
+.kv .d { color: var(--text-2); }
+
+/* ───────────────────────── Editor ───────────────────────── */
+.editor { border-top: 0; }
+.editor::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1px; background: var(--red); z-index: 3; }
+.tabs { display: flex; align-items: stretch; height: 100%; margin-left: 2px; }
+.tab {
+  display: flex; align-items: center; gap: 7px; padding: 0 12px; height: 30px;
+  color: var(--text-2); border-right: 1px solid var(--seam); cursor: pointer; font-size: 13px; position: relative;
+}
+.tab:first-child { border-left: 1px solid var(--seam); }
+.tab:hover { color: var(--text); background: var(--hover); }
+.tab.on { color: var(--text); background: var(--raised); }
+.tab.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; background: var(--raised); }
+.tab .mono { font-size: 12px; }
+.tab .x { color: var(--text-3); }
+.tab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-2); }
+.ph.edhdr { padding-right: 10px; gap: 12px; }
+
+.qbar {
+  height: 32px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 10px 0 12px;
+  border-bottom: 1px solid var(--seam); white-space: nowrap; background: var(--raised);
+}
+.btn {
+  height: 24px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px;
+  border: 1px solid var(--seam-2); border-radius: 4px; background: transparent; color: var(--text);
+  font-size: 12.5px; font-weight: 500; cursor: pointer; white-space: nowrap;
+}
+.btn:hover { background: var(--hover); }
+.btn .k { font: 400 10.5px "Fragment Mono", monospace; color: var(--text-3); }
+.btn.primary { background: var(--blue); border-color: var(--blue); color: var(--on-accent); font-weight: 600; }
+.btn.primary .k { color: var(--on-accent); opacity: .7; }
+.btn.primary:hover { filter: none; background: var(--blue); box-shadow: inset 0 0 0 1px rgba(255,255,255,.18); }
+.btn.ghost { border-color: transparent; color: var(--text-2); }
+.btn.ghost:hover { color: var(--text); }
+.btn.icon { padding: 0 6px; }
+.btn[disabled] { cursor: not-allowed; color: var(--text-3); border-color: var(--seam); background: transparent; }
+/* destructive: outline-only until focused, isolated by empty space */
+.btn.danger { color: var(--red); border-color: var(--red-line); background: transparent; }
+.btn.danger:hover, .btn.danger:focus-visible { background: var(--red); border-color: var(--red); color: var(--on-accent); outline: none; }
+.btn.danger[disabled] { color: var(--text-3); border-color: var(--seam); }
+.btn.danger[disabled]:hover { background: transparent; color: var(--text-3); border-color: var(--seam); }
+.void { display: flex; align-items: center; gap: 8px; margin-left: 32px; padding-left: 12px; border-left: 1px solid var(--seam); height: 20px; }
+
+.target { display: flex; align-items: center; gap: 7px; margin-left: 6px; padding: 0 9px; height: 24px; border-radius: 4px; background: var(--red-a); color: var(--red); font-size: 12.5px; }
+.target b { font-weight: 600; }
+.target .crumb { color: var(--text-2); }
+.target .crumb .mono { font-size: 11.5px; color: var(--text); }
+.chip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border: 1px solid var(--seam); border-radius: 4px; color: var(--text-2); font-size: 12.5px; }
+.chip.g svg { color: var(--green); }
+
+.code {
+  position: relative; flex: 1; display: grid; grid-template-columns: 58px 1fr; min-height: 0;
+  font: 400 12.5px/18px "Fragment Mono", ui-monospace, monospace;
+  padding-top: 6px;
+}
+.gut { position: relative; color: var(--text-3); text-align: right; user-select: none; }
+.gut .ln { height: 18px; padding-right: 14px; position: relative; }
+.gut .ln.cur { color: var(--text); }
+.gut .ok { position: absolute; left: 8px; top: 3px; color: var(--green); }
+.gut .rng { position: absolute; left: 4px; width: 1px; background: var(--green); }
+.gut .rng.cur { background: var(--blue); }
+.lines { position: relative; padding-left: 8px; color: var(--syn-id); }
+.lines .l { height: 18px; position: relative; white-space: pre; }
+.lines .l.band::before { content: ""; position: absolute; left: -8px; right: 0; top: 0; bottom: 0; background: var(--blue-a); opacity: .55; }
+.lines .l > span:not(.eol) { position: relative; }
+.k  { color: var(--syn-kw); }
+.f  { color: var(--syn-fn); }
+.s  { color: var(--syn-str); }
+.n  { color: var(--syn-num); }
+.c  { color: var(--syn-com); font-style: italic; }
+.o  { color: var(--syn-op); }
+.al { color: var(--syn-al); }
+.inlay {
+  font: 500 10.5px/14px "Source Sans 3", sans-serif; color: var(--text-3);
+  background: var(--seam-soft); border-radius: 3px; padding: 0 4px; margin-left: 10px; vertical-align: 1px;
+}
+.eol { position: absolute; right: 14px; top: 0; height: 18px; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); }
+.eol .g { color: var(--green); display: flex; align-items: center; gap: 4px; }
+.anchor { position: relative; }
+.caret { display: inline-block; width: 2px; height: 16px; background: var(--blue); vertical-align: -3px; margin-left: 0; }
+
+/* completion popup — expands along Y only */
+.cmp {
+  position: absolute; left: -4px; bottom: 21px; z-index: 20;
+  display: grid; grid-template-columns: 300px 232px;
+  background: var(--raised); border: 1px solid var(--seam-2); border-radius: 6px;
+  box-shadow: var(--shadow-pop);
+  font-family: "Source Sans 3", sans-serif; white-space: nowrap;
+  transform-origin: bottom;
+  overflow: hidden;
+}
+.cmp.anim { animation: growY 170ms cubic-bezier(.16,1,.3,1); }
+@keyframes growY { from { max-height: 24px; } to { max-height: 220px; } }
+.cmp ul { list-style: none; margin: 0; padding: 4px; border-right: 1px solid var(--seam); }
+.cmp li { height: 23px; display: grid; grid-template-columns: 18px 1fr auto; align-items: center; gap: 6px; padding: 0 7px 0 5px; border-radius: 3px; cursor: pointer; }
+.cmp li:hover { background: var(--hover); }
+.cmp li.on { background: var(--blue-a2); }
+.cmp li .kind { color: var(--text-2); display: flex; justify-content: center; }
+.cmp li.on .kind { color: var(--blue); }
+.cmp li .nm { font: 400 12.5px "Fragment Mono", monospace; color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+.cmp li .nm b { color: var(--blue); font-weight: 400; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+.cmp li .ty { font-size: 11.5px; color: var(--text-3); }
+.cmp li.out .nm, .cmp li.out .kind { color: var(--text-3); }
+.cmp li.out .ty { font-style: italic; }
+.cmp .det { padding: 9px 12px 8px; display: flex; flex-direction: column; gap: 0; font-size: 12px; }
+.cmp .det .h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.cmp .det .h .sc { color: var(--text-3); font-size: 12px; }
+.cmp .det .h .mono { font-size: 12.5px; color: var(--text); }
+.cmp .det .dk { display: grid; grid-template-columns: 78px 1fr; height: 19px; align-items: center; }
+.cmp .det .dk span:first-child { color: var(--text-3); }
+.cmp .det .dk .mono { font-size: 11.5px; }
+.cmp .det .dk .fk { display: flex; align-items: center; gap: 5px; color: var(--blue); }
+.cmp .det .note { color: var(--text-2); font-size: 12px; margin-top: 4px; white-space: normal; line-height: 1.3; }
+.cmp .foot { grid-column: 1 / -1; height: 24px; border-top: 1px solid var(--seam); display: flex; align-items: center; gap: 12px; padding: 0 10px; color: var(--text-3); font-size: 11.5px; }
+.cmp .foot span { display: flex; align-items: center; gap: 5px; }
+
+/* ───────────────────────── Results ───────────────────────── */
+.rtabs { display: flex; height: 30px; }
+.rtab { display: flex; align-items: center; gap: 7px; padding: 0 12px; color: var(--text-2); cursor: pointer; border-right: 1px solid var(--seam); position: relative; font-size: 13px; }
+.rtab:first-child { border-left: 1px solid var(--seam); }
+.rtab:hover { color: var(--text); background: var(--hover); }
+.rtab.on { color: var(--text); background: var(--raised); }
+.rtab.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; background: var(--raised); }
+.rtab .stamp { font-size: 11.5px; color: var(--amber); display: inline-flex; align-items: center; gap: 4px; }
+.rtab .stamp i { width: 6px; height: 6px; border-radius: 1px; background: var(--amber); display: block; }
+.rmeta { color: var(--text-3); font-size: 12px; display: flex; gap: 10px; align-items: center; }
+.rmeta .mono { font-size: 11px; }
+.rmeta .selsum { color: var(--text-2); }
+.rmeta .selsum b { color: var(--text); font-weight: 600; }
+
+.gtool {
+  height: 34px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 10px 0 12px;
+  border-bottom: 1px solid var(--seam); white-space: nowrap; background: var(--raised);
+}
+.where { flex: 0 1 300px; min-width: 180px; height: 24px; display: flex; align-items: center; gap: 7px; padding: 0 8px; border: 1px solid var(--seam-2); border-radius: 4px; background: var(--panel); color: var(--text-3); }
+.where .kw { font: 400 11.5px "Fragment Mono", monospace; color: var(--syn-kw); }
+.where input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font: 400 12px "Fragment Mono", monospace; }
+.where input::placeholder { color: var(--text-3); }
+.where:focus-within { border-color: var(--blue); }
+.pager { display: flex; align-items: center; gap: 2px; margin-left: 6px; color: var(--text-2); }
+.pager .pg { padding: 0 6px; font-size: 12.5px; color: var(--text); }
+.gsep { width: 1px; height: 16px; background: var(--seam); margin: 0 4px; }
+.gtool .spacer { flex: 1; }
+.lockchip { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12.5px; }
+.lockchip svg { color: var(--red); }
+.pend { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--amber); }
+.pend i { width: 7px; height: 7px; border-radius: 1.5px; background: var(--amber); display: block; }
+.pend .d { color: var(--text-2); }
+
+.gridwrap { position: relative; flex: 1; overflow: hidden; min-height: 0; }
+.rview { position: absolute; inset: 0; display: none; }
+.rview.on { display: block; }
+table.grid { border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 13px; }
+.grid th, .grid td { height: 21px; padding: 0 10px; border-right: 1px solid var(--seam-soft); border-bottom: 1px solid var(--seam-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.grid th {
+  height: 38px; text-align: left; font-weight: 600; color: var(--text); background: var(--panel);
+  border-bottom: 1px solid var(--seam-2); border-right: 1px solid var(--seam); vertical-align: middle; padding-top: 1px;
+}
+.grid th .hn { display: flex; align-items: center; gap: 6px; line-height: 15px; }
+.grid th .ht { display: block; font: 400 10.5px/13px "Fragment Mono", monospace; color: var(--text-3); margin-top: 1px; }
+.grid th.num .hn { justify-content: flex-end; }
+.grid th.num .ht { text-align: right; }
+.grid th .sort { color: var(--blue); display: flex; align-items: center; gap: 1px; font: 400 10px "Fragment Mono", monospace; }
+.grid th.rn, .grid td.rn { width: 46px; text-align: right; color: var(--text-3); background: var(--gutter); font-size: 11.5px; padding-right: 9px; border-right: 1px solid var(--seam); }
+.grid th.fill, .grid td.fill { border-right: 0; width: auto; }
+.grid td.num { text-align: right; }
+.grid tr:hover td { background: var(--hover); }
+.grid tr:hover td.rn { color: var(--text-2); }
+.grid td:hover:not(.rn):not(.fill) { box-shadow: inset 0 0 0 1px var(--seam-2); }
+.grid td.insel { background: var(--blue-a) !important; }
+.grid td.act { background: var(--blue-a2) !important; }
+.grid tr.selrow td.rn { color: var(--blue); }
+.null { font-variant-caps: all-small-caps; letter-spacing: .08em; color: var(--text-3); font-weight: 600; font-size: 13px; }
+.selbox { position: absolute; border: 1px solid var(--blue); pointer-events: none; z-index: 3; }
+.selbox::after { content: ""; position: absolute; right: -3px; bottom: -3px; width: 5px; height: 5px; background: var(--blue); border: 1px solid var(--panel); }
+.grid td.pending { background: var(--amber-a) !important; box-shadow: inset 0 0 0 1px var(--amber); color: var(--text); }
+.grid td.pending .old { color: var(--text-3); text-decoration: line-through; margin-right: 6px; }
+.grid td.rn.pend-rn { color: var(--amber); position: relative; }
+.grid td.rn.pend-rn::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--amber); }
+.grid .stampcell { font-size: 11px; color: var(--amber); }
+.grid td .dim { color: var(--text-2); }
+.grid td.ts { font: 400 11.5px "Fragment Mono", monospace; color: var(--text-2); }
+
+/* ───────────────────────── Status bar ───────────────────────── */
+.status {
+  display: flex; align-items: stretch; border-top: 1px solid var(--seam); background: var(--ground);
+  font-size: 12px; color: var(--text-2); white-space: nowrap;
+}
+.status .seg2 { display: flex; align-items: center; gap: 6px; padding: 0 10px; border-right: 1px solid var(--seam); }
+.status .seg2.r { border-right: 0; border-left: 1px solid var(--seam); }
+.status .envseg { background: var(--red-a); color: var(--red); font-weight: 600; padding-left: 12px; }
+.status .envseg .env { margin-right: 1px; }
+.status .g svg { color: var(--green); }
+.status .grow { flex: 1; }
+.status .mono { font-size: 11px; }
+.status button.seg2 { background: transparent; border-top: 0; border-bottom: 0; border-right: 0; cursor: pointer; color: var(--text-2); }
+.status button.seg2:hover { color: var(--text); background: var(--hover); }
+.status .lang b { color: var(--text); font-weight: 600; }
+
+/* ───────────────────────── Splash ───────────────────────── */
+.splash { display: none; position: relative; grid-row: 2 / 4; background: var(--ground); overflow: hidden; }
+.win[data-view="splash"] .tiles, .win[data-view="splash"] .status { display: none; }
+.win[data-view="splash"] .splash { display: block; }
+.ghostline { position: absolute; background: var(--seam); opacity: .55; }
+.splash .reg::before, .splash .reg::after { background: var(--seam-2); }
+.boot {
+  position: absolute; left: 50%; top: 286px; width: 640px; margin-left: -320px;
+  background: var(--panel); border: 1px solid var(--seam-2); border-radius: 6px;
+  overflow: hidden; height: 31px;
+  transition: height 260ms cubic-bezier(.16,1,.3,1);
+}
+.boot .ph { border-bottom-color: var(--seam); }
+.boot .ph .t { color: var(--text); }
+.boot .ph .clock { font: 400 11.5px "Fragment Mono", monospace; color: var(--text-2); }
+.boot .ph .to { display: flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 12.5px; }
+.boot .ph .to .mono { color: var(--text); font-size: 12px; }
+.log { padding: 6px 0 10px; font: 400 12px/22px "Fragment Mono", monospace; }
+.ll { display: grid; grid-template-columns: 70px 20px 1fr auto; align-items: center; height: 22px; padding: 0 14px 0 12px; opacity: 0; }
+.ll.shown { opacity: 1; transition: opacity 140ms ease-out; }
+.boot[style*="transition: none"] .ll { transition: none; }
+.ll .ts { color: var(--text-3); font-size: 11px; }
+.ll .st { display: flex; align-items: center; justify-content: flex-start; }
+.ll .st .ok { color: var(--green); display: none; }
+.ll .st .run { width: 7px; height: 7px; border-radius: 1.5px; background: var(--blue); display: block; animation: blink 900ms steps(2, jump-none) infinite; }
+.ll.done .st .ok { display: block; }
+.ll.done .st .run { display: none; }
+.ll .msg { color: var(--text); font-family: "Source Sans 3", sans-serif; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; gap: 8px; align-items: center; }
+.ll .msg .sub { color: var(--text-3); font-family: "Fragment Mono", monospace; font-size: 11px; }
+.ll .msg .g { color: var(--green); }
+.ll .dur { color: var(--text-2); font-size: 11.5px; text-align: right; min-width: 70px; }
+.ll.done .dur { color: var(--text); }
+.ll .bar { width: 120px; height: 3px; background: var(--seam); position: relative; display: inline-block; vertical-align: middle; border-radius: 1px; }
+.ll .bar i { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; background: var(--blue); border-radius: 1px; }
+.ll.done .bar i { background: var(--green); }
+.ll.trust .msg { gap: 6px; }
+.ll.trust .t1 { color: var(--red); font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.ll.trust .t2, .ll.trust .t3 { color: var(--text-2); display: flex; align-items: center; gap: 5px; }
+.ll.trust .t3 svg { color: var(--green); }
+.ll.trust .t2 svg { color: var(--red); }
+.ll .cursor { width: 7px; height: 14px; background: var(--text-2); display: inline-block; animation: blink 1s steps(2, jump-none) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.progseam { position: absolute; left: 0; bottom: 0; height: 1px; width: 0; background: var(--blue); transition: width 300ms cubic-bezier(.16,1,.3,1); }
+.boot.ready .progseam { background: var(--green); }
+.bootfoot { position: absolute; left: 50%; width: 640px; margin-left: -320px; display: flex; justify-content: space-between; color: var(--text-3); font-size: 12px; }
+.bootfoot span { display: flex; align-items: center; gap: 6px; }
+.bootfoot .lnk { color: var(--text-2); cursor: pointer; background: transparent; border: 0; display: flex; gap: 6px; align-items: center; padding: 0; }
+.bootfoot .lnk:hover { color: var(--text); }
+.bootmark { position: absolute; left: 50%; top: 214px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 10px; color: var(--text); }
+.bootmark .mark { width: 26px; height: 26px; }
+.bootmark .word { font-size: 20px; letter-spacing: .12em; }
+.bootmark .ver { color: var(--text-3); font-size: 11px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .boot, .ll.shown, .progseam { transition: none !important; }
+  .ll .st .run, .ll .cursor { animation: none; }
+  .cmp.anim { animation: none; }
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <!-- Hacivat mark: a screen (perde) split by a single seam, two figures either side -->
+    <symbol id="hv-mark" viewBox="0 0 16 16">
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      <line x1="8" y1="2.5" x2="8" y2="13.5" stroke="currentColor" stroke-width="1"/>
+      <rect x="3.5" y="5.5" width="3" height="5" rx=".6" fill="currentColor" opacity=".9"/>
+      <rect x="9.5" y="7.5" width="3" height="3" rx=".6" fill="none" stroke="currentColor" stroke-width="1"/>
+    </symbol>
+  </defs>
+</svg>
+
+<div class="win" id="win" data-view="workspace">
+
+  <!-- ═════════════ Title bar ═════════════ -->
+  <header class="titlebar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="brand"><svg class="mark"><use href="#hv-mark"/></svg><span class="word sc" lang="en">Hacivat</span></div>
+    <span class="vsep"></span>
+    <button class="switcher" title="Switch connection">
+      <span class="env prod"></span>
+      <span class="name">orders-prod</span>
+      <span class="prodtag sc" data-i="env.production">production</span>
+      <span class="vsep"></span>
+      <span class="ro"><i data-lucide="lock" class="i12"></i><span data-i="acc.ro">read-only</span></span>
+      <span class="dir"><i data-lucide="arrow-left-right" class="i12"></i><span data-i="path.directShort">Direct</span></span>
+      <span class="vsep"></span>
+      <span class="dim">PostgreSQL 16</span>
+      <i data-lucide="chevrons-up-down" class="i12" style="color:var(--text-3)"></i>
+    </button>
+    <button class="palette tbtn" style="margin:0 auto; width:300px; justify-content:flex-start;">
+      <i data-lucide="search" class="i12"></i><span data-i="palette">Go to anything</span><kbd>⌘K</kbd>
+    </button>
+    <div class="tb-right">
+      <div class="seg" role="group">
+        <button id="vWork" aria-pressed="true"><span data-i="view.workspace">Workspace</span></button>
+        <button id="vSplash" aria-pressed="false"><span data-i="view.splash">Splash</span><kbd>S</kbd></button>
+      </div>
+      <button class="tbtn" id="themeBtn" title="Theme (T)"><i data-lucide="moon" class="i12" id="themeIco"></i><kbd>T</kbd></button>
+      <button class="tbtn" id="langBtn" title="Language (L)"><span class="mono" style="font-size:11px" id="langLbl">EN</span><kbd>L</kbd></button>
+    </div>
+  </header>
+
+  <!-- ═════════════ Tiles ═════════════ -->
+  <main class="tiles" id="tiles">
+    <div class="col left">
+      <!-- Explorer -->
+      <section class="panel">
+        <div class="ph"><span class="t sc" data-i="explorer">Explorer</span><span class="grow"></span><span class="meta mono">6</span><kbd>⌘1</kbd></div>
+        <div class="xfilter"><i data-lucide="search" class="i12"></i><input data-i-ph="filterConn" placeholder="Filter connections"><kbd>⌘F</kbd></div>
+        <div class="tree" id="tree"></div>
+      </section>
+      <!-- Connection sheet -->
+      <section class="panel">
+        <div class="ph"><span class="t sc" data-i="connection">Connection</span><span class="meta mono" style="color:var(--text)">orders-prod</span><span class="grow"></span><kbd>⌘I</kbd></div>
+        <dl class="sheet" style="margin:0">
+          <div class="kv"><dt data-i="kv.env">Environment</dt><dd><span class="env prod"></span><span class="r" data-i="env.production">production</span></dd></div>
+          <div class="kv"><dt data-i="kv.access">Access</dt><dd><i data-lucide="lock" class="i12" style="color:var(--red)"></i><span data-i="acc.ro">read-only</span><span class="d mono">app_ro</span></dd></div>
+          <div class="kv"><dt data-i="kv.path">Path</dt><dd><i data-lucide="arrow-left-right" class="i12" style="color:var(--green)"></i><span data-i="path.direct">direct (P2P)</span><span class="d mono">18 ms</span></dd></div>
+          <div class="kv"><dt data-i="kv.agent">Agent</dt><dd><span class="mono">karagoz@eu-west-1a</span></dd></div>
+          <div class="kv"><dt data-i="kv.engine">Engine</dt><dd>PostgreSQL <span class="mono">16.4</span></dd></div>
+          <div class="kv"><dt data-i="kv.granted">Granted by</dt><dd>Perde · Acme</dd></div>
+          <div class="kv"><dt data-i="kv.audit">Audit</dt><dd><i data-lucide="shield-check" class="i12" style="color:var(--text-2)"></i><span class="d" data-i="audit.val">signed at agent</span></dd></div>
+        </dl>
+      </section>
+    </div>
+
+    <div class="col center">
+      <!-- Editor -->
+      <section class="panel editor">
+        <div class="ph edhdr">
+          <span class="t sc" data-i="editor">Editor</span>
+          <div class="tabs" id="etabs">
+            <div class="tab on"><i data-lucide="file-code-2" class="i12" style="color:var(--text-2)"></i><span class="mono">orders-prod.sql</span><span class="env prod" title="production"></span><i data-lucide="x" class="i12 x"></i></div>
+            <div class="tab"><i data-lucide="file-code-2" class="i12"></i><span class="mono">revenue-by-city.sql</span></div>
+            <div class="tab"><i data-lucide="file-code-2" class="i12"></i><span class="mono">scratch.sql</span><span class="dot" title="Unsaved"></span></div>
+          </div>
+          <span class="grow"></span>
+          <span class="meta"><span class="mono">2</span> <span data-i="statements">statements</span></span>
+          <kbd>⌘2</kbd>
+        </div>
+        <div class="qbar">
+          <button class="btn primary"><i data-lucide="play" class="i12"></i><span data-i="run">Run</span><span class="k">⌘↵</span></button>
+          <button class="btn"><i data-lucide="list-tree" class="i12"></i><span data-i="explain">Explain</span></button>
+          <button class="btn ghost"><i data-lucide="align-left" class="i12"></i><span data-i="format">Format</span></button>
+          <div class="target">
+            <span class="env prod"></span><b data-i="env.production">production</b>
+            <span class="crumb"><span class="mono">orders-prod</span> › <span class="mono">orders</span> › <span class="mono">public</span></span>
+          </div>
+          <span class="grow" style="flex:1"></span>
+          <span class="chip"><i data-lucide="lock" class="i12" style="color:var(--red)"></i><span data-i="acc.ro">read-only</span></span>
+          <span class="chip"><i data-lucide="git-commit-horizontal" class="i12"></i><span data-i="autocommit">Auto-commit</span></span>
+          <span class="chip"><span data-i="limit">Limit</span><span class="mono" style="font-size:11px;color:var(--text)">100</span></span>
+        </div>
+        <div class="code">
+          <div class="gut" id="gut"></div>
+          <div class="lines" id="lines">
+<div class="l"><span class="c">-- Top customers by revenue, last 30 days</span></div><div class="l"><span class="k">SELECT</span> c.full_name<span class="o">,</span><span class="eol"><span class="g"><i data-lucide="check" class="i12"></i><span data-i="executed">executed</span></span><span>42 ms</span><span>·</span><span>100 <span data-i="rowsWord">rows</span></span></span></div><div class="l">       c.city<span class="o">,</span></div><div class="l">       <span class="f">count</span><span class="o">(</span>o.id<span class="o">)</span>          <span class="k">AS</span> <span class="al">orders</span><span class="o">,</span><span class="inlay">bigint</span></div><div class="l">       <span class="f">sum</span><span class="o">(</span>oi.line_total<span class="o">)</span>   <span class="k">AS</span> <span class="al">revenue</span><span class="inlay">numeric</span></div><div class="l"><span class="k">FROM</span> customers c</div><div class="l"><span class="k">JOIN</span> orders o <span class="k">ON</span> o.customer_id <span class="o">=</span> c.id</div><div class="l"><span class="k">JOIN</span> order_items oi <span class="k">ON</span> oi.order_id <span class="o">=</span> o.id</div><div class="l"><span class="k">WHERE</span> o.ordered_at <span class="o">&gt;</span> <span class="f">now</span><span class="o">()</span> <span class="o">-</span> <span class="k">interval</span> <span class="s">'30 days'</span></div><div class="l"><span class="k">GROUP BY</span> c.full_name<span class="o">,</span> c.city</div><div class="l"><span class="k">ORDER BY</span> revenue <span class="k">DESC</span></div><div class="l"><span class="k">LIMIT</span> <span class="n">100</span><span class="o">;</span></div><div class="l"> </div><div class="l band"><span class="k">SELECT</span> <span class="o">*</span> <span class="k">FROM</span> orders <span class="k">WHERE</span> status <span class="o">=</span> <span class="s">'paid'</span> <span class="k">AND</span> <span class="anchor">c<span class="caret"></span><div class="cmp" id="cmp">
+  <ul id="cmpList">
+    <li class="on" data-k="customer_id"><span class="kind"><i data-lucide="columns-2" class="i12"></i></span><span class="nm"><b>c</b>ustomer_id</span><span class="ty mono">bigint · orders</span></li>
+    <li class="out" data-k="city"><span class="kind"><i data-lucide="columns-2" class="i12"></i></span><span class="nm"><b>c</b>ity</span><span class="ty" data-i="notInScope">not in scope</span></li>
+    <li data-k="cancelled_at"><span class="kind"><i data-lucide="columns-2" class="i12"></i></span><span class="nm"><b>c</b>ancelled_at</span><span class="ty mono">timestamptz · orders</span></li>
+    <li data-k="count"><span class="kind"><i data-lucide="square-function" class="i12"></i></span><span class="nm"><b>c</b>ount()</span><span class="ty" data-i="kind.function">function</span></li>
+    <li data-k="current_date"><span class="kind"><i data-lucide="hash" class="i12"></i></span><span class="nm"><b>c</b>urrent_date</span><span class="ty" data-i="kind.kwfn">keyword · function</span></li>
+    <li data-k="case"><span class="kind"><i data-lucide="brackets" class="i12"></i></span><span class="nm"><b>c</b>ase</span><span class="ty" data-i="kind.keyword">keyword</span></li>
+  </ul>
+  <div class="det" id="cmpDet"></div>
+  <div class="foot"><span><kbd>↵</kbd><span data-i="hint.insert">insert</span></span><span><kbd>⇥</kbd><span data-i="hint.replace">replace</span></span><span><kbd>⌘.</kbd><span data-i="hint.docs">docs</span></span><span style="margin-left:auto" class="mono">6 / 41</span></div>
+</div></span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Results -->
+      <section class="panel">
+        <div class="ph" style="padding-left:12px;gap:12px">
+          <span class="t sc" data-i="results">Results</span>
+          <div class="rtabs" id="rtabs">
+            <div class="rtab on" data-r="r1"><i data-lucide="table-2" class="i12"></i><span data-i="result1">Result 1</span><span class="mono" style="font-size:11px;color:var(--text-3)">stmt 1</span></div>
+            <div class="rtab" data-r="r2"><i data-lucide="table-2" class="i12"></i><span class="mono" style="font-size:12px">orders</span><span class="env stg"></span><span data-i="env.staging" style="color:var(--text-2)">staging</span><span class="stamp"><i></i>1</span></div>
+          </div>
+          <span class="grow"></span>
+          <span class="rmeta" id="rmeta1"><span class="selsum"><span class="mono">3 × 2</span> · Σ revenue <b class="mono" style="font-size:11.5px">110190.85</b></span><span class="vsep" style="height:12px"></span><span class="mono">100 <span data-i="rowsWord">rows</span> · 42 ms</span></span>
+          <kbd>⌘3</kbd>
+        </div>
+
+        <!-- toolbar: Result 1 (production, read-only) -->
+        <div class="gtool" id="tool1">
+          <label class="where"><i data-lucide="filter" class="i12"></i><span class="kw">WHERE</span><input placeholder="city = 'İstanbul'"></label>
+          <div class="pager">
+            <button class="btn ghost icon" disabled><i data-lucide="chevron-left" class="i12"></i></button>
+            <span class="pg" data-i="page">1–100 of 2,481</span>
+            <button class="btn ghost icon"><i data-lucide="chevron-right" class="i12"></i></button>
+          </div>
+          <span class="gsep"></span>
+          <button class="btn ghost"><i data-lucide="sigma" class="i12"></i><span data-i="countRows">Count rows</span></button>
+          <button class="btn ghost icon" title="Copy"><i data-lucide="copy" class="i12"></i></button>
+          <button class="btn"><i data-lucide="download" class="i12"></i><span data-i="export">Export</span><i data-lucide="chevron-down" class="i12" style="color:var(--text-3)"></i></button>
+          <span class="spacer"></span>
+          <span class="lockchip"><i data-lucide="lock" class="i12"></i><span data-i="roNote">Editing disabled · production is read-only</span></span>
+          <div class="void"><button class="btn danger" disabled title="Read-only connection"><i data-lucide="trash-2" class="i12"></i><span data-i="deleteRows">Delete rows</span></button></div>
+        </div>
+        <!-- toolbar: orders (staging, read-write, pending edit) -->
+        <div class="gtool" id="tool2" style="display:none">
+          <label class="where"><i data-lucide="filter" class="i12"></i><span class="kw">WHERE</span><input placeholder="status = 'pending'"></label>
+          <div class="pager">
+            <button class="btn ghost icon" disabled><i data-lucide="chevron-left" class="i12"></i></button>
+            <span class="pg" data-i="page2">1–100 of 18,204</span>
+            <button class="btn ghost icon"><i data-lucide="chevron-right" class="i12"></i></button>
+          </div>
+          <span class="gsep"></span>
+          <button class="btn ghost"><i data-lucide="sigma" class="i12"></i><span data-i="countRows">Count rows</span></button>
+          <span class="spacer"></span>
+          <span class="pend"><i></i><span data-i="pending">1 pending change</span><span class="d">· <span data-i="notSubmitted">not submitted</span></span></span>
+          <button class="btn ghost"><i data-lucide="file-diff" class="i12"></i><span data-i="previewDml">Preview DML</span></button>
+          <button class="btn"><i data-lucide="undo-2" class="i12"></i><span data-i="discard">Discard</span></button>
+          <button class="btn primary"><i data-lucide="check" class="i12"></i><span data-i="submit">Submit</span><span class="k">⌘S</span></button>
+          <div class="void"><button class="btn danger"><i data-lucide="trash-2" class="i12"></i><span data-i="deleteRows">Delete rows</span></button></div>
+        </div>
+
+        <div class="gridwrap" id="gridwrap">
+          <div class="rview on" id="r1"></div>
+          <div class="rview" id="r2"></div>
+        </div>
+      </section>
+    </div>
+
+    <span class="reg" style="left:276.5px; top:0"></span>
+    <span class="reg" style="left:276.5px; top:330.5px"></span>
+    <span class="reg" style="left:276.5px; bottom:-4px; top:auto; transform:translate(-4px,0)"></span>
+    <span class="reg" id="regL" style="left:0; transform:translate(0,-4px)"></span>
+    <span class="reg" style="right:0; left:auto; top:330.5px; transform:translate(4px,-4px)"></span>
+  </main>
+
+  <!-- ═════════════ Status bar ═════════════ -->
+  <footer class="status">
+    <span class="seg2 envseg"><span class="env prod"></span><i data-lucide="lock" class="i12"></i><span data-i="status.env">production · read-only</span></span>
+    <span class="seg2 g"><i data-lucide="arrow-left-right" class="i12"></i><span data-i="path.directShort">Direct</span><span class="mono">18 ms</span><span style="color:var(--text-3)">· karagoz@eu-west-1a</span></span>
+    <span class="seg2"><i data-lucide="git-commit-horizontal" class="i12"></i><span data-i="autocommit">Auto-commit</span></span>
+    <span class="seg2"><span class="mono">100</span><span data-i="rowsWord">rows</span><span>·</span><span class="mono">42 ms</span></span>
+    <span class="grow"></span>
+    <span class="seg2 r"><span data-i="lncol">Ln 14, Col 49</span></span>
+    <span class="seg2 r mono">UTF-8</span>
+    <span class="seg2 r">PostgreSQL</span>
+    <button class="seg2 r lang" id="langBtn2"><i data-lucide="languages" class="i12"></i><span id="langLbl2"><b>EN</b> / TR</span></button>
+  </footer>
+
+  <!-- ═════════════ Splash ═════════════ -->
+  <section class="splash" id="splash">
+    <!-- ghost of the tiles that will be filled -->
+    <div class="ghostline" style="left:276px; top:0; bottom:24px; width:1px"></div>
+    <div class="ghostline" style="left:277px; right:0; top:330px; height:1px"></div>
+    <div class="ghostline" style="left:0; width:276px; bottom:229px; height:1px"></div>
+    <div class="ghostline" style="left:0; right:0; bottom:24px; height:1px"></div>
+    <span class="reg" style="left:276.5px; top:0"></span>
+    <span class="reg" style="left:276.5px; top:330.5px"></span>
+    <span class="reg" style="left:276.5px; top:633.5px"></span>
+
+    <div class="bootmark"><svg class="mark"><use href="#hv-mark"/></svg><span class="word sc" lang="en">Hacivat</span><span class="ver mono">0.1.0</span></div>
+
+    <div class="boot" id="boot">
+      <div class="ph">
+        <span class="t sc" data-i="sp.title">Opening</span>
+        <span class="to"><span class="env prod"></span><span class="mono">orders-prod</span><span data-i="sp.via">via Perde · Acme</span></span>
+        <span class="grow"></span>
+        <span class="clock" id="clock">0.000 s</span>
+      </div>
+      <div class="log" id="log">
+        <div class="ll" data-at="0"><span class="ts mono">+0.000</span><span class="st"><i data-lucide="check" class="i12 ok"></i><span class="run"></span></span><span class="msg"><span data-i="sp.s0">Workspace</span><span class="sub">acme · 6 connections</span></span><span class="dur mono">4 ms</span></div>
+        <div class="ll" data-at="0.004"><span class="ts mono">+0.004</span><span class="st"><i data-lucide="check" class="i12 ok"></i><span class="run"></span></span><span class="msg"><span data-i="sp.s1">Resolving agent karagoz@eu-west-1a</span></span><span class="dur mono">38 ms</span></div>
+        <div class="ll" data-at="0.042"><span class="ts mono">+0.042</span><span class="st"><i data-lucide="check" class="i12 ok"></i><span class="run"></span></span><span class="msg"><span data-i="sp.s2">Hole punching… direct path found</span><span class="sub">udp · rtt 18 ms</span></span><span class="dur mono">212 ms</span></div>
+        <div class="ll" data-at="0.254"><span class="ts mono">+0.254</span><span class="st"><i data-lucide="check" class="i12 ok"></i><span class="run"></span></span><span class="msg"><span data-i="sp.s3">Authorizing role</span><span class="sub">app_ro</span></span><span class="dur mono">11 ms</span></div>
+        <div class="ll" data-at="0.265" id="introLine"><span class="ts mono">+0.265</span><span class="st"><i data-lucide="check" class="i12 ok"></i><span class="run"></span></span><span class="msg"><span data-i="sp.s4">Introspecting 214 objects</span><span class="bar"><i id="ibar"></i></span><span class="sub" id="icount">0 / 214</span></span><span class="dur mono">486 ms</span></div>
+        <div class="ll trust" data-at="0.751"><span class="ts mono">+0.751</span><span class="st"><i data-lucide="check" class="i12 ok"></i><span class="run"></span></span><span class="msg"><span class="t1"><span class="env prod"></span><span data-i="env.production">production</span></span><span class="t2"><i data-lucide="lock" class="i12"></i><span data-i="acc.ro">read-only</span></span><span class="t3"><i data-lucide="arrow-left-right" class="i12"></i><span data-i="path.direct">direct (P2P)</span></span></span><span class="dur mono">—</span></div>
+        <div class="ll" data-at="0.752"><span class="ts mono">+0.752</span><span class="st"><i data-lucide="check" class="i12 ok"></i><span class="run"></span></span><span class="msg"><span data-i="sp.s5">Opening workspace</span><span class="cursor"></span></span><span class="dur mono"></span></div>
+      </div>
+      <span class="progseam" id="prog"></span>
+    </div>
+    <div class="bootfoot" id="bootfoot">
+      <span><kbd>Esc</kbd><span data-i="sp.cancel">Cancel</span></span>
+      <button class="lnk" id="replay"><i data-lucide="rotate-ccw" class="i12"></i><span data-i="sp.replay">Replay</span><kbd>R</kbd></button>
+    </div>
+  </section>
+</div>
+
+<script>
+/* ───────────── i18n ───────────── */
+const I18N = {
+  en: {
+    "env.production":"production","env.staging":"staging","acc.ro":"read-only","acc.rw":"read-write",
+    "path.direct":"direct (P2P)","path.directShort":"Direct","palette":"Go to anything",
+    "view.workspace":"Workspace","view.splash":"Splash","explorer":"Explorer","filterConn":"Filter connections",
+    "group.local":"Local","tables":"Tables","views":"Views","functions":"Functions","sequences":"Sequences",
+    "connection":"Connection","kv.env":"Environment","kv.access":"Access","kv.path":"Path","kv.agent":"Agent",
+    "kv.engine":"Engine","kv.granted":"Granted by","kv.audit":"Audit","audit.val":"signed at agent",
+    "editor":"Editor","statements":"statements","run":"Run","explain":"Explain","format":"Format",
+    "autocommit":"Auto-commit","limit":"Limit","executed":"executed","rowsWord":"rows",
+    "notInScope":"not in scope","kind.function":"function","kind.kwfn":"keyword · function","kind.keyword":"keyword",
+    "hint.insert":"insert","hint.replace":"replace","hint.docs":"docs",
+    "results":"Results","result1":"Result 1","page":"1–100 of 2,481","page2":"1–100 of 18,204",
+    "countRows":"Count rows","export":"Export","roNote":"Editing disabled · production is read-only",
+    "deleteRows":"Delete rows","pending":"1 pending change","notSubmitted":"not submitted",
+    "previewDml":"Preview DML","discard":"Discard","submit":"Submit","edited":"edited",
+    "status.env":"production · read-only","lncol":"Ln 14, Col 49",
+    "sp.title":"Opening","sp.via":"via Perde · Acme","sp.s0":"Workspace loaded",
+    "sp.s1":"Resolving agent karagoz@eu-west-1a","sp.s2":"Hole punching… direct path found",
+    "sp.s3":"Authorizing role","sp.s4":"Introspecting 214 objects","sp.s5":"Opening workspace",
+    "sp.cancel":"Cancel","sp.replay":"Replay",
+    "d.column":"Column","d.function":"Function","d.keyword":"Keyword","d.type":"Type","d.nullable":"Nullable",
+    "d.table":"Table","d.refs":"References","d.returns":"Returns","d.no":"no · NOT NULL","d.yes":"yes",
+    "d.scopeNote":"customers is not joined in this statement. Insert adds JOIN customers c.",
+    "d.aggNote":"Aggregate. Counts non-null input rows.","d.cdNote":"SQL-standard; evaluated once per transaction.",
+    "d.caseNote":"Conditional expression: CASE WHEN … THEN … END","d.nullableNote":"Set when an order is cancelled."
+  },
+  tr: {
+    "env.production":"üretim","env.staging":"hazırlık","acc.ro":"salt okunur","acc.rw":"okuma-yazma",
+    "path.direct":"doğrudan (P2P)","path.directShort":"Doğrudan","palette":"Her şeye git",
+    "view.workspace":"Çalışma alanı","view.splash":"Açılış","explorer":"Gezgin","filterConn":"Bağlantılarda ara",
+    "group.local":"Yerel","tables":"Tablolar","views":"Görünümler","functions":"Fonksiyonlar","sequences":"Diziler",
+    "connection":"Bağlantı","kv.env":"Ortam","kv.access":"Erişim","kv.path":"Yol","kv.agent":"Ajan",
+    "kv.engine":"Motor","kv.granted":"Yetki veren","kv.audit":"Denetim","audit.val":"ajanda imzalanıyor",
+    "editor":"Düzenleyici","statements":"ifade","run":"Çalıştır","explain":"Planı göster","format":"Biçimlendir",
+    "autocommit":"Otomatik commit","limit":"Sınır","executed":"çalıştı","rowsWord":"satır",
+    "notInScope":"kapsam dışı","kind.function":"fonksiyon","kind.kwfn":"anahtar kelime · fonksiyon","kind.keyword":"anahtar kelime",
+    "hint.insert":"ekle","hint.replace":"değiştir","hint.docs":"belge",
+    "results":"Sonuçlar","result1":"Sonuç 1","page":"1–100 / 2.481","page2":"1–100 / 18.204",
+    "countRows":"Satırları say","export":"Dışa aktar","roNote":"Düzenleme kapalı · üretim salt okunur",
+    "deleteRows":"Satırları sil","pending":"1 bekleyen değişiklik","notSubmitted":"gönderilmedi",
+    "previewDml":"DML önizle","discard":"Vazgeç","submit":"Gönder","edited":"düzenlendi",
+    "status.env":"üretim · salt okunur","lncol":"Sat 14, Süt 49",
+    "sp.title":"Açılıyor","sp.via":"Perde · Acme üzerinden","sp.s0":"Çalışma alanı yüklendi",
+    "sp.s1":"karagoz@eu-west-1a ajanı çözümleniyor","sp.s2":"Delik delme… doğrudan yol bulundu",
+    "sp.s3":"Rol yetkilendiriliyor","sp.s4":"214 nesne inceleniyor","sp.s5":"Çalışma alanı açılıyor",
+    "sp.cancel":"İptal","sp.replay":"Yeniden oynat",
+    "d.column":"Sütun","d.function":"Fonksiyon","d.keyword":"Anahtar kelime","d.type":"Tür","d.nullable":"Boş olabilir",
+    "d.table":"Tablo","d.refs":"Başvurur","d.returns":"Döndürür","d.no":"hayır · NOT NULL","d.yes":"evet",
+    "d.scopeNote":"customers bu ifadede birleştirilmemiş. Ekle, JOIN customers c ekler.",
+    "d.aggNote":"Toplama. Boş olmayan girdi satırlarını sayar.","d.cdNote":"SQL standardı; işlem başına bir kez hesaplanır.",
+    "d.caseNote":"Koşullu ifade: CASE WHEN … THEN … END","d.nullableNote":"Sipariş iptal edildiğinde dolar."
+  }
+};
+let LANG = "en";
+const t = k => (I18N[LANG][k] ?? I18N.en[k] ?? k);
+
+/* ───────────── Explorer tree ───────────── */
+const TREE = [
+  {g:"group.local", n:"1"},
+  {d:0, chev:"down", ic:"database", lbl:"local-sqlite", env:"loc", meta:"sqlite"},
+  {d:1, ic:"cylinder", lbl:"app.db", dim:true},
+  {g:"Perde · Acme", raw:true, n:"4", agent:true},
+  {d:0, chev:"down", ic:"database", lbl:"orders-prod", strong:true, env:"prod", ro:true, p2p:true, meta:"pg 16"},
+  {d:1, chev:"down", ic:"cylinder", lbl:"orders"},
+  {d:2, chev:"down", ic:"layers", lbl:"public"},
+  {d:3, chev:"down", ic:"folder-open", lbl:"tables", i18n:true, cnt:"5"},
+  {d:4, ic:"table-2", lbl:"customers"},
+  {d:4, ic:"table-2", lbl:"orders", sel:true},
+  {d:4, ic:"table-2", lbl:"order_items"},
+  {d:4, ic:"table-2", lbl:"products"},
+  {d:4, ic:"table-2", lbl:"audit_log"},
+  {d:3, chev:"right", ic:"folder", lbl:"views", i18n:true, cnt:"3"},
+  {d:3, chev:"right", ic:"folder", lbl:"functions", i18n:true, cnt:"12"},
+  {d:3, chev:"right", ic:"folder", lbl:"sequences", i18n:true, cnt:"5"},
+  {d:2, chev:"right", ic:"layers", lbl:"billing"},
+  {d:0, chev:"right", ic:"database", lbl:"orders-staging", env:"stg", meta:"pg 16"},
+  {d:0, chev:"right", ic:"database", lbl:"cache-prod", env:"prod", ro:true, meta:"redis 7.4"},
+  {d:0, chev:"right", ic:"database", lbl:"events", env:"stg", meta:"mongo 7"},
+];
+function renderTree(){
+  const el = document.getElementById("tree");
+  el.innerHTML = TREE.map((r,i) => {
+    if (r.g) return `<div class="grp"><span class="sc">${r.raw ? r.g : t(r.g)}</span><span class="grow"></span>${r.agent?'<i data-lucide="radio" class="i12" title="Agent-provided"></i>':''}<span class="n mono">${r.n}</span></div>`;
+    const pad = 8 + r.d * 14;
+    const chev = r.chev ? `<i data-lucide="chevron-${r.chev}" class="i12"></i>` : "";
+    const env = r.env ? `<span class="env ${r.env}"></span>` : "";
+    const flags = (r.ro || r.p2p) ? `<span class="flags">${r.ro?'<i data-lucide="lock" class="i12"></i>':''}${r.p2p?'<i data-lucide="arrow-left-right" class="i12 p2p"></i>':''}</span>` : "";
+    const lbl = r.i18n ? t(r.lbl) : r.lbl;
+    const isMono = !r.i18n;
+    return `<div class="row${r.sel?' sel':''}" data-i="${i}" style="padding-left:${pad}px">
+      <span class="chev">${chev}</span><i data-lucide="${r.ic}" class="i12 ic"></i>
+      <span class="lbl${r.strong?' strong':''}${r.dim?' dim':''}">${lbl}</span>${env}${flags}
+      <span class="grow"></span>${r.cnt?`<span class="cnt mono">${r.cnt}</span>`:''}${r.meta?`<span class="meta mono">${r.meta}</span>`:''}</div>`;
+  }).join("");
+  el.querySelectorAll(".row").forEach(row => row.addEventListener("click", () => {
+    TREE.forEach(x => x.sel = false); TREE[+row.dataset.i].sel = true;
+    el.querySelectorAll(".row.sel").forEach(x => x.classList.remove("sel")); row.classList.add("sel");
+  }));
+}
+
+/* ───────────── Editor gutter ───────────── */
+function renderGutter(){
+  const g = document.getElementById("gut");
+  let h = "";
+  for (let i = 1; i <= 14; i++) {
+    h += `<div class="ln${i===14?' cur':''}">${i}${i===2?'<i data-lucide="check" class="i12 ok"></i>':''}</div>`;
+  }
+  h += `<span class="rng" style="top:${18}px;height:${18*11}px"></span>`;
+  h += `<span class="rng cur" style="top:${18*13}px;height:18px"></span>`;
+  g.innerHTML = h;
+}
+
+/* ───────────── Completion detail ───────────── */
+const DET = {
+  customer_id: () => `<div class="h"><span class="sc">${t("d.column")}</span><span class="mono">orders.customer_id</span></div>
+    <div class="dk"><span>${t("d.type")}</span><span class="mono">bigint</span></div>
+    <div class="dk"><span>${t("d.nullable")}</span><span>${t("d.no")}</span></div>
+    <div class="dk"><span>${t("d.table")}</span><span class="mono">public.orders</span></div>
+    <div class="dk"><span>${t("d.refs")}</span><span class="fk"><i data-lucide="key-round" class="i12"></i><span class="mono">FK → customers.id</span></span></div>`,
+  city: () => `<div class="h"><span class="sc">${t("d.column")}</span><span class="mono">customers.city</span></div>
+    <div class="dk"><span>${t("d.type")}</span><span class="mono">text</span></div>
+    <div class="dk"><span>${t("d.nullable")}</span><span>${t("d.yes")}</span></div>
+    <div class="note">${t("d.scopeNote")}</div>`,
+  cancelled_at: () => `<div class="h"><span class="sc">${t("d.column")}</span><span class="mono">orders.cancelled_at</span></div>
+    <div class="dk"><span>${t("d.type")}</span><span class="mono">timestamptz</span></div>
+    <div class="dk"><span>${t("d.nullable")}</span><span>${t("d.yes")}</span></div>
+    <div class="dk"><span>${t("d.table")}</span><span class="mono">public.orders</span></div>
+    <div class="note">${t("d.nullableNote")}</div>`,
+  count: () => `<div class="h"><span class="sc">${t("d.function")}</span><span class="mono">count(any)</span></div>
+    <div class="dk"><span>${t("d.returns")}</span><span class="mono">bigint</span></div>
+    <div class="note">${t("d.aggNote")}</div>`,
+  current_date: () => `<div class="h"><span class="sc">${t("d.keyword")}</span><span class="mono">current_date</span></div>
+    <div class="dk"><span>${t("d.returns")}</span><span class="mono">date</span></div>
+    <div class="note">${t("d.cdNote")}</div>`,
+  case: () => `<div class="h"><span class="sc">${t("d.keyword")}</span><span class="mono">case</span></div>
+    <div class="note">${t("d.caseNote")}</div>`,
+};
+let CMP_SEL = "customer_id";
+function renderDetail(){
+  document.getElementById("cmpDet").innerHTML = DET[CMP_SEL]();
+  icons();
+}
+function wireCompletion(){
+  document.querySelectorAll("#cmpList li").forEach(li => li.addEventListener("click", () => {
+    document.querySelectorAll("#cmpList li").forEach(x => x.classList.remove("on"));
+    li.classList.add("on"); CMP_SEL = li.dataset.k; renderDetail();
+  }));
+}
+
+/* ───────────── Result grids ───────────── */
+const R1 = [
+  ["Ada Yılmaz","İstanbul",14,"48920.50"],["Bora Işık","Ankara",12,"41388.00"],["Cem Öztürk","İzmir",11,"39104.75"],
+  ["Deniz Çelik","Berlin",9,"36870.20"],["Elif Şahin","İstanbul",10,"34215.90"],["Furkan Güneş","Iğdır",8,"31602.40"],
+  ["Gizem Aydın","London",9,"29948.15"],["Hakan Doğan",null,7,"27310.00"],["İpek Karaca","Bursa",8,"25774.60"],
+  ["Jale Koç","Antalya",6,"24190.35"],["Kerem Arslan","Ankara",7,"22846.80"],["Lale Erdem","Rotterdam",6,"21402.10"],
+  ["Mert Kılıç","İstanbul",5,"19995.00"],["Nur Polat","Eskişehir",6,"18730.45"],["Oğuz Tekin","Berlin",5,"17264.90"],
+  ["Pınar Uçar","İzmir",4,"16118.25"],["Rıza Kurt","",5,"15402.70"],["Selin Avcı","London",4,"14889.00"],
+  ["Tuna Bulut","Kayseri",3,"13550.40"],["Umut Ekinci","Gaziantep",4,"12906.15"],["Vural Şen","Ankara",3,"12011.80"],
+];
+function renderR1(){
+  const head = `<tr><th class="rn"></th>
+    <th style="width:250px"><span class="hn">full_name</span><span class="ht">text</span></th>
+    <th style="width:190px"><span class="hn">city</span><span class="ht">text</span></th>
+    <th class="num" style="width:120px"><span class="hn">orders</span><span class="ht">bigint</span></th>
+    <th class="num" style="width:170px"><span class="hn"><span class="sort"><i data-lucide="arrow-down" class="i12"></i>1</span>revenue</span><span class="ht">numeric(14,2)</span></th>
+    <th class="fill"></th></tr>`;
+  const body = R1.map((r,i) => {
+    const sel = i>=2 && i<=4;
+    const city = r[1] === null ? `<span class="null">null</span>` : r[1];
+    return `<tr class="${sel?'selrow':''}"><td class="rn">${i+1}</td><td>${r[0]}</td><td>${city}</td>
+      <td class="num ${sel?(i===2?'insel':'insel'):''}" data-c="o${i}">${r[2]}</td>
+      <td class="num ${sel?(i===2?'act':'insel'):''}" data-c="v${i}">${r[3]}</td><td class="fill"></td></tr>`;
+  }).join("");
+  document.getElementById("r1").innerHTML = `<table class="grid" style="width:100%"><colgroup><col style="width:46px"><col style="width:250px"><col style="width:190px"><col style="width:120px"><col style="width:170px"><col></colgroup><thead>${head}</thead><tbody>${body}</tbody></table><div class="selbox" id="selbox"></div>`;
+}
+const STAT = ["paid","shipped","pending","paid","refunded","shipped","paid","pending","paid","shipped","paid","cancelled","paid","shipped","pending","paid","paid","shipped","paid","paid","shipped"];
+function renderR2(){
+  const head = `<tr><th class="rn"></th>
+    <th class="num" style="width:96px"><span class="hn"><i data-lucide="key-round" class="i12" style="color:var(--text-3)"></i>id</span><span class="ht">bigint</span></th>
+    <th class="num" style="width:120px"><span class="hn">customer_id</span><span class="ht">bigint</span></th>
+    <th style="width:150px"><span class="hn">status</span><span class="ht">text</span></th>
+    <th class="num" style="width:130px"><span class="hn">total</span><span class="ht">numeric(12,2)</span></th>
+    <th style="width:230px"><span class="hn">ordered_at</span><span class="ht">timestamptz</span></th>
+    <th style="width:200px"><span class="hn">cancelled_at</span><span class="ht">timestamptz</span></th>
+    <th class="fill"></th></tr>`;
+  let rows = "";
+  const cust = [318,77,512,204,91,640,318,23,455,77,186,302,519,64,207,388,12,451,77,233,590];
+  const tot  = ["1240.00","389.90","2210.50","74.25","615.00","1899.99","312.40","88.00","4120.75","159.90","730.10","245.00","1012.60","66.30","528.45","3301.00","97.80","842.15","1550.00","210.40","689.70"];
+  for (let i=0;i<21;i++){
+    const id = 10421 - i;
+    const mm = 59 - ((i*7)%60), hh = 21 - Math.floor(i/3);
+    const ts = `2026-11-10 ${String(hh).padStart(2,"0")}:${String(mm).padStart(2,"0")}:${String((i*13)%60).padStart(2,"0")}+03`;
+    const pend = i===2;
+    const status = pend ? `<span class="old">pending</span>paid` : STAT[i];
+    const canc = STAT[i]==="cancelled" ? `<span class="ts">2026-11-10 19:02:11+03</span>` : `<span class="null">null</span>`;
+    rows += `<tr><td class="rn${pend?' pend-rn':''}">${i+1}</td><td class="num">${id}</td><td class="num">${cust[i]}</td>
+      <td class="${pend?'pending':''}">${status}</td><td class="num">${tot[i]}</td><td class="ts">${ts}</td><td>${STAT[i]==="cancelled"?'<span class="dim mono" style="font-size:11.5px">2026-11-10 19:02:11+03</span>':'<span class="null">null</span>'}</td>
+      <td class="fill">${pend?`<span class="stampcell sc">${t("edited")} · ${t("notSubmitted")}</span>`:''}</td></tr>`;
+  }
+  document.getElementById("r2").innerHTML = `<table class="grid" style="width:100%"><colgroup><col style="width:46px"><col style="width:96px"><col style="width:120px"><col style="width:150px"><col style="width:130px"><col style="width:230px"><col style="width:200px"><col></colgroup><thead>${head}</thead><tbody>${rows}</tbody></table>`;
+}
+function placeSelBox(){
+  const wrap = document.getElementById("r1"), box = document.getElementById("selbox");
+  const a = wrap.querySelector('[data-c="o2"]'), b = wrap.querySelector('[data-c="v4"]');
+  if (!a || !b || !wrap.offsetParent) return;
+  const W = wrap.getBoundingClientRect(), A = a.getBoundingClientRect(), B = b.getBoundingClientRect();
+  Object.assign(box.style, { left:(A.left-W.left-1)+"px", top:(A.top-W.top-1)+"px", width:(B.right-A.left+1)+"px", height:(B.bottom-A.top+1)+"px" });
+}
+function wireResultTabs(){
+  document.querySelectorAll(".rtab").forEach(tab => tab.addEventListener("click", () => {
+    document.querySelectorAll(".rtab").forEach(x => x.classList.toggle("on", x===tab));
+    const r = tab.dataset.r;
+    document.getElementById("r1").classList.toggle("on", r==="r1");
+    document.getElementById("r2").classList.toggle("on", r==="r2");
+    document.getElementById("tool1").style.display = r==="r1" ? "" : "none";
+    document.getElementById("tool2").style.display = r==="r2" ? "" : "none";
+    document.getElementById("rmeta1").style.visibility = r==="r1" ? "" : "hidden";
+    placeSelBox();
+  }));
+}
+
+/* ───────────── Theme / language / view ───────────── */
+function icons(){ if (window.lucide) lucide.createIcons({ attrs: { "stroke-width": 1.6 } }); }
+function setTheme(th){
+  document.documentElement.dataset.theme = th;
+  const ico = document.getElementById("themeBtn");
+  ico.innerHTML = `<i data-lucide="${th==="dark"?"moon":"sun"}" class="i12"></i><kbd>T</kbd>`;
+  icons();
+}
+function setLang(l){
+  LANG = l; document.documentElement.lang = l;
+  document.querySelectorAll("[data-i]").forEach(el => { el.textContent = t(el.dataset.i); });
+  document.querySelectorAll("[data-i-ph]").forEach(el => { el.placeholder = t(el.dataset.iPh); });
+  document.getElementById("langLbl").textContent = l.toUpperCase();
+  document.getElementById("langLbl2").innerHTML = l==="en" ? "<b>EN</b> / TR" : "EN / <b>TR</b>";
+  renderTree(); renderR2(); renderDetail(); icons();
+  requestAnimationFrame(placeSelBox);
+}
+function setView(v, animate){
+  document.getElementById("win").dataset.view = v;
+  document.getElementById("vWork").setAttribute("aria-pressed", v==="workspace");
+  document.getElementById("vSplash").setAttribute("aria-pressed", v==="splash");
+  if (v === "splash") runBoot(animate); else { stopBoot(); requestAnimationFrame(placeSelBox); }
+}
+
+/* ───────────── Splash: one panel growing on Y while the log prints ───────────── */
+let timers = [], rafId = 0;
+const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+function stopBoot(){ timers.forEach(clearTimeout); timers = []; cancelAnimationFrame(rafId); }
+function runBoot(animate){
+  stopBoot();
+  const boot = document.getElementById("boot"), lines = [...document.querySelectorAll("#log .ll")];
+  const prog = document.getElementById("prog"), clock = document.getElementById("clock");
+  const ibar = document.getElementById("ibar"), icount = document.getElementById("icount");
+  const foot = document.getElementById("bootfoot");
+  const HDR = 31, PAD = 16, LH = 22;
+  const setH = n => { boot.style.height = (HDR + (n ? PAD + n*LH : 0)) + "px"; foot.style.top = (286 + HDR + (n ? PAD + n*LH : 0) + 14) + "px"; };
+  const finish = () => {
+    lines.forEach(l => l.classList.add("shown","done")); lines[lines.length-1].classList.remove("done");
+    setH(lines.length); prog.style.width = "100%"; boot.classList.add("ready");
+    ibar.style.width = "100%"; icount.textContent = "214 / 214"; clock.textContent = "0.752 s";
+  };
+  boot.classList.remove("ready");
+  if (!animate || reduce) { boot.style.transition = "none"; prog.style.transition = "none"; finish(); return; }
+  boot.style.transition = ""; prog.style.transition = "";
+  lines.forEach(l => l.classList.remove("shown","done"));
+  setH(0); prog.style.width = "0%"; ibar.style.width = "0%"; icount.textContent = "0 / 214"; clock.textContent = "0.000 s";
+  // schedule: [show at ms, done at ms, simulated clock seconds at done]
+  const plan = [[250,420,.004],[520,900,.042],[1000,1550,.254],[1650,1850,.265],[1950,2900,.751],[3000,3080,.751],[3180,null,.752]];
+  const t0 = performance.now();
+  const tick = () => {
+    const el = performance.now() - t0;
+    const sim = Math.min(.752, el/3180*.752);
+    clock.textContent = sim.toFixed(3) + " s";
+    if (el >= 1950 && el <= 2900) { const p = (el-1950)/950; ibar.style.width = (p*100).toFixed(1)+"%"; icount.textContent = Math.round(p*214)+" / 214"; }
+    if (el < 3200) rafId = requestAnimationFrame(tick);
+  };
+  rafId = requestAnimationFrame(tick);
+  timers.push(setTimeout(() => {}, 0));
+  plan.forEach(([show, done], i) => {
+    timers.push(setTimeout(() => { lines[i].classList.add("shown"); setH(i+1); prog.style.width = ((i+1)/lines.length*100)+"%"; }, show));
+    if (done) timers.push(setTimeout(() => { lines[i].classList.add("done"); if (i===4){ ibar.style.width="100%"; icount.textContent="214 / 214"; } }, done));
+  });
+  timers.push(setTimeout(() => { boot.classList.add("ready"); prog.style.width = "100%"; clock.textContent = "0.752 s"; }, 3200));
+}
+
+/* ───────────── Boot ───────────── */
+const P = new URLSearchParams(location.search);
+renderTree(); renderGutter(); renderR1(); renderR2(); wireCompletion(); wireResultTabs();
+document.getElementById("regL").style.top = (document.querySelector(".col.left").getBoundingClientRect().height - 205 - 0.5) + "px";
+setTheme(P.get("theme") === "light" ? "light" : "dark");
+setLang(P.get("lang") === "tr" ? "tr" : "en");
+// URL-driven load renders the settled state (deterministic screenshots); toggling or R replays the motion.
+setView(P.get("view") === "splash" ? "splash" : "workspace", false);
+if (document.fonts) document.fonts.ready.then(() => requestAnimationFrame(placeSelBox));
+window.addEventListener("resize", placeSelBox);
+
+document.getElementById("themeBtn").addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+document.getElementById("langBtn").addEventListener("click", () => setLang(LANG === "en" ? "tr" : "en"));
+document.getElementById("langBtn2").addEventListener("click", () => setLang(LANG === "en" ? "tr" : "en"));
+document.getElementById("vWork").addEventListener("click", () => setView("workspace"));
+document.getElementById("vSplash").addEventListener("click", () => setView("splash", true));
+document.getElementById("replay").addEventListener("click", () => runBoot(true));
+document.addEventListener("keydown", e => {
+  if (e.target.matches("input, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === "t") setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+  else if (k === "l") setLang(LANG === "en" ? "tr" : "en");
+  else if (k === "s") setView(document.getElementById("win").dataset.view === "splash" ? "workspace" : "splash", true);
+  else if (k === "r" && document.getElementById("win").dataset.view === "splash") runBoot(true);
+  else if (k === "escape" && document.getElementById("win").dataset.view === "splash") setView("workspace");
+});
+</script>
+</body>
+</html>

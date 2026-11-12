@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<title>Hacivat — Parça Parça Karşılaştırma</title>
+<style>
+  :root { --bg:#0d0e10; --line:#2a2d33; --text:#e8e9ec; --muted:#9a9ea8; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+  header { position:sticky; top:0; z-index:3; background:rgba(13,14,16,.96); border-bottom:1px solid var(--line); padding:12px 28px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  header h1 { font-size:16px; margin:0 16px 0 0; }
+  header a { color:var(--muted); text-decoration:none; font-size:13px; border:1px solid var(--line); border-radius:8px; padding:5px 10px; }
+  .legend { margin-left:auto; display:flex; gap:12px; font-size:13px; color:var(--muted); }
+  .legend b { color:var(--text); }
+  main { padding:24px 28px 80px; display:grid; gap:56px; }
+  section { scroll-margin-top:70px; }
+  h2 { margin:0 0 4px; font-size:21px; }
+  .q { color:var(--muted); margin:0 0 16px; max-width:100ch; }
+  .stack { display:grid; gap:14px; }
+  .row { display:grid; grid-template-columns:repeat(3, 1fr); gap:14px; }
+  figure { margin:0; }
+  figcaption { font-size:13px; font-weight:700; letter-spacing:.04em; margin-bottom:6px; color:var(--muted); }
+  figcaption b { display:inline-grid; place-items:center; width:22px; height:22px; border-radius:6px; background:#e8e9ec; color:#111; margin-right:8px; }
+  img { display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:10px; cursor:zoom-in; }
+  dialog { padding:0; border:0; background:transparent; } dialog img { max-width:98vw; max-height:96vh; }
+  dialog::backdrop { background:rgba(0,0,0,.88); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Parça parça karşılaştırma</h1>
+  <a href="#s1">1 · Üst bar</a><a href="#s2">2 · Explorer</a><a href="#s3">3 · Editör</a><a href="#s4">4 · Grid</a>
+  <a href="#s5">5 · Durum çubuğu</a><a href="#s6">6 · Açık tema</a><a href="#s7">7 · Türkçe</a><a href="#s8">8 · Açılış</a>
+  <div class="legend"><span><b>A</b> İznik Sırrı</span><span><b>B</b> Grafit Konsol</span><span><b>C</b> Kategori Standardı</span></div>
+</header>
+<main id="m"></main>
+<dialog id="z"><img alt=""></dialog>
+<script>
+const P = {A:"assigned", B:"challenger-console", C:"canon"};
+const N = {A:"İznik Sırrı", B:"Grafit Konsol", C:"Kategori Standardı"};
+const M = "../../../.impeccable/mocks/decision/";
+const S = [
+  ["s1","Üst bar ve güven işaretleri","Pencere başlığı, bağlantı seçici, prod / read-only / P2P bilgisinin ilk bakışta nasıl okunduğu.","stack", k=>`top-${P[k]}.png`],
+  ["s2","Explorer (sol ağaç) ve bağlantı paneli","Ağaç hiyerarşisi, ortam işaretleri, yoğunluk, alttaki bağlantı detayı.","row", k=>`explorer-${P[k]}.png`],
+  ["s3","SQL editörü ve completion popup","Sözdizimi renkleri, satır numarası/gutter, çalıştırma durumu, öneri listesi ve detay paneli.","stack", k=>`editor-${P[k]}.png`],
+  ["s4","Sonuç grid'i","Okunabilirlik, sayı hizası, seçim, NULL gösterimi, araç çubuğu, read-only uyarısı.","stack", k=>`grid-${P[k]}.png`],
+  ["s5","Durum çubuğu","En alttaki şerit: ortam, yol, transaction, satır/ms, imleç.","stack", k=>`status-${P[k]}.png`],
+  ["s6","Açık tema (tam ekran)","Gündüz kullanımı.","row", k=>M+`${P[k]}-light.png`],
+  ["s7","Türkçe arayüz (tam ekran)","Daha uzun Türkçe metinlerle düzen.","row", k=>M+`${P[k]}-tr.png`],
+  ["s8","Açılış / yükleme ekranı","CleanMyMac anı. Canlı animasyon için maketlerde S tuşu: ../assigned, ../challenger-console, ../canon.","row", k=>M+`${P[k]}-splash.png`]
+];
+const m = document.getElementById("m");
+S.forEach(([id,t,q,layout,src])=>{
+  m.insertAdjacentHTML("beforeend", `<section id="${id}"><h2>${t}</h2><p class="q">${q}</p><div class="${layout}">${["A","B","C"].map(k=>`<figure><figcaption><b>${k}</b>${N[k]}</figcaption><img src="${src(k)}" alt="${k}"></figure>`).join("")}</div></section>`);
+});
+document.addEventListener("click", e=>{ const i=e.target.closest("img"); if(!i) return; const d=document.getElementById("z"); if(d.open){d.close();return;} d.querySelector("img").src=i.src; d.showModal(); });
+</script>
+</body>
+</html>

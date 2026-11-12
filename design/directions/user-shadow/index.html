@@ -1,0 +1,1308 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-view="workspace">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1440, initial-scale=1">
+<title>Hacivat — Perde</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Alegreya:ital,wght@0,500;0,600;0,700;1,400;1,500&family=Alegreya+Sans:ital,wght@0,400;0,500;0,700;1,400;1,500&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=block" rel="stylesheet">
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<style>
+/* ============================================================
+   PERDE — tokens
+   Dark = the theatre at night: dark wings, one lit screen.
+   Light = daylight perde: linen wings, paper screen.
+   ============================================================ */
+:root, :root[data-theme="dark"] {
+  --bg: #0B0806;
+  --wing-0: #14100C;   /* window / deepest wing   */
+  --wing-1: #18130E;   /* sidebar (vibrancy slot) */
+  --wing-2: #1C1611;   /* grid / panels           */
+  --wing-3: #231B13;   /* raised: toolbars        */
+  --wing-4: #2D2318;   /* controls, hover         */
+  --wing-5: #382B1E;
+  --line: #2B2118;
+  --line-2: #3B2E21;
+  --tx: #EEDFC0;
+  --tx-2: #BFAC89;
+  --tx-3: #9C8A6C;
+  --tx-4: #6F604B;
+
+  --madder: #C2412D;   --madder-tx: #F08E76;  --madder-tint: rgba(194,65,45,.16); --madder-line: rgba(214,92,70,.48);
+  --verd: #2F6F6A;     --verd-tx: #82C9BD;    --verd-tint: rgba(47,111,106,.26);  --verd-line: rgba(96,168,158,.45);
+  --saff: #D9A441;     --saff-tx: #ECC273;    --saff-tint: rgba(217,164,65,.15);  --saff-line: rgba(217,164,65,.62);
+
+  /* the lit screen */
+  --perde-1: #F2E3C3;
+  --perde-2: #E7D3AA;
+  --perde-3: #D3B98D;
+  --ink: #2A1E14;
+  --ink-2: #6A563E;
+  --ink-3: #9A8362;
+  --perde-tab-top: #EBD9B3;
+  --exec-band: rgba(217,164,65,.24);
+  --inlay-bg: rgba(106,86,62,.12);
+
+  --syn-kw: #33407E;
+  --syn-fn: #7E4610;
+  --syn-str: #4D6420;
+  --syn-num: #8A3456;
+  --syn-com: #8A7453;
+  --syn-op: #6A5844;
+  --syn-al: #5B4630;
+
+  --valance-bg: #26140F;
+  --valance-tx: #EFC9BC;
+  --valance-tx-2: #C59A8B;
+
+  --pop-bg: #1D1610;
+  --pop-bg-2: #241B14;
+  --pop-line: #3A2D20;
+
+  --shadow-pop: 0 18px 40px rgba(0,0,0,.42), 0 3px 8px rgba(0,0,0,.30);
+  --shadow-win: 0 0 0 1px rgba(0,0,0,.6);
+  --spill: rgba(233,216,180,.055);
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg: #CFC2A8;
+  --wing-0: #E8DFCD;
+  --wing-1: #EFE7D7;
+  --wing-2: #FBF8F0;
+  --wing-3: #F4EDDF;
+  --wing-4: #E9DFCB;
+  --wing-5: #DED1B7;
+  --line: #E2D7C2;
+  --line-2: #D0C1A3;
+  --tx: #22180F;
+  --tx-2: #5A4933;
+  --tx-3: #6F5E45;
+  --tx-4: #A29174;
+
+  --madder-tx: #A3311D;  --madder-tint: rgba(194,65,45,.10); --madder-line: rgba(194,65,45,.42);
+  --verd-tx: #215F59;    --verd-tint: rgba(47,111,106,.12);  --verd-line: rgba(47,111,106,.38);
+  --saff-tx: #855B0F;    --saff-tint: rgba(217,164,65,.22);  --saff-line: rgba(190,136,40,.75);
+
+  --perde-1: #FFFCF4;
+  --perde-2: #FBF4E4;
+  --perde-3: #F2E6CC;
+  --perde-tab-top: #FFFBF1;
+  --exec-band: rgba(217,164,65,.20);
+  --inlay-bg: rgba(106,86,62,.09);
+
+  --valance-bg: #F5E0D7;
+  --valance-tx: #6E2213;
+  --valance-tx-2: #96503F;
+
+  --pop-bg: #221A13;
+  --pop-bg-2: #2A2018;
+  --pop-line: #3D3023;
+
+  --shadow-pop: 0 18px 40px rgba(60,40,20,.28), 0 3px 8px rgba(60,40,20,.18);
+  --spill: rgba(255,250,236,.0);
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1440px; height: 900px; overflow: hidden; background: var(--bg); }
+body {
+  font-family: "Alegreya Sans", system-ui, sans-serif;
+  font-size: 13.5px; line-height: 1.35; color: var(--tx);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "kern" 1;
+}
+button { font: inherit; color: inherit; background: none; border: 0; cursor: default; }
+input { font: inherit; color: inherit; background: none; border: 0; outline: none; }
+.mono, code, kbd { font-family: "IBM Plex Mono", ui-monospace, monospace; font-feature-settings: "tnum" 1, "zero" 0; }
+::selection { background: rgba(217,164,65,.35); color: inherit; }
+svg.lucide { width: 14px; height: 14px; stroke-width: 1.75; flex: none; }
+:focus-visible { outline: 1.5px solid var(--saff); outline-offset: 1px; border-radius: 4px; }
+
+/* ============================================================ window */
+.win {
+  position: absolute; inset: 0;
+  border-radius: 10px; overflow: hidden;
+  background: var(--wing-0);
+  box-shadow: var(--shadow-win);
+  display: grid; grid-template-rows: 42px 1fr 26px;
+}
+[data-view="splash"] .win { grid-template-rows: 42px 1fr 0; }
+
+/* ------------------------------------------------ title bar */
+.titlebar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 12px 0 16px;
+  background: linear-gradient(180deg, var(--wing-3), var(--wing-1));
+  border-bottom: 1px solid var(--line);
+  position: relative; z-index: 5;
+}
+.traffic { display: flex; gap: 8px; width: 60px; }
+.tl { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 .5px rgba(0,0,0,.25); }
+.tl.r { background: #FF5F57; } .tl.y { background: #FEBC2E; } .tl.g { background: #28C840; }
+.brand { display: flex; align-items: center; gap: 8px; width: 192px; }
+.brand-name { font-family: "Alegreya", serif; font-weight: 600; font-size: 16px; letter-spacing: .005em; color: var(--tx); }
+.mark { width: 20px; height: 18px; flex: none; }
+
+.conn-switch {
+  display: flex; align-items: center; gap: 8px;
+  height: 28px; padding: 0 8px 0 4px;
+  background: var(--wing-0); border: 1px solid var(--line-2); border-radius: 7px;
+  max-width: 640px; white-space: nowrap;
+}
+:root[data-theme="light"] .conn-switch { background: var(--wing-2); }
+.conn-switch:hover { border-color: var(--tx-4); }
+.hide-sq {
+  width: 20px; height: 20px; border-radius: 5px; display: grid; place-items: center;
+  background: var(--madder); color: #FFF1E8;
+}
+.hide-sq svg.lucide { width: 12px; height: 12px; stroke-width: 2; }
+.cs-name { font-weight: 500; font-size: 12.5px; color: var(--tx); }
+.cs-eng { color: var(--tx-3); font-size: 12.5px; }
+.cs-div { width: 1px; height: 14px; background: var(--line-2); }
+.cs-env { color: var(--madder-tx); font-weight: 500; font-size: 12.5px; }
+.cs-path { display: flex; align-items: center; gap: 4px; color: var(--verd-tx); font-size: 12.5px; }
+.cs-path svg.lucide { width: 13px; height: 13px; }
+.conn-switch > svg.lucide:last-child { color: var(--tx-3); width: 13px; height: 13px; }
+.tb-spacer { flex: 1; }
+
+.seg { display: flex; align-items: center; height: 26px; padding: 2px; gap: 2px; background: var(--wing-0); border: 1px solid var(--line); border-radius: 7px; }
+:root[data-theme="light"] .seg { background: var(--wing-4); }
+.seg button { height: 20px; padding: 0 9px; border-radius: 5px; color: var(--tx-3); font-size: 12.5px; font-weight: 500; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.seg button:hover { color: var(--tx); }
+.seg button.on { background: var(--wing-4); color: var(--tx); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+:root[data-theme="light"] .seg button.on { background: var(--wing-2); box-shadow: 0 1px 2px rgba(80,60,30,.18); }
+.seg kbd, .kbd { font-size: 10px; color: var(--tx-4); border: 1px solid var(--line-2); border-radius: 3px; padding: 0 3px; line-height: 13px; }
+.tb-icon { width: 28px; height: 26px; display: grid; place-items: center; border-radius: 6px; color: var(--tx-2); }
+.tb-icon:hover { background: var(--wing-4); color: var(--tx); }
+.perde-status { display: flex; align-items: center; gap: 7px; color: var(--tx-2); font-size: 12.5px; padding: 0 4px 0 8px; border-left: 1px solid var(--line); height: 18px; white-space: nowrap; }
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.dot.verd { background: #3E9A90; box-shadow: 0 0 0 2px var(--verd-tint); }
+
+/* ------------------------------------------------ workspace layout */
+.workspace { display: grid; grid-template-columns: 280px 1fr; min-height: 0; }
+.splash { display: none; }
+[data-view="splash"] .workspace, [data-view="splash"] .status { display: none; }
+[data-view="splash"] .splash { display: block; }
+
+/* ------------------------------------------------ sidebar / explorer */
+.side {
+  background: var(--wing-1);
+  border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; min-height: 0;
+  position: relative;
+}
+.side::after { /* resize handle */
+  content: ""; position: absolute; top: 0; bottom: 0; right: -3px; width: 5px; cursor: col-resize; z-index: 2;
+}
+.side-head { height: 36px; display: flex; align-items: center; padding: 0 8px 0 14px; gap: 2px; }
+.side-title { font-weight: 700; font-size: 12.5px; color: var(--tx-2); flex: 1; letter-spacing: .01em; }
+.ib { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 5px; color: var(--tx-3); }
+.ib:hover { background: var(--wing-4); color: var(--tx); }
+.side-search {
+  margin: 0 10px 8px; height: 28px; display: flex; align-items: center; gap: 7px;
+  padding: 0 8px; border-radius: 6px; background: var(--wing-0); border: 1px solid var(--line);
+  color: var(--tx-3);
+}
+:root[data-theme="light"] .side-search { background: var(--wing-2); }
+.side-search input { flex: 1; min-width: 0; font-size: 13px; }
+.side-search input::placeholder { color: var(--tx-3); }
+.tree { flex: 1; overflow: hidden; padding: 2px 6px 8px; }
+.grp {
+  height: 26px; display: flex; align-items: center; gap: 7px; padding: 8px 8px 0 8px; margin-top: 4px;
+  font-size: 11.5px; font-weight: 700; color: var(--tx-3); letter-spacing: .02em;
+}
+.grp:first-child { margin-top: 0; }
+.grp .count { margin-left: auto; font-weight: 500; font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--tx-4); }
+.grp .pmark { width: 13px; height: 11px; }
+.row {
+  height: 24px; display: flex; align-items: center; gap: 6px;
+  padding-left: calc(6px + var(--lvl, 0) * 14px); padding-right: 6px;
+  border-radius: 5px; color: var(--tx); white-space: nowrap; font-size: 13.5px;
+}
+.row:hover { background: rgba(233,216,180,.045); }
+:root[data-theme="light"] .row:hover { background: rgba(80,60,30,.05); }
+.row.sel { background: var(--saff-tint); box-shadow: inset 0 0 0 1px rgba(217,164,65,.28); }
+.row .chev { width: 12px; display: grid; place-items: center; color: var(--tx-4); flex: none; }
+.row .chev svg.lucide { width: 12px; height: 12px; stroke-width: 2; }
+.row .ic { color: var(--tx-3); display: grid; place-items: center; }
+.row .nm { overflow: hidden; text-overflow: ellipsis; }
+.row .nm.mono { font-size: 12.5px; }
+.row .sub { color: var(--tx-4); font-size: 12px; }
+.row .meta { margin-left: auto; display: flex; align-items: center; gap: 5px; color: var(--tx-3); }
+.row .meta svg.lucide { width: 12px; height: 12px; }
+.row.sel .ic { color: var(--saff-tx); }
+.row.dim .nm { color: var(--tx-2); }
+.eng {
+  width: 18px; height: 16px; border-radius: 4px; display: grid; place-items: center; flex: none;
+  font: 700 8.5px/1 "Alegreya Sans", sans-serif; letter-spacing: .02em;
+  color: var(--tx); background: var(--wing-4); border: 1px solid var(--line-2);
+}
+.tag {
+  height: 16px; padding: 0 5px; border-radius: 4px; display: inline-flex; align-items: center;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+}
+.tag.prod { color: var(--madder-tx); background: var(--madder-tint); box-shadow: inset 0 0 0 1px var(--madder-line); }
+.tag.stg  { color: var(--verd-tx); background: var(--verd-tint); box-shadow: inset 0 0 0 1px var(--verd-line); }
+.m-lock { color: var(--madder-tx); }
+.m-direct { color: var(--verd-tx); }
+.m-rw { color: var(--tx-3); }
+
+/* stage card: the selected connection, its trust facts */
+.stagecard { border-top: 1px solid var(--line); padding: 12px 14px 14px; background: linear-gradient(180deg, var(--wing-1), var(--wing-0)); }
+:root[data-theme="light"] .stagecard { background: var(--wing-1); }
+.sc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.sc-head .nm { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; font-weight: 500; }
+.sc-head .tag { margin-left: auto; }
+.kv { display: grid; grid-template-columns: 76px 1fr; row-gap: 6px; column-gap: 10px; font-size: 13px; }
+.kv dt { color: var(--tx-3); }
+.kv dd { display: flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; }
+.kv dd svg.lucide { width: 13px; height: 13px; }
+.kv .mono { font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.kv .ro { color: var(--madder-tx); }
+.kv .dp { color: var(--verd-tx); }
+.kv .dim { color: var(--tx-4); font-size: 12px; }
+
+/* ------------------------------------------------ main column */
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--wing-0); }
+
+/* valance: the environment band on top of the stage */
+.valance {
+  height: 30px; flex: none; display: flex; align-items: center; gap: 12px;
+  padding: 0 12px 0 10px; background: var(--valance-bg); color: var(--valance-tx);
+  border-bottom: 1px solid var(--madder-line); white-space: nowrap; font-size: 13px;
+}
+.env-chip {
+  display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 8px 0 6px; border-radius: 5px;
+  background: var(--madder); color: #FFF2EA; font-weight: 700; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+}
+.env-chip svg.lucide { width: 12px; height: 12px; stroke-width: 2.25; }
+.valance b { font-family: "IBM Plex Mono", monospace; font-weight: 500; font-size: 12px; }
+.valance .v-path { display: inline-flex; align-items: center; gap: 6px; color: var(--valance-tx-2); }
+.valance .v-path .direct { color: var(--verd-tx); font-weight: 500; display: inline-flex; align-items: center; gap: 5px; }
+.valance .v-path code { font-size: 11.5px; color: var(--valance-tx); }
+.valance .sep { width: 1px; height: 14px; background: var(--madder-line); }
+.valance .v-right { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--valance-tx-2); font-size: 12px; }
+.valance .v-right svg.lucide { width: 12px; height: 12px; }
+:root[data-theme="light"] .valance .v-path .direct { color: var(--verd-tx); }
+
+/* editor tabs */
+.etabs { height: 36px; flex: none; display: flex; align-items: flex-end; padding: 0 8px 0 0; background: var(--wing-0); position: relative; }
+.etabs::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: var(--line); }
+.etab {
+  height: 31px; display: flex; align-items: center; gap: 7px; padding: 0 10px 0 12px; position: relative; z-index: 1;
+  color: var(--tx-3); font-family: "IBM Plex Mono", monospace; font-size: 12px; white-space: nowrap;
+  border-right: 1px solid var(--line);
+}
+.etab:hover { color: var(--tx); }
+.etab svg.lucide { width: 13px; height: 13px; }
+.etab .x { width: 16px; height: 16px; border-radius: 4px; display: grid; place-items: center; color: var(--tx-4); }
+.etab .x svg.lucide { width: 11px; height: 11px; }
+.etab .unsaved { width: 7px; height: 7px; border-radius: 50%; background: var(--saff); margin: 0 4px; }
+.etab.on {
+  color: var(--ink); background: var(--perde-tab-top); border-radius: 7px 7px 0 0; border-right-color: transparent;
+  box-shadow: 0 -1px 0 rgba(0,0,0,.15);
+}
+.etab.on .x { color: var(--ink-2); }
+/* hand-cut perforation along the lit tab's crown */
+.etab.on::before {
+  content: ""; position: absolute; left: 10px; right: 10px; top: 3px; height: 2px;
+  background-image: radial-gradient(circle, rgba(42,30,20,.28) 0.8px, transparent 1.1px);
+  background-size: 6px 2px; background-repeat: repeat-x;
+}
+.etab.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--perde-tab-top); }
+.etabs .spacer { flex: 1; }
+.erun { display: flex; align-items: center; gap: 6px; height: 36px; padding-bottom: 1px; }
+.ctl {
+  height: 24px; display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; border-radius: 6px;
+  color: var(--tx-2); font-size: 12.5px; white-space: nowrap; border: 1px solid transparent;
+}
+.ctl:hover { background: var(--wing-4); color: var(--tx); }
+.ctl.boxed { border-color: var(--line-2); }
+.ctl svg.lucide { width: 13px; height: 13px; }
+.ctl .mono { font-size: 11.5px; }
+.ctl .chevs { color: var(--tx-4); width: 12px; height: 12px; }
+.btn-run {
+  height: 24px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px 0 8px; border-radius: 6px;
+  background: var(--saff); color: #2A1B08; font-weight: 700; font-size: 12.5px; white-space: nowrap;
+  box-shadow: 0 1px 0 rgba(255,240,200,.35) inset, 0 1px 2px rgba(0,0,0,.3);
+}
+.btn-run:hover { background: #E4B04E; }
+.btn-run svg.lucide { width: 12px; height: 12px; fill: currentColor; stroke-width: 2; }
+.btn-run .k { font-family: "IBM Plex Mono", monospace; font-weight: 500; font-size: 10.5px; opacity: .7; }
+
+/* ------------------------------------------------ editor = the lit perde */
+.editor {
+  height: 292px; flex: none; position: relative; overflow: visible; z-index: 3;
+  background:
+    radial-gradient(ellipse 70% 120% at 42% 18%, var(--perde-1) 0%, var(--perde-2) 52%, var(--perde-3) 100%);
+  color: var(--ink);
+  font-family: "IBM Plex Mono", monospace; font-size: 13px;
+  --lh: 20px; --gut: 76px;
+}
+.code { padding-top: 8px; position: relative; }
+.ln { height: var(--lh); line-height: var(--lh); display: flex; white-space: pre; position: relative; }
+.g-stat { width: 22px; flex: none; position: relative; }
+.g-num { width: 32px; flex: none; text-align: right; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.g-fold { width: 22px; flex: none; }
+.tx { padding-left: 0; }
+.ln.cur .g-num { color: var(--ink); }
+.ln.exec { background: linear-gradient(90deg, transparent 0, transparent var(--gut), var(--exec-band) var(--gut)); }
+.ln.exec::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1px; background: linear-gradient(90deg, transparent var(--gut), rgba(190,136,40,.35) var(--gut)); }
+.ln.exec::after  { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: linear-gradient(90deg, transparent var(--gut), rgba(190,136,40,.35) var(--gut)); }
+.ln.exec .g-stat::after { content: ""; position: absolute; right: 7px; top: 2px; bottom: 2px; width: 2px; border-radius: 1px; background: var(--saff); }
+.rng { position: absolute; left: 10.5px; width: 1.5px; border-radius: 1px; background: rgba(47,111,106,.6); }
+.done-disc {
+  position: absolute; left: 4px; top: 3px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--verd); color: #EAF6F3; display: grid; place-items: center; z-index: 1;
+}
+.done-disc svg.lucide { width: 10px; height: 10px; stroke-width: 3; }
+.fold-ic { color: var(--ink-3); display: grid; place-items: center; height: 100%; }
+.fold-ic svg.lucide { width: 11px; height: 11px; }
+.k { color: var(--syn-kw); font-weight: 500; }
+.f { color: var(--syn-fn); }
+.s { color: var(--syn-str); }
+.n { color: var(--syn-num); }
+.c { color: var(--syn-com); font-style: italic; }
+.o { color: var(--syn-op); }
+.a { color: var(--syn-al); }
+.inlay {
+  display: inline-block; margin-left: 10px; padding: 0 6px; height: 16px; line-height: 16px; border-radius: 4px;
+  background: var(--inlay-bg); color: var(--ink-2); font-size: 11px; vertical-align: 1px;
+}
+.inlay.ok { color: #24605A; background: rgba(47,111,106,.12); display: inline-flex; gap: 5px; align-items: center; }
+.inlay.ok svg.lucide { width: 10px; height: 10px; stroke-width: 3; }
+.caret { display: inline-block; width: 2px; height: 17px; background: var(--ink); vertical-align: -3px; margin-left: 0; border-radius: 1px; }
+/* floor of the stage: the screen's light spills onto the grid */
+.splitter { height: 5px; flex: none; position: relative; background: var(--wing-0); cursor: row-resize; z-index: 2; }
+.splitter::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1px; background: rgba(0,0,0,.35); }
+:root[data-theme="light"] .splitter::before { background: var(--line-2); }
+.splitter::after { content: ""; position: absolute; left: 50%; top: 2px; width: 28px; height: 1px; margin-left: -14px; background: var(--tx-4); opacity: .6; }
+
+/* ------------------------------------------------ completion popup (a shadow cast on the screen) */
+.popup {
+  position: absolute; z-index: 10;
+  left: calc(var(--gut) + 47ch - 30px);
+  bottom: calc(292px - 8px - 13 * var(--lh) + 3px);
+  display: flex; background: var(--pop-bg); color: #EADBBC;
+  border: 1px solid var(--pop-line); border-radius: 9px; box-shadow: var(--shadow-pop);
+  font-family: "IBM Plex Mono", monospace; overflow: hidden;
+}
+.pop-list { width: 352px; display: flex; flex-direction: column; }
+.pop-items { padding: 4px; }
+.ci {
+  height: 25px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 6px; border-radius: 5px;
+  font-size: 12.5px; white-space: nowrap;
+}
+.ci:hover { background: rgba(233,216,180,.06); }
+.ci.on { background: rgba(217,164,65,.22); box-shadow: inset 0 0 0 1px rgba(217,164,65,.38); }
+.ci .kd { width: 16px; height: 16px; border-radius: 4px; display: grid; place-items: center; flex: none; }
+.ci .kd svg.lucide { width: 12px; height: 12px; stroke-width: 2; }
+.kd.col { background: rgba(47,111,106,.35); color: #9ED8CD; }
+.kd.fn  { background: rgba(217,164,65,.22); color: #F0C878; }
+.kd.kw  { background: rgba(110,120,190,.22); color: #B9C0EC; }
+.ci .lb b { color: #F2C66E; font-weight: 600; }
+.ci .ty { margin-left: auto; color: #A8977A; font-size: 11.5px; }
+.ci .src { color: #85765F; font-family: "Alegreya Sans", sans-serif; font-size: 12px; width: 76px; text-align: right; overflow: hidden; text-overflow: ellipsis; }
+.ci.oos .lb, .ci.oos .ty { color: #7C6E59; }
+.ci.oos .lb b { color: #9C8459; }
+.ci.oos .kd { opacity: .5; }
+.oos-tag { font-family: "Alegreya Sans", sans-serif; font-size: 11px; font-style: italic; color: #8A7B63; }
+.pop-foot {
+  margin-top: auto; height: 27px; border-top: 1px solid var(--pop-line); display: flex; align-items: center; gap: 12px;
+  padding: 0 10px; font-family: "Alegreya Sans", sans-serif; font-size: 12px; color: #9C8B6E; background: var(--pop-bg-2); white-space: nowrap;
+}
+.pop-foot kbd { font-size: 10.5px; color: #CDBB98; border: 1px solid #45362A; border-radius: 3px; padding: 0 4px; line-height: 15px; margin-right: 4px; }
+.pop-detail { width: 276px; border-left: 1px solid var(--pop-line); padding: 11px 13px; background: var(--pop-bg-2); font-family: "Alegreya Sans", sans-serif; }
+.pd-title { font-family: "IBM Plex Mono", monospace; font-size: 13px; font-weight: 600; color: #F3E5C6; }
+.pd-sub { font-size: 12.5px; color: #A8977A; margin: 2px 0 10px; }
+.pd-kv { display: grid; grid-template-columns: auto 1fr; column-gap: 12px; row-gap: 5px; font-size: 12.5px; }
+.pd-kv dt { color: #8F7F66; white-space: nowrap; }
+.pd-kv dd { color: #E5D5B5; min-width: 0; }
+.pd-kv dd code { font-size: 11.5px; overflow-wrap: anywhere; }
+.pd-kv .fk { color: #9ED8CD; display: inline-flex; gap: 4px; align-items: center; }
+.pd-kv .fk svg.lucide { width: 11px; height: 11px; }
+.pd-note { margin-top: 10px; font-size: 12px; color: #A8977A; line-height: 1.4; }
+
+/* ------------------------------------------------ results */
+.results { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--wing-2); position: relative; }
+.results::before { /* light spill from the screen above */
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 40px; pointer-events: none; z-index: 1;
+  background: linear-gradient(180deg, var(--spill), transparent);
+}
+.rhead { height: 32px; flex: none; display: flex; align-items: center; gap: 2px; padding: 0 10px 0 6px; border-bottom: 1px solid var(--line); background: var(--wing-1); }
+.rtab {
+  height: 24px; display: inline-flex; align-items: center; gap: 7px; padding: 0 10px; border-radius: 6px;
+  color: var(--tx-3); font-size: 13px; white-space: nowrap;
+}
+.rtab:hover { color: var(--tx); background: var(--wing-4); }
+.rtab.on { color: var(--tx); background: var(--wing-4); box-shadow: inset 0 0 0 1px var(--line-2); }
+.rtab svg.lucide { width: 13px; height: 13px; }
+.rtab .env-dot { width: 7px; height: 7px; border-radius: 2px; }
+.stamp {
+  height: 16px; min-width: 16px; padding: 0 4px; border-radius: 3px; display: inline-grid; place-items: center;
+  background: var(--saff); color: #2A1B08; font-size: 10.5px; font-weight: 700; font-family: "IBM Plex Mono", monospace;
+}
+.rhead .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.ro-chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 5px; white-space: nowrap;
+  color: var(--madder-tx); background: var(--madder-tint); box-shadow: inset 0 0 0 1px var(--madder-line); font-size: 12.5px;
+}
+.ro-chip svg.lucide { width: 12px; height: 12px; }
+.ro-chip b { font-weight: 700; }
+.env-chip-sm {
+  display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 5px; white-space: nowrap; font-size: 12.5px;
+  color: var(--verd-tx); background: var(--verd-tint); box-shadow: inset 0 0 0 1px var(--verd-line);
+}
+.env-chip-sm code { font-size: 11.5px; }
+.pend-chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 5px; white-space: nowrap; font-size: 12.5px;
+  color: var(--saff-tx); background: var(--saff-tint); box-shadow: inset 0 0 0 1px var(--saff-line);
+}
+.pend-chip svg.lucide { width: 12px; height: 12px; }
+
+.rtool { height: 34px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-bottom: 1px solid var(--line); background: var(--wing-2); }
+.where {
+  flex: 1; min-width: 160px; max-width: 520px; height: 24px; display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--line-2); border-radius: 6px; padding: 0 8px; background: var(--wing-0);
+}
+:root[data-theme="light"] .where { background: #FFFDF8; }
+.where .lbl { font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 600; color: var(--syn-kw); letter-spacing: .02em; }
+:root[data-theme="dark"] .where .lbl { color: #9EA8E0; }
+.where input { flex: 1; min-width: 0; font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+.where input::placeholder { font-family: "Alegreya Sans", sans-serif; font-size: 13px; color: var(--tx-3); }
+.rtool .gap { flex: 1; }
+.pager { display: inline-flex; align-items: center; gap: 2px; color: var(--tx-2); }
+.pager .pg { font-size: 12px; padding: 0 6px; font-family: "IBM Plex Mono", monospace; white-space: nowrap; }
+.vsep { width: 1px; height: 16px; background: var(--line-2); margin: 0 4px; }
+.selsum { display: inline-flex; align-items: center; gap: 6px; color: var(--saff-tx); font-size: 12px; font-family: "IBM Plex Mono", monospace; white-space: nowrap; }
+.selsum svg.lucide { width: 12px; height: 12px; }
+
+.gridwrap { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+.grid { position: absolute; inset: 0; overflow: hidden; font-size: 13px; }
+.gh, .gr { display: flex; width: max-content; min-width: 100%; }
+.gh { height: 36px; position: sticky; top: 0; z-index: 2; background: var(--wing-3); border-bottom: 1px solid var(--line-2); }
+.gh .cell { flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px; padding: 0 10px; }
+.gh .cell.num { align-items: flex-end; }
+.gh .cn { font-weight: 700; font-size: 13px; color: var(--tx); display: flex; align-items: center; gap: 5px; }
+.gh .ct { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--tx-3); }
+.gh .cn svg.lucide { width: 12px; height: 12px; color: var(--saff-tx); stroke-width: 2.2; }
+.gh .cn .pk { color: var(--saff-tx); }
+.cell { height: 100%; display: flex; align-items: center; padding: 0 10px; border-right: 1px solid var(--line); white-space: nowrap; overflow: hidden; flex: none; position: relative; }
+.cell.num { justify-content: flex-end; font-family: "IBM Plex Mono", monospace; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.cell.rn { width: 48px; justify-content: flex-end; color: var(--tx-4); font-family: "IBM Plex Mono", monospace; font-size: 11px; background: var(--wing-1); padding: 0 8px; }
+.gh .cell.rn { background: var(--wing-3); }
+.cell.fill { flex: 1; border-right: 0; }
+.gr { height: 20px; border-bottom: 1px solid rgba(255,240,210,.035); }
+:root[data-theme="light"] .gr { border-bottom-color: rgba(80,60,30,.06); }
+.gr:nth-child(odd) { background: rgba(233,216,180,.018); }
+:root[data-theme="light"] .gr:nth-child(odd) { background: rgba(120,90,40,.025); }
+.gr:hover { background: rgba(233,216,180,.055); }
+:root[data-theme="light"] .gr:hover { background: rgba(120,90,40,.06); }
+.gr:hover .cell.rn { color: var(--tx-2); }
+.gr .cell:not(.rn):not(.fill):hover { box-shadow: inset 0 0 0 1px var(--tx-4); }
+.null {
+  font-family: "IBM Plex Mono", monospace; font-size: 10.5px; font-style: italic; letter-spacing: .04em;
+  color: var(--tx-3); padding: 0 5px; border-radius: 3px; border: 1px dashed var(--line-2); line-height: 14px;
+}
+.cell.sel { background: rgba(217,164,65,.14); }
+:root[data-theme="light"] .cell.sel { background: rgba(217,164,65,.20); }
+.cell.sel.st { box-shadow: inset 0 1px 0 var(--saff-line); }
+.cell.sel.sb { box-shadow: inset 0 -1px 0 var(--saff-line); }
+.cell.sel.sl.st { box-shadow: inset 1px 1px 0 var(--saff-line); }
+.cell.sel.sl.sb { box-shadow: inset 1px -1px 0 var(--saff-line); }
+.cell.sel.sr.st { box-shadow: inset -1px 1px 0 var(--saff-line); }
+.cell.sel.sr.sb { box-shadow: inset -1px -1px 0 var(--saff-line); }
+.cell.sel.sl { box-shadow: inset 1px 0 0 var(--saff-line); }
+.cell.sel.sr { box-shadow: inset -1px 0 0 var(--saff-line); }
+.cell.sel.anchor { box-shadow: inset 0 0 0 1.5px var(--saff); }
+.gr.has-sel .cell.rn { color: var(--saff-tx); }
+.cell.edited { background: var(--saff-tint); box-shadow: inset 0 0 0 1px var(--saff-line); }
+.cell.edited .was { margin-left: 8px; font-family: "Alegreya Sans", sans-serif; font-size: 11.5px; color: var(--tx-3); text-decoration: line-through; text-decoration-color: var(--tx-4); }
+.cell.edited::after { /* hand-cut stamp corner */
+  content: ""; position: absolute; right: 0; top: 0; width: 0; height: 0;
+  border-top: 7px solid var(--saff); border-left: 7px solid transparent;
+}
+.gr.dirty .cell.rn { color: var(--saff-tx); }
+.st-badge { font-family: "IBM Plex Mono", monospace; font-size: 11.5px; padding: 0 6px; border-radius: 3px; line-height: 15px; }
+.st-paid { color: var(--verd-tx); background: var(--verd-tint); }
+.st-pending { color: var(--tx-2); background: rgba(233,216,180,.07); }
+:root[data-theme="light"] .st-pending { background: rgba(80,60,30,.07); }
+.st-shipped { color: #A9B4EA; background: rgba(110,120,190,.16); }
+:root[data-theme="light"] .st-shipped { color: #3C4888; background: rgba(60,72,140,.1); }
+.st-refunded { color: var(--madder-tx); background: var(--madder-tint); }
+.vscroll { position: absolute; right: 2px; top: 40px; bottom: 4px; width: 6px; z-index: 3; }
+.vscroll i { position: absolute; top: 0; left: 0; right: 0; height: 18%; border-radius: 3px; background: var(--tx-4); opacity: .55; }
+.dml {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 38px; z-index: 4; display: none; align-items: center; gap: 10px;
+  padding: 0 10px 0 12px; background: var(--wing-3); border-top: 1px solid var(--saff-line);
+  box-shadow: 0 -8px 20px rgba(0,0,0,.18);
+}
+.dml code { font-size: 12px; color: var(--tx-2); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dml code .k2 { color: #9EA8E0; } .dml code .s2 { color: #B9CC84; }
+:root[data-theme="light"] .dml code .k2 { color: var(--syn-kw); }
+:root[data-theme="light"] .dml code .s2 { color: var(--syn-str); }
+.btn { height: 24px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; white-space: nowrap; border: 1px solid var(--line-2); color: var(--tx); }
+.btn:hover { background: var(--wing-4); }
+.btn svg.lucide { width: 12px; height: 12px; }
+.btn.primary { background: var(--verd); border-color: transparent; color: #EAF6F3; font-weight: 700; }
+.btn.primary:hover { background: #377E78; }
+.results[data-tab="staging"] .dml { display: flex; }
+
+/* ------------------------------------------------ status bar */
+.status {
+  display: flex; align-items: center; gap: 2px; padding: 0 6px; font-size: 12px; color: var(--tx-2);
+  background: var(--wing-1); border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden;
+}
+.sb { height: 20px; display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border-radius: 4px; }
+.sb:hover { background: var(--wing-4); color: var(--tx); }
+.sb svg.lucide { width: 12px; height: 12px; }
+.sb.env { background: var(--madder); color: #FFF2EA; font-weight: 700; }
+.sb.env:hover { background: #CF4A35; color: #FFF2EA; }
+.sb.path { color: var(--verd-tx); }
+.sb.dim { color: var(--tx-4); }
+.sb .mono, .status .mono { font-size: 11.5px; }
+.status .grow { flex: 1; }
+.sb.lang { font-weight: 700; letter-spacing: .03em; }
+
+/* ============================================================ SPLASH */
+.splash { position: relative; height: 100%; overflow: hidden;
+  background:
+    radial-gradient(ellipse 58% 62% at 50% 40%, rgba(233,200,140,.10), rgba(233,200,140,0) 70%),
+    linear-gradient(180deg, #17110C, #0F0B08);
+}
+:root[data-theme="light"] .splash {
+  background:
+    radial-gradient(ellipse 58% 62% at 50% 40%, rgba(255,246,222,.9), rgba(255,246,222,0) 70%),
+    linear-gradient(180deg, #E9DFCB, #DDD0B6);
+}
+.sp-brand { position: absolute; top: 34px; left: 0; right: 0; display: flex; justify-content: center; align-items: center; gap: 12px; }
+.sp-brand .mark { width: 30px; height: 27px; }
+.sp-brand span { font-family: "Alegreya", serif; font-weight: 600; font-size: 30px; letter-spacing: .005em; color: var(--tx); }
+.stage { position: absolute; left: 50%; top: 92px; width: 900px; margin-left: -450px; height: 460px; }
+.frame {
+  position: absolute; inset: 0; border-radius: 6px; padding: 14px;
+  background: linear-gradient(180deg, #3A2A1C, #261A11);
+  box-shadow: 0 30px 60px rgba(0,0,0,.45), 0 4px 10px rgba(0,0,0,.35), inset 0 0 0 1px rgba(255,220,160,.08);
+}
+:root[data-theme="light"] .frame { background: linear-gradient(180deg, #5A4330, #3F2E20); box-shadow: 0 30px 60px rgba(70,45,20,.25), 0 4px 10px rgba(70,45,20,.2); }
+/* hand-cut perforations on the frame: light leaking through punched holes */
+.frame::before, .frame::after {
+  content: ""; position: absolute; left: 22px; right: 22px; height: 3px;
+  background-image: radial-gradient(circle, rgba(255,226,170,.55) 1px, transparent 1.4px);
+  background-size: 9px 3px; background-repeat: repeat-x;
+}
+.frame::before { top: 5px; } .frame::after { bottom: 5px; }
+.frame .perf-v { position: absolute; top: 22px; bottom: 22px; width: 3px;
+  background-image: radial-gradient(circle, rgba(255,226,170,.55) 1px, transparent 1.4px);
+  background-size: 3px 9px; background-repeat: repeat-y; }
+.frame .perf-v.l { left: 5px; } .frame .perf-v.r { right: 5px; }
+.screen {
+  position: relative; width: 100%; height: 100%; border-radius: 2px; overflow: hidden;
+  background: radial-gradient(ellipse 62% 78% at 50% 46%, #FFF4D6 0%, #F0DCAF 38%, #DCBD86 72%, #B8935C 100%);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,.35);
+}
+:root[data-theme="light"] .screen { background: radial-gradient(ellipse 62% 78% at 50% 46%, #FFFCF2 0%, #F8EDD3 45%, #EBD7AE 80%, #D9BD8A 100%); }
+.lamp { position: absolute; inset: 0; background: radial-gradient(ellipse 34% 44% at 50% 44%, rgba(255,250,232,.55), rgba(255,250,232,0) 100%); }
+.ground { position: absolute; left: 0; right: 0; bottom: 0; height: 30px; background: linear-gradient(180deg, rgba(60,36,16,0), rgba(60,36,16,.22)); }
+.ground::before { content: ""; position: absolute; left: 0; right: 0; top: 10px; height: 1px; background: rgba(42,30,20,.22); }
+.fig { position: absolute; overflow: visible; }
+.fig-h { left: 150px; bottom: 22px; height: 344px; width: 229px; }
+.fig-k { right: 148px; bottom: 22px; height: 326px; width: 217px; transform: scaleX(-1); }
+.punch { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+
+/* figure materials: translucent painted hide, inked outline */
+.hd { stroke: #2A190C; stroke-width: 1.7; stroke-linejoin: round; stroke-linecap: round; }
+.hd-madder { fill: rgba(194,65,45,.76); }
+.hd-madder-d { fill: rgba(140,42,28,.9); }
+.hd-verd { fill: rgba(47,111,106,.74); }
+.hd-saff { fill: rgba(217,164,65,.78); }
+.hd-indigo { fill: rgba(52,66,122,.76); }
+.hd-face { fill: rgba(250,236,204,.72); }
+.inkf { fill: #24170D; }
+.cut { fill: none; stroke: #24170D; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.holes circle { fill: #FFF6DE; }
+.pin { fill: #F1E0B8; stroke: #24170D; stroke-width: 1.6; }
+
+.narr { position: absolute; left: 50%; top: 578px; width: 640px; margin-left: -320px; }
+.nar-title { font-family: "Alegreya", serif; font-style: italic; font-weight: 500; font-size: 23px; color: var(--tx); text-align: center; margin-bottom: 18px; letter-spacing: .003em; }
+.nar-title code { font-style: normal; font-size: 19px; font-weight: 500; }
+.steps { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.step { height: 30px; display: flex; align-items: center; gap: 12px; font-size: 15px; color: var(--tx-4); transition: color .3s ease-out; }
+.step code { font-size: 13px; }
+.step .mk { width: 18px; height: 18px; border-radius: 50%; flex: none; display: grid; place-items: center; border: 1.5px solid var(--line-2); }
+.step .mk svg.lucide { width: 11px; height: 11px; stroke-width: 3; opacity: 0; }
+.step .ld { flex: 1; height: 1px; margin: 0 4px; background-image: radial-gradient(circle, var(--tx-4) .8px, transparent 1.1px); background-size: 6px 2px; background-repeat: repeat-x; opacity: .7; }
+.step .mt { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--tx-4); min-width: 84px; text-align: right; }
+.step.active { color: var(--tx); }
+.step.active .mk { border-color: var(--saff); }
+.step.active .mk::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--saff); animation: pulse 1s ease-in-out infinite; }
+.step.active .mt { color: var(--saff-tx); }
+.step.done { color: var(--tx-2); }
+.step.done .mk { background: var(--verd); border-color: var(--verd); color: #EAF6F3; }
+.step.done .mk svg.lucide { opacity: 1; }
+.step.done .mt { color: var(--verd-tx); }
+@keyframes pulse { 0%,100% { opacity: .35; } 50% { opacity: 1; } }
+.prog { margin-top: 16px; height: 2px; border-radius: 1px; background: var(--line-2); overflow: hidden; }
+.prog i { display: block; height: 100%; width: 100%; background: var(--saff); transform-origin: left; transform: scaleX(0); }
+.sp-foot { position: absolute; left: 32px; right: 32px; bottom: 22px; display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; color: var(--tx-3); }
+.sp-foot .l { display: flex; align-items: center; gap: 8px; }
+.btn-enter {
+  height: 30px; display: inline-flex; align-items: center; gap: 8px; padding: 0 12px 0 14px; border-radius: 7px;
+  background: var(--wing-4); color: var(--tx-2); font-size: 13.5px; font-weight: 500; border: 1px solid var(--line-2);
+  transition: background .3s ease-out, color .3s ease-out, border-color .3s ease-out;
+}
+.btn-enter svg.lucide { width: 14px; height: 14px; }
+.ready .btn-enter { background: var(--saff); color: #2A1B08; border-color: transparent; font-weight: 700; }
+.ready .btn-enter kbd { color: #5A4214; border-color: rgba(42,27,8,.3); }
+
+/* ---- splash choreography (only when the splash actually plays) */
+.play .lamp { animation: lampOn .9s cubic-bezier(.16,1,.3,1) both, flicker 3.2s ease-in-out 1s infinite alternate; }
+.play .screen { animation: screenOn .8s cubic-bezier(.16,1,.3,1) both; }
+.play .fig-h { animation: enterL 1.1s cubic-bezier(.16,1,.3,1) .35s both; }
+.play .fig-k { animation: enterR 1.1s cubic-bezier(.16,1,.3,1) .45s both; }
+.play .fig .bob { animation: bob .55s ease-in-out .35s 2 both; transform-box: view-box; transform-origin: 120px 340px; }
+.play .fore-h { animation: raise .7s cubic-bezier(.16,1,.3,1) 3.2s both; }
+.play .fore-k { animation: offer .7s cubic-bezier(.16,1,.3,1) 1.2s both; }
+.fore-h { transform-box: view-box; transform-origin: 166px 248px; }
+.fore-k { transform-box: view-box; transform-origin: 174px 256px; }
+.play .pdot { animation: punch .28s cubic-bezier(.2,1.4,.4,1) both; transform-box: fill-box; transform-origin: center; }
+.play .emb-body { animation: embLight 1.1s ease-out 2.3s both; }
+.play .ring { animation: ringOn .3s ease-out both; }
+.play .emb { animation: embIn .9s cubic-bezier(.16,1,.3,1) .9s both; }
+.play .cap { animation: fadeIn .6s ease-out 3.3s both; }
+.play .narr { animation: fadeUp .7s cubic-bezier(.16,1,.3,1) .2s both; }
+.emb-body { fill: rgba(217,164,65,.86); }
+@keyframes screenOn { from { opacity: .25; } to { opacity: 1; } }
+@keyframes lampOn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes flicker { 0% { opacity: 1; } 40% { opacity: .86; } 55% { opacity: .97; } 100% { opacity: .9; } }
+@keyframes enterL { from { transform: translateX(-90px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes enterR { from { transform: scaleX(-1) translateX(-90px); opacity: 0; } to { transform: scaleX(-1); opacity: 1; } }
+@keyframes bob { 0%,100% { transform: none; } 30% { transform: translateY(-5px) rotate(-1.2deg); } 65% { transform: translateY(1px) rotate(.6deg); } }
+@keyframes raise { from { transform: rotate(38deg); } to { transform: none; } }
+@keyframes offer { from { transform: rotate(30deg); } to { transform: none; } }
+@keyframes punch { from { transform: scale(0); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes embLight { from { fill: rgba(120,90,50,.28); } to { fill: rgba(217,164,65,.86); } }
+@keyframes ringOn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes embIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .play *, .play { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<!-- reusable mark: a lit screen in its frame, punched along the sill -->
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <linearGradient id="mk-lit" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F6E7C4"/><stop offset="1" stop-color="#D9A441"/>
+    </linearGradient>
+    <symbol id="mark" viewBox="0 0 20 18">
+      <rect x=".75" y=".75" width="18.5" height="16.5" rx="3.2" fill="#2A1E14" stroke="#4A3826" stroke-width="1"/>
+      <rect x="3" y="3" width="14" height="10" rx="1.2" fill="url(#mk-lit)"/>
+      <path d="M8.2 13 C8.2 9.6 9 7.4 10.6 6.6 C11.6 6.1 12.2 6.8 11.6 7.6 C11.1 8.3 11.6 10.4 12.6 13 Z" fill="#2A1E14" opacity=".85"/>
+      <circle cx="5" cy="15.2" r=".7" fill="#D9A441"/><circle cx="8.3" cy="15.2" r=".7" fill="#D9A441"/>
+      <circle cx="11.7" cy="15.2" r=".7" fill="#D9A441"/><circle cx="15" cy="15.2" r=".7" fill="#D9A441"/>
+    </symbol>
+  </defs>
+</svg>
+
+<div class="win" id="win">
+  <!-- ============================== TITLE BAR -->
+  <header class="titlebar">
+    <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+    <div class="brand"><svg class="mark"><use href="#mark"/></svg><span class="brand-name">Hacivat</span></div>
+    <button class="conn-switch" title="Switch connection (⌘K)">
+      <span class="hide-sq"><i data-lucide="lock-keyhole"></i></span>
+      <span class="cs-name mono">orders-prod</span>
+      <span class="cs-eng">PostgreSQL 16</span>
+      <span class="cs-div"></span>
+      <span class="cs-env" data-i18n="envProdRo">production · read-only</span>
+      <span class="cs-div"></span>
+      <span class="cs-path"><i data-lucide="arrow-left-right"></i><span data-i18n="directP2P">Direct P2P</span></span>
+      <i data-lucide="chevrons-up-down"></i>
+    </button>
+    <div class="tb-spacer"></div>
+    <div class="seg" id="viewSeg">
+      <button data-view="workspace"><span data-i18n="workspace">Workspace</span></button>
+      <button data-view="splash"><span data-i18n="splash">Splash</span><kbd>S</kbd></button>
+    </div>
+    <button class="tb-icon" id="themeBtn" title="Theme (T)"><i data-lucide="moon" class="ic-moon"></i></button>
+    <div class="seg" id="langSeg">
+      <button data-lang="en">EN</button><button data-lang="tr">TR</button>
+    </div>
+    <div class="perde-status"><span class="dot verd"></span>Perde · Acme</div>
+  </header>
+
+  <!-- ============================== WORKSPACE -->
+  <div class="workspace">
+    <aside class="side">
+      <div class="side-head">
+        <span class="side-title" data-i18n="explorer">Explorer</span>
+        <button class="ib" title="New connection"><i data-lucide="plus"></i></button>
+        <button class="ib" title="Refresh"><i data-lucide="refresh-cw"></i></button>
+        <button class="ib" title="Collapse all"><i data-lucide="chevrons-down-up"></i></button>
+      </div>
+      <div class="side-search"><i data-lucide="search"></i><input data-i18n-ph="filterObjects" placeholder="Filter objects"><span class="kbd">⌘F</span></div>
+
+      <div class="tree" id="tree">
+        <div class="grp"><span data-i18n="local">Local</span><span class="count">1</span></div>
+        <div class="row" style="--lvl:0"><span class="chev"><i data-lucide="chevron-down"></i></span><span class="eng">SL</span><span class="nm mono">local-sqlite</span><span class="sub">SQLite</span></div>
+        <div class="row" style="--lvl:1"><span class="chev"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="database"></i></span><span class="nm mono">app.db</span></div>
+
+        <div class="grp"><svg class="pmark"><use href="#mark"/></svg><span>Perde · Acme</span><span class="count">4</span></div>
+        <div class="row" style="--lvl:0" title="karagoz@eu-west-1a · direct P2P"><span class="chev"><i data-lucide="chevron-down"></i></span><span class="eng">PG</span><span class="nm mono">orders-prod</span>
+          <span class="meta"><span class="tag prod" data-i18n="tagProd">prod</span><span class="m-lock"><i data-lucide="lock-keyhole"></i></span><span class="m-direct"><i data-lucide="arrow-left-right"></i></span></span></div>
+        <div class="row" style="--lvl:1"><span class="chev"><i data-lucide="chevron-down"></i></span><span class="ic"><i data-lucide="database"></i></span><span class="nm mono">orders</span></div>
+        <div class="row" style="--lvl:2"><span class="chev"><i data-lucide="chevron-down"></i></span><span class="ic"><i data-lucide="layers"></i></span><span class="nm mono">public</span></div>
+        <div class="row" style="--lvl:3"><span class="chev"><i data-lucide="chevron-down"></i></span><span class="ic"><i data-lucide="folder-open"></i></span><span class="nm" data-i18n="tables">Tables</span><span class="sub">5</span></div>
+        <div class="row" style="--lvl:4"><span class="chev"></span><span class="ic"><i data-lucide="table-2"></i></span><span class="nm mono">customers</span></div>
+        <div class="row sel" style="--lvl:4"><span class="chev"></span><span class="ic"><i data-lucide="table-2"></i></span><span class="nm mono">orders</span><span class="meta"><span class="sub mono" style="font-size:10.5px">2,481</span></span></div>
+        <div class="row" style="--lvl:4"><span class="chev"></span><span class="ic"><i data-lucide="table-2"></i></span><span class="nm mono">order_items</span></div>
+        <div class="row" style="--lvl:4"><span class="chev"></span><span class="ic"><i data-lucide="table-2"></i></span><span class="nm mono">products</span></div>
+        <div class="row" style="--lvl:4"><span class="chev"></span><span class="ic"><i data-lucide="table-2"></i></span><span class="nm mono">audit_log</span></div>
+        <div class="row dim" style="--lvl:3"><span class="chev"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="eye"></i></span><span class="nm" data-i18n="views">Views</span></div>
+        <div class="row dim" style="--lvl:3"><span class="chev"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="square-function"></i></span><span class="nm" data-i18n="functions">Functions</span></div>
+        <div class="row dim" style="--lvl:3"><span class="chev"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="list-ordered"></i></span><span class="nm" data-i18n="sequences">Sequences</span></div>
+        <div class="row" style="--lvl:2"><span class="chev"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="layers"></i></span><span class="nm mono">billing</span></div>
+        <div class="row" style="--lvl:0"><span class="chev"><i data-lucide="chevron-right"></i></span><span class="eng">PG</span><span class="nm mono">orders-staging</span>
+          <span class="meta"><span class="tag stg" data-i18n="tagStg">stg</span><span class="m-rw"><i data-lucide="pencil"></i></span><span class="m-direct"><i data-lucide="arrow-left-right"></i></span></span></div>
+        <div class="row" style="--lvl:0"><span class="chev"><i data-lucide="chevron-right"></i></span><span class="eng">RD</span><span class="nm mono">cache-prod</span><span class="sub">Redis 7.4</span>
+          <span class="meta"><span class="tag prod" data-i18n="tagProd">prod</span><span class="m-lock"><i data-lucide="lock-keyhole"></i></span></span></div>
+        <div class="row" style="--lvl:0"><span class="chev"><i data-lucide="chevron-right"></i></span><span class="eng">MG</span><span class="nm mono">events</span><span class="sub">MongoDB 7</span>
+          <span class="meta"><span class="tag stg" data-i18n="tagStg">stg</span></span></div>
+      </div>
+
+      <div class="stagecard">
+        <div class="sc-head"><span class="eng">PG</span><span class="nm">orders-prod</span><span class="tag prod" data-i18n="production">production</span></div>
+        <dl class="kv">
+          <dt data-i18n="access">Access</dt><dd class="ro"><i data-lucide="lock-keyhole"></i><span data-i18n="readOnly">Read-only</span></dd>
+          <dt data-i18n="path">Path</dt><dd class="dp"><i data-lucide="arrow-left-right"></i><span data-i18n="directP2P">Direct P2P</span><span class="mono">· 18 ms</span></dd>
+          <dt data-i18n="agent">Agent</dt><dd><span class="mono">karagoz@eu-west-1a</span></dd>
+          <dt data-i18n="role">Role</dt><dd><span class="mono">backend-readonly</span></dd>
+          <dt data-i18n="engine">Engine</dt><dd>PostgreSQL 16</dd>
+        </dl>
+      </div>
+    </aside>
+
+    <section class="main">
+      <div class="valance">
+        <span class="env-chip"><i data-lucide="lock-keyhole"></i><span data-i18n="production">production</span></span>
+        <span data-i18n-html="valanceRo"><b>orders-prod</b> is read-only — writes are refused by the Karagöz agent</span>
+        <span class="sep"></span>
+        <span class="v-path"><span class="direct"><i data-lucide="arrow-left-right"></i><span data-i18n="directP2P">Direct P2P</span></span><span data-i18n="via">via</span><code>karagoz@eu-west-1a</code><span class="mono" style="font-size:11.5px">· 18 ms</span></span>
+        <span class="v-right"><i data-lucide="history"></i><span data-i18n="audited">Every query is audited</span></span>
+      </div>
+
+      <div class="etabs">
+        <div class="etab on"><i data-lucide="file-code-2"></i>orders-prod.sql<span class="x"><i data-lucide="x"></i></span></div>
+        <div class="etab"><i data-lucide="file-code-2"></i>revenue-by-city.sql<span class="x"><i data-lucide="x"></i></span></div>
+        <div class="etab"><i data-lucide="file-code-2"></i>scratch.sql<span class="unsaved" title="Unsaved"></span></div>
+        <span class="spacer"></span>
+        <div class="erun">
+          <button class="ctl boxed"><i data-lucide="layers"></i><span class="mono">orders › public</span><i data-lucide="chevrons-up-down" class="chevs"></i></button>
+          <button class="ctl boxed"><i data-lucide="git-commit-horizontal"></i><span data-i18n="autocommit">Auto-commit</span><i data-lucide="chevrons-up-down" class="chevs"></i></button>
+          <button class="ctl"><i data-lucide="list-tree"></i><span data-i18n="explain">Explain</span></button>
+          <button class="btn-run"><i data-lucide="play"></i><span data-i18n="run">Run</span><span class="k">⌘↵</span></button>
+        </div>
+      </div>
+
+      <div class="editor" id="editor">
+        <div class="code" id="code"></div>
+        <div class="popup" id="popup">
+          <div class="pop-list">
+            <div class="pop-items" id="popItems"></div>
+            <div class="pop-foot"><span><kbd>↵</kbd><span data-i18n="insert">Insert</span></span><span><kbd>⇥</kbd><span data-i18n="replace">Replace</span></span><span><kbd>⌃Space</kbd><span data-i18n="allCols">All columns</span></span></div>
+          </div>
+          <div class="pop-detail" id="popDetail"></div>
+        </div>
+      </div>
+      <div class="splitter" title="Drag to resize"></div>
+
+      <div class="results" id="results" data-tab="r1">
+        <div class="rhead">
+          <button class="rtab on" data-rtab="r1"><i data-lucide="table-2"></i><span data-i18n="result1">Result 1</span></button>
+          <button class="rtab" data-rtab="staging"><span class="env-dot" style="background:var(--verd)"></span><span class="mono" style="font-size:12px">orders</span><span data-i18n="stagingParen">(staging)</span><span class="stamp">1</span></button>
+          <div class="right" id="rhRight"></div>
+        </div>
+        <div class="rtool">
+          <div class="where"><span class="lbl">WHERE</span><input data-i18n-ph="whereHint" placeholder="Filter rows with a WHERE clause"></div>
+          <button class="ctl"><i data-lucide="sigma"></i><span data-i18n="countRows">Count rows</span></button>
+          <span class="gap"></span>
+          <span class="selsum" id="selsum"></span>
+          <span class="vsep"></span>
+          <span class="pager"><button class="ib"><i data-lucide="chevron-left"></i></button><span class="pg" id="pg">1–100 of 2,481</span><button class="ib"><i data-lucide="chevron-right"></i></button></span>
+          <span class="vsep"></span>
+          <button class="ctl"><i data-lucide="copy"></i><span data-i18n="copy">Copy</span></button>
+          <button class="ctl"><i data-lucide="download"></i><span data-i18n="export">Export</span></button>
+        </div>
+        <div class="gridwrap">
+          <div class="grid" id="grid"></div>
+          <div class="vscroll"><i></i></div>
+          <div class="dml">
+            <span class="pend-chip"><i data-lucide="file-diff"></i><span data-i18n="pending">1 pending change — not submitted</span></span>
+            <code><span class="k2">UPDATE</span> orders <span class="k2">SET</span> status = <span class="s2">'paid'</span> <span class="k2">WHERE</span> id = 10482;</code>
+            <button class="btn"><i data-lucide="file-diff"></i><span data-i18n="previewDml">Preview DML</span></button>
+            <button class="btn"><i data-lucide="undo-2"></i><span data-i18n="revert">Revert</span></button>
+            <button class="btn primary"><i data-lucide="send-horizontal"></i><span data-i18n="submit">Submit</span><span class="mono" style="font-size:10.5px;opacity:.75">⌘S</span></button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============================== SPLASH -->
+  <div class="splash" id="splash">
+    <div class="sp-brand"><svg class="mark"><use href="#mark"/></svg><span>Hacivat</span></div>
+
+    <div class="stage">
+      <div class="frame">
+        <span class="perf-v l"></span><span class="perf-v r"></span>
+        <div class="screen">
+          <div class="lamp"></div>
+          <div class="ground"></div>
+
+          <!-- HACİVAT — kavuk, pointed beard, long robe; one jointed arm -->
+          <svg class="fig fig-h" viewBox="0 0 240 360" aria-label="Hacivat">
+            <g class="bob">
+              <path class="hd hd-madder-d" d="M92 334 L92 347 L128 347 C136 347 141 345 145 340 L140 334 Z"/>
+              <path class="hd-face" d="M104 164 L128 164 L130 186 L102 186 Z"/>
+              <path class="hd hd-verd" d="M86 184 C102 176 142 176 158 186 L170 250 L188 334 L62 334 L80 250 Z"/>
+              <path class="cut" d="M150 190 L172 330"/>
+              <path class="cut" d="M106 262 L100 318 M124 262 L124 318" opacity=".55"/>
+              <path class="hd hd-madder" d="M64 320 L185 320 L188 334 L62 334 Z"/>
+              <path class="hd hd-saff" d="M80 244 L169 244 L171 257 L78 257 Z"/>
+              <g class="holes">
+                <circle cx="72" cy="327" r="1.7"/><circle cx="82" cy="327" r="1.7"/><circle cx="92" cy="327" r="1.7"/><circle cx="102" cy="327" r="1.7"/><circle cx="112" cy="327" r="1.7"/><circle cx="122" cy="327" r="1.7"/><circle cx="132" cy="327" r="1.7"/><circle cx="142" cy="327" r="1.7"/><circle cx="152" cy="327" r="1.7"/><circle cx="162" cy="327" r="1.7"/><circle cx="172" cy="327" r="1.7"/><circle cx="181" cy="327" r="1.7"/>
+                <circle cx="88" cy="250.5" r="1.5"/><circle cx="98" cy="250.5" r="1.5"/><circle cx="108" cy="250.5" r="1.5"/><circle cx="118" cy="250.5" r="1.5"/><circle cx="128" cy="250.5" r="1.5"/><circle cx="138" cy="250.5" r="1.5"/><circle cx="148" cy="250.5" r="1.5"/><circle cx="158" cy="250.5" r="1.5"/>
+                <circle cx="155" cy="206" r="1.4"/><circle cx="157.6" cy="222" r="1.4"/><circle cx="160.2" cy="238" r="1.4"/><circle cx="163.6" cy="270" r="1.4"/><circle cx="166.2" cy="286" r="1.4"/><circle cx="168.8" cy="302" r="1.4"/>
+                <circle cx="104" cy="214" r="1.6"/><circle cx="109.2" cy="214.0" r="1.25"/><circle cx="106.6" cy="218.5" r="1.25"/><circle cx="101.4" cy="218.5" r="1.25"/><circle cx="98.8" cy="214.0" r="1.25"/><circle cx="101.4" cy="209.5" r="1.25"/><circle cx="106.6" cy="209.5" r="1.25"/><circle cx="92" cy="288" r="1.6"/><circle cx="98.0" cy="288.0" r="1.25"/><circle cx="95.0" cy="293.2" r="1.25"/><circle cx="89.0" cy="293.2" r="1.25"/><circle cx="86.0" cy="288.0" r="1.25"/><circle cx="89.0" cy="282.8" r="1.25"/><circle cx="95.0" cy="282.8" r="1.25"/><circle cx="140" cy="290" r="1.6"/><circle cx="146.0" cy="290.0" r="1.25"/><circle cx="143.0" cy="295.2" r="1.25"/><circle cx="137.0" cy="295.2" r="1.25"/><circle cx="134.0" cy="290.0" r="1.25"/><circle cx="137.0" cy="284.8" r="1.25"/><circle cx="143.0" cy="284.8" r="1.25"/><circle cx="110" cy="300" r="1.6"/><circle cx="114.5" cy="300.0" r="1.1"/><circle cx="112.2" cy="303.9" r="1.1"/><circle cx="107.8" cy="303.9" r="1.1"/><circle cx="105.5" cy="300.0" r="1.1"/><circle cx="107.8" cy="296.1" r="1.1"/><circle cx="112.2" cy="296.1" r="1.1"/>
+              </g>
+              <path class="hd hd-madder-d" d="M138 334 L138 347 L176 347 C186 347 193 343 198 337 L186 334 Z"/>
+              <path class="hd hd-face" d="M64 104 L156 104 C160 112 163 118 166 123 L181 135 C182 138 180 140 176 140 L166 140 C167 144 169 147 166 150 L150 152 C140 164 128 172 108 172 C84 172 66 154 64 128 Z"/>
+              <path class="inkf" d="M168 150 C168 162 170 182 172 208 C160 193 140 181 118 172 C134 168 146 160 152 152 Z"/>
+              <path class="inkf" d="M148 151 C158 145 170 145 178 150 C170 153 160 155 148 156 Z"/>
+              <path d="M136 122 Q147 113 158 121 Q147 129 136 122 Z" fill="#F6E9C8" stroke="#24170D" stroke-width="1.8" stroke-linejoin="round"/><circle cx="150" cy="121.5" r="3.3" class="inkf"/>
+              <path class="cut" d="M134 112 Q146 106 159 112" stroke-width="2.2"/>
+              <path class="cut" d="M96 122 C88 123 88 138 97 139"/>
+              <path class="hd hd-saff" d="M58 92 C52 48 72 6 106 6 C140 6 160 48 154 92 Z"/>
+              <path class="cut" d="M84 90 C80 52 90 22 106 8 M128 90 C132 52 122 22 106 8 M106 8 L106 90" opacity=".7"/>
+              <path class="hd hd-madder" d="M52 90 C72 82 140 82 160 90 L163 106 C142 99 70 99 50 106 Z"/>
+              <path class="cut" d="M70 87 L64 101 M88 85 L82 99 M106 84 L100 98 M124 85 L118 99 M142 87 L136 100" opacity=".55"/>
+              <g class="holes">
+                <circle cx="73" cy="64" r="1.6"/><circle cx="76" cy="44" r="1.6"/><circle cx="84" cy="27" r="1.6"/><circle cx="95" cy="66" r="1.6"/><circle cx="96" cy="44" r="1.6"/>
+                <circle cx="117" cy="44" r="1.6"/><circle cx="117" cy="66" r="1.6"/><circle cx="139" cy="64" r="1.6"/><circle cx="136" cy="44" r="1.6"/><circle cx="128" cy="27" r="1.6"/>
+              </g>
+              <circle cx="117" cy="196" r="3.6" fill="#FFF6DE" stroke="#2A190C" stroke-width="1.2"/>
+              <g class="arm-h">
+                <path class="hd hd-indigo" d="M134 192 L156 188 L176 246 L156 254 Z"/>
+                <g class="fore-h">
+                  <path class="hd hd-indigo" d="M158 240 L174 254 L214 226 L204 212 Z"/>
+                  <ellipse class="hd hd-face" cx="214" cy="216" rx="9" ry="7"/>
+                  <g class="holes"><circle cx="178" cy="236" r="1.4"/><circle cx="190" cy="228" r="1.4"/></g>
+                  <circle class="pin" cx="166" cy="248" r="3.6"/>
+                </g>
+                <g class="holes"><circle cx="152" cy="212" r="1.4"/><circle cx="158" cy="228" r="1.4"/></g>
+                <circle class="pin" cx="145" cy="196" r="3.6"/>
+              </g>
+            </g>
+          </svg>
+
+          <!-- KARAGÖZ — işlik hat, round black beard, big eye, şalvar; long jointed arm -->
+          <svg class="fig fig-k" viewBox="0 0 240 360" aria-label="Karagöz">
+            <g class="bob">
+              <path class="hd hd-madder-d" d="M84 330 L84 344 L118 344 C126 344 131 342 134 337 L128 330 Z"/>
+              <path class="hd hd-indigo" d="M74 258 L166 258 C178 284 172 312 160 330 L134 330 L121 300 L108 330 L82 330 C68 312 64 284 74 258 Z"/>
+              <path class="cut" d="M96 270 C92 288 92 304 96 318 M146 270 C150 288 150 304 146 318" opacity=".55"/>
+              <path class="hd hd-madder-d" d="M128 330 L128 344 L166 344 C175 344 182 340 186 334 L174 330 Z"/>
+              <path class="hd-face" d="M106 160 L128 160 L130 182 L104 182 Z"/>
+              <path class="hd hd-saff" d="M80 182 C96 172 142 172 156 184 L166 250 L72 250 Z"/>
+              <path class="hd hd-madder" d="M70 246 L168 246 L170 262 L68 262 Z"/>
+              <path class="cut" d="M84 247 L78 261 M100 247 L94 261 M116 247 L110 261 M132 247 L126 261 M148 247 L142 261 M164 247 L158 261" opacity=".55"/>
+              <g class="holes">
+                <circle cx="86" cy="238" r="1.6"/><circle cx="96" cy="238" r="1.6"/><circle cx="106" cy="238" r="1.6"/><circle cx="116" cy="238" r="1.6"/><circle cx="126" cy="238" r="1.6"/><circle cx="136" cy="238" r="1.6"/><circle cx="146" cy="238" r="1.6"/><circle cx="156" cy="238" r="1.6"/>
+                <circle cx="100" cy="208" r="1.6"/><circle cx="105.2" cy="208.0" r="1.25"/><circle cx="102.6" cy="212.5" r="1.25"/><circle cx="97.4" cy="212.5" r="1.25"/><circle cx="94.8" cy="208.0" r="1.25"/><circle cx="97.4" cy="203.5" r="1.25"/><circle cx="102.6" cy="203.5" r="1.25"/><circle cx="132" cy="210" r="1.6"/><circle cx="136.6" cy="210.0" r="1.15"/><circle cx="134.3" cy="214.0" r="1.15"/><circle cx="129.7" cy="214.0" r="1.15"/><circle cx="127.4" cy="210.0" r="1.15"/><circle cx="129.7" cy="206.0" r="1.15"/><circle cx="134.3" cy="206.0" r="1.15"/>
+                <circle cx="96" cy="286" r="1.5"/><circle cx="94" cy="300" r="1.5"/><circle cx="146" cy="286" r="1.5"/><circle cx="148" cy="300" r="1.5"/>
+              </g>
+              <path class="hd hd-face" d="M64 104 L150 104 C156 112 160 118 162 124 L170 128 C182 130 186 144 176 150 C172 152 166 152 162 150 L160 156 C150 172 130 178 108 176 C82 174 64 156 64 130 Z"/>
+              <path class="inkf" d="M120 160 C126 148 146 146 160 152 C172 160 170 182 154 190 C138 196 120 188 116 176 C114 170 116 164 120 160 Z"/>
+              <path class="cut" d="M154 156 C158 152 164 152 168 154" stroke="#F1E0B8" stroke-width="1.4"/>
+              <circle cx="140" cy="124" r="9" fill="#F6E9C8" stroke="#24170D" stroke-width="2.4"/>
+              <circle cx="143" cy="124" r="4.3" class="inkf"/>
+              <path class="cut" d="M127 110 Q142 101 157 110" stroke-width="3.2"/>
+              <path class="cut" d="M94 122 C86 123 86 138 95 139"/>
+              <path class="hd hd-madder" d="M70 96 C70 62 78 28 94 12 C104 2 120 6 116 20 C112 42 122 72 142 96 Z"/>
+              <g class="holes"><circle cx="100" cy="24" r="1.6"/><circle cx="97" cy="42" r="1.6"/><circle cx="98" cy="60" r="1.6"/><circle cx="104" cy="78" r="1.6"/><circle cx="84" cy="72" r="1.6"/><circle cx="122" cy="80" r="1.6"/></g>
+              <path class="hd hd-saff" d="M62 92 L148 92 L150 106 L60 106 Z"/>
+              <g class="holes"><circle cx="72" cy="99" r="1.5"/><circle cx="82" cy="99" r="1.5"/><circle cx="92" cy="99" r="1.5"/><circle cx="102" cy="99" r="1.5"/><circle cx="112" cy="99" r="1.5"/><circle cx="122" cy="99" r="1.5"/><circle cx="132" cy="99" r="1.5"/><circle cx="142" cy="99" r="1.5"/></g>
+              <circle cx="118" cy="192" r="3.6" fill="#FFF6DE" stroke="#2A190C" stroke-width="1.2"/>
+              <g class="arm-k">
+                <path class="hd hd-madder" d="M128 188 L150 184 L184 252 L164 262 Z"/>
+                <g class="fore-k">
+                  <path class="hd hd-madder" d="M166 248 L182 262 L230 240 L224 226 Z"/>
+                  <ellipse class="hd hd-face" cx="232" cy="233" rx="9" ry="7"/>
+                  <g class="holes"><circle cx="190" cy="250" r="1.4"/><circle cx="204" cy="244" r="1.4"/></g>
+                  <circle class="pin" cx="174" cy="256" r="3.6"/>
+                </g>
+                <g class="holes"><circle cx="146" cy="204" r="1.4"/><circle cx="156" cy="222" r="1.4"/></g>
+                <circle class="pin" cx="139" cy="192" r="3.6"/>
+              </g>
+            </g>
+          </svg>
+
+          <!-- the connection: a hand-cut vessel, and the perforated path punched between them -->
+          <svg class="punch" id="punch" viewBox="0 0 872 432" preserveAspectRatio="none">
+            <g class="emb">
+              <path class="hd emb-body" d="M400 112 L400 170 C400 182 472 182 472 170 L472 112"/>
+              <ellipse class="hd hd-saff" cx="436" cy="112" rx="36" ry="11"/>
+              <path class="cut" d="M400 131 C400 143 472 143 472 131 M400 150 C400 162 472 162 472 150"/>
+              <g class="holes" id="rings"></g>
+              <text class="cap" x="436" y="206" text-anchor="middle" font-family="Alegreya, serif" font-style="italic" font-size="15" fill="#3A2A1A">orders-prod</text>
+            </g>
+            <g class="holes" id="punchDots"></g>
+          </svg>
+        </div>
+      </div>
+    </div>
+
+    <div class="narr" id="narr">
+      <div class="nar-title" id="narTitle" data-i18n-html="narTitle">Bringing <code>orders-prod</code> onto the stage</div>
+      <ol class="steps">
+        <li class="step" id="st1"><span class="mk"><i data-lucide="check"></i></span><span data-i18n-html="step1">Resolving agent <code>karagoz@eu-west-1a</code></span><span class="ld"></span><span class="mt" id="mt1">eu-west-1a</span></li>
+        <li class="step" id="st2"><span class="mk"><i data-lucide="check"></i></span><span data-i18n="step2">Hole punching… direct path found</span><span class="ld"></span><span class="mt" id="mt2">P2P · 18 ms</span></li>
+        <li class="step" id="st3"><span class="mk"><i data-lucide="check"></i></span><span data-i18n="step3">Introspecting 214 objects</span><span class="ld"></span><span class="mt" id="mt3">0 / 214</span></li>
+      </ol>
+      <div class="prog"><i id="prog"></i></div>
+    </div>
+
+    <div class="sp-foot">
+      <span class="l"><span class="dot verd"></span>Perde · Acme<span style="color:var(--tx-4)">·</span><span data-i18n="relayStandby">Relay standby</span></span>
+      <button class="btn-enter" id="enterBtn"><span data-i18n="enterWs">Enter workspace</span><kbd class="kbd">S</kbd></button>
+    </div>
+  </div>
+
+  <!-- ============================== STATUS BAR -->
+  <footer class="status">
+    <span class="sb env"><i data-lucide="lock-keyhole"></i><span data-i18n="envProdRo">production · read-only</span></span>
+    <span class="sb path"><i data-lucide="arrow-left-right"></i><span data-i18n="directMs">Direct · 18 ms</span></span>
+    <span class="sb dim" data-i18n="relayStandby">Relay standby</span>
+    <span class="sb"><i data-lucide="git-commit-horizontal"></i><span data-i18n="autocommit">Auto-commit</span></span>
+    <span class="sb"><i data-lucide="rows-3"></i><span data-i18n="rowsMs">100 rows · 42 ms</span></span>
+    <span class="grow"></span>
+    <span class="sb mono" data-i18n="lnCol">Ln 14, Col 49</span>
+    <span class="sb mono">UTF-8</span>
+    <span class="sb">PostgreSQL 16</span>
+    <button class="sb lang" id="sbLang">EN</button>
+  </footer>
+</div>
+
+<script>
+/* ============================================================ i18n */
+const T = {
+  en: {
+    envProdRo: "production · read-only", directP2P: "Direct P2P", workspace: "Workspace", splash: "Splash",
+    explorer: "Explorer", filterObjects: "Filter objects", local: "Local", tables: "Tables", views: "Views",
+    functions: "Functions", sequences: "Sequences", tagProd: "prod", tagStg: "stg", production: "production",
+    access: "Access", readOnly: "Read-only", path: "Path", agent: "Agent", role: "Role", viaPerde: "via Perde", engine: "Engine",
+    valanceRo: "<b>orders-prod</b> is read-only — writes are refused by the Karagöz agent", via: "via",
+    audited: "Every query is audited", autocommit: "Auto-commit", explain: "Explain", run: "Run",
+    insert: "Insert", replace: "Replace", allCols: "All columns",
+    result1: "Result 1", stagingParen: "(staging)", whereHint: "Filter rows with a WHERE clause", countRows: "Count rows",
+    copy: "Copy", export: "Export", pending: "1 pending change — not submitted", previewDml: "Preview DML", revert: "Revert", submit: "Submit",
+    directMs: "Direct · 18 ms", relayStandby: "Relay standby", rowsMs: "100 rows · 42 ms", lnCol: "Ln 14, Col 49",
+    roChip: "<b>Read-only</b> · editing is off on production", stgChip: "staging · read-write",
+    pager: "1–100 of 2,481", pagerStg: "1–100 of 12,904", was: "was",
+    col: "column", fn: "function", kw: "keyword", kwfn: "keyword · function", oos: "not in scope",
+    type: "Type", nullable: "Nullable", no: "no", yes: "yes", fk: "Foreign key", index: "Index", table: "Table", returns: "Returns",
+    noteOos: "<code>customers</code> is not joined in this statement. Insert anyway, or add a JOIN.",
+    noteCount: "Aggregate. Counts input rows; <code>count(expr)</code> skips NULLs.",
+    noteCd: "Current date at the start of the transaction.",
+    noteCase: "Conditional expression: <code>CASE WHEN … THEN … END</code>",
+    narTitle: "Bringing <code>orders-prod</code> onto the stage", narReady: "<code>orders-prod</code> is on stage",
+    step1: "Resolving agent <code>karagoz@eu-west-1a</code>", step2: "Hole punching… direct path found", step3: "Introspecting 214 objects",
+    found: "found", enterWs: "Enter workspace", sel: "selected",
+  },
+  tr: {
+    envProdRo: "canlı · salt okunur", directP2P: "Doğrudan P2P", workspace: "Çalışma alanı", splash: "Açılış",
+    explorer: "Gezgin", filterObjects: "Nesneleri süz", local: "Yerel", tables: "Tablolar", views: "Görünümler",
+    functions: "Fonksiyonlar", sequences: "Diziler", tagProd: "canlı", tagStg: "hazırlık", production: "canlı ortam",
+    access: "Erişim", readOnly: "Salt okunur", path: "Yol", agent: "Ajan", role: "Rol", viaPerde: "Perde üzerinden", engine: "Motor",
+    valanceRo: "<b>orders-prod</b> salt okunur — yazma işlemlerini Karagöz ajanı reddeder", via: "üzerinden",
+    audited: "Her sorgu denetim kaydına yazılır", autocommit: "Otomatik commit", explain: "Yürütme planı", run: "Çalıştır",
+    insert: "Ekle", replace: "Değiştir", allCols: "Tüm sütunlar",
+    result1: "Sonuç 1", stagingParen: "(hazırlık)", whereHint: "Satırları WHERE koşuluyla süzün", countRows: "Satırları say",
+    copy: "Kopyala", export: "Dışa aktar", pending: "1 bekleyen değişiklik — henüz gönderilmedi", previewDml: "DML önizle", revert: "Geri al", submit: "Gönder",
+    directMs: "Doğrudan · 18 ms", relayStandby: "Aktarıcı beklemede", rowsMs: "100 satır · 42 ms", lnCol: "Sat 14, Süt 49",
+    roChip: "<b>Salt okunur</b> · canlı ortamda düzenleme kapalı", stgChip: "hazırlık · okuma-yazma",
+    pager: "1–100 / 2.481", pagerStg: "1–100 / 12.904", was: "önceki",
+    col: "sütun", fn: "fonksiyon", kw: "anahtar sözcük", kwfn: "anahtar sözcük · fonksiyon", oos: "kapsam dışı",
+    type: "Tür", nullable: "Boş olabilir", no: "hayır", yes: "evet", fk: "Yabancı anahtar", index: "İndeks", table: "Tablo", returns: "Döndürür",
+    noteOos: "<code>customers</code> bu ifadede JOIN edilmemiş. Yine de ekleyin ya da bir JOIN tanımlayın.",
+    noteCount: "Toplama fonksiyonu. Girdi satırlarını sayar; <code>count(expr)</code> NULL değerleri atlar.",
+    noteCd: "İşlemin başladığı andaki tarih.",
+    noteCase: "Koşullu ifade: <code>CASE WHEN … THEN … END</code>",
+    narTitle: "<code>orders-prod</code> sahneye getiriliyor", narReady: "<code>orders-prod</code> sahnede",
+    step1: "<code>karagoz@eu-west-1a</code> ajanı çözümleniyor", step2: "NAT delme… doğrudan yol bulundu", step3: "214 nesne inceleniyor",
+    found: "bulundu", enterWs: "Çalışma alanına geç", sel: "seçili",
+  }
+};
+
+const qs = new URLSearchParams(location.search);
+const S = {
+  theme: qs.get("theme") === "light" ? "light" : "dark",
+  lang: qs.get("lang") === "tr" ? "tr" : "en",
+  view: qs.get("view") === "splash" ? "splash" : "workspace",
+  comp: 0, rtab: "r1",
+};
+const t = k => (T[S.lang][k] ?? T.en[k] ?? k);
+
+/* ============================================================ editor */
+const L = [
+  ['<span class="c">-- Top customers by revenue, last 30 days</span>'],
+  ['<span class="k">SELECT</span> <span class="a">c</span><span class="o">.</span>full_name<span class="o">,</span><span class="inlay">text</span>'],
+  ['       <span class="a">c</span><span class="o">.</span>city<span class="o">,</span><span class="inlay">text · nullable</span>'],
+  ['       <span class="f">count</span><span class="o">(</span><span class="a">o</span><span class="o">.</span>id<span class="o">)</span>          <span class="k">AS</span> orders<span class="o">,</span>'],
+  ['       <span class="f">sum</span><span class="o">(</span><span class="a">oi</span><span class="o">.</span>line_total<span class="o">)</span>   <span class="k">AS</span> revenue'],
+  ['<span class="k">FROM</span> customers <span class="a">c</span>'],
+  ['<span class="k">JOIN</span> orders <span class="a">o</span> <span class="k">ON</span> <span class="a">o</span><span class="o">.</span>customer_id <span class="o">=</span> <span class="a">c</span><span class="o">.</span>id'],
+  ['<span class="k">JOIN</span> order_items <span class="a">oi</span> <span class="k">ON</span> <span class="a">oi</span><span class="o">.</span>order_id <span class="o">=</span> <span class="a">o</span><span class="o">.</span>id'],
+  ['<span class="k">WHERE</span> <span class="a">o</span><span class="o">.</span>ordered_at <span class="o">&gt;</span> <span class="f">now</span><span class="o">()</span> <span class="o">-</span> <span class="k">interval</span> <span class="s">\'30 days\'</span>'],
+  ['<span class="k">GROUP BY</span> <span class="a">c</span><span class="o">.</span>full_name<span class="o">,</span> <span class="a">c</span><span class="o">.</span>city'],
+  ['<span class="k">ORDER BY</span> revenue <span class="k">DESC</span>'],
+  ['<span class="k">LIMIT</span> <span class="n">100</span><span class="o">;</span><span class="inlay ok" id="okInlay"><i data-lucide="check"></i><span data-i18n="rowsMs">100 rows · 42 ms</span></span>'],
+  [''],
+  ['<span class="k">SELECT</span> <span class="o">*</span> <span class="k">FROM</span> orders <span class="k">WHERE</span> status <span class="o">=</span> <span class="s">\'paid\'</span> <span class="k">AND</span> c<span class="caret"></span>'],
+];
+function renderCode() {
+  const el = document.getElementById("code");
+  el.innerHTML = L.map((l, i) => {
+    const n = i + 1;
+    const cls = ["ln"]; if (n === 14) cls.push("cur", "exec");
+    let stat = "";
+    if (n === 2) stat = '<span class="done-disc" title="Executed · 42 ms"><i data-lucide="check"></i></span>';
+    const fold = (n === 2) ? '<span class="fold-ic"><i data-lucide="chevron-down"></i></span>' : "";
+    return `<div class="${cls.join(" ")}"><span class="g-stat">${stat}</span><span class="g-num">${n}</span><span class="g-fold">${fold}</span><span class="tx">${l[0]}</span></div>`;
+  }).join("") + '<span class="rng" style="top:calc(8px + 20px + 10px);height:calc(10 * 20px)"></span>';
+}
+
+/* ============================================================ completion */
+const COMP = [
+  { k: "col", icon: "columns-3", label: "customer_id", ty: "bigint", src: "orders" },
+  { k: "col", icon: "columns-3", label: "city", ty: "text", src: "customers", oos: true },
+  { k: "col", icon: "columns-3", label: "cancelled_at", ty: "timestamptz", src: "orders" },
+  { k: "fn", icon: "square-function", label: "count()", ty: "bigint", srcKey: "fn" },
+  { k: "fn", icon: "square-function", label: "current_date", ty: "date", srcKey: "kwfn" },
+  { k: "kw", icon: "type", label: "case", ty: "", srcKey: "kw" },
+];
+function renderComp() {
+  document.getElementById("popItems").innerHTML = COMP.map((c, i) => {
+    const lb = `<b>${c.label[0]}</b>${c.label.slice(1)}`;
+    const src = c.oos ? `<span class="oos-tag">${t("oos")}</span>` : (c.src || t(c.srcKey).split(" · ")[0]);
+    return `<div class="ci ${i === S.comp ? "on" : ""} ${c.oos ? "oos" : ""}" data-i="${i}">
+      <span class="kd ${c.k}"><i data-lucide="${c.icon}"></i></span><span class="lb">${lb}</span>
+      <span class="ty">${c.ty}</span><span class="src">${src}</span></div>`;
+  }).join("");
+  const c = COMP[S.comp]; let d = "";
+  if (S.comp === 0) d = `<div class="pd-title">customer_id</div><div class="pd-sub">${t("col")} · orders</div>
+      <dl class="pd-kv"><dt>${t("type")}</dt><dd><code>bigint</code></dd><dt>${t("nullable")}</dt><dd>${t("no")} <code style="color:#8F7F66">NOT NULL</code></dd>
+      <dt>${t("fk")}</dt><dd class="fk"><i data-lucide="arrow-right"></i><code>customers.id</code></dd><dt>${t("index")}</dt><dd><code>orders_customer_id_idx</code></dd></dl>`;
+  else if (S.comp === 1) d = `<div class="pd-title">city</div><div class="pd-sub">${t("col")} · customers</div>
+      <dl class="pd-kv"><dt>${t("type")}</dt><dd><code>text</code></dd><dt>${t("nullable")}</dt><dd>${t("yes")}</dd></dl><div class="pd-note">${t("noteOos")}</div>`;
+  else if (S.comp === 2) d = `<div class="pd-title">cancelled_at</div><div class="pd-sub">${t("col")} · orders</div>
+      <dl class="pd-kv"><dt>${t("type")}</dt><dd><code>timestamptz</code></dd><dt>${t("nullable")}</dt><dd>${t("yes")}</dd><dt>${t("index")}</dt><dd><code>—</code></dd></dl>`;
+  else if (S.comp === 3) d = `<div class="pd-title">count(*) · count(expr)</div><div class="pd-sub">${t("fn")} · pg_catalog</div>
+      <dl class="pd-kv"><dt>${t("returns")}</dt><dd><code>bigint</code></dd></dl><div class="pd-note">${t("noteCount")}</div>`;
+  else if (S.comp === 4) d = `<div class="pd-title">current_date</div><div class="pd-sub">${t("kwfn")}</div>
+      <dl class="pd-kv"><dt>${t("returns")}</dt><dd><code>date</code></dd></dl><div class="pd-note">${t("noteCd")}</div>`;
+  else d = `<div class="pd-title">CASE</div><div class="pd-sub">${t("kw")}</div><div class="pd-note">${t("noteCase")}</div>`;
+  document.getElementById("popDetail").innerHTML = d;
+  icons();
+}
+document.getElementById("popItems").addEventListener("click", e => {
+  const ci = e.target.closest(".ci"); if (!ci) return; S.comp = +ci.dataset.i; renderComp();
+});
+
+/* ============================================================ grid */
+const R1 = [
+  ["Ada Yılmaz","İstanbul","14","48,210.50"],["Bora Işık","Ankara","12","41,875.00"],["Cem Öztürk","İzmir","11","39,402.75"],
+  ["Deniz Çelik","Berlin","9","36,118.40"],["Elif Şahin","İstanbul","10","33,960.00"],["Furkan Doğan","Iğdır","8","31,245.90"],
+  ["Gizem Aydın","London","9","29,880.15"],["Hakan Kılıç",null,"7","27,504.00"],["İpek Arslan","Bursa","8","26,731.60"],
+  ["Jale Koç","Eskişehir","6","24,990.00"],["Kerem Güneş","Amsterdam","7","23,412.35"],["Leyla Erdem","Antalya","6","22,005.80"],
+  ["Mert Aksoy","Ankara","5","20,760.00"],["Nil Kaya","İstanbul","6","19,384.25"],["Onur Polat","Trabzon","5","18,102.70"],
+  ["Pelin Uçar","Berlin","4","17,450.00"],["Rüya Tekin","İzmir","5","16,233.90"],["Selin Bulut","Gaziantep","4","15,870.45"],
+  ["Tolga Şen","London","4","14,996.00"],["Ufuk Ateş","Diyarbakır","3","14,210.60"],["Vildan Özkan","Konya","3","13,875.30"],
+];
+const C1 = [
+  { n: "full_name", t: "text", w: 270 }, { n: "city", t: "text", w: 210 },
+  { n: "orders", t: "bigint", w: 130, num: 1 }, { n: "revenue", t: "numeric(14,2)", w: 180, num: 1, sort: 1 },
+];
+const ST = ["paid","shipped","pending","paid","refunded","shipped","paid","pending","paid","shipped","paid","paid","pending","shipped","paid","refunded","paid","shipped","paid","paid","pending"];
+const TOT = ["412.00","1,280.50","96.75","2,045.00","58.20","730.10","1,112.00","264.90","3,480.00","149.99","822.40","67.00","1,904.25","455.60","238.00","99.90","1,375.00","610.45","2,210.00","88.80","514.30"];
+const R2 = ST.map((s, i) => [String(10480 + i), String([3121,884,1207,3121,56,2290,884,1416,77,3021,1207,640,2290,915,56,3388,1416,77,2742,640,915][i]), s, TOT[i],
+  `2026-11-${String(10 - Math.floor(i / 4)).padStart(2,"0")} ${String(23 - (i * 3) % 14).padStart(2,"0")}:${String((i * 17) % 60).padStart(2,"0")}:${String((i * 31) % 60).padStart(2,"0")}+00`]);
+const C2 = [
+  { n: "id", t: "bigint", w: 100, num: 1, pk: 1 }, { n: "customer_id", t: "bigint", w: 130, num: 1 },
+  { n: "status", t: "text", w: 170 }, { n: "total", t: "numeric(12,2)", w: 140, num: 1 }, { n: "ordered_at", t: "timestamptz", w: 250, mono: 1 },
+];
+const SEL = { r0: 2, r1: 4, c0: 2, c1: 3 };
+
+function head(cols) {
+  return `<div class="gh"><div class="cell rn"></div>` + cols.map(c =>
+    `<div class="cell ${c.num ? "num" : ""}" style="width:${c.w}px"><span class="cn">${c.pk ? '<i data-lucide="key-round"></i>' : ""}${c.n}${c.sort ? '<i data-lucide="arrow-down-wide-narrow"></i>' : ""}</span><span class="ct">${c.t}</span></div>`
+  ).join("") + `<div class="cell fill"></div></div>`;
+}
+function renderGrid() {
+  const g = document.getElementById("grid");
+  if (S.rtab === "r1") {
+    g.innerHTML = head(C1) + R1.map((r, ri) => {
+      const inR = ri >= SEL.r0 && ri <= SEL.r1;
+      return `<div class="gr ${inR ? "has-sel" : ""}"><div class="cell rn">${ri + 1}</div>` + r.map((v, ci) => {
+        const c = C1[ci]; const cls = ["cell"]; if (c.num) cls.push("num");
+        if (inR && ci >= SEL.c0 && ci <= SEL.c1) {
+          cls.push("sel"); if (ri === SEL.r0) cls.push("st"); if (ri === SEL.r1) cls.push("sb"); if (ci === SEL.c0) cls.push("sl"); if (ci === SEL.c1) cls.push("sr");
+          if (ri === SEL.r0 && ci === SEL.c0) cls.push("anchor");
+        }
+        const val = v === null ? '<span class="null">NULL</span>' : v;
+        return `<div class="${cls.join(" ")}" style="width:${c.w}px">${val}</div>`;
+      }).join("") + `<div class="cell fill"></div></div>`;
+    }).join("");
+  } else {
+    g.innerHTML = head(C2) + R2.map((r, ri) => {
+      const dirty = ri === 2;
+      return `<div class="gr ${dirty ? "dirty" : ""}"><div class="cell rn">${dirty ? '<i data-lucide="pencil" style="width:11px;height:11px;margin-right:4px"></i>' : ""}${ri + 1}</div>` + r.map((v, ci) => {
+        const c = C2[ci]; const cls = ["cell"]; if (c.num || c.mono) cls.push("num");
+        let val = v;
+        if (ci === 2) {
+          if (dirty) { cls.push("edited"); val = `<span class="st-badge st-paid">paid</span><span class="was">${t("was")} pending</span>`; }
+          else val = `<span class="st-badge st-${v}">${v}</span>`;
+        }
+        if (c.mono) return `<div class="${cls.join(" ")}" style="width:${c.w}px;justify-content:flex-start">${val}</div>`;
+        return `<div class="${cls.join(" ")}" style="width:${c.w}px">${val}</div>`;
+      }).join("") + `<div class="cell fill"></div></div>`;
+    }).join("");
+  }
+  // header-right chips + toolbar bits
+  const rr = document.getElementById("rhRight");
+  if (S.rtab === "r1") {
+    rr.innerHTML = `<span class="ro-chip"><i data-lucide="lock-keyhole"></i><span>${t("roChip")}</span></span>`;
+    document.getElementById("selsum").innerHTML = `<i data-lucide="sigma"></i>109,481.15<span style="color:var(--tx-3)">· 3 × 2 ${t("sel")}</span>`;
+    document.getElementById("pg").textContent = t("pager");
+  } else {
+    rr.innerHTML = `<span class="env-chip-sm"><code>orders-staging</code>· ${t("stgChip")}</span>`;
+    document.getElementById("selsum").innerHTML = "";
+    document.getElementById("pg").textContent = t("pagerStg");
+  }
+  document.querySelectorAll(".rtab").forEach(b => b.classList.toggle("on", b.dataset.rtab === S.rtab));
+  document.getElementById("results").dataset.tab = S.rtab;
+  icons();
+}
+document.querySelectorAll(".rtab").forEach(b => b.addEventListener("click", () => { S.rtab = b.dataset.rtab; renderGrid(); }));
+
+/* ============================================================ tree */
+document.getElementById("tree").addEventListener("click", e => {
+  const r = e.target.closest(".row"); if (!r) return;
+  document.querySelectorAll("#tree .row.sel").forEach(x => x.classList.remove("sel")); r.classList.add("sel");
+});
+
+/* ============================================================ splash */
+function buildPunch() {
+  // perforated path: quadratic from Hacivat's hand to Karagöz's hand, under the vessel
+  const p0 = [364, 268], cp = [436, 238], p2 = [504, 290], N = 15;
+  let s = "";
+  for (let i = 0; i < N; i++) {
+    const u = i / (N - 1), a = (1 - u) * (1 - u), b = 2 * (1 - u) * u, c = u * u;
+    const x = a * p0[0] + b * cp[0] + c * p2[0], y = a * p0[1] + b * cp[1] + c * p2[1];
+    // punched from Karagöz's side toward Hacivat
+    s += `<circle class="pdot" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${i % 2 ? 2.1 : 2.8}" style="animation-delay:${(1.45 + (N - 1 - i) * 0.055).toFixed(3)}s"/>`;
+  }
+  document.getElementById("punchDots").innerHTML = s;
+  let r = "";
+  [[121, 2.35], [140, 2.7], [159, 3.05]].forEach(([y, d]) => {
+    for (let k = 0; k < 7; k++) {
+      const x = 410 + k * 8.7; const yy = y + Math.sin((k / 6) * Math.PI) * 6;
+      r += `<circle class="ring" cx="${x.toFixed(1)}" cy="${yy.toFixed(1)}" r="1.7" style="animation-delay:${(d + k * 0.03).toFixed(2)}s"/>`;
+    }
+  });
+  document.getElementById("rings").innerHTML = r;
+}
+let timers = [];
+function setStep(id, cls) { const el = document.getElementById(id); el.classList.remove("active", "done"); if (cls) el.classList.add(cls); }
+function finalSplash() {
+  ["st1","st2","st3"].forEach(s => setStep(s, "done"));
+  document.getElementById("mt1").textContent = t("found");
+  document.getElementById("mt3").textContent = "214 / 214";
+  document.getElementById("prog").style.transform = "scaleX(1)";
+  document.getElementById("splash").classList.add("ready");
+  document.getElementById("narTitle").innerHTML = t("narReady");
+}
+function playSplash() {
+  timers.forEach(clearTimeout); timers = [];
+  const sp = document.getElementById("splash");
+  sp.classList.remove("play", "ready"); void sp.offsetWidth;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduce) { finalSplash(); return; }
+  sp.classList.add("play");
+  ["st1","st2","st3"].forEach(s => setStep(s, null));
+  document.getElementById("narTitle").innerHTML = t("narTitle");
+  document.getElementById("mt1").textContent = "eu-west-1a"; document.getElementById("mt3").textContent = "0 / 214";
+  const prog = document.getElementById("prog"); prog.style.transform = "scaleX(0)";
+  const at = (ms, fn) => timers.push(setTimeout(fn, ms));
+  at(300, () => { setStep("st1", "active"); prog.style.transform = "scaleX(.12)"; });
+  at(1300, () => { setStep("st1", "done"); document.getElementById("mt1").textContent = t("found"); setStep("st2", "active"); prog.style.transform = "scaleX(.38)"; });
+  at(2300, () => { setStep("st2", "done"); setStep("st3", "active"); prog.style.transform = "scaleX(.55)"; });
+  for (let i = 1; i <= 10; i++) at(2300 + i * 100, () => {
+    const n = Math.round(214 * (1 - Math.pow(1 - i / 10, 2)));
+    document.getElementById("mt3").textContent = `${n} / 214`; prog.style.transform = `scaleX(${(.55 + .45 * n / 214).toFixed(3)})`;
+  });
+  at(3400, finalSplash);
+}
+
+/* ============================================================ apply */
+function icons() { if (window.lucide) lucide.createIcons({ attrs: { "stroke-width": 1.75 } }); }
+function applyI18n() {
+  document.documentElement.lang = S.lang;
+  document.querySelectorAll("[data-i18n]").forEach(el => el.textContent = t(el.dataset.i18n));
+  document.querySelectorAll("[data-i18n-html]").forEach(el => el.innerHTML = t(el.dataset.i18nHtml));
+  document.querySelectorAll("[data-i18n-ph]").forEach(el => el.placeholder = t(el.dataset.i18nPh));
+  document.querySelectorAll("#langSeg button").forEach(b => b.classList.toggle("on", b.dataset.lang === S.lang));
+  document.getElementById("sbLang").textContent = S.lang.toUpperCase();
+  const sp = document.getElementById("splash");
+  if (sp.classList.contains("ready")) finalSplash();
+  renderComp(); renderGrid();
+}
+function applyTheme() {
+  document.documentElement.dataset.theme = S.theme;
+  const b = document.getElementById("themeBtn");
+  b.innerHTML = `<i data-lucide="${S.theme === "dark" ? "moon" : "sun"}"></i>`; icons();
+}
+function applyView(play) {
+  document.documentElement.dataset.view = S.view;
+  document.querySelectorAll("#viewSeg button").forEach(b => b.classList.toggle("on", b.dataset.view === S.view));
+  if (S.view === "splash" && play) playSplash();
+}
+document.querySelectorAll("#viewSeg button").forEach(b => b.addEventListener("click", () => { S.view = b.dataset.view; applyView(true); }));
+document.querySelectorAll("#langSeg button").forEach(b => b.addEventListener("click", () => { S.lang = b.dataset.lang; applyI18n(); }));
+document.getElementById("sbLang").addEventListener("click", () => { S.lang = S.lang === "en" ? "tr" : "en"; applyI18n(); });
+document.getElementById("themeBtn").addEventListener("click", () => { S.theme = S.theme === "dark" ? "light" : "dark"; applyTheme(); });
+document.getElementById("enterBtn").addEventListener("click", () => { S.view = "workspace"; applyView(false); });
+document.addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || e.altKey || e.target.tagName === "INPUT") return;
+  const k = e.key.toLowerCase();
+  if (k === "t") { S.theme = S.theme === "dark" ? "light" : "dark"; applyTheme(); }
+  else if (k === "l") { S.lang = S.lang === "en" ? "tr" : "en"; applyI18n(); }
+  else if (k === "s") { S.view = S.view === "splash" ? "workspace" : "splash"; applyView(true); }
+  else if (k === "arrowdown" && S.view === "workspace") { S.comp = (S.comp + 1) % COMP.length; renderComp(); e.preventDefault(); }
+  else if (k === "arrowup" && S.view === "workspace") { S.comp = (S.comp + COMP.length - 1) % COMP.length; renderComp(); e.preventDefault(); }
+});
+
+if (document.fonts) ["400 13px \"Alegreya Sans\"","500 13px \"Alegreya Sans\"","700 13px \"Alegreya Sans\"","italic 400 13px \"Alegreya Sans\"","500 13px Alegreya","600 13px Alegreya","italic 500 13px Alegreya","400 13px \"IBM Plex Mono\"","500 13px \"IBM Plex Mono\"","600 13px \"IBM Plex Mono\"","italic 400 13px \"IBM Plex Mono\""].forEach(f => document.fonts.load(f, "Hacivat İığşç"));
+if (qs.get("rtab") === "staging") S.rtab = "staging";
+renderCode(); buildPunch();
+applyTheme(); applyI18n(); applyView(true);
+icons();
+</script>
+</body>
+</html>

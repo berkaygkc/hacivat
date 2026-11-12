@@ -1,0 +1,1004 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1440, initial-scale=1">
+<title>Hacivat · İznik Sırrı</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Commissioner:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&family=Young+Serif&display=block" rel="stylesheet">
+<script src="https://unpkg.com/lucide@0.441.0/dist/umd/lucide.min.js"></script>
+<style>
+/* ──────────────────────────────────────────────────────────────────────
+   İZNİK SIRRI — every hue is a glaze, every glaze has exactly one meaning
+   cobalt      → the instrument: primary action, selection, caret, keywords
+   turquoise   → safe passage: success, direct path, staging
+   bole red    → production / danger
+   manganese   → pending: stamped, not yet submitted
+   sage        → literal value in code
+   bone        → text on night ink; ground in the light theme
+   Rules are one device pixel (--hair). Surfaces: ground · raised · glaze.
+   ────────────────────────────────────────────────────────────────────── */
+:root{
+  --hair:1px;
+  --ground:#0E141B;   /* night-ink working surface */
+  --raised:#16202B;   /* chrome: titlebar, explorer, toolbars */
+  --glaze:#1C2A3A;    /* thickest glaze: popovers, active tab */
+  --joint:#2A3644;
+  --tint:rgba(237,230,214,.045);
+  --ink:#EDE6D6; --ink-2:#A6A79F; --ink-3:#7C8592;
+  --cobalt:#1F4FA8; --cobalt-ink:#82A6EE; --cobalt-wash:rgba(31,79,168,.30); --cobalt-line:#4D79CC;
+  --turq:#2BB3A3;   --turq-ink:#4CCAB9;   --turq-wash:rgba(43,179,163,.13);
+  --coral:#D2452F;  --coral-ink:#F06D55;  --coral-wash:rgba(210,69,47,.13);
+  --mang:#8A5FA6;   --mang-ink:#BC97D8;   --mang-wash:rgba(138,95,166,.17);
+  --sage:#A3C48F;
+  --on-solid:#F5F0E4;
+  --lift:0 1px 2px rgba(2,6,12,.40), 0 14px 34px -10px rgba(2,6,12,.62);
+  --lift-sm:0 1px 2px rgba(2,6,12,.38), 0 4px 10px -4px rgba(2,6,12,.45);
+  --lip:rgba(237,230,214,.07);
+  --desk:#070B10;
+  /* ebru tray */
+  --water:#132235; --e-bone:#EDE6D6; --e-final:#EDE6D6; --e-night:#0E141B;
+  --ui:"Commissioner", ui-sans-serif, system-ui, sans-serif;
+  --mono:"Spline Sans Mono", ui-monospace, Menlo, monospace;
+  --serif:"Young Serif", Georgia, serif;
+}
+@media (min-resolution:2dppx){ :root{ --hair:.5px; } }
+:root[data-theme="light"]{
+  --ground:#F8F4EB;   /* porcelain */
+  --raised:#EDE6D7;   /* bone */
+  --glaze:#FFFDF8;
+  --joint:#CFC5B0;
+  --tint:rgba(22,40,74,.045);
+  --ink:#15274A; --ink-2:#47526C; --ink-3:#646C82;
+  --cobalt:#1F4FA8; --cobalt-ink:#1F4FA8; --cobalt-wash:rgba(31,79,168,.16); --cobalt-line:#1F4FA8;
+  --turq:#1F9E90;   --turq-ink:#0F7568;   --turq-wash:rgba(31,158,144,.12);
+  --coral:#C63E28;  --coral-ink:#B0331D;  --coral-wash:rgba(198,62,40,.10);
+  --mang:#7D4E9C;   --mang-ink:#71428F;   --mang-wash:rgba(125,78,156,.12);
+  --sage:#4C7A3A;
+  --on-solid:#FFFCF4;
+  --lift:0 1px 2px rgba(30,40,70,.10), 0 14px 34px -12px rgba(30,40,70,.28);
+  --lift-sm:0 1px 2px rgba(30,40,70,.10), 0 4px 10px -4px rgba(30,40,70,.18);
+  --lip:rgba(255,255,255,.7);
+  --desk:#D9D1C0;
+  --water:#F4EEE1; --e-bone:#FFFDF7; --e-final:#FFFDF8; --e-night:#E4DBC8;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1440px;height:900px;overflow:hidden;background:var(--desk)}
+body{font:400 12.5px/1.4 var(--ui);color:var(--ink);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1,"ss01" 1}
+::selection{background:var(--cobalt);color:var(--on-solid)}
+button{font:inherit;color:inherit;background:none;border:0;cursor:default}
+input{font:inherit;color:inherit;background:none;border:0;outline:0}
+input::placeholder{color:var(--ink-3)}
+:focus-visible{outline:var(--hair) solid var(--cobalt-line);outline-offset:1px}
+svg.lucide{width:14px;height:14px;stroke-width:1.75;flex:none}
+.mono{font-family:var(--mono);font-feature-settings:"tnum" 1,"zero" 0}
+
+/* ── window ─────────────────────────────────────────────── */
+.window{position:absolute;inset:0;border-radius:10px;overflow:hidden;background:var(--ground);display:flex;flex-direction:column}
+.titlebar{height:44px;flex:none;display:flex;align-items:center;background:var(--raised);border-bottom:var(--hair) solid var(--joint);position:relative;padding:0 12px 0 0}
+.lights{display:flex;gap:8px;padding:0 16px 0 18px}
+.lights i{width:12px;height:12px;border-radius:50%;display:block;background:#E5574C;box-shadow:0 0 0 var(--hair) rgba(0,0,0,.18) }
+.lights i:nth-child(2){background:#E7B13B}.lights i:nth-child(3){background:#4FB25A}
+.tb-btn{height:28px;min-width:28px;padding:0 6px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;gap:6px;color:var(--ink-2)}
+.tb-btn:hover{background:var(--tint);color:var(--ink)}
+.brand{display:flex;align-items:center;gap:8px;padding:0 12px 0 8px;width:180px}
+.brand .mark{width:20px;height:20px;color:var(--cobalt-ink)}
+.brand b{font:400 16px/1 var(--serif);letter-spacing:.005em;color:var(--ink)}
+
+/* connection switcher — the trust tile */
+.conn{display:flex;align-items:stretch;height:28px;border:var(--hair) solid var(--joint);border-radius:6px;overflow:hidden;background:var(--ground);box-shadow:var(--lift-sm);margin-left:16px}
+.conn>*{display:flex;align-items:center;gap:6px;padding:0 10px;white-space:nowrap}
+.conn>*+*{border-left:var(--hair) solid var(--joint)}
+.conn .env{background:var(--coral);color:var(--on-solid);font-weight:600;letter-spacing:.02em;padding:0 10px 0 9px}
+.conn .env svg{width:13px;height:13px}
+.conn .name{font-family:var(--mono);font-weight:500;color:var(--ink)}
+.conn .name small{font:400 11px var(--ui);color:var(--ink-3)}
+.conn .ro{color:var(--coral-ink);font-weight:500}
+.conn .path{color:var(--turq-ink);font-weight:500}
+.conn .chev{color:var(--ink-3);padding:0 7px}
+.tb-spacer{flex:1}
+.palette{height:28px;flex:0 1 236px;min-width:132px;border-radius:6px;border:var(--hair) solid var(--joint);background:var(--ground);display:flex;align-items:center;gap:8px;padding:0 6px 0 9px;color:var(--ink-3);margin-right:12px}
+.palette span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+kbd{font:500 10.5px/1 var(--mono);color:var(--ink-2);border:var(--hair) solid var(--joint);background:var(--raised);border-radius:4px;padding:3px 4px;min-width:18px;text-align:center;display:inline-block}
+.seg{display:flex;height:28px;border:var(--hair) solid var(--joint);border-radius:6px;overflow:hidden;margin-left:8px;background:var(--ground)}
+.seg button{white-space:nowrap;display:flex;align-items:center;gap:6px;padding:0 9px;color:var(--ink-3);font-weight:500}
+.seg button+button{border-left:var(--hair) solid var(--joint)}
+.seg button:hover{color:var(--ink)}
+.seg button.on{background:var(--glaze);color:var(--ink);box-shadow:var(--lift-sm)}
+.seg button.on svg{color:var(--cobalt-ink)}
+
+.prodline{height:0;border-top:var(--hair) solid var(--coral);flex:none;position:relative;z-index:2}
+
+/* ── workspace layout ──────────────────────────────────── */
+.body{flex:1;display:flex;min-height:0}
+.view{display:none}
+html[data-view="workspace"] #workspace{display:flex}
+html[data-view="splash"] #splash{display:flex}
+#workspace{flex:1;min-height:0;flex-direction:column}
+.side{width:264px;flex:none;background:var(--raised);border-right:var(--hair) solid var(--joint);display:flex;flex-direction:column;min-height:0}
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+
+.panel-h{height:36px;flex:none;display:flex;align-items:center;gap:4px;padding:0 8px 0 16px;border-bottom:var(--hair) solid var(--joint)}
+.panel-h h2{font:600 12px/1 var(--ui);color:var(--ink);flex:1;letter-spacing:.005em}
+.panel-h .tb-btn{height:24px;min-width:24px;padding:0 4px}
+
+/* explorer */
+.filter{margin:8px 8px 4px;height:28px;border:var(--hair) solid var(--joint);border-radius:6px;background:var(--ground);display:flex;align-items:center;gap:8px;padding:0 8px;color:var(--ink-3)}
+.filter input{flex:1;min-width:0}
+.tree{flex:1;overflow:hidden;padding:4px 0 8px}
+.grp{display:flex;align-items:center;gap:8px;height:28px;padding:0 12px 0 16px;color:var(--ink-3);font:600 10.5px/1 var(--ui);letter-spacing:.07em;text-transform:uppercase;margin-top:4px}
+.grp .perde{color:var(--ink-2)}
+.grp .cnt{margin-left:auto;font:500 10.5px var(--mono);letter-spacing:0;text-transform:none}
+.grp .signed{margin-left:auto;display:flex;align-items:center;gap:4px;text-transform:none;letter-spacing:0;font:500 10.5px var(--ui);color:var(--ink-3)}
+.row{position:relative;display:flex;align-items:center;gap:6px;height:24px;padding-right:10px;margin:0 6px;border-radius:5px;color:var(--ink-2);white-space:nowrap}
+.row:hover{background:var(--tint);color:var(--ink)}
+.row.sel{background:var(--cobalt-wash);color:var(--ink)}
+.row .tw{width:14px;display:flex;justify-content:center;color:var(--ink-3)}
+.row .tw svg{width:12px;height:12px}
+.row .ic{color:var(--ink-3)}
+.row .ic svg{width:14px;height:14px}
+.row .nm{color:inherit}
+.row.conn-row .nm{font-weight:500;color:var(--ink)}
+.row .meta{font:400 11px var(--ui);color:var(--ink-3)}
+.row .end{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--ink-3);font:500 10.5px var(--mono)}
+.row .end svg{width:12px;height:12px}
+.sw{width:8px;height:8px;border-radius:2px;display:inline-block;flex:none}
+.sw.prod{background:var(--coral)} .sw.stg{background:var(--turq)} .sw.loc{background:transparent;border:var(--hair) solid var(--ink-3)}
+.lock-c{color:var(--coral-ink)}
+.row.sel .ic{color:var(--cobalt-ink)}
+.guide{position:absolute;top:0;bottom:0;border-left:var(--hair) solid var(--joint)}
+
+/* connection detail tile */
+.cdetail{flex:none;border-top:var(--hair) solid var(--joint);padding:12px 16px 14px;display:grid;grid-template-columns:auto 1fr;column-gap:12px;row-gap:7px;align-items:center}
+.cdetail .t{grid-column:1/-1;display:flex;align-items:center;gap:8px;margin-bottom:3px}
+.cdetail .t b{font:500 12.5px var(--mono)}
+.cdetail .t span{margin-left:auto;font-size:11px;color:var(--ink-3)}
+.cdetail dt{color:var(--ink-3);font-size:11.5px}
+.cdetail dd{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden}
+.cdetail dd svg{width:13px;height:13px}
+.cdetail .mono{font-size:11.5px}
+.c-coral{color:var(--coral-ink)} .c-turq{color:var(--turq-ink)} .c-cob{color:var(--cobalt-ink)} .c-mang{color:var(--mang-ink)} .c-3{color:var(--ink-3)} .c-2{color:var(--ink-2)}
+
+/* ── editor ─────────────────────────────────────────────── */
+.tabs{height:36px;flex:none;display:flex;align-items:stretch;background:var(--raised);border-bottom:var(--hair) solid var(--joint);position:relative}
+.tab{position:relative;display:flex;align-items:center;gap:8px;padding:0 12px 0 14px;color:var(--ink-3);border-right:var(--hair) solid var(--joint);white-space:nowrap}
+.tab:hover{color:var(--ink)}
+.tab .x{width:16px;height:16px;border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--ink-3);opacity:.0}
+.tab:hover .x,.tab.on .x{opacity:1}
+.tab .x svg{width:12px;height:12px}
+.tab .fn{font:500 12px var(--mono)}
+.tab.on{background:var(--ground);color:var(--ink);margin-bottom:calc(var(--hair) * -1)}
+.tab.on::before{content:"";position:absolute;left:0;right:0;top:0;border-top:var(--hair) solid var(--coral)}
+.tab .dot{width:7px;height:7px;border-radius:50%;background:var(--ink-2)}
+.tabs .tools{margin-left:auto;display:flex;align-items:center;gap:8px;padding:0 12px}
+.btn{height:26px;padding:0 10px;border-radius:6px;display:inline-flex;align-items:center;gap:6px;font-weight:500;white-space:nowrap;color:var(--ink-2);border:var(--hair) solid var(--joint);background:var(--ground)}
+.btn:hover{color:var(--ink);background:var(--tint)}
+.btn.primary{background:var(--cobalt);border-color:var(--cobalt);color:var(--on-solid);box-shadow:var(--lift-sm)}
+.btn.primary:hover{background:#2558B6}
+.btn.primary kbd{background:transparent;color:rgba(245,240,228,.78);border-color:rgba(245,240,228,.30)}
+.btn kbd{padding:2px 3px;font-size:10px;min-width:0}
+.btn svg{width:13px;height:13px}
+.txmode{display:flex;align-items:center;gap:6px;color:var(--ink-3);font-size:11.5px;padding-right:4px}
+
+.editor{height:292px;flex:none;display:flex;position:relative;background:var(--ground);border-bottom:var(--hair) solid var(--joint)}
+.gutter{width:72px;flex:none;padding-top:8px;position:relative;border-right:var(--hair) solid var(--joint)}
+.ln{height:20px;display:flex;align-items:center;justify-content:flex-end;padding-right:26px;font:400 11.5px var(--mono);color:var(--ink-3)}
+.ln.cur{color:var(--ink)}
+.gmark{position:absolute;right:6px;width:14px;display:flex;justify-content:center;color:var(--turq-ink)}
+.gmark svg{width:13px;height:13px;stroke-width:2.2}
+.gbracket{position:absolute;right:20px;border-left:var(--hair) solid}
+.code{flex:1;position:relative;padding-top:8px;font:400 12.5px/20px var(--mono);font-feature-settings:"calt" 0, "liga" 0;white-space:pre;color:var(--ink)}
+.cl{height:20px;padding-left:14px;position:relative}
+.cl.cur{background:var(--cobalt-wash)}
+:root[data-theme="dark"] .cl.cur{background:rgba(31,79,168,.16)}
+:root[data-theme="light"] .cl.cur{background:rgba(31,79,168,.07)}
+.k{color:var(--cobalt-ink);font-weight:500}
+.f{color:var(--ink)}
+.s,.n{color:var(--sage)}
+.cm{color:var(--ink-3);font-style:italic}
+.o{color:var(--ink-2)}
+.al{color:var(--ink-2)}
+.inlay{display:inline-block;margin-left:10px;font:500 10.5px/16px var(--ui);color:var(--ink-3);background:var(--tint);border:var(--hair) solid var(--joint);border-radius:4px;padding:0 5px;vertical-align:1px}
+.inlay.m{font-family:var(--mono);font-weight:400;font-size:10.5px}
+.eol{display:inline-flex;align-items:baseline;gap:6px;margin-left:16px;color:var(--turq-ink);font:500 11px var(--ui);vertical-align:0}
+.eol svg{width:12px;height:12px;align-self:center;stroke-width:2.2}
+.eol .g .gv{font-size:12px}
+.caret{display:inline-block;width:2px;height:17px;background:var(--cobalt-ink);vertical-align:-4px;margin-left:0;animation:blink 1.06s steps(1) 6s infinite}
+@keyframes blink{50%{opacity:0}}
+.scrollthumb{position:absolute;right:3px;width:6px;border-radius:3px;background:var(--joint)}
+
+/* completion */
+.compl{position:absolute;z-index:20;display:flex;background:var(--glaze);border:var(--hair) solid var(--joint);border-radius:8px;box-shadow:var(--lift);overflow:hidden}
+.compl::before{content:"";position:absolute;left:0;right:0;top:0;border-top:var(--hair) solid var(--lip)}
+.clist{width:316px;padding:4px;display:flex;flex-direction:column}
+.ci{height:24px;display:flex;align-items:center;gap:8px;padding:0 8px 0 6px;border-radius:5px;white-space:nowrap}
+.ci:hover{background:var(--tint)}
+.ci .kd{width:16px;height:16px;display:flex;align-items:center;justify-content:center;color:var(--ink-3)}
+.ci .kd svg{width:13px;height:13px}
+.ci .lbl{font:400 12.5px var(--mono);color:var(--ink)}
+.ci .lbl u{text-decoration:none;color:var(--cobalt-ink);font-weight:600}
+.ci .ty{margin-left:auto;font:400 11px var(--mono);color:var(--ink-3)}
+.ci .src{font:400 11px var(--ui);color:var(--ink-3);min-width:56px;text-align:right}
+.ci.dim .lbl,.ci.dim .ty{opacity:.5}
+.ci.dim .src{font-style:italic}
+.ci.on{background:var(--cobalt);}
+.ci.on .lbl,.ci.on .ty,.ci.on .src,.ci.on .kd{color:var(--on-solid)}
+.ci.on .lbl u{color:var(--on-solid);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:var(--hair)}
+.cfoot{margin-top:auto;display:flex;gap:12px;align-items:center;padding:6px 6px 2px;border-top:var(--hair) solid var(--joint);color:var(--ink-3);font-size:11px;white-space:nowrap}
+.cfoot kbd{margin-right:4px}
+.cdet{width:236px;border-left:var(--hair) solid var(--joint);padding:10px 12px;display:flex;flex-direction:column;gap:8px;background:var(--raised)}
+.cdet .hd{font:500 13px var(--mono);color:var(--ink)}
+.cdet .sub{font-size:11.5px;color:var(--ink-3);margin-top:-5px}
+.cdet dl{display:grid;grid-template-columns:auto 1fr;column-gap:10px;row-gap:5px;font-size:11.5px}
+.cdet dt{color:var(--ink-3)}
+.cdet dd{font-family:var(--mono);font-size:11.5px;color:var(--ink);display:flex;align-items:center;gap:5px;white-space:nowrap}
+.cdet dd svg{width:12px;height:12px}
+.cdet p{font-size:11.5px;color:var(--ink-2);line-height:1.45}
+
+/* ── results ─────────────────────────────────────────────── */
+.results{flex:1;min-height:0;display:flex;flex-direction:column}
+.rbar{height:32px;flex:none;display:flex;align-items:stretch;background:var(--raised);border-bottom:var(--hair) solid var(--joint)}
+.rtab{display:flex;align-items:center;gap:8px;padding:0 14px;color:var(--ink-3);border-right:var(--hair) solid var(--joint);white-space:nowrap;position:relative}
+.rtab:hover{color:var(--ink)}
+.rtab.on{background:var(--ground);color:var(--ink);margin-bottom:calc(var(--hair) * -1)}
+.rtab.on::before{content:"";position:absolute;left:0;right:0;top:0;border-top:var(--hair) solid var(--cobalt-line)}
+.rtab .mono{font-size:12px}
+.rtab .stn{font:500 10.5px var(--mono);color:var(--ink-3);border:var(--hair) solid var(--joint);border-radius:3px;padding:0 4px;line-height:15px}
+.stampcount{font:600 9.5px/15px var(--mono);letter-spacing:.06em;color:var(--mang-ink);border:var(--hair) solid var(--mang-ink);background:var(--mang-wash);border-radius:3px;padding:0 4px}
+.rbar .meta{margin-left:auto;display:flex;align-items:center;gap:16px;padding:0 16px;color:var(--ink-2)}
+.rbar .ro-note{display:flex;align-items:center;gap:6px;color:var(--ink-2);font-size:11.5px}
+.rbar .ro-note svg{color:var(--coral-ink);width:13px;height:13px}
+
+/* gauges: hierarchy by scale contrast alone */
+.g{display:inline-flex;align-items:baseline;gap:3px;font-family:var(--mono);white-space:nowrap;color:inherit}
+.g .gv{font-size:13px;font-weight:500;letter-spacing:-.01em}
+.g .gu{font-size:9.5px;font-weight:500;letter-spacing:.02em}
+.g.lg .gv{font-size:15px}
+.g.xl .gv{font-size:28px;letter-spacing:-.02em;font-weight:400}
+.g.xl .gu{font-size:11px}
+.g+.g{margin-left:8px}
+
+.rpane{display:none;flex:1;min-height:0;flex-direction:column}
+.rpane.on{display:flex}
+.gtool{height:36px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px 0 8px;border-bottom:var(--hair) solid var(--joint);background:var(--ground)}
+.where{flex:1;max-width:420px;height:26px;border:var(--hair) solid var(--joint);border-radius:6px;display:flex;align-items:center;gap:8px;padding:0 8px;background:var(--raised)}
+.where b{font:600 10.5px var(--mono);color:var(--cobalt-ink);letter-spacing:.04em}
+.where input{flex:1;font:400 12px var(--mono)}
+.chip{height:26px;display:flex;align-items:center;gap:6px;padding:0 8px;border:var(--hair) solid var(--joint);border-radius:6px;font:400 11.5px var(--mono);color:var(--ink-2);white-space:nowrap}
+.chip b{font-weight:600;font-size:10.5px;color:var(--cobalt-ink);letter-spacing:.04em}
+.pager{display:flex;align-items:center;gap:2px;margin-left:auto;color:var(--ink)}
+.pager .tb-btn{height:26px;min-width:26px}
+.pager .g{padding:0 6px}
+.pager .g .of{font-size:9.5px;font-family:var(--ui);margin:0 2px;color:inherit}
+.vsep{width:0;height:16px;border-left:var(--hair) solid var(--joint);margin:0 4px}
+
+.gridwrap{flex:1;min-height:0;display:flex}
+.grid{flex:1;min-width:0;position:relative;overflow:hidden;display:flex;flex-direction:column}
+.gscroll{flex:1;min-height:0;overflow:hidden;position:relative}
+table.dg{width:calc(100% - 10px);border-collapse:separate;border-spacing:0;table-layout:fixed;font:400 12px/1 var(--mono);font-feature-settings:"tnum" 1}
+.dg th,.dg td{border-right:var(--hair) solid var(--joint);border-bottom:var(--hair) solid var(--joint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dg th{height:40px;background:var(--raised);text-align:left;padding:0 10px;vertical-align:middle;font-weight:400;position:relative}
+.dg th .cn{display:flex;align-items:center;gap:6px;font:500 12px/1 var(--mono);color:var(--ink)}
+.dg th .ct{font:400 10.5px/1 var(--mono);color:var(--ink-3);margin-top:5px}
+.dg th.r{text-align:right}.dg th.r .cn{justify-content:flex-end}
+.dg th .sort{color:var(--cobalt-ink);display:inline-flex;align-items:center;gap:2px;font-size:10px}
+.dg th .sort svg{width:13px;height:13px}
+.dg th.rn{color:var(--ink-3);text-align:right;font:400 10.5px var(--mono)}
+.dg td{height:20px;padding:0 10px;color:var(--ink)}
+.dg td.r{text-align:right}
+.dg td.rn{color:var(--ink-3);text-align:right;font-size:11px;background:var(--raised);padding:0 8px}
+.dg tr:hover td{background:var(--tint)}
+.dg tr:hover td.rn{background:var(--raised);color:var(--ink)}
+.dg td:not(.rn):hover{box-shadow:inset 0 0 0 var(--hair) var(--cobalt-line)}
+.dg td.insel{background:var(--cobalt-wash)!important}
+.dg tr.selrow td.rn{color:var(--cobalt-ink)}
+.null{display:inline-block;font:600 9px/14px var(--mono);letter-spacing:.08em;color:var(--ink-3);border:var(--hair) solid var(--joint);border-radius:3px;padding:0 4px}
+.empty{color:var(--ink-3)}
+.selbox{position:absolute;border:var(--hair) solid var(--cobalt-line);pointer-events:none;z-index:3}
+.selbox::after{content:"";position:absolute;right:-3px;bottom:-3px;width:5px;height:5px;background:var(--cobalt-line)}
+.ro-grid td:not(.rn){cursor:not-allowed}
+
+/* prefetch + scrollbar */
+.vscroll{position:absolute;right:0;top:40px;bottom:0;width:10px;border-left:var(--hair) solid var(--joint);background:var(--ground)}
+.vscroll .loaded{position:absolute;left:3px;right:3px;border-radius:2px}
+.vscroll .thumb{position:absolute;left:2px;right:2px;border-radius:3px;background:var(--ink-3);opacity:.55}
+.vscroll .pref{background:var(--turq);opacity:.45}
+.gfoot{height:28px;flex:none;display:flex;align-items:center;gap:12px;padding:0 12px;border-top:var(--hair) solid var(--joint);background:var(--raised);color:var(--ink-2);font-size:11.5px;white-space:nowrap}
+.pages{display:flex;height:8px;border:var(--hair) solid var(--joint);border-radius:2px;overflow:hidden}
+.pages i{width:7px;height:100%;display:block}
+.pages i+i{border-left:var(--hair) solid var(--joint)}
+.pages i.cur{background:var(--cobalt)}
+.pages i.pre{background:var(--turq)}
+.prefetch{display:flex;align-items:center;gap:8px}
+.prefetch .lbl{color:var(--turq-ink)}
+.gfoot .right{margin-left:auto;display:flex;align-items:center;gap:14px;color:var(--ink-2)}
+.gfoot .right .k3{color:var(--ink-3);font-size:11px}
+
+/* inspector */
+.insp{width:288px;flex:none;border-left:var(--hair) solid var(--joint);background:var(--raised);display:flex;flex-direction:column;min-height:0}
+.insp .ih{height:40px;flex:none;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:var(--hair) solid var(--joint)}
+.insp .ih h3{font:600 12px var(--ui);flex:1;white-space:nowrap}
+.insp .ih .g{color:var(--ink-3)}
+.fld{padding:8px 14px;border-bottom:var(--hair) solid var(--joint);display:flex;flex-direction:column;gap:3px}
+.fld .fk{display:flex;justify-content:space-between;font:400 10.5px var(--mono);color:var(--ink-3)}
+.fld .fv{font:400 13px var(--mono);color:var(--ink)}
+.fld .fv.num{text-align:right}
+.istats{padding:12px 14px;display:grid;grid-template-columns:1fr 1fr;gap:12px 10px}
+.istats .st{display:flex;flex-direction:column;gap:3px}
+.istats .st span{font-size:11px;color:var(--ink-3)}
+.istats .st .g{color:var(--ink)}
+.ist-h{padding:12px 14px 0;font:600 11.5px var(--ui);color:var(--ink-2);display:flex;align-items:center;gap:8px}
+.ist-h .g{margin-left:auto;color:var(--ink-2)}
+
+/* pending stamps */
+.stamp{display:inline-block;font:600 9px/14px var(--mono);letter-spacing:.07em;color:var(--mang-ink);border:var(--hair) solid var(--mang-ink);background:var(--mang-wash);border-radius:3px;padding:0 3px;vertical-align:1px}
+.dg tr.p-upd td.rn,.dg tr.p-ins td.rn,.dg tr.p-del td.rn{padding:0 6px}
+.dg tr.p-ins td:not(.rn){background:var(--mang-wash)}
+.dg tr.p-del td:not(.rn){color:var(--ink-3);text-decoration:line-through;text-decoration-color:var(--mang-ink);text-decoration-thickness:var(--hair)}
+.dg tr.p-del td:not(.rn){background:linear-gradient(var(--mang-wash),var(--mang-wash))}
+.dg td.chg{background:var(--mang-wash);box-shadow:inset 0 0 0 var(--hair) var(--mang-ink);position:relative}
+.dg td.chg::after{content:"";position:absolute;right:0;top:0;width:7px;height:7px;background:linear-gradient(225deg,var(--mang-ink) 50%,transparent 50%)}
+.dg td .was{color:var(--ink-3);text-decoration:line-through;text-decoration-thickness:var(--hair);font-size:10.5px;margin-left:8px}
+.dim{color:var(--ink-3)}
+.dml{padding:10px 14px;font:400 11.5px/18px var(--mono);white-space:pre;color:var(--ink);border-bottom:var(--hair) solid var(--joint);overflow:hidden}
+.dml .ln2{display:flex;gap:8px}
+.dml .stamp{flex:none;align-self:flex-start;margin-top:2px}
+.pendbar{height:40px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;border-top:var(--hair) solid var(--joint);background:var(--raised);white-space:nowrap}
+.pendbar .msg{display:flex;align-items:center;gap:8px;color:var(--ink-2);font-size:11.5px}
+.pendbar .msg b{color:var(--mang-ink);font-weight:600}
+.pendbar .acts{margin-left:auto;display:flex;gap:8px}
+.envtag{display:inline-flex;align-items:center;gap:6px;height:20px;padding:0 7px;border-radius:4px;font:500 11px var(--ui);white-space:nowrap}
+.envtag.stg{color:var(--turq-ink);background:var(--turq-wash);border:var(--hair) solid var(--turq)}
+.envtag.prod{color:var(--coral-ink);background:var(--coral-wash);border:var(--hair) solid var(--coral)}
+.envtag svg{width:12px;height:12px}
+
+/* ── status bar ─────────────────────────────────────────── */
+.status{height:28px;flex:none;display:flex;align-items:stretch;background:var(--raised);border-top:var(--hair) solid var(--joint);color:var(--ink-2);font-size:11.5px;white-space:nowrap}
+.status .it{display:flex;align-items:center;gap:6px;padding:0 10px}
+.status .it svg{width:13px;height:13px}
+.status .it+.it{border-left:var(--hair) solid var(--joint)}
+.status .envb{background:var(--coral);color:var(--on-solid);font-weight:600;gap:6px;padding:0 12px 0 10px}
+.status .envb .sep{opacity:.6;font-weight:400}
+.status .path{color:var(--turq-ink)}
+.status .path .g{color:var(--turq-ink)}
+.status .grow{flex:1;border-left:var(--hair) solid var(--joint)}
+.status .g .gv{font-size:12.5px}
+.status .lang{gap:0;padding:0}
+.status .lang button{height:100%;padding:0 9px;color:var(--ink-3);font-weight:600;font-size:10.5px;letter-spacing:.06em}
+.status .lang button.on{color:var(--ink);background:var(--tint)}
+
+/* ── splash ─────────────────────────────────────────────── */
+#splash{flex:1;min-height:0;position:relative}
+.tray{position:absolute;left:32px;top:32px;width:760px;height:792px;border-radius:12px;overflow:hidden;background:var(--water);border:var(--hair) solid var(--joint);box-shadow:var(--lift)}
+.tray svg{display:block;width:100%;height:100%}
+.e-cob{fill:var(--cobalt)} .e-tur{fill:var(--turq)} .e-cor{fill:var(--coral)} .e-bon{fill:var(--e-bone)} .e-fin{fill:var(--e-final);stroke:var(--cobalt);stroke-width:2} .e-nig{fill:var(--e-night)}
+.wave{fill:none;stroke:var(--cobalt);stroke-linecap:round;stroke-linejoin:round}
+.tray .cap{position:absolute;left:20px;bottom:16px;font:400 11px var(--ui);color:var(--ink-3);display:none}
+.sp-col{position:absolute;left:848px;top:0;bottom:0;width:532px;display:flex;flex-direction:column;justify-content:center}
+.sp-word{display:flex;align-items:center;gap:20px;opacity:0}
+.sp-word svg{width:56px;height:56px;color:var(--cobalt-ink)}
+.sp-word h1{font:400 72px/1 var(--serif);letter-spacing:-.01em;color:var(--ink)}
+.sp-lede{margin-top:20px;font-size:15px;line-height:1.5;color:var(--ink-2);max-width:460px}
+.sp-lede .mono{color:var(--ink);font-size:14px}
+.sp-trust{display:flex;margin-top:20px}
+.sp-trust .conn{margin-left:0;box-shadow:none}
+.steps{margin-top:36px;border:var(--hair) solid var(--joint);border-radius:8px;background:var(--raised);overflow:hidden}
+.step{height:56px;display:flex;align-items:center;gap:14px;padding:0 16px;position:relative}
+.step+.step{border-top:var(--hair) solid var(--joint)}
+.step .st{width:20px;height:20px;border-radius:5px;border:var(--hair) solid var(--joint);display:flex;align-items:center;justify-content:center;flex:none;color:var(--ink-3)}
+.step .st svg{width:12px;height:12px;stroke-width:2.4}
+.step .st i{display:none;width:8px;height:8px;border-radius:2px;background:var(--cobalt)}
+.step.act .st{border-color:var(--cobalt-line)}
+.step.act .st i{display:block;animation:tile 1.1s cubic-bezier(.65,0,.35,1) infinite}
+@keyframes tile{0%,100%{transform:scale(.55)}50%{transform:scale(1)}}
+.step.done .st{background:var(--turq-wash);border-color:var(--turq);color:var(--turq-ink)}
+.step .st svg{display:none}
+.step.done .st svg{display:block}
+.step .tx{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.step .tx b{font-weight:500;font-size:13px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.step.act .tx b,.step.done .tx b{color:var(--ink)}
+.step .tx span{font:400 11.5px var(--mono);color:var(--ink-3);white-space:nowrap}
+.step .g{color:var(--ink-3)}
+.step.done .g{color:var(--turq-ink)}
+.step.act .g{color:var(--ink)}
+.prog{margin-top:20px;display:flex;height:10px;border:var(--hair) solid var(--joint);border-radius:3px;overflow:hidden;background:var(--ground)}
+.prog i{flex:1;display:block}
+.prog i+i{border-left:var(--hair) solid var(--joint)}
+.prog i.f{background:var(--cobalt)}
+.prog.ok i.f{background:var(--turq)}
+.sp-foot{margin-top:16px;display:flex;align-items:center;gap:16px;color:var(--ink-3);font-size:11.5px}
+.sp-foot .g{color:var(--ink-2)}
+.sp-foot .r{margin-left:auto;display:flex;align-items:center;gap:6px}
+.sp-ver{position:absolute;right:28px;bottom:20px;color:var(--ink-3);font-size:11px}
+
+@media (prefers-reduced-motion:reduce){
+  .step.act .st i{animation:none;transform:none}
+  .caret{animation:none}
+}
+</style>
+</head>
+<body>
+<div class="window">
+  <!-- ═════════ TITLEBAR ═════════ -->
+  <header class="titlebar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <button class="tb-btn" title="Toggle explorer"><i data-lucide="panel-left"></i></button>
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10.6" fill="var(--e-final)" stroke="var(--cobalt)" stroke-width="1.2"/><circle cx="12" cy="8.1" r="2.35" fill="var(--cobalt)"/><circle cx="8.6" cy="14" r="2.35" fill="var(--cobalt)"/><circle cx="15.4" cy="14" r="2.35" fill="var(--cobalt)"/></svg>
+      <b>Hacivat</b>
+    </div>
+    <div class="conn" title="Active connection">
+      <span class="env"><i data-lucide="shield-alert"></i><span data-i18n="production">production</span></span>
+      <span class="name">orders-prod <small>PostgreSQL 16</small></span>
+      <span class="ro"><i data-lucide="lock"></i><span data-i18n="readonly">read-only</span></span>
+      <span class="path"><i data-lucide="arrow-right-left"></i><span data-i18n="directp2p">Direct (P2P)</span></span>
+      <span class="chev"><i data-lucide="chevron-down"></i></span>
+    </div>
+    <div class="tb-spacer"></div>
+    <div class="palette"><i data-lucide="search"></i><span data-i18n="palette">Search or run a command</span><kbd>⌘K</kbd></div>
+    <div class="seg" id="viewSeg">
+      <button data-view="workspace"><i data-lucide="table-2"></i><span data-i18n="workspace">Workspace</span></button>
+      <button data-view="splash"><i data-lucide="droplet"></i><span data-i18n="splash">Opening</span><kbd>S</kbd></button>
+    </div>
+    <div class="seg" id="langSeg">
+      <button data-lang="en">EN</button><button data-lang="tr">TR</button>
+    </div>
+    <div class="seg" id="themeSeg" title="Theme (T)">
+      <button data-theme="dark"><i data-lucide="moon"></i></button><button data-theme="light"><i data-lucide="sun"></i></button>
+    </div>
+  </header>
+  <div class="prodline"></div>
+
+  <!-- ═════════ WORKSPACE ═════════ -->
+  <div class="body">
+  <section id="workspace" class="view">
+   <div class="body">
+    <!-- explorer -->
+    <aside class="side">
+      <div class="panel-h">
+        <h2 data-i18n="explorer">Explorer</h2>
+        <button class="tb-btn" title="New connection"><i data-lucide="plus"></i></button>
+        <button class="tb-btn" title="Refresh"><i data-lucide="rotate-ccw"></i></button>
+      </div>
+      <div class="filter"><i data-lucide="search"></i><input data-i18n-ph="filterobj" placeholder="Filter objects"><kbd>⌘F</kbd></div>
+      <div class="tree" id="tree">
+        <div class="grp"><span data-i18n="local">Local</span><span class="cnt">1</span></div>
+        <div class="row conn-row" style="padding-left:6px"><span class="tw"><i data-lucide="chevron-down"></i></span><span class="ic"><i data-lucide="file"></i></span><span class="nm">local-sqlite</span><span class="meta">SQLite</span><span class="end"><span class="sw loc"></span></span></div>
+        <div class="row" style="padding-left:22px"><span class="guide" style="left:12px"></span><span class="tw"></span><span class="ic"><i data-lucide="database"></i></span><span class="nm">app.db</span></div>
+
+        <div class="grp"><span class="perde">Perde · Acme</span><span class="signed"><i data-lucide="shield-check" style="width:12px;height:12px;color:var(--turq-ink)"></i><span data-i18n="agents4">4 via Karagöz</span></span></div>
+        <div class="row conn-row" style="padding-left:6px"><span class="tw"><i data-lucide="chevron-down"></i></span><span class="ic c-coral"><i data-lucide="database"></i></span><span class="nm">orders-prod</span><span class="meta">PG 16</span><span class="end"><i data-lucide="arrow-right-left" class="c-turq"></i><i data-lucide="lock" class="lock-c"></i><span class="sw prod" title="production"></span></span></div>
+        <div class="row" style="padding-left:22px"><span class="guide" style="left:12px"></span><span class="tw"><i data-lucide="chevron-down"></i></span><span class="ic"><i data-lucide="database"></i></span><span class="nm">orders</span></div>
+        <div class="row" style="padding-left:38px"><span class="guide" style="left:12px"></span><span class="guide" style="left:28px"></span><span class="tw"><i data-lucide="chevron-down"></i></span><span class="ic"><i data-lucide="layers"></i></span><span class="nm">public</span></div>
+        <div class="row" style="padding-left:54px"><span class="guide" style="left:12px"></span><span class="guide" style="left:28px"></span><span class="guide" style="left:44px"></span><span class="tw"><i data-lucide="chevron-down"></i></span><span class="ic"><i data-lucide="folder"></i></span><span class="nm" data-i18n="tables">Tables</span><span class="end">5</span></div>
+        <div class="row" style="padding-left:70px"><span class="guide" style="left:12px"></span><span class="guide" style="left:28px"></span><span class="guide" style="left:44px"></span><span class="guide" style="left:60px"></span><span class="tw"></span><span class="ic"><i data-lucide="table-2"></i></span><span class="nm">customers</span><span class="end">18.4k</span></div>
+        <div class="row sel" style="padding-left:70px"><span class="guide" style="left:12px"></span><span class="guide" style="left:28px"></span><span class="guide" style="left:44px"></span><span class="guide" style="left:60px"></span><span class="tw"></span><span class="ic"><i data-lucide="table-2"></i></span><span class="nm">orders</span><span class="end">412k</span></div>
+        <div class="row" style="padding-left:70px"><span class="guide" style="left:12px"></span><span class="guide" style="left:28px"></span><span class="guide" style="left:44px"></span><span class="guide" style="left:60px"></span><span class="tw"></span><span class="ic"><i data-lucide="table-2"></i></span><span class="nm">order_items</span><span class="end">1.9M</span></div>
+        <div class="row" style="padding-left:70px"><span class="guide" style="left:12px"></span><span class="guide" style="left:28px"></span><span class="guide" style="left:44px"></span><span class="guide" style="left:60px"></span><span class="tw"></span><span class="ic"><i data-lucide="table-2"></i></span><span class="nm">products</span><span class="end">2.3k</span></div>
+        <div class="row" style="padding-left:70px"><span class="guide" style="left:12px"></span><span class="guide" style="left:28px"></span><span class="guide" style="left:44px"></span><span class="guide" style="left:60px"></span><span class="tw"></span><span class="ic"><i data-lucide="table-2"></i></span><span class="nm">audit_log</span><span class="end">6.1M</span></div>
+        <div class="row" style="padding-left:54px"><span class="guide" style="left:12px"></span><span class="guide" style="left:28px"></span><span class="guide" style="left:44px"></span><span class="tw"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="eye"></i></span><span class="nm" data-i18n="views">Views</span><span class="end">3</span></div>
+        <div class="row" style="padding-left:54px"><span class="guide" style="left:12px"></span><span class="guide" style="left:28px"></span><span class="guide" style="left:44px"></span><span class="tw"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="square-function"></i></span><span class="nm" data-i18n="functions">Functions</span><span class="end">7</span></div>
+        <div class="row" style="padding-left:54px"><span class="guide" style="left:12px"></span><span class="guide" style="left:28px"></span><span class="guide" style="left:44px"></span><span class="tw"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="list-ordered"></i></span><span class="nm" data-i18n="sequences">Sequences</span><span class="end">4</span></div>
+        <div class="row" style="padding-left:38px"><span class="guide" style="left:12px"></span><span class="guide" style="left:28px"></span><span class="tw"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="layers"></i></span><span class="nm">billing</span></div>
+        <div class="row conn-row" style="padding-left:6px"><span class="tw"><i data-lucide="chevron-right"></i></span><span class="ic c-turq"><i data-lucide="database"></i></span><span class="nm">orders-staging</span><span class="meta">PG 16</span><span class="end"><span class="sw stg" title="staging"></span></span></div>
+        <div class="row conn-row" style="padding-left:6px"><span class="tw"><i data-lucide="chevron-right"></i></span><span class="ic c-coral"><i data-lucide="layers"></i></span><span class="nm">cache-prod</span><span class="meta">Redis 7.4</span><span class="end"><i data-lucide="lock" class="lock-c"></i><span class="sw prod"></span></span></div>
+        <div class="row conn-row" style="padding-left:6px"><span class="tw"><i data-lucide="chevron-right"></i></span><span class="ic c-turq"><i data-lucide="leaf"></i></span><span class="nm">events</span><span class="meta">MongoDB 7</span><span class="end"><span class="sw stg"></span></span></div>
+      </div>
+
+      <dl class="cdetail">
+        <div class="t"><span class="sw prod"></span><b>orders-prod</b><span>PostgreSQL 16.4</span></div>
+        <dt data-i18n="environment">Environment</dt><dd class="c-coral"><i data-lucide="shield-alert"></i><span data-i18n="production">production</span></dd>
+        <dt data-i18n="access">Access</dt><dd><i data-lucide="lock" class="c-coral"></i><span data-i18n="readonly">read-only</span></dd>
+        <dt data-i18n="path">Path</dt><dd class="c-turq"><i data-lucide="arrow-right-left"></i><span data-i18n="directp2p">Direct (P2P)</span><span class="g"><span class="gv live-lat">18</span><span class="gu">ms</span></span></dd>
+        <dt data-i18n="agent">Agent</dt><dd class="mono">karagoz@eu-west-1a</dd>
+        <dt data-i18n="granted">Granted by</dt><dd><span>Perde · Acme</span><span class="c-3 mono" style="font-size:11px">backend-ro</span></dd>
+      </dl>
+    </aside>
+
+    <!-- main -->
+    <div class="main">
+      <div class="tabs">
+        <div class="tab on"><span class="sw prod"></span><span class="fn">orders-prod.sql</span><span class="x"><i data-lucide="x"></i></span></div>
+        <div class="tab"><span class="sw prod"></span><span class="fn">revenue-by-city.sql</span><span class="x"><i data-lucide="x"></i></span></div>
+        <div class="tab"><span class="sw loc"></span><span class="fn">scratch.sql</span><span class="dot" title="Unsaved"></span></div>
+        <div class="tools">
+          <span class="txmode"><i data-lucide="git-commit-horizontal"></i><span data-i18n="autocommit">Auto-commit</span></span>
+          <button class="btn"><i data-lucide="scan-eye"></i><span data-i18n="explain">Explain</span></button>
+          <button class="btn primary"><i data-lucide="play"></i><span data-i18n="runstmt">Run statement</span><kbd>⌘↵</kbd></button>
+        </div>
+      </div>
+
+      <div class="editor" id="editor">
+        <div class="gutter" id="gutter"></div>
+        <div class="code" id="code"></div>
+        <div class="scrollthumb" style="top:8px;height:120px"></div>
+
+        <div class="compl" id="compl">
+          <div class="clist" id="clist"></div>
+          <div class="cdet" id="cdet"></div>
+        </div>
+      </div>
+
+      <div class="results">
+        <div class="rbar">
+          <div class="rtab on" data-pane="p1"><i data-lucide="table-2" class="c-cob"></i><span data-i18n="result1">Result 1</span><span class="stn">stmt 1</span></div>
+          <div class="rtab" data-pane="p2"><span class="sw stg"></span><span class="mono">orders</span><span class="c-3" data-i18n="stagingparen">(staging)</span><span class="stampcount">3</span></div>
+          <div class="meta" id="rmeta">
+            <span class="ro-note"><i data-lucide="lock"></i><span data-i18n="ronote">Read-only on production — editing disabled</span></span>
+            <span><span class="g"><span class="gv">100</span><span class="gu" data-i18n="rowsU">rows</span></span><span class="g"><span class="gv">42</span><span class="gu">ms</span></span></span>
+          </div>
+        </div>
+
+        <!-- pane 1: prod read-only result -->
+        <div class="rpane on" id="p1">
+          <div class="gtool">
+            <div class="where"><b>WHERE</b><input data-i18n-ph="filterph" placeholder="city = 'İstanbul'  ·  ⌥↵ to apply"></div>
+            <div class="chip"><b>ORDER BY</b> revenue DESC</div>
+            <div class="pager">
+              <button class="tb-btn"><i data-lucide="chevron-left"></i></button>
+              <span class="g lg"><span class="gv">1–100</span><span class="of" data-i18n="of">of</span><span class="gv">2,481</span></span>
+              <button class="tb-btn"><i data-lucide="chevron-right"></i></button>
+            </div>
+            <span class="vsep"></span>
+            <button class="btn"><i data-lucide="hash"></i><span data-i18n="countrows">Count rows</span></button>
+            <button class="btn" title="Copy"><i data-lucide="copy"></i></button>
+            <button class="btn"><i data-lucide="download"></i><span data-i18n="export">Export</span><i data-lucide="chevron-down" style="width:12px;height:12px"></i></button>
+          </div>
+          <div class="gridwrap">
+            <div class="grid" id="grid1">
+              <div class="gscroll" id="gs1"><table class="dg ro-grid" id="dg1">
+                <colgroup><col style="width:48px"><col style="width:252px"><col style="width:188px"><col style="width:132px"><col style="width:176px"><col></colgroup>
+                <thead><tr>
+                  <th class="rn">#</th>
+                  <th><div class="cn">full_name</div><div class="ct">text</div></th>
+                  <th><div class="cn">city</div><div class="ct">text</div></th>
+                  <th class="r"><div class="cn">orders</div><div class="ct">bigint</div></th>
+                  <th class="r"><div class="cn"><span class="sort"><i data-lucide="arrow-down-wide-narrow"></i></span>revenue</div><div class="ct">numeric(14,2)</div></th>
+                  <th></th>
+                </tr></thead>
+                <tbody id="tb1"></tbody>
+              </table>
+              <div class="selbox" id="selbox"></div>
+              <div class="vscroll"><div class="loaded pref" style="top:46px;height:42px"></div><div class="thumb" style="top:2px;height:42px"></div></div></div>
+              <div class="gfoot">
+                <div class="prefetch">
+                  <div class="pages" id="pages"></div>
+                  <span class="lbl" data-i18n="nextready">Next page ready</span>
+                  <span class="g c-2"><span class="gv">101–200</span><span class="gu" data-i18n="prefetched">prefetched</span></span>
+                </div>
+                <div class="right">
+                  <span class="k3" data-i18n="selection">Selection</span>
+                  <span class="g"><span class="gv">3</span><span class="gu">×</span><span class="gv">2</span></span>
+                  <span class="g"><span class="gu">Σ orders</span><span class="gv">110</span></span>
+                  <span class="g"><span class="gu">Σ revenue</span><span class="gv">997,636.65</span></span>
+                </div>
+              </div>
+            </div>
+            <aside class="insp">
+              <div class="ih"><i data-lucide="panel-right" class="c-3"></i><h3 data-i18n="record">Record</h3><span class="g"><span class="gu" data-i18n="rowU">row</span><span class="gv">3</span></span></div>
+              <div class="fld"><div class="fk"><span>full_name</span><span>text</span></div><div class="fv">Cem Öztürk</div></div>
+              <div class="fld"><div class="fk"><span>city</span><span>text</span></div><div class="fv">İzmir</div></div>
+              <div class="fld"><div class="fk"><span>orders</span><span>bigint</span></div><div class="fv num">39</div></div>
+              <div class="fld"><div class="fk"><span>revenue</span><span>numeric(14,2)</span></div><div class="fv num">351,904.10</div></div>
+              <div class="ist-h"><span data-i18n="selstats">Selected range</span><span class="g"><span class="gv">6</span><span class="gu" data-i18n="cells">cells</span></span></div>
+              <div class="istats">
+                <div class="st"><span>Σ revenue</span><span class="g lg"><span class="gv">997,636.65</span></span></div>
+                <div class="st"><span>avg revenue</span><span class="g lg"><span class="gv">332,545.55</span></span></div>
+                <div class="st"><span>Σ orders</span><span class="g lg"><span class="gv">110</span></span></div>
+                <div class="st"><span>avg / order</span><span class="g lg"><span class="gv">9,069.42</span></span></div>
+              </div>
+            </aside>
+          </div>
+        </div>
+
+        <!-- pane 2: staging with pending stamps -->
+        <div class="rpane" id="p2">
+          <div class="gtool">
+            <span class="envtag stg"><i data-lucide="arrow-right-left"></i>orders-staging · <span data-i18n="readwrite">read-write</span></span>
+            <div class="where"><b>WHERE</b><input value="ordered_at > now() - interval '1 day'" class="mono"></div>
+            <div class="pager">
+              <button class="tb-btn"><i data-lucide="chevron-left"></i></button>
+              <span class="g lg"><span class="gv">1–100</span><span class="of" data-i18n="of">of</span><span class="gv">612</span></span>
+              <button class="tb-btn"><i data-lucide="chevron-right"></i></button>
+            </div>
+            <span class="vsep"></span>
+            <button class="btn"><i data-lucide="plus"></i><span data-i18n="addrow">Add row</span></button>
+            <button class="btn" title="Copy"><i data-lucide="copy"></i></button>
+          </div>
+          <div class="gridwrap">
+            <div class="grid">
+              <div class="gscroll"><table class="dg" id="dg2">
+                <colgroup><col style="width:48px"><col style="width:100px"><col style="width:120px"><col style="width:176px"><col style="width:112px"><col style="width:232px"><col></colgroup>
+                <thead><tr>
+                  <th class="rn">#</th>
+                  <th class="r"><div class="cn">id</div><div class="ct">bigint · PK</div></th>
+                  <th class="r"><div class="cn">customer_id</div><div class="ct">bigint · FK</div></th>
+                  <th><div class="cn">status</div><div class="ct">text</div></th>
+                  <th class="r"><div class="cn">total</div><div class="ct">numeric(12,2)</div></th>
+                  <th><div class="cn">ordered_at</div><div class="ct">timestamptz</div></th>
+                  <th></th>
+                </tr></thead>
+                <tbody id="tb2"></tbody>
+              </table>
+              <div class="vscroll"><div class="loaded pref" style="top:60px;height:56px"></div><div class="thumb" style="top:2px;height:56px"></div></div></div>
+              <div class="pendbar">
+                <div class="msg"><span class="stamp">INS</span><span class="stamp">UPD</span><span class="stamp">DEL</span><b data-i18n="pending3">3 pending changes</b><span data-i18n="stampedtill">— stamped until submitted</span></div>
+                <div class="acts">
+                  <button class="btn"><i data-lucide="undo-2"></i><span data-i18n="revert">Revert all</span></button>
+                  <button class="btn primary"><i data-lucide="send"></i><span data-i18n="submit">Submit</span><kbd>⌘S</kbd></button>
+                </div>
+              </div>
+            </div>
+            <aside class="insp">
+              <div class="ih"><i data-lucide="file-code-2" class="c-3"></i><h3 data-i18n="dmlpreview">DML preview</h3><span class="g"><span class="gv">3</span><span class="gu" data-i18n="stmtsU">stmts</span></span></div>
+              <div class="dml"><div class="ln2"><span class="stamp">INS</span><span><span class="k">INSERT INTO</span> orders
+  (customer_id, status, total)
+<span class="k">VALUES</span> (<span class="n">1187</span>, <span class="s">'paid'</span>, <span class="n">249.90</span>);</span></div></div>
+              <div class="dml"><div class="ln2"><span class="stamp">UPD</span><span><span class="k">UPDATE</span> orders
+<span class="k">SET</span> status = <span class="s">'paid'</span>
+<span class="k">WHERE</span> id = <span class="n">48212</span>;</span></div></div>
+              <div class="dml"><div class="ln2"><span class="stamp">DEL</span><span><span class="k">DELETE FROM</span> orders
+<span class="k">WHERE</span> id = <span class="n">48216</span>;</span></div></div>
+              <div class="ist-h" style="padding-bottom:12px"><span class="c-3" style="font-weight:400" data-i18n="txnote">Runs in one transaction on orders-staging</span></div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </div>
+   </div>
+
+    <!-- status bar -->
+    <footer class="status">
+      <span class="it envb"><i data-lucide="shield-alert"></i><span data-i18n="production">production</span><span class="sep">·</span><i data-lucide="lock" style="width:12px;height:12px"></i><span data-i18n="readonly">read-only</span></span>
+      <span class="it path"><i data-lucide="arrow-right-left"></i><span data-i18n="direct">Direct</span><span class="g"><span class="gv live-lat">18</span><span class="gu">ms</span></span><span class="c-3" data-i18n="relaystandby">relay on standby</span></span>
+      <span class="it"><i data-lucide="server" class="c-3"></i><span class="mono" style="font-size:11px">karagoz@eu-west-1a</span></span>
+      <span class="it"><i data-lucide="git-commit-horizontal" class="c-3"></i><span data-i18n="autocommit">Auto-commit</span></span>
+      <span class="grow"></span>
+      <span class="it"><span class="g"><span class="gv">100</span><span class="gu" data-i18n="rowsU">rows</span></span><span class="g"><span class="gv">42</span><span class="gu">ms</span></span></span>
+      <span class="it"><span class="g"><span class="gu" data-i18n="lnU">Ln</span><span class="gv">14</span></span><span class="g"><span class="gu" data-i18n="colU">Col</span><span class="gv">49</span></span></span>
+      <span class="it">UTF-8</span>
+      <span class="it">PostgreSQL</span>
+      <span class="it lang" id="langStatus"><button data-lang="en">EN</button><button data-lang="tr">TR</button></span>
+    </footer>
+  </section>
+
+  <!-- ═════════ SPLASH ═════════ -->
+  <section id="splash" class="view">
+    <div class="tray"><svg id="ebru" viewBox="0 0 760 792" preserveAspectRatio="none"></svg></div>
+    <div class="sp-col">
+      <div class="sp-word" id="spWord">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10.6" fill="var(--e-final)" stroke="var(--cobalt)" stroke-width="1.2"/><circle cx="12" cy="8.1" r="2.35" fill="var(--cobalt)"/><circle cx="8.6" cy="14" r="2.35" fill="var(--cobalt)"/><circle cx="15.4" cy="14" r="2.35" fill="var(--cobalt)"/></svg>
+        <h1>Hacivat</h1>
+      </div>
+      <p class="sp-lede"><span data-i18n="lede1">Opening</span> <span class="mono">orders-prod</span> <span data-i18n="lede2">through Perde · Acme. No credentials leave the agent.</span></p>
+      <div class="sp-trust">
+        <div class="conn">
+          <span class="env"><i data-lucide="shield-alert"></i><span data-i18n="production">production</span></span>
+          <span class="ro"><i data-lucide="lock"></i><span data-i18n="readonly">read-only</span></span>
+          <span class="path"><i data-lucide="arrow-right-left"></i><span data-i18n="directp2p">Direct (P2P)</span></span>
+        </div>
+      </div>
+      <div class="steps">
+        <div class="step" id="st1"><span class="st"><i></i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+          <div class="tx"><b data-i18n="s1">Resolving agent karagoz@eu-west-1a</b><span>perde.acme · role backend-ro</span></div>
+          <span class="g"><span class="gv" id="g1">—</span><span class="gu">ms</span></span></div>
+        <div class="step" id="st2"><span class="st"><i></i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+          <div class="tx"><b data-i18n="s2">Hole punching… direct path found</b><span>udp · 2 candidates · relay standby</span></div>
+          <span class="g"><span class="gv" id="g2">—</span><span class="gu">ms</span></span></div>
+        <div class="step" id="st3"><span class="st"><i></i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+          <div class="tx"><b data-i18n="s3">Introspecting 214 objects</b><span>orders · public, billing</span></div>
+          <span class="g lg"><span class="gv" id="g3">0</span><span class="gu">/ 214</span></span></div>
+      </div>
+      <div class="prog" id="prog"></div>
+      <div class="sp-foot">
+        <span class="g"><span class="gv" id="gEl">0.0</span><span class="gu">s</span></span>
+        <span data-i18n="elapsed">elapsed</span>
+        <span class="r"><kbd>esc</kbd><span data-i18n="cancel">cancel</span></span>
+      </div>
+    </div>
+    <div class="sp-ver">Hacivat 0.1 · <span data-i18n="oss">open source</span></div>
+  </section>
+  </div>
+</div>
+
+<script>
+/* ═════════ i18n ═════════ */
+const I18N = {
+  en:{production:"production",readonly:"read-only",readwrite:"read-write",directp2p:"Direct (P2P)",direct:"Direct",palette:"Search or run a command",
+    workspace:"Workspace",splash:"Opening",explorer:"Explorer",filterobj:"Filter objects",local:"Local",agents4:"4 via Karagöz",
+    tables:"Tables",views:"Views",functions:"Functions",sequences:"Sequences",environment:"Environment",access:"Access",path:"Path",agent:"Agent",granted:"Granted by",
+    autocommit:"Auto-commit",explain:"Explain",runstmt:"Run statement",result1:"Result 1",stagingparen:"(staging)",ronote:"Read-only on production — editing disabled",
+    rowsU:"rows",rowU:"row",filterph:"city = 'İstanbul'  ·  ⌥↵ to apply",of:"of",countrows:"Count rows",export:"Export",nextready:"Next page ready",prefetched:"prefetched",
+    selection:"Selection",record:"Record",selstats:"Selected range",cells:"cells",addrow:"Add row",pending3:"3 pending changes",stampedtill:"— stamped until submitted",
+    revert:"Revert all",submit:"Submit",dmlpreview:"DML preview",stmtsU:"stmts",txnote:"Runs as one transaction on orders-staging",relaystandby:"relay on standby",
+    lnU:"Ln",colU:"Col",lede1:"Opening",lede2:"through Perde · Acme. No credentials leave the agent.",s1:"Resolving agent karagoz@eu-west-1a",
+    s2:"Hole punching… direct path found",s3:"Introspecting 214 objects",elapsed:"elapsed",cancel:"cancel",oss:"open source",ready:"Ready",
+    k_col:"column",k_fn:"function",k_kw:"keyword",notscope:"not in scope",insert:"insert",replace:"replace",more:"more",
+    d_type:"Type",d_null:"Nullable",d_fk:"References",d_idx:"Index",d_tab:"Table",no:"no",yes:"yes",colof:"column of",fnsub:"aggregate · returns bigint",kwsub:"SQL keyword",
+    scopewhy:"customers is not joined in this statement. Insert adds JOIN customers c.",cdate_d:"Current date at transaction start, in the session time zone.",case_d:"Conditional expression: CASE WHEN … THEN … END."},
+  tr:{production:"üretim",readonly:"salt okunur",readwrite:"okuma-yazma",directp2p:"Doğrudan (P2P)",direct:"Doğrudan",palette:"Ara veya komut çalıştır",
+    workspace:"Çalışma alanı",splash:"Açılış",explorer:"Gezgin",filterobj:"Nesneleri süz",local:"Yerel",agents4:"Karagöz üzerinden 4",
+    tables:"Tablolar",views:"Görünümler",functions:"Fonksiyonlar",sequences:"Diziler",environment:"Ortam",access:"Erişim",path:"Yol",agent:"Ajan",granted:"Yetkiyi veren",
+    autocommit:"Otomatik commit",explain:"Planı göster",runstmt:"İfadeyi çalıştır",result1:"Sonuç 1",stagingparen:"(hazırlık)",ronote:"Üretimde salt okunur — düzenleme kapalı",
+    rowsU:"satır",rowU:"satır",filterph:"city = 'İstanbul'  ·  uygulamak için ⌥↵",of:"/",countrows:"Satırları say",export:"Dışa aktar",nextready:"Sonraki sayfa hazır",prefetched:"önceden yüklendi",
+    selection:"Seçim",record:"Kayıt",selstats:"Seçili aralık",cells:"hücre",addrow:"Satır ekle",pending3:"3 bekleyen değişiklik",stampedtill:"— gönderilene dek mühürlü",
+    revert:"Tümünü geri al",submit:"Gönder",dmlpreview:"DML önizlemesi",stmtsU:"ifade",txnote:"orders-staging üzerinde tek işlemde çalışır",relaystandby:"aktarıcı beklemede",
+    lnU:"Sat",colU:"Süt",lede1:"Açılıyor:",lede2:"Perde · Acme üzerinden. Kimlik bilgileri ajandan hiç çıkmaz.",s1:"karagoz@eu-west-1a ajanı çözümleniyor",
+    s2:"NAT delme… doğrudan yol bulundu",s3:"214 nesne inceleniyor",elapsed:"geçen süre",cancel:"iptal",oss:"açık kaynak",ready:"Hazır",
+    k_col:"sütun",k_fn:"fonksiyon",k_kw:"anahtar kelime",notscope:"kapsam dışı",insert:"ekle",replace:"değiştir",more:"daha fazla",
+    d_type:"Tür",d_null:"Boş olabilir",d_fk:"Başvurduğu",d_idx:"Dizin",d_tab:"Tablo",no:"hayır",yes:"evet",colof:"sütunu ·",fnsub:"toplama · bigint döndürür",kwsub:"SQL anahtar kelimesi",
+    scopewhy:"customers bu ifadede birleştirilmemiş. Ekle, JOIN customers c ekler.",cdate_d:"İşlem başlangıcındaki tarih, oturum saat diliminde.",case_d:"Koşullu ifade: CASE WHEN … THEN … END."}
+};
+let LANG="en";
+const t=k=>(I18N[LANG][k]??I18N.en[k]??k);
+function applyLang(l){
+  LANG=l; document.documentElement.lang=l;
+  document.querySelectorAll("[data-i18n]").forEach(e=>e.textContent=t(e.dataset.i18n));
+  document.querySelectorAll("[data-i18n-ph]").forEach(e=>e.placeholder=t(e.dataset.i18nPh));
+  document.querySelectorAll("[data-lang]").forEach(b=>b.classList.toggle("on",b.dataset.lang===l));
+  renderCompletion(); positionPopup();
+}
+function applyTheme(th){
+  document.documentElement.dataset.theme=th;
+  document.querySelectorAll("#themeSeg button").forEach(b=>b.classList.toggle("on",b.dataset.theme===th));
+}
+function applyView(v){
+  document.documentElement.dataset.view=v;
+  document.querySelectorAll("#viewSeg button").forEach(b=>b.classList.toggle("on",b.dataset.view===v));
+  if(v==="splash") Splash.start(); else { Splash.stop(); requestAnimationFrame(positionPopup); }
+}
+
+/* ═════════ editor ═════════ */
+const K=s=>`<span class="k">${s}</span>`, S=s=>`<span class="s">${s}</span>`, N=s=>`<span class="n">${s}</span>`, O=s=>`<span class="o">${s}</span>`, A=s=>`<span class="al">${s}</span>`;
+const LINES=[
+  `<span class="cm">-- Top customers by revenue, last 30 days</span>`,
+  `${K("SELECT")} c.full_name,`,
+  `       c.city,`,
+  `       <span class="f">count</span>(o.id)          ${K("AS")} orders,<span class="inlay m">bigint</span>`,
+  `       <span class="f">sum</span>(oi.line_total)   ${K("AS")} revenue`,
+  `${K("FROM")} customers ${A("c")}`,
+  `${K("JOIN")} orders ${A("o")} ${K("ON")} o.customer_id ${O("=")} c.id`,
+  `${K("JOIN")} order_items ${A("oi")} ${K("ON")} oi.order_id ${O("=")} o.id`,
+  `${K("WHERE")} o.ordered_at ${O(">")} <span class="f">now</span>() ${O("-")} ${K("interval")} ${S("'30 days'")}`,
+  `${K("GROUP BY")} c.full_name, c.city`,
+  `${K("ORDER BY")} revenue ${K("DESC")}`,
+  `${K("LIMIT")} ${N("100")};<span class="eol"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span class="g"><span class="gv">42</span><span class="gu">ms</span></span><span class="g"><span class="gv">100</span><span class="gu" data-i18n="rowsU">rows</span></span></span>`,
+  ``,
+  `${K("SELECT")} ${O("*")} ${K("FROM")} orders ${K("WHERE")} status ${O("=")} ${S("'paid'")} ${K("AND")} c<span class="caret" id="caret"></span>`
+];
+function renderEditor(){
+  const g=document.getElementById("gutter"), c=document.getElementById("code");
+  g.innerHTML=LINES.map((_,i)=>`<div class="ln${i===13?" cur":""}">${i+1}</div>`).join("")+
+    `<span class="gbracket" style="top:${8+20+4}px;height:${20*11-8}px;border-color:var(--turq)"></span>`+
+    `<span class="gmark" style="top:${8+20+3}px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>`+
+    `<span class="gbracket" style="top:${8+20*13+3}px;height:14px;border-color:var(--cobalt-line)"></span>`+
+    `<span class="gmark" style="top:${8+20*13+3}px;color:var(--cobalt-ink)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l12 8-12 8z" fill="currentColor" stroke="none"/></svg></span>`;
+  c.innerHTML=LINES.map((l,i)=>`<div class="cl${i===13?" cur":""}">${l||" "}</div>`).join("");
+}
+
+/* completion */
+const ITEMS=[
+  {lbl:"customer_id",kind:"col",ty:"bigint",src:"orders",
+   det:()=>({hd:"customer_id",sub:`orders · ${t("k_col")}`,dl:[[t("d_type"),"bigint"],[t("d_null"),`${t("no")} · NOT NULL`],[t("d_fk"),`<svg class="lucide" viewBox="0 0 24 24" fill="none" stroke="var(--cobalt-ink)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg><span class="c-cob">customers.id</span>`],[t("d_idx"),"orders_customer_id_idx"]]})},
+  {lbl:"city",kind:"col",ty:"text",src:"customers",dim:true,
+   det:()=>({hd:"city",sub:`customers · ${t("notscope")}`,dl:[[t("d_type"),"text"],[t("d_null"),t("yes")]],p:t("scopewhy")})},
+  {lbl:"cancelled_at",kind:"col",ty:"timestamptz",src:"orders",
+   det:()=>({hd:"cancelled_at",sub:`orders · ${t("k_col")}`,dl:[[t("d_type"),"timestamptz"],[t("d_null"),t("yes")],[t("d_idx"),"—"]]})},
+  {lbl:"count()",kind:"fn",ty:"bigint",src:"",
+   det:()=>({hd:"count(expr)",sub:t("fnsub"),dl:[[t("d_type"),"bigint"]],p:"count(*) · count(DISTINCT expr)"})},
+  {lbl:"current_date",kind:"fn",ty:"date",src:"",
+   det:()=>({hd:"current_date",sub:t("k_fn"),dl:[[t("d_type"),"date"]],p:t("cdate_d")})},
+  {lbl:"case",kind:"kw",ty:"",src:"",
+   det:()=>({hd:"CASE",sub:t("kwsub"),dl:[],p:t("case_d")})}
+];
+let SEL=0;
+const KIND_ICON={col:"columns-3",fn:"square-function",kw:"type"};
+function renderCompletion(){
+  const L=document.getElementById("clist");
+  L.innerHTML=ITEMS.map((it,i)=>{
+    const lb=`<u>${it.lbl[0]}</u>${it.lbl.slice(1)}`;
+    const src=it.dim?t("notscope"):(it.src|| (it.kind==="kw"?t("k_kw"):t("k_fn")));
+    return `<div class="ci${i===SEL?" on":""}${it.dim?" dim":""}" data-i="${i}"><span class="kd"><i data-lucide="${KIND_ICON[it.kind]}"></i></span><span class="lbl">${lb}</span><span class="ty">${it.ty}</span><span class="src">${src}</span></div>`;
+  }).join("")+`<div class="cfoot"><span><kbd>↵</kbd>${t("insert")}</span><span><kbd>⇥</kbd>${t("replace")}</span><span><kbd>⌃␣</kbd>${t("more")}</span></div>`;
+  const d=ITEMS[SEL].det();
+  document.getElementById("cdet").innerHTML=`<div class="hd">${d.hd}</div><div class="sub">${d.sub}</div>`+
+    (d.dl.length?`<dl>${d.dl.map(([a,b])=>`<dt>${a}</dt><dd>${b}</dd>`).join("")}</dl>`:"")+(d.p?`<p>${d.p}</p>`:"");
+  L.querySelectorAll(".ci").forEach(el=>el.addEventListener("click",()=>{SEL=+el.dataset.i;renderCompletion();}));
+  if(window.lucide) lucide.createIcons({attrs:{"stroke-width":1.75}});
+}
+function positionPopup(){
+  const ed=document.getElementById("editor"), ca=document.getElementById("caret"), p=document.getElementById("compl");
+  if(!ca||!ed.offsetParent) return;
+  const er=ed.getBoundingClientRect(), cr=ca.getBoundingClientRect();
+  const charW=cr.left-ca.previousSibling?.getBoundingClientRect?.().left || 7.5;
+  const x=cr.left-er.left+4; // opens just right of the caret, clear of the statement above
+  p.style.left=Math.round(x)+"px";
+  p.style.top=Math.round(cr.top-er.top-p.offsetHeight-6)+"px";
+}
+
+/* ═════════ grids ═════════ */
+const R1=[
+ ["Ada Yılmaz","İstanbul",48,"412,880.40"],["Bora Işık","Ankara",41,"386,215.75"],["Cem Öztürk","İzmir",39,"351,904.10"],
+ ["Deniz Çelik","Berlin",36,"327,640.00"],["Elif Şahin","İstanbul",35,"318,092.55"],["Selin Doğan",null,33,"297,415.20"],
+ ["Mert Aydın","Iğdır",31,"284,770.90"],["Hannah Weber","Berlin",30,"271,338.15"],["Oğuz Kaya","Bursa",29,"260,412.00"],
+ ["Zeynep Arslan","London",27,"248,905.35"],["Tolga Güneş","Antalya",26,"239,180.60"],["James Carter","London",25,"231,644.05"],
+ ["Ece Koç","Eskişehir",24,"224,015.80"],["Burak Özdemir","İstanbul",23,"215,377.45"],["Lena Fischer","Hamburg",22,"207,960.10"],
+ ["Gül Erdoğan","Ankara",21,"198,402.70"],["Kaan Polat","Trabzon",20,"190,226.35"],["Nil Aksoy","",19,"182,051.00"],
+ ["Sami Kurt","Konya",18,"175,890.25"],["Irmak Tan","İzmir",17,"168,314.60"]
+];
+function renderGrid1(){
+  document.getElementById("tb1").innerHTML=R1.map((r,i)=>{
+    const sel=i>=2&&i<=4, cls=sel?" insel":"";
+    const city=r[1]===null?`<span class="null">NULL</span>`:(r[1]===""?`<span class="empty">''</span>`:r[1]);
+    return `<tr class="${sel?"selrow":""}"><td class="rn">${i+1}</td><td>${r[0]}</td><td>${city}</td><td class="r${cls}">${r[2]}</td><td class="r${cls}">${r[3]}</td><td></td></tr>`;
+  }).join("");
+}
+function placeSel(){
+  const tb=document.getElementById("tb1"), g=document.getElementById("gs1"), b=document.getElementById("selbox");
+  const a=tb.rows[2].cells[3], z=tb.rows[4].cells[4];
+  if(!a||!g.offsetParent) return;
+  const gr=g.getBoundingClientRect(), ar=a.getBoundingClientRect(), zr=z.getBoundingClientRect();
+  Object.assign(b.style,{left:(ar.left-gr.left-.5)+"px",top:(ar.top-gr.top-.5)+"px",width:(zr.right-ar.left)+"px",height:(zr.bottom-ar.top)+"px"});
+}
+const R2=[
+ ["ins",null,"1187","paid","249.90","now()"],
+ ["",  "48210","1042","paid","1,240.00","2026-11-11 09:12:44+03"],
+ ["",  "48211","1187","shipped","89.90","2026-11-11 09:14:02+03"],
+ ["upd","48212","1009","paid|pending","412.35","2026-11-11 09:20:17+03"],
+ ["",  "48213","1311","paid","57.00","2026-11-11 09:31:50+03"],
+ ["",  "48214","1042","refunded","199.99","2026-11-11 09:44:08+03"],
+ ["",  "48215","1220","paid","2,018.40","2026-11-11 10:02:33+03"],
+ ["del","48216","1077","cancelled","0.00","2026-11-11 10:05:12+03"],
+ ["",  "48217","1408","paid","318.75","2026-11-11 10:11:46+03"],
+ ["",  "48218","1009","shipped","74.20","2026-11-11 10:26:01+03"],
+ ["",  "48219","1533","paid","1,105.00","2026-11-11 10:38:27+03"],
+ ["",  "48220","1187","paid","46.50","2026-11-11 10:52:09+03"],
+ ["",  "48221","1260","pending","233.10","2026-11-11 11:04:55+03"],
+ ["",  "48222","1042","paid","890.00","2026-11-11 11:17:38+03"],
+ ["",  "48223","1311","shipped","129.99","2026-11-11 11:29:14+03"],
+ ["",  "48224","1599","paid","3,412.60","2026-11-11 11:40:02+03"],
+ ["",  "48225","1077","paid","64.00","2026-11-11 11:58:21+03"],
+ ["",  "48226","1408","refunded","19.90","2026-11-11 12:06:45+03"],
+ ["",  "48227","1220","paid","542.30","2026-11-11 12:19:33+03"]
+];
+function renderGrid2(){
+  let n=0;
+  document.getElementById("tb2").innerHTML=R2.map(r=>{
+    const st=r[0]; const rn=st?`<span class="stamp">${st.toUpperCase()}</span>`:(++n);
+    if(st==="del"||st==="upd") n++;
+    const id=r[1]===null?`<span class="dim">DEFAULT</span>`:r[1];
+    let status=r[3], stCls="";
+    if(status.includes("|")){const [nw,old]=status.split("|"); status=`${nw}<span class="was">${old}</span>`; stCls=" chg";}
+    const ts=r[5]==="now()"?`<span class="dim">now()</span>`:r[5];
+    return `<tr class="${st?"p-"+st:""}"><td class="rn">${rn}</td><td class="r">${id}</td><td class="r">${r[2]}</td><td class="${stCls.trim()}">${status}</td><td class="r">${r[4]}</td><td>${ts}</td><td></td></tr>`;
+  }).join("");
+}
+function renderPages(){
+  document.getElementById("pages").innerHTML=Array.from({length:25},(_,i)=>`<i class="${i===0?"cur":i===1?"pre":""}"></i>`).join("");
+}
+
+/* ═════════ splash: real ebru (Jaffer marbling maths), vector fills only ═════════ */
+const Splash=(()=>{
+  const W=760,H=792, svg=document.getElementById("ebru");
+  let raf=0, t0=0, running=false;
+  const rnd=(s=>()=>{s|=0;s=s+0x6D2B79F5|0;let x=Math.imul(s^s>>>15,1|s);x=x+Math.imul(x^x>>>7,61|x)^x;return((x^x>>>14)>>>0)/4294967296})(1453);
+  const drops=[];
+  // serpme: fine sprinkle laid first
+  const sprinkle=["e-cob","e-tur","e-bon","e-cob","e-cor","e-nig"];
+  for(let i=0;i<46;i++) drops.push({x:rnd()*W,y:rnd()*H,r:7+rnd()*15,c:sprinkle[i%sprinkle.length],t:rnd()*380,d:260});
+  // ring systems: successive drops at one spot become rings
+  const sys=[
+    [205,215,[["e-cob",128],["e-bon",104],["e-tur",84],["e-cob",62],["e-cor",36]]],
+    [560,250,[["e-tur",112],["e-cob",92],["e-bon",70],["e-cor",48],["e-cob",22]]],
+    [300,575,[["e-cor",102],["e-bon",84],["e-cob",64],["e-tur",40]]],
+    [612,612,[["e-cob",118],["e-tur",94],["e-bon",70],["e-cob",42]]],
+    [92,440,[["e-bon",72],["e-cor",50],["e-cob",28]]],
+    [420,70,[["e-tur",66],["e-bon",44],["e-cob",22]]],
+    [716,430,[["e-cor",76],["e-bon",52],["e-tur",30]]]
+  ];
+  let k=0;
+  for(let lvl=0;lvl<5;lvl++) sys.forEach(([x,y,seq])=>{ if(seq[lvl]){ drops.push({x,y,r:seq[lvl][1],c:seq[lvl][0],t:300+k*44,d:420}); k++; } });
+  const FIN0=2520;
+  const finale=[
+    {x:380,y:396,r:158,c:"e-fin",t:FIN0,d:520},
+    {x:380,y:356,r:26,c:"e-cob",t:FIN0+420,d:300},
+    {x:340,y:424,r:26,c:"e-cob",t:FIN0+540,d:300},
+    {x:420,y:424,r:26,c:"e-cob",t:FIN0+660,d:300}
+  ];
+  const all=drops.concat(finale);
+  all.forEach(d=>{d.n=Math.max(72,Math.min(520,Math.round(d.r*4.2)))});
+  const COMB1=[1180,1880], COMB2=[1820,2480], WAVE=[3150,3620], END=3700;
+  const eo=x=>x<=0?0:x>=1?1:1-Math.pow(1-x,3);
+  const eio=x=>x<=0?0:x>=1?1:(x<.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2);
+
+  // build DOM
+  svg.innerHTML=all.map((d,i)=>`<path class="${d.c}" id="ep${i}"/>`).join("");
+  const els=all.map((_,i)=>document.getElementById("ep"+i));
+
+  const nDrops=drops.length;
+  function frame(T){
+    const rr=all.map(d=>eo((T-d.t)/d.d)*d.r);
+    const z1=eio((T-COMB1[0])/(COMB1[1]-COMB1[0]))*74, z2=eio((T-COMB2[0])/(COMB2[1]-COMB2[0]))*30;
+    for(let i=0;i<all.length;i++){
+      const d=all[i], el=els[i];
+      if(rr[i]<=.3){ el.setAttribute("d",""); continue; }
+      const n=d.n, P=new Float64Array(2*n);
+      for(let j=0;j<n;j++){const a=j/n*Math.PI*2;P[2*j]=d.x+rr[i]*Math.cos(a);P[2*j+1]=d.y+rr[i]*Math.sin(a);}
+      const apply=(q)=>{ const qr=rr[q]; if(qr<=.3) return; const cx=all[q].x, cy=all[q].y, r2=qr*qr;
+        for(let j=0;j<n;j++){const dx=P[2*j]-cx, dy=P[2*j+1]-cy, m=dx*dx+dy*dy||1e-6, s=Math.sqrt(1+r2/m); P[2*j]=cx+dx*s; P[2*j+1]=cy+dy*s;} };
+      if(i<nDrops){
+        for(let q=i+1;q<nDrops;q++) apply(q);
+        // gel-git: horizontal tines, alternating direction
+        if(z1>0) for(let y0=26,s=1;y0<H;y0+=48,s=-s){ for(let j=0;j<n;j++){const dd=Math.abs(P[2*j+1]-y0); P[2*j]+=s*z1*13/(dd+13);} }
+        // tarama: vertical comb, one direction
+        if(z2>0) for(let x0=10;x0<W;x0+=30){ for(let j=0;j<n;j++){const dd=Math.abs(P[2*j]-x0); P[2*j+1]+=z2*8/(dd+8);} }
+        for(let q=nDrops;q<all.length;q++) apply(q);
+      } else {
+        for(let q=i+1;q<all.length;q++) apply(q);
+      }
+      let s="M"+P[0].toFixed(1)+" "+P[1].toFixed(1);
+      for(let j=1;j<n;j++) s+="L"+P[2*j].toFixed(1)+" "+P[2*j+1].toFixed(1);
+      el.setAttribute("d",s+"Z");
+    }
+    // right column
+    const wf=eo((T-3000)/520), sw=document.getElementById("spWord"); sw.style.opacity=wf; sw.style.transform=`translateY(${(1-wf)*8}px)`;
+    const s1=T>=880, s2=T>=1980, s3=T>=5300;
+    setStep("st1",T<880?"act":"done"); setStep("st2",T<880?"":T<1980?"act":"done"); setStep("st3",T<1980?"":T<5300?"act":"done");
+    document.getElementById("g1").textContent=s1?"12":"—";
+    document.getElementById("g2").textContent=s2?"18":"—";
+    const f=Math.max(0,Math.min(1,(T-1980)/(5300-1980))); const objs=Math.round(214*(1-Math.pow(1-f,1.6)));
+    document.getElementById("g3").textContent=objs;
+    const tiles=document.querySelectorAll("#prog i"), filled=Math.round(tiles.length*((s1?.12:T/880*.12)+(s2?.18:Math.max(0,(T-880)/1100)*.18)+f*.70));
+    tiles.forEach((el,i)=>el.classList.toggle("f",i<filled));
+    document.getElementById("prog").classList.toggle("ok",s3);
+    document.getElementById("gEl").textContent=(Math.min(T,5300)/1000).toFixed(1);
+  }
+  function setStep(id,st){const e=document.getElementById(id); e.classList.toggle("act",st==="act"); e.classList.toggle("done",st==="done");}
+  document.getElementById("prog").innerHTML="<i></i>".repeat(48);
+  const reduced=matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function loop(){ const T=performance.now()-t0; frame(T); if(T<5600&&running) raf=requestAnimationFrame(loop); }
+  return {
+    start(){ running=true; const q=new URLSearchParams(location.search).get("t");
+      if(q!==null){ frame(+q); return; }
+      if(reduced){ frame(4200); return; }
+      t0=performance.now(); cancelAnimationFrame(raf); loop(); },
+    stop(){ running=false; cancelAnimationFrame(raf); }
+  };
+})();
+
+/* ═════════ live gauges ═════════ */
+setTimeout(()=>{ const seq=[18,17,18,19,18,18,17]; let i=0;
+  setInterval(()=>{ i=(i+1)%seq.length; document.querySelectorAll(".live-lat").forEach(e=>e.textContent=seq[i]); },1600); },6000);
+
+/* ═════════ wiring ═════════ */
+renderEditor(); renderGrid1(); renderGrid2(); renderPages(); renderCompletion();
+if(window.lucide) lucide.createIcons({attrs:{"stroke-width":1.75}});
+document.querySelectorAll("#tree .row").forEach(r=>r.addEventListener("click",()=>{document.querySelectorAll("#tree .row.sel").forEach(x=>x.classList.remove("sel"));r.classList.add("sel");}));
+document.querySelectorAll(".rtab").forEach(tb=>tb.addEventListener("click",()=>{
+  document.querySelectorAll(".rtab").forEach(x=>x.classList.toggle("on",x===tb));
+  document.querySelectorAll(".rpane").forEach(p=>p.classList.toggle("on",p.id===tb.dataset.pane));
+  document.getElementById("rmeta").style.visibility=tb.dataset.pane==="p1"?"visible":"hidden";
+  placeSel();
+}));
+document.querySelectorAll("#viewSeg button").forEach(b=>b.addEventListener("click",()=>applyView(b.dataset.view)));
+document.querySelectorAll("[data-lang]").forEach(b=>b.addEventListener("click",()=>applyLang(b.dataset.lang)));
+document.querySelectorAll("#themeSeg button").forEach(b=>b.addEventListener("click",()=>applyTheme(b.dataset.theme)));
+addEventListener("keydown",e=>{
+  if(e.metaKey||e.ctrlKey||e.altKey||/INPUT|TEXTAREA/.test(e.target.tagName)) return;
+  const k=e.key.toLowerCase();
+  if(k==="t") applyTheme(document.documentElement.dataset.theme==="dark"?"light":"dark");
+  if(k==="l") applyLang(LANG==="en"?"tr":"en");
+  if(k==="s") applyView(document.documentElement.dataset.view==="splash"?"workspace":"splash");
+});
+const Q=new URLSearchParams(location.search);
+applyTheme(Q.get("theme")==="light"?"light":"dark");
+applyLang(Q.get("lang")==="tr"?"tr":"en");
+applyView(Q.get("view")==="splash"?"splash":"workspace");
+if(Q.get("pane")==="2") document.querySelector('.rtab[data-pane="p2"]').click();
+document.fonts.ready.then(()=>{positionPopup();placeSel();});
+addEventListener("load",()=>{positionPopup();placeSel();});
+</script>
+</body>
+</html>

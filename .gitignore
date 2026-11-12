@@ -1,0 +1,6 @@
+# Local-only reference material (cloned third-party repos, extracted vendor resources). Never commit.
+.refs/
+target/
+.superpowers/
+.DS_Store
+*.key

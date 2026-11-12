@@ -1,0 +1,254 @@
+{
+  "title": "Hacivat'ın görsel dünyası",
+  "question": "Her yön aynı ekranı aynı veriyle çiziyor; görseller hazırlandıkça kartlara düşecek. Tıklanabilir halleri: design/directions/<id>/index.html (T: tema, L: dil, S: açılış ekranı). Bir veya iki finalist seç; 'Yönlendir' kutusuna istediğin karışımı yazabilirsin.",
+  "options": [
+    {
+      "id": "assigned",
+      "label": "İznik Sırrı",
+      "kicker": "THE ROLL",
+      "lineage": "16. yy İznik çinisi sırları ve ebru",
+      "thesis": "Gece mürekkebi bir çalışma yüzeyi; her renk bir İznik sırrından gelir ve tek bir anlam taşır, ebru yalnızca açılış ve yükleme anlarında akar.",
+      "palette": [
+        "#0E141B",
+        "#16202B",
+        "#1F4FA8",
+        "#2BB3A3",
+        "#D2452F",
+        "#EDE6D6"
+      ],
+      "materials": [
+        "sırlı seramik derinliği (katman = sır kalınlığı)",
+        "çini modül ızgarası",
+        "ebru akışı (sadece açılış/yükleme)"
+      ],
+      "viewport": "Solda bağlantı ağacı, ortada editör, altta grid; üst şeritte bağlantı rozeti ortam rengini taşır (prod = İznik mercanı), durum çubuğunda doğrudan/relay yolu ve açık transaction.",
+      "risk": "Motif süse kayarsa 'tema' gibi durur; miras renk sisteminde ve açılış anında yaşamalı, panellerde desen olmamalı.",
+      "raised": [
+        {
+          "from": "challenger-specimen",
+          "raise": "Sayısal okumalar (satır:kolon, ms, satır sayısı) yalnızca ölçek kontrastıyla hiyerarşi kuran canlı monospace göstergeler."
+        },
+        {
+          "from": "challenger-feed",
+          "raise": "Bir sonraki sayfa her zaman önceden yüklü; grid kaydırırken asla boş kare görünmez."
+        },
+        {
+          "from": "challenger-wallet",
+          "raise": "Hiçbir şey kaybolmaz, damgalanır: bekleyen insert/update/delete satırları onaylanana kadar damgalı durur."
+        },
+        {
+          "from": "challenger-rail",
+          "raise": "Her çizgi tek cihaz pikseli; bir yüzeyde en fazla üç değer kademesi."
+        }
+      ],
+      "comp": ".impeccable/mocks/decision/assigned.png"
+    },
+    {
+      "id": "model-pick",
+      "label": "Karanlık Kokpit",
+      "kicker": "IMPECCABLE’S PICK",
+      "lineage": "glass cockpit 'dark cockpit' felsefesi",
+      "thesis": "Normalde ekran tamamen sakin; prod, açık transaction, relay veya salt-okunur dışı bir durum olduğunda yalnızca o gösterge uçak ikaz lambası gibi yanar.",
+      "palette": [
+        "#0A0C0F",
+        "#151A20",
+        "#8FA3B8",
+        "#F2B33D",
+        "#E5484D",
+        "#3FB68B"
+      ],
+      "materials": [
+        "ikaz lambaları (annunciator)",
+        "teyp ölçekli göstergeler",
+        "mat cam panel"
+      ],
+      "viewport": "Üstte ince bir ikaz şeridi (ortam, yetki, tx, ağ yolu), altında sakin grafit çalışma alanı; editör ve grid aynı ızgarada, sayılar teyp ölçek gibi hizalı.",
+      "risk": "Tanıdık: koyu 'pro araç' görünümü bu kategoride çoğu çalışmanın vardığı yer; ayırt ediciliği ikaz dilinin disiplinine bağlı.",
+      "comp": ".impeccable/mocks/decision/model-pick.png"
+    },
+    {
+      "id": "user-shadow",
+      "label": "Perde (Gölge Oyunu)",
+      "kicker": "SENİN İSTEĞİN",
+      "lineage": "Karagöz–Hacivat gölge oyunu, arkadan aydınlatılmış perde",
+      "thesis": "Çalışma alanı arkadan ışık alan bir perde; renkler boyalı deve derisi tasvirlerden süzülen ışık gibi, karakterler sadece karşılama, boş durum ve yükleme anlarında sahneye çıkar.",
+      "palette": [
+        "#14100C",
+        "#231B13",
+        "#E9D8B4",
+        "#C2412D",
+        "#2F6F6A",
+        "#D9A441"
+      ],
+      "materials": [
+        "arkadan aydınlatılmış perde",
+        "delikli oyma tasvir kenarları",
+        "renkli şeffaf deri"
+      ],
+      "viewport": "Ortadaki editör sıcak, hafif aydınlık bir perde yüzeyi gibi; ağaç ve grid kenarlarda koyu; açılışta Hacivat ve Karagöz siluetleri bağlantıyı 'sahneye' getirir.",
+      "risk": "En güçlü marka hikâyesi ama en riskli: dozaj kaçarsa 'oyuncak' hissi verir (kaçınmak istediğin şey); günlük çalışma yüzeyi sade kalmalı.",
+      "comp": ".impeccable/mocks/decision/user-shadow.png"
+    },
+    {
+      "id": "challenger-wayfinding",
+      "label": "Havalimanı Yön Sistemi",
+      "verdict": "competitive",
+      "lineage": "havalimanı sarı yön tabelaları",
+      "thesis": "'Hangi veritabanında, hangi ortamdasın' sorusu tabela bandı gibi anıtsal; sarı yalnızca yön bulma ve ortam için kullanılır.",
+      "palette": [
+        "#FFC917",
+        "#111111",
+        "#FFFFFF",
+        "#2B2B2B",
+        "#E5484D"
+      ],
+      "materials": [
+        "asılı tabela bantları",
+        "beyaz piktogram kareleri",
+        "kenara kilitli oklar"
+      ],
+      "viewport": "Üstte sabit sarı bant: bağlantı adı, ortam ve şema anıtsal ölçekte; altında sakin siyah çalışma alanı.",
+      "case": "Ürün netliğinde güçlü (prod'da olduğunu asla kaçırmazsın), ama developer kimliği zayıf; uzun seansta sarı yorucu olabilir.",
+      "risk": "Geniş sarı alan uzun seanslarda göz yorar; dozaj kritik.",
+      "hero": "https://impeccable.style/worlds/cards/wayfinding-cartography-signage-terminal-yellow-wayfinding-hero.webp",
+      "comp": ".impeccable/mocks/decision/challenger-wayfinding.png"
+    },
+    {
+      "id": "challenger-console",
+      "label": "Grafit Konsol",
+      "verdict": "competitive",
+      "lineage": "dark-first geliştirici konsolları",
+      "thesis": "Grafit zemin, gölge yerine tek piksel ek yerleri, renkler yalnızca sözdiziminden ve durumdan; silme gibi yıkıcı aksiyonlar bilinçli boşlukla izole.",
+      "palette": [
+        "#16181D",
+        "#1E2127",
+        "#2A2E36",
+        "#7AA2F7",
+        "#E06C75"
+      ],
+      "materials": [
+        "ince çizgi ek yerleri",
+        "tek kademe yükselti",
+        "sözdizimi aksanları"
+      ],
+      "viewport": "Kalıcı paneller; gezinme düzeni değil panel içeriğini değiştirir; birincil aksiyon tek aksan rengi.",
+      "case": "Developer anında tanır ama kategoriye çok yakın; ayırt edicilik düşük.",
+      "risk": "Herkesin yaptığı koyu IDE'ye benzeme riski.",
+      "hero": "https://impeccable.style/worlds/cards/digital-design-canon-dark-first-developer-console-hero.webp",
+      "comp": ".impeccable/mocks/decision/challenger-console.png"
+    },
+    {
+      "id": "challenger-specimen",
+      "label": "Font Numune Kâğıdı",
+      "verdict": "declined",
+      "lineage": "değişken font numuneleri",
+      "thesis": "Hiyerarşi yalnızca ölçek kontrastıyla.",
+      "palette": [
+        "#F7F6F2",
+        "#111111",
+        "#FF4F1F"
+      ],
+      "materials": [
+        "boş kâğıt",
+        "dev harf"
+      ],
+      "viewport": "Dev glif ve canlı eksen okumaları.",
+      "case": "Bir DB client'ına zayıf oturuyor; ürün netliği düşük.",
+      "kept": "Ölçek kontrastıyla canlı monospace okumalar İznik'e aktarıldı.",
+      "risk": "Ürünle ilişkisi kopuk.",
+      "hero": "https://impeccable.style/worlds/cards/variable-font-specimen-hero.webp"
+    },
+    {
+      "id": "challenger-feed",
+      "label": "Dikey Video Akışı",
+      "verdict": "declined",
+      "lineage": "dikey medya akışları",
+      "thesis": "Bir sonraki öğe hep bir kaydırma ötede, hazır.",
+      "palette": [
+        "#000000",
+        "#FFFFFF"
+      ],
+      "materials": [
+        "tam ekran medya",
+        "sağ ray"
+      ],
+      "viewport": "Tek öğe tüm ekranı kaplar.",
+      "case": "Yoğun veri aracına uymuyor.",
+      "kept": "Önceden yüklenen sonraki sayfa: grid asla boş kare göstermez.",
+      "risk": "Tüketim hissi, iş aracı değil.",
+      "hero": "https://impeccable.style/worlds/cards/pop-culture-shelf-vertical-video-feed-surface-hero.webp"
+    },
+    {
+      "id": "challenger-wallet",
+      "label": "Uçak Bileti Cüzdanı",
+      "verdict": "declined",
+      "lineage": "jet çağı bilet kuponları",
+      "thesis": "Hiçbir şey kaybolmaz, iptal damgası yer.",
+      "palette": [
+        "#1B2A52",
+        "#C8102E",
+        "#FFFFFF",
+        "#5B3A8C"
+      ],
+      "materials": [
+        "karbon kopya",
+        "kupon"
+      ],
+      "viewport": "Kupon defteri akışı.",
+      "case": "Nostaljik ve oyuncaksı; developer kimliği zayıf.",
+      "kept": "Bekleyen değişiklikler damgalı kalır, onaylanana kadar kaybolmaz.",
+      "risk": "Oyuncak hissi.",
+      "hero": "https://impeccable.style/worlds/cards/vernacular-ephemera-jet-age-ticket-wallet-hero.webp"
+    },
+    {
+      "id": "challenger-rail",
+      "label": "Merkez Raylı Baskı",
+      "verdict": "declined",
+      "lineage": "geniş kenarlı referans baskıları",
+      "thesis": "Çizgi motoru her kuralı tek pikselde çizer.",
+      "palette": [
+        "#EFE8DA",
+        "#141414",
+        "#C73A1F"
+      ],
+      "materials": [
+        "kemik kâğıt",
+        "kırmızı rubrik"
+      ],
+      "viewport": "İki dar kolon, ortada anahtar rayı.",
+      "case": "Okuma yüzeyi, operasyon aracı değil.",
+      "kept": "Tek piksel çizgi disiplini ve üç değer kademesi.",
+      "risk": "Fazla kitapsı.",
+      "hero": "https://impeccable.style/worlds/cards/rw-centre-rail-reference-setting-hero.webp"
+    }
+  ],
+  "reroll": {
+    "registers": [
+      "safer",
+      "bolder"
+    ]
+  },
+  "buildPath": {
+    "value": "code"
+  },
+  "canon": true,
+  "canonCard": {
+    "label": "Kategori standardı",
+    "thesis": "Linear/Raycast/TablePlus sınıfı native macOS pro araç, kusursuz işçilikle.",
+    "palette": [
+      "#111113",
+      "#1C1C1F",
+      "#E6E6E8",
+      "#5E6AD2"
+    ],
+    "materials": [
+      "sistem fontu",
+      "vibrancy kenar çubuğu",
+      "tek aksan"
+    ],
+    "viewport": "Beklenen düzen: kenar çubuğu, sekmeli editör, grid; tam işçilikle.",
+    "risk": "Tasarım gereği rakiplerden ayırt edilemez.",
+    "comp": ".impeccable/mocks/decision/canon.png"
+  },
+  "steer": true
+}

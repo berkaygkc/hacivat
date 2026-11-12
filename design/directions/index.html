@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hacivat — Yön Galerisi</title>
+<style>
+  :root { --bg:#0d0e10; --panel:#16181c; --line:#2a2d33; --text:#e8e9ec; --muted:#9a9ea8; --accent:#e8b84a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+  header { position:sticky; top:0; z-index:5; background:rgba(13,14,16,.96); border-bottom:1px solid var(--line); padding:14px 28px; display:flex; gap:24px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; font-weight:650; letter-spacing:.01em; }
+  nav { display:flex; gap:6px; flex-wrap:wrap; }
+  nav a { color:var(--muted); text-decoration:none; padding:6px 12px; border:1px solid var(--line); border-radius:8px; font-size:13px; }
+  nav a:hover { color:var(--text); border-color:#444; }
+  .views { margin-left:auto; display:flex; gap:6px; }
+  .views button { background:var(--panel); color:var(--muted); border:1px solid var(--line); border-radius:8px; padding:6px 12px; font:inherit; font-size:13px; cursor:pointer; }
+  .views button.on { color:#111; background:var(--accent); border-color:var(--accent); }
+  main { padding:24px 28px 80px; display:grid; gap:48px; }
+  section { scroll-margin-top:80px; }
+  .head { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:12px; }
+  .head h2 { margin:0; font-size:22px; font-weight:700; }
+  .head .tag { font-size:12px; color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:2px 10px; }
+  .head p { margin:0; color:var(--muted); flex-basis:100%; max-width:110ch; }
+  .head .live { margin-left:auto; color:#111; background:var(--accent); text-decoration:none; padding:7px 14px; border-radius:8px; font-weight:600; font-size:14px; }
+  .shot { border:1px solid var(--line); border-radius:12px; overflow:hidden; background:#000; }
+  .shot img { display:block; width:100%; height:auto; cursor:zoom-in; }
+  .thumbs { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-top:10px; }
+  .thumbs button { padding:0; border:1px solid var(--line); border-radius:8px; overflow:hidden; background:none; cursor:pointer; position:relative; }
+  .thumbs button.on { outline:2px solid var(--accent); outline-offset:1px; }
+  .thumbs img { display:block; width:100%; height:auto; }
+  .thumbs span { position:absolute; left:6px; bottom:6px; background:rgba(0,0,0,.75); color:#fff; font-size:11px; padding:2px 7px; border-radius:6px; }
+  dialog { padding:0; border:0; background:transparent; max-width:98vw; max-height:98vh; }
+  dialog img { max-width:98vw; max-height:96vh; display:block; border-radius:8px; }
+  dialog::backdrop { background:rgba(0,0,0,.85); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Hacivat — Yön Galerisi</h1>
+  <nav id="nav"></nav>
+  <div class="views" id="views">
+    <button data-v="" class="on">Koyu · EN</button>
+    <button data-v="-light">Açık</button>
+    <button data-v="-tr">Türkçe</button>
+    <button data-v="-splash">Açılış</button>
+  </div>
+</header>
+<main id="main"></main>
+<dialog id="zoom"><img alt=""></dialog>
+<script>
+const D = [
+  ["assigned","İznik Sırrı","Zarın seçtiği yön · miras ince bir iz","Gece mürekkebi yüzey; her renk bir İznik sırrı ve tek anlam taşır (prod = mercan, doğrudan yol = turkuaz, bekleyen = mangan). Ebru yalnızca açılış/yükleme anında akar."],
+  ["model-pick","Karanlık Kokpit","Impeccable'ın favorisi","Uçak 'dark cockpit' felsefesi: her şey normalken ekran sakin; prod, salt-okunur, açık transaction, relay gibi durumlar ikaz lambası gibi yanar. LAMP TEST düğmesini dene."],
+  ["user-shadow","Perde (Gölge Oyunu)","Senin isteğin · miras görünür","Editör arkadan aydınlatılmış perde; Hacivat ve Karagöz siluetleri yalnızca açılışta sahneye çıkar, çalışma panelleri ciddi ve sade kalır."],
+  ["challenger-wayfinding","Havalimanı Yön Sistemi","Rakip yön","'Neredeyim' sorusu sarı kapı tabelası gibi anıtsal; sarı yalnızca konum için. Açılışta kalkış panosu (split-flap)."],
+  ["challenger-console","Grafit Konsol","Rakip yön","Grafit zemin, paneller yalnızca 1px çizgilerle ayrılır; renk sadece prod için; yıkıcı aksiyonlar bilinçli boşlukla izole."],
+  ["canon","Kategori Standardı","Tanıdık, kusursuz işçilik","Linear / Raycast / TablePlus sınıfı native macOS pro araç; ⌘K komut paleti dahil."]
+];
+const base = "../../.impeccable/mocks/decision/";
+let view = "";
+const main = document.getElementById("main"), nav = document.getElementById("nav");
+const labels = {"":"Koyu · EN","-light":"Açık","-tr":"Türkçe","-splash":"Açılış"};
+D.forEach(([id,name,tag,desc]) => {
+  nav.insertAdjacentHTML("beforeend", `<a href="#${id}">${name}</a>`);
+  main.insertAdjacentHTML("beforeend", `
+  <section id="${id}">
+    <div class="head"><h2>${name}</h2><span class="tag">${tag}</span>
+      <a class="live" href="${id}/index.html" target="_blank">Tıklanabilir maketi aç ↗</a>
+      <p>${desc}</p></div>
+    <div class="shot"><img data-id="${id}" src="${base}${id}.png" alt="${name}"></div>
+    <div class="thumbs">${Object.keys(labels).map(v=>`<button data-id="${id}" data-v="${v}" class="${v===""?"on":""}"><img src="${base}${id}${v}.png" alt=""><span>${labels[v]}</span></button>`).join("")}</div>
+  </section>`);
+});
+function setShot(id, v){
+  document.querySelector(`.shot img[data-id="${id}"]`).src = `${base}${id}${v}.png`;
+  document.querySelectorAll(`.thumbs button[data-id="${id}"]`).forEach(b=>b.classList.toggle("on", b.dataset.v===v));
+}
+document.addEventListener("click", e => {
+  const t = e.target.closest(".thumbs button"); if (t) setShot(t.dataset.id, t.dataset.v);
+  const vb = e.target.closest("#views button");
+  if (vb) { view = vb.dataset.v; document.querySelectorAll("#views button").forEach(b=>b.classList.toggle("on", b===vb)); D.forEach(([id])=>setShot(id, view)); }
+  const s = e.target.closest(".shot img");
+  if (s) { const d = document.getElementById("zoom"); d.querySelector("img").src = s.src; d.showModal(); }
+});
+document.getElementById("zoom").addEventListener("click", e => e.currentTarget.close());
+</script>
+</body>
+</html>
