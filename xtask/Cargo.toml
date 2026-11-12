@@ -17,6 +17,8 @@ base64.workspace = true
 hacivat-l10n-schema.workspace = true
 fluent-syntax.workspace = true
 icu_plurals.workspace = true
+icu_locale.workspace = true
+icu_normalizer.workspace = true
 
 [lints]
 workspace = true

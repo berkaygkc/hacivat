@@ -8106,6 +8106,8 @@ dependencies = [
  "fluent-syntax",
  "hacivat-bench",
  "hacivat-l10n-schema",
+ "icu_locale",
+ "icu_normalizer",
  "icu_plurals",
  "image",
  "serde_json",
