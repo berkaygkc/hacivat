@@ -36,6 +36,7 @@ pub fn install(cx: &mut App) {
     // ## registrations (append-only: Tasks 17, 18 and 20 add one line each)
     commands::register(cx); // ## m2a-t18-explorer
     interaction::install(cx); // ## m2a-t20-errors: the UI port (password prompts, R14)
+    dialog::install(cx); // ## m2a-t17-dialog
 }
 
 /// Boots the connections: the `ConnectionsModel` Global and its store diagnostics (Task 12),

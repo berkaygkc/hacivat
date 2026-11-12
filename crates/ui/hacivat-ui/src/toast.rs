@@ -70,6 +70,10 @@ pub struct Toast {
     pub actions: Vec<ToastAction>,
     /// The wide card (NOTES sticky toast).
     pub wide: bool,
+    // ## m2a-t17-dialog
+    /// Machine text shown verbatim under the title in mono (`TextSource::Data`), e.g. the URL
+    /// "Copy as URL" put on the clipboard (NOTES surface 2).
+    pub data: Option<SharedString>,
 }
 
 /// A button on a toast (M2a, NOTES surface 4).
@@ -92,6 +96,7 @@ impl Toast {
             bullets: Vec::new(),
             actions: Vec::new(),
             wide: false,
+            data: None,
         }
     }
 
@@ -333,6 +338,7 @@ struct Shown {
     sticky: bool,
     wide: bool,
     title: Option<SharedString>,
+    data: Option<SharedString>,
     text: SharedString,
     bullets: Vec<SharedString>,
     actions: Vec<(SharedString, ActionFn, FocusHandle)>,
@@ -360,6 +366,7 @@ impl IntoElement for ToastStack {
                             sticky: e.toast.sticky,
                             wide: e.toast.wide,
                             title: e.toast.title.as_ref().map(|f| f(cx)),
+                            data: e.toast.data.clone(),
                             text: (e.toast.text)(cx),
                             bullets: e.toast.bullets.iter().map(|f| f(cx)).collect(),
                             actions: e
@@ -395,11 +402,13 @@ impl IntoElement for ToastStack {
                         ToastKind::Error => (IconName::TriangleAlert, c.red),
                     };
                     let rich = shown.title.is_some()
+                        || shown.data.is_some()
                         || !shown.bullets.is_empty()
                         || !shown.actions.is_empty();
                     let headline = shown.title.clone().unwrap_or_else(|| shown.text.clone());
                     // Everything the card says, one line each, for the live announcement.
                     let mut spoken: Vec<SharedString> = vec![headline.clone()];
+                    spoken.extend(shown.data.clone());
                     if shown.title.is_some() && !shown.text.is_empty() {
                         spoken.push(shown.text.clone());
                     }
@@ -414,6 +423,14 @@ impl IntoElement for ToastStack {
                                 t.type_ramp.body_strong,
                                 c.text.to_hsla(),
                             ));
+                            if let Some(data) = &shown.data {
+                                content = content.child(Label::new(
+                                    data.clone(),
+                                    TextSource::Data,
+                                    t.type_ramp.mono_data,
+                                    c.text.to_hsla(),
+                                ));
+                            }
                             if !shown.text.is_empty() {
                                 // Raised Ink Rule: secondary lines on the card are text-2.
                                 content = content.child(Label::new(

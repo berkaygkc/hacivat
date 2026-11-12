@@ -134,6 +134,12 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         private_dir,
         files,
     } = boot;
+    // ## m2a-t17-dialog: the dialog's file pickers approve into the roots connects check.
+    let approved_roots = ApprovedRoots::for_user();
+    cx.set_global(crate::connections::dialog::DialogEnv {
+        approved_roots: approved_roots.clone(),
+        pgpass: files.pgpass.clone(),
+    });
     let deps = ConnectDeps {
         drivers,
         catalog: EngineCatalog::embedded(),
@@ -143,7 +149,7 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         transport_wrap: None,
         extra_steps: Vec::new(),
         // Home plus paths the user picks in the connection dialog (T17 adds them).
-        approved_roots: ApprovedRoots::for_user(),
+        approved_roots,
         timeout_override: None,
     };
     let manager =

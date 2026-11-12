@@ -1390,7 +1390,17 @@ fn the_initial_focus_is_safe_for_every_class(cx: &mut TestAppContext) {
                 // no change to the profile.
                 assert_eq!(calls, 0, "{class:?}");
                 assert_eq!(p.database.as_deref(), Some("orders_v2"), "{class:?}");
-                assert!(layer_ids(vcx).is_empty(), "{class:?}: the dialog closed");
+                // The error dialog closed; with Task 17 merged, Edit connection opens the real
+                // connection dialog in its place.
+                assert!(
+                    !layer_ids(vcx).contains(&"connection-error"),
+                    "{class:?}: the error dialog closed"
+                );
+                assert_eq!(
+                    layer_ids(vcx),
+                    ["connection-dialog"],
+                    "{class:?}: the editor opened"
+                );
             }
             other => panic!("unexpected focus {other}"),
         }

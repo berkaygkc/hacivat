@@ -503,8 +503,9 @@ impl Workspace {
         Some(self.closed(layer, window, cx))
     }
 
-    /// Removes the layer showing `view` (wherever it is in the stack).
-    fn remove_layer(&mut self, view: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+    /// Removes the layer showing `view` (wherever it is in the stack) and gives the focus back
+    /// (`pub` since m2a-t17: a custom modal layer closes itself by its view).
+    pub fn remove_layer(&mut self, view: EntityId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(layer) = self.layers.remove_view(view) {
             self.closed(layer, window, cx);
         }

@@ -16,6 +16,7 @@ use hacivat_ui_core::gpui_surface::{
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 
 use crate::button::{ClickHandler, focus_visible, hover_listener, interaction_state};
+use crate::capsule::{EnvKind, env_swatch};
 use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::Declare;
 use crate::popover::{A11yNode, Tip, lazy};
@@ -28,6 +29,9 @@ pub enum SegmentContent {
     /// [`TextSource::Data`], so pseudo-locales leave it alone and the registry check accepts it.
     Verbatim(SharedString),
     Icon(IconName),
+    // ## m2a-t17-dialog
+    /// A rendered Fluent message after the environment's 7 px mark (NOTES cross-cutting #2).
+    Marked(EnvKind, SharedString),
 }
 
 pub struct SegmentItem {
@@ -46,6 +50,7 @@ pub struct Segmented {
     items: Vec<SegmentItem>,
     mono: bool,
     inert: bool,
+    in_well: bool,
 }
 
 impl Segmented {
@@ -55,6 +60,7 @@ impl Segmented {
             items: Vec::new(),
             mono: false,
             inert: false,
+            in_well: false,
         }
     }
 
@@ -73,6 +79,14 @@ impl Segmented {
     /// same look (the title bar while a modal layer is open, M2a).
     pub fn inert(mut self, inert: bool) -> Self {
         self.inert = inert;
+        self
+    }
+
+    // ## m2a-t17-dialog
+    /// Inside a dialog (NOTES cross-cutting #5): the group sits in a field well (`panel` in dark,
+    /// `ground` in light) and the pressed label is weight 600.
+    pub fn in_well(mut self, in_well: bool) -> Self {
+        self.in_well = in_well;
         self
     }
 }
@@ -101,6 +115,13 @@ impl IntoElement for Segmented {
                 .border_color(c.seam_strong.to_hsla())
                 .rounded(px(t.radii.sm))
                 .overflow_hidden();
+            if self.in_well {
+                let well = match theme.mode {
+                    ThemeMode::Dark => c.panel,
+                    ThemeMode::Light => c.ground,
+                };
+                group = group.bg(well.to_hsla());
+            }
             let count = self.items.len();
             let ids: Vec<ElementId> = (0..count)
                 .map(|i| ElementId::from((self.id.clone(), format!("{i}"))))
@@ -141,9 +162,9 @@ impl IntoElement for Segmented {
                     .a11y_name
                     .clone()
                     .unwrap_or_else(|| match &item.content {
-                        SegmentContent::Label(label) | SegmentContent::Verbatim(label) => {
-                            label.clone()
-                        }
+                        SegmentContent::Label(label)
+                        | SegmentContent::Verbatim(label)
+                        | SegmentContent::Marked(_, label) => label.clone(),
                         SegmentContent::Icon(_) => item.tooltip.clone(),
                     });
                 let source = match item.content {
@@ -157,10 +178,24 @@ impl IntoElement for Segmented {
                         } else {
                             t.type_ramp.body
                         };
-                        if item.pressed && self.mono {
+                        if item.pressed && (self.mono || self.in_well) {
                             style.weight = 600;
                         }
                         Label::new(text, source, style, ink).into_any_element()
+                    }
+                    SegmentContent::Marked(kind, text) => {
+                        let mut style = t.type_ramp.body;
+                        if item.pressed && self.in_well {
+                            style.weight = 600;
+                        }
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(t.spacing.sm))
+                            .child(env_swatch(kind, &theme))
+                            .child(Label::new(text, source, style, ink))
+                            .into_any_element()
                     }
                     SegmentContent::Icon(name) => Icon::new(name)
                         .size(IconSize::Chrome)

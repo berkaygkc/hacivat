@@ -59,6 +59,8 @@ const MASK: char = '•';
 pub(crate) const FIELD_PADDING_LEFT_PX: f32 = 9.0;
 pub(crate) const FIELD_PADDING_RIGHT_PX: f32 = 6.0;
 const CARET_WIDTH_PX: f32 = 1.0;
+/// The size of a mono field's value (mock `.in.mono input { font: 400 12px "Fragment Mono" }`).
+const MONO_FIELD_PX: f32 = 12.0;
 
 /// The text line as last painted: what `bounds_for_range` and hit-testing measure against.
 struct InputLayout {
@@ -122,6 +124,16 @@ pub struct TextInput {
     paste_filter: Option<PasteFilter>,
     /// The text of the line last painted (the bullets when masked, the placeholder when empty).
     painted: SharedString,
+    // ## m2a-t17-dialog
+    /// Where the placeholder text comes from: a Fluent message (default) or data, such as a
+    /// suggested name or an example host.
+    placeholder_source: TextSource,
+    /// The value is drawn in Fragment Mono (machine text); the placeholder stays sans.
+    mono: bool,
+    /// Typing, pasting and cutting change nothing; selecting and copying still work.
+    read_only: bool,
+    /// The font family the value or placeholder was last shaped in.
+    painted_family: SharedString,
 }
 
 /// Sees a paste's clipboard text before a non-masked input inserts it; returning `true`
@@ -164,7 +176,39 @@ impl TextInput {
             well: false,
             paste_filter: None,
             painted: SharedString::default(),
+            placeholder_source: TextSource::Fluent,
+            mono: false,
+            read_only: false,
+            painted_family: SharedString::default(),
         }
+    }
+
+    /// Draws the value in Fragment Mono at 12 px (machine text: hosts, URLs, paths; the mock's
+    /// `.in.mono`); the placeholder stays in the sans body face.
+    pub fn set_mono(&mut self, mono: bool) {
+        self.mono = mono;
+    }
+
+    /// Refuses edits (typing, IME, paste, cut, Backspace); the text can still be selected and
+    /// copied (a form whose changes cannot be saved).
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// The font family the last painted line was shaped in (the value's or the placeholder's).
+    pub fn painted_family(&self) -> &SharedString {
+        &self.painted_family
+    }
+
+    // ## m2a-t17-dialog
+    /// Marks the placeholder as data (`TextSource::Data`): a suggestion or an example, not a
+    /// message (pseudo-locales leave it alone).
+    pub fn set_placeholder_source(&mut self, source: TextSource) {
+        self.placeholder_source = source;
     }
 
     /// Paints `•` per grapheme, refuses copy and cut, is announced as a password field with an
@@ -285,7 +329,7 @@ impl TextInput {
                 if !selection.is_empty() {
                     let text = self.ime.text()[selection].to_string();
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    if key == "x" {
+                    if key == "x" && !self.read_only {
                         self.ime.backspace();
                     }
                 }
@@ -299,6 +343,7 @@ impl TextInput {
             }
             // Other chords are commands (or AltGr text, which arrives through the input handler).
             _ if m.platform || m.control || m.function => return,
+            "backspace" if self.read_only => {}
             "backspace" => {
                 self.ime.backspace();
             }
@@ -409,6 +454,9 @@ impl EntityInputHandler for TextInput {
     /// non-masked input lets its filter consume it first (P16).
     fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = item.text() else { return };
+        if self.read_only {
+            return;
+        }
         if !self.masked
             && let Some(filter) = self.paste_filter.clone()
             && filter(&text, window, cx)
@@ -426,6 +474,9 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) {
         let Some(text) = sanitize(text) else { return };
+        if self.read_only {
+            return;
+        }
         let before = self.ime.text().to_string();
         self.ime.replace(range, &text);
         self.edited(&before, window, cx);
@@ -442,6 +493,9 @@ impl EntityInputHandler for TextInput {
         let Some(text) = sanitize(new_text) else {
             return;
         };
+        if self.read_only {
+            return;
+        }
         let before = self.ime.text().to_string();
         self.ime.replace_and_mark(range, &text, new_selected_range);
         self.edited(&before, window, cx);
@@ -606,10 +660,17 @@ impl Element for InputText {
     ) -> InputPaint {
         let t = Theme::get(cx).tokens;
         let style = t.type_ramp.body;
-        let font = font_for(&style);
-        let font_size = px(style.size_px);
         let line_height = px(style.line_height);
         let input = self.input.read(cx);
+        // m2a-t17-dialog: a mono field shapes its value in Fragment Mono (never a mask).
+        let mono = input.mono && !input.masked;
+        let (value_font, value_size) = if mono {
+            (font_for(&t.type_ramp.mono_data), px(MONO_FIELD_PX))
+        } else {
+            (font_for(&style), px(style.size_px))
+        };
+        let font = font_for(&style);
+        let font_size = px(style.size_px);
         // A masked input shapes only its bullets; offsets are mapped through the mask.
         let mask = input.masked.then(|| Mask::new(input.ime.text()));
         let value = match &mask {
@@ -622,12 +683,13 @@ impl Element for InputText {
         let marked = input.ime.marked().map(|m| painted(m.start)..painted(m.end));
         let focused = input.focus_handle.is_focused(window);
         let placeholder = value.is_empty().then(|| (input.placeholder)(cx));
+        let placeholder_source = input.placeholder_source;
         let mut scroll_x = input.scroll_x;
 
         let (ink, placeholder_ink) = (t.colors.text.to_hsla(), t.colors.text_3.to_hsla());
         let run = |len, color, underline| TextRun {
             len,
-            font: font.clone(),
+            font: value_font.clone(),
             color,
             background_color: None,
             underline,
@@ -653,7 +715,7 @@ impl Element for InputText {
         }
         let line = window
             .text_system()
-            .shape_line(value.clone(), font_size, &runs, None);
+            .shape_line(value.clone(), value_size, &runs, None);
 
         // Keep the caret in view.
         let width = bounds.size.width;
@@ -671,7 +733,14 @@ impl Element for InputText {
 
         let shown = match &placeholder {
             Some(p) => {
-                let runs = [run(p.len(), placeholder_ink, None)];
+                let runs = [TextRun {
+                    len: p.len(),
+                    font: font.clone(),
+                    color: placeholder_ink,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }];
                 window
                     .text_system()
                     .shape_line(p.clone(), font_size, &runs, None)
@@ -695,7 +764,7 @@ impl Element for InputText {
         if let Some(p) = &placeholder {
             TextRegistry::record(cx, || RenderedText {
                 text: p.clone(),
-                source: TextSource::Fluent,
+                source: placeholder_source,
                 size_px: style.size_px,
                 painted_px: f32::from(shown.width),
                 clipped: shown.width > width + px(0.5),
@@ -705,9 +774,15 @@ impl Element for InputText {
         }
 
         let shown_text = shown.text.clone();
+        let family: SharedString = if placeholder.is_some() || !mono {
+            font.family.clone()
+        } else {
+            value_font.family.clone()
+        };
         self.input.update(cx, |input, _| {
             input.scroll_x = scroll_x;
             input.painted = shown_text;
+            input.painted_family = family;
             input.layout = Some(InputLayout {
                 line,
                 origin,

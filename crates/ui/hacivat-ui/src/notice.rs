@@ -4,15 +4,19 @@
 //! (info), or a `green` circle-check when the notice reports something done. Actions are
 //! existing [`Button`]s. Announced as a status.
 
+use std::panic::Location;
+
+use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, InteractiveElement, IntoElement, ParentElement, Role, SharedString, Styled, div, px,
+    AnyElement, App, Hsla, InteractiveElement, IntoElement, ParentElement, Role, SharedString,
+    Styled, div, px,
 };
-use hacivat_ui_core::theme::{Theme, ThemeMode};
+use hacivat_ui_core::theme::{Theme, ThemeMode, TypeStyle};
 
 use crate::button::Button;
 use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::{A11yNode, lazy};
-use crate::text::{Label, TextSource};
+use crate::text::{RenderedText, TextRegistry, TextSource};
 
 /// The gap between the icon and the text column: 9 px, between the `md` (8) and `lg` (10)
 /// tokens (NOTES "NEW primitives": inline notice; mock `.notice { gap: 9px }`).
@@ -34,6 +38,7 @@ pub struct InlineNotice {
     secondary: Vec<SharedString>,
     params: Vec<(SharedString, SharedString)>,
     actions: Vec<Button>,
+    trailing: Option<Button>,
 }
 
 impl InlineNotice {
@@ -44,6 +49,7 @@ impl InlineNotice {
             secondary: Vec::new(),
             params: Vec::new(),
             actions: Vec::new(),
+            trailing: None,
         }
     }
 
@@ -69,6 +75,13 @@ impl InlineNotice {
         self.actions.push(button);
         self
     }
+
+    // ## m2a-t17-dialog
+    /// A button at the card's right edge, top-aligned (the mock's Undo and close buttons).
+    pub fn trailing(mut self, button: Button) -> Self {
+        self.trailing = Some(button);
+        self
+    }
 }
 
 impl IntoElement for InlineNotice {
@@ -89,15 +102,17 @@ impl IntoElement for InlineNotice {
             }
             .size(IconSize::Default);
             let name = self.lines.first().cloned().unwrap_or_default();
-            let line = |text: SharedString, ink| {
-                Label::new(text, TextSource::Fluent, t.type_ramp.body_sm, ink)
+            // m2a-t17-dialog: prose wraps (a long translation never clips); each line is still
+            // recorded in the text registry as a Fluent message.
+            let line = |text: SharedString, ink, cx: &mut App| {
+                text_run(text, TextSource::Fluent, t.type_ramp.body_sm, ink, cx)
             };
             let mut body = div().flex().flex_col().flex_1().min_w_0();
             for text in self.lines {
-                body = body.child(line(text, c.text.to_hsla()));
+                body = body.child(line(text, c.text.to_hsla(), cx));
             }
             for text in self.secondary {
-                body = body.child(line(text, c.text_2.to_hsla()));
+                body = body.child(line(text, c.text_2.to_hsla(), cx));
             }
             if !self.params.is_empty() {
                 let mut list = div().flex().flex_col().mt(px(t.spacing.xs));
@@ -106,15 +121,20 @@ impl IntoElement for InlineNotice {
                         div()
                             .flex()
                             .flex_row()
-                            .items_center()
+                            .items_start()
                             .gap(px(t.spacing.sm))
-                            .child(Label::new(
+                            .child(div().flex_none().child(text_run(
                                 key,
                                 TextSource::Data,
                                 t.type_ramp.mono_data,
                                 c.text.to_hsla(),
-                            ))
-                            .child(line(rest, c.text_2.to_hsla())),
+                                cx,
+                            )))
+                            .child(div().flex_1().min_w_0().child(line(
+                                rest,
+                                c.text_2.to_hsla(),
+                                cx,
+                            ))),
                     );
                 }
                 body = body.child(list);
@@ -142,9 +162,48 @@ impl IntoElement for InlineNotice {
                 .border_color(c.seam_strong.to_hsla())
                 .bg(well.to_hsla())
                 .child(div().flex_none().mt(px(ICON_NUDGE_PX)).child(icon))
-                .child(body);
+                .child(body)
+                .children(self.trailing.map(|b| div().flex_none().child(b)));
             A11yNode::new("inline-notice", Role::Status, name, false, card).into_any_element()
         })
         .into_any_element()
     }
+}
+
+// ## m2a-t17-dialog
+/// Notice text that wraps at the notice's width (prose) and is recorded in the text registry
+/// when built, so every part of a notice is recorded in reading order (like `explain.rs`'s
+/// paragraphs; `Label` is single-line and records at paint).
+#[track_caller]
+fn text_run(
+    text: SharedString,
+    source: TextSource,
+    style: TypeStyle,
+    color: Hsla,
+    cx: &mut App,
+) -> AnyElement {
+    let at = Location::caller();
+    TextRegistry::record(cx, || RenderedText {
+        text: text.clone(),
+        source,
+        size_px: style.size_px,
+        painted_px: 0.0,
+        clipped: false,
+        truncated: false,
+        path: format!(
+            "{}:{}:{}",
+            at.file().replace('\\', "/"),
+            at.line(),
+            at.column()
+        )
+        .into(),
+    });
+    div()
+        .w_full()
+        .font(font_for(&style))
+        .text_size(px(style.size_px))
+        .line_height(px(style.line_height))
+        .text_color(color)
+        .child(text)
+        .into_any_element()
 }

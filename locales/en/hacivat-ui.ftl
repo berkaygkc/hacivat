@@ -587,3 +587,225 @@ hv-conn-pw-title = Sign in to { $name }
 #   $user (String) - the database user, e.g. "deploy".
 hv-conn-pw-body = Enter the password for { $user }. It's kept only if the connection works.
 hv-conn-pw-cancel = Cancel
+## m2a-t17-dialog
+
+# Palette titles of the connection dialog's commands (they run only while the dialog is open).
+hv-cmd-connection-dialog-test = Test connection
+hv-cmd-connection-dialog-save = Save connection
+hv-cmd-connection-dialog-save-and-connect = Save and connect
+hv-cmd-connection-dialog-copy-url = Copy connection as URL
+# Connection dialog title for a new connection.
+hv-conn-dlg-title-new = New connection
+# Connection dialog title while editing a saved connection.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-dlg-title-edit = Edit { $name }
+# Line under the dialog title for a new connection.
+hv-conn-dlg-sub-new = Not saved yet
+# Line under the dialog title for a saved connection.
+hv-conn-dlg-sub-edit = Saved · changes apply on the next connect
+# Form row labels and placeholders of the connection dialog.
+hv-conn-dlg-url = URL
+hv-conn-dlg-url-ph = Paste a connection URL to fill the form
+hv-conn-dlg-copy-url = Copy as URL
+hv-conn-dlg-engine = Engine
+hv-conn-dlg-name = Name
+hv-conn-dlg-env = Environment
+# Hint under the environment choice when the host is not this machine.
+hv-conn-dlg-env-ask = Asked when you save, because this host isn't on this Mac.
+# Hint under the environment choice when the host is this machine.
+hv-conn-dlg-env-local = Set to local: the server runs on this Mac.
+hv-conn-dlg-ro = Read-only
+# Dimmer text after the Read-only checkbox, starting with its separator dot.
+hv-conn-dlg-ro-hint = · Block statements that change data or schema
+# Section headings of the connection form, in small caps: pre-cased here, never cased in code.
+hv-conn-section-server = SERVER
+hv-conn-section-auth = AUTHENTICATION
+# Titles of the folding sections of the connection form.
+hv-conn-section-tls = Encryption (TLS)
+hv-conn-section-advanced = Advanced
+hv-conn-dlg-host = Host
+hv-conn-dlg-port = Port
+hv-conn-dlg-db = Database
+hv-conn-dlg-user = User
+hv-conn-dlg-file = File
+# Button that opens a file picker.
+hv-conn-dlg-choose = Choose…
+hv-conn-dlg-sqlite-ro = Open the file read-only
+hv-conn-dlg-sqlite-create = Create the file if it doesn't exist
+# Row label of the sign-in method choice.
+hv-conn-dlg-auth = Authentication
+# The sign-in methods.
+hv-conn-auth-password = Password
+hv-conn-auth-pgpass = pgpass
+hv-conn-auth-cert = Client certificate
+hv-conn-auth-none = None
+hv-conn-dlg-password = Password
+# Label of the choice of how long a password is kept.
+hv-conn-dlg-remember = Remember
+# Placeholder of the password field when a password is already stored.
+hv-conn-dlg-pw-saved = saved in the Keychain
+# Next to a password that came from a pasted URL.
+hv-conn-dlg-pw-from-url = from the pasted URL
+# How long a password is kept, each with a hint.
+hv-conn-ret-never = Never
+hv-conn-ret-never-h = ask on every connect
+hv-conn-ret-restart = Until restart
+hv-conn-ret-restart-h = kept in memory
+hv-conn-ret-session = For this session
+hv-conn-ret-session-h = forgotten on disconnect
+hv-conn-ret-forever = Forever (Keychain)
+hv-conn-ret-forever-h = stored in the macOS Keychain
+# Hint of the disabled "Forever" choice when the system keyring can't be used.
+hv-conn-ret-forever-off-h = the system keyring isn't available
+# The pgpass line that matches the connection.
+# Variables:
+#   $n (Number) - the 1-based line number, e.g. 3.
+hv-conn-pgpass-match = Matches line { $n } of ~/.pgpass
+# Shown when no pgpass line matches the connection.
+hv-conn-pgpass-none = No line of ~/.pgpass matches this connection yet.
+hv-conn-pgpass-note = Read on every connect. { -brand-hacivat } stores no password for this connection.
+hv-conn-dlg-cert = Certificate
+hv-conn-dlg-key = Private key
+hv-conn-auth-none-note = Connects without a password. Use only for servers that trust this machine.
+# Summary of the folded encryption section in Auto mode.
+hv-conn-tls-sum-auto = Auto: verify when the server offers TLS
+hv-conn-tls-mode = Mode
+# The encryption modes, each with a hint.
+hv-conn-tls-auto = Auto
+hv-conn-tls-auto-h = verify if offered; plaintext only on private networks
+# Hint of Auto for MySQL and MariaDB, which send credentials in plain text only to this machine.
+hv-conn-tls-auto-loopback-h = verify if offered; plaintext only to this Mac
+hv-conn-tls-require = Require
+hv-conn-tls-require-h = encrypt, don't verify
+hv-conn-tls-verify-ca = Verify CA
+hv-conn-tls-verify-ca-h = check the chain
+hv-conn-tls-verify-full = Verify full
+hv-conn-tls-verify-full-h = check the chain and host name
+hv-conn-tls-disable = Disable
+hv-conn-tls-disable-h = never encrypt
+# Warning when encryption is turned off for MySQL or MariaDB.
+hv-conn-tls-disable-warn = With encryption off, the password crosses the network in plain text, where anyone on the network path can read it.
+hv-conn-tls-ca = CA certificate
+hv-conn-tls-ca-ph = System trust store
+# Summary of the folded Advanced section.
+# Variables:
+#   $timeout (Number) - the connect timeout in seconds, e.g. 15.
+#   $keepalive (Enum(on, off)) - whether keep-alive is on.
+#   $seconds (Number) - the keep-alive interval in seconds, e.g. 60.
+hv-conn-adv-sum = Timeout { $timeout } s · { $keepalive ->
+        [on] keep-alive every { $seconds } s
+       *[off] keep-alive off
+    }
+hv-conn-adv-timeout = Connect timeout
+# Unit after the connect timeout field.
+hv-conn-adv-timeout-unit = seconds
+hv-conn-adv-keepalive = Keep-alive every
+hv-conn-adv-off = Off
+# A keep-alive interval choice.
+# Variables:
+#   $seconds (Number) - the interval in seconds, e.g. 60.
+hv-conn-adv-every = { $seconds } s
+hv-conn-adv-app = Application name
+hv-conn-adv-extra = Extra properties
+hv-conn-adv-extra-add = Add property
+# Placeholders of an extra property's name and value fields.
+hv-conn-adv-extra-key = key
+hv-conn-adv-extra-value = value
+hv-conn-adv-extra-remove = Remove property
+hv-conn-adv-budget = Connections
+# The connection budget, stated as a fact.
+# Variables:
+#   $max (Number) - how many connections may be open at once, e.g. 4.
+hv-conn-adv-budget-v = Up to { $max } open at once; more consoles wait their turn
+# Footer buttons of the connection dialog.
+hv-conn-dlg-test = Test connection
+hv-conn-dlg-test-stop = Stop
+hv-conn-dlg-cancel = Cancel
+hv-conn-dlg-save = Save
+hv-conn-dlg-save-connect = Save and connect
+# Notice in the dialog when connections.toml can't be written.
+hv-conn-dlg-store-read-only = Connections can't be saved now, because the connections file can't be written.
+# Notice in the dialog when saving failed.
+hv-conn-dlg-save-failed = The connection couldn't be saved. Try again.
+# Notice in the dialog when the connection being edited was deleted meanwhile.
+hv-conn-dlg-save-gone = This connection was deleted, so the changes weren't saved.
+# Notice in the dialog when the connection was saved but its password was not.
+hv-conn-dlg-save-secret = The connection was saved, but its password couldn't be stored.
+# Environment names in the connection form, lowercase as the marks' labels.
+hv-conn-env-local = local
+hv-conn-env-dev = dev
+hv-conn-env-test = test
+hv-conn-env-staging = staging
+hv-conn-env-production = production
+# Notice after a connection URL filled the form.
+hv-conn-url-filled = Filled from the pasted URL.
+hv-conn-url-secret = The password was taken out of the URL. It goes to the Keychain when you save.
+# The password line of the notice when it is not kept in the Keychain.
+# Variables:
+#   $ret (Enum(never, until_restart, for_session)) - how long the password is kept.
+hv-conn-url-secret-other = { $ret ->
+        [never] The password was taken out of the URL. { -brand-hacivat } doesn't keep it and asks on every connect.
+        [until_restart] The password was taken out of the URL. { -brand-hacivat } keeps it in memory until restart.
+       *[for_session] The password was taken out of the URL. { -brand-hacivat } keeps it for this session.
+    }
+# After a URL parameter, what it became in the form.
+# Variables:
+#   $setting (String) - the form setting, e.g. "Encryption: Verify full".
+hv-conn-url-mapped = became { $setting }
+# The encryption setting a URL parameter became.
+# Variables:
+#   $mode (String) - the encryption mode, e.g. "Verify full".
+hv-conn-url-setting-tls = Encryption: { $mode }
+# After an unknown URL parameter.
+hv-conn-url-extra = kept as an extra property
+# Variables:
+#   $engine (String) - the database engine, e.g. "MySQL".
+hv-conn-url-engine-set = Engine set to { $engine } from the URL.
+hv-conn-url-undo = Undo
+# A pasted URL is for another engine than the form.
+# Variables:
+#   $engine (String) - the URL's engine, e.g. "MySQL".
+#   $current (String) - the form's engine, e.g. "PostgreSQL".
+hv-conn-url-switch = This is a { $engine } URL, and the form is set to { $current }.
+hv-conn-url-switch-l2 = Nothing was changed yet.
+# Variables:
+#   $engine (String) - the URL's engine, e.g. "MySQL".
+hv-conn-url-switch-btn = Switch to { $engine } and fill
+# Variables:
+#   $current (String) - the form's engine, e.g. "PostgreSQL".
+hv-conn-url-keep = Keep { $current }
+hv-conn-url-unrec = { -brand-hacivat } can't read this as a connection URL. Nothing was changed.
+hv-conn-url-formats = It reads postgres://, mysql://, mariadb://, jdbc:… URLs, key=value strings and SQLite file paths.
+# A pasted URL named several hosts.
+# Variables:
+#   $count (Number) - how many hosts the URL names, e.g. 2.
+#   $host (String) - the host that is used, e.g. "db-1.acme.io".
+hv-conn-url-multihost = The URL names { $count } hosts. { -brand-hacivat } connects to the first, { $host }.
+# Closes the URL notice.
+hv-conn-url-dismiss = Dismiss
+# Toast after saving a connection.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-toast-saved = Saved { $name }
+# Toast title after "Copy as URL"; the URL follows on its own line.
+hv-conn-toast-copied = Copied as URL
+hv-conn-toast-nopw = The password isn't included.
+# Problems that stop a save, shown under the field they belong to.
+hv-conn-issue-name-missing = Enter a name.
+hv-conn-issue-host-missing = Enter a host.
+hv-conn-issue-host-invalid = This host can't be used. Remove spaces and URL characters.
+hv-conn-issue-port-invalid = Enter a port from 1 to 65535.
+hv-conn-issue-file-missing = Choose a database file, or let { -brand-hacivat } create it.
+hv-conn-issue-path-refused = { -brand-hacivat } won't open this path. Choose a local file.
+hv-conn-issue-create-and-read-only = A new file can't be opened read-only. Turn one of the two off.
+hv-conn-issue-transport-unavailable = This connection uses a tunnel this version can't open yet.
+hv-conn-issue-tls-ca-unreadable = The CA certificate can't be read. Verify CA needs one.
+hv-conn-issue-tls-cert-unreadable = The client certificate or its key can't be read.
+hv-conn-issue-tls-key-encrypted = The private key is encrypted. Use an unencrypted key file.
+# Variables:
+#   $mode (String) - the encryption mode, e.g. "Verify CA".
+hv-conn-issue-tls-mode-unsupported = { $mode } isn't available for this engine yet.
+# Variables:
+#   $key (String) - the property's name, e.g. "sslkey".
+hv-conn-issue-option-rejected = The property { $key } isn't allowed here.
