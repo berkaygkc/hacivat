@@ -1124,3 +1124,38 @@ fn legitimate_password_words_still_parse() {
         assert_eq!(fv(&user, FieldId::User), "password");
     }
 }
+
+#[test]
+fn only_owner_keys_move_and_other_secret_keys_are_refused() {
+    for (i, text) in [
+        "postgres://h/db?ssl_password=SECRETPW",
+        "postgres://h/db?sslkey_password=SECRETPW",
+        "postgres://h/db?x_password=SECRETPW",
+        "postgres://h/db?a-pwd=SECRETPW",
+        "host=h ssl_password=SECRETPW",
+        "host=h x_password=SECRETPW dbname=d",
+        "mysql://u@h/db?db_password=SECRETPW",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for preferred in ENGINES {
+            let r = parse(text, preferred);
+            assert!(!format!("{r:?}").contains("SECRETPW"), "case {i}");
+            assert_eq!(
+                r.unrecognised(),
+                Some(UnrecognisedReason::NoMatch),
+                "case {i}"
+            );
+        }
+    }
+    for preferred in ENGINES {
+        let o = ok(parse("PGPASSWORD=SECRETPW host=h dbname=d", preferred));
+        assert!(password(&o) == "SECRETPW");
+        assert!(!format!("{o:?}").contains("SECRETPW"));
+        let o = ok(parse("postgres://h/db?sslpassword=SECRETPW", preferred));
+        assert!(o.secrets.is_empty());
+        assert!(o.tls_key_passphrase.is_some());
+        assert!(!format!("{o:?}").contains("SECRETPW"));
+    }
+}

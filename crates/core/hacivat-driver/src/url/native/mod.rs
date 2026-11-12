@@ -270,6 +270,36 @@ fn names_secret_key(s: &str) -> bool {
     })
 }
 
+/// Where a moved secret goes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum SecretSlot {
+    /// The database password.
+    Password,
+    /// The TLS key passphrase.
+    TlsPassphrase,
+}
+
+/// The slot a parameter key owns, if any: only the exact owner keys (ASCII case ignored; leading
+/// dashes allowed for the password keys) move. Every other key `is_secret_param` matches is
+/// refused, not moved.
+pub(super) fn secret_owner_slot(key: &str) -> Option<SecretSlot> {
+    if key.eq_ignore_ascii_case("sslpassword") {
+        return Some(SecretSlot::TlsPassphrase);
+    }
+    let k = key.trim_start_matches('-');
+    [
+        "password",
+        "pass",
+        "pwd",
+        "passwd",
+        "pgpassword",
+        "mysql_pwd",
+    ]
+    .iter()
+    .any(|o| o.eq_ignore_ascii_case(k))
+    .then_some(SecretSlot::Password)
+}
+
 /// `key` names a secret, as written or after up to 8 percent-decodings.
 fn secret_key(key: &str) -> bool {
     let mut k = key.to_string();
@@ -504,13 +534,16 @@ impl Builder {
     /// as an extra. `sslpassword` becomes the TLS key passphrase (the last one wins; an empty one
     /// clears it).
     pub(super) fn param(&mut self, key: &str, value: Zeroizing<String>) {
-        if key.eq_ignore_ascii_case("sslpassword") {
+        let slot = secret_owner_slot(key);
+        if slot == Some(SecretSlot::TlsPassphrase) {
             self.note(key, key);
             self.tls_key_passphrase =
                 (!value.is_empty()).then(|| SecretString::from(value.as_str()));
             return;
         }
-        if is_secret_param(key) {
+        // Any other password-like key (`ssl_password`, `x_password`) is kept as an extra, where
+        // `leaks_a_secret` refuses the whole parse: it is never moved into a slot it does not own.
+        if slot == Some(SecretSlot::Password) {
             self.password(key, SecretString::from(value.as_str()));
             return;
         }
