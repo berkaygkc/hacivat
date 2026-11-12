@@ -27,6 +27,7 @@
   - **What the approval prompt shows.** Three separate items: the AI's statement (labelled untrusted and rendered as plain text), Hacivat's own deterministic summary (effect class, targets, WHERE, estimated rows), and the SQL.
   - **Mismatch warning.** A heuristic check that uses no LLM shows a warning when the statement and the summary disagree.
   - **No effect on decisions.** The statement never changes the classification, the AI write mode or the session allowance. It is audited together with the SQL.
+- **2026-11-12 (M0):** Small caps are synthesized like the mock (design doc L11). Text is drawn crisp/thin by default, and a Settings option switches to macOS-standard heavier rendering (L12).
 - **2026-11-12:** The v1 design doc (`docs/superpowers/specs/2026-11-12-hacivat-v1-design.md`) is approved by the product owner.
 - **2026-11-11:** UI copy: the title-bar environment label for production reads "PROD" in Turkish ("PRODUCTION" in English).
 

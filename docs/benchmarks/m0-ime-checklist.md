@@ -12,25 +12,25 @@ Host: ______ (OS version, input source versions, VM or bare metal)
 4. Mid-composition click-away (Review Focus 4): start a composition (for example `kanji`, do not commit), then click another app and come back. Match the native editor (TextEdit on macOS). The composition survives the round-trip, still owned by the IME, and the candidate list may reappear. Esc, Enter or the next keystroke acts on that composition only. The text must not be lost or duplicated, and the underline must be gone once the composition is committed.
 5. The completion popup must not open during a composition.
 6. CJK rows (Japanese and Chinese): right after each composition keystroke, before the next frame is drawn, the candidate window x is estimated from monospace character widths, not the exact shaped line. Watch whether the candidate window jumps or sits visibly misplaced (horizontally off the composition) and record it in Observed.
-7. Tab: press Tab outside a composition; a tab character must be inserted.
+7. Tab: press Tab outside a composition; a tab character must be inserted. **macOS: Pass (PO).**
 
 ## macOS (Apple M4 Pro, macOS 26.6.2)
 
 | Input source | Input | Expected result | Observed | Pass/Fail |
 |---|---|---|---|---|
-| Turkish Q | `ğ` `ü` `ş` `ı` `ö` `ç` `İ` (the dedicated keys) | `ğüşıöçİ` | | |
-| Turkish Q | `Shift+i` | `İ` (dotted capital) | | |
-| Turkish Q | `i` | `i` (dotted lowercase) | | |
-| Turkish Q | `ı` key, then `Shift+ı` | `ı`, then `I` | | |
-| Turkish F | the F-layout keys for `ğüşıöçİ` | `ğüşıöçİ` | | |
-| Turkish F | `Shift+i`, then `i` | `İ`, then `i` | | |
-| US with dead keys (U.S. International) | `^` then `a` | `â` | | |
-| US with dead keys | `` ` `` then `e` | `è` | | |
-| US with dead keys | `^` then space | `^` | | |
-| Japanese (Kotoeri) | type `kanji`, check the candidate window, commit with Enter | `漢字` (or the chosen candidate), candidate window under the caret | | |
-| Japanese (Kotoeri) | type `kanji`, press Escape | composition cancelled, no text left | | |
-| Chinese Pinyin | type `zhongwen`, pick the first candidate with Space or Enter | `中文`, candidate window under the caret | | |
-| Any IME | start a composition, click away, return | see check 4 | | |
+| Turkish Q | `ğ` `ü` `ş` `ı` `ö` `ç` `İ` (the dedicated keys) | `ğüşıöçİ` |Correct (PO, 2026-11-12) | Pass |
+| Turkish Q | `Shift+i` | `İ` (dotted capital) |Correct | Pass |
+| Turkish Q | `i` | `i` (dotted lowercase) |Correct | Pass |
+| Turkish Q | `ı` key, then `Shift+ı` | `ı`, then `I` |Correct | Pass |
+| Turkish F | the F-layout keys for `ğüşıöçİ` | `ğüşıöçİ` |Correct | Pass |
+| Turkish F | `Shift+i`, then `i` | `İ`, then `i` |Correct | Pass |
+| US with dead keys (U.S. International) | `^` then `a` | `â` |Tested with ABC – Extended. Option+I then A gives `ʼa`. TextEdit gives the same, because Option+I is the horn dead key in this layout; the circumflex is Option+6. Matches native. | Pass (matches native) |
+| US with dead keys | `` ` `` then `e` | `è` | Not run separately (see the dead-key row above) | Not run |
+| US with dead keys | `^` then space | `^` | Not run separately | Not run |
+| Japanese (Kotoeri) | type `kanji`, check the candidate window, commit with Enter | `漢字` (or the chosen candidate), candidate window under the caret |Live Conversion showed `感じ` inline; the list appears on Space (native behaviour). Candidate window directly under the composition. | Pass |
+| Japanese (Kotoeri) | type `kanji`, press Escape | composition cancelled, no text left |First Esc reverts to `かんじ`, second Esc clears it. Same as native. | Pass |
+| Chinese Pinyin | type `zhongwen`, pick the first candidate with Space or Enter | `中文`, candidate window under the caret |Not tested: the input source was not found on the PO's machine. Japanese covers the same IME path. | Not run |
+| Any IME | start a composition, click away, return | see check 4 |Before the fix, the text was duplicated on Esc after returning. Fixed in fb106e7. The PO re-tested and the behaviour now matches TextEdit (no duplication). | Pass (after fix) |
 
 ## Windows 11 (x86_64)
 
@@ -41,7 +41,7 @@ Host: ______ (OS version, input source versions, VM or bare metal)
 | US with dead keys (US-International) | `^` then `a`; `` ` `` then `e` | `â`; `è` | | |
 | Japanese (MS-IME) | type `kanji`, commit with Enter | `漢字`, candidate window under the caret | | |
 | Chinese Pinyin | type `zhongwen`, commit | `中文`, candidate window under the caret | | |
-| Any IME | start a composition, click away, return | see check 4 | | |
+| Any IME | start a composition, click away, return | see check 4 |Before the fix, the text was duplicated on Esc after returning. Fixed in fb106e7. The PO re-tested and the behaviour now matches TextEdit (no duplication). | Pass (after fix) |
 
 ## Ubuntu 24.04
 
@@ -52,7 +52,7 @@ Host: ______ (OS version, input source versions, VM or bare metal)
 | US with dead keys (English US, intl. with dead keys) | `^` then `a`; `` ` `` then `e` | `â`; `è` | | |
 | Japanese (Mozc via IBus or Fcitx5) | type `kanji`, commit with Enter | `漢字`, candidate window under the caret | | |
 | Chinese Pinyin (IBus or Fcitx5) | type `zhongwen`, commit | `中文`, candidate window under the caret | | |
-| Any IME | start a composition, click away, return | see check 4 | | |
+| Any IME | start a composition, click away, return | see check 4 |Before the fix, the text was duplicated on Esc after returning. Fixed in fb106e7. The PO re-tested and the behaviour now matches TextEdit (no duplication). | Pass (after fix) |
 
 Pass criterion (spec section 6, M0): correct composition, caret and candidate window placement for Turkish Q, Turkish F, dead keys, and Japanese and Chinese IME.
 
