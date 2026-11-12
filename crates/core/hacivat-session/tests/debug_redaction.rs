@@ -17,6 +17,7 @@ fn secret_types_never_debug_print() {
         fields: FieldMap::default(),
         extra: vec![],
         secrets: vec![(FieldId::Password, SecretString::from("s3cret"))],
+        tls_key_passphrase: Some(SecretString::from("s3cret")),
         mapped: vec![],
         warnings: vec![],
     };

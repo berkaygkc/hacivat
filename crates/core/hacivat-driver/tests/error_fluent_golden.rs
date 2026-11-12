@@ -229,3 +229,44 @@ fn sqlite_texts_name_the_file_not_a_host() {
         }
     }
 }
+
+#[test]
+fn mysql_unknown_database_says_it_may_be_an_access_problem() {
+    // MySQL gives an unprivileged user 1044 for a database that does not exist (HV-CONN-03).
+    for engine in ["MySQL", "MariaDB"] {
+        let a = args("shop", "db.example", 3306, "app", "orders", engine, "");
+        let l = l10n("en");
+        let title = render(
+            &l,
+            "en",
+            ErrClass::ConfigUnknownDatabase.fluent_stem() + "-title",
+            &a,
+        );
+        assert!(title.contains("doesn't exist"), "{engine}: {title}");
+        assert!(title.contains("can't access it"), "{engine}: {title}");
+        let tr = l10n("tr");
+        let title = render(
+            &tr,
+            "tr",
+            ErrClass::ConfigUnknownDatabase.fluent_stem() + "-title",
+            &a,
+        );
+        assert!(title.contains("erişemiyor"), "{engine}: {title}");
+    }
+    let pg = args(
+        "shop",
+        "db.example",
+        5432,
+        "app",
+        "orders",
+        "PostgreSQL",
+        "",
+    );
+    let title = render(
+        &l10n("en"),
+        "en",
+        ErrClass::ConfigUnknownDatabase.fluent_stem() + "-title",
+        &pg,
+    );
+    assert!(!title.contains("can't access"), "{title}");
+}

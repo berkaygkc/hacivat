@@ -315,6 +315,58 @@ async fn auto_verifies_like_verify_full() {
     );
 }
 
+/// A self-signed `CA:TRUE` certificate presented as the server's own (common for PostgreSQL),
+/// with itself as the anchor, fails with webpki's `CaUsedAsEndEntity`, which rustls wraps in
+/// `CertificateError::Other`. That is the genuine error, not a stand-in.
+#[tokio::test]
+async fn a_ca_certificate_served_as_the_server_certificate_is_an_untrusted_issuer() {
+    install_crypto_provider();
+    let mut p = leaf_params("localhost");
+    p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    p.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    let key = KeyPair::generate().unwrap();
+    let cert = p.self_signed(&key).unwrap();
+
+    // The verifier directly: the real webpki error maps to UnknownIssuer.
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert.der().clone()).unwrap();
+    let verifier =
+        rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider())
+            .build()
+            .unwrap();
+    let err = rustls::client::danger::ServerCertVerifier::verify_server_cert(
+        &*verifier,
+        cert.der(),
+        &[],
+        &ServerName::try_from("localhost").unwrap(),
+        &[],
+        rustls::pki_types::UnixTime::now(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::Other(_))
+        ),
+        "{err:?}"
+    );
+    assert_eq!(TlsFailure::from_rustls(&err), TlsFailure::UnknownIssuer);
+
+    // And through the VerifyCa path of the crate.
+    let leaf = Leaf {
+        chain: vec![cert.der().clone()],
+        key: PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
+    };
+    let srv = Srv {
+        addr: serve(server_config(leaf)).await,
+        ca_pem: cert.pem(),
+    };
+    let err = handshake(&srv, TlsMode::VerifyCa, Some(&srv.ca_pem), "localhost")
+        .await
+        .unwrap_err();
+    assert_eq!(err.failure, Some(TlsFailure::UnknownIssuer), "{err:?}");
+}
+
 #[tokio::test]
 async fn verify_ca_still_checks_the_chain() {
     let srv = rcgen_server("localhost").await;
@@ -538,6 +590,38 @@ fn tls_file_problems_are_reported_before_connecting() {
         build_tls_params(&with_ca(TlsMode::VerifyCa, &der_ca), "db", Public)
             .unwrap()
             .is_some()
+    );
+}
+
+/// Stands in for webpki's `CaUsedAsEndEntity`, which rustls wraps in `CertificateError::Other`;
+/// webpki's `Display` prints the variant name.
+#[derive(Debug)]
+struct NamedError(&'static str);
+
+impl std::fmt::Display for NamedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for NamedError {}
+
+#[test]
+fn a_ca_certificate_used_as_the_server_certificate_is_an_untrusted_issuer() {
+    use rustls::{CertificateError, Error, OtherError};
+    let wrap = |name| {
+        Error::InvalidCertificate(CertificateError::Other(OtherError(std::sync::Arc::new(
+            NamedError(name),
+        ))))
+    };
+    assert_eq!(
+        TlsFailure::from_rustls(&wrap("CaUsedAsEndEntity")),
+        TlsFailure::UnknownIssuer
+    );
+    // Other wrapped errors stay `Other` (off Apple, where no OSStatus is read).
+    assert_eq!(
+        TlsFailure::from_rustls(&wrap("InvalidCertValidity")),
+        TlsFailure::Other
     );
 }
 

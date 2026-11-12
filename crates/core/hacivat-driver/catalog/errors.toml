@@ -261,7 +261,8 @@ fixes = ["edit_connection"]
 1040 = "server.too_many_connections"
 1290 = "server.read_only"
 1792 = "server.read_only"
-1044 = "authz.database"
+# MySQL answers an unknown database with 1044 (not 1049) to an account without global privileges.
+1044 = "config.unknown_database"
 2059 = "auth.method_unsupported"
 2061 = "auth.method_unsupported"
 

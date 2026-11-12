@@ -65,7 +65,13 @@ tested = ["8.0", "8.4"]
 default_budget = 4
 auth = ["password", "client_cert", "none"]
 option_allow = ["sslMode", "useSSL", "connectTimeout", "characterEncoding"]
-always_deny = ["allowLoadLocalInfile", "allowUrlInLocalInfile", "autoDeserialize"]
+# The first three are the JDBC names; the rest are mysql_async's own URL options (0.37), which
+# could weaken TLS, enable cleartext auth, or point at a local socket.
+always_deny = [
+    "allowLoadLocalInfile", "allowUrlInLocalInfile", "autoDeserialize",
+    "enable_cleartext_plugin", "socket", "prefer_socket", "require_ssl", "verify_ca",
+    "verify_identity", "built_in_roots", "secure_auth", "reset_connection",
+]
 path_keys = ["sslCa", "sslCert", "sslKey", "serverSslCert", "serverRSAPublicKeyFile", "trustCertificateKeyStoreUrl", "clientCertificateKeyStoreUrl"]
 
 [[engine.conn_type]]
@@ -89,7 +95,13 @@ tested = ["10.6", "10.11", "11.4"]
 default_budget = 4
 auth = ["password", "client_cert", "none"]
 option_allow = ["sslMode", "useSSL", "connectTimeout", "characterEncoding"]
-always_deny = ["allowLoadLocalInfile", "allowUrlInLocalInfile", "autoDeserialize"]
+# The first three are the JDBC names; the rest are mysql_async's own URL options (0.37), which
+# could weaken TLS, enable cleartext auth, or point at a local socket.
+always_deny = [
+    "allowLoadLocalInfile", "allowUrlInLocalInfile", "autoDeserialize",
+    "enable_cleartext_plugin", "socket", "prefer_socket", "require_ssl", "verify_ca",
+    "verify_identity", "built_in_roots", "secure_auth", "reset_connection",
+]
 path_keys = ["sslCa", "sslCert", "sslKey", "serverSslCert", "serverRSAPublicKeyFile", "trustCertificateKeyStoreUrl", "clientCertificateKeyStoreUrl"]
 
 [[engine.conn_type]]

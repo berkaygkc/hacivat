@@ -170,6 +170,11 @@ fn io_error(e: io::Error) -> RawError {
 /// `tokio-postgres`'s own constant, never server text.
 const TLS_NOT_OFFERED: &str = "server does not support TLS";
 
+/// The library's text for "the server wants a password and the config has none"
+/// (`connect_raw.rs`, an `Error::config`). It is `tokio-postgres`'s own constant, never server
+/// text.
+const PASSWORD_MISSING: &str = "password missing";
+
 /// Maps a `tokio-postgres` error (HV-CONN-03). Server errors keep SQLSTATE, severity, text,
 /// detail and hint verbatim; TLS failures carry their [`hacivat_net::TlsFailure`]; I/O keeps
 /// its kind.
@@ -202,6 +207,9 @@ pub(crate) fn pg_error(e: &tokio_postgres::Error) -> RawError {
     }
     if source.is_some_and(|s| s.to_string() == TLS_NOT_OFFERED) {
         return raw(RawErrorKind::TlsNotOffered);
+    }
+    if source.is_some_and(|s| s.to_string() == PASSWORD_MISSING) {
+        return raw(RawErrorKind::PasswordRequired);
     }
     if e.is_closed() {
         return raw(RawErrorKind::Io(io::ErrorKind::ConnectionReset));

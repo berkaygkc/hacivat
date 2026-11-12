@@ -53,6 +53,12 @@ pub enum RawErrorKind {
     Protocol,
     Cancelled,
     Unsupported,
+    /// The server asked for a password and the profile supplied none (PostgreSQL's
+    /// authentication request without a password). It classifies as `auth.invalid`: M2a has no
+    /// `auth.password_required` class, and `auth.invalid` already offers "Re-enter password",
+    /// the prompt. MySQL needs no kind: a missing password reaches the server, which answers
+    /// 1045 "using password: NO" (`auth.invalid` by code).
+    PasswordRequired,
     Other,
 }
 
@@ -177,6 +183,7 @@ fn by_transport(phase: Phase, kind: &RawErrorKind) -> Option<ErrClass> {
         RawErrorKind::Dns => ErrClass::NetworkDns,
         RawErrorKind::Timeout => ErrClass::NetworkTimeout,
         RawErrorKind::TlsNotOffered => ErrClass::TlsNotSupportedByServer,
+        RawErrorKind::PasswordRequired => ErrClass::AuthInvalid,
         RawErrorKind::Tls(failure) => match failure {
             TlsFailure::UnknownIssuer | TlsFailure::Expired | TlsFailure::NotYetValid => {
                 ErrClass::TlsUntrusted

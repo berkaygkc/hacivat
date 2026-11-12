@@ -200,11 +200,30 @@ enum SecretParams {
 
 /// Extra-parameter keys that carry a password, compared ASCII-case-insensitively. Task 7's
 /// parser moves these to the secret store; render does not rely on that.
-const SECRET_PARAMS: [&str; 5] = ["password", "sslpassword", "pass", "pwd", "passwd"];
+const SECRET_PARAMS: [&str; 7] = [
+    "password",
+    "sslpassword",
+    "pass",
+    "pwd",
+    "passwd",
+    "pgpassword",
+    "mysql_pwd",
+];
 
-/// Whether the extra parameter `key` carries a password.
+/// Key endings that make a key a password key (`db_password`, `x-pwd`).
+const SECRET_SUFFIXES: [&str; 4] = ["_password", "-password", "_pwd", "-pwd"];
+
+/// Whether the extra parameter `key` carries a password. Leading dashes are ignored
+/// (`--password`), and so is ASCII case. A key that only starts with a password word
+/// (`password_db`) does not count; one that ends with it (`x_password`) does.
 pub(super) fn is_secret_param(key: &str) -> bool {
+    let key = key.trim_start_matches('-');
     SECRET_PARAMS.iter().any(|s| s.eq_ignore_ascii_case(key))
+        || SECRET_SUFFIXES.iter().any(|s| {
+            key.len() >= s.len()
+                && key.is_char_boundary(key.len() - s.len())
+                && key[key.len() - s.len()..].eq_ignore_ascii_case(s)
+        })
 }
 
 /// A value to write: text to escape, or the mask, written as is.

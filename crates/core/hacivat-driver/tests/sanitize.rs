@@ -536,3 +536,26 @@ fn path_options_are_checked_without_being_listed_in_paths() {
         .is_ok()
     );
 }
+
+#[test]
+fn mysql_async_native_options_are_always_denied() {
+    for engine in [DbmsKind::MySql, DbmsKind::MariaDb] {
+        for key in [
+            "enable_cleartext_plugin",
+            "socket",
+            "prefer_socket",
+            "require_ssl",
+            "verify_ca",
+            "verify_identity",
+            "built_in_roots",
+            "secure_auth",
+            "reset_connection",
+        ] {
+            assert_eq!(
+                err_reasons(engine, UserTyped, &[(key, "false")]),
+                [ViolationReason::AlwaysDenied],
+                "{engine:?} {key}"
+            );
+        }
+    }
+}
