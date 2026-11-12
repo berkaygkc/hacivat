@@ -467,6 +467,26 @@ async fn transport_errors_keep_their_io_kind() {
 }
 
 #[tokio::test]
+async fn a_password_request_without_a_password_is_password_required() {
+    let (factory, mut server) = piped();
+    let mut r = base_req(factory);
+    r.password = None;
+    let srv = tokio::spawn(async move {
+        read_untyped(&mut server).await;
+        // AuthenticationCleartextPassword: 'R', length 8, code 3.
+        server
+            .write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 3])
+            .await
+            .unwrap();
+        server
+    });
+    let e = PgDriver::new().connect(r).await.err().unwrap();
+    assert_eq!(e.kind, RawErrorKind::PasswordRequired);
+    assert!(e.server.is_none());
+    drop(srv.await.unwrap());
+}
+
+#[tokio::test]
 async fn a_file_endpoint_is_unsupported() {
     let mut r = base_req(noop_factory());
     r.endpoint = Endpoint::File {

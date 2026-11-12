@@ -91,7 +91,7 @@ impl TlsFailure {
                 C::NotValidForName | C::NotValidForNameContext { .. } => TlsFailure::NameMismatch,
                 C::Expired | C::ExpiredContext { .. } => TlsFailure::Expired,
                 C::NotValidYet | C::NotValidYetContext { .. } => TlsFailure::NotYetValid,
-                C::Other(other) => platform_failure(other),
+                C::Other(other) => other_failure(other),
                 _ => TlsFailure::Other,
             },
             E::AlertReceived(A::CertificateRequired) => TlsFailure::ClientCertRequired,
@@ -108,6 +108,18 @@ impl TlsFailure {
             _ => TlsFailure::Other,
         }
     }
+}
+
+/// rustls has no variant for webpki's `CaUsedAsEndEntity` (a `CA:TRUE` certificate presented as
+/// the server's own, as common self-signed PostgreSQL certificates are) and wraps it in
+/// `CertificateError::Other`. webpki's `Display` is its variant name, so that name is the
+/// stable key. The certificate cannot be trusted as it is, which is `UnknownIssuer` (the
+/// "Encrypt without verifying" fix applies). Everything else is left to the platform verifier.
+fn other_failure(other: &rustls::OtherError) -> TlsFailure {
+    if other.to_string() == "CaUsedAsEndEntity" {
+        return TlsFailure::UnknownIssuer;
+    }
+    platform_failure(other)
 }
 
 /// The platform verifier on Apple maps only a few Security.framework results to rustls
