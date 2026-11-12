@@ -6,14 +6,15 @@
 //! - fields compare byte for byte (case-sensitive); a field that is exactly `*` matches anything;
 //! - `\x` stands for `x` in every field, so `\:` and `\\` are a literal `:` and `\`;
 //! - the first matching line wins;
-//! - an empty host, or a Unix-socket path, also matches the host `localhost`;
+//! - an empty host, or one of the default socket directories (`/tmp`, `/var/run/postgresql`,
+//!   `/run/postgresql`), is looked up as `localhost` instead; any other socket path matches
+//!   only its literal text;
 //! - port 0 means the default, 5432; ports compare as text (`05432` is not `5432`);
+//! - an empty database or user name matches no line, not even `*`;
+//! - the password is the fifth field: it ends at the first unescaped `:`;
 //! - on Unix a file that group or other may access (`mode & 0o077 != 0`) is ignored with a
-//!   warning, as is anything that is not a plain file. A missing or unreadable file has no
-//!   match.
-//!
-//! One documented departure (Task 8 brief): the password is the rest of the line after the
-//! fourth field, so an unescaped `:` stays in it.
+//!   warning, as is anything that is not a plain file or is over 1 MiB. A missing or
+//!   unreadable file has no match.
 //!
 //! The file is re-read on every call; nothing is cached. Its bytes are zeroized after use.
 
@@ -23,7 +24,9 @@ use std::path::{Path, PathBuf};
 use secrecy::SecretString;
 use zeroize::Zeroizing;
 
-use super::{FileCheck, check_file, home_dir, secret_from_bytes};
+use super::{
+    MAX_CREDENTIAL_FILE_BYTES, ReadError, home_dir, read_credential_file, secret_from_bytes,
+};
 
 /// The `.pgpass` line that matched (HV-SEC-03).
 #[derive(Debug)]
@@ -40,9 +43,15 @@ pub struct PgPassMatch {
 pub enum PgPassWarning {
     /// Group or other may read it (`mode & 0o077 != 0`). `mode` holds the permission bits.
     Permissions { path: PathBuf, mode: u32 },
-    /// The path is a directory or another non-plain file.
+    /// The path is a directory or another non-plain file (a FIFO, a device).
     IsDirectory(PathBuf),
+    /// The file is over `limit` bytes ([`MAX_CREDENTIAL_FILE_BYTES`]) and was not read.
+    TooLarge { path: PathBuf, limit: u64 },
 }
+
+/// The socket directories libpq builds commonly default to; a host equal to one of them is
+/// looked up as `localhost`.
+const DEFAULT_SOCKET_DIRS: [&str; 3] = ["/tmp", "/var/run/postgresql", "/run/postgresql"];
 
 /// libpq's default port.
 const DEFAULT_PORT: u16 = 5432;
@@ -86,35 +95,41 @@ pub fn pgpass_lookup(
     database: &str,
     user: Option<&str>,
 ) -> Result<Option<PgPassMatch>, PgPassWarning> {
-    match check_file(path) {
-        FileCheck::Missing => return Ok(None),
-        FileCheck::NotAFile => return Err(PgPassWarning::IsDirectory(path.to_path_buf())),
-        FileCheck::Exposed { mode } => {
-            return Err(PgPassWarning::Permissions {
+    if database.is_empty() || user == Some("") {
+        // libpq: no password lookup without a database and a user name.
+        return Ok(None);
+    }
+    let file = match read_credential_file(path) {
+        Ok(file) => file,
+        // libpq: a file it cannot open supplies no password.
+        Err(ReadError::Io(_)) => return Ok(None),
+        Err(ReadError::NotAFile) => return Err(PgPassWarning::IsDirectory(path.to_path_buf())),
+        Err(ReadError::TooLarge) => {
+            return Err(PgPassWarning::TooLarge {
                 path: path.to_path_buf(),
-                mode,
+                limit: MAX_CREDENTIAL_FILE_BYTES,
             });
         }
-        FileCheck::Private => {}
-    }
-    let Ok(bytes) = std::fs::read(path) else {
-        // libpq: a file it cannot open supplies no password.
-        return Ok(None);
     };
-    let bytes = Zeroizing::new(bytes);
+    if let Some(mode) = file.exposed_mode {
+        return Err(PgPassWarning::Permissions {
+            path: path.to_path_buf(),
+            mode,
+        });
+    }
+    let bytes = file.bytes;
     let port = if port == 0 { DEFAULT_PORT } else { port }.to_string();
-    let socket = host.is_empty() || is_unix_socket(host);
+    let host = if host.is_empty() || DEFAULT_SOCKET_DIRS.contains(&host) {
+        "localhost"
+    } else {
+        host
+    };
     for (index, line) in bytes.split(|&b| b == b'\n').enumerate() {
         let line = trim_line_end(line);
         if line.is_empty() || line[0] == b'#' {
             continue;
         }
-        let rest = match match_field(line, host.as_bytes()) {
-            Some(rest) => Some(rest),
-            None if socket => match_field(line, b"localhost"),
-            None => None,
-        };
-        let Some(rest) = rest
+        let Some(rest) = match_field(line, host.as_bytes())
             .and_then(|r| match_field(r, port.as_bytes()))
             .and_then(|r| match_field(r, database.as_bytes()))
         else {
@@ -137,11 +152,6 @@ pub fn pgpass_lookup(
         }));
     }
     Ok(None)
-}
-
-/// libpq's `is_unixsock_path`: an absolute path, or `@` for an abstract socket.
-fn is_unix_socket(host: &str) -> bool {
-    host.starts_with('/') || host.starts_with('@') || Path::new(host).is_absolute()
 }
 
 /// The line without its trailing `\n` and `\r` bytes.
@@ -202,11 +212,12 @@ fn take_field(buf: &[u8]) -> Option<(Option<String>, &[u8])> {
     None
 }
 
-/// The password: the rest of the line, with `\x` read as `x` (a lone trailing `\` is kept).
+/// The password field, libpq's de-escape loop: it ends at the first unescaped `:` or the end
+/// of the line, and `\x` reads as `x` (a lone trailing `\` is kept).
 fn unescape_secret(buf: &[u8]) -> SecretString {
     let mut out = Zeroizing::new(Vec::with_capacity(buf.len()));
     let mut i = 0;
-    while i < buf.len() {
+    while i < buf.len() && buf[i] != b':' {
         if buf[i] == b'\\' && i + 1 < buf.len() {
             i += 1;
         }
@@ -260,13 +271,5 @@ mod tests {
         );
         assert_eq!(take_field(b"*:rest"), Some((None, &b"rest"[..])));
         assert_eq!(take_field(b"no-colon"), None);
-    }
-
-    #[test]
-    fn socket_paths() {
-        assert!(is_unix_socket("/tmp"));
-        assert!(is_unix_socket("@abstract"));
-        assert!(!is_unix_socket("localhost"));
-        assert!(!is_unix_socket("db.example"));
     }
 }

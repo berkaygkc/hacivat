@@ -85,7 +85,7 @@ fn pgpass_vectors() {
             Some("u")
         )
         .password,
-        "pass:with:colons"
+        "pass"
     );
     assert_secret!(
         hit(&file(0o600, "h:5432:d:u:\n"), "h", 5432, "d", Some("u")).password,
@@ -138,6 +138,29 @@ fn escapes_in_every_field() {
     let f = file(0o600, "h\\:x:5432:d\\\\b:u:back\\\\slash\\:colon\\x\n");
     let m = hit(&f, "h:x", 5432, "d\\b", Some("u"));
     assert_secret!(m.password, "back\\slash:colonx");
+    // The password ends at the first unescaped `:`; an escaped one is kept.
+    assert_secret!(
+        hit(
+            &file(0o600, "h:5432:d:u:a\\:b:c\n"),
+            "h",
+            5432,
+            "d",
+            Some("u")
+        )
+        .password,
+        "a:b"
+    );
+    assert_secret!(
+        hit(
+            &file(0o600, "h:5432:d:u::rest\n"),
+            "h",
+            5432,
+            "d",
+            Some("u")
+        )
+        .password,
+        ""
+    );
     // A lone trailing backslash is kept.
     assert_secret!(
         hit(
@@ -160,19 +183,95 @@ fn ports_compare_as_text_and_zero_means_5432() {
 }
 
 #[test]
-fn localhost_matches_a_unix_socket() {
+fn an_empty_host_or_a_default_socket_dir_is_looked_up_as_localhost() {
     let f = file(
         0o600,
-        "localhost:5432:d:u:local\n/var/run/pg:5432:d:v:path\n",
+        "localhost:5432:d:u:local\n/var/run/pg:5432:d:v:path\n/tmp:5432:d:w:tmp\n:5432:d:x:empty\n",
     );
-    assert_eq!(hit(&f, "/tmp", 5432, "d", Some("u")).line, 1);
-    assert_eq!(hit(&f, "", 5432, "d", Some("u")).line, 1);
-    assert_eq!(hit(&f, "localhost", 5432, "d", Some("u")).line, 1);
+    for host in [
+        "",
+        "/tmp",
+        "/var/run/postgresql",
+        "/run/postgresql",
+        "localhost",
+    ] {
+        assert_eq!(hit(&f, host, 5432, "d", Some("u")).line, 1, "host {host:?}");
+    }
+    // Any other socket path matches only its literal text.
     assert_eq!(hit(&f, "/var/run/pg", 5432, "d", Some("v")).line, 2);
+    assert!(
+        pgpass_lookup(&f, "/var/run/pg", 5432, "d", Some("u"))
+            .unwrap()
+            .is_none()
+    );
+    // A substituted host is not also tried literally: `/tmp` is only `localhost`.
+    assert!(
+        pgpass_lookup(&f, "/tmp", 5432, "d", Some("w"))
+            .unwrap()
+            .is_none()
+    );
+    // An empty host never matches an empty-host line.
+    assert!(
+        pgpass_lookup(&f, "", 5432, "d", Some("x"))
+            .unwrap()
+            .is_none()
+    );
     assert!(
         pgpass_lookup(&f, "127.0.0.1", 5432, "d", Some("u"))
             .unwrap()
             .is_none()
+    );
+}
+
+#[test]
+fn an_empty_database_or_user_matches_nothing() {
+    let f = file(0o600, "*:*:*:*:pw\n");
+    assert!(
+        pgpass_lookup(&f, "h", 5432, "", Some("u"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        pgpass_lookup(&f, "h", 5432, "d", Some(""))
+            .unwrap()
+            .is_none()
+    );
+    assert!(pgpass_lookup(&f, "h", 5432, "", None).unwrap().is_none());
+    assert_eq!(hit(&f, "h", 5432, "d", Some("u")).line, 1);
+}
+
+#[test]
+fn an_oversized_file_is_refused_unread() {
+    let big = "#".repeat(1 << 20) + "\nh:5432:d:u:p\n";
+    let err = pgpass_lookup(&file(0o600, &big), "h", 5432, "d", Some("u")).unwrap_err();
+    assert_eq!(
+        err,
+        PgPassWarning::TooLarge {
+            path: LAST.with(|l| l.borrow().clone()),
+            limit: 1 << 20
+        }
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_or_a_device_is_refused_without_blocking() {
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("pgpass");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success());
+    // No writer ever opens it: a blocking open would hang here.
+    assert_eq!(
+        pgpass_lookup(&fifo, "h", 5432, "d", Some("u")).unwrap_err(),
+        PgPassWarning::IsDirectory(fifo.clone())
+    );
+    let zero = Path::new("/dev/zero");
+    assert_eq!(
+        pgpass_lookup(zero, "h", 5432, "d", Some("u")).unwrap_err(),
+        PgPassWarning::IsDirectory(zero.to_path_buf())
     );
 }
 
