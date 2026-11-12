@@ -12,7 +12,7 @@ use hacivat_secrets::AuthProviderId;
 use secrecy::SecretString;
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::pipeline::{ConnectDeps, ConnectError, Interaction, Progress, fresh_progress};
 use crate::profile::{Profile, ProfileDraft};
@@ -71,22 +71,38 @@ impl Default for ManagerConfig {
     }
 }
 
-/// A running test connection (HV-CONN-07). Dropping it cancels the test.
+/// The stub's senders, kept alive with the handle so its result never arrives (Task 16 drops
+/// this field).
+type StubSenders = (watch::Sender<Progress>, oneshot::Sender<TestReport>);
+
+/// A running test connection (HV-CONN-07). Dropping it cancels the test. It has no `Drop` impl
+/// of its own (a guard field cancels), so `progress` and `result` can be moved out of it
+/// (`m.test(..).result.await`); the test is cancelled when the rest of the handle drops.
 #[derive(Debug)]
 pub struct TestHandle {
     pub progress: watch::Receiver<Progress>,
     pub result: oneshot::Receiver<TestReport>,
     cancel: CancellationToken,
+    _guard: DropGuard,
+    #[allow(dead_code, reason = "Task 16")]
+    stub_senders: Option<StubSenders>,
 }
 
 impl TestHandle {
-    pub fn cancel(&self) {
-        self.cancel.cancel();
+    /// A handle whose result never arrives while it lives (the Task 1 stub).
+    fn pending(cancel: CancellationToken) -> TestHandle {
+        let (progress_tx, progress) = watch::channel(fresh_progress());
+        let (result_tx, result) = oneshot::channel();
+        TestHandle {
+            progress,
+            result,
+            _guard: cancel.clone().drop_guard(),
+            cancel,
+            stub_senders: Some((progress_tx, result_tx)),
+        }
     }
-}
 
-impl Drop for TestHandle {
-    fn drop(&mut self) {
+    pub fn cancel(&self) {
         self.cancel.cancel();
     }
 }
@@ -138,15 +154,10 @@ impl ConnectionManager {
         self.changes.subscribe()
     }
 
-    /// Starts a test of `draft` (Task 16). The stub's result never arrives.
+    /// Starts a test of `draft` (Task 16). The stub's result never arrives while the handle
+    /// lives (its senders stay in the handle).
     pub fn test(&self, _draft: ProfileDraft, _ix: Interaction) -> TestHandle {
-        let (_progress_tx, progress) = watch::channel(fresh_progress());
-        let (_result_tx, result) = oneshot::channel();
-        TestHandle {
-            progress,
-            result,
-            cancel: CancellationToken::new(),
-        }
+        TestHandle::pending(CancellationToken::new())
     }
 
     /// Closes every connection (Task 16).
@@ -158,5 +169,39 @@ impl ConnectionManager {
     /// at most `budget`; `true` if everything closed in time (P15). The quit handler uses it.
     pub fn shutdown_blocking(&self, _budget: Duration) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    #[test]
+    fn result_moves_out_and_the_rest_of_the_handle_cancels_on_drop() {
+        let token = CancellationToken::new();
+        let mut result = {
+            let handle = TestHandle::pending(token.clone());
+            let mut result = handle.result; // a partial move: `TestHandle` has no `Drop`
+            assert!(!token.is_cancelled());
+            // The stub's sender lives in the handle: nothing arrives, nothing is closed.
+            assert!(matches!(result.try_recv(), Err(TryRecvError::Empty)));
+            result
+        }; // the rest of the handle drops here
+        assert!(token.is_cancelled());
+        assert!(matches!(result.try_recv(), Err(TryRecvError::Closed)));
+    }
+
+    #[test]
+    fn dropping_or_cancelling_a_handle_cancels_the_test() {
+        let token = CancellationToken::new();
+        drop(TestHandle::pending(token.clone()));
+        assert!(token.is_cancelled());
+
+        let token = CancellationToken::new();
+        let handle = TestHandle::pending(token.clone());
+        handle.cancel();
+        assert!(token.is_cancelled());
+        drop(handle);
     }
 }

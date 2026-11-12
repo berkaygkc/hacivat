@@ -31,7 +31,7 @@ pub enum ProfileDiag {
 }
 
 /// What [`ProfileStore::open`] loaded (P29).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct LoadedProfiles {
     pub profiles: Vec<Profile>,
     pub diags: Vec<ProfileDiag>,

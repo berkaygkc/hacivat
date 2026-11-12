@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use super::FieldId;
 
 /// A compiled URL template (HV-DRV-02).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Template {
     pub id: String,
     pub field_set: BTreeSet<FieldId>,
@@ -17,7 +17,7 @@ pub struct Template {
 }
 
 /// A template node (Task 3).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Node {}
 
 impl Template {

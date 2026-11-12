@@ -18,7 +18,9 @@ pub struct ConnectionsBoot {
     pub loaded: LoadedProfiles,
     pub secrets: Arc<SecretStore>,
     pub drivers: Arc<DriverRegistry>,
-    /// Where forwarder sockets are created (`0700`).
+    /// Where forwarder sockets are created: a private `0700` directory (R18). The Task 1 stub
+    /// puts `std::env::temp_dir()` here as a placeholder only; Task 12 must create and use a
+    /// private `0700` directory for the forwarder's Unix sockets.
     pub private_dir: PathBuf,
 }
 
@@ -46,6 +48,7 @@ fn boot_with(paths: &LocalPaths, drivers: DriverRegistry) -> ConnectionsBoot {
         loaded,
         secrets: Arc::new(SecretStore::new(None)),
         drivers: Arc::new(drivers),
+        // Placeholder (not private): Task 12 replaces it with a `0700` directory (R18).
         private_dir: std::env::temp_dir(),
     }
 }
