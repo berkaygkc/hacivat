@@ -90,3 +90,11 @@ trybuild = "1.0.122"
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 # zed Cargo.toml:1046
 async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
+
+# Keep debug builds small: line tables give file:line in panics and backtraces
+# without full variable debuginfo (cuts target/ size roughly in half).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
