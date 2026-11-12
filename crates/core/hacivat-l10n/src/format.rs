@@ -265,7 +265,7 @@ fn merge_options(o: &mut FluentNumberOptions, named: &FluentArgs) {
             ("type", FluentValue::String(s)) if matches!(s.as_ref(), "cardinal" | "ordinal") => {
                 o.r#type = FluentNumberType::from(s.as_ref());
             }
-            _ => tracing::debug!(option = key, "l10n: NUMBER ignores an unsupported option"),
+            _ => tracing::warn!(option = key, "l10n: NUMBER ignores an unsupported option"),
         }
     }
 }
@@ -317,16 +317,10 @@ fn format_decimal(ctx: &FormatCtx, mut dec: Decimal, o: &NumOpts) -> String {
     dec.absolute.pad_end(-i16::from(o.min_fraction));
     with_memo(ctx, |m, locale| {
         m.ensure_decimal(locale, o.grouping);
-        m.ensure_list(locale, ListKind::And);
-        let (Some(Some(f)), Some(Some(text))) =
-            (m.decimal.get(&o.grouping), m.list.get(&ListKind::And))
-        else {
+        let Some(Some(f)) = m.decimal.get(&o.grouping) else {
             return dec.to_string();
         };
-        // `FormattedDecimal` implements `Display` only with `icu_decimal`'s `alloc` feature,
-        // which is not enabled; a one-item list writes its item unchanged and `FormattedList`
-        // always implements `Display` (Task 9 report: use `to_string` once `alloc` is on).
-        let render = |d: &Decimal| text.format(std::iter::once(f.format(d))).to_string();
+        let render = |d: &Decimal| f.format(d).to_string();
         if !o.percent {
             return render(&dec);
         }
@@ -448,7 +442,10 @@ fn datetime_fn<'a>(positional: &[FluentValue<'a>], named: &FluentArgs) -> Fluent
         }
         Some(FluentValue::String(s)) => match parse_iso8601(s) {
             Some(w) => Some(w),
-            None => return FluentValue::String(s.clone()),
+            None => {
+                tracing::warn!(value = %s, "l10n: DATETIME got a string that is not ISO 8601");
+                return FluentValue::String(s.clone());
+            }
         },
         _ => None,
     };
@@ -464,7 +461,7 @@ fn datetime_fn<'a>(positional: &[FluentValue<'a>], named: &FluentArgs) -> Fluent
             ("timeStyle", FluentValue::String(s)) if Style::parse(s).is_some() => {
                 key.time = Style::parse(s);
             }
-            _ => tracing::debug!(
+            _ => tracing::warn!(
                 option = name,
                 "l10n: DATETIME ignores an unsupported option"
             ),
@@ -586,7 +583,7 @@ fn wall_clock(ctx: &FormatCtx, when: WhenValue) -> Option<(i32, u8, u8, u8, u8, 
         } => (year, month, day, hour, minute, second),
         WhenValue::Instant { unix_ms } => {
             let utc = unix_ms.div_euclid(1000);
-            let local = utc + i64::from(utc_offset_seconds(&ctx.time_zone, utc));
+            let local = utc + i64::from(utc_offset_seconds(ctx, utc));
             let (y, mo, d) = civil_from_days(local.div_euclid(86_400));
             let sod = local.rem_euclid(86_400);
             (
@@ -601,32 +598,35 @@ fn wall_clock(ctx: &FormatCtx, when: WhenValue) -> Option<(i32, u8, u8, u8, u8, 
     })
 }
 
-/// The UTC offset of `zone` at `unix_secs`, from ICU4X's zone data. Unknown zones format in UTC
-/// (edge 10). ICU4X has no transition rules, so a zone that observes daylight saving time gets
-/// its standard offset (a known gap, see the Task 9 report).
-#[allow(deprecated)]
-fn utc_offset_seconds(zone: &str, unix_secs: i64) -> i32 {
-    use icu_time::zone::{IanaParser, VariantOffsetsCalculator, ZoneNameTimestamp};
-    let tz = IanaParser::new().parse(zone);
-    if tz.is_unknown() {
-        warn_once(zone, "l10n: unknown time zone, formatting in UTC");
+/// The UTC offset of `ctx.time_zone` at `unix_secs` from the tz database, daylight saving time
+/// included (jiff: the OS zoneinfo, or its bundled copy where the OS has none, as on Windows).
+/// Unknown zones format in UTC (edge 10). Zones are cached per thread until the generation
+/// changes.
+fn utc_offset_seconds(ctx: &FormatCtx, unix_secs: i64) -> i32 {
+    thread_local! {
+        static ZONES: RefCell<(u64, HashMap<String, Option<jiff::tz::TimeZone>>)> =
+            RefCell::new((0, HashMap::new()));
+    }
+    let Ok(at) = jiff::Timestamp::from_second(unix_secs) else {
         return 0;
-    }
-    match VariantOffsetsCalculator::new().compute_offsets_from_time_zone_and_name_timestamp(
-        tz,
-        ZoneNameTimestamp::from_epoch_seconds(unix_secs),
-    ) {
-        Some(o) => {
-            if o.daylight.is_some() {
-                warn_once(
-                    zone,
-                    "l10n: daylight saving time is not applied (no tz rules)",
-                );
-            }
-            o.standard.to_seconds()
+    };
+    ZONES.with(|zones| {
+        let mut zones = zones.borrow_mut();
+        if zones.0 != ctx.generation {
+            *zones = (ctx.generation, HashMap::new());
         }
-        None => 0,
-    }
+        let tz = zones
+            .1
+            .entry(ctx.time_zone.clone())
+            .or_insert_with(|| jiff::tz::TimeZone::get(&ctx.time_zone).ok());
+        match tz {
+            Some(tz) => tz.to_offset(at).seconds(),
+            None => {
+                warn_once(&ctx.time_zone, "l10n: unknown time zone, formatting in UTC");
+                0
+            }
+        }
+    })
 }
 
 fn warn_once(key: &str, message: &'static str) {
@@ -696,7 +696,7 @@ fn list_fn<'a>(positional: &[FluentValue<'a>], named: &FluentArgs) -> FluentValu
             ("type", FluentValue::String(s)) if s == "and" => kind = ListKind::And,
             ("type", FluentValue::String(s)) if s == "or" => kind = ListKind::Or,
             ("type", FluentValue::String(s)) if s == "unit" => kind = ListKind::Unit,
-            _ => tracing::debug!(option = name, "l10n: LIST ignores an unsupported option"),
+            _ => tracing::warn!(option = name, "l10n: LIST ignores an unsupported option"),
         }
     }
     FluentValue::Custom(Box::new(ListArg { items, kind }))
@@ -891,13 +891,19 @@ mod tests {
     }
 
     #[test]
-    fn istanbul_is_utc_plus_three() {
-        assert_eq!(
-            utc_offset_seconds("Europe/Istanbul", 1_794_405_909),
-            3 * 3600
-        );
-        assert_eq!(utc_offset_seconds("UTC", 1_794_405_909), 0);
-        assert_eq!(utc_offset_seconds("No/Such_Zone", 1_794_405_909), 0);
+    fn offsets_follow_the_tz_database() {
+        let at = |zone: &str| FormatCtx {
+            format_locale: "en-US".into(),
+            time_zone: zone.into(),
+            generation: 1,
+        };
+        // 2026-11-11T14:05:09Z, 2026-07-01T16:00Z and 2026-01-15T16:00Z.
+        let (nov, jul, jan) = (1_794_405_909, 1_782_921_600, 1_768_492_800);
+        assert_eq!(utc_offset_seconds(&at("Europe/Istanbul"), nov), 3 * 3600);
+        assert_eq!(utc_offset_seconds(&at("America/New_York"), jul), -4 * 3600);
+        assert_eq!(utc_offset_seconds(&at("America/New_York"), jan), -5 * 3600);
+        assert_eq!(utc_offset_seconds(&at("UTC"), nov), 0);
+        assert_eq!(utc_offset_seconds(&at("No/Such_Zone"), nov), 0);
     }
 
     #[test]

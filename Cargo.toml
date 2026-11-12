@@ -39,17 +39,23 @@ intl-memoizer = "0.5.3"
 unic-langid = { version = "0.9.6", features = ["macros"] }
 icu_casemap = "2.4.0"
 icu_datetime = "2.4.0"
-icu_decimal = "2.4.0"
+# `alloc` gives `FormattedDecimal` its `Display` (Task 9 fix round 1, M4).
+icu_decimal = { version = "2.4.0", features = ["alloc"] }
 icu_list = "2.4.0"
 icu_locale = "2.4.0"
 icu_normalizer = "2.4.0"
 icu_plurals = "2.4.0"
 icu_properties = "2.4.0"
+# Data-presence checks for the regional format policy (Task 9 fix round 1, I2).
+icu_provider = "2.4.0"
 icu_segmenter = "2.4.0"
 icu_time = "2.4.0"
 fixed_decimal = "0.7.3"
 sys-locale = "0.3.2"
 iana-time-zone = "0.1.65"
+# Time-zone rules (DST) for `DATETIME` instants; ICU4X has none. `tzdb-bundle-platform` embeds
+# the tz database where the OS has none (Windows). Pinned exactly (Task 9 fix round 1, I1).
+jiff = { version = "=0.2.38", features = ["tzdb-bundle-platform"] }
 
 # General.
 arc-swap = "1.9.5"

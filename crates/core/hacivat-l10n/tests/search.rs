@@ -1,6 +1,10 @@
 //! The UI search key (I18N-09, ALG-I18N-06) and when Turkish-tolerant folding is on (D-074).
 
-use hacivat_l10n::{MatchKind, MatchMode, SearchOpts, build_key, find, turkish_tolerant_for};
+use hacivat_l10n::{
+    Catalogs, MatchKind, MatchMode, OsLocale, SearchOpts, build_key, effective, find, negotiate,
+    turkish_tolerant_for,
+};
+use hacivat_settings::{LanguagePref, Settings};
 
 fn hit(text: &str, query: &str, o: &SearchOpts) -> bool {
     find(&build_key(text, o), query, o).is_some()
@@ -205,6 +209,82 @@ fn turkish_tolerance_follows_language_and_region() {
     assert!(turkish_tolerant_for("tr-XT", "en-US"));
     assert!(turkish_tolerant_for("en", "tr_TR.UTF-8"));
     assert!(!turkish_tolerant_for("az", "en-US"));
-    assert!(!turkish_tolerant_for("en", "en-TR"));
     assert!(!turkish_tolerant_for("", ""));
+}
+
+#[test]
+fn english_ui_with_a_turkish_region_is_tolerant() {
+    // macOS reports "English, region Turkey" as `en-TR`; the format locale resolves to `tr-TR`.
+    let mut s = Settings::default();
+    s.ui.language = LanguagePref::Tag("en".into());
+    let os = OsLocale {
+        languages: vec!["en-TR".into()],
+        ..OsLocale::default()
+    };
+    let neg = negotiate(
+        &effective(&s, &os, false).ctx,
+        Catalogs::embedded().locales(),
+    );
+    assert_eq!(neg.format_locale, "tr-TR");
+    assert!(turkish_tolerant_for("en", &neg.format_locale));
+    let os = OsLocale {
+        languages: vec!["en-GB".into()],
+        ..OsLocale::default()
+    };
+    let neg = negotiate(
+        &effective(&s, &os, false).ctx,
+        Catalogs::embedded().locales(),
+    );
+    assert!(!turkish_tolerant_for("en", &neg.format_locale));
+}
+
+#[test]
+fn kinds_outrank_each_other_across_items() {
+    let fz = SearchOpts {
+        mode: MatchMode::Fuzzy,
+        ..TOL
+    };
+    let q = "abcdefghijklmnopqrst";
+    // A substring 300 bytes in, versus the best possible 20-character fuzzy hit (every query
+    // character at a word start).
+    let far = format!("{}{q}", "x".repeat(300));
+    let sub = find(&build_key(&far, &fz), q, &fz).expect("substring");
+    let scattered = q.chars().map(String::from).collect::<Vec<_>>().join("_");
+    let fuzzy = find(&build_key(&scattered, &fz), q, &fz).expect("fuzzy");
+    assert_eq!(
+        (sub.kind, fuzzy.kind),
+        (MatchKind::Substring, MatchKind::Fuzzy)
+    );
+    assert!(sub.score > fuzzy.score, "{} vs {}", sub.score, fuzzy.score);
+    // The worst substring still beats the best acronym, and bands never overlap.
+    let worst_sub = find(
+        &build_key(&format!("{}id", "x".repeat(900)), &TOL),
+        "id",
+        &TOL,
+    )
+    .expect("substring");
+    let wp = SearchOpts {
+        mode: MatchMode::WordPrefix,
+        ..TOL
+    };
+    let acronym = find(&build_key("user_id", &wp), "ui", &wp).expect("acronym");
+    assert_eq!(acronym.kind, MatchKind::Fuzzy);
+    assert!(worst_sub.score > acronym.score && acronym.score > fuzzy.score);
+    let worst_prefix = find(
+        &build_key(&format!("{} identity", "x".repeat(900)), &TOL),
+        "id",
+        &TOL,
+    )
+    .expect("prefix");
+    assert_eq!(worst_prefix.kind, MatchKind::Prefix);
+    let best_sub = find(&build_key("xid", &TOL), "id", &TOL).expect("substring");
+    assert!(worst_prefix.score > best_sub.score);
+    let worst_exact = find(
+        &build_key(&format!("{} id", "x".repeat(900)), &TOL),
+        "id",
+        &TOL,
+    )
+    .expect("exact");
+    let best_prefix = find(&build_key("identity", &TOL), "id", &TOL).expect("prefix");
+    assert!(worst_exact.score > best_prefix.score);
 }

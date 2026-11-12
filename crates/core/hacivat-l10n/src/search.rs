@@ -305,12 +305,18 @@ impl SearchKey {
     }
 }
 
+/// Score bands, so a kind always outranks the next one across items: `ExactWord` 2501–3500,
+/// `Prefix` 1501–2500, `Substring` 501–1500 (`SUBSTRING_FLOOR`), `Fuzzy` 1–500 (`FUZZY_MAX`).
+/// Within a band an earlier match scores higher (the position penalty stops at 499).
+const SUBSTRING_FLOOR: u32 = 501;
+const FUZZY_MAX: u32 = SUBSTRING_FLOOR - 1;
+
 fn score(kind: MatchKind, pos: usize) -> u32 {
     let base = match kind {
         MatchKind::ExactWord => 3000,
         MatchKind::Prefix => 2000,
         MatchKind::Substring => 1000,
-        MatchKind::Fuzzy => return 0,
+        MatchKind::Fuzzy => return 1,
     };
     let at_start = if pos == 0 { 500 } else { 0 };
     base + at_start - to_u32(pos.min(499))
@@ -383,7 +389,8 @@ fn word_prefix(key: &SearchKey, q: &str) -> Option<Match> {
     let first = picked.first()?.start;
     Some(Match {
         ranges: key.ranges(picked),
-        score: 900 - to_u32(first.min(99)),
+        // An acronym is the strongest fuzzy signal: the top of the fuzzy band.
+        score: FUZZY_MAX - to_u32(first.min(99)),
         kind: MatchKind::Fuzzy,
     })
 }
@@ -454,13 +461,24 @@ fn fuzzy(key: &SearchKey, q: &str) -> Option<Match> {
         .collect::<Vec<_>>();
     Some(Match {
         ranges: key.ranges(ranges),
-        score: u32::try_from(best.clamp(1, 999)).unwrap_or(1),
+        score: fuzzy_score(best, m),
         kind: MatchKind::Fuzzy,
     })
 }
 
-/// Whether Turkish-tolerant folding is on: the UI language or the regional format is Turkish
-/// (D-074; the search box toggle overrides it).
+/// A raw subsequence score scaled into `1..=FUZZY_MAX - 100`, below every acronym and substring
+/// score. The best raw score for `m` query characters is `64 m + 8` (each at a word start,
+/// consecutive, the first at the very start).
+fn fuzzy_score(raw: i64, m: usize) -> u32 {
+    let best = 64 * i64::try_from(m).unwrap_or(i64::MAX / 128) + 8;
+    let top = i64::from(FUZZY_MAX - 100);
+    let scaled = 1 + raw.clamp(0, best) * (top - 1) / best;
+    u32::try_from(scaled).unwrap_or(1)
+}
+
+/// Whether Turkish-tolerant folding is on: the UI language or the effective format locale (the
+/// negotiated one, after the regional policy maps `en-TR` to `tr-TR`) is Turkish (D-074; the
+/// search box toggle overrides it).
 pub fn turkish_tolerant_for(ui_lang: &str, format_locale: &str) -> bool {
     let is_tr = |tag: &str| {
         tag.split(['-', '_', '.', '@'])

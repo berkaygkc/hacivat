@@ -137,9 +137,83 @@ pub fn effective(s: &Settings, os: &OsLocale, allow_pseudo: bool) -> EffectiveLo
     }
 }
 
-/// Whether ICU4X's zone data knows `zone` (an IANA ID or alias).
+/// Whether the tz database knows `zone` (an IANA ID or alias); the formatters use the same data.
 fn is_known_zone(zone: &str) -> bool {
-    !icu_time::zone::IanaParser::new().parse(zone).is_unknown()
+    jiff::tz::TimeZone::get(zone).is_ok()
+}
+
+/// The regional format policy (controller ruling, Task 9 fix round 1): numbers and dates follow
+/// the REGION, as the OS does. macOS reports "English, region Turkey" as `en-TR`, a locale CLDR
+/// has no data for; formatting it as `en` would print `1,234.5` for a user whose system shows
+/// `1.234,5`. So a `language-REGION` pair is kept when
+/// - the region is the language's own likely region (`de-DE`, `ca-ES`), or
+/// - the region's likely language is the tag's language (`de-AT`, `en-GB`), or
+/// - CLDR has number or date data for exactly that pair (`fr-CA`, `fr-CH`, `en-HK`, `es-US`);
+///
+/// otherwise it becomes the region's likely language with that region (`en-TR` → `tr-TR`).
+/// Extensions (`-u-nu-…`) are kept. User-customised separators need a native per-OS shim, which
+/// is an open item.
+pub(crate) fn regional_format_locale(mut locale: icu_locale::Locale) -> icu_locale::Locale {
+    use icu_locale::LocaleExpander;
+    use icu_locale::subtags::Language;
+    let Some(region) = locale.id.region else {
+        return locale;
+    };
+    let language = locale.id.language;
+    if language == Language::UNKNOWN {
+        return locale;
+    }
+    let expander = LocaleExpander::new_extended();
+    let mut own = icu_locale::LanguageIdentifier::from(language);
+    expander.maximize(&mut own);
+    if own.region == Some(region) {
+        return locale;
+    }
+    let mut by_region = icu_locale::LanguageIdentifier::UNKNOWN;
+    by_region.region = Some(region);
+    expander.maximize(&mut by_region);
+    if by_region.language == language
+        || by_region.language == Language::UNKNOWN
+        || has_own_data(&locale)
+    {
+        return locale;
+    }
+    locale.id.language = by_region.language;
+    locale.id.script = None;
+    locale.id.variants.clear();
+    locale
+}
+
+/// Whether ICU4X's compiled CLDR data has decimal symbols or a Gregorian year-month-day pattern
+/// for exactly this locale: a direct hit, not a fallback to a parent. (ICU4X drops data equal to
+/// its parent's, so a pair without a hit formats exactly like its parent.)
+fn has_own_data(locale: &icu_locale::Locale) -> bool {
+    use icu_datetime::provider::semantic_skeletons::DatetimePatternsDateGregorianV1;
+    use icu_decimal::provider::DecimalSymbolsV1;
+    use icu_provider::prelude::*;
+    /// The attribute key of the `YMD` field set in `DatetimePatternsDateGregorianV1`.
+    const YMD: &DataMarkerAttributes = DataMarkerAttributes::from_str_or_panic("ym0d");
+    let mut bare = locale.clone();
+    bare.extensions = Default::default();
+    let data_locale = DataLocale::from(&bare);
+    let request = |attributes: &'static DataMarkerAttributes| {
+        let mut metadata = DataRequestMetadata::default();
+        metadata.silent = true;
+        DataRequest {
+            id: DataIdentifierBorrowed::for_marker_attributes_and_locale(attributes, &data_locale),
+            metadata,
+        }
+    };
+    let decimal = DataProvider::<DecimalSymbolsV1>::load(
+        &icu_decimal::provider::Baked,
+        request(Default::default()),
+    );
+    let dates = DataProvider::<DatetimePatternsDateGregorianV1>::load(
+        &icu_datetime::provider::Baked,
+        request(YMD),
+    );
+    decimal.is_ok_and(|r| r.metadata.locale.is_none())
+        || dates.is_ok_and(|r| r.metadata.locale.is_none())
 }
 
 #[cfg(test)]

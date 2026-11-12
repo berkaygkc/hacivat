@@ -613,3 +613,80 @@ fn display_casing_handles_more_than_ascii() {
     assert_eq!(case_for_display("straße", &langid!("de")), "STRASSE");
     assert_eq!(case_for_display("istanbul", &langid!("az")), "İSTANBUL");
 }
+
+// --- Fix round 1 ---
+
+#[test]
+fn daylight_saving_time_is_applied() {
+    // I1: New York observes DST (UTC−4 in July, UTC−5 in January); Istanbul had DST until 2016.
+    let p = "{ DATETIME($t, timeStyle: \"short\") }";
+    assert_eq!(
+        fmt_tz("en-US", "America/New_York", p, t("2026-07-01T16:00:00Z")),
+        "12:00\u{202f}PM"
+    );
+    assert_eq!(
+        fmt_tz("en-US", "America/New_York", p, t("2026-01-15T16:00:00Z")),
+        "11:00\u{202f}AM"
+    );
+    assert_eq!(
+        fmt_tz("tr-TR", "Europe/Istanbul", p, t("2015-07-01T12:00:00Z")),
+        "15:00"
+    );
+    assert_eq!(
+        fmt_tz("tr-TR", "Europe/Istanbul", p, t("2015-01-15T12:00:00Z")),
+        "14:00"
+    );
+}
+
+#[test]
+fn turkish_and_english_grouping_of_a_large_decimal() {
+    // M7: L3 pinned literally.
+    assert_eq!(fmt("tr-TR", "{ $n }", n(110190.85)), "110.190,85");
+    assert_eq!(fmt("en-US", "{ $n }", n(110190.85)), "110,190.85");
+}
+
+fn format_locale_for(os_list: &[&str], ui: &str) -> String {
+    let e = effective(&settings_lang(ui), &os(os_list, None), false);
+    negotiate(&e.ctx, &avail()).format_locale
+}
+
+#[test]
+fn english_ui_with_turkish_region_formats_as_turkish() {
+    // I2: macOS reports "English, region Turkey" as `en-TR`; CLDR has no `en-TR` data, and
+    // Turkey's language is Turkish, so the format locale is `tr-TR`. The UI stays English.
+    let e = effective(&settings_lang("en"), &os(&["en-TR"], None), false);
+    let neg = negotiate(&e.ctx, &avail());
+    assert_eq!(neg.chain, vec![langid!("en")]);
+    assert_eq!(neg.format_locale, "tr-TR");
+    assert_eq!(fmt(&neg.format_locale, "{ $n }", n(1234.5)), "1.234,5");
+    assert_eq!(
+        fmt_tz(
+            &neg.format_locale,
+            "Europe/Istanbul",
+            "{ DATETIME($t, dateStyle: \"long\") }",
+            t("2026-11-11T14:05:09Z")
+        ),
+        "11 Kasım 2026"
+    );
+    // The same through `ui.regional_format`, and for another language with a Turkish region.
+    let mut s = settings_lang("en");
+    s.ui.regional_format = LanguagePref::Tag("en-TR".into());
+    let e = effective(&s, &os(&["en-US"], None), false);
+    assert_eq!(negotiate(&e.ctx, &avail()).format_locale, "tr-TR");
+    assert_eq!(format_locale_for(&["fr-TR"], "en"), "tr-TR");
+}
+
+#[test]
+fn regional_pairs_with_their_own_data_are_kept() {
+    for tag in [
+        "en-GB", "de-AT", "en-US", "tr-TR", "fr-CA", "fr-CH", "fr-BE", "es-US", "en-HK", "ca-ES",
+        "en-DE",
+    ] {
+        assert_eq!(format_locale_for(&[tag], "en"), tag);
+    }
+    // Extensions survive the mapping.
+    assert_eq!(
+        format_locale_for(&["en-TR-u-nu-arab"], "en"),
+        "tr-TR-u-nu-arab"
+    );
+}
