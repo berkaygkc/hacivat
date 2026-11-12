@@ -1,6 +1,6 @@
 # ADR 0001 addendum: M0 GPUI validation spike results
 
-- **Status:** Proposed. Waiting for the product owner's go/no-go decision.
+- **Status:** Accepted. The PO decided GO on 2026-11-12.
 - **Date:** 2026-11-12
 - **Plan:** `docs/superpowers/plans/2026-11-12-m0-gpui-validation-spike.md`
 - **Spec:** `docs/superpowers/specs/2026-11-12-hacivat-v1-design.md` §6 M0
@@ -89,4 +89,4 @@ These are things M1 must build or carry in `hacivat-ui-core`:
 
 Every engine gate (B1, B3, IME, VF a–d) passes on the macOS reference, most with wide margins: grid paint uses about 60 % of its budget at p99, and typing p95 is at most 13.6 ms. No result triggers the Linebender fallback. The open items are tooling or other-platform confirmations, not engine risks. The decision should be revisited only if the Windows or Linux runs fail B1, B3 or IME.
 
-**Decision (PO):** _pending_
+**Decision (PO, 2026-11-12):** **GO.** Proceed to M1 on GPUI at `912159c`. Windows and Linux confirmations follow as open items. Controller rulings made during M0 are in `docs/benchmarks/m0-rulings.md`.
