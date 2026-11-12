@@ -23,7 +23,7 @@
 use std::collections::BTreeSet;
 
 use percent_encoding::{AsciiSet, CONTROLS};
-use regex::RegexBuilder;
+use regex::{Regex, RegexBuilder};
 
 use super::FieldId;
 
@@ -65,10 +65,32 @@ pub(super) enum Node {
 pub(super) struct Placeholder {
     pub(super) name: Option<FieldId>,
     pub(super) ty: PhType,
-    /// A custom regex for the raw text, as written (anchored when compiled).
-    pub(super) regex: Option<String>,
+    /// A custom regex for the raw text, compiled once with the template.
+    pub(super) regex: Option<PhRegex>,
     pub(super) default: Option<String>,
     pub(super) escape: Escape,
+}
+
+/// A placeholder regex: its source as written, and the anchored `^(?:src)$` compiled form.
+/// Equality and hashing use the source, so `Template` keeps its derives.
+#[derive(Debug, Clone)]
+pub(super) struct PhRegex {
+    src: String,
+    pub(super) re: Regex,
+}
+
+impl PartialEq for PhRegex {
+    fn eq(&self, other: &Self) -> bool {
+        self.src == other.src
+    }
+}
+
+impl Eq for PhRegex {}
+
+impl std::hash::Hash for PhRegex {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.src.hash(state);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -104,10 +126,11 @@ const BASE: &AsciiSet = &CONTROLS
     .add(b';');
 /// A host also stops at `,` (host lists).
 const HOST: &AsciiSet = &BASE.add(b',');
-/// A parameter key also stops at `&`, `=` and `,`.
-const IDENT: &AsciiSet = &BASE.add(b'&').add(b'=').add(b',');
-/// A parameter value also stops at `&`.
-const PARAM: &AsciiSet = &BASE.add(b'&');
+/// A parameter key also stops at `&`, `=` and `,`. `+` is encoded in keys and values because
+/// form-style decoders (`mysql_async` among them) read a bare `+` as a space.
+const IDENT: &AsciiSet = &BASE.add(b'&').add(b'=').add(b',').add(b'+');
+/// A parameter value also stops at `&`; `+` is encoded as for a key.
+const PARAM: &AsciiSet = &BASE.add(b'&').add(b'+');
 /// A path keeps `/`, `:` and `\` readable; it encodes what would end it in a URL.
 const PATH: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -223,14 +246,31 @@ impl Template {
 
 /// Why a template failed to compile (HV-DRV-02). Positions are byte offsets in the source:
 /// `Unbalanced` points at the bracket left open (or the stray closer), the others at the `{` of
-/// the placeholder. `BadRegex` also covers an unknown type name; `TooManyFields` also covers an
-/// escape mode other than `%` or `none`.
+/// the placeholder.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TemplateError {
-    Unbalanced { pos: usize },
-    BadRegex { pos: usize },
-    UnknownField { name: String },
-    TooManyFields { pos: usize },
+    Unbalanced {
+        pos: usize,
+    },
+    /// The regex does not compile, or is over the size limit.
+    BadRegex {
+        pos: usize,
+    },
+    UnknownField {
+        name: String,
+    },
+    /// More than name, type, default and escape mode.
+    TooManyFields {
+        pos: usize,
+    },
+    /// A type name outside `host port ident param path file ipv6 text`.
+    UnknownType {
+        pos: usize,
+    },
+    /// An escape mode other than `%` or `none`.
+    BadEscapeMode {
+        pos: usize,
+    },
 }
 
 /// Compiles template text `src` as template `id`. The empty template is legal ("URL only").
@@ -451,20 +491,24 @@ impl Parser<'_> {
         let ty = if ty_text.is_empty() {
             PhType::for_field(name)
         } else {
-            PhType::from_id(&ty_text).ok_or(TemplateError::BadRegex { pos: open })?
+            PhType::from_id(&ty_text).ok_or(TemplateError::UnknownType { pos: open })?
         };
-        if let Some(re) = &regex {
-            RegexBuilder::new(&format!("^(?:{re})$"))
-                .size_limit(REGEX_SIZE_LIMIT)
-                .build()
-                .map_err(|_| TemplateError::BadRegex { pos: open })?;
-        }
+        let regex = match regex {
+            Some(src) => {
+                let re = RegexBuilder::new(&format!("^(?:{src})$"))
+                    .size_limit(REGEX_SIZE_LIMIT)
+                    .build()
+                    .map_err(|_| TemplateError::BadRegex { pos: open })?;
+                Some(PhRegex { src, re })
+            }
+            None => None,
+        };
 
         let default = Some(unescape(segment(2))).filter(|d| !d.is_empty());
         let escape = match unescape(segment(3)).as_str() {
             "" | "%" => Escape::Percent,
             "none" => Escape::None,
-            _ => return Err(TemplateError::TooManyFields { pos: open }),
+            _ => return Err(TemplateError::BadEscapeMode { pos: open }),
         };
         Ok(Node::Ph(Placeholder {
             name,

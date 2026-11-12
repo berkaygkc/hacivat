@@ -10,13 +10,17 @@
 //!   host and port), one entry per extra parameter for the pass-through item, and one entry for
 //!   any other item with a user value, joined by its separator.
 //! - `%` escaping encodes `@ / ? # % : [ ] ;`, space, controls and every non-ASCII byte, plus
-//!   what ends the type (`,` for a host, `&` for a parameter value, `& = ,` for a key). A host
-//!   with a `:` is an IPv6 literal and is bracketed instead.
+//!   what ends the type (`,` for a host, `& +` for a parameter value, `& = , +` for a key). A
+//!   host with a `:` is an IPv6 literal and is bracketed instead.
 //! - The password never comes from the `FieldMap`: Display shows `****` when the profile has
 //!   one, Copy leaves it out (its group collapses), and only `render_driver` writes it.
+//! - An extra parameter that carries a password (`password`, `sslpassword`, `pass`, `pwd`,
+//!   `passwd`, any ASCII case) is masked as `****` in Display and left out of Copy; only
+//!   `render_driver` writes it.
 //!
-//! Every buffer that may hold the password is a `Zeroizing<String>` reserved up front, so it is
-//! wiped on drop and does not reallocate (and leave a copy behind) as it grows.
+//! The URL is rendered into one `Zeroizing<String>` reserved up front, so it is wiped on drop
+//! and does not reallocate (and leave a copy behind) as it grows. Rendering is linear in the
+//! output: alternatives and list entries are written in place and truncated to roll back.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -57,14 +61,14 @@ pub fn render(
     extra: &[(String, String)],
     target: RenderTarget,
 ) -> Result<String, RenderError> {
-    let secret = match target {
-        RenderTarget::Display { has_password: true } => Secret::Mask,
+    let (secret, params) = match target {
+        RenderTarget::Display { has_password: true } => (Secret::Mask, SecretParams::Mask),
         RenderTarget::Display {
             has_password: false,
-        }
-        | RenderTarget::Copy => Secret::Omit,
+        } => (Secret::Omit, SecretParams::Mask),
+        RenderTarget::Copy => (Secret::Omit, SecretParams::Drop),
     };
-    let out = render_buf(t, fields, extra, secret)?;
+    let out = render_buf(t, fields, extra, secret, params)?;
     Ok(out.as_str().to_string())
 }
 
@@ -75,7 +79,13 @@ pub fn render_driver(
     extra: &[(String, String)],
     password: &SecretString,
 ) -> Result<SecretString, RenderError> {
-    let out = render_buf(t, fields, extra, Secret::Value(password.expose_secret()))?;
+    let out = render_buf(
+        t,
+        fields,
+        extra,
+        Secret::Value(password.expose_secret()),
+        SecretParams::Keep,
+    )?;
     Ok(SecretString::from(out.as_str()))
 }
 
@@ -176,6 +186,27 @@ enum Secret<'a> {
     Value(&'a str),
 }
 
+/// What happens to an extra parameter that carries a password (`password=…`, see
+/// [`is_secret_param`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecretParams {
+    /// Display: the key stays, the value is `****`.
+    Mask,
+    /// Copy: the parameter is left out.
+    Drop,
+    /// The driver URL: written as given.
+    Keep,
+}
+
+/// Extra-parameter keys that carry a password, compared ASCII-case-insensitively. Task 7's
+/// parser moves these to the secret store; render does not rely on that.
+const SECRET_PARAMS: [&str; 5] = ["password", "sslpassword", "pass", "pwd", "passwd"];
+
+/// Whether the extra parameter `key` carries a password.
+pub(super) fn is_secret_param(key: &str) -> bool {
+    SECRET_PARAMS.iter().any(|s| s.eq_ignore_ascii_case(key))
+}
+
 /// A value to write: text to escape, or the mask, written as is.
 enum Val<'a> {
     Text(Cow<'a, str>),
@@ -233,8 +264,7 @@ struct Ctx<'a> {
     fields: &'a FieldMap,
     extra: &'a [(String, String)],
     secret: Secret<'a>,
-    /// Every buffer's reserved capacity.
-    cap: usize,
+    secret_params: SecretParams,
 }
 
 /// What the nodes being rendered are inside of.
@@ -244,15 +274,12 @@ struct Scope<'a> {
     optional: bool,
     /// A host-list entry: the host and port to use.
     host: Option<(&'a str, Option<&'a str>)>,
-    /// A pass-through entry: the key, then the value, for the anonymous placeholders.
-    pair: Option<(&'a str, &'a str)>,
+    /// A pass-through entry: the key, then the value, for the anonymous placeholders. A `None`
+    /// value is a masked password parameter.
+    pair: Option<(&'a str, Option<&'a str>)>,
 }
 
 impl<'a> Ctx<'a> {
-    fn buf(&self) -> Buf {
-        Zeroizing::new(String::with_capacity(self.cap))
-    }
-
     fn value(&self, f: FieldId, scope: Scope<'a>) -> Option<Val<'a>> {
         let non_empty = |s: &'a str| Some(s).filter(|s| !s.is_empty());
         match (f, scope.host) {
@@ -278,6 +305,7 @@ fn render_buf(
     fields: &FieldMap,
     extra: &[(String, String)],
     secret: Secret<'_>,
+    secret_params: SecretParams,
 ) -> Result<Buf, RenderError> {
     for (f, v) in &fields.values {
         if *f != FieldId::Password && !v.is_empty() && !t.field_set.contains(f) {
@@ -293,17 +321,24 @@ fn render_buf(
     };
     let value_bytes: usize = fields.values.values().map(String::len).sum::<usize>()
         + fields.hosts.iter().map(|(h, _)| h.len() + 6).sum::<usize>()
-        + extra.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
+        + extra
+            .iter()
+            .map(|(k, v)| k.len() + v.len() + 4)
+            .sum::<usize>()
         + secret_len;
     let entries = 1 + fields.hosts.len() + extra.len();
     let ctx = Ctx {
         fields,
         extra,
         secret,
-        // Encoding at most triples a byte; literals repeat once per list entry.
-        cap: (literal_bytes(&t.nodes) + 16) * entries + 3 * value_bytes + 64,
+        secret_params,
     };
-    let mut out = ctx.buf();
+    // One buffer for the whole URL, reserved up front: encoding at most triples a byte, and
+    // literals repeat once per list entry. Rendering writes into it and truncates to roll back
+    // an alternative or an empty list entry; the truncated bytes stay in the spare capacity,
+    // which `Zeroizing` wipes on drop.
+    let cap = (literal_bytes(&t.nodes) + 16) * entries + 3 * value_bytes + 64;
+    let mut out = Zeroizing::new(String::with_capacity(cap));
     let mut anon = 0;
     render_seq(&t.nodes, &mut out, &ctx, Scope::default(), &mut anon)?;
     Ok(out)
@@ -370,31 +405,18 @@ fn render_node<'a>(
                 ..scope
             };
             for alt in alts {
-                let mut tmp = ctx.buf();
+                let mark = out.len();
                 let mut a = *anon;
-                let wrote = render_seq(alt, &mut tmp, ctx, inner, &mut a)?;
+                let wrote = render_seq(alt, out, ctx, inner, &mut a)?;
                 if wrote.selects(alt) {
-                    out.push_str(&tmp);
                     *anon = a;
                     return Ok(wrote);
                 }
+                out.truncate(mark);
             }
             Ok(Wrote::NONE)
         }
-        Node::List { sep, items } => {
-            let entries = render_list(items, ctx, scope)?;
-            for (i, e) in entries.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(sep);
-                }
-                out.push_str(e);
-            }
-            Ok(if entries.is_empty() {
-                Wrote::NONE
-            } else {
-                Wrote::STRONG
-            })
-        }
+        Node::List { sep, items } => render_list(sep, items, out, ctx, scope),
     }
 }
 
@@ -408,9 +430,13 @@ fn render_ph<'a>(
     let Some(f) = p.name else {
         // A pass-through key, then value.
         if let Some((k, v)) = scope.pair {
-            let text = if *anon == 0 { k } else { v };
+            let first = *anon == 0;
             *anon += 1;
-            write_value(out, p, text);
+            match (first, v) {
+                (true, _) => write_value(out, p, k),
+                (false, Some(v)) => write_value(out, p, v),
+                (false, None) => out.push_str("****"),
+            }
             return Ok(Wrote::STRONG);
         }
         if let Some(d) = &p.default {
@@ -438,49 +464,60 @@ fn render_ph<'a>(
     }
 }
 
-fn render_list<'a>(
-    items: &'a [Vec<Node>],
+/// Writes one list entry straight into `out`: the separator (after the first entry), then the
+/// item. An item that writes no user value is rolled back.
+fn list_entry<'a>(
+    item: &'a [Node],
+    sep: &str,
+    count: &mut usize,
+    out: &mut Buf,
     ctx: &Ctx<'a>,
     scope: Scope<'a>,
-) -> Result<Vec<Buf>, RenderError> {
+) -> Result<(), RenderError> {
+    let mark = out.len();
+    if *count > 0 {
+        out.push_str(sep);
+    }
+    if render_seq(item, out, ctx, scope, &mut 0)?.any() {
+        *count += 1;
+    } else {
+        out.truncate(mark);
+    }
+    Ok(())
+}
+
+fn render_list<'a>(
+    sep: &str,
+    items: &'a [Vec<Node>],
+    out: &mut Buf,
+    ctx: &Ctx<'a>,
+    scope: Scope<'a>,
+) -> Result<Wrote, RenderError> {
     let inner = Scope {
         optional: true,
         ..scope
     };
-    let mut entries = Vec::new();
+    let mut count = 0;
     let mut extras_done = false;
     for item in items {
         if names(item, FieldId::Host) {
-            let ports: Vec<Option<String>> = ctx
-                .fields
-                .hosts
-                .iter()
-                .map(|(_, p)| p.map(|p| p.to_string()))
-                .collect();
-            let hosts: Vec<(&str, Option<&str>)> = if ctx.fields.hosts.is_empty() {
-                match ctx.fields.values.get(&FieldId::Host) {
-                    Some(h) => vec![(
-                        h.as_str(),
-                        ctx.fields.values.get(&FieldId::Port).map(String::as_str),
-                    )],
-                    None => Vec::new(),
+            if ctx.fields.hosts.is_empty() {
+                if let Some(h) = ctx.fields.values.get(&FieldId::Host) {
+                    let port = ctx.fields.values.get(&FieldId::Port).map(String::as_str);
+                    let s = Scope {
+                        host: Some((h.as_str(), port)),
+                        ..inner
+                    };
+                    list_entry(item, sep, &mut count, out, ctx, s)?;
                 }
             } else {
-                ctx.fields
-                    .hosts
-                    .iter()
-                    .zip(&ports)
-                    .map(|((h, _), p)| (h.as_str(), p.as_deref()))
-                    .collect()
-            };
-            for host in hosts {
-                let mut tmp = ctx.buf();
-                let s = Scope {
-                    host: Some(host),
-                    ..inner
-                };
-                if render_seq(item, &mut tmp, ctx, s, &mut 0)?.any() {
-                    entries.push(tmp);
+                for (h, port) in &ctx.fields.hosts {
+                    let port = port.map(|p| p.to_string());
+                    let s = Scope {
+                        host: Some((h.as_str(), port.as_deref())),
+                        ..inner
+                    };
+                    list_entry(item, sep, &mut count, out, ctx, s)?;
                 }
             }
         } else if has_anonymous(item) {
@@ -489,23 +526,30 @@ fn render_list<'a>(
             }
             extras_done = true;
             for (k, v) in ctx.extra {
-                let mut tmp = ctx.buf();
+                let value = if is_secret_param(k) {
+                    match ctx.secret_params {
+                        SecretParams::Drop => continue,
+                        SecretParams::Mask => None,
+                        SecretParams::Keep => Some(v.as_str()),
+                    }
+                } else {
+                    Some(v.as_str())
+                };
                 let s = Scope {
-                    pair: Some((k.as_str(), v.as_str())),
+                    pair: Some((k.as_str(), value)),
                     ..inner
                 };
-                if render_seq(item, &mut tmp, ctx, s, &mut 0)?.any() {
-                    entries.push(tmp);
-                }
+                list_entry(item, sep, &mut count, out, ctx, s)?;
             }
         } else {
-            let mut tmp = ctx.buf();
-            if render_seq(item, &mut tmp, ctx, inner, &mut 0)?.any() {
-                entries.push(tmp);
-            }
+            list_entry(item, sep, &mut count, out, ctx, inner)?;
         }
     }
-    Ok(entries)
+    Ok(if count == 0 {
+        Wrote::NONE
+    } else {
+        Wrote::STRONG
+    })
 }
 
 fn write_value(out: &mut Buf, p: &Placeholder, v: &str) {

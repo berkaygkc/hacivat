@@ -1,35 +1,43 @@
 //! Matching typed text against a template (HV-DRV-03/04): memoised backtracking over the
-//! template nodes.
+//! template nodes, in two passes.
 //!
-//! - Every node, at every position, yields the positions where it can end, in preference
-//!   order (placeholders are greedy, a `path` is lazy, optional groups try their alternatives
-//!   before nothing, lists prefer more items). Only the first way to reach each end is kept:
-//!   what follows depends only on the position, so this loses no match.
-//! - Results are memoised per (node sequence, position), and the work is capped at 100,000
-//!   steps; past the cap the input does not match. Input over 64 KiB is refused unread.
-//! - Literals match exactly, except the leading scheme, which matches ASCII-case-insensitively
-//!   (`JDBC:` is `jdbc:`; never Unicode case folding).
-//! - A `%`-escaped placeholder is percent-decoded; an invalid escape (`%4G`, a trailing `%`) or
-//!   bytes that are not UTF-8 mean no match.
-//! - The whole input must be consumed.
+//! 1. **Ends.** Every node, at every position, yields the positions where it can end, in
+//!    preference order (placeholders are greedy, a `path` is lazy, optional groups try their
+//!    alternatives before nothing, lists prefer more items), each with a back-pointer saying how
+//!    it got there (which alternative, which list item from which position, where the first node
+//!    of a sequence ended). Only the first way to reach each end is kept: what follows depends
+//!    only on the position, so this loses no match. Results are memoised per (node, position)
+//!    and per (node sequence, position); no bindings are built in this pass, so memory is
+//!    linear in the work done.
+//! 2. **Bindings.** For the winning whole-input end, the back-pointers are followed once and the
+//!    captures of that one path are collected.
+//!
+//! Limits: the work is capped at 100,000 steps (past the cap the input does not match), a list
+//! holds at most 1,024 items, and input over 64 KiB is refused unread.
+//!
+//! Literals match exactly, except the leading scheme, which matches ASCII-case-insensitively
+//! (`JDBC:` is `jdbc:`; never Unicode case folding). A `%`-escaped placeholder is
+//! percent-decoded; an invalid escape (`%4G`, a trailing `%`) or bytes that are not UTF-8 mean
+//! no match. The whole input must be consumed.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 
 use percent_encoding::percent_decode_str;
-use regex::{Regex, RegexBuilder};
 use secrecy::SecretString;
 use secrecy::zeroize::Zeroizing;
 
 use super::render::{has_anonymous, names};
-use super::template::{Escape, Node, PhType, Placeholder, REGEX_SIZE_LIMIT};
+use super::template::{Escape, Node, PhType, Placeholder};
 use super::{FieldId, FieldMap, Template};
 
 /// The longest input the matcher reads.
 const MAX_INPUT: usize = 64 * 1024;
 /// The most steps one match may take.
 const BUDGET: usize = 100_000;
+/// The most items one list may match.
+pub(super) const MAX_LIST_ITEMS: usize = 1024;
 
 /// The fields and extra parameters of `input`, if it matches `t`.
 ///
@@ -135,8 +143,8 @@ impl Cap {
     }
 }
 
-/// What a partial match bound.
-#[derive(Clone, Debug, Default)]
+/// What the winning path bound.
+#[derive(Debug, Default)]
 struct Bind {
     named: Vec<(FieldId, Cap)>,
     hosts: Vec<(Cap, Option<Cap>)>,
@@ -146,17 +154,42 @@ struct Bind {
 }
 
 impl Bind {
-    fn concat(&self, other: &Bind) -> Bind {
-        let mut b = self.clone();
-        b.named.extend(other.named.iter().cloned());
-        b.hosts.extend(other.hosts.iter().cloned());
-        b.extras.extend(other.extras.iter().cloned());
-        b.anon.extend(other.anon.iter().cloned());
-        b
+    fn append(&mut self, other: Bind) {
+        self.named.extend(other.named);
+        self.hosts.extend(other.hosts);
+        self.extras.extend(other.extras);
+        self.anon.extend(other.anon);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.named.len() + self.hosts.len() + self.extras.len() + self.anon.len()
     }
 }
 
-type Ends = Rc<Vec<(usize, Bind)>>;
+/// How a node reached an end.
+#[derive(Clone, Copy, Debug)]
+enum Via {
+    /// A literal, a placeholder, a not-ahead.
+    Plain,
+    /// An optional group's alternative.
+    Alt(usize),
+    /// An optional group or a maybe-empty node, matching nothing.
+    Empty,
+    /// A maybe-empty node's inner node.
+    Inner,
+    /// A list item: the end before it, the item alternative, and where the item started.
+    Step {
+        prev: usize,
+        item: usize,
+        start: usize,
+    },
+}
+
+/// A node's ends, in preference order.
+type NodeEnds = Rc<Vec<(usize, Via)>>;
+/// A sequence's ends, each with where its first node ended.
+type SeqEnds = Rc<Vec<(usize, usize)>>;
 
 fn run(t: &Template, input: &str) -> Option<Bind> {
     if input.len() > MAX_INPUT {
@@ -164,22 +197,31 @@ fn run(t: &Template, input: &str) -> Option<Bind> {
     }
     let mut m = Matcher::new(input);
     let ends = m.seq(&t.nodes, 0);
-    if m.over {
+    if m.over || !ends.iter().any(|(end, _)| *end == input.len()) {
         return None;
     }
-    ends.iter()
-        .find(|(end, _)| *end == input.len())
-        .map(|(_, b)| b.clone())
+    let mut bind = Bind::default();
+    m.build_seq(&t.nodes, 0, input.len(), &mut bind)?;
+    Some(bind)
 }
 
 struct Matcher<'t, 'i> {
     input: &'i str,
-    memo: HashMap<(usize, usize, usize), Ends>,
+    seq_memo: HashMap<(usize, usize, usize), SeqEnds>,
+    node_memo: HashMap<(usize, usize), NodeEnds>,
     steps: usize,
     over: bool,
-    regexes: HashMap<&'t str, Option<Regex>>,
     /// `bad_pct[i]`: how many `%` before byte `i` do not start a `%XX` escape.
     bad_pct: Vec<u32>,
+    _nodes: std::marker::PhantomData<&'t Node>,
+}
+
+fn seq_key(nodes: &[Node], pos: usize) -> (usize, usize, usize) {
+    (nodes.as_ptr() as usize, nodes.len(), pos)
+}
+
+fn node_key(node: &Node, pos: usize) -> (usize, usize) {
+    (std::ptr::from_ref(node) as usize, pos)
 }
 
 impl<'t, 'i> Matcher<'t, 'i> {
@@ -198,11 +240,12 @@ impl<'t, 'i> Matcher<'t, 'i> {
         }
         Matcher {
             input,
-            memo: HashMap::new(),
+            seq_memo: HashMap::new(),
+            node_memo: HashMap::new(),
             steps: 0,
             over: false,
-            regexes: HashMap::new(),
             bad_pct,
+            _nodes: std::marker::PhantomData,
         }
     }
 
@@ -225,9 +268,11 @@ impl<'t, 'i> Matcher<'t, 'i> {
         !b[tail..r.end].contains(&b'%')
     }
 
-    fn seq(&mut self, nodes: &'t [Node], pos: usize) -> Ends {
-        let key = (nodes.as_ptr() as usize, nodes.len(), pos);
-        if let Some(hit) = self.memo.get(&key) {
+    // ---- Pass 1: ends ----
+
+    fn seq(&mut self, nodes: &'t [Node], pos: usize) -> SeqEnds {
+        let key = seq_key(nodes, pos);
+        if let Some(hit) = self.seq_memo.get(&key) {
             return hit.clone();
         }
         let result = if self.over {
@@ -235,40 +280,51 @@ impl<'t, 'i> Matcher<'t, 'i> {
         } else if let Some((first, rest)) = nodes.split_first() {
             let mut seen = HashSet::new();
             let mut out = Vec::new();
-            'outer: for (e1, b1) in self.node(first, pos) {
+            let firsts = self.node(first, pos);
+            'outer: for &(e1, _) in firsts.iter() {
                 let tail = self.seq(rest, e1);
-                for (e2, b2) in tail.iter() {
+                for &(e2, _) in tail.iter() {
                     if !self.charge(1) {
                         break 'outer;
                     }
-                    if seen.insert(*e2) {
-                        out.push((*e2, b1.concat(b2)));
+                    if seen.insert(e2) {
+                        out.push((e2, e1));
                     }
                 }
             }
             out
         } else {
-            vec![(pos, Bind::default())]
+            vec![(pos, pos)]
         };
         let result = Rc::new(result);
-        self.memo.insert(key, result.clone());
+        self.seq_memo.insert(key, result.clone());
         result
     }
 
-    fn node(&mut self, node: &'t Node, pos: usize) -> Vec<(usize, Bind)> {
+    fn node(&mut self, node: &'t Node, pos: usize) -> NodeEnds {
+        let key = node_key(node, pos);
+        if let Some(hit) = self.node_memo.get(&key) {
+            return hit.clone();
+        }
+        let result = Rc::new(self.node_ends(node, pos));
+        self.node_memo.insert(key, result.clone());
+        result
+    }
+
+    fn node_ends(&mut self, node: &'t Node, pos: usize) -> Vec<(usize, Via)> {
         let input = self.input;
         let rest = &input.as_bytes()[pos..];
         match node {
             Node::Lit(s) => {
                 if rest.starts_with(s.as_bytes()) {
-                    vec![(pos + s.len(), Bind::default())]
+                    vec![(pos + s.len(), Via::Plain)]
                 } else {
                     Vec::new()
                 }
             }
             Node::Scheme(s) => {
                 if rest.len() >= s.len() && rest[..s.len()].eq_ignore_ascii_case(s.as_bytes()) {
-                    vec![(pos + s.len(), Bind::default())]
+                    vec![(pos + s.len(), Via::Plain)]
                 } else {
                     Vec::new()
                 }
@@ -277,28 +333,32 @@ impl<'t, 'i> Matcher<'t, 'i> {
                 if rest.starts_with(s.as_bytes()) {
                     Vec::new()
                 } else {
-                    vec![(pos, Bind::default())]
+                    vec![(pos, Via::Plain)]
                 }
             }
             Node::MaybeEmpty(inner) => {
-                let mut out = self.node(inner, pos);
+                let mut out: Vec<(usize, Via)> = self
+                    .node(inner, pos)
+                    .iter()
+                    .map(|&(e, _)| (e, Via::Inner))
+                    .collect();
                 if !out.iter().any(|(e, _)| *e == pos) {
-                    out.push((pos, Bind::default()));
+                    out.push((pos, Via::Empty));
                 }
                 out
             }
             Node::Opt(alts) => {
                 let mut seen = HashSet::new();
                 let mut out = Vec::new();
-                for alt in alts {
-                    for (e, b) in self.seq(alt, pos).iter() {
-                        if seen.insert(*e) {
-                            out.push((*e, b.clone()));
+                for (i, alt) in alts.iter().enumerate() {
+                    for &(e, _) in self.seq(alt, pos).iter() {
+                        if seen.insert(e) {
+                            out.push((e, Via::Alt(i)));
                         }
                     }
                 }
                 if seen.insert(pos) {
-                    out.push((pos, Bind::default()));
+                    out.push((pos, Via::Empty));
                 }
                 out
             }
@@ -307,12 +367,15 @@ impl<'t, 'i> Matcher<'t, 'i> {
         }
     }
 
-    /// `item (sep item)*`, or nothing; more items first.
-    fn list(&mut self, sep: &str, items: &'t [Vec<Node>], pos: usize) -> Vec<(usize, Bind)> {
+    /// `item (sep item)*` with at most `MAX_LIST_ITEMS` items, or nothing; more items first.
+    fn list(&mut self, sep: &str, items: &'t [Vec<Node>], pos: usize) -> Vec<(usize, Via)> {
         let mut seen = HashSet::from([pos]);
-        let mut found: Vec<(usize, Bind)> = Vec::new();
-        let mut frontier = VecDeque::from([(pos, Bind::default())]);
-        while let Some((at, bind)) = frontier.pop_front() {
+        let mut found: Vec<(usize, Via)> = Vec::new();
+        let mut frontier = VecDeque::from([(pos, 0usize)]);
+        while let Some((at, count)) = frontier.pop_front() {
+            if count >= MAX_LIST_ITEMS {
+                continue;
+            }
             let start = if at == pos {
                 pos
             } else if self.input[at..].starts_with(sep) {
@@ -320,61 +383,43 @@ impl<'t, 'i> Matcher<'t, 'i> {
             } else {
                 continue;
             };
-            for item in items {
-                let host_item = names(item, FieldId::Host);
-                let pass_item = has_anonymous(item);
+            for (idx, item) in items.iter().enumerate() {
                 let ends = self.seq(item, start);
-                for (e, ib) in ends.iter() {
+                for &(e, _) in ends.iter() {
                     if !self.charge(1) {
                         return Vec::new();
                     }
                     // An item must consume text, or the list could repeat forever.
-                    if *e == start || !seen.insert(*e) {
+                    if e == start || !seen.insert(e) {
                         continue;
                     }
-                    let mut b = bind.concat(&item_bind(ib, host_item, pass_item));
-                    b.anon.clear();
-                    found.push((*e, b.clone()));
-                    frontier.push_back((*e, b));
+                    found.push((
+                        e,
+                        Via::Step {
+                            prev: at,
+                            item: idx,
+                            start,
+                        },
+                    ));
+                    frontier.push_back((e, count + 1));
                 }
             }
         }
         found.reverse();
-        found.push((pos, Bind::default()));
+        found.push((pos, Via::Empty));
         found
     }
 
-    fn placeholder(&mut self, p: &'t Placeholder, pos: usize) -> Vec<(usize, Bind)> {
+    fn placeholder(&mut self, p: &'t Placeholder, pos: usize) -> Vec<(usize, Via)> {
         let input = self.input;
         let mut out = Vec::new();
-        let bind = |span: Range<usize>, value: Range<usize>| {
-            let cap = Cap {
-                span,
-                value,
-                escape: p.escape,
-            };
-            let mut b = Bind::default();
-            match p.name {
-                Some(f) => b.named.push((f, cap)),
-                None => b.anon.push(cap),
-            }
-            b
-        };
         // A bracketed IPv6 literal for a host.
-        if p.ty == PhType::Host && p.regex.is_none() && self.input[pos..].starts_with('[') {
-            let inner = pos + 1;
-            let len = self.input[inner..]
-                .find(|c: char| !PhType::Ipv6.allows(c))
-                .unwrap_or(self.input.len() - inner);
-            let close = inner + len;
-            let value = inner..close;
-            if len > 0 && self.input[close..].starts_with(']') && self.escapes_ok(&value) {
-                out.push((close + 1, bind(pos..close + 1, value)));
-            }
+        if let Some(close) = self.bracketed_host(p, pos) {
+            out.push((close + 1, Via::Plain));
         }
         let mut ends: Vec<usize> = match &p.regex {
             Some(_) => {
-                let mut ends: Vec<usize> = self.input[pos..]
+                let mut ends: Vec<usize> = input[pos..]
                     .char_indices()
                     .map(|(i, c)| pos + i + c.len_utf8())
                     .collect();
@@ -383,7 +428,7 @@ impl<'t, 'i> Matcher<'t, 'i> {
             }
             None => {
                 let mut ends = vec![pos];
-                for (n, (i, c)) in self.input[pos..].char_indices().enumerate() {
+                for (n, (i, c)) in input[pos..].char_indices().enumerate() {
                     if n >= p.ty.max_len() || !p.ty.allows(c) {
                         break;
                     }
@@ -411,34 +456,102 @@ impl<'t, 'i> Matcher<'t, 'i> {
                 continue;
             }
             if let Some(re) = &p.regex
-                && !self
-                    .regex(re)
-                    .is_some_and(|re| re.is_match(&input[r.clone()]))
+                && !re.re.is_match(&input[r])
             {
                 continue;
             }
-            out.push((end, bind(r.clone(), r)));
+            out.push((end, Via::Plain));
         }
         out
     }
 
-    fn regex(&mut self, src: &'t str) -> Option<&Regex> {
-        self.regexes
-            .entry(src)
-            .or_insert_with(|| {
-                RegexBuilder::new(&format!("^(?:{src})$"))
-                    .size_limit(REGEX_SIZE_LIMIT)
-                    .build()
-                    .ok()
-            })
-            .as_ref()
+    /// For a host placeholder at `[`, the position of the `]` closing an IPv6 literal.
+    fn bracketed_host(&self, p: &Placeholder, pos: usize) -> Option<usize> {
+        if p.ty != PhType::Host || p.regex.is_some() || !self.input[pos..].starts_with('[') {
+            return None;
+        }
+        let inner = pos + 1;
+        let len = self.input[inner..]
+            .find(|c: char| !PhType::Ipv6.allows(c))
+            .unwrap_or(self.input.len() - inner);
+        let close = inner + len;
+        (len > 0 && self.input[close..].starts_with(']') && self.escapes_ok(&(inner..close)))
+            .then_some(close)
+    }
+
+    // ---- Pass 2: the bindings of one path ----
+
+    /// Collects the captures of `nodes` from `pos` to `end` into `bind`.
+    fn build_seq(&self, nodes: &'t [Node], pos: usize, end: usize, bind: &mut Bind) -> Option<()> {
+        let mut at = pos;
+        for i in 0..nodes.len() {
+            let ends = self.seq_memo.get(&seq_key(&nodes[i..], at))?;
+            let &(_, first_end) = ends.iter().find(|(e, _)| *e == end)?;
+            self.build_node(&nodes[i], at, first_end, bind)?;
+            at = first_end;
+        }
+        (at == end).then_some(())
+    }
+
+    fn via(&self, node: &Node, pos: usize, end: usize) -> Option<Via> {
+        let ends = self.node_memo.get(&node_key(node, pos))?;
+        ends.iter().find(|(e, _)| *e == end).map(|&(_, v)| v)
+    }
+
+    fn build_node(&self, node: &'t Node, pos: usize, end: usize, bind: &mut Bind) -> Option<()> {
+        match node {
+            Node::Lit(_) | Node::Scheme(_) | Node::NotAhead(_) => {}
+            Node::Ph(p) => {
+                let value = if self.bracketed_host(p, pos) == Some(end.wrapping_sub(1)) {
+                    pos + 1..end - 1
+                } else {
+                    pos..end
+                };
+                let cap = Cap {
+                    span: pos..end,
+                    value,
+                    escape: p.escape,
+                };
+                match p.name {
+                    Some(f) => bind.named.push((f, cap)),
+                    None => bind.anon.push(cap),
+                }
+            }
+            Node::MaybeEmpty(inner) => {
+                if let Via::Inner = self.via(node, pos, end)? {
+                    self.build_node(inner, pos, end, bind)?;
+                }
+            }
+            Node::Opt(alts) => {
+                if let Via::Alt(i) = self.via(node, pos, end)? {
+                    self.build_seq(&alts[i], pos, end, bind)?;
+                }
+            }
+            Node::List { items, .. } => {
+                let mut steps = Vec::new();
+                let mut cur = end;
+                while cur != pos {
+                    let Via::Step { prev, item, start } = self.via(node, pos, cur)? else {
+                        return None;
+                    };
+                    steps.push((item, start, cur));
+                    cur = prev;
+                }
+                for (item, start, item_end) in steps.into_iter().rev() {
+                    let seq = &items[item];
+                    let mut ib = Bind::default();
+                    self.build_seq(seq, start, item_end, &mut ib)?;
+                    bind.append(item_bind(ib, names(seq, FieldId::Host), has_anonymous(seq)));
+                }
+            }
+        }
+        Some(())
     }
 }
 
 /// An item's bindings as list entries: a host item's host and port become a host entry, a
 /// pass-through item's key and value an extra.
-fn item_bind(ib: &Bind, host_item: bool, pass_item: bool) -> Bind {
-    let mut b = ib.clone();
+fn item_bind(mut b: Bind, host_item: bool, pass_item: bool) -> Bind {
     if host_item {
         let take = |b: &mut Bind, f: FieldId| {
             b.named
@@ -457,6 +570,7 @@ fn item_bind(ib: &Bind, host_item: bool, pass_item: bool) -> Bind {
             b.extras.push((key, anon.next()));
         }
     }
+    b.anon.clear();
     b
 }
 
@@ -476,5 +590,42 @@ mod tests {
         assert!(!map.values.contains_key(&FieldId::Password));
         let (_, _, none) = match_template_with_password(&t, "pg://u@h").unwrap();
         assert!(none.is_none());
+    }
+
+    fn query(n: usize) -> String {
+        let params: Vec<String> = (0..n).map(|i| format!("k{i}=v{i}")).collect();
+        format!("q://h?{}", params.join("&"))
+    }
+
+    #[test]
+    fn memo_and_bindings_stay_linear_in_the_work() {
+        let t = compile(r"q://{host}[\?<&,{:ident}={:param}>]", "x").unwrap();
+        let input = query(MAX_LIST_ITEMS);
+        let mut m = Matcher::new(&input);
+        let ends = m.seq(&t.nodes, 0);
+        assert!(!m.over, "{} steps", m.steps);
+        assert!(ends.iter().any(|(e, _)| *e == input.len()));
+        let stored: usize = m.seq_memo.values().map(|v| v.len()).sum::<usize>()
+            + m.node_memo.values().map(|v| v.len()).sum::<usize>();
+        // Every stored end was charged as a step, so the memo cannot outgrow the budget.
+        assert!(
+            stored <= m.steps + m.seq_memo.len() + m.node_memo.len(),
+            "{stored}"
+        );
+        let mut bind = Bind::default();
+        m.build_seq(&t.nodes, 0, input.len(), &mut bind).unwrap();
+        // One host and one extra per item: nothing accumulated per reached end.
+        assert_eq!(bind.extras.len(), MAX_LIST_ITEMS);
+        assert_eq!(bind.len(), MAX_LIST_ITEMS + 1);
+    }
+
+    #[test]
+    fn a_list_stops_at_its_item_cap() {
+        let t = compile(r"q://{host}[\?<&,{:ident}={:param}>]", "x").unwrap();
+        assert_eq!(
+            match_template(&t, &query(MAX_LIST_ITEMS)).unwrap().1.len(),
+            MAX_LIST_ITEMS
+        );
+        assert!(match_template(&t, &query(MAX_LIST_ITEMS + 1)).is_none());
     }
 }

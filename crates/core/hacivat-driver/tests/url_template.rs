@@ -89,7 +89,11 @@ fn compile_errors_and_shapes() {
     );
     assert_eq!(
         compile("ab{host:nosuchtype}", "x").unwrap_err(),
-        TemplateError::BadRegex { pos: 2 }
+        TemplateError::UnknownType { pos: 2 }
+    );
+    assert_eq!(
+        compile("a{host:host:h:raw}", "x").unwrap_err(),
+        TemplateError::BadEscapeMode { pos: 1 }
     );
     assert_eq!(
         compile("{host:host:h:%:extra}", "x").unwrap_err(),
@@ -447,10 +451,113 @@ fn matcher_budget_stops_pathological_templates() {
     let input = "a".repeat(60 * 1024);
     let start = Instant::now();
     assert!(match_template(&t, &input).is_none());
-    assert!(
-        start.elapsed() < Duration::from_secs(2),
-        "{:?}",
-        start.elapsed()
+    // Fast enough for a paste: 100 ms in release, a generous bound for unoptimised builds.
+    assert!(start.elapsed() < bound(100), "{:?}", start.elapsed());
+}
+
+/// `release_ms` in a release build, ten times that in a debug build.
+fn bound(release_ms: u64) -> Duration {
+    let factor = if cfg!(debug_assertions) { 10 } else { 1 };
+    Duration::from_millis(release_ms * factor)
+}
+
+fn many_params(n: usize) -> String {
+    // Short params (`k3=3`), as in the measured 16 KB / 4,000-param case.
+    let params: Vec<String> = (0..n).map(|i| format!("k{}={}", i % 10, i % 10)).collect();
+    format!("q://h?{}", params.join("&"))
+}
+
+#[test]
+fn many_params_are_matched_in_bounded_time_and_memory() {
+    let t = compile(r"q://{host}[\?<&,{:ident}={:param}>]", "x").unwrap();
+    // 8,000 params in under 64 KiB, so the matcher reads them: over the
+    // 1,024-item list cap, so no match, and quickly.
+    let input = many_params(8_000);
+    assert!(input.len() < 64 * 1024);
+    let start = Instant::now();
+    assert!(match_template(&t, &input).is_none());
+    assert!(start.elapsed() < bound(200), "{:?}", start.elapsed());
+    // 1,000 params: a full, exact match.
+    let input = many_params(1_000);
+    let start = Instant::now();
+    let (m, extra) = match_template(&t, &input).unwrap();
+    assert!(start.elapsed() < bound(200), "{:?}", start.elapsed());
+    assert_eq!(m.values[&FieldId::Host], "h");
+    assert_eq!(extra.len(), 1_000);
+    assert_eq!(extra[999], ("k9".to_string(), "9".to_string()));
+}
+
+#[test]
+fn many_extras_render_in_linear_time() {
+    let t = compile(r"q://{host}[\?<&,{:ident}={:param}>]", "x").unwrap();
+    let extra: Vec<(String, String)> = (0..4_000)
+        .map(|i| (format!("k{i}"), format!("v{i}")))
+        .collect();
+    let start = Instant::now();
+    let url = render(&t, &f(&[("host", "h")]), &extra, RenderTarget::Copy).unwrap();
+    assert!(start.elapsed() < bound(50), "{:?}", start.elapsed());
+    assert!(url.starts_with("q://h?k0=v0&k1=v1&"));
+    assert!(url.ends_with("&k3999=v3999"));
+}
+
+#[test]
+fn password_like_extras_never_reach_display_or_copy() {
+    let t = pg_uri();
+    let fm = f(&[("host", "db"), ("database", "app")]);
+    let extra = extras(&[
+        ("sslmode", "require"),
+        ("PASSWORD", "s3cret"),
+        ("sslpassword", "s3cret"),
+        ("Pwd", "s3cret"),
+        ("pass", "s3cret"),
+        ("passwd", "s3cret"),
+    ]);
+    assert_eq!(
+        render(&t, &fm, &extra, RenderTarget::Copy).unwrap(),
+        "postgresql://db/app?sslmode=require"
+    );
+    assert_eq!(
+        render(
+            &t,
+            &fm,
+            &extra,
+            RenderTarget::Display {
+                has_password: false
+            }
+        )
+        .unwrap(),
+        "postgresql://db/app?sslmode=require&PASSWORD=****&sslpassword=****&Pwd=****&pass=****&passwd=****"
+    );
+    // Only the driver URL carries them.
+    let driver = render_driver(&t, &fm, &extra, &SecretString::from("pw")).unwrap();
+    assert!(driver.expose_secret().contains("PASSWORD=s3cret"));
+    // A password extra alone does not leave a stray `?` behind in Copy.
+    assert_eq!(
+        render(
+            &t,
+            &fm,
+            &extras(&[("password", "s3cret")]),
+            RenderTarget::Copy
+        )
+        .unwrap(),
+        "postgresql://db/app"
+    );
+}
+
+#[test]
+fn plus_is_encoded_in_keys_and_values() {
+    let t = pg_uri();
+    let url = render(
+        &t,
+        &f(&[("host", "db"), ("database", "app")]),
+        &extras(&[("a+b", "c+d")]),
+        RenderTarget::Copy,
+    )
+    .unwrap();
+    assert_eq!(url, "postgresql://db/app?a%2Bb=c%2Bd");
+    assert_eq!(
+        match_template(&t, &url).unwrap().1,
+        extras(&[("a+b", "c+d")])
     );
 }
 
