@@ -29,6 +29,7 @@
 //! error. The dialog traps Tab (like `Dialog`); Escape closes it (the workspace pops the layer,
 //! and the re-entry field's `Cancelled` does the same, P16).
 
+use std::collections::HashMap;
 use std::panic::Location;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -111,7 +112,9 @@ pub struct ErrorView {
     pending: bool,
     notice: Option<Notice>,
     root: FocusHandle,
-    fix_focus: Vec<FocusHandle>,
+    /// The fix buttons' focus handles, keyed by button ID (the list changes as fixes come and
+    /// go, so a position would hand a handle to another button).
+    fix_focus: HashMap<SharedString, FocusHandle>,
     connect_focus: FocusHandle,
     tech_focus: FocusHandle,
     copy_focus: FocusHandle,
@@ -149,7 +152,7 @@ impl ErrorView {
             pending: false,
             notice: None,
             root: cx.focus_handle(),
-            fix_focus: Vec::new(),
+            fix_focus: HashMap::new(),
             connect_focus: stop(cx),
             tech_focus: stop(cx),
             copy_focus: stop(cx),
@@ -172,6 +175,61 @@ impl ErrorView {
     /// Whether the re-entered password field is open.
     pub fn reentering(&self) -> bool {
         self.reenter.is_some()
+    }
+
+    /// The ID of the focused control of the dialog (`fix-…`, `fix-connect`, `tech-details`,
+    /// `copy-details`, `error-close`), if one is focused.
+    pub fn focused_control(&self, window: &Window, cx: &App) -> Option<SharedString> {
+        if let Some((id, _)) = self.fix_focus.iter().find(|(_, h)| h.is_focused(window)) {
+            return Some(id.clone());
+        }
+        let reenter = self
+            .reenter
+            .as_ref()
+            .map(|i| i.read(cx).focus_handle(cx))
+            .filter(|h| h.is_focused(window));
+        let named = [
+            (reenter.as_ref(), "reenter-field"),
+            (Some(&self.connect_focus), "fix-connect"),
+            (Some(&self.tech_focus), "tech-details"),
+            (Some(&self.copy_focus), "copy-details"),
+            (Some(&self.close_focus), "error-close"),
+        ];
+        named
+            .into_iter()
+            .find(|(h, _)| h.is_some_and(|h| h.is_focused(window)))
+            .map(|(_, id)| SharedString::from(id))
+    }
+
+    /// The focus handle of the fix button `id`, made on first use.
+    fn fix_handle(&mut self, id: &SharedString, cx: &mut App) -> FocusHandle {
+        self.fix_focus
+            .entry(id.clone())
+            .or_insert_with(|| stop(cx))
+            .clone()
+    }
+
+    /// Where the dialog's focus starts: the primary fix, else Edit connection, else Close.
+    /// A fix that weakens safety (Encrypt without verifying, Connect anyway) never has it, so
+    /// one reflexive Enter cannot run it.
+    fn initial_focus(&mut self, cx: &mut App) -> FocusHandle {
+        let buttons = self.fix_buttons(cx);
+        let usable = |b: &&FixButton| !b.disabled && !b.action.weakens_safety();
+        let chosen = buttons
+            .iter()
+            .filter(usable)
+            .find(|b| b.kind == ButtonKind::Primary)
+            .or_else(|| {
+                buttons
+                    .iter()
+                    .filter(usable)
+                    .find(|b| b.action == FixAction::EditConnection)
+            })
+            .map(|b| b.id.clone());
+        match chosen {
+            Some(id) => self.fix_handle(&id, cx),
+            None => self.close_focus.clone(),
+        }
     }
 
     fn in_dialog(&self) -> bool {
@@ -204,6 +262,11 @@ impl ErrorView {
             cx.emit(ErrorViewEvent::Fix(action));
             return;
         };
+        if action.starts_new_gesture() {
+            // A new gesture gets a fresh budget of rejections; only the re-entry continues it.
+            self.rejections = 0;
+            self.reenter = None;
+        }
         match action {
             FixAction::EditConnection => {
                 window.defer(cx, move |window, cx| {
@@ -255,6 +318,8 @@ impl ErrorView {
                     cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
                         match event {
                             InputEvent::Submitted => this.submit_reenter(window, cx),
+                            // Connect is enabled only while the field holds something.
+                            InputEvent::Changed => cx.notify(),
                             // A focused field swallows Escape (P16): it closes the dialog.
                             InputEvent::Cancelled => {
                                 window.defer(cx, close_layer);
@@ -281,6 +346,10 @@ impl ErrorView {
         let Some(input) = self.reenter.clone() else {
             return;
         };
+        // An empty field sends nothing: it would spend one of the gesture's 3 attempts.
+        if input.read(cx).value().is_empty() {
+            return;
+        }
         let password = input.update(cx, |i, _| {
             let typed = SecretString::from(i.value().to_string());
             i.set_value("");
@@ -349,6 +418,21 @@ impl ErrorView {
             }
             None => ConnectionsModel::connect(cx, id, None),
         }
+        // The manager may not have started (already connected, shutting down): then there is
+        // nothing to watch.
+        match manager.state(id) {
+            LiveState::Connecting(_) => {}
+            LiveState::Connected(_) => {
+                self.pending = false;
+                window.defer(cx, close_layer);
+                return;
+            }
+            _ => {
+                self.pending = false;
+                cx.notify();
+                return;
+            }
+        }
         self.pending = true;
         let window_handle = window.window_handle();
         self.watch = Some(cx.spawn(async move |this, cx| {
@@ -366,15 +450,17 @@ impl ErrorView {
                         let _ = this.update(cx, |this, cx| this.show_error(error, cx));
                         break;
                     }
-                    LiveState::Disconnected | LiveState::Lost { .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.pending = false;
-                            cx.notify();
-                        });
-                        break;
-                    }
+                    LiveState::Disconnected | LiveState::Lost { .. } => break,
                 }
             }
+            // However the watch ended (a state, or the manager's channel closed), nothing of
+            // this connect is pending any more.
+            let _ = this.update(cx, |this, cx| {
+                if this.pending {
+                    this.pending = false;
+                    cx.notify();
+                }
+            });
         }));
         cx.notify();
     }
@@ -405,13 +491,12 @@ impl ErrorView {
         let mut order: Vec<FocusHandle> = self
             .fix_buttons(cx)
             .iter()
-            .zip(&self.fix_focus)
-            .filter(|(b, _)| !b.disabled)
-            .map(|(_, h)| h.clone())
+            .filter(|b| !b.disabled)
+            .filter_map(|b| self.fix_focus.get(&b.id).cloned())
             .collect();
         if let Some(input) = &self.reenter {
             order.push(input.read(cx).focus_handle(cx));
-            if !self.pending {
+            if !self.pending && !input.read(cx).value().is_empty() {
                 order.push(self.connect_focus.clone());
             }
         }
@@ -506,9 +591,6 @@ impl ErrorView {
 
         // The fixes.
         let buttons = self.fix_buttons(cx);
-        while self.fix_focus.len() < buttons.len() {
-            self.fix_focus.push(stop(cx));
-        }
         let offers_require = buttons
             .iter()
             .any(|b| b.action == FixAction::EncryptWithoutVerifying);
@@ -522,7 +604,8 @@ impl ErrorView {
             .flex_wrap()
             .items_center()
             .gap(px(t.spacing.sm));
-        for (b, handle) in buttons.into_iter().zip(self.fix_focus.clone()) {
+        for b in buttons {
+            let handle = self.fix_handle(&b.id, cx);
             if b.kind == ButtonKind::Ghost {
                 // "Connect anyway" sits apart, at the end of the row (the mock's `grow`).
                 row = row.child(div().flex_1());
@@ -550,6 +633,7 @@ impl ErrorView {
 
         // The re-entered password (P8).
         if let Some(input) = self.reenter.clone() {
+            let reenter_empty = input.read(cx).value().is_empty();
             let n = u64::from(self.rejections) + 1;
             let attempt = tr(
                 cx,
@@ -580,7 +664,7 @@ impl ErrorView {
                                     tr(cx, ids::hv::CONN_FIX_CONNECT, NoArgs),
                                 )
                                 .kind(ButtonKind::Primary)
-                                .disabled(self.pending)
+                                .disabled(self.pending || reenter_empty)
                                 .focus_handle(self.connect_focus.clone())
                                 .on_click(cx.listener(
                                     |this, _, window, cx| {
@@ -918,7 +1002,27 @@ pub(crate) fn paragraph(
     id: Option<&'static str>,
     cx: &mut App,
 ) -> AnyElement {
-    let at = Location::caller();
+    record_text(&text, source, style, id, Location::caller(), cx);
+    div()
+        .w_full()
+        .font(font_for(&style))
+        .text_size(px(style.size_px))
+        .line_height(px(style.line_height))
+        .text_color(color)
+        .child(text)
+        .into_any_element()
+}
+
+/// Records `text` in the [`TextRegistry`] as drawn at `at` (`#id` appended), for text drawn
+/// without a `Label` (wrapping paragraphs, a line split into wrapping words).
+pub(crate) fn record_text(
+    text: &SharedString,
+    source: TextSource,
+    style: TypeStyle,
+    id: Option<&'static str>,
+    at: &'static Location<'static>,
+    cx: &mut App,
+) {
     TextRegistry::record(cx, || {
         let file = at.file().replace('\\', "/");
         let path = match id {
@@ -935,14 +1039,6 @@ pub(crate) fn paragraph(
             path: path.into(),
         }
     });
-    div()
-        .w_full()
-        .font(font_for(&style))
-        .text_size(px(style.size_px))
-        .line_height(px(style.line_height))
-        .text_color(color)
-        .child(text)
-        .into_any_element()
 }
 
 /// Pops the error dialog when it is the top layer (a fix, Close, Escape in the field, or a
@@ -979,21 +1075,9 @@ pub fn open_error_dialog_view(
 ) -> Option<Entity<ErrorView>> {
     let ws = window.root::<Workspace>().flatten()?;
     let view = cx.new(|cx| ErrorView::with_mode(error, Mode::Dialog { profile: id }, cx));
-    // The first fix (or Close) has the initial focus, as a dialog's primary does.
-    let first = {
-        let v = view.read(cx);
-        let buttons = v.fix_buttons(cx);
-        (!buttons.is_empty() && !buttons[0].disabled).then_some(buttons.len())
-    };
-    let handle = view.update(cx, |v, cx| match first {
-        Some(n) => {
-            while v.fix_focus.len() < n {
-                v.fix_focus.push(stop(cx));
-            }
-            v.fix_focus[0].clone()
-        }
-        None => v.close_focus.clone(),
-    });
+    // The primary fix (else Edit connection, else Close) has the initial focus; never a fix
+    // that weakens safety.
+    let handle = view.update(cx, |v, cx| v.initial_focus(cx));
     ws.update(cx, |ws, cx| {
         ws.push_layer(
             Layer {

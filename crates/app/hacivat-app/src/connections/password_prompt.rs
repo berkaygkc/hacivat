@@ -56,8 +56,13 @@ impl Focusable for PasswordPrompt {
 }
 
 impl PasswordPrompt {
-    fn new(request: PasswordRequest, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let PasswordRequest { question, reply } = request;
+    /// A prompt for `question`; its answer goes to `reply` (the forwarding task in [`open`]).
+    fn new(
+        question: Question,
+        reply: oneshot::Sender<Answer>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let Question::Password {
             name,
             user,
@@ -266,11 +271,17 @@ pub(crate) fn open(request: PasswordRequest, cx: &mut App) {
     let Some(window) = window else {
         return;
     };
-    let _ = window.update(cx, move |_, window, cx| {
-        let Some(ws) = window.root::<Workspace>().flatten() else {
-            return;
-        };
-        let prompt = cx.new(|cx| PasswordPrompt::new(request, window, cx));
+    let PasswordRequest {
+        question,
+        mut reply,
+    } = request;
+    // The prompt answers on its own channel; a task forwards that answer to the asker, or,
+    // when the asker goes away first (the connect or test was cancelled, the profile
+    // forgotten), closes the orphaned prompt.
+    let (answer_tx, answer_rx) = oneshot::channel::<Answer>();
+    let opened = window.update(cx, move |_, window, cx| {
+        let ws = window.root::<Workspace>().flatten()?;
+        let prompt = cx.new(|cx| PasswordPrompt::new(question, answer_tx, window, cx));
         let field = {
             let p = prompt.read(cx);
             p.input.read(cx).focus_handle(cx)
@@ -289,5 +300,33 @@ pub(crate) fn open(request: PasswordRequest, cx: &mut App) {
             );
         });
         window.focus(&field, cx);
+        Some(())
     });
+    if !matches!(opened, Ok(Some(()))) {
+        // Dropping `reply` answers `Cancelled`.
+        return;
+    }
+    cx.spawn(async move |cx| {
+        let answered = {
+            let closed = reply.closed();
+            futures::pin_mut!(closed);
+            match futures::future::select(closed, answer_rx).await {
+                futures::future::Either::Left(_) => None,
+                futures::future::Either::Right((answer, _)) => Some(answer),
+            }
+        };
+        match answered {
+            Some(Ok(answer)) => {
+                let _ = reply.send(answer);
+            }
+            // The prompt went away without an answer: dropping `reply` answers `Cancelled`.
+            Some(Err(_)) => {}
+            None => {
+                cx.update(|cx| {
+                    let _ = window.update(cx, |_, window, cx| close_layer(window, cx));
+                });
+            }
+        }
+    })
+    .detach();
 }

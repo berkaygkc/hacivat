@@ -16,6 +16,8 @@
 //!
 //! Enter confirms; Escape (or Cancel) answers `None`. Tab is trapped in the prompt.
 
+use std::panic::Location;
+
 use hacivat_l10n::{NoArgs, Text, ids};
 use hacivat_proto::EnvTag;
 use hacivat_session::profile::HintSource;
@@ -26,6 +28,7 @@ use hacivat_ui::dialog::{DialogSize, dialog_frame};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::popover::A11yNode;
 use hacivat_ui::text::{Label, TextSource};
+use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext as _, Context, Div, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, Role,
@@ -34,7 +37,7 @@ use hacivat_ui_core::gpui_surface::{
 use hacivat_ui_core::theme::Theme;
 use tokio::sync::oneshot;
 
-use crate::connections::error_view::paragraph;
+use crate::connections::error_view::{paragraph, record_text};
 use crate::l10n_global::{text_fn, tr};
 use crate::shell::Workspace;
 use crate::shell::layers::{DIALOG_CONTEXT, Layer};
@@ -227,35 +230,49 @@ impl ProdPrompt {
         };
         // The word is the message's one placeable: split on its isolation marks so it can be
         // drawn in red small caps (the word is pre-cased in the FTL, never cased here).
+        // The sentence wraps word by word (a long locale never clips), and is recorded once as
+        // the whole message; the word itself is drawn in red small caps.
         let c1_el = match split_isolated(&c1) {
-            Some((before, word, after)) => div()
-                .flex()
-                .flex_row()
-                .items_baseline()
-                .child(Label::new(
-                    SharedString::from(before),
+            Some((before, word, after)) => {
+                record_text(
+                    &c1,
                     TextSource::Fluent,
                     t.type_ramp.body_sm,
-                    c.text.to_hsla(),
-                ))
-                .child(
+                    Some("prod-c1"),
+                    Location::caller(),
+                    cx,
+                );
+                let style = t.type_ramp.body_sm;
+                let plain = |token: &str| {
+                    div()
+                        .flex_none()
+                        .font(font_for(&style))
+                        .text_size(px(style.size_px))
+                        .line_height(px(style.line_height))
+                        .text_color(c.text.to_hsla())
+                        .child(SharedString::from(token.to_string()))
+                        .into_any_element()
+                };
+                let mut tokens: Vec<AnyElement> = before.split_inclusive(' ').map(plain).collect();
+                tokens.push(
                     Label::new(
                         SharedString::from(word),
                         TextSource::Fluent,
                         t.type_ramp.label_sc,
                         c.red.to_hsla(),
                     )
-                    .id("prod-word"),
-                )
-                .child(div().flex_1().min_w_0().child(paragraph(
-                    after.into(),
-                    TextSource::Fluent,
-                    t.type_ramp.body_sm,
-                    c.text.to_hsla(),
-                    Some("prod-c1-after"),
-                    cx,
-                )))
-                .into_any_element(),
+                    .id("prod-word")
+                    .into_any_element(),
+                );
+                tokens.extend(after.split_inclusive(' ').map(plain));
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_baseline()
+                    .children(tokens)
+                    .into_any_element()
+            }
             None => text(c1, "prod-c1", cx),
         };
         let c2 = tr(cx, ids::hv::CONN_PROD_C2, NoArgs);

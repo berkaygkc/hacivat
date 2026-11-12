@@ -44,6 +44,21 @@ impl FixAction {
                 | FixAction::EncryptWithoutVerifying
         )
     }
+
+    /// Whether the fix gives up a safety check (an unverified certificate, an unsupported
+    /// server). Such a fix never has the initial focus: one reflexive Enter must not run it.
+    pub fn weakens_safety(&self) -> bool {
+        matches!(
+            self,
+            FixAction::ConnectAnyway | FixAction::EncryptWithoutVerifying
+        )
+    }
+
+    /// Whether the fix starts a new connect gesture (controller ruling, fix round 1): every
+    /// fix that connects except the password re-entry, which continues the gesture's count.
+    pub fn starts_new_gesture(&self) -> bool {
+        matches!(self, FixAction::TryAgain) || self.edits_profile()
+    }
 }
 
 /// One fix button: its element ID (`fix-…`), action, label and kind.

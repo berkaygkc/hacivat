@@ -37,7 +37,7 @@ use crate::connections::error_view::{ErrorView, ErrorViewEvent, paragraph};
 use crate::connections::fixes::FixAction;
 use crate::connections::model::ConnectionsModel;
 use crate::connections::report::{
-    Fmt, diag_rows, seconds, test_report_text, trail_a11y, trail_items, whole_ms,
+    Fmt, diag_rows, error_title, seconds, test_report_text, trail_a11y, trail_items, whole_ms,
 };
 use crate::l10n_global::tr;
 
@@ -452,9 +452,21 @@ impl Render for TestStrip {
             ThemeMode::Dark => c.panel,
             ThemeMode::Light => c.ground,
         };
-        let name = match &self.state {
+        // The status region is named by what it says, so assistive technology announces the
+        // result: "Testing", "Connected in 54 ms", or the error's heading.
+        let name: SharedString = match &self.state {
             TestStripState::Running(_) => tr(cx, ids::hv::CONN_TEST_RUNNING, NoArgs),
-            _ => SharedString::default(),
+            TestStripState::Done(report) => match report.error.as_ref().filter(|_| !report.ok) {
+                Some(error) => error_title(&Fmt::ui(cx), error).into(),
+                None => tr(
+                    cx,
+                    ids::hv::CONN_TEST_OK,
+                    ids::hv::HvConnTestOk {
+                        ms: whole_ms(report.total),
+                    },
+                ),
+            },
+            TestStripState::Idle => SharedString::default(),
         };
         let strip = div()
             .debug_selector(|| "test-strip".to_string())

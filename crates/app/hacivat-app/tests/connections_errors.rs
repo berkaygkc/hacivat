@@ -30,7 +30,7 @@ use hacivat_driver::{DriverRegistry, RawError, RawErrorKind, ServerInfo, ServerM
 use hacivat_l10n::OsLocale;
 use hacivat_net::{TlsMode, TlsSummary, TlsVerified};
 use hacivat_proto::{DbmsKind, EnvTag, ErrClass, ProfileId};
-use hacivat_secrets::{AuthProviderId, ExposeSecret};
+use hacivat_secrets::{AuthProviderId, ExposeSecret, SecretString};
 use hacivat_session::pipeline::{
     Answer, ConnectError, ErrArgs, Interaction, Phase, Question, StepOutcome, StepTrace, TrailStep,
 };
@@ -162,8 +162,19 @@ fn wait<T: 'static>(vcx: &mut VisualTestContext, task: Task<T>) -> T {
 /// A saved profile "orders-prod" for `deploy` at the loopback listener. A password profile
 /// for the authentication tests; otherwise one without a password (no prompt).
 fn saved_profile(vcx: &mut VisualTestContext, auth: AuthProviderId) -> ProfileId {
+    saved_profile_with(vcx, auth, None)
+}
+
+/// Like [`saved_profile`], storing `password` for the profile (retention Forever, the memory
+/// backend).
+fn saved_profile_with(
+    vcx: &mut VisualTestContext,
+    auth: AuthProviderId,
+    password: Option<&str>,
+) -> ProfileId {
     let port = listening_port(vcx);
     let mut draft = ProfileDraft::new();
+    draft.password = password.map(SecretString::from);
     draft.profile = Profile {
         name: "orders-prod".into(),
         endpoint: ProfileEndpoint::Server {
@@ -942,6 +953,8 @@ fn unknown_database_offers_top_three(cx: &mut TestAppContext) {
     click(vcx, "fix-use-0");
     settle(vcx, ms(50));
     assert_eq!(profile(vcx).database.as_deref(), Some("orders"));
+    let sent = fake(vcx).last_request().expect("a connect");
+    assert_eq!(sent.database.as_deref(), Some("orders"));
     assert!(matches!(live_of(vcx), LiveState::Connected(_)));
     assert!(
         layer_ids(vcx).is_empty(),
@@ -993,6 +1006,11 @@ fn tls_untrusted_encrypt_without_verifying(cx: &mut TestAppContext) {
     click(vcx, "fix-require");
     settle(vcx, ms(50));
     assert_eq!(profile(vcx).tls.mode, TlsMode::Require);
+    let sent = fake(vcx).last_request().expect("a connect");
+    assert_eq!(
+        sent.tls.expect("TLS parameters").settings.mode,
+        TlsMode::Require
+    );
 }
 
 #[gpui::test]
@@ -1290,4 +1308,242 @@ fn the_shots_fixtures_open_their_surfaces(cx: &mut TestAppContext) {
             "{layer}: `{text}` is drawn"
         );
     }
+}
+
+// ---- fix round 1 ---------------------------------------------------------------------------------
+
+/// The ID of the dialog's focused control.
+fn focused_control(vcx: &mut VisualTestContext) -> Option<String> {
+    vcx.run_until_parked();
+    let v = view(vcx);
+    in_window(vcx, |window, cx| v.read(cx).focused_control(window, cx)).map(|s| s.to_string())
+}
+
+#[gpui::test]
+fn the_initial_focus_is_safe_for_every_class(cx: &mut TestAppContext) {
+    let mut hostname = tls_untrusted("db-qa.acme.io");
+    hostname.class = ErrClass::TlsHostname;
+    let cases: Vec<(ConnectError, &str)> = vec![
+        (auth_invalid_attempts("deploy", 1), "fix-reenter"),
+        (
+            unknown_db("orders_v2", ["orders", "orders_archive", "postgres"]),
+            "fix-use-0",
+        ),
+        // Never "Encrypt without verifying" (R3) or "Connect anyway" (PO Q3).
+        (tls_untrusted("db-qa.acme.io"), "fix-edit"),
+        (hostname, "fix-edit"),
+        (unsupported("9.6.24"), "fix-edit"),
+        (
+            error_of(ErrClass::NetworkDns, Some(TrailStep::Resolve)),
+            "fix-retry",
+        ),
+        (error_of(ErrClass::ConfigInvalid, None), "fix-edit"),
+    ];
+    for (error, expected) in cases {
+        let class = error.class;
+        // Each case is a new shell with its own saved profile.
+        cx.update(|cx| cx.default_global::<Kept>().profile = None);
+        let vcx = error_dialog(cx, error, ok_fake());
+        assert_eq!(focused_control(vcx).as_deref(), Some(expected), "{class:?}");
+        if class == ErrClass::TlsUntrusted || class == ErrClass::ServerUnsupportedVersion {
+            // A reflexive Enter never weakens the connection.
+            vcx.simulate_keystrokes("enter");
+            settle(vcx, ms(20));
+            assert_eq!(profile(vcx).tls.mode, TlsMode::Auto, "{class:?}");
+            assert!(!profile(vcx).allow_unsupported_server, "{class:?}");
+        }
+    }
+}
+
+#[gpui::test]
+fn a_read_only_store_moves_the_initial_focus_off_disabled_fixes(cx: &mut TestAppContext) {
+    let first = shell_with_fake(cx, "en", ok_fake());
+    let id = saved_profile(first, AuthProviderId::None);
+    let text = std::fs::read_to_string(paths(first).connections_toml()).expect("the file");
+    let vcx = shell_with_connections_file(cx, "en", &text.replace("version = 1", "version = 2"));
+    let view = in_window(vcx, |window, cx| {
+        open_error_dialog_view(
+            id,
+            Arc::new(unknown_db("orders_v2", ["orders", "b", "c"])),
+            window,
+            cx,
+        )
+    })
+    .expect("the dialog");
+    vcx.run_until_parked();
+    let focused = in_window(vcx, |window, cx| view.read(cx).focused_control(window, cx));
+    assert_eq!(focused.as_deref(), Some("fix-edit"));
+}
+
+/// The re-entry's Connect button as announced.
+fn connect_button(vcx: &mut VisualTestContext) -> A11yDecl {
+    decls(vcx)
+        .into_iter()
+        .find(|d| d.role == Some(Role::Button) && d.name.as_ref() == "Connect")
+        .expect("the Connect button")
+}
+
+#[gpui::test]
+fn an_empty_reentry_sends_nothing(cx: &mut TestAppContext) {
+    let vcx = error_dialog(cx, auth_invalid_attempts("deploy", 1), fake_always_28p01());
+    click(vcx, "fix-reenter");
+    assert!(
+        connect_button(vcx).disabled,
+        "Connect is off while the field is empty"
+    );
+    vcx.simulate_keystrokes("enter"); // Enter in the empty field
+    click(vcx, "fix-connect");
+    settle(vcx, ms(30));
+    assert_eq!(fake(vcx).connect_calls(), 0);
+    assert_eq!(attempt_label(vcx), "Attempt 2 of 3");
+    type_password(vcx, "x");
+    assert!(!connect_button(vcx).disabled);
+}
+
+#[gpui::test]
+fn try_again_starts_a_new_gesture(cx: &mut TestAppContext) {
+    // A timeout after 2 rejections; Try again uses the stored password, which the server
+    // rejects once: the count restarts (controller ruling), so re-entry offers attempt 2.
+    let vcx = shell_with_fake(cx, "en", fake_always_28p01());
+    saved_profile_with(vcx, AuthProviderId::Password, Some("hv_test_pw"));
+    let mut timeout = error_of(ErrClass::NetworkTimeout, Some(TrailStep::Connect));
+    timeout.attempts = 2;
+    open_dialog_over(vcx, timeout);
+    assert_eq!(view(vcx).read_with(vcx, |v, _| v.rejections()), 2);
+    click(vcx, "fix-retry");
+    for _ in 0..50 {
+        settle(vcx, ms(10));
+        if view(vcx).read_with(vcx, |v, _| v.error().class) == ErrClass::AuthInvalid {
+            break;
+        }
+    }
+    assert_eq!(
+        view(vcx).read_with(vcx, |v, _| (v.error().class, v.rejections())),
+        (ErrClass::AuthInvalid, 1)
+    );
+    click(vcx, "fix-reenter");
+    assert_eq!(attempt_label(vcx), "Attempt 2 of 3");
+}
+
+#[gpui::test]
+fn a_fix_on_a_connected_profile_never_sticks_pending(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", ok_fake());
+    let id = saved_profile(vcx, AuthProviderId::None);
+    vcx.cx.update(|cx| ConnectionsModel::connect(cx, id, None));
+    for _ in 0..50 {
+        settle(vcx, ms(10));
+        if matches!(live_of(vcx), LiveState::Connected(_)) {
+            break;
+        }
+    }
+    assert!(matches!(live_of(vcx), LiveState::Connected(_)));
+    open_dialog_over(
+        vcx,
+        error_of(ErrClass::NetworkDns, Some(TrailStep::Resolve)),
+    );
+    // The manager starts no second connect: there is nothing to wait for.
+    click(vcx, "fix-retry");
+    settle(vcx, ms(20));
+    assert!(layer_ids(vcx).is_empty(), "the profile is connected");
+    assert_eq!(fake(vcx).connect_calls(), 1);
+}
+
+#[gpui::test]
+fn a_reentered_password_never_reaches_the_screen_or_the_clipboard(cx: &mut TestAppContext) {
+    let vcx = error_dialog(cx, auth_invalid_attempts("deploy", 1), fake_always_28p01());
+    click(vcx, "fix-reenter");
+    type_password(vcx, "hv_test_pw");
+    click(vcx, "fix-connect");
+    settle(vcx, ms(50));
+    assert_eq!(attempt_label(vcx), "Attempt 3 of 3");
+    expand(vcx, "tech-details");
+    click(vcx, "copy-details");
+    let copied = clipboard(vcx);
+    assert!(!copied.is_empty());
+    assert!(!copied.contains("hv_test_pw"), "the copy holds no password");
+    assert!(
+        registry_frame(vcx)
+            .iter()
+            .all(|r| !r.text.contains("hv_test_pw")),
+        "no drawn text holds the password"
+    );
+    let v = view(vcx);
+    let shown = vcx.cx.read(|cx| format!("{:?}", v.read(cx).error()));
+    assert!(!shown.contains("hv_test_pw"), "the error holds no password");
+}
+
+#[gpui::test]
+fn an_orphaned_password_prompt_closes(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    let Interaction::Interactive(port) = vcx.cx.read(interaction) else {
+        panic!("the app's interaction is interactive");
+    };
+    let rt = vcx.cx.read(|cx| cx.global::<ConnectionsModel>().runtime());
+    let asking = rt.spawn(async move {
+        port.ask(Question::Password {
+            profile: ProfileId::new(),
+            name: "orders-prod".into(),
+            user: "deploy".into(),
+            attempt: 1,
+        })
+        .await
+    });
+    prompt_open(vcx);
+    // The connect that asked was cancelled: its future is dropped.
+    asking.abort();
+    for _ in 0..100 {
+        settle(vcx, ms(5));
+        if layer_ids(vcx).is_empty() {
+            break;
+        }
+    }
+    assert!(layer_ids(vcx).is_empty(), "the orphaned prompt closed");
+}
+
+/// The strip's status region's accessible name.
+fn status_name(vcx: &mut VisualTestContext) -> String {
+    decls(vcx)
+        .into_iter()
+        .find(|d| d.role == Some(Role::Status))
+        .map(|d| strip_marks(&d.name))
+        .expect("the strip's status region")
+}
+
+#[gpui::test]
+fn the_strip_announces_its_result(cx: &mut TestAppContext) {
+    let vcx = strip_fixture(
+        cx,
+        "en",
+        ok_report(ms(54), ms(12), "PostgreSQL 16.4", tls13_verified()),
+    );
+    assert_eq!(status_name(vcx), "Connected in 54 ms");
+    let mut failed = ok_report(ms(54), ms(12), "PostgreSQL 16.4", tls13_verified());
+    failed.ok = false;
+    failed.error = Some(auth_invalid_attempts("deploy", 1));
+    let s = strip(vcx);
+    vcx.cx.update(|cx| {
+        s.update(cx, |s, cx| {
+            s.show(TestStripState::Done(Arc::new(failed)), cx)
+        })
+    });
+    assert_eq!(
+        status_name(vcx),
+        "The server rejected the password for deploy."
+    );
+}
+
+#[gpui::test]
+fn the_production_line_is_one_wrapping_sentence(cx: &mut TestAppContext) {
+    let (vcx, _rx) = ask(
+        cx,
+        "tr",
+        "orders-prod-us",
+        "db-prod-us.acme.io",
+        Some(("prod", HintSource::Host)),
+    );
+    assert_eq!(
+        strip_marks(&text_of(vcx, "prod-c1")),
+        "bu bağlantıda çalışırken başlık çubuğunda PROD kapsülünü gösterir,"
+    );
+    assert_eq!(text_of(vcx, "prod-word"), "PROD");
 }
