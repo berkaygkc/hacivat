@@ -11,3 +11,6 @@ anyhow.workspace = true
 cargo-packager-updater = "0.2.3"
 base64 = "0.22"
 minisign-verify = "0.2.5"
+
+[lints]
+workspace = true

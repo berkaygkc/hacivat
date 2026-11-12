@@ -4,8 +4,10 @@
 use gpui::{App, Global, Hsla, Rgba};
 
 mod generated;
+pub mod surfaces;
 
 pub use generated::{Colors, DARK, LIGHT, Motion, Radii, SHARED, SharedColors, Spacing, TypeRamp};
+pub use surfaces::{focus_outline, popover_surface};
 
 /// Packed `0xRRGGBBAA`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

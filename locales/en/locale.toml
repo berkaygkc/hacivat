@@ -1,0 +1,6 @@
+tag = "en"
+native_name = "English"
+english_name = "English"
+short_name = "EN"
+direction = "ltr"
+status = "stable"

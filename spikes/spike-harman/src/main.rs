@@ -10,7 +10,7 @@ use std::io::Write as _;
 use anyhow::{Result, bail};
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::*;
-use hacivat_ui_core::app::run_app;
+use hacivat_ui_core::app::{Boot, run_app};
 use hacivat_ui_core::shell::{display_sizes, native_window_id, open_unified_window};
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 use screen::data::Lang;
@@ -115,7 +115,7 @@ fn main() {
         update::check_and_install(url);
     }
     // run_app registers and verifies the bundled fonts (exit 3 on failure) and installs the icons.
-    run_app(move |cx| {
+    run_app(Boot::default(), move |cx| {
         Theme::install(cx, args.mode);
         let (lang, scale, print_window_id) = (args.lang, args.scale, args.print_window_id);
         // Native traffic lights replace the mock's drawn ones.

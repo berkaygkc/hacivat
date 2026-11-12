@@ -8,16 +8,35 @@ use gpui::{
 /// Process exit code when the bundled fonts cannot be registered or do not resolve.
 pub const FONT_FAILURE_EXIT: i32 = 3;
 
+/// How text is rasterized (L12). `Crisp` turns macOS font smoothing off for this app;
+/// `Standard` leaves the user's system preference in place. Applies on restart only (R11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextRendering {
+    #[default]
+    Crisp,
+    Standard,
+}
+
+/// Process-level choices that must be made before GPUI starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Boot {
+    pub text_rendering: TextRendering,
+}
+
 /// Registers the bundled fonts and verifies GPUI resolves them (no silent system-font fallback).
 pub fn bootstrap(cx: &mut App) -> anyhow::Result<()> {
     crate::fonts::register_fonts(cx).context("registering bundled fonts")?;
     crate::shell::verify_bundled_fonts(cx).context("verifying bundled fonts")
 }
 
-/// The one application bootstrap every spike uses: installs the bundled icon assets, registers
-/// and verifies the bundled fonts, then runs `f`. A font failure exits the process with
-/// [`FONT_FAILURE_EXIT`] before any window opens, so nothing renders with fallback fonts.
-pub fn run_app(f: impl FnOnce(&mut App) + 'static) {
+/// The one application bootstrap: installs the bundled icon assets, registers and verifies the
+/// bundled fonts, then runs `f`. A font failure exits the process with [`FONT_FAILURE_EXIT`]
+/// before any window opens, so nothing renders with fallback fonts.
+///
+/// `boot` is not applied yet (M0 behaviour); Task 4 applies `boot.text_rendering` before GPUI
+/// starts.
+pub fn run_app(boot: Boot, f: impl FnOnce(&mut App) + 'static) {
+    let _ = boot;
     gpui_platform::application()
         .with_assets(crate::shell::BundledAssets)
         .run(move |cx| {

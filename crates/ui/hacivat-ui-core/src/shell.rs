@@ -125,6 +125,10 @@ pub fn open_unified_window<V: Render + 'static>(
 
 /// The native window number for `screencapture -l` (macOS only).
 #[cfg(target_os = "macos")]
+#[allow(
+    unsafe_code,
+    reason = "Objective-C getters on the live NSView; Task 4 moves this into `platform/**`"
+)]
 pub fn native_window_id(window: &Window) -> Option<u32> {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;

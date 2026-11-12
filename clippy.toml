@@ -1,0 +1,10 @@
+# Locale-blind casing is banned workspace-wide (INV-3, L11, ruling R6). Human text is cased with
+# `hacivat_l10n::case_for_display`; small-caps text arrives pre-cased from Fluent. The ASCII
+# methods (`to_ascii_lowercase`, `eq_ignore_ascii_case`, ...) stay allowed for machine text.
+# An exception needs `#[expect(clippy::disallowed_methods, reason = "...")]` and review.
+disallowed-methods = [
+    { path = "str::to_lowercase", reason = "locale-blind casing (INV-3): use hacivat_l10n::case_for_display, or an ASCII method for machine text" },
+    { path = "str::to_uppercase", reason = "locale-blind casing (INV-3): use hacivat_l10n::case_for_display, or an ASCII method for machine text" },
+    { path = "char::to_lowercase", reason = "locale-blind casing (INV-3): use hacivat_l10n::case_for_display, or an ASCII method for machine text" },
+    { path = "char::to_uppercase", reason = "locale-blind casing (INV-3): use hacivat_l10n::case_for_display, or an ASCII method for machine text" },
+]

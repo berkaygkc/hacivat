@@ -1,18 +1,81 @@
 [workspace]
 resolver = "3"
-members = ["crates/ui/*", "xtask", "spikes/*"]
+members = ["crates/ui/*", "crates/core/*", "crates/app/*", "crates/bin/*", "xtask", "spikes/*"]
 
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
 publish = false
 
+[workspace.lints.rust]
+# Only `crates/ui/hacivat-ui-core/src/platform/**` may opt out, with a `// SAFETY:` comment per block.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# `clippy.toml` bans locale-blind casing (INV-3, L11, R6).
+disallowed_methods = "deny"
+
 [workspace.dependencies]
-# GPUI pin (zed-industries/zed @ 912159c). Only crates/ui/hacivat-ui-core may depend on these.
+# GPUI pin (zed-industries/zed @ 912159c). Only crates/ui/hacivat-ui-core may depend on these
+# (crates/ui and crates/app may add `gpui` with `test-support` as a dev-dependency, F1).
 gpui = { git = "https://github.com/zed-industries/zed", rev = "912159c7ad77ce6296a93be77efc298b0b00fd50" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "912159c7ad77ce6296a93be77efc298b0b00fd50", features = ["font-kit", "wayland", "x11"] }
 anyhow = "1"
 cargo_metadata = "0.19"
+
+# Workspace crates.
+hacivat-app = { path = "crates/app/hacivat-app" }
+hacivat-bench = { path = "crates/ui/hacivat-bench" }
+hacivat-l10n = { path = "crates/core/hacivat-l10n" }
+hacivat-l10n-schema = { path = "crates/core/hacivat-l10n-schema" }
+hacivat-settings = { path = "crates/core/hacivat-settings" }
+hacivat-ui = { path = "crates/ui/hacivat-ui" }
+hacivat-ui-core = { path = "crates/ui/hacivat-ui-core" }
+
+# Localization (Fluent + ICU4X 2.4).
+fluent-bundle = "0.16.0"
+fluent-syntax = "0.12.0"
+intl-memoizer = "0.5.3"
+unic-langid = { version = "0.9.6", features = ["macros"] }
+icu_casemap = "2.4.0"
+icu_datetime = "2.4.0"
+icu_decimal = "2.4.0"
+icu_list = "2.4.0"
+icu_locale = "2.4.0"
+icu_normalizer = "2.4.0"
+icu_plurals = "2.4.0"
+icu_properties = "2.4.0"
+icu_segmenter = "2.4.0"
+icu_time = "2.4.0"
+fixed_decimal = "0.7.3"
+sys-locale = "0.3.2"
+iana-time-zone = "0.1.65"
+
+# General.
+arc-swap = "1.9.5"
+base64 = "0.22.1"
+directories = "6.0.0"
+rust-embed = { version = "8.14.0", features = ["include-exclude"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.2.1"
+toml_edit = "0.25.19"
+unicode-segmentation = "1.13.3"
+
+# Logging.
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
+
+# Platform (hacivat-ui-core `platform/**` only).
+core-foundation = "0.10.1"
+core-foundation-sys = "0.8.7"
+mach2 = "0.6.0"
+windows-sys = "0.61.2"
+
+# Tests.
+tempfile = "3.27.0"
+trybuild = "1.0.122"
 
 [patch.crates-io]
 # zed Cargo.toml:1045

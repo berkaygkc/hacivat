@@ -1,0 +1,6 @@
+# Dynamic ID families (I18N-01): messages addressed by an ID built at runtime. They still get
+# typed constants in `hacivat_l10n::ids`; the l10n check does not report them as unused.
+#
+# hui-*     widget texts resolved by ID through `UiTextProvider` (R4)
+# hv-cmd-*  command titles, `hv-cmd-<action id with . and _ as ->` (R5)
+families = ["hui-*", "hv-cmd-*"]

@@ -1,7 +1,8 @@
 //! Frame-interval and input-latency recording plus pass/fail verdicts.
 //!
-//! This file is deliberately free of GPUI types: `xtask` includes it via `#[path]`
-//! so the report uses exactly the same statistics and thresholds as the recorders.
+//! This crate is deliberately free of GPUI types: `xtask bench-report` depends on it, so the
+//! report uses exactly the same statistics and thresholds as the recorders, which reach it as
+//! `hacivat_ui_core::frames` (feature `bench`).
 
 use std::io;
 use std::path::{Path, PathBuf};

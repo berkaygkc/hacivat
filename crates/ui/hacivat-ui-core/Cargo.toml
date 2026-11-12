@@ -5,14 +5,40 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Frame recording for the benches: `frame_loop` and `frames` (= `hacivat-bench`).
+bench = ["dep:hacivat-bench"]
+# Spike-only helpers (unified window, display sizes). Task 4 moves them behind this feature.
+spike-support = []
+# Paint-level named-rule checks (`named_rules`, R12): needs `Window::rendered_scene`.
+scene-check = ["gpui/bench-support"]
+# GPUI test contexts re-exported from `gpui_surface` for downstream tests.
+test-support = ["gpui/test-support", "gpui_platform/test-support"]
+
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
 anyhow.workspace = true
+rust-embed.workspace = true
+serde.workspace = true
+# Keymap data files (Task 5).
+toml.workspace = true
+# Keymap NFC normalization (Task 5).
+icu_normalizer.workspace = true
+hacivat-bench = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 raw-window-handle = "0.6"
+core-foundation.workspace = true
+core-foundation-sys.workspace = true
+mach2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

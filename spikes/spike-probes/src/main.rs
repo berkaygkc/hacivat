@@ -5,12 +5,14 @@
 //!
 //! The `a11y` probe follows `crates/gpui/examples/a11y.rs` at the GPUI pin (Apache-2.0).
 
+#![allow(unsafe_code, reason = "M0 probes call platform APIs directly; spike only")]
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use hacivat_ui_core::app::{open_window, run_app};
+use hacivat_ui_core::app::{Boot, open_window, run_app};
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
     App, AppContext, Bounds, ClipboardItem, Context, Element, ElementId, Font, FontFeatures,
@@ -42,7 +44,7 @@ fn main() {
         eprintln!("usage: spike-probes <all|{}>", ALL.join("|"));
         std::process::exit(2);
     };
-    run_app(move |cx| {
+    run_app(Boot::default(), move |cx| {
         let first_frame_ms: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
         let ff = first_frame_ms.clone();
         // Shaping needs a window's text system, so every probe runs with a window open.

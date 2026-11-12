@@ -1,16 +1,12 @@
 //! `cargo xtask bench-report <files...> --milestone m0`: appends one markdown row per
 //! recorder dump to `docs/benchmarks/<milestone>.md`.
 
-// Shares statistics and thresholds with the recorders (the file has no GPUI dependency).
-#[path = "../../crates/ui/hacivat-ui-core/src/frames.rs"]
-#[allow(dead_code)]
-mod frames;
-
-use frames::{
+// Shares statistics and thresholds with the recorders (`hacivat-bench` has no GPUI dependency).
+use hacivat_bench::{
     FrameStats, LatencyStats, RunInfo, Verdict, latency_stats_of, stats_of, verdict,
 };
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 const HEADER: &str = "# Benchmarks\n\n| label | OS | host | build | display | frames | mean fps | p95 ms | p99 ms | max gap ms | gaps > 100 ms | verdict |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n";
@@ -43,7 +39,7 @@ fn run_inner(args: Vec<String>) -> Result<PathBuf, String> {
     if files.is_empty() {
         return Err("no input files".into());
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let root = crate::workspace_root();
     let mut rows = String::new();
     for f in &files {
         let text = std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?;

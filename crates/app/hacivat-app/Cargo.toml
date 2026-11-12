@@ -1,0 +1,30 @@
+[package]
+name = "hacivat-app"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+scene-check = ["hacivat-ui-core/scene-check"]
+pseudo = ["hacivat-l10n/pseudo"]
+# The screenshot harness (Task 18).
+shots = ["scene-check", "pseudo", "hacivat-ui-core/test-support"]
+
+[dependencies]
+hacivat-ui-core.workspace = true
+hacivat-ui.workspace = true
+hacivat-l10n.workspace = true
+hacivat-settings.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+# F1: `#[gpui::test]` expands to `gpui::` paths; production code uses `gpui_surface` only.
+gpui = { workspace = true, features = ["test-support"] }
+hacivat-ui-core = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

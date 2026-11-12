@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::process::ExitCode;
 use std::rc::Rc;
 
-use hacivat_ui_core::app::{open_window, run_app};
+use hacivat_ui_core::app::{Boot, open_window, run_app};
 use hacivat_ui_core::gpui_surface::{
     AppContext, Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollEvent,
     Styled, Window, div, px,
@@ -117,7 +117,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    run_app(move |cx| {
+    run_app(Boot::default(), move |cx| {
         Theme::install(cx, ThemeMode::Dark);
         let tokens = Theme::get(cx).tokens;
         // The bench starts mid-table, where an absolute f32 pixel offset (~105M px) would

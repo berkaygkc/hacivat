@@ -6,7 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-hacivat-ui-core = { path = "../../crates/ui/hacivat-ui-core" }
+hacivat-ui-core = { path = "../../crates/ui/hacivat-ui-core", features = ["bench"] }
 anyhow.workspace = true
 # Spike-only rope (MIT). Never Zed's `rope`/`text` crates (GPL).
 ropey = "1.6"
+
+[lints]
+workspace = true
