@@ -1,8 +1,11 @@
 //! Dependency guard: transitive GPUI/zed reach, crate layers and workspace lints.
 //!
 //! Only `hacivat-ui-core` (the adapter) may reach `gpui`, `gpui_platform` or any zed-sourced
-//! crate. F1 exception: a direct dev-dependency of a Ui or App crate on `gpui` with
-//! `test-support`, because `#[gpui::test]` expands to hard-coded `gpui::` paths.
+//! crate. F1 exception: a dev-only dependency on `gpui` with `test-support`, owned by a Ui or
+//! App workspace crate (at any depth of the walk, since that crate is checked on its own),
+//! because `#[gpui::test]` expands to hard-coded `gpui::` paths. Spike, Tool and Core owners
+//! get no exception. Layers fail closed: a member outside the known directories is flagged.
+//! Core crates may reach no Ui crate; Ui crates (adapter included) may reach no Core crate.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::Path;
@@ -29,6 +32,8 @@ pub enum Rule {
     UiDependsOnCore,
     AdapterFeatureInProduct,
     MissingWorkspaceLints,
+    /// The manifest lives outside every known layer directory.
+    UnknownLayer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,13 +53,13 @@ enum Layer {
     Tool,
 }
 
-fn layer_of(md: &Metadata, p: &Package) -> Layer {
+fn layer_of(md: &Metadata, p: &Package) -> Option<Layer> {
     let abs = p.manifest_path.as_std_path();
     let rel = abs
         .strip_prefix(md.workspace_root.as_std_path())
         .unwrap_or(abs);
     let rel = rel.to_string_lossy().replace('\\', "/");
-    if rel.starts_with("crates/ui/") {
+    Some(if rel.starts_with("crates/ui/") {
         Layer::Ui
     } else if ["crates/core/", "crates/sql/", "crates/ai/"]
         .iter()
@@ -65,9 +70,11 @@ fn layer_of(md: &Metadata, p: &Package) -> Layer {
         Layer::App
     } else if rel.starts_with("spikes/") {
         Layer::Spike
-    } else {
+    } else if rel.starts_with("xtask/") {
         Layer::Tool
-    }
+    } else {
+        return None;
+    })
 }
 
 fn is_zed_sourced(p: &Package) -> bool {
@@ -136,13 +143,22 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
         out.insert((krate.to_string(), rule, via));
     };
 
+    let layers: HashMap<&PackageId, Layer> = members
+        .iter()
+        .filter_map(|m| layer_of(md, m).map(|l| (&m.id, l)))
+        .collect();
+
     for root in &members {
         let name = root.name.as_str();
-        let layer = layer_of(md, root);
 
         if !has_workspace_lints(&manifest(root.manifest_path.as_std_path())) {
             add(name, Rule::MissingWorkspaceLints, vec![]);
         }
+
+        let Some(&layer) = layers.get(&root.id) else {
+            add(name, Rule::UnknownLayer, vec![]);
+            continue;
+        };
 
         if PRODUCT_CRATES.contains(&name)
             && let Some(bad) = root.dependencies.iter().find(|d| {
@@ -156,21 +172,8 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
             add(name, Rule::AdapterFeatureInProduct, vec![bad.name.clone()]);
         }
 
-        if layer == Layer::Ui && name != ADAPTER {
-            for d in &root.dependencies {
-                if members
-                    .iter()
-                    .any(|w| w.name.as_str() == d.name && layer_of(md, w) == Layer::Core)
-                {
-                    add(name, Rule::UiDependsOnCore, vec![d.name.clone()]);
-                }
-            }
-        }
-
         // The adapter is the one crate allowed to reach GPUI.
-        if name == ADAPTER {
-            continue;
-        }
+        let is_adapter = name == ADAPTER;
 
         // Breadth-first walk over normal, build and dev edges; the first path found is reported.
         let mut seen: BTreeSet<&PackageId> = BTreeSet::from([&root.id]);
@@ -185,19 +188,32 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
                 // The exception applies to the Ui/App package that owns the edge, at any depth:
                 // that package is checked in its own right.
                 let from = pkgs[id];
-                if matches!(layer_of(md, from), Layer::Ui | Layer::App)
+                if !is_adapter
+                    && matches!(layers.get(id), Some(Layer::Ui | Layer::App))
                     && is_test_support_dev_edge(from, dep, kinds)
                 {
                     continue;
                 }
+                let dep_layer = layers.get(dep_id).copied();
+                if layer == Layer::Core && dep_layer == Some(Layer::Ui) {
+                    add(name, Rule::CoreReachesUi, via);
+                    continue;
+                }
+                if layer == Layer::Ui && dep_layer == Some(Layer::Core) {
+                    add(name, Rule::UiDependsOnCore, via);
+                    continue;
+                }
                 if dep.name.as_str() == ADAPTER {
+                    // Not expanded: the adapter's own edges are checked on the adapter.
                     if layer == Layer::Core {
                         add(name, Rule::CoreReachesUi, via);
                     }
                     continue;
                 }
                 if is_guarded(dep) {
-                    add(name, Rule::ZedOutsideAdapter, via);
+                    if !is_adapter {
+                        add(name, Rule::ZedOutsideAdapter, via);
+                    }
                     continue;
                 }
                 if seen.insert(dep_id) {
@@ -572,6 +588,75 @@ mod tests {
         let md = fx(&[("hacivat-ui", &[])]);
         let v = violations(&md, &|_| "[package]\nname=\"hacivat-ui\"\n".into());
         assert_eq!(v[0].rule, Rule::MissingWorkspaceLints);
+    }
+
+    #[test]
+    fn flags_core_reaching_any_ui_crate() {
+        let md = fx_at(&[
+            ("hacivat-l10n", "crates/core", &["hacivat-bench"]),
+            ("hacivat-bench", "crates/ui", &[]),
+        ]);
+        assert_eq!(rule_of(&md, "hacivat-l10n"), Rule::CoreReachesUi);
+    }
+
+    #[test]
+    fn flags_adapter_depending_on_core() {
+        let md = fx_at(&[
+            ("hacivat-ui-core", "crates/ui", &["hacivat-l10n"]),
+            ("hacivat-l10n", "crates/core", &[]),
+        ]);
+        assert_eq!(rule_of(&md, "hacivat-ui-core"), Rule::UiDependsOnCore);
+    }
+
+    #[test]
+    fn flags_ui_reaching_core_through_app_or_spike() {
+        for mid in [("spike-y", "spikes"), ("hacivat-app", "crates/app")] {
+            let md = fx_at(&[
+                ("hacivat-ui", "crates/ui", &[mid.0]),
+                (mid.0, mid.1, &["hacivat-l10n"]),
+                ("hacivat-l10n", "crates/core", &[]),
+            ]);
+            let v = violations(&md, &lints_ok);
+            let ui: Vec<_> = v.iter().filter(|v| v.krate == "hacivat-ui").collect();
+            assert_eq!(ui.len(), 1, "{v:?}");
+            assert_eq!(ui[0].rule, Rule::UiDependsOnCore);
+            assert_eq!(ui[0].via, [mid.0, "hacivat-l10n"]);
+        }
+    }
+
+    #[test]
+    fn test_support_exception_applies_at_depth_for_app_owner() {
+        let md = metadata(vec![
+            member("hacivat", "crates/bin", normal(&["hacivat-app"])),
+            member(
+                "hacivat-app",
+                "crates/app",
+                vec![dep("gpui", DepKind::Development, &["test-support"], None)],
+            ),
+        ]);
+        assert!(violations(&md, &lints_ok).is_empty());
+    }
+
+    #[test]
+    fn test_support_exception_is_denied_to_spike_and_tool_owners() {
+        for dir in ["spikes", "xtask"] {
+            let md = metadata(vec![
+                member("root-x", "spikes", normal(&["owner-x"])),
+                member(
+                    "owner-x",
+                    dir,
+                    vec![dep("gpui", DepKind::Development, &["test-support"], None)],
+                ),
+            ]);
+            assert_eq!(rule_of(&md, "owner-x"), Rule::ZedOutsideAdapter, "{dir}");
+            assert_eq!(rule_of(&md, "root-x"), Rule::ZedOutsideAdapter, "{dir}");
+        }
+    }
+
+    #[test]
+    fn unknown_member_directory_fails_closed() {
+        let md = fx_at(&[("mystery", "tools", &[])]);
+        assert_eq!(rule_of(&md, "mystery"), Rule::UnknownLayer);
     }
 
     #[test]
