@@ -8,19 +8,6 @@ pub use gpui::{
     IntoElement, KeyDownEvent, ParentElement, Pixels, Point, Render, SharedString, Size, Styled,
     UTF16Selection, Window, canvas, div, px,
 };
-// Task 9 (probes): text shaping, accessibility and clipboard types.
-pub use gpui::{
-    AppContext, ClipboardEntry, Element, ElementId, Font, FontFeatures, FontWeight,
-    GlobalElementId, InspectorElementId, LayoutId, Role, Style, TextRun, WindowHandle, accesskit,
-    hsla,
-};
-// Task 5 (spike-grid): custom painting, text shaping and scroll input.
-pub use gpui::{
-    ContentMask, FontId, InteractiveElement, ShapedLine, TextAlign, fill, point,
-};
-// Task 8 (harman VF): element building blocks.
-pub use gpui::{
-    AnyElement, BoxShadow, Div, FontStyle, HighlightStyle, StyledText, svg,
-};
-// Task 6 (spike-editor): custom element, keystrokes, layout helpers.
-pub use gpui::{AvailableSpace, Keystroke, Modifiers, relative, size};
+// Tasks 5, 6, 7, 8, 9 (grid, editor, IME, harman VF, probes): custom elements, text shaping,
+// scroll input, popover shadow, accessibility, clipboard, synthetic keystrokes, input handler.
+#[rustfmt::skip] pub use gpui::{AnyElement, AppContext, AvailableSpace, BoxShadow, ClipboardEntry, ContentMask, Div, Element, ElementId, ElementInputHandler, Font, FontFeatures, FontId, FontStyle, FontWeight, GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement, Keystroke, LayoutId, Modifiers, Role, ShapedLine, Style, StyledText, TextAlign, TextRun, UnderlineStyle, WindowHandle, accesskit, fill, hsla, point, relative, size, svg};

@@ -6,6 +6,7 @@ mod bench;
 mod buffer;
 mod completion;
 mod element;
+mod input;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -65,8 +66,8 @@ fn main() -> ExitCode {
 
     run_app(move |cx| {
         Theme::install(cx, ThemeMode::Dark);
-        let window = open_window(cx, "Hacivat B3 editor", (1280., 800.), |_, cx| {
-            cx.new(|cx| EditorView::new(buffer, cx))
+        let window = open_window(cx, "Hacivat B3 editor", (1280., 800.), |window, cx| {
+            cx.new(|cx| EditorView::new(buffer, window, cx))
         });
         let started = window.and_then(|window| {
             window.update(cx, |view, window, cx| {

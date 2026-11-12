@@ -14,15 +14,17 @@ use std::time::Instant;
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::frames::LatencyProbe;
 use hacivat_ui_core::gpui_surface::{
-    App, AvailableSpace, Bounds, ContentMask, Context, Element, ElementId, Entity, FocusHandle,
-    Focusable, Font, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement,
-    KeyDownEvent, LayoutId, ParentElement, Pixels, Render, ScrollWheelEvent, ShapedLine, Style,
-    Styled, TextAlign, TextRun, Window, div, fill, point, px, relative, size,
+    App, AvailableSpace, Bounds, ContentMask, Context, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId, InspectorElementId,
+    InteractiveElement, IntoElement, KeyDownEvent, LayoutId, ParentElement, Pixels, Point, Render,
+    ScrollWheelEvent, ShapedLine, Style, Styled, TextAlign, TextRun, UnderlineStyle, Window, div,
+    fill, point, px, relative, size,
 };
 use hacivat_ui_core::theme::{Colors, Theme};
 
 use crate::buffer::{Buffer, is_identifier_char};
 use crate::completion::{self, CompletionItem};
+use crate::input::ImeCore;
 
 /// Hard cap on the characters shaped per line (Review Focus 5: a 100k-char line).
 pub const MAX_SHAPED_COLUMNS: usize = 512;
@@ -174,23 +176,52 @@ fn token_color(token: Token, colors: &Colors) -> hacivat_ui_core::gpui_surface::
     .to_hsla()
 }
 
-fn text_runs(text: &str, font: &Font, colors: &Colors) -> Vec<TextRun> {
-    highlight(text)
-        .into_iter()
-        .map(|(range, token)| TextRun {
-            len: range.len(),
-            font: font.clone(),
-            color: token_color(token, colors),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        })
-        .collect()
+/// Highlight runs for `text`. `marked` is the byte range of an IME composition inside
+/// `text`; it is drawn with an underline, so runs are split at its edges.
+fn text_runs(
+    text: &str,
+    font: &Font,
+    colors: &Colors,
+    marked: Option<Range<usize>>,
+) -> Vec<TextRun> {
+    let underline = UnderlineStyle {
+        thickness: px(1.),
+        color: Some(colors.text.to_hsla()),
+        wavy: false,
+    };
+    let mut runs = Vec::new();
+    for (range, token) in highlight(text) {
+        let color = token_color(token, colors);
+        let mut push = |part: Range<usize>, underlined: bool| {
+            if !part.is_empty() {
+                runs.push(TextRun {
+                    len: part.len(),
+                    font: font.clone(),
+                    color,
+                    background_color: None,
+                    underline: underlined.then_some(underline),
+                    strikethrough: None,
+                });
+            }
+        };
+        match &marked {
+            Some(m) if m.start < range.end && m.end > range.start => {
+                let (s, e) = (m.start.max(range.start), m.end.min(range.end));
+                push(range.start..s, false);
+                push(s..e, true);
+                push(e..range.end, false);
+            }
+            _ => push(range, false),
+        }
+    }
+    runs
 }
 
 struct CachedLine {
     version: u64,
     columns: Range<usize>,
+    /// The composition range within the line (line-relative chars) this shape was made for.
+    marked: Option<Range<usize>>,
     shaped: ShapedLine,
 }
 
@@ -266,8 +297,13 @@ fn frame_shows_last_input(last_mark: Option<Instant>, painted_at: Instant) -> bo
     last_mark.is_none_or(|mark| mark <= painted_at)
 }
 
+/// Text for keys the platform does not deliver through the input handler.
+fn control_key_text(key: &str) -> Option<&'static str> {
+    (key == "tab").then_some("\t")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditKind {
+pub enum EditKind {
     Identifier,
     Delete,
     Other,
@@ -277,8 +313,8 @@ enum EditKind {
 pub struct EditorView {
     pub buffer: Buffer,
     pub focus_handle: FocusHandle,
-    /// Char indices; the caret is `selection.end`.
-    pub selection: Range<usize>,
+    /// Selection and IME composition, char indices; the caret is `ime.selection.end`.
+    pub ime: ImeCore,
     pub top_line: usize,
     pub scroll_col: usize,
     pub completion: Option<CompletionState>,
@@ -299,11 +335,19 @@ impl Focusable for EditorView {
 }
 
 impl EditorView {
-    pub fn new(buffer: Buffer, cx: &mut Context<Self>) -> Self {
+    pub fn new(buffer: Buffer, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        // Focus loss mid-composition commits the marked text (Review Focus 4).
+        cx.on_blur(&focus_handle, window, |this, window, cx| {
+            if this.ime.marked.is_some() {
+                EntityInputHandler::unmark_text(this, window, cx);
+            }
+        })
+        .detach();
         Self {
             buffer,
-            focus_handle: cx.focus_handle(),
-            selection: 0..0,
+            focus_handle,
+            ime: ImeCore::caret_at(0),
             top_line: 0,
             scroll_col: 0,
             completion: None,
@@ -318,13 +362,13 @@ impl EditorView {
     }
 
     pub fn caret(&self) -> usize {
-        self.selection.end
+        self.ime.selection.end
     }
 
     /// Moves the caret and scrolls so it sits `context_lines` below the top of the view.
     pub fn place_caret(&mut self, char_idx: usize, context_lines: usize) {
         let char_idx = char_idx.min(self.buffer.len_chars());
-        self.selection = char_idx..char_idx;
+        self.ime = ImeCore::caret_at(char_idx);
         self.top_line = self
             .buffer
             .char_to_line(char_idx)
@@ -332,13 +376,31 @@ impl EditorView {
         self.reveal_caret = true;
     }
 
-    /// The single edit entry point: key handling now, the IME handler in Task 7.
+    /// Edits for non-text keys (backspace, enter) and the bench setup. Text input, plain or
+    /// composed, goes through the `EntityInputHandler` impl in `input.rs`.
     pub fn replace(&mut self, range: Range<usize>, text: &str) {
-        self.buffer.delete(range.clone());
-        self.buffer.insert(range.start, text);
-        let caret = range.start + text.chars().count();
-        self.selection = caret..caret;
+        self.buffer.replace(range.clone(), text);
+        self.ime = ImeCore::caret_at(range.start + text.chars().count());
         self.reveal_caret = true;
+    }
+
+    /// Shared tail of every edit: completion, bench probe mark, repaint. `input_at` is when
+    /// the input reached the editor.
+    pub fn after_edit(&mut self, edit: EditKind, input_at: Instant, cx: &mut Context<Self>) {
+        self.reveal_caret = true;
+        self.refresh_completion(edit);
+        if let Some(bench) = &self.bench {
+            let measured = match bench.target {
+                ProbeTarget::EditorFrame => true,
+                ProbeTarget::CompletionPopup => {
+                    edit == EditKind::Identifier && self.completion.is_some()
+                }
+            };
+            if measured {
+                bench.mark_input(input_at);
+            }
+        }
+        cx.notify();
     }
 
     fn move_caret(&mut self, key: &str) -> bool {
@@ -356,7 +418,7 @@ impl EditorView {
             "up" | "down" => caret,
             _ => return false,
         };
-        self.selection = target..target;
+        self.ime = ImeCore::caret_at(target);
         self.reveal_caret = true;
         true
     }
@@ -385,7 +447,10 @@ impl EditorView {
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let input_at = Instant::now();
         let keystroke = &event.keystroke;
-        if keystroke.modifiers.platform || keystroke.modifiers.control {
+        // While composing, every key belongs to the IME (the platform sends it there first;
+        // this guards the platforms that do not).
+        if keystroke.modifiers.platform || keystroke.modifiers.control || self.ime.marked.is_some()
+        {
             return;
         }
         let caret = self.caret();
@@ -400,34 +465,21 @@ impl EditorView {
                 self.replace(caret..caret, "\n");
                 EditKind::Other
             }
+            // Tab is not delivered through `insertText` on macOS, so insert it here.
+            key if control_key_text(key).is_some() => {
+                let text = control_key_text(key).unwrap_or_default();
+                self.replace(self.ime.selection.clone(), text);
+                EditKind::Other
+            }
             "escape" => EditKind::Move,
             key if self.move_caret(key) => EditKind::Move,
-            _ => match keystroke.key_char.as_deref() {
-                Some(text) if !text.is_empty() => {
-                    self.replace(self.selection.clone(), text);
-                    if text.chars().all(is_identifier_char) {
-                        EditKind::Identifier
-                    } else {
-                        EditKind::Other
-                    }
-                }
-                _ => return,
-            },
+            // Printable text is not handled here: leaving the event unhandled lets the
+            // platform deliver it (through the IME when one is active) to
+            // `replace_text_in_range`, the one text input path.
+            _ => return,
         };
-        self.refresh_completion(edit);
-        if let Some(bench) = &self.bench {
-            let measured = match bench.target {
-                ProbeTarget::EditorFrame => true,
-                ProbeTarget::CompletionPopup => {
-                    edit == EditKind::Identifier && self.completion.is_some()
-                }
-            };
-            if measured {
-                bench.mark_input(input_at);
-            }
-        }
+        self.after_edit(edit, input_at, cx);
         cx.stop_propagation();
-        cx.notify();
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -527,17 +579,26 @@ impl EditorView {
                 visible_cols,
                 self.buffer.line_len_chars(line),
             );
-            let hit = self
-                .cache
-                .get(&line)
-                .is_some_and(|c| c.version == version && c.columns == columns);
+            let marked = self.marked_columns(line);
+            let hit = self.cache.get(&line).is_some_and(|c| {
+                c.version == version && c.columns == columns && c.marked == marked
+            });
             if !hit {
                 let text = self
                     .buffer
                     .line_slice(line)
                     .slice(columns.clone())
                     .to_string();
-                let runs = text_runs(&text, &font, &colors);
+                let marked_bytes = marked.as_ref().and_then(|m| {
+                    let (s, e) = (m.start.max(columns.start), m.end.min(columns.end));
+                    let byte = |col: usize| {
+                        text.char_indices()
+                            .nth(col - columns.start)
+                            .map_or(text.len(), |(b, _)| b)
+                    };
+                    (s < e).then(|| byte(s)..byte(e))
+                });
+                let runs = text_runs(&text, &font, &colors, marked_bytes);
                 let shaped = window
                     .text_system()
                     .shape_line(text.into(), font_size, &runs, None);
@@ -547,6 +608,7 @@ impl EditorView {
                     CachedLine {
                         version,
                         columns,
+                        marked,
                         shaped,
                     },
                 );
@@ -603,6 +665,64 @@ impl EditorView {
             caret,
             line_height,
         }
+    }
+
+    /// The part of the IME composition on `line`, as line-relative columns.
+    fn marked_columns(&self, line: usize) -> Option<Range<usize>> {
+        let marked = self.ime.marked.as_ref()?;
+        let line_start = self.buffer.line_to_char(line);
+        let line_end = line_start + self.buffer.line_len_chars(line);
+        let (s, e) = (marked.start.max(line_start), marked.end.min(line_end));
+        (s < e).then(|| s - line_start..e - line_start)
+    }
+
+    /// Monospace estimate of a char range's bounds from the last layout, for when the cached
+    /// line shape is stale (an IME query between an edit and the next frame).
+    pub fn estimated_bounds_for_char_range(&self, range: Range<usize>) -> Option<Bounds<Pixels>> {
+        let layout = self.layout?;
+        let line = self.buffer.char_to_line(range.start);
+        let row = line.checked_sub(layout.top_line)?;
+        if row >= layout.visible_lines {
+            return None;
+        }
+        let line_start = self.buffer.line_to_char(line);
+        let line_end = line_start + self.buffer.line_len_chars(line);
+        let x_for = |char_idx: usize| {
+            let col = char_idx.min(line_end) - line_start;
+            layout.text_bounds.left() + layout.char_width * (col as f32 - layout.scroll_col as f32)
+        };
+        let top = layout.text_bounds.top() + layout.line_height * row as f32;
+        Some(Bounds::from_corners(
+            point(x_for(range.start), top),
+            point(x_for(range.end), top + layout.line_height),
+        ))
+    }
+
+    /// The char index nearest to a window point, from the cached line layout.
+    pub fn char_at_point(&self, p: Point<Pixels>) -> Option<usize> {
+        let layout = self.layout?;
+        if !layout.text_bounds.contains(&p) {
+            return None;
+        }
+        let row = ((p.y - layout.text_bounds.top()) / layout.line_height).floor() as usize;
+        let line = layout.top_line + row;
+        if line >= self.buffer.line_count() {
+            return None;
+        }
+        let line_len = self.buffer.line_len_chars(line);
+        let col = match self.cache.get(&line) {
+            Some(cached) if cached.version == self.buffer.version_of_line(line) => {
+                let origin_x = layout.text_bounds.left()
+                    + layout.char_width * (cached.columns.start as f32 - layout.scroll_col as f32);
+                let byte = cached.shaped.closest_index_for_x(p.x - origin_x);
+                cached.columns.start + cached.shaped.text[..byte].chars().count()
+            }
+            _ => {
+                let cols = (p.x - layout.text_bounds.left()) / layout.char_width;
+                layout.scroll_col + cols.round().max(0.) as usize
+            }
+        };
+        Some(self.buffer.line_to_char(line) + col.min(line_len))
     }
 
     /// Screen bounds of a char range on one line, from the cached line layout. `None` if the
@@ -713,6 +833,12 @@ impl Element for EditorElement {
         cx: &mut App,
     ) {
         let colors = Theme::get(cx).tokens.colors;
+        let focus_handle = self.view.read(cx).focus_handle.clone();
+        window.handle_input(
+            &focus_handle,
+            ElementInputHandler::new(bounds, self.view.clone()),
+            cx,
+        );
         window.paint_quad(fill(bounds, colors.ground.to_hsla()));
         let gutter = Bounds::new(bounds.origin, size(frame.gutter_width, bounds.size.height));
         window.paint_quad(fill(gutter, colors.gutter.to_hsla()));
@@ -756,6 +882,13 @@ impl Element for EditorElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_inserts_a_tab_character() {
+        assert_eq!(control_key_text("tab"), Some("\t"));
+        assert_eq!(control_key_text("a"), None);
+        assert_eq!(control_key_text("enter"), None);
+    }
 
     #[test]
     fn column_window_never_shapes_more_than_512_and_covers_viewport() {
