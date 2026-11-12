@@ -15,7 +15,7 @@ use hacivat_secrets::{AuthProviderId, Retention};
 use hacivat_session::pipeline::{IssueCode, ValidationIssue};
 use hacivat_session::profile::{Profile, ProfileEndpoint, suggest_name};
 use hacivat_ui::button::{Button, ButtonKind};
-use hacivat_ui::capsule::{EnvKind, env_swatch};
+use hacivat_ui::capsule::{EnvKind, env_swatch_on_raised};
 use hacivat_ui::checkbox::Checkbox;
 use hacivat_ui::dialog::form_dialog;
 use hacivat_ui::disclosure::Disclosure;
@@ -107,6 +107,11 @@ impl Field {
     /// A masked field never parses a paste (R21, P16).
     fn masked(self) -> bool {
         matches!(self, Field::Password | Field::KeyPass)
+    }
+
+    /// Machine text is drawn in mono (the mock's `.in.mono`): every field but the secrets.
+    pub(crate) fn mono(self) -> bool {
+        !self.masked()
     }
 
     /// The field a pasted URL fills.
@@ -235,7 +240,10 @@ pub(crate) fn new_input(
         input.set_placeholder_source(source);
         input.set_masked(field.masked());
         if !field.masked() {
-            input.set_paste_filter(Some(super::paste::paste_filter(field, dialog)));
+            input.set_paste_filter(Some(super::paste::paste_filter(
+                field == Field::Url,
+                dialog,
+            )));
         }
         input
     });
@@ -441,23 +449,110 @@ pub(crate) fn field_of_issue(issue: &ValidationIssue) -> Option<Field> {
             | IssueCode::TlsModeUnsupported { .. }
             | IssueCode::PathRefused,
         ) => Some(Field::Ca),
-        (_, IssueCode::TlsCertUnreadable | IssueCode::TlsKeyEncrypted) => Some(Field::Cert),
+        (_, IssueCode::TlsCertUnreadable) => Some(Field::Cert),
+        (_, IssueCode::TlsKeyEncrypted) => Some(Field::Key),
         (_, IssueCode::OptionRejected { .. }) => Some(Field::AppName),
         _ => None,
     }
 }
 
-/// Whether editing `field` resolves `issue`.
-pub(crate) fn issue_belongs_to(issue: &ValidationIssue, field: Field) -> bool {
-    field_of_issue(issue) == Some(field)
+/// The TLS file a path-refused issue is about: the first of the CA, the certificate and the
+/// key that lies outside every approved root (the CA when none can be told apart).
+fn refused_tls_field(p: &Profile, roots: &[PathBuf]) -> Field {
+    let cert = p.tls.client_cert.as_ref();
+    [
+        (Field::Ca, p.tls.ca_file.clone()),
+        (Field::Cert, cert.map(|c| c.cert.clone())),
+        (Field::Key, cert.map(|c| c.key.clone())),
+    ]
+    .into_iter()
+    .find_map(|(field, path)| {
+        let path = path.filter(|p| !p.as_os_str().is_empty())?;
+        (!roots.iter().any(|root| path.starts_with(root))).then_some(field)
+    })
+    .unwrap_or(Field::Ca)
 }
 
-pub(crate) fn is_tls_issue(issue: &ValidationIssue) -> bool {
-    field_of_issue(issue) == Some(Field::Ca)
+/// The SQLite file option "Open the file read-only" (`mode=ro`, ruling A): it can only tighten.
+pub(crate) fn sqlite_mode_ro(p: &Profile) -> bool {
+    p.extra
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case(SQLITE_MODE) && v.eq_ignore_ascii_case(SQLITE_RO))
 }
 
-pub(crate) fn is_option_issue(issue: &ValidationIssue) -> bool {
-    matches!(issue.code, IssueCode::OptionRejected { .. })
+/// Sets or clears `mode=ro` in the profile's options.
+pub(crate) fn set_sqlite_mode_ro(p: &mut Profile, on: bool) {
+    if on {
+        p.extra
+            .retain(|(k, _)| !k.eq_ignore_ascii_case(SQLITE_MODE));
+        p.extra
+            .push((SQLITE_MODE.to_string(), SQLITE_RO.to_string()));
+    } else {
+        p.extra.retain(|(k, v)| {
+            !(k.eq_ignore_ascii_case(SQLITE_MODE) && v.eq_ignore_ascii_case(SQLITE_RO))
+        });
+    }
+}
+
+/// The SQLite option key and its read-only value (machine text).
+const SQLITE_MODE: &str = "mode";
+const SQLITE_RO: &str = "ro";
+
+/// A file that is to be created cannot be opened with `mode=ro` (ruling A; Validate checks the
+/// Hacivat guard, the dialog checks the file option).
+pub(crate) fn sqlite_mode_issue(p: &Profile) -> Option<ValidationIssue> {
+    let create = matches!(
+        p.endpoint,
+        ProfileEndpoint::File {
+            create_if_missing: true,
+            ..
+        }
+    );
+    (p.engine == DbmsKind::Sqlite && create && sqlite_mode_ro(p)).then_some(ValidationIssue {
+        field: Some(FieldId::File),
+        code: IssueCode::CreateAndReadOnly,
+    })
+}
+
+impl ConnectionDialog {
+    /// Where `issue` shows: under its field when that field is on screen, else (`None`) in the
+    /// notice at the top of the form.
+    pub(crate) fn issue_field(&self, issue: &ValidationIssue, cx: &App) -> Option<Field> {
+        let p = &self.draft.profile;
+        let field = match (&issue.field, &issue.code) {
+            (None, IssueCode::PathRefused) if p.engine != DbmsKind::Sqlite => {
+                let roots = cx
+                    .try_global::<super::DialogEnv>()
+                    .map(|e| e.approved_roots.list())
+                    .unwrap_or_default();
+                Some(refused_tls_field(p, &roots))
+            }
+            _ => field_of_issue(issue),
+        }?;
+        self.field_visible(field).then_some(field)
+    }
+
+    /// Whether `field` is part of the form as it is drawn now (an issue of a hidden field goes
+    /// to the top notice).
+    pub(crate) fn field_visible(&self, field: Field) -> bool {
+        let p = &self.draft.profile;
+        let sqlite = p.engine == DbmsKind::Sqlite;
+        match field {
+            Field::Url | Field::Name => true,
+            Field::File => sqlite,
+            Field::Host
+            | Field::Port
+            | Field::Database
+            | Field::User
+            | Field::Ca
+            | Field::Timeout
+            | Field::AppName => !sqlite,
+            Field::Password => !sqlite && p.auth == AuthProviderId::Password,
+            Field::Cert | Field::Key => !sqlite && p.auth == AuthProviderId::ClientCert,
+            // Hidden until encrypted keys are supported (ruling B).
+            Field::KeyPass => false,
+        }
+    }
 }
 
 /// The sentence for `issue` (one message per `IssueCode`).
@@ -673,7 +768,7 @@ impl ConnectionDialog {
                                 self.draft
                                     .profile
                                     .environment
-                                    .map(|e| env_swatch(env_kind(e), theme)),
+                                    .map(|e| env_swatch_on_raised(env_kind(e), theme)),
                             )
                             .child(
                                 Label::new(
@@ -694,9 +789,10 @@ impl ConnectionDialog {
         let t = theme.tokens;
         let running = matches!(self.strip.read(cx).state(), TestStripState::Running(_));
         let hint = |cx: &App, id: &str| shortcut_label(cx, id).map(SharedString::from);
-        let read_only = cx
-            .try_global::<crate::connections::ConnectionsModel>()
-            .is_some_and(|m| m.store_read_only());
+        let read_only = self.read_only
+            || cx
+                .try_global::<crate::connections::ConnectionsModel>()
+                .is_some_and(|m| m.store_read_only());
         let mut test = if running {
             Button::new("conn-test", tr(cx, ids::hv::CONN_DLG_TEST_STOP, NoArgs))
                 .icon(IconName::Square)
@@ -711,8 +807,8 @@ impl ConnectionDialog {
         .focus_handle(self.focus.test.clone())
         .on_raised(true)
         .on_click(cx.listener(|this, _, window, cx| this.toggle_test(window, cx)));
-        if running {
-            test = test.key_hint("esc".into());
+        if running && let Some(h) = escape_label(cx) {
+            test = test.key_hint(h);
         }
         let mut save = Button::new("conn-save", tr(cx, ids::hv::CONN_DLG_SAVE, NoArgs))
             .focus_handle(self.focus.save.clone())
@@ -815,7 +911,7 @@ impl ConnectionDialog {
         for issue in self
             .issues
             .iter()
-            .filter(|i| field_of_issue(i) == Some(field))
+            .filter(|i| self.issue_field(i, cx) == Some(field))
         {
             let id = format!("issue-{}", field.name());
             rows.push(
@@ -908,6 +1004,7 @@ impl ConnectionDialog {
         };
         let mut b = Button::new(id, tr(cx, ids::hv::CONN_DLG_CHOOSE, NoArgs))
             .focus_handle(handle)
+            .disabled(self.read_only)
             .on_raised(true)
             .on_click(cx.listener(move |this, _, window, cx| this.choose_file(field, window, cx)));
         if let Some(icon) = icon {
@@ -932,7 +1029,11 @@ impl ConnectionDialog {
                 InlineNotice::new(NoticeIcon::Info).line(tr(cx, msg, NoArgs)),
             );
         }
-        for issue in self.issues.iter().filter(|i| field_of_issue(i).is_none()) {
+        for issue in self
+            .issues
+            .iter()
+            .filter(|i| self.issue_field(i, cx).is_none())
+        {
             rows.push(
                 Kind::Row,
                 InlineNotice::new(NoticeIcon::Info).line(issue_text(cx, issue)),
@@ -978,23 +1079,25 @@ impl ConnectionDialog {
         }
 
         // Engine.
-        let engines =
-            ENGINES
-                .iter()
-                .fold(Segmented::new("conn-engine").in_well(true), |seg, &kind| {
-                    seg.item(SegmentItem {
-                        content: SegmentContent::Verbatim(kind.display_name().into()),
-                        pressed: p.engine == kind,
-                        tooltip: kind.display_name().into(),
-                        a11y_name: None,
-                        on_click: Rc::new({
-                            let me = cx.weak_entity();
-                            move |_, window, cx| {
-                                let _ = me.update(cx, |d, cx| d.set_engine(kind, window, cx));
-                            }
-                        }),
-                    })
-                });
+        let engines = ENGINES.iter().fold(
+            Segmented::new("conn-engine")
+                .in_well(true)
+                .inert(self.read_only),
+            |seg, &kind| {
+                seg.item(SegmentItem {
+                    content: SegmentContent::Verbatim(kind.display_name().into()),
+                    pressed: p.engine == kind,
+                    tooltip: kind.display_name().into(),
+                    a11y_name: None,
+                    on_click: Rc::new({
+                        let me = cx.weak_entity();
+                        move |_, window, cx| {
+                            let _ = me.update(cx, |d, cx| d.set_engine(kind, window, cx));
+                        }
+                    }),
+                })
+            },
+        );
         rows.push(
             Kind::Row,
             form_row(
@@ -1014,24 +1117,26 @@ impl ConnectionDialog {
         self.issue_rows(&mut rows, Field::Name, theme, cx);
 
         // Environment, with its marks.
-        let envs =
-            EnvTag::ALL
-                .iter()
-                .fold(Segmented::new("conn-env").in_well(true), |seg, &tag| {
-                    let label = tr(cx, env_label(tag), NoArgs);
-                    seg.item(SegmentItem {
-                        content: SegmentContent::Marked(env_kind(tag), label.clone()),
-                        pressed: p.environment == Some(tag),
-                        tooltip: label,
-                        a11y_name: None,
-                        on_click: Rc::new({
-                            let me = cx.weak_entity();
-                            move |_, window, cx| {
-                                let _ = me.update(cx, |d, cx| d.set_environment(tag, window, cx));
-                            }
-                        }),
-                    })
-                });
+        let envs = EnvTag::ALL.iter().fold(
+            Segmented::new("conn-env")
+                .in_well(true)
+                .inert(self.read_only),
+            |seg, &tag| {
+                let label = tr(cx, env_label(tag), NoArgs);
+                seg.item(SegmentItem {
+                    content: SegmentContent::Marked(env_kind(tag), label.clone()),
+                    pressed: p.environment == Some(tag),
+                    tooltip: label,
+                    a11y_name: None,
+                    on_click: Rc::new({
+                        let me = cx.weak_entity();
+                        move |_, window, cx| {
+                            let _ = me.update(cx, |d, cx| d.set_environment(tag, window, cx));
+                        }
+                    }),
+                })
+            },
+        );
         rows.push(
             Kind::Row,
             form_row(
@@ -1073,6 +1178,7 @@ impl ConnectionDialog {
                 Checkbox::new("conn-read-only", tr(cx, ids::hv::CONN_DLG_RO, NoArgs))
                     .sub_label(tr(cx, ids::hv::CONN_DLG_RO_HINT, NoArgs))
                     .checked(p.read_only)
+                    .disabled(self.read_only)
                     .focus_handle(self.focus.read_only.clone())
                     .on_toggle(move |on, window, cx| {
                         let _ = me.update(cx, |d, cx| {
@@ -1152,12 +1258,15 @@ impl ConnectionDialog {
                             "conn-sqlite-ro",
                             tr(cx, ids::hv::CONN_DLG_SQLITE_RO, NoArgs),
                         )
-                        .checked(p.read_only)
+                        .checked(sqlite_mode_ro(p))
+                        .disabled(self.read_only)
                         .focus_handle(self.focus.sqlite_ro.clone())
                         .on_toggle(move |on, window, cx| {
                             let _ = me_ro.update(cx, |d, cx| {
-                                // A SQLite file opened read-only is the profile's read-only.
-                                d.draft.profile.read_only = on;
+                                // The SQLite option `mode=ro`, apart from the Hacivat guard
+                                // (ruling A).
+                                set_sqlite_mode_ro(&mut d.draft.profile, on);
+                                d.rebuild_extra_rows(window, cx);
                                 d.after_edit(window, cx);
                             });
                         }),
@@ -1168,6 +1277,7 @@ impl ConnectionDialog {
                             tr(cx, ids::hv::CONN_DLG_SQLITE_CREATE, NoArgs),
                         )
                         .checked(create)
+                        .disabled(self.read_only)
                         .focus_handle(self.focus.sqlite_create.clone())
                         .on_toggle(move |on, window, cx| {
                             let _ = me_create.update(cx, |d, cx| {
@@ -1303,7 +1413,9 @@ impl ConnectionDialog {
             Self::section(theme, tr(cx, ids::hv::CONN_SECTION_AUTH, NoArgs)),
         );
         let auths = auth_choices(p.engine).into_iter().fold(
-            Segmented::new("conn-auth").in_well(true),
+            Segmented::new("conn-auth")
+                .in_well(true)
+                .inert(self.read_only),
             |seg, auth| {
                 seg.item(SegmentItem {
                     content: SegmentContent::Label(tr(cx, auth_label(auth), NoArgs)),
@@ -1430,11 +1542,8 @@ impl ConnectionDialog {
                     rows.push(Kind::Row, form_row(theme, tr(cx, label, NoArgs), row));
                     self.issue_rows(rows, field, theme, cx);
                 }
-                let row = self.secret_row(Field::KeyPass, theme, window, cx);
-                rows.push(
-                    Kind::Row,
-                    form_row(theme, tr(cx, ids::hv::CONN_DLG_KEY_PASS, NoArgs), row),
-                );
+                // The key passphrase field stays hidden until hacivat-net reads encrypted keys
+                // (ruling B); a pasted `sslpassword` is still kept as `TlsKeyPassphrase`.
             }
             AuthProviderId::None => {
                 rows.push(
@@ -1660,6 +1769,7 @@ impl ConnectionDialog {
                         .kind(ButtonKind::Icon)
                         .icon(IconName::X)
                         .focus_handle(row.remove.clone())
+                        .disabled(self.read_only)
                         .on_click(cx.listener(
                             move |this, _, window, cx| this.remove_extra_row(i, window, cx),
                         )),
@@ -1675,6 +1785,7 @@ impl ConnectionDialog {
                 .kind(ButtonKind::Ghost)
                 .icon(IconName::Plus)
                 .focus_handle(self.focus.add_extra.clone())
+                .disabled(self.read_only)
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.push_extra_row("", "", window, cx);
                     if let Some(row) = this.extras.last() {
@@ -1709,4 +1820,11 @@ impl ConnectionDialog {
             div().track_focus(&self.focus.advanced).child(disclosure),
         );
     }
+}
+
+/// The Escape key as the active keymap writes it (the Stop hint).
+fn escape_label(cx: &App) -> Option<SharedString> {
+    let active = cx.try_global::<crate::shell::ActiveKeymap>()?;
+    let chord = hacivat_ui_core::keymap::parse_chord("escape").ok()?;
+    Some(hacivat_ui_core::keymap::display_chord(&chord, active.platform).into())
 }

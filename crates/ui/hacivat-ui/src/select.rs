@@ -110,6 +110,12 @@ impl Select {
         self.menu.is_some()
     }
 
+    // ## m2a-t17-dialog
+    /// The choices as given (their labels, hints and disabled flags).
+    pub fn options(&self) -> &[SelectOption] {
+        &self.options
+    }
+
     fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu.is_some() || self.options.is_empty() {
             return;

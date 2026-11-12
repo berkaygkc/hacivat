@@ -39,15 +39,19 @@ use super::ConnectionDialog;
 use super::form::{Field, tls_label};
 use crate::l10n_global::tr;
 
+/// What the Display URL shows where a secret is (`hacivat_driver::url::render`).
+const DISPLAY_MASK: &str = "****";
+
 /// How long pasted fields keep the tint before it fades (NOTES cross-cutting #7).
 pub(crate) const TINT_HOLD: Duration = Duration::from_millis(1600);
 /// How long the tint takes to fade.
 pub(crate) const TINT_FADE: Duration = Duration::from_millis(240);
 
-/// The paste filter of `field` (P16).
-pub(crate) fn paste_filter(field: Field, dialog: WeakEntity<ConnectionDialog>) -> PasteFilter {
+/// The paste filter of a field (P16): `parse_all` (the URL row) takes every paste; any other
+/// field takes only text that looks like a connection.
+pub(crate) fn paste_filter(parse_all: bool, dialog: WeakEntity<ConnectionDialog>) -> PasteFilter {
     Rc::new(move |text: &str, window: &mut Window, cx: &mut App| {
-        if field != Field::Url && !looks_like_connection(text) {
+        if !parse_all && !looks_like_connection(text) {
             return false;
         }
         // The text may carry a password: it travels as a secret, and the field (leased while
@@ -137,20 +141,62 @@ impl ConnectionDialog {
     /// engine of a form with input, or says the text is not a connection.
     pub(crate) fn apply_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         match parse(text, Some(self.draft.profile.engine)) {
-            ParseResult::Unrecognised(_) => self.notice = Some(Notice::Unrecognised),
-            ParseResult::Recognised(outcome) => {
-                let form = self.draft.profile.engine;
-                if outcome.kind != form && !self.draft.touched.is_empty() {
-                    // HV-DRV-04: never switch a form with input silently.
-                    self.notice = Some(Notice::Switch {
-                        url: outcome.kind,
-                        form,
-                        outcome: Box::new(outcome),
-                    });
-                } else {
-                    self.fill(outcome, false, window, cx);
-                }
+            ParseResult::Unrecognised(_) => {
+                self.notice = Some(Notice::Unrecognised);
+                cx.notify();
             }
+            ParseResult::Recognised(outcome) => self.apply_outcome(outcome, window, cx),
+        }
+    }
+
+    /// The URL row's own text, edited: the row shows `****` where a password is, so a secret
+    /// whose value is that mask is the current secret, never a new one (it is dropped and the
+    /// draft's password or passphrase stays).
+    pub(crate) fn apply_row_text(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match parse(text, Some(self.draft.profile.engine)) {
+            ParseResult::Unrecognised(_) => {
+                self.notice = Some(Notice::Unrecognised);
+                cx.notify();
+            }
+            ParseResult::Recognised(mut outcome) => {
+                outcome
+                    .secrets
+                    .retain(|(_, s)| s.expose_secret() != DISPLAY_MASK);
+                if outcome
+                    .tls_key_passphrase
+                    .as_ref()
+                    .is_some_and(|s| s.expose_secret() == DISPLAY_MASK)
+                {
+                    outcome.tls_key_passphrase = None;
+                }
+                self.apply_outcome(outcome, window, cx);
+            }
+        }
+    }
+
+    /// Applies a recognised outcome: fills the form, or asks before switching the engine of a
+    /// form with input.
+    fn apply_outcome(
+        &mut self,
+        outcome: ParseOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let form = self.draft.profile.engine;
+        if outcome.kind != form && !self.draft.touched.is_empty() {
+            // HV-DRV-04: never switch a form with input silently.
+            self.notice = Some(Notice::Switch {
+                url: outcome.kind,
+                form,
+                outcome: Box::new(outcome),
+            });
+        } else {
+            self.fill(outcome, false, window, cx);
         }
         cx.notify();
     }
@@ -170,7 +216,18 @@ impl ConnectionDialog {
             ParseWarning::MultipleHosts { used, dropped } => Some((used.clone(), dropped + 1)),
             _ => None,
         });
+        let read_only_before = self.draft.profile.read_only;
         let report = apply_parse(&mut self.draft, outcome, force);
+        // SQLite `mode=ro` is the file option "Open the file read-only", not the Hacivat guard
+        // (ruling A): the guard keeps its value, the option is set.
+        if self.draft.profile.engine == hacivat_proto::DbmsKind::Sqlite
+            && mapped
+                .iter()
+                .any(|m| matches!(m.to, MappedTo::ReadOnly(true)))
+        {
+            self.draft.profile.read_only = read_only_before;
+            super::form::set_sqlite_mode_ro(&mut self.draft.profile, true);
+        }
         let engine_set = match report.engine {
             Some(EngineChange::Switched { to, .. }) => Some(to),
             _ => None,

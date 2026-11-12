@@ -45,12 +45,14 @@ impl ConnectionDialog {
     }
 
     /// The row's text was submitted, or the row lost the focus: a text that differs from the
-    /// mirror is applied as a paste (the mock's `change`).
+    /// mirror is applied as a paste (the mock's `change`), keeping the secrets the mask stands
+    /// for.
     pub(crate) fn apply_url_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.inputs[&Field::Url].read(cx).value().to_string();
         if text.trim().is_empty() || text == self.mirrored_url() {
             return;
         }
-        self.apply_text(&text, window, cx);
+        // The row's `****` stands for the current secret, never a new one.
+        self.apply_row_text(&text, window, cx);
     }
 }

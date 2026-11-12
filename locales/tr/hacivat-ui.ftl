@@ -269,8 +269,6 @@ hv-conn-dlg-cert = Sertifika
 # Review: PO
 hv-conn-dlg-key = Özel anahtar
 # Review: PO
-hv-conn-dlg-key-pass = Anahtar parolası
-# Review: PO
 hv-conn-auth-none-note = Parolasız bağlanır. Yalnızca bu makineye güvenen sunucularda kullanın.
 # Review: PO
 hv-conn-tls-sum-auto = Otomatik: sunucu TLS sunarsa doğrula

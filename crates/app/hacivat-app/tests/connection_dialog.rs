@@ -84,6 +84,8 @@ fn open_edit_saved(
         port: None,
     };
     draft.profile.retention = retention;
+    draft.profile.user = Some("deploy".to_string());
+    draft.profile.database = Some("orders".to_string());
     draft.password = Some(SecretString::from("hv_test_pw".to_string()));
     let id = draft.profile.id;
     vcx.cx
@@ -194,12 +196,30 @@ fn draft_tls_mode(vcx: &VisualTestContext) -> TlsMode {
     read(vcx, |d, _| d.profile().tls.mode)
 }
 
+/// Whether the TLS mode Select offers `mode` disabled: the option list the Select itself holds.
 fn tls_option_disabled(vcx: &VisualTestContext, mode: TlsMode) -> bool {
-    read(vcx, |d, _| d.tls_option_disabled(mode))
+    let at = [
+        TlsMode::Auto,
+        TlsMode::Require,
+        TlsMode::VerifyCa,
+        TlsMode::VerifyFull,
+        TlsMode::Disable,
+    ]
+    .iter()
+    .position(|m| *m == mode)
+    .expect("a mode of the select");
+    let select = read(vcx, |d, _| d.tls_select());
+    vcx.cx.read(|cx| select.read(cx).options()[at].disabled)
 }
 
+/// Whether the Remember Select offers `retention` disabled (its own option list).
 fn remember_option_disabled(vcx: &VisualTestContext, retention: Retention) -> bool {
-    read(vcx, |d, _| d.remember_option_disabled(retention))
+    let at = Retention::ALL
+        .iter()
+        .position(|r| *r == retention)
+        .expect("a retention");
+    let select = read(vcx, |d, _| d.remember_select());
+    vcx.cx.read(|cx| select.read(cx).options()[at].disabled)
 }
 
 fn focused_field(vcx: &VisualTestContext) -> String {
@@ -784,19 +804,28 @@ fn save_and_connect_saves_then_connects(cx: &mut TestAppContext) {
 fn a_read_only_store_explains_and_saves_nothing(cx: &mut TestAppContext) {
     let vcx = shell_with_connections_file(cx, "en", "version = 2\n");
     let vcx = open(vcx, DialogMode::New);
-    fill(vcx, &[("host", "localhost"), ("database", "shop")]);
+    let why = "Connections can't be saved now, because the connections file can't be written.";
+    // Explained from the start, before any save.
+    assert!(
+        notice_lines(vcx).contains(&why.to_string()),
+        "{:?}",
+        notice_lines(vcx)
+    );
+    // The fields take no input.
+    type_into(vcx, "host", "localhost");
+    assert_eq!(field(vcx, "host"), "");
+    assert!(read(vcx, |d, cx| d
+        .input("host")
+        .unwrap()
+        .read(cx)
+        .is_read_only()));
+    // Save does nothing but keep the explanation.
+    click(vcx, "conn-save");
     keys(vcx, &primary("s"));
     wait(vcx);
     assert!(profile_names(vcx).is_empty());
     assert_eq!(layer_ids(vcx), ["connection-dialog"]);
-    let lines = notice_lines(vcx);
-    assert!(
-        lines.contains(
-            &"Connections can't be saved now, because the connections file can't be written."
-                .to_string()
-        ),
-        "{lines:?}"
-    );
+    assert!(notice_lines(vcx).contains(&why.to_string()));
 }
 
 #[gpui::test]
@@ -811,4 +840,289 @@ fn a_pasted_password_never_reaches_the_url_row_or_the_clipboard(cx: &mut TestApp
         .map(|r| r.text.to_string())
         .collect();
     assert!(frame.iter().all(|t| !t.contains("s3cret")));
+}
+
+// ---- fix round 1 ---------------------------------------------------------------------------
+
+/// The URL row with its port set to `port` (the row's own text, edited).
+fn edit_row_port(vcx: &mut VisualTestContext, host: &str, port: &str) {
+    let row = url_row(vcx);
+    let edited = row.replacen(&format!("@{host}/"), &format!("@{host}:{port}/"), 1);
+    assert_ne!(row, edited, "the row names {host}");
+    set_field(vcx, "url", &edited);
+    keys(vcx, "enter");
+}
+
+#[gpui::test]
+fn editing_the_url_row_keeps_the_pasted_password(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    paste_into(vcx, "host", "postgres://deploy:s3cret@db.acme.io/orders");
+    let before = password_value(vcx);
+    assert!(!before.is_empty());
+    edit_row_port(vcx, "db.acme.io", "6000");
+    assert_eq!(field(vcx, "port"), "6000");
+    // The row's `****` is never taken as a new password.
+    assert_eq!(password_value(vcx), before);
+    assert_ne!(password_value(vcx), "****");
+}
+
+#[gpui::test]
+fn editing_the_url_row_in_edit_mode_keeps_the_stored_password(cx: &mut TestAppContext) {
+    let vcx = open_edit_saved(cx, "orders-prod", Retention::Forever);
+    assert!(url_row(vcx).contains(":****@"), "{}", url_row(vcx));
+    edit_row_port(vcx, "db-prod.acme.io", "6000");
+    assert_eq!(field(vcx, "port"), "6000");
+    assert_eq!(password_value(vcx), "");
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    let id = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().profiles()[0].id);
+    let stored = secret_backend(vcx)
+        .get(&SecretKey {
+            profile: id,
+            slot: SecretSlot::DbPassword,
+        })
+        .expect("the backend answers")
+        .expect("the stored password is still there");
+    use secrecy::ExposeSecret as _;
+    assert_ne!(stored.expose_secret(), "****");
+    assert_eq!(read_port(vcx), Some(6000));
+}
+
+fn read_port(vcx: &VisualTestContext) -> Option<u16> {
+    vcx.cx.read(
+        |cx| match &cx.global::<ConnectionsModel>().profiles()[0].endpoint {
+            ProfileEndpoint::Server { port, .. } => *port,
+            _ => None,
+        },
+    )
+}
+
+#[gpui::test]
+fn machine_text_is_mono_and_secrets_and_placeholders_are_not(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    fill(vcx, &[("host", "db.acme.io"), ("password", "pw")]);
+    vcx.run_until_parked();
+    let family = |vcx: &VisualTestContext, name: &str| {
+        read(vcx, |d, cx| {
+            d.input(name).unwrap().read(cx).painted_family().to_string()
+        })
+    };
+    assert_eq!(family(vcx, "host"), "Fragment Mono");
+    // The URL row mirrors the host: mono too.
+    assert_eq!(family(vcx, "url"), "Fragment Mono");
+    assert_ne!(family(vcx, "password"), "Fragment Mono");
+    // An empty field shows its placeholder in the sans face.
+    assert_ne!(family(vcx, "database"), "Fragment Mono");
+}
+
+#[gpui::test]
+fn a_url_pasted_into_an_extra_property_fills_the_form(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    click_selector(vcx, "disclosure-conn-advanced");
+    click(vcx, "conn-extra-add");
+    let key = read(vcx, |d, _| d.extra_keys())
+        .pop()
+        .expect("an extra row");
+    let handle = vcx.cx.read(|cx| key.focus_handle(cx));
+    in_window(vcx, |window, cx| window.focus(&handle, cx));
+    vcx.cx.write_to_clipboard(ClipboardItem::new_string(
+        "postgres://u@db.acme.io/shop".to_string(),
+    ));
+    keys(vcx, &primary("v"));
+    assert_eq!(field(vcx, "host"), "db.acme.io");
+    assert_eq!(field(vcx, "database"), "shop");
+}
+
+#[gpui::test]
+fn sqlite_read_only_and_open_read_only_are_two_controls(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    choose_engine(vcx, DbmsKind::Sqlite);
+    click_selector(vcx, "checkbox-conn-sqlite-ro");
+    let (guard, mode_ro) = read(vcx, |d, _| {
+        let p = d.profile();
+        (
+            p.read_only,
+            p.extra.contains(&("mode".to_string(), "ro".to_string())),
+        )
+    });
+    assert_eq!((guard, mode_ro), (false, true));
+    click_selector(vcx, "checkbox-conn-read-only");
+    let (guard, extras) = read(vcx, |d, _| {
+        (d.profile().read_only, d.profile().extra.clone())
+    });
+    assert!(guard);
+    assert_eq!(extras, [("mode".to_string(), "ro".to_string())]);
+    click_selector(vcx, "checkbox-conn-sqlite-ro");
+    assert!(read(vcx, |d, _| d.profile().extra.is_empty()
+        && d.profile().read_only));
+}
+
+#[gpui::test]
+fn creating_a_file_opened_read_only_is_an_issue(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    choose_engine(vcx, DbmsKind::Sqlite);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("new.db");
+    type_into(vcx, "file", &path.to_string_lossy());
+    click_selector(vcx, "checkbox-conn-sqlite-create");
+    click_selector(vcx, "checkbox-conn-sqlite-ro");
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    assert_eq!(
+        issue_under(vcx, "file"),
+        Some("A new file can't be opened read-only. Turn one of the two off.".into())
+    );
+    assert!(profile_names(vcx).is_empty());
+}
+
+#[gpui::test]
+fn client_certificate_has_no_passphrase_field_and_a_pasted_one_is_kept(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    click_selector(vcx, "segmented-conn-auth-2");
+    assert_eq!(
+        read(vcx, |d, _| d.profile().auth),
+        hacivat_secrets::AuthProviderId::ClientCert
+    );
+    assert!(has_field(vcx, "cert") && has_field(vcx, "key") && !has_field(vcx, "key-pass"));
+    // Leaving Client certificate drops its files.
+    type_into(vcx, "cert", "/tmp/hv-client.crt");
+    click_selector(vcx, "segmented-conn-auth-0");
+    assert!(read(vcx, |d, _| d.profile().tls.client_cert.is_none()));
+    assert_eq!(field(vcx, "cert"), "");
+    // A pasted `sslpassword` is still kept as the TLS key passphrase (ruling B).
+    paste_into(
+        vcx,
+        "host",
+        "postgres://u@localhost/shop?sslpassword=hv_test_pw",
+    );
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    let id = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().profiles()[0].id);
+    let kept = secret_backend(vcx)
+        .get(&SecretKey {
+            profile: id,
+            slot: SecretSlot::TlsKeyPassphrase,
+        })
+        .expect("the backend answers");
+    assert!(kept.is_some());
+}
+
+/// Every label drawn with ID `id`.
+fn labels(vcx: &VisualTestContext, id: &str) -> Vec<String> {
+    let needle = format!("#{id}");
+    registry_frame(vcx)
+        .into_iter()
+        .filter(|r| r.path.ends_with(&needle))
+        .map(|r| r.text.to_string())
+        .collect()
+}
+
+/// Opens the Edit dialog of a saved profile changed by `change` first.
+fn open_edit_with(
+    cx: &mut TestAppContext,
+    change: impl FnOnce(&mut hacivat_session::profile::Profile),
+) -> &'static mut VisualTestContext {
+    let vcx = shell_with_connections(cx, "en");
+    let mut draft = ProfileDraft::new();
+    draft.profile.name = "certs".to_string();
+    draft.profile.environment = Some(EnvTag::Dev);
+    draft.profile.endpoint = ProfileEndpoint::Server {
+        host: "db.acme.io".to_string(),
+        port: None,
+    };
+    change(&mut draft.profile);
+    let id = draft.profile.id;
+    vcx.cx
+        .update(|cx| ConnectionsModel::save(cx, draft).detach());
+    settle(vcx, Duration::from_millis(100));
+    open(vcx, DialogMode::Edit(id))
+}
+
+#[gpui::test]
+fn a_refused_certificate_path_shows_under_the_certificate(cx: &mut TestAppContext) {
+    let vcx = open_edit_with(cx, |p| {
+        p.auth = hacivat_secrets::AuthProviderId::ClientCert;
+        p.origin = hacivat_proto::Origin::DeepLink;
+        p.tls.client_cert = Some(hacivat_net::ClientCertPaths {
+            cert: "/hv-outside-roots/client.crt".into(),
+            key: "/hv-outside-roots/client.key".into(),
+        });
+    });
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    let refused = "Hacivat won't open this path. Choose a local file.";
+    assert!(
+        labels(vcx, "issue-cert").contains(&refused.to_string()),
+        "{:?}",
+        labels(vcx, "issue-cert")
+    );
+    assert!(!notice_lines(vcx).contains(&refused.to_string()));
+}
+
+#[gpui::test]
+fn an_issue_of_a_hidden_field_goes_to_the_top(cx: &mut TestAppContext) {
+    let vcx = open_edit_with(cx, |p| {
+        p.tls.client_cert = Some(hacivat_net::ClientCertPaths {
+            cert: "/hv-missing/client.crt".into(),
+            key: "/hv-missing/client.key".into(),
+        });
+    });
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    assert!(labels(vcx, "issue-cert").is_empty());
+    assert!(
+        notice_lines(vcx).contains(&"The client certificate or its key can't be read.".to_string()),
+        "{:?}",
+        notice_lines(vcx)
+    );
+}
+
+#[gpui::test]
+fn a_lost_validation_is_a_failed_save(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    let d = dialog(vcx);
+    in_window(vcx, |_, cx| d.update(cx, |d, cx| d.validation_lost(cx)));
+    vcx.run_until_parked();
+    assert!(!read(vcx, |d, _| d.is_saving()));
+    assert!(
+        notice_lines(vcx).contains(&"The connection couldn't be saved. Try again.".to_string())
+    );
+}
+
+#[gpui::test]
+fn closing_removes_the_dialog_layer_even_under_another_layer(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    let d = dialog(vcx);
+    push_test_layer(vcx, "probe", "Test");
+    assert_eq!(layer_ids(vcx), ["connection-dialog", "probe"]);
+    vcx.cx.update(|cx| {
+        d.update(cx, |_, cx| {
+            cx.emit(hacivat_app::connections::dialog::ConnectionDialogEvent::Closed)
+        })
+    });
+    vcx.run_until_parked();
+    assert_eq!(layer_ids(vcx), ["probe"]);
+}
+
+#[gpui::test]
+fn rebuilding_extra_rows_drops_their_subscriptions(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    paste_into(vcx, "url", "postgres://u@db.acme.io/shop?foo=1&bar=2");
+    let first = read(vcx, |d, _| d.subscription_count());
+    for _ in 0..3 {
+        paste_into(vcx, "url", "postgres://u@db.acme.io/shop?foo=1&bar=2");
+    }
+    assert_eq!(read(vcx, |d, _| d.subscription_count()), first);
+}
+
+#[test]
+fn a_pasted_text_never_shows_in_debug() {
+    let mode = DialogMode::NewFromText("postgres://u:s3cret@h/db".to_string());
+    let shown = format!("{mode:?}");
+    assert!(!shown.contains("s3cret"), "{shown}");
+    assert_eq!(shown, "NewFromText(<redacted>)");
 }

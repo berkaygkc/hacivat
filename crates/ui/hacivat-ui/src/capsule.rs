@@ -60,6 +60,17 @@ pub enum EnvKind {
 /// - test: a filled `text-2` circle (●).
 ///
 /// `Other` has no mark (an empty 0 px element).
+// ## m2a-t17-dialog
+/// [`env_swatch`] on a raised surface (a dialog): the local mark's outline is `text-2`, never
+/// text-3 (DESIGN.md Raised Ink Rule); every other mark is unchanged.
+pub fn env_swatch_on_raised(kind: EnvKind, theme: &Theme) -> Div {
+    let swatch = env_swatch(kind, theme);
+    match kind {
+        EnvKind::Local => swatch.border_color(theme.tokens.colors.text_2.to_hsla()),
+        _ => swatch,
+    }
+}
+
 pub fn env_swatch(kind: EnvKind, theme: &Theme) -> Div {
     let c = &theme.tokens.colors;
     let base = div().size(px(MARK_PX)).flex_none();
@@ -559,5 +570,32 @@ impl Capsule {
             node = node.description(description);
         }
         node.into_any_element()
+    }
+}
+
+// ## m2a-t17-dialog
+#[cfg(test)]
+mod raised_swatch_tests {
+    use super::*;
+    use hacivat_ui_core::theme::{DARK, ThemeMode};
+
+    #[test]
+    fn the_local_mark_on_a_raised_surface_is_outlined_in_text_2() {
+        let theme = Theme::new(ThemeMode::Dark);
+        let mut raised = env_swatch_on_raised(EnvKind::Local, &theme);
+        assert_eq!(
+            raised.style().border_color,
+            Some(DARK.colors.text_2.to_hsla())
+        );
+        let mut plain = env_swatch(EnvKind::Local, &theme);
+        assert_eq!(
+            plain.style().border_color,
+            Some(DARK.colors.text_3.to_hsla())
+        );
+        let mut staging = env_swatch_on_raised(EnvKind::Staging, &theme);
+        assert_eq!(
+            staging.style().border_color,
+            Some(DARK.colors.text_2.to_hsla())
+        );
     }
 }

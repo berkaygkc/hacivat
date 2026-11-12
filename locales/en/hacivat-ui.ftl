@@ -253,7 +253,6 @@ hv-conn-pgpass-none = No line of ~/.pgpass matches this connection yet.
 hv-conn-pgpass-note = Read on every connect. { -brand-hacivat } stores no password for this connection.
 hv-conn-dlg-cert = Certificate
 hv-conn-dlg-key = Private key
-hv-conn-dlg-key-pass = Key passphrase
 hv-conn-auth-none-note = Connects without a password. Use only for servers that trust this machine.
 # Summary of the folded encryption section in Auto mode.
 hv-conn-tls-sum-auto = Auto: verify when the server offers TLS

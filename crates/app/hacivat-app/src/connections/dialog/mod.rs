@@ -65,13 +65,24 @@ pub const DIALOG_CONTEXT: &str = "ConnectionDialog";
 /// Where "Supported versions" points (R11; a placeholder URL, an open item for the PO).
 pub const SUPPORTED_VERSIONS_URL: &str = "https://hacivat.dev/docs/engines";
 
-/// What the dialog opens on (NOTES surface 1).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// What the dialog opens on (NOTES surface 1). `Debug` never shows the pasted text: it may
+/// carry a password.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum DialogMode {
     New,
     /// A new profile prefilled from pasted connection text.
     NewFromText(String),
     Edit(ProfileId),
+}
+
+impl std::fmt::Debug for DialogMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DialogMode::New => f.write_str("New"),
+            DialogMode::NewFromText(_) => f.write_str("NewFromText(<redacted>)"),
+            DialogMode::Edit(id) => f.debug_tuple("Edit").field(id).finish(),
+        }
+    }
 }
 
 /// What the dialog emits: it wants its layer closed.
@@ -80,9 +91,10 @@ pub enum ConnectionDialogEvent {
     Closed,
 }
 
-/// What the dialog needs from the boot (T16 ruling A): the approved roots a picked file joins,
-/// and the pgpass file connects read. `boot::install` sets it; without it the dialog approves
-/// into a private list and reads no pgpass file.
+/// What the dialog needs from the boot (T16 ruling A): the approved roots a picked file joins
+/// (the same list `ConnectDeps` checks), and the pgpass file connects read. `boot::install`
+/// sets it. Without it (a shell booted without connections) a picked file is approved nowhere,
+/// a save validates with the user's home as the only root, and no pgpass line is looked up.
 pub struct DialogEnv {
     pub approved_roots: ApprovedRoots,
     pub pgpass: Option<PathBuf>,
@@ -166,11 +178,12 @@ impl Focus {
     }
 }
 
-/// One extra property row (Advanced).
+/// One extra property row (Advanced). Its subscriptions go with it.
 pub(crate) struct ExtraRow {
     pub(crate) key: Entity<TextInput>,
     pub(crate) value: Entity<TextInput>,
     pub(crate) remove: FocusHandle,
+    _subscriptions: Vec<Subscription>,
 }
 
 /// The connection dialog (NOTES surfaces 1 and 2).
@@ -200,6 +213,8 @@ pub struct ConnectionDialog {
     pub(crate) keyring_available: bool,
     pub(crate) pgpass: Option<PgPassState>,
     pub(crate) saving: bool,
+    /// `connections.toml` cannot be written: fields are read-only, Save is disabled.
+    pub(crate) read_only: bool,
     pub(crate) focus: Focus,
     subscriptions: Vec<Subscription>,
 }
@@ -253,9 +268,8 @@ pub fn open_connection_dialog(mode: DialogMode, window: &mut Window, cx: &mut Ap
             window,
             |ws, dialog, _: &ConnectionDialogEvent, window, cx| {
                 let keep = dialog.clone();
-                if ws.layer_ids().last() == Some(&DIALOG_LAYER_ID) {
-                    ws.pop_layer(window, cx);
-                }
+                // By its view: another layer (the environment prompt) may sit on top.
+                ws.remove_layer(dialog.entity_id(), window, cx);
                 cx.defer(move |_| drop(keep));
             },
         )
@@ -448,6 +462,18 @@ impl ConnectionDialog {
             ));
             inputs.insert(field, input);
         }
+        // Machine text is mono (the mock's `.in.mono`); a store that cannot be written makes
+        // every field read-only, and the form says why from the start.
+        let read_only = cx
+            .try_global::<ConnectionsModel>()
+            .is_some_and(|m| m.store_read_only());
+        for (field, input) in &inputs {
+            let mono = field.mono();
+            input.update(cx, |i, _| {
+                i.set_mono(mono);
+                i.set_read_only(read_only);
+            });
+        }
         // The password placeholder is a message only while a stored password stands behind it.
         if has_stored_password {
             inputs[&Field::Password]
@@ -478,9 +504,10 @@ impl ConnectionDialog {
             undo: None,
             tint: None,
             issues: Vec::new(),
-            problem: None,
+            problem: read_only.then_some(SaveProblem::StoreReadOnly),
             keyring_available: true,
             pgpass: None,
+            read_only,
             saving: false,
             focus: Focus::new(cx),
             subscriptions,
@@ -532,6 +559,26 @@ impl ConnectionDialog {
     /// Whether a save is in flight (validating, asking for an environment, or writing).
     pub fn is_saving(&self) -> bool {
         self.saving
+    }
+
+    /// The TLS mode select.
+    pub fn tls_select(&self) -> Entity<Select> {
+        self.tls_mode.clone()
+    }
+
+    /// How many subscriptions the dialog and its extra rows hold.
+    pub fn subscription_count(&self) -> usize {
+        self.subscriptions.len()
+            + self
+                .extras
+                .iter()
+                .map(|r| r._subscriptions.len())
+                .sum::<usize>()
+    }
+
+    /// The extra properties' key inputs, in order.
+    pub fn extra_keys(&self) -> Vec<Entity<TextInput>> {
+        self.extras.iter().map(|r| r.key.clone()).collect()
     }
 
     /// The Remember select.
@@ -722,7 +769,11 @@ impl ConnectionDialog {
         if let Some(id) = touched {
             self.draft.touched.insert(id);
         }
-        self.issues.retain(|i| !form::issue_belongs_to(i, field));
+        let issues = std::mem::take(&mut self.issues);
+        self.issues = issues
+            .into_iter()
+            .filter(|i| self.issue_field(i, cx) != Some(field))
+            .collect();
         if let Some(tint) = &mut self.tint {
             tint.fields.retain(|f| *f != field);
         }
@@ -815,7 +866,14 @@ impl ConnectionDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let leaving_cert = self.draft.profile.auth == AuthProviderId::ClientCert
+            && auth != AuthProviderId::ClientCert;
         self.draft.profile.auth = auth;
+        if leaving_cert {
+            // The client certificate belongs to that sign-in method only.
+            self.draft.profile.tls.client_cert = None;
+            self.write_fields(cx);
+        }
         self.after_edit(window, cx);
     }
 
@@ -859,16 +917,15 @@ impl ConnectionDialog {
         p
     }
 
-    /// A draft of `profile` with the secrets its sign-in method uses.
+    /// A draft of `profile` with its password (when it signs in with one) and the TLS key
+    /// passphrase a pasted `sslpassword` gave (kept as `TlsKeyPassphrase`; the field is hidden
+    /// until encrypted keys are supported, ruling B).
     fn draft_of(&self, profile: Profile) -> ProfileDraft {
         let password = match profile.auth {
             AuthProviderId::Password => self.draft.password.clone(),
             _ => None,
         };
-        let tls_key_passphrase = match profile.auth {
-            AuthProviderId::ClientCert => self.draft.tls_key_passphrase.clone(),
-            _ => None,
-        };
+        let tls_key_passphrase = self.draft.tls_key_passphrase.clone();
         ProfileDraft {
             profile,
             password,
@@ -887,10 +944,17 @@ impl ConnectionDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let read_only = self.read_only;
+        let me = cx.weak_entity();
         let make = |placeholder: TextFn, text: &str, cx: &mut Context<Self>| {
+            let filter = paste::paste_filter(false, me.clone());
             let input = cx.new(|cx| {
                 let mut i = TextInput::new(cx, placeholder);
                 i.set_value(text.to_string());
+                i.set_mono(true);
+                i.set_read_only(read_only);
+                // Paste works in every field (R21): a connection URL fills the form.
+                i.set_paste_filter(Some(filter));
                 i
             });
             let handle = input.read(cx).focus_handle(cx);
@@ -899,8 +963,9 @@ impl ConnectionDialog {
         };
         let key_input = make(text_fn(ids::hv::CONN_ADV_EXTRA_KEY), key, cx);
         let value_input = make(text_fn(ids::hv::CONN_ADV_EXTRA_VALUE), value, cx);
+        let mut subscriptions = Vec::new();
         for input in [&key_input, &value_input] {
-            self.subscriptions.push(cx.subscribe_in(
+            subscriptions.push(cx.subscribe_in(
                 input,
                 window,
                 |this, _, event: &InputEvent, window, cx| match event {
@@ -914,6 +979,7 @@ impl ConnectionDialog {
             key: key_input,
             value: value_input,
             remove: cx.focus_handle().tab_stop(true),
+            _subscriptions: subscriptions,
         });
     }
 
@@ -1128,7 +1194,7 @@ impl ConnectionDialog {
                 let field = self
                     .issues
                     .iter()
-                    .find_map(form::field_of_issue)
+                    .find_map(|i| self.issue_field(i, cx))
                     .unwrap_or(Field::Host);
                 self.focus_field(field, window, cx);
             }
@@ -1191,7 +1257,7 @@ impl ConnectionDialog {
         let Some(model) = cx.try_global::<ConnectionsModel>() else {
             return;
         };
-        if model.store_read_only() {
+        if model.store_read_only() || self.read_only {
             self.problem = Some(SaveProblem::StoreReadOnly);
             cx.notify();
             return;
@@ -1210,12 +1276,22 @@ impl ConnectionDialog {
         });
         self.saving = true;
         cx.spawn_in(window, async move |this, cx| {
-            let issues = rx.await.unwrap_or_default();
-            let _ = this.update_in(cx, |d, window, cx| {
-                d.validated(profile, issues, connect, window, cx)
+            let checked = rx.await;
+            let _ = this.update_in(cx, |d, window, cx| match checked {
+                Ok(issues) => d.validated(profile, issues, connect, window, cx),
+                // Validation never answered (it panicked, or the runtime is gone): that is a
+                // failed save, never "no issues".
+                Err(_) => d.validation_lost(cx),
             });
         })
         .detach();
+    }
+
+    /// Validation never answered (it panicked, or the core runtime is gone): the save failed.
+    pub fn validation_lost(&mut self, cx: &mut Context<Self>) {
+        self.saving = false;
+        self.problem = Some(SaveProblem::Failed);
+        cx.notify();
     }
 
     fn validated(
@@ -1226,11 +1302,24 @@ impl ConnectionDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mut issues = issues;
+        if let Some(issue) = form::sqlite_mode_issue(&profile)
+            && !issues.contains(&issue)
+        {
+            issues.push(issue);
+        }
         if !issues.is_empty() {
             self.saving = false;
-            self.open_tls |= issues.iter().any(form::is_tls_issue);
-            self.open_adv |= issues.iter().any(form::is_option_issue);
             self.issues = issues;
+            let fields: Vec<_> = self
+                .issues
+                .iter()
+                .filter_map(|i| self.issue_field(i, cx))
+                .collect();
+            self.open_tls |= fields.contains(&Field::Ca);
+            self.open_adv |= fields
+                .iter()
+                .any(|f| matches!(f, Field::Timeout | Field::AppName));
             cx.notify();
             return;
         }
