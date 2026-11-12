@@ -1126,8 +1126,8 @@ pub(crate) fn set_theme(cx: &mut App, pref: ThemePref) {
 
 /// The title bar's language control: a `Segmented` with one segment per catalog `short_name`
 /// (11.5 px mono, DESIGN.md Segmented Controls). The names are catalog data, not messages, so the
-/// segments are `Verbatim`; the tooltip and accessible name of a segment is the language's
-/// native name. Focusable and keyboard-operable like every `Segmented`.
+/// segments are `Verbatim`; the tooltip and the accessible name of a segment is the language's
+/// native name (the visible short name `TR` is announced as `Türkçe`). Focusable and keyboard-operable like every `Segmented`.
 fn language_switch(cx: &App) -> AnyElement {
     let mut group = Segmented::new("language-switch").mono(true);
     for choice in language_choices(cx) {
@@ -1135,6 +1135,7 @@ fn language_switch(cx: &App) -> AnyElement {
         group = group.item(SegmentItem {
             content: SegmentContent::Verbatim(choice.short_name),
             pressed: choice.active,
+            a11y_name: Some(choice.native_name.clone()),
             tooltip: choice.native_name,
             on_click: Rc::new(move |_, _, cx| set_language(cx, &tag)),
         });
@@ -1148,6 +1149,7 @@ fn theme_switch(theme: &Theme, cx: &App) -> AnyElement {
         content: SegmentContent::Icon(icon),
         pressed,
         tooltip,
+        a11y_name: None,
         on_click: Rc::new(move |_, _, cx| set_theme(cx, pref)),
     };
     Segmented::new("theme-switch")

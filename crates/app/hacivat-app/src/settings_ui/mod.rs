@@ -39,7 +39,10 @@ pub const SETTINGS_KIND: &str = "settings";
 /// The key context while the settings tab is active.
 pub const SETTINGS_CONTEXT: &str = "Settings";
 
-/// The navigation column.
+// DESIGN.md describes no settings page, so these three are this page's own sizes (no token
+// carries them). Rows are form rows built on the 26 px field/segmented height and the spacing
+// tokens, not the 22 px key/value rows of the connection panel and inspector.
+/// The navigation column (a little narrower than the 276 px explorer).
 const NAV_WIDTH_PX: f32 = 176.0;
 /// The column the setting titles sit in.
 const TITLE_COLUMN_PX: f32 = 200.0;
@@ -78,6 +81,8 @@ pub struct SettingsPage {
     query: String,
     section: Section,
     nav_focus: Vec<FocusHandle>,
+    /// The searchable titles, rebuilt only when the localization generation changes.
+    search_rows: Option<(u64, Vec<SearchRow>)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -95,12 +100,13 @@ impl SettingsPage {
             query: String::new(),
             section: Section::General,
             nav_focus: Section::ALL.iter().map(|_| cx.focus_handle()).collect(),
+            search_rows: None,
             _subscriptions: vec![subscription],
         }
     }
 
     /// The keys of the rows to show: the selected section's, or every match of the search.
-    fn visible_keys(&self, cx: &App) -> Vec<&'static str> {
+    fn visible_keys(&mut self, cx: &App) -> Vec<&'static str> {
         let all = settings_rows();
         let Some(global) = cx.try_global::<L10nGlobal>() else {
             return all.iter().map(|r| r.key).collect();
@@ -113,8 +119,13 @@ impl SettingsPage {
                 .collect();
         }
         let l10n: &L10n = &global.l10n;
-        let searchable: Vec<SearchRow> = all.iter().map(|r| SearchRow::of(r, l10n)).collect();
-        filter_rows(&self.query, &searchable, &search_opts(l10n))
+        let generation = l10n.generation();
+        if self.search_rows.as_ref().map(|(g, _)| *g) != Some(generation) {
+            let rows = all.iter().map(|r| SearchRow::of(r, l10n)).collect();
+            self.search_rows = Some((generation, rows));
+        }
+        let rows = self.search_rows.as_ref().map_or(&[][..], |(_, r)| &r[..]);
+        filter_rows(&self.query, rows, &search_opts(l10n))
     }
 
     fn nav(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -197,6 +208,7 @@ impl SettingsPage {
                 content,
                 pressed: is_selected(key, &choice, &current),
                 tooltip,
+                a11y_name: None,
                 on_click: Rc::new(move |_, _, cx| {
                     rows::apply_choice(cx, key, &value);
                     cx.refresh_windows();
@@ -341,10 +353,10 @@ impl Render for SettingsPage {
                     .pl(px(t.spacing.xl))
                     .child(
                         Label::new(
-                            tr(cx, self.section.title(), NoArgs),
+                            tr(cx, self.section.heading(), NoArgs),
                             TextSource::Fluent,
-                            t.type_ramp.body_strong,
-                            c.text.to_hsla(),
+                            t.type_ramp.panel_title,
+                            c.text_2.to_hsla(),
                         )
                         .id("settings-section-title"),
                     ),
@@ -417,6 +429,7 @@ pub fn regional_preview_text(cx: &App) -> SharedString {
     let Some(global) = cx.try_global::<L10nGlobal>() else {
         return SharedString::new_static(ids::hv::SETTINGS_REGIONAL_PREVIEW.id);
     };
+    // follow-up: (Number) -> ExactDecimal arg in codegen, then this goes through `tr`.
     global
         .l10n
         .t_dynamic(

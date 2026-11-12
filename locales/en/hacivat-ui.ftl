@@ -87,3 +87,15 @@ hv-settings-regional-preview = { NUMBER($number) } · { DATETIME($when, dateStyl
 # Variables:
 #   $chords (List) - the shortcuts and the character each types, e.g. "Ctrl+Alt+S → ś".
 hv-settings-keymap-collisions = On this keyboard layout these shortcuts type a character instead: { $chords }
+# Section headings of the settings page, in small caps: pre-cased here, never cased in code.
+hv-settings-section-general = GENERAL
+hv-settings-section-appearance = APPEARANCE
+hv-settings-section-keyboard = KEYBOARD
+# The two keymap presets: the brand, and the product whose shortcuts the preset follows.
+hv-settings-keymap-hacivat = { -brand-hacivat }
+hv-settings-keymap-datagrip = DataGrip
+# One shortcut in the collision warning: the shortcut and the character it types instead.
+# Variables:
+#   $chord (String) - the shortcut as the keyboard shows it, e.g. "Ctrl+Alt+S".
+#   $char (String) - the character it types on this layout, e.g. "ś".
+hv-settings-keymap-collision = { $chord } → { $char }

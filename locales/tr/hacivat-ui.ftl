@@ -79,3 +79,15 @@ hv-settings-restart-later = Sonra
 hv-settings-regional-preview = { NUMBER($number) } · { DATETIME($when, dateStyle: "short", timeStyle: "short") }
 # Review: PO
 hv-settings-keymap-collisions = Bu klavye düzeninde şu kısayollar bunun yerine bir karakter yazar: { $chords }
+# Review: PO
+hv-settings-section-general = GENEL
+# Review: PO
+hv-settings-section-appearance = GÖRÜNÜM
+# Review: PO
+hv-settings-section-keyboard = KLAVYE
+# Review: PO
+hv-settings-keymap-hacivat = { -brand-hacivat }
+# Review: PO
+hv-settings-keymap-datagrip = DataGrip
+# Review: PO
+hv-settings-keymap-collision = { $chord } → { $char }

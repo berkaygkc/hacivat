@@ -29,6 +29,9 @@ pub struct SegmentItem {
     pub pressed: bool,
     /// The tooltip, and the accessible name of an icon segment.
     pub tooltip: SharedString,
+    /// The accessible name when it differs from the label (a language's short name `TR` is
+    /// announced by its native name). `None`: the label, or the tooltip for an icon segment.
+    pub a11y_name: Option<SharedString>,
     pub on_click: ClickHandler,
 }
 
@@ -97,10 +100,15 @@ impl IntoElement for Segmented {
                 }
                 .to_hsla();
                 let is_icon = matches!(item.content, SegmentContent::Icon(_));
-                let name = match &item.content {
-                    SegmentContent::Label(label) | SegmentContent::Verbatim(label) => label.clone(),
-                    SegmentContent::Icon(_) => item.tooltip.clone(),
-                };
+                let name = item
+                    .a11y_name
+                    .clone()
+                    .unwrap_or_else(|| match &item.content {
+                        SegmentContent::Label(label) | SegmentContent::Verbatim(label) => {
+                            label.clone()
+                        }
+                        SegmentContent::Icon(_) => item.tooltip.clone(),
+                    });
                 let source = match item.content {
                     SegmentContent::Verbatim(_) => TextSource::Data,
                     _ => TextSource::Fluent,

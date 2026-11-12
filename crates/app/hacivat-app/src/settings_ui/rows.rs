@@ -3,7 +3,7 @@
 
 use std::rc::Rc;
 
-use hacivat_l10n::{MsgRef, NoArgs, Status, ids};
+use hacivat_l10n::{MsgRef, NoArgs, Status, Text, ids};
 use hacivat_settings::{KeymapPreset, LanguagePref, Settings, TextRenderingPref, ThemePref};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, SharedString};
@@ -12,7 +12,7 @@ use hacivat_ui_core::keymap::{Collision, display_chord, parse_chord};
 use crate::l10n_global::{L10nGlobal, switch_locale, tr};
 use crate::shell::keymap_state::set_keymap_preset;
 use crate::shell::workspace::{set_language, set_theme};
-use crate::shell::{ActiveKeymap, update_settings};
+use crate::shell::{ActiveKeymap, AppState, update_settings};
 
 /// The row keys (the TOML keys the rows edit).
 pub const LANGUAGE: &str = "ui.language";
@@ -41,6 +41,17 @@ impl Section {
             Section::General => ids::hv::SETTINGS_NAV_GENERAL,
             Section::Appearance => ids::hv::SETTINGS_NAV_APPEARANCE,
             Section::Keyboard => ids::hv::SETTINGS_NAV_KEYBOARD,
+        }
+    }
+}
+
+impl Section {
+    /// The page heading, pre-cased for small caps in Fluent.
+    pub fn heading(self) -> MsgRef<NoArgs> {
+        match self {
+            Section::General => ids::hv::SETTINGS_SECTION_GENERAL,
+            Section::Appearance => ids::hv::SETTINGS_SECTION_APPEARANCE,
+            Section::Keyboard => ids::hv::SETTINGS_SECTION_KEYBOARD,
         }
     }
 }
@@ -179,7 +190,10 @@ pub fn choices(cx: &App, key: &str) -> Vec<Choice> {
             msg("crisp", ids::hv::SETTINGS_TEXT_RENDERING_CRISP),
             msg("standard", ids::hv::SETTINGS_TEXT_RENDERING_STANDARD),
         ],
-        KEYMAP_PRESET => vec![data("hacivat", "Hacivat"), data("datagrip", "DataGrip")],
+        KEYMAP_PRESET => vec![
+            msg("hacivat", ids::hv::SETTINGS_KEYMAP_HACIVAT),
+            msg("datagrip", ids::hv::SETTINGS_KEYMAP_DATAGRIP),
+        ],
         _ => Vec::new(),
     }
 }
@@ -231,6 +245,13 @@ pub fn is_selected(key: &str, choice: &Choice, current: &str) -> bool {
 /// Applies `value` to row `key`: the change takes effect now (except text rendering, which waits
 /// for a restart) and is saved to `settings.toml` through the ordered writer.
 pub fn apply_choice(cx: &mut App, key: &str, value: &str) {
+    // Choosing what is already chosen changes nothing: no rewrite, no repeated warning.
+    let unchanged = cx
+        .try_global::<AppState>()
+        .is_some_and(|s| current_value(&s.settings, key) == value);
+    if unchanged {
+        return;
+    }
     match key {
         LANGUAGE => match value {
             SYSTEM => {
@@ -280,8 +301,8 @@ pub fn apply_choice(cx: &mut App, key: &str, value: &str) {
     }
 }
 
-/// `<chord as the platform shows it> → <character>` for each collision.
-fn collision_labels(cx: &App, collisions: &[Collision]) -> Vec<String> {
+/// (chord as the platform shows it, character typed) for each collision.
+fn collision_pairs(cx: &App, collisions: &[Collision]) -> Vec<(String, String)> {
     let platform = cx
         .try_global::<ActiveKeymap>()
         .map_or_else(crate::shell::keymap_state::current_platform, |a| a.platform);
@@ -292,7 +313,7 @@ fn collision_labels(cx: &App, collisions: &[Collision]) -> Vec<String> {
                 |_| c.chord.clone(),
                 |presses| display_chord(&presses, platform),
             );
-            format!("{chord} → {}", c.produces)
+            (chord, c.produces.to_string())
         })
         .collect()
 }
@@ -303,14 +324,27 @@ fn warn_about_collisions(cx: &mut App, collisions: &[Collision]) {
     if collisions.is_empty() {
         return;
     }
-    let chords = collision_labels(cx, collisions);
+    let pairs = collision_pairs(cx, collisions);
+    // Each item goes through its own message, re-read on every render (follows a language switch).
     let text = Rc::new(move |cx: &App| {
+        let chords = pairs
+            .iter()
+            .map(|(chord, produced)| {
+                tr(
+                    cx,
+                    ids::hv::SETTINGS_KEYMAP_COLLISION,
+                    ids::hv::HvSettingsKeymapCollision {
+                        chord: Text(chord.clone()),
+                        char: Text(produced.clone()),
+                    },
+                )
+                .to_string()
+            })
+            .collect();
         tr(
             cx,
             ids::hv::SETTINGS_KEYMAP_COLLISIONS,
-            ids::hv::HvSettingsKeymapCollisions {
-                chords: chords.clone(),
-            },
+            ids::hv::HvSettingsKeymapCollisions { chords },
         )
     });
     ToastQueue::push(cx, Toast::new(ToastKind::Error, text));

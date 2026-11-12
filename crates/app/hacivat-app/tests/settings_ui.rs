@@ -359,30 +359,89 @@ fn keymap_preset_reloads_and_warns_on_polish(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn choosing_the_already_chosen_segment_changes_nothing(cx: &mut TestAppContext) {
+    let (vcx, _) = settings_tab_with(cx, KeymapPlatform::Windows, "pl", "UTC");
+    choose(vcx, "keymap.preset", "datagrip");
+    assert_eq!(toast_texts(vcx).len(), 1);
+    choose(vcx, "keymap.preset", "datagrip");
+    assert_eq!(toast_texts(vcx).len(), 1, "no duplicate warning");
+}
+
+#[gpui::test]
+fn collision_items_come_from_fluent_and_follow_the_language(cx: &mut TestAppContext) {
+    let (vcx, _) = settings_tab_with(cx, KeymapPlatform::Windows, "pl", "UTC");
+    choose(vcx, "keymap.preset", "datagrip");
+    let toast = toast_texts(vcx).remove(0);
+    assert!(toast.contains("Ctrl+Alt+S \u{2192} \u{15b}"), "{toast}");
+    switch_to(vcx, "tr");
+    vcx.run_until_parked();
+    let toast = toast_texts(vcx).remove(0);
+    assert!(toast.starts_with("Bu klavye d"), "{toast}");
+    assert!(toast.contains("Ctrl+Alt+S \u{2192} \u{15b}"), "{toast}");
+}
+
+#[gpui::test]
+fn section_headings_are_pre_cased_small_caps_from_fluent(cx: &mut TestAppContext) {
+    let (vcx, _) = settings_tab(cx);
+    assert_eq!(
+        label_with_id(vcx, "settings-section-title").as_deref(),
+        Some("GENERAL")
+    );
+    switch_to(vcx, "tr");
+    vcx.run_until_parked();
+    assert_eq!(
+        label_with_id(vcx, "settings-section-title").as_deref(),
+        Some("GENEL")
+    );
+}
+
+#[gpui::test]
 fn the_title_bar_language_control_is_a_focusable_segmented(cx: &mut TestAppContext) {
     let vcx = shell(cx, "en");
-    let status = |vcx: &VisualTestContext| status_bar_text(vcx);
-    assert!(status(vcx).contains("EN"));
+    assert!(status_bar_text(vcx).contains("EN"));
     // Segments are `segmented-language-switch-<i>`; click TR.
     click(vcx, "segmented-language-switch-1".to_string());
     assert_eq!(palette_label(vcx), "Ara veya komut çalıştır");
-    // Keyboard: tab onto the EN segment and press Enter.
-    let handle = focus_segment(vcx, "segmented-language-switch-0");
-    assert!(handle, "the EN segment takes focus");
-    // GPUI turns Enter into a click on key-up (the harness sends key-down only).
+    // Focus the EN segment and press Enter: only that segment's handler switches to English, so
+    // the focused handle is the EN segment's.
+    focus_segment(vcx, "segmented-language-switch-0");
+    press_enter(vcx);
+    assert_eq!(palette_label(vcx), "Search or run a command");
+    // And the TR segment's, the other way.
+    focus_segment(vcx, "segmented-language-switch-1");
+    press_enter(vcx);
+    assert_eq!(palette_label(vcx), "Ara veya komut çalıştır");
+}
+
+#[gpui::test]
+fn the_language_segments_are_announced_by_their_native_names(cx: &mut TestAppContext) {
+    use hacivat_ui::popover::{a11y_record, a11y_take};
+    let vcx = shell(cx, "en");
+    a11y_record();
+    vcx.cx.update(|cx| cx.refresh_windows());
+    vcx.run_until_parked();
+    let names: Vec<String> = a11y_take()
+        .into_iter()
+        .filter(|d| d.role == Some(gpui::Role::Button))
+        .map(|d| d.name.to_string())
+        .collect();
+    assert!(names.iter().any(|n| n == "English"), "{names:?}");
+    assert!(names.iter().any(|n| n == "Türkçe"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "TR" || n == "EN"), "{names:?}");
+}
+
+/// Focuses the element with debug selector `name` with a mouse down (no release, so no click).
+fn focus_segment(vcx: &mut VisualTestContext, name: &str) {
+    let at = center(vcx, name.to_string());
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Left, Modifiers::none());
+    vcx.run_until_parked();
+}
+
+/// Enter down and up: GPUI turns it into a click on key-up (the harness sends key-down only).
+fn press_enter(vcx: &mut VisualTestContext) {
     vcx.simulate_keystrokes("enter");
     vcx.simulate_event(gpui::KeyUpEvent {
         keystroke: gpui::Keystroke::parse("enter").unwrap(),
     });
     vcx.run_until_parked();
-    assert_eq!(palette_label(vcx), "Search or run a command");
-}
-
-/// Focuses the element with debug selector `name` by clicking it without activating (mouse down
-/// focuses a tab-stop element); returns whether a focused element exists afterwards.
-fn focus_segment(vcx: &mut VisualTestContext, name: &str) -> bool {
-    let at = center(vcx, name.to_string());
-    vcx.simulate_mouse_down(at, gpui::MouseButton::Left, Modifiers::none());
-    vcx.run_until_parked();
-    focused(vcx).is_some()
 }
