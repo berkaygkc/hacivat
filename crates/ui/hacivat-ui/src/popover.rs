@@ -84,30 +84,65 @@ where
     }
 }
 
-/// One recorded `(role, name, selected)`.
-pub type Declaration = (Role, SharedString, Option<bool>);
-
-thread_local! {
-    static DECLARED: RefCell<Option<Vec<Declaration>>> =
-        const { RefCell::new(None) };
+/// One recorded accessibility declaration.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct A11yDecl {
+    pub role: Option<Role>,
+    pub name: SharedString,
+    pub selected: Option<bool>,
+    pub description: Option<SharedString>,
+    pub value: Option<SharedString>,
+    pub live: Option<accesskit::Live>,
+    pub disabled: bool,
+    pub modal: bool,
+    pub active_descendant: bool,
 }
 
-/// Starts (or restarts) recording every `(role, name, selected)` the widgets declare on this
-/// thread. GPUI builds its accessibility tree only while assistive technology is attached, and
-/// the test platforms never attach one, so tests assert on the declarations instead.
+impl A11yDecl {
+    pub fn new(role: Role, name: SharedString) -> Self {
+        Self {
+            role: Some(role),
+            name,
+            ..Self::default()
+        }
+    }
+
+    pub fn selected(mut self, selected: Option<bool>) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn description(mut self, description: SharedString) -> Self {
+        self.description = Some(description);
+        self
+    }
+
+    pub fn active_descendant(mut self) -> Self {
+        self.active_descendant = true;
+        self
+    }
+}
+
+thread_local! {
+    static DECLARED: RefCell<Option<Vec<A11yDecl>>> = const { RefCell::new(None) };
+}
+
+/// Starts (or restarts) recording every declaration the widgets make on this thread. GPUI
+/// builds its accessibility tree only while assistive technology is attached, and the test
+/// platforms never attach one, so tests assert on the declarations instead.
 pub fn a11y_record() {
     DECLARED.with(|d| *d.borrow_mut() = Some(Vec::new()));
 }
 
 /// Stops recording and returns the declarations made since [`a11y_record`].
-pub fn a11y_take() -> Vec<Declaration> {
+pub fn a11y_take() -> Vec<A11yDecl> {
     DECLARED.with(|d| d.borrow_mut().take().unwrap_or_default())
 }
 
-fn a11y_note(role: Role, name: &SharedString, selected: Option<bool>) {
+fn a11y_note(decl: &A11yDecl) {
     DECLARED.with(|d| {
         if let Some(log) = d.borrow_mut().as_mut() {
-            log.push((role, name.clone(), selected));
+            log.push(decl.clone());
         }
     });
 }
@@ -116,24 +151,34 @@ fn a11y_note(role: Role, name: &SharedString, selected: Option<bool>) {
 /// selected state) of a stateful element, and records the declaration for tests.
 pub trait Declare: StatefulInteractiveElement + Sized {
     fn declare(self, role: Role, name: SharedString, selected: Option<bool>) -> Self {
-        a11y_note(role, &name, selected);
-        let el = self.role(role).aria_label(name);
-        match selected {
-            Some(selected) => el.aria_selected(selected),
-            None => el,
+        self.declare_full(A11yDecl::new(role, name).selected(selected))
+    }
+
+    /// Like `declare`, with the description and active-descendant extras GPUI supports.
+    fn declare_full(self, decl: A11yDecl) -> Self {
+        a11y_note(&decl);
+        let mut el = self.role(decl.role.unwrap_or(Role::GenericContainer));
+        el = el.aria_label(decl.name.clone());
+        if let Some(selected) = decl.selected {
+            el = el.aria_selected(selected);
         }
+        if let Some(description) = decl.description {
+            el = el.aria_description(description);
+        }
+        if decl.active_descendant {
+            el = el.aria_active_descendant();
+        }
+        el
     }
 }
 
 impl<E: StatefulInteractiveElement> Declare for E {}
 
-/// Wraps `child` in an accessibility node with `role` and `label`, optionally modal. GPUI's
-/// `.role(..)` has no way to mark a node modal, so a dialog goes through this element.
+/// Wraps `child` in an accessibility node. GPUI's `.role(..)` cannot mark a node modal,
+/// disabled, live or valued, so the elements that need those go through this one.
 pub struct A11yNode {
     id: ElementId,
-    role: Role,
-    label: SharedString,
-    modal: bool,
+    decl: A11yDecl,
     child: AnyElement,
 }
 
@@ -145,14 +190,39 @@ impl A11yNode {
         modal: bool,
         child: impl IntoElement,
     ) -> Self {
-        a11y_note(role, &label, None);
+        let mut decl = A11yDecl::new(role, label);
+        decl.modal = modal;
         Self {
             id: id.into(),
-            role,
-            label,
-            modal,
+            decl,
             child: child.into_any_element(),
         }
+    }
+
+    /// The node is announced when its value changes (toasts).
+    pub fn live(mut self, live: accesskit::Live) -> Self {
+        self.decl.live = Some(live);
+        self
+    }
+
+    pub fn value(mut self, value: SharedString) -> Self {
+        self.decl.value = Some(value);
+        self
+    }
+
+    pub fn description(mut self, description: SharedString) -> Self {
+        self.decl.description = Some(description);
+        self
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.decl.disabled = disabled;
+        self
+    }
+
+    pub fn selected(mut self, selected: Option<bool>) -> Self {
+        self.decl.selected = selected;
+        self
     }
 }
 
@@ -175,6 +245,7 @@ impl Element for A11yNode {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
+        a11y_note(&self.decl);
         (self.child.request_layout(window, cx), ())
     }
 
@@ -204,13 +275,29 @@ impl Element for A11yNode {
     }
 
     fn a11y_role(&self) -> Option<Role> {
-        Some(self.role)
+        self.decl.role
     }
 
     fn write_a11y_info(&self, node: &mut accesskit::Node) {
-        node.set_label(self.label.to_string());
-        if self.modal {
+        let d = &self.decl;
+        node.set_label(d.name.to_string());
+        if d.modal {
             node.set_modal();
+        }
+        if d.disabled {
+            node.set_disabled();
+        }
+        if let Some(selected) = d.selected {
+            node.set_selected(selected);
+        }
+        if let Some(description) = &d.description {
+            node.set_description(description.to_string());
+        }
+        if let Some(value) = &d.value {
+            node.set_value(value.to_string());
+        }
+        if let Some(live) = d.live {
+            node.set_live(live);
         }
     }
 }

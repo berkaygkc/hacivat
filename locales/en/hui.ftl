@@ -10,3 +10,4 @@ hui-tabs = Tabs
 hui-window-minimize = Minimize
 hui-window-maximize = Maximize
 hui-window-close = Close window
+hui-menu-app = Application menu

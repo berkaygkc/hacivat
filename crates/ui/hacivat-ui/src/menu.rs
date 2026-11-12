@@ -13,9 +13,9 @@ use hacivat_ui_core::gpui_surface::{
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
-use crate::accesskey::{AccessKey, AccessKeyAssigner, same_key};
+use crate::accesskey::{AccessKey, AccessKeyAssigner, AccessKeyLocale, typed_matches};
 use crate::button::key_label;
-use crate::popover::Declare;
+use crate::popover::{A11yDecl, A11yNode, Declare};
 use crate::text::{KeyFn, Label, TextFn, TextSource};
 
 /// Minimum width of the menu surface.
@@ -213,6 +213,7 @@ impl PopupMenu {
                 else {
                     return;
                 };
+                let turkic = AccessKeyLocale::turkic(cx);
                 let keys = self.access_key_of_rows(cx);
                 let label_char = |i: usize, key: &AccessKey, cx: &App| match key {
                     AccessKey::InLabel(at) => (self.items[i].label)(cx)[*at..].chars().next(),
@@ -222,7 +223,9 @@ impl PopupMenu {
                 let hit = keys
                     .iter()
                     .enumerate()
-                    .find(|(i, k)| label_char(*i, k, cx).is_some_and(|c| same_key(c, typed)))
+                    .find(|(i, k)| {
+                        label_char(*i, k, cx).is_some_and(|c| typed_matches(c, typed, turkic))
+                    })
                     .map(|(i, _)| i);
                 if let Some(i) = hit {
                     self.choose(i, cx);
@@ -249,7 +252,19 @@ impl Render for PopupMenu {
         // Keep the menu inside the window: flip to the other side of the anchor when it would
         // overflow.
         let viewport = window.viewport_size();
-        let height = self.items.len() as f32 * MENU_ROW_PX + 8.0;
+        let height: f32 = self
+            .items
+            .iter()
+            .map(|item| {
+                if item.separator {
+                    1.0 + 2.0 * t.spacing.xs
+                } else {
+                    MENU_ROW_PX
+                }
+            })
+            .sum::<f32>()
+            + 2.0 * t.spacing.xs
+            + 2.0;
         let left = if self.anchor.x + px(MENU_MIN_WIDTH_PX) > viewport.width {
             (viewport.width - px(MENU_MIN_WIDTH_PX)).max(px(0.0))
         } else {
@@ -279,7 +294,6 @@ impl Render for PopupMenu {
                 let mut row = div()
                     .id(("menu-item", i))
                     .debug_selector(move || format!("menu-item-{i}"))
-                    .declare(Role::MenuItem, text.clone(), None)
                     .flex()
                     .flex_row()
                     .items_center()
@@ -312,7 +326,16 @@ impl Render for PopupMenu {
                         row = row.bg(c.hover.to_hsla());
                     }
                 }
-                row.into_any_element()
+                if item.disabled {
+                    return A11yNode::new(("menu-item-node", i), Role::MenuItem, text, false, row)
+                        .disabled(true)
+                        .into_any_element();
+                }
+                let mut decl = A11yDecl::new(Role::MenuItem, text);
+                if selected {
+                    decl = decl.active_descendant();
+                }
+                row.declare_full(decl).into_any_element()
             })
             .collect();
 

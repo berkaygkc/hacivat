@@ -13,7 +13,7 @@ use hacivat_ui_core::gpui_surface::{
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
-use crate::accesskey::{AccessKey, AccessKeyAssigner, same_key};
+use crate::accesskey::{AccessKey, AccessKeyAssigner, AccessKeyLocale, typed_matches};
 use crate::button::{Button, ButtonKind};
 use crate::icon::{Icon, IconName, IconSize};
 use crate::l10n::ui_text;
@@ -70,10 +70,29 @@ impl Dialog {
     /// Builds the dialog and focuses its `primary` button.
     pub fn new(spec: DialogSpec, window: &mut Window, cx: &mut App) -> Entity<Dialog> {
         cx.new(|cx| {
+            debug_assert!(
+                !spec.buttons.is_empty(),
+                "a dialog needs at least one button"
+            );
+            debug_assert!(
+                spec.primary < spec.buttons.len() && spec.cancel < spec.buttons.len(),
+                "dialog primary ({}) and cancel ({}) must index its {} buttons",
+                spec.primary,
+                spec.cancel,
+                spec.buttons.len()
+            );
             let buttons: Vec<FocusHandle> =
                 spec.buttons.iter().map(|_| cx.focus_handle()).collect();
-            if let Some(primary) = buttons.get(spec.primary) {
-                window.focus(primary, cx);
+            // A destructive primary never has the initial focus: a stray Enter must not delete.
+            let destructive =
+                spec.buttons.get(spec.primary).map(|b| b.kind) == Some(ButtonKind::Danger);
+            let initial = if destructive {
+                spec.cancel
+            } else {
+                spec.primary
+            };
+            if let Some(handle) = buttons.get(initial) {
+                window.focus(handle, cx);
             }
             Dialog {
                 spec,
@@ -127,17 +146,25 @@ impl Dialog {
         AccessKeyAssigner::assign(&rows)
     }
 
+    fn primary_is_destructive(&self) -> bool {
+        self.spec.buttons.get(self.spec.primary).map(|b| b.kind) == Some(ButtonKind::Danger)
+    }
+
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let stroke = &event.keystroke;
         match stroke.key.as_str() {
             "tab" => self.move_focus(!stroke.modifiers.shift, window, cx),
             "escape" => cx.emit(DialogEvent::Cancelled),
+            // A held key (auto-repeat) or a modified Enter never presses a button.
+            "enter" if event.is_held || has_modifier(stroke) => {}
             "enter" => match self.focused_button(window) {
                 Some(i) => cx.emit(DialogEvent::Pressed(i)),
+                None if self.primary_is_destructive() => {}
                 None => cx.emit(DialogEvent::Pressed(self.spec.primary)),
             },
             key if self.access_keys && stroke.modifiers.alt && key.chars().count() == 1 => {
                 let typed = key.chars().next().unwrap_or_default();
+                let turkic = AccessKeyLocale::turkic(cx);
                 let keys = self.access_keys_of_buttons(cx);
                 let hit = keys.iter().enumerate().find(|&(i, k)| {
                     let label = (self.spec.buttons[i].label)(cx);
@@ -146,7 +173,7 @@ impl Dialog {
                         AccessKey::Suffix(c) => Some(*c),
                         AccessKey::None => None,
                     }
-                    .is_some_and(|c| same_key(c, typed))
+                    .is_some_and(|c| typed_matches(c, typed, turkic))
                 });
                 match hit {
                     Some((i, _)) => cx.emit(DialogEvent::Pressed(i)),
@@ -160,6 +187,11 @@ impl Dialog {
     }
 }
 
+fn has_modifier(stroke: &hacivat_ui_core::gpui_surface::Keystroke) -> bool {
+    let m = &stroke.modifiers;
+    m.control || m.platform || m.shift || m.alt
+}
+
 impl Render for Dialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
@@ -167,6 +199,7 @@ impl Render for Dialog {
         let c = &t.colors;
         let title = (self.spec.title)(cx);
         let body = (self.spec.body)(cx);
+        let body_text = body.clone();
         let keys = if self.access_keys {
             self.access_keys_of_buttons(cx)
         } else {
@@ -249,6 +282,6 @@ impl Render for Dialog {
                         .gap(px(t.spacing.md))
                         .children(buttons),
                 );
-        A11yNode::new("dialog-node", Role::Dialog, title, true, card)
+        A11yNode::new("dialog-node", Role::Dialog, title, true, card).description(body_text)
     }
 }

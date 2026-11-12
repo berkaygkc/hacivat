@@ -9,14 +9,13 @@ use std::rc::Rc;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, ClickEvent, ElementId, Entity, FocusHandle, Hsla, InteractiveElement,
     IntoElement, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled, Window,
-    div, hsla, px,
+    div, px,
 };
 use hacivat_ui_core::theme::{Theme, TypeStyle, focus_outline};
 
 use crate::accesskey::AccessKey;
 use crate::icon::{Icon, IconName, IconSize};
-use crate::popover::Declare;
-use crate::popover::{Tip, lazy};
+use crate::popover::{A11yNode, Declare, Tip, lazy};
 use crate::text::{Label, TextSource};
 
 /// A click handler shared between the widgets that take one.
@@ -47,6 +46,7 @@ pub struct Button {
     on_click: Option<ClickHandler>,
     focus: Option<FocusHandle>,
     access_key: Option<AccessKey>,
+    fixed_width: Option<f32>,
 }
 
 impl Button {
@@ -61,6 +61,7 @@ impl Button {
             on_click: None,
             focus: None,
             access_key: None,
+            fixed_width: None,
         }
     }
 
@@ -105,6 +106,12 @@ impl Button {
         self
     }
 
+    /// Fixes the outer width (the title bar's 24 px overflow button).
+    pub fn fixed_width(mut self, width: f32) -> Self {
+        self.fixed_width = Some(width);
+        self
+    }
+
     /// Shows the access key in the label (Windows and Linux dialogs).
     pub fn access_key(mut self, key: AccessKey) -> Self {
         self.access_key = Some(key);
@@ -122,7 +129,7 @@ struct Look {
 
 fn look(kind: ButtonKind, disabled: bool, hot: bool, theme: &Theme) -> Look {
     let c = &theme.tokens.colors;
-    let clear = hsla(0.0, 0.0, 0.0, 0.0);
+    let clear = TRANSPARENT;
     if disabled {
         // text-3 ink; the seam-strong outline stays except on ghost, which has none.
         return Look {
@@ -217,6 +224,19 @@ pub(crate) fn key_label(
     }
 }
 
+/// Fully transparent (an outline that keeps its space but shows nothing).
+pub(crate) const TRANSPARENT: Hsla = Hsla {
+    h: 0.0,
+    s: 0.0,
+    l: 0.0,
+    a: 0.0,
+};
+
+/// Whether `handle` shows its focus ring: focused by keyboard navigation, not by a click.
+pub(crate) fn focus_visible(handle: &FocusHandle, window: &Window) -> bool {
+    handle.is_focused(window) && window.last_input_was_keyboard()
+}
+
 /// The hover flag and focus handle a widget keeps across frames, keyed by its element id.
 pub(crate) fn interaction_state(
     id: &ElementId,
@@ -267,12 +287,13 @@ impl Button {
             on_click,
             focus,
             access_key,
+            fixed_width,
         } = self;
 
         // Hover and focus state live with the element across frames.
         let (hover, keyed_focus) = interaction_state(&id, window, cx);
         let handle = focus.unwrap_or(keyed_focus);
-        let focused = !disabled && handle.is_focused(window);
+        let focused = !disabled && focus_visible(&handle, window);
         let hot = !disabled && (*hover.read(cx) || (kind == ButtonKind::Danger && focused));
         let look = look(kind, disabled, hot, &theme);
 
@@ -282,21 +303,30 @@ impl Button {
         }
         let icon_only = kind == ButtonKind::Icon;
         let selector = format!("button-{id}");
+        let node_id = ElementId::from((id.clone(), "node"));
 
         let mut body = div()
             .id(id)
             .debug_selector(move || selector)
-            .declare(Role::Button, label.clone(), None)
             .flex()
             .flex_row()
             .items_center()
             .flex_none()
             .gap(px(t.spacing.sm))
             .h(px(t.spacing.control_height))
-            .px(px(if icon_only { 6.0 } else { 9.0 }))
+            .px(px(if fixed_width.is_some() {
+                0.0
+            } else if icon_only {
+                6.0
+            } else {
+                9.0
+            }))
             .rounded(px(t.radii.sm))
             .border_1()
             .border_color(look.outline);
+        if let Some(width) = fixed_width {
+            body = body.w(px(width)).justify_center();
+        }
         if let Some(fill) = look.fill {
             body = body.bg(fill);
         }
@@ -307,15 +337,7 @@ impl Button {
             body = body.child(key_label(&label, access_key, style, look.ink));
         }
         if let Some(hint) = key_hint {
-            let dim = if disabled {
-                look.ink
-            } else if kind == ButtonKind::Primary {
-                let mut c = look.ink;
-                c.a *= 0.7;
-                c
-            } else {
-                t.colors.text_3.to_hsla()
-            };
+            let dim = t.colors.text_3.to_hsla();
             body = body.child(Label::new(
                 hint,
                 TextSource::Shortcut,
@@ -325,9 +347,12 @@ impl Button {
         }
 
         if disabled {
-            return body.into_any_element();
+            return A11yNode::new(node_id, Role::Button, label, false, body)
+                .disabled(true)
+                .into_any_element();
         }
         let mut body = focus_outline(body.track_focus(&handle).tab_stop(true), &theme, focused)
+            .declare(Role::Button, label.clone(), None)
             .cursor_pointer()
             .on_hover(hover_listener(hover));
         if let Some(handler) = on_click {

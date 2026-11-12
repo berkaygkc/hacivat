@@ -14,7 +14,7 @@ use hacivat_ui_core::gpui_surface::{
     AnyElement, App, ElementId, InteractiveElement, IntoElement, MouseButton, ParentElement, Role,
     SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
-use hacivat_ui_core::theme::Theme;
+use hacivat_ui_core::theme::{Theme, TypeStyle};
 use serde::{Deserialize, Serialize};
 
 pub use hacivat_ui_core::gpui_surface::Axis;
@@ -231,8 +231,11 @@ impl PaneTree {
     }
 
     /// Sets the ratio of the split at `path` (`false` = first child, `true` = second, from the
-    /// root), clamped to [0.1, 0.9]. A path that does not end at a split changes nothing.
+    /// root), clamped to [0.1, 0.9]; a non-finite ratio is ignored. A path that does not end at a split changes nothing.
     pub fn set_ratio(&mut self, path: &[bool], ratio: f32) {
+        if !ratio.is_finite() {
+            return;
+        }
         let mut node = &mut self.root;
         for &second in path {
             match node {
@@ -315,7 +318,7 @@ fn without_leaf(node: PaneNode, id: PaneId) -> Option<PaneNode> {
 /// How the environment of a tab is marked (a 7 px swatch; production is red).
 pub type EnvMark = EnvKind;
 
-/// What a tab shows. The strip is rebuilt every frame from IDs, so `title` may be a rendered
+/// What a tab shows. Only the active or hovered tab shows its close button. The strip is rebuilt every frame from IDs, so `title` may be a rendered
 /// string.
 #[derive(Debug, Clone)]
 pub struct TabSpec {
@@ -409,7 +412,11 @@ impl TabStrip {
             let hovered = *hover.read(cx);
             let ink = if active { c.text } else { c.text_2 }.to_hsla();
             let style = match tab.title_source {
-                TextSource::Data | TextSource::Catalog => t.type_ramp.code,
+                TextSource::Data | TextSource::Catalog => TypeStyle {
+                    size_px: 12.0,
+                    line_height: 12.0 * 1.35,
+                    ..t.type_ramp.code
+                },
                 _ => t.type_ramp.body,
             };
             let selector = format!("tab-{}", tab.id.0);
@@ -428,6 +435,11 @@ impl TabStrip {
                 .border_r_1()
                 .border_color(c.seam.to_hsla())
                 .cursor_pointer()
+                .child(
+                    Icon::new(IconName::FileCode)
+                        .size(IconSize::Chrome)
+                        .color(ink),
+                )
                 .child(Label::new(tab.title, tab.title_source, style, ink));
             if index == 0 {
                 el = el.border_l_1();
@@ -452,27 +464,29 @@ impl TabStrip {
             let close_id = ElementId::from((SharedString::from("tab-close"), tab.id.0 as usize));
             let close_selector = format!("tab-close-{}", tab.id.0);
             let on_close = self.on_close.clone();
-            el = el.child(
-                div()
-                    .id(close_id)
-                    .debug_selector(move || close_selector)
-                    .declare(Role::Button, close_name.clone(), None)
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        if let Some(handler) = &on_close {
-                            handler(pane, tab_id, window, cx);
-                        }
-                    })
-                    .child(
-                        Icon::new(IconName::X)
-                            .size(IconSize::Chrome)
-                            .color(c.text_3.to_hsla()),
-                    ),
-            );
+            if active || hovered {
+                el = el.child(
+                    div()
+                        .id(close_id)
+                        .debug_selector(move || close_selector)
+                        .declare(Role::Button, close_name.clone(), None)
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            if let Some(handler) = &on_close {
+                                handler(pane, tab_id, window, cx);
+                            }
+                        })
+                        .child(
+                            Icon::new(IconName::X)
+                                .size(IconSize::Chrome)
+                                .color(c.text_3.to_hsla()),
+                        ),
+                );
+            }
             let on_activate = self.on_activate.clone();
             el = el
                 .on_hover(hover_listener(hover))

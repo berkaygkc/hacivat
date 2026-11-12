@@ -4,6 +4,8 @@
 //! otherwise (F32): Turkish `I`/`ı` and `Ç`/`ç` are different keys, and no locale-blind casing
 //! function is involved.
 
+use hacivat_ui_core::gpui_surface::{App, Global};
+
 /// The key one label got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessKey {
@@ -81,4 +83,43 @@ impl AccessKeyAssigner {
         }
         out
     }
+}
+
+/// Whether the UI language is Turkic (dotted and dotless `i`). The app (Task 13) sets this
+/// global on every language switch; absent means not Turkic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccessKeyLocale {
+    pub turkic: bool,
+}
+
+impl Global for AccessKeyLocale {}
+
+impl AccessKeyLocale {
+    pub fn turkic(cx: &App) -> bool {
+        cx.try_global::<AccessKeyLocale>().is_some_and(|l| l.turkic)
+    }
+}
+
+/// Upper/lower pairs outside ASCII that a typed key folds together in every locale.
+const CASE_PAIRS: [(char, char); 5] = [('Ç', 'ç'), ('Ş', 'ş'), ('Ö', 'ö'), ('Ü', 'ü'), ('Ğ', 'ğ')];
+
+/// Whether the key the user typed selects the key shown in a label. This is the typed-key fold
+/// only (explicit table, no casing calls): ASCII pairs, the Turkish pairs in [`CASE_PAIRS`], and
+/// for the dotted/dotless letters `İ↔i` and `I↔ı` when `turkic`, otherwise `I↔i` with `İ` and
+/// `ı` exact. Assignment collisions stay exact-match ([`same_key`], F32).
+pub fn typed_matches(shown: char, typed: char, turkic: bool) -> bool {
+    if shown == typed {
+        return true;
+    }
+    let is_pair = |a: char, b: char| (shown == a && typed == b) || (shown == b && typed == a);
+    if CASE_PAIRS
+        .iter()
+        .any(|&(upper, lower)| is_pair(upper, lower))
+    {
+        return true;
+    }
+    if turkic {
+        return is_pair('İ', 'i') || is_pair('I', 'ı');
+    }
+    shown.is_ascii() && typed.is_ascii() && shown.eq_ignore_ascii_case(&typed)
 }

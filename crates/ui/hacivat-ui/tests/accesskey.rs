@@ -54,6 +54,27 @@ fn access_key_suffix_when_no_letters() {
 }
 
 #[test]
+fn typed_keys_fold_with_an_explicit_table() {
+    use hacivat_ui::accesskey::typed_matches;
+    // Turkish pairs fold in every locale.
+    assert!(typed_matches('Ç', 'ç', false));
+    assert!(typed_matches('ş', 'Ş', false));
+    assert!(typed_matches('Ö', 'ö', true));
+    assert!(typed_matches('Ü', 'ü', false));
+    assert!(typed_matches('Ğ', 'ğ', false));
+    // Turkic: İ↔i and I↔ı.
+    assert!(typed_matches('İ', 'i', true));
+    assert!(typed_matches('I', 'ı', true));
+    assert!(!typed_matches('I', 'i', true));
+    // Otherwise I↔i, with İ and ı exact.
+    assert!(typed_matches('I', 'i', false));
+    assert!(!typed_matches('İ', 'i', false));
+    assert!(!typed_matches('I', 'ı', false));
+    assert!(typed_matches('S', 's', false));
+    assert!(!typed_matches('S', 'ş', false));
+}
+
+#[test]
 fn access_key_none_when_nothing_is_left() {
     assert_eq!(
         AccessKeyAssigner::assign(&[("aa", None, None), ("a", None, None)]),

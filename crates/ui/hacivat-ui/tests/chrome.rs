@@ -176,6 +176,7 @@ fn the_tab_strip_reports_activation_and_close(cx: &mut TestAppContext) {
         div()
             .child(
                 TabStrip::new(PaneId(7), vec![tab(1, "one.sql"), tab(2, "two.sql")])
+                    .active(1)
                     .on_activate(move |pane, tab, _, _| {
                         a.borrow_mut().push(format!("activate {pane:?} {tab:?}"))
                     })

@@ -12,8 +12,8 @@ use hacivat_ui_core::theme::{Theme, ThemeTokens};
 
 use crate::button::ClickHandler;
 use crate::icon::{Icon, IconName, IconSize};
-use crate::popover::Declare;
 use crate::popover::lazy;
+use crate::popover::{A11yDecl, Declare};
 use crate::text::{Label, TextSource};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -124,6 +124,7 @@ impl IntoElement for Capsule {
                 .overflow_hidden()
                 .bg(c.panel.to_hsla());
             let name_for_label;
+            let mut description = None;
             match &self.model {
                 CapsuleModel::Placeholder { label } => {
                     name_for_label = label.clone();
@@ -142,6 +143,8 @@ impl IntoElement for Capsule {
                     path,
                 } => {
                     name_for_label = name.clone();
+                    description =
+                        Some(SharedString::from(format!("{env_label}, {access}, {path}")));
                     let production = *env == EnvKind::Production;
                     if production {
                         // The one cp_fill quad in the window (named rule).
@@ -155,6 +158,8 @@ impl IntoElement for Capsule {
                                 .flex_none()
                                 .pl(px(9.0))
                                 .pr(px(10.0))
+                                .rounded_tl(px(t.radii.xs))
+                                .rounded_bl(px(t.radii.xs))
                                 .bg(c.cp_fill.to_hsla())
                                 .child(text(
                                     env_label,
@@ -211,9 +216,9 @@ impl IntoElement for Capsule {
                         .color(c.text_3.to_hsla()),
                 ),
             );
-            let mut frame = frame
-                .declare(Role::Button, name_for_label, None)
-                .cursor_pointer();
+            let mut decl = A11yDecl::new(Role::Button, name_for_label);
+            decl.description = description;
+            let mut frame = frame.declare_full(decl).cursor_pointer();
             if let Some(handler) = self.on_click {
                 frame = frame.on_click(move |event, window, cx| handler(event, window, cx));
             }

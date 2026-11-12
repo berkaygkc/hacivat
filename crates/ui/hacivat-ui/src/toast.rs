@@ -11,14 +11,13 @@ use std::time::Duration;
 
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, ElementId, Global, InteractiveElement, IntoElement, ParentElement, Role,
-    SharedString, StatefulInteractiveElement, Styled, div, px,
+    SharedString, StatefulInteractiveElement, Styled, accesskit, div, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
 use crate::icon::{Icon, IconName, IconSize};
 use crate::l10n::ui_text;
-use crate::popover::Declare;
-use crate::popover::lazy;
+use crate::popover::{A11yNode, Declare, lazy};
 use crate::text::{Label, TextFn, TextSource};
 
 /// How many toasts show at once.
@@ -192,14 +191,23 @@ impl IntoElement for ToastStack {
                 .flex_col()
                 .gap(px(t.spacing.md))
                 .children(entries.into_iter().map(|(id, kind, text)| {
-                    let (role, icon, tint) = match kind {
-                        ToastKind::Info => (Role::Status, IconName::Info, c.blue),
-                        ToastKind::Error => (Role::Alert, IconName::TriangleAlert, c.red),
+                    let (role, live, icon, tint) = match kind {
+                        ToastKind::Info => (
+                            Role::Status,
+                            accesskit::Live::Polite,
+                            IconName::Info,
+                            c.blue,
+                        ),
+                        ToastKind::Error => (
+                            Role::Alert,
+                            accesskit::Live::Assertive,
+                            IconName::TriangleAlert,
+                            c.red,
+                        ),
                     };
-                    popover_surface(&theme)
+                    let card = popover_surface(&theme)
                         .id(ElementId::from(("toast", id)))
                         .debug_selector(move || format!("toast-{id}"))
-                        .declare(role, text.clone(), None)
                         .flex()
                         .flex_row()
                         .items_center()
@@ -213,7 +221,7 @@ impl IntoElement for ToastStack {
                                 .color(tint.to_hsla()),
                         )
                         .child(div().flex_1().min_w(px(0.0)).child(Label::new(
-                            text,
+                            text.clone(),
                             TextSource::Fluent,
                             t.type_ramp.body,
                             c.text.to_hsla(),
@@ -231,7 +239,12 @@ impl IntoElement for ToastStack {
                                         .size(IconSize::Chrome)
                                         .color(c.text_3.to_hsla()),
                                 ),
-                        )
+                        );
+                    // Announced by screen readers: the node's value changes with a live region
+                    // (macOS speaks only valued, live nodes).
+                    A11yNode::new(("toast-node", id), role, text.clone(), false, card)
+                        .live(live)
+                        .value(text)
                 }))
                 .into_any_element()
         })

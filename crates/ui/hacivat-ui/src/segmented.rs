@@ -8,7 +8,7 @@ use hacivat_ui_core::gpui_surface::{
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 
-use crate::button::{ClickHandler, hover_listener, interaction_state};
+use crate::button::{ClickHandler, focus_visible, hover_listener, interaction_state};
 use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::Declare;
 use crate::popover::{Tip, lazy};
@@ -82,8 +82,9 @@ impl IntoElement for Segmented {
             for (i, item) in self.items.into_iter().enumerate() {
                 let id = ElementId::from((self.id.clone(), format!("{i}")));
                 let (hover, handle) = interaction_state(&id, window, cx);
-                let focused = handle.is_focused(window);
+                let focused = focus_visible(&handle, window);
                 let ink = if item.pressed { c.text } else { c.text_2 }.to_hsla();
+                let is_icon = matches!(item.content, SegmentContent::Icon(_));
                 let name = match &item.content {
                     SegmentContent::Label(label) => label.clone(),
                     SegmentContent::Icon(_) => item.tooltip.clone(),
@@ -95,7 +96,7 @@ impl IntoElement for Segmented {
                         } else {
                             t.type_ramp.body
                         };
-                        if item.pressed {
+                        if item.pressed && self.mono {
                             style.weight = 600;
                         }
                         Label::new(label, TextSource::Fluent, style, ink).into_any_element()
@@ -114,7 +115,11 @@ impl IntoElement for Segmented {
                     .flex_row()
                     .items_center()
                     .h_full()
-                    .px(px(if self.mono { 8.0 } else { 9.0 }))
+                    .px(px(match (is_icon, self.mono) {
+                        (true, _) => 7.0,
+                        (false, true) => 8.0,
+                        (false, false) => 9.0,
+                    }))
                     .gap(px(t.spacing.sm))
                     .when_divider(i)
                     .border_color(c.seam_strong.to_hsla())

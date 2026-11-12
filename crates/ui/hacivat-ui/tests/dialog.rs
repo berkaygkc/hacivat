@@ -118,6 +118,55 @@ fn alt_access_key_presses_its_button_when_enabled(cx: &mut TestAppContext) {
     assert_eq!(events.take(), vec![]);
 }
 
+fn danger_spec() -> DialogSpec {
+    let mut spec = spec_two_buttons(0, 1);
+    spec.buttons[1].kind = ButtonKind::Danger;
+    spec
+}
+
+#[gpui::test]
+fn a_danger_primary_does_not_get_the_initial_focus(cx: &mut TestAppContext) {
+    let (d, vcx, events) = open_test_dialog(cx, danger_spec());
+    assert_eq!(focused_button(&d, vcx), Some(0), "focus starts on cancel");
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(events.take(), vec![DialogEvent::Pressed(0)]);
+}
+
+#[gpui::test]
+fn a_held_or_modified_enter_presses_nothing(cx: &mut TestAppContext) {
+    let (_, vcx, events) = open_test_dialog(cx, spec_two_buttons(0, 1));
+    vcx.simulate_event(gpui::KeyDownEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        is_held: true,
+        prefer_character_input: false,
+    });
+    assert_eq!(events.take(), vec![]);
+    vcx.simulate_keystrokes("shift-enter");
+    vcx.simulate_keystrokes("cmd-enter");
+    assert_eq!(events.take(), vec![]);
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(events.take(), vec![DialogEvent::Pressed(1)]);
+}
+
+#[gpui::test]
+#[should_panic(expected = "at least one button")]
+fn a_dialog_without_buttons_trips_the_debug_assertion(cx: &mut TestAppContext) {
+    let _ = open_test_dialog(cx, spec_titled("Empty", &[], 0, 0));
+}
+
+#[gpui::test]
+fn turkic_alt_keys_fold_dotted_and_dotless_i(cx: &mut TestAppContext) {
+    use hacivat_ui::accesskey::AccessKeyLocale;
+    let (d, vcx, events) = open_test_dialog(cx, spec_titled("T", &["İptal", "Tamam"], 0, 1));
+    d.update(vcx, |d, _| d.set_access_keys(true));
+    vcx.update(|_, cx| cx.set_global(AccessKeyLocale { turkic: true }));
+    vcx.simulate_keystrokes("alt-i");
+    assert_eq!(events.take(), vec![DialogEvent::Pressed(0)]);
+    vcx.update(|_, cx| cx.set_global(AccessKeyLocale { turkic: false }));
+    vcx.simulate_keystrokes("alt-i");
+    assert_eq!(events.take(), vec![], "İ is exact outside Turkic locales");
+}
+
 #[gpui::test]
 fn clicking_a_button_presses_it(cx: &mut TestAppContext) {
     let (_, vcx, events) = open_test_dialog(cx, spec_two_buttons(0, 1));

@@ -16,6 +16,7 @@ pub enum IconName {
     ChevronsUpDown,
     CircleCheck,
     Ellipsis,
+    FileCode,
     GitCommit,
     Info,
     Languages,
@@ -45,6 +46,7 @@ impl IconName {
             IconName::ChevronsUpDown => "icons/lucide/chevrons-up-down.svg",
             IconName::CircleCheck => "icons/lucide/circle-check.svg",
             IconName::Ellipsis => "icons/lucide/ellipsis.svg",
+            IconName::FileCode => "icons/lucide/file-code-2.svg",
             IconName::GitCommit => "icons/lucide/git-commit-horizontal.svg",
             IconName::Info => "icons/lucide/info.svg",
             IconName::Languages => "icons/lucide/languages.svg",
@@ -68,6 +70,8 @@ impl IconName {
 pub enum IconSize {
     /// 12 px: inside chrome and controls.
     Chrome,
+    /// 16 px: the title-bar brand mark.
+    Brand,
     /// 14 px.
     #[default]
     Default,
@@ -77,6 +81,7 @@ impl IconSize {
     pub fn px(self) -> f32 {
         match self {
             IconSize::Chrome => 12.0,
+            IconSize::Brand => 16.0,
             IconSize::Default => 14.0,
         }
     }
@@ -135,7 +140,7 @@ mod tests {
     use hacivat_ui_core::assets::BundledAssets;
     use hacivat_ui_core::gpui_surface::AssetSource;
 
-    const ALL: [IconName; 22] = [
+    const ALL: [IconName; 23] = [
         IconName::ArrowLeftRight,
         IconName::Check,
         IconName::ChevronDown,
@@ -143,6 +148,7 @@ mod tests {
         IconName::ChevronsUpDown,
         IconName::CircleCheck,
         IconName::Ellipsis,
+        IconName::FileCode,
         IconName::GitCommit,
         IconName::Info,
         IconName::Languages,

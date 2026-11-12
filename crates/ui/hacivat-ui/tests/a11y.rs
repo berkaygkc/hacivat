@@ -8,10 +8,10 @@ use hacivat_ui::dialog::{Dialog, DialogButton, DialogSpec};
 use hacivat_ui::icon::IconName;
 use hacivat_ui::menu::{MenuItemSpec, PopupMenu};
 use hacivat_ui::panes::{PaneId, TabId, TabSpec, TabStrip};
-use hacivat_ui::popover::{a11y_record, a11y_take};
+use hacivat_ui::popover::{A11yDecl, a11y_record, a11y_take};
 use hacivat_ui::text::{TextFn, TextSource};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue, ToastStack};
-use hacivat_ui_core::gpui_surface::{IntoElement, ParentElement, Styled, div};
+use hacivat_ui_core::gpui_surface::{IntoElement, ParentElement, Styled, accesskit, div};
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 use support::host;
 
@@ -25,7 +25,7 @@ type Node = (Role, String, bool);
 fn a11y_nodes(_: &mut VisualTestContext) -> Vec<Node> {
     a11y_take()
         .into_iter()
-        .map(|(role, name, selected)| (role, name.to_string(), selected.unwrap_or(false)))
+        .filter_map(|d| Some((d.role?, d.name.to_string(), d.selected.unwrap_or(false))))
         .collect()
 }
 
@@ -118,6 +118,132 @@ fn dialog_and_popup_menu_expose_roles_and_names(cx: &mut TestAppContext) {
     assert!(n.iter().any(|x| x.0 == Role::Menu));
     assert!(n.contains(&(Role::MenuItem, "Copy".into(), false)));
     assert!(n.contains(&(Role::MenuItem, "Paste".into(), false)));
+}
+
+fn declared(decls: &[A11yDecl], role: Role, name: &str) -> A11yDecl {
+    decls
+        .iter()
+        .find(|d| d.role == Some(role) && d.name.as_ref() == name)
+        .unwrap_or_else(|| panic!("no {role:?} named {name:?} in {decls:?}"))
+        .clone()
+}
+
+#[gpui::test]
+fn toasts_are_live_regions_with_their_text_as_value(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        ToastQueue::push(cx, Toast::new(ToastKind::Info, text("Saved")));
+        ToastQueue::push(cx, Toast::new(ToastKind::Error, text("Failed")));
+    });
+    a11y_record();
+    host(cx, |_, _| div().child(ToastStack::new()).into_any_element());
+    let decls = a11y_take();
+    let info = declared(&decls, Role::Status, "Saved");
+    assert_eq!(
+        (info.live, info.value.as_deref()),
+        (Some(accesskit::Live::Polite), Some("Saved"))
+    );
+    let error = declared(&decls, Role::Alert, "Failed");
+    assert_eq!(
+        (error.live, error.value.as_deref()),
+        (Some(accesskit::Live::Assertive), Some("Failed"))
+    );
+}
+
+#[gpui::test]
+fn dialog_is_modal_and_described_by_its_body(cx: &mut TestAppContext) {
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    a11y_record();
+    let spec = DialogSpec {
+        title: text("Delete?"),
+        body: text("Gone for good."),
+        buttons: vec![DialogButton {
+            label: text("OK"),
+            kind: ButtonKind::Default,
+            accesskey: None,
+            english_accesskey: None,
+        }],
+        cancel: 0,
+        primary: 0,
+    };
+    let _ = cx.add_window_view(|window, cx| Wrap::Dialog(Dialog::new(spec, window, cx)));
+    let dialog = declared(&a11y_take(), Role::Dialog, "Delete?");
+    assert!(dialog.modal);
+    assert_eq!(dialog.description.as_deref(), Some("Gone for good."));
+}
+
+#[gpui::test]
+fn disabled_button_and_menu_item_are_marked_disabled(cx: &mut TestAppContext) {
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    a11y_record();
+    host(cx, |_, _| {
+        div()
+            .child(Button::new("on", "Run".into()))
+            .child(Button::new("off", "Stop".into()).disabled(true))
+            .into_any_element()
+    });
+    let decls = a11y_take();
+    assert!(!declared(&decls, Role::Button, "Run").disabled);
+    assert!(declared(&decls, Role::Button, "Stop").disabled);
+
+    a11y_record();
+    let _ = cx.add_window_view(|window, cx| {
+        Wrap::Menu(PopupMenu::new(
+            point(px(0.), px(0.)),
+            vec![
+                MenuItemSpec::new(text("Cut"), "cut"),
+                MenuItemSpec::new(text("Copy"), "copy").disabled(true),
+            ],
+            window,
+            cx,
+        ))
+    });
+    let decls = a11y_take();
+    assert!(declared(&decls, Role::MenuItem, "Copy").disabled);
+    assert!(!declared(&decls, Role::MenuItem, "Cut").disabled);
+}
+
+#[gpui::test]
+fn the_highlighted_menu_row_is_the_active_descendant(cx: &mut TestAppContext) {
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    a11y_record();
+    let _ = cx.add_window_view(|window, cx| {
+        Wrap::Menu(PopupMenu::new(
+            point(px(0.), px(0.)),
+            vec![
+                MenuItemSpec::new(text("Cut"), "cut"),
+                MenuItemSpec::new(text("Copy"), "copy"),
+            ],
+            window,
+            cx,
+        ))
+    });
+    let decls = a11y_take();
+    assert!(declared(&decls, Role::MenuItem, "Cut").active_descendant);
+    assert!(!declared(&decls, Role::MenuItem, "Copy").active_descendant);
+}
+
+#[gpui::test]
+fn capsule_describes_environment_access_and_path(cx: &mut TestAppContext) {
+    use hacivat_ui::capsule::{Capsule, CapsuleModel, EnvKind};
+    a11y_record();
+    host(cx, |_, _| {
+        div()
+            .child(Capsule::new(CapsuleModel::Connection {
+                env: EnvKind::Production,
+                env_label: "PRODUCTION".into(),
+                name: "orders-prod".into(),
+                engine: "PostgreSQL 16".into(),
+                access: "read-only".into(),
+                path: "Direct".into(),
+            }))
+            .into_any_element()
+    });
+    let capsule = declared(&a11y_take(), Role::Button, "orders-prod");
+    assert_eq!(
+        capsule.description.as_deref(),
+        Some("PRODUCTION, read-only, Direct")
+    );
 }
 
 enum Wrap {

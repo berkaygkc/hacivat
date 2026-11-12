@@ -168,7 +168,11 @@ fn drag_region(el: Div) -> Div {
     el.window_control_area(WindowControlArea::Drag)
         .on_mouse_down(MouseButton::Left, |event, window, _| {
             if event.click_count >= 2 {
-                window.zoom_window();
+                if cfg!(target_os = "macos") {
+                    window.titlebar_double_click();
+                } else {
+                    window.zoom_window();
+                }
             } else {
                 window.start_window_move();
             }
@@ -233,7 +237,7 @@ impl TitleBar {
                         .pr(px(t.spacing.s_2xl))
                         .child(
                             Icon::new(IconName::HvMark)
-                                .size(IconSize::Default)
+                                .size(IconSize::Brand)
                                 .color(c.text_2.to_hsla()),
                         )
                         .child(Label::new(
@@ -312,6 +316,7 @@ impl TitleBar {
                 bar = bar.child(
                     Button::new("titlebar-overflow", ui_text(cx, "hui-menu-more"))
                         .kind(ButtonKind::Icon)
+                        .fixed_width(OVERFLOW_BUTTON_PX)
                         .icon(IconName::Ellipsis)
                         .on_click_rc(on_overflow),
                 );
@@ -332,7 +337,7 @@ impl TitleBar {
             if let Some(on_click) = self.app_menu {
                 bar = bar.child(
                     div().ml(px(t.spacing.md)).child(
-                        Button::new("titlebar-app-menu", ui_text(cx, "hui-menu-more"))
+                        Button::new("titlebar-app-menu", ui_text(cx, "hui-menu-app"))
                             .kind(ButtonKind::Icon)
                             .icon(IconName::Menu)
                             .on_click_rc(on_click),

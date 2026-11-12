@@ -10,3 +10,4 @@ hui-tabs = Sekmeler
 hui-window-minimize = Simge durumuna küçült
 hui-window-maximize = Ekranı kapla
 hui-window-close = Pencereyi kapat
+hui-menu-app = Uygulama menüsü
