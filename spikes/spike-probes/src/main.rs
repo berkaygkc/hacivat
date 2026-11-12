@@ -510,22 +510,11 @@ fn window_probes(
                     })
                     .ok();
                 match tree {
-                    Some((active, Some(json))) => {
-                        if json.contains("Result 1") && json.contains("Grid") {
-                            println!(
-                                "probe a11y: ok Grid \"Result 1\" present (assistive tech \
-                                 active={active}); node tree:\n{json}"
-                            );
-                        } else {
-                            println!("probe a11y: FAIL tree lacks Grid / \"Result 1\":\n{json}");
-                            failed = true;
-                        }
+                    Some((active, json)) => {
+                        let (line, fail) = a11y_line(active, json.as_deref());
+                        println!("{line}");
+                        failed |= fail;
                     }
-                    Some((active, None)) => println!(
-                        "probe a11y: record not verified (no assistive technology attached, \
-                         is_a11y_active={active}). Turn on VoiceOver (Cmd+F5), Narrator or Orca \
-                         and re-run to dump the node tree and verify manually."
-                    ),
                     None => {
                         println!("probe a11y: FAIL window update failed");
                         failed = true;
@@ -536,6 +525,36 @@ fn window_probes(
         });
     })
     .detach();
+}
+
+/// The a11y probe line and whether it fails. GPUI's debug tree alone proves only that GPUI built
+/// the nodes; the platform bridge is verified only while assistive technology is attached.
+fn a11y_line(active: bool, json: Option<&str>) -> (String, bool) {
+    let Some(json) = json else {
+        return (
+            format!(
+                "probe a11y: record not verified (no assistive technology attached, \
+                 is_a11y_active={active}). Turn on VoiceOver (Cmd+F5), Narrator or Orca \
+                 and re-run to dump the node tree and verify manually."
+            ),
+            false,
+        );
+    };
+    if !(json.contains("Result 1") && json.contains("Grid")) {
+        return (format!("probe a11y: FAIL tree lacks Grid / \"Result 1\":\n{json}"), true);
+    }
+    let line = if active {
+        format!(
+            "probe a11y: ok Grid \"Result 1\" present (assistive tech active); node tree:\n{json}"
+        )
+    } else {
+        format!(
+            "probe a11y: record GPUI tree ok; platform AT unverified (Grid \"Result 1\" in GPUI's \
+             debug tree, is_a11y_active=false). Attach VoiceOver, Narrator or Orca to verify the \
+             platform tree; node tree:\n{json}"
+        )
+    };
+    (line, false)
 }
 
 // ---------------------------------------------------------------- RSS
@@ -575,5 +594,43 @@ fn rss_bytes() -> Option<u64> {
         c.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
         (GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) != 0)
             .then_some(c.WorkingSetSize as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TREE: &str = r#"{"role":"Grid","label":"Result 1"}"#;
+
+    #[test]
+    fn a11y_with_assistive_tech_is_ok() {
+        let (line, failed) = a11y_line(true, Some(TREE));
+        assert!(line.starts_with("probe a11y: ok "), "{line}");
+        assert!(!failed);
+    }
+
+    #[test]
+    fn a11y_without_assistive_tech_does_not_claim_platform_ok() {
+        let (line, failed) = a11y_line(false, Some(TREE));
+        assert!(line.contains("GPUI tree ok; platform AT unverified"), "{line}");
+        assert!(!line.starts_with("probe a11y: ok"), "{line}");
+        assert!(!failed);
+    }
+
+    #[test]
+    fn a11y_tree_without_the_grid_fails() {
+        for active in [true, false] {
+            let (line, failed) = a11y_line(active, Some("{}"));
+            assert!(line.starts_with("probe a11y: FAIL"), "{line}");
+            assert!(failed);
+        }
+    }
+
+    #[test]
+    fn a11y_without_a_tree_is_recorded_unverified() {
+        let (line, failed) = a11y_line(false, None);
+        assert!(line.starts_with("probe a11y: record "), "{line}");
+        assert!(!failed);
     }
 }
