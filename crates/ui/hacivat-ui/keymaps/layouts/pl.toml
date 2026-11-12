@@ -1,3 +1,3 @@
 # Layout overlay: Polish (Programmer, KBDPL1), a US-style base layer. The M1 defaults need no
 # alternative chord here.
-shift_level = "~!@#$%^&*()_+{}|:\"<>?"
+shift_level = "!\"#$%&()*+:<>?@^_{|}~"

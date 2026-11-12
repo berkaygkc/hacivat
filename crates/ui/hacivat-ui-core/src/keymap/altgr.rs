@@ -23,13 +23,21 @@ struct TableFile {
     layout: String,
     #[serde(default)]
     keys: HashMap<String, String>,
+    #[serde(default)]
+    dead: HashMap<String, String>,
+    #[serde(default)]
+    shift_keys: HashMap<String, String>,
+    #[serde(default)]
+    shift_dead: HashMap<String, String>,
 }
 
-/// The AltGr layer of one layout: the character each key types with AltGr held.
+/// The AltGr layers of one layout: the characters each key types with AltGr held, and with
+/// Shift+AltGr held. A dead key counts as typing its accent.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AltGrTable {
     layout: String,
-    keys: HashMap<char, char>,
+    altgr: HashMap<char, Vec<char>>,
+    shift_altgr: HashMap<char, Vec<char>>,
 }
 
 fn single_char(s: &str) -> Option<char> {
@@ -40,19 +48,40 @@ fn single_char(s: &str) -> Option<char> {
     }
 }
 
+/// Folds `key = "chars"` tables into one layer. Several keys can normalize to the same name
+/// (Turkish `ı` and `i`), so a name maps to every character its keys type, in file order,
+/// sorted for determinism.
+fn layer(tables: [&HashMap<String, String>; 2]) -> HashMap<char, Vec<char>> {
+    let mut out: HashMap<char, Vec<char>> = HashMap::new();
+    for table in tables {
+        for (k, v) in table {
+            let Some(key) = single_char(k).map(normalize_char) else {
+                continue;
+            };
+            let chars = out.entry(key).or_default();
+            for c in v.chars() {
+                if !chars.contains(&c) {
+                    chars.push(c);
+                }
+            }
+        }
+    }
+    for chars in out.values_mut() {
+        chars.sort_unstable();
+    }
+    out
+}
+
 impl AltGrTable {
-    /// Parses a table file: `layout = "pl"` and a `[keys]` table of `key = "char"` pairs. The
-    /// data is embedded and tested; a file that does not parse gives an empty table.
+    /// Parses a table file: `layout = "pl"`, and the tables `[keys]`, `[dead]` (value: the
+    /// accent), `[shift_keys]` and `[shift_dead]`, each of `key = "chars"` pairs. The data is
+    /// embedded and tested; a file that does not parse gives an empty table.
     pub fn parse(toml: &str) -> AltGrTable {
         let file: TableFile = ::toml::from_str(toml).unwrap_or_default();
-        let keys = file
-            .keys
-            .iter()
-            .filter_map(|(k, v)| Some((normalize_char(single_char(k)?), single_char(v)?)))
-            .collect();
         AltGrTable {
             layout: file.layout,
-            keys,
+            altgr: layer([&file.keys, &file.dead]),
+            shift_altgr: layer([&file.shift_keys, &file.shift_dead]),
         }
     }
 
@@ -69,11 +98,21 @@ pub struct AltGrTables(pub Vec<AltGrTable>);
 impl AltGrTables {
     /// The character AltGr plus `key` types on `layout`, if any.
     pub fn get(&self, layout: &str, key: char) -> Option<char> {
+        self.get_all(layout, key, false).first().copied()
+    }
+
+    /// Every character AltGr (or Shift+AltGr when `shift`) plus `key` types on `layout`.
+    /// More than one only when several physical keys share a normalized name.
+    pub fn get_all(&self, layout: &str, key: char, shift: bool) -> &[char] {
         let key = normalize_char(key);
         self.0
             .iter()
             .find(|t| t.layout == layout)
-            .and_then(|t| t.keys.get(&key).copied())
+            .and_then(|t| {
+                let layer = if shift { &t.shift_altgr } else { &t.altgr };
+                layer.get(&key)
+            })
+            .map_or(&[], Vec::as_slice)
     }
 }
 
@@ -96,7 +135,7 @@ pub fn altgr_collisions(km: &Keymap, tables: &AltGrTables) -> Vec<Collision> {
                 if b.when_layout.as_ref().is_some_and(|l| l.0 != table.layout) {
                     continue;
                 }
-                if let Some(produces) = tables.get(&table.layout, c) {
+                for &produces in tables.get_all(&table.layout, c, press.mods.shift) {
                     found.push(Collision {
                         chord: chord_string(&b.chord),
                         layout: table.layout.clone(),

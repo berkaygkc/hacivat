@@ -1,13 +1,29 @@
-# AltGr layer, Polish (Programmer, KBDPL1).
+# AltGr layers of KBDPL1 (kbdpl1.dll version 10.0.25393.1.), derived by sources/derive_altgr.py.
+# DO NOT EDIT: regenerate. Keys are the key caps GPUI reports (the unshifted character,
+# plus the digit on AZERTY); values are the characters typed. Several characters under
+# one key mean several physical keys fold onto it (Turkish dotless i). `dead` tables
+# hold dead keys: the value is the accent. `shift_*` is Shift+AltGr.
 layout = "pl"
 
 [keys]
-a = "ą"
-c = "ć"
-e = "ę"
-l = "ł"
-n = "ń"
-o = "ó"
-s = "ś"
-x = "ź"
-z = "ż"
+"a" = "ą"
+"c" = "ć"
+"e" = "ę"
+"l" = "ł"
+"n" = "ń"
+"o" = "ó"
+"s" = "ś"
+"u" = "€"
+"x" = "ź"
+"z" = "ż"
+
+[shift_keys]
+"a" = "Ą"
+"c" = "Ć"
+"e" = "Ę"
+"l" = "Ł"
+"n" = "Ń"
+"o" = "Ó"
+"s" = "Ś"
+"x" = "Ź"
+"z" = "Ż"

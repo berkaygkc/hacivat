@@ -538,10 +538,39 @@ fn altgr_table_parses_and_looks_up() {
     assert_eq!(tables.get("de", 'q'), None);
 }
 
+#[test]
+fn altgr_table_keeps_dead_keys_and_folded_keys() {
+    let t = AltGrTable::parse(
+        "layout = \"tr-f\"\n[keys]\n\"ı\" = \"¶\"\ni = \"ß\"\n[dead]\nq = \"¨\"\n[shift_keys]\ns = \"º\"\n",
+    );
+    let tables = AltGrTables(vec![t]);
+    // `ı` and `i` fold onto one name, so both characters are reported.
+    assert_eq!(tables.get_all("tr-f", 'i', false), ['¶', 'ß']);
+    assert_eq!(tables.get_all("tr-f", 'ı', false), ['¶', 'ß']);
+    // A dead key types its accent.
+    assert_eq!(tables.get("tr-f", 'q'), Some('¨'));
+    // The Shift+AltGr layer is separate.
+    assert!(tables.get_all("tr-f", 's', false).is_empty());
+    assert_eq!(tables.get_all("tr-f", 's', true), ['º']);
+}
+
+#[test]
+fn collisions_report_every_character_of_a_folded_key() {
+    let tables = AltGrTables(vec![AltGrTable::parse(
+        "layout = \"tr-f\"\n[keys]\n\"ı\" = \"¶\"\ni = \"ß\"\n",
+    )]);
+    let km = fixture(&entry("ctrl-alt-i", "t.i"));
+    let got: Vec<char> = altgr_collisions(&km, &tables)
+        .into_iter()
+        .map(|c| c.produces)
+        .collect();
+    assert_eq!(got, ['¶', 'ß']);
+}
+
 fn tables() -> AltGrTables {
     AltGrTables(vec![
         AltGrTable::parse("layout = \"pl\"\n[keys]\nl = \"ł\"\ns = \"ś\"\n"),
-        AltGrTable::parse("layout = \"de\"\n[keys]\nm = \"µ\"\n"),
+        AltGrTable::parse("layout = \"de\"\n[keys]\nm = \"µ\"\n[shift_keys]\nm = \"º\"\n"),
     ])
 }
 
@@ -559,7 +588,7 @@ fn collisions_name_chord_layout_and_character() {
             Collision {
                 chord: "ctrl-alt-shift-m".into(),
                 layout: "de".into(),
-                produces: 'µ'
+                produces: 'º'
             },
             Collision {
                 chord: "ctrl-alt-l".into(),

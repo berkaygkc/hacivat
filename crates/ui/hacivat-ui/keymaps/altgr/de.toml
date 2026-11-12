@@ -1,16 +1,23 @@
-# AltGr layer, German (KBDGR).
+# AltGr layers of KBDGR (kbdgr.dll version 10.0.25393.1.), derived by sources/derive_altgr.py.
+# DO NOT EDIT: regenerate. Keys are the key caps GPUI reports (the unshifted character,
+# plus the digit on AZERTY); values are the characters typed. Several characters under
+# one key mean several physical keys fold onto it (Turkish dotless i). `dead` tables
+# hold dead keys: the value is the accent. `shift_*` is Shift+AltGr.
 layout = "de"
 
 [keys]
+"+" = "~"
+"0" = "}"
 "2" = "²"
 "3" = "³"
 "7" = "{"
 "8" = "["
 "9" = "]"
-"0" = "}"
-"ß" = "\\"
-"+" = "~"
 "<" = "|"
-q = "@"
-e = "€"
-m = "µ"
+"e" = "€"
+"m" = "µ"
+"q" = "@"
+"ß" = "\\"
+
+[shift_keys]
+"ß" = "ẞ"

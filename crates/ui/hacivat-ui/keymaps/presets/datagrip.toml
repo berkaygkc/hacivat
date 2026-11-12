@@ -26,7 +26,7 @@ context = "Workspace"
 platforms = ["windows", "linux"]
 
 # Accepted, documented AltGr shadowing (F12). On PL (Programmer) AltGr+S types the letter s with
-# acute, and on TR-Q it types the sharp s. AltGr chords always pass through to text input
+# acute, on TR-Q it types the sharp s, and on TR-F it types the micro sign. AltGr chords always pass through to text input
 # (Review Focus 1), so on those layouts `ctrl-alt-s` types the character instead of opening
 # Settings, and the command stays reachable from the command palette. CI compares this list
 # with the collisions it computes: a new collision fails until it is listed here.
@@ -40,3 +40,8 @@ produces = "ś"
 chord = "ctrl-alt-s"
 layout = "tr-q"
 produces = "ß"
+
+[[accepted_altgr_shadowing]]
+chord = "ctrl-alt-s"
+layout = "tr-f"
+produces = "µ"

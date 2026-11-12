@@ -72,6 +72,132 @@ fn known_altgr_facts() {
     assert_eq!(t.get("pl", 's'), Some('ś'));
 }
 
+/// Asserts the complete AltGr layer of `layout`: every listed key types exactly the listed
+/// characters (sorted), and no other key in ASCII or the Turkish/Latin key caps types any.
+fn assert_altgr_set(layout: &str, expected: &[(char, &str)]) {
+    let t = layouts_altgr();
+    let mut domain: Vec<char> = (0x20u8..0x7f)
+        .map(char::from)
+        .filter(|c| !c.is_ascii_uppercase())
+        .collect();
+    domain.extend("çşğüöıéèàê°²§".chars());
+    for key in domain {
+        let mut want: Vec<char> = expected
+            .iter()
+            .filter(|(k, _)| {
+                hacivat_ui_core::keymap::normalize_char(*k)
+                    == hacivat_ui_core::keymap::normalize_char(key)
+            })
+            .flat_map(|(_, v)| v.chars())
+            .collect();
+        want.sort_unstable();
+        assert_eq!(
+            t.get_all(layout, key, false),
+            want.as_slice(),
+            "{layout} key {key:?}"
+        );
+    }
+}
+
+/// KBDTUQ (kbdtuq.dll 10.0.25393.1), AltGr layer incl. dead keys. `ı` folds onto `i`.
+#[test]
+fn kbdtuq_altgr_set_is_complete() {
+    assert_altgr_set(
+        "tr-q",
+        &[
+            ('"', "<"),
+            ('*', "\\"),
+            ('-', "|"),
+            ('0', "}"),
+            ('1', ">"),
+            ('2', "£"),
+            ('3', "#"),
+            ('4', "$"),
+            ('5', "½"),
+            ('7', "{"),
+            ('8', "["),
+            ('9', "]"),
+            ('<', "|"),
+            ('a', "æ"),
+            ('e', "€"),
+            ('q', "@"),
+            ('s', "ß"),
+            ('t', "₺"),
+            ('ı', "i"),
+            (',', "`"),
+            ('ü', "~"),
+            ('ğ', "¨"),
+            ('ş', "´"),
+        ],
+    );
+    // No AltGr character on 6 (the old table had 3/4 fractions there).
+    assert_eq!(layouts_altgr().get("tr-q", '6'), None);
+}
+
+/// KBDTUF (kbdtuf.dll 10.0.25393.1), AltGr layer incl. dead keys. `ı` and `i` fold together.
+#[test]
+fn kbdtuf_altgr_set_is_complete() {
+    assert_altgr_set(
+        "tr-f",
+        &[
+            ('+', "¬"),
+            (',', "\u{ad}"),
+            ('-', "|"),
+            ('.', "÷"),
+            ('/', "\\"),
+            ('0', "}"),
+            ('1', "¹"),
+            ('2', "²"),
+            ('3', "#"),
+            ('4', "¼"),
+            ('5', "½"),
+            ('6', "¾"),
+            ('7', "{"),
+            ('8', "["),
+            ('9', "]"),
+            ('<', "|"),
+            ('b', "×"),
+            ('d', "¥"),
+            ('e', "€"),
+            ('f', "@"),
+            ('h', "ø"),
+            ('i', "ß"),
+            ('ı', "¶"),
+            ('j', "«"),
+            ('p', "£"),
+            ('s', "µ"),
+            ('t', "₺"),
+            ('u', "æ"),
+            ('v', "¢"),
+            ('ö', "»"),
+            ('q', "¨"),
+            ('w', "~"),
+            ('x', "`"),
+            ('y', "´"),
+        ],
+    );
+}
+
+#[test]
+fn datagrip_ctrl_alt_s_is_reported_on_turkish_f_too() {
+    let km = load(KeymapPlatform::Windows, "datagrip", None).0;
+    let c = altgr_collisions(&km, &layouts_altgr());
+    assert!(c.contains(&Collision {
+        chord: "ctrl-alt-s".into(),
+        layout: "tr-f".into(),
+        produces: 'µ'
+    }));
+    assert_eq!(c.len(), 3, "{c:?}");
+}
+
+#[test]
+fn shift_levels_come_from_the_klc_data() {
+    let level = |l: &str| shift_level(&KeyboardLayoutId(l.into()));
+    assert!(level("tr-f").contains(&'>') && level("tr-f").contains(&'*'));
+    assert!(level("tr-q").contains(&'>') && level("tr-q").contains(&'/'));
+    assert!(level("fr").contains(&'1') && !level("fr").contains(&','));
+}
+
 #[test]
 fn default_chords_are_reachable_on_every_layout() {
     for preset in PRESETS {

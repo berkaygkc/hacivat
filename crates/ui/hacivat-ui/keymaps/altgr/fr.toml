@@ -1,17 +1,32 @@
-# AltGr layer, French AZERTY (KBDFR). Digit keys are named by their digit.
+# AltGr layers of KBDFR (kbdfr.dll version 10.0.25393.1.), derived by sources/derive_altgr.py.
+# DO NOT EDIT: regenerate. Keys are the key caps GPUI reports (the unshifted character,
+# plus the digit on AZERTY); values are the characters typed. Several characters under
+# one key mean several physical keys fold onto it (Turkish dotless i). `dead` tables
+# hold dead keys: the value is the accent. `shift_*` is Shift+AltGr.
 layout = "fr"
 
 [keys]
-"2" = "~"
+"\"" = "#"
+"$" = "¤"
+"'" = "{"
+"(" = "["
+")" = "]"
+"-" = "|"
+"0" = "@"
 "3" = "#"
 "4" = "{"
 "5" = "["
 "6" = "|"
-"7" = "`"
 "8" = "\\"
 "9" = "^"
-"0" = "@"
-")" = "]"
 "=" = "}"
-"$" = "¤"
-e = "€"
+"_" = "\\"
+"e" = "€"
+"à" = "@"
+"ç" = "^"
+
+[dead]
+"2" = "~"
+"7" = "`"
+"è" = "`"
+"é" = "~"
