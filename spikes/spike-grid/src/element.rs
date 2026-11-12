@@ -7,13 +7,13 @@ use std::hash::Hash;
 use std::rc::Rc;
 use std::time::Instant;
 
-use hacivat_ui_core::fonts::font_for;
+use hacivat_ui_core::fonts::{SYNTH_SCALE, font_for};
 use hacivat_ui_core::gpui_surface::{
     App, Bounds, ContentMask, Font, FontId, Hsla, IntoElement, Pixels, ShapedLine, SharedString,
     Styled, TextAlign, TextRun, Window, canvas, fill, point, px,
 };
 use hacivat_ui_core::metrics::snap_to_device_px;
-use hacivat_ui_core::theme::{ThemeTokens, TypeStyle};
+use hacivat_ui_core::theme::{Caps, ThemeTokens, TypeStyle};
 
 use crate::scroll::{ScrollPos, scrollbar_thumb, visible_rows};
 use crate::source::{ColumnMeta, GridDataSource, NULL};
@@ -126,11 +126,17 @@ struct Role {
 }
 
 impl Role {
+    /// A synthesized small-caps style (the NULL marker, pre-cased "NULL") shapes its capitals at
+    /// `SYNTH_SCALE` of the size; a shaped line has no per-glyph tracking.
     fn new(style: &TypeStyle, color: Hsla) -> Self {
+        let size = match style.caps {
+            Caps::SynthesizedSmallCaps => style.size_px * SYNTH_SCALE,
+            Caps::Normal => style.size_px,
+        };
         Self {
             font: font_for(style),
             font_id: None,
-            size: style.size_px,
+            size,
             color,
         }
     }
@@ -535,6 +541,16 @@ fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn null_marker_uses_synthesized_small_caps() {
+        // The NULL literal is pre-cased capitals; label-sc shrinks them like the mock.
+        let t = &hacivat_ui_core::theme::DARK.type_ramp;
+        let color = hacivat_ui_core::gpui_surface::hsla(0.0, 0.0, 0.0, 1.0);
+        let null = Role::new(&t.label_sc, color);
+        assert!((null.size - t.label_sc.size_px * hacivat_ui_core::fonts::SYNTH_SCALE).abs() < 1e-6);
+        assert_eq!(Role::new(&t.body, color).size, t.body.size_px);
+    }
 
     #[test]
     fn lru_hits_do_not_rebuild() {

@@ -24,6 +24,18 @@ impl Color {
     }
 }
 
+/// How a type style renders capitals. DESIGN.md `fontVariantCaps`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Caps {
+    #[default]
+    Normal,
+    /// Small caps synthesized like the approved mock: pre-cased capitals at
+    /// [`SYNTH_SCALE`](crate::fonts::SYNTH_SCALE) of the size, with tracking. Render with
+    /// [`small_caps`](crate::fonts::small_caps); the font's `smcp`/`c2sc` are never used (PO
+    /// decision, M0).
+    SynthesizedSmallCaps,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TypeStyle {
     pub family: &'static str,
@@ -34,6 +46,7 @@ pub struct TypeStyle {
     /// Tracking in logical pixels.
     pub letter_spacing_px: f32,
     pub features: &'static [&'static str],
+    pub caps: Caps,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

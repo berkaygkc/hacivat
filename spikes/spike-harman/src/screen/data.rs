@@ -152,6 +152,21 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         .unwrap_or_else(|| panic!("missing string {key}"))
 }
 
+/// Locale-aware upper case (`toLocaleUpperCase`): Turkish maps `i` to `İ`. Small-caps labels are
+/// cased here, upstream of `hacivat_ui_core::fonts::small_caps`, which never changes case.
+pub fn upper(lang: Lang, s: &str) -> String {
+    s.chars()
+        .flat_map(|ch| {
+            let up: Vec<char> = if lang == Lang::Tr && ch == 'i' {
+                vec!['\u{130}']
+            } else {
+                ch.to_uppercase().collect()
+            };
+            up
+        })
+        .collect()
+}
+
 /// `Intl.NumberFormat` equivalent for the two languages: `,`/`.` swap in Turkish.
 pub fn nf(lang: Lang, v: f64, dp: usize) -> String {
     let s = format!("{v:.dp$}");
@@ -300,6 +315,15 @@ mod tests {
         assert_eq!(nf(Lang::Tr, 48920.5, 2), "48.920,50");
         assert_eq!(nf(Lang::En, 2481.0, 0), "2,481");
         assert_eq!(nf(Lang::En, 100.0, 0), "100");
+    }
+
+    #[test]
+    fn upper_is_locale_aware() {
+        assert_eq!(upper(Lang::En, "Explorer"), "EXPLORER");
+        assert_eq!(upper(Lang::En, "null"), "NULL");
+        assert_eq!(upper(Lang::Tr, "Gezgin"), "GEZGİN");
+        assert_eq!(upper(Lang::Tr, "Seçili aralık"), "SEÇİLİ ARALIK");
+        assert_eq!(upper(Lang::Tr, "Kayıt"), "KAYIT");
     }
 
     #[test]

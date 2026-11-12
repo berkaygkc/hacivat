@@ -2,9 +2,11 @@
 
 use std::cell::Cell;
 
-use hacivat_ui_core::fonts::font_for;
+use hacivat_ui_core::fonts::{font_for, small_caps};
 use hacivat_ui_core::gpui_surface::*;
-use hacivat_ui_core::theme::{Color, Colors, ShadowLayer, Theme, ThemeMode, TypeRamp, TypeStyle};
+use hacivat_ui_core::theme::{
+    Caps, Color, Colors, ShadowLayer, Theme, ThemeMode, TypeRamp, TypeStyle,
+};
 
 use super::data::{Env, Lang};
 
@@ -72,44 +74,16 @@ impl Ui {
         self.run(style, color.to_hsla()).child(s.into())
     }
 
-    /// Small-caps label with CSS-style tracking. The reference renders `font-variant-caps:
-    /// all-small-caps` with Chrome's synthesis (the Google Fonts subset carries no `smcp`):
-    /// letters become capitals at 0.7 x the size. GPUI has no `letter-spacing`, so each glyph is
-    /// its own flex item carrying a trailing gap (Chrome adds the spacing after every glyph).
+    /// Small-caps label with CSS-style tracking, synthesized like the reference (`font-variant-caps:
+    /// all-small-caps` with Chrome's synthesis; PO decision M0) by `hacivat_ui_core::fonts::small_caps`.
+    /// The text is cased here, upstream of the helper (Turkish `i` -> `İ`).
     pub fn sc(&self, size: f32, weight: u16, tracking_em: f32, color: Color, s: &str) -> Div {
-        // Adapter workaround (PO decision: small caps stay synthesized like the mock, GPUI has no
-        // letter-spacing). SYNTH_SCALE is Chrome's small-caps synthesis ratio.
-        const SYNTH_SCALE: f32 = 0.7;
-        // Empirical: Chrome's tracked small-caps renders ~half the nominal tracking (measured
-        // against the capture: EXPLORER, HACIVAT).
-        const TRACKING_FIT: f32 = 0.5;
-        let style = self.sans(size, weight);
-        let ls = size * tracking_em * TRACKING_FIT;
-        let font = font_for(&style);
-        let mut row = div().flex().flex_row().items_baseline().flex_none();
-        for ch in s.chars() {
-            let (txt, sz) = if ch.is_alphabetic() {
-                let up = if self.lang == Lang::Tr && ch == 'i' {
-                    "\u{130}".to_string()
-                } else {
-                    ch.to_uppercase().collect::<String>()
-                };
-                (up, size * SYNTH_SCALE)
-            } else {
-                (ch.to_string(), size)
-            };
-            row = row.child(
-                div()
-                    .font(font.clone())
-                    .text_size(px(sz))
-                    .line_height(px(style.line_height))
-                    .text_color(color.to_hsla())
-                    .whitespace_nowrap()
-                    .mr(px(ls))
-                    .child(txt),
-            );
-        }
-        row
+        let style = TypeStyle {
+            letter_spacing_px: size * tracking_em,
+            caps: Caps::SynthesizedSmallCaps,
+            ..self.sans(size, weight)
+        };
+        small_caps(&style, color.to_hsla(), &super::data::upper(self.lang, s))
     }
 
     pub fn icon(&self, name: &str, size: f32, color: Hsla) -> impl IntoElement + use<> {
