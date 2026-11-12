@@ -13,3 +13,14 @@ hui-palette-hint-navigate = Gezin
 hui-palette-hint-run = Çalıştır
 # Review: PO
 hui-palette-hint-close = Kapat
+
+## task-12-chrome
+hui-dialog-close = Kapat
+hui-toast-dismiss = Bildirimi kapat
+hui-menu-more = Diğer
+hui-tab-close = Sekmeyi kapat
+hui-tabs = Sekmeler
+hui-window-minimize = Simge durumuna küçült
+hui-window-maximize = Ekranı kapla
+hui-window-close = Pencereyi kapat
+hui-menu-app = Uygulama menüsü
