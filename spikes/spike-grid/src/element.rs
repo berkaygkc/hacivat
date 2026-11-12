@@ -548,7 +548,9 @@ mod tests {
         let t = &hacivat_ui_core::theme::DARK.type_ramp;
         let color = hacivat_ui_core::gpui_surface::hsla(0.0, 0.0, 0.0, 1.0);
         let null = Role::new(&t.label_sc, color);
-        assert!((null.size - t.label_sc.size_px * hacivat_ui_core::fonts::SYNTH_SCALE).abs() < 1e-6);
+        assert!(
+            (null.size - t.label_sc.size_px * hacivat_ui_core::fonts::SYNTH_SCALE).abs() < 1e-6
+        );
         assert_eq!(Role::new(&t.body, color).size, t.body.size_px);
     }
 

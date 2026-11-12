@@ -17,8 +17,8 @@ use hacivat_ui_core::gpui_surface::{
     App, AvailableSpace, Bounds, ContentMask, Context, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId, InspectorElementId,
     InteractiveElement, IntoElement, KeyDownEvent, LayoutId, ParentElement, Pixels, Point, Render,
-    ScrollWheelEvent, ShapedLine, Style, Styled, TextAlign, TextRun, UnderlineStyle, Window, div,
-    fill, point, px, relative, size,
+    ScrollEvent, ShapedLine, Style, Styled, TextAlign, TextRun, UnderlineStyle, Window, div, fill,
+    point, px, relative, size,
 };
 use hacivat_ui_core::theme::{Colors, Theme};
 
@@ -482,7 +482,7 @@ impl EditorView {
         cx.stop_propagation();
     }
 
-    fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(layout) = self.layout else { return };
         let delta = event.delta.pixel_delta(layout.line_height);
         let (mut dx, mut dy) = self.scroll_remainder;

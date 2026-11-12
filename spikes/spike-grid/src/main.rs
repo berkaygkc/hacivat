@@ -15,7 +15,7 @@ use std::rc::Rc;
 
 use hacivat_ui_core::app::{open_window, run_app};
 use hacivat_ui_core::gpui_surface::{
-    AppContext, Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollWheelEvent,
+    AppContext, Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollEvent,
     Styled, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode};
@@ -73,7 +73,7 @@ impl Render for GridView {
         div()
             .size_full()
             .bg(tokens.colors.ground.to_hsla())
-            .on_scroll(cx.listener(move |this, e: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(move |this, e: &ScrollEvent, _, cx| {
                 // GPUI deltas are positive when content should move down (towards row 0).
                 let d = e.delta.pixel_delta(px(row_h));
                 this.scroll_px(-f64::from(f32::from(d.y)), -f32::from(d.x));

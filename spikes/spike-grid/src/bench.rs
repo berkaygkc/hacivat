@@ -203,7 +203,10 @@ mod tests {
     fn a_complete_fling_expects_at_least_600_frames() {
         for os in ["macos", "windows", "linux"] {
             let run = fling_run(os, 0, 0);
-            assert!(run.expected_samples >= hacivat_ui_core::frames::B1_MIN_FRAMES, "{os}");
+            assert!(
+                run.expected_samples >= hacivat_ui_core::frames::B1_MIN_FRAMES,
+                "{os}"
+            );
             assert_eq!(run.painted_frames, Some(0));
         }
         assert_eq!(fling_run("macos", 3, 7).inactive_keys, 3);
