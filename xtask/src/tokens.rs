@@ -34,6 +34,8 @@ pub struct TypeSpec {
     pub weight: u16,
     /// Resolved to logical pixels (unitless values are multiplied by the size).
     pub line_height: f32,
+    /// Tracking in logical pixels (`em` values are multiplied by the size); 0.0 when absent.
+    pub letter_spacing_px: f32,
     pub features: Vec<String>,
 }
 
@@ -190,6 +192,20 @@ fn parse_type(name: &str, v: &Yaml) -> Result<TypeSpec> {
             size_px * m as f32
         }
     };
+    let line_height = (line_height * 100.0).round() / 100.0;
+    let letter_spacing_px = match yaml_str(&v["letterSpacing"]) {
+        None => 0.0,
+        Some(s) => {
+            let ctx = || format!("typography.{name}.letterSpacing");
+            let t = s.trim();
+            let px = if let Some(em) = t.strip_suffix("em") {
+                size_px * em.trim().parse::<f32>().with_context(ctx)?
+            } else {
+                parse_px(t).with_context(ctx)?
+            };
+            (px * 1000.0).round() / 1000.0
+        }
+    };
     let weight = yaml_f64(&v["fontWeight"])
         .ok_or_else(|| anyhow!("typography.{name}.fontWeight is missing"))? as u16;
     let features = match yaml_str(&v["fontFeature"]) {
@@ -206,6 +222,7 @@ fn parse_type(name: &str, v: &Yaml) -> Result<TypeSpec> {
         size_px,
         weight,
         line_height,
+        letter_spacing_px,
         features,
     })
 }
@@ -494,11 +511,12 @@ pub fn render(t: &Tokens) -> Result<String> {
         let feats: Vec<String> = s.features.iter().map(|f| format!("{f:?}")).collect();
         writeln!(
             o,
-            "{id}: TypeStyle {{ family: {:?}, size_px: {:?}, weight: {}, line_height: {:?}, features: &[{}] }},",
+            "{id}: TypeStyle {{ family: {:?}, size_px: {:?}, weight: {}, line_height: {:?}, letter_spacing_px: {:?}, features: &[{}] }},",
             s.family,
             s.size_px,
             s.weight,
             s.line_height,
+            s.letter_spacing_px,
             feats.join(", ")
         )?;
     }
@@ -677,7 +695,8 @@ spacing: {}
         let t = load(MD, JSON).unwrap();
         let body = &t.typography[0];
         assert_eq!(body.features, ["smcp", "c2sc"]);
-        assert_eq!(body.line_height, 13.0 * 1.35);
+        assert_eq!(body.line_height, 17.55);
+        assert_eq!(body.letter_spacing_px, 0.0);
         assert_eq!(t.typography[1].line_height, 14.0);
         assert_eq!(t.spacing[0].0, "2xs");
         assert_eq!(t.durations, [("m-dur-1".to_string(), 140)]);

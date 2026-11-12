@@ -31,6 +31,8 @@ pub struct TypeStyle {
     pub weight: u16,
     /// Logical pixels.
     pub line_height: f32,
+    /// Tracking in logical pixels.
+    pub letter_spacing_px: f32,
     pub features: &'static [&'static str],
 }
 
@@ -95,6 +97,15 @@ mod tests {
         for s in DARK.type_ramp.all() {
             assert!(s.size_px >= 11.0, "{}", s.family);
         }
+    }
+
+    #[test]
+    fn label_sc_has_tracking_from_design_md() {
+        // DESIGN.md: label-sc is 13px with letterSpacing 0.075em.
+        let s = DARK.type_ramp.label_sc;
+        assert!(s.letter_spacing_px > 0.0);
+        assert!((s.letter_spacing_px - 13.0 * 0.075).abs() < 1e-3);
+        assert_eq!(DARK.type_ramp.body.letter_spacing_px, 0.0);
     }
 
     #[test]
