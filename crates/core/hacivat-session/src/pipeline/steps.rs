@@ -82,6 +82,13 @@ pub(crate) const CLOSE_BUDGET: Duration = Duration::from_secs(2);
 /// The most server rejections of a password per connect gesture (P8).
 pub(crate) const MAX_REJECTIONS: u8 = 3;
 
+/// A pre-opened stream older than this is not handed to the driver: a server or forwarder may
+/// have dropped it while idle (MySQL's handshake waits about 10 s).
+const STALE_STREAM: Duration = Duration::from_secs(5);
+
+/// The slot holding the transport step's first stream until the factory hands it out.
+pub(crate) type FirstStream = Arc<Mutex<Option<BoxedStream>>>;
+
 /// How many database names the unknown-database probe reads, and how many it suggests.
 const PROBE_LIST: usize = 50;
 const SUGGESTIONS: usize = 3;
@@ -133,6 +140,11 @@ pub(crate) struct StepState {
     pub(crate) resolved: Vec<SocketAddr>,
     pub(crate) address: AddressClass,
     pub(crate) endpoint: Option<Endpoint>,
+    /// The stream the transport step opened for the first attempt, and when.
+    pub(crate) first_stream: Option<(FirstStream, tokio::time::Instant)>,
+    /// The auth step waited on the user (a prompt) or the keyring after the transport opened
+    /// its stream, so that stream may have idled out.
+    pub(crate) interacted: bool,
     pub(crate) forwarded: bool,
     pub(crate) tls: Option<TlsParams>,
     pub(crate) auth: Option<AuthMaterial>,
@@ -333,6 +345,14 @@ async fn ask_password(
     }
 }
 
+/// Whether `resolve_auth` will read the persistent store (the keyring, which may show a
+/// system dialog): a password profile kept `Forever`, with no draft.
+fn touches_keyring(p: &Profile, st: &StepState) -> bool {
+    p.auth == AuthProviderId::Password
+        && st.draft.is_none()
+        && p.retention == hacivat_secrets::Retention::Forever
+}
+
 /// The error of a credential lookup that failed.
 fn auth_error(e: &AuthError, phase: Phase) -> ConnectError {
     match e {
@@ -349,6 +369,7 @@ async fn material(
     fallback_user: Option<String>,
     outcome: AuthOutcome,
     phase: Phase,
+    attempt: u8,
 ) -> Result<AuthMaterial, ConnectError> {
     let user = match outcome {
         AuthOutcome::Ready(m) => return Ok(m),
@@ -358,7 +379,7 @@ async fn material(
         }
         AuthOutcome::Failed(e) => return Err(auth_error(&e, phase)),
     };
-    let password = ask_password(p, ix, user.clone(), 1).await?;
+    let password = ask_password(p, ix, user.clone(), attempt).await?;
     Ok(AuthMaterial {
         user: Some(user).filter(|u| !u.is_empty()),
         password: Some(password),
@@ -398,7 +419,20 @@ impl ConnectStep for PgPassStep {
             }
             st.trail.done(TrailStep::PgPass);
             let (ix, user) = (st.ix.clone(), st.user.clone());
-            let m = material(&cx.profile, &ix, user, outcome, Phase::CredentialFiles).await?;
+            // The first prompt of the gesture is attempt 1; a re-entry continues the count.
+            let attempt = st.rejections + 1;
+            let m = material(
+                &cx.profile,
+                &ix,
+                user,
+                outcome,
+                Phase::CredentialFiles,
+                attempt,
+            )
+            .await?;
+            if m.source == SecretSource::Prompt {
+                st.interacted = true;
+            }
             st.auth = Some(m);
             Ok(None)
         })
@@ -456,9 +490,10 @@ impl ConnectStep for ResolveStep {
 struct TransportStep;
 
 /// A factory that hands out `first` once, then opens new streams through `inner` (P23).
-fn first_then(first: BoxedStream, inner: StreamFactory) -> StreamFactory {
-    let first = Arc::new(Mutex::new(Some(first)));
-    StreamFactory::new(move || {
+fn first_then(first: BoxedStream, inner: StreamFactory) -> (StreamFactory, FirstStream) {
+    let slot: FirstStream = Arc::new(Mutex::new(Some(first)));
+    let first = slot.clone();
+    let factory = StreamFactory::new(move || {
         let taken = first
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -467,7 +502,8 @@ fn first_then(first: BoxedStream, inner: StreamFactory) -> StreamFactory {
             Some(stream) => Box::pin(async move { Ok(stream) }),
             None => inner.open(),
         }
-    })
+    });
+    (factory, slot)
 }
 
 impl ConnectStep for TransportStep {
@@ -531,7 +567,9 @@ impl ConnectStep for TransportStep {
                         &st.resolved,
                     )
                 })?;
-                factory = first_then(stream, factory);
+                let (handing_out, slot) = first_then(stream, factory);
+                factory = handing_out;
+                st.first_stream = Some((slot, tokio::time::Instant::now()));
                 st.trail.done(TrailStep::Connect);
             }
             st.forwarded = !caps.stream_injection && !driver_dials;
@@ -622,9 +660,16 @@ impl ConnectStep for AuthStep {
                 // The credential-files step already found them.
                 return Ok(None);
             }
+            if touches_keyring(&cx.profile, st) {
+                st.interacted = true;
+            }
             let outcome = resolve_blocking(&cx.profile, st, lookup_host(&cx.profile)).await?;
             let (ix, user) = (st.ix.clone(), st.user.clone());
-            let m = material(&cx.profile, &ix, user, outcome, Phase::Auth).await?;
+            let attempt = st.rejections + 1;
+            let m = material(&cx.profile, &ix, user, outcome, Phase::Auth, attempt).await?;
+            if m.source == SecretSource::Prompt {
+                st.interacted = true;
+            }
             st.auth = Some(m);
             Ok(None)
         })
@@ -734,16 +779,6 @@ fn trail_events(trail: &Recorder) -> hacivat_driver::DriverEvents {
     })
 }
 
-/// The server asked for a password and none was sent: the follow-up's `PasswordRequired`
-/// (classified `auth.invalid`), or, before it, `tokio-postgres`'s uncoded "password missing"
-/// (`RawErrorKind::Other` without a server message, T13 note 5).
-fn password_required(kind: DbmsKind, raw: &RawError, sent_password: bool) -> bool {
-    !sent_password
-        && kind == DbmsKind::Postgres
-        && raw.kind == RawErrorKind::Other
-        && raw.server.is_none()
-}
-
 /// Up to [`SUGGESTIONS`] names of `names` closest to `requested` by ASCII-case-insensitive
 /// edit distance; ties go alphabetically. `requested` itself is never offered.
 pub(crate) fn rank_suggestions(requested: &str, names: Vec<String>) -> Vec<String> {
@@ -832,6 +867,18 @@ impl ConnectStep for DriverStep {
                 // The driver dials itself: its connect runs now, untimed (P23).
                 st.trail.start(TrailStep::Connect);
             }
+            // A first stream that idled through a prompt or a keyring read, or for too long, is
+            // dropped: the factory dials a fresh one for the driver (the Connect step keeps the
+            // time it measured).
+            if let Some((slot, opened)) = st.first_stream.take()
+                && (st.interacted || opened.elapsed() > STALE_STREAM)
+            {
+                drop(
+                    slot.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take(),
+                );
+            }
             let events = trail_events(&st.trail);
             let conn = loop {
                 let req = request(&p, st, p.database.clone(), events.clone());
@@ -841,10 +888,9 @@ impl ConnectStep for DriverStep {
                     Ok(conn) => break conn,
                     Err(raw) => raw,
                 };
+                // `auth.invalid` includes `PasswordRequired` (the server wanted a password and
+                // none was sent: PostgreSQL), and MySQL 1045 "using password: NO".
                 let mut e = raw_failure(p.engine, Phase::DriverConnect, &raw);
-                if password_required(p.engine, &raw, sent_password) {
-                    e.class = ErrClass::AuthInvalid;
-                }
                 if e.class == ErrClass::AuthInvalid {
                     let user = st.auth.as_ref().and_then(|a| a.user.clone());
                     let user = user.or_else(|| st.user.clone()).unwrap_or_default();

@@ -171,7 +171,13 @@ impl Budget {
     }
 }
 
-/// `p`'s budget: `Budget::new(p.max_connections)`, which is 1 for SQLite (P4).
+/// `p`'s budget (P4, D-035): always 1 for SQLite (one writer; WAL's 1 writer + 2 readers come
+/// later), else `p.max_connections` but at least 1, so a profile saying 0 cannot make every
+/// connect wait forever.
 pub fn budget_for(p: &Profile) -> Budget {
-    Budget::new(p.max_connections)
+    if p.engine == hacivat_proto::DbmsKind::Sqlite {
+        Budget::new(1)
+    } else {
+        Budget::new(p.max_connections.max(1))
+    }
 }

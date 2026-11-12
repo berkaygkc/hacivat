@@ -73,6 +73,7 @@ pub async fn test_connection(
         draft_password: password,
         purpose: Purpose::Test,
         department: Department::Unknown,
+        prior_rejections: 0,
     };
     let mut live = match connect(deps, req, ix, cancel.clone(), progress).await {
         Ok(live) => live,

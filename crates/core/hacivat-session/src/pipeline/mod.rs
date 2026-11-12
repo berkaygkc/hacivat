@@ -36,10 +36,10 @@ pub use hacivat_driver::errors::Phase;
 pub use interaction::{Answer, Interaction, Question, UiPort};
 pub use steps::{ConnectStep, StepCx};
 pub use trail::{Progress, StepOutcome, StepTrace, TrailStep};
-pub use validate::{IssueCode, ValidationIssue, validate};
+pub use validate::{ApprovedRoots, IssueCode, ValidationIssue, validate, validate_with};
 
 pub(crate) use steps::{CLOSE_BUDGET, short_version};
-use steps::{Deadline, StepState, builtin_steps, close_bounded, error};
+use steps::{Deadline, MAX_REJECTIONS, StepState, builtin_steps, close_bounded, error};
 use trail::Recorder;
 
 use crate::profile::{Profile, ProfileEndpoint};
@@ -95,6 +95,10 @@ pub struct ConnectRequest {
     pub draft_password: Option<SecretString>,
     pub purpose: Purpose,
     pub department: Department,
+    /// Server rejections earlier in the same connect gesture: the error dialog's password
+    /// re-entry passes the failed connect's `attempts`, so the gesture keeps one budget of 3
+    /// (P8, R8). 0 for a new gesture.
+    pub prior_rejections: u8,
 }
 
 /// An open connection with what the pipeline learned (HV-CONN-01).
@@ -165,6 +169,9 @@ pub struct ConnectDeps {
     pub transport_wrap: Option<TransportWrap>,
     /// Extra steps merged into the ordered list by `order` (the cleanup-guard test seam).
     pub extra_steps: Vec<Arc<dyn ConnectStep>>,
+    /// Where files named by an untrusted-origin profile may live (DRV-05): the user's home and
+    /// the paths picked in the dialog ([`ApprovedRoots::for_user`], then `add`).
+    pub approved_roots: ApprovedRoots,
     /// Replaces the profile's connect timeout; `None` in the app, set only by tests.
     #[doc(hidden)]
     pub timeout_override: Option<Duration>,
@@ -179,12 +186,13 @@ pub struct ConnectDeps {
 /// - The connect timeout (the profile's, default 15 s) covers the network steps only: a
 ///   keyring read or a prompt never counts (P23). Running out is `network.timeout`.
 /// - Retries (P8): a password from this connect's prompt that the server rejects is asked for
-///   again, up to 3 rejections; a stored or draft password that is rejected returns
-///   `auth.invalid` at once. `attempts` counts server rejections.
+///   again, up to 3 rejections in the gesture (counting `prior_rejections`); a stored or draft
+///   password that is rejected returns `auth.invalid` at once. `attempts` counts the gesture's
+///   server rejections. A gesture that already has 3 fails at once, before any I/O.
 /// - On `config.unknown_database` a probe connection lists up to 50 databases, and the 3
 ///   closest names become `suggestions` (none for SQLite).
 /// - A password that worked (prompted, or the draft) is stored with the profile's retention
-///   only after success, and never by a Test (R8).
+///   only after success, never by a Test, and never once the connect was cancelled (R8).
 /// - On failure or cancel the connection is closed and the cleanup guards run LIFO.
 pub async fn connect(
     deps: &ConnectDeps,
@@ -216,12 +224,14 @@ async fn run(
         draft_password,
         purpose,
         department: _,
+        prior_rejections,
     } = req;
     let profile = Arc::new(validate::effective_profile(&original));
     let port = effective_port(&profile, deps.catalog);
     let user = effective_user(&profile);
 
-    let (mut issues, options) = validate::checked(&profile, deps.catalog);
+    let (mut issues, options) =
+        validate::checked(&profile, deps.catalog, &deps.approved_roots.list());
     if purpose == Purpose::Test {
         issues.retain(|i| i.code != IssueCode::NameMissing);
     }
@@ -241,6 +251,12 @@ async fn run(
     let Some(driver) = deps.drivers.resolve(profile.engine) else {
         return Err(fail_early(error(ErrClass::Internal, Phase::Validate)));
     };
+    if prior_rejections >= MAX_REJECTIONS {
+        // The gesture's budget of rejections is spent (P8): no more attempts, no I/O.
+        let mut e = fail_early(error(ErrClass::AuthInvalid, Phase::Auth));
+        e.attempts = prior_rejections;
+        return Err(e);
+    }
 
     let file_based = matches!(profile.endpoint, ProfileEndpoint::File { .. });
     let trail = Recorder::new(&plan(&profile), progress);
@@ -267,6 +283,8 @@ async fn run(
             AddressClass::Public
         },
         endpoint: None,
+        first_stream: None,
+        interacted: false,
         forwarded: false,
         tls: None,
         auth: None,
@@ -276,7 +294,7 @@ async fn run(
         support: None,
         current_user: None,
         access: AccessLabel::ReadWrite,
-        rejections: 0,
+        rejections: prior_rejections,
     };
     let mut cx = StepCx::new(profile.clone(), cancel.clone(), state);
 
@@ -336,7 +354,7 @@ async fn run(
         return Err(fail(e, cx, guards, started).await);
     };
     let StepCx { state: st, .. } = cx;
-    remember_password(&profile, purpose, &st.secrets, st.auth.as_ref()).await;
+    remember_password(&profile, purpose, &st.secrets, st.auth.as_ref(), &cancel).await;
     let trail = st.trail.snapshot();
     tracing::debug!(
         trail = ?trail.iter().map(|t| t.step.id()).collect::<Vec<_>>(),
@@ -506,12 +524,15 @@ fn args(
 
 /// Stores the password a successful Main connect used when it came from the prompt or the
 /// dialog's draft, with the profile's retention (R8). Never for a Test or a probe, never for
-/// `.pgpass` or a stored password. On the blocking pool (keyring).
+/// `.pgpass` or a stored password, and never for a cancelled connect: `cancel` is checked
+/// right before the write, and a `ForSession` secret written while a cancel (a disconnect or
+/// `forget` and its `forget_session`) raced it is forgotten again. On the blocking pool.
 async fn remember_password(
     p: &Profile,
     purpose: Purpose,
     secrets: &Arc<SecretStore>,
     auth: Option<&hacivat_secrets::AuthMaterial>,
+    cancel: &CancellationToken,
 ) {
     let Some(auth) = auth else { return };
     let worth_storing = purpose == Purpose::Main
@@ -526,10 +547,16 @@ async fn remember_password(
         slot: SecretSlot::DbPassword,
     };
     let retention = p.retention;
-    let secrets = secrets.clone();
-    let stored = tokio::task::spawn_blocking(move || secrets.put(&key, password, retention)).await;
+    if cancel.is_cancelled() {
+        return;
+    }
+    let store = secrets.clone();
+    let stored = tokio::task::spawn_blocking(move || store.put(&key, password, retention)).await;
     if !matches!(stored, Ok(Ok(_))) {
         tracing::warn!("the password that worked could not be stored");
+    }
+    if cancel.is_cancelled() && retention == Retention::ForSession {
+        secrets.forget_session(p.id);
     }
 }
 

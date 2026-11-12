@@ -169,6 +169,7 @@ fn deps_over(driver: Arc<FakeDriver>, secrets: Arc<SecretStore>) -> ConnectDeps 
         private_dir: std::env::temp_dir(),
         transport_wrap: Some(stub_wrap()),
         extra_steps: Vec::new(),
+        approved_roots: hacivat_session::pipeline::ApprovedRoots::for_user(),
         timeout_override: None,
     }
 }
@@ -349,7 +350,6 @@ pub fn sqlite_profile() -> Profile {
             create_if_missing: false,
         },
         user: None,
-        max_connections: 1,
         ..base(DbmsKind::Sqlite, "")
     }
 }
@@ -585,6 +585,7 @@ pub fn req(p: Profile) -> ConnectRequest {
         draft_password: None,
         purpose: Purpose::Main,
         department: Department::Console,
+        prior_rejections: 0,
     }
 }
 
@@ -766,4 +767,216 @@ pub async fn settle() {
     for _ in 0..50 {
         tokio::task::yield_now().await;
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Instrumented drivers: which stream a driver gets, and when connections open and close.
+
+/// A transport stub whose streams carry their open number (1, 2, …) as their first byte.
+fn numbered_wrap(
+    opened: Arc<std::sync::atomic::AtomicU8>,
+) -> hacivat_session::pipeline::TransportWrap {
+    Arc::new(move |_direct: StreamFactory| {
+        let opened = opened.clone();
+        StreamFactory::new(move || {
+            let n = opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            Box::pin(async move {
+                use tokio::io::AsyncWriteExt;
+                let (near, mut far) = tokio::io::duplex(64);
+                far.write_all(&[n]).await?;
+                Ok(Box::new(near) as BoxedStream)
+            })
+        })
+    })
+}
+
+/// Opens the request's stream factory, records the number of the stream it got, then lets
+/// the fake connect.
+struct ReadsStream {
+    fake: Arc<FakeDriver>,
+    seen: Arc<Mutex<Vec<u8>>>,
+}
+
+impl hacivat_driver::Driver for ReadsStream {
+    fn descriptor(&self) -> &hacivat_driver::DriverDescriptor {
+        hacivat_driver::Driver::descriptor(self.fake.as_ref())
+    }
+    fn connect(
+        &self,
+        req: hacivat_driver::DriverConnect,
+    ) -> BoxFuture<'static, Result<Box<dyn hacivat_driver::RawConn>, RawError>> {
+        let factory = match &req.endpoint {
+            hacivat_driver::Endpoint::Network { factory, .. } => Some(factory.clone()),
+            hacivat_driver::Endpoint::File { .. } => None,
+        };
+        let (fake, seen) = (self.fake.clone(), self.seen.clone());
+        Box::pin(async move {
+            if let Some(factory) = factory {
+                use tokio::io::AsyncReadExt;
+                let mut stream = factory.open().await.expect("a stream");
+                let mut n = [0u8; 1];
+                stream
+                    .read_exact(&mut n)
+                    .await
+                    .expect("the stream's number");
+                seen.lock().unwrap().push(n[0]);
+            }
+            hacivat_driver::Driver::connect(fake.as_ref(), req).await
+        })
+    }
+}
+
+/// Deps whose driver records the number of the stream each attempt read (1 is the stream the
+/// transport step pre-opened).
+pub fn deps_reading_streams(fake: FakeDriver) -> (ConnectDeps, Arc<Mutex<Vec<u8>>>) {
+    let fake = Arc::new(fake);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut drivers = DriverRegistry::new();
+    drivers.register(Arc::new(ReadsStream {
+        fake: fake.clone(),
+        seen: seen.clone(),
+    }));
+    let mut deps = deps_over(fake, thread_store());
+    deps.drivers = Arc::new(drivers);
+    deps.transport_wrap = Some(numbered_wrap(Arc::default()));
+    (deps, seen)
+}
+
+/// An extra step (after the transport, order 41) that waits `delay`.
+struct WaitStep(Duration);
+
+impl ConnectStep for WaitStep {
+    fn phase(&self) -> Phase {
+        Phase::Transport
+    }
+    fn order(&self) -> i32 {
+        41
+    }
+    fn applies(&self, _p: &Profile) -> bool {
+        true
+    }
+    fn apply<'a>(
+        &'a self,
+        _cx: &'a mut StepCx,
+    ) -> BoxFuture<'a, Result<Option<CleanupGuard>, ConnectError>> {
+        let d = self.0;
+        Box::pin(async move {
+            tokio::time::sleep(d).await;
+            Ok(None)
+        })
+    }
+}
+
+pub fn wait_step(delay: Duration) -> Arc<dyn ConnectStep> {
+    Arc::new(WaitStep(delay))
+}
+
+/// A connection log: `open`, `ping`, `close`, in order.
+pub type Log = Arc<Mutex<Vec<&'static str>>>;
+
+/// A connection whose close takes `close_delay` and whose pings may hang, logging both.
+struct LoggedConn {
+    inner: Box<dyn hacivat_driver::RawConn>,
+    log: Log,
+    close_delay: Duration,
+    hang_pings: bool,
+}
+
+impl hacivat_driver::RawConn for LoggedConn {
+    fn kind(&self) -> DbmsKind {
+        self.inner.kind()
+    }
+    fn server_info(&mut self) -> BoxFuture<'_, Result<ServerInfo, RawError>> {
+        self.inner.server_info()
+    }
+    fn ping(&mut self) -> BoxFuture<'_, Result<Duration, RawError>> {
+        self.log.lock().unwrap().push("ping");
+        if self.hang_pings {
+            Box::pin(std::future::pending())
+        } else {
+            self.inner.ping()
+        }
+    }
+    fn tls_summary(&mut self) -> BoxFuture<'_, TlsSummary> {
+        self.inner.tls_summary()
+    }
+    fn probe(&mut self) -> BoxFuture<'_, Vec<hacivat_driver::ProbeWarning>> {
+        self.inner.probe()
+    }
+    fn current_user(&mut self) -> BoxFuture<'_, Result<Option<String>, RawError>> {
+        self.inner.current_user()
+    }
+    fn list_databases(&mut self, limit: usize) -> BoxFuture<'_, Result<Vec<String>, RawError>> {
+        self.inner.list_databases(limit)
+    }
+    fn close(self: Box<Self>) -> BoxFuture<'static, ()> {
+        let LoggedConn {
+            inner,
+            log,
+            close_delay,
+            ..
+        } = *self;
+        Box::pin(async move {
+            tokio::time::sleep(close_delay).await;
+            inner.close().await;
+            log.lock().unwrap().push("close");
+        })
+    }
+    fn cancel_handle(&self) -> Option<Arc<dyn hacivat_driver::CancelHandle>> {
+        None
+    }
+}
+
+struct LoggedDriver {
+    fake: Arc<FakeDriver>,
+    log: Log,
+    close_delay: Duration,
+    hang_pings: bool,
+}
+
+impl hacivat_driver::Driver for LoggedDriver {
+    fn descriptor(&self) -> &hacivat_driver::DriverDescriptor {
+        hacivat_driver::Driver::descriptor(self.fake.as_ref())
+    }
+    fn connect(
+        &self,
+        req: hacivat_driver::DriverConnect,
+    ) -> BoxFuture<'static, Result<Box<dyn hacivat_driver::RawConn>, RawError>> {
+        let fut = hacivat_driver::Driver::connect(self.fake.as_ref(), req);
+        let (log, close_delay, hang_pings) = (self.log.clone(), self.close_delay, self.hang_pings);
+        Box::pin(async move {
+            let inner = fut.await?;
+            log.lock().unwrap().push("open");
+            Ok(Box::new(LoggedConn {
+                inner,
+                log,
+                close_delay,
+                hang_pings,
+            }) as Box<dyn hacivat_driver::RawConn>)
+        })
+    }
+}
+
+/// A manager over a logging driver for `kind`.
+pub fn logged_manager(
+    kind: DbmsKind,
+    close_delay: Duration,
+    hang_pings: bool,
+    config: ManagerConfig,
+) -> (Arc<ConnectionManager>, Log) {
+    let fake = Arc::new(FakeDriver::new(kind));
+    let log: Log = Arc::default();
+    let mut drivers = DriverRegistry::new();
+    drivers.register(Arc::new(LoggedDriver {
+        fake: fake.clone(),
+        log: log.clone(),
+        close_delay,
+        hang_pings,
+    }));
+    let mut deps = deps_over(fake, thread_store());
+    deps.drivers = Arc::new(drivers);
+    (
+        ConnectionManager::new(tokio::runtime::Handle::current(), Arc::new(deps), config),
+        log,
+    )
 }

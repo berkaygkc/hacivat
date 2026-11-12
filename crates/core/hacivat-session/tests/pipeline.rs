@@ -179,7 +179,7 @@ async fn verify_ca_without_a_ca_file_and_bad_sqlite_paths_are_validate_issues() 
         create_if_missing: true,
     };
     let e = err(s).await;
-    assert_eq!(e.issues[0].code, IssueCode::FileMissing);
+    assert_eq!(e.issues[0].code, IssueCode::PathRefused);
     assert!(e.trail.is_empty());
 }
 
@@ -487,4 +487,260 @@ async fn a_test_never_stores_the_draft_but_a_main_connect_does() {
         .await
         .unwrap();
     assert_eq!(stored(&deps), "typed");
+}
+
+// Fix round 1.
+
+#[tokio::test]
+async fn the_pre_opened_stream_is_used_when_nothing_waited() {
+    let (deps, seen) = deps_reading_streams(ok_pg());
+    connect(
+        &deps,
+        req(pg_profile(TlsMode::Disable)),
+        ix_none(),
+        token(),
+        progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(*seen.lock().unwrap(), [1]);
+}
+
+#[tokio::test]
+async fn a_prompt_or_a_keyring_read_gets_a_fresh_stream() {
+    // The pre-opened stream (1) idled through the prompt: the driver gets stream 2.
+    let (deps, seen) = deps_reading_streams(ok_pg());
+    let ui = ScriptedUi::answers(["pw"]);
+    connect(&deps, req(never_profile()), ui.ix(), token(), progress())
+        .await
+        .unwrap();
+    assert_eq!(*seen.lock().unwrap(), [2]);
+
+    // A keyring read may show a system dialog: the same.
+    let (deps, seen) = deps_reading_streams(ok_pg());
+    connect(
+        &deps,
+        req(forever_profile_with("kept")),
+        ix_none(),
+        token(),
+        progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(*seen.lock().unwrap(), [2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stream_older_than_five_seconds_is_replaced() {
+    let (mut deps, seen) = deps_reading_streams(ok_pg());
+    deps.extra_steps = vec![wait_step(Duration::from_secs(6))];
+    let live = connect(
+        &deps,
+        req(pg_profile(TlsMode::Disable)),
+        ix_none(),
+        token(),
+        progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(*seen.lock().unwrap(), [2]);
+    // The Connect step keeps the time the pipeline measured for the first stream.
+    let connect_step = live.trail.iter().find(|t| t.step == Connect).unwrap();
+    assert_eq!(connect_step.outcome, StepOutcome::Done);
+    assert!(connect_step.elapsed.is_some());
+}
+
+fn password_required() -> hacivat_driver::RawError {
+    hacivat_driver::RawError {
+        kind: hacivat_driver::RawErrorKind::PasswordRequired,
+        server: None,
+    }
+}
+
+#[tokio::test]
+async fn a_password_required_answer_leads_to_the_prompt() {
+    // PostgreSQL's "password missing": the server wanted one and none was sent.
+    let fake = FakeDriver::new(DbmsKind::Postgres).script(vec![Err(password_required())]);
+    let (deps, fake) = deps_with(fake);
+    let ui = ScriptedUi::answers(["pw"]);
+    connect(
+        &deps,
+        req(pg_profile(TlsMode::Disable)),
+        ui.ix(),
+        token(),
+        progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ui.asked_attempts(),
+        [1],
+        "a missing password is not a rejection"
+    );
+    assert_eq!(fake.last_request().unwrap().password.as_deref(), Some("pw"));
+    // Headless, it stops where it would ask.
+    let fake =
+        Arc::new(FakeDriver::new(DbmsKind::Postgres).connect_result(Err(password_required())));
+    let e = err_with(&fake, pg_profile(TlsMode::Disable)).await;
+    assert_eq!(
+        (e.class, e.attempts, e.needs_interaction),
+        (ErrClass::AuthInvalid, 0, true)
+    );
+}
+
+#[tokio::test]
+async fn a_reentry_continues_the_gestures_count_of_three() {
+    // R8, P8: the error dialog's re-entry after 2 rejections gets one more try.
+    let (deps, fake) =
+        deps_with(FakeDriver::new(DbmsKind::Postgres).connect_result(Err(db("28P01"))));
+    let mut r = req(forever_profile());
+    r.draft_password = Some(hacivat_secrets::SecretString::from("again"));
+    r.prior_rejections = 2;
+    let ui = ScriptedUi::answers(["never-asked"]);
+    let e = connect(&deps, r, ui.ix(), token(), progress())
+        .await
+        .unwrap_err();
+    assert_eq!((e.class, e.attempts), (ErrClass::AuthInvalid, 3));
+    assert!(ui.asked_attempts().is_empty());
+    assert_eq!(fake.connect_calls(), 1);
+
+    // A spent gesture does not connect at all.
+    let mut r = req(forever_profile());
+    r.prior_rejections = 3;
+    let e = connect(&deps, r, ui.ix(), token(), progress())
+        .await
+        .unwrap_err();
+    assert_eq!((e.class, e.attempts), (ErrClass::AuthInvalid, 3));
+    assert_eq!(fake.connect_calls(), 1);
+
+    // Prompts continue the numbering: after 1 rejection, attempts 2 and 3 are left.
+    let mut r = req(never_profile());
+    r.prior_rejections = 1;
+    let ui = ScriptedUi::answers(["a", "b", "c"]);
+    let e = connect(&deps, r, ui.ix(), token(), progress())
+        .await
+        .unwrap_err();
+    assert_eq!(ui.asked_attempts(), [2, 3]);
+    assert_eq!(e.attempts, 3);
+}
+
+#[tokio::test]
+async fn a_reentry_that_works_is_stored() {
+    let (deps, _) = deps_with(ok_pg());
+    let mut r = req(forever_profile());
+    r.draft_password = Some(hacivat_secrets::SecretString::from("fixed"));
+    r.prior_rejections = 1;
+    connect(&deps, r, ix_none(), token(), progress())
+        .await
+        .unwrap();
+    assert_eq!(stored(&deps), "fixed");
+}
+
+/// A UI that cancels the connect while its prompt is open, then answers.
+struct CancellingUi(tokio_util::sync::CancellationToken);
+
+impl hacivat_session::pipeline::UiPort for CancellingUi {
+    fn ask(
+        &self,
+        _q: hacivat_session::pipeline::Question,
+    ) -> futures::future::BoxFuture<'static, hacivat_session::pipeline::Answer> {
+        self.0.cancel();
+        Box::pin(async {
+            hacivat_session::pipeline::Answer::Password(hacivat_secrets::SecretString::from("late"))
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_connect_stores_nothing() {
+    let (deps, fake) = deps_with(ok_pg());
+    let t = token();
+    let ix = Interaction::Interactive(Arc::new(CancellingUi(t.clone())));
+    let e = connect(&deps, req(forever_profile()), ix, t, progress())
+        .await
+        .unwrap_err();
+    assert_eq!(e.class, ErrClass::Cancelled);
+    assert_eq!(stored(&deps), "");
+    assert_eq!(fake.connect_calls(), 0);
+}
+
+#[tokio::test]
+async fn validation_uses_the_deps_approved_roots() {
+    let home = tempfile::tempdir().unwrap();
+    let ca = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/test-ca.pem"
+    ))
+    .unwrap();
+    let file = home.path().join("ca.pem");
+    std::fs::write(&file, ca).unwrap();
+    let mut p = pg_profile(TlsMode::VerifyFull);
+    p.tls.ca_file = Some(file.clone());
+    p.origin = hacivat_proto::Origin::Imported {
+        source: hacivat_proto::ImportSource::PgService,
+    };
+    // A server that negotiates verified TLS (VerifyFull refuses plaintext, R3).
+    let (mut deps, fake) = deps_with(ok_pg().tls(hacivat_net::TlsSummary {
+        encrypted: true,
+        version: Some("TLSv1.3".into()),
+        cipher: None,
+        verified: hacivat_net::TlsVerified::Full,
+    }));
+    deps.approved_roots = hacivat_session::pipeline::ApprovedRoots::new(Vec::new());
+    let e = connect(&deps, req(p.clone()), ix_none(), token(), progress())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (e.class, e.issues[0].code.clone(), fake.connect_calls()),
+        (ErrClass::ConfigInvalid, IssueCode::PathRefused, 0)
+    );
+    // The user picks the file in the dialog: it is approved for every later connect.
+    deps.approved_roots.add(file);
+    assert!(
+        connect(&deps, req(p), ix_none(), token(), progress())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn rejected_and_prompted_passwords_never_reach_logs_or_debug() {
+    // A stored password the server rejects.
+    let fake = Arc::new(FakeDriver::new(DbmsKind::Postgres).connect_result(Err(db("28P01"))));
+    let profile = forever_profile_with("s3cret-stored");
+    let logs = capture_tracing(|| err_with(&fake, profile.clone())).await;
+    assert!(!logs.contains("s3cret-stored"));
+    let e = err_with(&fake, profile).await;
+    assert!(!format!("{e:?}").contains("s3cret-stored"));
+
+    // Prompted passwords, each rejected.
+    let (deps, _) = deps_with(FakeDriver::new(DbmsKind::Postgres).connect_result(Err(db("28P01"))));
+    let answers = ["s3cret-a", "s3cret-b", "s3cret-c"];
+    let ui = ScriptedUi::answers(answers);
+    let logs = capture_tracing(|| async {
+        let e = connect(&deps, req(never_profile()), ui.ix(), token(), progress())
+            .await
+            .unwrap_err();
+        format!("{e:?}")
+    });
+    let logs = logs.await;
+    let ui = ScriptedUi::answers(answers);
+    let e = connect(&deps, req(never_profile()), ui.ix(), token(), progress())
+        .await
+        .unwrap_err();
+    assert_eq!(e.attempts, 3);
+    for pw in answers {
+        assert!(!logs.contains(pw), "{pw} in logs");
+        assert!(!format!("{e:?}").contains(pw), "{pw} in ConnectError");
+    }
+
+    // A request with a draft, and the live connection made from it.
+    let mut r = req(forever_profile());
+    r.draft_password = Some(hacivat_secrets::SecretString::from("s3cret-draft"));
+    assert!(!format!("{r:?}").contains("s3cret-draft"));
+    let (deps, _) = deps_with(ok_pg());
+    let live = connect(&deps, r, ix_none(), token(), progress())
+        .await
+        .unwrap();
+    assert!(!format!("{live:?}").contains("s3cret-draft"));
 }

@@ -132,7 +132,6 @@ impl Live {
 /// One profile's slot.
 struct Entry {
     state: LiveState,
-    budget: Arc<Budget>,
     /// The connect in flight: its id and cancel token (single-flight).
     attempt: Option<(u64, CancellationToken)>,
     live: Option<Live>,
@@ -140,6 +139,10 @@ struct Entry {
 
 struct Inner {
     entries: HashMap<ProfileId, Entry>,
+    /// One budget per profile, kept across `forget` and a changed `max_connections`, so a
+    /// connection still closing holds its permit and the next connect waits for it (a second
+    /// SQLite connection never opens before the first has closed).
+    budgets: HashMap<ProfileId, Arc<Budget>>,
     shutting_down: bool,
     generation: u64,
     next_attempt: u64,
@@ -264,7 +267,12 @@ impl Shared {
             let pinged = {
                 let mut guard = conn.lock().await;
                 let Some(live) = guard.as_mut() else { return };
-                tokio::time::timeout(PING_BUDGET, live.raw().ping()).await
+                // A close or shutdown never waits for a ping: it stops the ping, which frees
+                // the connection.
+                tokio::select! {
+                    () = stop.cancelled() => return,
+                    pinged = tokio::time::timeout(PING_BUDGET, live.raw().ping()) => pinged,
+                }
             };
             let class = match pinged {
                 Ok(Ok(_)) => continue,
@@ -297,10 +305,12 @@ impl Shared {
     }
 
     /// Runs one connect: a Console permit, then the pipeline, mirroring its progress.
+    #[allow(clippy::too_many_arguments, reason = "one private call site")]
     async fn run_connect(
         self: Arc<Self>,
         profile: Arc<Profile>,
         draft: Option<SecretString>,
+        prior_rejections: u8,
         ix: Interaction,
         attempt: u64,
         token: CancellationToken,
@@ -317,6 +327,7 @@ impl Shared {
             draft_password: draft,
             purpose: Purpose::Main,
             department: Department::Console,
+            prior_rejections,
         };
         let deps = self.deps.clone();
         let pipeline = connect(&deps, req, ix, token, progress_tx);
@@ -365,6 +376,22 @@ pub struct ConnectionManager {
     shared: Arc<Shared>,
 }
 
+impl Drop for ConnectionManager {
+    /// Stops every liveness task and cancels every connect in flight; their tasks hold the
+    /// shared state, so without this they would keep it (and the connections) alive.
+    fn drop(&mut self) {
+        let inner = self.shared.lock();
+        for entry in inner.entries.values() {
+            if let Some((_, token)) = &entry.attempt {
+                token.cancel();
+            }
+            if let Some(live) = &entry.live {
+                live.stop.cancel();
+            }
+        }
+    }
+}
+
 impl ConnectionManager {
     pub fn new(rt: Handle, deps: Arc<ConnectDeps>, config: ManagerConfig) -> Arc<Self> {
         Arc::new(ConnectionManager {
@@ -375,6 +402,7 @@ impl ConnectionManager {
                 changes: watch::Sender::new(0),
                 inner: Mutex::new(Inner {
                     entries: HashMap::new(),
+                    budgets: HashMap::new(),
                     shutting_down: false,
                     generation: 0,
                     next_attempt: 0,
@@ -392,6 +420,29 @@ impl ConnectionManager {
         draft_password: Option<SecretString>,
         ix: Interaction,
     ) {
+        self.start(profile, draft_password, 0, ix);
+    }
+
+    /// The error dialog's password re-entry (R8, P8): connects with `password` as the draft,
+    /// continuing the failed connect's count of server rejections (`ConnectError::attempts`),
+    /// so one gesture never gets more than 3. The password is stored only if it works.
+    pub fn connect_reentry(
+        &self,
+        profile: Arc<Profile>,
+        password: SecretString,
+        prior_rejections: u8,
+        ix: Interaction,
+    ) {
+        self.start(profile, Some(password), prior_rejections, ix);
+    }
+
+    fn start(
+        &self,
+        profile: Arc<Profile>,
+        draft_password: Option<SecretString>,
+        prior_rejections: u8,
+        ix: Interaction,
+    ) {
         let shared = &self.shared;
         let mut inner = shared.lock();
         if inner.shutting_down {
@@ -401,28 +452,39 @@ impl ConnectionManager {
         inner.next_attempt += 1;
         let entry = inner.entries.entry(profile.id).or_insert_with(|| Entry {
             state: LiveState::Disconnected,
-            budget: Arc::new(budget_for(&profile)),
             attempt: None,
             live: None,
         });
         if entry.attempt.is_some() || entry.live.is_some() {
             return;
         }
-        if entry.budget.max() != profile.max_connections {
-            entry.budget = Arc::new(budget_for(&profile));
-        }
         let token = CancellationToken::new();
         entry.attempt = Some((attempt, token.clone()));
-        let budget = entry.budget.clone();
+        let wanted = budget_for(&profile);
+        let budget = inner
+            .budgets
+            .entry(profile.id)
+            .or_insert_with(|| Arc::new(budget_for(&profile)));
+        // A new size applies once the old budget is idle (nothing open or closing).
+        if budget.max() != wanted.max() && budget.in_use() == 0 {
+            *budget = Arc::new(wanted);
+        }
+        let budget = budget.clone();
         shared.set(
             &mut inner,
             profile.id,
             LiveState::Connecting(fresh_progress()),
         );
         drop(inner);
-        let task = shared
-            .clone()
-            .run_connect(profile, draft_password, ix, attempt, token, budget);
+        let task = shared.clone().run_connect(
+            profile,
+            draft_password,
+            prior_rejections,
+            ix,
+            attempt,
+            token,
+            budget,
+        );
         shared.rt.spawn(task);
     }
 

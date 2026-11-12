@@ -164,3 +164,115 @@ fn core_runtime_threads_are_named() {
     });
     assert!(n.unwrap().starts_with("hv-core"));
 }
+
+// Fix round 1.
+
+#[tokio::test]
+async fn a_sqlite_reconnect_after_forget_waits_for_the_close() {
+    // The budget outlives `forget`: the second open waits for the first close (200 ms).
+    let (m, log) = logged_manager(
+        hacivat_proto::DbmsKind::Sqlite,
+        ms(200),
+        false,
+        ManagerConfig::default(),
+    );
+    let s = Arc::new(sqlite_profile());
+    m.connect(s.clone(), None, Interaction::Headless);
+    wait_connected(&m, s.id).await;
+    m.forget(s.id);
+    m.connect(s.clone(), None, Interaction::Headless);
+    wait_connected(&m, s.id).await;
+    assert_eq!(*log.lock().unwrap(), ["open", "close", "open"]);
+}
+
+#[tokio::test]
+async fn a_changed_budget_waits_for_the_old_connection_to_close() {
+    let (m, log) = logged_manager(
+        hacivat_proto::DbmsKind::Postgres,
+        ms(200),
+        false,
+        ManagerConfig::default(),
+    );
+    let one = Arc::new(Profile {
+        max_connections: 1,
+        ..p().as_ref().clone()
+    });
+    m.connect(one.clone(), None, Interaction::Headless);
+    wait_connected(&m, one.id).await;
+    m.disconnect(one.id);
+    let two = Arc::new(Profile {
+        max_connections: 2,
+        ..one.as_ref().clone()
+    });
+    m.connect(two.clone(), None, Interaction::Headless);
+    wait_connected(&m, two.id).await;
+    assert_eq!(*log.lock().unwrap(), ["open", "close", "open"]);
+}
+
+#[tokio::test]
+async fn shutdown_never_waits_for_a_hanging_ping() {
+    let (m, log) = logged_manager(
+        hacivat_proto::DbmsKind::Postgres,
+        Duration::ZERO,
+        true,
+        ManagerConfig {
+            liveness: ms(20),
+            ..Default::default()
+        },
+    );
+    connect_and_wait(&m).await;
+    // Let the first ping start (and hang, holding the connection).
+    while !log.lock().unwrap().contains(&"ping") {
+        tokio::time::sleep(ms(5)).await;
+    }
+    let t = Instant::now();
+    m.shutdown().await;
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    assert_eq!(*log.lock().unwrap(), ["open", "ping", "close"]);
+}
+
+#[tokio::test]
+async fn dropping_the_manager_stops_its_liveness_pings() {
+    let (m, log) = logged_manager(
+        hacivat_proto::DbmsKind::Postgres,
+        Duration::ZERO,
+        false,
+        ManagerConfig {
+            liveness: ms(20),
+            ..Default::default()
+        },
+    );
+    connect_and_wait(&m).await;
+    tokio::time::sleep(ms(60)).await;
+    drop(m);
+    let pings = || log.lock().unwrap().iter().filter(|e| **e == "ping").count();
+    let after_drop = pings();
+    assert!(after_drop >= 1);
+    tokio::time::sleep(ms(100)).await;
+    assert_eq!(pings(), after_drop);
+}
+
+#[tokio::test]
+async fn the_error_dialogs_reentry_continues_the_count() {
+    let (m, fake) = manager(ok_pg().connect_result(Err(db("28P01"))));
+    let pw = Arc::new(Profile {
+        auth: hacivat_secrets::AuthProviderId::Password,
+        retention: Retention::Never,
+        ..p().as_ref().clone()
+    });
+    m.connect_reentry(
+        pw.clone(),
+        SecretString::from("again"),
+        2,
+        Interaction::Headless,
+    );
+    let mut changes = m.changes();
+    let e = loop {
+        if let LiveState::Failed(e) = m.state(pw.id) {
+            break e;
+        }
+        changes.changed().await.unwrap();
+    };
+    assert_eq!((e.class, e.attempts), (ErrClass::AuthInvalid, 3));
+    assert_eq!(fake.connect_calls(), 1);
+}

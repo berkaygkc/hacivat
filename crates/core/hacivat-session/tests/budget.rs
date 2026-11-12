@@ -50,3 +50,16 @@ fn sqlite_budget_is_one() {
     assert_eq!(budget_for(&sqlite_profile()).max(), 1);
     assert_eq!(budget_for(&pg_profile(TlsMode::Auto)).max(), 4);
 }
+
+#[test]
+fn budgets_are_clamped() {
+    // SQLite is 1 whatever the profile says; elsewhere 0 would make every connect wait.
+    let mut s = sqlite_profile();
+    s.max_connections = 8;
+    assert_eq!(budget_for(&s).max(), 1);
+    let mut p = pg_profile(TlsMode::Auto);
+    p.max_connections = 0;
+    let b = budget_for(&p);
+    assert_eq!(b.max(), 1);
+    assert!(b.try_acquire(Priority::Console).is_some());
+}

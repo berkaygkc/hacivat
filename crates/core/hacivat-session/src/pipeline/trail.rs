@@ -76,6 +76,8 @@ struct RecorderState {
     /// When each running step started, on the Tokio clock (so paused-clock tests agree).
     since: Vec<(TrailStep, tokio::time::Instant)>,
     tx: watch::Sender<Progress>,
+    /// The trail is final (a failure): late driver events change nothing and publish nothing.
+    sealed: bool,
 }
 
 impl RecorderState {
@@ -92,6 +94,9 @@ impl RecorderState {
     }
 
     fn finish(&mut self, step: TrailStep, outcome: StepOutcome, elapsed: Option<Duration>) {
+        if self.sealed {
+            return;
+        }
         let Some(t) = self.entry(step) else { return };
         t.outcome = outcome;
         t.elapsed = elapsed;
@@ -119,6 +124,7 @@ impl Recorder {
             started: Instant::now(),
             since: Vec::new(),
             tx,
+            sealed: false,
         };
         state.publish();
         Recorder {
@@ -142,6 +148,9 @@ impl Recorder {
     /// Marks `step` running from now. A step not in the plan is ignored.
     pub(crate) fn start(&self, step: TrailStep) {
         self.with(|s| {
+            if s.sealed {
+                return;
+            }
             let Some(t) = s.entry(step) else { return };
             t.outcome = StepOutcome::Running;
             t.elapsed = None;
@@ -181,9 +190,12 @@ impl Recorder {
     /// The trail of a failure at `at` (R25, the mock's `trailHTML`): the steps before it are
     /// done (a skipped step stays skipped), `at` failed, the rest pending. When `at` is `None`
     /// or not in the plan, the failure is at the step running now, else at the first step not
-    /// yet done. Published as the final progress.
+    /// yet done. Published as the final progress, then sealed.
     pub(crate) fn fail(&self, at: Option<TrailStep>) -> Vec<StepTrace> {
         self.with(|s| {
+            if s.sealed {
+                return s.trail.clone();
+            }
             let position = |step: TrailStep| s.trail.iter().position(|t| t.step == step);
             let index = at
                 .and_then(position)
@@ -214,17 +226,23 @@ impl Recorder {
             s.current = None;
             s.since.clear();
             s.publish();
+            s.sealed = true;
             s.trail.clone()
         })
     }
 
-    /// Clears the trail (a `config.invalid` failure shows issues inline, R25) and publishes it.
+    /// Clears the trail (a `config.invalid` failure shows issues inline, R25), publishes it
+    /// and seals it.
     pub(crate) fn clear(&self) {
         self.with(|s| {
+            if s.sealed {
+                return;
+            }
             s.trail.clear();
             s.current = None;
             s.since.clear();
             s.publish();
+            s.sealed = true;
         });
     }
 }
@@ -279,5 +297,25 @@ mod tests {
         let trail = r.fail(Some(TrailStep::OpenFile));
         assert_eq!(trail[1].outcome, StepOutcome::Failed);
         assert_eq!(trail[3].outcome, StepOutcome::Pending);
+    }
+
+    #[tokio::test]
+    async fn a_failed_trail_is_sealed_against_late_driver_events() {
+        let (tx, mut rx) = watch::channel(Progress {
+            trail: Vec::new(),
+            current: None,
+            started: Instant::now(),
+        });
+        let r = Recorder::new(&[TrailStep::Connect, TrailStep::SignIn], tx);
+        let failed = r.fail(Some(TrailStep::Connect));
+        rx.mark_unchanged();
+        // A driver event that arrives after the failure (the late connection's task).
+        r.start(TrailStep::SignIn);
+        r.done(TrailStep::SignIn);
+        r.skip(TrailStep::SignIn);
+        r.clear();
+        assert_eq!(r.snapshot(), failed);
+        assert_eq!(r.fail(None), failed);
+        assert!(!rx.has_changed().unwrap(), "nothing was published");
     }
 }
