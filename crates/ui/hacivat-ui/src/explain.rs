@@ -8,8 +8,9 @@
 //!
 //! Focus: the popover takes the focus on its first frame and remembers where it was (the
 //! trigger). Escape hands the focus back and emits [`ExplainEvent::Dismissed`]; it does not stop
-//! the key, so the workspace's Escape also pops the layer (whose restore focus is the same
-//! trigger, recorded by `open_anchored`).
+//! the key, so the workspace's Escape pops the layer (whose restore focus is the same trigger,
+//! recorded by `open_anchored`). The workspace is the only close path inside the layer stack:
+//! hosts there must not also pop on `Dismissed` (see [`ExplainEvent`]).
 
 use std::panic::Location;
 
@@ -32,9 +33,17 @@ const WIDTH_PX: f32 = 300.0;
 const TITLE_GAP_PX: f32 = 7.0;
 
 /// What the popover tells its host.
+///
+/// Contract: `Dismissed` is a notification, not a close request. The popover does not stop the
+/// Escape key, so it keeps propagating to the workspace, whose Escape handler pops the top layer
+/// (the `open_anchored` host) and restores that layer's focus. A host inside the workspace's
+/// layer stack must therefore **not** also pop the layer on `Dismissed`: it would close a second
+/// layer. Only a host outside the layer stack (a test, or a parent that draws the popover
+/// itself) closes it on `Dismissed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExplainEvent {
-    /// Escape was pressed: the focus is back on the trigger; the host closes the popover.
+    /// Escape was pressed and the focus is back on the trigger. See the enum's contract: the
+    /// workspace closes the layer on the same key.
     Dismissed,
 }
 

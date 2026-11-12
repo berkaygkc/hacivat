@@ -102,6 +102,10 @@ pub struct A11yDecl {
     pub toggled: Option<bool>,
     /// The 1-based position of an item in its set and the set's size (a list item).
     pub position: Option<(usize, usize)>,
+    /// Declared by an [`A11yNode`] wrapper rather than on the interactive element itself. An
+    /// assistive-technology Click reaches only an element's own `on_click`, so an enabled
+    /// clickable control declares itself (`Declare`) and is never a wrapper.
+    pub wrapper: bool,
 }
 
 impl A11yDecl {
@@ -214,6 +218,7 @@ impl A11yNode {
     ) -> Self {
         let mut decl = A11yDecl::new(role, label);
         decl.modal = modal;
+        decl.wrapper = true;
         Self {
             id: id.into(),
             decl,

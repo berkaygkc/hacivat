@@ -292,7 +292,7 @@ impl TitleBar {
             label_style.size_px = label_style.size_px.max(11.0);
             let on_click = palette.on_click;
             let name = palette.placeholder.clone();
-            let mut field = div()
+            let field = div()
                 .id(ElementId::from("palette-field"))
                 .debug_selector(|| "palette-field".to_string())
                 .flex()
@@ -335,13 +335,19 @@ impl TitleBar {
                     t.type_ramp.mono_kbd,
                     c.text_3.to_hsla(),
                 ));
-            if !inert {
-                field = field
+            // As `Button`: declared on the clickable field while enabled (an assistive-technology
+            // Click reaches `on_click`), wrapped in a disabled node while inert.
+            let field = if inert {
+                A11yNode::new("palette-field-node", Role::Button, name, false, field)
+                    .disabled(true)
+                    .into_any_element()
+            } else {
+                field
+                    .declare(Role::Button, name, None)
                     .cursor_pointer()
-                    .on_click(move |event, window, cx| on_click(event, window, cx));
-            }
-            let field = A11yNode::new("palette-field-node", Role::Button, name, false, field)
-                .disabled(inert);
+                    .on_click(move |event, window, cx| on_click(event, window, cx))
+                    .into_any_element()
+            };
             bar = bar.child(field).child(drag_region(div().flex_1().h_full()));
         }
 

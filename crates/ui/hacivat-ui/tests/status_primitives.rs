@@ -915,12 +915,26 @@ fn the_inert_title_bar_marks_its_controls_disabled(cx: &mut TestAppContext) {
         "{decls:?}"
     );
 
+    // Inert controls are wrapped in a node that can say "disabled".
+    for name in ["Search", "orders-prod", "Retry"] {
+        assert!(declared(&decls, Role::Button, name).wrapper, "{name}");
+    }
+
+    // Enabled, each control declares its role on the clickable element itself, as `Button`
+    // does, so an assistive-technology Click reaches its `on_click`. (GPUI's test platform
+    // never attaches assistive technology and its action routing is crate-private, so the
+    // Click itself cannot be dispatched here; this is the structural check.)
     a11y_record();
     let (_vcx, _) = mount_titlebar_in(ChromeKind::LinuxClient, cx, false);
     let decls = a11y_take();
     for name in ["Search", "orders-prod", "Retry"] {
-        assert!(!declared(&decls, Role::Button, name).disabled, "{name}");
+        let decl = declared(&decls, Role::Button, name);
+        assert!(!decl.disabled && !decl.wrapper, "{name}: {decl:?}");
     }
+    a11y_record();
+    let (_vcx, _) = mount_capsule(cx, connected_prod_ro_unencrypted());
+    let decl = declared(&a11y_take(), Role::Button, "unencrypted");
+    assert!(!decl.disabled && !decl.wrapper, "{decl:?}");
 }
 
 /// Fix 9: while inert, the drag regions and the window buttons stay live.
@@ -945,15 +959,51 @@ fn the_inert_title_bar_keeps_dragging_and_window_buttons_live(cx: &mut TestAppCo
     vcx.run_until_parked();
     assert_eq!(cx.update(|cx| cx.windows().len()), before - 1);
 
-    // A press on the drag region still starts a window move: the test platform's
-    // `start_window_move` is unimplemented, so reaching it panics.
+    // A press on the drag region still starts a window move. GPUI's test platform (at the
+    // workspace pin) implements `TestWindow::start_window_move` as a bare `unimplemented!()`, so
+    // reaching it panics with "not implemented"; the message does not name the method, so the
+    // panic's backtrace (captured by a hook scoped to this thread) must. If GPUI's test platform
+    // ever implements `start_window_move`, this check has to observe the move another way.
     let (vcx, _) = mount_titlebar(cx, true);
     let bar = bounds_of(vcx, "title-bar");
     let drag_at = gpui::point(bar.left() + px(20.0), bar.center().y);
-    let pressed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let (pressed, trace) = with_panic_trace(|| {
         vcx.simulate_mouse_down(drag_at, gpui::MouseButton::Left, Modifiers::none());
+    });
+    let payload = pressed.expect_err("the drag region did not see the press");
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert_eq!(message, "not implemented", "an unrelated panic");
+    assert!(
+        trace.contains("start_window_move"),
+        "the panic did not come from start_window_move:\n{trace}"
+    );
+}
+
+/// Runs `f`, catching a panic, and returns the panic's message and backtrace as the panic hook
+/// saw them on this thread (other threads keep the previous hook).
+fn with_panic_trace(f: impl FnOnce()) -> (std::thread::Result<()>, String) {
+    type Hook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+    let this_thread = std::thread::current().id();
+    let seen = Arc::new(Mutex::new(String::new()));
+    let previous: Arc<Hook> = Arc::new(std::panic::take_hook());
+    let (sink, fallback) = (seen.clone(), previous.clone());
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().id() == this_thread {
+            let trace = std::backtrace::Backtrace::force_capture();
+            *sink.lock().unwrap() = format!("{info}\n{trace}");
+        } else {
+            fallback(info);
+        }
     }));
-    assert!(pressed.is_err(), "the drag region did not see the press");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    drop(std::panic::take_hook());
+    std::panic::set_hook(Box::new(move |info| previous(info)));
+    let trace = seen.lock().unwrap().clone();
+    (result, trace)
 }
 
 // ---- step trail accessibility (ruling B) ------------------------------------------------------

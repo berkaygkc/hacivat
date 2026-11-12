@@ -28,7 +28,7 @@ use hacivat_ui_core::theme::{Theme, ThemeTokens, TypeStyle};
 
 use crate::button::{ClickHandler, hover_listener, interaction_state};
 use crate::icon::{Icon, IconName, IconSize};
-use crate::popover::{A11yNode, lazy};
+use crate::popover::{A11yDecl, A11yNode, Declare, lazy};
 use crate::step_trail::run_marker;
 use crate::text::{Label, TextSource};
 
@@ -298,14 +298,23 @@ impl Capsule {
                     handler(segment, slot.get().bottom_left(), window, cx);
                 });
             }
-            A11yNode::new(
-                ElementId::Name(format!("{id}-node").into()),
-                Role::Button,
-                name.clone(),
-                false,
-                el,
-            )
-            .disabled(inert)
+            // As `Button`: an enabled segment declares its role on the clickable element itself,
+            // so an assistive-technology Click reaches `on_click`; an inert one is wrapped in a
+            // node that can say "disabled".
+            if inert {
+                A11yNode::new(
+                    ElementId::Name(format!("{id}-node").into()),
+                    Role::Button,
+                    name.clone(),
+                    false,
+                    el,
+                )
+                .disabled(true)
+                .into_any_element()
+            } else {
+                el.declare(Role::Button, name.clone(), None)
+                    .into_any_element()
+            }
         };
 
         let head = |frame: Stateful<Div>, head: Head<'_>| {
@@ -538,8 +547,14 @@ impl Capsule {
                 frame = frame.on_click(move |event, window, cx| handler(event, window, cx));
             }
         }
+        // As `Button`: declared on the clickable frame while enabled, wrapped while inert.
+        if !inert {
+            let mut decl = A11yDecl::new(Role::Button, name_for_label);
+            decl.description = description;
+            return frame.declare_full(decl).into_any_element();
+        }
         let mut node = A11yNode::new("capsule-node", Role::Button, name_for_label, false, frame)
-            .disabled(inert);
+            .disabled(true);
         if let Some(description) = description {
             node = node.description(description);
         }
