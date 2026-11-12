@@ -2314,6 +2314,8 @@ dependencies = [
  "anyhow",
  "gpui",
  "gpui_platform",
+ "objc2 0.6.5",
+ "raw-window-handle",
 ]
 
 [[package]]
@@ -4983,6 +4985,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "spike-harman"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "hacivat-ui-core",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6636,6 +6646,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "cargo_metadata",
+ "image",
  "serde_json",
  "yaml-rust2",
 ]

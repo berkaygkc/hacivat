@@ -1,0 +1,780 @@
+{
+ "colors": [
+  {
+   "name": "titlebar-bg",
+   "x": 1050,
+   "y": 20,
+   "token": "ground",
+   "theme": "dark"
+  },
+  {
+   "name": "cp-fill-capsule",
+   "x": 185,
+   "y": 20,
+   "token": "cp_fill",
+   "theme": "dark"
+  },
+  {
+   "name": "capsule-bg",
+   "x": 643,
+   "y": 10,
+   "token": "panel",
+   "theme": "dark"
+  },
+  {
+   "name": "palette-bg",
+   "x": 900,
+   "y": 10,
+   "token": "ground",
+   "theme": "dark"
+  },
+  {
+   "name": "seg-pressed-bg",
+   "x": 1170,
+   "y": 10,
+   "token": "raised",
+   "theme": "dark"
+  },
+  {
+   "name": "titlebar-seam",
+   "x": 1050,
+   "y": 39,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "explorer-bg",
+   "x": 150,
+   "y": 600,
+   "token": "side",
+   "theme": "dark"
+  },
+  {
+   "name": "explorer-header-bg",
+   "x": 200,
+   "y": 55,
+   "token": "head",
+   "theme": "dark"
+  },
+  {
+   "name": "explorer-selected-row",
+   "x": 250,
+   "y": 336,
+   "token": "blue_tint",
+   "theme": "dark"
+  },
+  {
+   "name": "explorer-selected-bar",
+   "x": 0,
+   "y": 336,
+   "token": "blue",
+   "theme": "dark"
+  },
+  {
+   "name": "sheet-header-bg",
+   "x": 170,
+   "y": 686,
+   "token": "head",
+   "theme": "dark"
+  },
+  {
+   "name": "sheet-bg",
+   "x": 265,
+   "y": 760,
+   "token": "side",
+   "theme": "dark"
+  },
+  {
+   "name": "seam-explorer-editor",
+   "x": 276,
+   "y": 300,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "seam-explorer-editor-low",
+   "x": 276,
+   "y": 800,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "seam-left-split",
+   "x": 100,
+   "y": 670,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "seam-editor-results",
+   "x": 700,
+   "y": 362,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "editor-red-line",
+   "x": 900,
+   "y": 40,
+   "token": "red",
+   "theme": "dark"
+  },
+  {
+   "name": "editor-tab-active-bg",
+   "x": 466,
+   "y": 44,
+   "token": "raised",
+   "theme": "dark"
+  },
+  {
+   "name": "editor-header-bg",
+   "x": 1000,
+   "y": 55,
+   "token": "head",
+   "theme": "dark"
+  },
+  {
+   "name": "qbar-bg",
+   "x": 900,
+   "y": 86,
+   "token": "raised",
+   "theme": "dark"
+  },
+  {
+   "name": "run-button-bg",
+   "x": 300,
+   "y": 76,
+   "token": "blue",
+   "theme": "dark"
+  },
+  {
+   "name": "editor-bg",
+   "x": 1300,
+   "y": 250,
+   "token": "panel",
+   "theme": "dark"
+  },
+  {
+   "name": "editor-band-line14",
+   "x": 1300,
+   "y": 350,
+   "token": "blue_tint",
+   "theme": "dark"
+  },
+  {
+   "name": "popup-selected-item",
+   "x": 997,
+   "y": 182,
+   "token": "blue_tint_strong",
+   "theme": "dark"
+  },
+  {
+   "name": "popup-detail-bg",
+   "x": 1220,
+   "y": 300,
+   "token": "raised",
+   "theme": "dark"
+  },
+  {
+   "name": "popup-foot-bg",
+   "x": 1100,
+   "y": 330,
+   "token": "head",
+   "theme": "dark"
+  },
+  {
+   "name": "results-header-bg",
+   "x": 800,
+   "y": 378,
+   "token": "head",
+   "theme": "dark"
+  },
+  {
+   "name": "result-tab-active-bg",
+   "x": 294,
+   "y": 385,
+   "token": "raised",
+   "theme": "dark"
+  },
+  {
+   "name": "gtool-bg",
+   "x": 1255,
+   "y": 404,
+   "token": "raised",
+   "theme": "dark"
+  },
+  {
+   "name": "where-box-bg",
+   "x": 580,
+   "y": 404,
+   "token": "panel",
+   "theme": "dark"
+  },
+  {
+   "name": "grid-header-bg",
+   "x": 800,
+   "y": 429,
+   "token": "head",
+   "theme": "dark"
+  },
+  {
+   "name": "grid-rownum-bg",
+   "x": 290,
+   "y": 470,
+   "token": "gutter",
+   "theme": "dark"
+  },
+  {
+   "name": "grid-cell-bg",
+   "x": 700,
+   "y": 470,
+   "token": "panel",
+   "theme": "dark"
+  },
+  {
+   "name": "grid-selected-cell",
+   "x": 880,
+   "y": 515,
+   "token": "blue_tint",
+   "theme": "dark"
+  },
+  {
+   "name": "grid-active-cell",
+   "x": 990,
+   "y": 515,
+   "token": "blue_tint_strong",
+   "theme": "dark"
+  },
+  {
+   "name": "grid-selbox-border",
+   "x": 866,
+   "y": 520,
+   "token": "blue",
+   "theme": "dark"
+  },
+  {
+   "name": "grid-fill-col",
+   "x": 1160,
+   "y": 470,
+   "token": "panel",
+   "theme": "dark"
+  },
+  {
+   "name": "scroll-track",
+   "x": 1184,
+   "y": 700,
+   "token": "gutter",
+   "theme": "dark"
+  },
+  {
+   "name": "strip-bg",
+   "x": 800,
+   "y": 864,
+   "token": "raised",
+   "theme": "dark"
+  },
+  {
+   "name": "strip-page-current",
+   "x": 293,
+   "y": 863,
+   "token": "blue",
+   "theme": "dark"
+  },
+  {
+   "name": "inspector-bg",
+   "x": 1300,
+   "y": 860,
+   "token": "gutter",
+   "theme": "dark"
+  },
+  {
+   "name": "inspector-header-bg",
+   "x": 1300,
+   "y": 442,
+   "token": "gutter",
+   "theme": "dark"
+  },
+  {
+   "name": "seam-inspector",
+   "x": 1188,
+   "y": 600,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "status-bg",
+   "x": 700,
+   "y": 888,
+   "token": "ground",
+   "theme": "dark"
+  },
+  {
+   "name": "status-env-tint",
+   "x": 5,
+   "y": 888,
+   "token": "red_tint",
+   "theme": "dark"
+  },
+  {
+   "name": "status-seam",
+   "x": 700,
+   "y": 876,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "titlebar-bg",
+   "x": 1050,
+   "y": 20,
+   "token": "ground",
+   "theme": "light"
+  },
+  {
+   "name": "cp-fill-capsule",
+   "x": 185,
+   "y": 20,
+   "token": "cp_fill",
+   "theme": "light"
+  },
+  {
+   "name": "capsule-bg",
+   "x": 643,
+   "y": 10,
+   "token": "panel",
+   "theme": "light"
+  },
+  {
+   "name": "palette-bg",
+   "x": 900,
+   "y": 10,
+   "token": "ground",
+   "theme": "light"
+  },
+  {
+   "name": "seg-pressed-bg",
+   "x": 1170,
+   "y": 10,
+   "token": "raised",
+   "theme": "light"
+  },
+  {
+   "name": "titlebar-seam",
+   "x": 1050,
+   "y": 39,
+   "token": "seam",
+   "theme": "light"
+  },
+  {
+   "name": "explorer-bg",
+   "x": 150,
+   "y": 600,
+   "token": "side",
+   "theme": "light"
+  },
+  {
+   "name": "explorer-header-bg",
+   "x": 200,
+   "y": 55,
+   "token": "head",
+   "theme": "light"
+  },
+  {
+   "name": "explorer-selected-row",
+   "x": 250,
+   "y": 336,
+   "token": "blue_tint",
+   "theme": "light"
+  },
+  {
+   "name": "explorer-selected-bar",
+   "x": 0,
+   "y": 336,
+   "token": "blue",
+   "theme": "light"
+  },
+  {
+   "name": "sheet-header-bg",
+   "x": 170,
+   "y": 686,
+   "token": "head",
+   "theme": "light"
+  },
+  {
+   "name": "sheet-bg",
+   "x": 265,
+   "y": 760,
+   "token": "side",
+   "theme": "light"
+  },
+  {
+   "name": "seam-explorer-editor",
+   "x": 276,
+   "y": 300,
+   "token": "seam",
+   "theme": "light"
+  },
+  {
+   "name": "seam-explorer-editor-low",
+   "x": 276,
+   "y": 800,
+   "token": "seam",
+   "theme": "light"
+  },
+  {
+   "name": "seam-left-split",
+   "x": 100,
+   "y": 670,
+   "token": "seam",
+   "theme": "light"
+  },
+  {
+   "name": "seam-editor-results",
+   "x": 700,
+   "y": 362,
+   "token": "seam",
+   "theme": "light"
+  },
+  {
+   "name": "editor-red-line",
+   "x": 900,
+   "y": 40,
+   "token": "red",
+   "theme": "light"
+  },
+  {
+   "name": "editor-tab-active-bg",
+   "x": 466,
+   "y": 44,
+   "token": "raised",
+   "theme": "light"
+  },
+  {
+   "name": "editor-header-bg",
+   "x": 1000,
+   "y": 55,
+   "token": "head",
+   "theme": "light"
+  },
+  {
+   "name": "qbar-bg",
+   "x": 900,
+   "y": 86,
+   "token": "raised",
+   "theme": "light"
+  },
+  {
+   "name": "run-button-bg",
+   "x": 300,
+   "y": 76,
+   "token": "blue",
+   "theme": "light"
+  },
+  {
+   "name": "editor-bg",
+   "x": 1300,
+   "y": 250,
+   "token": "panel",
+   "theme": "light"
+  },
+  {
+   "name": "editor-band-line14",
+   "x": 1300,
+   "y": 350,
+   "token": "blue_tint",
+   "theme": "light"
+  },
+  {
+   "name": "popup-selected-item",
+   "x": 997,
+   "y": 182,
+   "token": "blue_tint_strong",
+   "theme": "light"
+  },
+  {
+   "name": "popup-detail-bg",
+   "x": 1220,
+   "y": 300,
+   "token": "raised",
+   "theme": "light"
+  },
+  {
+   "name": "popup-foot-bg",
+   "x": 1100,
+   "y": 330,
+   "token": "head",
+   "theme": "light"
+  },
+  {
+   "name": "results-header-bg",
+   "x": 800,
+   "y": 378,
+   "token": "head",
+   "theme": "light"
+  },
+  {
+   "name": "result-tab-active-bg",
+   "x": 294,
+   "y": 385,
+   "token": "raised",
+   "theme": "light"
+  },
+  {
+   "name": "gtool-bg",
+   "x": 1255,
+   "y": 404,
+   "token": "raised",
+   "theme": "light"
+  },
+  {
+   "name": "where-box-bg",
+   "x": 580,
+   "y": 404,
+   "token": "panel",
+   "theme": "light"
+  },
+  {
+   "name": "grid-header-bg",
+   "x": 800,
+   "y": 429,
+   "token": "head",
+   "theme": "light"
+  },
+  {
+   "name": "grid-rownum-bg",
+   "x": 290,
+   "y": 470,
+   "token": "gutter",
+   "theme": "light"
+  },
+  {
+   "name": "grid-cell-bg",
+   "x": 700,
+   "y": 470,
+   "token": "panel",
+   "theme": "light"
+  },
+  {
+   "name": "grid-selected-cell",
+   "x": 880,
+   "y": 515,
+   "token": "blue_tint",
+   "theme": "light"
+  },
+  {
+   "name": "grid-active-cell",
+   "x": 990,
+   "y": 515,
+   "token": "blue_tint_strong",
+   "theme": "light"
+  },
+  {
+   "name": "grid-selbox-border",
+   "x": 866,
+   "y": 520,
+   "token": "blue",
+   "theme": "light"
+  },
+  {
+   "name": "grid-fill-col",
+   "x": 1160,
+   "y": 470,
+   "token": "panel",
+   "theme": "light"
+  },
+  {
+   "name": "scroll-track",
+   "x": 1184,
+   "y": 700,
+   "token": "gutter",
+   "theme": "light"
+  },
+  {
+   "name": "strip-bg",
+   "x": 800,
+   "y": 864,
+   "token": "raised",
+   "theme": "light"
+  },
+  {
+   "name": "strip-page-current",
+   "x": 293,
+   "y": 863,
+   "token": "blue",
+   "theme": "light"
+  },
+  {
+   "name": "inspector-bg",
+   "x": 1300,
+   "y": 860,
+   "token": "gutter",
+   "theme": "light"
+  },
+  {
+   "name": "inspector-header-bg",
+   "x": 1300,
+   "y": 442,
+   "token": "gutter",
+   "theme": "light"
+  },
+  {
+   "name": "seam-inspector",
+   "x": 1188,
+   "y": 600,
+   "token": "seam",
+   "theme": "light"
+  },
+  {
+   "name": "status-bg",
+   "x": 700,
+   "y": 888,
+   "token": "ground",
+   "theme": "light"
+  },
+  {
+   "name": "status-env-tint",
+   "x": 5,
+   "y": 888,
+   "token": "red_tint",
+   "theme": "light"
+  },
+  {
+   "name": "status-seam",
+   "x": 700,
+   "y": 876,
+   "token": "seam",
+   "theme": "light"
+  }
+ ],
+ "scanlines": [
+  {
+   "name": "titlebar-bottom-seam",
+   "axis": "y",
+   "at": 1050,
+   "from": 20,
+   "to": 60,
+   "expect_edges_px": [
+    39,
+    40,
+    41
+   ]
+  },
+  {
+   "name": "explorer-header-seam",
+   "axis": "y",
+   "at": 272,
+   "from": 60,
+   "to": 80,
+   "expect_edges_px": [
+    69,
+    70
+   ]
+  },
+  {
+   "name": "explorer-editor-seam",
+   "axis": "x",
+   "at": 667,
+   "from": 250,
+   "to": 300,
+   "expect_edges_px": [
+    276,
+    277
+   ]
+  },
+  {
+   "name": "left-column-split",
+   "axis": "y",
+   "at": 272,
+   "from": 660,
+   "to": 690,
+   "expect_edges_px": [
+    670,
+    671
+   ]
+  },
+  {
+   "name": "editor-header-qbar-32",
+   "axis": "y",
+   "at": 1000,
+   "from": 60,
+   "to": 110,
+   "expect_edges_px": [
+    69,
+    70,
+    101,
+    102
+   ]
+  },
+  {
+   "name": "editor-results-seam-header-30",
+   "axis": "y",
+   "at": 800,
+   "from": 361,
+   "to": 396,
+   "expect_edges_px": [
+    362,
+    363,
+    392,
+    393
+   ]
+  },
+  {
+   "name": "toolbar-34-and-grid-header-36",
+   "axis": "y",
+   "at": 1255,
+   "from": 395,
+   "to": 431,
+   "expect_edges_px": [
+    426,
+    427
+   ]
+  },
+  {
+   "name": "grid-rows-1-5-pitch-21",
+   "axis": "y",
+   "at": 700,
+   "from": 458,
+   "to": 572,
+   "tol_de": 0.8,
+   "expect_edges_px": [
+    462,
+    463,
+    483,
+    484,
+    504,
+    505,
+    525,
+    526,
+    546,
+    547,
+    567,
+    568
+   ]
+  },
+  {
+   "name": "grid-track-inspector-edge",
+   "axis": "x",
+   "at": 600,
+   "from": 1170,
+   "to": 1196,
+   "expect_edges_px": [
+    1179,
+    1180,
+    1188,
+    1189
+   ]
+  },
+  {
+   "name": "strip-and-status-top",
+   "axis": "y",
+   "at": 850,
+   "from": 845,
+   "to": 890,
+   "expect_edges_px": [
+    850,
+    851,
+    876,
+    877
+   ]
+  }
+ ]
+}

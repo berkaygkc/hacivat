@@ -8,3 +8,8 @@ pub use gpui::{
     IntoElement, KeyDownEvent, ParentElement, Pixels, Point, Render, SharedString, Size, Styled,
     UTF16Selection, Window, canvas, div, px,
 };
+// Task 8 (harman VF): element building blocks.
+pub use gpui::{
+    AnyElement, AppContext, BoxShadow, Div, FontStyle, FontWeight, HighlightStyle, StyledText, hsla,
+    point, svg,
+};
