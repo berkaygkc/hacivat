@@ -173,6 +173,7 @@ fn cold_parse_en_tr_under_10ms() {
         })
         .collect();
     t.sort();
+    eprintln!("cold_parse_en_tr: median {:?} (20 runs)", t[10]);
     assert!(t[10] <= Duration::from_millis(10), "median {:?}", t[10]);
 }
 
@@ -191,6 +192,7 @@ fn cold_load_and_build_en_tr_under_10ms() {
         })
         .collect();
     t.sort();
+    eprintln!("cold_load_and_build_en_tr: median {:?} (20 runs)", t[10]);
     assert!(t[10] <= Duration::from_millis(10), "median {:?}", t[10]);
 }
 
