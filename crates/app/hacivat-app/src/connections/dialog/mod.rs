@@ -1094,7 +1094,10 @@ impl ConnectionDialog {
         cx.notify();
     }
 
+    /// Closes the dialog (Cancel, the close button, a save). A test still running is stopped
+    /// first, so it never outlives the dialog (T20 integration).
     pub(crate) fn close(&mut self, cx: &mut Context<Self>) {
+        self.strip.update(cx, |strip, cx| strip.stop(cx));
         cx.emit(ConnectionDialogEvent::Closed);
     }
 
