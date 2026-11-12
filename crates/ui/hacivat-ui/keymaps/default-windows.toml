@@ -1,0 +1,45 @@
+# Default keymap, Windows (UI-EDIT-13). AltGr is Ctrl+Alt on Windows, so no chord may combine
+# Ctrl+Alt with a key that types a character through AltGr on TR-Q, TR-F, DE, FR or PL
+# (CI: `altgr_collisions` over every preset). Modifier names stay English.
+
+[[binding]]
+chord = "ctrl-k"
+command = "workspace.command_palette"
+context = "Workspace"
+
+[[binding]]
+chord = "ctrl-,"
+command = "workspace.open_settings"
+context = "Workspace"
+
+[[binding]]
+chord = "ctrl-t"
+command = "workspace.new_console_tab"
+context = "Workspace"
+
+[[binding]]
+chord = "ctrl-w"
+command = "workspace.close_tab"
+context = "Workspace"
+
+[[binding]]
+chord = "ctrl-f4"
+command = "workspace.close_tab"
+context = "Workspace"
+
+[[binding]]
+chord = "ctrl-tab"
+command = "workspace.next_tab"
+context = "Workspace"
+
+[[binding]]
+chord = "ctrl-shift-tab"
+command = "workspace.prev_tab"
+context = "Workspace"
+
+[[binding]]
+chord = "alt-1"
+command = "workspace.toggle_explorer"
+context = "Workspace"
+
+# Windows has no quit chord (Alt+F4 belongs to the system).
