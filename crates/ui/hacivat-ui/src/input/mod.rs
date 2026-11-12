@@ -545,6 +545,7 @@ impl Element for InputText {
                 text: p.clone(),
                 source: TextSource::Fluent,
                 size_px: style.size_px,
+                painted_px: f32::from(shown.width),
                 clipped: shown.width > width + px(0.5),
                 truncated: false,
                 path: "hacivat-ui/src/input/mod.rs#placeholder".into(),

@@ -5,11 +5,12 @@ use std::rc::Rc;
 
 use gpui::{TestAppContext, VisualTestContext, point, px};
 use hacivat_ui::button::{Button, ButtonKind};
+use hacivat_ui::capsule::{Capsule, CapsuleModel, EnvKind};
 use hacivat_ui::icon::IconName;
 use hacivat_ui::panes::{PaneId, TabId, TabSpec, TabStrip};
 use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
 use hacivat_ui::statusbar::StatusBar;
-use hacivat_ui::text::TextSource;
+use hacivat_ui::text::{RenderedText, TextRegistry, TextSource};
 use hacivat_ui::titlebar::{OVERFLOW_BUTTON_PX, TitleBarFit, titlebar_fit};
 use hacivat_ui_core::gpui_surface::{IntoElement, ParentElement, Styled, div};
 use support::host;
@@ -341,4 +342,77 @@ impl gpui::Render for MenuHost {
     fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
         div().size_full().child(self.0.clone())
     }
+}
+
+/// What the registry check does under en-XA: Fluent output is bracketed as a whole, so a
+/// Fluent-sourced text without brackets is a hardcoded string.
+fn unbracketed_fluent(frame: &[RenderedText]) -> Vec<String> {
+    frame
+        .iter()
+        .filter(|r| r.source == TextSource::Fluent)
+        .filter(|r| !(r.text.starts_with('[') && r.text.ends_with(']')))
+        .map(|r| r.text.to_string())
+        .collect()
+}
+
+#[gpui::test]
+fn pseudo_locale_brackets_fluent_segments_but_not_verbatim_ones_or_the_capsule_name(
+    cx: &mut TestAppContext,
+) {
+    let segment = |content, pressed| SegmentItem {
+        content,
+        pressed,
+        tooltip: "[Language]".into(),
+        on_click: Rc::new(|_, _, _| {}),
+    };
+    let vcx = host(cx, move |_, _| {
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                Segmented::new("theme")
+                    .item(segment(SegmentContent::Label("[Light]".into()), true))
+                    .item(segment(SegmentContent::Label("[Dark]".into()), false)),
+            )
+            .child(
+                Segmented::new("lang")
+                    .mono(true)
+                    .item(segment(SegmentContent::Verbatim("EN".into()), true))
+                    .item(segment(SegmentContent::Verbatim("TR".into()), false)),
+            )
+            .child(Capsule::new(CapsuleModel::Connection {
+                env: EnvKind::Local,
+                env_label: "[LOCAL]".into(),
+                name: "orders-db".into(),
+                engine: "PostgreSQL".into(),
+                access: "[Read only]".into(),
+                path: "[Direct]".into(),
+            }))
+            .into_any_element()
+    });
+    vcx.update(|_, cx| {
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        })
+    });
+    vcx.simulate_resize(gpui::size(px(800.0), px(300.0)));
+    vcx.run_until_parked();
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let source_of = |text: &str| {
+        frame
+            .iter()
+            .find(|r| r.text == text)
+            .unwrap_or_else(|| panic!("{text} not drawn: {frame:?}"))
+            .source
+    };
+    assert_eq!(source_of("[Light]"), TextSource::Fluent);
+    assert_eq!(source_of("[Dark]"), TextSource::Fluent);
+    assert_eq!(source_of("EN"), TextSource::Data);
+    assert_eq!(source_of("TR"), TextSource::Data);
+    assert_eq!(source_of("orders-db"), TextSource::Data);
+    assert_eq!(source_of("PostgreSQL"), TextSource::Data);
+    assert_eq!(source_of("[Read only]"), TextSource::Fluent);
+    // Nothing is flagged: every Fluent text is bracketed, user data and verbatim text is not.
+    assert_eq!(unbracketed_fluent(&frame), Vec::<String>::new());
 }
