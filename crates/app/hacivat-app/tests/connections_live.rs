@@ -15,7 +15,9 @@ use hacivat_secrets::{AuthProviderId, Retention, SecretKey, SecretSlot, SecretSt
 use hacivat_session::LiveState;
 use hacivat_session::profile::{Profile, ProfileDraft};
 use hacivat_ui::capsule::{CapsuleModel, EnvKind};
+#[cfg(feature = "scene-check")]
 use hacivat_ui_core::named_rules::assert_one_filled_badge;
+#[cfg(feature = "scene-check")]
 use hacivat_ui_core::theme::Theme;
 use support::*;
 
@@ -144,10 +146,13 @@ fn capsule_and_status_follow_the_current_connection(cx: &mut TestAppContext) {
         matches!(m, CapsuleModel::Connection { env: EnvKind::Production, ref unencrypted, .. } if unencrypted.as_deref() == Some("unencrypted")),
         "{m:?}"
     );
-    let cp_fill = vcx
-        .cx
-        .read(|cx| Theme::get(cx).tokens.colors.cp_fill.to_hsla());
-    vcx.update(|window, _| assert_one_filled_badge(window, cp_fill, true));
+    #[cfg(feature = "scene-check")]
+    {
+        let cp_fill = vcx
+            .cx
+            .read(|cx| Theme::get(cx).tokens.colors.cp_fill.to_hsla());
+        vcx.update(|window, _| assert_one_filled_badge(window, cp_fill, true));
+    }
     let status = status_bar_text(vcx);
     assert!(status.contains("production · read-write"), "{status}");
     assert!(status.contains("unencrypted"), "{status}");
