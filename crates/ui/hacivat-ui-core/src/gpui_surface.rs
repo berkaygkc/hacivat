@@ -8,3 +8,5 @@ pub use gpui::{
     IntoElement, KeyDownEvent, ParentElement, Pixels, Point, Render, SharedString, Size, Styled,
     UTF16Selection, Window, canvas, div, px,
 };
+// Task 6 (spike-editor): custom element, text shaping, popover shadow and synthetic keystrokes.
+#[rustfmt::skip] pub use gpui::{AnyElement, AppContext, AvailableSpace, BoxShadow, ContentMask, Element, ElementId, Font, GlobalElementId, InspectorElementId, InteractiveElement, Keystroke, LayoutId, Modifiers, ShapedLine, Style, TextAlign, TextRun, fill, point, relative, size};

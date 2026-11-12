@@ -1,0 +1,12 @@
+[package]
+name = "spike-editor"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hacivat-ui-core = { path = "../../crates/ui/hacivat-ui-core" }
+anyhow.workspace = true
+# Spike-only rope (MIT). Never Zed's `rope`/`text` crates (GPL).
+ropey = "1.6"
