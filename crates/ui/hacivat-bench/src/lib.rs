@@ -213,17 +213,32 @@ pub fn verdict(label: &str, os: &str, stats: &impl Judge, run: &RunInfo) -> Verd
     if complete { v } else { Verdict::Fail }
 }
 
-/// `head`, plus `-dirty` if `git status --porcelain` output lists any change other than
+/// `head`, plus `-dirty` if `git status --porcelain -z` output lists any change other than
 /// untracked files under `target/` or `.superpowers/` (bench output and agent reports) or any
 /// change under `docs/benchmarks/` (the report this run feeds).
-pub fn build_label(head: &str, porcelain: &str) -> String {
-    let dirty = porcelain.lines().any(|line| {
-        let path = line.get(3..).unwrap_or("");
-        let ignorable = (line.starts_with("??")
+///
+/// Entries are NUL-terminated `XY path`. A rename or copy (`R`/`C` in either status column) is
+/// followed by a second NUL-terminated path with no status prefix; the entry is clean only if
+/// both paths are ignorable.
+pub fn build_label(head: &str, porcelain_z: &str) -> String {
+    let mut entries = porcelain_z.split('\0');
+    let mut dirty = false;
+    while let Some(entry) = entries.next() {
+        if entry.is_empty() {
+            continue;
+        }
+        let status = entry.get(..2).unwrap_or(entry);
+        let path = entry.get(3..).unwrap_or("");
+        let mut ignorable = (status == "??"
             && (path.starts_with("target/") || path.starts_with(".superpowers/")))
             || path.starts_with("docs/benchmarks/");
-        !line.trim().is_empty() && !ignorable
-    });
+        if status.contains(['R', 'C']) {
+            // The other path of a rename or copy is a change too: clean only if both are.
+            let other = entries.next().unwrap_or("");
+            ignorable &= other.starts_with("docs/benchmarks/");
+        }
+        dirty |= !ignorable;
+    }
     if dirty {
         format!("{head}-dirty")
     } else {
@@ -246,7 +261,10 @@ pub fn build_stamp(root: &Path) -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     match head {
-        Some(head) => build_label(&head, &git(&["status", "--porcelain"]).unwrap_or_default()),
+        Some(head) => build_label(
+            &head,
+            &git(&["status", "--porcelain", "-z"]).unwrap_or_default(),
+        ),
         None => "nogit".into(),
     }
 }
@@ -696,18 +714,18 @@ mod tests {
     fn build_label_marks_dirty_trees() {
         assert_eq!(build_label("abc1234", ""), "abc1234");
         assert_eq!(
-            build_label("abc1234", " M xtask/src/bench_report.rs\n"),
+            build_label("abc1234", " M xtask/src/bench_report.rs\0"),
             "abc1234-dirty"
         );
         assert_eq!(
-            build_label("abc1234", "?? spikes/new.rs\n"),
+            build_label("abc1234", "?? spikes/new.rs\0"),
             "abc1234-dirty"
         );
-        let ignored = "?? target/bench/b3-typing.json\n?? .superpowers/sdd/x-report.md\n";
+        let ignored = "?? target/bench/b3-typing.json\0?? .superpowers/sdd/x-report.md\0";
         assert_eq!(build_label("abc1234", ignored), "abc1234");
         // Only untracked files there are ignored; a tracked change still counts.
         assert_eq!(
-            build_label("abc1234", " M .superpowers/x.md\n"),
+            build_label("abc1234", " M .superpowers/x.md\0"),
             "abc1234-dirty"
         );
     }
@@ -716,16 +734,74 @@ mod tests {
     fn build_label_ignores_benchmark_docs() {
         // Writing results into docs/benchmarks must not make the next run look dirty.
         assert_eq!(
-            build_label("abc1234", " M docs/benchmarks/m0.md\n"),
+            build_label("abc1234", " M docs/benchmarks/m0.md\0"),
             "abc1234"
         );
         assert_eq!(
-            build_label("abc1234", "?? docs/benchmarks/m1.md\n"),
+            build_label("abc1234", "?? docs/benchmarks/m1.md\0"),
             "abc1234"
         );
         assert_eq!(
-            build_label("abc1234", " M docs/other.md\n"),
+            build_label("abc1234", " M docs/other.md\0"),
             "abc1234-dirty"
+        );
+    }
+
+    #[test]
+    fn bench_doc_edits_are_not_dirty() {
+        assert_eq!(
+            build_label("abc1234", " M docs/benchmarks/m1.md\0"),
+            "abc1234"
+        );
+    }
+
+    #[test]
+    fn non_ascii_path_is_dirty_without_quoting() {
+        assert_eq!(
+            build_label("abc1234", " M crates/ui/İçerik.rs\0"),
+            "abc1234-dirty"
+        );
+    }
+
+    #[test]
+    fn rename_source_path_is_not_parsed_as_an_entry() {
+        assert_eq!(
+            build_label(
+                "abc1234",
+                "R  docs/benchmarks/new.md\0docs/benchmarks/old.md\0 M docs/benchmarks/m1.md\0"
+            ),
+            "abc1234"
+        );
+        assert_eq!(
+            build_label("abc1234", "R  crates/new.rs\0docs/benchmarks/old.md\0"),
+            "abc1234-dirty"
+        );
+    }
+
+    #[test]
+    fn rename_is_clean_only_if_both_paths_are_ignorable() {
+        assert_eq!(
+            build_label("abc1234", "R  docs/benchmarks/new.md\0crates/old.rs\0"),
+            "abc1234-dirty"
+        );
+        assert_eq!(
+            build_label(
+                "abc1234",
+                "R  docs/benchmarks/new.md\0docs/benchmarks/old.md\0"
+            ),
+            "abc1234"
+        );
+    }
+
+    #[test]
+    fn entries_are_split_on_nul() {
+        assert_eq!(
+            build_label("abc1234", "?? target/x.json\0 M crates/a.rs\0"),
+            "abc1234-dirty"
+        );
+        assert_eq!(
+            build_label("abc1234", "?? target/x.json\0?? .superpowers/y.md\0"),
+            "abc1234"
         );
     }
 }
