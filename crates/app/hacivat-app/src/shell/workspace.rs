@@ -899,8 +899,9 @@ impl Workspace {
                 on_segment(segment, anchor, window, cx)
             });
         }
+        let modal = self.layers.has_modal();
         let mut bar = TitleBar::new(chrome)
-            .inert(self.layers.has_modal())
+            .inert(modal)
             .brand(tr(cx, ids::cm::BRAND_HACIVAT_CAPS, NoArgs))
             .capsule(capsule)
             .palette_field(
@@ -910,7 +911,10 @@ impl Workspace {
                     ActionRegistry::run(PALETTE_ACTION, window, cx);
                 },
             )
-            .right(vec![language_switch(cx), theme_switch(theme, cx)]);
+            .right(vec![
+                language_switch(cx, modal),
+                theme_switch(theme, cx, modal),
+            ]);
         if matches!(chrome, ChromeKind::WindowsCaption | ChromeKind::LinuxClient) {
             bar = bar.app_menu(|_, window, cx| {
                 ActionRegistry::run(APP_MENU_ACTION, window, cx);
@@ -1212,7 +1216,11 @@ impl Render for Workspace {
             .child(tiles)
             .child(status_bar)
             .children(self.layers.elements(&theme))
-            .child(ToastStack::new().above(t.spacing.statusbar_height));
+            .child(
+                ToastStack::new()
+                    .above(t.spacing.statusbar_height)
+                    .inert(self.layers.has_modal()),
+            );
         client_decorations(root.into_any_element(), window, &theme)
     }
 }
@@ -1271,8 +1279,9 @@ pub(crate) fn set_theme(cx: &mut App, pref: ThemePref) {
 /// (11.5 px mono, DESIGN.md Segmented Controls). The names are catalog data, not messages, so the
 /// segments are `Verbatim`; the tooltip and the accessible name of a segment is the language's
 /// native name (the visible short name `TR` is announced as `Türkçe`). Focusable and keyboard-operable like every `Segmented`.
-fn language_switch(cx: &App) -> AnyElement {
-    let mut group = Segmented::new("language-switch").mono(true);
+/// `inert` while a modal layer is open (the title bar ignores the pointer then).
+fn language_switch(cx: &App, inert: bool) -> AnyElement {
+    let mut group = Segmented::new("language-switch").mono(true).inert(inert);
     for choice in language_choices(cx) {
         let tag = choice.tag;
         group = group.item(SegmentItem {
@@ -1287,7 +1296,7 @@ fn language_switch(cx: &App) -> AnyElement {
 }
 
 /// The title bar's theme control: moon (dark) and sun (light).
-fn theme_switch(theme: &Theme, cx: &App) -> AnyElement {
+fn theme_switch(theme: &Theme, cx: &App, inert: bool) -> AnyElement {
     let segment = |icon, pressed, tooltip, pref: ThemePref| SegmentItem {
         content: SegmentContent::Icon(icon),
         pressed,
@@ -1296,6 +1305,7 @@ fn theme_switch(theme: &Theme, cx: &App) -> AnyElement {
         on_click: Rc::new(move |_, _, cx| set_theme(cx, pref)),
     };
     Segmented::new("theme-switch")
+        .inert(inert)
         .item(segment(
             IconName::Moon,
             theme.mode == ThemeMode::Dark,

@@ -47,6 +47,7 @@ pub struct Button {
     focus: Option<FocusHandle>,
     access_key: Option<AccessKey>,
     fixed_width: Option<f32>,
+    inert: bool,
 }
 
 impl Button {
@@ -62,6 +63,7 @@ impl Button {
             focus: None,
             access_key: None,
             fixed_width: None,
+            inert: false,
         }
     }
 
@@ -83,6 +85,13 @@ impl Button {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Ignores the pointer and the keyboard and is announced as disabled, but keeps its look:
+    /// a control a modal layer has made unavailable without dimming it (the title bar, M2a).
+    pub fn inert(mut self, inert: bool) -> Self {
+        self.inert = inert;
         self
     }
 
@@ -288,13 +297,15 @@ impl Button {
             focus,
             access_key,
             fixed_width,
+            inert,
         } = self;
 
         // Hover and focus state live with the element across frames.
         let (hover, keyed_focus) = interaction_state(&id, window, cx);
         let handle = focus.unwrap_or(keyed_focus);
         let focused = !disabled && focus_visible(&handle, window);
-        let hot = !disabled && (*hover.read(cx) || (kind == ButtonKind::Danger && focused));
+        let hot =
+            !disabled && !inert && (*hover.read(cx) || (kind == ButtonKind::Danger && focused));
         let look = look(kind, disabled, hot, &theme);
 
         let mut style = t.type_ramp.control;
@@ -346,7 +357,7 @@ impl Button {
             ));
         }
 
-        if disabled {
+        if disabled || inert {
             return A11yNode::new(node_id, Role::Button, label, false, body)
                 .disabled(true)
                 .into_any_element();
