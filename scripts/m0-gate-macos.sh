@@ -22,7 +22,12 @@ trap 'rm -f "$marker"' EXIT
 
 pause() {
   printf '\n%s\n' "$1"
-  read -r -p "Hazır olunca Enter'a bas (pencere açılınca klavye/fareye dokunma)... " _
+  if [ -t 0 ]; then
+    read -r -p "Hazır olunca Enter'a bas (pencere açılınca klavye/fareye dokunma)... " _
+  else
+    for s in 5 4 3 2 1; do printf '%s ' "$s"; sleep 1; done
+    printf '\n(klavye/fareye dokunma)\n'
+  fi
 }
 
 caffeinate -dims -w $$ &
@@ -45,9 +50,13 @@ while IFS= read -r f; do files+=("$f"); done < <(find target/bench -name '*.json
 if [ "${#files[@]}" -eq 0 ]; then echo "No bench files produced." >&2; exit 1; fi
 cargo run -q --locked -p xtask -- bench-report "${files[@]}" --milestone m0
 
-pause "Ekran okuyucu: VoiceOver'ı aç (Cmd+F5), sonra devam et"
-target/release/spike-probes a11y || true
-echo "VoiceOver'ı kapatabilirsin (Cmd+F5)."
+if [ -t 0 ]; then
+  pause "Ekran okuyucu: VoiceOver'ı aç (Cmd+F5), sonra devam et"
+  target/release/spike-probes a11y || true
+  echo "VoiceOver'ı kapatabilirsin (Cmd+F5)."
+else
+  echo "Ekran okuyucu testi ayrıca: VoiceOver'ı aç (Cmd+F5) ve 'target/release/spike-probes a11y' çalıştır."
+fi
 
 echo
 echo "Bitti. Sonuçlar docs/benchmarks/m0.md içinde; commit etmeden önce controller'a haber ver."
