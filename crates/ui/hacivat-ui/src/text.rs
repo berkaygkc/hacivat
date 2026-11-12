@@ -56,7 +56,8 @@ pub struct RenderedText {
     pub clipped: bool,
     /// Wider than its bounds and drawn ellipsized.
     pub truncated: bool,
-    /// Where the text was created (`file:line:column`, plus `#id` for a label with an ID).
+    /// Where the text was created (`file:line:column`, plus `#id` for a label with an ID). The
+    /// file uses `/` separators on every platform.
     pub path: SharedString,
 }
 
@@ -165,11 +166,14 @@ impl Label {
         self.source
     }
 
+    /// `file:line:column` (plus `#id`), with `/` separators on every platform: `Location::file`
+    /// uses `\` on Windows, and callers match the path by a `crate/src/file.rs:` suffix.
     fn path(&self) -> SharedString {
         let l = self.location;
+        let file = l.file().replace('\\', "/");
         match &self.id {
-            Some(id) => format!("{}:{}:{}#{id}", l.file(), l.line(), l.column()).into(),
-            None => format!("{}:{}:{}", l.file(), l.line(), l.column()).into(),
+            Some(id) => format!("{file}:{}:{}#{id}", l.line(), l.column()).into(),
+            None => format!("{file}:{}:{}", l.line(), l.column()).into(),
         }
     }
 }

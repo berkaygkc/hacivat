@@ -109,7 +109,9 @@ fn registry_records_full_text_source_and_size_once_per_frame(cx: &mut TestAppCon
     assert_eq!(r.text, "A very long label");
     assert_eq!(r.source, TextSource::Data);
     assert_eq!(r.size_px, DARK.type_ramp.body.size_px);
-    assert!(r.path.contains("text.rs"), "{}", r.path);
+    // `/` separators on every platform (Windows' `Location::file` uses `\`).
+    assert!(r.path.contains("hacivat-ui/tests/text.rs:"), "{}", r.path);
+    assert!(!r.path.contains('\\'), "{}", r.path);
 }
 
 #[gpui::test]
