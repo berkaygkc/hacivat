@@ -2869,6 +2869,7 @@ version = "0.0.0"
 dependencies = [
  "futures",
  "hacivat-driver",
+ "hacivat-net",
  "hacivat-proto",
  "rusqlite",
  "tempfile",
