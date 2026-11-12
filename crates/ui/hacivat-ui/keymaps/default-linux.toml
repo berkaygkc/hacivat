@@ -113,3 +113,11 @@ context = "ConnectionDialog"
 chord = "ctrl-shift-c"
 command = "connection_dialog.copy_url"
 context = "ConnectionDialog"
+
+## m2a-t18-explorer
+# The newest sticky notification takes the focus (its actions are then keyboard-reachable).
+
+[[binding]]
+chord = "f6"
+command = "workspace.focus_notification"
+context = "Workspace"

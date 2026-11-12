@@ -831,6 +831,9 @@ impl Workspace {
     /// Escape pops the topmost layer; with no layer open it goes to the `escape` hook. Runs
     /// without borrowing the workspace, so the hook may update it.
     fn on_escape(ws: &Entity<Workspace>, event: &KeyDownEvent, window: &mut Window, cx: &mut App) {
+        if Self::on_tab(ws, event, window, cx) {
+            return;
+        }
         if event.keystroke.key != "escape" {
             return;
         }
@@ -844,6 +847,33 @@ impl Workspace {
         {
             cx.stop_propagation();
         }
+    }
+
+    // ## m2a-t18-explorer
+    /// Tab and Shift-Tab that reach the workspace (no focused element consumed them, and no
+    /// layer is open: a modal layer traps Tab itself) move the focus to the next or previous
+    /// tab stop, for keyboard-only use (v1 criterion, M2a Task 18). Returns whether it moved.
+    fn on_tab(
+        ws: &Entity<Workspace>,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let stroke = &event.keystroke;
+        let m = &stroke.modifiers;
+        if stroke.key != "tab" || m.control || m.alt || m.platform || m.function {
+            return false;
+        }
+        if !ws.read(cx).layers.is_empty() {
+            return false;
+        }
+        if m.shift {
+            window.focus_prev(cx);
+        } else {
+            window.focus_next(cx);
+        }
+        cx.stop_propagation();
+        true
     }
 
     fn on_drag_move(

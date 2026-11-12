@@ -575,6 +575,12 @@ impl ConnectionManager {
         TestHandle::new(progress, result, token)
     }
 
+    /// How long quitting may wait for connections to close (`ManagerConfig::shutdown_budget`;
+    /// M2a Task 18's quit handler).
+    pub fn shutdown_budget(&self) -> Duration {
+        self.shared.config.shutdown_budget
+    }
+
     /// Closes every connection within `config.shutdown_budget`. A connect still in flight is
     /// cancelled, and a connection that lands later is closed at once.
     pub fn shutdown(&self) -> BoxFuture<'static, ()> {

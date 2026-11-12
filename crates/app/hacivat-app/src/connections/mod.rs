@@ -34,6 +34,7 @@ use hacivat_ui_core::gpui_surface::App;
 /// Registers the connection actions (called from `crate::init`). Actions only, never hooks.
 pub fn install(_cx: &mut App) {
     // ## registrations (append-only: Tasks 17, 18 and 20 add one line each)
+    commands::register(_cx); // ## m2a-t18-explorer
 }
 
 /// Boots the connections: the `ConnectionsModel` Global and its store diagnostics (Task 12),

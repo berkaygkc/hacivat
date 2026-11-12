@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use hacivat_l10n::{Count, NoArgs, Text, ids};
 use hacivat_proto::{Origin, ProfileId, TagSource};
@@ -171,6 +172,11 @@ impl ConnectionsModel {
                 profile.env_source = TagSource::Org;
             }
             _ => profile.env_source = TagSource::User,
+        }
+        // RF5 (P39, Task 18): an edit of a profile that is connecting cancels the attempt
+        // first, so it never lands with the old values; the next connect uses the new ones.
+        if !is_new && matches!(m.manager.state(id), LiveState::Connecting(_)) {
+            m.manager.cancel(id);
         }
         let old_retention = stored.map(|p| p.retention);
         let retention = profile.retention;
@@ -337,6 +343,13 @@ impl ConnectionsModel {
         self.writer.flush();
     }
 
+    /// Waits, at most `budget`, until every queued job (secret calls and profile writes) has
+    /// run; `true` if the queue drained in time. Blocks this thread: only the bounded quit
+    /// path calls it (P15, Task 18).
+    pub fn drain_writes(&self, budget: Duration) -> bool {
+        self.writer.drain(budget)
+    }
+
     /// The profile list as the file should hold it.
     fn snapshot(&self) -> Vec<Profile> {
         self.profiles.iter().map(|p| (**p).clone()).collect()
@@ -487,6 +500,19 @@ impl ProfileWriter {
     /// Writes the pending list now; a failure is already logged by `write_pending`.
     fn flush(&self) {
         let _ = write_pending(&self.pending, &self.store);
+    }
+
+    /// Queues a marker job and waits for it at most `budget`: jobs run in order, so when it
+    /// runs every earlier job is done. A closed queue has nothing left to run.
+    fn drain(&self, budget: Duration) -> bool {
+        let (done, wait) = std::sync::mpsc::channel();
+        let marker: Job = Box::new(move || {
+            let _ = done.send(());
+        });
+        if self.jobs.send(marker).is_err() {
+            return true;
+        }
+        wait.recv_timeout(budget).is_ok()
     }
 }
 

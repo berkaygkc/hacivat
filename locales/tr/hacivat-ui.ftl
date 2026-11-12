@@ -159,3 +159,212 @@ hv-conn-toast-dup = { $name } olarak çoğaltıldı
 hv-conn-file-unreadable = { -brand-hacivat } bağlantılar dosyanızı okuyamıyor. Dosya olduğu gibi bırakıldı; okunabilene kadar bağlantılar değiştirilemez.
 # Review: PO
 hv-conn-file-values-ignored = Bağlantılar dosyanızdaki { $count } ayar okunamadı ve yok sayıldı.
+
+## m2a-t18-explorer
+
+# Review: PO
+hv-cmd-connection-new = Yeni bağlantı
+# Review: PO
+hv-cmd-connection-paste-url = Kopyalanan URL'den yeni bağlantı
+# Review: PO
+hv-cmd-connection-toggle-connect = Bağlan ya da bağlantıyı kes
+# Review: PO
+hv-cmd-connection-edit = Bağlantıyı düzenle
+# Review: PO
+hv-cmd-connection-duplicate = Bağlantıyı çoğalt
+# Review: PO
+hv-cmd-connection-copy-url = Bağlantıyı URL olarak kopyala
+# Review: PO
+hv-cmd-connection-delete = Bağlantıyı sil
+# Review: PO
+hv-cmd-connection-context-menu = Bağlantı menüsünü göster
+# Review: PO
+hv-cmd-connection-import-pg-service = pg_service.conf içe aktar
+# Review: PO
+hv-cmd-connection-retry = Bağlantıyı yeniden dene
+# Review: PO
+hv-cmd-connection-explain-unencrypted = Şifrelemesiz bağlantıyı açıkla
+# Review: PO
+hv-cmd-workspace-focus-notification = En yeni bildirime git
+# Review: PO
+hv-explorer-empty-body = Bir PostgreSQL, MySQL, MariaDB ya da SQLite veritabanı ekleyin. Bir bağlantı URL'si yapıştırırsanız { -brand-hacivat } formu sizin için doldurur.
+# Review: PO
+hv-explorer-new = Yeni bağlantı
+# Review: PO
+hv-explorer-paste = URL yapıştır
+# Review: PO
+hv-explorer-import = pg_service.conf içe aktar…
+# Review: PO
+hv-explorer-group-production = ÜRETİM
+# Review: PO
+hv-explorer-group-staging = HAZIRLIK
+# Review: PO
+hv-explorer-group-test = TEST
+# Review: PO
+hv-explorer-group-dev = GELİŞTİRME
+# Review: PO
+hv-explorer-group-local = YEREL
+# Review: PO
+hv-explorer-group-unset = ORTAM YOK
+# Review: PO
+hv-explorer-env = { $env ->
+        [production] üretim
+        [staging] hazırlık
+        [test] test
+        [dev] geliştirme
+        [local] yerel
+       *[unset] ortam yok
+    }
+# Review: PO
+hv-explorer-write-failed = Değişiklik bağlantılar dosyanıza kaydedilemedi.
+# Review: PO
+hv-explorer-secret-failed = Kayıtlı bir parola sistemin anahtar deposunda güncellenemedi.
+# Review: PO
+hv-explorer-copied = URL olarak kopyalandı
+# Review: PO
+hv-explorer-copied-nopw = Parola dahil değil.
+# Review: PO
+hv-conn-menu-connect = Bağlan
+# Review: PO
+hv-conn-menu-disconnect = Bağlantıyı kes
+# Review: PO
+hv-conn-menu-edit = Düzenle…
+# Review: PO
+hv-conn-menu-dup = Çoğalt
+# Review: PO
+hv-conn-menu-copy-url = URL olarak kopyala
+# Review: PO
+hv-conn-menu-delete = Sil…
+# Review: PO
+hv-conn-del-title = { $name } silinsin mi?
+# Review: PO
+hv-conn-del-body = Kayıtlı parolası Anahtar Zinciri'nden de silinir. Betikler ve sorgu geçmişi kalır. Bu işlem geri alınamaz.
+# Review: PO
+hv-conn-del-btn = Sil
+# Review: PO
+hv-conn-del-cancel = Vazgeç
+# Review: PO
+hv-conn-toast-deleted = { $name } silindi
+# Review: PO
+hv-conn-toast-cancelled = { $name } bağlantısı iptal edildi.
+# Review: PO
+hv-conn-sheet-none = Ayrıntılarını görmek için bir bağlantı seçin.
+# Review: PO
+hv-conn-kv-env = Ortam
+# Review: PO
+hv-conn-kv-engine = Motor
+# Review: PO
+hv-conn-kv-host = Adres
+# Review: PO
+hv-conn-kv-file = Dosya
+# Review: PO
+hv-conn-kv-user = Kullanıcı
+# Review: PO
+hv-conn-kv-access = Erişim
+# Review: PO
+hv-conn-kv-path = Yol
+# Review: PO
+hv-conn-kv-enc = Şifreleme
+# Review: PO
+hv-conn-kv-secret = Parola
+# Review: PO
+hv-conn-access-ro-guarded = salt okunur (korumalı)
+# Review: PO
+hv-conn-enc-verified = { $version } · doğrulandı
+# Review: PO
+hv-conn-enc-unverified = { $version } · doğrulanmadı
+# Review: PO
+hv-conn-enc-unencrypted = şifrelenmemiş
+# Review: PO
+hv-conn-enc-none-file = geçerli değil (dosya)
+# Review: PO
+hv-conn-secret-forever = Anahtar Zinciri · kalıcı
+# Review: PO
+hv-conn-secret-never = her seferinde sorar
+# Review: PO
+hv-conn-secret-session = bu oturum boyunca
+# Review: PO
+hv-conn-secret-restart = yeniden başlatana kadar
+# Review: PO
+hv-conn-secret-pgpass = ~/.pgpass dosyasından
+# Review: PO
+hv-conn-secret-none = yok
+# Review: PO
+hv-conn-unenc-title = Şifrelemesiz bağlanıldı
+# Review: PO
+hv-conn-unenc-body = { $host } TLS sunmuyor. Adres özel bir ağda olduğu için { -brand-hacivat } şifresiz bağlantıya izin verdi. Bağlantı şifresiz kaldıkça bu rozet görünür.
+# Review: PO
+hv-conn-unenc-fix = Kaldırmak için sunucuda TLS'i açın ya da SSH üzerinden bağlanın.
+# Review: PO
+hv-capsule-connecting = Bağlanıyor
+# Review: PO
+hv-capsule-failed = Bağlanılamadı
+# Review: PO
+hv-capsule-retry = Yeniden dene
+# Review: PO
+hv-capsule-clock = { NUMBER($seconds, minimumFractionDigits: 2) } sn
+# Review: PO
+hv-capsule-step = { $step ->
+        [pgpass] pgpass
+        [resolve] Çözümle
+        [connect] Bağlan
+        [tls] TLS
+        [sign-in] Oturum aç
+        [check-server] Sunucuyu denetle
+       *[open-file] Dosyayı aç
+    }
+# Review: PO
+hv-capsule-unsupported = desteklenmiyor
+# Review: PO
+hv-capsule-access-read-write = okuma-yazma
+# Review: PO
+hv-capsule-latency = { $ms } ms
+# Review: PO
+hv-status-env = { $env ->
+        [production] üretim
+        [staging] hazırlık
+        [test] test
+        [dev] geliştirme
+        [local] yerel
+       *[unset] ortam yok
+    } · { $access ->
+        [read-only] salt okunur
+       *[read-write] okuma-yazma
+    }
+# Review: PO
+hv-home-title = Açık sorgu yok
+# Review: PO
+hv-home-hint = Gezgin'den bir bağlantı seçin ya da yeni bir tane ekleyin.
+# Review: PO
+hv-home-new = Yeni bağlantı
+# Review: PO
+hv-home-paste = Kopyalanan URL'den yeni bağlantı
+# Review: PO
+hv-home-connect = Seçili bağlantıya bağlan
+# Review: PO
+hv-conn-import-title = pg_service.conf'tan içe aktar
+# Review: PO
+hv-conn-import-body = İçe aktarılacak servisleri seçin. Her uzak servis için bir ortam gerekir.
+# Review: PO
+hv-conn-import-env = { $env ->
+        [production] Üretim
+        [staging] Hazırlık
+        [test] Test
+        [dev] Geliştirme
+        [local] Yerel
+       *[unset] Seçin…
+    }
+# Review: PO
+hv-conn-import-confirm = İçe aktar
+# Review: PO
+hv-conn-import-cancel = Vazgeç
+# Review: PO
+hv-conn-import-row = { $service } · { $target }
+# Review: PO
+hv-conn-import-empty = pg_service.conf içinde servis bulunamadı.
+# Review: PO
+hv-conn-import-unreadable = pg_service.conf okunamadı.
+# Review: PO
+hv-conn-import-password-ignored = Dosyayı başka kullanıcılar okuyabildiği için { $service } parolası yok sayıldı.
+# Review: PO
+hv-conn-import-done = { $count } bağlantı içe aktarıldı

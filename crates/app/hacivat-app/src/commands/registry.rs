@@ -301,10 +301,13 @@ fn show_menu(window: &mut Window, cx: &mut App) {
     menu.update(cx, |m, _| m.label(text_fn_id("hui-menu-app")));
 }
 
-/// Shows the explorer when it is hidden, so its connection filter is on screen. The M1 filter
-/// is a static field (Task 13) with nothing to filter yet, so there is no input to focus.
+/// Shows the explorer when it is hidden, so its connection filter is on screen, and focuses
+/// the filter when the connections explorer is there (M2a, Task 18; the M1 filter is a static
+/// field with nothing to focus).
 fn focus_explorer_filter(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     if !ws.layout().1.explorer_visible {
         ws.toggle_explorer(window, cx);
     }
+    // ## m2a-t18-explorer: after this update, so the explorer view is free to read.
+    window.defer(cx, crate::connections::explorer::focus_filter);
 }
