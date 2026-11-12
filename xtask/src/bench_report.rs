@@ -41,34 +41,69 @@ fn run_inner(args: Vec<String>) -> Result<PathBuf, String> {
     if files.is_empty() {
         return Err("no input files".into());
     }
-    let build = build_hash();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let build = build_hash(&root);
     let mut rows = String::new();
     for f in &files {
         let text = std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?;
         rows.push_str(&row_for(&text, &build).map_err(|e| format!("{}: {e}", f.display()))?);
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let out = root.join("docs/benchmarks").join(format!("{milestone}.md"));
-    let mut doc = std::fs::read_to_string(&out).unwrap_or_else(|_| HEADER.to_string());
-    if !doc.ends_with('\n') {
-        doc.push('\n');
-    }
-    doc.push_str(&rows);
+    let doc = std::fs::read_to_string(&out).unwrap_or_else(|_| HEADER.to_string());
+    let doc = insert_rows(&doc, &rows);
     std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| e.to_string())?;
     std::fs::write(&out, doc).map_err(|e| e.to_string())?;
     Ok(out)
 }
 
-fn build_hash() -> String {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
+/// Inserts `rows` right after the last table row, so notes written under the table stay
+/// below it.
+fn insert_rows(doc: &str, rows: &str) -> String {
+    let mut lines: Vec<&str> = doc.lines().collect();
+    let at = lines
+        .iter()
+        .rposition(|l| l.starts_with('|'))
+        .map_or(lines.len(), |i| i + 1);
+    lines.splice(at..at, rows.lines());
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Short HEAD hash, with `-dirty` when the measured code differs from that commit.
+fn build_hash(root: &Path) -> String {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+    };
+    let head = git(&["rev-parse", "--short", "HEAD"])
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "nogit".into())
+        .filter(|s| !s.is_empty());
+    match head {
+        Some(head) => build_label(&head, &git(&["status", "--porcelain"]).unwrap_or_default()),
+        None => "nogit".into(),
+    }
+}
+
+/// `head`, plus `-dirty` if `git status --porcelain` output lists any change other than
+/// untracked files under `target/` or `.superpowers/` (bench output and agent reports).
+fn build_label(head: &str, porcelain: &str) -> String {
+    let dirty = porcelain.lines().any(|line| {
+        let path = line.get(3..).unwrap_or("");
+        let ignorable = line.starts_with("??")
+            && (path.starts_with("target/") || path.starts_with(".superpowers/"));
+        !line.trim().is_empty() && !ignorable
+    });
+    if dirty {
+        format!("{head}-dirty")
+    } else {
+        head.to_string()
+    }
 }
 
 fn verdict_text(v: Verdict) -> &'static str {
@@ -140,6 +175,27 @@ mod tests {
         let json = r#"{"label":"b3-completion","os":"macos","host":"h","kind":"latency","values_ms":[10,20,60]}"#;
         let row = row_for(json, "x").unwrap();
         assert!(row.contains("| 3 | - | 60.0 | - | 60.0 | - | FAIL |"), "{row}");
+    }
+
+    #[test]
+    fn build_label_marks_dirty_trees() {
+        assert_eq!(build_label("abc1234", ""), "abc1234");
+        assert_eq!(build_label("abc1234", " M xtask/src/bench_report.rs\n"), "abc1234-dirty");
+        assert_eq!(build_label("abc1234", "?? spikes/new.rs\n"), "abc1234-dirty");
+        let ignored = "?? target/bench/b3-typing.json\n?? .superpowers/sdd/x-report.md\n";
+        assert_eq!(build_label("abc1234", ignored), "abc1234");
+        // Only untracked files there are ignored; a tracked change still counts.
+        assert_eq!(build_label("abc1234", " M .superpowers/x.md\n"), "abc1234-dirty");
+    }
+
+    #[test]
+    fn rows_go_after_the_table_not_after_trailing_notes() {
+        let doc = "# B\n\n| a |\n|---|\n| r1 |\n\n## Notes\n- n\n";
+        assert_eq!(
+            insert_rows(doc, "| r2 |\n"),
+            "# B\n\n| a |\n|---|\n| r1 |\n| r2 |\n\n## Notes\n- n\n"
+        );
+        assert_eq!(insert_rows("| a |\n|---|", "| r |\n"), "| a |\n|---|\n| r |\n");
     }
 
     #[test]

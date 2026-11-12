@@ -22,3 +22,5 @@ pub use gpui::{
 pub use gpui::{
     AnyElement, BoxShadow, Div, FontStyle, HighlightStyle, StyledText, svg,
 };
+// Task 6 (spike-editor): custom element, keystrokes, layout helpers.
+pub use gpui::{AvailableSpace, Keystroke, Modifiers, relative, size};
