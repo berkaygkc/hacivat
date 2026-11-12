@@ -1,9 +1,9 @@
-//! The workspace window and its per-OS chrome. `ChromeKind` and `TRAFFIC_LIGHTS_INSET_PX` are
-//! complete; Task 8 fills in the per-OS window options and `chrome_kind`.
+//! The workspace window and its per-OS chrome: a transparent macOS title bar with the native
+//! traffic lights inset, a custom Windows caption, client-side decorations on Linux.
 
 use gpui::{
-    App, Bounds, Entity, Render, SharedString, Window, WindowBounds, WindowHandle, WindowOptions,
-    px, size,
+    App, Bounds, Decorations, Entity, Pixels, Render, SharedString, TitlebarOptions, Window,
+    WindowBounds, WindowDecorations, WindowHandle, WindowOptions, point, px, size,
 };
 
 /// Who draws the window chrome.
@@ -23,6 +23,13 @@ pub enum ChromeKind {
 /// 3 × 12 px lights, 2 × 8 px gaps and its 18 px margin (from `spike-harman`'s title bar).
 pub const TRAFFIC_LIGHTS_INSET_PX: f32 = 52.0 + 18.0;
 
+/// Where the native traffic lights sit in the 40 px title bar: the mock's 14 px left padding,
+/// vertically centred (the position `spike-harman` passed visual fidelity with).
+const TRAFFIC_LIGHTS_POSITION_PX: (f32, f32) = (14.0, 13.0);
+
+const MACOS: bool = cfg!(target_os = "macos");
+const WINDOWS: bool = cfg!(target_os = "windows");
+
 /// What the workspace window opens with. Default: 1440 × 900, minimum 960 × 600.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceWindowSpec {
@@ -41,35 +48,108 @@ impl Default for WorkspaceWindowSpec {
     }
 }
 
-/// Opens the workspace window. Stub (Task 8 adds the per-OS chrome): a centered, titled window
-/// of `spec.size` with `spec.min_size` as its minimum.
+/// Opens the workspace window, centred on the primary display at `spec.size` with
+/// `spec.min_size` as its minimum, with the chrome [`chrome_kind`] reports:
+///
+/// - macOS: transparent title bar, native traffic lights at (14, 13); the app's title bar
+///   reserves [`TRAFFIC_LIGHTS_INSET_PX`] for them;
+/// - Windows: transparent title bar; the app's title bar draws the caption and marks its
+///   buttons with `WindowControlArea`;
+/// - Linux: client-side decorations requested; the compositor may refuse
+///   ([`ChromeKind::LinuxServer`]).
 pub fn open_workspace_window<V: Render + 'static>(
     cx: &mut App,
     spec: WorkspaceWindowSpec,
     build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
 ) -> anyhow::Result<WindowHandle<V>> {
     let bounds = Bounds::centered(None, size(px(spec.size.0), px(spec.size.1)), cx);
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(spec.min_size.0), px(spec.min_size.1))),
-        titlebar: Some(gpui::TitlebarOptions {
-            title: Some(spec.title),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    cx.open_window(options, build)
+    cx.open_window(workspace_window_options(spec, bounds), build)
 }
 
-/// The chrome `window` was opened with. Stub (Task 8 reads the window's decorations): the
-/// platform default, `LinuxClient` on Linux.
+/// The per-OS window options for `spec` at `bounds` (all branches compile on every OS).
+fn workspace_window_options(spec: WorkspaceWindowSpec, bounds: Bounds<Pixels>) -> WindowOptions {
+    let (x, y) = TRAFFIC_LIGHTS_POSITION_PX;
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(spec.min_size.0), px(spec.min_size.1))),
+        titlebar: Some(TitlebarOptions {
+            title: Some(spec.title),
+            appears_transparent: MACOS || WINDOWS,
+            traffic_light_position: MACOS.then(|| point(px(x), px(y))),
+        }),
+        window_decorations: (!MACOS && !WINDOWS).then_some(WindowDecorations::Client),
+        ..Default::default()
+    }
+}
+
+/// Who draws `window`'s chrome. Fixed on macOS and Windows; on Linux it follows the decorations
+/// the compositor granted (client-side was requested, server-side is the fallback).
 pub fn chrome_kind(window: &Window) -> ChromeKind {
-    let _ = window;
-    if cfg!(target_os = "macos") {
+    if MACOS {
         ChromeKind::MacTrafficLights
-    } else if cfg!(target_os = "windows") {
+    } else if WINDOWS {
         ChromeKind::WindowsCaption
     } else {
-        ChromeKind::LinuxClient
+        match window.window_decorations() {
+            Decorations::Client { .. } => ChromeKind::LinuxClient,
+            Decorations::Server => ChromeKind::LinuxServer,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options() -> WindowOptions {
+        let spec = WorkspaceWindowSpec {
+            title: "t".into(),
+            ..Default::default()
+        };
+        let bounds = Bounds {
+            origin: gpui::point(px(0.), px(0.)),
+            size: size(px(1440.), px(900.)),
+        };
+        workspace_window_options(spec, bounds)
+    }
+
+    #[test]
+    fn options_carry_spec_size_minimum_and_title() {
+        let o = options();
+        assert!(
+            matches!(o.window_bounds, Some(WindowBounds::Windowed(b)) if b.size == size(px(1440.), px(900.)))
+        );
+        assert_eq!(o.window_min_size, Some(size(px(960.), px(600.))));
+        assert_eq!(o.titlebar.and_then(|t| t.title), Some("t".into()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_has_a_transparent_title_bar_with_inset_traffic_lights() {
+        let o = options();
+        let t = o.titlebar.unwrap();
+        assert!(t.appears_transparent);
+        assert_eq!(
+            t.traffic_light_position,
+            Some(gpui::point(px(14.), px(13.)))
+        );
+        assert_eq!(o.window_decorations, None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_has_a_transparent_title_bar_for_the_custom_caption() {
+        let o = options();
+        assert_eq!(o.window_decorations, None);
+        assert!(o.titlebar.unwrap().appears_transparent);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn linux_requests_client_side_decorations() {
+        assert_eq!(
+            options().window_decorations,
+            Some(gpui::WindowDecorations::Client)
+        );
     }
 }
