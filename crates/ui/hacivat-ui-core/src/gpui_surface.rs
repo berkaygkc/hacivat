@@ -8,3 +8,9 @@ pub use gpui::{
     IntoElement, KeyDownEvent, ParentElement, Pixels, Point, Render, SharedString, Size, Styled,
     UTF16Selection, Window, canvas, div, px,
 };
+// Task 9 (probes): text shaping, accessibility and clipboard types.
+pub use gpui::{
+    AppContext, ClipboardEntry, Element, ElementId, Font, FontFeatures, FontWeight,
+    GlobalElementId, InspectorElementId, LayoutId, Role, Style, TextRun, WindowHandle, accesskit,
+    hsla,
+};
