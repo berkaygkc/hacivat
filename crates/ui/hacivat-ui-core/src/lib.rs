@@ -6,4 +6,5 @@ pub mod frame_loop;
 pub mod frames;
 pub mod gpui_surface;
 pub mod metrics;
+pub mod shell;
 pub mod theme;
