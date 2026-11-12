@@ -87,6 +87,10 @@ EOF
         -out "$tmp/identity.p12" -passout env:HV_P12_PASS
     rm -f "$tmp/key.pem"
 
+    # `security import` takes the password only as `-P <value>`, so it is briefly visible in
+    # the process list. That is acceptable here: the password is random, used once, and only
+    # unlocks the temporary PKCS#12 file in a private mktemp directory that is removed on exit.
+    # It never protects anything that outlives this script.
     security import "$tmp/identity.p12" -k "$KEYCHAIN" -f pkcs12 -P "$HV_P12_PASS" \
         -T /usr/bin/codesign
     unset HV_P12_PASS

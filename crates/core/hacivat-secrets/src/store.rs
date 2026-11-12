@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use hacivat_proto::ProfileId;
 use secrecy::SecretString;
 
-use crate::backend::{KEYRING_BACKEND_NAME, KeyringBackend, SecretBackend, SecretError};
+use crate::backend::{SecretBackend, SecretError};
 
 /// Which secret of a profile (HV-SEC-05).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -256,16 +256,13 @@ impl SecretStore {
     }
 
     /// Deletes every secret of `profile`, whatever its retention. Every backend slot is tried;
-    /// the first backend error is returned.
+    /// an `Unavailable` backend holds nothing, and the first other backend error is returned.
     pub fn delete_all(&self, profile: ProfileId) -> Result<(), SecretError> {
         lock(&self.process).retain(|k, _| k.profile != profile);
         lock(&self.session).retain(|k, _| k.profile != profile);
-        let Some(backend) = &self.backend else {
-            return Ok(());
-        };
         let mut first_error = None;
         for slot in backend_slots() {
-            if let Err(e) = backend.delete(&SecretKey { profile, slot }) {
+            if let Err(e) = self.backend_delete(&SecretKey { profile, slot }) {
                 first_error.get_or_insert(e);
             }
         }
@@ -273,7 +270,9 @@ impl SecretStore {
     }
 
     /// Copies every secret `from` holds under `retention` to `to`, with the same retention
-    /// (profile duplication). A `Forever` copy the backend refuses falls back like `put`.
+    /// (profile duplication). A `Forever` copy the backend refuses falls back like `put`. A
+    /// backend read that fails with `Unavailable` or `Denied` counts as nothing stored, so a
+    /// fallen-back secret still copies on a machine without a keyring.
     pub fn copy_all(
         &self,
         from: ProfileId,
@@ -295,28 +294,39 @@ impl SecretStore {
         slots.sort();
         slots.dedup();
         for slot in slots {
-            if let Some(value) = self.get(
-                &SecretKey {
-                    profile: from,
-                    slot,
-                },
-                retention,
-            )? {
+            let source = SecretKey {
+                profile: from,
+                slot,
+            };
+            let value = match self.get(&source, retention) {
+                Err(SecretError::Unavailable | SecretError::Denied) => None,
+                other => other?,
+            };
+            if let Some(value) = value {
                 self.put(&SecretKey { profile: to, slot }, value, retention)?;
             }
         }
         Ok(())
     }
 
-    /// Whether the OS keyring is usable: `KeyringBackend::available()` computed once, off the
-    /// UI thread, then cached (P36). Without a backend it is `false`; any other backend
-    /// (`memory`) is always usable.
+    /// Whether the OS keyring is usable: the backend's `probe_available()` (for the keyring,
+    /// `KeyringBackend::available()`) computed once, off the UI thread, then cached (P36).
+    /// Without a backend it is `false`; the memory backend is always usable.
     pub fn keyring_available(&self) -> bool {
-        *self.keyring_available.get_or_init(|| match &self.backend {
-            None => false,
-            Some(backend) if backend.name() == KEYRING_BACKEND_NAME => KeyringBackend::available(),
-            Some(_) => true,
+        *self.keyring_available.get_or_init(|| {
+            self.backend
+                .as_ref()
+                .is_some_and(|backend| backend.probe_available())
         })
+    }
+
+    /// Deletes `key`'s backend entry. With no backend, or an `Unavailable` one, nothing is
+    /// stored there, so there is nothing to delete.
+    fn backend_delete(&self, key: &SecretKey) -> Result<(), SecretError> {
+        match self.backend.as_ref().map(|backend| backend.delete(key)) {
+            None | Some(Ok(()) | Err(SecretError::Unavailable)) => Ok(()),
+            Some(Err(e)) => Err(e),
+        }
     }
 
     /// Removes `key` from every place `from` keeps it, except `keep` (where it just landed).
@@ -336,11 +346,7 @@ impl SecretStore {
                 Place::Session => {
                     lock(&self.session).remove(key);
                 }
-                Place::Backend => {
-                    if let Some(backend) = &self.backend {
-                        backend.delete(key)?;
-                    }
-                }
+                Place::Backend => self.backend_delete(key)?,
             }
         }
         Ok(())

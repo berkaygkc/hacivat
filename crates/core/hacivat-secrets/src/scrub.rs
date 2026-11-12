@@ -20,31 +20,66 @@ fn is_secret_key(key: &str) -> bool {
 /// - a URL's userinfo password (`postgres://u:p@h/db` → `postgres://u@h/db`);
 /// - secret query parameters (`?user=u&password=p` → `?user=u`) and secret `;key=value`
 ///   parameters after the authority (`jdbc:sqlserver://h;password=p`);
+/// - scheme-less userinfo (`root:pw@localhost:3306/db`, the Go DSN `u:pw@tcp(h)/db`,
+///   `//u:p@h/db`);
 /// - libpq keyword/value strings (`host=h password='a b'` → `host=h`);
 /// - semicolon connection strings (`Server=h;Password=x;` → `Server=h;`).
 ///
 /// Other text is returned unchanged.
 pub fn scrub_url(url: &str) -> String {
-    if let Some(scheme_end) = url.find("://") {
+    // A URL only when the text before `://` is a scheme (`jdbc:postgresql` included), so a
+    // `sslcrl=http://c` value inside a keyword string does not make the string a URL.
+    if let Some(scheme_end) = url.find("://")
+        && is_scheme(&url[..scheme_end])
+    {
         let (scheme, rest) = url.split_at(scheme_end + 3);
         return format!("{scheme}{}", scrub_after_scheme(rest));
+    }
+    if let Some(rest) = bare_userinfo(url) {
+        let prefix = &url[..url.len() - rest.len()];
+        return format!("{prefix}{}", scrub_after_scheme(rest));
     }
     if !url.contains('=') {
         return url.to_string();
     }
-    // A `;` in a key or an unquoted value means a semicolon list, not libpq.
-    let semicolons = |p: &Pair<'_>| {
-        p.key.contains(';') || (p.raw_value.contains(';') && !p.raw_value.starts_with('\''))
-    };
-    match keyword_pairs(url) {
-        Some(pairs) if !pairs.iter().any(semicolons) => pairs
+    // Both shapes in turn; removal only shrinks the string. The semicolon pass goes first, so
+    // `Password=x;Url=h` loses only its first entry; the libpq pass then drops a pair whose
+    // unquoted value held a `;` (`password=a;b`). A `;` in a key means it is not libpq.
+    let semicolon_scrubbed = scrub_semicolon_list(url);
+    match keyword_pairs(&semicolon_scrubbed) {
+        Some(pairs) if !pairs.iter().any(|p| p.key.contains(';')) => pairs
             .iter()
             .filter(|p| !is_secret_key(p.key))
             .map(|p| p.text)
             .collect::<Vec<_>>()
             .join(" "),
-        _ => scrub_semicolon_list(url),
+        _ => semicolon_scrubbed,
     }
+}
+
+/// Whether `s` is a URL scheme: `^[A-Za-z][A-Za-z0-9+.\-:]*$` (`:` for `jdbc:postgresql`).
+fn is_scheme(s: &str) -> bool {
+    let mut bytes = s.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphabetic())
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-' | b':'))
+}
+
+/// For scheme-less userinfo (`^(//)?[^\s/@=]*:\S*@`), the text after the optional `//`.
+fn bare_userinfo(s: &str) -> Option<&str> {
+    let rest = s.strip_prefix("//").unwrap_or(s);
+    let colon = rest.find(':')?;
+    if rest[..colon]
+        .bytes()
+        .any(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'@' | b'='))
+    {
+        return None;
+    }
+    let after_colon = &rest[colon..];
+    let token = after_colon
+        .split(|c: char| c.is_ascii_whitespace())
+        .next()
+        .unwrap_or("");
+    token.contains('@').then_some(rest)
 }
 
 /// `opts` with the value of every secret-bearing key replaced by `<removed>`; the keys and
@@ -104,9 +139,15 @@ fn scrub_after_scheme(rest: &str) -> String {
 /// `u:p@h/db` → `u@h/db`, for the text after `scheme://`.
 ///
 /// The authority ends at the first `/`, `?` or `#`; its userinfo ends at the authority's last
-/// `@`, so an unescaped `@` in the password is removed too. A raw `/`, `?` or `#` in a password
-/// ends the authority early (`u:p#ss@h`): when the authority has no `@` and its text after the
-/// last `:` is not a numeric port, the userinfo runs to the next `@`.
+/// `@`, so an unescaped `@` in the password is removed too.
+///
+/// A raw `/`, `?` or `#` in a password ends the authority early (`u:p#ss@h`, `u:12/34@h`).
+/// When the authority has no `@`, does not start with `[` (IPv6) and has a `:`, the userinfo
+/// runs to the next `@` if no `=` or `&` comes before that `@` (it would be a query, as in
+/// `?user=u@srv`) and one of these holds:
+/// - the text after the last `:` is not a numeric port;
+/// - the authority ends at `#`;
+/// - no further `/` comes before that `@`.
 fn without_userinfo_password(rest: &str) -> String {
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
@@ -116,11 +157,21 @@ fn without_userinfo_password(rest: &str) -> String {
         }
         return rest.to_string();
     }
-    if let (Some(colon), Some(last_colon)) = (authority.find(':'), authority.rfind(':')) {
+    if authority.starts_with('[') {
+        return rest.to_string();
+    }
+    if let (Some(colon), Some(last_colon)) = (authority.find(':'), authority.rfind(':'))
+        && let Some(at) = rest[authority_end..].find('@')
+    {
+        let at = authority_end + at;
+        let before_at = &rest[authority_end..at];
         let port = &authority[last_colon + 1..];
         let is_port = !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit());
-        if !is_port && let Some(at) = rest[authority_end..].find('@') {
-            return format!("{}{}", &rest[..colon], &rest[authority_end + at..]);
+        let ends_at_hash = rest[authority_end..].starts_with('#');
+        let no_further_slash = !before_at.get(1..).unwrap_or("").contains('/');
+        let not_a_query = !before_at.contains(['=', '&']);
+        if not_a_query && (!is_port || ends_at_hash || no_further_slash) {
+            return format!("{}{}", &rest[..colon], &rest[at..]);
         }
     }
     rest.to_string()
@@ -183,8 +234,6 @@ fn split_semicolons(s: &str) -> Vec<&str> {
 /// One libpq `key = value` pair.
 struct Pair<'a> {
     key: &'a str,
-    /// The value as written, quotes included.
-    raw_value: &'a str,
     /// The whole pair as written.
     text: &'a str,
 }
@@ -215,7 +264,6 @@ fn keyword_pairs(s: &str) -> Option<Vec<Pair<'_>>> {
             return None;
         }
         i = skip_ws(i + 1);
-        let value_start = i;
         if bytes.get(i) == Some(&b'\'') {
             i += 1;
             while i < bytes.len() && bytes[i] != b'\'' {
@@ -230,7 +278,6 @@ fn keyword_pairs(s: &str) -> Option<Vec<Pair<'_>>> {
         }
         pairs.push(Pair {
             key,
-            raw_value: &s[value_start..i],
             text: &s[start..i],
         });
     }
@@ -298,6 +345,76 @@ mod tests {
         for (n, (input, want)) in cases.into_iter().enumerate() {
             assert!(scrub_url(input) == want, "scrub case {n} failed");
         }
+    }
+
+    #[test]
+    fn review_round_1_vectors() {
+        // Failures name the case number only, never the input or output.
+        let cases = [
+            // 1. `://` inside a value does not make a keyword or semicolon string a URL.
+            (
+                "host=h password=x sslcrl=http://c",
+                "host=h sslcrl=http://c",
+            ),
+            ("Password=x;Url=http://h", "Url=http://h"),
+            (
+                "jdbc:postgresql://h/db?password=p",
+                "jdbc:postgresql://h/db",
+            ),
+            // 2. An unquoted `;` in a libpq password value.
+            ("host=h password=a;b", "host=h"),
+            ("host=h password=a;b user=u", "host=h user=u"),
+            // 3. Scheme-less userinfo.
+            ("root:pw@localhost:3306/db", "root@localhost:3306/db"),
+            ("u:pw@tcp(h)/db", "u@tcp(h)/db"),
+            ("//u:p@h/db", "//u@h/db"),
+            (
+                "u:pw@tcp(h)/db?parseTime=true",
+                "u@tcp(h)/db?parseTime=true",
+            ),
+            ("note: see a@b", "note: see a@b"),
+            // 6. A numeric password with `#`, `/` or `?`.
+            ("postgres://u:12#34@h/db", "postgres://u@h/db"),
+            ("postgres://u:12/34@h/db", "postgres://u@h/db"),
+            ("postgres://u:12?34@h/db", "postgres://u@h/db"),
+            // 7. IPv6 hosts are never taken for userinfo.
+            (
+                "postgres://[::1]/db?user=u@srv",
+                "postgres://[::1]/db?user=u@srv",
+            ),
+            (
+                "postgres://[::1]:5432/db?user=u@srv",
+                "postgres://[::1]:5432/db?user=u@srv",
+            ),
+        ];
+        for (n, (input, want)) in cases.into_iter().enumerate() {
+            assert!(scrub_url(input) == want, "round-1 scrub case {n} failed");
+        }
+    }
+
+    #[test]
+    fn never_panics_on_short_punctuation_strings() {
+        // Every string of up to four of these characters, alone and after `x://`; slicing on
+        // multi-byte `İ` and `%` at the end are the risky cases.
+        let alphabet = [
+            ':', '@', '/', '?', '#', '=', ';', '\'', '{', '}', ' ', '[', '%', 'İ', 'a',
+        ];
+        let mut s = String::new();
+        let mut checked = 0;
+        for n in 0..alphabet.len().pow(4) {
+            s.clear();
+            let mut k = n;
+            for _ in 0..4 {
+                s.push(alphabet[k % alphabet.len()]);
+                k /= alphabet.len();
+            }
+            for input in [s.as_str(), &format!("x://{s}")] {
+                let out = scrub_url(input);
+                assert!(out.len() <= input.len(), "scrubbing never grows the text");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 2 * alphabet.len().pow(4));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use ::keyring::credential::CredentialPersistence;
 use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroize;
 
-use super::{KEYRING_BACKEND_NAME, SecretBackend, SecretError};
+use super::{SecretBackend, SecretError};
 use crate::store::SecretKey;
 
 /// The account of every Hacivat entry (R7).
@@ -111,7 +111,11 @@ impl SecretBackend for KeyringBackend {
     }
 
     fn name(&self) -> &'static str {
-        KEYRING_BACKEND_NAME
+        "keyring"
+    }
+
+    fn probe_available(&self) -> bool {
+        Self::available()
     }
 
     /// The Windows credential's comment, or the Secret Service item's label. macOS keyring 3

@@ -25,9 +25,6 @@ pub enum SecretError {
     Backend(String),
 }
 
-/// [`KeyringBackend`]'s `name()`.
-pub(crate) const KEYRING_BACKEND_NAME: &str = "keyring";
-
 /// A secret storage backend (HV-SEC-05). Every method blocks; callers run them on the core
 /// runtime's blocking pool.
 pub trait SecretBackend: Send + Sync + 'static {
@@ -41,5 +38,10 @@ pub trait SecretBackend: Send + Sync + 'static {
     /// (HV-SEC-05, P44). Backends without labels ignore it.
     fn set_label(&self, _key: &SecretKey, _label: &str) -> Result<(), SecretError> {
         Ok(())
+    }
+    /// Whether the backend can store secrets now, without prompting (P36). May block (a D-Bus
+    /// probe); `SecretStore::keyring_available` calls it once and caches the answer.
+    fn probe_available(&self) -> bool {
+        true
     }
 }

@@ -243,6 +243,83 @@ fn a_successful_forever_put_replaces_an_earlier_fallback() {
     assert!(s.keyring_available(), "a memory backend is always usable");
 }
 
+/// A store whose backend is unavailable (Linux without a Secret Service), holding `x` for
+/// `k()` as a `Forever` secret that fell back to the process.
+fn fallen_back_store() -> SecretStore {
+    let s = SecretStore::new(Some(Arc::new(Failing(SecretError::Unavailable))));
+    assert!(matches!(
+        s.put(&k(), sec("x"), Retention::Forever).unwrap(),
+        Stored::FellBackTo { .. }
+    ));
+    s
+}
+
+#[test]
+fn delete_all_with_an_unavailable_backend() {
+    let s = fallen_back_store();
+    s.delete_all(k().profile).unwrap();
+    assert!(s.get(&k(), Retention::UntilRestart).unwrap().is_none());
+}
+
+#[test]
+fn copy_all_with_an_unavailable_backend() {
+    let s = fallen_back_store();
+    let to = ProfileId::new();
+    s.copy_all(k().profile, to, Retention::Forever).unwrap();
+    let copied = SecretKey {
+        profile: to,
+        slot: SecretSlot::DbPassword,
+    };
+    assert_secret!(s.get(&copied, Retention::Forever).unwrap().unwrap(), "x");
+    let denied = SecretStore::new(Some(Arc::new(Failing(SecretError::Denied))));
+    denied
+        .copy_all(k().profile, to, Retention::Forever)
+        .unwrap();
+}
+
+#[test]
+fn lowering_a_fallen_back_secret_with_an_unavailable_backend() {
+    let s = fallen_back_store();
+    assert_eq!(
+        s.change_retention(&k(), Retention::Forever, Retention::ForSession)
+            .unwrap(),
+        Stored::AsRequested
+    );
+    assert_secret!(s.get(&k(), Retention::ForSession).unwrap().unwrap(), "x");
+    assert!(s.get(&k(), Retention::UntilRestart).unwrap().is_none());
+}
+
+/// A backend that reports itself unavailable, counting the probes.
+struct Unprobed(std::sync::atomic::AtomicU32);
+
+impl SecretBackend for Unprobed {
+    fn get(&self, _key: &SecretKey) -> Result<Option<SecretString>, SecretError> {
+        Ok(None)
+    }
+    fn put(&self, _key: &SecretKey, _value: &SecretString) -> Result<(), SecretError> {
+        Ok(())
+    }
+    fn delete(&self, _key: &SecretKey) -> Result<(), SecretError> {
+        Ok(())
+    }
+    fn name(&self) -> &'static str {
+        "unprobed"
+    }
+    fn probe_available(&self) -> bool {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        false
+    }
+}
+
+#[test]
+fn keyring_available_asks_the_backend_once() {
+    let b = Arc::new(Unprobed(std::sync::atomic::AtomicU32::new(0)));
+    let s = SecretStore::new(Some(b.clone()));
+    assert!(!s.keyring_available());
+    assert!(!s.keyring_available());
+    assert_eq!(b.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[test]
 fn service_names() {
     assert_eq!(
