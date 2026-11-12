@@ -1,0 +1,11 @@
+{
+  "version": "@VERSION@",
+  "notes": "Hacivat Spike @VERSION@",
+  "pub_date": "@PUB_DATE@",
+  "platforms": {
+    "macos-aarch64": { "url": "", "signature": "", "format": "app" },
+    "macos-x86_64": { "url": "", "signature": "", "format": "app" },
+    "windows-x86_64": { "url": "", "signature": "", "format": "nsis" },
+    "linux-x86_64": { "url": "", "signature": "", "format": "appimage" }
+  }
+}
