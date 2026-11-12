@@ -1,5 +1,6 @@
-//! Spike shell: app bootstrap with bundled SVG icons, a unified (full-size content) window for
-//! visual-fidelity captures, a font-resolution guard and the native window id for `screencapture`.
+//! Spike shell: bundled SVG icons (installed by `app::run_app`), a unified (full-size content)
+//! window for visual-fidelity captures, a font-resolution guard and the native window id for
+//! `screencapture`.
 
 use std::borrow::Cow;
 
@@ -49,17 +50,6 @@ impl AssetSource for BundledAssets {
             .map(|(p, _)| SharedString::from(*p))
             .collect())
     }
-}
-
-/// Like `app::run_app`, with the bundled icon assets installed.
-pub fn run_app_with_assets(f: impl FnOnce(&mut App) + 'static) {
-    gpui_platform::application().with_assets(BundledAssets).run(move |cx| {
-        if let Err(err) = crate::fonts::register_fonts(cx) {
-            eprintln!("failed to register bundled fonts: {err:#}");
-            std::process::exit(3);
-        }
-        f(cx);
-    });
 }
 
 /// Fails unless the bundled faces are what GPUI resolves: both families are registered, the
