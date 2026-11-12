@@ -131,6 +131,8 @@ fn regional_preview(vcx: &VisualTestContext) -> String {
     label_with_id(vcx, "settings-regional-preview").expect("the regional preview is on screen")
 }
 
+/// Only the macOS text-rendering tests use it (the row is macOS only).
+#[cfg(target_os = "macos")]
 fn restart_note_visible(vcx: &VisualTestContext) -> bool {
     label_with_id(vcx, "settings-restart-note").is_some()
 }
