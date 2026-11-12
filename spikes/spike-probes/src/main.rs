@@ -70,8 +70,13 @@ fn main() {
                 "clipboard" => Some(clipboard(cx)),
                 _ => None,
             });
-            if let Ok(Some(r)) = r {
-                failed |= report(p, r);
+            match r {
+                Ok(Some(r)) => failed |= report(p, r),
+                Ok(None) => {}
+                Err(e) => {
+                    println!("probe {p}: FAIL window update failed: {e:#}");
+                    failed = true;
+                }
             }
         }
         let want_a11y = probes.contains(&"a11y");
@@ -120,9 +125,7 @@ fn shape(cx: &Window, font: &Font, text: &str) -> Shaped {
         underline: None,
         strikethrough: None,
     };
-    let layout = cx
-        .text_system()
-        .layout_line(text, px(16.), &[run], None);
+    let layout = cx.text_system().layout_line(text, px(16.), &[run], None);
     let mut glyphs = Vec::new();
     let mut font_ids = Vec::new();
     for r in &layout.runs {
@@ -477,7 +480,7 @@ fn window_probes(
     cx.spawn(async move |cx| {
         cx.background_executor().timer(idle).await;
         let mut failed = failed_so_far;
-        cx.update(|cx| -> () {
+        cx.update(|cx| {
             if want_startup {
                 match *first_frame_ms.borrow() {
                     Some(ms) => {
@@ -508,17 +511,20 @@ fn window_probes(
                     .ok();
                 match tree {
                     Some((active, Some(json))) => {
-                        println!("probe a11y: ok tree (assistive tech active={active}):\n{json}");
-                        if !json.contains("Result 1") || !json.contains("Grid") {
-                            println!("probe a11y: FAIL tree lacks Grid / \"Result 1\"");
+                        if json.contains("Result 1") && json.contains("Grid") {
+                            println!(
+                                "probe a11y: ok Grid \"Result 1\" present (assistive tech \
+                                 active={active}); node tree:\n{json}"
+                            );
+                        } else {
+                            println!("probe a11y: FAIL tree lacks Grid / \"Result 1\":\n{json}");
                             failed = true;
                         }
                     }
                     Some((active, None)) => println!(
-                        "probe a11y: ok element registered; no tree captured because no assistive \
-                         technology is attached (is_a11y_active={active}). Turn on VoiceOver \
-                         (Cmd+F5), Narrator or Orca and re-run to dump the node tree and verify \
-                         manually."
+                        "probe a11y: record not verified (no assistive technology attached, \
+                         is_a11y_active={active}). Turn on VoiceOver (Cmd+F5), Narrator or Orca \
+                         and re-run to dump the node tree and verify manually."
                     ),
                     None => {
                         println!("probe a11y: FAIL window update failed");
