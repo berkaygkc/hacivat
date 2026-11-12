@@ -360,9 +360,11 @@ impl Button {
             body = body.child(key_label(&label, access_key, style, look.ink));
         }
         if let Some(hint) = key_hint {
-            // On a raised surface: the primary's own ink, else text-2 (never text-3).
+            // A primary's hint takes its own ink (on-accent) on every surface: text-3 on its
+            // blue fill is unreadable (m2a-t21-shots). On a raised surface the others use
+            // text-2 (never text-3).
             let dim = match (on_raised, kind) {
-                (true, ButtonKind::Primary) => look.ink,
+                (_, ButtonKind::Primary) => look.ink,
                 (true, _) => t.colors.text_2.to_hsla(),
                 (false, _) => t.colors.text_3.to_hsla(),
             };

@@ -403,7 +403,8 @@ impl Render for ProdPrompt {
                 }
             })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(Label::new(
+            // ## m2a-t21-shots: the title wraps (a long name or locale never clips).
+            .child(hacivat_ui::text::paragraph(
                 title.clone(),
                 TextSource::Fluent,
                 t.type_ramp.body_strong,

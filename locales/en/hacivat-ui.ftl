@@ -201,25 +201,6 @@ hv-explorer-group-dev = DEV
 hv-explorer-group-local = LOCAL
 # The group of connections without an environment (hand-edited files only).
 hv-explorer-group-unset = NO ENVIRONMENT
-# An environment tag as a word: the connection sheet and the capsule's tag of a non-production connection.
-# Variables:
-#   $env (Enum(production, staging, test, dev, local, unset)) - the connection's environment tag.
-hv-explorer-env = { $env ->
-        [production] production
-        [staging] staging
-        [test] test
-        [dev] dev
-        [local] local
-       *[unset] no environment
-    }
-# Toast when a connection change could not be written to connections.toml.
-hv-explorer-write-failed = The change couldn't be saved to your connections file.
-# Toast when a saved password could not be removed from or copied in the system keyring.
-hv-explorer-secret-failed = A saved password couldn't be updated in the system keyring.
-# Toast after Copy as URL from the explorer.
-hv-explorer-copied = Copied as URL
-# The line under the copy toast when the connection signs in with a password.
-hv-explorer-copied-nopw = The password isn't included.
 # The connection menu (explorer row, Shift-F10).
 hv-conn-menu-connect = Connect
 hv-conn-menu-disconnect = Disconnect
@@ -257,10 +238,10 @@ hv-conn-kv-secret = Password
 hv-conn-access-ro-guarded = read-only (guarded)
 # The Encryption row of a live connection.
 # Variables:
-#   $version (String) - the TLS version the server negotiated, e.g. "TLSv1.3".
+#   $version (String) - the TLS version the server negotiated, e.g. "TLS 1.3".
 hv-conn-enc-verified = { $version } · verified
 # Variables:
-#   $version (String) - the TLS version the server negotiated, e.g. "TLSv1.3".
+#   $version (String) - the TLS version the server negotiated, e.g. "TLS 1.3".
 hv-conn-enc-unverified = { $version } · not verified
 hv-conn-enc-unencrypted = unencrypted
 hv-conn-enc-none-file = not applicable (file)
@@ -285,18 +266,6 @@ hv-capsule-retry = Retry
 # Variables:
 #   $seconds (Decimal) - seconds since the connect started, e.g. 1.25.
 hv-capsule-clock = { NUMBER($seconds, minimumFractionDigits: 2) } s
-# The step the capsule shows while connecting.
-# Variables:
-#   $step (Enum(pgpass, resolve, connect, tls, sign-in, check-server, open-file)) - the running step.
-hv-capsule-step = { $step ->
-        [pgpass] pgpass
-        [resolve] Resolve
-        [connect] Connect
-        [tls] TLS
-        [sign-in] Sign in
-        [check-server] Check server
-       *[open-file] Open file
-    }
 # The capsule's mark of a server below the supported versions (PO Q3).
 hv-capsule-unsupported = unsupported
 # The capsule's access cell for a read-write connection.
@@ -307,19 +276,9 @@ hv-capsule-access-read-write = read-write
 hv-capsule-latency = { $ms } ms
 # The status bar's environment segment: the current connection's environment and access.
 # Variables:
-#   $env (Enum(production, staging, test, dev, local, unset)) - the connection's environment tag.
-#   $access (Enum(read-only, read-write)) - whether the connection is read-only.
-hv-status-env = { $env ->
-        [production] production
-        [staging] staging
-        [test] test
-        [dev] dev
-        [local] local
-       *[unset] no environment
-    } · { $access ->
-        [read-only] read-only
-       *[read-write] read-write
-    }
+#   $env (String) - the environment word (an hv-conn-env-* message), e.g. "production".
+#   $access (String) - the access word (an hv-capsule-access-* message), e.g. "read-write".
+hv-status-env = { $env } · { $access }
 # The editor area's home while no query is open: the title, the hint and the entry points.
 hv-home-title = No query open
 hv-home-hint = Pick a connection in the Explorer, or add one.
@@ -329,17 +288,6 @@ hv-home-connect = Connect to the selected connection
 # The pg_service.conf import dialog (R24).
 hv-conn-import-title = Import from pg_service.conf
 hv-conn-import-body = Choose the services to import. Every remote service needs an environment.
-# An environment choice of an imported service.
-# Variables:
-#   $env (Enum(production, staging, test, dev, local, unset)) - the environment tag, or none chosen yet.
-hv-conn-import-env = { $env ->
-        [production] Production
-        [staging] Staging
-        [test] Test
-        [dev] Dev
-        [local] Local
-       *[unset] Choose…
-    }
 hv-conn-import-confirm = Import
 hv-conn-import-cancel = Cancel
 # A service row of the import dialog: its name and the server it points to (connection data).
@@ -809,3 +757,12 @@ hv-conn-issue-tls-mode-unsupported = { $mode } isn't available for this engine y
 # Variables:
 #   $key (String) - the property's name, e.g. "sslkey".
 hv-conn-issue-option-rejected = The property { $key } isn't allowed here.
+
+## m2a-t21-shots
+
+# A connection without an environment tag, as a word (the sheet and the capsule; hand-edited files only).
+hv-conn-env-unset = no environment
+# The import dialog's environment choice before one is picked.
+hv-conn-import-choose = Choose…
+# Toast when a deleted connection's saved password could not be removed from the system keyring.
+hv-conn-toast-delete-secret = The connection was deleted, but its saved password couldn't be removed from the system keyring.

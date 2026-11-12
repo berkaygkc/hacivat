@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use hacivat_driver::Support;
-use hacivat_l10n::{Count, ExactDecimal, NoArgs, Text, ids};
+use hacivat_l10n::{Count, ExactDecimal, MsgRef, NoArgs, Text, ids};
 use hacivat_net::{AddressClass, TlsVerified};
 use hacivat_proto::{AccessLabel, DbmsKind, EnvTag, ProfileId};
 use hacivat_session::profile::{Profile, ProfileEndpoint};
@@ -50,26 +50,23 @@ pub fn env_kind(tag: Option<EnvTag>) -> EnvKind {
     }
 }
 
-/// The tag as an argument of `hv-explorer-env`.
-fn env_arg(tag: Option<EnvTag>) -> ids::hv::HvExplorerEnvEnv {
-    use ids::hv::HvExplorerEnvEnv as E;
+// ## m2a-t21-shots: one family of environment words (`hv-conn-env-*`), shared with the
+// connection dialog's Environment control, the import dialog and the status bar.
+/// The message of the tag's word (`production`, …, `no environment`).
+pub fn env_word_id(tag: Option<EnvTag>) -> MsgRef<NoArgs> {
     match tag {
-        Some(EnvTag::Production) => E::Production,
-        Some(EnvTag::Staging) => E::Staging,
-        Some(EnvTag::Test) => E::Test,
-        Some(EnvTag::Dev) => E::Dev,
-        Some(EnvTag::Local) => E::Local,
-        None => E::Unset,
+        Some(EnvTag::Production) => ids::hv::CONN_ENV_PRODUCTION,
+        Some(EnvTag::Staging) => ids::hv::CONN_ENV_STAGING,
+        Some(EnvTag::Test) => ids::hv::CONN_ENV_TEST,
+        Some(EnvTag::Dev) => ids::hv::CONN_ENV_DEV,
+        Some(EnvTag::Local) => ids::hv::CONN_ENV_LOCAL,
+        None => ids::hv::CONN_ENV_UNSET,
     }
 }
 
 /// The tag as a word (`production`, `staging`, …, `no environment`).
 pub fn env_word(cx: &App, tag: Option<EnvTag>) -> SharedString {
-    tr(
-        cx,
-        ids::hv::EXPLORER_ENV,
-        ids::hv::HvExplorerEnv { env: env_arg(tag) },
-    )
+    tr(cx, env_word_id(tag), NoArgs)
 }
 
 /// The capsule's environment label: the pre-cased production block, else the tag's word.
@@ -109,12 +106,14 @@ pub fn encryption_label(cx: &App, p: &Profile, info: &LiveInfo) -> SharedString 
     if !info.tls.encrypted {
         return tr(cx, ids::hv::CONN_ENC_UNENCRYPTED, NoArgs);
     }
-    let version = Text(
-        info.tls
-            .version
-            .clone()
-            .unwrap_or_else(|| "TLS".to_string()),
-    );
+    // ## m2a-t21-shots: the protocol as the test strip writes it (`TLS 1.3`, not the
+    // library's `TLSv1.3`), so the capsule, the status bar and the sheet agree with it.
+    let version = Text(match info.tls.version.as_deref() {
+        Some(v) if !crate::connections::report::tls_version_number(v).is_empty() => {
+            format!("TLS {}", crate::connections::report::tls_version_number(v))
+        }
+        _ => "TLS".to_string(),
+    });
     match info.tls.verified {
         TlsVerified::Full | TlsVerified::CaOnly => tr(
             cx,
@@ -145,18 +144,8 @@ pub fn is_read_only(info: &LiveInfo) -> bool {
 }
 
 fn step_label(cx: &App, step: hacivat_session::pipeline::TrailStep) -> SharedString {
-    use hacivat_session::pipeline::TrailStep as S;
-    use ids::hv::HvCapsuleStepStep as A;
-    let step = match step {
-        S::PgPass => A::Pgpass,
-        S::Resolve => A::Resolve,
-        S::Connect => A::Connect,
-        S::Tls => A::Tls,
-        S::SignIn => A::SignIn,
-        S::CheckServer => A::CheckServer,
-        S::OpenFile => A::OpenFile,
-    };
-    tr(cx, ids::hv::CAPSULE_STEP, ids::hv::HvCapsuleStep { step })
+    // ## m2a-t21-shots: the trail's own step names (`hv-conn-step-*`).
+    crate::connections::report::step_label(&crate::connections::report::Fmt::ui(cx), step).into()
 }
 
 /// The running clock of a connect (`1.25 s`), from the GPUI executor clock (P22).
@@ -387,7 +376,8 @@ mod fixtures {
         id
     }
 
-    fn info(encrypted: bool, read_only: bool, support: Support) -> LiveInfo {
+    /// A live PostgreSQL 16.4 connection (also the explorer fixture's live rows).
+    pub(crate) fn sample_live_info(encrypted: bool, read_only: bool, support: Support) -> LiveInfo {
         LiveInfo {
             server: ServerInfo {
                 kind: DbmsKind::Postgres,
@@ -454,7 +444,7 @@ mod fixtures {
             "orders-dev",
             EnvTag::Dev,
             false,
-            LiveState::Connected(Arc::new(info(false, false, Support::Supported))),
+            LiveState::Connected(Arc::new(sample_live_info(false, false, Support::Supported))),
         );
     }
 
@@ -465,7 +455,7 @@ mod fixtures {
             "orders-prod",
             EnvTag::Production,
             true,
-            LiveState::Connected(Arc::new(info(true, true, Support::Supported))),
+            LiveState::Connected(Arc::new(sample_live_info(true, true, Support::Supported))),
         );
     }
 
@@ -489,7 +479,7 @@ mod fixtures {
             "legacy",
             EnvTag::Test,
             false,
-            LiveState::Connected(Arc::new(info(
+            LiveState::Connected(Arc::new(sample_live_info(
                 true,
                 false,
                 Support::Unsupported {

@@ -173,6 +173,36 @@ fn group_title(cx: &App, tag: Option<EnvTag>) -> SharedString {
     tr(cx, id, NoArgs)
 }
 
+// ## m2a-t21-shots
+/// How readily a row's name shrinks against its meta (flex weights): the meta gives way first.
+const NAME_SHRINK: f32 = 0.01;
+/// How much of a name a row keeps at the least: about six characters (and the ellipsis).
+const NAME_MIN_CHARS: usize = 6;
+
+/// The narrowest a row's name gets: its first [`NAME_MIN_CHARS`] characters and the ellipsis,
+/// or the whole name when it is that short.
+fn name_min_width(name: &str, style: TypeStyle, window: &mut Window) -> Pixels {
+    let mut chars = name.chars();
+    let head: String = chars.by_ref().take(NAME_MIN_CHARS).collect();
+    let text: SharedString = if chars.next().is_some() {
+        format!("{head}…").into()
+    } else {
+        head.into()
+    };
+    let run = hacivat_ui_core::gpui_surface::TextRun {
+        len: text.len(),
+        font: font_for(&style),
+        color: hacivat_ui_core::gpui_surface::hsla(0.0, 0.0, 0.0, 1.0),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(text, px(style.size_px), &[run], None)
+        .width
+}
+
 /// A wrapping paragraph recorded in the text registry like a label (`Label` draws one line),
 /// so the pseudo-locale and test checks see it. `id` is appended to its path as `#id`.
 #[track_caller]
@@ -272,7 +302,8 @@ pub fn menu_items(cx: &App, id: ProfileId) -> Vec<MenuItemSpec> {
         item(text_fn(ids::hv::CONN_MENU_DUP), "connection.duplicate"),
         item(text_fn(ids::hv::CONN_MENU_COPY_URL), "connection.copy_url"),
         MenuItemSpec::separator(),
-        item(text_fn(ids::hv::CONN_MENU_DELETE), "connection.delete"),
+        // ## m2a-t21-shots: "Delete… in red" (NOTES §8).
+        item(text_fn(ids::hv::CONN_MENU_DELETE), "connection.delete").danger(true),
     ]
 }
 
@@ -495,7 +526,14 @@ impl ExplorerView {
             .into_any_element()
     }
 
-    fn row(&self, index: usize, p: &Profile, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn row(
+        &self,
+        index: usize,
+        p: &Profile,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = theme.tokens;
         let c = &t.colors;
         let m = cx.global::<ConnectionsModel>();
@@ -533,16 +571,21 @@ impl ExplorerView {
                     .color(c.text_2.to_hsla()),
             )
             .child(
-                div().min_w(px(0.0)).flex_shrink(1.0).child(
-                    Label::new(
-                        p.name.clone(),
-                        TextSource::Data,
-                        t.type_ramp.body,
-                        c.text.to_hsla(),
-                    )
-                    .truncate(true)
-                    .id(SharedString::from(format!("explorer-row-name-{index}"))),
-                ),
+                // ## m2a-t21-shots: the name gives way last (the meta ellipsizes first)
+                // and never below about six characters.
+                div()
+                    .min_w(name_min_width(&p.name, t.type_ramp.body, window))
+                    .flex_shrink(NAME_SHRINK)
+                    .child(
+                        Label::new(
+                            p.name.clone(),
+                            TextSource::Data,
+                            t.type_ramp.body,
+                            c.text.to_hsla(),
+                        )
+                        .truncate(true)
+                        .id(SharedString::from(format!("explorer-row-name-{index}"))),
+                    ),
             )
             .child(env_swatch(env_kind(p.environment), theme));
         if selected {
@@ -569,37 +612,61 @@ impl ExplorerView {
             );
         }
         row = row.child(div().flex_1());
+        // ## m2a-t21-shots: the meta (live mark, latency, engine) shrinks first: its labels
+        // ellipsize (tooltip: the whole text) before the name does.
+        let mut meta = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(t.spacing.sm))
+            .min_w(px(0.0))
+            .flex_shrink(1.0);
         match &live {
             LiveState::Connected(info) => {
-                row = row
+                meta = meta
                     .child(
-                        Icon::new(IconName::Check)
-                            .size(IconSize::Chrome)
-                            .color(c.green.to_hsla()),
+                        div().flex_none().child(
+                            Icon::new(IconName::Check)
+                                .size(IconSize::Chrome)
+                                .color(c.green.to_hsla()),
+                        ),
                     )
-                    .child(Label::new(
-                        latency_label(cx, info),
-                        TextSource::Fluent,
-                        t.type_ramp.mono_data,
-                        c.text_2.to_hsla(),
-                    ));
+                    .child(
+                        Label::new(
+                            latency_label(cx, info),
+                            TextSource::Fluent,
+                            t.type_ramp.mono_data,
+                            c.text_2.to_hsla(),
+                        )
+                        .truncate(true)
+                        .id(SharedString::from(format!("explorer-row-latency-{index}"))),
+                    );
             }
-            LiveState::Connecting(_) => row = row.child(run_marker(theme)),
+            LiveState::Connecting(_) => {
+                meta = meta.child(div().flex_none().child(run_marker(theme)));
+            }
             LiveState::Failed(_) | LiveState::Lost { .. } => {
-                row = row.child(
-                    Icon::new(IconName::TriangleAlert)
-                        .size(IconSize::Chrome)
-                        .color(c.text.to_hsla()),
+                meta = meta.child(
+                    div().flex_none().child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size(IconSize::Chrome)
+                            .color(c.text.to_hsla()),
+                    ),
                 );
             }
             LiveState::Disconnected => {}
         }
-        row = row.child(Label::new(
-            engine_label(p, info.as_deref()),
-            TextSource::Data,
-            t.type_ramp.caption,
-            c.text_2.to_hsla(),
-        ));
+        meta = meta.child(
+            Label::new(
+                engine_label(p, info.as_deref()),
+                TextSource::Data,
+                t.type_ramp.caption,
+                c.text_2.to_hsla(),
+            )
+            .truncate(true)
+            .id(SharedString::from(format!("explorer-row-engine-{index}"))),
+        );
+        row = row.child(meta);
         let list = self.list_focus.clone();
         let list_right = list.clone();
         row.on_mouse_down(
@@ -626,7 +693,7 @@ impl ExplorerView {
         .into_any_element()
     }
 
-    fn list(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn list(&self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme.tokens;
         let c = &t.colors;
         let mut list = div()
@@ -639,7 +706,9 @@ impl ExplorerView {
             .flex_1()
             .min_h(px(0.0))
             .overflow_y_scroll()
-            .pb(px(t.spacing.md));
+            .pb(px(t.spacing.md))
+            // ## m2a-t21-shots: the frame checks treat this clip as a scroll viewport.
+            .child(hacivat_ui::text::scroll_viewport());
         let mut index = 0;
         for (g, (tag, rows)) in visible_groups(cx, &self.query(cx)).into_iter().enumerate() {
             let header = div()
@@ -671,7 +740,7 @@ impl ExplorerView {
                 );
             list = list.child(header);
             for p in rows {
-                let row = self.row(index, &p, theme, cx);
+                let row = self.row(index, &p, theme, window, cx);
                 list = list.child(row);
                 index += 1;
             }
@@ -701,7 +770,7 @@ impl Render for ExplorerView {
         let body = if empty {
             self.empty(&theme, cx)
         } else {
-            self.list(&theme, cx)
+            self.list(&theme, window, cx)
         };
         div()
             .flex()
@@ -726,10 +795,17 @@ pub use fixtures::*;
 
 #[cfg(feature = "shots")]
 mod fixtures {
-    use hacivat_proto::{DbmsKind, EnvTag};
+    use std::sync::Arc;
+
+    use hacivat_driver::Support;
+    use hacivat_proto::{DbmsKind, EnvTag, ErrClass};
+    use hacivat_session::LiveState;
+    use hacivat_session::pipeline::{Progress, TrailStep};
     use hacivat_session::profile::{Profile, ProfileDraft, ProfileEndpoint};
     use hacivat_ui_core::gpui_surface::{App, Window};
 
+    use crate::connections::capsule::sample_live_info;
+    use crate::connections::error_view::sample_error;
     use crate::connections::model::ConnectionsModel;
 
     fn add(cx: &mut App, name: &str, engine: DbmsKind, env: Option<EnvTag>, read_only: bool) {
@@ -762,6 +838,19 @@ mod fixtures {
         .detach();
     }
 
+    /// Shows `name` in `state` (the mirror's value; nothing connects).
+    fn live(cx: &mut App, name: &str, state: LiveState) {
+        let id = cx
+            .global::<ConnectionsModel>()
+            .profiles()
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.id);
+        if let Some(id) = id {
+            cx.global_mut::<ConnectionsModel>().set_live(id, state);
+        }
+    }
+
     /// The explorer with no connection (NOTES §8 empty state).
     pub fn empty_fixture(_window: &mut Window, _cx: &mut App) {}
 
@@ -785,6 +874,32 @@ mod fixtures {
         add(cx, "scratch", DbmsKind::Postgres, Some(EnvTag::Dev), false);
         add(cx, "app.db", DbmsKind::Sqlite, Some(EnvTag::Local), false);
         add(cx, "legacy", DbmsKind::Postgres, None, false);
+        // ## m2a-t21-shots: every live mark (NOTES §8): connected with latency (and the
+        // plaintext flag), connecting (the run marker), failed (the alert).
+        live(
+            cx,
+            "billing",
+            LiveState::Connected(Arc::new(sample_live_info(false, false, Support::Supported))),
+        );
+        live(
+            cx,
+            "orders-test",
+            LiveState::Connecting(Progress {
+                trail: Vec::new(),
+                current: Some(TrailStep::SignIn),
+                started: std::time::Instant::now(),
+            }),
+        );
+        live(
+            cx,
+            "scratch",
+            LiveState::Failed(Arc::new(sample_error(
+                ErrClass::NetworkRefused,
+                TrailStep::Connect,
+                None,
+                "",
+            ))),
+        );
         let first = cx
             .global::<ConnectionsModel>()
             .profiles()

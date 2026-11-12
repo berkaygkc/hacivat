@@ -1159,3 +1159,47 @@ fn only_owner_keys_move_and_other_secret_keys_are_refused() {
         assert!(!format!("{o:?}").contains("SECRETPW"));
     }
 }
+
+// ## m2a-t21-shots
+
+#[test]
+fn the_public_secret_key_rule_covers_the_import_names() {
+    use hacivat_driver::url::is_secret_param;
+    for key in [
+        "password",
+        "PASSWORD",
+        "sslpassword",
+        "sslkeypassword",
+        "SSLKeyPassword",
+        "pgpassword",
+        "mysql_pwd",
+        "--password",
+        "db_password",
+        "x-pwd",
+    ] {
+        assert!(is_secret_param(key), "{key}");
+    }
+    for key in [
+        "password_db",
+        "user",
+        "sslmode",
+        "sslkey",
+        "application_name",
+    ] {
+        assert!(!is_secret_param(key), "{key}");
+    }
+}
+
+#[test]
+fn a_url_carrying_sslkeypassword_is_refused_and_never_shows_it() {
+    for preferred in ENGINES {
+        let r = parse("postgres://h/db?sslkeypassword=SECRETPW", preferred);
+        assert_eq!(
+            r.unrecognised(),
+            Some(UnrecognisedReason::NoMatch),
+            "{preferred:?}"
+        );
+        assert!(!format!("{r:?}").contains("SECRETPW"));
+        assert!(!format!("{r:#?}").contains("SECRETPW"));
+    }
+}

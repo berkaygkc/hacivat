@@ -247,7 +247,7 @@ fn method_alone(auth: AuthProviderId) -> ids::hv::HvConnDiagAuthMethodMethod {
 }
 
 /// The TLS version number of a summary (`TLSv1.3` → `1.3`).
-fn tls_version_number(v: &str) -> &str {
+pub(crate) fn tls_version_number(v: &str) -> &str {
     let v = v.trim();
     let lower = v.get(..4).filter(|p| p.eq_ignore_ascii_case("tlsv"));
     let rest = if lower.is_some() { &v[4..] } else { v };

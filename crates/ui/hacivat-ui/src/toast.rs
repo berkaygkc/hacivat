@@ -415,25 +415,30 @@ impl IntoElement for ToastStack {
                     spoken.extend(shown.bullets.iter().cloned());
                     let announcement: SharedString = spoken.join("\n").into();
                     let mut content = div().flex().flex_col().flex_1().min_w(px(0.0));
+                    // ## m2a-t21-shots: the title and the text wrap to the card; the data
+                    // line (a URL) is one line that ellipsizes, its tooltip the whole value.
                     match &shown.title {
                         Some(title) => {
-                            content = content.child(Label::new(
+                            content = content.child(crate::text::paragraph(
                                 title.clone(),
                                 TextSource::Fluent,
                                 t.type_ramp.body_strong,
                                 c.text.to_hsla(),
                             ));
                             if let Some(data) = &shown.data {
-                                content = content.child(Label::new(
-                                    data.clone(),
-                                    TextSource::Data,
-                                    t.type_ramp.mono_data,
-                                    c.text.to_hsla(),
-                                ));
+                                content = content.child(
+                                    Label::new(
+                                        data.clone(),
+                                        TextSource::Data,
+                                        t.type_ramp.mono_data,
+                                        c.text.to_hsla(),
+                                    )
+                                    .truncate(true),
+                                );
                             }
                             if !shown.text.is_empty() {
                                 // Raised Ink Rule: secondary lines on the card are text-2.
-                                content = content.child(Label::new(
+                                content = content.child(crate::text::paragraph(
                                     shown.text.clone(),
                                     TextSource::Fluent,
                                     t.type_ramp.body,
@@ -442,7 +447,7 @@ impl IntoElement for ToastStack {
                             }
                         }
                         None => {
-                            content = content.child(Label::new(
+                            content = content.child(crate::text::paragraph(
                                 shown.text.clone(),
                                 TextSource::Fluent,
                                 t.type_ramp.body,
@@ -454,25 +459,31 @@ impl IntoElement for ToastStack {
                         content =
                             content.child(div().flex().flex_col().mt(px(t.spacing.xs)).children(
                                 shown.bullets.iter().enumerate().map(|(i, bullet)| {
+                                    // ## m2a-t21-shots: a bullet wraps; its square sits on
+                                    // the first line.
+                                    let line = t.type_ramp.body.line_height;
                                     div()
                                         .flex()
                                         .flex_row()
-                                        .items_center()
+                                        .items_start()
                                         .gap(px(t.spacing.sm))
                                         .child(
                                             div()
                                                 .debug_selector(move || {
                                                     format!("toast-bullet-{id}-{i}")
                                                 })
+                                                .mt(px((line - BULLET_PX) / 2.0))
                                                 .size(px(BULLET_PX))
                                                 .flex_none()
                                                 .bg(c.text_2.to_hsla()),
                                         )
-                                        .child(Label::new(
-                                            bullet.clone(),
-                                            TextSource::Fluent,
-                                            t.type_ramp.body,
-                                            c.text_2.to_hsla(),
+                                        .child(div().flex_1().min_w(px(0.0)).child(
+                                            crate::text::paragraph(
+                                                bullet.clone(),
+                                                TextSource::Fluent,
+                                                t.type_ramp.body,
+                                                c.text_2.to_hsla(),
+                                            ),
                                         ))
                                 }),
                             ));

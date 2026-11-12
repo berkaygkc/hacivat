@@ -9,9 +9,11 @@
 
 use std::rc::Rc;
 
+use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, ClickEvent, ElementId, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Role, SharedString, StatefulInteractiveElement, Styled, accesskit, div, px,
+    ParentElement, Pixels, Role, SharedString, StatefulInteractiveElement, Styled, TextRun, Window,
+    accesskit, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 
@@ -120,8 +122,16 @@ impl IntoElement for Segmented {
                     ThemeMode::Dark => c.panel,
                     ThemeMode::Light => c.ground,
                 };
-                group = group.bg(well.to_hsla());
+                // ## m2a-t21-shots: a form control never runs past its card: the group
+                // shrinks to its row and the segment labels ellipsize (tooltip: the whole
+                // label), long locales included.
+                group = group
+                    .bg(well.to_hsla())
+                    .flex_shrink(1.0)
+                    .min_w(px(0.0))
+                    .max_w_full();
             }
+            let shrink = self.in_well;
             let count = self.items.len();
             let ids: Vec<ElementId> = (0..count)
                 .map(|i| ElementId::from((self.id.clone(), format!("{i}"))))
@@ -181,7 +191,9 @@ impl IntoElement for Segmented {
                         if item.pressed && (self.mono || self.in_well) {
                             style.weight = 600;
                         }
-                        Label::new(text, source, style, ink).into_any_element()
+                        Label::new(text, source, style, ink)
+                            .truncate(shrink)
+                            .into_any_element()
                     }
                     SegmentContent::Marked(kind, text) => {
                         let mut style = t.type_ramp.body;
@@ -192,9 +204,10 @@ impl IntoElement for Segmented {
                             .flex()
                             .flex_row()
                             .items_center()
+                            .min_w(px(0.0))
                             .gap(px(t.spacing.sm))
-                            .child(env_swatch(kind, &theme))
-                            .child(Label::new(text, source, style, ink))
+                            .child(env_swatch(kind, &theme).flex_none())
+                            .child(Label::new(text, source, style, ink).truncate(shrink))
                             .into_any_element()
                     }
                     SegmentContent::Icon(name) => Icon::new(name)
@@ -209,6 +222,9 @@ impl IntoElement for Segmented {
                     segment = segment
                         .declare(Role::Button, name.clone(), None)
                         .aria_toggled(accesskit::Toggled::from(item.pressed));
+                }
+                if shrink {
+                    segment = segment.min_w(px(SEGMENT_MIN_PX)).flex_shrink(1.0);
                 }
                 let mut segment = segment
                     .flex()
@@ -263,6 +279,46 @@ impl IntoElement for Segmented {
         })
         .into_any_element()
     }
+}
+
+// ## m2a-t21-shots
+/// The narrowest a shrinking (in-well) segment gets: its padding and a few glyphs with the
+/// ellipsis. A host whose row cannot give every segment its whole label uses
+/// [`natural_width`] to switch to a Select instead of showing ellipsized segments.
+pub const SEGMENT_MIN_PX: f32 = 44.0;
+
+/// The width an in-well group needs to show every label whole: per segment the 9 px padding on
+/// both sides, the label at weight 600 (as when pressed, the widest), and the 7 px mark with its
+/// gap where `marked`; plus the 1 px dividers and the border.
+pub fn natural_width(
+    labels: &[(SharedString, bool)],
+    theme: &Theme,
+    window: &mut Window,
+) -> Pixels {
+    let t = theme.tokens;
+    let mut style = t.type_ramp.body;
+    style.weight = 600;
+    let font = font_for(&style);
+    let mut total = px(2.0 + labels.len().saturating_sub(1) as f32);
+    for (label, marked) in labels {
+        let run = TextRun {
+            len: label.len(),
+            font: font.clone(),
+            color: t.colors.text.to_hsla(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let width = window
+            .text_system()
+            .shape_line(label.clone(), px(style.size_px), &[run], None)
+            .width;
+        total += width + px(18.0);
+        if *marked {
+            total += px(7.0 + t.spacing.sm);
+        }
+    }
+    total
 }
 
 /// Dividers: every segment but the first draws a left seam.

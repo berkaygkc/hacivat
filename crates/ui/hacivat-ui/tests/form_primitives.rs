@@ -1184,3 +1184,63 @@ fn checkbox_and_choice_list_accessibility(cx: &mut TestAppContext) {
         (Some(true), Some(true))
     );
 }
+
+// ## m2a-t21-shots: an in-well group shrinks, but never below a minimum per segment
+
+fn long_well_group(width: f32) -> impl Fn(&mut gpui::Window, &mut App) -> gpui::AnyElement {
+    move |_, _| {
+        let mut group = Segmented::new("well").in_well(true);
+        for i in 0..5 {
+            group = group.item(SegmentItem {
+                content: SegmentContent::Label(format!("A rather long label {i}").into()),
+                pressed: i == 0,
+                tooltip: "tip".into(),
+                a11y_name: None,
+                on_click: Rc::new(|_, _, _| {}),
+            });
+        }
+        div()
+            .flex()
+            .w(px(width))
+            .child(div().flex().min_w(px(0.0)).child(group))
+            .into_any_element()
+    }
+}
+
+#[gpui::test]
+fn a_shrinking_well_group_keeps_a_minimum_per_segment(cx: &mut TestAppContext) {
+    use hacivat_ui::segmented::SEGMENT_MIN_PX;
+    let vcx = host(cx, long_well_group(120.0));
+    vcx.simulate_resize(gpui::size(px(800.0), px(200.0)));
+    vcx.run_until_parked();
+    for i in 0..5 {
+        let w = vcx
+            .debug_bounds(selector(format!("segmented-well-{i}")))
+            .expect("segment drawn")
+            .size
+            .width;
+        assert!(w >= px(SEGMENT_MIN_PX - 0.5), "segment {i}: {w:?}");
+    }
+}
+
+#[gpui::test]
+fn the_natural_width_counts_whole_labels_and_marks(cx: &mut TestAppContext) {
+    use hacivat_ui::segmented::natural_width;
+    let vcx = host(cx, |_, _| div().into_any_element());
+    vcx.update(|window, cx| {
+        let theme = *Theme::get(cx);
+        let short = natural_width(&[("ab".into(), false)], &theme, window);
+        let long = natural_width(&[("abcdefghij".into(), false)], &theme, window);
+        let marked = natural_width(&[("ab".into(), true)], &theme, window);
+        let two = natural_width(
+            &[("ab".into(), false), ("ab".into(), false)],
+            &theme,
+            window,
+        );
+        assert!(long > short, "{long:?} > {short:?}");
+        // The 7 px mark and its 6 px gap.
+        assert_eq!(marked - short, px(13.0));
+        // A second segment: its label, padding and one divider.
+        assert_eq!(two - short, short - px(2.0) + px(1.0));
+    });
+}

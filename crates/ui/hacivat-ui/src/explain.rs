@@ -12,19 +12,16 @@
 //! recorded by `open_anchored`). The workspace is the only close path inside the layer stack:
 //! hosts there must not also pop on `Dismissed` (see [`ExplainEvent`]).
 
-use std::panic::Location;
-
-use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Role,
     SharedString, Styled, Window, div, px,
 };
-use hacivat_ui_core::theme::{Theme, TypeStyle, popover_surface};
+use hacivat_ui_core::theme::{Theme, popover_surface};
 
 use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::A11yNode;
-use crate::text::{Label, RenderedText, TextRegistry, TextSource};
+use crate::text::{TextSource, paragraph};
 
 /// The card's width (NOTES: 300 px).
 const WIDTH_PX: f32 = 300.0;
@@ -107,42 +104,6 @@ impl ExplainPopover {
     }
 }
 
-/// A paragraph that wraps to its container. `Label` draws one line, so the paragraph uses
-/// GPUI's wrapping text and records itself in the [`TextRegistry`] like a label (its source
-/// stays checkable under the pseudo-locales).
-#[track_caller]
-fn paragraph(
-    text: SharedString,
-    style: TypeStyle,
-    color: hacivat_ui_core::gpui_surface::Hsla,
-    cx: &mut App,
-) -> AnyElement {
-    let at = Location::caller();
-    TextRegistry::record(cx, || RenderedText {
-        text: text.clone(),
-        source: TextSource::Fluent,
-        size_px: style.size_px,
-        painted_px: 0.0,
-        clipped: false,
-        truncated: false,
-        path: format!(
-            "{}:{}:{}",
-            at.file().replace('\\', "/"),
-            at.line(),
-            at.column()
-        )
-        .into(),
-    });
-    div()
-        .w_full()
-        .font(font_for(&style))
-        .text_size(px(style.size_px))
-        .line_height(px(style.line_height))
-        .text_color(color)
-        .child(text)
-        .into_any_element()
-}
-
 impl Render for ExplainPopover {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.opened {
@@ -170,7 +131,13 @@ impl Render for ExplainPopover {
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let p = paragraph(line.clone(), t.type_ramp.body_sm, c.text_2.to_hsla(), cx);
+                // ## m2a-t21-shots: recorded at paint, after the title, with its real fit.
+                let p = paragraph(
+                    line.clone(),
+                    TextSource::Fluent,
+                    t.type_ramp.body_sm,
+                    c.text_2.to_hsla(),
+                );
                 let gap = if i == last { 0.0 } else { t.spacing.sm };
                 div().pb(px(gap)).child(p).into_any_element()
             })
@@ -189,20 +156,29 @@ impl Render for ExplainPopover {
                     .debug_selector(|| "explain-title".to_string())
                     .flex()
                     .flex_row()
-                    .items_center()
+                    .items_start()
                     .gap(px(TITLE_GAP_PX))
                     .mb(px(t.spacing.xs))
                     .child(
-                        Icon::new(self.icon)
-                            .size(IconSize::Chrome)
-                            .color(c.text.to_hsla()),
+                        // ## m2a-t21-shots: the icon sits on the first line of a title
+                        // that wraps.
+                        div()
+                            .flex_none()
+                            .mt(px((t.type_ramp.body_strong.line_height
+                                - IconSize::Chrome.px())
+                                / 2.0))
+                            .child(
+                                Icon::new(self.icon)
+                                    .size(IconSize::Chrome)
+                                    .color(c.text.to_hsla()),
+                            ),
                     )
-                    .child(Label::new(
+                    .child(div().flex_1().min_w(px(0.0)).child(paragraph(
                         self.title.clone(),
                         TextSource::Fluent,
                         t.type_ramp.body_strong,
                         c.text.to_hsla(),
-                    )),
+                    ))),
             )
             .children(paragraphs);
         let description: SharedString = self.body.join(" ").into();

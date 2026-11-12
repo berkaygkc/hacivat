@@ -1134,3 +1134,140 @@ fn a_pasted_text_never_shows_in_debug() {
     assert!(!shown.contains("s3cret"), "{shown}");
     assert_eq!(shown, "NewFromText(<redacted>)");
 }
+
+// ## m2a-t21-shots
+
+/// The stored TLS key passphrase of the first profile, straight from the backend.
+fn stored_key_passphrase(vcx: &VisualTestContext) -> Option<SecretString> {
+    let id = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().profiles()[0].id);
+    secret_backend(vcx)
+        .get(&SecretKey {
+            profile: id,
+            slot: SecretSlot::TlsKeyPassphrase,
+        })
+        .expect("the backend answers")
+}
+
+#[gpui::test]
+fn sslpassword_mask_in_the_url_row_never_replaces_the_stored_passphrase(cx: &mut TestAppContext) {
+    use secrecy::ExposeSecret as _;
+    let vcx = shell_with_connections(cx, "en");
+    let mut draft = ProfileDraft::new();
+    draft.profile.name = "certs".to_string();
+    draft.profile.environment = Some(EnvTag::Dev);
+    draft.profile.endpoint = ProfileEndpoint::Server {
+        host: "db.acme.io".to_string(),
+        port: None,
+    };
+    draft.profile.user = Some("deploy".to_string());
+    draft.profile.database = Some("orders".to_string());
+    draft.tls_key_passphrase = Some(SecretString::from("hv_test_pp".to_string()));
+    let id = draft.profile.id;
+    vcx.cx
+        .update(|cx| ConnectionsModel::save(cx, draft).detach());
+    settle(vcx, Duration::from_millis(100));
+    assert!(
+        stored_key_passphrase(vcx).is_some(),
+        "the passphrase is stored"
+    );
+    let vcx = open(vcx, DialogMode::Edit(id));
+    // The row as shown, edited to carry the Display mask as `sslpassword` and a new port.
+    let row = url_row(vcx);
+    let edited = row.replacen("@db.acme.io/", "@db.acme.io:6000/", 1);
+    assert_ne!(row, edited, "the row names the host: {row}");
+    let joiner = if edited.contains('?') { '&' } else { '?' };
+    set_field(vcx, "url", &format!("{edited}{joiner}sslpassword=****"));
+    keys(vcx, "enter");
+    assert_eq!(field(vcx, "port"), "6000");
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    let stored = stored_key_passphrase(vcx).expect("the stored passphrase is still there");
+    assert_ne!(stored.expose_secret(), "****");
+    assert!(
+        stored.expose_secret() == "hv_test_pp",
+        "the stored passphrase was replaced"
+    );
+    assert_eq!(read_port(vcx), Some(6000));
+}
+
+#[gpui::test]
+fn english_keeps_the_environment_segments(cx: &mut TestAppContext) {
+    // English: every environment label fits the row, so the segmented control stays.
+    let vcx = open_new(cx, "en");
+    vcx.run_until_parked();
+    assert!(!read(vcx, |d, _| d.environment_is_select()));
+    assert!(vcx.debug_bounds("segmented-conn-env").is_some());
+    assert!(vcx.debug_bounds("conn-env-select").is_none());
+}
+
+#[gpui::test]
+fn the_environment_select_sets_the_tag_like_the_segments(cx: &mut TestAppContext) {
+    // The pseudo-locale's labels are some 40 % longer: the row takes a Select.
+    let vcx = open_new(cx, "tr-XT");
+    vcx.run_until_parked();
+    assert!(read(vcx, |d, _| d.environment_is_select()));
+    assert!(vcx.debug_bounds("conn-env-select").is_some());
+    assert!(vcx.debug_bounds("segmented-conn-env").is_none());
+    // "Choose…" while no tag is set; picking Staging (index 4) sets it.
+    let select = read(vcx, |d, _| d.env_select());
+    assert_eq!(vcx.cx.read(|cx| select.read(cx).selected()), 0);
+    vcx.cx.update(|cx| {
+        select.update(cx, |s, cx| {
+            s.set_selected(4, cx);
+            cx.emit(SelectEvent::Changed(4));
+        })
+    });
+    vcx.run_until_parked();
+    assert_eq!(env_pressed(vcx), Some(EnvTag::Staging));
+}
+
+#[gpui::test]
+fn the_environment_select_follows_the_automatic_local_tag(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "tr-XT");
+    vcx.run_until_parked();
+    assert!(read(vcx, |d, _| d.environment_is_select()));
+    let select = read(vcx, |d, _| d.env_select());
+    assert_eq!(vcx.cx.read(|cx| select.read(cx).selected()), 0, "Choose…");
+    type_into(vcx, "host", "localhost");
+    assert_eq!(env_pressed(vcx), Some(EnvTag::Local));
+    // The Select shows "local" (option 1), and draws that option's label.
+    assert_eq!(vcx.cx.read(|cx| select.read(cx).selected()), 1);
+    let local = vcx
+        .cx
+        .read(|cx| (select.read(cx).options()[1].label)(cx).to_string());
+    let drawn: Vec<String> = registry_frame(vcx)
+        .into_iter()
+        .filter(|r| r.path.contains("hacivat-ui/src/select.rs:"))
+        .map(|r| r.text.to_string())
+        .collect();
+    assert!(drawn.contains(&local), "{local:?} in {drawn:?}");
+    // Back to a remote host: no tag, "Choose…" again.
+    set_field(vcx, "host", "10.0.4.7");
+    assert_eq!(env_pressed(vcx), None);
+    assert_eq!(vcx.cx.read(|cx| select.read(cx).selected()), 0);
+}
+
+#[gpui::test]
+fn every_in_well_segmented_control_fits_its_row_in_a_long_locale(cx: &mut TestAppContext) {
+    use hacivat_ui::segmented::SEGMENT_MIN_PX;
+    let vcx = open_new(cx, "tr-XT");
+    vcx.simulate_resize(gpui::size(gpui::px(1024.0), gpui::px(700.0)));
+    vcx.run_until_parked();
+    let card = vcx
+        .debug_bounds("form-dialog")
+        .expect("the form dialog is drawn");
+    for (group, count) in [("conn-engine", 4), ("conn-auth", 4)] {
+        let sel: &'static str = Box::leak(format!("segmented-{group}").into_boxed_str());
+        let bounds = vcx
+            .debug_bounds(sel)
+            .unwrap_or_else(|| panic!("{group} drawn"));
+        assert!(bounds.right() <= card.right(), "{group} runs past the card");
+        for i in 0..count {
+            let sel: &'static str = Box::leak(format!("segmented-{group}-{i}").into_boxed_str());
+            let w = vcx.debug_bounds(sel).expect("segment drawn").size.width;
+            assert!(w >= gpui::px(SEGMENT_MIN_PX - 0.5), "{group}-{i}: {w:?}");
+        }
+    }
+}

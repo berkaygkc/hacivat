@@ -207,23 +207,6 @@ hv-explorer-group-local = YEREL
 # Review: PO
 hv-explorer-group-unset = ORTAM YOK
 # Review: PO
-hv-explorer-env = { $env ->
-        [production] üretim
-        [staging] hazırlık
-        [test] test
-        [dev] geliştirme
-        [local] yerel
-       *[unset] ortam yok
-    }
-# Review: PO
-hv-explorer-write-failed = Değişiklik bağlantılar dosyanıza kaydedilemedi.
-# Review: PO
-hv-explorer-secret-failed = Kayıtlı bir parola sistemin anahtar deposunda güncellenemedi.
-# Review: PO
-hv-explorer-copied = URL olarak kopyalandı
-# Review: PO
-hv-explorer-copied-nopw = Parola dahil değil.
-# Review: PO
 hv-conn-menu-connect = Bağlan
 # Review: PO
 hv-conn-menu-disconnect = Bağlantıyı kes
@@ -304,33 +287,13 @@ hv-capsule-retry = Yeniden dene
 # Review: PO
 hv-capsule-clock = { NUMBER($seconds, minimumFractionDigits: 2) } sn
 # Review: PO
-hv-capsule-step = { $step ->
-        [pgpass] pgpass
-        [resolve] Çözümle
-        [connect] Bağlan
-        [tls] TLS
-        [sign-in] Oturum aç
-        [check-server] Sunucuyu denetle
-       *[open-file] Dosyayı aç
-    }
-# Review: PO
 hv-capsule-unsupported = desteklenmiyor
 # Review: PO
 hv-capsule-access-read-write = okuma-yazma
 # Review: PO
 hv-capsule-latency = { $ms } ms
 # Review: PO
-hv-status-env = { $env ->
-        [production] üretim
-        [staging] hazırlık
-        [test] test
-        [dev] geliştirme
-        [local] yerel
-       *[unset] ortam yok
-    } · { $access ->
-        [read-only] salt okunur
-       *[read-write] okuma-yazma
-    }
+hv-status-env = { $env } · { $access }
 # Review: PO
 hv-home-title = Açık sorgu yok
 # Review: PO
@@ -345,15 +308,6 @@ hv-home-connect = Seçili bağlantıya bağlan
 hv-conn-import-title = pg_service.conf'tan içe aktar
 # Review: PO
 hv-conn-import-body = İçe aktarılacak servisleri seçin. Her uzak servis için bir ortam gerekir.
-# Review: PO
-hv-conn-import-env = { $env ->
-        [production] Üretim
-        [staging] Hazırlık
-        [test] Test
-        [dev] Geliştirme
-        [local] Yerel
-       *[unset] Seçin…
-    }
 # Review: PO
 hv-conn-import-confirm = İçe aktar
 # Review: PO
@@ -850,3 +804,12 @@ hv-conn-issue-tls-key-encrypted = Özel anahtar şifreli. Şifresiz bir anahtar 
 hv-conn-issue-tls-mode-unsupported = { $mode } bu motor için henüz kullanılamıyor.
 # Review: PO
 hv-conn-issue-option-rejected = { $key } özelliğine burada izin verilmiyor.
+
+## m2a-t21-shots
+
+# Review: PO
+hv-conn-env-unset = ortam yok
+# Review: PO
+hv-conn-import-choose = Seçin…
+# Review: PO
+hv-conn-toast-delete-secret = Bağlantı silindi, ancak kayıtlı parolası sistemin anahtar deposundan kaldırılamadı.

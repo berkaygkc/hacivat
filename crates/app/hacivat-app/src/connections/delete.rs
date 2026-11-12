@@ -12,10 +12,11 @@ use hacivat_l10n::{Text, ids};
 use hacivat_proto::ProfileId;
 use hacivat_ui::button::ButtonKind;
 use hacivat_ui::dialog::{Dialog, DialogButton, DialogEvent, DialogSize, DialogSpec};
+use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, Entity, Global, WeakEntity, Window};
 
 use crate::connections::commands::{refuse_read_only, show_save_error, toast_deleted};
-use crate::connections::model::ConnectionsModel;
+use crate::connections::model::{ConnectionsModel, SaveError};
 use crate::l10n_global::{text_fn, tr};
 use crate::shell::Workspace;
 
@@ -95,6 +96,13 @@ pub fn delete_now(id: ProfileId, name: String, cx: &mut App) {
         let result = task.await;
         cx.update(|cx| match result {
             Ok(()) => toast_deleted(name, cx),
+            // ## m2a-t21-shots: the profile is gone; only its keyring entry stayed.
+            Err(SaveError::Secret(_)) => {
+                ToastQueue::push(
+                    cx,
+                    Toast::new(ToastKind::Error, text_fn(ids::hv::CONN_TOAST_DELETE_SECRET)),
+                );
+            }
             Err(e) => show_save_error(&e, cx),
         });
     })

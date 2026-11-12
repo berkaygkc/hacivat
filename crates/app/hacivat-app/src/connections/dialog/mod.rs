@@ -202,6 +202,12 @@ pub struct ConnectionDialog {
     pub(crate) remember: Entity<Select>,
     pub(crate) tls_mode: Entity<Select>,
     pub(crate) keepalive: Entity<Select>,
+    // ## m2a-t21-shots
+    /// The Environment control as a Select, drawn instead of the segmented control when the
+    /// row cannot show every environment's label whole (a long locale).
+    pub(crate) env_select: Entity<Select>,
+    /// Whether the last frame drew `env_select` (tests).
+    pub(crate) env_as_select: std::cell::Cell<bool>,
     pub(crate) strip: Entity<TestStrip>,
     pub(crate) open_tls: bool,
     pub(crate) open_adv: bool,
@@ -407,6 +413,12 @@ impl ConnectionDialog {
             s.set_label(text_fn(ids::hv::CONN_ADV_KEEPALIVE));
             s
         });
+        let environment = p.environment;
+        let env_select = cx.new(|cx| {
+            let mut s = Select::new(form::env_options(), form::env_index(environment), cx);
+            s.set_label(text_fn(ids::hv::CONN_DLG_ENV));
+            s
+        });
 
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe_in(
@@ -436,6 +448,15 @@ impl ConnectionDialog {
                 if let Some(m) = TLS_MODES.get(*i) {
                     this.draft.profile.tls.mode = *m;
                     this.after_edit(window, cx);
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &env_select,
+            window,
+            |this, _, SelectEvent::Changed(i): &SelectEvent, window, cx| {
+                if let Some(tag) = i.checked_sub(1).and_then(|i| EnvTag::ALL.get(i)) {
+                    this.set_environment(*tag, window, cx);
                 }
             },
         ));
@@ -497,6 +518,8 @@ impl ConnectionDialog {
             remember,
             tls_mode,
             keepalive,
+            env_select,
+            env_as_select: std::cell::Cell::new(false),
             strip,
             open_tls: false,
             open_adv: false,
@@ -587,6 +610,17 @@ impl ConnectionDialog {
     }
 
     /// The test strip (Task 20 fills it).
+    // ## m2a-t21-shots
+    /// Whether the last frame drew the Environment control as a Select (a long locale).
+    pub fn environment_is_select(&self) -> bool {
+        self.env_as_select.get()
+    }
+
+    /// The Environment Select (drawn only when [`Self::environment_is_select`]).
+    pub fn env_select(&self) -> Entity<Select> {
+        self.env_select.clone()
+    }
+
     pub fn strip(&self) -> Entity<TestStrip> {
         self.strip.clone()
     }
@@ -618,6 +652,10 @@ impl ConnectionDialog {
             ("remember", self.remember.read(cx).focus_handle(cx)),
             ("tls-mode", self.tls_mode.read(cx).focus_handle(cx)),
             ("keepalive", self.keepalive.read(cx).focus_handle(cx)),
+            (
+                "environment-select",
+                self.env_select.read(cx).focus_handle(cx),
+            ),
         ];
         let owned = [
             ("read-only", &f.read_only),
@@ -783,12 +821,23 @@ impl ConnectionDialog {
     /// After any change of the draft: the automatic environment, the URL row, the pgpass line.
     pub(crate) fn after_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.apply_env_rule();
+        self.sync_env_select(cx);
         self.sync_url(window, cx);
         self.refresh_pgpass(cx);
         if !matches!(self.strip.read(cx).state(), TestStripState::Running(_)) {
             self.problem = None;
         }
         cx.notify();
+    }
+
+    // ## m2a-t21-shots
+    /// Shows the draft's environment in the Environment Select (the long-locale fallback of
+    /// the segmented control), whatever changed it: a pick, the automatic `local` rule, a paste.
+    pub(crate) fn sync_env_select(&mut self, cx: &mut Context<Self>) {
+        let want = form::env_index(self.draft.profile.environment);
+        if self.env_select.read(cx).selected() != want {
+            self.env_select.update(cx, |s, cx| s.set_selected(want, cx));
+        }
     }
 
     /// The automatic environment (NOTES surface 1): until the user picks one, a SQLite file, a
@@ -906,6 +955,8 @@ impl ConnectionDialog {
         self.tls_mode.update(cx, |s, cx| s.set_selected(tls, cx));
         self.keepalive
             .update(cx, |s, cx| s.set_selected(keepalive, cx));
+        let env = form::env_index(p.environment);
+        self.env_select.update(cx, |s, cx| s.set_selected(env, cx));
     }
 
     /// The profile a save or a test uses: an empty name takes the suggested one (P30).
@@ -1339,6 +1390,7 @@ impl ConnectionDialog {
                     profile.environment = Some(env);
                     d.draft.profile.environment = Some(env);
                     d.env_touched = true;
+                    d.sync_env_select(cx);
                     d.commit(profile, connect, window, cx);
                 }
                 // Cancelled: the dialog stays open, unchanged.

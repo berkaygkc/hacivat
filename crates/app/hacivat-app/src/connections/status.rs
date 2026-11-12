@@ -6,8 +6,7 @@
 //! no current connection it shows M1's "No connection".
 
 use hacivat_driver::Support;
-use hacivat_l10n::{NoArgs, ids};
-use hacivat_proto::EnvTag;
+use hacivat_l10n::{NoArgs, Text, ids};
 use hacivat_session::LiveState;
 use hacivat_session::profile::Profile;
 use hacivat_ui::statusbar::{env_segment, status_label};
@@ -16,32 +15,26 @@ use hacivat_ui_core::gpui_surface::{AnyElement, App, IntoElement, SharedString};
 use hacivat_ui_core::theme::Theme;
 
 use crate::connections::capsule::{
-    current_profile, encryption_label, env_kind, is_read_only, latency_label,
+    current_profile, encryption_label, env_kind, env_word, is_read_only, latency_label,
 };
 use crate::connections::model::ConnectionsModel;
 use crate::l10n_global::tr;
 
-fn status_env_arg(tag: Option<EnvTag>) -> ids::hv::HvStatusEnvEnv {
-    use ids::hv::HvStatusEnvEnv as E;
-    match tag {
-        Some(EnvTag::Production) => E::Production,
-        Some(EnvTag::Staging) => E::Staging,
-        Some(EnvTag::Test) => E::Test,
-        Some(EnvTag::Dev) => E::Dev,
-        Some(EnvTag::Local) => E::Local,
-        None => E::Unset,
-    }
-}
-
-/// `production · read-only` and the like.
+/// `production · read-only` and the like: the environment word (`hv-conn-env-*`) and the
+/// access word (`hv-capsule-access-*`) in `hv-status-env`.
 fn env_text(cx: &App, p: &Profile, read_only: bool) -> SharedString {
-    use ids::hv::HvStatusEnvAccess as A;
+    // ## m2a-t21-shots: no second copy of the environment and access words.
+    let access = if read_only {
+        ids::hv::CAPSULE_ACCESS_READ_ONLY
+    } else {
+        ids::hv::CAPSULE_ACCESS_READ_WRITE
+    };
     tr(
         cx,
         ids::hv::STATUS_ENV,
         ids::hv::HvStatusEnv {
-            env: status_env_arg(p.environment),
-            access: if read_only { A::ReadOnly } else { A::ReadWrite },
+            env: Text(env_word(cx, p.environment).to_string()),
+            access: Text(tr(cx, access, NoArgs).to_string()),
         },
     )
 }

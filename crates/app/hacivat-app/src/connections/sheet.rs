@@ -12,29 +12,44 @@ use hacivat_session::profile::{Profile, ProfileEndpoint};
 use hacivat_ui::capsule::env_swatch;
 use hacivat_ui::text::{Label, TextSource};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, AnyView, App, AppContext as _, Context, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Window, div, px,
+    AnyElement, AnyView, App, AppContext as _, Context, FocusHandle, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, div, point, px,
 };
-use hacivat_ui_core::theme::Theme;
+use hacivat_ui_core::theme::{Theme, focus_outline};
 
 use crate::connections::capsule::{encryption_label, engine_label, env_kind, env_word};
 use crate::connections::explorer::endpoint_text;
 use crate::connections::model::ConnectionsModel;
 use crate::l10n_global::tr;
-use crate::shell::tiles::{self, empty_state, panel_header, panel_title};
+use crate::shell::tiles::{self, empty_state_wrapping, panel_header, panel_title};
+use hacivat_ui::text::scroll_viewport;
 
 /// The width of the key column.
 const KEY_PX: f32 = 92.0;
 
 /// The sheet view (the `connection_panel` hook).
+/// A key/value row's height: one ↑/↓ scroll step.
+const ROW_PX: f32 = 22.0;
+/// The scroll thumb's width and shortest length.
+const THUMB_PX: f32 = 4.0;
+const THUMB_MIN_PX: f32 = 16.0;
+
 pub struct SheetView {
     _subscription: Subscription,
+    // ## m2a-t21-shots
+    /// The rows' scroll position, for the scroll thumb.
+    scroll: ScrollHandle,
+    /// The rows take the focus (a Tab stop while they overflow) and scroll from the keyboard.
+    focus: FocusHandle,
 }
 
 /// The `connection_panel` hook.
 pub fn build(_window: &mut Window, cx: &mut App) -> AnyView {
     cx.new(|cx| SheetView {
         _subscription: cx.observe_global::<ConnectionsModel>(|_, cx| cx.notify()),
+        scroll: ScrollHandle::new(),
+        focus: cx.focus_handle(),
     })
     .into()
 }
@@ -55,6 +70,60 @@ fn secret_label(cx: &App, p: &Profile) -> SharedString {
 }
 
 impl SheetView {
+    // ## m2a-t21-shots
+    /// The scroll thumb (DESIGN.md: 3 px radius, on the scroll track's tone) while the rows are
+    /// taller than the tile: 4 px wide at the right edge, its length and place in proportion.
+    /// Read from the last layout, so it shows from the frame after the rows overflow.
+    fn thumb(theme: &Theme, scroll: &ScrollHandle) -> Option<AnyElement> {
+        let max = f32::from(scroll.max_offset().y);
+        let view = f32::from(scroll.bounds().size.height);
+        if max < 0.5 || view <= 0.0 {
+            return None;
+        }
+        let t = theme.tokens;
+        let length = (view * view / (view + max)).max(THUMB_MIN_PX);
+        let at = (-f32::from(scroll.offset().y) / max).clamp(0.0, 1.0) * (view - length);
+        Some(
+            div()
+                .debug_selector(|| "sheet-scroll-thumb".to_string())
+                .absolute()
+                .right(px(2.0))
+                .top(px(at))
+                .w(px(THUMB_PX))
+                .h(px(length))
+                .rounded(px(t.radii.xs))
+                .bg(t.colors.seam_strong.to_hsla())
+                .into_any_element(),
+        )
+    }
+
+    /// Scrolls the rows from the keyboard (they are read-only: no row takes the focus).
+    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let stroke = &event.keystroke;
+        if stroke.modifiers.modified() {
+            return;
+        }
+        let max = f32::from(self.scroll.max_offset().y);
+        if max < 0.5 {
+            return;
+        }
+        let at = -f32::from(self.scroll.offset().y);
+        let page = (f32::from(self.scroll.bounds().size.height) - ROW_PX).max(ROW_PX);
+        let to = match stroke.key.as_str() {
+            "up" => at - ROW_PX,
+            "down" => at + ROW_PX,
+            "pageup" => at - page,
+            "pagedown" => at + page,
+            "home" => 0.0,
+            "end" => max,
+            _ => return,
+        };
+        let x = self.scroll.offset().x;
+        self.scroll.set_offset(point(x, px(-to.clamp(0.0, max))));
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn kv(theme: &Theme, index: usize, key: SharedString, value: AnyElement) -> impl IntoElement {
         let t = theme.tokens;
         let c = &t.colors;
@@ -62,16 +131,18 @@ impl SheetView {
             .flex()
             .flex_row()
             .items_center()
-            .min_h(px(22.0))
+            .min_h(px(ROW_PX))
             .gap(px(t.spacing.md))
             .child(
                 div().w(px(KEY_PX)).flex_none().child(
+                    // ## m2a-t21-shots: a long key ellipsizes in its 92 px column.
                     Label::new(
                         key,
                         TextSource::Fluent,
                         t.type_ramp.caption,
                         c.text_2.to_hsla(),
                     )
+                    .truncate(true)
                     .id(SharedString::from(format!("sheet-key-{index}"))),
                 ),
             )
@@ -159,7 +230,7 @@ impl SheetView {
 }
 
 impl Render for SheetView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let Some(m) = cx.try_global::<ConnectionsModel>() else {
             // P17: no model, the M1 panel.
@@ -173,7 +244,7 @@ impl Render for SheetView {
             "panel-connection-title",
         ));
         let body = match m.selected().and_then(|id| m.get(id)) {
-            None => empty_state(
+            None => empty_state_wrapping(
                 &theme,
                 tr(cx, ids::hv::CONN_SHEET_NONE, NoArgs),
                 "sheet-none",
@@ -200,7 +271,34 @@ impl Render for SheetView {
                 for (i, (key, value)) in Self::rows(&theme, &p, cx).into_iter().enumerate() {
                     body = body.child(Self::kv(&theme, i, key, value));
                 }
-                body.into_any_element()
+                // ## m2a-t21-shots: a short tile scrolls its rows instead of cutting the last
+                // ones off under the status bar, and a scroll thumb says there is more.
+                // Keyboard: a Tab stop only while the rows overflow; ↑/↓ by a row, PgUp/PgDn
+                // by a page, Home/End to the ends.
+                let overflows = f32::from(self.scroll.max_offset().y) >= 0.5;
+                let focus = self.focus.clone().tab_stop(overflows);
+                let focused = overflows && focus.is_focused(window);
+                let rows = focus_outline(
+                    div()
+                        .id("sheet-rows")
+                        .debug_selector(|| "sheet-rows".to_string())
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .track_focus(&focus)
+                        .on_key_down(cx.listener(Self::on_key)),
+                    &theme,
+                    focused,
+                )
+                .child(scroll_viewport())
+                .child(body);
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(rows)
+                    .children(Self::thumb(&theme, &self.scroll))
+                    .into_any_element()
             }
         };
         div()

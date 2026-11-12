@@ -343,7 +343,9 @@ impl Render for SettingsPage {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            // m2a-t21-shots: the frame checks treat this clip as a scroll viewport.
+            .child(hacivat_ui::text::scroll_viewport());
         if self.query.trim().is_empty() {
             list = list.child(
                 div()

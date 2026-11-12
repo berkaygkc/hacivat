@@ -126,6 +126,8 @@ pub fn form_dialog(
                 .pt(px(t.spacing.xl))
                 .px(px(t.spacing.s_3xl))
                 .pb(px(t.spacing.s_2xl))
+                // ## m2a-t21-shots: the frame checks treat this clip as a scroll viewport.
+                .child(crate::text::scroll_viewport())
                 .child(body),
         )
         .children(strip)
@@ -368,7 +370,8 @@ impl Render for Dialog {
                         ))
                         .child(close),
                 )
-                .child(div().child(Label::new(
+                // ## m2a-t21-shots: the body wraps to the card (a long locale never clips).
+                .child(div().child(crate::text::paragraph(
                     body,
                     TextSource::Fluent,
                     t.type_ramp.body,

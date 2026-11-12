@@ -1280,3 +1280,120 @@ fn the_explanation_popover_takes_and_returns_the_focus(cx: &mut TestAppContext) 
     assert!(focused(vcx, &input));
     assert_eq!(*events.borrow(), [ExplainEvent::Dismissed]);
 }
+
+// ## m2a-t21-shots: popover paragraphs face the frame checks
+
+#[gpui::test]
+fn explanation_paragraphs_are_recorded_after_the_title_and_unclipped(cx: &mut TestAppContext) {
+    let vcx = explain_fixture(cx);
+    enable_registry(vcx);
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let drawn: Vec<&str> = frame.iter().map(|r| r.text.as_ref()).collect();
+    assert_eq!(
+        drawn,
+        [
+            "Unencrypted connection",
+            "ci-mariadb sends queries and results in plain text.",
+            "To encrypt, set TLS to Require in Edit connection.",
+        ]
+    );
+    for r in &frame[1..] {
+        assert!(r.path.contains("hacivat-ui/src/explain.rs:"), "{}", r.path);
+        assert_eq!(r.size_px, 12.5);
+        assert!(!r.clipped, "{r:?}");
+    }
+}
+
+#[gpui::test]
+fn a_paragraph_in_a_box_too_short_for_it_is_clipped(cx: &mut TestAppContext) {
+    let vcx = host(cx, |_, cx| {
+        let t = Theme::get(cx).tokens;
+        div()
+            .w(px(120.0))
+            .h(px(6.0))
+            .overflow_hidden()
+            .child(hacivat_ui::text::paragraph(
+                "A sentence long enough to wrap onto a second line here.",
+                hacivat_ui::text::TextSource::Fluent,
+                t.type_ramp.body_sm,
+                t.colors.text_2.to_hsla(),
+            ))
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(400.0), px(200.0)));
+    enable_registry(vcx);
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    assert_eq!(frame.len(), 1);
+    assert!(frame[0].clipped, "{:?}", frame[0]);
+}
+
+// ## m2a-t21-shots: the capsule probe and the clip policy
+
+#[gpui::test]
+fn the_capsule_probe_is_empty_in_a_frame_without_the_capsule(cx: &mut TestAppContext) {
+    use hacivat_ui::capsule::CapsuleProbe;
+    let show = Rc::new(Cell::new(true));
+    let shown = show.clone();
+    let vcx = host(cx, move |_, _| {
+        let mut root = div().p(px(10.0)).child(hacivat_ui::text::Label::new(
+            "always",
+            hacivat_ui::text::TextSource::Fluent,
+            DARK.type_ramp.body,
+            DARK.colors.text.to_hsla(),
+        ));
+        if shown.get() {
+            root = root.child(Capsule::new(failed_capsule("orders-prod")));
+        }
+        root.into_any_element()
+    });
+    vcx.update(|_, cx| cx.set_global(CapsuleProbe::default()));
+    enable_registry(vcx);
+    let probed = |vcx: &mut VisualTestContext| vcx.read(|cx| cx.global::<CapsuleProbe>().bounds);
+    assert!(probed(vcx).is_some(), "the capsule was painted");
+    show.set(false);
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    assert_eq!(probed(vcx), None, "no stale bounds from the earlier frame");
+}
+
+/// A label in a 10 px tall container that clips; `scrolls` marks it as a scroll viewport.
+fn cut_label(cx: &mut TestAppContext, scrolls: bool) -> bool {
+    let vcx = host(cx, move |_, _| {
+        let mut clip = div().id("clip").w(px(200.0)).h(px(10.0));
+        clip = if scrolls {
+            gpui::StatefulInteractiveElement::overflow_y_scroll(clip)
+                .child(hacivat_ui::text::scroll_viewport())
+        } else {
+            clip.overflow_hidden()
+        };
+        div()
+            .p(px(10.0))
+            .child(clip.child(hacivat_ui::text::Label::new(
+                "cut",
+                hacivat_ui::text::TextSource::Fluent,
+                DARK.type_ramp.body,
+                DARK.colors.text.to_hsla(),
+            )))
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(400.0), px(200.0)));
+    enable_registry(vcx);
+    vcx.read(|cx| {
+        cx.global::<TextRegistry>()
+            .frame
+            .iter()
+            .find(|r| r.text.as_ref() == "cut")
+            .expect("the label is drawn")
+            .clipped
+    })
+}
+
+#[gpui::test]
+fn a_label_cut_by_a_container_is_clipped(cx: &mut TestAppContext) {
+    assert!(cut_label(cx, false));
+}
+
+#[gpui::test]
+fn a_label_partly_scrolled_out_of_a_viewport_is_not_clipped(cx: &mut TestAppContext) {
+    assert!(!cut_label(cx, true));
+}
