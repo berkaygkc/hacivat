@@ -362,3 +362,228 @@ hv-conn-import-done = { $count ->
         [one] Imported one connection
        *[other] Imported { $count } connections
     }
+## m2a-t20-errors
+
+# The connection dialog's test strip while a test runs (NOTES surface 1).
+hv-conn-test-running = Testing
+# The running clock of a test, in seconds with two decimals.
+# Variables:
+#   $seconds (Decimal) - seconds since the test started, e.g. 0.06.
+hv-conn-test-clock = { NUMBER($seconds, minimumFractionDigits: 2) } s
+# The test strip's heading after a successful test.
+# Variables:
+#   $ms (Number) - the whole test in whole milliseconds, e.g. 54.
+hv-conn-test-ok = Connected in { $ms } ms
+# The line under a successful test's heading.
+hv-conn-test-ok-sub = Nothing was saved. The test opened its own connection and closed it.
+# The button that copies the test report (always in English).
+hv-conn-test-copy = Copy report
+
+# Diagnostics of a successful test: row labels and values.
+hv-conn-diag-server = Server
+hv-conn-diag-latency = Latency
+hv-conn-diag-tls = Encryption
+hv-conn-diag-cipher = Cipher
+hv-conn-diag-auth = Signed in as
+hv-conn-diag-warn = Warnings
+hv-conn-diag-none = None
+# The server row's value.
+# Variables:
+#   $product (String) - the server's product name, e.g. "PostgreSQL".
+#   $version (String) - the server's version, e.g. "16.4".
+hv-conn-diag-server-v = { $product } { $version }
+# The latency row's value.
+# Variables:
+#   $ms (Number) - the median round trip in whole milliseconds, e.g. 12.
+hv-conn-diag-latency-v = { $ms } ms · median of 3 pings
+# The sign-in row's value: the user and the sign-in method.
+# Variables:
+#   $user (String) - the database user, e.g. "deploy".
+#   $method (Enum(password, none, pgpass, client_cert)) - how the user signed in.
+hv-conn-diag-auth-v = { $user } · { $method ->
+        [password] Password
+        [pgpass] pgpass
+        [client_cert] Client certificate
+       *[none] no password
+    }
+# The sign-in row's value when the user is unknown: the sign-in method alone.
+# Variables:
+#   $method (Enum(password, none, pgpass, client_cert)) - how the user signed in.
+hv-conn-diag-auth-method = { $method ->
+        [password] Password
+        [pgpass] pgpass
+        [client_cert] Client certificate
+       *[none] No password
+    }
+# The encryption row's value for an encrypted connection.
+# Variables:
+#   $version (String) - the TLS version number, e.g. "1.3".
+#   $state (Enum(full, ca_only, no)) - how far the server's certificate was verified.
+hv-conn-diag-tls-v = TLS { $version } · { $state ->
+        [full] verified
+        [ca_only] CA verified
+       *[no] not verified
+    }
+# The encryption row's value when the TLS version is unknown.
+# Variables:
+#   $state (Enum(full, ca_only, no)) - how far the server's certificate was verified.
+hv-conn-diag-tls-nov = TLS · { $state ->
+        [full] verified
+        [ca_only] CA verified
+       *[no] not verified
+    }
+# The encryption row's value for an unencrypted network connection.
+hv-conn-diag-tls-none = unencrypted
+# The encryption and sign-in rows of a database file (SQLite).
+hv-conn-diag-file = not applicable (file)
+# One line of a copied report (English): a row's label and its value.
+# Variables:
+#   $label (String) - the row's label, e.g. "Latency".
+#   $value (String) - the row's value, e.g. "12 ms · median of 3 pings".
+hv-conn-diag-row = { $label }: { $value }
+
+# The connect steps of the step trail (HV-CONN-01).
+hv-conn-step-resolve = Resolve
+hv-conn-step-tcp = Connect
+hv-conn-step-tls = TLS
+hv-conn-step-auth = Sign in
+hv-conn-step-check = Check server
+hv-conn-step-pgpass = pgpass
+hv-conn-step-open = Open file
+# A finished step's duration.
+# Variables:
+#   $ms (Number) - the step's time in whole milliseconds, e.g. 14.
+hv-conn-step-ms = { $ms } ms
+# The step trail's accessible name, and the state each step announces.
+hv-conn-step-list = Connection steps
+hv-conn-step-state-pending = not started
+hv-conn-step-state-running = in progress
+hv-conn-step-state-done = done
+hv-conn-step-state-failed = failed
+hv-conn-step-state-skipped = skipped
+
+# Warnings a successful test still reports.
+hv-conn-warn-no-tls = The connection isn't encrypted.
+hv-conn-warn-tls-not-verified = The connection is encrypted, but the server's certificate wasn't verified.
+# Variables:
+#   $version (String) - the server's version, e.g. "18.1".
+hv-conn-warn-not-tested = { -brand-hacivat } hasn't been tested with version { $version } yet.
+# Variables:
+#   $version (String) - the server's version, e.g. "9.6.24".
+hv-conn-warn-unsupported = Version { $version } is older than { -brand-hacivat } supports. You chose to connect anyway.
+hv-conn-warn-replica = The server is a read-only replica.
+hv-conn-warn-server-read-only = The server is in read-only mode.
+hv-conn-warn-super-read-only = The server is in super-read-only mode: nobody can write, not even administrators.
+# Variables:
+#   $seconds (Number) - the server's idle timeout in seconds, e.g. 60.
+hv-conn-warn-low-wait-timeout = The server closes idle connections after { $seconds } s.
+hv-conn-warn-local-infile-on = The server allows LOAD DATA LOCAL INFILE, so it can ask for files from this Mac.
+hv-conn-warn-sqlite-file-not-writable = The database file can't be written, so it opens read-only.
+# Variables:
+#   $mode (String) - the SQLite journal mode, e.g. "delete".
+hv-conn-warn-sqlite-journal = The database uses the { $mode } journal mode.
+
+# The connect-error dialog's title (NOTES surface 3).
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-err-title = Couldn't connect to { $name }
+# Under the re-entered password field: which of the 3 attempts this is.
+# Variables:
+#   $n (Number) - the attempt, 1 to 3.
+hv-conn-err-attempt = Attempt { $n } of 3
+# Placeholder of the re-entered password field.
+# Variables:
+#   $user (String) - the database user, e.g. "deploy".
+hv-conn-err-new-pw = Password for { $user }
+# The technical details disclosure and its rows.
+hv-conn-err-tech = Technical details
+hv-conn-err-stage = Failed at
+hv-conn-err-class = Class
+hv-conn-err-code = Code
+hv-conn-err-server = Server message
+hv-conn-err-elapsed-label = Elapsed
+# The elapsed row's value, in seconds with three decimals.
+# Variables:
+#   $seconds (Decimal) - the connect's time in seconds, e.g. 0.214.
+hv-conn-err-elapsed = { NUMBER($seconds, minimumFractionDigits: 3) } s
+# The button that copies the technical details (always in English).
+hv-conn-err-copy = Copy details (English)
+
+# Quick fixes (HV-CONN-03).
+hv-conn-fix-reenter = Enter password again
+hv-conn-fix-edit = Edit connection
+hv-conn-fix-retry = Try again
+# Variables:
+#   $db (String) - a database the user can open, e.g. "orders".
+hv-conn-fix-use-db = Use { $db }
+hv-conn-fix-versions = Supported versions
+hv-conn-fix-anyway = Connect anyway, unsupported
+hv-conn-fix-connect = Connect
+hv-conn-fix-close = Close
+# The fix for an untrusted or mismatched certificate (R3): TLS without verification.
+hv-conn-fix-require = Encrypt without verifying
+# Shown with that fix: what it gives up, plainly.
+hv-conn-fix-require-note = The connection will be encrypted, but { -brand-hacivat } won't check that the server is who it claims to be.
+# Shown when the connections file is read-only: fixes that change the connection are off.
+hv-conn-fix-read-only = Your connections file can't be changed, so fixes that edit this connection are off.
+# Shown when a fix's change to the connection could not be saved.
+hv-conn-fix-save-failed = The change couldn't be saved to your connections file.
+
+# The production-tag prompt (NOTES surface 4, D-004).
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod-us".
+hv-conn-prod-title = How careful should { -brand-hacivat } be with { $name }?
+# Variables:
+#   $host (String) - the connection's host, e.g. "db-prod-us.acme.io".
+hv-conn-prod-body = { $host } isn't on this Mac. Pick the kind of database it is. You can change this later in the connection settings.
+# Why Production is preselected: a word of the host name.
+# Variables:
+#   $token (String) - the word that matched, e.g. "prod".
+hv-conn-prod-suggest = Suggested because the host name contains “{ $token }”.
+# Why Production is preselected: a word of the connection's name.
+# Variables:
+#   $token (String) - the word that matched, e.g. "prd".
+hv-conn-prod-suggest-name = Suggested because the name contains “{ $token }”.
+# The environment choices and their descriptions.
+hv-conn-prod-opt-production = Production
+hv-conn-prod-opt-production-d = Live data that people or services rely on
+hv-conn-prod-opt-staging = Staging
+hv-conn-prod-opt-staging-d = A copy that mirrors production
+hv-conn-prod-opt-test = Test
+hv-conn-prod-opt-test-d = Shared test or CI data
+hv-conn-prod-opt-dev = Dev
+hv-conn-prod-opt-dev-d = A development database you can break
+# The choice list's accessible name.
+hv-conn-prod-choices = Environment
+# What changes with Production, as a list.
+hv-conn-prod-changes = With production, { -brand-hacivat }:
+# Variables:
+#   $word (String) - the capsule's word, hv-conn-prod-c1-word, drawn in red small caps.
+hv-conn-prod-c1 = shows the { $word } capsule in the title bar while you work on it,
+# The capsule's word in the list, in small caps: pre-cased here, never cased in code.
+hv-conn-prod-c1-word = PRODUCTION
+hv-conn-prod-c2 = asks you to confirm statements that change data or schema,
+hv-conn-prod-c3 = uses manual commit: nothing is written until you commit.
+# Shown instead of the list for any other environment.
+hv-conn-prod-other = No extra confirmations. Statements commit as they run.
+# The primary button: it names the result.
+# Variables:
+#   $env (Enum(production, staging, test, dev)) - the chosen tag.
+hv-conn-prod-save = { $env ->
+        [production] Save as production
+        [staging] Save as staging
+        [test] Save as test
+       *[dev] Save as dev
+    }
+# The primary button while nothing is chosen (disabled).
+hv-conn-prod-pick = Pick an environment
+hv-conn-prod-cancel = Cancel
+
+# The password prompt a connect asks through (R14).
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-pw-title = Sign in to { $name }
+# Variables:
+#   $user (String) - the database user, e.g. "deploy".
+hv-conn-pw-body = Enter the password for { $user }. It's kept only if the connection works.
+hv-conn-pw-cancel = Cancel
