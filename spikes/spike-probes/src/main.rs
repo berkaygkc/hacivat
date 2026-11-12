@@ -541,7 +541,10 @@ fn a11y_line(active: bool, json: Option<&str>) -> (String, bool) {
         );
     };
     if !(json.contains("Result 1") && json.contains("Grid")) {
-        return (format!("probe a11y: FAIL tree lacks Grid / \"Result 1\":\n{json}"), true);
+        return (
+            format!("probe a11y: FAIL tree lacks Grid / \"Result 1\":\n{json}"),
+            true,
+        );
     }
     let line = if active {
         format!(
@@ -613,7 +616,10 @@ mod tests {
     #[test]
     fn a11y_without_assistive_tech_does_not_claim_platform_ok() {
         let (line, failed) = a11y_line(false, Some(TREE));
-        assert!(line.contains("GPUI tree ok; platform AT unverified"), "{line}");
+        assert!(
+            line.contains("GPUI tree ok; platform AT unverified"),
+            "{line}"
+        );
         assert!(!line.starts_with("probe a11y: ok"), "{line}");
         assert!(!failed);
     }

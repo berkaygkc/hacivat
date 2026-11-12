@@ -11,7 +11,11 @@ use std::time::{Duration, Instant};
 /// The cargo workspace root (`crates/ui/hacivat-ui-core` -> `../../..`).
 pub fn workspace_root() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.ancestors().nth(3).unwrap_or(manifest).to_path_buf()
+    manifest
+        .ancestors()
+        .nth(3)
+        .unwrap_or(manifest)
+        .to_path_buf()
 }
 
 /// Where benches write their JSON dumps: `<workspace>/target/bench`, independent of the cwd.
@@ -67,7 +71,10 @@ mod tests {
 
     #[test]
     fn display_hz_comes_from_the_refresh_interval() {
-        assert_eq!(hz_of(Some(std::time::Duration::from_micros(4_167))).map(f64::round), Some(240.0));
+        assert_eq!(
+            hz_of(Some(std::time::Duration::from_micros(4_167))).map(f64::round),
+            Some(240.0)
+        );
         assert_eq!(hz_of(None), None);
         assert_eq!(hz_of(Some(std::time::Duration::ZERO)), None);
     }

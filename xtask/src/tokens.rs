@@ -39,7 +39,9 @@ impl Caps {
         match s {
             None | Some("normal") => Ok(Self::Normal),
             Some("synthesized") => Ok(Self::SynthesizedSmallCaps),
-            Some(other) => bail!("fontVariantCaps must be `normal` or `synthesized`, got `{other}`"),
+            Some(other) => {
+                bail!("fontVariantCaps must be `normal` or `synthesized`, got `{other}`")
+            }
         }
     }
 
@@ -790,14 +792,24 @@ spacing: {}
         assert!(ty("label-sc").features.is_empty());
         let normal = MD.replace("fontVariantCaps: synthesized", "fontVariantCaps: normal");
         let t = load(&normal, JSON).unwrap();
-        assert_eq!(t.typography.iter().find(|s| s.name == "label-sc").unwrap().caps, Caps::Normal);
+        assert_eq!(
+            t.typography
+                .iter()
+                .find(|s| s.name == "label-sc")
+                .unwrap()
+                .caps,
+            Caps::Normal
+        );
     }
 
     #[test]
     fn rejects_unknown_font_variant_caps() {
         // Real smcp/c2sc small caps are not an option (PO decision): only `synthesized`.
         for bad in ["all-small-caps", "smcp", "\"\""] {
-            let md = MD.replace("fontVariantCaps: synthesized", &format!("fontVariantCaps: {bad}"));
+            let md = MD.replace(
+                "fontVariantCaps: synthesized",
+                &format!("fontVariantCaps: {bad}"),
+            );
             assert!(load(&md, JSON).is_err(), "{bad}");
         }
     }
@@ -825,7 +837,11 @@ spacing: {}
                 s.features
             );
         }
-        assert!(t.typography.iter().all(|s| s.features.iter().all(|f| f != "smcp" && f != "c2sc")));
+        assert!(
+            t.typography
+                .iter()
+                .all(|s| s.features.iter().all(|f| f != "smcp" && f != "c2sc"))
+        );
     }
 
     #[test]

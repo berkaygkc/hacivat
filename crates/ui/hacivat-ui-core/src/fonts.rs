@@ -61,7 +61,11 @@ pub const TRACKING_FIT: f32 = 0.5;
 pub fn small_caps_glyphs(text: &str, size_px: f32) -> Vec<(char, f32)> {
     text.chars()
         .map(|ch| {
-            let size = if ch.is_alphabetic() { size_px * SYNTH_SCALE } else { size_px };
+            let size = if ch.is_alphabetic() {
+                size_px * SYNTH_SCALE
+            } else {
+                size_px
+            };
             (ch, size)
         })
         .collect()
@@ -129,7 +133,16 @@ mod tests {
         let sc = 13.0 * SYNTH_SCALE;
         assert_eq!(
             g,
-            vec![('N', sc), ('U', sc), ('L', sc), ('L', sc), (' ', 13.0), ('2', 13.0), ('·', 13.0), ('x', sc)]
+            vec![
+                ('N', sc),
+                ('U', sc),
+                ('L', sc),
+                ('L', sc),
+                (' ', 13.0),
+                ('2', 13.0),
+                ('·', 13.0),
+                ('x', sc)
+            ]
         );
     }
 
@@ -137,7 +150,12 @@ mod tests {
     fn small_caps_take_pre_cased_text_and_never_case_it() {
         // Turkish dotted capital I arrives pre-cased and is kept; lower-case input is not
         // upper-cased here (casing is locale-aware and happens upstream).
-        let chars = |s: &str| small_caps_glyphs(s, 10.0).into_iter().map(|g| g.0).collect::<String>();
+        let chars = |s: &str| {
+            small_caps_glyphs(s, 10.0)
+                .into_iter()
+                .map(|g| g.0)
+                .collect::<String>()
+        };
         assert_eq!(chars("GEZGİN"), "GEZGİN");
         assert_eq!(chars("gezgin"), "gezgin");
     }

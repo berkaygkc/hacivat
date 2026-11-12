@@ -521,11 +521,26 @@ mod tests {
             max_ms: p95,
         };
         let run = lat_run(1);
-        assert_eq!(verdict("b3-typing-small", "macos", &l(16.0), &run), Verdict::Pass);
-        assert_eq!(verdict("b3-typing-small", "macos", &l(16.1), &run), Verdict::Fail);
-        assert_eq!(verdict("b3-completion", "macos", &l(50.0), &run), Verdict::Pass);
-        assert_eq!(verdict("b3-completion", "macos", &l(50.1), &run), Verdict::Fail);
-        assert_eq!(verdict("other", "macos", &l(1.0), &run), Verdict::NoThreshold);
+        assert_eq!(
+            verdict("b3-typing-small", "macos", &l(16.0), &run),
+            Verdict::Pass
+        );
+        assert_eq!(
+            verdict("b3-typing-small", "macos", &l(16.1), &run),
+            Verdict::Fail
+        );
+        assert_eq!(
+            verdict("b3-completion", "macos", &l(50.0), &run),
+            Verdict::Pass
+        );
+        assert_eq!(
+            verdict("b3-completion", "macos", &l(50.1), &run),
+            Verdict::Fail
+        );
+        assert_eq!(
+            verdict("other", "macos", &l(1.0), &run),
+            Verdict::NoThreshold
+        );
     }
 
     #[test]
@@ -565,58 +580,111 @@ mod tests {
 
     #[test]
     fn complete_runs_keep_their_threshold_verdict() {
-        assert_eq!(verdict("b1-fling", "macos", &ok(), &b1_run()), Verdict::Pass);
-        assert_eq!(verdict("b3-typing", "macos", &lat(2_000), &lat_run(2_000)), Verdict::Pass);
+        assert_eq!(
+            verdict("b1-fling", "macos", &ok(), &b1_run()),
+            Verdict::Pass
+        );
+        assert_eq!(
+            verdict("b3-typing", "macos", &lat(2_000), &lat_run(2_000)),
+            Verdict::Pass
+        );
         // 95 % of the expected samples is still complete.
-        assert_eq!(verdict("b3-typing", "macos", &lat(1_900), &lat_run(2_000)), Verdict::Pass);
+        assert_eq!(
+            verdict("b3-typing", "macos", &lat(1_900), &lat_run(2_000)),
+            Verdict::Pass
+        );
     }
 
     #[test]
     fn zero_samples_fail() {
-        assert_eq!(verdict("b3-typing", "macos", &lat(0), &lat_run(0)), Verdict::Fail);
+        assert_eq!(
+            verdict("b3-typing", "macos", &lat(0), &lat_run(0)),
+            Verdict::Fail
+        );
         let empty = stats_of(&[]);
-        let run = RunInfo { painted_frames: Some(0), ..b1_run() };
+        let run = RunInfo {
+            painted_frames: Some(0),
+            ..b1_run()
+        };
         assert_eq!(verdict("b1-fling", "macos", &empty, &run), Verdict::Fail);
     }
 
     #[test]
     fn partial_runs_fail_below_95_percent_of_expected() {
-        assert_eq!(verdict("b3-typing", "macos", &lat(1_899), &lat_run(2_000)), Verdict::Fail);
-        let run = RunInfo { expected_samples: 1_300, ..b1_run() };
+        assert_eq!(
+            verdict("b3-typing", "macos", &lat(1_899), &lat_run(2_000)),
+            Verdict::Fail
+        );
+        let run = RunInfo {
+            expected_samples: 1_300,
+            ..b1_run()
+        };
         assert_eq!(verdict("b1-fling", "macos", &ok(), &run), Verdict::Fail);
     }
 
     #[test]
     fn inactive_keys_fail() {
-        let run = RunInfo { inactive_keys: 1, ..lat_run(2_000) };
-        assert_eq!(verdict("b3-typing", "macos", &lat(2_000), &run), Verdict::Fail);
-        let run = RunInfo { inactive_keys: 1, ..b1_run() };
+        let run = RunInfo {
+            inactive_keys: 1,
+            ..lat_run(2_000)
+        };
+        assert_eq!(
+            verdict("b3-typing", "macos", &lat(2_000), &run),
+            Verdict::Fail
+        );
+        let run = RunInfo {
+            inactive_keys: 1,
+            ..b1_run()
+        };
         assert_eq!(verdict("b1-fling", "macos", &ok(), &run), Verdict::Fail);
     }
 
     #[test]
     fn aborted_runs_fail() {
-        let run = RunInfo { aborted: true, ..lat_run(2_000) };
-        assert_eq!(verdict("b3-completion", "macos", &lat(2_000), &run), Verdict::Fail);
+        let run = RunInfo {
+            aborted: true,
+            ..lat_run(2_000)
+        };
+        assert_eq!(
+            verdict("b3-completion", "macos", &lat(2_000), &run),
+            Verdict::Fail
+        );
     }
 
     #[test]
     fn b1_needs_painted_frames_for_95_percent_of_intervals() {
-        let run = RunInfo { painted_frames: Some(1_139), ..b1_run() };
+        let run = RunInfo {
+            painted_frames: Some(1_139),
+            ..b1_run()
+        };
         assert_eq!(verdict("b1-fling", "macos", &ok(), &run), Verdict::Fail);
-        let run = RunInfo { painted_frames: Some(1_140), ..b1_run() };
+        let run = RunInfo {
+            painted_frames: Some(1_140),
+            ..b1_run()
+        };
         assert_eq!(verdict("b1-fling", "macos", &ok(), &run), Verdict::Pass);
-        let run = RunInfo { painted_frames: None, ..b1_run() };
+        let run = RunInfo {
+            painted_frames: None,
+            ..b1_run()
+        };
         assert_eq!(verdict("b1-fling", "macos", &ok(), &run), Verdict::Fail);
     }
 
     #[test]
     fn b1_needs_at_least_600_frames() {
         let s = stats_of(&[16.0; 599]);
-        let run = RunInfo { expected_samples: 0, painted_frames: Some(599), ..b1_run() };
+        let run = RunInfo {
+            expected_samples: 0,
+            painted_frames: Some(599),
+            ..b1_run()
+        };
         assert_eq!(verdict("b1-fling", "macos", &s, &run), Verdict::Fail);
         let s = stats_of(&[16.0; 600]);
-        let run = RunInfo { expected_samples: 0, painted_frames: Some(600), ..b1_run() };
+        let run = RunInfo {
+            expected_samples: 0,
+            painted_frames: Some(600),
+            ..b1_run()
+        };
         assert_eq!(verdict("b1-fling", "macos", &s, &run), Verdict::Pass);
     }
 
@@ -630,19 +698,37 @@ mod tests {
     #[test]
     fn build_label_marks_dirty_trees() {
         assert_eq!(build_label("abc1234", ""), "abc1234");
-        assert_eq!(build_label("abc1234", " M xtask/src/bench_report.rs\n"), "abc1234-dirty");
-        assert_eq!(build_label("abc1234", "?? spikes/new.rs\n"), "abc1234-dirty");
+        assert_eq!(
+            build_label("abc1234", " M xtask/src/bench_report.rs\n"),
+            "abc1234-dirty"
+        );
+        assert_eq!(
+            build_label("abc1234", "?? spikes/new.rs\n"),
+            "abc1234-dirty"
+        );
         let ignored = "?? target/bench/b3-typing.json\n?? .superpowers/sdd/x-report.md\n";
         assert_eq!(build_label("abc1234", ignored), "abc1234");
         // Only untracked files there are ignored; a tracked change still counts.
-        assert_eq!(build_label("abc1234", " M .superpowers/x.md\n"), "abc1234-dirty");
+        assert_eq!(
+            build_label("abc1234", " M .superpowers/x.md\n"),
+            "abc1234-dirty"
+        );
     }
 
     #[test]
     fn build_label_ignores_benchmark_docs() {
         // Writing results into docs/benchmarks must not make the next run look dirty.
-        assert_eq!(build_label("abc1234", " M docs/benchmarks/m0.md\n"), "abc1234");
-        assert_eq!(build_label("abc1234", "?? docs/benchmarks/m1.md\n"), "abc1234");
-        assert_eq!(build_label("abc1234", " M docs/other.md\n"), "abc1234-dirty");
+        assert_eq!(
+            build_label("abc1234", " M docs/benchmarks/m0.md\n"),
+            "abc1234"
+        );
+        assert_eq!(
+            build_label("abc1234", "?? docs/benchmarks/m1.md\n"),
+            "abc1234"
+        );
+        assert_eq!(
+            build_label("abc1234", " M docs/other.md\n"),
+            "abc1234-dirty"
+        );
     }
 }
