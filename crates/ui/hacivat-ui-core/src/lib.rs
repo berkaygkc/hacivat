@@ -2,6 +2,7 @@
 
 pub mod actions;
 pub mod app;
+pub mod assets;
 pub mod fonts;
 #[cfg(feature = "bench")]
 pub mod frame_loop;
@@ -9,7 +10,9 @@ pub mod gpui_surface;
 pub mod keymap;
 pub mod metrics;
 pub mod named_rules;
-pub mod shell;
+pub mod platform;
+#[cfg(feature = "spike-support")]
+pub mod spike_support;
 pub mod theme;
 pub mod window;
 

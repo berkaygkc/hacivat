@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-hacivat-ui-core = { path = "../../crates/ui/hacivat-ui-core" }
+hacivat-ui-core = { path = "../../crates/ui/hacivat-ui-core", features = ["spike-support"] }
 anyhow.workspace = true
 cargo-packager-updater = "0.2.3"
 base64 = "0.22"
