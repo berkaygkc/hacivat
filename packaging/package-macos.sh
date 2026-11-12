@@ -1,64 +1,93 @@
 #!/usr/bin/env bash
-# Build, sign (Developer ID, hardened runtime), notarize + staple when a notarytool profile exists,
-# and minisign-sign the universal macOS bundle of spike-harman.
-# usage: packaging/package-macos.sh <version>
+# Build the universal macOS DMG of Hacivat.
 #
-# Env (all optional; nothing is ever written into the repo):
-#   APPLE_SIGNING_IDENTITY   codesign identity (default: the first Developer ID Application in the keychain)
-#   REQUIRE_NOTARIZATION     1 makes a missing/failing notary profile fatal (default: 1 when RELEASE=1, else 0)
+# usage: packaging/package-macos.sh <version>
+#   (default)  an UNSIGNED DMG, exactly what the CI nightly produces.
+#   RELEASE=1  PO's Mac only (L13): Developer ID sign, notarize, staple, then minisign the DMG and
+#              the update tarball with the passworded key (minisign prompts for the password).
+#
+# Env (nothing is ever written into the repo):
+#   RELEASE                  1 turns on signing, notarization and minisign
 #   NOTARY_PROFILE           notarytool keychain profile (default: hacivat-notary)
+#   APPLE_SIGNING_IDENTITY   codesign identity (default: the first Developer ID Application in the keychain)
+#   REQUIRE_NOTARIZATION     1|true|yes makes an unusable notary profile fatal (always on when RELEASE=1; a falsy override fails)
 #   UPDATE_KEY               minisign secret key (default: ~/.hacivat-keys/update.key)
-# Output: target/packager/<version>/ (.dmg, .app.tar.gz + .minisig)
+# Output: target/packager/<version>/Hacivat_<version>_universal.dmg
 set -euo pipefail
 VERSION="${1:?usage: package-macos.sh <version>}"
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
-PROFILE="${NOTARY_PROFILE:-hacivat-notary}"
-KEY="${UPDATE_KEY:-$HOME/.hacivat-keys/update.key}"
-IDENT="${APPLE_SIGNING_IDENTITY:-$(security find-identity -v -p codesigning | awk '/Developer ID Application/ {print $2; exit}')}"
-[ -n "$IDENT" ] || { echo "no Developer ID Application identity found" >&2; exit 1; }
+# shellcheck source=packaging/common.sh
+. "$ROOT/packaging/common.sh"
+
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 OUT="$TARGET_DIR/packager/$VERSION"
-BIN="$OUT"   # cargo-packager resolves binaries relative to the out dir
+PROFILE="${NOTARY_PROFILE:-hacivat-notary}"
+
+IDENT=""
+if truthy "${RELEASE:-0}"; then
+  # Fail before the long build: the key must exist and be passworded, the identity must exist.
+  require_encrypted_key "$ROOT"
+  IDENT="${APPLE_SIGNING_IDENTITY:-$(security find-identity -v -p codesigning | awk '/Developer ID Application/ {print $2; exit}')}"
+  [ -n "$IDENT" ] || { echo "no Developer ID Application identity found" >&2; exit 1; }
+  # A release is always notarized: an override that turns it off is an error, not a downgrade.
+  if [ -n "${REQUIRE_NOTARIZATION:-}" ] && ! truthy "$REQUIRE_NOTARIZATION"; then
+    echo "RELEASE=1 requires notarization; REQUIRE_NOTARIZATION=$REQUIRE_NOTARIZATION is not allowed" >&2
+    exit 1
+  fi
+  REQUIRE_NOTARIZATION=1
+fi
+
 rm -rf "$OUT"; mkdir -p "$OUT"
-
-export HACIVAT_SPIKE_VERSION="$VERSION"
 for t in aarch64-apple-darwin x86_64-apple-darwin; do
-  cargo build --release -p spike-harman --target "$t"
+  cargo build --release --locked -p hacivat --target "$t"
 done
-lipo -create -output "$BIN/spike-harman" \
-  "$TARGET_DIR/aarch64-apple-darwin/release/spike-harman" \
-  "$TARGET_DIR/x86_64-apple-darwin/release/spike-harman"
+lipo -create -output "$OUT/hacivat" \
+  "$TARGET_DIR/aarch64-apple-darwin/release/hacivat" \
+  "$TARGET_DIR/x86_64-apple-darwin/release/hacivat"
 
-CFG="$ROOT/packaging/.Packager.generated.toml"   # git-ignored; holds the identity hash
+CFG="$ROOT/packaging/.Packager.generated.toml"   # ignored by the repo; may hold the identity hash
 trap 'rm -f "$CFG"' EXIT
-sed -e "s/@VERSION@/$VERSION/" -e "s/@SIGNING_IDENTITY@/$IDENT/" packaging/Packager.toml > "$CFG"
-
-REQUIRE_NOTARIZATION="${REQUIRE_NOTARIZATION:-${RELEASE:-0}}"   # RELEASE=1 implies it
-NOTARIZE=0
-if PROBE_ERR="$(xcrun notarytool history --keychain-profile "$PROFILE" 2>&1 >/dev/null)"; then
-  NOTARIZE=1
-  export APPLE_KEYCHAIN_PROFILE="$PROFILE"   # cargo-packager then notarizes + staples the .app
-elif [ "$REQUIRE_NOTARIZATION" = 1 ]; then
-  echo "FATAL: notarization required but notarytool profile '$PROFILE' is unusable:" >&2
-  echo "$PROBE_ERR" >&2
-  exit 1
+if [ -n "$IDENT" ]; then
+  sed -e "s/@VERSION@/$VERSION/" -e "s/@SIGNING_IDENTITY@/$IDENT/" packaging/Packager.toml > "$CFG"
 else
-  echo "WARNING: notarytool profile '$PROFILE' unusable: building signed but NOT notarized:" >&2
-  echo "$PROBE_ERR" >&2
+  sed -e "s/@VERSION@/$VERSION/" -e '/@SIGNING_IDENTITY@/d' packaging/Packager.toml > "$CFG"
+fi
+
+NOTARIZE=0
+if [ -n "$IDENT" ]; then
+  if probe_run "notarytool profile '$PROFILE'" xcrun notarytool history --keychain-profile "$PROFILE"; then
+    NOTARIZE=1
+    export APPLE_KEYCHAIN_PROFILE="$PROFILE"   # cargo-packager then notarizes + staples the .app
+  elif truthy "${REQUIRE_NOTARIZATION:-0}"; then
+    echo "FATAL: notarization required but notarytool profile '$PROFILE' is unusable (output above)" >&2
+    exit 1
+  else
+    echo "WARNING: building signed but NOT notarized" >&2
+  fi
 fi
 cargo packager -c "$CFG" --formats app,dmg --out-dir "$OUT"
 
-DMG="$(ls "$OUT"/*.dmg)"
+DMG="$OUT/Hacivat_${VERSION}_universal.dmg"
+BUILT="$(ls "$OUT"/*.dmg)"
+[ "$BUILT" = "$DMG" ] || mv "$BUILT" "$DMG"
+
 if [ "$NOTARIZE" = 1 ]; then
   xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait
   xcrun stapler staple "$DMG"
   xcrun stapler validate "$DMG"
 fi
 
-# Update artifact: the .app in a tarball (the updater skips the first path component), minisigned.
-TARBALL="$OUT/hacivat-spike_${VERSION}_universal.app.tar.gz"
-COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$OUT" "Hacivat Spike.app"
-minisign -S -s "$KEY" -m "$TARBALL" -x "$TARBALL.minisig" -t "hacivat-spike $VERSION"
-codesign --verify --deep --strict --verbose=2 "$OUT/Hacivat Spike.app"
-echo "done: $OUT"
+if [ -n "$IDENT" ]; then
+  # The updater takes the .app in a tarball (it skips the first path component).
+  TARBALL="$OUT/hacivat_${VERSION}_universal.app.tar.gz"
+  COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$OUT" "Hacivat.app"
+  codesign --verify --deep --strict --verbose=2 "$OUT/Hacivat.app"
+  require_encrypted_key "$ROOT"
+  for f in "$DMG" "$TARBALL"; do
+    minisign -S -s "$UPDATE_KEY_PATH" -m "$f" -x "$f.minisig" -t "hacivat $VERSION"
+  done
+else
+  echo "unsigned build (set RELEASE=1 on the PO's Mac to sign, notarize and minisign)"
+fi
+echo "done: $DMG"
