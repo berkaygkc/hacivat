@@ -31,6 +31,8 @@ case "$kind" in
     screencapture -x -o -l "$wid" "$OUT/cand-$tag.png"
     # screencapture tags the file with the display profile (Display P3); the reference is sRGB.
     sips -m "/System/Library/ColorSync/Profiles/sRGB Profile.icc" "$OUT/cand-$tag.png" --out "$OUT/cand-$tag.png" >/dev/null
+    # xtask vf refuses candidates that still carry an embedded profile: leave it untagged (sRGB).
+    sips --deleteColorManagementProperties "$OUT/cand-$tag.png" >/dev/null
     kill "$pid" 2>/dev/null || true
     ;;
   *) echo "usage: capture.sh ref|cand theme lang scale" >&2; exit 2 ;;

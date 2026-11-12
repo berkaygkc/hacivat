@@ -323,6 +323,62 @@
    "theme": "dark"
   },
   {
+   "name": "swatch-prod-explorer",
+   "x": 120,
+   "y": 221,
+   "token": "red",
+   "theme": "dark"
+  },
+  {
+   "name": "swatch-amber-result-tab",
+   "x": 580,
+   "y": 377,
+   "token": "amber",
+   "theme": "dark"
+  },
+  {
+   "name": "tab-dot-text2",
+   "x": 788,
+   "y": 55,
+   "token": "text_2",
+   "theme": "dark"
+  },
+  {
+   "name": "scroll-thumb",
+   "x": 1184,
+   "y": 480,
+   "token": "text_3@.6",
+   "theme": "dark"
+  },
+  {
+   "name": "scroll-prefetch",
+   "x": 1184,
+   "y": 506,
+   "token": "green_fill@.6",
+   "theme": "dark"
+  },
+  {
+   "name": "strip-page-prefetched",
+   "x": 300,
+   "y": 863,
+   "token": "green_fill",
+   "theme": "dark"
+  },
+  {
+   "name": "grid-header-seam-strong",
+   "x": 800,
+   "y": 462,
+   "token": "seam_strong",
+   "theme": "dark"
+  },
+  {
+   "name": "grid-row-seam-soft",
+   "x": 700,
+   "y": 483,
+   "token": "seam_soft",
+   "theme": "dark"
+  },
+  {
    "name": "titlebar-bg",
    "x": 1050,
    "y": 20,
@@ -643,6 +699,62 @@
    "y": 876,
    "token": "seam",
    "theme": "light"
+  },
+  {
+   "name": "swatch-prod-explorer",
+   "x": 120,
+   "y": 221,
+   "token": "red",
+   "theme": "light"
+  },
+  {
+   "name": "swatch-amber-result-tab",
+   "x": 580,
+   "y": 377,
+   "token": "amber",
+   "theme": "light"
+  },
+  {
+   "name": "tab-dot-text2",
+   "x": 788,
+   "y": 55,
+   "token": "text_2",
+   "theme": "light"
+  },
+  {
+   "name": "scroll-thumb",
+   "x": 1184,
+   "y": 480,
+   "token": "text_3@.6",
+   "theme": "light"
+  },
+  {
+   "name": "scroll-prefetch",
+   "x": 1184,
+   "y": 506,
+   "token": "green_fill@.6",
+   "theme": "light"
+  },
+  {
+   "name": "strip-page-prefetched",
+   "x": 300,
+   "y": 863,
+   "token": "green_fill",
+   "theme": "light"
+  },
+  {
+   "name": "grid-header-seam-strong",
+   "x": 800,
+   "y": 462,
+   "token": "seam_strong",
+   "theme": "light"
+  },
+  {
+   "name": "grid-row-seam-soft",
+   "x": 700,
+   "y": 483,
+   "token": "seam_soft",
+   "theme": "light"
   }
  ],
  "scanlines": [
@@ -735,6 +847,7 @@
    "from": 458,
    "to": 572,
    "tol_de": 0.8,
+   "note": "seam_soft vs panel is only dE 1.4 in dark, below the default 2.0 edge threshold",
    "expect_edges_px": [
     462,
     463,

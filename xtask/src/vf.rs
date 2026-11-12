@@ -10,7 +10,7 @@ use image::{GenericImage, Rgba, RgbaImage};
 use serde_json::Value;
 
 /// A colour sample passes when ΔE2000 between reference and candidate is at most this.
-pub const SAMPLE_TOLERANCE_DE: f64 = 2.0;
+pub const SAMPLE_TOLERANCE_DE: f64 = 1.0;
 /// Edge detector threshold: ΔE between neighbouring pixels above which a pixel starts an edge.
 pub const EDGE_TOLERANCE_DE: f64 = 2.0;
 /// Allowed deviation (logical px) between expected and found edges.
@@ -304,6 +304,25 @@ fn parse_args(args: &[String]) -> Result<Args> {
     Ok(a)
 }
 
+/// Whether a PNG carries an embedded ICC profile (an `iCCP` chunk before the pixel data).
+pub fn png_has_icc_profile(bytes: &[u8]) -> bool {
+    const SIG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    if !bytes.starts_with(SIG) {
+        return false;
+    }
+    let mut i = SIG.len();
+    while i + 8 <= bytes.len() {
+        let len = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
+        match &bytes[i + 4..i + 8] {
+            b"iCCP" => return true,
+            b"IDAT" | b"IEND" => return false,
+            _ => {}
+        }
+        i += 12 + len;
+    }
+    false
+}
+
 fn load(p: &Path) -> Result<RgbaImage> {
     Ok(image::open(p).with_context(|| format!("open {}", p.display()))?.to_rgba8())
 }
@@ -333,8 +352,17 @@ pub fn run() -> ExitCode {
 
 fn run_inner(args: &[String]) -> Result<bool> {
     let a = parse_args(args)?;
+    let cand_path = a.candidate.as_deref().context("--candidate required")?;
+    if png_has_icc_profile(&std::fs::read(cand_path)?) {
+        bail!(
+            "candidate {} carries an embedded ICC profile (iCCP chunk); the comparison assumes \
+             untagged sRGB. Convert and strip it first (design/vf/capture.sh does this with sips)",
+            cand_path.display()
+        );
+    }
+
     let rf = load(a.reference.as_deref().context("--reference required")?)?;
-    let cd = load(a.candidate.as_deref().context("--candidate required")?)?;
+    let cd = load(cand_path)?;
     if let Some(out) = &a.side_by_side {
         side_by_side(&rf, &cd).save(out)?;
         println!("wrote {}", out.display());
@@ -452,6 +480,69 @@ mod tests {
         assert_eq!(o.dimensions(), (24, 4));
         assert_eq!(*o.get_pixel(0, 0), rgb(0xFF0000));
         assert_eq!(*o.get_pixel(18, 0), rgb(0x00FF00));
+    }
+
+    fn fake_png(chunks: &[&[u8; 4]]) -> Vec<u8> {
+        let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        for c in chunks {
+            v.extend_from_slice(&2u32.to_be_bytes());
+            v.extend_from_slice(*c);
+            v.extend_from_slice(&[0, 0]);
+            v.extend_from_slice(&[0, 0, 0, 0]); // crc (not checked)
+        }
+        v
+    }
+
+    #[test]
+    fn detects_embedded_icc_profile() {
+        assert!(png_has_icc_profile(&fake_png(&[b"IHDR", b"iCCP", b"IDAT", b"IEND"])));
+        assert!(!png_has_icc_profile(&fake_png(&[b"IHDR", b"IDAT", b"IEND"])));
+        // iCCP after IDAT is not a valid position and is ignored.
+        assert!(!png_has_icc_profile(&fake_png(&[b"IHDR", b"IDAT", b"iCCP"])));
+    }
+
+    #[test]
+    fn candidate_with_icc_profile_is_refused() {
+        let dir = std::env::temp_dir().join("vf-icc-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("tagged.png");
+        std::fs::write(&png, fake_png(&[b"IHDR", b"iCCP", b"IDAT", b"IEND"])).unwrap();
+        let args: Vec<String> = ["--reference", png.to_str().unwrap(), "--candidate", png.to_str().unwrap()]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let err = run_inner(&args).unwrap_err().to_string();
+        assert!(err.contains("ICC profile"), "{err}");
+    }
+
+    #[test]
+    fn samples_cover_required_tokens_and_seams() {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../design/vf/samples.json");
+        let s = parse_samples(&std::fs::read_to_string(p).unwrap()).unwrap();
+        for theme in ["dark", "light"] {
+            let tokens: Vec<&str> = s
+                .colors
+                .iter()
+                .filter(|c| c.theme == theme)
+                .map(|c| c.token.split('@').next().unwrap())
+                .collect();
+            for want in [
+                "cp_fill", "ground", "panel", "side", "head", "gutter", "raised", "seam", "seam_strong",
+                "seam_soft", "blue", "blue_tint", "blue_tint_strong", "red", "red_tint", "amber",
+                "green_fill", "text_2", "text_3",
+            ] {
+                assert!(tokens.contains(&want), "{theme}: no sample for token {want}");
+            }
+        }
+        let has_edge = |name: &str, e: u32| {
+            s.scanlines.iter().any(|l| l.name.contains(name) && l.expect_edges_px.contains(&e))
+        };
+        assert!(has_edge("explorer-editor-seam", 276), "x = 276 seam");
+        assert!(has_edge("titlebar", 39), "title-bar seam");
+        let rows = s.scanlines.iter().find(|l| l.name.contains("grid-rows")).expect("grid rows scanline");
+        for e in [483, 504, 525, 546, 567] {
+            assert!(rows.expect_edges_px.contains(&e), "row border {e}");
+        }
     }
 
     #[test]
