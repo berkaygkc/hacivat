@@ -565,6 +565,12 @@ fn tls_failures_map_from_rustls_errors() {
             Error::InvalidCertificate(CertificateError::Revoked),
             TlsFailure::Other,
         ),
+        // A bad signature is a forged handshake or chain, not an unknown issuer: the
+        // "trust this certificate" fixes would be the wrong advice.
+        (
+            Error::InvalidCertificate(CertificateError::BadSignature),
+            TlsFailure::Protocol,
+        ),
         (
             Error::AlertReceived(AlertDescription::CertificateRequired),
             TlsFailure::ClientCertRequired,
@@ -578,6 +584,76 @@ fn tls_failures_map_from_rustls_errors() {
     ] {
         assert_eq!(TlsFailure::from_rustls(&e), f, "{e:?}");
     }
+}
+
+/// Throwaway test keys and self-signed certificates, generated with `openssl genrsa`,
+/// `openssl ecparam -genkey -noout`, `openssl pkcs8 -topk8 -nocrypt -outform DER` and
+/// `openssl req -x509` (X.509 v3 with `CA:FALSE`, `clientAuth`; `ec-sec1-v1.crt` is a
+/// deliberate v1 certificate made without extensions). They protect nothing. Key files end in
+/// `-key.pem`/`-key.der` because the repository ignores `*.key`.
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+#[test]
+fn pkcs1_sec1_and_der_pkcs8_keys_load() {
+    install_crypto_provider();
+    let client = |cert: &str, key: &str| TlsSettings {
+        mode: TlsMode::Require,
+        ca_file: None,
+        client_cert: Some(ClientCertPaths {
+            cert: fixture(cert),
+            key: fixture(key),
+        }),
+    };
+    for (cert, key) in [
+        ("rsa-pkcs1.crt", "rsa-pkcs1-key.pem"),
+        ("ec-sec1.crt", "ec-sec1-key.pem"),
+        ("ec-pkcs8.crt", "ec-pkcs8-key.der"),
+    ] {
+        let p = build_tls_params(&client(cert, key), "db", Public);
+        assert!(matches!(p, Ok(Some(_))), "{key}: {p:?}");
+    }
+    // Keys that load but belong to another certificate are still refused.
+    assert_eq!(
+        build_tls_params(&client("rsa-pkcs1.crt", "ec-sec1-key.pem"), "db", Public).unwrap_err(),
+        TlsSetupError::KeyUnreadable(fixture("ec-sec1-key.pem"))
+    );
+    // A certificate rustls cannot use (X.509 v1) is the certificate's fault, not the key's.
+    assert_eq!(
+        build_tls_params(&client("ec-sec1-v1.crt", "ec-sec1-key.pem"), "db", Public).unwrap_err(),
+        TlsSetupError::CertFileUnreadable(fixture("ec-sec1-v1.crt"))
+    );
+}
+
+#[test]
+fn an_unusable_server_name_fails_closed() {
+    install_crypto_provider();
+    for mode in [
+        TlsMode::Auto,
+        TlsMode::Require,
+        TlsMode::VerifyCa,
+        TlsMode::VerifyFull,
+    ] {
+        assert_eq!(
+            build_tls_params(&settings(mode), "db bad", Public).unwrap_err(),
+            TlsSetupError::InvalidServerName("db bad".into()),
+            "{mode:?}"
+        );
+    }
+    // Disable never needs a name.
+    assert!(
+        build_tls_params(&settings(TlsMode::Disable), "db bad", Public)
+            .unwrap()
+            .is_none()
+    );
+    // A trailing dot is a valid absolute name.
+    let p = build_tls_params(&settings(TlsMode::VerifyFull), "db.acme.io.", Public)
+        .unwrap()
+        .unwrap();
+    assert_eq!(p.server_name.to_str(), "db.acme.io");
 }
 
 #[test]

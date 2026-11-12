@@ -5,13 +5,22 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use futures::future::BoxFuture;
 use tokio::net::TcpListener;
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::cleanup::CleanupGuard;
 use crate::stream::{BoxedStream, StreamFactory};
+
+/// How long one `factory.open()` may take before that accepted connection is closed: the
+/// profile's default connect timeout. Opens run in accept order, so without a bound a stalled
+/// factory (a future SSH channel) would hold every later connection.
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The pause before accepting again when the process is out of file descriptors.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Where a forwarder listens (R18).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -40,10 +49,16 @@ impl LoopbackForwarder {
     /// Binds a forwarder for `factory` and starts accepting on the current Tokio runtime.
     ///
     /// Each accepted connection gets the next `factory.open()`, in accept order, and the two
-    /// are relayed byte for byte (TLS stays end to end). After `max_accepts` connections the
-    /// listener closes (a Unix socket file is removed), while the relays keep running. If an
-    /// open fails, that accepted connection is closed. The guard closes the listener, stops
-    /// every relay and removes the forwarder's private directory.
+    /// are relayed byte for byte (TLS stays end to end). An open that fails, or takes longer
+    /// than [`OPEN_TIMEOUT`], closes that accepted connection. After `max_accepts` connections
+    /// the listener closes (a Unix socket file is removed), while the relays keep running.
+    ///
+    /// A connection that is gone before it is accepted (reset or aborted) does not use up an
+    /// accept; running out of file descriptors pauses accepting briefly instead of stopping.
+    ///
+    /// The guard closes the listener, stops every relay and removes the forwarder's private
+    /// directory. Dropping the guard without running it (a cancelled connect) does the same,
+    /// except that it does not wait for the accept task to finish.
     ///
     /// In `UnixOrTcp` mode on Unix the socket lives in a fresh `0700` directory inside
     /// `private_dir` (created `0700` if missing) and is `0600` itself.
@@ -53,26 +68,7 @@ impl LoopbackForwarder {
         max_accepts: u32,
         mode: ForwarderMode,
     ) -> BoxFuture<'static, io::Result<(LoopbackForwarder, CleanupGuard)>> {
-        let private_dir = private_dir.to_path_buf();
-        Box::pin(async move {
-            let bound = Listener::bind(&private_dir, mode).await?;
-            let addr = bound.addr.clone();
-            let dir = bound.dir.clone();
-            let accepted = Arc::new(AtomicU64::new(0));
-            let task = tokio::spawn(run(bound, factory, max_accepts, accepted.clone()));
-            let guard = CleanupGuard::new(move || {
-                Box::pin(async move {
-                    // Dropping the task drops the listener and its relay set, which aborts
-                    // every relay.
-                    task.abort();
-                    let _ = task.await;
-                    if let Some(dir) = dir {
-                        let _ = std::fs::remove_dir_all(dir);
-                    }
-                })
-            });
-            Ok((LoopbackForwarder { addr, accepted }, guard))
-        })
+        bind_with(factory, private_dir, max_accepts, mode, OPEN_TIMEOUT)
     }
 
     pub fn addr(&self) -> &ForwarderAddr {
@@ -85,33 +81,143 @@ impl LoopbackForwarder {
     }
 }
 
-async fn run(bound: Bound, factory: StreamFactory, max_accepts: u32, accepted: Arc<AtomicU64>) {
-    let Bound {
-        listener,
-        addr,
-        dir: _,
-    } = bound;
+/// [`LoopbackForwarder::bind`] with its open timeout as a parameter (unit tests shorten it).
+fn bind_with(
+    factory: StreamFactory,
+    private_dir: &Path,
+    max_accepts: u32,
+    mode: ForwarderMode,
+    open_timeout: Duration,
+) -> BoxFuture<'static, io::Result<(LoopbackForwarder, CleanupGuard)>> {
+    let private_dir = private_dir.to_path_buf();
+    Box::pin(async move {
+        let Bound {
+            listener,
+            addr,
+            dir,
+        } = Listener::bind(&private_dir, mode).await?;
+        // Owns the directory from here on, so it is removed on every path.
+        let mut teardown = Teardown { task: None, dir };
+        let accepted = Arc::new(AtomicU64::new(0));
+        teardown.task = Some(tokio::spawn(run(
+            listener,
+            addr.clone(),
+            factory,
+            max_accepts,
+            accepted.clone(),
+            open_timeout,
+        )));
+        let guard = CleanupGuard::new(move || Box::pin(teardown.run()));
+        Ok((LoopbackForwarder { addr, accepted }, guard))
+    })
+}
+
+/// Stops the accept task (dropping it drops the listener and its relay set, which aborts
+/// every relay) and removes the private directory: when the guard runs, and also when the
+/// guard is dropped without running, because a dropped `JoinHandle` does not abort its task.
+struct Teardown {
+    task: Option<JoinHandle<()>>,
+    dir: Option<PathBuf>,
+}
+
+impl Teardown {
+    async fn run(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        // `Drop` removes the directory.
+    }
+}
+
+impl Drop for Teardown {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        if let Some(dir) = self.dir.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+async fn run(
+    listener: Listener,
+    addr: ForwarderAddr,
+    factory: StreamFactory,
+    max_accepts: u32,
+    accepted: Arc<AtomicU64>,
+    open_timeout: Duration,
+) {
+    let max = u64::from(max_accepts);
     let mut listener = Some(listener);
     let mut relays = JoinSet::new();
-    for n in 1..=u64::from(max_accepts) {
+    let mut n = 0;
+    while n < max {
         let Some(l) = listener.as_ref() else { break };
-        let Ok(client) = l.accept().await else {
-            break;
+        let client = match l.accept().await {
+            Ok(client) => client,
+            Err(e) => match on_accept_error(&e) {
+                AcceptErrorAction::Skip => continue,
+                AcceptErrorAction::Backoff => {
+                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                    continue;
+                }
+                AcceptErrorAction::Stop => break,
+            },
         };
+        n += 1;
         accepted.store(n, Ordering::SeqCst);
-        if n == u64::from(max_accepts) {
+        if n == max {
             close(&mut listener, &addr);
         }
         // Opened in accept order: the first open goes to the first connection.
-        match factory.open().await {
-            Ok(upstream) => {
+        match tokio::time::timeout(open_timeout, factory.open()).await {
+            Ok(Ok(upstream)) => {
                 relays.spawn(relay(client, upstream));
             }
-            Err(_) => drop(client),
+            Ok(Err(_)) | Err(_) => drop(client),
         }
     }
     close(&mut listener, &addr);
     while relays.join_next().await.is_some() {}
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AcceptErrorAction {
+    /// The connection died before it was accepted; take the next one.
+    Skip,
+    /// Out of file descriptors; wait a little and try again.
+    Backoff,
+    /// The listener itself is broken.
+    Stop,
+}
+
+fn on_accept_error(e: &io::Error) -> AcceptErrorAction {
+    match e.kind() {
+        io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::Interrupted => AcceptErrorAction::Skip,
+        _ if out_of_descriptors(e) => AcceptErrorAction::Backoff,
+        _ => AcceptErrorAction::Stop,
+    }
+}
+
+/// `EMFILE` or `ENFILE` (24 and 23 on Linux and the BSDs, macOS included).
+#[cfg(unix)]
+fn out_of_descriptors(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(23 | 24))
+}
+
+/// `WSAEMFILE`.
+#[cfg(windows)]
+fn out_of_descriptors(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(10024))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn out_of_descriptors(_e: &io::Error) -> bool {
+    false
 }
 
 fn close(listener: &mut Option<Listener>, addr: &ForwarderAddr) {
@@ -157,7 +263,12 @@ impl Listener {
         match self {
             Listener::Tcp(l) => {
                 let (s, _) = l.accept().await?;
-                s.set_nodelay(true)?;
+                // A connection reset while it waited in the backlog has no peer any more.
+                if s.peer_addr().is_err() {
+                    return Err(io::ErrorKind::ConnectionAborted.into());
+                }
+                // Only latency is at stake; a failure here is not worth dropping the client.
+                let _ = s.set_nodelay(true);
                 Ok(Box::new(s))
             }
             #[cfg(unix)]
@@ -229,4 +340,86 @@ fn unique_private_dir(parent: &Path) -> io::Result<PathBuf> {
         }
     }
     Err(io::ErrorKind::AlreadyExists.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn accept_errors_skip_back_off_or_stop() {
+        use io::ErrorKind::*;
+        for kind in [ConnectionAborted, ConnectionReset, Interrupted] {
+            assert_eq!(
+                on_accept_error(&kind.into()),
+                AcceptErrorAction::Skip,
+                "{kind:?}"
+            );
+        }
+        if cfg!(unix) {
+            for code in [23, 24] {
+                assert_eq!(
+                    on_accept_error(&io::Error::from_raw_os_error(code)),
+                    AcceptErrorAction::Backoff
+                );
+            }
+        }
+        assert_eq!(
+            on_accept_error(&InvalidInput.into()),
+            AcceptErrorAction::Stop
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_open_is_cut_off_and_the_next_connection_is_served() {
+        // The first open never finishes; the second hands out a stream that says "ok".
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let factory = StreamFactory::new(move || {
+            let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
+            Box::pin(async move {
+                if first {
+                    std::future::pending::<()>().await;
+                }
+                let (a, mut b) = tokio::io::duplex(64);
+                b.write_all(b"ok").await?;
+                tokio::spawn(async move {
+                    let mut sink = [0u8; 1];
+                    let _ = b.read(&mut sink).await;
+                });
+                Ok(Box::new(a) as BoxedStream)
+            })
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (fwd, guard) = bind_with(
+            factory,
+            dir.path(),
+            2,
+            ForwarderMode::Tcp,
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+        let ForwarderAddr::Tcp(a) = *fwd.addr() else {
+            panic!("expected TCP")
+        };
+        let mut stalled = tokio::net::TcpStream::connect(a).await.unwrap();
+        let mut buf = [0u8; 2];
+        let n = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf))
+            .await
+            .expect("the stalled connection is closed after the open timeout");
+        assert!(matches!(n, Ok(0) | Err(_)));
+
+        let mut served = tokio::net::TcpStream::connect(a).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), served.read_exact(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf, b"ok");
+        assert_eq!(fwd.accepted(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        guard.run().await;
+    }
 }

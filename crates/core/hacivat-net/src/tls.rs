@@ -1,7 +1,6 @@
 //! Non-interactive TLS (HV-SEC-02): modes, settings, the rustls client configuration and what
 //! a handshake reports. rustls uses the ring provider only (P5), with TLS 1.2 as the minimum.
 
-use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -85,7 +84,10 @@ impl TlsFailure {
         use rustls::{AlertDescription as A, CertificateError as C, Error as E};
         match e {
             E::InvalidCertificate(c) => match c {
-                C::UnknownIssuer | C::BadSignature => TlsFailure::UnknownIssuer,
+                C::UnknownIssuer => TlsFailure::UnknownIssuer,
+                // A signature that does not verify (in the chain or the handshake) looks like
+                // tampering, not an unknown CA: "trust this certificate" would be wrong advice.
+                C::BadSignature => TlsFailure::Protocol,
                 C::NotValidForName | C::NotValidForNameContext { .. } => TlsFailure::NameMismatch,
                 C::Expired | C::ExpiredContext { .. } => TlsFailure::Expired,
                 C::NotValidYet | C::NotValidYetContext { .. } => TlsFailure::NotYetValid,
@@ -112,6 +114,10 @@ impl TlsFailure {
 /// errors and reports the rest as `Other("<description>: <OSStatus>")`. This reads the
 /// trailing numeric code only, never the (localized) description. Elsewhere `Other` stays
 /// `Other`.
+///
+/// `errSecNotTrusted` (-67843) is generic: Security.framework also reports it for policy
+/// failures (a lifetime over Apple's limit, a missing server-auth usage, a weak key), so on
+/// Apple those show as `UnknownIssuer` too.
 fn platform_failure(other: &rustls::OtherError) -> TlsFailure {
     if !cfg!(target_vendor = "apple") {
         return TlsFailure::Other;
@@ -167,6 +173,8 @@ pub enum TlsSetupError {
     CertFileUnreadable(PathBuf),
     KeyUnreadable(PathBuf),
     KeyEncrypted(PathBuf),
+    /// The TLS host is neither an IP literal nor a DNS name rustls can verify or send as SNI.
+    InvalidServerName(String),
 }
 
 /// Builds the client configuration for `settings` toward `tls_host`; `None` means Disable.
@@ -181,9 +189,9 @@ pub enum TlsSetupError {
 /// - `Require`: any certificate (the handshake signature is still checked).
 ///
 /// Each verifier writes its first error, mapped to a [`TlsFailure`], into `failure`.
-/// `server_name` is the address for an IP literal, so no SNI is sent; a name rustls cannot
-/// carry becomes `0.0.0.0`, which no certificate matches. `plaintext_allowed` is true only for
-/// `Auto` toward a non-public address (P9).
+/// `server_name` is the address for an IP literal, so no SNI is sent. A host that is neither
+/// an IP literal nor a valid DNS name fails closed with [`TlsSetupError::InvalidServerName`].
+/// `plaintext_allowed` is true only for `Auto` toward a non-public address (P9).
 ///
 /// The CA, certificate and key files are read here (small blocking reads). A missing or
 /// unusable file, or an encrypted key, is a [`TlsSetupError`].
@@ -195,6 +203,7 @@ pub fn build_tls_params(
     if settings.mode == TlsMode::Disable {
         return Ok(None);
     }
+    let server_name = server_name(tls_host)?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let ca = match &settings.ca_file {
         Some(path) => Some((read_ca_file(path)?, path.as_path())),
@@ -229,14 +238,21 @@ pub fn build_tls_params(
     let config = match client {
         Some(client) => builder
             .with_client_auth_cert(client.chain, client.key)
-            .map_err(|_| TlsSetupError::KeyUnreadable(client.key_path))?,
+            .map_err(|e| match e {
+                // rustls could not use the certificate itself (a v1 certificate, say).
+                rustls::Error::InvalidCertificate(_) => {
+                    TlsSetupError::CertFileUnreadable(client.cert_path)
+                }
+                // An unsupported key, or one that does not belong to the certificate.
+                _ => TlsSetupError::KeyUnreadable(client.key_path),
+            })?,
         None => builder.with_no_client_auth(),
     };
 
     Ok(Some(TlsParams {
         settings: settings.clone(),
         config: Arc::new(config),
-        server_name: server_name(tls_host),
+        server_name,
         plaintext_allowed: settings.mode == TlsMode::Auto && class != AddressClass::Public,
         failure,
     }))
@@ -249,13 +265,15 @@ pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-fn server_name(host: &str) -> ServerName<'static> {
+/// The name to verify and send as SNI. An IP literal is an address (no SNI); a trailing dot
+/// is dropped; anything else rustls cannot use fails closed.
+fn server_name(host: &str) -> Result<ServerName<'static>, TlsSetupError> {
     if let Some(ip) = parse_ip_literal(host) {
-        return ServerName::IpAddress(ip.into());
+        return Ok(ServerName::IpAddress(ip.into()));
     }
     let name = host.strip_suffix('.').unwrap_or(host);
     ServerName::try_from(name.to_owned())
-        .unwrap_or(ServerName::IpAddress(Ipv4Addr::UNSPECIFIED.into()))
+        .map_err(|_| TlsSetupError::InvalidServerName(host.to_owned()))
 }
 
 struct CaFile {
@@ -299,6 +317,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 struct ClientCert {
     chain: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
+    cert_path: PathBuf,
     key_path: PathBuf,
 }
 
@@ -321,6 +340,7 @@ fn read_client_cert(paths: &ClientCertPaths) -> Result<ClientCert, TlsSetupError
     Ok(ClientCert {
         chain,
         key,
+        cert_path: paths.cert.clone(),
         key_path: paths.key.clone(),
     })
 }
@@ -569,11 +589,15 @@ mod tests {
     }
 
     #[test]
-    fn invalid_names_never_verify_and_send_no_sni() {
-        assert_eq!(
-            server_name("db_1 bad"),
-            ServerName::IpAddress(Ipv4Addr::UNSPECIFIED.into())
-        );
-        assert_eq!(server_name("db.acme.io.").to_str(), "db.acme.io");
+    fn invalid_names_fail_closed() {
+        for bad in ["db bad", "", ".", "db..acme.io"] {
+            assert_eq!(
+                server_name(bad),
+                Err(TlsSetupError::InvalidServerName(bad.into())),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(server_name("db.acme.io.").unwrap().to_str(), "db.acme.io");
+        assert!(matches!(server_name("[::1]"), Ok(ServerName::IpAddress(_))));
     }
 }

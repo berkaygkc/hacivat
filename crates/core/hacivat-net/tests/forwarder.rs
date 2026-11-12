@@ -221,3 +221,78 @@ async fn unix_mode_creates_the_private_directory_when_missing() {
     assert!(!p.exists());
     guard.run().await;
 }
+
+/// Waits up to two seconds for `addr` to refuse connections.
+async fn eventually_refuses(addr: &ForwarderAddr) -> bool {
+    for _ in 0..40 {
+        if connect_to_result(addr).await.is_err() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn dropping_the_guard_without_running_it_still_tears_down() {
+    for forwarder_mode in [ForwarderMode::Tcp, ForwarderMode::UnixOrTcp] {
+        let dir = tempdir();
+        let (fwd, guard) =
+            LoopbackForwarder::bind(echo_factory().await, dir.path(), 4, forwarder_mode)
+                .await
+                .unwrap();
+        let mut c = connect_to(fwd.addr()).await;
+        c.write_all(b"ping").await.unwrap();
+        assert_eq!(read4(&mut c).await, *b"ping");
+
+        drop(guard); // a cancelled connect never runs its guards
+        if let ForwarderAddr::Unix(p) = fwd.addr() {
+            assert!(
+                !p.parent().unwrap().exists(),
+                "the private directory is removed"
+            );
+        }
+        assert!(
+            eventually_refuses(fwd.addr()).await,
+            "{forwarder_mode:?}: still accepting after the guard was dropped"
+        );
+        let mut buf = [0u8; 4];
+        let n = tokio::time::timeout(Duration::from_secs(2), c.read(&mut buf))
+            .await
+            .expect("the relay is gone after the guard was dropped");
+        assert!(matches!(n, Ok(0) | Err(_)), "{forwarder_mode:?}");
+        assert_eq!(fwd.accepted(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_client_that_resets_at_once_does_not_kill_the_forwarder() {
+    let dir = tempdir();
+    // Two slots: whether the reset connection is caught before it uses one (its peer is
+    // already gone at accept) or after (the reset is still in flight) is up to the kernel.
+    // Either way the forwarder must go on serving.
+    let (fwd, guard) =
+        LoopbackForwarder::bind(echo_factory().await, dir.path(), 2, ForwarderMode::Tcp)
+            .await
+            .unwrap();
+    let ForwarderAddr::Tcp(a) = fwd.addr() else {
+        panic!("expected TCP")
+    };
+    // Connect and reset without yielding, before the forwarder's first accept.
+    let rude = std::net::TcpStream::connect(a).unwrap();
+    rude.set_nonblocking(true).unwrap();
+    let rude = tokio::net::TcpStream::from_std(rude).unwrap();
+    rude.set_zero_linger().unwrap();
+    drop(rude);
+
+    let mut c = connect_to(fwd.addr()).await;
+    c.write_all(b"ping").await.unwrap();
+    let mut buf = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(2), c.read_exact(&mut buf))
+        .await
+        .expect("the real client is served")
+        .unwrap();
+    assert_eq!(buf, *b"ping");
+    assert!((1..=2).contains(&fwd.accepted()), "{}", fwd.accepted());
+    guard.run().await;
+}
