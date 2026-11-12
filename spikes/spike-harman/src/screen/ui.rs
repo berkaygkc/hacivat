@@ -77,6 +77,8 @@ impl Ui {
     /// letters become capitals at 0.7 x the size. GPUI has no `letter-spacing`, so each glyph is
     /// its own flex item carrying a trailing gap (Chrome adds the spacing after every glyph).
     pub fn sc(&self, size: f32, weight: u16, tracking_em: f32, color: Color, s: &str) -> Div {
+        // Adapter workaround (PO decision: small caps stay synthesized like the mock, GPUI has no
+        // letter-spacing). SYNTH_SCALE is Chrome's small-caps synthesis ratio.
         const SYNTH_SCALE: f32 = 0.7;
         // Empirical: Chrome's tracked small-caps renders ~half the nominal tracking (measured
         // against the capture: EXPLORER, HACIVAT).
