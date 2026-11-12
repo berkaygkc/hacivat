@@ -263,6 +263,13 @@ fn app_switch_keeps_composition_for_the_platform(cx: &mut TestAppContext) {
         vcx.read(|cx| *cx.global::<FocusedInput>()),
         FocusedInput::default()
     );
+    // A re-render in the background (the input still holds window focus) keeps it cleared.
+    input.update(vcx, |_, cx| cx.notify());
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read(|cx| *cx.global::<FocusedInput>()),
+        FocusedInput::default()
+    );
     // Back in the app the IME commits its composition: no second copy.
     vcx.update(|w, _| w.activate_window());
     vcx.run_until_parked();
@@ -375,6 +382,9 @@ impl Render for Slot {
 fn input_focused_before_its_first_render_is_published(cx: &mut TestAppContext) {
     cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
     let (slot, vcx) = cx.add_window_view(|_, _| Slot { input: None });
+    // The window is key (an inactive window publishes nothing; see the app-switch test).
+    vcx.update(|w, _| w.activate_window());
+    vcx.run_until_parked();
     let input = slot.update_in(vcx, |s, w, cx| {
         let input = cx.new(|cx| TextInput::new(cx, placeholder()));
         input.focus_handle(cx).focus(w, cx);

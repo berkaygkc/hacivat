@@ -131,6 +131,9 @@ impl Label {
     }
 
     /// Ellipsize with `…` instead of overflowing; the full text becomes the tooltip.
+    ///
+    /// A truncating label must be drawn inside a view (any `Render` entity): GPUI's tooltip
+    /// machinery reads the current view and panics without one.
     pub fn truncate(mut self, truncate: bool) -> Self {
         self.truncate = truncate;
         self
@@ -216,7 +219,6 @@ impl Render for TooltipText {
         let theme = Theme::get(cx);
         let t = theme.tokens;
         popover_surface(theme)
-            .rounded(px(t.radii.xs))
             .px(px(t.spacing.sm))
             .py(px(t.spacing.s_2xs))
             .child(Label::new(
@@ -250,6 +252,15 @@ enum Painted {
 }
 
 const ELLIPSIS: &str = "…";
+
+/// `at` clamped to `text` and floored to a char boundary.
+fn floor_boundary(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
 
 /// The largest prefix (in bytes, at a grapheme boundary) of `text` that fits `max_width` with
 /// an ellipsis of `ellipsis_width` after it; `x_for(byte)` gives the prefix width.
@@ -302,7 +313,10 @@ impl LabelElement {
     }
 
     /// Highlight ranges clamped to `text`, on char boundaries, sorted and disjoint.
-    fn highlight_in(&self, text: &str) -> Vec<Range<usize>> {
+    /// Highlight ranges clamped to `text[..limit]`: an ellipsized line underlines only the
+    /// kept prefix, never the `…`.
+    fn highlight_in(&self, text: &str, limit: usize) -> Vec<Range<usize>> {
+        let text = &text[..floor_boundary(text, limit)];
         let floor = |mut i: usize| {
             i = i.min(text.len());
             while !text.is_char_boundary(i) {
@@ -328,8 +342,9 @@ impl LabelElement {
         out
     }
 
-    fn shape(&self, text: SharedString, window: &mut Window) -> ShapedLine {
-        let highlight = self.highlight_in(&text);
+    /// Shapes `text`, underlining highlights only within its first `highlight_limit` bytes.
+    fn shape(&self, text: SharedString, highlight_limit: usize, window: &mut Window) -> ShapedLine {
+        let highlight = self.highlight_in(&text, highlight_limit);
         let runs = self.runs(text.len(), &highlight);
         window
             .text_system()
@@ -367,7 +382,7 @@ impl LabelElement {
                 glyphs,
             }
         } else {
-            let line = self.shape(self.label.text.clone(), window);
+            let line = self.shape(self.label.text.clone(), usize::MAX, window);
             Measured {
                 width: line.width,
                 line: Some(line),
@@ -448,8 +463,8 @@ impl Element for LabelElement {
                     x
                 };
                 // `…` is not alphabetic: it keeps the full size, like digits and punctuation.
-                let ellipsis =
-                    self.shape(ELLIPSIS.into(), window).width + px(small_caps_tracking_px(&style));
+                let ellipsis = self.shape(ELLIPSIS.into(), 0, window).width
+                    + px(small_caps_tracking_px(&style));
                 let text = &self.label.text;
                 let end = fitting_prefix(text, bounds.size.width, ellipsis, x_for);
                 format!("{}{ELLIPSIS}", &text[..end])
@@ -473,11 +488,15 @@ impl Element for LabelElement {
         if !ellipsize {
             return Some(Painted::Line(Box::new(line)));
         }
-        let ellipsis = self.shape(ELLIPSIS.into(), window).width;
+        let ellipsis = self.shape(ELLIPSIS.into(), 0, window).width;
         let text = &self.label.text;
         let end = fitting_prefix(text, bounds.size.width, ellipsis, |b| line.x_for_index(b));
         let shown = format!("{}{ELLIPSIS}", &text[..end]);
-        Some(Painted::Line(Box::new(self.shape(shown.into(), window))))
+        Some(Painted::Line(Box::new(self.shape(
+            shown.into(),
+            end,
+            window,
+        ))))
     }
 
     fn paint(
@@ -582,13 +601,43 @@ mod tests {
             truncated: None,
         };
         // `İ` is two bytes: 1..2 floors to 0..2; 5..99 clamps to the end.
-        assert_eq!(el.highlight_in("İstanbul"), vec![0..2, 3..4, 5..9]);
-        let runs = el.runs(9, &el.highlight_in("İstanbul"));
+        assert_eq!(
+            el.highlight_in("İstanbul", usize::MAX),
+            vec![0..2, 3..4, 5..9]
+        );
+        let runs = el.runs(9, &el.highlight_in("İstanbul", usize::MAX));
         assert_eq!(
             runs.iter()
                 .map(|r| (r.len, r.underline.is_some()))
                 .collect::<Vec<_>>(),
             vec![(2, true), (1, false), (1, true), (1, false), (4, true)]
         );
+    }
+
+    #[test]
+    fn ellipsized_line_never_underlines_the_ellipsis() {
+        let el = LabelElement {
+            label: Label::new(
+                "İstanbul",
+                TextSource::Data,
+                DARK.type_ramp.body,
+                DARK.colors.text.to_hsla(),
+            )
+            .highlight(vec![0..3, 3..9], DARK.colors.blue.to_hsla()),
+            truncated: None,
+        };
+        // Cut after "İsta" (5 bytes) and append `…` (3 bytes), as prepaint does.
+        let shown = format!("{}{ELLIPSIS}", &"İstanbul"[..5]);
+        let highlight = el.highlight_in(&shown, 5);
+        assert_eq!(highlight, vec![0..5]);
+        let runs = el.runs(shown.len(), &highlight);
+        assert_eq!(
+            runs.iter()
+                .map(|r| (r.len, r.underline.is_some()))
+                .collect::<Vec<_>>(),
+            vec![(5, true), (3, false)]
+        );
+        // A cut inside a character floors to its boundary.
+        assert_eq!(el.highlight_in(&shown, 1), Vec::<Range<usize>>::new());
     }
 }

@@ -378,8 +378,11 @@ impl Render for TextInput {
         let t = theme.tokens;
         let focused = self.focus_handle.is_focused(window);
         // Focus given before the first render (before the listeners existed) is published here.
+        // Not while the window is inactive: then the blur listener has cleared the entry on
+        // purpose (app switch), and a background re-render must not bring it back.
         let me = Some(cx.entity_id());
-        if focused && cx.default_global::<FocusedInput>().entity != me {
+        if focused && window.is_window_active() && cx.default_global::<FocusedInput>().entity != me
+        {
             *cx.default_global::<FocusedInput>() = FocusedInput {
                 entity: me,
                 composing: self.ime.is_composing(),
