@@ -17,38 +17,62 @@ pub struct SemVerLoose {
 /// MariaDB before 11 prefixes its handshake version with this, for old MySQL clients.
 const MARIADB_HANDSHAKE_PREFIX: &str = "5.5.5-";
 
+/// Pre-release markers right after the version digits (`14beta1`, `17devel`, `16rc1`).
+const PRERELEASE: [&str; 4] = ["alpha", "beta", "rc", "devel"];
+
+/// The version parts of `s` and the text after them: the first `\d+(\.\d+){0,2}` run of ASCII
+/// digits, after stripping a `5.5.5-` handshake prefix that a digit follows.
+fn scan(s: &str) -> Option<([u32; 3], &str)> {
+    let body = match s.strip_prefix(MARIADB_HANDSHAKE_PREFIX) {
+        Some(rest) if rest.starts_with(|c: char| c.is_ascii_digit()) => rest,
+        _ => s,
+    };
+    let bytes = body.as_bytes();
+    let start = bytes.iter().position(u8::is_ascii_digit)?;
+    let mut parts = [0u32; 3];
+    let mut i = start;
+    for (n, part) in parts.iter_mut().enumerate() {
+        if n > 0 {
+            // A part continues only after a `.` followed by a digit.
+            if bytes.get(i) != Some(&b'.') || !bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+                break;
+            }
+            i += 1;
+        }
+        let end = bytes[i..]
+            .iter()
+            .position(|b| !b.is_ascii_digit())
+            .map_or(bytes.len(), |p| i + p);
+        *part = body[i..end].parse().ok()?;
+        i = end;
+    }
+    Some((parts, &body[i..]))
+}
+
 impl SemVerLoose {
     /// The first `\d+(\.\d+){0,2}` run of ASCII digits in `s`, after stripping a `5.5.5-`
-    /// handshake prefix; missing parts are `0`. `None` when there is no such run, or a part
-    /// does not fit in a `u32`.
+    /// handshake prefix (only when a digit follows it); missing parts are `0`. `None` when
+    /// there is no such run, or a part does not fit in a `u32`.
     pub fn parse(s: &str) -> Option<Self> {
-        let body = s.strip_prefix(MARIADB_HANDSHAKE_PREFIX).unwrap_or(s);
-        let bytes = body.as_bytes();
-        let start = bytes.iter().position(u8::is_ascii_digit)?;
-        let mut parts = [0u32; 3];
-        let mut i = start;
-        for (n, part) in parts.iter_mut().enumerate() {
-            if n > 0 {
-                // A part continues only after a `.` followed by a digit.
-                if bytes.get(i) != Some(&b'.') || !bytes.get(i + 1).is_some_and(u8::is_ascii_digit)
-                {
-                    break;
-                }
-                i += 1;
-            }
-            let end = bytes[i..]
-                .iter()
-                .position(|b| !b.is_ascii_digit())
-                .map_or(bytes.len(), |p| i + p);
-            *part = body[i..end].parse().ok()?;
-            i = end;
-        }
+        let (parts, _) = scan(s)?;
         Some(SemVerLoose {
             major: parts[0],
             minor: parts[1],
             patch: parts[2],
             raw: s.to_string(),
         })
+    }
+
+    /// The raw version marks a pre-release: `alpha`, `beta`, `rc` or `devel` (ASCII case
+    /// ignored) right after the digits, or after a `-` there.
+    fn is_prerelease(&self) -> bool {
+        let Some((_, rest)) = scan(&self.raw) else {
+            return false;
+        };
+        let rest = rest.strip_prefix('-').unwrap_or(rest).as_bytes();
+        PRERELEASE
+            .iter()
+            .any(|m| rest.len() >= m.len() && rest[..m.len()].eq_ignore_ascii_case(m.as_bytes()))
     }
 
     /// The first `n` parts, padded with zeros.
@@ -94,8 +118,9 @@ fn catalog_version(v: &str) -> Option<([u32; 3], usize)> {
 ///
 /// A catalog version is compared at its own precision: the floor `14` compares majors, the
 /// floor `8.0` and the tested `10.11` compare major and minor. An engine with no floor (SQLite)
-/// is `Supported` (P4). On an engine with a floor, a missing version is `NotTested`, and so is an
-/// engine the catalog does not describe.
+/// is `Supported` (P4). On an engine with a floor, a missing version is `NotTested`, and so are
+/// a pre-release at or above the floor (`14beta1`, `17devel`) and an engine the catalog does
+/// not describe.
 pub fn support_status(catalog: &EngineCatalog, info: &ServerInfo) -> Support {
     let Some(spec) = catalog.get(info.kind) else {
         return Support::NotTested;
@@ -112,6 +137,9 @@ pub fn support_status(catalog: &EngineCatalog, info: &ServerInfo) -> Support {
         return Support::Unsupported {
             floor: floor.to_string(),
         };
+    }
+    if version.is_prerelease() {
+        return Support::NotTested;
     }
     let tested = spec
         .tested

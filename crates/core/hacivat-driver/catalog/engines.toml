@@ -28,6 +28,7 @@ option_allow = [
 ]
 always_deny = []
 safe_gucs = ["search_path", "statement_timeout", "application_name", "DateStyle", "TimeZone", "lc_messages"]
+path_keys = ["sslrootcert", "sslcert", "sslkey", "sslcrl", "passfile"]
 
 [[engine.conn_type]]
 id = "default"
@@ -65,6 +66,7 @@ default_budget = 4
 auth = ["password", "client_cert", "none"]
 option_allow = ["sslMode", "useSSL", "connectTimeout", "characterEncoding"]
 always_deny = ["allowLoadLocalInfile", "allowUrlInLocalInfile", "autoDeserialize"]
+path_keys = ["sslCa", "sslCert", "sslKey", "serverSslCert", "serverRSAPublicKeyFile", "trustCertificateKeyStoreUrl", "clientCertificateKeyStoreUrl"]
 
 [[engine.conn_type]]
 id = "default"
@@ -88,6 +90,7 @@ default_budget = 4
 auth = ["password", "client_cert", "none"]
 option_allow = ["sslMode", "useSSL", "connectTimeout", "characterEncoding"]
 always_deny = ["allowLoadLocalInfile", "allowUrlInLocalInfile", "autoDeserialize"]
+path_keys = ["sslCa", "sslCert", "sslKey", "serverSslCert", "serverRSAPublicKeyFile", "trustCertificateKeyStoreUrl", "clientCertificateKeyStoreUrl"]
 
 [[engine.conn_type]]
 id = "default"

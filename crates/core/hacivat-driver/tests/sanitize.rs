@@ -412,3 +412,127 @@ fn startup_scripts_from_untrusted_origins_are_quarantined() {
         [ViolationReason::QuarantinedScript]
     );
 }
+
+fn perde() -> Origin {
+    Origin::PerdeManaged { org: "acme".into() }
+}
+
+#[test]
+fn pg_options_split_like_the_server_vertical_tab_included() {
+    // The server's pg_split_opts splits on C isspace, which includes \x0B and \x0C.
+    for v in [
+        "-c search_path=a\x0B-c\x0Bsession_preload_libraries=x",
+        "-c search_path=a\x0C-c\x0Csession_preload_libraries=x",
+        "-c search_path=a\r-c\rsession_preload_libraries=x",
+    ] {
+        assert_eq!(
+            err_reasons(DbmsKind::Postgres, perde(), &[("options", v)]),
+            [ViolationReason::AlwaysDenied],
+            "{v:?}"
+        );
+    }
+    // A backslash escape could glue words the way the server reads them: refused outright.
+    assert_eq!(
+        err_reasons(
+            DbmsKind::Postgres,
+            perde(),
+            &[(
+                "options",
+                r"-c search_path=a\ -c\ session_preload_libraries=x"
+            )]
+        ),
+        [ViolationReason::AlwaysDenied]
+    );
+    // `-` reads as `_` in a setting name, as the server's ParseLongOption does.
+    assert!(
+        sanitize(
+            &input(
+                DbmsKind::Postgres,
+                perde(),
+                &[("options", "--search-path=app")],
+                &[]
+            ),
+            cat()
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn control_characters_are_refused_for_every_origin_even_with_the_toggle() {
+    for (k, v) in [
+        ("application_name", "a\0b"),
+        ("application_name", "a\x1Bb"),
+        ("app\nname", "x"),
+    ] {
+        let toggled = input_with(DbmsKind::Postgres, UserTyped, &[(k, v)], &[], true);
+        assert_eq!(
+            reasons(sanitize(&toggled, cat())),
+            [ViolationReason::AlwaysDenied],
+            "{k:?}={v:?}"
+        );
+    }
+}
+
+#[test]
+fn an_escape_in_a_key_is_a_second_encoding() {
+    assert_eq!(
+        err_reasons(DbmsKind::Postgres, UserTyped, &[("ssl%6Dode", "require")]),
+        [ViolationReason::DoubleEncoding]
+    );
+}
+
+#[test]
+fn path_options_are_checked_without_being_listed_in_paths() {
+    assert_eq!(
+        err_reasons(DbmsKind::Postgres, imported(), &[("sslkey", "/etc/passwd")]),
+        [ViolationReason::PathOutsideRoots]
+    );
+    assert_eq!(
+        err_reasons(
+            DbmsKind::Postgres,
+            imported(),
+            &[("SSLROOTCERT", "~/.postgresql/../../../etc/ssl/cert.pem")]
+        ),
+        [ViolationReason::PathOutsideRoots]
+    );
+    // Inside the approved roots it passes.
+    assert!(
+        sanitize(
+            &input(
+                DbmsKind::Postgres,
+                imported(),
+                &[("sslcert", "~/.postgresql/postgresql.crt")],
+                &[]
+            ),
+            cat()
+        )
+        .is_ok()
+    );
+    // `sslrootcert=system` names the system trust store, not a file.
+    assert!(
+        sanitize(
+            &input(
+                DbmsKind::Postgres,
+                imported(),
+                &[("sslrootcert", "system")],
+                &[]
+            ),
+            cat()
+        )
+        .is_ok()
+    );
+    // The user typed it: no path rule.
+    assert!(
+        sanitize(
+            &input(
+                DbmsKind::Postgres,
+                UserTyped,
+                &[("sslkey", "/etc/passwd")],
+                &[]
+            ),
+            cat()
+        )
+        .is_ok()
+    );
+}

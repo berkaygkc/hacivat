@@ -46,6 +46,9 @@ pub struct EngineSpec {
     /// PostgreSQL settings that a `-c` in the `options` option may set when the profile comes
     /// from an untrusted origin (HV-DRV-05). Empty for other engines.
     pub safe_gucs: Vec<String>,
+    /// Option keys whose value names a file; from an untrusted origin the value must lie inside
+    /// an approved root (HV-DRV-05).
+    pub path_keys: Vec<String>,
     /// The default connection budget (CONN-02).
     pub default_budget: u8,
 }
@@ -96,6 +99,8 @@ struct RawEngine {
     always_deny: Vec<String>,
     #[serde(default)]
     safe_gucs: Vec<String>,
+    #[serde(default)]
+    path_keys: Vec<String>,
     default_budget: u8,
 }
 
@@ -172,6 +177,7 @@ impl EngineCatalog {
                 option_allow: e.option_allow,
                 always_deny: e.always_deny,
                 safe_gucs: e.safe_gucs,
+                path_keys: e.path_keys,
                 default_budget: e.default_budget,
             });
         }

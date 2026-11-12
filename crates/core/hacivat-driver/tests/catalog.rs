@@ -108,6 +108,10 @@ fn embedded_catalog_content_is_normative() {
             "lc_messages"
         ]
     );
+    assert_eq!(
+        pg.path_keys,
+        ["sslrootcert", "sslcert", "sslkey", "sslcrl", "passfile"]
+    );
 
     let my = c.get(DbmsKind::MySql).unwrap();
     assert_eq!((my.floor.as_deref(), my.default_budget), (Some("8.0"), 4));
@@ -184,10 +188,59 @@ fn catalog_load_errors_name_the_problem() {
 }
 
 #[test]
-fn chain_of_an_engine_outside_the_catalog_is_itself() {
+fn an_engine_without_a_fallback_or_outside_the_catalog_is_its_own_chain() {
     let c = EngineCatalog::embedded();
+    // In the catalog, no fallback edge.
     assert_eq!(c.chain(DbmsKind::Postgres), vec![DbmsKind::Postgres]);
+    // Not in the catalog at all.
     assert_eq!(c.chain(DbmsKind::Redis), vec![DbmsKind::Redis]);
+}
+
+#[test]
+fn the_mariadb_handshake_prefix_is_stripped_only_before_a_digit() {
+    let v = SemVerLoose::parse("5.5.5-10.6.18-MariaDB").unwrap();
+    assert_eq!((v.major, v.minor, v.patch), (10, 6, 18));
+    // Not followed by a digit: `5.5.5` is the version itself.
+    let v = SemVerLoose::parse("5.5.5-MariaDB").unwrap();
+    assert_eq!((v.major, v.minor, v.patch), (5, 5, 5));
+    let v = SemVerLoose::parse("5.5.5-").unwrap();
+    assert_eq!((v.major, v.minor, v.patch), (5, 5, 5));
+}
+
+#[test]
+fn pre_releases_are_not_tested() {
+    let c = EngineCatalog::embedded();
+    for raw in [
+        "14beta1",
+        "17devel",
+        "16rc1",
+        "18beta2 (Debian 18~beta2-1)",
+        "15RC2",
+        "16-rc1",
+    ] {
+        assert_eq!(
+            support_status(c, &info(DbmsKind::Postgres, raw)),
+            Support::NotTested,
+            "{raw}"
+        );
+    }
+    // Below the floor, a pre-release is still unsupported.
+    assert_eq!(
+        support_status(c, &info(DbmsKind::Postgres, "13beta1")),
+        Support::Unsupported { floor: "14".into() }
+    );
+    // Distribution suffixes are not pre-release markers.
+    assert_eq!(
+        support_status(
+            c,
+            &info(DbmsKind::Postgres, "16.4 (Debian 16.4-1.pgdg120+2)")
+        ),
+        Support::Supported
+    );
+    assert_eq!(
+        support_status(c, &info(DbmsKind::MySql, "8.0.46-0ubuntu0.24.04.1")),
+        Support::Supported
+    );
 }
 
 #[test]
