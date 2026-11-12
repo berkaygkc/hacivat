@@ -8,8 +8,8 @@ publish.workspace = true
 [features]
 scene-check = ["hacivat-ui-core/scene-check"]
 pseudo = ["hacivat-l10n/pseudo"]
-# The screenshot harness (Task 18).
-shots = ["scene-check", "pseudo", "hacivat-ui-core/test-support"]
+# The screenshot harness (Task 18); M2a shots drive connections through `FakeDriver`.
+shots = ["scene-check", "pseudo", "hacivat-ui-core/test-support", "hacivat-driver/fake"]
 
 [dependencies]
 hacivat-ui-core.workspace = true
@@ -21,8 +21,19 @@ serde_json.workspace = true
 anyhow.workspace = true
 # Save failures and keymap diagnostics (Task 13 fix round 1).
 tracing.workspace = true
+# M2a connections (Task 1).
+hacivat-proto.workspace = true
+hacivat-net.workspace = true
+hacivat-secrets.workspace = true
+hacivat-driver.workspace = true
+hacivat-session.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-util.workspace = true
+secrecy.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
+hacivat-driver = { workspace = true, features = ["fake"] }
 # F1: `#[gpui::test]` expands to `gpui::` paths; production code uses `gpui_surface` only.
 gpui = { workspace = true, features = ["test-support"] }
 hacivat-ui-core = { workspace = true, features = ["test-support"] }

@@ -214,6 +214,11 @@ fn capsule_is_26_px_and_only_production_has_the_fill_block(cx: &mut TestAppConte
                     engine: "PostgreSQL 16".into(),
                     access: "read-only".into(),
                     path: "Direct".into(),
+                    read_only: true,
+                    direct: true,
+                    latency: None,
+                    unencrypted: None,
+                    unsupported: None,
                 }))
                 .into_any_element()
         });
@@ -385,6 +390,11 @@ fn pseudo_locale_brackets_fluent_segments_but_not_verbatim_ones_or_the_capsule_n
                 engine: "PostgreSQL".into(),
                 access: "[Read only]".into(),
                 path: "[Direct]".into(),
+                read_only: true,
+                direct: true,
+                latency: None,
+                unencrypted: None,
+                unsupported: None,
             }))
             .into_any_element()
     });

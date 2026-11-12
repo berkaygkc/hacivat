@@ -127,7 +127,14 @@ fn on_key_down(ev: &KeyDownEvent, ctx: &ContextStack, window: &mut Window, cx: &
     }
     let composing = cx.try_global::<FocusedInput>().is_some_and(|f| f.composing);
     let now = cx.background_executor().now();
-    let outcome = state.0.borrow_mut().on_key_down(ev, ctx, composing, now);
+    let modal = window
+        .root::<Workspace>()
+        .flatten()
+        .and_then(|ws| ws.read(cx).modal_context());
+    let outcome = match modal {
+        None => state.0.borrow_mut().on_key_down(ev, ctx, composing, now),
+        Some(top) => modal_outcome(&state, ev, ctx, top, composing, now),
+    };
     match outcome {
         DispatchOutcome::Run(id) => {
             set_pending_chord(cx, None);
@@ -142,6 +149,34 @@ fn on_key_down(ev: &KeyDownEvent, ctx: &ContextStack, window: &mut Window, cx: &
             set_pending_chord(cx, None);
             false
         }
+    }
+}
+
+/// The action that quits the app; its binding stays live under a modal layer (P47).
+const QUIT_ACTION: &str = "app.quit";
+
+/// Resolves a key while a modal layer is open (P47): only the bindings of the top layer's
+/// context `top`, plus `app.quit` from the full stack `ctx`.
+fn modal_outcome(
+    state: &DispatcherState,
+    ev: &KeyDownEvent,
+    ctx: &ContextStack,
+    top: &'static str,
+    composing: bool,
+    now: Instant,
+) -> DispatchOutcome {
+    let outcome = state
+        .0
+        .borrow_mut()
+        .on_key_down(ev, &ContextStack(vec![top]), composing, now);
+    if outcome != DispatchOutcome::PassThrough {
+        return outcome;
+    }
+    // A probe on a copy, so a Workspace chord never starts pending under the modal layer.
+    let mut probe = state.0.borrow().clone();
+    match probe.on_key_down(ev, ctx, composing, now) {
+        DispatchOutcome::Run(id) if id == QUIT_ACTION => DispatchOutcome::Run(id),
+        _ => DispatchOutcome::PassThrough,
     }
 }
 

@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, ClickEvent, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
-    Role, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    Pixels, Point, Role, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeTokens};
 
@@ -22,10 +22,14 @@ pub enum EnvKind {
     Staging,
     Local,
     Other,
+    // M2a (Task 1); their marks arrive with Task 9.
+    Dev,
+    Test,
 }
 
 /// The 7 px environment swatch: production a filled red square, staging a hollow square,
-/// local a hollow circle. `Other` has no mark (an empty 0 px element).
+/// local a hollow circle. `Other` has no mark (an empty 0 px element); `Dev` and `Test` have
+/// none until Task 9.
 pub fn env_swatch(kind: EnvKind, theme: &Theme) -> Div {
     let c = &theme.tokens.colors;
     let base = div().size(px(7.0)).flex_none();
@@ -36,14 +40,38 @@ pub fn env_swatch(kind: EnvKind, theme: &Theme) -> Div {
             .border_1()
             .border_color(c.text_3.to_hsla())
             .rounded_full(),
-        EnvKind::Other => div().size(px(0.0)).flex_none(),
+        EnvKind::Other | EnvKind::Dev | EnvKind::Test => div().size(px(0.0)).flex_none(),
     }
 }
 
+/// A clickable part of the capsule (M2a, NOTES surface 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CapsuleSegment {
+    Body,
+    Retry,
+    Unencrypted,
+}
+
+/// Called with the clicked segment and the bottom-left of its bounds, the anchor for
+/// `open_anchored` (P4).
+pub type SegmentHandler = Rc<dyn Fn(CapsuleSegment, Point<Pixels>, &mut Window, &mut App)>;
+
+/// What the capsule shows. Every string is chrome text from Fluent except the connection's
+/// name and engine, which are data. The M2a states render from Task 9 on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapsuleModel {
     /// No connection yet.
     Placeholder { label: SharedString },
+    /// A connect in progress.
+    Connecting {
+        env: EnvKind,
+        env_label: SharedString,
+        name: SharedString,
+        engine: SharedString,
+        label: SharedString,
+        step: SharedString,
+        clock: SharedString,
+    },
     Connection {
         env: EnvKind,
         /// Pre-cased by Fluent (`PRODUCTION` in English, `PROD` in Turkish).
@@ -51,13 +79,28 @@ pub enum CapsuleModel {
         name: SharedString,
         engine: SharedString,
         access: SharedString,
+        read_only: bool,
         path: SharedString,
+        direct: bool,
+        latency: Option<SharedString>,
+        /// The unencrypted badge's label, when the connection has no TLS.
+        unencrypted: Option<SharedString>,
+        /// The unsupported-version badge's label.
+        unsupported: Option<SharedString>,
+    },
+    /// The last connect failed.
+    Failed {
+        label: SharedString,
+        name: SharedString,
+        retry: SharedString,
     },
 }
 
 pub struct Capsule {
     model: CapsuleModel,
     on_click: Option<ClickHandler>,
+    #[allow(dead_code, reason = "Task 9")]
+    on_segment: Option<SegmentHandler>,
 }
 
 impl Capsule {
@@ -65,7 +108,17 @@ impl Capsule {
         Self {
             model,
             on_click: None,
+            on_segment: None,
         }
+    }
+
+    /// Called when a segment is clicked, with its bottom-left corner (Task 9 wires it).
+    pub fn on_segment(
+        mut self,
+        handler: impl Fn(CapsuleSegment, Point<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_segment = Some(Rc::new(handler));
+        self
     }
 
     pub fn on_click(
@@ -130,7 +183,11 @@ impl IntoElement for Capsule {
             let name_for_label;
             let mut description = None;
             match &self.model {
-                CapsuleModel::Placeholder { label } => {
+                // Task 9 draws the connecting and failed states; until then they show their
+                // label like the placeholder.
+                CapsuleModel::Placeholder { label }
+                | CapsuleModel::Connecting { label, .. }
+                | CapsuleModel::Failed { label, .. } => {
                     name_for_label = label.clone();
                     frame = frame.child(div().flex().items_center().px(px(9.0)).child(text(
                         label,
@@ -145,6 +202,7 @@ impl IntoElement for Capsule {
                     engine,
                     access,
                     path,
+                    ..
                 } => {
                     name_for_label = name.clone();
                     description =

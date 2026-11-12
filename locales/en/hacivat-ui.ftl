@@ -134,3 +134,8 @@ hv-settings-keymap-datagrip = DataGrip
 #   $chord (String) - the shortcut as the keyboard shows it, e.g. "Ctrl+Alt+S".
 #   $char (String) - the character it types on this layout, e.g. "ś".
 hv-settings-keymap-collision = { $chord } → { $char }
+
+## m2a-t01-menu
+
+# The File menu title (the macOS menu bar and the Windows/Linux in-window menu).
+hv-menu-file = File

@@ -16,9 +16,11 @@ pub use gpui::ResizeEdge;
 // Widgets: stateful elements (`role`, `aria_label`, `aria_selected`, `on_click`, `on_drag`,
 // `tooltip` live on `StatefulInteractiveElement` at the pin), builders, pointer events.
 #[rustfmt::skip] pub use gpui::{AssetSource, DragMoveEvent, MouseMoveEvent, MouseUpEvent, Stateful, StatefulInteractiveElement, WeakEntity};
+// M2a (Task 1): anchored popovers and selects (`deferred(anchored())`), file pickers.
 pub use crate::actions::RunCommand;
 /// `.when(..)`/`.map(..)` builders (`gpui::prelude::FluentBuilder` at the pin).
 pub use gpui::prelude::FluentBuilder;
+pub use gpui::{Anchor, AnchoredPositionMode, PathPromptOptions, anchored, deferred};
 /// GPUI's test contexts, for downstream tests (`test-support`).
 #[cfg(feature = "test-support")]
 pub use gpui::{HeadlessAppContext, TestAppContext, VisualTestContext};

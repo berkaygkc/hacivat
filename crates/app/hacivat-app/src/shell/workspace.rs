@@ -25,10 +25,10 @@ use hacivat_ui::titlebar::TitleBar;
 use hacivat_ui::toast::ToastStack;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, Context, Decorations, Div, Entity, EntityId,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ResizeEdge, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, Window, WindowHandle, div, point, px,
-    relative,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ResizeEdge,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window, WindowHandle,
+    anchored, div, point, px, relative,
 };
 use hacivat_ui_core::keymap::ContextStack;
 use hacivat_ui_core::theme::{Theme, ThemeMode, popover_surface};
@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::PendingChord;
 use crate::l10n_global::{L10nGlobal, WINDOW_TITLE, switch_locale, tr, ui_language};
-use crate::shell::hooks::key_capture;
+use crate::shell::hooks::{focused_contexts, hooks, key_capture};
 use crate::shell::keymap_state::shortcut_label;
 use crate::shell::layers::{DIALOG_CONTEXT, Layer, Layers, MENU_CONTEXT};
 use crate::shell::persist::LatestWriter;
@@ -60,6 +60,8 @@ pub const WORKSPACE_CONTEXT: &str = "Workspace";
 const PALETTE_ACTION: &str = "workspace.command_palette";
 /// The action the Windows/Linux app-menu button runs (registered by Task 16, F14).
 const APP_MENU_ACTION: &str = "app.show_menu";
+/// The key context of an anchored popover layer (`open_anchored`).
+pub const POPOVER_CONTEXT: &str = "Popover";
 
 /// The harman demo connection (`--vf-demo`): a production capsule. The name and engine are
 /// connection data, not chrome text.
@@ -113,6 +115,9 @@ pub struct Workspace {
     kind_contexts: HashMap<&'static str, &'static str>,
     next_tab: u32,
     capsule: Option<DemoCapsule>,
+    /// Views from the `explorer` and `connection_panel` hooks, built once (P17).
+    explorer_view: Option<AnyView>,
+    connection_panel_view: Option<AnyView>,
     layers: Layers,
     focus: FocusHandle,
     drag: Option<Seam>,
@@ -164,6 +169,10 @@ impl Workspace {
         ];
         // ... and before the window's view goes (the window closed).
         cx.on_release(|this, _| this.saver.flush()).detach();
+        // The hook views are built once; hooks are set before the workspace opens (P17).
+        let slots = hooks(cx);
+        let explorer_view = slots.explorer.map(|build| build(window, cx));
+        let connection_panel_view = slots.connection_panel.map(|build| build(window, cx));
         let mut ws = Self {
             tiles: TileLayout::default(),
             panes: PaneTree::new(TabId(0)),
@@ -172,6 +181,8 @@ impl Workspace {
             kind_contexts: HashMap::new(),
             next_tab: 1,
             capsule: demo,
+            explorer_view,
+            connection_panel_view,
             layers: Layers::default(),
             focus: cx.focus_handle(),
             drag: None,
@@ -545,6 +556,7 @@ impl Workspace {
             context: DIALOG_CONTEXT,
             view: dialog.clone().into(),
             restore_focus: restore,
+            modal: true,
         };
         self.push_layer_with(layer, Some(subscription), window, cx);
         dialog
@@ -584,17 +596,59 @@ impl Workspace {
             context: MENU_CONTEXT,
             view: menu.clone().into(),
             restore_focus: restore,
+            modal: false,
         };
         self.push_layer_with(layer, Some(subscription), window, cx);
         menu
     }
 
-    /// The active key contexts, innermost last: `Workspace`, the active tab's context, then each
-    /// layer's context from the bottom up.
-    pub fn context_stack(&self, _window: &Window) -> ContextStack {
+    /// Opens `view` as a non-modal layer `id` (context `Popover`) with its top-left at `anchor`
+    /// (window coordinates); a press outside it closes it.
+    pub fn open_anchored(
+        &mut self,
+        id: &'static str,
+        anchor: Point<Pixels>,
+        view: AnyView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let restore = window.focused(cx);
+        let host = cx.new(|_| AnchoredHost { anchor, view });
+        let host_id = host.entity_id();
+        let subscription = cx.subscribe_in(
+            &host,
+            window,
+            move |this, host, _: &AnchorDismissed, window, cx| {
+                // As in `open_dialog`: the host lives until this event reached every subscriber.
+                let keep = host.clone();
+                this.remove_layer(host_id, window, cx);
+                cx.defer(move |_| drop(keep));
+            },
+        );
+        let layer = Layer {
+            id,
+            context: POPOVER_CONTEXT,
+            view: host.into(),
+            restore_focus: restore,
+            modal: false,
+        };
+        self.push_layer_with(layer, Some(subscription), window, cx);
+    }
+
+    /// The top layer's context while a modal layer is open: the only context whose bindings
+    /// resolve then, besides `app.quit` (P47).
+    pub fn modal_context(&self) -> Option<&'static str> {
+        self.layers.modal_context()
+    }
+
+    /// The active key contexts, innermost last: `Workspace`, the active tab's context, each
+    /// layer's context from the bottom up, then each registered focus context whose handle is
+    /// focused (`register_focus_context`).
+    pub fn context_stack(&self, window: &Window, cx: &App) -> ContextStack {
         let mut stack = vec![WORKSPACE_CONTEXT];
         stack.extend(self.active_tab_kind().and_then(|k| self.tab_context(k)));
         stack.extend(self.layers.contexts());
+        stack.extend(focused_contexts(window, cx));
         ContextStack(stack)
     }
 
@@ -614,21 +668,54 @@ impl Workspace {
 
     // ---- capsule -----------------------------------------------------------------------------
 
-    /// What the title-bar capsule shows, in the current language.
+    /// What the title-bar capsule shows, in the current language: the demo connection, else
+    /// the `capsule` hook's model, else the M1 placeholder.
     pub fn capsule_model(&self, cx: &App) -> CapsuleModel {
         match &self.capsule {
-            None => CapsuleModel::Placeholder {
-                label: tr(cx, ids::hv::CAPSULE_NO_CONNECTION, NoArgs),
-            },
+            None => hooks(cx)
+                .capsule
+                .and_then(|model| model(cx))
+                .unwrap_or_else(|| CapsuleModel::Placeholder {
+                    label: tr(cx, ids::hv::CAPSULE_NO_CONNECTION, NoArgs),
+                }),
             Some(demo) => CapsuleModel::Connection {
                 env: EnvKind::Production,
                 env_label: tr(cx, ids::hv::CAPSULE_ENV_PRODUCTION, NoArgs),
                 name: demo.name.clone(),
                 engine: demo.engine.clone(),
                 access: tr(cx, ids::hv::CAPSULE_ACCESS_READ_ONLY, NoArgs),
+                read_only: true,
                 path: tr(cx, ids::hv::CAPSULE_PATH_DIRECT, NoArgs),
+                direct: true,
+                latency: None,
+                unencrypted: None,
+                unsupported: None,
             },
         }
+    }
+}
+
+/// Emitted by an [`AnchoredHost`] when a press lands outside its view.
+struct AnchorDismissed;
+
+/// Places a popover view at its anchor and reports a press outside it (`open_anchored`).
+struct AnchoredHost {
+    anchor: Point<Pixels>,
+    view: AnyView,
+}
+
+impl EventEmitter<AnchorDismissed> for AnchoredHost {}
+
+impl Render for AnchoredHost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(
+            anchored().position(self.anchor).snap_to_window().child(
+                div()
+                    .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(AnchorDismissed)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.view.clone()),
+            ),
+        )
     }
 }
 
@@ -741,9 +828,20 @@ fn repair_ratios(node: &mut PaneNode) {
 // ---- rendering -------------------------------------------------------------------------------
 
 impl Workspace {
-    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.key == "escape" && !self.layers.is_empty() {
-            self.pop_layer(window, cx);
+    /// Escape pops the topmost layer; with no layer open it goes to the `escape` hook. Runs
+    /// without borrowing the workspace, so the hook may update it.
+    fn on_escape(ws: &Entity<Workspace>, event: &KeyDownEvent, window: &mut Window, cx: &mut App) {
+        if event.keystroke.key != "escape" {
+            return;
+        }
+        if !ws.read(cx).layers.is_empty() {
+            ws.update(cx, |ws, cx| ws.pop_layer(window, cx));
+            cx.stop_propagation();
+            return;
+        }
+        if let Some(hook) = hooks(cx).escape
+            && hook(window, cx)
+        {
             cx.stop_propagation();
         }
     }
@@ -795,9 +893,16 @@ impl Workspace {
         let keys: SharedString = shortcut_label(cx, PALETTE_ACTION)
             .unwrap_or_default()
             .into();
+        let mut capsule = Capsule::new(self.capsule_model(cx));
+        if let Some(on_segment) = hooks(cx).capsule_segment {
+            capsule = capsule.on_segment(move |segment, anchor, window, cx| {
+                on_segment(segment, anchor, window, cx)
+            });
+        }
         let mut bar = TitleBar::new(chrome)
+            .inert(self.layers.has_modal())
             .brand(tr(cx, ids::cm::BRAND_HACIVAT_CAPS, NoArgs))
-            .capsule(Capsule::new(self.capsule_model(cx)))
+            .capsule(capsule)
             .palette_field(
                 tr(cx, ids::hv::TITLEBAR_PALETTE, NoArgs),
                 keys,
@@ -815,11 +920,21 @@ impl Workspace {
     }
 
     fn status_bar(&self, theme: &Theme, cx: &App) -> StatusBar {
-        let mut bar = StatusBar::new().left(status_label(
-            theme,
-            tr(cx, ids::hv::STATUS_NO_CONNECTION, NoArgs),
-            TextSource::Fluent,
-        ));
+        let mut bar = StatusBar::new();
+        match hooks(cx).status_left {
+            Some(left) => {
+                for segment in left(theme, cx) {
+                    bar = bar.left(segment);
+                }
+            }
+            None => {
+                bar = bar.left(status_label(
+                    theme,
+                    tr(cx, ids::hv::STATUS_NO_CONNECTION, NoArgs),
+                    TextSource::Fluent,
+                ));
+            }
+        }
         if let Some(chord) = cx.try_global::<PendingChord>().and_then(|p| p.0.clone()) {
             let text = tr(
                 cx,
@@ -841,6 +956,14 @@ impl Workspace {
     ) -> AnyElement {
         let c = &theme.tokens.colors;
         let l = self.tiles;
+        let explorer = match &self.explorer_view {
+            Some(view) => view.clone().into_any_element(),
+            None => tiles::explorer(theme, cx).into_any_element(),
+        };
+        let connection_panel = match &self.connection_panel_view {
+            Some(view) => view.clone().into_any_element(),
+            None => tiles::connection_panel(theme, cx).into_any_element(),
+        };
         let left = l.explorer_visible.then(|| {
             div()
                 .flex()
@@ -855,14 +978,14 @@ impl Workspace {
                         .flex_1()
                         .min_h(px(0.0))
                         .overflow_hidden()
-                        .child(tiles::explorer(theme, cx)),
+                        .child(explorer),
                 )
                 .child(
                     div()
                         .h(px(l.conn_panel_h))
                         .flex_none()
                         .overflow_hidden()
-                        .child(tiles::connection_panel(theme, cx)),
+                        .child(connection_panel),
                 )
         });
         let root = self.panes.root.clone();
@@ -1048,15 +1171,24 @@ impl Render for Workspace {
         let c = &t.colors;
         // The hook may run actions that update this view, so it runs without borrowing it.
         let weak = cx.entity().downgrade();
+        let weak_escape = weak.clone();
         let capture = move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
             let Some(hook) = key_capture(cx) else {
                 return;
             };
-            let Some(stack) = weak.upgrade().map(|ws| ws.read(cx).context_stack(window)) else {
+            let Some(stack) = weak
+                .upgrade()
+                .map(|ws| ws.read(cx).context_stack(window, cx))
+            else {
                 return;
             };
             if hook(event, &stack, window, cx) {
                 cx.stop_propagation();
+            }
+        };
+        let escape = move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
+            if let Some(ws) = weak_escape.upgrade() {
+                Self::on_escape(&ws, event, window, cx);
             }
         };
         let title_bar = self.title_bar(&theme, window, cx);
@@ -1073,7 +1205,7 @@ impl Render for Workspace {
             .bg(c.ground.to_hsla())
             .text_color(c.text.to_hsla())
             .capture_key_down(capture)
-            .on_key_down(cx.listener(Self::on_key_down))
+            .on_key_down(escape)
             .on_mouse_move(cx.listener(Self::on_drag_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
             .child(title_bar)
@@ -1085,8 +1217,12 @@ impl Render for Workspace {
     }
 }
 
-/// The editor area of a console with no connection.
+/// The editor area of a console with no connection: the `editor_empty` hook's element, else
+/// the M1 empty state.
 fn editor_empty(theme: &Theme, cx: &App) -> AnyElement {
+    if let Some(element) = hooks(cx).editor_empty {
+        return element(theme, cx);
+    }
     tiles::empty_state(theme, tr(cx, ids::hv::EDITOR_EMPTY, NoArgs), "editor-empty")
         .into_any_element()
 }

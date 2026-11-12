@@ -31,6 +31,23 @@ pub enum IconName {
     Sun,
     TriangleAlert,
     X,
+    // M2a connections (Task 1).
+    Database,
+    LockOpen,
+    RotateCw,
+    Copy,
+    ClipboardPaste,
+    Plug,
+    Unplug,
+    Pencil,
+    Trash2,
+    ExternalLink,
+    Route,
+    CircleAlert,
+    CircleX,
+    FolderOpen,
+    Undo2,
+    FileKey,
     /// The Hacivat mark (`icons/hacivat/hv-mark.svg`).
     HvMark,
 }
@@ -61,6 +78,22 @@ impl IconName {
             IconName::Sun => "icons/lucide/sun.svg",
             IconName::TriangleAlert => "icons/lucide/triangle-alert.svg",
             IconName::X => "icons/lucide/x.svg",
+            IconName::Database => "icons/lucide/database.svg",
+            IconName::LockOpen => "icons/lucide/lock-open.svg",
+            IconName::RotateCw => "icons/lucide/rotate-cw.svg",
+            IconName::Copy => "icons/lucide/copy.svg",
+            IconName::ClipboardPaste => "icons/lucide/clipboard-paste.svg",
+            IconName::Plug => "icons/lucide/plug.svg",
+            IconName::Unplug => "icons/lucide/unplug.svg",
+            IconName::Pencil => "icons/lucide/pencil.svg",
+            IconName::Trash2 => "icons/lucide/trash-2.svg",
+            IconName::ExternalLink => "icons/lucide/external-link.svg",
+            IconName::Route => "icons/lucide/route.svg",
+            IconName::CircleAlert => "icons/lucide/circle-alert.svg",
+            IconName::CircleX => "icons/lucide/circle-x.svg",
+            IconName::FolderOpen => "icons/lucide/folder-open.svg",
+            IconName::Undo2 => "icons/lucide/undo-2.svg",
+            IconName::FileKey => "icons/lucide/file-key.svg",
             IconName::HvMark => "icons/hacivat/hv-mark.svg",
         }
     }
@@ -140,7 +173,7 @@ mod tests {
     use hacivat_ui_core::assets::BundledAssets;
     use hacivat_ui_core::gpui_surface::AssetSource;
 
-    const ALL: [IconName; 23] = [
+    const ALL: [IconName; 39] = [
         IconName::ArrowLeftRight,
         IconName::Check,
         IconName::ChevronDown,
@@ -163,6 +196,22 @@ mod tests {
         IconName::Sun,
         IconName::TriangleAlert,
         IconName::X,
+        IconName::Database,
+        IconName::LockOpen,
+        IconName::RotateCw,
+        IconName::Copy,
+        IconName::ClipboardPaste,
+        IconName::Plug,
+        IconName::Unplug,
+        IconName::Pencil,
+        IconName::Trash2,
+        IconName::ExternalLink,
+        IconName::Route,
+        IconName::CircleAlert,
+        IconName::CircleX,
+        IconName::FolderOpen,
+        IconName::Undo2,
+        IconName::FileKey,
         IconName::HvMark,
     ];
 

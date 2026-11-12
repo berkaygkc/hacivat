@@ -21,12 +21,16 @@ use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, Global, WindowHandle};
 
-pub use hooks::{KeyCaptureHook, ShellHooks, set_key_capture};
+pub use hooks::{
+    CapsuleFn, ElementFn, EscapeFn, FocusContexts, KeyCaptureHook, SegmentFn, ShellHooks, StatusFn,
+    ViewBuilder, register_focus_context, set_capsule, set_capsule_segment, set_connection_panel,
+    set_editor_empty, set_escape, set_explorer, set_key_capture, set_status_left,
+};
 pub use keymap_state::{ActiveKeymap, install_with as install_keymap_with, set_keymap_preset};
 pub use layers::{Layer, Layers};
 pub use tab_content::{TabContent, TabContentRegistry, TabKind};
 pub use tiles::TileLayout;
-pub use workspace::{DemoCapsule, Workspace, open_workspace};
+pub use workspace::{DemoCapsule, POPOVER_CONTEXT, Workspace, open_workspace};
 
 use crate::l10n_global::{HostLocale, build_initial, install_l10n, tr};
 use crate::theme_pref::apply_theme;
@@ -54,6 +58,9 @@ pub struct Startup {
     pub l10n: Arc<L10n>,
     /// Whether settings changes are saved to `settings.toml` (false under session overrides).
     pub persist_settings: bool,
+    /// The connections to boot (M2a). `None` from `new`/`with_overrides`: the shell then runs
+    /// exactly as in M1 (P17).
+    pub connections: Option<crate::connections::ConnectionsBoot>,
 }
 
 /// Command-line overrides for one session (`--theme`, `--lang`): applied in memory only, and
@@ -99,6 +106,7 @@ impl Startup {
             catalogs: Arc::new(catalogs),
             l10n: Arc::new(l10n),
             persist_settings: overrides.is_empty(),
+            connections: None,
         }
     }
 }
@@ -157,8 +165,9 @@ struct Initialized;
 impl Global for Initialized {}
 
 /// Starts the app on `cx`: installs the settings, localization, theme and keymap, runs
-/// [`crate::init`] (once per app), opens the workspace window and shows the startup
-/// diagnostics as toasts (F24).
+/// [`crate::init`] (once per app), boots the connections when `startup.connections` is set
+/// (before the window opens, so their hook views exist when `Workspace::new` builds them, P17),
+/// opens the workspace window and shows the startup diagnostics as toasts (F24).
 pub fn start(
     cx: &mut App,
     startup: Startup,
@@ -178,6 +187,9 @@ pub fn start(
     }
     apply_theme(cx, theme);
     keymap_state::install(cx);
+    if let Some(boot) = startup.connections {
+        crate::connections::boot(cx, boot);
+    }
     let window = open_workspace(cx, demo)?;
     show_startup_diags(cx, &startup.diags, startup.quarantined.as_deref());
     Ok(window)

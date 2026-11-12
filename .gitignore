@@ -1,6 +1,9 @@
 # Local-only reference material (cloned third-party repos, extracted vendor resources). Never commit.
 .refs/
 target/
+# Core-only build directories (M2a per-task target dirs) and Docker-produced files.
+target-core/
+target/docker/
 .superpowers/
 .DS_Store
 *.key

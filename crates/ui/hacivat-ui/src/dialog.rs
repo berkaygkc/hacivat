@@ -7,8 +7,8 @@
 //! render, so an open dialog follows a language switch (F16).
 
 use hacivat_ui_core::gpui_surface::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, Role,
+    AnyElement, App, AppContext, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, Role,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
@@ -41,6 +41,45 @@ pub struct DialogSpec {
     pub cancel: usize,
     /// The button with the initial focus.
     pub primary: usize,
+    pub size: DialogSize,
+}
+
+/// A dialog card's width class (NOTES "NEW primitives": dialog sizes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DialogSize {
+    /// 420 px: confirmations and short notices.
+    Standard,
+    /// 480 px: the error and production-tag dialogs.
+    Wide,
+    /// 640 px: the connection form.
+    Form,
+}
+
+impl DialogSize {
+    pub fn width_px(self) -> f32 {
+        match self {
+            DialogSize::Standard => DIALOG_WIDTH_PX,
+            DialogSize::Wide => 480.0,
+            DialogSize::Form => 640.0,
+        }
+    }
+}
+
+/// The card of a dialog of `size` on a popover surface (Task 6). The stub is an empty `div`.
+pub fn dialog_frame(_theme: &Theme, _size: DialogSize) -> Div {
+    div()
+}
+
+/// The form dialog: a header, a scrolling body, an optional test strip and a footer (Task 6).
+/// The stub is an empty `div`.
+pub fn form_dialog(
+    _theme: &Theme,
+    _header: AnyElement,
+    _body: AnyElement,
+    _strip: Option<AnyElement>,
+    _footer: AnyElement,
+) -> Div {
+    div()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

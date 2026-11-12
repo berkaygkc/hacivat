@@ -306,6 +306,7 @@ pub fn open_palette(window: &mut Window, cx: &mut App) {
                 context: PALETTE_CONTEXT,
                 view: host.clone().into(),
                 restore_focus: None,
+                modal: false,
             },
             window,
             cx,

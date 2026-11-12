@@ -24,6 +24,9 @@ pub struct Layer {
     /// Focused again when the layer is popped; `push_layer` records the focused element when
     /// this is `None`.
     pub restore_focus: Option<FocusHandle>,
+    /// A modal layer dims and blocks what is under it, and while one is open only the top
+    /// layer's bindings (and `app.quit`) resolve (P47). `open_dialog` sets it.
+    pub modal: bool,
 }
 
 struct Entry {
@@ -72,9 +75,22 @@ impl Layers {
         self.stack.is_empty()
     }
 
-    /// The layers as elements covering the window, bottom first. A dialog sits centred over a
-    /// dimmed ground that takes every click; other layers place themselves (a popup menu at its
-    /// anchor, dismissing itself on a press outside).
+    /// Whether any open layer is modal.
+    pub fn has_modal(&self) -> bool {
+        self.stack.iter().any(|e| e.layer.modal)
+    }
+
+    /// The top layer's context while a modal layer is open (P47).
+    pub fn modal_context(&self) -> Option<&'static str> {
+        if !self.has_modal() {
+            return None;
+        }
+        self.stack.last().map(|e| e.layer.context)
+    }
+
+    /// The layers as elements covering the window, bottom first. A modal layer sits centred
+    /// over a dimmed ground that takes every click; other layers place themselves (a popup menu
+    /// at its anchor, dismissing itself on a press outside).
     pub fn elements(&self, theme: &Theme) -> Vec<AnyElement> {
         let c = &theme.tokens.colors;
         self.stack
@@ -88,7 +104,7 @@ impl Layers {
                     .top_0()
                     .left_0()
                     .size_full();
-                if layer.context == DIALOG_CONTEXT {
+                if layer.modal {
                     let mut scrim = c.ground.to_hsla();
                     scrim.a = SCRIM_ALPHA;
                     overlay = overlay

@@ -44,8 +44,9 @@ pub struct MenuGroup {
     pub items: Vec<MenuEntry>,
 }
 
-/// The menus' layout by action ID; actions nobody registered are left out.
-fn layout() -> [(&'static str, Vec<MenuEntry>); 4] {
+/// The menus' layout by action ID; actions nobody registered are left out, and so is a group
+/// left without items (the File group until Task 18 registers `connection.new`).
+fn layout() -> [(&'static str, Vec<MenuEntry>); 5] {
     use MenuEntry::{Action as A, Separator as S};
     [
         (
@@ -59,6 +60,8 @@ fn layout() -> [(&'static str, Vec<MenuEntry>); 4] {
                 A("app.quit"),
             ],
         ),
+        // M2a (Task 1, P18).
+        (ids::hv::MENU_FILE.id, vec![A("connection.new")]),
         (
             ids::hv::MENU_VIEW.id,
             vec![
@@ -90,12 +93,13 @@ fn layout() -> [(&'static str, Vec<MenuEntry>); 4] {
     ]
 }
 
-/// The menu model for `reg`: four groups (`hv-menu-app`, `-view`, `-window`, `-help`) of the
-/// registered actions, without leading, trailing or doubled separators.
+/// The menu model for `reg`: the groups (`hv-menu-app`, `-file`, `-view`, `-window`, `-help`)
+/// of the registered actions, without leading, trailing or doubled separators. A group with no
+/// registered action is left out.
 pub fn menu_model(reg: &ActionRegistry) -> Vec<MenuGroup> {
     layout()
         .into_iter()
-        .map(|(title_id, entries)| {
+        .filter_map(|(title_id, entries)| {
             let mut items: Vec<MenuEntry> = Vec::new();
             for entry in entries {
                 match entry {
@@ -111,7 +115,7 @@ pub fn menu_model(reg: &ActionRegistry) -> Vec<MenuGroup> {
             if items.last() == Some(&MenuEntry::Separator) {
                 items.pop();
             }
-            MenuGroup { title_id, items }
+            (!items.is_empty()).then_some(MenuGroup { title_id, items })
         })
         .collect()
 }

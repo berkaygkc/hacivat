@@ -408,13 +408,36 @@ fn every_action_title_exists_in_en() {
     }
 }
 
-#[test]
-fn keymap_commands_are_registered() {
-    let reg = registry();
+/// M2a commands bound by Task 1's keymap data before Tasks 17 and 18 register them in
+/// `connections::install`. The gate (Task 22) empties this list.
+const M2A_PENDING_COMMANDS: [&str; 12] = [
+    "connection.new",
+    "connection.paste_url",
+    "connection.toggle_connect",
+    "connection.edit",
+    "connection.duplicate",
+    "connection.copy_url",
+    "connection.delete",
+    "connection.context_menu",
+    "connection_dialog.test",
+    "connection_dialog.save",
+    "connection_dialog.save_and_connect",
+    "connection_dialog.copy_url",
+];
+
+/// Every bound command is in the app's registry (`init`: the workspace actions and every
+/// `connections::install` registration), or still pending (M2a).
+#[gpui::test]
+fn keymap_commands_are_registered(cx: &mut TestAppContext) {
+    let reg = cx.update(|cx| {
+        hacivat_app::init(cx);
+        cx.global::<ActionRegistry>().clone()
+    });
     for p in ALL_PLATFORMS {
         for preset in PRESETS {
             for b in load(p, preset, None).0.bindings() {
-                assert!(reg.get(&b.command).is_some(), "{}", b.command);
+                let pending = M2A_PENDING_COMMANDS.contains(&b.command.as_str());
+                assert!(reg.get(&b.command).is_some() || pending, "{}", b.command);
             }
         }
     }
@@ -801,7 +824,7 @@ fn restart_flushes_pending_writes_before_restarting(cx: &mut TestAppContext) {
 fn a_dialog_caller_receives_the_pressed_button(cx: &mut TestAppContext) {
     use hacivat_app::l10n_global::text_fn_id;
     use hacivat_ui::button::ButtonKind;
-    use hacivat_ui::dialog::{DialogButton, DialogEvent, DialogSpec};
+    use hacivat_ui::dialog::{DialogButton, DialogEvent, DialogSize, DialogSpec};
     let vcx = shell(cx, "en");
     let events: Rc<RefCell<Vec<DialogEvent>>> = Rc::default();
     let sink = events.clone();
@@ -818,6 +841,7 @@ fn a_dialog_caller_receives_the_pressed_button(cx: &mut TestAppContext) {
             buttons: vec![button("hui-dialog-close"), button("hv-menu-help")],
             cancel: 0,
             primary: 1,
+            size: DialogSize::Standard,
         };
         let dialog = w.open_dialog(spec, window, cx);
         cx.subscribe(&dialog, move |_, _, e: &DialogEvent, _| {
@@ -1004,5 +1028,62 @@ fn chords_in_other_contexts_and_during_composition_pass_through() {
             Instant::now()
         ),
         DispatchOutcome::PassThrough
+    );
+}
+
+// ## m2a-t01-interfaces
+
+/// P47: while a modal layer is open, only its own bindings (and `app.quit`) resolve, so a
+/// Workspace chord cannot stack another layer over a dialog.
+#[gpui::test]
+fn modal_layer_blocks_workspace_bindings(cx: &mut TestAppContext) {
+    let vcx = shell(cx, "en");
+    run(vcx, "app.about");
+    let before = layer_ids(vcx);
+    assert_eq!(before, ["dialog"]);
+    vcx.simulate_keystrokes(&primary("k")); // the palette binding is a Workspace binding
+    assert_eq!(layer_ids(vcx), before);
+    // A non-modal layer keeps the Workspace bindings live.
+    vcx.simulate_keystrokes("escape");
+    push_test_layer(vcx, "probe", "Probe");
+    vcx.simulate_keystrokes(&primary("k"));
+    assert_eq!(layer_ids(vcx), ["probe", "palette"]);
+}
+
+/// P18: the File group lists `connection.new` once it is registered; until then the group is
+/// left out.
+#[test]
+fn file_menu_appears_once_connection_new_is_registered() {
+    use hacivat_ui::actions::ActionDef;
+    let titles = |reg: &ActionRegistry| -> Vec<&'static str> {
+        menu_model(reg).iter().map(|g| g.title_id).collect()
+    };
+    let mut reg = registry();
+    assert_eq!(
+        titles(&reg),
+        [
+            "hv-menu-app",
+            "hv-menu-view",
+            "hv-menu-window",
+            "hv-menu-help"
+        ]
+    );
+    reg.register(ActionDef {
+        id: "connection.new",
+        title_id: "hv-menu-file",
+        context: "Workspace",
+        run: Rc::new(|_, _| {}),
+        enabled: |_| true,
+    })
+    .unwrap();
+    assert_eq!(
+        titles(&reg),
+        [
+            "hv-menu-app",
+            "hv-menu-file",
+            "hv-menu-view",
+            "hv-menu-window",
+            "hv-menu-help"
+        ]
     );
 }

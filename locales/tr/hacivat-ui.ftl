@@ -135,3 +135,8 @@ hv-settings-keymap-hacivat = { -brand-hacivat }
 hv-settings-keymap-datagrip = DataGrip
 # Review: PO
 hv-settings-keymap-collision = { $chord } → { $char }
+
+## m2a-t01-menu
+
+# Review: PO
+hv-menu-file = Dosya
