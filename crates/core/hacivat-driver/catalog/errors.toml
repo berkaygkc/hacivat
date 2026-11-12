@@ -1,0 +1,286 @@
+# The connect-error registry and classification tables (HV-CONN-03). Embedded by
+# `hacivat_driver::errors`; read by `cargo xtask l10n check` (L026).
+#
+# [[class]]: one entry per `ErrClass::ALL`, in taxonomy order.
+#   id         the stable class ID (`ErrClass::id`).
+#   reachable  whether M2a can produce the class. L026 requires the English messages
+#              `error-conn-<class>-title` and `-body` (hacivat-core.ftl) for every reachable class.
+#   fixes      the quick fixes in button order (`FixId::id`). Without the key: ["edit_connection"].
+#
+# [codes.<table>]: a server error code and its class. Codes always win over text.
+#   postgres   SQLSTATE (PostgreSQL).
+#   mysql      vendor error numbers (MySQL and MariaDB).
+#   mariadb    vendor error numbers that only MariaDB gives this meaning; checked before `mysql`.
+#   sqlite     primary result codes; an extended code is reduced to its low byte first.
+#
+# [fragile]: English text fragments (ASCII, lowercase) for a server error that carries no code.
+# Matched case-insensitively, and only when the server's language is unknown or English: never
+# against localized text.
+
+[[class]]
+id = "network.dns"
+reachable = true
+fixes = ["try_again", "edit_connection"]
+
+[[class]]
+id = "network.refused"
+reachable = true
+fixes = ["try_again", "edit_connection"]
+
+[[class]]
+id = "network.timeout"
+reachable = true
+fixes = ["try_again", "edit_connection"]
+
+[[class]]
+id = "network.reset"
+reachable = true
+fixes = ["try_again", "edit_connection"]
+
+[[class]]
+id = "network.unreachable"
+reachable = true
+fixes = ["try_again", "edit_connection"]
+
+[[class]]
+id = "network.ipv6_unavailable"
+reachable = true
+fixes = ["try_again", "edit_connection"]
+
+[[class]]
+id = "tls.handshake"
+reachable = true
+fixes = ["edit_connection"]
+
+# R3 (PO-away): until M2b's certificate review, the interim fix sets the profile's TLS mode to
+# Require and connects.
+[[class]]
+id = "tls.untrusted"
+reachable = true
+fixes = ["encrypt_without_verifying", "edit_connection"]
+
+[[class]]
+id = "tls.hostname"
+reachable = true
+fixes = ["encrypt_without_verifying", "edit_connection"]
+
+[[class]]
+id = "tls.protocol"
+reachable = true
+fixes = ["edit_connection"]
+
+[[class]]
+id = "tls.client_cert_required"
+reachable = true
+fixes = ["edit_connection"]
+
+[[class]]
+id = "tls.not_supported_by_server"
+reachable = true
+fixes = ["edit_connection"]
+
+[[class]]
+id = "ssh.host_key_unknown"
+reachable = false
+
+[[class]]
+id = "ssh.host_key_changed"
+reachable = false
+
+[[class]]
+id = "ssh.auth"
+reachable = false
+
+[[class]]
+id = "ssh.channel_open"
+reachable = false
+
+[[class]]
+id = "ssh.agent_unavailable"
+reachable = false
+
+[[class]]
+id = "auth.invalid"
+reachable = true
+fixes = ["reenter_password", "edit_connection"]
+
+[[class]]
+id = "auth.expired"
+reachable = true
+fixes = ["edit_connection"]
+
+[[class]]
+id = "auth.expiring"
+reachable = false
+
+[[class]]
+id = "auth.locked"
+reachable = true
+fixes = ["edit_connection"]
+
+[[class]]
+id = "auth.method_unsupported"
+reachable = true
+fixes = ["edit_connection"]
+
+[[class]]
+id = "auth.mfa_required"
+reachable = false
+
+[[class]]
+id = "authz.database"
+reachable = true
+fixes = ["edit_connection"]
+
+[[class]]
+id = "authz.object"
+reachable = false
+
+# Validate shows these problems on the form, so the error offers no button.
+[[class]]
+id = "config.invalid"
+reachable = true
+fixes = []
+
+[[class]]
+id = "config.unknown_database"
+reachable = true
+fixes = ["use_database", "edit_connection"]
+
+[[class]]
+id = "config.mode_mismatch"
+reachable = false
+
+[[class]]
+id = "config.wrong_port_protocol"
+reachable = false
+
+[[class]]
+id = "config.pooler_prepared_statements"
+reachable = false
+
+[[class]]
+id = "server.too_many_connections"
+reachable = true
+fixes = ["try_again", "edit_connection"]
+
+[[class]]
+id = "server.starting"
+reachable = true
+fixes = ["try_again", "edit_connection"]
+
+[[class]]
+id = "server.shutdown"
+reachable = true
+fixes = ["edit_connection"]
+
+[[class]]
+id = "server.read_only"
+reachable = true
+fixes = ["edit_connection"]
+
+# PO Q3: below the floor, warn and offer "Connect anyway (unsupported)" as a ghost button.
+[[class]]
+id = "server.unsupported_version"
+reachable = true
+fixes = ["supported_versions", "edit_connection", "connect_anyway"]
+
+[[class]]
+id = "karagoz.forbidden"
+reachable = false
+
+[[class]]
+id = "karagoz.grant_expired"
+reachable = false
+
+[[class]]
+id = "karagoz.revoked"
+reachable = false
+
+[[class]]
+id = "karagoz.upstream_unreachable"
+reachable = false
+
+[[class]]
+id = "karagoz.upstream_auth"
+reachable = false
+
+[[class]]
+id = "karagoz.overloaded"
+reachable = false
+
+[[class]]
+id = "karagoz.protocol"
+reachable = false
+
+[[class]]
+id = "karagoz.session_timeout"
+reachable = false
+
+[[class]]
+id = "karagoz.resume_expired"
+reachable = false
+
+[[class]]
+id = "karagoz.direct_path_unavailable"
+reachable = false
+
+[[class]]
+id = "karagoz.peer_identity_mismatch"
+reachable = false
+
+[[class]]
+id = "cancelled"
+reachable = true
+fixes = ["edit_connection"]
+
+[[class]]
+id = "internal"
+reachable = true
+fixes = ["edit_connection"]
+
+[codes.postgres]
+28P01 = "auth.invalid"
+28000 = "authz.database"
+3D000 = "config.unknown_database"
+53300 = "server.too_many_connections"
+57P03 = "server.starting"
+57P01 = "server.shutdown"
+57P02 = "server.shutdown"
+25006 = "server.read_only"
+08001 = "network.reset"
+08006 = "network.reset"
+
+[codes.mysql]
+1045 = "auth.invalid"
+1862 = "auth.expired"
+1820 = "auth.expired"
+3118 = "auth.locked"
+1049 = "config.unknown_database"
+1040 = "server.too_many_connections"
+1290 = "server.read_only"
+1792 = "server.read_only"
+1044 = "authz.database"
+2059 = "auth.method_unsupported"
+2061 = "auth.method_unsupported"
+
+[codes.mariadb]
+# ER_ACCOUNT_HAS_BEEN_LOCKED (P44).
+4151 = "auth.locked"
+
+[codes.sqlite]
+14 = "config.unknown_database" # SQLITE_CANTOPEN
+26 = "config.invalid"          # SQLITE_NOTADB
+8 = "server.read_only"         # SQLITE_READONLY
+5 = "internal"                 # SQLITE_BUSY
+6 = "internal"                 # SQLITE_LOCKED
+
+[fragile]
+"password authentication failed" = "auth.invalid"
+"access denied for user" = "auth.invalid"
+"too many connections" = "server.too_many_connections"
+"the database system is starting up" = "server.starting"
+"the database system is shutting down" = "server.shutdown"
+"unknown database" = "config.unknown_database"
+"server does not support tls" = "tls.not_supported_by_server"
+"server does not support ssl" = "tls.not_supported_by_server"

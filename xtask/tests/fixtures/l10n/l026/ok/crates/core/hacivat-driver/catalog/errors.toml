@@ -1,0 +1,9 @@
+# L026 fixture: the reachable class has both English messages.
+
+[[class]]
+id = "auth.invalid"
+reachable = true
+
+[[class]]
+id = "ssh.host_key_unknown"
+reachable = false

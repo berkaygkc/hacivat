@@ -754,9 +754,11 @@ fn check_plurals(m: &Msg, file: &str, locale: &str, en: &English<'_>, out: &mut 
     };
     for sel in m.selectors.iter().filter(|s| !s.ordinal) {
         let numeric_var = sel.var.as_deref().is_some_and(|v| {
-            en.sigs
-                .get(m.id.as_str())
-                .is_some_and(|s| s.vars.iter().any(|(n, t)| n == v && *t == VarType::Number))
+            en.sigs.get(m.id.as_str()).is_some_and(|s| {
+                s.vars
+                    .iter()
+                    .any(|(n, t)| n == v && matches!(t, VarType::Number | VarType::Decimal))
+            })
         });
         if !(sel.number_fn || numeric_var) {
             continue;
@@ -917,6 +919,73 @@ fn check_shape(m: &Msg, en: &Msg, file: &str, locale: &str, out: &mut Vec<Findin
     if en.attrs.iter().any(|a| !m.attrs.contains(a)) {
         push(Severity::Warning);
     }
+}
+
+// ## m2a-t10-errors
+
+/// The connect-error registry, relative to the repository root (the parent of `locales/`).
+pub const ERRORS_TOML: &str = "crates/core/hacivat-driver/catalog/errors.toml";
+
+/// L026: every class `errors.toml` marks `reachable` has English `error-conn-<class>-title` and
+/// `-body` messages. `src` is the registry's text; `None` (no registry next to the catalogs)
+/// checks nothing.
+pub fn check_error_registry(src: Option<&str>, en: &English<'_>, out: &mut Vec<Finding>) {
+    let Some(src) = src else {
+        return;
+    };
+    let mut err = |line: u32, id: &str| {
+        out.push(finding(
+            "L026",
+            Severity::Error,
+            "en",
+            ERRORS_TOML,
+            line,
+            id,
+        ));
+    };
+    let Ok(table) = src.parse::<toml::Table>() else {
+        err(0, "errors.toml is not valid TOML");
+        return;
+    };
+    let Some(classes) = table.get("class").and_then(toml::Value::as_array) else {
+        err(0, "errors.toml has no [[class]] entries");
+        return;
+    };
+    for entry in classes {
+        let id = entry.get("id").and_then(toml::Value::as_str);
+        let reachable = entry.get("reachable").and_then(toml::Value::as_bool);
+        let (Some(id), Some(reachable)) = (id, reachable) else {
+            err(
+                0,
+                "a [[class]] entry needs a string `id` and a boolean `reachable`",
+            );
+            continue;
+        };
+        if !reachable {
+            continue;
+        }
+        let stem: String = id
+            .chars()
+            .map(|c| if c == '.' || c == '_' { '-' } else { c })
+            .collect();
+        for part in ["title", "body"] {
+            let msg = format!("error-conn-{stem}-{part}");
+            let present = en.msgs.get(msg.as_str()).is_some_and(|(m, _)| m.has_value);
+            if !present {
+                err(id_line(src, id), &msg);
+            }
+        }
+    }
+}
+
+/// The 1-based line of `id = "<id>"` in `src`, or 0.
+fn id_line(src: &str, id: &str) -> u32 {
+    src.lines()
+        .position(|l| {
+            l.split_once('=')
+                .is_some_and(|(k, v)| k.trim() == "id" && v.trim().trim_matches('"') == id)
+        })
+        .map_or(0, |i| u32::try_from(i + 1).unwrap_or(u32::MAX))
 }
 
 pub fn finding(

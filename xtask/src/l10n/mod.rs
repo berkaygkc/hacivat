@@ -111,6 +111,11 @@ fn report(root: &Path, code_roots: &[&Path]) -> Report {
 
     smoke::check(&locales, &en, &mut out);
 
+    let registry = root
+        .parent()
+        .and_then(|repo| std::fs::read_to_string(repo.join(rules::ERRORS_TOML)).ok());
+    rules::check_error_registry(registry.as_deref(), &en, &mut out);
+
     if !code_roots.is_empty() {
         let en_ids: BTreeSet<String> = en.msgs.keys().map(|k| (*k).to_string()).collect();
         let allow = read_allowlist(root, &mut out);
@@ -328,6 +333,7 @@ fn rule_summary(rule: &str) -> &'static str {
         "L023" => "access key not in the label or not unique in its container",
         "L024" => "code uses an undefined message ID",
         "L025" => "English message never referenced",
+        "L026" => "reachable error class without English title and body",
         "L027" => "message fails to render with sample arguments",
         "L029" => "pseudo-locale folder committed",
         "L900" => "hard-coded UI text or string assembly",
@@ -576,6 +582,49 @@ mod tests {
             .find(|c| c.locale == "tr" && c.domain == "common")
             .unwrap();
         assert!(tr.translated < tr.total, "{tr:?}");
+    }
+
+    /// Checks an L026 fixture: a repository-shaped tree with `locales/` and the driver's
+    /// `errors.toml`.
+    fn check_fixture(name: &str) -> Vec<Finding> {
+        check(&fx(name).join("locales"), &[])
+    }
+
+    fn codes(f: Vec<Finding>) -> Vec<&'static str> {
+        let mut c: Vec<&'static str> = f.iter().map(|x| x.rule).collect();
+        c.dedup();
+        c
+    }
+
+    #[test]
+    fn a_decimal_selector_is_a_plural_select() {
+        assert_eq!(ids_of("tr-few-decimal", "L013"), ["cm-rows"]);
+    }
+
+    #[test]
+    fn l026_reachable_class_without_english_message() {
+        assert_eq!(codes(check_fixture("l026/missing")), ["L026"]);
+        assert!(codes(check_fixture("l026/ok")).is_empty());
+        assert!(codes(check_fixture("l026/unreachable-without-message")).is_empty());
+    }
+
+    #[test]
+    fn l026_names_the_missing_message_and_is_an_error() {
+        let f = check_fixture("l026/missing");
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].severity, Severity::Error);
+        assert_eq!(f[0].id, "error-conn-auth-invalid-body");
+        assert_eq!(f[0].file, "crates/core/hacivat-driver/catalog/errors.toml");
+        assert_eq!(f[0].line, 4);
+    }
+
+    #[test]
+    fn l026_rejects_an_unreadable_registry() {
+        let mut out = Vec::new();
+        let en_files = Vec::new();
+        let en = rules::English::new(&en_files);
+        rules::check_error_registry(Some("[[class]]\nid = 3\n"), &en, &mut out);
+        assert_eq!(codes(out), ["L026"]);
     }
 
     #[test]

@@ -1,0 +1,52 @@
+network.dns title: db-prod-us.acme.io bulunamadı.
+network.dns body: Bu Mac sunucu adını çözümleyemedi. Yazımı denetleyin; sunucu özel bir ağdaysa VPN'e bağlanın.
+network.refused title: db-prod-us.acme.io sunucusu 5432 numaralı bağlantı noktasında bağlantıyı reddetti.
+network.refused body: Sunucuya ulaşılabiliyor, ama bu bağlantı noktasında bağlantıyı kabul eden bir şey yok. Bağlantı noktasını ve veritabanı sunucusunun çalışıp ağ bağlantılarını kabul ettiğini denetleyin.
+network.timeout title: db-prod-us.acme.io zamanında yanıt vermedi.
+network.timeout body: Bağlantı denemesi zaman aşımına uğradı. Sunucu meşgul olabilir ya da bir güvenlik duvarı bağlantıyı düşürüyor olabilir. Yeniden deneyin ya da sunucu adını ve bağlantı noktasını denetleyin.
+network.reset title: db-prod-us.acme.io bağlantıyı kapattı.
+network.reset body: Bağlantı, Hacivat oturum açamadan kesildi. Sunucu yeniden başlamış ya da bir güvenlik duvarı veya vekil sunucu bağlantıyı kapatmış olabilir. Yeniden deneyin.
+network.unreachable title: db-prod-us.acme.io sunucusuna bu Mac'ten ulaşılamıyor.
+network.unreachable body: Sunucuya giden bir ağ yolu yok. Ağ bağlantınızı denetleyin; sunucu özel bir ağdaysa VPN'e bağlanın.
+network.ipv6_unavailable title: db-prod-us.acme.io sunucusuna yalnızca IPv6 ile ulaşılabiliyor.
+network.ipv6_unavailable body: Sunucunun yalnızca IPv6 adresleri var ve bu ağ IPv6 taşımıyor. Başka bir ağ deneyin ya da varsa sunucunun IPv4 adresini kullanın.
+tls.handshake title: db-prod-us.acme.io ile güvenli bağlantı kurulamadı.
+tls.handshake body: Hacivat ile sunucu şifreleme konusunda anlaşamadı. Bağlantının TLS ayarlarını denetleyin; nedeni teknik ayrıntılarda.
+tls.untrusted title: db-prod-us.acme.io, bu Mac'in güvenmediği bir sertifika gönderdi.
+tls.untrusted body: Kendinden imzalı ya da şirketinizin kendi CA'sınca verilmiş olabilir. Güvenmeden önce inceleyin.
+tls.hostname title: db-prod-us.acme.io sunucusunun sertifikası başka bir ad için verilmiş.
+tls.hostname body: Sunucunun sertifikası, Hacivat'ın bağlandığı adı kapsamıyor. Sertifikada yazan bir adla bağlanın; örneğin IP adresi ya da takma ad yerine sunucunun tam alan adıyla.
+tls.protocol title: db-prod-us.acme.io ile güvenli bağlantı bir güvenlik denetiminden geçemedi.
+tls.protocol body: Sunucu, Hacivat'ın kabul etmediği bir TLS sürümü kullanıyor ya da doğrulanamayan şifreli veri gönderdi. Hacivat TLS 1.2 veya sonrasını gerektirir. Sunucu güncelse ağdaki bir şey bağlantıya müdahale ediyor olabilir.
+tls.client_cert_required title: db-prod-us.acme.io bir istemci sertifikası istiyor.
+tls.client_cert_required body: Sunucu yalnızca kendi sertifikasını sunan bağlantıları kabul ediyor. İstemci sertifikasını ve anahtarını bağlantının TLS ayarlarına ekleyin.
+tls.not_supported_by_server title: db-prod-us.acme.io şifreli bağlantı sunmuyor.
+tls.not_supported_by_server body: Bu bağlantı TLS gerektiriyor ama sunucu desteklemiyor. Sunucuda TLS'i açın ya da ağ özel ve güvenilirse bağlantının TLS kipini değiştirin.
+auth.invalid title: Sunucu deploy kullanıcısının parolasını reddetti.
+auth.invalid body: Parola değişmiş ya da süresi dolmuş olabilir. Hesap kilitlenmesin diye Hacivat 3 denemeden sonra durur.
+auth.expired title: deploy kullanıcısının parolasının süresi doldu.
+auth.expired body: Sunucu, bu hesap oturum açmadan önce yeni bir parola istiyor. Parolayı başka bir araçla değiştirin ya da veritabanı yöneticinize başvurun, sonra yeni parolayı buraya girin.
+auth.locked title: deploy hesabı kilitli.
+auth.locked body: Sunucu bu hesabın oturum açmasına izin vermiyor; genellikle çok sayıda başarısız denemeden sonra ya da bir yönetici kilitlediği için. Kilidi açması için veritabanı yöneticinize başvurun.
+auth.method_unsupported title: Sunucu, deploy kullanıcısından Hacivat'ın kullanamadığı bir yöntemle oturum açmasını istiyor.
+auth.method_unsupported body: Hesap, Hacivat'ın bu bağlantı üzerinden desteklemediği bir kimlik doğrulama yöntemi kullanıyor. Bazı yöntemler yalnızca şifreli bağlantıda çalışır: TLS'i açmayı deneyin ya da hesabın hangi yöntemi kullandığını veritabanı yöneticinize sorun.
+authz.database title: deploy kullanıcısının orders_v2 veritabanını açma izni yok.
+authz.database body: Sunucu bu hesabın buradan bu veritabanına bağlanmasına izin vermiyor. Erişim için veritabanı yöneticinize başvurun ya da hesabın açabildiği bir veritabanı seçin.
+config.invalid title: orders-prod bağlantısının ayarları kullanılamıyor.
+config.invalid body: Bağlantıdaki bir ayar olduğu gibi kullanılamıyor. Hangisi olduğu teknik ayrıntılarda yazıyor; düzeltmek için bağlantıyı düzenleyin.
+config.unknown_database title: db-prod-us.acme.io üzerinde orders_v2 adlı bir veritabanı yok.
+config.unknown_database body: Oturum açıldı. deploy kullanıcısının erişebildiği veritabanları:
+server.too_many_connections title: db-prod-us.acme.io sunucusunda boş bağlantı kalmadı.
+server.too_many_connections body: Sunucu bağlantı sınırına ulaştı. Biraz sonra yeniden deneyin ya da artık gerekmeyen bağlantıları kapatın.
+server.starting title: db-prod-us.acme.io hâlâ başlatılıyor.
+server.starting body: Veritabanı sunucusu çalışıyor ama henüz bağlantılara hazır değil. Biraz sonra yeniden deneyin.
+server.shutdown title: db-prod-us.acme.io kapanıyor.
+server.shutdown body: Veritabanı sunucusu duruyor ya da bir yönetici oturumu sonlandırdı. Sunucu yeniden açılınca tekrar bağlanın.
+server.read_only title: db-prod-us.acme.io yalnızca okumaya izin veriyor.
+server.read_only body: Sunucu salt okunur kipte; örneğin bir kopya (replica) olduğu için. Değişiklik yapmak için birincil sunucuya bağlanın.
+server.unsupported_version title: db-prod-us.acme.io, Hacivat'ın desteklemediği PostgreSQL 9.6.24 sürümünü çalıştırıyor.
+server.unsupported_version body: Hacivat PostgreSQL 14 ve sonrasını destekler. Şema okuma ve güvenlik denetimleri daha yeni sistem kataloglarına dayanır.
+cancelled title: orders-prod bağlantısı iptal edildi.
+cancelled body: Hiçbir şey değişmedi. Hazır olduğunuzda yeniden bağlanın.
+internal title: orders-prod bağlantısı kurulurken bir sorun oluştu.
+internal body: Hacivat beklemediği bir hatayla karşılaştı. Sunucunun mesajı teknik ayrıntılarda; sorunu bildirirken bunları kopyalayın.

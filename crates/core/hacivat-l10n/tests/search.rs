@@ -288,3 +288,84 @@ fn kinds_outrank_each_other_across_items() {
     let best_prefix = find(&build_key("identity", &TOL), "id", &TOL).expect("prefix");
     assert!(worst_exact.score > best_prefix.score);
 }
+
+// ## m2a-t10-prepared-query
+
+use hacivat_l10n::PreparedQuery;
+
+/// Queries and the texts each is tried against: hits, misses, Turkish letters, accents, word
+/// starts, acronyms, subsequences, whitespace, an empty query and controls.
+fn corpus() -> Vec<(&'static str, Vec<&'static str>)> {
+    let texts = vec![
+        "orders-prod",
+        "İSTANBUL_SUBE",
+        "müşteri_ılık",
+        "user_id",
+        "events_2026_10",
+        "Straße",
+        "ad\u{2067}min",
+        "db-prod-us.acme.io",
+        "",
+    ];
+    [
+        "prod",
+        "istanbul",
+        "ılık",
+        "musteri",
+        "ID",
+        "ui",
+        "e10",
+        "stras",
+        "  acme   io ",
+        "",
+        "admin",
+        "zzz",
+        "ş",
+    ]
+    .into_iter()
+    .map(|q| (q, texts.clone()))
+    .collect()
+}
+
+fn opts_tr() -> SearchOpts {
+    SearchOpts {
+        turkish_tolerant: true,
+        mode: MatchMode::Fuzzy,
+    }
+}
+
+#[test]
+fn prepared_query_equals_find() {
+    for (q, texts) in corpus() {
+        let o = opts_tr();
+        let p = PreparedQuery::new(q, &o);
+        for t in texts {
+            let k = build_key(t, &o);
+            assert_eq!(p.matches(&k), find(&k, q, &o), "{q} ~ {t}");
+        }
+    }
+}
+
+#[test]
+fn prepared_query_equals_find_in_every_mode() {
+    for turkish_tolerant in [true, false] {
+        for mode in [MatchMode::Contains, MatchMode::WordPrefix, MatchMode::Fuzzy] {
+            let o = SearchOpts {
+                turkish_tolerant,
+                mode,
+            };
+            for (q, texts) in corpus() {
+                let p = PreparedQuery::new(q, &o);
+                for t in texts {
+                    let k = build_key(t, &o);
+                    assert_eq!(p.matches(&k), find(&k, q, &o), "{o:?} {q} ~ {t}");
+                }
+            }
+        }
+    }
+    // A prepared query is reusable: the same answer twice.
+    let p = PreparedQuery::new("prod", &TOL);
+    let k = build_key("orders-prod", &TOL);
+    assert_eq!(p.matches(&k), p.matches(&k));
+    assert!(p.matches(&k).is_some());
+}

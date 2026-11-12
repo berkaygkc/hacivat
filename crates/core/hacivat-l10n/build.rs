@@ -206,6 +206,7 @@ fn message(out: &mut String, sig: &Signature, names: &mut Names, errors: &mut Ve
         let rust_ty = match ty {
             VarType::String => "crate::args::Text".to_string(),
             VarType::Number => "crate::args::Count".to_string(),
+            VarType::Decimal => "crate::args::ExactDecimal".to_string(),
             VarType::DateTime => "crate::args::WhenValue".to_string(),
             VarType::List => "::std::vec::Vec<::std::string::String>".to_string(),
             VarType::Enum(values) => {
