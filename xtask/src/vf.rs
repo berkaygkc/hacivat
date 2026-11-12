@@ -135,10 +135,6 @@ impl Scanline {
     pub fn x(y: u32, from: u32, to: u32) -> Self {
         Self { name: String::new(), axis: Axis::X, at: y, from, to, expect_edges_px: vec![], tol_de: None }
     }
-    /// Scans along y, at column `x`.
-    pub fn y(x: u32, from: u32, to: u32) -> Self {
-        Self { name: String::new(), axis: Axis::Y, at: x, from, to, expect_edges_px: vec![], tol_de: None }
-    }
 }
 
 /// Positions (along the scan axis, in image pixels) where ΔE to the previous pixel exceeds `tol_de`.

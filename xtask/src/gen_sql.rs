@@ -87,24 +87,21 @@ const STATUSES: &[&str] = &["paid", "pending", "shipped", "cancelled", "refunded
 fn harman_top_customers(r: &mut Rng, out: &mut Vec<String>) {
     let days = 7 + r.below(83);
     let limit = 10 * (1 + r.below(20));
-    out.extend(
-        [
-            format!("-- Top customers by revenue, last {days} days"),
-            "SELECT c.full_name,".into(),
-            "       c.city, c.segment,".into(),
-            "       count(o.id)          AS orders,".into(),
-            "       sum(oi.line_total)   AS revenue".into(),
-            "FROM customers c".into(),
-            "JOIN orders o ON o.customer_id = c.id".into(),
-            "JOIN order_items oi ON oi.order_id = o.id".into(),
-            format!("WHERE o.ordered_at > now() - interval '{days} days'"),
-            "GROUP BY c.full_name, c.city, c.segment".into(),
-            "ORDER BY revenue DESC".into(),
-            format!("LIMIT {limit};"),
-            String::new(),
-        ]
-        .into_iter(),
-    );
+    out.extend([
+        format!("-- Top customers by revenue, last {days} days"),
+        "SELECT c.full_name,".into(),
+        "       c.city, c.segment,".into(),
+        "       count(o.id)          AS orders,".into(),
+        "       sum(oi.line_total)   AS revenue".into(),
+        "FROM customers c".into(),
+        "JOIN orders o ON o.customer_id = c.id".into(),
+        "JOIN order_items oi ON oi.order_id = o.id".into(),
+        format!("WHERE o.ordered_at > now() - interval '{days} days'"),
+        "GROUP BY c.full_name, c.city, c.segment".into(),
+        "ORDER BY revenue DESC".into(),
+        format!("LIMIT {limit};"),
+        String::new(),
+    ]);
 }
 
 fn harman_status_filter(r: &mut Rng, out: &mut Vec<String>) {
@@ -118,44 +115,38 @@ fn harman_status_filter(r: &mut Rng, out: &mut Vec<String>) {
 fn cte(r: &mut Rng, out: &mut Vec<String>) {
     let days = 1 + r.below(60);
     let cities: Vec<String> = (0..4).map(|_| format!("'{}'", r.pick(CITIES))).collect();
-    out.extend(
-        [
-            "WITH recent_orders AS (".into(),
-            "    SELECT o.id, o.customer_id, o.total".into(),
-            "    FROM orders o".into(),
-            format!("    WHERE o.ordered_at >= current_date - {days}"),
-            "),".into(),
-            "city_totals AS (".into(),
-            "    SELECT c.city, sum(r.total) AS total".into(),
-            "    FROM recent_orders r".into(),
-            "    JOIN customers c ON c.id = r.customer_id".into(),
-            "    GROUP BY c.city".into(),
-            ")".into(),
-            "SELECT city, total".into(),
-            "FROM city_totals".into(),
-            format!("WHERE city IN ({})", cities.join(", ")),
-            "ORDER BY total DESC;".into(),
-            String::new(),
-        ]
-        .into_iter(),
-    );
+    out.extend([
+        "WITH recent_orders AS (".into(),
+        "    SELECT o.id, o.customer_id, o.total".into(),
+        "    FROM orders o".into(),
+        format!("    WHERE o.ordered_at >= current_date - {days}"),
+        "),".into(),
+        "city_totals AS (".into(),
+        "    SELECT c.city, sum(r.total) AS total".into(),
+        "    FROM recent_orders r".into(),
+        "    JOIN customers c ON c.id = r.customer_id".into(),
+        "    GROUP BY c.city".into(),
+        ")".into(),
+        "SELECT city, total".into(),
+        "FROM city_totals".into(),
+        format!("WHERE city IN ({})", cities.join(", ")),
+        "ORDER BY total DESC;".into(),
+        String::new(),
+    ]);
 }
 
 fn block_comment(r: &mut Rng, out: &mut Vec<String>) {
     let batch = r.below(100_000);
-    out.extend(
-        [
-            "/*".into(),
-            format!(" * Nightly reconciliation for batch {batch}."),
-            format!(
-                " * Müşteri kayıtları {} ve {} şubelerinden gelir.",
-                r.pick(CITIES),
-                r.pick(CITIES)
-            ),
-            " */".into(),
-        ]
-        .into_iter(),
-    );
+    out.extend([
+        "/*".into(),
+        format!(" * Nightly reconciliation for batch {batch}."),
+        format!(
+            " * Müşteri kayıtları {} ve {} şubelerinden gelir.",
+            r.pick(CITIES),
+            r.pick(CITIES)
+        ),
+        " */".into(),
+    ]);
 }
 
 fn long_in_list(r: &mut Rng, out: &mut Vec<String>) {

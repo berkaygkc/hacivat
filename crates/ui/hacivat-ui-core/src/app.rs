@@ -57,7 +57,7 @@ mod tests {
         // The test platform's text system registers nothing, which is exactly the silent
         // fallback the bootstrap must refuse.
         let cx = gpui::TestAppContext::single();
-        let err = cx.update(|cx| bootstrap(cx)).unwrap_err();
+        let err = cx.update(bootstrap).unwrap_err();
         assert!(format!("{err:#}").contains("not registered"), "{err:#}");
     }
 

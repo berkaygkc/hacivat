@@ -99,7 +99,7 @@ impl ImeCore {
         text.replace_chars(target.clone(), new_text);
         let inserted = new_text.chars().count();
         let end = target.start + inserted;
-        self.marked = (inserted > 0).then(|| target.start..end);
+        self.marked = (inserted > 0).then_some(target.start..end);
         self.selection = match new_selected_utf16 {
             Some(sel) => {
                 let len16 = new_text.encode_utf16().count();

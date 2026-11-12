@@ -40,11 +40,9 @@ pub fn column_window(scroll_col: usize, visible_cols: usize, line_len: usize) ->
     let step = MAX_SHAPED_COLUMNS
         .saturating_sub(visible_cols)
         .min(WINDOW_STEP);
-    let start = if step == 0 {
-        scroll_col
-    } else {
-        scroll_col / step * step
-    };
+    let start = scroll_col
+        .checked_div(step)
+        .map_or(scroll_col, |q| q * step);
     let start = start.min(line_len);
     start..(start + MAX_SHAPED_COLUMNS).min(line_len)
 }
@@ -126,8 +124,8 @@ pub fn highlight(text: &str) -> Vec<(Range<usize>, Token)> {
         let token = if rest.starts_with("--") {
             i = text.len();
             Token::Comment
-        } else if rest.starts_with("/*") {
-            i = rest[2..].find("*/").map_or(text.len(), |e| i + 2 + e + 2);
+        } else if let Some(body) = rest.strip_prefix("/*") {
+            i = body.find("*/").map_or(text.len(), |e| i + 2 + e + 2);
             Token::Comment
         } else if c == '\'' {
             i = rest[1..].find('\'').map_or(text.len(), |e| i + 1 + e + 1);
@@ -437,7 +435,7 @@ impl EditorView {
         }
         let prefix: String = (start..caret).map(|i| self.buffer.char(i)).collect();
         let items = completion::complete(&prefix);
-        self.completion = (!items.is_empty()).then(|| CompletionState {
+        self.completion = (!items.is_empty()).then_some(CompletionState {
             replace: start..caret,
             items,
             selected: 0,
