@@ -905,6 +905,11 @@ fn auth_invalid_reenter_counts_and_stops_at_three(cx: &mut TestAppContext) {
     }
     assert_eq!(labels, ["Attempt 2 of 3", "Attempt 3 of 3"]);
     assert_eq!(fake(vcx).connect_calls(), 2);
+    let sent = fake(vcx).last_request().expect("a connect");
+    assert!(
+        sent.password.as_deref() == Some("x"),
+        "the re-entered password filled the password slot"
+    );
     // The gesture's budget is spent: no field, no re-enter fix, the dialog stays.
     assert_eq!(view(vcx).read_with(vcx, |v, _| v.rejections()), 3);
     assert!(!fix_labels(vcx).contains(&"Enter password again".to_string()));
@@ -1310,6 +1315,16 @@ fn the_shots_fixtures_open_their_surfaces(cx: &mut TestAppContext) {
     }
 }
 
+/// Enter down and up, as a keyboard sends it: GPUI turns a clean down-and-up on a focused
+/// button into a click.
+fn press_enter(vcx: &mut VisualTestContext) {
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").expect("a keystroke"),
+    });
+    vcx.run_until_parked();
+}
+
 // ---- fix round 1 ---------------------------------------------------------------------------------
 
 /// The ID of the dialog's focused control.
@@ -1345,12 +1360,39 @@ fn the_initial_focus_is_safe_for_every_class(cx: &mut TestAppContext) {
         cx.update(|cx| cx.default_global::<Kept>().profile = None);
         let vcx = error_dialog(cx, error, ok_fake());
         assert_eq!(focused_control(vcx).as_deref(), Some(expected), "{class:?}");
-        if class == ErrClass::TlsUntrusted || class == ErrClass::ServerUnsupportedVersion {
-            // A reflexive Enter never weakens the connection.
-            vcx.simulate_keystrokes("enter");
-            settle(vcx, ms(20));
-            assert_eq!(profile(vcx).tls.mode, TlsMode::Auto, "{class:?}");
-            assert!(!profile(vcx).allow_unsupported_server, "{class:?}");
+        // A reflexive Enter runs exactly the focused fix, and never weakens the connection.
+        press_enter(vcx);
+        settle(vcx, ms(50));
+        let p = profile(vcx);
+        assert_eq!(p.tls.mode, TlsMode::Auto, "{class:?}");
+        assert!(!p.allow_unsupported_server, "{class:?}");
+        let calls = fake(vcx).connect_calls();
+        match expected {
+            "fix-reenter" => {
+                // The field opened; nothing was sent yet.
+                assert!(view(vcx).read_with(vcx, |v, _| v.reentering()), "{class:?}");
+                assert_eq!(calls, 0, "{class:?}");
+                assert_eq!(layer_ids(vcx), ["connection-error"], "{class:?}");
+            }
+            "fix-use-0" => {
+                assert_eq!(p.database.as_deref(), Some("orders"), "{class:?}");
+                let sent = fake(vcx).last_request().expect("a connect");
+                assert_eq!(sent.database.as_deref(), Some("orders"), "{class:?}");
+                assert!(layer_ids(vcx).is_empty(), "{class:?}: connected, closed");
+            }
+            "fix-retry" => {
+                assert_eq!(calls, 1, "{class:?}");
+                assert_eq!(p.database.as_deref(), Some("orders_v2"), "{class:?}");
+                assert!(layer_ids(vcx).is_empty(), "{class:?}: connected, closed");
+            }
+            "fix-edit" => {
+                // Edit connection closes the dialog (for the connection dialog); no connect,
+                // no change to the profile.
+                assert_eq!(calls, 0, "{class:?}");
+                assert_eq!(p.database.as_deref(), Some("orders_v2"), "{class:?}");
+                assert!(layer_ids(vcx).is_empty(), "{class:?}: the dialog closed");
+            }
+            other => panic!("unexpected focus {other}"),
         }
     }
 }
@@ -1470,6 +1512,15 @@ fn a_reentered_password_never_reaches_the_screen_or_the_clipboard(cx: &mut TestA
     let v = view(vcx);
     let shown = vcx.cx.read(|cx| format!("{:?}", v.read(cx).error()));
     assert!(!shown.contains("hv_test_pw"), "the error holds no password");
+    let sent = fake(vcx).last_request().expect("a connect");
+    assert!(
+        sent.password.as_deref() == Some("hv_test_pw"),
+        "the password slot holds the re-entered password"
+    );
+    assert!(
+        !format!("{sent:?}").contains("hv_test_pw"),
+        "the request's Debug redacts it"
+    );
 }
 
 #[gpui::test]
@@ -1546,4 +1597,39 @@ fn the_production_line_is_one_wrapping_sentence(cx: &mut TestAppContext) {
         "bu bağlantıda çalışırken başlık çubuğunda PROD kapsülünü gösterir,"
     );
     assert_eq!(text_of(vcx, "prod-word"), "PROD");
+}
+
+#[gpui::test]
+fn a_fast_failure_replaces_the_error_shown(cx: &mut TestAppContext) {
+    // Try again with a stored password the server rejects at once: whether the failure lands
+    // before the dialog reads the state or after, the new error replaces the old one.
+    let vcx = shell_with_fake(cx, "en", fake_always_28p01());
+    saved_profile_with(vcx, AuthProviderId::Password, Some("hv_test_pw"));
+    open_dialog_over(
+        vcx,
+        error_of(ErrClass::NetworkDns, Some(TrailStep::Resolve)),
+    );
+    let old = view(vcx).read_with(vcx, |v, _| v.error().clone());
+    click(vcx, "fix-retry");
+    for _ in 0..50 {
+        settle(vcx, ms(10));
+        if !Arc::ptr_eq(&view(vcx).read_with(vcx, |v, _| v.error().clone()), &old) {
+            break;
+        }
+    }
+    let new = view(vcx).read_with(vcx, |v, _| v.error().clone());
+    assert!(!Arc::ptr_eq(&new, &old), "the new error is shown");
+    assert_eq!(new.class, ErrClass::AuthInvalid);
+    assert_eq!(view(vcx).read_with(vcx, |v, _| v.rejections()), 1);
+    assert_eq!(
+        error_title(vcx),
+        "The server rejected the password for deploy."
+    );
+    // Its trail fails at Sign in, and nothing is pending: the fixes are live.
+    assert!(
+        new.trail
+            .iter()
+            .any(|t| t.step == TrailStep::SignIn && t.outcome == StepOutcome::Failed)
+    );
+    assert!(fix_buttons(vcx).iter().all(|b| !b.3), "no fix is disabled");
 }

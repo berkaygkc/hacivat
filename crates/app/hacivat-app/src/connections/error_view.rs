@@ -94,6 +94,17 @@ enum Mode {
     Dialog { profile: ProfileId },
 }
 
+/// What `connect` does after reading the state the manager left (`ErrorView::after_start`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterStart {
+    /// The connect runs: watch it.
+    Watch,
+    /// The profile is connected: close the dialog.
+    Close,
+    /// Nothing runs (any new failure is already shown).
+    Done,
+}
+
 /// A line shown under the fixes after a save failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Notice {
@@ -418,20 +429,13 @@ impl ErrorView {
             }
             None => ConnectionsModel::connect(cx, id, None),
         }
-        // The manager may not have started (already connected, shutting down): then there is
-        // nothing to watch.
-        match manager.state(id) {
-            LiveState::Connecting(_) => {}
-            LiveState::Connected(_) => {
-                self.pending = false;
+        match self.after_start(manager.state(id), cx) {
+            AfterStart::Watch => {}
+            AfterStart::Close => {
                 window.defer(cx, close_layer);
                 return;
             }
-            _ => {
-                self.pending = false;
-                cx.notify();
-                return;
-            }
+            AfterStart::Done => return,
         }
         self.pending = true;
         let window_handle = window.window_handle();
@@ -463,6 +467,29 @@ impl ErrorView {
             });
         }));
         cx.notify();
+    }
+
+    /// What to do with the profile's state read right after asking the manager to connect.
+    /// The connect may already be over (a fast failure on the core runtime landed first), or
+    /// the manager may not have started one (already connected, shutting down). A failure
+    /// other than the one shown is shown now: the new error, its count and its trail.
+    fn after_start(&mut self, state: LiveState, cx: &mut Context<Self>) -> AfterStart {
+        match state {
+            LiveState::Connecting(_) => AfterStart::Watch,
+            LiveState::Connected(_) => {
+                self.pending = false;
+                AfterStart::Close
+            }
+            LiveState::Failed(error) if !Arc::ptr_eq(&error, &self.error) => {
+                self.show_error(error, cx);
+                AfterStart::Done
+            }
+            LiveState::Failed(_) | LiveState::Disconnected | LiveState::Lost { .. } => {
+                self.pending = false;
+                cx.notify();
+                AfterStart::Done
+            }
+        }
     }
 
     /// Shows the error a connect started here ended with. The gesture's count only grows; the
@@ -1227,3 +1254,93 @@ pub use shots::{auth_fixture, tls_fixture, unknown_db_fixture, unsupported_fixtu
 
 #[cfg(feature = "shots")]
 pub(crate) use shots::sample as sample_error;
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use gpui::TestAppContext;
+    use hacivat_driver::errors::Phase;
+    use hacivat_session::pipeline::{ErrArgs, StepOutcome, StepTrace, TrailStep};
+
+    use super::*;
+
+    fn error(class: ErrClass, attempts: u8, failed: TrailStep) -> Arc<ConnectError> {
+        Arc::new(ConnectError {
+            class,
+            phase: Phase::DriverConnect,
+            trail: vec![StepTrace {
+                step: failed,
+                outcome: StepOutcome::Failed,
+                elapsed: None,
+            }],
+            args: ErrArgs {
+                name: "orders".into(),
+                host: Some("127.0.0.1".into()),
+                port: Some(5432),
+                user: Some("deploy".into()),
+                database: None,
+                file: None,
+                engine: "PostgreSQL".into(),
+                version: None,
+            },
+            server: None,
+            fixes: Vec::new(),
+            suggestions: Vec::new(),
+            issues: Vec::new(),
+            elapsed: Duration::from_millis(5),
+            attempts,
+            needs_interaction: false,
+        })
+    }
+
+    /// A failure that lands before the state is read still replaces the error shown: the
+    /// new error, its count and its trail.
+    #[gpui::test]
+    fn a_failure_read_right_after_the_start_is_shown(cx: &mut TestAppContext) {
+        let shown = error(ErrClass::NetworkDns, 2, TrailStep::Resolve);
+        let view = cx.new(|cx| {
+            ErrorView::with_mode(
+                shown.clone(),
+                Mode::Dialog {
+                    profile: ProfileId::new(),
+                },
+                cx,
+            )
+        });
+        let fresh = error(ErrClass::AuthInvalid, 3, TrailStep::SignIn);
+        let next = view.update(cx, |v, cx| {
+            v.pending = true;
+            v.after_start(LiveState::Failed(fresh.clone()), cx)
+        });
+        assert_eq!(next, AfterStart::Done);
+        view.read_with(cx, |v, _| {
+            assert!(Arc::ptr_eq(v.error(), &fresh));
+            assert_eq!(v.rejections(), 3);
+            assert_eq!(v.error().trail[0].step, TrailStep::SignIn);
+            assert!(!v.pending);
+        });
+        // The error already shown is not shown again; nothing is pending.
+        let again = view.update(cx, |v, cx| {
+            v.pending = true;
+            v.after_start(LiveState::Failed(fresh.clone()), cx)
+        });
+        assert_eq!(again, AfterStart::Done);
+        assert!(view.read_with(cx, |v, _| !v.pending));
+        let connecting = view.update(cx, |v, cx| {
+            v.after_start(
+                LiveState::Connecting(hacivat_session::pipeline::Progress {
+                    trail: Vec::new(),
+                    current: None,
+                    started: std::time::Instant::now(),
+                }),
+                cx,
+            )
+        });
+        assert_eq!(connecting, AfterStart::Watch);
+        assert_eq!(
+            view.update(cx, |v, cx| v.after_start(LiveState::Disconnected, cx)),
+            AfterStart::Done
+        );
+    }
+}
