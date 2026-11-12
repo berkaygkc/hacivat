@@ -1,24 +1,65 @@
-//! The Hacivat executable. Task 13 adds settings, logging, localization and the workspace
-//! shell; until then it opens an empty window so CI and packaging can target the crate.
+//! The Hacivat executable: local paths, settings, logs and localization are prepared before
+//! GPUI starts; then the app opens the workspace window.
+//!
+//! Flags: `--smoke` (launch probe for CI), `--vf-demo` (the harman production capsule, for
+//! visual-fidelity captures), `--print-window-id` (for `design/vf/capture.sh app`).
 
-use hacivat_ui_core::app::{Boot, open_window, run_app};
-use hacivat_ui_core::gpui_surface::{AppContext, Context, IntoElement, Render, Window, div};
+mod logging;
+mod smoke;
 
-struct Empty;
+use std::time::Instant;
 
-impl Render for Empty {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
-}
+use hacivat_app::Startup;
+use hacivat_app::shell::DemoCapsule;
+use hacivat_l10n::OsLocale;
+use hacivat_settings::{LocalPaths, TextRenderingPref};
+use hacivat_ui_core::app::{Boot, TextRendering, run_app};
+
+/// Exit code for bad flags.
+const USAGE_EXIT: i32 = 2;
+/// Exit code when the local directories or the window cannot be created.
+const STARTUP_EXIT: i32 = 1;
 
 fn main() {
-    run_app(Boot::default(), |cx| {
-        hacivat_app::init(cx);
-        // The brand is never translated; the window title is not chrome text.
-        if let Err(err) = open_window(cx, "Hacivat", (1440.0, 900.0), |_, cx| cx.new(|_| Empty)) {
-            eprintln!("opening the window failed: {err:#}");
-            std::process::exit(1);
+    let started = Instant::now();
+    let flags = match smoke::parse(std::env::args().skip(1)) {
+        Ok(flags) => flags,
+        Err(err) => {
+            eprintln!("hacivat: {err} (flags: --smoke, --vf-demo, --print-window-id)");
+            std::process::exit(USAGE_EXIT);
         }
+    };
+    let paths = match LocalPaths::from_os().and_then(|p| p.ensure_dirs().map(|()| p)) {
+        Ok(paths) => paths,
+        Err(err) => {
+            eprintln!("hacivat: cannot prepare the local directories: {err}");
+            std::process::exit(STARTUP_EXIT);
+        }
+    };
+    let outcome = hacivat_settings::load(&paths.settings_toml());
+    let _log_guard = logging::init(&paths.logs_dir());
+    tracing::info!(
+        diags = outcome.diags.len(),
+        quarantined = outcome.quarantined.is_some(),
+        "settings loaded"
+    );
+    let startup = Startup::new(paths, outcome, OsLocale::detect());
+    let boot = Boot {
+        text_rendering: match startup.settings.ui.text_rendering {
+            TextRenderingPref::Crisp => TextRendering::Crisp,
+            TextRenderingPref::Standard => TextRendering::Standard,
+        },
+    };
+    let demo = flags.vf_demo.then(DemoCapsule::harman);
+    run_app(boot, move |cx| {
+        match hacivat_app::start(cx, startup, demo) {
+            Ok(window) => smoke::install(cx, window.into(), flags, started),
+            Err(err) => {
+                tracing::error!(error = %format!("{err:#}"), "opening the workspace window failed");
+                eprintln!("hacivat: opening the window failed: {err:#}");
+                std::process::exit(STARTUP_EXIT);
+            }
+        }
+        cx.activate(true);
     });
 }
