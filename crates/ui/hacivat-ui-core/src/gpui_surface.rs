@@ -18,3 +18,7 @@ pub use gpui::{
 pub use gpui::{
     ContentMask, FontId, InteractiveElement, ShapedLine, TextAlign, fill, point,
 };
+// Task 8 (harman VF): element building blocks.
+pub use gpui::{
+    AnyElement, BoxShadow, Div, FontStyle, HighlightStyle, StyledText, svg,
+};
