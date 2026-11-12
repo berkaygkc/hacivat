@@ -3,6 +3,16 @@
 //! `m2a-pg17` (compose `container_name`, P25) must give the same outcome. Run with
 //! `cargo xtask docker test --set pr -p hacivat-session` (or `--set full`).
 //!
+//! **Environment dependency.** The psql side relies on the official `postgres` image's
+//! `pg_hba.conf`: loopback (`127.0.0.1/32`, `::1/128`) and the Unix socket are `trust`, and
+//! only `host all all all scram-sha-256` asks for a password. A `trust`ed connection never
+//! reads `PGPASSFILE`, so psql connects with `hostaddr=<the container's own IP>` (a
+//! non-loopback address, scram) while `host=<vector host>` is what libpq looks the file up
+//! under. If the image or its pg_hba changes (the container IP becomes trusted, or scram is
+//! dropped), psql would skip the file: every vector would then come out `Accepted` or
+//! `NoPassword` regardless of its lines, and the test fails loudly at `libpq == expect`
+//! rather than passing silently.
+//!
 //! No password reaches the test output: the vectors name it `@PW@`, psql gets the file on
 //! stdin, and an outcome is only `Accepted`, `Rejected` or `NoPassword`.
 
@@ -133,8 +143,14 @@ fn quoted(value: &str) -> String {
 }
 
 /// The script run in the container: the file arrives on stdin, `$1` is the connection string
-/// without `hostaddr`. The connection goes to the container's own (non-loopback) address, where
-/// the server asks for a password, and the temporary file is removed afterwards.
+/// without `hostaddr`, and the temporary file is removed afterwards.
+///
+/// The `hostaddr` trick: the official image's pg_hba trusts loopback and the socket, and a
+/// trusted connection never reads `PGPASSFILE`. So the script dials the container's own
+/// (non-loopback) address with `hostaddr`, where pg_hba's `host all all all scram-sha-256`
+/// asks for a password, while libpq looks the file up under `host` (libpq: with both set,
+/// `host` names the connection in the password file). If the image or pg_hba changes so that
+/// this address is trusted, psql skips the file and the test fails at `libpq == expect`.
 const SCRIPT: &str = r#"f=$(mktemp) || exit 90
 cat > "$f"
 chmod 600 "$f"

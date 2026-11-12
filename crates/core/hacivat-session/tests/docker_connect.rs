@@ -1,6 +1,13 @@
 //! Engine conformance over Docker (Task 19, exit criteria 1–3): the whole connect pipeline,
 //! `test_connection` and the `ConnectionManager` with the real drivers against every server of
 //! the M2a matrix. Run with `cargo xtask docker test --set full -p hacivat-session`.
+//!
+//! `connects_and_detects_every_matrix_target` also writes each target's resolved server
+//! version to the Docker artifact `resolved-versions.txt` (`hacivat_testkit::artifact`, so
+//! `<main checkout>/target/docker/resolved-versions.txt` under `cargo xtask docker test`), for
+//! the gate (Task 22). One line per target, `<id>\t<ServerInfo.raw_version>`, after a
+//! `# set: <set>` header; under `--set full` it lists all 13 targets (pg13 is connected with
+//! `allow_unsupported_server` only to read its version).
 
 mod docker_support;
 
@@ -29,6 +36,7 @@ async fn connects_and_detects_every_matrix_target() {
     if !docker_enabled() {
         return;
     }
+    let mut resolved = Vec::new();
     for t in matrix() {
         let live = connect(
             &deps(),
@@ -60,10 +68,41 @@ async fn connects_and_detects_every_matrix_target() {
             t.id,
             live.server.raw_version
         );
-        // The resolved version, for the gate (Step 4).
-        eprintln!("resolved {} = {}", t.id, live.server.raw_version);
+        resolved.push((t.id.clone(), live.server.raw_version.clone()));
         live.close().await;
     }
+    // Outside the matrix: pg13 is below the floor (read with `allow_unsupported_server`) and
+    // pg17-tr is pg17 with Turkish server messages.
+    for id in ["pg13", "pg17-tr"] {
+        let Some(t) = target_required(id) else {
+            continue;
+        };
+        let mut p = profile_for(&t, auto_or_require(&t));
+        p.allow_unsupported_server = true;
+        let live = connect(&deps(), req(p), Interaction::Headless, token(), progress())
+            .await
+            .unwrap_or_else(|e| panic!("{id}: {:?}", e.class));
+        assert!(live.server.raw_version.contains(&t.major), "{id}");
+        resolved.push((t.id.clone(), live.server.raw_version.clone()));
+        live.close().await;
+    }
+    write_resolved_versions(&resolved);
+}
+
+/// Writes the resolved versions to the Docker artifact `resolved-versions.txt` (Step 4; read
+/// by the gate).
+fn write_resolved_versions(resolved: &[(String, String)]) {
+    let path = hacivat_testkit::artifact("resolved-versions.txt");
+    let set = std::env::var("HACIVAT_DOCKER_SET").unwrap_or_else(|_| "full".to_string());
+    let mut text = format!("# set: {set}\n");
+    for (id, version) in resolved {
+        text.push_str(&format!("{id}\t{version}\n"));
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).expect("the artifact directory");
+    }
+    std::fs::write(&path, text).expect("resolved-versions.txt is written");
+    eprintln!("resolved versions: {}", path.display());
 }
 
 #[tokio::test]

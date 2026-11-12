@@ -78,6 +78,11 @@ database = "hv_test"
 user = "hv_test"
 expect = "accepted"
 
+# Only `/var/run/postgresql` is tested on purpose: it is the `DEFAULT_PGSOCKET_DIR` of
+# Debian's libpq (the psql in `m2a-pg17`), the only directory that build looks up as
+# `localhost`. `pgpass_lookup` also maps `/tmp` and `/run/postgresql` to `localhost` (the
+# defaults of other builds), which this psql would match literally, so those two are
+# intentionally untested here.
 [[vector]]
 name = "localhost-vs-socket"
 edge = "the default socket directory is looked up as `localhost`, never as its path"
