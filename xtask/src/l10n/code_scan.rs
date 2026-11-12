@@ -125,7 +125,7 @@ fn scan_source(
                     used.push((s.clone(), line, false));
                 }
             }
-            Tok::Punct('+') if ui && !is(&toks, i + 1, '=') => {
+            Tok::Punct('+') if ui && !is(&toks, i + 1, '=') && !in_identifier_call(&toks, i) => {
                 let (l, r) = (left_operand(&toks, i), right_operand(&toks, i));
                 let text = Operand::Text;
                 let lit_or_text = |o: Operand| matches!(o, Operand::Text | Operand::Lit);
@@ -156,6 +156,7 @@ fn scan_source(
                 }
                 if ui {
                     if name == "format"
+                        && !in_identifier_call(&toks, i)
                         && is(&toks, i + 1, '!')
                         && is(&toks, i + 2, '(')
                         && let Some(template) = format_assembly(&toks, i + 2)
@@ -263,6 +264,10 @@ fn in_identifier_call(toks: &[Token], i: usize) -> bool {
             Tok::Punct('(' | '[' | '{') => {
                 if depth > 0 {
                     depth -= 1;
+                    continue;
+                }
+                // Only a `(` directly after the callee is a call; `id { .. }` is a block.
+                if !matches!(toks[j].tok, Tok::Punct('(')) {
                     continue;
                 }
                 let Some(Tok::Ident(callee)) = j.checked_sub(1).map(|k| &toks[k].tok) else {
@@ -882,6 +887,26 @@ mod tests {
         ] {
             assert_eq!(flagged(src), 0, "{src}");
         }
+        // Assembly inside an identifier call is not UI text either.
+        for src in [
+            r#"fn f() { div().id(format!("{} {}", l10n.t(A), b)); }"#,
+            r#"fn f() { div().id(l10n.t(A) + " " + &l10n.t(B)); }"#,
+        ] {
+            assert_eq!(flagged(src), 0, "{src}");
+        }
+        assert_eq!(
+            flagged(r#"fn f() { let s = format!("{} {}", l10n.t(A), b); }"#),
+            1
+        );
+        // A block after a variable named `id` is not a call.
+        assert_eq!(
+            flagged(r#"fn f() { match id { _ => a.child(SharedString::from("Open")) } }"#),
+            1
+        );
+        assert_eq!(
+            flagged(r#"fn f() { if let Some(x) = id { a.child("Open"); } }"#),
+            1
+        );
         // Text next to an identifier is still text.
         assert_eq!(
             flagged(r#"fn f() { div().id("x").child(SharedString::from("Open")); }"#),
