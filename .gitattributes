@@ -1,0 +1,12 @@
+# Normalise every text file to LF in the repository and in checkouts, so token
+# codegen (`cargo xtask tokens --check`) and the generated sources are byte-stable on Windows.
+* text=auto eol=lf
+
+# Binary assets: never touch line endings or diff them as text.
+*.ttf binary
+*.otf binary
+*.png binary
+*.gif binary
+*.mp4 binary
+*.icc binary
+*.dmg binary

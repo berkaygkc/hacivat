@@ -258,7 +258,8 @@ fn parse_layers(shadows: &serde_json::Value, name: &str) -> Result<Vec<Layer>> {
 }
 
 pub fn load(design_md: &str, design_json: &str) -> Result<Tokens> {
-    let docs = YamlLoader::load_from_str(frontmatter(design_md)?)
+    let design_md = normalize_eol(design_md);
+    let docs = YamlLoader::load_from_str(frontmatter(&design_md)?)
         .context("DESIGN.md frontmatter is not valid YAML")?;
     let doc = docs.first().ok_or_else(|| anyhow!("empty frontmatter"))?;
 
@@ -353,7 +354,7 @@ pub fn load_repo_sources() -> Result<Tokens> {
     let md = std::fs::read_to_string(repo_root().join("DESIGN.md")).context("reading DESIGN.md")?;
     let json = std::fs::read_to_string(repo_root().join(".impeccable/design.json"))
         .context("reading .impeccable/design.json")?;
-    load(&md, &json)
+    load(&normalize_eol(&md), &normalize_eol(&json))
 }
 
 /// kebab -> snake; keys that start with a digit get an `s_` prefix.
@@ -571,12 +572,26 @@ fn unified_diff(expected: &str, actual: &str) -> String {
         .unwrap_or_else(|_| "(diff unavailable)".into())
 }
 
+/// `--check` compare that ignores CRLF vs LF (Windows checkouts without `.gitattributes`).
+fn same_text(a: &str, b: &str) -> bool {
+    normalize_eol(a) == normalize_eol(b)
+}
+
+/// CRLF -> LF, so a Windows checkout parses and compares like a Unix one.
+fn normalize_eol(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains("\r\n") {
+        std::borrow::Cow::Owned(s.replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
 fn run_inner(check: bool) -> Result<bool> {
     let rendered = render(&load_repo_sources()?)?;
     let path = generated_path();
     if check {
         let current = std::fs::read_to_string(&path).unwrap_or_default();
-        if current == rendered {
+        if same_text(&current, &rendered) {
             return Ok(true);
         }
         eprint!("{}", unified_diff(&rendered, &current));
@@ -705,6 +720,18 @@ spacing: {}
     }
 
     #[test]
+    fn parses_crlf_frontmatter() {
+        let md = MD.replace('\n', "\r\n");
+        assert_eq!(load(&md, JSON).unwrap(), load(MD, JSON).unwrap());
+    }
+
+    #[test]
+    fn check_compare_ignores_crlf() {
+        assert!(same_text("a\r\nb\r\n", "a\nb\n"));
+        assert!(!same_text("a\nb\n", "a\nc\n"));
+    }
+
+    #[test]
     fn rejects_non_px_units() {
         let md = MD.replace("\"13px\"", "\"13em\"");
         assert!(load(&md, JSON).is_err());
@@ -712,9 +739,10 @@ spacing: {}
 
     #[test]
     fn generated_file_is_current() {
+        let current = std::fs::read_to_string(generated_path()).unwrap();
         assert_eq!(
             render(&load_repo_sources().unwrap()).unwrap(),
-            std::fs::read_to_string(generated_path()).unwrap()
+            normalize_eol(&current)
         );
     }
 }
