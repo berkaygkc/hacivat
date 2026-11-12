@@ -7,7 +7,7 @@ use std::sync::Arc;
 use hacivat_driver::{DriverRegistry, EngineCatalog};
 use hacivat_secrets::{CredentialFiles, KeyringBackend, MemoryBackend, SecretBackend, SecretStore};
 use hacivat_session::pipeline::ConnectDeps;
-use hacivat_session::profile::{LoadedProfiles, ProfileDiag, ProfileStore};
+use hacivat_session::profile::{LoadedProfiles, ProfileStore};
 use hacivat_session::{ConnectionManager, CoreRuntime, ManagerConfig, default_drivers};
 use hacivat_settings::LocalPaths;
 use hacivat_ui_core::gpui_surface::App;
@@ -119,9 +119,10 @@ fn boot_with(
 }
 
 /// Sets the `ConnectionsModel` Global from `boot` (with its `ConnectionManager`) and shows the
-/// store diagnostics as toasts, one per kind (P29): the quarantined file; the skipped entries
-/// (invalid, duplicate ID, unknown engine) as one count; an ignored password (never echoed);
-/// a newer file (read-only). It never touches the keyring. A pending profile write is flushed
+/// store diagnostics as toasts, one per kind (P29): the quarantined file; a file that cannot
+/// be read or set aside; the skipped entries (invalid, duplicate ID, unknown engine) as one
+/// count; the ignored values as one count; an ignored password (never echoed); a newer file
+/// (read-only). It never touches the keyring. A pending profile write is flushed
 /// at quit.
 pub fn install(cx: &mut App, boot: ConnectionsBoot) {
     let ConnectionsBoot {
@@ -161,27 +162,5 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
     })
     .detach();
 
-    let skipped = diags
-        .iter()
-        .filter(|d| {
-            matches!(
-                d,
-                ProfileDiag::InvalidEntry { .. }
-                    | ProfileDiag::DuplicateId { .. }
-                    | ProfileDiag::UnknownEngine { .. }
-            )
-        })
-        .count();
-    let password_ignored = diags
-        .iter()
-        .any(|d| matches!(d, ProfileDiag::SecretKeyIgnored { .. }));
-    let newer = diags
-        .iter()
-        .any(|d| matches!(d, ProfileDiag::NewerVersion { .. }));
-    let quarantined = quarantined.map(|path| {
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    });
-    push_store_toasts(cx, quarantined, skipped, password_ignored, newer);
+    push_store_toasts(cx, &diags, quarantined.as_deref());
 }

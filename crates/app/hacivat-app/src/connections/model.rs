@@ -17,16 +17,19 @@
 //! stored only after the connect succeeds (Task 16).
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hacivat_l10n::{Count, NoArgs, Text, ids};
-use hacivat_proto::ProfileId;
+use hacivat_proto::{Origin, ProfileId, TagSource};
 use hacivat_secrets::{Retention, SecretError, SecretKey, SecretSlot, SecretStore, Stored};
-use hacivat_session::profile::{Profile, ProfileDraft, ProfileStore, StoreError, duplicate_name};
+use hacivat_session::profile::{
+    Profile, ProfileDiag, ProfileDraft, ProfileStore, StoreError, duplicate_name,
+};
 use hacivat_session::{ConnectionManager, CoreRuntime, LiveState, TestHandle};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
-use hacivat_ui_core::gpui_surface::{App, Global, Task};
+use hacivat_ui_core::gpui_surface::{App, Global, SharedString, Task};
 use secrecy::SecretString;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
@@ -40,6 +43,8 @@ pub enum SaveError {
     StoreReadOnly,
     Io(String),
     Secret(SecretError),
+    /// The profile is not in the list (deleted meanwhile): an edit never brings it back.
+    NotFound,
 }
 
 impl From<StoreError> for SaveError {
@@ -137,20 +142,37 @@ impl ConnectionsModel {
 
     /// Saves `draft` (a new profile, or the saved one with its ID), and its password and TLS
     /// key passphrase by its retention (see the module docs). A read-only store refuses at
-    /// once and changes nothing.
+    /// once and changes nothing; so does an edit of a profile that was deleted meanwhile
+    /// (`NotFound`: it is never brought back).
+    ///
+    /// Environment tags (D-004): a profile whose tag the organization set keeps its stored
+    /// `environment` and `env_source`, whatever the draft says; any other profile's tag is the
+    /// user's (`env_source` is always `User`).
     pub fn save(cx: &mut App, draft: ProfileDraft) -> Task<Result<ProfileId, SaveError>> {
         let m = cx.global::<ConnectionsModel>();
         if m.read_only {
             return Task::ready(Err(SaveError::StoreReadOnly));
         }
         let ProfileDraft {
-            profile,
+            mut profile,
             password,
             tls_key_passphrase,
+            is_new,
             ..
         } = draft;
         let id = profile.id;
-        let old_retention = m.get(id).map(|p| p.retention);
+        let stored = m.get(id);
+        if !is_new && stored.is_none() {
+            return Task::ready(Err(SaveError::NotFound));
+        }
+        match stored.as_deref() {
+            Some(old) if old.env_source == TagSource::Org => {
+                profile.environment = old.environment;
+                profile.env_source = TagSource::Org;
+            }
+            _ => profile.env_source = TagSource::User,
+        }
+        let old_retention = stored.map(|p| p.retention);
         let retention = profile.retention;
         let name = profile.name.clone();
         let secrets = m.secrets.clone();
@@ -170,7 +192,7 @@ impl ConnectionsModel {
             if fell_back {
                 cx.update(notice_keyring_unavailable);
             }
-            written?;
+            cx.update(|cx| written.surface(cx))?;
             secret.map_or(Ok(id), |e| Err(SaveError::Secret(e)))
         })
     }
@@ -194,27 +216,31 @@ impl ConnectionsModel {
         }
         let secrets = m.secrets.clone();
         let done = m.writer.run(m.snapshot(), move || secrets.delete_all(id));
-        cx.spawn(async move |_| {
+        cx.spawn(async move |cx| {
             let (deleted, written) = done.await.map_err(|_| cancelled())?;
-            written?;
+            cx.update(|cx| written.surface(cx))?;
             deleted.map_err(SaveError::Secret)
         })
     }
 
     /// Saves a copy of `id` right after it, named `<name>-2` (or the next free number), with
-    /// copies of its secrets, selects it and shows the `hv-conn-toast-dup` toast.
+    /// copies of its secrets, selects it and shows the `hv-conn-toast-dup` toast. The copy is
+    /// the user's own: its tag is the user's and its origin `UserTyped` (D-004), even when the
+    /// original is managed by the organization.
     pub fn duplicate(cx: &mut App, id: ProfileId) -> Task<Result<ProfileId, SaveError>> {
         let m = cx.global::<ConnectionsModel>();
         if m.read_only {
             return Task::ready(Err(SaveError::StoreReadOnly));
         }
         let Some(at) = m.profiles.iter().position(|p| p.id == id) else {
-            return Task::ready(Err(SaveError::Io("unknown profile".to_string())));
+            return Task::ready(Err(SaveError::NotFound));
         };
         let names: Vec<&str> = m.profiles.iter().map(|p| p.name.as_str()).collect();
         let mut copy = (*m.profiles[at]).clone();
         copy.id = ProfileId::new();
         copy.name = duplicate_name(&m.profiles[at].name, &names);
+        copy.env_source = TagSource::User;
+        copy.origin = Origin::UserTyped;
         let (new_id, name, retention) = (copy.id, copy.name.clone(), copy.retention);
         let secrets = m.secrets.clone();
 
@@ -240,7 +266,7 @@ impl ConnectionsModel {
         });
         cx.spawn(async move |cx| {
             let (copied, written) = done.await.map_err(|_| cancelled())?;
-            written?;
+            cx.update(|cx| written.surface(cx))?;
             cx.update(|cx| {
                 let text = Rc::new(move |cx: &App| {
                     tr(
@@ -391,6 +417,23 @@ struct Pending {
     last: Result<(), StoreError>,
 }
 
+/// What a job's write did: its result, and a file it set aside first (P29).
+struct Written {
+    result: Result<(), StoreError>,
+    quarantined: Option<PathBuf>,
+}
+
+impl Written {
+    /// Shows the `hv-conn-file-quarantined` toast when the write set the file aside, and
+    /// returns the write's result.
+    fn surface(self, cx: &mut App) -> Result<(), SaveError> {
+        if let Some(path) = self.quarantined {
+            push_quarantined(cx, file_name(&path));
+        }
+        self.result.map_err(SaveError::from)
+    }
+}
+
 /// The ordered writer of `connections.toml` (P48): a serial job queue on the core runtime and
 /// a latest-wins slot.
 struct ProfileWriter {
@@ -426,7 +469,7 @@ impl ProfileWriter {
         &self,
         profiles: Vec<Profile>,
         work: impl FnOnce() -> T + Send + 'static,
-    ) -> oneshot::Receiver<(T, Result<(), StoreError>)> {
+    ) -> oneshot::Receiver<(T, Written)> {
         lock(&self.pending).profiles = Some(profiles);
         let (done, rx) = oneshot::channel();
         let pending = self.pending.clone();
@@ -448,63 +491,126 @@ impl ProfileWriter {
 }
 
 /// Writes the pending list, if any, under the slot's lock (so writes never overlap or reorder);
-/// with nothing pending, the last write's result stands.
-fn write_pending(pending: &Mutex<Pending>, store: &ProfileStore) -> Result<(), StoreError> {
+/// with nothing pending, the last write's result stands. Only the write that set the file
+/// aside reports it.
+fn write_pending(pending: &Mutex<Pending>, store: &ProfileStore) -> Written {
     let mut slot = lock(pending);
+    let mut quarantined = None;
     if let Some(profiles) = slot.profiles.take() {
-        slot.last = store.save(&profiles);
+        slot.last = store.save_reporting(&profiles).map(|report| {
+            quarantined = report.quarantined;
+        });
         if let Err(e) = &slot.last {
             tracing::warn!(error = ?e, "connections: saving connections.toml failed");
         }
     }
-    slot.last.clone()
+    Written {
+        result: slot.last.clone(),
+        quarantined,
+    }
 }
 
 fn lock(m: &Mutex<Pending>) -> std::sync::MutexGuard<'_, Pending> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-// Toast helpers for the boot diagnostics (P29) live here so every connections toast is built
+// Toast helpers for the store diagnostics (P29) live here so every connections toast is built
 // the same way.
 
-/// One toast per kind of store diagnostic (P29), in a fixed order.
-pub(crate) fn push_store_toasts(
+/// The file name a quarantined file was saved under.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn push_quarantined(cx: &mut App, file: String) {
+    let text = Rc::new(move |cx: &App| {
+        tr(
+            cx,
+            ids::hv::CONN_FILE_QUARANTINED,
+            ids::hv::HvConnFileQuarantined {
+                file: Text(file.clone()),
+            },
+        )
+    });
+    ToastQueue::push(cx, Toast::new(ToastKind::Error, text));
+}
+
+/// A toast for a count of `id`-style problems (entries skipped, values ignored).
+fn push_count(
     cx: &mut App,
-    quarantined: Option<String>,
-    skipped: usize,
-    password_ignored: bool,
-    newer: bool,
+    kind: ToastKind,
+    count: usize,
+    render: fn(&App, Count) -> SharedString,
 ) {
-    if let Some(file) = quarantined {
-        let text = Rc::new(move |cx: &App| {
-            tr(
-                cx,
-                ids::hv::CONN_FILE_QUARANTINED,
-                ids::hv::HvConnFileQuarantined {
-                    file: Text(file.clone()),
-                },
-            )
-        });
+    if count == 0 {
+        return;
+    }
+    let count = u64::try_from(count).unwrap_or(u64::MAX);
+    let text = Rc::new(move |cx: &App| render(cx, Count(count)));
+    ToastQueue::push(cx, Toast::new(kind, text));
+}
+
+/// One toast per kind of store diagnostic (P29), in a fixed order: the file set aside, the
+/// file that cannot be read (or set aside), the skipped entries, the ignored values, an
+/// ignored password (never echoed), a newer file.
+pub(crate) fn push_store_toasts(cx: &mut App, diags: &[ProfileDiag], quarantined: Option<&Path>) {
+    if let Some(path) = quarantined {
+        push_quarantined(cx, file_name(path));
+    }
+    let any = |f: fn(&ProfileDiag) -> bool| diags.iter().any(f);
+    let count = |f: fn(&ProfileDiag) -> bool| diags.iter().filter(|d| f(d)).count();
+    if any(|d| {
+        matches!(
+            d,
+            ProfileDiag::Unreadable { .. } | ProfileDiag::QuarantineFailed { .. }
+        )
+    }) {
+        let text = Rc::new(|cx: &App| tr(cx, ids::hv::CONN_FILE_UNREADABLE, NoArgs));
         ToastQueue::push(cx, Toast::new(ToastKind::Error, text));
     }
-    if skipped > 0 {
-        let count = u64::try_from(skipped).unwrap_or(u64::MAX);
-        let text = Rc::new(move |cx: &App| {
+    push_count(
+        cx,
+        ToastKind::Error,
+        count(|d| {
+            matches!(
+                d,
+                ProfileDiag::InvalidEntry { .. }
+                    | ProfileDiag::DuplicateId { .. }
+                    | ProfileDiag::UnknownEngine { .. }
+            )
+        }),
+        |cx, count| {
             tr(
                 cx,
                 ids::hv::CONN_FILE_ENTRIES_SKIPPED,
-                ids::hv::HvConnFileEntriesSkipped {
-                    count: Count(count),
-                },
+                ids::hv::HvConnFileEntriesSkipped { count },
             )
-        });
-        ToastQueue::push(cx, Toast::new(ToastKind::Error, text));
-    }
-    if password_ignored {
+        },
+    );
+    push_count(
+        cx,
+        ToastKind::Info,
+        count(|d| matches!(d, ProfileDiag::ValueIgnored { .. })),
+        |cx, count| {
+            tr(
+                cx,
+                ids::hv::CONN_FILE_VALUES_IGNORED,
+                ids::hv::HvConnFileValuesIgnored { count },
+            )
+        },
+    );
+    if any(|d| {
+        matches!(
+            d,
+            ProfileDiag::SecretKeyIgnored { .. } | ProfileDiag::SecretKeyOutsideEntries
+        )
+    }) {
         let text = Rc::new(|cx: &App| tr(cx, ids::hv::CONN_FILE_PASSWORD_IGNORED, NoArgs));
         ToastQueue::push(cx, Toast::new(ToastKind::Info, text));
     }
-    if newer {
+    if any(|d| matches!(d, ProfileDiag::NewerVersion { .. })) {
         let text = Rc::new(|cx: &App| tr(cx, ids::hv::CONN_STORE_READ_ONLY, NoArgs));
         ToastQueue::push(cx, Toast::new(ToastKind::Info, text));
     }

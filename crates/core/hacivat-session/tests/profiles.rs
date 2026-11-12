@@ -698,3 +698,219 @@ fn ids_survive_the_store_as_strings() {
         .unwrap();
     assert!(read(store.path()).contains(&format!("id = \"{id}\"")));
 }
+
+// ---- fix round 1 -----------------------------------------------------------------------------
+
+const ID_A: &str = "6f9619ff-8b86-d011-b42d-00c04fc964ff";
+const ID_B: &str = "7f9619ff-8b86-d011-b42d-00c04fc964ff";
+
+fn entry(id: &str, name: &str, more: &str) -> String {
+    format!(
+        "[[connection]]\nid = \"{id}\"\nname = \"{name}\"\nengine = \"postgres\"\nhost = \"h\"\n{more}"
+    )
+}
+
+#[test]
+fn an_org_tag_counts_only_on_a_profile_the_org_manages() {
+    let text = format!(
+        "version = 1\n{}{}",
+        entry(
+            ID_A,
+            "mine",
+            "environment = \"dev\"\nenv_source = \"org\"\n"
+        ),
+        entry(
+            ID_B,
+            "managed",
+            "environment = \"production\"\nenv_source = \"org\"\norigin = { kind = \"perde_managed\", org = \"acme\" }\n"
+        ),
+    );
+    let (_, loaded) = ProfileStore::open(write_tmp(&text));
+    assert_eq!(
+        loaded.diags,
+        [ProfileDiag::ValueIgnored {
+            index: 0,
+            key: "env_source".into()
+        }]
+    );
+    let sources: Vec<(TagSource, Option<EnvTag>)> = loaded
+        .profiles
+        .iter()
+        .map(|p| (p.env_source, p.environment))
+        .collect();
+    assert_eq!(
+        sources,
+        [
+            (TagSource::User, Some(EnvTag::Dev)),
+            (TagSource::Org, Some(EnvTag::Production))
+        ]
+    );
+}
+
+#[test]
+fn an_unknown_environment_is_no_tag_reported_and_kept_on_disk() {
+    let path = write_tmp(&format!(
+        "version = 1\n{}",
+        entry(ID_A, "a", "environment = \"uat\"\n")
+    ));
+    let (store, loaded) = ProfileStore::open(path.clone());
+    assert_eq!(loaded.profiles.len(), 1);
+    assert_eq!(loaded.profiles[0].environment, None);
+    assert_eq!(
+        loaded.diags,
+        [ProfileDiag::ValueIgnored {
+            index: 0,
+            key: "environment".into()
+        }]
+    );
+    store.save(&loaded.profiles).unwrap();
+    assert!(read(&path).contains("environment = \"uat\""));
+    let tagged = Profile {
+        environment: Some(EnvTag::Dev),
+        ..loaded.profiles[0].clone()
+    };
+    store.save(&[tagged]).unwrap();
+    let text = read(&path);
+    assert!(
+        text.contains("environment = \"dev\"") && !text.contains("uat"),
+        "{text}"
+    );
+}
+
+#[test]
+fn saving_keeps_a_duplicate_id_entry_and_entries_added_by_hand() {
+    let path = write_tmp(&format!(
+        "version = 1\n{}{}",
+        entry(ID_A, "first", ""),
+        entry(ID_A, "second", "")
+    ));
+    let (store, loaded) = ProfileStore::open(path.clone());
+    assert_eq!(loaded.profiles.len(), 1);
+    // An entry added by hand while the app runs.
+    let mut text = read(&path);
+    text.push_str(&entry(ID_B, "by-hand", ""));
+    std::fs::write(&path, text).unwrap();
+
+    store.save(&loaded.profiles).unwrap();
+    let text = read(&path);
+    for name in ["first", "second", "by-hand"] {
+        assert!(
+            text.contains(&format!("name = \"{name}\"")),
+            "{name}: {text}"
+        );
+    }
+    // A deleted profile's entries go, duplicates included; the hand-added one stays.
+    store.save(&[]).unwrap();
+    let text = read(&path);
+    assert!(
+        !text.contains("first") && !text.contains("second"),
+        "{text}"
+    );
+    assert!(text.contains("name = \"by-hand\""), "{text}");
+    let (_, reloaded) = ProfileStore::open(path);
+    assert_eq!(reloaded.profiles.len(), 1);
+    assert_eq!(reloaded.profiles[0].name, "by-hand");
+}
+
+#[test]
+fn password_keys_outside_the_entries_are_stripped_and_reported() {
+    let path = write_tmp(&format!(
+        "version = 1\npassword = \"typed-1\"\n[future]\nPwd = \"typed-2\"\nkeep = 1\n{}",
+        entry(ID_A, "a", "")
+    ));
+    let (store, loaded) = ProfileStore::open(path.clone());
+    assert_eq!(loaded.diags, [ProfileDiag::SecretKeyOutsideEntries]);
+    store.save(&loaded.profiles).unwrap();
+    let text = read(&path);
+    assert!(!text.contains("typed-"), "{text}");
+    assert!(text.contains("keep = 1"), "{text}");
+}
+
+#[test]
+fn a_file_broken_after_open_is_quarantined_by_save_and_reported() {
+    let path = write_tmp("version = 1\n");
+    let (store, _) = ProfileStore::open(path.clone());
+    std::fs::write(&path, "[[connection").unwrap();
+    let report = store.save_reporting(&[pg("h", None)]).unwrap();
+    let aside = report.quarantined.expect("set aside");
+    assert_eq!(read(&aside), "[[connection");
+    assert!(read(&path).contains("[[connection]]"));
+}
+
+#[cfg(unix)]
+mod unix_io {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn set_mode(path: &Path, mode: u32) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Whether permission bits stop this process (they do not for root).
+    fn permissions_apply(path: &Path) -> bool {
+        std::fs::read(path).is_err()
+    }
+
+    #[test]
+    fn an_unreadable_file_is_left_untouched_and_the_store_read_only() {
+        let text = format!("version = 1\n{}", entry(ID_A, "a", ""));
+        let path = write_tmp(&text);
+        set_mode(&path, 0o000);
+        if !permissions_apply(&path) {
+            set_mode(&path, 0o600);
+            return;
+        }
+        let (store, loaded) = ProfileStore::open(path.clone());
+        set_mode(&path, 0o600);
+        assert!(
+            matches!(&loaded.diags[..], [ProfileDiag::Unreadable { reason }] if reason == "PermissionDenied"),
+            "{:?}",
+            loaded.diags
+        );
+        assert!(loaded.quarantined.is_none());
+        assert!(store.read_only());
+        assert_eq!(store.save(&[]), Err(StoreError::ReadOnly));
+        assert_eq!(read(&path), text);
+    }
+
+    #[test]
+    fn a_save_that_cannot_read_the_file_writes_nothing() {
+        let text = format!("version = 1\n{}", entry(ID_A, "a", ""));
+        let path = write_tmp(&text);
+        let (store, loaded) = ProfileStore::open(path.clone());
+        assert_eq!(loaded.profiles.len(), 1);
+        set_mode(&path, 0o000);
+        if !permissions_apply(&path) {
+            set_mode(&path, 0o600);
+            return;
+        }
+        let result = store.save(&[]);
+        set_mode(&path, 0o600);
+        assert_eq!(result, Err(StoreError::Io("PermissionDenied".into())));
+        assert_eq!(read(&path), text);
+    }
+
+    #[test]
+    fn a_failed_quarantine_is_reported_and_the_store_read_only() {
+        let path = write_tmp("[[connection");
+        let dir = path.parent().unwrap().to_path_buf();
+        set_mode(&dir, 0o500);
+        let probe = dir.join("probe");
+        if std::fs::write(&probe, "x").is_ok() {
+            // Root: permission bits do not apply.
+            std::fs::remove_file(probe).unwrap();
+            set_mode(&dir, 0o700);
+            return;
+        }
+        let (store, loaded) = ProfileStore::open(path.clone());
+        set_mode(&dir, 0o700);
+        assert!(
+            matches!(&loaded.diags[..], [ProfileDiag::QuarantineFailed { .. }]),
+            "{:?}",
+            loaded.diags
+        );
+        assert!(loaded.quarantined.is_none());
+        assert!(store.read_only());
+        assert_eq!(read(&path), "[[connection");
+    }
+}

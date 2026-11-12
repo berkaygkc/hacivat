@@ -143,9 +143,9 @@ hv-menu-file = File
 ## m2a-t12-profiles
 
 # Toast when a password could not be saved to the system keyring; it is kept in memory until quit.
-hv-conn-keyring-unavailable = Passwords can't be saved to the system keyring right now. Hacivat keeps them until it quits.
+hv-conn-keyring-unavailable = Passwords can't be saved to the system keyring right now. { -brand-hacivat } keeps them until it quits.
 # Toast at startup when connections.toml was written by a newer Hacivat: connections can't be changed.
-hv-conn-store-read-only = Your connections file is from a newer Hacivat. Connections can't be added or changed in this version.
+hv-conn-store-read-only = Your connections file is from a newer { -brand-hacivat }. Connections can't be added or changed in this version.
 # Error toast at startup when connections.toml could not be parsed and was set aside.
 # Variables:
 #   $file (String) - the name the unreadable file was saved under, e.g. "connections.toml.corrupt-1731400000".
@@ -158,8 +158,17 @@ hv-conn-file-entries-skipped = { $count ->
        *[other] { $count } connections in your connections file couldn't be read and were skipped.
     }
 # Toast at startup when connections.toml contained a password; the value is never shown.
-hv-conn-file-password-ignored = A password in your connections file was ignored. Hacivat keeps passwords in the system keyring, never in that file.
+hv-conn-file-password-ignored = A password in your connections file was ignored. { -brand-hacivat } keeps passwords in the system keyring, never in that file.
 # Toast after duplicating a connection.
 # Variables:
 #   $name (String) - the new connection's name, e.g. "orders-prod-2".
 hv-conn-toast-dup = Duplicated as { $name }
+# Error toast at startup when connections.toml exists but could not be read (permissions, disk error) or could not be set aside; the file is left untouched and connections can't be changed.
+hv-conn-file-unreadable = { -brand-hacivat } can't read your connections file. It was left as it is, and connections can't be changed until it can be read.
+# Toast at startup when some values in connections.toml were not understood and were ignored (an unknown environment, an organization tag on a connection the organization does not manage).
+# Variables:
+#   $count (Number) - how many values were ignored, e.g. 2.
+hv-conn-file-values-ignored = { $count ->
+        [one] One setting in your connections file couldn't be read and was ignored.
+       *[other] { $count } settings in your connections file couldn't be read and were ignored.
+    }

@@ -14,7 +14,7 @@ use std::time::Duration;
 use gpui::{Task, TestAppContext, VisualTestContext};
 use hacivat_app::connections::{ConnectionsBoot, ConnectionsModel, SaveError};
 use hacivat_driver::DriverRegistry;
-use hacivat_proto::ProfileId;
+use hacivat_proto::{EnvTag, Origin, ProfileId, TagSource};
 use hacivat_secrets::{
     ExposeSecret, MemoryBackend, Retention, SecretBackend, SecretError, SecretKey, SecretSlot,
     SecretString,
@@ -481,4 +481,136 @@ fn the_secret_backend_follows_hacivat_secrets() {
     assert_eq!(secret_backend_from(Some("MEMORY")).name(), "memory");
     assert_eq!(secret_backend_from(None).name(), "keyring");
     assert_eq!(secret_backend_from(Some("vault")).name(), "keyring");
+}
+
+// ---- fix round 1 -----------------------------------------------------------------------------
+
+const MANAGED: &str = "version = 1\n[[connection]]\nid = \"6f9619ff-8b86-d011-b42d-00c04fc964ff\"\nname = \"managed\"\nengine = \"postgres\"\nhost = \"db.acme.io\"\nenvironment = \"production\"\nenv_source = \"org\"\norigin = { kind = \"perde_managed\", org = \"acme\" }\n";
+
+fn only_profile(vcx: &VisualTestContext) -> Profile {
+    vcx.cx
+        .read(|cx| (*cx.global::<ConnectionsModel>().profiles()[0]).clone())
+}
+
+fn profiles(vcx: &VisualTestContext) -> Vec<Profile> {
+    vcx.cx.read(|cx| {
+        cx.global::<ConnectionsModel>()
+            .profiles()
+            .iter()
+            .map(|p| (**p).clone())
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn an_org_tag_survives_an_edit_and_a_user_cannot_claim_one(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections_file(cx, "en", MANAGED);
+    let managed = only_profile(vcx);
+    assert_eq!(managed.env_source, TagSource::Org);
+
+    // The draft tries to lower the organization's tag and to hand it to the user.
+    let mut edit = ProfileDraft::edit(managed.clone());
+    edit.profile.environment = Some(EnvTag::Dev);
+    edit.profile.env_source = TagSource::User;
+    edit.profile.name = "renamed".into();
+    save(vcx, edit);
+    let saved = only_profile(vcx);
+    assert_eq!(
+        (saved.name.as_str(), saved.environment, saved.env_source),
+        ("renamed", Some(EnvTag::Production), TagSource::Org)
+    );
+
+    // A user's profile can never claim an organization tag.
+    let mut claim = named_draft("mine");
+    claim.profile.environment = Some(EnvTag::Production);
+    claim.profile.env_source = TagSource::Org;
+    let id = save(vcx, claim);
+    let mine = profiles(vcx).into_iter().find(|p| p.id == id).unwrap();
+    assert_eq!(mine.env_source, TagSource::User);
+    assert_eq!(mine.environment, Some(EnvTag::Production));
+}
+
+#[gpui::test]
+fn a_duplicate_of_a_managed_profile_is_the_users_own(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections_file(cx, "en", MANAGED);
+    let original = only_profile(vcx);
+    let copy_id = duplicate(vcx, original.id);
+    let copy = profiles(vcx).into_iter().find(|p| p.id == copy_id).unwrap();
+    assert_eq!(copy.env_source, TagSource::User);
+    assert_eq!(copy.origin, Origin::UserTyped);
+    assert_eq!(copy.environment, Some(EnvTag::Production));
+    assert_eq!(only_profile(vcx).env_source, TagSource::Org);
+}
+
+#[gpui::test]
+fn an_edit_of_a_deleted_profile_is_refused_and_not_brought_back(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    let id = save(vcx, named_draft("a"));
+    let stale = edit_named(id, "a-edited");
+    delete(vcx, id);
+    assert!(matches!(try_save(vcx, stale), Err(SaveError::NotFound)));
+    assert!(profile_names(vcx).is_empty());
+    assert!(!read(&paths(vcx).connections_toml()).contains(&id.to_string()));
+    let task = vcx.cx.update(|cx| ConnectionsModel::duplicate(cx, id));
+    assert!(matches!(wait(vcx, task), Err(SaveError::NotFound)));
+}
+
+#[gpui::test]
+fn a_file_broken_while_running_is_set_aside_by_the_next_save_with_a_toast(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    save(vcx, named_draft("a"));
+    let path = paths(vcx).connections_toml();
+    std::fs::write(&path, "[[connection").unwrap();
+    save(vcx, named_draft("b"));
+    assert_eq!(toast_ids(vcx), ["hv-conn-file-quarantined"]);
+    let text = read(&path);
+    assert!(
+        text.contains("name = \"a\"") && text.contains("name = \"b\""),
+        "{text}"
+    );
+}
+
+#[gpui::test]
+fn ignored_values_and_outside_passwords_are_reported_at_boot(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections_file(
+        cx,
+        "en",
+        "version = 1\npassword = \"typed-pw\"\n[[connection]]\nid = \"6f9619ff-8b86-d011-b42d-00c04fc964ff\"\nname = \"a\"\nengine = \"postgres\"\nhost = \"h\"\nenvironment = \"uat\"\nenv_source = \"org\"\n",
+    );
+    assert_eq!(
+        toast_ids(vcx),
+        [
+            "hv-conn-file-values-ignored",
+            "hv-conn-file-password-ignored"
+        ]
+    );
+    assert_eq!(
+        toast_texts(vcx)[0],
+        "2 settings in your connections file couldn't be read and were ignored."
+    );
+    assert!(toast_texts(vcx).iter().all(|t| !t.contains("typed-pw")));
+    let p = only_profile(vcx);
+    assert_eq!((p.environment, p.env_source), (None, TagSource::User));
+}
+
+#[gpui::test]
+fn an_unreadable_file_is_reported_left_alone_and_read_only(cx: &mut TestAppContext) {
+    // A connections.toml the app cannot read: a directory in its place is an I/O error, not a
+    // parse error, so nothing is set aside.
+    let vcx = shell_with_connections_prepared(
+        cx,
+        "en",
+        Arc::new(MemoryBackend::new()),
+        |paths: &LocalPaths| std::fs::create_dir_all(paths.connections_toml()).unwrap(),
+    );
+    assert_eq!(toast_ids(vcx), ["hv-conn-file-unreadable"]);
+    let read_only = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().store_read_only());
+    assert!(read_only);
+    assert!(paths(vcx).connections_toml().is_dir());
+    assert!(matches!(
+        try_save(vcx, named_draft("a")),
+        Err(SaveError::StoreReadOnly)
+    ));
 }

@@ -22,7 +22,7 @@ pub use rules::{
     HintSource, duplicate_name, is_local_endpoint, needs_environment_prompt, production_hint,
     suggest_name,
 };
-pub use store::{LoadedProfiles, ProfileDiag, ProfileStore, StoreError};
+pub use store::{LoadedProfiles, ProfileDiag, ProfileStore, SaveReport, StoreError};
 
 /// Where a profile connects (HV-CONN-01).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

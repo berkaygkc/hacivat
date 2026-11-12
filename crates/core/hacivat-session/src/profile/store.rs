@@ -29,21 +29,31 @@
 //!
 //! - **Secrets.** A `password`, `passwd`, `pwd`, `pass` or `sslpassword` key (ASCII case
 //!   ignored, at any depth of an entry, or as an `extra` key) is dropped on load with
-//!   `SecretKeyIgnored`, never echoed and never written back.
+//!   `SecretKeyIgnored`; outside the entries (top level, unknown tables) with
+//!   `SecretKeyOutsideEntries`. It is never echoed and never written back.
 //! - **Unknown keys** are kept: a save re-reads the file and edits it with `toml_edit`, so
 //!   unknown top-level keys, unknown keys of an entry and whole entries this version cannot read
 //!   (an unknown engine, an invalid value) stay as they are. A saved profile keeps the unknown
-//!   keys of the entry with its ID; an entry whose profile is gone (deleted) is dropped, and so
-//!   is a later entry with a duplicate ID.
+//!   keys of the entry with its ID. Only the entries of profiles this store loaded or wrote and
+//!   that a save no longer carries (deleted) are dropped; later entries with a duplicate ID and
+//!   entries added by hand while the app runs are kept.
+//! - **Environment tags (D-004).** An unknown `environment` (`uat`) loads as no tag, with
+//!   `ValueIgnored` (and stays on disk while the profile has none). `env_source = "org"` counts
+//!   only on a profile the organization manages (`origin` `perde_managed`); elsewhere it loads
+//!   as the user's tag, with `ValueIgnored`.
 //! - **Versions.** A `version` above 1 makes the store read-only (`NewerVersion`); nothing is
-//!   written. A file that is not TOML, is unreadable, or has a malformed `version` is set aside
-//!   with `fsio::quarantine(path, "corrupt", now)`.
+//!   written. A file that is not TOML or has a malformed `version` is set aside with
+//!   `fsio::quarantine(path, "corrupt", now)`. A file that cannot be read (permissions, a disk
+//!   error), or cannot be set aside, is left untouched and the store is read-only
+//!   (`Unreadable`, `QuarantineFailed`): never a silent empty list (P29).
 //! - **Writes** are atomic (`fsio::atomic_write`): the file is `0600` and a created directory
 //!   `0700`. Paths are stored as UTF-8 (a non-UTF-8 path is written lossily).
 
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
 use hacivat_net::{ClientCertPaths, TlsMode, TlsSettings};
@@ -83,6 +93,33 @@ pub enum ProfileDiag {
     NewerVersion {
         found: u32,
     },
+    // ## m2a-t12-profiles (fix round 1)
+    /// A value of an entry was not understood and was ignored; the entry still loads. `key` is
+    /// `environment` (an unknown tag: no tag) or `env_source` (an unknown source, or an
+    /// organization tag on a profile the organization does not manage: the user's tag).
+    ValueIgnored {
+        index: usize,
+        key: String,
+    },
+    /// A password key outside the `[[connection]]` entries was ignored (never echoed).
+    SecretKeyOutsideEntries,
+    /// The file exists but could not be read (`reason`: the I/O error kind). It is left
+    /// untouched and the store is read-only.
+    Unreadable {
+        reason: String,
+    },
+    /// The file could not be parsed and could not be set aside (`reason`: the I/O error kind).
+    /// It is left untouched and the store is read-only.
+    QuarantineFailed {
+        reason: String,
+    },
+}
+
+/// What a save did besides writing (P29).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct SaveReport {
+    /// The file had become unparsable since it was opened; it was set aside here first.
+    pub quarantined: Option<PathBuf>,
 }
 
 /// What [`ProfileStore::open`] loaded (P29).
@@ -107,32 +144,42 @@ pub enum StoreError {
 pub struct ProfileStore {
     path: PathBuf,
     read_only: bool,
+    /// The IDs this store loaded or wrote. An entry on disk with one of them that a save no
+    /// longer carries was deleted; any other entry the save does not carry (added by hand
+    /// while the app runs) is kept.
+    known: Mutex<HashSet<ProfileId>>,
 }
 
 impl ProfileStore {
-    /// Opens the store at `path` and loads its profiles. A missing file loads nothing.
+    /// Opens the store at `path` and loads its profiles. A missing file loads nothing. A file
+    /// that cannot be parsed is set aside (`quarantined`); one that cannot be read, or set
+    /// aside, is left untouched and the store is read-only, with a diagnostic (P29).
     pub fn open(path: PathBuf) -> (ProfileStore, LoadedProfiles) {
         let mut out = LoadedProfiles::default();
         let doc = match read_doc(&path) {
             Ok(Some(doc)) => doc,
-            Ok(None) => return (ProfileStore::at(path, false), out),
-            Err(Corrupt) => {
-                out.quarantined = fsio::quarantine(&path, "corrupt", SystemTime::now()).ok();
-                return (ProfileStore::at(path, false), out);
+            Ok(None) => return (ProfileStore::at(path, false, &out), out),
+            Err(ReadError::Io(reason)) => {
+                out.diags.push(ProfileDiag::Unreadable { reason });
+                return (ProfileStore::at(path, true, &out), out);
             }
+            Err(ReadError::Parse) => return quarantine_on_open(path, out),
         };
         let version = match version_of(&doc) {
             Ok(v) => v,
-            Err(Corrupt) => {
-                out.quarantined = fsio::quarantine(&path, "corrupt", SystemTime::now()).ok();
-                return (ProfileStore::at(path, false), out);
-            }
+            Err(ReadError::Io(_) | ReadError::Parse) => return quarantine_on_open(path, out),
         };
         let read_only = version > VERSION;
         if read_only {
             out.diags.push(ProfileDiag::NewerVersion {
                 found: u32::try_from(version).unwrap_or(u32::MAX),
             });
+        }
+        let secret_outside = doc.iter().any(|(key, item)| {
+            key != "connection" && (is_secret_key(key) || item_has_secrets(item))
+        });
+        if secret_outside {
+            out.diags.push(ProfileDiag::SecretKeyOutsideEntries);
         }
         match doc.get("connection") {
             None => {}
@@ -146,33 +193,51 @@ impl ProfileStore {
                 reason: "connection".to_string(),
             }),
         }
-        (ProfileStore::at(path, read_only), out)
+        (ProfileStore::at(path, read_only, &out), out)
     }
 
-    fn at(path: PathBuf, read_only: bool) -> ProfileStore {
-        ProfileStore { path, read_only }
+    fn at(path: PathBuf, read_only: bool, loaded: &LoadedProfiles) -> ProfileStore {
+        ProfileStore {
+            path,
+            read_only,
+            known: Mutex::new(loaded.profiles.iter().map(|p| p.id).collect()),
+        }
     }
 
     /// Writes `profiles`, in order, keeping unknown keys and entries this version cannot read.
     /// A read-only store, or a file that became newer since it was opened, writes nothing.
     pub fn save(&self, profiles: &[Profile]) -> Result<(), StoreError> {
+        self.save_reporting(profiles).map(|_| ())
+    }
+
+    /// [`save`](Self::save), reporting a file that was set aside first (P29).
+    ///
+    /// The file is re-read and edited: `profiles` come first, each in the entry with its ID
+    /// (keeping that entry's unknown keys), then every other entry as it is (entries this
+    /// version cannot read, later entries with a duplicate ID, entries added by hand while the
+    /// app runs). Only the entries of profiles this store loaded or wrote and that `profiles`
+    /// no longer carries (deleted) are dropped. A file that cannot be read is left untouched
+    /// (`Io`); one that cannot be parsed is set aside first.
+    pub fn save_reporting(&self, profiles: &[Profile]) -> Result<SaveReport, StoreError> {
         if self.read_only {
             return Err(StoreError::ReadOnly);
         }
+        let mut report = SaveReport::default();
         let mut doc = match read_doc(&self.path) {
             Ok(Some(doc)) => doc,
             Ok(None) => DocumentMut::new(),
+            Err(ReadError::Io(reason)) => return Err(StoreError::Io(reason)),
             // Broken since it was opened: set it aside, as a load would, and start over.
-            Err(Corrupt) => {
-                fsio::quarantine(&self.path, "corrupt", SystemTime::now()).map_err(io_error)?;
+            Err(ReadError::Parse) => {
+                report.quarantined = Some(self.quarantine()?);
                 DocumentMut::new()
             }
         };
         match version_of(&doc) {
             Ok(v) if v > VERSION => return Err(StoreError::ReadOnly),
             Ok(_) => {}
-            Err(Corrupt) => {
-                fsio::quarantine(&self.path, "corrupt", SystemTime::now()).map_err(io_error)?;
+            Err(_) => {
+                report.quarantined = Some(self.quarantine()?);
                 doc = DocumentMut::new();
             }
         }
@@ -181,35 +246,45 @@ impl ProfileStore {
             doc.insert("version", value(VERSION));
         }
 
-        // The entries on disk: readable ones by ID (the first of a duplicate ID wins), and the
-        // ones this version cannot read, kept as they are.
-        let mut by_id: HashMap<ProfileId, Table> = HashMap::new();
-        let mut unreadable = Vec::new();
+        let known = lock(&self.known).clone();
+        let wanted: HashSet<ProfileId> = profiles.iter().map(|p| p.id).collect();
+        let mut matched: HashMap<ProfileId, Table> = HashMap::new();
+        let mut kept = Vec::new();
         if let Some(Item::ArrayOfTables(entries)) = doc.remove("connection") {
             for entry in entries {
-                match read_entry(&entry) {
-                    Ok(p) => {
-                        by_id.entry(p.id).or_insert(entry);
-                    }
-                    Err(_) => unreadable.push(entry),
+                match read_entry(&entry).map(|(p, _)| p.id) {
+                    Ok(id) if wanted.contains(&id) => match matched.entry(id) {
+                        Entry::Vacant(slot) => {
+                            slot.insert(entry);
+                        }
+                        Entry::Occupied(_) => kept.push(entry), // a later duplicate, as it is
+                    },
+                    Ok(id) if known.contains(&id) => {} // deleted
+                    _ => kept.push(entry),
                 }
             }
         }
         let mut entries = ArrayOfTables::new();
         for p in profiles {
-            let mut entry = by_id.remove(&p.id).unwrap_or_default();
+            let mut entry = matched.remove(&p.id).unwrap_or_default();
             write_entry(&mut entry, p);
-            strip_secrets(&mut entry);
             entries.push(entry);
         }
-        for mut entry in unreadable {
-            strip_secrets(&mut entry);
+        for entry in kept {
             entries.push(entry);
         }
         if !entries.is_empty() {
             doc.insert("connection", Item::ArrayOfTables(entries));
         }
-        fsio::atomic_write(&self.path, doc.to_string().as_bytes()).map_err(io_error)
+        // No secret key is ever written back, inside the entries or outside them.
+        strip_secrets(doc.as_table_mut());
+        fsio::atomic_write(&self.path, doc.to_string().as_bytes()).map_err(io_error)?;
+        lock(&self.known).extend(wanted);
+        Ok(report)
+    }
+
+    fn quarantine(&self) -> Result<PathBuf, StoreError> {
+        fsio::quarantine(&self.path, "corrupt", SystemTime::now()).map_err(io_error)
     }
 
     pub fn read_only(&self) -> bool {
@@ -222,29 +297,65 @@ impl ProfileStore {
 }
 
 fn io_error(e: io::Error) -> StoreError {
-    StoreError::Io(e.to_string())
+    StoreError::Io(io_reason(&e))
 }
 
-/// The file cannot be read as a `connections.toml`.
-struct Corrupt;
+/// A stable machine string for an I/O error (its kind), never OS text.
+fn io_reason(e: &io::Error) -> String {
+    format!("{:?}", e.kind())
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Why the file could not be loaded.
+enum ReadError {
+    /// It could not be read (permissions, a disk error); the I/O error kind.
+    Io(String),
+    /// It is not a `connections.toml` (not TOML, or a malformed `version`).
+    Parse,
+}
 
 /// The parsed file; `None` when it does not exist.
-fn read_doc(path: &Path) -> Result<Option<DocumentMut>, Corrupt> {
+fn read_doc(path: &Path) -> Result<Option<DocumentMut>, ReadError> {
     match std::fs::read_to_string(path) {
-        Ok(text) => text.parse::<DocumentMut>().map(Some).map_err(|_| Corrupt),
+        Ok(text) => text
+            .parse::<DocumentMut>()
+            .map(Some)
+            .map_err(|_| ReadError::Parse),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(Corrupt),
+        // Not UTF-8: the bytes were read, but they are not a TOML file.
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => Err(ReadError::Parse),
+        Err(e) => Err(ReadError::Io(io_reason(&e))),
     }
 }
 
 /// The file's `version` (1 when missing); a version that is not a positive integer is corrupt.
-fn version_of(doc: &DocumentMut) -> Result<i64, Corrupt> {
+fn version_of(doc: &DocumentMut) -> Result<i64, ReadError> {
     match doc.get("version") {
         None => Ok(VERSION),
         Some(item) => match item.as_integer() {
             Some(v) if v >= 1 => Ok(v),
-            _ => Err(Corrupt),
+            _ => Err(ReadError::Parse),
         },
+    }
+}
+
+/// Sets an unparsable file aside. When that fails, the file is left untouched and the store
+/// is read-only, with a diagnostic: never a silent empty list (P29).
+fn quarantine_on_open(path: PathBuf, mut out: LoadedProfiles) -> (ProfileStore, LoadedProfiles) {
+    match fsio::quarantine(&path, "corrupt", SystemTime::now()) {
+        Ok(aside) => {
+            out.quarantined = Some(aside);
+            (ProfileStore::at(path, false, &out), out)
+        }
+        Err(e) => {
+            out.diags.push(ProfileDiag::QuarantineFailed {
+                reason: io_reason(&e),
+            });
+            (ProfileStore::at(path, true, &out), out)
+        }
     }
 }
 
@@ -254,10 +365,18 @@ fn load_entry(index: usize, entry: &Table, out: &mut LoadedProfiles) {
         out.diags.push(ProfileDiag::SecretKeyIgnored { index });
     }
     match read_entry(entry) {
-        Ok(p) if out.profiles.iter().any(|q| q.id == p.id) => {
+        Ok((p, _)) if out.profiles.iter().any(|q| q.id == p.id) => {
             out.diags.push(ProfileDiag::DuplicateId { id: p.id });
         }
-        Ok(p) => out.profiles.push(p),
+        Ok((p, ignored)) => {
+            for key in ignored {
+                out.diags.push(ProfileDiag::ValueIgnored {
+                    index,
+                    key: key.to_string(),
+                });
+            }
+            out.profiles.push(p);
+        }
         Err(Skip::UnknownEngine(engine)) => {
             out.diags.push(ProfileDiag::UnknownEngine { index, engine });
         }
@@ -420,7 +539,10 @@ fn opt_id<T>(
     }
 }
 
-fn read_entry(t: &Table) -> Read<Profile> {
+/// The profile of entry `t`, and the keys whose values were not understood and were ignored
+/// (`environment`, `env_source`; D-004).
+fn read_entry(t: &Table) -> Read<(Profile, Vec<&'static str>)> {
+    let mut ignored = Vec::new();
     let id: ProfileId = match opt_str(t, "id")? {
         Some(id) => id.parse().map_err(|_| Skip::Invalid("id"))?,
         None => return invalid("id"),
@@ -451,12 +573,28 @@ fn read_entry(t: &Table) -> Read<Profile> {
         None => Vec::new(),
         Some(item) => read_extra(item)?,
     };
-    Ok(Profile {
+    let origin = read_origin(t)?;
+    // An unknown tag (a newer version's, or a typo) is no tag: the user is asked again.
+    let environment = opt_id(t, "environment", EnvTag::from_id).unwrap_or_else(|_| {
+        ignored.push("environment");
+        None
+    });
+    // Only the organization sets an organization tag (D-004): `org` counts only on a profile
+    // it manages.
+    let env_source = match opt_id(t, "env_source", tag_source_from_id) {
+        Ok(Some(TagSource::Org)) if matches!(origin, Origin::PerdeManaged { .. }) => TagSource::Org,
+        Ok(None | Some(TagSource::User)) => TagSource::User,
+        Ok(Some(TagSource::Org)) | Err(_) => {
+            ignored.push("env_source");
+            TagSource::User
+        }
+    };
+    let profile = Profile {
         id,
         name,
         engine,
-        environment: opt_id(t, "environment", EnvTag::from_id)?,
-        env_source: opt_id(t, "env_source", tag_source_from_id)?.unwrap_or_default(),
+        environment,
+        env_source,
         read_only: opt_bool(t, "read_only")?.unwrap_or(false),
         endpoint,
         database: opt_str(t, "database")?,
@@ -477,9 +615,10 @@ fn read_entry(t: &Table) -> Read<Profile> {
             },
         ),
         extra,
-        origin: read_origin(t)?,
+        origin,
         allow_unsupported_server: opt_bool(t, "allow_unsupported_server")?.unwrap_or(false),
-    })
+    };
+    Ok((profile, ignored))
 }
 
 fn tag_source_from_id(id: &str) -> Option<TagSource> {
@@ -634,7 +773,14 @@ fn write_entry(t: &mut Table, p: &Profile) {
     t.insert("id", value(p.id.to_string()));
     t.insert("name", value(p.name.clone()));
     t.insert("engine", value(p.engine.id()));
-    set_opt(t, "environment", p.environment.map(|e| value(e.id())));
+    // A tag this version does not know (`uat`) stays on disk while the profile has none.
+    let unknown_tag = t
+        .get("environment")
+        .and_then(Item::as_str)
+        .is_some_and(|id| EnvTag::from_id(id).is_none());
+    if p.environment.is_some() || !unknown_tag {
+        set_opt(t, "environment", p.environment.map(|e| value(e.id())));
+    }
     set_opt(
         t,
         "env_source",

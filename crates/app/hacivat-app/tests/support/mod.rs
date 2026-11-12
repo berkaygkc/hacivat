@@ -684,6 +684,21 @@ pub fn shell_with_backend(
     file: Option<&str>,
     backend: std::sync::Arc<dyn hacivat_secrets::SecretBackend>,
 ) -> &'static mut VisualTestContext {
+    shell_with_connections_prepared(cx, lang, backend, |paths: &LocalPaths| {
+        if let Some(text) = file {
+            write(paths.connections_toml(), text);
+        }
+    })
+}
+
+/// A connections shell whose secret store uses `backend`; `prepare` sets up the local paths
+/// (files in place of `connections.toml`, say) before boot.
+pub fn shell_with_connections_prepared(
+    cx: &mut TestAppContext,
+    lang: &str,
+    backend: std::sync::Arc<dyn hacivat_secrets::SecretBackend>,
+    prepare: impl FnOnce(&LocalPaths),
+) -> &'static mut VisualTestContext {
     use hacivat_driver::DriverRegistry;
     use hacivat_driver::fake::FakeDriver;
     use hacivat_proto::DbmsKind;
@@ -693,9 +708,7 @@ pub fn shell_with_backend(
     cx.update(|cx| cx.default_global::<TempRoots>().0.push(root));
     let paths = LocalPaths::under(&path);
     paths.ensure_dirs().expect("test dirs");
-    if let Some(text) = file {
-        write(paths.connections_toml(), text);
-    }
+    prepare(&paths);
     let mut drivers = DriverRegistry::new();
     for kind in [
         DbmsKind::Postgres,
