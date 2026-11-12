@@ -772,3 +772,203 @@ pub fn toast_ids(vcx: &VisualTestContext) -> Vec<String> {
     vcx.run_until_parked();
     ids
 }
+
+// ## m2a-t18-explorer
+
+/// `FakeDriver` presented as a driver that dials its own direct TCP target (MySQL's shape): the
+/// pipeline then opens no stream, and the fake never dials, so no app test opens a socket or
+/// sends a DNS query (P46: hosts are IP literals).
+struct DialsItself {
+    fake: std::sync::Arc<hacivat_driver::fake::FakeDriver>,
+    descriptor: hacivat_driver::DriverDescriptor,
+}
+
+impl hacivat_driver::Driver for DialsItself {
+    fn descriptor(&self) -> &hacivat_driver::DriverDescriptor {
+        &self.descriptor
+    }
+    fn connect(
+        &self,
+        req: hacivat_driver::DriverConnect,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<Box<dyn hacivat_driver::RawConn>, hacivat_driver::RawError>,
+    > {
+        hacivat_driver::Driver::connect(self.fake.as_ref(), req)
+    }
+}
+
+/// The PostgreSQL `FakeDriver` of a `shell_with_fake` shell.
+struct TestFake(std::sync::Arc<hacivat_driver::fake::FakeDriver>);
+
+impl Global for TestFake {}
+
+/// A connections shell whose PostgreSQL driver is `fake` (dialing itself, so no socket is
+/// opened); the other engines get plain fakes. `prepare` runs on the local paths before boot.
+pub fn shell_with_fake_prepared(
+    cx: &mut TestAppContext,
+    lang: &str,
+    fake: hacivat_driver::fake::FakeDriver,
+    prepare: impl FnOnce(&LocalPaths),
+) -> &'static mut VisualTestContext {
+    use hacivat_driver::fake::FakeDriver;
+    use hacivat_driver::{Driver as _, DriverRegistry};
+    use hacivat_proto::DbmsKind;
+
+    let root = tempfile::tempdir().expect("temp dir");
+    let path = root.path().to_path_buf();
+    cx.update(|cx| cx.default_global::<TempRoots>().0.push(root));
+    let paths = LocalPaths::under(&path);
+    paths.ensure_dirs().expect("test dirs");
+    prepare(&paths);
+    let fake = std::sync::Arc::new(fake);
+    let mut descriptor = fake.descriptor().clone();
+    descriptor.caps.stream_injection = false;
+    let mut drivers = DriverRegistry::new();
+    drivers.register(std::sync::Arc::new(DialsItself {
+        fake: fake.clone(),
+        descriptor,
+    }));
+    for kind in [DbmsKind::MySql, DbmsKind::MariaDb, DbmsKind::Sqlite] {
+        drivers.register(std::sync::Arc::new(FakeDriver::new(kind)));
+    }
+    let backend: std::sync::Arc<dyn hacivat_secrets::SecretBackend> =
+        std::sync::Arc::new(hacivat_secrets::MemoryBackend::new());
+    let mut boot = hacivat_app::connections::ConnectionsBoot::for_tests(&paths, drivers);
+    boot.secrets = std::sync::Arc::new(hacivat_secrets::SecretStore::new(Some(backend.clone())));
+    let mut outcome = hacivat_settings::load(&paths.settings_toml());
+    outcome.settings.ui.language = LanguagePref::Tag(lang.to_string());
+    let mut startup = Startup::new(paths, outcome, OsLocale::default());
+    startup.connections = Some(boot);
+    let window = cx.update(|cx| {
+        cx.set_global(TestSecretBackend(backend));
+        cx.set_global(TestFake(fake));
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+        start(cx, startup, None).expect("open the workspace").into()
+    });
+    // Core work (Tokio threads) wakes GPUI tasks throughout these tests (P22).
+    cx.executor().allow_parking();
+    finish(cx, window)
+}
+
+/// [`shell_with_fake_prepared`] with nothing prepared.
+pub fn shell_with_fake(
+    cx: &mut TestAppContext,
+    lang: &str,
+    fake: hacivat_driver::fake::FakeDriver,
+) -> &'static mut VisualTestContext {
+    shell_with_fake_prepared(cx, lang, fake, |_| {})
+}
+
+/// The PostgreSQL fake of a `shell_with_fake` shell.
+pub fn fake(vcx: &VisualTestContext) -> std::sync::Arc<hacivat_driver::fake::FakeDriver> {
+    vcx.cx.read(|cx| cx.global::<TestFake>().0.clone())
+}
+
+/// A PostgreSQL test profile `name` at `host` (an IP literal), signing in without a password.
+pub fn test_profile(
+    name: &str,
+    env: Option<hacivat_proto::EnvTag>,
+    host: &str,
+) -> hacivat_session::profile::Profile {
+    hacivat_session::profile::Profile {
+        name: name.to_string(),
+        environment: env,
+        endpoint: hacivat_session::profile::ProfileEndpoint::Server {
+            host: host.to_string(),
+            port: None,
+        },
+        user: Some("deploy".to_string()),
+        auth: hacivat_secrets::AuthProviderId::None,
+        ..Default::default()
+    }
+}
+
+/// Saves `draft` through the model (its list changes at once; the write is queued).
+pub fn save_draft(
+    vcx: &VisualTestContext,
+    draft: hacivat_session::profile::ProfileDraft,
+) -> hacivat_proto::ProfileId {
+    let id = draft.profile.id;
+    vcx.cx.update(|cx| {
+        hacivat_app::connections::ConnectionsModel::save(cx, draft).detach();
+    });
+    vcx.run_until_parked();
+    id
+}
+
+/// Saves `profile` as a new profile.
+pub fn add_profile(
+    vcx: &VisualTestContext,
+    profile: hacivat_session::profile::Profile,
+) -> hacivat_proto::ProfileId {
+    save_draft(
+        vcx,
+        hacivat_session::profile::ProfileDraft {
+            is_new: true,
+            ..hacivat_session::profile::ProfileDraft::edit(profile)
+        },
+    )
+}
+
+/// The ID of the profile named `name`.
+pub fn profile_id(vcx: &VisualTestContext, name: &str) -> hacivat_proto::ProfileId {
+    vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::connections::ConnectionsModel>()
+            .profiles()
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.id)
+            .unwrap_or_else(|| panic!("no profile named {name}"))
+    })
+}
+
+/// The mirrored live state of the profile named `name`.
+pub fn live(vcx: &VisualTestContext, name: &str) -> hacivat_session::LiveState {
+    let id = profile_id(vcx, name);
+    vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::connections::ConnectionsModel>()
+            .live(id)
+    })
+}
+
+/// Connects the profile named `name` through the model.
+pub fn connect(vcx: &VisualTestContext, name: &str) {
+    let id = profile_id(vcx, name);
+    vcx.cx.update(|cx| {
+        hacivat_app::connections::ConnectionsModel::connect(cx, id, None);
+    });
+    vcx.run_until_parked();
+}
+
+/// What the capsule shows.
+pub fn capsule_model(vcx: &VisualTestContext) -> hacivat_ui::capsule::CapsuleModel {
+    let ws = workspace(vcx);
+    vcx.cx.read(|cx| ws.read(cx).capsule_model(cx))
+}
+
+/// Clicks the centre of the element with debug selector `selector`.
+pub fn click(vcx: &mut VisualTestContext, selector: &'static str) {
+    let bounds = vcx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("`{selector}` is drawn"));
+    vcx.simulate_click(bounds.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+}
+
+/// Texts drawn by `file` (a path suffix such as `hacivat-ui/src/explain.rs`), in paint order.
+pub fn texts_drawn_by(vcx: &VisualTestContext, file: &str) -> Vec<String> {
+    texts_from(vcx, file)
+}
+
+/// The text of the label (or paragraph) with element ID `id`, if drawn.
+pub fn text_of(vcx: &VisualTestContext, id: &str) -> Option<String> {
+    let needle = format!("#{id}");
+    registry_frame(vcx)
+        .into_iter()
+        .find(|r| r.path.ends_with(&needle))
+        .map(|r| r.text.to_string())
+}

@@ -454,10 +454,14 @@ fn menus_follow_language(cx: &mut TestAppContext) {
                 .collect::<Vec<_>>()
         })
     };
-    assert_eq!(names(vcx), ["Hacivat", "View", "Window", "Help"]);
+    // The File group holds `connection.new`, registered since M2a Task 18 (P18).
+    assert_eq!(names(vcx), ["Hacivat", "File", "View", "Window", "Help"]);
     switch_to(vcx, "tr");
     vcx.run_until_parked();
-    assert_eq!(names(vcx), ["Hacivat", "Görünüm", "Pencere", "Yardım"]);
+    assert_eq!(
+        names(vcx),
+        ["Hacivat", "Dosya", "Görünüm", "Pencere", "Yardım"]
+    );
 }
 
 #[gpui::test]
