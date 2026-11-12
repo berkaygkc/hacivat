@@ -408,25 +408,8 @@ fn every_action_title_exists_in_en() {
     }
 }
 
-/// M2a commands bound by Task 1's keymap data before Tasks 17 and 18 register them in
-/// `connections::install`. The gate (Task 22) empties this list.
-const M2A_PENDING_COMMANDS: [&str; 12] = [
-    "connection.new",
-    "connection.paste_url",
-    "connection.toggle_connect",
-    "connection.edit",
-    "connection.duplicate",
-    "connection.copy_url",
-    "connection.delete",
-    "connection.context_menu",
-    "connection_dialog.test",
-    "connection_dialog.save",
-    "connection_dialog.save_and_connect",
-    "connection_dialog.copy_url",
-];
-
 /// Every bound command is in the app's registry (`init`: the workspace actions and every
-/// `connections::install` registration), or still pending (M2a).
+/// `connections::install` registration). The M2a pending list was emptied at the gate (T22).
 #[gpui::test]
 fn keymap_commands_are_registered(cx: &mut TestAppContext) {
     let reg = cx.update(|cx| {
@@ -436,8 +419,7 @@ fn keymap_commands_are_registered(cx: &mut TestAppContext) {
     for p in ALL_PLATFORMS {
         for preset in PRESETS {
             for b in load(p, preset, None).0.bindings() {
-                let pending = M2A_PENDING_COMMANDS.contains(&b.command.as_str());
-                assert!(reg.get(&b.command).is_some() || pending, "{}", b.command);
+                assert!(reg.get(&b.command).is_some(), "{}", b.command);
             }
         }
     }

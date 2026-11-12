@@ -1202,6 +1202,7 @@ fn english_keeps_the_environment_segments(cx: &mut TestAppContext) {
     assert!(vcx.debug_bounds("conn-env-select").is_none());
 }
 
+#[cfg(feature = "pseudo")]
 #[gpui::test]
 fn the_environment_select_sets_the_tag_like_the_segments(cx: &mut TestAppContext) {
     // The pseudo-locale's labels are some 40 % longer: the row takes a Select.
@@ -1223,6 +1224,7 @@ fn the_environment_select_sets_the_tag_like_the_segments(cx: &mut TestAppContext
     assert_eq!(env_pressed(vcx), Some(EnvTag::Staging));
 }
 
+#[cfg(feature = "pseudo")]
 #[gpui::test]
 fn the_environment_select_follows_the_automatic_local_tag(cx: &mut TestAppContext) {
     let vcx = open_new(cx, "tr-XT");

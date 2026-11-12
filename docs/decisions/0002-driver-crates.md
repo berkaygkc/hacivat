@@ -393,3 +393,21 @@ before the first job and safe to call from any thread.
   roots. T2's `sanitize` already canonicalizes component by component for untrusted origins.
   The guard must apply the same rule to the path the driver finally opens, including names
   given to `ATTACH` if any `ATTACH` is ever allowed.
+
+## m2a-t22 — gate: the loopback forwarder slot race
+
+`LoopbackForwarder` in `ForwarderMode::Tcp` listens on `127.0.0.1:0` and accepts one connection
+(`max_accepts = 1`). Between `bind` and the driver's `connect`, another process on the same
+machine that knows the port can connect first and take the slot. The driver's own connection
+then fails, or, if the other process relays to the real server, it sits on a connection that
+carries the session. This is inherent to a loopback listener and is the same exposure as
+`ssh -L`. The ruling (controller, M2a) accepts it:
+
+- The port is chosen by the kernel and is not announced anywhere but to the driver.
+- Only local processes of any user on the machine can reach it, and such a process can already
+  read the user's memory in most threat models M2a covers.
+- TLS still verifies the real server name (`with_danger_tls_hostname_override`), so a process
+  that wins the slot cannot read an encrypted session without the server's certificate.
+  Under `Auto` plaintext is allowed only on loopback or private networks (see Known limits).
+- M2b revisits this together with the SSH transport, which will also use the forwarder
+  (a Unix socket in a `0700` directory where the driver can use one).
