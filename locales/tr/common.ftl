@@ -8,3 +8,7 @@
 -brand-hacivat-caps = HACIVAT
 
 cm-brand-hacivat-caps = { -brand-hacivat-caps }
+
+## l10n-core
+
+cm-error-unknown = Metin bulunamadı: { $code }
