@@ -25,12 +25,21 @@ pub enum SecretError {
     Backend(String),
 }
 
+/// [`KeyringBackend`]'s `name()`.
+pub(crate) const KEYRING_BACKEND_NAME: &str = "keyring";
+
 /// A secret storage backend (HV-SEC-05). Every method blocks; callers run them on the core
 /// runtime's blocking pool.
 pub trait SecretBackend: Send + Sync + 'static {
     fn get(&self, key: &SecretKey) -> Result<Option<SecretString>, SecretError>;
     fn put(&self, key: &SecretKey, value: &SecretString) -> Result<(), SecretError>;
+    /// Deletes `key`'s entry; deleting a missing entry succeeds.
     fn delete(&self, key: &SecretKey) -> Result<(), SecretError>;
     /// A stable backend name for diagnostics (`memory`, `keyring`).
     fn name(&self) -> &'static str;
+    /// Sets the human-readable label of `key`'s existing entry, e.g. the profile name
+    /// (HV-SEC-05, P44). Backends without labels ignore it.
+    fn set_label(&self, _key: &SecretKey, _label: &str) -> Result<(), SecretError> {
+        Ok(())
+    }
 }
