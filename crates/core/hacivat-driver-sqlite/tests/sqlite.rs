@@ -42,7 +42,7 @@ fn tmp_path(name: &str) -> TmpPath {
 fn tmp_db() -> TmpPath {
     let p = tmp_path("existing.db");
     let c = rusqlite::Connection::open(&*p).unwrap();
-    c.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1);")
+    c.execute_batch("CREATE TABLE seed(x); INSERT INTO seed VALUES (1);")
         .unwrap();
     drop(c);
     p
@@ -131,6 +131,60 @@ async fn create_if_missing_creates() {
 }
 
 #[tokio::test]
+async fn a_directory_is_refused_before_sqlite_opens_it() {
+    let dir = tempfile::tempdir().unwrap();
+    for create in [false, true] {
+        let err = open_err(open(dir.path(), create, false).await);
+        assert_eq!(err.kind, RawErrorKind::Io(std::io::ErrorKind::InvalidInput));
+        assert_eq!(err.server, None);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fifo_is_refused_before_sqlite_opens_it() {
+    // Reading a FIFO with no writer blocks forever; it must never reach SQLite.
+    let p = tmp_path("pipe.db");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&*p)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    for (create, read_only) in [(false, false), (true, false), (false, true)] {
+        let err = open_err(open(&p, create, read_only).await);
+        assert_eq!(err.kind, RawErrorKind::Io(std::io::ErrorKind::InvalidInput));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_to_a_database_file_opens() {
+    let f = tmp_db();
+    let link = f.with_file_name("link.db");
+    std::os::unix::fs::symlink(&*f, &link).unwrap();
+    let mut c = open(&link, false, false).await.unwrap();
+    assert!(c.ping().await.is_ok());
+}
+
+#[tokio::test]
+async fn a_locked_file_fails_within_the_connect_timeout() {
+    let f = tmp_db();
+    // Another connection holds an exclusive lock: no reader can get in until it commits.
+    let holder = rusqlite::Connection::open(&*f).unwrap();
+    holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let mut req = request(&f, false, false);
+    req.connect_timeout = Duration::from_millis(200);
+    let start = Instant::now();
+    let err = open_err(SqliteDriver::new().connect(req).await);
+    let waited = start.elapsed();
+    assert_eq!(err.server.unwrap().vendor_code.map(|c| c & 0xff), Some(5));
+    assert!(waited >= Duration::from_millis(150), "{waited:?}");
+    // rusqlite's own default would wait 5 s.
+    assert!(waited < Duration::from_secs(3), "{waited:?}");
+    holder.execute_batch("COMMIT").unwrap();
+}
+
+#[tokio::test]
 async fn a_file_that_is_not_a_database_fails_at_connect() {
     let p = tmp_path("notes.txt");
     std::fs::write(
@@ -206,12 +260,12 @@ async fn probe_reports_wal_journal_mode() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn probe_reports_a_file_it_cannot_write() {
-    use std::os::unix::fs::PermissionsExt;
     let f = tmp_db();
-    std::fs::set_permissions(&*f, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let mut perms = std::fs::metadata(&*f).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&*f, perms).unwrap();
     // Read-write was asked for; SQLite falls back to read-only on a write-protected file.
     let warnings = open(&f, false, false).await.unwrap().probe().await;
     assert!(

@@ -66,7 +66,7 @@ impl Driver for SqliteDriver {
                 });
             };
             let read_only = read_only || req.read_only || mode_is_ro(&req.options);
-            let conn = open::open(path, create_if_missing, read_only).await?;
+            let conn = open::open(path, create_if_missing, read_only, req.connect_timeout).await?;
             Ok(Box::new(conn) as Box<dyn RawConn>)
         })
     }
@@ -136,16 +136,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("existing.db");
         let c = rusqlite::Connection::open(&path).unwrap();
-        c.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1);")
+        c.execute_batch("CREATE TABLE seed(x); INSERT INTO seed VALUES (1);")
             .unwrap();
         drop(c);
         (dir, path)
     }
 
     async fn open_at(path: &Path, create_if_missing: bool, read_only: bool) -> SqliteConn {
-        open(path.to_path_buf(), create_if_missing, read_only)
-            .await
-            .unwrap()
+        open(
+            path.to_path_buf(),
+            create_if_missing,
+            read_only,
+            std::time::Duration::from_secs(15),
+        )
+        .await
+        .unwrap()
     }
 
     async fn exec(c: &mut SqliteConn, sql: &str) -> Result<(), RawError> {
@@ -198,8 +203,11 @@ mod tests {
     async fn read_only_open_rejects_writes() {
         let (_dir, f) = tmp_db();
         let mut c = open_at(&f, false, true).await;
-        assert_eq!(exec_err_code(&mut c, "CREATE TABLE t2(x)").await, 8);
-        assert_eq!(exec_err_code(&mut c, "INSERT INTO t VALUES (2)").await, 8);
+        assert_eq!(exec_err_code(&mut c, "CREATE TABLE t(x)").await, 8);
+        assert_eq!(
+            exec_err_code(&mut c, "INSERT INTO seed VALUES (2)").await,
+            8
+        );
     }
 
     #[tokio::test]
@@ -222,27 +230,22 @@ mod tests {
             events: std::sync::Arc::new(|_| {}),
         };
         // The probe stays quiet about a read-only file only when read-only was asked for, so
-        // a write-protected file tells the two apart.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o444)).unwrap();
-            let not_writable = |w: &Vec<hacivat_driver::ProbeWarning>| {
-                w.contains(&hacivat_driver::ProbeWarning::SqliteFileNotWritable)
-            };
-            let driver = SqliteDriver::new();
-            let mut c = driver.connect(request(false, vec![])).await.unwrap();
-            assert!(not_writable(&c.probe().await));
-            let mut c = driver.connect(request(true, vec![])).await.unwrap();
-            assert!(!not_writable(&c.probe().await));
-            let ro = vec![("Mode".to_string(), "RO".to_string())];
-            let mut c = driver.connect(request(false, ro)).await.unwrap();
-            assert!(!not_writable(&c.probe().await));
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = request;
-        }
+        // a write-protected file tells the two apart. The read-only bit (Unix) or attribute
+        // (Windows) works on every platform.
+        let mut perms = std::fs::metadata(&f).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&f, perms).unwrap();
+        let not_writable = |w: &Vec<hacivat_driver::ProbeWarning>| {
+            w.contains(&hacivat_driver::ProbeWarning::SqliteFileNotWritable)
+        };
+        let driver = SqliteDriver::new();
+        let mut c = driver.connect(request(false, vec![])).await.unwrap();
+        assert!(not_writable(&c.probe().await));
+        let mut c = driver.connect(request(true, vec![])).await.unwrap();
+        assert!(!not_writable(&c.probe().await));
+        let ro = vec![("Mode".to_string(), "RO".to_string())];
+        let mut c = driver.connect(request(false, ro)).await.unwrap();
+        assert!(!not_writable(&c.probe().await));
     }
 
     #[tokio::test]
@@ -265,7 +268,7 @@ mod tests {
         assert_eq!(
             exec_err_code(
                 &mut c,
-                "UPDATE sqlite_schema SET sql = 'x' WHERE name = 't'"
+                "UPDATE sqlite_schema SET sql = 'x' WHERE name = 'seed'"
             )
             .await
                 & 0xff,

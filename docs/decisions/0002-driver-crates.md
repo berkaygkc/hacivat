@@ -75,6 +75,10 @@ connection.
 - `PRAGMA schema_version` is read at connect, because SQLite reads a file lazily. A file that
   is not a database (`SQLITE_NOTADB`, 26) or is locked fails in the connect step, not at the
   first query.
+- The busy timeout is set to `DriverConnect.connect_timeout` before that read, replacing
+  rusqlite's 5 s default. A file another process holds locked fails the connect within that
+  time with `SQLITE_BUSY` (5, `internal`). The timeout stays on the connection for later
+  statements.
 
 **File path rules.**
 - Only an absolute path, or exactly `:memory:`, reaches SQLite. Anything else, including the
@@ -86,6 +90,14 @@ connection.
   `?mode=memory`, `?immutable=1`) even without `SQLITE_OPEN_URI`. An absolute path never
   starts with `file:`. A relative path would also depend on the app's working directory.
   The empty path opens a private temporary database.
+- Windows device namespaces are refused the same way: `\\.\…` (for example
+  `\\.\PhysicalDrive0`) and `\\?\GLOBALROOT\…`.
+- When something exists at the path, it must be a regular file. `fs::metadata` follows
+  symlinks, so a symlink to a file opens. A directory, FIFO, socket or device is refused with
+  `Io(InvalidInput)` before SQLite opens it, so a read can never block the connection's thread
+  (a FIFO with no writer blocks forever). Any other `metadata` error is returned as
+  `Io(kind)`. The check and the open are not atomic: a local process that swaps the file in
+  between can still win. That race needs local write access to the directory.
 - Whether a path lies under the approved roots is `sanitize`'s rule (T2), applied by the
   caller to `SanitizeInput.paths` for an untrusted origin. The driver opens what it is given;
   it does not expand `~`.
@@ -110,10 +122,34 @@ before the first job and safe to call from any thread.
 - `SQLITE_ENABLE_LOAD_EXTENSION=1` is compiled in. rusqlite's `DbConfig` omits
   `SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION`, so we rely on SQLite's default (off) and never
   enable it.
-- The busy timeout is rusqlite's 5 s default, not `connect_timeout`. A file locked by another
-  process fails the connect after 5 s with `SQLITE_BUSY` (5, `internal`).
-- Read-only here means the open flag only. The full read-only guard (`query_only`, a
-  default-deny authorizer that refuses `ATTACH` and `VACUUM INTO`, `sqlite3_limit`) belongs to
+- Read-only here means the open flag only. The full read-only guard belongs to
   `hacivat-guard` (spec §4, SQLite row) and is not in M2a.
 - The connection budget (1, or 1 writer and 2 readers in WAL mode, D-035) is the session
   layer's. The driver opens one connection per `connect`.
+
+**M2b notes for `hacivat-guard`.** In M2a a read-only connection is only the
+`SQLITE_OPEN_READ_ONLY` flag. These gaps are known, and M2b must close them:
+- **`ATTACH` and `VACUUM INTO` still write.** `ATTACH 'new.db'` creates and opens a writable
+  database next to the read-only one. `VACUUM INTO 'copy.db'` writes a full copy of the data.
+  Both name a file chosen by whoever wrote the SQL (spec §4, ver/01 #sqlite-ro).
+- **Turn off `SQLITE_DBCONFIG_ENABLE_ATTACH_CREATE` and `SQLITE_DBCONFIG_ENABLE_ATTACH_WRITE`**
+  (SQLite 3.49+; the bundled engine is 3.54.1). rusqlite exposes them only with its
+  `modern_sqlite` feature, which is a manifest change.
+- **Set `SQLITE_LIMIT_ATTACHED` to 0**, so no `ATTACH` can succeed. This is
+  `Connection::set_limit` behind rusqlite's `limits` feature.
+- **Install a default-deny authorizer** (`Connection::authorizer`, rusqlite `hooks` feature).
+  It must deny:
+  - `ATTACH` and `DETACH`;
+  - every write action code;
+  - `VACUUM INTO`;
+  - PRAGMAs not on an allow-list, `query_only` included;
+  - `load_extension`, `readfile` and `writefile`.
+
+  Then add `PRAGMA query_only = 1`, the other `sqlite3_limit` caps, a progress-handler timeout
+  and `sqlite3_stmt_readonly` (necessary, not sufficient).
+- **Resolve symlinks first.** Canonicalize the path (`fs::canonicalize`, which resolves every
+  symlink and `..`) before any approved-roots check, and open the canonical path. That way the
+  checked file is the opened file, and a symlink cannot point an approved name outside the
+  roots. T2's `sanitize` already canonicalizes component by component for untrusted origins.
+  The guard must apply the same rule to the path the driver finally opens, including names
+  given to `ATTACH` if any `ATTACH` is ever allowed.

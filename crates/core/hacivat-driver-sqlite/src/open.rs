@@ -6,12 +6,15 @@
 //! jobs over an `mpsc` channel and awaits each reply on a `oneshot`, so the async executor never
 //! blocks on SQLite.
 
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
-use hacivat_driver::{CancelHandle, ProbeWarning, RawConn, RawError, SemVerLoose, ServerInfo};
+use hacivat_driver::{
+    CancelHandle, ProbeWarning, RawConn, RawError, RawErrorKind, SemVerLoose, ServerInfo,
+};
 use hacivat_net::{TlsSummary, TlsVerified};
 use hacivat_proto::DbmsKind;
 use rusqlite::config::DbConfig;
@@ -43,11 +46,44 @@ pub(crate) fn open_flags(create_if_missing: bool, read_only: bool) -> OpenFlags 
 /// parsed as a URI (`?vfs=`, `?mode=`, `?immutable=`) even without `SQLITE_OPEN_URI`. An
 /// absolute path never starts with `file:`. A relative path would also depend on the app's
 /// working directory, and the empty path opens a private temporary database.
-fn check_path(path: &Path) -> Result<(), RawError> {
-    if path.is_absolute() || path.as_os_str() == MEMORY {
+///
+/// Windows device namespaces (`\\.\PhysicalDrive0`, `\\?\GLOBALROOT\Device\…`) are refused:
+/// they name devices, never database files.
+pub(crate) fn check_path(path: &Path) -> Result<(), RawError> {
+    if path.as_os_str() == MEMORY {
+        return Ok(());
+    }
+    let device = match path.components().next() {
+        Some(Component::Prefix(p)) => match p.kind() {
+            Prefix::DeviceNS(_) => true,
+            Prefix::Verbatim(name) => name.eq_ignore_ascii_case("GLOBALROOT"),
+            _ => false,
+        },
+        _ => false,
+    };
+    if path.is_absolute() && !device {
         Ok(())
     } else {
         Err(invalid_path())
+    }
+}
+
+/// When something exists at `path`, it must be a regular file (a symlink to one is fine). A
+/// FIFO, socket, device or directory is refused before SQLite opens it, so a read on it can
+/// never block the connection's thread. A missing path is left to SQLite (`CANTOPEN`, or a new
+/// file with `create_if_missing`).
+fn check_existing(path: &Path) -> Result<(), RawError> {
+    if path.as_os_str() == MEMORY {
+        return Ok(());
+    }
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(()),
+        Ok(_) => Err(invalid_path()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(RawError {
+            kind: RawErrorKind::Io(e.kind()),
+            server: None,
+        }),
     }
 }
 
@@ -56,8 +92,10 @@ fn open_blocking(
     path: &Path,
     create_if_missing: bool,
     read_only: bool,
+    connect_timeout: Duration,
 ) -> Result<Connection, RawError> {
     check_path(path)?;
+    check_existing(path)?;
     let conn = Connection::open_with_flags(path, open_flags(create_if_missing, read_only))
         .map_err(raw_error)?;
     // Extension loading stays off: rusqlite is built without `load_extension`, and SQLite
@@ -68,6 +106,8 @@ fn open_blocking(
     // functions that are not marked innocuous.
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)
         .map_err(raw_error)?;
+    // A file locked by another process makes the header read wait, at most this long.
+    conn.busy_timeout(connect_timeout).map_err(raw_error)?;
     // SQLite reads the file lazily; read the header now so a file that is not a database
     // (`SQLITE_NOTADB`) or is locked fails at connect, not at the first query.
     conn.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0))
@@ -89,17 +129,19 @@ pub(crate) struct SqliteConn {
 }
 
 /// Opens `path` on a dedicated thread of the blocking pool. Resolves once the file is open and
-/// its header has been read; the connection then stays on that thread.
+/// its header has been read; the connection then stays on that thread. `connect_timeout` is
+/// SQLite's busy timeout: how long a file locked by another process is waited for.
 pub(crate) async fn open(
     path: PathBuf,
     create_if_missing: bool,
     read_only: bool,
+    connect_timeout: Duration,
 ) -> Result<SqliteConn, RawError> {
     let (opened_tx, opened_rx) = oneshot::channel::<Result<(), RawError>>();
     let (jobs_tx, mut jobs_rx) = mpsc::channel::<Job>(1);
     let (closed_tx, closed_rx) = oneshot::channel::<()>();
     tokio::task::spawn_blocking(move || {
-        let conn = match open_blocking(&path, create_if_missing, read_only) {
+        let conn = match open_blocking(&path, create_if_missing, read_only, connect_timeout) {
             Ok(conn) => conn,
             Err(e) => {
                 let _ = opened_tx.send(Err(e));
@@ -243,5 +285,25 @@ impl RawConn for SqliteConn {
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
         // M2b: an `InterruptHandle` (`sqlite3_interrupt`), taken before the connection moves.
         None
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::path::Path;
+
+    use super::check_path;
+
+    #[test]
+    fn device_namespaces_are_refused() {
+        for p in [
+            r"\\.\PhysicalDrive0",
+            r"\\.\C:",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\a.db",
+        ] {
+            assert!(check_path(Path::new(p)).is_err(), "{p}");
+        }
+        assert!(check_path(Path::new(r"C:\data\a.db")).is_ok());
+        assert!(check_path(Path::new(r"\\?\C:\data\a.db")).is_ok());
     }
 }
