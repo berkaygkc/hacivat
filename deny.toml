@@ -42,6 +42,8 @@ unknown-git = "deny"
 unused-allowed-source = "allow"
 allow-git = [
     "https://github.com/zed-industries/zed",
+    # The Hacivat zed fork (R1): zed @ 912159c plus the carried IME patch.
+    "https://github.com/berkaygkc/zed",
     "https://github.com/zed-industries/font-kit",
     "https://github.com/zed-industries/async-process",
     "https://github.com/zed-industries/async-task",

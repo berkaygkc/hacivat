@@ -1,9 +1,21 @@
-# GPUI carry patches (not applied)
+# GPUI carry patches
 
-These are patches against GPUI at `zed@912159c7ad77ce6296a93be77efc298b0b00fd50`. They are
-kept here for review. **Nothing in the build applies them.** To use one, apply it in a fork
-of zed, or to a vendored copy of `gpui_macos`, and point the `gpui_platform` dependency at
-that copy.
+These are patches against GPUI at `zed@912159c7ad77ce6296a93be77efc298b0b00fd50`. The files
+here are the reviewable record. The build does not apply them itself: it gets them through
+the Hacivat zed fork (ruling R1).
+
+## How they are applied
+
+- **Fork:** `https://github.com/berkaygkc/zed`, branch `hacivat/912159c`.
+- **Pinned commit:** `4858c0911c04a11c47255d9cd17338f407e6a1af`. It is `912159c` plus one
+  commit, "gpui_macos: discard marked text on FocusLost (Hacivat carry)", which carries the
+  patch below and adds `HACIVAT-PATCHES.md` at the fork root.
+- The workspace `Cargo.toml` pins `gpui` and `gpui_platform` to that commit. `deny.toml`
+  allows the fork as a git source, and `cargo xtask check-deps` treats it as zed-sourced
+  (`ZED_SOURCES`).
+- **To add a patch:** commit it on the fork branch, list it in `HACIVAT-PATCHES.md`, add
+  the patch file here, then move the pin in `Cargo.toml` and the `Cargo.lock` sources to the
+  new commit.
 
 ## `gpui-discard-marked-text-on-focus-lost.patch`
 
@@ -25,8 +37,16 @@ that copy.
   - It fixes the in-window programmatic focus move.
   - It does **not** fix a focus move while the window is inactive. That case would also
     need GPUI to deliver the blur, or to send `FocusLost`, for an inactive window.
-- **Status:** written against the pinned source, but not compiled. Nothing may be built
-  inside `.refs/`. Compile it and test it manually in the fork before relying on it.
+- **Status:** applied via the fork at `4858c09`. It applied cleanly to `912159c`. The fork
+  commit differs from this file in one way only: `rustfmt` reflowed the `use gpui::{…}`
+  import list, which this file leaves unformatted. Behaviour is identical, and the fork
+  commit is the authoritative copy. `cargo check -p gpui_macos` and
+  `cargo clippy -p gpui_macos` pass in the fork checkout with Rust 1.98.1, without warnings.
+- **Still open:**
+  - Gap 2, a focus move while the window is inactive, stays open. It needs a change in
+    `gpui` itself, on the same fork branch, and is assigned to M5 (editor IME, UI-EDIT-12).
+  - The manual IME check of this patch needs the palette and settings inputs from Wave 4,
+    so it runs in Task 19, Step 3.
 
 ## Apache-2.0 obligations when carrying a patch
 
