@@ -22,7 +22,7 @@ pub use rules::{
     HintSource, duplicate_name, is_local_endpoint, needs_environment_prompt, production_hint,
     suggest_name,
 };
-pub use store::{LoadedProfiles, ProfileDiag, ProfileStore, StoreError};
+pub use store::{LoadedProfiles, ProfileDiag, ProfileStore, SaveReport, StoreError};
 
 /// Where a profile connects (HV-CONN-01).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -119,6 +119,9 @@ impl Default for Profile {
 pub struct ProfileDraft {
     pub profile: Profile,
     pub password: Option<SecretString>,
+    /// The TLS client key passphrase (a pasted `sslpassword`), stored in
+    /// `SecretSlot::TlsKeyPassphrase` on save (Task 12).
+    pub tls_key_passphrase: Option<SecretString>,
     pub is_new: bool,
     /// The fields the user edited by hand (a pasted URL never overwrites them).
     pub touched: BTreeSet<FieldId>,
@@ -130,6 +133,7 @@ impl ProfileDraft {
         ProfileDraft {
             profile: Profile::default(),
             password: None,
+            tls_key_passphrase: None,
             is_new: true,
             touched: BTreeSet::new(),
         }
@@ -140,6 +144,7 @@ impl ProfileDraft {
         ProfileDraft {
             profile: p,
             password: None,
+            tls_key_passphrase: None,
             is_new: false,
             touched: BTreeSet::new(),
         }
