@@ -33,7 +33,7 @@ fn main() -> ExitCode {
         Some("docker") => docker::run(),
         other => {
             eprintln!(
-                "unknown xtask command: {other:?}\navailable: bench-report, check-deps, check-update-key, gen-sql, l10n, shot-diff, tokens, vf"
+                "unknown xtask command: {other:?}\navailable: bench-report, check-deps, check-update-key, docker, gen-sql, l10n, shot-diff, tokens, vf"
             );
             ExitCode::from(2)
         }

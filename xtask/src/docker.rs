@@ -241,6 +241,45 @@ fn selected_services(root: &Path, set: &str) -> Result<Vec<String>> {
     services_in_set(&text, set)
 }
 
+/// Why the Docker engine cannot be used, from the outcome of `docker info`: `Err(kind)` when
+/// the binary could not be spawned, else `(exit success, stderr)`. `None`: the engine answers.
+/// Without this check every service would read as `missing`, and the "run `docker up`"
+/// advice would mislead.
+pub fn engine_problem(info: Result<(bool, &str), std::io::ErrorKind>) -> Option<String> {
+    const NOT_RUNNING: &str = "Docker is not running or not installed";
+    match info {
+        Ok((true, _)) => None,
+        Err(std::io::ErrorKind::NotFound) => {
+            Some(format!("{NOT_RUNNING}: no `docker` binary on PATH"))
+        }
+        Err(kind) => Some(format!(
+            "{NOT_RUNNING}: could not run `docker info` ({kind})"
+        )),
+        Ok((false, stderr)) => match stderr.lines().map(str::trim).find(|l| !l.is_empty()) {
+            Some(detail) => Some(format!("{NOT_RUNNING}: {detail}")),
+            None => Some(format!("{NOT_RUNNING}: `docker info` failed")),
+        },
+    }
+}
+
+/// Bails with [`engine_problem`]'s message unless the Docker engine answers `docker info`.
+fn ensure_engine() -> Result<()> {
+    let out = Command::new("docker")
+        .args(["info", "--format", "{{.ServerVersion}}"])
+        .output();
+    let problem = match &out {
+        Ok(o) => engine_problem(Ok((
+            o.status.success(),
+            &String::from_utf8_lossy(&o.stderr),
+        ))),
+        Err(e) => engine_problem(Err(e.kind())),
+    };
+    match problem {
+        Some(message) => bail!("{message}"),
+        None => Ok(()),
+    }
+}
+
 fn health_of(service: &str) -> Health {
     let out = Command::new("docker")
         .args([
@@ -325,6 +364,11 @@ fn run_down(root: &Path) -> Result<bool> {
     Ok(status.success())
 }
 
+/// Runs the Docker tests of `crates` against the healthy `set`.
+///
+/// `-- --ignored` runs every `#[ignore]` test of those crates, not only the
+/// `#[ignore = "docker"]` ones, so a Docker test must also gate itself on
+/// `hacivat_testkit::docker_enabled()`.
 fn run_test(root: &Path, set: &str, crates: &[String]) -> Result<bool> {
     let services = selected_services(root, set)?;
     let now = statuses(&services);
@@ -352,6 +396,7 @@ fn run_test(root: &Path, set: &str, crates: &[String]) -> Result<bool> {
 fn run_inner(args: &[String]) -> Result<bool> {
     let cmd = parse_args(args)?;
     let root = repo_root()?;
+    ensure_engine()?;
     match cmd.action {
         Action::Up => run_up(&root, cmd.set.as_deref().unwrap_or("full")),
         Action::Down => run_down(&root),
@@ -450,6 +495,34 @@ mod tests {
         ];
         assert_eq!(unhealthy(&statuses), ["mysql84", "pg18"]);
         assert_eq!(container_name("pg17-tls"), "m2a-pg17-tls");
+    }
+
+    #[test]
+    fn an_unreachable_engine_is_named_not_reported_as_missing_services() {
+        assert_eq!(engine_problem(Ok((true, ""))), None);
+        let missing = engine_problem(Err(std::io::ErrorKind::NotFound)).unwrap();
+        assert!(
+            missing.starts_with("Docker is not running or not installed"),
+            "{missing}"
+        );
+        assert!(missing.contains("no `docker` binary"), "{missing}");
+        let down = engine_problem(Ok((
+            false,
+            "\nCannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+             Is the docker daemon running?\n",
+        )))
+        .unwrap();
+        assert!(
+            down.starts_with("Docker is not running or not installed: Cannot connect"),
+            "{down}"
+        );
+        let silent = engine_problem(Ok((false, ""))).unwrap();
+        assert!(silent.contains("`docker info` failed"), "{silent}");
+        let denied = engine_problem(Err(std::io::ErrorKind::PermissionDenied)).unwrap();
+        assert!(
+            denied.starts_with("Docker is not running or not installed"),
+            "{denied}"
+        );
     }
 
     #[test]
