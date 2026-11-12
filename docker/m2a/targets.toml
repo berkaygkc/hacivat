@@ -1,0 +1,114 @@
+# Docker test targets of the M2a server matrix (R17). One `[[target]]` per service of
+# compose.yml, read only through `hacivat-testkit` (Global Constraints, Docker).
+#
+# - `engine` is a `DbmsKind` id; `major` is the server line the tests assert on.
+# - `tls_default` is what the server offers out of the box, observed on the first
+#   `cargo xtask docker up --set full` and committed: `none` or `self_signed`.
+# - `sets`: `pr` (CI and quick local runs) = pg17 + mysql84; `full` = every target.
+#
+# Host 127.0.0.1, user `hv_test`, database `hv_test` everywhere. The throwaway test password
+# lives only in `hacivat-testkit` and the files of this directory.
+
+[[target]]
+id = "pg13"
+engine = "postgres"
+major = "13"
+port = 54313
+tls_default = "none"
+sets = ["full"]
+
+[[target]]
+id = "pg14"
+engine = "postgres"
+major = "14"
+port = 54314
+tls_default = "none"
+sets = ["full"]
+
+[[target]]
+id = "pg15"
+engine = "postgres"
+major = "15"
+port = 54315
+tls_default = "none"
+sets = ["full"]
+
+[[target]]
+id = "pg16"
+engine = "postgres"
+major = "16"
+port = 54316
+tls_default = "none"
+sets = ["full"]
+
+[[target]]
+id = "pg17"
+engine = "postgres"
+major = "17"
+port = 54317
+tls_default = "none"
+sets = ["pr", "full"]
+
+[[target]]
+id = "pg18"
+engine = "postgres"
+major = "18"
+port = 54318
+tls_default = "none"
+sets = ["full"]
+
+[[target]]
+id = "pg17-tls"
+engine = "postgres"
+major = "17"
+port = 54327
+tls_default = "self_signed"
+sets = ["full"]
+
+[[target]]
+id = "pg17-tr"
+engine = "postgres"
+major = "17"
+port = 54337
+tls_default = "none"
+sets = ["full"]
+
+[[target]]
+id = "mysql80"
+engine = "mysql"
+major = "8.0"
+port = 33080
+tls_default = "self_signed"
+sets = ["full"]
+
+[[target]]
+id = "mysql84"
+engine = "mysql"
+major = "8.4"
+port = 33084
+tls_default = "self_signed"
+sets = ["pr", "full"]
+
+[[target]]
+id = "mariadb106"
+engine = "mariadb"
+major = "10.6"
+port = 33106
+tls_default = "none"
+sets = ["full"]
+
+[[target]]
+id = "mariadb1011"
+engine = "mariadb"
+major = "10.11"
+port = 33111
+tls_default = "none"
+sets = ["full"]
+
+[[target]]
+id = "mariadb114"
+engine = "mariadb"
+major = "11.4"
+port = 33114
+tls_default = "self_signed"
+sets = ["full"]
