@@ -48,8 +48,16 @@ pub struct Msg {
     pub selectors: Vec<Selector>,
     /// Markup tags with their largest per-variant count (L017).
     pub markup: BTreeMap<String, usize>,
-    /// Message references (`{ cm-other }`), used by L025.
+    /// Message references (`{ cm-other }`), used by L015 and L025.
     pub refs: Vec<String>,
+    /// Term references (`{ -brand }`, without the dash), used by L015.
+    pub terms: Vec<String>,
+    /// `FUNCTION(option)` pairs outside the option allow-list (L007).
+    pub bad_options: Vec<String>,
+    /// The plain text of the value (placeables dropped), the access-key label (L023).
+    pub value_text: String,
+    /// The text of the `.accesskey` attribute (L023).
+    pub accesskey: Option<String>,
 }
 
 /// A select expression that may be a plural select.
@@ -69,6 +77,8 @@ pub struct FtlFile {
     pub rel: String,
     pub src: String,
     pub msgs: Vec<Msg>,
+    /// Terms defined in this file (without the dash).
+    pub terms: BTreeSet<String>,
     pub signatures: Vec<Signature>,
 }
 
@@ -319,6 +329,14 @@ pub fn parse_ftl(
     let resource = match parser::parse(src.as_str()) {
         Ok(r) | Err((r, _)) => r,
     };
+    let terms = resource
+        .body
+        .iter()
+        .filter_map(|entry| match entry {
+            ast::Entry::Term(t) => Some(t.id.name.to_string()),
+            _ => None,
+        })
+        .collect();
     let msgs = resource
         .body
         .iter()
@@ -331,6 +349,7 @@ pub fn parse_ftl(
         domain: domain.to_string(),
         rel: rel.to_string(),
         msgs,
+        terms,
         signatures,
         src: String::new(),
     }
@@ -345,6 +364,12 @@ fn analyze(src: &str, m: &ast::Message<&str>) -> Msg {
         id,
         ..Msg::default()
     };
+    msg.value_text = m.value.as_ref().map(plain_text).unwrap_or_default();
+    msg.accesskey = m
+        .attributes
+        .iter()
+        .find(|a| a.id.name == "accesskey")
+        .map(|a| plain_text(&a.value).trim().to_string());
     let mut patterns: Vec<&ast::Pattern<&str>> = m.value.iter().collect();
     patterns.extend(m.attributes.iter().map(|a| &a.value));
     for p in patterns {
@@ -355,6 +380,17 @@ fn analyze(src: &str, m: &ast::Message<&str>) -> Msg {
         }
     }
     msg
+}
+
+/// The text elements of a pattern, placeables dropped.
+fn plain_text(p: &ast::Pattern<&str>) -> String {
+    p.elements
+        .iter()
+        .filter_map(|el| match el {
+            ast::PatternElement::TextElement { value } => Some(*value),
+            ast::PatternElement::Placeable { .. } => None,
+        })
+        .collect()
 }
 
 fn walk_pattern(p: &ast::Pattern<&str>, msg: &mut Msg) {
@@ -417,8 +453,12 @@ fn walk_inline(i: &ast::InlineExpression<&str>, msg: &mut Msg) {
         ast::InlineExpression::VariableReference { id } => {
             msg.vars.insert(id.name.to_string());
         }
-        ast::InlineExpression::FunctionReference { arguments, .. } => walk_call(arguments, msg),
-        ast::InlineExpression::TermReference { arguments, .. } => {
+        ast::InlineExpression::FunctionReference { id, arguments } => {
+            check_options(id.name, arguments, msg);
+            walk_call(arguments, msg);
+        }
+        ast::InlineExpression::TermReference { id, arguments, .. } => {
+            msg.terms.push(id.name.to_string());
             if let Some(a) = arguments {
                 walk_call(a, msg);
             }
@@ -427,6 +467,56 @@ fn walk_inline(i: &ast::InlineExpression<&str>, msg: &mut Msg) {
         ast::InlineExpression::Placeable { expression } => walk_expression(expression, msg),
         ast::InlineExpression::StringLiteral { .. }
         | ast::InlineExpression::NumberLiteral { .. } => {}
+    }
+}
+
+/// The named options each built-in function accepts (L007).
+fn allowed_options(function: &str) -> Option<&'static [&'static str]> {
+    Some(match function {
+        "NUMBER" => &[
+            "minimumFractionDigits",
+            "maximumFractionDigits",
+            "minimumIntegerDigits",
+            "minimumSignificantDigits",
+            "maximumSignificantDigits",
+            "useGrouping",
+            "style",
+            "currency",
+            "currencyDisplay",
+            "type",
+        ],
+        "DATETIME" => &[
+            "dateStyle",
+            "timeStyle",
+            "year",
+            "month",
+            "day",
+            "weekday",
+            "hour",
+            "minute",
+            "second",
+            "hour12",
+            "hourCycle",
+            "timeZoneName",
+            "era",
+        ],
+        "LIST" => &["type", "style"],
+        _ => return None,
+    })
+}
+
+fn check_options(function: &str, args: &ast::CallArguments<&str>, msg: &mut Msg) {
+    match allowed_options(function) {
+        Some(allowed) => {
+            for n in args
+                .named
+                .iter()
+                .filter(|n| !allowed.contains(&n.name.name))
+            {
+                msg.bad_options.push(format!("{function}({})", n.name.name));
+            }
+        }
+        None => msg.bad_options.push(format!("{function}()")),
     }
 }
 
@@ -582,6 +672,81 @@ pub fn check_ids(files: &[FtlFile], locale: &str, out: &mut Vec<Finding>) {
     }
 }
 
+/// L015: message and term references must resolve in the same file or in `common`.
+pub fn check_refs(files: &[FtlFile], locale: &str, out: &mut Vec<Finding>) {
+    let common: Vec<&FtlFile> = files.iter().filter(|f| f.domain == "common").collect();
+    let defined_msg = |f: &FtlFile, id: &str| {
+        f.msgs.iter().any(|m| m.id == id)
+            || common.iter().any(|c| c.msgs.iter().any(|m| m.id == id))
+    };
+    let defined_term =
+        |f: &FtlFile, t: &str| f.terms.contains(t) || common.iter().any(|c| c.terms.contains(t));
+    for f in files {
+        for m in &f.msgs {
+            let bad_msg = m.refs.iter().filter(|r| !defined_msg(f, r));
+            let bad_term = m.terms.iter().filter(|t| !defined_term(f, t));
+            for r in bad_msg
+                .map(String::as_str)
+                .chain(bad_term.map(String::as_str))
+            {
+                let detail = format!("{} -> {r}", m.id);
+                out.push(finding(
+                    "L015",
+                    Severity::Error,
+                    locale,
+                    &f.rel,
+                    m.line,
+                    &detail,
+                ));
+            }
+        }
+    }
+}
+
+/// L023: an `.accesskey` must be one character of the label and unique in its container (the
+/// messages sharing the ID without its last segment). Case folding is ASCII-only; other
+/// characters must match exactly (never Turkic folding).
+pub fn check_access_keys(files: &[FtlFile], locale: &str, out: &mut Vec<Finding>) {
+    let mut used: BTreeSet<(String, String)> = BTreeSet::new();
+    for f in files {
+        for m in &f.msgs {
+            let Some(key) = &m.accesskey else { continue };
+            let mut chars = key.chars();
+            let (Some(k), None) = (chars.next(), chars.next()) else {
+                out.push(finding(
+                    "L023",
+                    Severity::Warning,
+                    locale,
+                    &f.rel,
+                    m.line,
+                    &m.id,
+                ));
+                continue;
+            };
+            let folded = k.to_ascii_lowercase();
+            let in_label = m
+                .value_text
+                .chars()
+                .any(|c| c.to_ascii_lowercase() == folded);
+            let container =
+                m.id.rsplit_once('-')
+                    .map_or(m.id.as_str(), |(c, _)| c)
+                    .to_string();
+            let fresh = used.insert((container, folded.to_string()));
+            if !in_label || !fresh {
+                out.push(finding(
+                    "L023",
+                    Severity::Warning,
+                    locale,
+                    &f.rel,
+                    m.line,
+                    &m.id,
+                ));
+            }
+        }
+    }
+}
+
 /// Plural selectors against the locale's CLDR cardinal categories (L013, L014).
 fn check_plurals(m: &Msg, file: &str, locale: &str, en: &English<'_>, out: &mut Vec<Finding>) {
     let Some(cats) = cardinal_categories(locale) else {
@@ -654,7 +819,21 @@ pub fn check_locale(
     out: &mut Vec<Finding>,
 ) -> BTreeSet<String> {
     let mut present = BTreeSet::new();
+    check_refs(files, locale, out);
+    check_access_keys(files, locale, out);
     for f in files {
+        for m in &f.msgs {
+            for bad in &m.bad_options {
+                out.push(finding(
+                    "L007",
+                    Severity::Error,
+                    locale,
+                    &f.rel,
+                    m.line,
+                    &format!("{} {bad}", m.id),
+                ));
+            }
+        }
         for m in f
             .msgs
             .iter()

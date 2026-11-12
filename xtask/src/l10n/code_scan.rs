@@ -7,9 +7,6 @@ use std::path::{Path, PathBuf};
 use super::rules::finding;
 use super::{Finding, Severity};
 
-/// Function names that return translated text (I18N-23 rule 1).
-const TEXT_FNS: [&str; 6] = ["t", "tr", "text", "l10n", "ui_text", "fluent"];
-
 /// ID prefixes that double as `hacivat_l10n::ids` module names.
 const ID_MODULES: [&str; 10] = [
     "cm", "hui", "hv", "hc", "kg", "ps", "pw", "pe", "db", "error",
@@ -84,8 +81,8 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Whether the hard-coded-literal lint applies to this file (`hacivat-ui` and the app crates).
-fn literal_lint_applies(display: &str) -> bool {
+/// Whether the UI lints apply to this file (`hacivat-ui` and the app crates).
+fn ui_scope(display: &str) -> bool {
     let padded = format!("/{display}");
     padded.contains("/crates/ui/hacivat-ui/src/")
         || padded.split_once("/crates/app/").is_some_and(|(_, rest)| {
@@ -103,13 +100,15 @@ fn scan_source(
 ) {
     let toks = lex(src);
     let mentions_ids = toks.iter().any(|t| t.tok == Tok::Ident("ids".into()));
-    let literals = literal_lint_applies(display);
+    let ui = ui_scope(display);
+    let first_new = result.findings.len();
     let mut push = |rule: &'static str, line: u32, id: &str| {
         result
             .findings
             .push(finding(rule, Severity::Error, "", display, line, id));
     };
-    let mut used = Vec::new();
+    // (ID, line, whether it must exist)
+    let mut used: Vec<(String, u32, bool)> = Vec::new();
 
     let mut i = 0;
     while i < toks.len() {
@@ -120,33 +119,49 @@ fn scan_source(
         let line = toks[i].line;
         match &toks[i].tok {
             Tok::Str(s) => {
-                if hacivat_l10n_schema::is_valid_id(s) {
-                    used.push((s.clone(), line));
+                // Any literal naming a defined message counts as a use; only ID-consuming
+                // calls (below) make an unknown one an error.
+                if en_ids.contains(s) {
+                    used.push((s.clone(), line, false));
+                }
+            }
+            Tok::Punct('+') if ui && !is(&toks, i + 1, '=') => {
+                let (l, r) = (left_operand(&toks, i), right_operand(&toks, i));
+                let text = Operand::Text;
+                let lit_or_text = |o: Operand| matches!(o, Operand::Text | Operand::Lit);
+                if (l == text && lit_or_text(r)) || (r == text && lit_or_text(l)) {
+                    push("L900", line, "translated text + ..");
                 }
             }
             Tok::Ident(name) => {
                 // ids::<ns>::<CONST>, or <ns>::<CONST> in a file that mentions `ids`.
                 if let Some((ns, konst, len)) = id_path(&toks, i, mentions_ids) {
-                    used.push((id_of(&ns, &konst), line));
+                    used.push((id_of(&ns, &konst), line, true));
                     i += len;
                     continue;
                 }
-                if name == "format"
-                    && is(&toks, i + 1, '!')
-                    && is(&toks, i + 2, '(')
-                    && let Some(template) = format_assembly(&toks, i + 2)
+                // The first argument of an ID-consuming call is a message ID.
+                let id_arg = if is_text_call(&toks, i) {
+                    Some(i + 1)
+                } else if name == "MsgRef" && is_path(&toks, i + 1, &["new"]) {
+                    Some(i + 4)
+                } else {
+                    None
+                };
+                if let Some(open) = id_arg
+                    && let Some(Tok::Str(s)) = toks.get(open + 1).map(|t| &t.tok)
+                    && hacivat_l10n_schema::is_valid_id(s)
                 {
-                    push("L900", line, &format!("format!(\"{template}\" ..)"));
+                    used.push((s.clone(), line, true));
                 }
-                if TEXT_FNS.contains(&name.as_str())
-                    && is(&toks, i + 1, '(')
-                    && let Some(close) = matching(&toks, i + 1)
-                    && is(&toks, close + 1, '+')
-                    && (is_str(&toks, close + 2) || is_text_call(&toks, close + 2))
-                {
-                    push("L900", line, &format!("{name}(..) + .."));
-                }
-                if literals {
+                if ui {
+                    if name == "format"
+                        && is(&toks, i + 1, '!')
+                        && is(&toks, i + 2, '(')
+                        && let Some(template) = format_assembly(&toks, i + 2)
+                    {
+                        push("L900", line, &format!("format!(\"{template}\" ..)"));
+                    }
                     hardcoded(&toks, i, allow, &mut push);
                 }
             }
@@ -155,8 +170,13 @@ fn scan_source(
         i += 1;
     }
 
-    for (id, line) in used {
-        if !en_ids.contains(&id) {
+    let mut seen = BTreeSet::new();
+    let mut fresh = result.findings.split_off(first_new);
+    fresh.retain(|f| seen.insert((f.rule, f.line, f.id.clone())));
+    result.findings.extend(fresh);
+
+    for (id, line, must_exist) in used {
+        if must_exist && !en_ids.contains(&id) {
             result
                 .findings
                 .push(finding("L024", Severity::Error, "", display, line, &id));
@@ -165,7 +185,9 @@ fn scan_source(
     }
 }
 
-/// Reports a string literal with letters passed straight to a UI text sink.
+/// Reports string literals (and `format!` templates with words) passed as the first argument
+/// of a UI text sink: `.child(..)`, `SharedString::from(..)` / `::new_static(..)` and
+/// `Label::new(.., TextSource::Fluent, ..)`.
 fn hardcoded(
     toks: &[Token],
     i: usize,
@@ -178,20 +200,14 @@ fn hardcoded(
     let (open, needs_fluent) = match name.as_str() {
         "child" if i > 0 && is(toks, i - 1, '.') => (i + 1, false),
         "SharedString" if is_path(toks, i + 1, &["from"]) => (i + 4, false),
+        "SharedString" if is_path(toks, i + 1, &["new_static"]) => (i + 4, false),
         "Label" if is_path(toks, i + 1, &["new"]) => (i + 4, true),
         _ => return,
     };
-    if !is(toks, open, '(') {
-        return;
-    }
-    let Some(Tok::Str(lit)) = toks.get(open + 1).map(|t| &t.tok) else {
+    let Some(close) = is(toks, open, '(').then(|| matching(toks, open)).flatten() else {
         return;
     };
-    if !lit.chars().any(char::is_alphabetic) || allow.contains(lit) {
-        return;
-    }
     if needs_fluent {
-        let close = matching(toks, open).unwrap_or(toks.len());
         let fluent = (open..close).any(|j| {
             matches!(&toks[j].tok, Tok::Ident(n) if n == "TextSource")
                 && is_path(toks, j + 1, &["Fluent"])
@@ -200,11 +216,56 @@ fn hardcoded(
             return;
         }
     }
-    push("L900", toks[open + 1].line, lit);
+    // Walk the first argument: literals outside nested calls, through `if`/`match` braces.
+    let (mut parens, mut braces) = (0i32, 0i32);
+    let mut j = open + 1;
+    while j < close {
+        match &toks[j].tok {
+            Tok::Punct('(' | '[') => parens += 1,
+            Tok::Punct(')' | ']') => parens -= 1,
+            Tok::Punct('{') => braces += 1,
+            Tok::Punct('}') => braces -= 1,
+            Tok::Punct(',') if parens == 0 && braces == 0 => break,
+            Tok::Str(lit) if parens == 0 => {
+                if lit.chars().any(char::is_alphabetic) && !allow.contains(lit) {
+                    push("L900", toks[j].line, lit);
+                }
+            }
+            Tok::Ident(n)
+                if n == "format" && parens == 0 && is(toks, j + 1, '!') && is(toks, j + 2, '(') =>
+            {
+                if let Some(Tok::Str(t)) = toks.get(j + 3).map(|t| &t.tok)
+                    && has_words(t)
+                    && !allow.contains(t)
+                {
+                    push("L900", toks[j].line, &format!("format!(\"{t}\" ..)"));
+                }
+                j = matching(toks, j + 2).unwrap_or(close);
+            }
+            _ => {}
+        }
+        j += 1;
+    }
 }
 
-/// `format!` whose template has two or more placeholders and whose arguments call a text
-/// function. Returns the template.
+/// Whether a format template has letters outside its `{..}` placeholders.
+fn has_words(template: &str) -> bool {
+    let mut depth = 0u32;
+    template.chars().any(|c| match c {
+        '{' => {
+            depth += 1;
+            false
+        }
+        '}' => {
+            depth = depth.saturating_sub(1);
+            false
+        }
+        c => depth == 0 && c.is_alphabetic(),
+    })
+}
+
+/// `format!` that assembles translated text: its arguments call a text function and its
+/// template has two placeholders, or one placeholder next to words. Returns the template.
 fn format_assembly(toks: &[Token], open: usize) -> Option<String> {
     let Some(Tok::Str(template)) = toks.get(open + 1).map(|t| &t.tok) else {
         return None;
@@ -212,12 +273,145 @@ fn format_assembly(toks: &[Token], open: usize) -> Option<String> {
     let close = matching(toks, open)?;
     let placeholders = template.replace("{{", "").matches('{').count();
     let calls_text = (open + 2..close).any(|j| is_text_call(toks, j));
-    (placeholders >= 2 && calls_text).then(|| template.clone())
+    let assembles = placeholders >= 2 || (placeholders == 1 && has_words(template));
+    (calls_text && assembles).then(|| template.clone())
 }
 
+/// Calls that always return translated text or consume message IDs, on any receiver.
+const ALWAYS_TEXT_FNS: [&str; 6] = [
+    "ui_text",
+    "t_dynamic",
+    "t_attr",
+    "t_machine",
+    "t_rendered",
+    "t_english",
+];
+
+/// Generic names that count only on an `l10n` receiver or path.
+const GENERIC_TEXT_FNS: [&str; 4] = ["t", "tr", "text", "fluent"];
+
+/// Whether the identifier at `j` is a call of a translated-text function.
 fn is_text_call(toks: &[Token], j: usize) -> bool {
-    matches!(toks.get(j).map(|t| &t.tok), Some(Tok::Ident(n)) if TEXT_FNS.contains(&n.as_str()))
-        && is(toks, j + 1, '(')
+    let Some(Token {
+        tok: Tok::Ident(name),
+        ..
+    }) = toks.get(j)
+    else {
+        return false;
+    };
+    is(toks, j + 1, '(')
+        && (ALWAYS_TEXT_FNS.contains(&name.as_str())
+            || (GENERIC_TEXT_FNS.contains(&name.as_str()) && receiver_is_l10n(toks, j)))
+}
+
+/// `l10n.t(..)`, `self.l10n.t(..)`, `l10n(cx).t(..)`, `hacivat_l10n::t(..)`, `ids::..`.
+fn receiver_is_l10n(toks: &[Token], j: usize) -> bool {
+    let named = |n: &str| n.contains("l10n") || n == "ui_text" || n == "provider";
+    if j >= 2 && is(toks, j - 1, '.') {
+        return match &toks[j - 2].tok {
+            Tok::Ident(n) => named(n),
+            Tok::Punct(')') => matching_back(toks, j - 2)
+                .and_then(|open| open.checked_sub(1))
+                .is_some_and(|k| matches!(&toks[k].tok, Tok::Ident(n) if named(n))),
+            _ => false,
+        };
+    }
+    j >= 3
+        && is_colons(toks, j - 2)
+        && matches!(&toks[j - 3].tok, Tok::Ident(n) if named(n) || n == "ids")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operand {
+    Text,
+    Lit,
+    Other,
+}
+
+/// Conversions that keep an operand's kind (`"x".to_string()`, `t(A).clone()`).
+const PASS_THROUGH: [&str; 5] = ["to_string", "to_owned", "clone", "into", "as_str"];
+
+/// The kind of the expression ending right before the `+` at `plus`.
+fn left_operand(toks: &[Token], plus: usize) -> Operand {
+    let mut end = plus;
+    loop {
+        let Some(last) = end.checked_sub(1) else {
+            return Operand::Other;
+        };
+        if matches!(toks[last].tok, Tok::Str(_)) {
+            return Operand::Lit;
+        }
+        if !is(toks, last, ')') {
+            return Operand::Other;
+        }
+        let Some(open) = matching_back(toks, last) else {
+            return Operand::Other;
+        };
+        let Some(callee) = open.checked_sub(1) else {
+            return Operand::Other;
+        };
+        if is_text_call(toks, callee) {
+            return Operand::Text;
+        }
+        let strips =
+            matches!(&toks[callee].tok, Tok::Ident(n) if PASS_THROUGH.contains(&n.as_str()));
+        if strips && callee >= 1 && is(toks, callee - 1, '.') {
+            end = callee - 1;
+        } else {
+            return Operand::Other;
+        }
+    }
+}
+
+/// The kind of the expression starting right after the `+` at `plus`.
+fn right_operand(toks: &[Token], plus: usize) -> Operand {
+    let mut k = plus + 1;
+    if is(toks, k, '&') {
+        k += 1;
+    }
+    if is_str(toks, k) {
+        return Operand::Lit;
+    }
+    for _ in 0..3 {
+        if !matches!(
+            toks.get(k),
+            Some(Token {
+                tok: Tok::Ident(_),
+                ..
+            })
+        ) {
+            break;
+        }
+        if is_text_call(toks, k) {
+            return Operand::Text;
+        }
+        if is(toks, k + 1, '.') {
+            k += 2;
+        } else if is_colons(toks, k + 1) {
+            k += 3;
+        } else {
+            break;
+        }
+    }
+    Operand::Other
+}
+
+/// The index of the bracket opening the one at `close`.
+fn matching_back(toks: &[Token], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for j in (0..=close).rev() {
+        match toks[j].tok {
+            Tok::Punct(')' | ']' | '}') => depth += 1,
+            Tok::Punct('(' | '[' | '{') => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The `ids::<ns>::<CONST>` path starting at `i` as `(ns, CONST, token count)`.
@@ -552,9 +746,12 @@ fn unescape(chars: &[char], i: usize, out: &mut String, line: &mut u32) -> usize
 mod tests {
     use super::*;
 
+    const UI: &str = "crates/ui/hacivat-ui/src/a.rs";
+    const CORE: &str = "crates/core/hacivat-l10n/src/a.rs";
+
     fn run(src: &str, display: &str, en: &[&str], allow: &[&str]) -> Scan {
-        let en: BTreeSet<String> = en.iter().map(|s| s.to_string()).collect();
-        let allow: BTreeSet<String> = allow.iter().map(|s| s.to_string()).collect();
+        let en: BTreeSet<String> = en.iter().map(|s| (*s).to_string()).collect();
+        let allow: BTreeSet<String> = allow.iter().map(|s| (*s).to_string()).collect();
         let mut result = Scan {
             findings: Vec::new(),
             used_ids: BTreeSet::new(),
@@ -567,15 +764,19 @@ mod tests {
         s.findings.iter().map(|f| (f.rule, f.id.as_str())).collect()
     }
 
+    fn flagged(src: &str) -> usize {
+        run(src, UI, &[], &[]).findings.len()
+    }
+
     #[test]
     fn test_modules_comments_and_chars_are_ignored() {
         let src = r#"
             // .child("Not code")
             fn view() { let _ = '"'; let _ = "hv-known"; }
             #[cfg(test)]
-            mod tests { fn t() { x.child("Test only"); y("hv-nope"); } }
+            mod tests { fn t() { x.child("Test only"); l10n.t_dynamic("hv-nope"); } }
         "#;
-        let s = run(src, "crates/ui/hacivat-ui/src/a.rs", &["hv-known"], &[]);
+        let s = run(src, UI, &["hv-known"], &[]);
         assert!(s.findings.is_empty(), "{:?}", rules(&s));
         assert!(s.used_ids.contains("hv-known"));
     }
@@ -590,34 +791,114 @@ mod tests {
                 Label::new("orders", TextSource::Catalog, s, c);
             }
         "#;
-        let s = run(src, "crates/ui/hacivat-ui/src/a.rs", &[], &["orders-prod"]);
+        let s = run(src, UI, &[], &["orders-prod"]);
         assert_eq!(
             rules(&s),
             [("L900", "Open"), ("L900", "Close"), ("L900", "Save")]
         );
-        let out_of_scope = run(src, "crates/core/hacivat-l10n/src/a.rs", &[], &[]);
-        assert!(out_of_scope.findings.is_empty());
-        let app = run(src, "crates/app/hacivat-app/src/a.rs", &[], &[]);
-        assert_eq!(app.findings.len(), 4);
+        assert!(run(src, CORE, &[], &[]).findings.is_empty());
+        assert_eq!(
+            run(src, "crates/app/hacivat-app/src/a.rs", &[], &[])
+                .findings
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn literal_forms_in_the_first_argument_are_flagged() {
+        assert_eq!(flagged(r#"fn f() { a.child("Open".into()); }"#), 1);
+        assert_eq!(flagged(r#"fn f() { a.child("Open".to_string()); }"#), 1);
+        assert_eq!(
+            flagged(r#"fn f() { a.child(if c { "A" } else { "B" }); }"#),
+            2
+        );
+        assert_eq!(
+            flagged(r#"fn f() { SharedString::new_static("Static"); }"#),
+            1
+        );
+        assert_eq!(flagged(r#"fn f() { a.child(format!("{} rows", n)); }"#), 1);
+        assert_eq!(
+            flagged(r#"fn f() { a.child(match k { K::A => "One", _ => "Two" }); }"#),
+            2
+        );
+        // Nested calls, ids and non-words are not UI text.
+        assert_eq!(
+            flagged(r#"fn f() { a.child(div().id("save").child(x)); }"#),
+            0
+        );
+        assert_eq!(flagged(r#"fn f() { a.child(format!("{}", n)); }"#), 0);
+        assert_eq!(flagged(r#"fn f() { a.child("×".into()); }"#), 0);
     }
 
     #[test]
     fn ids_paths_resolve_to_message_ids() {
         let src = "use hacivat_l10n::ids; fn f() { t(ids::cm::ERROR_UNKNOWN); t(ids::hv::NOPE_X); t(hv::_2FA); }";
-        let s = run(src, "x.rs", &["cm-error-unknown", "hv-2fa"], &[]);
+        let s = run(src, CORE, &["cm-error-unknown", "hv-2fa"], &[]);
         assert_eq!(rules(&s), [("L024", "hv-nope-x")]);
         assert!(s.used_ids.contains("cm-error-unknown") && s.used_ids.contains("hv-2fa"));
     }
 
     #[test]
+    fn only_id_consuming_calls_make_a_literal_an_id() {
+        let src = r#"
+            fn f() {
+                route("error-page"); lookup("db-main"); a.child(x).id("hv-not-a-message");
+                let _ = "cm-ok";
+                l10n.t_dynamic("hv-missing"); ui_text("hui-missing"); MsgRef::new("hv-gone");
+            }
+        "#;
+        for display in [UI, CORE] {
+            let s = run(src, display, &["cm-ok"], &[]);
+            let l024: Vec<&str> = s
+                .findings
+                .iter()
+                .filter(|f| f.rule == "L024")
+                .map(|f| f.id.as_str())
+                .collect();
+            assert_eq!(l024, ["hv-missing", "hui-missing", "hv-gone"], "{display}");
+            assert!(s.used_ids.contains("cm-ok"));
+        }
+    }
+
+    #[test]
     fn concatenation_of_translated_text_is_flagged() {
-        let src = r#"fn f() {
-            let a = format!("{} {}", l10n.t(DELETE), name);
-            let b = t(A) + " " + &t(B);
-            let c = format!("{} rows", n);
-        }"#;
-        let s = run(src, "x.rs", &[], &[]);
-        assert_eq!(s.findings.len(), 2, "{:?}", rules(&s));
+        for src in [
+            r#"fn f() { let a = format!("{} {}", l10n.t(DELETE), name); }"#,
+            r#"fn f() { let a = format!("{} rows", l10n.t(N)); }"#,
+            r#"fn f() { let a = format!("{} (beta)", self.l10n.t(X)); }"#,
+            r#"fn f() { let a = format!("{} {}", ui_text(A), b); }"#,
+            r#"fn f() { let a = l10n.t(A) + " " + &l10n.t(B); }"#,
+            r#"fn f() { let a = l10n.t(A) + &l10n.t(B); }"#,
+            r#"fn f() { let a = "Delete ".to_string() + &l10n.t(B); }"#,
+            r#"fn f() { let a = l10n.t(A).to_string() + "!"; }"#,
+            r#"fn f() { let a = l10n(cx).t(A) + ": "; }"#,
+        ] {
+            let s = run(src, UI, &[], &[]);
+            assert_eq!(s.findings.len(), 1, "{src}: {:?}", rules(&s));
+        }
+        let s = run(
+            r#"fn f() { format!("{} {}", l10n.t(A), b); }"#,
+            UI,
+            &[],
+            &[],
+        );
         assert!(s.findings[0].id.contains("format!"));
+    }
+
+    #[test]
+    fn plain_formatting_and_non_ui_code_are_not_concatenation() {
+        for src in [
+            r#"fn f() { format!("{}:{}", text(x), id); }"#,
+            r#"fn f() { format!("{} rows", n); }"#,
+            r#"fn f() { format!("{}", l10n.t(A)); }"#,
+            r#"fn f() { let a = text(x) + "!"; let n = 1 + 2; let s = a + b; }"#,
+        ] {
+            assert_eq!(flagged(src), 0, "{src}");
+        }
+        let src = r#"fn f() { format!("{} {}", l10n.t(A), b); l10n.t(A) + " "; a.child("Open"); }"#;
+        assert!(run(src, CORE, &[], &[]).findings.is_empty());
+        let src = r#"fn f() { format!("{}:{}", text(x), id); }"#;
+        assert!(run(src, CORE, &[], &[]).findings.is_empty());
     }
 }

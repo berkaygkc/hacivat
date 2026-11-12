@@ -9,6 +9,7 @@
 
 mod code_scan;
 mod rules;
+mod smoke;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -107,6 +108,8 @@ fn report(root: &Path, code_roots: &[&Path]) -> Report {
         let present = rules::check_locale(files, locale, &en, &mut out);
         completeness.extend(completeness_rows(locale, &present, &en));
     }
+
+    smoke::check(&locales, &en, &mut out);
 
     if !code_roots.is_empty() {
         let en_ids: BTreeSet<String> = en.msgs.keys().map(|k| (*k).to_string()).collect();
@@ -310,6 +313,7 @@ fn rule_summary(rule: &str) -> &'static str {
         "L004" => "message ID grammar or prefix does not match the domain file",
         "L005" => "duplicate message ID",
         "L006" => "variable documentation incomplete or malformed",
+        "L007" => "NUMBER/DATETIME/LIST option or function not allowed",
         "L008" => "message not in English (obsolete)",
         "L009" => "message missing from the locale",
         "L010" => "value/attribute shape differs from English",
@@ -317,11 +321,14 @@ fn rule_summary(rule: &str) -> &'static str {
         "L012" => "English variable absent from the translation",
         "L013" => "plural key not in the locale's CLDR cardinal set",
         "L014" => "CLDR plural category missing",
+        "L015" => "reference to a message or term the locale cannot resolve",
         "L017" => "markup tags differ from English",
         "L018" => "forbidden character or sequence",
         "L021" => "Turkish suffix directly after a placeable",
+        "L023" => "access key not in the label or not unique in its container",
         "L024" => "code uses an undefined message ID",
         "L025" => "English message never referenced",
+        "L027" => "message fails to render with sample arguments",
         "L029" => "pseudo-locale folder committed",
         "L900" => "hard-coded UI text or string assembly",
         _ => "",
@@ -483,6 +490,11 @@ mod tests {
             ("junk", "L003"),
             ("dup-across-domains", "L005"),
             ("suffix-after-placeable", "L021"),
+            ("bad-option", "L007"),
+            ("drops-var", "L012"),
+            ("undefined-ref", "L015"),
+            ("undefined-ref", "L027"),
+            ("accesskey", "L023"),
         ] {
             assert!(
                 rules_of(&check(&fx(fixture), &[])).contains(&rule),
@@ -491,10 +503,48 @@ mod tests {
         }
     }
 
+    /// The IDs flagged by `rule` in `fixture`.
+    fn ids_of(fixture: &str, rule: &str) -> Vec<String> {
+        let mut ids: Vec<String> = check(&fx(fixture), &[])
+            .into_iter()
+            .filter(|f| f.rule == rule)
+            .map(|f| f.id)
+            .collect();
+        ids.dedup();
+        ids
+    }
+
     #[test]
     fn clean_fixture_exits_zero() {
         let f = check(&fx("clean"), &[]);
         assert!(errors(&f).is_empty(), "{f:?}");
+        // Clean Turkish one/other plurals raise neither a dead-variant nor a missing-category finding.
+        assert!(
+            f.iter().all(|x| x.rule != "L013" && x.rule != "L014"),
+            "{f:?}"
+        );
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn only_the_wrong_message_is_flagged() {
+        // Every fixture has several correct messages next to the one broken one.
+        assert_eq!(ids_of("typo-var", "L011"), ["cm-saved"]);
+        assert_eq!(ids_of("drops-var", "L012"), ["cm-saved"]);
+        assert_eq!(ids_of("dropped-code-tag", "L017"), ["cm-hint"]);
+        assert_eq!(ids_of("tr-few", "L013"), ["cm-rows"]);
+        assert_eq!(ids_of("obsolete", "L008"), ["cm-gone"]);
+        assert_eq!(ids_of("missing", "L009"), ["cm-ok"]);
+        assert_eq!(
+            ids_of("bad-option", "L007"),
+            ["cm-size NUMBER(bogusOption)"]
+        );
+        assert_eq!(ids_of("undefined-ref", "L027"), ["cm-hint"]);
+        assert_eq!(ids_of("undefined-ref", "L015"), ["cm-hint -> nope"]);
+        assert_eq!(
+            ids_of("accesskey", "L023"),
+            ["hv-menu-file-save", "hv-menu-file-close"]
+        );
     }
 
     #[test]
