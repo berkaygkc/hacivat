@@ -1,0 +1,108 @@
+name: m0
+
+# Regression signal for the M0 GPUI spike, not authoritative: the spike's
+# real numbers come from the reference hardware, not from shared runners.
+
+on:
+  push:
+    branches: [main, m0-spike]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins 1.98.1; install it explicitly.
+      - name: Install pinned toolchain
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Linux system dependencies (GPUI)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ clang lld cmake make pkg-config \
+            libasound2-dev libfontconfig-dev libssl-dev libzstd-dev \
+            libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libvulkan-dev mesa-vulkan-drivers libxcb1-dev xvfb
+
+      - name: macOS Metal Toolchain
+        if: runner.os == 'macOS'
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --release
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Token staleness check
+        run: cargo xtask tokens --check
+
+      - name: Dependency guard
+        run: cargo xtask check-deps
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # deny.toml [graph] targets cover macOS, Windows and Linux.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+
+  bench:
+    name: bench (regression signal only)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Linux system dependencies (GPUI)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ clang lld cmake make pkg-config \
+            libasound2-dev libfontconfig-dev libssl-dev libzstd-dev \
+            libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libvulkan-dev mesa-vulkan-drivers libxcb1-dev xvfb
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build spikes
+        run: cargo build --release -p spike-grid -p spike-editor
+
+      - name: Bench (software rendering under a virtual display)
+        run: |
+          mkdir -p bench-out
+          xvfb-run -a cargo run --release -p spike-grid -- --bench fling > bench-out/spike-grid-fling.json
+          xvfb-run -a cargo run --release -p spike-editor -- --bench > bench-out/spike-editor.json
+
+      - name: Upload bench JSON (regression signal only, not authoritative)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-regression-signal-only-not-authoritative
+          path: bench-out/*.json

@@ -1,6 +1,9 @@
 [graph]
 targets = [
     "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
 ]
 
 [licenses]
@@ -42,4 +45,15 @@ allow-git = [
     "https://github.com/zed-industries/font-kit",
     "https://github.com/zed-industries/async-process",
     "https://github.com/zed-industries/async-task",
+    # Each of the following is declared by the pinned zed workspace itself:
+    # zed Cargo.toml:1009 (wgpu, rev cddb2f5)
+    "https://github.com/gfx-rs/wgpu",
+    # zed Cargo.toml:831 (oo7)
+    "https://github.com/zed-industries/oo7",
+    # zed Cargo.toml:894 (scap)
+    "https://github.com/zed-industries/scap",
+    # zed Cargo.toml:988 (wasm_thread)
+    "https://github.com/zed-industries/wasm_thread",
+    # zed crates/gpui_linux/Cargo.toml:127 (xim-rs)
+    "https://github.com/zed-industries/xim-rs",
 ]
