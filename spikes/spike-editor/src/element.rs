@@ -15,10 +15,10 @@ use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::frames::LatencyProbe;
 use hacivat_ui_core::gpui_surface::{
     App, AvailableSpace, Bounds, ContentMask, Context, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId, InspectorElementId,
-    InteractiveElement, IntoElement, KeyDownEvent, LayoutId, ParentElement, Pixels, Point, Render,
-    ScrollEvent, ShapedLine, Style, Styled, TextAlign, TextRun, UnderlineStyle, Window, div, fill,
-    point, px, relative, size,
+    Entity, FocusHandle, Focusable, Font, GlobalElementId, InspectorElementId, InteractiveElement,
+    IntoElement, KeyDownEvent, LayoutId, ParentElement, Pixels, Point, Render, ScrollEvent,
+    ShapedLine, Style, Styled, TextAlign, TextRun, UnderlineStyle, Window, div, fill, point, px,
+    relative, size,
 };
 use hacivat_ui_core::theme::{Colors, Theme};
 
@@ -335,10 +335,13 @@ impl Focusable for EditorView {
 impl EditorView {
     pub fn new(buffer: Buffer, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        // Focus loss mid-composition commits the marked text (Review Focus 4).
+        // Focus loss mid-composition (Review Focus 4): an app switch leaves the composition
+        // to the platform IME; a focus move inside the active window commits it.
+        // `ImeCore::blur` has the reasoning. No `notify_text_input_changed` here: the handle
+        // is no longer focused at blur time, so GPUI would skip it.
         cx.on_blur(&focus_handle, window, |this, window, cx| {
-            if this.ime.marked.is_some() {
-                EntityInputHandler::unmark_text(this, window, cx);
+            if this.ime.blur(window.is_window_active()) {
+                cx.notify();
             }
         })
         .detach();

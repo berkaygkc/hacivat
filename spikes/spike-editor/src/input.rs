@@ -120,6 +120,22 @@ impl ImeCore {
         self.marked = None;
     }
 
+    /// Focus left the editor. Returns whether the composition was committed.
+    ///
+    /// When the window itself resigned key (app switch), the platform input context keeps
+    /// the composition and the IME resumes it on return (NSTextView behaves the same), so
+    /// the marked range must survive: a local commit would orphan the IME's composition and
+    /// its next `insertText`/`setMarkedText` would land beside the committed copy. Only a
+    /// focus move inside a still-active window commits locally; GPUI 912159c gives the app
+    /// no way to make the platform discard its composition (see ime-fix-report.md).
+    pub fn blur(&mut self, window_active: bool) -> bool {
+        let committed = window_active && self.marked.is_some();
+        if committed {
+            self.unmark();
+        }
+        committed
+    }
+
     pub fn marked_utf16<T: TextBuf>(&self, text: &T) -> Option<Range<usize>> {
         self.marked
             .as_ref()
@@ -328,6 +344,9 @@ impl ImeState {
     fn unmark(&mut self) {
         self.core.unmark();
     }
+    fn blur(&mut self, window_active: bool) -> bool {
+        self.core.blur(window_active)
+    }
     fn text(&self) -> &str {
         &self.buf.0
     }
@@ -395,6 +414,77 @@ mod tests {
         s.replace(Some(0..1), "Z");
         assert_eq!(s.text(), "Zbcx");
         assert_eq!(s.marked_utf16(), None);
+    }
+
+    // Bug 1 (PO manual test, Japanese Romaji + Live Conversion): compose 感じ, click Finder,
+    // come back, press Esc. NSTextInputContext still holds the composition, so the IME
+    // re-delivers it with replacementRange = NSNotFound (`None`). Our side must still have
+    // the marked range, or the re-delivered text lands next to a local commit.
+    #[test]
+    fn blur_duplication_app_switch_keeps_composition_for_the_platform() {
+        let mut s = ImeState::new("SELECT ");
+        s.replace_and_mark(None, "感じ", Some(2..2));
+        assert!(!s.blur(false));
+        assert_eq!(s.marked_utf16(), Some(7..9));
+        // Back in the app, Esc: the IME replaces its composition (here, another candidate).
+        s.replace_and_mark(None, "幹事", Some(2..2));
+        s.replace(None, "幹事");
+        assert_eq!(s.text(), "SELECT 幹事");
+    }
+
+    #[test]
+    fn blur_duplication_ime_commit_on_return_replaces_composition() {
+        // The IME may instead commit on return (e.g. on the click that reactivates the
+        // window): insertText(sameText, NSNotFound) must not append a second copy.
+        let mut s = ImeState::new("");
+        s.replace_and_mark(None, "感じ", Some(2..2));
+        s.blur(false);
+        s.replace(None, "感じ");
+        assert_eq!(s.text(), "感じ");
+        assert_eq!(s.marked_utf16(), None);
+    }
+
+    #[test]
+    fn blur_within_active_window_commits_composition() {
+        // Focus moved to another view in the same, still-key window: GPUI gives us no way
+        // to tell NSTextInputContext, so the editor commits locally (Review Focus 4).
+        let mut s = ImeState::new("x");
+        s.replace_and_mark(None, "ş", None);
+        assert!(s.blur(true));
+        assert_eq!(s.text(), "xş");
+        assert_eq!(s.marked_utf16(), None);
+    }
+
+    // Bug 2 (PO manual test, ABC – Extended, Option+I then A gives "ʼa"): matches native
+    // TextEdit. In that layout Option+I is the horn dead key (U+02BC standalone; composes
+    // only with o/u into ơ/ư), so UCKeyTranslate itself yields "ʼa". These pin that a dead
+    // key's marked text is replaced, never committed-then-appended, however AppKit commits.
+    #[test]
+    fn dead_key_commit_with_nsnotfound_replaces_the_marked_dead_key() {
+        let mut s = ImeState::new("SELECT ");
+        s.replace_and_mark(None, "ʼ", Some(1..1));
+        s.replace(None, "ʼa");
+        assert_eq!(s.text(), "SELECT ʼa");
+        assert_eq!(s.marked_utf16(), None);
+        assert_eq!(s.core.selection_utf16(&s.buf), 9..9);
+    }
+
+    #[test]
+    fn dead_key_commit_with_explicit_replacement_range_replaces_the_mark() {
+        let mut s = ImeState::new("x");
+        s.replace_and_mark(None, "ˆ", Some(1..1));
+        s.replace(Some(1..2), "â");
+        assert_eq!(s.text(), "xâ");
+    }
+
+    #[test]
+    fn dead_key_split_commit_mark_then_letter_yields_both_once() {
+        // AppKit may also commit the dead key alone and then insert the letter.
+        let mut s = ImeState::new("");
+        s.replace_and_mark(None, "ʼ", Some(1..1));
+        s.replace(None, "ʼ");
+        s.replace(None, "a");
+        assert_eq!(s.text(), "ʼa");
     }
 
     #[test]

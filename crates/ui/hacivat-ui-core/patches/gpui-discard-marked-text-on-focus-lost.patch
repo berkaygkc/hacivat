@@ -1,0 +1,57 @@
+--- a/crates/gpui_macos/src/window.rs
++++ b/crates/gpui_macos/src/window.rs
+@@ -1,3 +1,6 @@
++// Modified by the Hacivat project (2026-11-12): adds `text_input_state_changed`, which
++// calls `-[NSTextInputContext discardMarkedText]` on a text-input focus loss. Original
++// work: Zed Industries, Apache-2.0, zed@912159c7ad77ce6296a93be77efc298b0b00fd50.
+ use crate::{
+     BoolExt, MacDisplay, MetalFrames, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
+     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
+@@ -13,7 +16,8 @@
+     Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+     Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal, PlatformInput,
+     PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
+-    SharedString, Size, SystemWindowTab, WindowAppearance, WindowBackgroundAppearance,
++    SharedString, Size, SystemWindowTab, TextInputStateChange, WindowAppearance,
++    WindowBackgroundAppearance,
+     WindowBounds, WindowControlArea, WindowKind, WindowParams, WindowVisibility, point, px, size,
+ };
+ #[cfg(any(test, feature = "test-support"))]
+@@ -2189,6 +2193,37 @@
+             .detach()
+     }
+ 
++    // Hacivat modification: end the platform composition on a real text-input focus loss.
++    fn text_input_state_changed(&self, change: TextInputStateChange) {
++        // GPUI sends `FocusLost` only when the window's focused text input goes from Some
++        // to None, i.e. on a real focus change. An app switch keeps GPUI focus, so it never
++        // sends it there, and the IME keeps owning that composition. `ContentChanged` and
++        // `SelectionChanged` follow every IME edit and must never discard.
++        if change != TextInputStateChange::FocusLost {
++            return;
++        }
++        // GPUI sends this during the draw, before focus listeners run, so the app's
++        // `on_blur` has not committed its marked text yet. Deferring to the foreground
++        // executor discards after that local commit, the order NSTextInputContext expects:
++        // the client unmarks first, then tells the input method to drop its copy.
++        let executor = self.0.lock().foreground_executor.clone();
++        let window_state = Rc::downgrade(&self.0);
++        executor
++            .spawn(async move {
++                let Some(window_state) = window_state.upgrade() else {
++                    return;
++                };
++                let native_view = window_state.lock().native_view.as_ptr();
++                unsafe {
++                    let input_context: *mut AnyObject = msg_send![native_view, inputContext];
++                    if !input_context.is_null() {
++                        let _: () = msg_send![input_context, discardMarkedText];
++                    }
++                }
++            })
++            .detach()
++    }
++
+     fn titlebar_double_click(&self, is_resizable: bool, is_minimizable: bool) {
+         let this = self.0.lock();
+         if this.simple_fullscreen_state.is_some() {
