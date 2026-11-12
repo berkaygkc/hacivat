@@ -6,7 +6,7 @@ use gpui::{
     Window,
 };
 use hacivat_ui::button::ButtonKind;
-use hacivat_ui::dialog::{Dialog, DialogButton, DialogEvent, DialogSpec};
+use hacivat_ui::dialog::{Dialog, DialogButton, DialogEvent, DialogSize, DialogSpec};
 use hacivat_ui::text::TextFn;
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 
@@ -50,6 +50,7 @@ pub fn spec_titled(
             .collect(),
         cancel,
         primary,
+        size: DialogSize::Standard,
     }
 }
 

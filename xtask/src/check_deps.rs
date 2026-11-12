@@ -659,6 +659,36 @@ mod tests {
         assert_eq!(rule_of(&md, "mystery"), Rule::UnknownLayer);
     }
 
+    /// M2a Task 1: the nine new crates are workspace members in the Core layer, with no
+    /// violation (no UI or GPUI reach, workspace lints on).
+    #[test]
+    fn new_core_crates_are_core_layer_and_clean() {
+        let md = cargo_metadata::MetadataCommand::new()
+            .current_dir(crate::workspace_root())
+            .exec()
+            .unwrap();
+        let v = violations(&md, &|p| std::fs::read_to_string(p).unwrap_or_default());
+        for c in [
+            "hacivat-proto",
+            "hacivat-net",
+            "hacivat-secrets",
+            "hacivat-driver",
+            "hacivat-driver-pg",
+            "hacivat-driver-mysql",
+            "hacivat-driver-sqlite",
+            "hacivat-session",
+            "hacivat-testkit",
+        ] {
+            let member = md
+                .workspace_packages()
+                .into_iter()
+                .find(|p| p.name.as_str() == c);
+            let member = member.unwrap_or_else(|| panic!("{c} is not a workspace member"));
+            assert_eq!(layer_of(&md, member), Some(Layer::Core), "{c}");
+            assert!(v.iter().all(|x| x.krate != c), "{c}: {v:?}");
+        }
+    }
+
     #[test]
     fn clippy_toml_bans_locale_blind_casing() {
         let t = std::fs::read_to_string(workspace_root().join("clippy.toml")).unwrap();

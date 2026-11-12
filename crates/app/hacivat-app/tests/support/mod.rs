@@ -29,7 +29,7 @@ use hacivat_l10n::{
 use hacivat_settings::{LanguagePref, LocalPaths, ThemePref};
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::button::ButtonKind;
-use hacivat_ui::dialog::{DialogButton, DialogSpec};
+use hacivat_ui::dialog::{DialogButton, DialogSize, DialogSpec};
 use hacivat_ui::input::TextInput;
 use hacivat_ui::l10n::UiArg;
 use hacivat_ui::panes::PaneTree;
@@ -296,7 +296,7 @@ pub fn layer_ids(vcx: &VisualTestContext) -> Vec<&'static str> {
 /// `Workspace::context_stack` in the shell's window.
 pub fn context_stack(vcx: &VisualTestContext) -> ContextStack {
     let ws = workspace(vcx);
-    in_window(vcx, |window, cx| ws.read(cx).context_stack(window))
+    in_window(vcx, |window, cx| ws.read(cx).context_stack(window, cx))
 }
 
 /// The focused element's handle.
@@ -368,6 +368,7 @@ pub fn open_dialog_ids(vcx: &VisualTestContext, title_id: &'static str, body_id:
             }],
             cancel: 0,
             primary: 0,
+            size: DialogSize::Standard,
         };
         w.open_dialog(spec, window, cx);
     });
@@ -481,6 +482,7 @@ pub fn push_test_layer(vcx: &VisualTestContext, id: &'static str, context: &'sta
                 context,
                 view: view.into(),
                 restore_focus: None,
+                modal: false,
             },
             window,
             cx,

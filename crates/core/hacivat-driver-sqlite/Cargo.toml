@@ -1,0 +1,20 @@
+[package]
+name = "hacivat-driver-sqlite"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hacivat-proto.workspace = true
+hacivat-driver.workspace = true
+rusqlite.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+futures.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

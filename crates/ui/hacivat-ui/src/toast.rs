@@ -15,6 +15,7 @@ use hacivat_ui_core::gpui_surface::{
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
+use crate::actions::ActionFn;
 use crate::icon::{Icon, IconName, IconSize};
 use crate::l10n::ui_text;
 use crate::popover::{A11yNode, Declare, lazy};
@@ -40,6 +41,22 @@ pub struct Toast {
     pub text: TextFn,
     pub kind: ToastKind,
     pub ttl: Duration,
+    // M2a (Task 1; drawn from Task 9 on).
+    /// Stays until dismissed or an action runs (no TTL).
+    pub sticky: bool,
+    pub title: Option<TextFn>,
+    pub bullets: Vec<TextFn>,
+    pub actions: Vec<ToastAction>,
+    /// The wide card (NOTES sticky toast).
+    pub wide: bool,
+}
+
+/// A button on a toast (M2a, NOTES surface 4).
+#[derive(Clone)]
+pub struct ToastAction {
+    pub label: TextFn,
+    /// `Rc<dyn Fn(&mut Window, &mut App)>`.
+    pub run: ActionFn,
 }
 
 impl Toast {
@@ -49,6 +66,11 @@ impl Toast {
             text,
             kind,
             ttl: DEFAULT_TOAST_TTL,
+            sticky: false,
+            title: None,
+            bullets: Vec::new(),
+            actions: Vec::new(),
+            wide: false,
         }
     }
 }

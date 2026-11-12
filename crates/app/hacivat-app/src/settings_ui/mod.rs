@@ -11,7 +11,7 @@ use std::rc::Rc;
 use hacivat_l10n::{ArgValue, ExactDecimal, L10n, NoArgs, WhenValue, ids};
 use hacivat_settings::{Settings, TextRenderingPref};
 use hacivat_ui::button::{Button, ButtonKind};
-use hacivat_ui::dialog::{DialogButton, DialogEvent, DialogSpec};
+use hacivat_ui::dialog::{DialogButton, DialogEvent, DialogSize, DialogSpec};
 use hacivat_ui::input::{InputEvent, TextInput};
 use hacivat_ui::popover::Declare as _;
 use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
@@ -482,6 +482,7 @@ fn open_restart_dialog(window: &mut Window, cx: &mut App) {
         ],
         cancel: 1,
         primary: 0,
+        size: DialogSize::Standard,
     };
     let dialog = workspace.update(cx, |ws, cx| ws.open_dialog(spec, window, cx));
     // The workspace drops its handle to the dialog when it removes the layer, on the same event;

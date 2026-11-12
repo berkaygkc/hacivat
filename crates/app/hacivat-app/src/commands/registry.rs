@@ -8,7 +8,7 @@ use hacivat_l10n::{Catalogs, Status, Text, ids};
 use hacivat_settings::{LanguagePref, ThemePref};
 use hacivat_ui::actions::{ActionDef, ActionFn, ActionRegistry};
 use hacivat_ui::button::ButtonKind;
-use hacivat_ui::dialog::{DialogButton, DialogSpec};
+use hacivat_ui::dialog::{DialogButton, DialogSize, DialogSpec};
 use hacivat_ui::panes::Axis;
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, AppContext as _, Context, Window};
@@ -281,6 +281,7 @@ fn open_about(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspac
         }],
         cancel: 0,
         primary: 0,
+        size: DialogSize::Standard,
     };
     ws.open_dialog(spec, window, cx);
 }

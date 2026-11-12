@@ -9,6 +9,7 @@
 pub mod ime;
 
 use std::ops::Range;
+use std::rc::Rc;
 
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
@@ -69,7 +70,15 @@ pub struct TextInput {
     reported_composing: bool,
     /// Focus and blur listeners, installed by the first render (they need the window).
     focus_subscriptions: Vec<Subscription>,
+    #[allow(dead_code, reason = "Task 6")]
+    masked: bool,
+    #[allow(dead_code, reason = "Task 6")]
+    paste_filter: Option<PasteFilter>,
 }
+
+/// Sees a paste's clipboard text before a non-masked input inserts it; returning `true`
+/// consumes the paste (nothing is inserted). A masked input never calls it (P16).
+pub type PasteFilter = Rc<dyn Fn(&str, &mut Window, &mut App) -> bool>;
 
 impl EventEmitter<InputEvent> for TextInput {}
 
@@ -100,7 +109,20 @@ impl TextInput {
             scroll_x: px(0.0),
             reported_composing: false,
             focus_subscriptions: Vec::new(),
+            masked: false,
+            paste_filter: None,
         }
+    }
+
+    /// Paints `•` per grapheme, refuses copy and cut and exposes an empty accessible value;
+    /// `value()` is unchanged (Task 6 draws it).
+    pub fn set_masked(&mut self, masked: bool) {
+        self.masked = masked;
+    }
+
+    /// Installs (or removes) the paste filter (P16). Stored here; Task 6 calls it on paste.
+    pub fn set_paste_filter(&mut self, filter: Option<PasteFilter>) {
+        self.paste_filter = filter;
     }
 
     pub fn value(&self) -> &str {

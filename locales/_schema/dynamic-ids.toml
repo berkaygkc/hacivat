@@ -3,4 +3,6 @@
 #
 # hui-*     widget texts resolved by ID through `UiTextProvider` (R4)
 # hv-cmd-*  command titles, `hv-cmd-<action id with . and _ as ->` (R5)
-families = ["hui-*", "hv-cmd-*"]
+# error-conn-*  connect-error headings and bodies, `ErrClass::fluent_stem()` plus `-title` or
+#           `-body` (M2a, HV-CONN-03)
+families = ["hui-*", "hv-cmd-*", "error-conn-*"]

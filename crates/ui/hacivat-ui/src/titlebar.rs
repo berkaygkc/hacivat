@@ -81,6 +81,8 @@ pub struct TitleBar {
     right: Vec<AnyElement>,
     app_menu: Option<ClickHandler>,
     fit: Option<FitInputs>,
+    #[allow(dead_code, reason = "Task 9")]
+    inert: bool,
 }
 
 impl TitleBar {
@@ -93,7 +95,15 @@ impl TitleBar {
             right: Vec::new(),
             app_menu: None,
             fit: None,
+            inert: false,
         }
+    }
+
+    /// Whether a modal layer covers the window: the bar's controls then ignore the pointer,
+    /// while the window can still be moved (M2a; Task 9 makes it take effect).
+    pub fn inert(mut self, inert: bool) -> Self {
+        self.inert = inert;
+        self
     }
 
     /// The product word, pre-cased for small caps (`cm-brand-hacivat-caps`).

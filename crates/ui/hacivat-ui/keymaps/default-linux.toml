@@ -44,3 +44,72 @@ context = "Workspace"
 chord = "ctrl-q"
 command = "app.quit"
 context = "Workspace"
+
+## m2a-t01-connections
+# Connections (M2a, R20). The commands are registered by Tasks 17 and 18; a binding whose
+# command nobody registered does nothing.
+
+[[binding]]
+chord = "ctrl-n"
+command = "connection.new"
+context = "Workspace"
+
+[[binding]]
+chord = "ctrl-shift-v"
+command = "connection.paste_url"
+context = "Workspace"
+
+[[binding]]
+chord = "enter"
+command = "connection.toggle_connect"
+context = "Explorer"
+
+[[binding]]
+chord = "ctrl-e"
+command = "connection.edit"
+context = "Explorer"
+
+[[binding]]
+chord = "ctrl-d"
+command = "connection.duplicate"
+context = "Explorer"
+
+[[binding]]
+chord = "ctrl-shift-c"
+command = "connection.copy_url"
+context = "Explorer"
+
+[[binding]]
+chord = "backspace"
+command = "connection.delete"
+context = "Explorer"
+
+[[binding]]
+chord = "delete"
+command = "connection.delete"
+context = "Explorer"
+
+[[binding]]
+chord = "shift-f10"
+command = "connection.context_menu"
+context = "Explorer"
+
+[[binding]]
+chord = "ctrl-t"
+command = "connection_dialog.test"
+context = "ConnectionDialog"
+
+[[binding]]
+chord = "ctrl-s"
+command = "connection_dialog.save"
+context = "ConnectionDialog"
+
+[[binding]]
+chord = "ctrl-enter"
+command = "connection_dialog.save_and_connect"
+context = "ConnectionDialog"
+
+[[binding]]
+chord = "ctrl-shift-c"
+command = "connection_dialog.copy_url"
+context = "ConnectionDialog"
