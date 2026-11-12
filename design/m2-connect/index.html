@@ -1,0 +1,1939 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1440, initial-scale=1">
+<title>Hacivat Connect</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Fragment+Mono:ital@0;1&display=block" rel="stylesheet">
+<style>
+/* ═══════════════════════════════════════════════════════════════
+   M2a Connect — clickable mocks inside the approved harman world.
+   Tokens, type, radii and components are harman's; additions are
+   marked NEW and listed in NOTES.md.
+   Scale:  radius 0 · 3 · 4 · 6   seam 1px   spacing 2/4/6/8/10/12/14/16
+           type 11 · 11.5 · 12 · 12.5 · 13 · 13.5 · 15
+   GPUI:   solid fills, 1px borders, popover shadow only, no transforms,
+           no blur, no filters, no masks.
+   ═══════════════════════════════════════════════════════════════ */
+:root, :root[data-theme="dark"] {
+  --ground:#16181D; --panel:#1E2127; --side:#1E2127; --head:#1E2127; --gutter:#1A1D22;
+  --raised:#252931; --hover:#23272E; --seam:#2A2E36; --seam-2:#363B45; --seam-soft:#23262D;
+  --text:#C9D1D9; --text-2:#8B949E; --text-3:#828A96; --text-3-base:#828A96;
+  --on-accent:#10141C; --on-red:#10141C; --cp-fill:#CE2C31; --on-cp-fill:#FFFFFF;
+  --blue:#7AA2F7; --blue-a:rgba(122,162,247,.12); --blue-a2:rgba(122,162,247,.22); --blue-hover:#8DB0F8;
+  --red:#E06C75; --red-a:rgba(224,108,117,.13); --red-line:rgba(224,108,117,.55);
+  --green:#98C379; --green-fill:rgba(152,195,121,.55);
+  --amber:#E5C07B; --amber-a:rgba(229,192,123,.13);
+  --syn-kw:#B4A7F2; --syn-str:#98C379; --syn-num:#E5C07B;
+  --scrim:rgba(22,24,29,.6);                       /* ground @ SCRIM_ALPHA 0.6 (shell/layers.rs) */
+  --shadow-pop:0 10px 28px rgba(0,0,0,.34), 0 1px 2px rgba(0,0,0,.30);
+  --tl-close:#FF5F57; --tl-min:#FEBC2E; --tl-max:#28C840;
+  color-scheme:dark;
+}
+:root[data-theme="light"] {
+  --ground:#F7F7F8; --panel:#FFFFFF; --side:#F7F7F8; --head:#F7F7F8; --gutter:#FAFAFB;
+  --raised:#FFFFFF; --hover:#F1F1F3; --seam:#E5E5E9; --seam-2:#D8D8DE; --seam-soft:#EFEFF2;
+  --text:#1B1B1F; --text-2:#55555E; --text-3:#6C6C76; --text-3-base:#6C6C76;
+  --on-accent:#FFFFFF; --on-red:#FFFFFF; --cp-fill:#CE2C31; --on-cp-fill:#FFFFFF;
+  --blue:#3B5FD9; --blue-a:rgba(59,95,217,.08); --blue-a2:rgba(59,95,217,.15); --blue-hover:#3352C4;
+  --red:#CE2C31; --red-a:rgba(206,44,49,.08); --red-line:rgba(206,44,49,.45);
+  --green:#1F7A50; --green-fill:rgba(31,122,80,.42);
+  --amber:#A35C00; --amber-a:rgba(163,92,0,.10);
+  --syn-kw:#4B57C2; --syn-str:#2B7A30; --syn-num:#B4530A;
+  --scrim:rgba(247,247,248,.6);
+  --shadow-pop:0 12px 32px -6px rgba(20,20,40,.20), 0 0 0 1px rgba(20,20,40,.04), 0 1px 2px rgba(20,20,40,.08);
+  color-scheme:light;
+}
+
+/* ───────── Base (harman) ───────── */
+* { box-sizing:border-box; }
+html, body { margin:0; height:100%; }
+body { background:var(--ground); color:var(--text); font:400 13px/1.35 "Source Sans 3", system-ui, sans-serif;
+  font-variant-numeric:tabular-nums; -webkit-font-smoothing:antialiased; overflow:hidden; }
+::selection { background:var(--blue-a2); color:inherit; }
+button { font:inherit; color:inherit; }
+input { font:inherit; color:inherit; caret-color:var(--blue); }
+.mono { font-family:"Fragment Mono", ui-monospace, monospace; font-variant-numeric:tabular-nums; }
+.sc { font-variant-caps:all-small-caps; letter-spacing:.075em; font-weight:600; }
+svg.ic { width:14px; height:14px; flex:none; display:block; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+svg.ic.i12 { width:12px; height:12px; }
+:focus { outline:none; }
+:focus-visible { outline:1px solid var(--blue); outline-offset:1px; }
+kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1px solid var(--seam); border-radius:3px;
+  padding:2px 4px; display:inline-flex; align-items:center; height:16px; background:transparent; flex:none; }
+.grow { flex:1; }
+.vsep { width:1px; height:18px; background:var(--seam); flex:none; }
+
+/* Environment marks. Shape-coded first, hue only for production.
+   local ○ (existing) · dev ◉ (NEW) · test ● (NEW) · staging □ (existing) · production ■ (existing) */
+.env { width:7px; height:7px; border-radius:0; flex:none; display:inline-block; position:relative; }
+.env.production { background:var(--red); }
+.env.staging { border:1px solid var(--text-2); }
+.env.test { background:var(--text-2); border-radius:50%; }
+.env.dev { border:1px solid var(--text-2); border-radius:50%; }
+.env.dev::after { content:""; position:absolute; left:1px; top:1px; width:3px; height:3px; border-radius:50%; background:var(--text-2); }
+.env.local { border:1px solid var(--text-3); border-radius:50%; }
+
+/* ───────── Mock bar (mock only, not product) ───────── */
+.mockbar { height:34px; display:flex; align-items:center; gap:8px; padding:0 10px; background:var(--gutter);
+  border-bottom:1px dashed var(--seam-2); white-space:nowrap; color:var(--text-2); font-size:12px; overflow:hidden; }
+.mockbar .tag { font:400 11px "Fragment Mono", monospace; color:var(--text-2); border:1px dashed var(--seam-2); border-radius:3px; padding:2px 6px; }
+.mockbar .lbl { color:var(--text-3); font-size:11.5px; }
+.mseg { display:flex; height:24px; border:1px solid var(--seam-2); border-radius:4px; overflow:hidden; flex:none; }
+.mseg button { border:0; background:transparent; padding:0 8px; color:var(--text-2); cursor:pointer; display:flex; align-items:center; gap:5px; font-size:12px; }
+.mseg button + button { border-left:1px solid var(--seam-2); }
+.mseg button[aria-pressed="true"] { background:var(--raised); color:var(--text); }
+:root[data-theme="light"] .mseg button[aria-pressed="true"] { background:var(--panel); }
+.mseg button:hover { color:var(--text); }
+.mseg button .n { font:400 11px "Fragment Mono", monospace; color:var(--text-3); }
+.mseg.lang button { font:400 11.5px "Fragment Mono", monospace; }
+
+/* ───────── Window ───────── */
+.win { position:relative; width:100vw; height:calc(100vh - 34px); display:grid; grid-template-rows:40px 1fr 24px; background:var(--ground); min-height:620px; }
+.titlebar { display:flex; align-items:center; padding:0 10px 0 14px; border-bottom:1px solid var(--seam); background:var(--ground);
+  user-select:none; white-space:nowrap; min-width:0; position:relative; z-index:40; }
+.lights { display:flex; gap:8px; margin-right:18px; }
+.lights i { width:12px; height:12px; border-radius:50%; display:block; border:.5px solid rgba(0,0,0,.25); }
+.lights i:nth-child(1){background:var(--tl-close);} .lights i:nth-child(2){background:var(--tl-min);} .lights i:nth-child(3){background:var(--tl-max);}
+.brand { display:flex; align-items:center; gap:8px; color:var(--text); padding-right:14px; }
+.brand .word { font-size:14.5px; letter-spacing:.09em; }
+.mark { width:16px; height:16px; display:block; color:var(--text-2); }
+
+/* Capsule (harman) + M2a states */
+.capsule { display:flex; align-items:stretch; height:26px; margin-left:12px; padding:0; border:1px solid var(--seam-2); border-radius:4px;
+  overflow:hidden; background:var(--panel); cursor:pointer; font-size:13px; flex:none; }
+.capsule > span { display:flex; align-items:center; gap:6px; padding:0 9px; }
+.capsule > span + span { border-left:1px solid var(--seam-2); }
+.capsule:hover > span:not(.cp-env) { background:var(--hover); }
+.cp-env { background:var(--cp-fill); color:var(--on-cp-fill); padding:0 10px 0 9px !important; font-size:13.5px; }
+.cp-env .sc { letter-spacing:.09em; font-weight:700; }
+.cp-tag { color:var(--text-2); }
+.cp-name b { font-weight:600; color:var(--text); }
+.cp-name .dim { color:var(--text-2); }
+.cp-ro svg { color:var(--red); }
+.cp-rw { color:var(--text-2); }
+.cp-path svg.direct { color:var(--green); }
+.cp-path svg.ssh { color:var(--text-2); }
+.cp-path .mono { font-size:11.5px; color:var(--text-2); }
+.cp-unenc { color:var(--text); }
+.cp-unenc svg { color:var(--text-2); }
+.cp-chev { color:var(--text-3); padding:0 6px !important; }
+.cp-none { color:var(--text-2); }
+.cp-run { color:var(--text); }
+.cp-run .mono { font-size:11.5px; color:var(--text-2); min-width:44px; }
+.run { width:7px; height:7px; background:var(--amber); display:block; flex:none; }          /* splash run marker */
+.cp-fail { color:var(--text); }
+.cp-fail svg { color:var(--text); }
+.cp-retry { color:var(--text-2); }
+.capsule:hover .cp-retry { color:var(--text); }
+
+.palette { margin:0 4px 0 auto; flex:0 1 290px; min-width:170px; height:26px; display:flex; align-items:center; gap:8px; padding:0 6px 0 9px;
+  border:1px solid var(--seam); border-radius:4px; color:var(--text-3); background:transparent; cursor:text; overflow:hidden; }
+.palette:hover { border-color:var(--seam-2); }
+.palette span { flex:1; text-align:left; overflow:hidden; text-overflow:ellipsis; }
+
+/* Tiles */
+.tiles { position:relative; display:grid; grid-template-columns:276px 1fr; gap:1px; background:var(--seam); min-height:0; }
+.col { display:grid; gap:1px; min-height:0; background:var(--seam); }
+.col.left { grid-template-rows:1fr 205px; }
+.panel { background:var(--panel); min-height:0; min-width:0; display:flex; flex-direction:column; position:relative; overflow:hidden; }
+.panel.side { background:var(--side); }
+.ph { height:30px; flex:none; display:flex; align-items:center; gap:10px; padding:0 10px 0 12px; border-bottom:1px solid var(--seam); white-space:nowrap; background:var(--head); }
+.ph .t { color:var(--text-2); font-size:13.5px; }
+.ph .meta { color:var(--text-3); font-size:12px; }
+.ph .id { color:var(--text); font-size:12.5px; }
+.ph .ibtn { margin-right:-4px; }
+
+/* Explorer */
+.xfilter { display:flex; align-items:center; gap:7px; height:28px; margin:8px 8px 4px; padding:0 6px 0 8px; border:1px solid var(--seam); border-radius:4px; color:var(--text-3); background:var(--panel); }
+:root[data-theme="dark"] .xfilter { background:transparent; }
+.xfilter input { flex:1; min-width:0; border:0; background:transparent; outline:none; font-size:12.5px; }
+.xfilter input::placeholder { color:var(--text-3); }
+.tree { padding:2px 0 8px; overflow:auto; flex:1; outline:none; }
+.grp { height:26px; display:flex; align-items:center; gap:7px; padding:6px 10px 0 12px; color:var(--text-3); font-size:13px; }
+.grp .rule { flex:1; height:1px; background:var(--seam-soft); }
+:root[data-theme="light"] .grp .rule { background:var(--seam); }
+.grp .n { font-size:11px; color:var(--text-3); }
+.row { height:23px; display:flex; align-items:center; gap:6px; padding:0 10px 0 12px; cursor:default; white-space:nowrap; color:var(--text); position:relative; }
+.row:hover { background:var(--hover); }
+.row.sel { background:var(--blue-a); }
+.row.sel::before { content:""; position:absolute; left:0; top:0; bottom:0; width:1px; background:var(--blue); }
+.tree:focus-visible .row.sel { outline:1px solid var(--blue); outline-offset:-1px; }
+.row .ic { color:var(--text-2); }
+.row.sel > .ic { color:var(--blue); }
+.row .lbl { overflow:hidden; text-overflow:ellipsis; }
+.row .lbl.on { font-weight:600; }
+.row .flags { display:flex; align-items:center; gap:5px; color:var(--text-2); }
+.row .flags .ro { color:var(--red); }
+.row .meta { color:var(--text-3); font-size:11px; display:flex; align-items:center; gap:4px; }
+.row .meta .ok { color:var(--green); }
+.row .run { width:7px; height:7px; }
+.xempty { flex:1; display:flex; flex-direction:column; align-items:flex-start; padding:18px 14px 0 14px; gap:8px; }
+.xempty .h { font-weight:600; color:var(--text); font-size:13px; display:flex; align-items:center; gap:8px; }
+.xempty .h svg { color:var(--text-2); }
+.xempty p { margin:0 0 4px; color:var(--text-2); font-size:12.5px; line-height:1.4; }
+.xempty .acts { display:flex; flex-direction:column; align-items:stretch; gap:6px; width:100%; }
+.xempty .acts .btn { justify-content:flex-start; }
+.xempty .acts .btn .k { margin-left:auto; }
+
+/* Connection sheet */
+.sheet { padding:6px 0 0; margin:0; }
+.kv { display:grid; grid-template-columns:92px 1fr; align-items:center; height:22px; padding:0 12px; column-gap:10px; font-size:12.5px; white-space:nowrap; }
+.kv dt { color:var(--text-3); margin:0; overflow:hidden; text-overflow:ellipsis; }
+.kv dd { margin:0; display:flex; align-items:center; gap:6px; min-width:0; overflow:hidden; }
+.kv dd .mono { font-size:11.5px; overflow:hidden; text-overflow:ellipsis; }
+.kv .r { color:var(--red); font-weight:600; }
+.kv .d { color:var(--text-2); }
+.kv .g { color:var(--green); }
+
+/* Center: empty workspace */
+.home { flex:1; display:flex; align-items:center; justify-content:center; }
+.home .box { width:420px; display:flex; flex-direction:column; gap:14px; }
+.home .h { color:var(--text-2); font-size:13.5px; }
+.home .keys { display:grid; grid-template-columns:1fr auto; row-gap:9px; column-gap:24px; font-size:13px; }
+.home .keys span { color:var(--text-2); }
+.home .keys .k { display:flex; gap:3px; justify-content:flex-end; }
+.home .hint { color:var(--text-3); font-size:12px; }
+
+/* Buttons (harman) */
+.btn { height:24px; display:inline-flex; align-items:center; gap:6px; padding:0 9px; border:1px solid var(--seam-2); border-radius:4px; background:transparent;
+  color:var(--text); font-size:12.5px; font-weight:500; cursor:pointer; white-space:nowrap; flex:none; }
+.btn:hover { background:var(--hover); }
+.btn .k { font:400 11px "Fragment Mono", monospace; color:var(--text-3); }
+.btn.primary { background:var(--blue); border-color:var(--blue); color:var(--on-accent); font-weight:600; }
+.btn.primary .k { color:var(--on-accent); opacity:.7; }
+.btn.primary:hover { background:var(--blue-hover); border-color:var(--blue-hover); }
+.btn.ghost { border-color:transparent; color:var(--text-2); }
+.btn.ghost:hover { color:var(--text); }
+.btn.icon { padding:0 6px; }
+.btn[disabled], .btn[disabled]:hover { cursor:not-allowed; color:var(--text-3); border-color:var(--seam-2); background:transparent; }
+.btn.ghost[disabled], .btn.ghost[disabled]:hover { border-color:transparent; }
+.btn.danger { color:var(--red); border-color:var(--red-line); background:transparent; }
+.btn.danger:hover, .btn.danger:focus-visible { background:var(--red); border-color:var(--red); color:var(--on-red); outline:none; }
+.void { display:flex; align-items:center; gap:8px; margin-right:28px; padding-right:12px; border-right:1px solid var(--seam); height:20px; flex:none; }
+
+/* Status bar (harman) */
+.status { display:flex; align-items:stretch; border-top:1px solid var(--seam); background:var(--ground); font-size:12px; color:var(--text-2); white-space:nowrap; position:relative; z-index:1; }
+.status .s { display:flex; align-items:center; gap:6px; padding:0 10px; border-right:1px solid var(--seam); }
+.status .s.r { border-right:0; border-left:1px solid var(--seam); }
+.status .envseg { background:var(--red-a); color:var(--red); font-weight:600; padding-left:12px; }
+.status .envseg.np { background:transparent; color:var(--text); font-weight:400; }
+.status .g svg { color:var(--green); }
+.status .mono { font-size:11px; }
+.status button.s { background:transparent; border-top:0; border-bottom:0; border-right:0; cursor:pointer; color:var(--text-2); }
+.status button.s:hover { color:var(--text); background:var(--hover); }
+.status .lang b { color:var(--text); font-weight:600; }
+.status .run { width:7px; height:7px; }
+
+/* ───────── Layers: scrim + dialogs ─────────
+   The scrim starts below the title bar: the capsule is never dimmed (decision M2a-1). */
+.layer { position:absolute; left:0; right:0; top:40px; bottom:0; background:var(--scrim); display:flex; align-items:center; justify-content:center; z-index:30; }
+.dlg { position:relative; background:var(--raised); border:1px solid var(--seam-2); border-radius:6px; box-shadow:var(--shadow-pop);
+  display:flex; flex-direction:column; max-height:calc(100% - 32px); --text-3:var(--text-2); }    /* Raised Ink Rule */
+.dlg.w420 { width:420px; } .dlg.w480 { width:480px; } .dlg.w640 { width:640px; }
+.dlg .dhead { display:flex; align-items:flex-start; gap:12px; padding:16px 16px 0; }
+.dlg .dhead .tt { flex:1; min-width:0; }
+.dlg .dhead .title { font-weight:600; font-size:13px; color:var(--text); }
+.dlg .dhead .sub { color:var(--text-2); font-size:12.5px; margin-top:2px; display:flex; gap:6px; align-items:center; }
+.dlg .x { border:0; background:transparent; padding:4px; border-radius:4px; color:var(--text-3); cursor:pointer; margin:-3px -4px 0 0; }
+.dlg .x:hover { background:var(--hover); color:var(--text); }
+.dlg .dbody { padding:12px 16px 0; color:var(--text-2); font-size:13px; }
+.dlg .dbody p { margin:0 0 10px; line-height:1.4; }
+.dlg .dbody p.strong { color:var(--text); }
+.dlg .dfoot { display:flex; align-items:center; gap:8px; padding:12px 16px 16px; }
+.dlg .dfoot .grow { flex:1; }
+.dlg.form .dhead { padding:12px 14px 12px 16px; border-bottom:1px solid var(--seam); align-items:center; }
+.dlg.form .dscroll { overflow:auto; padding:12px 16px 14px; min-height:0; }
+.dlg.form .dfoot { border-top:1px solid var(--seam); padding:12px 16px; }
+
+/* Form rows */
+.frow { display:grid; grid-template-columns:140px 1fr; align-items:center; column-gap:12px; min-height:26px; }
+.frow + .frow, .frow + .notice, .notice + .frow, .frow + .hintrow, .hintrow + .frow { margin-top:8px; }
+.flab { color:var(--text-2); font-size:13px; line-height:1.25; }
+.fcell { display:flex; align-items:center; gap:8px; min-width:0; }
+.hintrow { display:grid; grid-template-columns:140px 1fr; column-gap:12px; margin-top:4px; }
+.hintrow .h { grid-column:2; color:var(--text-2); font-size:12px; display:flex; gap:6px; align-items:center; line-height:1.35; }
+.hintrow .h svg { flex:none; }
+.inl { color:var(--text-2); font-size:13px; flex:none; }
+.secth { display:flex; align-items:center; gap:7px; height:22px; margin:14px 0 8px; color:var(--text-2); font-size:13px; }
+.secth .rule { flex:1; height:1px; background:var(--seam); }
+
+/* TextInput (existing): 26px, seam-strong, radius 4, padding 0 6 0 9; field well = panel (dark) / ground (light) like the harman query box */
+.in { height:26px; display:flex; align-items:center; gap:6px; padding:0 6px 0 9px; border:1px solid var(--seam-2); border-radius:4px; background:var(--panel);
+  min-width:0; flex:1; --text-3:var(--text-3-base); transition:background-color 240ms cubic-bezier(.16,1,.3,1); }
+:root[data-theme="light"] .in { background:var(--ground); }
+.in input { flex:1; min-width:0; border:0; background:transparent; outline:0; font-size:13px; color:var(--text); padding:0; height:24px; }
+.in input::placeholder { color:var(--text-3); }
+.in.mono input::placeholder { font-family:"Source Sans 3", system-ui, sans-serif; font-size:13px; }
+.in.mono input { font:400 12px "Fragment Mono", monospace; }
+.in:focus-within { outline:1px solid var(--blue); outline-offset:1px; }
+.in.filled { background:var(--blue-a2); }
+.in .tail { color:var(--text-3); font-size:12px; flex:none; display:flex; gap:4px; align-items:center; }
+.in .tail .btn { height:20px; padding:0 5px; margin-right:-3px; }
+.in.port { flex:0 0 76px; }
+.in.short { flex:0 0 96px; }
+.in.err { border-color:var(--text-2); }
+
+/* Segmented (existing). Inside a raised dialog it sits in a field well; pressed = raised (dark) / panel (light). */
+.seg { display:flex; height:26px; border:1px solid var(--seam-2); border-radius:4px; overflow:hidden; flex:none; background:var(--panel); }
+:root[data-theme="light"] .seg { background:var(--ground); }
+.seg button { border:0; background:transparent; padding:0 9px; color:var(--text-2); cursor:pointer; display:flex; align-items:center; gap:6px; font-size:13px; }
+.seg button + button { border-left:1px solid var(--seam-2); }
+.seg button[aria-pressed="true"] { background:var(--raised); color:var(--text); font-weight:600; }
+:root[data-theme="light"] .seg button[aria-pressed="true"] { background:var(--panel); }
+.seg button:hover { color:var(--text); }
+.seg button:focus-visible { outline:1px solid var(--blue); outline-offset:-2px; }
+.seg.unset button[aria-pressed="false"] { color:var(--text-2); }
+
+/* NEW · Checkbox: 14px, radius 3, 1px seam-strong; checked = blue fill + on-accent check */
+.cb { display:inline-flex; align-items:center; gap:8px; cursor:pointer; color:var(--text); font-size:13px; border:0; background:transparent; padding:0; text-align:left; }
+.cb .box { width:14px; height:14px; border:1px solid var(--seam-2); border-radius:3px; background:var(--panel); display:flex; align-items:center; justify-content:center; flex:none; color:var(--on-accent); }
+:root[data-theme="light"] .cb .box { background:var(--ground); }
+:root .cb[aria-checked="true"] .box, :root[data-theme="light"] .cb[aria-checked="true"] .box { background:var(--blue); border-color:var(--blue); }
+.cb .box svg { width:12px; height:12px; stroke-width:2.2; visibility:hidden; }
+.cb[aria-checked="true"] .box svg { visibility:visible; }
+.cb .sub { color:var(--text-2); }
+
+/* NEW · Select: field-shaped button that opens a PopupMenu */
+.select { height:26px; display:inline-flex; align-items:center; gap:8px; padding:0 6px 0 9px; border:1px solid var(--seam-2); border-radius:4px; background:var(--panel);
+  color:var(--text); cursor:pointer; font-size:13px; min-width:0; text-align:left; }
+:root[data-theme="light"] .select { background:var(--ground); }
+.select .v { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.select svg { color:var(--text-2); }
+.select:hover { border-color:var(--text-3-base); }
+
+/* NEW · Disclosure: 30px row, chevron swaps right/down (no rotation), small-caps title, summary at text-2 */
+.disc { width:100%; height:32px; display:flex; align-items:center; gap:8px; border:0; border-top:1px solid var(--seam); background:transparent; padding:0 2px 0 0; cursor:pointer; text-align:left; margin-top:14px; }
+.disc + .dbox + .disc, .disc + .disc { margin-top:0; }
+.disc .chev { color:var(--text-2); width:14px; display:flex; justify-content:center; }
+.disc .ttl { color:var(--text); font-size:13px; font-weight:600; }
+.disc .sum { flex:1; text-align:right; color:var(--text-2); font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:flex; justify-content:flex-end; gap:6px; align-items:center; }
+.disc:hover .ttl { color:var(--text); }
+.disc:focus-visible { outline-offset:-1px; }
+.dbox { padding:4px 0 12px 22px; }
+
+/* NEW · Inline notice: bordered inset, icon carries meaning only when it is a result */
+.notice { display:flex; gap:9px; align-items:flex-start; padding:8px 10px; border:1px solid var(--seam-2); border-radius:4px; background:var(--panel); color:var(--text); font-size:12.5px; line-height:1.4; }
+:root[data-theme="light"] .notice { background:var(--ground); }
+.notice > svg { margin-top:1px; color:var(--text-2); }
+.notice .nb { flex:1; min-width:0; }
+.notice .nb .l2 { color:var(--text-2); }
+.notice .nb ul { margin:4px 0 0; padding:0; list-style:none; }
+.notice .nb li { display:flex; gap:6px; align-items:baseline; color:var(--text-2); }
+.notice .nb li .mono { font-size:11.5px; color:var(--text); }
+.notice .acts { display:flex; gap:6px; margin-top:8px; }
+.notice.ok > svg { color:var(--green); }
+.notice .mono { font-size:11.5px; }
+
+/* Test result strip (above the dialog footer) */
+.tres { border-top:1px solid var(--seam); padding:10px 16px 12px; background:var(--panel); }
+:root[data-theme="light"] .tres { background:var(--ground); }
+.tres { --text-3:var(--text-3-base); }
+.tres .th { display:flex; align-items:center; gap:8px; color:var(--text); font-weight:600; }
+.tres .th .ok { color:var(--green); }
+.tres .sub2 { color:var(--text-2); font-size:12.5px; margin:2px 0 0 22px; }
+.tres .th .mono { font-weight:400; font-size:11.5px; color:var(--text-2); }
+.diag { display:grid; grid-template-columns:auto minmax(0,1fr) auto minmax(0,1fr); column-gap:12px; row-gap:3px; margin-top:8px; font-size:12.5px; }
+.diag dt { color:var(--text-2); margin:0; white-space:nowrap; }
+.diag dd { margin:0; display:flex; align-items:center; gap:6px; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.diag dd .mono { font-size:11.5px; }
+.diag dd svg { color:var(--green); }
+
+/* NEW · Step trail: pipeline stages with done ✓ (green), running ■ (amber), failed ✕ (ink), pending (text-2) */
+.trail { display:flex; align-items:center; column-gap:14px; flex-wrap:wrap; margin-top:8px; row-gap:2px; }
+.trail .st { display:flex; align-items:center; gap:5px; height:20px; font-size:12px; color:var(--text-2); }
+.trail .st .mono { font-size:11px; color:var(--text-2); }
+.trail .st.done svg { color:var(--green); }
+.trail .st.done { color:var(--text); }
+.trail .st.fail { color:var(--text); font-weight:600; }
+.trail .st.fail svg { color:var(--text); }
+.trail .st.run2 { color:var(--text); }
+.trail .st.pend .dot { width:7px; height:7px; border:1px solid var(--seam-2); display:block; }
+.trail .sep { width:14px; height:1px; background:var(--seam-2); margin:0 6px; }
+
+/* Error block */
+.eb .eh { display:flex; gap:9px; align-items:flex-start; }
+.eb .eh svg { margin-top:1px; color:var(--text); flex:none; }
+.eb .eh .t1 { color:var(--text); font-weight:600; font-size:13px; line-height:1.35; }
+.eb .eh .t2 { color:var(--text-2); font-size:12.5px; margin-top:3px; line-height:1.4; }
+.eb .fixes { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; align-items:center; }
+.eb .dbs { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+.eb .dbs .btn { font-family:"Fragment Mono", monospace; font-size:12px; font-weight:400; }
+.eb .pwrow { display:flex; gap:8px; margin-top:10px; align-items:center; }
+.eb .attempt { color:var(--text-2); font-size:12px; }
+.tech { margin-top:10px; }
+.tech .dsc { display:flex; align-items:center; gap:6px; border:0; background:transparent; padding:0; color:var(--text-2); cursor:pointer; font-size:12.5px; }
+.tech .dsc:hover { color:var(--text); }
+.tech .box { margin-top:8px; padding:8px 10px; border:1px solid var(--seam-2); border-radius:4px; background:var(--panel); font-size:12px; }
+:root[data-theme="light"] .tech .box { background:var(--ground); }
+.tech .box { --text-3:var(--text-3-base); }
+.tech .kvx { display:grid; grid-template-columns:110px 1fr; row-gap:4px; column-gap:10px; }
+.tech .kvx dt { color:var(--text-3); margin:0; }
+.tech .kvx dd { margin:0; color:var(--text); min-width:0; overflow-wrap:anywhere; }
+.tech .kvx dd.mono { font-size:11.5px; }
+.tech .code { font:400 11px "Fragment Mono", monospace; border:1px solid var(--seam-2); border-radius:3px; padding:1px 4px; color:var(--text); }
+.tech .copy { margin-top:8px; }
+
+/* NEW · Choice list (radio rows) for the production-tag prompt */
+.choices { border:1px solid var(--seam-2); border-radius:4px; overflow:hidden; margin:2px 0 10px; }
+.choice { display:grid; grid-template-columns:14px 7px 1fr; column-gap:10px; align-items:center; width:100%; min-height:34px; padding:7px 10px;
+  border:0; background:transparent; text-align:left; cursor:pointer; color:var(--text); }
+.choice + .choice { border-top:1px solid var(--seam); }
+.choice:hover { background:var(--hover); }
+.choice[aria-checked="true"] { background:var(--blue-a); }
+.choice:focus-visible { outline-offset:-2px; }
+.choice .radio { width:14px; height:14px; border:1px solid var(--seam-2); border-radius:50%; display:flex; align-items:center; justify-content:center; background:var(--panel); }
+:root[data-theme="light"] .choice .radio { background:var(--ground); }
+.choice[aria-checked="true"] .radio { border-color:var(--blue); }
+.choice[aria-checked="true"] .radio::after { content:""; width:6px; height:6px; border-radius:50%; background:var(--blue); }
+.choice .cl { display:flex; flex-direction:column; min-width:0; }
+.choice .cl b { font-weight:600; font-size:13px; }
+.choice .cl span { color:var(--text-2); font-size:12.5px; }
+.changes { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:7px; }
+.changes li { display:grid; grid-template-columns:16px 1fr; column-gap:8px; align-items:start; color:var(--text); font-size:12.5px; line-height:1.4; }
+.changes li .m { height:17px; display:flex; align-items:center; justify-content:center; color:var(--text-2); }
+.changes .prodword { color:var(--red); font-variant-caps:all-small-caps; letter-spacing:.09em; font-weight:700; }
+.calm { color:var(--text-2); font-size:12.5px; margin:0; }
+.suggest { color:var(--text-2); font-size:12px; display:flex; gap:6px; align-items:center; margin:-2px 0 8px; }
+
+/* Certificate / fingerprint insets (DML-preview anatomy) */
+.inset { padding:8px 10px; border:1px solid var(--seam-2); border-radius:4px; background:var(--panel); --text-3:var(--text-3-base); }
+:root[data-theme="light"] .inset { background:var(--ground); }
+.certkv { display:grid; grid-template-columns:120px 1fr; row-gap:5px; column-gap:10px; font-size:12.5px; margin-bottom:10px; }
+.certkv dt { color:var(--text-2); margin:0; }
+.certkv dd { margin:0; color:var(--text); min-width:0; }
+.certkv dd.mono { font-size:11.5px; }
+.fp { font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); letter-spacing:.02em; }
+.fphead { display:flex; align-items:center; gap:6px; color:var(--text-2); font-size:12.5px; margin-bottom:5px; }
+.chain { margin:10px 0 0; padding:0; list-style:none; font-size:12.5px; }
+.chain li { height:22px; display:flex; align-items:center; gap:7px; white-space:nowrap; }
+.chain li .mono { font-size:11.5px; color:var(--text); }
+.chain li .d { color:var(--text-2); }
+.chain li .tick { width:9px; height:11px; border-left:1px solid var(--seam-2); border-bottom:1px solid var(--seam-2); margin-top:-8px; flex:none; }
+.chain li.l1 { padding-left:8px; } .chain li.l2 { padding-left:24px; }
+.chain li svg { color:var(--text-2); }
+
+/* SSH: route line + jump list */
+.route { display:flex; align-items:center; flex-wrap:wrap; gap:6px; color:var(--text-2); font-size:12px; }
+.route .mono { font-size:11.5px; color:var(--text); }
+.route svg { color:var(--text-2); }
+.hops { display:flex; flex-direction:column; gap:6px; flex:1; min-width:0; }
+.hop { display:flex; align-items:center; gap:8px; }
+.hop .ix { font:400 11px "Fragment Mono", monospace; color:var(--text-2); width:12px; text-align:right; flex:none; }
+
+/* PopupMenu (existing): min 200px, rows 24px, radius 6, popover shadow */
+.menu { position:absolute; z-index:60; min-width:200px; padding:4px; background:var(--raised); border:1px solid var(--seam-2); border-radius:6px; box-shadow:var(--shadow-pop); --text-3:var(--text-2); outline:none; }
+.menu .mi { height:24px; display:flex; align-items:center; gap:12px; padding:0 10px; border-radius:3px; cursor:default; white-space:nowrap; color:var(--text); font-size:13px; }
+.menu .mi .ck { width:12px; color:var(--blue); display:flex; }
+.menu .mi .h { color:var(--text-2); font-size:12px; margin-left:auto; padding-left:16px; }
+.menu .mi .k { font:400 11px "Fragment Mono", monospace; color:var(--text-2); margin-left:auto; padding-left:16px; }
+.menu .mi.on { background:var(--hover); }
+.menu .mi.dis { color:var(--text-2); }
+.menu .mi.danger { color:var(--red); }
+.menu .mi.mono2 .lab { font:400 12px "Fragment Mono", monospace; }
+.menu .sep { height:1px; background:var(--seam); margin:4px 0; }
+.menu .mh { padding:4px 10px 4px; color:var(--text-2); font-size:12px; }
+
+/* Popover explanation (unencrypted badge) */
+.pop { position:absolute; z-index:45; width:300px; padding:10px 12px; background:var(--raised); border:1px solid var(--seam-2); border-radius:6px; box-shadow:var(--shadow-pop); font-size:12.5px; color:var(--text-2); line-height:1.4; --text-3:var(--text-2); }
+.pop b { color:var(--text); font-weight:600; display:flex; gap:7px; align-items:center; margin-bottom:4px; font-size:13px; }
+.pop p { margin:0 0 6px; }
+
+/* Toast (existing) + NEW sticky variant with actions */
+.toasts { position:absolute; right:12px; bottom:36px; display:flex; flex-direction:column; gap:8px; z-index:50; }
+.toast { width:320px; padding:8px 12px; background:var(--raised); border:1px solid var(--seam-2); border-radius:6px; box-shadow:var(--shadow-pop); display:flex; gap:8px; align-items:flex-start; font-size:12.5px; color:var(--text); --text-3:var(--text-2); }
+.toast.wide { width:380px; }
+.toast > svg { margin-top:1px; color:var(--text-2); }
+.toast > svg.ok { color:var(--green); }
+.toast .tb { flex:1; min-width:0; line-height:1.4; }
+.toast .tb .t1 { font-weight:600; }
+.toast .tb .l2 { color:var(--text-2); }
+.toast .tb .mono { font-size:11.5px; overflow-wrap:anywhere; }
+.toast .tb ul { margin:4px 0 0; padding:0 0 0 0; list-style:none; color:var(--text-2); }
+.toast .tb li { display:flex; gap:6px; align-items:flex-start; }
+.toast .tb li::before { content:""; width:3px; height:3px; background:var(--text-2); flex:none; margin-top:7px; }
+.toast .acts { display:flex; gap:6px; margin-top:8px; }
+.toast .x { border:0; background:transparent; padding:2px; color:var(--text-2); cursor:pointer; border-radius:3px; }
+.toast .x:hover { color:var(--text); background:var(--hover); }
+
+/* ───────── Mock notes drawer (mock only) ───────── */
+.notes { position:fixed; top:34px; right:0; bottom:0; width:420px; z-index:80; background:var(--gutter); border-left:1px dashed var(--seam-2);
+  display:none; flex-direction:column; font-size:12.5px; color:var(--text); }
+.notes.on { display:flex; }
+.notes .nh { height:30px; display:flex; align-items:center; gap:8px; padding:0 10px 0 12px; border-bottom:1px solid var(--seam); flex:none; }
+.notes .nh .tag { font:400 11px "Fragment Mono", monospace; color:var(--text-2); border:1px dashed var(--seam-2); border-radius:3px; padding:1px 5px; }
+.notes .nbody { overflow:auto; padding:10px 12px 20px; }
+.notes h3 { margin:12px 0 6px; font-size:13.5px; color:var(--text-2); font-variant-caps:all-small-caps; letter-spacing:.075em; font-weight:600; }
+.notes h3:first-child { margin-top:2px; }
+.notes ul { margin:0; padding-left:16px; color:var(--text); line-height:1.45; }
+.notes li { margin-bottom:4px; }
+.notes li code, .notes p code { font:400 11.5px "Fragment Mono", monospace; color:var(--text); }
+.notes p { margin:0 0 6px; color:var(--text-2); line-height:1.45; }
+.notes table { width:100%; border-collapse:collapse; font-size:12px; table-layout:fixed; }
+.notes td { border-top:1px solid var(--seam); padding:4px 4px 4px 0; vertical-align:top; overflow-wrap:anywhere; }
+.notes td.k { font:400 11px "Fragment Mono", monospace; color:var(--text-2); width:30%; }
+.notes td.en { color:var(--text-2); width:33%; }
+.notes .por { font:400 10.5px "Fragment Mono", monospace; color:var(--amber); border:1px dashed var(--amber); border-radius:3px; padding:0 3px; white-space:nowrap; margin-left:4px; }
+.notes .sample { display:flex; gap:6px; align-items:center; margin:6px 0; }
+.notes .sample code { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:400 11px "Fragment Mono", monospace; border:1px solid var(--seam-2); border-radius:3px; padding:3px 5px; }
+</style>
+</head>
+<body>
+<!--ICON-SPRITE-BEGIN: Lucide 0.460 (ISC), inlined; see crates/ui/hacivat-ui-core/assets/icons/lucide/LICENSE -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="hv-mark" viewBox="0 0 16 16"><rect x="1.5" y="1.5" width="13" height="13" rx="2.5" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2.2 1.6"/><path d="M5.6 4.8v6.4M10.4 4.8v6.4M5.6 8h4.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></symbol>
+<symbol id="i-align-left" viewBox="0 0 24 24"><path d="M15 12H3" /> <path d="M17 18H3" /> <path d="M21 6H3" /></symbol>
+<symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14" /> <path d="m19 12-7 7-7-7" /></symbol>
+<symbol id="i-arrow-left-right" viewBox="0 0 24 24"><path d="M8 3 4 7l4 4" /> <path d="M4 7h16" /> <path d="m16 21 4-4-4-4" /> <path d="M20 17H4" /></symbol>
+<symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14" /> <path d="m12 5 7 7-7 7" /></symbol>
+<symbol id="i-badge-check" viewBox="0 0 24 24"><path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z" /> <path d="m9 12 2 2 4-4" /></symbol>
+<symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <path d="m4.9 4.9 14.2 14.2" /></symbol>
+<symbol id="i-brackets" viewBox="0 0 24 24"><path d="M16 3h3v18h-3" /> <path d="M8 21H5V3h3" /></symbol>
+<symbol id="i-calendar" viewBox="0 0 24 24"><path d="M8 2v4" /> <path d="M16 2v4" /> <rect width="18" height="18" x="3" y="4" rx="2" /> <path d="M3 10h18" /></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></symbol>
+<symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></symbol>
+<symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></symbol>
+<symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></symbol>
+<symbol id="i-chevrons-up-down" viewBox="0 0 24 24"><path d="m7 15 5 5 5-5" /> <path d="m7 9 5-5 5 5" /></symbol>
+<symbol id="i-circle-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <line x1="12" x2="12" y1="8" y2="12" /> <line x1="12" x2="12.01" y1="16" y2="16" /></symbol>
+<symbol id="i-circle-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <path d="m9 12 2 2 4-4" /></symbol>
+<symbol id="i-circle-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <circle cx="12" cy="12" r="1" /></symbol>
+<symbol id="i-circle-x" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <path d="m15 9-6 6" /> <path d="m9 9 6 6" /></symbol>
+<symbol id="i-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /></symbol>
+<symbol id="i-clipboard-paste" viewBox="0 0 24 24"><path d="M15 2H9a1 1 0 0 0-1 1v2c0 .6.4 1 1 1h6c.6 0 1-.4 1-1V3c0-.6-.4-1-1-1Z" /> <path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2M16 4h2a2 2 0 0 1 2 2v2M11 14h10" /> <path d="m17 10 4 4-4 4" /></symbol>
+<symbol id="i-columns-2" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M12 3v18" /></symbol>
+<symbol id="i-copy-check" viewBox="0 0 24 24"><path d="m12 15 2 2 4-4" /> <rect width="14" height="14" x="8" y="8" rx="2" ry="2" /> <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /> <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></symbol>
+<symbol id="i-corner-down-left" viewBox="0 0 24 24"><polyline points="9 10 4 15 9 20" /> <path d="M20 4v7a4 4 0 0 1-4 4H4" /></symbol>
+<symbol id="i-cylinder" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3" /> <path d="M3 5v14a9 3 0 0 0 18 0V5" /></symbol>
+<symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3" /> <path d="M3 5V19A9 3 0 0 0 21 19V5" /> <path d="M3 12A9 3 0 0 0 21 12" /></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /> <polyline points="7 10 12 15 17 10" /> <line x1="12" x2="12" y1="15" y2="3" /></symbol>
+<symbol id="i-ellipsis-vertical" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1" /> <circle cx="12" cy="5" r="1" /> <circle cx="12" cy="19" r="1" /></symbol>
+<symbol id="i-ellipsis" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1" /> <circle cx="19" cy="12" r="1" /> <circle cx="5" cy="12" r="1" /></symbol>
+<symbol id="i-external-link" viewBox="0 0 24 24"><path d="M15 3h6v6" /> <path d="M10 14 21 3" /> <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></symbol>
+<symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49" /> <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" /> <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" /> <path d="m2 2 20 20" /></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" /> <circle cx="12" cy="12" r="3" /></symbol>
+<symbol id="i-file-code-2" viewBox="0 0 24 24"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4" /> <path d="M14 2v4a2 2 0 0 0 2 2h4" /> <path d="m5 12-3 3 3 3" /> <path d="m9 18 3-3-3-3" /></symbol>
+<symbol id="i-file-diff" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /> <path d="M9 10h6" /> <path d="M12 13V7" /> <path d="M9 17h6" /></symbol>
+<symbol id="i-file-key" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /> <circle cx="10" cy="16" r="2" /> <path d="m16 10-4.5 4.5" /> <path d="m15 11 1 1" /></symbol>
+<symbol id="i-file-up" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /> <path d="M14 2v4a2 2 0 0 0 2 2h4" /> <path d="M12 12v6" /> <path d="m15 15-3-3-3 3" /></symbol>
+<symbol id="i-filter" viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" /></symbol>
+<symbol id="i-fingerprint" viewBox="0 0 24 24"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4" /> <path d="M14 13.12c0 2.38 0 6.38-1 8.88" /> <path d="M17.29 21.02c.12-.6.43-2.3.5-3.02" /> <path d="M2 12a10 10 0 0 1 18-6" /> <path d="M2 16h.01" /> <path d="M21.8 16c.2-2 .131-5.354 0-6" /> <path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2" /> <path d="M8.65 22c.21-.66.45-1.32.57-2" /> <path d="M9 6.8a6 6 0 0 1 9 5.2v2" /></symbol>
+<symbol id="i-folder-open" viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></symbol>
+<symbol id="i-git-commit-horizontal" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /> <line x1="3" x2="9" y1="12" y2="12" /> <line x1="15" x2="21" y1="12" y2="12" /></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" /> <path d="M2 12h20" /></symbol>
+<symbol id="i-hard-drive" viewBox="0 0 24 24"><line x1="22" x2="2" y1="12" y2="12" /> <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" /> <line x1="6" x2="6.01" y1="16" y2="16" /> <line x1="10" x2="10.01" y1="16" y2="16" /></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <path d="M12 16v-4" /> <path d="M12 8h.01" /></symbol>
+<symbol id="i-key-round" viewBox="0 0 24 24"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z" /> <circle cx="16.5" cy="7.5" r=".5" fill="currentColor" /></symbol>
+<symbol id="i-key-square" viewBox="0 0 24 24"><path d="M12.4 2.7a2.5 2.5 0 0 1 3.4 0l5.5 5.5a2.5 2.5 0 0 1 0 3.4l-3.7 3.7a2.5 2.5 0 0 1-3.4 0L8.7 9.8a2.5 2.5 0 0 1 0-3.4z" /> <path d="m14 7 3 3" /> <path d="m9.4 10.6-6.814 6.814A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814" /></symbol>
+<symbol id="i-keyboard" viewBox="0 0 24 24"><path d="M10 8h.01" /> <path d="M12 12h.01" /> <path d="M14 8h.01" /> <path d="M16 12h.01" /> <path d="M18 8h.01" /> <path d="M6 8h.01" /> <path d="M7 16h10" /> <path d="M8 12h.01" /> <rect width="20" height="16" x="2" y="4" rx="2" /></symbol>
+<symbol id="i-languages" viewBox="0 0 24 24"><path d="m5 8 6 6" /> <path d="m4 14 6-6 2-3" /> <path d="M2 5h12" /> <path d="M7 2h1" /> <path d="m22 22-5-10-5 10" /> <path d="M14 18h6" /></symbol>
+<symbol id="i-laptop" viewBox="0 0 24 24"><path d="M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9m16 0H4m16 0 1.28 2.55a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45L4 16" /></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" /> <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" /> <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" /></symbol>
+<symbol id="i-layout-panel-left" viewBox="0 0 24 24"><rect width="7" height="18" x="3" y="3" rx="1" /> <rect width="7" height="7" x="14" y="3" rx="1" /> <rect width="7" height="7" x="14" y="14" rx="1" /></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /> <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></symbol>
+<symbol id="i-list-ordered" viewBox="0 0 24 24"><path d="M10 12h11" /> <path d="M10 18h11" /> <path d="M10 6h11" /> <path d="M4 10h2" /> <path d="M4 6h1v4" /> <path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1" /></symbol>
+<symbol id="i-list-tree" viewBox="0 0 24 24"><path d="M21 12h-8" /> <path d="M21 6H8" /> <path d="M21 18h-8" /> <path d="M3 6v4c0 1.1.9 2 2 2h3" /> <path d="M3 10v6c0 1.1.9 2 2 2h3" /></symbol>
+<symbol id="i-loader-circle" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></symbol>
+<symbol id="i-lock-open" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2" /> <path d="M7 11V7a5 5 0 0 1 9.9-1" /></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2" /> <path d="M7 11V7a5 5 0 0 1 10 0v4" /></symbol>
+<symbol id="i-menu" viewBox="0 0 24 24"><line x1="4" x2="20" y1="12" y2="12" /> <line x1="4" x2="20" y1="6" y2="6" /> <line x1="4" x2="20" y1="18" y2="18" /></symbol>
+<symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14" /></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" /></symbol>
+<symbol id="i-network" viewBox="0 0 24 24"><rect x="16" y="16" width="6" height="6" rx="1" /> <rect x="2" y="16" width="6" height="6" rx="1" /> <rect x="9" y="2" width="6" height="6" rx="1" /> <path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" /> <path d="M12 12V8" /></symbol>
+<symbol id="i-panel-left" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M9 3v18" /></symbol>
+<symbol id="i-panel-right" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M15 3v18" /></symbol>
+<symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /> <path d="m15 5 4 4" /></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3" /></symbol>
+<symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5" /> <path d="M9 8V2" /> <path d="M15 8V2" /> <path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" /></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14" /> <path d="M12 5v14" /></symbol>
+<symbol id="i-radio" viewBox="0 0 24 24"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9" /> <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5" /> <circle cx="12" cy="12" r="2" /> <path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5" /> <path d="M19.1 4.9C23 8.8 23 15.1 19.1 19" /></symbol>
+<symbol id="i-refresh-cw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></symbol>
+<symbol id="i-rotate-cw" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /></symbol>
+<symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="19" r="3" /> <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" /> <circle cx="18" cy="5" r="3" /></symbol>
+<symbol id="i-rows-2" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M3 12h18" /></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8" /> <path d="m21 21-4.3-4.3" /></symbol>
+<symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2" ry="2" /> <rect width="20" height="8" x="2" y="14" rx="2" ry="2" /> <line x1="6" x2="6.01" y1="6" y2="6" /> <line x1="6" x2="6.01" y1="18" y2="18" /></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /> <circle cx="12" cy="12" r="3" /></symbol>
+<symbol id="i-shield-alert" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /> <path d="M12 8v4" /> <path d="M12 16h.01" /></symbol>
+<symbol id="i-shield-check" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /> <path d="m9 12 2 2 4-4" /></symbol>
+<symbol id="i-shield-off" viewBox="0 0 24 24"><path d="m2 2 20 20" /> <path d="M5 5a1 1 0 0 0-1 1v7c0 5 3.5 7.5 7.67 8.94a1 1 0 0 0 .67.01c2.35-.82 4.48-1.97 5.9-3.71" /> <path d="M9.309 3.652A12.252 12.252 0 0 0 11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1v7a9.784 9.784 0 0 1-.08 1.264" /></symbol>
+<symbol id="i-sigma" viewBox="0 0 24 24"><path d="M18 7V5a1 1 0 0 0-1-1H6.5a.5.5 0 0 0-.4.8l4.5 6a2 2 0 0 1 0 2.4l-4.5 6a.5.5 0 0 0 .4.8H17a1 1 0 0 0 1-1v-2" /></symbol>
+<symbol id="i-square-function" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" ry="2" /> <path d="M9 17c2 0 2.8-1 2.8-2.8V10c0-2 1-3.3 3.2-3" /> <path d="M9 11.2h5.7" /></symbol>
+<symbol id="i-square" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /> <path d="M12 2v2" /> <path d="M12 20v2" /> <path d="m4.93 4.93 1.41 1.41" /> <path d="m17.66 17.66 1.41 1.41" /> <path d="M2 12h2" /> <path d="M20 12h2" /> <path d="m6.34 17.66-1.41 1.41" /> <path d="m19.07 4.93-1.41 1.41" /></symbol>
+<symbol id="i-table-2" viewBox="0 0 24 24"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18" /></symbol>
+<symbol id="i-table-properties" viewBox="0 0 24 24"><path d="M15 3v18" /> <rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M21 9H3" /> <path d="M21 15H3" /></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5" /> <line x1="12" x2="20" y1="19" y2="19" /></symbol>
+<symbol id="i-trash-2" viewBox="0 0 24 24"><path d="M3 6h18" /> <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /> <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /> <line x1="10" x2="10" y1="11" y2="17" /> <line x1="14" x2="14" y1="11" y2="17" /></symbol>
+<symbol id="i-triangle-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /> <path d="M12 9v4" /> <path d="M12 17h.01" /></symbol>
+<symbol id="i-undo-2" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5" /> <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11" /></symbol>
+<symbol id="i-unplug" viewBox="0 0 24 24"><path d="m19 5 3-3" /> <path d="m2 22 3-3" /> <path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z" /> <path d="M7.5 13.5 10 11" /> <path d="M10.5 16.5 13 14" /> <path d="m12 6 6 6 2.3-2.3a2.4 2.4 0 0 0 0-3.4l-2.6-2.6a2.4 2.4 0 0 0-3.4 0Z" /></symbol>
+<symbol id="i-wifi-off" viewBox="0 0 24 24"><path d="M12 20h.01" /> <path d="M8.5 16.429a5 5 0 0 1 7 0" /> <path d="M5 12.859a10 10 0 0 1 5.17-2.69" /> <path d="M19 12.859a10 10 0 0 0-2.007-1.523" /> <path d="M2 8.82a15 15 0 0 1 4.177-2.643" /> <path d="M22 8.82a15 15 0 0 0-11.288-3.764" /> <path d="m2 2 20 20" /></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18" /> <path d="m6 6 12 12" /></symbol>
+
+</defs></svg>
+<!--ICON-SPRITE-END-->
+
+<!-- ═════════════ Mock bar (not product) ═════════════ -->
+<div class="mockbar" id="mockbar"></div>
+
+<div class="win" id="win">
+  <header class="titlebar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="brand"><svg class="mark" role="img" aria-label="Logo placeholder"><use href="#hv-mark"/></svg><span class="word sc" lang="en">Hacivat</span></div>
+    <span class="vsep"></span>
+    <span id="capslot" style="display:flex"></span>
+    <button class="palette" tabindex="-1"><svg class="ic i12"><use href="#i-search"/></svg><span data-i="app-palette"></span><kbd>⌘K</kbd></button>
+  </header>
+
+  <main class="tiles">
+    <div class="col left">
+      <section class="panel side" id="explorer"></section>
+      <section class="panel side" id="sheet"></section>
+    </div>
+    <section class="panel" id="center"></section>
+  </main>
+
+  <footer class="status" id="status"></footer>
+  <div id="layers"></div>
+  <div id="menus"></div>
+  <div class="toasts" id="toasts"></div>
+</div>
+
+<aside class="notes" id="notes"></aside>
+
+<script type="application/json" id="i18n">
+{
+"en": {
+  "app-palette":"Search or run a command",
+  "explorer":"Explorer","filter-conn":"Filter connections","new-conn-tip":"New connection",
+  "env-local":"local","env-dev":"dev","env-test":"test","env-staging":"staging","env-production":"production","env-prod-cap":"production",
+  "acc-ro":"read-only","acc-rw":"read-write",
+  "path-direct":"Direct","path-ssh":"SSH via {host}",
+  "enc-verified":"TLS 1.3 · verified","enc-pinned":"TLS 1.3 · pinned","enc-unencrypted":"unencrypted","enc-none-file":"not applicable (file)",
+  "kv-env":"Environment","kv-engine":"Engine","kv-host":"Host","kv-file":"File","kv-user":"User","kv-path":"Path","kv-enc":"Encryption","kv-secret":"Password",
+  "secret-forever":"Keychain · forever","secret-never":"asks every time","secret-session":"for this session","secret-restart":"until restart","secret-pgpass":"from ~/.pgpass","secret-none":"none",
+  "sheet-meta":"connection","sheet-none":"Select a connection to see its details.",
+  "home-title":"No query open","home-new":"New connection","home-paste":"New connection from a copied URL","home-connect":"Connect to the selected connection","home-search":"Search or run a command","home-hint":"Pick a connection in the Explorer, or add one.",
+  "sb-noconn":"No connection","sb-env":"{env} · {access}",
+  "dlg-title-new":"New connection","dlg-title-edit":"Edit {name}","dlg-sub-new":"Not saved yet","dlg-sub-edit":"Saved · changes apply on the next connect",
+  "dlg-url":"URL","dlg-url-ph":"Paste a connection URL to fill the form","dlg-copy-url":"Copy as URL",
+  "dlg-engine":"Engine","dlg-name":"Name","dlg-env":"Environment","dlg-env-ask":"Asked when you save, because this host isn't on this Mac.","dlg-env-local":"Set to local: the server runs on this Mac.",
+  "dlg-ro":"Read-only","dlg-ro-hint":"Block statements that change data or schema",
+  "sec-server":"Server","dlg-host":"Host","dlg-port":"Port","dlg-db":"Database","dlg-user":"User","dlg-file":"File","dlg-choose":"Choose…",
+  "dlg-sqlite-ro":"Open the file read-only","dlg-sqlite-create":"Create the file if it doesn't exist",
+  "sec-auth":"Authentication","auth-password":"Password","auth-pgpass":"pgpass","auth-cert":"Client certificate","auth-none":"None",
+  "dlg-password":"Password","dlg-remember":"Remember","dlg-pw-saved":"saved in the Keychain","dlg-pw-from-url":"from the pasted URL",
+  "ret-never":"Never","ret-never-h":"ask on every connect","ret-restart":"Until restart","ret-restart-h":"kept in memory","ret-session":"For this session","ret-session-h":"forgotten on disconnect","ret-forever":"Forever (Keychain)","ret-forever-h":"stored in the macOS Keychain",
+  "pgpass-match":"Matches line {n} of ~/.pgpass","pgpass-note":"Read on every connect. Hacivat stores no password for this connection.",
+  "dlg-cert":"Certificate","dlg-key":"Private key","dlg-key-pass":"Key passphrase",
+  "auth-none-note":"Connects without a password. Use only for servers that trust this machine.",
+  "sec-tls":"Encryption (TLS)","tls-sum-auto":"Auto: verify when the server offers TLS","tls-mode":"Mode",
+  "tls-auto":"Auto","tls-auto-h":"verify if offered; plaintext only on private networks","tls-require":"Require","tls-require-h":"encrypt, don't verify","tls-verify-ca":"Verify CA","tls-verify-ca-h":"check the chain","tls-verify-full":"Verify full","tls-verify-full-h":"check the chain and host name","tls-disable":"Disable","tls-disable-h":"never encrypt",
+  "tls-ca":"CA certificate","tls-ca-ph":"System trust store","tls-pin":"Pinned certificate","tls-pin-none":"None","tls-remove-pin":"Remove pin",
+  "sec-ssh":"SSH tunnel","ssh-sum-off":"Off","ssh-sum-on":"via {host}","ssh-sum-hops":"via {host} · {n} jump host","ssh-use":"Connect through an SSH tunnel","ssh-import":"Import from ~/.ssh/config…",
+  "ssh-host":"SSH host","ssh-user":"SSH user","ssh-auth-agent":"Agent","ssh-auth-key":"Key file","ssh-auth-password":"Password","ssh-auth-kbd":"Keyboard-interactive",
+  "ssh-agent-note":"Uses the keys loaded in ssh-agent (2 keys).","ssh-key":"Key file","ssh-passphrase":"Passphrase","ssh-kbd-note":"The server's questions, such as a one-time code, appear when you connect.",
+  "ssh-jumps":"Jump hosts","ssh-add-jump":"Add jump host","ssh-route":"Route","ssh-this-mac":"this Mac",
+  "ssh-hostkeys":"Host keys","hk-ask":"Ask for new hosts","hk-accept":"Accept new, stop on change","hk-strict":"Known hosts only",
+  "ssh-import-title":"Hosts in ~/.ssh/config","ssh-proxycmd":"uses ProxyCommand, not supported","ssh-imported":"Imported {alias} from ~/.ssh/config: host, user, key and jump host.",
+  "sec-adv":"Advanced","adv-sum":"Timeout {s} s · keep-alive off","adv-timeout":"Connect timeout","adv-keepalive":"Keep-alive every","adv-off":"Off","adv-app":"Application name","adv-extra":"Extra properties","adv-extra-add":"Add property","adv-budget":"Connections","adv-budget-v":"Up to 4 open at once; more consoles wait their turn","unit-s":"s",
+  "dlg-test":"Test connection","dlg-cancel":"Cancel","dlg-save":"Save","dlg-save-connect":"Save and connect",
+  "test-running":"Testing","test-stop":"Stop","test-ok":"Connected in {ms}","test-ok-sub":"Nothing was saved. The test opened its own connection and closed it.","test-copy":"Copy report",
+  "diag-server":"Server","diag-latency":"Latency","diag-latency-v":"{ms} · median of 3 pings","diag-tls":"Encryption","diag-auth":"Signed in as","diag-warn":"Warnings","diag-none":"None",
+  "step-resolve":"Resolve","step-tcp":"Connect","step-tls":"TLS","step-auth":"Sign in","step-check":"Check server","step-ssh":"SSH","step-pgpass":"pgpass","step-open":"Open file",
+  "url-filled":"Filled from the pasted URL.","url-secret":"The password was taken out of the URL. It goes to the Keychain when you save.","url-secret-other":"The password was taken out of the URL. Hacivat keeps it {ret}.","url-mapped":"became","url-extra":"kept as an extra property","url-engine-set":"Engine set to {engine} from the URL.","url-undo":"Undo",
+  "url-switch":"This is a {engine} URL, and the form is set to {current}.","url-switch-l2":"Nothing was changed yet.","url-switch-btn":"Switch to {engine} and fill","url-keep":"Keep {current}",
+  "url-unrec":"Hacivat can't read this as a connection URL. Nothing was changed.","url-formats":"It reads postgres://, mysql://, mariadb://, jdbc:… URLs, key=value strings and SQLite file paths.",
+  "toast-copied":"Copied as URL","toast-nopw":"The password isn't included.","toast-nossh":"The SSH tunnel can't be written into a URL and was left out.",
+  "err-title":"Couldn't connect to {name}",
+  "err-auth-h":"The server rejected the password for {user}.","err-auth-b":"The password may have changed or expired. Hacivat stops after 3 attempts so the account isn't locked.",
+  "err-dns-h":"{host} couldn't be found.","err-dns-b":"This Mac couldn't look up the host name. Check the spelling, or connect to your VPN if the host is on a private network.",
+  "err-tls-h":"{host} sent a certificate this Mac doesn't trust.","err-tls-b":"It may be self-signed or issued by your company's own CA. Review it before you trust it.",
+  "err-db-h":"The database {db} doesn't exist on {host}.","err-db-b":"Signing in worked. These databases are open to {user}:",
+  "err-old-h":"{host} runs {engine} {version}, which Hacivat doesn't support.","err-old-b":"Hacivat supports PostgreSQL 14 and later. Its schema reading and safety checks rely on newer system catalogs.",
+  "fix-reenter":"Enter password again","fix-edit":"Edit connection","fix-retry":"Try again","fix-ssh":"Connect through SSH…","fix-review-cert":"Review certificate…","fix-use-db":"Use {db}","fix-versions":"Supported versions","fix-anyway":"Connect anyway, unsupported","fix-connect":"Connect","fix-close":"Close",
+  "err-attempt":"Attempt {n} of 3","err-new-pw":"Password for {user}",
+  "err-tech":"Technical details","err-stage":"Failed at","err-class":"Class","err-code":"Code","err-server":"Server message","err-elapsed":"Elapsed","err-copy":"Copy details (English)",
+  "prod-title":"How careful should Hacivat be with {name}?","prod-body":"{host} isn't on this Mac. Pick the kind of database it is. You can change this later in the connection settings.",
+  "prod-suggest":"Suggested because the host name contains “prod”.",
+  "prod-opt-production":"Production","prod-opt-production-d":"Live data that people or services rely on","prod-opt-staging":"Staging","prod-opt-staging-d":"A copy that mirrors production","prod-opt-test":"Test","prod-opt-test-d":"Shared test or CI data","prod-opt-dev":"Dev","prod-opt-dev-d":"A development database you can break",
+  "prod-changes":"With production, Hacivat:","prod-c1":"shows the {word} capsule in the title bar while you work on it,","prod-c1-word":"production","prod-c2":"asks you to confirm statements that change data or schema,","prod-c3":"uses manual commit: nothing is written until you commit.",
+  "prod-other":"No extra confirmations. Statements commit as they run.","prod-save":"Save as {env}","prod-pick":"Pick an environment",
+  "tls-title":"Certificate not trusted","tls-body":"{host}:{port} offered a certificate that no CA trusted by this Mac has signed. Compare the fingerprint with whoever runs the server before you continue.",
+  "tls-subject":"Issued to","tls-issuer":"Issued by","tls-valid":"Valid until","tls-fp":"SHA-256 fingerprint","tls-chain":"Chain","tls-leaf":"server","tls-inter":"intermediate","tls-root":"root · not trusted by this Mac",
+  "tls-pin-note":"Pinning trusts exactly this certificate for {host}:{port}. If it ever changes, Hacivat stops and asks again. A pin doesn't extend the expiry date.",
+  "tls-pin-btn":"Pin this certificate","tls-import":"Import CA…","tls-copy-fp":"Copy fingerprint",
+  "unenc-title":"Connected without encryption","unenc-body":"{host} doesn't offer TLS. Hacivat allowed plaintext because the address is on a private network. This badge stays for as long as the connection is unencrypted.","unenc-fix":"To remove it, turn on TLS on the server or connect through SSH.",
+  "plain-title":"{host} doesn't offer encryption","plain-body":"{ip} accepts only unencrypted connections and isn't on a private network. Your password and query results would cross the network in plain text.","plain-ssh":"Use an SSH tunnel…","plain-connect":"Connect without encryption","plain-remember":"Don't ask again for this connection",
+  "hk-title":"First connection to {host}","hk-body":"This Mac hasn't connected to this SSH server before. Compare the fingerprint with the one your administrator gave you.","hk-fp":"Host key","hk-store":"Hacivat saves it in its own known-hosts list. ~/.ssh/known_hosts isn't changed.","hk-trust":"Trust and connect",
+  "cap-none":"No connection","cap-connecting":"Connecting","cap-failed":"Couldn't connect","cap-retry":"Retry","cap-reconnecting":"Reconnecting · attempt {n}","cap-next":"in {s} s",
+  "lost-title":"Reconnected to {name}","lost-body":"The server session ended while the network was down. Hacivat opened a new one.","lost-tx":"Rolled back: your open transaction, with 2 uncommitted changes","lost-other":"Also gone: temp tables and session variables","lost-details":"Show details","lost-dismiss":"Dismiss",
+  "toast-cancelled":"Connecting to {name} was cancelled.","toast-connected":"Connected to {name}",
+  "exp-empty-title":"No connections yet","exp-empty-body":"Add a PostgreSQL, MySQL, MariaDB or SQLite database. If you paste a connection URL, Hacivat fills the form for you.","exp-new":"New connection","exp-paste":"Paste URL","exp-import":"Import pg_service.conf…",
+  "menu-connect":"Connect","menu-disconnect":"Disconnect","menu-edit":"Edit…","menu-dup":"Duplicate","menu-copy-url":"Copy as URL","menu-delete":"Delete…",
+  "del-title":"Delete {name}?","del-body":"Its saved password is removed from the Keychain too. Scripts and query history stay. This can't be undone.","del-btn":"Delete",
+  "toast-saved":"Saved {name}","toast-dup":"Duplicated as {name}","toast-deleted":"Deleted {name}","toast-versions":"Opens hacivat.dev/docs/engines in your browser."
+},
+"tr": {
+  "app-palette":"Ara veya komut çalıştır",
+  "explorer":"Gezgin","filter-conn":"Bağlantılarda ara","new-conn-tip":"Yeni bağlantı",
+  "env-local":"yerel","env-dev":"geliştirme","env-test":"test","env-staging":"hazırlık","env-production":"üretim","env-prod-cap":"prod",
+  "acc-ro":"salt okunur","acc-rw":"okuma-yazma",
+  "path-direct":"Doğrudan","path-ssh":"{host} üzerinden SSH",
+  "enc-verified":"TLS 1.3 · doğrulandı","enc-pinned":"TLS 1.3 · sabitlendi","enc-unencrypted":"şifrelenmemiş","enc-none-file":"geçerli değil (dosya)",
+  "kv-env":"Ortam","kv-engine":"Motor","kv-host":"Adres","kv-file":"Dosya","kv-user":"Kullanıcı","kv-path":"Yol","kv-enc":"Şifreleme","kv-secret":"Parola",
+  "secret-forever":"Anahtar Zinciri · kalıcı","secret-never":"her seferinde sorar","secret-session":"bu oturum boyunca","secret-restart":"yeniden başlatana kadar","secret-pgpass":"~/.pgpass dosyasından","secret-none":"yok",
+  "sheet-meta":"bağlantı","sheet-none":"Ayrıntılarını görmek için bir bağlantı seçin.",
+  "home-title":"Açık sorgu yok","home-new":"Yeni bağlantı","home-paste":"Kopyalanan URL'den yeni bağlantı","home-connect":"Seçili bağlantıya bağlan","home-search":"Ara veya komut çalıştır","home-hint":"Gezgin'den bir bağlantı seçin ya da yeni bir tane ekleyin.",
+  "sb-noconn":"Bağlantı yok","sb-env":"{env} · {access}",
+  "dlg-title-new":"Yeni bağlantı","dlg-title-edit":"{name} bağlantısını düzenle","dlg-sub-new":"Henüz kaydedilmedi","dlg-sub-edit":"Kayıtlı · değişiklikler bir sonraki bağlanışta geçerli olur",
+  "dlg-url":"URL","dlg-url-ph":"Formu doldurmak için bir bağlantı URL'si yapıştırın","dlg-copy-url":"URL olarak kopyala",
+  "dlg-engine":"Motor","dlg-name":"Ad","dlg-env":"Ortam","dlg-env-ask":"Bu adres bu Mac'te olmadığı için kaydederken sorulur.","dlg-env-local":"Yerel olarak ayarlandı: sunucu bu Mac'te çalışıyor.",
+  "dlg-ro":"Salt okunur","dlg-ro-hint":"Veriyi ya da şemayı değiştiren ifadeleri engelle",
+  "sec-server":"Sunucu","dlg-host":"Adres","dlg-port":"Port","dlg-db":"Veritabanı","dlg-user":"Kullanıcı","dlg-file":"Dosya","dlg-choose":"Seç…",
+  "dlg-sqlite-ro":"Dosyayı salt okunur aç","dlg-sqlite-create":"Dosya yoksa oluştur",
+  "sec-auth":"Kimlik doğrulama","auth-password":"Parola","auth-pgpass":"pgpass","auth-cert":"İstemci sertifikası","auth-none":"Yok",
+  "dlg-password":"Parola","dlg-remember":"Hatırla","dlg-pw-saved":"Anahtar Zinciri'nde kayıtlı","dlg-pw-from-url":"yapıştırılan URL'den",
+  "ret-never":"Hiçbir zaman","ret-never-h":"her bağlanışta sor","ret-restart":"Yeniden başlatana kadar","ret-restart-h":"bellekte tutulur","ret-session":"Bu oturum boyunca","ret-session-h":"bağlantı kesilince unutulur","ret-forever":"Kalıcı (Anahtar Zinciri)","ret-forever-h":"macOS Anahtar Zinciri'nde saklanır",
+  "pgpass-match":"~/.pgpass dosyasının {n}. satırıyla eşleşiyor","pgpass-note":"Her bağlanışta okunur. Hacivat bu bağlantı için parola saklamaz.",
+  "dlg-cert":"Sertifika","dlg-key":"Özel anahtar","dlg-key-pass":"Anahtar parolası",
+  "auth-none-note":"Parolasız bağlanır. Yalnızca bu makineye güvenen sunucularda kullanın.",
+  "sec-tls":"Şifreleme (TLS)","tls-sum-auto":"Otomatik: sunucu TLS sunarsa doğrula","tls-mode":"Mod",
+  "tls-auto":"Otomatik","tls-auto-h":"sunulursa doğrula; şifresiz yalnızca özel ağlarda","tls-require":"Zorunlu","tls-require-h":"şifrele, doğrulama","tls-verify-ca":"CA'yı doğrula","tls-verify-ca-h":"zinciri denetle","tls-verify-full":"Tam doğrula","tls-verify-full-h":"zinciri ve sunucu adını denetle","tls-disable":"Kapalı","tls-disable-h":"hiç şifreleme",
+  "tls-ca":"CA sertifikası","tls-ca-ph":"Sistem güven deposu","tls-pin":"Sabitlenmiş sertifika","tls-pin-none":"Yok","tls-remove-pin":"Sabitlemeyi kaldır",
+  "sec-ssh":"SSH tüneli","ssh-sum-off":"Kapalı","ssh-sum-on":"{host} üzerinden","ssh-sum-hops":"{host} üzerinden · {n} ara sunucu","ssh-use":"SSH tüneli üzerinden bağlan","ssh-import":"~/.ssh/config'den içe aktar…",
+  "ssh-host":"SSH sunucusu","ssh-user":"SSH kullanıcısı","ssh-auth-agent":"Ajan","ssh-auth-key":"Anahtar dosyası","ssh-auth-password":"Parola","ssh-auth-kbd":"Klavye etkileşimli",
+  "ssh-agent-note":"ssh-agent'a yüklü anahtarları kullanır (2 anahtar).","ssh-key":"Anahtar dosyası","ssh-passphrase":"Parola ifadesi","ssh-kbd-note":"Sunucunun soruları, örneğin tek kullanımlık kod, bağlanırken gösterilir.",
+  "ssh-jumps":"Ara sunucular","ssh-add-jump":"Ara sunucu ekle","ssh-route":"Rota","ssh-this-mac":"bu Mac",
+  "ssh-hostkeys":"Sunucu anahtarları","hk-ask":"Yeni sunucularda sor","hk-accept":"Yeniyi kabul et, değişirse dur","hk-strict":"Yalnızca bilinen sunucular",
+  "ssh-import-title":"~/.ssh/config içindeki sunucular","ssh-proxycmd":"ProxyCommand kullanıyor, desteklenmiyor","ssh-imported":"{alias}, ~/.ssh/config'den içe aktarıldı: adres, kullanıcı, anahtar ve ara sunucu.",
+  "sec-adv":"Gelişmiş","adv-sum":"Zaman aşımı {s} sn · canlı tutma kapalı","adv-timeout":"Bağlanma zaman aşımı","adv-keepalive":"Canlı tutma aralığı","adv-off":"Kapalı","adv-app":"Uygulama adı","adv-extra":"Ek özellikler","adv-extra-add":"Özellik ekle","adv-budget":"Bağlantı sayısı","adv-budget-v":"Aynı anda en çok 4 açık; fazlası sıra bekler","unit-s":"sn",
+  "dlg-test":"Bağlantıyı test et","dlg-cancel":"İptal","dlg-save":"Kaydet","dlg-save-connect":"Kaydet ve bağlan",
+  "test-running":"Test ediliyor","test-stop":"Durdur","test-ok":"{ms} içinde bağlandı","test-ok-sub":"Hiçbir şey kaydedilmedi. Test kendi bağlantısını açtı ve kapattı.","test-copy":"Raporu kopyala",
+  "diag-server":"Sunucu","diag-latency":"Gecikme","diag-latency-v":"{ms} · 3 ölçümün ortancası","diag-tls":"Şifreleme","diag-auth":"Oturum","diag-warn":"Uyarılar","diag-none":"Yok",
+  "step-resolve":"Çözümle","step-tcp":"Bağlan","step-tls":"TLS","step-auth":"Oturum aç","step-check":"Sunucuyu denetle","step-ssh":"SSH","step-pgpass":"pgpass","step-open":"Dosyayı aç",
+  "url-filled":"Yapıştırılan URL'den dolduruldu.","url-secret":"Parola URL'den ayrıldı. Kaydettiğinizde Anahtar Zinciri'ne gider.","url-secret-other":"Parola URL'den ayrıldı. Hacivat onu şöyle tutar: {ret}.","url-mapped":"şuna dönüştü:","url-extra":"ek özellik olarak saklandı","url-engine-set":"Motor URL'ye göre {engine} olarak ayarlandı.","url-undo":"Geri al",
+  "url-switch":"Bu bir {engine} URL'si, form ise {current} için ayarlı.","url-switch-l2":"Henüz hiçbir şey değişmedi.","url-switch-btn":"{engine} motoruna geç ve doldur","url-keep":"{current} kalsın",
+  "url-unrec":"Hacivat bunu bir bağlantı URL'si olarak okuyamıyor. Hiçbir şey değişmedi.","url-formats":"postgres://, mysql://, mariadb://, jdbc:… URL'lerini, anahtar=değer dizelerini ve SQLite dosya yollarını okur.",
+  "toast-copied":"URL olarak kopyalandı","toast-nopw":"Parola dahil değil.","toast-nossh":"SSH tüneli URL'ye yazılamadığı için dışarıda kaldı.",
+  "err-title":"{name} bağlantısı kurulamadı",
+  "err-auth-h":"Sunucu {user} kullanıcısının parolasını reddetti.","err-auth-b":"Parola değişmiş ya da süresi dolmuş olabilir. Hesap kilitlenmesin diye Hacivat 3 denemeden sonra durur.",
+  "err-dns-h":"{host} bulunamadı.","err-dns-b":"Bu Mac sunucu adını çözümleyemedi. Yazımı denetleyin; sunucu özel bir ağdaysa VPN'e bağlanın.",
+  "err-tls-h":"{host}, bu Mac'in güvenmediği bir sertifika gönderdi.","err-tls-b":"Kendinden imzalı ya da şirketinizin kendi CA'sınca verilmiş olabilir. Güvenmeden önce inceleyin.",
+  "err-db-h":"{host} üzerinde {db} adlı bir veritabanı yok.","err-db-b":"Oturum açıldı. {user} kullanıcısının erişebildiği veritabanları:",
+  "err-old-h":"{host}, Hacivat'ın desteklemediği {engine} {version} sürümünü çalıştırıyor.","err-old-b":"Hacivat PostgreSQL 14 ve sonrasını destekler. Şema okuma ve güvenlik denetimleri daha yeni sistem kataloglarına dayanır.",
+  "fix-reenter":"Parolayı yeniden gir","fix-edit":"Bağlantıyı düzenle","fix-retry":"Yeniden dene","fix-ssh":"SSH üzerinden bağlan…","fix-review-cert":"Sertifikayı incele…","fix-use-db":"{db} kullan","fix-versions":"Desteklenen sürümler","fix-anyway":"Yine de bağlan (desteksiz)","fix-connect":"Bağlan","fix-close":"Kapat",
+  "err-attempt":"3 denemeden {n}.","err-new-pw":"{user} için parola",
+  "err-tech":"Teknik ayrıntılar","err-stage":"Hata adımı","err-class":"Sınıf","err-code":"Kod","err-server":"Sunucu mesajı","err-elapsed":"Geçen süre","err-copy":"Ayrıntıları kopyala (İngilizce)",
+  "prod-title":"Hacivat {name} için ne kadar dikkatli olsun?","prod-body":"{host} bu Mac'te değil. Nasıl bir veritabanı olduğunu seçin. Bunu daha sonra bağlantı ayarlarından değiştirebilirsiniz.",
+  "prod-suggest":"Adreste “prod” geçtiği için önerildi.",
+  "prod-opt-production":"Üretim","prod-opt-production-d":"İnsanların ya da servislerin dayandığı canlı veri","prod-opt-staging":"Hazırlık","prod-opt-staging-d":"Üretimi yansıtan bir kopya","prod-opt-test":"Test","prod-opt-test-d":"Ortak test ya da CI verisi","prod-opt-dev":"Geliştirme","prod-opt-dev-d":"Bozulmasında sakınca olmayan geliştirme veritabanı",
+  "prod-changes":"Üretim seçilirse Hacivat:","prod-c1":"bu bağlantıda çalışırken başlık çubuğunda {word} kapsülünü gösterir,","prod-c1-word":"prod","prod-c2":"veriyi ya da şemayı değiştiren ifadeler için onay ister,","prod-c3":"elle commit kullanır: siz commit edene kadar hiçbir şey yazılmaz.",
+  "prod-other":"Ek onay yok. İfadeler çalıştıkça commit edilir.","prod-save":"{Env} olarak kaydet","prod-pick":"Bir ortam seçin",
+  "tls-title":"Sertifikaya güvenilmiyor","tls-body":"{host}:{port}, bu Mac'in güvendiği hiçbir CA'nın imzalamadığı bir sertifika sundu. Devam etmeden önce parmak izini sunucuyu yöneten kişiyle karşılaştırın.",
+  "tls-subject":"Verildiği ad","tls-issuer":"Veren","tls-valid":"Geçerlilik sonu","tls-fp":"SHA-256 parmak izi","tls-chain":"Zincir","tls-leaf":"sunucu","tls-inter":"ara sertifika","tls-root":"kök · bu Mac güvenmiyor",
+  "tls-pin-note":"Sabitleme, {host}:{port} için yalnızca bu sertifikaya güvenir. Sertifika bir gün değişirse Hacivat durur ve yeniden sorar. Sabitleme geçerlilik süresini uzatmaz.",
+  "tls-pin-btn":"Bu sertifikayı sabitle","tls-import":"CA içe aktar…","tls-copy-fp":"Parmak izini kopyala",
+  "unenc-title":"Şifrelemesiz bağlanıldı","unenc-body":"{host} TLS sunmuyor. Adres özel bir ağda olduğu için Hacivat şifresiz bağlantıya izin verdi. Bağlantı şifresiz kaldıkça bu rozet görünür.","unenc-fix":"Kaldırmak için sunucuda TLS'i açın ya da SSH üzerinden bağlanın.",
+  "plain-title":"{host} şifreleme sunmuyor","plain-body":"{ip} yalnızca şifresiz bağlantı kabul ediyor ve özel bir ağda değil. Parolanız ve sorgu sonuçlarınız ağda düz metin olarak taşınır.","plain-ssh":"SSH tüneli kullan…","plain-connect":"Şifrelemeden bağlan","plain-remember":"Bu bağlantı için bir daha sorma",
+  "hk-title":"{host} ile ilk bağlantı","hk-body":"Bu Mac bu SSH sunucusuna daha önce bağlanmadı. Parmak izini yöneticinizin verdiğiyle karşılaştırın.","hk-fp":"Sunucu anahtarı","hk-store":"Hacivat bunu kendi bilinen sunucular listesine kaydeder. ~/.ssh/known_hosts değişmez.","hk-trust":"Güven ve bağlan",
+  "cap-none":"Bağlantı yok","cap-connecting":"Bağlanıyor","cap-failed":"Bağlanılamadı","cap-retry":"Yeniden dene","cap-reconnecting":"Yeniden bağlanıyor · {n}. deneme","cap-next":"{s} sn sonra",
+  "lost-title":"{name} ile yeniden bağlanıldı","lost-body":"Ağ kesikken sunucu oturumu sona erdi. Hacivat yeni bir oturum açtı.","lost-tx":"Geri alındı: commit edilmemiş 2 değişiklik içeren açık işleminiz","lost-other":"Ayrıca kayboldu: geçici tablolar ve oturum değişkenleri","lost-details":"Ayrıntıları göster","lost-dismiss":"Kapat",
+  "toast-cancelled":"{name} bağlantısı iptal edildi.","toast-connected":"{name} ile bağlanıldı",
+  "exp-empty-title":"Henüz bağlantı yok","exp-empty-body":"Bir PostgreSQL, MySQL, MariaDB ya da SQLite veritabanı ekleyin. Bir bağlantı URL'si yapıştırırsanız Hacivat formu sizin için doldurur.","exp-new":"Yeni bağlantı","exp-paste":"URL yapıştır","exp-import":"pg_service.conf içe aktar…",
+  "menu-connect":"Bağlan","menu-disconnect":"Bağlantıyı kes","menu-edit":"Düzenle…","menu-dup":"Çoğalt","menu-copy-url":"URL olarak kopyala","menu-delete":"Sil…",
+  "del-title":"{name} silinsin mi?","del-body":"Kayıtlı parolası Anahtar Zinciri'nden de silinir. Betikler ve sorgu geçmişi kalır. Bu işlem geri alınamaz.","del-btn":"Sil",
+  "toast-saved":"{name} kaydedildi","toast-dup":"{name} olarak çoğaltıldı","toast-deleted":"{name} silindi","toast-versions":"Tarayıcınızda hacivat.dev/docs/engines sayfasını açar."
+}
+}
+</script>
+
+<script>
+/* ═════════════ i18n + helpers ═════════════ */
+const I18N = JSON.parse(document.getElementById("i18n").textContent);
+let LANG = "en";
+const t = (k, v) => { let s = I18N[LANG][k] ?? I18N.en[k] ?? k; if (v) s = s.replace(/\{(\w+)\}/g, (m, n) => v[n] ?? m); return s; };
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+const ic = (n, cls = "") => `<svg class="ic ${cls}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
+const NF = {};
+const nf = (v, dp = 0) => { const loc = LANG === "tr" ? "tr-TR" : "en-US", k = loc + dp; return (NF[k] ??= new Intl.NumberFormat(loc, { minimumFractionDigits: dp, maximumFractionDigits: dp })).format(v); };
+const ms = v => nf(v) + " ms";
+const secs = (v, dp = 1) => nf(v, dp) + " " + t("unit-s");
+const dateFmt = d => new Intl.DateTimeFormat(LANG === "tr" ? "tr-TR" : "en-US", { day: "numeric", month: "long", year: "numeric" }).format(d);
+const mark = env => env ? `<span class="env ${env}" aria-hidden="true"></span>` : "";
+const $ = id => document.getElementById(id);
+const kbdK = s => `<span class="k">${s}</span>`;
+
+/* ═════════════ Product data ═════════════ */
+const ENG = {
+  pg:     { label: "PostgreSQL", short: "pg",      port: 5432, scheme: "postgres" },
+  mysql:  { label: "MySQL",      short: "mysql",   port: 3306, scheme: "mysql" },
+  maria:  { label: "MariaDB",    short: "mariadb", port: 3306, scheme: "mariadb" },
+  sqlite: { label: "SQLite",     short: "sqlite" },
+};
+const ENVS = ["local", "dev", "test", "staging", "production"];
+const ENV_ORDER = ["production", "staging", "test", "dev", "local"];
+const SEED = [
+  { id:"orders-prod", engine:"pg", ver:"16.4", env:"production", ro:true, host:"db-prod-eu.acme.io", port:5432, db:"orders", user:"app_ro", auth:"password", ret:"forever", tls:"verified",
+    ssh:{ on:true, host:"bastion.acme.io", port:22, user:"deploy", auth:"agent", key:"~/.ssh/id_ed25519", hops:[{ host:"jump-eu.acme.io", user:"deploy" }], policy:"ask" }, lat:31 },
+  { id:"billing-prod", engine:"mysql", ver:"8.4.3", env:"production", ro:true, host:"billing-db.acme.io", port:3306, db:"billing", user:"reader", auth:"password", ret:"never", tls:"verified", lat:22 },
+  { id:"orders-staging", engine:"pg", ver:"16.4", env:"staging", host:"db-stg.acme.io", port:5432, db:"orders", user:"deploy", auth:"pgpass", tls:"verified", lat:4 },
+  { id:"reports-test", engine:"pg", ver:"16.4", env:"test", host:"db-qa.acme.io", port:5432, db:"reports", user:"qa", auth:"password", ret:"session", tls:"untrusted", lat:9 },
+  { id:"ci-mariadb", engine:"maria", ver:"11.4.4", env:"test", host:"10.0.4.21", port:3306, db:"ci", user:"ci", auth:"password", ret:"forever", tls:"none", lat:2 },
+  { id:"legacy-crm", engine:"pg", ver:"9.6.24", env:"test", host:"crm-db.acme.io", port:5432, db:"crm", user:"crm_ro", auth:"password", ret:"forever", tls:"verified", lat:12, outcome:"old" },
+  { id:"api-dev", engine:"mysql", ver:"8.0.40", env:"dev", host:"dev-db.acme.internal", port:3306, db:"api", user:"dev", auth:"password", ret:"restart", tls:"verified", lat:6 },
+  { id:"partner-feed", engine:"mysql", ver:"8.0.36", env:"dev", host:"feed.partner-data.net", ip:"203.0.113.40", port:3306, db:"feed", user:"acme", auth:"password", ret:"forever", tls:"none-public", lat:48 },
+  { id:"local-pg", engine:"pg", ver:"17.2", env:"local", host:"localhost", port:5432, db:"shop", user:"postgres", auth:"none", tls:"none", lat:1 },
+  { id:"app.db", engine:"sqlite", ver:"3.47.2", env:"local", path:"~/code/shop/app.db", lat:0 },
+];
+const clone = o => JSON.parse(JSON.stringify(o));
+let CONNS = clone(SEED);
+const conn = id => CONNS.find(c => c.id === id);
+const isLocalHost = h => !h || /^(localhost|127\.|::1$|\/)/i.test(h.trim());
+const isPrivate = h => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|fd)/.test(h || "");
+const engVer = c => `${ENG[c.engine].label} ${String(c.ver || "").split(".").slice(0, c.engine === "sqlite" ? 2 : 1).join(".")}`;
+
+/* ═════════════ State ═════════════ */
+const S = {
+  surface: 0, sc: {}, theme: "dark", notes: false,
+  sel: "orders-staging",
+  cap: { state: "connected", conn: "orders-staging" },
+  layers: [], menu: null, pop: null, toasts: [],
+};
+let TIMERS = [];
+const later = (fn, d) => { const id = setTimeout(fn, d); TIMERS.push(id); return id; };
+const clearTimers = () => { TIMERS.forEach(clearTimeout); TIMERS = []; clearInterval(TICK); TICK = 0; };
+let TICK = 0;
+
+/* ═════════════ Connection dialog model ═════════════ */
+function blankForm(engine = "pg") {
+  return { engine, name:"", nameTouched:false, env:null, envTouched:false, ro:false,
+    host:"", port:"", db:"", user:"", auth:"password", password:"", pwFrom:null, ret:"forever",
+    path:"", sqliteRo:false, sqliteCreate:false, cert:"~/.postgresql/client.crt", key:"~/.postgresql/client.key",
+    tls:"auto", ca:"", pin:null,
+    ssh:{ on:false, host:"", port:"22", user:"", auth:"agent", key:"~/.ssh/id_ed25519", hops:[], policy:"ask" },
+    timeout:15, app:"hacivat", extras:[] };
+}
+function formFromConn(c) {
+  const f = blankForm(c.engine);
+  Object.assign(f, { name:c.id, nameTouched:true, env:c.env, envTouched:true, ro:!!c.ro, host:c.host || "", port:String(c.port || ""), db:c.db || "", user:c.user || "",
+    auth:c.auth || "password", ret:c.ret || "forever", password:c.auth === "password" && c.ret === "forever" ? "saved" : "", path:c.path || "" });
+  if (c.ssh) f.ssh = clone({ ...f.ssh, ...c.ssh, port:String(c.ssh.port || 22) });
+  if (c.tls === "pinned") f.pin = "3F:9A:C2:…:D4:71";
+  if (c.tlsMode) f.tls = c.tlsMode; if (c.app) f.app = c.app; if (c.extras) f.extras = clone(c.extras);
+  return f;
+}
+function newDialog(form, mode = "new", editId = null) {
+  return { type:"conn", mode, editId, form: form || blankForm(), open:{ tls:false, ssh:false, adv:false }, test:{ state:"idle" }, notice:null, filled:[] };
+}
+const topLayer = () => S.layers[S.layers.length - 1];
+const connLayer = () => S.layers.find(l => l.type === "conn");
+
+/* URL render (never includes a secret) */
+function renderURL(f) {
+  if (f.engine === "sqlite") return f.path ? `file:${f.path}${f.sqliteRo ? "?mode=ro" : ""}` : "";
+  if (!f.host) return "";
+  const e = ENG[f.engine], u = f.user ? encodeURIComponent(f.user) + "@" : "";
+  const host = f.host.includes(":") ? `[${f.host}]` : f.host;
+  const q = [];
+  const tlsMap = f.engine === "pg"
+    ? { require:"sslmode=require", "verify-ca":"sslmode=verify-ca", "verify-full":"sslmode=verify-full", disable:"sslmode=disable" }
+    : { require:"ssl-mode=REQUIRED", "verify-ca":"ssl-mode=VERIFY_CA", "verify-full":"ssl-mode=VERIFY_IDENTITY", disable:"ssl-mode=DISABLED" };
+  if (tlsMap[f.tls]) q.push(tlsMap[f.tls]);
+  if (f.engine === "pg" && f.app && f.app !== "hacivat") q.push("application_name=" + encodeURIComponent(f.app));
+  f.extras.forEach(([k, v]) => q.push(`${k}=${encodeURIComponent(v)}`));
+  return `${e.scheme}://${u}${host}:${f.port || e.port}${f.db ? "/" + encodeURIComponent(f.db) : ""}${q.length ? "?" + q.join("&") : ""}`;
+}
+
+/* URL parse (HV-DRV-04 subset): native schemes, jdbc: prefix, libpq key=value, SQLite paths */
+function parseConn(raw) {
+  let s = (raw || "").trim();
+  if (!s || s.length > 65536) return { kind:"unrec" };
+  s = s.replace(/^jdbc:/i, "");
+  const out = { kind:"ok", fields:{}, secret:null, mapped:[], extras:[] };
+  const m = s.match(/^(postgres|postgresql|mysql|mariadb):\/\//i);
+  if (m) {
+    const sch = m[1].toLowerCase();
+    out.engine = sch.startsWith("postgres") ? "pg" : sch === "mysql" ? "mysql" : "maria";
+    let u; try { u = new URL(s.replace(/^[a-z]+:/i, "http:")); } catch { return { kind:"unrec" }; }
+    const f = out.fields;
+    f.host = decodeURIComponent(u.hostname.replace(/^\[|\]$/g, ""));
+    f.port = u.port; f.db = decodeURIComponent(u.pathname.replace(/^\//, "")); f.user = decodeURIComponent(u.username);
+    if (u.password) out.secret = decodeURIComponent(u.password);
+    const pgT = { disable:"disable", allow:"auto", prefer:"auto", require:"require", "verify-ca":"verify-ca", "verify-full":"verify-full" };
+    const myT = { DISABLED:"disable", PREFERRED:"auto", REQUIRED:"require", VERIFY_CA:"verify-ca", VERIFY_IDENTITY:"verify-full" };
+    for (const [k, v] of u.searchParams) {
+      const kl = k.toLowerCase();
+      if (kl === "sslmode" && pgT[v]) { f.tls = pgT[v]; out.mapped.push([`${k}=${v}`, `${t("sec-tls")}: ${t("tls-" + pgT[v])}`]); }
+      else if ((kl === "ssl-mode" || kl === "sslmode") && myT[v.toUpperCase()]) { f.tls = myT[v.toUpperCase()]; out.mapped.push([`${k}=${v}`, `${t("sec-tls")}: ${t("tls-" + f.tls)}`]); }
+      else if (kl === "user") f.user = v;
+      else if (kl === "password") out.secret = v;
+      else if (kl === "application_name") { f.app = v; out.mapped.push([`${k}=${v}`, `${t("adv-app")}: ${v}`]); }
+      else if (kl === "connect_timeout") { f.timeout = +v || 15; out.mapped.push([`${k}=${v}`, `${t("adv-timeout")}: ${v} ${t("unit-s")}`]); }
+      else out.extras.push([k, v]);
+    }
+    return out;
+  }
+  if (/^file:/i.test(s) || /^(~|\.{0,2})\/.+\.(db|sqlite3?|db3)(\?.*)?$/i.test(s)) {
+    out.engine = "sqlite";
+    const [p, q] = s.replace(/^file:/i, "").split("?");
+    out.fields.path = p; out.fields.sqliteRo = /mode=ro/.test(q || "");
+    return out;
+  }
+  if (/\b(host|dbname)\s*=/.test(s)) {
+    out.engine = "pg";
+    const re = /(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S+)/g; let mm, any = false;
+    while ((mm = re.exec(s))) {
+      any = true; const k = mm[1].toLowerCase(), v = mm[2].replace(/^'|'$/g, "").replace(/\\(.)/g, "$1");
+      if (k === "host") out.fields.host = v; else if (k === "port") out.fields.port = v; else if (k === "dbname") out.fields.db = v;
+      else if (k === "user") out.fields.user = v; else if (k === "password") out.secret = v;
+      else if (k === "sslmode") { out.fields.tls = { prefer:"auto", allow:"auto" }[v] || v; out.mapped.push([`sslmode=${v}`, `${t("sec-tls")}: ${t("tls-" + out.fields.tls)}`]); }
+      else out.extras.push([k, v]);
+    }
+    return any ? out : { kind:"unrec" };
+  }
+  return { kind:"unrec" };
+}
+const looksLikeConn = s => /^\s*(jdbc:)?(postgres|postgresql|mysql|mariadb):\/\//i.test(s) || /^\s*file:/i.test(s) || /\b(host|dbname)\s*=\s*\S/.test(s);
+
+function suggestName(f) {
+  if (f.engine === "sqlite") return (f.path.split("/").pop() || "");
+  if (!f.host) return "";
+  if (isLocalHost(f.host)) return (f.db || "local") + "-local";
+  const first = f.host.split(".")[0].split("-").filter(x => !/^(db|pg|mysql|sql)$/i.test(x)).join("-") || f.host.split(".")[0];
+  if (!f.db) return first;
+  return f.db.toLowerCase().startsWith(first.toLowerCase()) ? f.db : `${f.db}-${first}`;
+}
+
+/* ═════════════ Test / connect outcomes (mock) ═════════════ */
+function stepsFor(f) {
+  if (f.engine === "sqlite") return ["open", "check"];
+  const s = [];
+  if (f.auth === "pgpass") s.push("pgpass");
+  if (f.ssh && f.ssh.on) s.push("ssh");
+  s.push("resolve", "tcp");
+  if (f.tls !== "disable") s.push("tls");
+  s.push("auth", "check");
+  return s;
+}
+const STEP_MS = { pgpass:1, ssh:186, resolve:3, tcp:14, tls:22, auth:11, check:4, open:2 };
+function outcomeOf(f) {
+  if (f.outcome) return f.outcome;
+  if (f.password === "wrong") return "auth";
+  if (/\.(oi|internl)$|typo/.test(f.host)) return "dns";
+  if (f.db === "orders_v2") return "db";
+  if (/crm-db/.test(f.host)) return "old";
+  if (/db-qa/.test(f.host) && !f.pin) return "tls";
+  return "ok";
+}
+const FAIL_STEP = { auth:"auth", dns:"resolve", tls:"tls", db:"auth", old:"check" };
+const ERR = {
+  auth: { cls:"auth.invalid", code:"28P01", server:'FATAL:  password authentication failed for user "{user}"', elapsed:0.214 },
+  dns:  { cls:"network.dns", code:"EAI_NONAME", server:"failed to lookup address information: nodename nor servname provided, or not known", elapsed:0.031 },
+  tls:  { cls:"tls.untrusted", code:"UnknownIssuer", server:"invalid peer certificate: UnknownIssuer", elapsed:0.058 },
+  db:   { cls:"config.unknown_database", code:"3D000", server:'FATAL:  database "{db}" does not exist', elapsed:0.198 },
+  old:  { cls:"server.unsupported_version", code:"server_version_num 90624", server:"PostgreSQL 9.6.24 on x86_64-pc-linux-gnu, compiled by gcc (Debian 6.3.0-18) 6.3.0, 64-bit", elapsed:0.241 },
+};
+
+/* ═════════════ Rendering ═════════════ */
+function capsuleHTML() {
+  const c = S.cap, k = c.conn && conn(c.conn);
+  if (!k || c.state === "none")
+    return `<button class="capsule" data-act="capClick" data-fk="cap" title="${esc(t("cap-none"))}"><span class="cp-none">${ic("database","i12")}<span>${esc(t("cap-none"))}</span></span><span class="cp-chev">${ic("chevrons-up-down","i12")}</span></button>`;
+  const envSeg = k.env === "production"
+    ? `<span class="cp-env"><span class="sc">${esc(t("env-prod-cap"))}</span></span>`
+    : `<span class="cp-tag">${mark(k.env)}<span>${esc(t("env-" + k.env))}</span></span>`;
+  const name = `<span class="cp-name"><b>${esc(k.id)}</b><span class="dim">${esc(engVer(k))}</span></span>`;
+  const chev = `<span class="cp-chev">${ic("chevrons-up-down","i12")}</span>`;
+  if (c.state === "connecting") {
+    const st = c.stage ? t("step-" + c.stage) : "";
+    return `<button class="capsule" data-act="capClick" data-fk="cap">${envSeg}${name}<span class="cp-run"><i class="run"></i><span>${esc(t("cap-connecting"))}</span><span class="mono" style="color:var(--text-2)">${esc(st)}</span><span class="mono" id="capClock">${secs(c.elapsed || 0.2, 2)}</span></span>${chev}</button>`;
+  }
+  if (c.state === "failed")
+    return `<button class="capsule" data-act="capClick" data-fk="cap">${envSeg}${name}<span class="cp-fail">${ic("triangle-alert","i12")}<span>${esc(t("cap-failed"))}</span></span><span class="cp-retry">${ic("rotate-cw","i12")}<span>${esc(t("cap-retry"))}</span></span>${chev}</button>`;
+  if (c.state === "reconnecting")
+    return `<button class="capsule" data-act="capClick" data-fk="cap">${envSeg}${name}<span class="cp-run"><i class="run"></i><span>${esc(t("cap-reconnecting", { n: nf(c.attempt || 3) }))}</span><span class="mono">${esc(t("cap-next", { s: nf(4) }))}</span></span>${chev}</button>`;
+  const acc = k.ro ? `<span class="cp-ro">${ic("lock","i12")}<span>${esc(t("acc-ro"))}</span></span>` : (k.engine === "sqlite" ? "" : `<span class="cp-rw"><span>${esc(t("acc-rw"))}</span></span>`);
+  const path = k.engine === "sqlite" ? `<span class="cp-path">${ic("hard-drive","i12 ssh")}<span class="mono">${esc(k.path)}</span></span>`
+    : k.ssh && k.ssh.on ? `<span class="cp-path">${ic("route","i12 ssh")}<span>${esc(t("path-ssh", { host: k.ssh.host.split(".")[0] }))}</span><span class="mono">${ms(k.lat)}</span></span>`
+    : `<span class="cp-path">${ic("arrow-left-right","i12 direct")}<span>${esc(t("path-direct"))}</span><span class="mono">${ms(k.lat)}</span></span>`;
+  const unenc = (k.tls === "none" && k.engine !== "sqlite") ? `<span class="cp-unenc" data-act="unencPop" id="unencSeg" title="">${ic("lock-open","i12")}<span>${esc(t("enc-unencrypted"))}</span></span>` : "";
+  return `<button class="capsule" data-act="capClick" data-fk="cap">${envSeg}${name}${acc}${path}${unenc}${chev}</button>`;
+}
+
+function renderTitle() { $("capslot").innerHTML = capsuleHTML(); }
+
+function explorerHTML() {
+  const head = `<div class="ph"><span class="t sc">${esc(t("explorer"))}</span><span class="grow"></span><span class="meta mono">${CONNS.length}</span>
+    <button class="btn ghost icon ibtn" data-act="newConn" data-fk="xnew" title="${esc(t("new-conn-tip"))} ⌘N">${ic("plus","i12")}</button><kbd>⌘1</kbd></div>`;
+  if (!CONNS.length) {
+    return head + `<div class="xempty">
+      <div class="h">${ic("database")}<span>${esc(t("exp-empty-title"))}</span></div>
+      <p>${esc(t("exp-empty-body"))}</p>
+      <div class="acts">
+        <button class="btn primary" data-act="newConn" data-fk="e1">${ic("plus","i12")}<span>${esc(t("exp-new"))}</span>${kbdK("⌘N")}</button>
+        <button class="btn" data-act="pasteNew" data-fk="e2">${ic("clipboard-paste","i12")}<span>${esc(t("exp-paste"))}</span>${kbdK("⌘⇧V")}</button>
+        <button class="btn ghost" data-act="importSvc" data-fk="e3">${ic("file-up","i12")}<span>${esc(t("exp-import"))}</span></button>
+      </div></div>`;
+  }
+  let h = head + `<div class="xfilter">${ic("search","i12")}<input data-fk="xfilter" placeholder="${esc(t("filter-conn"))}" tabindex="-1"><kbd>⌘F</kbd></div><div class="tree" id="tree" tabindex="0" data-fk="tree" role="listbox" aria-label="${esc(t("explorer"))}">`;
+  for (const env of ENV_ORDER) {
+    const rows = CONNS.filter(c => c.env === env);
+    if (!rows.length) continue;
+    h += `<div class="grp"><span class="sc">${esc(t("env-" + env))}</span><span class="rule"></span><span class="n mono">${rows.length}</span></div>`;
+    for (const c of rows) {
+      const live = S.cap.conn === c.id && S.cap.state !== "none";
+      const flags = [];
+      if (c.ro) flags.push(ic("lock","i12 ro"));
+      if (c.ssh && c.ssh.on) flags.push(`<span title="SSH">${ic("route","i12")}</span>`);
+      if (c.tls === "none" && c.engine !== "sqlite") flags.push(`<span title="${esc(t("enc-unencrypted"))}">${ic("lock-open","i12")}</span>`);
+      let meta = `<span class="mono">${esc(ENG[c.engine].short)} ${esc(String(c.ver).split(".")[0])}</span>`;
+      if (live && S.cap.state === "connected") meta = `${ic("check","i12 ok")}<span class="mono">${ms(c.lat)}</span>`;
+      if (live && (S.cap.state === "connecting" || S.cap.state === "reconnecting")) meta = `<i class="run"></i>`;
+      if (live && S.cap.state === "failed") meta = ic("triangle-alert","i12");
+      h += `<div class="row${S.sel === c.id ? " sel" : ""}" role="option" aria-selected="${S.sel === c.id}" data-row="${esc(c.id)}">
+        ${ic(c.engine === "sqlite" ? "file-code-2" : "database","i12")}<span class="lbl${live && S.cap.state === "connected" ? " on" : ""}">${esc(c.id)}</span>${mark(c.env)}
+        ${flags.length ? `<span class="flags">${flags.join("")}</span>` : ""}<span class="grow"></span><span class="meta">${meta}</span></div>`;
+    }
+  }
+  return h + `</div>`;
+}
+function renderExplorer() { $("explorer").innerHTML = explorerHTML(); }
+
+function secretLabel(c) {
+  if (c.engine === "sqlite") return t("secret-none");
+  if (c.auth === "pgpass") return t("secret-pgpass");
+  if (c.auth === "none") return t("secret-none");
+  return t("secret-" + (c.ret || "forever"));
+}
+function encHTML(c) {
+  if (c.engine === "sqlite") return `<span class="d">${esc(t("enc-none-file"))}</span>`;
+  if (c.tls === "none") return `${ic("lock-open","i12")}<span>${esc(t("enc-unencrypted"))}</span>`;
+  if (c.tls === "pinned") return `${ic("lock","i12")}<span>${esc(t("enc-pinned"))}</span>`;
+  if (c.tls === "untrusted" || c.tls === "none-public") return `<span class="d">—</span>`;
+  return `${ic("lock","i12")}<span>${esc(t("enc-verified"))}</span>`;
+}
+function renderSheet() {
+  const c = conn(S.sel);
+  if (!c) { $("sheet").innerHTML = `<div class="ph"><span class="meta">${esc(t("sheet-meta"))}</span><span class="grow"></span><kbd>⌘I</kbd></div><div style="padding:10px 12px;color:var(--text-3);font-size:12.5px">${esc(t("sheet-none"))}</div>`; return; }
+  const envCls = c.env === "production" ? "r" : "";
+  const path = c.engine === "sqlite" ? `<span class="d">—</span>` : c.ssh && c.ssh.on ? `${ic("route","i12")}<span>${esc(t("path-ssh", { host: c.ssh.host }))}</span>` : `${ic("arrow-left-right","i12 g")}<span>${esc(t("path-direct"))}</span>`;
+  $("sheet").innerHTML = `<div class="ph"><span class="id mono">${esc(c.id)}</span><span class="grow"></span><span class="meta">${esc(t("sheet-meta"))}</span><kbd>⌘I</kbd></div>
+  <dl class="sheet">
+    <div class="kv"><dt>${esc(t("kv-env"))}</dt><dd>${mark(c.env)}<span class="${envCls}">${esc(t("env-" + c.env))}</span>${c.ro ? `${ic("lock","i12")}<span class="d">${esc(t("acc-ro"))}</span>` : ""}</dd></div>
+    <div class="kv"><dt>${esc(t("kv-engine"))}</dt><dd>${esc(ENG[c.engine].label)} <span class="mono">${esc(c.ver)}</span></dd></div>
+    <div class="kv"><dt>${esc(t(c.engine === "sqlite" ? "kv-file" : "kv-host"))}</dt><dd><span class="mono">${esc(c.engine === "sqlite" ? c.path : `${c.host}:${c.port}/${c.db}`)}</span></dd></div>
+    ${c.engine === "sqlite" ? "" : `<div class="kv"><dt>${esc(t("kv-user"))}</dt><dd><span class="mono">${esc(c.user)}</span></dd></div>`}
+    <div class="kv"><dt>${esc(t("kv-path"))}</dt><dd>${path}</dd></div>
+    <div class="kv"><dt>${esc(t("kv-enc"))}</dt><dd>${encHTML(c)}</dd></div>
+    <div class="kv"><dt>${esc(t("kv-secret"))}</dt><dd><span class="d">${esc(secretLabel(c))}</span></dd></div>
+  </dl>`;
+}
+
+function renderCenter() {
+  $("center").innerHTML = `<div class="ph"><span class="meta">${esc(t("home-title"))}</span><span class="grow"></span><kbd>⌘2</kbd></div>
+  <div class="home"><div class="box">
+    <div class="keys">
+      <span>${esc(t("home-new"))}</span><span class="k"><kbd>⌘N</kbd></span>
+      <span>${esc(t("home-paste"))}</span><span class="k"><kbd>⌘⇧V</kbd></span>
+      <span>${esc(t("home-connect"))}</span><span class="k"><kbd>↵</kbd></span>
+      <span>${esc(t("home-search"))}</span><span class="k"><kbd>⌘K</kbd></span>
+    </div>
+    <div class="hint">${esc(t("home-hint"))}</div>
+  </div></div>`;
+}
+
+function renderStatus() {
+  const c = S.cap, k = c.conn && conn(c.conn);
+  let h = "";
+  if (!k || c.state === "none") h += `<span class="s envseg np">${esc(t("sb-noconn"))}</span>`;
+  else {
+    const envTxt = t("sb-env", { env: t("env-" + k.env), access: t(k.ro ? "acc-ro" : "acc-rw") });
+    h += k.env === "production"
+      ? `<span class="s envseg">${mark("production")}${k.ro ? ic("lock","i12") : ""}<span>${esc(envTxt)}</span></span>`
+      : `<span class="s envseg np">${mark(k.env)}<span>${esc(envTxt)}</span><span class="mono" style="color:var(--text-2)">${esc(k.id)}</span></span>`;
+    if (c.state === "connecting" || c.state === "reconnecting")
+      h += `<span class="s"><i class="run"></i><span>${esc(c.state === "connecting" ? t("cap-connecting") : t("cap-reconnecting", { n: nf(c.attempt || 3) }))}</span></span>`;
+    else if (c.state === "failed") h += `<span class="s">${ic("triangle-alert","i12")}<span>${esc(t("cap-failed"))}</span></span>`;
+    else if (k.engine !== "sqlite") {
+      h += k.ssh && k.ssh.on ? `<span class="s">${ic("route","i12")}<span>${esc(t("path-ssh", { host: k.ssh.host }))}</span><span class="mono">${ms(k.lat)}</span></span>`
+        : `<span class="s g">${ic("arrow-left-right","i12")}<span>${esc(t("path-direct"))}</span><span class="mono">${ms(k.lat)}</span></span>`;
+      h += `<span class="s">${encHTML(k)}</span>`;
+    }
+  }
+  h += `<span class="grow"></span>`;
+  if (k && c.state !== "none") h += `<span class="s r">${esc(ENG[k.engine].label)} <span class="mono">${esc(k.ver)}</span></span>`;
+  h += `<span class="s r mono">UTF-8</span><button class="s r lang" data-act="toggleLang" tabindex="-1">${ic("languages","i12")}<span>${LANG === "en" ? "<b>EN</b> / TR" : "EN / <b>TR</b>"}</span></button>`;
+  $("status").innerHTML = h;
+}
+
+/* ───────── Dialog: connection form ───────── */
+const segBtns = (name, opts, cur, fk) => `<div class="seg${cur == null ? " unset" : ""}" role="radiogroup" data-seg="${name}">` +
+  opts.map((o, i) => `<button type="button" role="radio" aria-pressed="${o.v === cur}" aria-checked="${o.v === cur}" data-act="seg" data-name="${name}" data-v="${o.v}" data-fk="${fk}-${o.v}" tabindex="${(cur == null ? i === 0 : o.v === cur) ? 0 : -1}">${o.h || ""}<span>${esc(o.l)}</span></button>`).join("") + `</div>`;
+const input = (path, val, o = {}) => `<label class="in${o.mono ? " mono" : ""}${o.cls ? " " + o.cls : ""}${o.filled ? " filled" : ""}"><input data-f="${path}" data-fk="f-${path}" value="${esc(val)}" placeholder="${esc(o.ph || "")}" ${o.type ? `type="${o.type}"` : ""} spellcheck="false" autocomplete="off" aria-label="${esc(o.label || path)}">${o.tail ? `<span class="tail">${o.tail}</span>` : ""}</label>`;
+const checkbox = (path, on, label, sub) => `<button type="button" class="cb" role="checkbox" aria-checked="${!!on}" data-act="cb" data-path="${path}" data-fk="cb-${path}"><span class="box">${ic("check")}</span><span>${esc(label)}</span>${sub ? `<span class="sub">${esc(sub)}</span>` : ""}</button>`;
+const select = (name, label, fk, wide) => `<button type="button" class="select" data-act="select" data-name="${name}" data-fk="${fk}" aria-haspopup="listbox" ${wide ? `style="width:${wide}px"` : ""}><span class="v">${esc(label)}</span>${ic("chevrons-up-down","i12")}</button>`;
+const frow = (label, cell, forId) => `<div class="frow"><span class="flab">${esc(label)}</span><div class="fcell">${cell}</div></div>`;
+const hintrow = (html) => `<div class="hintrow"><span class="h">${html}</span></div>`;
+const get = (o, p) => p.split(".").reduce((a, k) => a?.[k], o);
+const setp = (o, p, v) => { const ks = p.split("."); const last = ks.pop(); ks.reduce((a, k) => a[k], o)[last] = v; };
+const RET = ["never", "restart", "session", "forever"];
+const TLSM = ["auto", "require", "verify-ca", "verify-full", "disable"];
+
+function tlsSummary(f) { return f.tls === "auto" ? t("tls-sum-auto") : t("tls-" + f.tls); }
+function sshSummary(f) {
+  if (!f.ssh.on) return t("ssh-sum-off");
+  return f.ssh.hops.length ? t("ssh-sum-hops", { host: f.ssh.host || "…", n: nf(f.ssh.hops.length) }) : t("ssh-sum-on", { host: f.ssh.host || "…" });
+}
+function noticeHTML(n) {
+  if (!n) return "";
+  if (n.kind === "filled") {
+    const lis = [];
+    if (n.engineSet) lis.push(`<li>${esc(t("url-engine-set", { engine: ENG[n.engineSet].label }))}</li>`);
+    if (n.secret) lis.push(`<li>${ic("key-round","i12")}<span>${esc(n.ret === "forever" ? t("url-secret") : t("url-secret-other", { ret: t("ret-" + n.ret).toLowerCase() }))}</span></li>`);
+    n.mapped.forEach(([a, b]) => lis.push(`<li><span class="mono">${esc(a)}</span><span>${esc(t("url-mapped"))}</span><span>${esc(b)}</span></li>`));
+    n.extras.forEach(([a, b]) => lis.push(`<li><span class="mono">${esc(a)}=${esc(b)}</span><span>${esc(t("url-extra"))}</span></li>`));
+    return `<div class="notice ok" role="status">${ic("circle-check")}<div class="nb"><div>${esc(t("url-filled"))}</div><ul>${lis.join("")}</ul></div><button class="btn ghost" data-act="undoPaste" data-fk="undo">${esc(t("url-undo"))}</button></div>`;
+  }
+  if (n.kind === "switch") return `<div class="notice" role="status">${ic("info")}<div class="nb"><div>${esc(t("url-switch", { engine: ENG[n.parsed.engine].label, current: ENG[n.current].label }))}</div><div class="l2">${esc(t("url-switch-l2"))}</div>
+      <div class="acts"><button class="btn" data-act="acceptSwitch" data-fk="sw1">${esc(t("url-switch-btn", { engine: ENG[n.parsed.engine].label }))}</button><button class="btn ghost" data-act="dismissNotice" data-fk="sw2">${esc(t("url-keep", { current: ENG[n.current].label }))}</button></div></div></div>`;
+  if (n.kind === "unrec") return `<div class="notice" role="status">${ic("info")}<div class="nb"><div>${esc(t("url-unrec"))}</div><div class="l2">${esc(t("url-formats"))}</div></div><button class="btn ghost icon" data-act="dismissNotice" data-fk="nx" title="${esc(t("fix-close"))}">${ic("x","i12")}</button></div>`;
+  if (n.kind === "ssh") return `<div class="notice ok" role="status">${ic("circle-check")}<div class="nb">${esc(t("ssh-imported", { alias: n.alias }))}</div></div>`;
+  return "";
+}
+
+function connDialogHTML(L) {
+  const f = L.form, e = ENG[f.engine], filled = p => L.filled.includes(p);
+  const title = L.mode === "edit" ? t("dlg-title-edit", { name: f.name }) : t("dlg-title-new");
+  const remote = f.engine !== "sqlite" && f.host && !isLocalHost(f.host);
+  let b = "";
+  b += frow(t("dlg-url"), input("url", renderURL(f), { mono:true, ph:t("dlg-url-ph"), label:t("dlg-url"),
+    tail:`<button class="btn ghost icon" data-act="copyUrl" data-fk="copyurl" title="${esc(t("dlg-copy-url"))} ⌘⇧C" tabindex="-1">${ic("copy","i12")}</button>` }));
+  if (L.notice) b += `<div style="margin-top:8px">${noticeHTML(L.notice)}</div>`;
+  b += frow(t("dlg-engine"), segBtns("engine", Object.entries(ENG).map(([v, o]) => ({ v, l:o.label })), f.engine, "eng"));
+  b += frow(t("dlg-name"), input("name", f.name, { mono:true, ph: suggestName(f), label:t("dlg-name"), filled:filled("name") }));
+  b += frow(t("dlg-env"), segBtns("env", ENVS.map(v => ({ v, l:t("env-" + v), h:mark(v) })), f.env, "env"));
+  if (!f.envTouched && remote) b += hintrow(`${ic("info","i12")}<span>${esc(t("dlg-env-ask"))}</span>`);
+  else if (!f.envTouched && f.engine !== "sqlite" && f.host && isLocalHost(f.host)) b += hintrow(`<span>${esc(t("dlg-env-local"))}</span>`);
+  b += `<div class="frow"><span class="flab"></span><div class="fcell">${checkbox("ro", f.ro, t("dlg-ro"), "· " + t("dlg-ro-hint"))}</div></div>`;
+
+  b += `<div class="secth"><span class="sc">${esc(t("sec-server"))}</span><span class="rule"></span></div>`;
+  if (f.engine === "sqlite") {
+    b += frow(t("dlg-file"), input("path", f.path, { mono:true, ph:"~/code/shop/app.db", label:t("dlg-file"), filled:filled("path") }) + `<button class="btn" data-act="choose" data-fk="choose">${ic("folder-open","i12")}<span>${esc(t("dlg-choose"))}</span></button>`);
+    b += `<div class="frow"><span class="flab"></span><div class="fcell" style="flex-direction:column;align-items:flex-start;gap:8px">${checkbox("sqliteRo", f.sqliteRo, t("dlg-sqlite-ro"))}${checkbox("sqliteCreate", f.sqliteCreate, t("dlg-sqlite-create"))}</div></div>`;
+  } else {
+    b += frow(t("dlg-host"), input("host", f.host, { mono:true, ph:"db-stg.acme.io", label:t("dlg-host"), filled:filled("host") }) +
+      `<span class="inl">${esc(t("dlg-port"))}</span>` + input("port", f.port, { mono:true, ph:String(e.port), label:t("dlg-port"), cls:"port", filled:filled("port") }));
+    b += frow(t("dlg-db"), input("db", f.db, { mono:true, ph:f.engine === "pg" ? "postgres" : "", label:t("dlg-db"), filled:filled("db") }));
+    b += frow(t("dlg-user"), input("user", f.user, { mono:true, ph:f.engine === "pg" ? "postgres" : "root", label:t("dlg-user"), filled:filled("user") }));
+
+    b += `<div class="secth"><span class="sc">${esc(t("sec-auth"))}</span><span class="rule"></span></div>`;
+    const auths = (f.engine === "pg" ? ["password", "pgpass", "cert", "none"] : ["password", "cert", "none"]).map(v => ({ v, l:t("auth-" + v) }));
+    b += frow(t("sec-auth"), segBtns("auth", auths, f.auth, "auth"));
+    if (f.auth === "password") {
+      const ph = f.password === "saved" ? t("dlg-pw-saved") : "";
+      const pwVal = f.password === "saved" ? "" : f.password;
+      b += frow(t("dlg-password"), input("password", pwVal, { type:"password", ph, label:t("dlg-password"), filled:filled("password"),
+        tail: f.pwFrom === "url" ? `<span>${ic("key-round","i12")}</span><span>${esc(t("dlg-pw-from-url"))}</span>` : "" }) +
+        `<span class="inl">${esc(t("dlg-remember"))}</span>` + select("ret", t("ret-" + f.ret), "sel-ret", 186));
+    } else if (f.auth === "pgpass") {
+      b += hintrow(`${ic("check","i12")}<span>${esc(t("pgpass-match", { n: nf(3) }))} · <span class="mono" style="font-size:11.5px;color:var(--text)">db-stg.acme.io:5432:orders:deploy:••••</span></span>`);
+      b += hintrow(`<span>${esc(t("pgpass-note"))}</span>`);
+    } else if (f.auth === "cert") {
+      b += frow(t("dlg-cert"), input("cert", f.cert, { mono:true, label:t("dlg-cert") }) + `<button class="btn" data-act="choose" data-fk="ch-cert">${esc(t("dlg-choose"))}</button>`);
+      b += frow(t("dlg-key"), input("key", f.key, { mono:true, label:t("dlg-key") }) + `<button class="btn" data-act="choose" data-fk="ch-key">${esc(t("dlg-choose"))}</button>`);
+      b += frow(t("dlg-key-pass"), input("password", f.password === "saved" ? "" : f.password, { type:"password", ph:f.password === "saved" ? t("dlg-pw-saved") : "", label:t("dlg-key-pass") }) +
+        `<span class="inl">${esc(t("dlg-remember"))}</span>` + select("ret", t("ret-" + f.ret), "sel-ret", 186));
+    } else {
+      b += hintrow(`${ic("info","i12")}<span>${esc(t("auth-none-note"))}</span>`);
+    }
+
+    /* TLS */
+    b += disc("tls", t("sec-tls"), tlsSummary(f), L.open.tls);
+    if (L.open.tls) {
+      b += `<div class="dbox">` + frow(t("tls-mode"), select("tls", t("tls-" + f.tls), "sel-tls", 200) + `<span class="inl" style="color:var(--text-2);font-size:12.5px;flex:1;min-width:0">${esc(t("tls-" + f.tls + "-h"))}</span>`);
+      b += frow(t("tls-ca"), input("ca", f.ca, { mono:true, ph:t("tls-ca-ph"), label:t("tls-ca") }) + `<button class="btn" data-act="choose" data-fk="ch-ca">${esc(t("dlg-choose"))}</button>`);
+      b += frow(t("tls-pin"), f.pin ? `<span class="mono" style="font-size:11.5px">SHA-256 ${esc(f.pin)}</span><button class="btn ghost" data-act="unpin" data-fk="unpin">${esc(t("tls-remove-pin"))}</button>` : `<span style="color:var(--text-2)">${esc(t("tls-pin-none"))}</span>`);
+      b += `</div>`;
+    }
+    /* SSH */
+    b += disc("ssh", t("sec-ssh"), sshSummary(f), L.open.ssh, f.ssh.on ? ic("route","i12") : "");
+    if (L.open.ssh) b += `<div class="dbox">${sshHTML(f, L)}</div>`;
+    /* Advanced */
+    b += disc("adv", t("sec-adv"), t("adv-sum", { s: nf(f.timeout) }), L.open.adv);
+    if (L.open.adv) {
+      b += `<div class="dbox">` + frow(t("adv-timeout"), input("timeout", String(f.timeout), { mono:true, cls:"short", label:t("adv-timeout"), tail:esc(t("unit-s")) }));
+      b += frow(t("adv-keepalive"), select("keepalive", t("adv-off"), "sel-ka", 120));
+      b += frow(t("adv-app"), input("app", f.app, { mono:true, label:t("adv-app") }));
+      b += frow(t("adv-budget"), `<span style="color:var(--text-2)">${esc(t("adv-budget-v"))}</span>`);
+      b += frow(t("adv-extra"), `<div style="display:flex;flex-direction:column;gap:6px;flex:1;min-width:0">${f.extras.map(([k, v], i) => `<div class="fcell">${input("extra" + i + "k", k, { mono:true, label:"key" })}<span class="inl">=</span>${input("extra" + i + "v", v, { mono:true, label:"value" })}<button class="btn ghost icon" data-act="rmExtra" data-i="${i}" data-fk="rmx${i}">${ic("x","i12")}</button></div>`).join("")}
+        <div><button class="btn ghost" data-act="addExtra" data-fk="addx">${ic("plus","i12")}<span>${esc(t("adv-extra-add"))}</span></button></div></div>`);
+      b += `</div>`;
+    }
+  }
+
+  /* test strip */
+  const tres = testHTML(L);
+  const testBtn = L.test.state === "running"
+    ? `<button class="btn" data-act="stopTest" data-fk="test">${ic("square","i12")}<span>${esc(t("test-stop"))}</span><span class="k">esc</span></button>`
+    : `<button class="btn" data-act="test" data-fk="test">${ic("plug","i12")}<span>${esc(t("dlg-test"))}</span><span class="k">⌘T</span></button>`;
+  return `<div class="dlg w640 form" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+    <div class="dhead"><div class="tt"><div class="title">${esc(title)}</div><div class="sub">${f.env ? mark(f.env) : ""}<span>${esc(L.mode === "edit" ? t("dlg-sub-edit") : t("dlg-sub-new"))}</span></div></div>
+      <button class="x" data-act="closeLayer" tabindex="-1" title="${esc(t("dlg-cancel"))} (esc)">${ic("x","i12")}</button></div>
+    <div class="dscroll" id="dscroll">${b}</div>
+    ${tres}
+    <div class="dfoot">${testBtn}<span class="grow"></span>
+      <button class="btn ghost" data-act="closeLayer" data-fk="cancel">${esc(t("dlg-cancel"))}</button>
+      <button class="btn" data-act="save" data-fk="save">${esc(t("dlg-save"))}<span class="k">⌘S</span></button>
+      <button class="btn primary" data-act="saveConnect" data-fk="saveconn">${esc(t("dlg-save-connect"))}<span class="k">⌘↵</span></button></div>
+  </div>`;
+}
+function disc(id, title, summary, open, sumIcon = "") {
+  return `<button type="button" class="disc" aria-expanded="${open}" data-act="disc" data-id="${id}" data-fk="disc-${id}"><span class="chev">${ic(open ? "chevron-down" : "chevron-right","i12")}</span><span class="ttl">${esc(title)}</span><span class="sum">${sumIcon}<span>${esc(summary)}</span></span></button>`;
+}
+function sshHTML(f, L) {
+  let h = `<div class="frow"><span class="flab"></span><div class="fcell">${checkbox("ssh.on", f.ssh.on, t("ssh-use"))}<span class="grow"></span><button class="btn" data-act="sshImport" data-fk="sshimp">${ic("file-up","i12")}<span>${esc(t("ssh-import"))}</span></button></div></div>`;
+  if (L.notice && L.notice.kind === "ssh") h += `<div style="margin-top:8px">${noticeHTML(L.notice)}</div>`;
+  if (!f.ssh.on) return h;
+  h += frow(t("ssh-host"), input("ssh.host", f.ssh.host, { mono:true, ph:"bastion.acme.io", label:t("ssh-host"), filled:L.filled.includes("ssh.host") }) + `<span class="inl">${esc(t("dlg-port"))}</span>` + input("ssh.port", f.ssh.port, { mono:true, cls:"port", label:t("dlg-port") }));
+  h += frow(t("ssh-user"), input("ssh.user", f.ssh.user, { mono:true, ph:"deploy", label:t("ssh-user"), filled:L.filled.includes("ssh.user") }));
+  h += frow(t("sec-auth"), segBtns("sshauth", ["agent", "key", "password", "kbd"].map(v => ({ v, l:t("ssh-auth-" + v) })), f.ssh.auth, "sshauth"));
+  if (f.ssh.auth === "agent") h += hintrow(`${ic("key-round","i12")}<span>${esc(t("ssh-agent-note"))}</span>`);
+  if (f.ssh.auth === "key") {
+    h += frow(t("ssh-key"), input("ssh.key", f.ssh.key, { mono:true, label:t("ssh-key") }) + `<button class="btn" data-act="choose" data-fk="ch-sshkey">${esc(t("dlg-choose"))}</button>`);
+    h += frow(t("ssh-passphrase"), input("ssh.pass", "", { type:"password", label:t("ssh-passphrase") }) + `<span class="inl">${esc(t("dlg-remember"))}</span>` + select("ret", t("ret-" + f.ret), "sel-ret2", 186));
+  }
+  if (f.ssh.auth === "password") h += frow(t("dlg-password"), input("ssh.pass", "", { type:"password", label:t("dlg-password") }) + `<span class="inl">${esc(t("dlg-remember"))}</span>` + select("ret", t("ret-" + f.ret), "sel-ret3", 186));
+  if (f.ssh.auth === "kbd") h += hintrow(`${ic("info","i12")}<span>${esc(t("ssh-kbd-note"))}</span>`);
+  h += frow(t("ssh-jumps"), `<div class="hops">${f.ssh.hops.map((hp, i) => `<div class="hop"><span class="ix">${i + 1}</span>${input("ssh.hops." + i + ".host", hp.host, { mono:true, label:"jump host" })}${input("ssh.hops." + i + ".user", hp.user, { mono:true, cls:"short", label:"user" })}<button class="btn ghost icon" data-act="rmHop" data-i="${i}" data-fk="rmhop${i}" title="⌫">${ic("x","i12")}</button></div>`).join("")}
+    <div><button class="btn ghost" data-act="addHop" data-fk="addhop">${ic("plus","i12")}<span>${esc(t("ssh-add-jump"))}</span></button></div></div>`);
+  const stops = [`<span>${esc(t("ssh-this-mac"))}</span>`, ...f.ssh.hops.map(x => `<span class="mono">${esc(x.host || "…")}</span>`), `<span class="mono">${esc(f.ssh.host || "…")}</span>`, `<span class="mono">${esc(f.host || "…")}:${esc(f.port || ENG[f.engine].port)}</span>`];
+  h += frow(t("ssh-route"), `<div class="route">${stops.join(ic("arrow-right","i12"))}</div>`);
+  h += frow(t("ssh-hostkeys"), select("policy", t({ ask:"hk-ask", accept:"hk-accept", strict:"hk-strict" }[f.ssh.policy]), "sel-policy", 240));
+  return h;
+}
+
+function trailHTML(steps, cur, failAt) {
+  return `<div class="trail">` + steps.map((s, i) => {
+    let cls = "pend", mk = `<i class="dot"></i>`, msv = "";
+    if (failAt != null && i === failAt) { cls = "fail"; mk = ic("x","i12"); }
+    else if (i < cur || (failAt == null && cur >= steps.length)) { cls = "done"; mk = ic("check","i12"); msv = `<span class="mono">${ms(STEP_MS[s])}</span>`; }
+    else if (i === cur && failAt == null) { cls = "run2"; mk = `<i class="run"></i>`; }
+    return `<span class="st ${cls}">${mk}<span>${esc(t("step-" + s))}</span>${msv}</span>`;
+  }).join("") + `</div>`;
+}
+function testHTML(L) {
+  const T = L.test, f = L.form;
+  if (T.state === "idle") return "";
+  const steps = stepsFor(f);
+  if (T.state === "running")
+    return `<div class="tres" role="status"><div class="th"><i class="run"></i><span>${esc(t("test-running"))}</span><span class="mono">${secs(T.elapsed || 0.05, 2)}</span></div>${trailHTML(steps, T.step)}</div>`;
+  if (T.state === "ok") {
+    const total = steps.reduce((a, s) => a + STEP_MS[s], 0);
+    const ver = f.engine === "pg" ? "PostgreSQL 16.4" : f.engine === "mysql" ? "MySQL 8.4.3" : f.engine === "maria" ? "MariaDB 11.4.4" : "SQLite 3.47.2";
+    const enc = f.engine === "sqlite" ? `<span>${esc(t("enc-none-file"))}</span>` : `${ic("lock","i12")}<span>${esc(t("enc-verified"))}</span><span class="mono" style="color:var(--text-2)">TLS_AES_256_GCM_SHA384</span>`;
+    return `<div class="tres" role="status"><div class="th">${ic("circle-check","ok")}<span>${esc(t("test-ok", { ms: ms(total) }))}</span><span class="grow"></span><button class="btn ghost" data-act="copyReport" data-fk="copyrep" style="margin:-4px -6px -4px 0">${ic("copy","i12")}<span>${esc(t("test-copy"))}</span></button></div><div class="sub2">${esc(t("test-ok-sub"))}</div>
+      ${trailHTML(steps, steps.length)}
+      <dl class="diag"><dt>${esc(t("diag-server"))}</dt><dd><span class="mono">${esc(ver)}</span></dd><dt>${esc(t("diag-latency"))}</dt><dd><span>${esc(t("diag-latency-v", { ms: ms(f.ssh.on ? 31 : 4) }))}</span></dd>
+      <dt>${esc(t("diag-auth"))}</dt><dd><span class="mono">${esc(f.engine === "sqlite" ? "—" : (f.user || "postgres") + " · " + (f.engine === "pg" ? "SCRAM-SHA-256" : "caching_sha2_password"))}</span></dd><dt>${esc(t("diag-warn"))}</dt><dd style="color:var(--text-2)">${esc(t("diag-none"))}</dd>
+      <dt>${esc(t("diag-tls"))}</dt><dd style="grid-column:2 / 5">${enc}</dd></dl></div>`;
+  }
+  if (T.state === "fail") return `<div class="tres" role="alert">${errorBlockHTML(T.kind, f, "inline")}</div>`;
+  return "";
+}
+
+/* ───────── Error block (inline in the dialog, or in the error dialog) ───────── */
+function errVars(kind, f) {
+  return { name: f.name || suggestName(f), user: f.user || "postgres", host: f.host, db: f.db, engine: ENG[f.engine].label, version: "9.6.24", port: f.port || ENG[f.engine].port };
+}
+function errorBlockHTML(kind, f, where, extra = {}) {
+  const v = errVars(kind, f), E = ERR[kind], steps = stepsFor(f), failAt = steps.indexOf(FAIL_STEP[kind]);
+  let fixes = "";
+  if (kind === "auth") {
+    fixes = extra.reenter
+      ? `<div class="pwrow">${input("errpw", "", { type:"password", label:t("err-new-pw", { user:v.user }), ph:t("err-new-pw", { user:v.user }) })}<button class="btn primary" data-act="retryPw" data-fk="retrypw">${esc(t("fix-connect"))}<span class="k">↵</span></button></div><div class="attempt" style="margin-top:6px">${esc(t("err-attempt", { n: nf(2) }))}</div>`
+      : `<div class="fixes"><button class="btn primary" data-act="fixReenter" data-fk="fx1">${ic("key-round","i12")}<span>${esc(t("fix-reenter"))}</span></button>${where !== "inline" ? `<button class="btn" data-act="fixEdit" data-fk="fx2">${esc(t("fix-edit"))}</button>` : ""}<span class="attempt">${esc(t("err-attempt", { n: nf(1) }))}</span></div>`;
+  } else if (kind === "dns") {
+    fixes = `<div class="fixes"><button class="btn primary" data-act="fixRetry" data-fk="fx1">${ic("rotate-cw","i12")}<span>${esc(t("fix-retry"))}</span></button>${where !== "inline" ? `<button class="btn" data-act="fixEdit" data-fk="fx2">${esc(t("fix-edit"))}</button>` : ""}<button class="btn" data-act="fixSsh" data-fk="fx3">${ic("route","i12")}<span>${esc(t("fix-ssh"))}</span></button></div>`;
+  } else if (kind === "tls") {
+    fixes = `<div class="fixes"><button class="btn primary" data-act="fixCert" data-fk="fx1">${ic("fingerprint","i12")}<span>${esc(t("fix-review-cert"))}</span></button>${where !== "inline" ? `<button class="btn" data-act="fixEdit" data-fk="fx2">${esc(t("fix-edit"))}</button>` : ""}</div>`;
+  } else if (kind === "db") {
+    fixes = `<div class="dbs">${["orders", "orders_archive", "postgres"].map((d, i) => `<button class="btn${i === 0 ? " primary" : ""}" data-act="fixDb" data-db="${d}" data-fk="fxdb${i}">${ic("database","i12")}<span>${esc(t("fix-use-db", { db:d }))}</span></button>`).join("")}</div>`;
+  } else if (kind === "old") {
+    fixes = `<div class="fixes"><button class="btn" data-act="fixVersions" data-fk="fx1">${ic("external-link","i12")}<span>${esc(t("fix-versions"))}</span></button>${where !== "inline" ? `<button class="btn" data-act="fixEdit" data-fk="fx2">${esc(t("fix-edit"))}</button>` : ""}<span class="grow"></span><button class="btn ghost" data-act="fixAnyway" data-fk="fx3">${esc(t("fix-anyway"))}</button></div>`;
+  }
+  const head = where === "inline" ? `<div class="eh">${ic("triangle-alert")}<div><div class="t1">${esc(t("err-" + kind + "-h", v))}</div><div class="t2">${esc(t("err-" + kind + "-b", v))}</div></div></div>`
+    : `<div class="eh"><div><div class="t1" style="font-weight:400">${esc(t("err-" + kind + "-h", v))}</div><div class="t2">${esc(t("err-" + kind + "-b", v))}</div></div></div>`;
+  const open = extra.techOpen;
+  const tech = `<div class="tech"><button class="dsc" aria-expanded="${!!open}" data-act="techToggle" data-fk="tech">${ic(open ? "chevron-down" : "chevron-right","i12")}<span>${esc(t("err-tech"))}</span></button>
+    ${open ? `<div class="box"><dl class="kvx"><dt>${esc(t("err-stage"))}</dt><dd>${esc(t("step-" + FAIL_STEP[kind]))}</dd><dt>${esc(t("err-class"))}</dt><dd class="mono">${esc(E.cls)}</dd>
+      <dt>${esc(t("err-code"))}</dt><dd><span class="code">${esc(E.code)}</span></dd><dt>${esc(t("err-server"))}</dt><dd class="mono">${esc(E.server.replace("{user}", v.user).replace("{db}", v.db))}</dd>
+      <dt>${esc(t("err-elapsed"))}</dt><dd class="mono">${secs(E.elapsed, 3)}</dd></dl>
+      <div class="copy"><button class="btn ghost" data-act="copyErr" data-fk="copyerr">${ic("copy","i12")}<span>${esc(t("err-copy"))}</span></button></div></div>` : ""}</div>`;
+  return `<div class="eb">${head}${trailHTML(steps, failAt, failAt)}${fixes}${tech}</div>`;
+}
+
+/* ───────── Other dialogs ───────── */
+function dlgShell(w, title, body, foot, opts = {}) {
+  return `<div class="dlg ${w}" role="${opts.alert ? "alertdialog" : "dialog"}" aria-modal="true" aria-label="${esc(title)}">
+    <div class="dhead"><div class="tt"><div class="title">${esc(title)}</div>${opts.sub ? `<div class="sub">${opts.sub}</div>` : ""}</div><button class="x" data-act="closeLayer" tabindex="-1" title="esc">${ic("x","i12")}</button></div>
+    <div class="dbody">${body}</div><div class="dfoot">${foot}</div></div>`;
+}
+function errorDialogHTML(L) {
+  const c = conn(L.conn), f = formFromConn(c);
+  if (L.db) f.db = L.db;
+  return dlgShell("w480", t("err-title", { name: c.id }), errorBlockHTML(L.kind, f, "dialog", L),
+    `<span class="grow"></span><button class="btn ghost" data-act="closeLayer" data-fk="close">${esc(t("fix-close"))}</button>`, { sub: `${mark(c.env)}<span class="mono" style="font-size:11.5px">${esc(c.host)}:${esc(c.port)}</span>` });
+}
+function prodHTML(L) {
+  const f = connLayer().form, name = f.name || suggestName(f), sel = L.choice;
+  const opts = ["production", "staging", "test", "dev"].map(v => `<button type="button" class="choice" role="radio" aria-checked="${sel === v}" data-act="choose-env" data-v="${v}" data-fk="ch-${v}" tabindex="${(sel ? sel === v : v === "production") ? 0 : -1}">
+      <span class="radio"></span>${mark(v)}<span class="cl"><b>${esc(t("prod-opt-" + v))}</b><span>${esc(t("prod-opt-" + v + "-d"))}</span></span></button>`).join("");
+  const after = sel === "production"
+    ? `<p style="margin:0 0 7px;color:var(--text-2)">${esc(t("prod-changes"))}</p><ul class="changes">
+        <li><span class="m">${mark("production")}</span><span>${t("prod-c1", { word:`<span class="prodword">${esc(t("prod-c1-word"))}</span>` })}</span></li>
+        <li><span class="m">${ic("shield-check","i12")}</span><span>${esc(t("prod-c2"))}</span></li>
+        <li><span class="m">${ic("git-commit-horizontal","i12")}</span><span>${esc(t("prod-c3"))}</span></li></ul>`
+    : sel ? `<p class="calm">${esc(t("prod-other"))}</p>` : "";
+  const body = `<p>${esc(t("prod-body", { host: f.host }))}</p>${L.suggested ? `<div class="suggest">${ic("info","i12")}<span>${esc(t("prod-suggest"))}</span></div>` : ""}<div class="choices" role="radiogroup">${opts}</div>${after}`;
+  const btn = sel ? `<button class="btn primary" data-act="prodSave" data-fk="prodsave">${esc(t("prod-save", { env: t("env-" + sel), Env: t("prod-opt-" + sel) }))}<span class="k">↵</span></button>` : `<button class="btn primary" disabled>${esc(t("prod-pick"))}</button>`;
+  return dlgShell("w420", t("prod-title", { name }), body, `<span class="grow"></span><button class="btn ghost" data-act="closeLayer" data-fk="pcancel">${esc(t("dlg-cancel"))}</button>${btn}`);
+}
+const FP = "3F:9A:C2:7E:15:B0:4D:88:E1:2C:6F:93:0A:D7:5B:31:C4:68:9E:F2:07:BA:43:1D:8C:E5:72:39:A6:0F:D4:71";
+function tlsHTML(L) {
+  const F = L.fromTest && connLayer()?.form;
+  const c = F ? { host:F.host, port:F.port || ENG[F.engine].port, env:F.env, id:F.name || suggestName(F) } : conn(L.conn), v = { host: c.host, port: c.port };
+  const fp = FP.split(":"), fpTxt = fp.slice(0, 16).join(":") + "<br>" + fp.slice(16).join(":");
+  const body = `<p>${esc(t("tls-body", v))}</p>
+    <dl class="certkv"><dt>${esc(t("tls-subject"))}</dt><dd class="mono">CN=${esc(c.host)}</dd><dt>${esc(t("tls-issuer"))}</dt><dd class="mono">CN=Acme Internal CA G2, O=Acme</dd><dt>${esc(t("tls-valid"))}</dt><dd>${esc(dateFmt(new Date(2027, 2, 14)))}</dd></dl>
+    <div class="inset"><div class="fphead"><span>${esc(t("tls-fp"))}</span><span class="grow"></span><button class="btn ghost icon" data-act="copyFp" data-fk="copyfp" title="${esc(t("tls-copy-fp"))}">${ic("copy","i12")}</button></div><div class="fp">${fpTxt}</div></div>
+    <div style="margin-top:12px;color:var(--text-2);font-size:12.5px">${esc(t("tls-chain"))}</div>
+    <ul class="chain" style="margin-top:2px"><li>${ic("fingerprint","i12")}<span class="mono">${esc(c.host)}</span><span class="d">· ${esc(t("tls-leaf"))}</span></li>
+      <li class="l1"><i class="tick"></i><span class="mono">Acme Internal CA G2</span><span class="d">· ${esc(t("tls-inter"))}</span></li>
+      <li class="l2"><i class="tick"></i><span class="mono">Acme Root CA 2021</span><span class="d">· ${esc(t("tls-root"))}</span></li></ul>
+    <p style="margin:10px 0 0;font-size:12.5px">${esc(t("tls-pin-note", v))}</p>`;
+  return dlgShell("w480", t("tls-title"), body, `<button class="btn ghost" data-act="tlsCancel" data-fk="tcancel">${esc(t("dlg-cancel"))}</button><span class="grow"></span>
+    <button class="btn" data-act="importCa" data-fk="tca">${ic("file-up","i12")}<span>${esc(t("tls-import"))}</span></button>
+    <button class="btn primary" data-act="pin" data-fk="tpin">${ic("fingerprint","i12")}<span>${esc(t("tls-pin-btn"))}</span></button>`,
+    { sub: `${mark(c.env)}<span class="mono" style="font-size:11.5px">${esc(c.id)}</span>` });
+}
+function plainHTML(L) {
+  const c = conn(L.conn);
+  const body = `<p>${esc(t("plain-body", { ip: c.ip }))}</p><div style="margin-top:4px">${checkbox("plainRemember", L.remember, t("plain-remember"))}</div>`;
+  return dlgShell("w420", t("plain-title", { host: c.host }), body, `<button class="btn ghost" data-act="tlsCancel" data-fk="pc0">${esc(t("dlg-cancel"))}</button><span class="grow"></span>
+    <button class="btn" data-act="plainConnect" data-fk="pc1">${ic("lock-open","i12")}<span>${esc(t("plain-connect"))}</span></button>
+    <button class="btn primary" data-act="plainSsh" data-fk="pc2">${ic("route","i12")}<span>${esc(t("plain-ssh"))}</span></button>`, { sub: `${mark(c.env)}<span class="mono" style="font-size:11.5px">${esc(c.id)}</span>` });
+}
+function hostkeyHTML(L) {
+  const body = `<p>${esc(t("hk-body"))}</p>
+    <div class="inset"><div class="fphead"><span>${esc(t("hk-fp"))}</span><span class="mono" style="font-size:11.5px;color:var(--text)">ED25519</span><span class="grow"></span><button class="btn ghost icon" data-act="copyFp" data-fk="copyhk" title="${esc(t("tls-copy-fp"))}">${ic("copy","i12")}</button></div>
+    <div class="fp">SHA256:pX0fV2qk7mJ3bWcLr9TzE1uYhN4sGd8aKoQ6iRvM5yA</div></div>
+    <p style="margin:10px 0 0;font-size:12.5px">${esc(t("hk-store"))}</p>`;
+  return dlgShell("w420", t("hk-title", { host: "bastion.acme.io" }), body, `<span class="grow"></span><button class="btn ghost" data-act="tlsCancel" data-fk="hk0">${esc(t("dlg-cancel"))}</button><button class="btn primary" data-act="hkTrust" data-fk="hk1">${ic("check","i12")}<span>${esc(t("hk-trust"))}</span></button>`,
+    { sub: `<span class="mono" style="font-size:11.5px">bastion.acme.io:22 · deploy</span>` });
+}
+function deleteHTML(L) {
+  const c = conn(L.conn);
+  return dlgShell("w420", t("del-title", { name: c.id }), `<p>${esc(t("del-body"))}</p>`,
+    `<span class="grow"></span><button class="btn ghost" data-act="closeLayer" data-fk="d0">${esc(t("dlg-cancel"))}</button><button class="btn danger" data-act="doDelete" data-fk="d1">${ic("trash-2","i12")}<span>${esc(t("del-btn"))}</span></button>`, { alert:true });
+}
+
+function renderLayers() {
+  const fk = document.activeElement?.dataset?.fk, selS = document.activeElement?.selectionStart, selE = document.activeElement?.selectionEnd;
+  const sc = $("dscroll")?.scrollTop;
+  $("layers").innerHTML = S.layers.map(L => `<div class="layer" data-layer="${L.type}">${
+    L.type === "conn" ? connDialogHTML(L) : L.type === "error" ? errorDialogHTML(L) : L.type === "prod" ? prodHTML(L) : L.type === "tls" ? tlsHTML(L)
+    : L.type === "plain" ? plainHTML(L) : L.type === "hostkey" ? hostkeyHTML(L) : L.type === "delete" ? deleteHTML(L) : ""}</div>`).join("");
+  if (sc != null && $("dscroll")) $("dscroll").scrollTop = sc;
+  if (fk) {
+    const el = document.querySelector(`[data-fk="${CSS.escape(fk)}"]`);
+    if (el) { el.focus({ preventScroll: true }); if (selS != null && el.setSelectionRange) try { el.setSelectionRange(selS, selE); } catch {} }
+  }
+  // Filled-from-URL tint fades after a beat (state duration 240 ms)
+  const L = connLayer();
+  if (L && L.filled.length && !L.fadeQueued) { L.fadeQueued = true; later(() => { document.querySelectorAll(".in.filled").forEach(n => n.classList.remove("filled")); L.filled = []; L.fadeQueued = false; }, 1600); }
+}
+
+function menuHTML() {
+  const M = S.menu; if (!M) return "";
+  return `<div class="menu" id="menu" role="menu" tabindex="-1" style="left:${M.x}px;top:${M.y}px;${M.w ? `min-width:${M.w}px` : ""}">${M.title ? `<div class="mh">${esc(M.title)}</div>` : ""}` + M.items.map((it, i) =>
+    it.sep ? `<div class="sep"></div>` : `<div class="mi${i === M.active ? " on" : ""}${it.dis ? " dis" : ""}${it.danger ? " danger" : ""}${it.mono ? " mono2" : ""}" role="menuitem" data-mi="${i}" aria-disabled="${!!it.dis}">
+      ${M.checks ? `<span class="ck">${it.checked ? ic("check","i12") : ""}</span>` : ""}<span class="lab">${esc(it.label)}</span>${it.hint ? `<span class="h">${esc(it.hint)}</span>` : ""}${it.kbd ? `<span class="k">${it.kbd}</span>` : ""}</div>`).join("") + `</div>`;
+}
+function renderMenus() {
+  let h = menuHTML();
+  if (S.pop === "unenc") {
+    const k = conn(S.cap.conn), seg = $("unencSeg");
+    if (k && seg) { const W = $("win").getBoundingClientRect(), r = seg.getBoundingClientRect();
+      h += `<div class="pop" style="left:${Math.min(r.left - W.left, W.width - 312)}px;top:${r.bottom - W.top + 6}px"><b>${ic("lock-open","i12")}${esc(t("unenc-title"))}</b><p>${esc(t("unenc-body", { host: k.host }))}</p><p style="margin:0">${esc(t("unenc-fix"))}</p></div>`; }
+  }
+  $("menus").innerHTML = h;
+  if (S.menu) $("menu").focus({ preventScroll: true });
+}
+
+function renderToasts() {
+  $("toasts").innerHTML = S.toasts.map(x => `<div class="toast${x.wide ? " wide" : ""}" role="${x.sticky ? "alert" : "status"}">${ic(x.icon || "info", x.ok ? "ok" : "")}<div class="tb">${x.html}</div><button class="x" data-act="dismissToast" data-id="${x.id}" title="${esc(t("lost-dismiss"))}">${ic("x","i12")}</button></div>`).join("");
+}
+let TOASTID = 0;
+function toast(html, o = {}) {
+  const id = ++TOASTID; S.toasts.push({ id, html, ...o });
+  if (S.toasts.length > 3) S.toasts.shift();
+  renderToasts();
+  if (!o.sticky) later(() => { S.toasts = S.toasts.filter(x => x.id !== id); renderToasts(); }, 6000);
+}
+function lostToast() {
+  const k = conn(S.cap.conn);
+  toast(`<div class="t1">${esc(t("lost-title", { name: k.id }))}</div><div class="l2">${esc(t("lost-body"))}</div><ul><li>${esc(t("lost-tx"))}</li><li>${esc(t("lost-other"))}</li></ul>
+    <div class="acts"><button class="btn" data-act="noop">${esc(t("lost-details"))}</button><button class="btn ghost" data-act="dismissToast" data-id="${TOASTID + 1}">${esc(t("lost-dismiss"))}</button></div>`, { sticky:true, icon:"rotate-cw", wide:true });
+}
+
+function renderAll() {
+  document.documentElement.dataset.theme = S.theme;
+  document.documentElement.lang = LANG;
+  document.querySelectorAll("[data-i]").forEach(el => el.textContent = t(el.dataset.i));
+  renderTitle(); renderExplorer(); renderSheet(); renderCenter(); renderStatus(); renderLayers(); renderMenus(); renderToasts(); renderMockbar(); renderNotes();
+}
+
+/* ═════════════ Mock bar + notes (mock only) ═════════════ */
+const SURF = [
+  { id:"dialog", label:"Dialog", sc:[["blank","Blank"],["filled","Filled"],["testing","Testing"],["passed","Test passed"],["failed","Test failed"],["sqlite","SQLite"],["mysql","MySQL + cert"]] },
+  { id:"url", label:"URL", sc:[["before","Before paste"],["pasted","postgres:// pasted"],["switch","MySQL URL in PG form"],["unrec","Unreadable"],["copy","Copy as URL"]] },
+  { id:"errors", label:"Errors", sc:[["auth","Auth failed"],["dns","Host not found"],["tls","Cert untrusted"],["db","No such database"],["old","Server too old"]] },
+  { id:"prod", label:"Prod tag", sc:[["suggest","Suggested"],["none","No suggestion"],["staging","Staging chosen"]] },
+  { id:"tls", label:"TLS", sc:[["untrusted","Untrusted cert"],["unencrypted","Unencrypted badge"],["public","No TLS, public host"]] },
+  { id:"ssh", label:"SSH", sc:[["settings","Settings"],["import","Import ~/.ssh/config"],["hostkey","New host key"]] },
+  { id:"capsule", label:"Capsule", sc:[["connecting","Connecting"],["connected","Connected"],["prod","Connected · prod"],["failed","Failed"],["reconnecting","Reconnecting"],["lost","Session lost"],["live","▶ Play"]] },
+  { id:"explorer", label:"Explorer", sc:[["list","List"],["menu","Context menu"],["empty","Empty"],["delete","Delete"]] },
+];
+function renderMockbar() {
+  const s = SURF[S.surface], cur = S.sc[s.id] || s.sc[0][0];
+  $("mockbar").innerHTML = `<span class="tag">MOCK · M2a</span>
+    <div class="mseg" role="group" aria-label="Surface">${SURF.map((x, i) => `<button aria-pressed="${i === S.surface}" data-act="surf" data-i="${i}" tabindex="-1"><span class="n">${i + 1}</span>${x.label}</button>`).join("")}</div>
+    <span class="lbl">[ ]</span>
+    <div class="mseg" role="group" aria-label="Scenario">${s.sc.map(([k, l]) => `<button aria-pressed="${k === cur}" data-act="scen" data-k="${k}" tabindex="-1">${l}</button>`).join("")}</div>
+    <span class="grow"></span>
+    <div class="mseg lang" role="group" aria-label="Language (L)"><button aria-pressed="${LANG === "en"}" data-act="lang" data-v="en" tabindex="-1">EN</button><button aria-pressed="${LANG === "tr"}" data-act="lang" data-v="tr" tabindex="-1">TR</button></div>
+    <div class="mseg" role="group" aria-label="Theme (T)"><button aria-pressed="${S.theme === "dark"}" data-act="theme" data-v="dark" tabindex="-1" title="Dark (T)">${ic("moon","i12")}</button><button aria-pressed="${S.theme === "light"}" data-act="theme" data-v="light" tabindex="-1" title="Light (T)">${ic("sun","i12")}</button></div>
+    <div class="mseg"><button aria-pressed="${S.notes}" data-act="notes" tabindex="-1">Notes <span class="n">N</span></button></div>`;
+}
+const SAMPLE_PG = "postgres://deploy:Tr0ub4dor%263@inv-db.acme.io:5432/inventory?sslmode=verify-full&application_name=hacivat-inventory&target_session_attrs=read-write";
+const SAMPLE_MY = "mysql://reader@billing-db.acme.io:3306/billing?ssl-mode=VERIFY_IDENTITY";
+const NOTES = {
+  dialog: { intent:"One calm column, edited top to bottom; everything the user must decide is visible, everything they rarely touch is folded. The URL row mirrors the form live, so the form and the URL are the same object seen two ways.",
+    points:["Initial focus is Host; paste works in every field, so there is no separate import step.","Environment is a Segmented with shape-coded marks. For a remote host it starts unset with a hint: the D-004 prompt asks on save rather than guessing.","Read-only sits next to Environment, not in Advanced: it is a trust decision, not a tuning knob.","TLS, SSH and Advanced are disclosures with a live summary, so a folded section still tells the truth (\"Auto: verify when the server offers TLS\").","Test connection runs the real pipeline (HV-CONN-07) and reports the steps, server, latency (median of 3), TLS and sign-in. It says nothing was saved.","Footer: Test (⌘T) on the left; Cancel, Save (⌘S) and the one primary, Save and connect (⌘↵), on the right.","Keyboard: Tab walks URL → Engine → Name → Environment → Read-only → Host → Port → Database → User → Auth → Password → Remember → TLS → SSH → Advanced → footer. Arrow keys move inside a Segmented; Space toggles a disclosure or checkbox; Esc closes; Shift-Tab wraps."] },
+  url: { intent:"Paste is the fastest path in. The secret never lives in a URL: it is split off on paste and never written on copy.",
+    points:["Paste a postgres://, mysql://, mariadb://, jdbc:… URL, a key=value DSN or a SQLite path into any field (not just the URL row).","The filled fields flash blue-tint for 1.6 s, then settle. The notice lists exactly what happened: password moved out, parameters mapped, unknown ones kept.","A URL for another engine never switches silently when the form already has input (HV-DRV-04). An untouched form switches and says so.","Unreadable text changes nothing and says which formats are accepted.","Copy as URL (row button, ⌘⇧C, Explorer menu) never includes the password, and says when the SSH tunnel was left out."],
+    sample:true },
+  errors: { intent:"An error is a sentence about the user's situation, a trail showing where it broke, and one-click fixes. The raw server text is one disclosure away, never the headline.",
+    points:["Codes first (SQLSTATE, vendor code), never localized server text (HV-CONN-03). Turkish servers send \"HATA\"; the title still comes from the class.","The step trail reuses the Test anatomy: the user sees the stage that failed.","Auth: \"Enter password again\" opens an inline field and counts attempts (stops at 3 to avoid lockouts).","Unknown database: the fix lists the databases the user can actually open, as one-click buttons.","Server too old: \"Connect anyway\" is a ghost button, pending a PO decision (question 3).","Copy details produces English text for support, whatever the UI language."] },
+  prod: { intent:"A quiet question, not an alarm: neutral title, no warning icon, the production consequences listed in plain words with harman's own marks.",
+    points:["Shown on the first save of a profile whose host is not on this Mac (D-004 option B). Local hosts and SQLite files get local automatically.","The choice list shows the environment marks the user will see in the Explorer.","Production lists what changes: capsule, confirmations, manual commit. The capsule word is red text with a swatch, never a filled badge (One Filled Badge Rule).","The primary button names the result: \"Save as production\". Enter confirms, Esc returns to the form unchanged.","Suggestion only when the host or name contains prod/prd/live; otherwise nothing is preselected and the primary stays disabled."] },
+  tls: { intent:"D-005 Auto: safe by default, with a guided path for self-signed servers instead of a silent downgrade.",
+    points:["Untrusted certificate: subject, issuer, expiry (formatted by locale), the SHA-256 fingerprint in two lines of 16 bytes, and the chain with the untrusted root named.","Pin is primary because it is the precise, reversible answer; Import CA… is for company CAs; Cancel ends the connect.","Pinning text states the two rules users must know: a changed certificate stops the connection, and a pin does not override expiry.","Unencrypted: plaintext is allowed only for loopback and private addresses, with a permanent badge in the capsule, status bar, connection sheet and Explorer row. It has no hue: it is a fact, not an alarm. Click the capsule badge for the explanation.","Public host without TLS: ask, with an SSH tunnel as the suggested way out."] },
+  ssh: { intent:"Make the route visible. Jump hosts are first-class, not hidden in ~/.ssh/config.",
+    points:["Import from ~/.ssh/config resolves Host, HostName, User, Port, IdentityFile and ProxyJump. Entries that use ProxyCommand are shown but disabled (D-037).","Auth is a Segmented: Agent / Key file / Password / Keyboard-interactive.","The Route row draws the actual path: this Mac → jump → bastion → database, so a 2-hop chain is never a surprise.","Host-key policy: Ask (default) / Accept new, stop on change / Known hosts only. There is no \"accept everything\".","New host key: the ED25519 SHA256 fingerprint, and a note that ~/.ssh/known_hosts is not written."] },
+  capsule: { intent:"The capsule is the single source of where you are. It changes shape with the connection state, and it is never dimmed by a dialog.",
+    points:["Connecting: the splash's amber run marker, the current pipeline step and a running clock. Esc cancels.","Connected: environment, name and engine, access, path with latency, and the unencrypted badge when it applies. Production keeps the one filled badge.","Failed: no hue; an alert glyph and a Retry segment. Clicking opens the error dialog.","Reconnecting: run marker, attempt count and the next attempt time (HV-CONN-05 backoff).","Session lost (D-085): a sticky toast lists what was rolled back and lost. It stays until dismissed."] },
+  explorer: { intent:"A flat list of saved connections grouped by environment, production first. No tree until M4.",
+    points:["Rows: engine glyph, name, environment mark, flags (read-only lock, SSH route, unencrypted), and engine or live latency on the right.","Keyboard: ↑/↓ select, ↵ connect, ⌘E edit, ⌘D duplicate, ⌘⇧C copy as URL, ⌫ delete, Shift-F10 or right-click for the menu.","Empty state: one primary action, a paste path and pg_service import (HV-SEC-04).","Delete removes the Keychain entry too and says so; the destructive button is outline-only until hover or focus."] },
+};
+const NEW_PRIMS = ["Dialog sizes 480 (wide) and 640 (form)","Checkbox","Select","Disclosure","Inline notice","Step trail","Choice list (radio rows)","Environment marks: dev ◉, test ●","Toast: sticky variant with actions","Capsule states: connecting, failed, reconnecting; unencrypted segment"];
+const KEY_PREFIX = { dialog:["dlg-","sec-","auth-","ret-","pgpass-","tls-sum","tls-mode","tls-auto","tls-require","tls-verify","tls-disable","tls-ca","tls-pin","tls-remove","adv-","test-","diag-","step-","unit-"], url:["url-","toast-copied","toast-no"], errors:["err-","fix-"], prod:["prod-","env-"], tls:["tls-title","tls-body","tls-subject","tls-issuer","tls-valid","tls-fp","tls-chain","tls-leaf","tls-inter","tls-root","tls-pin-note","tls-pin-btn","tls-import","tls-copy","unenc-","plain-","enc-"], ssh:["ssh-","hk-"], capsule:["cap-","lost-","sb-","toast-cancelled","toast-connected","path-","acc-"], explorer:["exp-","menu-","del-","toast-saved","toast-dup","toast-deleted","kv-","secret-","sheet-","home-","explorer","filter-conn","new-conn"] };
+function renderNotes() {
+  const el = $("notes"); el.classList.toggle("on", S.notes);
+  if (!S.notes) return;
+  const s = SURF[S.surface], N = NOTES[s.id];
+  const keys = Object.keys(I18N.en).filter(k => KEY_PREFIX[s.id].some(p => k.startsWith(p)));
+  el.innerHTML = `<div class="nh"><span class="tag">MOCK NOTES</span><span style="color:var(--text-2)">${S.surface + 1} · ${esc(s.label)}</span><span class="grow"></span><button class="btn ghost icon" data-act="notes" title="N">${ic("x","i12")}</button></div>
+  <div class="nbody"><h3>Intent</h3><p style="color:var(--text)">${esc(N.intent)}</p><h3>Decisions</h3><ul>${N.points.map(p => `<li>${esc(p)}</li>`).join("")}</ul>
+  ${N.sample ? `<h3>Try it</h3><p>Copy a sample, open the dialog (surface 1 or 2), click any field and paste with ⌘V.</p>
+    <div class="sample"><code>${esc(SAMPLE_PG)}</code><button class="btn" data-act="copySample" data-v="pg">Copy</button></div>
+    <div class="sample"><code>${esc(SAMPLE_MY)}</code><button class="btn" data-act="copySample" data-v="my">Copy</button></div>
+    <div class="sample"><code>host=localhost port=5432 dbname=shop user=postgres</code><button class="btn" data-act="copySample" data-v="dsn">Copy</button></div>` : ""}
+  <h3>NEW primitives (all surfaces)</h3><ul>${NEW_PRIMS.map(p => `<li>${esc(p)}</li>`).join("")}</ul>
+  <h3>Strings on this surface</h3><p>Turkish strings carry a <span class="por">PO review</span> marker until the PO signs them off.</p>
+  <table>${keys.map(k => `<tr><td class="k">${esc(k)}</td><td class="en">${esc(I18N.en[k])}</td><td>${esc(I18N.tr[k] ?? "")}<span class="por">PO review</span></td></tr>`).join("")}</table>
+  <h3>Mock keys</h3><p><code>1</code>–<code>8</code> surface · <code>[</code> <code>]</code> scenario · <code>T</code> theme · <code>L</code> language · <code>N</code> notes. In the browser, ⌘T and ⌘N belong to the browser: use Alt+T / Alt+N (⌥) instead; every ⌘ shortcut also works with Alt or Ctrl.</p></div>`;
+}
+
+/* ═════════════ Scenario setup ═════════════ */
+function filledForm() {
+  const f = blankForm("pg");
+  Object.assign(f, { name:"inventory-staging", nameTouched:true, host:"inv-db.acme.io", port:"5432", db:"inventory", user:"deploy", password:"hunter2-staging", ret:"forever" });
+  return f;
+}
+function setup(id, sc) {
+  clearTimers(); CONNS = clone(SEED);
+  Object.assign(S, { layers:[], menu:null, pop:null, toasts:[], sel:"orders-staging", cap:{ state:"connected", conn:"orders-staging" } });
+  const D = (f, mode, editId) => { const L = newDialog(f, mode, editId); S.layers.push(L); return L; };
+  if (id === "dialog") {
+    if (sc === "blank") D();
+    if (sc === "filled") D(filledForm());
+    if (sc === "testing") { const L = D(filledForm()); L.test = { state:"running", step:3, elapsed:0.21 }; }
+    if (sc === "passed") { const L = D(filledForm()); L.test = { state:"ok" }; }
+    if (sc === "failed") { const f = filledForm(); f.password = "wrong"; const L = D(f); L.test = { state:"fail", kind:"auth" }; }
+    if (sc === "sqlite") { const f = blankForm("sqlite"); Object.assign(f, { path:"~/code/shop/app.db", name:"app.db", env:"local", envTouched:true }); D(f); }
+    if (sc === "mysql") { const f = blankForm("mysql"); Object.assign(f, { name:"billing-replica", nameTouched:true, host:"billing-ro.acme.io", port:"3306", db:"billing", user:"reader", auth:"cert", cert:"~/.mysql/reader.crt", key:"~/.mysql/reader.key", tls:"verify-full" }); const L = D(f); L.open.tls = true; }
+  }
+  if (id === "url") {
+    if (sc === "before") D();
+    if (sc === "pasted") { const L = D(); applyPaste(L, SAMPLE_PG, true); }
+    if (sc === "switch") { const f = blankForm("pg"); f.host = "db-stg.acme.io"; const L = D(f); applyPaste(L, SAMPLE_MY, true); }
+    if (sc === "unrec") { const L = D(); applyPaste(L, "db-stg.acme.io orders deploy (port 5432)", true); }
+    if (sc === "copy") { S.sel = "orders-prod"; const c = conn("orders-prod"); const L = D(formFromConn(c), "edit", c.id); later(() => copyUrlToast(L.form), 50); }
+  }
+  if (id === "errors") {
+    const target = { auth:"orders-staging", dns:"api-dev", tls:"reports-test", db:"orders-staging", old:"legacy-crm" }[sc];
+    if (sc === "auth") conn(target).auth = "password";
+    S.sel = target; S.cap = { state:"failed", conn:target, kind:sc };
+    S.layers.push({ type:"error", conn:target, kind:sc, db: sc === "db" ? "orders_v2" : null, techOpen: sc === "auth" });
+  }
+  if (id === "prod") {
+    const f = blankForm("pg");
+    Object.assign(f, sc === "none" ? { host:"pg-eu-2.acme.io", db:"payments", user:"svc_payments" } : { host:"db-prod-us.acme.io", db:"orders", user:"app_ro" }, { port:"5432", password:"s3cret-prod", ro:true });
+    f.name = suggestName(f);
+    D(f);
+    S.layers.push({ type:"prod", choice: sc === "suggest" ? "production" : sc === "staging" ? "staging" : null, suggested: sc === "suggest", connect:true });
+  }
+  if (id === "tls") {
+    if (sc === "untrusted") { S.sel = "reports-test"; S.cap = { state:"connecting", conn:"reports-test", stage:"tls", elapsed:0.06 }; S.layers.push({ type:"tls", conn:"reports-test" }); }
+    if (sc === "unencrypted") { S.sel = "ci-mariadb"; S.cap = { state:"connected", conn:"ci-mariadb" }; S.pop = "unenc"; }
+    if (sc === "public") { S.sel = "partner-feed"; S.cap = { state:"connecting", conn:"partner-feed", stage:"tls", elapsed:0.09 }; S.layers.push({ type:"plain", conn:"partner-feed", remember:false }); }
+  }
+  if (id === "ssh") {
+    const c = conn("orders-prod"); S.sel = c.id;
+    if (sc === "hostkey") { S.cap = { state:"connecting", conn:c.id, stage:"ssh", elapsed:0.19 }; S.layers.push({ type:"hostkey", conn:c.id }); }
+    else {
+      const L = D(formFromConn(c), "edit", c.id); L.open.ssh = true;
+      if (sc === "import") later(() => openSshImport(), 30);
+    }
+  }
+  if (id === "capsule") {
+    const map = { connecting:["connecting","orders-staging"], connected:["connected","orders-staging"], prod:["connected","orders-prod"], failed:["failed","orders-staging"], reconnecting:["reconnecting","orders-prod"], lost:["connected","orders-prod"], live:["none", null] };
+    const [st, cid] = map[sc]; S.cap = { state:st, conn:cid, stage: st === "connecting" ? "tls" : null, elapsed:0.08, attempt:3 }; if (cid) S.sel = cid;
+    if (sc === "lost") later(lostToast, 30);
+    if (sc === "live") { S.sel = "orders-prod"; later(() => connect("orders-prod"), 400); }
+  }
+  if (id === "explorer") {
+    if (sc === "empty") { CONNS = []; S.sel = null; S.cap = { state:"none" }; }
+    if (sc === "menu") later(() => openCtxMenu("orders-staging"), 30);
+    if (sc === "delete") S.layers.push({ type:"delete", conn:"orders-staging" });
+  }
+}
+function go(surface, sc) {
+  S.surface = surface; const s = SURF[surface]; S.sc[s.id] = sc || S.sc[s.id] || s.sc[0][0];
+  setup(s.id, S.sc[s.id]); renderAll(); focusInitial();
+  const u = new URLSearchParams(location.search); u.set("s", surface + 1); u.set("sc", S.sc[s.id]); u.set("theme", S.theme); u.set("lang", LANG);
+  history.replaceState(null, "", "?" + u.toString());
+}
+function focusInitial() {
+  const L = topLayer();
+  if (!L) { $("tree")?.focus({ preventScroll:true }); return; }
+  const pick = { conn:'[data-fk="f-host"],[data-fk="f-path"]', prod:'[data-fk="prodsave"],[aria-checked="true"].choice,[data-fk="ch-production"]', tls:'[data-fk="tpin"]', plain:'[data-fk="pc2"]', hostkey:'[data-fk="hk1"]', delete:'[data-fk="d0"]', error:'[data-fk="fx1"],[data-fk="fxdb0"],[data-fk="close"]' }[L.type];
+  const el = pick && document.querySelector(`.layer:last-child ${pick.split(",").join(", .layer:last-child ")}`);
+  el?.focus({ preventScroll:true });
+}
+
+/* ═════════════ Flows ═════════════ */
+function applyPaste(L, text, quiet) {
+  const p = parseConn(text), f = L.form;
+  if (p.kind !== "ok") { L.notice = { kind:"unrec" }; return; }
+  const touched = !!(f.host || f.db || f.user || f.path);
+  if (p.engine !== f.engine && touched) { L.notice = { kind:"switch", parsed:p, current:f.engine, text }; return; }
+  fillFrom(L, p, p.engine !== f.engine ? p.engine : null);
+}
+function fillFrom(L, p, engineSet) {
+  L.undo = clone(L.form);
+  const f = L.form;
+  if (engineSet || p.engine !== f.engine) { f.engine = p.engine; if (p.engine !== "pg" && f.auth === "pgpass") f.auth = "password"; }
+  const filled = [];
+  for (const [k, v] of Object.entries(p.fields)) { if (v !== "" && v != null) { f[k] = v; filled.push(k); } }
+  if (p.secret) { f.password = p.secret; f.pwFrom = "url"; f.auth = "password"; filled.push("password"); }
+  if (p.extras.length) f.extras = p.extras;
+  if (!f.nameTouched) { f.name = suggestName(f); filled.push("name"); }
+  if (f.engine === "sqlite") { f.env = "local"; }
+  L.filled = filled;
+  if (p.fields.tls && p.fields.tls !== "auto") L.open.tls = false;
+  L.notice = { kind:"filled", secret: !!p.secret, ret: f.ret, mapped: p.mapped, extras: p.extras, engineSet };
+  L.test = { state:"idle" };
+}
+function copyUrlToast(f) {
+  const url = renderURL(f);
+  try { navigator.clipboard?.writeText(url).catch(() => {}); } catch {}
+  toast(`<div class="t1">${esc(t("toast-copied"))}</div><div class="mono">${esc(url)}</div><div class="l2">${esc(t("toast-nopw"))}${f.ssh && f.ssh.on ? " " + esc(t("toast-nossh")) : ""}</div>`, { icon:"copy", wide:true });
+}
+
+function runTest(L) {
+  clearTimers();
+  const steps = stepsFor(L.form), out = outcomeOf(L.form), failAt = out === "ok" ? -1 : steps.indexOf(FAIL_STEP[out]);
+  L.test = { state:"running", step:0, elapsed:0, t0:performance.now() };
+  renderLayers();
+  TICK = setInterval(() => { if (L.test.state !== "running") return clearInterval(TICK); L.test.elapsed = (performance.now() - L.test.t0) / 1000; const n = document.querySelector(".tres .th .mono"); if (n) n.textContent = secs(L.test.elapsed, 2); }, 50);
+  const stepDur = s => Math.max(140, Math.min(420, STEP_MS[s] * 2));
+  let acc = 0;
+  steps.forEach((s, i) => {
+    acc += stepDur(s);
+    later(() => {
+      if (L.test.state !== "running") return;
+      if (i === failAt) { L.test = { state:"fail", kind:out }; clearInterval(TICK); renderLayers(); return; }
+      L.test.step = i + 1;
+      if (i === steps.length - 1) { L.test = { state:"ok" }; clearInterval(TICK); }
+      renderLayers();
+    }, acc);
+  });
+}
+
+function trySave(connectAfter) {
+  const L = connLayer(); if (!L) return;
+  const f = L.form;
+  if (f.engine !== "sqlite" && !f.host) { document.querySelector('[data-fk="f-host"]')?.focus(); return; }
+  if (!f.env) {
+    if (f.engine === "sqlite" || isLocalHost(f.host)) f.env = "local";
+    else { const sug = /prod|prd|live/i.test(f.host + " " + f.name); S.layers.push({ type:"prod", choice: sug ? "production" : null, suggested: sug, connect: connectAfter }); renderLayers(); focusInitial(); return; }
+  }
+  commitSave(L, connectAfter);
+}
+function commitSave(L, connectAfter) {
+  const f = L.form, id = f.name || suggestName(f) || "connection";
+  const rec = { id, engine:f.engine, ver: f.engine === "pg" ? "16.4" : f.engine === "mysql" ? "8.4.3" : f.engine === "maria" ? "11.4.4" : "3.47.2", env:f.env, ro:f.ro,
+    host:f.host, port:+(f.port || ENG[f.engine].port || 0), db:f.db, user:f.user, auth:f.auth, ret:f.ret, path:f.path, tls: f.pin ? "pinned" : isLocalHost(f.host) || isPrivate(f.host) ? (f.tls === "auto" && isLocalHost(f.host) ? "none" : "verified") : "verified",
+    ssh: f.ssh.on ? clone(f.ssh) : null, lat: f.ssh.on ? 31 : 5, outcome: outcomeOf(f), tlsMode:f.tls, app:f.app, extras:clone(f.extras) };
+  if (L.mode === "edit") { const i = CONNS.findIndex(c => c.id === L.editId); if (i >= 0) CONNS[i] = { ...CONNS[i], ...rec }; } else { CONNS = CONNS.filter(c => c.id !== id); CONNS.push(rec); }
+  S.layers = []; S.sel = id;
+  renderAll();
+  toast(`<div>${esc(t("toast-saved", { name:id }))}</div>`, { icon:"check", ok:true });
+  if (connectAfter) connect(id);
+}
+
+function connect(id) {
+  clearTimers();
+  const c = conn(id); if (!c) return;
+  const f = formFromConn(c); if (c.ssh) f.ssh = { ...f.ssh, on:true };
+  const steps = stepsFor(f), out = c.outcome || (c.tls === "untrusted" ? "tlsAsk" : c.tls === "none-public" ? "plainAsk" : "ok");
+  S.sel = id; S.cap = { state:"connecting", conn:id, stage:steps[0], elapsed:0, t0:performance.now() };
+  S.pop = null; S.menu = null;
+  renderTitle(); renderExplorer(); renderSheet(); renderStatus(); renderMenus();
+  TICK = setInterval(() => { if (S.cap.state !== "connecting") return; S.cap.elapsed = (performance.now() - S.cap.t0) / 1000; const n = $("capClock"); if (n) n.textContent = secs(S.cap.elapsed, 2); }, 50);
+  let acc = 0;
+  steps.forEach((s, i) => {
+    acc += Math.max(220, Math.min(520, STEP_MS[s] * 2.4));
+    later(() => {
+      if (S.cap.state !== "connecting" || S.cap.conn !== id) return;
+      const next = steps[i + 1];
+      if (s === "tls" && out === "tlsAsk") { S.layers.push({ type:"tls", conn:id }); renderLayers(); focusInitial(); return; }
+      if (s === "tls" && out === "plainAsk") { S.layers.push({ type:"plain", conn:id, remember:false }); renderLayers(); focusInitial(); return; }
+      if (["auth", "dns", "db", "old"].includes(out) && s === FAIL_STEP[out]) { failConnect(id, out); return; }
+      if (!next) { S.cap = { state:"connected", conn:id }; clearInterval(TICK); renderTitle(); renderExplorer(); renderStatus(); toast(`<div>${esc(t("toast-connected", { name:id }))}</div>`, { icon:"check", ok:true }); return; }
+      S.cap.stage = next; renderTitle(); renderStatus();
+    }, acc);
+  });
+}
+function resumeConnect(id, after) {
+  // continue after an interaction (pin / plaintext / host key)
+  const c = conn(id); if (after) after(c);
+  S.layers = S.layers.filter(l => !["tls", "plain", "hostkey", "error"].includes(l.type));
+  renderLayers();
+  S.cap = { state:"connecting", conn:id, stage:"auth", elapsed:S.cap.elapsed || 0.1, t0:performance.now() - (S.cap.elapsed || 0.1) * 1000 };
+  renderTitle(); renderStatus();
+  later(() => { S.cap.stage = "check"; renderTitle(); }, 260);
+  later(() => { clearInterval(TICK); S.cap = { state:"connected", conn:id }; renderTitle(); renderExplorer(); renderSheet(); renderStatus(); toast(`<div>${esc(t("toast-connected", { name:id }))}</div>`, { icon:"check", ok:true }); }, 560);
+}
+function failConnect(id, kind) {
+  clearInterval(TICK);
+  S.cap = { state:"failed", conn:id, kind };
+  S.layers.push({ type:"error", conn:id, kind, db: kind === "db" ? conn(id).db : null });
+  renderAll(); focusInitial();
+}
+function cancelConnect() {
+  const id = S.cap.conn; clearTimers(); S.cap = { state:"none" }; S.layers = S.layers.filter(l => l.type === "conn");
+  renderAll(); toast(`<div>${esc(t("toast-cancelled", { name:id }))}</div>`, { icon:"info" });
+}
+
+/* menus */
+function openMenu(m, anchorEl, below = true) {
+  const W = $("win").getBoundingClientRect(), r = anchorEl.getBoundingClientRect();
+  S.menu = { ...m, x: r.left - W.left, y: (below ? r.bottom + 4 : r.top) - W.top, active: m.active ?? m.items.findIndex(i => !i.sep && !i.dis), opener: anchorEl.dataset.fk };
+  renderMenus();
+  const el = $("menu"), mr = el.getBoundingClientRect();
+  if (mr.bottom > W.bottom - 4) { S.menu.y = Math.max(4, r.top - W.top - mr.height - 4); el.style.top = S.menu.y + "px"; }
+  if (mr.right > W.right - 4) { S.menu.x = W.width - mr.width - 8; el.style.left = S.menu.x + "px"; }
+}
+function closeMenu(restore = true) {
+  const op = S.menu?.opener; S.menu = null; renderMenus();
+  if (restore && op) document.querySelector(`[data-fk="${CSS.escape(op)}"]`)?.focus({ preventScroll:true });
+}
+function pickMenu(i) {
+  const M = S.menu, it = M.items[i]; if (!it || it.sep || it.dis) return;
+  closeMenu(); M.onPick(it);
+}
+function openSelect(btn) {
+  const L = connLayer(), f = L.form, name = btn.dataset.name;
+  let items = [], cur;
+  if (name === "ret") { cur = f.ret; items = RET.map(v => ({ v, label:t("ret-" + v), hint:t("ret-" + v + "-h") })); }
+  if (name === "tls") { cur = f.tls; items = TLSM.map(v => ({ v, label:t("tls-" + v), hint:t("tls-" + v + "-h") })); }
+  if (name === "policy") { cur = f.ssh.policy; items = [["ask","hk-ask"],["accept","hk-accept"],["strict","hk-strict"]].map(([v, k]) => ({ v, label:t(k) })); }
+  if (name === "keepalive") { cur = "off"; items = [["off", t("adv-off")], ["30", "30 " + t("unit-s")], ["60", "60 " + t("unit-s")], ["300", "300 " + t("unit-s")]].map(([v, l]) => ({ v, label:l })); }
+  items.forEach(i => i.checked = i.v === cur);
+  openMenu({ items, checks:true, active: items.findIndex(i => i.checked), w: btn.offsetWidth, onPick: it => {
+    if (name === "ret") f.ret = it.v; if (name === "tls") f.tls = it.v; if (name === "policy") f.ssh.policy = it.v;
+    renderLayers(); document.querySelector(`[data-fk="${btn.dataset.fk}"]`)?.focus();
+  } }, btn);
+}
+function openSshImport() {
+  const btn = document.querySelector('[data-fk="sshimp"]'); if (!btn) return;
+  const items = [
+    { v:"bastion-eu", label:"bastion-eu", hint:"deploy@bastion.acme.io · ProxyJump jump-eu", mono:true },
+    { v:"jump-eu", label:"jump-eu", hint:"deploy@jump-eu.acme.io", mono:true },
+    { v:"build-box", label:"build-box", hint:"ci@10.0.4.7 · IdentityFile ~/.ssh/ci_ed25519", mono:true },
+    { v:"legacy-gw", label:"legacy-gw", hint:t("ssh-proxycmd"), mono:true, dis:true },
+  ];
+  openMenu({ items, title:t("ssh-import-title"), onPick: it => {
+    const L = connLayer(), f = L.form;
+    if (it.v === "bastion-eu") Object.assign(f.ssh, { on:true, host:"bastion.acme.io", user:"deploy", port:"22", auth:"agent", hops:[{ host:"jump-eu.acme.io", user:"deploy" }] });
+    if (it.v === "jump-eu") Object.assign(f.ssh, { on:true, host:"jump-eu.acme.io", user:"deploy", port:"22", auth:"agent", hops:[] });
+    if (it.v === "build-box") Object.assign(f.ssh, { on:true, host:"10.0.4.7", user:"ci", port:"22", auth:"key", key:"~/.ssh/ci_ed25519", hops:[] });
+    L.filled = ["ssh.host", "ssh.user"]; L.notice = { kind:"ssh", alias:it.v }; renderLayers();
+  } }, btn);
+}
+function openCtxMenu(id, at) {
+  const row = document.querySelector(`[data-row="${CSS.escape(id)}"]`); if (!row) return;
+  S.sel = id; renderExplorer(); renderSheet();
+  const live = S.cap.conn === id && S.cap.state === "connected";
+  const items = [
+    { v:"connect", label:t(live ? "menu-disconnect" : "menu-connect"), kbd:"↵" }, { v:"edit", label:t("menu-edit"), kbd:"⌘E" }, { v:"dup", label:t("menu-dup"), kbd:"⌘D" },
+    { v:"copy", label:t("menu-copy-url"), kbd:"⌘⇧C" }, { sep:true }, { v:"delete", label:t("menu-delete"), kbd:"⌫", danger:true }];
+  const r2 = document.querySelector(`[data-row="${CSS.escape(id)}"]`);
+  const anchor = at ? { getBoundingClientRect: () => ({ left:at.x, right:at.x, top:at.y, bottom:at.y }), dataset:{ fk:"tree" } } : { getBoundingClientRect: () => { const r = r2.getBoundingClientRect(); return { left:r.left + 120, right:r.left + 120, top:r.top, bottom:r.bottom - 2 }; }, dataset:{ fk:"tree" } };
+  openMenu({ items, onPick: it => rowAction(it.v, id) }, anchor);
+}
+function rowAction(v, id) {
+  const c = conn(id); if (!c) return;
+  if (v === "connect") { if (S.cap.conn === id && S.cap.state === "connected") { S.cap = { state:"none" }; renderAll(); } else connect(id); }
+  if (v === "edit") { S.layers = [newDialog(formFromConn(c), "edit", id)]; renderLayers(); focusInitial(); }
+  if (v === "dup") { const n = id + "-copy"; CONNS.splice(CONNS.indexOf(c) + 1, 0, { ...clone(c), id:n, outcome:c.outcome }); S.sel = n; renderExplorer(); renderSheet(); toast(`<div>${esc(t("toast-dup", { name:n }))}</div>`, { icon:"copy" }); }
+  if (v === "copy") copyUrlToast(formFromConn(c));
+  if (v === "delete") { S.layers = [{ type:"delete", conn:id }]; renderLayers(); focusInitial(); }
+}
+
+/* ═════════════ Events ═════════════ */
+const ACT = {
+  surf: a => go(+a.dataset.i), scen: a => go(S.surface, a.dataset.k),
+  lang: a => { LANG = a.dataset.v; renderAll(); }, theme: a => { S.theme = a.dataset.v; renderAll(); },
+  toggleLang: () => { LANG = LANG === "en" ? "tr" : "en"; renderAll(); },
+  notes: () => { S.notes = !S.notes; renderMockbar(); renderNotes(); },
+  copySample: a => { const v = { pg:SAMPLE_PG, my:SAMPLE_MY, dsn:"host=localhost port=5432 dbname=shop user=postgres" }[a.dataset.v]; try { navigator.clipboard.writeText(v).catch(() => {}); } catch {} a.textContent = "Copied"; },
+  noop: () => {},
+  newConn: () => { S.layers = [newDialog()]; S.menu = null; renderLayers(); renderMenus(); focusInitial(); },
+  pasteNew: async () => { let txt = SAMPLE_PG; try { const c = await navigator.clipboard.readText(); if (looksLikeConn(c)) txt = c; } catch {} const L = newDialog(); S.layers = [L]; applyPaste(L, txt); renderLayers(); focusInitial(); },
+  importSvc: () => { CONNS = clone(SEED).filter(c => ["orders-staging", "local-pg"].includes(c.id)); S.sel = "orders-staging"; S.cap = { state:"none" }; renderAll(); toast(`<div class="t1">pg_service.conf</div><div class="l2">2 × [service] → orders-staging, local-pg</div>`, { icon:"file-up" }); },
+  closeLayer: () => closeTop(),
+  seg: a => {
+    const L = connLayer(), f = L?.form, n = a.dataset.name, v = a.dataset.v;
+    if (!f) return;
+    if (n === "engine") { if (f.engine !== v) { f.engine = v; f.port = ""; if (v !== "pg" && f.auth === "pgpass") f.auth = "password"; if (v === "sqlite" && !f.envTouched) f.env = "local"; if (v !== "sqlite" && f.env === "local" && !f.envTouched) f.env = null; L.test = { state:"idle" }; } }
+    if (n === "env") { f.env = v; f.envTouched = true; }
+    if (n === "auth") f.auth = v;
+    if (n === "sshauth") f.ssh.auth = v;
+    renderLayers(); document.querySelector(`[data-fk="${a.dataset.fk}"]`)?.focus();
+  },
+  cb: a => {
+    const p = a.dataset.path;
+    if (p === "plainRemember") { topLayer().remember = !topLayer().remember; renderLayers(); return; }
+    const L = connLayer(); setp(L.form, p, !get(L.form, p));
+    if (p === "ssh.on" && L.form.ssh.on && !L.form.ssh.host) L.form.ssh.port = "22";
+    renderLayers();
+  },
+  select: a => openSelect(a),
+  disc: a => { const L = connLayer(); L.open[a.dataset.id] = !L.open[a.dataset.id]; renderLayers(); },
+  copyUrl: () => copyUrlToast(connLayer().form),
+  undoPaste: () => { const L = connLayer(); if (L.undo) L.form = L.undo; L.notice = null; L.filled = []; renderLayers(); },
+  dismissNotice: () => { const L = connLayer(); L.notice = null; renderLayers(); document.querySelector('[data-fk="f-host"]')?.focus(); },
+  acceptSwitch: () => { const L = connLayer(), n = L.notice; L.form.host = ""; fillFrom(L, n.parsed, n.parsed.engine); renderLayers(); },
+  choose: a => { const L = connLayer(); if (a.dataset.fk === "choose") { L.form.path = "~/code/shop/app.db"; renderLayers(); } },
+  unpin: () => { connLayer().form.pin = null; renderLayers(); },
+  addExtra: () => { connLayer().form.extras.push(["", ""]); renderLayers(); document.querySelector(`[data-fk="f-extra${connLayer().form.extras.length - 1}k"]`)?.focus(); },
+  rmExtra: a => { connLayer().form.extras.splice(+a.dataset.i, 1); renderLayers(); },
+  addHop: () => { const f = connLayer().form; f.ssh.hops.push({ host:"", user:f.ssh.user }); renderLayers(); document.querySelector(`[data-fk="f-ssh.hops.${f.ssh.hops.length - 1}.host"]`)?.focus(); },
+  rmHop: a => { connLayer().form.ssh.hops.splice(+a.dataset.i, 1); renderLayers(); },
+  sshImport: () => openSshImport(),
+  test: () => runTest(connLayer()),
+  stopTest: () => { clearTimers(); connLayer().test = { state:"idle" }; renderLayers(); },
+  copyReport: () => toast(`<div>${esc(t("test-copy"))} ✓</div>`, { icon:"copy" }),
+  save: () => trySave(false), saveConnect: () => trySave(true),
+  "choose-env": a => { topLayer().choice = a.dataset.v; renderLayers(); document.querySelector(`[data-fk="ch-${a.dataset.v}"]`)?.focus(); },
+  prodSave: () => { const P = S.layers.pop(), L = connLayer(); L.form.env = P.choice; L.form.envTouched = true; commitSave(L, P.connect); },
+  techToggle: () => { const L = topLayer(); if (L.type === "error") L.techOpen = !L.techOpen; else connLayer().techOpen = !connLayer().techOpen; renderLayers(); },
+  fixReenter: () => { const L = topLayer(); if (L.type === "error") { L.reenter = true; renderLayers(); $("layers").querySelector('[data-fk="f-errpw"]')?.focus(); } else { const C = connLayer(); C.test = { state:"idle" }; C.form.password = ""; renderLayers(); document.querySelector('[data-fk="f-password"]')?.focus(); } },
+  retryPw: () => { const L = topLayer(); conn(L.conn).outcome = null; S.layers = []; renderLayers(); connect(L.conn); },
+  fixRetry: () => { const L = topLayer(); if (L.type === "error") { S.layers = []; renderLayers(); connect(L.conn); } else runTest(connLayer()); },
+  fixEdit: () => { const L = topLayer(); const c = conn(L.conn); S.layers = [newDialog(formFromConn(c), "edit", c.id)]; renderLayers(); focusInitial(); },
+  fixSsh: () => { const L = topLayer(); if (L.type === "error") { const c = conn(L.conn); const D = newDialog(formFromConn(c), "edit", c.id); D.open.ssh = true; D.form.ssh.on = true; S.layers = [D]; } else { const C = connLayer(); C.open.ssh = true; C.form.ssh.on = true; C.test = { state:"idle" }; } renderLayers(); document.querySelector('[data-fk="f-ssh.host"]')?.focus(); },
+  fixCert: () => { const L = topLayer(); if (L.type === "error") { S.layers.push({ type:"tls", conn:L.conn }); } else { const C = connLayer(); const tmp = conn("reports-test"); S.layers.push({ type:"tls", conn:tmp.id, fromTest:true }); } renderLayers(); focusInitial(); },
+  fixDb: a => { const L = topLayer(); if (L.type === "error") { const c = conn(L.conn); c.db = a.dataset.db; c.outcome = null; S.layers = []; renderLayers(); connect(c.id); } else { const C = connLayer(); C.form.db = a.dataset.db; runTest(C); } },
+  fixVersions: () => toast(`<div>${esc(t("toast-versions"))}</div>`, { icon:"external-link" }),
+  fixAnyway: () => { const L = topLayer(); const c = conn(L.conn); c.outcome = null; S.layers = []; renderLayers(); connect(c.id); },
+  copyErr: () => toast(`<div>${esc(t("err-copy"))} ✓</div>`, { icon:"copy" }),
+  copyFp: () => toast(`<div>${esc(t("tls-copy-fp"))} ✓</div>`, { icon:"copy" }),
+  tlsCancel: () => { const L = S.layers.pop(); if (L.fromTest) { renderLayers(); return; } if (S.cap.state === "connecting") { clearTimers(); S.cap = { state:"failed", conn:L.conn, kind:"tls" }; } renderAll(); },
+  pin: () => { const L = topLayer(); if (L.fromTest) { S.layers.pop(); const C = connLayer(); C.form.pin = FP.slice(0, 11) + "…" + FP.slice(-5); runTest(C); return; } resumeConnect(L.conn, c => { c.tls = "pinned"; c.outcome = null; }); },
+  importCa: () => toast(`<div>${esc(t("tls-import"))}</div><div class="l2 mono">~/Downloads/acme-internal-ca-g2.pem</div>`, { icon:"file-up" }),
+  plainConnect: () => { const L = topLayer(); resumeConnect(L.conn, c => { c.tls = "none"; }); },
+  plainSsh: () => { const L = topLayer(); const c = conn(L.conn); clearTimers(); S.cap = { state:"none" }; const D = newDialog(formFromConn(c), "edit", c.id); D.open.ssh = true; D.form.ssh.on = true; S.layers = [D]; renderAll(); document.querySelector('[data-fk="f-ssh.host"]')?.focus(); },
+  hkTrust: () => { const L = topLayer(); resumeConnect(L.conn); },
+  doDelete: () => { const L = S.layers.pop(); CONNS = CONNS.filter(c => c.id !== L.conn); if (S.cap.conn === L.conn) S.cap = { state:"none" }; S.sel = CONNS[0]?.id || null; renderAll(); toast(`<div>${esc(t("toast-deleted", { name:L.conn }))}</div>`, { icon:"trash-2" }); },
+  dismissToast: a => { S.toasts = S.toasts.filter(x => x.id !== +a.dataset.id); renderToasts(); },
+  capClick: (a, e) => {
+    if (S.cap.state === "failed") { if (e.target.closest(".cp-retry")) { const id = S.cap.conn; conn(id).outcome = null; connect(id); return; } S.layers = [{ type:"error", conn:S.cap.conn, kind:S.cap.kind || "auth", db: S.cap.kind === "db" ? "orders_v2" : null }]; renderLayers(); focusInitial(); return; }
+    const items = CONNS.map(c => ({ v:c.id, label:c.id, hint:ENG[c.engine].label, mono:true, checked:S.cap.conn === c.id }));
+    openMenu({ items, checks:true, onPick: it => connect(it.v) }, $("capslot").firstElementChild);
+  },
+  unencPop: () => { S.pop = S.pop === "unenc" ? null : "unenc"; renderMenus(); },
+};
+document.addEventListener("click", e => {
+  const mi = e.target.closest("[data-mi]");
+  if (mi) { pickMenu(+mi.dataset.mi); return; }
+  if (S.menu && !e.target.closest("#menu")) { closeMenu(false); if (!e.target.closest("[data-act]")) return; }
+  if (S.pop && !e.target.closest(".pop") && !e.target.closest("#unencSeg")) { S.pop = null; renderMenus(); }
+  const a = e.target.closest("[data-act]");
+  if (a && ACT[a.dataset.act]) { e.preventDefault(); ACT[a.dataset.act](a, e); return; }
+  const row = e.target.closest("[data-row]");
+  if (row) { S.sel = row.dataset.row; renderExplorer(); renderSheet(); $("tree")?.focus({ preventScroll:true }); }
+  if (e.target.classList.contains("layer") && topLayer()?.type !== "conn") closeTop();
+});
+document.addEventListener("dblclick", e => { const row = e.target.closest("[data-row]"); if (row) connect(row.dataset.row); });
+document.addEventListener("contextmenu", e => { const row = e.target.closest("[data-row]"); if (row) { e.preventDefault(); openCtxMenu(row.dataset.row, { x:e.clientX, y:e.clientY }); } });
+document.addEventListener("input", e => {
+  const p = e.target.dataset.f; if (!p) return;
+  const L = connLayer(), v = e.target.value;
+  if (p === "errpw") return;
+  if (!L) return;
+  const f = L.form;
+  if (p === "url") return;
+  const mExtra = p.match(/^extra(\d+)([kv])$/);
+  if (mExtra) { f.extras[+mExtra[1]][mExtra[2] === "k" ? 0 : 1] = v; }
+  else if (p === "timeout") f.timeout = +v || 0;
+  else setp(f, p, v);
+  if (p === "name") f.nameTouched = !!v;
+  if (p === "password") f.pwFrom = null;
+  if (!f.nameTouched && ["host", "db", "path"].includes(p)) { f.name = suggestName(f); const n = document.querySelector('[data-f="name"]'); if (n) n.value = f.name; }
+  const u = document.querySelector('[data-f="url"]'); if (u && document.activeElement !== u) u.value = renderURL(f);
+  if (["host"].includes(p)) {
+    // env hint depends on locality; re-render lazily when the hint would change
+    const remote = f.host && !isLocalHost(f.host), had = !!document.querySelector(".hintrow");
+    if (!f.envTouched && (remote !== L._remote)) { L._remote = remote; renderLayers(); }
+  }
+  if (L.test.state !== "idle" && L.test.state !== "running") { L.test = { state:"idle" }; renderLayers(); }
+});
+document.addEventListener("change", e => {
+  if (e.target.dataset.f !== "url") return;
+  const L = connLayer(); if (!L) return;
+  if (e.target.value.trim() && e.target.value !== renderURL(L.form)) { applyPaste(L, e.target.value); renderLayers(); }
+});
+document.addEventListener("paste", e => {
+  const L = topLayer(); if (!L || L.type !== "conn") return;
+  const tgt = e.target; if (tgt.type === "password") return;
+  const text = e.clipboardData?.getData("text") || "";
+  if (!looksLikeConn(text) && tgt.dataset?.f !== "url") return;
+  e.preventDefault(); applyPaste(L, text); renderLayers();
+});
+
+function closeTop() {
+  if (S.menu) return closeMenu();
+  const L = S.layers.pop();
+  if (L && (L.type === "tls" || L.type === "plain" || L.type === "hostkey") && S.cap.state === "connecting" && !L.fromTest) { clearTimers(); S.cap = { state:"failed", conn:L.conn, kind: L.type === "tls" ? "tls" : "dns" }; renderAll(); return; }
+  if (L && L.type === "conn" && L.test.state === "running") clearTimers();
+  renderLayers(); renderMenus();
+  if (!S.layers.length) $("tree")?.focus({ preventScroll:true }); else focusInitial();
+}
+function focusables(root) { return [...root.querySelectorAll('button:not([disabled]):not([tabindex="-1"]), input:not([tabindex="-1"]), [tabindex="0"]')].filter(el => el.offsetParent !== null); }
+const mod = e => e.metaKey || e.ctrlKey || e.altKey;
+document.addEventListener("keydown", e => {
+  const tag = e.target.tagName, inField = tag === "INPUT" || tag === "TEXTAREA";
+  /* menu */
+  if (S.menu) {
+    const M = S.menu, n = M.items.length, step = d => { let i = M.active; do { i = (i + d + n) % n; } while ((M.items[i].sep || M.items[i].dis) && i !== M.active); M.active = i; renderMenus(); };
+    if (e.key === "ArrowDown") { e.preventDefault(); step(1); } else if (e.key === "ArrowUp") { e.preventDefault(); step(-1); }
+    else if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickMenu(M.active); }
+    else if (e.key === "Escape" || e.key === "Tab") { e.preventDefault(); closeMenu(); }
+    return;
+  }
+  const L = topLayer();
+  /* layers */
+  if (L) {
+    if (e.key === "Escape") {
+      if (L.type === "conn" && L.test.state === "running") { ACT.stopTest(); e.preventDefault(); return; }
+      e.preventDefault(); closeTop(); return;
+    }
+    if (e.key === "Tab") {
+      const root = $("layers").lastElementChild, fs = focusables(root); if (!fs.length) return;
+      const i = fs.indexOf(document.activeElement);
+      e.preventDefault(); (e.shiftKey ? fs[(i - 1 + fs.length) % fs.length] : fs[(i + 1) % fs.length]).focus();
+      return;
+    }
+    if (L.type === "conn" && mod(e)) {
+      if (e.code === "Enter") { e.preventDefault(); return trySave(true); }
+      if (e.code === "KeyS") { e.preventDefault(); return trySave(false); }
+      if (e.code === "KeyT") { e.preventDefault(); return runTest(L); }
+      if (e.code === "KeyC" && e.shiftKey) { e.preventDefault(); return copyUrlToast(L.form); }
+    }
+    if (L.type === "prod" && e.key === "Enter" && L.choice && !e.target.closest(".choice")) { e.preventDefault(); return ACT.prodSave(); }
+    if (L.type === "prod" && e.key === "Enter" && e.target.closest(".choice")) { e.preventDefault(); return ACT.prodSave(); }
+    if (L.type === "error" && L.reenter && e.key === "Enter" && e.target.dataset.f === "errpw") { e.preventDefault(); return ACT.retryPw(); }
+    /* radio-like groups: arrows move + select */
+    const grp = e.target.closest(".seg, .choices");
+    if (grp && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) {
+      const bs = [...grp.querySelectorAll("button")], i = bs.indexOf(e.target), d = (e.key === "ArrowRight" || e.key === "ArrowDown") ? 1 : -1;
+      const nb = bs[(i + d + bs.length) % bs.length]; e.preventDefault(); nb.click(); return;
+    }
+    if (e.target.classList?.contains("select") && (e.key === "ArrowDown" || e.key === " " || e.key === "Enter")) { e.preventDefault(); openSelect(e.target); return; }
+    if (inField || mod(e)) return;
+    return mockKeys(e);
+  }
+  /* capsule: Esc cancels a connect */
+  if (e.key === "Escape" && S.cap.state === "connecting") { e.preventDefault(); return cancelConnect(); }
+  if (e.key === "Escape" && S.pop) { S.pop = null; renderMenus(); return; }
+  /* workspace shortcuts */
+  if (mod(e) && e.code === "KeyN") { e.preventDefault(); return ACT.newConn(); }
+  if (mod(e) && e.shiftKey && e.code === "KeyV") { e.preventDefault(); return ACT.pasteNew(); }
+  if (inField) return;
+  const tree = e.target.id === "tree";
+  if (tree && S.sel) {
+    const ids = ENV_ORDER.flatMap(env => CONNS.filter(c => c.env === env).map(c => c.id)), i = ids.indexOf(S.sel);
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); S.sel = ids[Math.max(0, Math.min(ids.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))]; renderExplorer(); renderSheet(); $("tree").focus(); document.querySelector(".row.sel")?.scrollIntoView({ block:"nearest" }); return; }
+    if (e.key === "Enter") { e.preventDefault(); return rowAction("connect", S.sel); }
+    if (mod(e) && e.code === "KeyE") { e.preventDefault(); return rowAction("edit", S.sel); }
+    if (mod(e) && e.code === "KeyD") { e.preventDefault(); return rowAction("dup", S.sel); }
+    if (mod(e) && e.shiftKey && e.code === "KeyC") { e.preventDefault(); return rowAction("copy", S.sel); }
+    if (e.key === "Backspace" || e.key === "Delete") { e.preventDefault(); return rowAction("delete", S.sel); }
+    if ((e.shiftKey && e.key === "F10") || e.key === "ContextMenu") { e.preventDefault(); return openCtxMenu(S.sel); }
+  }
+  if (mod(e)) return;
+  mockKeys(e);
+});
+function mockKeys(e) {
+  const k = e.key;
+  if (/^[1-8]$/.test(k)) return go(+k - 1);
+  if (k === "]" || k === "[") { const s = SURF[S.surface], i = s.sc.findIndex(x => x[0] === S.sc[s.id]); return go(S.surface, s.sc[(i + (k === "]" ? 1 : -1) + s.sc.length) % s.sc.length][0]); }
+  if (k === "t" || k === "T") { S.theme = S.theme === "dark" ? "light" : "dark"; return renderAll(); }
+  if (k === "l" || k === "L") { LANG = LANG === "en" ? "tr" : "en"; return renderAll(); }
+  if (k === "n" || k === "N") { S.notes = !S.notes; renderMockbar(); renderNotes(); }
+}
+window.addEventListener("resize", () => { if (S.pop) renderMenus(); });
+
+/* ═════════════ Boot ═════════════ */
+(() => {
+  const P = new URLSearchParams(location.search);
+  S.theme = P.get("theme") === "light" ? "light" : "dark";
+  LANG = P.get("lang") === "tr" ? "tr" : "en";
+  S.notes = P.get("notes") === "1";
+  const s = Math.max(1, Math.min(8, +(P.get("s") || 1))) - 1;
+  go(s, P.get("sc") || undefined);
+  if (document.fonts) document.fonts.ready.then(() => { if (S.pop || S.menu) renderMenus(); });
+})();
+</script>
+</body>
+</html>
