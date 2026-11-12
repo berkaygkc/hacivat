@@ -20,8 +20,8 @@ disallowed_methods = "deny"
 # plus the carried IME patch (R1; see crates/ui/hacivat-ui-core/patches/README.md).
 # Only crates/ui/hacivat-ui-core may depend on these
 # (crates/ui and crates/app may add `gpui` with `test-support` as a dev-dependency, F1).
-gpui = { git = "https://github.com/berkaygkc/zed", rev = "4858c0911c04a11c47255d9cd17338f407e6a1af" }
-gpui_platform = { git = "https://github.com/berkaygkc/zed", rev = "4858c0911c04a11c47255d9cd17338f407e6a1af", features = ["font-kit", "wayland", "x11"] }
+gpui = { git = "https://github.com/berkaygkc/zed", rev = "a1eaa20480d5bfe62e21ab1248e3900232dab92b" }
+gpui_platform = { git = "https://github.com/berkaygkc/zed", rev = "a1eaa20480d5bfe62e21ab1248e3900232dab92b", features = ["font-kit", "wayland", "x11"] }
 anyhow = "1"
 cargo_metadata = "0.19"
 

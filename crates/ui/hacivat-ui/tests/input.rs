@@ -299,6 +299,82 @@ fn app_switch_keeps_composition_for_the_platform(cx: &mut TestAppContext) {
     );
 }
 
+/// Two inputs side by side, as the settings search and the command palette field.
+struct TwoInputs {
+    a: Entity<TextInput>,
+    b: Entity<TextInput>,
+}
+
+impl Render for TwoInputs {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child(self.a.clone()).child(self.b.clone())
+    }
+}
+
+/// M1 gate, Known gap 1: a programmatic focus move from one composing input straight to
+/// another. The fork's GPUI now reports `FocusLost` then `FocusGained` for it, and the macOS
+/// carry discards the platform composition after the focus listeners. The app side must
+/// already have committed: `a` keeps its text once, `b` starts empty, and what is typed next
+/// lands in `b` only.
+#[gpui::test]
+fn focus_move_between_inputs_commits_the_composition_once(cx: &mut TestAppContext) {
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    let (host, vcx) = cx.add_window_view(|_, cx| TwoInputs {
+        a: cx.new(|cx| TextInput::new(cx, placeholder())),
+        b: cx.new(|cx| TextInput::new(cx, placeholder())),
+    });
+    let (a, b) = host.read_with(vcx, |h, _| (h.a.clone(), h.b.clone()));
+    vcx.update(|w, cx| {
+        w.activate_window();
+        a.focus_handle(cx).focus(w, cx);
+    });
+    vcx.run_until_parked();
+    let a_events = record_input_events(&a, vcx);
+    let b_events = record_input_events(&b, vcx);
+    vcx.simulate_input("abc ");
+    a.update_in(vcx, |i, w, cx| {
+        i.replace_and_mark_text_in_range(None, "漢字", Some(2..2), w, cx)
+    });
+    assert!(vcx.read(|cx| cx.global::<FocusedInput>().composing));
+
+    vcx.update(|w, cx| b.focus_handle(cx).focus(w, cx));
+    vcx.run_until_parked();
+
+    a.read_with(vcx, |i, _| {
+        assert_eq!(i.value(), "abc 漢字");
+        assert!(!i.is_composing());
+    });
+    b.read_with(vcx, |i, _| {
+        assert_eq!(i.value(), "");
+        assert!(!i.is_composing());
+    });
+    assert_eq!(
+        vcx.read(|cx| *cx.global::<FocusedInput>()),
+        FocusedInput {
+            entity: Some(b.entity_id()),
+            composing: false
+        }
+    );
+    assert_eq!(
+        a_events
+            .take()
+            .into_iter()
+            .filter(|e| matches!(e, InputEvent::CompositionChanged(_)))
+            .collect::<Vec<_>>(),
+        [
+            InputEvent::CompositionChanged(true),
+            InputEvent::CompositionChanged(false)
+        ]
+    );
+    assert!(b_events.take().is_empty());
+
+    // The platform input handler now belongs to `b`.
+    vcx.simulate_input("x");
+    a.read_with(vcx, |i, _| assert_eq!(i.value(), "abc 漢字"));
+    b.read_with(vcx, |i, _| assert_eq!(i.value(), "x"));
+    assert!(a_events.take().is_empty());
+}
+
 #[gpui::test]
 fn focus_and_blur_keep_focused_input_current(cx: &mut TestAppContext) {
     let (input, other, vcx) = focused_input_and_other(cx);
