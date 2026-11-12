@@ -98,19 +98,21 @@ typography:
     fontSize: "13.5px"
     fontWeight: 600
     letterSpacing: "0.075em"
-    fontFeature: "smcp, c2sc, tnum"
+    fontFeature: "tnum"
+    fontVariantCaps: synthesized
   label-sc:
     fontFamily: "Source Sans 3, system-ui, sans-serif"
     fontSize: "13px"
     fontWeight: 600
     letterSpacing: "0.075em"
-    fontFeature: "smcp, c2sc, tnum"
+    fontFeature: "tnum"
+    fontVariantCaps: synthesized
   capsule-env:
     fontFamily: "Source Sans 3, system-ui, sans-serif"
     fontSize: "13.5px"
     fontWeight: 700
     letterSpacing: "0.09em"
-    fontFeature: "smcp, c2sc"
+    fontVariantCaps: synthesized
   control:
     fontFamily: "Source Sans 3, system-ui, sans-serif"
     fontSize: "12.5px"
@@ -543,7 +545,11 @@ Keyword (lilac / indigo), function (cyan / teal), string (green), number (amber 
 
 **The 11px Floor Rule.** No text renders below 11px, including key hints, inlays and column-type subtitles.
 
-**The Real Small Caps Rule.** Section labels use the font's small-caps features with 0.075em tracking at weight 600, never uppercased body text.
+**The Crisp Text Rule.** Text is drawn without platform stroke dilation, matching the approved mock (antialiased, thin). On macOS the app sets its own `AppleFontSmoothing` preference to 0 at startup. A user setting can switch to the heavier platform-standard rendering (PO decision, M0, 2026-11-12).
+
+**The Synthesized Small Caps Rule.** Section labels are small caps at weight 600 with 0.075em tracking, drawn as pre-cased capitals at 0.7× size. They are never uppercased body text at full size.
+
+**PO decision (M0, 2026-11-12): small caps are synthesized, like the approved mock.** Tokens marked `fontVariantCaps: synthesized` render pre-cased capitals at 0.7× size with the token's tracking (`hacivat_ui_core::fonts::small_caps`), not the font's `smcp`/`c2sc`; casing (including Turkish İ) happens upstream, never in the renderer.
 
 ## Layout
 

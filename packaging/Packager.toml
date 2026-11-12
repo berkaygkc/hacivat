@@ -1,0 +1,24 @@
+# cargo-packager config for the M0 spike. Run via packaging/package-macos.sh (or the Linux/Windows
+# scripts), which render the @PLACEHOLDERS@ into a git-ignored copy: nothing secret lives here.
+name = "spike-harman"
+productName = "Hacivat Spike"
+identifier = "dev.hacivat.spike"
+version = "@VERSION@"
+description = "Hacivat M0 GPUI validation spike"
+publisher = "Hacivat"
+copyright = "Hacivat"
+category = "DeveloperTool"
+
+[[binaries]]
+path = "spike-harman"
+main = true
+
+# macOS: Developer ID signing with the hardened runtime (cargo-packager passes `--options runtime`
+# and `--timestamp`). The identity is injected by package-macos.sh from the keychain.
+[macos]
+minimumSystemVersion = "13.0"
+signingIdentity = "@SIGNING_IDENTITY@"
+
+# Windows: unsigned, per-user NSIS installer (no admin prompt).
+[nsis]
+installMode = "currentUser"
