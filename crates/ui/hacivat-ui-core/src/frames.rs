@@ -152,9 +152,17 @@ fn json_str(s: &str) -> String {
 }
 
 /// Writes `<dir>/<label>-<os>-<unix_ts>.json`. `kind` is "frames" or "latency".
-fn write_dump(dir: &Path, label: &str, os: &str, kind: &str, values_ms: &[f64]) -> io::Result<PathBuf> {
+fn write_dump(
+    dir: &Path,
+    label: &str,
+    os: &str,
+    kind: &str,
+    values_ms: &[f64],
+) -> io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
     let path = dir.join(format!("{label}-{os}-{ts}.json"));
     let values: Vec<String> = values_ms.iter().map(|v| format!("{v}")).collect();
     let body = format!(
@@ -182,7 +190,12 @@ pub struct FrameRecorder {
 
 impl FrameRecorder {
     pub fn new(label: &str) -> Self {
-        Self { label: label.to_string(), last: None, intervals_ms: Vec::new(), recording: true }
+        Self {
+            label: label.to_string(),
+            last: None,
+            intervals_ms: Vec::new(),
+            recording: true,
+        }
     }
 
     /// Collects one frame. Called from a `window.on_next_frame` loop.
@@ -223,7 +236,11 @@ pub struct LatencyProbe {
 
 impl LatencyProbe {
     pub fn new(label: &str) -> Self {
-        Self { label: label.to_string(), pending: None, samples_ms: Vec::new() }
+        Self {
+            label: label.to_string(),
+            pending: None,
+            samples_ms: Vec::new(),
+        }
     }
 
     /// Marks an input event. If one is already pending the earliest mark is kept.
@@ -304,25 +321,39 @@ mod tests {
 
     #[test]
     fn report_marks_b1_fail_below_55fps_on_macos() {
-        let s = FrameStats { mean_fps: 54.9, ..ok() };
+        let s = FrameStats {
+            mean_fps: 54.9,
+            ..ok()
+        };
         assert_eq!(verdict("b1-fling", "macos", &s), Verdict::Fail);
     }
 
     #[test]
     fn report_marks_b1_pass_45fps_on_linux() {
-        let s = FrameStats { mean_fps: 45.0, ..ok() };
+        let s = FrameStats {
+            mean_fps: 45.0,
+            ..ok()
+        };
         assert_eq!(verdict("b1-fling", "linux", &s), Verdict::Pass);
     }
 
     #[test]
     fn b1_fails_on_long_gap() {
-        let s = FrameStats { gaps_over_100ms: 1, ..ok() };
+        let s = FrameStats {
+            gaps_over_100ms: 1,
+            ..ok()
+        };
         assert_eq!(verdict("b1-fling", "macos", &s), Verdict::Fail);
     }
 
     #[test]
     fn b3_thresholds() {
-        let l = |p95| LatencyStats { samples: 1, p50_ms: 1.0, p95_ms: p95, max_ms: p95 };
+        let l = |p95| LatencyStats {
+            samples: 1,
+            p50_ms: 1.0,
+            p95_ms: p95,
+            max_ms: p95,
+        };
         assert_eq!(verdict("b3-typing-small", "macos", &l(16.0)), Verdict::Pass);
         assert_eq!(verdict("b3-typing-small", "macos", &l(16.1)), Verdict::Fail);
         assert_eq!(verdict("b3-completion", "macos", &l(50.0)), Verdict::Pass);
