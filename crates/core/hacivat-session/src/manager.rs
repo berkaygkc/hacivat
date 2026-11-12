@@ -377,17 +377,25 @@ pub struct ConnectionManager {
 }
 
 impl Drop for ConnectionManager {
-    /// Stops every liveness task and cancels every connect in flight; their tasks hold the
-    /// shared state, so without this they would keep it (and the connections) alive.
+    /// Stops every liveness task, closes every open connection (in the background) and takes
+    /// every connect in flight; their tasks hold the shared state, so without this they would
+    /// keep it (and the connections) alive. Marked as shutting down, so a connect that lands
+    /// afterwards is closed at once and never starts a liveness task.
     fn drop(&mut self) {
-        let inner = self.shared.lock();
-        for entry in inner.entries.values() {
-            if let Some((_, token)) = &entry.attempt {
+        let mut inner = self.shared.lock();
+        inner.shutting_down = true;
+        let mut lives = Vec::new();
+        for entry in inner.entries.values_mut() {
+            if let Some((_, token)) = entry.attempt.take() {
                 token.cancel();
             }
-            if let Some(live) = &entry.live {
-                live.stop.cancel();
-            }
+            lives.extend(entry.live.take());
+        }
+        drop(inner);
+        // `Drop` cannot wait: the open connections are closed on the core runtime.
+        for live in lives {
+            live.stop.cancel();
+            self.shared.rt.spawn(live.close());
         }
     }
 }

@@ -580,6 +580,26 @@ mod tests {
             codes(&typed, &ApprovedRoots::new(Vec::new())),
             Vec::<IssueCode>::new()
         );
+        // A CA file an untrusted URL carried in its extras (`sslrootcert`, `sslCa`, `ssl-ca`)
+        // takes the same rule.
+        for (engine, key) in [
+            (DbmsKind::Postgres, "sslrootcert"),
+            (DbmsKind::MySql, "sslCa"),
+            (DbmsKind::MySql, "ssl-ca"),
+        ] {
+            let mut p = imported(&inside);
+            p.tls.ca_file = None;
+            p.engine = engine;
+            p.extra = vec![(key.into(), outside.display().to_string())];
+            let roots = ApprovedRoots::new(vec![home.path().to_path_buf()]);
+            let found = codes(&p, &roots);
+            assert!(found.contains(&IssueCode::PathRefused), "{key}: {found:?}");
+            p.extra = vec![(key.into(), inside.display().to_string())];
+            assert!(
+                !codes(&p, &roots).contains(&IssueCode::PathRefused),
+                "{key}"
+            );
+        }
         // The user's default roots are the home directory.
         assert_eq!(
             ApprovedRoots::for_user().list(),

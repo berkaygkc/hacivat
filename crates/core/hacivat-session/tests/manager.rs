@@ -253,6 +253,32 @@ async fn dropping_the_manager_stops_its_liveness_pings() {
 }
 
 #[tokio::test]
+async fn a_connect_landing_after_the_manager_dropped_is_closed_without_pings() {
+    // The exact window (pipeline done, `landed` not yet run) cannot be hit deterministically;
+    // a connect in flight at the drop must end closed, with no liveness task left behind.
+    let (m, log) = logged_manager(
+        hacivat_proto::DbmsKind::Postgres,
+        Duration::ZERO,
+        false,
+        ManagerConfig {
+            liveness: ms(10),
+            ..Default::default()
+        },
+    );
+    m.connect(p(), None, Interaction::Headless);
+    tokio::time::sleep(ms(5)).await;
+    drop(m);
+    tokio::time::sleep(ms(100)).await;
+    let log = log.lock().unwrap().clone();
+    assert!(!log.contains(&"ping"), "{log:?}");
+    assert_eq!(
+        log.iter().filter(|e| **e == "open").count(),
+        log.iter().filter(|e| **e == "close").count(),
+        "{log:?}"
+    );
+}
+
+#[tokio::test]
 async fn the_error_dialogs_reentry_continues_the_count() {
     let (m, fake) = manager(ok_pg().connect_result(Err(db("28P01"))));
     let pw = Arc::new(Profile {

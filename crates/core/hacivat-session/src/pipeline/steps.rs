@@ -430,9 +430,8 @@ impl ConnectStep for PgPassStep {
                 attempt,
             )
             .await?;
-            if m.source == SecretSource::Prompt {
-                st.interacted = true;
-            }
+            // A prompt here comes before the transport opens its stream: nothing idles.
+            st.interacted |= m.source == SecretSource::Prompt && st.first_stream.is_some();
             st.auth = Some(m);
             Ok(None)
         })
@@ -660,16 +659,16 @@ impl ConnectStep for AuthStep {
                 // The credential-files step already found them.
                 return Ok(None);
             }
-            if touches_keyring(&cx.profile, st) {
+            // Only a wait after the first stream was opened can let it idle out.
+            let stream_open = st.first_stream.is_some();
+            if stream_open && touches_keyring(&cx.profile, st) {
                 st.interacted = true;
             }
             let outcome = resolve_blocking(&cx.profile, st, lookup_host(&cx.profile)).await?;
             let (ix, user) = (st.ix.clone(), st.user.clone());
             let attempt = st.rejections + 1;
             let m = material(&cx.profile, &ix, user, outcome, Phase::Auth, attempt).await?;
-            if m.source == SecretSource::Prompt {
-                st.interacted = true;
-            }
+            st.interacted |= stream_open && m.source == SecretSource::Prompt;
             st.auth = Some(m);
             Ok(None)
         })
