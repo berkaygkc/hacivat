@@ -37,7 +37,7 @@
 | VF d | Radii, popover shadow only, 11 px floor | Radii are 0/3/4/6, and the popover shadow is the only shadow. The 11 px floor applies to nominal size; synthesized small caps are a PO-approved exception. | **PASS** |
 | VF e | Turkish strings fit at 1440 px | TR captures pass. The 1× and 1.5× scales have not been captured: the Mac's 1× external display path is documented, and 1.5× needs the Windows host. | **PASS** (2×); 1×/1.5× open |
 | VF f | PO side-by-side sign-off | Signed off 2026-11-12. The only difference raised was text weight, now resolved by decision (see below). | **PASS** |
-| PKG | Signed builds and an update round trip | macOS: a universal `.app` and DMG, signed with Developer ID and hardened runtime. The minisign-verified update 0.0.1 → 0.0.2 works. A tampered artifact is refused, and a rollback to an older signed artifact is refused. Notarization is waiting on the PO's `hacivat-notary` keychain profile. Windows and Linux scripts are written but have not been run. `.rpm` is not supported by cargo-packager 0.11.8. | **Partial** (tooling gate, so it does not trigger the engine fallback) |
+| PKG | Signed builds and an update round trip | macOS: universal `.app` + DMG, Developer ID-signed with hardened runtime, **notarized and stapled**. Gatekeeper reports `accepted, source=Notarized Developer ID` for both the DMG and the `.app` (submission 381b451b, run with `RELEASE=1 NOTARY_PROFILE=mystat-notary`, which uses the same Apple account as the PO's MyStat profile). A minisign-verified update 0.0.1 → 0.0.2 succeeded; a tampered artifact was refused, and so was a rollback to an older signed artifact. Windows and Linux scripts are written but have not been run. cargo-packager 0.11.8 has no `.rpm` output. | **PASS (macOS)**; Windows/Linux open |
 
 ### Non-gating measurements (X row)
 
@@ -75,7 +75,6 @@ These are things M1 must build or carry in `hacivat-ui-core`:
 | Item | Needed for | Owner |
 |---|---|---|
 | Windows 11 and Ubuntu 24.04 gate runs: B1, B3, IME (incl. Narrator/Orca), VF 1.5×, PKG | Full M0 sign-off per spec. Not needed to start M1 on macOS. | PO provides hosts; agents run the scripts (`design/vf/capture.ps1`, `capture.sh`, packaging scripts) |
-| Notarization run (`RELEASE=1 packaging/package-macos.sh`) | PKG macOS | PO creates the `hacivat-notary` profile |
 | Dark `gutter` token sRGB re-check | VF b | Windows host |
 | VF 1× capture on the external display | VF e | Any time on the Mac |
 | GPUI IME patch (FocusLost → discardMarkedText) plus blur for inactive windows | Review Focus 4 edge cases | M1 adapter work |
