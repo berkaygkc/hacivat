@@ -732,6 +732,10 @@ pub fn shell_with_connections_prepared(
         });
         start(cx, startup, None).expect("open the workspace").into()
     });
+    // The core runtime wakes the foreground loops (interaction port, live mirror, connect
+    // watch) from its own threads; without this gpui's test scheduler flags that as a
+    // non-deterministic test.
+    cx.executor().allow_parking();
     finish(cx, window)
 }
 

@@ -65,7 +65,16 @@ impl SecretBackend for NoKeyring {
 
 fn open_new_without_keyring(cx: &mut TestAppContext) -> &'static mut VisualTestContext {
     let vcx = shell_with_backend(cx, "en", None, Arc::new(NoKeyring(MemoryBackend::new())));
-    open(vcx, DialogMode::New)
+    let vcx = open(vcx, DialogMode::New);
+    // The probe answer lands whenever the core's blocking pool gets to it (slower than the
+    // fixed wait in `open` on Windows runners): wait for it, not for a fixed time.
+    for _ in 0..250 {
+        if remember_option_disabled(vcx, Retention::Forever) {
+            return vcx;
+        }
+        settle(vcx, Duration::from_millis(10));
+    }
+    panic!("the keyring probe did not land");
 }
 
 /// A shell with a saved production profile `name` whose password is kept by `retention`, and
