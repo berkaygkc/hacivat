@@ -47,24 +47,32 @@ pub(crate) fn open_flags(create_if_missing: bool, read_only: bool) -> OpenFlags 
 /// absolute path never starts with `file:`. A relative path would also depend on the app's
 /// working directory, and the empty path opens a private temporary database.
 ///
-/// Windows device namespaces (`\\.\PhysicalDrive0`, `\\?\GLOBALROOT\Device\…`) are refused:
-/// they name devices, never database files.
+/// Some Windows path prefixes are refused; see [`prefix_refused`].
 pub(crate) fn check_path(path: &Path) -> Result<(), RawError> {
     if path.as_os_str() == MEMORY {
         return Ok(());
     }
-    let device = match path.components().next() {
-        Some(Component::Prefix(p)) => match p.kind() {
-            Prefix::DeviceNS(_) => true,
-            Prefix::Verbatim(name) => name.eq_ignore_ascii_case("GLOBALROOT"),
-            _ => false,
-        },
+    let refused = match path.components().next() {
+        Some(Component::Prefix(p)) => prefix_refused(p.kind()),
         _ => false,
     };
-    if path.is_absolute() && !device {
+    if path.is_absolute() && !refused {
         Ok(())
     } else {
         Err(invalid_path())
+    }
+}
+
+/// A Windows path prefix that never names a local database file:
+/// - device namespaces (`\\.\PhysicalDrive0`, `\\?\GLOBALROOT\Device\…`);
+/// - UNC shares (`\\server\share\…`, `\\?\UNC\server\share\…`). Opening one performs SMB
+///   authentication, which leaks the user's NTLM hash to that host. A dead share can block the
+///   thread, and SQLite's locking over SMB is unreliable.
+fn prefix_refused(prefix: Prefix<'_>) -> bool {
+    match prefix {
+        Prefix::DeviceNS(_) | Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
+        Prefix::Verbatim(name) => name.eq_ignore_ascii_case("GLOBALROOT"),
+        Prefix::Disk(_) | Prefix::VerbatimDisk(_) => false,
     }
 }
 
@@ -288,6 +296,26 @@ impl RawConn for SqliteConn {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::Prefix;
+
+    use super::prefix_refused;
+
+    #[test]
+    fn device_and_unc_prefixes_are_refused_disks_are_not() {
+        let s = OsStr::new;
+        assert!(prefix_refused(Prefix::DeviceNS(s("PhysicalDrive0"))));
+        assert!(prefix_refused(Prefix::Verbatim(s("globalroot"))));
+        assert!(prefix_refused(Prefix::UNC(s("server"), s("share"))));
+        assert!(prefix_refused(Prefix::VerbatimUNC(s("server"), s("share"))));
+        assert!(!prefix_refused(Prefix::Verbatim(s("other"))));
+        assert!(!prefix_refused(Prefix::Disk(b'C')));
+        assert!(!prefix_refused(Prefix::VerbatimDisk(b'C')));
+    }
+}
+
 #[cfg(all(test, windows))]
 mod windows_tests {
     use std::path::Path;
@@ -295,11 +323,13 @@ mod windows_tests {
     use super::check_path;
 
     #[test]
-    fn device_namespaces_are_refused() {
+    fn device_namespaces_and_unc_shares_are_refused() {
         for p in [
             r"\\.\PhysicalDrive0",
             r"\\.\C:",
             r"\\?\GLOBALROOT\Device\HarddiskVolume1\a.db",
+            r"\\server\share\a.db",
+            r"\\?\UNC\server\share\a.db",
         ] {
             assert!(check_path(Path::new(p)).is_err(), "{p}");
         }

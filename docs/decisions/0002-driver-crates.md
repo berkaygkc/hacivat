@@ -92,6 +92,10 @@ connection.
   The empty path opens a private temporary database.
 - Windows device namespaces are refused the same way: `\\.\…` (for example
   `\\.\PhysicalDrive0`) and `\\?\GLOBALROOT\…`.
+- UNC paths (`\\server\share\…`, `\\?\UNC\…`) are refused with `Io(InvalidInput)`, as
+  defence in depth (T7 refuses them too). Opening one performs SMB authentication, which leaks
+  the user's NTLM hash to the host. A dead share can also block the thread, and SQLite's
+  locking over SMB is unreliable.
 - When something exists at the path, it must be a regular file. `fs::metadata` follows
   symlinks, so a symlink to a file opens. A directory, FIFO, socket or device is refused with
   `Io(InvalidInput)` before SQLite opens it, so a read can never block the connection's thread
