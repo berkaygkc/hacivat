@@ -445,6 +445,18 @@ pub fn input_value(vcx: &VisualTestContext, handle: &FocusHandle) -> String {
     })
 }
 
+/// The test input whose focus handle is `handle` (Task 16: drive its IME composition).
+pub fn test_input(vcx: &VisualTestContext, handle: &FocusHandle) -> Entity<TextInput> {
+    vcx.cx.read(|cx| {
+        cx.global::<TestInputs>()
+            .0
+            .iter()
+            .find(|i| i.focus_handle(cx) == *handle)
+            .cloned()
+            .expect("a test input with this handle")
+    })
+}
+
 /// A focusable test layer.
 struct TestLayer {
     focus: FocusHandle,

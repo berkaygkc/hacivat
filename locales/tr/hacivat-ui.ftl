@@ -34,3 +34,47 @@ hv-settings-invalid-value = Bazı ayarlar okunamadı, varsayılanları kullanıl
 hv-settings-newer-version = Ayarlar dosyanız Hacivat'ın daha yeni bir sürümünden. Bu sürümün tanımadığı ayarlar korunur.
 # Review: PO
 hv-settings-file-quarantined = Ayarlar dosyanız okunamadı. { $file } olarak kaydedildi, varsayılanlar kullanılıyor.
+
+## Task 16
+
+# Review: PO
+hv-cmd-workspace-command-palette = Komut paleti
+hv-cmd-workspace-open-settings = Ayarları aç
+# Review: PO
+hv-cmd-workspace-new-console-tab = Yeni konsol sekmesi
+# Review: PO
+hv-cmd-workspace-close-tab = Sekmeyi kapat
+# Review: PO
+hv-cmd-workspace-next-tab = Sonraki sekme
+# Review: PO
+hv-cmd-workspace-prev-tab = Önceki sekme
+# Review: PO
+hv-cmd-workspace-split-right = Sağa böl
+# Review: PO
+hv-cmd-workspace-split-down = Aşağı böl
+# Review: PO
+hv-cmd-workspace-focus-next-pane = Sonraki bölmeye geç
+# Review: PO
+hv-cmd-workspace-toggle-explorer = Gezgini göster veya gizle
+# Review: PO
+hv-cmd-workspace-toggle-theme = Koyu ve açık tema arasında geç
+# Review: PO
+hv-cmd-workspace-next-language = Sonraki dile geç
+# Review: PO
+hv-cmd-workspace-reload-translations = Çevirileri yeniden yükle
+hv-cmd-app-about = { -brand-hacivat } Hakkında
+# Review: PO
+hv-cmd-app-show-menu = Uygulama menüsünü göster
+# Review: PO
+hv-cmd-app-restart = Yeniden başlat
+# Review: PO
+hv-cmd-app-quit = Uygulamadan çık
+# Review: PO
+hv-cmd-explorer-focus-filter = Bağlantı filtresine odaklan
+hv-menu-app = { -brand-hacivat }
+hv-menu-view = Görünüm
+hv-menu-window = Pencere
+hv-menu-help = Yardım
+hv-about-title = { -brand-hacivat } Hakkında
+hv-about-version = Sürüm { $version }
+hv-toast-translations-reloaded = Çeviriler yeniden yüklendi

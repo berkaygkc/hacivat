@@ -528,8 +528,12 @@ impl Workspace {
         let subscription = cx.subscribe_in(
             &dialog,
             window,
-            move |this, _, _: &DialogEvent, window, cx| {
+            move |this, dialog, _: &DialogEvent, window, cx| {
+                // Removing the layer drops the last strong handle; keep the dialog alive until
+                // this event has reached every subscriber (a caller's included).
+                let keep = dialog.clone();
                 this.remove_layer(view, window, cx);
+                cx.defer(move |_| drop(keep));
             },
         );
         let layer = Layer {
@@ -557,8 +561,11 @@ impl Workspace {
         let subscription = cx.subscribe_in(
             &menu,
             window,
-            move |this, _, event: &PopupMenuEvent, window, cx| {
+            move |this, menu, event: &PopupMenuEvent, window, cx| {
+                // As in `open_dialog`: the caller's subscription still gets this event.
+                let keep = menu.clone();
                 this.remove_layer(view, window, cx);
+                cx.defer(move |_| drop(keep));
                 if let PopupMenuEvent::Chosen(action) = event {
                     let action = action.clone();
                     // Runs once this update is done, so an action may update the workspace.

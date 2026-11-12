@@ -42,4 +42,9 @@ chord = "alt-1"
 command = "workspace.toggle_explorer"
 context = "Workspace"
 
+[[binding]]
+chord = "ctrl-f"
+command = "explorer.focus_filter"
+context = "Workspace"
+
 # Windows has no quit chord (Alt+F4 belongs to the system).
