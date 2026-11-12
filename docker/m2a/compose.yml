@@ -1,0 +1,173 @@
+# The M2a server matrix for the engine tests (R17). Driven only by `cargo xtask docker`
+# (see README.md); docker/m2a/targets.toml lists the same services for `hacivat-testkit`.
+#
+# Every port binds to 127.0.0.1 only. The credentials are throwaway test values: user
+# `hv_test`, password `hv_test_pw`, database `hv_test` on every server. Never copy them into
+# a non-test file.
+#
+# Data lives in anonymous volumes; `cargo xtask docker down` removes them, so every `up`
+# starts from the init scripts.
+
+name: hacivat-m2a
+
+x-pg-env: &pg-env
+  POSTGRES_USER: hv_test
+  POSTGRES_PASSWORD: hv_test_pw
+  POSTGRES_DB: hv_test
+
+# pg_isready over TCP: during initdb the entrypoint's temporary server listens on the socket
+# only, so "ready on 127.0.0.1" means the init scripts have run.
+x-pg-health: &pg-health
+  test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "hv_test", "-d", "hv_test"]
+  interval: 2s
+  timeout: 5s
+  retries: 60
+  start_period: 120s
+
+x-pg-init: &pg-init
+  - ./init/pg.sql:/docker-entrypoint-initdb.d/00-fixtures.sql:ro
+
+x-mysql-env: &mysql-env
+  MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+  MYSQL_USER: hv_test
+  MYSQL_PASSWORD: hv_test_pw
+  MYSQL_DATABASE: hv_test
+
+x-mariadb-env: &mariadb-env
+  MARIADB_RANDOM_ROOT_PASSWORD: "yes"
+  MARIADB_USER: hv_test
+  MARIADB_PASSWORD: hv_test_pw
+  MARIADB_DATABASE: hv_test
+
+# A real query as hv_test over TCP: the entrypoints run the init scripts with networking off,
+# so this passes only once the fixtures (and the `orders` grant) exist.
+x-mysql-health: &mysql-health
+  test: ["CMD-SHELL", "mysql -h127.0.0.1 -P3306 -uhv_test -p\"$$MYSQL_PASSWORD\" -e 'SELECT 1' orders >/dev/null 2>&1"]
+  interval: 2s
+  timeout: 5s
+  retries: 60
+  start_period: 120s
+
+x-mariadb-health: &mariadb-health
+  test: ["CMD-SHELL", "mariadb -h127.0.0.1 -P3306 -uhv_test -p\"$$MARIADB_PASSWORD\" -e 'SELECT 1' orders >/dev/null 2>&1"]
+  interval: 2s
+  timeout: 5s
+  retries: 60
+  start_period: 120s
+
+x-mysql-init: &mysql-init
+  - ./init/mysql.sql:/docker-entrypoint-initdb.d/00-fixtures.sql:ro
+
+services:
+  # Below the PostgreSQL floor (14): the `server.unsupported_version` fixture.
+  pg13:
+    image: postgres:13
+    container_name: m2a-pg13
+    environment: *pg-env
+    volumes: *pg-init
+    ports: ["127.0.0.1:54313:5432"]
+    healthcheck: *pg-health
+
+  pg14:
+    image: postgres:14
+    container_name: m2a-pg14
+    environment: *pg-env
+    volumes: *pg-init
+    ports: ["127.0.0.1:54314:5432"]
+    healthcheck: *pg-health
+
+  pg15:
+    image: postgres:15
+    container_name: m2a-pg15
+    environment: *pg-env
+    volumes: *pg-init
+    ports: ["127.0.0.1:54315:5432"]
+    healthcheck: *pg-health
+
+  pg16:
+    image: postgres:16
+    container_name: m2a-pg16
+    environment: *pg-env
+    volumes: *pg-init
+    ports: ["127.0.0.1:54316:5432"]
+    healthcheck: *pg-health
+
+  pg17:
+    image: postgres:17
+    container_name: m2a-pg17
+    environment: *pg-env
+    volumes: *pg-init
+    ports: ["127.0.0.1:54317:5432"]
+    healthcheck: *pg-health
+
+  pg18:
+    image: postgres:18
+    container_name: m2a-pg18
+    environment: *pg-env
+    volumes: *pg-init
+    ports: ["127.0.0.1:54318:5432"]
+    healthcheck: *pg-health
+
+  # ssl=on with a self-signed certificate generated at initdb (pg-tls/init.sh).
+  pg17-tls:
+    image: postgres:17
+    container_name: m2a-pg17-tls
+    environment: *pg-env
+    volumes:
+      - ./init/pg.sql:/docker-entrypoint-initdb.d/00-fixtures.sql:ro
+      - ./pg-tls/init.sh:/docker-entrypoint-initdb.d/10-tls.sh:ro
+    ports: ["127.0.0.1:54327:5432"]
+    healthcheck: *pg-health
+
+  # Server messages in Turkish (I18N-14: shown verbatim); the image adds the tr_TR locale.
+  pg17-tr:
+    build: ./pg-tr
+    image: hacivat-m2a-pg17-tr:17
+    container_name: m2a-pg17-tr
+    command: ["postgres", "-c", "lc_messages=tr_TR.UTF-8"]
+    environment: *pg-env
+    volumes: *pg-init
+    ports: ["127.0.0.1:54337:5432"]
+    healthcheck: *pg-health
+
+  mysql80:
+    image: mysql:8.0
+    container_name: m2a-mysql80
+    environment: *mysql-env
+    volumes: *mysql-init
+    ports: ["127.0.0.1:33080:3306"]
+    healthcheck: *mysql-health
+
+  # Its auto-generated /var/lib/mysql/ca.pem is copied to <main>/target/docker/mysql84-ca.pem
+  # by `cargo xtask docker up`.
+  mysql84:
+    image: mysql:8.4
+    container_name: m2a-mysql84
+    environment: *mysql-env
+    volumes: *mysql-init
+    ports: ["127.0.0.1:33084:3306"]
+    healthcheck: *mysql-health
+
+  mariadb106:
+    image: mariadb:10.6
+    container_name: m2a-mariadb106
+    environment: *mariadb-env
+    volumes: *mysql-init
+    ports: ["127.0.0.1:33106:3306"]
+    healthcheck: *mariadb-health
+
+  mariadb1011:
+    image: mariadb:10.11
+    container_name: m2a-mariadb1011
+    environment: *mariadb-env
+    volumes: *mysql-init
+    ports: ["127.0.0.1:33111:3306"]
+    healthcheck: *mariadb-health
+
+  mariadb114:
+    image: mariadb:11.4
+    container_name: m2a-mariadb114
+    environment: *mariadb-env
+    volumes: *mysql-init
+    ports: ["127.0.0.1:33114:3306"]
+    healthcheck: *mariadb-health

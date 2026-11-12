@@ -6,6 +6,8 @@ mod shot_diff;
 mod tokens;
 mod update_key;
 mod vf;
+// ## m2a-t11-docker
+mod docker;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -27,6 +29,8 @@ fn main() -> ExitCode {
         Some("check-update-key") => update_key::run(),
         Some("vf") => vf::run(),
         Some("shot-diff") => shot_diff::run(),
+        // ## m2a-t11-docker
+        Some("docker") => docker::run(),
         other => {
             eprintln!(
                 "unknown xtask command: {other:?}\navailable: bench-report, check-deps, check-update-key, gen-sql, l10n, shot-diff, tokens, vf"
