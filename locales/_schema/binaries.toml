@@ -1,0 +1,5 @@
+# Per-binary domain inclusion (I18N-01 step 5). A domain is an FTL file stem under
+# `locales/<tag>/`. Folders starting with `_` are not locales.
+
+[binaries]
+hacivat = ["common", "hui", "hacivat-ui", "hacivat-core"]

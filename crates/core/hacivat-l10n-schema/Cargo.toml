@@ -1,0 +1,12 @@
+[package]
+name = "hacivat-l10n-schema"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fluent-syntax.workspace = true
+
+[lints]
+workspace = true

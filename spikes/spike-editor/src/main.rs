@@ -11,9 +11,8 @@ mod input;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use hacivat_ui_core::app::{open_window, run_app};
+use hacivat_ui_core::app::{Boot, open_window, run_app};
 use hacivat_ui_core::gpui_surface::AppContext;
-use hacivat_ui_core::theme::{Theme, ThemeMode};
 
 use crate::bench::BenchMode;
 use crate::buffer::Buffer;
@@ -64,8 +63,7 @@ fn main() -> ExitCode {
     drop(text);
     let bench_mode = args.bench;
 
-    run_app(move |cx| {
-        Theme::install(cx, ThemeMode::Dark);
+    run_app(Boot::default(), move |cx| {
         let window = open_window(cx, "Hacivat B3 editor", (1280., 800.), |window, cx| {
             cx.new(|cx| EditorView::new(buffer, window, cx))
         });

@@ -513,7 +513,7 @@ Keyword (lilac / indigo), function (cyan / teal), string (green), number (amber 
 
 **The Hue Is Meaning Rule.** Red, green, amber and blue are never used decoratively. If an element is coloured, it must answer "which environment", "which path", "what is pending" or "what is selected".
 
-**The Raised Ink Rule.** Tertiary ink (text-3) never sits on the raised surface: dark text-3 reaches only 4.18:1 on raised #252931. Metadata on raised toolbars, active tabs, the next-page strip and popovers uses text-2.
+**The Raised Ink Rule.** Tertiary ink (text-3) never sits on the raised surface: dark text-3 reaches only 4.18:1 on raised #252931. Metadata on raised toolbars, active tabs, the next-page strip and popovers uses text-2. Disabled items are exempt: a disabled menu item or control stays text-3 on raised surfaces (disabled controls carry no contrast requirement); the disabled state must also be conveyed by non-interaction.
 
 **The Same Weight Rule.** The capsule fill and its white text are identical in dark and light themes.
 
@@ -592,7 +592,7 @@ All icons are Lucide at 1.6 stroke width: 12px inside chrome and controls, 14px 
 - **Focus:** 1px blue outline at 1px offset on every focusable element.
 
 ### Title-Bar Capsule (signature)
-A single 26px segmented capsule anchored left after the brand: cp-fill production block in capsule-env type, then connection name (600) with engine at text-2, access (red lock + "read-only"), path (green arrows + "Direct (P2P)"), and a chevron. Segments are divided by seam-strong; hover tints every segment except the production block. The production label is "PRODUCTION" in English and "PROD" in Turkish, so the block keeps its width across locales. The splash assembles the same capsule and docks it into this slot.
+A single 26px segmented capsule anchored left after the brand: cp-fill production block in capsule-env type, then connection name (600) with engine at text-2, access (red lock + "read-only"), path (green arrows + "Direct (P2P)"), and a chevron. v1 shows the path as "Direct"; "(P2P)" appears only with Perde/Karagöz paths. Segments are divided by seam-strong; hover tints every segment except the production block. The production label is "PRODUCTION" in English and "PROD" in Turkish, so the block keeps its width across locales. The splash assembles the same capsule and docks it into this slot.
 
 ### Explorer Tree
 - **Filter field:** 28px, 4px radius, search icon, kbd hint.
@@ -607,7 +607,7 @@ Mono connection name in the header, then 22px key/value rows on a 92px key colum
 - **Production hairline:** a 1px red line across the top of an editor bound to production.
 - **Toolbar:** raised 32px bar with Run (primary), Explain, Format (ghost), a seam-led breadcrumb of connection, database and schema in mono, and auto-commit and limit chips.
 - **Gutter:** 58px, line numbers at text-3 (current line at text), green check on executed statements, a 1px green range bar per executed statement and a blue bar on the current statement. End-of-line status shows "executed", timing and row count.
-- **Completion popup:** 300px list plus 236px detail pane on raised, 6px radius, seam-strong border, popover shadow. Items are 23px with kind icon, mono name with the typed prefix underlined in blue, and type at text-3; out-of-scope items dim and italicise their type. Active item uses blue-tint-strong. A 24px footer lists key hints and the match count. It expands along Y only.
+- **Completion popup:** 300px list plus 236px detail pane on raised, 6px radius, seam-strong border, popover shadow. Items are 23px with kind icon, mono name with the typed prefix underlined in blue, and type at text-2; out-of-scope items dim and italicise their type. Active item uses blue-tint-strong. A 24px footer lists key hints and the match count. It expands along Y only.
 
 ### Results
 - **Result tabs:** same anatomy as editor tabs; staging tabs carry the hollow swatch, "(staging)" and an amber pending stamp with count.

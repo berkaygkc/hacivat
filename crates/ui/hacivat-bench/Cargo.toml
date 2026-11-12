@@ -1,0 +1,13 @@
+[package]
+name = "hacivat-bench"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# GPUI-free frame statistics and verdicts, shared by the recorders (via
+# `hacivat_ui_core::frames` under the `bench` feature) and `xtask bench-report`.
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+# Hard-coded UI literals the l10n lint (I18N-23, rule L900) accepts: data, identifiers and symbols
+# that are not translatable text. Append-only (F19): each task adds its own entries to the list
+# below under a `# <task slug>` comment. A literal passed to `.child(`, `SharedString::from(` or
+# `Label::new(.., TextSource::Fluent, ..)` in `hacivat-ui` or an app crate must be listed here
+# or come from Fluent.
+
+literals = [
+    # task-10
+    # task-13-shell
+    # The separator between the catalog short names of the status-bar language toggle
+    # (`EN / TR`, DESIGN.md Status Bar): a symbol between data labels, not translatable text.
+    "/",
+]

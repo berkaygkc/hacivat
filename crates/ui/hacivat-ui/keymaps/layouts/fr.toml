@@ -1,0 +1,15 @@
+# Layout overlay: French AZERTY (KBDFR). The digit row types symbols without Shift, so a digit
+# chord needs Shift: `alt-1` becomes `alt-shift-1`.
+shift_level = "%+./0123456789>?£§¨°"
+
+[[binding]]
+chord = "alt-shift-1"
+command = "workspace.toggle_explorer"
+context = "Workspace"
+platforms = ["windows", "linux"]
+
+[[binding]]
+chord = "cmd-shift-1"
+command = "workspace.toggle_explorer"
+context = "Workspace"
+platforms = ["macos"]

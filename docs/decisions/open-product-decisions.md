@@ -141,6 +141,7 @@ Short glossary for terms used below:
 | D-088 | P2 | Relays inside customer networks | Later |
 | D-089 | P2 | Lease mirror in Perde; OpenBao backend | Mirror yes (Karagöz authoritative); OpenBao later |
 | D-090 | P2 | Several agents per database (agent HA) | Single agent per database in v1 |
+| D-091 | P1 | Open-core split for Perde script libraries (L14) | Libraries, permissions and basic history are free (collaboration basics). Git mirror/restore and long-retention history are paid. |
 
 ---
 
@@ -947,3 +948,16 @@ Not listed as decisions because they are already decided, are engineering choice
 8. **Audit fail-closed (D-010).** algorithms/31 calls it a decision "per edition"; access/06's rule "security is never paywalled" argues against edition differences.
 9. **Turkish search (D-074).** algorithms/26 assumes accent-insensitive UI search **on** by default for everyone; algorithms/25 P11 recommends Turkish-tolerant find **only** for Turkish UI/regional settings and says it aligns with algorithms/26.
 10. **Cross-reference error.** algorithms/01 HV-SEC-02 points to "§9-1" for the TLS decision; the list is in §7.
+
+### D-091 — Open-core split for Perde script libraries (L14)
+
+- **Tier:** P1. Decide before the Perde script-library work starts (v1.x).
+- **Question:** Which parts of team script libraries are in the free self-hosted Perde, and which are paid?
+- **Why it matters:** Sharing scripts is a core collaboration feature. Under D-003 security is never paid, but org-scale operations may be.
+- **Options:**
+  - (a) Everything free.
+  - (b) Libraries, permissions and basic history free; git mirror/restore and long-retention history paid.
+  - (c) The whole feature paid.
+- **Recommended default:** (b). *Controller proposal, 2026-11-12. Open: the PO has not decided.*
+- **Components:** Perde, Hacivat.
+- **Source:** design doc L14.

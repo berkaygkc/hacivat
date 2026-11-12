@@ -1,0 +1,48 @@
+# Default keymap, macOS (UI-EDIT-13). Chords are `mods-key`; mods are ctrl, alt (Option),
+# shift and cmd. No chord may use Option or Option+Shift alone on a printable key: Option types
+# characters and dead keys on every Mac layout (CI: `option_only_printables`).
+
+[[binding]]
+chord = "cmd-k"
+command = "workspace.command_palette"
+context = "Workspace"
+
+[[binding]]
+chord = "cmd-,"
+command = "workspace.open_settings"
+context = "Workspace"
+
+[[binding]]
+chord = "cmd-t"
+command = "workspace.new_console_tab"
+context = "Workspace"
+
+[[binding]]
+chord = "cmd-w"
+command = "workspace.close_tab"
+context = "Workspace"
+
+[[binding]]
+chord = "ctrl-tab"
+command = "workspace.next_tab"
+context = "Workspace"
+
+[[binding]]
+chord = "ctrl-shift-tab"
+command = "workspace.prev_tab"
+context = "Workspace"
+
+[[binding]]
+chord = "cmd-1"
+command = "workspace.toggle_explorer"
+context = "Workspace"
+
+[[binding]]
+chord = "cmd-f"
+command = "explorer.focus_filter"
+context = "Workspace"
+
+[[binding]]
+chord = "cmd-q"
+command = "app.quit"
+context = "Workspace"

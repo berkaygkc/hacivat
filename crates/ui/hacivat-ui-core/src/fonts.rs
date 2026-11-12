@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 
+use anyhow::{Result, anyhow, bail};
 use gpui::{
     App, Div, Font, FontFeatures, FontWeight, Hsla, ParentElement as _, Styled as _, div, font, px,
 };
@@ -22,13 +23,52 @@ const FONT_FILES: [&[u8]; 6] = [
 ];
 
 /// Registers the bundled fonts with GPUI's text system.
-pub fn register_fonts(cx: &mut App) -> anyhow::Result<()> {
+pub fn register_fonts(cx: &mut App) -> Result<()> {
     let fonts: Vec<Cow<'static, [u8]>> = FONT_FILES.iter().map(|b| Cow::Borrowed(*b)).collect();
     cx.text_system().add_fonts(fonts)
 }
 
+/// Fails unless the bundled faces are what GPUI resolves: both families are registered, the
+/// Semibold weight resolves to a different face than Regular, and the mono family really is
+/// monospaced while the UI family is not (a silent system-font fallback would break one of these).
+pub fn verify_bundled_fonts(cx: &App) -> Result<()> {
+    let ts = cx.text_system();
+    let names = ts.all_font_names();
+    for fam in [UI_FAMILY, MONO_FAMILY] {
+        if !names.iter().any(|n| n == fam) {
+            bail!("bundled font family {fam:?} is not registered with GPUI");
+        }
+    }
+    let face = |family: &str, w: f32| {
+        let mut f = font(family.to_string());
+        f.weight = FontWeight(w);
+        ts.resolve_font(&f)
+    };
+    if face(UI_FAMILY, 400.0) == face(UI_FAMILY, 600.0) {
+        bail!("{UI_FAMILY}: weight 400 and 600 resolve to the same face");
+    }
+    let adv = |id, c| {
+        ts.advance(id, px(100.0), c)
+            .map(|s| f32::from(s.width))
+            .map_err(|e| anyhow!("{e}"))
+    };
+    let mono = face(MONO_FAMILY, 400.0);
+    if (adv(mono, 'i')? - adv(mono, 'M')?).abs() > 0.5 {
+        bail!("{MONO_FAMILY} did not resolve to a monospaced face");
+    }
+    let ui = face(UI_FAMILY, 400.0);
+    if (adv(ui, 'i')? - adv(ui, 'M')?).abs() < 5.0 {
+        bail!("{UI_FAMILY} did not resolve to a proportional face");
+    }
+    Ok(())
+}
+
 /// Maps a type token to a GPUI `Font`. Token families are CSS stacks
 /// (`"Source Sans 3, system-ui, sans-serif"`); the first entry is the bundled family.
+///
+/// Token features pass through as requested. `tnum` is a no-op on the bundled faces: Source
+/// Sans 3 digits are tabular by default (and Fragment Mono is monospaced). It stays in the
+/// tokens because DESIGN.md asks for tabular figures (deferred minor T3).
 pub fn font_for(style: &TypeStyle) -> Font {
     let family = style
         .family
@@ -80,6 +120,10 @@ pub fn small_caps_tracking_px(style: &TypeStyle) -> f32 {
 /// pre-cased `text` in `style`'s face, letters at [`SYNTH_SCALE`] x `style.size_px`, each glyph
 /// followed by [`small_caps_tracking_px`] (GPUI has no `letter-spacing`, so every glyph is its
 /// own flex item; Chrome also adds the spacing after each glyph). Never calls `to_uppercase`.
+///
+/// Flex layout rounds every glyph box to the pixel grid, so this row is wider than the sum of
+/// its glyph advances. `hacivat_ui::text::Label` therefore does not use it: it shapes and paints
+/// the [`small_caps_glyphs`] itself, so measured and painted widths are the same numbers.
 pub fn small_caps(style: &TypeStyle, color: Hsla, text: &str) -> Div {
     let font = font_for(style);
     let gap = small_caps_tracking_px(style);

@@ -1,24 +1,26 @@
-# cargo-packager config for the M0 spike. Run via packaging/package-macos.sh (or the Linux/Windows
-# scripts), which render the @PLACEHOLDERS@ into a git-ignored copy: nothing secret lives here.
-name = "spike-harman"
-productName = "Hacivat Spike"
-identifier = "dev.hacivat.spike"
+# cargo-packager config for Hacivat. Run via packaging/package-macos.sh (or the Linux/Windows
+# scripts), which render the @PLACEHOLDERS@ into an ignored copy: nothing secret lives here.
+# Lines carrying the signing placeholder are deleted by every script that does not sign, so the
+# Windows and Linux configs, and the unsigned macOS nightly, never see it (L13).
+name = "hacivat"
+productName = "Hacivat"
+identifier = "dev.hacivat.Hacivat"
 version = "@VERSION@"
-description = "Hacivat M0 GPUI validation spike"
+description = "Hacivat, a native SQL client"
 publisher = "Hacivat"
 copyright = "Hacivat"
 category = "DeveloperTool"
 
 [[binaries]]
-path = "spike-harman"
+path = "hacivat"
 main = true
 
-# macOS: Developer ID signing with the hardened runtime (cargo-packager passes `--options runtime`
-# and `--timestamp`). The identity is injected by package-macos.sh from the keychain.
+# macOS: Developer ID signing with the hardened runtime applies only to a local RELEASE=1 build
+# on the PO's Mac (cargo-packager passes `--options runtime` and `--timestamp`).
 [macos]
 minimumSystemVersion = "13.0"
 signingIdentity = "@SIGNING_IDENTITY@"
 
-# Windows: unsigned, per-user NSIS installer (no admin prompt).
+# Windows: per-user NSIS installer (no admin prompt), unsigned.
 [nsis]
 installMode = "currentUser"

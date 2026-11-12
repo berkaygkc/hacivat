@@ -1,0 +1,48 @@
+[package]
+name = "hacivat-l10n"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Pseudo-locales `en-XA` and `tr-XT` (I18N-16).
+pseudo = []
+
+[dependencies]
+fluent-bundle.workspace = true
+fluent-syntax.workspace = true
+intl-memoizer.workspace = true
+unic-langid.workspace = true
+icu_casemap.workspace = true
+icu_datetime.workspace = true
+icu_decimal.workspace = true
+icu_list.workspace = true
+icu_locale.workspace = true
+icu_normalizer.workspace = true
+icu_plurals.workspace = true
+icu_properties.workspace = true
+icu_provider.workspace = true
+icu_segmenter.workspace = true
+icu_time.workspace = true
+fixed_decimal.workspace = true
+arc-swap.workspace = true
+rust-embed.workspace = true
+sys-locale.workspace = true
+iana-time-zone.workspace = true
+jiff.workspace = true
+unicode-segmentation.workspace = true
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true
+hacivat-settings.workspace = true
+
+[build-dependencies]
+hacivat-l10n-schema.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

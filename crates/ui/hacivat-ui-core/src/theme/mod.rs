@@ -4,8 +4,10 @@
 use gpui::{App, Global, Hsla, Rgba};
 
 mod generated;
+pub mod surfaces;
 
 pub use generated::{Colors, DARK, LIGHT, Motion, Radii, SHARED, SharedColors, Spacing, TypeRamp};
+pub use surfaces::{focus_outline, popover_surface};
 
 /// Packed `0xRRGGBBAA`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,11 +124,13 @@ mod tests {
     }
 
     #[test]
-    fn radii_on_scale() {
-        assert_eq!(
-            [DARK.radii.none, DARK.radii.xs, DARK.radii.sm, DARK.radii.md],
-            [0.0, 3.0, 4.0, 6.0]
-        );
+    fn radii_on_scale_in_both_themes() {
+        for t in [&DARK, &LIGHT] {
+            assert_eq!(
+                [t.radii.none, t.radii.xs, t.radii.sm, t.radii.md],
+                [0.0, 3.0, 4.0, 6.0]
+            );
+        }
     }
 
     #[test]

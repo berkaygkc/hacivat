@@ -157,6 +157,10 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
 pub fn upper(lang: Lang, s: &str) -> String {
     s.chars()
         .flat_map(|ch| {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "M0 spike demo data, ASCII-only; not product code"
+            )]
             let up: Vec<char> = if lang == Lang::Tr && ch == 'i' {
                 vec!['\u{130}']
             } else {
