@@ -109,9 +109,44 @@ fn read_services(sources: Option<Vec<PathBuf>>) -> ReadOut {
     out
 }
 
-/// A profile for a service (libpq keeps the first value of a repeated key). Options other
-/// than the endpoint, database and user stay as extras; DRV-05 checks them at connect.
-fn profile_of(name: String, fields: Vec<(String, String)>, password: bool) -> Profile {
+/// Password-like option names that never stay in `Profile.extra` (the file would keep the
+/// secret in the clear). This mirrors `hacivat_driver::url`'s `is_secret_param`, which is not
+/// public: these exact names, ASCII case and leading dashes ignored...
+const SECRET_PARAMS: [&str; 8] = [
+    "password",
+    "sslpassword",
+    "pass",
+    "pwd",
+    "passwd",
+    "pgpassword",
+    "mysql_pwd",
+    "sslkeypassword",
+];
+/// ...and these endings (`db_password`, `x-pwd`).
+const SECRET_SUFFIXES: [&str; 4] = ["_password", "-password", "_pwd", "-pwd"];
+
+/// Whether the option `key` carries a secret.
+fn is_secret_param(key: &str) -> bool {
+    let key = key.trim_start_matches('-');
+    SECRET_PARAMS.iter().any(|s| s.eq_ignore_ascii_case(key))
+        || SECRET_SUFFIXES.iter().any(|s| {
+            key.len() >= s.len()
+                && key.is_char_boundary(key.len() - s.len())
+                && key[key.len() - s.len()..].eq_ignore_ascii_case(s)
+        })
+}
+
+/// A profile for a service (libpq keeps the first value of a repeated key), and the TLS key
+/// passphrase from its `sslpassword` (any ASCII case), which is saved in
+/// `SecretSlot::TlsKeyPassphrase` like a pasted one (T7). Options other than the endpoint,
+/// database and user stay as extras (DRV-05 checks them at connect), except password-like
+/// ones, which are dropped: a secret never lands in `connections.toml`.
+fn profile_of(
+    name: String,
+    fields: Vec<(String, String)>,
+    password: bool,
+) -> (Profile, Option<SecretString>) {
+    let mut tls_key_passphrase = None;
     let mut host: Option<String> = None;
     let mut port: Option<u16> = None;
     let mut database = None;
@@ -133,6 +168,12 @@ fn profile_of(name: String, fields: Vec<(String, String)>, password: bool) -> Pr
             "user" => {
                 user.get_or_insert(value);
             }
+            _ if key.eq_ignore_ascii_case("sslpassword") => {
+                if tls_key_passphrase.is_none() {
+                    tls_key_passphrase = Some(SecretString::from(value));
+                }
+            }
+            _ if is_secret_param(&key) => {}
             _ => extra.push((key, value)),
         }
     }
@@ -150,7 +191,7 @@ fn profile_of(name: String, fields: Vec<(String, String)>, password: bool) -> Pr
     } else {
         (AuthProviderId::PgPass, Retention::default())
     };
-    Profile {
+    let profile = Profile {
         name,
         engine: DbmsKind::Postgres,
         endpoint,
@@ -163,7 +204,8 @@ fn profile_of(name: String, fields: Vec<(String, String)>, password: bool) -> Pr
             source: ImportSource::PgService,
         },
         ..Profile::default()
-    }
+    };
+    (profile, tls_key_passphrase)
 }
 
 /// The preselected environment (R22, R24): local endpoints are `local`; a production token in
@@ -212,6 +254,7 @@ fn choice_label(tag: Option<EnvTag>) -> Rc<dyn Fn(&App) -> SharedString> {
 struct Row {
     profile: Profile,
     password: Option<SecretString>,
+    tls_key_passphrase: Option<SecretString>,
     env: Option<EnvTag>,
     checked: bool,
     select: Entity<Select>,
@@ -345,7 +388,8 @@ impl ImportView {
                 service.name.clone()
             };
             taken.push(name.clone());
-            let profile = profile_of(name, service.fields, service.password.is_some());
+            let (profile, tls_key_passphrase) =
+                profile_of(name, service.fields, service.password.is_some());
             let env = preselect(&profile);
             let selected = CHOICES.iter().position(|c| *c == env).unwrap_or(0);
             let options = CHOICES
@@ -370,6 +414,7 @@ impl ImportView {
             rows.push(Row {
                 profile,
                 password: service.password,
+                tls_key_passphrase,
                 env,
                 checked: true,
                 select,
@@ -475,6 +520,7 @@ impl ImportView {
                 .or_else(|| is_local_endpoint(&profile.endpoint).then_some(EnvTag::Local));
             let draft = ProfileDraft {
                 password: row.password.take(),
+                tls_key_passphrase: row.tls_key_passphrase.take(),
                 is_new: true,
                 ..ProfileDraft::edit(profile)
             };
@@ -667,8 +713,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn secrets_never_stay_in_extra_and_sslpassword_is_the_key_passphrase() {
+        use secrecy::ExposeSecret;
+        let (p, passphrase) = profile_of(
+            "orders".to_string(),
+            vec![
+                ("host".into(), "db".into()),
+                ("SSLPassword".into(), "s3cret".into()),
+                ("sslpassword".into(), "second".into()),
+                ("PGPASSWORD".into(), "hv_test_pw".into()),
+                ("db_password".into(), "hv_test_pw".into()),
+                ("--pwd".into(), "hv_test_pw".into()),
+                ("sslmode".into(), "require".into()),
+                ("password_db".into(), "kept".into()),
+            ],
+            false,
+        );
+        assert_eq!(
+            passphrase
+                .as_ref()
+                .map(|s| s.expose_secret().to_string())
+                .as_deref(),
+            Some("s3cret")
+        );
+        assert_eq!(
+            p.extra,
+            vec![
+                ("sslmode".to_string(), "require".to_string()),
+                ("password_db".to_string(), "kept".to_string())
+            ]
+        );
+        let text = format!("{p:?}");
+        assert!(!text.contains("s3cret") && !text.contains("hv_test_pw"));
+    }
+
+    #[test]
     fn a_service_maps_to_an_imported_profile_with_first_values() {
-        let p = profile_of(
+        let (p, _) = profile_of(
             "orders".to_string(),
             vec![
                 ("host".into(), "db-prod".into()),
@@ -698,7 +779,7 @@ mod tests {
             }
         );
         assert_eq!(p.auth, AuthProviderId::PgPass);
-        let with_password = profile_of("x".into(), vec![], true);
+        let (with_password, _) = profile_of("x".into(), vec![], true);
         assert_eq!(
             (with_password.auth, with_password.retention),
             (AuthProviderId::Password, Retention::Forever)
@@ -707,19 +788,19 @@ mod tests {
 
     #[test]
     fn local_and_production_rows_are_preselected() {
-        let local = profile_of("a".into(), vec![("host".into(), "localhost".into())], false);
+        let (local, _) = profile_of("a".into(), vec![("host".into(), "localhost".into())], false);
         assert_eq!(preselect(&local), Some(EnvTag::Local));
-        let socket = profile_of("a".into(), vec![("host".into(), "/tmp".into())], false);
+        let (socket, _) = profile_of("a".into(), vec![("host".into(), "/tmp".into())], false);
         assert_eq!(preselect(&socket), Some(EnvTag::Local));
-        let prod = profile_of("a".into(), vec![("host".into(), "db-prod".into())], false);
+        let (prod, _) = profile_of("a".into(), vec![("host".into(), "db-prod".into())], false);
         assert_eq!(preselect(&prod), Some(EnvTag::Production));
-        let named = profile_of(
+        let (named, _) = profile_of(
             "orders-live".into(),
             vec![("host".into(), "10.0.0.5".into())],
             false,
         );
         assert_eq!(preselect(&named), Some(EnvTag::Production));
-        let other = profile_of(
+        let (other, _) = profile_of(
             "delivery".into(),
             vec![("host".into(), "10.0.0.5".into())],
             false,

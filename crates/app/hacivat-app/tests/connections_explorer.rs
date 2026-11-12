@@ -501,3 +501,110 @@ fn f6_moves_the_focus_to_the_newest_sticky_toast(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("escape"); // a focused toast dismisses on Escape
     assert!(vcx.cx.read(ToastQueue::visible_ids).is_empty());
 }
+
+/// Whether the registered command `id` is enabled now.
+fn enabled(vcx: &VisualTestContext, id: &str) -> bool {
+    vcx.cx.read(|cx| {
+        cx.global::<ActionRegistry>()
+            .get(id)
+            .is_some_and(|d| (d.enabled)(cx))
+    })
+}
+
+/// Review fix 1: a filter that hides the selection moves it to the first visible row (or
+/// clears it), so Enter, Backspace and ⌘D never act on a hidden profile.
+#[gpui::test]
+fn explorer_commands_never_act_on_a_hidden_row(cx: &mut TestAppContext) {
+    let vcx = with_profiles(
+        cx,
+        [
+            ("orders-prod", Some(EnvTag::Production)),
+            ("orders-dev", Some(EnvTag::Dev)),
+        ],
+    );
+    focus_list(vcx); // selects the first row, orders-prod
+    assert_eq!(selected_id(vcx), Some(profile_id(vcx, "orders-prod")));
+    filter(vcx, "dev");
+    assert_eq!(row_names(vcx), ["orders-dev"]);
+    assert_eq!(selected_id(vcx), Some(profile_id(vcx, "orders-dev")));
+    focus_list(vcx);
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(connect_calls(vcx), ["orders-dev"]);
+    // Nothing visible: nothing selected, and the explorer commands are disabled.
+    focus_filter(vcx);
+    vcx.simulate_input("zzz");
+    assert!(row_names(vcx).is_empty());
+    assert_eq!(selected_id(vcx), None);
+    for id in [
+        "connection.toggle_connect",
+        "connection.delete",
+        "connection.duplicate",
+        "connection.copy_url",
+    ] {
+        assert!(!enabled(vcx, id), "{id}");
+    }
+    // A selection the filter hides (set from elsewhere) is not acted on either.
+    let prod = profile_id(vcx, "orders-prod");
+    vcx.cx.update(|cx| ConnectionsModel::select(cx, Some(prod)));
+    assert!(!run(vcx, "connection.delete"));
+    assert!(!run(vcx, "connection.duplicate"));
+    assert!(layer_ids(vcx).is_empty());
+    assert_eq!(row_names(vcx), Vec::<String>::new());
+    assert_eq!(connect_calls(vcx), ["orders-dev"]);
+}
+
+/// Review fix 4: a read-only store (a newer file) disables every mutating command; the menu
+/// shows them disabled, and connecting still works.
+#[gpui::test]
+fn a_read_only_store_disables_the_mutating_commands(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections_file(
+        cx,
+        "en",
+        "version = 2\n[[connection]]\nid = \"6f9619ff-8b86-d011-b42d-00c04fc964ff\"\nname = \"a\"\nengine = \"postgres\"\nhost = \"127.0.0.1\"\nenvironment = \"dev\"\n",
+    );
+    focus_list(vcx);
+    assert_eq!(row_names(vcx), ["a"]);
+    for id in [
+        "connection.new",
+        "connection.paste_url",
+        "connection.import_pg_service",
+        "connection.edit",
+        "connection.duplicate",
+        "connection.delete",
+    ] {
+        assert!(!enabled(vcx, id), "{id}");
+    }
+    assert!(enabled(vcx, "connection.toggle_connect"));
+    assert!(enabled(vcx, "connection.copy_url"));
+    vcx.simulate_keystrokes("backspace");
+    assert!(layer_ids(vcx).is_empty(), "no delete confirmation");
+    let id = selected_id(vcx).expect("selected");
+    let disabled: Vec<bool> = vcx.cx.read(|cx| {
+        explorer::menu_items(cx, id)
+            .iter()
+            .filter(|i| !i.separator)
+            .map(|i| i.disabled)
+            .collect()
+    });
+    // Connect, Edit…, Duplicate, Copy as URL, Delete…
+    assert_eq!(disabled, [false, true, true, false, true]);
+}
+
+/// Review minor: the home entry points are real buttons (tab stops) that run their command.
+#[gpui::test]
+fn home_entry_points_are_buttons(cx: &mut TestAppContext) {
+    let vcx = with_profiles(cx, [("a", Some(EnvTag::Dev))]);
+    for id in [
+        "button-home-new",
+        "button-home-paste",
+        "button-home-connect",
+        "button-home-palette",
+    ] {
+        assert!(vcx.debug_bounds(id).is_some(), "{id}");
+    }
+    focus_list(vcx); // selects a
+    click(vcx, "button-home-connect");
+    assert_eq!(connect_calls(vcx), ["a"]);
+    click(vcx, "button-home-palette");
+    assert_eq!(layer_ids(vcx), ["palette"]);
+}

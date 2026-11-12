@@ -57,8 +57,8 @@ fn spec(name: String) -> DialogSpec {
             button(text_fn(ids::hv::CONN_DEL_BTN), ButtonKind::Danger),
         ],
         cancel: CANCEL,
-        // The initial focus is on Cancel (NOTES §8).
-        primary: CANCEL,
+        // A destructive primary: `Dialog` gives the initial focus to Cancel (NOTES §8).
+        primary: DELETE,
         size: DialogSize::Standard,
     }
 }

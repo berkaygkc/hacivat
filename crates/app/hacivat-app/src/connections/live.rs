@@ -9,11 +9,11 @@
 //!   starts (never `Progress.started`). While any profile is connecting a 50 ms timer repaints;
 //!   ticking clocks are the only motion.
 //! - **Escape.** With no layer open, Escape cancels the current connect and toasts.
-//! - **Quit (P15).** GPUI gives quit futures 200 ms, so the quit handler blocks, bounded:
-//!   `ConnectionManager::shutdown_blocking` closes every connection (and cancels connects), the
-//!   queued secret jobs and profile writes drain within what is left of the budget, then the
-//!   core runtime stops with its own 200 ms budget. This is the only place profile writes may
-//!   block the UI thread.
+//! - **Quit (P15).** GPUI gives quit futures 200 ms, so the quit handler blocks, bounded by the
+//!   manager's `shutdown_budget`: the queued secret jobs and profile writes drain first (at most
+//!   half the budget), then `ConnectionManager::shutdown_blocking` closes every connection (and
+//!   cancels connects) within the rest, then the core runtime stops with its own 200 ms budget.
+//!   This is the only place profile writes may block the UI thread.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use hacivat_l10n::{Text, ids};
 use hacivat_proto::ProfileId;
-use hacivat_session::{LiveState, ManagerConfig};
+use hacivat_session::LiveState;
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, Global, Window};
 
@@ -78,8 +78,15 @@ pub fn install(cx: &mut App) {
     .detach();
 }
 
-/// Marks `id`'s connect as started now (the capsule clock's zero), unless it already runs.
+/// Marks `id`'s connect as started now (the capsule clock's zero): the user started an
+/// attempt, so an older start never carries over.
 pub fn note_started(cx: &mut App, id: ProfileId) {
+    let now = cx.background_executor().now();
+    cx.default_global::<LiveClocks>().started.insert(id, now);
+}
+
+/// Starts `id`'s clock unless it already runs (the mirror saw a connect it did not start).
+fn ensure_started(cx: &mut App, id: ProfileId) {
     let now = cx.background_executor().now();
     cx.default_global::<LiveClocks>()
         .started
@@ -115,7 +122,7 @@ fn mirror(cx: &mut App) {
     for (id, state) in states {
         if matches!(state, LiveState::Connecting(_)) {
             connecting = true;
-            note_started(cx, id);
+            ensure_started(cx, id);
         } else {
             cx.default_global::<LiveClocks>().started.remove(&id);
         }
@@ -202,10 +209,14 @@ fn quit(cx: &mut App) {
     let Some(m) = cx.try_global::<ConnectionsModel>() else {
         return;
     };
-    let budget = ManagerConfig::default().shutdown_budget;
+    let budget = m.manager().shutdown_budget();
     let started = Instant::now();
-    let closed = m.manager().shutdown_blocking(budget);
-    let drained = m.drain_writes(budget.saturating_sub(started.elapsed()));
+    // Profile and secret writes first, with at most half the budget, so a slow close never
+    // starves a keyring write; then the connections get what is left.
+    let drained = m.drain_writes(budget / 2);
+    let closed = m
+        .manager()
+        .shutdown_blocking(budget.saturating_sub(started.elapsed()));
     m.core_runtime().shutdown(RUNTIME_SHUTDOWN);
     tracing::debug!(closed, drained, "connections: shut down");
 }

@@ -240,14 +240,16 @@ pub fn on_segment(
     }
 }
 
-/// Opens the error dialog of the current profile's failed connect.
+/// Opens the error dialog of the current profile's failed connect; a lost one reconnects.
 fn open_failure(window: &mut Window, cx: &mut App) {
     let Some(p) = current_profile(cx) else {
         return;
     };
-    let state = cx.global::<ConnectionsModel>().live(p.id);
-    if let LiveState::Failed(error) = state {
-        open_error_dialog(p.id, error, window, cx);
+    match cx.global::<ConnectionsModel>().live(p.id) {
+        LiveState::Failed(error) => open_error_dialog(p.id, error, window, cx),
+        // A lost connection has no connect error to show: the body retries, like Retry.
+        LiveState::Lost { .. } => retry(cx),
+        _ => {}
     }
 }
 
@@ -320,7 +322,9 @@ pub fn explain_unencrypted(anchor: Point<Pixels>, window: &mut Window, cx: &mut 
 }
 
 /// The keyboard path to the explanation (`connection.explain_unencrypted`): anchored under
-/// the title bar's middle, where the capsule sits.
+/// the title bar's middle, where the capsule sits. The segment's real bounds are known only
+/// inside `Capsule`'s click handler (Task 9's widget exposes no bounds), so a command run
+/// from the keyboard or the palette uses this fixed anchor.
 pub fn explain_unencrypted_from_keyboard(window: &mut Window, cx: &mut App) {
     let size = window.viewport_size();
     let t = hacivat_ui_core::theme::Theme::get(cx).tokens;

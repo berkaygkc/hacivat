@@ -1,15 +1,14 @@
 //! The editor area's home when no connection is open (NOTES surface 8, Task 18).
 //!
 //! There is no query console in M2 (L15 c): the centre shows the keyboard entry points with
-//! their shortcut labels from the active keymap. Each row runs its command when clicked.
+//! their shortcut labels from the active keymap. Each entry is a ghost button (a tab stop) that
+//! runs its command, disabled while the command cannot run.
 
 use hacivat_l10n::{MsgRef, NoArgs, ids};
 use hacivat_ui::actions::ActionRegistry;
+use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::text::{Label, TextSource};
-use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, div, px,
-};
+use hacivat_ui_core::gpui_surface::{AnyElement, App, IntoElement, ParentElement, Styled, div, px};
 use hacivat_ui_core::theme::{Theme, TypeStyle};
 
 use crate::connections::model::ConnectionsModel;
@@ -17,13 +16,28 @@ use crate::l10n_global::tr;
 use crate::shell::keymap_state::shortcut_label;
 use crate::shell::tiles;
 
-/// The entry points, top down: the label and the command it runs.
-const ENTRIES: [(MsgRef<NoArgs>, &str); 4] = [
-    (ids::hv::HOME_NEW, "connection.new"),
-    (ids::hv::HOME_PASTE, "connection.paste_url"),
-    (ids::hv::HOME_CONNECT, "connection.toggle_connect"),
-    (ids::hv::TITLEBAR_PALETTE, "workspace.command_palette"),
+/// The entry points, top down: the button ID, the label and the command it runs.
+const ENTRIES: [(&str, MsgRef<NoArgs>, &str); 4] = [
+    ("home-new", ids::hv::HOME_NEW, "connection.new"),
+    ("home-paste", ids::hv::HOME_PASTE, "connection.paste_url"),
+    (
+        "home-connect",
+        ids::hv::HOME_CONNECT,
+        "connection.toggle_connect",
+    ),
+    (
+        "home-palette",
+        ids::hv::TITLEBAR_PALETTE,
+        "workspace.command_palette",
+    ),
 ];
+
+/// Whether the registered command `action` is enabled now.
+fn enabled(cx: &App, action: &str) -> bool {
+    cx.try_global::<ActionRegistry>()
+        .and_then(|r| r.get(action))
+        .is_some_and(|d| (d.enabled)(cx))
+}
 
 /// The `editor_empty` hook; without a model the M1 empty state (P17).
 pub fn element(theme: &Theme, cx: &App) -> AnyElement {
@@ -36,39 +50,21 @@ pub fn element(theme: &Theme, cx: &App) -> AnyElement {
     let mut rows = div()
         .flex()
         .flex_col()
+        .items_start()
         .gap(px(t.spacing.xs))
         .pt(px(t.spacing.lg));
-    for (i, (label, action)) in ENTRIES.into_iter().enumerate() {
-        let keys: SharedString = shortcut_label(cx, action).unwrap_or_default().into();
-        rows = rows.child(
-            div()
-                .id(("home-entry", i))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(t.spacing.s_3xl))
-                .h(px(t.spacing.control_height))
-                .px(px(t.spacing.md))
-                .rounded(px(t.radii.sm))
-                .cursor_pointer()
-                .hover(|s| s.bg(c.hover.to_hsla()))
-                .on_click(move |_, window, cx| {
-                    ActionRegistry::run(action, window, cx);
-                })
-                .child(Label::new(
-                    tr(cx, label, NoArgs),
-                    TextSource::Fluent,
-                    t.type_ramp.body,
-                    c.text.to_hsla(),
-                ))
-                .child(Label::new(
-                    keys,
-                    TextSource::Shortcut,
-                    t.type_ramp.mono_kbd,
-                    c.text_2.to_hsla(),
-                )),
-        );
+    for (id, label, action) in ENTRIES {
+        // Real buttons: tab stops, Enter and Space, announced as buttons.
+        let mut button = Button::new(id, tr(cx, label, NoArgs))
+            .kind(ButtonKind::Ghost)
+            .disabled(!enabled(cx, action))
+            .on_click(move |_, window, cx| {
+                ActionRegistry::run(action, window, cx);
+            });
+        if let Some(keys) = shortcut_label(cx, action) {
+            button = button.key_hint(keys.into());
+        }
+        rows = rows.child(button);
     }
     div()
         .flex()

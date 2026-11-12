@@ -811,6 +811,23 @@ pub fn shell_with_fake_prepared(
     fake: hacivat_driver::fake::FakeDriver,
     prepare: impl FnOnce(&LocalPaths),
 ) -> &'static mut VisualTestContext {
+    shell_with_fake_backend(
+        cx,
+        lang,
+        fake,
+        std::sync::Arc::new(hacivat_secrets::MemoryBackend::new()),
+        prepare,
+    )
+}
+
+/// [`shell_with_fake_prepared`] whose secret store uses `backend`.
+pub fn shell_with_fake_backend(
+    cx: &mut TestAppContext,
+    lang: &str,
+    fake: hacivat_driver::fake::FakeDriver,
+    backend: std::sync::Arc<dyn hacivat_secrets::SecretBackend>,
+    prepare: impl FnOnce(&LocalPaths),
+) -> &'static mut VisualTestContext {
     use hacivat_driver::fake::FakeDriver;
     use hacivat_driver::{Driver as _, DriverRegistry};
     use hacivat_proto::DbmsKind;
@@ -832,8 +849,6 @@ pub fn shell_with_fake_prepared(
     for kind in [DbmsKind::MySql, DbmsKind::MariaDb, DbmsKind::Sqlite] {
         drivers.register(std::sync::Arc::new(FakeDriver::new(kind)));
     }
-    let backend: std::sync::Arc<dyn hacivat_secrets::SecretBackend> =
-        std::sync::Arc::new(hacivat_secrets::MemoryBackend::new());
     let mut boot = hacivat_app::connections::ConnectionsBoot::for_tests(&paths, drivers);
     boot.secrets = std::sync::Arc::new(hacivat_secrets::SecretStore::new(Some(backend.clone())));
     let mut outcome = hacivat_settings::load(&paths.settings_toml());

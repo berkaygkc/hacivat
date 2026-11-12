@@ -96,6 +96,14 @@ pub fn focus_filter(window: &mut Window, cx: &mut App) {
     }
 }
 
+/// Whether `id`'s row is visible under the current filter (true without an explorer view).
+pub fn is_visible(cx: &App, id: ProfileId) -> bool {
+    match explorer(cx) {
+        Some(view) => view.read(cx).visible_ids(cx).contains(&id),
+        None => true,
+    }
+}
+
 /// Focuses the list (its `Explorer` bindings then apply).
 pub fn focus_list(window: &mut Window, cx: &mut App) {
     if let Some(view) = explorer(cx) {
@@ -236,8 +244,14 @@ pub fn menu_items(cx: &App, id: ProfileId) -> Vec<MenuItemSpec> {
         .map(|m| m.live(id))
         .unwrap_or_default();
     let connected = matches!(live, LiveState::Connected(_) | LiveState::Connecting(_));
+    let enabled = |action: &str| {
+        cx.try_global::<ActionRegistry>()
+            .and_then(|r| r.get(action))
+            .is_some_and(|d| (d.enabled)(cx))
+    };
     let item = |label: TextFn, action: &'static str| {
-        let mut item = MenuItemSpec::new(label, action);
+        // A command that cannot run now (a read-only store) shows disabled.
+        let mut item = MenuItemSpec::new(label, action).disabled(!enabled(action));
         if shortcut_label(cx, action).is_some() {
             let keys: TextFn =
                 Rc::new(move |cx: &App| shortcut_label(cx, action).unwrap_or_default().into());
@@ -295,7 +309,10 @@ impl ExplorerView {
                 &filter,
                 window,
                 |this, _, event: &InputEvent, window, cx| match event {
-                    InputEvent::Changed => cx.notify(),
+                    InputEvent::Changed => {
+                        this.keep_selection_visible(cx);
+                        cx.notify();
+                    }
                     // P16: Escape in the field is the shell's Escape (cancel a connect).
                     InputEvent::Cancelled => {
                         let escape = cx.global::<ShellHooks>().escape.clone();
@@ -317,6 +334,16 @@ impl ExplorerView {
             list_focus,
             row_bounds: Rc::default(),
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// A selection the filter hides moves to the first visible row, or is cleared when no
+    /// row is visible: the `Explorer` commands never act on a hidden row.
+    fn keep_selection_visible(&self, cx: &mut Context<Self>) {
+        let ids = self.visible_ids(cx);
+        let selected = cx.global::<ConnectionsModel>().selected();
+        if selected.is_some_and(|s| !ids.contains(&s)) {
+            ConnectionsModel::select(cx, ids.first().copied());
         }
     }
 

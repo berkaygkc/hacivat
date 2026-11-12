@@ -275,13 +275,16 @@ fn quit_closes_every_connection(cx: &mut TestAppContext) {
     connect_and_wait(vcx, "a");
     connect_and_wait(vcx, "b");
     assert_eq!(fake(vcx).close_calls(), 0);
+    assert_eq!(fake(vcx).open_connections(), 2);
     quit(vcx);
     assert_eq!(fake(vcx).close_calls(), 2);
+    assert_eq!(fake(vcx).open_connections(), 0);
 }
 
 /// RF5 (P39) at quit: the connect in flight is cancelled and the quit stays within its budget.
-/// The core runtime stops at the end of the quit (P15), which drops the attempt before its
-/// handshake completes, so no connection is ever opened, and none is left open.
+/// The core runtime stops at the end of the quit (P15) and drops the attempt task before the
+/// delayed handshake lands, so the late connection is abandoned (never opened, nothing to
+/// close) rather than closed: the fake's open-connection count goes back to 0 either way.
 #[gpui::test]
 fn quit_during_connect_cancels_within_budget(cx: &mut TestAppContext) {
     let vcx = with_fake(cx, ok_pg().delay(ms(300)));
@@ -301,16 +304,113 @@ fn quit_during_connect_cancels_within_budget(cx: &mut TestAppContext) {
         .read(|cx| cx.global::<ConnectionsModel>().manager().state(id));
     assert_eq!(state, LiveState::Disconnected);
     std::thread::sleep(ms(500));
-    assert_eq!(fake(vcx).close_calls(), 0);
+    assert_eq!(fake(vcx).open_connections(), 0);
+}
+
+/// A memory backend whose `put` takes 300 ms (a slow keychain): longer than the core
+/// runtime's own 200 ms shutdown budget, so only `drain_writes` waits for it.
+struct SlowPut(hacivat_secrets::MemoryBackend);
+
+impl hacivat_secrets::SecretBackend for SlowPut {
+    fn get(&self, key: &SecretKey) -> Result<Option<SecretString>, hacivat_secrets::SecretError> {
+        self.0.get(key)
+    }
+    fn put(
+        &self,
+        key: &SecretKey,
+        value: &SecretString,
+    ) -> Result<(), hacivat_secrets::SecretError> {
+        std::thread::sleep(ms(300));
+        self.0.put(key, value)
+    }
+    fn delete(&self, key: &SecretKey) -> Result<(), hacivat_secrets::SecretError> {
+        self.0.delete(key)
+    }
+    fn name(&self) -> &'static str {
+        "slow-put"
+    }
+}
+
+/// P15: a Forever password queued just before quit reaches the keyring, because the quit
+/// drains the writer's queue (bounded) before the runtime stops. Without `drain_writes` the
+/// runtime's 200 ms budget ends first and the entry is missing.
+#[gpui::test]
+fn quit_drains_queued_profile_writes(cx: &mut TestAppContext) {
+    let backend = std::sync::Arc::new(SlowPut(hacivat_secrets::MemoryBackend::new()));
+    let vcx = shell_with_fake_backend(cx, "en", ok_pg(), backend.clone(), |_| {});
+    let mut p = test_profile("drained", Some(EnvTag::Dev), "127.0.0.1");
+    p.auth = AuthProviderId::Password;
+    p.retention = Retention::Forever;
+    let id = save_draft(
+        vcx,
+        ProfileDraft {
+            password: Some(SecretString::from("hv_test_pw".to_string())),
+            is_new: true,
+            ..ProfileDraft::edit(p)
+        },
+    );
+    let key = SecretKey {
+        profile: id,
+        slot: SecretSlot::DbPassword,
+    };
+    use hacivat_secrets::SecretBackend as _;
+    assert!(
+        backend.get(&key).unwrap().is_none(),
+        "the put is still queued"
+    );
+    quit(vcx);
+    assert!(backend.get(&key).unwrap().is_some());
+    let text = std::fs::read_to_string(paths(vcx).connections_toml()).expect("written");
+    assert!(text.contains("drained"), "{text}");
 }
 
 #[gpui::test]
-fn quit_drains_queued_profile_writes(cx: &mut TestAppContext) {
-    let vcx = shell_with_fake(cx, "en", ok_pg());
-    add_profile(vcx, test_profile("drained", Some(EnvTag::Dev), "127.0.0.1"));
-    quit(vcx);
-    let text = std::fs::read_to_string(paths(vcx).connections_toml()).expect("written");
-    assert!(text.contains("drained"), "{text}");
+fn a_failed_production_capsule_keeps_production_first(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", ok_pg().connect_result(Err(refused())));
+    add_profile(
+        vcx,
+        test_profile("orders-prod", Some(EnvTag::Production), "10.0.4.12"),
+    );
+    connect_and_settle(vcx, "orders-prod");
+    assert!(matches!(
+        capsule_model(vcx),
+        CapsuleModel::Failed {
+            env: EnvKind::Production,
+            ..
+        }
+    ));
+    let fill = vcx
+        .debug_bounds("cp-fill")
+        .expect("the PRODUCTION block is drawn");
+    let body = vcx.debug_bounds("capsule-body").expect("the name is drawn");
+    assert!(fill.right() <= body.left(), "{fill:?} then {body:?}");
+    let texts = texts_drawn_by(vcx, "hacivat-ui/src/capsule.rs");
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("PRODUCTION"),
+        "{texts:?}"
+    );
+}
+
+#[gpui::test]
+fn the_body_of_a_lost_connection_reconnects(cx: &mut TestAppContext) {
+    let vcx = with_fake(cx, ok_pg());
+    let id = profile_id(vcx, "a");
+    vcx.cx.update(|cx| {
+        let m = cx.global_mut::<ConnectionsModel>();
+        m.set_live(
+            id,
+            LiveState::Lost {
+                class: hacivat_proto::ErrClass::NetworkReset,
+            },
+        );
+        m.note_attempt(id);
+    });
+    vcx.run_until_parked();
+    assert!(matches!(capsule_model(vcx), CapsuleModel::Failed { .. }));
+    click(vcx, "capsule-body");
+    connect_and_settle_after_retry(vcx);
+    assert!(matches!(live(vcx, "a"), LiveState::Connected(_)));
 }
 
 #[gpui::test]

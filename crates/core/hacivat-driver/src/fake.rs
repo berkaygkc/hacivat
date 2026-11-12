@@ -136,6 +136,9 @@ impl FakeRequest {
 struct Counters {
     connect: AtomicUsize,
     close: AtomicUsize,
+    /// Connection objects alive: made for a connect, not yet dropped (closed or abandoned,
+    /// e.g. with a pending connect when its runtime stops). M2a Task 18.
+    alive: AtomicUsize,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -242,6 +245,12 @@ impl FakeDriver {
         self.counters.close.load(Ordering::SeqCst)
     }
 
+    /// Connections opened (or being opened) and not yet dropped: closed connections and
+    /// abandoned connects (their future dropped) both count as gone (M2a Task 18).
+    pub fn open_connections(&self) -> usize {
+        self.counters.alive.load(Ordering::SeqCst)
+    }
+
     pub fn last_request(&self) -> Option<FakeRequest> {
         lock(&self.last).clone()
     }
@@ -272,6 +281,7 @@ impl Driver for FakeDriver {
             user: req.user.clone(),
             counters: self.counters.clone(),
         };
+        self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
         let with_tls = req.tls.is_some();
         let events = req.events.clone();
@@ -301,6 +311,12 @@ struct FakeConn {
     databases: Vec<String>,
     user: Option<String>,
     counters: Arc<Counters>,
+}
+
+impl Drop for FakeConn {
+    fn drop(&mut self) {
+        self.counters.alive.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl RawConn for FakeConn {

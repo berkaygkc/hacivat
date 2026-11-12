@@ -42,14 +42,29 @@ fn has_selection(cx: &App) -> bool {
     selected(cx).is_some()
 }
 
+/// The store can be written (P29): the mutating commands are disabled otherwise.
+fn writable(cx: &App) -> bool {
+    cx.try_global::<ConnectionsModel>()
+        .is_some_and(|m| !m.store_read_only())
+}
+
+fn can_add(cx: &App) -> bool {
+    has_model(cx) && writable(cx)
+}
+
+fn can_change_selection(cx: &App) -> bool {
+    has_selection(cx) && writable(cx)
+}
+
 fn always(_: &App) -> bool {
     true
 }
 
-/// The selected profile.
+/// The selected profile, while its row is visible (a filtered-out row is never acted on).
 fn selected(cx: &App) -> Option<Arc<Profile>> {
     let m = cx.try_global::<ConnectionsModel>()?;
-    m.selected().and_then(|id| m.get(id))
+    let id = m.selected().filter(|id| explorer::is_visible(cx, *id))?;
+    m.get(id)
 }
 
 fn on_selected(f: fn(Arc<Profile>, &mut Window, &mut App)) -> ActionFn {
@@ -76,14 +91,14 @@ pub fn register(cx: &mut App) {
             ids::hv::CMD_CONNECTION_NEW.id,
             WORKSPACE,
             Rc::new(|window, cx| open_connection_dialog(DialogMode::New, window, cx)),
-            has_model,
+            can_add,
         ),
         (
             "connection.paste_url",
             ids::hv::CMD_CONNECTION_PASTE_URL.id,
             WORKSPACE,
             Rc::new(paste_url),
-            has_model,
+            can_add,
         ),
         (
             "connection.toggle_connect",
@@ -97,14 +112,14 @@ pub fn register(cx: &mut App) {
             ids::hv::CMD_CONNECTION_EDIT.id,
             EXPLORER,
             on_selected(|p, window, cx| open_connection_dialog(DialogMode::Edit(p.id), window, cx)),
-            has_selection,
+            can_change_selection,
         ),
         (
             "connection.duplicate",
             ids::hv::CMD_CONNECTION_DUPLICATE.id,
             EXPLORER,
             on_selected(|p, _, cx| duplicate(p.id, cx)),
-            has_selection,
+            can_change_selection,
         ),
         (
             "connection.copy_url",
@@ -118,7 +133,7 @@ pub fn register(cx: &mut App) {
             ids::hv::CMD_CONNECTION_DELETE.id,
             EXPLORER,
             on_selected(|p, window, cx| delete::confirm(p.id, window, cx)),
-            has_selection,
+            can_change_selection,
         ),
         (
             "connection.context_menu",
@@ -132,7 +147,7 @@ pub fn register(cx: &mut App) {
             ids::hv::CMD_CONNECTION_IMPORT_PG_SERVICE.id,
             WORKSPACE,
             Rc::new(import::open),
-            has_model,
+            can_add,
         ),
         (
             "connection.retry",
@@ -181,7 +196,9 @@ fn paste_url(window: &mut Window, cx: &mut App) {
 
 /// Connects `id`, or disconnects (cancels) it when it is connected (or connecting).
 pub fn toggle_connect(id: ProfileId, cx: &mut App) {
-    match cx.global::<ConnectionsModel>().live(id) {
+    // The manager's state, not the mirror (which may lag by one change).
+    let state = cx.global::<ConnectionsModel>().manager().state(id);
+    match state {
         LiveState::Connected(_) => ConnectionsModel::disconnect(cx, id),
         LiveState::Connecting(_) => ConnectionsModel::cancel_connect(cx, id),
         LiveState::Disconnected | LiveState::Failed(_) | LiveState::Lost { .. } => {
