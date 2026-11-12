@@ -1,6 +1,13 @@
 //! `xtask vf`: visual-fidelity comparison between a Chromium reference capture of the harman mock
 //! and a GPUI candidate capture. Colour samples are compared with CIEDE2000, scanlines compare
 //! edge positions (±1 logical px). `--side-by-side` writes reference|candidate for PO sign-off.
+//!
+//! Before grading the candidate the expectations themselves are validated against the
+//! reference: both images must be 1440x900 x scale, every reference sample pixel must match its
+//! labelled DESIGN.md token (dE2000 <= 1, translucent tokens composited over their `over`
+//! backdrop), and every scanline must find exactly its expected edges in the reference. Any of
+//! these failing is an error (exit 2: "reference/token mismatch" / "bad expectation"), not a
+//! candidate FAIL.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -197,6 +204,8 @@ pub struct ColorSample {
     pub y: f64,
     pub token: String,
     pub theme: String,
+    /// Opaque token a translucent `token` is composited over.
+    pub over: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -221,6 +230,7 @@ pub fn parse_samples(json: &str) -> Result<Samples> {
             y: n(c, "y")?,
             token: s(c, "token")?,
             theme: s(c, "theme")?,
+            over: c.get("over").and_then(Value::as_str).map(str::to_string),
         });
     }
     let mut scanlines = vec![];
@@ -270,6 +280,68 @@ fn scale_line(l: &Scanline, scale: f64) -> Scanline {
     }
 }
 
+/// The logical frame every capture must show (DESIGN.md reference window).
+pub const FRAME: (u32, u32) = (1440, 900);
+
+/// Fails unless `img` is exactly `FRAME` x `scale` device pixels.
+pub fn check_size(img: &RgbaImage, scale: f64, what: &str) -> Result<()> {
+    let want = (
+        (FRAME.0 as f64 * scale).round() as u32,
+        (FRAME.1 as f64 * scale).round() as u32,
+    );
+    if img.dimensions() != want {
+        bail!(
+            "{what} is {}x{}, expected {}x{} ({}x{} at scale {scale})",
+            img.width(),
+            img.height(),
+            want.0,
+            want.1,
+            FRAME.0,
+            FRAME.1
+        );
+    }
+    Ok(())
+}
+
+fn token_rgba(tokens: &crate::tokens::Tokens, theme: &str, token: &str) -> Result<u32> {
+    let key = token.replace('_', "-");
+    let set = match theme {
+        "dark" => &tokens.dark,
+        "light" => &tokens.light,
+        other => bail!("unknown theme {other}"),
+    };
+    set.color(&key)
+        .or_else(|| tokens.shared.color(&key))
+        .with_context(|| format!("token `{token}` is not in DESIGN.md colors ({theme})"))
+}
+
+/// The sRGB colour a sample labelled `token` (optionally `token@opacity`) must show in `theme`:
+/// the DESIGN.md value, or for a translucent token its source-over composite on the opaque
+/// `over` token (8-bit, as Chromium blends).
+pub fn expected_rgb(
+    tokens: &crate::tokens::Tokens,
+    theme: &str,
+    token: &str,
+    over: Option<&str>,
+) -> Result<[u8; 3]> {
+    let (name, opacity) = match token.split_once('@') {
+        Some((n, op)) => (n, op.parse::<f64>().with_context(|| format!("bad opacity in `{token}`"))?),
+        None => (token, 1.0),
+    };
+    let fg = token_rgba(tokens, theme, name)?;
+    let ch = |c: u32, i: u32| f64::from((c >> (24 - 8 * i)) & 0xFF);
+    let alpha = ch(fg, 3) / 255.0 * opacity;
+    if alpha >= 1.0 {
+        return Ok([0, 1, 2].map(|i| ch(fg, i) as u8));
+    }
+    let over = over.with_context(|| format!("translucent token `{token}` needs an `over` backdrop"))?;
+    let bg = token_rgba(tokens, theme, over)?;
+    if bg & 0xFF != 0xFF {
+        bail!("backdrop `{over}` of `{token}` is not opaque");
+    }
+    Ok([0, 1, 2].map(|i| (ch(fg, i) * alpha + ch(bg, i) * (1.0 - alpha)).round() as u8))
+}
+
 struct Args {
     reference: Option<PathBuf>,
     candidate: Option<PathBuf>,
@@ -295,7 +367,12 @@ fn parse_args(args: &[String]) -> Result<Args> {
             "--reference" => a.reference = Some(val()?.into()),
             "--candidate" => a.candidate = Some(val()?.into()),
             "--scale" => a.scale = val()?.parse()?,
-            "--theme" => a.theme = val()?,
+            "--theme" => {
+                a.theme = val()?;
+                if a.theme != "dark" && a.theme != "light" {
+                    bail!("--theme must be dark or light, got {:?}", a.theme);
+                }
+            }
             "--samples" => a.samples = val()?.into(),
             "--side-by-side" => a.side_by_side = Some(val()?.into()),
             other => bail!("unknown flag {other}"),
@@ -368,13 +445,75 @@ fn run_inner(args: &[String]) -> Result<bool> {
         println!("wrote {}", out.display());
     }
     let samples = parse_samples(&std::fs::read_to_string(&a.samples)?)?;
+    let tokens = crate::tokens::load_repo_sources()?;
+    compare(&rf, &cd, &samples, &a.theme, a.scale, &tokens)
+}
+
+/// Validates the expectations against the reference (errors), then grades the candidate:
+/// `Ok(false)` when any candidate sample or scanline fails.
+fn compare(
+    rf: &RgbaImage,
+    cd: &RgbaImage,
+    samples: &Samples,
+    theme: &str,
+    scale: f64,
+    tokens: &crate::tokens::Tokens,
+) -> Result<bool> {
+    check_size(rf, scale, "reference")?;
+    check_size(cd, scale, "candidate")?;
     println!(
         "reference {}x{}  candidate {}x{}  scale {}",
-        rf.width(), rf.height(), cd.width(), cd.height(), a.scale
+        rf.width(), rf.height(), cd.width(), cd.height(), scale
     );
+    let colors: Vec<&ColorSample> = samples.colors.iter().filter(|c| c.theme == theme).collect();
+
+    // 1. Every reference sample shows its labelled token.
+    let mut mismatches = vec![];
+    for c in &colors {
+        let want = expected_rgb(tokens, theme, &c.token, c.over.as_deref())
+            .with_context(|| format!("sample {}", c.name))?;
+        let pr = sample_pixel(rf, c.x, c.y, scale);
+        let de = delta_e2000(srgb_to_lab(want), srgb_to_lab([pr[0], pr[1], pr[2]]));
+        if de > SAMPLE_TOLERANCE_DE {
+            mismatches.push(format!(
+                "{} ({}, {}) {}{}: reference #{:02X}{:02X}{:02X}, token #{:02X}{:02X}{:02X}, dE {de:.2}",
+                c.name, c.x, c.y, c.token,
+                c.over.as_deref().map(|o| format!(" over {o}")).unwrap_or_default(),
+                pr[0], pr[1], pr[2], want[0], want[1], want[2]
+            ));
+        }
+    }
+    if !mismatches.is_empty() {
+        bail!("reference/token mismatch ({theme}):\n  {}", mismatches.join("\n  "));
+    }
+
+    // 2. Every scanline finds exactly its expected edges in the reference.
+    let edges = |img: &RgbaImage, l: &Scanline| {
+        let found = logical_edges(
+            &find_edges(img, &scale_line(l, scale), l.tol_de.unwrap_or(EDGE_TOLERANCE_DE)),
+            scale,
+        );
+        let (missing, extra) = match_edges(&l.expect_edges_px, &found);
+        (found, missing, extra)
+    };
+    let mut bad = vec![];
+    for l in &samples.scanlines {
+        let (found, missing, extra) = edges(rf, l);
+        if !missing.is_empty() || !extra.is_empty() {
+            bad.push(format!(
+                "{}: expected {:?}, reference has {found:?} (missing {missing:?}, extra {extra:?})",
+                l.name, l.expect_edges_px
+            ));
+        }
+    }
+    if !bad.is_empty() {
+        bail!("bad expectation: scanlines disagree with the reference:\n  {}", bad.join("\n  "));
+    }
+
+    // 3. Grade the candidate.
     let (mut pass, mut fail) = (0, 0);
-    for c in samples.colors.iter().filter(|c| c.theme == a.theme) {
-        let (pr, pc) = (sample_pixel(&rf, c.x, c.y, a.scale), sample_pixel(&cd, c.x, c.y, a.scale));
+    for c in &colors {
+        let (pr, pc) = (sample_pixel(rf, c.x, c.y, scale), sample_pixel(cd, c.x, c.y, scale));
         let de = de_pixels(&pr, &pc);
         let ok = de <= SAMPLE_TOLERANCE_DE;
         println!(
@@ -385,9 +524,7 @@ fn run_inner(args: &[String]) -> Result<bool> {
         if ok { pass += 1 } else { fail += 1 }
     }
     for l in &samples.scanlines {
-        let sl = scale_line(l, a.scale);
-        let found = logical_edges(&find_edges(&cd, &sl, l.tol_de.unwrap_or(EDGE_TOLERANCE_DE)), a.scale);
-        let (missing, extra) = match_edges(&l.expect_edges_px, &found);
+        let (found, missing, extra) = edges(cd, l);
         let ok = missing.is_empty() && extra.is_empty();
         let fmt: Vec<String> = found.iter().map(|f| format!("{f:.1}")).collect();
         println!(
@@ -543,6 +680,103 @@ mod tests {
         for e in [483, 504, 525, 546, 567] {
             assert!(rows.expect_edges_px.contains(&e), "row border {e}");
         }
+    }
+
+    fn dark_rgb(tokens: &crate::tokens::Tokens, token: &str) -> Rgba<u8> {
+        let [r, g, b] = expected_rgb(tokens, "dark", token, None).unwrap();
+        Rgba([r, g, b, 255])
+    }
+
+    /// A 1440x900 (scale 1) dark frame of `ground` with a 1 px `seam` column at x = 276.
+    fn frame(tokens: &crate::tokens::Tokens) -> RgbaImage {
+        let (ground, seam) = (dark_rgb(tokens, "ground"), dark_rgb(tokens, "seam"));
+        RgbaImage::from_fn(1440, 900, |x, _| if x == 276 { seam } else { ground })
+    }
+
+    fn frame_samples(token: &str, expect: Vec<u32>) -> Samples {
+        Samples {
+            colors: vec![ColorSample {
+                name: "bg".into(),
+                x: 100.0,
+                y: 100.0,
+                token: token.into(),
+                theme: "dark".into(),
+                over: None,
+            }],
+            scanlines: vec![Scanline {
+                name: "seam".into(),
+                expect_edges_px: expect,
+                ..Scanline::x(450, 250, 300)
+            }],
+        }
+    }
+
+    #[test]
+    fn rejects_themes_other_than_dark_and_light() {
+        let args: Vec<String> = ["--theme", "blue", "--reference", "r.png", "--candidate", "c.png"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let err = run_inner(&args).unwrap_err().to_string();
+        assert!(err.contains("dark or light"), "{err}");
+    }
+
+    #[test]
+    fn rejects_images_that_are_not_1440x900_at_scale() {
+        let t = crate::tokens::load_repo_sources().unwrap();
+        let good = frame(&t);
+        let small = RgbaImage::new(1440, 899);
+        let s = frame_samples("ground", vec![276, 277]);
+        for (rf, cd) in [(&small, &good), (&good, &small)] {
+            let err = compare(rf, cd, &s, "dark", 1.0, &t).unwrap_err().to_string();
+            assert!(err.contains("1440x900"), "{err}");
+        }
+        // The same frame is too small at scale 2.
+        let err = compare(&good, &good, &s, "dark", 2.0, &t).unwrap_err().to_string();
+        assert!(err.contains("2880x1800"), "{err}");
+    }
+
+    #[test]
+    fn reference_pixels_must_match_their_tokens() {
+        let t = crate::tokens::load_repo_sources().unwrap();
+        let img = frame(&t);
+        let err = compare(&img, &img, &frame_samples("raised", vec![276, 277]), "dark", 1.0, &t)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reference/token mismatch"), "{err}");
+    }
+
+    #[test]
+    fn reference_scanlines_must_match_expectations() {
+        let t = crate::tokens::load_repo_sources().unwrap();
+        let img = frame(&t);
+        let err = compare(&img, &img, &frame_samples("ground", vec![300, 301]), "dark", 1.0, &t)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bad expectation"), "{err}");
+    }
+
+    #[test]
+    fn valid_reference_grades_the_candidate() {
+        let t = crate::tokens::load_repo_sources().unwrap();
+        let rf = frame(&t);
+        let s = frame_samples("ground", vec![276, 277]);
+        assert!(compare(&rf, &rf, &s, "dark", 1.0, &t).unwrap());
+        // Candidate off by a whole token at the sample: graded FAIL, not an error.
+        let mut cd = rf.clone();
+        cd.put_pixel(100, 100, dark_rgb(&t, "raised"));
+        assert!(!compare(&rf, &cd, &s, "dark", 1.0, &t).unwrap());
+    }
+
+    #[test]
+    fn translucent_tokens_composite_over_their_backdrop() {
+        let t = crate::tokens::load_repo_sources().unwrap();
+        // Chromium renders .row.sel (--blue-a over --panel) as #293140 in dark.
+        assert_eq!(expected_rgb(&t, "dark", "blue_tint", Some("panel")).unwrap(), [41, 49, 64]);
+        // `@.6` multiplies the alpha (CSS opacity): text_3 at 60 % over light gutter.
+        assert_eq!(expected_rgb(&t, "light", "text_3@.6", Some("gutter")).unwrap(), [165, 165, 171]);
+        assert!(expected_rgb(&t, "dark", "blue_tint", None).is_err(), "needs a backdrop");
+        assert!(expected_rgb(&t, "dark", "no_such_token", None).is_err());
     }
 
     #[test]

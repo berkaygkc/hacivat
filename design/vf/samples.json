@@ -61,7 +61,8 @@
    "x": 250,
    "y": 336,
    "token": "blue_tint",
-   "theme": "dark"
+   "theme": "dark",
+   "over": "side"
   },
   {
    "name": "explorer-selected-bar",
@@ -158,15 +159,17 @@
    "name": "editor-band-line14",
    "x": 1300,
    "y": 350,
-   "token": "blue_tint",
-   "theme": "dark"
+   "token": "blue_tint@.55",
+   "theme": "dark",
+   "over": "panel"
   },
   {
    "name": "popup-selected-item",
    "x": 997,
    "y": 182,
    "token": "blue_tint_strong",
-   "theme": "dark"
+   "theme": "dark",
+   "over": "raised"
   },
   {
    "name": "popup-detail-bg",
@@ -236,14 +239,16 @@
    "x": 880,
    "y": 515,
    "token": "blue_tint",
-   "theme": "dark"
+   "theme": "dark",
+   "over": "panel"
   },
   {
    "name": "grid-active-cell",
    "x": 990,
    "y": 515,
    "token": "blue_tint_strong",
-   "theme": "dark"
+   "theme": "dark",
+   "over": "panel"
   },
   {
    "name": "grid-selbox-border",
@@ -313,7 +318,8 @@
    "x": 5,
    "y": 888,
    "token": "red_tint",
-   "theme": "dark"
+   "theme": "dark",
+   "over": "ground"
   },
   {
    "name": "status-seam",
@@ -348,21 +354,24 @@
    "x": 1184,
    "y": 480,
    "token": "text_3@.6",
-   "theme": "dark"
+   "theme": "dark",
+   "over": "gutter"
   },
   {
    "name": "scroll-prefetch",
    "x": 1184,
    "y": 506,
    "token": "green_fill@.6",
-   "theme": "dark"
+   "theme": "dark",
+   "over": "gutter"
   },
   {
    "name": "strip-page-prefetched",
    "x": 300,
    "y": 863,
    "token": "green_fill",
-   "theme": "dark"
+   "theme": "dark",
+   "over": "raised"
   },
   {
    "name": "grid-header-seam-strong",
@@ -439,7 +448,8 @@
    "x": 250,
    "y": 336,
    "token": "blue_tint",
-   "theme": "light"
+   "theme": "light",
+   "over": "side"
   },
   {
    "name": "explorer-selected-bar",
@@ -536,15 +546,17 @@
    "name": "editor-band-line14",
    "x": 1300,
    "y": 350,
-   "token": "blue_tint",
-   "theme": "light"
+   "token": "blue_tint@.8",
+   "theme": "light",
+   "over": "panel"
   },
   {
    "name": "popup-selected-item",
    "x": 997,
    "y": 182,
    "token": "blue_tint_strong",
-   "theme": "light"
+   "theme": "light",
+   "over": "raised"
   },
   {
    "name": "popup-detail-bg",
@@ -585,7 +597,7 @@
    "name": "where-box-bg",
    "x": 580,
    "y": 404,
-   "token": "panel",
+   "token": "ground",
    "theme": "light"
   },
   {
@@ -614,14 +626,16 @@
    "x": 880,
    "y": 515,
    "token": "blue_tint",
-   "theme": "light"
+   "theme": "light",
+   "over": "panel"
   },
   {
    "name": "grid-active-cell",
    "x": 990,
    "y": 515,
    "token": "blue_tint_strong",
-   "theme": "light"
+   "theme": "light",
+   "over": "panel"
   },
   {
    "name": "grid-selbox-border",
@@ -691,7 +705,8 @@
    "x": 5,
    "y": 888,
    "token": "red_tint",
-   "theme": "light"
+   "theme": "light",
+   "over": "ground"
   },
   {
    "name": "status-seam",
@@ -726,21 +741,24 @@
    "x": 1184,
    "y": 480,
    "token": "text_3@.6",
-   "theme": "light"
+   "theme": "light",
+   "over": "gutter"
   },
   {
    "name": "scroll-prefetch",
    "x": 1184,
    "y": 506,
    "token": "green_fill@.6",
-   "theme": "light"
+   "theme": "light",
+   "over": "gutter"
   },
   {
    "name": "strip-page-prefetched",
    "x": 300,
    "y": 863,
    "token": "green_fill",
-   "theme": "light"
+   "theme": "light",
+   "over": "raised"
   },
   {
    "name": "grid-header-seam-strong",
