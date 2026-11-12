@@ -4,17 +4,23 @@
 //! focus, navigates with arrows, Home and End, chooses with Enter or a click, dismisses with
 //! Escape or a click outside, and on Windows and Linux chooses by access key. Labels and keys
 //! are [`TextFn`]/[`KeyFn`] closures re-read on every render (F16).
+//!
+//! M2a: a menu can carry a check column (a `blue` check on the [`MenuItemSpec::checked`] row)
+//! and per-row `text-2` hints, and a [`Select`](crate::select::Select) embeds one with
+//! [`PopupMenu::embedded`] inside its own `deferred(anchored())` instead of a workspace layer
+//! (P34), so both share this row anatomy.
 
 use hacivat_ui_core::gpui_surface::Entity;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Point, Render, Role,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    SharedString, StatefulInteractiveElement, Styled, Window, accesskit, div, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
 use crate::accesskey::{AccessKey, AccessKeyAssigner, AccessKeyLocale, typed_matches};
 use crate::button::key_label;
+use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::{A11yDecl, A11yNode, Declare};
 use crate::text::{KeyFn, Label, TextFn, TextSource};
 
@@ -34,6 +40,11 @@ pub struct MenuItemSpec {
     pub action: SharedString,
     /// A separator line instead of an item (every other field is ignored).
     pub separator: bool,
+    /// Shows the check in the menu's check column (a [`Select`](crate::select::Select)'s current
+    /// option). A menu with any checked row draws the column on every row.
+    pub checked: bool,
+    /// A dimmer second text after the label (`text-2`).
+    pub hint: Option<TextFn>,
 }
 
 impl MenuItemSpec {
@@ -45,6 +56,8 @@ impl MenuItemSpec {
             disabled: false,
             action: action.into(),
             separator: false,
+            checked: false,
+            hint: None,
         }
     }
 
@@ -56,6 +69,8 @@ impl MenuItemSpec {
             disabled: true,
             action: SharedString::default(),
             separator: true,
+            checked: false,
+            hint: None,
         }
     }
 
@@ -74,6 +89,16 @@ impl MenuItemSpec {
         self
     }
 
+    pub fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
+        self
+    }
+
+    pub fn hint(mut self, hint: TextFn) -> Self {
+        self.hint = Some(hint);
+        self
+    }
+
     fn selectable(&self) -> bool {
         !self.separator && !self.disabled
     }
@@ -87,7 +112,10 @@ pub enum PopupMenuEvent {
 }
 
 pub struct PopupMenu {
-    anchor: Point<Pixels>,
+    /// The top left in window coordinates; `None` for an embedded menu, which its host places
+    /// (`deferred(anchored())`).
+    anchor: Option<Point<Pixels>>,
+    min_width: Pixels,
     items: Vec<MenuItemSpec>,
     selected: Option<usize>,
     focus: FocusHandle,
@@ -111,18 +139,47 @@ impl PopupMenu {
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<PopupMenu> {
+        Self::build(Some(anchor), items, window, cx)
+    }
+
+    /// A menu its host positions (a `Select`'s `deferred(anchored())`, P34); takes the focus.
+    pub fn embedded(
+        items: Vec<MenuItemSpec>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<PopupMenu> {
+        Self::build(None, items, window, cx)
+    }
+
+    fn build(
+        anchor: Option<Point<Pixels>>,
+        items: Vec<MenuItemSpec>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<PopupMenu> {
         cx.new(|cx| {
             let focus = cx.focus_handle();
             window.focus(&focus, cx);
+            // The highlight starts on the checked row (a Select's current option).
+            let selected = items
+                .iter()
+                .position(|i| i.checked && i.selectable())
+                .or_else(|| items.iter().position(MenuItemSpec::selectable));
             PopupMenu {
                 anchor,
-                selected: items.iter().position(MenuItemSpec::selectable),
+                min_width: px(MENU_MIN_WIDTH_PX),
+                selected,
                 items,
                 focus,
                 label: None,
                 access_keys: !cfg!(target_os = "macos"),
             }
         })
+    }
+
+    /// Widens the menu to at least `width` (never under [`MENU_MIN_WIDTH_PX`]).
+    pub fn set_min_width(&mut self, width: Pixels) {
+        self.min_width = width.max(px(MENU_MIN_WIDTH_PX));
     }
 
     /// Names the menu for assistive technology.
@@ -250,31 +307,35 @@ impl Render for PopupMenu {
         };
 
         // Keep the menu inside the window: flip to the other side of the anchor when it would
-        // overflow.
-        let viewport = window.viewport_size();
-        let height: f32 = self
-            .items
-            .iter()
-            .map(|item| {
-                if item.separator {
-                    1.0 + 2.0 * t.spacing.xs
-                } else {
-                    MENU_ROW_PX
-                }
-            })
-            .sum::<f32>()
-            + 2.0 * t.spacing.xs
-            + 2.0;
-        let left = if self.anchor.x + px(MENU_MIN_WIDTH_PX) > viewport.width {
-            (viewport.width - px(MENU_MIN_WIDTH_PX)).max(px(0.0))
-        } else {
-            self.anchor.x
-        };
-        let top = if self.anchor.y + px(height) > viewport.height {
-            (self.anchor.y - px(height)).max(px(0.0))
-        } else {
-            self.anchor.y
-        };
+        // overflow. An embedded menu is placed by its host's `anchored()`.
+        let position = self.anchor.map(|anchor| {
+            let viewport = window.viewport_size();
+            let height: f32 = self
+                .items
+                .iter()
+                .map(|item| {
+                    if item.separator {
+                        1.0 + 2.0 * t.spacing.xs
+                    } else {
+                        MENU_ROW_PX
+                    }
+                })
+                .sum::<f32>()
+                + 2.0 * t.spacing.xs
+                + 2.0;
+            let left = if anchor.x + self.min_width > viewport.width {
+                (viewport.width - self.min_width).max(px(0.0))
+            } else {
+                anchor.x
+            };
+            let top = if anchor.y + px(height) > viewport.height {
+                (anchor.y - px(height)).max(px(0.0))
+            } else {
+                anchor.y
+            };
+            (left, top)
+        });
+        let check_column = self.items.iter().any(|i| i.checked && !i.separator);
 
         let rows: Vec<AnyElement> = self
             .items
@@ -291,6 +352,25 @@ impl Render for PopupMenu {
                 let selected = self.selected == Some(i);
                 let ink = if item.disabled { c.text_3 } else { c.text }.to_hsla();
                 let text = (item.label)(cx);
+                // The check column (12 px, `blue` check) sits before the label on every row of a
+                // menu that has one.
+                let mut lead = div().flex().flex_row().items_center().gap(px(t.spacing.xl));
+                if check_column {
+                    let mut column = div().flex().flex_none().w(px(IconSize::Chrome.px()));
+                    if item.checked {
+                        column = column.child(
+                            div()
+                                .debug_selector(move || format!("menu-item-check-{i}"))
+                                .child(
+                                    Icon::new(IconName::Check)
+                                        .size(IconSize::Chrome)
+                                        .color(c.blue.to_hsla()),
+                                ),
+                        );
+                    }
+                    lead = lead.child(column);
+                }
+                lead = lead.child(key_label(&text, Some(keys[i]), t.type_ramp.body, ink));
                 let mut row = div()
                     .id(("menu-item", i))
                     .debug_selector(move || format!("menu-item-{i}"))
@@ -302,15 +382,34 @@ impl Render for PopupMenu {
                     .h(px(MENU_ROW_PX))
                     .px(px(t.spacing.lg))
                     .rounded(px(t.radii.xs))
-                    .child(key_label(&text, Some(keys[i]), t.type_ramp.body, ink));
-                if let Some(shortcut) = &item.keys {
-                    row = row.child(Label::new(
-                        shortcut(cx),
-                        TextSource::Shortcut,
-                        t.type_ramp.mono_kbd,
-                        // Raised Ink Rule: key hints on the raised menu use text-2.
-                        c.text_2.to_hsla(),
-                    ));
+                    .child(lead);
+                if item.hint.is_some() || item.keys.is_some() {
+                    // NOTES: the hint and the keys sit right, 16 px from the label at least.
+                    let mut trail = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(t.spacing.xl))
+                        .pl(px(t.spacing.xs));
+                    if let Some(hint) = &item.hint {
+                        // Raised Ink Rule: the hint on the raised menu uses text-2.
+                        trail = trail.child(Label::new(
+                            hint(cx),
+                            TextSource::Fluent,
+                            t.type_ramp.caption,
+                            c.text_2.to_hsla(),
+                        ));
+                    }
+                    if let Some(shortcut) = &item.keys {
+                        trail = trail.child(Label::new(
+                            shortcut(cx),
+                            TextSource::Shortcut,
+                            t.type_ramp.mono_kbd,
+                            // Raised Ink Rule: key hints on the raised menu use text-2.
+                            c.text_2.to_hsla(),
+                        ));
+                    }
+                    row = row.child(trail);
                 }
                 if !item.disabled {
                     let action_index = i;
@@ -332,24 +431,36 @@ impl Render for PopupMenu {
                         .disabled(true)
                         .into_any_element();
                 }
-                let mut decl = A11yDecl::new(Role::MenuItem, text);
+                let role = if check_column {
+                    Role::MenuItemRadio
+                } else {
+                    Role::MenuItem
+                };
+                let mut decl = A11yDecl::new(role, text);
                 if selected {
                     decl = decl.active_descendant();
                 }
-                row.declare_full(decl).into_any_element()
+                let row = row.declare_full(decl);
+                if check_column {
+                    row.aria_toggled(accesskit::Toggled::from(item.checked))
+                        .into_any_element()
+                } else {
+                    row.into_any_element()
+                }
             })
             .collect();
 
         let menu_name = self.label.as_ref().map(|l| l(cx)).unwrap_or_default();
-        let menu = popover_surface(&theme)
+        let mut menu = popover_surface(&theme)
             .id("popup-menu")
             .debug_selector(|| "popup-menu".to_string())
             .track_focus(&self.focus)
-            .declare(Role::Menu, menu_name.clone(), None)
-            .absolute()
-            .left(left)
-            .top(top)
-            .min_w(px(MENU_MIN_WIDTH_PX))
+            .declare(Role::Menu, menu_name.clone(), None);
+        if let Some((left, top)) = position {
+            menu = menu.absolute().left(left).top(top);
+        }
+        let menu = menu
+            .min_w(self.min_width)
             .py(px(t.spacing.xs))
             .px(px(t.spacing.xs))
             .flex()

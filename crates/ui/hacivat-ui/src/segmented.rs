@@ -2,10 +2,16 @@
 //! `seam_strong` outline and dividers; the pressed segment sits on `raised` (`panel` in the
 //! light theme) with text ink, the others in `text_2` (hover lifts them to `text`). Every segment
 //! has the debug selector `segmented-<id>-<index>` for tests.
+//!
+//! Keyboard (M2a, roving tab stop): the group is one tab stop, the pressed segment (the first when
+//! none is); ← and → move the focus to the neighbouring segment and press it, wrapping at the
+//! ends. Enter and Space press the focused segment.
+
+use std::rc::Rc;
 
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, ElementId, InteractiveElement, IntoElement, ParentElement, Role, SharedString,
-    StatefulInteractiveElement, Styled, accesskit, div, px,
+    AnyElement, ClickEvent, ElementId, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Role, SharedString, StatefulInteractiveElement, Styled, accesskit, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 
@@ -86,9 +92,31 @@ impl IntoElement for Segmented {
                 .border_color(c.seam_strong.to_hsla())
                 .rounded(px(t.radii.sm))
                 .overflow_hidden();
-            for (i, item) in self.items.into_iter().enumerate() {
-                let id = ElementId::from((self.id.clone(), format!("{i}")));
-                let (hover, handle) = interaction_state(&id, window, cx);
+            let count = self.items.len();
+            let ids: Vec<ElementId> = (0..count)
+                .map(|i| ElementId::from((self.id.clone(), format!("{i}"))))
+                .collect();
+            let states: Vec<_> = ids
+                .iter()
+                .map(|id| interaction_state(id, window, cx))
+                .collect();
+            // One tab stop per group: the pressed segment, or the first.
+            let stop = self.items.iter().position(|i| i.pressed).unwrap_or(0);
+            let handles: Rc<Vec<FocusHandle>> = Rc::new(
+                states
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, handle))| handle.clone().tab_stop(i == stop))
+                    .collect(),
+            );
+            let clicks: Rc<Vec<ClickHandler>> =
+                Rc::new(self.items.iter().map(|i| i.on_click.clone()).collect());
+            for ((i, item), (id, (hover, handle))) in self
+                .items
+                .into_iter()
+                .enumerate()
+                .zip(ids.into_iter().zip(states))
+            {
                 let focused = focus_visible(&handle, window);
                 let hovered = *hover.read(cx);
                 // Harman: hover lifts an unpressed segment's ink to `text`; the fill is only for
@@ -155,11 +183,25 @@ impl IntoElement for Segmented {
                 }
                 let on_click = item.on_click;
                 let tooltip = item.tooltip;
-                let segment =
-                    focus_outline(segment.track_focus(&handle).tab_stop(true), &theme, focused)
-                        .on_hover(hover_listener(hover))
-                        .on_click(move |event, window, cx| on_click(event, window, cx))
-                        .tooltip(move |_, cx| Tip::view(tooltip.clone(), cx));
+                let (handles, clicks) = (handles.clone(), clicks.clone());
+                let segment = focus_outline(segment.track_focus(&handles[i]), &theme, focused)
+                    .on_hover(hover_listener(hover))
+                    .on_click(move |event, window, cx| on_click(event, window, cx))
+                    .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                        let stroke = &event.keystroke;
+                        if stroke.modifiers.modified() {
+                            return;
+                        }
+                        let next = match stroke.key.as_str() {
+                            "right" => (i + 1) % count,
+                            "left" => (i + count - 1) % count,
+                            _ => return,
+                        };
+                        cx.stop_propagation();
+                        window.focus(&handles[next], cx);
+                        clicks[next](&ClickEvent::default(), window, cx);
+                    })
+                    .tooltip(move |_, cx| Tip::view(tooltip.clone(), cx));
                 group = group.child(segment);
             }
             group.into_any_element()

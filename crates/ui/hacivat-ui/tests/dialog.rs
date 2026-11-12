@@ -73,6 +73,20 @@ pub fn open_test_dialog(
     (dialog, vcx, events)
 }
 
+/// Enter down and up, as a keyboard sends it: GPUI turns a clean down-and-up on a focused button
+/// into a click, which must not press the button a second time.
+fn press_enter(vcx: &mut VisualTestContext) {
+    vcx.simulate_keystrokes("enter");
+    release_enter(vcx);
+}
+
+fn release_enter(vcx: &mut VisualTestContext) {
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    vcx.run_until_parked();
+}
+
 fn focused_button(d: &Entity<Dialog>, vcx: &mut VisualTestContext) -> Option<usize> {
     let d = d.clone();
     vcx.update(|window, cx| d.read(cx).focused_button(window))
@@ -95,14 +109,15 @@ fn dialog_traps_focus_and_escape_cancels(cx: &mut TestAppContext) {
 #[gpui::test]
 fn dialog_enter_presses_primary(cx: &mut TestAppContext) {
     let (_, vcx, events) = open_test_dialog(cx, spec_two_buttons(0, 1));
-    vcx.simulate_keystrokes("enter");
+    press_enter(vcx);
     assert_eq!(events.take(), vec![DialogEvent::Pressed(1)]);
 }
 
 #[gpui::test]
 fn enter_presses_the_focused_button_not_a_hidden_default(cx: &mut TestAppContext) {
     let (_, vcx, events) = open_test_dialog(cx, spec_two_buttons(0, 1));
-    vcx.simulate_keystrokes("tab enter");
+    vcx.simulate_keystrokes("tab");
+    press_enter(vcx);
     assert_eq!(events.take(), vec![DialogEvent::Pressed(0)]);
 }
 
@@ -129,7 +144,7 @@ fn danger_spec() -> DialogSpec {
 fn a_danger_primary_does_not_get_the_initial_focus(cx: &mut TestAppContext) {
     let (d, vcx, events) = open_test_dialog(cx, danger_spec());
     assert_eq!(focused_button(&d, vcx), Some(0), "focus starts on cancel");
-    vcx.simulate_keystrokes("enter");
+    press_enter(vcx);
     assert_eq!(events.take(), vec![DialogEvent::Pressed(0)]);
 }
 
@@ -141,11 +156,12 @@ fn a_held_or_modified_enter_presses_nothing(cx: &mut TestAppContext) {
         is_held: true,
         prefer_character_input: false,
     });
+    release_enter(vcx);
     assert_eq!(events.take(), vec![]);
     vcx.simulate_keystrokes("shift-enter");
     vcx.simulate_keystrokes("cmd-enter");
     assert_eq!(events.take(), vec![]);
-    vcx.simulate_keystrokes("enter");
+    press_enter(vcx);
     assert_eq!(events.take(), vec![DialogEvent::Pressed(1)]);
 }
 

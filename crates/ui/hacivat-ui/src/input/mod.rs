@@ -5,6 +5,10 @@
 //! `replace_and_mark_text_in_range`); the key handler only edits with named keys (Backspace,
 //! arrows) and never inserts printable characters itself. While a composition is in progress,
 //! every key belongs to the IME. The model is [`ime::ImeState`].
+//!
+//! A masked input (M2a, passwords) paints `•` per grapheme, never copies or cuts, and exposes an
+//! empty accessible value; [`TextInput::value`] still returns the text. A paste reaches the app
+//! only through [`TextInput::set_paste_filter`] (P16), which a masked input never calls.
 
 pub mod ime;
 
@@ -12,17 +16,19 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use hacivat_ui_core::fonts::font_for;
+use hacivat_ui_core::gpui_surface::FluentBuilder as _;
 use hacivat_ui_core::gpui_surface::{
     App, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId, ElementInputHandler,
     Entity, EntityId, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Global,
     GlobalElementId, InspectorElementId, InteractiveElement as _, IntoElement, KeyDownEvent,
     LayoutId, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, Role,
-    ShapedLine, SharedString, StatefulInteractiveElement as _, Style, Styled as _, Subscription,
-    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, div, fill, point, px, relative,
-    size,
+    ShapedLine, SharedString, Style, Styled as _, Subscription, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, div, fill, point, px, relative, size,
 };
-use hacivat_ui_core::theme::{Theme, focus_outline};
+use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
+use unicode_segmentation::UnicodeSegmentation as _;
 
+use crate::popover::A11yNode;
 use crate::text::{RenderedText, TextFn, TextRegistry, TextSource};
 use ime::ImeState;
 
@@ -46,9 +52,12 @@ pub struct FocusedInput {
 
 impl Global for FocusedInput {}
 
-/// DESIGN.md `palette-field` padding (`0 6px 0 9px`); fields share it.
-const PADDING_LEFT_PX: f32 = 9.0;
-const PADDING_RIGHT_PX: f32 = 6.0;
+/// What a masked input paints for each grapheme.
+const MASK: char = '•';
+
+/// DESIGN.md `palette-field` padding (`0 6px 0 9px`); fields share it (`TextInput`, `Select`).
+pub(crate) const FIELD_PADDING_LEFT_PX: f32 = 9.0;
+pub(crate) const FIELD_PADDING_RIGHT_PX: f32 = 6.0;
 const CARET_WIDTH_PX: f32 = 1.0;
 
 /// The text line as last painted: what `bounds_for_range` and hit-testing measure against.
@@ -57,6 +66,43 @@ struct InputLayout {
     /// Top-left of the line (scroll applied).
     origin: Point<Pixels>,
     line_height: Pixels,
+    /// For a masked input: maps value offsets to and from the painted bullets.
+    mask: Option<Mask>,
+}
+
+/// The grapheme boundaries of a masked value: grapheme `g` starts at `bounds[g]` in the value and
+/// at `g * MASK.len_utf8()` in the painted bullets.
+#[derive(Clone)]
+struct Mask {
+    bounds: Vec<usize>,
+}
+
+impl Mask {
+    fn new(value: &str) -> Self {
+        let mut bounds: Vec<usize> = value.grapheme_indices(true).map(|(i, _)| i).collect();
+        bounds.push(value.len());
+        Mask { bounds }
+    }
+
+    /// The bullets, one per grapheme.
+    fn text(&self) -> String {
+        std::iter::repeat_n(MASK, self.bounds.len() - 1).collect()
+    }
+
+    /// A value byte offset as a painted byte offset (inside a grapheme: its start).
+    fn to_painted(&self, byte: usize) -> usize {
+        let grapheme = self
+            .bounds
+            .partition_point(|&b| b <= byte)
+            .saturating_sub(1);
+        grapheme * MASK.len_utf8()
+    }
+
+    /// A painted byte offset as a value byte offset.
+    fn to_value(&self, byte: usize) -> usize {
+        let grapheme = (byte / MASK.len_utf8()).min(self.bounds.len() - 1);
+        self.bounds[grapheme]
+    }
 }
 
 /// A single-line text input, 26 px tall (DESIGN.md `field-height`).
@@ -70,14 +116,19 @@ pub struct TextInput {
     reported_composing: bool,
     /// Focus and blur listeners, installed by the first render (they need the window).
     focus_subscriptions: Vec<Subscription>,
-    #[allow(dead_code, reason = "Task 6")]
     masked: bool,
-    #[allow(dead_code, reason = "Task 6")]
+    /// Draws the field on its own well (`panel` / `ground`).
+    well: bool,
     paste_filter: Option<PasteFilter>,
+    /// The text of the line last painted (the bullets when masked, the placeholder when empty).
+    painted: SharedString,
 }
 
 /// Sees a paste's clipboard text before a non-masked input inserts it; returning `true`
 /// consumes the paste (nothing is inserted). A masked input never calls it (P16).
+///
+/// The filter runs while the input is being updated: it must not read or update this input (it
+/// is leased); defer edits with `window.defer`.
 pub type PasteFilter = Rc<dyn Fn(&str, &mut Window, &mut App) -> bool>;
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -110,19 +161,44 @@ impl TextInput {
             reported_composing: false,
             focus_subscriptions: Vec::new(),
             masked: false,
+            well: false,
             paste_filter: None,
+            painted: SharedString::default(),
         }
     }
 
-    /// Paints `•` per grapheme, refuses copy and cut and exposes an empty accessible value;
-    /// `value()` is unchanged (Task 6 draws it).
+    /// Paints `•` per grapheme, refuses copy and cut, is announced as a password field with an
+    /// empty value, and hands the platform text services (IME, dictation) only bullets;
+    /// `value()` is unchanged. Call it inside an `update` and `cx.notify()` to repaint.
+    ///
+    /// Secure event input (macOS `EnableSecureEventInput`, which hides keystrokes from other
+    /// processes while the field is focused) is not enabled yet: deferred to a later security
+    /// pass by controller ruling (M2a T6 fix round 1).
     pub fn set_masked(&mut self, masked: bool) {
         self.masked = masked;
     }
 
-    /// Installs (or removes) the paste filter (P16). Stored here; Task 6 calls it on paste.
+    /// Draws the field on its own well (`panel` in dark, `ground` in light), so its text-3
+    /// placeholder never sits on a raised surface (DESIGN.md Raised Ink Rule, NOTES cross-cutting
+    /// #4). Inputs inside a dialog or any other raised surface must enable it.
+    pub fn set_well(&mut self, well: bool) {
+        self.well = well;
+    }
+
+    pub fn is_masked(&self) -> bool {
+        self.masked
+    }
+
+    /// Installs (or removes) the paste filter (P16), called on every paste into a non-masked
+    /// input.
     pub fn set_paste_filter(&mut self, filter: Option<PasteFilter>) {
         self.paste_filter = filter;
+    }
+
+    /// The text of the line last painted: the value, its bullets when masked, or the
+    /// placeholder when empty.
+    pub fn painted_text(&self) -> &SharedString {
+        &self.painted
     }
 
     pub fn value(&self) -> &str {
@@ -202,6 +278,8 @@ impl TextInput {
         let clipboard_chord = m.secondary(cx) && !m.alt && !m.shift;
         match keystroke.key.as_str() {
             "a" if clipboard_chord => self.ime.select_all(),
+            // A masked input never puts its value on the clipboard.
+            "c" | "x" if clipboard_chord && self.masked => {}
             key @ ("c" | "x") if clipboard_chord => {
                 let selection = self.ime.selection();
                 if !selection.is_empty() {
@@ -255,17 +333,19 @@ impl TextInput {
             let byte = layout
                 .line
                 .closest_index_for_x(event.position.x - layout.origin.x);
+            let byte = layout.mask.as_ref().map_or(byte, |m| m.to_value(byte));
             self.ime.set_caret(byte);
             window.notify_text_selection_changed(&self.focus_handle);
             cx.notify();
         }
     }
 
-    /// Bounds of a byte range on the painted line.
+    /// Bounds of a byte range (of the value) on the painted line.
     fn byte_bounds(&self, range: Range<usize>) -> Option<Bounds<Pixels>> {
         let l = self.layout.as_ref()?;
-        let x0 = l.line.x_for_index(range.start);
-        let x1 = l.line.x_for_index(range.end).max(x0);
+        let painted = |byte| l.mask.as_ref().map_or(byte, |m| m.to_painted(byte));
+        let x0 = l.line.x_for_index(painted(range.start));
+        let x1 = l.line.x_for_index(painted(range.end)).max(x0);
         Some(Bounds::new(
             point(l.origin.x + x0, l.origin.y),
             size(x1 - x0, l.line_height),
@@ -294,7 +374,13 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
-        Some(self.ime.text_for_range_utf16(range, adjusted_range))
+        let text = self.ime.text_for_range_utf16(range, adjusted_range);
+        if self.masked {
+            // Platform text services get one bullet per UTF-16 unit: the same length, so the
+            // IME's range arithmetic holds, and never the password.
+            return Some(std::iter::repeat_n(MASK, text.encode_utf16().count()).collect());
+        }
+        Some(text)
     }
 
     fn selected_text_range(
@@ -317,6 +403,19 @@ impl EntityInputHandler for TextInput {
         self.ime.unmark();
         let text = self.ime.text().to_string();
         self.edited(&text, window, cx);
+    }
+
+    /// Every paste (the clipboard chord and the platform's paste) comes through here: a
+    /// non-masked input lets its filter consume it first (P16).
+    fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = item.text() else { return };
+        if !self.masked
+            && let Some(filter) = self.paste_filter.clone()
+            && filter(&text, window, cx)
+        {
+            return;
+        }
+        self.replace_text_in_range(None, &text, window, cx);
     }
 
     fn replace_text_in_range(
@@ -368,6 +467,7 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let layout = self.layout.as_ref()?;
         let byte = layout.line.index_for_x(point.x - layout.origin.x)?;
+        let byte = layout.mask.as_ref().map_or(byte, |m| m.to_value(byte));
         Some(self.ime.byte_to_utf16(byte))
     }
 
@@ -411,24 +511,47 @@ impl Render for TextInput {
             };
         }
         let placeholder = (self.placeholder)(cx);
+        // A masked input exposes no value to assistive technology.
+        let value: SharedString = if self.masked {
+            SharedString::default()
+        } else {
+            self.ime.text().to_string().into()
+        };
         let field = div()
             .id(("text-input", cx.entity_id()))
-            .role(Role::TextInput)
-            .aria_label(placeholder)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .flex()
             .items_center()
             .h(px(t.spacing.field_height))
-            .pl(px(PADDING_LEFT_PX))
-            .pr(px(PADDING_RIGHT_PX))
+            .pl(px(FIELD_PADDING_LEFT_PX))
+            .pr(px(FIELD_PADDING_RIGHT_PX))
             .rounded(px(t.radii.sm))
             .border_1()
             .border_color(t.colors.seam_strong.to_hsla())
             .cursor_text()
+            .when(self.well, |field| {
+                let fill = match theme.mode {
+                    ThemeMode::Dark => t.colors.panel,
+                    ThemeMode::Light => t.colors.ground,
+                };
+                field.bg(fill.to_hsla())
+            })
             .child(InputText { input: cx.entity() });
-        focus_outline(field, &theme, focused)
+        let role = if self.masked {
+            Role::PasswordInput
+        } else {
+            Role::TextInput
+        };
+        A11yNode::new(
+            ("text-input-node", cx.entity_id()),
+            role,
+            placeholder,
+            false,
+            focus_outline(field, &theme, focused),
+        )
+        .value(value)
     }
 }
 
@@ -487,9 +610,16 @@ impl Element for InputText {
         let font_size = px(style.size_px);
         let line_height = px(style.line_height);
         let input = self.input.read(cx);
-        let value = SharedString::from(input.ime.text().to_string());
+        // A masked input shapes only its bullets; offsets are mapped through the mask.
+        let mask = input.masked.then(|| Mask::new(input.ime.text()));
+        let value = match &mask {
+            Some(mask) => SharedString::from(mask.text()),
+            None => SharedString::from(input.ime.text().to_string()),
+        };
+        let painted = |byte: usize| mask.as_ref().map_or(byte, |m| m.to_painted(byte));
         let selection = input.ime.selection();
-        let marked = input.ime.marked();
+        let selection = painted(selection.start)..painted(selection.end);
+        let marked = input.ime.marked().map(|m| painted(m.start)..painted(m.end));
         let focused = input.focus_handle.is_focused(window);
         let placeholder = value.is_empty().then(|| (input.placeholder)(cx));
         let mut scroll_x = input.scroll_x;
@@ -574,12 +704,15 @@ impl Element for InputText {
             });
         }
 
+        let shown_text = shown.text.clone();
         self.input.update(cx, |input, _| {
             input.scroll_x = scroll_x;
+            input.painted = shown_text;
             input.layout = Some(InputLayout {
                 line,
                 origin,
                 line_height,
+                mask,
             });
         });
         InputPaint {
