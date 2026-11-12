@@ -117,7 +117,9 @@ impl TlsFailure {
 ///
 /// `errSecNotTrusted` (-67843) is generic: Security.framework also reports it for policy
 /// failures (a lifetime over Apple's limit, a missing server-auth usage, a weak key), so on
-/// Apple those show as `UnknownIssuer` too.
+/// Apple those show as `UnknownIssuer` too. Some policy failures arrive with their own code
+/// (a validity period over Apple's maximum, a CA certificate used as the server's), and they
+/// are `UnknownIssuer` for the same reason: the certificate cannot be trusted as it is.
 fn platform_failure(other: &rustls::OtherError) -> TlsFailure {
     if !cfg!(target_vendor = "apple") {
         return TlsFailure::Other;
@@ -125,8 +127,11 @@ fn platform_failure(other: &rustls::OtherError) -> TlsFailure {
     let text = other.to_string();
     let code = text.rsplit(' ').next().and_then(|c| c.parse::<i32>().ok());
     match code {
-        // errSecNotTrusted, errSecCreateChainFailed, errSecInvalidRoot
-        Some(-67843 | -67810 | -67612) => TlsFailure::UnknownIssuer,
+        // errSecNotTrusted (-67843), errSecCreateChainFailed (-25318), errSecInvalidRoot
+        // (-67612)
+        Some(-67843 | -25318 | -67612) => TlsFailure::UnknownIssuer,
+        // errSecCertificateValidityPeriodTooLong, errSecCertificateIsCA
+        Some(-67901 | -67902) => TlsFailure::UnknownIssuer,
         // errSecHostNameMismatch
         Some(-67602) => TlsFailure::NameMismatch,
         // errSecCertificateExpired
@@ -577,6 +582,16 @@ mod tests {
                 "“db” certificate is not trusted: -67843",
                 TlsFailure::UnknownIssuer,
             ),
+            // The pg17-tls fixture (a 10-year self-signed CA:TRUE certificate) on macOS.
+            (
+                "“localhost” certificate is not standards compliant: -67901",
+                TlsFailure::UnknownIssuer,
+            ),
+            ("x: -67902", TlsFailure::UnknownIssuer),
+            // errSecCreateChainFailed is -25318; -67810 is errSecBlockSizeMismatch.
+            ("x: -25318", TlsFailure::UnknownIssuer),
+            ("x: -67612", TlsFailure::UnknownIssuer),
+            ("x: -67810", TlsFailure::Other),
             ("x: -67818", TlsFailure::Expired),
             ("x: -67819", TlsFailure::NotYetValid),
             ("x: -67602", TlsFailure::NameMismatch),
