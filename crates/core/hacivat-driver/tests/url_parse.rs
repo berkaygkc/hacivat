@@ -1045,3 +1045,82 @@ fn looks_like_connection_follows_the_mock() {
         assert!(!looks_like_connection(s), "{s}");
     }
 }
+
+// ---- Follow-up: shell-snippet and dash/underscore-prefixed secret keys ----
+
+#[test]
+fn shell_snippet_and_prefixed_secret_keys_never_stay_in_the_clear() {
+    for (i, text) in [
+        "PGPASSWORD=SECRETPW host=h dbname=d",
+        "pgpassword=SECRETPW host=h",
+        "MYSQL_PWD=SECRETPW host=h",
+        "host=h MYSQL_PWD=SECRETPW",
+        "postgres://h/db?options=--password=SECRETPW",
+        "postgres://h/db?options=--pwd=SECRETPW",
+        "postgres://h/db?a-password=SECRETPW",
+        "postgres://h/db?x_password=SECRETPW",
+        "postgres://h/db?x_pwd=SECRETPW",
+        "postgres://h/db?x=y&--password=SECRETPW",
+        "postgres://h/db?x=y&-password=SECRETPW",
+        "postgres://h/db?x=y&db_password=SECRETPW",
+        "postgres://h/db?x=y&PGPASSWORD=SECRETPW",
+        "mysql://u@h/db?MYSQL_PWD=SECRETPW",
+        "host=h options='--password=SECRETPW'",
+        "host=h options=--password=SECRETPW",
+        r#"postgres://h/db?x=\"password\"=SECRETPW"#,
+        r#"postgres://h/db?x=\'pwd\'=SECRETPW"#,
+        r#"host=h options=\"password\"=SECRETPW"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for preferred in ENGINES {
+            let r = parse(text, preferred);
+            assert!(!format!("{r:?}").contains("SECRETPW"), "case {i}");
+            match r {
+                // Refused outright, or moved to the secret by a parser that owns the key.
+                ParseResult::Recognised(o) => {
+                    assert!(password(&o) == "SECRETPW", "case {i} {preferred:?}");
+                    assert!(
+                        o.extra
+                            .iter()
+                            .all(|(k, v)| !v.contains("SECRETPW") && !k.contains("SECRETPW")),
+                        "case {i}"
+                    );
+                }
+                other => assert_eq!(
+                    other.unrecognised(),
+                    Some(UnrecognisedReason::NoMatch),
+                    "case {i}"
+                ),
+            }
+        }
+    }
+}
+
+#[test]
+fn legitimate_password_words_still_parse() {
+    let opts = ok(parse(
+        "postgres://h/db?options=-c%20search_path%3Dpublic",
+        None,
+    ));
+    assert_eq!(opts.extra[0].1, "-c search_path=public");
+    let enc = ok(parse(
+        "host=h options='-c password_encryption=scram-sha-256'",
+        None,
+    ));
+    assert_eq!(enc.extra[0].1, "-c password_encryption=scram-sha-256");
+    let app = ok(parse(
+        "postgres://h/db?application_name=password-reset-service",
+        None,
+    ));
+    assert_eq!(app.mapped[0].value, "password-reset-service");
+    for preferred in ENGINES {
+        let db = ok(parse("postgres://h/password_db", preferred));
+        assert_eq!(fv(&db, FieldId::Database), "password_db");
+        let dsn = ok(parse("host=h dbname=password_db", preferred));
+        assert_eq!(fv(&dsn, FieldId::Database), "password_db");
+        let user = ok(parse("host=h user=password", preferred));
+        assert_eq!(fv(&user, FieldId::User), "password");
+    }
+}

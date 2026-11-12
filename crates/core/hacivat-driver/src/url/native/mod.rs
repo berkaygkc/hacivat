@@ -255,9 +255,13 @@ fn names_secret_key(s: &str) -> bool {
     let b = s.as_bytes();
     s.match_indices('=').any(|(eq, _)| {
         // `trim_end_matches` cuts on char boundaries; the key run is ASCII, so `start` is one too.
-        let end = s[..eq]
+        let mut end = s[..eq]
             .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`'))
             .len();
+        // A backslash right before a closing quote (`\"password\"=X`) is escaping, not key.
+        if end > 0 && b[end - 1] == b'\\' && matches!(b[end], b'"' | b'\'' | b'`') {
+            end -= 1;
+        }
         let mut start = end;
         while start > 0 && key_byte(b[start - 1]) {
             start -= 1;
