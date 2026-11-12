@@ -120,6 +120,12 @@ pub fn parse(input: &str, preferred: Option<DbmsKind>) -> ParseResult {
         Claim::Unclaimed => by_template(text, preferred),
     };
     match found {
+        // The outcome invariant (T7 fix round 2): a value that still carries a password-like
+        // `key=` means some recognizer swallowed a secret into it; the text is refused rather
+        // than stored with the secret in the clear. The public reason stays `NoMatch`.
+        Some(o) if native::leaks_a_secret(&o) => {
+            ParseResult::Unrecognised(UnrecognisedReason::NoMatch)
+        }
         Some(o) => ParseResult::Recognised(o),
         None => ParseResult::Unrecognised(UnrecognisedReason::NoMatch),
     }
@@ -212,7 +218,7 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use super::*;
-    use crate::url::native::names_a_secret;
+    use crate::url::native::{carries_secret, is_network_path};
 
     // The template fallback is unreachable through `parse` for texts with a native scheme (the
     // claim rule), so these call it directly: its own guard must hold on its own.
@@ -287,18 +293,76 @@ mod tests {
             "host=h password=x a.db",
             "/s&PASS%77ord=x",
             "/s&PASS%2577ord=x",
+            // Round 2: whitespace around `=`, `,`, an encoded `=` or separator.
+            "host=h password = x x.db",
+            "Server=h;Pwd =x;a.db",
+            "Server=h; Pwd = x; a.db",
+            "a,passwd=x",
+            "x=password=1",
+            "PassWord%3Dx",
+            "/sock%26PassWord%3Dx",
+            "a\tpassword\t=\tx",
         ] {
-            assert!(names_a_secret(v), "{v}");
+            assert!(carries_secret(v), "{v}");
         }
         for v in [
             "/tmp/a=b",
             "/var/run/postgresql",
+            "/run/passwordless",
+            "password_db",
             "/s&passwords=x",
             "/s&mypassword=x",
             "/s&password",
             "x=password",
+            "/tmp/password%3D",
+            "",
+            "=",
+            " = = ",
         ] {
-            assert!(!names_a_secret(v), "{v}");
+            assert!(!carries_secret(v), "{v}");
         }
+    }
+
+    #[test]
+    fn network_path_shapes() {
+        for p in [
+            "//h/s",
+            r"\\h\s",
+            r"\\?\UNC\h\s",
+            r"\\.\pipe",
+            r"\??\UNC\h\s\a.db",
+            r"/??/UNC/h/s/a.db",
+            r"\??/C:\a.db",
+            r"/\h",
+        ] {
+            assert!(is_network_path(p), "{p}");
+        }
+        for p in [
+            "/tmp/a.db",
+            r"C:\a.db",
+            "?",
+            r"\?",
+            r"\??",
+            r"\??x",
+            "a.db",
+            "",
+        ] {
+            assert!(!is_network_path(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn the_scan_is_linear() {
+        let start = std::time::Instant::now();
+        let n = 64 * 1024;
+        for v in [
+            "=".repeat(n),
+            " =".repeat(n / 2),
+            "a=".repeat(n / 2),
+            "%3D".repeat(n / 3),
+        ] {
+            assert!(!carries_secret(&v));
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 }

@@ -15,7 +15,7 @@
 
 use hacivat_proto::DbmsKind;
 
-use super::{Builder, decode_plain, is_network_path, names_a_secret, query, strip_ci};
+use super::{Builder, carries_secret, decode_plain, is_network_path, query, strip_ci};
 use crate::url::FieldId;
 use crate::url::parse::ParseOutcome;
 
@@ -85,7 +85,7 @@ pub(super) fn plain_path(text: &str) -> Option<ParseOutcome> {
     if text.chars().any(char::is_control)
         || text.contains("://")
         || is_network_path(text)
-        || names_a_secret(text)
+        || carries_secret(text)
     {
         return None;
     }

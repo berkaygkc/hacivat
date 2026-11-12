@@ -401,6 +401,112 @@ fn a_refused_dsn_ending_in_db_is_not_a_path() {
     assert_eq!(r.unrecognised(), Some(UnrecognisedReason::NoMatch));
 }
 
+// ---- The outcome invariant (T7 fix round 2) ----
+
+/// The re-review's probes: each once left the password inside a field, an extra or a file name.
+#[test]
+fn no_recognised_value_carries_a_swallowed_secret() {
+    // Named by index: the texts hold a fixture secret.
+    for (i, text) in [
+        // Whitespace around `=` (libpq, ADO).
+        "host=h password = SECRETPW x.db",
+        "Server=h;Pwd =SECRETPW;a.db",
+        "Server=h; Pwd = SECRETPW; a.db",
+        // Native query, socket and file values.
+        "postgresql:///db?host=/sock;password=SECRETPW",
+        "mysql://u@localhost/db?socket=/tmp/s;pwd=SECRETPW",
+        "postgres://h/db?a=x;password=SECRETPW",
+        "file:/tmp/a.db?x=1;password=SECRETPW",
+        "file:/tmp/a.db;password=SECRETPW",
+        "postgresql:///db?host=/sock%26PassWord%3DSECRETPW",
+        "postgres://h/db?application_name=x,pwd=SECRETPW",
+        "jdbc:sqlite:/tmp/a.db;passwd = SECRETPW",
+        // An encoded `=`.
+        "host=h PassWord%3DSECRETPW x.db",
+        "postgres://h/a%3Bpassword%3DSECRETPW",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for preferred in [None, Some(DbmsKind::Postgres), Some(DbmsKind::Sqlite)] {
+            let r = parse(text, preferred);
+            assert_eq!(
+                r.unrecognised(),
+                Some(UnrecognisedReason::NoMatch),
+                "case {i}"
+            );
+            assert!(!format!("{r:?}").contains("SECRETPW"), "case {i}");
+        }
+    }
+}
+
+/// Where the native parser owns the key, the secret is moved, not refused.
+#[test]
+fn an_owned_secret_key_is_still_moved() {
+    for (i, text) in [
+        "host=h password = SECRETPW",
+        "host=h\tpassword=\tSECRETPW dbname=d",
+        "postgres://h/db?a=x&password=SECRETPW",
+        "mysql://u@localhost/db?socket=/tmp/s&pwd=SECRETPW",
+        "postgresql:///db?host=/sock&PassWord=SECRETPW",
+        "file:/tmp/a.db?x=1&password=SECRETPW",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let o = ok(parse(text, None));
+        assert!(password(&o) == "SECRETPW", "case {i}");
+        assert!(!format!("{o:?}").contains("SECRETPW"), "case {i}");
+    }
+}
+
+/// A value that merely mentions `password`, with no `=` after it, is kept.
+#[test]
+fn a_value_that_only_mentions_password_is_kept() {
+    let db = ok(parse("postgres://h/password_db", None));
+    assert_eq!(fv(&db, FieldId::Database), "password_db");
+    let sock = ok(parse("postgresql:///db?host=/run/passwordless", None));
+    assert_eq!(fv(&sock, FieldId::Socket), "/run/passwordless");
+    let file = ok(parse("file:/tmp/password.db", None));
+    assert_eq!(fv(&file, FieldId::File), "/tmp/password.db");
+    let plain = ok(parse("/tmp/passwords; old.db", None));
+    assert_eq!(fv(&plain, FieldId::File), "/tmp/passwords; old.db");
+    let extra = ok(parse(
+        "postgres://h/db?note=no%20password%20here&x=pass;word",
+        None,
+    ));
+    assert_eq!(
+        extra.extra,
+        vec![
+            ("note".to_string(), "no password here".to_string()),
+            ("x".to_string(), "pass;word".to_string())
+        ]
+    );
+    let user = ok(parse("host=h user=password", None));
+    assert_eq!(fv(&user, FieldId::User), "password");
+}
+
+#[test]
+fn nt_object_namespace_paths_are_refused() {
+    for text in [
+        r"\??\UNC\server\share\a.db",
+        r"\??\C:\data\a.db",
+        "/??/UNC/server/share/a.db",
+        r"file:\??\UNC\server\share\a.db",
+        "file:%5C%3F%3F%5CUNC%5Cserver%5Cshare%5Ca.db",
+        "file:%2F%3F%3F%2FUNC%2Fserver%2Fshare%2Fa.db",
+        r"jdbc:sqlite:\??\UNC\server\share\a.db",
+        "jdbc:sqlite:%5C??%5CUNC%5Cserver%5Cshare%5Ca.db",
+        "%5C%3F%3F%5CUNC%5Cserver%5Cshare%5Ca.db",
+    ] {
+        assert_eq!(
+            parse(text, None).unrecognised(),
+            Some(UnrecognisedReason::NoMatch),
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn port_zero_is_refused() {
     for text in [

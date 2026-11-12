@@ -235,45 +235,77 @@ fn valid_port(p: &str) -> bool {
         && p.parse::<u16>().is_ok_and(|n| n != 0)
 }
 
-/// Whether `v` holds `key=` for a password-like `key` (`password`, `sslpassword`, `pass`, `pwd`,
-/// `passwd`; ASCII case ignored; as written or after any number of percent-decodings, up to 8)
-/// at its start or after `?`, `&`, `;` or whitespace: the shape of a query or a DSN swallowed
-/// into one value. Linear in `v`: the keys partition it.
-pub(super) fn names_a_secret(v: &str) -> bool {
-    let secret = |key: &str| {
-        let mut k = key.to_string();
-        for _ in 0..8 {
-            if is_secret_param(&k) {
-                return true;
-            }
-            let decoded = percent_decode_str(&k).decode_utf8_lossy().into_owned();
-            if decoded == k {
-                return false;
-            }
-            k = decoded;
+/// The one secret-shape check (T7 fix rounds 1 and 2): whether `v`, as written or
+/// percent-decoded once, holds `key =` for a password-like `key` (`password`, `sslpassword`,
+/// `pass`, `pwd`, `passwd`; ASCII case ignored; the key itself also after any number of
+/// percent-decodings, up to 8). A key is the run before `=` (optional ASCII whitespace between
+/// them) back to the start, `;`, `&`, `?`, `,`, `=` or ASCII whitespace: the shape of a query,
+/// a DSN or an ADO string swallowed into one value. Linear in `v`.
+pub(super) fn carries_secret(v: &str) -> bool {
+    names_secret_key(v)
+        || (v.contains('%') && names_secret_key(&percent_decode_str(v).decode_utf8_lossy()))
+}
+
+fn names_secret_key(s: &str) -> bool {
+    let boundary = |c: u8| matches!(c, b';' | b'&' | b'?' | b',' | b'=') || c.is_ascii_whitespace();
+    let b = s.as_bytes();
+    // Each scan back stops at the previous `=` at the latest, so the work is linear.
+    s.match_indices('=').any(|(eq, _)| {
+        let mut end = eq;
+        while end > 0 && b[end - 1].is_ascii_whitespace() {
+            end -= 1;
         }
-        false
-    };
-    let mut start = 0;
-    for (i, c) in v.char_indices() {
-        if matches!(c, '?' | '&' | ';') || c.is_whitespace() {
-            start = i + c.len_utf8();
-        } else if c == '=' {
-            if secret(&v[start..i]) {
-                return true;
-            }
-            start = i + 1;
+        let mut start = end;
+        while start > 0 && !boundary(b[start - 1]) {
+            start -= 1;
         }
+        start < end && secret_key(&s[start..end])
+    })
+}
+
+/// `key` names a secret, as written or after up to 8 percent-decodings.
+fn secret_key(key: &str) -> bool {
+    let mut k = key.to_string();
+    for _ in 0..8 {
+        if is_secret_param(&k) {
+            return true;
+        }
+        let decoded = percent_decode_str(&k).decode_utf8_lossy().into_owned();
+        if decoded == k {
+            return false;
+        }
+        k = decoded;
     }
     false
 }
 
-/// A path that names another machine: it starts with two separators (`//host`, `\\host`,
-/// `\\?\UNC\`, `\\.\`, or a mix). Opening one on Windows sends the user's credentials (an NTLM
-/// hash) to that host, so no pasted text may become one.
+/// A path that names another machine or the NT object namespace: it starts with two
+/// separators (`//host`, `\\host`, `\\?\UNC\`, `\\.\`, or a mix), or with `\??\` (any
+/// separators). Opening one on Windows can send the user's credentials (an NTLM hash) to a
+/// host, so no pasted text may become one. Callers check decoded text.
 pub(super) fn is_network_path(p: &str) -> bool {
+    let sep = |c: Option<char>| matches!(c, Some('/' | '\\'));
     let mut c = p.chars();
-    matches!((c.next(), c.next()), (Some('/' | '\\'), Some('/' | '\\')))
+    let (a, b, x, d) = (c.next(), c.next(), c.next(), c.next());
+    (sep(a) && sep(b)) || (sep(a) && b == Some('?') && x == Some('?') && sep(d))
+}
+
+/// The outcome invariant, checked before `parse` returns (T7 fix round 2): no value the
+/// outcome keeps in the clear (fields, hosts, extras as `key=value`, mapped values) carries a
+/// password-like `key =`, and the file is no network path. Whatever recognizer produced the
+/// outcome, a secret is moved by a parser that owns its key or the text is refused; it is never
+/// left inside another value.
+pub(in crate::url) fn leaks_a_secret(o: &ParseOutcome) -> bool {
+    let file_is_remote = o.fields.values.get(&FieldId::File).is_some_and(|f| {
+        is_network_path(f) || is_network_path(&percent_decode_str(f).decode_utf8_lossy())
+    });
+    file_is_remote
+        || o.fields.values.values().any(|v| carries_secret(v))
+        || o.fields.hosts.iter().any(|(h, _)| carries_secret(h))
+        || o.extra
+            .iter()
+            .any(|(k, v)| carries_secret(&format!("{k}={v}")))
+        || o.mapped.iter().any(|m| carries_secret(&m.value))
 }
 
 /// The setting a parameter maps to, for `kind`; `folded` is the ASCII-lowercased key. A value
@@ -539,7 +571,7 @@ pub(super) fn from_template(
     extra: Vec<(String, String)>,
     password: Option<SecretString>,
 ) -> Option<ParseOutcome> {
-    if map.values.values().any(|v| names_a_secret(v))
+    if map.values.values().any(|v| carries_secret(v))
         || map
             .values
             .get(&FieldId::File)
@@ -565,5 +597,5 @@ pub(super) fn from_template(
     for (k, v) in extra {
         b.param(&k, Zeroizing::new(v));
     }
-    b.finish()
+    b.finish().filter(|o| !leaks_a_secret(o))
 }
