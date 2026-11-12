@@ -1,0 +1,6 @@
+tag = "tr"
+native_name = "Türkçe"
+english_name = "Türkçe"
+short_name = "TR"
+direction = "ltr"
+status = "beta"

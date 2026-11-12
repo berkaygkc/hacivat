@@ -8106,6 +8106,7 @@ dependencies = [
  "cargo_metadata",
  "fluent-syntax",
  "hacivat-bench",
+ "hacivat-l10n",
  "hacivat-l10n-schema",
  "icu_locale",
  "icu_normalizer",
