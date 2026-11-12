@@ -4985,11 +4985,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "spike-grid"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "hacivat-ui-core",
+]
+
+[[package]]
 name = "spike-harman"
 version = "0.0.0"
 dependencies = [
  "anyhow",
  "hacivat-ui-core",
+]
+
+[[package]]
+name = "spike-probes"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "hacivat-ui-core",
+ "libc",
+ "windows-sys",
 ]
 
 [[package]]

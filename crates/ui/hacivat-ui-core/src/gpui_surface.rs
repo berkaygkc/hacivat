@@ -13,3 +13,10 @@ pub use gpui::{
     AnyElement, AppContext, BoxShadow, Div, FontStyle, FontWeight, HighlightStyle, StyledText, hsla,
     point, svg,
 };
+// Task 9 (probes): text shaping, accessibility and clipboard types.
+pub use gpui::{
+    ClipboardEntry, Element, ElementId, Font, FontFeatures, GlobalElementId, InspectorElementId,
+    LayoutId, Role, Style, TextRun, WindowHandle, accesskit,
+};
+// Task 5 (spike-grid): custom painting, text shaping and scroll input.
+pub use gpui::{ContentMask, FontId, InteractiveElement, ShapedLine, TextAlign, fill};
