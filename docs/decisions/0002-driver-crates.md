@@ -49,7 +49,9 @@ secrets are copied into library-owned buffers (P49), and known defects.
   SCRAM runs as `SCRAM-SHA-256` (not `-PLUS`), as libpq does when it cannot bind.
 - **sslmode (P9).** `Disable` runs without an `SSLRequest`. `Auto` is `Prefer` only when
   `TlsParams.plaintext_allowed` (loopback or private address); toward a public address it is
-  `Require`, so the password never crosses the network in plaintext. `Require`, `VerifyCa`
+  `Require`, so a server that declines TLS gets no startup message and no password. (That
+  covers a plaintext server only; see Known limits for what a man in the middle can still
+  do.) `Require`, `VerifyCa`
   and `VerifyFull` are `Require`; verification lives in the rustls configuration. The
   library's "server does not support TLS" (its own constant, not server text) is
   `RawErrorKind::TlsNotOffered`, which Task 10 classifies as `tls.not_supported_by_server`.
@@ -70,7 +72,9 @@ secrets are copied into library-owned buffers (P49), and known defects.
 - **Errors.** A server error keeps SQLSTATE, severity (verbatim, possibly localized), text,
   detail and hint. When the localized severity (`S`) differs from the never-localized `V`
   field, `lang_hint` is `und`, so no English-text rule reads a translated message. TLS
-  failures are `Tls(TlsFailure)`, I/O keeps its `io::ErrorKind`, a malformed message is
+  failures are `Tls(TlsFailure)`, including a rustls alert on a live session (tokio-rustls
+  reports it as `InvalidData` around the rustls error, which goes through
+  `TlsFailure::from_rustls`). I/O keeps its `io::ErrorKind`, a malformed message is
   `Protocol`, and the connect timeout is `Timeout`. A server that asks for a password when
   none was given surfaces as `Other` (`tokio-postgres` reports it as a configuration error).
 - **Secrets (P49).** The password is copied into `tokio_postgres::Config` (as bytes) only at
@@ -92,4 +96,23 @@ secrets are copied into library-owned buffers (P49), and known defects.
     `Auto`/`VerifyFull` off Apple. It surfaces as `TlsFailure::Other`, not `UnknownIssuer`.
   - On macOS the platform verifier rejects a server certificate valid longer than Apple's
     maximum with OSStatus -67901 before the trust check. `hacivat-net` maps -67901 and -67902
-    to `UnknownIssuer`, like the other policy failures.
+    to `UnknownIssuer`, like the other policy failures. Apple's 825-day validity limit applies
+    to certificates from a private CA too. For a long-lived private-CA certificate, the
+    `tls.untrusted` advice to import the CA may therefore not help; only
+    "encrypt without verifying" (`Require`) gets through.
+  - **Cleartext and md5 password requests are always answered (controller ruling).**
+    `tokio-postgres` answers `AuthenticationCleartextPassword` (`R` code 3) and
+    `AuthenticationMD5Password` (code 5) whatever the transport is. A man in the middle can
+    harvest the password (in clear, or as an md5 hash it can attack offline):
+    - in `Require` mode, where any certificate is accepted, by terminating TLS itself;
+    - in `Auto` on a loopback or private address (`Prefer`), by answering the `SSLRequest`
+      with `N` (stripping TLS) and then asking for a cleartext password.
+
+    P9 closes only the case of `Auto` toward a public address.
+  - **M2b follow-ups:**
+    - a `require_auth`-style guard on the injected stream. It sniffs the backend
+      authentication request (`R`, codes 3 and 5) and refuses to answer unless the session
+      is verified TLS (`VerifyCa`, `VerifyFull`, or `Auto` that negotiated TLS) or the mode is
+      `Disable` (an explicit plaintext choice);
+    - `tls-server-end-point` channel binding, so `SCRAM-SHA-256-PLUS` detects a terminating
+      man in the middle even under `Require`.

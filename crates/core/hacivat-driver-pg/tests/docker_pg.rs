@@ -24,11 +24,51 @@ use hacivat_testkit::{DockerTarget, docker_enabled, target, targets};
 use secrecy::SecretString;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+/// Whether every named target must exist in the active set: under `full` (or with no set,
+/// which means every target) a missing one is a failure, never a silent skip. A narrower set
+/// (`pr`) legitimately leaves targets out.
+fn must_exist(set: Option<&str>) -> bool {
+    set.is_none_or(|s| s == "full")
+}
+
+fn active_set() -> Option<String> {
+    std::env::var("HACIVAT_DOCKER_SET").ok()
+}
+
+/// The target `id`, or `None` when the active set leaves it out. Panics when the set should
+/// contain it (`must_exist`).
+fn target_required(id: &str) -> Option<DockerTarget> {
+    let t = target(id);
+    let set = active_set();
+    assert!(
+        t.is_some() || !must_exist(set.as_deref()),
+        "Docker target {id} is missing from the {} set",
+        set.as_deref().unwrap_or("full")
+    );
+    t
+}
+
 fn pg_targets(ids: &[&str]) -> Vec<DockerTarget> {
-    targets(Some(DbmsKind::Postgres))
+    let found: Vec<DockerTarget> = targets(Some(DbmsKind::Postgres))
         .into_iter()
         .filter(|t| ids.contains(&t.id.as_str()))
-        .collect()
+        .collect();
+    if must_exist(active_set().as_deref()) {
+        for id in ids {
+            assert!(
+                found.iter().any(|t| t.id == *id),
+                "Docker target {id} is missing from the full set"
+            );
+        }
+    }
+    found
+}
+
+#[test]
+fn only_the_full_set_requires_every_target() {
+    assert!(must_exist(Some("full")));
+    assert!(must_exist(None));
+    assert!(!must_exist(Some("pr")));
 }
 
 fn direct_factory(t: &DockerTarget) -> StreamFactory {
@@ -151,7 +191,7 @@ fn sqlstate(e: RawError) -> String {
 }
 
 async fn connect_db(id: &str, db: &str) -> Box<dyn RawConn> {
-    let t = target(id).unwrap();
+    let t = target_required(id).unwrap();
     let r = req_db(&t, db);
     match PgDriver::new().connect(r).await {
         Ok(c) => c,
@@ -160,7 +200,7 @@ async fn connect_db(id: &str, db: &str) -> Box<dyn RawConn> {
 }
 
 async fn connect_ro(id: &str) -> PgConn {
-    let t = target(id).unwrap();
+    let t = target_required(id).unwrap();
     let mut r = req(&t, direct_factory(&t), TlsMode::Auto);
     r.read_only = true;
     connect_conn(r)
@@ -223,7 +263,9 @@ async fn pg_connects_over_injected_stream_counting_bytes() {
 #[ignore = "docker"]
 async fn pg_tls_target_modes() {
     docker_only!();
-    let Some(t) = target("pg17-tls") else { return };
+    let Some(t) = target_required("pg17-tls") else {
+        return;
+    };
     let e = PgDriver::new()
         .connect(req(&t, direct_factory(&t), TlsMode::VerifyFull))
         .await
@@ -246,7 +288,9 @@ async fn pg_tls_target_modes() {
 #[ignore = "docker"]
 async fn pg_tls_records_the_verifier_failure_per_attempt() {
     docker_only!();
-    let Some(t) = target("pg17-tls") else { return };
+    let Some(t) = target_required("pg17-tls") else {
+        return;
+    };
     // Auto toward a loopback host still verifies when the server offers TLS (HV-SEC-01).
     let r = req(&t, direct_factory(&t), TlsMode::Auto);
     let failure = r.tls.as_ref().unwrap().failure.clone();
@@ -259,7 +303,9 @@ async fn pg_tls_records_the_verifier_failure_per_attempt() {
 #[ignore = "docker"]
 async fn pg_auto_on_a_public_host_refuses_a_plaintext_server() {
     docker_only!();
-    let Some(t) = target("pg17") else { return };
+    let Some(t) = target_required("pg17") else {
+        return;
+    };
     let settings = TlsSettings::default();
     let r = req_with(&t, direct_factory(&t), settings, AddressClass::Public);
     let e = PgDriver::new().connect(r).await.err().unwrap();
@@ -270,7 +316,9 @@ async fn pg_auto_on_a_public_host_refuses_a_plaintext_server() {
 #[ignore = "docker"]
 async fn pg_server_errors_keep_sqlstate() {
     docker_only!();
-    let Some(t) = target("pg17") else { return };
+    let Some(t) = target_required("pg17") else {
+        return;
+    };
     assert_eq!(
         sqlstate(
             PgDriver::new()
@@ -297,7 +345,9 @@ async fn pg_server_errors_keep_sqlstate() {
 #[ignore = "docker"]
 async fn pg_turkish_server_text_is_kept_verbatim_and_marked() {
     docker_only!();
-    let Some(t) = target("pg17-tr") else { return };
+    let Some(t) = target_required("pg17-tr") else {
+        return;
+    };
     let e = PgDriver::new()
         .connect(req_pw(&t, "wrong"))
         .await
@@ -314,7 +364,7 @@ async fn pg_turkish_server_text_is_kept_verbatim_and_marked() {
 #[ignore = "docker"]
 async fn pg_lists_databases_and_reads_user() {
     docker_only!();
-    if target("pg17").is_none() {
+    if target_required("pg17").is_none() {
         return;
     }
     let mut c = connect_db("pg17", "postgres").await;
@@ -341,7 +391,7 @@ async fn pg_lists_databases_and_reads_user() {
 #[ignore = "docker"]
 async fn pg13_reports_major_13() {
     docker_only!();
-    if target("pg13").is_none() {
+    if target_required("pg13").is_none() {
         return;
     }
     assert_eq!(
@@ -361,7 +411,7 @@ async fn pg13_reports_major_13() {
 #[ignore = "docker"]
 async fn pg_read_only_profile_sets_the_session_default() {
     docker_only!();
-    if target("pg17").is_none() {
+    if target_required("pg17").is_none() {
         return;
     }
     let mut c = connect_ro("pg17").await;
@@ -385,7 +435,7 @@ fn recorder() -> (DriverEvents, Arc<Mutex<Vec<DriverEvent>>>) {
 async fn pg_reports_tls_and_sign_in_events() {
     docker_only!();
     use DriverEvent::*;
-    if let Some(t) = target("pg17-tls") {
+    if let Some(t) = target_required("pg17-tls") {
         let mut r = req(&t, direct_factory(&t), TlsMode::Require);
         let (events, seen) = recorder();
         r.events = events;
@@ -395,7 +445,7 @@ async fn pg_reports_tls_and_sign_in_events() {
             [TlsStarted, TlsDone, AuthStarted, AuthDone]
         );
     }
-    if let Some(t) = target("pg17") {
+    if let Some(t) = target_required("pg17") {
         for mode in [TlsMode::Disable, TlsMode::Auto] {
             let mut r = req(&t, direct_factory(&t), mode);
             let (events, seen) = recorder();
@@ -410,7 +460,9 @@ async fn pg_reports_tls_and_sign_in_events() {
 #[ignore = "docker"]
 async fn pg_close_ends_the_server_session() {
     docker_only!();
-    let Some(t) = target("pg17") else { return };
+    let Some(t) = target_required("pg17") else {
+        return;
+    };
     let name = format!("hv-t13-close-{}", std::process::id());
     let mut r = req(&t, direct_factory(&t), TlsMode::Auto);
     r.application_name = name.clone();

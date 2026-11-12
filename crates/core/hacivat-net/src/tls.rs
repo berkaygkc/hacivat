@@ -127,8 +127,9 @@ fn platform_failure(other: &rustls::OtherError) -> TlsFailure {
     let text = other.to_string();
     let code = text.rsplit(' ').next().and_then(|c| c.parse::<i32>().ok());
     match code {
-        // errSecNotTrusted, errSecCreateChainFailed, errSecInvalidRoot
-        Some(-67843 | -67810 | -67612) => TlsFailure::UnknownIssuer,
+        // errSecNotTrusted (-67843), errSecCreateChainFailed (-25318), errSecInvalidRoot
+        // (-67612)
+        Some(-67843 | -25318 | -67612) => TlsFailure::UnknownIssuer,
         // errSecCertificateValidityPeriodTooLong, errSecCertificateIsCA
         Some(-67901 | -67902) => TlsFailure::UnknownIssuer,
         // errSecHostNameMismatch
@@ -587,6 +588,10 @@ mod tests {
                 TlsFailure::UnknownIssuer,
             ),
             ("x: -67902", TlsFailure::UnknownIssuer),
+            // errSecCreateChainFailed is -25318; -67810 is errSecBlockSizeMismatch.
+            ("x: -25318", TlsFailure::UnknownIssuer),
+            ("x: -67612", TlsFailure::UnknownIssuer),
+            ("x: -67810", TlsFailure::Other),
             ("x: -67818", TlsFailure::Expired),
             ("x: -67819", TlsFailure::NotYetValid),
             ("x: -67602", TlsFailure::NameMismatch),

@@ -10,7 +10,7 @@ use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
 use hacivat_driver::{DriverConnect, DriverEvent, Endpoint, RawError, RawErrorKind, ServerMessage};
-use hacivat_net::TlsMode;
+use hacivat_net::{TlsFailure, TlsMode};
 use secrecy::ExposeSecret;
 use tokio_postgres::Config;
 use tokio_postgres::config::SslMode;
@@ -207,18 +207,56 @@ pub(crate) fn pg_error(e: &tokio_postgres::Error) -> RawError {
         return raw(RawErrorKind::Io(io::ErrorKind::ConnectionReset));
     }
     if let Some(io) = source.and_then(|s| s.downcast_ref::<io::Error>()) {
-        // `Kind::Io` carries the transport's error; `Parse`/`Encode` wrap a malformed message.
-        return raw(match io.kind() {
-            io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => RawErrorKind::Protocol,
-            kind => RawErrorKind::Io(kind),
-        });
+        return raw(io_kind(io));
     }
     raw(RawErrorKind::Other)
+}
+
+/// The kind of an I/O error from a live or starting connection. A rustls error inside it (an
+/// alert after the handshake, which tokio-rustls reports as `InvalidData`) is a TLS failure.
+/// Otherwise `Kind::Io` carries the transport's error and `Parse`/`Encode` wrap a malformed
+/// message.
+fn io_kind(io: &io::Error) -> RawErrorKind {
+    if let Some(tls) = io
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+    {
+        return RawErrorKind::Tls(TlsFailure::from_rustls(tls));
+    }
+    match io.kind() {
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => RawErrorKind::Protocol,
+        kind => RawErrorKind::Io(kind),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rustls_error_after_the_handshake_is_a_tls_failure() {
+        // tokio-rustls reports an alert on a live session as InvalidData around the rustls
+        // error; it must not read as a malformed PostgreSQL message.
+        let alert = io::Error::new(
+            io::ErrorKind::InvalidData,
+            rustls::Error::AlertReceived(rustls::AlertDescription::CertificateRequired),
+        );
+        assert_eq!(
+            io_kind(&alert),
+            RawErrorKind::Tls(TlsFailure::ClientCertRequired)
+        );
+        let decrypt = io::Error::new(io::ErrorKind::InvalidData, rustls::Error::DecryptError);
+        assert_eq!(io_kind(&decrypt), RawErrorKind::Tls(TlsFailure::Protocol));
+        // Without a rustls error inside, InvalidData is still a protocol error, and the
+        // transport's own kinds pass through.
+        let malformed = io::Error::new(io::ErrorKind::InvalidData, "invalid message length");
+        assert_eq!(io_kind(&malformed), RawErrorKind::Protocol);
+        let reset = io::Error::from(io::ErrorKind::ConnectionReset);
+        assert_eq!(
+            io_kind(&reset),
+            RawErrorKind::Io(io::ErrorKind::ConnectionReset)
+        );
+    }
 
     #[test]
     fn options_escape_and_dangling_backslashes() {
