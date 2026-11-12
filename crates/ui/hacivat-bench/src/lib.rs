@@ -218,7 +218,8 @@ pub fn verdict(label: &str, os: &str, stats: &impl Judge, run: &RunInfo) -> Verd
 /// change under `docs/benchmarks/` (the report this run feeds).
 ///
 /// Entries are NUL-terminated `XY path`. A rename or copy (`R`/`C` in either status column) is
-/// followed by a second NUL-terminated path with no status prefix; it is consumed and ignored.
+/// followed by a second NUL-terminated path with no status prefix; the entry is clean only if
+/// both paths are ignorable.
 pub fn build_label(head: &str, porcelain_z: &str) -> String {
     let mut entries = porcelain_z.split('\0');
     let mut dirty = false;
@@ -228,12 +229,14 @@ pub fn build_label(head: &str, porcelain_z: &str) -> String {
         }
         let status = entry.get(..2).unwrap_or(entry);
         let path = entry.get(3..).unwrap_or("");
-        if status.contains(['R', 'C']) {
-            entries.next();
-        }
-        let ignorable = (status == "??"
+        let mut ignorable = (status == "??"
             && (path.starts_with("target/") || path.starts_with(".superpowers/")))
             || path.starts_with("docs/benchmarks/");
+        if status.contains(['R', 'C']) {
+            // The other path of a rename or copy is a change too: clean only if both are.
+            let other = entries.next().unwrap_or("");
+            ignorable &= other.starts_with("docs/benchmarks/");
+        }
         dirty |= !ignorable;
     }
     if dirty {
@@ -772,6 +775,21 @@ mod tests {
         assert_eq!(
             build_label("abc1234", "R  crates/new.rs\0docs/benchmarks/old.md\0"),
             "abc1234-dirty"
+        );
+    }
+
+    #[test]
+    fn rename_is_clean_only_if_both_paths_are_ignorable() {
+        assert_eq!(
+            build_label("abc1234", "R  docs/benchmarks/new.md\0crates/old.rs\0"),
+            "abc1234-dirty"
+        );
+        assert_eq!(
+            build_label(
+                "abc1234",
+                "R  docs/benchmarks/new.md\0docs/benchmarks/old.md\0"
+            ),
+            "abc1234"
         );
     }
 

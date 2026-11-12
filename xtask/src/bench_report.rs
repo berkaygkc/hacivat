@@ -175,16 +175,22 @@ pub fn row_for(json: &str, source_file: &str) -> Result<String, String> {
             .map(str::to_string)
     };
     let (label, os, host, kind) = (s("label")?, s("os")?, s("host")?, s("kind")?);
-    let (label, os, host) = (escape_cell(&label), escape_cell(&os), escape_cell(&host));
     let src = source_marker(source_file);
     let run = run_info(&v)?;
-    let (build, display) = (escape_cell(&run.build), display_text(&run));
+    let display = display_text(&run);
     let values: Vec<f64> = v["values_ms"]
         .as_array()
         .ok_or("missing \"values_ms\"")?
         .iter()
         .map(|x| x.as_f64().ok_or("non-numeric value"))
         .collect::<Result<_, _>>()?;
+    // Escape only for display; the verdict above and below sees the raw label and OS.
+    let (cl, co, ch, cb) = (
+        escape_cell(&label),
+        escape_cell(&os),
+        escape_cell(&host),
+        escape_cell(&run.build),
+    );
     let mut row = String::new();
     match kind.as_str() {
         "frames" => {
@@ -192,7 +198,7 @@ pub fn row_for(json: &str, source_file: &str) -> Result<String, String> {
             let ver = verdict_text(verdict(&label, &os, &st, &run));
             let _ = writeln!(
                 row,
-                "| {label} | {os} | {host} | {build} | {display} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {} | {ver} | {src} |",
+                "| {cl} | {co} | {ch} | {cb} | {display} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {} | {ver} | {src} |",
                 st.frames, st.mean_fps, st.p95_ms, st.p99_ms, st.max_gap_ms, st.gaps_over_100ms
             );
         }
@@ -202,7 +208,7 @@ pub fn row_for(json: &str, source_file: &str) -> Result<String, String> {
             let ver = verdict_text(verdict(&label, &os, &st, &run));
             let _ = writeln!(
                 row,
-                "| {label} | {os} | {host} | {build} | {display} | {} | - | {:.1} | - | {:.1} | - | {ver} | {src} |",
+                "| {cl} | {co} | {ch} | {cb} | {display} | {} | - | {:.1} | - | {:.1} | - | {ver} | {src} |",
                 st.samples, st.p95_ms, st.max_ms
             );
         }
@@ -426,5 +432,19 @@ mod tests {
         let j = dump("b1|x", "macos", "frames", &vec!["16"; 600].join(","), "");
         let r = row_for(&j, "x.json").unwrap();
         assert!(r.starts_with("| b1\\|x |"), "{r}");
+    }
+
+    #[test]
+    fn pipe_in_host_keeps_the_verdict_and_is_escaped() {
+        let vals = vec!["16"; 600].join(",");
+        let plain = dump("b1-fling", "macos", "frames", &vals, "");
+        let piped = dump("b1-fling", "macos", "frames", &vals, r#""host":"a|b""#);
+        let (p, q) = (
+            row_for(&plain, "t.json").unwrap(),
+            row_for(&piped, "t.json").unwrap(),
+        );
+        assert!(body(&p).ends_with("| PASS |"), "{p}");
+        assert!(body(&q).ends_with("| PASS |"), "{q}");
+        assert!(q.contains("| a\\|b |"), "{q}");
     }
 }
