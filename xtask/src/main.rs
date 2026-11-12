@@ -1,6 +1,7 @@
 mod bench_report;
 mod check_deps;
 mod gen_sql;
+mod l10n;
 mod tokens;
 mod vf;
 
@@ -19,6 +20,7 @@ fn main() -> ExitCode {
         Some("bench-report") => bench_report::run(),
         Some("check-deps") => check_deps::run(),
         Some("gen-sql") => gen_sql::run(),
+        Some("l10n") => l10n::run(),
         Some("tokens") => tokens::run(),
         Some("vf") => vf::run(),
         other => {
