@@ -295,12 +295,13 @@ fn format_locale(ctx: &NegotiationCtx, requests: &[Request], diags: &mut Vec<Neg
         .map_or_else(|| "en-US".to_string(), |r| with_region(r.locale.clone()))
 }
 
-/// `tr` → `tr-TR`, `zh-Hant` → `zh-Hant-TW`; a tag with a region is returned as is.
+/// `tr` → `tr-TR`, `zh-Hant` → `zh-Hant-TW`; then the regional format policy
+/// (`effective::regional_format_locale`: `en-TR` → `tr-TR`).
 fn with_region(mut locale: icu_locale::Locale) -> String {
     if locale.id.region.is_none() {
         let mut max = locale.id.clone();
         icu_locale::LocaleExpander::new_extended().maximize(&mut max);
         locale.id.region = max.region;
     }
-    locale.to_string()
+    crate::effective::regional_format_locale(locale).to_string()
 }
