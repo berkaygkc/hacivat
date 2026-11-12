@@ -64,16 +64,18 @@ fn is_scheme(s: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-' | b':'))
 }
 
-/// For scheme-less userinfo (`^(//)?[^\s/@=\\]*:\S*@`), the text after the optional `//`.
+/// For scheme-less userinfo (`^(//)?[^\s/@=]*:\S*@`), the text after the optional `//`.
 ///
-/// A `\` before the colon, or a drive letter followed by `:\`, is a Windows path
-/// (`C:\dir\a@b`, `\\host\share:x@y`), not credentials.
+/// A drive letter followed by `:\`, or text starting with `\\` (a UNC path), is a Windows path
+/// (`C:\dir\a@b`, `\\host\share:x@y`), not credentials. Any other `\` is allowed in the user
+/// (`DOMAIN\user:pw@h` is scrubbed).
 fn bare_userinfo(s: &str) -> Option<&str> {
     let rest = s.strip_prefix("//").unwrap_or(s);
     let colon = rest.find(':')?;
     if rest[..colon]
         .bytes()
-        .any(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'@' | b'=' | b'\\'))
+        .any(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'@' | b'='))
+        || rest.starts_with("\\\\")
     {
         return None;
     }
@@ -379,7 +381,8 @@ mod tests {
                 "u@tcp(h)/db?parseTime=true",
             ),
             ("note: see a@b", "note: see a@b"),
-            // Windows paths are not userinfo.
+            // A domain user is userinfo; Windows paths are not.
+            ("DOMAIN\\user:pw@h", "DOMAIN\\user@h"),
             ("C:\\dir\\a@b", "C:\\dir\\a@b"),
             ("\\\\host\\share:x@y", "\\\\host\\share:x@y"),
             // 6. A numeric password with `#`, `/` or `?`.

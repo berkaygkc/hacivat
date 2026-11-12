@@ -70,7 +70,7 @@ option_allow = ["sslMode", "useSSL", "connectTimeout", "characterEncoding"]
 always_deny = [
     "allowLoadLocalInfile", "allowUrlInLocalInfile", "autoDeserialize",
     "enable_cleartext_plugin", "socket", "prefer_socket", "require_ssl", "verify_ca",
-    "verify_identity", "built_in_roots",
+    "verify_identity", "built_in_roots", "secure_auth", "reset_connection",
 ]
 path_keys = ["sslCa", "sslCert", "sslKey", "serverSslCert", "serverRSAPublicKeyFile", "trustCertificateKeyStoreUrl", "clientCertificateKeyStoreUrl"]
 
@@ -100,7 +100,7 @@ option_allow = ["sslMode", "useSSL", "connectTimeout", "characterEncoding"]
 always_deny = [
     "allowLoadLocalInfile", "allowUrlInLocalInfile", "autoDeserialize",
     "enable_cleartext_plugin", "socket", "prefer_socket", "require_ssl", "verify_ca",
-    "verify_identity", "built_in_roots",
+    "verify_identity", "built_in_roots", "secure_auth", "reset_connection",
 ]
 path_keys = ["sslCa", "sslCert", "sslKey", "serverSslCert", "serverRSAPublicKeyFile", "trustCertificateKeyStoreUrl", "clientCertificateKeyStoreUrl"]
 

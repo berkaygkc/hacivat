@@ -129,7 +129,9 @@ fn embedded_catalog_content_is_normative() {
             "require_ssl",
             "verify_ca",
             "verify_identity",
-            "built_in_roots"
+            "built_in_roots",
+            "secure_auth",
+            "reset_connection"
         ]
     );
     assert_eq!(

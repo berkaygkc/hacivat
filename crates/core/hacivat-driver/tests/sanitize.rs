@@ -548,6 +548,8 @@ fn mysql_async_native_options_are_always_denied() {
             "verify_ca",
             "verify_identity",
             "built_in_roots",
+            "secure_auth",
+            "reset_connection",
         ] {
             assert_eq!(
                 err_reasons(engine, UserTyped, &[(key, "false")]),
