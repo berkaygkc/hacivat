@@ -58,9 +58,9 @@ Pass criterion (spec section 6, M0): correct composition, caret and candidate wi
 
 ## Known gaps (M0)
 
-Both gaps fall under Review Focus 4. Both are pending the GPUI patch `crates/ui/hacivat-ui-core/patches/gpui-discard-marked-text-on-focus-lost.patch`, which is not applied. At zed@912159c, GPUI on macOS gives the app no way to make `NSTextInputContext` drop its composition.
+Both gaps fall under Review Focus 4.
 
-- **In-window programmatic focus move during composition.** The editor commits the marked text locally, but the IME keeps its own copy of the composition. The next IME delivery can then land beside the committed text. Clicks and keystrokes do not trigger this, because the IME sees them first. The patch closes this gap.
-- **Focus move while the window is inactive.** GPUI delivers no blur for this, because the previous focus path of an inactive window is empty (`crates/gpui/src/window.rs:3773-3777`). The underline can stay stuck on the old editor. The patch alone does not close this gap: GPUI would also need to deliver the blur, or `FocusLost`, for inactive windows.
+- **In-window programmatic focus move during composition. CLOSED in M1 (2026-11-12).** The editor committed the marked text locally, but the IME kept its own copy of the composition, so the next IME delivery could land beside the committed text. Closed by two commits on the Hacivat zed fork, branch `hacivat/912159c`: `4858c09` (the FocusLost→discardMarkedText patch in gpui_macos) and `a1eaa20` (GPUI sends FocusLost then FocusGained on an input→input move, which it previously did not, since it sent FocusLost only on Some↔None transitions). The PO's re-test with `HACIVAT_DEBUG_FOCUS_MOVE_MS=3000` (settings search → palette) passed on 2026-11-12 after a first run failed without `a1eaa20`. See `m1.md`.
+- **Focus move while the window is inactive. Still open → M5 (UI-EDIT-12).** GPUI delivers no blur for this, because the previous focus path of an inactive window is empty (`crates/gpui/src/window.rs:3773-3777`). The underline can stay stuck on the old editor. The fork patch alone does not close this gap: GPUI would also need to deliver the blur, or `FocusLost`, for inactive windows.
 
 Not a gap: in ABC – Extended, Option+I is the horn dead key, so Option+I then A gives `ʼa`. That matches TextEdit. Circumflex in that layout is Option+6.

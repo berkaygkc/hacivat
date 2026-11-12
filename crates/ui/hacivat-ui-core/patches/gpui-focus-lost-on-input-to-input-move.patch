@@ -1,0 +1,177 @@
+--- a/crates/gpui/src/input.rs
++++ b/crates/gpui/src/input.rs
+@@ -1,3 +1,6 @@
++// Modified by the Hacivat project (2026-11-12): the tests cover the `FocusLost` then
++// `FocusGained` pair that `Window::draw` reports for a direct move between text inputs.
++// Original work: Zed Industries, Apache-2.0, zed@912159c7ad77ce6296a93be77efc298b0b00fd50.
+ use crate::{
+     App, Bounds, ClipboardItem, Context, Entity, InputHandler, Pixels, TextInputConfiguration,
+     UTF16Selection, Window,
+@@ -458,12 +461,16 @@ mod tests {
+             window.notify_text_input_changed(&first_focus);
+         })
+         .unwrap();
++        // Focus moved straight from one text input to another, so the platform hears the
++        // old input's loss and then the new input's gain (Hacivat modification).
+         assert_eq!(
+             test_window.text_input_state_changes(),
+             [
+                 TextInputStateChange::FocusGained,
+                 TextInputStateChange::ContentChanged,
+                 TextInputStateChange::SelectionChanged,
++                TextInputStateChange::FocusLost,
++                TextInputStateChange::FocusGained,
+             ]
+         );
+ 
+@@ -496,12 +503,105 @@ mod tests {
+                 TextInputStateChange::FocusGained,
+                 TextInputStateChange::ContentChanged,
+                 TextInputStateChange::SelectionChanged,
++                TextInputStateChange::FocusLost,
++                TextInputStateChange::FocusGained,
+                 TextInputStateChange::SelectionChanged,
+                 TextInputStateChange::FocusLost,
+             ]
+         );
+     }
+ 
++    // Hacivat modification: a direct focus move between two text inputs.
++    #[gpui::test]
++    fn focus_move_between_text_inputs_reports_loss_then_gain(cx: &mut TestAppContext) {
++        let window = cx.add_window(|_, cx| TwoInputsTestView {
++            first: cx.new(|cx| ConfigurationTestView {
++                focus_handle: cx.focus_handle(),
++                configuration: TextInputConfiguration::default(),
++                accepts_text_input: true,
++            }),
++            second: cx.new(|cx| ConfigurationTestView {
++                focus_handle: cx.focus_handle(),
++                configuration: TextInputConfiguration::default(),
++                accepts_text_input: true,
++            }),
++        });
++        let root = window.root(cx).unwrap();
++        let test_window = cx.test_window(window.into());
++        let window = AnyWindowHandle::from(window);
++        let (first, second) = root.read_with(cx, |root, cx| {
++            (
++                root.first.read(cx).focus_handle.clone(),
++                root.second.read(cx).focus_handle.clone(),
++            )
++        });
++        let focus_and_draw = |handle: &FocusHandle, cx: &mut TestAppContext| {
++            cx.update_window(window, |_, window, cx| {
++                window.focus(handle, cx);
++                window.draw(cx).clear(cx);
++            })
++            .unwrap();
++        };
++
++        focus_and_draw(&first, cx);
++        assert_eq!(
++            test_window.text_input_state_changes(),
++            [TextInputStateChange::FocusGained]
++        );
++
++        // a -> b within one frame: the old input's loss, then the new input's gain.
++        focus_and_draw(&second, cx);
++        assert_eq!(
++            test_window.text_input_state_changes(),
++            [
++                TextInputStateChange::FocusGained,
++                TextInputStateChange::FocusLost,
++                TextInputStateChange::FocusGained,
++            ]
++        );
++
++        // Refocusing the same input, or redrawing, forwards nothing.
++        focus_and_draw(&second, cx);
++        cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
++            .unwrap();
++        assert_eq!(test_window.text_input_state_changes().len(), 3);
++
++        // b -> a moves back the same way.
++        focus_and_draw(&first, cx);
++        assert_eq!(
++            test_window.text_input_state_changes()[3..],
++            [
++                TextInputStateChange::FocusLost,
++                TextInputStateChange::FocusGained,
++            ]
++        );
++
++        // Leaving text inputs entirely is still a single loss.
++        cx.update_window(window, |_, window, cx| {
++            window.blur(cx);
++            window.draw(cx).clear(cx);
++        })
++        .unwrap();
++        assert_eq!(
++            test_window.text_input_state_changes()[5..],
++            [TextInputStateChange::FocusLost]
++        );
++    }
++
++    struct TwoInputsTestView {
++        first: Entity<ConfigurationTestView>,
++        second: Entity<ConfigurationTestView>,
++    }
++
++    impl Render for TwoInputsTestView {
++        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
++            div()
++                .size_full()
++                .child(self.first.clone())
++                .child(self.second.clone())
++        }
++    }
++
+     struct ConfigurationTestView {
+         focus_handle: FocusHandle,
+         configuration: TextInputConfiguration,
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -1,3 +1,7 @@
++// Modified by the Hacivat project (2026-11-12): `Window::draw` also reports
++// `TextInputStateChange::FocusLost` then `FocusGained` when focus moves directly from one
++// text input to a different one. Original work: Zed Industries, Apache-2.0,
++// zed@912159c7ad77ce6296a93be77efc298b0b00fd50.
+ #[cfg(feature = "profiler")]
+ use crate::DebugFrameOverlayMode;
+ #[cfg(any(feature = "inspector", debug_assertions))]
+@@ -3738,6 +3742,15 @@ impl Window {
+                 } else {
+                     TextInputStateChange::FocusLost
+                 });
++        } else if previous.is_some() && previous != focused_text_input {
++            // Hacivat modification: focus moved straight from one text input to another
++            // within a single frame. The platform must end the old input's session (e.g.
++            // drop a live IME composition) before the new input's session starts, so this
++            // reports the loss of the old input and then the gain of the new one.
++            self.platform_window
++                .text_input_state_changed(TextInputStateChange::FocusLost);
++            self.platform_window
++                .text_input_state_changed(TextInputStateChange::FocusGained);
+         }
+ 
+         self.layout_engine.as_mut().unwrap().clear();
+--- a/crates/gpui_macos/src/window.rs
++++ b/crates/gpui_macos/src/window.rs
+@@ -2195,10 +2195,12 @@ impl PlatformWindow for MacWindow {
+ 
+     // Hacivat modification: end the platform composition on a real text-input focus loss.
+     fn text_input_state_changed(&self, change: TextInputStateChange) {
+-        // GPUI sends `FocusLost` only when the window's focused text input goes from Some
+-        // to None, i.e. on a real focus change. An app switch keeps GPUI focus, so it never
+-        // sends it there, and the IME keeps owning that composition. `ContentChanged` and
+-        // `SelectionChanged` follow every IME edit and must never discard.
++        // GPUI sends `FocusLost` only on a real focus change: when the window's focused text
++        // input goes from Some to None, or (Hacivat `gpui` carry) moves directly to a
++        // different text input, followed there by `FocusGained`. An app switch keeps GPUI
++        // focus, so it never sends it there, and the IME keeps owning that composition.
++        // `ContentChanged` and `SelectionChanged` follow every IME edit and must never
++        // discard.
+         if change != TextInputStateChange::FocusLost {
+             return;
+         }
