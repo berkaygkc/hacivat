@@ -1,8 +1,8 @@
 //! FTL signature extraction (the `# Variables:` blocks), shared by `hacivat-l10n`'s build
 //! script and `xtask l10n check` (I18N-01 step 7, I18N-04 step 1, I18N-17 L003/L004/L006).
 //!
-//! A documented variable looks like this (the type is one of `String`, `Number`, `DateTime`,
-//! `List` or `Enum(a, b, ...)`):
+//! A documented variable looks like this (the type is one of `String`, `Number`, `Decimal`,
+//! `DateTime`, `List` or `Enum(a, b, ...)`):
 //!
 //! ```ftl
 //! # Variables:
@@ -19,7 +19,10 @@ use fluent_syntax::parser;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VarType {
     String,
+    /// A count: an integer that selects plural variants.
     Number,
+    /// An exact decimal passed as text (`ExactDecimal`), never through `f64`.
+    Decimal,
     DateTime,
     List,
     /// One of a closed set of values (`Enum(table, view)`), passed as text.
@@ -77,7 +80,7 @@ impl fmt::Display for SchemaError {
             ),
             SchemaErrorKind::BadVariableDoc { id, text } => write!(
                 f,
-                "`{id}` has a malformed `# Variables:` line `{text}` (want `$name (String|Number|DateTime|List|Enum(a, b)) - description`)"
+                "`{id}` has a malformed `# Variables:` line `{text}` (want `$name (String|Number|Decimal|DateTime|List|Enum(a, b)) - description`)"
             ),
         }
     }
@@ -275,6 +278,7 @@ fn parse_var_doc(line: &str) -> Option<(String, VarType)> {
     let ty = match rest[..close].trim() {
         "String" => VarType::String,
         "Number" => VarType::Number,
+        "Decimal" => VarType::Decimal,
         "DateTime" => VarType::DateTime,
         "List" => VarType::List,
         other => {
@@ -492,6 +496,17 @@ hv-ok = again
                 (4, SchemaErrorKind::DuplicateId { id: "hv-ok".into() }),
             ]
         );
+    }
+
+    #[test]
+    fn decimal_is_a_variable_type() {
+        let ftl = "# Variables:\n#   $seconds (Decimal) - elapsed time.\nhv-clock = { NUMBER($seconds, minimumFractionDigits: 2) } s\n";
+        let sigs = extract(ftl, "en/hacivat-ui.ftl").unwrap();
+        assert_eq!(
+            sigs[0].vars,
+            vec![("seconds".to_string(), VarType::Decimal)]
+        );
+        assert!(extract("# Variables:\n#   $s (decimal) - x\nhv-c = { $s }\n", "f").is_err());
     }
 
     #[test]

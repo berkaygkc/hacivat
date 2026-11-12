@@ -115,7 +115,7 @@ hv-settings-restart-body = Hacivat closes and opens again to apply the new text 
 hv-settings-restart-later = Later
 # A sample of the regional format: a number and a date with time, as the chosen format shows them.
 # Variables:
-#   $number (Number) - a sample number, 1234.5.
+#   $number (Decimal) - a sample number, 1234.5.
 #   $when (DateTime) - a sample wall-clock time, 2026-11-11 14:05.
 hv-settings-regional-preview = { NUMBER($number) } · { DATETIME($when, dateStyle: "short", timeStyle: "short") }
 # Warning toast after choosing a keymap preset whose shortcuts type characters on this keyboard layout.

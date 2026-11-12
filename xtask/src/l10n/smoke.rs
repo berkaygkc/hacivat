@@ -32,6 +32,11 @@ fn number_samples() -> Vec<ArgValue> {
 fn sample(ty: &VarType, number: &ArgValue, long: bool) -> ArgValue {
     match ty {
         VarType::Number => number.clone(),
+        // A decimal gets the same sample values, as exact text.
+        VarType::Decimal => match number {
+            ArgValue::Count(n) => ArgValue::Decimal(ExactDecimal(n.to_string())),
+            other => other.clone(),
+        },
         VarType::String if long => ArgValue::Text("W".repeat(120)),
         VarType::String => ArgValue::Text("Sample".into()),
         VarType::DateTime => ArgValue::When(WhenValue::Instant {

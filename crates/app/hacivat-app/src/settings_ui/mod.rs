@@ -8,7 +8,7 @@ pub mod search;
 
 use std::rc::Rc;
 
-use hacivat_l10n::{ArgValue, ExactDecimal, L10n, NoArgs, WhenValue, ids};
+use hacivat_l10n::{ExactDecimal, L10n, NoArgs, WhenValue, ids};
 use hacivat_settings::{Settings, TextRenderingPref};
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::dialog::{DialogButton, DialogEvent, DialogSize, DialogSpec};
@@ -428,33 +428,21 @@ fn segment_content(cx: &App, choice: &Choice) -> (SegmentContent, SharedString) 
 /// The regional-format sample: `1234.5` and 2026-11-11 14:05 (a wall-clock value, so the time
 /// zone never shifts it, F30), rendered by the installed localization.
 pub fn regional_preview_text(cx: &App) -> SharedString {
-    let Some(global) = cx.try_global::<L10nGlobal>() else {
-        return SharedString::new_static(ids::hv::SETTINGS_REGIONAL_PREVIEW.id);
-    };
-    // follow-up: (Number) -> ExactDecimal arg in codegen, then this goes through `tr`.
-    global
-        .l10n
-        .t_dynamic(
-            ids::hv::SETTINGS_REGIONAL_PREVIEW.id,
-            vec![
-                (
-                    "number",
-                    ArgValue::Decimal(ExactDecimal("1234.5".to_string())),
-                ),
-                (
-                    "when",
-                    ArgValue::When(WhenValue::Local {
-                        year: 2026,
-                        month: 11,
-                        day: 11,
-                        hour: 14,
-                        minute: 5,
-                        second: 0,
-                    }),
-                ),
-            ],
-        )
-        .into()
+    tr(
+        cx,
+        ids::hv::SETTINGS_REGIONAL_PREVIEW,
+        ids::hv::HvSettingsRegionalPreview {
+            number: ExactDecimal("1234.5".to_string()),
+            when: WhenValue::Local {
+                year: 2026,
+                month: 11,
+                day: 11,
+                hour: 14,
+                minute: 5,
+                second: 0,
+            },
+        },
+    )
 }
 
 /// Asks to restart, then restarts: the pending settings and layout writes are flushed first,

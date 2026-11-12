@@ -1,0 +1,52 @@
+network.dns title: db-prod-us.acme.io couldn't be found.
+network.dns body: This Mac couldn't look up the host name. Check the spelling, or connect to your VPN if the host is on a private network.
+network.refused title: db-prod-us.acme.io refused the connection on port 5432.
+network.refused body: The host is reachable, but nothing accepted the connection on that port. Check the port, and that the database server is running and accepts network connections.
+network.timeout title: db-prod-us.acme.io didn't answer in time.
+network.timeout body: The connection attempt ran out of time. The server may be busy, or a firewall may be dropping the connection. Try again, or check the host and port.
+network.reset title: db-prod-us.acme.io closed the connection.
+network.reset body: The connection was cut before Hacivat could sign in. The server may have restarted, or a firewall or proxy may have closed the connection. Try again.
+network.unreachable title: db-prod-us.acme.io can't be reached from this Mac.
+network.unreachable body: There is no network route to the host. Check your network connection, or connect to your VPN if the host is on a private network.
+network.ipv6_unavailable title: db-prod-us.acme.io can only be reached over IPv6.
+network.ipv6_unavailable body: The host has only IPv6 addresses, and this network doesn't carry IPv6. Try another network, or use the host's IPv4 address if it has one.
+tls.handshake title: The secure connection to db-prod-us.acme.io couldn't be set up.
+tls.handshake body: Hacivat and the server couldn't agree on encryption. Check the connection's TLS settings; the technical details have the reason.
+tls.untrusted title: db-prod-us.acme.io sent a certificate this Mac doesn't trust.
+tls.untrusted body: The server's certificate isn't signed by an authority this Mac trusts. You can encrypt the connection without verifying the certificate, or ask your administrator for the CA.
+tls.hostname title: The certificate from db-prod-us.acme.io is for a different name.
+tls.hostname body: The server's certificate doesn't cover the name Hacivat connected to. Connect with a name the certificate lists, such as the server's full domain name instead of an IP address or an alias.
+tls.protocol title: The secure connection to db-prod-us.acme.io failed a safety check.
+tls.protocol body: The server uses a TLS version Hacivat doesn't accept, or sent encrypted data that didn't verify. Hacivat needs TLS 1.2 or later. If the server is up to date, something on the network may be interfering with the connection.
+tls.client_cert_required title: db-prod-us.acme.io asks for a client certificate.
+tls.client_cert_required body: The server only accepts connections that present a certificate of their own. Add the client certificate and its key in the connection's TLS settings.
+tls.not_supported_by_server title: db-prod-us.acme.io doesn't offer encrypted connections.
+tls.not_supported_by_server body: This connection requires TLS, and the server doesn't support it. Turn on TLS on the server, or change the connection's TLS mode if the network is private and trusted.
+auth.invalid title: The server rejected the password for deploy.
+auth.invalid body: The password may have changed or expired. Hacivat stops after 3 attempts so the account isn't locked.
+auth.expired title: The password for deploy has expired.
+auth.expired body: The server wants a new password before this account can sign in. Change it with another tool or ask your database administrator, then enter the new password here.
+auth.locked title: The account deploy is locked.
+auth.locked body: The server doesn't let this account sign in, often after too many failed attempts or because an administrator locked it. Ask your database administrator to unlock it.
+auth.method_unsupported title: The server wants deploy to sign in with a method Hacivat can't use.
+auth.method_unsupported body: The account uses an authentication method Hacivat doesn't support over this connection. Some methods only work over an encrypted connection: try turning on TLS, or ask your database administrator which method the account uses.
+authz.database title: deploy isn't allowed to open orders_v2.
+authz.database body: The server doesn't let this account connect to this database from here. Ask your database administrator for access, or pick a database the account can open.
+config.invalid title: The settings of orders-prod can't be used.
+config.invalid body: Something in the connection can't be used as it is. The technical details name it; edit the connection to fix it.
+config.unknown_database title: The database orders_v2 doesn't exist on db-prod-us.acme.io.
+config.unknown_database body: Signing in worked. These databases are open to deploy:
+server.too_many_connections title: db-prod-us.acme.io has no free connections.
+server.too_many_connections body: The server has reached its connection limit. Try again in a moment, or close connections you no longer need.
+server.starting title: db-prod-us.acme.io is still starting up.
+server.starting body: The database server is running but isn't ready for connections yet. Try again in a moment.
+server.shutdown title: db-prod-us.acme.io is shutting down.
+server.shutdown body: The database server is stopping, or an administrator ended the session. Connect again once the server is back.
+server.read_only title: db-prod-us.acme.io only allows reading.
+server.read_only body: The server is in read-only mode, for example because it is a replica. Connect to the primary server to make changes.
+server.unsupported_version title: db-prod-us.acme.io runs PostgreSQL 9.6.24, which Hacivat doesn't support.
+server.unsupported_version body: Hacivat supports PostgreSQL 14 and later. Its schema reading and safety checks rely on newer system catalogs.
+cancelled title: Connecting to orders-prod was cancelled.
+cancelled body: Nothing was changed. Connect again when you're ready.
+internal title: Something went wrong while connecting to orders-prod.
+internal body: Hacivat hit an error it didn't expect. The technical details have the server's message; copy them if you report the problem.
