@@ -1,0 +1,3 @@
+# Layout overlay: Turkish F (KBDTUF). Base-layer characters that need Shift. The M1 defaults
+# need no alternative chord here. [Inferred: verify against KBDTUF before freezing.]
+shift_level = "!\"^$%&'()=?_;:"

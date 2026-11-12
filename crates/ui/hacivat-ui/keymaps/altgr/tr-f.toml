@@ -1,0 +1,10 @@
+# AltGr layer, Turkish F (KBDTUF). PARTIAL: only the entries known to matter for SQL typing.
+# [Inferred: complete and verify against the KBDTUF layout table before freezing.]
+layout = "tr-f"
+
+[keys]
+"7" = "{"
+"8" = "["
+"9" = "]"
+"0" = "}"
+f = "@"

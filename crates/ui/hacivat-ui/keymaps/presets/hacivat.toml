@@ -1,0 +1,2 @@
+# Preset "hacivat": the collision-safe defaults, unchanged. It adds no bindings and accepts no
+# AltGr shadowing (CI: `hacivat_preset_accepts_no_shadowing_and_datagrip_names_polish_s`).

@@ -1,6 +1,22 @@
-//! Keymap model (UI-EDIT-13): types only. Parsing, normalization, resolution, AltGr and
-//! reachability checks and display land in Task 5 as submodules of this module.
+//! Keymap model (UI-EDIT-13): types, plus parsing, normalization, resolution, AltGr and
+//! reachability checks and display as submodules.
 
+mod altgr;
+#[cfg(test)]
+mod behaviour_tests;
+mod display;
+mod normalize;
+mod parse;
+mod reach;
+mod resolve;
+
+pub use altgr::{AltGrTable, AltGrTables, Collision, altgr_collisions, option_only_printables};
+pub use display::display_chord;
+pub use normalize::{normalize, normalize_char};
+pub use parse::{chord_string, parse_chord};
+pub use reach::{layout_id_from_platform, unreachable_chords};
+
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 /// Modifier state of a key press. `Default` is no modifier.
@@ -146,12 +162,40 @@ impl std::fmt::Display for KeymapError {
 
 impl std::error::Error for KeymapError {}
 
-/// The loaded bindings for one platform. Constructors and accessors land in Task 5.
+/// The loaded bindings for one platform.
+///
+/// Built by `Keymap::from_sources`; queried with `Keymap::resolve`, `Keymap::bindings` and
+/// `Keymap::bindings_for`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code, reason = "Task 5 adds the constructors and accessors")]
 pub struct Keymap {
     platform: KeymapPlatform,
     bindings: Vec<Binding>,
+    /// First press of every binding's chord → indexes into `bindings` (the `(Mods, NormKey)`
+    /// hash of UI-EDIT-13 step 4).
+    index: HashMap<KeyPress, Vec<usize>>,
+    /// Per layout: base-layer characters that need Shift (`shift_level` of the layout overlays).
+    shift_levels: HashMap<KeyboardLayoutId, Vec<char>>,
+}
+
+impl Keymap {
+    /// Every loaded binding, in load order (defaults, preset, layout overlays, user), F15.
+    pub fn bindings(&self) -> &[Binding] {
+        &self.bindings
+    }
+
+    /// The platform this keymap was loaded for.
+    pub fn platform(&self) -> KeymapPlatform {
+        self.platform
+    }
+
+    /// The bindings for `command` that apply on `layout`: the layout's overlay alternatives
+    /// first (what the user must press on that layout), then the generic chords.
+    pub fn bindings_for(&self, command: &str, layout: &KeyboardLayoutId) -> Vec<&Binding> {
+        let of_command = || self.bindings.iter().filter(|b| b.command == command);
+        let overlay = of_command().filter(|b| b.when_layout.as_ref() == Some(layout));
+        let generic = of_command().filter(|b| b.when_layout.is_none());
+        overlay.chain(generic).collect()
+    }
 }
 
 #[cfg(test)]

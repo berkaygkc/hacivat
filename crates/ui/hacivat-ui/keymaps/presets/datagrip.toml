@@ -1,0 +1,42 @@
+# Preset "datagrip": DataGrip's chords where they differ from the defaults. A preset binding
+# replaces the default binding of the same command.
+
+[[binding]]
+chord = "cmd-shift-a"
+command = "workspace.command_palette"
+context = "Workspace"
+platforms = ["macos"]
+
+[[binding]]
+chord = "ctrl-shift-a"
+command = "workspace.command_palette"
+context = "Workspace"
+platforms = ["windows", "linux"]
+
+[[binding]]
+chord = "cmd-,"
+command = "workspace.open_settings"
+context = "Workspace"
+platforms = ["macos"]
+
+[[binding]]
+chord = "ctrl-alt-s"
+command = "workspace.open_settings"
+context = "Workspace"
+platforms = ["windows", "linux"]
+
+# Accepted, documented AltGr shadowing (F12). On PL (Programmer) AltGr+S types the letter s with
+# acute, and on TR-Q it types the sharp s. AltGr chords always pass through to text input
+# (Review Focus 1), so on those layouts `ctrl-alt-s` types the character instead of opening
+# Settings, and the command stays reachable from the command palette. CI compares this list
+# with the collisions it computes: a new collision fails until it is listed here.
+
+[[accepted_altgr_shadowing]]
+chord = "ctrl-alt-s"
+layout = "pl"
+produces = "ś"
+
+[[accepted_altgr_shadowing]]
+chord = "ctrl-alt-s"
+layout = "tr-q"
+produces = "ß"

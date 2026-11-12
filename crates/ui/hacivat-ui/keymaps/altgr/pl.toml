@@ -1,0 +1,13 @@
+# AltGr layer, Polish (Programmer, KBDPL1).
+layout = "pl"
+
+[keys]
+a = "ą"
+c = "ć"
+e = "ę"
+l = "ł"
+n = "ń"
+o = "ó"
+s = "ś"
+x = "ź"
+z = "ż"

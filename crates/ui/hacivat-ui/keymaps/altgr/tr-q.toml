@@ -1,0 +1,23 @@
+# AltGr layer, Turkish Q (KBDTUQ). Keys are the key caps, values what AltGr+key types.
+# [Inferred: verify against the KBDTUQ layout table before freezing; see i18n/02 open question 1.]
+layout = "tr-q"
+
+[keys]
+"1" = ">"
+"2" = "£"
+"3" = "#"
+"4" = "$"
+"5" = "½"
+"6" = "¾"
+"7" = "{"
+"8" = "["
+"9" = "]"
+"0" = "}"
+"*" = "\\"
+"-" = "|"
+q = "@"
+e = "€"
+t = "₺"
+a = "æ"
+s = "ß"
+"ü" = "~"
