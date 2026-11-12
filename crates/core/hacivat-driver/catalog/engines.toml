@@ -1,0 +1,120 @@
+# The engine catalog (HV-DRV-01), embedded at build time by `EngineCatalog::embedded()`.
+#
+# Every ID here is a stable machine string and is never shown. Connection-type templates use
+# the HV-DRV-02 grammar (`url::template::compile`): `{name:type/regex:default:escape}`
+# placeholders, `[a|b]` optional groups, `<sep,item>` lists and `\` escapes (a literal `?` is
+# `\?`). An empty template means "URL only": the URL is kept as typed.
+#
+# Engines are listed in the order the UI offers them.
+
+schema = 1
+
+[[engine]]
+id = "postgres"
+default_port = 5432
+floor = "14"
+tested = ["14", "15", "16", "17", "18"]
+default_budget = 4
+auth = ["password", "pgpass", "client_cert", "none"]
+option_allow = [
+    "sslmode",
+    "application_name",
+    "connect_timeout",
+    "options",
+    "target_session_attrs",
+    "sslrootcert",
+    "sslcert",
+    "sslkey",
+]
+always_deny = []
+safe_gucs = ["search_path", "statement_timeout", "application_name", "DateStyle", "TimeZone", "lc_messages"]
+path_keys = ["sslrootcert", "sslcert", "sslkey", "sslcrl", "passfile"]
+
+[[engine.conn_type]]
+id = "default"
+template = 'postgresql://[{user}[:{password}]@]{host:host}[:{port:port}][/{database}][\?<&,{:ident}={:param}>]'
+
+[[engine.conn_type]]
+id = "unix_socket"
+template = 'postgresql://[{user}[:{password}]@][:{port:port}]/[{database}]\?host={socket:path}[&<&,{:ident}={:param}>]'
+
+[[engine.conn_type]]
+id = "url_only"
+template = ''
+
+[[engine.default]]
+key = "application_name"
+value = "Hacivat"
+rationale = "Names the session in pg_stat_activity and server logs, so a DBA can tell Hacivat connections apart."
+
+[[engine.default]]
+key = "client_encoding"
+value = "UTF8"
+rationale = "Text crosses the wire as UTF-8 whatever the server or database encoding, so no value is mangled in transit."
+
+[[engine.default]]
+key = "extra_float_digits"
+value = "3"
+rationale = "Floats are sent in their shortest exact form, so a value read and written back round-trips unchanged."
+
+[[engine]]
+id = "mysql"
+default_port = 3306
+floor = "8.0"
+tested = ["8.0", "8.4"]
+default_budget = 4
+auth = ["password", "client_cert", "none"]
+option_allow = ["sslMode", "useSSL", "connectTimeout", "characterEncoding"]
+always_deny = ["allowLoadLocalInfile", "allowUrlInLocalInfile", "autoDeserialize"]
+path_keys = ["sslCa", "sslCert", "sslKey", "serverSslCert", "serverRSAPublicKeyFile", "trustCertificateKeyStoreUrl", "clientCertificateKeyStoreUrl"]
+
+[[engine.conn_type]]
+id = "default"
+template = 'mysql://[{user}[:{password}]@]{host:host}[:{port:port}][/{database}][\?<&,{:ident}={:param}>]'
+
+[[engine.conn_type]]
+id = "unix_socket"
+template = 'mysql://[{user}[:{password}]@]localhost[/{database}]\?socket={socket:path}[&<&,{:ident}={:param}>]'
+
+[[engine.conn_type]]
+id = "url_only"
+template = ''
+
+[[engine]]
+id = "mariadb"
+fallback = "mysql"
+default_port = 3306
+floor = "10.6"
+tested = ["10.6", "10.11", "11.4"]
+default_budget = 4
+auth = ["password", "client_cert", "none"]
+option_allow = ["sslMode", "useSSL", "connectTimeout", "characterEncoding"]
+always_deny = ["allowLoadLocalInfile", "allowUrlInLocalInfile", "autoDeserialize"]
+path_keys = ["sslCa", "sslCert", "sslKey", "serverSslCert", "serverRSAPublicKeyFile", "trustCertificateKeyStoreUrl", "clientCertificateKeyStoreUrl"]
+
+[[engine.conn_type]]
+id = "default"
+template = 'mariadb://[{user}[:{password}]@]{host:host}[:{port:port}][/{database}][\?<&,{:ident}={:param}>]'
+
+[[engine.conn_type]]
+id = "unix_socket"
+template = 'mariadb://[{user}[:{password}]@]localhost[/{database}]\?socket={socket:path}[&<&,{:ident}={:param}>]'
+
+[[engine.conn_type]]
+id = "url_only"
+template = ''
+
+[[engine]]
+id = "sqlite"
+default_budget = 1
+auth = ["none"]
+option_allow = ["mode"]
+always_deny = ["vfs", "load_extension"]
+
+[[engine.conn_type]]
+id = "file"
+template = 'file:{file:file/[^?#]+}[\?<&,{:ident}={:param}>]'
+
+[[engine.conn_type]]
+id = "memory"
+template = ':memory:'
