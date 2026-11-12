@@ -9,11 +9,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use hacivat_driver::{
-    Driver, DriverConnect, Endpoint, ProbeWarning, RawError, RawErrorKind, ServerMessage,
+    Driver, DriverConnect, DriverEvent, Endpoint, ProbeWarning, RawError, RawErrorKind,
+    ServerMessage,
 };
 use hacivat_driver_mysql::{
-    MySqlDriver, opts_for, opts_for_forwarded, os_roots, probe_warnings, raw_error, ssl_opts,
-    user_databases,
+    MySqlDriver, opts_for, opts_for_forwarded, os_roots, plaintext_fallback_allowed,
+    probe_warnings, raw_error, ssl_opts, trail_events, user_databases,
 };
 use hacivat_net::{
     AddressClass, BoxedStream, StreamFactory, Target, TlsFailure, TlsMode, TlsSettings,
@@ -334,6 +335,175 @@ async fn a_failed_forwarded_open_is_an_error_not_a_hang() {
         Ok(_) => panic!("the factory refuses"),
         Err(e) => e,
     };
-    assert!(matches!(e.kind, RawErrorKind::Io(_)), "{:?}", e.kind);
+    assert_eq!(e.kind, RawErrorKind::Io(io::ErrorKind::ConnectionRefused));
     assert_eq!(opens.load(Ordering::SeqCst), 1);
+}
+
+/// An Auto request toward `host` whose pipeline resolved it to `ip`.
+fn auto_at(host: &str, ip: [u8; 4], factory: StreamFactory) -> DriverConnect {
+    install_crypto_provider();
+    let ip = IpAddr::V4(Ipv4Addr::from(ip));
+    let resolved = vec![SocketAddr::new(ip, 3306)];
+    let class = hacivat_net::classify_host(host, &resolved);
+    let settings = TlsSettings::default();
+    assert_eq!(settings.mode, TlsMode::Auto);
+    DriverConnect {
+        endpoint: Endpoint::Network {
+            factory,
+            direct: None,
+            resolved,
+            tls_host: host.to_string(),
+        },
+        tls: build_tls_params(&settings, host, class).unwrap(),
+        user: Some("deploy".into()),
+        password: Some(SecretString::from("s3cret")),
+        database: None,
+        application_name: "Hacivat".into(),
+        read_only: false,
+        options: vec![],
+        connect_timeout: Duration::from_secs(5),
+        events: Arc::new(|_| {}),
+    }
+}
+
+#[test]
+fn plaintext_fallback_only_toward_loopback() {
+    let f = || unreachable_factory(Arc::default());
+    let private = auto_at("db.internal", [10, 0, 0, 5], f());
+    // hacivat-net would allow it (Auto toward a non-public address); MySQL does not.
+    assert!(private.tls.as_ref().unwrap().plaintext_allowed);
+    assert!(!plaintext_fallback_allowed(&private));
+    assert!(plaintext_fallback_allowed(&auto_at(
+        "localhost",
+        [127, 0, 0, 1],
+        f()
+    )));
+    assert!(!plaintext_fallback_allowed(&auto_at(
+        "db.example.com",
+        [203, 0, 113, 7],
+        f()
+    )));
+    let mut require = auto_at("localhost", [127, 0, 0, 1], f());
+    let settings = TlsSettings {
+        mode: TlsMode::Require,
+        ..TlsSettings::default()
+    };
+    require.tls = build_tls_params(&settings, "localhost", AddressClass::Loopback).unwrap();
+    assert!(!plaintext_fallback_allowed(&require));
+}
+
+/// A MySQL 8.4 initial handshake without `CLIENT_SSL`, as an attacker stripping TLS sends it.
+fn handshake_without_tls() -> Vec<u8> {
+    let mut p = vec![10u8];
+    p.extend_from_slice(b"8.4.3\0");
+    p.extend_from_slice(&7u32.to_le_bytes());
+    p.extend_from_slice(b"abcdefgh\0");
+    // PROTOCOL_41 | SECURE_CONNECTION | LONG_PASSWORD | TRANSACTIONS; PLUGIN_AUTH; no SSL.
+    p.extend_from_slice(&0xA201u16.to_le_bytes());
+    p.push(0xff);
+    p.extend_from_slice(&2u16.to_le_bytes());
+    p.extend_from_slice(&0x0008u16.to_le_bytes());
+    p.push(21);
+    p.extend_from_slice(&[0; 10]);
+    p.extend_from_slice(b"ijklmnopqrst\0");
+    p.extend_from_slice(b"caching_sha2_password\0");
+    let len = u32::try_from(p.len()).unwrap().to_le_bytes();
+    let mut packet = vec![len[0], len[1], len[2], 0];
+    packet.extend_from_slice(&p);
+    packet
+}
+
+/// Serves one connection: sends `greeting`, then returns every byte the client sent.
+async fn fake_server(greeting: Vec<u8>) -> (SocketAddr, tokio::task::JoinHandle<Vec<u8>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        s.write_all(&greeting).await.unwrap();
+        let mut got = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(2), s.read_to_end(&mut got)).await;
+        got
+    });
+    (addr, served)
+}
+
+fn tcp_factory(addr: SocketAddr, opens: Arc<AtomicUsize>) -> StreamFactory {
+    StreamFactory::new(move || {
+        opens.fetch_add(1, Ordering::SeqCst);
+        Box::pin(
+            async move { Ok(Box::new(tokio::net::TcpStream::connect(addr).await?) as BoxedStream) },
+        )
+    })
+}
+
+#[tokio::test]
+async fn auto_toward_a_private_host_without_tls_sends_no_credentials() {
+    let (addr, served) = fake_server(handshake_without_tls()).await;
+    let opens = Arc::new(AtomicUsize::new(0));
+    let req = auto_at(
+        "db.internal",
+        [10, 0, 0, 5],
+        tcp_factory(addr, opens.clone()),
+    );
+    let e = match MySqlDriver::new().connect(req).await {
+        Ok(_) => panic!("a private host without TLS must not get a plaintext sign-in"),
+        Err(e) => e,
+    };
+    assert_eq!(e.kind, RawErrorKind::TlsNotOffered);
+    // One connection, and not a single byte back: no handshake response, no user, no
+    // password, no request for the server's RSA key.
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
+    assert_eq!(served.await.unwrap(), Vec::<u8>::new());
+}
+
+#[test]
+fn the_trail_follows_what_the_handshake_reached() {
+    use DriverEvent::*;
+    let db = |code| RawError {
+        kind: RawErrorKind::Db,
+        server: Some(ServerMessage {
+            sqlstate: None,
+            vendor_code: Some(code),
+            severity: None,
+            text: String::new(),
+            detail: None,
+            hint: None,
+            lang_hint: None,
+        }),
+    };
+    let kind = |k| RawError {
+        kind: k,
+        server: None,
+    };
+    assert_eq!(
+        trail_events(true, Ok(())),
+        [TlsStarted, TlsDone, AuthStarted, AuthDone]
+    );
+    assert_eq!(trail_events(false, Ok(())), [AuthStarted, AuthDone]);
+    assert_eq!(
+        trail_events(
+            true,
+            Err(&kind(RawErrorKind::Tls(TlsFailure::UnknownIssuer)))
+        ),
+        [TlsStarted]
+    );
+    assert_eq!(
+        trail_events(true, Err(&db(1045))),
+        [TlsStarted, TlsDone, AuthStarted]
+    );
+    assert_eq!(trail_events(false, Err(&db(1045))), [AuthStarted]);
+    // Refused before the greeting: neither TLS nor sign-in began.
+    assert_eq!(trail_events(true, Err(&db(1130))), []);
+    assert_eq!(
+        trail_events(true, Err(&kind(RawErrorKind::TlsNotOffered))),
+        []
+    );
+    assert_eq!(
+        trail_events(
+            true,
+            Err(&kind(RawErrorKind::Io(io::ErrorKind::ConnectionRefused)))
+        ),
+        []
+    );
 }

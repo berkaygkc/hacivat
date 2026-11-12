@@ -24,8 +24,8 @@ use hacivat_driver::{
     RawErrorKind, ServerInfo, ServerMessage,
 };
 use hacivat_net::{
-    CleanupGuard, ForwarderAddr, ForwarderMode, LoopbackForwarder, StreamFactory, Target,
-    TlsFailure, TlsMode, TlsSummary,
+    AddressClass, CleanupGuard, ForwarderAddr, ForwarderMode, LoopbackForwarder, StreamFactory,
+    Target, TlsFailure, TlsMode, TlsSummary, classify_host,
 };
 use hacivat_proto::DbmsKind;
 use mysql_async::prelude::Queryable;
@@ -210,6 +210,61 @@ fn io_kind(e: &io::Error) -> RawErrorKind {
     }
 }
 
+/// Whether Auto may sign in without TLS after the server offered none: only toward a
+/// loopback address, and only where `hacivat-net` allows plaintext at all.
+///
+/// This is stricter than `TlsParams::plaintext_allowed` (Auto toward any non-public address).
+/// Without TLS, `caching_sha2_password` "perform full authentication" makes `mysql_async`
+/// request the server's RSA public key and encrypt the password with whatever key comes back;
+/// it has no setting to refuse that. An active attacker on a private network can strip
+/// `CLIENT_SSL` from the greeting, send its own key and recover the password. Loopback has no
+/// such attacker in the path. An explicit Disable remains the user's choice (with a warning).
+#[doc(hidden)]
+pub fn plaintext_fallback_allowed(req: &DriverConnect) -> bool {
+    let Endpoint::Network {
+        resolved, tls_host, ..
+    } = &req.endpoint
+    else {
+        return false;
+    };
+    req.tls.as_ref().is_some_and(|t| {
+        t.settings.mode == TlsMode::Auto
+            && t.plaintext_allowed
+            && classify_host(tls_host, resolved) == AddressClass::Loopback
+    })
+}
+
+/// Server errors sent instead of the greeting, before TLS or sign-in begin:
+/// `ER_CON_COUNT_ERROR`, `ER_HOST_IS_BLOCKED`, `ER_HOST_NOT_PRIVILEGED`.
+const PRE_GREETING_ERRORS: [i64; 3] = [1040, 1129, 1130];
+
+/// The trail events for one finished `mysql_async` connect attempt. TLS and sign-in run
+/// inside one call (`Conn::new`), so the events are derived from how far it got: after a
+/// success all four (or the two sign-in events without TLS); after a TLS failure only
+/// `TlsStarted`; after a sign-in error the TLS pair (when TLS was on) and `AuthStarted`;
+/// after a transport error, a pre-greeting refusal or `TlsNotOffered`, nothing.
+#[doc(hidden)]
+pub fn trail_events(tls: bool, outcome: Result<(), &RawError>) -> Vec<DriverEvent> {
+    use DriverEvent::*;
+    let tls_pair: &[DriverEvent] = if tls { &[TlsStarted, TlsDone] } else { &[] };
+    match outcome {
+        Ok(()) => [tls_pair, &[AuthStarted, AuthDone]].concat(),
+        Err(e) => match &e.kind {
+            RawErrorKind::Tls(_) if tls => vec![TlsStarted],
+            RawErrorKind::Db
+                if e.server
+                    .as_ref()
+                    .and_then(|s| s.vendor_code)
+                    .is_some_and(|c| PRE_GREETING_ERRORS.contains(&c)) =>
+            {
+                Vec::new()
+            }
+            RawErrorKind::Db | RawErrorKind::Unsupported => [tls_pair, &[AuthStarted]].concat(),
+            _ => Vec::new(),
+        },
+    }
+}
+
 /// [`MySqlDriver::connect`](crate::MySqlDriver) without the box, so a test can reach
 /// [`MySqlConn::select_i64`].
 #[doc(hidden)]
@@ -240,8 +295,11 @@ async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn
     let tls_on = mode != TlsMode::Disable;
     let mut ca = Vec::new();
     if tls_on {
-        // The OS store is read once, off the async worker threads.
-        let _ = tokio::task::spawn_blocking(crate::tls::os_roots).await;
+        // The OS store is read once, on the blocking pool. A panic there is an internal error,
+        // never retried on an async worker.
+        tokio::task::spawn_blocking(crate::tls::os_roots)
+            .await
+            .map_err(|_| err(RawErrorKind::Other))?;
         if let Some(path) = req.tls.as_ref().and_then(|t| t.settings.ca_file.as_deref()) {
             ca = tokio::fs::read(path)
                 .await
@@ -249,33 +307,30 @@ async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn
                 .unwrap_or_default();
         }
     }
-    let events = &req.events;
-    events(if tls_on {
-        DriverEvent::TlsStarted
-    } else {
-        DriverEvent::AuthStarted
-    });
-    let plaintext_allowed = req.tls.as_ref().is_some_and(|t| t.plaintext_allowed);
-    let (conn, guard, tls_used) = match attempt(req, tls_on, ca).await {
+    let report = |tls: bool, outcome: Result<(), &RawError>| {
+        for e in trail_events(tls, outcome) {
+            (req.events)(e);
+        }
+    };
+    let first = attempt(req, tls_on, ca).await;
+    report(tls_on, first.as_ref().map(|_| ()));
+    let (conn, guard, tls_used) = match first {
         Ok((conn, guard)) => (conn, guard, tls_on),
-        // Auto: the server has no TLS; fall back only where plaintext is allowed (P9).
+        // Auto: the server offered no TLS. Plaintext only toward loopback (see
+        // `plaintext_fallback_allowed`); elsewhere `TlsNotOffered` (P9). `DriverEvent` has no
+        // "continuing without TLS" event: the trail shows no TLS step for the fallback.
         Err(e)
             if mode == TlsMode::Auto
                 && e.kind == RawErrorKind::TlsNotOffered
-                && plaintext_allowed =>
+                && plaintext_fallback_allowed(req) =>
         {
-            events(DriverEvent::AuthStarted);
-            let (conn, guard) = attempt(req, false, Vec::new()).await?;
+            let second = attempt(req, false, Vec::new()).await;
+            report(false, second.as_ref().map(|_| ()));
+            let (conn, guard) = second?;
             (conn, guard, false)
         }
         Err(e) => return Err(e),
     };
-    // `mysql_async` runs TLS and sign-in in one call, so they are reported together.
-    if tls_used {
-        events(DriverEvent::TlsDone);
-        events(DriverEvent::AuthStarted);
-    }
-    events(DriverEvent::AuthDone);
     let kind = if conn.server_version().0 >= 10 {
         DbmsKind::MariaDb
     } else {

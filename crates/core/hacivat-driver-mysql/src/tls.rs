@@ -32,11 +32,12 @@ pub fn ssl_opts(mode: TlsMode) -> Option<SslOpts> {
     }
 }
 
-/// How far a connection in `mode` verified the server (HV-SEC-02).
+/// How far a connection in `mode` verified the server (HV-SEC-02). VerifyCa matches
+/// [`ssl_opts`]: it would run the full checks, so it would report `Full` (it is refused before
+/// connecting in M2a, P11).
 pub(crate) fn verified(mode: TlsMode) -> TlsVerified {
     match mode {
-        TlsMode::Auto | TlsMode::VerifyFull => TlsVerified::Full,
-        TlsMode::VerifyCa => TlsVerified::CaOnly,
+        TlsMode::Auto | TlsMode::VerifyCa | TlsMode::VerifyFull => TlsVerified::Full,
         TlsMode::Disable | TlsMode::Require => TlsVerified::No,
     }
 }

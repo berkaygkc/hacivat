@@ -22,8 +22,8 @@ use hacivat_driver::{
 };
 use hacivat_driver_mysql::{MySqlConn, MySqlDriver, connect_conn};
 use hacivat_net::{
-    AddressClass, BoxedStream, StreamFactory, Target, TlsFailure, TlsMode, TlsSettings,
-    TlsVerified, build_tls_params, direct, install_crypto_provider,
+    BoxedStream, StreamFactory, Target, TlsFailure, TlsMode, TlsSettings, TlsVerified,
+    build_tls_params, classify_host, direct, install_crypto_provider,
 };
 use hacivat_proto::DbmsKind;
 use hacivat_testkit::{DockerTarget, TlsDefault, docker_enabled, targets};
@@ -130,6 +130,8 @@ struct Spec<'a> {
     password: Option<&'a str>,
     database: Option<&'a str>,
     read_only: bool,
+    /// What the pipeline resolved the host to (the target's own address by default).
+    resolved: Option<Vec<SocketAddr>>,
 }
 
 impl Spec<'_> {
@@ -144,6 +146,7 @@ impl Spec<'_> {
             password: None,
             database: None,
             read_only: false,
+            resolved: None,
         }
     }
 }
@@ -151,6 +154,8 @@ impl Spec<'_> {
 fn build(t: &DockerTarget, s: Spec<'_>) -> DriverConnect {
     install_crypto_provider();
     let tls_host = s.tls_host.unwrap_or(&t.host).to_string();
+    let resolved = s.resolved.unwrap_or_else(|| resolved(t));
+    let class = classify_host(&tls_host, &resolved);
     let settings = TlsSettings {
         mode: s.mode,
         ca_file: s.ca.map(Path::to_path_buf),
@@ -163,10 +168,10 @@ fn build(t: &DockerTarget, s: Spec<'_>) -> DriverConnect {
                 host: t.host.clone(),
                 port: t.port,
             }),
-            resolved: resolved(t),
+            resolved,
             tls_host: tls_host.clone(),
         },
-        tls: build_tls_params(&settings, &tls_host, AddressClass::Loopback).unwrap(),
+        tls: build_tls_params(&settings, &tls_host, class).unwrap(),
         user: Some(s.user.unwrap_or(&t.user).to_string()),
         password: Some(SecretString::from(s.password.unwrap_or(&t.password))),
         database: Some(s.database.unwrap_or(&t.database).to_string()),
@@ -447,5 +452,46 @@ async fn every_target_lists_databases_reads_the_user_and_probes() {
             assert_eq!(warnings, Vec::<ProbeWarning>::new(), "{}", t.id);
         }
         c.close().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "docker"]
+async fn auto_falls_back_to_plaintext_only_toward_loopback() {
+    if !docker_enabled() {
+        return;
+    }
+    for t in targets_of(&[DbmsKind::MySql, DbmsKind::MariaDb]) {
+        if t.tls_default != TlsDefault::None {
+            continue;
+        }
+        // Loopback: Auto signs in without TLS.
+        let mut c = connect(req(&t, TlsMode::Auto))
+            .await
+            .unwrap_or_else(|e| panic!("{}: {:?}", t.id, e.kind));
+        assert!(!c.tls_summary().await.encrypted, "{}", t.id);
+        c.close().await;
+        // The same server reached as a private-network host (through the forwarder, as a
+        // tunnel would): Auto refuses the plaintext sign-in, and opens only one stream.
+        let inner = direct_factory(&t);
+        let opens = Arc::new(AtomicUsize::new(0));
+        let seen = opens.clone();
+        let counted = StreamFactory::new(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+            inner.open()
+        });
+        let r = build(
+            &t,
+            Spec {
+                direct: false,
+                factory: Some(counted),
+                tls_host: Some("db.internal"),
+                resolved: Some(vec!["10.0.0.5:3306".parse().unwrap()]),
+                ..Spec::new(TlsMode::Auto)
+            },
+        );
+        let e = connect(r).await.err().unwrap();
+        assert_eq!(e.kind, RawErrorKind::TlsNotOffered, "{}", t.id);
+        assert_eq!(opens.load(Ordering::SeqCst), 1, "{}", t.id);
     }
 }

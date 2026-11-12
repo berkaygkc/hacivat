@@ -26,7 +26,10 @@ use hacivat_driver::{
 use hacivat_proto::DbmsKind;
 
 #[doc(hidden)]
-pub use connect::{MySqlConn, connect_conn, opts_for, opts_for_forwarded, raw_error};
+pub use connect::{
+    MySqlConn, connect_conn, opts_for, opts_for_forwarded, plaintext_fallback_allowed, raw_error,
+    trail_events,
+};
 #[doc(hidden)]
 pub use probe::{probe_warnings, server_version_text, user_databases};
 #[doc(hidden)]

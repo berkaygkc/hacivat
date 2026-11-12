@@ -69,9 +69,27 @@ secrets are copied into library-owned buffers (P49), and known defects.
     keys of any type, but treats a DER key as PKCS #1, so a DER PKCS #8 or SEC1 key fails
     there.
   - **Auto** asks for TLS first. If the server lacks `CLIENT_SSL`
-    (`DriverError::NoClientSslFlagFromServer`) and `plaintext_allowed`, it reconnects in
-    plaintext. Otherwise, as for Require and VerifyFull, the result is
-    `RawErrorKind::TlsNotOffered` (P9).
+    (`DriverError::NoClientSslFlagFromServer`), it reconnects in plaintext **only toward a
+    loopback address** (`classify_host(tls_host, resolved) == Loopback`, and also
+    `plaintext_allowed`). This is stricter than `hacivat-net`'s generic `plaintext_allowed`
+    (Auto toward any non-public address), on purpose. Everywhere else, as for Require and
+    VerifyFull, the result is `RawErrorKind::TlsNotOffered` (P9), and no byte is sent after
+    the greeting. The UI then offers its fixes. A private-network server without TLS
+    therefore needs TLS turned on, or an explicit Disable.
+  - **Why (controller ruling, fix round 1): plaintext password recovery.**
+    - Without TLS, `caching_sha2_password` "perform full authentication" makes `mysql_async`
+      always request the server's RSA public key and encrypt the password with the key that
+      comes back. It has no setting to refuse public-key retrieval on an insecure
+      connection.
+    - An active attacker can therefore strip `CLIENT_SSL` from the greeting, answer "perform
+      full authentication", send its own key and decrypt the password.
+    - On loopback no such attacker sits in the path.
+  - **Explicit Disable is an accepted risk the user opts into.** Disable signs in in
+    plaintext on any network, with the same exposure, and Task 17 shows a warning for it.
+  - **M2b follow-up:** a knob that refuses public-key retrieval (and the cleartext and
+    `sha256_password` paths) when the connection is not secure, upstream or in the same
+    `[patch]` fork as the VerifyCa fix below. Auto toward private networks can then be
+    revisited.
   - Failures are read from the error chain, never from text. The rustls error is the one
     tokio-rustls wraps in an `io::Error`, or `TlsError::Tls`. `TlsFailure::from_rustls` maps
     both `NotValidForName` and `NotValidForNameContext` to `NameMismatch`.
@@ -88,7 +106,9 @@ secrets are copied into library-owned buffers (P49), and known defects.
     behaviour: the chain verifies against `mysql84-ca.pem`, and the handshake still fails
     with `NameMismatch`.
   - M2b revisits this with an upstream fix (match the error variant) or a fork under
-    `[patch]`.
+    `[patch]`. The same fork would carry the public-key retrieval knob above.
+  - `verified()` reports `Full` for VerifyCa, matching `ssl_opts`, which gives VerifyCa the
+    full checks. Neither is reached in M2a.
 - **Secrets (P49).** `Opts` keeps the password as a `String` and derives `Debug`.
   - The driver copies it out of the `SecretString` when it builds the `Opts`, right before
     `Conn::new`, and its own copy is dropped when the handshake finishes.
