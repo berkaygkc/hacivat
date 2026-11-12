@@ -216,7 +216,7 @@ fn draw_natural(
     text: &'static str,
     style: TypeStyle,
     width: Option<f32>,
-) -> (f32, TextRegistry) {
+) -> (f32, f32, TextRegistry) {
     cx.update(|cx| {
         Theme::install(cx, ThemeMode::Dark);
         hacivat_ui_core::fonts::register_fonts(cx).unwrap();
@@ -228,23 +228,67 @@ fn draw_natural(
     let (_, vcx) = cx.add_window_view(|_, _| NaturalHost { text, style, width });
     vcx.run_until_parked();
     let w = f32::from(vcx.debug_bounds("natural").unwrap().size.width);
-    (w, vcx.read(|cx| cx.global::<TextRegistry>().clone()))
+    // The expected ink: every glyph shaped on its own at its small-caps size, plus the
+    // tracking between glyphs (not after the last one).
+    let expected = vcx.update(|window, _| {
+        let font = hacivat_ui_core::fonts::font_for(&style);
+        let gap = hacivat_ui_core::fonts::small_caps_tracking_px(&style);
+        let glyphs = hacivat_ui_core::fonts::small_caps_glyphs(text, style.size_px);
+        let n = glyphs.len();
+        let sum: f32 = glyphs
+            .into_iter()
+            .map(|(ch, size)| {
+                let run = gpui::TextRun {
+                    len: ch.len_utf8(),
+                    font: font.clone(),
+                    color: DARK.colors.text.to_hsla(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let line =
+                    window
+                        .text_system()
+                        .shape_line(ch.to_string().into(), px(size), &[run], None);
+                f32::from(line.width)
+            })
+            .sum();
+        sum + gap * (n as f32 - 1.0)
+    });
+    (
+        w,
+        expected,
+        vcx.read(|cx| cx.global::<TextRegistry>().clone()),
+    )
 }
 
 #[gpui::test]
-fn small_caps_given_their_measured_width_paint_whole(cx: &mut TestAppContext) {
+fn small_caps_paint_exactly_their_measured_run(cx: &mut TestAppContext) {
     for style in [
         DARK.type_ramp.label_sc,
         DARK.type_ramp.panel_title,
         DARK.type_ramp.capsule_env,
     ] {
         for text in ["HACIVAT", "PROD", "GEZGİN", "BAĞLANTI"] {
-            let (natural, _) = draw_natural(cx, text, style, None);
-            // The painted run is exactly as wide as the measured one: handing the label its own
-            // width neither ellipsizes nor clips it.
-            let (_, reg) = draw_natural(cx, text, style, Some(natural));
+            let (natural, expected, reg) = draw_natural(cx, text, style, None);
+            let painted = reg.frame[0].painted_px;
+            // The painted run is the sum of its glyph advances plus tracking (the old flex row
+            // painted ~0.5 px wider per glyph), and fits the box it was measured for.
+            assert!(
+                (painted - expected).abs() < 0.01,
+                "{text}: painted {painted} vs glyph sum {expected}"
+            );
+            assert!(
+                painted <= natural + 0.5,
+                "{text}: {painted} > box {natural}"
+            );
+            // Handing the label exactly its measured width neither ellipsizes nor clips it.
+            let (_, _, reg) = draw_natural(cx, text, style, Some(natural));
             let r = &reg.frame[0];
             assert!(!r.truncated && !r.clipped, "{text} at {natural}px: {r:?}");
+            // A box sized to the ink (no trailing tracking) is not flagged either.
+            let (_, _, reg) = draw_natural(cx, text, style, Some(expected.ceil()));
+            assert!(!reg.frame[0].clipped, "{text} at ink width");
         }
     }
 }

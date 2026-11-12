@@ -48,6 +48,10 @@ pub struct RenderedText {
     pub text: SharedString,
     pub source: TextSource,
     pub size_px: f32,
+    /// The ink width of the run actually painted (for small caps without the gap after the last
+    /// glyph). Measuring and painting are the same numbers, so this never exceeds the width the
+    /// label was laid out with.
+    pub painted_px: f32,
     /// Wider than its bounds and not truncating: part of the text is cut off.
     pub clipped: bool,
     /// Wider than its bounds and drawn ellipsized.
@@ -145,7 +149,8 @@ impl Label {
     }
 
     /// Underlines the byte `ranges` of the text in `color` (matched characters in the palette).
-    /// Ranges are clamped to the text and to character boundaries.
+    /// Ranges are clamped to the text and to character boundaries. Highlights are not applied to
+    /// synthesized small caps (their glyphs are separate lines); only plain styles underline.
     pub fn highlight(mut self, ranges: Vec<Range<usize>>, color: Hsla) -> Self {
         self.highlight = ranges;
         self.highlight_color = Some(color);
@@ -408,8 +413,23 @@ impl LabelElement {
                 .map(|g| g.line)
                 .chain(ellipsis_glyph)
                 .collect();
-            // Baseline-align the glyphs of different sizes, like a baseline-aligned flex row.
-            let top = lines.iter().map(baseline).fold(px(0.0), |a, b| a.max(b));
+            // Baseline-align the glyphs of different sizes. The baseline comes from the style's
+            // full-size metrics, not from the glyphs present, so `HACIVAT` and `HACIVAT 2` sit
+            // at the same height.
+            let reference = TextRun {
+                len: 1,
+                font: font_for(&style),
+                color: self.label.color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let top = baseline(&window.text_system().shape_line(
+                "x".into(),
+                px(style.size_px),
+                &[reference],
+                None,
+            ));
             let mut x = px(0.0);
             let gap = px(small_caps_tracking_px(&style));
             let placed: Vec<_> = lines
@@ -420,7 +440,8 @@ impl LabelElement {
                     (at, l)
                 })
                 .collect();
-            return Some(Painted::Caps(placed, x));
+            // The tracking after the last glyph is spacing, not ink.
+            return Some(Painted::Caps(placed, (x - gap).max(px(0.0))));
         }
 
         let line = measured.line.take()?;
@@ -543,6 +564,7 @@ impl Element for LabelElement {
             text: self.label.text.clone(),
             source: self.label.source,
             size_px: self.label.style.size_px,
+            painted_px: f32::from(painted_width),
             clipped: painted_width > bounds.size.width + px(0.5),
             truncated: ellipsize,
             path: self.label.path(),
@@ -619,6 +641,29 @@ mod tests {
             "{height} vs {}",
             style.line_height
         );
+    }
+
+    #[gpui::test]
+    fn small_caps_baseline_does_not_depend_on_which_glyphs_are_present(cx: &mut TestAppContext) {
+        let vcx = cx.add_empty_window();
+        let style = DARK.type_ramp.label_sc;
+        let first_y = |text: &'static str, vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, cx| {
+                hacivat_ui_core::fonts::register_fonts(cx).unwrap();
+                let el = LabelElement {
+                    label: Label::new(text, TextSource::Data, style, DARK.colors.text.to_hsla()),
+                    truncated: None,
+                };
+                let mut measured = el.measure(window);
+                let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(300.0), px(30.0)));
+                match el.plan(bounds, &mut measured, false, window) {
+                    Some(Painted::Caps(placed, _)) => f32::from(placed[0].0.y),
+                    _ => panic!("small caps expected"),
+                }
+            })
+        };
+        // `H` is a small-capital glyph in both; the digit only adds a full-size glyph.
+        assert_eq!(first_y("HACIVAT", vcx), first_y("HACIVAT 2", vcx));
     }
 
     #[test]
