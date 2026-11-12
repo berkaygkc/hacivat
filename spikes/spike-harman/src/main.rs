@@ -1,7 +1,9 @@
-//! `spike-harman [--theme dark|light] [--lang en|tr] [--scale 1|1.5|2] [--print-window-id]`
+//! `spike-harman [--theme dark|light] [--lang en|tr] [--scale 1|1.5|2] [--print-window-id]
+//!               [--check-update <manifest-url>]`
 //! Reproduces the approved harman workspace (1440 × 900 logical) for visual-fidelity checks.
 
 mod screen;
+mod update;
 
 use std::io::Write as _;
 
@@ -21,10 +23,11 @@ struct Args {
     scale: f32,
     print_window_id: bool,
     display: Option<usize>,
+    check_update: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
-    let mut a = Args { mode: ThemeMode::Dark, lang: Lang::En, scale: 2.0, print_window_id: false, display: None };
+    let mut a = Args { mode: ThemeMode::Dark, lang: Lang::En, scale: 2.0, print_window_id: false, display: None, check_update: None };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         match k.as_str() {
@@ -45,6 +48,7 @@ fn parse_args() -> Result<Args> {
             "--scale" => a.scale = it.next().unwrap_or_default().parse()?,
             "--print-window-id" => a.print_window_id = true,
             "--display" => a.display = Some(it.next().unwrap_or_default().parse()?),
+            "--check-update" => a.check_update = Some(it.next().unwrap_or_default()),
             other => bail!("unknown flag {other}"),
         }
     }
@@ -98,6 +102,9 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if let Some(url) = &args.check_update {
+        update::check_and_install(url);
+    }
     run_app_with_assets(move |cx| {
         if let Err(e) = verify_bundled_fonts(cx) {
             eprintln!("spike-harman: bundled fonts did not resolve: {e:#}");
@@ -112,7 +119,7 @@ fn main() {
         let sizes = display_sizes(cx);
         let display = args.display.or_else(|| sizes.iter().position(|s| s.0 <= 2200.0 && s.0 >= 1440.0));
         eprintln!("spike-harman: displays {sizes:?}, using {display:?}");
-        let opened = open_unified_window(cx, "Hacivat", screen::WINDOW, lights, display, move |_, cx| {
+        let opened = open_unified_window(cx, &format!("Hacivat Spike {}", update::VERSION), screen::WINDOW, lights, display, move |_, cx| {
             cx.new(|_| Harman { lang, scale, print_window_id, reported: false })
         });
         if let Err(e) = opened {
