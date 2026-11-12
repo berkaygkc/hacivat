@@ -8,9 +8,14 @@
 //!
 //! The target has `harness = false`: on macOS the platform (and its text system) can only be
 //! created on the main thread, and libtest runs every test on a spawned thread. `main` keeps
-//! libtest's contract: the self-checks always run, and `render_all_surfaces` (the main check)
-//! runs only with `--ignored` or `--include-ignored`. `SHOTS_FILTER=<substring>` renders only
-//! the shots whose file name contains it; `SHOTS_DIR` overrides the output directory.
+//! libtest's contract: the self-checks run unless `--ignored`, and `render_all_surfaces` (the
+//! main check) runs only with `--ignored` or `--include-ignored`. A positional filter that
+//! names no test selects shots by file name (substring, or whole name with `--exact`):
+//! `-- --ignored palette-open` renders only those and keeps the other PNGs. `SHOTS_DIR`
+//! overrides the output directory.
+//!
+//! Every surface must show in its frame: a label drawn by its own source file (palette, dialog,
+//! toast, menu, settings page; the title bar for the shells, the capsule for the demo).
 //!
 //! Every frame is checked before it is written:
 //! - (a) in the pseudo locales (`en-XA`, `tr-XT`) every `TextSource::Fluent` label is bracketed;
@@ -95,6 +100,29 @@ impl Surface {
 
     fn is_demo(self) -> bool {
         self == Surface::ShellDemoProduction
+    }
+
+    /// Proof that the surface is on screen: a label created in this source file (and, for the
+    /// demo, with this text). `RenderedText::path` is the label's creation site.
+    fn marker(self) -> (&'static str, Option<&'static str>) {
+        match self {
+            Surface::Shell | Surface::ShellNarrow => ("hacivat-ui/src/titlebar.rs:", None),
+            Surface::ShellDemoProduction => ("hacivat-ui/src/capsule.rs:", Some("orders-prod")),
+            Surface::PaletteOpen => ("hacivat-ui/src/palette.rs:", None),
+            Surface::SettingsGeneral => ("hacivat-app/src/settings_ui/", None),
+            Surface::DialogAbout => ("hacivat-ui/src/dialog.rs:", None),
+            Surface::ToastInfo => ("hacivat-ui/src/toast.rs:", None),
+            Surface::MenuApp => ("hacivat-ui/src/menu.rs:", None),
+        }
+    }
+
+    /// A violation when the frame shows no label of this surface.
+    fn missing_from(self, name: &str, frame: &[RenderedText]) -> Option<String> {
+        let (file, text) = self.marker();
+        let shown = frame
+            .iter()
+            .any(|r| r.path.contains(file) && text.is_none_or(|t| strip(&r.text) == t));
+        (!shown).then(|| format!("{name}: the surface is missing: no label from {file} {text:?}"))
     }
 
     /// Brings the surface on screen in a freshly started shell.
@@ -295,6 +323,7 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     if frame.is_empty() {
         failures.push(format!("{name}: the frame drew no label"));
     }
+    failures.extend(shot.surface.missing_from(&name, &frame));
     let badge = cx
         .update_window(handle, |_, window, cx| {
             let cp_fill = Theme::get(cx).tokens.colors.cp_fill.to_hsla();
@@ -324,8 +353,9 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     failures
 }
 
-/// The main check: renders every shot, then fails with every violation found.
-fn render_all_surfaces() {
+/// The main check: renders the shots named in `names` (file names), then fails with every
+/// violation found. Only a full run (`all`) removes the PNGs already in the directory.
+fn render_all_surfaces(names: &[String], all: bool) {
     match current_headless_renderer() {
         Ok(Some(_)) => {}
         Ok(None) => {
@@ -338,9 +368,8 @@ fn render_all_surfaces() {
     apply_text_rendering(TextRendering::Crisp);
     let dir = out_dir();
     std::fs::create_dir_all(&dir).expect("create the shots directory");
-    let filter = std::env::var("SHOTS_FILTER").unwrap_or_default();
-    // Stale PNGs never pass for fresh ones.
-    if filter.is_empty() {
+    // Stale PNGs never pass for fresh ones; a filtered run keeps the shots it does not render.
+    if all {
         for entry in std::fs::read_dir(&dir)
             .expect("read the shots directory")
             .flatten()
@@ -353,14 +382,14 @@ fn render_all_surfaces() {
     let mut failures = Vec::new();
     let mut rendered = 0;
     for shot in shots() {
-        if !shot.file_name(2.0).contains(filter.as_str()) {
+        if !names.contains(&shot.file_name(2.0)) {
             continue;
         }
         failures.extend(render(shot, &dir));
         rendered += 1;
     }
     println!("shots: {rendered} rendered into {}", dir.display());
-    assert!(rendered > 0, "SHOTS_FILTER={filter:?} matched no shot");
+    assert!(rendered > 0, "no shot selected");
     assert!(
         failures.is_empty(),
         "{} violations:\n{}",
@@ -408,12 +437,102 @@ fn pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px() {
     assert!(check_labels("s", "tr", &frame[3..4]).is_empty());
 }
 
-/// libtest's contract without its threads: the self-checks always run (not with `--ignored`
-/// alone), the renders only with `--ignored` or `--include-ignored`.
+/// The ignored test: it renders, so it runs only on request.
+const RENDER_TEST: &str = "render_all_surfaces";
+
+/// The command line, read the way libtest reads it.
+#[derive(Debug, Default, PartialEq)]
+struct Cli {
+    /// Positional arguments: test names, or (for the render) shot file names.
+    filters: Vec<String>,
+    /// `--skip`: tests whose name contains one of these do not run.
+    skips: Vec<String>,
+    exact: bool,
+    list: bool,
+    /// Only the ignored tests (`--ignored`).
+    ignored_only: bool,
+    /// Ignored tests too (`--include-ignored`).
+    include_ignored: bool,
+    terse: bool,
+}
+
+impl Cli {
+    fn parse(args: impl IntoIterator<Item = String>) -> Cli {
+        let mut cli = Cli::default();
+        let mut it = args.into_iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--exact" => cli.exact = true,
+                "--list" => cli.list = true,
+                "--ignored" => cli.ignored_only = true,
+                "--include-ignored" => cli.include_ignored = true,
+                "--skip" => cli.skips.extend(it.next()),
+                "--format" => cli.terse |= it.next().as_deref() == Some("terse"),
+                // Flags with a value that change nothing here.
+                "--test-threads" | "--color" | "--logfile" | "-Z" => {
+                    it.next();
+                }
+                s if s.starts_with("--format=") => cli.terse |= s == "--format=terse",
+                s if s.starts_with('-') => {}
+                _ => cli.filters.push(a),
+            }
+        }
+        cli
+    }
+
+    /// Whether `pattern` selects `name` (substring, or equality with `--exact`).
+    fn matches(&self, pattern: &str, name: &str) -> bool {
+        if self.exact {
+            name == pattern || name.strip_suffix(".png") == Some(pattern)
+        } else {
+            name.contains(pattern)
+        }
+    }
+
+    fn skipped(&self, name: &str) -> bool {
+        self.skips.iter().any(|s| name.contains(s.as_str()))
+    }
+
+    /// Whether test `name` is selected by the filters (and not skipped).
+    fn selects_test(&self, name: &str) -> bool {
+        !self.skipped(name)
+            && (self.filters.is_empty() || self.filters.iter().any(|f| self.matches(f, name)))
+    }
+
+    /// The shots the render covers: all of them when the test is selected by its own name or
+    /// by no filter, else the shots a filter names. `None` when the render is not selected.
+    fn shots(&self, all: &[String]) -> Option<Vec<String>> {
+        if self.skipped(RENDER_TEST) {
+            return None;
+        }
+        if self.selects_test(RENDER_TEST) {
+            return Some(all.to_vec());
+        }
+        let picked: Vec<String> = all
+            .iter()
+            .filter(|s| self.filters.iter().any(|f| self.matches(f, s)))
+            .cloned()
+            .collect();
+        (!picked.is_empty()).then_some(picked)
+    }
+
+    fn runs_ignored(&self) -> bool {
+        self.ignored_only || self.include_ignored
+    }
+}
+
+/// libtest's contract without its threads. `--list` lists every test (`--ignored`: only the
+/// ignored render). The self-checks run unless `--ignored`; the render runs with `--ignored` or
+/// `--include-ignored`. A filter naming the render (or, without matching a test, shots) selects
+/// what it renders. Asked for the render by its exact name without `--ignored` (how nextest runs
+/// one test), the binary fails instead of passing without rendering.
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let has = |flag: &str| args.iter().any(|a| a == flag);
-    let checks: [(&str, fn()); 2] = [
+    let cli = Cli::parse(std::env::args().skip(1));
+    let checks: [(&str, fn()); 4] = [
+        (
+            "a_missing_surface_fails_its_frame",
+            a_missing_surface_fails_its_frame,
+        ),
         (
             "the_matrix_covers_every_surface_locale_and_theme",
             the_matrix_covers_every_surface_locale_and_theme,
@@ -422,24 +541,132 @@ fn main() {
             "pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px",
             pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px,
         ),
+        (
+            "the_command_line_reads_like_libtest",
+            the_command_line_reads_like_libtest,
+        ),
     ];
-    if has("--list") {
-        for (name, _) in checks {
-            println!("{name}: test");
+    let all: Vec<String> = shots().iter().map(|s| s.file_name(2.0)).collect();
+    let render = cli.shots(&all);
+    if cli.list {
+        let mut n = 0;
+        if !cli.ignored_only {
+            for (name, _) in checks.iter().filter(|(name, _)| cli.selects_test(name)) {
+                println!("{name}: test");
+                n += 1;
+            }
         }
-        println!("render_all_surfaces: test");
+        if render.is_some() {
+            println!("{RENDER_TEST}: test");
+            n += 1;
+        }
+        if !cli.terse {
+            println!("\n{n} tests, 0 benchmarks");
+        }
         return;
     }
-    if !has("--ignored") {
-        for (name, check) in checks {
+    let (mut passed, mut ignored) = (0, 0);
+    if !cli.ignored_only {
+        for (name, check) in checks.iter().filter(|(name, _)| cli.selects_test(name)) {
             check();
             println!("test {name} ... ok");
+            passed += 1;
         }
     }
-    if has("--ignored") || has("--include-ignored") {
-        render_all_surfaces();
-        println!("test render_all_surfaces ... ok");
-    } else {
-        println!("test render_all_surfaces ... ignored (run with --ignored)");
+    match render {
+        Some(names) if cli.runs_ignored() => {
+            render_all_surfaces(&names, names.len() == all.len());
+            println!("test {RENDER_TEST} ... ok");
+            passed += 1;
+        }
+        Some(_) if cli.exact => {
+            eprintln!("{RENDER_TEST} is ignored: run it with --ignored or --include-ignored");
+            std::process::exit(101);
+        }
+        Some(_) => {
+            println!("test {RENDER_TEST} ... ignored, renders PNGs (run with --ignored)");
+            ignored += 1;
+        }
+        None => {}
     }
+    println!("\ntest result: ok. {passed} passed; 0 failed; {ignored} ignored");
+}
+
+fn a_missing_surface_fails_its_frame() {
+    let at = |path: &str, text: &str| RenderedText {
+        text: text.to_string().into(),
+        source: TextSource::Fluent,
+        size_px: 13.0,
+        painted_px: 10.0,
+        clipped: false,
+        truncated: false,
+        path: path.to_string().into(),
+    };
+    let shell = [at(
+        "crates/ui/hacivat-ui/src/titlebar.rs:297:25#palette-placeholder",
+        "Search",
+    )];
+    assert!(Surface::Shell.missing_from("s", &shell).is_none());
+    for surface in [
+        Surface::PaletteOpen,
+        Surface::SettingsGeneral,
+        Surface::DialogAbout,
+        Surface::ToastInfo,
+        Surface::MenuApp,
+        Surface::ShellDemoProduction,
+    ] {
+        let found = surface
+            .missing_from("s", &shell)
+            .expect("a shell-only frame misses it");
+        assert!(found.contains("the surface is missing"), "{found}");
+    }
+    // The demo needs the harman capsule, not just any capsule label.
+    let capsule = |text| [at("crates/ui/hacivat-ui/src/capsule.rs:111:21", text)];
+    assert!(
+        Surface::ShellDemoProduction
+            .missing_from("s", &capsule("No connection"))
+            .is_some()
+    );
+    assert!(
+        Surface::ShellDemoProduction
+            .missing_from("s", &capsule("orders-prod"))
+            .is_none()
+    );
+}
+
+fn the_command_line_reads_like_libtest() {
+    let parse = |s: &str| Cli::parse(s.split_whitespace().map(str::to_string));
+    let all: Vec<String> = shots().iter().map(|s| s.file_name(2.0)).collect();
+    // No filter: everything; the render is ignored unless asked for.
+    let cli = parse("--nocapture --test-threads 1");
+    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(68));
+    assert!(!cli.runs_ignored());
+    // nextest: `--list --format terse --ignored` lists only the render.
+    let cli = parse("--list --format terse --ignored");
+    assert!(cli.list && cli.terse && cli.ignored_only);
+    // A filter naming shots renders only those; one naming the test renders all.
+    assert_eq!(
+        parse("--ignored palette-open-dark")
+            .shots(&all)
+            .map(|s| s.len()),
+        Some(4)
+    );
+    assert_eq!(
+        parse("--ignored render_all").shots(&all).map(|s| s.len()),
+        Some(68)
+    );
+    // `--exact` matches whole names (a shot with or without `.png`).
+    assert_eq!(parse("--exact render_all").shots(&all), None);
+    assert_eq!(
+        parse("--exact --ignored shell-dark-en-1280x800@2x").shots(&all),
+        Some(vec!["shell-dark-en-1280x800@2x.png".to_string()])
+    );
+    assert!(parse("--exact render_all_surfaces").selects_test(RENDER_TEST));
+    assert!(
+        !parse("--exact the_matrix")
+            .selects_test("the_matrix_covers_every_surface_locale_and_theme")
+    );
+    // `--skip` drops tests; a filter matching nothing selects nothing.
+    assert_eq!(parse("--skip render").shots(&all), None);
+    assert_eq!(parse("no-such-shot").shots(&all), None);
 }

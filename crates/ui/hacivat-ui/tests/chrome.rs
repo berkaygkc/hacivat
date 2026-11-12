@@ -44,37 +44,33 @@ fn draw_chrome_probe(cx: &mut TestAppContext) -> &mut VisualTestContext {
 }
 
 #[test]
-fn titlebar_collapses_segments_before_truncating_palette() {
+fn titlebar_collapses_segments_before_shrinking_palette() {
     assert_eq!(
-        titlebar_fit(1440.0, 600.0, 360.0, 220.0, 180.0),
+        titlebar_fit(1440.0, 600.0, 360.0, 180.0),
         TitleBarFit {
             segments_in_overflow: false,
-            palette_width: 360.0,
-            palette_truncates: false
+            palette_width: 360.0
         }
     );
     assert_eq!(
-        titlebar_fit(1024.0, 600.0, 360.0, 220.0, 180.0),
+        titlebar_fit(1024.0, 600.0, 360.0, 180.0),
         TitleBarFit {
             segments_in_overflow: true,
-            palette_width: 360.0,
-            palette_truncates: false
+            palette_width: 360.0
         }
     );
     assert_eq!(
-        titlebar_fit(1100.0, 600.0, 360.0, 220.0, 180.0),
+        titlebar_fit(1100.0, 600.0, 360.0, 180.0),
         TitleBarFit {
             segments_in_overflow: true,
-            palette_width: 360.0,
-            palette_truncates: false
+            palette_width: 360.0
         }
     );
     assert_eq!(
-        titlebar_fit(800.0, 600.0, 360.0, 220.0, 180.0),
+        titlebar_fit(800.0, 600.0, 360.0, 180.0),
         TitleBarFit {
             segments_in_overflow: true,
-            palette_width: 176.0,
-            palette_truncates: true
+            palette_width: 176.0
         }
     );
     assert_eq!(OVERFLOW_BUTTON_PX, 24.0);
@@ -83,11 +79,10 @@ fn titlebar_collapses_segments_before_truncating_palette() {
 #[test]
 fn titlebar_never_returns_a_negative_palette() {
     assert_eq!(
-        titlebar_fit(300.0, 600.0, 360.0, 220.0, 180.0),
+        titlebar_fit(300.0, 600.0, 360.0, 180.0),
         TitleBarFit {
             segments_in_overflow: true,
-            palette_width: 0.0,
-            palette_truncates: true
+            palette_width: 0.0
         }
     );
 }

@@ -480,9 +480,11 @@ impl TabStrip {
                             }
                         })
                         .child(
+                            // Raised Ink Rule: the active tab is raised, so its × is text-2;
+                            // an inactive tab (head, or hover) keeps text-3.
                             Icon::new(IconName::X)
                                 .size(IconSize::Chrome)
-                                .color(c.text_3.to_hsla()),
+                                .color(if active { c.text_2 } else { c.text_3 }.to_hsla()),
                         ),
                 );
             }

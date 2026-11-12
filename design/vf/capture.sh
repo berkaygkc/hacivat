@@ -53,6 +53,31 @@ find_chrome() {
   exit 1
 }
 
+# Prints why the frame at $1 looks empty (effectively one colour: the window content is
+# missing), or nothing. Counts distinct colours of a thumbnail with Pillow when python3 has it;
+# otherwise judges by compressed size (a uniform PNG compresses to almost nothing).
+blank_frame() {
+  local png="$1" bytes w h
+  if python3 -E -c 'import PIL' 2>/dev/null; then
+    python3 -E -c '
+import sys
+from PIL import Image
+im = Image.open(sys.argv[1]).convert("RGB")
+im.thumbnail((360, 225))
+n = len(set(im.getdata()))
+if n < 16:
+    print(f"{n} distinct colours")
+' "$png"
+    return
+  fi
+  bytes="$(wc -c <"$png" | tr -d ' ')"
+  w="$(sips -g pixelWidth "$png" 2>/dev/null | sed -n 's/.*pixelWidth: //p')"
+  h="$(sips -g pixelHeight "$png" 2>/dev/null | sed -n 's/.*pixelHeight: //p')"
+  if [ -n "$w" ] && [ -n "$h" ] && [ "$((bytes * 1000))" -lt "$((w * h * 20))" ]; then
+    echo "$bytes bytes for ${w}x${h}"
+  fi
+}
+
 # ImageMagick 7 is `magick`; 6 is `convert`/`mogrify`.
 magick_cmd() {
   if have magick; then echo magick; elif have convert; then echo convert; else echo ""; fi
@@ -99,16 +124,19 @@ case "$kind" in
         args+=(--display "$HARMAN_DISPLAY")
       fi
       run_env=()
+      tmp_home=""
     else
       BIN="${CARGO_TARGET_DIR:-$ROOT/target}/debug/hacivat"
       name="cand-app-$tag"
       args=(--vf-demo --print-window-id --theme "$theme" --lang "$lang")
-      run_env=(HOME="$(mktemp -d)")
+      tmp_home="$(mktemp -d)"
+      run_env=(HOME="$tmp_home")
     fi
     LOG="$OUT/$name.log"
     env ${run_env[@]+"${run_env[@]}"} "$BIN" "${args[@]}" >"$LOG" 2>&1 &
     pid=$!
-    trap 'kill "$pid" 2>/dev/null || true' EXIT
+    disown "$pid" 2>/dev/null || true
+    trap 'kill "$pid" 2>/dev/null || true; if [ -n "${tmp_home:-}" ]; then rm -rf "$tmp_home"; fi' EXIT
     for _ in $(seq 1 50); do
       grep -q '^WINDOW_ID=' "$LOG" 2>/dev/null && break
       kill -0 "$pid" 2>/dev/null || { cat "$LOG" >&2; exit 1; }
@@ -123,7 +151,11 @@ case "$kind" in
     png="$OUT/$name.png"
     if [ "$os" = Darwin ]; then
       wid="$(sed -n 's/^WINDOW_ID=//p' "$LOG" | head -1)"
-      screencapture -x -o -l "$wid" "$png"
+      if ! screencapture -x -o -l "$wid" "$png"; then
+        echo "capture.sh: screencapture failed; give the terminal Screen Recording permission" \
+          "(System Settings > Privacy & Security > Screen Recording), then retry" >&2
+        exit 1
+      fi
       # screencapture tags the file with the display profile (Display P3); the reference is sRGB.
       sips -m "/System/Library/ColorSync/Profiles/sRGB Profile.icc" "$png" --out "$png" >/dev/null
       # xtask vf refuses candidates that still carry an embedded profile: leave it untagged (sRGB).
@@ -141,6 +173,14 @@ case "$kind" in
     else
       title="$(sed -n 's/^WINDOW_TITLE=//p' "$LOG" | head -1)"
       capture_linux "$title" "$png"
+    fi
+    # Without Screen Recording permission macOS captures the window frame with no content.
+    why="$(blank_frame "$png")"
+    if [ -n "$why" ]; then
+      rm -f "$png"
+      echo "capture.sh: the captured window is effectively uniform ($why): its content is" \
+        "missing. On macOS check Screen Recording permission for the terminal." >&2
+      exit 1
     fi
     ;;
   *) echo "usage: capture.sh ref|cand|app theme lang scale" >&2; exit 2 ;;

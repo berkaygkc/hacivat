@@ -492,8 +492,9 @@ jobs:
           else
             cargo test --locked -p hacivat-app --features scene-check,pseudo,shots --test shots -- --ignored --nocapture
           fi
+      # A failing render still uploads what it wrote, so the violations can be looked at.
       - name: Upload screens
-        if: steps.guard.outputs.present == 'true'
+        if: always() && steps.guard.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pseudo-screens-${{ runner.os }}

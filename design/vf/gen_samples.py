@@ -132,7 +132,17 @@ M1_SCANS = [
     dict(name="status-top", axis="y", at=700, **{"from": 872, "to": 890}, expect_edges_px=[876, 877]),
 ]
 
-if "--set" in sys.argv and sys.argv[sys.argv.index("--set") + 1] == "m1-shell":
+SETS = ("default", "m1-shell")
+chosen = "default"
+if "--set" in sys.argv:
+    i = sys.argv.index("--set")
+    if i + 1 >= len(sys.argv):
+        sys.exit(f"gen_samples.py: --set needs a value ({', '.join(SETS)})")
+    chosen = sys.argv[i + 1]
+    if chosen not in SETS:
+        sys.exit(f"gen_samples.py: unknown set {chosen!r} ({', '.join(SETS)})")
+
+if chosen == "m1-shell":
     m1 = [sample(th, *c) for th in ("dark", "light") for c in M1]
     json.dump(dict(colors=m1, scanlines=M1_SCANS), open("design/vf/samples-m1-shell.json", "w"), indent=1,
               ensure_ascii=False)
