@@ -4,7 +4,8 @@
 
 use hacivat_driver::EngineCatalog;
 use hacivat_driver::url::{
-    FieldId, FieldMap, ParseOutcome, ParseResult, RenderTarget, Template, compile, parse, render,
+    FieldId, FieldMap, ParseOutcome, ParseResult, RenderTarget, Template, UnrecognisedReason,
+    compile, parse, render,
 };
 use hacivat_proto::DbmsKind;
 
@@ -167,4 +168,50 @@ fn extras_round_trip_in_order() {
             assert_eq!(o.extra, extra, "{url}");
         }
     }
+}
+
+/// T7 fix round 1 (M4): a socket URL with a malformed tail is refused; the tail never widens
+/// the socket path, which once swallowed `&password=…` into it.
+#[test]
+fn a_malformed_tail_never_widens_a_socket() {
+    let tails = [
+        "&flag",
+        "&",
+        "&&x=1",
+        "&password=SECRETPW&flag",
+        "&pwd=SECRETPW&",
+        "&x=1&sslpassword=SECRETPW&",
+    ];
+    let mut checked = 0;
+    for spec in EngineCatalog::embedded().engines() {
+        for ct in &spec.conn_types {
+            if ct.template.is_empty() {
+                continue;
+            }
+            let t = compile(&ct.template, &ct.id).unwrap();
+            if !t.field_set.contains(&FieldId::Socket) {
+                continue;
+            }
+            for fields in sample_fields(spec.kind, &t).into_iter().take(10) {
+                let url = render(&t, &fields, &[], RenderTarget::Copy).unwrap();
+                for (i, tail) in tails.iter().enumerate() {
+                    // Failure messages show the URL and the tail's index, never the tail: some
+                    // tails hold a fixture secret.
+                    let text = format!("{url}{tail}");
+                    for preferred in [None, Some(spec.kind)] {
+                        let r = parse(&text, preferred);
+                        assert_eq!(
+                            r.unrecognised(),
+                            Some(UnrecognisedReason::NoMatch),
+                            "{url} + tail {i}"
+                        );
+                        assert!(!format!("{r:?}").contains("SECRETPW"), "{url} + tail {i}");
+                    }
+                    checked += 1;
+                }
+            }
+        }
+    }
+    // The socket templates of PostgreSQL, MySQL and MariaDB.
+    assert_eq!(checked, 3 * 10 * tails.len());
 }

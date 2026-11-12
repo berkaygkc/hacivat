@@ -8,12 +8,16 @@
 //!    engine than the preferred one is reported with its own engine (the caller proposes the
 //!    switch, never silently).
 //! 2. **Catalog templates** (`matcher`), the preferred engine's first, then the others'; within
-//!    a group the match with the fewest extras wins, then catalog order.
+//!    a group the match with the fewest extras wins, then catalog order. Only a text that no
+//!    native form claims gets here: a native refusal is final (a looser template once swallowed
+//!    `&password=…` into a socket path). With today's catalog every template starts with a
+//!    native scheme, so this recognizer serves future engines' templates.
 //!
 //! The input is trimmed; over 64 KiB it is `TooLong`, unread. Every value is decoded exactly
 //! once. The password, from the user info or a password-like parameter, ends up only in
-//! `secrets`. Parsing is locale-invariant (ASCII case folding only). The password field never
-//! reaches this parser: masked inputs never call the paste filter (R21).
+//! `secrets`, and an `sslpassword` only in `tls_key_passphrase`. Parsing is locale-invariant
+//! (ASCII case folding only). The password field never reaches this parser: masked inputs never
+//! call the paste filter (R21).
 
 use std::sync::OnceLock;
 
@@ -22,7 +26,7 @@ use hacivat_proto::DbmsKind;
 use secrecy::SecretString;
 
 use super::matcher::{Matched, match_template_with_password};
-use super::native::{self, strip_ci};
+use super::native::{self, Claim, strip_ci};
 use super::{FieldId, FieldMap, Template, compile};
 use crate::EngineCatalog;
 
@@ -68,6 +72,9 @@ pub struct ParseOutcome {
     pub fields: FieldMap,
     pub extra: Vec<(String, String)>,
     pub secrets: Vec<(FieldId, SecretString)>,
+    /// The TLS client key passphrase from an `sslpassword` parameter (any ASCII case, after
+    /// decoding), for `SecretSlot::TlsKeyPassphrase`. Never kept in `extra` (T7 fix round 1).
+    pub tls_key_passphrase: Option<SecretString>,
     pub mapped: Vec<MappedParam>,
     pub warnings: Vec<ParseWarning>,
 }
@@ -99,7 +106,7 @@ impl ParseResult {
     }
 }
 
-/// Parses `input`, preferring `preferred`'s templates when the text has no native form.
+/// Parses `input`, preferring `preferred`'s templates when no native form claims the text.
 pub fn parse(input: &str, preferred: Option<DbmsKind>) -> ParseResult {
     if input.len() > MAX_INPUT {
         return ParseResult::Unrecognised(UnrecognisedReason::TooLong);
@@ -108,7 +115,11 @@ pub fn parse(input: &str, preferred: Option<DbmsKind>) -> ParseResult {
     if text.is_empty() {
         return ParseResult::Unrecognised(UnrecognisedReason::Empty);
     }
-    match native::parse(text).or_else(|| by_template(text, preferred)) {
+    let found = match native::parse(text) {
+        Claim::Claimed(verdict) => verdict,
+        Claim::Unclaimed => by_template(text, preferred),
+    };
+    match found {
         Some(o) => ParseResult::Recognised(o),
         None => ParseResult::Unrecognised(UnrecognisedReason::NoMatch),
     }
@@ -194,4 +205,100 @@ fn best<'a>(cands: impl Iterator<Item = &'a Candidate>, text: &str) -> Option<Pa
     }
     let (c, (map, extra, password)) = best?;
     native::from_template(c.kind, &c.conn_type, map, extra, password)
+}
+
+#[cfg(test)]
+mod tests {
+    use secrecy::ExposeSecret;
+
+    use super::*;
+    use crate::url::native::names_a_secret;
+
+    // The template fallback is unreachable through `parse` for texts with a native scheme (the
+    // claim rule), so these call it directly: its own guard must hold on its own.
+
+    #[test]
+    fn the_template_path_refuses_a_swallowed_password() {
+        // Failure messages name the case by index: the texts hold a fixture secret.
+        for (i, text) in [
+            "postgresql:///db?host=/sock&password=SECRETPW&flag",
+            "postgresql://u@/db?host=/sock&password=SECRETPW&",
+            "mysql://u@localhost/db?socket=/tmp/s&pwd=SECRETPW&x",
+            "mariadb://u@localhost/db?socket=/tmp/s&PASS%2577ord=SECRETPW&x",
+            "postgresql:///db?host=/sock;sslpassword=SECRETPW&flag",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(by_template(text, None).is_none(), "case {i}");
+            assert!(
+                by_template(text, Some(DbmsKind::Postgres)).is_none(),
+                "case {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_template_path_refuses_network_files() {
+        for text in [
+            "file://server/share/a.db",
+            "file:////server/share/a.db",
+            r"file:\\server\share\a.db",
+            r"file:\\?\UNC\server\share\a.db",
+            r"file:/\server\share\a.db",
+        ] {
+            assert!(
+                by_template(text, Some(DbmsKind::Sqlite)).is_none(),
+                "{text}"
+            );
+        }
+        let local = by_template("file:/tmp/a.db", Some(DbmsKind::Sqlite)).unwrap();
+        assert_eq!(local.fields.values[&FieldId::File], "/tmp/a.db");
+    }
+
+    #[test]
+    fn the_template_path_moves_both_secrets() {
+        let o = by_template(
+            "postgresql://u:s3cret@h/db?a=b#c&pass%77ord=x2&SSLPASSWORD=kp",
+            Some(DbmsKind::Postgres),
+        )
+        .unwrap();
+        assert_eq!(
+            (o.kind, o.conn_type.as_str()),
+            (DbmsKind::Postgres, "default")
+        );
+        assert_eq!(o.extra, vec![("a".to_string(), "b#c".to_string())]);
+        assert!(o.secrets.len() == 1 && o.secrets[0].1.expose_secret() == "x2");
+        assert!(o.tls_key_passphrase.as_ref().unwrap().expose_secret() == "kp");
+        let shown = format!("{o:?}");
+        for s in ["s3cret", "x2", "kp"] {
+            assert!(!shown.contains(s));
+        }
+    }
+
+    #[test]
+    fn swallowed_secret_shapes() {
+        for v in [
+            "/sock&password=x",
+            "/sock&pwd=",
+            "?Pass=x",
+            ";sslpassword=x",
+            "password=x",
+            "host=h password=x a.db",
+            "/s&PASS%77ord=x",
+            "/s&PASS%2577ord=x",
+        ] {
+            assert!(names_a_secret(v), "{v}");
+        }
+        for v in [
+            "/tmp/a=b",
+            "/var/run/postgresql",
+            "/s&passwords=x",
+            "/s&mypassword=x",
+            "/s&password",
+            "x=password",
+        ] {
+            assert!(!names_a_secret(v), "{v}");
+        }
+    }
 }

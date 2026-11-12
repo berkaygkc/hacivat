@@ -4,11 +4,17 @@
 //!
 //! Every value is decoded exactly once: here for the native forms, by the matcher for a
 //! template match (whose values `from_template` takes as they are). `sanitize` (HV-DRV-05)
-//! relies on that and rejects any `%XX` left in a value as a second encoding. Keys are compared with ASCII case folding
-//! only. A password, from the user info or from a password-like parameter (`password`, `pass`,
-//! `pwd`, `passwd`, any ASCII case, after decoding, so `pass%77ord` counts), goes to the secret
-//! and never into the fields or the extras; it is held in wiped buffers until it is a
-//! `SecretString`.
+//! relies on that and rejects any `%XX` left in a value as a second encoding. Keys are
+//! compared with ASCII case folding only.
+//!
+//! A password, from the user info or from a password-like parameter (`password`, `pass`, `pwd`,
+//! `passwd`, any ASCII case, after decoding, so `pass%77ord` counts), goes to the secret, and an
+//! `sslpassword` to the TLS key passphrase; neither ever lands in the fields or the extras. They
+//! are held in wiped buffers until they are `SecretString`s.
+//!
+//! A text a native form claims (by its scheme, `jdbc:`, `file:`, `sqlite:`, `:memory:`, or as a
+//! DSN or SQLite path it accepts) is final: if the form refuses it, no template is tried, so a
+//! looser template can never swallow a refused URL's password into a field.
 
 pub mod jdbc;
 pub mod libpq_dsn;
@@ -32,24 +38,35 @@ use super::{FieldId, FieldMap};
 
 /// Recognises `text` (trimmed, at most 64 KiB) as one of the native forms, in order: `jdbc:`
 /// (stripped and re-routed), the server URIs, SQLite URIs and `:memory:`, the libpq DSN, and a
-/// SQLite path. A form whose prefix matched but whose body did not is not tried as another.
-pub(super) fn parse(text: &str) -> Option<ParseOutcome> {
+/// SQLite path. A prefix claims the text: its form's verdict is final.
+pub(super) fn parse(text: &str) -> Claim {
     if let Some(rest) = strip_ci(text, "jdbc:") {
-        return jdbc::parse(rest);
+        return Claim::Claimed(jdbc::parse(rest));
     }
     if let Some(claimed) = server_uri(text) {
-        return claimed;
+        return Claim::Claimed(claimed);
     }
     if let Some(rest) = strip_ci(text, "file:") {
-        return sqlite::file_uri(rest);
+        return Claim::Claimed(sqlite::file_uri(rest));
     }
     if let Some(rest) = strip_ci(text, "sqlite:") {
-        return sqlite::sqlite_scheme(rest);
+        return Claim::Claimed(sqlite::sqlite_scheme(rest));
     }
     if text == sqlite::MEMORY {
-        return sqlite::memory();
+        return Claim::Claimed(sqlite::memory());
     }
-    libpq_dsn::parse(text).or_else(|| sqlite::plain_path(text))
+    match libpq_dsn::parse(text).or_else(|| sqlite::plain_path(text)) {
+        Some(o) => Claim::Claimed(Some(o)),
+        None => Claim::Unclaimed,
+    }
+}
+
+/// What the native recognizers made of a text.
+pub(super) enum Claim {
+    /// No native form claims the text; only then may the template fallback try it.
+    Unclaimed,
+    /// A native form claimed the text; `None` when it refused it. Final either way.
+    Claimed(Option<ParseOutcome>),
 }
 
 /// A `postgres://`, `postgresql://`, `mysql://` or `mariadb://` URI: `None` when `text` has none
@@ -149,7 +166,9 @@ pub(super) fn split_uri(rest: &str) -> Option<Uri> {
         Some((a, p)) => (a, Some(p)),
         None => (head, None),
     };
-    if authority.chars().any(char::is_whitespace) {
+    // A raw `@` after the first `/` means the user info held an unencoded `/` (`u:12/34@h`):
+    // the split would put part of the password in the path.
+    if authority.chars().any(char::is_whitespace) || path.is_some_and(|p| p.contains('@')) {
         return None;
     }
     let (userinfo, hostspec) = match authority.rsplit_once('@') {
@@ -209,9 +228,52 @@ fn host_port(entry: &str) -> Option<(String, Option<String>)> {
     Some((decode_plain(host)?, port.map(str::to_string)))
 }
 
-/// One to five ASCII digits naming a `u16`; a leading zero is allowed.
+/// One to five ASCII digits naming a port from 1 to 65535; a leading zero is allowed.
 fn valid_port(p: &str) -> bool {
-    (1..=5).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok()
+    (1..=5).contains(&p.len())
+        && p.bytes().all(|b| b.is_ascii_digit())
+        && p.parse::<u16>().is_ok_and(|n| n != 0)
+}
+
+/// Whether `v` holds `key=` for a password-like `key` (`password`, `sslpassword`, `pass`, `pwd`,
+/// `passwd`; ASCII case ignored; as written or after any number of percent-decodings, up to 8)
+/// at its start or after `?`, `&`, `;` or whitespace: the shape of a query or a DSN swallowed
+/// into one value. Linear in `v`: the keys partition it.
+pub(super) fn names_a_secret(v: &str) -> bool {
+    let secret = |key: &str| {
+        let mut k = key.to_string();
+        for _ in 0..8 {
+            if is_secret_param(&k) {
+                return true;
+            }
+            let decoded = percent_decode_str(&k).decode_utf8_lossy().into_owned();
+            if decoded == k {
+                return false;
+            }
+            k = decoded;
+        }
+        false
+    };
+    let mut start = 0;
+    for (i, c) in v.char_indices() {
+        if matches!(c, '?' | '&' | ';') || c.is_whitespace() {
+            start = i + c.len_utf8();
+        } else if c == '=' {
+            if secret(&v[start..i]) {
+                return true;
+            }
+            start = i + 1;
+        }
+    }
+    false
+}
+
+/// A path that names another machine: it starts with two separators (`//host`, `\\host`,
+/// `\\?\UNC\`, `\\.\`, or a mix). Opening one on Windows sends the user's credentials (an NTLM
+/// hash) to that host, so no pasted text may become one.
+pub(super) fn is_network_path(p: &str) -> bool {
+    let mut c = p.chars();
+    matches!((c.next(), c.next()), (Some('/' | '\\'), Some('/' | '\\')))
 }
 
 /// The setting a parameter maps to, for `kind`; `folded` is the ASCII-lowercased key. A value
@@ -262,6 +324,7 @@ pub(super) struct Builder {
     conn_type: String,
     fields: BTreeMap<FieldId, String>,
     password: Option<SecretString>,
+    tls_key_passphrase: Option<SecretString>,
     extra: Vec<(String, String)>,
     mapped: Vec<MappedParam>,
     warnings: Vec<ParseWarning>,
@@ -276,6 +339,7 @@ impl Builder {
             conn_type: conn_type.to_string(),
             fields: BTreeMap::new(),
             password: None,
+            tls_key_passphrase: None,
             extra: Vec::new(),
             mapped: Vec::new(),
             warnings: Vec::new(),
@@ -393,15 +457,17 @@ impl Builder {
 
     /// A parameter that is not a field of the form: a password moves to the secret, a known
     /// setting is mapped (PostgreSQL `options` is also kept as an extra), anything else is kept
-    /// as an extra. `sslpassword` (a key passphrase, which has no field here) is dropped, so it
-    /// is never stored in the clear.
+    /// as an extra. `sslpassword` becomes the TLS key passphrase (the last one wins; an empty one
+    /// clears it).
     pub(super) fn param(&mut self, key: &str, value: Zeroizing<String>) {
+        if key.eq_ignore_ascii_case("sslpassword") {
+            self.note(key, key);
+            self.tls_key_passphrase =
+                (!value.is_empty()).then(|| SecretString::from(value.as_str()));
+            return;
+        }
         if is_secret_param(key) {
-            if key.eq_ignore_ascii_case("sslpassword") {
-                self.note(key, key);
-            } else {
-                self.password(key, SecretString::from(value.as_str()));
-            }
+            self.password(key, SecretString::from(value.as_str()));
             return;
         }
         let folded = key.to_ascii_lowercase();
@@ -453,6 +519,7 @@ impl Builder {
             },
             extra: self.extra,
             secrets,
+            tls_key_passphrase: self.tls_key_passphrase,
             mapped: self.mapped,
             warnings: self.warnings,
         })
@@ -461,6 +528,10 @@ impl Builder {
 
 /// The outcome of a template match (the fallback recognizer): the matcher has decoded every
 /// value once; extras go through the same password, mapping and duplicate rules.
+///
+/// Refused, as defence in depth behind the claim rule: a field value that holds a
+/// password-like `key=` (a query or DSN tail swallowed by a loose placeholder), and a file that
+/// is a network path.
 pub(super) fn from_template(
     kind: DbmsKind,
     conn_type: &str,
@@ -468,6 +539,14 @@ pub(super) fn from_template(
     extra: Vec<(String, String)>,
     password: Option<SecretString>,
 ) -> Option<ParseOutcome> {
+    if map.values.values().any(|v| names_a_secret(v))
+        || map
+            .values
+            .get(&FieldId::File)
+            .is_some_and(|f| is_network_path(f))
+    {
+        return None;
+    }
     let mut b = Builder::new(kind, conn_type);
     if let Some(pw) = password {
         b.password("password", pw);

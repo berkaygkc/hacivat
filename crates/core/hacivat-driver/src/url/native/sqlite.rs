@@ -10,10 +10,12 @@
 //!   `.sqlite`, `.sqlite3`, `.db3`, `.s3db`, `.sl3`, ASCII case ignored), so a socket directory
 //!   or a host name is not mistaken for a file. It is kept exactly as typed: no decoding, and no
 //!   expansion of `~` or `%USERNAME%`.
+//! - A network path (`//host/…`, `\\host\…`, `\\?\UNC\…`, `\\.\…`), in any form, is refused:
+//!   on Windows, opening one sends the user's NTLM hash to the named host.
 
 use hacivat_proto::DbmsKind;
 
-use super::{Builder, decode_plain, query, strip_ci};
+use super::{Builder, decode_plain, is_network_path, names_a_secret, query, strip_ci};
 use crate::url::FieldId;
 use crate::url::parse::ParseOutcome;
 
@@ -46,7 +48,7 @@ pub(super) fn file_uri(rest: &str) -> Option<ParseOutcome> {
         None => path,
     };
     let path = decode_plain(path)?;
-    if path.is_empty() {
+    if path.is_empty() || is_network_path(&path) {
         return None;
     }
     let mut b = if path == MEMORY {
@@ -77,9 +79,14 @@ pub(super) fn sqlite_scheme(rest: &str) -> Option<ParseOutcome> {
     file_uri(rest)
 }
 
-/// A plain path to a SQLite file.
+/// A plain path to a SQLite file. Never a network path, and never text that carries a
+/// password-like `key=` (a DSN the DSN parser refused, ending in `….db`).
 pub(super) fn plain_path(text: &str) -> Option<ParseOutcome> {
-    if text.chars().any(char::is_control) || text.contains("://") {
+    if text.chars().any(char::is_control)
+        || text.contains("://")
+        || is_network_path(text)
+        || names_a_secret(text)
+    {
         return None;
     }
     let name = text.rsplit(['/', '\\']).next()?;

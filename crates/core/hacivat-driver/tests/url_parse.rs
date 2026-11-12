@@ -213,14 +213,53 @@ fn a_percent_encoded_password_key_is_still_a_password() {
 }
 
 #[test]
-fn an_ssl_key_passphrase_never_stays_in_the_extras() {
-    let o = ok(parse(
+fn an_ssl_key_passphrase_is_carried_apart() {
+    // Controller ruling (T7 fix round 1): `sslpassword`, any case or encoding, becomes
+    // `tls_key_passphrase`, never an extra and never the password.
+    // Failure messages name the case by index: the texts hold a fixture secret.
+    for (i, text) in [
         "postgres://u@h/db?sslpassword=s3cret&sslkey=/k.pem",
+        "postgres://u@h/db?SSLPassword=s3cret&sslkey=/k.pem",
+        "postgres://u@h/db?ssl%70assword=s3cret&sslkey=/k.pem",
+        "host=h sslpassword=s3cret sslkey=/k.pem",
+        "jdbc:postgresql://h/db?sslpassword=s3cret&sslkey=/k.pem",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let o = ok(parse(text, None));
+        assert!(o.secrets.is_empty(), "case {i}");
+        let kp = o.tls_key_passphrase.as_ref();
+        assert!(
+            kp.is_some_and(|k| k.expose_secret() == "s3cret"),
+            "case {i}"
+        );
+        assert_eq!(
+            o.extra,
+            vec![("sslkey".to_string(), "/k.pem".to_string())],
+            "case {i}"
+        );
+        assert!(
+            !o.warnings.contains(&ParseWarning::PasswordMoved),
+            "case {i}"
+        );
+        assert!(!format!("{o:?}").contains("s3cret"), "case {i}");
+    }
+    // Both secrets at once, each in its own place; the last passphrase wins, an empty one
+    // clears it.
+    let both = ok(parse(
+        "postgres://u:pw1@h/db?sslpassword=a&sslpassword=kp2",
         None,
     ));
-    assert!(o.secrets.is_empty());
-    assert_eq!(o.extra, vec![("sslkey".to_string(), "/k.pem".to_string())]);
-    assert!(!format!("{o:?}").contains("s3cret"));
+    assert!(password(&both) == "pw1");
+    assert!(both.tls_key_passphrase.unwrap().expose_secret() == "kp2");
+    let cleared = ok(parse("postgres://h/db?sslpassword=a&sslpassword=", None));
+    assert!(cleared.tls_key_passphrase.is_none());
+    assert!(
+        ok(parse("postgres://h/db", None))
+            .tls_key_passphrase
+            .is_none()
+    );
 }
 
 #[test]
@@ -250,16 +289,136 @@ fn dsn_password_is_moved_with_quotes_and_escapes() {
 
 #[test]
 fn secrets_never_reach_debug_output() {
-    for text in [
+    for (i, text) in [
         "postgres://u:s3cret@h/db",
         "mysql://u@h/db?pwd=s3cret",
         "host=h password=s3cret",
-        "postgresql://u:s3cret@h/db?a=b#frag",
-    ] {
+        "jdbc:postgresql://u:s3cret@h/db",
+        "jdbc:mysql://h/db?password=s3cret",
+        "jdbc:postgresql:db?password=s3cret",
+        "file:/tmp/a.db?password=s3cret",
+        "jdbc:sqlite:/tmp/a.db?pwd=s3cret",
+        "postgresql://u:s3cret@first:5432,second:5433/db",
+        "postgresql://u:s3cret@/db?host=/var/run/postgresql",
+        "postgresql:///db?host=/sock&password=s3cret",
+        "mysql://u:s3cret@localhost/db?socket=/tmp/mysql.sock",
+        "mysql://u@localhost/db?socket=/tmp/s&pwd=s3cret",
+        "postgres://h/db?sslpassword=s3cret",
+        "host=/sock sslpassword=s3cret",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Named by index: the texts hold a fixture secret.
         let r = parse(text, None);
-        assert!(r.unrecognised().is_none(), "{text}");
-        assert!(!format!("{r:?}").contains("s3cret"), "{text}");
+        assert!(r.unrecognised().is_none(), "case {i}");
+        assert!(!format!("{r:?}").contains("s3cret"), "case {i}");
     }
+}
+
+// ---- A refused URL is final (T7 fix round 1) ----
+
+#[test]
+fn a_claimed_url_that_is_refused_never_reaches_the_templates() {
+    // A looser template used to take these, swallowing the password into the socket path.
+    // Named by index: the texts hold a fixture secret.
+    for (i, text) in [
+        "postgresql:///db?host=/sock&password=SECRETPW&flag",
+        "postgresql://u@/db?host=/sock&password=SECRETPW&",
+        "mysql://u@localhost/db?socket=/tmp/s&pwd=SECRETPW&x",
+        "mariadb://u@localhost/db?socket=/tmp/s&pwd=SECRETPW&",
+        "jdbc:postgresql:///db?host=/sock&password=SECRETPW&flag",
+        "postgresql://u:SECRETPW@h/db?a=b#c",
+        "file:/tmp/a.db?password=SECRETPW&flag",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = parse(text, None);
+        assert_eq!(
+            r.unrecognised(),
+            Some(UnrecognisedReason::NoMatch),
+            "case {i}"
+        );
+        assert!(!format!("{r:?}").contains("SECRETPW"), "case {i}");
+    }
+}
+
+#[test]
+fn a_raw_at_sign_in_the_path_is_refused() {
+    // `u:12/34@h`: an unencoded `/` in the password would put `34@h/db` in the database.
+    for (i, text) in [
+        "postgres://u:12/34@h/db",
+        "mysql://u:12/34@h/db",
+        "postgres://h/my@db",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            parse(text, None).unrecognised(),
+            Some(UnrecognisedReason::NoMatch),
+            "case {i}"
+        );
+    }
+    // Encoded, it is fine.
+    let o = ok(parse("postgres://u:12%2F34@h/my%40db", None));
+    assert!(password(&o) == "12/34");
+    assert_eq!(fv(&o, FieldId::Database), "my@db");
+}
+
+#[test]
+fn network_paths_never_become_sqlite_files() {
+    // On Windows, opening one sends the user's NTLM hash to the named host.
+    for text in [
+        "file://server/share/a.db",
+        "file:////server/share/a.db",
+        "file://localhost//server/share/a.db",
+        r"file:\\server\share\a.db",
+        r"file:\\?\UNC\server\share\a.db",
+        r"file:\\.\pipe\a.db",
+        "file:%2F%2Fserver/share/a.db",
+        r"file:/\server\share\a.db",
+        r"jdbc:sqlite:\\server\share\a.db",
+        r"\\server\share\a.db",
+        r"\\?\UNC\server\share\a.db",
+        r"\\.\C:\a.db",
+        "//server/share/a.db",
+        r"/\server\share\a.db",
+    ] {
+        assert_eq!(
+            parse(text, None).unrecognised(),
+            Some(UnrecognisedReason::NoMatch),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_dsn_ending_in_db_is_not_a_path() {
+    // Not a DSN (`x.db` has no `=`), and not a SQLite path either: it carries a password.
+    let r = parse("host=h password=SECRETPW x.db", None);
+    assert_eq!(r.unrecognised(), Some(UnrecognisedReason::NoMatch));
+}
+
+#[test]
+fn port_zero_is_refused() {
+    for text in [
+        "postgres://h:0/db",
+        "postgres://h:00000/db",
+        "host=h port=0",
+        "mysql://h:0",
+    ] {
+        assert_eq!(
+            parse(text, None).unrecognised(),
+            Some(UnrecognisedReason::NoMatch),
+            "{text}"
+        );
+    }
+    assert_eq!(
+        fv(&ok(parse("postgres://h:1/db", None)), FieldId::Port),
+        "1"
+    );
 }
 
 // ---- Mapping ----
@@ -527,7 +686,7 @@ fn sqlite_forms() {
         "~/data/app.sqlite3",
         "./a.db3",
         "app.db",
-        r"\\srv\share\a.db",
+        r"C:\data\app.db",
         "C:/%USERNAME%/a.db",
     ] {
         let o = ok(parse(p, None));
@@ -537,8 +696,14 @@ fn sqlite_forms() {
             "{p}"
         );
     }
-    // A path that does not name a SQLite file is not taken for one.
-    for p in ["/var/run/postgresql", "notes.txt", "example.com"] {
+    // A path that does not name a local SQLite file is not taken for one (a UNC path would
+    // send the user's NTLM hash to the host it names).
+    for p in [
+        "/var/run/postgresql",
+        "notes.txt",
+        "example.com",
+        r"\\srv\share\a.db",
+    ] {
         assert_eq!(
             parse(p, None).unrecognised(),
             Some(UnrecognisedReason::NoMatch),
@@ -550,21 +715,19 @@ fn sqlite_forms() {
 // ---- The template fallback ----
 
 #[test]
-fn the_template_fallback_takes_what_the_native_parser_refuses() {
-    // A raw `#` is not part of a libpq URI, but the catalog template's parameter value allows
-    // it, so the template matcher recognises the text; the password still moves.
-    let o = ok(parse(
-        "postgresql://u:s3cret@h/db?a=b#c&pass%77ord=x2",
+fn the_template_fallback_never_retries_a_native_refusal() {
+    // A raw `#` is not part of a libpq URI. The catalog template's parameter value would allow
+    // it, but the native parser claimed the text by its scheme, so its refusal is final, for
+    // every preferred engine. (The fallback itself is covered by `url::parse::tests`.)
+    for preferred in [
+        None,
         Some(DbmsKind::Postgres),
-    ));
-    assert_eq!(
-        (o.kind, o.conn_type.as_str()),
-        (DbmsKind::Postgres, "default")
-    );
-    assert_eq!(fv(&o, FieldId::User), "u");
-    assert_eq!(o.extra, vec![("a".to_string(), "b#c".to_string())]);
-    assert!(password(&o) == "x2");
-    assert!(o.warnings.contains(&ParseWarning::PasswordMoved));
+        Some(DbmsKind::MySql),
+        Some(DbmsKind::Sqlite),
+    ] {
+        let r = parse("postgresql://u:s3cret@h/db?a=b#c&pass%77ord=x2", preferred);
+        assert_eq!(r.unrecognised(), Some(UnrecognisedReason::NoMatch));
+    }
 }
 
 // ---- Limits ----
