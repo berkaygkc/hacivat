@@ -25,6 +25,7 @@ pub fn init(cx: &mut App) {
     cx.set_global(PendingChord::default());
     shell::install_globals(cx);
     // registrations (append-only)
+    settings_ui::install(cx);
 }
 
 #[cfg(test)]

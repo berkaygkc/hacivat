@@ -137,6 +137,20 @@ fn install_settings_writer(cx: &mut App, enabled: bool) {
     .detach();
 }
 
+/// Writes the pending settings and every workspace's pending layout now, on the calling thread.
+/// `on_app_quit` does this at quit, but `App::restart` quits from inside an update, where GPUI
+/// cannot run its quit handlers, so a restart calls this first.
+pub fn flush_pending_writes(cx: &mut App) {
+    if let Some(w) = cx.try_global::<SettingsWriter>() {
+        w.writer.flush();
+    }
+    for window in cx.windows() {
+        if let Some(workspace) = window.downcast::<Workspace>() {
+            let _ = workspace.update(cx, |ws, _, _| ws.flush_layout());
+        }
+    }
+}
+
 /// Set once `crate::init` has run in this app.
 struct Initialized;
 
