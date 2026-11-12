@@ -2,7 +2,7 @@
 //!
 //! `spike-grid` runs interactively (trackpad and wheel, including momentum events).
 //! `spike-grid --bench fling` drives a synthetic fling, prints `FrameStats` and writes
-//! `target/bench/b1-fling-<os>-<ts>.json`.
+//! `<workspace>/target/bench/b1-fling-<os>-<ts>.json` (exit 1 if it cannot).
 
 mod bench;
 mod element;
@@ -137,8 +137,12 @@ fn main() -> ExitCode {
             }
         };
         cx.activate(true);
-        if let Mode::BenchFling = mode {
-            let _ = handle.update(cx, |_, window, cx| bench::start(cx.entity(), window));
+        if let Mode::BenchFling = mode
+            && let Err(e) = handle.update(cx, |_, window, cx| bench::start(cx.entity(), window))
+        {
+            // Without the bench driver the app would idle forever and never write a result.
+            eprintln!("could not start the fling bench: {e:#}");
+            std::process::exit(1);
         }
     });
     ExitCode::SUCCESS

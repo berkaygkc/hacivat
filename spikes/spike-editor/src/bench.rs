@@ -4,12 +4,12 @@
 //! the edit (or the popup) has been drawn and presented.
 
 use std::cell::RefCell;
-use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
-use hacivat_ui_core::frames::{LatencyProbe, Verdict, verdict};
+use hacivat_ui_core::frame_loop::{bench_dir, stamp_run};
+use hacivat_ui_core::frames::{LatencyProbe, RunInfo, Verdict, verdict};
 use hacivat_ui_core::gpui_surface::{Context, Keystroke, Modifiers, Window};
 
 use crate::element::{BenchProbe, EditorView, ProbeTarget};
@@ -119,6 +119,21 @@ pub fn completion_script(identifier_keys: usize) -> Vec<Key> {
     script
 }
 
+/// Latency samples a complete replay of `script` yields: every key for the typing benches, only
+/// identifier keys for completion (the Enter between words is not measured).
+pub fn expected_samples(mode: BenchMode, script: &[Key]) -> usize {
+    match mode {
+        BenchMode::Typing | BenchMode::TypingLongLine => script.len(),
+        BenchMode::Completion => script.iter().filter(|k| matches!(k, Key::Char(_))).count(),
+    }
+}
+
+/// Process exit code for a finished bench: non-zero when the replay aborted or its JSON could
+/// not be written (a FAIL verdict on a complete run still exits 0; the verdict is the result).
+pub fn exit_code(run: &RunInfo, dumped: bool) -> i32 {
+    i32::from(run.aborted || !dumped)
+}
+
 /// Places the caret for `mode`, attaches the probe and starts the keystroke replay.
 pub fn start(
     mode: BenchMode,
@@ -161,6 +176,7 @@ pub fn start(
         }
     };
 
+    let expected = expected_samples(mode, &script);
     let probe = Rc::new(RefCell::new(LatencyProbe::new(mode.label())));
     view.bench = Some(BenchProbe::new(probe.clone(), target));
     window.focus(&view.focus_handle, cx);
@@ -173,6 +189,7 @@ pub fn start(
         executor.timer(WARMUP).await;
         let start = Instant::now();
         let mut inactive_keys = 0;
+        let mut aborted = false;
         for (i, key) in script.iter().enumerate() {
             let due = start + PERIOD * i as u32;
             if let Some(wait) = due.checked_duration_since(Instant::now()) {
@@ -187,55 +204,79 @@ pub fn start(
                 Ok(false) => inactive_keys += 1,
                 Err(err) => {
                     eprintln!("bench aborted: {err:#}");
+                    aborted = true;
                     break;
                 }
             }
         }
         executor.timer(SETTLE).await;
-        let finished = cx.update(|_, cx| {
+        let finished = cx.update(|window, cx| {
             let shaped_lines = view.read_with(cx, |view, _| view.shaped_lines).unwrap_or(0);
             if inactive_keys > 0 {
                 eprintln!(
                     "warning: {inactive_keys} keystrokes went to an inactive window; GPUI throttles inactive windows, so this run is not representative"
                 );
             }
-            finish(mode, &probe, inactive_keys, shaped_lines);
+            let run = RunInfo {
+                expected_samples: expected,
+                inactive_keys,
+                aborted,
+                ..stamp_run(window, cx)
+            };
+            let code = finish(mode, &probe, &run, shaped_lines);
+            if code != 0 {
+                std::process::exit(code);
+            }
             cx.quit();
         });
         if let Err(err) = finished {
+            // The window is gone, so no gradeable dump was written.
             eprintln!("bench could not finish: {err:#}");
+            std::process::exit(1);
         }
     })
     .detach();
     Ok(())
 }
 
+/// Prints the stats, writes the JSON dump (with `run`'s metadata) and returns the exit code.
 fn finish(
     mode: BenchMode,
     probe: &Rc<RefCell<LatencyProbe>>,
-    inactive_keys: usize,
+    run: &RunInfo,
     shaped_lines: u64,
-) {
+) -> i32 {
     let probe = probe.borrow();
     let stats = probe.stats();
     let os = std::env::consts::OS;
-    let verdict = match verdict(mode.label(), os, &stats) {
+    let verdict = match verdict(mode.label(), os, &stats, run) {
         Verdict::Pass => "PASS",
         Verdict::Fail => "FAIL",
         Verdict::NoThreshold => "n/a",
     };
     println!(
-        "{}: samples={} p50={:.2}ms p95={:.2}ms max={:.2}ms verdict={verdict} inactive_keys={inactive_keys} lines_shaped={shaped_lines}",
+        "{}: samples={}/{} p50={:.2}ms p95={:.2}ms max={:.2}ms verdict={verdict} inactive_keys={} aborted={} lines_shaped={shaped_lines} build={}",
         mode.label(),
         stats.samples,
+        run.expected_samples,
         stats.p50_ms,
         stats.p95_ms,
-        stats.max_ms
+        stats.max_ms,
+        run.inactive_keys,
+        run.aborted,
+        run.build,
     );
-    match probe.dump_json(Path::new("target/bench"), os) {
-        Ok(path) => println!("wrote {}", path.display()),
-        Err(err) => eprintln!("could not write bench json: {err}"),
-    }
+    let dumped = match probe.dump_json(&bench_dir(), os, run) {
+        Ok(path) => {
+            println!("wrote {}", path.display());
+            true
+        }
+        Err(err) => {
+            eprintln!("could not write bench json: {err}");
+            false
+        }
+    };
+    exit_code(run, dumped)
 }
 
 #[cfg(test)]
@@ -275,13 +316,41 @@ mod tests {
     fn bench_labels_match_the_report_thresholds() {
         for mode in ["typing", "typing-long-line", "completion"] {
             let label = BenchMode::parse(mode).unwrap().label();
-            let worst = hacivat_ui_core::frames::LatencyStats {
+            let stats = |p95| hacivat_ui_core::frames::LatencyStats {
                 samples: 1,
-                p50_ms: 1e3,
-                p95_ms: 1e3,
-                max_ms: 1e3,
+                p50_ms: 1.0,
+                p95_ms: p95,
+                max_ms: p95,
             };
-            assert_eq!(verdict(label, "macos", &worst), Verdict::Fail);
+            let run = RunInfo {
+                expected_samples: 1,
+                ..RunInfo::unstamped()
+            };
+            assert_eq!(verdict(label, "macos", &stats(1e3), &run), Verdict::Fail);
+            assert_eq!(verdict(label, "macos", &stats(1.0), &run), Verdict::Pass);
         }
+    }
+
+    #[test]
+    fn expected_samples_count_only_measured_keys() {
+        let typing = typing_script(TYPING_KEYSTROKES);
+        assert_eq!(expected_samples(BenchMode::Typing, &typing), 2_000);
+        assert_eq!(expected_samples(BenchMode::TypingLongLine, &typing), 2_000);
+        // Enter between completion words is not measured.
+        let completion = completion_script(COMPLETION_KEYSTROKES);
+        assert!(completion.len() > 300);
+        assert_eq!(expected_samples(BenchMode::Completion, &completion), 300);
+    }
+
+    #[test]
+    fn aborted_or_unwritten_runs_exit_non_zero() {
+        let done = RunInfo::unstamped();
+        assert_eq!(exit_code(&done, true), 0);
+        assert_eq!(exit_code(&done, false), 1);
+        let aborted = RunInfo {
+            aborted: true,
+            ..RunInfo::unstamped()
+        };
+        assert_eq!(exit_code(&aborted, true), 1);
     }
 }
