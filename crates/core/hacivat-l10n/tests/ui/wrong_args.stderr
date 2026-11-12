@@ -1,0 +1,41 @@
+error[E0308]: mismatched types
+ --> tests/ui/wrong_args.rs:8:41
+  |
+8 |     let _ = l.t(cm::BRAND_HACIVAT_CAPS, cm::CmErrorUnknown { code: Text("x".into()) });
+  |               -                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `NoArgs`, found `CmErrorUnknown`
+  |               |
+  |               arguments to this method are incorrect
+  |
+note: method defined here
+ --> src/runtime.rs
+  |
+  |     pub fn t<A: IntoFluentArgs>(&self, msg: MsgRef<A>, args: A) -> String {
+  |            ^
+
+error[E0308]: mismatched types
+  --> tests/ui/wrong_args.rs:10:36
+   |
+10 |     let _ = l.t(cm::ERROR_UNKNOWN, NoArgs);
+   |               -                    ^^^^^^ expected `CmErrorUnknown`, found `NoArgs`
+   |               |
+   |               arguments to this method are incorrect
+   |
+note: method defined here
+  --> src/runtime.rs
+   |
+   |     pub fn t<A: IntoFluentArgs>(&self, msg: MsgRef<A>, args: A) -> String {
+   |            ^
+
+error[E0308]: mismatched types
+  --> tests/ui/wrong_args.rs:12:63
+   |
+12 |     let _ = l.t(cm::ERROR_UNKNOWN, cm::CmErrorUnknown { code: Count(1) });
+   |                                                               ^^^^^^^^ expected `Text`, found `Count`
+
+error[E0560]: struct `CmErrorUnknown` has no field named `name`
+  --> tests/ui/wrong_args.rs:14:57
+   |
+14 |     let _ = l.t(cm::ERROR_UNKNOWN, cm::CmErrorUnknown { name: Text("x".into()) });
+   |                                                         ^^^^ `CmErrorUnknown` does not have this field
+   |
+   = note: available fields are: `code`
