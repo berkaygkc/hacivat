@@ -1,0 +1,27 @@
+### Shared texts.
+
+# A fixed label.
+cm-ok = OK
+
+# Rows read so far.
+# Variables:
+#   $count (Number) - number of rows.
+cm-rows =
+    { $count ->
+        [one] One row
+       *[other] { $count } rows
+    }
+
+# Rich text.
+cm-hint = Press <code>F5</code> to refresh.
+
+# Saved.
+# Variables:
+#   $name (String) - connection name.
+cm-saved = Connection { $name } saved.
+    .title = Saved
+
+# Size.
+# Variables:
+#   $size (Number) - bytes.
+cm-size = { NUMBER($size, bogusOption: 1) } bytes
