@@ -1,6 +1,7 @@
 //! Segmented controls (DESIGN.md Components, Segmented Controls): a 26 px group with a
 //! `seam_strong` outline and dividers; the pressed segment sits on `raised` (`panel` in the
-//! light theme) with text ink, the others in `text_2`.
+//! light theme) with text ink, the others in `text_2` (hover lifts them to `text`). Every segment
+//! has the debug selector `segmented-<id>-<index>` for tests.
 
 use hacivat_ui_core::gpui_surface::{
     AnyElement, ElementId, InteractiveElement, IntoElement, ParentElement, Role, SharedString,
@@ -28,6 +29,9 @@ pub struct SegmentItem {
     pub pressed: bool,
     /// The tooltip, and the accessible name of an icon segment.
     pub tooltip: SharedString,
+    /// The accessible name when it differs from the label (a language's short name `TR` is
+    /// announced by its native name). `None`: the label, or the tooltip for an icon segment.
+    pub a11y_name: Option<SharedString>,
     pub on_click: ClickHandler,
 }
 
@@ -86,12 +90,25 @@ impl IntoElement for Segmented {
                 let id = ElementId::from((self.id.clone(), format!("{i}")));
                 let (hover, handle) = interaction_state(&id, window, cx);
                 let focused = focus_visible(&handle, window);
-                let ink = if item.pressed { c.text } else { c.text_2 }.to_hsla();
+                let hovered = *hover.read(cx);
+                // Harman: hover lifts an unpressed segment's ink to `text`; the fill is only for
+                // the pressed segment.
+                let ink = if item.pressed || hovered {
+                    c.text
+                } else {
+                    c.text_2
+                }
+                .to_hsla();
                 let is_icon = matches!(item.content, SegmentContent::Icon(_));
-                let name = match &item.content {
-                    SegmentContent::Label(label) | SegmentContent::Verbatim(label) => label.clone(),
-                    SegmentContent::Icon(_) => item.tooltip.clone(),
-                };
+                let name = item
+                    .a11y_name
+                    .clone()
+                    .unwrap_or_else(|| match &item.content {
+                        SegmentContent::Label(label) | SegmentContent::Verbatim(label) => {
+                            label.clone()
+                        }
+                        SegmentContent::Icon(_) => item.tooltip.clone(),
+                    });
                 let source = match item.content {
                     SegmentContent::Verbatim(_) => TextSource::Data,
                     _ => TextSource::Fluent,
@@ -113,9 +130,10 @@ impl IntoElement for Segmented {
                         .color(ink)
                         .into_any_element(),
                 };
-                let hovered = *hover.read(cx);
+                let selector = format!("segmented-{}-{i}", self.id);
                 let mut segment = div()
                     .id(id)
+                    .debug_selector(move || selector)
                     .declare(Role::Button, name, None)
                     .aria_toggled(accesskit::Toggled::from(item.pressed))
                     .flex()
@@ -134,8 +152,6 @@ impl IntoElement for Segmented {
                     .child(content);
                 if item.pressed {
                     segment = segment.bg(pressed_fill.to_hsla());
-                } else if hovered {
-                    segment = segment.bg(c.hover.to_hsla());
                 }
                 let on_click = item.on_click;
                 let tooltip = item.tooltip;

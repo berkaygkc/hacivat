@@ -26,6 +26,7 @@ pub fn init(cx: &mut App) {
     shell::install_globals(cx);
     // registrations (append-only)
     commands::install(cx);
+    settings_ui::install(cx);
 }
 
 #[cfg(test)]
