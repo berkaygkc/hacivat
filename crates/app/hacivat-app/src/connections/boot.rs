@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use hacivat_driver::{DriverRegistry, EngineCatalog};
 use hacivat_secrets::{CredentialFiles, KeyringBackend, MemoryBackend, SecretBackend, SecretStore};
-use hacivat_session::pipeline::ConnectDeps;
+use hacivat_session::pipeline::{ApprovedRoots, ConnectDeps};
 use hacivat_session::profile::{LoadedProfiles, ProfileStore};
 use hacivat_session::{ConnectionManager, CoreRuntime, ManagerConfig, default_drivers};
 use hacivat_settings::LocalPaths;
@@ -142,6 +142,8 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         private_dir,
         transport_wrap: None,
         extra_steps: Vec::new(),
+        // Home plus paths the user picks in the connection dialog (T17 adds them).
+        approved_roots: ApprovedRoots::for_user(),
         timeout_override: None,
     };
     let manager =
