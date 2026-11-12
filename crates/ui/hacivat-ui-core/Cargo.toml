@@ -8,7 +8,7 @@ publish.workspace = true
 [features]
 # Frame recording for the benches: `frame_loop` and `frames` (= `hacivat-bench`).
 bench = ["dep:hacivat-bench"]
-# Spike-only helpers (unified window, display sizes). Task 4 moves them behind this feature.
+# Spike-only helpers in `spike_support` (unified window, display sizes, window id re-export).
 spike-support = []
 # Paint-level named-rule checks (`named_rules`, R12): needs `Window::rendered_scene`.
 scene-check = ["gpui/bench-support"]

@@ -18,8 +18,8 @@ pub fn resident_set_mib() -> Option<u64> {
 /// `VmRSS` in MiB from the text of `/proc/self/status` (the kernel reports it in kB).
 #[cfg(any(target_os = "linux", test))]
 fn vm_rss_mib(status: &str) -> Option<u64> {
-    let line = status.lines().find(|l| l.starts_with("VmRSS:"))?;
-    let mut fields = line["VmRSS:".len()..].split_whitespace();
+    let rest = status.lines().find_map(|l| l.strip_prefix("VmRSS:"))?;
+    let mut fields = rest.split_whitespace();
     let kib: u64 = fields.next()?.parse().ok()?;
     (fields.next()? == "kB").then_some(kib / KIB_PER_MIB)
 }
