@@ -122,7 +122,14 @@ fn embedded_catalog_content_is_normative() {
         [
             "allowLoadLocalInfile",
             "allowUrlInLocalInfile",
-            "autoDeserialize"
+            "autoDeserialize",
+            "enable_cleartext_plugin",
+            "socket",
+            "prefer_socket",
+            "require_ssl",
+            "verify_ca",
+            "verify_identity",
+            "built_in_roots"
         ]
     );
     assert_eq!(

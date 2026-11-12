@@ -139,9 +139,12 @@ error-conn-config-invalid-body = { $engine ->
 #   $engine (String) - the engine's product name; `SQLite` selects the file wording.
 #   $db (String) - the database Hacivat asked for.
 #   $host (String) - the host Hacivat connected to.
+#   $user (String) - the user name Hacivat sent (MySQL and MariaDB word it as "doesn't exist, or can't access").
 #   $file (String) - the SQLite file's path.
 error-conn-config-unknown-database-title = { $engine ->
         [SQLite] { $file } couldn't be opened.
+        [MySQL] The database { $db } doesn't exist on { $host }, or { $user } can't access it.
+        [MariaDB] The database { $db } doesn't exist on { $host }, or { $user } can't access it.
        *[other] The database { $db } doesn't exist on { $host }.
     }
 # Followed by one button per database the user can open.

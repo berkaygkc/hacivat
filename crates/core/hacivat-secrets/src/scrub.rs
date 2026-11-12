@@ -64,14 +64,20 @@ fn is_scheme(s: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-' | b':'))
 }
 
-/// For scheme-less userinfo (`^(//)?[^\s/@=]*:\S*@`), the text after the optional `//`.
+/// For scheme-less userinfo (`^(//)?[^\s/@=\\]*:\S*@`), the text after the optional `//`.
+///
+/// A `\` before the colon, or a drive letter followed by `:\`, is a Windows path
+/// (`C:\dir\a@b`, `\\host\share:x@y`), not credentials.
 fn bare_userinfo(s: &str) -> Option<&str> {
     let rest = s.strip_prefix("//").unwrap_or(s);
     let colon = rest.find(':')?;
     if rest[..colon]
         .bytes()
-        .any(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'@' | b'='))
+        .any(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'@' | b'=' | b'\\'))
     {
+        return None;
+    }
+    if colon == 1 && rest.as_bytes()[0].is_ascii_alphabetic() && rest[2..].starts_with('\\') {
         return None;
     }
     let after_colon = &rest[colon..];
@@ -373,6 +379,9 @@ mod tests {
                 "u@tcp(h)/db?parseTime=true",
             ),
             ("note: see a@b", "note: see a@b"),
+            // Windows paths are not userinfo.
+            ("C:\\dir\\a@b", "C:\\dir\\a@b"),
+            ("\\\\host\\share:x@y", "\\\\host\\share:x@y"),
             // 6. A numeric password with `#`, `/` or `?`.
             ("postgres://u:12#34@h/db", "postgres://u@h/db"),
             ("postgres://u:12/34@h/db", "postgres://u@h/db"),
@@ -398,6 +407,8 @@ mod tests {
         // multi-byte `İ` and `%` at the end are the risky cases.
         let alphabet = [
             ':', '@', '/', '?', '#', '=', ';', '\'', '{', '}', ' ', '[', '%', 'İ', 'a',
+            // 2-byte (`ş`), 3-byte (`€`) and a backslash.
+            'ş', '€', '\\',
         ];
         let mut s = String::new();
         let mut checked = 0;
@@ -415,6 +426,56 @@ mod tests {
             }
         }
         assert_eq!(checked, 2 * alphabet.len().pow(4));
+    }
+
+    #[test]
+    fn never_panics_on_longer_multibyte_strings() {
+        // A deterministic LCG picks 5 to 24 characters from an alphabet with 1-, 2-, 3- and
+        // 4-byte characters, alone and after `x://`; 20 000 strings.
+        let alphabet = [
+            ':',
+            '@',
+            '/',
+            '?',
+            '#',
+            '=',
+            ';',
+            '\'',
+            '{',
+            '}',
+            ' ',
+            '[',
+            '%',
+            '\\',
+            'a',
+            'ş',
+            'İ',
+            '€',
+            '\u{1F600}',
+        ];
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize
+        };
+        for _ in 0..20_000 {
+            let len = 5 + next() % 20;
+            let s: String = (0..len)
+                .map(|_| alphabet[next() % alphabet.len()])
+                .collect();
+            for input in [s.clone(), format!("x://{s}")] {
+                let out = scrub_url(&input);
+                // The keyword pass re-joins pairs with one space, so a string whose quoted
+                // value runs straight into the next key (`k='v'k2=w`) may gain a byte per pair
+                // (a pair is at least three bytes); it never grows by more than that.
+                assert!(
+                    out.len() <= input.len() + input.len() / 3,
+                    "scrubbing grew the text: {input:?} -> {out:?}"
+                );
+            }
+        }
     }
 
     #[test]

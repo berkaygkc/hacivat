@@ -108,6 +108,8 @@ error-conn-config-invalid-body = { $engine ->
 # Review: PO
 error-conn-config-unknown-database-title = { $engine ->
         [SQLite] { $file } açılamadı.
+        [MySQL] { $host } üzerinde { $db } adlı bir veritabanı yok ya da { $user } kullanıcısı ona erişemiyor.
+        [MariaDB] { $host } üzerinde { $db } adlı bir veritabanı yok ya da { $user } kullanıcısı ona erişemiyor.
        *[other] { $host } üzerinde { $db } adlı bir veritabanı yok.
     }
 # Review: PO

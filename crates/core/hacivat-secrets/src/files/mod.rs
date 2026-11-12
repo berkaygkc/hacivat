@@ -68,9 +68,26 @@ fn read_credential_file(path: &Path) -> Result<CredentialFile, ReadError> {
     })
 }
 
-/// `O_NONBLOCK` for the platforms Hacivat ships on (no `libc` dependency); 0 elsewhere. It only
-/// affects FIFOs and devices, which are refused right after the open.
-#[cfg(any(target_os = "linux", target_os = "android"))]
+/// `O_NONBLOCK` for the platforms Hacivat ships on (no `libc` dependency). It only affects FIFOs
+/// and devices, which are refused right after the open, so 0 is a safe fallback: the open of a
+/// FIFO may then block until a writer appears, but nothing is ever read from it.
+///
+/// On Linux and Android the value is per architecture: `0o4000` on x86, x86_64, arm, aarch64,
+/// riscv64, powerpc, powerpc64 and s390x; mips, sparc and alpha use other values, so they (and
+/// every other unix) get 0 rather than a wrong flag. Apple and the BSDs use 4.
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "arm",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "s390x"
+    )
+))]
 const O_NONBLOCK: i32 = 0o4000;
 #[cfg(any(
     target_vendor = "apple",
@@ -83,8 +100,19 @@ const O_NONBLOCK: i32 = 4;
 #[cfg(all(
     unix,
     not(any(
-        target_os = "linux",
-        target_os = "android",
+        all(
+            any(target_os = "linux", target_os = "android"),
+            any(
+                target_arch = "x86",
+                target_arch = "x86_64",
+                target_arch = "arm",
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "powerpc",
+                target_arch = "powerpc64",
+                target_arch = "s390x"
+            )
+        ),
         target_vendor = "apple",
         target_os = "freebsd",
         target_os = "openbsd",
@@ -147,6 +175,40 @@ mod tests {
     fn invalid_utf8_is_replaced_not_dropped() {
         assert!(secret_from_bytes(b"ok").expose_secret() == "ok");
         assert!(secret_from_bytes(b"a\xffb").expose_secret() == "a\u{fffd}b");
+    }
+
+    /// The hard-coded flag matches the platform's value on the hosts this test can run on.
+    #[cfg(any(
+        target_vendor = "apple",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    #[test]
+    fn o_nonblock_matches_the_host() {
+        let want = if cfg!(target_vendor = "apple") {
+            4
+        } else {
+            0o4000
+        };
+        assert_eq!(O_NONBLOCK, want);
+    }
+
+    /// With a real flag, opening a FIFO that has no writer is refused instead of blocking.
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    #[test]
+    fn a_fifo_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if !made.is_ok_and(|s| s.success()) || O_NONBLOCK == 0 {
+            return;
+        }
+        assert!(matches!(
+            read_credential_file(&fifo),
+            Err(ReadError::NotAFile)
+        ));
     }
 
     #[test]

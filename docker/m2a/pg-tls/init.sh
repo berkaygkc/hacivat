@@ -5,9 +5,13 @@
 # what the server offers, and the tests choose the client's sslmode.
 set -e
 
-openssl req -new -x509 -days 3650 -nodes \
+# A leaf certificate (CA:FALSE, serverAuth, under the 398-day cap of Apple's verifier), not a
+# CA: the platform verifiers reject a CA certificate used as the server's own.
+openssl req -new -x509 -days 397 -nodes \
     -newkey rsa:2048 \
     -subj "/CN=localhost" \
+    -addext "basicConstraints=critical,CA:FALSE" \
+    -addext "extendedKeyUsage=serverAuth" \
     -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
     -keyout "$PGDATA/server.key" \
     -out "$PGDATA/server.crt" 2>/dev/null

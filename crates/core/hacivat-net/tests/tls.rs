@@ -541,6 +541,38 @@ fn tls_file_problems_are_reported_before_connecting() {
     );
 }
 
+/// Stands in for webpki's `CaUsedAsEndEntity`, which rustls wraps in `CertificateError::Other`;
+/// webpki's `Display` prints the variant name.
+#[derive(Debug)]
+struct NamedError(&'static str);
+
+impl std::fmt::Display for NamedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for NamedError {}
+
+#[test]
+fn a_ca_certificate_used_as_the_server_certificate_is_an_untrusted_issuer() {
+    use rustls::{CertificateError, Error, OtherError};
+    let wrap = |name| {
+        Error::InvalidCertificate(CertificateError::Other(OtherError(std::sync::Arc::new(
+            NamedError(name),
+        ))))
+    };
+    assert_eq!(
+        TlsFailure::from_rustls(&wrap("CaUsedAsEndEntity")),
+        TlsFailure::UnknownIssuer
+    );
+    // Other wrapped errors stay `Other` (off Apple, where no OSStatus is read).
+    assert_eq!(
+        TlsFailure::from_rustls(&wrap("InvalidCertValidity")),
+        TlsFailure::Other
+    );
+}
+
 #[test]
 fn tls_failures_map_from_rustls_errors() {
     use rustls::{AlertDescription, CertificateError, Error};

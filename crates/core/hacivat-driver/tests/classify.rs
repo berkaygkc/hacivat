@@ -187,7 +187,8 @@ fn every_code_of_the_tables() {
         (My, "1040", ServerTooManyConnections),
         (My, "1290", ServerReadOnly),
         (My, "1792", ServerReadOnly),
-        (My, "1044", AuthzDatabase),
+        (My, "1044", ConfigUnknownDatabase),
+        (Maria, "1044", ConfigUnknownDatabase),
         (My, "2059", AuthMethodUnsupported),
         (Maria, "3118", AuthLocked),
         (Maria, "1049", ConfigUnknownDatabase),
@@ -260,6 +261,7 @@ fn every_transport_kind() {
         (RawErrorKind::Tls(TlsFailure::Other), TlsHandshake),
         (RawErrorKind::Protocol, Internal),
         (RawErrorKind::Unsupported, Internal),
+        (RawErrorKind::PasswordRequired, AuthInvalid),
         (RawErrorKind::Other, Internal),
         (RawErrorKind::Db, Internal),
     ] {
@@ -482,6 +484,7 @@ fn every_classified_class_is_reachable() {
         RawErrorKind::Protocol,
         RawErrorKind::Cancelled,
         RawErrorKind::Unsupported,
+        RawErrorKind::PasswordRequired,
         RawErrorKind::Other,
     ];
     kinds.extend(
