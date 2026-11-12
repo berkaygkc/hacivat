@@ -14,3 +14,7 @@ pub use gpui::{
     GlobalElementId, InspectorElementId, LayoutId, Role, Style, TextRun, WindowHandle, accesskit,
     hsla,
 };
+// Task 5 (spike-grid): custom painting, text shaping and scroll input.
+pub use gpui::{
+    ContentMask, FontId, InteractiveElement, ShapedLine, TextAlign, fill, point,
+};
