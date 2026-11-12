@@ -1,0 +1,481 @@
+name: ci
+
+# CI never signs (L13): no job reads a signing secret, and the nightly packages are unsigned
+# build artifacts. Release signing happens locally on the PO's Mac (packaging/*.sh).
+#
+# The bench job is a regression signal for the M0 spikes, not authoritative: real numbers come
+# from the reference hardware, not from shared runners.
+
+on:
+  push:
+    branches: [main, m1-foundations]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# bash everywhere (Git Bash on Windows): PowerShell would split `--features a,b` at the comma.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-test:
+    name: build-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins 1.98.1; install it explicitly.
+      - name: Install pinned toolchain
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Linux system dependencies (GPUI)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/linux-deps
+
+      # The runner's default Xcode may predate `-downloadComponent` (exit 64,
+      # "invalid option"); select the newest installed Xcode first.
+      - name: Select newest Xcode
+        if: runner.os == 'macOS'
+        run: |
+          xcode="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+          if [ -z "$xcode" ]; then
+            echo "::error::no /Applications/Xcode_*.app on this runner"
+            exit 1
+          fi
+          echo "selecting $xcode"
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+
+      # Xcode 26+ ships the Metal compiler as a separate component. Download it
+      # only when this xcodebuild supports that; then insist the compiler exists,
+      # so a missing toolchain fails here and not deep inside the GPUI build.
+      - name: macOS Metal Toolchain
+        if: runner.os == 'macOS'
+        run: |
+          if xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            echo "Metal compiler already present"
+          elif xcodebuild -help 2>&1 | grep -q -- '-downloadComponent'; then
+            xcodebuild -downloadComponent MetalToolchain
+          else
+            echo "xcodebuild has no -downloadComponent; relying on the bundled Metal compiler"
+          fi
+          if ! xcrun -sdk macosx metal --version; then
+            echo "::error::Metal compiler (xcrun metal) is missing after toolchain setup"
+            exit 1
+          fi
+
+      - name: Lint VF capture script (PSScriptAnalyzer)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
+            Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          }
+          $issues = Invoke-ScriptAnalyzer -Path design/vf/capture.ps1 -Severity Warning,Error
+          $issues | Format-Table -AutoSize
+          if ($issues) { exit 1 }
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --release --locked
+
+      # Full test set, lines 1-4 (F2). Line 5 is the nightly release-tests job.
+      - name: Test (1/4) workspace
+        run: cargo test --workspace --locked
+
+      - name: Test (2/4) ui-core, test-support + scene-check
+        run: cargo test --locked -p hacivat-ui-core --features test-support,scene-check
+
+      - name: Test (3/4) l10n, pseudo
+        run: cargo test --locked -p hacivat-l10n --features pseudo
+
+      - name: Test (4/4) app, scene-check + pseudo
+        run: cargo test --locked -p hacivat-app --features scene-check,pseudo
+
+  tokens:
+    name: tokens
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/linux-deps
+      - uses: Swatinem/rust-cache@v2
+      - name: Token staleness check
+        run: cargo run --locked -p xtask -- tokens --check
+
+  check-deps:
+    name: check-deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/linux-deps
+      - uses: Swatinem/rust-cache@v2
+      - name: Dependency guard
+        run: cargo run --locked -p xtask -- check-deps
+
+  l10n-check:
+    name: l10n-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/linux-deps
+      - uses: Swatinem/rust-cache@v2
+      - name: Catalog and literal lint
+        run: cargo run --locked -p xtask -- l10n check
+      - name: Repository catalogs are clean (F19)
+        run: cargo test --locked -p xtask l10n -- --ignored repo_catalogs_are_clean
+
+  # Turkish locale on the host: casing and formatting must not depend on LANG (INV-3).
+  turkey-test:
+    name: turkey-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      LANG: tr_TR.UTF-8
+      LC_ALL: tr_TR.UTF-8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/linux-deps
+      - name: Generate the tr_TR locale
+        run: |
+          sudo apt-get install -y --no-install-recommends locales
+          sudo locale-gen tr_TR.UTF-8
+          locale -a | grep -i '^tr_TR'
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (1/4) workspace
+        run: cargo test --workspace --locked
+      - name: Test (2/4) ui-core, test-support + scene-check
+        run: cargo test --locked -p hacivat-ui-core --features test-support,scene-check
+      - name: Test (3/4) l10n, pseudo
+        run: cargo test --locked -p hacivat-l10n --features pseudo
+      - name: Test (4/4) app, scene-check + pseudo
+        run: cargo test --locked -p hacivat-app --features scene-check,pseudo
+
+  # Spec 7.1 / F29: runtime language switching (tests of Tasks 13, 16 and 17).
+  switch:
+    name: switch (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Linux system dependencies (GPUI)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/linux-deps
+      - name: Select newest Xcode
+        if: runner.os == 'macOS'
+        run: |
+          xcode="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+          [ -n "$xcode" ] || { echo "::error::no /Applications/Xcode_*.app on this runner"; exit 1; }
+          sudo xcode-select -s "$xcode"
+      - name: macOS Metal Toolchain
+        if: runner.os == 'macOS'
+        run: |
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            if xcodebuild -help 2>&1 | grep -q -- '-downloadComponent'; then
+              xcodebuild -downloadComponent MetalToolchain
+            fi
+          fi
+          xcrun -sdk macosx metal --version
+      - uses: Swatinem/rust-cache@v2
+      - name: Language switching tests
+        run: cargo test --locked -p hacivat-app --features scene-check,pseudo -- switch language
+
+  # Needs the `hacivat` binary's --smoke flag (Task 13, F17). Skips until crates/bin/hacivat/src/smoke.rs
+  # exists, so this job stays green on a branch that predates the app shell.
+  launch-smoke:
+    name: launch-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect the app shell
+        id: guard
+        shell: bash
+        env:
+          SMOKE_HASH: ${{ hashFiles('crates/bin/hacivat/src/smoke.rs') }}
+        run: |
+          if [ -n "$SMOKE_HASH" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::crates/bin/hacivat/src/smoke.rs is absent; launch smoke skipped until Task 13 merges"
+          fi
+      - name: Install pinned toolchain
+        if: steps.guard.outputs.present == 'true'
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Linux system dependencies (GPUI)
+        if: steps.guard.outputs.present == 'true' && runner.os == 'Linux'
+        uses: ./.github/actions/linux-deps
+      - name: Select newest Xcode
+        if: steps.guard.outputs.present == 'true' && runner.os == 'macOS'
+        run: |
+          xcode="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+          [ -n "$xcode" ] || { echo "::error::no /Applications/Xcode_*.app on this runner"; exit 1; }
+          sudo xcode-select -s "$xcode"
+      - name: macOS Metal Toolchain
+        if: steps.guard.outputs.present == 'true' && runner.os == 'macOS'
+        run: |
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            if xcodebuild -help 2>&1 | grep -q -- '-downloadComponent'; then
+              xcodebuild -downloadComponent MetalToolchain
+            fi
+          fi
+          xcrun -sdk macosx metal --version
+      - uses: Swatinem/rust-cache@v2
+        if: steps.guard.outputs.present == 'true'
+      - name: Build the release binary
+        if: steps.guard.outputs.present == 'true'
+        run: cargo build --release --locked -p hacivat
+      - name: Launch smoke
+        if: steps.guard.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a cargo run --release --locked -p hacivat -- --smoke | tee smoke.log
+          else
+            cargo run --release --locked -p hacivat -- --smoke | tee smoke.log
+          fi
+          grep -Eq '^first-frame-ms=[0-9]+' smoke.log || { echo "::error::no first-frame-ms= line"; exit 1; }
+          grep -Eq '^idle-rss-mib=[0-9]+' smoke.log || { echo "::error::no idle-rss-mib= line"; exit 1; }
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # deny.toml [graph] targets cover macOS, Windows and Linux; --all-features covers the
+      # scene-check dependencies (F28).
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+          arguments: --all-features
+
+  # Full test set, line 5 (F10): release-only fallback and the 10 ms parse budget.
+  release-tests:
+    name: release-tests
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/linux-deps
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (5/5) l10n, release
+        run: cargo test --release --locked -p hacivat-l10n --features pseudo
+
+  bench:
+    name: bench (regression signal only)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: ./.github/actions/linux-deps
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build spikes
+        run: cargo build --release --locked -p spike-grid -p spike-editor
+
+      - name: Generate B3 fixture
+        run: cargo xtask gen-sql --lines 50000 --long-line 100000 --out target/fixtures/b3-50k.sql
+
+      - name: Bench spike-grid fling (software rendering under a virtual display)
+        run: xvfb-run -a cargo run --locked -p spike-grid --release -- --bench fling
+
+      - name: Bench spike-editor typing
+        run: xvfb-run -a cargo run --locked -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench typing
+
+      - name: Bench spike-editor typing-long-line
+        run: xvfb-run -a cargo run --locked -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench typing-long-line
+
+      - name: Bench spike-editor completion
+        run: xvfb-run -a cargo run --locked -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench completion
+
+      - name: Upload bench JSON (regression signal only, not authoritative)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-regression-signal-only-not-authoritative
+          path: target/bench/*.json
+          if-no-files-found: error
+
+  # Unsigned installers (L13): macOS universal .dmg, Windows NSIS, Linux AppImage + .deb. Nothing
+  # here signs, notarizes or minisigns; releases are signed locally from these artifacts.
+  nightly-package:
+    name: nightly-package (${{ matrix.os }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Linux system dependencies (GPUI)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/linux-deps
+      - name: Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends libfuse2t64 file
+      - name: Select newest Xcode
+        if: runner.os == 'macOS'
+        run: |
+          xcode="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+          [ -n "$xcode" ] || { echo "::error::no /Applications/Xcode_*.app on this runner"; exit 1; }
+          sudo xcode-select -s "$xcode"
+      - name: macOS Metal Toolchain and universal targets
+        if: runner.os == 'macOS'
+        run: |
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            if xcodebuild -help 2>&1 | grep -q -- '-downloadComponent'; then
+              xcodebuild -downloadComponent MetalToolchain
+            fi
+          fi
+          xcrun -sdk macosx metal --version
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-packager
+        shell: bash
+        run: cargo install cargo-packager --locked --version '^0.11'
+      - name: Nightly version
+        id: version
+        shell: bash
+        run: echo "value=0.1.0-nightly.$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - name: Package (macOS, unsigned universal dmg)
+        if: runner.os == 'macOS'
+        env:
+          NIGHTLY_VERSION: ${{ steps.version.outputs.value }}
+        run: packaging/package-macos.sh "$NIGHTLY_VERSION"
+      - name: Package (Linux, unsigned AppImage and deb)
+        if: runner.os == 'Linux'
+        env:
+          NIGHTLY_VERSION: ${{ steps.version.outputs.value }}
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: packaging/package-linux.sh "$NIGHTLY_VERSION"
+      - name: Package (Windows, unsigned NSIS)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          NIGHTLY_VERSION: ${{ steps.version.outputs.value }}
+        run: ./packaging/package-windows.ps1 $env:NIGHTLY_VERSION
+      - name: Upload unsigned packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: hacivat-nightly-unsigned-${{ runner.os }}
+          path: |
+            target/packager/*/*.dmg
+            target/packager/*/*-setup.exe
+            target/packager/*/*.AppImage
+            target/packager/*/*.deb
+          if-no-files-found: error
+
+  # Task 18's pseudo-locale screen harness. Skips until tests/shots.rs exists.
+  pseudo-screens:
+    name: pseudo-screens (${{ matrix.os }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect the screen harness
+        id: guard
+        shell: bash
+        env:
+          SHOTS_HASH: ${{ hashFiles('crates/app/hacivat-app/tests/shots.rs') }}
+        run: |
+          if [ -n "$SHOTS_HASH" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::tests/shots.rs is absent; pseudo-screens skipped until Task 18 merges"
+          fi
+      - name: Install pinned toolchain
+        if: steps.guard.outputs.present == 'true'
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Linux system dependencies (GPUI)
+        if: steps.guard.outputs.present == 'true' && runner.os == 'Linux'
+        uses: ./.github/actions/linux-deps
+      - name: Select newest Xcode and Metal Toolchain
+        if: steps.guard.outputs.present == 'true' && runner.os == 'macOS'
+        run: |
+          xcode="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+          [ -n "$xcode" ] || { echo "::error::no /Applications/Xcode_*.app on this runner"; exit 1; }
+          sudo xcode-select -s "$xcode"
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            if xcodebuild -help 2>&1 | grep -q -- '-downloadComponent'; then
+              xcodebuild -downloadComponent MetalToolchain
+            fi
+          fi
+          xcrun -sdk macosx metal --version
+      - uses: Swatinem/rust-cache@v2
+        if: steps.guard.outputs.present == 'true'
+      - name: Render the pseudo-locale screens
+        if: steps.guard.outputs.present == 'true'
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a cargo test --locked -p hacivat-app --features scene-check,pseudo --test shots -- --nocapture
+          else
+            cargo test --locked -p hacivat-app --features scene-check,pseudo --test shots -- --nocapture
+          fi
+      - name: Upload screens
+        if: steps.guard.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pseudo-screens-${{ runner.os }}
+          path: target/shots/**
+          if-no-files-found: error

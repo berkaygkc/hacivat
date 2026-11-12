@@ -3,6 +3,7 @@ mod check_deps;
 mod gen_sql;
 mod l10n;
 mod tokens;
+mod update_key;
 mod vf;
 
 use std::path::{Path, PathBuf};
@@ -22,6 +23,7 @@ fn main() -> ExitCode {
         Some("gen-sql") => gen_sql::run(),
         Some("l10n") => l10n::run(),
         Some("tokens") => tokens::run(),
+        Some("check-update-key") => update_key::run(),
         Some("vf") => vf::run(),
         other => {
             eprintln!("unknown xtask command: {other:?}\navailable: bench-report, check-deps");
