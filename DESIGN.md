@@ -607,7 +607,7 @@ Mono connection name in the header, then 22px key/value rows on a 92px key colum
 - **Production hairline:** a 1px red line across the top of an editor bound to production.
 - **Toolbar:** raised 32px bar with Run (primary), Explain, Format (ghost), a seam-led breadcrumb of connection, database and schema in mono, and auto-commit and limit chips.
 - **Gutter:** 58px, line numbers at text-3 (current line at text), green check on executed statements, a 1px green range bar per executed statement and a blue bar on the current statement. End-of-line status shows "executed", timing and row count.
-- **Completion popup:** 300px list plus 236px detail pane on raised, 6px radius, seam-strong border, popover shadow. Items are 23px with kind icon, mono name with the typed prefix underlined in blue, and type at text-3; out-of-scope items dim and italicise their type. Active item uses blue-tint-strong. A 24px footer lists key hints and the match count. It expands along Y only.
+- **Completion popup:** 300px list plus 236px detail pane on raised, 6px radius, seam-strong border, popover shadow. Items are 23px with kind icon, mono name with the typed prefix underlined in blue, and type at text-2; out-of-scope items dim and italicise their type. Active item uses blue-tint-strong. A 24px footer lists key hints and the match count. It expands along Y only.
 
 ### Results
 - **Result tabs:** same anatomy as editor tabs; staging tabs carry the hollow swatch, "(staging)" and an amber pending stamp with count.

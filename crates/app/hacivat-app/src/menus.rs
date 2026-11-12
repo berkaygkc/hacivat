@@ -13,10 +13,15 @@ use std::sync::Mutex;
 
 use hacivat_l10n::ids;
 use hacivat_ui::actions::ActionRegistry;
-use hacivat_ui::menu::MenuItemSpec;
+use hacivat_ui::menu::{MENU_MIN_WIDTH_PX, MenuItemSpec};
 use hacivat_ui::text::TextFn;
-use hacivat_ui_core::gpui_surface::{App, KeyBinding, Keystroke, Menu, MenuItem, RunCommand};
+use hacivat_ui_core::fonts::font_for;
+use hacivat_ui_core::gpui_surface::{
+    App, KeyBinding, Keystroke, Menu, MenuItem, Pixels, Point, RunCommand, SharedString, TextRun,
+    Window, point, px,
+};
 use hacivat_ui_core::keymap::chord_string;
+use hacivat_ui_core::theme::{Theme, TypeStyle};
 
 use crate::l10n_global::{text_fn_id, tr_id};
 use crate::shell::ActiveKeymap;
@@ -175,6 +180,56 @@ pub fn popup_items(model: &[MenuGroup], cx: &App) -> Vec<MenuItemSpec> {
     out
 }
 
+/// Room for an access key shown after a label, `(X)`, when the label has no usable letter.
+const ACCESS_KEY_SUFFIX_PX: f32 = 24.0;
+
+/// How wide the in-window menu of `items` draws: its widest row (label, gap, keys and the row
+/// padding), the surface padding and borders, at least `MENU_MIN_WIDTH_PX`.
+fn popup_width(items: &[MenuItemSpec], window: &Window, cx: &App) -> f32 {
+    let t = Theme::get(cx).tokens;
+    let ink = t.colors.text.to_hsla();
+    let measure = |text: SharedString, style: &TypeStyle| -> f32 {
+        let run = TextRun {
+            len: text.len(),
+            font: font_for(style),
+            color: ink,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let line = window
+            .text_system()
+            .shape_line(text, px(style.size_px), &[run], None);
+        f32::from(line.width)
+    };
+    let widest = items
+        .iter()
+        .filter(|i| !i.separator)
+        .map(|i| {
+            let label = measure((i.label)(cx), &t.type_ramp.body);
+            let keys = i
+                .keys
+                .as_ref()
+                .map(|k| k(cx))
+                .filter(|k| !k.is_empty())
+                .map_or(0.0, |k| t.spacing.xl + measure(k, &t.type_ramp.mono_kbd));
+            label + ACCESS_KEY_SUFFIX_PX + keys + 2.0 * t.spacing.lg
+        })
+        .fold(0.0, f32::max);
+    // Surface padding (xs on each side) and its 1 px border.
+    (widest + 2.0 * t.spacing.xs + 2.0).max(MENU_MIN_WIDTH_PX)
+}
+
+/// Where the in-window menu of `items` opens: under the title bar, its right edge `sm` inside
+/// the window's right edge (the app-menu button is at the right end of the title bar), clamped
+/// so the whole menu stays inside the window.
+pub fn in_window_menu_anchor(items: &[MenuItemSpec], window: &Window, cx: &App) -> Point<Pixels> {
+    let t = Theme::get(cx).tokens;
+    let width = popup_width(items, window, cx);
+    let x = (window.viewport_size().width - px(width + t.spacing.sm)).max(px(0.0));
+    point(x, px(t.spacing.titlebar_height))
+}
+
 /// Interns chord texts: GPUI's `KeyBinding::new` takes `&'static str`, and the set of chords in
 /// the keymap data is small and fixed.
 fn intern(chord: String) -> &'static str {
@@ -230,9 +285,15 @@ fn menu_key_bindings(model: &[MenuGroup], cx: &App) -> Vec<KeyBinding> {
 }
 
 /// Rebuilds the menus after a language or keymap change (F15): on macOS the menu bar and its
-/// key equivalents; elsewhere nothing, since the in-window menu reads its labels when it
+/// key equivalents; elsewhere no menu, since the in-window menu reads its labels when it
 /// renders.
+///
+/// GPUI `KeyBinding`s are owned by this function: on every platform it clears every binding,
+/// then on macOS binds only the menu key equivalents, under [`MENU_KEY_CONTEXT`]. Widgets and
+/// later tasks must not call `bind_keys`; keys go through Hacivat's dispatcher (the key-capture
+/// hook and the keymap data, R7).
 pub fn rebuild(cx: &mut App) {
+    cx.clear_key_bindings();
     if !cfg!(target_os = "macos") {
         return;
     }
@@ -242,8 +303,6 @@ pub fn rebuild(cx: &mut App) {
     let model = menu_model(reg);
     let bindings = menu_key_bindings(&model, cx);
     let menus = build_menus(&model, cx);
-    // Hacivat binds no other GPUI keys (R7): these are the only bindings.
-    cx.clear_key_bindings();
     cx.bind_keys(bindings);
     cx.set_menus(menus);
 }

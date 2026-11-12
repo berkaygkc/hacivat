@@ -9,16 +9,15 @@ use hacivat_settings::{LanguagePref, ThemePref};
 use hacivat_ui::actions::{ActionDef, ActionFn, ActionRegistry};
 use hacivat_ui::button::ButtonKind;
 use hacivat_ui::dialog::{DialogButton, DialogSpec};
-use hacivat_ui::menu::MENU_MIN_WIDTH_PX;
 use hacivat_ui::panes::Axis;
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
-use hacivat_ui_core::gpui_surface::{App, AppContext as _, Context, Window, point, px};
+use hacivat_ui_core::gpui_surface::{App, AppContext as _, Context, Window};
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 
 use crate::commands::palette;
 use crate::l10n_global::{L10nGlobal, switch_locale, text_fn, text_fn_id, tr, ui_language};
 use crate::menus;
-use crate::shell::{AppState, Workspace, update_settings};
+use crate::shell::{AppState, Workspace, flush_pending_writes, update_settings};
 use crate::theme_pref::apply_theme;
 
 /// The key context every command here belongs to.
@@ -147,10 +146,11 @@ pub fn register_workspace_actions(reg: &mut ActionRegistry) {
         (
             "app.restart",
             ids::hv::CMD_APP_RESTART.id,
-            // Deferred, so nothing is being updated when it runs.
+            // Deferred, so nothing is being updated when it runs. The pending settings and
+            // layout writes land first: a restart inside an update runs no quit hooks.
             Rc::new(|_, cx| {
                 cx.defer(|cx| {
-                    // controller: call shell::flush_pending_writes before restart (T17)
+                    flush_pending_writes(cx);
                     cx.restart();
                 })
             }),
@@ -295,11 +295,7 @@ fn show_menu(window: &mut Window, cx: &mut App) {
         Some(reg) => menus::popup_items(&menus::menu_model(reg), cx),
         None => return,
     };
-    let t = Theme::get(cx).tokens;
-    let anchor = point(
-        window.viewport_size().width - px(MENU_MIN_WIDTH_PX + t.spacing.sm),
-        px(t.spacing.titlebar_height),
-    );
+    let anchor = menus::in_window_menu_anchor(&items, window, cx);
     let menu = ws.update(cx, |ws, cx| ws.open_popup_menu(anchor, items, window, cx));
     menu.update(cx, |m, _| m.label(text_fn_id("hui-menu-app")));
 }

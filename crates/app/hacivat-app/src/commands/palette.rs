@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use hacivat_l10n::{MatchMode, SearchOpts, build_key, find, turkish_tolerant_for};
+use hacivat_l10n::{MatchKind, MatchMode, SearchOpts, build_key, find, turkish_tolerant_for};
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::palette::{Palette, PaletteEvent, PaletteItem};
 use hacivat_ui_core::gpui_surface::{
@@ -44,49 +44,75 @@ pub struct RecentCommands(pub Vec<String>);
 impl Global for RecentCommands {}
 
 /// Ranks `entries` for `query` (F14, C18):
-/// 1. matches on the localized title, by kind (ExactWord > Prefix > Substring > Fuzzy, the
-///    search key's score bands) and score;
-/// 2. then matches on the English title only;
+/// 1. matches on the localized title,
+/// 2. then matches on the English title only,
 /// 3. then matches on the action ID only.
 ///
-/// Ties go to the more recent command (`recent` is most recent first), then to registry order.
-/// An empty query lists every entry. Only localized-title matches are highlighted.
+/// Within a layer the match kind decides first (ExactWord > Prefix > Substring > Fuzzy), then
+/// recency (`recent` is most recent first), then the score inside the kind (an earlier match
+/// scores higher), then registry order. So a recently run command leads every command matched
+/// the same way, not only exact score ties. An empty query lists every entry, recent first.
+/// Only localized-title matches are highlighted.
 pub fn rank_commands(
     query: &str,
     entries: &[CommandEntry],
     recent: &[String],
     opts: &SearchOpts,
 ) -> Vec<PaletteItem> {
-    let mut scored: Vec<(u8, u32, usize, usize, PaletteItem)> = entries
+    struct Ranked {
+        layer: u8,
+        kind: u8,
+        recency: usize,
+        score: u32,
+        order: usize,
+        item: PaletteItem,
+    }
+    let mut ranked: Vec<Ranked> = entries
         .iter()
         .enumerate()
         .filter_map(|(order, e)| {
-            let (layer, score, highlight) =
-                if let Some(m) = find(&build_key(&e.title, opts), query, opts) {
-                    (0, m.score, m.ranges)
-                } else if let Some(m) = find(&build_key(&e.english_title, opts), query, opts) {
-                    (1, m.score, Vec::new())
-                } else {
-                    let m = find(&build_key(e.id, opts), query, opts)?;
-                    (2, m.score, Vec::new())
-                };
-            let recency = recent.iter().position(|r| r == e.id).unwrap_or(usize::MAX);
+            let (layer, m) = if let Some(m) = find(&build_key(&e.title, opts), query, opts) {
+                (0, m)
+            } else if let Some(m) = find(&build_key(&e.english_title, opts), query, opts) {
+                (1, m)
+            } else {
+                (2, find(&build_key(e.id, opts), query, opts)?)
+            };
             let item = PaletteItem {
                 id: SharedString::new_static(e.id),
                 title: e.title.clone(),
                 keys: e.keys.clone(),
-                highlight,
+                highlight: if layer == 0 { m.ranges } else { Vec::new() },
             };
-            Some((layer, score, recency, order, item))
+            Some(Ranked {
+                layer,
+                kind: kind_rank(m.kind),
+                recency: recent.iter().position(|r| r == e.id).unwrap_or(usize::MAX),
+                score: m.score,
+                order,
+                item,
+            })
         })
         .collect();
-    scored.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then(b.1.cmp(&a.1))
-            .then(a.2.cmp(&b.2))
-            .then(a.3.cmp(&b.3))
+    ranked.sort_by(|a, b| {
+        a.layer
+            .cmp(&b.layer)
+            .then(a.kind.cmp(&b.kind))
+            .then(a.recency.cmp(&b.recency))
+            .then(b.score.cmp(&a.score))
+            .then(a.order.cmp(&b.order))
     });
-    scored.into_iter().map(|s| s.4).collect()
+    ranked.into_iter().map(|r| r.item).collect()
+}
+
+/// The match kinds best first.
+fn kind_rank(kind: MatchKind) -> u8 {
+    match kind {
+        MatchKind::ExactWord => 0,
+        MatchKind::Prefix => 1,
+        MatchKind::Substring => 2,
+        MatchKind::Fuzzy => 3,
+    }
 }
 
 /// The enabled registered actions, titled in the UI language with their bound keys.

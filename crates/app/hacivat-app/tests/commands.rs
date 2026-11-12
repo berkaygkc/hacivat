@@ -360,6 +360,46 @@ fn recent_breaks_ties() {
     assert_eq!(r[0].id, "app.about");
 }
 
+/// Review B1: recency outranks a better score inside the same match kind, not only exact ties.
+/// For `tab` every tab title is an ExactWord match; "Next tab" scores best (earliest match).
+#[test]
+fn recent_leads_matches_of_the_same_kind() {
+    let ids = |r: Vec<PaletteItem>| r.into_iter().map(|i| i.id.to_string()).collect::<Vec<_>>();
+    let plain = ids(rank_commands("tab", &fixture_items_en(), &[], &off()));
+    assert_eq!(plain[0], "workspace.next_tab");
+    let at = |v: &[String], id: &str| v.iter().position(|x| x == id).unwrap();
+    assert!(at(&plain, "workspace.close_tab") < at(&plain, "workspace.new_console_tab"));
+    let r = ids(rank_commands(
+        "tab",
+        &fixture_items_en(),
+        &["workspace.close_tab".into()],
+        &off(),
+    ));
+    assert_eq!(r[0], "workspace.close_tab");
+    assert!(at(&r, "workspace.close_tab") < at(&r, "workspace.new_console_tab"));
+    let r = ids(rank_commands(
+        "tab",
+        &fixture_items_en(),
+        &["workspace.new_console_tab".into()],
+        &off(),
+    ));
+    assert_eq!(r[0], "workspace.new_console_tab");
+}
+
+/// Review B1: a better match kind still beats recency. For `set`, "Open settings" is a Prefix
+/// title match; the recent "Switch between dark and light theme" only matches fuzzily.
+#[test]
+fn a_better_kind_beats_recency() {
+    let r = rank_commands(
+        "set",
+        &fixture_items_en(),
+        &["workspace.toggle_theme".into()],
+        &off(),
+    );
+    assert_eq!(r[0].id, "workspace.open_settings");
+    assert!(r.iter().any(|i| i.id == "workspace.toggle_theme"));
+}
+
 #[test]
 fn every_action_title_exists_in_en() {
     let (reg, l) = (registry(), l10n_en());
@@ -603,6 +643,97 @@ fn menu_chords_are_bound_under_the_menu_context(cx: &mut TestAppContext) {
     assert_eq!(found, [(true, Some(MENU_KEY_CONTEXT.to_string()))]);
 }
 
+/// The popup menu's bounds and the window's viewport size, after a frame.
+fn popup_bounds(
+    vcx: &mut VisualTestContext,
+) -> (gpui::Bounds<gpui::Pixels>, gpui::Size<gpui::Pixels>) {
+    vcx.run_until_parked();
+    let bounds = vcx
+        .debug_bounds("popup-menu")
+        .expect("the popup menu is drawn");
+    let viewport = in_window(vcx, |window, _| window.viewport_size());
+    (bounds, viewport)
+}
+
+fn assert_inside(bounds: gpui::Bounds<gpui::Pixels>, viewport: gpui::Size<gpui::Pixels>) {
+    assert!(
+        bounds.origin.x >= px(0.0) && bounds.origin.y >= px(0.0),
+        "{bounds:?}"
+    );
+    assert!(
+        bounds.right() <= viewport.width,
+        "{bounds:?} in {viewport:?}"
+    );
+    assert!(
+        bounds.bottom() <= viewport.height,
+        "{bounds:?} in {viewport:?}"
+    );
+}
+
+/// Review B3, end to end where the in-window menu exists: `app.show_menu` opens layer `menu`
+/// under the title bar, inside the window.
+#[cfg(not(target_os = "macos"))]
+#[gpui::test]
+fn show_menu_opens_the_in_window_menu_inside_the_window(cx: &mut TestAppContext) {
+    let vcx = shell(cx, "en");
+    assert!(run(vcx, "app.show_menu"));
+    assert_eq!(layer_ids(vcx), ["menu"]);
+    let (bounds, viewport) = popup_bounds(vcx);
+    assert_inside(bounds, viewport);
+    assert_eq!(bounds.origin.y, px(40.0));
+}
+
+/// Review B3 on every platform: the anchor `app.show_menu` uses keeps the whole menu (wider
+/// than its 200 px minimum) inside the window, right-aligned under the title bar.
+#[gpui::test]
+fn the_in_window_menu_anchor_keeps_the_menu_inside_the_window(cx: &mut TestAppContext) {
+    use hacivat_app::menus::in_window_menu_anchor;
+    let vcx = shell(cx, "tr");
+    with_ws(vcx, |w, window, cx| {
+        let items = popup_items(&menu_model(cx.global::<ActionRegistry>()), cx);
+        let anchor = in_window_menu_anchor(&items, window, cx);
+        w.open_popup_menu(anchor, items, window, cx);
+    });
+    assert_eq!(layer_ids(vcx), ["menu"]);
+    let (bounds, viewport) = popup_bounds(vcx);
+    assert_inside(bounds, viewport);
+    assert!(bounds.size.width > px(200.0), "{bounds:?}");
+    assert!(
+        viewport.width - bounds.right() <= px(40.0),
+        "{bounds:?} in {viewport:?}"
+    );
+}
+
+/// Review B2: `menus::rebuild` owns GPUI's key bindings; after it, every binding is a menu key
+/// equivalent under `HacivatMenu`, so none can fire on an element.
+#[gpui::test]
+fn every_gpui_binding_after_rebuild_is_a_menu_equivalent(cx: &mut TestAppContext) {
+    let vcx = shell(cx, "en");
+    vcx.update(|_, cx| {
+        cx.bind_keys([gpui::KeyBinding::new(
+            "cmd-y",
+            RunCommand {
+                id: "app.about".into(),
+            },
+            None,
+        )]);
+        hacivat_app::menus::rebuild(cx);
+    });
+    let contexts: Vec<Option<String>> = vcx.read(|cx| {
+        cx.key_bindings()
+            .borrow()
+            .bindings()
+            .map(|b| b.predicate().map(|p| p.to_string()))
+            .collect()
+    });
+    if cfg!(target_os = "macos") {
+        assert!(!contexts.is_empty());
+    }
+    for context in &contexts {
+        assert_eq!(context.as_deref(), Some(MENU_KEY_CONTEXT), "{contexts:?}");
+    }
+}
+
 #[gpui::test]
 fn run_command_from_a_menu_runs_the_action(cx: &mut TestAppContext) {
     let vcx = shell(cx, "en");
@@ -617,14 +748,51 @@ fn run_command_from_a_menu_runs_the_action(cx: &mut TestAppContext) {
     assert_eq!(tab_count(vcx), 2);
 }
 
-/// `app.restart` asks the platform to restart. (The flush of pending writes before it is wired
-/// by the controller at merge, from Task 17's `shell::flush_pending_writes`.)
+/// `app.restart` asks the platform to restart.
 #[gpui::test]
 fn restart_asks_the_platform_to_restart(cx: &mut TestAppContext) {
     let vcx = shell(cx, "en");
     let mut restarted = vcx.cx.expect_restart();
     assert!(run(vcx, "app.restart"));
     assert!(matches!(restarted.try_recv(), Ok(Some(_))));
+}
+
+/// Ruling: a settings change and a layout change still inside their debounce are on disk by the
+/// time `app.restart` asks the platform to restart (nothing is parked in between, so neither
+/// background writer has run).
+#[gpui::test]
+fn restart_flushes_pending_writes_before_restarting(cx: &mut TestAppContext) {
+    use hacivat_app::shell::update_settings;
+    use hacivat_settings::ThemePref;
+    let root = tempfile::tempdir().unwrap();
+    let vcx = shell_at(cx, root.path(), "en");
+    let mut restarted = vcx.cx.expect_restart();
+    let settings = root.path().join("config/settings.toml");
+    let layout_file = root.path().join("data/workspace.json");
+    assert!(!layout_file.exists());
+    let ws = workspace(vcx);
+    let written_at_restart = in_window(vcx, |window, cx| {
+        update_settings(cx, |s| s.ui.theme = ThemePref::Light);
+        ws.update(cx, |w, cx| w.toggle_explorer(window, cx));
+        assert!(ActionRegistry::run("app.restart", window, cx));
+        (
+            std::fs::read_to_string(&settings).unwrap_or_default(),
+            std::fs::read_to_string(&layout_file).unwrap_or_default(),
+        )
+    });
+    // The restart is deferred to the end of that update; read the files once it has run.
+    assert!(matches!(restarted.try_recv(), Ok(Some(_))));
+    assert_eq!(written_at_restart, (String::new(), String::new()));
+    let saved_settings = std::fs::read_to_string(&settings).unwrap();
+    assert!(
+        saved_settings.contains("theme = \"light\""),
+        "{saved_settings}"
+    );
+    let saved_layout = std::fs::read_to_string(&layout_file).unwrap();
+    assert!(
+        saved_layout.contains("\"explorer_visible\": false"),
+        "{saved_layout}"
+    );
 }
 
 /// T13 fix: a caller that subscribes to the dialog `open_dialog` returns (and keeps no handle)
