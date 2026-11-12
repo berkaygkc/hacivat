@@ -1,9 +1,9 @@
-# L026 fixture: the reachable class has both English messages.
+# L026 fixture: every class is reachable, and each has both English messages.
 
 [[class]]
 id = "auth.invalid"
 reachable = true
 
 [[class]]
-id = "ssh.host_key_unknown"
-reachable = false
+id = "network.dns"
+reachable = true

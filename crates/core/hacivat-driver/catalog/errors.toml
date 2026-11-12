@@ -136,11 +136,12 @@ fixes = ["edit_connection"]
 id = "authz.object"
 reachable = false
 
-# Validate shows these problems on the form, so the error offers no button.
+# Controller ruling B (T10 review): a TLS-setup or SQLite-file problem can reach the error
+# dialog outside the form, so it offers Edit connection (the brief's `[]` is overridden).
 [[class]]
 id = "config.invalid"
 reachable = true
-fixes = []
+fixes = ["edit_connection"]
 
 [[class]]
 id = "config.unknown_database"

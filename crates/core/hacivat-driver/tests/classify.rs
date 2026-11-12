@@ -159,7 +159,8 @@ fn fixes_and_retryable() {
         fixes_for(TlsUntrusted),
         [FixId::EncryptWithoutVerifying, FixId::EditConnection]
     );
-    assert!(fixes_for(ConfigInvalid).is_empty());
+    // Controller ruling B (T10 review) overrides the brief's `[]`.
+    assert_eq!(fixes_for(ConfigInvalid), [FixId::EditConnection]);
     assert!(!classify(Pg, Phase::DriverConnect, &db_err(Pg, "28P01", "")).retryable);
 }
 
@@ -297,6 +298,31 @@ fn a_cancel_wins_over_a_server_code() {
     let mut e = db_err(Pg, "28P01", "x");
     e.kind = RawErrorKind::Cancelled;
     assert_eq!(classify(Pg, Phase::Auth, &e).class, Cancelled);
+}
+
+#[test]
+fn a_coded_error_is_never_read_by_its_text() {
+    // MySQL 1698 (auth_socket: "Access denied for user 'root'@'localhost'") is not a wrong
+    // password, and the tables do not know it: the English fragment must not decide.
+    let e = db_err(My, "1698", "Access denied for user 'root'@'localhost'");
+    assert_eq!(classify(My, Phase::Auth, &e).class, Internal);
+    // A PostgreSQL SQLSTATE the table lacks, with text a fragile rule would match.
+    let e = db_err(
+        Pg,
+        "XX000",
+        "FATAL: too many connections for role \"deploy\"",
+    );
+    assert_eq!(classify(Pg, Phase::Auth, &e).class, Internal);
+    // The same texts without any code do reach the fragile rules.
+    assert_eq!(
+        classify(
+            My,
+            Phase::Auth,
+            &text_err("Access denied for user 'root'@'localhost'", None)
+        )
+        .class,
+        AuthInvalid
+    );
 }
 
 #[test]
@@ -536,6 +562,6 @@ fn tls_setup_errors_are_configuration_problems() {
         let c = classify_tls_setup(&e);
         assert_eq!(c.class, ConfigInvalid, "{e:?}");
         assert!(!c.retryable);
-        assert!(c.fixes.is_empty());
+        assert_eq!(c.fixes, [FixId::EditConnection]);
     }
 }

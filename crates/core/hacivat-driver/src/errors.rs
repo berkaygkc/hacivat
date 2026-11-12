@@ -79,7 +79,8 @@ pub struct Classified {
 /// 2. The server's code, through the engine's tables (`errors.toml`). Never its text.
 /// 3. The transport: DNS, socket errors, TLS failures, timeouts. Any I/O failure while resolving
 ///    names is `network.dns`.
-/// 4. Fragile English text rules, only when the server's language is unknown or English.
+/// 4. Fragile English text rules, only for an error with no code at all, and only when the
+///    server's language is unknown or English.
 /// 5. Otherwise `internal`; the surface shows the server's text verbatim.
 ///
 /// The retry flag and the fixes follow the class (steps 7 and 8).
@@ -206,8 +207,16 @@ fn by_transport(phase: Phase, kind: &RawErrorKind) -> Option<ErrClass> {
     })
 }
 
-/// Step 4: fragile English text rules, skipped unless the server speaks English (or did not say).
+/// Step 4: fragile English text rules, only for a server error that carries no code at all (a
+/// coded error the tables do not know stays `internal`), and only when the server speaks English
+/// (or did not say).
+///
+/// The `[fragile]` needles are tried in alphabetical order (a `BTreeMap`) and the first match
+/// wins, so they must stay disjoint: no needle may contain another (a unit test checks this).
 fn by_english_text(server: &ServerMessage) -> Option<ErrClass> {
+    if server.sqlstate.is_some() || server.vendor_code.is_some() {
+        return None;
+    }
     let english = server.lang_hint.as_deref().is_none_or(|tag| {
         tag.split(['-', '_'])
             .next()
@@ -291,6 +300,16 @@ mod tests {
         for (needle, class) in &r.fragile {
             assert!(reachable.contains(class), "{needle} -> {class:?}");
             assert!(needle.is_ascii(), "{needle}");
+        }
+    }
+
+    #[test]
+    fn fragile_needles_are_disjoint() {
+        let needles: Vec<&String> = registry().fragile.keys().collect();
+        for a in &needles {
+            for b in &needles {
+                assert!(a == b || !a.contains(b.as_str()), "`{a}` contains `{b}`");
+            }
         }
     }
 

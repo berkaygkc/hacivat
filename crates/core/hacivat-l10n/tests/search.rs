@@ -334,6 +334,8 @@ fn opts_tr() -> SearchOpts {
     }
 }
 
+// `find` delegates to `PreparedQuery`, so these equalities hold by construction: they pin the
+// public contract Task 18 relies on. `find`'s own tests above carry the matching coverage.
 #[test]
 fn prepared_query_equals_find() {
     for (q, texts) in corpus() {

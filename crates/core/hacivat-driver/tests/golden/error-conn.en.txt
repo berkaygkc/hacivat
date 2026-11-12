@@ -13,7 +13,7 @@ network.ipv6_unavailable body: The host has only IPv6 addresses, and this networ
 tls.handshake title: The secure connection to db-prod-us.acme.io couldn't be set up.
 tls.handshake body: Hacivat and the server couldn't agree on encryption. Check the connection's TLS settings; the technical details have the reason.
 tls.untrusted title: db-prod-us.acme.io sent a certificate this Mac doesn't trust.
-tls.untrusted body: It may be self-signed or issued by your company's own CA. Review it before you trust it.
+tls.untrusted body: The server's certificate isn't signed by an authority this Mac trusts. You can encrypt the connection without verifying the certificate, or ask your administrator for the CA.
 tls.hostname title: The certificate from db-prod-us.acme.io is for a different name.
 tls.hostname body: The server's certificate doesn't cover the name Hacivat connected to. Connect with a name the certificate lists, such as the server's full domain name instead of an IP address or an alias.
 tls.protocol title: The secure connection to db-prod-us.acme.io failed a safety check.

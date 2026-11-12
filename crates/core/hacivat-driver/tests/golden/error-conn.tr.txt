@@ -13,7 +13,7 @@ network.ipv6_unavailable body: Sunucunun yalnızca IPv6 adresleri var ve bu ağ 
 tls.handshake title: db-prod-us.acme.io ile güvenli bağlantı kurulamadı.
 tls.handshake body: Hacivat ile sunucu şifreleme konusunda anlaşamadı. Bağlantının TLS ayarlarını denetleyin; nedeni teknik ayrıntılarda.
 tls.untrusted title: db-prod-us.acme.io, bu Mac'in güvenmediği bir sertifika gönderdi.
-tls.untrusted body: Kendinden imzalı ya da şirketinizin kendi CA'sınca verilmiş olabilir. Güvenmeden önce inceleyin.
+tls.untrusted body: Sunucunun sertifikası, bu Mac'in güvendiği bir makam tarafından imzalanmamış. Bağlantıyı sertifikayı doğrulamadan şifreleyebilir ya da yöneticinizden CA'yı isteyebilirsiniz.
 tls.hostname title: db-prod-us.acme.io sunucusunun sertifikası başka bir ad için verilmiş.
 tls.hostname body: Sunucunun sertifikası, Hacivat'ın bağlandığı adı kapsamıyor. Sertifikada yazan bir adla bağlanın; örneğin IP adresi ya da takma ad yerine sunucunun tam alan adıyla.
 tls.protocol title: db-prod-us.acme.io ile güvenli bağlantı bir güvenlik denetiminden geçemedi.

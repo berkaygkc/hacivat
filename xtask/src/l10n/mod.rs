@@ -111,10 +111,14 @@ fn report(root: &Path, code_roots: &[&Path]) -> Report {
 
     smoke::check(&locales, &en, &mut out);
 
-    let registry = root
-        .parent()
-        .and_then(|repo| std::fs::read_to_string(repo.join(rules::ERRORS_TOML)).ok());
-    rules::check_error_registry(registry.as_deref(), &en, &mut out);
+    // L026 runs on a repository-shaped tree: when the driver crate is next to `locales/`, its
+    // registry must be readable.
+    if let Some(repo) = root.parent()
+        && repo.join(rules::DRIVER_DIR).is_dir()
+    {
+        let registry = std::fs::read_to_string(repo.join(rules::ERRORS_TOML)).ok();
+        rules::check_error_registry(registry.as_deref(), &en, &mut out);
+    }
 
     if !code_roots.is_empty() {
         let en_ids: BTreeSet<String> = en.msgs.keys().map(|k| (*k).to_string()).collect();
@@ -628,10 +632,25 @@ mod tests {
     }
 
     #[test]
+    fn l026_fails_loudly_without_the_registry() {
+        // The fixture has the driver crate but no `errors.toml`.
+        let f = check_fixture("l026/no-registry");
+        assert_eq!(codes(f.clone()), ["L026"]);
+        assert_eq!(f[0].severity, Severity::Error);
+        assert_eq!(f[0].id, "errors.toml is missing or unreadable");
+    }
+
+    #[test]
     #[ignore = "repo-wide: run by CI l10n-check and the gate (F19)"]
     fn repo_catalogs_are_clean() {
         let roots = repo_code_roots();
         let refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+        // L026 reads the driver's registry; it must exist in the repository.
+        assert!(
+            crate::workspace_root().join(rules::ERRORS_TOML).is_file(),
+            "{} is missing",
+            rules::ERRORS_TOML
+        );
         let f = check(&crate::workspace_root().join("locales"), &refs);
         assert!(errors(&f).is_empty(), "{:#?}", errors(&f));
     }

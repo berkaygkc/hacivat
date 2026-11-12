@@ -58,7 +58,10 @@ error-conn-tls-handshake-body = Hacivat and the server couldn't agree on encrypt
 # Variables:
 #   $host (String) - the host Hacivat connected to.
 error-conn-tls-untrusted-title = { $host } sent a certificate this Mac doesn't trust.
-error-conn-tls-untrusted-body = It may be self-signed or issued by your company's own CA. Review it before you trust it.
+# Review: PO
+# Changed from the approved mock text ("…Review it before you trust it."): M2a has no
+# certificate review, only "Encrypt without verifying" (R3). M2b restores the review flow.
+error-conn-tls-untrusted-body = The server's certificate isn't signed by an authority this Mac trusts. You can encrypt the connection without verifying the certificate, or ask your administrator for the CA.
 
 # tls.hostname
 # Variables:

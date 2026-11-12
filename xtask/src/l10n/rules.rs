@@ -926,13 +926,13 @@ fn check_shape(m: &Msg, en: &Msg, file: &str, locale: &str, out: &mut Vec<Findin
 /// The connect-error registry, relative to the repository root (the parent of `locales/`).
 pub const ERRORS_TOML: &str = "crates/core/hacivat-driver/catalog/errors.toml";
 
+/// The driver crate whose registry L026 reads; a tree that has it must have `ERRORS_TOML`.
+pub const DRIVER_DIR: &str = "crates/core/hacivat-driver";
+
 /// L026: every class `errors.toml` marks `reachable` has English `error-conn-<class>-title` and
-/// `-body` messages. `src` is the registry's text; `None` (no registry next to the catalogs)
-/// checks nothing.
+/// `-body` messages. `src` is the registry's text; `None` means it could not be read, which is
+/// itself an error (the caller only checks trees that have the driver crate).
 pub fn check_error_registry(src: Option<&str>, en: &English<'_>, out: &mut Vec<Finding>) {
-    let Some(src) = src else {
-        return;
-    };
     let mut err = |line: u32, id: &str| {
         out.push(finding(
             "L026",
@@ -942,6 +942,10 @@ pub fn check_error_registry(src: Option<&str>, en: &English<'_>, out: &mut Vec<F
             line,
             id,
         ));
+    };
+    let Some(src) = src else {
+        err(0, "errors.toml is missing or unreadable");
+        return;
     };
     let Ok(table) = src.parse::<toml::Table>() else {
         err(0, "errors.toml is not valid TOML");
@@ -964,6 +968,8 @@ pub fn check_error_registry(src: Option<&str>, en: &English<'_>, out: &mut Vec<F
         if !reachable {
             continue;
         }
+        // The same rule as `hacivat_proto::ErrClass::fluent_stem` (xtask does not link
+        // hacivat-proto): `.` and `_` become `-`, after `error-conn-`.
         let stem: String = id
             .chars()
             .map(|c| if c == '.' || c == '_' { '-' } else { c })

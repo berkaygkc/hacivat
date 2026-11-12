@@ -45,7 +45,9 @@ error-conn-tls-handshake-body = Hacivat ile sunucu şifreleme konusunda anlaşam
 # Review: PO
 error-conn-tls-untrusted-title = { $host }, bu Mac'in güvenmediği bir sertifika gönderdi.
 # Review: PO
-error-conn-tls-untrusted-body = Kendinden imzalı ya da şirketinizin kendi CA'sınca verilmiş olabilir. Güvenmeden önce inceleyin.
+# Changed from the approved mock text: M2a has no certificate review, only
+# "Encrypt without verifying" (R3). M2b restores the review flow.
+error-conn-tls-untrusted-body = Sunucunun sertifikası, bu Mac'in güvendiği bir makam tarafından imzalanmamış. Bağlantıyı sertifikayı doğrulamadan şifreleyebilir ya da yöneticinizden CA'yı isteyebilirsiniz.
 
 # Review: PO
 error-conn-tls-hostname-title = { $host } sunucusunun sertifikası başka bir ad için verilmiş.
