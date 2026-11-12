@@ -12,8 +12,9 @@ use hacivat_session::profile::{Profile, ProfileEndpoint};
 use hacivat_ui::capsule::env_swatch;
 use hacivat_ui::text::{Label, TextSource};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, AnyView, App, AppContext as _, Context, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Window, div, px,
+    AnyElement, AnyView, App, AppContext as _, Context, InteractiveElement as _, IntoElement,
+    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
+    Window, div, px,
 };
 use hacivat_ui_core::theme::Theme;
 
@@ -66,12 +67,14 @@ impl SheetView {
             .gap(px(t.spacing.md))
             .child(
                 div().w(px(KEY_PX)).flex_none().child(
+                    // ## m2a-t21-shots: a long key ellipsizes in its 92 px column.
                     Label::new(
                         key,
                         TextSource::Fluent,
                         t.type_ramp.caption,
                         c.text_2.to_hsla(),
                     )
+                    .truncate(true)
                     .id(SharedString::from(format!("sheet-key-{index}"))),
                 ),
             )
@@ -200,7 +203,15 @@ impl Render for SheetView {
                 for (i, (key, value)) in Self::rows(&theme, &p, cx).into_iter().enumerate() {
                     body = body.child(Self::kv(&theme, i, key, value));
                 }
-                body.into_any_element()
+                // ## m2a-t21-shots: a short tile scrolls its rows instead of cutting the last
+                // ones off under the status bar.
+                div()
+                    .id("sheet-rows")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(body)
+                    .into_any_element()
             }
         };
         div()

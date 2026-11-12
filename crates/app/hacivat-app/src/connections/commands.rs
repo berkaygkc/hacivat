@@ -213,8 +213,9 @@ pub fn toggle_connect(id: ProfileId, cx: &mut App) {
 pub fn show_save_error(error: &SaveError, cx: &mut App) {
     let id = match error {
         SaveError::StoreReadOnly => ids::hv::CONN_STORE_READ_ONLY,
-        SaveError::Io(_) => ids::hv::EXPLORER_WRITE_FAILED,
-        SaveError::Secret(_) => ids::hv::EXPLORER_SECRET_FAILED,
+        // ## m2a-t21-shots: the dialog's and the fixes' save-error texts.
+        SaveError::Io(_) => ids::hv::CONN_FIX_SAVE_FAILED,
+        SaveError::Secret(_) => ids::hv::CONN_DLG_SAVE_SECRET,
         SaveError::NotFound => return,
     };
     let kind = if *error == SaveError::StoreReadOnly {
@@ -258,12 +259,12 @@ fn copy_as_url(p: &Profile, cx: &mut App) {
     let mut toast = Toast::new(
         ToastKind::Info,
         if copied.omitted_password {
-            text_fn(ids::hv::EXPLORER_COPIED_NOPW)
+            text_fn(ids::hv::CONN_TOAST_NOPW)
         } else {
             Rc::new(|_: &App| Default::default())
         },
     );
-    toast.title = Some(text_fn(ids::hv::EXPLORER_COPIED));
+    toast.title = Some(text_fn(ids::hv::CONN_TOAST_COPIED));
     ToastQueue::push(cx, toast);
 }
 

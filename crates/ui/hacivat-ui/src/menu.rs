@@ -45,6 +45,10 @@ pub struct MenuItemSpec {
     pub checked: bool,
     /// A dimmer second text after the label (`text-2`).
     pub hint: Option<TextFn>,
+    // ## m2a-t21-shots
+    /// A destructive item (NOTES §8: "Delete… in red"): its label is drawn in `red` while it is
+    /// enabled. Off by default.
+    pub danger: bool,
 }
 
 impl MenuItemSpec {
@@ -58,6 +62,7 @@ impl MenuItemSpec {
             separator: false,
             checked: false,
             hint: None,
+            danger: false,
         }
     }
 
@@ -71,6 +76,7 @@ impl MenuItemSpec {
             separator: true,
             checked: false,
             hint: None,
+            danger: false,
         }
     }
 
@@ -97,6 +103,29 @@ impl MenuItemSpec {
     pub fn hint(mut self, hint: TextFn) -> Self {
         self.hint = Some(hint);
         self
+    }
+
+    // ## m2a-t21-shots
+    /// Marks a destructive item (its label is `red` while enabled).
+    pub fn danger(mut self, danger: bool) -> Self {
+        self.danger = danger;
+        self
+    }
+
+    /// The label's ink: `text-3` when disabled, `red` for an enabled destructive item, else
+    /// `text`.
+    pub fn label_ink(
+        &self,
+        c: &hacivat_ui_core::theme::Colors,
+    ) -> hacivat_ui_core::gpui_surface::Hsla {
+        if self.disabled {
+            c.text_3
+        } else if self.danger {
+            c.red
+        } else {
+            c.text
+        }
+        .to_hsla()
     }
 
     fn selectable(&self) -> bool {
@@ -350,7 +379,7 @@ impl Render for PopupMenu {
                         .into_any_element();
                 }
                 let selected = self.selected == Some(i);
-                let ink = if item.disabled { c.text_3 } else { c.text }.to_hsla();
+                let ink = item.label_ink(c);
                 let text = (item.label)(cx);
                 // The check column (12 px, `blue` check) sits before the label on every row of a
                 // menu that has one.
@@ -469,5 +498,33 @@ impl Render for PopupMenu {
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(PopupMenuEvent::Dismissed)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
         menu.children(rows)
+    }
+}
+
+// ## m2a-t21-shots
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use hacivat_ui_core::gpui_surface::{App, SharedString};
+    use hacivat_ui_core::theme::{DARK, LIGHT};
+
+    use super::MenuItemSpec;
+
+    fn item() -> MenuItemSpec {
+        MenuItemSpec::new(Rc::new(|_: &App| SharedString::from("Delete…")), "x.delete")
+    }
+
+    #[test]
+    fn a_danger_item_is_red_until_it_is_disabled() {
+        for c in [&DARK.colors, &LIGHT.colors] {
+            assert!(!item().danger, "off by default");
+            assert_eq!(item().label_ink(c), c.text.to_hsla());
+            assert_eq!(item().danger(true).label_ink(c), c.red.to_hsla());
+            assert_eq!(
+                item().danger(true).disabled(true).label_ink(c),
+                c.text_3.to_hsla()
+            );
+        }
     }
 }

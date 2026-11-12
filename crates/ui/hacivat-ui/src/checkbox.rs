@@ -137,20 +137,22 @@ impl Checkbox {
             .flex_none()
             .items_center()
             .gap(px(t.spacing.md))
-            .child(mark)
-            .child(Label::new(
+            // ## m2a-t21-shots: in a narrow row the sub-label ellipsizes (tooltip: all of
+            // it); the box and the label keep their size.
+            .flex_shrink(1.0)
+            .min_w(px(0.0))
+            .child(div().flex_none().child(mark))
+            .child(div().flex_none().child(Label::new(
                 label.clone(),
                 TextSource::Fluent,
                 t.type_ramp.body,
                 ink.to_hsla(),
-            ));
+            )));
         if let Some(sub) = sub_label.clone() {
-            row = row.child(Label::new(
-                sub,
-                TextSource::Fluent,
-                t.type_ramp.body,
-                sub_ink.to_hsla(),
-            ));
+            row = row.child(
+                Label::new(sub, TextSource::Fluent, t.type_ramp.body, sub_ink.to_hsla())
+                    .truncate(true),
+            );
         }
 
         // Assistive technology hears the state (also when disabled) and the sub-label as the

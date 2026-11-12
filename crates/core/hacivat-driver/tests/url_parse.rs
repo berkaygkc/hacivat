@@ -1159,3 +1159,33 @@ fn only_owner_keys_move_and_other_secret_keys_are_refused() {
         assert!(!format!("{o:?}").contains("SECRETPW"));
     }
 }
+
+// ## m2a-t21-shots
+
+#[test]
+fn the_public_secret_key_rule_covers_the_import_names() {
+    use hacivat_driver::url::is_secret_param;
+    for key in [
+        "password",
+        "PASSWORD",
+        "sslpassword",
+        "sslkeypassword",
+        "SSLKeyPassword",
+        "pgpassword",
+        "mysql_pwd",
+        "--password",
+        "db_password",
+        "x-pwd",
+    ] {
+        assert!(is_secret_param(key), "{key}");
+    }
+    for key in [
+        "password_db",
+        "user",
+        "sslmode",
+        "sslkey",
+        "application_name",
+    ] {
+        assert!(!is_secret_param(key), "{key}");
+    }
+}

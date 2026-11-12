@@ -16,7 +16,7 @@ use hacivat_ui_core::gpui_surface::{
     Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
     ParentElement, Pixels, Point, Render, ShapedLine, SharedString,
     StatefulInteractiveElement as _, Style, Styled, TextAlign, TextRun, UnderlineStyle, Window,
-    div, point, px, relative,
+    canvas, div, point, px, relative,
 };
 use hacivat_ui_core::theme::{Caps, Theme, TypeStyle, popover_surface};
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -569,7 +569,8 @@ impl Element for LabelElement {
             source: self.label.source,
             size_px: self.label.style.size_px,
             painted_px: f32::from(painted_width),
-            clipped: painted_width > bounds.size.width + px(0.5),
+            clipped: painted_width > bounds.size.width + px(0.5)
+                || cut_by_clip(bounds, window.content_mask().bounds),
             truncated: ellipsize,
             path: self.label.path(),
         });
@@ -614,6 +615,175 @@ impl Element for LabelElement {
                 }
             }
         });
+    }
+}
+
+// ## m2a-t21-shots
+
+/// Wrapping prose (a [`Label`] is one line), recorded in the [`TextRegistry`] while it is laid
+/// out, in the tree's order like a label, with what it really drew: `painted_px` is its widest wrapped
+/// line, and `clipped` is set when the wrapped text is taller or wider than its box, or when
+/// the box runs past the clip of its container on the left or right, or is cut at its top or
+/// bottom edge. The frame checks (pseudo-locale
+/// bracketing, nothing clipped, the 11 px floor) then see paragraphs too.
+pub struct Paragraph {
+    text: SharedString,
+    source: TextSource,
+    style: TypeStyle,
+    color: Hsla,
+    id: Option<&'static str>,
+    centered: bool,
+    location: &'static Location<'static>,
+}
+
+/// A [`Paragraph`] of `text` in `style` and `color`.
+#[track_caller]
+pub fn paragraph(
+    text: impl Into<SharedString>,
+    source: TextSource,
+    style: TypeStyle,
+    color: Hsla,
+) -> Paragraph {
+    Paragraph {
+        text: text.into(),
+        source,
+        style,
+        color,
+        id: None,
+        centered: false,
+        location: Location::caller(),
+    }
+}
+
+impl Paragraph {
+    /// Appended to the recorded path as `#id`, for tests.
+    pub fn id(mut self, id: &'static str) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    /// Centres each wrapped line (empty states).
+    pub fn centered(mut self) -> Self {
+        self.centered = true;
+        self
+    }
+}
+
+/// Whether a label laid out in `bounds` is cut at the left or right edge of its container's
+/// clip (`mask`) while it shows in the clip's rows: a control row wider than its card, say.
+/// A label scrolled wholly above or below the clip is hidden, not cut.
+fn cut_by_clip(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> bool {
+    let slack = px(0.5);
+    let in_rows = bounds.top() < mask.bottom() && bounds.bottom() > mask.top();
+    in_rows && (bounds.left() < mask.left() - slack || bounds.right() > mask.right() + slack)
+}
+
+/// What a paragraph laid out in `bounds` (clipped to `mask`) drew: its widest line and whether
+/// part of it is cut off. `lines` holds each wrapped line's width and height. Half a pixel of
+/// slack absorbs rounding.
+fn paragraph_fit(
+    lines: &[(Pixels, Pixels)],
+    bounds: Bounds<Pixels>,
+    mask: Bounds<Pixels>,
+) -> (Pixels, bool) {
+    let slack = px(0.5);
+    let widest = lines.iter().map(|(w, _)| *w).fold(px(0.0), Pixels::max);
+    let height = lines.iter().map(|(_, h)| *h).fold(px(0.0), |a, b| a + b);
+    // Partly inside the clip, partly outside: cut at the clip's top or bottom edge.
+    let cut_vertically = (bounds.top() < mask.bottom() && bounds.bottom() > mask.bottom() + slack)
+        || (bounds.bottom() > mask.top() && bounds.top() < mask.top() - slack);
+    let clipped = height > bounds.size.height + slack
+        || widest > bounds.size.width + slack
+        || bounds.left() < mask.left() - slack
+        || bounds.right() > mask.right() + slack
+        || cut_vertically;
+    (widest, clipped)
+}
+
+impl IntoElement for Paragraph {
+    type Element = AnyElement;
+
+    fn into_element(self) -> AnyElement {
+        let Paragraph {
+            text,
+            source,
+            style,
+            color,
+            id,
+            centered,
+            location,
+        } = self;
+        let file = location.file().replace('\\', "/");
+        let path: SharedString = match id {
+            Some(id) => format!("{file}:{}:{}#{id}", location.line(), location.column()),
+            None => format!("{file}:{}:{}", location.line(), location.column()),
+        }
+        .into();
+        let recorded = text.clone();
+        // Recorded in prepaint, as `Label` records, so the registry keeps the tree's order.
+        let probe = canvas(
+            move |bounds, window, cx| {
+                if !cx.try_global::<TextRegistry>().is_some_and(|r| r.enabled) {
+                    return;
+                }
+                let run = TextRun {
+                    len: recorded.len(),
+                    font: font_for(&style),
+                    color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let line_height = px(style.line_height);
+                let lines: Vec<(Pixels, Pixels)> = window
+                    .text_system()
+                    .shape_text(
+                        recorded.clone(),
+                        px(style.size_px),
+                        &[run],
+                        Some(bounds.size.width),
+                        None,
+                    )
+                    .map(|lines| {
+                        lines
+                            .iter()
+                            .map(|l| {
+                                let size = l.size(line_height);
+                                (size.width, size.height)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mask = window.content_mask().bounds;
+                let (painted, clipped) = paragraph_fit(&lines, bounds, mask);
+                TextRegistry::record(cx, || RenderedText {
+                    text: recorded,
+                    source,
+                    size_px: style.size_px,
+                    painted_px: f32::from(painted),
+                    clipped,
+                    truncated: false,
+                    path,
+                });
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
+        let mut block = div().relative().w_full();
+        if centered {
+            block = block.text_center();
+        }
+        block
+            .font(font_for(&style))
+            .text_size(px(style.size_px))
+            .line_height(px(style.line_height))
+            .text_color(color)
+            .child(text)
+            .child(probe)
+            .into_any_element()
     }
 }
 
@@ -750,5 +920,51 @@ mod tests {
         );
         // A cut inside a character floors to its boundary.
         assert_eq!(el.highlight_in(&shown, 1), Vec::<Range<usize>>::new());
+    }
+
+    // ## m2a-t21-shots
+
+    #[test]
+    fn paragraphs_and_labels_cut_by_their_box_or_their_clip_are_clipped() {
+        let b = |x: f32, w: f32, h: f32| {
+            Bounds::new(
+                point(px(x), px(0.0)),
+                hacivat_ui_core::gpui_surface::size(px(w), px(h)),
+            )
+        };
+        let mask = b(0.0, 300.0, 1000.0);
+        let lines = [(px(120.0), px(18.0)), (px(80.0), px(18.0))];
+        // Two 18 px lines in a 36 px box: everything shows.
+        assert_eq!(
+            paragraph_fit(&lines, b(10.0, 276.0, 36.0), mask),
+            (px(120.0), false)
+        );
+        // A box one line short.
+        assert!(paragraph_fit(&lines, b(10.0, 276.0, 18.0), mask).1);
+        // A line wider than its box (a word that cannot wrap).
+        assert!(paragraph_fit(&lines, b(10.0, 100.0, 36.0), mask).1);
+        // A box that runs past its container's clip on the right, then on the left.
+        assert!(paragraph_fit(&lines, b(100.0, 276.0, 36.0), mask).1);
+        assert!(paragraph_fit(&lines, b(-4.0, 276.0, 36.0), mask).1);
+        // A box cut by a short container (a 6 px clip over a 36 px paragraph).
+        let short = Bounds::new(
+            point(px(0.0), px(0.0)),
+            hacivat_ui_core::gpui_surface::size(px(300.0), px(6.0)),
+        );
+        assert!(paragraph_fit(&lines, b(10.0, 276.0, 36.0), short).1);
+        // Wholly below a scrolled clip: hidden, not cut.
+        let above = Bounds::new(
+            point(px(0.0), px(-100.0)),
+            hacivat_ui_core::gpui_surface::size(px(300.0), px(50.0)),
+        );
+        assert!(!paragraph_fit(&lines, b(10.0, 276.0, 36.0), above).1);
+        // A label: cut at the clip's right edge in a visible row; hidden when scrolled away.
+        let clip = Bounds::new(
+            point(px(0.0), px(0.0)),
+            hacivat_ui_core::gpui_surface::size(px(300.0), px(100.0)),
+        );
+        assert!(!cut_by_clip(b(10.0, 200.0, 18.0), clip));
+        assert!(cut_by_clip(b(200.0, 120.0, 18.0), clip));
+        assert!(!cut_by_clip(b(200.0, 120.0, 18.0), above));
     }
 }

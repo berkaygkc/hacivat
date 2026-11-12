@@ -272,7 +272,8 @@ pub fn menu_items(cx: &App, id: ProfileId) -> Vec<MenuItemSpec> {
         item(text_fn(ids::hv::CONN_MENU_DUP), "connection.duplicate"),
         item(text_fn(ids::hv::CONN_MENU_COPY_URL), "connection.copy_url"),
         MenuItemSpec::separator(),
-        item(text_fn(ids::hv::CONN_MENU_DELETE), "connection.delete"),
+        // ## m2a-t21-shots: "Delete… in red" (NOTES §8).
+        item(text_fn(ids::hv::CONN_MENU_DELETE), "connection.delete").danger(true),
     ]
 }
 
@@ -577,12 +578,13 @@ impl ExplorerView {
                             .size(IconSize::Chrome)
                             .color(c.green.to_hsla()),
                     )
-                    .child(Label::new(
+                    // ## m2a-t21-shots: the meta keeps its width; the name truncates first.
+                    .child(div().flex_none().child(Label::new(
                         latency_label(cx, info),
                         TextSource::Fluent,
                         t.type_ramp.mono_data,
                         c.text_2.to_hsla(),
-                    ));
+                    )));
             }
             LiveState::Connecting(_) => row = row.child(run_marker(theme)),
             LiveState::Failed(_) | LiveState::Lost { .. } => {
@@ -594,12 +596,12 @@ impl ExplorerView {
             }
             LiveState::Disconnected => {}
         }
-        row = row.child(Label::new(
+        row = row.child(div().flex_none().child(Label::new(
             engine_label(p, info.as_deref()),
             TextSource::Data,
             t.type_ramp.caption,
             c.text_2.to_hsla(),
-        ));
+        )));
         let list = self.list_focus.clone();
         let list_right = list.clone();
         row.on_mouse_down(
@@ -726,10 +728,17 @@ pub use fixtures::*;
 
 #[cfg(feature = "shots")]
 mod fixtures {
-    use hacivat_proto::{DbmsKind, EnvTag};
+    use std::sync::Arc;
+
+    use hacivat_driver::Support;
+    use hacivat_proto::{DbmsKind, EnvTag, ErrClass};
+    use hacivat_session::LiveState;
+    use hacivat_session::pipeline::{Progress, TrailStep};
     use hacivat_session::profile::{Profile, ProfileDraft, ProfileEndpoint};
     use hacivat_ui_core::gpui_surface::{App, Window};
 
+    use crate::connections::capsule::sample_live_info;
+    use crate::connections::error_view::sample_error;
     use crate::connections::model::ConnectionsModel;
 
     fn add(cx: &mut App, name: &str, engine: DbmsKind, env: Option<EnvTag>, read_only: bool) {
@@ -762,6 +771,19 @@ mod fixtures {
         .detach();
     }
 
+    /// Shows `name` in `state` (the mirror's value; nothing connects).
+    fn live(cx: &mut App, name: &str, state: LiveState) {
+        let id = cx
+            .global::<ConnectionsModel>()
+            .profiles()
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.id);
+        if let Some(id) = id {
+            cx.global_mut::<ConnectionsModel>().set_live(id, state);
+        }
+    }
+
     /// The explorer with no connection (NOTES §8 empty state).
     pub fn empty_fixture(_window: &mut Window, _cx: &mut App) {}
 
@@ -785,6 +807,32 @@ mod fixtures {
         add(cx, "scratch", DbmsKind::Postgres, Some(EnvTag::Dev), false);
         add(cx, "app.db", DbmsKind::Sqlite, Some(EnvTag::Local), false);
         add(cx, "legacy", DbmsKind::Postgres, None, false);
+        // ## m2a-t21-shots: every live mark (NOTES §8): connected with latency (and the
+        // plaintext flag), connecting (the run marker), failed (the alert).
+        live(
+            cx,
+            "billing",
+            LiveState::Connected(Arc::new(sample_live_info(false, false, Support::Supported))),
+        );
+        live(
+            cx,
+            "orders-test",
+            LiveState::Connecting(Progress {
+                trail: Vec::new(),
+                current: Some(TrailStep::SignIn),
+                started: std::time::Instant::now(),
+            }),
+        );
+        live(
+            cx,
+            "scratch",
+            LiveState::Failed(Arc::new(sample_error(
+                ErrClass::NetworkRefused,
+                TrailStep::Connect,
+                None,
+                "",
+            ))),
+        );
         let first = cx
             .global::<ConnectionsModel>()
             .profiles()

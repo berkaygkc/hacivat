@@ -1280,3 +1280,49 @@ fn the_explanation_popover_takes_and_returns_the_focus(cx: &mut TestAppContext) 
     assert!(focused(vcx, &input));
     assert_eq!(*events.borrow(), [ExplainEvent::Dismissed]);
 }
+
+// ## m2a-t21-shots: popover paragraphs face the frame checks
+
+#[gpui::test]
+fn explanation_paragraphs_are_recorded_after_the_title_and_unclipped(cx: &mut TestAppContext) {
+    let vcx = explain_fixture(cx);
+    enable_registry(vcx);
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let drawn: Vec<&str> = frame.iter().map(|r| r.text.as_ref()).collect();
+    assert_eq!(
+        drawn,
+        [
+            "Unencrypted connection",
+            "ci-mariadb sends queries and results in plain text.",
+            "To encrypt, set TLS to Require in Edit connection.",
+        ]
+    );
+    for r in &frame[1..] {
+        assert!(r.path.contains("hacivat-ui/src/explain.rs:"), "{}", r.path);
+        assert_eq!(r.size_px, 12.5);
+        assert!(!r.clipped, "{r:?}");
+    }
+}
+
+#[gpui::test]
+fn a_paragraph_in_a_box_too_short_for_it_is_clipped(cx: &mut TestAppContext) {
+    let vcx = host(cx, |_, cx| {
+        let t = Theme::get(cx).tokens;
+        div()
+            .w(px(120.0))
+            .h(px(6.0))
+            .overflow_hidden()
+            .child(hacivat_ui::text::paragraph(
+                "A sentence long enough to wrap onto a second line here.",
+                hacivat_ui::text::TextSource::Fluent,
+                t.type_ramp.body_sm,
+                t.colors.text_2.to_hsla(),
+            ))
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(400.0), px(200.0)));
+    enable_registry(vcx);
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    assert_eq!(frame.len(), 1);
+    assert!(frame[0].clipped, "{:?}", frame[0]);
+}

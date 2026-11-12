@@ -17,6 +17,7 @@ use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use hacivat_driver::url::is_secret_param;
 use hacivat_l10n::{Count, NoArgs, Text, ids};
 use hacivat_proto::{DbmsKind, EnvTag, ImportSource, Origin};
 use hacivat_secrets::{
@@ -107,33 +108,6 @@ fn read_services(sources: Option<Vec<PathBuf>>) -> ReadOut {
         }
     }
     out
-}
-
-/// Password-like option names that never stay in `Profile.extra` (the file would keep the
-/// secret in the clear). This mirrors `hacivat_driver::url`'s `is_secret_param`, which is not
-/// public: these exact names, ASCII case and leading dashes ignored...
-const SECRET_PARAMS: [&str; 8] = [
-    "password",
-    "sslpassword",
-    "pass",
-    "pwd",
-    "passwd",
-    "pgpassword",
-    "mysql_pwd",
-    "sslkeypassword",
-];
-/// ...and these endings (`db_password`, `x-pwd`).
-const SECRET_SUFFIXES: [&str; 4] = ["_password", "-password", "_pwd", "-pwd"];
-
-/// Whether the option `key` carries a secret.
-fn is_secret_param(key: &str) -> bool {
-    let key = key.trim_start_matches('-');
-    SECRET_PARAMS.iter().any(|s| s.eq_ignore_ascii_case(key))
-        || SECRET_SUFFIXES.iter().any(|s| {
-            key.len() >= s.len()
-                && key.is_char_boundary(key.len() - s.len())
-                && key[key.len() - s.len()..].eq_ignore_ascii_case(s)
-        })
 }
 
 /// A profile for a service (libpq keeps the first value of a repeated key), and the TLS key
@@ -232,22 +206,12 @@ const CHOICES: [Option<EnvTag>; 6] = [
 ];
 
 fn choice_label(tag: Option<EnvTag>) -> Rc<dyn Fn(&App) -> SharedString> {
-    use ids::hv::HvConnImportEnvEnv as E;
-    let env = match tag {
-        Some(EnvTag::Production) => E::Production,
-        Some(EnvTag::Staging) => E::Staging,
-        Some(EnvTag::Test) => E::Test,
-        Some(EnvTag::Dev) => E::Dev,
-        Some(EnvTag::Local) => E::Local,
-        None => E::Unset,
+    // ## m2a-t21-shots: the environment words of the connection dialog (`hv-conn-env-*`).
+    let id = match tag {
+        Some(_) => crate::connections::capsule::env_word_id(tag),
+        None => ids::hv::CONN_IMPORT_CHOOSE,
     };
-    Rc::new(move |cx: &App| {
-        tr(
-            cx,
-            ids::hv::CONN_IMPORT_ENV,
-            ids::hv::HvConnImportEnv { env },
-        )
-    })
+    Rc::new(move |cx: &App| tr(cx, id, NoArgs))
 }
 
 /// One row of the dialog.
@@ -724,6 +688,8 @@ mod tests {
                 ("PGPASSWORD".into(), "hv_test_pw".into()),
                 ("db_password".into(), "hv_test_pw".into()),
                 ("--pwd".into(), "hv_test_pw".into()),
+                // ## m2a-t21-shots: kept out by the driver's rule now (no local copy).
+                ("sslkeypassword".into(), "hv_test_pw".into()),
                 ("sslmode".into(), "require".into()),
                 ("password_db".into(), "kept".into()),
             ],

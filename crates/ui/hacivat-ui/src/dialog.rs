@@ -368,7 +368,8 @@ impl Render for Dialog {
                         ))
                         .child(close),
                 )
-                .child(div().child(Label::new(
+                // ## m2a-t21-shots: the body wraps to the card (a long locale never clips).
+                .child(div().child(crate::text::paragraph(
                     body,
                     TextSource::Fluent,
                     t.type_ramp.body,

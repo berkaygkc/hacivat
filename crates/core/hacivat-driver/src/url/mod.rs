@@ -17,7 +17,9 @@ pub use parse::{
     MappedParam, MappedTo, ParseOutcome, ParseResult, ParseWarning, UnrecognisedReason,
     looks_like_connection, parse,
 };
-pub use render::{RenderError, RenderTarget, render, render_driver, rewrite_endpoint};
+pub use render::{
+    RenderError, RenderTarget, is_secret_param, render, render_driver, rewrite_endpoint,
+};
 pub use template::{Template, TemplateError, compile};
 
 /// A field a URL template can carry (HV-DRV-02).

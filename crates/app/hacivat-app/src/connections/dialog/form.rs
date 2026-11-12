@@ -31,7 +31,7 @@ use hacivat_ui::text::{Label, TextFn, TextSource};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext as _, Context, Div, Entity, Focusable as _, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Role, SharedString, StatefulInteractiveElement as _,
-    Styled, WeakEntity, Window, div, px,
+    Styled, WeakEntity, Window, div, px, relative,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 use secrecy::ExposeSecret;
@@ -495,6 +495,10 @@ pub(crate) fn set_sqlite_mode_ro(p: &mut Profile, on: bool) {
 }
 
 /// The SQLite option key and its read-only value (machine text).
+// ## m2a-t21-shots: where the password field's "from the pasted URL" tail may start (a share of
+// the field), so the dots before it stay visible.
+const TAIL_LEFT: f32 = 0.35;
+
 const SQLITE_MODE: &str = "mode";
 const SQLITE_RO: &str = "ro";
 
@@ -635,13 +639,8 @@ fn env_kind(tag: EnvTag) -> EnvKind {
 }
 
 fn env_label(tag: EnvTag) -> MsgRef<NoArgs> {
-    match tag {
-        EnvTag::Local => ids::hv::CONN_ENV_LOCAL,
-        EnvTag::Dev => ids::hv::CONN_ENV_DEV,
-        EnvTag::Test => ids::hv::CONN_ENV_TEST,
-        EnvTag::Staging => ids::hv::CONN_ENV_STAGING,
-        EnvTag::Production => ids::hv::CONN_ENV_PRODUCTION,
-    }
+    // ## m2a-t21-shots: one mapping for every environment word.
+    crate::connections::capsule::env_word_id(Some(tag))
 }
 
 fn auth_label(auth: AuthProviderId) -> MsgRef<NoArgs> {
@@ -830,22 +829,33 @@ impl ConnectionDialog {
         if let Some(h) = hint(cx, "connection_dialog.save_and_connect") {
             save_connect = save_connect.key_hint(h);
         }
+        // ## m2a-t21-shots: when the buttons do not fit one line (a long locale), the right
+        // group wraps under Test, still right-aligned; no button runs past the card.
         div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .gap(px(t.spacing.md))
             .w_full()
             .child(test)
-            .child(div().flex_1())
             .child(
-                Button::new("conn-cancel", tr(cx, ids::hv::CONN_DLG_CANCEL, NoArgs))
-                    .kind(ButtonKind::Ghost)
-                    .focus_handle(self.focus.cancel.clone())
-                    .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .flex_none()
+                    .ml_auto()
+                    .gap(px(t.spacing.md))
+                    .child(
+                        Button::new("conn-cancel", tr(cx, ids::hv::CONN_DLG_CANCEL, NoArgs))
+                            .kind(ButtonKind::Ghost)
+                            .focus_handle(self.focus.cancel.clone())
+                            .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                    )
+                    .child(save)
+                    .child(save_connect),
             )
-            .child(save)
-            .child(save_connect)
             .into_any_element()
     }
 
@@ -1103,7 +1113,11 @@ impl ConnectionDialog {
             form_row(
                 theme,
                 tr(cx, ids::hv::CONN_DLG_ENGINE, NoArgs),
-                div().track_focus(&self.focus.engine).child(engines),
+                div()
+                    .track_focus(&self.focus.engine)
+                    .flex()
+                    .min_w_0()
+                    .child(engines),
             ),
         );
         rows.push(
@@ -1142,7 +1156,11 @@ impl ConnectionDialog {
             form_row(
                 theme,
                 tr(cx, ids::hv::CONN_DLG_ENV, NoArgs),
-                div().track_focus(&self.focus.environment).child(envs),
+                div()
+                    .track_focus(&self.focus.environment)
+                    .flex()
+                    .min_w_0()
+                    .child(envs),
             ),
         );
         let has_host = !host_text(&p).trim().is_empty();
@@ -1368,20 +1386,28 @@ impl ConnectionDialog {
             .child(self.field_box(field, theme, window, cx));
         if field == Field::Password && self.password_from_url && self.draft.password.is_some() {
             // The mock's tail: where the password came from.
+            // ## m2a-t21-shots: the tail keeps to the field's right part (the dots stay
+            // visible) and ellipsizes there instead of spilling over the field and its label.
             secret = secret.child(
                 div()
                     .absolute()
                     .top_0()
                     .bottom_0()
+                    .left(relative(TAIL_LEFT))
                     .right(px(t.spacing.sm))
                     .flex()
                     .items_center()
-                    .child(Label::new(
-                        tr(cx, ids::hv::CONN_DLG_PW_FROM_URL, NoArgs),
-                        TextSource::Fluent,
-                        t.type_ramp.caption,
-                        c.text_2.to_hsla(),
-                    )),
+                    .justify_end()
+                    .min_w_0()
+                    .child(
+                        Label::new(
+                            tr(cx, ids::hv::CONN_DLG_PW_FROM_URL, NoArgs),
+                            TextSource::Fluent,
+                            t.type_ramp.caption,
+                            c.text_2.to_hsla(),
+                        )
+                        .truncate(true),
+                    ),
             );
         }
         div()
@@ -1436,7 +1462,11 @@ impl ConnectionDialog {
             form_row(
                 theme,
                 tr(cx, ids::hv::CONN_DLG_AUTH, NoArgs),
-                div().track_focus(&self.focus.auth).child(auths),
+                div()
+                    .track_focus(&self.focus.auth)
+                    .flex()
+                    .min_w_0()
+                    .child(auths),
             ),
         );
         match p.auth {

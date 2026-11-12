@@ -608,3 +608,28 @@ fn home_entry_points_are_buttons(cx: &mut TestAppContext) {
     click(vcx, "button-home-palette");
     assert_eq!(layer_ids(vcx), ["palette"]);
 }
+
+// ## m2a-t21-shots
+
+#[gpui::test]
+fn only_delete_is_red_in_the_connection_menu(cx: &mut TestAppContext) {
+    let vcx = with_profiles(cx, [("a", Some(EnvTag::Dev))]);
+    let id = profile_id(vcx, "a");
+    let danger: Vec<(String, bool)> = vcx.cx.read(|cx| {
+        explorer::menu_items(cx, id)
+            .iter()
+            .filter(|s| !s.separator)
+            .map(|s| ((s.label)(cx).to_string(), s.danger))
+            .collect()
+    });
+    assert_eq!(
+        danger,
+        [
+            ("Connect".to_string(), false),
+            ("Edit…".to_string(), false),
+            ("Duplicate".to_string(), false),
+            ("Copy as URL".to_string(), false),
+            ("Delete…".to_string(), true),
+        ]
+    );
+}

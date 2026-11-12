@@ -1134,3 +1134,60 @@ fn a_pasted_text_never_shows_in_debug() {
     assert!(!shown.contains("s3cret"), "{shown}");
     assert_eq!(shown, "NewFromText(<redacted>)");
 }
+
+// ## m2a-t21-shots
+
+/// The stored TLS key passphrase of the first profile, straight from the backend.
+fn stored_key_passphrase(vcx: &VisualTestContext) -> Option<SecretString> {
+    let id = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().profiles()[0].id);
+    secret_backend(vcx)
+        .get(&SecretKey {
+            profile: id,
+            slot: SecretSlot::TlsKeyPassphrase,
+        })
+        .expect("the backend answers")
+}
+
+#[gpui::test]
+fn sslpassword_mask_in_the_url_row_never_replaces_the_stored_passphrase(cx: &mut TestAppContext) {
+    use secrecy::ExposeSecret as _;
+    let vcx = shell_with_connections(cx, "en");
+    let mut draft = ProfileDraft::new();
+    draft.profile.name = "certs".to_string();
+    draft.profile.environment = Some(EnvTag::Dev);
+    draft.profile.endpoint = ProfileEndpoint::Server {
+        host: "db.acme.io".to_string(),
+        port: None,
+    };
+    draft.profile.user = Some("deploy".to_string());
+    draft.profile.database = Some("orders".to_string());
+    draft.tls_key_passphrase = Some(SecretString::from("hv_test_pp".to_string()));
+    let id = draft.profile.id;
+    vcx.cx
+        .update(|cx| ConnectionsModel::save(cx, draft).detach());
+    settle(vcx, Duration::from_millis(100));
+    assert!(
+        stored_key_passphrase(vcx).is_some(),
+        "the passphrase is stored"
+    );
+    let vcx = open(vcx, DialogMode::Edit(id));
+    // The row as shown, edited to carry the Display mask as `sslpassword` and a new port.
+    let row = url_row(vcx);
+    let edited = row.replacen("@db.acme.io/", "@db.acme.io:6000/", 1);
+    assert_ne!(row, edited, "the row names the host: {row}");
+    let joiner = if edited.contains('?') { '&' } else { '?' };
+    set_field(vcx, "url", &format!("{edited}{joiner}sslpassword=****"));
+    keys(vcx, "enter");
+    assert_eq!(field(vcx, "port"), "6000");
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    let stored = stored_key_passphrase(vcx).expect("the stored passphrase is still there");
+    assert_ne!(stored.expose_secret(), "****");
+    assert!(
+        stored.expose_secret() == "hv_test_pp",
+        "the stored passphrase was replaced"
+    );
+    assert_eq!(read_port(vcx), Some(6000));
+}

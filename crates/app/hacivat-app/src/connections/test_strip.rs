@@ -354,7 +354,13 @@ impl TestStrip {
                 } else {
                     format!("diag-{key}-value-{i}")
                 };
-                let line = div().flex().flex_row().items_center().gap(px(t.spacing.sm));
+                // ## m2a-t21-shots: a long value ellipsizes (its tooltip shows it whole).
+                let line = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .min_w_0()
+                    .gap(px(t.spacing.sm));
                 let line = if key == "tls" && report.tls.as_ref().is_some_and(|t| t.encrypted) {
                     line.child(
                         Icon::new(IconName::Lock)
@@ -367,6 +373,7 @@ impl TestStrip {
                 let line = line
                     .child(
                         Label::new(v.clone(), TextSource::Fluent, value_style, value_color)
+                            .truncate(true)
                             .id(SharedString::from(id)),
                     )
                     .children(row.extra.clone().filter(|_| i == 0).map(|cipher| {

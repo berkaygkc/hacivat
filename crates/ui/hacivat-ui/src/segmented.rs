@@ -120,8 +120,16 @@ impl IntoElement for Segmented {
                     ThemeMode::Dark => c.panel,
                     ThemeMode::Light => c.ground,
                 };
-                group = group.bg(well.to_hsla());
+                // ## m2a-t21-shots: a form control never runs past its card: the group
+                // shrinks to its row and the segment labels ellipsize (tooltip: the whole
+                // label), long locales included.
+                group = group
+                    .bg(well.to_hsla())
+                    .flex_shrink(1.0)
+                    .min_w(px(0.0))
+                    .max_w_full();
             }
+            let shrink = self.in_well;
             let count = self.items.len();
             let ids: Vec<ElementId> = (0..count)
                 .map(|i| ElementId::from((self.id.clone(), format!("{i}"))))
@@ -181,7 +189,9 @@ impl IntoElement for Segmented {
                         if item.pressed && (self.mono || self.in_well) {
                             style.weight = 600;
                         }
-                        Label::new(text, source, style, ink).into_any_element()
+                        Label::new(text, source, style, ink)
+                            .truncate(shrink)
+                            .into_any_element()
                     }
                     SegmentContent::Marked(kind, text) => {
                         let mut style = t.type_ramp.body;
@@ -192,9 +202,10 @@ impl IntoElement for Segmented {
                             .flex()
                             .flex_row()
                             .items_center()
+                            .min_w(px(0.0))
                             .gap(px(t.spacing.sm))
-                            .child(env_swatch(kind, &theme))
-                            .child(Label::new(text, source, style, ink))
+                            .child(env_swatch(kind, &theme).flex_none())
+                            .child(Label::new(text, source, style, ink).truncate(shrink))
                             .into_any_element()
                     }
                     SegmentContent::Icon(name) => Icon::new(name)
@@ -209,6 +220,9 @@ impl IntoElement for Segmented {
                     segment = segment
                         .declare(Role::Button, name.clone(), None)
                         .aria_toggled(accesskit::Toggled::from(item.pressed));
+                }
+                if shrink {
+                    segment = segment.min_w(px(0.0)).flex_shrink(1.0);
                 }
                 let mut segment = segment
                     .flex()
