@@ -250,17 +250,13 @@ pub fn build_stamp(root: &Path) -> String {
     }
 }
 
+/// Host label written into public benchmark rows. The machine's real hostname often contains the
+/// owner's name, so it is never used; set `HACIVAT_BENCH_HOST` to label a run (e.g. `po-mac`).
 fn host_name() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
+    std::env::var("HACIVAT_BENCH_HOST")
         .ok()
-        .filter(|h| !h.is_empty())
-        .or_else(|| {
-            let out = std::process::Command::new("hostname").output().ok()?;
-            let h = String::from_utf8(out.stdout).ok()?.trim().to_string();
-            (!h.is_empty()).then_some(h)
-        })
-        .unwrap_or_else(|| "unknown".into())
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(|| "unlabelled".into())
 }
 
 fn json_str(s: &str) -> String {

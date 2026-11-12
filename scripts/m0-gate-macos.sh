@@ -6,6 +6,7 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 export CARGO_TARGET_DIR="$PWD/target"
+export HACIVAT_BENCH_HOST="${HACIVAT_BENCH_HOST:-po-mac}"
 RUNS="${1:-3}"
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
