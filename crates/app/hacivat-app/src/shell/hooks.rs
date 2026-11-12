@@ -10,6 +10,10 @@ use hacivat_ui_core::keymap::ContextStack;
 pub type KeyCaptureHook = Rc<dyn Fn(&KeyDownEvent, &ContextStack, &mut Window, &mut App) -> bool>;
 
 /// The shell's hook slots.
+///
+/// Keys reach commands through the key-capture hook (Task 16's dispatcher) and the keymap data,
+/// never through GPUI key bindings: GPUI `KeyBinding`s are owned by `crate::menus::rebuild`,
+/// which clears them on every rebuild, so widgets must not use `bind_keys`.
 #[derive(Clone, Default)]
 pub struct ShellHooks {
     pub key_capture: Option<KeyCaptureHook>,

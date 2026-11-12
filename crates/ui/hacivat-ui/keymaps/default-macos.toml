@@ -38,6 +38,11 @@ command = "workspace.toggle_explorer"
 context = "Workspace"
 
 [[binding]]
+chord = "cmd-f"
+command = "explorer.focus_filter"
+context = "Workspace"
+
+[[binding]]
 chord = "cmd-q"
 command = "app.quit"
 context = "Workspace"

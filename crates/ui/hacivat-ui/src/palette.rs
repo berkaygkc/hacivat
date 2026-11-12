@@ -221,7 +221,7 @@ impl Render for Palette {
                             keys,
                             TextSource::Shortcut,
                             ty.mono_kbd,
-                            c.text_3.to_hsla(),
+                            c.text_2.to_hsla(),
                         ))
                     })
             })
@@ -246,7 +246,7 @@ impl Render for Palette {
                             ui_text(cx, "hui-palette-no-results"),
                             TextSource::Fluent,
                             ty.body,
-                            c.text_3.to_hsla(),
+                            c.text_2.to_hsla(),
                         )),
                 )
             });
@@ -260,13 +260,13 @@ impl Render for Palette {
                     key_label(keys),
                     TextSource::Shortcut,
                     ty.mono_kbd,
-                    c.text_3.to_hsla(),
+                    c.text_2.to_hsla(),
                 ))
                 .child(Label::new(
                     ui_text(cx, id),
                     TextSource::Fluent,
                     ty.caption,
-                    c.text_3.to_hsla(),
+                    c.text_2.to_hsla(),
                 ))
         };
         let footer = div()
