@@ -34,7 +34,7 @@ pub use effective::{EffectiveLocale, OsLocale, effective};
 pub use format::{FormatCtx, install_functions, with_format_ctx};
 pub use negotiate::{NegDiag, Negotiated, NegotiationCtx, PrefSource, negotiate};
 pub use pseudo::{PseudoMode, transform_literal, transform_resource, wrap_message};
-pub use render::{Rendered, Sink, render};
+pub use render::{Rendered, Sink};
 pub use runtime::{Bundles, FormatInputs, L10n, Runtime, build_runtime};
 pub use search::{
     Match, MatchKind, MatchMode, SearchKey, SearchOpts, build_key, find, turkish_tolerant_for,

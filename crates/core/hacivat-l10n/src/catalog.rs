@@ -3,10 +3,12 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fluent_bundle::FluentResource;
+use fluent_syntax::ast;
 use serde::Deserialize;
 use unic_langid::LanguageIdentifier;
 
@@ -73,6 +75,21 @@ pub enum LoadDiag {
     OverlaySkipped {
         path: PathBuf,
         reason: String,
+    },
+    /// An overlay file started with a UTF-8 byte-order mark; it was removed.
+    BomStripped {
+        file: String,
+    },
+    /// An overlay file defines a message or term (`-name`) twice; the first one is kept.
+    DuplicateId {
+        file: String,
+        id: String,
+    },
+    /// Bidi control characters (U+202A–U+202E, U+2066–U+2069) typed into an overlay file's
+    /// text were removed (I18N-04 edge 21). Argument data is never touched (edge 22).
+    BidiControlsStripped {
+        file: String,
+        count: u32,
     },
 }
 
@@ -219,7 +236,14 @@ impl Catalogs {
                     continue;
                 }
                 let path = format!("{folder}/{name}");
-                let resource = parse(text, &path, &mut out.diags);
+                let mut resource = parse(text, &path, &mut out.diags);
+                if layer == Layer::Overlay
+                    && let Some(clean) = sanitize_overlay(resource.source(), &path, &mut out.diags)
+                {
+                    resource = match FluentResource::try_new(clean) {
+                        Ok(res) | Err((res, _)) => res,
+                    };
+                }
                 out.files.push(CatalogFile {
                     tag: folder.clone(),
                     path,
@@ -229,6 +253,104 @@ impl Catalogs {
             }
         }
         out
+    }
+}
+
+/// Bidi controls a translator must not type: embeddings/overrides U+202A–U+202E and isolates
+/// U+2066–U+2069 (I18N-17 L018).
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Cleans an overlay file at load time (rendered output is never post-processed): drops later
+/// duplicates of a message or term ID (the first wins) and removes bidi controls from literal
+/// text. Placeables and argument values are left alone. Returns the cleaned source when
+/// something changed; the valid entries are re-serialized, Junk was already reported.
+fn sanitize_overlay(src: &str, path: &str, diags: &mut Vec<LoadDiag>) -> Option<String> {
+    let mut ast = match fluent_syntax::parser::parse(src.to_string()) {
+        Ok(ast) | Err((ast, _)) => ast,
+    };
+    let mut changed = false;
+
+    let mut seen = std::collections::HashSet::new();
+    ast.body.retain(|entry| {
+        let id = match entry {
+            ast::Entry::Message(m) => m.id.name.clone(),
+            ast::Entry::Term(t) => format!("-{}", t.id.name),
+            _ => return true,
+        };
+        if seen.insert(id.clone()) {
+            true
+        } else {
+            diags.push(LoadDiag::DuplicateId {
+                file: path.to_string(),
+                id,
+            });
+            changed = true;
+            false
+        }
+    });
+
+    let mut stripped = 0u32;
+    if src.chars().any(is_bidi_control) {
+        for entry in &mut ast.body {
+            match entry {
+                ast::Entry::Message(m) => {
+                    if let Some(value) = &mut m.value {
+                        strip_pattern(value, &mut stripped);
+                    }
+                    for attr in &mut m.attributes {
+                        strip_pattern(&mut attr.value, &mut stripped);
+                    }
+                }
+                ast::Entry::Term(t) => {
+                    strip_pattern(&mut t.value, &mut stripped);
+                    for attr in &mut t.attributes {
+                        strip_pattern(&mut attr.value, &mut stripped);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if stripped > 0 {
+        diags.push(LoadDiag::BidiControlsStripped {
+            file: path.to_string(),
+            count: stripped,
+        });
+        changed = true;
+    }
+
+    changed.then(|| fluent_syntax::serializer::serialize(&ast))
+}
+
+/// Removes bidi controls from the text elements of `p`, including the text of select
+/// variants; expressions (variables, literals in placeables, references) are kept.
+fn strip_pattern(p: &mut ast::Pattern<String>, stripped: &mut u32) {
+    for el in &mut p.elements {
+        match el {
+            ast::PatternElement::TextElement { value } => {
+                let before = value.chars().count();
+                value.retain(|c| !is_bidi_control(c));
+                let removed = before - value.chars().count();
+                *stripped += u32::try_from(removed).unwrap_or(u32::MAX);
+            }
+            ast::PatternElement::Placeable { expression } => strip_expression(expression, stripped),
+        }
+    }
+}
+
+fn strip_expression(e: &mut ast::Expression<String>, stripped: &mut u32) {
+    match e {
+        ast::Expression::Select { variants, .. } => {
+            for v in variants {
+                strip_pattern(&mut v.value, stripped);
+            }
+        }
+        ast::Expression::Inline(ast::InlineExpression::Placeable { expression }) => {
+            strip_expression(expression, stripped);
+        }
+        ast::Expression::Inline(_) => {}
     }
 }
 
@@ -368,21 +490,21 @@ pub(crate) fn maximize(tag: &LanguageIdentifier) -> LanguageIdentifier {
 
 /// Reads the overlay tree into `<folder>/<file>` pairs, enforcing the file-safety limits.
 fn read_overlay(dir: &Path, diags: &mut Vec<LoadDiag>) -> Vec<(String, String)> {
-    let mut skip = |path: &Path, reason: &str| {
+    fn skip(diags: &mut Vec<LoadDiag>, path: &Path, reason: &str) {
         diags.push(LoadDiag::OverlaySkipped {
             path: path.to_path_buf(),
             reason: reason.to_string(),
         });
-    };
+    }
     let root = match dir.canonicalize() {
         Ok(root) => root,
         Err(e) => {
-            skip(dir, &format!("overlay directory unreadable: {e}"));
+            skip(diags, dir, &format!("overlay directory unreadable: {e}"));
             return Vec::new();
         }
     };
     let Ok(entries) = std::fs::read_dir(&root) else {
-        skip(dir, "overlay directory unreadable");
+        skip(diags, dir, "overlay directory unreadable");
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -395,15 +517,15 @@ fn read_overlay(dir: &Path, diags: &mut Vec<LoadDiag>) -> Vec<(String, String)> 
             continue;
         }
         let Some(real) = inside(&root, &folder_path) else {
-            skip(&folder_path, "symlink leaves the overlay root");
+            skip(diags, &folder_path, "symlink leaves the overlay root");
             continue;
         };
         if !real.is_dir() {
-            skip(&folder_path, "not a locale folder");
+            skip(diags, &folder_path, "not a locale folder");
             continue;
         }
         let Ok(files) = std::fs::read_dir(&real) else {
-            skip(&folder_path, "locale folder unreadable");
+            skip(diags, &folder_path, "locale folder unreadable");
             continue;
         };
         let mut files: Vec<_> = files.filter_map(Result::ok).collect();
@@ -411,60 +533,44 @@ fn read_overlay(dir: &Path, diags: &mut Vec<LoadDiag>) -> Vec<(String, String)> 
         for file in files {
             let name = file.file_name().to_string_lossy().into_owned();
             let path = file.path();
-            if let Some(text) = read_overlay_file(&root, &path, &name, &mut skip) {
-                out.push((format!("{folder_name}/{name}"), text));
+            let rel = format!("{folder_name}/{name}");
+            match read_overlay_file(&root, &path, &name) {
+                Ok((text, had_bom)) => {
+                    if had_bom {
+                        diags.push(LoadDiag::BomStripped { file: rel.clone() });
+                    }
+                    out.push((rel, text));
+                }
+                Err(reason) => skip(diags, &path, &reason),
             }
         }
     }
     out
 }
 
-fn read_overlay_file(
-    root: &Path,
-    path: &Path,
-    name: &str,
-    skip: &mut impl FnMut(&Path, &str),
-) -> Option<String> {
-    let Some(real) = inside(root, path) else {
-        skip(path, "symlink leaves the overlay root");
-        return None;
-    };
+/// One overlay file's text and whether a BOM was removed, or why it was skipped. The size limit
+/// is enforced on the bytes actually read (no separate `metadata` check to race with).
+fn read_overlay_file(root: &Path, path: &Path, name: &str) -> Result<(String, bool), String> {
+    let real = inside(root, path).ok_or("symlink leaves the overlay root")?;
     if real.is_dir() {
-        skip(path, "nested folder");
-        return None;
+        return Err("nested folder".into());
     }
     if !(name.ends_with(".ftl") || name == "locale.toml") {
-        skip(path, "not a catalog file (*.ftl or locale.toml)");
-        return None;
+        return Err("not a catalog file (*.ftl or locale.toml)".into());
     }
-    match std::fs::metadata(&real) {
-        Ok(m) if m.len() > MAX_OVERLAY_FILE => {
-            skip(path, "larger than 1 MB");
-            return None;
-        }
-        Ok(_) => {}
-        Err(e) => {
-            skip(path, &format!("unreadable: {e}"));
-            return None;
-        }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&real)
+        .and_then(|f| f.take(MAX_OVERLAY_FILE + 1).read_to_end(&mut bytes))
+        .map_err(|e| format!("unreadable: {e}"))?;
+    if bytes.len() as u64 > MAX_OVERLAY_FILE {
+        return Err("larger than 1 MB".into());
     }
-    let bytes = match std::fs::read(&real) {
-        Ok(b) => b,
-        Err(e) => {
-            skip(path, &format!("unreadable: {e}"));
-            return None;
-        }
+    let (text, had_bom) = match bytes.strip_prefix(b"\xEF\xBB\xBF".as_slice()) {
+        Some(rest) => (rest, true),
+        None => (bytes.as_slice(), false),
     };
-    let text = bytes
-        .strip_prefix(b"\xEF\xBB\xBF".as_slice())
-        .unwrap_or(&bytes);
-    match std::str::from_utf8(text) {
-        Ok(text) => Some(text.to_string()),
-        Err(_) => {
-            skip(path, "not UTF-8");
-            None
-        }
-    }
+    let text = std::str::from_utf8(text).map_err(|_| "not UTF-8".to_string())?;
+    Ok((text.to_string(), had_bom))
 }
 
 /// The real path of `path` when it stays under `root` (which is canonical).

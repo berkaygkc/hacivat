@@ -4,8 +4,9 @@ use std::ops::Deref;
 use std::path::Path;
 
 use hacivat_l10n::{
-    CatalogLocale, Catalogs, FormatInputs, L10n, LanguageIdentifier, LoadDiag, NegDiag, Negotiated,
-    NegotiationCtx, PrefSource, Status, build_runtime, negotiate,
+    ArgValue, CatalogLocale, Catalogs, FormatInputs, IntoFluentArgs, L10n, LanguageIdentifier,
+    LoadDiag, MsgRef, NegDiag, Negotiated, NegotiationCtx, PrefSource, Status, build_runtime,
+    negotiate,
 };
 
 const EN_TOML: &str = "tag = \"en\"\nnative_name = \"English\"\nenglish_name = \"English\"\nshort_name = \"EN\"\ndirection = \"ltr\"\nstatus = \"stable\"\n";
@@ -370,5 +371,165 @@ fn explicit_regional_format_wins() {
     assert_eq!(
         negotiate(&c, Catalogs::embedded().locales()).format_locale,
         "tr-TR"
+    );
+}
+
+// Fix round 1 (I1): every request is merged in order; the chain ends at the first `en`.
+
+#[test]
+fn english_first_in_language_ends_the_chain() {
+    assert_eq!(chain(&neg(&[env("LANGUAGE", "en_US:tr")], None)), ["en"]);
+}
+
+#[test]
+fn english_first_in_the_os_list_ends_the_chain() {
+    assert_eq!(chain(&neg(&[os(&["en-US", "tr-TR"])], None)), ["en"]);
+}
+
+#[test]
+fn explicit_experimental_choice_merges_with_the_os_list() {
+    let c = Catalogs::embedded().with_overlay(&tmp_overlay(&[("az/hacivat-ui.ftl", "hv-x = X")]));
+    let n = negotiate(&ctx(&[set("az"), os(&["tr-TR"])], None, false), c.locales());
+    assert_eq!(chain(&n), ["az", "tr", "en"]);
+    assert_eq!(n.format_locale, "tr-TR");
+}
+
+#[test]
+fn pseudo_merges_like_any_other_request() {
+    let n = negotiate(
+        &ctx(&[set("tr-XT"), os(&["tr-TR"])], None, true),
+        Catalogs::embedded().locales(),
+    );
+    assert_eq!(chain(&n), ["tr-XT", "tr", "en"]);
+    assert_eq!(n.format_locale, "tr-TR");
+}
+
+// Fix round 1 (I2): only regional sources set the format locale.
+
+#[test]
+fn linux_messages_and_region_split() {
+    let n = neg(
+        &[
+            env("LC_MESSAGES", "en_US.UTF-8"),
+            env("LANG", "tr_TR.UTF-8"),
+        ],
+        None,
+    );
+    assert_eq!(chain(&n), ["en"]);
+    assert_eq!(n.format_locale, "tr-TR");
+}
+
+#[test]
+fn hacivat_lang_is_an_explicit_ui_override() {
+    let c = Catalogs::embedded().with_overlay(&tmp_overlay(&[("de/hacivat-ui.ftl", "hv-x = X")]));
+    let n = negotiate(
+        &ctx(
+            &[env("HACIVAT_LANG", "de"), env("LANG", "en_US.UTF-8")],
+            None,
+            false,
+        ),
+        c.locales(),
+    );
+    assert_eq!(chain(&n), ["de", "en"]);
+    assert_eq!(n.format_locale, "en-US");
+    let n = neg(&[env("KARAGOZ_LANG", "tr")], None);
+    assert_eq!(chain(&n), ["tr", "en"]);
+    assert_eq!(n.format_locale, "en-US");
+}
+
+#[test]
+fn explicit_ui_language_never_sets_the_format_locale() {
+    assert_eq!(neg(&[set("tr")], None).format_locale, "en-US");
+    assert_eq!(neg(&[set("tr"), os(&["tr"])], None).format_locale, "tr-TR");
+}
+
+// Fix round 1 (M6): parents that drop a subtag, never across scripts (I18N-03 step 3).
+
+#[test]
+fn script_parent_is_inserted_within_the_same_script() {
+    assert_eq!(
+        chain_with(&["uz", "uz-Latn"], &[set("uz-Latn")]),
+        ["uz-Latn", "uz", "en"]
+    );
+    assert_eq!(
+        chain_with(&["zh", "zh-Hant"], &[set("zh-Hant")]),
+        ["zh-Hant", "en"]
+    );
+    assert_eq!(
+        chain_with(&["pt", "pt-BR", "pt-Latn-BR"], &[set("pt-Latn-BR")]),
+        ["pt-Latn-BR", "pt-BR", "pt", "en"]
+    );
+}
+
+// Fix round 1 (I3, M4): overlay hygiene.
+
+struct NameArg(String);
+
+impl IntoFluentArgs for NameArg {
+    fn into_args(self) -> Vec<(&'static str, ArgValue)> {
+        vec![("name", ArgValue::Text(self.0))]
+    }
+}
+
+#[test]
+fn overlay_bidi_controls_are_stripped_from_literals_only() {
+    const SAVED: MsgRef<NameArg> = MsgRef::new("hv-saved");
+    // Edge 21: a translator typed U+202E, U+2068 and U+2069 into the text.
+    let c = Catalogs::from_memory(&[
+        ("en/locale.toml", EN_TOML),
+        ("tr/locale.toml", TR_TOML),
+        (
+            "en/hacivat-ui.ftl",
+            "hv-saved = Connection { $name } saved.",
+        ),
+    ])
+    .with_overlay(&tmp_overlay(&[(
+        "tr/hacivat-ui.ftl",
+        "hv-saved = Bağlantı\u{202E} \u{2068}{ $name }\u{2069} kaydedildi.\n",
+    )]));
+    assert!(c.diags().contains(&LoadDiag::BidiControlsStripped {
+        file: "tr/hacivat-ui.ftl".into(),
+        count: 3
+    }));
+    let l = l10n_from(&c, &["tr", "en"]);
+    assert_eq!(
+        l.t_machine(SAVED, NameArg("prod".into())),
+        "Bağlantı prod kaydedildi."
+    );
+    // Edge 22: marks inside argument data belong to the user and stay.
+    assert_eq!(
+        l.t_machine(SAVED, NameArg("pr\u{2068}od".into())),
+        "Bağlantı pr\u{2068}od kaydedildi."
+    );
+}
+
+#[test]
+fn overlay_duplicate_id_first_wins_with_a_diag() {
+    let c = Catalogs::embedded().with_overlay(&tmp_overlay(&[(
+        "tr/hacivat-ui.ftl",
+        "hv-a = first\nhv-a = second\n",
+    )]));
+    assert!(c.diags().contains(&LoadDiag::DuplicateId {
+        file: "tr/hacivat-ui.ftl".into(),
+        id: "hv-a".into()
+    }));
+    assert_eq!(
+        l10n_from(&c, &["tr", "en"]).t_dynamic("hv-a", vec![]),
+        "first"
+    );
+}
+
+#[test]
+fn overlay_bom_is_stripped_with_a_diag() {
+    let c = Catalogs::embedded().with_overlay(&tmp_overlay(&[(
+        "tr/hacivat-ui.ftl",
+        "\u{FEFF}hv-a = A-bom\n",
+    )]));
+    assert!(c.diags().contains(&LoadDiag::BomStripped {
+        file: "tr/hacivat-ui.ftl".into()
+    }));
+    assert_eq!(
+        l10n_from(&c, &["tr", "en"]).t_dynamic("hv-a", vec![]),
+        "A-bom"
     );
 }

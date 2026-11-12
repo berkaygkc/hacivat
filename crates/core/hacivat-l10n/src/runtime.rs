@@ -2,9 +2,10 @@
 //! two bundles over the same parsed resources (UI isolating, machine not), plus the format
 //! context. Rendering with per-message fallback lives in `render.rs`.
 
+use std::collections::HashSet;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use fluent_bundle::FluentResource;
@@ -15,7 +16,7 @@ use crate::catalog::{Catalogs, Layer, LoadDiag};
 use crate::format::{FormatCtx, install_functions};
 use crate::negotiate::Negotiated;
 use crate::pseudo::{PseudoMode, transform_resource};
-use crate::render::{Sink, render, render_english, render_missing};
+use crate::render::{Rendered, Sink, missing, render, render_english, render_or_missing};
 
 /// What the formatters need besides the UI chain (F7).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -66,6 +67,8 @@ pub(crate) struct BundleSet {
     pub(crate) locales: Vec<LocaleBundles>,
     /// Set when `chain[0]` is a pseudo-locale: UI results are bracketed.
     pub(crate) pseudo: Option<PseudoMode>,
+    /// (message ID, locale or kind) pairs already logged: render errors are logged once.
+    pub(crate) logged: Mutex<HashSet<(String, String)>>,
 }
 
 impl fmt::Debug for Bundles {
@@ -116,7 +119,11 @@ pub fn build_runtime(
             generation,
         },
         diags: cat.diags().to_vec(),
-        bundles: Bundles(Arc::new(BundleSet { locales, pseudo })),
+        bundles: Bundles(Arc::new(BundleSet {
+            locales,
+            pseudo,
+            logged: Mutex::default(),
+        })),
     }
 }
 
@@ -202,19 +209,23 @@ impl L10n {
         self.text(id, args, Sink::Ui)
     }
 
+    /// Renders `msg` for `sink` and reports which bundle answered (debug markers, UI tests). Like
+    /// [`L10n::t`], a missing message yields the missing-message text (`missing` is set).
+    pub fn t_rendered<A: IntoFluentArgs>(&self, msg: MsgRef<A>, args: A, sink: Sink) -> Rendered {
+        let rt = self.current.load();
+        render_or_missing(&rt, msg.id, args.into_args(), sink)
+    }
+
     /// Renders `id` from the `en` bundle only, without isolation marks (the English search
     /// layer).
     pub fn t_english(&self, id: &str) -> String {
         let rt = self.current.load();
-        render_english(&rt, id).unwrap_or_else(|| render_missing(&rt, id, Sink::Machine))
+        render_english(&rt, id).unwrap_or_else(|| missing(&rt, id, Sink::Machine).text)
     }
 
     fn text(&self, id: &str, args: Vec<(&'static str, ArgValue)>, sink: Sink) -> String {
         let rt = self.current.load();
-        match render(&rt, id, None, args, sink) {
-            Some(r) => r.text,
-            None => render_missing(&rt, id, sink),
-        }
+        render_or_missing(&rt, id, args, sink).text
     }
 
     /// The installed runtime.

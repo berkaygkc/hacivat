@@ -2605,6 +2605,7 @@ dependencies = [
  "sys-locale",
  "tempfile",
  "toml 1.2.1+spec-1.1.0",
+ "tracing",
  "trybuild",
  "unic-langid",
  "unicode-segmentation",

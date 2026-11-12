@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use hacivat_l10n::{
     ArgValue, Catalogs, FormatInputs, IntoFluentArgs, L10n, LanguageIdentifier, MsgRef, Negotiated,
-    Runtime, build_runtime,
+    Runtime, Sink, build_runtime,
 };
 #[cfg(not(debug_assertions))]
 use hacivat_l10n::{NegotiationCtx, PrefSource, negotiate};
@@ -109,6 +109,11 @@ fn tr_typo_variable_is_flagged_in_debug() {
     assert!(
         l.t_dynamic("hv-r", vec![("count", ArgValue::Count(2))])
             .starts_with("⚠[")
+    );
+    // The flagged text is the Turkish attempt, unresolved variable and all.
+    assert_eq!(
+        l.t_dynamic("hv-r", vec![("count", ArgValue::Count(2))]),
+        "⚠[\u{2068}{$cuont}\u{2069} satır]"
     );
 }
 
@@ -213,21 +218,154 @@ fn attribute_falls_back_per_message() {
     assert_eq!(l.t_attr(MENU, "nope", hacivat_l10n::NoArgs), None);
 }
 
-#[test]
-fn missing_argument_keeps_the_translation() {
-    // A caller error (English needs `$name` too) is not the translation's fault: no fallback.
+/// A caller error: English needs `$name` too, so it is not the translation's fault.
+fn missing_name() -> String {
     let l = l10n(
         &["tr", "en"],
         &[("tr", "hv-saved = Bağlantı { $name } kaydedildi.")],
         &[("en", "hv-saved = Connection { $name } saved.")],
     );
-    assert_eq!(
-        l.t_machine(
-            MsgRef::<hacivat_l10n::NoArgs>::new("hv-saved"),
-            hacivat_l10n::NoArgs
-        ),
-        "Bağlantı {$name} kaydedildi."
+    l.t_machine(
+        MsgRef::<hacivat_l10n::NoArgs>::new("hv-saved"),
+        hacivat_l10n::NoArgs,
+    )
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "hv-saved")]
+fn missing_argument_asserts_in_debug() {
+    missing_name();
+}
+
+#[cfg(not(debug_assertions))]
+#[test]
+fn missing_argument_keeps_the_translation_in_release() {
+    // No fallback: the Turkish text is kept, with the unresolved variable shown.
+    assert_eq!(missing_name(), "Bağlantı {$name} kaydedildi.");
+}
+
+// Fix round 1 (M1): which bundle answered.
+
+#[test]
+fn rendered_reports_the_locale_used_and_fallback() {
+    const A: MsgRef<hacivat_l10n::NoArgs> = MsgRef::new("hv-a");
+    const B: MsgRef<hacivat_l10n::NoArgs> = MsgRef::new("hv-b");
+    let l = l10n(
+        &["tr", "en"],
+        &[("tr", "hv-a = A-tr")],
+        &[("en", "hv-a = A\nhv-b = B")],
     );
+    let a = l.t_rendered(A, hacivat_l10n::NoArgs, Sink::Ui);
+    assert_eq!(
+        (
+            a.text.as_str(),
+            a.locale_used.to_string(),
+            a.fell_back,
+            a.missing
+        ),
+        ("A-tr", "tr".to_string(), false, false)
+    );
+    let b = l.t_rendered(B, hacivat_l10n::NoArgs, Sink::Ui);
+    assert_eq!(
+        (
+            b.text.as_str(),
+            b.locale_used.to_string(),
+            b.fell_back,
+            b.missing
+        ),
+        ("B", "en".to_string(), true, false)
+    );
+}
+
+#[cfg(not(debug_assertions))]
+#[test]
+fn rendered_reports_structural_fallback_in_release() {
+    let l = l10n(
+        &["tr", "en"],
+        &[("tr", "hv-r = { $cuont } satır")],
+        &[("en", "hv-r = { $count } rows")],
+    );
+    let r = l.t_rendered(MsgRef::<CountArg>::new("hv-r"), CountArg(2), Sink::Machine);
+    assert_eq!(
+        (r.text.as_str(), r.locale_used.to_string(), r.fell_back),
+        ("2 rows", "en".to_string(), true)
+    );
+}
+
+#[test]
+fn rendered_marks_a_missing_message() {
+    let l = l10n(&["tr", "en"], &[], &[("en", "hv-a = A")]);
+    let r = l.t_rendered(
+        MsgRef::<hacivat_l10n::NoArgs>::new("hv-nope"),
+        hacivat_l10n::NoArgs,
+        Sink::Ui,
+    );
+    assert!(r.missing && r.fell_back);
+    assert_ne!(r.text, "hv-nope");
+}
+
+// Fix round 1 (M2): plural variants are chosen by the UI language's CLDR rules.
+
+struct CountArg(u64);
+
+impl IntoFluentArgs for CountArg {
+    fn into_args(self) -> Vec<(&'static str, ArgValue)> {
+        vec![("count", ArgValue::Count(self.0))]
+    }
+}
+
+#[test]
+fn turkish_plural_selection() {
+    const ROWS: MsgRef<CountArg> = MsgRef::new("hv-rows");
+    let l = l10n(
+        &["tr", "en"],
+        &[(
+            "tr",
+            "hv-rows = { $count ->\n    [one] tek satır\n   *[other] { $count } satır\n}",
+        )],
+        &[(
+            "en",
+            "hv-rows = { $count ->\n    [one] one row\n   *[other] { $count } rows\n}",
+        )],
+    );
+    assert_eq!(l.t_machine(ROWS, CountArg(1)), "tek satır");
+    assert_eq!(l.t_machine(ROWS, CountArg(2)), "2 satır");
+    assert_eq!(l.t_machine(ROWS, CountArg(0)), "0 satır");
+}
+
+// Fix round 1 (M9): concurrent switches; the newest reservation always ends up installed.
+
+#[test]
+fn concurrent_installs_keep_the_newest_generation() {
+    let l = std::sync::Arc::new(L10n::new(rt(0)));
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            let l = l.clone();
+            std::thread::spawn(move || {
+                let mut highest = 0;
+                for _ in 0..2_000 {
+                    let g = l.reserve_generation();
+                    highest = highest.max(g);
+                    l.install_if_newer(rt(g));
+                    assert!(
+                        l.generation() >= g,
+                        "installed {} < own {g}",
+                        l.generation()
+                    );
+                }
+                highest
+            })
+        })
+        .collect();
+    let highest = workers
+        .into_iter()
+        .map(|w| w.join().unwrap())
+        .max()
+        .unwrap();
+    assert_eq!(highest, 4_000);
+    assert_eq!(l.generation(), highest);
+    assert!(!l.install_if_newer(rt(highest)));
 }
 
 #[cfg(debug_assertions)]

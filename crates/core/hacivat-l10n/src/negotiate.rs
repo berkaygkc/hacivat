@@ -58,62 +58,59 @@ pub struct Negotiated {
 struct Request {
     /// As requested, with extensions (`tr-TR-u-nu-arab`).
     locale: icu_locale::Locale,
-    /// An explicit user choice (`ui.language`): may pick an experimental catalog.
+    /// An explicit UI-language choice (`ui.language`, `HACIVAT_LANG`, `KARAGOZ_LANG`): may pick
+    /// an experimental catalog.
     explicit: bool,
-    /// May supply the format locale: not `ui.language` (an explicit UI language never sets the
-    /// format locale), not the message-only `LANGUAGE`/`LC_MESSAGES`.
+    /// A regional source that may supply the format locale (the OS list, `LC_ALL`,
+    /// `LC_NUMERIC`, `LC_TIME`, `LANG`). Explicit UI choices and the message-only `LANGUAGE`
+    /// and `LC_MESSAGES` never set the format locale.
     regional: bool,
-    /// Index of the `PrefSource` it came from.
-    source: usize,
 }
 
-/// Negotiates the UI chain and format locale (I18N-03 steps 1–7). The highest-priority source
-/// that matches any catalog decides the chain (setting `en` with OS `tr-TR` gives `[en]`);
-/// every source still counts for the format locale.
+/// Environment variables that name the UI language explicitly.
+const EXPLICIT_ENV: [&str; 2] = ["HACIVAT_LANG", "KARAGOZ_LANG"];
+/// Environment variables that only concern messages.
+const MESSAGE_ENV: [&str; 2] = ["LANGUAGE", "LC_MESSAGES"];
+
+/// Negotiates the UI chain and format locale (I18N-03 steps 1–7). Every request, in priority
+/// order, appends its best catalog (and that catalog's same-script parents); the chain then ends
+/// right after the first `en`, because English is complete and nothing after it is reached.
 pub fn negotiate(ctx: &NegotiationCtx, avail: &[CatalogLocale]) -> Negotiated {
+    let en = unic_langid::langid!("en");
     let mut diags = Vec::new();
     let requests = collect(ctx, &mut diags);
-    let has_en = avail.iter().any(|c| c.tag == unic_langid::langid!("en"));
+    let has_en = avail.iter().any(|c| c.tag == en);
 
     let mut chain: Vec<LanguageIdentifier> = Vec::new();
-    let mut deciding: Option<usize> = None;
     for r in &requests {
-        if deciding.is_some_and(|s| s != r.source) {
-            break;
-        }
-        let before = chain.len();
         let id = r.locale.id.to_string();
-        if is_pseudo(&id) {
-            match id.parse() {
-                Ok(tag) if ctx.allow_pseudo && has_en => push_unique(&mut chain, tag),
-                _ => diags.push(NegDiag::NoMatch { requested: id }),
-            }
-            continue;
-        }
         let allow_experimental = ctx.allow_experimental || r.explicit;
-        match best_match(&r.locale.id, avail, allow_experimental) {
-            Some(found) => {
-                push_unique(&mut chain, found.tag.clone());
-                // A regional catalog is followed by its language parent (`pt-BR` → `pt`).
-                if found.tag.region.is_some() {
-                    let mut parent = found.tag.clone();
-                    parent.region = None;
-                    if avail.iter().any(|c| {
-                        c.tag == parent && (allow_experimental || c.status != Status::Experimental)
-                    }) {
-                        push_unique(&mut chain, parent);
-                    }
-                }
+        let matched: Vec<LanguageIdentifier> = if is_pseudo(&id) {
+            // Pseudo-locales are generated from `en`, so they need it and a permission.
+            match id.parse() {
+                Ok(tag) if ctx.allow_pseudo && has_en => vec![tag],
+                _ => Vec::new(),
             }
-            None => diags.push(NegDiag::NoMatch { requested: id }),
+        } else {
+            best_match(&r.locale.id, avail, allow_experimental)
+                .map(|found| with_parents(found, avail, allow_experimental))
+                .unwrap_or_default()
+        };
+        if matched.is_empty() {
+            diags.push(NegDiag::NoMatch { requested: id });
         }
-        if chain.len() > before {
-            deciding = Some(r.source);
+        for tag in matched {
+            if !chain.contains(&tag) {
+                chain.push(tag);
+            }
         }
     }
-    push_unique(&mut chain, unic_langid::langid!("en"));
+    match chain.iter().position(|t| *t == en) {
+        Some(i) => chain.truncate(i + 1),
+        None => chain.push(en),
+    }
 
-    let format_locale = format_locale(ctx, &requests, &chain, &mut diags);
+    let format_locale = format_locale(ctx, &requests, &mut diags);
     Negotiated {
         chain,
         format_locale,
@@ -121,43 +118,76 @@ pub fn negotiate(ctx: &NegotiationCtx, avail: &[CatalogLocale]) -> Negotiated {
     }
 }
 
-fn push_unique(chain: &mut Vec<LanguageIdentifier>, tag: LanguageIdentifier) {
-    if !chain.contains(&tag) {
-        chain.push(tag);
+/// `found` followed by its parents that exist in `avail`: first without the region, then
+/// without the script (`pt-Latn-BR` → `pt-BR` → `pt`, `uz-Latn` → `uz`). A parent whose
+/// likely script differs is skipped, because a chain never crosses scripts (`zh-Hant` ↛ `zh`,
+/// which is Simplified).
+fn with_parents(
+    found: &CatalogLocale,
+    avail: &[CatalogLocale],
+    allow_experimental: bool,
+) -> Vec<LanguageIdentifier> {
+    let tag = &found.tag;
+    let mut out = vec![tag.clone()];
+    let mut candidates = Vec::new();
+    if tag.region.is_some() {
+        let mut p = tag.clone();
+        p.region = None;
+        candidates.push(p);
     }
+    if tag.region.is_some() && tag.script.is_some() {
+        let mut p = tag.clone();
+        p.script = None;
+        candidates.push(p);
+    }
+    if tag.region.is_some() || tag.script.is_some() {
+        let mut p = tag.clone();
+        p.region = None;
+        p.script = None;
+        candidates.push(p);
+    }
+    for parent in candidates {
+        let usable = avail.iter().any(|c| {
+            c.tag == parent
+                && c.max.script == found.max.script
+                && (allow_experimental || c.status != Status::Experimental)
+        });
+        if usable && !out.contains(&parent) {
+            out.push(parent);
+        }
+    }
+    out
 }
 
-/// Step 1–2: raw preferences in priority order, normalized and deduplicated.
+/// Step 1–2: raw preferences in priority order, normalized (duplicates are harmless: the chain
+/// deduplicates, and the format locale takes the first regional one).
 fn collect(ctx: &NegotiationCtx, diags: &mut Vec<NegDiag>) -> Vec<Request> {
     let mut out: Vec<Request> = Vec::new();
-    for (index, source) in ctx.sources.iter().enumerate() {
-        let mut add =
-            |raw: &str, name: &str, explicit: bool, regional: bool, diags: &mut Vec<NegDiag>| {
-                let Some(locale) = normalize(raw, name, diags) else {
-                    return;
-                };
-                if !out.iter().any(|r| r.locale == locale) {
-                    out.push(Request {
-                        locale,
-                        explicit,
-                        regional,
-                        source: index,
-                    });
-                }
-            };
+    let mut add =
+        |raw: &str, name: &str, explicit: bool, regional: bool, diags: &mut Vec<NegDiag>| {
+            if let Some(locale) = normalize(raw, name, diags) {
+                out.push(Request {
+                    locale,
+                    explicit,
+                    regional,
+                });
+            }
+        };
+    for source in &ctx.sources {
         match source {
             PrefSource::Setting(tag) => add(tag, "setting", true, false, diags),
             PrefSource::Env(var, value) => {
-                let regional = !matches!(*var, "LANGUAGE" | "LC_MESSAGES");
+                let explicit = EXPLICIT_ENV.contains(var);
+                let regional = !explicit && !MESSAGE_ENV.contains(var);
                 for part in value.split(':') {
                     let bare = strip_codeset(part);
                     if bare == "C" || bare == "POSIX" {
                         diags.push(NegDiag::CLocale {
                             var: (*var).to_string(),
                         });
-                        add("en", var, false, regional, diags);
+                        add("en", var, explicit, regional, diags);
                     } else {
-                        add(part, var, false, regional, diags);
+                        add(part, var, explicit, regional, diags);
                     }
                 }
             }
@@ -246,15 +276,11 @@ fn best_match<'a>(
         .map(|(c, _)| c)
 }
 
-/// Step 7: `ui.regional_format` → the OS regional format → the first regional request →
-/// `chain[0]`, each given a region from likely subtags when it has none. Extensions are kept
-/// (`tr-TR-u-nu-arab`).
-fn format_locale(
-    ctx: &NegotiationCtx,
-    requests: &[Request],
-    chain: &[LanguageIdentifier],
-    diags: &mut Vec<NegDiag>,
-) -> String {
+/// Step 7, regional sources only: `ui.regional_format` → the OS regional format → the first
+/// regional request (OS list, `LC_ALL`, `LC_NUMERIC`, `LC_TIME`, `LANG`) → `en-US`. An explicit
+/// UI language (`ui.language`, `HACIVAT_LANG`) never sets it. A tag without a region gets one
+/// from likely subtags; extensions are kept (`tr-TR-u-nu-arab`).
+fn format_locale(ctx: &NegotiationCtx, requests: &[Request], diags: &mut Vec<NegDiag>) -> String {
     for (value, source) in [
         (&ctx.format_pref, "regional_format"),
         (&ctx.os_format, "os_format"),
@@ -263,17 +289,10 @@ fn format_locale(
             return with_region(locale);
         }
     }
-    if let Some(r) = requests
+    requests
         .iter()
         .find(|r| r.regional && !is_pseudo(&r.locale.id.to_string()))
-    {
-        return with_region(r.locale.clone());
-    }
-    chain
-        .iter()
-        .find(|t| !is_pseudo(&t.to_string()))
-        .and_then(|t| icu_locale::Locale::try_from_str(&t.to_string()).ok())
-        .map_or_else(|| "en-US".to_string(), with_region)
+        .map_or_else(|| "en-US".to_string(), |r| with_region(r.locale.clone()))
 }
 
 /// `tr` → `tr-TR`, `zh-Hant` → `zh-Hant-TW`; a tag with a region is returned as is.
