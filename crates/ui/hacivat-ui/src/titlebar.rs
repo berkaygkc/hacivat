@@ -262,7 +262,6 @@ impl TitleBar {
         bar = bar.child(drag_region(div().flex_1().h_full()));
 
         if let Some(palette) = self.palette {
-            let truncates = fit.is_some_and(|f| f.palette_truncates);
             let w = fit.map_or(PALETTE_PREF_PX, |f| f.palette_width);
             let mut label_style = t.type_ramp.body;
             label_style.size_px = label_style.size_px.max(11.0);
@@ -301,7 +300,10 @@ impl TitleBar {
                             c.text_3.to_hsla(),
                         )
                         .id("palette-placeholder")
-                        .truncate(truncates || fit.is_some()),
+                        // The field's width comes from the Overflow Rule; a placeholder longer
+                        // than what is left of it (pseudo-locales, long translations) ellipsizes
+                        // instead of being cut mid-glyph (Task 18 shots, assertion b).
+                        .truncate(true),
                     ),
                 )
                 .child(Label::new(

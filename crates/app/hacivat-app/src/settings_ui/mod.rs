@@ -397,7 +397,9 @@ impl Render for SettingsPage {
             .flex()
             .flex_row()
             .size_full()
-            .bg(c.ground.to_hsla())
+            // Tab content is a pane: `panel` (white in light), like the editor and results; the
+            // nav keeps `side`. `ground` is for the window ground and the bars (DESIGN.md).
+            .bg(c.panel.to_hsla())
             .child(self.nav(&theme, window, cx))
             .child(
                 div()

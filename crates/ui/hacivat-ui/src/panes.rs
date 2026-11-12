@@ -441,9 +441,8 @@ impl TabStrip {
                         .color(ink),
                 )
                 .child(Label::new(tab.title, tab.title_source, style, ink));
-            if index == 0 {
-                el = el.border_l_1();
-            }
+            // No left border on the first tab: the strip starts at a tile seam (or the window
+            // edge), and a second line there would make a 2 px seam (Task 18 review).
             if active {
                 el = el.bg(c.raised.to_hsla());
             } else if hovered {

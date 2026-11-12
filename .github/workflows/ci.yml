@@ -499,3 +499,8 @@ jobs:
           name: pseudo-screens-${{ runner.os }}
           path: target/shots/**
           if-no-files-found: error
+      # F17: pixel comparison (dE2000) against the committed macOS baselines. Skipped until
+      # Task 19 commits design/baselines/m1/macos/*.png.
+      - name: Compare with the M1 baselines (shot-diff)
+        if: steps.guard.outputs.present == 'true' && runner.os == 'macOS' && hashFiles('design/baselines/m1/macos/*.png') != ''
+        run: cargo run --locked -p xtask -- shot-diff --baseline design/baselines/m1/macos --candidate target/shots

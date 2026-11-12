@@ -196,7 +196,8 @@ impl IntoElement for ToastStack {
                             Role::Status,
                             accesskit::Live::Polite,
                             IconName::Info,
-                            c.blue,
+                            // Hue Is Meaning: info is no selection, so its icon is text-2.
+                            c.text_2,
                         ),
                         ToastKind::Error => (
                             Role::Alert,
@@ -235,9 +236,10 @@ impl IntoElement for ToastStack {
                                 .cursor_pointer()
                                 .on_click(move |_, _, cx| ToastQueue::dismiss(cx, id))
                                 .child(
+                                    // Raised Ink Rule: text-2 on the raised card.
                                     Icon::new(IconName::X)
                                         .size(IconSize::Chrome)
-                                        .color(c.text_3.to_hsla()),
+                                        .color(c.text_2.to_hsla()),
                                 ),
                         );
                     // Announced by screen readers: the node's value changes with a live region

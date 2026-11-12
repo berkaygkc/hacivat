@@ -1,0 +1,268 @@
+{
+ "colors": [
+  {
+   "name": "titlebar-bg",
+   "x": 1105,
+   "y": 20,
+   "token": "ground",
+   "theme": "dark"
+  },
+  {
+   "name": "cp-fill-capsule",
+   "x": 183,
+   "y": 12,
+   "token": "cp_fill",
+   "theme": "dark"
+  },
+  {
+   "name": "capsule-name-bg",
+   "x": 300,
+   "y": 9,
+   "token": "panel",
+   "theme": "dark"
+  },
+  {
+   "name": "palette-bg",
+   "x": 980,
+   "y": 10,
+   "token": "ground",
+   "theme": "dark"
+  },
+  {
+   "name": "theme-seg-moon-bg",
+   "x": 1390,
+   "y": 10,
+   "token": "raised",
+   "theme": "dark"
+  },
+  {
+   "name": "titlebar-seam",
+   "x": 1105,
+   "y": 39,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "explorer-header-bg",
+   "x": 200,
+   "y": 55,
+   "token": "head",
+   "theme": "dark"
+  },
+  {
+   "name": "connection-header-bg",
+   "x": 170,
+   "y": 686,
+   "token": "head",
+   "theme": "dark"
+  },
+  {
+   "name": "seam-explorer-editor",
+   "x": 276,
+   "y": 300,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "seam-explorer-editor-low",
+   "x": 276,
+   "y": 800,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "seam-left-split",
+   "x": 100,
+   "y": 670,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "seam-editor-results",
+   "x": 700,
+   "y": 362,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "status-bg",
+   "x": 700,
+   "y": 888,
+   "token": "ground",
+   "theme": "dark"
+  },
+  {
+   "name": "status-seam",
+   "x": 700,
+   "y": 876,
+   "token": "seam",
+   "theme": "dark"
+  },
+  {
+   "name": "titlebar-bg",
+   "x": 1105,
+   "y": 20,
+   "token": "ground",
+   "theme": "light"
+  },
+  {
+   "name": "cp-fill-capsule",
+   "x": 183,
+   "y": 12,
+   "token": "cp_fill",
+   "theme": "light"
+  },
+  {
+   "name": "capsule-name-bg",
+   "x": 300,
+   "y": 9,
+   "token": "panel",
+   "theme": "light"
+  },
+  {
+   "name": "palette-bg",
+   "x": 980,
+   "y": 10,
+   "token": "ground",
+   "theme": "light"
+  },
+  {
+   "name": "theme-seg-moon-bg",
+   "x": 1390,
+   "y": 10,
+   "token": "ground",
+   "theme": "light"
+  },
+  {
+   "name": "titlebar-seam",
+   "x": 1105,
+   "y": 39,
+   "token": "seam",
+   "theme": "light"
+  },
+  {
+   "name": "explorer-header-bg",
+   "x": 200,
+   "y": 55,
+   "token": "head",
+   "theme": "light"
+  },
+  {
+   "name": "connection-header-bg",
+   "x": 170,
+   "y": 686,
+   "token": "head",
+   "theme": "light"
+  },
+  {
+   "name": "seam-explorer-editor",
+   "x": 276,
+   "y": 300,
+   "token": "seam",
+   "theme": "light"
+  },
+  {
+   "name": "seam-explorer-editor-low",
+   "x": 276,
+   "y": 800,
+   "token": "seam",
+   "theme": "light"
+  },
+  {
+   "name": "seam-left-split",
+   "x": 100,
+   "y": 670,
+   "token": "seam",
+   "theme": "light"
+  },
+  {
+   "name": "seam-editor-results",
+   "x": 700,
+   "y": 362,
+   "token": "seam",
+   "theme": "light"
+  },
+  {
+   "name": "status-bg",
+   "x": 700,
+   "y": 888,
+   "token": "ground",
+   "theme": "light"
+  },
+  {
+   "name": "status-seam",
+   "x": 700,
+   "y": 876,
+   "token": "seam",
+   "theme": "light"
+  }
+ ],
+ "scanlines": [
+  {
+   "name": "titlebar-bottom-seam",
+   "axis": "y",
+   "at": 160,
+   "from": 30,
+   "to": 60,
+   "expect_edges_px": [
+    39,
+    40
+   ]
+  },
+  {
+   "name": "explorer-header-seam",
+   "axis": "y",
+   "at": 272,
+   "from": 60,
+   "to": 76,
+   "expect_edges_px": [
+    69,
+    70
+   ]
+  },
+  {
+   "name": "explorer-editor-seam",
+   "axis": "x",
+   "at": 667,
+   "from": 250,
+   "to": 300,
+   "expect_edges_px": [
+    276,
+    277
+   ]
+  },
+  {
+   "name": "left-column-split",
+   "axis": "y",
+   "at": 272,
+   "from": 660,
+   "to": 690,
+   "expect_edges_px": [
+    670,
+    671
+   ]
+  },
+  {
+   "name": "editor-results-seam",
+   "axis": "y",
+   "at": 700,
+   "from": 361,
+   "to": 372,
+   "expect_edges_px": [
+    362,
+    363
+   ]
+  },
+  {
+   "name": "status-top",
+   "axis": "y",
+   "at": 700,
+   "from": 872,
+   "to": 890,
+   "expect_edges_px": [
+    876,
+    877
+   ]
+  }
+ ]
+}

@@ -1,0 +1,445 @@
+//! The screenshot harness (Task 18, feature `shots`): renders every M1 surface headlessly (R8:
+//! GPUI's `HeadlessAppContext` with the platform's real text system and its headless renderer)
+//! and writes `target/shots/<surface>-<theme>-<locale>-<w>x<h>@<s>x.png`.
+//!
+//! ```text
+//! cargo test -p hacivat-app --features shots --test shots -- --ignored
+//! ```
+//!
+//! The target has `harness = false`: on macOS the platform (and its text system) can only be
+//! created on the main thread, and libtest runs every test on a spawned thread. `main` keeps
+//! libtest's contract: the self-checks always run, and `render_all_surfaces` (the main check)
+//! runs only with `--ignored` or `--include-ignored`. `SHOTS_FILTER=<substring>` renders only
+//! the shots whose file name contains it; `SHOTS_DIR` overrides the output directory.
+//!
+//! Every frame is checked before it is written:
+//! - (a) in the pseudo locales (`en-XA`, `tr-XT`) every `TextSource::Fluent` label is bracketed;
+//! - (b) no label is clipped;
+//! - (c) every label is at least 11 px nominal (synthesized small caps record their nominal
+//!   size; their 0.7x glyph runs are the one exception);
+//! - (d) the One Filled Badge rule holds, expecting production only on the demo surface.
+//!
+//! Windows has no headless renderer at the pin: the test prints `shots: no headless renderer
+//! (R8)` and passes.
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use hacivat_app::l10n_global::text_fn_id;
+use hacivat_app::menus;
+use hacivat_app::shell::DemoCapsule;
+use hacivat_app::shell::Workspace;
+use hacivat_app::{Startup, start};
+use hacivat_l10n::OsLocale;
+use hacivat_settings::{LanguagePref, LocalPaths, ThemePref};
+use hacivat_ui::actions::ActionRegistry;
+use hacivat_ui::text::{RenderedText, TextRegistry, TextSource};
+use hacivat_ui_core::app::{TextRendering, bootstrap};
+use hacivat_ui_core::assets::BundledAssets;
+use hacivat_ui_core::gpui_surface::{
+    AnyWindowHandle, App, HeadlessAppContext, Window, current_headless_renderer, current_platform,
+    px, size,
+};
+use hacivat_ui_core::named_rules::assert_one_filled_badge;
+use hacivat_ui_core::platform::apply_text_rendering;
+use hacivat_ui_core::theme::{Theme, ThemeMode};
+
+/// The M1 surfaces, in render order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Surface {
+    Shell,
+    ShellDemoProduction,
+    ShellNarrow,
+    PaletteOpen,
+    SettingsGeneral,
+    DialogAbout,
+    ToastInfo,
+    MenuApp,
+}
+
+const SURFACES: [Surface; 8] = [
+    Surface::Shell,
+    Surface::ShellDemoProduction,
+    Surface::ShellNarrow,
+    Surface::PaletteOpen,
+    Surface::SettingsGeneral,
+    Surface::DialogAbout,
+    Surface::ToastInfo,
+    Surface::MenuApp,
+];
+const LOCALES: [&str; 4] = ["en", "tr", "en-XA", "tr-XT"];
+const THEMES: [ThemePref; 2] = [ThemePref::Dark, ThemePref::Light];
+const PSEUDO: [&str; 2] = ["en-XA", "tr-XT"];
+
+impl Surface {
+    fn name(self) -> &'static str {
+        match self {
+            Surface::Shell => "shell",
+            Surface::ShellDemoProduction => "shell-demo-production",
+            Surface::ShellNarrow => "shell-narrow",
+            Surface::PaletteOpen => "palette-open",
+            Surface::SettingsGeneral => "settings-general",
+            Surface::DialogAbout => "dialog-about",
+            Surface::ToastInfo => "toast-info",
+            Surface::MenuApp => "menu-app",
+        }
+    }
+
+    /// The logical window size of the matrix shots.
+    fn size(self) -> (f32, f32) {
+        match self {
+            Surface::ShellNarrow => (1024.0, 700.0),
+            _ => (1280.0, 800.0),
+        }
+    }
+
+    fn is_demo(self) -> bool {
+        self == Surface::ShellDemoProduction
+    }
+
+    /// Brings the surface on screen in a freshly started shell.
+    fn open(self, window: &mut Window, cx: &mut App) {
+        let action = match self {
+            Surface::Shell | Surface::ShellDemoProduction | Surface::ShellNarrow => return,
+            Surface::PaletteOpen => "workspace.command_palette",
+            Surface::SettingsGeneral => "workspace.open_settings",
+            Surface::DialogAbout => "app.about",
+            Surface::ToastInfo => "workspace.reload_translations",
+            Surface::MenuApp => {
+                open_app_menu(window, cx);
+                return;
+            }
+        };
+        assert!(
+            ActionRegistry::run(action, window, cx),
+            "{action} did not run"
+        );
+    }
+}
+
+/// `app.show_menu`'s popup. The action exists only where the title bar draws the app-menu
+/// button (Windows, Linux); on macOS the harness opens the same popup directly.
+fn open_app_menu(window: &mut Window, cx: &mut App) {
+    if cfg!(not(target_os = "macos")) {
+        assert!(ActionRegistry::run("app.show_menu", window, cx));
+        return;
+    }
+    let ws = window
+        .root::<Workspace>()
+        .flatten()
+        .expect("the root view is the workspace");
+    let items = menus::popup_items(&menus::menu_model(cx.global::<ActionRegistry>()), cx);
+    let anchor = menus::in_window_menu_anchor(&items, window, cx);
+    let menu = ws.update(cx, |ws, cx| ws.open_popup_menu(anchor, items, window, cx));
+    menu.update(cx, |m, _| m.label(text_fn_id("hui-menu-app")));
+}
+
+/// One frame to render.
+#[derive(Debug, Clone, Copy)]
+struct Shot {
+    surface: Surface,
+    theme: ThemePref,
+    locale: &'static str,
+    size: (f32, f32),
+}
+
+impl Shot {
+    fn theme_name(&self) -> &'static str {
+        match self.theme {
+            ThemePref::Light => "light",
+            _ => "dark",
+        }
+    }
+
+    fn file_name(&self, scale: f32) -> String {
+        format!(
+            "{}-{}-{}-{}x{}@{}x.png",
+            self.surface.name(),
+            self.theme_name(),
+            self.locale,
+            self.size.0,
+            self.size.1,
+            scale
+        )
+    }
+}
+
+/// Every shot: the surface matrix at 1280x800 (`shell-narrow` at 1024x700) x locales x
+/// themes, then `shell-demo-production` at 1440x900 x en/tr x dark/light for VF.
+fn shots() -> Vec<Shot> {
+    let mut out = Vec::new();
+    for surface in SURFACES {
+        for theme in THEMES {
+            for locale in LOCALES {
+                out.push(Shot {
+                    surface,
+                    theme,
+                    locale,
+                    size: surface.size(),
+                });
+            }
+        }
+    }
+    for theme in THEMES {
+        for locale in ["en", "tr"] {
+            out.push(Shot {
+                surface: Surface::ShellDemoProduction,
+                theme,
+                locale,
+                size: (1440.0, 900.0),
+            });
+        }
+    }
+    out
+}
+
+fn out_dir() -> PathBuf {
+    std::env::var_os("SHOTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../target/shots")
+                .canonicalize()
+                .unwrap_or_else(|_| {
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/shots")
+                })
+        })
+}
+
+/// Without isolation marks (U+2068/U+2069), which wrap placeables.
+fn strip(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\u{2068}' | '\u{2069}'))
+        .collect()
+}
+
+/// Assertions (a) to (c) on what the frame drew; one message per violation.
+fn check_labels(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in frame {
+        let text = strip(&r.text);
+        if PSEUDO.contains(&locale)
+            && r.source == TextSource::Fluent
+            && !(text.starts_with('[') && text.ends_with(']'))
+        {
+            out.push(format!(
+                "{name}: (a) Fluent label not bracketed: {:?} at {}",
+                text, r.path
+            ));
+        }
+        if r.clipped {
+            out.push(format!(
+                "{name}: (b) clipped: {:?} ({:.1} px painted) at {}",
+                text, r.painted_px, r.path
+            ));
+        }
+        if r.size_px < 11.0 {
+            out.push(format!(
+                "{name}: (c) {} px < 11: {:?} at {}",
+                r.size_px, text, r.path
+            ));
+        }
+    }
+    out
+}
+
+/// Renders `shot` in a fresh app, checks the frame and writes the PNG. Returns the violations.
+fn render(shot: Shot, dir: &Path) -> Vec<String> {
+    let platform = current_platform(true);
+    let mut cx = HeadlessAppContext::with_platform(
+        platform.text_system(),
+        Arc::new(BundledAssets),
+        current_headless_renderer,
+    );
+    cx.update(|cx| {
+        bootstrap(cx).expect("bundled fonts register and resolve");
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    let root = tempfile::tempdir().expect("temp dir");
+    let paths = LocalPaths::under(root.path());
+    paths.ensure_dirs().expect("test dirs");
+    let mut outcome = hacivat_settings::load(&paths.settings_toml());
+    outcome.settings.ui.language = LanguagePref::Tag(shot.locale.to_string());
+    outcome.settings.ui.theme = shot.theme;
+    let startup = Startup::new(paths, outcome, OsLocale::default());
+    let demo = shot.surface.is_demo().then(DemoCapsule::harman);
+    let handle: AnyWindowHandle = cx
+        .update(|cx| start(cx, startup, demo))
+        .expect("the workspace opens")
+        .into();
+    let (w, h) = shot.size;
+    cx.update_window(handle, |_, window, cx| {
+        window.resize(size(px(w), px(h)));
+        window.bounds_changed(cx);
+        // A real app window is key; focus rings and carets draw as they would there.
+        window.activate_window();
+    })
+    .expect("the window is open");
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| shot.surface.open(window, cx))
+        .expect("the window is open");
+    cx.run_until_parked();
+    cx.update(|cx| cx.refresh_windows());
+    cx.run_until_parked();
+
+    let scale = cx
+        .update_window(handle, |_, window, _| window.scale_factor())
+        .expect("the window is open");
+    let name = shot.file_name(scale);
+    let frame = cx.update(|cx| cx.global::<TextRegistry>().frame.clone());
+    let mut failures = check_labels(&name, shot.locale, &frame);
+    if frame.is_empty() {
+        failures.push(format!("{name}: the frame drew no label"));
+    }
+    let badge = cx
+        .update_window(handle, |_, window, cx| {
+            let cp_fill = Theme::get(cx).tokens.colors.cp_fill.to_hsla();
+            catch_unwind(AssertUnwindSafe(|| {
+                assert_one_filled_badge(window, cp_fill, shot.surface.is_demo())
+            }))
+        })
+        .expect("the window is open");
+    if let Err(panic) = badge {
+        let msg = panic
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| "One Filled Badge rule".to_string());
+        failures.push(format!("{name}: (d) {msg}"));
+    }
+
+    let image = cx.capture_screenshot(handle).expect("the frame renders");
+    let want = ((w * scale).round() as u32, (h * scale).round() as u32);
+    if image.dimensions() != want {
+        failures.push(format!(
+            "{name}: image is {:?}, expected {want:?}",
+            image.dimensions()
+        ));
+    }
+    image.save(dir.join(&name)).expect("write the PNG");
+    println!("shot {name}: {} labels", frame.len());
+    failures
+}
+
+/// The main check: renders every shot, then fails with every violation found.
+fn render_all_surfaces() {
+    match current_headless_renderer() {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            println!("shots: no headless renderer (R8)");
+            return;
+        }
+        Err(err) => panic!("shots: the headless renderer failed to start: {err:#}"),
+    }
+    // GPUI reads the font-smoothing preference once, on the first glyph (R11).
+    apply_text_rendering(TextRendering::Crisp);
+    let dir = out_dir();
+    std::fs::create_dir_all(&dir).expect("create the shots directory");
+    let filter = std::env::var("SHOTS_FILTER").unwrap_or_default();
+    // Stale PNGs never pass for fresh ones.
+    if filter.is_empty() {
+        for entry in std::fs::read_dir(&dir)
+            .expect("read the shots directory")
+            .flatten()
+        {
+            if entry.path().extension().is_some_and(|e| e == "png") {
+                std::fs::remove_file(entry.path()).expect("remove a stale shot");
+            }
+        }
+    }
+    let mut failures = Vec::new();
+    let mut rendered = 0;
+    for shot in shots() {
+        if !shot.file_name(2.0).contains(filter.as_str()) {
+            continue;
+        }
+        failures.extend(render(shot, &dir));
+        rendered += 1;
+    }
+    println!("shots: {rendered} rendered into {}", dir.display());
+    assert!(rendered > 0, "SHOTS_FILTER={filter:?} matched no shot");
+    assert!(
+        failures.is_empty(),
+        "{} violations:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+fn the_matrix_covers_every_surface_locale_and_theme() {
+    let all = shots();
+    assert_eq!(all.len(), 8 * 4 * 2 + 4);
+    let names: Vec<String> = all.iter().map(|s| s.file_name(2.0)).collect();
+    assert!(names.contains(&"shell-dark-en-1280x800@2x.png".to_string()));
+    assert!(names.contains(&"shell-narrow-light-tr-XT-1024x700@2x.png".to_string()));
+    assert!(names.contains(&"shell-demo-production-light-tr-1440x900@2x.png".to_string()));
+    assert!(names.contains(&"menu-app-dark-en-XA-1280x800@2x.png".to_string()));
+    let unique: std::collections::BTreeSet<&String> = names.iter().collect();
+    assert_eq!(unique.len(), names.len());
+}
+
+fn pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px() {
+    let label = |text: &str, source, size_px, clipped| RenderedText {
+        text: text.to_string().into(),
+        source,
+        size_px,
+        painted_px: 10.0,
+        clipped,
+        truncated: false,
+        path: "x.rs:1:1".into(),
+    };
+    let frame = [
+        label("[Ŝéåŕçĥ]", TextSource::Fluent, 13.0, false),
+        label("\u{2068}[Ŝéåŕçĥ]\u{2069}", TextSource::Fluent, 13.0, false),
+        label("EN", TextSource::Data, 11.5, false),
+        label("Search", TextSource::Fluent, 13.0, false),
+        label("[ok]", TextSource::Fluent, 10.5, true),
+    ];
+    assert!(check_labels("s", "en", &frame[..3]).is_empty());
+    let found = check_labels("s", "en-XA", &frame);
+    assert_eq!(found.len(), 3, "{found:#?}");
+    assert!(found[0].contains("(a)") && found[0].contains("Search"));
+    assert!(found[1].contains("(b)"));
+    assert!(found[2].contains("(c) 10.5 px"));
+    // Outside the pseudo locales an unbracketed Fluent label is fine.
+    assert!(check_labels("s", "tr", &frame[3..4]).is_empty());
+}
+
+/// libtest's contract without its threads: the self-checks always run (not with `--ignored`
+/// alone), the renders only with `--ignored` or `--include-ignored`.
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    let checks: [(&str, fn()); 2] = [
+        (
+            "the_matrix_covers_every_surface_locale_and_theme",
+            the_matrix_covers_every_surface_locale_and_theme,
+        ),
+        (
+            "pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px",
+            pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px,
+        ),
+    ];
+    if has("--list") {
+        for (name, _) in checks {
+            println!("{name}: test");
+        }
+        println!("render_all_surfaces: test");
+        return;
+    }
+    if !has("--ignored") {
+        for (name, check) in checks {
+            check();
+            println!("test {name} ... ok");
+        }
+    }
+    if has("--ignored") || has("--include-ignored") {
+        render_all_surfaces();
+        println!("test render_all_surfaces ... ok");
+    } else {
+        println!("test render_all_surfaces ... ignored (run with --ignored)");
+    }
+}

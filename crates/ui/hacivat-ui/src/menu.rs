@@ -308,7 +308,8 @@ impl Render for PopupMenu {
                         shortcut(cx),
                         TextSource::Shortcut,
                         t.type_ramp.mono_kbd,
-                        c.text_3.to_hsla(),
+                        // Raised Ink Rule: key hints on the raised menu use text-2.
+                        c.text_2.to_hsla(),
                     ));
                 }
                 if !item.disabled {

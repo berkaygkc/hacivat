@@ -1,4 +1,5 @@
 """Regenerates design/vf/samples.json (run from the repo root: python3 design/vf/gen_samples.py).
+`--set m1-shell` writes design/vf/samples-m1-shell.json instead: the M1 shell subset (Task 18).
 
 Coordinates are logical px on the 1440x900 frame, derived from the harman layout and checked by
 running `xtask vf` with the Chromium reference as its own candidate. Tokens that have no flat
@@ -11,6 +12,7 @@ are composited over in `over`; `xtask vf` checks every REFERENCE pixel against
 token-over-backdrop from DESIGN.md (dE2000 <= 1) before it compares the candidate.
 """
 import json
+import sys
 
 C = [  # name, x, y, token[, over]
     ("titlebar-bg", 1050, 20, "ground"),
@@ -97,5 +99,44 @@ S = [
     dict(name="strip-and-status-top", axis="y", at=850, **{"from": 845, "to": 890},
          expect_edges_px=[850, 851, 876, 877]),
 ]
-json.dump(dict(colors=colors, scanlines=S), open("design/vf/samples.json", "w"), indent=1, ensure_ascii=False)
-print(len(colors), len(S))
+
+# The M1 shell set (Task 18): only regions that the harman reference and the M1 demo shell
+# (`hacivat --vf-demo`, `shell-demo-production`) draw alike. M1 has no tree, editor content,
+# results grid, inspector, production hairline, next-page strip or view switcher, so samples sit
+# in the title bar (capsule, palette, language segments), the status bar, the explorer and
+# connection panel headers (x < 276) and on the seams (x = 276; y = 362, 671). Points avoid
+# glyphs in both frames; xtask's m1_shell_samples_validate_against_reference checks the zones.
+M1 = [  # name, x, y, token[, over]
+    ("titlebar-bg", 1105, 20, "ground"),
+    ("cp-fill-capsule", 183, 12, "cp_fill"),
+    ("capsule-name-bg", 300, 9, "panel"),
+    ("palette-bg", 980, 10, "ground"),
+    # The theme control: moon pressed (raised) in dark, unpressed (ground) in light.
+    ("theme-seg-moon-bg", 1390, 10, {"dark": "raised", "light": "ground"}),
+    ("titlebar-seam", 1105, 39, "seam"),
+    ("explorer-header-bg", 200, 55, "head"),
+    ("connection-header-bg", 170, 686, "head"),
+    ("seam-explorer-editor", 276, 300, "seam"),
+    ("seam-explorer-editor-low", 276, 800, "seam"),
+    ("seam-left-split", 100, 670, "seam"),
+    ("seam-editor-results", 700, 362, "seam"),
+    ("status-bg", 700, 888, "ground"),
+    ("status-seam", 700, 876, "seam"),
+]
+M1_SCANS = [
+    dict(name="titlebar-bottom-seam", axis="y", at=160, **{"from": 30, "to": 60}, expect_edges_px=[39, 40]),
+    dict(name="explorer-header-seam", axis="y", at=272, **{"from": 60, "to": 76}, expect_edges_px=[69, 70]),
+    dict(name="explorer-editor-seam", axis="x", at=667, **{"from": 250, "to": 300}, expect_edges_px=[276, 277]),
+    dict(name="left-column-split", axis="y", at=272, **{"from": 660, "to": 690}, expect_edges_px=[670, 671]),
+    dict(name="editor-results-seam", axis="y", at=700, **{"from": 361, "to": 372}, expect_edges_px=[362, 363]),
+    dict(name="status-top", axis="y", at=700, **{"from": 872, "to": 890}, expect_edges_px=[876, 877]),
+]
+
+if "--set" in sys.argv and sys.argv[sys.argv.index("--set") + 1] == "m1-shell":
+    m1 = [sample(th, *c) for th in ("dark", "light") for c in M1]
+    json.dump(dict(colors=m1, scanlines=M1_SCANS), open("design/vf/samples-m1-shell.json", "w"), indent=1,
+              ensure_ascii=False)
+    print(len(m1), len(M1_SCANS))
+else:
+    json.dump(dict(colors=colors, scanlines=S), open("design/vf/samples.json", "w"), indent=1, ensure_ascii=False)
+    print(len(colors), len(S))

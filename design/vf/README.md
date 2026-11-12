@@ -7,6 +7,33 @@
 
 `xtask vf` first validates its expectations against the reference: both images must be 1440×900 × scale, every reference sample pixel must match its DESIGN.md token (ΔE2000 ≤ 1; translucent tokens over their `over` backdrop), and every scanline must find exactly its expected edges in the reference. Any of those failing exits 2 ("reference/token mismatch" or "bad expectation"); only then is the candidate graded (exit 1 on a candidate FAIL).
 
+## M1 shell (Task 18)
+
+The M1 shell is graded on `samples-m1-shell.json` (`python3 design/vf/gen_samples.py --set m1-shell`): only the title bar, the status bar, the explorer and connection panel headers and the seams, because M1 has no tree, editor content, grid, inspector or view switcher.
+
+The candidate comes from the screenshot harness (R8: GPUI's `HeadlessAppContext` with the real text system and the Metal/wgpu headless renderer), which also renders every M1 surface in `en`, `tr`, `en-XA` and `tr-XT`, dark and light, into `target/shots/`:
+
+```sh
+cargo test -p hacivat-app --features shots --test shots -- --ignored
+for theme in dark light; do for lang in en tr; do
+  design/vf/capture.sh ref "$theme" "$lang" 2
+  cargo run -p xtask -- vf --reference "target/vf/ref-$theme-$lang-2x.png" \
+    --candidate "target/shots/shell-demo-production-$theme-$lang-1440x900@2x.png" \
+    --samples design/vf/samples-m1-shell.json --scale 2 --theme "$theme"
+done; done
+```
+
+The real-window fallback (`capture.sh app`) runs `hacivat --vf-demo --print-window-id --theme --lang` with a fresh `HOME`, so no saved layout moves a seam. The binary cannot pick a display, so capture at the scale of the display its window opens on (1 on the PO's external main display); `capture.sh` refuses a capture whose width does not match `<scale>`:
+
+```sh
+cargo build -p hacivat -p xtask
+design/vf/capture.sh ref dark en 1 && design/vf/capture.sh app dark en 1
+cargo run -p xtask -- vf --reference target/vf/ref-dark-en-1x.png \
+  --candidate target/vf/cand-app-dark-en-1x.png --samples design/vf/samples-m1-shell.json --scale 1 --theme dark
+```
+
+`cargo xtask shot-diff --baseline <dir> --candidate target/shots [--max-de 2.0 --max-share 0.001]` compares same-named PNGs pixel by pixel (ΔE2000) and exits 1 when a shot changed in more than the allowed share of pixels, is missing, or changed size. The nightly `pseudo-screens` job runs it against `design/baselines/m1/macos` once those baselines exist (Task 19).
+
 ## macOS
 
 ```sh
