@@ -337,10 +337,10 @@ impl EditorView {
         let focus_handle = cx.focus_handle();
         // Focus loss mid-composition (Review Focus 4): an app switch leaves the composition
         // to the platform IME; a focus move inside the active window commits it.
-        // `ImeCore::blur` has the reasoning.
+        // `ImeCore::blur` has the reasoning. No `notify_text_input_changed` here: the handle
+        // is no longer focused at blur time, so GPUI would skip it.
         cx.on_blur(&focus_handle, window, |this, window, cx| {
             if this.ime.blur(window.is_window_active()) {
-                window.notify_text_input_changed(&this.focus_handle);
                 cx.notify();
             }
         })

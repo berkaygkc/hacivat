@@ -9,7 +9,7 @@ Host: ______ (OS version, input source versions, VM or bare metal)
 1. Composition underline: the in-progress text is underlined while composing, and the underline disappears on commit.
 2. Caret position: the caret sits at the end of the composition (or at the IME's chosen position inside it), never at the line start.
 3. Candidate window placement: the candidate window sits directly under the composition, and follows it when the line scrolls or the window moves.
-4. Mid-composition click-away (Review Focus 4): start a composition (for example `kanji`, do not commit), then click another window or app. The marked text must be committed as plain text exactly once: not lost, not duplicated, no stuck underline when you return.
+4. Mid-composition click-away (Review Focus 4): start a composition (for example `kanji`, do not commit), then click another app and come back. Match the native editor (TextEdit on macOS). The composition survives the round-trip, still owned by the IME, and the candidate list may reappear. Esc, Enter or the next keystroke acts on that composition only. The text must not be lost or duplicated, and the underline must be gone once the composition is committed.
 5. The completion popup must not open during a composition.
 6. CJK rows (Japanese and Chinese): right after each composition keystroke, before the next frame is drawn, the candidate window x is estimated from monospace character widths, not the exact shaped line. Watch whether the candidate window jumps or sits visibly misplaced (horizontally off the composition) and record it in Observed.
 7. Tab: press Tab outside a composition; a tab character must be inserted.
@@ -55,3 +55,12 @@ Host: ______ (OS version, input source versions, VM or bare metal)
 | Any IME | start a composition, click away, return | see check 4 | | |
 
 Pass criterion (spec section 6, M0): correct composition, caret and candidate window placement for Turkish Q, Turkish F, dead keys, and Japanese and Chinese IME.
+
+## Known gaps (M0)
+
+Both gaps fall under Review Focus 4. Both are pending the GPUI patch `crates/ui/hacivat-ui-core/patches/gpui-discard-marked-text-on-focus-lost.patch`, which is not applied. At zed@912159c, GPUI on macOS gives the app no way to make `NSTextInputContext` drop its composition.
+
+- **In-window programmatic focus move during composition.** The editor commits the marked text locally, but the IME keeps its own copy of the composition. The next IME delivery can then land beside the committed text. Clicks and keystrokes do not trigger this, because the IME sees them first. The patch closes this gap.
+- **Focus move while the window is inactive.** GPUI delivers no blur for this, because the previous focus path of an inactive window is empty (`crates/gpui/src/window.rs:3773-3777`). The underline can stay stuck on the old editor. The patch alone does not close this gap: GPUI would also need to deliver the blur, or `FocusLost`, for inactive windows.
+
+Not a gap: in ABC – Extended, Option+I is the horn dead key, so Option+I then A gives `ʼa`. That matches TextEdit. Circumflex in that layout is Option+6.
