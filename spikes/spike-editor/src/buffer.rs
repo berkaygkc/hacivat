@@ -28,11 +28,28 @@ impl From<&str> for Buffer {
 }
 
 impl Buffer {
+    #[cfg(test)]
     pub fn insert(&mut self, char_idx: usize, text: &str) {
         let char_idx = char_idx.min(self.rope.len_chars());
         self.edit(char_idx..char_idx, text);
     }
 
+    /// Replaces `range` with `text` as one edit.
+    pub fn replace(&mut self, range: Range<usize>, text: &str) {
+        let len = self.rope.len_chars();
+        let start = range.start.min(len);
+        self.edit(start..range.end.clamp(start, len), text);
+    }
+
+    pub fn text_in(&self, range: Range<usize>) -> String {
+        let len = self.rope.len_chars();
+        let start = range.start.min(len);
+        self.rope
+            .slice(start..range.end.clamp(start, len))
+            .to_string()
+    }
+
+    #[cfg(test)]
     pub fn delete(&mut self, range: Range<usize>) {
         let len = self.rope.len_chars();
         let range = range.start.min(len)..range.end.min(len);
@@ -103,14 +120,12 @@ impl Buffer {
         self.rope.char(char_idx)
     }
 
-    // The UTF-16 conversions serve the IME handler (Task 7), which speaks UTF-16 offsets.
-    #[allow(dead_code)]
+    // The UTF-16 conversions serve the IME handler, which speaks UTF-16 offsets.
     pub fn char_to_utf16(&self, char_idx: usize) -> usize {
         self.rope
             .char_to_utf16_cu(char_idx.min(self.rope.len_chars()))
     }
 
-    #[allow(dead_code)]
     pub fn utf16_to_char(&self, u16_idx: usize) -> usize {
         self.rope
             .utf16_cu_to_char(u16_idx.min(self.rope.len_utf16_cu()))

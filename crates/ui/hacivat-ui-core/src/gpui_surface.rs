@@ -10,4 +10,4 @@ pub use gpui::{
 };
 // Tasks 5, 6, 9 (grid, editor, probes): custom elements, text shaping, scroll input, popover
 // shadow, accessibility, clipboard and synthetic keystrokes.
-#[rustfmt::skip] pub use gpui::{AnyElement, AppContext, AvailableSpace, BoxShadow, ClipboardEntry, ContentMask, Element, ElementId, Font, FontFeatures, FontId, FontWeight, GlobalElementId, InspectorElementId, InteractiveElement, Keystroke, LayoutId, Modifiers, Role, ShapedLine, Style, TextAlign, TextRun, WindowHandle, accesskit, fill, hsla, point, relative, size};
+#[rustfmt::skip] pub use gpui::{AnyElement, AppContext, AvailableSpace, BoxShadow, ClipboardEntry, ContentMask, Element, ElementId, ElementInputHandler, Font, FontFeatures, FontId, FontWeight, GlobalElementId, InspectorElementId, InteractiveElement, Keystroke, LayoutId, Modifiers, Role, ShapedLine, Style, TextAlign, TextRun, UnderlineStyle, WindowHandle, accesskit, fill, hsla, point, relative, size};
