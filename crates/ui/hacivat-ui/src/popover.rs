@@ -100,6 +100,8 @@ pub struct A11yDecl {
     pub expanded: Option<bool>,
     /// Checked state of a checkbox, radio or toggle button; `None` where it does not apply.
     pub toggled: Option<bool>,
+    /// The 1-based position of an item in its set and the set's size (a list item).
+    pub position: Option<(usize, usize)>,
 }
 
 impl A11yDecl {
@@ -256,6 +258,12 @@ impl A11yNode {
         self.decl.toggled = Some(toggled);
         self
     }
+
+    /// The item's 1-based position in its set of `size` items ("3 of 5").
+    pub fn position(mut self, position: usize, size: usize) -> Self {
+        self.decl.position = Some((position, size));
+        self
+    }
 }
 
 impl Element for A11yNode {
@@ -336,6 +344,10 @@ impl Element for A11yNode {
         }
         if let Some(toggled) = d.toggled {
             node.set_toggled(accesskit::Toggled::from(toggled));
+        }
+        if let Some((position, size)) = d.position {
+            node.set_position_in_set(position);
+            node.set_size_of_set(size);
         }
     }
 }

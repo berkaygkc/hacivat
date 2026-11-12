@@ -1,24 +1,29 @@
-//! Toasts: short notices at the bottom right, above the status bar. At most three show at once
-//! (the rest wait their turn), each lives its TTL (6 s by default) unless dismissed, and none
-//! animates (named rule). The text is a [`TextFn`], so a visible toast follows a language
-//! switch (F16).
+//! Toasts: short notices at the bottom right, above the status bar. At most three transient
+//! toasts show at once (the rest wait their turn), each lives its TTL (6 s by default) unless
+//! dismissed, and none animates (named rule). The text is a [`TextFn`], so a visible toast
+//! follows a language switch (F16).
 //!
 //! A sticky toast (NOTES "NEW primitives": toast, sticky + actions) has no TTL and is announced
 //! as an alert. It may carry a title (weight 600), the text as a `text-2` body line, a list of
 //! `text-2` bullets with 3 px square marks, and a row of buttons; an action runs, then dismisses
-//! the toast. A `wide` toast is 380 px instead of 320.
+//! the toast. A `wide` toast is 380 px instead of 320. Sticky toasts have their own two slots,
+//! so they never keep a transient toast from showing.
+//!
+//! Keyboard: the actions and the dismiss ✕ are buttons and tab stops; [`focus_newest_sticky`]
+//! moves the focus to the newest sticky toast (the host binds a key to it), Escape dismisses a
+//! focused toast, and dismissing it gives the focus back to where it was.
 //!
 //! [`ToastQueue`] is the model (a `Global`); [`ToastStack`] draws it and is placed by the host
-//! (Task 13's `Layers`). Debug selectors: `toast-<id>`, `toast-bullet-<id>-<i>` and the action
-//! buttons `button-toast-action-<id>-<i>`.
+//! (Task 13's `Layers`). Debug selectors: `toast-<id>`, `toast-bullet-<id>-<i>`, the action
+//! buttons `button-toast-action-<id>-<i>` and the ✕ `button-toast-dismiss-<id>`.
 
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
 
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, ElementId, Global, InteractiveElement, IntoElement, ParentElement, Role,
-    SharedString, StatefulInteractiveElement, Styled, Window, accesskit, div, px,
+    AnyElement, App, ElementId, FocusHandle, Global, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Role, SharedString, Styled, Window, accesskit, div, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
@@ -26,11 +31,13 @@ use crate::actions::ActionFn;
 use crate::button::{Button, ButtonKind};
 use crate::icon::{Icon, IconName, IconSize};
 use crate::l10n::ui_text;
-use crate::popover::{A11yNode, Declare, lazy};
+use crate::popover::{A11yNode, lazy};
 use crate::text::{Label, TextFn, TextSource};
 
-/// How many toasts show at once.
+/// How many transient toasts show at once.
 pub const MAX_VISIBLE_TOASTS: usize = 3;
+/// How many sticky toasts show at once, besides the transient ones.
+pub const MAX_STICKY_TOASTS: usize = 2;
 /// The default lifetime of a toast.
 pub const DEFAULT_TOAST_TTL: Duration = Duration::from_secs(6);
 /// Gap between the toast stack and the window edge, and above the status bar.
@@ -116,9 +123,52 @@ pub fn sticky_demo_fixture(
     ToastQueue::push(cx, toast);
 }
 
+/// Moves the focus to the newest visible sticky toast: its first action, or its ✕. Returns
+/// whether a sticky toast took the focus. Dismissing that toast gives the focus back. The host
+/// binds a key to this (GPUI key bindings belong to `menus::rebuild`).
+pub fn focus_newest_sticky(window: &mut Window, cx: &mut App) -> bool {
+    let previous = window.focused(cx);
+    let target = {
+        let Some(q) = cx.try_global::<ToastQueue>() else {
+            return false;
+        };
+        let Some(entry) = q
+            .visible
+            .iter()
+            .filter(|e| e.toast.sticky)
+            .max_by_key(|e| e.id)
+        else {
+            return false;
+        };
+        let handle = entry
+            .actions_focus
+            .first()
+            .unwrap_or(&entry.dismiss_focus)
+            .clone();
+        (entry.id, handle)
+    };
+    let (id, handle) = target;
+    if let Some(entry) = cx
+        .global_mut::<ToastQueue>()
+        .visible
+        .iter_mut()
+        .find(|e| e.id == id)
+        && entry.restore.is_none()
+    {
+        entry.restore = previous;
+    }
+    window.focus(&handle, cx);
+    true
+}
+
 struct Entry {
     id: u64,
     toast: Toast,
+    /// One focus handle per action, then the ✕'s.
+    actions_focus: Vec<FocusHandle>,
+    dismiss_focus: FocusHandle,
+    /// Where the focus was before [`focus_newest_sticky`] moved it here.
+    restore: Option<FocusHandle>,
 }
 
 /// The toasts on screen and those waiting.
@@ -132,16 +182,23 @@ pub struct ToastQueue {
 impl Global for ToastQueue {}
 
 impl ToastQueue {
-    /// Shows `toast` now, or after one of the three visible ones goes.
+    /// Shows `toast` now, or after a visible toast of its kind (sticky or transient) goes.
     pub fn push(cx: &mut App, toast: Toast) {
+        let entry = Entry {
+            id: 0,
+            actions_focus: toast.actions.iter().map(|_| cx.focus_handle()).collect(),
+            dismiss_focus: cx.focus_handle(),
+            restore: None,
+            toast,
+        };
         let started = {
             let q = cx.default_global::<ToastQueue>();
             q.next_id += 1;
             let entry = Entry {
                 id: q.next_id,
-                toast,
+                ..entry
             };
-            if q.visible.len() < MAX_VISIBLE_TOASTS {
+            if q.has_room(entry.toast.sticky) {
                 let started = (entry.id, entry.toast.lifetime());
                 q.visible.push(entry);
                 Some(started)
@@ -156,8 +213,22 @@ impl ToastQueue {
         cx.refresh_windows();
     }
 
+    /// Whether a toast of this kind can show now.
+    fn has_room(&self, sticky: bool) -> bool {
+        let max = if sticky {
+            MAX_STICKY_TOASTS
+        } else {
+            MAX_VISIBLE_TOASTS
+        };
+        self.visible
+            .iter()
+            .filter(|e| e.toast.sticky == sticky)
+            .count()
+            < max
+    }
+
     /// Removes a toast (its TTL ran out, the user dismissed it or one of its actions ran) and
-    /// promotes a waiting one.
+    /// promotes the waiting toasts that now have room.
     pub fn dismiss(cx: &mut App, id: u64) {
         let promoted = {
             let q = cx.default_global::<ToastQueue>();
@@ -167,20 +238,36 @@ impl ToastQueue {
             if q.visible.len() + q.waiting.len() == before {
                 return;
             }
-            if q.visible.len() < MAX_VISIBLE_TOASTS
-                && let Some(entry) = q.waiting.pop_front()
-            {
-                let started = (entry.id, entry.toast.lifetime());
-                q.visible.push(entry);
-                Some(started)
-            } else {
-                None
+            let mut promoted = Vec::new();
+            while let Some(at) = q.waiting.iter().position(|e| q.has_room(e.toast.sticky)) {
+                if let Some(entry) = q.waiting.remove(at) {
+                    promoted.push((entry.id, entry.toast.lifetime()));
+                    q.visible.push(entry);
+                }
             }
+            promoted
         };
-        if let Some((id, Some(ttl))) = promoted {
-            Self::start_timer(cx, id, ttl);
+        for (id, ttl) in promoted {
+            if let Some(ttl) = ttl {
+                Self::start_timer(cx, id, ttl);
+            }
         }
         cx.refresh_windows();
+    }
+
+    /// Dismisses `id` from a key or a click and gives the focus back to where it was before
+    /// [`focus_newest_sticky`] moved it.
+    fn dismiss_in(window: &mut Window, cx: &mut App, id: u64) {
+        let restore = cx.try_global::<ToastQueue>().and_then(|q| {
+            q.visible
+                .iter()
+                .find(|e| e.id == id)
+                .and_then(|e| e.restore.clone())
+        });
+        Self::dismiss(cx, id);
+        if let Some(handle) = restore {
+            window.focus(&handle, cx);
+        }
     }
 
     fn start_timer(cx: &mut App, id: u64, ttl: Duration) {
@@ -208,16 +295,27 @@ impl ToastQueue {
 /// over the whole window.
 pub struct ToastStack {
     status_bar_px: f32,
+    inert: bool,
 }
 
 impl ToastStack {
     pub fn new() -> Self {
-        Self { status_bar_px: 0.0 }
+        Self {
+            status_bar_px: 0.0,
+            inert: false,
+        }
     }
 
     /// The height of the status bar the stack clears.
     pub fn above(mut self, status_bar_px: f32) -> Self {
         self.status_bar_px = status_bar_px;
+        self
+    }
+
+    /// While a modal layer is open the toasts stay readable but their buttons do nothing and
+    /// are announced as disabled (R26); the host passes `Layers::has_modal()`.
+    pub fn inert(mut self, inert: bool) -> Self {
+        self.inert = inert;
         self
     }
 }
@@ -237,7 +335,8 @@ struct Shown {
     title: Option<SharedString>,
     text: SharedString,
     bullets: Vec<SharedString>,
-    actions: Vec<(SharedString, ActionFn)>,
+    actions: Vec<(SharedString, ActionFn, FocusHandle)>,
+    dismiss_focus: FocusHandle,
 }
 
 impl IntoElement for ToastStack {
@@ -248,6 +347,7 @@ impl IntoElement for ToastStack {
             let theme = *Theme::get(cx);
             let t = theme.tokens;
             let c = &t.colors;
+            let inert = self.inert;
             let dismiss = ui_text(cx, "hui-toast-dismiss");
             let entries: Vec<Shown> = cx
                 .try_global::<ToastQueue>()
@@ -266,8 +366,10 @@ impl IntoElement for ToastStack {
                                 .toast
                                 .actions
                                 .iter()
-                                .map(|a| ((a.label)(cx), a.run.clone()))
+                                .zip(&e.actions_focus)
+                                .map(|(a, h)| ((a.label)(cx), a.run.clone(), h.clone()))
                                 .collect(),
+                            dismiss_focus: e.dismiss_focus.clone(),
                         })
                         .collect()
                 })
@@ -296,6 +398,13 @@ impl IntoElement for ToastStack {
                         || !shown.bullets.is_empty()
                         || !shown.actions.is_empty();
                     let headline = shown.title.clone().unwrap_or_else(|| shown.text.clone());
+                    // Everything the card says, one line each, for the live announcement.
+                    let mut spoken: Vec<SharedString> = vec![headline.clone()];
+                    if shown.title.is_some() && !shown.text.is_empty() {
+                        spoken.push(shown.text.clone());
+                    }
+                    spoken.extend(shown.bullets.iter().cloned());
+                    let announcement: SharedString = spoken.join("\n").into();
                     let mut content = div().flex().flex_col().flex_1().min_w(px(0.0));
                     match &shown.title {
                         Some(title) => {
@@ -359,7 +468,7 @@ impl IntoElement for ToastStack {
                                 .gap(px(t.spacing.sm))
                                 .mt(px(t.spacing.md))
                                 .children(shown.actions.into_iter().enumerate().map(
-                                    |(i, (label, run))| {
+                                    |(i, (label, run, focus))| {
                                         // One emphasised action; the rest are ghosts (mock).
                                         let kind = if i == 0 {
                                             ButtonKind::Default
@@ -373,10 +482,12 @@ impl IntoElement for ToastStack {
                                             label,
                                         )
                                         .kind(kind)
+                                        .focus_handle(focus)
+                                        .inert(inert)
                                         .on_click(
                                             move |_, window, cx| {
                                                 run(window, cx);
-                                                ToastQueue::dismiss(cx, id);
+                                                ToastQueue::dismiss_in(window, cx, id);
                                             },
                                         )
                                     },
@@ -398,6 +509,16 @@ impl IntoElement for ToastStack {
                     } else {
                         card.items_center()
                     };
+                    if !inert {
+                        // Escape dismisses the toast that holds the focus.
+                        card = card.on_key_down(move |event: &KeyDownEvent, window, cx| {
+                            let stroke = &event.keystroke;
+                            if stroke.key == "escape" && !stroke.modifiers.modified() {
+                                cx.stop_propagation();
+                                ToastQueue::dismiss_in(window, cx, id);
+                            }
+                        });
+                    }
                     let card = card
                         .child(
                             Icon::new(icon)
@@ -406,26 +527,23 @@ impl IntoElement for ToastStack {
                         )
                         .child(content)
                         .child(
-                            div()
-                                .id(ElementId::from(("toast-dismiss", id)))
-                                .declare(Role::Button, dismiss.clone(), None)
-                                .flex()
-                                .items_center()
-                                .cursor_pointer()
-                                .on_click(move |_, _, cx| ToastQueue::dismiss(cx, id))
-                                .child(
-                                    // Raised Ink Rule: text-2 on the raised card.
-                                    Icon::new(IconName::X)
-                                        .size(IconSize::Chrome)
-                                        .color(c.text_2.to_hsla()),
-                                ),
+                            // Raised Ink Rule: the icon button's ink is text-2 on the card.
+                            Button::new(
+                                ElementId::Name(format!("toast-dismiss-{id}").into()),
+                                dismiss.clone(),
+                            )
+                            .kind(ButtonKind::Icon)
+                            .icon(IconName::X)
+                            .focus_handle(shown.dismiss_focus)
+                            .inert(inert)
+                            .on_click(move |_, window, cx| ToastQueue::dismiss_in(window, cx, id)),
                         );
                     // Announced by screen readers: the node's value changes with a live region
                     // (macOS speaks only valued, live nodes).
                     let mut node =
                         A11yNode::new(("toast-node", id), role, headline.clone(), false, card)
                             .live(live)
-                            .value(headline);
+                            .value(announcement);
                     if shown.title.is_some() && !shown.text.is_empty() {
                         node = node.description(shown.text);
                     }

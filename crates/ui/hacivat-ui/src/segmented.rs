@@ -18,7 +18,7 @@ use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 use crate::button::{ClickHandler, focus_visible, hover_listener, interaction_state};
 use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::Declare;
-use crate::popover::{Tip, lazy};
+use crate::popover::{A11yNode, Tip, lazy};
 use crate::text::{Label, TextSource};
 
 pub enum SegmentContent {
@@ -45,6 +45,7 @@ pub struct Segmented {
     id: ElementId,
     items: Vec<SegmentItem>,
     mono: bool,
+    inert: bool,
 }
 
 impl Segmented {
@@ -53,6 +54,7 @@ impl Segmented {
             id: id.into(),
             items: Vec::new(),
             mono: false,
+            inert: false,
         }
     }
 
@@ -64,6 +66,13 @@ impl Segmented {
     /// Labels in 11.5 px mono (the language segments).
     pub fn mono(mut self, mono: bool) -> Self {
         self.mono = mono;
+        self
+    }
+
+    /// Ignores the pointer and the keyboard and announces every segment as disabled, with the
+    /// same look (the title bar while a modal layer is open, M2a).
+    pub fn inert(mut self, inert: bool) -> Self {
+        self.inert = inert;
         self
     }
 }
@@ -159,11 +168,14 @@ impl IntoElement for Segmented {
                         .into_any_element(),
                 };
                 let selector = format!("segmented-{}-{i}", self.id);
-                let mut segment = div()
-                    .id(id)
-                    .debug_selector(move || selector)
-                    .declare(Role::Button, name, None)
-                    .aria_toggled(accesskit::Toggled::from(item.pressed))
+                let node_id = ElementId::from((self.id.clone(), format!("{i}-node")));
+                let mut segment = div().id(id).debug_selector(move || selector);
+                if !self.inert {
+                    segment = segment
+                        .declare(Role::Button, name.clone(), None)
+                        .aria_toggled(accesskit::Toggled::from(item.pressed));
+                }
+                let mut segment = segment
                     .flex()
                     .flex_row()
                     .items_center()
@@ -176,11 +188,19 @@ impl IntoElement for Segmented {
                     .gap(px(t.spacing.sm))
                     .when_divider(i)
                     .border_color(c.seam_strong.to_hsla())
-                    .cursor_pointer()
                     .child(content);
                 if item.pressed {
                     segment = segment.bg(pressed_fill.to_hsla());
                 }
+                if self.inert {
+                    group = group.child(
+                        A11yNode::new(node_id, Role::Button, name, false, segment)
+                            .toggled(item.pressed)
+                            .disabled(true),
+                    );
+                    continue;
+                }
+                let segment = segment.cursor_pointer();
                 let on_click = item.on_click;
                 let tooltip = item.tooltip;
                 let (handles, clicks) = (handles.clone(), clicks.clone());

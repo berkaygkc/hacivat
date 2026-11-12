@@ -4,18 +4,23 @@
 //! - done: a 12 px `green` check, the label in `text` and the duration in mono 11 px `text-2`;
 //! - running: the 7 px square `amber` run marker and the label in `text`;
 //! - failed: a 12 px ✕ in `text` (no new hue for errors) and the label at weight 600;
-//! - pending: a 7 px hollow square in `seam-strong` and the label in `text-2`.
+//! - pending: a 7 px hollow square in `seam-strong` and the label in `text-2`;
+//! - skipped (a step the path did not need): a 12 px `text-2` dash and the label in `text-2`.
 //!
-//! The labels and durations come from the caller (Fluent); the trail owns no text. Debug
-//! selectors: `step-trail`, `trail-<i>`, `trail-run-<i>` and `trail-pending-<i>`.
+//! Accessibility: the trail is a list and every step a list item named by its label, with its
+//! position ("4 of 5", which locates a failure) and, given [`TrailA11y`], its state word as the
+//! value and its duration as the description. The labels, durations and state words come from
+//! the caller (Fluent); the trail owns no text. Debug selectors: `step-trail`, `trail-<i>`,
+//! `trail-run-<i>` and `trail-pending-<i>`.
 
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, Div, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, div, px,
+    AnyElement, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Role, SharedString,
+    Styled, div, px,
 };
 use hacivat_ui_core::theme::{Theme, TypeStyle};
 
 use crate::icon::{Icon, IconName, IconSize};
-use crate::popover::lazy;
+use crate::popover::{A11yNode, lazy};
 use crate::text::{Label, TextSource};
 
 /// The height of one trail item (NOTES "Step trail": 20 px).
@@ -31,8 +36,12 @@ const MARK_PX: f32 = 7.0;
 pub enum TrailState {
     Pending,
     Running,
-    Done { duration: Option<SharedString> },
+    Done {
+        duration: Option<SharedString>,
+    },
     Failed,
+    /// The connect path did not need this step (M2a fix round: the a11y state set).
+    Skipped,
 }
 
 /// One step of a trail.
@@ -40,6 +49,29 @@ pub enum TrailState {
 pub struct TrailItem {
     pub label: SharedString,
     pub state: TrailState,
+}
+
+/// What assistive technology hears: the list's name and one word per state (Fluent).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TrailA11y {
+    pub label: SharedString,
+    pub pending: SharedString,
+    pub running: SharedString,
+    pub done: SharedString,
+    pub failed: SharedString,
+    pub skipped: SharedString,
+}
+
+impl TrailA11y {
+    fn word(&self, state: &TrailState) -> &SharedString {
+        match state {
+            TrailState::Pending => &self.pending,
+            TrailState::Running => &self.running,
+            TrailState::Done { .. } => &self.done,
+            TrailState::Failed => &self.failed,
+            TrailState::Skipped => &self.skipped,
+        }
+    }
 }
 
 /// The 7 px square `amber` run marker: "in progress" (DESIGN.md splash; NOTES cross-cutting #3,
@@ -54,11 +86,18 @@ pub fn run_marker(theme: &Theme) -> Div {
 /// A row of connect steps (NOTES surface 1).
 pub struct StepTrail {
     items: Vec<TrailItem>,
+    a11y: Option<TrailA11y>,
 }
 
 impl StepTrail {
     pub fn new(items: Vec<TrailItem>) -> Self {
-        StepTrail { items }
+        StepTrail { items, a11y: None }
+    }
+
+    /// The list's accessible name and the state words announced for each step.
+    pub fn a11y(mut self, a11y: TrailA11y) -> Self {
+        self.a11y = Some(a11y);
+        self
     }
 }
 
@@ -71,60 +110,96 @@ impl IntoElement for StepTrail {
             let t = theme.tokens;
             let c = &t.colors;
             let caption = t.type_ramp.caption;
-            let label =
-                |s: &SharedString, style: TypeStyle, color: hacivat_ui_core::gpui_surface::Hsla| {
-                    Label::new(s.clone(), TextSource::Fluent, style, color)
-                };
-            let items = self.items.into_iter().enumerate().map(|(i, item)| {
-                let row = div()
-                    .debug_selector(move || format!("trail-{i}"))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .flex_none()
-                    .gap(px(ITEM_GAP_PX))
-                    .h(px(ITEM_HEIGHT_PX));
-                match item.state {
-                    TrailState::Done { duration } => row
-                        .child(
-                            Icon::new(IconName::Check)
-                                .size(IconSize::Chrome)
-                                .color(c.green.to_hsla()),
-                        )
-                        .child(label(&item.label, caption, c.text.to_hsla()))
-                        .children(
-                            duration.map(|d| label(&d, t.type_ramp.mono_micro, c.text_2.to_hsla())),
-                        ),
-                    TrailState::Running => row
-                        .child(run_marker(&theme).debug_selector(move || format!("trail-run-{i}")))
-                        .child(label(&item.label, caption, c.text.to_hsla())),
-                    TrailState::Failed => row
-                        .child(
-                            Icon::new(IconName::X)
-                                .size(IconSize::Chrome)
-                                .color(c.text.to_hsla()),
-                        )
-                        .child(label(
-                            &item.label,
-                            TypeStyle {
-                                weight: 600,
-                                ..caption
-                            },
-                            c.text.to_hsla(),
-                        )),
-                    TrailState::Pending => row
-                        .child(
-                            div()
-                                .debug_selector(move || format!("trail-pending-{i}"))
-                                .size(px(MARK_PX))
-                                .flex_none()
-                                .border_1()
-                                .border_color(c.seam_strong.to_hsla()),
-                        )
-                        .child(label(&item.label, caption, c.text_2.to_hsla())),
-                }
-            });
-            div()
+            let label = |s: &SharedString, style: TypeStyle, color: Hsla| {
+                Label::new(s.clone(), TextSource::Fluent, style, color)
+            };
+            let a11y = self.a11y;
+            let count = self.items.len();
+            let items: Vec<AnyElement> = self
+                .items
+                .into_iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let row = div()
+                        .debug_selector(move || format!("trail-{i}"))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .flex_none()
+                        .gap(px(ITEM_GAP_PX))
+                        .h(px(ITEM_HEIGHT_PX));
+                    let duration = match &item.state {
+                        TrailState::Done { duration } => duration.clone(),
+                        _ => None,
+                    };
+                    let row = match &item.state {
+                        TrailState::Done { duration } => row
+                            .child(
+                                Icon::new(IconName::Check)
+                                    .size(IconSize::Chrome)
+                                    .color(c.green.to_hsla()),
+                            )
+                            .child(label(&item.label, caption, c.text.to_hsla()))
+                            .children(
+                                duration
+                                    .as_ref()
+                                    .map(|d| label(d, t.type_ramp.mono_micro, c.text_2.to_hsla())),
+                            ),
+                        TrailState::Running => row
+                            .child(
+                                run_marker(&theme).debug_selector(move || format!("trail-run-{i}")),
+                            )
+                            .child(label(&item.label, caption, c.text.to_hsla())),
+                        TrailState::Failed => row
+                            .child(
+                                Icon::new(IconName::X)
+                                    .size(IconSize::Chrome)
+                                    .color(c.text.to_hsla()),
+                            )
+                            .child(label(
+                                &item.label,
+                                TypeStyle {
+                                    weight: 600,
+                                    ..caption
+                                },
+                                c.text.to_hsla(),
+                            )),
+                        TrailState::Pending => row
+                            .child(
+                                div()
+                                    .debug_selector(move || format!("trail-pending-{i}"))
+                                    .size(px(MARK_PX))
+                                    .flex_none()
+                                    .border_1()
+                                    .border_color(c.seam_strong.to_hsla()),
+                            )
+                            .child(label(&item.label, caption, c.text_2.to_hsla())),
+                        TrailState::Skipped => row
+                            .child(
+                                Icon::new(IconName::Minus)
+                                    .size(IconSize::Chrome)
+                                    .color(c.text_2.to_hsla()),
+                            )
+                            .child(label(&item.label, caption, c.text_2.to_hsla())),
+                    };
+                    let mut node = A11yNode::new(
+                        ("trail-item", i),
+                        Role::ListItem,
+                        item.label.clone(),
+                        false,
+                        row,
+                    )
+                    .position(i + 1, count);
+                    if let Some(a11y) = &a11y {
+                        node = node.value(a11y.word(&item.state).clone());
+                    }
+                    if let Some(duration) = duration {
+                        node = node.description(duration);
+                    }
+                    node.into_any_element()
+                })
+                .collect();
+            let list = div()
                 .debug_selector(|| "step-trail".to_string())
                 .flex()
                 .flex_row()
@@ -132,8 +207,9 @@ impl IntoElement for StepTrail {
                 .items_center()
                 .gap_x(px(t.spacing.s_2xl))
                 .gap_y(px(t.spacing.s_2xs))
-                .children(items)
-                .into_any_element()
+                .children(items);
+            let name = a11y.map(|a| a.label).unwrap_or_default();
+            A11yNode::new("step-trail-node", Role::List, name, false, list).into_any_element()
         })
         .into_any_element()
     }

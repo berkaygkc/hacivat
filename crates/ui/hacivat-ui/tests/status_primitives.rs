@@ -11,22 +11,23 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, Font, FontId, FontMetrics, FontRun, GlyphId, Hsla, InteractiveElement,
-    IntoElement, LineLayout, Modifiers, NoopTextSystem, ParentElement, Pixels, PlatformTextSystem,
-    Point, RenderGlyphParams, Role, SharedString, Size, Styled, TestAppContext, TestDispatcher,
-    TextRenderingMode, VisualTestContext, div, px, size,
+    App, AppContext as _, Bounds, Focusable as _, Font, FontId, FontMetrics, FontRun, GlyphId,
+    Hsla, InteractiveElement, IntoElement, LineLayout, Modifiers, NoopTextSystem, ParentElement,
+    Pixels, PlatformTextSystem, Point, RenderGlyphParams, Role, SharedString, Size, Styled,
+    TestAppContext, TestDispatcher, TextRenderingMode, VisualTestContext, div, px, size,
 };
 use hacivat_ui::button::Button;
 use hacivat_ui::capsule::{Capsule, CapsuleModel, CapsuleSegment, EnvKind, env_swatch};
-use hacivat_ui::explain::ExplainPopover;
+use hacivat_ui::explain::{ExplainEvent, ExplainPopover};
 use hacivat_ui::icon::{DrawnIcon, IconName, icon_record, icon_take};
+use hacivat_ui::input::TextInput;
 use hacivat_ui::popover::{A11yDecl, a11y_record, a11y_take};
 use hacivat_ui::statusbar::{StatusBar, env_segment};
-use hacivat_ui::step_trail::{StepTrail, TrailItem, TrailState};
+use hacivat_ui::step_trail::{StepTrail, TrailA11y, TrailItem, TrailState};
 use hacivat_ui::text::{TextFn, TextRegistry};
 use hacivat_ui::titlebar::TitleBar;
 use hacivat_ui::toast::{
-    Toast, ToastAction, ToastKind, ToastQueue, ToastStack, sticky_demo_fixture,
+    Toast, ToastAction, ToastKind, ToastQueue, ToastStack, focus_newest_sticky, sticky_demo_fixture,
 };
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::theme::{DARK, Theme, ThemeMode};
@@ -448,7 +449,17 @@ fn connected_prod_ro_unencrypted() -> CapsuleModel {
 }
 
 fn failed_capsule(name: &'static str) -> CapsuleModel {
+    failed_in(EnvKind::Production, name)
+}
+
+fn failed_in(env: EnvKind, name: &'static str) -> CapsuleModel {
     CapsuleModel::Failed {
+        env,
+        env_label: if env == EnvKind::Production {
+            "PRODUCTION".into()
+        } else {
+            "Staging".into()
+        },
         label: "Couldn't connect".into(),
         name: name.into(),
         retry: "Retry".into(),
@@ -541,6 +552,67 @@ fn capsule_states(cx: &mut TestAppContext) {
     assert_eq!(hits.borrow()[1].1, bounds_of(vcx, "capsule").bottom_left());
 }
 
+/// Ruling A: a failed production connection keeps the PRODUCTION block first (NOTES §7).
+#[gpui::test]
+fn a_failed_capsule_keeps_its_environment_first(cx: &mut TestAppContext) {
+    let (vcx, _) = mount_capsule(cx, failed_capsule("orders-prod"));
+    assert_one_filled_badge(vcx, true);
+    assert!(bounds_of(vcx, "cp-fill").right() <= bounds_of(vcx, "capsule-body").left());
+    assert!(texts(vcx).contains(&"PRODUCTION".into()));
+
+    let (vcx, _) = mount_capsule(cx, failed_in(EnvKind::Staging, "orders-staging"));
+    assert_one_filled_badge(vcx, false);
+    assert!(texts(vcx).contains(&"Staging".into()));
+}
+
+/// Exactly one handler runs per click: the segment handler wins over `on_click`.
+#[gpui::test]
+fn capsule_click_handlers_are_exclusive(cx: &mut TestAppContext) {
+    let clicks = Rc::new(Cell::new(0));
+    let hits: Hits = Rc::default();
+    let (c, h) = (clicks.clone(), hits.clone());
+    let vcx = host(cx, move |_, _| {
+        let (c, h) = (c.clone(), h.clone());
+        div()
+            .p(px(20.0))
+            .flex()
+            .child(
+                Capsule::new(failed_capsule("orders-prod"))
+                    .on_click(move |_, _, _| c.set(c.get() + 1))
+                    .on_segment(move |s, anchor, _, _| h.borrow_mut().push((s, anchor))),
+            )
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(1200.0), px(200.0)));
+    vcx.run_until_parked();
+    click(vcx, "capsule-body");
+    click(vcx, "capsule-retry");
+    assert_eq!(clicks.get(), 0);
+    assert_eq!(
+        hits.borrow().iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+        [CapsuleSegment::Body, CapsuleSegment::Retry]
+    );
+
+    // Without a segment handler, `on_click` takes the body click (M1).
+    let clicks = Rc::new(Cell::new(0));
+    let c = clicks.clone();
+    let vcx = host(cx, move |_, _| {
+        let c = c.clone();
+        div()
+            .p(px(20.0))
+            .flex()
+            .child(
+                Capsule::new(failed_capsule("orders-prod"))
+                    .on_click(move |_, _, _| c.set(c.get() + 1)),
+            )
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(1200.0), px(200.0)));
+    vcx.run_until_parked();
+    click(vcx, "capsule-body");
+    assert_eq!(clicks.get(), 1);
+}
+
 #[gpui::test]
 fn capsule_segments_are_announced(cx: &mut TestAppContext) {
     a11y_record();
@@ -550,7 +622,7 @@ fn capsule_segments_are_announced(cx: &mut TestAppContext) {
         declared(&decls, Role::Button, "orders-prod")
             .description
             .as_deref(),
-        Some("Couldn't connect")
+        Some("PRODUCTION, Couldn't connect")
     );
     declared(&decls, Role::Button, "Retry");
 
@@ -764,20 +836,22 @@ fn explanation_popover_is_300_wide(cx: &mut TestAppContext) {
 
 // ---- title bar --------------------------------------------------------------------------------
 
-fn mount_titlebar(
+fn mount_titlebar_in(
+    chrome: ChromeKind,
     cx: &mut TestAppContext,
     inert: bool,
 ) -> (&mut VisualTestContext, Rc<Cell<usize>>) {
     let opened = Rc::new(Cell::new(0));
     let count = opened.clone();
     let vcx = host(cx, move |_, _| {
-        let (a, b, c) = (count.clone(), count.clone(), count.clone());
+        let (a, b, c, d) = (count.clone(), count.clone(), count.clone(), count.clone());
         div()
             .w_full()
             .child(
-                TitleBar::new(ChromeKind::MacTrafficLights)
+                TitleBar::new(chrome)
                     .inert(inert)
                     .brand("HACIVAT".into())
+                    .app_menu(move |_, _, _| d.set(d.get() + 1))
                     .capsule(
                         Capsule::new(failed_capsule("orders-prod"))
                             .on_segment(move |_, _, _, _| a.set(a.get() + 1)),
@@ -814,4 +888,345 @@ fn title_bar_controls_are_inert_while_modal(cx: &mut TestAppContext) {
     click(vcx, "capsule-retry");
     click(vcx, "button-theme");
     assert_eq!(opened.get(), 4);
+}
+
+fn mount_titlebar(
+    cx: &mut TestAppContext,
+    inert: bool,
+) -> (&mut VisualTestContext, Rc<Cell<usize>>) {
+    mount_titlebar_in(ChromeKind::MacTrafficLights, cx, inert)
+}
+
+#[gpui::test]
+fn the_inert_title_bar_marks_its_controls_disabled(cx: &mut TestAppContext) {
+    a11y_record();
+    let (_vcx, _) = mount_titlebar_in(ChromeKind::LinuxClient, cx, true);
+    let decls = a11y_take();
+    for name in ["Search", "orders-prod", "Retry"] {
+        assert!(declared(&decls, Role::Button, name).disabled, "{name}");
+    }
+    // The app-menu button (its Fluent name) is announced disabled too.
+    assert!(
+        decls
+            .iter()
+            .filter(|d| d.role == Some(Role::Button) && d.disabled)
+            .count()
+            >= 4,
+        "{decls:?}"
+    );
+
+    a11y_record();
+    let (_vcx, _) = mount_titlebar_in(ChromeKind::LinuxClient, cx, false);
+    let decls = a11y_take();
+    for name in ["Search", "orders-prod", "Retry"] {
+        assert!(!declared(&decls, Role::Button, name).disabled, "{name}");
+    }
+}
+
+/// Fix 9: while inert, the drag regions and the window buttons stay live.
+#[gpui::test]
+fn the_inert_title_bar_keeps_dragging_and_window_buttons_live(cx: &mut TestAppContext) {
+    let (vcx, opened) = mount_titlebar_in(ChromeKind::LinuxClient, cx, true);
+    let close = bounds_of(vcx, "window-close");
+    let bar = bounds_of(vcx, "title-bar");
+    for what in ["capsule", "right", "app-menu"] {
+        let cover = bounds_of(vcx, format!("titlebar-inert-{what}"));
+        assert!(!cover.intersects(&close), "{what} covers the close button");
+    }
+    // The brand's drag region (left of the capsule) is under no cover.
+    let drag_at = gpui::point(bar.left() + px(30.0), bar.center().y);
+    let capsule_cover = bounds_of(vcx, "titlebar-inert-capsule");
+    assert!(drag_at.x < capsule_cover.left());
+    click(vcx, "button-titlebar-app-menu");
+    assert_eq!(opened.get(), 0, "the app menu is inert");
+    // The Linux close button still closes the window.
+    let before = vcx.update(|_, cx| cx.windows().len());
+    vcx.simulate_click(close.center(), Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.windows().len()), before - 1);
+
+    // A press on the drag region still starts a window move: the test platform's
+    // `start_window_move` is unimplemented, so reaching it panics.
+    let (vcx, _) = mount_titlebar(cx, true);
+    let bar = bounds_of(vcx, "title-bar");
+    let drag_at = gpui::point(bar.left() + px(20.0), bar.center().y);
+    let pressed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vcx.simulate_mouse_down(drag_at, gpui::MouseButton::Left, Modifiers::none());
+    }));
+    assert!(pressed.is_err(), "the drag region did not see the press");
+}
+
+// ---- step trail accessibility (ruling B) ------------------------------------------------------
+
+#[gpui::test]
+fn the_trail_announces_each_state_and_where_it_failed(cx: &mut TestAppContext) {
+    a11y_record();
+    let vcx = host(cx, |_, _| {
+        div()
+            .w(px(600.0))
+            .child(
+                StepTrail::new(vec![
+                    done("Resolve", "3 ms"),
+                    TrailItem {
+                        label: "SSH".into(),
+                        state: TrailState::Skipped,
+                    },
+                    failed("Sign in"),
+                    pending("Check"),
+                ])
+                .a11y(TrailA11y {
+                    label: "Connection steps".into(),
+                    pending: "pending".into(),
+                    running: "in progress".into(),
+                    done: "done".into(),
+                    failed: "failed".into(),
+                    skipped: "skipped".into(),
+                }),
+            )
+            .into_any_element()
+    });
+    vcx.run_until_parked();
+    let decls = a11y_take();
+    declared(&decls, Role::List, "Connection steps");
+    let item = |name: &str| declared(&decls, Role::ListItem, name);
+    let resolve = item("Resolve");
+    assert_eq!(
+        (
+            resolve.value.as_deref(),
+            resolve.description.as_deref(),
+            resolve.position
+        ),
+        (Some("done"), Some("3 ms"), Some((1, 4)))
+    );
+    assert_eq!(item("SSH").value.as_deref(), Some("skipped"));
+    let failed = item("Sign in");
+    assert_eq!(
+        (failed.value.as_deref(), failed.position),
+        (Some("failed"), Some((3, 4)))
+    );
+    assert_eq!(item("Check").value.as_deref(), Some("pending"));
+    assert!(names(&frame_icons(vcx)).contains(&IconName::Minus));
+}
+
+// ---- toasts: keyboard, announcement, slots, modal --------------------------------------------
+
+struct InputHost {
+    input: gpui::Entity<TextInput>,
+    stack: Rc<dyn Fn() -> ToastStack>,
+}
+
+impl gpui::Render for InputHost {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .child(div().w(px(300.0)).child(self.input.clone()))
+            .child((self.stack)())
+    }
+}
+
+/// A window with a focused text input and a toast stack.
+fn mount_input_and_toasts(
+    cx: &mut TestAppContext,
+    stack: impl Fn() -> ToastStack + 'static,
+) -> (&mut VisualTestContext, gpui::Entity<TextInput>) {
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    let stack: Rc<dyn Fn() -> ToastStack> = Rc::new(stack);
+    let (view, vcx) = cx.add_window_view(move |_, cx| InputHost {
+        input: cx.new(|cx| TextInput::new(cx, text("Filter"))),
+        stack: stack.clone(),
+    });
+    vcx.simulate_resize(gpui::size(px(1000.0), px(600.0)));
+    let input = view.read_with(vcx, |h, _| h.input.clone());
+    let focus = input.clone();
+    vcx.update(|window, cx| {
+        window.activate_window();
+        focus.focus_handle(cx).focus(window, cx);
+    });
+    vcx.run_until_parked();
+    (vcx, input)
+}
+
+fn sticky(title: &'static str, ran: Rc<Cell<usize>>) -> Toast {
+    let mut toast = Toast::new(ToastKind::Info, text("Open transactions were rolled back."));
+    toast.sticky = true;
+    toast.title = Some(text(title));
+    toast.bullets = vec![text("Your open transaction"), text("Temporary tables")];
+    toast.actions = vec![ToastAction {
+        label: text("Show details"),
+        run: Rc::new(move |_, _| ran.set(ran.get() + 1)),
+    }];
+    toast
+}
+
+fn focused(vcx: &mut VisualTestContext, input: &gpui::Entity<TextInput>) -> bool {
+    let input = input.clone();
+    vcx.update(|window, cx| input.focus_handle(cx).is_focused(window))
+}
+
+#[gpui::test]
+fn sticky_toasts_are_reachable_by_keyboard(cx: &mut TestAppContext) {
+    let ran = Rc::new(Cell::new(0));
+    let r = ran.clone();
+    cx.update(|cx| ToastQueue::push(cx, sticky("Reconnected to orders-prod", r)));
+    let (vcx, input) = mount_input_and_toasts(cx, ToastStack::new);
+    let id = visible(vcx)[0];
+    assert!(has(vcx, format!("button-toast-action-{id}-0")));
+    assert!(has(vcx, format!("button-toast-dismiss-{id}")));
+
+    // The route the host binds a key to: focus reaches the first action; Enter runs it.
+    assert!(vcx.update(focus_newest_sticky));
+    vcx.run_until_parked();
+    assert!(!focused(vcx, &input));
+    // Enter down and up, as a keyboard sends it: GPUI clicks the focused button on key-up.
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    vcx.run_until_parked();
+    assert_eq!(ran.get(), 1);
+    assert!(visible(vcx).is_empty());
+    assert!(focused(vcx, &input), "dismissing gives the focus back");
+
+    // Escape dismisses the focused toast without running its action.
+    let r = ran.clone();
+    vcx.update(|_, cx| ToastQueue::push(cx, sticky("Reconnected again", r)));
+    vcx.run_until_parked();
+    assert!(vcx.update(focus_newest_sticky));
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert_eq!(ran.get(), 1);
+    assert!(visible(vcx).is_empty());
+    assert!(focused(vcx, &input));
+
+    // Nothing sticky: the route reports it and leaves the focus alone.
+    assert!(!vcx.update(focus_newest_sticky));
+    assert!(focused(vcx, &input));
+}
+
+#[gpui::test]
+fn the_toast_announcement_includes_its_bullets(cx: &mut TestAppContext) {
+    let ran = Rc::new(Cell::new(0));
+    cx.update(|cx| ToastQueue::push(cx, sticky("Reconnected to orders-prod", ran)));
+    a11y_record();
+    let (_vcx, _) = mount_input_and_toasts(cx, ToastStack::new);
+    let node = declared(&a11y_take(), Role::Alert, "Reconnected to orders-prod");
+    let value = node.value.unwrap_or_default();
+    for line in [
+        "Reconnected to orders-prod",
+        "Open transactions were rolled back.",
+        "Your open transaction",
+        "Temporary tables",
+    ] {
+        assert!(value.contains(line), "{line} in {value:?}");
+    }
+}
+
+#[gpui::test]
+fn sticky_toasts_never_take_a_transient_slot(cx: &mut TestAppContext) {
+    let ran = Rc::new(Cell::new(0));
+    cx.update(|cx| {
+        for title in ["one", "two", "three"] {
+            ToastQueue::push(cx, sticky(title, ran.clone()));
+        }
+        for t in ["a", "b", "c", "d"] {
+            ToastQueue::push(cx, Toast::new(ToastKind::Info, text(t)));
+        }
+        // Two sticky and three transient show; the third sticky and `d` wait.
+        assert_eq!(ToastQueue::visible_ids(cx).len(), 5);
+        assert_eq!(ToastQueue::waiting(cx), 2);
+        // Dismissing a sticky toast promotes the waiting sticky one, not `d`.
+        let first = ToastQueue::visible_ids(cx)[0];
+        ToastQueue::dismiss(cx, first);
+        assert_eq!(ToastQueue::visible_ids(cx).len(), 5);
+        assert_eq!(ToastQueue::waiting(cx), 1);
+    });
+    // The transient ones expire and `d` takes a slot; the sticky ones stay.
+    cx.executor().advance_clock(Duration::from_secs(7));
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert_eq!(ToastQueue::visible_ids(cx).len(), 3);
+        assert_eq!(ToastQueue::waiting(cx), 0);
+    });
+}
+
+#[gpui::test]
+fn toast_actions_are_inert_while_a_modal_is_open(cx: &mut TestAppContext) {
+    let ran = Rc::new(Cell::new(0));
+    let r = ran.clone();
+    cx.update(|cx| ToastQueue::push(cx, sticky("Reconnected to orders-prod", r)));
+    a11y_record();
+    let (vcx, _) = mount_input_and_toasts(cx, || ToastStack::new().inert(true));
+    let decls = a11y_take();
+    assert!(declared(&decls, Role::Button, "Show details").disabled);
+    let id = visible(vcx)[0];
+    click(vcx, format!("button-toast-action-{id}-0"));
+    click(vcx, format!("button-toast-dismiss-{id}"));
+    assert_eq!(ran.get(), 0);
+    assert_eq!(visible(vcx), [id]);
+}
+
+// ---- explanation popover focus ----------------------------------------------------------------
+
+struct PopoverHost {
+    input: gpui::Entity<TextInput>,
+    popover: Option<gpui::Entity<ExplainPopover>>,
+}
+
+impl gpui::Render for PopoverHost {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .child(div().w(px(300.0)).child(self.input.clone()))
+            .children(self.popover.clone())
+    }
+}
+
+#[gpui::test]
+fn the_explanation_popover_takes_and_returns_the_focus(cx: &mut TestAppContext) {
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    let (view, vcx) = cx.add_window_view(|_, cx| PopoverHost {
+        input: cx.new(|cx| TextInput::new(cx, text("Filter"))),
+        popover: None,
+    });
+    let input = view.read_with(vcx, |h, _| h.input.clone());
+    let focus = input.clone();
+    vcx.update(|window, cx| {
+        window.activate_window();
+        focus.focus_handle(cx).focus(window, cx);
+    });
+    vcx.run_until_parked();
+    assert!(focused(vcx, &input));
+
+    // Open it: it takes the focus.
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let sink = events.clone();
+    let popover = vcx.update(|_, cx| {
+        let popover = ExplainPopover::new(
+            "Unencrypted connection".into(),
+            IconName::LockOpen,
+            vec!["ci-mariadb sends queries in plain text.".into()],
+            cx,
+        );
+        cx.subscribe(&popover, move |_, e: &ExplainEvent, _| {
+            sink.borrow_mut().push(*e)
+        })
+        .detach();
+        popover
+    });
+    let p = popover.clone();
+    view.update_in(vcx, |h, _, cx| {
+        h.popover = Some(p);
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let p = popover.clone();
+    assert!(vcx.update(|window, cx| p.focus_handle(cx).is_focused(window)));
+    assert!(!focused(vcx, &input));
+
+    // Escape: the focus goes back to the input, and the host hears it.
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(focused(vcx, &input));
+    assert_eq!(*events.borrow(), [ExplainEvent::Dismissed]);
 }

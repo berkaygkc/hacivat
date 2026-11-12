@@ -5,13 +5,19 @@
 //! padding 10/12. The title is 13 px weight 600 `text` after a 12 px icon; each body entry is a
 //! paragraph at 12.5 px `text-2` (Raised Ink Rule) that wraps to the card's width. The caller
 //! passes every string (Fluent). Debug selectors: `explain-popover`, `explain-title`.
+//!
+//! Focus: the popover takes the focus on its first frame and remembers where it was (the
+//! trigger). Escape hands the focus back and emits [`ExplainEvent::Dismissed`]; it does not stop
+//! the key, so the workspace's Escape also pops the layer (whose restore focus is the same
+//! trigger, recorded by `open_anchored`).
 
 use std::panic::Location;
 
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, AnyView, App, AppContext as _, Context, InteractiveElement, IntoElement,
-    ParentElement, Render, Role, SharedString, Styled, Window, div, px,
+    AnyElement, AnyView, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Role,
+    SharedString, Styled, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, TypeStyle, popover_surface};
 
@@ -25,14 +31,51 @@ const WIDTH_PX: f32 = 300.0;
 /// (6) and `md` (8) tokens).
 const TITLE_GAP_PX: f32 = 7.0;
 
+/// What the popover tells its host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplainEvent {
+    /// Escape was pressed: the focus is back on the trigger; the host closes the popover.
+    Dismissed,
+}
+
 /// An explanation card (NOTES surface 7).
 pub struct ExplainPopover {
     title: SharedString,
     icon: IconName,
     body: Vec<SharedString>,
+    focus: FocusHandle,
+    /// Whether the popover has taken the focus yet (on its first frame).
+    opened: bool,
+    /// The focus before the popover took it: the trigger.
+    restore: Option<FocusHandle>,
+}
+
+impl EventEmitter<ExplainEvent> for ExplainPopover {}
+
+impl Focusable for ExplainPopover {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
 }
 
 impl ExplainPopover {
+    /// The popover as an entity, for a host that listens to [`ExplainEvent`].
+    pub fn new(
+        title: SharedString,
+        icon: IconName,
+        body: Vec<SharedString>,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        cx.new(|cx| ExplainPopover {
+            title,
+            icon,
+            body,
+            focus: cx.focus_handle(),
+            opened: false,
+            restore: None,
+        })
+    }
+
     /// The popover as a view, ready for a layer.
     pub fn view(
         title: SharedString,
@@ -40,7 +83,18 @@ impl ExplainPopover {
         body: Vec<SharedString>,
         cx: &mut App,
     ) -> AnyView {
-        cx.new(|_| ExplainPopover { title, icon, body }).into()
+        Self::new(title, icon, body, cx).into()
+    }
+
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let stroke = &event.keystroke;
+        if stroke.key != "escape" || stroke.modifiers.modified() {
+            return;
+        }
+        if let Some(handle) = self.restore.take() {
+            window.focus(&handle, cx);
+        }
+        cx.emit(ExplainEvent::Dismissed);
     }
 }
 
@@ -81,7 +135,23 @@ fn paragraph(
 }
 
 impl Render for ExplainPopover {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.opened {
+            // Take the focus once the first frame is drawn, remembering the trigger.
+            self.opened = true;
+            let this = cx.entity().downgrade();
+            window.defer(cx, move |window, cx| {
+                let Some(this) = this.upgrade() else {
+                    return;
+                };
+                let previous = window.focused(cx);
+                let focus = this.update(cx, |this, _| {
+                    this.restore = previous;
+                    this.focus.clone()
+                });
+                window.focus(&focus, cx);
+            });
+        }
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = &t.colors;
@@ -97,6 +167,8 @@ impl Render for ExplainPopover {
             })
             .collect();
         let card = popover_surface(&theme)
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key))
             .debug_selector(|| "explain-popover".to_string())
             .flex()
             .flex_col()

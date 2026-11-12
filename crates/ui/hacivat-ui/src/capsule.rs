@@ -9,8 +9,8 @@
 //! - connected: the access (a lock that is red only on production, or a `text-2` read-write
 //!   label), the path (green arrows for Direct, the route glyph otherwise, latency in mono), an
 //!   "unencrypted" segment (lock-open 12 px `text-2`, label `text`) and an "unsupported" mark;
-//! - failed: a 12 px alert glyph in `text` with the label, then a Retry segment (rotate-cw,
-//!   `text-2`, `text` while the capsule is hovered).
+//! - failed: the environment block and the name, a 12 px alert glyph in `text` with the label,
+//!   then a Retry segment (rotate-cw, `text-2`, `text` while the capsule is hovered).
 //!
 //! The production block always comes first. Debug selectors: `capsule`, `cp-fill`,
 //! `capsule-body` (the name segment), `capsule-run`, `capsule-retry`, `capsule-unencrypted` and
@@ -28,8 +28,7 @@ use hacivat_ui_core::theme::{Theme, ThemeTokens, TypeStyle};
 
 use crate::button::{ClickHandler, hover_listener, interaction_state};
 use crate::icon::{Icon, IconName, IconSize};
-use crate::popover::lazy;
-use crate::popover::{A11yDecl, Declare};
+use crate::popover::{A11yNode, lazy};
 use crate::step_trail::run_marker;
 use crate::text::{Label, TextSource};
 
@@ -135,8 +134,11 @@ pub enum CapsuleModel {
         /// The unsupported-version badge's label.
         unsupported: Option<SharedString>,
     },
-    /// The last connect failed.
+    /// The last connect failed. The environment block still comes first (a failed production
+    /// connection keeps its PRODUCTION block, NOTES §7).
     Failed {
+        env: EnvKind,
+        env_label: SharedString,
         label: SharedString,
         name: SharedString,
         retry: SharedString,
@@ -147,6 +149,7 @@ pub struct Capsule {
     model: CapsuleModel,
     on_click: Option<ClickHandler>,
     on_segment: Option<SegmentHandler>,
+    inert: bool,
 }
 
 impl Capsule {
@@ -155,12 +158,21 @@ impl Capsule {
             model,
             on_click: None,
             on_segment: None,
+            inert: false,
         }
+    }
+
+    /// Ignores the pointer and is announced as disabled, with the same look (the title bar
+    /// while a modal layer is open, M2a).
+    pub fn inert(mut self, inert: bool) -> Self {
+        self.inert = inert;
+        self
     }
 
     /// Called when a segment is clicked, with the bottom-left corner of its bounds: `Retry` and
     /// `Unencrypted` for those segments, `Body` (anchored at the capsule's bottom-left) for a
-    /// click anywhere else.
+    /// click anywhere else. Exactly one handler runs per click: with `on_segment` set, a click on
+    /// the body reports `Body` here and [`Capsule::on_click`] is not called.
     pub fn on_segment(
         mut self,
         handler: impl Fn(CapsuleSegment, Point<Pixels>, &mut Window, &mut App) + 'static,
@@ -169,6 +181,7 @@ impl Capsule {
         self
     }
 
+    /// Called for a click on the capsule when no [`Capsule::on_segment`] handler is set (M1).
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -264,23 +277,35 @@ impl Capsule {
             .on_hover(hover_listener(hover))
             .child(bounds_probe(frame_bounds.clone(), 1.0, 1.0));
 
-        // A segment that reports itself (and not `Body`) when clicked.
-        let on_segment = self.on_segment.clone();
-        let clickable = |id: &'static str, segment: CapsuleSegment, name: &SharedString| {
+        // A segment that reports itself (and not `Body`) when clicked; announced as a button,
+        // disabled while the capsule is inert.
+        let inert = self.inert;
+        let on_segment = if inert { None } else { self.on_segment.clone() };
+        let clickable = |id: &'static str,
+                         segment: CapsuleSegment,
+                         name: &SharedString,
+                         content: [AnyElement; 2]| {
             let slot = Rc::new(Cell::new(Bounds::default()));
             let mut el = cell(t)
                 .id(id)
                 .debug_selector(move || id.to_string())
                 .relative()
-                .declare(Role::Button, name.clone(), None)
-                .child(bounds_probe(slot.clone(), 1.0, 0.0));
+                .child(bounds_probe(slot.clone(), 1.0, 0.0))
+                .children(content);
             if let Some(handler) = on_segment.clone() {
                 el = el.on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     handler(segment, slot.get().bottom_left(), window, cx);
                 });
             }
-            el
+            A11yNode::new(
+                ElementId::Name(format!("{id}-node").into()),
+                Role::Button,
+                name.clone(),
+                false,
+                el,
+            )
+            .disabled(inert)
         };
 
         let head = |frame: Stateful<Div>, head: Head<'_>| {
@@ -434,11 +459,15 @@ impl Capsule {
                 }
                 frame = frame.child(access_cell).child(path_cell);
                 if let Some(label) = unencrypted {
-                    frame = frame.child(
-                        clickable("capsule-unencrypted", CapsuleSegment::Unencrypted, label)
-                            .child(icon(IconName::LockOpen, c.text_2.to_hsla()))
-                            .child(text(label, body, c.text.to_hsla())),
-                    );
+                    frame = frame.child(clickable(
+                        "capsule-unencrypted",
+                        CapsuleSegment::Unencrypted,
+                        label,
+                        [
+                            icon(IconName::LockOpen, c.text_2.to_hsla()).into_any_element(),
+                            text(label, body, c.text.to_hsla()).into_any_element(),
+                        ],
+                    ));
                 }
                 if let Some(label) = unsupported {
                     // A permanent, hue-free mark (PO Q3).
@@ -450,13 +479,19 @@ impl Capsule {
                     );
                 }
             }
-            CapsuleModel::Failed { label, name, retry } => {
+            CapsuleModel::Failed {
+                env,
+                env_label,
+                label,
+                name,
+                retry,
+            } => {
                 name_for_label = name.clone();
-                description = Some(label.clone());
+                description = Some(SharedString::from(format!("{env_label}, {label}")));
                 frame = head(
                     frame,
                     Head {
-                        env: None,
+                        env: Some((*env, env_label)),
                         name,
                         engine: None,
                     },
@@ -469,11 +504,15 @@ impl Capsule {
                             .child(icon(IconName::TriangleAlert, c.text.to_hsla()))
                             .child(text(label, body, c.text.to_hsla())),
                     )
-                    .child(
-                        clickable("capsule-retry", CapsuleSegment::Retry, retry)
-                            .child(icon(IconName::RotateCw, retry_ink.to_hsla()))
-                            .child(text(retry, body, retry_ink.to_hsla())),
-                    );
+                    .child(clickable(
+                        "capsule-retry",
+                        CapsuleSegment::Retry,
+                        retry,
+                        [
+                            icon(IconName::RotateCw, retry_ink.to_hsla()).into_any_element(),
+                            text(retry, body, retry_ink.to_hsla()).into_any_element(),
+                        ],
+                    ));
             }
         }
         frame = frame.child(
@@ -483,26 +522,27 @@ impl Capsule {
                     .color(c.text_3.to_hsla()),
             ),
         );
-        let mut decl = A11yDecl::new(Role::Button, name_for_label);
-        decl.description = description;
-        let mut frame = frame.declare_full(decl).cursor_pointer();
-        let on_click = self.on_click;
-        let on_segment = self.on_segment;
-        if on_click.is_some() || on_segment.is_some() {
-            frame = frame.on_click(move |event, window, cx| {
-                if let Some(handler) = &on_click {
-                    handler(event, window, cx);
-                }
-                if let Some(handler) = &on_segment {
+        // Exactly one handler per click: the segment handler wins, `on_click` is the M1 fallback.
+        if !inert {
+            frame = frame.cursor_pointer();
+            if let Some(handler) = self.on_segment {
+                frame = frame.on_click(move |_, window, cx| {
                     handler(
                         CapsuleSegment::Body,
                         frame_bounds.get().bottom_left(),
                         window,
                         cx,
-                    );
-                }
-            });
+                    )
+                });
+            } else if let Some(handler) = self.on_click {
+                frame = frame.on_click(move |event, window, cx| handler(event, window, cx));
+            }
         }
-        frame.into_any_element()
+        let mut node = A11yNode::new("capsule-node", Role::Button, name_for_label, false, frame)
+            .disabled(inert);
+        if let Some(description) = description {
+            node = node.description(description);
+        }
+        node.into_any_element()
     }
 }

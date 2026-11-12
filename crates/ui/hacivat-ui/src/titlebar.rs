@@ -21,8 +21,7 @@ use crate::button::{Button, ButtonKind, ClickHandler, hover_listener, interactio
 use crate::capsule::Capsule;
 use crate::icon::{Icon, IconName, IconSize};
 use crate::l10n::ui_text;
-use crate::popover::Declare;
-use crate::popover::lazy;
+use crate::popover::{A11yNode, Declare, lazy};
 use crate::text::{Label, TextSource};
 
 /// Width of the overflow button that takes the trailing segments.
@@ -99,9 +98,11 @@ impl TitleBar {
     }
 
     /// Whether a modal layer is open (M2a): the palette field, the capsule, the trailing
-    /// segments, the overflow button and the app menu then ignore the pointer. The drag
-    /// regions, the traffic lights and the window controls stay live, and the bar is drawn as
-    /// usual (the scrim starts below it, NOTES cross-cutting #1).
+    /// segments, the overflow button and the app menu then ignore the pointer, and the palette
+    /// field, the capsule and the two buttons are announced as disabled. The trailing segments
+    /// are the caller's elements: build them inert too (`Segmented::inert`). The drag regions,
+    /// the traffic lights and the window controls stay live, and the bar is drawn as usual (the
+    /// scrim starts below it, NOTES cross-cutting #1).
     pub fn inert(mut self, inert: bool) -> Self {
         self.inert = inert;
         self
@@ -167,13 +168,14 @@ impl TitleBar {
 
 /// Lays a transparent cover over `el` that takes every press, so the controls under it do
 /// nothing while the bar is inert (and show no hover).
-fn inert_cover(el: Div, inert: bool) -> Div {
+/// Debug selector: `titlebar-inert-<what>`.
+fn inert_cover(el: Div, inert: bool, what: &'static str) -> Div {
     if !inert {
         return el;
     }
     el.relative().child(
         div()
-            .debug_selector(|| "titlebar-inert-cover".to_string())
+            .debug_selector(move || format!("titlebar-inert-{what}"))
             .absolute()
             .top_0()
             .left_0()
@@ -277,8 +279,9 @@ impl TitleBar {
         }
         if let Some(capsule) = self.capsule {
             bar = bar.child(inert_cover(
-                div().ml(px(t.spacing.xl)).child(capsule),
+                div().ml(px(t.spacing.xl)).child(capsule.inert(inert)),
                 inert,
+                "capsule",
             ));
         }
         bar = bar.child(drag_region(div().flex_1().h_full()));
@@ -288,10 +291,10 @@ impl TitleBar {
             let mut label_style = t.type_ramp.body;
             label_style.size_px = label_style.size_px.max(11.0);
             let on_click = palette.on_click;
+            let name = palette.placeholder.clone();
             let mut field = div()
                 .id(ElementId::from("palette-field"))
                 .debug_selector(|| "palette-field".to_string())
-                .declare(Role::Button, palette.placeholder.clone(), None)
                 .flex()
                 .flex_row()
                 .items_center()
@@ -337,6 +340,8 @@ impl TitleBar {
                     .cursor_pointer()
                     .on_click(move |event, window, cx| on_click(event, window, cx));
             }
+            let field = A11yNode::new("palette-field-node", Role::Button, name, false, field)
+                .disabled(inert);
             bar = bar.child(field).child(drag_region(div().flex_1().h_full()));
         }
 
@@ -350,9 +355,11 @@ impl TitleBar {
                             .kind(ButtonKind::Icon)
                             .fixed_width(OVERFLOW_BUTTON_PX)
                             .icon(IconName::Ellipsis)
+                            .inert(inert)
                             .on_click_rc(on_overflow),
                     ),
                     inert,
+                    "overflow",
                 ));
             }
         } else if !self.right.is_empty() {
@@ -364,6 +371,7 @@ impl TitleBar {
                     .gap(px(t.spacing.md))
                     .children(self.right),
                 inert,
+                "right",
             ));
         }
 
@@ -375,9 +383,11 @@ impl TitleBar {
                         Button::new("titlebar-app-menu", ui_text(cx, "hui-menu-app"))
                             .kind(ButtonKind::Icon)
                             .icon(IconName::Menu)
+                            .inert(inert)
                             .on_click_rc(on_click),
                     ),
                     inert,
+                    "app-menu",
                 ));
             }
             bar = bar.child(caption_buttons(chrome, window, cx));
