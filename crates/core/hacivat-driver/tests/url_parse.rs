@@ -486,6 +486,149 @@ fn a_value_that_only_mentions_password_is_kept() {
     assert_eq!(fv(&user, FieldId::User), "password");
 }
 
+// ---- Fix round 3: Unicode whitespace, allowlisted keys, socket network paths ----
+
+const ENGINES: [Option<DbmsKind>; 4] = [
+    None,
+    Some(DbmsKind::Postgres),
+    Some(DbmsKind::MySql),
+    Some(DbmsKind::Sqlite),
+];
+
+#[test]
+fn round_three_swallowed_secrets_are_refused() {
+    // Named by index: the texts hold a fixture secret.
+    for (i, text) in [
+        // Unicode whitespace (rich-text pastes): NBSP and U+3000.
+        "host=h password\u{a0}=SECRETPW x.db",
+        "Server=h;\u{a0}Pwd=SECRETPW;a.db",
+        "postgres://h/db?application_name=x%C2%A0password=SECRETPW",
+        "postgres://h/db?application_name=x%E3%80%80password=SECRETPW",
+        "postgres://h/db?x=y\u{3000}pwd\u{3000}=SECRETPW",
+        // Any non-key character ends a key: quotes, brace, pipe, colon, slash, plus.
+        "postgres://h/db?x='password=SECRETPW'",
+        "postgres://h/db?x=\"password\"=SECRETPW",
+        "postgres://h/db?x={password=SECRETPW}",
+        "postgres://h/db?x=a|password=SECRETPW",
+        "postgres://h/db?x=a:password=SECRETPW",
+        "postgresql:///db?host=/tmp/password=SECRETPW",
+        "mysql://u@localhost/db?socket=/tmp/pwd=SECRETPW",
+        "postgres://h/db?x=x%2Bpassword=SECRETPW",
+        "postgres://h/db?x=x+password=SECRETPW",
+        "host=h options='-c x=1,password=SECRETPW'",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for preferred in ENGINES {
+            let r = parse(text, preferred);
+            assert_eq!(
+                r.unrecognised(),
+                Some(UnrecognisedReason::NoMatch),
+                "case {i}"
+            );
+            assert!(!format!("{r:?}").contains("SECRETPW"), "case {i}");
+        }
+    }
+}
+
+#[test]
+fn a_rich_text_dsn_moves_its_password() {
+    // The DSN splits on any Unicode whitespace, so the password is moved, not swallowed.
+    for (i, (text, db)) in [
+        (
+            "host=h\u{a0}password=SECRETPW\u{a0}dbname=x.db",
+            Some("x.db"),
+        ),
+        ("host=h\u{3000}password=SECRETPW", None),
+        (
+            "host=h \u{a0}password\u{a0}=\u{a0}SECRETPW dbname=d",
+            Some("d"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for preferred in ENGINES {
+            let o = ok(parse(text, preferred));
+            assert_eq!(fv(&o, FieldId::Host), "h", "case {i}");
+            assert_eq!(
+                o.fields.values.get(&FieldId::Database).map(String::as_str),
+                db,
+                "case {i}"
+            );
+            assert!(password(&o) == "SECRETPW", "case {i}");
+            assert!(!format!("{o:?}").contains("SECRETPW"), "case {i}");
+        }
+    }
+}
+
+#[test]
+fn sockets_on_other_machines_are_refused() {
+    for text in [
+        r"mysql://u@localhost/db?socket=\\evil\pipe\mysql",
+        "mysql://u@localhost/db?socket=//evil/pipe/mysql",
+        "mysql://u@localhost/db?socket=%5C%5Cevil%5Cpipe%5Cmysql",
+        "postgresql:///db?host=//evil/share",
+        "postgresql:///db?host=%2F%2Fevil%2Fshare",
+        "postgresql://%2F%2Fevil%2Fshare/db",
+        "host=//evil/share dbname=d",
+        "host='//evil/share' dbname=d",
+    ] {
+        for preferred in ENGINES {
+            assert_eq!(
+                parse(text, preferred).unrecognised(),
+                Some(UnrecognisedReason::NoMatch),
+                "{text}"
+            );
+        }
+    }
+    // A local socket is fine.
+    let ok_sock = ok(parse("mysql://u@localhost/db?socket=/tmp/mysql.sock", None));
+    assert_eq!(fv(&ok_sock, FieldId::Socket), "/tmp/mysql.sock");
+}
+
+#[test]
+fn round_three_legitimate_values_still_parse() {
+    let opts = ok(parse(
+        "postgres://h/db?options=-c%20search_path%3Dpublic",
+        None,
+    ));
+    assert_eq!(
+        opts.extra,
+        vec![("options".to_string(), "-c search_path=public".to_string())]
+    );
+    let enc = ok(parse(
+        "postgres://h/db?options=-c%20password_encryption%3Dscram-sha-256",
+        None,
+    ));
+    assert_eq!(enc.extra[0].1, "-c password_encryption=scram-sha-256");
+    let dsn = ok(parse("host=h options='-c search_path=public'", None));
+    assert_eq!(dsn.extra[0].1, "-c search_path=public");
+    let app = ok(parse(
+        "postgres://h/db?application_name=password-reset-service",
+        None,
+    ));
+    assert_eq!(app.mapped[0].value, "password-reset-service");
+    let db = ok(parse("postgres://h/password_db", None));
+    assert_eq!(fv(&db, FieldId::Database), "password_db");
+    let sock = ok(parse("postgresql:///db?host=/run/passwordless", None));
+    assert_eq!(fv(&sock, FieldId::Socket), "/run/passwordless");
+    let user = ok(parse("host=h user=password", None));
+    assert_eq!(fv(&user, FieldId::User), "password");
+    let tr = ok(parse("postgres://h/%C5%9Fifre_db", None));
+    assert_eq!(fv(&tr, FieldId::Database), "şifre_db");
+    let tr_file = ok(parse("/tmp/şifre.db", None));
+    assert_eq!(fv(&tr_file, FieldId::File), "/tmp/şifre.db");
+    let tr_uri = ok(parse("file:/tmp/%C5%9Fifre.db", None));
+    assert_eq!(fv(&tr_uri, FieldId::File), "/tmp/şifre.db");
+    // Accepted cost of the allowlist rule: a file named like `password=…` is refused.
+    assert_eq!(
+        parse("/tmp/password=1.db", None).unrecognised(),
+        Some(UnrecognisedReason::NoMatch)
+    );
+}
+
 #[test]
 fn nt_object_namespace_paths_are_refused() {
     for text in [

@@ -302,6 +302,24 @@ mod tests {
             "PassWord%3Dx",
             "/sock%26PassWord%3Dx",
             "a\tpassword\t=\tx",
+            // Round 3: Unicode whitespace, and any non-key character as a boundary.
+            "host=h\u{a0}password=x",
+            "host=h password\u{a0}=x",
+            "Server=h;\u{a0}Pwd=x",
+            "x\u{3000}password\u{3000}=x",
+            "x%C2%A0password=x",
+            "x%E3%80%80password=x",
+            "'password=x'",
+            "\"password\"=x",
+            "'password' = x",
+            "{password=x}",
+            "a|password=x",
+            "a:password=x",
+            "/tmp/password=x",
+            "x+password=x",
+            "/tmp/password%3D",
+            "/tmp/password=1.db",
+            "şifre password=x",
         ] {
             assert!(carries_secret(v), "{v}");
         }
@@ -314,10 +332,18 @@ mod tests {
             "/s&mypassword=x",
             "/s&password",
             "x=password",
-            "/tmp/password%3D",
+            "-c search_path=public",
+            "-c password_encryption=scram-sha-256",
+            "password-reset-service",
+            "app=password-reset-service",
+            "şifre_db",
+            "/tmp/şifre.db",
+            "şifre=x",
+            "x.password_hash=1",
             "",
             "=",
             " = = ",
+            "\u{a0}=\u{3000}=",
         ] {
             assert!(!carries_secret(v), "{v}");
         }
@@ -360,6 +386,10 @@ mod tests {
             " =".repeat(n / 2),
             "a=".repeat(n / 2),
             "%3D".repeat(n / 3),
+            "\u{a0}=".repeat(n / 3),
+            format!("{}=", "a".repeat(n)),
+            format!("{}=", "\u{3000}".repeat(n / 3)),
+            "x\u{3000}".repeat(n / 4),
         ] {
             assert!(!carries_secret(&v));
         }

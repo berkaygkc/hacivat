@@ -235,28 +235,31 @@ fn valid_port(p: &str) -> bool {
         && p.parse::<u16>().is_ok_and(|n| n != 0)
 }
 
-/// The one secret-shape check (T7 fix rounds 1 and 2): whether `v`, as written or
-/// percent-decoded once, holds `key =` for a password-like `key` (`password`, `sslpassword`,
-/// `pass`, `pwd`, `passwd`; ASCII case ignored; the key itself also after any number of
-/// percent-decodings, up to 8). A key is the run before `=` (optional ASCII whitespace between
-/// them) back to the start, `;`, `&`, `?`, `,`, `=` or ASCII whitespace: the shape of a query,
-/// a DSN or an ADO string swallowed into one value. Linear in `v`.
+/// The one secret-shape check (T7 fix rounds 1 to 3): whether `v`, as written or
+/// percent-decoded once, holds `key=` for a password-like `key` (`password`, `sslpassword`,
+/// `pass`, `pwd`, `passwd`; ASCII case ignored; the key itself also percent-decoded, up to 8
+/// times). The shape of a query, a DSN or an ADO string swallowed into one value.
+///
+/// The key rule is an allowlist: at each `=`, skip back over any Unicode whitespace
+/// (`char::is_whitespace`, so NBSP and U+3000 count) and closing quotes (`"`, `'`, `` ` ``),
+/// then take the longest run of `[A-Za-z0-9_%-]` before it. Every other character ends the
+/// key, so no list of separators can miss one (`'`, `{`, `|`, `:`, `/`, `+`, …). Linear in `v`:
+/// neither backward scan crosses the previous `=`.
 pub(super) fn carries_secret(v: &str) -> bool {
     names_secret_key(v)
         || (v.contains('%') && names_secret_key(&percent_decode_str(v).decode_utf8_lossy()))
 }
 
 fn names_secret_key(s: &str) -> bool {
-    let boundary = |c: u8| matches!(c, b';' | b'&' | b'?' | b',' | b'=') || c.is_ascii_whitespace();
+    let key_byte = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'%' | b'-');
     let b = s.as_bytes();
-    // Each scan back stops at the previous `=` at the latest, so the work is linear.
     s.match_indices('=').any(|(eq, _)| {
-        let mut end = eq;
-        while end > 0 && b[end - 1].is_ascii_whitespace() {
-            end -= 1;
-        }
+        // `trim_end_matches` cuts on char boundaries; the key run is ASCII, so `start` is one too.
+        let end = s[..eq]
+            .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`'))
+            .len();
         let mut start = end;
-        while start > 0 && !boundary(b[start - 1]) {
+        while start > 0 && key_byte(b[start - 1]) {
             start -= 1;
         }
         start < end && secret_key(&s[start..end])
@@ -290,16 +293,21 @@ pub(super) fn is_network_path(p: &str) -> bool {
     (sep(a) && sep(b)) || (sep(a) && b == Some('?') && x == Some('?') && sep(d))
 }
 
-/// The outcome invariant, checked before `parse` returns (T7 fix round 2): no value the
+/// The outcome invariant, checked before `parse` returns (T7 fix rounds 2 and 3): no value the
 /// outcome keeps in the clear (fields, hosts, extras as `key=value`, mapped values) carries a
-/// password-like `key =`, and the file is no network path. Whatever recognizer produced the
+/// password-like `key =`, and neither the file nor the socket is a network path. Whatever recognizer produced the
 /// outcome, a secret is moved by a parser that owns its key or the text is refused; it is never
 /// left inside another value.
 pub(in crate::url) fn leaks_a_secret(o: &ParseOutcome) -> bool {
-    let file_is_remote = o.fields.values.get(&FieldId::File).is_some_and(|f| {
-        is_network_path(f) || is_network_path(&percent_decode_str(f).decode_utf8_lossy())
-    });
-    file_is_remote
+    // A file or a socket on another machine (round 3: sockets too; a MySQL `\\host\pipe\…` or
+    // a PostgreSQL `//host/share` socket directory would reach out over SMB).
+    let remote = |f: FieldId| {
+        o.fields.values.get(&f).is_some_and(|p| {
+            is_network_path(p) || is_network_path(&percent_decode_str(p).decode_utf8_lossy())
+        })
+    };
+    remote(FieldId::File)
+        || remote(FieldId::Socket)
         || o.fields.values.values().any(|v| carries_secret(v))
         || o.fields.hosts.iter().any(|(h, _)| carries_secret(h))
         || o.extra

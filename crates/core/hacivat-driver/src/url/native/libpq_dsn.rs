@@ -1,7 +1,10 @@
 //! libpq keyword/value connection strings (`host=... dbname=...`) (HV-DRV-04), tokenized as
-//! libpq does: `key = value` pairs separated by whitespace (C `isspace`), whitespace allowed
-//! around `=`, and a value either single-quoted or ending at whitespace, with `\` escaping the
-//! next character in both. There is no percent-decoding: unquoting is the one decode.
+//! libpq does: `key = value` pairs separated by whitespace, whitespace allowed around `=`, and a
+//! value either single-quoted or ending at whitespace, with `\` escaping the next character in
+//! both. There is no percent-decoding: unquoting is the one decode. Unlike libpq, whitespace
+//! means any Unicode whitespace (NBSP, U+3000), not only C `isspace`; quote a value to keep one.
+//! There is no ADO (`Server=…;Pwd=…`) parser in M2a: such text is protected by the outcome
+//! invariant (`leaks_a_secret`), which refuses it when it would land in a field.
 //!
 //! A text is a DSN only when it names a connection key (`host`, `hostaddr`, `port`, `dbname`
 //! or `user`, ASCII case ignored), so `a=b` is not taken for one. Keys fold ASCII case only:
@@ -41,9 +44,12 @@ pub(super) fn parse(text: &str) -> Option<ParseOutcome> {
     b.finish()
 }
 
-/// C `isspace`: space, tab, newline, vertical tab, form feed, carriage return.
+/// A separator: C `isspace` (space, tab, newline, vertical tab, form feed, carriage return)
+/// and, beyond libpq, any Unicode whitespace (T7 fix round 3). A DSN pasted from rich text
+/// (Slack, Confluence, Word) carries NBSPs or U+3000 where spaces were meant, and splitting on
+/// them moves a `password` to the secret instead of leaving it inside the previous value.
 fn is_space(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | '\r') || c == char::from(11) || c == char::from(12)
+    c.is_whitespace()
 }
 
 fn skip_space(s: &str, i: usize) -> usize {
