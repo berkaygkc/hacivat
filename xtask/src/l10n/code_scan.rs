@@ -125,7 +125,7 @@ fn scan_source(
                     used.push((s.clone(), line, false));
                 }
             }
-            Tok::Punct('+') if ui && !is(&toks, i + 1, '=') => {
+            Tok::Punct('+') if ui && !is(&toks, i + 1, '=') && !in_identifier_call(&toks, i) => {
                 let (l, r) = (left_operand(&toks, i), right_operand(&toks, i));
                 let text = Operand::Text;
                 let lit_or_text = |o: Operand| matches!(o, Operand::Text | Operand::Lit);
@@ -156,6 +156,7 @@ fn scan_source(
                 }
                 if ui {
                     if name == "format"
+                        && !in_identifier_call(&toks, i)
                         && is(&toks, i + 1, '!')
                         && is(&toks, i + 2, '(')
                         && let Some(template) = format_assembly(&toks, i + 2)
@@ -197,6 +198,9 @@ fn hardcoded(
     let Tok::Ident(name) = &toks[i].tok else {
         return;
     };
+    if in_identifier_call(toks, i) {
+        return;
+    }
     let (open, needs_fluent) = match name.as_str() {
         "child" if i > 0 && is(toks, i - 1, '.') => (i + 1, false),
         "SharedString" if is_path(toks, i + 1, &["from"]) => (i + 4, false),
@@ -246,6 +250,41 @@ fn hardcoded(
         }
         j += 1;
     }
+}
+
+/// Whether token `i` sits inside the arguments of a call that takes an element identifier or a
+/// key, not text: `.id(..)`, `.debug_selector(..)`, `.key_context(..)` or an `ElementId`
+/// constructor (`ElementId::from(..)`, `ElementId::Name(..)`, `ElementId::NamedInteger(..)`).
+fn in_identifier_call(toks: &[Token], i: usize) -> bool {
+    let mut depth = 0usize;
+    for j in (i.saturating_sub(400)..i).rev() {
+        match toks[j].tok {
+            Tok::Punct(')' | ']' | '}') => depth += 1,
+            Tok::Punct(';') if depth == 0 => return false,
+            Tok::Punct('(' | '[' | '{') => {
+                if depth > 0 {
+                    depth -= 1;
+                    continue;
+                }
+                // Only a `(` directly after the callee is a call; `id { .. }` is a block.
+                if !matches!(toks[j].tok, Tok::Punct('(')) {
+                    continue;
+                }
+                let Some(Tok::Ident(callee)) = j.checked_sub(1).map(|k| &toks[k].tok) else {
+                    continue;
+                };
+                let keyed = matches!(callee.as_str(), "id" | "debug_selector" | "key_context");
+                let constructor = j >= 4
+                    && is_colons(toks, j - 3)
+                    && matches!(&toks[j - 4].tok, Tok::Ident(t) if t == "ElementId");
+                if keyed || constructor {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Whether a format template has letters outside its `{..}` placeholders.
@@ -829,6 +868,54 @@ mod tests {
         );
         assert_eq!(flagged(r#"fn f() { a.child(format!("{}", n)); }"#), 0);
         assert_eq!(flagged(r#"fn f() { a.child("×".into()); }"#), 0);
+    }
+
+    #[test]
+    fn element_identifiers_are_not_ui_text() {
+        for src in [
+            // The exact patterns of hacivat-ui panes.rs.
+            r#"fn f() { div().id(ElementId::from((SharedString::from("tab-strip"), pane.0 as usize))); }"#,
+            r#"fn f() { div().id(ElementId::from((SharedString::from("tab"), n))); }"#,
+            r#"fn f() { div().id(ElementId::from((SharedString::from("tab-close"), n))); }"#,
+            r#"fn f() { let id = ElementId::from((SharedString::from("tab"), n)); }"#,
+            r#"fn f() { ElementId::Name(SharedString::from("tab")); }"#,
+            r#"fn f() { ElementId::NamedInteger(SharedString::from("tab"), 3); }"#,
+            r#"fn f() { div().id(SharedString::from("tab")); }"#,
+            r#"fn f() { div().id(format!("tab-{n}")); }"#,
+            r#"fn f() { div().debug_selector(|| SharedString::from("tab").to_string()); }"#,
+            r#"fn f() { div().key_context(SharedString::from("Editor")); }"#,
+        ] {
+            assert_eq!(flagged(src), 0, "{src}");
+        }
+        // Assembly inside an identifier call is not UI text either.
+        for src in [
+            r#"fn f() { div().id(format!("{} {}", l10n.t(A), b)); }"#,
+            r#"fn f() { div().id(l10n.t(A) + " " + &l10n.t(B)); }"#,
+        ] {
+            assert_eq!(flagged(src), 0, "{src}");
+        }
+        assert_eq!(
+            flagged(r#"fn f() { let s = format!("{} {}", l10n.t(A), b); }"#),
+            1
+        );
+        // A block after a variable named `id` is not a call.
+        assert_eq!(
+            flagged(r#"fn f() { match id { _ => a.child(SharedString::from("Open")) } }"#),
+            1
+        );
+        assert_eq!(
+            flagged(r#"fn f() { if let Some(x) = id { a.child("Open"); } }"#),
+            1
+        );
+        // Text next to an identifier is still text.
+        assert_eq!(
+            flagged(r#"fn f() { div().id("x").child(SharedString::from("Open")); }"#),
+            1
+        );
+        assert_eq!(
+            flagged(r#"fn f() { div().child(SharedString::from("Open")); }"#),
+            1
+        );
     }
 
     #[test]
