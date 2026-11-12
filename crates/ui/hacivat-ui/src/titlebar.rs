@@ -5,7 +5,7 @@
 //! The bar is draggable (`start_window_move`) and a double click zooms; only its inert regions
 //! (inset, brand, spacers) start a drag so buttons keep their clicks. The Overflow Rule is
 //! [`titlebar_fit`]: trailing segments collapse into an overflow button before the palette
-//! label truncates.
+//! field shrinks; a placeholder that no longer fits ellipsizes.
 
 use std::rc::Rc;
 
@@ -37,34 +37,24 @@ pub struct TitleBarFit {
     /// The trailing segments live behind the overflow button.
     pub segments_in_overflow: bool,
     pub palette_width: f32,
-    /// The palette label ellipsizes (its width fell below the minimum).
-    pub palette_truncates: bool,
 }
 
 /// The Overflow Rule (F13). With `available = width - fixed`: when the preferred palette and
 /// all segments fit, nothing changes. Otherwise the segments move behind a 24 px overflow
-/// button and the palette takes what is left, up to its preferred width; its label truncates
-/// only when that falls below `palette_min`.
-pub fn titlebar_fit(
-    width: f32,
-    fixed: f32,
-    palette_pref: f32,
-    palette_min: f32,
-    segments: f32,
-) -> TitleBarFit {
+/// button and the palette takes what is left, up to its preferred width (the field's
+/// `min_w` keeps it at `PALETTE_MIN_PX` or wider).
+pub fn titlebar_fit(width: f32, fixed: f32, palette_pref: f32, segments: f32) -> TitleBarFit {
     let available = width - fixed;
     if available >= palette_pref + segments {
         return TitleBarFit {
             segments_in_overflow: false,
             palette_width: palette_pref,
-            palette_truncates: false,
         };
     }
     let palette_width = palette_pref.min(available - OVERFLOW_BUTTON_PX).max(0.0);
     TitleBarFit {
         segments_in_overflow: true,
         palette_width,
-        palette_truncates: palette_width < palette_min,
     }
 }
 
@@ -198,7 +188,7 @@ impl TitleBar {
         let fit = self
             .fit
             .as_ref()
-            .map(|f| titlebar_fit(width, f.fixed, PALETTE_PREF_PX, PALETTE_MIN_PX, f.segments));
+            .map(|f| titlebar_fit(width, f.fixed, PALETTE_PREF_PX, f.segments));
 
         let mut bar = div()
             .debug_selector(|| "title-bar".to_string())
@@ -262,7 +252,6 @@ impl TitleBar {
         bar = bar.child(drag_region(div().flex_1().h_full()));
 
         if let Some(palette) = self.palette {
-            let truncates = fit.is_some_and(|f| f.palette_truncates);
             let w = fit.map_or(PALETTE_PREF_PX, |f| f.palette_width);
             let mut label_style = t.type_ramp.body;
             label_style.size_px = label_style.size_px.max(11.0);
@@ -301,7 +290,10 @@ impl TitleBar {
                             c.text_3.to_hsla(),
                         )
                         .id("palette-placeholder")
-                        .truncate(truncates || fit.is_some()),
+                        // The field's width comes from the Overflow Rule; a placeholder longer
+                        // than what is left of it (pseudo-locales, long translations) ellipsizes
+                        // instead of being cut mid-glyph (Task 18 shots, assertion b).
+                        .truncate(true),
                     ),
                 )
                 .child(Label::new(

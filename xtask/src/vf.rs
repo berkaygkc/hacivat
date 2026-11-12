@@ -775,6 +775,74 @@ mod tests {
         assert!(expected_rgb(&t, "dark", "no_such_token", None).is_err());
     }
 
+    /// Regions of the 1440x900 (scale 1) M1 shell that the harman reference and the M1 shell
+    /// draw alike (Task 18): everything else in harman (tree, editor, grid, inspector) is not in M1.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Zone {
+        TitleBar,
+        StatusBar,
+        PanelHeader,
+        Seam,
+    }
+
+    /// The zone a colour sample lies in: seams at x ∈ {276, 1188} or y ∈ {362, 671} (±1 px), the
+    /// title bar (y < 40), the status bar (y ≥ 876), the explorer and connection panel headers
+    /// (y ∈ [40, 70) or [671, 701), x < 276).
+    fn zone_of(p: &ColorSample) -> Option<Zone> {
+        let near = |v: f64, at: f64| (v - at).abs() <= 1.0;
+        if [276.0, 1188.0].iter().any(|&x| near(p.x, x))
+            || [362.0, 671.0].iter().any(|&y| near(p.y, y))
+        {
+            Some(Zone::Seam)
+        } else if p.y < 40.0 {
+            Some(Zone::TitleBar)
+        } else if p.y >= 876.0 {
+            Some(Zone::StatusBar)
+        } else if p.x < 276.0 && ((40.0..70.0).contains(&p.y) || (671.0..701.0).contains(&p.y)) {
+            Some(Zone::PanelHeader)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn m1_shell_samples_validate_against_reference() {
+        let s = parse_samples(
+            &std::fs::read_to_string(
+                crate::workspace_root().join("design/vf/samples-m1-shell.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for p in &s.colors {
+            assert!(zone_of(p).is_some(), "{p:?} lies outside every zone");
+        }
+        for z in [
+            Zone::TitleBar,
+            Zone::StatusBar,
+            Zone::PanelHeader,
+            Zone::Seam,
+        ] {
+            assert!(
+                s.colors.iter().any(|p| zone_of(p) == Some(z)),
+                "no sample in {z:?}"
+            );
+        }
+        // Both themes are sampled alike, and every scanline expects edges.
+        let count = |theme: &str| s.colors.iter().filter(|c| c.theme == theme).count();
+        assert_eq!(count("dark"), count("light"));
+        assert!(!s.scanlines.is_empty());
+        for l in &s.scanlines {
+            assert!(!l.expect_edges_px.is_empty(), "{}", l.name);
+        }
+        // Every reference token resolves in DESIGN.md (the self-check `xtask vf` runs first).
+        let t = crate::tokens::load_repo_sources().unwrap();
+        for c in &s.colors {
+            expected_rgb(&t, &c.theme, &c.token, c.over.as_deref())
+                .unwrap_or_else(|e| panic!("{}: {e:#}", c.name));
+        }
+    }
+
     #[test]
     fn shipped_samples_json_is_valid_and_large_enough() {
         let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../design/vf/samples.json");

@@ -234,9 +234,10 @@ impl Render for Dialog {
             .cursor_pointer()
             .on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Cancelled)))
             .child(
+                // Raised Ink Rule: text-2 on the raised dialog surface, never text-3.
                 Icon::new(IconName::X)
                     .size(IconSize::Chrome)
-                    .color(c.text_3.to_hsla()),
+                    .color(c.text_2.to_hsla()),
             );
 
         let card =
