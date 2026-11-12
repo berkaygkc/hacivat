@@ -15,7 +15,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    std::fs::create_dir_all(parent)?;
+    create_dir_all_private(parent)?;
     let mut tmp_name = OsString::from(".");
     tmp_name.push(path.file_name().unwrap_or_default());
     tmp_name.push(format!(
@@ -37,7 +37,8 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
-        std::fs::rename(&tmp, path)
+        std::fs::rename(&tmp, path)?;
+        sync_dir(parent)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -58,4 +59,55 @@ pub fn quarantine(path: &Path, tag: &str, now: SystemTime) -> io::Result<PathBuf
     }
     std::fs::rename(path, &target)?;
     Ok(target)
+}
+
+/// `create_dir_all`, with mode `0700` on every directory it creates (Unix). Existing
+/// directories are left as they are.
+pub fn create_dir_all_private(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// Flushes the directory entry of a just-renamed file (Unix; a no-op elsewhere).
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(dir)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn lazily_created_parents_are_0700() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("a/b/c/file.bin");
+        atomic_write(&file, b"x").unwrap();
+        for d in ["a", "a/b", "a/b/c"] {
+            let m = std::fs::metadata(root.path().join(d))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(m, 0o700, "{d}");
+        }
+    }
 }

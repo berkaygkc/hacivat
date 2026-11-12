@@ -41,12 +41,13 @@ impl LocalPaths {
         }
     }
 
-    /// Creates the base directories (and `<runtime>/hacivat`) with mode `0700` on Unix.
+    /// Creates the base directories (and the IPC socket directory, `<runtime>/hacivat` or
+    /// `<cache>/hacivat`) with mode `0700` on Unix.
     pub fn ensure_dirs(&self) -> io::Result<()> {
-        let runtime_app = self.runtime.as_ref().map(|r| r.join("hacivat"));
+        let ipc_dir = self.ipc_endpoint(None).parent().map(Path::to_path_buf);
         for dir in [&self.config, &self.data, &self.cache]
             .into_iter()
-            .chain(runtime_app.as_ref())
+            .chain(ipc_dir.as_ref().filter(|_| !cfg!(windows)))
         {
             create_private_dir(dir)?;
         }
@@ -107,17 +108,32 @@ impl LocalPaths {
 }
 
 fn create_private_dir(dir: &Path) -> io::Result<()> {
+    crate::fsio::create_dir_all_private(dir)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    #[cfg(not(unix))]
-    {
-        std::fs::create_dir_all(dir)
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn ipc_dir_without_runtime_is_created_0700_under_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let mut p = LocalPaths::under(root.path());
+        p.runtime = None;
+        p.ensure_dirs().unwrap();
+        let sock = p.ipc_endpoint(None);
+        let dir = sock.parent().unwrap();
+        assert_eq!(dir, p.cache.join("hacivat"));
+        assert_eq!(
+            std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 }
