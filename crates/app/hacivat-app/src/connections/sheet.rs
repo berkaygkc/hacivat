@@ -12,11 +12,11 @@ use hacivat_session::profile::{Profile, ProfileEndpoint};
 use hacivat_ui::capsule::env_swatch;
 use hacivat_ui::text::{Label, TextSource};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, AnyView, App, AppContext as _, Context, InteractiveElement as _, IntoElement,
-    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, div, px,
+    AnyElement, AnyView, App, AppContext as _, Context, FocusHandle, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, div, point, px,
 };
-use hacivat_ui_core::theme::Theme;
+use hacivat_ui_core::theme::{Theme, focus_outline};
 
 use crate::connections::capsule::{encryption_label, engine_label, env_kind, env_word};
 use crate::connections::explorer::endpoint_text;
@@ -29,6 +29,8 @@ use hacivat_ui::text::scroll_viewport;
 const KEY_PX: f32 = 92.0;
 
 /// The sheet view (the `connection_panel` hook).
+/// A key/value row's height: one ↑/↓ scroll step.
+const ROW_PX: f32 = 22.0;
 /// The scroll thumb's width and shortest length.
 const THUMB_PX: f32 = 4.0;
 const THUMB_MIN_PX: f32 = 16.0;
@@ -38,6 +40,8 @@ pub struct SheetView {
     // ## m2a-t21-shots
     /// The rows' scroll position, for the scroll thumb.
     scroll: ScrollHandle,
+    /// The rows take the focus (a Tab stop while they overflow) and scroll from the keyboard.
+    focus: FocusHandle,
 }
 
 /// The `connection_panel` hook.
@@ -45,6 +49,7 @@ pub fn build(_window: &mut Window, cx: &mut App) -> AnyView {
     cx.new(|cx| SheetView {
         _subscription: cx.observe_global::<ConnectionsModel>(|_, cx| cx.notify()),
         scroll: ScrollHandle::new(),
+        focus: cx.focus_handle(),
     })
     .into()
 }
@@ -92,6 +97,33 @@ impl SheetView {
         )
     }
 
+    /// Scrolls the rows from the keyboard (they are read-only: no row takes the focus).
+    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let stroke = &event.keystroke;
+        if stroke.modifiers.modified() {
+            return;
+        }
+        let max = f32::from(self.scroll.max_offset().y);
+        if max < 0.5 {
+            return;
+        }
+        let at = -f32::from(self.scroll.offset().y);
+        let page = (f32::from(self.scroll.bounds().size.height) - ROW_PX).max(ROW_PX);
+        let to = match stroke.key.as_str() {
+            "up" => at - ROW_PX,
+            "down" => at + ROW_PX,
+            "pageup" => at - page,
+            "pagedown" => at + page,
+            "home" => 0.0,
+            "end" => max,
+            _ => return,
+        };
+        let x = self.scroll.offset().x;
+        self.scroll.set_offset(point(x, px(-to.clamp(0.0, max))));
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn kv(theme: &Theme, index: usize, key: SharedString, value: AnyElement) -> impl IntoElement {
         let t = theme.tokens;
         let c = &t.colors;
@@ -99,7 +131,7 @@ impl SheetView {
             .flex()
             .flex_row()
             .items_center()
-            .min_h(px(22.0))
+            .min_h(px(ROW_PX))
             .gap(px(t.spacing.md))
             .child(
                 div().w(px(KEY_PX)).flex_none().child(
@@ -198,7 +230,7 @@ impl SheetView {
 }
 
 impl Render for SheetView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let Some(m) = cx.try_global::<ConnectionsModel>() else {
             // P17: no model, the M1 panel.
@@ -241,13 +273,25 @@ impl Render for SheetView {
                 }
                 // ## m2a-t21-shots: a short tile scrolls its rows instead of cutting the last
                 // ones off under the status bar, and a scroll thumb says there is more.
-                let rows = div()
-                    .id("sheet-rows")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .child(scroll_viewport())
-                    .child(body);
+                // Keyboard: a Tab stop only while the rows overflow; ↑/↓ by a row, PgUp/PgDn
+                // by a page, Home/End to the ends.
+                let overflows = f32::from(self.scroll.max_offset().y) >= 0.5;
+                let focus = self.focus.clone().tab_stop(overflows);
+                let focused = overflows && focus.is_focused(window);
+                let rows = focus_outline(
+                    div()
+                        .id("sheet-rows")
+                        .debug_selector(|| "sheet-rows".to_string())
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .track_focus(&focus)
+                        .on_key_down(cx.listener(Self::on_key)),
+                    &theme,
+                    focused,
+                )
+                .child(scroll_viewport())
+                .child(body);
                 div()
                     .relative()
                     .flex_1()

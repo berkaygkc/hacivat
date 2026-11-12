@@ -1222,3 +1222,52 @@ fn the_environment_select_sets_the_tag_like_the_segments(cx: &mut TestAppContext
     vcx.run_until_parked();
     assert_eq!(env_pressed(vcx), Some(EnvTag::Staging));
 }
+
+#[gpui::test]
+fn the_environment_select_follows_the_automatic_local_tag(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "tr-XT");
+    vcx.run_until_parked();
+    assert!(read(vcx, |d, _| d.environment_is_select()));
+    let select = read(vcx, |d, _| d.env_select());
+    assert_eq!(vcx.cx.read(|cx| select.read(cx).selected()), 0, "Choose…");
+    type_into(vcx, "host", "localhost");
+    assert_eq!(env_pressed(vcx), Some(EnvTag::Local));
+    // The Select shows "local" (option 1), and draws that option's label.
+    assert_eq!(vcx.cx.read(|cx| select.read(cx).selected()), 1);
+    let local = vcx
+        .cx
+        .read(|cx| (select.read(cx).options()[1].label)(cx).to_string());
+    let drawn: Vec<String> = registry_frame(vcx)
+        .into_iter()
+        .filter(|r| r.path.contains("hacivat-ui/src/select.rs:"))
+        .map(|r| r.text.to_string())
+        .collect();
+    assert!(drawn.contains(&local), "{local:?} in {drawn:?}");
+    // Back to a remote host: no tag, "Choose…" again.
+    set_field(vcx, "host", "10.0.4.7");
+    assert_eq!(env_pressed(vcx), None);
+    assert_eq!(vcx.cx.read(|cx| select.read(cx).selected()), 0);
+}
+
+#[gpui::test]
+fn every_in_well_segmented_control_fits_its_row_in_a_long_locale(cx: &mut TestAppContext) {
+    use hacivat_ui::segmented::SEGMENT_MIN_PX;
+    let vcx = open_new(cx, "tr-XT");
+    vcx.simulate_resize(gpui::size(gpui::px(1024.0), gpui::px(700.0)));
+    vcx.run_until_parked();
+    let card = vcx
+        .debug_bounds("form-dialog")
+        .expect("the form dialog is drawn");
+    for (group, count) in [("conn-engine", 4), ("conn-auth", 4)] {
+        let sel: &'static str = Box::leak(format!("segmented-{group}").into_boxed_str());
+        let bounds = vcx
+            .debug_bounds(sel)
+            .unwrap_or_else(|| panic!("{group} drawn"));
+        assert!(bounds.right() <= card.right(), "{group} runs past the card");
+        for i in 0..count {
+            let sel: &'static str = Box::leak(format!("segmented-{group}-{i}").into_boxed_str());
+            let w = vcx.debug_bounds(sel).expect("segment drawn").size.width;
+            assert!(w >= gpui::px(SEGMENT_MIN_PX - 0.5), "{group}-{i}: {w:?}");
+        }
+    }
+}

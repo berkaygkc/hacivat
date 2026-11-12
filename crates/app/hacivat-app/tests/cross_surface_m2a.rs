@@ -455,3 +455,54 @@ fn a_keyring_entry_left_behind_by_a_delete_is_named(cx: &mut TestAppContext) {
         ]
     );
 }
+
+#[gpui::test]
+fn the_connection_sheet_scrolls_from_the_keyboard(cx: &mut TestAppContext) {
+    let vcx = app_with_fake(cx, ok_pg());
+    let mut p = test_profile("orders-prod", Some(EnvTag::Production), "10.0.4.12");
+    p.read_only = true;
+    let id = add_profile(vcx, p);
+    vcx.cx.update(|cx| ConnectionsModel::select(cx, Some(id)));
+    connect(vcx, "orders-prod");
+    wait_until(vcx, "the connect", |vcx| {
+        matches!(live(vcx, "orders-prod"), LiveState::Connected(_))
+    });
+    // A short window: the sheet's rows overflow its tile.
+    vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(560.0)));
+    vcx.run_until_parked();
+    vcx.cx.update(|cx| cx.refresh_windows());
+    vcx.run_until_parked();
+    let rows = vcx
+        .debug_bounds("sheet-rows")
+        .expect("the sheet rows are drawn");
+    let thumb = |vcx: &mut VisualTestContext| {
+        vcx.debug_bounds("sheet-scroll-thumb")
+            .expect("a scroll thumb while the rows overflow")
+    };
+    assert!(
+        (thumb(vcx).top() - rows.top()).abs() < gpui::px(1.0),
+        "starts at the top"
+    );
+    // A click puts the focus on the rows; End scrolls to the bottom, Home back, ↓ one row.
+    vcx.simulate_click(rows.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    for (key, at_bottom) in [("end", true), ("home", false)] {
+        vcx.simulate_keystrokes(key);
+        vcx.run_until_parked();
+        let t = thumb(vcx);
+        if at_bottom {
+            assert!(
+                (t.bottom() - rows.bottom()).abs() < gpui::px(1.0),
+                "{key}: {t:?}"
+            );
+        } else {
+            assert!((t.top() - rows.top()).abs() < gpui::px(1.0), "{key}: {t:?}");
+        }
+    }
+    vcx.simulate_keystrokes("down");
+    vcx.run_until_parked();
+    assert!(
+        thumb(vcx).top() > rows.top() + gpui::px(0.5),
+        "down moves it"
+    );
+}

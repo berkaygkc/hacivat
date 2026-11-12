@@ -821,12 +821,23 @@ impl ConnectionDialog {
     /// After any change of the draft: the automatic environment, the URL row, the pgpass line.
     pub(crate) fn after_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.apply_env_rule();
+        self.sync_env_select(cx);
         self.sync_url(window, cx);
         self.refresh_pgpass(cx);
         if !matches!(self.strip.read(cx).state(), TestStripState::Running(_)) {
             self.problem = None;
         }
         cx.notify();
+    }
+
+    // ## m2a-t21-shots
+    /// Shows the draft's environment in the Environment Select (the long-locale fallback of
+    /// the segmented control), whatever changed it: a pick, the automatic `local` rule, a paste.
+    pub(crate) fn sync_env_select(&mut self, cx: &mut Context<Self>) {
+        let want = form::env_index(self.draft.profile.environment);
+        if self.env_select.read(cx).selected() != want {
+            self.env_select.update(cx, |s, cx| s.set_selected(want, cx));
+        }
     }
 
     /// The automatic environment (NOTES surface 1): until the user picks one, a SQLite file, a
@@ -1379,6 +1390,7 @@ impl ConnectionDialog {
                     profile.environment = Some(env);
                     d.draft.profile.environment = Some(env);
                     d.env_touched = true;
+                    d.sync_env_select(cx);
                     d.commit(profile, connect, window, cx);
                 }
                 // Cancelled: the dialog stays open, unchanged.
