@@ -5,6 +5,7 @@
 pub mod hooks;
 pub mod keymap_state;
 pub mod layers;
+pub mod persist;
 pub mod tab_content;
 pub mod tabs;
 pub mod tiles;
@@ -15,10 +16,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_l10n::{Catalogs, L10n, NoArgs, OsLocale, Text, ids};
-use hacivat_settings::{LoadOutcome, LocalPaths, Settings, SettingsDiag};
+use hacivat_settings::{LanguagePref, LoadOutcome, LocalPaths, Settings, SettingsDiag, ThemePref};
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
-use hacivat_ui_core::gpui_surface::{App, AppContext as _, Global, WindowHandle};
+use hacivat_ui_core::gpui_surface::{App, Global, WindowHandle};
 
 pub use hooks::{KeyCaptureHook, ShellHooks, set_key_capture};
 pub use keymap_state::{ActiveKeymap, install_with as install_keymap_with, set_keymap_preset};
@@ -29,6 +30,7 @@ pub use workspace::{DemoCapsule, Workspace, open_workspace};
 
 use crate::l10n_global::{HostLocale, build_initial, install_l10n, tr};
 use crate::theme_pref::apply_theme;
+use persist::LatestWriter;
 
 /// Where the app keeps its files and the settings in effect.
 #[derive(Debug, Clone)]
@@ -50,10 +52,42 @@ pub struct Startup {
     pub os_locale: OsLocale,
     pub catalogs: Arc<Catalogs>,
     pub l10n: Arc<L10n>,
+    /// Whether settings changes are saved to `settings.toml` (false under session overrides).
+    pub persist_settings: bool,
+}
+
+/// Command-line overrides for one session (`--theme`, `--lang`): applied in memory only, and
+/// while any is set no settings change is ever written.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionOverrides {
+    pub theme: Option<ThemePref>,
+    pub language: Option<String>,
+}
+
+impl SessionOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.theme.is_none() && self.language.is_none()
+    }
 }
 
 impl Startup {
     pub fn new(paths: LocalPaths, outcome: LoadOutcome, os_locale: OsLocale) -> Startup {
+        Startup::with_overrides(paths, outcome, os_locale, &SessionOverrides::default())
+    }
+
+    /// Like [`Startup::new`], with `overrides` applied to the loaded settings in memory.
+    pub fn with_overrides(
+        paths: LocalPaths,
+        mut outcome: LoadOutcome,
+        os_locale: OsLocale,
+        overrides: &SessionOverrides,
+    ) -> Startup {
+        if let Some(theme) = overrides.theme {
+            outcome.settings.ui.theme = theme;
+        }
+        if let Some(tag) = &overrides.language {
+            outcome.settings.ui.language = LanguagePref::Tag(tag.clone());
+        }
         let catalogs = Catalogs::embedded().with_overlay(&paths.locales_overlay_dir());
         let l10n = build_initial(&catalogs, &outcome.settings, &os_locale);
         Startup {
@@ -64,8 +98,43 @@ impl Startup {
             os_locale,
             catalogs: Arc::new(catalogs),
             l10n: Arc::new(l10n),
+            persist_settings: overrides.is_empty(),
         }
     }
+}
+
+/// Saves settings changes in order (only the latest state lands) and flushes on quit.
+struct SettingsWriter {
+    writer: LatestWriter<(PathBuf, Settings)>,
+    enabled: bool,
+}
+
+impl Global for SettingsWriter {}
+
+fn write_settings((path, settings): &(PathBuf, Settings)) {
+    if let Err(err) = hacivat_settings::save_changes(path, settings) {
+        // The file stays as it was; the change stays applied for this session.
+        tracing::warn!(path = %path.display(), %err, "settings: saving failed");
+    }
+}
+
+fn install_settings_writer(cx: &mut App, enabled: bool) {
+    if let Some(w) = cx.try_global::<SettingsWriter>() {
+        let writer = w.writer.clone();
+        cx.set_global(SettingsWriter { writer, enabled });
+        return;
+    }
+    cx.set_global(SettingsWriter {
+        writer: LatestWriter::new(write_settings),
+        enabled,
+    });
+    cx.on_app_quit(|cx| {
+        if let Some(w) = cx.try_global::<SettingsWriter>() {
+            w.writer.flush();
+        }
+        async {}
+    })
+    .detach();
 }
 
 /// Set once `crate::init` has run in this app.
@@ -82,6 +151,7 @@ pub fn start(
     demo: Option<DemoCapsule>,
 ) -> anyhow::Result<WindowHandle<Workspace>> {
     let theme = startup.settings.ui.theme;
+    install_settings_writer(cx, startup.persist_settings);
     cx.set_global(AppState {
         paths: startup.paths,
         settings: startup.settings,
@@ -108,7 +178,8 @@ pub(crate) fn install_globals(cx: &mut App) {
 }
 
 /// Applies `change` to the settings in effect and saves the changed keys to `settings.toml` on
-/// the background executor. Returns the new settings (the defaults when no `AppState` exists).
+/// the background executor, in order: of quick successive changes the last one lands. Nothing is
+/// written under session overrides. Returns the new settings (the defaults without `AppState`).
 pub fn update_settings(cx: &mut App, change: impl FnOnce(&mut Settings)) -> Settings {
     let Some(state) = cx.try_global::<AppState>() else {
         let mut settings = Settings::default();
@@ -119,12 +190,9 @@ pub fn update_settings(cx: &mut App, change: impl FnOnce(&mut Settings)) -> Sett
     let path = state.paths.settings_toml();
     change(&mut settings);
     cx.global_mut::<AppState>().settings = settings.clone();
-    let saved = settings.clone();
-    cx.background_spawn(async move {
-        // A failed save keeps the file as it was; the setting stays applied for this session.
-        let _ = hacivat_settings::save_changes(&path, &saved);
-    })
-    .detach();
+    if let Some(w) = cx.try_global::<SettingsWriter>().filter(|w| w.enabled) {
+        w.writer.submit((path, settings.clone()), None, cx).detach();
+    }
     settings
 }
 

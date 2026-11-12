@@ -82,9 +82,12 @@ fn load(
     layout: KeyboardLayoutId,
     user: Option<&str>,
 ) -> ActiveKeymap {
-    // Diagnostics (a bad user file, duplicate chords) leave the rest of the keymap usable;
-    // reporting them belongs to the keymap UI (v1.x).
-    let (keymap, _diags) = keymaps::load(platform, preset_name(preset), user);
+    // Diagnostics (a bad user file, duplicate chords) leave the rest of the keymap usable; they
+    // are logged, and showing them belongs to the keymap UI (v1.x).
+    let (keymap, diags) = keymaps::load(platform, preset_name(preset), user);
+    for diag in diags {
+        tracing::warn!(?diag, "keymap: diagnostic while loading");
+    }
     ActiveKeymap {
         preset,
         platform,

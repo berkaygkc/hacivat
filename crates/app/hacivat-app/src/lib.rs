@@ -8,7 +8,7 @@ pub mod settings_ui;
 pub mod shell;
 pub mod theme_pref;
 
-pub use shell::{AppState, Startup, start};
+pub use shell::{AppState, SessionOverrides, Startup, start};
 
 use hacivat_ui_core::gpui_surface::{App, Global, SharedString};
 

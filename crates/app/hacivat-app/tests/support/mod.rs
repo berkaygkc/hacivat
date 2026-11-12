@@ -33,7 +33,7 @@ use hacivat_ui::dialog::{DialogButton, DialogSpec};
 use hacivat_ui::input::TextInput;
 use hacivat_ui::l10n::UiArg;
 use hacivat_ui::panes::PaneTree;
-use hacivat_ui::text::{RenderedText, TextRegistry, TextSource};
+use hacivat_ui::text::{RenderedText, TextRegistry};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::keymap::{ContextStack, KeyboardLayoutId, KeymapPlatform};
 
@@ -223,19 +223,9 @@ fn text_with_id(vcx: &VisualTestContext, id: &str) -> String {
         .unwrap_or_else(|| panic!("no label `{id}` in the frame"))
 }
 
-/// The title bar's palette field label (the second title-bar label, after the brand).
+/// The title bar's palette field placeholder (label ID `palette-placeholder`).
 pub fn palette_label(vcx: &VisualTestContext) -> String {
-    let texts: Vec<String> = registry_frame(vcx)
-        .into_iter()
-        .filter(|r| {
-            r.path.contains("hacivat-ui/src/titlebar.rs:") && r.source == TextSource::Fluent
-        })
-        .map(|r| r.text.to_string())
-        .collect();
-    texts
-        .get(1)
-        .cloned()
-        .expect("the title bar draws its palette field")
+    text_with_id(vcx, "palette-placeholder")
 }
 
 /// The explorer panel's title.
@@ -271,7 +261,14 @@ pub fn dialog_body(vcx: &VisualTestContext) -> String {
 
 /// Everything the status bar drew, joined by spaces.
 pub fn status_bar_text(vcx: &VisualTestContext) -> String {
-    texts_from(vcx, "hacivat-ui/src/statusbar.rs").join(" ")
+    registry_frame(vcx)
+        .into_iter()
+        .filter(|r| {
+            r.path.contains("hacivat-ui/src/statusbar.rs:") || r.path.contains("#status-language")
+        })
+        .map(|r| r.text.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// How many tabs the workspace holds.

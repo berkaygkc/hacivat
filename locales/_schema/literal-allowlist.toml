@@ -6,4 +6,8 @@
 
 literals = [
     # task-10
+    # task-13-shell
+    # The separator between the catalog short names of the status-bar language toggle
+    # (`EN / TR`, DESIGN.md Status Bar): a symbol between data labels, not translatable text.
+    "/",
 ]

@@ -27,9 +27,10 @@ use crate::text::{Label, TextSource};
 
 /// Width of the overflow button that takes the trailing segments.
 pub const OVERFLOW_BUTTON_PX: f32 = 24.0;
-/// The palette field's preferred and minimum widths.
-pub const PALETTE_PREF_PX: f32 = 360.0;
-pub const PALETTE_MIN_PX: f32 = 220.0;
+/// The palette field's preferred and minimum widths (harman: `flex: 0 1 290px`,
+/// `min-width: 170px`).
+pub const PALETTE_PREF_PX: f32 = 290.0;
+pub const PALETTE_MIN_PX: f32 = 170.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TitleBarFit {
@@ -273,8 +274,10 @@ impl TitleBar {
                 .flex()
                 .flex_row()
                 .items_center()
-                .flex_none()
-                .w(px(w))
+                .flex_shrink(1.0)
+                .flex_basis(px(w))
+                .min_w(px(PALETTE_MIN_PX))
+                .mr(px(t.spacing.s_2xl))
                 .h(px(t.spacing.field_height))
                 .pl(px(9.0))
                 .pr(px(t.spacing.sm))
@@ -297,6 +300,7 @@ impl TitleBar {
                             label_style,
                             c.text_3.to_hsla(),
                         )
+                        .id("palette-placeholder")
                         .truncate(truncates || fit.is_some()),
                     ),
                 )

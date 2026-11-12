@@ -3,19 +3,21 @@
 //! layer stack, and saves the layout to `workspace.json` (debounced, on the background
 //! executor) whenever it changes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use hacivat_l10n::{NoArgs, Status, Text, ids};
-use hacivat_settings::{LanguagePref, ThemePref, workspace_state};
+use hacivat_settings::{LanguagePref, ThemePref, fsio, workspace_state};
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::capsule::{Capsule, CapsuleModel, EnvKind};
 use hacivat_ui::dialog::{Dialog, DialogEvent, DialogSpec};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::menu::{MenuItemSpec, PopupMenu, PopupMenuEvent};
-use hacivat_ui::panes::{Axis, PaneId, PaneNode, PaneTree, TabId, TabSpec, TabStrip};
+use hacivat_ui::panes::{
+    Axis, MAX_RATIO, MIN_RATIO, PaneId, PaneNode, PaneTree, TabId, TabSpec, TabStrip,
+};
 use hacivat_ui::popover::Declare as _;
 use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
 use hacivat_ui::statusbar::{StatusBar, status_label};
@@ -27,7 +29,7 @@ use hacivat_ui_core::gpui_surface::{
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
     MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ResizeEdge, Role,
     SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window, WindowHandle,
-    div, px, relative,
+    div, point, px, relative,
 };
 use hacivat_ui_core::keymap::ContextStack;
 use hacivat_ui_core::theme::{Theme, ThemeMode, popover_surface};
@@ -41,8 +43,10 @@ use crate::l10n_global::{L10nGlobal, WINDOW_TITLE, switch_locale, tr, ui_languag
 use crate::shell::hooks::key_capture;
 use crate::shell::keymap_state::shortcut_label;
 use crate::shell::layers::{DIALOG_CONTEXT, Layer, Layers, MENU_CONTEXT};
+use crate::shell::persist::LatestWriter;
 use crate::shell::tab_content::{TabContentRegistry, TabKind};
 use crate::shell::tabs::{CONSOLE_CONTEXT, context_of, title_of};
+use crate::shell::tiles::TileBounds;
 use crate::shell::tiles::{self, Seam, TileLayout};
 use crate::shell::{AppState, update_settings};
 use crate::theme_pref::{apply_theme, follow_appearance};
@@ -114,6 +118,8 @@ pub struct Workspace {
     focus: FocusHandle,
     drag: Option<Seam>,
     state_path: Option<PathBuf>,
+    /// Writes `workspace.json`; a pending state is flushed on quit and when the view goes.
+    saver: LatestWriter<(PathBuf, serde_json::Value)>,
     save_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -151,7 +157,14 @@ impl Workspace {
             cx.observe_window_appearance(window, |_, window, cx| {
                 follow_appearance(cx, window.appearance());
             }),
+            // A layout change still waiting for its debounce is written before the app quits.
+            cx.on_app_quit(|this, _| {
+                this.saver.flush();
+                async {}
+            }),
         ];
+        // ... and before the window's view goes (the window closed).
+        cx.on_release(|this, _| this.saver.flush()).detach();
         let mut ws = Self {
             tiles: TileLayout::default(),
             panes: PaneTree::new(TabId(0)),
@@ -164,58 +177,59 @@ impl Workspace {
             focus: cx.focus_handle(),
             drag: None,
             state_path,
+            saver: LatestWriter::new(write_state),
             save_task: None,
             _subscriptions: subscriptions,
         };
-        ws.restore(cx);
+        let t = Theme::get(cx).tokens;
+        let size = window.viewport_size();
+        let bounds = TileBounds {
+            window: (f32::from(size.width), f32::from(size.height)),
+            top: t.spacing.titlebar_height,
+            bottom: t.spacing.statusbar_height,
+        };
+        ws.restore(bounds, cx);
         ws
     }
 
     // ---- persistence -------------------------------------------------------------------------
 
-    /// Restores `workspace.json` when it is readable; otherwise keeps one `Console 1`.
-    fn restore(&mut self, cx: &App) {
+    /// Restores `workspace.json` when it is readable and consistent; otherwise keeps one
+    /// `Console 1`. A file that parses as JSON but does not describe a valid workspace is set
+    /// aside (`*.corrupt-<ts>`) before anything overwrites it.
+    fn restore(&mut self, bounds: TileBounds, cx: &App) {
         let Some(path) = &self.state_path else {
             return;
         };
         let Some(value) = workspace_state::load(path, WORKSPACE_STATE_VERSION) else {
             return;
         };
-        let Ok(saved) = serde_json::from_value::<SavedState>(value) else {
-            return;
-        };
         let registry = cx.try_global::<TabContentRegistry>();
-        let mut tabs = BTreeMap::new();
-        for tab in saved.tabs {
-            let kind = match tab.kind {
-                SavedKind::Console { n } => Some(TabKind::Console { n }),
-                SavedKind::Registered { name } => registry
-                    .and_then(|r| r.kind_named(&name))
-                    .map(TabKind::Registered),
-            };
-            if let Some(kind) = kind {
-                tabs.insert(tab.id, kind);
+        let restored = serde_json::from_value::<SavedState>(value)
+            .map_err(|e| e.to_string())
+            .and_then(|saved| {
+                validate(
+                    saved,
+                    |name| registry.and_then(|r| r.kind_named(name)),
+                    bounds,
+                )
+                .map_err(str::to_string)
+            });
+        let restored = match restored {
+            Ok(restored) => restored,
+            Err(reason) => {
+                tracing::warn!(path = %path.display(), %reason, "workspace: state set aside");
+                let _ = fsio::quarantine(path, "corrupt", SystemTime::now());
+                return;
             }
-        }
-        let mut panes = saved.panes;
-        // A tab the tree names but nobody can show any more (an unregistered kind) is closed.
-        let orphans: Vec<(PaneId, TabId)> = panes
-            .panes
-            .iter()
-            .flat_map(|(pane, p)| p.tabs.iter().map(move |t| (*pane, *t)))
-            .filter(|(_, t)| !tabs.contains_key(t))
-            .collect();
-        for (pane, tab) in orphans {
-            panes.close_tab(pane, tab);
-        }
-        tabs.retain(|id, _| panes.panes.values().any(|p| p.tabs.contains(id)));
-        self.next_tab = tabs.keys().next_back().map_or(0, |t| t.0 + 1);
-        for kind in tabs.values() {
+        };
+        for kind in restored.tabs.values() {
             self.note_context(*kind, cx);
         }
-        self.tiles = saved.tiles;
-        self.panes = panes;
-        self.tabs = tabs;
+        self.next_tab = restored.next_tab;
+        self.tiles = restored.tiles;
+        self.panes = restored.panes;
+        self.tabs = restored.tabs;
     }
 
     fn saved_state(&self) -> SavedState {
@@ -247,12 +261,7 @@ impl Workspace {
         let Ok(value) = serde_json::to_value(self.saved_state()) else {
             return;
         };
-        let executor = cx.background_executor().clone();
-        self.save_task = Some(cx.background_spawn(async move {
-            executor.timer(SAVE_DEBOUNCE).await;
-            // A failed save keeps the previous file; the next change tries again.
-            let _ = workspace_state::save(&path, WORKSPACE_STATE_VERSION, &value);
-        }));
+        self.save_task = Some(self.saver.submit((path, value), Some(SAVE_DEBOUNCE), cx));
     }
 
     /// The pane tree and tile layout that `workspace.json` persists.
@@ -284,11 +293,13 @@ impl Workspace {
             .unwrap_or_default()
     }
 
-    fn fresh_tab(&mut self, kind: TabKind) -> TabId {
+    /// A new tab ID for `kind`; `None` once the ID space is used up (never in practice: restore
+    /// rejects a state whose IDs leave no room).
+    fn fresh_tab(&mut self, kind: TabKind) -> Option<TabId> {
         let id = TabId(self.next_tab);
-        self.next_tab += 1;
+        self.next_tab = self.next_tab.checked_add(1)?;
         self.tabs.insert(id, kind);
-        id
+        Some(id)
     }
 
     /// The next console number: one more than the highest open console.
@@ -300,7 +311,7 @@ impl Workspace {
                 TabKind::Registered(_) => None,
             })
             .max()
-            .map_or(1, |n| n + 1)
+            .map_or(1, |n| n.saturating_add(1))
     }
 
     /// Adds `tab` to the focused pane and activates it. With no pane left (every tab closed),
@@ -319,7 +330,9 @@ impl Workspace {
     /// Opens `Console <n>` in the focused pane.
     pub fn new_console_tab(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let n = self.next_console();
-        let tab = self.fresh_tab(TabKind::Console { n });
+        let Some(tab) = self.fresh_tab(TabKind::Console { n }) else {
+            return;
+        };
         self.add_to_focused(tab);
         self.layout_changed(cx);
     }
@@ -349,7 +362,9 @@ impl Workspace {
     /// focus.
     pub fn split_focused(&mut self, axis: Axis, _window: &mut Window, cx: &mut Context<Self>) {
         let n = self.next_console();
-        let tab = self.fresh_tab(TabKind::Console { n });
+        let Some(tab) = self.fresh_tab(TabKind::Console { n }) else {
+            return;
+        };
         if self.panes.panes.contains_key(&self.panes.focused) {
             self.panes.split(self.panes.focused, axis, tab);
         } else {
@@ -394,7 +409,9 @@ impl Workspace {
                 self.panes.activate(pane, idx);
             }
         } else {
-            let tab = self.fresh_tab(TabKind::Registered(kind));
+            let Some(tab) = self.fresh_tab(TabKind::Registered(kind)) else {
+                return;
+            };
             self.note_context(TabKind::Registered(kind), cx);
             self.build_view(tab, window, cx);
             self.add_to_focused(tab);
@@ -604,6 +621,112 @@ impl Workspace {
     }
 }
 
+/// Writes `workspace.json`; a failure keeps the previous file and the next change tries again.
+fn write_state((path, value): &(PathBuf, serde_json::Value)) {
+    if let Err(err) = workspace_state::save(path, WORKSPACE_STATE_VERSION, value) {
+        tracing::warn!(path = %path.display(), %err, "workspace: saving the layout failed");
+    }
+}
+
+/// A restored workspace, consistent and within the window.
+#[derive(Debug, Clone, PartialEq)]
+struct Restored {
+    tiles: TileLayout,
+    panes: PaneTree,
+    tabs: BTreeMap<TabId, TabKind>,
+    next_tab: u32,
+}
+
+/// Checks a saved state and repairs what can be repaired:
+///
+/// - rejected (the caller sets the file aside): a pane tree whose leaves are not exactly its
+///   panes, a tab listed twice or in two panes, a pane naming a tab the state does not
+///   describe, or tab IDs that leave no room for another;
+/// - repaired: tile sizes (finite, within `bounds`), split ratios, active indexes, a focused
+///   pane that does not exist, and tabs of kinds nobody registered (closed).
+fn validate(
+    saved: SavedState,
+    registered: impl Fn(&str) -> Option<&'static str>,
+    bounds: TileBounds,
+) -> Result<Restored, &'static str> {
+    let SavedState {
+        tiles,
+        mut panes,
+        tabs: saved_tabs,
+    } = saved;
+    let leaves = panes.leaves();
+    let unique: BTreeSet<PaneId> = leaves.iter().copied().collect();
+    if unique.len() != leaves.len() || unique != panes.panes.keys().copied().collect() {
+        return Err("the pane tree does not match its panes");
+    }
+    let mut described: BTreeMap<TabId, Option<TabKind>> = BTreeMap::new();
+    for tab in saved_tabs {
+        let kind = match tab.kind {
+            SavedKind::Console { n } => Some(TabKind::Console { n }),
+            SavedKind::Registered { name } => registered(&name).map(TabKind::Registered),
+        };
+        if described.insert(tab.id, kind).is_some() {
+            return Err("a tab is listed twice");
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for pane in panes.panes.values() {
+        for tab in &pane.tabs {
+            if !seen.insert(*tab) {
+                return Err("a tab is in two places");
+            }
+            if !described.contains_key(tab) {
+                return Err("a pane names an unknown tab");
+            }
+        }
+    }
+    let next_tab = match seen.last() {
+        Some(max) => max.0.checked_add(1).ok_or("the tab IDs are used up")?,
+        None => 0,
+    };
+    // Tabs nobody can show any more (an unregistered kind) close; their siblings move up.
+    let orphans: Vec<(PaneId, TabId)> = panes
+        .panes
+        .iter()
+        .flat_map(|(pane, p)| p.tabs.iter().map(move |t| (*pane, *t)))
+        .filter(|(_, t)| described.get(t).is_some_and(Option::is_none))
+        .collect();
+    for (pane, tab) in orphans {
+        panes.close_tab(pane, tab);
+    }
+    for pane in panes.panes.values_mut() {
+        pane.active = pane.active.min(pane.tabs.len().saturating_sub(1));
+    }
+    repair_ratios(&mut panes.root);
+    if !panes.panes.contains_key(&panes.focused) {
+        panes.focused = panes.leaves().first().copied().unwrap_or(PaneId(0));
+    }
+    let tabs: BTreeMap<TabId, TabKind> = described
+        .into_iter()
+        .filter_map(|(id, kind)| Some((id, kind?)))
+        .filter(|(id, _)| panes.panes.values().any(|p| p.tabs.contains(id)))
+        .collect();
+    Ok(Restored {
+        tiles: tiles.sanitized(bounds),
+        panes,
+        tabs,
+        next_tab,
+    })
+}
+
+/// Clamps every split ratio into `[MIN_RATIO, MAX_RATIO]`; a non-finite one becomes even.
+fn repair_ratios(node: &mut PaneNode) {
+    if let PaneNode::Split { ratio, a, b, .. } = node {
+        *ratio = if ratio.is_finite() {
+            ratio.clamp(MIN_RATIO, MAX_RATIO)
+        } else {
+            0.5
+        };
+        repair_ratios(a);
+        repair_ratios(b);
+    }
+}
+
 // ---- rendering -------------------------------------------------------------------------------
 
 impl Workspace {
@@ -629,11 +752,20 @@ impl Workspace {
             return;
         }
         let t = Theme::get(cx).tokens;
+        // Under Linux client decorations the content sits inside the resize inset.
+        let inset = match chrome_kind(window) {
+            ChromeKind::LinuxClient => window.client_inset().map_or(0.0, f32::from),
+            _ => 0.0,
+        };
         let size = window.viewport_size();
-        let window_px = (f32::from(size.width), f32::from(size.height));
+        let window_px = (
+            f32::from(size.width) - 2.0 * inset,
+            f32::from(size.height) - 2.0 * inset,
+        );
+        let position = point(event.position.x - px(inset), event.position.y - px(inset));
         self.tiles.drag(
             seam,
-            event.position,
+            position,
             window_px,
             t.spacing.titlebar_height,
             t.spacing.statusbar_height,
@@ -1250,4 +1382,133 @@ fn client_decorations(root: AnyElement, window: &mut Window, theme: &Theme) -> A
         .child(frame)
         .children(edges)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+    use hacivat_ui::panes::Pane;
+
+    fn bounds() -> TileBounds {
+        TileBounds {
+            window: (1440.0, 900.0),
+            top: 40.0,
+            bottom: 24.0,
+        }
+    }
+
+    fn console(id: u32, n: u32) -> SavedTab {
+        SavedTab {
+            id: TabId(id),
+            kind: SavedKind::Console { n },
+        }
+    }
+
+    fn two_panes() -> SavedState {
+        let mut panes = PaneTree::new(TabId(0));
+        panes.split(PaneId(0), Axis::Horizontal, TabId(1));
+        SavedState {
+            tiles: TileLayout::default(),
+            panes,
+            tabs: vec![console(0, 1), console(1, 2)],
+        }
+    }
+
+    fn none(_: &str) -> Option<&'static str> {
+        None
+    }
+
+    #[test]
+    fn a_valid_state_is_kept() {
+        let saved = two_panes();
+        let r = validate(saved.clone(), none, bounds()).unwrap();
+        assert_eq!(
+            (r.panes, r.tiles, r.next_tab),
+            (saved.panes, saved.tiles, 2)
+        );
+        assert_eq!(r.tabs.len(), 2);
+    }
+
+    #[test]
+    fn tile_sizes_are_made_finite_and_fit_the_window() {
+        let mut saved = two_panes();
+        saved.tiles = TileLayout {
+            explorer_w: f32::NAN,
+            conn_panel_h: 1.0e9,
+            editor_h: -5.0,
+            inspector_w: f32::INFINITY,
+            explorer_visible: true,
+        };
+        let t = validate(saved, none, bounds()).unwrap().tiles;
+        assert_eq!(t.explorer_w, 276.0);
+        assert_eq!(t.conn_panel_h, 900.0 - 40.0 - 24.0 - tiles::MIN_TILE_PX);
+        assert_eq!(t.editor_h, tiles::MIN_TILE_PX);
+        assert_eq!(t.inspector_w, 252.0);
+    }
+
+    #[test]
+    fn a_missing_focused_pane_and_bad_indexes_are_repaired() {
+        let mut saved = two_panes();
+        saved.panes.focused = PaneId(9);
+        saved.panes.panes.get_mut(&PaneId(0)).unwrap().active = 7;
+        saved.panes.set_ratio(&[], 0.5);
+        if let PaneNode::Split { ratio, .. } = &mut saved.panes.root {
+            *ratio = f32::NAN;
+        }
+        let r = validate(saved, none, bounds()).unwrap();
+        assert_eq!(r.panes.focused, PaneId(0));
+        assert_eq!(r.panes.panes[&PaneId(0)].active, 0);
+        assert!(matches!(r.panes.root, PaneNode::Split { ratio, .. } if ratio == 0.5));
+    }
+
+    #[test]
+    fn inconsistent_states_are_rejected() {
+        let mut extra_pane = two_panes();
+        extra_pane.panes.panes.insert(
+            PaneId(5),
+            Pane {
+                tabs: vec![],
+                active: 0,
+            },
+        );
+        assert!(validate(extra_pane, none, bounds()).is_err());
+
+        let mut twice = two_panes();
+        twice.tabs.push(console(1, 3));
+        assert!(validate(twice, none, bounds()).is_err());
+
+        let mut unknown = two_panes();
+        unknown.tabs.pop();
+        assert!(validate(unknown, none, bounds()).is_err());
+
+        let mut exhausted = SavedState {
+            tiles: TileLayout::default(),
+            panes: PaneTree::new(TabId(u32::MAX)),
+            tabs: vec![console(u32::MAX, 1)],
+        };
+        assert_eq!(
+            validate(exhausted.clone(), none, bounds()),
+            Err("the tab IDs are used up")
+        );
+        exhausted.panes = PaneTree::new(TabId(u32::MAX - 1));
+        exhausted.tabs = vec![console(u32::MAX - 1, 1)];
+        assert_eq!(
+            validate(exhausted, none, bounds()).unwrap().next_tab,
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn tabs_of_unregistered_kinds_are_closed() {
+        let mut saved = two_panes();
+        saved.tabs[1] = SavedTab {
+            id: TabId(1),
+            kind: SavedKind::Registered {
+                name: "gone".to_string(),
+            },
+        };
+        let r = validate(saved, none, bounds()).unwrap();
+        assert_eq!(r.panes.panes.len(), 1);
+        assert_eq!(r.tabs.keys().copied().collect::<Vec<_>>(), [TabId(0)]);
+    }
 }

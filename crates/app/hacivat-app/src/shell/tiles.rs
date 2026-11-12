@@ -8,10 +8,11 @@ use hacivat_ui::text::{Label, TextSource};
 use hacivat_ui_core::gpui_surface::{
     App, Div, ParentElement, Pixels, Point, SharedString, Styled, div, px,
 };
-use hacivat_ui_core::theme::Theme;
+use hacivat_ui_core::theme::{Theme, ThemeMode};
 use serde::{Deserialize, Serialize};
 
 use crate::l10n_global::tr;
+use crate::shell::keymap_state::shortcut_label;
 
 /// The sizes of the fixed tiles, in logical pixels. Saved in `workspace.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -39,8 +40,15 @@ impl Default for TileLayout {
 pub const MIN_TILE_PX: f32 = 120.0;
 /// The widest the explorer gets.
 pub const MAX_EXPLORER_PX: f32 = 560.0;
+/// The widest the inspector gets.
+pub const MAX_INSPECTOR_PX: f32 = 560.0;
 /// The invisible grab area around a 1 px seam.
 const SEAM_GRAB_PX: f32 = 6.0;
+/// DESIGN.md `components.tree-filter.height` (no spacing token carries it).
+const TREE_FILTER_HEIGHT_PX: f32 = 28.0;
+/// The action whose key hint the explorer filter shows (bound by a later task; no hint until
+/// then).
+pub const EXPLORER_FILTER_ACTION: &str = "explorer.focus_filter";
 
 /// A draggable seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,9 +61,34 @@ pub enum Seam {
     Editor,
 }
 
+/// Where the tiles live: the window size, and the bars above and below them (logical px).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TileBounds {
+    pub window: (f32, f32),
+    pub top: f32,
+    pub bottom: f32,
+}
+
+impl TileBounds {
+    fn tiles_h(&self) -> f32 {
+        (self.window.1 - self.top - self.bottom).max(0.0)
+    }
+
+    fn max_explorer(&self) -> f32 {
+        MAX_EXPLORER_PX
+            .min(self.window.0 - MIN_TILE_PX)
+            .max(MIN_TILE_PX)
+    }
+
+    /// The tallest the editor area or the connection panel gets.
+    fn max_tall(&self) -> f32 {
+        (self.tiles_h() - MIN_TILE_PX).max(MIN_TILE_PX)
+    }
+}
+
 impl TileLayout {
-    /// Moves `seam` to the pointer at `pos` (window coordinates) in a window of `size`, with the
-    /// tiles starting `top` px down and ending `bottom` px above the window's bottom edge.
+    /// Moves `seam` to the pointer at `pos` (coordinates of the window content) in a window of
+    /// `size`, with the tiles starting `top` px down and ending `bottom` px above its bottom edge.
     pub fn drag(
         &mut self,
         seam: Seam,
@@ -64,22 +97,36 @@ impl TileLayout {
         top: f32,
         bottom: f32,
     ) {
-        let (w, h) = window;
+        let b = TileBounds {
+            window,
+            top,
+            bottom,
+        };
         let (x, y) = (f32::from(pos.x), f32::from(pos.y));
-        let tiles_h = (h - top - bottom).max(0.0);
         match seam {
-            Seam::Explorer => {
-                let max = MAX_EXPLORER_PX.min(w - MIN_TILE_PX).max(MIN_TILE_PX);
-                self.explorer_w = x.clamp(MIN_TILE_PX, max);
-            }
+            Seam::Explorer => self.explorer_w = x.clamp(MIN_TILE_PX, b.max_explorer()),
             Seam::Connection => {
-                let max = (tiles_h - MIN_TILE_PX).max(MIN_TILE_PX);
-                self.conn_panel_h = (h - bottom - y).clamp(MIN_TILE_PX, max);
+                self.conn_panel_h = (window.1 - bottom - y).clamp(MIN_TILE_PX, b.max_tall())
             }
-            Seam::Editor => {
-                let max = (tiles_h - MIN_TILE_PX).max(MIN_TILE_PX);
-                self.editor_h = (y - top).clamp(MIN_TILE_PX, max);
-            }
+            Seam::Editor => self.editor_h = (y - top).clamp(MIN_TILE_PX, b.max_tall()),
+        }
+    }
+
+    /// The layout made safe for `bounds`: a non-finite size takes its default, and every size is
+    /// clamped to what dragging allows in that window (restored state may come from a larger
+    /// window, or be hand-edited).
+    pub fn sanitized(self, bounds: TileBounds) -> TileLayout {
+        let d = TileLayout::default();
+        let finite = |v: f32, default: f32| if v.is_finite() { v } else { default };
+        TileLayout {
+            explorer_w: finite(self.explorer_w, d.explorer_w)
+                .clamp(MIN_TILE_PX, bounds.max_explorer()),
+            conn_panel_h: finite(self.conn_panel_h, d.conn_panel_h)
+                .clamp(MIN_TILE_PX, bounds.max_tall()),
+            editor_h: finite(self.editor_h, d.editor_h).clamp(MIN_TILE_PX, bounds.max_tall()),
+            inspector_w: finite(self.inspector_w, d.inspector_w)
+                .clamp(MIN_TILE_PX, MAX_INSPECTOR_PX),
+            explorer_visible: self.explorer_visible,
         }
     }
 }
@@ -139,18 +186,20 @@ pub fn empty_state(theme: &Theme, text: SharedString, id: &'static str) -> Div {
 pub fn explorer(theme: &Theme, cx: &App) -> Div {
     let t = theme.tokens;
     let c = &t.colors;
-    let filter = div()
+    // DESIGN.md `tree-filter`: 28 px, `body-sm`, text-3, radius sm, padding `0 6px 0 8px`;
+    // filled with `panel` in the light theme (transparent on the dark sidebar).
+    let mut filter = div()
         .flex()
         .flex_row()
         .items_center()
-        .h(px(28.0))
+        .h(px(TREE_FILTER_HEIGHT_PX))
         .flex_none()
         .mx(px(t.spacing.md))
         .mt(px(t.spacing.md))
         .mb(px(t.spacing.xs))
         .pl(px(t.spacing.md))
         .pr(px(t.spacing.sm))
-        .gap(px(7.0))
+        .gap(px(t.spacing.sm))
         .border_1()
         .border_color(c.seam.to_hsla())
         .rounded(px(t.radii.sm))
@@ -164,12 +213,26 @@ pub fn explorer(theme: &Theme, cx: &App) -> Div {
                 Label::new(
                     tr(cx, ids::hv::EXPLORER_FILTER, hacivat_l10n::NoArgs),
                     TextSource::Fluent,
-                    t.type_ramp.body,
+                    t.type_ramp.body_sm,
                     c.text_3.to_hsla(),
                 )
                 .id("explorer-filter"),
             ),
         );
+    if theme.mode == ThemeMode::Light {
+        filter = filter.bg(c.panel.to_hsla());
+    }
+    if let Some(keys) = shortcut_label(cx, EXPLORER_FILTER_ACTION) {
+        filter = filter.child(
+            Label::new(
+                keys,
+                TextSource::Shortcut,
+                t.type_ramp.mono_kbd,
+                c.text_3.to_hsla(),
+            )
+            .id("explorer-filter-keys"),
+        );
+    }
     div()
         .flex()
         .flex_col()

@@ -235,3 +235,111 @@ fn english_defaults_match_l10n_for_every_hui_message() {
         ); // samples: counts = 2, text vars = "x"
     }
 }
+
+// ---- fix round 1 -----------------------------------------------------------------------------
+
+fn settings_file(root: &std::path::Path) -> String {
+    std::fs::read_to_string(root.join("config/settings.toml")).unwrap_or_default()
+}
+
+#[gpui::test(iterations = 20)]
+fn rapid_setting_changes_persist_the_last_value(cx: &mut TestAppContext) {
+    use hacivat_app::shell::update_settings;
+    use hacivat_settings::LanguagePref;
+    let root = tempfile::tempdir().unwrap();
+    let vcx = shell_at(cx, root.path(), "en");
+    vcx.cx.update(|cx| {
+        for tag in ["tr", "en", "tr", "en", "tr", "en"] {
+            update_settings(cx, |s| s.ui.language = LanguagePref::Tag(tag.to_string()));
+        }
+    });
+    vcx.run_until_parked();
+    let file = settings_file(root.path());
+    assert!(file.contains("language = \"en\""), "{file}");
+}
+
+#[gpui::test]
+fn a_layout_change_survives_a_close_within_the_debounce(cx: &mut TestAppContext) {
+    let root = tempfile::tempdir().unwrap();
+    let vcx = shell_at(cx, root.path(), "en");
+    workspace(vcx).update_in(vcx, |w, win, cx| w.split_focused(Axis::Vertical, win, cx));
+    let before = layout(vcx);
+    assert_eq!(before.0.panes.len(), 2);
+    close_all_windows(vcx); // no clock advance: the 500 ms debounce has not run
+    let vcx2 = shell_at(cx, root.path(), "en");
+    assert_eq!(layout(vcx2), before);
+}
+
+#[gpui::test]
+fn a_layout_change_is_written_when_the_app_quits(cx: &mut TestAppContext) {
+    let root = tempfile::tempdir().unwrap();
+    let vcx = shell_at(cx, root.path(), "en");
+    workspace(vcx).update_in(vcx, |w, win, cx| w.toggle_explorer(win, cx));
+    let path = root.path().join("data/workspace.json");
+    assert!(!path.exists());
+    cx.quit();
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("\"explorer_visible\": false"), "{saved}");
+}
+
+#[gpui::test]
+fn an_inconsistent_workspace_json_is_set_aside(cx: &mut TestAppContext) {
+    let root = tempfile::tempdir().unwrap();
+    write(
+        root.path().join("data/workspace.json"),
+        "{\"version\": 1, \"tiles\": {\"explorer_w\": 1.0}, \"oops\": true}",
+    );
+    let vcx = shell_at(cx, root.path(), "en");
+    assert_eq!(tab_count(vcx), 1);
+    let set_aside: Vec<String> = std::fs::read_dir(root.path().join("data"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("workspace.json.corrupt-"))
+        .collect();
+    assert_eq!(set_aside.len(), 1, "{set_aside:?}");
+}
+
+#[gpui::test]
+fn restored_tiles_are_clamped_to_the_window(cx: &mut TestAppContext) {
+    let root = tempfile::tempdir().unwrap();
+    let vcx = shell_at(cx, root.path(), "en");
+    workspace(vcx).update_in(vcx, |w, win, cx| w.new_console_tab(win, cx));
+    close_all_windows(vcx);
+    let path = root.path().join("data/workspace.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"editor_h\": 322.0", "\"editor_h\": 100000.0");
+    std::fs::write(&path, text).unwrap();
+    let vcx2 = shell_at(cx, root.path(), "en");
+    let (_, tiles) = layout(vcx2);
+    assert!(
+        tiles.editor_h < 2000.0 && tiles.editor_h >= 120.0,
+        "{}",
+        tiles.editor_h
+    );
+    assert_eq!(tab_count(vcx2), 2);
+}
+
+#[gpui::test]
+fn session_overrides_never_write_settings(cx: &mut TestAppContext) {
+    use hacivat_app::shell::update_settings;
+    use hacivat_app::{SessionOverrides, Startup, start};
+    use hacivat_l10n::OsLocale;
+    use hacivat_settings::LocalPaths;
+    let root = tempfile::tempdir().unwrap();
+    let paths = LocalPaths::under(root.path());
+    paths.ensure_dirs().unwrap();
+    let outcome = hacivat_settings::load(&paths.settings_toml());
+    let overrides = SessionOverrides {
+        theme: Some(ThemePref::Light),
+        language: Some("tr".to_string()),
+    };
+    let startup = Startup::with_overrides(paths, outcome, OsLocale::default(), &overrides);
+    cx.update(|cx| {
+        start(cx, startup, None).unwrap();
+        assert_eq!(Theme::get(cx).mode, ThemeMode::Light);
+        update_settings(cx, |s| s.ui.theme = ThemePref::Dark);
+    });
+    cx.run_until_parked();
+    assert!(!root.path().join("config/settings.toml").exists());
+}
