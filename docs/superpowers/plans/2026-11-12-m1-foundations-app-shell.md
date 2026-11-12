@@ -20,6 +20,8 @@ Core never sees UI types. UI widgets receive rendered strings or resolve `hui-*`
 - `tracing` + `tracing-subscriber` (json) + `tracing-appender`
 - `trybuild` (dev), `cargo-packager`, `minisign`, `cargo-deny`, `actionlint`
 
+**PO decisions at approval (2026-11-12):** plan approved; execute subagent-driven with 3–5 parallel agents. R1 confirmed: fork zed to `berkaygkc/zed` and carry the IME patch there. CI does not sign anything (unsigned nightlies; releases signed/notarized locally).
+
 **Spec:** `docs/superpowers/specs/2026-11-12-hacivat-v1-design.md`. Read §3.1–3.4, §4 rows i18n/Settings/Keyboard/Accessibility, §5.1–5.4, §5.6, §6 M1, §7, the decision log (L1, L2, L11, L12) and §10 C8, C15, C17, C18.
 
 Also read:
@@ -70,7 +72,7 @@ Also read:
   - macOS is Developer ID signed and notarized (`NOTARY_PROFILE`, verified at `82dadcc` with `mystat-notary`).
   - Windows is unsigned.
   - Linux is minisign-signed.
-  - Nightlies sign only with the **passworded** update key held in CI secrets.
+  - **PO decision (2026-11-12): CI does not sign.** Nightlies are unsigned build artifacts; no Apple certificate, notarization key or minisign key goes into GitHub secrets. Signed + notarized + minisigned releases are produced locally on the PO's Mac (`RELEASE=1 NOTARY_PROFILE=<profile> packaging/package-macos.sh`), with the passworded update key kept in `~/.hacivat-keys/`.
 - **Execution (L1):**
   - Feature branch `m1-foundations` off `main`. Each task runs in its own git worktree on branch `m1/<task-slug>`, created from `m1-foundations`.
   - Each agent starts with `git merge --ff-only m1-foundations`.
@@ -926,10 +928,10 @@ hacivat/
     - `tokens`, `check-deps`
     - Nightly `bench` (unchanged spike benches)
     - Nightly `nightly-package` (3 OSes):
-      - macOS: universal, signed if `APPLE_CERT_P12_BASE64` is set, notarized if `APPLE_API_KEY_P8_BASE64` is set (`notarytool --key/--key-id/--issuer`), else a warning annotation.
+      - macOS: universal, **unsigned** (PO decision: no signing in CI).
       - Windows: unsigned NSIS.
       - Linux: AppImage and `.deb`.
-      - Every artifact plus the update manifest is minisigned with `MINISIGN_SECRET_KEY` and `MINISIGN_PASSWORD`, after `check-update-key` passes.
+      - Nightly artifacts are **not** minisigned in CI (PO decision). `check-update-key` is used by the local release script instead.
     - Nightly `pseudo-screens` (macOS + Ubuntu; runs Task 18's harness and uploads `target/shots/**`). Until Task 18 merges, it is guarded with `if: hashFiles('crates/app/hacivat-app/tests/shots.rs') != ''`.
   - Packager config:
     - `name = "hacivat"`, `productName = "Hacivat"`, `identifier = "dev.hacivat.Hacivat"`, `version = "@VERSION@"` (nightly `0.1.0-nightly.<yyyymmdd>`), `minimumSystemVersion = "13.0"`.
@@ -939,7 +941,7 @@ hacivat/
 
 - [ ] **Step 0 (PO):**
   - Generate the passworded key: `minisign -G -p packaging/keys/update.pub -s ~/.hacivat-keys/update.key`, without `-W`.
-  - Add the repository secrets `MINISIGN_SECRET_KEY` (the file content) and `MINISIGN_PASSWORD`.
+  - (PO decision) Do NOT add CI secrets; the passworded key stays local in `~/.hacivat-keys/` and the local release script refuses an unencrypted key.
   - Optionally add `APPLE_CERT_P12_BASE64`, `APPLE_CERT_PASSWORD`, `APPLE_API_KEY_P8_BASE64`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`.
   - Until the key exists, nightly packaging builds but signs nothing and fails the job.
 - [ ] **Step 1: Write the failing tests.**
@@ -952,7 +954,7 @@ hacivat/
 - [ ] **Step 3: Implement the subcommand, the workflow and the packaging changes** (deferred minors: Task 10 ×2, Task 10 REQUIRE_NOTARIZATION/probe).
 - [ ] **Step 4:** Run `cargo test -p xtask update_key && actionlint .github/workflows/ci.yml && bash -n packaging/*.sh`. Locally, run `packaging/package-macos.sh 0.1.0-m1`. Expected: tests PASS, actionlint finds nothing, and a signed DMG is produced. With `RELEASE=1 NOTARY_PROFILE=<profile>`, `spctl -a -vvv -t install` reports `source=Notarized Developer ID`.
 - [ ] **Step 5:** After the controller pushes the branch, run `gh workflow run ci.yml --ref m1-foundations`. Expected: every PR job is green, and `launch-smoke` passes on all three OSes.
-- [ ] **Step 6: Commit** with message `ci(m1): clippy, l10n-check, turkey-test, launch smoke, nightly signed packages; passworded update key`.
+- [ ] **Step 6: Commit** with message `ci(m1): clippy, l10n-check, turkey-test, launch smoke, nightly unsigned packages; passworded local update key`.
 
 ### Task 15: Carry the GPUI IME patch on a zed fork (R1)
 
