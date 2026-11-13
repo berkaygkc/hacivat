@@ -188,6 +188,7 @@ fn stub_wrap() -> hacivat_session::pipeline::TransportWrap {
 fn deps_over(driver: Arc<FakeDriver>, secrets: Arc<SecretStore>) -> ConnectDeps {
     let mut drivers = DriverRegistry::new();
     drivers.register(driver);
+    let (tunnels, known_hosts) = ssh_stubs();
     ConnectDeps {
         drivers: Arc::new(drivers),
         catalog: EngineCatalog::embedded(),
@@ -200,6 +201,8 @@ fn deps_over(driver: Arc<FakeDriver>, secrets: Arc<SecretStore>) -> ConnectDeps 
         extra_steps: Vec::new(),
         approved_roots: hacivat_session::pipeline::ApprovedRoots::for_user(),
         timeout_override: None,
+        tunnels,
+        known_hosts,
     }
 }
 
@@ -398,7 +401,7 @@ pub fn no_host() -> Profile {
 
 pub fn ssh_profile() -> Profile {
     Profile {
-        transport: TransportSpec::SshTunnel,
+        transport: TransportSpec::SshTunnel(Default::default()),
         ..pg_profile(TlsMode::Disable)
     }
 }
@@ -582,7 +585,10 @@ impl ScriptedUi {
 
 impl UiPort for ScriptedUi {
     fn ask(&self, q: Question) -> BoxFuture<'static, Answer> {
-        let Question::Password { attempt, .. } = q;
+        // M2b: this UI only answers password questions; any other is cancelled.
+        let Question::Password { attempt, .. } = q else {
+            return Box::pin(async { Answer::Cancelled });
+        };
         self.0.asked.lock().unwrap().push(attempt);
         let answer = self.0.answers.lock().unwrap().pop_front();
         let delay = self.0.delay;
@@ -619,11 +625,15 @@ pub fn progress() -> watch::Sender<Progress> {
 
 pub fn req(p: Profile) -> ConnectRequest {
     ConnectRequest {
+        read_only: p.read_only,
         profile: Arc::new(p),
         draft_password: None,
         purpose: Purpose::Main,
         department: Department::Console,
         prior_rejections: 0,
+        draft_ssh: Vec::new(),
+        overlay_secrets: None,
+        plaintext_consent: false,
     }
 }
 
@@ -963,6 +973,25 @@ impl hacivat_driver::RawConn for LoggedConn {
     fn cancel_handle(&self) -> Option<Arc<dyn hacivat_driver::CancelHandle>> {
         None
     }
+    fn execute<'a>(
+        &'a mut self,
+        sql: &'a str,
+        opts: hacivat_driver::ExecOpts,
+    ) -> BoxFuture<'a, Result<hacivat_driver::ExecSummary, RawError>> {
+        self.inner.execute(sql, opts)
+    }
+    fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
+        self.inner.batch(sql)
+    }
+    fn tx_status(&self) -> hacivat_driver::TxStatus {
+        self.inner.tx_status()
+    }
+    fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>> {
+        self.inner.reset()
+    }
+    fn backend_id(&self) -> Option<u64> {
+        self.inner.backend_id()
+    }
 }
 
 struct LoggedDriver {
@@ -1017,4 +1046,20 @@ pub fn logged_manager(
         ConnectionManager::new(tokio::runtime::Handle::current(), Arc::new(deps), config),
         log,
     )
+}
+
+// ## m2b-t01-interfaces
+
+/// The SSH stores of a test's `ConnectDeps`: a tunnel manager over a known-hosts store whose
+/// files do not exist (loading does no I/O, Q42).
+pub fn ssh_stubs() -> (
+    Arc<hacivat_net::ssh::TunnelManager>,
+    Arc<hacivat_net::ssh::KnownHosts>,
+) {
+    let known = hacivat_net::ssh::KnownHosts::load(
+        Vec::new(),
+        PathBuf::from("/nonexistent/hacivat/known_hosts"),
+    );
+    let tunnels = hacivat_net::ssh::TunnelManager::new(known.clone(), Default::default());
+    (tunnels, known)
 }

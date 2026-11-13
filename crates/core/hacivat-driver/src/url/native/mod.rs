@@ -245,7 +245,7 @@ fn valid_port(p: &str) -> bool {
 /// then take the longest run of `[A-Za-z0-9_%-]` before it. Every other character ends the
 /// key, so no list of separators can miss one (`'`, `{`, `|`, `:`, `/`, `+`, …). Linear in `v`:
 /// neither backward scan crosses the previous `=`.
-pub(super) fn carries_secret(v: &str) -> bool {
+pub fn carries_secret(v: &str) -> bool {
     names_secret_key(v)
         || (v.contains('%') && names_secret_key(&percent_decode_str(v).decode_utf8_lossy()))
 }

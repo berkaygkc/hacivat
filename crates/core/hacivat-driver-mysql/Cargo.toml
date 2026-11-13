@@ -21,6 +21,9 @@ secrecy.workspace = true
 [dev-dependencies]
 hacivat-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# M2b (Task 1, Q2): Task 8's in-process greeting server.
+tokio-rustls.workspace = true
+rcgen.workspace = true
 
 [lints]
 workspace = true

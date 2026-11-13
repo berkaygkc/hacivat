@@ -152,6 +152,8 @@ pub(crate) fn step_label(f: &Fmt, step: TrailStep) -> String {
         TrailStep::SignIn => f.t(ids::hv::CONN_STEP_AUTH, NoArgs),
         TrailStep::CheckServer => f.t(ids::hv::CONN_STEP_CHECK, NoArgs),
         TrailStep::OpenFile => f.t(ids::hv::CONN_STEP_OPEN, NoArgs),
+        // ## m2b-t01-interfaces: the tunnel is part of connecting until Task 22's own label.
+        TrailStep::Ssh => f.t(ids::hv::CONN_STEP_TCP, NoArgs),
     }
 }
 
@@ -265,7 +267,8 @@ fn tls_text(f: &Fmt, tls: Option<&TlsSummary>, file: bool) -> String {
     };
     use ids::hv::{HvConnDiagTlsNovState as N, HvConnDiagTlsVState as V};
     let (v, n) = match tls.verified {
-        TlsVerified::Full => (V::Full, N::Full),
+        // ## m2b-t01-interfaces: a pinned certificate reads as verified until Task 19's state.
+        TlsVerified::Full | TlsVerified::Pinned => (V::Full, N::Full),
         TlsVerified::CaOnly => (V::CaOnly, N::CaOnly),
         TlsVerified::No => (V::No, N::No),
     };

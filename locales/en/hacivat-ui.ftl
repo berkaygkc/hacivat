@@ -777,3 +777,23 @@ hv-conn-enc-ca-only = { $version } · CA verified
 # Variables:
 #   $key (String) - the property's name, e.g. "db_password".
 hv-conn-issue-option-secret = The property { $key } holds a password. Remove it and type the password in the Password field.
+
+## m2b-t01-interfaces
+
+# Placeholder issue texts for the SSH section and the TLS key (Task 1); Task 20 rewrites the
+# SSH ones and Task 19 the TLS one.
+# An SSH hop has no host.
+# Review: PO
+hv-conn-issue-ssh-host-missing = Enter the SSH host.
+# An SSH hop has no user.
+# Review: PO
+hv-conn-issue-ssh-user-missing = Enter the SSH user.
+# The tunnel has more jump hosts than Hacivat supports.
+# Review: PO
+hv-conn-issue-ssh-too-many-hops = This tunnel has too many jump hosts.
+# The SSH key file is missing or can't be read.
+# Review: PO
+hv-conn-issue-ssh-key-file-missing = The SSH key file can't be read.
+# The TLS client key uses the old OpenSSL encryption, which can't be decrypted.
+# Review: PO
+hv-conn-issue-tls-key-legacy-encrypted = This private key uses an old encryption format. Convert it to PKCS #8.

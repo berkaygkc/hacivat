@@ -153,7 +153,7 @@ fn req_with(
             resolved: vec![],
             tls_host: t.host.clone(),
         },
-        tls: build_tls_params(&settings, &t.host, class).unwrap(),
+        tls: build_tls_params(&settings, &t.host, 5432, class, None).unwrap(),
         user: Some(t.user.clone()),
         password: Some(SecretString::from(t.password.clone())),
         database: Some(t.database.clone()),
@@ -162,6 +162,7 @@ fn req_with(
         options: vec![],
         connect_timeout: Duration::from_secs(10),
         events: Arc::new(|_| {}),
+        insecure_auth: Default::default(),
     }
 }
 

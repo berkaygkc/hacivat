@@ -154,6 +154,51 @@ pub fn target(id: &str) -> Option<DockerTarget> {
     targets(None).into_iter().find(|t| t.id == id)
 }
 
+// ## m2b-t01-interfaces
+
+/// The target `id` a set-gated Docker test needs (Q6). `None` (with `skip <id>: not in set
+/// <set>` on stderr) when `id` is not in the active `HACIVAT_DOCKER_SET`, so the test returns
+/// early. A target in the active set never skips silently: it must accept a TCP connection,
+/// else this panics.
+///
+/// # Panics
+/// When `id` is in the active set but its server does not accept a connection within 5 s.
+pub fn require_target(id: &str) -> Option<DockerTarget> {
+    let set = std::env::var("HACIVAT_DOCKER_SET").ok();
+    let target = require_target_in_set(set.as_deref(), id)?;
+    let addr = (target.host.as_str(), target.port);
+    let reachable = std::net::ToSocketAddrs::to_socket_addrs(&addr)
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .is_some_and(|a| {
+            std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_secs(5)).is_ok()
+        });
+    assert!(
+        reachable,
+        "{id} is in set {} but its server at {}:{} is not healthy",
+        set.as_deref().unwrap_or("<all>"),
+        target.host,
+        target.port
+    );
+    Some(target)
+}
+
+/// [`require_target`] for a given active set (`None`: every target), without the health check:
+/// the pure core, like [`targets_in_set`].
+pub fn require_target_in_set(set: Option<&str>, id: &str) -> Option<DockerTarget> {
+    let found = targets_in_set(set, None).into_iter().find(|t| t.id == id);
+    if found.is_none() {
+        eprintln!("skip {id}: not in set {}", set.unwrap_or("<all>"));
+    }
+    found
+}
+
+#[cfg(feature = "ssh")]
+pub mod agent;
+pub mod chaos;
+#[cfg(feature = "ssh")]
+pub mod ssh_server;
+
 /// A Docker-produced file: `$HACIVAT_DOCKER_ARTIFACTS/<name>` (P25). `cargo xtask docker`
 /// sets the variable to `<main checkout>/target/docker`.
 ///

@@ -98,8 +98,9 @@ pub enum Stored {
 }
 
 /// The highest SSH hop whose reserved slots `delete_all` and `copy_all` visit in the backend
-/// (R7: the SSH and proxy slots are reserved until M2b).
-const MAX_SSH_HOP: u8 = 8;
+/// (R7: the SSH and proxy slots are reserved until M2b). M2b: public, so no writer stores a
+/// slot beyond it (one `delete_all` could never reach; fix round 1, M3).
+pub const MAX_SSH_HOP: u8 = 8;
 
 /// Every slot a backend may hold for one profile. A backend cannot list its entries, so
 /// `delete_all` and `copy_all` visit each of these.
@@ -279,6 +280,20 @@ impl SecretStore {
         to: ProfileId,
         retention: Retention,
     ) -> Result<(), SecretError> {
+        self.copy_slots(from, to, retention, &|_| true)
+    }
+
+    // ## m2b-t01-interfaces (fix round 1, I2)
+    /// [`copy_all`](Self::copy_all) for the slots `wanted` accepts only: a profile's SSH
+    /// secrets have their own retention (`Profile::ssh_retention`), so a duplicate copies them
+    /// apart from the DB password, each under its own retention.
+    pub fn copy_slots(
+        &self,
+        from: ProfileId,
+        to: ProfileId,
+        retention: Retention,
+        wanted: &dyn Fn(SecretSlot) -> bool,
+    ) -> Result<(), SecretError> {
         let mut slots = match retention {
             Retention::Never => return Ok(()),
             Retention::UntilRestart => profile_slots(&self.process, from),
@@ -291,6 +306,7 @@ impl SecretStore {
                 slots
             }
         };
+        slots.retain(|slot| wanted(*slot));
         slots.sort();
         slots.dedup();
         for slot in slots {
@@ -328,6 +344,17 @@ impl SecretStore {
             Some(backend) => backend.set_label(key, label),
             None => Ok(()),
         }
+    }
+
+    // ## m2b-t01-interfaces
+    /// Which backend holds `Forever` secrets: `None` until the backend was probed (Q23).
+    pub fn backend_choice(&self) -> Option<crate::backend::BackendChoice> {
+        self.backend.as_ref().and_then(|backend| backend.choice())
+    }
+
+    /// The vault behind the backend, when the backend is (or chose) the vault (Q23).
+    pub fn vault(&self) -> Option<&dyn crate::backend::VaultBackend> {
+        self.backend.as_ref().and_then(|backend| backend.as_vault())
     }
 
     // ## m2a-finalfix
@@ -463,5 +490,86 @@ mod label_tests {
             vec![(key, "orders-prod".to_string())]
         );
         assert_eq!(SecretStore::new(None).set_label(&key, "x"), Ok(()));
+    }
+}
+
+// ## m2b-t01-interfaces
+#[cfg(test)]
+mod choice_tests {
+    use super::*;
+    use crate::backend::{BackendChoice, FallbackBackend, FileVault, MemoryBackend};
+
+    #[test]
+    fn the_store_reports_its_backend_choice_and_vault() {
+        let memory = SecretStore::new(Some(Arc::new(MemoryBackend::new())));
+        assert_eq!(memory.backend_choice(), Some(BackendChoice::Memory));
+        assert!(memory.vault().is_none());
+        assert_eq!(SecretStore::new(None).backend_choice(), None);
+
+        let vault = Arc::new(FileVault::open("/nonexistent/vault.bin".into()));
+        let fallback =
+            FallbackBackend::new(Arc::new(MemoryBackend::new()), vault, Box::new(|| false));
+        let store = SecretStore::new(Some(Arc::new(fallback)));
+        assert_eq!(store.backend_choice(), None, "not probed yet");
+        assert!(
+            store.keyring_available(),
+            "Forever stays enabled with the vault"
+        );
+        assert_eq!(store.backend_choice(), Some(BackendChoice::Vault));
+        assert!(store.vault().is_some_and(|v| !v.is_unlocked()));
+    }
+
+    /// Fix round 1 (I2): `copy_slots` copies only the slots it is given.
+    #[test]
+    fn copy_slots_skips_the_slots_it_is_not_given() {
+        let backend = Arc::new(MemoryBackend::new());
+        let store = SecretStore::new(Some(backend.clone()));
+        let (from, to) = (ProfileId::new(), ProfileId::new());
+        let key = |profile, slot| SecretKey { profile, slot };
+        let ssh = SecretSlot::SshPassword { hop: 0 };
+        store
+            .put(
+                &key(from, SecretSlot::DbPassword),
+                "hv_test_pw".into(),
+                Retention::Forever,
+            )
+            .unwrap();
+        store
+            .put(
+                &key(from, ssh),
+                "hv_test_pw".into(),
+                Retention::UntilRestart,
+            )
+            .unwrap();
+        let not_ssh = |s: SecretSlot| !matches!(s, SecretSlot::SshPassword { .. });
+        store
+            .copy_slots(from, to, Retention::Forever, &not_ssh)
+            .unwrap();
+        assert!(
+            backend
+                .get(&key(to, SecretSlot::DbPassword))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            backend.get(&key(to, ssh)).unwrap().is_none(),
+            "never escalated"
+        );
+        assert!(
+            store
+                .get(&key(to, ssh), Retention::UntilRestart)
+                .unwrap()
+                .is_none()
+        );
+        store
+            .copy_slots(from, to, Retention::UntilRestart, &|s| !not_ssh(s))
+            .unwrap();
+        assert!(
+            store
+                .get(&key(to, ssh), Retention::UntilRestart)
+                .unwrap()
+                .is_some()
+        );
+        assert!(backend.get(&key(to, ssh)).unwrap().is_none());
     }
 }

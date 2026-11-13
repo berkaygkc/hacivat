@@ -115,7 +115,8 @@ pub fn encryption_label(cx: &App, p: &Profile, info: &LiveInfo) -> SharedString 
         _ => "TLS".to_string(),
     });
     match info.tls.verified {
-        TlsVerified::Full => tr(
+        // ## m2b-t01-interfaces: a pinned certificate reads as verified until Task 19's label.
+        TlsVerified::Full | TlsVerified::Pinned => tr(
             cx,
             ids::hv::CONN_ENC_VERIFIED,
             ids::hv::HvConnEncVerified { version },
@@ -216,6 +217,15 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
             label: tr(cx, ids::hv::CAPSULE_FAILED, NoArgs),
             name,
             retry: tr(cx, ids::hv::CAPSULE_RETRY, NoArgs),
+        }),
+        // ## m2b-t01-interfaces: Task 22 gives it its own label and the next attempt.
+        LiveState::Reconnecting { .. } => Some(CapsuleModel::Reconnecting {
+            env,
+            env_label,
+            name,
+            engine: engine_label(&p, None),
+            label: tr(cx, ids::hv::CAPSULE_CONNECTING, NoArgs),
+            next: None,
         }),
     }
 }
@@ -413,6 +423,9 @@ mod fixtures {
             path: PathKind::Direct,
             user: Some("deploy".to_string()),
             auth: AuthProviderId::Password,
+            via: None,
+            hops: 0,
+            access_warnings: Vec::new(),
         }
     }
 

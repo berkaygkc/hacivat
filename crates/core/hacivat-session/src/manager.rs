@@ -7,26 +7,58 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use hacivat_driver::{ServerInfo, Support, classify};
+use hacivat_guard::{GapReason, RoleWarning};
 use hacivat_net::{AddressClass, TlsSummary};
 use hacivat_proto::{AccessLabel, Department, ErrClass, ProfileId};
 use hacivat_secrets::AuthProviderId;
 use secrecy::SecretString;
 use tokio::runtime::Handle;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{broadcast, oneshot, watch};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::budget::{Budget, BudgetPermit, Priority, budget_for};
 use crate::pipeline::{
-    ConnectDeps, ConnectError, ConnectRequest, Interaction, LiveConnection, Phase, Progress,
-    Purpose, TrailStep, connect, fresh_progress,
+    ConnectDeps, ConnectError, ConnectRequest, Interaction, LiveConnection, Phase, ProfileChange,
+    Progress, Purpose, TrailStep, connect, fresh_progress,
 };
 use crate::profile::{Profile, ProfileDraft};
+use crate::session::{LostState, SessionManager};
 use crate::test_conn::{TestReport, test_connection};
 
 /// How the bytes travel, as the capsule shows it (HV-CONN-01). Only `Direct` in M2a.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PathKind {
     Direct,
+    // ## m2b-t01-interfaces
+    Ssh,
+}
+
+// ## m2b-t01-interfaces
+/// What the manager reports besides state changes (Task 17; the app's `events.rs` relays them).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConnectionEvent {
+    SessionLost {
+        profile: ProfileId,
+        lost: LostState,
+    },
+    IdleDisconnected {
+        profile: ProfileId,
+    },
+    IdleTransaction {
+        profile: ProfileId,
+        minutes: u32,
+    },
+    /// The guard saw a statement escape it (the copy depends on `reason`, Q35).
+    EnforcementGap {
+        profile: ProfileId,
+        reason: GapReason,
+    },
+    /// A connect changed the profile (a pin, a CA file, the plaintext consent): the app saves
+    /// them through `ConnectionsModel::apply_changes`.
+    ProfileChanges {
+        profile: ProfileId,
+        changes: Vec<ProfileChange>,
+    },
 }
 
 /// A connected profile, for the capsule and the status bar (HV-CONN-01).
@@ -41,6 +73,12 @@ pub struct LiveInfo {
     pub path: PathKind,
     pub user: Option<String>,
     pub auth: AuthProviderId,
+    // ## m2b-t01-interfaces
+    /// The bastion of an SSH path.
+    pub via: Option<String>,
+    /// SSH hops (0 for a direct path).
+    pub hops: u8,
+    pub access_warnings: Vec<RoleWarning>,
 }
 
 /// A profile's connection state (HV-CONN-01).
@@ -54,6 +92,12 @@ pub enum LiveState {
     /// The liveness ping failed (CONN-04 subset; no reconnect in M2a).
     Lost {
         class: ErrClass,
+    },
+    // ## m2b-t01-interfaces
+    /// Reconnecting after a loss (Task 17): `attempt` from 1, `next_in` until the next try.
+    Reconnecting {
+        attempt: u32,
+        next_in: Option<Duration>,
     },
 }
 
@@ -73,6 +117,15 @@ impl Default for ManagerConfig {
             liveness: Duration::from_secs(30),
             shutdown_budget: Duration::from_secs(2),
         }
+    }
+}
+
+// ## m2b-t01-interfaces
+impl ManagerConfig {
+    /// M2b's configuration: liveness per profile from `LivenessPolicy::for_profile` (B18).
+    /// Task 1 stub: M2a's (Task 17).
+    pub fn m2b() -> ManagerConfig {
+        ManagerConfig::default()
     }
 }
 
@@ -154,6 +207,8 @@ struct Shared {
     config: ManagerConfig,
     changes: watch::Sender<u64>,
     inner: Mutex<Inner>,
+    // ## m2b-t01-interfaces
+    events: broadcast::Sender<ConnectionEvent>,
 }
 
 impl Shared {
@@ -228,9 +283,12 @@ impl Shared {
                 .and_then(|t| t.elapsed)
                 .unwrap_or_default(),
             access: live.access,
-            path: PathKind::Direct,
+            path: live.path,
             user: live.user.clone(),
             auth: live.auth,
+            via: live.via.clone(),
+            hops: 0,
+            access_warnings: live.access_warnings.clone(),
         };
         let kind = live.server.kind;
         let stop = CancellationToken::new();
@@ -331,11 +389,15 @@ impl Shared {
         };
         let (progress_tx, mut progress_rx) = watch::channel(fresh_progress());
         let req = ConnectRequest {
+            read_only: profile.read_only,
             profile,
             draft_password: draft,
             purpose: Purpose::Main,
             department: Department::Console,
             prior_rejections,
+            draft_ssh: Vec::new(),
+            overlay_secrets: None,
+            plaintext_consent: false,
         };
         let deps = self.deps.clone();
         let pipeline = connect(&deps, req, ix, token, progress_tx);
@@ -423,8 +485,43 @@ impl ConnectionManager {
                     generation: 0,
                     next_attempt: 0,
                 }),
+                events: broadcast::Sender::new(64),
             }),
         })
+    }
+
+    // ## m2b-t01-interfaces
+
+    /// The manager's events (Task 17 sends them; the app relays them, Q42).
+    pub fn events(&self) -> broadcast::Receiver<ConnectionEvent> {
+        self.shared.events.subscribe()
+    }
+
+    /// Sends `event` to every `events()` receiver: a test seam (fix round 1, M5), only with
+    /// the `test-support` feature, so no production caller can inject profile changes.
+    #[cfg(feature = "test-support")]
+    pub fn publish_event(&self, event: ConnectionEvent) {
+        // No receiver is not an error: nobody listens yet.
+        let _ = self.shared.events.send(event);
+    }
+
+    /// How many `events()` receivers are open (test seam, feature `test-support`).
+    #[cfg(feature = "test-support")]
+    pub fn event_subscribers(&self) -> usize {
+        self.shared.events.receiver_count()
+    }
+
+    /// The sessions of a connected profile (Task 15, Task 17). Task 1 stub: none.
+    pub fn sessions(&self, _id: ProfileId) -> Option<Arc<SessionManager>> {
+        None
+    }
+
+    /// Gives a connected profile's sessions the saved `profile` (Q17): the app calls it after
+    /// every save and `apply_changes`. Task 1 stub: nothing holds a profile yet (Task 17).
+    pub fn update_profile(&self, id: ProfileId, profile: Arc<Profile>) {
+        if let Some(sessions) = self.sessions(id) {
+            sessions.update_profile(profile);
+        }
     }
 
     /// Starts connecting `profile` on the core runtime. Single-flight: while a connect for the

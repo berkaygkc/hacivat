@@ -13,9 +13,12 @@ use std::path::PathBuf;
 
 use hacivat_driver::url::FieldId;
 use hacivat_net::TlsSettings;
+use hacivat_net::ssh::{HopSecrets, SshSpec};
 use hacivat_proto::{DbmsKind, EnvTag, Origin, ProfileId, TagSource};
 use hacivat_secrets::{AuthProviderId, Retention};
 use secrecy::SecretString;
+
+use crate::session::{IsolationLevel, TxMode};
 
 pub use fields::{
     ApplyReport, CopiedUrl, EngineChange, apply_parse, copy_url, display_url, to_fields,
@@ -44,11 +47,13 @@ pub enum ProfileEndpoint {
     },
 }
 
-/// How the bytes travel (HV-CONN-01). Only `Direct` connects in M2a.
+/// How the bytes travel (HV-CONN-01). Only `Direct` connects in M2a; M2b adds SSH tunnels
+/// (the transport step, Task 14).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TransportSpec {
     Direct,
-    SshTunnel,
+    // ## m2b-t01-interfaces
+    SshTunnel(SshSpec),
     Karagoz {
         org: String,
         agent_id: String,
@@ -83,6 +88,16 @@ pub struct Profile {
     pub origin: Origin,
     /// The user chose to connect to a server below the version floor.
     pub allow_unsupported_server: bool,
+    // ## m2b-t01-interfaces
+    /// Every request goes through one session (HV-SESS-02, D-035).
+    pub single_session: bool,
+    /// `None` uses the environment's default (`session::default_mode`).
+    pub tx_mode: Option<TxMode>,
+    pub isolation: Option<IsolationLevel>,
+    /// Seconds idle before the connection closes; `None` keeps it open.
+    pub idle_disconnect_s: Option<u32>,
+    /// How long the SSH passwords and passphrases are kept.
+    pub ssh_retention: Retention,
 }
 
 impl Default for Profile {
@@ -112,6 +127,11 @@ impl Default for Profile {
             extra: Vec::new(),
             origin: Origin::UserTyped,
             allow_unsupported_server: false,
+            single_session: false,
+            tx_mode: None,
+            isolation: None,
+            idle_disconnect_s: None,
+            ssh_retention: Retention::default(),
         }
     }
 }
@@ -128,6 +148,10 @@ pub struct ProfileDraft {
     pub is_new: bool,
     /// The fields the user edited by hand (a pasted URL never overwrites them).
     pub touched: BTreeSet<FieldId>,
+    // ## m2b-t01-interfaces
+    /// The SSH secrets typed in the dialog, per hop; `ConnectionsModel::save` stores them under
+    /// `SecretSlot::{SshPassword, SshPassphrase} { hop }` with `ssh_retention` (Q23).
+    pub ssh_secrets: Vec<HopSecrets>,
 }
 
 impl ProfileDraft {
@@ -139,6 +163,7 @@ impl ProfileDraft {
             tls_key_passphrase: None,
             is_new: true,
             touched: BTreeSet::new(),
+            ssh_secrets: Vec::new(),
         }
     }
 
@@ -150,6 +175,7 @@ impl ProfileDraft {
             tls_key_passphrase: None,
             is_new: false,
             touched: BTreeSet::new(),
+            ssh_secrets: Vec::new(),
         }
     }
 }

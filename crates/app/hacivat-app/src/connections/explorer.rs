@@ -642,7 +642,8 @@ impl ExplorerView {
                         .id(SharedString::from(format!("explorer-row-latency-{index}"))),
                     );
             }
-            LiveState::Connecting(_) => {
+            // ## m2b-t01-interfaces: a reconnect runs like a connect (Task 22 refines it).
+            LiveState::Connecting(_) | LiveState::Reconnecting { .. } => {
                 meta = meta.child(div().flex_none().child(run_marker(theme)));
             }
             LiveState::Failed(_) | LiveState::Lost { .. } => {

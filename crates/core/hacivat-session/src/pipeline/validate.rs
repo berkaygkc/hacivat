@@ -51,6 +51,18 @@ pub enum IssueCode {
     OptionSecret {
         key: String,
     },
+    // ## m2b-t01-interfaces: Task 12 checks them; Task 20 renders the SSH ones (Q9).
+    /// An SSH hop has no host.
+    SshHostMissing,
+    /// An SSH hop has no user.
+    SshUserMissing,
+    /// More hops than a tunnel allows.
+    SshTooManyHops,
+    /// An SSH key file is missing or unreadable.
+    SshKeyFileMissing,
+    /// A legacy OpenSSL-encrypted TLS key (`Proc-Type: 4,ENCRYPTED`), which cannot be
+    /// decrypted (Task 3, Task 19).
+    TlsKeyLegacyEncrypted,
 }
 
 /// One issue, with the field it belongs to (HV-CONN-01).
@@ -216,8 +228,16 @@ pub(crate) fn checked(
         } else if p.tls.mode == TlsMode::VerifyCa && p.tls.ca_file.is_none() {
             push(None, IssueCode::TlsCaUnreadable);
         } else if !host.trim().is_empty() && !host_invalid(host.trim()) {
-            // The address class only decides `plaintext_allowed`, which is not checked here.
-            if let Err(e) = build_tls_params(&p.tls, host.trim(), AddressClass::Private) {
+            // The address class only decides `plaintext_allowed`, which is not checked here;
+            // nor are pins (the port only names the pin endpoint).
+            let port = match &p.endpoint {
+                ProfileEndpoint::Server { port, .. } => *port,
+                _ => None,
+            }
+            .or_else(|| catalog.get(p.engine).and_then(|e| e.default_port))
+            .unwrap_or_default();
+            if let Err(e) = build_tls_params(&p.tls, host.trim(), port, AddressClass::Private, None)
+            {
                 let (field, code) = tls_issue(&e);
                 push(field, code);
             }
@@ -280,6 +300,9 @@ pub(crate) fn tls_issue(e: &TlsSetupError) -> (Option<FieldId>, IssueCode) {
         }
         TlsSetupError::KeyEncrypted(_) => (None, IssueCode::TlsKeyEncrypted),
         TlsSetupError::InvalidServerName(_) => (Some(FieldId::Host), IssueCode::HostInvalid),
+        // ## m2b-t01-interfaces
+        TlsSetupError::KeyEncryptedLegacy(_) => (None, IssueCode::TlsKeyLegacyEncrypted),
+        TlsSetupError::KeyPassphraseWrong(_) => (None, IssueCode::TlsKeyEncrypted),
     }
 }
 

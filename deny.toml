@@ -40,7 +40,9 @@ deny = [
     { crate = "workspace", reason = "zed GPL crate" },
     { crate = "rope", reason = "zed GPL crate" },
     { crate = "text", reason = "zed GPL crate" },
-    # Two rustls providers make `ClientConfig::builder()` panic (M2a Task 1, P5).
+    # Two rustls providers make `ClientConfig::builder()` panic (M2a Task 1, P5). M2b: russh is
+    # built without its `aws-lc-rs` default (`ring`, `rsa`, `flate2` only; Q28, ADR 0003). The
+    # vendored `mysql_async` (third_party/, a `[patch]` path crate) needs no source entry.
     { crate = "aws-lc-rs", reason = "M2a uses the ring provider" },
     { crate = "aws-lc-sys", reason = "M2a uses the ring provider; OpenSSL licence" },
 ]

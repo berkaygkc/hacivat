@@ -9,19 +9,31 @@
 //! arrives after the pipeline gave up is closed by the task that awaited it.
 
 mod interaction;
+// ## m2b-t01-interfaces: Task 14 fills them.
+mod prompts;
+mod ssh_step;
 mod steps;
 mod trail;
 mod validate;
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
+use hacivat_driver::InsecureAuth;
 use hacivat_driver::{
     DriverRegistry, EngineCatalog, RawConn, ServerInfo, ServerMessage, Support, fixes_for,
 };
-use hacivat_net::{AddressClass, CleanupGuard, StreamFactory, TlsSummary, TlsVerified};
+use hacivat_guard::RoleWarning;
+use hacivat_net::ssh::{
+    HopSecrets, HostKey, KnownHosts, KnownSource, TransportGeneration, TunnelManager,
+};
+use hacivat_net::{
+    AddressClass, CertPin, CertReview, CleanupGuard, StreamFactory, TlsMode, TlsSummary,
+    TlsVerified,
+};
 use hacivat_proto::{AccessLabel, DbmsKind, Department, ErrClass, ErrFamily, FixId};
 use hacivat_secrets::{
     AuthProviderId, CredentialFiles, Retention, SecretKey, SecretSlot, SecretSource, SecretStore,
@@ -31,14 +43,16 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use crate::manager::PathKind;
+
 pub use hacivat_driver::errors::Phase;
-pub use interaction::{Answer, Interaction, Question, UiPort};
+pub use interaction::{Answer, Interaction, Question, SecretPrompt, UiPort};
 pub use steps::{ConnectStep, StepCx};
 pub use trail::{Progress, StepOutcome, StepTrace, TrailStep};
 pub use validate::{ApprovedRoots, IssueCode, ValidationIssue, validate, validate_with};
 
-pub(crate) use steps::{CLOSE_BUDGET, short_version};
-use steps::{Deadline, MAX_REJECTIONS, StepState, builtin_steps, close_bounded, error};
+pub(crate) use steps::{CLOSE_BUDGET, error, short_version};
+use steps::{Deadline, MAX_REJECTIONS, StepState, builtin_steps, close_bounded};
 use trail::Recorder;
 
 use crate::profile::{Profile, ProfileEndpoint};
@@ -65,6 +79,53 @@ pub struct ErrArgs {
     pub file: Option<String>,
     pub engine: String,
     pub version: Option<String>,
+    // ## m2b-t01-interfaces
+    /// The SSH hop the error happened at (from 0), and its host.
+    pub hop: Option<u8>,
+    pub hop_host: Option<String>,
+}
+
+// ## m2b-t01-interfaces
+
+/// A change to the saved profile that a connect asks for (Task 14) or a review makes (Task 19);
+/// the app applies it through `ConnectionsModel::apply_changes`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ProfileChange {
+    AddPin(CertPin),
+    /// Built only by `cert_dialog::review` (Q26); the pipeline never builds it.
+    ReplacePin {
+        old: [u8; 32],
+        new: CertPin,
+    },
+    SetCaFile(PathBuf),
+    AllowPublicPlaintext,
+}
+
+/// The secrets that worked for a live connection, kept in the session overlay for its
+/// reconnects and side connections, never persisted (Q17). `Debug` only (redacted).
+#[derive(Debug, Default)]
+pub struct SessionSecrets {
+    pub db: Option<SecretString>,
+    pub hops: Vec<HopSecrets>,
+    pub tls_key_passphrase: Option<SecretString>,
+}
+
+/// A changed SSH host key, for the "Review host key" fix (Task 21).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HostKeyMismatch {
+    pub hop: u8,
+    pub host: String,
+    pub port: u16,
+    pub old: HostKey,
+    pub new: HostKey,
+    pub source: KnownSource,
+}
+
+/// Whether the drivers may send a password by an insecure method for `profile` over an
+/// address of `class` with TLS `mode` (B8, Q20, Q23). Task 1 stub: always refuses unless the
+/// channel is verified (the strictest answer) until Task 14.
+pub fn insecure_auth_for(_profile: &Profile, _class: AddressClass, _mode: TlsMode) -> InsecureAuth {
+    InsecureAuth::RefuseUnlessVerified
 }
 
 /// A failed connect, classified (HV-CONN-03).
@@ -84,6 +145,13 @@ pub struct ConnectError {
     pub attempts: u8,
     /// A headless connect stopped where it would have asked the user.
     pub needs_interaction: bool,
+    // ## m2b-t01-interfaces
+    /// The certificate to review (`tls.untrusted`, `tls.pin_changed`; Task 14).
+    pub certificate: Option<CertReview>,
+    /// The changed host key (`ssh.host_key_changed`; Task 14).
+    pub host_key: Option<HostKeyMismatch>,
+    /// Changes the failed connect still asks the profile for.
+    pub profile_changes: Vec<ProfileChange>,
 }
 
 /// One connect (HV-CONN-01). `department` is `Console` for Main, `Unknown` for Test and
@@ -98,6 +166,16 @@ pub struct ConnectRequest {
     /// re-entry passes the failed connect's `attempts`, so the gesture keeps one budget of 3
     /// (P8, R8). 0 for a new gesture.
     pub prior_rejections: u8,
+    // ## m2b-t01-interfaces
+    /// `profile.read_only` or a read-only session; the connect is read-only if either is.
+    pub read_only: bool,
+    /// The SSH secrets typed in the dialog, for Test (Q23).
+    pub draft_ssh: Vec<HopSecrets>,
+    /// The session overlay's secrets, used before the store (reconnects, side connections;
+    /// Q17).
+    pub overlay_secrets: Option<SessionSecrets>,
+    /// The overlay's one-gesture consent to the public-plaintext question (Q17).
+    pub plaintext_consent: bool,
 }
 
 /// An open connection with what the pipeline learned (HV-CONN-01).
@@ -110,6 +188,19 @@ pub struct LiveConnection {
     pub user: Option<String>,
     pub access: AccessLabel,
     pub trail: Vec<StepTrace>,
+    // ## m2b-t01-interfaces
+    /// Profile changes the connect made (a pin, a CA file, the plaintext consent; Task 14).
+    pub profile_changes: Vec<ProfileChange>,
+    /// The SSH chain generation the connection runs over.
+    pub transport: Option<TransportGeneration>,
+    pub path: PathKind,
+    /// The bastion, as the capsule names an SSH path.
+    pub via: Option<String>,
+    /// What the role probe found (Task 18).
+    pub access_warnings: Vec<RoleWarning>,
+    /// The secrets that worked, for the session overlay (Q17).
+    pub secrets_used: SessionSecrets,
+    pub plaintext_consent: bool,
     conn: Box<dyn RawConn>,
     guards: Vec<CleanupGuard>,
     forwarded: bool,
@@ -126,6 +217,13 @@ impl fmt::Debug for LiveConnection {
             .field("user", &self.user)
             .field("access", &self.access)
             .field("trail", &self.trail)
+            .field("profile_changes", &self.profile_changes)
+            .field("transport", &self.transport)
+            .field("path", &self.path)
+            .field("via", &self.via)
+            .field("access_warnings", &self.access_warnings)
+            .field("secrets_used", &self.secrets_used)
+            .field("plaintext_consent", &self.plaintext_consent)
             .field("guards", &self.guards.len())
             .field("forwarded", &self.forwarded)
             .finish_non_exhaustive()
@@ -172,6 +270,11 @@ pub struct ConnectDeps {
     /// Replaces the profile's connect timeout; `None` in the app, set only by tests.
     #[doc(hidden)]
     pub timeout_override: Option<Duration>,
+    // ## m2b-t01-interfaces
+    /// The SSH chains (Task 9), shared by every connect.
+    pub tunnels: Arc<TunnelManager>,
+    /// The known-host stores (Task 4).
+    pub known_hosts: Arc<KnownHosts>,
 }
 
 /// Runs the pipeline for `req` (HV-CONN-01 steps 0–10).
@@ -222,7 +325,14 @@ async fn run(
         purpose,
         department: _,
         prior_rejections,
+        read_only,
+        // ## m2b-t01-interfaces: Task 14 uses the SSH drafts and the overlay.
+        draft_ssh: _,
+        overlay_secrets: _,
+        plaintext_consent,
     } = req;
+    // A connect is read-only if the profile or the session is (never weaker than the profile).
+    let read_only = read_only || profile.read_only;
     // The typed settings only: an extra option never overrides them (M2a final review I2).
     let port = effective_port(&profile, deps.catalog);
     let user = effective_user(&profile);
@@ -292,6 +402,8 @@ async fn run(
         current_user: None,
         access: AccessLabel::ReadWrite,
         rejections: prior_rejections,
+        read_only,
+        access_warnings: Vec::new(),
     };
     let mut cx = StepCx::new(profile.clone(), cancel.clone(), state);
 
@@ -371,6 +483,13 @@ async fn run(
         user: st.current_user,
         access: st.access,
         trail,
+        profile_changes: Vec::new(),
+        transport: None,
+        path: PathKind::Direct,
+        via: None,
+        access_warnings: st.access_warnings,
+        secrets_used: SessionSecrets::default(),
+        plaintext_consent,
         conn,
         guards,
         forwarded: st.forwarded,
@@ -516,6 +635,8 @@ fn args(
             .display_name()
             .to_string(),
         version: server.map(short_version),
+        hop: None,
+        hop_host: None,
     }
 }
 

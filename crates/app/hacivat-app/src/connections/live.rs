@@ -105,7 +105,7 @@ pub fn clock_seconds(cx: &App, id: ProfileId) -> f64 {
 }
 
 /// Copies every profile's manager state into the model.
-fn mirror(cx: &mut App) {
+pub(crate) fn mirror(cx: &mut App) {
     let Some(m) = cx.try_global::<ConnectionsModel>() else {
         return;
     };

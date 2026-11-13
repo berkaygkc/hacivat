@@ -156,6 +156,11 @@ pub(crate) struct StepState {
     pub(crate) access: AccessLabel,
     /// Server rejections of a password so far (P8).
     pub(crate) rejections: u8,
+    // ## m2b-t01-interfaces
+    /// The profile or the session is read-only (`ConnectRequest::read_only`).
+    pub(crate) read_only: bool,
+    /// What the role probe found (Task 18).
+    pub(crate) access_warnings: Vec<hacivat_guard::RoleWarning>,
 }
 
 impl StepState {
@@ -181,6 +186,8 @@ pub(crate) fn error(class: ErrClass, phase: Phase) -> ConnectError {
             file: None,
             engine: String::new(),
             version: None,
+            hop: None,
+            hop_host: None,
         },
         server: None,
         fixes: Vec::new(),
@@ -189,6 +196,9 @@ pub(crate) fn error(class: ErrClass, phase: Phase) -> ConnectError {
         elapsed: Duration::ZERO,
         attempts: 0,
         needs_interaction: false,
+        certificate: None,
+        host_key: None,
+        profile_changes: Vec::new(),
     }
 }
 
@@ -340,6 +350,8 @@ async fn ask_password(
             match ui.ask(q).await {
                 Answer::Password(pw) => Ok(pw),
                 Answer::Cancelled => Err(error(ErrClass::Cancelled, Phase::Auth)),
+                // ## m2b-t01-interfaces: any other answer to a password question cancels.
+                _ => Err(error(ErrClass::Cancelled, Phase::Auth)),
             }
         }
     }
@@ -610,11 +622,15 @@ impl ConnectStep for TlsStep {
             let settings = cx.profile.tls.clone();
             let host = server_host(&cx.profile).unwrap_or_default().to_string();
             let class = st.address;
+            // ## m2b-t01-interfaces: the port names the pin endpoint; Task 14 passes the
+            // TLS key passphrase.
+            let port = st.port.unwrap_or_default();
             // Small blocking reads of the CA, certificate and key files.
-            let built =
-                tokio::task::spawn_blocking(move || build_tls_params(&settings, &host, class))
-                    .await
-                    .map_err(|_| error(ErrClass::Internal, Phase::Tls))?;
+            let built = tokio::task::spawn_blocking(move || {
+                build_tls_params(&settings, &host, port, class, None)
+            })
+            .await
+            .map_err(|_| error(ErrClass::Internal, Phase::Tls))?;
             match built {
                 Ok(params) => {
                     st.tls = params;
@@ -734,7 +750,8 @@ fn request(
         ) => Endpoint::File {
             path: path.clone(),
             create_if_missing: *create_if_missing,
-            read_only: p.read_only,
+            // Fix round 1 (I1): the profile OR the session (`ConnectRequest::read_only`).
+            read_only: st.read_only,
         },
         (_, Some(e)) => e.clone(),
         // The transport step always runs before for a network endpoint.
@@ -754,10 +771,12 @@ fn request(
         password: auth.and_then(|a| a.password.clone()),
         database,
         application_name: p.application_name.clone(),
-        read_only: p.read_only,
+        read_only: st.read_only,
         options: st.options.clone(),
         connect_timeout: st.clock.remaining(),
         events,
+        // ## m2b-t01-interfaces: the insecure-auth guard (Task 14 decides the policy).
+        insecure_auth: super::insecure_auth_for(p, st.address, p.tls.mode),
     }
 }
 
@@ -1043,12 +1062,12 @@ impl ConnectStep for PostConnectStep {
             st.current_user = user
                 .or_else(|| st.auth.as_ref().and_then(|a| a.user.clone()))
                 .or_else(|| st.user.clone());
-            // R10: read-only is a label plus a session setting until M2b's guard.
-            st.access = if p.read_only {
-                AccessLabel::ReadOnlyGuarded
-            } else {
-                AccessLabel::ReadWrite
-            };
+            // ## m2b-t01-interfaces: the access label and the role probe's warnings (Task 18;
+            // until then the M2a R10 label).
+            let (access, warnings) =
+                crate::session::readonly::access_for(&mut **conn, p.engine, st.read_only).await;
+            st.access = access;
+            st.access_warnings = warnings;
             st.trail.done(TrailStep::CheckServer);
             Ok(None)
         })

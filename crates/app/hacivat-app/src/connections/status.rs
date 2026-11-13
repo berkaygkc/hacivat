@@ -59,7 +59,8 @@ pub fn segments(theme: &Theme, cx: &App) -> Vec<AnyElement> {
         |text: SharedString| status_label(theme, text, TextSource::Fluent).into_any_element();
     match m.live(p.id) {
         LiveState::Disconnected => no_connection(),
-        LiveState::Connecting(_) => vec![
+        // ## m2b-t01-interfaces: a reconnect reads like a connect (Task 22 refines it).
+        LiveState::Connecting(_) | LiveState::Reconnecting { .. } => vec![
             env_segment(theme, kind, env_text(cx, &p, p.read_only), p.read_only),
             fluent(tr(cx, ids::hv::CAPSULE_CONNECTING, NoArgs)),
         ],

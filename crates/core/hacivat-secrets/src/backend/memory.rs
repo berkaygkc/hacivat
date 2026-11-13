@@ -77,6 +77,11 @@ impl SecretBackend for MemoryBackend {
     fn name(&self) -> &'static str {
         "memory"
     }
+
+    // ## m2b-t01-interfaces
+    fn choice(&self) -> Option<super::BackendChoice> {
+        Some(super::BackendChoice::Memory)
+    }
 }
 
 #[cfg(test)]

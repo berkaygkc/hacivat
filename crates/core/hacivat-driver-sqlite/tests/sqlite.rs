@@ -64,6 +64,7 @@ fn request(path: &Path, create_if_missing: bool, read_only: bool) -> DriverConne
         options: vec![],
         connect_timeout: Duration::from_secs(15),
         events: Arc::new(|_| {}),
+        insecure_auth: Default::default(),
     }
 }
 

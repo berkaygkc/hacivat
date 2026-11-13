@@ -17,11 +17,14 @@ pub enum TrailStep {
     SignIn,
     CheckServer,
     OpenFile,
+    // ## m2b-t01-interfaces
+    /// The SSH tunnel (Task 14).
+    Ssh,
 }
 
 impl TrailStep {
     /// The stable ID: `pgpass`, `resolve`, `connect`, `tls`, `sign_in`, `check_server`,
-    /// `open_file`.
+    /// `open_file`, `ssh`.
     pub fn id(self) -> &'static str {
         match self {
             TrailStep::PgPass => "pgpass",
@@ -31,6 +34,7 @@ impl TrailStep {
             TrailStep::SignIn => "sign_in",
             TrailStep::CheckServer => "check_server",
             TrailStep::OpenFile => "open_file",
+            TrailStep::Ssh => "ssh",
         }
     }
 }

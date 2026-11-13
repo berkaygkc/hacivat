@@ -11,6 +11,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
 use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme};
+use secrecy::SecretString;
 
 use crate::address::{AddressClass, parse_ip_literal};
 
@@ -57,12 +58,26 @@ pub struct ClientCertPaths {
     pub key: PathBuf,
 }
 
+/// A pinned server certificate (M2b, HV-SEC-02): the SHA-256 of the leaf's DER for one
+/// endpoint, `pin_endpoint(host, port)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CertPin {
+    pub endpoint: String,
+    pub sha256: [u8; 32],
+}
+
 /// A profile's TLS settings (HV-SEC-02).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct TlsSettings {
     pub mode: TlsMode,
     pub ca_file: Option<PathBuf>,
     pub client_cert: Option<ClientCertPaths>,
+    // ## m2b-t01-interfaces
+    /// Pinned leaf certificates (Task 3). A pin for the endpoint forbids the plaintext
+    /// fallback (Q13).
+    pub pins: Vec<CertPin>,
+    /// The user answered the public-plaintext question with "remember" (Task 14).
+    pub allow_public_plaintext: bool,
 }
 
 /// Why a handshake failed, as the verifier saw it (HV-CONN-03).
@@ -75,6 +90,9 @@ pub enum TlsFailure {
     Protocol,
     ClientCertRequired,
     Other,
+    // ## m2b-t01-interfaces
+    /// The leaf is not the pinned certificate (Task 3).
+    PinMismatch,
 }
 
 impl TlsFailure {
@@ -170,6 +188,12 @@ pub struct TlsParams {
     /// never reads the file again, so a file that became unreadable after the check cannot
     /// silently drop the CA (M2a final review M6).
     pub ca_certs: Arc<[CertificateDer<'static>]>,
+    // ## m2b-t01-interfaces
+    /// The chain the server presented (leaf first), recorded by the verifier for the
+    /// certificate review (Task 3).
+    pub presented: Arc<Mutex<Option<PresentedChain>>>,
+    /// How far the server certificate was verified, written on a successful verify.
+    pub outcome: Arc<Mutex<Option<TlsVerified>>>,
 }
 
 /// How far a server certificate was verified (HV-SEC-02).
@@ -177,7 +201,102 @@ pub struct TlsParams {
 pub enum TlsVerified {
     Full,
     CaOnly,
+    // ## m2b-t01-interfaces
+    /// The leaf matched the endpoint's pin (Task 3).
+    Pinned,
     No,
+}
+
+// ## m2b-t01-interfaces
+
+/// The certificate chain a server presented, leaf first (M2b).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PresentedChain(pub Vec<CertificateDer<'static>>);
+
+impl PresentedChain {
+    /// A chain from DER blobs, leaf first (for crates that do not depend on rustls, such as
+    /// the fake driver).
+    pub fn from_der(ders: Vec<Vec<u8>>) -> PresentedChain {
+        PresentedChain(ders.into_iter().map(CertificateDer::from).collect())
+    }
+}
+
+/// A certificate's place in a presented chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChainRole {
+    Leaf,
+    Intermediate,
+    Root,
+}
+
+/// One certificate of a chain, as the review shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChainEntry {
+    pub subject: String,
+    pub role: ChainRole,
+}
+
+/// What the certificate review shows (Task 3, Task 19).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CertReview {
+    pub endpoint: String,
+    pub subject: String,
+    pub issuer: String,
+    pub not_before_unix: i64,
+    pub not_after_unix: i64,
+    pub sha256: [u8; 32],
+    pub chain: Vec<ChainEntry>,
+    /// The pin the endpoint had, when the review is for a changed pin.
+    pub pinned: Option<[u8; 32]>,
+}
+
+/// The pin endpoint of `tls_host` and `port`: the host in ASCII lowercase without a trailing
+/// dot, an IPv6 literal in brackets (`db:5432`, `[::1]:5432`).
+pub fn pin_endpoint(tls_host: &str, port: u16) -> String {
+    let bare = tls_host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(tls_host);
+    let bare = bare.strip_suffix('.').unwrap_or(bare).to_ascii_lowercase();
+    if bare.contains(':') {
+        format!("[{bare}]:{port}")
+    } else {
+        format!("{bare}:{port}")
+    }
+}
+
+/// The SHA-256 of a certificate's DER.
+pub fn cert_sha256(der: &[u8]) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(der).into()
+}
+
+/// A SHA-256 fingerprint as two lines of 16 colon-separated uppercase hex bytes.
+pub fn fingerprint_lines(sha256: &[u8; 32]) -> [String; 2] {
+    let line = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    [line(&sha256[..16]), line(&sha256[16..])]
+}
+
+/// The review of a presented chain for `endpoint`. Task 1 stub: no review (`None`) until
+/// Task 3 parses the certificates; a caller without a review offers no "trust" action.
+pub fn cert_review(
+    _chain: &PresentedChain,
+    _endpoint: &str,
+    _pinned: Option<[u8; 32]>,
+) -> Option<CertReview> {
+    None
+}
+
+/// The RFC 5929 `tls-server-end-point` channel-binding hash of a leaf (B9). Task 1 stub: none
+/// until Task 3, so no channel binding is offered.
+pub fn tls_server_end_point(_leaf_der: &[u8]) -> Option<Vec<u8>> {
+    None
 }
 
 /// What a live connection's TLS looks like (HV-SEC-02).
@@ -198,6 +317,12 @@ pub enum TlsSetupError {
     KeyEncrypted(PathBuf),
     /// The TLS host is neither an IP literal nor a DNS name rustls can verify or send as SNI.
     InvalidServerName(String),
+    // ## m2b-t01-interfaces
+    /// A legacy OpenSSL-encrypted PEM key (`Proc-Type: 4,ENCRYPTED`), which Hacivat cannot
+    /// decrypt (Task 3).
+    KeyEncryptedLegacy(PathBuf),
+    /// The key passphrase does not decrypt the key (Task 3).
+    KeyPassphraseWrong(PathBuf),
 }
 
 /// Builds the client configuration for `settings` toward `tls_host`; `None` means Disable.
@@ -218,15 +343,25 @@ pub enum TlsSetupError {
 ///
 /// The CA, certificate and key files are read here (small blocking reads). A missing or
 /// unusable file, or an encrypted key, is a [`TlsSetupError`].
+///
+/// M2b (Task 1): `port` names the pin endpoint (`pin_endpoint(tls_host, port)`) and
+/// `key_passphrase` is for an encrypted client key (Task 3 decrypts it; until then an
+/// encrypted key is still `KeyEncrypted`). The verifier records the presented chain and, on
+/// success, the outcome. Until Task 3 checks pins, a pin for the endpoint fails closed: the
+/// handshake fails with [`TlsFailure::PinMismatch`] and the plaintext fallback is off (Q13).
 pub fn build_tls_params(
     settings: &TlsSettings,
     tls_host: &str,
+    port: u16,
     class: AddressClass,
+    _key_passphrase: Option<&SecretString>,
 ) -> Result<Option<TlsParams>, TlsSetupError> {
     if settings.mode == TlsMode::Disable {
         return Ok(None);
     }
     let server_name = server_name(tls_host)?;
+    let endpoint = pin_endpoint(tls_host, port);
+    let pinned = settings.pins.iter().any(|p| p.endpoint == endpoint);
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let ca = match &settings.ca_file {
         Some(path) => Some((read_ca_file(path)?, path.as_path())),
@@ -241,7 +376,13 @@ pub fn build_tls_params(
         None => None,
     };
 
+    let failure = Arc::new(Mutex::new(None));
     let inner: Arc<dyn ServerCertVerifier> = match settings.mode {
+        // ## m2b-t01-interfaces: the pin-check stub refuses every certificate (Task 3).
+        _ if pinned => Arc::new(PinStub {
+            failure: failure.clone(),
+            provider: provider.clone(),
+        }),
         TlsMode::Require => Arc::new(AcceptAnyCert {
             provider: provider.clone(),
         }),
@@ -251,10 +392,18 @@ pub fn build_tls_params(
         }),
         TlsMode::Disable | TlsMode::Auto | TlsMode::VerifyFull => platform_verifier(ca, &provider)?,
     };
-    let failure = Arc::new(Mutex::new(None));
+    let presented = Arc::new(Mutex::new(None));
+    let outcome = Arc::new(Mutex::new(None));
     let verifier = Arc::new(Recording {
         inner,
         failure: failure.clone(),
+        presented: presented.clone(),
+        outcome: outcome.clone(),
+        verified: match settings.mode {
+            TlsMode::Require => TlsVerified::No,
+            TlsMode::VerifyCa => TlsVerified::CaOnly,
+            TlsMode::Disable | TlsMode::Auto | TlsMode::VerifyFull => TlsVerified::Full,
+        },
     });
 
     let builder = rustls::ClientConfig::builder_with_provider(provider)
@@ -280,9 +429,13 @@ pub fn build_tls_params(
         settings: settings.clone(),
         config: Arc::new(config),
         server_name,
-        plaintext_allowed: settings.mode == TlsMode::Auto && class != AddressClass::Public,
+        plaintext_allowed: settings.mode == TlsMode::Auto
+            && class != AddressClass::Public
+            && !pinned,
         failure,
         ca_certs,
+        presented,
+        outcome,
     }))
 }
 
@@ -415,11 +568,16 @@ fn platform_verifier(
     }
 }
 
-/// Wraps a verifier and records its first error into `TlsParams::failure`.
+/// Wraps a verifier and records its first error into `TlsParams::failure`; M2b: also the
+/// presented chain, and the outcome of a successful certificate check.
 #[derive(Debug)]
 struct Recording {
     inner: Arc<dyn ServerCertVerifier>,
     failure: Arc<Mutex<Option<TlsFailure>>>,
+    presented: Arc<Mutex<Option<PresentedChain>>>,
+    outcome: Arc<Mutex<Option<TlsVerified>>>,
+    /// What a successful check of `inner` means.
+    verified: TlsVerified,
 }
 
 impl Recording {
@@ -443,13 +601,23 @@ impl ServerCertVerifier for Recording {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        self.record(self.inner.verify_server_cert(
+        let chain = std::iter::once(end_entity)
+            .chain(intermediates)
+            .map(|c| c.clone().into_owned())
+            .collect();
+        *self
+            .presented
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(PresentedChain(chain));
+        let verified = self.record(self.inner.verify_server_cert(
             end_entity,
             intermediates,
             server_name,
             ocsp_response,
             now,
-        ))
+        ))?;
+        *self.outcome.lock().unwrap_or_else(PoisonError::into_inner) = Some(self.verified);
+        Ok(verified)
     }
 
     fn verify_tls12_signature(
@@ -539,6 +707,34 @@ impl ServerCertVerifier for AcceptAnyCert {
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         Ok(ServerCertVerified::assertion())
+    }
+
+    provider_signatures!();
+}
+
+// ## m2b-t01-interfaces
+/// The pin-check stub (Task 1, "No silent weakening"): until Task 3 compares the leaf with the
+/// pin, an endpoint with a pin refuses every certificate as [`TlsFailure::PinMismatch`].
+#[derive(Debug)]
+struct PinStub {
+    failure: Arc<Mutex<Option<TlsFailure>>>,
+    provider: Arc<CryptoProvider>,
+}
+
+impl ServerCertVerifier for PinStub {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let mut slot = self.failure.lock().unwrap_or_else(PoisonError::into_inner);
+        slot.get_or_insert(TlsFailure::PinMismatch);
+        Err(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::ApplicationVerificationFailure,
+        ))
     }
 
     provider_signatures!();
@@ -651,5 +847,62 @@ mod tests {
         }
         assert_eq!(server_name("db.acme.io.").unwrap().to_str(), "db.acme.io");
         assert!(matches!(server_name("[::1]"), Ok(ServerName::IpAddress(_))));
+    }
+
+    // ## m2b-t01-interfaces
+
+    #[test]
+    fn pin_endpoints_and_fingerprints() {
+        assert_eq!(pin_endpoint("db", 5432), "db:5432");
+        assert_eq!(pin_endpoint("DB.Acme.IO.", 5432), "db.acme.io:5432");
+        assert_eq!(pin_endpoint("::1", 5432), "[::1]:5432");
+        assert_eq!(pin_endpoint("[::1]", 5432), "[::1]:5432");
+        let sha = cert_sha256(b"abc");
+        assert_eq!(
+            fingerprint_lines(&sha),
+            [
+                "BA:78:16:BF:8F:01:CF:EA:41:41:40:DE:5D:AE:22:23",
+                "B0:03:61:A3:96:17:7A:9C:B4:10:FF:61:F2:00:15:AD"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pin_fails_closed_until_task_3_and_forbids_plaintext() {
+        let settings = TlsSettings {
+            pins: vec![CertPin {
+                endpoint: "10.0.0.5:5432".into(),
+                sha256: [9; 32],
+            }],
+            ..Default::default()
+        };
+        let params = build_tls_params(&settings, "10.0.0.5", 5432, AddressClass::Private, None)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !params.plaintext_allowed,
+            "a pin forbids the fallback (Q13)"
+        );
+        // Another port is another endpoint: no pin applies there.
+        let other = build_tls_params(&settings, "10.0.0.5", 6432, AddressClass::Private, None)
+            .unwrap()
+            .unwrap();
+        assert!(other.plaintext_allowed);
+    }
+
+    #[test]
+    fn the_pin_stub_refuses_every_certificate() {
+        let failure = Arc::new(Mutex::new(None));
+        let stub = PinStub {
+            failure: failure.clone(),
+            provider: Arc::new(rustls::crypto::ring::default_provider()),
+        };
+        let leaf = CertificateDer::from(vec![0x30, 0x00]);
+        let name = ServerName::try_from("db").unwrap();
+        assert!(
+            stub.verify_server_cert(&leaf, &[], &name, &[], UnixTime::now())
+                .is_err()
+        );
+        assert_eq!(*failure.lock().unwrap(), Some(TlsFailure::PinMismatch));
     }
 }

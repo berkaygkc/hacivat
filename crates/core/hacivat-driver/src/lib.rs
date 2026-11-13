@@ -23,12 +23,14 @@ pub mod url;
 pub use catalog::{CatalogError, ConnTypeSpec, DefaultOption, EngineCatalog, EngineSpec};
 pub use driver::{
     CancelHandle, CancelMechanism, Driver, DriverCaps, DriverConnect, DriverDescriptor,
-    DriverEvent, DriverEvents, Endpoint, ProbeWarning, RawConn,
+    DriverEvent, DriverEvents, Endpoint, ExecOpts, ExecSummary, InsecureAuth, ProbeWarning,
+    Protocol, RawConn, TxStatus,
 };
 pub use errors::{
-    Classified, Phase, RawError, RawErrorKind, ServerMessage, classify, fixes_for,
+    Classified, Phase, RawError, RawErrorKind, ServerMessage, classify, classify_ssh, fixes_for,
     reachable_classes,
 };
 pub use registry::DriverRegistry;
 pub use sanitize::{SanitizeInput, Violation, ViolationReason, sanitize};
 pub use server::{SemVerLoose, ServerInfo, Support, detect_mysql_family, support_status};
+pub use url::carries_secret; // ## m2b-t01-interfaces: the secret-scan invariant (M2a T7)

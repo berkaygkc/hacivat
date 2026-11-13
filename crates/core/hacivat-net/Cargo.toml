@@ -12,11 +12,24 @@ rustls.workspace = true
 tokio-rustls.workspace = true
 rustls-platform-verifier.workspace = true
 rustls-pki-types.workspace = true
+# M2b (Task 1): SSH tunnels, known hosts, pins and certificate review, encrypted client keys.
+russh.workspace = true
+sha2.workspace = true
+x509-parser.workspace = true
+pkcs8.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+base64.workspace = true
+secrecy.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+# M2b (Task 1, Q5): the in-process SSH server and agent.
+hacivat-testkit = { workspace = true, features = ["ssh"] }
+tracing-log.workspace = true
 
 [lints]
 workspace = true

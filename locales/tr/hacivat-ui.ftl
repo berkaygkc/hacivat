@@ -820,3 +820,16 @@ hv-conn-toast-delete-secret = Bağlantı silindi, ancak kayıtlı parolası sist
 hv-conn-enc-ca-only = { $version } · CA doğrulandı
 # Review: PO
 hv-conn-issue-option-secret = { $key } özelliği bir parola taşıyor. Özelliği kaldırın, parolayı Parola alanına yazın.
+
+## m2b-t01-interfaces
+
+# Review: PO
+hv-conn-issue-ssh-host-missing = SSH sunucusunu girin.
+# Review: PO
+hv-conn-issue-ssh-user-missing = SSH kullanıcısını girin.
+# Review: PO
+hv-conn-issue-ssh-too-many-hops = Bu tünelde çok fazla ara sunucu var.
+# Review: PO
+hv-conn-issue-ssh-key-file-missing = SSH anahtar dosyası okunamıyor.
+# Review: PO
+hv-conn-issue-tls-key-legacy-encrypted = Bu özel anahtar eski bir şifreleme biçimi kullanıyor. Anahtarı PKCS #8'e dönüştürün.

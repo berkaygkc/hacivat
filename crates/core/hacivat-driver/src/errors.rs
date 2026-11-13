@@ -60,6 +60,11 @@ pub enum RawErrorKind {
     /// 1045 "using password: NO" (`auth.invalid` by code).
     PasswordRequired,
     Other,
+    // ## m2b-t01-interfaces
+    /// The server asked for the password by an insecure method (cleartext or MD5) over a
+    /// channel that is not verified TLS, and `InsecureAuth::RefuseUnlessVerified` refused
+    /// before the password left (B8, Q20).
+    InsecureAuthRefused,
 }
 
 /// A driver error before classification (HV-CONN-03).
@@ -103,9 +108,19 @@ pub fn classify_tls_setup(err: &TlsSetupError) -> Classified {
         | TlsSetupError::CertFileUnreadable(_)
         | TlsSetupError::KeyUnreadable(_)
         | TlsSetupError::KeyEncrypted(_)
-        | TlsSetupError::InvalidServerName(_) => ErrClass::ConfigInvalid,
+        | TlsSetupError::InvalidServerName(_)
+        // ## m2b-t01-interfaces
+        | TlsSetupError::KeyEncryptedLegacy(_)
+        | TlsSetupError::KeyPassphraseWrong(_) => ErrClass::ConfigInvalid,
     };
     classified(class)
+}
+
+// ## m2b-t01-interfaces
+/// Classifies an SSH tunnel failure (Task 14). Task 1 stub: every SSH failure is `internal`
+/// until Task 14 maps them to the `ssh.*` classes.
+pub fn classify_ssh(_err: &hacivat_net::ssh::SshError) -> Classified {
+    classified(ErrClass::Internal)
 }
 
 /// The quick fixes of `class`, in button order, from `errors.toml`.
@@ -192,7 +207,11 @@ fn by_transport(phase: Phase, kind: &RawErrorKind) -> Option<ErrClass> {
             TlsFailure::Protocol => ErrClass::TlsProtocol,
             TlsFailure::ClientCertRequired => ErrClass::TlsClientCertRequired,
             TlsFailure::Other => ErrClass::TlsHandshake,
+            // ## m2b-t01-interfaces
+            TlsFailure::PinMismatch => ErrClass::TlsPinChanged,
         },
+        // ## m2b-t01-interfaces
+        RawErrorKind::InsecureAuthRefused => ErrClass::AuthInsecureMethod,
         RawErrorKind::Io(io) => match io {
             K::ConnectionRefused => ErrClass::NetworkRefused,
             K::TimedOut => ErrClass::NetworkTimeout,
