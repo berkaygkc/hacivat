@@ -1,5 +1,4 @@
-//! Input limits checked before a statement reaches the server (SQL-SAFE-05). Task 5 fills
-//! [`check_input`].
+//! Input limits checked before a statement reaches the server (SQL-SAFE-05).
 
 /// The longest statement a session accepts, in bytes (1 MiB).
 pub const MAX_STATEMENT_BYTES: usize = 1 << 20;
@@ -11,10 +10,16 @@ pub enum InputViolation {
     Nul,
 }
 
-/// Whether `sql` may be sent. Task 1 stub: fails closed (every statement is refused as too
-/// long) until Task 5.
-pub fn check_input(_sql: &str) -> Result<(), InputViolation> {
-    Err(InputViolation::TooLong {
-        limit: MAX_STATEMENT_BYTES,
-    })
+/// Whether `sql` may be sent: at most [`MAX_STATEMENT_BYTES`] bytes (UTF-8, not characters),
+/// and no NUL, which C-string APIs (SQLite, libpq-style tools) would cut the statement at.
+pub fn check_input(sql: &str) -> Result<(), InputViolation> {
+    if sql.len() > MAX_STATEMENT_BYTES {
+        return Err(InputViolation::TooLong {
+            limit: MAX_STATEMENT_BYTES,
+        });
+    }
+    if sql.as_bytes().contains(&0) {
+        return Err(InputViolation::Nul);
+    }
+    Ok(())
 }

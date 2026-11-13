@@ -3,8 +3,9 @@
 //! role probe and the honest access label. No I/O, no async, no runtime: the session actor
 //! (`hacivat-session::session::readonly`) runs what this crate decides.
 //!
-//! Task 1 ships the interface: [`plan_for`] works (Q8, Task 5's exact values); every other
-//! function is a fail-closed stub ("No silent weakening") until Task 5 fills it.
+//! Every decision fails closed: an engine, answer or name the guard does not know is treated
+//! as an escape, a denial or a non-least-privilege role, never as safe. ADR 0004
+//! (`## m2b-t05`) records the layers per engine.
 
 pub mod input;
 pub mod label;
