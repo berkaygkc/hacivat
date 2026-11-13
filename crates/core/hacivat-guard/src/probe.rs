@@ -52,12 +52,16 @@ pub struct RoleFindings {
 ///    `standard_conforming_strings`.
 /// 4. TEMP on the database.
 /// 5. The extensions that reach other servers.
+///
+/// T18 review m-3: every function, aggregate and relation is `pg_catalog.`-qualified, so a
+/// `search_path` that names another schema before `pg_catalog` (an imported URL may set it)
+/// cannot shadow them. Operators stay unqualified (ADR 0004 `m2b-t18`).
 const PG_PROBE: [&str; 5] = [
-    "SELECT bool_or(rolsuper), bool_or(rolbypassrls), bool_or(rolreplication), bool_or(rolcreaterole) FROM pg_roles WHERE pg_has_role(current_user, oid, 'MEMBER')",
-    "SELECT r.rolname FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program','pg_signal_backend','pg_write_all_data','pg_maintain')",
-    "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE c.relkind IN ('r','p','v','m','f','S') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND (c.relowner = r.oid OR CASE WHEN c.relkind = 'S' THEN has_sequence_privilege(r.oid, c.oid, 'USAGE, UPDATE') ELSE has_table_privilege(r.oid, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') OR has_any_column_privilege(r.oid, c.oid, 'INSERT, UPDATE') END)) OR EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND has_schema_privilege(r.oid, n.oid, 'CREATE')) OR EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND (r.rolcreatedb OR has_database_privilege(r.oid, current_database(), 'CREATE')))",
-    "SELECT has_database_privilege(current_database(), 'TEMP')",
-    "SELECT extname FROM pg_extension WHERE extname IN ('dblink','postgres_fdw','pg_net','http')",
+    "SELECT pg_catalog.bool_or(rolsuper), pg_catalog.bool_or(rolbypassrls), pg_catalog.bool_or(rolreplication), pg_catalog.bool_or(rolcreaterole) FROM pg_catalog.pg_roles WHERE pg_catalog.pg_has_role(current_user, oid, 'MEMBER')",
+    "SELECT r.rolname FROM pg_catalog.pg_roles r WHERE pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') AND r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program','pg_signal_backend','pg_write_all_data','pg_maintain')",
+    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace JOIN pg_catalog.pg_roles r ON pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') WHERE c.relkind IN ('r','p','v','m','f','S') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND (c.relowner = r.oid OR CASE WHEN c.relkind = 'S' THEN pg_catalog.has_sequence_privilege(r.oid, c.oid, 'USAGE, UPDATE') ELSE pg_catalog.has_table_privilege(r.oid, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') OR pg_catalog.has_any_column_privilege(r.oid, c.oid, 'INSERT, UPDATE') END)) OR EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_roles r ON pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE')) OR EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') AND (r.rolcreatedb OR pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'CREATE')))",
+    "SELECT pg_catalog.has_database_privilege(pg_catalog.current_database(), 'TEMP')",
+    "SELECT extname FROM pg_catalog.pg_extension WHERE extname IN ('dblink','postgres_fdw','pg_net','http')",
 ];
 
 const MYSQL_PROBE: [&str; 1] = ["SHOW GRANTS"];
