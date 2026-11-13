@@ -22,6 +22,7 @@ use hacivat_net::TlsMode;
 use hacivat_proto::DbmsKind;
 use hacivat_secrets::AuthProviderId;
 
+use super::options::{FoldedOption, fold_typed_options};
 use super::{Profile, ProfileDraft, ProfileEndpoint, TransportSpec};
 
 /// The SQLite path of an in-memory database (the `memory` connection type).
@@ -48,6 +49,9 @@ pub struct ApplyReport {
     pub engine: Option<EngineChange>,
     pub password_moved: bool,
     pub mapped: Vec<MappedParam>,
+    /// Parameters the parser kept as extras that have a typed setting (`sslrootcert`,
+    /// `sslmode=allow`, ...): they went to it, not to `extra` (M2a final review I2).
+    pub folded: Vec<FoldedOption>,
     pub extras_kept: Vec<String>,
     pub warnings: Vec<ParseWarning>,
 }
@@ -256,7 +260,8 @@ fn switch_engine(p: &mut Profile, to: DbmsKind) {
 /// - **The password** moves to `draft.password` (and the auth becomes Password); an
 ///   `sslpassword` moves to `draft.tls_key_passphrase`.
 /// - **Mapped settings** (TLS mode, application name, connect timeout, SQLite read-only) are
-///   applied; unknown parameters replace the draft's extras.
+///   applied; unknown parameters replace the draft's extras, and those with a typed setting
+///   (`sslrootcert`, `sslcert`, ...) are folded into it (`fold_typed_options`).
 pub fn apply_parse(
     draft: &mut ProfileDraft,
     outcome: ParseOutcome,
@@ -277,6 +282,7 @@ pub fn apply_parse(
         engine: None,
         password_moved: false,
         mapped: Vec::new(),
+        folded: Vec::new(),
         extras_kept: Vec::new(),
         warnings,
     };
@@ -371,8 +377,10 @@ pub fn apply_parse(
     }
     report.mapped = mapped;
     if !extra.is_empty() {
-        report.extras_kept = extra.iter().map(|(k, _)| k.clone()).collect();
         p.extra = extra;
+        // An option with a typed setting goes to it, as the mapped ones did.
+        report.folded = fold_typed_options(p);
+        report.extras_kept = p.extra.iter().map(|(k, _)| k.clone()).collect();
     }
 
     let password = secrets

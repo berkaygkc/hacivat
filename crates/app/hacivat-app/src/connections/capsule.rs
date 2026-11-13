@@ -115,10 +115,16 @@ pub fn encryption_label(cx: &App, p: &Profile, info: &LiveInfo) -> SharedString 
         _ => "TLS".to_string(),
     });
     match info.tls.verified {
-        TlsVerified::Full | TlsVerified::CaOnly => tr(
+        TlsVerified::Full => tr(
             cx,
             ids::hv::CONN_ENC_VERIFIED,
             ids::hv::HvConnEncVerified { version },
+        ),
+        // ## m2a-finalfix (I3): the chain was checked, the host name was not.
+        TlsVerified::CaOnly => tr(
+            cx,
+            ids::hv::CONN_ENC_CA_ONLY,
+            ids::hv::HvConnEncCaOnly { version },
         ),
         TlsVerified::No => tr(
             cx,

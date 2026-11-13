@@ -3,6 +3,8 @@
 //! Task 1; logic in Task 12.
 
 mod fields;
+// ## m2a-finalfix
+mod options;
 mod rules;
 mod store;
 
@@ -18,6 +20,7 @@ use secrecy::SecretString;
 pub use fields::{
     ApplyReport, CopiedUrl, EngineChange, apply_parse, copy_url, display_url, to_fields,
 };
+pub use options::{FoldedOption, FoldedTo, fold_typed_options, strip_secret_options};
 pub use rules::{
     HintSource, duplicate_name, is_local_endpoint, needs_environment_prompt, production_hint,
     suggest_name,

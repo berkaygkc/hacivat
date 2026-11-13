@@ -10,8 +10,6 @@ hacivat-proto.workspace = true
 keyring.workspace = true
 secrecy.workspace = true
 zeroize.workspace = true
-url.workspace = true
-regex.workspace = true
 directories.workspace = true
 
 [dev-dependencies]

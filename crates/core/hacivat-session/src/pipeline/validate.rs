@@ -1,19 +1,19 @@
 //! Step 0 of a connect: profile issues and option sanitizing (HV-CONN-01, HV-DRV-05).
 //!
-//! Validation runs on the profile's *effective* settings ([`effective_profile`]): libpq,
-//! JDBC and MySQL-client options that a URL left in the profile's extra options (`sslmode`,
-//! `sslMode`, `ssl-mode`, `useSSL`, `sslrootcert`, `sslCa`, `ssl-ca`, `connect_timeout`, ...)
-//! are applied to its TLS settings and timeout first, because no driver reads them (T13, T14).
-//! T7's parser maps the TLS mode, `useSSL` and `connect_timeout` itself (`MappedTo`); the file
-//! options stay extras, so they are mapped here.
+//! Validation and the connect read the profile's typed settings only. Options with a typed
+//! setting (`sslmode`, `sslrootcert`, `connect_timeout`, ...) never override it here: they are
+//! folded into it where they enter a profile (`profile::fold_typed_options`: a paste, the
+//! import, the dialog, a load and every save), so the form, the quick fixes and the connect
+//! agree (M2a final review I2). One that is still in `extra` changes nothing (no driver reads
+//! it) and goes through DRV-05 like any other option.
 
 use std::fmt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use hacivat_driver::url::FieldId;
 use hacivat_driver::{EngineCatalog, SanitizeInput, ViolationReason, sanitize};
-use hacivat_net::{AddressClass, ClientCertPaths, TlsMode, TlsSetupError, build_tls_params};
+use hacivat_net::{AddressClass, TlsMode, TlsSetupError, build_tls_params};
 use hacivat_proto::DbmsKind;
 
 use crate::profile::{Profile, ProfileEndpoint, TransportSpec};
@@ -44,6 +44,12 @@ pub enum IssueCode {
     OptionRejected {
         key: String,
         reason: ViolationReason,
+    },
+    // ## m2a-finalfix
+    /// An extra option whose key carries a password (`hacivat_proto::is_secret_param`): a
+    /// password belongs in the password field, never in `extra` (M2a final review I1).
+    OptionSecret {
+        key: String,
     },
 }
 
@@ -114,7 +120,10 @@ pub fn validate(p: &Profile, catalog: &EngineCatalog) -> Vec<ValidationIssue> {
 /// - SSH tunnels and the Karagöz transport cannot connect in M2a (R4).
 /// - TLS: `VerifyCa` is unsupported for MySQL and MariaDB (P11); elsewhere it needs a CA file
 ///   (libpq parity: `verify-ca` without a root file trusts nothing). The CA, certificate and
-///   key files must be readable, the key unencrypted, and the host usable as a TLS name.
+///   key files must be readable, the key unencrypted, and the host usable as a TLS name. For
+///   every origin, a TLS file is never a UNC share or a device path (`\\server\share`, `//`,
+///   `\\?\UNC\`, `\\.\`, `\??\`): `PathRefused`, as for SQLite.
+/// - An extra option whose key carries a password is `OptionSecret`.
 /// - Options go through DRV-05 [`sanitize`] with the TLS files listed as paths and `roots`
 ///   approved; a file outside them (untrusted origins only) is `PathRefused`.
 ///
@@ -124,10 +133,10 @@ pub fn validate_with(
     catalog: &EngineCatalog,
     roots: &ApprovedRoots,
 ) -> Vec<ValidationIssue> {
-    checked(&effective_profile(p), catalog, &roots.list()).0
+    checked(p, catalog, &roots.list()).0
 }
 
-/// The issues of an effective profile and, when there are none, the sanitized options.
+/// The issues of a profile and, when there are none, the sanitized options.
 pub(crate) fn checked(
     p: &Profile,
     catalog: &EngineCatalog,
@@ -184,9 +193,17 @@ pub(crate) fn checked(
     if !matches!(p.transport, TransportSpec::Direct) {
         push(None, IssueCode::TransportUnavailable);
     }
+    // A TLS file on a share or a device is refused before anything opens, resolves or stats it
+    // (N2): neither the TLS check below nor the DRV-05 path rule may touch it.
+    let all_paths = tls_paths(p);
+    let tls_refused = all_paths.iter().any(|(_, path)| network_path(path));
+    if tls_refused {
+        push(None, IssueCode::PathRefused);
+    }
     if let ProfileEndpoint::Server { host, .. } = &p.endpoint
         && !file_based
         && p.tls.mode != TlsMode::Disable
+        && !tls_refused
     {
         let mysql_family = catalog.chain(p.engine).contains(&DbmsKind::MySql);
         if mysql_family && p.tls.mode == TlsMode::VerifyCa {
@@ -206,7 +223,15 @@ pub(crate) fn checked(
             }
         }
     }
-    let paths = tls_paths(p);
+    let paths: Vec<(String, PathBuf)> = all_paths
+        .into_iter()
+        .filter(|(_, path)| !network_path(path))
+        .collect();
+    for (key, _) in &p.extra {
+        if hacivat_proto::is_secret_param(key) {
+            push(None, IssueCode::OptionSecret { key: key.clone() });
+        }
+    }
     let options = match sanitize(
         &SanitizeInput {
             kind: p.engine,
@@ -287,14 +312,11 @@ fn sqlite_path_issue(path: &Path, create_if_missing: bool) -> Option<IssueCode> 
     if text.is_empty() {
         return Some(IssueCode::FileMissing);
     }
-    let refused_text = text
+    let file_uri = text
         .as_bytes()
         .get(..5)
-        .is_some_and(|head| head.eq_ignore_ascii_case(b"file:"))
-        || text.starts_with("\\\\")
-        || text.starts_with("//")
-        || text.starts_with("\\??\\");
-    if refused_text || !path.is_absolute() || refused_prefix(path) {
+        .is_some_and(|head| head.eq_ignore_ascii_case(b"file:"));
+    if file_uri || network_path(path) || !path.is_absolute() {
         return Some(IssueCode::PathRefused);
     }
     match std::fs::metadata(path) {
@@ -305,104 +327,16 @@ fn sqlite_path_issue(path: &Path, create_if_missing: bool) -> Option<IssueCode> 
     }
 }
 
-/// A Windows prefix that never names a local file: a UNC share or a device namespace.
-fn refused_prefix(path: &Path) -> bool {
-    use std::path::Prefix;
-    match path.components().next() {
-        Some(Component::Prefix(p)) => match p.kind() {
-            Prefix::DeviceNS(_) | Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
-            Prefix::Verbatim(name) => name.eq_ignore_ascii_case("GLOBALROOT"),
-            Prefix::Disk(_) | Prefix::VerbatimDisk(_) => false,
-        },
-        _ => false,
-    }
-}
-
-/// An option key folded for matching: ASCII lowercase, without `-` and `_` (`sslMode`,
-/// `ssl-mode` and `ssl_mode` are one key).
-fn fold_key(key: &str) -> String {
-    key.chars()
-        .filter(|c| *c != '-' && *c != '_')
-        .map(|c| c.to_ascii_lowercase())
-        .collect()
-}
-
-/// `p` with the client-side driver options of its extras applied (the drivers read none of
-/// them). An option overrides the profile's own setting, as the URL that carried it asked.
-/// Keys match after [`fold_key`] (so JDBC `sslMode`, MySQL-client `ssl-mode` and libpq
-/// `sslmode` are one key); values fold ASCII case and `_`/`-`.
-///
-/// - Mode (`sslmode`): `disable`/`disabled`; `allow`, `prefer`, `preferred` are Auto;
-///   `require`/`required`; `verify-ca`; `verify-full`/`verify-identity`. MySQL and MariaDB also
-///   read `useSSL` (`false` is Disable, `true` Require) when no mode is given.
-/// - Files: the CA (`sslrootcert` for PostgreSQL, where `system` keeps the platform roots;
-///   `sslCa`/`ssl-ca` for MySQL and MariaDB) and the client certificate with its key
-///   (`sslcert` + `sslkey`, `ssl-cert` + `ssl-key`).
-/// - Timeout: `connect_timeout` in seconds; MySQL's JDBC `connectTimeout` in milliseconds,
-///   rounded up.
-///
-/// An unknown value changes nothing.
-pub(crate) fn effective_profile(p: &Profile) -> Profile {
-    let mut e = p.clone();
-    let mysql = matches!(p.engine, DbmsKind::MySql | DbmsKind::MariaDb);
-    if p.engine != DbmsKind::Postgres && !mysql {
-        return e;
-    }
-    // The last value of a key wins.
-    let get = |folded: &str| {
-        p.extra
-            .iter()
-            .rev()
-            .find(|(k, _)| fold_key(k) == folded)
-            .map(|(k, v)| (k.as_str(), v.trim()))
-    };
-    let value = |v: &str| v.to_ascii_lowercase().replace('_', "-");
-    let mode = match get("sslmode").map(|(_, v)| value(v)).as_deref() {
-        Some("disable" | "disabled") => Some(TlsMode::Disable),
-        Some("allow" | "prefer" | "preferred") => Some(TlsMode::Auto),
-        Some("require" | "required") => Some(TlsMode::Require),
-        Some("verify-ca") => Some(TlsMode::VerifyCa),
-        Some("verify-full" | "verify-identity") => Some(TlsMode::VerifyFull),
-        Some(_) => None,
-        None if mysql => match get("usessl").map(|(_, v)| value(v)).as_deref() {
-            Some("false") => Some(TlsMode::Disable),
-            Some("true") => Some(TlsMode::Require),
-            _ => None,
-        },
-        None => None,
-    };
-    if let Some(mode) = mode {
-        e.tls.mode = mode;
-    }
-    let ca_key = if mysql { "sslca" } else { "sslrootcert" };
-    if let Some((_, v)) = get(ca_key) {
-        let system = !mysql && v.eq_ignore_ascii_case("system");
-        e.tls.ca_file = (!system && !v.is_empty()).then(|| PathBuf::from(v));
-    }
-    if let (Some((_, cert)), Some((_, key))) = (get("sslcert"), get("sslkey"))
-        && !cert.is_empty()
-        && !key.is_empty()
-    {
-        e.tls.client_cert = Some(ClientCertPaths {
-            cert: PathBuf::from(cert),
-            key: PathBuf::from(key),
-        });
-    }
-    if let Some((key, v)) = get("connecttimeout")
-        && let Ok(n) = v.parse::<u64>()
-        && n > 0
-    {
-        // JDBC's `connectTimeout` (no separator) counts milliseconds.
-        let jdbc_ms = mysql && !key.contains(['_', '-']);
-        let seconds = if jdbc_ms { n.div_ceil(1000) } else { n };
-        e.connect_timeout_s = u32::try_from(seconds).unwrap_or(u32::MAX);
-    }
-    e
+/// A path that never names a local file, on any OS (`hacivat_net::is_network_path`): a UNC
+/// share, `//host`, `\\?\UNC\`, `\\.\` or `\??\`. Checked before any file system call.
+fn network_path(path: &Path) -> bool {
+    hacivat_net::is_network_path(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hacivat_net::ClientCertPaths;
     use hacivat_proto::{ImportSource, Origin};
 
     fn pg(extra: &[(&str, &str)]) -> Profile {
@@ -427,21 +361,21 @@ mod tests {
             .collect()
     }
 
+    // ## m2a-finalfix
+    /// I2: an extra never overrides a typed setting. A profile whose extras still name a TLS
+    /// mode validates (and connects) with its typed mode; the fold that runs where options
+    /// enter a profile is what applies them.
     #[test]
-    fn libpq_jdbc_and_mysql_client_options_set_the_effective_tls_settings_and_timeout() {
-        let e = effective_profile(&pg(&[("SSLMODE", "verify-full"), ("connect_timeout", "7")]));
-        assert_eq!((e.tls.mode, e.connect_timeout_s), (TlsMode::VerifyFull, 7));
-        let e = effective_profile(&pg(&[("sslmode", "bogus")]));
-        assert_eq!(e.tls.mode, TlsMode::Auto);
-        let e = effective_profile(&pg(&[("sslrootcert", "system")]));
-        assert_eq!(e.tls.ca_file, None);
-        let e = effective_profile(&pg(&[("sslrootcert", "/certs/ca.pem")]));
-        assert_eq!(e.tls.ca_file, Some(PathBuf::from("/certs/ca.pem")));
+    fn extras_never_override_the_typed_tls_settings() {
+        let mut p = pg(&[("sslmode", "verify-ca")]);
+        p.tls.mode = TlsMode::Require;
+        // Verify CA without a CA file would be an issue: the typed Require is what counts.
+        assert_eq!(codes(&p, &ApprovedRoots::new(Vec::new())), []);
 
-        let mut my = pg(&[("sslMode", "verify_ca"), ("connectTimeout", "2500")]);
+        let mut my = pg(&[("sslMode", "verify_ca")]);
         my.engine = DbmsKind::MySql;
-        let e = effective_profile(&my);
-        assert_eq!((e.tls.mode, e.connect_timeout_s), (TlsMode::VerifyCa, 3));
+        assert_eq!(codes(&my, &ApprovedRoots::new(Vec::new())), []);
+        crate::profile::fold_typed_options(&mut my);
         assert!(
             validate(&my, EngineCatalog::embedded()).contains(&ValidationIssue {
                 field: None,
@@ -450,35 +384,69 @@ mod tests {
                 }
             })
         );
-        my.extra = vec![("useSSL".into(), "false".into())];
-        assert_eq!(effective_profile(&my).tls.mode, TlsMode::Disable);
+    }
 
-        // JDBC `sslCa`/`sslCert`/`sslKey` and the MySQL client's `ssl-ca`/`ssl-cert`/`ssl-key`.
-        for (ca, cert, key, mode) in [
-            ("sslCa", "sslCert", "sslKey", "REQUIRED"),
-            ("ssl-ca", "ssl-cert", "ssl-key", "verify_identity"),
+    /// I1: a password never sits in the extras, whatever its key's spelling.
+    #[test]
+    fn a_password_option_is_an_issue() {
+        for key in [
+            "pgpassword",
+            "db_password",
+            "--pwd",
+            "SSLPassword",
+            "trustCertificateKeyStorePassword",
+            "ssl_passphrase",
         ] {
-            my.extra = [
-                (ca, "/c/ca.pem"),
-                (cert, "/c/me.pem"),
-                (key, "/c/me.key"),
-                ("ssl-mode", mode),
-                ("connect_timeout", "4"),
-            ]
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-            let e = effective_profile(&my);
-            assert_eq!(e.tls.ca_file, Some(PathBuf::from("/c/ca.pem")), "{ca}");
+            let p = pg(&[(key, "hv_test_pw")]);
             assert_eq!(
-                e.tls.client_cert,
-                Some(ClientCertPaths {
-                    cert: "/c/me.pem".into(),
-                    key: "/c/me.key".into()
-                })
+                codes(&p, &ApprovedRoots::new(Vec::new())),
+                [IssueCode::OptionSecret { key: key.into() }],
+                "{key}"
             );
-            assert_ne!(e.tls.mode, TlsMode::Auto, "{mode}");
-            assert_eq!(e.connect_timeout_s, 4, "seconds, not JDBC milliseconds");
+        }
+        assert_eq!(
+            codes(
+                &pg(&[("pass_through", "x")]),
+                &ApprovedRoots::new(Vec::new())
+            ),
+            []
+        );
+    }
+
+    /// I5: a TLS file is never a network or device path, whatever the profile's origin.
+    #[test]
+    fn tls_files_on_a_share_or_a_device_are_refused_for_every_origin() {
+        for bad in [
+            r"\\server\share\ca.pem",
+            "//server/share/ca.pem",
+            r"\\?\UNC\server\share\ca.pem",
+            r"\\.\PhysicalDrive0",
+            r"\??\C:\ca.pem",
+        ] {
+            for origin in [
+                Origin::UserTyped,
+                Origin::Imported {
+                    source: ImportSource::Url,
+                },
+            ] {
+                let mut p = pg(&[]);
+                p.origin = origin;
+                p.tls.mode = TlsMode::VerifyFull;
+                p.tls.ca_file = Some(PathBuf::from(bad));
+                assert!(
+                    codes(&p, &ApprovedRoots::new(Vec::new())).contains(&IssueCode::PathRefused),
+                    "{bad}"
+                );
+                p.tls.ca_file = None;
+                p.tls.client_cert = Some(ClientCertPaths {
+                    cert: PathBuf::from(bad),
+                    key: PathBuf::from(bad),
+                });
+                assert!(
+                    codes(&p, &ApprovedRoots::new(Vec::new())).contains(&IssueCode::PathRefused),
+                    "{bad}"
+                );
+            }
         }
     }
 
@@ -591,10 +559,13 @@ mod tests {
             p.tls.ca_file = None;
             p.engine = engine;
             p.extra = vec![(key.into(), outside.display().to_string())];
+            // Folded into the typed CA, as an import or a paste does (I2).
+            crate::profile::fold_typed_options(&mut p);
             let roots = ApprovedRoots::new(vec![home.path().to_path_buf()]);
             let found = codes(&p, &roots);
             assert!(found.contains(&IssueCode::PathRefused), "{key}: {found:?}");
             p.extra = vec![(key.into(), inside.display().to_string())];
+            crate::profile::fold_typed_options(&mut p);
             assert!(
                 !codes(&p, &roots).contains(&IssueCode::PathRefused),
                 "{key}"

@@ -1,8 +1,14 @@
 //! Scrubbing: removes passwords from URLs and option lists before they reach a log, the
 //! clipboard or a file (HV-SEC-05).
 //!
-//! A key is secret when its ASCII-lowercased form contains `pass`, `pwd`, `secret`, `token` or
-//! `key`. Matching is locale-invariant and errs on the side of removing too much.
+//! A key is secret when `hacivat_proto::is_secret_param` (the one password-key rule the parser,
+//! the import, the dialog and the store share) says so, or when its ASCII-lowercased form
+//! contains `pass`, `pwd`, `secret`, `token` or `key`. The fragments are a deliberate superset:
+//! a scrub errs on the side of removing too much. Matching is locale-invariant.
+//!
+//! Callers: the connect error's technical details and the copied reports scrub the server's
+//! message (`hacivat-app` `connections::report`), so a server that echoes a connection string
+//! never puts its password on the screen or the clipboard.
 
 /// The key fragments that mark a secret-bearing option.
 const SECRET_FRAGMENTS: [&str; 5] = ["pass", "pwd", "secret", "token", "key"];
@@ -10,9 +16,14 @@ const SECRET_FRAGMENTS: [&str; 5] = ["pass", "pwd", "secret", "token", "key"];
 /// What a scrubbed option value becomes in [`scrub_options`].
 const REMOVED: &str = "<removed>";
 
-/// Whether an option key names a secret (`(?i)pass|pwd|secret|token|key`, ASCII only).
+/// Whether an option key names a secret: the shared password-key rule, or a secret fragment
+/// (`(?i)pass|pwd|secret|token|key`, ASCII only).
 fn is_secret_key(key: &str) -> bool {
-    let key = percent_decode_ascii(key.trim()).to_ascii_lowercase();
+    let key = percent_decode_ascii(key.trim());
+    if hacivat_proto::is_secret_param(&key) {
+        return true;
+    }
+    let key = key.to_ascii_lowercase();
     SECRET_FRAGMENTS.iter().any(|f| key.contains(f))
 }
 
@@ -88,6 +99,43 @@ fn bare_userinfo(s: &str) -> Option<&str> {
         .next()
         .unwrap_or("");
     token.contains('@').then_some(rest)
+}
+
+// ## m2a-finalfix (round 2, N4)
+/// A server's message without a password: [`scrub_url`], unless that would leave nothing of a
+/// message that had text. Free text is no connection string, and `scrub_url` can read a whole
+/// sentence as one `key=value` segment (`duplicate key value … Key (id)=(1) already exists.`)
+/// and drop it. Then only the whitespace-separated `key=value` words whose key is secret (the
+/// scrubber's own rule: a password key, or a `pass`/`pwd`/`secret`/`token`/`key` fragment) lose
+/// their value (`password=<removed>`); every other word, and the whitespace, stays as the
+/// server sent it.
+pub fn scrub_message(text: &str) -> String {
+    let scrubbed = scrub_url(text);
+    if !scrubbed.trim().is_empty() || text.trim().is_empty() {
+        return scrubbed;
+    }
+    text.split_inclusive(char::is_whitespace)
+        .map(|word| {
+            let body = word.trim_end_matches(char::is_whitespace);
+            let space = &word[body.len()..];
+            match body.split_once('=') {
+                Some((key, _)) if !key_of(key).is_empty() && is_secret_key(key_of(key)) => {
+                    format!("{key}={REMOVED}{space}")
+                }
+                _ => word.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// The option name at the end of `s` (`(password` → `password`, `"pwd` → `pwd`).
+fn key_of(s: &str) -> &str {
+    let start = s
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    &s[start..]
 }
 
 /// `opts` with the value of every secret-bearing key replaced by `<removed>`; the keys and
@@ -495,6 +543,44 @@ mod tests {
         }
         for k in ["host", "sslmode", "user", "dbname"] {
             assert!(!is_secret_key(k), "{k}");
+        }
+    }
+
+    // ## m2a-finalfix (round 2, N4)
+    #[test]
+    fn a_server_message_is_never_blanked_and_still_loses_its_password() {
+        let duplicate = "duplicate key value violates unique constraint \"t_pkey\" \
+                         DETAIL: Key (id)=(1) already exists.";
+        assert_eq!(scrub_url(duplicate), "", "scrub_url alone blanks it");
+        assert_eq!(scrub_message(duplicate), duplicate);
+        assert_eq!(
+            scrub_message("could not connect: key=value password=s3cret\n(pwd=x2) token=t user=u"),
+            "could not connect: key=<removed> password=<removed>\n(pwd=<removed> token=<removed> user=u"
+        );
+        // What `scrub_url` handles keeps its result.
+        assert_eq!(
+            scrub_message("host=db user=u password=s3cret"),
+            "host=db user=u"
+        );
+        assert_eq!(scrub_message("plain text"), "plain text");
+        assert_eq!(scrub_message(""), "");
+    }
+
+    // ## m2a-finalfix
+    /// Every key the shared rule calls a password is scrubbed (the scrub is a superset).
+    #[test]
+    fn every_shared_password_key_is_scrubbed() {
+        for k in [
+            "password",
+            "--password",
+            "pgpassword",
+            "mysql_pwd",
+            "sslkeypassword",
+            "db_password",
+            "x-pwd",
+        ] {
+            assert!(hacivat_proto::is_secret_param(k), "{k}");
+            assert!(is_secret_key(k), "{k}");
         }
     }
 }

@@ -716,3 +716,41 @@ fn a_long_name_keeps_about_six_characters(cx: &mut TestAppContext) {
     // The meta gave way first: the engine is ellipsized too.
     assert!(drawn(vcx, "explorer-row-engine-0").truncated);
 }
+
+// ## m2a-finalfix
+/// I2: a service imported with `sslmode=disable` toward a public host is a Disable profile:
+/// the edit form shows Disable (not Auto, while the connect would go plaintext), and no
+/// `sslmode` extra is left to override what the form shows.
+#[gpui::test]
+fn an_imported_sslmode_is_what_the_form_shows(cx: &mut TestAppContext) {
+    use hacivat_app::connections::dialog::{DialogMode, open_connection_dialog, open_dialog};
+    use hacivat_net::TlsMode;
+    let vcx = with_pg_service(cx, "[orders]\nhost=db.acme.io\nsslmode=disable\n");
+    run(vcx, "connection.import_pg_service");
+    assert_eq!(import_rows(vcx), ["orders"]);
+    set_import_env(vcx, 0, Some(EnvTag::Staging));
+    click(vcx, "button-import-confirm");
+    settle(vcx, ms(100));
+    let id = profile_id(vcx, "orders");
+    let p = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().get(id))
+        .expect("imported");
+    assert_eq!(p.tls.mode, TlsMode::Disable);
+    assert!(p.extra.is_empty(), "{:?}", p.extra);
+    in_window(vcx, |window, cx| {
+        open_connection_dialog(DialogMode::Edit(id), window, cx)
+    });
+    settle(vcx, ms(20));
+    let dialog = in_window(vcx, |window, cx| open_dialog(window, cx)).expect("the edit dialog");
+    let (mode, select) = vcx.cx.read(|cx| {
+        let d = dialog.read(cx);
+        (d.profile().tls.mode, d.tls_select())
+    });
+    assert_eq!(mode, TlsMode::Disable);
+    // The Select's options are Auto, Require, Verify CA, Verify full, Disable.
+    assert_eq!(vcx.cx.read(|cx| select.read(cx).selected()), 4);
+    let text = std::fs::read_to_string(paths(vcx).connections_toml()).expect("the file");
+    assert!(text.contains("tls.mode = \"disable\""), "{text}");
+    assert!(!text.contains("sslmode"), "{text}");
+}

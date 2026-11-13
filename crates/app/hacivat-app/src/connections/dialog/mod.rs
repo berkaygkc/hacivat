@@ -13,6 +13,15 @@
 //! text becomes a `SecretString` at once. Programmatic changes (paste, undo, a quick fix) write
 //! the fields back.
 //!
+//! **Extra properties (M2a final review I1, I2).** A row whose key owns a secret slot
+//! (`password`, `pgpassword`, `mysql_pwd`, ...; `sslpassword` for the key passphrase) never
+//! reaches the draft's options: when the row is left (its fields lose the focus) or before a
+//! save or a test, its value moves into the masked password (or passphrase) slot and the row
+//! goes. Any other password-like key (`db_password`, `x-pwd`) stays out of the options too and
+//! is refused with `IssueCode::OptionSecret`, which blocks a save. A row with a typed setting
+//! (`sslmode`, `sslrootcert`, `connect_timeout`, ...) is folded into that setting the same way,
+//! so the form, the fixes and the connect agree.
+//!
 //! **Threading (§5.4).** Validation (it reads TLS files), the keyring probe (P36) and the pgpass
 //! lookup run on the core runtime; the dialog awaits only `oneshot` channels.
 
@@ -26,14 +35,15 @@ use std::rc::Rc;
 
 use hacivat_driver::EngineCatalog;
 use hacivat_driver::url::FieldId;
+use hacivat_driver::url::native::{OwnerSlot, secret_owner_slot};
 use hacivat_l10n::{Text, ids};
 use hacivat_net::TlsMode;
 use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
 use hacivat_secrets::{AuthProviderId, Retention};
-use hacivat_session::pipeline::{ApprovedRoots, ValidationIssue, validate_with};
+use hacivat_session::pipeline::{ApprovedRoots, IssueCode, ValidationIssue, validate_with};
 use hacivat_session::profile::{
-    Profile, ProfileDraft, ProfileEndpoint, is_local_endpoint, needs_environment_prompt,
-    production_hint, suggest_name,
+    Profile, ProfileDraft, ProfileEndpoint, fold_typed_options, is_local_endpoint,
+    needs_environment_prompt, production_hint, suggest_name,
 };
 use hacivat_ui::actions::{ActionDef, ActionRegistry};
 use hacivat_ui::input::{InputEvent, TextInput};
@@ -604,6 +614,17 @@ impl ConnectionDialog {
         self.extras.iter().map(|r| r.key.clone()).collect()
     }
 
+    // ## m2a-finalfix
+    /// The extra properties' value inputs, in order.
+    pub fn extra_values(&self) -> Vec<Entity<TextInput>> {
+        self.extras.iter().map(|r| r.value.clone()).collect()
+    }
+
+    /// The issues the form shows now.
+    pub fn issues(&self) -> &[ValidationIssue] {
+        &self.issues
+    }
+
     /// The Remember select.
     pub fn remember_select(&self) -> Entity<Select> {
         self.remember.clone()
@@ -1025,6 +1046,14 @@ impl ConnectionDialog {
                     _ => {}
                 },
             ));
+            // ## m2a-finalfix: leaving a row moves its secret, or its typed setting (I1, I2).
+            let handle = input.read(cx).focus_handle(cx);
+            // Blur listeners run while the window draws: the rows change after the frame.
+            subscriptions.push(cx.on_blur(&handle, window, |_, window, cx| {
+                cx.defer_in(window, |this, window, cx| {
+                    this.commit_extra_rows(window, cx)
+                });
+            }));
         }
         self.extras.push(ExtraRow {
             key: key_input,
@@ -1046,20 +1075,93 @@ impl ConnectionDialog {
         }
     }
 
-    /// The draft's extra options from the rows (a row without a key is left out).
+    /// The draft's extra options from the rows. A row without a key is left out, and so is a
+    /// row whose key carries a password: an owner key (`password`, `sslpassword`, ...) waits
+    /// to move into its slot ([`Self::commit_extra_rows`]); any other password-like key is an
+    /// `OptionSecret` issue (M2a final review I1). A password never enters the draft's options.
     pub(crate) fn sync_extras(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.draft.profile.extra = self
-            .extras
-            .iter()
-            .map(|row| {
-                (
-                    row.key.read(cx).value().trim().to_string(),
-                    row.value.read(cx).value().to_string(),
-                )
-            })
-            .filter(|(k, _)| !k.is_empty())
-            .collect();
+        self.sync_extras_quietly(cx);
+        let refused = self.extra_issues(cx);
+        self.issues
+            .retain(|i| !matches!(i.code, IssueCode::OptionSecret { .. }));
+        self.issues.extend(refused);
         self.after_edit(window, cx);
+    }
+
+    // ## m2a-finalfix
+    /// The `OptionSecret` issue of every row whose key carries a password and owns no slot
+    /// (`db_password`, `x-pwd`): it can never be saved, and it is never moved.
+    pub(crate) fn extra_issues(&self, cx: &App) -> Vec<ValidationIssue> {
+        let mut issues: Vec<ValidationIssue> = Vec::new();
+        for row in &self.extras {
+            let key = row.key.read(cx).value().trim().to_string();
+            if secret_owner_slot(&key).is_none() && hacivat_proto::is_secret_param(&key) {
+                let issue = ValidationIssue {
+                    field: None,
+                    code: IssueCode::OptionSecret { key },
+                };
+                if !issues.contains(&issue) {
+                    issues.push(issue);
+                }
+            }
+        }
+        issues
+    }
+
+    /// Settles the extra rows (when a row is left, and before a save or a test): a row with
+    /// an owner key and a value moves it into the password (or, for `sslpassword`, the TLS key
+    /// passphrase) slot, as a pasted URL's password does, and goes; a row with a typed setting
+    /// (`sslmode=require`, `connect_timeout=9`, ...) is folded into it and goes (I1, I2).
+    pub(crate) fn commit_extra_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut moved = false;
+        let rows = std::mem::take(&mut self.extras);
+        for row in rows {
+            let key = row.key.read(cx).value().trim().to_string();
+            let value = row.value.read(cx).value().to_string();
+            match secret_owner_slot(&key) {
+                Some(OwnerSlot::Password) if !value.is_empty() => {
+                    self.draft.password = Some(SecretString::from(value));
+                    self.draft.profile.auth = AuthProviderId::Password;
+                    self.draft.touched.insert(FieldId::Password);
+                    self.has_stored_password = false;
+                    self.password_from_url = false;
+                    moved = true;
+                }
+                Some(OwnerSlot::TlsPassphrase) if !value.is_empty() => {
+                    self.draft.tls_key_passphrase = Some(SecretString::from(value));
+                    moved = true;
+                }
+                _ => self.extras.push(row),
+            }
+        }
+        self.sync_extras_quietly(cx);
+        let folded = fold_typed_options(&mut self.draft.profile);
+        if folded.is_empty() && !moved {
+            return;
+        }
+        self.extras.retain(|row| {
+            let key = row.key.read(cx).value().trim().to_string();
+            let value = row.value.read(cx).value().to_string();
+            !folded.iter().any(|f| f.key == key && f.value == value)
+        });
+        self.write_fields(cx);
+        self.sync_extras(window, cx);
+    }
+
+    /// The draft's options from the rows, without the follow-up of an edit.
+    fn sync_extras_quietly(&mut self, cx: &App) {
+        let mut extra = Vec::new();
+        for row in &self.extras {
+            let key = row.key.read(cx).value().trim().to_string();
+            if key.is_empty()
+                || secret_owner_slot(&key).is_some()
+                || hacivat_proto::is_secret_param(&key)
+            {
+                continue;
+            }
+            extra.push((key, row.value.read(cx).value().to_string()));
+        }
+        self.draft.profile.extra = extra;
     }
 
     /// Rebuilds the extra rows from the draft (after a paste or an undo).
@@ -1227,7 +1329,9 @@ impl ConnectionDialog {
         self.run_test(window, cx);
     }
 
-    pub(crate) fn run_test(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // ## m2a-finalfix: the rows' secrets and typed settings first (I1, I2).
+        self.commit_extra_rows(window, cx);
         let draft = self.draft_of(self.profile_to_save());
         self.strip.update(cx, |strip, cx| strip.run(draft, cx));
         cx.notify();
@@ -1314,6 +1418,8 @@ impl ConnectionDialog {
             return;
         }
         let runtime = model.runtime();
+        // ## m2a-finalfix: the rows' secrets and typed settings first (I1, I2).
+        self.commit_extra_rows(window, cx);
         let roots = cx
             .try_global::<DialogEnv>()
             .map(|e| e.approved_roots.clone())
@@ -1358,6 +1464,12 @@ impl ConnectionDialog {
             && !issues.contains(&issue)
         {
             issues.push(issue);
+        }
+        // ## m2a-finalfix: a password-like extra row (never in the options) blocks the save.
+        for issue in self.extra_issues(cx) {
+            if !issues.contains(&issue) {
+                issues.push(issue);
+            }
         }
         if !issues.is_empty() {
             self.saving = false;

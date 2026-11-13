@@ -595,11 +595,13 @@ fn prefixed_and_suffixed_secret_keys_are_masked_and_dropped() {
         ("x_password", "s3cret"),
         ("a-password", "s3cret"),
         ("db_PWD", "s3cret"),
-        ("password_db", "keep"),
+        ("password_db", "s3cret"),
+        ("keyStorePassword", "s3cret"),
+        ("pass_through", "keep"),
     ]);
     assert_eq!(
         render(&t, &fm, &extra, RenderTarget::Copy).unwrap(),
-        "postgresql://db/app?sslmode=require&password_db=keep"
+        "postgresql://db/app?sslmode=require&pass_through=keep"
     );
     let display = render(
         &t,
@@ -612,5 +614,5 @@ fn prefixed_and_suffixed_secret_keys_are_masked_and_dropped() {
     .unwrap();
     assert!(!display.contains("s3cret"), "{display}");
     assert!(display.contains("PGPASSWORD=****"), "{display}");
-    assert!(display.contains("password_db=keep"), "{display}");
+    assert!(display.contains("pass_through=keep"), "{display}");
 }

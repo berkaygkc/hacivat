@@ -20,5 +20,5 @@ pub use providers::{
     AuthError, AuthMaterial, AuthOutcome, AuthProviderId, AuthRequest, CredentialFiles,
     SecretSource, resolve_auth,
 };
-pub use scrub::{scrub_options, scrub_url};
+pub use scrub::{scrub_message, scrub_options, scrub_url};
 pub use store::{Retention, SecretKey, SecretSlot, SecretStore, Stored};

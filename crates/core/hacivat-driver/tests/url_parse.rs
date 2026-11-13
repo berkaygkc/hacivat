@@ -598,11 +598,13 @@ fn round_three_legitimate_values_still_parse() {
         opts.extra,
         vec![("options".to_string(), "-c search_path=public".to_string())]
     );
-    let enc = ok(parse(
+    // M2a final-fix round 2 (N1): a value naming a password-like key is refused, even this
+    // server-side GUC (a client has no reason to set it).
+    let enc = parse(
         "postgres://h/db?options=-c%20password_encryption%3Dscram-sha-256",
         None,
-    ));
-    assert_eq!(enc.extra[0].1, "-c password_encryption=scram-sha-256");
+    );
+    assert_eq!(enc.unrecognised(), Some(UnrecognisedReason::NoMatch));
     let dsn = ok(parse("host=h options='-c search_path=public'", None));
     assert_eq!(dsn.extra[0].1, "-c search_path=public");
     let app = ok(parse(
@@ -1105,11 +1107,12 @@ fn legitimate_password_words_still_parse() {
         None,
     ));
     assert_eq!(opts.extra[0].1, "-c search_path=public");
-    let enc = ok(parse(
+    // M2a final-fix round 2 (N1): `password_encryption` is a password-like key now.
+    let enc = parse(
         "host=h options='-c password_encryption=scram-sha-256'",
         None,
-    ));
-    assert_eq!(enc.extra[0].1, "-c password_encryption=scram-sha-256");
+    );
+    assert_eq!(enc.unrecognised(), Some(UnrecognisedReason::NoMatch));
     let app = ok(parse(
         "postgres://h/db?application_name=password-reset-service",
         None,
@@ -1176,11 +1179,14 @@ fn the_public_secret_key_rule_covers_the_import_names() {
         "--password",
         "db_password",
         "x-pwd",
+        "password_db",
+        "trustCertificateKeyStorePassword",
+        "passphrase",
     ] {
         assert!(is_secret_param(key), "{key}");
     }
     for key in [
-        "password_db",
+        "pass_through",
         "user",
         "sslmode",
         "sslkey",
@@ -1201,5 +1207,26 @@ fn a_url_carrying_sslkeypassword_is_refused_and_never_shows_it() {
         );
         assert!(!format!("{r:?}").contains("SECRETPW"));
         assert!(!format!("{r:#?}").contains("SECRETPW"));
+    }
+}
+
+// ## m2a-finalfix (round 2, N1)
+/// A pasted URL whose option key only mentions a password (JDBC camelCase, a passphrase, a
+/// numbered password) is refused like any other password-like key, so its value never reaches
+/// the form, the extras or the paste notice.
+#[test]
+fn a_url_carrying_a_camel_case_or_passphrase_key_is_refused_and_never_shows_it() {
+    for url in [
+        "mysql://u@h/db?trustCertificateKeyStorePassword=SECRETPW",
+        "mysql://u@h/db?clientCertificateKeyStorePassword=SECRETPW",
+        "mariadb://u@h/db?keyStorePassword=SECRETPW",
+        "mysql://u@h/db?password1=SECRETPW",
+        "postgres://u@h/db?ssl_passphrase=SECRETPW",
+    ] {
+        for preferred in ENGINES {
+            let r = parse(url, preferred);
+            assert_eq!(r.unrecognised(), Some(UnrecognisedReason::NoMatch), "{url}");
+            assert!(!format!("{r:#?}").contains("SECRETPW"), "{url}");
+        }
     }
 }

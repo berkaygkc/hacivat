@@ -766,3 +766,14 @@ hv-conn-env-unset = no environment
 hv-conn-import-choose = Choose…
 # Toast when a deleted connection's saved password could not be removed from the system keyring.
 hv-conn-toast-delete-secret = The connection was deleted, but its saved password couldn't be removed from the system keyring.
+
+## m2a-finalfix
+
+# The Encryption row of a live connection whose certificate chain was checked but whose host name was not (Verify CA).
+# Variables:
+#   $version (String) - the TLS version the server negotiated, e.g. "TLS 1.3".
+hv-conn-enc-ca-only = { $version } · CA verified
+# Under Advanced, when an extra property's key holds a password (db_password, x-pwd, ...).
+# Variables:
+#   $key (String) - the property's name, e.g. "db_password".
+hv-conn-issue-option-secret = The property { $key } holds a password. Remove it and type the password in the Password field.

@@ -507,3 +507,33 @@ fn the_trail_follows_what_the_handshake_reached() {
         []
     );
 }
+
+// ## m2a-finalfix
+/// M6: the driver trusts exactly the CA certificates the pipeline read and checked
+/// (`TlsParams::ca_certs`) and never reads the file again, so a CA file that becomes
+/// unreadable after the check cannot silently leave only the OS roots.
+#[tokio::test]
+async fn the_ca_file_is_never_read_again_by_the_driver() {
+    install_crypto_provider();
+    let path = std::env::temp_dir().join(format!("hv-mysql-ca-{}.pem", std::process::id()));
+    std::fs::write(
+        &path,
+        include_bytes!("../../hacivat-session/tests/fixtures/test-ca.pem"),
+    )
+    .unwrap();
+    let settings = TlsSettings {
+        mode: TlsMode::VerifyFull,
+        ca_file: Some(path.clone()),
+        ..TlsSettings::default()
+    };
+    let mut req = req_any();
+    req.tls = build_tls_params(&settings, "db.internal", AddressClass::Private).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let ca = req.tls.as_ref().unwrap().ca_certs.clone();
+    assert_eq!(ca.len(), 1);
+    let o = opts_for(&req);
+    let ssl = o.ssl_opts().expect("VerifyFull asks for TLS");
+    assert_eq!(ssl.root_certs().len(), os_roots().len() + 1);
+    let first = ssl.root_certs()[0].read().await.unwrap();
+    assert_eq!(first.as_ref(), ca[0].as_ref());
+}

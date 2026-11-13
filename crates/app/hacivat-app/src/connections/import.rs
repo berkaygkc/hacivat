@@ -24,7 +24,7 @@ use hacivat_secrets::{
     AuthProviderId, Retention, SecretString, ServiceFileWarning, pg_service_paths, read_pg_service,
 };
 use hacivat_session::profile::{
-    Profile, ProfileDraft, ProfileEndpoint, duplicate_name, is_local_endpoint,
+    Profile, ProfileDraft, ProfileEndpoint, duplicate_name, fold_typed_options, is_local_endpoint,
     needs_environment_prompt, production_hint,
 };
 use hacivat_ui::button::{Button, ButtonKind};
@@ -112,9 +112,12 @@ fn read_services(sources: Option<Vec<PathBuf>>) -> ReadOut {
 
 /// A profile for a service (libpq keeps the first value of a repeated key), and the TLS key
 /// passphrase from its `sslpassword` (any ASCII case), which is saved in
-/// `SecretSlot::TlsKeyPassphrase` like a pasted one (T7). Options other than the endpoint,
-/// database and user stay as extras (DRV-05 checks them at connect), except password-like
-/// ones, which are dropped: a secret never lands in `connections.toml`.
+/// `SecretSlot::TlsKeyPassphrase` like a pasted one (T7). Password-like options
+/// (`hacivat_proto::is_secret_param`) are dropped: a secret never lands in `connections.toml`.
+/// Options with a typed setting (`sslmode`, `sslrootcert`, `sslcert`/`sslkey`,
+/// `connect_timeout`, `application_name`) go to it, as a pasted URL's do (M2a final review
+/// I2), so the form shows what the connect uses. The rest stay as extras (DRV-05 checks them
+/// at connect).
 fn profile_of(
     name: String,
     fields: Vec<(String, String)>,
@@ -165,7 +168,7 @@ fn profile_of(
     } else {
         (AuthProviderId::PgPass, Retention::default())
     };
-    let profile = Profile {
+    let mut profile = Profile {
         name,
         engine: DbmsKind::Postgres,
         endpoint,
@@ -179,6 +182,12 @@ fn profile_of(
         },
         ..Profile::default()
     };
+    // libpq keeps a repeated key's first value; the fold would keep the last one.
+    let mut seen = HashSet::new();
+    profile
+        .extra
+        .retain(|(k, _)| seen.insert(k.to_ascii_lowercase()));
+    fold_typed_options(&mut profile);
     (profile, tls_key_passphrase)
 }
 
@@ -691,7 +700,9 @@ mod tests {
                 // ## m2a-t21-shots: kept out by the driver's rule now (no local copy).
                 ("sslkeypassword".into(), "hv_test_pw".into()),
                 ("sslmode".into(), "require".into()),
-                ("password_db".into(), "kept".into()),
+                ("password_db".into(), "hv_test_pw".into()),
+                ("trustStorePassword".into(), "hv_test_pw".into()),
+                ("pass_through".into(), "kept".into()),
             ],
             false,
         );
@@ -702,13 +713,12 @@ mod tests {
                 .as_deref(),
             Some("s3cret")
         );
+        // ## m2a-finalfix: `sslmode` went to the typed TLS mode (I2).
         assert_eq!(
             p.extra,
-            vec![
-                ("sslmode".to_string(), "require".to_string()),
-                ("password_db".to_string(), "kept".to_string())
-            ]
+            vec![("pass_through".to_string(), "kept".to_string())]
         );
+        assert_eq!(p.tls.mode, hacivat_net::TlsMode::Require);
         let text = format!("{p:?}");
         assert!(!text.contains("s3cret") && !text.contains("hv_test_pw"));
     }
@@ -734,10 +744,9 @@ mod tests {
             }
         );
         assert_eq!(p.database.as_deref(), Some("orders"));
-        assert_eq!(
-            p.extra,
-            vec![("sslmode".to_string(), "require".to_string())]
-        );
+        // ## m2a-finalfix: the TLS mode is typed, not an extra (I2).
+        assert!(p.extra.is_empty());
+        assert_eq!(p.tls.mode, hacivat_net::TlsMode::Require);
         assert_eq!(
             p.origin,
             Origin::Imported {
@@ -749,6 +758,50 @@ mod tests {
         assert_eq!(
             (with_password.auth, with_password.retention),
             (AuthProviderId::Password, Retention::Forever)
+        );
+    }
+
+    // ## m2a-finalfix
+    /// I2: the service's TLS and timeout options become the typed settings the form shows and
+    /// the connect uses; none stays an extra that could override them.
+    #[test]
+    fn tls_and_timeout_options_become_typed_settings() {
+        use hacivat_net::{ClientCertPaths, TlsMode};
+        let (p, _) = profile_of(
+            "orders".to_string(),
+            vec![
+                ("host".into(), "db.acme.io".into()),
+                ("sslmode".into(), "disable".into()),
+                ("sslmode".into(), "verify-full".into()),
+                ("sslrootcert".into(), "/certs/ca.pem".into()),
+                ("sslcert".into(), "/certs/me.pem".into()),
+                ("sslkey".into(), "/certs/me.key".into()),
+                ("connect_timeout".into(), "9".into()),
+                ("application_name".into(), "etl".into()),
+                ("target_session_attrs".into(), "read-write".into()),
+            ],
+            false,
+        );
+        // libpq's first value wins: a public host imported with `sslmode=disable` is Disable.
+        assert_eq!(p.tls.mode, TlsMode::Disable);
+        assert_eq!(
+            p.tls.ca_file.as_deref(),
+            Some(std::path::Path::new("/certs/ca.pem"))
+        );
+        assert_eq!(
+            p.tls.client_cert,
+            Some(ClientCertPaths {
+                cert: "/certs/me.pem".into(),
+                key: "/certs/me.key".into()
+            })
+        );
+        assert_eq!(
+            (p.connect_timeout_s, p.application_name.as_str()),
+            (9, "etl")
+        );
+        assert_eq!(
+            p.extra,
+            vec![("target_session_attrs".to_string(), "read-write".to_string())]
         );
     }
 

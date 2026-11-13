@@ -1,7 +1,6 @@
 //! Booting the connections: the core runtime, the profile store, the secret store and the
 //! drivers, prepared before GPUI starts (Task 12).
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hacivat_driver::{DriverRegistry, EngineCatalog};
@@ -14,13 +13,6 @@ use hacivat_ui_core::gpui_surface::App;
 
 use crate::connections::model::{ConnectionsModel, push_store_toasts};
 
-/// The forwarder socket directory's name under the app's local data (R18).
-const PRIVATE_DIR_NAME: &str = "fwd";
-
-/// The longest private directory path that leaves room for a forwarder socket inside it
-/// (`/hv-fwd-<pid>-<n>/fwd.sock`) within the Unix socket path limit (104 bytes on macOS).
-const MAX_PRIVATE_DIR_LEN: usize = 70;
-
 /// Everything the connections need, built before the window opens (M2a, P17).
 pub struct ConnectionsBoot {
     pub runtime: Arc<CoreRuntime>,
@@ -28,9 +20,6 @@ pub struct ConnectionsBoot {
     pub loaded: LoadedProfiles,
     pub secrets: Arc<SecretStore>,
     pub drivers: Arc<DriverRegistry>,
-    /// Where forwarder sockets are created: a private `0700` directory under the app's local
-    /// data (R18), see [`private_dir_for`].
-    pub private_dir: PathBuf,
     /// The credential files connects read (`.pgpass`, `pg_service.conf`); none in tests.
     pub files: CredentialFiles,
 }
@@ -72,33 +61,6 @@ pub fn secret_backend_from(choice: Option<&str>) -> Arc<dyn SecretBackend> {
     }
 }
 
-/// The private directory for forwarder sockets (R18): `<data>/fwd`, or `<cache>/fwd` when the
-/// data path is too long for a socket path. It is created `0700` (an existing one is set to
-/// `0700`). A failure is logged; the forwarder creates the directory `0700` itself when it
-/// binds.
-pub fn private_dir_for(paths: &LocalPaths) -> PathBuf {
-    let preferred = paths.data.join(PRIVATE_DIR_NAME);
-    let dir = if preferred.as_os_str().len() <= MAX_PRIVATE_DIR_LEN {
-        preferred
-    } else {
-        paths.cache.join(PRIVATE_DIR_NAME)
-    };
-    if let Err(err) = make_private(&dir) {
-        tracing::warn!(dir = %dir.display(), %err, "connections: preparing the socket directory failed");
-    }
-    dir
-}
-
-fn make_private(dir: &Path) -> std::io::Result<()> {
-    hacivat_settings::fsio::create_dir_all_private(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
 fn boot_with(
     paths: &LocalPaths,
     drivers: DriverRegistry,
@@ -113,7 +75,6 @@ fn boot_with(
         loaded,
         secrets: Arc::new(SecretStore::new(Some(backend))),
         drivers: Arc::new(drivers),
-        private_dir: private_dir_for(paths),
         files,
     }
 }
@@ -131,7 +92,6 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         loaded,
         secrets,
         drivers,
-        private_dir,
         files,
     } = boot;
     // ## m2a-t17-dialog: the dialog's file pickers approve into the roots connects check.
@@ -145,7 +105,6 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         catalog: EngineCatalog::embedded(),
         secrets: secrets.clone(),
         files,
-        private_dir,
         transport_wrap: None,
         extra_steps: Vec::new(),
         // Home plus paths the user picks in the connection dialog (T17 adds them).

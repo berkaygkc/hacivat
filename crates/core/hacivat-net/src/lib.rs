@@ -7,6 +7,8 @@ pub mod address;
 pub mod cleanup;
 pub mod direct;
 pub mod forwarder;
+// ## m2a-finalfix
+pub mod paths;
 pub mod stream;
 pub mod tls;
 
@@ -14,6 +16,7 @@ pub use address::{AddressClass, classify_host, classify_ip};
 pub use cleanup::CleanupGuard;
 pub use direct::{NetError, Target, direct, resolve};
 pub use forwarder::{ForwarderAddr, ForwarderMode, LoopbackForwarder};
+pub use paths::is_network_path;
 pub use stream::{AsyncStream, BoxedStream, StreamFactory};
 pub use tls::{
     ClientCertPaths, TlsFailure, TlsMode, TlsParams, TlsSettings, TlsSetupError, TlsSummary,

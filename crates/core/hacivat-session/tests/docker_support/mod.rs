@@ -131,7 +131,6 @@ pub fn deps() -> ConnectDeps {
             pgpass: None,
             pg_service: None,
         },
-        private_dir: std::env::temp_dir(),
         transport_wrap: None,
         extra_steps: Vec::new(),
         approved_roots: ApprovedRoots::for_user(),

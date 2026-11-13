@@ -14,7 +14,6 @@ mod trail;
 mod validate;
 
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -164,8 +163,6 @@ pub struct ConnectDeps {
     pub catalog: &'static EngineCatalog,
     pub secrets: Arc<SecretStore>,
     pub files: CredentialFiles,
-    /// Where forwarder sockets are created (`0700`).
-    pub private_dir: PathBuf,
     pub transport_wrap: Option<TransportWrap>,
     /// Extra steps merged into the ordered list by `order` (the cleanup-guard test seam).
     pub extra_steps: Vec<Arc<dyn ConnectStep>>,
@@ -220,13 +217,13 @@ async fn run(
 ) -> Result<LiveConnection, ConnectError> {
     let started = tokio::time::Instant::now();
     let ConnectRequest {
-        profile: original,
+        profile,
         draft_password,
         purpose,
         department: _,
         prior_rejections,
     } = req;
-    let profile = Arc::new(validate::effective_profile(&original));
+    // The typed settings only: an extra option never overrides them (M2a final review I2).
     let port = effective_port(&profile, deps.catalog);
     let user = effective_user(&profile);
 
@@ -525,8 +522,10 @@ fn args(
 /// Stores the password a successful Main connect used when it came from the prompt or the
 /// dialog's draft, with the profile's retention (R8). Never for a Test or a probe, never for
 /// `.pgpass` or a stored password, and never for a cancelled connect: `cancel` is checked
-/// right before the write, and a `ForSession` secret written while a cancel (a disconnect or
-/// `forget` and its `forget_session`) raced it is forgotten again. On the blocking pool.
+/// right before the write, and a secret written while a cancel raced it is removed again
+/// (M2a final review M2). A Delete cancels the connect before it queues its own `delete_all`,
+/// so either the put lands first and the Delete removes it, or the put sees the cancel here
+/// and removes it itself: no `Forever` entry outlives its profile. On the blocking pool.
 async fn remember_password(
     p: &Profile,
     purpose: Purpose,
@@ -555,8 +554,13 @@ async fn remember_password(
     if !matches!(stored, Ok(Ok(_))) {
         tracing::warn!("the password that worked could not be stored");
     }
-    if cancel.is_cancelled() && retention == Retention::ForSession {
-        secrets.forget_session(p.id);
+    if cancel.is_cancelled() {
+        // The connect was cancelled (a disconnect, a Delete) while the write ran: undo it.
+        let store = secrets.clone();
+        let removed = tokio::task::spawn_blocking(move || store.remove(&key, retention)).await;
+        if !matches!(removed, Ok(Ok(()))) {
+            tracing::warn!("a password stored by a cancelled connect could not be removed");
+        }
     }
 }
 

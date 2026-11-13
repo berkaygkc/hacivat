@@ -9,6 +9,10 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
+// ## m2a-finalfix
+mod secret_param;
+pub use secret_param::is_secret_param;
+
 /// Serializes a type as its `id()` string and reads it back through `from_id`.
 macro_rules! id_serde {
     ($ty:ty, $what:literal) => {

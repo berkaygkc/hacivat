@@ -1643,3 +1643,85 @@ fn a_fast_failure_replaces_the_error_shown(cx: &mut TestAppContext) {
     );
     assert!(fix_buttons(vcx).iter().all(|b| !b.3), "no fix is disabled");
 }
+
+// ## m2a-finalfix
+
+/// I2: a service imported with `sslmode=verify-full` is a Verify full profile; "Encrypt without
+/// verifying" saves Require, and the next connect uses Require. No imported extra is left to
+/// override the fix (the form, the fix and the connect agree).
+#[gpui::test]
+fn the_require_fix_wins_over_an_imported_sslmode(cx: &mut TestAppContext) {
+    use hacivat_app::connections::import::{self, ImportSources};
+    let vcx = shell_with_fake(cx, "en", ok_fake());
+    let port = listening_port(vcx);
+    let file = paths(vcx).data.join("pg_service.conf");
+    std::fs::write(
+        &file,
+        format!("[orders-prod]\nhost=127.0.0.1\nport={port}\nuser=deploy\nsslmode=verify-full\n"),
+    )
+    .expect("the service file");
+    vcx.cx.update(|cx| cx.set_global(ImportSources(vec![file])));
+    in_window(vcx, import::open);
+    settle(vcx, ms(100));
+    let dialog = vcx.cx.read(import::open_view).expect("the import dialog");
+    vcx.cx.update(|cx| dialog.update(cx, |v, cx| v.confirm(cx)));
+    settle(vcx, ms(100));
+    let id = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().profiles()[0].id);
+    vcx.cx
+        .update(|cx| cx.default_global::<Kept>().profile = Some(id));
+    assert_eq!(profile(vcx).tls.mode, TlsMode::VerifyFull);
+    assert!(profile(vcx).extra.is_empty(), "{:?}", profile(vcx).extra);
+    // No password file in a test shell: sign in without one (the TLS settings stay).
+    let mut draft = ProfileDraft::edit((*profile(vcx)).clone());
+    draft.profile.auth = AuthProviderId::None;
+    let task = vcx.cx.update(|cx| ConnectionsModel::save(cx, draft));
+    wait(vcx, task).expect("the profile saves");
+    assert_eq!(profile(vcx).tls.mode, TlsMode::VerifyFull);
+
+    open_dialog_over(vcx, tls_untrusted("127.0.0.1"));
+    click(vcx, "fix-require");
+    settle(vcx, ms(50));
+    assert_eq!(profile(vcx).tls.mode, TlsMode::Require);
+    let sent = fake(vcx).last_request().expect("a connect");
+    assert_eq!(
+        sent.tls.expect("TLS parameters").settings.mode,
+        TlsMode::Require
+    );
+}
+
+/// M4: a server message that is a connection string loses its password on the screen and in
+/// the English copy (`hacivat_secrets::scrub_url`); the rest stays verbatim.
+#[gpui::test]
+fn a_server_message_never_shows_a_password(cx: &mut TestAppContext) {
+    let vcx = error_dialog(
+        cx,
+        auth_invalid_with_server("28P01", "host=db.acme.io user=deploy password=s3cret-x"),
+        ok_fake(),
+    );
+    expand(vcx, "tech-details");
+    let row = tech_row(vcx, "Server message");
+    assert_eq!(row, "host=db.acme.io user=deploy");
+    click(vcx, "copy-details");
+    let text = clipboard(vcx);
+    assert!(!text.contains("s3cret"), "a password reached the clipboard");
+    assert!(text.contains("Server message: host=db.acme.io user=deploy"));
+}
+
+/// N4 (round 2): a server message that only looks like one `key=value` segment to the URL
+/// scrubber is never blanked; only a password-like word loses its value.
+#[gpui::test]
+fn a_server_message_is_never_blanked(cx: &mut TestAppContext) {
+    let message = "duplicate key value violates unique constraint \"t_pkey\" password=s3cret-x";
+    let vcx = error_dialog(cx, auth_invalid_with_server("23505", message), ok_fake());
+    expand(vcx, "tech-details");
+    assert_eq!(
+        tech_row(vcx, "Server message"),
+        "duplicate key value violates unique constraint \"t_pkey\" password=<removed>"
+    );
+    click(vcx, "copy-details");
+    let text = clipboard(vcx);
+    assert!(!text.contains("s3cret"), "a password reached the clipboard");
+    assert!(text.contains("Server message: duplicate key value violates unique constraint"));
+}

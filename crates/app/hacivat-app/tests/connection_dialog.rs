@@ -1282,3 +1282,224 @@ fn every_in_well_segmented_control_fits_its_row_in_a_long_locale(cx: &mut TestAp
         }
     }
 }
+
+// ## m2a-finalfix
+
+/// Focuses `input` and types `text` into it.
+fn type_into_input(
+    vcx: &mut VisualTestContext,
+    input: &Entity<hacivat_ui::input::TextInput>,
+    text: &str,
+) {
+    let handle = vcx.cx.read(|cx| input.focus_handle(cx));
+    in_window(vcx, |window, cx| window.focus(&handle, cx));
+    vcx.run_until_parked();
+    vcx.simulate_input(text);
+    vcx.run_until_parked();
+}
+
+/// Adds an extra property row (Advanced must be open) and types `key`, then `value`, into it.
+/// The window is made active first: GPUI reports a field losing the focus only in an active
+/// window, and leaving a row is what settles it.
+fn add_extra(vcx: &mut VisualTestContext, key: &str, value: &str) {
+    in_window(vcx, |window, _| window.activate_window());
+    vcx.run_until_parked();
+    click(vcx, "conn-extra-add");
+    let k = read(vcx, |d, _| d.extra_keys())
+        .pop()
+        .expect("an extra row");
+    let v = read(vcx, |d, _| d.extra_values())
+        .pop()
+        .expect("an extra row");
+    type_into_input(vcx, &k, key);
+    type_into_input(vcx, &v, value);
+}
+
+fn extra_key_texts(vcx: &VisualTestContext) -> Vec<String> {
+    read(vcx, |d, cx| {
+        d.extra_keys()
+            .iter()
+            .map(|k| k.read(cx).value().to_string())
+            .collect()
+    })
+}
+
+/// I1: a row whose key owns a slot moves into it when the row is left, so the password is
+/// masked at once and kept like a typed one: in the keychain, never in the options or the
+/// file. `sslpassword` goes to the TLS key passphrase.
+#[gpui::test]
+fn an_owner_key_extra_moves_into_its_secret_slot(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    fill(vcx, &[("host", "localhost"), ("database", "shop")]);
+    click_selector(vcx, "disclosure-conn-advanced");
+    add_extra(vcx, "PGPASSWORD", "hv_test_pw");
+    // Still typing in the row: nothing moved, and nothing reached the options.
+    assert!(read(vcx, |d, _| d.profile().extra.is_empty()));
+    focus_field(vcx, "name");
+    assert_eq!(password_value(vcx), "hv_test_pw");
+    assert!(extra_key_texts(vcx).is_empty());
+    add_extra(vcx, "sslpassword", "k3y-pass");
+    focus_field(vcx, "name");
+    assert!(extra_key_texts(vcx).is_empty());
+    assert!(read(vcx, |d, _| d.profile().extra.is_empty()));
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    assert!(layer_ids(vcx).is_empty(), "saved");
+    let text = std::fs::read_to_string(paths(vcx).connections_toml()).expect("the file");
+    assert!(!text.contains("hv_test_pw") && !text.contains("k3y-pass"));
+    assert!(!text.to_ascii_lowercase().contains("password"), "{text}");
+    assert!(
+        keyring_entry(vcx).is_some(),
+        "the password is in the keychain"
+    );
+    let passphrase = stored_key_passphrase(vcx).expect("the passphrase is stored");
+    use secrecy::ExposeSecret as _;
+    assert!(
+        passphrase.expose_secret() == "k3y-pass",
+        "passphrase mismatch"
+    );
+}
+
+/// I1: a password-like key that owns no slot (`db_password`) is refused: it never enters the
+/// options, the form says why under Advanced, and the save is blocked until it is removed.
+#[gpui::test]
+fn a_password_like_extra_is_refused_and_blocks_the_save(cx: &mut TestAppContext) {
+    use hacivat_session::pipeline::IssueCode;
+    let vcx = open_new(cx, "en");
+    fill(vcx, &[("host", "localhost"), ("database", "shop")]);
+    click_selector(vcx, "disclosure-conn-advanced");
+    add_extra(vcx, "db_password", "hv_test_pw");
+    focus_field(vcx, "name");
+    assert!(read(vcx, |d, _| d.profile().extra.is_empty()));
+    assert!(read(vcx, |d, _| d.issues().iter().any(|i| i.code
+        == IssueCode::OptionSecret {
+            key: "db_password".into()
+        })));
+    let shown = issue_under(vcx, "app-name")
+        .expect("the issue is shown under Advanced")
+        .replace(['\u{2068}', '\u{2069}'], "");
+    assert_eq!(
+        shown,
+        "The property db_password holds a password. Remove it and type the password in the Password field."
+    );
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    assert_eq!(layer_ids(vcx), ["connection-dialog"]);
+    assert!(profile_names(vcx).is_empty());
+    // Removed: the issue goes and the save goes through, without the secret.
+    click(vcx, "conn-extra-remove-0");
+    assert!(read(vcx, |d, _| d.issues().is_empty()));
+    focus_field(vcx, "name");
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    assert!(layer_ids(vcx).is_empty());
+    let text = std::fs::read_to_string(paths(vcx).connections_toml()).expect("the file");
+    assert!(!text.contains("hv_test_pw") && !text.contains("db_password"));
+}
+
+/// I2: a row with a typed setting goes to that setting when the row is left, so the form,
+/// the fixes and the connect all see one value.
+#[gpui::test]
+fn a_typed_setting_in_the_extras_goes_to_its_field(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    click_selector(vcx, "disclosure-conn-advanced");
+    add_extra(vcx, "sslmode", "disable");
+    focus_field(vcx, "name");
+    assert_eq!(draft_tls_mode(vcx), TlsMode::Disable);
+    let select = read(vcx, |d, _| d.tls_select());
+    let selected = vcx.cx.read(|cx| select.read(cx).selected());
+    assert_eq!(selected, 4, "the TLS Select shows Disable");
+    add_extra(vcx, "connect_timeout", "9");
+    focus_field(vcx, "name");
+    assert_eq!(field(vcx, "timeout"), "9");
+    assert!(extra_key_texts(vcx).is_empty());
+    assert!(read(vcx, |d, _| d.profile().extra.is_empty()));
+    // A value no rule knows stays an extra and changes nothing.
+    add_extra(vcx, "sslmode", "bogus");
+    focus_field(vcx, "name");
+    assert_eq!(extra_key_texts(vcx), ["sslmode"]);
+    assert_eq!(draft_tls_mode(vcx), TlsMode::Disable);
+}
+
+/// I5: a pasted URL makes the profile an import (`Imported { source: Url }`), so DRV-05 and
+/// the approved roots apply: a CA file the URL named outside them is refused, and the same
+/// file picked in the dialog passes. Text typed into the URL row keeps the user's origin.
+#[gpui::test]
+fn a_pasted_url_is_an_import_and_a_picked_file_still_passes(cx: &mut TestAppContext) {
+    use hacivat_proto::{ImportSource, Origin};
+    let vcx = open_new(cx, "en");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ca = dir.path().join("ca.pem");
+    std::fs::write(
+        &ca,
+        include_bytes!("../../../core/hacivat-session/tests/fixtures/test-ca.pem"),
+    )
+    .expect("the CA file");
+    let outside_home = std::env::home_dir().is_none_or(|home| !ca.starts_with(home));
+    paste_into(
+        vcx,
+        "host",
+        &format!(
+            "postgres://deploy@localhost/shop?sslmode=verify-full&sslrootcert={}",
+            ca.display()
+        ),
+    );
+    assert_eq!(
+        read(vcx, |d, _| d.profile().origin.clone()),
+        Origin::Imported {
+            source: ImportSource::Url
+        }
+    );
+    assert_eq!(
+        read(vcx, |d, _| d.profile().tls.ca_file.clone()),
+        Some(ca.clone())
+    );
+    if outside_home {
+        keys(vcx, &primary("s"));
+        wait(vcx);
+        assert_eq!(layer_ids(vcx), ["connection-dialog"]);
+        assert_eq!(
+            issue_under(vcx, "ca"),
+            Some("Hacivat won't open this path. Choose a local file.".into())
+        );
+    }
+    let d = dialog(vcx);
+    in_window(vcx, |window, cx| {
+        d.update(cx, |d, cx| {
+            d.picked(
+                hacivat_app::connections::dialog::form::Field::Ca,
+                ca.clone(),
+                window,
+                cx,
+            )
+        })
+    });
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    assert!(layer_ids(vcx).is_empty(), "the picked file is approved");
+    let origin = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().profiles()[0].origin.clone());
+    assert_eq!(
+        origin,
+        Origin::Imported {
+            source: ImportSource::Url
+        }
+    );
+}
+
+/// I5: text the user types into the URL row is their own: the profile keeps its origin.
+#[gpui::test]
+fn the_url_rows_typed_text_keeps_the_users_origin(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    fill(
+        vcx,
+        &[("host", "db.acme.io"), ("user", "u"), ("database", "x")],
+    );
+    edit_row_port(vcx, "db.acme.io", "6000");
+    assert_eq!(field(vcx, "port"), "6000");
+    assert_eq!(
+        read(vcx, |d, _| d.profile().origin.clone()),
+        hacivat_proto::Origin::UserTyped
+    );
+}

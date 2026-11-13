@@ -166,7 +166,6 @@ fn deps_over(driver: Arc<FakeDriver>, secrets: Arc<SecretStore>) -> ConnectDeps 
             pgpass: Some(pgpass_file()),
             pg_service: None,
         },
-        private_dir: std::env::temp_dir(),
         transport_wrap: Some(stub_wrap()),
         extra_steps: Vec::new(),
         approved_roots: hacivat_session::pipeline::ApprovedRoots::for_user(),
@@ -234,6 +233,12 @@ pub fn deps_with_slow_backend(delay: Duration, password: &str) -> ConnectDeps {
         password: password.into(),
     });
     deps_over(Arc::new(ok_pg()), Arc::new(SecretStore::new(Some(backend))))
+}
+
+// ## m2a-finalfix
+/// Deps over `fake` whose secrets live in `secrets` (a test's own backend).
+pub fn deps_with_store(fake: FakeDriver, secrets: Arc<SecretStore>) -> ConnectDeps {
+    deps_over(Arc::new(fake), secrets)
 }
 
 /// An extra step at `order` whose guard records `name` into `sink` (P23).

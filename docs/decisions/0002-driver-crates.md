@@ -411,3 +411,21 @@ carries the session. This is inherent to a loopback listener and is the same exp
   Under `Auto` plaintext is allowed only on loopback or private networks (see Known limits).
 - M2b revisits this together with the SSH transport, which will also use the forwarder
   (a Unix socket in a `0700` directory where the driver can use one).
+
+## m2a-finalfix — known limits (addendum to m2a-t13 and m2a-t14)
+
+- **P49 holds only for PostgreSQL.** `tokio-postgres` keeps no copy of the password after
+  authentication (`config_for` builds the `Config` at connect time and drops it after the
+  handshake). `mysql_async::Conn` keeps a clone of its `Opts`, with the password as a plain
+  `String`, for the connection's whole life (`reset` and `change_user` reuse it), so a MySQL or
+  MariaDB password stays in process memory until the connection closes and cannot be zeroized.
+  Hacivat never formats `Opts` or `Conn`. Closing the gap needs an upstream change or the
+  `[patch]` fork planned for M2b (see m2a-t14).
+- **The MySQL CA is read once.** `build_tls_params` reads and checks the CA file and keeps its
+  certificates in `TlsParams::ca_certs`; the MySQL driver hands exactly those to `mysql_async`
+  and never reads the file again. An unreadable CA is `config.invalid` (`TlsCaUnreadable`)
+  before any I/O, as for PostgreSQL, never a silent fall-back to the OS roots alone.
+- **No forwarder socket directory.** The MySQL forwarder listens on loopback TCP only
+  (`ForwarderMode::Tcp`, R18), so M2a creates no private `0700` socket directory; the unused
+  `ConnectDeps::private_dir` and the boot's `fwd` directory are gone. The SSH transport in M2b
+  brings one back where a driver can use a Unix socket.

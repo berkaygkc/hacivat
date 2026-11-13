@@ -116,7 +116,6 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "async-
 secrecy = "0.10"
 zeroize = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
-url = "2"
 percent-encoding = "2"
 regex = "1"
 # Test certificates; its default crypto backend is ring.

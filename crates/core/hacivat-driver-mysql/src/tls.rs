@@ -10,8 +10,6 @@ use std::sync::OnceLock;
 use hacivat_net::{TlsMode, TlsParams, TlsVerified};
 use mysql_async::{ClientIdentity, SslOpts};
 use rustls::RootCertStore;
-use rustls::pki_types::CertificateDer;
-use rustls::pki_types::pem::PemObject;
 
 /// The mode part of the TLS options; `None` sends no TLS request (Disable).
 ///
@@ -57,30 +55,12 @@ pub fn os_roots() -> &'static [Vec<u8>] {
     })
 }
 
-/// The certificates of a CA file (PEM with any number of certificates, or one DER
-/// certificate), as DER. An unreadable file gives no certificates: `build_tls_params` already
-/// checked it, and a file that vanished since then simply adds no trust.
-pub(crate) fn ca_file_der(bytes: &[u8]) -> Vec<Vec<u8>> {
-    if bytes.windows(11).any(|w| w == b"-----BEGIN ") {
-        CertificateDer::pem_slice_iter(bytes)
-            .filter_map(Result::ok)
-            .map(|c| c.as_ref().to_vec())
-            .collect()
-    } else if bytes.is_empty() {
-        Vec::new()
-    } else {
-        vec![bytes.to_vec()]
-    }
-}
-
-/// Reads the CA file of `tls`, if any (a small blocking read).
+/// The CA file's certificates as DER: the ones `build_tls_params` read and checked
+/// (`TlsParams::ca_certs`). The file is never read again here, so an unreadable CA is the
+/// pipeline's `config.invalid` (`TlsCaUnreadable`), as for PostgreSQL, and never a silent
+/// fall-back to the OS roots alone (M2a final review M6).
 pub(crate) fn read_ca(tls: &TlsParams) -> Vec<Vec<u8>> {
-    tls.settings
-        .ca_file
-        .as_deref()
-        .and_then(|p| std::fs::read(p).ok())
-        .map(|b| ca_file_der(&b))
-        .unwrap_or_default()
+    tls.ca_certs.iter().map(|c| c.as_ref().to_vec()).collect()
 }
 
 /// The full TLS options for a connect: the mode part, the CA-file and OS roots as DER, the

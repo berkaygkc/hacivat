@@ -813,3 +813,10 @@ hv-conn-env-unset = ortam yok
 hv-conn-import-choose = Seçin…
 # Review: PO
 hv-conn-toast-delete-secret = Bağlantı silindi, ancak kayıtlı parolası sistemin anahtar deposundan kaldırılamadı.
+
+## m2a-finalfix
+
+# Review: PO
+hv-conn-enc-ca-only = { $version } · CA doğrulandı
+# Review: PO
+hv-conn-issue-option-secret = { $key } özelliği bir parola taşıyor. Özelliği kaldırın, parolayı Parola alanına yazın.

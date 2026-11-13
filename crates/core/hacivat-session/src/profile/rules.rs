@@ -1,8 +1,7 @@
 //! Naming and environment rules (D-004, R22, R23, P7). Host and name matching folds ASCII case
 //! only (`eq_ignore_ascii_case`, `to_ascii_lowercase`); other text is kept verbatim, never cased.
 
-use std::net::IpAddr;
-
+use hacivat_net::{AddressClass, classify_host};
 use hacivat_proto::DbmsKind;
 
 use super::{Profile, ProfileEndpoint};
@@ -17,8 +16,9 @@ pub enum HintSource {
 /// Host-name parts that only say "a database" and make poor names (the mock's `suggestName`).
 const GENERIC_HOST_PARTS: [&str; 4] = ["db", "pg", "mysql", "sql"];
 
-/// Whether the endpoint is on this machine: a loopback host (`localhost`, `localhost.`,
-/// `127.0.0.0/8`, `::1`; an empty host means the default local socket), a socket or a file.
+/// Whether the endpoint is on this machine: a loopback host (`localhost`, `*.localhost`,
+/// `127.0.0.0/8`, `::1`, as `hacivat_net::classify_host` decides; an empty host means the
+/// default local socket), a socket or a file.
 pub fn is_local_endpoint(e: &ProfileEndpoint) -> bool {
     match e {
         ProfileEndpoint::Server { host, .. } => is_local_host(host),
@@ -26,21 +26,12 @@ pub fn is_local_endpoint(e: &ProfileEndpoint) -> bool {
     }
 }
 
-/// Whether `host` names this machine (the mock's `isLocalHost`, ASCII folding only).
+/// Whether `host` names this machine. One rule with the connect path (M2a final review M3):
+/// `classify_host` without resolved addresses, so the dialog's automatic `local` tag, the
+/// environment prompt and the plaintext rule never disagree.
 fn is_local_host(host: &str) -> bool {
     let host = host.trim();
-    if host.is_empty() {
-        return true;
-    }
-    let name = host.strip_suffix('.').unwrap_or(host);
-    if name.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    let bare = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host);
-    bare.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    host.is_empty() || classify_host(host, &[]) == AddressClass::Loopback
 }
 
 /// A name for an unnamed profile (the mock's `suggestName`):

@@ -270,9 +270,10 @@ fn names_secret_key(s: &str) -> bool {
     })
 }
 
-/// Where a moved secret goes.
+/// Where a moved secret goes. Public (M2a final review I1): the connection dialog's extra
+/// properties move the same owner keys the parser does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum SecretSlot {
+pub enum OwnerSlot {
     /// The database password.
     Password,
     /// The TLS key passphrase.
@@ -282,9 +283,9 @@ pub(super) enum SecretSlot {
 /// The slot a parameter key owns, if any: only the exact owner keys (ASCII case ignored; leading
 /// dashes allowed for the password keys) move. Every other key `is_secret_param` matches is
 /// refused, not moved.
-pub(super) fn secret_owner_slot(key: &str) -> Option<SecretSlot> {
+pub fn secret_owner_slot(key: &str) -> Option<OwnerSlot> {
     if key.eq_ignore_ascii_case("sslpassword") {
-        return Some(SecretSlot::TlsPassphrase);
+        return Some(OwnerSlot::TlsPassphrase);
     }
     let k = key.trim_start_matches('-');
     [
@@ -297,7 +298,7 @@ pub(super) fn secret_owner_slot(key: &str) -> Option<SecretSlot> {
     ]
     .iter()
     .any(|o| o.eq_ignore_ascii_case(k))
-    .then_some(SecretSlot::Password)
+    .then_some(OwnerSlot::Password)
 }
 
 /// `key` names a secret, as written or after up to 8 percent-decodings.
@@ -535,7 +536,7 @@ impl Builder {
     /// clears it).
     pub(super) fn param(&mut self, key: &str, value: Zeroizing<String>) {
         let slot = secret_owner_slot(key);
-        if slot == Some(SecretSlot::TlsPassphrase) {
+        if slot == Some(OwnerSlot::TlsPassphrase) {
             self.note(key, key);
             self.tls_key_passphrase =
                 (!value.is_empty()).then(|| SecretString::from(value.as_str()));
@@ -543,7 +544,7 @@ impl Builder {
         }
         // Any other password-like key (`ssl_password`, `x_password`) is kept as an extra, where
         // `leaks_a_secret` refuses the whole parse: it is never moved into a slot it does not own.
-        if slot == Some(SecretSlot::Password) {
+        if slot == Some(OwnerSlot::Password) {
             self.password(key, SecretString::from(value.as_str()));
             return;
         }
