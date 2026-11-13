@@ -24,7 +24,7 @@ Every patch is fenced in the source by a `// HACIVAT PATCH §N` comment. Tests:
 
 ## §1 `skip_domain_validation` matches the name error by variant (Task 8)
 
-- `src/io/tls/rustls_io.rs` (`DangerousVerifier::verify_server_cert`, ~l.170-180): the arm
+- `src/io/tls/rustls_io.rs` (`DangerousVerifier::verify_server_cert`, l.178-182): the arm
   `Err(ref e) if e.to_string().contains("NotValidForName") && skip` becomes
   `Err(rustls::Error::InvalidCertificate(CertificateError::NotValidForName | NotValidForNameContext { .. })) if skip`.
 - Why: rustls renders that error as "certificate not valid for name ..." (Display), so the upstream
@@ -47,12 +47,23 @@ Every patch is fenced in the source by a `// HACIVAT PATCH §N` comment. Tests:
   authentication" arm, ~l.807-815): before either branch (the clear password when `is_secure() ||
   is_socket()`, or requesting the server RSA key with `0x02`), `if !guard() { return
   Err(InsecurePasswordRefused) }`. No password byte and no `0x02` request leave the client.
-- Reachability notes: `sha256_password` is unreachable (the handshake maps every plugin except
-  `caching_sha2_password` to `mysql_native_password`, `conn/mod.rs` ~l.550-555), and
-  `mysql_clear_password` stays gated by `enable_cleartext_plugin(false)`. The native-password
-  response is a salted SHA-1 scramble, never the clear password. Every `write_*` call in the auth
-  code was traced: l.583 (SSL request), l.626 (handshake response), l.677/679 (clear plugin,
-  gated), l.782 (auth switch response), l.813/816/827 (guarded here).
+- Reachability notes (patched-file line numbers):
+  - `sha256_password` is unreachable via the handshake (every plugin except `caching_sha2_password`
+    maps to `mysql_native_password`, `conn/mod.rs` l.550-555). Via an AuthSwitch it is an `Other`
+    plugin (see below).
+  - `mysql_clear_password` is refused before any write while `enable_cleartext_plugin` is false
+    (gate at l.663-668).
+  - `mysql_old_password` is refused while `secure_auth` is true (the default).
+  - MariaDB ed25519 and parsec send a signature, never the password.
+  - `Other` plugins (`sha256_password` by switch, `dialog`, gssapi): `gen_data` returns `None`, the
+    client writes an empty packet, then fails with `UnknownAuthPlugin`.
+  - The native-password response is a salted SHA-1 scramble, never the clear password.
+  - The guard's safety therefore depends on Hacivat keeping `enable_cleartext_plugin(false)` and
+    `secure_auth(true)` (Task 13 sets both).
+- Write trace (patched-file lines): l.583 SSL request; l.626 handshake response (scramble);
+  l.677/679 the generic auth-switch response for every switched plugin (clear-password gate at
+  l.663-668); l.782 the parsec response (signature); l.819/822/833 the `caching_sha2` full-auth
+  writes (clear password, `0x02` key request, encrypted password), all behind the guard.
 - Tests: `password_guard_false_refuses_before_any_password_byte` (server sees zero bytes after
   the refusal), `password_guard_true_or_absent_keeps_upstream_flow`.
 - Upstream PR text: "Add `OptsBuilder::password_guard`: a callback consulted before the password
@@ -73,6 +84,9 @@ Every patch is fenced in the source by a `// HACIVAT PATCH §N` comment. Tests:
 - `src/opts/mod.rs`: `MysqlOpts.local_infile_capability` (default `true`),
   `Opts::local_infile_capability()`, `OptsBuilder::local_infile_capability(bool)`;
   `get_capabilities` sets `CLIENT_LOCAL_FILES` only when true.
+- This only changes the advertised capability. A hostile server can still send a `0xFB` LOCAL INFILE
+  request; the client refuses it (`LocalInfileError::NoHandler`) only because no infile handler is
+  installed. Hacivat must never install one (`local_infile_handler`).
 - Test: `capability_knobs_shape_the_handshake_response`.
 - Upstream PR text: "Make `CLIENT_LOCAL_FILES` configurable (default unchanged), so a client
   can refuse LOCAL INFILE requests at the protocol level."

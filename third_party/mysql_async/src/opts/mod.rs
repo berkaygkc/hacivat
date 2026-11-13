@@ -1221,6 +1221,8 @@ impl Opts {
         let mut out = CapabilityFlags::CLIENT_PROTOCOL_41
             | CapabilityFlags::CLIENT_SECURE_CONNECTION
             | CapabilityFlags::CLIENT_LONG_PASSWORD
+            // HACIVAT PATCH §3, §4: CLIENT_LOCAL_FILES and CLIENT_MULTI_STATEMENTS removed here,
+            // added below behind their knobs.
             | CapabilityFlags::CLIENT_TRANSACTIONS
             | CapabilityFlags::CLIENT_MULTI_RESULTS
             | CapabilityFlags::CLIENT_PS_MULTI_RESULTS
@@ -1286,6 +1288,7 @@ impl Default for MysqlOpts {
             secure_auth: true,
             client_found_rows: false,
             enable_cleartext_plugin: false,
+            // HACIVAT PATCH §2, §3, §4
             password_guard: None,
             multi_statements: true,
             local_infile_capability: true,
