@@ -795,8 +795,6 @@ hv-conn-issue-tls-ca-unreadable = CA sertifikası okunamıyor. CA doğrulaması 
 # Review: PO
 hv-conn-issue-tls-cert-unreadable = İstemci sertifikası ya da anahtarı okunamıyor.
 # Review: PO
-hv-conn-issue-tls-key-encrypted = Özel anahtar şifreli. Şifresiz bir anahtar dosyası kullanın.
-# Review: PO
 hv-conn-issue-tls-mode-unsupported = { $mode } bu motor için henüz kullanılamıyor.
 # Review: PO
 hv-conn-issue-option-rejected = { $key } özelliğine burada izin verilmiyor.

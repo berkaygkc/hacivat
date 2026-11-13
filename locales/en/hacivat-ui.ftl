@@ -746,7 +746,6 @@ hv-conn-issue-create-and-read-only = A new file can't be opened read-only. Turn 
 hv-conn-issue-transport-unavailable = This connection uses a tunnel this version can't open yet.
 hv-conn-issue-tls-ca-unreadable = The CA certificate can't be read. Verify CA needs one.
 hv-conn-issue-tls-cert-unreadable = The client certificate or its key can't be read.
-hv-conn-issue-tls-key-encrypted = The private key is encrypted. Use an unencrypted key file.
 # Variables:
 #   $mode (String) - the encryption mode, e.g. "Verify CA".
 hv-conn-issue-tls-mode-unsupported = { $mode } isn't available for this engine yet.
