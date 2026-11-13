@@ -361,7 +361,7 @@ async fn run(
         profile,
         draft_password,
         purpose,
-        department: _,
+        department,
         prior_rejections,
         read_only,
         // ## m2b-t14-pipeline: the SSH drafts (Test, Q23) and the session overlay (Q17).
@@ -385,6 +385,11 @@ async fn run(
     );
     if purpose == Purpose::Test {
         issues.retain(|i| i.code != IssueCode::NameMissing);
+    }
+    // ## m2b-t18-guarded-exec (fix round 2, I-3b): a read-only session of a read-write profile
+    // refuses a role switch too (`checked` already did for a read-only profile).
+    if read_only && !profile.read_only {
+        issues.extend(validate::read_only_issues(&profile));
     }
     let fail_early = |mut e: ConnectError| {
         progress.send_replace(fresh_progress());
@@ -460,6 +465,9 @@ async fn run(
         rejections: prior_rejections,
         read_only,
         access_warnings: Vec::new(),
+        // ## m2b-t18-guarded-exec (review m-2): a cancel or kill connection runs no user SQL
+        // and shows no label, so it skips the role probe.
+        probe_role: department != Department::Cancel,
         // ## m2b-t14-pipeline
         purpose,
         timeout,
