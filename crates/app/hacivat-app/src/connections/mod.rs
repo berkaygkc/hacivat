@@ -36,6 +36,8 @@ pub mod plaintext_prompt;
 pub mod secret_prompt;
 pub mod session_toasts;
 pub mod vault_dialog;
+// ## m2b-t21-prompts: the parts the SSH and vault prompts share.
+pub mod prompt_kit;
 
 pub use boot::ConnectionsBoot;
 pub use model::{ConnectionsModel, SaveError};

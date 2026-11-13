@@ -280,6 +280,12 @@ impl SecretStore {
     /// (profile duplication). A `Forever` copy the backend refuses falls back like `put`. A
     /// backend read that fails with `Unavailable` or `Denied` counts as nothing stored, so a
     /// fallen-back secret still copies on a machine without a keyring.
+    ///
+    /// **Never for a profile with SSH slots** (m2b-t21-prompts, T1 re-review N1). They are kept
+    /// under `Profile::ssh_retention`, not the DB retention, so `copy_all` would copy them
+    /// under the wrong one (a `Never` SSH secret could land in the keyring). Use
+    /// [`copy_slots`](Self::copy_slots) once per retention, as `ConnectionsModel::duplicate`
+    /// does.
     pub fn copy_all(
         &self,
         from: ProfileId,

@@ -795,3 +795,311 @@ async fn a_cancel_while_storing_undoes_every_stored_secret() {
         }
     }
 }
+
+// ## m2b-t21-prompts (fix round 1): the SSH secret prompt's Remember.
+
+/// The secret `deps` keeps in `slot` of the test profile under `retention`.
+fn stored_under(deps: &ConnectDeps, slot: SecretSlot, retention: Retention) -> Option<String> {
+    deps.secrets
+        .get(
+            &SecretKey {
+                profile: pid(),
+                slot,
+            },
+            retention,
+        )
+        .unwrap()
+        .map(|s| s.expose_secret().to_string())
+}
+
+fn ui_ssh_secret(pw: &str, remember: Retention) -> ScriptedUiM2b {
+    ScriptedUi::answers_m2b([Answer::SshSecret {
+        secret: sec(pw),
+        remember,
+    }])
+}
+
+/// A Remember that differs from the profile's `ssh_retention`: the typed secret is stored under
+/// it, and the successful Main connect reports `SshRetention` so the app re-saves the profile.
+#[tokio::test]
+async fn a_remember_choice_stores_under_it_and_reports_the_new_retention() {
+    let s = ssh(cfg().user_pw("u", "pw")).await;
+    let deps = deps_ssh(&s, FakeDriver::new(DbmsKind::Postgres).consumes_factory());
+    let ui = ui_ssh_secret("pw", Retention::UntilRestart);
+    let live = connect(&deps, req(ssh_forever(&s)), ui.ix(), token(), progress())
+        .await
+        .unwrap();
+    let slot = SecretSlot::SshPassword { hop: 0 };
+    assert!(
+        stored_under(&deps, slot, Retention::UntilRestart).as_deref() == Some("pw"),
+        "kept until restart (values not shown)"
+    );
+    assert!(matches!(
+        live.profile_changes[..],
+        [hacivat_session::pipeline::ProfileChange::SshRetention(
+            Retention::UntilRestart
+        )]
+    ));
+}
+
+/// The typed secret replaces an older one kept under the profile's retention: the old place is
+/// cleared, so the app's re-save (which moves stored secrets to the new retention) never brings
+/// the stale secret back over the typed one.
+#[tokio::test]
+async fn a_remember_choice_clears_the_old_place() {
+    let s = ssh(cfg().user_pw("u", "pw")).await;
+    let deps = deps_ssh(&s, FakeDriver::new(DbmsKind::Postgres).consumes_factory());
+    let slot = SecretSlot::SshPassword { hop: 0 };
+    deps.secrets
+        .put(
+            &SecretKey {
+                profile: pid(),
+                slot,
+            },
+            sec("stale"),
+            Retention::Forever,
+        )
+        .unwrap();
+    let ui = ui_ssh_secret("pw", Retention::ForSession);
+    connect(&deps, req(ssh_forever(&s)), ui.ix(), token(), progress())
+        .await
+        .unwrap();
+    assert!(
+        stored_under(&deps, slot, Retention::Forever).is_none(),
+        "the stale one went"
+    );
+    assert!(
+        stored_under(&deps, slot, Retention::ForSession).as_deref() == Some("pw"),
+        "the typed one stays (values not shown)"
+    );
+}
+
+/// The same retention as the profile's reports nothing; a Test never stores and never reports.
+#[tokio::test]
+async fn a_remember_choice_is_reported_only_when_it_changes_and_never_by_a_test() {
+    let s = ssh(cfg().user_pw("u", "pw")).await;
+    let deps = deps_ssh(&s, FakeDriver::new(DbmsKind::Postgres).consumes_factory());
+    let same = ui_ssh_secret("pw", Retention::Forever);
+    let live = connect(&deps, req(ssh_forever(&s)), same.ix(), token(), progress())
+        .await
+        .unwrap();
+    assert!(live.profile_changes.is_empty());
+    assert!(
+        stored_slot(&deps, SecretSlot::SshPassword { hop: 0 }).as_deref() == Some("pw"),
+        "stored Forever (values not shown)"
+    );
+
+    let fresh = deps_ssh(&s, FakeDriver::new(DbmsKind::Postgres).consumes_factory());
+    let test = ui_ssh_secret("pw", Retention::UntilRestart);
+    let mut r = req(ssh_forever(&s));
+    r.purpose = hacivat_session::pipeline::Purpose::Test;
+    let live = connect(&fresh, r, test.ix(), token(), progress())
+        .await
+        .unwrap();
+    assert!(live.profile_changes.is_empty(), "a Test reports nothing");
+    let slot = SecretSlot::SshPassword { hop: 0 };
+    assert!(stored_under(&fresh, slot, Retention::UntilRestart).is_none());
+    assert!(stored_under(&fresh, slot, Retention::Forever).is_none());
+}
+
+// ## m2b-t21-prompts (fix round 2, R2): where the prompt's Remember starts.
+
+/// A user who presses Enter on every prompt: trusts host keys, types `passwords[hop]` and keeps
+/// the Remember each SSH question starts from, except `pick` on the first one. Records every
+/// question.
+#[derive(Clone)]
+struct BareEnter {
+    passwords: Vec<&'static str>,
+    pick: Option<Retention>,
+    asked: Arc<Mutex<Vec<Question>>>,
+}
+
+impl BareEnter {
+    fn new(passwords: &[&'static str], pick: Option<Retention>) -> BareEnter {
+        BareEnter {
+            passwords: passwords.to_vec(),
+            pick,
+            asked: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn ix(&self) -> hacivat_session::pipeline::Interaction {
+        hacivat_session::pipeline::Interaction::Interactive(Arc::new(self.clone()))
+    }
+
+    /// The `remember` of every SSH secret question, in order.
+    fn remembers(&self) -> Vec<Option<Retention>> {
+        self.asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|q| match q {
+                Question::Secret { remember, .. } => Some(*remember),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+impl hacivat_session::pipeline::UiPort for BareEnter {
+    fn ask(&self, q: Question) -> futures::future::BoxFuture<'static, Answer> {
+        let first = self.remembers().is_empty();
+        let answer = match &q {
+            Question::HostKey { .. } => Answer::TrustHostKey,
+            Question::Secret {
+                prompt: SecretPrompt::SshPassword { hop, .. },
+                remember,
+                ..
+            } => {
+                let secret = sec(self.passwords[usize::from(*hop)]);
+                match (remember, self.pick.filter(|_| first)) {
+                    (Some(_), Some(pick)) => Answer::SshSecret {
+                        secret,
+                        remember: pick,
+                    },
+                    (Some(start), None) => Answer::SshSecret {
+                        secret,
+                        remember: *start,
+                    },
+                    (None, _) => Answer::Secret(secret),
+                }
+            }
+            _ => Answer::Cancelled,
+        };
+        self.asked.lock().unwrap().push(q);
+        Box::pin(async move { answer })
+    }
+}
+
+/// A profile through `s` whose SSH secrets are kept `Never`.
+fn ssh_never(s: &TestSshServer) -> Profile {
+    let mut p = ssh_forever(s);
+    p.ssh_retention = Retention::Never;
+    p
+}
+
+/// Deps with their own tunnel manager over `deps`'s secrets: a later connect of the same
+/// profile asks again instead of reusing a tunnel kept for its grace period.
+fn same_secrets(deps: &ConnectDeps) -> ConnectDeps {
+    deps_over_store(
+        FakeDriver::new(DbmsKind::Postgres).consumes_factory(),
+        deps.secrets.clone(),
+    )
+}
+
+fn retention_reported(live: &LiveConnection, r: Retention) -> bool {
+    live.profile_changes
+        .iter()
+        .any(|c| matches!(c, hacivat_session::pipeline::ProfileChange::SshRetention(x) if *x == r))
+}
+
+/// The review's r1-g: a new connection set to Never; Test (Enter); Save; Connect (Enter). The
+/// Test's question offers no Remember (it stores nothing); the Connect's starts from the saved
+/// Never, so the password is never kept Forever and the profile stays Never.
+#[tokio::test]
+async fn a_bare_enter_after_a_test_keeps_the_saved_never() {
+    let s = ssh(cfg().user_pw("u", "pw")).await;
+    let deps = deps_ssh(&s, FakeDriver::new(DbmsKind::Postgres).consumes_factory());
+    let test = BareEnter::new(&["pw"], None);
+    let report = test_connection(
+        &deps,
+        draft(ssh_never(&s), None),
+        test.ix(),
+        token(),
+        progress(),
+    )
+    .await;
+    assert!(report.ok, "{:?}", report.error.map(|e| e.class));
+    assert_eq!(test.remembers(), [None]);
+
+    let later = same_secrets(&deps);
+    let ui = BareEnter::new(&["pw"], None);
+    let live = connect(&later, req(ssh_never(&s)), ui.ix(), token(), progress())
+        .await
+        .unwrap();
+    assert_eq!(ui.remembers(), [Some(Retention::Never)]);
+    assert!(
+        live.profile_changes.is_empty(),
+        "nothing to re-save: the profile stays Never"
+    );
+    let slot = SecretSlot::SshPassword { hop: 0 };
+    for r in [
+        Retention::Forever,
+        Retention::UntilRestart,
+        Retention::ForSession,
+    ] {
+        assert!(stored_under(&later, slot, r).is_none(), "kept nowhere");
+    }
+}
+
+/// The review's r1-f: a choice applies within its own connect only. Connect 1 picks Forever;
+/// the user then sets Never again; connect 2 starts from the saved Never.
+#[tokio::test]
+async fn the_remember_starts_from_the_saved_retention_not_an_earlier_choice() {
+    let s = ssh(cfg().user_pw("u", "pw")).await;
+    let deps = deps_ssh(&s, FakeDriver::new(DbmsKind::Postgres).consumes_factory());
+    let slot = SecretSlot::SshPassword { hop: 0 };
+    let first = BareEnter::new(&["pw"], Some(Retention::Forever));
+    let live = connect(&deps, req(ssh_never(&s)), first.ix(), token(), progress())
+        .await
+        .unwrap();
+    assert_eq!(first.remembers(), [Some(Retention::Never)]);
+    assert!(retention_reported(&live, Retention::Forever));
+    assert!(
+        stored_slot(&deps, slot).as_deref() == Some("pw"),
+        "values not shown"
+    );
+    drop(live);
+    // The user sets Never again in the dialog: the save moves the secret out of Forever.
+    deps.secrets
+        .change_retention(
+            &SecretKey {
+                profile: pid(),
+                slot,
+            },
+            Retention::Forever,
+            Retention::Never,
+        )
+        .unwrap();
+
+    let later = same_secrets(&deps);
+    let second = BareEnter::new(&["pw"], None);
+    let live = connect(&later, req(ssh_never(&s)), second.ix(), token(), progress())
+        .await
+        .unwrap();
+    assert_eq!(second.remembers(), [Some(Retention::Never)]);
+    assert!(live.profile_changes.is_empty());
+    assert!(stored_slot(&later, slot).is_none(), "not kept Forever");
+}
+
+/// Within one connect, the next hop's question starts from the choice made on the first.
+#[tokio::test]
+async fn the_next_hop_of_the_same_connect_starts_from_the_choice() {
+    let b = ssh(cfg().user_pw("u", "pb")).await;
+    let a = TestSshServer::start(cfg().user_pw("u", "pa"));
+    let mut p = through(
+        db_internal(pg_profile(hacivat_net::TlsMode::Disable)),
+        vec![hop(&a, SshAuth::Password), hop(&b, SshAuth::Password)],
+        HostKeyPolicy::Ask,
+    );
+    p.ssh_retention = Retention::Forever;
+    let deps = deps_ssh(&b, FakeDriver::new(DbmsKind::Postgres).consumes_factory());
+    let ui = BareEnter::new(&["pa", "pb"], Some(Retention::UntilRestart));
+    let live = connect(&deps, req(p), ui.ix(), token(), progress())
+        .await
+        .unwrap();
+    assert_eq!(
+        ui.remembers(),
+        [Some(Retention::Forever), Some(Retention::UntilRestart)]
+    );
+    assert!(retention_reported(&live, Retention::UntilRestart));
+    let kept = |hop| {
+        stored_under(
+            &deps,
+            SecretSlot::SshPassword { hop },
+            Retention::UntilRestart,
+        )
+    };
+    assert!(kept(0).as_deref() == Some("pa"), "values not shown");
+    assert!(kept(1).as_deref() == Some("pb"), "values not shown");
+}

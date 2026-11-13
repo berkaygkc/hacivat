@@ -779,3 +779,190 @@ the vault, the session overlay, the keyring CI and the deferrals.
 - **Debug.** `SessionOverlay` derives `Debug`, and every secret in it is a `SecretString`, which
   prints redacted. `SessionManager`'s `Debug` shows only whether an overlay exists. Neither
   type derives `PartialEq`.
+
+## m2b-t21 — SSH and vault prompts
+
+- **Host key changed is a hard stop (Q34).** Cancel is the primary, has the initial focus and is
+  the only Enter default: Enter cancels wherever the focus is, the trust action included, and
+  only a click or Space on "Remove the old key and trust the new one" runs it. Enter still
+  copies on a Copy button and retries on Try again, which widen nothing. The key-up Enter is
+  suppressed in the capture phase, so a focused button is never pressed twice.
+- **A first-seen key is never trusted by Enter (fix round 1, review I2, controller ruling).** The
+  new-host-key prompt opens mid-connect, perhaps while the user types elsewhere, so it opens
+  with Cancel focused and Enter cancels (on a Copy button it copies); Trust and connect stays the
+  visual primary and runs only from a click or Space. This departs from the M2a mock (Trust
+  focused) and follows the PO's rule for the certificate dialog.
+- **Hacivat never edits `~/.ssh`.** The replace button exists only when the stored key is in
+  Hacivat's own store; it calls `KnownHosts::replace` on the core runtime, then reconnects. The
+  reconnect checks the key again, so a replace that failed (the line went meanwhile, the key is
+  revoked) trusts nothing. For an OpenSSH file the dialog shows `ssh-keygen -R` built from
+  `known_hosts::host_pattern` (the bare host on port 22, else `"[host]:port"`), with `-f` for
+  any file other than `~/.ssh/known_hosts`; Try again works without a restart because the
+  stores re-read a changed file (Q24).
+- **The command is shell-safe or absent.** The host pattern may hold only ASCII letters,
+  digits and `.-_:%[]`, and the file only `._/~+@,-` besides letters and digits; neither may
+  start with a dash (it would read as an option). Anything else gets no command at all, rather
+  than a quoted one a user might paste into the wrong shell. Host names were validated when the
+  profile was saved; this is the second check.
+- **Server text is data, never prose (T9 review M3).** Keyboard-interactive name, instruction
+  and prompt labels are shown in their own mono fields, never inside a translated sentence. They
+  are made visible as OpenSSH's `strnvis` does: a backslash is doubled first; C0 and C1
+  controls (ANSI escapes included; only `\n` kept) become `\ooo`; bidi controls and invisible
+  format characters become `\u{…}`: every Unicode `Cf` character (the tag characters
+  U+E0000–U+E007F included, which can smuggle invisible ASCII), the line and paragraph
+  separators, U+034F and the Hangul fillers that draw blank (fix round 1, review m4). The name and each label are capped at 256 characters, the instruction at
+  2,048, and the server text scrolls on its own (119 px). A round with more than 8 prompts is
+  refused (answered `Cancelled`) without opening a dialog. The prompt's body scrolls, so the
+  footer always stays in the window (fix round 1, review m5).
+- **Secret fields.** Every prompt field that holds a secret is the M2a masked `TextInput`:
+  bullets painted, nothing copied, an empty accessible value, and `text_for_range` answers
+  bullets (the I2 rule). A value becomes a `SecretString` the moment it is read and the field is
+  cleared then; a prompt clears every field when it closes, cancelled or answered. The typed
+  text in `TextInput`'s own buffer is not zeroized (B14, M9).
+- **Remember in the SSH secret prompt (fix round 1, controller ruling on the reviewer's seam;
+  a named exception in Task 14's files).** The prompt offers the dialog's retention choices in a
+  Select (the vault's label for Forever when the vault holds Forever secrets) and answers
+  `Answer::SshSecret { secret, remember }`. `PipelinePrompter` records `remember` (the last
+  answer wins), and the connect stores its typed SSH secrets under it. When it differs from the
+  profile's `ssh_retention`, the typed slots first leave the old retention's place (`Forever`'s
+  fallback and `UntilRestart` share one map), and a successful **Main** connect only reports
+  `ProfileChange::SshRetention`, never a Test or a probe. The app saves it through
+  `apply_changes` after the connect (a save mid-connect would cancel it, RF5): the save moves
+  every other hop's stored secrets to the new retention, behind the vault gate. The TLS key
+  passphrase prompt keeps a static row (the DB retention).
+- **Where Remember starts (fix round 2, review R2).** The question says it:
+  `Question::Secret { remember }` is the saved profile's `ssh_retention`, or a choice made
+  earlier in the same connect (the next hop's prompt); a bare Enter answers exactly that. The
+  choice lives in that connect's `PipelinePrompter` and ends with it; the app's prompt keeps
+  nothing. A Test or a probe stores nothing, so its question has `remember: None`: the prompt
+  shows the static row "Never" and answers the plain secret, and nothing is recorded or
+  reported. So a profile set to Never is never stored Forever by a bare Enter, and an unsaved
+  draft's Test never chooses a retention for the profile.
+- **A Forever put waits for the vault (T1 review M7, Q38).** Unless the keyring or the memory
+  backend holds Forever secrets, a save's queued job reads the vault's state on the blocking
+  pool. Only when the vault is missing or locked does it ask the UI (Create or Unlock) and wait;
+  Not now or Cancel lets the put fall back to Until restart with the M2a toast. A save that needs
+  no dialog never waits for the UI thread, so the bounded quit drain still lands it (P15).
+- **Vault calls never run on the UI thread (T6 review N1).** `exists`, `is_unlocked`, `create`,
+  `unlock`, `reset` and `resettable` run on the core runtime's blocking pool and answer through
+  a `oneshot`. The Remember label reads only the backend's cached choice.
+- **Attempts never leak across gestures.** The pipeline counts unlock attempts per connect
+  (Task 14). A delete, duplicate or save that unlocks the vault itself counts in its dialog,
+  from 1 for each gesture; Cancel after a wrong password ends the gesture, and three misses end
+  it too. There is no lockout (B13: the file is offline-attackable anyway).
+- **A locked vault and a delete (T6 carry; fix round 1, review m2).** Where the vault may hold
+  the profile's secrets, a delete deletes them first, in a secrets-only job; a locked vault asks
+  to be unlocked. Declined (or three misses), nothing is deleted: the profile stays and the
+  delete fails with `Unchanged`, which says why. Only a vault that cannot be used at all (a
+  damaged or non-regular file, whose entries nobody can read) lets the profile go as in M2a,
+  with the error reported. A duplicate that meets a locked vault asks to unlock and copies
+  again; declined, the copy has no secrets and the error is reported.
+- **SSH secrets follow their hop, all or nothing (T20 carry; fix round 1, review I1).** Slots are
+  keyed by hop index. A save that adds, removes or reorders jump hosts first moves the stored
+  SSH secrets in a secrets-only job: every old slot is read (any failure stops before a write),
+  the moved values are written (hops matched by host, ASCII-folded, port, user and sign-in
+  method), then every slot nothing replaces is removed. A failed write puts back what was
+  written (a slot that cannot be put back is removed). Only when the move fully succeeded is the
+  new hop order saved; a declined unlock, a refused write or any other error leaves the stored
+  profile and its slots as they were, and the save fails with `Unchanged`, which the dialog
+  shows. So a secret is never on a hop it was not typed for, and a.example's password never
+  reaches b.example. A second save of the same profile waits until the move is done. Moved
+  Forever secrets are labelled (P44).
+- **The move is fail-closed (fix round 2, review R1).** Three cases that round 1 counted as
+  success are failures, undone, and the save fails with `Unchanged` and the reason:
+  - a put the store keeps elsewhere (`Stored::FellBackTo`, a Q38 fallback to Until restart): the
+    backend still holds the old value at that index, so it would come back on the wrong hop
+    after a restart. The undo gives the in-memory fallback back what it held;
+  - a read error other than `Unavailable` (no backend, nothing stored), `Denied` included: the
+    move stops before any write;
+  - an undo whose restore does not land as requested: the slot is cleared instead (backend and
+    memory), so the secret is lost and asked again rather than misplaced. The reason then says
+    so (`ssh-slot-rollback-cleared`, or `ssh-slot-rollback-failed` when even the clear failed).
+  The move never shows the fallback toast any more: there is nothing to fall back to.
+- **Changes wait for a pending move (fix round 2, review R3).** `apply_changes` (every change
+  kind: T19's pins, CA file and plaintext consent, and `SshRetention`) first waits for a pending
+  hop move of the profile and the save it leads to, then builds from the profile as stored then,
+  never from a copy read before. So a connect's changes that arrive while the move waits on the
+  vault's unlock keep the user's hop edit, and the edit keeps them.
+- **An open edit dialog takes `SshRetention` at once (fix round 1 follow-up; review n2).** It is
+  forwarded when the change is applied, before the re-save is done and whatever its outcome:
+  the re-save writes the profile even when a secret move fails, so the dialog and the stored
+  profile agree. If that re-save ever becomes refusable, the forward must wait for it.
+- **A failed retention move can leave the old entry (review n1).** Moving SSH secrets out of a
+  retention can fail (a locked vault when leaving Forever, the unlock declined): the connect's
+  retirement of the typed slots only logs it, and the app's re-save reports it. The old entry
+  then stays where it was, unused while the profile's retention differs, and it would be read
+  again if the user switched back to that retention later, perhaps after a hop edit made under
+  the other one. This is the M2a class of failed retention moves; a sweep of SSH slots kept
+  under a retention other than the current one, on the next unlocked save, is carried to a
+  later milestone.
+- **Reset needs the typed word and a regular file.** The Danger button stays disabled until
+  the field equals `hv-conn-vault-reset-word` exactly (no casing, no trimming) and is never the
+  default: Enter does nothing in the reset dialog. A symlink or any other non-file at
+  `vault.bin` is now `Denied` (it was `VaultCorrupt`, which offers a reset) and `reset` refuses
+  it; the dialog offers no reset until the blocking pool said the path holds a regular file
+  (T6 review N3).
+- **A hung instance cannot stall the vault (T6 review N2).** `vault.bin.lock` is taken with
+  `try_lock` for at most 5 s (polled every 20 ms); after that a read goes on unlocked and a
+  write refuses with `VaultReadOnly`, which a Forever put falls back from (Q38). Fix round 1
+  (review m9): after a timeout the next calls try once for 30 s, so a hung instance costs one
+  wait, not one per slot; `FileVault::with_lock_wait` shortens the wait for tests.
+- **A vault file that is not a regular file says so (fix round 1, review m3).** A Hacivat-driven
+  unlock that meets `Denied` closes with a notice instead of silently.
+- **`copy_all` is not for SSH slots (T1 re-review N1).** Its doc says so; a duplicate copies the
+  DB slots and the SSH slots with `copy_slots`, each under its own retention.
+
+## m2b-t19 — TLS UI: certificate review, pin changed, plaintext question
+
+- **The safe answer is the default (Q34; PO question pending, default Cancel).** The
+  certificate review opens with Cancel focused, in both variants. Enter acts on key down only
+  (never held, never with a modifier) and its key up is suppressed, so the focused button's
+  keyboard click never runs twice. In the untrusted variant Enter presses the focused button:
+  a pin takes a deliberate Tab to "Pin this certificate". The pin-changed variant is a hard
+  stop: Enter cancels whatever has the focus, and "Replace pin" runs only on its own click (the
+  pointer, or Space on the focused button). The public-plaintext question opens on "Use an SSH
+  tunnel…"; "Connect without encryption" is never the default.
+- **Only an explicit click replaces a pin (Q26).** `cert_dialog::change_for` builds
+  `ReplacePin { old: review.pinned, new: { review.endpoint, review.sha256 } }` only for the
+  Replace pin choice, and that choice exists only in a review opened from an error (the
+  "Review certificate" fix, or the dialog's test strip): a pipeline question never offers it.
+  Applying a change (`cert_dialog::apply_change`, used by `ConnectionsModel::apply_changes` and
+  by the dialog's draft) is guarded the same way: `AddPin` never replaces an endpoint's pin,
+  and `ReplacePin` replaces it only while it still is `old`, the fingerprint the user compared.
+  A stale review, or two reviews of one profile, therefore change nothing. Changes apply to
+  the profile the review was opened for, by ID, and to nothing else.
+- **Dates (B5).** When today is outside the reviewed certificate's validity window (the wall
+  clock), the review offers neither Pin, Replace pin nor Import CA, and says why. The error's
+  own fix list wins over the registry's (`ConnectError::fixes`, Task 14's narrowing), so an
+  expired certificate's error offers only Edit connection, and "Review certificate…" needs a
+  certificate to review.
+- **What is shown.** The full SHA-256 (32 bytes, two mono lines of 16) in every review; Copy
+  writes exactly those 32 colon-separated bytes. Certificate names are RFC 4514 strings with
+  controls and bidi marks already escaped (Task 3); they are drawn verbatim in mono, never inside
+  a translated sentence. The TLS section's "Pinned certificate" row abbreviates the fingerprint
+  with an ellipsis (its first four and last two bytes, the mock's form); it identifies the pin,
+  the review is where fingerprints are compared.
+- **A Test writes nothing outside the dialog (T14 review M3).** `TestReport` carries the test's
+  `profile_changes`; the dialog applies them to its draft only, and only while the draft still
+  names the tested engine and endpoint. A Test connects with a copy of the approved roots, so
+  the CA file its certificate question imports is approved for that test only; the dialog
+  approves it app-wide when the profile that names it is saved. A file picked from the error
+  dialog's "Import CA…" (a saved profile, connected again at once) or from the dialog's own
+  pickers is approved when picked (T16 ruling A).
+- **The remembered plaintext consent is bound to an endpoint (T14 review I2).** The dialog
+  drops `tls.allow_public_plaintext` as soon as the host or the port changes, whatever changed
+  them (typing, a paste, an engine switch); a Test's "Don't ask again" binds it to the tested
+  endpoint.
+- **Disable with a pin (T3 ruling M2).** `IssueCode::TlsDisableIgnoresPin` is a notice the TLS
+  section shows; Validate never reports it, so it neither blocks a save nor a connect.
+- **Key passphrase (B25).** The client certificate's key passphrase is a masked field beside
+  the Remember select, stored like the password under the profile's retention; Save validates
+  the key with it (`validate_with_passphrase`), so an encrypted key with the right passphrase is
+  no issue.
+- **Fix round 1.** `apply_changes` hands the same changes to an open edit dialog of the
+  profile (its draft, a save in flight included), so no Save writes an older draft over a pin,
+  a CA file or the consent; the consent joins only a draft that still names the endpoint it
+  was given for. A review's change that the saved profile did not take (a stale `ReplacePin`,
+  a read-only store) is neither confirmed nor followed by a connect. A Test-imported CA joins
+  the app-wide roots only once the save that names it succeeded (it counts as approved for
+  that save's check). The error report's encrypted-key line asks for the passphrase (B25).

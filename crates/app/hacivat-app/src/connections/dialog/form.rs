@@ -1,7 +1,12 @@
 //! The dialog form: engine, server, authentication, TLS and advanced sections (NOTES surface 1,
-//! Task 17). The layout follows the mock's `connDialogHTML` without the SSH disclosure (R4):
+//! Task 17). The layout follows the mock's `connDialogHTML` (the SSH disclosure is Task 20's):
 //! form rows (140 px labels, 8 px apart), small-caps section headings, hint rows 4 px under their
 //! row, and the folded sections with live summaries.
+//!
+//! M2b (Task 19): the TLS section's "Pinned certificate" row (a short fingerprint and Remove
+//! pin, or None) and the Disable-with-a-pin notice; the client certificate's masked Key
+//! passphrase with Remember; VerifyCa for every engine (B10); the Remember Select's "Forever"
+//! label from `vault_dialog::forever_label`.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -9,11 +14,12 @@ use std::rc::Rc;
 use hacivat_driver::EngineCatalog;
 use hacivat_driver::url::FieldId;
 use hacivat_l10n::{Count, MsgRef, NoArgs, Text, ids};
+use hacivat_net::ssh::SshAuth;
 use hacivat_net::{ClientCertPaths, TlsMode};
-use hacivat_proto::{DbmsKind, EnvTag};
+use hacivat_proto::{DbmsKind, EnvTag, Origin};
 use hacivat_secrets::{AuthProviderId, Retention};
 use hacivat_session::pipeline::{IssueCode, ValidationIssue};
-use hacivat_session::profile::{Profile, ProfileEndpoint, suggest_name};
+use hacivat_session::profile::{Profile, ProfileEndpoint, TransportSpec, suggest_name};
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::capsule::{EnvKind, env_swatch_on_raised};
 use hacivat_ui::checkbox::Checkbox;
@@ -40,6 +46,7 @@ use super::{
     ConnectionDialog, ENGINES, KEEPALIVES, SaveProblem, TLS_MODES, is_mysql_family, on_dialog_key,
 };
 use crate::connections::test_strip::TestStripState;
+use crate::connections::{cert_dialog, vault_dialog};
 use crate::l10n_global::{text_fn, tr};
 use crate::shell::keymap_state::shortcut_label;
 
@@ -338,13 +345,27 @@ pub(crate) fn retention_options(keyring: bool) -> Vec<SelectOption> {
                 Retention::Never => (ids::hv::CONN_RET_NEVER, ids::hv::CONN_RET_NEVER_H),
                 Retention::UntilRestart => (ids::hv::CONN_RET_RESTART, ids::hv::CONN_RET_RESTART_H),
                 Retention::ForSession => (ids::hv::CONN_RET_SESSION, ids::hv::CONN_RET_SESSION_H),
+                // ## m2b-t21-prompts: "Forever (encrypted file)" while the vault holds the
+                // Forever secrets (Q23); re-read on every render, so it follows the probe.
                 Retention::Forever if keyring => {
-                    (ids::hv::CONN_RET_FOREVER, ids::hv::CONN_RET_FOREVER_H)
+                    let (label, hint) = crate::connections::vault_dialog::forever_texts();
+                    return SelectOption {
+                        label,
+                        hint: Some(hint),
+                        disabled: false,
+                    };
                 }
                 Retention::Forever => (ids::hv::CONN_RET_FOREVER, ids::hv::CONN_RET_FOREVER_OFF_H),
             };
+            // ## m2b-t19-tls: "Forever" names where the secret goes: the keyring, or the vault
+            // when it is chosen (Task 21's `forever_label`).
+            let label: TextFn = if *r == Retention::Forever {
+                Rc::new(|cx: &App| tr(cx, vault_dialog::forever_label(cx), NoArgs))
+            } else {
+                text_fn(label)
+            };
             SelectOption {
-                label: text_fn(label),
+                label,
                 hint: Some(text_fn(hint)),
                 disabled: *r == Retention::Forever && !keyring,
             }
@@ -373,27 +394,15 @@ fn tls_hint(engine: DbmsKind, mode: TlsMode) -> MsgRef<NoArgs> {
     }
 }
 
-/// MySQL and MariaDB cannot verify a CA without the host name in M2a (P11).
-pub(crate) fn tls_mode_disabled(engine: DbmsKind, mode: TlsMode) -> bool {
-    mode == TlsMode::VerifyCa && is_mysql_family(engine)
-}
-
-/// The TLS modes with their hints; VerifyCa is disabled with its reason for MySQL and MariaDB.
+/// The TLS modes with their hints. Every mode works for every engine: MySQL and MariaDB verify
+/// the chain without the host name too since M2b (B10; M2a's P11 disabled VerifyCa for them).
 pub(crate) fn tls_options(engine: DbmsKind) -> Vec<SelectOption> {
     TLS_MODES
         .iter()
-        .map(|&mode| {
-            let disabled = tls_mode_disabled(engine, mode);
-            let hint: TextFn = if disabled {
-                Rc::new(move |cx: &App| unsupported_mode(cx, mode))
-            } else {
-                text_fn(tls_hint(engine, mode))
-            };
-            SelectOption {
-                label: text_fn(tls_label(mode)),
-                hint: Some(hint),
-                disabled,
-            }
+        .map(|&mode| SelectOption {
+            label: text_fn(tls_label(mode)),
+            hint: Some(text_fn(tls_hint(engine, mode))),
+            disabled: false,
         })
         .collect()
 }
@@ -480,7 +489,9 @@ pub(crate) fn field_of_issue(issue: &ValidationIssue) -> Option<Field> {
             | IssueCode::PathRefused,
         ) => Some(Field::Ca),
         (_, IssueCode::TlsCertUnreadable) => Some(Field::Cert),
-        (_, IssueCode::TlsKeyEncrypted) => Some(Field::Key),
+        // ## m2b-t19-tls: an encrypted key wants its passphrase; a legacy one, another file.
+        (_, IssueCode::TlsKeyEncrypted) => Some(Field::KeyPass),
+        (_, IssueCode::TlsKeyLegacyEncrypted) => Some(Field::Key),
         (_, IssueCode::OptionRejected { .. } | IssueCode::OptionSecret { .. }) => {
             Some(Field::AppName)
         }
@@ -488,9 +499,21 @@ pub(crate) fn field_of_issue(issue: &ValidationIssue) -> Option<Field> {
     }
 }
 
+/// Whether Validate refuses `path` of `p` (DRV-05, B26): a share or a device for every origin,
+/// and, for a profile from an untrusted origin, a path outside every approved root. No file
+/// system call (the dialog draws with it); Validate itself compares canonical forms.
+fn path_refused(p: &Profile, path: &std::path::Path, roots: &[PathBuf]) -> bool {
+    if path.as_os_str().is_empty() {
+        return false;
+    }
+    let untrusted = !matches!(p.origin, Origin::UserTyped);
+    hacivat_net::paths::local_path(path).is_none()
+        || (untrusted && !roots.iter().any(|root| path.starts_with(root)))
+}
+
 /// The TLS file a path-refused issue is about: the first of the CA, the certificate and the
-/// key that lies outside every approved root (the CA when none can be told apart).
-fn refused_tls_field(p: &Profile, roots: &[PathBuf]) -> Field {
+/// key that Validate refuses, if any.
+fn refused_tls_field(p: &Profile, roots: &[PathBuf]) -> Option<Field> {
     let cert = p.tls.client_cert.as_ref();
     [
         (Field::Ca, p.tls.ca_file.clone()),
@@ -498,11 +521,33 @@ fn refused_tls_field(p: &Profile, roots: &[PathBuf]) -> Field {
         (Field::Key, cert.map(|c| c.key.clone())),
     ]
     .into_iter()
-    .find_map(|(field, path)| {
-        let path = path.filter(|p| !p.as_os_str().is_empty())?;
-        (!roots.iter().any(|root| path.starts_with(root))).then_some(field)
+    .find_map(|(field, path)| path_refused(p, path.as_deref()?, roots).then_some(field))
+}
+
+// ## m2b-t19-tls (carry-in from Task 20)
+/// Whether a path-refused issue is (also) about an SSH key: a hop's key file or an imported
+/// `IdentityFile` that Validate refuses. The SSH section shows it, never a TLS field.
+pub(crate) fn ssh_path_refused(p: &Profile, cx: &App) -> bool {
+    let TransportSpec::SshTunnel(spec) = &p.transport else {
+        return false;
+    };
+    let roots = approved_roots(cx);
+    spec.hops.iter().any(|hop| {
+        let key = match &hop.auth {
+            SshAuth::KeyFile { path } => Some(path),
+            _ => None,
+        };
+        key.into_iter()
+            .chain(hop.identity_files.iter())
+            .any(|path| path_refused(p, path, &roots))
     })
-    .unwrap_or(Field::Ca)
+}
+
+/// The approved roots the dialog's checks compare with (none without a `DialogEnv`).
+fn approved_roots(cx: &App) -> Vec<PathBuf> {
+    cx.try_global::<super::DialogEnv>()
+        .map(|e| e.approved_roots.list())
+        .unwrap_or_default()
 }
 
 /// The SQLite file option "Open the file read-only" (`mode=ro`, ruling A): it can only tighten.
@@ -558,12 +603,14 @@ impl ConnectionDialog {
     pub(crate) fn issue_field(&self, issue: &ValidationIssue, cx: &App) -> Option<Field> {
         let p = &self.draft.profile;
         let field = match (&issue.field, &issue.code) {
+            // ## m2b-t19-tls: a refused TLS file shows under its field; a refused SSH key in
+            // the SSH section (Task 20 carry-in); neither told apart, under the CA.
             (None, IssueCode::PathRefused) if p.engine != DbmsKind::Sqlite => {
-                let roots = cx
-                    .try_global::<super::DialogEnv>()
-                    .map(|e| e.approved_roots.list())
-                    .unwrap_or_default();
-                Some(refused_tls_field(p, &roots))
+                match refused_tls_field(p, &approved_roots(cx)) {
+                    Some(field) => Some(field),
+                    None if ssh_path_refused(p, cx) => None,
+                    None => Some(Field::Ca),
+                }
             }
             _ => field_of_issue(issue),
         }?;
@@ -586,9 +633,10 @@ impl ConnectionDialog {
             | Field::Timeout
             | Field::AppName => !sqlite,
             Field::Password => !sqlite && p.auth == AuthProviderId::Password,
-            Field::Cert | Field::Key => !sqlite && p.auth == AuthProviderId::ClientCert,
-            // Hidden until encrypted keys are supported (ruling B).
-            Field::KeyPass => false,
+            // ## m2b-t19-tls: the key passphrase with the client certificate (B25).
+            Field::Cert | Field::Key | Field::KeyPass => {
+                !sqlite && p.auth == AuthProviderId::ClientCert
+            }
         }
     }
 }
@@ -606,7 +654,8 @@ fn issue_text(cx: &App, issue: &ValidationIssue) -> SharedString {
         IssueCode::TransportUnavailable => ids::hv::CONN_ISSUE_TRANSPORT_UNAVAILABLE,
         IssueCode::TlsCaUnreadable => ids::hv::CONN_ISSUE_TLS_CA_UNREADABLE,
         IssueCode::TlsCertUnreadable => ids::hv::CONN_ISSUE_TLS_CERT_UNREADABLE,
-        IssueCode::TlsKeyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_ENCRYPTED,
+        // ## m2b-t19-tls: the field below can open an encrypted key (B25).
+        IssueCode::TlsKeyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_PASSPHRASE,
         IssueCode::TlsModeUnsupported { mode } => return unsupported_mode(cx, *mode),
         IssueCode::OptionRejected { key, .. } => {
             return tr(
@@ -633,6 +682,8 @@ fn issue_text(cx: &App, issue: &ValidationIssue) -> SharedString {
         IssueCode::SshTooManyHops => ids::hv::CONN_ISSUE_SSH_TOO_MANY_HOPS,
         IssueCode::SshKeyFileMissing => ids::hv::CONN_ISSUE_SSH_KEY_FILE_MISSING,
         IssueCode::TlsKeyLegacyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_LEGACY_ENCRYPTED,
+        // ## m2b-t19-tls
+        IssueCode::TlsDisableIgnoresPin => ids::hv::CONN_ISSUE_TLS_DISABLE_IGNORES_PIN,
     };
     tr(cx, msg, NoArgs)
 }
@@ -1087,6 +1138,8 @@ impl ConnectionDialog {
                 SaveProblem::Failed => ids::hv::CONN_DLG_SAVE_FAILED,
                 SaveProblem::Gone => ids::hv::CONN_DLG_SAVE_GONE,
                 SaveProblem::SecretNotStored => ids::hv::CONN_DLG_SAVE_SECRET,
+                // ## m2b-t21-prompts (fix round 1, I1)
+                SaveProblem::Unchanged => ids::hv::CONN_SAVE_UNCHANGED,
             };
             rows.push(
                 Kind::Row,
@@ -1095,7 +1148,7 @@ impl ConnectionDialog {
         }
         // ## m2b-t01-interfaces: the SSH section draws its own issues (Task 20, Q9).
         for issue in self.issues.iter().filter(|i| {
-            self.issue_field(i, cx).is_none() && !super::ssh::owns_issue(&self.draft.profile, i)
+            self.issue_field(i, cx).is_none() && !super::ssh::owns_issue(&self.draft.profile, i, cx)
         }) {
             rows.push(
                 Kind::Row,
@@ -1681,8 +1734,14 @@ impl ConnectionDialog {
                     rows.push(Kind::Row, form_row(theme, tr(cx, label, NoArgs), row));
                     self.issue_rows(rows, field, theme, cx);
                 }
-                // The key passphrase field stays hidden until hacivat-net reads encrypted keys
-                // (ruling B); a pasted `sslpassword` is still kept as `TlsKeyPassphrase`.
+                // ## m2b-t19-tls: the key's passphrase, masked, kept as the profile remembers
+                // its secrets (B25). A pasted `sslpassword` fills it too.
+                let row = self.secret_row(Field::KeyPass, theme, window, cx);
+                rows.push(
+                    Kind::Row,
+                    form_row(theme, tr(cx, ids::hv::CONN_DLG_KEY_PASS, NoArgs), row),
+                );
+                self.issue_rows(rows, Field::KeyPass, theme, cx);
             }
             AuthProviderId::None => {
                 rows.push(
@@ -1764,6 +1823,26 @@ impl ConnectionDialog {
             form_row(theme, tr(cx, ids::hv::CONN_TLS_CA, NoArgs), ca),
         );
         self.issue_rows(&mut content, Field::Ca, theme, cx);
+        // ## m2b-t19-tls: the pinned certificate of this endpoint (NOTES M2a surface 1).
+        let pin_row = self.render_pin(theme, cx);
+        content.push(
+            Kind::Row,
+            form_row(theme, tr(cx, ids::hv::CONN_TLS_PIN, NoArgs), pin_row),
+        );
+        let (host, port) = self.tls_endpoint();
+        if p.tls.disable_ignores_pin(&host, port) {
+            // Disable wins over the pin (T3 ruling M2): say that the pin is not checked.
+            content.push(
+                Kind::Row,
+                InlineNotice::new(NoticeIcon::Info).line(issue_text(
+                    cx,
+                    &ValidationIssue {
+                        field: None,
+                        code: IssueCode::TlsDisableIgnoresPin,
+                    },
+                )),
+            );
+        }
         let me = cx.weak_entity();
         let disclosure = Disclosure::new("conn-tls", tr(cx, ids::hv::CONN_SECTION_TLS, NoArgs))
             .summary(summary)
@@ -1779,6 +1858,61 @@ impl ConnectionDialog {
             Kind::Disclosure,
             div().track_focus(&self.focus.tls).child(disclosure),
         );
+    }
+
+    // ## m2b-t19-tls
+    /// The "Pinned certificate" value: `SHA-256` and a short fingerprint (its first four and last
+    /// two bytes, the mock's form; the review shows all 32) with Remove pin, or None.
+    fn render_pin(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme.tokens;
+        let c = &t.colors;
+        let Some(pin) = self.current_pin() else {
+            return Label::new(
+                tr(cx, ids::hv::CONN_TLS_PIN_NONE, NoArgs),
+                TextSource::Fluent,
+                t.type_ramp.body,
+                c.text_2.to_hsla(),
+            )
+            .id("tls-pin-row")
+            .into_any_element();
+        };
+        let [first, second] = hacivat_net::fingerprint_lines(&pin.sha256);
+        let short = format!("{}{ELLIPSIS}{}", &first[..11], &second[second.len() - 5..]);
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(t.spacing.md))
+            .min_w_0()
+            .child(div().flex_none().child(Label::new(
+                SharedString::from(cert_dialog::SHA256_LABEL),
+                TextSource::Data,
+                t.type_ramp.mono_data,
+                c.text_2.to_hsla(),
+            )))
+            .child(
+                div().flex_none().child(
+                    Label::new(
+                        SharedString::from(short),
+                        TextSource::Data,
+                        t.type_ramp.mono_data,
+                        c.text.to_hsla(),
+                    )
+                    .id("tls-pin-row"),
+                ),
+            )
+            .child(
+                Button::new(
+                    "tls-remove-pin",
+                    tr(cx, ids::hv::CONN_TLS_REMOVE_PIN, NoArgs),
+                )
+                .kind(ButtonKind::Ghost)
+                .focus_handle(self.focus.remove_pin.clone())
+                .disabled(self.read_only)
+                .on_raised(true)
+                .on_click(cx.listener(|this, _, window, cx| this.remove_pin(window, cx))),
+            )
+            .into_any_element()
     }
 
     fn render_advanced(
@@ -1960,6 +2094,9 @@ impl ConnectionDialog {
         );
     }
 }
+
+/// The ellipsis between the two ends of a short fingerprint (a symbol, not text).
+const ELLIPSIS: char = '…';
 
 /// The Escape key as the active keymap writes it (the Stop hint).
 fn escape_label(cx: &App) -> Option<SharedString> {

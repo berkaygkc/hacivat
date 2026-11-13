@@ -79,6 +79,13 @@ pub trait VaultBackend: SecretBackend {
     fn lock(&self);
     /// Deletes the vault and everything in it.
     fn reset(&self) -> Result<(), SecretError>;
+    // ## m2b-t21-prompts
+    /// Whether a reset may be offered: the vault path holds a regular file, or nothing. A
+    /// symlink or any other non-file there is the user's own arrangement (a dotfiles link):
+    /// it is reported as `Denied` and never reset (T6 review N3). Blocking (a `stat`).
+    fn resettable(&self) -> bool {
+        true
+    }
 }
 
 /// Argon2id parameters: memory in KiB, iterations, lanes.
@@ -117,6 +124,13 @@ const MIN_MASTER_CHARS: usize = 8;
 const MAX_VAULT_BYTES: u64 = 16 << 20;
 /// How often a read is retried when the file was replaced between its check and its open.
 const READ_ATTEMPTS: usize = 16;
+// ## m2b-t21-prompts
+/// How long a vault call waits for `vault.bin.lock` held by another instance (T6 review N2).
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// How often the lock is tried meanwhile.
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+/// How long a lock that timed out is taken as still held (fix round 1, review m9).
+const LOCK_STUCK: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The header bounds checked before any key is derived (Q30).
 const M_KIB_BOUNDS: RangeInclusive<u32> = 8_192..=1_048_576;
@@ -196,6 +210,12 @@ pub struct FileVault {
     path: PathBuf,
     params: VaultParams,
     state: Mutex<Option<Unlocked>>,
+    // ## m2b-t21-prompts (fix round 1, review m9)
+    /// How long a call waits for `vault.bin.lock` held elsewhere.
+    lock_wait: std::time::Duration,
+    /// Until when a lock that timed out is taken as still held: calls then try once and go on
+    /// at once, so a hung instance costs one wait, not one per slot (`delete_all` visits ~20).
+    lock_stuck_until: Mutex<Option<std::time::Instant>>,
 }
 
 impl fmt::Debug for FileVault {
@@ -230,7 +250,16 @@ impl FileVault {
             path,
             params: p,
             state: Mutex::new(None),
+            lock_wait: LOCK_WAIT,
+            lock_stuck_until: Mutex::new(None),
         }
+    }
+
+    // ## m2b-t21-prompts (fix round 1, review m9)
+    /// The vault with another wait for a lock held elsewhere (tests use a short one).
+    pub fn with_lock_wait(mut self, wait: std::time::Duration) -> FileVault {
+        self.lock_wait = wait;
+        self
     }
 
     fn state(&self) -> MutexGuard<'_, Option<Unlocked>> {
@@ -296,8 +325,36 @@ impl FileVault {
             options.mode(0o600);
         }
         let file = options.open(&path).or_else(|_| File::open(&path)).ok()?;
-        file.lock().ok()?;
-        Some(file)
+        // ## m2b-t21-prompts (T6 review N2): a stopped or hung instance holding the lock must not
+        // stall every vault call: try for at most `LOCK_WAIT`, then go on as without a lock (a
+        // read reads, a write refuses with `VaultReadOnly`, which a Forever put falls back from).
+        // Fix round 1 (m9): after a timeout, calls try once for `LOCK_STUCK` and go on at once.
+        let now = std::time::Instant::now();
+        let mut stuck = self
+            .lock_stuck_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let wait = match *stuck {
+            Some(until) if now < until => std::time::Duration::ZERO,
+            _ => self.lock_wait,
+        };
+        let deadline = now + wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => {
+                    *stuck = None;
+                    return Some(file);
+                }
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    *stuck = Some(std::time::Instant::now() + LOCK_STUCK);
+                    return None;
+                }
+                Err(_) => return None,
+            }
+        }
     }
 
     /// [`file_lock`](Self::file_lock) for a write: missing is `VaultReadOnly` (the vault cannot
@@ -475,8 +532,9 @@ impl VaultBackend for FileVault {
 
     /// A wrong password, or a body that fails the AEAD under a header that parses, is
     /// `WrongMasterPassword` (the AEAD cannot tell tampering from a wrong password, Q30); a
-    /// header that does not parse, a truncated file, out-of-bounds parameters or a non-file at
-    /// the path is `VaultCorrupt`. Nothing is written either way. Holds the state lock and the
+    /// header that does not parse, a truncated file or out-of-bounds parameters are
+    /// `VaultCorrupt`; a symlink or other non-file at the path is `Denied` (m2b-t21, T6 review
+    /// N3). Nothing is written either way. Holds the state lock and the
     /// file lock from the read to the install (fix round 1, M8).
     fn unlock(&self, master: SecretString) -> Result<(), SecretError> {
         if names_another_machine(&self.path) {
@@ -513,6 +571,7 @@ impl VaultBackend for FileVault {
 
     /// Locks, then deletes the vault file and any stale temp file under the file lock, and
     /// syncs the directory (fix round 1, M3). A missing file is fine; the lock file stays.
+    /// A symlink or any other non-file at the path is `Denied` and stays (T6 review N3).
     fn reset(&self) -> Result<(), SecretError> {
         let mut state = self.state();
         *state = None;
@@ -520,6 +579,10 @@ impl VaultBackend for FileVault {
             return Err(SecretError::Unavailable);
         }
         let _lock = self.file_lock();
+        // ## m2b-t21-prompts
+        if !self.resettable() {
+            return Err(SecretError::Denied);
+        }
         match fs::remove_file(&self.path) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -529,6 +592,19 @@ impl VaultBackend for FileVault {
         remove_stale_temps(&dir, &self.path);
         sync_dir(&dir);
         Ok(())
+    }
+
+    // ## m2b-t21-prompts
+    /// A regular file or nothing at the path; never a share or device path, a symlink, a
+    /// directory, or a path that cannot be looked at.
+    fn resettable(&self) -> bool {
+        if names_another_machine(&self.path) {
+            return false;
+        }
+        match fs::symlink_metadata(&self.path) {
+            Ok(meta) => meta.file_type().is_file(),
+            Err(e) => e.kind() == io::ErrorKind::NotFound,
+        }
     }
 }
 
@@ -688,9 +764,10 @@ fn push_json_str(out: &mut Vec<u8>, s: &str) {
 }
 
 /// The vault file's bytes (ciphertext only). A share or device path is `Unavailable` without
-/// any file system call; a symlink, a non-file or an oversized file is `VaultCorrupt`; a
-/// missing file is `Unavailable`. When the file is replaced between the check and the open (a
-/// writer outside the lock), the read is retried; a replace that never settles is
+/// any file system call; a symlink or a non-file is `Denied` (m2b-t21, T6 review N3); an
+/// oversized file is `VaultCorrupt`; a missing file is `Unavailable`. When the file is
+/// replaced between the check and the open (a writer outside the lock), the read is retried;
+/// a replace that never settles is
 /// `Backend("vault-read")`, never `VaultCorrupt` (fix round 1, I1).
 fn read_vault(path: &Path) -> Result<Vec<u8>, SecretError> {
     if names_another_machine(path) {
@@ -704,10 +781,16 @@ fn read_vault(path: &Path) -> Result<Vec<u8>, SecretError> {
     Err(SecretError::Backend("vault-read".to_string()))
 }
 
-/// One check-open-compare-read; `None` when the path was replaced in between.
+/// One check-open-compare-read; `None` when the path was replaced in between. A symlink or any
+/// other non-file at the path is `Denied`, never `VaultCorrupt`: it is not damage, and the
+/// damaged-vault notice would offer a reset (T6 review N3).
 fn read_vault_once(path: &Path) -> Result<Option<Vec<u8>>, SecretError> {
     let link = fs::symlink_metadata(path).map_err(|e| io_error(&e))?;
-    if !link.file_type().is_file() || link.len() > MAX_VAULT_BYTES {
+    // ## m2b-t21-prompts
+    if !link.file_type().is_file() {
+        return Err(SecretError::Denied);
+    }
+    if link.len() > MAX_VAULT_BYTES {
         return Err(SecretError::VaultCorrupt);
     }
     let file = match File::open(path) {

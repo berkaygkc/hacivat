@@ -50,6 +50,12 @@ pub enum Question {
         name: String,
         prompt: SecretPrompt,
         attempt: u8,
+        // ## m2b-t21-prompts (fix round 2, R2)
+        /// The retention the typed SSH secret will be kept under, which the prompt's Remember
+        /// starts from: the saved profile's `ssh_retention`, or a choice made earlier in this
+        /// same connect. `None` where no choice applies (a Test, which stores nothing; a TLS
+        /// key passphrase, kept under the DB retention): the prompt then offers none.
+        remember: Option<hacivat_secrets::Retention>,
     },
     /// A keyboard-interactive round (one-time codes; Task 21).
     Keyboard {
@@ -99,6 +105,14 @@ pub enum Answer {
     Keyboard(Vec<SecretString>),
     /// The vault's master password.
     Master(SecretString),
+    // ## m2b-t21-prompts (fix round 1, Remember seam; named exception in Task 14's files)
+    /// An SSH password or key passphrase, with the retention the prompt's Remember chose: the
+    /// connect stores its typed SSH secrets under it and, when it differs from the profile's
+    /// `ssh_retention`, a successful Main connect reports `ProfileChange::SshRetention`.
+    SshSecret {
+        secret: SecretString,
+        remember: hacivat_secrets::Retention,
+    },
 }
 
 /// The UI side of a connect: shows a question and resolves with the answer (HV-CONN-01).
