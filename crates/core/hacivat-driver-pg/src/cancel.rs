@@ -37,7 +37,8 @@ pub(crate) fn cancel_mode(ssl_mode: SslMode, session_tls: bool) -> ObserverMode 
 pub(crate) struct PgCancel {
     pub token: CancelToken,
     pub factory: StreamFactory,
-    /// The connection's TLS parameters, with a failure slot of the cancel's own.
+    /// The connection's TLS parameters, forked: slots of the cancel's own, and every cancel
+    /// forks them again (one per handshake).
     pub tls: Option<TlsParams>,
     pub mode: ObserverMode,
 }
@@ -50,10 +51,9 @@ impl PgCancel {
         ssl_mode: SslMode,
         session_tls: bool,
     ) -> PgCancel {
-        let tls = tls.map(|t| TlsParams {
-            failure: Arc::default(),
-            ..t.clone()
-        });
+        // ## m2b-t14-pipeline: TLS parameters of the cancel's own (T10 review M1): its
+        // verifier records into slots the session never reads.
+        let tls = tls.map(TlsParams::fork);
         PgCancel {
             token,
             factory,
@@ -67,7 +67,7 @@ impl CancelHandle for PgCancel {
     fn cancel(&self) -> BoxFuture<'static, Result<(), RawError>> {
         let token = self.token.clone();
         let factory = self.factory.clone();
-        let tls = self.tls.clone();
+        let tls = self.tls.as_ref().map(TlsParams::fork);
         let mode = self.mode;
         Box::pin(async move {
             let attempt = async {

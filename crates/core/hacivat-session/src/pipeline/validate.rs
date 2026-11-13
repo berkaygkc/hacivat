@@ -167,7 +167,31 @@ pub fn validate_with(
     catalog: &EngineCatalog,
     roots: &ApprovedRoots,
 ) -> Vec<ValidationIssue> {
-    checked(p, catalog, &roots.list()).0
+    checked(p, catalog, &roots.list(), KeyCheck::Passphrase(None)).0
+}
+
+// ## m2b-t14-pipeline
+/// [`validate_with`] opening an encrypted TLS client key with `passphrase` (the dialog's field,
+/// T3 carry-in): with the right one there is no `TlsKeyEncrypted` issue; a wrong one is
+/// `TlsKeyEncrypted` too.
+pub fn validate_with_passphrase(
+    p: &Profile,
+    catalog: &EngineCatalog,
+    roots: &ApprovedRoots,
+    passphrase: Option<&secrecy::SecretString>,
+) -> Vec<ValidationIssue> {
+    checked(p, catalog, &roots.list(), KeyCheck::Passphrase(passphrase)).0
+}
+
+// ## m2b-t14-pipeline
+/// How Validate treats an encrypted TLS client key.
+#[derive(Clone, Copy)]
+pub(crate) enum KeyCheck<'a> {
+    /// Open it with this passphrase; without one an encrypted key is `TlsKeyEncrypted`.
+    Passphrase(Option<&'a secrecy::SecretString>),
+    /// The connect pipeline: its TLS step opens the key with the overlay's, the stored or a
+    /// typed passphrase, so an encrypted key is not an issue at step 0.
+    Deferred,
 }
 
 /// The issues of a profile and, when there are none, the sanitized options.
@@ -175,6 +199,7 @@ pub(crate) fn checked(
     p: &Profile,
     catalog: &EngineCatalog,
     roots: &[PathBuf],
+    key: KeyCheck<'_>,
 ) -> (Vec<ValidationIssue>, Vec<(String, String)>) {
     let mut issues: Vec<ValidationIssue> = Vec::new();
     let mut push = |field: Option<FieldId>, code: IssueCode| {
@@ -244,10 +269,8 @@ pub(crate) fn checked(
     match &p.transport {
         TransportSpec::Direct => {}
         TransportSpec::SshTunnel(spec) => {
-            // ## m2b-t12-profiles: fail closed (no silent weakening) until Task 14's SSH step
-            // exists; without it the pipeline would reach the database directly. Task 14
-            // removes this one line.
-            push(None, IssueCode::TransportUnavailable);
+            // ## m2b-t14-pipeline (named exception): the SSH step exists, so an SSH tunnel is
+            // no longer `TransportUnavailable`.
             ssh_issues(spec, &mut push, &outside);
         }
         TransportSpec::Karagoz { .. } => push(None, IssueCode::TransportUnavailable),
@@ -282,10 +305,18 @@ pub(crate) fn checked(
             }
             .or_else(|| catalog.get(p.engine).and_then(|e| e.default_port))
             .unwrap_or_default();
-            if let Err(e) = build_tls_params(&p.tls, host.trim(), port, AddressClass::Private, None)
-            {
-                let (field, code) = tls_issue(&e);
-                push(field, code);
+            // ## m2b-t14-pipeline: the key passphrase (T3 carry-in).
+            let passphrase = match key {
+                KeyCheck::Passphrase(passphrase) => passphrase,
+                KeyCheck::Deferred => None,
+            };
+            match build_tls_params(&p.tls, host.trim(), port, AddressClass::Private, passphrase) {
+                Err(TlsSetupError::KeyEncrypted(_)) if matches!(key, KeyCheck::Deferred) => {}
+                Err(e) => {
+                    let (field, code) = tls_issue(&e);
+                    push(field, code);
+                }
+                Ok(_) => {}
             }
         }
     }

@@ -13,7 +13,7 @@ network.ipv6_unavailable body: Sunucunun yalnızca IPv6 adresleri var ve bu ağ 
 tls.handshake title: db-prod-us.acme.io ile güvenli bağlantı kurulamadı.
 tls.handshake body: Hacivat ile sunucu şifreleme konusunda anlaşamadı. Bağlantının TLS ayarlarını denetleyin; nedeni teknik ayrıntılarda.
 tls.untrusted title: db-prod-us.acme.io, bu Mac'in güvenmediği bir sertifika gönderdi.
-tls.untrusted body: Sunucunun sertifikası, bu Mac'in güvendiği bir makam tarafından imzalanmamış. Bağlantıyı sertifikayı doğrulamadan şifreleyebilir ya da yöneticinizden CA'yı isteyebilirsiniz.
+tls.untrusted body: Kendinden imzalı ya da şirketinizin kendi CA'sınca verilmiş olabilir. Güvenmeden önce inceleyin.
 tls.hostname title: db-prod-us.acme.io sunucusunun sertifikası başka bir ad için verilmiş.
 tls.hostname body: Sunucunun sertifikası, Hacivat'ın bağlandığı adı kapsamıyor. Sertifikada yazan bir adla bağlanın; örneğin IP adresi ya da takma ad yerine sunucunun tam alan adıyla.
 tls.protocol title: db-prod-us.acme.io ile güvenli bağlantı bir güvenlik denetiminden geçemedi.
@@ -22,6 +22,20 @@ tls.client_cert_required title: db-prod-us.acme.io bir istemci sertifikası isti
 tls.client_cert_required body: Sunucu yalnızca kendi sertifikasını sunan bağlantıları kabul ediyor. İstemci sertifikasını ve anahtarını bağlantının TLS ayarlarına ekleyin.
 tls.not_supported_by_server title: db-prod-us.acme.io şifreli bağlantı sunmuyor.
 tls.not_supported_by_server body: Bu bağlantı TLS gerektiriyor ama sunucu desteklemiyor. Sunucuda TLS'i açın ya da ağ özel ve güvenilirse bağlantının TLS kipini değiştirin.
+tls.pin_changed title: db-prod-us.acme.io, sabitlenenden farklı bir sertifika gönderdi.
+tls.pin_changed body: Hacivat oturum açmadan önce durdu. Sabitlemeyi değiştirmeden önce yeni parmak izini sunucuyu yöneten kişiyle karşılaştırın.
+ssh.host_key_unknown title: Hacivat bastion.acme.io sunucusunun anahtarını henüz tanımıyor.
+ssh.host_key_unknown body: Bu Mac bu SSH sunucusuna daha önce bağlanmadı ve bağlantı anahtarına güvenip güvenmeyeceğinizi sormadı. Anahtarı incelemek için yeniden deneyin ya da bağlantının sunucu anahtarı ayarını denetleyin.
+ssh.host_key_changed title: bastion.acme.io sunucusunun anahtarı değişti.
+ssh.host_key_changed body: Hacivat oturum açmadan önce durdu. Güvenmeden önce yeni anahtarı inceleyin.
+ssh.auth title: bastion.acme.io, SSH oturumunu reddetti.
+ssh.auth body: Hacivat bu bağlantının izin verdiği oturum açma yöntemlerini denedi. Açık anahtarınızın o sunucudaki ~/.ssh/authorized_keys dosyasında olduğunu denetleyin ya da başka bir oturum açma yöntemi seçin.
+ssh.channel_open title: bastion.acme.io tünellere izin vermiyor (AllowTcpForwarding)
+ssh.channel_open body: bastion.acme.io oturumu açıldı, ancak sunucu bağlantıyı db-prod-us.acme.io adresine iletmeyi reddetti. Yöneticisinden TCP iletimine, PermitOpen ayarlıysa db-prod-us.acme.io adresine de izin vermesini isteyin.
+ssh.agent_unavailable title: Hacivat ssh-agent'a ulaşamıyor.
+ssh.agent_unavailable body: Bu bağlantı bastion.acme.io oturumunu ssh-agent'taki anahtarlarla açar, ancak Hacivat için SSH_AUTH_SOCK ayarlı değil. Ajanı başlatıp anahtarınızı ssh-add ile ekleyin ya da bağlantının SSH ayarlarında bir anahtar dosyası seçin.
+ssh.host_key_revoked title: bastion.acme.io, iptal edilmiş olarak işaretli bir anahtar gönderdi.
+ssh.host_key_revoked body: Hacivat iptal edilmiş bir anahtarla asla bağlanmaz. Sunucunun güncel anahtarını yöneticisinden isteyin.
 auth.invalid title: Sunucu deploy kullanıcısının parolasını reddetti.
 auth.invalid body: Parola değişmiş ya da süresi dolmuş olabilir. Hesap kilitlenmesin diye Hacivat 3 denemeden sonra durur.
 auth.expired title: deploy kullanıcısının parolasının süresi doldu.
@@ -30,6 +44,8 @@ auth.locked title: deploy hesabı kilitli.
 auth.locked body: Sunucu bu hesabın oturum açmasına izin vermiyor; genellikle çok sayıda başarısız denemeden sonra ya da bir yönetici kilitlediği için. Kilidi açması için veritabanı yöneticinize başvurun.
 auth.method_unsupported title: Sunucu, deploy kullanıcısından Hacivat'ın kullanamadığı bir yöntemle oturum açmasını istiyor.
 auth.method_unsupported body: Hesap, Hacivat'ın bu bağlantı üzerinden desteklemediği bir kimlik doğrulama yöntemi kullanıyor. Bazı yöntemler yalnızca şifreli bağlantıda çalışır: TLS'i açmayı deneyin ya da hesabın hangi yöntemi kullandığını veritabanı yöneticinize sorun.
+auth.insecure_method title: Sunucu parolayı bu bağlantıda güvenli olmayan bir biçimde istedi.
+auth.insecure_method body: Bağlantı şifreli değil; parola ağda başkalarının okuyabileceği ya da yeniden kullanabileceği bir biçimde taşınırdı. Hacivat parolayı göndermedi. Sunucuda TLS'i açın ya da bu ağda riski kabul ediyorsanız Şifreleme'yi Kapalı yapın.
 authz.database title: deploy kullanıcısının orders_v2 veritabanını açma izni yok.
 authz.database body: Sunucu bu hesabın buradan bu veritabanına bağlanmasına izin vermiyor. Erişim için veritabanı yöneticinize başvurun ya da hesabın açabildiği bir veritabanı seçin.
 config.invalid title: orders-prod bağlantısının ayarları kullanılamıyor.

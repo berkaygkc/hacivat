@@ -1320,3 +1320,82 @@ pub async fn settle_until(what: &str, mut done: impl FnMut() -> bool) {
         tokio::task::yield_now().await;
     }
 }
+
+// ## m2b-t14-pipeline
+// The M2b scripted UI (Task 14): it answers every question kind from a list, in order, and
+// records each question it was asked.
+
+/// A `UiPort` that answers any question with the next scripted [`Answer`] (then `Cancelled`),
+/// after `delay` of real time, and records every question.
+#[derive(Clone)]
+pub struct ScriptedUiM2b(Arc<UiScriptM2b>);
+
+struct UiScriptM2b {
+    answers: Mutex<VecDeque<Answer>>,
+    asked: Mutex<Vec<Question>>,
+    delay: Duration,
+}
+
+impl ScriptedUi {
+    /// The M2b scripted UI over `answers`.
+    pub fn answers_m2b<const N: usize>(answers: [Answer; N]) -> ScriptedUiM2b {
+        ScriptedUiM2b(Arc::new(UiScriptM2b {
+            answers: Mutex::new(answers.into_iter().collect()),
+            asked: Mutex::new(Vec::new()),
+            delay: Duration::ZERO,
+        }))
+    }
+}
+
+impl ScriptedUiM2b {
+    /// The same script, each answer given after `delay` (a user who takes their time).
+    pub fn delay(self, delay: Duration) -> ScriptedUiM2b {
+        let script = Arc::try_unwrap(self.0).unwrap_or_else(|_| panic!("a fresh script"));
+        ScriptedUiM2b(Arc::new(UiScriptM2b { delay, ..script }))
+    }
+
+    pub fn ix(&self) -> Interaction {
+        Interaction::Interactive(Arc::new(self.clone()))
+    }
+
+    /// Every question asked, in order.
+    pub fn asked(&self) -> Vec<Question> {
+        self.0.asked.lock().unwrap().clone()
+    }
+
+    /// The `attempt` of every `UnlockVault` question, in order.
+    pub fn unlock_attempts(&self) -> Vec<u8> {
+        self.asked()
+            .into_iter()
+            .filter_map(|q| match q {
+                Question::UnlockVault { attempt } => Some(attempt),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+impl UiPort for ScriptedUiM2b {
+    fn ask(&self, q: Question) -> BoxFuture<'static, Answer> {
+        self.0.asked.lock().unwrap().push(q);
+        let answer = self.0.answers.lock().unwrap().pop_front();
+        let delay = self.0.delay;
+        Box::pin(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            answer.unwrap_or(Answer::Cancelled)
+        })
+    }
+}
+
+/// A secret for an answer (an obvious fixture value).
+pub fn sec(s: &str) -> SecretString {
+    SecretString::from(s.to_string())
+}
+
+/// An interactive UI that answers its first question (an SSH password prompt under
+/// `AcceptNew`) with `pw`, and cancels any other.
+pub fn ui_secret(pw: &str) -> Interaction {
+    ScriptedUi::answers_m2b([Answer::Secret(sec(pw))]).ix()
+}

@@ -45,9 +45,8 @@ error-conn-tls-handshake-body = Hacivat ile sunucu şifreleme konusunda anlaşam
 # Review: PO
 error-conn-tls-untrusted-title = { $host }, bu Mac'in güvenmediği bir sertifika gönderdi.
 # Review: PO
-# Changed from the approved mock text: M2a has no certificate review, only
-# "Encrypt without verifying" (R3). M2b restores the review flow.
-error-conn-tls-untrusted-body = Sunucunun sertifikası, bu Mac'in güvendiği bir makam tarafından imzalanmamış. Bağlantıyı sertifikayı doğrulamadan şifreleyebilir ya da yöneticinizden CA'yı isteyebilirsiniz.
+# m2b-t14-pipeline (named exception): back to the approved mock text (`err-tls-b`).
+error-conn-tls-untrusted-body = Kendinden imzalı ya da şirketinizin kendi CA'sınca verilmiş olabilir. Güvenmeden önce inceleyin.
 
 # Review: PO
 error-conn-tls-hostname-title = { $host } sunucusunun sertifikası başka bir ad için verilmiş.
@@ -162,3 +161,52 @@ error-conn-cancelled-body = Hiçbir şey değişmedi. Hazır olduğunuzda yenide
 error-conn-internal-title = { $name } bağlantısı kurulurken bir sorun oluştu.
 # Review: PO
 error-conn-internal-body = Hacivat beklemediği bir hatayla karşılaştı. Sunucunun mesajı teknik ayrıntılarda; sorunu bildirirken bunları kopyalayın.
+
+## m2b-t14-pipeline
+
+# Connect errors that M2b reaches (Task 2 NOTES, Turkish column; ssh.host_key_unknown is new).
+# Every entry waits for the PO's review.
+
+# Review: PO
+error-conn-tls-pin-changed-title = { $host }, sabitlenenden farklı bir sertifika gönderdi.
+# Review: PO
+error-conn-tls-pin-changed-body = Hacivat oturum açmadan önce durdu. Sabitlemeyi değiştirmeden önce yeni parmak izini sunucuyu yöneten kişiyle karşılaştırın.
+
+# Review: PO
+error-conn-ssh-host-key-unknown-title = Hacivat { $hop_host } sunucusunun anahtarını henüz tanımıyor.
+# Review: PO
+error-conn-ssh-host-key-unknown-body = Bu Mac bu SSH sunucusuna daha önce bağlanmadı ve bağlantı anahtarına güvenip güvenmeyeceğinizi sormadı. Anahtarı incelemek için yeniden deneyin ya da bağlantının sunucu anahtarı ayarını denetleyin.
+
+# Review: PO
+error-conn-ssh-host-key-changed-title = { $hop_host } sunucusunun anahtarı değişti.
+# Review: PO
+error-conn-ssh-host-key-changed-body = Hacivat oturum açmadan önce durdu. Güvenmeden önce yeni anahtarı inceleyin.
+
+# Review: PO
+error-conn-ssh-auth-title = { $hop_host }, SSH oturumunu reddetti.
+# Review: PO
+error-conn-ssh-auth-body = Hacivat bu bağlantının izin verdiği oturum açma yöntemlerini denedi. Açık anahtarınızın o sunucudaki ~/.ssh/authorized_keys dosyasında olduğunu denetleyin ya da başka bir oturum açma yöntemi seçin.
+
+# Review: PO
+error-conn-ssh-channel-open-title = { $hop_host } tünellere izin vermiyor (AllowTcpForwarding)
+# Review: PO
+error-conn-ssh-channel-open-body = { $hop_host } oturumu açıldı, ancak sunucu bağlantıyı { $host } adresine iletmeyi reddetti. Yöneticisinden TCP iletimine, PermitOpen ayarlıysa { $host } adresine de izin vermesini isteyin.
+
+# Review: PO
+error-conn-ssh-agent-unavailable-title = Hacivat ssh-agent'a ulaşamıyor.
+# Review: PO
+error-conn-ssh-agent-unavailable-body = Bu bağlantı { $hop_host } oturumunu ssh-agent'taki anahtarlarla açar, ancak Hacivat için SSH_AUTH_SOCK ayarlı değil. Ajanı başlatıp anahtarınızı ssh-add ile ekleyin ya da bağlantının SSH ayarlarında bir anahtar dosyası seçin.
+
+# Review: PO
+error-conn-ssh-host-key-revoked-title = { $hop_host }, iptal edilmiş olarak işaretli bir anahtar gönderdi.
+# Review: PO
+error-conn-ssh-host-key-revoked-body = Hacivat iptal edilmiş bir anahtarla asla bağlanmaz. Sunucunun güncel anahtarını yöneticisinden isteyin.
+
+# Review: PO
+error-conn-auth-insecure-method-title = Sunucu parolayı bu bağlantıda güvenli olmayan bir biçimde istedi.
+# Review: PO
+error-conn-auth-insecure-method-body-tls = Bağlantı şifreli, ancak sertifika doğrulanmadığı için Hacivat parolanın { $host } sunucusuna ulaşacağından emin olamıyor ve parolayı göndermedi. Sertifikayı inceleyip sabitleyin, sonra yeniden bağlanın.
+# Review: PO
+error-conn-auth-insecure-method-body-plain = Bağlantı şifreli değil; parola ağda başkalarının okuyabileceği ya da yeniden kullanabileceği bir biçimde taşınırdı. Hacivat parolayı göndermedi. Sunucuda TLS'i açın ya da bu ağda riski kabul ediyorsanız Şifreleme'yi Kapalı yapın.
+# Review: PO
+error-conn-auth-insecure-method-body = { error-conn-auth-insecure-method-body-plain }

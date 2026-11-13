@@ -336,7 +336,6 @@ async fn single_session_pooled_drop_never_resets() {
 }
 
 #[tokio::test]
-#[ignore = "needs Task 14: the pipeline fills LiveConnection.profile_changes and secrets_used"]
 async fn overlay_keeps_profile_changes_and_secrets_for_side_connections() {
     // Q17
     let (sm, f) = manager_over(
@@ -880,8 +879,16 @@ fn pin_never_profile() -> Profile {
 }
 
 fn fake_pg_with_pin_answer_and_never_retention() -> FakeDriver {
+    // The pinned retry must report an encrypted, pinned connection: since Task 14 the
+    // pipeline refuses an unencrypted connection the request did not allow.
     fake_pg()
         .presented(vec![fixture_ca_der()])
+        .tls(TlsSummary {
+            encrypted: true,
+            version: Some("TLSv1.3".into()),
+            cipher: None,
+            verified: hacivat_net::TlsVerified::Pinned,
+        })
         .script(vec![Err(tls_unknown()), Ok(())])
 }
 

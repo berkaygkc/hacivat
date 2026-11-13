@@ -361,13 +361,14 @@ impl FakeDriver {
     }
 
     /// The chain (DER, leaf first) written into `TlsParams.presented` when a connect with TLS
-    /// fails with a TLS error.
+    /// fails with a TLS error (M2b Task 14: or with `InsecureAuthRefused`, after its handshake).
     pub fn presented(mut self, der: Vec<Vec<u8>>) -> Self {
         self.presented = Some(der);
         self
     }
 
-    /// The outcome written into `TlsParams.outcome` when a connect with TLS succeeds.
+    /// The outcome written into `TlsParams.outcome` when a connect with TLS succeeds (M2b Task
+    /// 14: or fails with `InsecureAuthRefused`).
     pub fn tls_outcome(mut self, v: TlsVerified) -> Self {
         self.tls_outcome = Some(v);
         self
@@ -491,10 +492,22 @@ impl Driver for FakeDriver {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
+            // ## m2b-t14-pipeline: an insecure-auth refusal comes after a handshake that
+            // completed (Q20), so its chain and outcome are recorded too.
+            let refused_after_tls = matches!(
+                &result,
+                Err(RawError {
+                    kind: RawErrorKind::InsecureAuthRefused,
+                    ..
+                })
+            );
             if let (Err(e), Some((slot, _)), Some(der)) = (&result, &tls_slots, presented)
-                && matches!(e.kind, RawErrorKind::Tls(_))
+                && (matches!(e.kind, RawErrorKind::Tls(_)) || refused_after_tls)
             {
                 *lock(slot) = Some(PresentedChain::from_der(der));
+            }
+            if let (true, Some((_, slot)), Some(v)) = (refused_after_tls, &tls_slots, outcome) {
+                *lock(slot) = Some(v);
             }
             result?;
             if let (Some((_, slot)), Some(v)) = (&tls_slots, outcome) {

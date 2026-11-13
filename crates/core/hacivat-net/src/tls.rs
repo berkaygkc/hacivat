@@ -237,6 +237,63 @@ pub struct TlsParams {
     pub presented: Arc<Mutex<Option<PresentedChain>>>,
     /// How far the server certificate was verified, written on a successful verify.
     pub outcome: Arc<Mutex<Option<TlsVerified>>>,
+    // ## m2b-t14-pipeline
+    /// What [`TlsParams::fork`] rebuilds the recording verifier from (opaque; no secret).
+    pub verifier: VerifierSeed,
+}
+
+// ## m2b-t14-pipeline
+/// The parts of a [`TlsParams`]' recording verifier that do not change between handshakes: the
+/// mode's own verifier, the endpoint's pin and what a successful check means. It holds no
+/// secret (the client key lives in `config`'s resolver, which a fork shares).
+#[derive(Clone)]
+pub struct VerifierSeed {
+    inner: Arc<dyn ServerCertVerifier>,
+    pin: Option<[u8; 32]>,
+    verified: TlsVerified,
+}
+
+impl std::fmt::Debug for VerifierSeed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifierSeed")
+            .field("pinned", &self.pin.is_some())
+            .field("verified", &self.verified)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TlsParams {
+    /// The same parameters with slots of their own (`failure`, `presented`, `outcome`, all
+    /// empty) and a configuration whose verifier records into them: one per handshake, so two
+    /// handshakes never read each other's chain or outcome (a PostgreSQL cancel next to its
+    /// session, a connect attempt after the one before; T10 review M1, T3 carry-in). The
+    /// checks are the same (mode, CA, pin); the client certificate is shared. Holds no secret.
+    pub fn fork(&self) -> TlsParams {
+        let failure = Arc::new(Mutex::new(None));
+        let presented = Arc::new(Mutex::new(None));
+        let outcome = Arc::new(Mutex::new(None));
+        let verifier = Arc::new(Recording {
+            inner: self.verifier.inner.clone(),
+            pin: self.verifier.pin,
+            failure: failure.clone(),
+            presented: presented.clone(),
+            outcome: outcome.clone(),
+            verified: self.verifier.verified,
+        });
+        let mut config = (*self.config).clone();
+        config.dangerous().set_certificate_verifier(verifier);
+        TlsParams {
+            settings: self.settings.clone(),
+            config: Arc::new(config),
+            server_name: self.server_name.clone(),
+            plaintext_allowed: self.plaintext_allowed,
+            failure,
+            ca_certs: self.ca_certs.clone(),
+            presented,
+            outcome,
+            verifier: self.verifier.clone(),
+        }
+    }
 }
 
 /// How far a server certificate was verified (HV-SEC-02).
@@ -722,18 +779,24 @@ pub fn build_tls_params(
     };
     let presented = Arc::new(Mutex::new(None));
     let outcome = Arc::new(Mutex::new(None));
-    let verifier = Arc::new(Recording {
+    // ## m2b-t14-pipeline: kept as the seed `TlsParams::fork` rebuilds the verifier from.
+    let seed = VerifierSeed {
         inner,
         pin,
-        failure: failure.clone(),
-        presented: presented.clone(),
-        outcome: outcome.clone(),
         verified: match settings.mode {
             _ if pinned => TlsVerified::Pinned,
             TlsMode::Require => TlsVerified::No,
             TlsMode::VerifyCa => TlsVerified::CaOnly,
             TlsMode::Disable | TlsMode::Auto | TlsMode::VerifyFull => TlsVerified::Full,
         },
+    };
+    let verifier = Arc::new(Recording {
+        inner: seed.inner.clone(),
+        pin,
+        failure: failure.clone(),
+        presented: presented.clone(),
+        outcome: outcome.clone(),
+        verified: seed.verified,
     });
 
     let builder = rustls::ClientConfig::builder_with_provider(provider)
@@ -779,6 +842,7 @@ pub fn build_tls_params(
         ca_certs,
         presented,
         outcome,
+        verifier: seed,
     }))
 }
 
