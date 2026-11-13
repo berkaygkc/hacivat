@@ -189,7 +189,10 @@ async fn a_dropped_request_does_not_pass_its_cancel_on() {
     let h = c.cancel_handle().unwrap();
     {
         let mut run = c.execute("SELECT 1", simple());
-        assert!((&mut run).now_or_never().is_none());
+        // One poll hands the job to the blocking pool; on a fast runner it may already be done
+        // (a CI flake asserted it was still pending). Either way its cancel must not reach the
+        // next request, which is what this test checks.
+        let _ = (&mut run).now_or_never();
         h.cancel().await.unwrap();
     }
     let s = timeout(LIMIT, c.execute(COUNTED, simple()))

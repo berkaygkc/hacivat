@@ -7,7 +7,7 @@
 
 // Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
 // systems; the lints still run in full on Unix.
-#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+#![cfg_attr(not(unix), allow(unused_imports, unused_variables))]
 #![allow(dead_code, reason = "each test file uses a subset of the fixtures")]
 #![allow(
     clippy::result_large_err,
