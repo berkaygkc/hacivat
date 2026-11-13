@@ -522,6 +522,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test (5) driver, fake
         run: cargo test --locked -p hacivat-driver --features fake
+      # ## m2b-t16-docker-matrix
+      - name: Check image digest pins
+        run: cargo run --locked -p xtask -- docker check-pins
       - name: Start the pr servers
         run: cargo run --locked -p xtask -- docker up --set pr
       - name: Docker tests (pr set)
@@ -532,3 +535,75 @@ jobs:
       - name: Stop the servers
         if: always()
         run: cargo run --locked -p xtask -- docker down
+
+  # ## m2b-t16-docker-matrix
+  # The whole matrix (pg13-18, auth/TLS/Turkish variants, MySQL, MariaDB, the sshd bastions) on
+  # a schedule or by hand. No secrets: the servers use the throwaway credentials of docker/m2a.
+  docker-full:
+    name: docker-full
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Check image digest pins
+        run: cargo run --locked -p xtask -- docker check-pins
+      - name: Start every server
+        run: cargo run --locked -p xtask -- docker up --set full
+      - name: Docker tests (full set)
+        run: cargo run --locked -p xtask -- docker test --set full
+      - name: Server logs
+        if: failure()
+        run: docker compose -f docker/m2a/compose.yml logs --no-color
+      - name: Stop the servers
+        if: always()
+        run: cargo run --locked -p xtask -- docker down
+
+  # ## m2b-t16-keyring
+  # The live OS keyring round trip (B15). The test asserts `KeyringBackend::probe_available()`
+  # first, so a broken D-Bus setup fails loudly instead of silently testing the vault.
+  keyring-linux:
+    name: keyring-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the Secret Service
+        run: sudo apt-get install -y gnome-keyring dbus-x11
+      - name: Live keyring round trip (gnome-keyring over D-Bus)
+        run: |
+          dbus-run-session -- bash -c 'echo hv | gnome-keyring-daemon --unlock --components=secrets && HACIVAT_KEYRING_LIVE=1 cargo test --locked -p hacivat-secrets -- --ignored live_keyring_round_trip'
+
+  keyring-windows:
+    name: keyring-windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Live keyring round trip (Windows Credential Manager)
+        env:
+          HACIVAT_KEYRING_LIVE: "1"
+        run: cargo test --locked -p hacivat-secrets -- --ignored live_keyring_round_trip
+
+  # No D-Bus session on this runner: the Linux backend must fall back to the vault. Task 6
+  # owns the test and writes it as `#[ignore = "ci-linux"]`.
+  vault-linux:
+    name: vault-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Vault fallback without a Secret Service
+        run: cargo test --locked -p hacivat-secrets --test fallback -- --include-ignored linux_without_secret_service_uses_vault

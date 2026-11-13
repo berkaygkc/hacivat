@@ -58,10 +58,23 @@ x-mariadb-health: &mariadb-health
 x-mysql-init: &mysql-init
   - ./init/mysql.sql:/docker-entrypoint-initdb.d/00-fixtures.sql:ro
 
+# Generated files (ssh host public keys, the client key pairs, the mysql84 CA) land in
+# $HV_ARTIFACTS, which `cargo xtask docker` sets to <main checkout>/target/docker. Run by hand
+# without it, they land in ./artifacts (git-ignored).
+x-artifacts: &artifacts
+  - ${HV_ARTIFACTS:-./artifacts}:/artifacts
+
+x-ssh-health: &ssh-health
+  test: ["CMD-SHELL", "ssh-keyscan -T 2 -p 22 127.0.0.1 2>/dev/null | grep -q ssh-ed25519"]
+  interval: 2s
+  timeout: 5s
+  retries: 60
+  start_period: 60s
+
 services:
   # Below the PostgreSQL floor (14): the `server.unsupported_version` fixture.
   pg13:
-    image: postgres:13
+    image: postgres:13@sha256:4689940c683801b4ab839ab3b0a0a3555a5fe425371422310944e89eca7d8068
     container_name: m2a-pg13
     environment: *pg-env
     volumes: *pg-init
@@ -69,7 +82,7 @@ services:
     healthcheck: *pg-health
 
   pg14:
-    image: postgres:14
+    image: postgres:14@sha256:980b7cb415aa0f812f65bdec8f6f599be408d8ed9c83ffcaa12650eac397b264
     container_name: m2a-pg14
     environment: *pg-env
     volumes: *pg-init
@@ -77,7 +90,7 @@ services:
     healthcheck: *pg-health
 
   pg15:
-    image: postgres:15
+    image: postgres:15@sha256:5a407822929c3789ff5154d3d35bd7e2090318149344c8a3d4ca942b035822ed
     container_name: m2a-pg15
     environment: *pg-env
     volumes: *pg-init
@@ -85,7 +98,7 @@ services:
     healthcheck: *pg-health
 
   pg16:
-    image: postgres:16
+    image: postgres:16@sha256:63e83b5a3dc36a917dccb76fe1bd2ac51f1ec9c1deb47ff20d4f04233bf6eae9
     container_name: m2a-pg16
     environment: *pg-env
     volumes: *pg-init
@@ -93,7 +106,7 @@ services:
     healthcheck: *pg-health
 
   pg17:
-    image: postgres:17
+    image: postgres:17@sha256:846a7ddaa67a4b354ae1d21087b683901aa6113a4ed626d3787cfbf6c85e3e07
     container_name: m2a-pg17
     environment: *pg-env
     volumes: *pg-init
@@ -101,7 +114,7 @@ services:
     healthcheck: *pg-health
 
   pg18:
-    image: postgres:18
+    image: postgres:18@sha256:b9f6b8ff03b62f3cfd9d9ba3fe56226a9991c79d3fb46fd46536263bf02be553
     container_name: m2a-pg18
     environment: *pg-env
     volumes: *pg-init
@@ -110,7 +123,7 @@ services:
 
   # ssl=on with a self-signed certificate generated at initdb (pg-tls/init.sh).
   pg17-tls:
-    image: postgres:17
+    image: postgres:17@sha256:846a7ddaa67a4b354ae1d21087b683901aa6113a4ed626d3787cfbf6c85e3e07
     container_name: m2a-pg17-tls
     environment: *pg-env
     volumes:
@@ -131,7 +144,7 @@ services:
     healthcheck: *pg-health
 
   mysql80:
-    image: mysql:8.0
+    image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
     container_name: m2a-mysql80
     environment: *mysql-env
     volumes: *mysql-init
@@ -141,7 +154,7 @@ services:
   # Its auto-generated /var/lib/mysql/ca.pem is copied to <main>/target/docker/mysql84-ca.pem
   # by `cargo xtask docker up`.
   mysql84:
-    image: mysql:8.4
+    image: mysql:8.4@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
     container_name: m2a-mysql84
     environment: *mysql-env
     volumes: *mysql-init
@@ -149,7 +162,7 @@ services:
     healthcheck: *mysql-health
 
   mariadb106:
-    image: mariadb:10.6
+    image: mariadb:10.6@sha256:c7d726a1c0d29e486a1ab4ef0c76c75431a11428e76c50e99ba32106cea04114
     container_name: m2a-mariadb106
     environment: *mariadb-env
     volumes: *mysql-init
@@ -157,7 +170,7 @@ services:
     healthcheck: *mariadb-health
 
   mariadb1011:
-    image: mariadb:10.11
+    image: mariadb:10.11@sha256:7d829180b5b2a9ba74f6242876ab401a0d7dd338a807e522ef92bc9698760f20
     container_name: m2a-mariadb1011
     environment: *mariadb-env
     volumes: *mysql-init
@@ -165,9 +178,71 @@ services:
     healthcheck: *mariadb-health
 
   mariadb114:
-    image: mariadb:11.4
+    image: mariadb:11.4@sha256:5e73baf8179b29f115101bb102763a47a017361f3e9792daccba6646c3ab1532
     container_name: m2a-mariadb114
     environment: *mariadb-env
     volumes: *mysql-init
     ports: ["127.0.0.1:33114:3306"]
     healthcheck: *mariadb-health
+
+  # pg17-auth (Task 16): the md5 (`hv_md5`) and cleartext-password (`hv_clear`) roles, through
+  # pg-auth/pg_hba.conf. Port 54347: 54327 is pg17-tls.
+  pg17-auth:
+    image: postgres:17@sha256:846a7ddaa67a4b354ae1d21087b683901aa6113a4ed626d3787cfbf6c85e3e07
+    container_name: m2a-pg17-auth
+    environment: *pg-env
+    volumes:
+      - ./init/pg.sql:/docker-entrypoint-initdb.d/00-fixtures.sql:ro
+      - ./pg-auth:/hv-pg-auth:ro
+      - ./pg-auth/init.sh:/docker-entrypoint-initdb.d/10-auth.sh:ro
+    ports: ["127.0.0.1:54347:5432"]
+    healthcheck: *pg-health
+
+  # Writes the client key pairs to the artifacts directory (once, never committed), then stays
+  # up so its healthcheck can see them. The sshd services wait for it.
+  ssh-client-keys:
+    build: ./sshd
+    image: hacivat-m2a-sshd:1
+    container_name: m2a-ssh-client-keys
+    command: ["keygen"]
+    volumes: *artifacts
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /artifacts/ssh-client-ed25519.pub && test -f /artifacts/ssh-client-ed25519-enc.pub"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  # The first bastion: published on the host, and the only way to reach sshd-b.
+  sshd-a:
+    build: ./sshd
+    image: hacivat-m2a-sshd:1
+    container_name: m2a-sshd-a
+    environment:
+      HV_SSHD_ID: sshd-a
+    volumes: *artifacts
+    ports: ["127.0.0.1:2222:22"]
+    networks: [default, ssh-inner]
+    depends_on:
+      ssh-client-keys:
+        condition: service_healthy
+    healthcheck: *ssh-health
+
+  # The second bastion: no published port. The host reaches it only through sshd-a
+  # (ProxyJump), over the ssh-inner network.
+  sshd-b:
+    build: ./sshd
+    image: hacivat-m2a-sshd:1
+    container_name: m2a-sshd-b
+    environment:
+      HV_SSHD_ID: sshd-b
+    volumes: *artifacts
+    networks: [ssh-inner, default]
+    depends_on:
+      ssh-client-keys:
+        condition: service_healthy
+    healthcheck: *ssh-health
+
+networks:
+  default: {}
+  ssh-inner: {}
