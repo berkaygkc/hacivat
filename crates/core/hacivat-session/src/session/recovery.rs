@@ -121,11 +121,24 @@ const MYSQL_CONNECTION_ENDING: [(i64, ErrClass); 6] = [
 /// (fix round 2, I6): a recovery case after connect (PostgreSQL's `57P01`/`57P02`
 /// `server.shutdown`, `57P03` `server.starting`, `08006` `network.reset`), or one of MySQL's
 /// connection-ending codes. `None`: an ordinary statement error.
+///
+/// Fix round 3 (I7): on PostgreSQL only a `FATAL` or `PANIC` ends the connection. An `ERROR`
+/// with one of these SQLSTATEs is a remote server's failure relayed by `postgres_fdw` or
+/// `dblink`, and the local session (and its transaction) is fine. The severity is the
+/// server's `S` field: the non-localized `V` unless the server translates it; a translated
+/// one that does not read `FATAL` is found closed at the next round trip instead (safe).
 pub(crate) fn connection_ending(
     kind: DbmsKind,
     raw: &RawError,
     class: ErrClass,
 ) -> Option<ErrClass> {
+    if kind == DbmsKind::Postgres {
+        let severity = raw.server.as_ref()?.severity.as_deref()?;
+        let fatal = ["FATAL", "PANIC"]
+            .iter()
+            .any(|s| severity.eq_ignore_ascii_case(s));
+        return (fatal && is_recovery_case(class)).then_some(class);
+    }
     if is_recovery_case(class) {
         return Some(class);
     }
@@ -146,11 +159,42 @@ pub(crate) fn touches_tx(sql: &str) -> bool {
     sql.split(';').any(|statement| {
         let words = words(statement, true);
         match words.first().map(String::as_str) {
-            Some("BEGIN" | "START") => true,
+            // `XA START` / `XA BEGIN` open an XA transaction (fix round 3, R3).
+            Some("BEGIN" | "START" | "XA") => true,
             Some("SET") => words.iter().any(|w| w == "AUTOCOMMIT"),
             _ => false,
         }
     })
+}
+
+/// What a user statement leaves MySQL's `autocommit` at (fix round 3, I8): `Some(false)` after
+/// `SET [SESSION | LOCAL | @@session. | @@local. | @@]autocommit = 0 | OFF | FALSE`, `Some(true)`
+/// after `= 1 | ON | TRUE | DEFAULT`, the last one in a batch winning; `None` when it does not
+/// set it. A `SET GLOBAL` changes new sessions only, not this one.
+pub(crate) fn autocommit_set(sql: &str) -> Option<bool> {
+    let mut last = None;
+    for statement in sql.split(';') {
+        let words = words(statement, true);
+        if words.first().map(String::as_str) != Some("SET") {
+            continue;
+        }
+        for (i, w) in words.iter().enumerate() {
+            // Only a modifier right before it makes it global (`SET GLOBAL autocommit`,
+            // `@@global.autocommit`); any doubt reads as this session's, which errs toward
+            // "off" being remembered (the safe side).
+            let global =
+                i > 0 && matches!(words[i - 1].as_str(), "GLOBAL" | "PERSIST" | "PERSIST_ONLY");
+            if w != "AUTOCOMMIT" || global {
+                continue;
+            }
+            last = match words.get(i + 1).map(String::as_str) {
+                Some("0" | "OFF" | "FALSE") => Some(false),
+                Some("1" | "ON" | "TRUE" | "DEFAULT") => Some(true),
+                _ => last,
+            };
+        }
+    }
+    last
 }
 
 /// What a session did that a reconnect would lose (a first-keyword scan, B19).
@@ -304,7 +348,42 @@ mod tests {
     }
 
     #[test]
+    fn a_users_autocommit_setting_is_read_in_every_spelling() {
+        for off in [
+            "SET autocommit = 0",
+            "set autocommit=OFF",
+            "SET SESSION autocommit = 0",
+            "SET @@session.autocommit = 0",
+            "SET @@autocommit := FALSE",
+            "SET LOCAL autocommit = 0",
+            "SET @x = 1, autocommit = 0",
+            "SET autocommit = 1; SET autocommit = 0",
+        ] {
+            assert_eq!(autocommit_set(off), Some(false), "{off}");
+        }
+        for on in [
+            "SET autocommit = 1",
+            "SET autocommit = ON",
+            "SET @@session.autocommit = DEFAULT",
+            "SET autocommit = 0; SET autocommit = 1",
+        ] {
+            assert_eq!(autocommit_set(on), Some(true), "{on}");
+        }
+        for neither in [
+            "SET GLOBAL autocommit = 0",
+            "SET @@global.autocommit = 0",
+            "SET work_mem = '1MB'",
+            "SELECT 'SET autocommit = 0'",
+            "UPDATE t SET autocommit = 0",
+        ] {
+            assert_eq!(autocommit_set(neither), None, "{neither}");
+        }
+    }
+
+    #[test]
     fn a_transaction_anywhere_in_a_batch_is_seen() {
+        assert!(touches_tx("XA START 'x'"));
+        assert!(touches_tx("xa begin 'x'"));
         assert!(touches_tx("BEGIN"));
         assert!(touches_tx(
             "insert into t values (1); begin; update t set a = 2"
@@ -344,13 +423,36 @@ mod tests {
             connection_ending(DbmsKind::MySql, &mysql(1062), internal),
             None
         );
-        // PostgreSQL decides by class (57P01 is `server.shutdown`); a vendor code means nothing.
+        // PostgreSQL decides by class (57P01 is `server.shutdown`) and severity (I7); a vendor
+        // code means nothing.
+        let pg = |severity: Option<&str>| RawError {
+            kind: hacivat_driver::RawErrorKind::Db,
+            server: Some(hacivat_driver::ServerMessage {
+                sqlstate: Some("57P01".into()),
+                vendor_code: Some(4031),
+                severity: severity.map(str::to_string),
+                text: String::new(),
+                detail: None,
+                hint: None,
+                lang_hint: None,
+            }),
+        };
+        let shutdown = ErrClass::ServerShutdown;
+        for fatal in ["FATAL", "PANIC", "fatal"] {
+            assert_eq!(
+                connection_ending(DbmsKind::Postgres, &pg(Some(fatal)), shutdown),
+                Some(shutdown)
+            );
+        }
+        // A relayed remote failure (`postgres_fdw`, `dblink`), a translated severity, none.
+        for not_fatal in [Some("ERROR"), Some("ÖLÜMCÜL"), None] {
+            assert_eq!(
+                connection_ending(DbmsKind::Postgres, &pg(not_fatal), shutdown),
+                None
+            );
+        }
         assert_eq!(
-            connection_ending(DbmsKind::Postgres, &mysql(4031), ErrClass::ServerShutdown),
-            Some(ErrClass::ServerShutdown)
-        );
-        assert_eq!(
-            connection_ending(DbmsKind::Postgres, &mysql(4031), internal),
+            connection_ending(DbmsKind::Postgres, &pg(Some("FATAL")), internal),
             None
         );
     }

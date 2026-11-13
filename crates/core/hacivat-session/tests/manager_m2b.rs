@@ -750,20 +750,156 @@ async fn a_batch_that_begins_a_transaction_leaves_it_unknown_and_is_lost() {
     for sql in [
         "INSERT INTO t VALUES (1); BEGIN; UPDATE t SET a = 2",
         "SET autocommit = 0",
+        // Fix round 3, R3.
+        "XA START 'x'",
     ] {
-        let (m, f) = manager(
-            ok_pg().exec(vec![lost_and_failed(if sql.starts_with("SET") {
-                "SET"
-            } else {
-                "INSERT"
-            })]),
-        );
+        let first = sql.split(' ').next().unwrap();
+        let prefix: &'static str = match first {
+            "SET" => "SET",
+            "XA" => "XA",
+            _ => "INSERT",
+        };
+        let (m, f) = manager(ok_pg().exec(vec![lost_and_failed(prefix)]));
         connect_and_wait(&m).await;
         let s = default_session(&m);
         let _ = s.submit(user_exec(sql)).reply.await;
         wait_state(&m, |s| matches!(s, LiveState::Lost { .. })).await;
         assert_eq!(f.connect_calls(), 1, "{sql}");
     }
+}
+
+/// A PostgreSQL error with `sqlstate` at `severity`.
+fn pg_error(sqlstate: &str, severity: &str) -> hacivat_driver::RawError {
+    let mut e = db(sqlstate);
+    if let Some(server) = e.server.as_mut() {
+        server.severity = Some(severity.to_string());
+    }
+    e
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_relayed_remote_error_keeps_the_session_and_its_transaction() {
+    // Review H14 / I7: `postgres_fdw` and `dblink` relay a remote server's failure as a local
+    // ERROR with its SQLSTATE; the local connection and the user's transaction are fine.
+    for sqlstate in ["08006", "08001", "57P01"] {
+        let (m, f) = manager(ok_pg().exec(vec![
+            tx("BEGIN", TxStatus::InTx),
+            FakeExec {
+                result: Err(pg_error(sqlstate, "ERROR")),
+                tx_after: Some(TxStatus::Failed),
+                ..fails_once_with_reset("SELECT * FROM remote_t")
+            },
+            tx("ROLLBACK", TxStatus::Idle),
+        ]));
+        connect_and_wait(&m).await;
+        let s = default_session(&m);
+        ok(&s, user_exec("BEGIN")).await;
+        assert_eq!(
+            refusal(&s, user_exec("SELECT * FROM remote_t")).await,
+            ExecErrorKind::Db,
+            "{sqlstate}"
+        );
+        let now = snap(&s);
+        assert!(
+            matches!(now.state, SessionState::Idle) && now.tx.status == TxStatus::Failed,
+            "{sqlstate}: {now:?}"
+        );
+        // The transaction is still the user's to end.
+        ok(&s, user_exec("ROLLBACK")).await;
+        tokio::time::sleep(secs(40)).await;
+        assert_eq!(f.connect_calls(), 1, "{sqlstate}");
+        assert!(matches!(m.state(p().id), LiveState::Connected(_)));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_users_mysql_autocommit_off_ends_a_loss_lost_and_is_never_undone() {
+    // Review H13 / I8: after the user's own `SET autocommit = 0` the server keeps an implicit
+    // transaction; a lost `UPDATE` must not reconnect (a later COMMIT would commit nothing,
+    // and the reconnect would turn autocommit back on).
+    let (m, f) = manager_profile(
+        FakeDriver::new(DbmsKind::MySql).exec(vec![fails_once_with_reset("UPDATE")]),
+        mysql_profile(TlsMode::Disable),
+    );
+    let mut ev = m.events();
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    ok(&s, user_exec("SET autocommit = 0")).await;
+    assert_eq!(
+        refusal(&s, user_exec("UPDATE t SET a = 1")).await,
+        ExecErrorKind::ConnectionLost {
+            outcome_unknown: true
+        }
+    );
+    wait_state(&m, |s| matches!(s, LiveState::Lost { .. })).await;
+    let ConnectionEvent::SessionLost { lost, .. } = next_event(&mut ev).await else {
+        panic!("a SessionLost event");
+    };
+    assert!(lost.open_tx);
+    assert_eq!(
+        refusal(&s, Request::Tx(TxCommand::Commit)).await,
+        ExecErrorKind::NotConnected
+    );
+    tokio::time::sleep(secs(60)).await;
+    assert_eq!(f.connect_calls(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_idle_loss_under_the_users_autocommit_off_is_lost_and_turning_it_on_reconnects() {
+    // I8: even an idle loss (a ping) is `Lost` while the user's `autocommit = 0` holds; once
+    // they turn it back on, an idle loss reconnects again.
+    let mysql = || {
+        manager_profile(
+            FakeDriver::new(DbmsKind::MySql),
+            mysql_profile(TlsMode::Disable),
+        )
+    };
+    let (m, f) = mysql();
+    connect_and_wait(&m).await;
+    ok(
+        &default_session(&m),
+        user_exec("SET @@session.autocommit = OFF"),
+    )
+    .await;
+    drop_connections(&m, &f);
+    wait_state(&m, |s| matches!(s, LiveState::Lost { .. })).await;
+    assert_eq!(f.connect_calls(), 1);
+
+    let (m, f) = mysql();
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    ok(&s, user_exec("SET autocommit = 0")).await;
+    ok(&s, user_exec("SET autocommit = 1")).await;
+    lose_connection(&m, &f).await;
+    wait_connected(&m, p().id).await;
+    // A global setting is not this session's.
+    let (m, f) = mysql();
+    connect_and_wait(&m).await;
+    ok(&default_session(&m), user_exec("SET GLOBAL autocommit = 0")).await;
+    lose_connection(&m, &f).await;
+    wait_connected(&m, p().id).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_commit_whose_follow_up_probe_finds_the_loss_reports_no_rollback() {
+    // Review H15 / R4: the COMMIT succeeded (Idle observed); the schema re-probe after it
+    // finds the loss. The session was idle by then, so it reconnects and claims no rollback.
+    let (m, f) = manager(ok_pg().exec(vec![
+        tx("BEGIN", TxStatus::InTx),
+        tx("COMMIT", TxStatus::Idle),
+        fails_once_with_reset("SELECT current_database()"),
+    ]));
+    let mut ev = m.events();
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    ok(&s, Request::Tx(TxCommand::Begin)).await;
+    ok(&s, Request::Tx(TxCommand::Commit)).await;
+    let ConnectionEvent::SessionLost { lost, .. } = next_event(&mut ev).await else {
+        panic!("a SessionLost event");
+    };
+    assert!(!lost.open_tx, "{lost:?}");
+    assert!(matches!(m.state(p().id), LiveState::Connected(_)));
+    assert_eq!(f.connect_calls(), 2);
 }
 
 #[tokio::test(start_paused = true)]

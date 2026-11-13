@@ -29,9 +29,10 @@
 //!   - a loss is an I/O, protocol, timeout or TLS failure, or a server error that ends the
 //!     connection (`server.shutdown`, `server.starting`, MySQL's server-gone codes; fix round
 //!     2, I6);
-//!   - with a transaction open before the request that found the loss (never the status a
-//!     driver reports after it; fix round 2, C2), or the request in flight possibly opening one
-//!     (a `BEGIN`, `START` or `SET autocommit` in it, a user statement of a Manual session),
+//!   - with a transaction open by the last status seen before the loss (never the status a
+//!     driver reports after it; fix rounds 2 and 3, C2 and R4), or the request in flight
+//!     possibly opening one (a `BEGIN`, `START`, `XA` or `SET autocommit` in it, a user
+//!     statement of a Manual session), or the user's own MySQL `autocommit = 0` in force (I8),
 //!     nothing is replayed (fix round 1, C1): the session emits `SessionEvent::Lost` and breaks
 //!     (the profile is `Lost`, with Retry);
 //!   - otherwise (an idle session) it is not broken: it publishes `Connecting` (so it keeps
@@ -84,8 +85,8 @@ use crate::session::liveness::{LivenessAction, LivenessPolicy, Supervisor};
 use crate::session::readonly::run_guarded;
 // ## m2b-t17-liveness
 use crate::session::recovery::{
-    LostState, Tracked, connection_ending, is_recovery_case, lost_state, touches_tx,
-    track_statement,
+    LostState, Tracked, autocommit_set, connection_ending, is_recovery_case, lost_state,
+    touches_tx, track_statement,
 };
 use crate::session::schema::{Family, family, first_keyword};
 use crate::session::{
@@ -231,6 +232,7 @@ pub(crate) fn spawn_supervised(
         last_class: None,
         tracked: Tracked::default(),
         lost: None,
+        autocommit_off: false,
     };
     let ctl = Ctl {
         id,
@@ -284,6 +286,9 @@ pub(crate) struct Core {
     tracked: Tracked,
     /// What the last loss took, until the reconnect reports it.
     lost: Option<LostState>,
+    /// MySQL: the user's own `SET autocommit = 0` is in force (fix round 3, I8). Every
+    /// statement then runs in an implicit transaction, as in Manual mode.
+    autocommit_off: bool,
 }
 
 fn not_connected() -> ExecError {
@@ -401,6 +406,8 @@ impl Core {
                 // ## m2b-t17-liveness: a reset session starts with nothing to lose.
                 if reset.is_ok() {
                     self.tracked = Tracked::default();
+                    // `COM_RESET_CONNECTION` restores the session's `autocommit`.
+                    self.autocommit_off = false;
                 }
                 reset
             }
@@ -444,6 +451,11 @@ impl Core {
         // ## m2b-t17-liveness: what a reconnect would lose (B19).
         if origin == ExecOrigin::User {
             track_statement(&mut self.tracked, sql);
+            if family(self.kind) == Family::MySql
+                && let Some(on) = autocommit_set(sql)
+            {
+                self.autocommit_off = !on;
+            }
         }
         if origin == ExecOrigin::User && needs_schema_reprobe(sql) {
             self.reprobe().await;
@@ -514,6 +526,8 @@ impl Core {
                         }
                         if self.tx.mode == TxMode::Manual && mysql {
                             self.control("SET autocommit = 1").await?;
+                            // Whatever the user had set is overridden now.
+                            self.autocommit_off = false;
                         }
                     }
                 }
@@ -578,7 +592,7 @@ impl Core {
     // ## m2b-t17-liveness
 
     /// Notes what the loss took: the transaction is gone, its mode and isolation stay (B19).
-    /// `before` is the status before the request that found the loss (fix round 2, C2): a
+    /// `before` is the last status observed before the loss (fix rounds 2 and 3, C2 and R4): a
     /// driver's status after a loss says nothing about the transaction.
     fn note_loss(&mut self, before: TxStatus) {
         let tracked = Tracked {
@@ -1018,9 +1032,7 @@ async fn keepalive(core: &mut Core, ctl: &mut Ctl, timeout: std::time::Duration)
             );
             core.broken = Some(class);
             core.close().await;
-            // A ping changes no transaction: the status is the one before it.
-            let before = core.tx.status;
-            match begin_recovery(core, ctl, class, before, false) {
+            match begin_recovery(core, ctl, class, false) {
                 Some(reconnect) => Flow::Recover(reconnect),
                 None => {
                     break_now(core, ctl, class).await;
@@ -1036,15 +1048,15 @@ async fn keepalive(core: &mut Core, ctl: &mut Ctl, timeout: std::time::Duration)
 /// session). The dead connection is already closed.
 ///
 /// Fix round 1, C1: only an idle session reconnects. When the lost connection had a
-/// transaction open (`before`, the status before the request that found the loss; fix round 2,
-/// C2), or the request in flight may have opened one (`tx_unknown`), nothing is replayed and
-/// nothing runs on a new connection: the session tells what was lost (`SessionEvent::Lost`)
-/// and returns `None`, so it breaks (`Lost` with Retry).
+/// transaction open (the last status observed before the loss, never one read after it; fix
+/// rounds 2 and 3, C2 and R4), or the request in flight may have opened one (`tx_unknown`), or
+/// the user's own MySQL `autocommit = 0` is in force (I8), nothing is replayed and nothing
+/// runs on a new connection: the session tells what was lost (`SessionEvent::Lost`) and
+/// returns `None`, so it breaks (`Lost` with Retry).
 fn begin_recovery(
     core: &mut Core,
     ctl: &mut Ctl,
     class: ErrClass,
-    before: TxStatus,
     tx_unknown: bool,
 ) -> Option<BoxFuture<'static, Result<LiveConnection, ConnectError>>> {
     let reconnector = ctl.hooks.reconnect.clone()?;
@@ -1052,8 +1064,14 @@ fn begin_recovery(
     if !is_recovery_case(class) || closing {
         return None;
     }
+    // The last status observed before the loss (`observe` reads none after it; fix round 3,
+    // R4): a transaction that just committed is not reported rolled back.
+    let before = core.tx.status;
     core.note_loss(before);
-    if tx_unknown || core.lost.as_ref().is_some_and(|l| l.open_tx) {
+    // I8: under the user's own `autocommit = 0` a transaction may be open whatever the status
+    // says, and a reconnect would silently turn autocommit back on.
+    let unknown = tx_unknown || core.autocommit_off;
+    if unknown || core.lost.as_ref().is_some_and(|l| l.open_tx) {
         tracing::debug!(
             session = ctl.id.0,
             class = class.id(),
@@ -1413,7 +1431,7 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
     let mut reply = Some(reply);
     if let Some(class) = core.broken {
         core.close().await;
-        recovery = begin_recovery(core, ctl, class, tx_before.status, tx_unknown);
+        recovery = begin_recovery(core, ctl, class, tx_unknown);
         if recovery.is_some()
             && let Some(request) = retry
             && matches!(

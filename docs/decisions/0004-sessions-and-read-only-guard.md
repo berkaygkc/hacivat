@@ -481,22 +481,38 @@ restarts. Only recovery asks, so at a first connect `ssh.channel_open` stays a h
 
 - **Only an idle session reconnects (fix round 1, C1, controller ruling).** When the lost
   connection had a transaction open (`InTx`, `Failed`), or the request in flight may have opened
-  one (its state is unknown: a `Tx(Begin)`, a user statement with a `BEGIN`/`START` or a
-  `SET autocommit` anywhere in it, any user statement of a Manual session), nothing is replayed
+  one (its state is unknown: a `Tx(Begin)`, a user statement with a `BEGIN`/`START`/`XA` or a
+  `SET autocommit` anywhere in it, any user statement of a Manual session), or the user's own
+  MySQL `autocommit = 0` is in force (see below), nothing is replayed
   and nothing the user sent for that connection ever runs on another: the session emits
   `SessionEvent::Lost` (with `open_tx`) and breaks; the profile is `Lost` (Retry), then
   `SessionLost { lost }`. Rejected: reconnecting and refusing the next `COMMIT` (a later
   statement would still run outside the lost transaction).
-- **"Had a transaction open" is the status before the request that found the loss (fix round
-  2, C2).** A driver's status after a loss says nothing about the transaction: the PostgreSQL
+- **"Had a transaction open" is the last status seen before the loss (fix rounds 2 and 3, C2
+  and R4).** A driver's status after a loss says nothing about the transaction: the PostgreSQL
   driver reports `Failed` for a connection it found closed (ADR 0002 m2b-t10). So the actor
   never reads (`observe`) a status after an error that broke the session, and the loss's
-  `open_tx` comes from the status captured before the request (a keep-alive changes none). An
-  idle autocommit session whose statement finds the loss therefore reconnects; that statement
-  alone is `ConnectionLost { outcome_unknown: true }`, and the toast claims no rollback.
+  `open_tx` is the session's status at that point: the last one observed before the loss (a
+  keep-alive changes none; a `COMMIT` that succeeded before its follow-up probe found the loss
+  left `Idle`, so no rollback is claimed for a transaction that committed). An idle autocommit
+  session whose statement finds the loss therefore reconnects; that statement alone is
+  `ConnectionLost { outcome_unknown: true }`, and the toast claims no rollback.
+- **The user's own MySQL `autocommit = 0` (fix round 3, I8).** A successful user
+  `SET [SESSION | LOCAL | @@session. | @@local. | @@]autocommit = 0 | OFF | FALSE` (MySQL,
+  MariaDB) is remembered until `= 1 | ON | TRUE | DEFAULT`, a reset, or the app's own switch to
+  Auto. While it holds, the server runs every statement in an implicit transaction, so the
+  session treats a loss as one inside a transaction (`Lost`, `SessionLost { open_tx }`): it
+  never reconnects, which would also silently turn autocommit back on. `SET GLOBAL` (only the
+  word right before the variable is read) changes other sessions and is ignored; any doubt
+  reads as this session's.
 - **A connection-ending server error is a loss (fix round 2, I6).** A server error whose class
   is a recovery case after connect (PostgreSQL `57P01`/`57P02` `server.shutdown`, `57P03`
-  `server.starting`, `08006` `network.reset`), or one of MySQL's connection-ending codes (1053
+  `server.starting`, `08006` `network.reset`; on PostgreSQL only at severity `FATAL` or `PANIC`,
+  fix round 3, I7: an `ERROR` with these SQLSTATEs is a remote server's failure relayed by
+  `postgres_fdw` or `dblink`, and the local session and its transaction stay; the severity is
+  the server's `S`, which is the non-localized `V` unless the server translates it, and a
+  translated one that does not read `FATAL` is found closed at the next round trip instead), or
+  one of MySQL's connection-ending codes (1053
   server shutdown, 1927/3169 connection killed, 4031 interaction timeout; 2006/2013 should a
   driver report them as server errors), breaks the session on the request it answered, which
   keeps the server's message. So the recovery starts there, not one request late, and a request
@@ -592,7 +608,11 @@ replay timeout), H10 (an edit during the first connect, same and moved destinati
 H11 (`57P01`, `57P03`, MySQL 4031 answering a statement start the recovery; an ordinary error
 does not), H12 (an idle autocommit statement, a read-only session's schema switch and an
 internal read that find the loss reconnect; a statement inside a transaction is still `Lost`),
-and a batch with a later `BEGIN` or `SET autocommit` is `Lost`. A Docker test ends the default
+and a batch with a later `BEGIN`, `SET autocommit` or `XA START` is `Lost`; round 3: H13 (the
+user's MySQL `autocommit = 0`: a lost `UPDATE` and an idle loss are `Lost`, a later `COMMIT`
+never runs, `= 1` and `SET GLOBAL` reconnect), H14 (a relayed `ERROR` `08006`/`08001`/`57P01`
+keeps the session and its `Failed` transaction), H15 (a `COMMIT` whose follow-up probe finds the
+loss reconnects with no rollback claimed). A Docker test ends the default
 session's backend from the admin connection on pg17 and mysql84 (`pg_terminate_backend`,
 `KILL`); an Auto-mode user `SELECT 1` finds the loss within three round trips, the session
 reconnects, and `SessionLost` claims no rollback.
