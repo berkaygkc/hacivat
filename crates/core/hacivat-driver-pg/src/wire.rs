@@ -20,8 +20,9 @@
 //!   `CopyInResponse` (`G`) or `CopyBothResponse` (`W`), and the server would wait in copy-in
 //!   mode for data that never comes, with no `ReadyForQuery`. The observer answers it itself
 //!   with a `CopyFail`, followed by a `Sync` when the statement came through the extended
-//!   protocol (the server ignores the `Sync` already sent during copy-in, then discards until
-//!   the next one). The server ends the copy with `ErrorResponse` and exactly one
+//!   protocol and its own `Sync` already started out (the server ignores that one during
+//!   copy-in, then discards until the next one); a `Sync` not yet written follows the
+//!   `CopyFail` and ends the discard itself, so exactly one `Sync` counts (R1). The server ends the copy with `ErrorResponse` and exactly one
 //!   `ReadyForQuery`, which completes the failed request in `tokio-postgres` and in the count
 //!   below, so the connection stays usable and the status exact. The bytes go out on a frontend
 //!   message boundary only, never inside a message `tokio-postgres` is writing.
@@ -107,6 +108,17 @@ pub enum ObserverMode {
 struct Tag {
     bytes: [u8; TAG_CAP],
     len: usize,
+}
+
+/// How [`WireState::settle`] ended (round 1 re-review, R3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Settled {
+    /// Every `ReadyForQuery` owed arrived: the status is exact.
+    Synced,
+    /// The connection ended first (a FATAL error, the server closing it).
+    Closed,
+    /// The bound expired with `ReadyForQuery` messages still owed.
+    Expired,
 }
 
 /// What the observers of one connection share (Q11, Q12).
@@ -245,9 +257,8 @@ impl WireState {
         self.copy_refused.swap(false, Ordering::SeqCst)
     }
 
-    /// Waits until [`WireState::synced`], at most `limit`; whether every `ReadyForQuery` owed
-    /// arrived (`false` also when the connection ended first).
-    pub async fn settle(&self, limit: Duration) -> bool {
+    /// Waits until [`WireState::synced`], at most `limit`, and says how the wait ended.
+    pub(crate) async fn settle(&self, limit: Duration) -> Settled {
         let wait = async {
             loop {
                 let mut notified = std::pin::pin!(self.notify.notified());
@@ -258,9 +269,14 @@ impl WireState {
                 notified.await;
             }
         };
-        let _ = tokio::time::timeout(limit, wait).await;
-        !self.closed.load(Ordering::SeqCst)
-            && self.ready.load(Ordering::SeqCst) >= self.expected.load(Ordering::SeqCst)
+        let expired = tokio::time::timeout(limit, wait).await.is_err();
+        if self.closed.load(Ordering::SeqCst) {
+            Settled::Closed
+        } else if expired {
+            Settled::Expired
+        } else {
+            Settled::Synced
+        }
     }
 
     fn on_auth_ok(&self) {
@@ -452,6 +468,9 @@ struct Writer {
     /// The type of the last statement-running message written: `Q` (simple) or `E`
     /// (extended `Execute`).
     last_command: u8,
+    // ## m2b-t10 round 1 re-review (R1)
+    /// A `Sync` was written (its type byte at least) since the last `Execute`.
+    sync_since_execute: bool,
 }
 
 impl Writer {
@@ -481,6 +500,13 @@ impl Writer {
                 }
                 if self.header_len == 0 && matches!(data[0], b'Q' | b'E') {
                     self.last_command = data[0];
+                }
+                if self.header_len == 0 {
+                    match data[0] {
+                        b'E' => self.sync_since_execute = false,
+                        b'S' => self.sync_since_execute = true,
+                        _ => {}
+                    }
                 }
                 let n = (5 - self.header_len).min(data.len());
                 self.header[self.header_len..self.header_len + n].copy_from_slice(&data[..n]);
@@ -546,6 +572,7 @@ impl<S> Observer<S> {
                 header_len: 0,
                 left: 0,
                 last_command: 0,
+                sync_since_execute: false,
             },
             inject: [0; INJECT_CAP],
             inject_len: 0,
@@ -606,7 +633,10 @@ impl<S> Observer<S> {
         }
     }
 
-    /// Queues `CopyFail` (and `Sync` after an extended `Execute`) for the copy just refused.
+    /// Queues `CopyFail` for the copy just refused, and a `Sync` after an extended `Execute`
+    /// whose own `Sync` already started out (the server ignores that one in copy-in). When the
+    /// library's `Sync` is not written yet (a partial write), it follows the `CopyFail` and ends
+    /// the discard itself: a second one would draw an uncounted `ReadyForQuery` (R1).
     fn queue_copy_fail(&mut self) {
         let mut msg = [0u8; INJECT_CAP];
         let body = COPY_FAIL_REASON.len() + 1;
@@ -614,7 +644,7 @@ impl<S> Observer<S> {
         msg[1..5].copy_from_slice(&u32::try_from(body + 4).unwrap_or(0).to_be_bytes());
         msg[5..5 + COPY_FAIL_REASON.len()].copy_from_slice(COPY_FAIL_REASON);
         let mut len = 5 + body;
-        if self.writer.last_command == b'E' {
+        if self.writer.last_command == b'E' && self.writer.sync_since_execute {
             msg[len..len + 5].copy_from_slice(&[b'S', 0, 0, 0, 4]);
             len += 5;
         }
