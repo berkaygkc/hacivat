@@ -15,7 +15,7 @@ pub mod probe;
 pub mod sqlite;
 
 pub use input::{InputViolation, MAX_STATEMENT_BYTES, check_input};
-pub use label::{access_label, remediation};
+pub use label::{access_label, remediation, remediation_for};
 pub use plan::{GuardPlan, ResetKind, plan_for};
 pub use post::{GapReason, PostCheck, PostFacts, TxStatusLite, check_post};
 pub use probe::{RoleFindings, RoleWarning, interpret_probe, role_probe_sql};

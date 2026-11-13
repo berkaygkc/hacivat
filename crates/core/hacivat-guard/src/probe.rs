@@ -40,19 +40,22 @@ pub struct RoleFindings {
 ///
 /// 1. The role flags, `bool_or` over those roles (always one row: a role is a member of
 ///    itself).
-/// 2. The dangerous predefined roles among them.
-/// 3. Whether any of them can write: owns a user relation; holds `INSERT`/`UPDATE`/`DELETE`/
-///    `TRUNCATE` on one, or column-level `INSERT`/`UPDATE` (`has_any_column_privilege`); holds
-///    `USAGE` or `UPDATE` on a sequence; or holds `CREATE` on a user schema (`public` on
-///    clusters created before PostgreSQL 15 or upgraded from one, and the database owner's
-///    `public` on 15+). Schemas are filtered with `!~ '^pg_'`, which needs no escape and so
-///    does not depend on `standard_conforming_strings`.
+/// 2. The dangerous predefined roles among them. `pg_maintain` (PostgreSQL 17+: `ANALYZE`,
+///    `LOCK … ACCESS EXCLUSIVE` on every relation) simply never matches on older servers.
+/// 3. Whether any of them can write or create: owns a user relation; holds `INSERT`/`UPDATE`/
+///    `DELETE`/`TRUNCATE` on one, or column-level `INSERT`/`UPDATE`
+///    (`has_any_column_privilege`); holds `USAGE` or `UPDATE` on a sequence; holds `CREATE` on
+///    a user schema (`public` on clusters created before PostgreSQL 15 or upgraded from one,
+///    and the database owner's `public` on 15+); or has `CREATEDB` or `CREATE` on the database
+///    (round 3, m-4: folded in here so row 1 keeps its four columns). Schemas are filtered
+///    with `!~ '^pg_'`, which needs no escape and so does not depend on
+///    `standard_conforming_strings`.
 /// 4. TEMP on the database.
 /// 5. The extensions that reach other servers.
 const PG_PROBE: [&str; 5] = [
     "SELECT bool_or(rolsuper), bool_or(rolbypassrls), bool_or(rolreplication), bool_or(rolcreaterole) FROM pg_roles WHERE pg_has_role(current_user, oid, 'MEMBER')",
-    "SELECT r.rolname FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program','pg_signal_backend','pg_write_all_data')",
-    "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE c.relkind IN ('r','p','v','m','f','S') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND (c.relowner = r.oid OR CASE WHEN c.relkind = 'S' THEN has_sequence_privilege(r.oid, c.oid, 'USAGE, UPDATE') ELSE has_table_privilege(r.oid, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') OR has_any_column_privilege(r.oid, c.oid, 'INSERT, UPDATE') END)) OR EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND has_schema_privilege(r.oid, n.oid, 'CREATE'))",
+    "SELECT r.rolname FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program','pg_signal_backend','pg_write_all_data','pg_maintain')",
+    "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE c.relkind IN ('r','p','v','m','f','S') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND (c.relowner = r.oid OR CASE WHEN c.relkind = 'S' THEN has_sequence_privilege(r.oid, c.oid, 'USAGE, UPDATE') ELSE has_table_privilege(r.oid, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') OR has_any_column_privilege(r.oid, c.oid, 'INSERT, UPDATE') END)) OR EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND has_schema_privilege(r.oid, n.oid, 'CREATE')) OR EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND (r.rolcreatedb OR has_database_privilege(r.oid, current_database(), 'CREATE')))",
     "SELECT has_database_privilege(current_database(), 'TEMP')",
     "SELECT extname FROM pg_extension WHERE extname IN ('dblink','postgres_fdw','pg_net','http')",
 ];
@@ -68,7 +71,7 @@ const PG_ROLE_FLAGS: [RoleWarning; 4] = [
 ];
 
 /// Row set 2's names (the probe's `IN` list) and the warning each adds.
-const PG_PREDEFINED_ROLES: [(&str, RoleWarning); 5] = [
+const PG_PREDEFINED_ROLES: [(&str, RoleWarning); 6] = [
     ("pg_read_server_files", RoleWarning::ServerFileRoles),
     ("pg_write_server_files", RoleWarning::ServerFileRoles),
     (
@@ -77,6 +80,9 @@ const PG_PREDEFINED_ROLES: [(&str, RoleWarning); 5] = [
     ),
     ("pg_signal_backend", RoleWarning::SignalBackend),
     ("pg_write_all_data", RoleWarning::WritePrivileges),
+    // Round 3, m-4: maintenance and `LOCK` on every relation, which a read-only transaction
+    // does not stop.
+    ("pg_maintain", RoleWarning::WritePrivileges),
 ];
 
 /// Row set 5's names (the probe's `IN` list). A warning carries the name from this list, never

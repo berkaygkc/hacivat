@@ -1,7 +1,8 @@
 //! The honest access label and the remediation SQL (D-035, MCP-09 step 1, C19, Q21).
 
 use hacivat_guard::{
-    RoleFindings, RoleWarning, access_label, interpret_probe, remediation, role_probe_sql,
+    RoleFindings, RoleWarning, access_label, interpret_probe, remediation, remediation_for,
+    role_probe_sql,
 };
 use hacivat_proto::{AccessLabel, DbmsKind};
 
@@ -141,6 +142,46 @@ fn remediation_is_exact() {
     );
     for k in [DbmsKind::MariaDb, DbmsKind::Sqlite, DbmsKind::MsSql] {
         assert_eq!(remediation(k), None, "{k:?}");
+    }
+}
+
+const PG13_REMEDIATION: &str = "CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT USAGE ON SCHEMA <schema> TO <role>;\nGRANT SELECT ON ALL TABLES IN SCHEMA <schema> TO <role>;\nGRANT SELECT ON ALL SEQUENCES IN SCHEMA <schema> TO <role>;\nALTER DEFAULT PRIVILEGES IN SCHEMA <schema> GRANT SELECT ON TABLES TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;\n-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;";
+
+#[test]
+fn postgres_remediation_follows_the_server_version() {
+    // Round 3, m-7: `pg_read_all_data` exists from PostgreSQL 14.
+    let current = remediation(DbmsKind::Postgres);
+    for major in [None, Some(14), Some(15), Some(18), Some(u32::MAX)] {
+        assert_eq!(
+            remediation_for(DbmsKind::Postgres, major),
+            current,
+            "{major:?}"
+        );
+    }
+    for major in [Some(13), Some(12), Some(9), Some(0)] {
+        assert_eq!(
+            remediation_for(DbmsKind::Postgres, major),
+            Some(PG13_REMEDIATION),
+            "{major:?}"
+        );
+    }
+    let s = PG13_REMEDIATION;
+    assert!(!s.contains("pg_read_all_data") && !s.contains("NOINHERIT"));
+    for line in s.lines().filter(|l| l.contains("PUBLIC")) {
+        assert!(line.starts_with("-- optional: "), "{line}");
+    }
+}
+
+#[test]
+fn other_engines_ignore_the_version() {
+    for major in [None, Some(5), Some(8), Some(13)] {
+        assert_eq!(
+            remediation_for(DbmsKind::MySql, major),
+            remediation(DbmsKind::MySql)
+        );
+        for k in [DbmsKind::MariaDb, DbmsKind::Sqlite, DbmsKind::MsSql] {
+            assert_eq!(remediation_for(k, major), None, "{k:?} {major:?}");
+        }
     }
 }
 

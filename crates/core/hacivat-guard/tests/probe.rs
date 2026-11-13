@@ -52,8 +52,9 @@ fn probe_sql_per_engine() {
         [
             // Fix round 2 (I-1): rows 1 and 3 cover every role current_user is a MEMBER of.
             "SELECT bool_or(rolsuper), bool_or(rolbypassrls), bool_or(rolreplication), bool_or(rolcreaterole) FROM pg_roles WHERE pg_has_role(current_user, oid, 'MEMBER')",
-            "SELECT r.rolname FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program','pg_signal_backend','pg_write_all_data')",
-            "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE c.relkind IN ('r','p','v','m','f','S') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND (c.relowner = r.oid OR CASE WHEN c.relkind = 'S' THEN has_sequence_privilege(r.oid, c.oid, 'USAGE, UPDATE') ELSE has_table_privilege(r.oid, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') OR has_any_column_privilege(r.oid, c.oid, 'INSERT, UPDATE') END)) OR EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND has_schema_privilege(r.oid, n.oid, 'CREATE'))",
+            "SELECT r.rolname FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program','pg_signal_backend','pg_write_all_data','pg_maintain')",
+            // Round 3 (m-4): CREATEDB and database CREATE folded into row 3.
+            "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE c.relkind IN ('r','p','v','m','f','S') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND (c.relowner = r.oid OR CASE WHEN c.relkind = 'S' THEN has_sequence_privilege(r.oid, c.oid, 'USAGE, UPDATE') ELSE has_table_privilege(r.oid, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') OR has_any_column_privilege(r.oid, c.oid, 'INSERT, UPDATE') END)) OR EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND has_schema_privilege(r.oid, n.oid, 'CREATE')) OR EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND (r.rolcreatedb OR has_database_privilege(r.oid, current_database(), 'CREATE')))",
             "SELECT has_database_privilege(current_database(), 'TEMP')",
             "SELECT extname FROM pg_extension WHERE extname IN ('dblink','postgres_fdw','pg_net','http')",
         ]
@@ -69,8 +70,9 @@ fn probe_sql_per_engine() {
 /// What PostgreSQL 13, 15 and 18 returned for rows 1 and 3 of the corrected probe, run as
 /// `hv_ro` in each scenario (fix round 2, I-1; throwaway containers; the versions agreed, and
 /// `pg_read_all_data`, new in 14, ran on 15 and 18 only). Rows 2 and 5 were empty and row 4
-/// (TEMP, granted to PUBLIC by default) true throughout.
-const PG_SCENARIOS: [(&str, [bool; 4], bool); 11] = [
+/// (TEMP, granted to PUBLIC by default) true throughout. Round 3 (m-4, m-7) added the last four,
+/// run again on 13, 15 and 18.
+const PG_SCENARIOS: [(&str, [bool; 4], bool); 15] = [
     ("SELECT only", [false; 4], false),
     ("pg_read_all_data (the remediation)", [false; 4], false),
     ("member of a superuser role", [true; 4], true),
@@ -82,6 +84,10 @@ const PG_SCENARIOS: [(&str, [bool; 4], bool); 11] = [
     ("member of a table's owner", [false; 4], true),
     ("database owner", [false; 4], true),
     ("SELECT only, after revokes", [false; 4], false),
+    ("CREATEDB", [false; 4], true),
+    ("member of a CREATEDB role", [false; 4], true),
+    ("CREATE on the database", [false; 4], true),
+    ("the PostgreSQL 13 remediation", [false; 4], false),
 ];
 
 #[test]
@@ -218,6 +224,7 @@ fn pg_each_predefined_role_has_its_warning() {
         ),
         ("pg_signal_backend", RoleWarning::SignalBackend),
         ("pg_write_all_data", RoleWarning::WritePrivileges),
+        ("pg_maintain", RoleWarning::WritePrivileges),
     ] {
         let f = interpret_probe(
             DbmsKind::Postgres,

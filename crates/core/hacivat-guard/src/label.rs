@@ -45,6 +45,21 @@ GRANT pg_read_all_data TO <role>;\n\
 -- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;\n\
 -- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;";
 
+/// PostgreSQL before 14, which has no `pg_read_all_data` (round 3, m-7): `SELECT` on one
+/// schema's tables and sequences, and on the tables created there later (default privileges of
+/// the role that runs it), with the same two optional comments. It adds a `<schema>`
+/// placeholder.
+const PG13_REMEDIATION: &str = "CREATE ROLE <role> LOGIN PASSWORD '<password>';\n\
+GRANT USAGE ON SCHEMA <schema> TO <role>;\n\
+GRANT SELECT ON ALL TABLES IN SCHEMA <schema> TO <role>;\n\
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA <schema> TO <role>;\n\
+ALTER DEFAULT PRIVILEGES IN SCHEMA <schema> GRANT SELECT ON TABLES TO <role>;\n\
+-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;\n\
+-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;";
+
+/// The first PostgreSQL major version with `pg_read_all_data`.
+const PG_READ_ALL_DATA_SINCE: u32 = 14;
+
 /// MySQL: a user with `SELECT` and `SHOW VIEW` on one database, which the probe reads as least
 /// privilege.
 const MYSQL_REMEDIATION: &str = "CREATE USER '<role>'@'%' IDENTIFIED BY '<password>';\n\
@@ -52,10 +67,21 @@ GRANT SELECT, SHOW VIEW ON <database>.* TO '<role>'@'%';";
 
 /// SQL that creates a least-privilege role, with `<role>`, `<password>` and `<database>`
 /// placeholders and nothing else to fill in. `None` where no role change makes the label
-/// enforced: MariaDB (C19) and SQLite, and every other engine.
+/// enforced: MariaDB (C19) and SQLite, and every other engine. PostgreSQL gets the form for
+/// version 14 and later; [`remediation_for`] takes the server's major version.
 pub fn remediation(kind: DbmsKind) -> Option<&'static str> {
+    remediation_for(kind, None)
+}
+
+/// [`remediation`] for a server of major version `major`. PostgreSQL before 14 gets the
+/// schema-grant form, which also uses a `<schema>` placeholder; an unknown version (`None`)
+/// gets the 14+ form. Other engines ignore `major`.
+pub fn remediation_for(kind: DbmsKind, major: Option<u32>) -> Option<&'static str> {
     match kind {
-        DbmsKind::Postgres => Some(PG_REMEDIATION),
+        DbmsKind::Postgres => match major {
+            Some(m) if m < PG_READ_ALL_DATA_SINCE => Some(PG13_REMEDIATION),
+            _ => Some(PG_REMEDIATION),
+        },
         DbmsKind::MySql => Some(MYSQL_REMEDIATION),
         _ => None,
     }

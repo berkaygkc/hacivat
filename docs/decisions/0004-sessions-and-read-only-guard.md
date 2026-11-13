@@ -86,6 +86,14 @@ folded (PostgreSQL tags; MySQL and SQLite report the first keyword, Q35):
   `ServerFileRoles` → guarded), and so do `COPY … TO PROGRAM`, `lo_export` and `dblink_exec`,
   which no read-only transaction stops.
 
+  Known cost (review m-6): these tags also close the session in two cases that write nothing,
+  which fails closed:
+  - MySQL `SELECT … INTO @var` reports 1 affected row;
+  - a `CALL` whose procedure ends with a statement that reports a row count.
+
+  The alert then says the statement changed data. Both are rare in a read-only session, and
+  Task 18's copy review should know about them.
+
 Rejected: trusting `rows_affected` alone (DDL has none); treating an unknown transaction state
 as clean (the session may not have recorded it, and the guard cannot then confirm that the
 transaction survived).
@@ -224,6 +232,32 @@ row in the table (`PROCESS`, `SHOW DATABASES`, dynamic `*_ADMIN` privileges); an
 without a probe. An `EgressExtension` warning carries the name from the probe's list, never
 the server's text.
 
+*Round 3 (review m-4, controller ruling).*
+
+- Row 2 also lists `pg_maintain`, mapped to `WritePrivileges`. On PostgreSQL 17+ it allows
+  `ANALYZE`, `VACUUM`, `REFRESH` and `LOCK … ACCESS EXCLUSIVE` on every relation, and `LOCK`
+  runs inside a read-only transaction (S-10). On older servers the name simply never matches.
+- Row 3 also turns true when a member role has `rolcreatedb`, or `CREATE` on the current
+  database (`has_database_privilege`, which allows new schemas). These are folded into row 3
+  because row 1 must keep its four columns. A finding reads as `WritePrivileges`.
+
+Validated on throwaway PostgreSQL 13, 15 and 18:
+
+- `CREATEDB`, membership in a CREATEDB role and database `CREATE` each set row 3;
+- row 2 returns `pg_maintain` on 18;
+- 13 and 15 accept the `IN` list without it;
+- `pg_read_all_data` and a SELECT-only role stay clean.
+
+Still not probed: `USAGE ON FOREIGN SERVER`, egress FDWs outside the fixed row-5 list, and
+`SECURITY DEFINER` functions that `PUBLIC` can execute. Their writes are DDL or rely on the
+read-only transaction (L4) failing.
+
+*Large objects (review m-5).* No role setting prevents them. Any role may call `lo_create`,
+and large-object ownership and `UPDATE` grants are not probed. Only the read-only transaction
+(L4) stops large-object writes: `lo_create`, `lo_put`, `lo_import` and `lo_unlink` fail with
+`25006` inside it. Task 23's bypass suite asserts this. `lo_export` writes a server file and
+needs `pg_write_server_files` or superuser, both of which the probe reports.
+
 **Labels (`access_label`, D-035).** Not read-only → `ReadWrite`. Read-only →
 `ReadOnlyEnforced` only for PostgreSQL or MySQL whose findings say least privilege **and**
 carry no warning that denies it (only PostgreSQL's `TempPrivilege` is neutral), so
@@ -240,7 +274,24 @@ created before PostgreSQL 15 or upgraded from one), the corrected probe reads ev
 `WritePrivileges`, so this line is what lets the remediation reach the enforced label there.
 It stays optional because it affects every role, and it changes nothing on clusters that
 never granted it. The approved mock (`design/m2b-secure/NOTES.md` and `index.html`) shows the
-same string. No `NOINHERIT`: a non-inheriting member would not get `pg_read_all_data` and could
+same string.
+
+*PostgreSQL before 14 (review m-7, controller ruling).* `pg_read_all_data` does not exist
+before 14, so the string above fails on PostgreSQL 13. `remediation_for(kind, major)` takes
+the server's major version:
+
+- below 14 it returns `CREATE ROLE …`, then `GRANT USAGE ON SCHEMA <schema>`,
+  `GRANT SELECT ON ALL TABLES IN SCHEMA <schema>`,
+  `GRANT SELECT ON ALL SEQUENCES IN SCHEMA <schema>` and
+  `ALTER DEFAULT PRIVILEGES IN SCHEMA <schema> GRANT SELECT ON TABLES`, plus the same two
+  optional comments. This adds a `<schema>` placeholder.
+- 14 and later, and an unknown version, return the string above.
+
+`remediation(kind)` is kept, because `hacivat-session` already re-exports it, and returns
+the 14+ form. The mock shows the 14+ form. Validated on PostgreSQL 13, 15 and 18: the 13 form
+reads as least privilege, and its default privileges reach a table created afterwards.
+
+No `NOINHERIT`: a non-inheriting member would not get `pg_read_all_data` and could
 read nothing (Q21). MySQL: `CREATE USER '<role>'@'%' IDENTIFIED BY '<password>'`,
 `GRANT SELECT, SHOW VIEW ON <database>.* TO '<role>'@'%'`, which the probe reads as least
 privilege (tested). MariaDB, SQLite and every other engine: `None`, since no role change makes
@@ -248,7 +299,7 @@ their label enforced. The strings carry only the `<role>`, `<password>` and `<da
 placeholders; the UI shows and copies them unchanged.
 
 **Tests.** `crates/core/hacivat-guard/tests/{plans,post,sqlite_authorizer,probe,labels}.rs`
-(58 tests): exact plan values; every gap and its order; unknown transaction state; tags in any
+(60 tests): exact plan values; every gap and its order; unknown transaction state; tags in any
 case, with and without row counts; MySQL `WITH`/`CALL`/`DO`/`SELECT` with affected rows, and
 PostgreSQL `SELECT n` left alone; byte-counted input limits; every pragma of the list without
 an argument and every setting pragma with one, in both cases; the six introspection pragmas
