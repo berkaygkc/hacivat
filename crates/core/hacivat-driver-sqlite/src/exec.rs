@@ -29,31 +29,48 @@ use crate::raw_error;
 /// How many virtual-machine steps pass between two checks of the cancel latch.
 pub(crate) const PROGRESS_STEPS: i32 = 1000;
 
-/// The request a cancel is for.
+/// Which requests a cancel is for. Tickets are handed out in order and their jobs run in
+/// order on the connection's thread, so "every ticket up to N" names exactly the requests
+/// submitted so far.
 #[derive(Debug, Default)]
 struct Latch {
-    /// The last ticket handed out.
+    /// The last ticket handed out (`begin`).
     last: u64,
-    /// The ticket of the request submitted and not yet ended.
-    running: Option<u64>,
-    /// A cancel arrived for `running`.
-    requested: bool,
+    /// The highest ticket whose job has ended (`end`).
+    done: u64,
+    /// The ticket of the job the connection's thread is running, if it runs one.
+    job: Option<u64>,
+    /// Every ticket up to this one is cancelled.
+    cancelled_upto: u64,
+    /// `close` was called: every job, running or queued, stops.
+    closing: bool,
 }
 
-/// Cancels the request running on a connection, latched per request (review I1).
+impl Latch {
+    fn stops(&self, ticket: u64) -> bool {
+        self.closing || ticket <= self.cancelled_upto
+    }
+}
+
+/// Cancels the requests on a connection, latched per job (review I1, R1-M1) and on close
+/// (R1-I1).
 ///
 /// - `execute` and `batch` take a ticket ([`begin`](Self::begin)) on the async side before the
-///   job is sent, and the connection's thread ends it ([`end`](Self::end)) when the job is done.
-/// - [`cancel`](CancelHandle::cancel) acts only while a ticket is open: it sets the latch and
-///   calls `sqlite3_interrupt`, both under the latch's lock. A cancel while nothing runs does
-///   nothing.
+///   job is sent. The connection's thread marks the job it runs ([`start`](Self::start)) and
+///   ends it ([`end`](Self::end)).
+/// - [`cancel`](CancelHandle::cancel) acts only while some submitted ticket has not ended: it
+///   cancels every ticket handed out so far and calls `sqlite3_interrupt`, both under the
+///   latch's lock. A cancel while nothing is pending does nothing, and it never covers a ticket
+///   handed out later, so it can never reach the next request. A request whose future was
+///   dropped keeps its cancel: its job still stops, and a later `begin` does not reset it.
 /// - The job reads the latch right after `prepare`, and the connection's progress handler
-///   reads it every [`PROGRESS_STEPS`] steps and interrupts the statement. So a cancel that
-///   lands between submit and the first step (whose interrupt SQLite clears when the
-///   statement starts) still ends the statement.
-/// - `end` clears the latch under the same lock, so a cancel can never reach the next
-///   request. An interrupt sent just before `end`, after the last statement stopped, is
-///   cleared by SQLite when the next statement starts (no statement is active then).
+///   reads it (for the job it runs) every [`PROGRESS_STEPS`] steps and interrupts the
+///   statement. So a cancel that lands between submit and the first step (whose interrupt
+///   SQLite clears when the statement starts) still ends the statement. An interrupt sent just
+///   before `end`, after the last statement stopped, is cleared by SQLite when the next
+///   statement starts (no statement is active then).
+/// - [`close`](Self::close) stops every job, running or queued, so closing never waits on a
+///   statement whose request was abandoned.
 ///
 /// Safe from any thread; after the connection closes it does nothing.
 pub(crate) struct SqliteCancel {
@@ -73,42 +90,50 @@ impl SqliteCancel {
         self.latch.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Opens the ticket of a request about to be sent; a cancel from now on is for it.
+    /// Hands out the ticket of a request about to be sent; a cancel from now on is for it.
     pub(crate) fn begin(&self) -> u64 {
         let mut latch = self.latch();
         latch.last += 1;
-        latch.running = Some(latch.last);
-        latch.requested = false;
         latch.last
     }
 
-    /// Ends `ticket`'s request: a later cancel does nothing. A ticket a newer request has
-    /// replaced (its future was dropped) leaves the newer one alone.
+    /// The connection's thread starts `ticket`'s job.
+    pub(crate) fn start(&self, ticket: u64) {
+        self.latch().job = Some(ticket);
+    }
+
+    /// `ticket`'s job has ended: a later cancel is not for it.
     pub(crate) fn end(&self, ticket: u64) {
         let mut latch = self.latch();
-        if latch.running == Some(ticket) {
-            latch.running = None;
-            latch.requested = false;
-        }
+        latch.job = None;
+        latch.done = latch.done.max(ticket);
     }
 
-    /// Whether `ticket`'s request was cancelled.
+    /// Whether `ticket`'s job must stop (cancelled, or the connection is closing).
     pub(crate) fn cancelled(&self, ticket: u64) -> bool {
-        let latch = self.latch();
-        latch.running == Some(ticket) && latch.requested
+        self.latch().stops(ticket)
     }
 
-    /// For the progress handler: the request on the connection was cancelled.
+    /// For the progress handler: the job the connection runs must stop. Outside a request's
+    /// job (the open, probes) only closing stops it.
     pub(crate) fn pending(&self) -> bool {
-        self.latch().requested
+        let latch = self.latch();
+        latch.closing || latch.job.is_some_and(|t| latch.stops(t))
+    }
+
+    /// The connection is closing: stop the running statement and every queued job.
+    pub(crate) fn close(&self) {
+        let mut latch = self.latch();
+        latch.closing = true;
+        self.interrupt.interrupt();
     }
 }
 
 impl CancelHandle for SqliteCancel {
     fn cancel(&self) -> BoxFuture<'static, Result<(), RawError>> {
         let mut latch = self.latch();
-        if latch.running.is_some() {
-            latch.requested = true;
+        if latch.last > latch.done {
+            latch.cancelled_upto = latch.last;
             self.interrupt.interrupt();
         }
         drop(latch);

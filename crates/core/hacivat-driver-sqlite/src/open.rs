@@ -319,7 +319,10 @@ impl RawConn for SqliteConn {
     }
 
     fn close(mut self: Box<Self>) -> BoxFuture<'static, ()> {
-        // Dropping the sender ends the thread's loop; it drops the connection, then signals.
+        // Stop the running statement and every queued job first (review R1-I1): a request whose
+        // future was dropped may still run one that never ends. Then dropping the sender ends
+        // the thread's loop; it drops the connection, then signals.
+        self.cancel.close();
         self.jobs = None;
         let closed = self.closed.take();
         Box::pin(async move {
@@ -349,6 +352,7 @@ impl RawConn for SqliteConn {
             let ticket = cancel.begin();
             let (result, tx) = self
                 .call(move |c| {
+                    cancel.start(ticket);
                     let r = crate::exec::execute(c, &sql, opts.max_rows, guard.as_deref(), || {
                         cancel.cancelled(ticket)
                     });
@@ -370,6 +374,7 @@ impl RawConn for SqliteConn {
             let ticket = cancel.begin();
             let (result, tx) = self
                 .call(move |c| {
+                    cancel.start(ticket);
                     let r = if cancel.cancelled(ticket) {
                         Err(interrupted())
                     } else {

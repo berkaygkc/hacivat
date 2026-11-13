@@ -199,6 +199,50 @@ async fn a_dropped_request_does_not_pass_its_cancel_on() {
     assert_eq!(s.rows[0][0].as_deref(), Some("100000"));
 }
 
+/// Review R1-M1: a request cancelled and then dropped before its job ran keeps its cancel.
+/// The next request's ticket does not reset it, so the orphaned endless statement stops and
+/// the next request runs. 20 rounds, each bounded.
+#[tokio::test]
+async fn a_cancelled_then_dropped_request_still_stops() {
+    let mut c = rw(db_with_table()).await;
+    let h = c.cancel_handle().unwrap();
+    for round in 0..20 {
+        {
+            let mut run = c.execute(ENDLESS, ExecOpts::default());
+            assert!((&mut run).now_or_never().is_none());
+            h.cancel().await.unwrap();
+        }
+        let s = ended(c.execute(COUNTED, simple()), &h, &format!("round {round}"))
+            .await
+            .unwrap_or_else(|e| panic!("round {round}: {e:?}"));
+        assert_eq!(s.rows[0][0].as_deref(), Some("100000"), "round {round}");
+    }
+}
+
+/// Review R1-I1: `close` stops a statement whose request future was dropped without a cancel
+/// (the session's abandoned path), and a job queued behind it, so it returns within the
+/// bound and the connection's thread exits (`close` resolves only after the thread dropped
+/// the connection). On both profiles.
+#[tokio::test]
+async fn close_stops_a_statement_whose_request_was_dropped() {
+    for read_only in [false, true] {
+        let mut c = if read_only {
+            ro(db_with_table()).await
+        } else {
+            rw(db_with_table()).await
+        };
+        let h = c.cancel_handle().unwrap();
+        for _ in 0..2 {
+            let mut run = c.execute(ENDLESS, ExecOpts::default());
+            assert!((&mut run).now_or_never().is_none());
+        }
+        if timeout(LIMIT, c.close()).await.is_err() {
+            let _ = h.cancel().await;
+            panic!("read_only {read_only}: close waited on the abandoned statement");
+        }
+    }
+}
+
 #[tokio::test]
 async fn the_cancel_handle_outlives_the_connection() {
     let c = rw(db_with_table()).await;

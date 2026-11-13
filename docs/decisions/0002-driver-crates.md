@@ -489,22 +489,35 @@ early cancel: SQLite clears the interrupt flag whenever a statement starts while
 (`sqlite3RunParser`, `sqlite3Step`), so a cancel sent after `execute` was submitted but before
 the connection's thread started the statement did nothing (17 of 20 in review). The handle
 (`SqliteCancel`) therefore keeps a latch:
-- `execute` and `batch` open a ticket on the async side before the job is sent; the
-  connection's thread ends it when the job is done. A ticket replaced by a newer request (its
-  future dropped) cannot end or receive the newer one's cancel.
-- `cancel()` acts only while a ticket is open: under the latch's lock it sets `requested` and
-  calls `sqlite3_interrupt`. A cancel while nothing runs does nothing.
+- `execute` and `batch` take a ticket on the async side before the job is sent. Tickets are
+  handed out in order and their jobs run in order on the connection's thread, which marks the
+  job it runs and records the highest ticket that has ended.
+- `cancel()` acts only while some submitted ticket has not ended: under the latch's lock it
+  cancels every ticket handed out so far (`cancelled_upto = last`) and calls
+  `sqlite3_interrupt`. A cancel while nothing is pending does nothing, and it never covers a
+  ticket handed out later, so it can never reach the next request (Task 7's C1). The latch
+  follows the job, not the future (fix round 2, R1-M1): a request cancelled and then dropped
+  before its job ran still stops, and the next request's ticket does not reset it.
 - The job reads the latch right after `prepare` (before the first step), and a progress handler,
-  installed on every connection, reads it every 1,000 VM steps and interrupts the statement.
-- Ending the ticket clears the latch under the same lock, so a cancel can never reach the next
-  request (Task 7's C1). An interrupt sent just before the end, after the last statement
-  stopped, is cleared by SQLite when the next statement starts.
+  installed on every connection, reads it for the job it runs every 1,000 VM steps and
+  interrupts the statement. An interrupt sent just after the last statement stopped is cleared
+  by SQLite when the next statement starts.
+- `close()` (fix round 2, R1-I1) sets a `closing` flag and interrupts before dropping the job
+  sender; the progress handler and the post-prepare checks honour it. A statement whose request
+  future was dropped without a cancel (the session's abandoned path) and any job queued behind
+  it stop, so `close` returns and the connection's thread exits instead of spinning forever.
+- `batch` reads the latch before `execute_batch` only (R1-M2, accepted): a cancel that lands
+  between two short statements of a trusted batch, none of which reaches 1,000 VM steps, lets
+  the batch finish and report `Ok`. Reporting `Cancelled` after the work committed would be
+  wrong, and the text is short and trusted.
 
 An interrupted or latched request is `RawErrorKind::Cancelled` (extended code 9,
 `SQLITE_INTERRUPT`). The handle is safe from any thread and a no-op after close. Tests: 50
 immediate cancels after submit, each bounded and all interrupted; `batch` likewise; a cancel
-before or after a statement, or for a dropped request, never reaches the next one. The progress
-handler is only the latch, not a timeout.
+before or after a statement, or for a dropped request, never reaches the next one; a cancelled
+then dropped endless request still stops (20 rounds); `close` after dropping two endless
+requests returns within the bound on both profiles. The progress handler is only the latch,
+not a timeout.
 
 **Accepted limitation: WAL side files (fix round 1, review I3; controller ruling).** A
 read-only session on a WAL-mode database may create `-wal` (empty) and `-shm` next to the file
