@@ -11,7 +11,8 @@
 //!   only its literal text;
 //! - port 0 means the default, 5432; ports compare as text (`05432` is not `5432`);
 //! - an empty database or user name matches no line, not even `*`;
-//! - the password is the fifth field: it ends at the first unescaped `:`;
+//! - the password is the fifth field: it ends at the first unescaped `:`; an empty field is
+//!   no password (`None`, B27);
 //! - on Unix a file that group or other may access (`mode & 0o077 != 0`) is ignored with a
 //!   warning, as is anything that is not a plain file or is over 1 MiB. A missing or
 //!   unreadable file has no match.
@@ -35,7 +36,9 @@ pub struct PgPassMatch {
     pub line: u32,
     /// The user asked for; with none asked, the line's user (`None` when it is `*`).
     pub user: Option<String>,
-    pub password: SecretString,
+    /// `None` when the line's password field is empty (B27, m2b-t06): libpq then sends no
+    /// password, never an empty one.
+    pub password: Option<SecretString>,
 }
 
 /// Why `.pgpass` was ignored (HV-SEC-03).
@@ -213,8 +216,9 @@ fn take_field(buf: &[u8]) -> Option<(Option<String>, &[u8])> {
 }
 
 /// The password field, libpq's de-escape loop: it ends at the first unescaped `:` or the end
-/// of the line, and `\x` reads as `x` (a lone trailing `\` is kept).
-fn unescape_secret(buf: &[u8]) -> SecretString {
+/// of the line, and `\x` reads as `x` (a lone trailing `\` is kept). An empty field is `None`
+/// (B27).
+fn unescape_secret(buf: &[u8]) -> Option<SecretString> {
     let mut out = Zeroizing::new(Vec::with_capacity(buf.len()));
     let mut i = 0;
     while i < buf.len() && buf[i] != b':' {
@@ -224,7 +228,7 @@ fn unescape_secret(buf: &[u8]) -> SecretString {
         out.push(buf[i]);
         i += 1;
     }
-    secret_from_bytes(&out)
+    (!out.is_empty()).then(|| secret_from_bytes(&out))
 }
 
 #[cfg(test)]
