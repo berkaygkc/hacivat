@@ -187,11 +187,9 @@ async fn verify_ca_without_a_ca_file_and_bad_sqlite_paths_are_validate_issues() 
 async fn cancel_mid_connect_runs_cleanups_lifo() {
     let order = Arc::new(Mutex::new(vec![]));
     // Two ConnectDeps.extra_steps at order 41 and 42 whose guards push "guard-a" and
-    // "guard-b" into `order` (P23).
-    let deps = deps_with_guards(
-        order.clone(),
-        FakeDriver::new(DbmsKind::Postgres).delay(Duration::from_millis(500)),
-    );
+    // "guard-b" into `order` (P23). The driver holds the connect (gated) until the cancel, so
+    // the cancel always lands mid-connect, however slow the machine.
+    let (deps, fake) = deps_with_guards(order.clone(), FakeDriver::new(DbmsKind::Postgres).gated());
     let t = token();
     let h = tokio::spawn(connect_owned(
         deps,
@@ -199,7 +197,10 @@ async fn cancel_mid_connect_runs_cleanups_lifo() {
         ix_none(),
         t.clone(),
     ));
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    eventually("the connect to reach the driver", || {
+        fake.connect_calls() == 1
+    })
+    .await;
     t.cancel();
     let e = h.await.unwrap().unwrap_err();
     assert_eq!(e.class, ErrClass::Cancelled);

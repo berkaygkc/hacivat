@@ -10,7 +10,7 @@ mod support;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext};
 use hacivat_app::connections::ConnectionsModel;
@@ -180,15 +180,6 @@ fn dialog_title(vcx: &VisualTestContext) -> String {
     label(vcx, "conn-dialog-title").expect("the dialog title is drawn")
 }
 
-/// Waits (in real time) until `check` holds, for at most 5 s.
-fn wait_until(vcx: &VisualTestContext, what: &str, check: impl Fn(&VisualTestContext) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !check(vcx) {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        settle(vcx, ms(10));
-    }
-}
-
 // ---- the One Filled Badge rule, scoped to the title-bar capsule (T21 ruling) -------------------
 
 #[cfg(feature = "scene-check")]
@@ -251,11 +242,14 @@ fn save_remote_asks_environment_then_capsule_turns_production(cx: &mut TestAppCo
 
 #[gpui::test]
 fn escape_order_in_the_dialog(cx: &mut TestAppContext) {
-    let vcx = app_with_fake(cx, ok_pg().delay(Duration::from_secs(5)));
+    // Held at the driver: the test runs for as long as this test looks at it.
+    let vcx = app_with_fake(cx, ok_pg().gated());
     open_new_dialog(vcx);
     fill_valid(vcx);
     vcx.simulate_keystrokes(&primary("t"));
-    settle(vcx, ms(20));
+    wait_until(vcx, "the test to reach the driver", |vcx| {
+        fake(vcx).connect_calls() == 1
+    });
     assert!(strip_running(vcx));
     vcx.simulate_keystrokes("escape");
     assert!(!strip_running(vcx));
@@ -267,15 +261,22 @@ fn escape_order_in_the_dialog(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn closing_dialog_cancels_running_test(cx: &mut TestAppContext) {
-    let vcx = app_with_fake(cx, ok_pg().delay(Duration::from_secs(5)));
+    // Held at the driver until the dialog is closed, then let through: the late connection
+    // must be closed (P23), not left open.
+    let vcx = app_with_fake(cx, ok_pg().gated());
     open_new_dialog(vcx);
     fill_valid(vcx);
     vcx.simulate_keystrokes(&primary("t"));
-    settle(vcx, ms(20));
+    wait_until(vcx, "the test to reach the driver", |vcx| {
+        fake(vcx).connect_calls() == 1
+    });
     assert!(strip_running(vcx));
     click(vcx, "button-conn-cancel");
     assert!(layer_ids(vcx).is_empty());
-    settle(vcx, Duration::from_secs(6));
+    fake(vcx).release();
+    wait_until(vcx, "the late connection to be closed", |vcx| {
+        fake(vcx).close_calls() >= 1 && fake(vcx).open_connections() == 0
+    });
     let f = fake(vcx);
     assert_eq!(f.connect_calls(), 1);
     assert_eq!(f.close_calls(), f.connect_calls());
@@ -447,7 +448,11 @@ fn a_keyring_entry_left_behind_by_a_delete_is_named(cx: &mut TestAppContext) {
         vcx.cx
             .read(|cx| cx.global::<ConnectionsModel>().get(id).is_none())
     });
-    settle(vcx, ms(50));
+    // The keyring delete fails on the profile writer, after the profile is gone: its toast
+    // comes when the writer is done.
+    wait_until(vcx, "the delete's toast", |vcx| {
+        !toast_texts(vcx).is_empty()
+    });
     assert_eq!(
         toast_texts(vcx),
         [

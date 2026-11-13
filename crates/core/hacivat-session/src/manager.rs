@@ -260,16 +260,24 @@ impl Shared {
         stop: CancellationToken,
     ) {
         loop {
+            // `biased`: a stop wins over an interval that is due at the same time (a busy
+            // runtime polls both ready at once), so no ping starts after a close or a drop.
             tokio::select! {
+                biased;
                 () = stop.cancelled() => return,
                 () = tokio::time::sleep(self.config.liveness) => {}
             }
             let pinged = {
                 let mut guard = conn.lock().await;
                 let Some(live) = guard.as_mut() else { return };
+                // The stop may have come while this task waited for the lock.
+                if stop.is_cancelled() {
+                    return;
+                }
                 // A close or shutdown never waits for a ping: it stops the ping, which frees
                 // the connection.
                 tokio::select! {
+                    biased;
                     () = stop.cancelled() => return,
                     pinged = tokio::time::timeout(PING_BUDGET, live.raw().ping()) => pinged,
                 }

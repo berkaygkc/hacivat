@@ -89,12 +89,20 @@ async fn disconnect_forgets_session_secrets() {
 
 #[tokio::test]
 async fn forget_cancels_inflight_and_clears_state() {
-    let (m, fake) = manager(ok_pg().delay(ms(300)));
+    // Held at the driver until forgotten, then let through: the late connection is closed.
+    let (m, fake) = manager(ok_pg().gated());
     m.connect(p(), None, Interaction::Headless);
-    tokio::time::sleep(ms(20)).await;
+    eventually("the connect to reach the driver", || {
+        fake.connect_calls() == 1
+    })
+    .await;
     m.forget(p().id);
     assert_eq!(m.state(p().id), LiveState::Disconnected);
-    tokio::time::sleep(ms(400)).await;
+    fake.release();
+    eventually("the late connection to be closed", || {
+        fake.close_calls() >= 1
+    })
+    .await;
     assert_eq!(fake.close_calls(), 1);
     assert_eq!(m.state(p().id), LiveState::Disconnected);
 }
@@ -119,16 +127,20 @@ fn shutdown_closes_all_within_budget() {
 #[test]
 fn a_connection_landing_after_shutdown_is_closed_at_once() {
     let rt = CoreRuntime::new().unwrap();
-    let (m, fake) = manager_on(rt.handle(), ok_pg().delay(ms(200)));
+    // Held at the driver until after the shutdown, then let through: it lands late.
+    let (m, fake) = manager_on(rt.handle(), ok_pg().gated());
     m.connect(p(), None, Interaction::Headless);
     // Shut down while the driver is connecting.
-    while fake.connect_calls() == 0 {
-        std::thread::sleep(ms(5));
-    }
+    eventually_blocking("the connect to reach the driver", || {
+        fake.connect_calls() == 1
+    });
     assert!(m.shutdown_blocking(Duration::from_secs(2)));
     // A connect after shutdown started does nothing.
     m.connect(p(), None, Interaction::Headless);
-    std::thread::sleep(ms(400));
+    fake.release();
+    eventually_blocking("the late connection to be closed", || {
+        fake.close_calls() >= 1
+    });
     assert_eq!((fake.connect_calls(), fake.close_calls()), (1, 1));
     assert_eq!(m.state(p().id), LiveState::Disconnected);
     rt.shutdown(Duration::from_secs(1));
@@ -243,9 +255,9 @@ async fn dropping_the_manager_stops_its_liveness_pings() {
         },
     );
     connect_and_wait(&m).await;
-    tokio::time::sleep(ms(60)).await;
-    drop(m);
     let pings = || log.lock().unwrap().iter().filter(|e| **e == "ping").count();
+    eventually("the first liveness ping", || pings() >= 1).await;
+    drop(m);
     let after_drop = pings();
     assert!(after_drop >= 1);
     tokio::time::sleep(ms(100)).await;
@@ -269,6 +281,12 @@ async fn a_connect_landing_after_the_manager_dropped_is_closed_without_pings() {
     tokio::time::sleep(ms(5)).await;
     drop(m);
     tokio::time::sleep(ms(100)).await;
+    // Whatever opened is closed in the background: wait for that, not for a fixed time.
+    let count = |what: &str| log.lock().unwrap().iter().filter(|e| **e == what).count();
+    eventually("every open connection to close", || {
+        count("open") == count("close")
+    })
+    .await;
     let log = log.lock().unwrap().clone();
     assert!(!log.contains(&"ping"), "{log:?}");
     assert_eq!(

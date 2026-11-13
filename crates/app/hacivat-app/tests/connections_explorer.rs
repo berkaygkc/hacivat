@@ -191,7 +191,10 @@ fn with_saved_secret(
         ..ProfileDraft::edit(profile)
     };
     let id = save_draft(vcx, draft);
-    settle(vcx, ms(100));
+    // The profile writer stores the password off the UI thread.
+    wait_until(vcx, "the password to reach the keyring", |vcx| {
+        keyring_entry(vcx, id).is_some()
+    });
     (vcx, id)
 }
 
@@ -217,7 +220,10 @@ fn import_view(vcx: &VisualTestContext) -> gpui::Entity<import::ImportView> {
 }
 
 fn import_rows(vcx: &VisualTestContext) -> Vec<String> {
-    settle(vcx, ms(100));
+    // The service files are read on the core runtime; the dialog opens when they are.
+    wait_until(vcx, "the import dialog to open", |vcx| {
+        vcx.cx.read(import::open_view).is_some()
+    });
     let view = import_view(vcx);
     vcx.cx.read(|cx| view.read(cx).row_names())
 }
@@ -347,8 +353,7 @@ fn escape_in_the_filter_runs_the_escape_hook(cx: &mut TestAppContext) {
     let vcx = shell_with_fake(
         cx,
         "en",
-        hacivat_driver::fake::FakeDriver::new(hacivat_proto::DbmsKind::Postgres)
-            .delay(Duration::from_secs(5)),
+        hacivat_driver::fake::FakeDriver::new(hacivat_proto::DbmsKind::Postgres).gated(),
     );
     add_profile(vcx, test_profile("a", Some(EnvTag::Dev), "127.0.0.1"));
     connect(vcx, "a");
@@ -386,7 +391,11 @@ fn delete_confirms_with_cancel_focused_and_removes_secrets(cx: &mut TestAppConte
     assert_eq!(dialog_title(vcx), "Delete a?");
     assert_eq!(focused_button_label(vcx), "Cancel");
     vcx.simulate_keystrokes("tab enter");
-    settle(vcx, ms(100));
+    // The delete finishes off the UI thread (the profile writer removes the keyring entry);
+    // its toast says it is done.
+    wait_until(vcx, "the delete to finish", |vcx| {
+        !toast_texts(vcx).is_empty()
+    });
     assert!(row_names(vcx).is_empty());
     assert!(keyring_entry(vcx, id).is_none());
     assert_eq!(toast_texts(vcx), ["Deleted a"]);
@@ -422,7 +431,10 @@ fn pg_service_import_requires_env_for_remote(cx: &mut TestAppContext) {
     set_import_env(vcx, 0, Some(EnvTag::Staging));
     assert!(!import_button_disabled(vcx));
     click(vcx, "button-import-confirm");
-    settle(vcx, ms(100));
+    // The saves finish on the profile writer; the import's toast follows them.
+    wait_until(vcx, "the import to finish", |vcx| {
+        !toast_texts(vcx).is_empty()
+    });
     assert!(layer_ids(vcx).is_empty());
     assert_eq!(
         profile_origins(vcx),
@@ -652,15 +664,9 @@ fn connected_row(cx: &mut TestAppContext, name: &str) -> &'static mut VisualTest
     p.read_only = true;
     add_profile(vcx, p);
     connect(vcx, name);
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !matches!(live(vcx, name), hacivat_session::LiveState::Connected(_)) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the connect never finished"
-        );
-        settle(vcx, ms(10));
-    }
-    vcx.run_until_parked();
+    wait_until(vcx, "the connect to finish", |vcx| {
+        matches!(live(vcx, name), hacivat_session::LiveState::Connected(_))
+    });
     vcx
 }
 
@@ -730,7 +736,11 @@ fn an_imported_sslmode_is_what_the_form_shows(cx: &mut TestAppContext) {
     assert_eq!(import_rows(vcx), ["orders"]);
     set_import_env(vcx, 0, Some(EnvTag::Staging));
     click(vcx, "button-import-confirm");
-    settle(vcx, ms(100));
+    // The file is written by the profile writer; the import's toast follows the write.
+    wait_until(vcx, "the import to finish", |vcx| {
+        !toast_texts(vcx).is_empty()
+    });
+    assert_eq!(toast_texts(vcx), ["Imported one connection"]);
     let id = profile_id(vcx, "orders");
     let p = vcx
         .cx
