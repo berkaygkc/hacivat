@@ -43,7 +43,15 @@ enum ReadError {
 /// no window between the check and the read. On Unix the open is non-blocking, so a FIFO is
 /// refused instead of waiting for a writer. Symlinks are followed, as libpq's `stat` does.
 fn read_credential_file(path: &Path) -> Result<CredentialFile, ReadError> {
-    let file = open_nonblocking(path).map_err(ReadError::Io)?;
+    let file = match open_nonblocking(path) {
+        Ok(file) => file,
+        // Windows refuses to open a directory (access denied) before we can look at it; report
+        // it as "not a file" like every other platform does after the open.
+        Err(_) if std::fs::metadata(path).is_ok_and(|m| !m.is_file()) => {
+            return Err(ReadError::NotAFile);
+        }
+        Err(e) => return Err(ReadError::Io(e)),
+    };
     let meta = file.metadata().map_err(ReadError::Io)?;
     if !meta.is_file() {
         return Err(ReadError::NotAFile);
