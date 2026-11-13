@@ -274,6 +274,8 @@ async fn smuggled_commit_is_an_enforcement_gap_and_discards_the_connection() {
     let (h, f) =
         ro_session(fake_pg_ro_clean().exec(vec![tx("SELECT 1; COMMIT", TxStatus::Idle)])).await;
     let mut events = h.events();
+    // The connect's role probe reset once (fix round 2, I-3b); the gap adds none.
+    let resets = f.reset_calls();
     let r = h.submit(user_exec("SELECT 1; COMMIT")).reply.await.unwrap();
     // smuggled past 1a
     assert_eq!(
@@ -288,7 +290,7 @@ async fn smuggled_commit_is_an_enforcement_gap_and_discards_the_connection() {
         saw_gap |= e == SessionEvent::EnforcementGap(GapReason::TransactionEndedByStatement);
     }
     assert!(saw_gap);
-    assert_eq!(f.reset_calls(), 0);
+    assert_eq!(f.reset_calls(), resets);
     let later = h.submit(user_exec("select 1")).reply.await.unwrap();
     assert_eq!(later.unwrap_err().kind, ExecErrorKind::NotConnected);
 }
@@ -476,6 +478,18 @@ async fn step_1a_reads_mysql_comments_as_the_server_does() {
             DbmsKind::MySql,
             "/*!50000 SELECT 1 */ /*!50000 ROLLBACK */ SELECT 2",
         ),
+        // Fix round 2 (I-1b): a skipped version-gated comment may hold one nested comment
+        // (`consume_comment(lip, 1)`), so the server reads `COMMIT` after the second `*/`.
+        (DbmsKind::MySql, "/*!99999 /* x */ SELECT 1 */ COMMIT"),
+        (DbmsKind::MariaDb, "/*!999999 /* x */ SELECT 1 */ COMMIT"),
+        (DbmsKind::MariaDb, "/*M!999999 /* x */ SELECT 1 */ COMMIT"),
+        (
+            DbmsKind::MySql,
+            "/*!99999 /*!40000 x */ SELECT 1 */ ROLLBACK",
+        ),
+        // Only one level: a second `/*` inside the nested one is text, so its `*/` ends the
+        // nested comment and the next ends the version-gated one.
+        (DbmsKind::MySql, "/*!99999 /* a /* b */ SELECT 1 */ BEGIN"),
     ] {
         let f = fake_mysql_ro_clean();
         let mut c = conn(&f).await;
@@ -499,10 +513,28 @@ async fn step_1a_reads_mysql_comments_as_the_server_does() {
         );
         assert!(f.executed().is_empty());
     }
+    // A chain of version-gated comments is followed once per comment, not once per path
+    // (review n-1): sixteen of them are read; seventeen pass the fork bound and are refused.
+    let chain = |n: usize| "/*!1 */ ".repeat(n) + "SELECT 1";
+    let f = fake_mysql_ro_clean();
+    assert!(guarded_on(&f, DbmsKind::MySql, &chain(16)).await.is_ok());
+    let f = fake_mysql_ro_clean();
+    assert_eq!(
+        guarded_on(&f, DbmsKind::MySql, &chain(17))
+            .await
+            .unwrap_err(),
+        ExecErrorKind::ReadOnlyDenied(DenyLayer::Transaction)
+    );
     // What the server reads as a read stays a read.
     for (kind, sql) in [
         // MySQL: `/*M!` is a comment, so its `COMMIT` is never run.
         (DbmsKind::MySql, "/*M!100100 COMMIT */ SELECT 1"),
+        // A skipped version-gated comment holds one nested level, not two: the server reads
+        // `SELECT 2` after it (and `SELECT 1` when it runs it).
+        (DbmsKind::MySql, "/*!99999 /* x */ SELECT 1 */ SELECT 2"),
+        // A plain comment does not nest on MySQL: `COMMIT */` is never reached as a keyword,
+        // the statement is `SELECT 1 */ …` (a syntax error, never a commit).
+        (DbmsKind::MySql, "/* /* */ SELECT 1 */ COMMIT"),
         // MySQL: the comment runs to the line feed, so the statement is `SELECT 1`.
         (DbmsKind::MySql, "-- x\rCOMMIT\nSELECT 1"),
         // SQLite ends a line comment at a line feed too.
@@ -682,8 +714,7 @@ async fn a_failed_mysql_call_that_ended_the_transaction_is_a_gap() {
         "DO p()",
         "/*!99999 CREATE TABLE x (a int) */ CALL p()",
         "(SELECT 1)",
-        // Skipped, this version-gated DDL leaves no statement: not every reading is DDL.
-        "/*!50000 ALTER TABLE t ADD b int */",
+        "SET autocommit = 1",
     ] {
         let f = mysql_failing("45000");
         assert_eq!(
@@ -714,9 +745,15 @@ async fn a_failed_mysql_ddl_that_committed_implicitly_is_only_an_error() {
         "CREATE TABLE x (a int)",
         "drop table t",
         "/*! ALTER TABLE t ADD b int */",
+        // Review n-4: skipped, a version-gated comment that holds the whole statement leaves
+        // none (an empty query, no commit), so only its DDL reading counts.
+        "/*!50000 ALTER TABLE t ADD b int */",
         "TRUNCATE t",
         "GRANT SELECT ON t TO u",
         "RENAME TABLE t TO u",
+        "RESET MASTER",
+        "CHANGE REPLICATION SOURCE TO SOURCE_HOST = 'h'",
+        "STOP REPLICA",
     ] {
         let f = mysql_failing("1792");
         assert_eq!(
@@ -886,6 +923,79 @@ async fn a_switched_role_reads_guarded() {
         access_for(&mut *conn(&f).await, DbmsKind::Postgres, true).await,
         (AccessLabel::ReadOnlyGuarded, vec![RoleWarning::Unparsed])
     );
+}
+
+#[tokio::test]
+async fn the_probe_resets_before_its_identity_check() {
+    // Fix round 2 (I-3b): the identity the probe judges is the one every guarded request runs
+    // as after its own reset (`SET SESSION AUTHORIZATION DEFAULT`, `RESET ALL`).
+    let f = fake_pg_probe_least();
+    let mut c = conn(&f).await;
+    assert_eq!(
+        access_for(&mut *c, DbmsKind::Postgres, true).await.0,
+        AccessLabel::ReadOnlyEnforced
+    );
+    assert_eq!(f.reset_calls(), 1);
+    assert_eq!(f.executed(), pg_probe_lines());
+    // A reset that fails leaves the identity unknown: guarded, and nothing else runs.
+    let f = FakeDriver::new(DbmsKind::Postgres)
+        .reset_fails()
+        .exec(vec![same_role()]);
+    assert_eq!(
+        access_for(&mut *conn(&f).await, DbmsKind::Postgres, true).await,
+        (AccessLabel::ReadOnlyGuarded, vec![RoleWarning::Unparsed])
+    );
+    assert!(f.executed().is_empty());
+    // MySQL, read-write and side connections reset nothing here.
+    let f = FakeDriver::new(DbmsKind::MySql);
+    let _ = access_for(&mut *conn(&f).await, DbmsKind::MySql, true).await;
+    let _ = access_for(&mut *conn(&f).await, DbmsKind::MySql, false).await;
+    assert_eq!(f.reset_calls(), 0);
+}
+
+#[tokio::test]
+async fn a_read_only_connect_refuses_a_role_switch_in_its_options() {
+    // Fix round 2 (I-3b): `-c role=` or `-c session_authorization=` in a read-only connect's
+    // options is a visible configuration issue, before any I/O; a read-write connect keeps it.
+    let with_role =
+        |p: hacivat_session::profile::Profile, value: &str| hacivat_session::profile::Profile {
+            extra: vec![("options".into(), value.into())],
+            ..p
+        };
+    let rejected = hacivat_session::pipeline::IssueCode::OptionRejected {
+        key: "options".into(),
+        reason: hacivat_driver::ViolationReason::AlwaysDenied,
+    };
+    for value in ["-c role=hv_ro", "-c session_authorization=hv_ro"] {
+        // A read-only profile.
+        let fake = Arc::new(fake_pg());
+        let e = err_with(&fake, with_role(ro_profile(), value)).await;
+        assert_eq!(e.class, hacivat_proto::ErrClass::ConfigInvalid, "{value}");
+        assert!(e.issues.iter().any(|i| i.code == rejected), "{value}");
+        assert_eq!(fake.connect_calls(), 0, "{value}");
+        // A read-only session of a read-write profile.
+        let (deps, fake) = deps_with(fake_pg());
+        let mut request = req(with_role(rw(pg_profile(TlsMode::Disable)), value));
+        request.read_only = true;
+        let e = connect(&deps, request, ix_none(), token(), progress())
+            .await
+            .expect_err("refused");
+        assert_eq!(e.class, hacivat_proto::ErrClass::ConfigInvalid, "{value}");
+        assert!(e.issues.iter().any(|i| i.code == rejected), "{value}");
+        assert_eq!(fake.connect_calls(), 0, "{value}");
+    }
+    // Read-write keeps `-c role=`.
+    let fake = Arc::new(fake_pg());
+    let live = ok_with(
+        &fake,
+        with_role(rw(pg_profile(TlsMode::Disable)), "-c role=hv_ro"),
+    )
+    .await;
+    assert_eq!(
+        fake.last_request().unwrap().options,
+        [("options".to_string(), "-c role=hv_ro".to_string())]
+    );
+    live.close().await;
 }
 
 #[tokio::test(start_paused = true)]

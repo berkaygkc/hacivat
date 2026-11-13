@@ -386,6 +386,11 @@ async fn run(
     if purpose == Purpose::Test {
         issues.retain(|i| i.code != IssueCode::NameMissing);
     }
+    // ## m2b-t18-guarded-exec (fix round 2, I-3b): a read-only session of a read-write profile
+    // refuses a role switch too (`checked` already did for a read-only profile).
+    if read_only && !profile.read_only {
+        issues.extend(validate::read_only_issues(&profile));
+    }
     let fail_early = |mut e: ConnectError| {
         progress.send_replace(fresh_progress());
         e.args = args(&profile, port, user.clone(), None);

@@ -21,9 +21,9 @@ use std::time::Instant;
 use docker_support::*;
 use futures::future::BoxFuture;
 use hacivat_driver::{ExecOpts, ExecSummary, Protocol};
-use hacivat_proto::{AccessLabel, DbmsKind, Department};
+use hacivat_proto::{AccessLabel, DbmsKind, Department, ErrClass};
 use hacivat_session::RoleWarning;
-use hacivat_session::pipeline::{ConnectError, Interaction, LiveConnection, connect};
+use hacivat_session::pipeline::{ConnectError, Interaction, IssueCode, LiveConnection, connect};
 use hacivat_session::profile::Profile;
 use hacivat_session::session::readonly::access_for;
 use hacivat_session::session::{
@@ -154,12 +154,22 @@ async fn scalar(live: &mut LiveConnection, sql: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Runs fixture text on `live`. A failure names the statement only up to its first literal (a
+/// literal may hold the matrix password) and the server's SQLSTATE or code.
 async fn batch(live: &mut LiveConnection, id: &str, sql: &str) {
-    live.raw()
-        .batch(sql)
-        .await
-        .unwrap_or_else(|e| panic!("{id}: fixture `{sql}`: {:?}", e.kind));
+    if let Err(e) = live.raw().batch(sql).await {
+        let shown = sql.split('\'').next().unwrap_or_default();
+        let code = e
+            .server
+            .as_ref()
+            .map(|s| (s.sqlstate.clone(), s.vendor_code));
+        panic!("{id}: fixture `{shown}…`: {:?} {code:?}", e.kind);
+    }
 }
+
+/// The targets whose fixtures this test binary already ensured: the tests run in parallel, and
+/// concurrent `CREATE ROLE`/`GRANT`/`CREATE TABLE IF NOT EXISTS` race on the catalogs.
+static FIXTURES: tokio::sync::Mutex<Vec<String>> = tokio::sync::Mutex::const_new(Vec::new());
 
 /// A name unique to this test run, for `application_name`.
 fn unique(prefix: &str) -> String {
@@ -178,6 +188,10 @@ fn unique(prefix: &str) -> String {
 /// TEMP and `CREATE` on `public` revoked from `PUBLIC` as the init script does (the same
 /// statements, so the matrix volumes end as the init script leaves them).
 async fn ensure_pg_fixtures(t: &DockerTarget) {
+    let mut done = FIXTURES.lock().await;
+    if done.contains(&t.id) {
+        return;
+    }
     let mut a = admin(t).await;
     let password = t.password.replace('\'', "''");
     let roles = [
@@ -220,11 +234,16 @@ async fn ensure_pg_fixtures(t: &DockerTarget) {
         batch(&mut a, &t.id, sql).await;
     }
     a.close().await;
+    done.push(t.id.clone());
 }
 
 /// `hv_probe` and `hv_ro` (`SELECT, SHOW VIEW` on the test database) on MySQL or MariaDB
 /// target `t`, created only when `hv_ro` cannot sign in (the init script makes it).
 async fn ensure_mysql_fixtures(t: &DockerTarget) {
+    let mut done = FIXTURES.lock().await;
+    if done.contains(&t.id) {
+        return;
+    }
     let mut a = admin(t).await;
     batch(
         &mut a,
@@ -259,6 +278,7 @@ async fn ensure_mysql_fixtures(t: &DockerTarget) {
         }
     }
     a.close().await;
+    done.push(t.id.clone());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -351,7 +371,7 @@ async fn pg_fixture_roles_with_more_than_read_are_guarded() {
 #[ignore = "docker"]
 async fn pg_a_session_running_as_another_role_is_guarded() {
     // Fix round 1 (I-3): the probe would see `hv_ro`, but `SET ROLE NONE` returns to the login.
-    // A role default and a typed `-c role=` both read guarded, `Unparsed`.
+    // A role default reads guarded, `Unparsed` (the probe's reset restores it).
     if !docker_enabled() {
         return;
     }
@@ -363,12 +383,70 @@ async fn pg_a_session_running_as_another_role_is_guarded() {
     assert_eq!(by_default.access, AccessLabel::ReadOnlyGuarded);
     assert_eq!(by_default.access_warnings, [RoleWarning::Unparsed]);
     by_default.close().await;
-    let mut typed = profile_as(&t, &t.user, true);
-    typed.extra = vec![("options".into(), format!("-c role={RO}"))];
-    let typed = connect_profile(&t, typed).await;
-    assert_eq!(typed.access, AccessLabel::ReadOnlyGuarded);
-    assert_eq!(typed.access_warnings, [RoleWarning::Unparsed]);
-    typed.close().await;
+    // Fix round 2 (I-3b): a typed `-c role=` or `-c session_authorization=` is refused on a
+    // read-only connect before any I/O, as a visible issue.
+    for setting in ["role", "session_authorization"] {
+        let mut typed = profile_as(&t, &t.user, true);
+        typed.extra = vec![("options".into(), format!("-c {setting}={RO}"))];
+        let refused = connect(
+            &deps(),
+            req_pw(typed, &t.password),
+            Interaction::Headless,
+            token(),
+            progress(),
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{}: -c {setting}= connected read-only", t.id));
+        assert_eq!(refused.class, ErrClass::ConfigInvalid, "{setting}");
+        assert!(
+            refused
+                .issues
+                .iter()
+                .any(|i| matches!(i.code, IssueCode::OptionRejected { .. })),
+            "{setting}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "docker"]
+async fn pg_the_probe_judges_the_identity_after_the_reset() {
+    // Fix round 2 (I-3b), without the sanitizer: a superuser connection that runs as `hv_ro`
+    // (session authorization or `SET ROLE`) looks like `hv_ro`, but the guard's reset
+    // (`SET SESSION AUTHORIZATION DEFAULT`, `RESET ALL`) returns to the superuser. The probe
+    // resets first, so it judges the superuser. (On pg17 a startup `-c session_authorization=`
+    // was observed to leave `current_user` the login, so the identity is switched in-session.)
+    if !docker_enabled() {
+        return;
+    }
+    let Some(t) = require_target("pg17") else {
+        return;
+    };
+    ensure_pg_fixtures(&t).await;
+    for switch in [
+        format!("SET SESSION AUTHORIZATION {RO}"),
+        format!("SET ROLE {RO}"),
+    ] {
+        let mut live = admin(&t).await;
+        batch(&mut live, &t.id, &switch).await;
+        assert_eq!(
+            scalar(&mut live, "SELECT current_user").await,
+            RO,
+            "{switch}"
+        );
+        let (label, warnings) = access_for(live.raw(), DbmsKind::Postgres, true).await;
+        assert_eq!(
+            label,
+            AccessLabel::ReadOnlyGuarded,
+            "{switch}: {warnings:?}"
+        );
+        assert!(
+            warnings.contains(&RoleWarning::Superuser),
+            "{switch}: {warnings:?}"
+        );
+        live.close().await;
+    }
 }
 
 #[tokio::test]
@@ -483,7 +561,15 @@ async fn pg_probe_on_100k_tables_is_measured() {
     let (label, warnings) = access_for(ro.raw(), DbmsKind::Postgres, true).await;
     let took = started.elapsed();
     ro.close().await;
-    eprintln!("{}: role probe over {TABLES} tables took {took:?}", t.id);
+    let line = format!("{}: role probe over {TABLES} tables took {took:?}", t.id);
+    eprintln!("{line}");
+    // Also the Docker artifact `t18-probe-timing.txt`, which a run without `--nocapture`
+    // keeps (ADR 0004 `m2b-t18` records it).
+    let path = hacivat_testkit::artifact("t18-probe-timing.txt");
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).expect("the artifact directory");
+    }
+    std::fs::write(&path, format!("{line}\n")).expect("t18-probe-timing.txt is written");
     batch(&mut a, &t.id, &drop_db).await;
     a.close().await;
     assert_eq!(label, AccessLabel::ReadOnlyEnforced, "{warnings:?}");
@@ -548,7 +634,12 @@ async fn mysql_guarded_session_reads_and_refuses() {
         );
         // T13 carry: an executable comment is statement text; a version-gated one is read both
         // ways (fix round 1, I-1).
-        for sql in ["/*!50000 COMMIT */", "/*!99999 SELECT 1 */ COMMIT"] {
+        for sql in [
+            "/*!50000 COMMIT */",
+            "/*!99999 SELECT 1 */ COMMIT",
+            // Fix round 2 (I-1b): one nested comment inside a skipped version-gated one.
+            "/*!999999 /* x */ SELECT 1 */ COMMIT",
+        ] {
             assert_eq!(
                 run(&s, sql).await.unwrap_err().kind,
                 ExecErrorKind::ReadOnlyDenied(DenyLayer::Transaction),

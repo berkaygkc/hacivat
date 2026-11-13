@@ -355,7 +355,31 @@ pub(crate) fn checked(
             Vec::new()
         }
     };
+    // ## m2b-t18-guarded-exec (fix round 2, I-3b): a read-only profile may not switch the role.
+    if p.read_only {
+        for issue in read_only_issues(p) {
+            push(issue.field, issue.code);
+        }
+    }
     (issues, options)
+}
+
+// ## m2b-t18-guarded-exec
+/// The options a read-only connect of `p` refuses (`hacivat_driver::sanitize::
+/// read_only_violations`: a PostgreSQL `options` value that sets `role` or
+/// `session_authorization`), as visible issues. The pipeline also applies it when only the
+/// session is read-only (Task 18 fix round 2, I-3b).
+pub(crate) fn read_only_issues(p: &Profile) -> Vec<ValidationIssue> {
+    hacivat_driver::sanitize::read_only_violations(p.engine, &p.extra)
+        .into_iter()
+        .map(|v| ValidationIssue {
+            field: None,
+            code: IssueCode::OptionRejected {
+                key: v.key,
+                reason: v.reason,
+            },
+        })
+        .collect()
 }
 
 /// A host no resolver or TLS stack should see: ASCII whitespace, a control character, or URL

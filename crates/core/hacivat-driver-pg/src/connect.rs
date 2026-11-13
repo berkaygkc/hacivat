@@ -71,10 +71,23 @@ fn without_dangling_escape(s: &str) -> &str {
 
 /// The startup `options` string: the sanitized extras in order, then the read-only default
 /// last, so nothing before it can turn it off (a later `-c` wins).
-fn startup_options(read_only: bool, extras: &[(String, String)]) -> Option<String> {
+///
+/// ## m2b-t18-guarded-exec (Task 18 fix round 2, I-3b): a read-only connect refuses an
+/// `options` value that sets `role` or `session_authorization`
+/// (`hacivat_driver::sanitize::pg_options_switch_role`), never dropping it silently: the role
+/// probe would judge one identity and the guard's reset return to another. The session's
+/// validation refuses it first, as a visible issue; this is the driver's own belt. A
+/// read-write connect keeps it.
+fn startup_options(
+    read_only: bool,
+    extras: &[(String, String)],
+) -> Result<Option<String>, RawError> {
     let mut parts: Vec<String> = Vec::new();
     for (key, value) in extras {
         if key.eq_ignore_ascii_case("options") {
+            if read_only && hacivat_driver::sanitize::pg_options_switch_role(value) {
+                return Err(raw(RawErrorKind::Unsupported));
+            }
             let trimmed = without_dangling_escape(value.trim());
             if !trimmed.is_empty() {
                 parts.push(trimmed.to_string());
@@ -92,13 +105,14 @@ fn startup_options(read_only: bool, extras: &[(String, String)]) -> Option<Strin
     if read_only {
         parts.push("-c default_transaction_read_only=on".into());
     }
-    (!parts.is_empty()).then(|| parts.join(" "))
+    Ok((!parts.is_empty()).then(|| parts.join(" ")))
 }
 
 /// The `tokio-postgres` configuration for `req`, password included (P49): build it only at
-/// connect time, never format it, drop it after the handshake.
+/// connect time, never format it, drop it after the handshake. Fails when a read-only `req`
+/// switches the role in its `options` (`startup_options`).
 #[doc(hidden)]
-pub fn config_for(req: &DriverConnect) -> Config {
+pub fn config_for(req: &DriverConnect) -> Result<Config, RawError> {
     let mut c = Config::new();
     if let Some(user) = &req.user {
         c.user(user);
@@ -110,14 +124,14 @@ pub fn config_for(req: &DriverConnect) -> Config {
         c.dbname(db);
     }
     c.application_name(&req.application_name);
-    if let Some(options) = startup_options(req.read_only, &req.options) {
+    if let Some(options) = startup_options(req.read_only, &req.options)? {
         c.options(options);
     }
     let mode = req.tls.as_ref().map_or(SslMode::Disable, |t| {
         ssl_mode(t.settings.mode, t.plaintext_allowed)
     });
     c.ssl_mode(mode);
-    c
+    Ok(c)
 }
 
 /// Connects and returns the concrete connection. [`crate::PgDriver`] boxes it; tests use it
@@ -143,7 +157,7 @@ pub async fn connect_conn_with(
     }
     let shared = Shared::default();
     let connector = Connector::new(req.tls.as_ref(), req.events.clone(), shared.clone());
-    let mut config = config_for(&req);
+    let mut config = config_for(&req)?;
     adjust(&mut config);
     let mode = config.get_ssl_mode();
     let events = req.events.clone();
@@ -318,14 +332,57 @@ mod tests {
         assert_eq!(without_dangling_escape("x\\"), "x");
         assert_eq!(without_dangling_escape("x\\\\"), "x\\\\");
         assert_eq!(without_dangling_escape("x\\\\\\"), "x\\\\");
-        assert_eq!(startup_options(false, &[]), None);
+        assert_eq!(startup_options(false, &[]), Ok(None));
         assert_eq!(
             startup_options(false, &[("OPTIONS".into(), "  ".into())]),
-            None
+            Ok(None)
         );
         assert_eq!(
-            startup_options(true, &[("unknown_key".into(), "1".into())]).as_deref(),
+            startup_options(true, &[("unknown_key".into(), "1".into())])
+                .unwrap()
+                .as_deref(),
             Some("-c default_transaction_read_only=on")
         );
+    }
+
+    // ## m2b-t18-guarded-exec
+    #[test]
+    fn a_read_only_connect_refuses_a_role_switch() {
+        // Task 18 fix round 2 (I-3b): every spelling the server reads as `role` or
+        // `session_authorization` is refused on a read-only connect, never dropped.
+        for value in [
+            "-c role=hv_ro",
+            "-crole=hv_ro",
+            "-c search_path=app -c ROLE=hv_ro",
+            "--role=hv_ro",
+            "-c session_authorization=hv_ro",
+            "-c session-authorization=hv_ro",
+            "--Session_Authorization=hv_ro",
+            "-c\tsession_authorization=x",
+            "-c \\ role=x",
+        ] {
+            let extras = [("options".to_string(), value.to_string())];
+            assert_eq!(
+                startup_options(true, &extras).unwrap_err().kind,
+                RawErrorKind::Unsupported,
+                "{value:?}"
+            );
+            // A read-write connect keeps `-c role=` (a legitimate feature).
+            assert!(
+                startup_options(false, &extras)
+                    .unwrap()
+                    .is_some_and(|o| o.contains(value.trim())),
+                "{value:?}"
+            );
+        }
+        // Names that only look alike are left alone.
+        for value in [
+            "-c rolex=1",
+            "-c search_path=role",
+            "-c application_name=role=x",
+        ] {
+            let extras = [("options".to_string(), value.to_string())];
+            assert!(startup_options(true, &extras).is_ok(), "{value:?}");
+        }
     }
 }

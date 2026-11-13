@@ -27,6 +27,7 @@
 //! replay, and whenever the connection still reports a transaction at the end. User text never
 //! goes through `batch`, the trusted path.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -316,38 +317,44 @@ fn statement_error(e: &RawError, sent: bool) -> ExecError {
 const MAX_READINGS: usize = 64;
 
 /// The first keyword of a statement as its server may read it: one reading per way the
-/// server's lexer can go, each ASCII upper-cased (empty when the statement does not start with
-/// a word).
+/// server's lexer can go, each ASCII upper-cased. `Some("")` when the statement starts with
+/// something other than a word (`(`); `None` when the reading holds no statement at all (only
+/// comments, as when a version-gated comment holds the whole statement and is skipped).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Keywords {
-    readings: Vec<String>,
-    /// False when [`MAX_READINGS`] cut the readings short.
+    readings: Vec<Option<String>>,
+    /// False when [`MAX_READINGS`] or [`MAX_FORKS`] cut the readings short.
     complete: bool,
+    /// The version-gated comments already forked at, by position: both readings of one reach
+    /// the same text after it, so it is followed once (review n-1: a chain of them stays
+    /// linear instead of doubling).
+    forked: HashSet<usize>,
 }
 
 impl Keywords {
-    /// Step 1a: some reading is a transaction keyword, or the readings are incomplete.
-    fn controls_transaction(&self) -> bool {
-        !self.complete
-            || self
-                .readings
-                .iter()
-                .any(|k| TRANSACTION_KEYWORDS.contains(&k.as_str()))
+    fn words(&self) -> impl Iterator<Item = &str> {
+        self.readings.iter().flatten().map(String::as_str)
     }
 
-    /// Every reading is one of `words` (and there is one).
+    /// Step 1a: some reading is a transaction keyword, or the readings are incomplete.
+    fn controls_transaction(&self) -> bool {
+        !self.complete || self.words().any(|k| TRANSACTION_KEYWORDS.contains(&k))
+    }
+
+    /// Every reading that holds a statement starts with one of `words`, and one does. A
+    /// reading without a statement (a skipped version-gated comment that held all of it) runs
+    /// nothing on the server, so it neither commits nor counts (review n-4).
     fn all_in(&self, words: &[&str]) -> bool {
-        self.complete
-            && !self.readings.is_empty()
-            && self.readings.iter().all(|k| words.contains(&k.as_str()))
+        self.complete && self.words().next().is_some() && self.words().all(|k| words.contains(&k))
     }
 }
 
 /// First keywords of MySQL statements that commit implicitly before they run (T13), so a
 /// failed one may leave no transaction without having escaped anything: the server refuses
 /// it afterwards under the session's read-only setting. An allowlist: any other keyword after
-/// a failed statement is judged (fix round 1, I-2).
-const IMPLICIT_COMMIT_KEYWORDS: [&str; 15] = [
+/// a failed statement is judged (fix round 1, I-2). Fix round 2 (review I-2 note) adds the
+/// preparable replication and administration verbs `RESET`, `CHANGE` and `STOP`.
+const IMPLICIT_COMMIT_KEYWORDS: [&str; 18] = [
     "CREATE",
     "ALTER",
     "DROP",
@@ -363,6 +370,9 @@ const IMPLICIT_COMMIT_KEYWORDS: [&str; 15] = [
     "UNINSTALL",
     "CACHE",
     "LOAD",
+    "RESET",
+    "CHANGE",
+    "STOP",
 ];
 
 /// The lexer rules of one engine that decide where a statement's first keyword is.
@@ -398,6 +408,7 @@ pub(crate) fn guard_keywords(kind: DbmsKind, sql: &str) -> Keywords {
     let mut keywords = Keywords {
         readings: Vec::new(),
         complete: true,
+        forked: HashSet::new(),
     };
     read_from(sql.as_bytes(), 0, 0, lexer, &mut keywords);
     keywords
@@ -406,6 +417,13 @@ pub(crate) fn guard_keywords(kind: DbmsKind, sql: &str) -> Keywords {
 /// How many version-gated comments one reading may fork at (the recursion depth; a statement
 /// may hold a million of them). Past it the readings are incomplete, which fails closed.
 const MAX_FORKS: usize = 16;
+
+/// Nesting levels a block comment may hold: PostgreSQL's nest without a bound; MySQL's and
+/// MariaDB's do not, except that a skipped version-gated comment may hold one level
+/// (`consume_comment(lip, 1)`, "version allowed to have one level of comment inside"; fix
+/// round 2, I-1b).
+const NESTS_FREELY: u32 = u32::MAX;
+const SKIPPED_VERSIONED_NESTING: u32 = 1;
 
 /// Follows one reading from `i`, forking at each version-gated executable comment; `forks` is
 /// how many forks led here.
@@ -418,7 +436,7 @@ fn read_from(b: &[u8], mut i: usize, forks: usize, lexer: Lexer, out: &mut Keywo
     let at = |i: usize| b.get(i).copied();
     loop {
         let Some(c) = at(i) else {
-            out.readings.push(String::new());
+            out.readings.push(None);
             return;
         };
         if c.is_ascii_whitespace() || c == b'\x0b' || c == b';' {
@@ -447,18 +465,23 @@ fn read_from(b: &[u8], mut i: usize, forks: usize, lexer: Lexer, out: &mut Keywo
                     i = start;
                     continue;
                 }
-                // Version-gated: run (its text) or skipped (what follows it).
+                // Version-gated: run (its text) or skipped (what follows it). Both readings from
+                // here were followed already if another reading reached this comment.
+                if !out.forked.insert(i) {
+                    return;
+                }
                 read_from(b, text, forks + 1, lexer, out);
-                match block_end(b, i, false) {
+                match block_end(b, i, SKIPPED_VERSIONED_NESTING) {
                     Some(end) => read_from(b, end, forks + 1, lexer, out),
-                    None => out.readings.push(String::new()),
+                    None => out.readings.push(None),
                 }
                 return;
             }
-            match block_end(b, i, lexer.postgres) {
+            let nesting = if lexer.postgres { NESTS_FREELY } else { 0 };
+            match block_end(b, i, nesting) {
                 Some(end) => i = end,
                 None => {
-                    out.readings.push(String::new());
+                    out.readings.push(None);
                     return;
                 }
             }
@@ -466,13 +489,13 @@ fn read_from(b: &[u8], mut i: usize, forks: usize, lexer: Lexer, out: &mut Keywo
             // The end of an executable comment the reading went into.
             i += 2;
         } else {
-            out.readings.push(
+            out.readings.push(Some(
                 b[i..]
                     .iter()
                     .take_while(|c| c.is_ascii_alphanumeric() || **c == b'_')
                     .map(|c| char::from(c.to_ascii_uppercase()))
                     .collect(),
-            );
+            ));
             return;
         }
     }
@@ -487,8 +510,10 @@ fn line_end(b: &[u8], from: usize, cr_ends: bool) -> usize {
         .map_or(b.len(), |p| from + p + 1)
 }
 
-/// The index after the block comment that opens at `start`; `None` when it never ends.
-fn block_end(b: &[u8], start: usize, nested: bool) -> Option<usize> {
+/// The index after the block comment that opens at `start`; `None` when it never ends. A `/*`
+/// inside opens a nested comment only while fewer than `nesting` levels are open; past that it
+/// is plain text (as in MySQL's `consume_comment`).
+fn block_end(b: &[u8], start: usize, nesting: u32) -> Option<usize> {
     let mut depth = 1u32;
     let mut i = start + 2;
     while i + 1 < b.len() {
@@ -500,7 +525,7 @@ fn block_end(b: &[u8], start: usize, nested: bool) -> Option<usize> {
                     return Some(i);
                 }
             }
-            (b'/', b'*') if nested => {
+            (b'/', b'*') if depth <= nesting => {
                 depth += 1;
                 i += 2;
             }
@@ -566,9 +591,20 @@ fn same_role(answer: &ExecSummary) -> bool {
 }
 
 /// The probe's row sets; `None` when a statement failed or answered too many rows, or (on
-/// PostgreSQL) the connection runs as a role other than its session user.
+/// PostgreSQL) the reset failed or the connection runs as a role other than its session user.
+///
+/// PostgreSQL first resets the connection the way every guarded request ends (fix round 2,
+/// I-3b): the reset's `SET SESSION AUTHORIZATION DEFAULT` returns to the signed-in login and
+/// its `RESET ALL` restores a startup or role-default `role`, so the identity check and the
+/// probe judge the identity every guarded request after the first runs as. Without it a
+/// superuser login with a startup `session_authorization` reads as the reader it named, and
+/// the first guarded request's reset turns it back into the superuser.
 async fn probe(conn: &mut dyn RawConn, kind: DbmsKind) -> Option<Vec<Vec<Vec<Option<String>>>>> {
     if kind == DbmsKind::Postgres {
+        if let Err(e) = conn.reset().await {
+            tracing::debug!(kind = ?e.kind, "the role probe's reset failed");
+            return None;
+        }
         match conn.execute(PG_IDENTITY_SQL, simple(1)).await {
             Ok(answer) if same_role(&answer) => {}
             Ok(_) => {

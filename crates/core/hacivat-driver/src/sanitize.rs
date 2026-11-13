@@ -241,6 +241,61 @@ fn pg_options_safe(value: &str, gucs: &[String]) -> bool {
     any
 }
 
+// ## m2b-t18-guarded-exec
+
+/// The settings that change which role a PostgreSQL session runs as. On a read-only
+/// connection either one would make the role probe judge another identity than the one the
+/// guard's reset (`SET SESSION AUTHORIZATION DEFAULT`, `RESET ALL`) returns to (Task 18 fix
+/// round 2, I-3b).
+const PG_ROLE_SETTINGS: [&str; 2] = ["role", "session_authorization"];
+
+/// Whether a PostgreSQL `options` value sets `role` or `session_authorization`. It is read the
+/// way the server reads it: split as `pg_split_opts` splits it (C `isspace`, `\` escapes),
+/// then each `-c name=value`, `-cname=value`, `-c` followed by a separate `name=value`, or
+/// `--name=value` item; names compare ASCII case-insensitively, with `-` read as `_` and
+/// surrounding whitespace ignored. A dangling `-c` sets nothing.
+pub fn pg_options_switch_role(value: &str) -> bool {
+    let words = pg_split_opts(value);
+    let mut words = words.iter();
+    while let Some(word) = words.next() {
+        let setting = if word == "-c" {
+            words.next().map(String::as_str)
+        } else {
+            word.strip_prefix("--").or_else(|| word.strip_prefix("-c"))
+        };
+        let Some((name, _)) = setting.and_then(|s| s.split_once('=')) else {
+            continue;
+        };
+        let name = name.trim_matches(c_isspace).replace('-', "_");
+        if PG_ROLE_SETTINGS
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(&name))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The options a read-only profile may not carry, whatever its origin and the unsafe toggle:
+/// a PostgreSQL `options` value that switches the role ([`pg_options_switch_role`]), as
+/// `AlwaysDenied`. A read-write profile keeps them (`-c role=` is a legitimate feature).
+pub fn read_only_violations(kind: DbmsKind, options: &[(String, String)]) -> Vec<Violation> {
+    if kind != DbmsKind::Postgres {
+        return Vec::new();
+    }
+    options
+        .iter()
+        .filter(|(key, value)| {
+            key.eq_ignore_ascii_case(PG_OPTIONS) && pg_options_switch_role(value)
+        })
+        .map(|(key, _)| Violation {
+            key: key.clone(),
+            reason: ViolationReason::AlwaysDenied,
+        })
+        .collect()
+}
+
 /// `p` with a leading `~` expanded, made absolute and canonicalized one component at a time:
 /// a component that exists is resolved through the file system (symlinks included), so every
 /// prefix is either canonical or does not exist, and `..` can always drop the last component.

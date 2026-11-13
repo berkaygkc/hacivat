@@ -473,10 +473,20 @@ read-only session runs only fixed or quoted control text (fix round 1, m-5): `Sw
     runs on a server at least that version and is skipped on an older one, so it is read
     **both ways** — inside it, and after its end — and the stricter result wins: 1a refuses
     when any reading is a transaction keyword. `/*!99999 SELECT 1 */ COMMIT` is refused.
-  - Readings fork at each version-gated comment; at most 16 forks deep and 64 readings. Past
-    either bound the readings are incomplete, which 1a refuses (a statement with more than 16
-    version-gated comments before its first word is not guessed at). A 1 MiB statement of them
-    is refused at once.
+  - **A skipped version-gated comment may hold one nested comment** (fix round 2, I-1b): MySQL's
+    and MariaDB's lexer skips it with `consume_comment(lip, 1)` ("version allowed to have one
+    level of comment inside"), so in the skipped reading one inner `/*…*/` (`!` and `M!`
+    included: inside a skipped comment they are plain comments) is skipped whole, the next
+    `*/` ends the version-gated comment, and a deeper `/*` is plain text. Ordinary MySQL,
+    MariaDB and SQLite comments do not nest (`consume_comment(lip, 0)`).
+    `/*!99999 /* x */ SELECT 1 */ COMMIT` is refused.
+  - Readings fork at each version-gated comment, and each comment is followed once (both of
+    its readings reach the same text after it; review n-1): a chain of them stays linear. At
+    most 16 forks deep and 64 readings; past either bound the readings are incomplete, which
+    1a refuses. In practice: up to 16 version-gated comments before the first word are read,
+    a 17th is refused (not guessed at), and a 1 MiB statement of them is refused at once.
+    (Round 1 forked without the memo, so 7 sequential comments already overflowed 64
+    readings.)
   - On PostgreSQL and SQLite `/*!` is an ordinary comment.
 
   The session's `schema::first_keyword` (Task 7: Manual-mode control words, schema reprobe)
@@ -489,7 +499,8 @@ read-only session runs only fixed or quoted control text (fix round 1, m-5): `Sw
   `GapReason` set has: the guard found no transaction — the connection is discarded, and the
   user statement is never sent. (This also settles the open question whether MySQL reports
   `SERVER_STATUS_IN_TRANS` after `START TRANSACTION READ ONLY`: if a server did not, every
-  read-only statement would end here, loudly, before any user text ran.)
+  read-only statement would end here, loudly, before any user text ran. The fix round 2
+  Docker run confirmed MySQL 8.0, 8.4 and MariaDB 10.6, 10.11, 11.4 report it.)
 - **3.** The user statement through `execute` with `Protocol::Extended` and the caller's row
   limit, whatever protocol the caller asked for: one statement, prepared (PostgreSQL refuses a
   second one with `42601`; MySQL's read-only connection never re-sends an unpreparable
@@ -524,11 +535,21 @@ read-only session runs only fixed or quoted control text (fix round 1, m-5): `Sw
     before DDL and administration statements and then refuses them under the session's
     read-only setting (`1792`), which escapes nothing; a refused `CREATE` must not close the
     session. A failed statement is therefore not judged only when **every** reading of its
-    first keyword is in the allowlist `IMPLICIT_COMMIT_KEYWORDS`: `CREATE`, `ALTER`, `DROP`,
-    `RENAME`, `TRUNCATE`, `GRANT`, `REVOKE`, `ANALYZE`, `OPTIMIZE`, `REPAIR`, `FLUSH`, `INSTALL`,
-    `UNINSTALL`, `CACHE`, `LOAD`. Any other keyword (`CALL`, `DO`, an unknown word, a
-    parenthesis), and a version-gated DDL comment whose skipped reading is empty, is judged.
-    (The first version skipped every failed MySQL statement: wrong for `CALL`.)
+    first keyword that holds a statement is in the allowlist `IMPLICIT_COMMIT_KEYWORDS`:
+    `CREATE`, `ALTER`, `DROP`, `RENAME`, `TRUNCATE`, `GRANT`, `REVOKE`, `ANALYZE`, `OPTIMIZE`,
+    `REPAIR`, `FLUSH`, `INSTALL`, `UNINSTALL`, `CACHE`, `LOAD`, and since fix round 2 the
+    preparable replication and administration verbs `RESET`, `CHANGE`, `STOP` (review note:
+    a refused `RESET MASTER` no longer closes the session). Any other keyword (`CALL`, `DO`,
+    `SET`, an unknown word, a parenthesis), and mixed readings (`/*!99999 CREATE */ CALL p()`),
+    are judged. A reading that holds no statement — a version-gated comment that held the
+    whole statement, skipped — runs an empty query on the server (`1065`, no implicit commit),
+    so it does not count (review n-4): a failing `/*!50000 ALTER … */` is only an error. A
+    `mysqldump` view header (`/*!50001 CREATE … */ /*!50013 DEFINER=… */ …`) still has a
+    `DEFINER` reading and is judged (the readings do not model that version gates are
+    monotonic; doing so could drop a reading the server takes). The exemption trusts the
+    server's read-only refusal after the implicit commit for these classes only; a successful
+    one is still judged. (The first version skipped every failed MySQL statement: wrong for
+    `CALL`.)
   - SQLite runs in autocommit; a failed statement has nothing to judge.
 
   A gap → `EnforcementGap(reason)`: the connection is discarded **unreset**, the actor marks the
@@ -568,15 +589,35 @@ Q14): `run_guarded` never runs inside a user transaction.
 **Role probe and label (`access_for`, called by the pipeline's PostConnect).**
 
 - Read-write: `ReadWrite`, nothing runs.
-- Read-only PostgreSQL: first `SELECT current_user, session_user` (fix round 1, I-3). The probe
-  judges `current_user`'s roles, but `SET ROLE NONE` returns to the session user, so a session
-  running as another role (a role default `ALTER ROLE login SET role = …`, or a typed
-  `options=-c role=…`) could read enforced while one `DO $$ … SET ROLE NONE … $$` escalates.
-  The two names are compared here (no server operator; `current_user` and `session_user` are
-  SQL keywords, not names `search_path` resolves); anything but one row of two equal non-NULL
-  names is `Unparsed`, guarded, and the probe does not run. Residual: a superuser login that
-  sets `session_authorization` at startup has equal names; only a superuser can, and only by
-  typing it into the profile's options.
+- Read-only PostgreSQL: first **the connection's reset** (fix round 2, I-3b), the same
+  `conn.reset()` every guarded request ends with: its `SET SESSION AUTHORIZATION DEFAULT`
+  returns to the signed-in login and its `RESET ALL` restores a startup or role-default `role`.
+  So the identity check and the probe judge the identity every guarded request after the
+  first runs as (round 1 judged the identity before the first reset: a superuser login running
+  as a reader would have read enforced, and the first request's reset would have made it the
+  superuser again). A failed reset is `Unparsed`, guarded. One round trip per read-only
+  connect.
+- Then `SELECT current_user, session_user` (fix round 1, I-3). The probe judges
+  `current_user`'s roles, but `SET ROLE NONE` returns to the session user, so a session running
+  as another role (a role default `ALTER ROLE login SET role = …`) could read enforced while one
+  `DO $$ … SET ROLE NONE … $$` escalates. The two names are compared here (no server operator;
+  `current_user` and `session_user` are SQL keywords, not names `search_path` resolves);
+  anything but one row of two equal non-NULL names is `Unparsed`, guarded, and the probe does
+  not run.
+- **No role switch in a read-only connect's options** (fix round 2, I-3b, named exceptions in
+  `hacivat-driver` `sanitize.rs`, `hacivat-driver-pg` `connect.rs` and the pipeline's
+  `validate.rs`/`mod.rs`, blocks `m2b-t18-guarded-exec`). `sanitize::pg_options_switch_role`
+  reads an `options` value as the server does (`pg_split_opts`; `-c name=value`,
+  `-cname=value`, `-c` then `name=value`, `--name=value`; names ASCII-folded, `-` as `_`) and
+  finds `role` or `session_authorization`. `sanitize::read_only_violations` turns that into an
+  `AlwaysDenied` violation, whatever the origin and the unsafe toggle; the pipeline's
+  validation shows it as `OptionRejected` (`ConfigInvalid`, before any I/O) for a read-only
+  profile and for a read-only session of a read-write profile. The PostgreSQL driver's
+  `startup_options` refuses it too on a read-only connect (`Unsupported`, never dropped
+  silently), the belt for a caller outside the pipeline. A read-write connect keeps `-c role=`.
+  Observed on pg17: a startup `-c session_authorization=` left `current_user` the login, so
+  the reset is what guards the in-session switches (`SET SESSION AUTHORIZATION`, `SET ROLE`),
+  tested on pg17.
 - Then (PostgreSQL) or directly (MySQL) `role_probe_sql`'s fixed statements (never user text),
   each through `execute(Simple)` with at most 10,000 rows, then `interpret_probe` and
   `access_label`. A statement that fails, an answer that was truncated, or a probe longer than
@@ -617,42 +658,71 @@ detected one). The app reads `LiveInfo.server` and fills `<schema>` (Task 22).
 `hv_probe_scale` of 100,000 tables, times `access_for` as `hv_ro`, prints the time and drops the
 database again (a database left by an interrupted run is dropped first; fix round 1, m-6). It
 asserts the label only, which already means the probe ended within its 5 s bound; no
-wall-clock assertion gates CI (fix round 1, I-4). **Measured time: pending** — the Docker stack
-was not up for this task; the controller records it here from the full-set run, and the bound is
-raised if it exceeds 2 s.
+wall-clock assertion gates CI (fix round 1, I-4). It also writes the Docker artifact
+`t18-probe-timing.txt`. **Measured (fix round 2, `--set full`, pg17, local Docker on the
+development Mac): the whole probe — reset, identity check and the five statements — took
+153 ms over 100,000 tables** (`hv_ro`, enforced). Row 3's `EXISTS` finds nothing for a
+least-privilege role, so it scans every relation once; well under the 2 s the review asked
+about and the 5 s bound.
 
 **Docker fixtures (review m-6).** The fixture roles are created idempotently and stay on the
 matrix volumes: `hv_ro` (as the init script makes it), `hv_ro_su` (superuser member),
 `hv_ro_col` (column `UPDATE`), `hv_ro_create` (`CREATE` on `public`), `hv_ro_setrole` (superuser
 member and `hv_ro` member, `role = hv_ro` by default), all with the matrix's throwaway password.
 The `REVOKE TEMP`/`REVOKE CREATE ON SCHEMA public` from `PUBLIC` repeat the init script's own
-statements. MySQL: `hv_t18_ddl` is dropped before the DDL leg and never created.
+statements. MySQL: `hv_t18_ddl` is dropped before the DDL leg and never created. The test
+binary creates each target's fixtures once, under a lock: the tests run in parallel, and
+concurrent `CREATE ROLE`/`GRANT`/`CREATE TABLE IF NOT EXISTS` race on the catalogs (the first
+Docker run failed five tests on exactly that). A fixture failure names the statement only up
+to its first literal (a literal may hold the matrix password) and the server's code.
 
-**Tests.** `crates/core/hacivat-session/tests/readonly.rs` (FakeDriver, 35): the exact
+**Carried (fix round 2 review).** To Task 10's owner (n-2): `RESET_SQL`'s
+`SELECT pg_advisory_unlock_all()` is unqualified; after `RESET ALL` restores a startup
+`search_path`, a shadow function could keep advisory locks held across guarded requests (a lock
+leak, not a write): use `pg_catalog.pg_advisory_unlock_all()`. To Task 23's bypass suite (n-3):
+a MySQL account can always change its own password (`ALTER USER USER() IDENTIFIED BY …`,
+`SET PASSWORD = …`), which L5 cannot prevent; assert both are refused in a guarded read-only
+session (1792, or a gap). Also to Task 23 (I-2): a `CALL` of a procedure that commits, writes
+and commits.
+
+**Tests.** `crates/core/hacivat-session/tests/readonly.rs` (FakeDriver, 37): the exact
 PostgreSQL and MySQL sequences with replay and one reset; a smuggled `COMMIT` → gap, `Broken`,
 no open connection, the event, no reset, later requests `NotConnected`; canary non-NULL → gap;
-the transaction keywords; MySQL/MariaDB executable comments; the six review-H1 forms and
-both-way readings refused before I/O, and what the server reads as a read left alone; too many
-version-gated comments refused; engine comment rules and look-alike words; the 1 MiB limit
+the transaction keywords; MySQL/MariaDB executable comments; the six review-H1 forms,
+both-way readings and the one-level nesting of a skipped version-gated comment (I-1b) refused
+before I/O, and what the server reads as a read left alone; a chain of 16 version-gated
+comments read, a 17th refused; engine comment rules and look-alike words; the 1 MiB limit
 before I/O; a failed statement still rolls back and resets (server message kept); a cancelled
 one skips the canary and still resets; a failed `BEGIN` runs nothing else; a `before` step that
 leaves a transaction open breaks the session; a `before` that opens no transaction never sends
 the statement (H3); a failed MySQL `CALL` that left no transaction → gap (H2), and `DO`, a
-parenthesis and mixed readings too; a failed MySQL DDL → `Db`, reset, kept; MySQL write with
+parenthesis, `SET` and mixed readings too; a failed MySQL DDL (a whole-statement
+version-gated one and `RESET`/`CHANGE`/`STOP` included) → `Db`, reset, kept; MySQL write with
 rows → gap; `25P01` on the rollback → gap without reset; an unreadable canary → `Internal` and
 broken; a PostgreSQL error with no transaction → gap; a failed reset breaks the session; an
 engine without a plan runs nothing; SQLite runs only the statement; the probe: read-only only,
-identity check then the fixed statements, a switched role (and an unreadable identity answer)
-→ `Unparsed` without the probe (I-3), a failure is `Unparsed`, a 6 s probe is `Unparsed` (H4),
+reset, identity check, then the fixed statements; a failed reset is `Unparsed` (I-3b); a
+switched role (and an unreadable identity answer) → `Unparsed` without the probe (I-3); a
+read-only connect (profile or session) with `-c role=`/`-c session_authorization=` refused as a
+visible `OptionRejected` before I/O, read-write kept (I-3b); a failure is `Unparsed`, a 6 s
+probe is `Unparsed` (H4),
 TEMP keeps the enforced label, superuser, MySQL `SHOW GRANTS`, MariaDB/SQLite unprobed, a MySQL
 profile on MariaDB; a side connection runs no probe (H5); the label on a pipeline connect;
 remediation by version. `hacivat-guard` `plans.rs`/`probe.rs`: the qualified SQL.
-`tests/docker_readonly.rs`: `hv_ro` reads a table, a write is refused, `COMMIT` denied (pg17);
-`hv_ro` enforced and the superuser guarded with its warning; the three T5 fixture roles
-guarded with their warnings; a role default and a typed `-c role=` read guarded `Unparsed`
-(I-3); `hv_ro` enforced on every PostgreSQL line (13–18); MySQL 8.4 `hv_ro` enforced, MariaDB
-guarded with no warnings; MySQL/MariaDB sessions read, refuse a write, refuse executable-comment
-`COMMIT`s (both readings), and a refused `CREATE TABLE` is `Db`, the session stays usable and
-the table is absent (the I-2 premise); advisory lock and `LISTEN` do not survive a request; the
-100k-table measurement; and, without a server, SQLite guarded and a SQLite session that reads
-and refuses. The Docker tests compile; their run is pending (above).
+`hacivat-driver` `tests/sanitize.rs` and `hacivat-driver-pg` (`connect.rs` unit,
+`tests/unit.rs`): the role-switch reader, the read-only violation, the driver's refusal and
+read-write's `-c role=`.
+`tests/docker_readonly.rs` (**run in fix round 2 with `--set full`: 10/10 pass**, plus the
+other session Docker files and `hacivat-driver-pg`'s, all green): `hv_ro` reads a table, a
+write is refused, `COMMIT` denied (pg17); `hv_ro` enforced and the superuser guarded with its
+warning; the three T5 fixture roles guarded with their warnings; a role default reads guarded
+`Unparsed`, and a typed `-c role=`/`-c session_authorization=` on a read-only connect is
+refused (`ConfigInvalid`, `OptionRejected`); a superuser connection switched in-session to
+`hv_ro` (`SET SESSION AUTHORIZATION`, `SET ROLE`) reads guarded with `Superuser` after the
+probe's reset (I-3b); `hv_ro` enforced on every PostgreSQL line (13–18; this also confirms the
+`pg_catalog`-qualified probe SQL on every server); MySQL 8.4 `hv_ro` enforced, MariaDB guarded
+with no warnings; MySQL 8.0/8.4 and MariaDB sessions read, refuse a write, refuse
+executable-comment `COMMIT`s (both readings, and one nested level), and a refused
+`CREATE TABLE` is `Db`, the session stays usable and the table is absent (the I-2 premise,
+confirmed); advisory lock and `LISTEN` do not survive a request; the 100k-table measurement
+(above); and, without a server, SQLite guarded and a SQLite session that reads and refuses.
