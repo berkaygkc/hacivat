@@ -95,3 +95,72 @@ the vault, the session overlay, the keyring CI and the deferrals.
   for the endpoint makes every handshake fail with `TlsFailure::PinMismatch` and forbids the
   plaintext fallback; the host-key check and the tunnel refuse; the vault is locked and stores
   nothing; the SSH transport is still refused at Validate (`TransportUnavailable`).
+
+## m2b-t06 — vault
+
+- **Choice (B13, D-016 option A, Q30).** Where no OS keyring is usable (in practice Linux
+  without Secret Service), `Forever` secrets live in `<data>/vault.bin`: one
+  XChaCha20-Poly1305 blob over a JSON map `{ "<service>": "<secret>" }`, under a 32-byte
+  Argon2id key (v1.3; default `m = 65536 KiB`, `t = 3`, `p = 1`) derived from a master password
+  of at least 8 characters. The 64-byte header (`HVVAULT1`, `format_major`/`format_minor` u16 LE,
+  `m_kib`/`t`/`p` u32 LE, 16-byte salt, 24-byte nonce) is the associated data, so no header
+  byte (a downgraded cost, a version) can change without the unlock failing. Salt and nonce
+  come from `getrandom::fill`; every write draws a fresh 192-bit nonce and keeps the salt, so
+  the key stays the same and nonce reuse is a random collision only. A forgotten master
+  password is unrecoverable: `reset` deletes the file.
+- **Rejected.** AES-GCM (a 96-bit nonce is too short for random nonces per write);
+  scrypt/PBKDF2 (Argon2id is the current recommendation and already RustCrypto); a per-entry
+  file layout (it leaks how many secrets and which profiles); storing the service names in
+  clear for lookups (they name profiles and hops, so they stay inside the ciphertext).
+- **Fails closed.**
+  - The header is unauthenticated until the key exists, so its parameters are bounded before
+    any derivation: `m_kib` 8,192–1,048,576, `t` 1–10, `p` 1–8, else `VaultCorrupt` with no
+    key derived (a crafted `m_kib` would otherwise abort the process on allocation). Only a
+    vault built `with_params(p)` (tests) also accepts a header equal to `p`.
+  - A header that does not parse, a truncated file, a bad magic or a symlink/non-file at the
+    path is `VaultCorrupt`; a body that fails the AEAD under a header that parses is
+    `WrongMasterPassword` (the AEAD cannot tell tampering from a wrong password). Nothing is
+    written on any unlock failure, and a locked vault refuses `put` and `delete`.
+  - A newer `format_major` is `VaultReadOnly`: `get` works, `put` and `delete` refuse.
+  - Writes are atomic: `vault.bin.tmp` is created fresh (`create_new`, mode `0600`; a stale or
+    planted entry there is removed, never written through), written, `fsync`ed, renamed over
+    `vault.bin`, then the directory is `fsync`ed on Unix. The temp file only ever holds
+    ciphertext. A symlink or other non-file at `vault.bin` is refused, never followed; a read
+    checks that the opened handle is the file that was checked (device and inode on Unix). A
+    share or device path (`hacivat_net::is_network_path`'s rule, copied because
+    `hacivat-secrets` cannot depend on `hacivat-net`) is refused before any file system call.
+    A failed write changes nothing: the in-memory map is replaced only after the rename, and
+    the error is `VaultReadOnly` (the file cannot be written).
+  - **Forever-put errors never become hard errors (Q38).** `SecretStore::put(.., Forever)`
+    turns `VaultLocked`, `VaultReadOnly` and `VaultCorrupt` into `Stored::FellBackTo {
+    retention: UntilRestart, reason }` (the M2a toast), like `Unavailable`, `Denied` and
+    `TooLarge`. A vault that does not exist yet is "locked" for `put` (the UI offers Create)
+    and holds nothing for `get` and `delete` (`Ok(None)`, `Ok(())`), so the pipeline prompts
+    for the password instead of asking to unlock a vault that is not there.
+- **Secrets in memory.** The key is a `Zeroizing<[u8; 32]>`; the map holds `SecretString`
+  values. The JSON is written by hand into a `Zeroizing<Vec<u8>>` sized exactly up front (plus
+  the tag), encrypted in place, and never reallocated while it holds plaintext; the body is
+  decrypted in place in a `Zeroizing<Vec<u8>>` and parsed straight into `SecretString` with
+  secrecy's `serde` feature (no plain `String` value). `lock` drops both, which zeroizes them.
+  Argon2's working memory is supplied by the vault and overwritten (`black_box`ed) before it
+  is freed, because `argon2` is built without its `zeroize` feature (Task 1 owns the
+  manifest).
+  - **Residual, accepted:** a secret containing `"`, `\` or a control character is unescaped
+    by serde_json through its internal scratch buffer, which is freed without zeroizing; and
+    Argon2's initial Blake2b state lives briefly on the stack. Neither reaches a file, a log or
+    `Debug`.
+- **Timing.** The unlock cost depends only on the header parameters (Argon2id), the Poly1305
+  tag compare is constant-time, and the JSON is parsed only after the tag verified.
+- **Fallback backend (Q23).** `FallbackBackend` probes the keyring once (`OnceLock`), on first
+  use, without prompting (P36). Probe true routes everything to the keyring; probe false to
+  the vault. `choice()`/`as_vault()` follow the probed choice, and `probe_available()` is true
+  either way, so Forever stays enabled with the vault label.
+- **pgpass (B27).** An empty password field is `None` (libpq sends no password), not
+  `Some("")`; `PgPassMatch::password` is `Option<SecretString>`.
+- **Tests.** `crates/core/hacivat-secrets/tests/vault.rs` (round trip, no plaintext and mode
+  `0600`, header layout, wrong password, tamper, truncation, bad magic, the header as AAD, a
+  downgraded cost, read-only newer major, crafted parameters, `open` bounds, short master,
+  existing file, fresh nonces with a kept salt, reset, a planted symlink at `vault.bin` and at
+  the temp path, a failed write, network paths, `Debug`), `tests/fallback.rs` (probe once,
+  keyring or vault, the store's choice, Q38 fallbacks; `linux_without_secret_service_uses_vault`
+  runs in CI `vault-linux`), `tests/pgpass.rs` (`empty_password_field_is_none`).

@@ -135,9 +135,9 @@ enum Place {
 /// runtime's blocking pool, never on the UI thread.
 ///
 /// - `Forever`: the backend only. When the backend is missing, or refuses with `Unavailable`,
-///   `Denied` or `TooLarge`, the secret is kept in the process map instead and `put` reports
-///   `FellBackTo { retention: UntilRestart, reason }`. A `Forever` get reads that fallback
-///   first.
+///   `Denied`, `TooLarge`, `VaultLocked`, `VaultReadOnly` or `VaultCorrupt` (Q38), the secret is
+///   kept in the process map instead and `put` reports `FellBackTo { retention: UntilRestart,
+///   reason }`. A `Forever` get reads that fallback first.
 /// - `UntilRestart`: the process map.
 /// - `ForSession`: the session map, cleared per profile by `forget_session`.
 /// - `Never`: nothing is kept.
@@ -209,7 +209,13 @@ impl SecretStore {
                         Err(
                             e @ (SecretError::Unavailable
                             | SecretError::Denied
-                            | SecretError::TooLarge { .. }),
+                            | SecretError::TooLarge { .. }
+                            // ## m2b-t06-vault: a vault that is locked (or not created yet),
+                            // written by a newer Hacivat, or damaged never makes a Forever put a
+                            // hard error (Q38).
+                            | SecretError::VaultLocked
+                            | SecretError::VaultReadOnly
+                            | SecretError::VaultCorrupt),
                         ) => e,
                         Err(e) => return Err(e),
                     },

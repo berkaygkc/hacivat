@@ -121,8 +121,12 @@ fn ours(v: &Vector) -> Outcome {
         .unwrap_or_else(|w| panic!("{}: the file was ignored: {w:?}", v.name));
     match found {
         None => Outcome::NoPassword,
-        Some(m) if m.password.expose_secret().is_empty() => Outcome::NoPassword,
-        Some(m) if m.password.expose_secret() == docker_password().expose_secret() => {
+        // B27 (m2b-t06): an empty password field is `None`.
+        Some(m) if m.password.is_none() => Outcome::NoPassword,
+        Some(m)
+            if m.password.as_ref().map(|p| p.expose_secret())
+                == Some(docker_password().expose_secret()) =>
+        {
             Outcome::Accepted
         }
         Some(_) => Outcome::Rejected,
