@@ -126,19 +126,87 @@ fn every_read_pragma_is_allowed_without_argument_in_any_case() {
     }
 }
 
+/// Pragmas whose argument is a table or index name (controller ruling on Q16).
+const INTROSPECTION_PRAGMAS: [&str; 6] = [
+    "table_info",
+    "table_xinfo",
+    "index_list",
+    "index_info",
+    "index_xinfo",
+    "foreign_key_list",
+];
+
 #[test]
-fn every_pragma_with_an_argument_is_denied() {
-    for name in READ_PRAGMAS {
-        for arg in ["", "0", "1", "t", "main", "OFF"] {
-            assert_eq!(
-                sqlite_authorize(&SqliteAction::Pragma {
-                    name,
-                    arg: Some(arg)
-                }),
-                Authorization::Deny,
-                "{name}({arg:?})"
-            );
+fn every_setting_pragma_with_an_argument_is_denied() {
+    for name in READ_PRAGMAS
+        .into_iter()
+        .filter(|n| !INTROSPECTION_PRAGMAS.contains(n))
+    {
+        let upper = name.to_ascii_uppercase();
+        for n in [name, upper.as_str()] {
+            for arg in ["", "0", "1", "t", "main", "OFF", "delete", "wal"] {
+                assert_eq!(
+                    sqlite_authorize(&SqliteAction::Pragma {
+                        name: n,
+                        arg: Some(arg)
+                    }),
+                    Authorization::Deny,
+                    "{n}({arg:?})"
+                );
+            }
         }
+    }
+}
+
+#[test]
+fn introspection_pragmas_are_allowed_with_a_name_argument() {
+    // What SQLite hands the authorizer (confirmed with the sqlite3 shell's `.auth on`):
+    // `PRAGMA table_info(t)`, `PRAGMA main.table_info(t)`, `pragma_table_info('t')` and
+    // `pragma_table_info('t', 'main')` all arrive as `("table_info", Some("t"))`, with the
+    // schema in a separate argument the adapter does not pass on.
+    for name in INTROSPECTION_PRAGMAS {
+        let upper = name.to_ascii_uppercase();
+        for n in [name, upper.as_str()] {
+            for arg in ["t", "idx_t_a", "My Table", "main"] {
+                assert_eq!(
+                    sqlite_authorize(&SqliteAction::Pragma {
+                        name: n,
+                        arg: Some(arg)
+                    }),
+                    Authorization::Allow,
+                    "{n}({arg:?})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn introspection_pragmas_keep_exact_names() {
+    // The name-argument allowance does not reach look-alikes, prefixed names or setters.
+    for name in [
+        "main.table_info",
+        "table_info ",
+        "table_infos",
+        "index_list\0",
+        "writable_schema",
+        "query_only",
+        "user_version",
+        "schema_version",
+        "journal_mode",
+        "foreign_keys",
+        "trusted_schema",
+        "foreign_key_check",
+        "integrity_check",
+    ] {
+        assert_eq!(
+            sqlite_authorize(&SqliteAction::Pragma {
+                name,
+                arg: Some("t")
+            }),
+            Authorization::Deny,
+            "{name:?}"
+        );
     }
 }
 

@@ -85,23 +85,34 @@ characters, and no NUL (C-string APIs would cut the statement there and run a di
 `ATTACH_WRITE` off, `LIMIT_ATTACHED` 0, `LIMIT_LENGTH` 100,000,000, `LIMIT_SQL_LENGTH` 1 MiB (the
 input limit), `LIMIT_VARIABLE_NUMBER` 32,766. The authorizer denies by default and allows only
 `Read`, `Select`, `Recursive`, functions other than `load_extension`, `readfile`, `writefile`,
-`edit` and `fts3_tokenizer`, and the pragmas of `SQLITE_READ_PRAGMAS` **without an argument**
+`edit` and `fts3_tokenizer`, the pragmas of `SQLITE_READ_PRAGMAS` **without an argument**
 (Q16: `query_only`, `journal_mode`, `trusted_schema` and `foreign_keys` are readable; with an
-argument each is a setter and stays denied). Names are compared with ASCII case folding
+argument each is a setter and stays denied), and the six `SQLITE_INTROSPECTION_PRAGMAS`
+(`table_info`, `table_xinfo`, `index_list`, `index_info`, `index_xinfo`, `foreign_key_list`)
+**with** a name argument (see the controller ruling below). Names are compared with ASCII case folding
 (INV-3) and must match whole: a schema prefix (`main.query_only`), padding or a NUL is denied
 (SQLite passes the bare pragma name and the schema separately, so this never denies a real
 read). The `match` names every `SqliteAction`, so a new action needs a decision; `Other(code)`
 is always denied. The authorizer returns `Deny`, never `Ignore`: `Ignore` turns a denied column
 read into NULL and lets the statement run.
 
-Known cost: the name-taking pragmas (`table_info`, `table_xinfo`, `index_list`, `index_info`,
-`index_xinfo`, `foreign_key_list`) are only useful with an argument, so on a read-only
-connection they are denied in both the `PRAGMA x(t)` and the `pragma_x('t')` forms (the
-table-valued form prepares the same pragma and asks the authorizer again: the sqlite3 shell's
-`.auth on` trace shows `PRAGMA "table_info" "t"` for `SELECT … FROM pragma_table_info('t')`, and
-`PRAGMA "query_only" NULL "main"` for `PRAGMA main.query_only`). Introspection of a
-read-only SQLite profile reads `sqlite_schema` or uses a separate connection. Allowing a name
-argument for those six only is a one-line change that needs a controller ruling.
+*Controller ruling (fix round, on Q16).* The "no argument" rule is for the setting pragmas.
+The six introspection pragmas are only useful with a table or index name, so they are allowed
+with an argument, in every form a user writes them. The sqlite3 shell's `.auth on` trace
+shows what the authorizer receives:
+
+- `PRAGMA table_info(t)`, `pragma_table_info('t')` → `PRAGMA "table_info" "t"`;
+- `PRAGMA main.table_info(t)`, `pragma_table_info('t','main')` →
+  `PRAGMA "table_info" "t" "main"` (the table-valued form prepares the same pragma and asks
+  the authorizer again; the schema is a separate argument the adapter does not pass on);
+- `PRAGMA main.query_only` → `PRAGMA "query_only" NULL "main"`.
+
+The ruling also asked to refuse these six with a value assignment (`= …`). The authorizer
+cannot do that: `PRAGMA table_info = t` arrives as `PRAGMA "table_info" "t"`, exactly like
+`PRAGMA table_info(t)`. It does not need to: none of the six has a setter, and the `=` form
+reads table `t` the same way. Assigning to a pragma that has a setter stays denied, because
+every other pragma is refused whenever it carries an argument. A text-level refusal of
+`= …` would have to sit in Task 11's adapter, which sees the SQL. It would add no safety.
 
 **Role probe (MCP-09 step 1).** PostgreSQL runs five statements (role flags; membership in
 `pg_read_server_files`, `pg_write_server_files`, `pg_execute_server_program`,
@@ -149,9 +160,10 @@ their label enforced. The strings carry only the `<role>`, `<password>` and `<da
 placeholders; the UI shows and copies them unchanged.
 
 **Tests.** `crates/core/hacivat-guard/tests/{plans,post,sqlite_authorizer,probe,labels}.rs`
-(50 tests): exact plan values; every gap and its order; unknown transaction state; tags in any
-case, with and without row counts; byte-counted input limits; every pragma of the list with
-and without an argument, in both cases, and malformed names; every write, attach and raw
+(52 tests): exact plan values; every gap and its order; unknown transaction state; tags in any
+case, with and without row counts; byte-counted input limits; every pragma of the list without
+an argument and every setting pragma with one, in both cases; the six introspection pragmas
+with a name argument; malformed and look-alike names; every write, attach and raw
 action code (-1..=40 and the `i32` extremes) denied; every PostgreSQL warning and every
 malformed probe shape; MySQL grant lines with odd whitespace, case, quoting, column lists,
 role grants, grant options, partial revokes and a smuggled second statement; labels, including

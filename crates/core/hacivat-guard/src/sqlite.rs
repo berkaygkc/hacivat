@@ -89,8 +89,9 @@ const DENIED_FUNCTIONS: [&str; 5] = [
     "fts3_tokenizer",
 ];
 
-/// Pragmas a read-only connection may read, and only read: with an argument every one of them
-/// is denied (Q16), because an argument is how a pragma is set.
+/// Pragmas a read-only connection may read without an argument (Q16). With an argument, only
+/// the [`SQLITE_INTROSPECTION_PRAGMAS`] are allowed; for every other one an argument is how it
+/// is set, so it is denied.
 pub const SQLITE_READ_PRAGMAS: [&str; 20] = [
     "table_info",
     "table_xinfo",
@@ -114,10 +115,25 @@ pub const SQLITE_READ_PRAGMAS: [&str; 20] = [
     "foreign_keys",
 ];
 
+/// Introspection pragmas whose argument is a table or index name (controller ruling on Q16).
+/// None of them has a setter: SQLite gives the authorizer the same `(name, argument)` for
+/// `PRAGMA table_info(t)`, `PRAGMA table_info = t`, `PRAGMA main.table_info(t)`,
+/// `pragma_table_info('t')` and `pragma_table_info('t', 'main')` (the schema arrives
+/// separately), and every one of these only reads the schema.
+pub const SQLITE_INTROSPECTION_PRAGMAS: [&str; 6] = [
+    "table_info",
+    "table_xinfo",
+    "index_list",
+    "index_info",
+    "index_xinfo",
+    "foreign_key_list",
+];
+
 /// The read-only authorizer's answer to `a`. It denies by default and allows only reads
-/// (`Read`, `Select`, `Recursive`), functions outside [`DENIED_FUNCTIONS`] and the pragmas of
-/// [`SQLITE_READ_PRAGMAS`] without an argument. Names are compared with ASCII case folding
-/// (INV-3) and must match whole: a name with a schema prefix or padding is denied. The match
+/// (`Read`, `Select`, `Recursive`), functions outside [`DENIED_FUNCTIONS`], the pragmas of
+/// [`SQLITE_READ_PRAGMAS`] without an argument, and the [`SQLITE_INTROSPECTION_PRAGMAS`] with
+/// a name argument. Names are compared with ASCII case folding (INV-3) and must match whole: a
+/// name with a schema prefix or padding is denied (SQLite passes the bare name). The match
 /// names every action, so a new one cannot be allowed by accident.
 pub fn sqlite_authorize(a: &SqliteAction<'_>) -> Authorization {
     let allow = match a {
@@ -128,8 +144,10 @@ pub fn sqlite_authorize(a: &SqliteAction<'_>) -> Authorization {
         SqliteAction::Pragma { name, arg: None } => SQLITE_READ_PRAGMAS
             .iter()
             .any(|p| name.eq_ignore_ascii_case(p)),
-        SqliteAction::Pragma { arg: Some(_), .. }
-        | SqliteAction::Attach { .. }
+        SqliteAction::Pragma { name, arg: Some(_) } => SQLITE_INTROSPECTION_PRAGMAS
+            .iter()
+            .any(|p| name.eq_ignore_ascii_case(p)),
+        SqliteAction::Attach { .. }
         | SqliteAction::Detach
         | SqliteAction::Insert { .. }
         | SqliteAction::Update { .. }
