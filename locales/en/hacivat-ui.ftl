@@ -787,16 +787,124 @@ hv-conn-issue-option-secret = The property { $key } holds a password. Remove it 
 hv-conn-issue-ssh-host-missing = Enter the SSH host.
 # An SSH hop has no user.
 # Review: PO
-hv-conn-issue-ssh-user-missing = Enter the SSH user.
+hv-conn-issue-ssh-user-missing = Enter the user to sign in as.
 # The tunnel has more jump hosts than Hacivat supports.
 # Review: PO
-hv-conn-issue-ssh-too-many-hops = This tunnel has too many jump hosts.
+hv-conn-issue-ssh-too-many-hops = A tunnel can go through at most 8 jump hosts.
 # The SSH key file is missing or can't be read.
 # Review: PO
-hv-conn-issue-ssh-key-file-missing = The SSH key file can't be read.
+hv-conn-issue-ssh-key-file-missing = This key file can't be found. Choose the private key, such as ~/.ssh/id_ed25519.
 # The TLS client key uses the old OpenSSL encryption, which can't be decrypted.
 # Review: PO
 hv-conn-issue-tls-key-legacy-encrypted = This private key uses an old encryption format. Convert it to PKCS #8.
+
+## m2b-t20-ssh
+
+# The SSH disclosure of the connection dialog (NOTES M2a surface 6).
+hv-conn-section-ssh = SSH tunnel
+# Summary of the folded SSH section when the connection uses no tunnel.
+hv-conn-ssh-sum-off = Off
+# Summary of the folded SSH section: a tunnel without jump hosts.
+# Variables:
+#   $host (String) - the SSH host, e.g. "bastion.acme.io".
+hv-conn-ssh-sum-on = via { $host }
+# Summary of the folded SSH section: a tunnel through jump hosts.
+# Variables:
+#   $host (String) - the SSH host, e.g. "bastion.acme.io".
+#   $n (Number) - how many jump hosts lead to it, e.g. 1.
+hv-conn-ssh-sum-hops = via { $host } · { $n ->
+        [one] { $n } jump host
+       *[other] { $n } jump hosts
+    }
+hv-conn-ssh-use = Connect through an SSH tunnel
+hv-conn-ssh-import = Import from ~/.ssh/config…
+hv-conn-ssh-host = SSH host
+hv-conn-ssh-user = SSH user
+# The SSH sign-in methods (a segmented control).
+hv-conn-ssh-auth-agent = Agent
+hv-conn-ssh-auth-key = Key file
+hv-conn-ssh-auth-password = Password
+hv-conn-ssh-auth-kbd = Keyboard-interactive
+hv-conn-ssh-agent-note = Uses the keys loaded in ssh-agent.
+hv-conn-ssh-key = Key file
+hv-conn-ssh-passphrase = Passphrase
+hv-conn-ssh-kbd-note = The server's questions, such as a one-time code, appear when you connect.
+hv-conn-ssh-jumps = Jump hosts
+hv-conn-ssh-add-jump = Add jump host
+# The remove button of a jump host row (its tooltip and accessible name).
+# Variables:
+#   $n (Number) - the row's 1-based position, e.g. 2.
+hv-conn-ssh-remove-jump = Remove jump host { $n }
+# Under a jump host row without a host.
+hv-conn-ssh-jump-host-missing = Enter the jump host.
+# Under the jump host list when a jump host's key file (from ~/.ssh/config) is missing.
+hv-conn-ssh-jump-key-missing = A jump host's key file can't be found. Fix its IdentityFile in ~/.ssh/config, then import the host again.
+hv-conn-ssh-route = Route
+# The first stop of the route row: this computer.
+# Variables:
+#   $os (Enum(mac, other)) - whether this computer is a Mac.
+hv-conn-ssh-this-mac = { $os ->
+        [mac] this Mac
+       *[other] this computer
+    }
+hv-conn-ssh-hostkeys = Host keys
+# The host key policies (a select; there is never an "accept everything" choice).
+hv-conn-ssh-hk-ask = Ask for new hosts
+hv-conn-ssh-hk-accept = Accept new, stop on change
+hv-conn-ssh-hk-strict = Known hosts only
+# The accessible name of the import menu.
+hv-conn-ssh-import-title = Hosts in ~/.ssh/config
+# Why an import entry is disabled.
+hv-conn-ssh-proxycmd = uses ProxyCommand, not supported
+# Why an import entry is disabled: one of its values looked like a password (never shown).
+hv-conn-ssh-unusable-secret = holds a value that looks like a password, not imported
+# Why an import entry is disabled.
+# Variables:
+#   $token (String) - the unsupported token, e.g. "%C".
+hv-conn-ssh-unusable-token = uses { $token }, not supported
+# Why an import entry is disabled: a cycle, or a chain longer than a tunnel allows.
+hv-conn-ssh-unusable-depth = its jump hosts nest too deep
+# Why an import entry is disabled: a ProxyJump names a host the file doesn't define.
+hv-conn-ssh-unusable-unknown = names a jump host that isn't in the file
+# What an import entry resolves to, through jump hosts.
+# Variables:
+#   $target (String) - the user and host it signs in to, e.g. "deploy@bastion.acme.io".
+#   $jumps (String) - its ProxyJump hosts, e.g. "jump-eu".
+hv-conn-ssh-import-via = { $target } · ProxyJump { $jumps }
+# What an import entry resolves to, with a key file.
+# Variables:
+#   $target (String) - the user and host it signs in to, e.g. "ci@10.0.4.7".
+#   $key (String) - its first IdentityFile, e.g. "~/.ssh/ci_ed25519".
+hv-conn-ssh-import-key = { $target } · IdentityFile { $key }
+# The import menu's only row when the file names no host.
+hv-conn-ssh-import-none = No hosts in ~/.ssh/config
+# The import menu's only row when the file can't be read.
+hv-conn-ssh-import-unreadable = ~/.ssh/config can't be read
+# The notice after an import.
+# Variables:
+#   $alias (String) - the imported Host alias, e.g. "bastion".
+hv-conn-ssh-imported = Imported { $alias } from ~/.ssh/config: host, user, key and jump host.
+# Lines of the import notice: what the import skipped or changed.
+# Variables:
+#   $line (Number) - the line in ~/.ssh/config, e.g. 12.
+hv-conn-ssh-notice-match = Line { $line }: Match blocks were skipped.
+# Variables:
+#   $line (Number) - the line in ~/.ssh/config, e.g. 3.
+hv-conn-ssh-notice-include = Line { $line }: Include nests too deep, so the files it names were skipped.
+# Variables:
+#   $alias (String) - the Host alias, e.g. "bastion".
+hv-conn-ssh-notice-known-hosts = { $alias }: UserKnownHostsFile was ignored. { -brand-hacivat } checks its own known hosts and ~/.ssh/known_hosts.
+# Variables:
+#   $alias (String) - the Host alias, e.g. "bastion".
+hv-conn-ssh-notice-strict-no = { $alias }: StrictHostKeyChecking no is read as Ask for new hosts.
+# Variables:
+#   $alias (String) - the Host alias, e.g. "bastion".
+hv-conn-ssh-notice-agent = { $alias }: IdentityAgent was ignored. { -brand-hacivat } uses the agent in SSH_AUTH_SOCK.
+# Variables:
+#   $alias (String) - the Host alias, e.g. "bastion".
+hv-conn-ssh-notice-jump-password = { $alias }: its ProxyJump held a password, which was removed and not kept.
+# The SSH step of the connect trail.
+hv-conn-step-ssh = SSH
 
 ## m2a-demo-extra
 

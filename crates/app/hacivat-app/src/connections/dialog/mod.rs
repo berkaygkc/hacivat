@@ -771,6 +771,11 @@ impl ConnectionDialog {
         if let Some((name, _)) = owned.iter().find(|(_, h)| h.is_focused(window)) {
             return Some(name);
         }
+        // ## m2b-t01-interfaces: the SSH section (Task 20; `ssh::SshSection::focused` names
+        // its elements).
+        if ssh::contains_focus(window, cx) {
+            return Some("ssh");
+        }
         let groups = [
             ("engine", &f.engine),
             ("environment", &f.environment),
@@ -1068,14 +1073,15 @@ impl ConnectionDialog {
             _ => None,
         };
         let tls_key_passphrase = self.draft.tls_key_passphrase.clone();
+        // ## m2b-t01-interfaces: Task 20 passes the typed SSH secrets to Test and Save.
+        let ssh_secrets = ssh::secrets_for(&profile, &self.draft);
         ProfileDraft {
             profile,
             password,
             tls_key_passphrase,
             is_new: self.draft.is_new,
             touched: self.draft.touched.clone(),
-            // ## m2b-t01-interfaces: Task 20 passes the typed SSH secrets to Test.
-            ssh_secrets: Vec::new(),
+            ssh_secrets,
         }
     }
 
