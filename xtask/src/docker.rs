@@ -514,7 +514,7 @@ pub fn pin_text(text: &str, mut resolve: impl FnMut(&str) -> Result<String>) -> 
 pub fn parse_digest(output: &str) -> Result<String> {
     let digest = output.trim().trim_matches('"');
     let hex = digest.strip_prefix("sha256:").unwrap_or_default();
-    if hex.len() < 2 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("unexpected digest output {:?}", output.trim());
     }
     Ok(digest.to_string())
@@ -796,7 +796,7 @@ mod tests {
         );
         assert_eq!(unpinned_dockerfile("FROM alpine:3.20\n"), ["alpine:3.20"]);
         // A locally built image is not pulled; `scratch` and pinned bases are fine.
-        assert!(unpinned("  image: hacivat-m2a-sshd:1\n").is_empty());
+        assert!(unpinned("  image: hacivat-m2a-sshd:2\n").is_empty());
         assert!(
             unpinned_dockerfile("FROM scratch\nFROM --platform=x a:1@sha256:9 AS b\n").is_empty()
         );
@@ -827,7 +827,7 @@ mod tests {
     fn pin_text_resolves_each_tag_once_and_skips_local_images() {
         let mut asked = Vec::new();
         let out = pin_text(
-            "  image: postgres:17\n  image: postgres:17\n  image: hacivat-m2a-sshd:1\n  x: y\n",
+            "  image: postgres:17\n  image: postgres:17\n  image: hacivat-m2a-sshd:2\n  x: y\n",
             |tag| {
                 asked.push(tag.to_string());
                 Ok("sha256:aa".to_string())
@@ -836,14 +836,16 @@ mod tests {
         .unwrap();
         assert_eq!(
             out,
-            "  image: postgres:17@sha256:aa\n  image: postgres:17@sha256:aa\n  image: hacivat-m2a-sshd:1\n  x: y\n"
+            "  image: postgres:17@sha256:aa\n  image: postgres:17@sha256:aa\n  image: hacivat-m2a-sshd:2\n  x: y\n"
         );
         assert_eq!(asked, ["postgres:17"]);
     }
 
     #[test]
     fn digest_comes_from_the_json_output() {
-        assert_eq!(parse_digest("\"sha256:ab12\"\n").unwrap(), "sha256:ab12");
+        let good = format!("sha256:{}", "ab12".repeat(16));
+        assert_eq!(parse_digest(&format!("\"{good}\"\n")).unwrap(), good);
+        assert!(parse_digest("\"sha256:ab12\"").is_err());
         assert!(parse_digest("not json").is_err());
         assert!(parse_digest("\"latest\"").is_err());
     }
@@ -891,5 +893,72 @@ mod tests {
             parse_args(&args("check-pins")).unwrap().action,
             Action::CheckPins
         );
+    }
+
+    /// The sshd entrypoint run twice against a temp directory (a container restart): the
+    /// second start must not die on the existing host key, and must publish a fresh one.
+    #[cfg(unix)]
+    #[test]
+    fn sshd_entrypoint_survives_a_restart() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (bin, ssh, art, home) = (
+            root.join("bin"),
+            root.join("ssh"),
+            root.join("artifacts"),
+            root.join("home"),
+        );
+        for d in [&bin, &ssh, &art, &home] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let stub = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // Like the real tool: refuses to overwrite an existing key file.
+        stub(
+            "ssh-keygen",
+            "while [ $# -gt 1 ]; do [ \"$1\" = -f ] && f=\"$2\"; shift; done\n\
+             [ -e \"$f\" ] && exit 1\n\
+             echo \"key-$$-$(date +%s%N)\" > \"$f\"; echo \"pub-$$-$(date +%s%N)\" > \"$f.pub\"",
+        );
+        stub("chown", "exit 0");
+        stub("sshd", "exit 0");
+        for n in ["ssh-client-ed25519.pub", "ssh-client-ed25519-enc.pub"] {
+            std::fs::write(art.join(n), "client-key\n").unwrap();
+        }
+        let scripts = crate::workspace_root().join("docker/m2a/sshd");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let start = || {
+            Command::new("sh")
+                .arg(scripts.join("entrypoint.sh"))
+                .env("PATH", &path)
+                .env("HV_SSHD_ID", "sshd-t")
+                .env("HV_SSH_DIR", &ssh)
+                .env("HV_ARTIFACTS", &art)
+                .env("HV_HOME_SSH", &home)
+                .env("HV_SSHD_BIN", bin.join("sshd"))
+                .output()
+                .unwrap()
+        };
+        let first = start();
+        assert!(first.status.success(), "{first:?}");
+        let pub1 = std::fs::read_to_string(art.join("ssh-host-sshd-t.pub")).unwrap();
+        let second = start();
+        assert!(second.status.success(), "{second:?}");
+        let pub2 = std::fs::read_to_string(art.join("ssh-host-sshd-t.pub")).unwrap();
+        assert_ne!(pub1, pub2, "the restart publishes a fresh host key");
+        assert_eq!(
+            pub2,
+            std::fs::read_to_string(ssh.join("ssh_host_ed25519_key.pub")).unwrap()
+        );
+        let auth = std::fs::read_to_string(home.join("authorized_keys")).unwrap();
+        assert_eq!(auth.lines().count(), 2);
     }
 }

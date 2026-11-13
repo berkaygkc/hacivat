@@ -6,6 +6,11 @@
 //! - [`ChaosProxy::blackhole`]: bytes are read and thrown away in both directions; no
 //!   connection is closed, so the peers see silence.
 //! - [`ChaosProxy::restore`]: ends a cut and a blackhole.
+//!
+//! Semantics to know: a cut accepts and then closes a new connection, so a client sees an
+//! EOF or reset, never `ECONNREFUSED`. A blackhole discards the bytes (a real black hole, not
+//! a pause), so a protocol stream is desynchronised once it ends: use it to trigger a
+//! liveness timeout, then expect to reconnect.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -37,6 +42,8 @@ pub struct ChaosProxy {
     accept_task: JoinHandle<()>,
     /// The pending end of the last cut; a newer cut or a restore supersedes it.
     cut_generation: Arc<AtomicUsize>,
+    /// The timer tasks of cuts, aborted when the proxy drops.
+    timers: std::sync::Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl ChaosProxy {
@@ -63,6 +70,7 @@ impl ChaosProxy {
             runtime: Handle::current(),
             accept_task,
             cut_generation: Arc::new(AtomicUsize::new(0)),
+            timers: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -74,13 +82,17 @@ impl ChaosProxy {
         let mine = self.cut_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let shared = Arc::clone(&self.shared);
         let generation = Arc::clone(&self.cut_generation);
-        self.runtime.spawn(async move {
+        let timer = self.runtime.spawn(async move {
             tokio::time::sleep(for_).await;
             // Only the latest cut ends the refusal.
             if generation.load(Ordering::SeqCst) == mine {
                 shared.refusing.store(false, Ordering::SeqCst);
             }
         });
+        if let Ok(mut timers) = self.timers.lock() {
+            timers.retain(|t| !t.is_finished());
+            timers.push(timer);
+        }
     }
 
     /// While on, bytes are swallowed in both directions without closing anything.
@@ -105,12 +117,22 @@ impl ChaosProxy {
 impl Drop for ChaosProxy {
     fn drop(&mut self) {
         self.accept_task.abort();
+        if let Ok(timers) = self.timers.lock() {
+            for t in timers.iter() {
+                t.abort();
+            }
+        }
         self.shared.epoch.send_modify(|e| *e += 1);
     }
 }
 
 async fn accept_loop(listener: TcpListener, upstream: SocketAddr, shared: Arc<Shared>) {
-    while let Ok((client, _)) = listener.accept().await {
+    loop {
+        let Ok((client, _)) = listener.accept().await else {
+            // A transient accept error (EMFILE, ECONNABORTED) must not end the proxy.
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            continue;
+        };
         // Subscribe before looking at `refusing`: a cut that lands in between is seen by
         // either the flag or the receiver.
         let epoch = shared.epoch.subscribe();
@@ -128,7 +150,11 @@ async fn relay(
     shared: Arc<Shared>,
     mut epoch: watch::Receiver<u64>,
 ) {
-    let Ok(server) = TcpStream::connect(upstream).await else {
+    let connected = tokio::select! {
+        r = TcpStream::connect(upstream) => r,
+        _ = epoch.changed() => return,
+    };
+    let Ok(server) = connected else {
         return;
     };
     shared.accepted.fetch_add(1, Ordering::SeqCst);

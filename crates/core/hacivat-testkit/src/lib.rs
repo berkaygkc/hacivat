@@ -253,7 +253,7 @@ pub fn artifact_in(dir: Option<&str>, name: &str) -> PathBuf {
 // ## m2b-t16-ssh-targets
 
 /// The password of the SSH bastions' user (throwaway, like [`PASSWORD`]).
-const SSH_PASSWORD: &str = "hv_test_pw";
+const SSH_PASSWORD: &str = "hv_ssh_pw";
 /// The passphrase of the encrypted generated client key (`ssh_client_key(true)`).
 pub const SSH_CLIENT_KEY_PASSPHRASE: &str = "hv_test_pw";
 

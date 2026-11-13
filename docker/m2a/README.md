@@ -52,7 +52,6 @@ The test credentials are throwaway values. Never copy them into a non-test file.
   keys are 0644 so the Linux CI runner user can read them.
 - On MySQL and MariaDB only:
   - `hv_locked`, an account created with `ACCOUNT LOCK`;
-  - `hv_ro`, which has read-only grants on the three databases.
 - `mysql84`'s auto-generated CA certificate is copied to
   `<main checkout>/target/docker/mysql84-ca.pem`. Tests reach it only through
   `hacivat_testkit::artifact("mysql84-ca.pem")`.

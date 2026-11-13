@@ -60,6 +60,7 @@ async fn ssh_targets_accept_the_generated_key() {
         return;
     }
     let Some(t) = ssh_target("sshd-a") else {
+        eprintln!("skip sshd-a: not in the active set");
         return;
     };
     let mut s = TcpStream::connect((t.host.as_str(), t.port)).await.unwrap();

@@ -1,15 +1,20 @@
 #!/bin/sh
-# `sshd` (default): generate the host key, publish its public half as
-# /artifacts/ssh-host-<HV_SSHD_ID>.pub, trust the generated client keys, run sshd.
-# `keygen`: write the client key pairs once, then stay up so the healthcheck can see them.
-# Nothing private is committed: every key here is generated at startup. The client private
-# keys are world-readable (0644) because on Linux CI the runner user is not root; they only
-# open throwaway localhost test containers.
+# `sshd` (default): generate a fresh host key (regen-hostkey.sh publishes its public half as
+# /artifacts/ssh-host-<HV_SSHD_ID>.pub), trust the generated client keys, and exec sshd as
+# PID 1. `keygen`: write the client key pairs once, then stay up so the healthcheck can see
+# them. Nothing private is committed: every key here is generated at startup. The client
+# private keys are world-readable (0644) because on Linux CI the runner user is not root;
+# they only open throwaway localhost test containers.
+# HV_ARTIFACTS, HV_HOME_SSH and HV_SSHD_BIN override paths for the shell test.
 set -eu
 
+HERE="$(dirname "$0")"
+ARTIFACTS="${HV_ARTIFACTS:-/artifacts}"
+HOME_SSH="${HV_HOME_SSH:-/home/hv_ssh/.ssh}"
+SSHD_BIN="${HV_SSHD_BIN:-/usr/sbin/sshd}"
 PASSPHRASE=hv_test_pw
-PLAIN=/artifacts/ssh-client-ed25519
-ENC=/artifacts/ssh-client-ed25519-enc
+PLAIN="$ARTIFACTS/ssh-client-ed25519"
+ENC="$ARTIFACTS/ssh-client-ed25519-enc"
 
 case "${1:-sshd}" in
 keygen)
@@ -19,17 +24,16 @@ keygen)
         ssh-keygen -q -t ed25519 -N "$PASSPHRASE" -C hv-test-client-enc -f "$ENC"
         chmod 644 "$PLAIN" "$ENC" "$PLAIN.pub" "$ENC.pub"
     fi
+    # `init: true` in compose gives this a PID 1 that forwards SIGTERM.
     exec sleep infinity
     ;;
 sshd)
-    : "${HV_SSHD_ID:?HV_SSHD_ID is required}"
-    ssh-keygen -q -t ed25519 -N "" -f /etc/ssh/ssh_host_ed25519_key
-    cp /etc/ssh/ssh_host_ed25519_key.pub "/artifacts/ssh-host-$HV_SSHD_ID.pub"
-    chmod 644 "/artifacts/ssh-host-$HV_SSHD_ID.pub"
-    cat "$PLAIN.pub" "$ENC.pub" > /home/hv_ssh/.ssh/authorized_keys
-    chown hv_ssh:hv_ssh /home/hv_ssh/.ssh/authorized_keys
-    chmod 600 /home/hv_ssh/.ssh/authorized_keys
-    exec /usr/sbin/sshd -D -e
+    # A fresh host key at every start: a restarted container still holds the old one.
+    HV_NO_SIGNAL=1 "$HERE/regen-hostkey.sh"
+    cat "$PLAIN.pub" "$ENC.pub" > "$HOME_SSH/authorized_keys"
+    chown hv_ssh:hv_ssh "$HOME_SSH/authorized_keys"
+    chmod 600 "$HOME_SSH/authorized_keys"
+    exec "$SSHD_BIN" -D -e
     ;;
 *)
     exec "$@"

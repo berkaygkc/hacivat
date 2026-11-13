@@ -563,10 +563,11 @@ jobs:
         run: cargo run --locked -p xtask -- docker down
 
   # ## m2b-t16-keyring
-  # The live OS keyring round trip (B15). The test asserts `KeyringBackend::probe_available()`
-  # first, so a broken D-Bus setup fails loudly instead of silently testing the vault.
+  # The live OS keyring round trip (B15). A broken D-Bus setup fails the
+  # round trip loudly (the Linux build has the Secret Service backend only).
   keyring-linux:
     name: keyring-linux
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -575,13 +576,14 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Install the Secret Service
-        run: sudo apt-get install -y gnome-keyring dbus-x11
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring dbus-x11
       - name: Live keyring round trip (gnome-keyring over D-Bus)
         run: |
           dbus-run-session -- bash -c 'echo hv | gnome-keyring-daemon --unlock --components=secrets && HACIVAT_KEYRING_LIVE=1 cargo test --locked -p hacivat-secrets -- --ignored live_keyring_round_trip'
 
   keyring-windows:
     name: keyring-windows
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -598,6 +600,7 @@ jobs:
   # owns the test and writes it as `#[ignore = "ci-linux"]`.
   vault-linux:
     name: vault-linux
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
