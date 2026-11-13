@@ -148,8 +148,8 @@ async fn open(cx: &mut StepCx) -> Result<Option<CleanupGuard>, ConnectError> {
     }
     let used = lease.take_secrets();
     st.ssh.hops = if used.is_empty() {
-        // A lease that joined an open chain authenticated nothing: the overlay's secrets (if
-        // any) are still the ones that work.
+        // A lease that joined an open chain gets the chain's secrets (fix round 1, review I4);
+        // empty only when nothing was kept there: the overlay's (if any) still work.
         std::mem::take(&mut st.overlay.hops)
     } else {
         used
@@ -157,6 +157,11 @@ async fn open(cx: &mut StepCx) -> Result<Option<CleanupGuard>, ConnectError> {
     st.ssh.typed = prompter.map(|p| p.typed()).unwrap_or_default();
     st.ssh.transport = Some(lease.generation());
     st.ssh.via = Some(lease.bastion().to_string());
+    st.ssh.hop_hosts = spec
+        .hops
+        .iter()
+        .map(|h| h.host.trim().to_string())
+        .collect();
     st.ssh.path = PathKind::Ssh;
     st.address = ssh_address_class(&db_host);
     st.trail.done(TrailStep::Ssh);
@@ -386,6 +391,8 @@ pub(crate) struct SshState {
     pub(crate) transport: Option<hacivat_net::ssh::TransportGeneration>,
     pub(crate) via: Option<String>,
     pub(crate) path: PathKind,
+    /// The hops' hosts, in order (an error names the hop that failed).
+    pub(crate) hop_hosts: Vec<String>,
 }
 
 impl SshState {
@@ -397,6 +404,7 @@ impl SshState {
             transport: None,
             via: None,
             path: PathKind::Direct,
+            hop_hosts: Vec::new(),
         }
     }
 }

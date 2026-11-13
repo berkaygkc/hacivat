@@ -14,7 +14,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
 
 use common::*;
 use hacivat_driver::fake::FakeDriver;
@@ -75,19 +74,13 @@ fn known_empty() -> Arc<KnownHosts> {
     KnownHosts::load(Vec::new(), fresh_path("known_hosts"))
 }
 
-/// Deps over `fake` and `secrets`, with their own tunnel manager (no agent, 0 s grace). A
-/// direct profile keeps the stub transport (no socket); an SSH profile uses the tunnel.
+/// Deps over `fake` and `secrets`, with their own tunnel manager (no agent, the default 30 s
+/// grace: fix round 1, review I4). A direct profile keeps the stub transport (no socket); an
+/// SSH profile uses the tunnel.
 fn deps_over_store(fake: FakeDriver, secrets: Arc<SecretStore>) -> ConnectDeps {
     let mut deps = deps_with_store(fake, secrets);
     let known = known_empty();
-    deps.tunnels = TunnelManager::with_agent(
-        known.clone(),
-        TunnelConfig {
-            idle_grace: Duration::ZERO,
-            ..TunnelConfig::default()
-        },
-        None,
-    );
+    deps.tunnels = TunnelManager::with_agent(known.clone(), TunnelConfig::default(), None);
     deps.known_hosts = known;
     deps
 }
@@ -254,11 +247,6 @@ fn secret_prompt_hops(ui: &ScriptedUiM2b) -> Vec<u8> {
         .collect()
 }
 
-/// Waits until `deps`' tunnel manager has no session open (the 0 s grace ran).
-async fn tunnels_closed(deps: &ConnectDeps) {
-    eventually("the tunnel closed", || deps.tunnels.sessions_open() == 0).await;
-}
-
 // ---------------------------------------------------------------------------------------------
 // SSH secrets (R8, Q23)
 
@@ -281,10 +269,11 @@ async fn prompted_ssh_secret_stored_only_after_success() {
     )
     .await;
     assert!(stored_slot(&deps, SecretSlot::SshPassword { hop: 0 }).is_none());
-    // A 0 s grace: the next connect opens (and authenticates) its own tunnel.
-    tunnels_closed(&deps).await;
+    // A connect that types the secret and succeeds stores it (its own tunnel manager, so it
+    // opens and authenticates a chain of its own).
+    let fresh = deps_ssh(&s, FakeDriver::new(DbmsKind::Postgres).consumes_factory());
     connect(
-        &deps,
+        &fresh,
         req(ssh_forever(&s)),
         ui_secret("pw"),
         token(),
@@ -293,9 +282,40 @@ async fn prompted_ssh_secret_stored_only_after_success() {
     .await
     .unwrap();
     assert_eq!(
-        stored_slot(&deps, SecretSlot::SshPassword { hop: 0 }).as_deref(),
+        stored_slot(&fresh, SecretSlot::SshPassword { hop: 0 }).as_deref(),
         Some("pw")
     );
+}
+
+/// Fix round 1 (review I4, ruling a): with the default 30 s grace, the connect after a failed
+/// one joins the chain still open. It is not asked again, and the hop secret that
+/// authenticated the chain reaches its `secrets_used` (the session overlay, Q17), so a later
+/// headless reconnect can sign in. Only a connect that typed a secret stores it (R8): the
+/// joining one did not, so nothing is stored.
+#[tokio::test]
+async fn a_connect_that_joins_within_the_grace_gets_the_chains_hop_secret() {
+    let s = ssh(cfg().user_pw("u", "pw")).await;
+    let deps = deps_ssh(
+        &s,
+        FakeDriver::new(DbmsKind::Postgres)
+            .consumes_factory()
+            .script(vec![Err(db("57P03"))]),
+    );
+    let first = ScriptedUi::answers_m2b([Answer::Secret(sec("pw"))]);
+    let e = connect(&deps, req(ssh_forever(&s)), first.ix(), token(), progress())
+        .await
+        .unwrap_err();
+    assert_eq!(e.class, ErrClass::ServerStarting);
+    assert_eq!(s.sessions_accepted(), 1);
+    let again = ScriptedUi::answers_m2b([Answer::Secret(sec("pw"))]);
+    let live = connect(&deps, req(ssh_forever(&s)), again.ix(), token(), progress())
+        .await
+        .unwrap();
+    assert_eq!(s.sessions_accepted(), 1, "joined the chain in its grace");
+    assert!(again.asked().is_empty(), "nothing asked again");
+    let hops = &live.secrets_used.hops;
+    assert_eq!(expose(hops[0].password.as_ref().unwrap()), "pw");
+    assert!(stored_slot(&deps, SecretSlot::SshPassword { hop: 0 }).is_none());
 }
 
 /// The per-hop prompts of a jump chain: a jump host and a bastion, each asking for its own
@@ -634,4 +654,69 @@ async fn connect_logs_never_contain_any_m2b_secret() {
     ] {
         assert!(!logs.contains(s), "{s}");
     }
+}
+
+// ## m2b-t14-pipeline fix round 1 (review M2)
+
+/// A UI that answers from a list, and cancels `token` the moment it is asked to create the
+/// vault (the user disconnects while the question is open).
+struct CancelsAtCreateVault {
+    answers: Mutex<Vec<Answer>>,
+    token: tokio_util::sync::CancellationToken,
+}
+
+impl hacivat_session::pipeline::UiPort for CancelsAtCreateVault {
+    fn ask(&self, q: Question) -> futures::future::BoxFuture<'static, Answer> {
+        if matches!(q, Question::CreateVault) {
+            self.token.cancel();
+        }
+        let answer = {
+            let mut answers = self.answers.lock().unwrap();
+            if answers.is_empty() {
+                Answer::Cancelled
+            } else {
+                answers.remove(0)
+            }
+        };
+        Box::pin(async move { answer })
+    }
+}
+
+/// A cancel while the create-vault question is open creates no vault, stores nothing, closes
+/// the connection and fails the connect as cancelled.
+#[tokio::test]
+async fn a_cancel_during_the_create_vault_question_stores_nothing() {
+    let f = Arc::new(ok_pg());
+    let vault = Arc::new(FileVault::with_params(fresh_path("vault.bin"), fast()));
+    let store = Arc::new(SecretStore::new(Some(
+        vault.clone() as Arc<dyn SecretBackend>
+    )));
+    let mut deps = deps_over_store(ok_pg(), store);
+    let mut drivers = hacivat_driver::DriverRegistry::new();
+    drivers.register(f.clone());
+    deps.drivers = Arc::new(drivers);
+    let cancel = token();
+    let ui = Arc::new(CancelsAtCreateVault {
+        answers: Mutex::new(vec![
+            Answer::Password(sec("pw")),
+            Answer::Master(sec("correct horse")),
+        ]),
+        token: cancel.clone(),
+    });
+    let e = connect(
+        &deps,
+        req(forever_profile()),
+        hacivat_session::pipeline::Interaction::Interactive(ui),
+        cancel,
+        progress(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.class, ErrClass::Cancelled);
+    assert!(!vault.exists(), "no vault was created");
+    for retention in [Retention::Forever, Retention::UntilRestart] {
+        let kept = deps.secrets.get(&db_key(pid()), retention).unwrap();
+        assert!(kept.is_none(), "{retention:?}");
+    }
+    assert_eq!(f.open_connections(), 0, "the connection was closed");
 }

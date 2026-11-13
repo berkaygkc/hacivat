@@ -118,21 +118,15 @@ impl Driver for NoInjection {
     }
 }
 
-/// Deps over `driver`, with their own tunnel manager over `known` (no agent, 0 s grace).
+/// Deps over `driver`, with their own tunnel manager over `known` (no agent, the default
+/// grace).
 fn deps_on(driver: Arc<dyn Driver>, known: Arc<KnownHosts>) -> ConnectDeps {
     let (mut deps, _) = deps_with(FakeDriver::new(DbmsKind::Postgres));
     let mut drivers = DriverRegistry::new();
     drivers.register(driver);
     deps.drivers = Arc::new(drivers);
     deps.transport_wrap = None;
-    deps.tunnels = TunnelManager::with_agent(
-        known.clone(),
-        TunnelConfig {
-            idle_grace: Duration::ZERO,
-            ..TunnelConfig::default()
-        },
-        None,
-    );
+    deps.tunnels = TunnelManager::with_agent(known.clone(), TunnelConfig::default(), None);
     deps.known_hosts = known;
     deps
 }
@@ -556,4 +550,28 @@ async fn headless_without_a_hop_password_needs_interaction() {
     let (a, b) = jump_pair().await;
     let e = connect_chain_bad_pw_at(&a, &b, 1).await.unwrap_err();
     assert!(!e.needs_interaction);
+}
+
+/// Fix round 1 (review M6): a refused channel names the hop that refused it, with its host.
+#[tokio::test]
+async fn a_refused_channel_names_its_hop() {
+    let s = TestSshServer::start(
+        cfg()
+            .user_pw("u", "pw")
+            .forward(hacivat_testkit::ssh_server::ForwardPolicy::Deny),
+    );
+    let f = Arc::new(FakeDriver::new(DbmsKind::Postgres).consumes_factory());
+    let ui = ScriptedUi::answers_m2b([Answer::TrustHostKey, Answer::Secret(sec("pw"))]);
+    let p = through(
+        pg_auto("db.internal", 5432),
+        vec![hop(&s, SshAuth::Password)],
+        HostKeyPolicy::Ask,
+    );
+    let e = connect(&deps_fake(&f), req(p), ui.ix(), token(), progress())
+        .await
+        .unwrap_err();
+    assert_eq!(e.class, ErrClass::SshChannelOpen);
+    assert_eq!(e.args.hop, Some(0));
+    assert_eq!(e.args.hop_host.as_deref(), Some(s.host().as_str()));
+    assert_eq!(failed_step(e), TrailStep::Connect);
 }

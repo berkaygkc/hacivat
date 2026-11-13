@@ -474,6 +474,7 @@ async fn run(
         tls_passphrase_typed: false,
         attempt_tls: None,
         consent: plaintext_consent,
+        plaintext_retry: false,
         changes: Vec::new(),
         retries: Default::default(),
         vault_tried: false,
@@ -525,6 +526,17 @@ async fn run(
         let e = error(ErrClass::Cancelled, Phase::PostConnect);
         return Err(fail(e, cx, guards, started).await);
     }
+    // ## m2b-t14-pipeline: every secret a successful Main connect was given by the user is
+    // stored now, never before (R8), with the vault created first when needed (Q38). Fix
+    // round 1 (review M2): a cancel during that (the create-vault question, a slow keychain)
+    // undoes what was stored and fails the connect like any other cancel.
+    let todo = typed_secrets(&profile, &cx.state);
+    let (ix, store) = (cx.state.ix.clone(), cx.state.secrets.clone());
+    remember_secrets(profile.id, ix, store, todo, &cancel).await;
+    if cancel.is_cancelled() {
+        let e = error(ErrClass::Cancelled, Phase::PostConnect);
+        return Err(fail(e, cx, guards, started).await);
+    }
 
     let (conn, server, support) = (
         cx.state.conn.take(),
@@ -537,10 +549,6 @@ async fn run(
         return Err(fail(e, cx, guards, started).await);
     };
     let StepCx { state: mut st, .. } = cx;
-    // ## m2b-t14-pipeline: every secret a successful Main connect was given by the user is
-    // stored now, never before (R8), with the vault created first when needed (Q38).
-    let todo = typed_secrets(&profile, &st);
-    remember_secrets(profile.id, st.ix.clone(), st.secrets.clone(), todo, &cancel).await;
     let secrets_used = SessionSecrets {
         db: st
             .auth
@@ -769,7 +777,7 @@ async fn remember_secrets(
         return;
     }
     if todo.iter().any(|(_, _, r)| *r == Retention::Forever) {
-        prompts::ensure_vault(&ix, &secrets).await;
+        prompts::ensure_vault(&ix, &secrets, cancel).await;
     }
     for (slot, secret, retention) in todo {
         let key = SecretKey { profile, slot };

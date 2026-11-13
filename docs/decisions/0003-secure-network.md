@@ -682,7 +682,7 @@ the vault, the session overlay, the keyring CI and the deferrals.
   vault on a `Forever` put falls back to `UntilRestart` (Task 6), never a hard error.
 - **What the overlay gets (Q17).** `LiveConnection.secrets_used` holds the database password
   of a password profile, the hop secrets that authenticated (`TunnelLease::take_secrets`; for a
-  lease that joined an open chain, the overlay's own, unchanged) and the TLS key passphrase in
+  lease that joined an open chain, the chain's, since fix round 1) and the TLS key passphrase in
   use; `plaintext_consent` the consent; `profile_changes` every change (also on a later
   failure, in `ConnectError.profile_changes`). The overlay keeps them in memory only (Task 15).
 - **Headless never asks.** An unknown host key under `Ask`, a password hop without a password,
@@ -692,6 +692,38 @@ the vault, the session overlay, the keyring CI and the deferrals.
 - **Validate and the TLS key passphrase (T3 carry-in).** The pipeline's Validate does not
   report an encrypted client key (its TLS step opens it); `validate_with_passphrase` gives the
   dialog the same check with its passphrase field.
+- **Fix round 1 (review I1–I4, M1, M2, M6; controller rulings).**
+  - **Consent never widens the guard outside its retry (I1).** A plaintext consent (answered,
+    or carried by the session overlay) sends `InsecureAuth::Allow` only on the plaintext retry
+    it answered: under `Auto`, without a pin, while the attempt's TLS parameters allow
+    plaintext. The first attempt, Require, VerifyCa, VerifyFull and any pinned endpoint (the
+    remembered `allow_public_plaintext` included) stay `RefuseUnlessVerified` unless the address
+    is local or the mode is Disable.
+  - **Consent is bound to the destination (I2).** The pipeline reads the consent only from the
+    request the current overlay builds; Task 15's `update_profile` drops the overlay's consent
+    and secrets when host, port, user, auth, transport or client certificate change, and the
+    consent when the TLS mode changes or the remembered answer is unticked. The dialog clearing
+    `allow_public_plaintext` on a host change is Task 19's.
+  - **The plaintext backstop follows the request (I3).** After the driver connected, an
+    unencrypted connection whose last request did not allow plaintext is refused
+    (`tls.not_supported_by_server`; `[EditConnection]` on a pinned endpoint): Require and
+    Verify*, a public host under Auto without consent, and a pinned endpoint at any address,
+    through SSH too. It no longer re-derives the rule from the mode and the address class.
+  - **A lease that joins an open chain gets its secrets (I4, ruling a).** `TunnelManager` keeps
+    the secrets that authenticated a chain with the chain (zeroized when it drops, never in
+    `Debug`), and `take_secrets` hands a copy to a lease that joins it. They reach
+    `secrets_used`, so the overlay can serve a headless reconnect. Only a connect that typed a
+    secret stores it (R8): a joining connect stores nothing, because the chain may have been
+    opened by another profile with the same hops, users and methods, whose typed secret must
+    not be written into this profile's slots.
+  - **No pin or CA for dates (M1).** An expired or not-yet-valid certificate offers only Edit
+    connection and carries no review; an unknown issuer without a reviewable chain offers
+    Import CA and Edit connection.
+  - **Cancel during storing (M2).** The create-vault question closes unanswered on a cancel, an
+    answer after a cancel creates nothing, and a cancel during `remember_secrets` fails the
+    connect as cancelled after the puts undid themselves.
+  - **The refused channel's hop (M6).** `ssh.channel_open` names the hop that refused, by its
+    own host.
 
 ## m2b-t15 — session overlay
 

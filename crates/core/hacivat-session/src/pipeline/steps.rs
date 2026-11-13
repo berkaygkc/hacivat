@@ -31,7 +31,7 @@ use hacivat_net::{
     AddressClass, BoxedStream, CleanupGuard, NetError, StreamFactory, Target, TlsMode, TlsParams,
     TlsSettings, TlsSetupError, TlsSummary, build_tls_params, classify_host, direct, resolve,
 };
-use hacivat_proto::{AccessLabel, DbmsKind, ErrClass};
+use hacivat_proto::{AccessLabel, DbmsKind, ErrClass, FixId};
 use hacivat_secrets::{
     AuthError, AuthMaterial, AuthOutcome, AuthProviderId, AuthRequest, CredentialFiles,
     SecretError, SecretSource, SecretStore, resolve_auth,
@@ -188,6 +188,9 @@ pub(crate) struct StepState {
     pub(crate) attempt_tls: Option<TlsParams>,
     /// Consent to plaintext toward a public host: the overlay's (Q17) or this connect's answer.
     pub(crate) consent: bool,
+    /// The consent was applied: the TLS parameters now allow the plaintext retry (review I1:
+    /// only that retry, under Auto without a pin, sends `InsecureAuth::Allow` for it).
+    pub(crate) plaintext_retry: bool,
     /// The profile changes this connect made.
     pub(crate) changes: Vec<ProfileChange>,
     pub(crate) retries: Retries,
@@ -646,7 +649,8 @@ pub(crate) async fn hand_over(
                 );
                 if let hacivat_net::ssh::SshError::ChannelOpen { hop, .. } = ssh_error {
                     out.args.hop = Some(hop);
-                    out.args.hop_host = st.ssh.via.clone();
+                    // Fix round 1 (review M6): the hop that refused, not always the bastion.
+                    out.args.hop_host = st.ssh.hop_hosts.get(usize::from(hop)).cloned();
                 }
                 return out;
             }
@@ -944,13 +948,35 @@ fn request(
         connect_timeout: st.clock.remaining(),
         events,
         // ## m2b-t01-interfaces: the insecure-auth guard (Task 14 decides the policy).
-        // ## m2b-t14-pipeline: the user's consent to plaintext covers the password (B8).
-        insecure_auth: if st.consent {
-            hacivat_driver::InsecureAuth::Allow
-        } else {
-            super::insecure_auth_for(p, st.address, p.tls.mode)
-        },
+        insecure_auth: insecure_auth(p, st),
     }
+}
+
+// ## m2b-t14-pipeline (fix round 1, review I1)
+/// The insecure-auth guard of the next attempt (B8, Q20). The plaintext consent (answered now,
+/// or carried by the session overlay) gives `Allow` only on the plaintext retry it answered:
+/// under `Auto`, with no pin, and only while the TLS parameters allow plaintext. A pinned
+/// endpoint never gets `Allow` from any consent, the remembered one included (Q13); otherwise
+/// the profile's policy, [`super::insecure_auth_for`], applies.
+fn insecure_auth(p: &Profile, st: &StepState) -> hacivat_driver::InsecureAuth {
+    use hacivat_driver::InsecureAuth;
+    let pinned = st
+        .tls_settings
+        .pin_for(&st.tls_host, st.port.unwrap_or_default())
+        .is_some();
+    let plaintext_attempt = st.tls.as_ref().is_some_and(|t| t.plaintext_allowed);
+    let auto = p.tls.mode == TlsMode::Auto;
+    if st.plaintext_retry && plaintext_attempt && auto && !pinned {
+        return InsecureAuth::Allow;
+    }
+    let local = matches!(
+        st.address,
+        AddressClass::Loopback | AddressClass::UnixSocket
+    );
+    if pinned && !local && p.tls.mode != TlsMode::Disable {
+        return InsecureAuth::RefuseUnlessVerified;
+    }
+    super::insecure_auth_for(p, st.address, p.tls.mode)
 }
 
 /// The trail's view of the driver's progress.
@@ -1074,13 +1100,14 @@ impl ConnectStep for DriverStep {
             let conn = loop {
                 let req = request(&p, st, p.database.clone(), events.clone());
                 let sent_password = req.password.is_some();
-                let attempt_tls = req.tls.clone();
+                // ## m2b-t14-pipeline: this attempt's TLS parameters (its recorded chain, and
+                // what it allowed: the post-connect backstop reads them, review I3).
+                st.attempt_tls = req.tls.clone();
                 let driver = st.driver.clone();
                 let raw = match dial(&driver, req, &mut st.clock).await {
                     Ok(conn) => break conn,
                     Err(raw) => raw,
                 };
-                st.attempt_tls = attempt_tls;
                 // `auth.invalid` includes `PasswordRequired` (the server wanted a password and
                 // none was sent: PostgreSQL), and MySQL 1045 "using password: NO".
                 let mut e = raw_failure(p.engine, Phase::DriverConnect, &raw);
@@ -1223,22 +1250,22 @@ impl ConnectStep for PostConnectStep {
                 cipher: None,
                 verified: hacivat_net::TlsVerified::No,
             });
-            let network = server_host(&p).is_some();
-            // ## m2b-t14-pipeline: plaintext the user accepted toward a public host (B7), on
-            // an endpoint without a pin (Q13).
-            let consented = p.tls.mode == TlsMode::Auto
-                && (st.consent || st.tls_settings.allow_public_plaintext)
-                && st
+            // ## m2b-t14-pipeline (fix round 1, review I3): the backstop follows what the
+            // connect asked for. Any unencrypted connection whose request did not allow
+            // plaintext is refused: Require and Verify*, a public host under Auto without
+            // consent, and a pinned endpoint at any address, through SSH too (Q13). Auto toward
+            // a private address, or with the user's consent, allowed it (P9, B7).
+            let plaintext_allowed = st.attempt_tls.as_ref().map(|t| t.plaintext_allowed);
+            if !summary.encrypted && plaintext_allowed == Some(false) {
+                let mut e = error(ErrClass::TlsNotSupportedByServer, Phase::PostConnect);
+                if st
                     .tls_settings
                     .pin_for(&st.tls_host, st.port.unwrap_or_default())
-                    .is_none();
-            if network
-                && p.tls.mode != TlsMode::Disable
-                && !summary.encrypted
-                && (p.tls.mode != TlsMode::Auto || st.address == AddressClass::Public)
-                && !consented
-            {
-                return Err(error(ErrClass::TlsNotSupportedByServer, Phase::PostConnect));
+                    .is_some()
+                {
+                    e.fixes = vec![FixId::EditConnection];
+                }
+                return Err(e);
             }
 
             // R11: below the floor stops here unless the user chose to connect anyway.

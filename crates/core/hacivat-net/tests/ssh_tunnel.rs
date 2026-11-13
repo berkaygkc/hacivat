@@ -1384,8 +1384,26 @@ async fn joined_leases_and_keyboard_answers_hand_back_nothing() {
     let s = ssh(cfg().user_pw("u", "pw")).await;
     let m = mgr(&s);
     let mut first = m.acquire(req_user(&s, "u"), None, tok()).await.unwrap();
-    let mut joined = m.acquire(req_user(&s, "u"), None, tok()).await.unwrap();
-    assert!(joined.take_secrets().is_empty());
+    // m2b-t14 (review I4, named exception): a lease that joins the open chain gets the secrets
+    // that authenticated it, once, for its connect's session overlay (Q17).
+    let mut joined = m
+        .acquire(
+            request(
+                vec![hop(&s, "u", SshAuth::Password)],
+                HostKeyPolicy::AcceptNew,
+            ),
+            None,
+            tok(),
+        )
+        .await
+        .unwrap();
+    let got = joined.take_secrets();
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        got[0].password.as_ref().map(|p| p.expose_secret()),
+        Some("pw")
+    );
+    assert!(joined.take_secrets().is_empty(), "once");
     assert_eq!(first.take_secrets().len(), 1);
 
     let k = ssh(cfg().user_kbd("u", &[("Code: ", false, "123456")])).await;

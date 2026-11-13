@@ -467,6 +467,13 @@ fn error_args(e: &ConnectError) -> Vec<(&'static str, ArgValue)> {
     opt("db", a.database.clone());
     opt("file", a.file.clone());
     opt("version", a.version.clone());
+    // ## m2b-t14-pipeline (fix round 1, one-time ownership exception): the SSH hop an error
+    // happened at. `$hop_host` is its host; `$hop` counts from 1, as the copy names hops
+    // ("hop 2"), while `ErrArgs.hop` counts from 0.
+    opt("hop_host", a.hop_host.clone());
+    if let Some(hop) = a.hop {
+        args.push(("hop", ArgValue::Count(u64::from(hop) + 1)));
+    }
     args
 }
 

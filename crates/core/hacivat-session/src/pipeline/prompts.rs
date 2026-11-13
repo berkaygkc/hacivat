@@ -119,10 +119,18 @@ pub(crate) async fn ask_and_retry(
             Err(e)
         }
         ErrClass::TlsUntrusted => {
+            let pinnable = matches!(raw.kind, RawErrorKind::Tls(TlsFailure::UnknownIssuer));
+            if !pinnable {
+                // Fix round 1 (review M1): expired or not yet valid. Neither a pin (B5: it
+                // never extends the dates) nor a CA can help, so neither is offered.
+                e.fixes = vec![FixId::EditConnection];
+                return Err(e);
+            }
             let review = review_of(attempt.as_ref(), &endpoint, None);
             e.certificate = review.clone();
-            let pinnable = matches!(raw.kind, RawErrorKind::Tls(TlsFailure::UnknownIssuer));
-            let Some(review) = review.filter(|_| pinnable) else {
+            let Some(review) = review else {
+                // No chain to review: only the CA can still help.
+                e.fixes = vec![FixId::ImportCa, FixId::EditConnection];
                 return Err(e);
             };
             let Interaction::Interactive(ui) = st.ix.clone() else {
@@ -222,6 +230,7 @@ fn picked_path(path: &Path) -> bool {
 fn allow_plaintext(st: &mut StepState) {
     if let Some(t) = st.tls.as_mut() {
         t.plaintext_allowed = true;
+        st.plaintext_retry = true;
     }
 }
 
@@ -348,7 +357,11 @@ pub(crate) async fn read_store(
 /// a vault that does not exist yet, an interactive connect asks `Question::CreateVault`;
 /// `Master` creates it on the blocking pool. Cancelled, headless or a failed create: the put
 /// that follows falls back to `UntilRestart` (the M2a toast).
-pub(crate) async fn ensure_vault(ix: &Interaction, secrets: &Arc<SecretStore>) {
+pub(crate) async fn ensure_vault(
+    ix: &Interaction,
+    secrets: &Arc<SecretStore>,
+    cancel: &tokio_util::sync::CancellationToken,
+) {
     let store = secrets.clone();
     let absent = tokio::task::spawn_blocking(move || store.vault().is_some_and(|v| !v.exists()))
         .await
@@ -359,10 +372,20 @@ pub(crate) async fn ensure_vault(ix: &Interaction, secrets: &Arc<SecretStore>) {
     let Interaction::Interactive(ui) = ix else {
         return;
     };
-    let Answer::Master(master) = ui.ask(Question::CreateVault).await else {
+    // Fix round 1 (review M2): a cancel while the question is open closes it unanswered, and
+    // an answer that comes after a cancel creates nothing.
+    let answer = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return,
+        answer = ui.ask(Question::CreateVault) => answer,
+    };
+    let Answer::Master(master) = answer else {
         tracing::debug!("vault not created; the secret is kept until restart");
         return;
     };
+    if cancel.is_cancelled() {
+        return;
+    }
     let store = secrets.clone();
     let created = tokio::task::spawn_blocking(move || match store.vault() {
         Some(vault) => vault.create(master),
