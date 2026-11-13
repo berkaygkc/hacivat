@@ -8,23 +8,25 @@ use std::path::{Component, Path, PathBuf, Prefix};
 /// two separators (`\\host\share`, `//host/share`, which covers `\\?\UNC\` and `\\.\`), with
 /// `\??\`, or it has a UNC, device or `GLOBALROOT` prefix. Opening one on Windows can send the
 /// user's credentials (an NTLM hash) to a host, so it is refused before any file system call:
-/// no open, no `metadata`, no `canonicalize`.
+/// no open, no `metadata`, no `canonicalize`. On Windows a parsed prefix decides, so a verbatim
+/// disk path (`\\?\C:\…`) is local.
 pub fn is_network_path(path: &Path) -> bool {
+    // Where the system parses a prefix (Windows), its kind decides: a verbatim disk path
+    // (`\\?\C:\…`) is local even though it starts with two separators.
+    if let Some(Component::Prefix(p)) = path.components().next() {
+        return match p.kind() {
+            Prefix::DeviceNS(_) | Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
+            Prefix::Verbatim(name) => name.eq_ignore_ascii_case("GLOBALROOT"),
+            Prefix::Disk(_) | Prefix::VerbatimDisk(_) => false,
+        };
+    }
+    // No prefix (every path on Unix): a share spelled `\\server` or `//server`, or the NT
+    // object namespace `\??\`, is refused by its text.
     let text = path.to_string_lossy();
     let sep = |c: Option<char>| matches!(c, Some('/' | '\\'));
     let mut chars = text.chars();
     let (a, b, c, d) = (chars.next(), chars.next(), chars.next(), chars.next());
-    if (sep(a) && sep(b)) || (sep(a) && b == Some('?') && c == Some('?') && sep(d)) {
-        return true;
-    }
-    match path.components().next() {
-        Some(Component::Prefix(p)) => match p.kind() {
-            Prefix::DeviceNS(_) | Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
-            Prefix::Verbatim(name) => name.eq_ignore_ascii_case("GLOBALROOT"),
-            Prefix::Disk(_) | Prefix::VerbatimDisk(_) => false,
-        },
-        _ => false,
-    }
+    (sep(a) && sep(b)) || (sep(a) && b == Some('?') && c == Some('?') && sep(d))
 }
 
 // ## m2b-t12-profiles
@@ -106,6 +108,16 @@ mod tests {
         ] {
             assert!(!is_network_path(Path::new(p)), "{p}");
         }
+    }
+
+    /// A verbatim disk path is local on Windows (it starts with two separators, which the
+    /// text rule alone took for a share: a Windows CI failure in the SQLite driver).
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_disk_path_is_local_on_windows() {
+        assert!(!is_network_path(Path::new(r"\\?\C:\data\a.db")));
+        assert!(is_network_path(Path::new(r"\\?\UNC\h\s\a.db")));
+        assert!(is_network_path(Path::new(r"\\?\GLOBALROOT\Device\x")));
     }
 
     // ## m2b-t12-profiles
