@@ -845,12 +845,13 @@ mod fixtures {
     }
 
     /// Test, guarded with every finding, with its explanation open (it scrolls at 960x600).
+    /// PostgreSQL 17: the longest remediation (the four-argument `pg_logical_emit_message`).
     pub fn ro_guarded_fixture(window: &mut Window, cx: &mut App) {
         show_profile(
             cx,
             profile("orders-qa", EnvTag::Test, true, None),
             live(
-                "16.4",
+                "17.2",
                 AccessLabel::ReadOnlyGuarded,
                 vec![
                     RoleWarning::Superuser,
@@ -865,6 +866,7 @@ mod fixtures {
                     RoleWarning::EgressExtension("postgres_fdw".to_string()),
                     RoleWarning::RoleGrantNotExpanded,
                     RoleWarning::Unparsed,
+                    RoleWarning::NonTransactionalWrite,
                 ],
                 None,
                 true,
@@ -873,7 +875,8 @@ mod fixtures {
         super::explain_access_from_keyboard(window, cx);
     }
 
-    /// Staging on PostgreSQL 13, guarded: the schema-grant remediation.
+    /// Staging on PostgreSQL 13, guarded: the schema-grant remediation. The findings of the
+    /// mock's realistic case (`PUBLIC` holds TEMP and `EXECUTE` on `pg_logical_emit_message`).
     pub fn ro_pg13_fixture(window: &mut Window, cx: &mut App) {
         show_profile(
             cx,
@@ -881,7 +884,12 @@ mod fixtures {
             live(
                 "13.12",
                 AccessLabel::ReadOnlyGuarded,
-                vec![RoleWarning::Superuser, RoleWarning::WritePrivileges],
+                vec![
+                    RoleWarning::Superuser,
+                    RoleWarning::WritePrivileges,
+                    RoleWarning::TempPrivilege,
+                    RoleWarning::NonTransactionalWrite,
+                ],
                 None,
                 true,
             ),

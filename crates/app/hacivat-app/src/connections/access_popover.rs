@@ -169,6 +169,8 @@ fn warning_text(cx: &App, w: &RoleWarning) -> SharedString {
         RoleWarning::TempPrivilege => ids::hv::CONN_RO_WARN_TEMP_PRIVILEGE,
         RoleWarning::RoleGrantNotExpanded => ids::hv::CONN_RO_WARN_ROLE_GRANT_NOT_EXPANDED,
         RoleWarning::Unparsed => ids::hv::CONN_RO_WARN_UNPARSED,
+        // ## m2b-t23-f1: PostgreSQL row 6 (`pg_logical_emit_message` and the like).
+        RoleWarning::NonTransactionalWrite => ids::hv::CONN_RO_WARN_NON_TRANSACTIONAL_WRITE,
         RoleWarning::EgressExtension(name) => {
             return tr(
                 cx,
@@ -837,10 +839,21 @@ mod tests {
             is_replica: Some(false),
         });
         assert!(pg13.is_some_and(|s| s.contains("<schema>")));
+        // ## m2b-t23-f1: 14 to 16 name the three-argument `pg_logical_emit_message`, 17 and
+        // later (`remediation`) the four-argument one.
+        let pg16 = remediation_for_server(&hacivat_driver::ServerInfo {
+            kind: DbmsKind::Postgres,
+            product: "PostgreSQL".into(),
+            version: hacivat_driver::SemVerLoose::parse("16.4"),
+            raw_version: "16.4".into(),
+            is_replica: Some(false),
+        });
+        assert!(pg16.is_some_and(|s| s.contains("pg_logical_emit_message(boolean, text, text)")));
         for sql in [
             hacivat_session::remediation(DbmsKind::Postgres),
             hacivat_session::remediation(DbmsKind::MySql),
             pg13,
+            pg16,
         ] {
             for line in sql.expect("a remediation").lines() {
                 let words: Vec<String> = sql_words(line)

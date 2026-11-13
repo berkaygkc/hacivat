@@ -885,7 +885,7 @@ fn read_only_labels_and_remediation_popover(cx: &mut TestAppContext) {
     let (vcx, id) = connected_with(
         cx,
         AccessLabel::ReadOnlyGuarded,
-        vec![RoleWarning::Superuser],
+        vec![RoleWarning::Superuser, RoleWarning::NonTransactionalWrite],
     );
     assert_eq!(
         capsule_text(vcx, "access"),
@@ -896,6 +896,15 @@ fn read_only_labels_and_remediation_popover(cx: &mut TestAppContext) {
     let text = popover_text(vcx);
     assert!(text.contains("<role>"), "{text}");
     assert!(text.contains("It is a superuser."), "{text}");
+    // ## m2b-t23-f1: PostgreSQL row 6, and the REVOKE that clears it (16: three arguments).
+    assert!(
+        text.contains("It can run functions whose effects a rollback can't undo."),
+        "{text}"
+    );
+    assert!(
+        text.contains("pg_logical_emit_message(boolean, text, text)"),
+        "{text}"
+    );
     assert!(text.contains("Found on this role:"), "{text}");
     assert!(
         text.contains("Read-only is guarded, not enforced"),
@@ -940,10 +949,13 @@ fn copy_sql_copies_the_remediation_exactly(cx: &mut TestAppContext) {
         .read_from_clipboard()
         .and_then(|item| item.text())
         .expect("the SQL is on the clipboard");
+    // ## m2b-t23-f1: the server's own form (16: the three-argument REVOKE EXECUTE line).
+    let server = info("16.4", AccessLabel::ReadOnlyGuarded, vec![]).server;
     assert_eq!(
         Some(copied.as_str()),
-        hacivat_session::remediation(DbmsKind::Postgres)
+        hacivat_session::session::readonly::remediation_for_server(&server)
     );
+    assert!(copied.contains("pg_logical_emit_message(boolean, text, bytea) FROM PUBLIC;"));
     assert!(
         toast_texts(vcx)
             .iter()
@@ -1091,6 +1103,7 @@ fn the_popover_stays_between_the_bars(cx: &mut TestAppContext) {
             RoleWarning::EgressExtension("postgres_fdw".into()),
             RoleWarning::RoleGrantNotExpanded,
             RoleWarning::Unparsed,
+            RoleWarning::NonTransactionalWrite,
         ],
     );
     vcx.simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
@@ -1100,7 +1113,7 @@ fn the_popover_stays_between_the_bars(cx: &mut TestAppContext) {
     assert!(card.top() >= gpui::px(46.0), "{card:?}");
     assert!(card.bottom() <= gpui::px(600.0 - 24.0 - 6.0), "{card:?}");
     assert_eq!(card.size.width, gpui::px(300.0));
-    // All twelve findings at the minimum window: the body scrolls, Copy SQL stays in view.
+    // All thirteen findings at the minimum window: the body scrolls, Copy SQL stays in view.
     assert!(vcx.debug_bounds("access-popover-thumb").is_some());
     let copy = vcx
         .debug_bounds("button-ro-copy-snippet")
