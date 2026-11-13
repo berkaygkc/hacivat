@@ -1,0 +1,18 @@
+# A ~/.ssh/config fixture (no real hosts). The `Include` runs before the blocks below, so the
+# included hosts come first; `Host *` is last, so its values only fill what is still unset.
+Include config.d/*.conf
+
+Host db-eu
+  HostName db.eu.acme.io
+  Port 2222
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  ProxyJump jump-eu
+  StrictHostKeyChecking accept-new
+
+Host legacy
+  ProxyCommand ssh -W %h:%p gw.acme.io
+
+Host *
+  User deploy
+  ServerAliveInterval 30
