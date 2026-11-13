@@ -12,8 +12,6 @@ hacivat-driver.workspace = true
 mysql_async.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
-# The OS trust roots, fed to mysql_async as DER (P10).
-rustls-native-certs.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "io-util", "time"] }
 futures.workspace = true
 secrecy.workspace = true

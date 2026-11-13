@@ -3,15 +3,23 @@
 //! - Direct TCP (`direct: Some(Target::Tcp)`): `mysql_async` dials the TLS host itself, with
 //!   the pipeline's resolved addresses (P10).
 //! - Anything else (a transport wrap, P13; a Unix socket target): a one-shot TCP forwarder on
-//!   `127.0.0.1:0` relays to the endpoint's factory, and TLS verifies the real host name through
-//!   `with_danger_tls_hostname_override`. Never a Unix socket: `mysql_async` sends no TLS over
-//!   one.
+//!   `127.0.0.1:0` relays to the endpoint's factory. Never a Unix socket: `mysql_async` sends no
+//!   TLS over one.
+//!
+//! TLS always runs through Hacivat's `TlsParams.config` and verifies the profile's TLS host
+//! (`with_danger_tls_hostname_override`), in every mode (Q2, patch §5; see [`crate::tls`]).
 //!
 //! Every connection sets `prefer_socket(false)`, so `mysql_async` never reconnects through
 //! `@@socket` (which would bypass the forwarder and TLS), installs no `LOCAL INFILE` handler and
-//! keeps the cleartext plugin off. The profile's driver options are never read: none of the
-//! catalog's (JDBC-named) options has a `mysql_async` meaning, and `mysql_async`'s own names
-//! (`enable_cleartext_plugin`, `socket`, ...) must never come from user input.
+//! never advertises `CLIENT_LOCAL_FILES` (patch §4), keeps the cleartext plugin off, asks for
+//! `CLIENT_MULTI_STATEMENTS` only when read-write (patch §3) and guards the full-authentication
+//! password by the TLS outcome (patch §2, Q20). The profile's driver options are never read:
+//! none of the catalog's (JDBC-named) options has a `mysql_async` meaning, and `mysql_async`'s
+//! own names (`enable_cleartext_plugin`, `socket`, ...) must never come from user input.
+//!
+//! Every attempt builds its own `Opts` and `SslOpts` (`mysql_async` caches one connector per
+//! `SslOpts`, T8 carry-in). The `KILL QUERY` side connection is another `connect` with its own
+//! `DriverConnect`, so it never shares an `Opts` with the connection it cancels.
 
 use std::io;
 use std::net::IpAddr;
@@ -20,20 +28,19 @@ use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
 use hacivat_driver::{
-    CancelHandle, DriverConnect, DriverEvent, Endpoint, ProbeWarning, RawConn, RawError,
-    RawErrorKind, ServerInfo, ServerMessage,
+    CancelHandle, DriverConnect, DriverEvent, Endpoint, ExecOpts, ExecSummary, ProbeWarning,
+    RawConn, RawError, RawErrorKind, ServerInfo, ServerMessage, TxStatus,
 };
 use hacivat_net::{
     AddressClass, CleanupGuard, ForwarderAddr, ForwarderMode, LoopbackForwarder, StreamFactory,
-    Target, TlsFailure, TlsMode, TlsSummary, classify_host,
+    Target, TlsFailure, TlsMode, TlsParams, TlsSummary, TlsVerified, classify_host,
 };
 use hacivat_proto::DbmsKind;
 use mysql_async::prelude::Queryable;
-use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
+use mysql_async::{Conn, Opts, OptsBuilder};
 use secrecy::ExposeSecret;
 
-use crate::probe;
-use crate::tls::{full_ssl_opts, read_ca};
+use crate::{exec, probe, tls};
 
 /// Runs on the session at connect when the profile is read-only (HV-CONN-07).
 const READ_ONLY_SESSION: &str = "SET SESSION TRANSACTION READ ONLY";
@@ -43,12 +50,11 @@ fn forwarder_dir() -> std::path::PathBuf {
     std::env::temp_dir()
 }
 
-/// Where `mysql_async` dials, and the name TLS verifies when it differs.
+/// Where `mysql_async` dials.
 struct Dial {
     host: String,
     port: u16,
     resolved: Option<Vec<IpAddr>>,
-    host_override: Option<String>,
 }
 
 /// The name to dial and verify: brackets around an IPv6 literal and a trailing dot removed.
@@ -81,22 +87,22 @@ fn direct_dial(req: &DriverConnect) -> Option<Dial> {
         host: tls_host(req).to_owned(),
         port: *port,
         resolved: (!resolved.is_empty()).then(|| resolved.iter().map(|a| a.ip()).collect()),
-        host_override: None,
     })
 }
 
-fn forwarded_dial(req: &DriverConnect, port: u16) -> Dial {
+fn forwarded_dial(port: u16) -> Dial {
     Dial {
         host: "127.0.0.1".to_owned(),
         port,
         resolved: None,
-        host_override: Some(tls_host(req).to_owned()),
     }
 }
 
-/// The `Opts` for one attempt. The password is copied out of its `SecretString` here, at the
-/// last moment; the caller hands the value straight to `Conn::new` (P49).
-fn build_opts(req: &DriverConnect, dial: Dial, ssl: Option<SslOpts>) -> Opts {
+/// The `Opts` for one attempt; `tls` is `None` for a plaintext attempt. Every call builds a
+/// fresh `SslOpts` (and so a fresh connector) and a fresh password guard. The password is
+/// copied out of its `SecretString` here, at the last moment; the caller hands the value
+/// straight to `Conn::new` (P49).
+fn build_opts(req: &DriverConnect, dial: Dial, tls: Option<&TlsParams>) -> Opts {
     let setup: Vec<&str> = if req.read_only {
         vec![READ_ONLY_SESSION]
     } else {
@@ -113,15 +119,13 @@ fn build_opts(req: &DriverConnect, dial: Dial, ssl: Option<SslOpts>) -> Opts {
         .socket(None::<String>)
         .enable_cleartext_plugin(false)
         .secure_auth(true)
-        .ssl_opts(ssl)
+        .ssl_opts(tls.map(|t| tls::ssl_opts(t, tls_host(req))))
+        .password_guard(Some(tls::password_guard(tls, req.insecure_auth)))
+        .multi_statements(!req.read_only)
+        .local_infile_capability(false)
         .setup(setup)
         .connect_attribute("program_name", req.application_name.clone())
         .into()
-}
-
-fn ssl_for(req: &DriverConnect, dial: &Dial, ca: Vec<Vec<u8>>) -> Option<SslOpts> {
-    let tls = req.tls.as_ref()?;
-    full_ssl_opts(tls, ca, dial.host_override.as_deref())
 }
 
 /// The `Opts` the driver would connect with: the Direct ones for a TCP target, else the
@@ -129,14 +133,7 @@ fn ssl_for(req: &DriverConnect, dial: &Dial, ca: Vec<Vec<u8>>) -> Option<SslOpts
 #[doc(hidden)]
 pub fn opts_for(req: &DriverConnect) -> Opts {
     match direct_dial(req) {
-        Some(dial) => {
-            let ssl = ssl_for(
-                req,
-                &dial,
-                req.tls.as_ref().map(read_ca).unwrap_or_default(),
-            );
-            build_opts(req, dial, ssl)
-        }
+        Some(dial) => build_opts(req, dial, req.tls.as_ref()),
         None => opts_for_forwarded(req, 0),
     }
 }
@@ -145,28 +142,32 @@ pub fn opts_for(req: &DriverConnect) -> Opts {
 /// never `Debug`-format the result (P49).
 #[doc(hidden)]
 pub fn opts_for_forwarded(req: &DriverConnect, port: u16) -> Opts {
-    let dial = forwarded_dial(req, port);
-    let ssl = ssl_for(
-        req,
-        &dial,
-        req.tls.as_ref().map(read_ca).unwrap_or_default(),
-    );
-    build_opts(req, dial, ssl)
+    build_opts(req, forwarded_dial(port), req.tls.as_ref())
 }
 
 fn err(kind: RawErrorKind) -> RawError {
     RawError { kind, server: None }
 }
 
+/// Server errors that mean the statement was interrupted: `ER_QUERY_INTERRUPTED` (1317, a
+/// `KILL QUERY`), MySQL's `max_execution_time` (3024) and MariaDB's `max_statement_time`
+/// (1969).
+const INTERRUPTED: [u16; 3] = [1317, 3024, 1969];
+
 /// A `mysql_async` error as a raw error, by type and code only, never by message text
-/// (HV-CONN-03). The server's own message is kept verbatim in `server`.
+/// (HV-CONN-03). The server's own message is kept verbatim in `server`, also for an
+/// interruption (`Cancelled`), whose code the session reads.
 #[doc(hidden)]
 pub fn raw_error(e: &mysql_async::Error) -> RawError {
     use mysql_async::{DriverError as D, Error as E, IoError, TlsError};
     let kind = match e {
         E::Server(s) => {
             return RawError {
-                kind: RawErrorKind::Db,
+                kind: if INTERRUPTED.contains(&s.code) {
+                    RawErrorKind::Cancelled
+                } else {
+                    RawErrorKind::Db
+                },
                 server: Some(ServerMessage {
                     sqlstate: (!s.state.is_empty()).then(|| s.state.clone()),
                     vendor_code: Some(i64::from(s.code)),
@@ -189,6 +190,8 @@ pub fn raw_error(e: &mysql_async::Error) -> RawError {
             | D::UnknownAuthPlugin { .. }
             | D::NamedPipesDisabled => RawErrorKind::Unsupported,
             D::NoKeyFound => RawErrorKind::Tls(TlsFailure::Other),
+            // Patch §2: the guard refused before the password left (B8, Q20).
+            D::InsecurePasswordRefused => RawErrorKind::InsecureAuthRefused,
             _ => RawErrorKind::Protocol,
         },
         E::Url(_) | E::Other(_) => RawErrorKind::Other,
@@ -259,7 +262,9 @@ pub fn trail_events(tls: bool, outcome: Result<(), &RawError>) -> Vec<DriverEven
             {
                 Vec::new()
             }
-            RawErrorKind::Db | RawErrorKind::Unsupported => [tls_pair, &[AuthStarted]].concat(),
+            RawErrorKind::Db | RawErrorKind::Unsupported | RawErrorKind::InsecureAuthRefused => {
+                [tls_pair, &[AuthStarted]].concat()
+            }
             _ => Vec::new(),
         },
     }
@@ -278,10 +283,6 @@ pub(crate) async fn connect(req: DriverConnect) -> Result<MySqlConn, RawError> {
         .tls
         .as_ref()
         .map_or(TlsMode::Disable, |t| t.settings.mode);
-    if mode == TlsMode::VerifyCa {
-        // P11: `mysql_async` cannot skip only the name check with the locked rustls.
-        return Err(err(RawErrorKind::Unsupported));
-    }
     if matches!(req.endpoint, Endpoint::File { .. }) {
         return Err(err(RawErrorKind::Unsupported));
     }
@@ -292,25 +293,13 @@ pub(crate) async fn connect(req: DriverConnect) -> Result<MySqlConn, RawError> {
 }
 
 async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn, RawError> {
-    let tls_on = mode != TlsMode::Disable;
-    let mut ca = Vec::new();
-    if tls_on {
-        // The OS store is read once, on the blocking pool. A panic there is an internal error,
-        // never retried on an async worker.
-        tokio::task::spawn_blocking(crate::tls::os_roots)
-            .await
-            .map_err(|_| err(RawErrorKind::Other))?;
-        // The CA certificates the pipeline read and checked; never the file again (M6).
-        if let Some(tls) = req.tls.as_ref() {
-            ca = read_ca(tls);
-        }
-    }
     let report = |tls: bool, outcome: Result<(), &RawError>| {
         for e in trail_events(tls, outcome) {
             (req.events)(e);
         }
     };
-    let first = attempt(req, tls_on, ca).await;
+    let first = attempt(req, req.tls.as_ref()).await;
+    let tls_on = req.tls.is_some();
     report(tls_on, first.as_ref().map(|_| ()));
     let (conn, guard, tls_used) = match first {
         Ok((conn, guard)) => (conn, guard, tls_on),
@@ -322,12 +311,17 @@ async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn
                 && e.kind == RawErrorKind::TlsNotOffered
                 && plaintext_fallback_allowed(req) =>
         {
-            let second = attempt(req, false, Vec::new()).await;
+            let second = attempt(req, None).await;
             report(false, second.as_ref().map(|_| ()));
             let (conn, guard) = second?;
             (conn, guard, false)
         }
         Err(e) => return Err(e),
+    };
+    // The outcome this connection's handshake recorded, read right after it.
+    let verified = match req.tls.as_ref() {
+        Some(t) if tls_used => tls::verified(t),
+        _ => TlsVerified::No,
     };
     let kind = if conn.server_version().0 >= 10 {
         DbmsKind::MariaDb
@@ -339,18 +333,20 @@ async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn
         guard,
         kind,
         tls_mode: if tls_used { mode } else { TlsMode::Disable },
+        verified,
+        read_only: req.read_only,
+        tx: TxStatus::Idle,
     })
 }
 
-/// One connect attempt, Direct or through a fresh forwarder (it accepts one connection).
+/// One connect attempt, Direct or through a fresh forwarder (it accepts one connection);
+/// `tls` is `None` for a plaintext attempt.
 async fn attempt(
     req: &DriverConnect,
-    tls: bool,
-    ca: Vec<Vec<u8>>,
+    tls: Option<&TlsParams>,
 ) -> Result<(Conn, Option<CleanupGuard>), RawError> {
     if let Some(dial) = direct_dial(req) {
-        let ssl = if tls { ssl_for(req, &dial, ca) } else { None };
-        let opts = build_opts(req, dial, ssl);
+        let opts = build_opts(req, dial, tls);
         return Conn::new(opts)
             .await
             .map(|c| (c, None))
@@ -367,9 +363,7 @@ async fn attempt(
         guard.run().await;
         return Err(err(RawErrorKind::Other));
     };
-    let dial = forwarded_dial(req, addr.port());
-    let ssl = if tls { ssl_for(req, &dial, ca) } else { None };
-    let opts = build_opts(req, dial, ssl);
+    let opts = build_opts(req, forwarded_dial(addr.port()), tls);
     match Conn::new(opts).await {
         Ok(conn) => Ok((conn, Some(guard))),
         Err(e) => {
@@ -414,6 +408,13 @@ pub struct MySqlConn {
     kind: DbmsKind,
     /// The mode TLS ran in; `Disable` when the connection is plaintext.
     tls_mode: TlsMode,
+    // ## m2b-t13-mysql
+    /// The outcome the handshake recorded (`No` without TLS).
+    verified: TlsVerified,
+    /// The connection runs read-only (no multi-statements, no `COM_QUERY` fallback).
+    read_only: bool,
+    /// The transaction status from the last OK packet (HV-SESS-03).
+    tx: TxStatus,
 }
 
 impl MySqlConn {
@@ -462,9 +463,10 @@ impl RawConn for MySqlConn {
     fn tls_summary(&mut self) -> BoxFuture<'_, TlsSummary> {
         Box::pin(async move {
             let mode = self.tls_mode;
+            let verified = self.verified;
             match self.conn() {
-                Ok(conn) => probe::tls_summary(conn, mode).await,
-                Err(_) => probe::summary(mode, None, None, None),
+                Ok(conn) => probe::tls_summary(conn, mode, verified).await,
+                Err(_) => probe::summary(mode, verified, None, None, None),
             }
         })
     }
@@ -507,34 +509,53 @@ impl RawConn for MySqlConn {
         })
     }
 
+    /// `None`: MySQL cancels with `KILL QUERY <backend_id>` on a side connection, which the
+    /// session opens through the pipeline (`SideConnector`, with its own `DriverConnect` and so
+    /// its own `Opts`, `SslOpts` and guard) and closes after the statement. The driver keeps no
+    /// credentials for one of its own.
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
-        // M2b: `KILL QUERY <id>` on a second connection through the same factory.
         None
     }
 
-    // ## m2b-t01-interfaces: Task 13 (`exec`) fills these; until then nothing runs.
+    // ## m2b-t13-mysql
 
     fn execute<'a>(
         &'a mut self,
-        _sql: &'a str,
-        _opts: hacivat_driver::ExecOpts,
-    ) -> BoxFuture<'a, Result<hacivat_driver::ExecSummary, RawError>> {
-        Box::pin(async { Err(crate::exec::not_yet()) })
+        sql: &'a str,
+        opts: ExecOpts,
+    ) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
+        Box::pin(async move {
+            let Some(conn) = self.conn.as_mut() else {
+                return Err(err(RawErrorKind::Io(io::ErrorKind::NotConnected)));
+            };
+            exec::execute(conn, self.read_only, &mut self.tx, sql, opts).await
+        })
     }
 
-    fn batch<'a>(&'a mut self, _sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
-        Box::pin(async { Err(crate::exec::not_yet()) })
+    fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
+        Box::pin(async move {
+            let Some(conn) = self.conn.as_mut() else {
+                return Err(err(RawErrorKind::Io(io::ErrorKind::NotConnected)));
+            };
+            exec::batch(conn, &mut self.tx, sql).await
+        })
     }
 
-    fn tx_status(&self) -> hacivat_driver::TxStatus {
-        hacivat_driver::TxStatus::Idle
+    fn tx_status(&self) -> TxStatus {
+        self.tx
     }
 
     fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>> {
-        Box::pin(async { Err(crate::exec::not_yet()) })
+        Box::pin(async move {
+            let Some(conn) = self.conn.as_mut() else {
+                return Err(err(RawErrorKind::Io(io::ErrorKind::NotConnected)));
+            };
+            exec::reset(conn, &mut self.tx).await
+        })
     }
 
+    /// The thread ID from the handshake (`CONNECTION_ID()`), which `KILL` takes.
     fn backend_id(&self) -> Option<u64> {
-        None
+        self.conn.as_ref().map(|c| u64::from(c.id()))
     }
 }
