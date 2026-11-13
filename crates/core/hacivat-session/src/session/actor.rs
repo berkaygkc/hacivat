@@ -78,9 +78,7 @@ use crate::session::cancel::{
 use crate::session::liveness::{LivenessAction, LivenessPolicy, Supervisor};
 use crate::session::readonly::run_guarded;
 // ## m2b-t17-liveness
-use crate::session::recovery::{
-    LostState, Tracked, is_recovery_case, lost_state, track_statement,
-};
+use crate::session::recovery::{LostState, Tracked, is_recovery_case, lost_state, track_statement};
 use crate::session::schema::{Family, family, first_keyword};
 use crate::session::{
     CancelOutcome, CancelState, ClosePolicy, CloseRefused, Command, EnvPlan, Escalation, ExecError,

@@ -211,8 +211,12 @@ pub enum CloseRefused {
 /// What a session tells its owner.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SessionEvent {
-    SlowCancel { req: u64 },
-    IdleTransaction { minutes: u32 },
+    SlowCancel {
+        req: u64,
+    },
+    IdleTransaction {
+        minutes: u32,
+    },
     EnforcementGap(GapReason),
     Lost(LostState),
     Reconnected,

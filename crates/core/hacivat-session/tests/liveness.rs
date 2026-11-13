@@ -298,7 +298,11 @@ fn a_jump_with_an_open_transaction_and_no_keepalive_still_pings_once() {
         let mut acts = Vec::new();
         acts.extend(s.step(secs(1), secs(8 * 3600), false, tx));
         acts.extend(s.step(secs(1), secs(1), false, tx));
-        assert_eq!(acts, [LivenessAction::Suspect, LivenessAction::Ping], "{tx:?}");
+        assert_eq!(
+            acts,
+            [LivenessAction::Suspect, LivenessAction::Ping],
+            "{tx:?}"
+        );
     }
 }
 

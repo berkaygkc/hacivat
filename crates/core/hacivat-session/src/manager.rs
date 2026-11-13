@@ -801,7 +801,9 @@ impl Reconnector for Recovery {
         let cancelled = || error(ErrClass::Cancelled, Phase::PostConnect);
         let (lost_at, mut attempt, mut last_class) = {
             let mut loss = self.loss();
-            let resume = loss.as_mut().is_some_and(|l| std::mem::take(&mut l.continuing));
+            let resume = loss
+                .as_mut()
+                .is_some_and(|l| std::mem::take(&mut l.continuing));
             if !resume {
                 *loss = Some(Loss {
                     lost_at: tokio::time::Instant::now(),
@@ -818,7 +820,10 @@ impl Reconnector for Recovery {
             if let Some(shared) = self.shared.upgrade() {
                 shared.end_live(self.id, self.seq, LiveState::Lost { class: last_class });
             }
-            return Box::pin(std::future::ready(Err(error(last_class, Phase::PostConnect))));
+            return Box::pin(std::future::ready(Err(error(
+                last_class,
+                Phase::PostConnect,
+            ))));
         };
         // Synchronously: the capsule shows the reconnect before the failed request answers.
         if let Some(shared) = self.shared.upgrade() {
