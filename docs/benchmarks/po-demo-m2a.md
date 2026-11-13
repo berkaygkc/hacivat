@@ -47,7 +47,9 @@ davranışı yalnızca bu listeyle görülür.
 
    - Servis (Keychain Access'te "Ad / Name" sütunu): `hacivat-dev/<profil-uuid>/db-password`
    - Hesap (Account): `hacivat`
-   - Yorum (Comment): profilin adı
+   - Yorum (Comment): macOS'ta boş kalır (keyring 3 etiket yazmaz, P44). Hangi uuid'nin hangi
+     profile ait olduğunu `connections.toml` gösterir:
+     `grep -nE '^(id|name) =' "$HOME/Library/Application Support/dev.hacivat.Hacivat/connections.toml"`
 
    Keychain Access'te bakmak için: Keychain Access uygulamasını açın, sol üstte `login`
    anahtar zincirini ve "Passwords / Parolalar" kategorisini seçin, arama kutusuna `hacivat-dev`
@@ -236,7 +238,8 @@ Veritabanı `hv_test`. "Save and connect".
 
 **İyi görünüm (silme):**
 - Önce Keychain Access'te `hacivat-dev` aratın: bu profilin `hacivat-dev/<uuid>/db-password` girişi
-  vardır (hesap `hacivat`, yorum profil adı). `<uuid>` değerini not edin.
+  vardır (hesap `hacivat`; yorum macOS'ta boştur). `<uuid>` değerini `connections.toml`'daki
+  `id`/`name` satırlarından eşleyip not edin.
 - Gezgindeki profilde ⌫ (ya da sağ tık, "Delete…"). Onay kutusu **alertdialog**'dur: başlık
   "Delete … ?", **Cancel düğmesi odaktadır**, "Delete" menüde ve kutuda kırmızıdır.
 - "Delete" deyince satır kaybolur. Keychain Access'te aramayı yenileyin (⌘R ya da yeniden arayın):
