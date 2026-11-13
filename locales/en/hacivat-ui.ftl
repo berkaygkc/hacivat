@@ -468,10 +468,6 @@ hv-conn-fix-versions = Supported versions
 hv-conn-fix-anyway = Connect anyway, unsupported
 hv-conn-fix-connect = Connect
 hv-conn-fix-close = Close
-# The fix for an untrusted or mismatched certificate (R3): TLS without verification.
-hv-conn-fix-require = Encrypt without verifying
-# Shown with that fix: what it gives up, plainly.
-hv-conn-fix-require-note = The connection will be encrypted, but { -brand-hacivat } won't check that the server is who it claims to be.
 # Shown when the connections file is read-only: fixes that change the connection are off.
 hv-conn-fix-read-only = Your connections file can't be changed, so fixes that edit this connection are off.
 # Shown when a fix's change to the connection could not be saved.
@@ -750,7 +746,6 @@ hv-conn-issue-create-and-read-only = A new file can't be opened read-only. Turn 
 hv-conn-issue-transport-unavailable = This connection uses a tunnel this version can't open yet.
 hv-conn-issue-tls-ca-unreadable = The CA certificate can't be read. Verify CA needs one.
 hv-conn-issue-tls-cert-unreadable = The client certificate or its key can't be read.
-hv-conn-issue-tls-key-encrypted = The private key is encrypted. Use an unencrypted key file.
 # Variables:
 #   $mode (String) - the encryption mode, e.g. "Verify CA".
 hv-conn-issue-tls-mode-unsupported = { $mode } isn't available for this engine yet.
@@ -795,8 +790,9 @@ hv-conn-issue-ssh-too-many-hops = A tunnel can go through at most 8 jump hosts.
 # Review: PO
 hv-conn-issue-ssh-key-file-missing = This key file can't be found. Choose the private key, such as ~/.ssh/id_ed25519.
 # The TLS client key uses the old OpenSSL encryption, which can't be decrypted.
+# m2b-t19-tls (named exception): the placeholder rewritten.
 # Review: PO
-hv-conn-issue-tls-key-legacy-encrypted = This private key uses an old encryption format. Convert it to PKCS #8.
+hv-conn-issue-tls-key-legacy-encrypted = This key is encrypted in an old format { -brand-hacivat } can't read. Convert it to an encrypted PKCS #8 key (openssl pkcs8 -topk8), then choose the new file.
 
 ## m2b-t20-ssh
 
@@ -939,6 +935,309 @@ hv-conn-err-refused = { $name } — { $reason ->
 hv-conn-err-attempts-used = All 3 attempts are used. { -brand-hacivat } won't send another password, so the account isn't locked.
 # Under the connection dialog's Password field after 3 rejected passwords: how to try again.
 hv-conn-dlg-attempts-used = No attempts left for this server. To try again, change the host, port or user, or reopen this dialog.
+
+## m2b-t21-prompts
+
+# The new-host-key prompt (M2a NOTES surface 6). Its title.
+# Variables:
+#   $host (String) - the SSH host Hacivat dialled, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-hk-title = First connection to { $host }
+# Variables:
+#   $os (Enum(mac, other)) - whether this computer is a Mac.
+# Review: PO
+hv-conn-hk-body = { $os ->
+        [mac] This Mac hasn't connected to this SSH server before. Compare the fingerprint with the one your administrator gave you.
+       *[other] This computer hasn't connected to this SSH server before. Compare the fingerprint with the one your administrator gave you.
+    }
+# The fingerprint inset's label.
+# Review: PO
+hv-conn-hk-fp = Host key
+# Review: PO
+hv-conn-hk-store = { -brand-hacivat } saves it in its own known-hosts list. ~/.ssh/known_hosts isn't changed.
+# The primary button.
+# Review: PO
+hv-conn-hk-trust = Trust and connect
+# The tooltip and accessible name of the Copy button of a fingerprint inset.
+# Review: PO
+hv-conn-hk-copy-fp = Copy fingerprint
+
+# The changed-host-key review (NOTES surface 1): a hard stop whose default is Cancel.
+# Variables:
+#   $host (String) - the SSH host Hacivat dialled, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-hk-changed-title = The host key of { $host } changed
+# Review: PO
+hv-conn-hk-changed-body = The server answered with a different key from the one stored for it. That happens when a server is rebuilt or its keys are rotated, and also when someone is intercepting the connection. { -brand-hacivat } stopped before signing in.
+# The two fingerprint insets.
+# Review: PO
+hv-conn-hk-changed-old = Stored key
+# Review: PO
+hv-conn-hk-changed-new = Offered now
+# Under the stored key: where it is stored.
+# Review: PO
+hv-conn-hk-changed-stored-in = Stored in
+# Review: PO
+hv-conn-hk-changed-src-hacivat = { -brand-hacivat }'s known hosts
+# Variables:
+#   $file (String) - the OpenSSH file, e.g. "~/.ssh/known_hosts".
+#   $n (Number) - the line in that file, e.g. 14.
+# Review: PO
+hv-conn-hk-changed-src-openssh = { $file } line { NUMBER($n, useGrouping: "false") }
+# Variables:
+#   $host (String) - the SSH host, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-hk-changed-ask = Ask whoever runs { $host } whether its key changed, and compare the new fingerprint before you trust it.
+# The trust-widening button: never the default.
+# Review: PO
+hv-conn-hk-changed-replace = Remove the old key and trust the new one
+# Above the ssh-keygen command when the old key is in an OpenSSH file.
+# Variables:
+#   $file (String) - the OpenSSH file, e.g. "~/.ssh/known_hosts".
+# Review: PO
+hv-conn-hk-changed-openssh-note = { -brand-hacivat } doesn't change { $file }. If the new key is genuine, remove the old line in a terminal, then try again:
+# Review: PO
+hv-conn-hk-changed-copy = Copy command
+# Toast after Copy command.
+# Review: PO
+hv-conn-hk-changed-copied = Copied the command
+# Toast after the old key was replaced.
+# Variables:
+#   $host (String) - the SSH host, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-hk-changed-trusted = Trusted the new key of { $host }
+
+# The keyboard-interactive prompt (NOTES surface 2). Server text is never placed in these.
+# Variables:
+#   $host (String) - the SSH host Hacivat dialled, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-kbd-title = Sign in to { $host }
+# Variables:
+#   $host (String) - the SSH host Hacivat dialled, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-kbd-asks = { $host } asks:
+# The caption of the inset holding the server's own text.
+# Review: PO
+hv-conn-kbd-from-server = Sent by the server, shown as received
+# Review: PO
+hv-conn-kbd-no-text = The server sent no name or instructions.
+# Variables:
+#   $n (Number) - the attempt, 1 to 3.
+# Review: PO
+hv-conn-kbd-attempt = Attempt { $n } of 3
+# Review: PO
+hv-conn-kbd-not-kept = Answers go to this server only and aren't kept.
+# Review: PO
+hv-conn-kbd-rejected = The server didn't accept the answers and asked again.
+# Review: PO
+hv-conn-kbd-continue = Continue
+
+# The SSH password and key passphrase prompts (NOTES surface 3).
+# Variables:
+#   $host (String) - the asking hop's host, e.g. "jump-eu.acme.io".
+#   $n (Number) - the hop's 1-based position, e.g. 1.
+#   $total (Number) - how many hops the route has, e.g. 2.
+# Review: PO
+hv-conn-ssh-secret-hop = { $host }, hop { $n } of { $total }
+# Variables:
+#   $host (String) - the asking hop's host, e.g. "jump-eu.acme.io".
+# Review: PO
+hv-conn-ssh-secret-pw-title = SSH password for { $host }
+# Variables:
+#   $user (String) - the SSH user and host, e.g. "deploy@jump-eu.acme.io".
+# Review: PO
+hv-conn-ssh-secret-pw-body = Enter the SSH password for { $user }. It's kept only if the connection works.
+# Variables:
+#   $key (String) - the key file, e.g. "~/.ssh/id_ed25519".
+# Review: PO
+hv-conn-ssh-secret-pass-title = Passphrase for { $key }
+# Review: PO
+hv-conn-ssh-secret-pass-body = This key file is encrypted. Enter its passphrase. It's kept only if the connection works.
+# Variables:
+#   $host (String) - the asking hop's host, e.g. "jump-eu.acme.io".
+# Review: PO
+hv-conn-ssh-secret-wrong = { $host } didn't accept the password.
+# After a passphrase that didn't decrypt the key (new: the mock shows only the password's line).
+# Review: PO
+hv-conn-ssh-secret-pass-wrong = That passphrase didn't unlock the key.
+# Variables:
+#   $n (Number) - the attempt, 1 to 3.
+# Review: PO
+hv-conn-ssh-secret-attempt = Attempt { $n } of 3
+# Review: PO
+hv-conn-ssh-secret-continue = Continue
+
+# The vault (NOTES surface 4): create, unlock, reset, damaged.
+# Review: PO
+hv-conn-vault-create-title = Create a vault for saved passwords
+# Review: PO
+hv-conn-vault-create-why = This computer has no system keyring.
+# Review: PO
+hv-conn-vault-create-what = { -brand-hacivat } keeps the passwords you save Forever in an encrypted file, locked with a master password.
+# Review: PO
+hv-conn-vault-master = Master password
+# Review: PO
+hv-conn-vault-repeat = Repeat
+# The create dialog's two live rules.
+# Review: PO
+hv-conn-vault-min = At least 8 characters
+# Review: PO
+hv-conn-vault-match = Both entries match
+# Review: PO
+hv-conn-vault-mismatch = The two entries don't match
+# Review: PO
+hv-conn-vault-norecover = { -brand-hacivat } can't recover it. If you forget it, you reset the vault and enter your saved passwords again.
+# Review: PO
+hv-conn-vault-notnow-note = Not now keeps this password until { -brand-hacivat } restarts.
+# Review: PO
+hv-conn-vault-notnow = Not now
+# Review: PO
+hv-conn-vault-create-btn = Create vault
+# Toast after the vault was created.
+# Review: PO
+hv-conn-vault-created = Vault created. Passwords you save Forever go there.
+# Review: PO
+hv-conn-vault-unlock-title = Unlock the vault
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+# Review: PO
+hv-conn-vault-unlock-body = { -brand-hacivat } needs the master password to read the saved password for { $name }. The vault stays unlocked until you quit.
+# The unlock body when no single connection asks (new: the pipeline's question names none).
+# Review: PO
+hv-conn-vault-unlock-body-any = { -brand-hacivat } needs the master password to read your saved passwords. The vault stays unlocked until you quit.
+# Review: PO
+hv-conn-vault-unlock-wrong = That isn't the master password.
+# Variables:
+#   $n (Number) - the attempt, 1 to 3.
+# Review: PO
+hv-conn-vault-attempt = Attempt { $n } of 3
+# Review: PO
+hv-conn-vault-unlock-btn = Unlock
+# Review: PO
+hv-conn-vault-reset-link = Reset vault…
+# Review: PO
+hv-conn-vault-reset-title = Reset the vault?
+# The mock counts the passwords; a locked or damaged vault can't be counted, so the body names none.
+# Review: PO
+hv-conn-vault-reset-body = This deletes the vault and every password saved in it. Your connections stay, and { -brand-hacivat } asks for each password the next time you connect. This can't be undone.
+# Variables:
+#   $word (String) - the word to type, hv-conn-vault-reset-word, e.g. "reset".
+# Review: PO
+hv-conn-vault-reset-type = Type { $word } to confirm
+# The word typed to confirm a reset: the same in every language on purpose (B13).
+# Review: PO
+hv-conn-vault-reset-word = reset
+# Review: PO
+hv-conn-vault-reset-btn = Reset vault
+# Toast after a reset.
+# Review: PO
+hv-conn-vault-reset-done = The vault was reset. Its saved passwords are gone.
+# Review: PO
+hv-conn-vault-damaged-title = The vault can't be read
+# Review: PO
+hv-conn-vault-damaged-body = The vault file failed its integrity check, so { -brand-hacivat } didn't use it and didn't change it. Restore it from a backup, or reset the vault.
+# Review: PO
+hv-conn-vault-damaged-meanwhile = Until then, passwords you enter are kept until { -brand-hacivat } restarts.
+# The Remember choice "Forever" when the vault holds the secrets, with its hint.
+# Review: PO
+hv-conn-ret-forever-vault = Forever (encrypted file)
+# Review: PO
+hv-conn-ret-forever-vault-h = in { -brand-hacivat }'s vault, behind a master password
+
+# The quick fix of ssh.host_key_changed: opens the review (NOTES surface 1).
+# Review: PO
+hv-conn-fix-review-host-key = Review host key…
+
+# Fix round 1. Under the SSH secret prompt's Remember: the choice is the connection's.
+# Review: PO
+hv-conn-ssh-secret-remember-all = Applies to the saved SSH passwords and passphrases of every hop of this connection.
+# Fix round 1. A save or delete that changed nothing because the stored passwords could not be
+# moved or deleted (a locked vault whose unlock was declined, a refused write).
+# Review: PO
+hv-conn-save-unchanged = Nothing was changed: the saved passwords couldn't be moved or removed. If { -brand-hacivat } asks, unlock the vault, then try again.
+# Fix round 1. The vault file is a link or not a regular file, so it can't be used.
+# Review: PO
+hv-conn-vault-denied = { -brand-hacivat } can't use the vault file: it isn't a regular file. Passwords you enter are kept until { -brand-hacivat } restarts.
+
+## m2b-t19-tls
+
+# Quick fixes of an untrusted certificate (B6): open the certificate review, or choose its CA file.
+hv-conn-fix-review-cert = Review certificate…
+hv-conn-fix-import-ca = Import CA…
+# The certificate review's title (NOTES M2a surface 5).
+hv-conn-tls-title = Certificate not trusted
+# Variables:
+#   $host (String) - the server's host as the connection names it, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-body = { $host }:{ $port } offered a certificate that no CA trusted by this Mac has signed. Compare the fingerprint with whoever runs the server before you continue.
+# The certificate's facts.
+hv-conn-tls-subject = Issued to
+hv-conn-tls-issuer = Issued by
+hv-conn-tls-valid = Valid until
+# The certificate's expiry date, in the regional format.
+# Variables:
+#   $when (DateTime) - the moment the certificate expires, e.g. 2027-03-14.
+hv-conn-tls-valid-date = { DATETIME($when, dateStyle: "long") }
+hv-conn-tls-fp = SHA-256 fingerprint
+# The tooltip of the button that copies a fingerprint.
+hv-conn-tls-copy-fp = Copy fingerprint
+hv-conn-tls-chain = Chain
+# A certificate's place in the chain, after its name.
+hv-conn-tls-leaf = server
+hv-conn-tls-inter = intermediate
+hv-conn-tls-root = root · not trusted by this Mac
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-pin-note = Pinning trusts exactly this certificate for { $host }:{ $port }. If it ever changes, { -brand-hacivat } stops and asks again. A pin doesn't extend the expiry date.
+hv-conn-tls-pin-btn = Pin this certificate
+hv-conn-tls-import = Import CA…
+# Under the certificate's facts when today is outside its dates: why nothing can trust it.
+# Variables:
+#   $state (Enum(expired, early)) - expired: past its expiry date; early: not valid yet.
+hv-conn-tls-dates-note = { $state ->
+        [expired] This certificate has expired. A pin doesn't extend the expiry date, so it can't be pinned. Ask whoever runs the server to renew it.
+       *[early] This certificate isn't valid yet. Check the date and time of this Mac, or ask whoever runs the server.
+    }
+# The TLS section of the connection dialog: the endpoint's pinned certificate.
+hv-conn-tls-pin = Pinned certificate
+hv-conn-tls-pin-none = None
+hv-conn-tls-remove-pin = Remove pin
+# In the TLS section when Encryption is Disable and the endpoint has a pinned certificate.
+hv-conn-issue-tls-disable-ignores-pin = With encryption off, the pinned certificate isn't checked. Choose another mode to use the pin.
+# The client certificate's key passphrase field.
+hv-conn-dlg-key-pass = Key passphrase
+# Under the key passphrase field when the key is encrypted and the passphrase is missing or wrong.
+hv-conn-issue-tls-key-passphrase = This key is encrypted. Enter its passphrase.
+# The certificate of a pinned endpoint changed (NOTES M2b surface 5).
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-pin-changed-title = The certificate of { $host }:{ $port } changed
+hv-conn-tls-pin-changed-body = This connection is pinned to one certificate, and the server now presents a different one. { -brand-hacivat } stopped before signing in.
+# The two fingerprints: the pinned one, and the one the server presents now.
+hv-conn-tls-pin-changed-old = Pinned
+hv-conn-tls-pin-changed-new = Now
+hv-conn-tls-pin-changed-ask = A renewed certificate looks like this too. Ask whoever runs the server before you replace the pin.
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-pin-changed-note = Replacing the pin trusts exactly the new certificate for { $host }:{ $port } and removes the old pin. A pin doesn't extend the expiry date.
+hv-conn-tls-pin-changed-replace = Replace pin
+# Toast after Replace pin.
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+hv-conn-tls-pin-changed-done = Pinned the new certificate of { $host }
+# The public-plaintext question (NOTES M2a surface 5): a public host offered no TLS.
+# Variables:
+#   $host (String) - the server's host, e.g. "db.acme.io".
+hv-conn-plain-title = { $host } doesn't offer encryption
+# Variables:
+#   $ip (String) - the server's address, e.g. "203.0.113.10".
+hv-conn-plain-body = { $ip } accepts only unencrypted connections and isn't on a private network. Your password and query results would cross the network in plain text.
+hv-conn-plain-ssh = Use an SSH tunnel…
+hv-conn-plain-connect = Connect without encryption
+hv-conn-plain-remember = Don't ask again for this connection
 
 ## m2b-t23-f1
 

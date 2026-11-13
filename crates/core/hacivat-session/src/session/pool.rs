@@ -196,6 +196,8 @@ fn apply_change(p: &mut Profile, change: &ProfileChange) {
         }
         ProfileChange::SetCaFile(path) => p.tls.ca_file = Some(path.clone()),
         ProfileChange::AllowPublicPlaintext => p.tls.allow_public_plaintext = true,
+        // ## m2b-t21-prompts (fix round 1): the Remember an SSH secret prompt chose.
+        ProfileChange::SshRetention(retention) => p.ssh_retention = *retention,
     }
 }
 

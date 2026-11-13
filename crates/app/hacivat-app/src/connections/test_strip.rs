@@ -623,6 +623,8 @@ mod shots {
             ping_median: Some(Duration::from_millis(12)),
             warnings: Vec::new(),
             error: None,
+            // ## m2b-t19-tls
+            profile_changes: Vec::new(),
         };
         open(TestStripState::Done(report.into()), window, cx);
     }
@@ -647,6 +649,8 @@ mod shots {
             ping_median: None,
             warnings: Vec::new(),
             error: Some(error),
+            // ## m2b-t19-tls
+            profile_changes: Vec::new(),
         };
         open(TestStripState::Done(report.into()), window, cx);
     }

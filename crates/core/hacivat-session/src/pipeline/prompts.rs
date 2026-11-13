@@ -264,6 +264,8 @@ pub(crate) async fn ask_tls_passphrase(
             key: key.to_path_buf(),
         },
         attempt,
+        // ## m2b-t21-prompts (fix round 2): the DB retention keeps it; no choice here.
+        remember: None,
     };
     match ui.ask(q).await {
         Answer::Secret(s) | Answer::Password(s) => Some(s),
@@ -417,15 +419,23 @@ pub(crate) struct PipelinePrompter {
     profile: ProfileId,
     name: String,
     typed: Arc<Mutex<Vec<(u8, SshSlot)>>>,
+    // ## m2b-t21-prompts (fix round 1): the Remember of the last SSH secret prompt answered.
+    remember: Arc<Mutex<Option<hacivat_secrets::Retention>>>,
+    /// Fix round 2 (R2): where a Main connect keeps typed SSH secrets unless a prompt chose
+    /// otherwise, the saved profile's `ssh_retention`; `None` for a Test or a probe, whose
+    /// prompts offer no Remember (they store nothing).
+    remember_default: Option<hacivat_secrets::Retention>,
 }
 
 impl PipelinePrompter {
-    pub(crate) fn new(ui: Arc<dyn UiPort>, p: &Profile) -> Arc<PipelinePrompter> {
+    pub(crate) fn new(ui: Arc<dyn UiPort>, p: &Profile, stores: bool) -> Arc<PipelinePrompter> {
         Arc::new(PipelinePrompter {
             ui,
             profile: p.id,
             name: p.name.clone(),
             typed: Arc::default(),
+            remember: Arc::default(),
+            remember_default: stores.then_some(p.ssh_retention),
         })
     }
 
@@ -435,6 +445,12 @@ impl PipelinePrompter {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    // ## m2b-t21-prompts (fix round 1)
+    /// The retention the user chose at an SSH secret prompt (the last answer wins), if any.
+    pub(crate) fn remember(&self) -> Option<hacivat_secrets::Retention> {
+        *self.remember.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -475,18 +491,35 @@ impl SshPrompter for PipelinePrompter {
                 SshSlot::Passphrase,
             ),
         };
+        // ## m2b-t21-prompts (fix round 2, R2): the prompt starts from the saved retention, or
+        // from the choice an earlier prompt of this same connect made; never from anything
+        // older, and never for a connect that stores nothing.
+        let remember = self
+            .remember_default
+            .map(|saved| self.remember().unwrap_or(saved));
         let asked = self.ui.ask(Question::Secret {
             profile: self.profile,
             name: self.name.clone(),
             prompt,
             attempt,
+            remember,
         });
         let typed = self.typed.clone();
+        // Fix round 2 (R2): a connect that offered no choice records none, whatever the answer.
+        let chosen = remember.is_some().then(|| self.remember.clone());
         Box::pin(async move {
             match asked.await {
                 Answer::Secret(s) | Answer::Password(s) => {
                     note(&typed, hop, slot);
                     Some(s)
+                }
+                // ## m2b-t21-prompts (fix round 1): the prompt's Remember travels with it.
+                Answer::SshSecret { secret, remember } => {
+                    note(&typed, hop, slot);
+                    if let Some(chosen) = chosen {
+                        *chosen.lock().unwrap_or_else(PoisonError::into_inner) = Some(remember);
+                    }
+                    Some(secret)
                 }
                 _ => None,
             }

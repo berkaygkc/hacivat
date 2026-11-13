@@ -1,9 +1,13 @@
 //! Quick fixes the error surfaces offer, and what each does (HV-CONN-03, Task 20).
 //!
-//! The fixes come from the error registry (`fixes_for`, Task 10), in its button order. M2a runs
-//! seven of them; the others (`ReviewCertificate`, `ConnectThroughSsh`, …) belong to M2b flows
-//! and are not shown. `UseDatabase` becomes one button per suggested database (at most 3); with
-//! no suggestion (SQLite, or no list) it offers nothing.
+//! The fixes are the error's own list (`ConnectError::fixes`: the registry's `fixes_for`, which
+//! the pipeline narrows where a fix cannot help, Task 14), in its button order; an error that
+//! carries none falls back to the registry's. `UseDatabase` becomes one button per suggested
+//! database (at most 3); with no suggestion (SQLite, or no list) it offers nothing.
+//!
+//! M2b (Task 19): "Review certificate…" (only with a certificate to review) and "Import CA…"
+//! replace M2a's interim "Encrypt without verifying" (B6). `ConnectThroughSsh` and
+//! `ReviewHostKey` belong to Tasks 20 and 21 and show no button until their owners add one.
 
 use std::sync::Arc;
 
@@ -34,7 +38,6 @@ pub enum FixAction {
     UseDatabase(String),
     SupportedVersions,
     ConnectAnyway,
-    EncryptWithoutVerifying,
     // ## m2b-t01-interfaces: M2b flows, run by [`run_m2b_fix`]. Their owners add the labels
     // and map their `FixId`s in `fix_actions` (Tasks 19, 20, 21); until then no button shows.
     ReviewCertificate,
@@ -54,9 +57,9 @@ pub fn run_m2b_fix(
     cx: &mut App,
 ) -> bool {
     match action {
-        FixAction::ReviewCertificate => cert_dialog::review(error.clone(), window, cx),
-        // Task 19 picks and imports the CA file.
-        FixAction::ImportCa => {}
+        // ## m2b-t19-tls: the review builds its own change (Q26); Import CA picks the file.
+        FixAction::ReviewCertificate => cert_dialog::review(error.clone(), profile, window, cx),
+        FixAction::ImportCa => cert_dialog::import_ca(profile, cx),
         FixAction::ConnectThroughSsh => dialog::ssh::open_with_ssh(profile, window, cx),
         FixAction::ReviewHostKey => {
             if let Some(m) = error.host_key.clone() {
@@ -71,21 +74,20 @@ pub fn run_m2b_fix(
 impl FixAction {
     /// Whether the fix changes the saved profile (and so needs a writable connections file).
     pub fn edits_profile(&self) -> bool {
+        // ## m2b-t19-tls: a pin and a CA file are saved with the profile.
         matches!(
             self,
             FixAction::UseDatabase(_)
                 | FixAction::ConnectAnyway
-                | FixAction::EncryptWithoutVerifying
+                | FixAction::ReviewCertificate
+                | FixAction::ImportCa
         )
     }
 
-    /// Whether the fix gives up a safety check (an unverified certificate, an unsupported
-    /// server). Such a fix never has the initial focus: one reflexive Enter must not run it.
+    /// Whether the fix gives up a safety check (an unsupported server). Such a fix never has
+    /// the initial focus: one reflexive Enter must not run it.
     pub fn weakens_safety(&self) -> bool {
-        matches!(
-            self,
-            FixAction::ConnectAnyway | FixAction::EncryptWithoutVerifying
-        )
+        matches!(self, FixAction::ConnectAnyway)
     }
 
     /// Whether the fix starts a new connect gesture (controller ruling, fix round 1): every
@@ -105,13 +107,21 @@ pub struct FixButton {
     pub disabled: bool,
 }
 
-/// The fixes `error` offers, in the registry's order. `UseDatabase` expands into the first
-/// [`MAX_DATABASE_FIXES`] suggestions; `ReenterPassword` is left out once the gesture's
-/// `rejections` reached [`MAX_REJECTIONS`]; `EditConnection` is left out when `with_edit` is
-/// false (the inline strip sits on the form itself, as in the mock).
+/// The fixes `error` offers, in its order (the registry's when it carries none). `UseDatabase`
+/// expands into the first [`MAX_DATABASE_FIXES`] suggestions; `ReenterPassword` is left out
+/// once the gesture's `rejections` reached [`MAX_REJECTIONS`]; `EditConnection` is left out
+/// when `with_edit` is false (the inline strip sits on the form itself, as in the mock);
+/// `ReviewCertificate` needs a certificate to review (NOTES M2b ruling 10).
 pub fn fix_actions(error: &ConnectError, rejections: u8, with_edit: bool) -> Vec<FixAction> {
     let mut out = Vec::new();
-    for fix in hacivat_driver::errors::fixes_for(error.class) {
+    // ## m2b-t19-tls: the pipeline narrows the registry's list where a fix cannot help (an
+    // expired certificate offers neither a pin nor a CA; Task 14 review M1).
+    let fixes = if error.fixes.is_empty() {
+        hacivat_driver::errors::fixes_for(error.class).to_vec()
+    } else {
+        error.fixes.clone()
+    };
+    for fix in fixes {
         match fix {
             FixId::EditConnection if with_edit => out.push(FixAction::EditConnection),
             FixId::TryAgain => out.push(FixAction::TryAgain),
@@ -127,8 +137,18 @@ pub fn fix_actions(error: &ConnectError, rejections: u8, with_edit: bool) -> Vec
             ),
             FixId::SupportedVersions => out.push(FixAction::SupportedVersions),
             FixId::ConnectAnyway => out.push(FixAction::ConnectAnyway),
-            FixId::EncryptWithoutVerifying => out.push(FixAction::EncryptWithoutVerifying),
-            // M2b flows (certificate review, SSH, …) and the edit button inline.
+            // ## m2b-t19-tls
+            FixId::ReviewCertificate if error.certificate.is_some() => {
+                out.push(FixAction::ReviewCertificate);
+            }
+            FixId::ImportCa => out.push(FixAction::ImportCa),
+            // ## m2b-t21-prompts: the review opens over the error dialog only (the inline test
+            // strip has no saved connection to reconnect); it needs the changed key.
+            FixId::ReviewHostKey if with_edit && error.host_key.is_some() => {
+                out.push(FixAction::ReviewHostKey);
+            }
+            // M2b flows of other tasks (SSH), M2a's retired `EncryptWithoutVerifying` (B6) and
+            // the edit button inline.
             _ => {}
         }
     }
@@ -136,24 +156,16 @@ pub fn fix_actions(error: &ConnectError, rejections: u8, with_edit: bool) -> Vec
 }
 
 /// The buttons for `actions`: IDs `fix-edit`, `fix-retry`, `fix-reenter`, `fix-use-<i>`,
-/// `fix-versions`, `fix-anyway`, `fix-require`. The first of re-enter, try again or the first
-/// database is the primary (the mock); "Connect anyway" is a ghost (PO Q3); the rest are
-/// default buttons. "Encrypt without verifying" is never primary: it weakens the connection.
+/// `fix-versions`, `fix-anyway`, `fix-review-cert`, `fix-import-ca`. The first of re-enter, try
+/// again, the first database or Review certificate is the primary (the mocks); "Connect
+/// anyway" is a ghost (PO Q3); the rest are default buttons.
 pub fn fix_buttons(actions: &[FixAction], cx: &App) -> Vec<FixButton> {
     let mut db_index = 0;
     let mut primary_taken = false;
     actions
         .iter()
         // ## m2b-t01-interfaces: no label yet (their owners add them).
-        .filter(|action| {
-            !matches!(
-                action,
-                FixAction::ReviewCertificate
-                    | FixAction::ImportCa
-                    | FixAction::ConnectThroughSsh
-                    | FixAction::ReviewHostKey
-            )
-        })
+        .filter(|action| !matches!(action, FixAction::ConnectThroughSsh))
         .map(|action| {
             let (id, label): (SharedString, SharedString) = match action {
                 FixAction::EditConnection => {
@@ -186,19 +198,32 @@ pub fn fix_buttons(actions: &[FixAction], cx: &App) -> Vec<FixButton> {
                     "fix-anyway".into(),
                     tr(cx, ids::hv::CONN_FIX_ANYWAY, NoArgs),
                 ),
-                FixAction::EncryptWithoutVerifying => (
-                    "fix-require".into(),
-                    tr(cx, ids::hv::CONN_FIX_REQUIRE, NoArgs),
+                // ## m2b-t19-tls
+                FixAction::ReviewCertificate => (
+                    "fix-review-cert".into(),
+                    tr(cx, ids::hv::CONN_FIX_REVIEW_CERT, NoArgs),
+                ),
+                FixAction::ImportCa => (
+                    "fix-import-ca".into(),
+                    tr(cx, ids::hv::CONN_FIX_IMPORT_CA, NoArgs),
+                ),
+                // ## m2b-t21-prompts
+                FixAction::ReviewHostKey => (
+                    "fix-review-host-key".into(),
+                    tr(cx, ids::hv::CONN_FIX_REVIEW_HOST_KEY, NoArgs),
                 ),
                 // Filtered out above until their owners add the labels.
-                FixAction::ReviewCertificate
-                | FixAction::ImportCa
-                | FixAction::ConnectThroughSsh
-                | FixAction::ReviewHostKey => (SharedString::default(), SharedString::default()),
+                FixAction::ConnectThroughSsh => (SharedString::default(), SharedString::default()),
             };
             let kind = match action {
                 FixAction::ConnectAnyway => ButtonKind::Ghost,
-                FixAction::ReenterPassword | FixAction::TryAgain | FixAction::UseDatabase(_)
+                // ## m2b-t21-prompts: Review host key is primary too (the review's default is
+                // Cancel, so reviewing is safe).
+                FixAction::ReenterPassword
+                | FixAction::TryAgain
+                | FixAction::UseDatabase(_)
+                | FixAction::ReviewCertificate
+                | FixAction::ReviewHostKey
                     if !primary_taken =>
                 {
                     primary_taken = true;

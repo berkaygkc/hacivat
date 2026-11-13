@@ -369,9 +369,16 @@ pub(crate) fn contains_focus(window: &Window, cx: &App) -> bool {
     section_state(window, cx).is_some_and(|s| s.read(cx).focus.root.contains_focused(window, cx))
 }
 
-/// Whether `issue` belongs to the SSH section (it draws it; the form's top notice does not).
-pub(crate) fn owns_issue(profile: &Profile, issue: &ValidationIssue) -> bool {
-    matches!(profile.transport, TransportSpec::SshTunnel(_)) && is_ssh_issue(issue)
+// ## m2b-t19-tls (Task 20 carry-in): `cx`, and a refused SSH key path.
+/// Whether `issue` belongs to the SSH section (it draws it; the form's top notice does not). A
+/// refused path is the section's when an SSH key path is one Validate refuses (it never shows
+/// under a TLS field).
+pub(crate) fn owns_issue(profile: &Profile, issue: &ValidationIssue, cx: &App) -> bool {
+    matches!(profile.transport, TransportSpec::SshTunnel(_))
+        && (is_ssh_issue(issue)
+            || (issue.code == IssueCode::PathRefused
+                && issue.field.is_none()
+                && super::form::ssh_path_refused(profile, cx)))
 }
 
 /// The typed SSH secrets of `draft` for a save or a test of `profile` (Q23): none unless it
@@ -898,7 +905,7 @@ impl SshSection {
         let owned: Vec<ValidationIssue> = d
             .issues
             .iter()
-            .filter(|i| owns_issue(&d.draft.profile, i))
+            .filter(|i| owns_issue(&d.draft.profile, i, cx))
             .cloned()
             .collect();
         let retention = retention_index(d.draft.profile.ssh_retention);
@@ -1928,6 +1935,8 @@ pub fn issue_slug(code: &IssueCode) -> &'static str {
         IssueCode::SshKeyFileMissing => "key-file-missing",
         IssueCode::HostInvalid => "host-invalid",
         IssueCode::PortInvalid => "port-invalid",
+        // ## m2b-t19-tls
+        IssueCode::PathRefused => "path-refused",
         _ => "other",
     }
 }
@@ -1967,7 +1976,8 @@ impl SshSection {
                     hops_where(jumps, |h| h.user.trim().is_empty()),
                     Place::User,
                 ),
-                IssueCode::SshKeyFileMissing => {
+                // ## m2b-t19-tls: a refused key path, beside the key file (else the jump list).
+                IssueCode::SshKeyFileMissing | IssueCode::PathRefused => {
                     let key = self.main_auth() == AuthKind::Key;
                     (key, Vec::new(), if key { Place::Key } else { Place::Jumps })
                 }
@@ -2006,6 +2016,8 @@ fn issue_text(cx: &App, place: Place, code: &IssueCode) -> SharedString {
         (_, IssueCode::SshTooManyHops) => ids::hv::CONN_ISSUE_SSH_TOO_MANY_HOPS,
         (_, IssueCode::SshKeyFileMissing) => ids::hv::CONN_ISSUE_SSH_KEY_FILE_MISSING,
         (_, IssueCode::HostInvalid) => ids::hv::CONN_ISSUE_HOST_INVALID,
+        // ## m2b-t19-tls
+        (_, IssueCode::PathRefused) => ids::hv::CONN_ISSUE_PATH_REFUSED,
         _ => ids::hv::CONN_ISSUE_PORT_INVALID,
     };
     tr(cx, msg, NoArgs)

@@ -219,6 +219,8 @@ pub fn show_save_error(error: &SaveError, cx: &mut App) {
         SaveError::Io(_) => ids::hv::CONN_FIX_SAVE_FAILED,
         SaveError::Secret(_) => ids::hv::CONN_DLG_SAVE_SECRET,
         SaveError::NotFound => return,
+        // ## m2b-t21-prompts (fix round 1): nothing changed, and why.
+        SaveError::Unchanged(_) => ids::hv::CONN_SAVE_UNCHANGED,
     };
     let kind = if *error == SaveError::StoreReadOnly {
         ToastKind::Info
