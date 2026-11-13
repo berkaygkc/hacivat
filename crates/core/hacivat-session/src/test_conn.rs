@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::pipeline::{
     CLOSE_BUDGET, ConnectDeps, ConnectError, ConnectRequest, Interaction, Progress, Purpose,
-    StepTrace, connect, short_version,
+    SessionSecrets, StepTrace, connect, short_version,
 };
 use crate::profile::{ProfileDraft, ProfileEndpoint};
 
@@ -80,6 +80,7 @@ pub async fn test_connection_continuing(
         profile,
         password,
         ssh_secrets,
+        tls_key_passphrase,
         ..
     } = draft;
     let auth = profile.auth;
@@ -94,7 +95,13 @@ pub async fn test_connection_continuing(
         prior_rejections,
         // ## m2b-t01-interfaces: the dialog's typed SSH secrets, for Test (Q23).
         draft_ssh: ssh_secrets,
-        overlay_secrets: None,
+        // ## m2b-t14-pipeline: the dialog's TLS key passphrase, used (never stored) like the
+        // draft password. A Test never shares an SSH tunnel: the pipeline acquires with
+        // `share = false` for `Purpose::Test` (CONN-07), and the tunnel closes with the test.
+        overlay_secrets: tls_key_passphrase.map(|passphrase| SessionSecrets {
+            tls_key_passphrase: Some(passphrase),
+            ..SessionSecrets::default()
+        }),
         plaintext_consent: false,
     };
     let mut live = match connect(deps, req, ix, cancel.clone(), progress).await {

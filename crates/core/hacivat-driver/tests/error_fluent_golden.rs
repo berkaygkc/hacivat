@@ -43,6 +43,8 @@ fn args(
         ("engine", text(engine)),
         ("version", text(version)),
         ("file", text("")),
+        // ## m2b-t14-pipeline: the SSH classes name the hop.
+        ("hop_host", text("bastion.acme.io")),
     ])
 }
 
@@ -120,7 +122,8 @@ fn every_reachable_class_renders_in_en_and_tr() {
             ),
         );
         maybe_update(lang, &got);
-        assert_eq!(got.lines().count(), 2 * 26, "a title and a body per class");
+        // m2b-t14-pipeline: 26 M2a classes + tls.pin_changed, six ssh.* and auth.insecure_method.
+        assert_eq!(got.lines().count(), 2 * 34, "a title and a body per class");
         assert_eq!(got, golden(lang));
         assert!(
             !got.contains('{') && !got.contains("error-conn-"),

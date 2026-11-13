@@ -41,7 +41,9 @@
 //! refuses every channel the server opens.
 //!
 //! **Secrets back (Q17).** [`TunnelLease::take_secrets`] hands the caller the passwords and
-//! passphrases that authenticated, once, for its session overlay; never keyboard answers.
+//! passphrases that authenticated, once, for its session overlay; never keyboard answers. A
+//! lease that joins an open chain gets the ones that authenticated that chain (Task 14 review
+//! I4).
 //!
 //! `hacivat-net` has no logger: the caller logs [`TunnelLease::trusted_keys`] (keys stored
 //! without a question) and `KnownHosts::skipped_lines`.
@@ -320,6 +322,7 @@ impl TunnelManager {
             hop_count: hops.len() as u8,
             channel_timeout: req.connect_timeout,
             hops: Mutex::new(Vec::new()),
+            secrets: Mutex::new(Vec::new()),
             closing: AtomicBool::new(false),
             dead: AtomicBool::new(false),
             established: AtomicBool::new(false),
@@ -351,6 +354,8 @@ impl TunnelManager {
         }
         let trusted = std::mem::take(&mut *lock(&build.trusted));
         let secrets = std::mem::take(&mut *lock(&build.used));
+        // ## m2b-t14-pipeline: kept with the chain for the leases that join it (review I4).
+        *lock(&chain.secrets) = copy_hop_secrets(&secrets);
         // `established` first, then `dead` (M2): a session that ends in between either sees
         // `established` (and sends `Dead`) or is seen here.
         chain.established.store(true, Ordering::SeqCst);
@@ -397,6 +402,13 @@ impl TunnelManager {
         };
         slot.users += 1;
         slot.epoch += 1;
+        // ## m2b-t14-pipeline (review I4): a lease that joins without secrets of its own gets
+        // the ones that authenticated the chain (same `ChainKey`: same hops, users and auth).
+        let secrets = if secrets.is_empty() {
+            copy_hop_secrets(&lock(&slot.chain.secrets))
+        } else {
+            secrets
+        };
         Ok(TunnelLease::new(slot.chain.clone(), trusted, secrets))
     }
 }
@@ -425,6 +437,23 @@ struct Chain {
     /// Set once a lease was handed out: only then does a death send an event.
     established: AtomicBool,
     registry: Weak<Registry>,
+    // ## m2b-t14-pipeline (named exception, review I4)
+    /// The secrets that authenticated the hops, by hop: a lease that joins the chain gets a
+    /// copy (Q17: its connect's session overlay needs them for a later reconnect). Zeroized
+    /// when the chain drops; never in `Debug`.
+    secrets: Mutex<Vec<HopSecrets>>,
+}
+
+// ## m2b-t14-pipeline
+/// A copy of `secrets` (`HopSecrets` is not `Clone`: it holds secrets).
+fn copy_hop_secrets(secrets: &[HopSecrets]) -> Vec<HopSecrets> {
+    secrets
+        .iter()
+        .map(|h| HopSecrets {
+            password: h.password.clone(),
+            passphrase: h.passphrase.clone(),
+        })
+        .collect()
 }
 
 /// An authenticated hop: its session handle, a receiver that resolves when the session's task
@@ -737,8 +766,9 @@ impl TunnelLease {
     /// `TunnelRequest.secrets` (a reconnect passes them straight back): the password that was
     /// accepted and the passphrase that decrypted the accepted key, stored or typed (Q17: the
     /// session overlay keeps them in memory). Keyboard-interactive answers are never included:
-    /// they are often one-time codes and must not be replayed. Empty for a lease that joined an
-    /// open chain, and on every call after the first.
+    /// they are often one-time codes and must not be replayed. A lease that joined an open chain
+    /// gets the secrets that authenticated the chain (m2b-t14, review I4: same `ChainKey`, so
+    /// the same hops, users and methods). Empty on every call after the first.
     pub fn take_secrets(&mut self) -> Vec<HopSecrets> {
         std::mem::take(&mut self.secrets)
     }
