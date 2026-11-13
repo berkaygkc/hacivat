@@ -12,8 +12,12 @@
 //!   privilege can stop them: only the read-only transaction and settings do (L3, L4 stand
 //!   alone).
 //! - PostgreSQL fixtures live in a database of their own (`hv_t23`, dropped first and last);
-//!   MySQL's in `hv_t23_*` objects of the test database (dropped first and last). The matrix
-//!   volumes keep no trace (Q7).
+//!   MySQL's in `hv_t23_*` objects of the test database (dropped first and last). A row whose
+//!   escape would leave something on the server (a replication slot, a server file, a global
+//!   variable) is undone at teardown. The matrix volumes keep no trace (Q7).
+//! - The fixture names are fixed: two runs at once from different worktrees would drop each
+//!   other's fixtures. The Docker runs are serialised by the controller's lock wrapper
+//!   (`target/docker/run-docker-tests.sh`).
 //! - Every row of every target runs and is recorded before the test judges: one run shows the
 //!   whole matrix. Each target's results are written to the Docker artifact
 //!   `t23-bypass-<target>.tsv` (ADR 0004 `m2b-t23`). A statement that holds a password is never
@@ -59,8 +63,9 @@ const PG_PRIV: &str = "42501";
 /// The fixture large object (`lo_from_bytea(LO, 'hv')`).
 const LO: u32 = 230_023;
 
-/// The guard's canary found an assigned transaction ID after the statement: L6, a gap, the
-/// connection discarded (after the `ROLLBACK`, which undid the write).
+/// L6 found the statement's effect after it ran (the canary saw a transaction ID, or the
+/// transaction had ended) and discarded the connection. A row passes with it only when the side
+/// channel is unchanged: the `ROLLBACK` undid the effect.
 const GAP: &str = "gap";
 
 /// Rows the read-only transaction (or 1a, the extended protocol, or L6's canary with the
@@ -68,10 +73,10 @@ const GAP: &str = "gap";
 /// P37 P38, and the large-object writes (T5 review m-5). `hv_ro` may meet its missing
 /// privilege first (`42501`).
 ///
-/// Observed: the read-only transaction does **not** refuse the large-object writes
-/// (`lo_create`, `lo_from_bytea`, and for an owner `lo_put`, `lo_unlink`, `lo_import`) on
-/// PostgreSQL 13–18. They run, assign a transaction ID, and L6's canary reports the gap after
-/// the guard's `ROLLBACK` has undone them: nothing persists (the side channel), and the
+/// Observed: the read-only transaction refuses the large-object writes (`lo_create`,
+/// `lo_from_bytea`, and for an owner `lo_put`, `lo_unlink`, `lo_import`) only from PostgreSQL
+/// 16 (`25006`). On 13–15 they run, assign a transaction ID, and L6's canary reports the gap
+/// after the guard's `ROLLBACK` has undone them: nothing persists (the side channel), and the
 /// connection is discarded. `query_to_xml` cannot run a `DELETE` at all (`0A000`), so a
 /// PL/pgSQL `EXECUTE` stands for P38's dynamic SQL.
 const PG_SERVER_BLOCKED: &[Row] = &[
@@ -96,6 +101,11 @@ const PG_SERVER_BLOCKED: &[Row] = &[
     ("P7", "/* x */ END", &["1a"]),
     ("P7", "ROLLBACK", &["1a"]),
     ("P8", "CALL hv_t23_commit()", &["2D000"]),
+    (
+        "P9",
+        "DO $$ BEGIN INSERT INTO hv_t23 VALUES (9); END $$",
+        &[PG_RO],
+    ),
     ("P14", "COPY hv_t23 FROM '/etc/hostname'", &[PG_RO, PG_PRIV]),
     (
         "P26",
@@ -168,7 +178,7 @@ const PG_PRIVILEGE_ONLY: &[Row] = &[
     (
         "P32",
         "SELECT pg_logical_emit_message(true, 'hv_t23', 'x')",
-        &[PG_PRIV, PG_RO, GAP],
+        &[GAP],
     ),
     (
         "P33",
@@ -187,9 +197,8 @@ const MY_RO: &str = "1792";
 /// Table-level privilege refusals: `ER_TABLEACCESS_DENIED_ERROR`, `ER_DBACCESS_DENIED_ERROR`.
 const MY_TABLE_PRIV: &str = "1142";
 const MY_DB_PRIV: &str = "1044";
-/// Global privilege refusals: `ER_SPECIFIC_ACCESS_DENIED_ERROR`, `ER_ACCESS_DENIED_ERROR`.
+/// The global privilege refusal: `ER_SPECIFIC_ACCESS_DENIED_ERROR`.
 const MY_PRIV: &str = "1227";
-const MY_ACCESS: &str = "1045";
 
 /// Rows the read-only transaction or session setting (or the prepared-statement protocol)
 /// stops whoever runs them: M1 M2 M5 (`FOR UPDATE`, `LOCK TABLES`) M6 M8 M12 M13 M17. `hv_ro`
@@ -244,7 +253,7 @@ const MYSQL_PRIVILEGE_ONLY: &[Row] = &[
     (
         "M4",
         "SELECT a FROM hv_t23_bypass INTO OUTFILE '/tmp/hv_t23_out'",
-        &[MY_ACCESS, MY_PRIV, "1290"],
+        &[MY_PRIV],
     ),
     // MySQL 8 ends the connection when an account without SYSTEM_VARIABLES_ADMIN sends
     // `SET GLOBAL`/`SET PERSIST` as a prepared statement (finding F2, `zz_docker_m2b_findings`):
@@ -256,17 +265,13 @@ const MYSQL_PRIVILEGE_ONLY: &[Row] = &[
         &[MY_PRIV, "1064", LOST],
     ),
     // 3615: the variable is not persisted; nothing to reset, nothing reset.
-    (
-        "M10",
-        "RESET PERSIST max_connections",
-        &[MY_PRIV, "1064", "3615"],
-    ),
+    ("M10", "RESET PERSIST max_connections", &["3615"]),
     ("M10", "FLUSH TABLES", &[MY_PRIV]),
-    ("M10", "KILL {victim}", &["1095", "protocol"]),
+    ("M10", "KILL {victim}", &["1095"]),
     (
         "M11",
         "CREATE FUNCTION hv_t23_udf RETURNS STRING SONAME 'hv_t23.so'",
-        &[MY_PRIV, MY_DB_PRIV, MY_RO, "1126", "protocol"],
+        &["protocol"],
     ),
     ("M7", "CALL hv_t23_escape()", &["1370"]),
 ];
@@ -304,8 +309,14 @@ fn tro(t: &DockerTarget) -> &'static str {
 enum BypassResult {
     /// Stopped: a server code, `1a` or `protocol`.
     Blocked(String),
-    /// It ran; L6 found the escape and discarded the connection.
+    /// It ran; L6 found the escape and discarded the connection, and the side channel is
+    /// unchanged (the `ROLLBACK` undid it).
     Gap,
+    /// L6 found it and discarded the connection, **but the change was committed** (the side
+    /// channel saw it): detected, not stopped (review I2).
+    CommittedGap(String),
+    /// The connection ended (the session recovered on its own); nothing changed.
+    Lost,
     /// It ran, and nothing was left after the request.
     Neutralised,
     /// It ran and left an effect the side channel saw.
@@ -319,6 +330,10 @@ impl BypassResult {
         match self {
             BypassResult::Blocked(code) => format!("blocked {code}"),
             BypassResult::Gap => "gap (L6, connection discarded)".into(),
+            BypassResult::CommittedGap(what) => {
+                format!("committed; L6 gap (connection discarded): {what}")
+            }
+            BypassResult::Lost => "connection lost".into(),
             BypassResult::Neutralised => "ran, neutralised".into(),
             BypassResult::Escaped(what) => format!("ESCAPED: {what}"),
             BypassResult::Unknown(what) => format!("unknown: {what}"),
@@ -341,32 +356,42 @@ fn outcome(reply: &Reply) -> String {
     }
 }
 
-/// Whether `got` is a stop: a server code (an SQLSTATE or a vendor code), `1a` or `protocol`.
+/// Whether `got` is a stop: a server code (an SQLSTATE or a vendor code), `1a` or `protocol`
+/// (never `ran`, `gap` or `lost`, which have results of their own).
 fn is_code(got: &str) -> bool {
-    !got.is_empty() && got.chars().all(|c| c.is_ascii_alphanumeric()) && got != "ran"
+    !got.is_empty()
+        && got.chars().all(|c| c.is_ascii_alphanumeric())
+        && !["ran", GAP, LOST].contains(&got)
 }
 
 /// What one row came to, whatever it was expected to do: `Escaped` when the side channel
 /// changed, `Gap`, `Neutralised` (it ran and left nothing), `Blocked` (a server code, `1a`,
 /// `protocol`), else `Unknown`.
 fn judge(reply: &Reply, before: &str, after: &str) -> BypassResult {
-    if before != after {
-        return BypassResult::Escaped(format!("side channel changed: {before} → {after}"));
-    }
     let got = outcome(reply);
+    if before != after {
+        let change = format!("side channel changed: {before} → {after}");
+        return if got == GAP {
+            BypassResult::CommittedGap(change)
+        } else {
+            BypassResult::Escaped(change)
+        };
+    }
     match got.as_str() {
-        "gap" => BypassResult::Gap,
+        GAP => BypassResult::Gap,
+        LOST => BypassResult::Lost,
         "ran" => BypassResult::Neutralised,
         _ if is_code(&got) => BypassResult::Blocked(got),
         _ => BypassResult::Unknown(got),
     }
 }
 
-/// Whether a stopped row's result is one its row allows.
+/// Whether a stopped row's result is one its row allows (a committed gap never is).
 fn stopped(result: &BypassResult, allowed: &[&str]) -> bool {
     match result {
         BypassResult::Blocked(code) => allowed.contains(&code.as_str()),
-        BypassResult::Gap => allowed.contains(&"gap"),
+        BypassResult::Gap => allowed.contains(&GAP),
+        BypassResult::Lost => allowed.contains(&LOST),
         _ => false,
     }
 }
@@ -378,20 +403,12 @@ fn judge_neutralised(
     after: &str,
     lingering: &[String],
 ) -> BypassResult {
-    if before != after {
-        return BypassResult::Escaped(format!("side channel changed: {before} → {after}"));
-    }
     if !lingering.is_empty() {
         return BypassResult::Escaped(format!("lingering: {}", lingering.join("; ")));
     }
-    let got = outcome(reply);
-    if got == "ran" {
-        BypassResult::Neutralised
-    } else if is_code(&got) {
-        BypassResult::Blocked(got)
-    } else {
-        BypassResult::Unknown(got)
-    }
+    // A gap (committed or not) or a lost connection keeps its own result, which fails a
+    // neutralised row.
+    judge(reply, before, after)
 }
 
 /// One target's recorded rows and what failed.
@@ -560,6 +577,39 @@ impl Ro {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The lines
+
+/// The lines of `engine` a bypass test runs (the twins with a `-` in their id are left out):
+/// those of the active set. Under the full set every one of `expected` must be there (review
+/// m5: a missing line fails, and a run of none fails); a line a narrower set leaves out skips
+/// with its line on stderr (Q6).
+fn lines_of(engine: DbmsKind, expected: &[&str]) -> Vec<DockerTarget> {
+    let found: Vec<DockerTarget> = targets(Some(engine))
+        .into_iter()
+        .filter(|t| !t.id.contains('-'))
+        .collect();
+    let set = std::env::var("HACIVAT_DOCKER_SET").ok();
+    for id in expected {
+        if !found.iter().any(|t| t.id == *id) {
+            assert!(
+                !must_exist(set.as_deref()),
+                "{id} is missing from the {} set",
+                set.as_deref().unwrap_or("full")
+            );
+            eprintln!(
+                "skip {id}: not in set {}",
+                set.as_deref().unwrap_or("<all>")
+            );
+        }
+    }
+    assert!(
+        !must_exist(set.as_deref()) || !found.is_empty(),
+        "no {engine:?} line ran"
+    );
+    found
+}
+
+// ---------------------------------------------------------------------------------------------
 // PostgreSQL
 
 const PG_DB: &str = "hv_t23";
@@ -569,6 +619,8 @@ const PG_DB: &str = "hv_t23";
 /// `public` revoked from `PUBLIC` as the matrix does.
 async fn pg_fixture(t: &DockerTarget) {
     let mut a = admin(t).await;
+    // What an interrupted earlier run may have left.
+    pg_undo_escapes(t, &mut a).await;
     batch(
         &mut a,
         &t.id,
@@ -612,8 +664,11 @@ async fn pg_fixture(t: &DockerTarget) {
     d.close().await;
 }
 
-async fn pg_drop_fixture(t: &DockerTarget) {
+/// Drops the fixture database and undoes what an escaped row would leave outside it; returns
+/// what it had to undo (each one a failure: the row escaped).
+async fn pg_drop_fixture(t: &DockerTarget) -> Vec<String> {
     let mut a = admin(t).await;
+    let undone = pg_undo_escapes(t, &mut a).await;
     batch(
         &mut a,
         &t.id,
@@ -621,6 +676,42 @@ async fn pg_drop_fixture(t: &DockerTarget) {
     )
     .await;
     a.close().await;
+    undone
+}
+
+/// The server files P14 (`COPY TO`) and P33 (`lo_export`) would write.
+const PG_SERVER_FILES: [&str; 2] = ["/tmp/hv_t23_copy", "/tmp/hv_t23_lo"];
+
+/// Undoes what an escaped row leaves outside the fixture database (review m6), as the
+/// superuser: P31's replication slot (a slot keeps WAL forever, and `DROP DATABASE` does not
+/// drop a physical one) and the server files of P14 and P33. Returns what it found.
+async fn pg_undo_escapes(t: &DockerTarget, a: &mut LiveConnection) -> Vec<String> {
+    let mut found = Vec::new();
+    let slot = "SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'hv_t23_slot'";
+    if count(a, slot).await > 0 {
+        batch(a, &t.id, "SELECT pg_drop_replication_slot('hv_t23_slot')").await;
+        found.push(format!(
+            "{}: the replication slot hv_t23_slot (dropped)",
+            t.id
+        ));
+    }
+    for file in PG_SERVER_FILES {
+        let exists = scalar(
+            a,
+            &format!("SELECT pg_stat_file('{file}', true) IS NOT NULL"),
+        )
+        .await;
+        if exists == "t" {
+            batch(
+                a,
+                &t.id,
+                &format!("COPY (SELECT 1) TO PROGRAM 'rm -f {file}'"),
+            )
+            .await;
+            found.push(format!("{}: the server file {file} (removed)", t.id));
+        }
+    }
+    found
 }
 
 /// What the admin side channel sees in `hv_t23`: the table's rows, the relations of `public`,
@@ -737,7 +828,9 @@ async fn pg_bypass_rows(t: &DockerTarget) -> Record {
     assert_eq!(scalar(&mut a, "SELECT 1").await, "1", "{} P11", t.id);
     ro.close().await;
     a.close().await;
-    pg_drop_fixture(t).await;
+    for undone in pg_drop_fixture(t).await {
+        record.fail(format!("escaped: {undone}"));
+    }
     record
 }
 
@@ -747,12 +840,11 @@ async fn pg_bypass_rows_blocked_without_classifier() {
     if !docker_enabled() {
         return;
     }
-    // pg13–pg18 of the active set (Q6); the TLS, auth and Turkish twins are pg17 again.
-    let lines: Vec<DockerTarget> = targets(Some(DbmsKind::Postgres))
-        .into_iter()
-        .filter(|t| !t.id.contains('-'))
-        .collect();
-    assert!(!lines.is_empty(), "the active set has no PostgreSQL line");
+    // pg13–pg18 (Q6); the TLS, auth and Turkish twins are pg17 again.
+    let lines = lines_of(
+        DbmsKind::Postgres,
+        &["pg13", "pg14", "pg15", "pg16", "pg17", "pg18"],
+    );
     let mut failures = Vec::new();
     for t in lines {
         let record = pg_bypass_rows(&t).await;
@@ -858,6 +950,7 @@ async fn mysql_bypass_rows(t: &DockerTarget, judged: bool) -> Record {
     mysql_fixture(t).await;
     let mut record = Record::default();
     let mut a = admin(t).await;
+    let max_connections = scalar(&mut a, "SELECT @@global.max_connections").await;
     let required = |ok: bool, result: &BypassResult| {
         if judged {
             ok
@@ -880,14 +973,13 @@ async fn mysql_bypass_rows(t: &DockerTarget, judged: bool) -> Record {
         mysql_server_blocked(t, &ro, user, judged, &mut a, &mut record).await;
         // The brief's M9 and M5: a session set back to read-write is read-only again at the
         // next request (the test account has `CREATE`); a user lock does not survive it.
+        // Judged by the side channel (review m1): `hv_m9` must not exist afterwards.
         let _ = ro.try_row("SET SESSION TRANSACTION READ WRITE").await;
-        let m9 = ro.run("CREATE TABLE hv_m9 (a int)").await;
-        let result = if m9.is_err() {
-            BypassResult::Blocked(outcome(&m9))
-        } else {
-            BypassResult::Escaped("CREATE TABLE ran".into())
-        };
-        let ok = required(m9.is_err(), &result);
+        let before = mysql_snapshot(&mut a, t).await;
+        let m9 = ro.try_row("CREATE TABLE hv_m9 (a int)").await;
+        let after = mysql_snapshot(&mut a, t).await;
+        let result = judge(&m9, &before, &after);
+        let ok = required(stopped(&result, &[MY_RO, MY_TABLE_PRIV]), &result);
         record.row(
             t,
             user,
@@ -950,9 +1042,8 @@ async fn mysql_bypass_rows(t: &DockerTarget, judged: bool) -> Record {
     assert_eq!(scalar(&mut a, "SELECT 1").await, "1", "{} M10 KILL", t.id);
 
     // T18 review n-3: an account may always change its own password, and L5 cannot prevent it;
-    // in a guarded read-only session every form must be refused (`1792`, or `1227`) or caught
-    // (a gap): MySQL's `USER()` form, the `CURRENT_USER()` one MariaDB also parses, and
-    // `SET PASSWORD`.
+    // in a guarded read-only session every form must be refused (`1792`) or caught (a gap):
+    // MySQL's `USER()` form, the `CURRENT_USER()` one MariaDB also parses, and `SET PASSWORD`.
     // The statement holds a password, so neither it nor its server message is printed. The
     // side channel: `hv_ro` still signs in with the matrix password.
     for form in [
@@ -962,31 +1053,21 @@ async fn mysql_bypass_rows(t: &DockerTarget, judged: bool) -> Record {
     ] {
         let changed = "hv_t23_changed";
         let reply = ro.try_row(&format!("{form} '{changed}'")).await;
-        let got = outcome(&reply);
         let mut p = profile_for(t, auto_or_require(t)).user("hv_ro");
         p.read_only = true;
         let still = connect(&deps(), req(p), Interaction::Headless, token(), progress()).await;
         let result = match still {
             Ok(live) => {
                 live.close().await;
-                if got == "gap" {
-                    BypassResult::Gap
-                } else if is_code(&got) {
-                    BypassResult::Blocked(got)
-                } else {
-                    BypassResult::Unknown(got)
-                }
+                // Unchanged: hv_ro still signs in with the matrix password.
+                judge(&reply, "", "")
             }
             Err(_) => {
                 restore_hv_ro_password(t, changed).await;
                 BypassResult::Escaped("the password changed (restored)".into())
             }
         };
-        let ok = required(
-            matches!(&result, BypassResult::Gap)
-                || matches!(&result, BypassResult::Blocked(code) if code == MY_RO || code == MY_PRIV),
-            &result,
-        );
+        let ok = required(stopped(&result, &[MY_RO, GAP]), &result);
         record.row(t, "hv_ro", "n-3", &format!("{form} '…'"), result, ok);
     }
     ro.close().await;
@@ -1013,24 +1094,60 @@ async fn mysql_bypass_rows(t: &DockerTarget, judged: bool) -> Record {
             &format!("SELECT COUNT(*) FROM hv_t23_bypass WHERE a = {value}"),
         )
         .await;
+        // The side channel decides (review I2): a gap after a committed row is detected, not
+        // stopped.
         let result = match (got.as_str(), wrote) {
-            ("gap", _) => BypassResult::Gap,
+            (GAP, 0) => BypassResult::Gap,
+            (GAP, n) => BypassResult::CommittedGap(format!("{n} row committed")),
             (_, 0) if is_code(&got) => BypassResult::Blocked(got),
             (_, 0) => BypassResult::Unknown(got),
             _ => BypassResult::Escaped(format!("committed a row ({got}); the label is guarded")),
         };
-        // The first must be caught; the second is the documented residual (L5 only).
+        // The first must be caught by L6 (stopped or detected); the second is the documented
+        // residual (L5 only).
         let ok = if value == 100 {
-            required(result == BypassResult::Gap, &result)
+            required(
+                matches!(result, BypassResult::Gap | BypassResult::CommittedGap(_)),
+                &result,
+            )
         } else {
             !matches!(result, BypassResult::Unknown(_))
         };
         record.row(t, &t.user, "M7/I-2", sql, result, ok);
     }
     ro.close().await;
+    // A `SET GLOBAL`/`SET PERSIST` that escaped is undone (review m6): only an account that could
+    // change it can put it back, and `hv_ro` is the one that tried.
+    let now = scalar(&mut a, "SELECT @@global.max_connections").await;
+    if now != max_connections {
+        restore_max_connections(t, &max_connections).await;
+        record.fail(format!(
+            "{}: max_connections escaped ({max_connections} → {now}; restored)",
+            t.id
+        ));
+    }
     a.close().await;
     mysql_drop_fixture(t).await;
     record
+}
+
+/// Puts `max_connections` back to `value` and drops a persisted setting of it, as `hv_ro` on a
+/// read-write connection (it changed it, so it may), over `COM_QUERY`.
+async fn restore_max_connections(t: &DockerTarget, value: &str) {
+    let p = profile_for(t, auto_or_require(t)).user("hv_ro");
+    let mut live = connect(&deps(), req(p), Interaction::Headless, token(), progress())
+        .await
+        .unwrap_or_else(|e| panic!("{}: hv_ro to restore: {:?}", t.id, e.class));
+    batch(
+        &mut live,
+        &t.id,
+        &format!("SET GLOBAL max_connections = {value}"),
+    )
+    .await;
+    if t.engine == DbmsKind::MySql {
+        batch(&mut live, &t.id, "RESET PERSIST IF EXISTS max_connections").await;
+    }
+    live.close().await;
 }
 
 /// Puts `hv_ro`'s matrix password back after a row changed it to `changed` (as `hv_ro` itself,
@@ -1057,10 +1174,8 @@ async fn mysql_bypass_rows_blocked_without_classifier() {
     if !docker_enabled() {
         return;
     }
-    let mysql = targets(Some(DbmsKind::MySql));
-    assert!(!mysql.is_empty(), "the active set has no MySQL line");
     let mut failures = Vec::new();
-    for t in mysql {
+    for t in lines_of(DbmsKind::MySql, &["mysql80", "mysql84"]) {
         let record = mysql_bypass_rows(&t, true).await;
         record.write(&t);
         failures.extend(record.failures);
@@ -1077,7 +1192,10 @@ async fn mariadb_bypass_rows_recorded() {
     // Q32: every row has a result (none `Unknown`); ADR 0004 records them. The label stays
     // guarded (C19).
     let mut failures = Vec::new();
-    for t in targets(Some(DbmsKind::MariaDb)) {
+    for t in lines_of(
+        DbmsKind::MariaDb,
+        &["mariadb106", "mariadb1011", "mariadb114"],
+    ) {
         let record = mysql_bypass_rows(&t, false).await;
         record.write(&t);
         failures.extend(record.failures);

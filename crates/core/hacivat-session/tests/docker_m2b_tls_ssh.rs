@@ -78,7 +78,7 @@ async fn pins_in_auto(t: &DockerTarget, path: Path) {
 async fn connect_mysql_verify_ca(id: &str) -> Option<Result<LiveConnection, ConnectError>> {
     let t = require_target(id)?;
     let mut p = profile_for(&t, TlsMode::VerifyCa);
-    p.tls.ca_file = Some(hacivat_testkit::artifact("mysql84-ca.pem"));
+    p.tls.ca_file = Some(hacivat_testkit::artifact(&format!("{id}-ca.pem")));
     Some(connect_ix(p, Interaction::Headless).await)
 }
 

@@ -26,7 +26,9 @@ use hacivat_net::TlsMode;
 use hacivat_proto::DbmsKind;
 use hacivat_session::LiveState;
 use hacivat_session::pipeline::Interaction;
-use hacivat_session::session::{CancelOutcome, ExecErrorKind, Request, SessionKind, SessionState};
+use hacivat_session::session::{
+    CancelOutcome, ExecErrorKind, Request, SessionKind, SessionManager, SessionState,
+};
 use hacivat_testkit::chaos::ChaosProxy;
 use hacivat_testkit::require_target;
 
@@ -38,8 +40,34 @@ fn rw(t: &hacivat_testkit::DockerTarget) -> hacivat_session::profile::Profile {
 // ---------------------------------------------------------------------------------------------
 // Cancel (E3)
 
-/// Cancels `sql` (a long sleep) on `s` after `after`: `Cancelled` within 1 s, the request
-/// ends `Cancelled`, and the session runs the next statement.
+/// Waits (a condition, 20 ms steps, 10 s at most) until request `seq` has been running on `s`
+/// for `d`, by the session's own `Busy { since }`: the scenario's time (MySQL pre-opens its
+/// `KILL QUERY` side connection 500 ms into a statement, Q37), never a guess.
+async fn running_for(
+    s: &hacivat_session::session::SessionHandle,
+    seq: u64,
+    d: std::time::Duration,
+    what: &str,
+) {
+    let deadline = Instant::now() + secs(10);
+    loop {
+        if let SessionState::Busy { req, since } = s.state().borrow().state.clone()
+            && req == seq
+            && since.elapsed() >= d
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what}: request {seq} is not running: {:?}",
+            s.state().borrow().state
+        );
+        tokio::time::sleep(ms(20)).await;
+    }
+}
+
+/// Cancels `sql` (a long sleep) on `s` once it has run for `after`: `Cancelled` within 1 s, the
+/// request ends `Cancelled`, and the session runs the next statement.
 async fn cancels_within_a_second(
     s: &hacivat_session::session::SessionHandle,
     sql: &str,
@@ -47,7 +75,7 @@ async fn cancels_within_a_second(
     what: &str,
 ) {
     let q = s.submit(user_exec(sql));
-    tokio::time::sleep(after).await;
+    running_for(s, q.seq, after, what).await;
     let start = Instant::now();
     let outcome = q.cancel(s).await.expect("the cancel answers");
     let took = start.elapsed();
@@ -127,7 +155,7 @@ async fn cancel_matrix() {
 /// that answer; the session runs the next statement.
 async fn sleep_only_ends_at_once(s: &hacivat_session::session::SessionHandle, what: &str) {
     let q = s.submit(user_exec("SELECT SLEEP(60)"));
-    tokio::time::sleep(ms(600)).await;
+    running_for(s, q.seq, ms(600), what).await;
     let start = Instant::now();
     let outcome = q.cancel(s).await.expect("the cancel answers");
     let reply = tokio::time::timeout(secs(1), q.reply)
@@ -230,7 +258,8 @@ async fn insert_killed_mid_flight_reports_outcome_unknown_without_duplicate() {
     let q = on.s.submit(user_exec(
         "INSERT INTO hv_t23_insert (v) SELECT SLEEP(1) + 1",
     ));
-    tokio::time::sleep(ms(300)).await;
+    // Into the statement's second on the server; the assertions hold wherever the cut lands.
+    running_for(&on.s, q.seq, ms(300), "mysql84 INSERT").await;
     chaos.cut(secs(2));
     let e = q
         .reply
@@ -351,11 +380,15 @@ async fn ro_fatal_on_the_guards_begin_reconnects() {
     let mut p = profile_via(&t, proxy.addr);
     p.read_only = true;
     p.application_name = app.clone();
+    // No keep-alive: a ping during the hold would take the FATAL meant for the `BEGIN` (m8).
+    p.keepalive_s = Some(0);
+    let mut a = admin(&t).await;
+    // The write below must stay refused; a table an escaped one left behind goes first and last.
+    batch(&mut a, &t.id, "DROP TABLE IF EXISTS hv_t23_p1").await;
     let on = OnManager::connect(deps(), p).await;
     let mut ev = on.m.events();
     assert!(run(&on.s, "SELECT 1").await.is_ok());
     proxy.hold();
-    let mut a = admin(&t).await;
     batch(
         &mut a,
         &t.id,
@@ -386,13 +419,14 @@ async fn ro_fatal_on_the_guards_begin_reconnects() {
     assert!(run(&s, "SELECT 1").await.is_ok());
     // Still read-only.
     let write = run(&s, "CREATE TABLE hv_t23_p1 (a int)").await;
+    on.shutdown().await;
+    batch(&mut a, &t.id, "DROP TABLE IF EXISTS hv_t23_p1").await;
+    a.close().await;
     assert!(
         matches!(&write, Err(e) if e.kind == ExecErrorKind::Db),
         "{:?}",
         write.map_err(|e| e.kind)
     );
-    on.shutdown().await;
-    a.close().await;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -419,10 +453,10 @@ async fn a_released_pooled_session_is_parked_and_reused() {
             .expect("a pooled session");
         assert!(run(&first, "SELECT 1").await.is_ok(), "{}", t.id);
         let released = (*first).clone();
-        let from = released.state().borrow().generation;
+        assert_eq!(sessions.parked_count(), 0, "{}", t.id);
         drop(first);
-        // Parked: reset (busy, then idle), never broken and closed.
-        parked_after_reset(&released, from, &t.id).await;
+        // Parked: reset, never broken and closed.
+        wait_parked(&sessions, 1, &released, &t.id).await;
         let again = sessions.pooled(kind).await.expect("a pooled session");
         assert_eq!(
             again.id(),
@@ -489,26 +523,25 @@ async fn the_schema_probe_reads_the_servers_answer() {
 // ---------------------------------------------------------------------------------------------
 // Carried: an SSH chain's death closes the parked pooled sessions (T17 R2, review M6)
 
-/// Waits until released session `s` (its state generation `from` before the release) is reset
-/// and back in the pool: the reset request ran (busy, then idle) and the release task parked
-/// it, which follows the reset's reply with no wait in between (a bounded 200 ms covers the
-/// task's scheduling).
-async fn parked_after_reset(s: &hacivat_session::session::SessionHandle, from: u64, what: &str) {
+/// Waits (a condition, 50 ms steps, 10 s at most) until the pool holds `parked` released
+/// sessions: a release resets its session, then parks it (review I1: no fixed sleep). `s` is
+/// the released session, whose state the failure message shows.
+async fn wait_parked(
+    sessions: &SessionManager,
+    parked: usize,
+    s: &hacivat_session::session::SessionHandle,
+    what: &str,
+) {
     let deadline = Instant::now() + secs(10);
-    loop {
-        let now = s.state().borrow().clone();
-        if now.generation >= from + 2 && now.state == SessionState::Idle {
-            break;
-        }
+    while sessions.parked_count() != parked {
         assert!(
             Instant::now() < deadline,
-            "{what}: the release's reset did not end: {:?} (generation {} from {from})",
-            now.state,
-            now.generation
+            "{what}: the released session was not parked (pool {}, session {:?})",
+            sessions.parked_count(),
+            s.state().borrow().state
         );
         tokio::time::sleep(ms(50)).await;
     }
-    tokio::time::sleep(ms(200)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -554,17 +587,16 @@ async fn ssh_death_closes_parked_pooled_sessions() {
             .expect("a pooled session");
         assert!(run(&pooled, "SELECT 1").await.is_ok(), "{}", t.id);
         let parked = (*pooled).clone();
-        let from = parked.state().borrow().generation;
         drop(pooled);
-        parked_after_reset(&parked, from, &t.id).await;
+        wait_parked(&sessions, 1, &parked, &t.id).await;
         let again = sessions
             .pooled(kind.clone())
             .await
             .expect("a pooled session");
         assert_eq!(again.id(), parked.id(), "{}: the pool parks", t.id);
-        let from = parked.state().borrow().generation;
+        assert_eq!(sessions.parked_count(), 0, "{}", t.id);
         drop(again);
-        parked_after_reset(&parked, from, &t.id).await;
+        wait_parked(&sessions, 1, &parked, &t.id).await;
         assert_eq!(sessions.open_count(), 2, "{}", t.id);
         proxy.cut(secs(3));
         // The chain died: the parked session is closed (never handed out again) and the

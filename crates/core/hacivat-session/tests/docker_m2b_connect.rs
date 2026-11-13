@@ -122,9 +122,15 @@ async fn two_profiles_share_one_ssh_session() {
     let deps = matrix_deps();
     let tunnels = deps.tunnels.clone();
     let m = manager_over(deps);
+    // pg17's backend carries a name of its own, so the admin side sees it end.
+    let app = unique("hv_t23_share");
     let profiles: Vec<Arc<_>> = [&pg, &my]
         .into_iter()
-        .map(|t| Arc::new(profile_on(t, path, mode_on(t, path)).expect("sshd-a is in the set")))
+        .map(|t| {
+            let mut p = profile_on(t, path, mode_on(t, path)).expect("sshd-a is in the set");
+            p.application_name = app.clone();
+            Arc::new(p)
+        })
         .collect();
     for p in &profiles {
         connect_on(&m, p).await;
@@ -140,8 +146,20 @@ async fn two_profiles_share_one_ssh_session() {
         let reply = run(&default_session(&m, p.id), "SELECT 1").await;
         assert!(reply.is_ok(), "{}: {:?}", t.id, reply.map_err(|e| e.kind));
     }
-    // One profile leaving keeps the session for the other.
+    // One profile leaving keeps the session for the other: wait until pg17's connection has
+    // really closed on the server (its lease goes with it), then the shared session is still up.
     m.disconnect(profiles[0].id);
+    let mut a = admin(&pg).await;
+    let gone = format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = '{app}'");
+    let deadline = std::time::Instant::now() + secs(10);
+    while count(&mut a, &gone).await != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pg17's connection did not close"
+        );
+        tokio::time::sleep(ms(50)).await;
+    }
+    a.close().await;
     assert_eq!(tunnels.sessions_open(), 1);
     let reply = run(&default_session(&m, profiles[1].id), "SELECT 1").await;
     assert!(reply.is_ok(), "{}: {:?}", my.id, reply.map_err(|e| e.kind));

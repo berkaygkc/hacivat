@@ -654,6 +654,13 @@ impl SessionManager {
         self.lock().sessions.len()
     }
 
+    // ## m2b-t23-conformance (named exception, controller ruling I1)
+    /// Released pooled sessions parked now, waiting to be borrowed again: what a test waits on
+    /// instead of guessing when a release's reset has parked its session.
+    pub fn parked_count(&self) -> usize {
+        self.lock().idle.values().map(Vec::len).sum()
+    }
+
     /// Closes every session and drops the overlay (disconnect, `forget`, quit). A running
     /// request is deactivated first, an open transaction is rolled back, and a connect still
     /// in flight is cancelled and never registers a session or brings the overlay back.

@@ -975,22 +975,45 @@ statement per request; MySQL never re-sends an unpreparable statement as text).
   show nothing left (no channel, holdable cursor or SQL-level prepared statement; the read-only
   default, `standard_conforming_strings` and `search_path` as before; MySQL's read-only setting,
   no user variable, the pinned `sql_mode`), and a write must still be refused (`25006`) or the
-  test account's DDL (`1792`).
-- A row passes only with the outcome its row allows (the exact SQLSTATE or vendor code, `1a`,
-  `protocol`, or `gap`) **and** an unchanged side channel. MariaDB rows are recorded, not judged
-  (none may stay unknown, Q32); its label stays guarded (C19), and the test asserts that.
+  test account's DDL (`1792`). The brief's M9 line (`SET SESSION TRANSACTION READ WRITE`, then
+  `CREATE TABLE`) is judged by the snapshot too, and allows only `1792` or `1142`.
+- **A stopped row passes only with the outcome its row allows** (the exact SQLSTATE or vendor
+  code, `1a`, `protocol`, `gap` or `lost`, each only where it was observed) **and an unchanged
+  side channel**. So a `gap` that passes is one whose effect the `ROLLBACK` undid. A gap after
+  which the side channel shows a committed change is its own outcome, **committed; L6 gap**
+  (detected, not stopped): it is never recorded as `gap`. The owner's `CALL` rows (T18 I-2) are
+  not stopped rows; they record what L6 detected and what it missed (below). MariaDB rows are
+  recorded, not judged (none may stay unknown, Q32); its label stays guarded (C19), and the test
+  asserts that.
 - Fixtures never touch the matrix's own objects (Q7): PostgreSQL's live in a database of their
   own, `hv_t23`, dropped first and last; MySQL's are `hv_t23_*` objects of the test database,
-  dropped first and last. `hv_ro` is (re)created only when missing, as Task 18 does.
-- The rows run on PostgreSQL 13–18, MySQL 8.0/8.4 and MariaDB 10.6/10.11/11.4 directly, and the
-  server-blocked rows of the `pr` lines (pg17, mysql84) again **through `sshd-a`**. Each target's
-  results go to the Docker artifact `t23-bypass-<target>.tsv`; the tables below are those of the
-  final `--set full` run. SQLite has its own test without a server (below).
+  dropped first and last. `hv_ro` is (re)created only when missing, as Task 18 does. What an
+  escaped row would leave outside them is undone at teardown, and the escape fails the test:
+  P31's replication slot (`DROP DATABASE` does not drop a physical slot), the server files of
+  P14 and P33, and a changed `max_connections` (set back, and `RESET PERSIST`, by the account
+  that changed it). An M4 `INTO OUTFILE` file could not be removed by SQL; it would fail the row
+  (and every later run, as the file then exists). The fixture names are fixed, so two runs at once
+  would collide; the controller's lock wrapper serialises the Docker runs.
+- Under `--set full` every line (PostgreSQL 13–18, MySQL 8.0/8.4, MariaDB 10.6/10.11/11.4) must be
+  present, or the test fails; a narrower set skips its missing lines with a line on stderr (Q6).
+- **Paths (accepted narrowing).** The rows run on every line directly; only the server-blocked
+  rows of the `pr` lines (pg17, mysql84) run again **through `sshd-a`**. Across the suite, the
+  connect matrix runs every TCP target directly and through `sshd-a`, and the cancel, TLS-pin and
+  insecure-auth tests run each of their targets on both paths (the shared-session test is
+  SSH-only by nature); the terminated-backend test runs through `sshd-a` on the `pr` lines
+  only; the INSERT-cut and outage tests run directly only (their `ChaosProxy` sits in front of the
+  database's published port), and SSH death is covered by the parked-session test. This narrows
+  the brief's "every TCP test runs twice"; the controller accepted it (fix round 1, m4).
+- Each target's results go to the Docker artifact `t23-bypass-<target>.tsv`; the tables below
+  are generated from those of the final `--set full` run. SQLite has its own test without a
+  server (below).
 
 Cell values: a server code (SQLSTATE or vendor code), `1a`, `protocol`, `gap` (L6 found the
-statement's effect after it ran, after the `ROLLBACK` had undone it, and discarded the
-connection), `neutralised` (it ran; nothing was left), `lost` (the connection ended; F2 below),
-**escaped** (a side effect persisted).
+statement's effect after it ran and discarded the connection; the side channel shows nothing
+persisted, because the `ROLLBACK` undid it), **committed; L6 gap** (L6 found it and discarded the
+connection, but the change had been committed), `neutralised` (it ran; nothing was left), `lost`
+(the connection ended and the session recovered; nothing changed; F2 below), **escaped** (a side
+effect persisted and nothing caught it).
 
 **PostgreSQL** (pg13 = 13, pg14 = 14, pg15 = 15, pg16 = 16, pg17 = 17, pg18 = 18)
 
@@ -1009,6 +1032,7 @@ connection), `neutralised` (it ran; nothing was left), `lost` (the connection en
 | P7 | hv_ro | `/* x */ END` | 1a | 1a | 1a | 1a | 1a | 1a |
 | P7 | hv_ro | `ROLLBACK` | 1a | 1a | 1a | 1a | 1a | 1a |
 | P8 | hv_ro | `CALL hv_t23_commit()` | 2D000 | 2D000 | 2D000 | 2D000 | 2D000 | 2D000 |
+| P9 | hv_ro | `DO $$ BEGIN INSERT INTO hv_t23 VALUES (9); END $$` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
 | P14 | hv_ro | `COPY hv_t23 FROM '/etc/hostname'` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
 | P26 | hv_ro | `CREATE TEMP TABLE hv_t23_tmp (a int)` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
 | P37 | hv_ro | `SELECT nextval('hv_t23_seq')` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
@@ -1035,6 +1059,7 @@ connection), `neutralised` (it ran; nothing was left), `lost` (the connection en
 | P7 | hv_test | `/* x */ END` | 1a | 1a | 1a | 1a | 1a | 1a |
 | P7 | hv_test | `ROLLBACK` | 1a | 1a | 1a | 1a | 1a | 1a |
 | P8 | hv_test | `CALL hv_t23_commit()` | 2D000 | 2D000 | 2D000 | 2D000 | 2D000 | 2D000 |
+| P9 | hv_test | `DO $$ BEGIN INSERT INTO hv_t23 VALUES (9); END $$` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
 | P14 | hv_test | `COPY hv_t23 FROM '/etc/hostname'` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
 | P26 | hv_test | `CREATE TEMP TABLE hv_t23_tmp (a int)` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
 | P37 | hv_test | `SELECT nextval('hv_t23_seq')` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
@@ -1074,7 +1099,7 @@ connection), `neutralised` (it ran; nothing was left), `lost` (the connection en
 | P34 | hv_ro | `CHECKPOINT` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
 | P34 | hv_ro | `SELECT pg_stat_reset()` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
 
-Through `sshd-a` (pg17): 52 server-blocked rows, 0 different from the direct leg.
+Through `sshd-a` (pg17): 54 server-blocked rows, 0 different from the direct leg.
 
 **MySQL** (mysql80 = 8.0, mysql84 = 8.4)
 
@@ -1125,7 +1150,7 @@ Through `sshd-a` (pg17): 52 server-blocked rows, 0 different from the direct leg
 | n-3 | hv_ro | `ALTER USER USER() IDENTIFIED BY '…'` | 1792 | 1792 |
 | n-3 | hv_ro | `ALTER USER CURRENT_USER() IDENTIFIED BY '…'` | 1792 | 1792 |
 | n-3 | hv_ro | `SET PASSWORD = '…'` | gap | gap |
-| M7/I-2 | hv_test | `CALL hv_t23_escape()` | gap | gap |
+| M7/I-2 | hv_test | `CALL hv_t23_escape()` | **committed; L6 gap** | **committed; L6 gap** |
 | M7/I-2 | hv_test | `CALL hv_t23_escape_ro()` | **escaped** (committed; guarded) | **escaped** (committed; guarded) |
 
 Through `sshd-a` (mysql84): 24 server-blocked rows, 0 different from the direct leg.
@@ -1179,8 +1204,8 @@ Through `sshd-a` (mysql84): 24 server-blocked rows, 0 different from the direct 
 | n-3 | hv_ro | `ALTER USER USER() IDENTIFIED BY '…'` | 1064 | 1064 | 1064 |
 | n-3 | hv_ro | `ALTER USER CURRENT_USER() IDENTIFIED BY '…'` | 1792 | 1792 | 1792 |
 | n-3 | hv_ro | `SET PASSWORD = '…'` | gap | gap | gap |
-| M7/I-2 | hv_test | `CALL hv_t23_escape()` | gap | gap | gap |
-| M7/I-2 | hv_test | `CALL hv_t23_escape_ro()` | gap | gap | gap |
+| M7/I-2 | hv_test | `CALL hv_t23_escape()` | **committed; L6 gap** | **committed; L6 gap** | **committed; L6 gap** |
+| M7/I-2 | hv_test | `CALL hv_t23_escape_ro()` | **committed; L6 gap** | **committed; L6 gap** | **committed; L6 gap** |
 
 **SQLite (no server; runs on every PR).** A read-only session over a fresh file refused `INSERT`
 (L9), `ATTACH '<dir>/n.db'` and `VACUUM INTO '<dir>/c.db'` (L2), `PRAGMA query_only = 0` (L1),
@@ -1194,11 +1219,13 @@ database is byte-identical.
 - **PostgreSQL 13–18: every server-blocked row is stopped by L3, 1a or the protocol alone** — the
   superuser rows show it — and no row left a trace. `hv_ro` meets its missing privilege first on
   `COPY FROM` a file, `nextval`/`setval` and the large-object rows of PostgreSQL 13–15 (`42501`).
+  P9's `DO` block is `25006`.
 - **Large objects (T5 review m-5).** The read-only transaction refuses `lo_create`,
   `lo_from_bytea`, `lo_put`, `lo_unlink` and `lo_import` only from **PostgreSQL 16** (`25006`).
   On 13–15 they run: they assign a transaction ID, the guard's `ROLLBACK` undoes them, and L6's
-  canary reports the gap and discards the connection. Nothing persisted on any line. So on 13–15
-  it is L6, not L3, that stops them; m-5's "only the read-only transaction stops it" holds from 16.
+  canary reports the gap and discards the connection. Nothing persisted on any line (the side
+  channel counts the large objects and reads the fixture one). So on 13–15 it is L6, not L3, that
+  stops them; m-5's "only the read-only transaction stops it" holds from 16.
 - `RESET transaction_read_only` runs on 13–15 — it restores L4's `default_transaction_read_only
   = on`, a no-op — and is `0A000` from 16. `query_to_xml` cannot run a `DELETE` at all (`0A000`);
   a PL/pgSQL `EXECUTE` (`hv_t23_dyn_write`) stands for P38's dynamic SQL and is `25006`.
@@ -1207,36 +1234,37 @@ database is byte-identical.
 - **P32 (finding F1).** `pg_logical_emit_message(true, …)` is a gap (rolled back). Its
   non-transactional form is executable by `PUBLIC` on 13–18: `hv_ro`, labelled enforced, writes a
   WAL record that no rollback undoes and no canary sees. Not in the tables; the failing test
-  `zz_docker_m2b_findings::f1_pg_enforced_role_cannot_write_wal_messages` holds it. Either the probe
-  must not read such a role as enforced, or the remediation must revoke `EXECUTE` on it.
+  `zz_docker_m2b_findings::f1_pg_enforced_role_cannot_write_wal_messages` holds it.
 - **MySQL 8.0/8.4: every server-blocked row is stopped by L4 or the protocol alone** — the owner
-  rows are `1792` or `protocol` — and no row left a trace. The brief's M9 (`SET SESSION
-  TRANSACTION READ WRITE`, then `CREATE TABLE`) is `1792` for the owner: the reset and the replay
-  restore the read-only setting. User locks (`GET_LOCK`, also inside an executable comment) do not
-  survive the request.
+  rows are `1792` or `protocol` — and no row left a trace. The brief's M9 is `1792` for the owner
+  (the reset and the replay restore the read-only setting; the snapshot shows no `hv_m9`) and
+  `1142` for `hv_ro`. User locks (`GET_LOCK`, also inside an executable comment) do not survive
+  the request.
 - **T18 carries.** `CALL` of a procedure that commits, opens a read-write transaction, writes and
   commits: `hv_ro` has no `EXECUTE` (`1370`). The owner's `hv_t23_escape` (ends with no
-  transaction) is a **gap** — L6 catches it and discards the connection, but the row **was
-  committed**: L3 and L4 cannot stop a procedure that overrides the session's read-only setting.
-  The owner's `hv_t23_escape_ro` (ends inside a new read-only transaction) **escapes every runtime
-  layer** on MySQL; only L5 is honest: the account is labelled guarded (asserted). Both are the
-  `EXECUTE` residual Task 18 recorded; least privilege (no `EXECUTE`) is the remedy. `SET GLOBAL`
-  and `SET PERSIST` as `hv_ro` change nothing (side channel) but end the connection (finding F2);
-  `RESET PERSIST` of a variable that is not persisted is `3615`. Review n-3: `ALTER USER USER()`
-  and `ALTER USER CURRENT_USER()` are `1792`, `SET PASSWORD` a gap (refused after its implicit
-  commit, judged), and `hv_ro` still signs in with the matrix password.
-- **MariaDB (recorded).** Like MySQL on the read-only setting (`1792`), with three differences:
-  `LOCK TABLES` is preparable and commits implicitly (a **gap**, discarded); `HANDLER … OPEN`
-  runs (neutralised by `COM_RESET_CONNECTION`); `XA START` is `1400`. Both escape procedures are
-  gaps. `SET PERSIST`, `RESET PERSIST` and `ALTER USER USER()` are syntax errors there
+  transaction) is a **committed; L6 gap** on MySQL and MariaDB: L6 detects it and discards the
+  connection, but the row **was committed** — L3 and L4 cannot stop a procedure that overrides the
+  session's read-only setting. The owner's `hv_t23_escape_ro` (ends inside a new read-only
+  transaction) **escapes every runtime layer** on MySQL (on MariaDB it too ends as a committed
+  gap); only L5 is honest: the account is labelled guarded (asserted). Both are the `EXECUTE`
+  residual Task 18 recorded; least privilege (no `EXECUTE`) is the remedy. `SET GLOBAL` and
+  `SET PERSIST` as `hv_ro` change nothing (side channel) but end the connection until the F2 fix
+  lands (`lost`); `RESET PERSIST` is `3615` — nothing is persisted, so the server answers before
+  any privilege check, and **L5 for `RESET PERSIST` is untested by this fixture**. Review n-3:
+  `ALTER USER USER()` and `ALTER USER CURRENT_USER()` are `1792`, `SET PASSWORD` a gap (refused
+  after its implicit commit, judged), and `hv_ro` still signs in with the matrix password.
+- **MariaDB (recorded).** Like MySQL on the read-only setting (`1792`), with these differences:
+  `LOCK TABLES` is preparable and commits implicitly (a gap, nothing persisted, discarded);
+  `HANDLER … OPEN` runs (neutralised by `COM_RESET_CONNECTION`); `XA START` is `1400`;
+  `SET PERSIST`, `RESET PERSIST` and `ALTER USER USER()` are syntax errors there
   (`CURRENT_USER()` is `1792`); `SET GLOBAL` is `1227` in both protocols. The label stays guarded
   (C19); nothing here is claimed as enforced.
 - **Through `sshd-a`** (pg17 over the channel's stream, mysql84 through the loopback forwarder)
   every server-blocked row gave the direct leg's result.
 
-**Findings (failing tests in `tests/zz_docker_m2b_findings.rs`, routed by the controller).** The
-file sorts last on purpose: cargo stops at the first failing test binary, and a known-red finding
-must not hide the rest of the Docker suite.
+**Findings.** Failing tests in `tests/zz_docker_m2b_findings.rs` (the file sorts last on
+purpose: cargo stops at the first failing test binary, and a known-red finding must not hide the
+rest of the Docker suite), routed by the controller:
 
 - **F1** (role probe / remediation, T5/T18): above.
 - **F2** (MySQL driver, T13, vendored `mysql_async`): on MySQL 8.0 and 8.4 an account without
@@ -1247,13 +1275,11 @@ must not hide the rest of the Docker suite.
   `SELECT` on `mysql.user`); MariaDB answers `1227` in both protocols. The user is told
   "connection lost, outcome unknown" for a statement the server refused, and the session
   reconnects. Nothing changes on the server.
-- **F3** (session reset, T7; pool, T15): a released pooled PostgreSQL session is never parked.
-  The reset's verify probe `SELECT current_user = session_user` runs with `ExecOpts::default()`
-  (the extended protocol), whose rows the PostgreSQL driver counts without decoding, so the probe
-  never reads `t`; the session breaks and closes, and every borrow opens a new connection. The
-  FakeDriver pool tests script the probe's answer, so they pass. MySQL has no verify probe and
-  parks. A local run with the probe on the simple protocol passed F3 (reverted; the fix is the
-  owner's).
+- **F3** (session reset, T7; pool, T15) — **fixed** on `m2b-fix-f3` (merged into this branch;
+  ADR section `m2b-t07 — internal value reads`): released PostgreSQL pooled sessions were never
+  parked, because the reset's verify probe ran on the count-only extended protocol. Its test is
+  now `docker_m2b_cancel_reconnect::a_released_pooled_session_is_parked_and_reused`, and the T17
+  R2 test runs on pg17 as well as mysql84.
 
 **Other conformance results (exit criteria E1–E3, E6–E8, E14).** `docker_m2b_connect.rs`: every
 TCP target of the matrix (PostgreSQL 14–18, pg17-tls, MySQL 8.0/8.4, MariaDB 10.6/10.11/11.4)
@@ -1263,23 +1289,27 @@ from the overlay); the bastions' host keys are trusted `Strict` from their publi
 SSH the trail is `Ssh, Connect, [Tls,] SignIn, CheckServer`, the address private, `via` the last
 hop, PostgreSQL on the channel's stream and MySQL through the forwarder. A MySQL-family server
 without TLS needs `Disable` through SSH: its `Auto` falls back to plaintext on loopback only (the
-open PO question Q41). Two profiles share one SSH session. `docker_m2b_tls_ssh.rs`: pg17-tls and
-mysql84 in `Auto` are reviewed once, pinned (`TlsVerified::Pinned`, one `AddPin` for the database
-host, its in-network name through SSH) and reconnect pinned headless; mysql84 `VerifyCa` with its
-container CA is `CaOnly`; pg17-auth's md5 and cleartext roles are refused through SSH under `Auto`
+open PO question Q41). Two profiles share one SSH session, and it stays up after one profile's
+connection has closed on the server. `docker_m2b_tls_ssh.rs`: pg17-tls and mysql84 in `Auto` are
+reviewed once, pinned (`TlsVerified::Pinned`, one `AddPin` for the database host, its in-network
+name through SSH) and reconnect pinned headless; mysql84 `VerifyCa` with its container CA is
+`CaOnly`; pg17-auth's md5 and cleartext roles are refused through SSH under `Auto`
 (`auth.insecure_method`), allowed with `Disable` and on loopback, and SCRAM connects.
 `docker_m2b_cancel_reconnect.rs`: a cancel ends `pg_sleep(60)` and a `SLEEP` over a table within
 1 s on pg17, mysql84 and mariadb114, directly and through SSH, and an endless SQLite CTE (MySQL's
 `SELECT SLEEP(60)` alone is answered with its result when killed, so it finishes,
 `AlreadyFinished`, also within 1 s); a terminated backend inside a transaction gives `SessionLost
 { open_tx, temp_objects }` and `Lost` (T17 C1: never replayed; the brief's `Connected` predates
-C1), and Retry connects without the old temporary table, directly and through SSH; an `INSERT`
-cut mid-flight is `ConnectionLost { outcome_unknown: true }` and ran at most once; a 20 s outage
-reconnects within the B19 schedule (bounded at 75 s: the sixth attempt is due 45 s ± 20 % after
-the loss, past the brief's 45 s); the read-only guard's `BEGIN` answered by `FATAL 57P01`
-reconnects (T17 P1; the named exception in `readonly.rs`: `lost_class` takes
-`recovery::connection_ending`, the reply is `ConnectionLost`); an SSH chain's death closes the
-parked pooled MySQL session (`close_idle`, T17 R2; a mutation run without it timed out).
+C1), and Retry connects without the old temporary table; an `INSERT` cut mid-flight is
+`ConnectionLost { outcome_unknown: true }` and ran at most once; a 20 s outage reconnects within
+the B19 schedule (bounded at 75 s: the sixth attempt is due 45 s ± 20 % after the loss, past the
+brief's 45 s); the read-only guard's `BEGIN` answered by `FATAL 57P01` reconnects (T17 P1; the
+named exception in `readonly.rs`: `lost_class` takes `recovery::connection_ending`, the reply is
+`ConnectionLost`); an SSH chain's death closes the parked pooled sessions (`close_idle`, T17 R2;
+a mutation run without it timed out on MySQL). The waits are conditions, never fixed sleeps
+(fix round 1, I1): a request "has run for 600 ms" is read from the session's own `Busy { since }`,
+and a released session "is parked" from `SessionManager::parked_count` (a read-only accessor added
+to the pool as a named exception).
 
 **Not done: MySQL client-certificate sign-in (T13 carry).** It needs a MySQL target whose
 `ssl_ca` trusts a committed test CA and an account `REQUIRE X509`: a compose change and an init
