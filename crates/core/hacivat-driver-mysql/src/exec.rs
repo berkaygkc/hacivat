@@ -15,9 +15,12 @@
 //! - The command tag is the statement's first keyword in ASCII upper case ([`command_tag`];
 //!   MySQL has no command tags, Q35).
 //! - An ERR packet carries no status flags, so it never sets the status by itself. When the
-//!   server answered with an error, the connection is still in step and one `DO 0` reads the
-//!   status again: an earlier statement of the same text may have opened a transaction, and a
-//!   deadlock (1213) rolls one back. If that fails too, the previous status stays.
+//!   server answered with an error, the connection is still in step and one `COM_PING` reads
+//!   the status again: an earlier statement of the same text may have opened a transaction, a
+//!   deadlock (1213) rolls one back, and a failing DDL commits implicitly first. `COM_PING` is
+//!   not a statement, so the diagnostics area (`SHOW WARNINGS`, `SHOW ERRORS`,
+//!   `GET DIAGNOSTICS`, `@@warning_count`) still describes the failed statement (review I1). If
+//!   the ping fails too, the previous status stays.
 
 use hacivat_driver::{ExecOpts, ExecSummary, Protocol, RawError, RawErrorKind, TxStatus};
 use mysql_async::consts::StatusFlags;
@@ -28,9 +31,6 @@ use crate::connect::raw_error;
 
 /// `ER_UNSUPPORTED_PS`: "This command is not supported in the prepared statement protocol yet".
 const UNSUPPORTED_PS: u16 = 1295;
-
-/// Reads the transaction status again after a server error; changes nothing.
-const STATUS_PROBE: &str = "DO 0";
 
 /// The transaction status in a server's status flags (`SERVER_STATUS_IN_TRANS`).
 #[doc(hidden)]
@@ -152,7 +152,8 @@ fn last_status(conn: &Conn) -> Option<TxStatus> {
 }
 
 /// Updates `tx` after a call: from the OK packet on success; after a server error from a
-/// `DO 0` (the ERR packet has no flags); otherwise it stays.
+/// `COM_PING`, whose OK packet carries the flags (the ERR packet has none) and which leaves the
+/// diagnostics area alone; otherwise it stays.
 async fn settle<T>(
     conn: &mut Conn,
     tx: &mut TxStatus,
@@ -165,7 +166,7 @@ async fn settle<T>(
             }
         }
         Err(mysql_async::Error::Server(_)) => {
-            if conn.query_drop(STATUS_PROBE).await.is_ok()
+            if conn.ping().await.is_ok()
                 && let Some(status) = last_status(conn)
             {
                 *tx = status;

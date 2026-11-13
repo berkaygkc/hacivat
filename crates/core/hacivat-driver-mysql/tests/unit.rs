@@ -587,7 +587,7 @@ async fn verify_ca_is_no_longer_refused() {
 fn insecure_password_refusal_and_interruptions_are_mapped() {
     let refused = mysql_async::Error::Driver(mysql_async::DriverError::InsecurePasswordRefused);
     assert_eq!(raw_error(&refused).kind, RawErrorKind::InsecureAuthRefused);
-    for code in [1317, 3024] {
+    for code in [1317, 3024, 1969] {
         let e = raw_error(&mysql_async::Error::Server(mysql_async::ServerError {
             code,
             message: "Query execution was interrupted".into(),

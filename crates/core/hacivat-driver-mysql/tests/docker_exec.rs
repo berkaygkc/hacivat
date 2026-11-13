@@ -321,6 +321,85 @@ async fn a_failed_multi_statement_reports_the_transaction_it_opened() {
     }
 }
 
+// ## m2b-t13-mysql fix round 1 (review I1)
+
+/// The `(Level, Code)` rows of `SHOW WARNINGS`.
+async fn warnings(c: &mut MySqlConn) -> Vec<(String, String)> {
+    let s = c.execute("SHOW WARNINGS", simple()).await.unwrap();
+    s.rows
+        .into_iter()
+        .map(|r| (r[0].clone().unwrap(), r[1].clone().unwrap()))
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "docker"]
+async fn a_failed_statement_keeps_its_diagnostics() {
+    // The status re-read after an error is `COM_PING`, not a statement, so `SHOW WARNINGS` still
+    // describes the failed statement, in and out of a transaction.
+    for t in mysql_family() {
+        let mut c = mysql(&t).await;
+        for in_tx in [false, true] {
+            if in_tx {
+                c.batch("START TRANSACTION").await.unwrap();
+            }
+            let e = c
+                .execute("SELECT * FROM no_such_table", ExecOpts::default())
+                .await
+                .unwrap_err();
+            assert_eq!(vendor(&e), Some(1146), "{}", t.id);
+            let want = if in_tx {
+                TxStatus::InTx
+            } else {
+                TxStatus::Idle
+            };
+            assert_eq!(c.tx_status(), want, "{}", t.id);
+            assert_eq!(
+                warnings(&mut c).await,
+                [("Error".to_string(), "1146".to_string())],
+                "{} in_tx={in_tx}",
+                t.id
+            );
+        }
+        c.batch("ROLLBACK").await.unwrap();
+        // A warning of a successful statement survives too (no status re-read runs then).
+        c.execute("SELECT CAST('1x' AS SIGNED)", simple())
+            .await
+            .unwrap();
+        assert_eq!(
+            warnings(&mut c).await,
+            [("Warning".to_string(), "1292".to_string())],
+            "{}",
+            t.id
+        );
+        Box::new(c).close().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "docker"]
+async fn a_failing_ddl_inside_a_transaction_commits_it() {
+    // MySQL and MariaDB commit implicitly before a DDL statement runs, also when it then fails
+    // (1050: the table exists): the server is Idle, and so is the status the driver reports.
+    for t in mysql_family() {
+        let mut a = admin(&t).await;
+        ensure_probe_table(&mut a).await;
+        let mut c = mysql(&t).await;
+        c.batch("START TRANSACTION").await.unwrap();
+        assert_eq!(c.tx_status(), TxStatus::InTx, "{}", t.id);
+        let e = c
+            .execute("CREATE TABLE hv_test.hv_probe (a int)", simple())
+            .await
+            .unwrap_err();
+        assert_eq!(vendor(&e), Some(1050), "{}", t.id);
+        assert_eq!(c.tx_status(), TxStatus::Idle, "{}", t.id);
+        // The next statement's own OK packet agrees.
+        let s = c.execute("SELECT 1", simple()).await.unwrap();
+        assert_eq!(s.tx, TxStatus::Idle, "{}", t.id);
+        Box::new(c).close().await;
+    }
+}
+
 #[tokio::test]
 #[ignore = "docker"]
 async fn simple_rows_are_text_and_extended_rows_are_counted() {

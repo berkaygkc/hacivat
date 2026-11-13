@@ -753,10 +753,19 @@ This section supersedes the M2a P11 defect note ("VerifyCa is unsupported in M2a
   packet of each call. An ERR packet carries no status flags and never sets it. The brief's "an
   ERR keeps the previous value" is not exact on its own: `START TRANSACTION; <failing
   statement>` (read-write multi-statement) leaves the server in a transaction the previous
-  value does not show, and a deadlock (1213) rolls one back. So after a **server** error (the
-  connection is still in step) the driver sends one `DO 0` and reads its flags; if that fails
-  too, or after a transport error, the previous value stays. The Docker test
-  `a_failed_multi_statement_reports_the_transaction_it_opened` fails without the probe.
+  value does not show, a deadlock (1213) rolls one back, and a failing DDL inside a transaction
+  (`CREATE TABLE` of an existing table, 1050) has already committed it implicitly. So after a
+  **server** error (the connection is still in step) the driver sends one `COM_PING` and
+  reads the status flags of its OK packet; if that fails too, or after a transport error, the
+  previous value stays. The Docker tests
+  `a_failed_multi_statement_reports_the_transaction_it_opened` and
+  `a_failing_ddl_inside_a_transaction_commits_it` fail without the re-read.
+  - *Fix round 1 (review I1):* the re-read was a `DO 0` statement, which replaced the
+    diagnostics area: `SHOW WARNINGS`, `SHOW ERRORS`, `GET DIAGNOSTICS`, `@@warning_count` and
+    `ROW_COUNT()` no longer described the failed statement (often the only place a MySQL error
+    names its real cause, such as a foreign-key 150/1005), and every error added a statement to
+    the general and slow logs. `COM_PING` is not a statement and touches none of them
+    (`a_failed_statement_keeps_its_diagnostics`, on MySQL and MariaDB).
 - **Reset and identity.** `reset` is `Conn::reset` (`COM_RESET_CONNECTION`), after which
   `mysql_async` runs the `setup` statements again, so a read-only connection is
   `SET SESSION TRANSACTION READ ONLY` again (`reset_keeps_a_read_only_session_read_only`). It
