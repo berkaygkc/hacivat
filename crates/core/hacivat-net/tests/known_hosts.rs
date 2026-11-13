@@ -637,6 +637,32 @@ fn a_hand_edited_store_is_reread() {
     assert_eq!(kh.check("db", 22, &K1), HostKeyCheck::Unknown);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_fifo_at_any_path_never_blocks_a_check_or_a_write() {
+    // M3: opening a FIFO with no writer blocks; neither the store nor an OpenSSH file may be one.
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("known_hosts");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !made {
+        eprintln!("skip: mkfifo unavailable");
+        return;
+    }
+    let kh = KnownHosts::load(vec![fifo.clone()], fifo.clone());
+    assert_eq!(kh.check("db", 22, &K1), HostKeyCheck::Unknown);
+    assert_eq!(
+        kh.trust("db", 22, &K1).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        kh.replace("db", 22, &K1, &K2).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+}
+
 #[test]
 fn host_pattern_follows_openssh() {
     assert_eq!(host_pattern("Bastion.acme.io", 22), "bastion.acme.io");

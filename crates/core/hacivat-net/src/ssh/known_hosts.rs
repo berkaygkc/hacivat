@@ -158,8 +158,8 @@ impl KnownHosts {
         &self.openssh_files
     }
 
-    /// Lines over 16 KiB skipped in the files as last read. `hacivat-net` has no logger; the
-    /// caller logs this count.
+    /// Lines over 16 KiB skipped in the files as last read, plus one per file cut at 64 MiB.
+    /// `hacivat-net` has no logger; the caller logs this count.
     pub fn skipped_lines(&self) -> usize {
         let state = self.lock();
         state.hacivat.skipped + state.openssh.iter().map(|c| c.skipped).sum::<usize>()
@@ -566,15 +566,20 @@ fn lines(body: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
 
 /// Hacivat's store, whole; `None` when it does not exist.
 fn read_store(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    match fs::metadata(path) {
-        Ok(meta) if meta.len() > MAX_KNOWN_HOSTS_BYTES => Err(io::Error::new(
+    let (file, len) = match open_regular(path) {
+        Ok(opened) => opened,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if len > MAX_KNOWN_HOSTS_BYTES {
+        return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "known_hosts: the store is too large",
-        )),
-        Ok(_) => fs::read(path).map(Some),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+        ));
     }
+    let mut body = Vec::new();
+    file.take(MAX_KNOWN_HOSTS_BYTES).read_to_end(&mut body)?;
+    Ok(Some(body))
 }
 
 /// Writes `body` to `path` atomically: a `0600` temp file next to it, `fsync`, rename. The
@@ -619,19 +624,16 @@ fn write_atomic(path: &Path, body: &[u8]) -> io::Result<()> {
 
 /// Streams the lines of the regular file at `path` (at most `max_bytes`), numbered from 1,
 /// without `\n` or a trailing `\r`. A line over [`MAX_LINE`] is never buffered: it is skipped
-/// and counted. Never opens anything but a regular file (no FIFO or device can block it).
+/// and counted. A file longer than `max_bytes` counts one more skip for everything past the cap
+/// (its cut last line included). Never reads anything but a regular file ([`open_regular`]).
 pub(super) fn read_lines(
     path: &Path,
     max_bytes: u64,
     mut each: impl FnMut(usize, &[u8]),
 ) -> io::Result<usize> {
-    if !fs::metadata(path)?.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "not a regular file",
-        ));
-    }
-    let mut reader = BufReader::new(File::open(path)?.take(max_bytes));
+    let (file, len) = open_regular(path)?;
+    let truncated = len > max_bytes;
+    let mut reader = BufReader::new(file.take(max_bytes));
     let mut line = Vec::new();
     let (mut no, mut skipped, mut too_long) = (0, 0, false);
     loop {
@@ -656,11 +658,30 @@ pub(super) fn read_lines(
             finish_line(no, &mut line, &mut too_long, &mut skipped, &mut each);
         }
     }
-    if !line.is_empty() || too_long {
+    if truncated {
+        skipped += 1;
+    } else if !line.is_empty() || too_long {
         no += 1;
         finish_line(no, &mut line, &mut too_long, &mut skipped, &mut each);
     }
     Ok(skipped)
+}
+
+/// Opens `path` only if it is a regular file, and returns its length. The path is checked
+/// before opening (opening a FIFO would block) and the open handle again after (the path may
+/// have been swapped in between). A FIFO swapped in during that window can still block the
+/// open: the paths are the user's own.
+fn open_regular(path: &Path) -> io::Result<(File, u64)> {
+    let not_regular = || io::Error::new(io::ErrorKind::InvalidInput, "not a regular file");
+    if !fs::metadata(path)?.is_file() {
+        return Err(not_regular());
+    }
+    let file = File::open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(not_regular());
+    }
+    Ok((file, meta.len()))
 }
 
 fn finish_line(
@@ -708,6 +729,25 @@ mod tests {
         // A pathological pattern stays linear-ish.
         let text = vec![b'a'; MAX_LINE];
         assert!(!glob(&[b"*a".repeat(64).as_slice(), b"b"].concat(), &text));
+    }
+
+    #[test]
+    fn bytes_past_the_cap_count_as_one_skip_and_the_cut_line_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        fs::write(&path, "one\ntwo\nthree-cut-here\n").unwrap();
+        let mut seen = Vec::new();
+        let skipped = read_lines(&path, 12, |no, line| seen.push((no, line.to_vec()))).unwrap();
+        assert_eq!(seen, [(1, b"one".to_vec()), (2, b"two".to_vec())]);
+        assert_eq!(skipped, 1);
+        // Under the cap: nothing is skipped and an unterminated last line counts.
+        fs::write(&path, "one\ntwo").unwrap();
+        seen.clear();
+        assert_eq!(
+            read_lines(&path, 12, |no, l| seen.push((no, l.to_vec()))).unwrap(),
+            0
+        );
+        assert_eq!(seen, [(1, b"one".to_vec()), (2, b"two".to_vec())]);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! imported). `Match` blocks are skipped with a notice. The import only reads files: nothing in
 //! a config is ever executed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -33,11 +33,25 @@ pub enum ConfigIssue {
 /// Something the import skipped or changed, shown to the user.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConfigNotice {
-    MatchSkipped { line: usize },
-    UserKnownHostsIgnored { alias: String },
-    StrictNoMappedToAsk { alias: String },
-    IdentityAgentIgnored { alias: String },
-    IncludeTooDeep { line: usize },
+    MatchSkipped {
+        line: usize,
+    },
+    UserKnownHostsIgnored {
+        alias: String,
+    },
+    StrictNoMappedToAsk {
+        alias: String,
+    },
+    IdentityAgentIgnored {
+        alias: String,
+    },
+    IncludeTooDeep {
+        line: usize,
+    },
+    /// A `ProxyJump` carried a password (`user:password@host`); it was dropped, never kept.
+    ProxyJumpPasswordIgnored {
+        alias: String,
+    },
 }
 
 /// One `Host` block, resolved.
@@ -96,7 +110,7 @@ pub fn read_ssh_config(
         is_secret,
         blocks: Vec::new(),
         aliases: Vec::new(),
-        notices: Vec::new(),
+        notices: Notices::default(),
         files: 0,
     };
     parser.file(path, 0, &[])?;
@@ -106,6 +120,7 @@ pub fn read_ssh_config(
         mut notices,
         ..
     } = parser;
+    let index = BlockIndex::new(&blocks);
     let mut hosts: Vec<SshConfigHost> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut queue = aliases;
@@ -116,7 +131,7 @@ pub fn read_ssh_config(
         if !seen.insert(alias.to_ascii_lowercase()) {
             continue;
         }
-        let host = resolve_host(&blocks, &alias, home, local_user, &mut notices);
+        let host = resolve_host(&blocks, &index, &alias, home, local_user, &mut notices);
         for jump in &host.proxy_jump {
             if let Some(spec) = JumpSpec::parse(jump) {
                 queue.push(spec.host);
@@ -124,7 +139,77 @@ pub fn read_ssh_config(
         }
         hosts.push(host);
     }
-    Ok(SshConfig { hosts, notices })
+    Ok(SshConfig {
+        hosts,
+        notices: notices.list,
+    })
+}
+
+/// The notices in order, each once.
+#[derive(Default)]
+struct Notices {
+    list: Vec<ConfigNotice>,
+    seen: HashSet<ConfigNotice>,
+}
+
+impl Notices {
+    fn push(&mut self, n: ConfigNotice) {
+        if self.seen.insert(n.clone()) {
+            self.list.push(n);
+        }
+    }
+}
+
+/// Which blocks can apply to a name, so resolving every alias is linear in practice: a block
+/// whose positive patterns are all literal can only apply to those names; every other block
+/// (wildcards, the lines before any `Host`) is checked for every alias.
+struct BlockIndex {
+    general: Vec<usize>,
+    literal: HashMap<String, Vec<usize>>,
+}
+
+impl BlockIndex {
+    fn new(blocks: &[Block]) -> BlockIndex {
+        let mut index = BlockIndex {
+            general: Vec::new(),
+            literal: HashMap::new(),
+        };
+        for (i, block) in blocks.iter().enumerate() {
+            let Some(patterns) = &block.patterns else {
+                index.general.push(i);
+                continue;
+            };
+            let mut positive: Vec<&String> =
+                patterns.iter().filter(|p| !p.starts_with('!')).collect();
+            if positive.iter().any(|p| p.contains(['*', '?'])) {
+                index.general.push(i);
+                continue;
+            }
+            positive.sort();
+            positive.dedup();
+            for name in positive {
+                index.literal.entry(name.clone()).or_default().push(i);
+            }
+        }
+        index
+    }
+
+    /// The blocks that may apply to `name` (ASCII lower-cased), in file order.
+    fn candidates(&self, name: &str) -> Vec<usize> {
+        let own = self.literal.get(name).map_or(&[][..], Vec::as_slice);
+        let mut out = Vec::with_capacity(self.general.len() + own.len());
+        let (mut a, mut b) = (0, 0);
+        while a < self.general.len() || b < own.len() {
+            if b >= own.len() || (a < self.general.len() && self.general[a] < own[b]) {
+                out.push(self.general[a]);
+                a += 1;
+            } else {
+                out.push(own[b]);
+                b += 1;
+            }
+        }
+        out
+    }
 }
 
 /// The tunnel of `alias`, following `ProxyJump` into hops: `ProxyJump j1,j2` on `a` gives
@@ -132,15 +217,20 @@ pub fn read_ssh_config(
 /// ones are reached through the earlier ones. A cycle (or a chain over 9 hops) is
 /// `IncludeTooDeep`; an alias the config does not know is `NoHostName`; an unusable hop makes
 /// the chain unusable.
+///
+/// `SshSpec` carries one host-key policy for the chain, so it is the strictest of the hops' own
+/// `StrictHostKeyChecking` (Strict > Ask > AcceptNew; a hop without one counts as Ask, OpenSSH's
+/// default): a `yes` bastion is never weakened by a `Host *` `accept-new`.
 pub fn resolve_alias(cfg: &SshConfig, alias: &str) -> Result<SshSpec, ConfigIssue> {
     let host = find(cfg, alias)?;
-    let mut hops = Vec::new();
-    push_hops(cfg, host, None, None, true, 0, &mut hops)?;
-    Ok(SshSpec {
-        hops,
-        host_keys: host.strict_host_key_checking.unwrap_or_default(),
+    // The policy starts at the weakest and every hop raises it to its own (at least one hop).
+    let mut chain = SshSpec {
+        hops: Vec::new(),
+        host_keys: HostKeyPolicy::AcceptNew,
         keepalive_s: host.server_alive_interval.filter(|s| *s > 0),
-    })
+    };
+    push_hops(cfg, host, None, None, true, 0, &mut chain)?;
+    Ok(chain)
 }
 
 fn find<'a>(cfg: &'a SshConfig, alias: &str) -> Result<&'a SshConfigHost, ConfigIssue> {
@@ -157,7 +247,7 @@ fn push_hops(
     port: Option<u16>,
     follow_jumps: bool,
     depth: usize,
-    hops: &mut Vec<HopSpec>,
+    chain: &mut SshSpec,
 ) -> Result<(), ConfigIssue> {
     if depth > MAX_JUMP_DEPTH {
         return Err(ConfigIssue::IncludeTooDeep);
@@ -176,11 +266,11 @@ fn push_hops(
                 spec.port,
                 i == 0,
                 depth + 1,
-                hops,
+                chain,
             )?;
         }
     }
-    hops.push(HopSpec {
+    chain.hops.push(HopSpec {
         host: host.hostname.clone().unwrap_or_else(|| host.alias.clone()),
         port: port.or(host.port).unwrap_or(DEFAULT_PORT),
         user: user
@@ -194,10 +284,38 @@ fn push_hops(
         identities_only: host.identities_only,
         identity_files: host.identity_files.clone(),
     });
-    if hops.len() > MAX_HOPS {
+    if chain.hops.len() > MAX_HOPS {
         return Err(ConfigIssue::IncludeTooDeep);
     }
+    let own = host.strict_host_key_checking.unwrap_or_default();
+    if strictness(own) > strictness(chain.host_keys) {
+        chain.host_keys = own;
+    }
     Ok(())
+}
+
+fn strictness(policy: HostKeyPolicy) -> u8 {
+    match policy {
+        HostKeyPolicy::AcceptNew => 0,
+        HostKeyPolicy::Ask => 1,
+        HostKeyPolicy::Strict => 2,
+    }
+}
+
+/// `spec` without a password in its user part (`user:password@host` gives `user@host`), or
+/// `None` when it has none. OpenSSH never uses such a password; Hacivat never keeps it.
+fn strip_jump_password(spec: &str) -> Option<String> {
+    let (scheme, rest) = match spec.strip_prefix("ssh://") {
+        Some(rest) => ("ssh://", rest),
+        None => ("", spec),
+    };
+    let (user, host) = rest.rsplit_once('@')?;
+    let (user, _password) = user.split_once(':')?;
+    Some(if user.is_empty() {
+        format!("{scheme}{host}")
+    } else {
+        format!("{scheme}{user}@{host}")
+    })
 }
 
 /// `[user@]host[:port]` or `ssh://[user@]host[:port]`; an IPv6 host is in brackets.
@@ -211,7 +329,11 @@ impl JumpSpec {
     fn parse(spec: &str) -> Option<JumpSpec> {
         let spec = spec.strip_prefix("ssh://").unwrap_or(spec);
         let (user, rest) = match spec.rsplit_once('@') {
-            Some((user, rest)) if !user.is_empty() => (Some(user.to_string()), rest),
+            // Never a password (`user:password`): only the part before `:` is the user.
+            Some((user, rest)) if !user.is_empty() => {
+                let user = user.split_once(':').map_or(user, |(u, _)| u);
+                ((!user.is_empty()).then(|| user.to_string()), rest)
+            }
             Some(_) => return None,
             None => (None, spec),
         };
@@ -287,7 +409,7 @@ struct Directive {
 #[derive(Debug)]
 struct Block {
     /// The patterns of the `Host` blocks enclosing the `Include`s this block came through: each
-    /// must match too.
+    /// must match too. Every pattern is ASCII lower-cased.
     guards: Vec<Vec<String>>,
     /// `None`: the lines before any `Host` (every host). `Some(vec![])` matches nothing (a
     /// skipped `Match` block).
@@ -296,6 +418,7 @@ struct Block {
 }
 
 impl Block {
+    /// Whether the block applies to `name` (ASCII lower-cased).
     fn applies_to(&self, name: &str) -> bool {
         self.guards.iter().all(|g| patterns_match(g, name))
             && self
@@ -306,12 +429,10 @@ impl Block {
 }
 
 /// OpenSSH's `Host` matching: a negated pattern that matches excludes the block; otherwise any
-/// positive match applies it. ASCII case is ignored.
+/// positive match applies it. Both sides are already ASCII lower-cased.
 fn patterns_match(patterns: &[String], name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
     let mut positive = false;
     for pattern in patterns {
-        let pattern = pattern.to_ascii_lowercase();
         match pattern.strip_prefix('!') {
             Some(negated) if glob(negated.as_bytes(), name.as_bytes()) => return false,
             Some(_) => {}
@@ -326,7 +447,7 @@ struct Parser<'a> {
     is_secret: &'a dyn Fn(&str) -> bool,
     blocks: Vec<Block>,
     aliases: Vec<String>,
-    notices: Vec<ConfigNotice>,
+    notices: Notices,
     files: usize,
 }
 
@@ -350,11 +471,18 @@ impl Parser<'_> {
                 let patterns: Vec<String> =
                     args.into_iter().filter(|p| !(self.is_secret)(p)).collect();
                 for p in &patterns {
-                    if !p.starts_with('!') && !p.contains(['*', '?']) {
+                    // An alias declared in a file included under a `Host` that its name does
+                    // not match never gets that file's settings: it is not listed.
+                    let lower = p.to_ascii_lowercase();
+                    if !p.starts_with('!')
+                        && !p.contains(['*', '?'])
+                        && guards.iter().all(|g| patterns_match(g, &lower))
+                    {
                         self.aliases.push(p.clone());
                     }
                 }
-                current = self.open_block(guards, Some(patterns));
+                let lowered = patterns.iter().map(|p| p.to_ascii_lowercase()).collect();
+                current = self.open_block(guards, Some(lowered));
             } else if keyword.eq_ignore_ascii_case("match") {
                 in_match = true;
                 self.notices.push(ConfigNotice::MatchSkipped { line: no });
@@ -371,6 +499,10 @@ impl Parser<'_> {
                 // The rest of this file continues the block the `Include` sat in.
                 current = self.open_block(guards, patterns);
             } else if let Some(key) = Key::from_keyword(&keyword) {
+                // A keyword without a value is an error to OpenSSH: ignored here.
+                if args.iter().all(String::is_empty) {
+                    continue;
+                }
                 let secret = (self.is_secret)(&args.join(" "));
                 let value = (!secret).then(|| args.into_iter().next().unwrap_or_default());
                 self.blocks[current]
@@ -419,10 +551,7 @@ impl Parser<'_> {
         }
         for path in paths {
             if depth + 1 > MAX_INCLUDE_DEPTH || self.files >= MAX_FILES {
-                let notice = ConfigNotice::IncludeTooDeep { line };
-                if !self.notices.contains(&notice) {
-                    self.notices.push(notice);
-                }
+                self.notices.push(ConfigNotice::IncludeTooDeep { line });
                 return;
             }
             let _ = self.file(&path, depth + 1, guards);
@@ -476,10 +605,11 @@ fn tokenize(line: &str) -> Option<(String, Vec<String>)> {
 /// (`IdentityFile` accumulates). Tokens expand after all blocks are read.
 fn resolve_host(
     blocks: &[Block],
+    index: &BlockIndex,
     alias: &str,
     home: &Path,
     local_user: &str,
-    notices: &mut Vec<ConfigNotice>,
+    notices: &mut Notices,
 ) -> SshConfigHost {
     let mut host = SshConfigHost {
         alias: alias.to_string(),
@@ -489,7 +619,13 @@ fn resolve_host(
     let mut hostname = None;
     let mut identities: Vec<String> = Vec::new();
     let mut proxy_set = false;
-    for block in blocks.iter().filter(|b| b.applies_to(alias)) {
+    let name = alias.to_ascii_lowercase();
+    let applying = index
+        .candidates(&name)
+        .into_iter()
+        .map(|i| &blocks[i])
+        .filter(|b| b.applies_to(&name));
+    for block in applying {
         for d in &block.directives {
             let first = match d.key {
                 Key::IdentityFile => true,
@@ -515,11 +651,20 @@ fn resolve_host(
                 Key::IdentitiesOnly => host.identities_only = yes(word),
                 Key::ProxyJump => {
                     if !word.eq_ignore_ascii_case("none") {
+                        let mut stripped = false;
                         host.proxy_jump = word
                             .split(',')
                             .filter(|j| !j.is_empty())
-                            .map(str::to_string)
+                            .map(|jump| {
+                                strip_jump_password(jump)
+                                    .inspect(|_| stripped = true)
+                                    .unwrap_or_else(|| jump.to_string())
+                            })
                             .collect();
+                        if stripped {
+                            let alias = alias.to_string();
+                            notices.push(ConfigNotice::ProxyJumpPasswordIgnored { alias });
+                        }
                     }
                 }
                 Key::ProxyCommand => {
@@ -535,7 +680,7 @@ fn resolve_host(
                         "ask" => Some(HostKeyPolicy::Ask),
                         "no" | "off" => {
                             let alias = alias.to_string();
-                            notice(ConfigNotice::StrictNoMappedToAsk { alias }, notices);
+                            notices.push(ConfigNotice::StrictNoMappedToAsk { alias });
                             Some(HostKeyPolicy::Ask)
                         }
                         _ => None,
@@ -543,12 +688,12 @@ fn resolve_host(
                 }
                 Key::UserKnownHostsFile => {
                     let alias = alias.to_string();
-                    notice(ConfigNotice::UserKnownHostsIgnored { alias }, notices);
+                    notices.push(ConfigNotice::UserKnownHostsIgnored { alias });
                 }
                 Key::IdentityAgent => {
                     if word != "SSH_AUTH_SOCK" {
                         let alias = alias.to_string();
-                        notice(ConfigNotice::IdentityAgentIgnored { alias }, notices);
+                        notices.push(ConfigNotice::IdentityAgentIgnored { alias });
                     }
                 }
             }
@@ -595,13 +740,6 @@ fn resolve_host(
         }
     }
     host
-}
-
-/// Adds `n` unless it is already there.
-fn notice(n: ConfigNotice, notices: &mut Vec<ConfigNotice>) {
-    if !notices.contains(&n) {
-        notices.push(n);
-    }
 }
 
 fn yes(word: &str) -> bool {
@@ -692,6 +830,16 @@ mod tests {
     fn jump_specs_parse() {
         let parse = |s| JumpSpec::parse(s).map(|j| (j.user, j.host, j.port));
         assert_eq!(parse("j"), Some((None, "j".into(), None)));
+        // A password in the user part is never the user.
+        assert_eq!(parse("u:pw@j"), Some((Some("u".into()), "j".into(), None)));
+        assert_eq!(parse(":pw@j"), Some((None, "j".into(), None)));
+        assert_eq!(
+            strip_jump_password("ssh://u:pw@j:2").as_deref(),
+            Some("ssh://u@j:2")
+        );
+        assert_eq!(strip_jump_password(":pw@j").as_deref(), Some("j"));
+        assert_eq!(strip_jump_password("u@j"), None);
+        assert_eq!(strip_jump_password("[::1]:2"), None);
         assert_eq!(
             parse("u@j:2"),
             Some((Some("u".into()), "j".into(), Some(2)))

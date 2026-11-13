@@ -278,7 +278,8 @@ fn the_fixture_imports_with_include_globs_and_host_star_last() {
         ]
     );
     assert!(spec.hops[1].identities_only);
-    assert_eq!(spec.host_keys, HostKeyPolicy::AcceptNew);
+    // db-eu says accept-new but jump-eu sets nothing (Ask): the chain takes the stricter.
+    assert_eq!(spec.host_keys, HostKeyPolicy::Ask);
     assert_eq!(spec.keepalive_s, Some(30));
     assert_eq!(
         resolve_alias(&c, "legacy").unwrap_err(),
@@ -461,8 +462,114 @@ fn an_include_inside_a_host_block_is_conditional() {
     ]);
     assert_eq!(host(&c, "a").user.as_deref(), Some("from-inc"));
     assert_eq!(host(&c, "b").user.as_deref(), Some("me"));
-    // `Host c` sits in a file included under `Host a`: it only applies when `a` matched.
-    assert_eq!(host(&c, "c").port, None);
+    // `Host c` sits in a file included under `Host a`: it only applies to a name that matches
+    // `a` too, so `c` never gets it and is not listed.
+    assert!(find(&c, "c").is_none());
+    assert_eq!(aliases(&c), ["a", "b"]);
+}
+
+// Fix round 1.
+
+#[test]
+fn a_strict_bastion_is_not_weakened_by_a_wildcard_accept_new() {
+    // I1: OpenSSH checks the bastion with `yes`; one policy for the chain is the strictest.
+    let c = cfg(
+        "Host bastion\n StrictHostKeyChecking yes\nHost db\n ProxyJump bastion\nHost *\n StrictHostKeyChecking accept-new\n",
+    );
+    assert_eq!(
+        host(&c, "bastion").strict_host_key_checking,
+        Some(HostKeyPolicy::Strict)
+    );
+    let spec = resolve_alias(&c, "db").unwrap();
+    assert_eq!(spec.hops.len(), 2);
+    assert_eq!(spec.host_keys, HostKeyPolicy::Strict);
+}
+
+#[test]
+fn the_chain_policy_is_the_strictest_hop_and_an_unset_hop_counts_as_ask() {
+    let policy = |body: &str| resolve_alias(&cfg(body), "db").unwrap().host_keys;
+    // Every hop accept-new: AcceptNew.
+    assert_eq!(
+        policy("Host db\n ProxyJump j\nHost *\n StrictHostKeyChecking accept-new\n"),
+        HostKeyPolicy::AcceptNew
+    );
+    // The jump host sets nothing: it counts as Ask.
+    assert_eq!(
+        policy("Host db\n ProxyJump j\n StrictHostKeyChecking accept-new\n"),
+        HostKeyPolicy::Ask
+    );
+    // The final host is stricter than its jumps.
+    assert_eq!(
+        policy(
+            "Host db\n ProxyJump j\n StrictHostKeyChecking yes\nHost j\n StrictHostKeyChecking accept-new\n"
+        ),
+        HostKeyPolicy::Strict
+    );
+    // A strict hop deep in the first jump's own chain still counts.
+    assert_eq!(
+        policy(
+            "Host db\n ProxyJump j1\nHost j1\n ProxyJump j0\nHost j0\n StrictHostKeyChecking yes\nHost *\n StrictHostKeyChecking accept-new\n"
+        ),
+        HostKeyPolicy::Strict
+    );
+}
+
+#[test]
+fn a_password_in_a_proxy_jump_uri_is_dropped_and_noted() {
+    let c = cfg("Host db\n ProxyJump ssh://admin:hv_test_pw@jump.acme.io:2201,ops:hv_test_pw@j2\n");
+    assert!(!format!("{c:?}").contains("hv_test_pw"));
+    assert_eq!(
+        host(&c, "db").proxy_jump,
+        ["ssh://admin@jump.acme.io:2201", "ops@j2"]
+    );
+    assert_eq!(
+        c.notices,
+        [ConfigNotice::ProxyJumpPasswordIgnored { alias: "db".into() }]
+    );
+    let spec = resolve_alias(&c, "db").unwrap();
+    assert!(!format!("{spec:?}").contains("hv_test_pw"));
+    let hops: Vec<_> = spec
+        .hops
+        .iter()
+        .map(|h| (h.host.as_str(), h.port, h.user.as_str()))
+        .collect();
+    assert_eq!(
+        hops,
+        [
+            ("jump.acme.io", 2201, "admin"),
+            ("j2", 22, "ops"),
+            ("db", 22, "me")
+        ]
+    );
+}
+
+#[test]
+fn a_keyword_without_a_value_is_ignored() {
+    let c = cfg("Host b\n HostName\n User\n Port\nHost *\n HostName fallback.acme.io\n");
+    let b = host(&c, "b");
+    assert_eq!(b.hostname.as_deref(), Some("fallback.acme.io"));
+    assert_eq!(b.user.as_deref(), Some("me"));
+    assert_eq!(
+        resolve_alias(&c, "b").unwrap().hops[0].host,
+        "fallback.acme.io"
+    );
+}
+
+#[test]
+fn a_large_config_imports_in_linear_time() {
+    // M1: 20,000 hosts with a wildcard block. Quadratic resolution took ~6.8 s for 8,000 hosts
+    // in a debug build (so minutes for this); the bound only catches that regression.
+    let mut body = String::new();
+    for i in 0..20_000 {
+        body.push_str(&format!("Host h{i}\n HostName h{i}.acme.io\n"));
+    }
+    body.push_str("Host *\n User deploy\n");
+    let start = std::time::Instant::now();
+    let c = cfg(&body);
+    let elapsed = start.elapsed();
+    assert_eq!(c.hosts.len(), 20_000);
+    assert_eq!(host(&c, "h19999").user.as_deref(), Some("deploy"));
+    assert!(elapsed < std::time::Duration::from_secs(20), "{elapsed:?}");
 }
 
 #[test]

@@ -186,3 +186,22 @@ the vault, the session overlay, the keyring CI and the deferrals.
     too, resolved through the wildcard blocks. A cycle, a recursion over 8 levels or a chain
     over 9 hops (`MAX_SSH_HOP` + 1) is `ConfigIssue::IncludeTooDeep`; an unusable hop makes the
     whole chain unusable. A hop authenticates with its first `IdentityFile`, else the agent.
+  - **Host-key policy of a chain (fix round 1, I1).** OpenSSH checks each hop with that hop's
+    own `StrictHostKeyChecking`; `SshSpec` carries one policy for the chain, so the import takes
+    the **strictest** over every hop: Strict > Ask > AcceptNew, and a hop without the setting
+    counts as Ask (OpenSSH's default). A `yes` bastion behind `Host *` `accept-new` therefore
+    keeps the chain Strict, and `AcceptNew` holds only when every hop says `accept-new`
+    (`a_strict_bastion_is_not_weakened_by_a_wildcard_accept_new`). Rejected: the final alias's
+    policy for every hop (it silently weakened a stricter jump host).
+  - **A password in a `ProxyJump` URI** (`user:password@host`, which `carries_secret` does not
+    flag) is stripped before the value is stored: only `user@host` reaches `proxy_jump` and the
+    hops, and `ConfigNotice::ProxyJumpPasswordIgnored { alias }` tells the user (fix round 1).
+  - Fix round 1 also: a keyword without a value is ignored (OpenSSH rejects it); an alias
+    declared in a file included under a `Host` whose patterns it does not match is not listed
+    (it could never get that file's settings); resolving the import is linear in practice
+    (blocks whose patterns are all literal are indexed by name, so only wildcard blocks are
+    checked for every alias; 20,000 hosts import in well under a second).
+  - `known_hosts` reads (fix round 1): every file is opened only after a regular-file check on
+    the path and checked again on the open handle; a FIFO at the store path makes `trust` fail
+    (`InvalidInput`) instead of blocking under the mutex. A file over 64 MiB is cut there and
+    the cut counts as one skipped line in `skipped_lines` (its partial last line is dropped).
