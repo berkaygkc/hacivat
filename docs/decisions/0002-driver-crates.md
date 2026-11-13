@@ -481,12 +481,40 @@ argument and is denied by the authorizer; the file is read-only and `query_only`
 
 **Transactions and cancel.** `tx_status` is `InTx` exactly when `sqlite3_get_autocommit` is
 off, read on the connection's thread after every `execute` and `batch` (failed ones too).
-`cancel_handle` is rusqlite's `InterruptHandle` (`sqlite3_interrupt`), taken on the
-connection's thread at open; it is safe from any thread and a no-op after close. An
-interrupted statement is `RawErrorKind::Cancelled` (extended code 9 kept). An interrupt while
-nothing runs is cleared by SQLite when the next statement starts. `reset` is `Ok(())` and
-`backend_id` is `None`. `batch` runs trusted control text as several statements; the
-authorizer still applies on a read-only profile.
+`reset` is `Ok(())` and `backend_id` is `None`. `batch` runs trusted control text as several
+statements; the authorizer still applies on a read-only profile.
+
+**Cancel, latched per request (fix round 1, review I1).** `sqlite3_interrupt` alone loses an
+early cancel: SQLite clears the interrupt flag whenever a statement starts while none is active
+(`sqlite3RunParser`, `sqlite3Step`), so a cancel sent after `execute` was submitted but before
+the connection's thread started the statement did nothing (17 of 20 in review). The handle
+(`SqliteCancel`) therefore keeps a latch:
+- `execute` and `batch` open a ticket on the async side before the job is sent; the
+  connection's thread ends it when the job is done. A ticket replaced by a newer request (its
+  future dropped) cannot end or receive the newer one's cancel.
+- `cancel()` acts only while a ticket is open: under the latch's lock it sets `requested` and
+  calls `sqlite3_interrupt`. A cancel while nothing runs does nothing.
+- The job reads the latch right after `prepare` (before the first step), and a progress handler,
+  installed on every connection, reads it every 1,000 VM steps and interrupts the statement.
+- Ending the ticket clears the latch under the same lock, so a cancel can never reach the next
+  request (Task 7's C1). An interrupt sent just before the end, after the last statement
+  stopped, is cleared by SQLite when the next statement starts.
+
+An interrupted or latched request is `RawErrorKind::Cancelled` (extended code 9,
+`SQLITE_INTERRUPT`). The handle is safe from any thread and a no-op after close. Tests: 50
+immediate cancels after submit, each bounded and all interrupted; `batch` likewise; a cancel
+before or after a statement, or for a dropped request, never reaches the next one. The progress
+handler is only the latch, not a timeout.
+
+**Accepted limitation: WAL side files (fix round 1, review I3; controller ruling).** A
+read-only session on a WAL-mode database may create `-wal` (empty) and `-shm` next to the file
+and leave them after close: SQLite's WAL reader needs the shared-memory index, and a read-only
+connection never checkpoints or unlinks them. The alternatives are unsafe or unavailable:
+`immutable=1` ignores a concurrent writer (wrong reads, possible corruption reports), and
+`readonly_shm` needs existing files and the URI form the driver refuses. The database file
+itself stays byte-identical (test `a_read_only_session_on_a_wal_database_leaves_the_database_file_unchanged`,
+which also checks the `-wal` holds no frames). The other tests now list every file but the
+database itself, so a side file elsewhere would fail them.
 
 **Findings recorded for review.**
 - A denied *function* is `SQLITE_ERROR` with "not authorized to use function: …" (SQLite's
@@ -497,5 +525,8 @@ authorizer still applies on a read-only profile.
   that adds them, matched with ASCII case folding.
 - A file opened read-only by its own mode without a read-only profile keeps M2a's behaviour
   (only the flag); the guard and its labels apply to read-only profiles and sessions.
-- Not in this task: a progress-handler timeout (the session's cancel ladder and the interrupt
-  cover runaway statements).
+- Not in this task: a progress-handler timeout (the session's cancel ladder and the latched
+  interrupt cover runaway statements; the progress handler is where a timeout would go).
+- Statements that never ask the authorizer: `VACUUM` and `VACUUM INTO` (refused by
+  `readonly-required`), and `VACUUM temp`, which SQLite skips (`vacuum.c` ignores the temp
+  schema) and which is read-only to `sqlite3_stmt_readonly`: a harmless no-op.

@@ -11,8 +11,12 @@
 //!   that also sets the mode, so it is not "read-only" to `sqlite3_stmt_readonly`).
 //! - **Command tag.** The first keyword in ASCII upper case (Q35), for the guard's
 //!   `WriteSucceeded` post-check.
+//! - **Cancel.** [`SqliteCancel`] latches a cancel per request (see there): `sqlite3_interrupt`
+//!   alone is lost when it lands before the statement starts, because SQLite clears the
+//!   interrupt flag whenever a statement starts with none active.
 
 use std::fmt::Write as _;
+use std::sync::{Mutex, PoisonError};
 
 use futures::future::BoxFuture;
 use hacivat_driver::{CancelHandle, ExecSummary, RawError, RawErrorKind, ServerMessage, TxStatus};
@@ -22,16 +26,103 @@ use rusqlite::{Connection, InterruptHandle, ffi};
 use crate::harden::AuthTrail;
 use crate::raw_error;
 
-/// Cancels the statement running on a connection with `sqlite3_interrupt`. Safe from any
-/// thread; after the connection closes it does nothing. An interrupt that arrives while no
-/// statement runs is cleared when the next one starts, so it never reaches that one.
-pub(crate) struct SqliteCancel(pub(crate) InterruptHandle);
+/// How many virtual-machine steps pass between two checks of the cancel latch.
+pub(crate) const PROGRESS_STEPS: i32 = 1000;
+
+/// The request a cancel is for.
+#[derive(Debug, Default)]
+struct Latch {
+    /// The last ticket handed out.
+    last: u64,
+    /// The ticket of the request submitted and not yet ended.
+    running: Option<u64>,
+    /// A cancel arrived for `running`.
+    requested: bool,
+}
+
+/// Cancels the request running on a connection, latched per request (review I1).
+///
+/// - `execute` and `batch` take a ticket ([`begin`](Self::begin)) on the async side before the
+///   job is sent, and the connection's thread ends it ([`end`](Self::end)) when the job is done.
+/// - [`cancel`](CancelHandle::cancel) acts only while a ticket is open: it sets the latch and
+///   calls `sqlite3_interrupt`, both under the latch's lock. A cancel while nothing runs does
+///   nothing.
+/// - The job reads the latch right after `prepare`, and the connection's progress handler
+///   reads it every [`PROGRESS_STEPS`] steps and interrupts the statement. So a cancel that
+///   lands between submit and the first step (whose interrupt SQLite clears when the
+///   statement starts) still ends the statement.
+/// - `end` clears the latch under the same lock, so a cancel can never reach the next
+///   request. An interrupt sent just before `end`, after the last statement stopped, is
+///   cleared by SQLite when the next statement starts (no statement is active then).
+///
+/// Safe from any thread; after the connection closes it does nothing.
+pub(crate) struct SqliteCancel {
+    interrupt: InterruptHandle,
+    latch: Mutex<Latch>,
+}
+
+impl SqliteCancel {
+    pub(crate) fn new(interrupt: InterruptHandle) -> Self {
+        SqliteCancel {
+            interrupt,
+            latch: Mutex::new(Latch::default()),
+        }
+    }
+
+    fn latch(&self) -> std::sync::MutexGuard<'_, Latch> {
+        self.latch.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Opens the ticket of a request about to be sent; a cancel from now on is for it.
+    pub(crate) fn begin(&self) -> u64 {
+        let mut latch = self.latch();
+        latch.last += 1;
+        latch.running = Some(latch.last);
+        latch.requested = false;
+        latch.last
+    }
+
+    /// Ends `ticket`'s request: a later cancel does nothing. A ticket a newer request has
+    /// replaced (its future was dropped) leaves the newer one alone.
+    pub(crate) fn end(&self, ticket: u64) {
+        let mut latch = self.latch();
+        if latch.running == Some(ticket) {
+            latch.running = None;
+            latch.requested = false;
+        }
+    }
+
+    /// Whether `ticket`'s request was cancelled.
+    pub(crate) fn cancelled(&self, ticket: u64) -> bool {
+        let latch = self.latch();
+        latch.running == Some(ticket) && latch.requested
+    }
+
+    /// For the progress handler: the request on the connection was cancelled.
+    pub(crate) fn pending(&self) -> bool {
+        self.latch().requested
+    }
+}
 
 impl CancelHandle for SqliteCancel {
     fn cancel(&self) -> BoxFuture<'static, Result<(), RawError>> {
-        self.0.interrupt();
+        let mut latch = self.latch();
+        if latch.running.is_some() {
+            latch.requested = true;
+            self.interrupt.interrupt();
+        }
+        drop(latch);
         Box::pin(async { Ok(()) })
     }
+}
+
+/// The error of a cancelled request: `SQLITE_INTERRUPT`, as SQLite reports an interrupted
+/// statement (`Cancelled`).
+pub(crate) fn interrupted() -> RawError {
+    raw_error(rusqlite::Error::SqliteFailure(
+        ffi::Error::new(ffi::SQLITE_INTERRUPT),
+        None,
+    ))
 }
 
 /// The transaction status: SQLite is in a transaction exactly when autocommit is off.
@@ -61,12 +152,14 @@ pub(crate) fn readonly_required() -> RawError {
 }
 
 /// Runs one statement, keeping at most `max_rows` rows and counting the rest. `trail` is the
-/// read-only connection's authorizer trail (`None` on a read-write connection).
+/// read-only connection's authorizer trail (`None` on a read-write connection). `cancelled`
+/// reads the request's cancel latch.
 pub(crate) fn execute(
     conn: &Connection,
     sql: &str,
     max_rows: usize,
     trail: Option<&AuthTrail>,
+    cancelled: impl Fn() -> bool,
 ) -> Result<ExecSummary, RawError> {
     if let Some(trail) = trail {
         trail.clear();
@@ -91,6 +184,10 @@ pub(crate) fn execute(
         && !trail.only_journal_mode_query()
     {
         return Err(readonly_required());
+    }
+    // A cancel that landed before the statement started (its interrupt is gone by now).
+    if cancelled() {
+        return Err(interrupted());
     }
     let columns: Vec<String> = stmt.column_names().map(str::to_string).collect();
     let width = columns.len();

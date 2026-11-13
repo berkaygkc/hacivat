@@ -9,10 +9,14 @@
 
 mod common;
 
+use std::future::Future;
+use std::sync::Arc;
 use std::time::Instant;
 
 use common::*;
-use hacivat_driver::{ExecOpts, RawErrorKind, TxStatus};
+use futures::FutureExt as _;
+use hacivat_driver::{CancelHandle, ExecOpts, RawErrorKind, TxStatus};
+use tokio::time::timeout;
 
 #[tokio::test]
 async fn full_tail_required() {
@@ -70,47 +74,129 @@ async fn execute_reports_the_transaction_status_too() {
     assert_eq!(text(&mut c, "SELECT count(*) FROM t").await, "1");
 }
 
+/// A statement that never ends by itself.
+const ENDLESS: &str =
+    "WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r) SELECT count(*) FROM r";
+
+/// A statement that runs long enough to meet the progress handler, then ends.
+const COUNTED: &str = "WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 100000) \
+                       SELECT count(*) FROM r";
+
+/// The bound on any wait for a statement in these tests.
+const LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Awaits `run`, whose statement never ends unless cancelled, for at most [`LIMIT`]. A lost
+/// cancel fails the test instead of hanging it: before the panic the statement (running by
+/// then, so the latch takes) is cancelled again, so the runtime's blocking thread can end.
+async fn ended<T>(run: impl Future<Output = T>, h: &Arc<dyn CancelHandle>, what: &str) -> T {
+    match timeout(LIMIT, run).await {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = h.cancel().await;
+            panic!("{what}: the cancel was lost")
+        }
+    }
+}
+
+/// Plan-mandated (Task 11 Step 1), adapted in fix round 1 (review I2): the cancel is sent as
+/// soon as the statement is submitted (`biased` polls the execute first), with no sleep, and
+/// the whole exchange is bounded by a timeout.
 #[tokio::test]
 async fn interrupt_cancels_a_long_recursive_cte() {
     let mut c = rw(db_with_table()).await;
     let h = c.cancel_handle().unwrap();
     let start = Instant::now();
-    let (r, _) = tokio::join!(
-        c.execute(
-            "WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r) SELECT count(*) FROM r",
-            ExecOpts::default()
-        ),
-        async {
-            tokio::time::sleep(ms(200)).await;
-            h.cancel().await
-        }
-    );
+    let run = async {
+        tokio::join!(biased; c.execute(ENDLESS, ExecOpts::default()), async { h.cancel().await })
+    };
+    let (r, _) = ended(run, &h, "plan test").await;
     assert!(r.is_err());
     assert!(start.elapsed() < secs(2));
     assert!(c.execute("SELECT 1", simple()).await.is_ok());
 }
 
+/// Review I1: a cancel sent after the statement is submitted but before the connection's
+/// thread starts it is latched, not cleared with SQLite's interrupt flag. 50 rounds, each
+/// bounded.
 #[tokio::test]
-async fn an_interrupted_statement_is_cancelled_and_a_stale_interrupt_is_harmless() {
+async fn an_early_cancel_is_latched() {
     let mut c = rw(db_with_table()).await;
     let h = c.cancel_handle().unwrap();
-    // No statement runs: the interrupt changes nothing for the next one.
-    h.cancel().await.unwrap();
+    for round in 0..50 {
+        let mut run = c.execute(ENDLESS, ExecOpts::default());
+        // Submitted: the job is on its way to the connection's thread.
+        assert!((&mut run).now_or_never().is_none());
+        h.cancel().await.unwrap();
+        let e = ended(run, &h, &format!("round {round}")).await.unwrap_err();
+        assert_eq!(e.kind, RawErrorKind::Cancelled, "round {round}");
+        // SQLITE_INTERRUPT
+        assert_eq!(e.server.and_then(|s| s.vendor_code), Some(9));
+    }
     assert_eq!(text(&mut c, "SELECT 2").await, "2");
-    let (r, _) = tokio::join!(
-        c.execute(
-            "WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r) SELECT max(i) FROM r",
-            ExecOpts::default()
-        ),
-        async {
-            tokio::time::sleep(ms(100)).await;
-            h.cancel().await
-        }
+}
+
+/// The trusted `batch` path is latched the same way; the interrupted statement leaves nothing.
+#[tokio::test]
+async fn an_early_cancel_ends_a_batch() {
+    let mut c = rw(db_with_table()).await;
+    let h = c.cancel_handle().unwrap();
+    let mut run = c.batch(
+        "CREATE TABLE big AS WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r) \
+         SELECT i FROM r",
     );
-    let e = r.unwrap_err();
+    assert!((&mut run).now_or_never().is_none());
+    h.cancel().await.unwrap();
+    let e = ended(run, &h, "batch").await.unwrap_err();
     assert_eq!(e.kind, RawErrorKind::Cancelled);
-    // SQLITE_INTERRUPT
-    assert_eq!(e.server.and_then(|s| s.vendor_code), Some(9));
+    assert_eq!(
+        text(
+            &mut c,
+            "SELECT count(*) FROM sqlite_schema WHERE name = 'big'"
+        )
+        .await,
+        "0"
+    );
+}
+
+/// A cancel while nothing runs (before any statement, or after one completed) does nothing,
+/// and never reaches the next statement, which runs long enough to meet the progress handler.
+#[tokio::test]
+async fn a_cancel_while_nothing_runs_never_reaches_the_next_statement() {
+    let mut c = rw(db_with_table()).await;
+    let h = c.cancel_handle().unwrap();
+    h.cancel().await.unwrap();
+    for round in 0..20 {
+        assert_eq!(text(&mut c, "SELECT 1").await, "1");
+        h.cancel().await.unwrap();
+        let s = timeout(LIMIT, c.execute(COUNTED, simple()))
+            .await
+            .expect("bounded")
+            .unwrap_or_else(|e| panic!("round {round}: {e:?}"));
+        assert_eq!(s.rows[0][0].as_deref(), Some("100000"), "round {round}");
+        h.cancel().await.unwrap();
+        timeout(LIMIT, c.batch("CREATE TEMP TABLE IF NOT EXISTS x(a)"))
+            .await
+            .expect("bounded")
+            .unwrap();
+    }
+}
+
+/// The cancel of a request whose future was dropped before it ran does not reach the next
+/// request: each request takes its own ticket.
+#[tokio::test]
+async fn a_dropped_request_does_not_pass_its_cancel_on() {
+    let mut c = rw(db_with_table()).await;
+    let h = c.cancel_handle().unwrap();
+    {
+        let mut run = c.execute("SELECT 1", simple());
+        assert!((&mut run).now_or_never().is_none());
+        h.cancel().await.unwrap();
+    }
+    let s = timeout(LIMIT, c.execute(COUNTED, simple()))
+        .await
+        .expect("bounded")
+        .unwrap();
+    assert_eq!(s.rows[0][0].as_deref(), Some("100000"));
 }
 
 #[tokio::test]

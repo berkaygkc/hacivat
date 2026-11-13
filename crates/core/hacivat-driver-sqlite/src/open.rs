@@ -19,10 +19,10 @@ use hacivat_driver::{
 use hacivat_net::{TlsSummary, TlsVerified};
 use hacivat_proto::DbmsKind;
 use rusqlite::config::DbConfig;
-use rusqlite::{Connection, InterruptHandle, OpenFlags};
+use rusqlite::{Connection, OpenFlags};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::exec::{SqliteCancel, tx_status};
+use crate::exec::{PROGRESS_STEPS, SqliteCancel, interrupted, tx_status};
 use crate::harden::{AuthTrail, harden_read_only};
 use crate::{gone, invalid_path, raw_error};
 
@@ -171,22 +171,29 @@ pub(crate) async fn open(
     guarded: bool,
     connect_timeout: Duration,
 ) -> Result<SqliteConn, RawError> {
-    let (opened_tx, opened_rx) = oneshot::channel::<Result<InterruptHandle, RawError>>();
+    let (opened_tx, opened_rx) = oneshot::channel::<Result<Arc<SqliteCancel>, RawError>>();
     let (jobs_tx, mut jobs_rx) = mpsc::channel::<Job>(1);
     let (closed_tx, closed_rx) = oneshot::channel::<()>();
     let guard = guarded.then(|| Arc::new(AuthTrail::default()));
     let trail = guard.clone();
     tokio::task::spawn_blocking(move || {
-        let opened = open_blocking(&path, create_if_missing, read_only, trail, connect_timeout);
-        let conn = match opened {
-            Ok(conn) => conn,
+        let opened = open_blocking(&path, create_if_missing, read_only, trail, connect_timeout)
+            .and_then(|mut conn| {
+                let cancel = Arc::new(SqliteCancel::new(conn.get_interrupt_handle()));
+                let latch = Arc::clone(&cancel);
+                conn.progress_handler(PROGRESS_STEPS, Some(move || latch.pending()))
+                    .map_err(raw_error)?;
+                Ok((conn, cancel))
+            });
+        let (conn, cancel) = match opened {
+            Ok(opened) => opened,
             Err(e) => {
                 let _ = opened_tx.send(Err(e));
                 return;
             }
         };
         // The caller gave up on the open: close the file straight away.
-        if opened_tx.send(Ok(conn.get_interrupt_handle())).is_err() {
+        if opened_tx.send(Ok(cancel)).is_err() {
             return;
         }
         while let Some(job) = jobs_rx.blocking_recv() {
@@ -195,14 +202,14 @@ pub(crate) async fn open(
         drop(conn);
         let _ = closed_tx.send(());
     });
-    let interrupt = opened_rx.await.map_err(|_| gone())??;
+    let cancel = opened_rx.await.map_err(|_| gone())??;
     Ok(SqliteConn {
         jobs: Some(jobs_tx),
         closed: Some(closed_rx),
         read_only: read_only || guarded,
         guard,
         tx: TxStatus::Idle,
-        cancel: Arc::new(SqliteCancel(interrupt)),
+        cancel,
     })
 }
 
@@ -322,7 +329,7 @@ impl RawConn for SqliteConn {
         })
     }
 
-    /// The connection's `InterruptHandle` (`sqlite3_interrupt`), taken on its thread at open.
+    /// The connection's latched interrupt ([`SqliteCancel`]), made on its thread at open.
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
         Some(self.cancel.clone())
     }
@@ -337,10 +344,15 @@ impl RawConn for SqliteConn {
     ) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
         let sql = sql.to_string();
         let guard = self.guard.clone();
+        let cancel = Arc::clone(&self.cancel);
         Box::pin(async move {
+            let ticket = cancel.begin();
             let (result, tx) = self
                 .call(move |c| {
-                    let r = crate::exec::execute(c, &sql, opts.max_rows, guard.as_deref());
+                    let r = crate::exec::execute(c, &sql, opts.max_rows, guard.as_deref(), || {
+                        cancel.cancelled(ticket)
+                    });
+                    cancel.end(ticket);
                     (r, tx_status(c))
                 })
                 .await?;
@@ -353,9 +365,19 @@ impl RawConn for SqliteConn {
     /// read-only profile).
     fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
         let sql = sql.to_string();
+        let cancel = Arc::clone(&self.cancel);
         Box::pin(async move {
+            let ticket = cancel.begin();
             let (result, tx) = self
-                .call(move |c| (c.execute_batch(&sql).map_err(raw_error), tx_status(c)))
+                .call(move |c| {
+                    let r = if cancel.cancelled(ticket) {
+                        Err(interrupted())
+                    } else {
+                        c.execute_batch(&sql).map_err(raw_error)
+                    };
+                    cancel.end(ticket);
+                    (r, tx_status(c))
+                })
                 .await?;
             self.tx = tx;
             result

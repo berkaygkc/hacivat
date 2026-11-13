@@ -25,6 +25,13 @@ pub struct Conn {
     _db: Db,
 }
 
+impl Conn {
+    /// Closes the connection; returns once the file is closed.
+    pub async fn close(self) {
+        self.conn.close().await;
+    }
+}
+
 impl Deref for Conn {
     type Target = dyn RawConn;
     fn deref(&self) -> &Self::Target {

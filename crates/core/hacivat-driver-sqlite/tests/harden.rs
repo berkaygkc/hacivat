@@ -42,12 +42,13 @@ fn rich_db_in(dir: &tempfile::TempDir) -> Db {
     db
 }
 
-/// The files in `dir` other than the database and its journal files.
+/// The files in `dir` other than the database file itself (side files such as `-wal`, `-shm`
+/// and `-journal` are listed: review I3).
 fn stray_files(dir: &tempfile::TempDir) -> Vec<String> {
     std::fs::read_dir(dir.path())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with("db.sqlite"))
+        .filter(|n| n != "db.sqlite")
         .collect()
 }
 
@@ -309,4 +310,59 @@ async fn the_journal_mode_can_be_read_not_set() {
         assert_eq!(err_code(&mut c, sql).await, SQLITE_AUTH, "{sql}");
     }
     assert_eq!(text(&mut c, "PRAGMA journal_mode").await, mode);
+}
+
+/// Review I3, an accepted limitation (ADR 0002 m2b-t11): SQLite's WAL reader needs the `-wal`
+/// and `-shm` files, so a read-only session on a WAL database may create them and leave them
+/// behind (`immutable=1` would avoid it but is unsafe with a concurrent writer). The database
+/// file itself stays byte-identical, and the `-wal` holds no frames.
+#[tokio::test]
+async fn a_read_only_session_on_a_wal_database_leaves_the_database_file_unchanged() {
+    let dir = tempdir();
+    let db = db_in(&dir);
+    let path = db.path.clone();
+    let w = rusqlite::Connection::open(&path).unwrap();
+    let mode: String = w
+        .query_row("PRAGMA journal_mode = wal", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    w.execute_batch("INSERT INTO t VALUES (2)").unwrap();
+    // The last connection to close checkpoints and removes the side files.
+    drop(w);
+    assert!(stray_files(&dir).is_empty(), "{:?}", stray_files(&dir));
+    let before = std::fs::read(&path).unwrap();
+
+    let mut c = ro(db).await;
+    assert_eq!(text(&mut c, "PRAGMA journal_mode").await, "wal");
+    assert_eq!(text(&mut c, "SELECT count(*) FROM t").await, "2");
+    for sql in [
+        "INSERT INTO t VALUES (3)",
+        "PRAGMA journal_mode = delete",
+        "PRAGMA wal_checkpoint(TRUNCATE)",
+        "VACUUM",
+    ] {
+        assert!(c.execute(sql, simple()).await.is_err(), "{sql}");
+    }
+    c.close().await;
+
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "the database file changed"
+    );
+    let stray = stray_files(&dir);
+    assert!(
+        stray
+            .iter()
+            .all(|n| n == "db.sqlite-wal" || n == "db.sqlite-shm"),
+        "{stray:?}"
+    );
+    let wal = dir.path().join("db.sqlite-wal");
+    if wal.exists() {
+        assert_eq!(
+            std::fs::metadata(&wal).unwrap().len(),
+            0,
+            "WAL frames written"
+        );
+    }
 }
