@@ -4,7 +4,9 @@
 //! Each `connect` counts the call, records the request (password included, as a plain string,
 //! for asserts; its `Debug` redacts it), waits the configured delay, then returns the next
 //! scripted result or the default one. A successful connect reports `TlsStarted`/`TlsDone`
-//! (with TLS params) and `AuthStarted`/`AuthDone` to the request's event callback.
+//! (with TLS params) and `AuthStarted`/`AuthDone` to the request's event callback. A gated
+//! driver (`gated`) holds every connect until `release`, so a test can observe a connect in
+//! flight without racing a delay.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -152,6 +154,8 @@ pub struct FakeDriver {
     result: Result<(), RawError>,
     script: Mutex<VecDeque<Result<(), RawError>>>,
     delay: Duration,
+    /// `Some` for a gated driver: connects wait until it reads `true` (`release`).
+    gate: Option<tokio::sync::watch::Sender<bool>>,
     pings: Vec<Result<Duration, RawError>>,
     tls: TlsSummary,
     databases: Vec<String>,
@@ -184,6 +188,7 @@ impl FakeDriver {
             result: Ok(()),
             script: Mutex::new(VecDeque::new()),
             delay: Duration::ZERO,
+            gate: None,
             pings: Vec::new(),
             tls: TlsSummary {
                 encrypted: false,
@@ -219,6 +224,21 @@ impl FakeDriver {
     pub fn delay(mut self, delay: Duration) -> Self {
         self.delay = delay;
         self
+    }
+
+    /// Holds every connect (after it is counted and recorded, before its delay and result)
+    /// until [`release`](Self::release): a test sees the connect in flight for as long as it
+    /// needs, however slow the machine, instead of racing a delay.
+    pub fn gated(mut self) -> Self {
+        self.gate = Some(tokio::sync::watch::Sender::new(false));
+        self
+    }
+
+    /// Lets every held connect (and every later one) go on. Nothing for an ungated driver.
+    pub fn release(&self) {
+        if let Some(gate) = &self.gate {
+            gate.send_replace(true);
+        }
     }
 
     /// Ping results per connection, in order; then 1 ms.
@@ -265,8 +285,9 @@ impl Driver for FakeDriver {
         &self,
         req: DriverConnect,
     ) -> BoxFuture<'static, Result<Box<dyn RawConn>, RawError>> {
-        self.counters.connect.fetch_add(1, Ordering::SeqCst);
+        // Recorded before it is counted: a test that saw the count also sees the request.
         *lock(&self.last) = Some(FakeRequest::of(&req));
+        self.counters.connect.fetch_add(1, Ordering::SeqCst);
         let scripted = lock(&self.script).pop_front();
         let result = match scripted {
             Some(result) => result,
@@ -283,10 +304,18 @@ impl Driver for FakeDriver {
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
+        let gate = self
+            .gate
+            .as_ref()
+            .map(tokio::sync::watch::Sender::subscribe);
         let with_tls = req.tls.is_some();
         let events = req.events.clone();
         drop(req);
         Box::pin(async move {
+            if let Some(mut gate) = gate {
+                // The driver (the sender) outlives its connects in tests; if it is gone, go on.
+                let _ = gate.wait_for(|open| *open).await;
+            }
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
@@ -433,6 +462,23 @@ mod tests {
         assert!(!conn.tls_summary().await.encrypted);
         conn.close().await;
         assert_eq!((fake.connect_calls(), fake.close_calls()), (2, 1));
+    }
+
+    #[tokio::test]
+    async fn a_gated_connect_waits_for_the_release() {
+        use futures::FutureExt as _;
+        let fake = FakeDriver::new(DbmsKind::Postgres).gated();
+        let mut held = fake.connect(request(None, Arc::new(|_| {})));
+        assert_eq!(fake.connect_calls(), 1, "counted before the gate");
+        for _ in 0..10 {
+            assert!((&mut held).now_or_never().is_none(), "held at the gate");
+            tokio::task::yield_now().await;
+        }
+        fake.release();
+        assert!(held.await.is_ok());
+        // Released for good: a later connect goes straight through.
+        assert!(fake.connect(request(None, Arc::new(|_| {}))).await.is_ok());
+        assert_eq!(fake.open_connections(), 0, "both connections dropped");
     }
 
     #[tokio::test]

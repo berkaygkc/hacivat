@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::net::TcpListener;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
     AppContext as _, Context, Entity, Global, IntoElement, Modifiers, ParentElement as _, Render,
@@ -142,21 +142,7 @@ fn fake_always_28p01() -> FakeDriver {
 
 /// Waits (in real time, P22) until `task` is done and returns its output.
 fn wait<T: 'static>(vcx: &mut VisualTestContext, task: Task<T>) -> T {
-    let out = Rc::new(RefCell::new(None));
-    let slot = out.clone();
-    vcx.cx.update(|cx| {
-        cx.spawn(async move |_| {
-            *slot.borrow_mut() = Some(task.await);
-        })
-        .detach();
-    });
-    for _ in 0..400 {
-        if let Some(v) = out.borrow_mut().take() {
-            return v;
-        }
-        settle(vcx, ms(5));
-    }
-    panic!("the task did not finish in 2 s");
+    wait_task(vcx, task)
 }
 
 /// A saved profile "orders-prod" for `deploy` at the loopback listener. A password profile
@@ -348,6 +334,19 @@ fn profile(vcx: &mut VisualTestContext) -> Arc<Profile> {
     vcx.cx
         .read(|cx| cx.global::<ConnectionsModel>().get(id))
         .expect("the profile")
+}
+
+/// The error dialog's count of server rejections in this gesture.
+fn rejections(vcx: &mut VisualTestContext) -> u8 {
+    view(vcx).read_with(vcx, |v, _| v.rejections())
+}
+
+/// Waits until a connect started by a fix has reached the fake driver (the first connect of
+/// these tests; it runs on the core runtime).
+fn wait_driver_call(vcx: &mut VisualTestContext) {
+    wait_until_mut(vcx, "the fix's connect to reach the driver", |vcx| {
+        fake(vcx).connect_calls() > 0
+    });
 }
 
 fn live_of(vcx: &mut VisualTestContext) -> LiveState {
@@ -610,12 +609,13 @@ fn strip(vcx: &mut VisualTestContext) -> Entity<TestStrip> {
         .expect("a strip")
 }
 
-/// A strip running a test against a server that takes 30 s to answer.
+/// A strip running a test against a server that never answers (a gated fake).
 fn strip_running(cx: &mut TestAppContext, lang: &str) -> &'static mut VisualTestContext {
     let vcx = shell_with_fake(
         cx,
         lang,
-        FakeDriver::new(DbmsKind::Postgres).delay(ms(30_000)),
+        // Held at the driver until the test ends: running for as long as the test looks.
+        FakeDriver::new(DbmsKind::Postgres).gated(),
     );
     let port = listening_port(vcx);
     let strip = host_strip(vcx);
@@ -792,12 +792,9 @@ fn a_finished_test_shows_its_report_and_says_so(cx: &mut TestAppContext) {
     };
     vcx.cx
         .update(|cx| strip.update(cx, |s, cx| s.run(draft, cx)));
-    for _ in 0..100 {
-        settle(vcx, ms(10));
-        if !strip.read_with(vcx, |s, _| s.is_running()) {
-            break;
-        }
-    }
+    wait_until(vcx, "the test to finish", |vcx| {
+        !strip.read_with(vcx, |s, _| s.is_running())
+    });
     assert!(matches!(
         strip.read_with(vcx, |s, _| s.state().clone()),
         TestStripState::Done(r) if r.ok
@@ -900,8 +897,12 @@ fn auth_invalid_reenter_counts_and_stops_at_three(cx: &mut TestAppContext) {
     while has_id(vcx, "reenter-field") {
         labels.push(attempt_label(vcx));
         type_password(vcx, "x");
+        let before = rejections(vcx);
         click(vcx, "fix-connect");
-        settle(vcx, ms(50));
+        // The re-entered connect fails on the core runtime: wait for its rejection to land.
+        wait_until_mut(vcx, "the re-entered password's rejection", |vcx| {
+            rejections(vcx) > before
+        });
     }
     assert_eq!(labels, ["Attempt 2 of 3", "Attempt 3 of 3"]);
     assert_eq!(fake(vcx).connect_calls(), 2);
@@ -922,13 +923,9 @@ fn a_reentered_password_that_works_closes_the_dialog(cx: &mut TestAppContext) {
     click(vcx, "fix-reenter");
     type_password(vcx, "hv_test_pw");
     vcx.simulate_keystrokes("enter");
-    for _ in 0..50 {
-        settle(vcx, ms(10));
-        if layer_ids(vcx).is_empty() {
-            break;
-        }
-    }
-    assert!(layer_ids(vcx).is_empty());
+    wait_until(vcx, "the connect to close the dialog", |vcx| {
+        layer_ids(vcx).is_empty()
+    });
     assert!(matches!(live_of(vcx), LiveState::Connected(_)));
     // The fake saw the re-entered password as the draft (it is never shown).
     let sent = fake(vcx).last_request().and_then(|r| r.password);
@@ -956,7 +953,10 @@ fn unknown_database_offers_top_three(cx: &mut TestAppContext) {
     );
     assert_eq!(button_kind(vcx, "fix-use-0"), ButtonKind::Primary);
     click(vcx, "fix-use-0");
-    settle(vcx, ms(50));
+    // The fix's connect runs on the core runtime; the dialog closes when it is connected.
+    wait_until(vcx, "the fixed connect to close the dialog", |vcx| {
+        layer_ids(vcx).is_empty()
+    });
     assert_eq!(profile(vcx).database.as_deref(), Some("orders"));
     let sent = fake(vcx).last_request().expect("a connect");
     assert_eq!(sent.database.as_deref(), Some("orders"));
@@ -992,10 +992,12 @@ fn unsupported_offers_ghost_connect_anyway_and_persists(cx: &mut TestAppContext)
     );
     assert_eq!(button_kind(vcx, "fix-anyway"), ButtonKind::Ghost);
     click(vcx, "fix-anyway");
-    settle(vcx, ms(50));
     assert!(profile(vcx).allow_unsupported_server);
-    let file = std::fs::read_to_string(paths(vcx).connections_toml()).expect("the file");
-    assert!(file.contains("allow_unsupported_server = true"), "{file}");
+    // The profile writer writes the file off the UI thread.
+    let toml = paths(vcx).connections_toml();
+    wait_until(vcx, "the fix to reach the file", |_| {
+        std::fs::read_to_string(&toml).is_ok_and(|f| f.contains("allow_unsupported_server = true"))
+    });
 }
 
 #[gpui::test]
@@ -1009,7 +1011,7 @@ fn tls_untrusted_encrypt_without_verifying(cx: &mut TestAppContext) {
     );
     assert_ne!(button_kind(vcx, "fix-require"), ButtonKind::Primary);
     click(vcx, "fix-require");
-    settle(vcx, ms(50));
+    wait_driver_call(vcx);
     assert_eq!(profile(vcx).tls.mode, TlsMode::Require);
     let sent = fake(vcx).last_request().expect("a connect");
     assert_eq!(
@@ -1217,25 +1219,19 @@ fn spawn_on_core(
 }
 
 fn block(vcx: &mut VisualTestContext, rx: std::sync::mpsc::Receiver<Answer>) -> Answer {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        if let Ok(answer) = rx.try_recv() {
-            return answer;
-        }
-        assert!(Instant::now() < deadline, "no answer in 2 s");
-        settle(vcx, ms(5));
-    }
+    let mut answer = None;
+    wait_until(vcx, "the core's question to be answered", |_| {
+        answer = rx.try_recv().ok();
+        answer.is_some()
+    });
+    answer.expect("an answer")
 }
 
 /// Waits until the prompt is open (the core's question reached the UI thread).
 fn prompt_open(vcx: &mut VisualTestContext) {
-    for _ in 0..200 {
-        settle(vcx, ms(5));
-        if layer_ids(vcx) == ["password-prompt"] {
-            return;
-        }
-    }
-    panic!("the password prompt did not open");
+    wait_until(vcx, "the password prompt to open", |vcx| {
+        layer_ids(vcx) == ["password-prompt"]
+    });
 }
 
 #[gpui::test]
@@ -1362,7 +1358,15 @@ fn the_initial_focus_is_safe_for_every_class(cx: &mut TestAppContext) {
         assert_eq!(focused_control(vcx).as_deref(), Some(expected), "{class:?}");
         // A reflexive Enter runs exactly the focused fix, and never weakens the connection.
         press_enter(vcx);
-        settle(vcx, ms(50));
+        if matches!(expected, "fix-use-0" | "fix-retry") {
+            // These connect (on the core runtime); the dialog closes once connected.
+            wait_until(vcx, "the connect to close the dialog", |vcx| {
+                !layer_ids(vcx).contains(&"connection-error")
+            });
+        } else {
+            // These must not connect: give a wrong connect the time to show.
+            settle(vcx, ms(50));
+        }
         let p = profile(vcx);
         assert_eq!(p.tls.mode, TlsMode::Auto, "{class:?}");
         assert!(!p.allow_unsupported_server, "{class:?}");
@@ -1463,12 +1467,9 @@ fn try_again_starts_a_new_gesture(cx: &mut TestAppContext) {
     open_dialog_over(vcx, timeout);
     assert_eq!(view(vcx).read_with(vcx, |v, _| v.rejections()), 2);
     click(vcx, "fix-retry");
-    for _ in 0..50 {
-        settle(vcx, ms(10));
-        if view(vcx).read_with(vcx, |v, _| v.error().class) == ErrClass::AuthInvalid {
-            break;
-        }
-    }
+    wait_until_mut(vcx, "the retry's rejection", |vcx| {
+        view(vcx).read_with(vcx, |v, _| v.error().class) == ErrClass::AuthInvalid
+    });
     assert_eq!(
         view(vcx).read_with(vcx, |v, _| (v.error().class, v.rejections())),
         (ErrClass::AuthInvalid, 1)
@@ -1482,13 +1483,9 @@ fn a_fix_on_a_connected_profile_never_sticks_pending(cx: &mut TestAppContext) {
     let vcx = shell_with_fake(cx, "en", ok_fake());
     let id = saved_profile(vcx, AuthProviderId::None);
     vcx.cx.update(|cx| ConnectionsModel::connect(cx, id, None));
-    for _ in 0..50 {
-        settle(vcx, ms(10));
-        if matches!(live_of(vcx), LiveState::Connected(_)) {
-            break;
-        }
-    }
-    assert!(matches!(live_of(vcx), LiveState::Connected(_)));
+    wait_until_mut(vcx, "the connect to finish", |vcx| {
+        matches!(live_of(vcx), LiveState::Connected(_))
+    });
     open_dialog_over(
         vcx,
         error_of(ErrClass::NetworkDns, Some(TrailStep::Resolve)),
@@ -1505,8 +1502,11 @@ fn a_reentered_password_never_reaches_the_screen_or_the_clipboard(cx: &mut TestA
     let vcx = error_dialog(cx, auth_invalid_attempts("deploy", 1), fake_always_28p01());
     click(vcx, "fix-reenter");
     type_password(vcx, "hv_test_pw");
+    let before = rejections(vcx);
     click(vcx, "fix-connect");
-    settle(vcx, ms(50));
+    wait_until_mut(vcx, "the re-entered password's rejection", |vcx| {
+        rejections(vcx) > before
+    });
     assert_eq!(attempt_label(vcx), "Attempt 3 of 3");
     expand(vcx, "tech-details");
     click(vcx, "copy-details");
@@ -1552,13 +1552,9 @@ fn an_orphaned_password_prompt_closes(cx: &mut TestAppContext) {
     prompt_open(vcx);
     // The connect that asked was cancelled: its future is dropped.
     asking.abort();
-    for _ in 0..100 {
-        settle(vcx, ms(5));
-        if layer_ids(vcx).is_empty() {
-            break;
-        }
-    }
-    assert!(layer_ids(vcx).is_empty(), "the orphaned prompt closed");
+    wait_until(vcx, "the orphaned prompt to close", |vcx| {
+        layer_ids(vcx).is_empty()
+    });
 }
 
 /// The strip's status region's accessible name.
@@ -1621,12 +1617,9 @@ fn a_fast_failure_replaces_the_error_shown(cx: &mut TestAppContext) {
     );
     let old = view(vcx).read_with(vcx, |v, _| v.error().clone());
     click(vcx, "fix-retry");
-    for _ in 0..50 {
-        settle(vcx, ms(10));
-        if !Arc::ptr_eq(&view(vcx).read_with(vcx, |v, _| v.error().clone()), &old) {
-            break;
-        }
-    }
+    wait_until_mut(vcx, "the retry's new error", |vcx| {
+        !Arc::ptr_eq(&view(vcx).read_with(vcx, |v, _| v.error().clone()), &old)
+    });
     let new = view(vcx).read_with(vcx, |v, _| v.error().clone());
     assert!(!Arc::ptr_eq(&new, &old), "the new error is shown");
     assert_eq!(new.class, ErrClass::AuthInvalid);
@@ -1662,10 +1655,16 @@ fn the_require_fix_wins_over_an_imported_sslmode(cx: &mut TestAppContext) {
     .expect("the service file");
     vcx.cx.update(|cx| cx.set_global(ImportSources(vec![file])));
     in_window(vcx, import::open);
-    settle(vcx, ms(100));
+    // The service file is read on the core runtime; the dialog opens when it is.
+    wait_until(vcx, "the import dialog to open", |vcx| {
+        vcx.cx.read(import::open_view).is_some()
+    });
     let dialog = vcx.cx.read(import::open_view).expect("the import dialog");
     vcx.cx.update(|cx| dialog.update(cx, |v, cx| v.confirm(cx)));
-    settle(vcx, ms(100));
+    // The import's toast follows its saves on the profile writer.
+    wait_until(vcx, "the import to finish", |vcx| {
+        !toast_texts(vcx).is_empty()
+    });
     let id = vcx
         .cx
         .read(|cx| cx.global::<ConnectionsModel>().profiles()[0].id);
@@ -1682,7 +1681,7 @@ fn the_require_fix_wins_over_an_imported_sslmode(cx: &mut TestAppContext) {
 
     open_dialog_over(vcx, tls_untrusted("127.0.0.1"));
     click(vcx, "fix-require");
-    settle(vcx, ms(50));
+    wait_driver_call(vcx);
     assert_eq!(profile(vcx).tls.mode, TlsMode::Require);
     let sent = fake(vcx).last_request().expect("a connect");
     assert_eq!(

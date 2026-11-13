@@ -77,6 +77,12 @@ pub async fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>, NetError>
 /// the whole open; it fails with `TimedOut`. When every attempt fails the most telling error is
 /// returned (a refusal over "network unreachable"). An empty `resolved` fails with
 /// `InvalidInput`. Unix targets connect to the socket path (Unix only).
+///
+/// Windows retries a SYN answered by a reset before it reports the refusal (about 2 s, even on
+/// loopback), so there a refused port is `ConnectionRefused` only when `connect_timeout` is
+/// longer than that, and `TimedOut` otherwise. The default (15 s) is; turning the retries off
+/// (`SIO_TCP_INITIAL_RTO`) would also drop them for real lossy links, so the stack's
+/// behaviour is kept.
 pub fn direct(
     target: Target,
     resolved: Vec<SocketAddr>,

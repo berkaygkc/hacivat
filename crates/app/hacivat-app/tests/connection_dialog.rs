@@ -3,7 +3,7 @@
 //! save, edit and the inline fixes.
 //!
 //! Core work (validation, the keyring probe, profile writes) runs on the core runtime, so tests
-//! that save wait for it with `settle` (P22).
+//! that save wait for it with `wait_until`/`wait_task` (P22).
 
 mod support;
 
@@ -68,13 +68,10 @@ fn open_new_without_keyring(cx: &mut TestAppContext) -> &'static mut VisualTestC
     let vcx = open(vcx, DialogMode::New);
     // The probe answer lands whenever the core's blocking pool gets to it (slower than the
     // fixed wait in `open` on Windows runners): wait for it, not for a fixed time.
-    for _ in 0..250 {
-        if remember_option_disabled(vcx, Retention::Forever) {
-            return vcx;
-        }
-        settle(vcx, Duration::from_millis(10));
-    }
-    panic!("the keyring probe did not land");
+    wait_until(vcx, "the keyring probe to land", |vcx| {
+        remember_option_disabled(vcx, Retention::Forever)
+    });
+    vcx
 }
 
 /// A shell with a saved production profile `name` whose password is kept by `retention`, and
@@ -97,9 +94,8 @@ fn open_edit_saved(
     draft.profile.database = Some("orders".to_string());
     draft.password = Some(SecretString::from("hv_test_pw".to_string()));
     let id = draft.profile.id;
-    vcx.cx
-        .update(|cx| ConnectionsModel::save(cx, draft).detach());
-    settle(vcx, Duration::from_millis(100));
+    let saved = vcx.cx.update(|cx| ConnectionsModel::save(cx, draft));
+    wait_task(vcx, saved).expect("the profile saves");
     assert!(
         keyring_entry(vcx).is_some(),
         "the saved password is in the keyring"
@@ -438,19 +434,14 @@ fn keyring_entry(vcx: &VisualTestContext) -> Option<()> {
         .map(|_| ())
 }
 
-/// Waits (real time, at most 5 s) until a save in flight is done: validation (which loads the
-/// platform roots for TLS) and the profile write run on the core runtime.
+/// Waits (real time, at most [`WAIT`]) until a save in flight is done: validation (which
+/// loads the platform roots for TLS) and the profile write run on the core runtime.
 fn wait(vcx: &VisualTestContext) {
-    for _ in 0..250 {
-        settle(vcx, Duration::from_millis(20));
-        let busy = in_window(vcx, |window, cx| {
+    wait_until(vcx, "the save to finish", |vcx| {
+        !in_window(vcx, |window, cx| {
             open_dialog(window, cx).is_some_and(|d| d.read(cx).is_saving())
-        });
-        if !busy {
-            return;
-        }
-    }
-    panic!("the save did not finish");
+        })
+    });
 }
 
 // ---- the brief's tests --------------------------------------------------------------------------
@@ -712,13 +703,9 @@ fn remote_save_waits_for_an_environment(cx: &mut TestAppContext) {
     keys(vcx, &primary("s"));
     // The save is held on the production-tag prompt (T20), which waits for the user, so the
     // dialog stays "saving" on purpose: wait for the prompt layer instead of the save.
-    for _ in 0..250 {
-        settle(vcx, Duration::from_millis(20));
-        if layer_ids(vcx).contains(&"production-prompt") {
-            break;
-        }
-    }
-    assert!(layer_ids(vcx).contains(&"production-prompt"));
+    wait_until(vcx, "the production-tag prompt", |vcx| {
+        layer_ids(vcx).contains(&"production-prompt")
+    });
     assert!(profile_names(vcx).is_empty());
     assert!(layer_ids(vcx).contains(&"connection-dialog"));
 }
@@ -1053,9 +1040,8 @@ fn open_edit_with(
     };
     change(&mut draft.profile);
     let id = draft.profile.id;
-    vcx.cx
-        .update(|cx| ConnectionsModel::save(cx, draft).detach());
-    settle(vcx, Duration::from_millis(100));
+    let saved = vcx.cx.update(|cx| ConnectionsModel::save(cx, draft));
+    wait_task(vcx, saved).expect("the profile saves");
     open(vcx, DialogMode::Edit(id))
 }
 
@@ -1174,9 +1160,8 @@ fn sslpassword_mask_in_the_url_row_never_replaces_the_stored_passphrase(cx: &mut
     draft.profile.database = Some("orders".to_string());
     draft.tls_key_passphrase = Some(SecretString::from("hv_test_pp".to_string()));
     let id = draft.profile.id;
-    vcx.cx
-        .update(|cx| ConnectionsModel::save(cx, draft).detach());
-    settle(vcx, Duration::from_millis(100));
+    let saved = vcx.cx.update(|cx| ConnectionsModel::save(cx, draft));
+    wait_task(vcx, saved).expect("the profile saves");
     assert!(
         stored_key_passphrase(vcx).is_some(),
         "the passphrase is stored"

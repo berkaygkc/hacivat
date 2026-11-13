@@ -64,13 +64,16 @@ async fn refused_and_dns_errors() {
         resolve("nonexistent.invalid", 5432).await,
         Err(NetError::Dns { .. })
     ));
+    // A generous timeout: Windows answers a refused SYN only after retrying it (about 2 s on
+    // loopback; Linux and macOS refuse at once), and running out first would be `TimedOut`,
+    // the right answer for a timeout shorter than that, not the one this test is about.
     let f = direct(
         Target::Tcp {
             host: "localhost".into(),
             port: 1,
         },
         vec![closed_port()],
-        Duration::from_secs(1),
+        Duration::from_secs(15),
     );
     assert_eq!(
         open_err(f.open().await).kind(),

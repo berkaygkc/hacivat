@@ -754,6 +754,73 @@ pub fn settle(vcx: &VisualTestContext, d: std::time::Duration) {
     vcx.run_until_parked();
 }
 
+/// How long [`wait_until`] waits before it fails: generous, since CI runners (and a loaded
+/// machine) can be much slower than a developer's laptop. A passing wait ends as soon as its
+/// condition holds, so this only bounds a failing test.
+pub const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Runs the GPUI tasks that core work (Tokio threads, the profile writer, the blocking pool)
+/// woke, letting real time pass between rounds, until `done` holds; panics naming `what`
+/// after [`WAIT`]. Use it instead of a fixed `settle` whenever a test asserts the outcome of
+/// work on another thread (P22). It never advances the executor clock, so GPUI timers (toast
+/// dismissal, the capsule clock) stay where the test put them.
+#[track_caller]
+pub fn wait_until(
+    vcx: &VisualTestContext,
+    what: &str,
+    mut done: impl FnMut(&VisualTestContext) -> bool,
+) {
+    vcx.executor().allow_parking();
+    poll_until(what, || {
+        vcx.run_until_parked();
+        done(vcx)
+    });
+}
+
+/// [`wait_until`] for conditions read through `&mut VisualTestContext` (element bounds).
+#[track_caller]
+pub fn wait_until_mut(
+    vcx: &mut VisualTestContext,
+    what: &str,
+    mut done: impl FnMut(&mut VisualTestContext) -> bool,
+) {
+    vcx.executor().allow_parking();
+    poll_until(what, || {
+        vcx.run_until_parked();
+        done(vcx)
+    });
+}
+
+/// Polls `poll` every 5 ms of real time until it returns `true`; panics naming `what` after
+/// [`WAIT`]. For waits with no GPUI work to run (after quit, say); else see [`wait_until`].
+#[track_caller]
+pub fn poll_until(what: &str, mut poll: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while !poll() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out after {WAIT:?} waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Waits (as [`wait_until`]) until `task` is done and returns its output: a save or a
+/// delete finishes on the profile writer, off the UI thread.
+#[track_caller]
+pub fn wait_task<T: 'static>(vcx: &VisualTestContext, task: gpui::Task<T>) -> T {
+    let out = Rc::new(RefCell::new(None));
+    let slot = out.clone();
+    vcx.cx.update(|cx| {
+        cx.spawn(async move |_| {
+            *slot.borrow_mut() = Some(task.await);
+        })
+        .detach();
+    });
+    wait_until(vcx, "the task to finish", |_| out.borrow().is_some());
+    out.borrow_mut().take().expect("the task's output")
+}
+
 /// The app's local paths.
 pub fn paths(vcx: &VisualTestContext) -> LocalPaths {
     vcx.cx.read(|cx| cx.global::<AppState>().paths.clone())

@@ -44,6 +44,36 @@ pub fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
+/// How long a wait for core work may take before the test fails: generous, since CI runners
+/// can be much slower than a laptop; a passing wait ends as soon as its condition holds.
+pub const WAIT: Duration = Duration::from_secs(10);
+
+/// Polls `done` every 5 ms (letting the runtime's tasks run) until it holds; panics naming
+/// `what` after [`WAIT`] of real time. Not for `start_paused` tests.
+pub async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out after {WAIT:?} waiting for {what}"
+        );
+        tokio::time::sleep(ms(5)).await;
+    }
+}
+
+/// [`eventually`] for a plain thread (a test that owns its `CoreRuntime`).
+#[track_caller]
+pub fn eventually_blocking(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out after {WAIT:?} waiting for {what}"
+        );
+        std::thread::sleep(ms(5));
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Secrets: one store per test thread, so a profile's stored password and the deps agree.
 
@@ -272,8 +302,11 @@ impl ConnectStep for GuardStep {
 }
 
 /// Deps with two extra steps at orders 41 and 42 whose guards push `guard-a` and `guard-b`.
-pub fn deps_with_guards(order: Arc<Mutex<Vec<&'static str>>>, fake: FakeDriver) -> ConnectDeps {
-    let mut deps = deps_with_fake(fake);
+pub fn deps_with_guards(
+    order: Arc<Mutex<Vec<&'static str>>>,
+    fake: FakeDriver,
+) -> (ConnectDeps, Arc<FakeDriver>) {
+    let (mut deps, fake) = deps_with(fake);
     deps.extra_steps = vec![
         Arc::new(GuardStep {
             order: 41,
@@ -286,7 +319,7 @@ pub fn deps_with_guards(order: Arc<Mutex<Vec<&'static str>>>, fake: FakeDriver) 
             sink: order,
         }),
     ];
-    deps
+    (deps, fake)
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -29,6 +29,12 @@ fn ok_pg() -> FakeDriver {
     FakeDriver::new(DbmsKind::Postgres)
 }
 
+/// A PostgreSQL fake whose connects stay in flight until `fake(vcx).release()`: tests that
+/// look at a connecting profile hold it there instead of racing a delay.
+fn held_pg() -> FakeDriver {
+    ok_pg().gated()
+}
+
 fn refused() -> RawError {
     RawError {
         kind: RawErrorKind::Io(std::io::ErrorKind::ConnectionRefused),
@@ -43,14 +49,25 @@ fn with_fake(cx: &mut TestAppContext, fake: FakeDriver) -> &'static mut VisualTe
     vcx
 }
 
-/// Waits (in real time, core work runs on Tokio) until `name` is no longer connecting.
+/// Connects `name` and waits (in real time, core work runs on Tokio) until the connect is
+/// over. `connect` mirrors `Connecting` before it returns, so the wait never ends early.
 fn connect_and_settle(vcx: &VisualTestContext, name: &str) {
     connect(vcx, name);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while matches!(live(vcx, name), LiveState::Connecting(_)) {
-        assert!(Instant::now() < deadline, "the connect never finished");
-        settle(vcx, ms(10));
-    }
+    wait_connect_over(vcx, name);
+}
+
+/// Waits until `name` is no longer connecting.
+fn wait_connect_over(vcx: &VisualTestContext, name: &str) {
+    wait_until(vcx, &format!("the connect of {name} to finish"), |vcx| {
+        !matches!(live(vcx, name), LiveState::Connecting(_))
+    });
+}
+
+/// Waits until the held connect of `fake(vcx)` has reached the driver (`n` calls in all).
+fn wait_driver_calls(vcx: &VisualTestContext, n: usize) {
+    wait_until(vcx, &format!("{n} connect(s) to reach the driver"), |vcx| {
+        fake(vcx).connect_calls() >= n
+    });
 }
 
 fn connect_and_wait(vcx: &VisualTestContext, name: &str) {
@@ -101,23 +118,26 @@ fn popover_text(vcx: &VisualTestContext) -> String {
 
 #[gpui::test]
 fn model_mirrors_manager_states(cx: &mut TestAppContext) {
-    let vcx = with_fake(cx, ok_pg().delay(ms(200)));
+    // The connect is held at the driver until released: `Connecting` is observed for as long
+    // as the test needs, never raced against a delay (CI runners are slow).
+    let vcx = with_fake(cx, held_pg());
     connect(vcx, "a");
-    settle(vcx, ms(50));
+    wait_driver_calls(vcx, 1);
     assert!(matches!(live(vcx, "a"), LiveState::Connecting(_)));
     assert!(matches!(
         capsule_model(vcx),
         CapsuleModel::Connecting { .. }
     ));
-    settle(vcx, ms(300));
+    fake(vcx).release();
+    wait_connect_over(vcx, "a");
     assert!(matches!(live(vcx, "a"), LiveState::Connected(_)));
 }
 
 #[gpui::test]
 fn the_connecting_clock_reads_the_executor_clock(cx: &mut TestAppContext) {
-    let vcx = with_fake(cx, ok_pg().delay(Duration::from_secs(5)));
+    let vcx = with_fake(cx, held_pg());
     connect(vcx, "a");
-    settle(vcx, ms(20));
+    wait_driver_calls(vcx, 1);
     vcx.executor().advance_clock(ms(1250));
     vcx.run_until_parked();
     let CapsuleModel::Connecting { clock, label, .. } = capsule_model(vcx) else {
@@ -161,7 +181,7 @@ fn capsule_and_status_follow_the_current_connection(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn escape_cancels_connect_and_toasts(cx: &mut TestAppContext) {
-    let vcx = with_fake(cx, ok_pg().delay(Duration::from_secs(5)));
+    let vcx = with_fake(cx, held_pg());
     connect(vcx, "a");
     vcx.simulate_keystrokes("escape");
     settle(vcx, ms(50));
@@ -179,11 +199,7 @@ fn failed_capsule_retry_reconnects(cx: &mut TestAppContext) {
     assert!(matches!(capsule_model(vcx), CapsuleModel::Failed { .. }));
     assert!(status_bar_text(vcx).contains("Couldn't connect"));
     click(vcx, "capsule-retry");
-    settle(vcx, ms(50));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while matches!(live(vcx, "a"), LiveState::Connecting(_)) && Instant::now() < deadline {
-        settle(vcx, ms(10));
-    }
+    wait_retry_over(vcx);
     assert!(matches!(live(vcx, "a"), LiveState::Connected(_)));
 }
 
@@ -193,23 +209,20 @@ fn retry_has_a_keyboard_path(cx: &mut TestAppContext) {
     assert!(!run(vcx, "connection.retry"), "nothing failed yet");
     connect_and_settle(vcx, "a");
     assert!(run(vcx, "connection.retry"));
-    connect_and_settle_after_retry(vcx);
+    wait_retry_over(vcx);
     assert!(matches!(live(vcx, "a"), LiveState::Connected(_)));
 }
 
-fn connect_and_settle_after_retry(vcx: &VisualTestContext) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        settle(vcx, ms(10));
-        if !matches!(live(vcx, "a"), LiveState::Connecting(_)) || Instant::now() > deadline {
-            break;
-        }
-    }
+/// Waits until the retry of "a" (the fake's second connect) has reached the driver and is
+/// over: waiting only for "not connecting" could end before the retry started.
+fn wait_retry_over(vcx: &VisualTestContext) {
+    wait_driver_calls(vcx, 2);
+    wait_connect_over(vcx, "a");
 }
 
 #[gpui::test]
 fn delete_while_connecting_cancels_and_forgets_secrets(cx: &mut TestAppContext) {
-    let vcx = shell_with_fake(cx, "en", ok_pg().delay(Duration::from_secs(5)));
+    let vcx = shell_with_fake(cx, "en", held_pg());
     let mut p = test_profile("a", Some(EnvTag::Dev), "127.0.0.1");
     p.auth = AuthProviderId::Password;
     p.retention = Retention::ForSession;
@@ -221,14 +234,16 @@ fn delete_while_connecting_cancels_and_forgets_secrets(cx: &mut TestAppContext) 
             ..ProfileDraft::edit(p)
         },
     );
-    settle(vcx, ms(50));
-    assert!(session_secret(vcx, "a").is_some());
+    // The secret is stored by the profile writer (off the UI thread).
+    wait_until(vcx, "the session password to be stored", |vcx| {
+        session_secret(vcx, "a").is_some()
+    });
     let id = profile_id(vcx, "a");
     connect(vcx, "a");
-    settle(vcx, ms(20));
-    vcx.cx
-        .update(|cx| ConnectionsModel::delete(cx, id).detach());
-    settle(vcx, ms(50));
+    wait_driver_calls(vcx, 1);
+    // The secrets are deleted by the profile writer: wait for the delete itself to finish.
+    let deleted = vcx.cx.update(|cx| ConnectionsModel::delete(cx, id));
+    wait_task(vcx, deleted).expect("the delete succeeds");
     let (state, secret) = vcx.cx.read(|cx| {
         let m = cx.global::<ConnectionsModel>();
         let secret = m
@@ -292,24 +307,32 @@ fn quit_closes_every_connection(cx: &mut TestAppContext) {
 /// close) rather than closed: the fake's open-connection count goes back to 0 either way.
 #[gpui::test]
 fn quit_during_connect_cancels_within_budget(cx: &mut TestAppContext) {
-    let vcx = with_fake(cx, ok_pg().delay(ms(300)));
+    // Held at the driver: the connect is surely in flight when the quit starts, however slow
+    // the machine (the turkey-test runner once took more than a fixed 20 ms to get there).
+    let vcx = with_fake(cx, held_pg());
     connect(vcx, "a");
-    settle(vcx, ms(20));
+    wait_driver_calls(vcx, 1);
     assert_eq!(fake(vcx).connect_calls(), 1);
+    let budget = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().manager().shutdown_budget());
     let started = Instant::now();
     quit(vcx);
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "{:?}",
-        started.elapsed()
-    );
+    // P15's bound is the manager's shutdown budget (2 s): a quit that waited for the held
+    // connect instead of cancelling it would take all of it.
+    assert!(started.elapsed() < budget, "{:?}", started.elapsed());
     let id = profile_id(vcx, "a");
     let state = vcx
         .cx
         .read(|cx| cx.global::<ConnectionsModel>().manager().state(id));
     assert_eq!(state, LiveState::Disconnected);
-    std::thread::sleep(ms(500));
-    assert_eq!(fake(vcx).open_connections(), 0);
+    // The handshake "lands" after the quit: the stopped runtime never runs it, so nothing is
+    // ever opened (the attempt is abandoned with its task).
+    fake(vcx).release();
+    poll_until("the late connection to be dropped", || {
+        fake(vcx).open_connections() == 0
+    });
+    assert_eq!(fake(vcx).connect_calls(), 1);
 }
 
 /// A memory backend whose `put` takes 300 ms (a slow keychain): longer than the core
@@ -414,17 +437,18 @@ fn the_body_of_a_lost_connection_reconnects(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert!(matches!(capsule_model(vcx), CapsuleModel::Failed { .. }));
     click(vcx, "capsule-body");
-    connect_and_settle_after_retry(vcx);
+    wait_driver_calls(vcx, 1);
+    wait_connect_over(vcx, "a");
     assert!(matches!(live(vcx, "a"), LiveState::Connected(_)));
 }
 
 #[gpui::test]
 fn editing_a_connecting_profile_cancels_then_saves(cx: &mut TestAppContext) {
-    let vcx = with_fake(cx, ok_pg().delay(Duration::from_secs(5)));
+    let vcx = with_fake(cx, held_pg());
     connect(vcx, "a");
-    settle(vcx, ms(20));
+    wait_driver_calls(vcx, 1);
     save_edit(vcx, "a", |d| d.profile.database = Some("orders".into()));
-    settle(vcx, ms(50));
+    // The save cancels the connect before it returns (RF5): no wait needed for either.
     assert_eq!(live(vcx, "a"), LiveState::Disconnected);
     assert_eq!(profile(vcx, "a").database.as_deref(), Some("orders"));
 }

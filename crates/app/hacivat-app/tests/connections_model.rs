@@ -5,9 +5,7 @@
 
 mod support;
 
-use std::cell::RefCell;
 use std::path::Path;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -106,21 +104,7 @@ fn edit_named(id: ProfileId, name: &str) -> ProfileDraft {
 
 /// Waits (in real time, P22) until `task` is done and returns its output.
 fn wait<T: 'static>(vcx: &VisualTestContext, task: Task<T>) -> T {
-    let out = Rc::new(RefCell::new(None));
-    let slot = out.clone();
-    vcx.cx.update(|cx| {
-        cx.spawn(async move |_| {
-            *slot.borrow_mut() = Some(task.await);
-        })
-        .detach();
-    });
-    for _ in 0..400 {
-        if let Some(v) = out.borrow_mut().take() {
-            return v;
-        }
-        settle(vcx, ms(5));
-    }
-    panic!("the task did not finish in 2 s");
+    wait_task(vcx, task)
 }
 
 fn try_save(vcx: &VisualTestContext, draft: ProfileDraft) -> Result<ProfileId, SaveError> {
@@ -326,7 +310,11 @@ fn profile_writes_are_ordered_last_wins(cx: &mut TestAppContext) {
     let id = save(vcx, named_draft("w"));
     save_no_wait(vcx, edit_named(id, "x"));
     save_no_wait(vcx, edit_named(id, "y"));
-    settle(vcx, ms(100));
+    // Every queued write is done once the writer has drained (its jobs run in order).
+    let drained = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().drain_writes(WAIT));
+    assert!(drained, "the profile writer drained within {WAIT:?}");
     let text = read(&paths(vcx).connections_toml());
     assert!(
         text.contains("name = \"y\"") && !text.contains("name = \"x\""),
