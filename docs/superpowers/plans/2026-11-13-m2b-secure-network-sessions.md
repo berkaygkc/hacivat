@@ -21,21 +21,21 @@ M2's exit criteria (spec §6 M2) are checked at the end of this plan (Task 25).
 - `hacivat-session` gains `session/`: actor, transactions, cancel, environment plan, schema context, reset, router, pools, liveness, recovery and guarded read-only execution.
   - The M2a "main connection" becomes the profile's **default console session** (B4).
   - `ConnectionManager` keeps its public role (one `LiveState` per profile for the capsule). Internally it owns a `SessionManager` per profile.
-- `mysql_async` 0.37.1 is vendored under `third_party/mysql_async/` with four small patches, wired in through `[patch.crates-io]` (B10).
+- `mysql_async` 0.37.1 is vendored under `third_party/mysql_async/` with five small patches, wired in through `[patch.crates-io]` (B10). Patch §5 lets MySQL use Hacivat's own rustls `ClientConfig`, so pins, review, outcome and decrypted client keys work for MySQL exactly as for PostgreSQL (Q2).
 - The app gets the M2b surfaces through stub modules that Task 1 creates. Each later task fills only its own modules. Task 1 makes `interaction.rs` route every new `Question` variant, and creates `events.rs`, which dispatches every `ConnectionEvent`.
 
 **Tech Stack:**
 - Everything from M2a. Its Tech Stack still applies, and so do its manifests and rulings.
-- SSH: `russh` (current 0.5x; `default-features = false`, ring backend only, never `aws-lc-rs`) with its `keys` module, used for the client, the agent client and, in tests, the server and the agent server.
-- TLS display and keys: `x509-parser` (certificate review), `sha2`, `pkcs8` with `encryption` and `pkcs5` (encrypted PKCS #8 client keys, PBES2).
-- Vault: `chacha20poly1305` (XChaCha20-Poly1305), `argon2` (Argon2id), `rand_core` with `getrandom`. All are RustCrypto, MIT OR Apache-2.0.
+- SSH: `russh` (current 0.5x; `default-features = false, features = ["ring", "rsa", "flate2"]`, ring backend only, never `aws-lc-rs`; Q28) with its `keys` module, used for the client, the agent client and, in tests, the server and the agent server.
+- TLS display and keys: `x509-parser` (certificate review), `sha2`, `pkcs8` with `encryption`, `pkcs5`, `pem`, `std` and `sha1-insecure` (encrypted PKCS #8 client keys: PBES2, plus the SHA-1 PRF of OpenSSL 1.0 keys; Q5, Q36).
+- Vault: `chacha20poly1305` (XChaCha20-Poly1305), `argon2` (Argon2id), `getrandom` (`getrandom::fill` for salt and nonce; already in the lock), and `secrecy` with its `serde` feature (vault JSON parsed into `SecretString`). All are RustCrypto or already in the graph, MIT OR Apache-2.0 (Q30).
 - Known hosts: `hmac` and `sha1` for hashed `known_hosts` entries. Both are already in the graph through russh.
-- Vendored: `mysql_async` 0.37.1 (MIT OR Apache-2.0) plus the patches in `third_party/mysql_async/PATCHES.md`.
+- Vendored: `mysql_async` 0.37.1 (MIT OR Apache-2.0) plus the patches in `third_party/mysql_async/PATCHES.md` (§1–§5).
 - Exact versions are whatever is current and compatible when Task 1 adds them. `Cargo.lock` is the record. Task 1's manifest table is exhaustive. Any other crate needs a ruling.
 
 **Execution (PO, 2026-11-12, nonstop mandate):**
 - Subagent-driven, in parallel waves of 3–5 worktree agents.
-- Branch `m2b` is created from `m2a` at its tip after the M2a final whole-branch review (`489b039` or later). No merge to `main` overnight (ledger ruling).
+- Branch `m2b` is cut from `m2a` at its tip after the `m2a-finalfix` worktree's work has merged into `m2a` (the M2a final review `489b039` and the CI fix `144b38c` are already in; Q45). Task branches are `m2b-<slug>`, based on `m2b`. No merge to `main` overnight (ledger ruling).
 - The PO is asleep. Every open item is settled below as a ruling (B-numbers) and listed for the PO's morning review.
 
 **Spec:** `docs/superpowers/specs/2026-11-12-hacivat-v1-design.md`. Read:
@@ -59,49 +59,51 @@ Also read:
 
 ## Global Constraints
 
-Every task's requirements include this section. `<main>` is `/Users/berkaygokce/Documents/hobby-projects/hacivat`.
+Every task's requirements include this section. `<main>` is the absolute path of the main checkout; the controller states it in every brief and in `global-constraints.md`.
 
-- **Inherited.** The M2a Global Constraints apply unchanged, except where a line below replaces one. They cover:
+- **Inherited.** The M2a Global Constraints apply unchanged, except where a line below replaces or extends one. They cover:
   - the M1 rules: GPUI pin, no Zed GPL crates, toolchain 1.98.1, no `unsafe`, ASCII-only casing (INV-3), the text rules, the Fluent grammar, semantic tokens, the named design rules, the stubs rule F31 and the test-bodies rule F9;
-  - layering; secrets; threading (§5.4); machine text; Fluent conventions; engines and versions;
-  - Docker, the full test set, execution, modal layers, Escape and paste in fields, key bindings, writes, and rate limits.
-- **Branches.** The feature branch is `m2b`. Each task works in its own worktree. Its first commands are `git checkout -B m2b-<task-slug> m2b`, then `git merge-base --is-ancestor m2b HEAD`. Stop if either fails. Never use `m2b/<slug>`: git cannot create it while `m2b` exists.
+  - layering; secrets; threading (§5.4, restated below as the Q4 ruling); machine text; Fluent conventions; engines and versions;
+  - Docker, the full test set, execution, modal layers (extended below, Q34), Escape and paste in fields, key bindings, writes, and rate limits.
+- **Branches.** The feature branch is `m2b`, cut from `m2a` after the `m2a-finalfix` work has merged into `m2a` (Q45). Each task works in its own worktree on a branch named `m2b-<slug>`. Its first commands are `git checkout -B m2b-<task-slug> m2b`, then `git merge-base --is-ancestor m2b HEAD`. Stop if either fails. Never use `m2b/<slug>`: git cannot create it while `m2b` exists.
 - **SDD files.** The ledger, `global-constraints.md` (an exact copy of this section) and the implementer and reviewer rules live in `<main>/.superpowers/sdd/2026-11-13-m2b-secure-network-sessions/`. Briefs cite them by absolute path.
-- **Target directories (M2a W4 lesson: the shared gpui `target` caused stale-artifact collisions).**
-  - Every task uses its own directory:
-    - `CARGO_TARGET_DIR=<main>/target-core/m2b-tNN` for core-only tasks;
-    - `CARGO_TARGET_DIR=<main>/target-ui/m2b-tNN` for every task that builds `gpui` (all `crates/ui` and `crates/app` tasks).
-  - No two agents ever share a target directory. **At most three gpui agents run at once** (disk).
-  - The controller deletes the per-task directories after each wave is merged.
+- **Disk and target directories (Q1; M2a W4 lesson: the shared gpui `target` caused stale-artifact collisions).**
+  - **Admission.** Before each dispatch the controller checks `df -h <main>`. A gpui agent (any task that builds `gpui`: every `crates/ui` and `crates/app` task) starts only with **≥ 25 GiB free**; a core-only agent only with **≥ 8 GiB free**. Otherwise the task queues.
+  - **At most two gpui agents run at once unless `df` shows ≥ 60 GiB free.**
+  - Every agent exports **`CARGO_INCREMENTAL=0`**.
+  - **Task 1 builds in `<main>/target`** (warm; it is the only W0 builder).
+  - Every other task uses its own **`CARGO_TARGET_DIR=<main>/target-core/m2b-tNN`** (gpui tasks included), and the controller **deletes that directory after the task merges**.
+  - No two agents ever share a target directory.
   - The controller's final verification of a wave runs in `<main>/target`, after `cargo clean -p <every crate the wave touched>`.
   - Before its own final run, each task runs `cargo clean -p <crates it touched>` in its own directory.
   - Nobody but the controller runs `cargo test --workspace`.
 - **Dependencies.**
-  - Task 1 writes every manifest change M2b needs (its Step 3 table), `deny.toml`, the `[patch.crates-io]` entry and the vendored `third_party/mysql_async/`. No later task edits a manifest, except Task 8, which edits files inside `third_party/mysql_async/src/**` only.
+  - Task 1 writes every manifest change M2b needs (its Step 3 table), `deny.toml`, the `[patch.crates-io]` entry and the vendored `third_party/mysql_async/`. No later task edits a manifest, except: Task 8, which edits files inside `third_party/mysql_async/src/**` only; and Task 13, which removes `rustls-native-certs` from `crates/core/hacivat-driver-mysql/Cargo.toml` (a removal only, once §5 makes it unused; Q2).
   - **Never run a plain `cargo update`.** Add a dependency by editing the manifest, then `cargo check`. If a bump is unavoidable, use `cargo update -p <crate> --precise <v>` and list it in the commit body.
-  - "Only additions" in `Cargo.lock`: an upward bump of an existing entry is allowed only when listed in the commit body.
+  - "Only additions" in `Cargo.lock`: an upward bump of an existing entry is allowed only when listed in the commit body. The `mysql_async` entry losing its `source` and `checksum` (it becomes a path package) is an allowed change; Task 1 lists it (Q29).
 - **Licences and crypto.**
   - The cargo-deny allow-list is unchanged.
-  - `aws-lc-rs` and `aws-lc-sys` stay banned. russh is built with its ring backend only; Task 1 proves this with `cargo tree -i aws-lc-rs` (expected: nothing).
-  - If russh's RSA support pulls the `rsa` crate (RUSTSEC-2023-0071, the Marvin timing issue), it is accepted, and ADR 0003 records why:
+  - `aws-lc-rs` and `aws-lc-sys` stay banned. russh is built with `default-features = false, features = ["ring", "rsa", "flate2"]` (Q28); Task 1 proves this with `cargo tree -i aws-lc-rs` (expected: nothing) and records `cargo tree -e features -i russh`, `cargo tree -i ring`, `cargo tree -i rsa` and `cargo tree -i pageant --target x86_64-pc-windows-msvc` in ADR 0003.
+  - russh's RSA support pulls the `rsa` crate (RUSTSEC-2023-0071, the Marvin timing issue, no fixed version). It is accepted, and ADR 0003 records why:
     - the advisory concerns RSA decryption and signing timing that an attacker measures, and Hacivat only signs SSH authentication challenges locally with the user's own key;
     - Ed25519 keys are preferred in the copy.
-  - The `deny` CI job checks licences, bans and sources (no advisories), unchanged from M2a.
+  - The `deny` CI job checks licences, bans and sources (no advisories), unchanged from M2a. RUSTSEC-2023-0071 is therefore a **documented acceptance, not a CI pass**; the ledger records it (Q45).
 - **Secrets (extended).** The M2a rules now also cover:
   - **SSH passwords, SSH key passphrases, keyboard-interactive answers** (one-time codes included), **the vault master password**, **TLS key passphrases**, and **vault contents**.
   - None of these ever appears in `connections.toml`, `known_hosts`, `vault.bin` in plain text, logs, `Debug`, panic messages, test output or snapshots. A type that holds one derives `Debug` only (redacted), never `PartialEq`.
-  - **Secret-scan invariant (M2a T7, `carries_secret`).** Task 1 makes `hacivat_driver::url::carries_secret` public. Every value that M2b reads from a file the user did not type into Hacivat passes it before it reaches a profile:
+  - **Secret-scan invariant (M2a T7, `carries_secret`).** Task 1 makes `hacivat_driver::url::carries_secret` public (in `url/native/mod.rs` and its re-export in `url/mod.rs`). Every value that M2b reads from a file the user did not type into Hacivat passes it before it reaches a profile:
     - `~/.ssh/config` values;
     - imported key paths;
     - `known_hosts` comments.
 
     A hit refuses the value: the entry gets a `ConfigIssue::SecretInValue` notice, and the value is never echoed.
-  - The vault key and the decrypted map live only in `Zeroizing` buffers. The vault file is written atomically (temp file, `fsync`, rename) with mode `0600`.
-- **Security review.** Tasks 1, 3, 4, 5, 6, 8, 9, 10, 11, 13, 14, 18, 19, 21 and 23 are security-sensitive.
+  - The vault key and the decrypted map live only in `Zeroizing` buffers or `SecretString` (the vault JSON is parsed straight into them; Q30). The vault file is written atomically (temp file, `fsync`, rename) with mode `0600`.
+  - **Session overlay (Q17).** A secret that worked for a live connection (including retention `Never`, one-time codes and a typed SSH passphrase) is kept in memory, in `SecretString`/`Zeroizing` buffers, by that profile's `SessionManager` for reconnects and side connections only. It is dropped at disconnect, `forget` and quit, and never persisted. ADR 0003 records this.
+- **Security review.** Tasks 1, 3, 4, 5, 6, 8, 9, 10, 11, 13, 14, 15 (it holds the session overlay's secrets, Q17), 18, 19, 21 and 23 are security-sensitive.
   - Their reviewers run on **opus**, with the **adversarial probes** listed in each task's "Review" line.
   - The reviewer writes and runs at least one hostile test that the implementer did not write, and reports it.
 - **ADRs.** Every security choice is recorded:
-  - `docs/decisions/0003-secure-network.md`: TLS pins and review, the plaintext question, the insecure-auth guard, channel binding, SSH, known hosts, the agent, the vault, the keyring CI and the deferrals;
+  - `docs/decisions/0003-secure-network.md`: TLS pins and review, the plaintext question, the insecure-auth guard, channel binding, SSH, known hosts, the agent, the vault, the session overlay, the keyring CI and the deferrals;
   - `docs/decisions/0004-sessions-and-read-only-guard.md`: the actor model, transaction state, cancel ladder, reconnect policy, guard layers per engine, labels, the role probe and the bypass-suite results;
   - `docs/decisions/0002-driver-crates.md`: one M2b section per driver task and one for the vendored `mysql_async`.
 
@@ -125,10 +127,14 @@ Every task's requirements include this section. `<main>` is `/Users/berkaygokce/
 
   **Named exceptions** (each edits another task's block, once):
   - Task 14 rewrites `error-conn-tls-untrusted-body` (in M2a T10's block of `hacivat-core.ftl`) back to the mock's `err-tls-b` text, now that review exists;
-  - Task 19 deletes `hv-conn-fix-require` (in M2a T20's block, EN and TR).
+  - Task 19 deletes `hv-conn-fix-require` (in M2a T20's block, EN and TR);
+  - Task 20 rewrites the `hv-conn-issue-ssh-*` placeholders, and Task 19 rewrites `hv-conn-issue-tls-key-legacy-encrypted`, in Task 1's block of `hacivat-ui.ftl` (EN and TR; Q3).
 - **Docker.**
-  - The compose project `hacivat-m2a` (`docker/m2a/`, containers `m2a-<id>`) stays the matrix (B17), and it is controller-owned. Only the controller runs `cargo xtask docker up` or `down`. Task 16 Step 5 is the one task step that may.
+  - The compose project `hacivat-m2a` (`docker/m2a/`, containers `m2a-<id>`) stays the matrix (B17), and it is controller-owned. Only the controller runs `cargo xtask docker up` or `down`. Task 16 Step 5 is the one task step that may, and it runs only after the controller confirms Task 13's Docker run is finished (Q7).
   - Tests that need a server are `#[ignore = "docker"]` and run only through `cargo xtask docker test --set pr|full [-p <crate>]`.
+  - **Set-aware targets (Q6).** A Docker test gets its targets only from `hacivat_testkit::require_target(id)` (returns `None`, with `eprintln!("skip {id}: not in set {set}")`, when the id is not in the active `HACIVAT_DOCKER_SET`; panics when the id is in the set but unhealthy) or `targets(Some(engine))`. No literal target id appears outside a `require_target` call. A target in the active set never skips silently (M2a ruling).
+  - Through SSH, a test reaches the database at the target's in-network endpoint `DockerTarget.internal` (compose service name and internal port; Task 16), never `127.0.0.1:<published port>`.
+  - Fixture roles and tables that a test needs (`hv_ro`, `hv_probe`, `hv_probe_log`) are created idempotently through the admin connection by the test's helpers, so a test never depends on a volume having been recreated (Q7).
   - In-process servers (the testkit SSH server, agent and `ChaosProxy`) need no Docker. Their tests run in plain `cargo test`.
 - **Full test set.** "All tests pass" means every line below. Each task runs the lines for the crates it touches. PR CI runs lines 1–6 and `docker-pr`. Nightly runs line 7, `docker-full` and the keyring jobs. The gate runs all of them.
   ```
@@ -143,7 +149,23 @@ Every task's requirements include this section. `<main>` is `/Users/berkaygokce/
   cargo xtask docker test --set full            # Docker (local; CI: docker-pr on PRs, docker-full nightly)
   HACIVAT_KEYRING_LIVE=1 cargo test -p hacivat-secrets -- --ignored live_keyring_round_trip   # gate, PO's Mac; CI on Linux and Windows
   ```
-- **The UI thread never awaits I/O, and nothing on the UI thread prompts the keychain** (§5.4). Every new prompt follows the `AppUiPort` pattern: the question arrives on an `mpsc` channel, and the answer leaves on a `oneshot`. A prompt closed by any means answers `Answer::Cancelled`.
+  **Every new test file compiles under plain `cargo test --workspace` (Q5):**
+  - scene-check-only asserts are `#[cfg(feature = "scene-check")]` (the M2a `connections_live.rs` pattern);
+  - unix-only tests and asserts are `#[cfg(unix)]` (`TestAgent`, `0o600` mode asserts, `std::os::unix::fs::symlink`); Windows CI runs `cargo test --workspace`;
+  - each task also runs `cargo test -p <crate> --no-run` without features;
+  - a test that needs the platform keyring state injects its backend and waits for the probe to land (`144b38c`), never the real platform keyring.
+- **Test timing (Q4, Q25).**
+  - Tests wait on a condition, never on a fixed sleep: `run_until_parked`, or a settle loop that advances the clock and re-checks a predicate (the app's `settle_until`, appended by Task 1), bounded by a timeout. Real-time sleeps are allowed only where a real server or socket sets the pace (Docker, chaos), and are then bounded.
+  - `#[tokio::test(start_paused = true)]` is used only with FakeDriver or pure state, **never with in-process servers on real sockets** (the paused clock auto-advances while the runtime waits on socket I/O and fires timeouts spuriously).
+- **Threading (Q4 ruling; restates the inherited M2a line).** The UI thread never awaits I/O, and nothing on the UI thread prompts the keychain (§5.4).
+  - **Awaiting `tokio::sync` channels (`oneshot`, `watch`, `mpsc`, `broadcast`) from GPUI foreground tasks is ALLOWED.** It is what M2a ships and it passed CI. Every new prompt follows the `AppUiPort` pattern: the question arrives on an `mpsc` channel, and the answer leaves on a `oneshot`. A prompt closed by any means answers `Answer::Cancelled`. Core-runtime calls made from the UI (vault create, unlock and reset; `KnownHosts::replace`; `read_ssh_config`) return through a `oneshot` the foreground task awaits.
+  - **The determinism requirement is met in tests:** every shared test helper that builds a shell with connections calls `cx.executor().allow_parking()` (as M2a's `shell_with_connections_prepared` does since `144b38c`), and tests wait on a condition (above), never on fixed sleeps.
+  - **Do not convert `live.rs`, `events.rs`, `interaction.rs` or `password_prompt.rs` to polling.** Timer polling is used only where there is no channel to await.
+- **Modal layers (M2b additions, Q34).**
+  - Custom prompt layers follow the M2a Dialog key-phase fix: Enter acts on key-down (bubble), never when held or with a modifier; the key-up `Enter` is suppressed in capture; Escape, Enter and Tab bubble out of a nested Select.
+  - Hard stops (host key changed, pin changed) have no Enter default other than Cancel.
+  - Row-level keys (Task 20's Alt+↑/↓) are element-level `on_key_down`, never `cx.bind_keys` (`menus::rebuild` owns bindings).
+  - Raised Ink: fingerprint insets and popovers on raised surfaces use text-2.
 - **No silent weakening.** A stub (F31) for a security layer fails closed. Examples:
   - the read-only executor stub returns `ExecErrorKind::Internal`;
   - the pin-check stub treats every pin as a mismatch;
@@ -176,7 +198,7 @@ These are the five input classes the spec implies, no test elsewhere exercises t
      - every refusal names the hop.
    - Tests:
      - `proxycommand_entries_are_listed_but_unusable`, `include_loop_stops_at_depth_8`, `match_blocks_are_skipped_with_a_notice`, `secret_looking_values_are_refused`, `hashed_entries_match` and `revoked_marker_is_a_hard_stop` (Task 4);
-     - `identities_only_tries_the_key_file_first`, `forwarding_refused_names_the_hop` and `changed_key_is_never_accepted_in_any_policy` (Task 9).
+     - `identities_only_tries_the_key_file_first`, `many_agent_keys_without_identities_only_reports_auth_with_hop`, `forwarding_refused_names_the_hop`, `server_initiated_channels_are_refused` and `changed_key_is_never_accepted_in_any_policy` (Task 9).
 3. **Certificates in the wild.**
    - Cases: a self-signed `CA:TRUE` leaf; an IP-only SAN; an expired pinned certificate; a legitimately rotated certificate on a pinned endpoint; Apple's 825-day rule; a subject with Turkish characters; TLS through SSH (SNI is the database host, never `127.0.0.1`).
    - Expected:
@@ -185,7 +207,8 @@ These are the five input classes the spec implies, no test elsewhere exercises t
      - rotation is a hard stop with old and new fingerprints;
      - subjects are shown verbatim.
    - Tests:
-     - `ca_true_self_signed_can_be_pinned`, `pin_does_not_override_expiry`, `rotated_certificate_is_pin_mismatch_with_both_fingerprints` and `turkish_subject_is_verbatim` (Task 3);
+     - `ca_true_self_signed_can_be_pinned`, `ip_only_san_can_be_pinned`, `long_validity_cert_can_be_pinned`, `pin_does_not_override_expiry`, `rotated_certificate_is_pin_mismatch_with_both_fingerprints`, `pinned_endpoint_never_allows_plaintext` and `turkish_subject_is_verbatim` (Task 3);
+     - `pin_flow_on_mysql84` (Task 13, MySQL through Hacivat's own `ClientConfig`, Q2);
      - `tls_through_ssh_sends_the_database_host_as_sni` (Task 14).
 4. **Read-only bypass attempts with no classifier.**
    - Cases: `COMMIT; DROP …`, `SET TRANSACTION READ WRITE`, MySQL DDL, `/*!50000 DROP TABLE t */`, `SELECT pg_advisory_lock(1)`, SQLite `ATTACH 'new.db'` and `VACUUM INTO`, `PRAGMA query_only=0`.
@@ -199,10 +222,11 @@ These are the five input classes the spec implies, no test elsewhere exercises t
      - a forgotten password can only reset, with a typed confirmation.
    - Tests:
      - `ssh_secrets_never_logged` (Task 9);
-     - `tampered_vault_is_untouched_and_reports_corrupt`, `newer_vault_version_is_read_only` and `wrong_master_password` (Task 6);
-    - `vault_locked_asks_unlock_then_reads` and `vault_unlock_cancel_falls_back_to_password_prompt` (Task 14);
+     - `tampered_vault_is_untouched`, `newer_vault_version_is_read_only`, `wrong_master_password` and `crafted_header_params_are_corrupt` (Task 6);
+     - `vault_locked_asks_unlock_then_reads`, `vault_unlock_cancel_falls_back_to_password_prompt` and `three_wrong_master_passwords_fall_back_to_password_prompt` (Task 14);
      - `prompted_ssh_secret_stored_only_after_success` and `connect_logs_never_contain_any_m2b_secret` (Task 14);
      - `vault_reset_needs_typed_confirmation` (Task 21).
+   - `capture_tracing` (every "never logged" test) captures at TRACE and installs the `log` bridge (`tracing_log::LogTracer`), so russh and `mysql_async` `log` records are scanned too (Q33).
 
 ## Assumptions and rulings
 
@@ -238,6 +262,8 @@ These are controller calls made while the PO is away. The PO can overrule each o
   - Pins are stored in the profile as `tls.pins = [{ endpoint = "host:port", sha256 = "<hex>" }]`. `host` is the TLS host as typed, and IPv6 goes in brackets. A fingerprint is not a secret.
   - A matching pin overrides the chain-trust and name checks. It never overrides `NotBefore` or `NotAfter` (D-005: "a pin doesn't extend the expiry date").
   - A pin is checked in every mode except Disable. Require with a pin verifies the pin.
+  - **A pin also forbids the plaintext fallback (Q13).** `build_tls_params` sets `plaintext_allowed = false` whenever `settings.pins` holds an entry for `pin_endpoint(tls_host, port)`, even with `allow_public_plaintext`. A pin means "I expect TLS with this certificate"; an `N` answer to the `SSLRequest` on a pinned endpoint fails `tls.not_supported_by_server` with fixes `[EditConnection]` and is never asked. MySQL is unaffected (its Auto fallback is loopback-only, and loopback skips pins).
+  - Pins apply to MySQL and MariaDB exactly as to PostgreSQL, through patch §5 (B10, Q2).
   - A changed certificate on a pinned endpoint is a hard stop: new class `tls.pin_changed`, with fix `ReviewCertificate`. The review dialog shows the old and the new fingerprint. Replacing the pin is an explicit action, never the default button.
 - **B6. Interactive TLS (D-005 option A).**
   - Interactive `tls.untrusted` (`UnknownIssuer`, including `CaUsedAsEndEntity` and the Apple policy codes M2a maps to it) in `Auto`, `VerifyFull` or `VerifyCa` asks `Question::Certificate`. The answers:
@@ -266,22 +292,25 @@ These are controller calls made while the PO is away. The PO can overrule each o
     - the user consented to public plaintext (B7).
   - Otherwise it is `RefuseUnlessVerified`. The driver then refuses any step that would reveal the password, unless the TLS outcome is `Full`, `CaOnly` or `Pinned`.
   - **PostgreSQL:** the `wire::Observer` refuses `R` codes 3 (cleartext) and 5 (md5) before `tokio-postgres` answers.
-  - **MySQL and MariaDB:** the vendored patch refuses RSA public-key retrieval and sending the cleartext password in the `caching_sha2_password` and `sha256_password` full-authentication paths.
-  - The result is the new class **`auth.insecure_method`**, with fixes `[ReviewCertificate, EditConnection]`.
-  - *Cost:* an md5-only private server without TLS under `Auto` now needs an explicit `Disable`. This is a behaviour change from M2a and is on the PO list.
+  - **MySQL and MariaDB:** the vendored patch §2 adds `OptsBuilder::password_guard(Option<Arc<dyn Fn() -> bool + Send + Sync>>)`. It is evaluated at the `caching_sha2_password` full-authentication point (`0x04`), before the password is sent in clear or the server's RSA key is requested. The driver supplies "outcome ∈ {Full, CaOnly, Pinned} (read from `TlsParams.outcome`) or `InsecureAuth::Allow`". `sha256_password` is not reachable in `mysql_async` (the handshake maps it to native), and `mysql_clear_password` stays off (`enable_cleartext_plugin(false)`, M2a).
+  - **The guard is outcome-based for both engines (Q20)**, never mode-based: Require with a pin is `Pinned` and is allowed.
+  - The result is the new class **`auth.insecure_method`**, with fixes `[ReviewCertificate, EditConnection]`. When TLS was up, `ConnectError.certificate` carries the presented chain's review, so "Review certificate" can pin; after the pin the outcome is `Pinned` and the guard allows the password (Q20).
+  - *Cost:* an md5-only private server without TLS under `Auto` now needs an explicit `Disable`. M2a profiles set to Require by "Encrypt without verifying" now hit `auth.insecure_method` (PostgreSQL md5/password: always; MySQL: on a `caching_sha2` cache miss); the fix is Review certificate → Pin. Both are behaviour changes from M2a and are on the PO list.
 - **B9. Channel binding.**
-  - `PgTlsStream::channel_binding()` returns `tls-server-end-point` (RFC 5929): SHA-256 of the leaf for MD5-, SHA-1- and SHA-256-signed certificates, and the signature's own hash (SHA-384 or SHA-512) otherwise. An unknown signature algorithm gives no binding.
+  - `PgTlsStream::channel_binding()` returns `tls-server-end-point` (RFC 5929): SHA-256 of the leaf for MD5-, SHA-1- and SHA-256-signed certificates, and the signature's own hash (SHA-384 or SHA-512, including `ecdsa-with-SHA512`) otherwise; RSASSA-PSS uses the hash from its parameters (Q36). Ed25519 and any unknown signature algorithm give no binding.
   - `tokio-postgres` uses `ChannelBinding::Prefer` (its default), so `SCRAM-SHA-256-PLUS` detects a man in the middle that terminates TLS, even under Require.
 - **B10. `mysql_async` is vendored, not forked.**
-  - `third_party/mysql_async/` holds 0.37.1 plus four patches, each a numbered section in `PATCHES.md` with its diff summary and an upstream PR draft:
-    1. `skip_domain_validation` matches the `NotValidForName` and `NotValidForNameContext` **variants**, not their text. This fixes VerifyCa (M2a P11).
-    2. `OptsBuilder::insecure_password_refused(bool)` (B8).
+  - `third_party/mysql_async/` holds 0.37.1 plus five patches, each a numbered section in `PATCHES.md` with its diff summary and an upstream PR draft:
+    1. `skip_domain_validation` matches the `NotValidForName` and `NotValidForNameContext` **variants**, not their text. An upstream bug fix (M2a P11); Hacivat's own VerifyCa no longer depends on it (§5).
+    2. `OptsBuilder::password_guard(Option<Arc<dyn Fn() -> bool + Send + Sync>>)`: an outcome predicate evaluated at the `caching_sha2_password` full-auth point (`0x04`); `false` refuses before the cleartext password or the RSA key request (B8, Q20).
     3. `OptsBuilder::multi_statements(bool)` drops `CLIENT_MULTI_STATEMENTS` (L3 for read-only).
     4. `OptsBuilder::local_infile_capability(bool)` drops `CLIENT_LOCAL_FILES`.
+    5. `SslOpts::with_rustls_client_config(Arc<rustls::ClientConfig>)`: when set, `build_tls_connector` returns `TlsConnector::from(cfg)` and ignores the roots, the client identity and the danger flags; the hostname override still supplies the server name. Hacivat's `TlsParams.config` is used as is: the pin-aware recording verifier (pins, presented-chain capture for review, `TlsParams.outcome`), the platform verifier, the CA file, and the client identity Hacivat decrypted (encrypted PKCS #8, B25). This is the same configuration PostgreSQL uses (Q2).
   - *Why vendor:* no git fork on the PO's GitHub account overnight, and no `allow-git` entry.
   - Upstream PRs are a PO action on the morning list.
-  - After patch 1, **VerifyCa is enabled for MySQL and MariaDB**: Validate drops the `TlsModeUnsupported` rule, and the TLS Select enables the mode.
-  - MySQL `Auto` plaintext fallback stays loopback-only (M2a ruling). Widening it is revisited at M9.
+  - **VerifyCa is enabled for MySQL and MariaDB**, running through Hacivat's own `ChainOnly` verifier via §5: Validate drops the `TlsModeUnsupported` rule, and the TLS Select enables the mode.
+  - The `rustls-native-certs` root path is removed from the MySQL connect path (the platform verifier is used, as for PostgreSQL). ADR 0002 records the removal of M2a's "OS roots vs platform verifier" difference.
+  - MySQL `Auto` plaintext fallback stays loopback-only (M2a ruling). M2a limited it because `mysql_async` sent the password on the RSA-key path; patch §2 removes that reason, so **widening it to Private is a PO question** on the morning list (Q41). Until the PO answers, the M2a rule stands.
 - **B11. SSH (HV-SEC-01, D-037).**
   - The library is `russh` with the ring backend. Auth methods: agent, key file (OpenSSH and PKCS #8, passphrase from `SecretSlot::SshPassphrase { hop }`), password and keyboard-interactive.
   - Not in v1: `ProxyCommand` (D-037: entries are shown disabled), PuTTY `.ppk` and Pageant (v1.x), and a forced local port (so `sec-ssh-forced-port-multi` is not reachable).
@@ -289,17 +318,20 @@ These are controller calls made while the PO is away. The PO can overrule each o
   - **Jump hosts** try, in order: the agent, the bastion's key file if one is set, an `IdentityFile` imported for that hop, then a password or keyboard-interactive prompt if the server offers it.
   - **Order within one hop** (`alg/01`): agent → key → password → keyboard-interactive. With `IdentitiesOnly`, the key file comes before the agent.
   - **Host keys.** Hacivat keeps its own store at `<config>/known_hosts`: OpenSSH format, `0600`, ordered writer. It reads `~/.ssh/known_hosts` and `known_hosts2` read-only, hashed entries included, and **never writes them**.
+    - `KnownHosts::load` does no I/O: the files are read lazily on the core runtime at the first `check` or `trust` (no startup file I/O on the main thread; Q42).
+    - `check` re-reads an OpenSSH file whenever its `(mtime, len)` changed since the last read (one `stat` per check, under the writer's mutex), so the copied `ssh-keygen -R` advice takes effect on the next retry without a restart (Q24).
     - Policies: `Ask` (default), `AcceptNew` and `Strict`. There is never an "accept all".
     - `AcceptNew` is an explicit user policy, so it also applies headless. It never applies to a changed key.
     - A changed key is a hard stop (`ssh.host_key_changed`). The review dialog offers to replace the old key only when that key is in Hacivat's own store. Otherwise it shows the `ssh-keygen -R` command to copy.
     - `@revoked` gives the new class **`ssh.host_key_revoked`**.
     - `@cert-authority`: host certificates are verified when russh exposes them. Otherwise the key is treated as unknown. Task 4 pins whichever behaviour holds.
     - Per-profile `UserKnownHostsFile` is not imported (v1.x).
-  - **Remote name resolution only.** The database host goes into the `direct-tcpip` request. With SSH the trail drops `Resolve` and shows `Ssh` before `Connect`, a deliberate change to the mock's `stepsFor`.
+  - **Remote name resolution only.** The database host goes into the `direct-tcpip` request. With SSH the trail drops `Resolve` and shows `Ssh` before `Connect`, a deliberate change to the mock's `stepsFor`. `ResolveStep::applies` is `false` for `TransportSpec::SshTunnel`: no local DNS lookup of the database host, which would also leak internal names (Q44).
+  - **Channel hygiene (Q46).** Hacivat never requests agent forwarding, X11, a pty, a shell or exec, and never accepts a server-initiated channel. `direct-tcpip` originator fields carry `127.0.0.1:0`, not a local address.
   - **The address class under SSH** comes from the typed database host: an IP literal is its own class, `localhost` is Loopback, and any other name is Private (it resolves inside the bastion's network). B8's guard still applies.
   - **Sharing** is keyed by the chain prefix: host, port, user, auth-identity fingerprint and policy per hop. A Test connection never shares (CONN-07).
   - **Timing.** An idle tunnel closes after a 30 s grace. Keep-alive runs every 30 s per hop, up to 3 failures. Hops are released in reverse order, on partial failure too.
-  - **SSH secrets** have their own retention, `Profile.ssh_retention` (default Forever), matching the mock's second Remember Select.
+  - **SSH secrets** have their own retention, `Profile.ssh_retention` (default Forever), matching the mock's second Remember Select. `SecretSlot::SshPassphrase { hop }` holds one passphrase per hop: the first key on that hop that needs one. ADR 0003 records the limit (Q43).
   - **MySQL through SSH** uses M2a's `LoopbackForwarder` over the tunnel factory (R18). PostgreSQL takes the channel stream directly.
 - **B12. `~/.ssh/config` import uses its own parser** (no new crate).
   - Supported:
@@ -308,14 +340,17 @@ These are controller calls made while the PO is away. The PO can overrule each o
     - `Include` with `~` and a `*` glob in the last segment only, at most 8 levels deep;
     - the keys `HostName`, `User`, `Port`, `IdentityFile`, `IdentitiesOnly`, `ProxyJump` (chains and comma lists), `ServerAliveInterval`, `StrictHostKeyChecking` (`yes` → Strict, `accept-new` → AcceptNew, `ask`/`no`/`off` → Ask, with a notice for `no`/`off`), `UserKnownHostsFile` (noted, not imported) and `ProxyCommand` (the entry is marked unusable).
   - `Match` blocks are skipped with a notice.
-  - `IdentityFile` tokens `%d %h %p %r %u %%` are expanded. Any other token makes the entry unusable.
+  - `IdentityFile` tokens `%d %h %p %r %u %%` are expanded, and `HostName` with `%h` is expanded the same way. Any other token makes the entry unusable.
+  - `IdentityAgent` (the 1Password and Secretive agents) is noted, not imported (v1.x): `ConfigNotice::IdentityAgentIgnored { alias }` tells the user why the agent is not used (Q43).
 - **B13. Vault (D-016 option A, HV-SEC-05, M2a R5).**
   - **Format.** `FileVault` at `<data>/vault.bin`:
     - header: magic `HVVAULT1`, `format_major = 1`, Argon2id `m = 65536 KiB`, `t = 3`, `p = 1`, a 16-byte salt and a 24-byte nonce;
     - body: one XChaCha20-Poly1305 blob over a JSON map from service name to secret. The header is the associated data.
+  - **The header is unauthenticated until the key is derived, so it is bounded first (Q30):** `m_kib` in 8,192–1,048,576, `t` in 1–10, `p` in 1–8, otherwise `VaultCorrupt` (a crafted `m_kib` would otherwise abort the process on allocation). Salt and nonce come from `getrandom::fill`. The decrypted JSON is parsed straight into `SecretString`/`Zeroizing<String>`, never a plain `String`.
   - **Writes** rewrite the whole file atomically.
-  - **Activation.** `FallbackBackend` uses it only when the keyring probe says unavailable, which in practice means Linux without Secret Service. The probe runs once, on the core runtime (P36). The code is cross-platform for tests.
-  - **Opt-in.** The first Forever save on such a machine opens "Create a vault". Cancelling keeps the secret Until restart, with the M2a toast.
+  - **Activation.** `FallbackBackend` uses it only when the keyring probe says unavailable, which in practice means Linux without Secret Service. The probe runs once, on the core runtime (P36). The code is cross-platform for tests. Once the vault is chosen, `FallbackBackend::probe_available()` returns `true`, so Forever stays enabled with the vault label (Q23).
+  - **Opt-in.** The first Forever save on such a machine opens "Create a vault": from the connection dialog's save (Task 21) **and** from the connect path when a prompted Forever secret is stored after success (the pipeline asks `Question::CreateVault`, Interactive only; this is the common Linux path; Q38). Cancelling keeps the secret Until restart, with the M2a toast.
+  - **Forever-put errors never become hard errors (Q38).** `VaultLocked`, `VaultReadOnly` and `VaultCorrupt` on a Forever `put` fall back to `UntilRestart` with a reason (the M2a toast). `vault.create` and `vault.unlock` run on the blocking pool (Argon2).
   - **Master password.** At least 8 characters, no other rule. Unlock lasts for the app run and is locked at quit.
   - **Attempts.** 3 per unlock gesture, with no lockout.
   - **Recovery.** A forgotten password means reset: typing the word the dialog shows deletes the vault.
@@ -340,7 +375,8 @@ These are controller calls made while the PO is away. The PO can overrule each o
   - `docker/m2a/` and the project `hacivat-m2a` stay; a rename is M9 cleanup. Task 16 adds:
     - **`sshd-a`** (published on `127.0.0.1:2222`; on the default network and on `ssh-inner`) and **`sshd-b`** (not published; on `ssh-inner` and the default network). Both come from one `docker/m2a/sshd/Dockerfile` on a digest-pinned Alpine. Host keys and the test client key pair are generated at container start into the artifacts mount, so no private key is committed and GitHub push protection is never triggered. The test user is `hv_ssh` with password `hv_ssh_pw`.
     - **`pg17-auth`**: `pg_hba` maps user `hv_md5` to `md5` and `hv_clear` to `password`, for B8.
-    - read-only roles in `docker/m2a/init`: PostgreSQL `hv_ro` (`pg_read_all_data`, `REVOKE TEMP`, `NOINHERIT`) and MySQL/MariaDB `hv_ro` (`SELECT`, `SHOW VIEW`), for the role probe.
+    - read-only roles in `docker/m2a/init`: PostgreSQL `hv_ro` (`pg_read_all_data`, `REVOKE TEMP`; it inherits, so it can read, Q21) and MySQL/MariaDB `hv_ro` (`SELECT`, `SHOW VIEW`), for the role probe. Tests also create them idempotently through the admin connection (Q7).
+    - `targets.toml` `[[target]]` gains `service` (compose name) and `internal_port`, and `DockerTarget` gains `internal: (String, u16)`, the in-network endpoint used through SSH (Q6).
   - There is no toxiproxy. `hacivat-testkit::ChaosProxy`, an in-process relay that can cut, refuse and blackhole, simulates outages without touching the controller's compose project.
   - **Every `image:`** becomes `tag@sha256:<multi-arch index digest>`, and so does every `FROM`. `cargo xtask docker pin` writes the digests; `cargo xtask docker check-pins` fails on any unpinned line.
   - **Sets:** `pr` = pg17, mysql84, sshd-a, sshd-b. `full` = everything.
@@ -351,7 +387,7 @@ These are controller calls made while the PO is away. The PO can overrule each o
   - **Idle disconnect** comes from `Profile.idle_disconnect_s`. Without it, by environment: dev 4 h, test 2 h, staging 2 h, production 1 h, local or none: off.
   - Keep-alive never counts as activity.
   - With an open transaction at the threshold there is no disconnect. Instead `SessionEvent::IdleTransaction` fires once (notify only, D-014).
-  - **Sleep and wake:** M2b detects clock jumps only (wall − monotonic > 5 s ⇒ `Suspect` ⇒ one immediate ping). OS sleep notifications and the App Nap opt-out need platform FFI, so they go to **M9**.
+  - **Sleep and wake:** M2b detects clock jumps only: `Suspect` when `wall_delta − mono_delta > 5 s` **or** `mono_delta > tick + 5 s` (on Windows, `Instant` may include suspended time, Q31) ⇒ one immediate ping. On `Suspect` with the transaction Idle, the idle threshold is compared against **wall** time since the last activity: Disconnect if exceeded, else Ping (a production profile idle for 59 minutes plus a night asleep disconnects). OS sleep notifications and the App Nap opt-out need platform FFI, so they go to **M9**.
 - **B19. Reconnect (HV-CONN-05, D-085).**
   - **Backoff:** 0, 1, 2, 4 and 8 s, then every 30 s up to 5 min, with ±20 % jitter from an injectable RNG. After that the state is `Lost`, with Retry.
   - An auth failure while reconnecting stops at once and shows Failed (no loop).
@@ -359,6 +395,7 @@ These are controller calls made while the PO is away. The PO can overrule each o
   - **Never replayed:** user statements. A statement that died in flight returns `ConnectionLost { outcome_unknown: true }`. App-internal idempotent reads are re-run once.
   - **The toast.** Every reconnect that replaced a server session fires `ConnectionEvent::SessionLost { lost }`. The toast always shows its title and body. It adds the rolled-back line only when an open transaction was lost, and the "also gone" line only when other state was lost.
   - **What counts as lost.** M2b tracks temp objects, session variables and locks from the first keyword of each user statement (`CREATE TEMP…`, `SET`, `LOCK`, `SELECT pg_advisory_lock`/`GET_LOCK`). M3 replaces the scan with the classifier.
+  - **Reconnects and side connections use the session overlay (Q17).** Each `SessionManager` keeps an in-memory overlay: the profile with every `ProfileChange` of its successful connects applied, the one-gesture plaintext consent (`ConnectPlaintext` without remember), and the `SessionSecrets` that worked. The app pushes edits with `ConnectionManager::update_profile(id, Arc<Profile>)` after every save and `apply_changes`; that replaces the overlay's profile and keeps the consent and secrets. The overlay is dropped at disconnect, `forget` and quit, and never persisted. A reconnect that still needs interaction (a one-time code, an unknown host key, a locked vault) stops with `LiveState::Lost { class }` and `needs_interaction`; the capsule's Retry starts an interactive connect. Recovery never prompts.
 - **B20. One SSH death, one reconnect per dependent.**
   - `TunnelManager` publishes `TunnelEvent::Dead { key, generation }`.
   - Recovery takes a per-transport-generation lock, so each dependent profile reconnects once, even when many sessions share the tunnel.
@@ -368,11 +405,13 @@ These are controller calls made while the PO is away. The PO can overrule each o
     - L3: PostgreSQL extended protocol; MySQL without `CLIENT_MULTI_STATEMENTS` and `CLIENT_LOCAL_FILES`, with prepared statements only (`ER_UNSUPPORTED_PS` is denied); SQLite prepares the full text and requires `stmt_readonly`;
     - L4: the per-engine wrapper from `hacivat-guard`;
     - L5: the role probe, which drives the label;
-    - L6: PostgreSQL canary, ROLLBACK check, `DISCARD ALL` and re-init; MySQL ROLLBACK, `COM_RESET_CONNECTION` and re-init; SQLite has no per-request reset.
+    - L6: PostgreSQL canary, ROLLBACK check, session reset (the `DISCARD ALL` sequence without its `DEALLOCATE ALL` step, plus deallocating SQL-level prepared statements by name, Q10) and replay of the session's environment plan (Q15); MySQL ROLLBACK, `COM_RESET_CONNECTION` and the same replay; SQLite has no per-request reset.
+  - **Transaction-control statements on a read-only session (Q35).** A user statement whose first keyword is `COMMIT`, `ROLLBACK`, `BEGIN`, `START`, `END`, `ABORT`, `SAVEPOINT` or `RELEASE` is denied before execution as `ReadOnlyDenied(Transaction)`. It is a first-keyword check, not a classifier; the canary and the post-check still catch smuggled cases.
   - **"read-only (enforced by server role)"** is shown only for PostgreSQL and MySQL when the probe finds a least-privilege role. MariaDB (C19) and SQLite (no server role) always show "guarded". Every other read-only connection shows "read-only (guarded)" with a remediation popover.
   - **An enforcement gap** taints the session, discards the connection and emits `ConnectionEvent::EnforcementGap`. Gap causes: a non-NULL canary with the classifier off (S-10), "no transaction in progress" on ROLLBACK, or a write command tag.
 - **B22. Transaction defaults.**
   - Production defaults to Manual (D-036). Everything else defaults to Auto. `Profile.tx_mode` overrides.
+  - **Read-only sessions are always Auto (Q14).** `Profile.tx_mode` and the D-036 default apply only to read-write sessions. On a read-only session, `SetMode(Manual | Smart)` and `TxCommand::Begin` are `TxError::Unsupported` (the guard owns the transaction). Otherwise SQLite's authorizer would deny Manual's `BEGIN` on every statement, and on PostgreSQL and MySQL the guard's own `BEGIN … ROLLBACK` would nest inside, or implicitly commit, the Manual transaction.
   - Manual on PostgreSQL and SQLite sends `BEGIN` before the next statement. MySQL uses `SET autocommit = 0`.
   - Switching Manual → Auto in a transaction is refused (`TxError::InProgress`).
   - Isolation changes apply at the next begin.
@@ -382,7 +421,8 @@ These are controller calls made while the PO is away. The PO can overrule each o
     - PostgreSQL: `CancelToken::cancel_query_raw` over a stream from the same `StreamFactory`, with the same TLS `Connector`;
     - MySQL and MariaDB: `KILL QUERY <id>` on a side connection opened through the pipeline with `Department::Cancel` (outside the budget, cached for 30 s);
     - SQLite: `InterruptHandle`.
-  - **Stale-cancel guard:** a cancel is sent only while the session runs that request's sequence number.
+  - **Stale-cancel guard (Q18):** `SessionHandle::cancel(seq)` and `escalate(seq, e)` name the request. A cancel is sent only while the session runs that sequence number; otherwise the answer is `AlreadyFinished`.
+  - **MySQL pre-warm (Q37):** the side connection is pre-opened once a statement has run for 500 ms, so the first cancel does not pay for a TLS and auth handshake through the tunnel. It uses the session overlay's secrets (Q17). ADR 0004 records that `KILL QUERY <id>` behind ProxySQL or MaxScale may hit another backend, and that thread ids come from the handshake's 32-bit field.
   - **Timing:** up to 2 s for a terminal state, then `CancelOutcome::StillRunning`. At 10 s, `SessionEvent::SlowCancel`.
   - `Escalation::Terminate` uses `pg_terminate_backend` or `KILL CONNECTION` on a side connection. `Escalation::Deactivate` closes the socket and marks the session Broken.
   - The UI for all of this is M3 (B1).
@@ -391,7 +431,13 @@ These are controller calls made while the PO is away. The PO can overrule each o
   - Encrypted PKCS #8 (PBES2) keys are supported, with the passphrase in `SecretSlot::TlsKeyPassphrase`. When none is stored, an Interactive connect asks for it.
   - Legacy OpenSSL `Proc-Type: 4,ENCRYPTED` keys are refused with the new `IssueCode::TlsKeyLegacyEncrypted`.
   - The dialog shows the passphrase field again, reversing M2a T17's ruling.
-- **B26. Paths.** Validate canonicalizes every TLS, SQLite and SSH key path with `std::fs::canonicalize` before it checks `ApprovedRoots`, for untrusted origins. A symlink that escapes the roots is `PathRefused`. Paths are still shown as the user typed them. (Ledger: T15 note to M2b.)
+- **B26. Paths (Q22).** For untrusted origins, Validate checks every TLS, SQLite and SSH key path against `ApprovedRoots` on canonical forms. (Ledger: T15 note to M2b.)
+  - Both the path and **every root** are canonicalised (`std::fs::canonicalize`), so macOS `/var/folders/…` → `/private/var/…` matches on both sides.
+  - A `VerbatimDisk` prefix is stripped back to `Disk` (`\\?\C:\` → `C:\`) by a small local helper (no new crate).
+  - M2a's text and prefix rules (including the SQLite `\\` rule) run on the **typed** path; the containment check runs on the canonical forms.
+  - A missing file (a new SQLite file) canonicalises its parent directory and appends the file name.
+  - A path that canonicalises to a UNC, device or verbatim-UNC prefix is `PathRefused`, and so is a symlink that escapes the roots.
+  - Paths are still shown as the user typed them.
 - **B27. pgpass.** An empty password field is `None`, not `Some("")` (libpq parity; ledger, T19 follow-up). The default socket directories stay as T8 mapped them.
 - **B28. Mocks.** New surfaces are mocked in `design/m2b-secure/` (Task 2) in the harman world, with the M2a mock bar. Under the overnight ruling the controller approves them, and the PO reviews the links in the morning. The PO-approved M2a surfaces 5 and 6 are not re-mocked.
 - **B29. The capsule's reconnecting state does not exist in code yet.** `hacivat-ui/src/capsule.rs:119` has no such variant. Task 1 adds `CapsuleModel::Reconnecting`, and Task 22 renders it. The other M2a seams exist as named and are used:
@@ -456,9 +502,13 @@ M2a surfaces 5 (TLS certificate decision, public-host-without-TLS, unencrypted b
 ## Waves
 
 The work is interface-first. Task 1 commits every cross-task type and signature with fail-closed stubs (F31). It also provides working minimal versions of the helpers that same-wave tasks consume:
-- `FakeDriver` execution scripting;
-- the app's `interaction.rs` routing;
-- the app's `events.rs` dispatch;
+- `FakeDriver` execution scripting (consume-once entries, Q23);
+- `hacivat_guard::plan_for`, as a constant table with Task 5's exact values (pure data, fail-closed by construction; Q8), so Task 7's environment-plan test is green in W1;
+- `hacivat_testkit::require_target` (Q6), so Docker tests written in W2 are set-aware before Task 16 lands;
+- the app's `interaction.rs` routing and `events.rs` dispatch (awaiting `tokio::sync` channels, the Q4 ruling);
+- the app's `dialog::open_edit(id, DialogFocus, ..)` seam and the `fixes.rs` wiring of `ConnectThroughSsh` and `ReviewHostKey` (Q9), so Tasks 19 and 20 never edit each other's files;
+- `ConnectionsModel` storing typed SSH secrets on save, and its `known_hosts()`/`tunnels()` accessors (Q23);
+- the `settle_until` test helper (Q4);
 - the vendored `mysql_async` (unpatched);
 - every manifest and `deny.toml`;
 - the ADR 0003/0004 skeletons;
@@ -466,29 +516,29 @@ The work is interface-first. Task 1 commits every cross-task type and signature 
 
 | Wave | Runs | Tasks (parallel agents; model) | Unblocked by |
 |---|---|---|---|
-| W0 | 2 | **T1** interface commit (opus) · **T2** mocks for new surfaces (opus) | — |
+| W0 | 2 | **T1** interface commit (opus; `CARGO_TARGET_DIR=<main>/target`) · **T2** mocks for new surfaces (opus) | — |
 | W1 | 5 | **T3** TLS pins, review, encrypted keys (opus) · **T4** SSH config import and known hosts (opus) · **T5** `hacivat-guard` (opus) · **T6** vault, fallback backend, pgpass (opus) · **T7** session actor core: queue, tx, cancel, env, schema, reset (opus) | T1 merged |
 | W2 | 5 | **T8** `mysql_async` patches (sonnet) · **T9** SSH `TunnelManager` and testkit SSH server and agent (opus; T4) · **T10** PostgreSQL driver M2b (opus) · **T11** SQLite driver M2b (opus; T5) · **T12** profiles, store, Validate (opus) | W1 merged |
-| W3 | 4 | **T13** MySQL/MariaDB driver M2b (opus; T8) · **T14** pipeline: interactive TLS, plaintext question, SSH transport, secrets, insecure-auth policy, new classes (opus; T3, T6, T9, T12) · **T15** `SessionManager`, router, pools (opus; T7) · **T16** Docker matrix, digests, CI matrix and keyring jobs, `ChaosProxy` (sonnet) | W2 merged |
+| W3 | 4 | **T13** MySQL/MariaDB driver M2b (opus; T8) · **T14** pipeline: interactive TLS, plaintext question, SSH transport, secrets, insecure-auth policy, new classes (opus; T3, T6, T9, T12) · **T15** `SessionManager`, router, pools (opus; T7) · **T16** Docker matrix, digests, CI matrix and keyring jobs, `ChaosProxy` (sonnet). **T16 Step 5 runs last in W3**, after T13's Docker run (Q7) | W2 merged |
 | W4 | 5 | **T17** liveness, recovery, `ConnectionManager` integration (opus; T15, T9) · **T18** guarded read-only execution and role probe (opus; T5, T10, T11, T13) · **T19** TLS UI (opus, gpui; T14) · **T20** SSH settings UI (opus, gpui; T12, T4) · **T21** SSH and vault prompts (opus, gpui; T14, T6) | W3 merged |
 | W5 | 2 | **T22** live-state UI: reconnecting, session lost, idle, read-only labels, SSH path (opus, gpui; T17, T18) · **T23** conformance suite over Docker (opus; all core) | W4 merged |
 | W6 | 1 | **T24** shots, cross-surface tests, DESIGN.md (opus, gpui) | W5 merged |
 | W7 | 1 | **T25** M2b gate (sonnet, with controller) | everything |
 
-W4 runs three gpui agents (T19, T20, T21), which is the maximum.
+W4 runs at most two gpui agents at once unless `df` shows ≥ 60 GiB free (Q1); T21 starts when T19 or T20 finishes. Every dispatch passes the disk admission rule (Global Constraints).
 
 File ownership. "Owns" means creates or modifies; anything not listed belongs to Task 1.
-- **T1:** see its Files.
+- **T1:** see its Files, which list every site its new variants, fields, signatures and seams touch (Q3, Q9, Q40).
 - **T2:** `design/m2b-secure/{index.html,NOTES.md}`.
 - **T3:** `crates/core/hacivat-net/src/tls.rs` and `crates/core/hacivat-net/tests/{tls_pins,tls_review}.rs`.
 - **T4:** `crates/core/hacivat-net/src/ssh/{config,known_hosts}.rs` and `crates/core/hacivat-net/tests/{ssh_config,known_hosts}.rs`.
 - **T5:** `crates/core/hacivat-guard/src/**` (except `lib.rs` module lines) and `crates/core/hacivat-guard/tests/**`.
 - **T6:**
-  - `crates/core/hacivat-secrets/src/backend/{vault,fallback}.rs`;
+  - `crates/core/hacivat-secrets/src/backend/{vault,fallback,mod}.rs` and `crates/core/hacivat-secrets/src/store.rs` (`backend_choice`, `vault()`, the Forever-put fallback);
   - `crates/core/hacivat-secrets/src/files/pgpass.rs` (empty password);
   - `crates/core/hacivat-secrets/tests/{vault,fallback}.rs` and `tests/pgpass.rs` (append).
 - **T7:** `crates/core/hacivat-session/src/session/{actor,tx,cancel,env,schema,reset}.rs` and `crates/core/hacivat-session/tests/{session_actor,tx,cancel,env_schema}.rs`.
-- **T8:** `third_party/mysql_async/src/**` and `third_party/mysql_async/PATCHES.md`.
+- **T8:** `third_party/mysql_async/src/**`, `third_party/mysql_async/PATCHES.md`, `crates/core/hacivat-driver-mysql/tests/patches.rs` and `crates/core/hacivat-driver-mysql/tests/docker_mysql.rs` (the superseded test's `#[ignore]` only).
 - **T9:**
   - `crates/core/hacivat-net/src/ssh/tunnel.rs` and `crates/core/hacivat-net/tests/ssh_tunnel.rs`;
   - `crates/core/hacivat-testkit/src/{ssh_server,agent}.rs`.
@@ -503,25 +553,28 @@ File ownership. "Owns" means creates or modifies; anything not listed belongs to
   - `crates/core/hacivat-session/src/pipeline/{mod,steps}.rs` and new `pipeline/{ssh_step,prompts}.rs`;
   - `crates/core/hacivat-driver/src/errors.rs` and `crates/core/hacivat-driver/catalog/errors.toml`;
   - the `hacivat-core.ftl` blocks (EN, TR) and the named exception;
+  - `crates/core/hacivat-session/src/test_conn.rs`;
   - `crates/core/hacivat-session/tests/{pipeline_tls,pipeline_ssh,pipeline_secrets}.rs`.
-- **T15:** `crates/core/hacivat-session/src/session/{router,pool}.rs` and `crates/core/hacivat-session/tests/{router,pool}.rs`.
+- **T15:** `crates/core/hacivat-session/src/session/{router,pool}.rs` (with the session overlay) and `crates/core/hacivat-session/tests/{router,pool}.rs`.
 - **T16:**
   - `docker/m2a/**` (new `sshd/`, `pg-auth/`, init blocks, digests);
-  - `crates/core/hacivat-testkit/src/{lib,chaos}.rs`;
-  - `xtask/src/docker.rs` (`pin`, `check-pins`, sets);
+  - `crates/core/hacivat-testkit/src/{lib,chaos}.rs` (except T1's `require_target`) and `crates/core/hacivat-testkit/tests/{targets,chaos,ssh_targets}.rs`;
+  - `xtask/src/docker.rs` (`pin`, `check-pins`, sets) and `xtask/src/main.rs` (one arm);
   - `.github/workflows/ci.yml` (its blocks).
 - **T17:**
   - `crates/core/hacivat-session/src/session/{liveness,recovery}.rs` and `crates/core/hacivat-session/src/manager.rs`;
   - `crates/core/hacivat-session/tests/{liveness,recovery,manager_m2b}.rs`.
 - **T18:** `crates/core/hacivat-session/src/session/readonly.rs` and `crates/core/hacivat-session/tests/readonly.rs`, plus `tests/docker_readonly.rs`.
 - **T19:**
-  - `crates/app/hacivat-app/src/connections/{cert_dialog,plaintext_prompt,fixes,error_view}.rs` and `dialog/{mod,form}.rs`;
+  - `crates/app/hacivat-app/src/connections/{cert_dialog,plaintext_prompt,fixes,error_view}.rs` and `dialog/{mod,form}.rs` (except T1's `open_edit` seam and its two `fixes.rs` lines);
   - `model.rs` (`apply_changes` only);
   - `crates/app/hacivat-app/tests/connections_tls.rs`.
 - **T20:** `crates/app/hacivat-app/src/connections/dialog/ssh.rs` and `crates/app/hacivat-app/tests/connections_ssh_form.rs`.
 - **T21:** `crates/app/hacivat-app/src/connections/{hostkey_prompt,kbd_prompt,secret_prompt,vault_dialog}.rs` and `crates/app/hacivat-app/tests/connections_prompts.rs`.
 - **T22:**
-  - `crates/app/hacivat-app/src/connections/{session_toasts,live,capsule,sheet,status,explorer}.rs`;
+  - `crates/app/hacivat-app/src/connections/{session_toasts,live,capsule,sheet,status,explorer}.rs` (`live.rs` keeps awaiting its `watch` channel, Q4 ruling);
+  - `crates/app/hacivat-app/src/connections/boot.rs` (the named lines only: `ManagerConfig::m2b()` and the Linux `FallbackBackend`);
+  - `crates/app/hacivat-app/src/commands/debug.rs` (the debug-build cancel demo commands, Q39);
   - `crates/ui/hacivat-ui/src/capsule.rs` (`Reconnecting` rendering);
   - `crates/app/hacivat-app/tests/connections_live_m2b.rs`.
 - **T23:** `crates/core/hacivat-session/tests/docker_m2b_*.rs`.
@@ -536,11 +589,11 @@ Each UI task (T19–T22) appends its own FTL block, and owns the shots fixtures 
 
 ```
 hacivat/
-  Cargo.toml                         # + russh, x509-parser, sha2, pkcs8, chacha20poly1305, argon2, rand_core, hmac, sha1;
+  Cargo.toml                         # + russh, x509-parser, sha2, pkcs8, chacha20poly1305, argon2, getrandom, hmac, sha1;
                                      #   hacivat-guard; [patch.crates-io] mysql_async = { path = "third_party/mysql_async" };
                                      #   [workspace] exclude = ["third_party"]
   deny.toml                          # unchanged bans; comment on rsa (Global Constraints, licences and crypto)
-  third_party/mysql_async/           # 0.37.1 + PATCHES.md (T1 copies, T8 patches)
+  third_party/mysql_async/           # 0.37.1 + PATCHES.md §0–§5 (T1 copies pristine, T8 patches)
   docker/m2a/{compose.yml, targets.toml, sshd/{Dockerfile,entrypoint.sh,sshd_config}, pg-auth/{pg_hba.conf,init.sql}, init/*.sql}
   docs/decisions/{0003-secure-network.md, 0004-sessions-and-read-only-guard.md}
   design/m2b-secure/{index.html, NOTES.md}
@@ -550,7 +603,7 @@ hacivat/
     hacivat-net/src/tls.rs                           # pins, presented chain, review, encrypted keys
     hacivat-net/src/ssh/{mod, config, known_hosts, tunnel}.rs                     # NEW
     hacivat-secrets/src/backend/{vault, fallback}.rs; files/pgpass.rs
-    hacivat-driver/src/{driver, errors, fake}.rs; url/mod.rs (pub carries_secret); catalog/errors.toml
+    hacivat-driver/src/{driver, errors, fake}.rs; url/{mod, native/mod}.rs (pub carries_secret); catalog/errors.toml
     hacivat-driver-pg/src/{wire, exec, cancel}.rs    # NEW files; connect/tls/probe extended
     hacivat-driver-mysql/src/exec.rs                 # NEW; connect/tls extended
     hacivat-driver-sqlite/src/{harden, exec}.rs      # NEW; open extended
@@ -561,6 +614,7 @@ hacivat/
   crates/ui/hacivat-ui/src/capsule.rs               # + Reconnecting
   crates/app/hacivat-app/src/connections/{cert_dialog, plaintext_prompt, hostkey_prompt, kbd_prompt, secret_prompt,
                                           vault_dialog, session_toasts, events}.rs, dialog/ssh.rs           # NEW
+  crates/app/hacivat-app/src/commands/debug.rs      # + debug-build cancel demo (T22, Q39)
   locales/{en,tr}/{hacivat-ui,hacivat-core}.ftl     # appended blocks
   xtask/src/{docker.rs, check_deps.rs}
   docs/benchmarks/{m2b.md, po-demo-m2b.md}
@@ -568,6 +622,8 @@ hacivat/
 
 ---
 ### Task 1: Interface commit (types, stubs, manifests, vendored driver, app routing)
+
+**Build:** `CARGO_TARGET_DIR=<main>/target` (warm; the only W0 builder), `CARGO_INCREMENTAL=0` (Q1).
 
 **Files:**
 - Create:
@@ -578,23 +634,48 @@ hacivat/
   - `crates/core/hacivat-session/src/session/{mod,actor,tx,cancel,env,schema,reset,router,pool,liveness,recovery,readonly}.rs`, `crates/core/hacivat-session/src/pipeline/{ssh_step,prompts}.rs`
   - `crates/core/hacivat-testkit/src/{ssh_server,agent,chaos}.rs`
   - `crates/app/hacivat-app/src/connections/{cert_dialog,plaintext_prompt,hostkey_prompt,kbd_prompt,secret_prompt,vault_dialog,session_toasts,events}.rs`, `crates/app/hacivat-app/src/connections/dialog/ssh.rs`
-  - `third_party/mysql_async/**`: a pristine copy of `~/.cargo/registry/src/*/mysql_async-0.37.1`. Its `Cargo.toml` drops `[dev-dependencies]`, `[[test]]`, `[[bench]]` and `[[example]]`. `PATCHES.md` starts with §0, "vendored copy, test and bench sections removed".
+  - `third_party/mysql_async/**`: a pristine copy of `~/.cargo/registry/src/*/mysql_async-0.37.1` (Q29).
+    - Its `Cargo.toml` drops `[dev-dependencies]`, `[[test]]`, `[[bench]]`, `[[example]]` and `[profile.bench]` (cargo warns on every build about profiles in a non-root package).
+    - The copy omits `Cargo.toml.orig`, `Cargo.lock`, `azure-pipelines.yml` and `tests/`.
+    - `PATCHES.md` starts with §0, "vendored copy, test, bench and CI files removed", and lists §1–§5 as "Task 8".
+    - **Q2 note:** T1 copies the source unmodified and makes no TLS change in `hacivat-driver-mysql`. Patch §5 (`SslOpts::with_rustls_client_config`, Task 8) is the hook through which MySQL later uses Hacivat's own `TlsParams.config`; Task 13 wires it.
   - `docs/decisions/0003-secure-network.md` and `docs/decisions/0004-sessions-and-read-only-guard.md`: Status, Context, and a Rule heading naming the per-task section format.
-  - Test files: `crates/core/hacivat-session/tests/m2b_interfaces.rs` and `crates/app/hacivat-app/tests/m2b_routing.rs`.
-- Modify:
-  - `Cargo.toml` (workspace deps, `exclude`, `[patch.crates-io]`) and `deny.toml` (comments only, unless `cargo deny` needs more; then a ruling);
-  - the manifests of `hacivat-{net,secrets,driver-sqlite,session,testkit}` (Step 3 table);
+  - Test files: `crates/core/hacivat-session/tests/m2b_interfaces.rs`, `crates/core/hacivat-testkit/tests/require_target.rs` and `crates/app/hacivat-app/tests/m2b_routing.rs`.
+- Modify, workspace and manifests:
+  - `Cargo.toml` (workspace deps, `exclude = ["third_party"]`, `[patch.crates-io]`) and `deny.toml` (comments only, unless `cargo deny` needs more; then a ruling). `exclude` is essential: otherwise the path crate becomes a workspace member, and clippy `-D warnings` and the `check-deps` rules `UnknownLayer`/`MissingWorkspaceLints` hit `mysql_async` (Q29).
+  - `Cargo.lock`: the `mysql_async` entry loses `source` and `checksum`; list it in the commit body (Q29).
+  - the manifests of `hacivat-{net,secrets,driver,driver-sqlite,session,testkit,app}` (Step 3 table).
+- Modify, core types and stubs:
   - `crates/core/hacivat-proto/src/lib.rs`;
-  - `crates/core/hacivat-net/src/{lib,tls}.rs` (types and the new signature only; behaviour unchanged);
-  - `crates/core/hacivat-driver/src/{driver,errors,fake,lib}.rs` and `url/mod.rs`;
+  - `crates/core/hacivat-net/src/{lib,tls,address}.rs` (types, the new `build_tls_params` signature, `ssh_address_class`; behaviour unchanged);
+  - `crates/core/hacivat-driver/src/{driver,errors,fake,lib}.rs`, `url/mod.rs` and **`url/native/mod.rs`** (`carries_secret` from `pub(super)` to `pub`, Q3);
   - `crates/core/hacivat-driver/catalog/errors.toml` (three `reachable = false` entries);
   - the three driver crates (trait stubs);
-  - `crates/core/hacivat-session/src/{lib,manager}.rs`, `pipeline/{mod,interaction,trail,validate,steps}.rs` (types; PostConnect calls `session::readonly::access_for`) and `profile/mod.rs`;
-  - `crates/core/hacivat-secrets/src/{lib,backend/mod,backend/vault}.rs`;
+  - `crates/core/hacivat-session/src/{lib,manager}.rs` (`PathKind` already exists in `manager.rs` with `Direct`; T1 adds `Ssh` there and `LiveConnection.path` reuses it), `pipeline/{mod,interaction,trail,validate,steps}.rs` (types; PostConnect calls `session::readonly::access_for`; the `Answer` match at `steps.rs:341-342` gains a `_ =>` arm that cancels; `validate.rs::tls_issue` gains the new `TlsSetupError` arms) and `profile/mod.rs` (`ProfileDraft.ssh_secrets`);
+  - `crates/core/hacivat-session/src/profile/store.rs` (minimal: parse and write `transport = "ssh_tunnel"` with an empty `SshSpec`, at `store.rs:669` and `:866`; Task 12 owns the real `[ssh]` table);
+  - `crates/core/hacivat-secrets/src/{lib,store,backend/mod,backend/vault}.rs` (`SecretBackend::choice`, `SecretStore::vault`);
+  - `crates/core/hacivat-testkit/src/lib.rs` (`require_target`, working; Q6);
   - `crates/ui/hacivat-ui/src/capsule.rs` (the variant, with a minimal render);
-  - `crates/app/hacivat-app/src/connections/{mod,interaction}.rs` and `dialog/form.rs` (one hook line for the SSH section);
-  - `xtask/src/check_deps.rs` (the `hacivat-guard` rule);
+  - `xtask/src/check_deps.rs` (the `hacivat-guard` rule).
+- Modify, app (minimal arms, renames, seams and fields only; Q3, Q9, Q23):
+  - `crates/app/hacivat-app/src/connections/{mod,interaction,events}.rs`;
+  - `connections/report.rs` (`TlsVerified::Pinned` arm at `:267-269`) and `connections/capsule.rs` (`TlsVerified::Pinned` at `:118-123`; `LiveState::Reconnecting` at `:173,240,250`);
+  - `connections/{commands,status,explorer}.rs` and `connections/error_view.rs` (`LiveState::Reconnecting` arms at `commands.rs:203`, `error_view.rs:445,478`, `status.rs:62`, `explorer.rs:645`; the new `ConnectError`/`ErrArgs` fields in the `src` tests at `error_view.rs:1175,1277`);
+  - `connections/password_prompt.rs` (`PasswordRequest` → `PromptRequest` at `:28,265,274`; the irrefutable `let Question::Password` at `:66` becomes a `match` that answers `Cancelled` for other variants);
+  - `connections/boot.rs` (`ConnectDeps.{tunnels, known_hosts}`: `KnownHosts::load(..)`, which does no I/O, and `TunnelManager::new`, at `:142-153`; Q23, Q42);
+  - `connections/fixes.rs` (the arms `ReviewCertificate`, `ImportCa`, `ConnectThroughSsh` and `ReviewHostKey`; `ConnectThroughSsh` → `dialog::ssh::open_with_ssh` and `ReviewHostKey` → `hostkey_prompt::review_changed`, one line each; Q9);
+  - `connections/dialog/mod.rs` (the seam `open_edit(id, DialogFocus, window, cx)`, with a working `Default`; Q9) and `dialog/form.rs` (one hook line for the SSH section; `issue_text` arms at `:596-617` for the five new `IssueCode`s, mapped to Task 1's placeholder messages);
+  - `connections/model.rs` (`ConnectionsModel::{known_hosts, tunnels}`; `save` stores `ProfileDraft.ssh_secrets` under `SecretSlot::{SshPassword, SshPassphrase} { hop }` with `ssh_retention`, about 15 lines mirroring the DB password; `save` calls `vault_dialog::ensure_vault_before_forever` (one line) and `ConnectionManager::update_profile` (one line, Q17); Q23);
+  - `crates/app/hacivat-app/tests/connections_errors.rs` (`:234`, the new `ConnectError` fields);
+  - `crates/app/hacivat-app/tests/support/mod.rs` (append block `// ## m2b-t01-interfaces`: `settle_until(vcx, timeout, pred)`, which loops `allow_parking`, a short real sleep, `advance_clock(16 ms)` and `run_until_parked` until `pred` holds, and panics with the predicate's name on timeout; Q4).
+- Modify, existing tests that the new variants, fields and signature break (Q3):
+  - `TransportSpec::SshTunnel` unit-variant uses: `crates/core/hacivat-session/tests/profiles.rs:183` and `tests/common/mod.rs:363`;
+  - `Question` irrefutable `let`: `crates/core/hacivat-session/tests/common/mod.rs:547`;
+  - `ConnectDeps { .. }` literals: `crates/core/hacivat-session/tests/{common,docker_support}/mod.rs` (and `pipeline/mod.rs`);
+  - `DriverConnect { .. }` literals (33 in 9 files; add `insecure_auth`): `hacivat-driver/src/{driver,fake}.rs`, `hacivat-driver-sqlite/src/lib.rs`, `hacivat-driver-sqlite/tests/sqlite.rs`, `hacivat-driver-pg/tests/{unit,docker_pg}.rs`, `hacivat-driver-mysql/tests/{unit,docker_mysql}.rs`, `hacivat-session/src/pipeline/steps.rs`;
+  - `build_tls_params(` with five arguments (about 40 calls): `hacivat-net/tests/tls.rs`, `hacivat-driver-pg/tests/{unit,docker_pg}.rs`, `hacivat-driver-mysql/tests/{unit,docker_mysql}.rs`, `hacivat-session/src/pipeline/{steps,validate}.rs` (`steps.rs:615`, `validate.rs:203`);
   - every `TlsSettings { … }` and `Profile { … }` literal in the workspace (add `..Default::default()`).
+- Modify, locales: `locales/{en,tr}/hacivat-ui.ftl`, block `## m2b-t01-interfaces`: placeholder messages `hv-conn-issue-ssh-host-missing`, `-ssh-user-missing`, `-ssh-too-many-hops`, `-ssh-key-file-missing` and `hv-conn-issue-tls-key-legacy-encrypted`, each with `# Review: PO` (typed message ids exist only for messages in `locales/en`). Task 20 and Task 19 rewrite their text (named exception).
 
 **Interfaces (Produces; every later task consumes these names).** Derives follow M2a Task 1:
 - every data type derives `Debug, Clone, PartialEq`, plus `Eq, Hash` where the fields allow, `Copy` for fieldless enums, and `Default` where a default is named;
@@ -619,6 +700,9 @@ pub struct TlsParams { /* M2a fields */ .., pub presented: Arc<Mutex<Option<Pres
 pub enum TlsSetupError { /* M2a */ .., KeyEncryptedLegacy(PathBuf), KeyPassphraseWrong(PathBuf) }
 pub fn build_tls_params(settings: &TlsSettings, tls_host: &str, port: u16, class: AddressClass,
                         key_passphrase: Option<&SecretString>) -> Result<Option<TlsParams>, TlsSetupError>;
+                                                                           // T3: a pin for pin_endpoint(tls_host, port) forces
+                                                                           // plaintext_allowed = false (Q13). TlsParams.config is
+                                                                           // also what MySQL uses, via vendored patch §5 (Q2)
 pub fn pin_endpoint(tls_host: &str, port: u16) -> String;                  // "db:5432", "[::1]:5432"
 pub fn cert_sha256(der: &[u8]) -> [u8; 32];
 pub fn fingerprint_lines(sha256: &[u8; 32]) -> [String; 2];                // "AB:CD:…" 16 bytes per line
@@ -628,6 +712,9 @@ pub struct CertReview { pub endpoint: String, pub subject: String, pub issuer: S
                         pub not_after_unix: i64, pub sha256: [u8; 32], pub chain: Vec<ChainEntry>, pub pinned: Option<[u8; 32]> }
 pub fn cert_review(chain: &PresentedChain, endpoint: &str, pinned: Option<[u8; 32]>) -> Option<CertReview>;
 pub fn tls_server_end_point(leaf_der: &[u8]) -> Option<Vec<u8>>;           // RFC 5929 (B9)
+
+// hacivat-net::address (working in T1)
+pub fn ssh_address_class(host: &str) -> AddressClass;   // B11: IP literal → its own class, "localhost" → Loopback, other names → Private
 
 // hacivat-net::ssh (T4: config, known_hosts; T9: tunnel)
 pub enum SshAuth { Agent, KeyFile { path: PathBuf }, Password, KeyboardInteractive }
@@ -641,14 +728,18 @@ pub enum KnownSource { Hacivat, OpenSsh { path: PathBuf, line: usize } }
 pub enum HostKeyCheck { Known(KnownSource), Unknown, Changed { old: HostKey, source: KnownSource }, Revoked { source: KnownSource } }
 pub struct KnownHosts { .. }
 impl KnownHosts {
-    pub fn load(openssh_files: Vec<PathBuf>, hacivat_file: PathBuf) -> Arc<KnownHosts>;
+    pub fn load(openssh_files: Vec<PathBuf>, hacivat_file: PathBuf) -> Arc<KnownHosts>;   // no I/O (Q42): files are read lazily
+                                                       // at the first check/trust, and an OpenSSH file is re-read when its
+                                                       // (mtime, len) changed (Q24)
     pub fn check(&self, host: &str, port: u16, key: &HostKey) -> HostKeyCheck;
     pub fn trust(&self, host: &str, port: u16, key: &HostKey) -> io::Result<()>;           // Hacivat store only
     pub fn replace(&self, host: &str, port: u16, old: &HostKey, new: &HostKey) -> io::Result<()>;  // Hacivat store only
     pub fn hacivat_path(&self) -> &Path;
 }
 pub enum ConfigIssue { ProxyCommand, UnsupportedToken(String), SecretInValue, IncludeTooDeep, NoHostName }
-pub enum ConfigNotice { MatchSkipped { line: usize }, UserKnownHostsIgnored { alias: String }, StrictNoMappedToAsk { alias: String } }
+pub enum ConfigNotice { MatchSkipped { line: usize }, UserKnownHostsIgnored { alias: String }, StrictNoMappedToAsk { alias: String },
+                       IdentityAgentIgnored { alias: String },                            // Q43
+                       IncludeTooDeep { line: usize } }                                   // Q32: the Include loop is visible
 pub struct SshConfigHost { pub alias: String, pub hostname: Option<String>, pub port: Option<u16>, pub user: Option<String>,
                            pub identity_files: Vec<PathBuf>, pub identities_only: bool, pub proxy_jump: Vec<String>,
                            pub server_alive_interval: Option<u32>, pub strict_host_key_checking: Option<HostKeyPolicy>,
@@ -690,7 +781,9 @@ impl TunnelLease { pub fn factory(&self, host: &str, port: u16) -> StreamFactory
 
 // hacivat-secrets
 SecretError::{ /* M2a */ .., VaultLocked, VaultCorrupt, WrongMasterPassword, VaultReadOnly }
-pub trait SecretBackend { /* M2a */ ..; fn as_vault(&self) -> Option<&dyn VaultBackend> { None } }
+pub trait SecretBackend { /* M2a */ ..; fn as_vault(&self) -> Option<&dyn VaultBackend> { None }
+    fn choice(&self) -> Option<BackendChoice> { None } }   // Q23: KeyringBackend → Some(Keyring) once probed; MemoryBackend →
+                                                           // Some(Memory); FallbackBackend delegates to its probed choice
 pub trait VaultBackend: SecretBackend { fn exists(&self) -> bool; fn is_unlocked(&self) -> bool;
     fn create(&self, master: SecretString) -> Result<(), SecretError>; fn unlock(&self, master: SecretString) -> Result<(), SecretError>;
     fn lock(&self); fn reset(&self) -> Result<(), SecretError>; }
@@ -698,9 +791,11 @@ pub struct VaultParams { pub m_kib: u32, pub t: u32, pub p: u32 }            // 
 pub struct FileVault { .. }  impl FileVault { pub fn open(path: PathBuf) -> FileVault; pub fn with_params(path: PathBuf, p: VaultParams) -> FileVault }
 pub enum BackendChoice { Keyring, Vault, Memory }
 pub struct FallbackBackend { .. }
-impl FallbackBackend { pub fn new(keyring: Arc<dyn SecretBackend>, vault: Arc<FileVault>, probe: Box<dyn Fn() -> bool + Send + Sync>) -> Self;
-                       pub fn choice(&self) -> Option<BackendChoice> }
-impl SecretStore { pub fn backend_choice(&self) -> Option<BackendChoice> }   // None until probed
+impl FallbackBackend { pub fn new(keyring: Arc<dyn SecretBackend>, vault: Arc<FileVault>, probe: Box<dyn Fn() -> bool + Send + Sync>) -> Self }
+                       // SecretBackend::probe_available() is true when the vault is chosen, so Forever stays enabled with
+                       // the vault label (Q23); choice() and as_vault() come through the trait
+impl SecretStore { pub fn backend_choice(&self) -> Option<BackendChoice>;    // None until probed (reads SecretBackend::choice)
+                   pub fn vault(&self) -> Option<&dyn VaultBackend> }        // Q23; T21 and T14 reach the vault through it
 
 // hacivat-driver
 pub enum TxStatus { #[default] Idle, InTx, Failed }
@@ -716,11 +811,14 @@ pub trait RawConn { /* M2a */ ..;
     fn execute<'a>(&'a mut self, sql: &'a str, opts: ExecOpts) -> BoxFuture<'a, Result<ExecSummary, RawError>>;
     fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>>;     // trusted control text, simple protocol
     fn tx_status(&self) -> TxStatus;
-    fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>>;                           // DISCARD ALL / COM_RESET_CONNECTION / no-op
-    fn backend_id(&self) -> Option<u64>; }                                                // PG pid, MySQL thread id
+    fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>>;   // PG: the DISCARD ALL sequence minus DEALLOCATE ALL (Q10);
+                                                                  // MySQL: COM_RESET_CONNECTION; SQLite: no-op
+    fn backend_id(&self) -> Option<u64>; }                        // PG pid (from BackendKeyData, Q11), MySQL thread id
 pub fn classify_ssh(err: &SshError) -> Classified;                                       // errors.rs, T14
 pub use url::carries_secret;                                                              // now pub (secret-scan invariant)
-// FakeDriver (working in T1):
+// FakeDriver (working in T1). Matching (Q23): the first *unconsumed* entry whose prefix matches is used once; an
+// unmatched statement gives Ok(ExecSummary::default()) with the status unchanged; executed() records execute and batch
+// text in order; cancel resolves the running statement with RawErrorKind::Cancelled unless ignores_cancel (needs tokio `sync`).
 pub struct FakeExec { pub prefix: &'static str, pub result: Result<ExecSummary, RawError>, pub delay: Duration,
                       pub tx_after: Option<TxStatus>, pub panics: bool }
 impl FakeDriver { pub fn exec(self, script: Vec<FakeExec>) -> Self; pub fn backend(self, id: u64) -> Self;
@@ -736,7 +834,7 @@ impl FakeDriver { pub fn exec(self, script: Vec<FakeExec>) -> Self; pub fn backe
 pub struct GuardPlan { pub session_setup: Vec<&'static str>, pub before: Vec<&'static str>, pub canary: Option<&'static str>,
                        pub after: Vec<&'static str>, pub reset: ResetKind }
 pub enum ResetKind { DiscardAll, ResetConnection, None }
-pub fn plan_for(kind: DbmsKind) -> Option<GuardPlan>;
+pub fn plan_for(kind: DbmsKind) -> Option<GuardPlan>;   // working in T1 (Q8): a constant table with exactly Task 5's values; T5 tests it
 pub struct PostFacts { pub tx_after_statement: Option<TxStatusLite>, pub canary: Option<Option<String>>,
                        pub rollback_notice_codes: Vec<String>, pub command_tag: Option<String>, pub rows_affected: Option<u64> }
 pub enum TxStatusLite { Idle, InTx, Failed }                                // guard cannot depend on hacivat-driver
@@ -766,6 +864,7 @@ pub fn remediation(kind: DbmsKind) -> Option<&'static str>;                // SQ
 Profile { /* M2a */ .., pub single_session: bool, pub tx_mode: Option<TxMode>, pub isolation: Option<IsolationLevel>,
           pub idle_disconnect_s: Option<u32>, pub ssh_retention: Retention, pub transport: TransportSpec }
 pub enum TransportSpec { Direct, SshTunnel(SshSpec), Karagoz { org: String, agent_id: String, resource_id: String } }
+ProfileDraft { /* M2a */ .., pub ssh_secrets: Vec<HopSecrets> }              // Q23; Debug only; ConnectionsModel::save stores them
 
 // hacivat-session::pipeline
 pub enum SecretPrompt { SshPassword { hop: u8, host: String, user: String }, SshPassphrase { hop: u8, key: PathBuf },
@@ -779,14 +878,22 @@ pub enum Question { Password { .. } /* M2a */, Certificate { profile: ProfileId,
 pub enum Answer { Password(SecretString), Cancelled /* M2a */, Pin, ImportCa(PathBuf), ConnectPlaintext { remember: bool },
     UseSsh, TrustHostKey, Secret(SecretString), Keyboard(Vec<SecretString>), Master(SecretString) }   // Debug only
 pub enum ProfileChange { AddPin(CertPin), ReplacePin { old: [u8; 32], new: CertPin }, SetCaFile(PathBuf), AllowPublicPlaintext }
+                                                       // ReplacePin is built only by cert_dialog::review (Q26); the pipeline never
+pub struct SessionSecrets { pub db: Option<SecretString>, pub hops: Vec<HopSecrets>, pub tls_key_passphrase: Option<SecretString> }
+                                                       // Debug only (Q17): the secrets that worked, kept in the session overlay
 pub struct HostKeyMismatch { pub hop: u8, pub host: String, pub port: u16, pub old: HostKey, pub new: HostKey, pub source: KnownSource }
 ConnectError { /* M2a */ .., pub certificate: Option<CertReview>, pub host_key: Option<HostKeyMismatch>,
                pub profile_changes: Vec<ProfileChange> }
 ErrArgs { /* M2a */ .., pub hop: Option<u8>, pub hop_host: Option<String> }
-ConnectRequest { /* M2a */ .., pub read_only: bool }                        // profile.read_only || session read-only
+ConnectRequest { /* M2a */ .., pub read_only: bool,                         // profile.read_only || session read-only
+                 pub draft_ssh: Vec<HopSecrets>,                             // typed in the dialog, for Test (Q23)
+                 pub overlay_secrets: Option<SessionSecrets>,                // reconnects and side connections (Q17); used before the store
+                 pub plaintext_consent: bool }                               // the overlay's one-gesture consent (Q17)
 ConnectDeps { /* M2a */ .., pub tunnels: Arc<TunnelManager>, pub known_hosts: Arc<KnownHosts> }
 LiveConnection { /* M2a */ .., pub profile_changes: Vec<ProfileChange>, pub transport: Option<TransportGeneration>,
-                 pub path: PathKind, pub via: Option<String>, pub access_warnings: Vec<RoleWarning> }
+                 pub path: PathKind, pub via: Option<String>, pub access_warnings: Vec<RoleWarning>,
+                 pub secrets_used: SessionSecrets, pub plaintext_consent: bool }   // Q17
+pub fn insecure_auth_for(profile: &Profile, class: AddressClass, mode: TlsMode) -> InsecureAuth;   // pub (Q23); T14 implements
 IssueCode::{ /* M2a */ .., SshHostMissing, SshUserMissing, SshTooManyHops, SshKeyFileMissing, TlsKeyLegacyEncrypted }
 TrailStep::Ssh                                                               // id "ssh"
 
@@ -799,10 +906,10 @@ pub enum SessionState { #[default] Disconnected, Connecting, Idle, Busy { req: u
                         Cancelling { req: u64, since: Instant }, Broken(ErrClass) }
 pub enum TxMode { #[default] Auto, Manual, Smart }               // ids "auto" | "manual" | "smart"
 pub enum IsolationLevel { #[default] Default, ReadUncommitted, ReadCommitted, RepeatableRead, Serializable }
-pub struct TxState { pub mode: TxMode, pub isolation: IsolationLevel, pub status: TxStatus, pub since: Option<Instant>, pub statements: u32 }
+pub struct TxState { pub mode: TxMode, pub isolation: IsolationLevel, pub status: TxStatus, pub since: Option<Instant>, pub statements: u32 }   // Default
 pub enum TxCommand { Begin, Commit, Rollback, SetMode(TxMode), SetIsolation(IsolationLevel) }
 pub enum TxError { InProgress, NeedsClassifier, Unsupported, FailedNeedsRollback }
-pub struct SchemaCtx { pub database: Option<String>, pub schema: Option<String>, pub search_path: Vec<String>, pub user: Option<String> }
+pub struct SchemaCtx { pub database: Option<String>, pub schema: Option<String>, pub search_path: Vec<String>, pub user: Option<String> }   // Default
 pub enum CancelState { #[default] Idle, Cancelling { since: Instant }, SlowCancel { since: Instant }, Terminating, Deactivating }
 pub enum CancelOutcome { Cancelled, AlreadyFinished, StillRunning, Disconnected, Failed(ErrClass) }
 pub enum Escalation { Terminate, Deactivate }
@@ -816,22 +923,25 @@ pub enum ExecErrorKind { Db, ConnectionLost { outcome_unknown: bool }, Cancelled
 pub struct ExecError { pub kind: ExecErrorKind, pub server: Option<ServerMessage> }
 pub type Reply = Result<ExecSummary, ExecError>;
 pub struct RequestTicket { pub seq: u64, pub reply: oneshot::Receiver<Reply> }
+impl RequestTicket { pub fn cancel(&self, h: &SessionHandle) -> oneshot::Receiver<CancelOutcome> }   // h.cancel(self.seq) (Q18)
 pub enum ClosePolicy { RefuseIfOpenTx, RollBack }
 pub enum CloseRefused { OpenTransaction }
-pub struct LostState { pub open_tx: bool, pub temp_objects: bool, pub session_vars: bool, pub prepared: u32, pub locks: bool }
+pub struct LostState { pub open_tx: bool, pub temp_objects: bool, pub session_vars: bool, pub prepared: u32, pub locks: bool }   // Default
 impl LostState { pub fn is_empty(&self) -> bool }
 pub enum SessionEvent { SlowCancel { req: u64 }, IdleTransaction { minutes: u32 }, EnforcementGap(GapReason), Lost(LostState),
                         Reconnected, SchemaChanged(SchemaCtx), TxChanged(TxState) }
 pub struct SessionHandle { .. }   // Clone
 impl SessionHandle { pub fn id(&self) -> SessionId; pub fn kind(&self) -> &SessionKind;
-    pub fn submit(&self, req: Request) -> RequestTicket; pub fn cancel(&self) -> oneshot::Receiver<CancelOutcome>;
-    pub fn escalate(&self, e: Escalation) -> oneshot::Receiver<CancelOutcome>;
+    pub fn submit(&self, req: Request) -> RequestTicket;
+    pub fn cancel(&self, seq: u64) -> oneshot::Receiver<CancelOutcome>;                  // Q18: AlreadyFinished unless `seq` is running
+    pub fn escalate(&self, seq: u64, e: Escalation) -> oneshot::Receiver<CancelOutcome>;
     pub fn state(&self) -> watch::Receiver<SessionSnapshot>; pub fn events(&self) -> broadcast::Receiver<SessionEvent>;
     pub fn close(&self, p: ClosePolicy) -> BoxFuture<'static, Result<(), CloseRefused>>; }
 // session::actor (T7)
 pub fn spawn_session(rt: &Handle, spec: SessionSpec, profile: Arc<Profile>, live: LiveConnection, hooks: SessionHooks) -> SessionHandle;
 pub struct SessionHooks { pub side: Arc<dyn SideConnector>, pub reconnect: Option<Arc<dyn Reconnector>> }   // T17 supplies `reconnect`
-pub trait SideConnector: Send + Sync { fn open_side(&self) -> BoxFuture<'static, Result<LiveConnection, ConnectError>>; }  // Department::Cancel
+pub trait SideConnector: Send + Sync { fn open_side(&self) -> BoxFuture<'static, Result<LiveConnection, ConnectError>>; }  // Department::Cancel;
+                                                                           // T15's implementation connects with the session overlay (Q17)
 pub trait Reconnector: Send + Sync { fn reconnect(&self, attempt: u32) -> BoxFuture<'static, Result<LiveConnection, ConnectError>>; }
 // session::tx, env, schema, reset (T7)
 pub fn default_mode(env: Option<EnvTag>) -> TxMode;                           // Production → Manual
@@ -854,8 +964,13 @@ impl SessionManager { pub fn new(rt: Handle, profile: Arc<Profile>, deps: Arc<Co
     pub fn open(self: &Arc<Self>, spec: SessionSpec, ix: Interaction) -> BoxFuture<'static, Result<SessionHandle, ConnectError>>;
     pub fn pooled(self: &Arc<Self>, kind: SessionKind) -> BoxFuture<'static, Result<PooledSession, ConnectError>>;
     pub fn default_session(&self) -> Option<SessionHandle>; pub fn open_count(&self) -> usize;
-    pub fn close_all(&self) -> BoxFuture<'static, ()>; }
-pub struct PooledSession { .. }   // Deref<Target = SessionHandle>; Drop → reset → idle pool (60 s idle close)
+    pub fn close_all(&self) -> BoxFuture<'static, ()>;
+    pub fn update_profile(&self, profile: Arc<Profile>);   // Q17: replaces the overlay's profile, keeps consent and secrets
+    pub fn overlay(&self) -> Option<SessionOverlay>; }
+pub struct SessionOverlay { pub profile: Arc<Profile>, pub plaintext_consent: bool, pub secrets: SessionSecrets }   // Debug only (Q17);
+                                                       // never persisted; dropped at disconnect, forget and quit
+pub struct PooledSession { .. }   // Deref<Target = SessionHandle>; Drop → reset → idle pool (60 s idle close);
+                                  // a borrow of the default session (Single mode, SQLite) never resets it (Q19)
 // session::liveness, recovery (T17)
 pub struct LivenessPolicy { pub keepalive: Option<Duration>, pub idle_disconnect: Option<Duration>, pub tick: Duration }
 impl LivenessPolicy { pub fn for_profile(p: &Profile) -> LivenessPolicy }
@@ -867,28 +982,45 @@ impl Supervisor { pub fn new(p: LivenessPolicy, now: Instant, wall: SystemTime) 
 pub struct RecoveryPolicy { pub schedule: Vec<Duration>, pub steady: Duration, pub give_up_after: Duration, pub jitter: f32 }
 impl RecoveryPolicy { pub fn delay(&self, attempt: u32, elapsed: Duration, rng: &mut dyn FnMut() -> f32) -> Option<Duration> }
 pub fn is_recovery_case(class: ErrClass) -> bool;
-pub struct Tracked { pub tx: TxStatus, pub temp_created: bool, pub set_seen: bool, pub prepared: u32, pub locks_seen: bool }
+pub struct Tracked { pub tx: TxStatus, pub temp_created: bool, pub set_seen: bool, pub prepared: u32, pub locks_seen: bool }   // Default
 pub fn track_statement(t: &mut Tracked, sql: &str);                       // first-keyword scan (B19)
 pub fn lost_state(t: &Tracked) -> LostState;
 // session::readonly (T18)
-pub fn run_guarded<'a>(conn: &'a mut dyn RawConn, kind: DbmsKind, sql: &'a str, opts: ExecOpts) -> BoxFuture<'a, Result<ExecSummary, ExecError>>;
+pub fn run_guarded<'a>(conn: &'a mut dyn RawConn, kind: DbmsKind, sql: &'a str, opts: ExecOpts, replay: &'a [String])
+    -> BoxFuture<'a, Result<ExecSummary, ExecError>>;   // Q15: `replay` = the session's EnvPlan::statements() (minus PG client
+                                                        // identity), run after the reset; the actor passes its current plan
 pub fn access_for<'a>(conn: &'a mut dyn RawConn, kind: DbmsKind, read_only: bool) -> BoxFuture<'a, (AccessLabel, Vec<RoleWarning>)>;
 //   T1 stubs: run_guarded → Err(Internal); access_for → (ReadOnlyGuarded | ReadWrite, []) as M2a R10
 
 // hacivat-session::manager (T17)
-pub enum PathKind { Direct, Ssh }
+pub enum PathKind { Direct, Ssh }                     // exists in manager.rs with Direct; T1 adds Ssh (Q3)
 LiveInfo { /* M2a */ .., pub via: Option<String>, pub hops: u8, pub access_warnings: Vec<RoleWarning> }
 LiveState::{ /* M2a */ .., Reconnecting { attempt: u32, next_in: Option<Duration> } }
 pub enum ConnectionEvent { SessionLost { profile: ProfileId, lost: LostState }, IdleDisconnected { profile: ProfileId },
-    IdleTransaction { profile: ProfileId, minutes: u32 }, EnforcementGap { profile: ProfileId },
+    IdleTransaction { profile: ProfileId, minutes: u32 }, EnforcementGap { profile: ProfileId, reason: GapReason },   // reason: Q35 copy
     ProfileChanges { profile: ProfileId, changes: Vec<ProfileChange> } }
 impl ConnectionManager { pub fn events(&self) -> broadcast::Receiver<ConnectionEvent>;
-                         pub fn sessions(&self, id: ProfileId) -> Option<Arc<SessionManager>>; }
+                         pub fn sessions(&self, id: ProfileId) -> Option<Arc<SessionManager>>;
+                         pub fn update_profile(&self, id: ProfileId, profile: Arc<Profile>); }   // Q17; the app calls it after
+                                                                           // every save and apply_changes
+pub use hacivat_guard::{RoleWarning, GapReason, remediation};               // hacivat-session lib.rs re-export (Q5): no app → guard edge
 impl ManagerConfig { pub fn m2b() -> ManagerConfig }   // liveness from LivenessPolicy::for_profile (B18); Default stays M2a's 30 s ping
 
 // hacivat-testkit (T9: ssh, T16: chaos)
-#[cfg(feature = "ssh")] pub mod ssh_server;  // TestSshServer::start(TestSshConfig) -> TestSshServer { addr, host_key: HostKey }
-#[cfg(feature = "ssh")] pub mod agent;       // TestAgent::start(keys) -> TestAgent { socket: PathBuf } (unix)
+pub fn require_target(id: &str) -> Option<DockerTarget>;   // working in T1 (Q6): None + eprintln!("skip {id}: not in set {set}")
+                                                           // outside the active set; panics when in the set but unhealthy
+pub fn require_target_in_set(set: Option<&str>, id: &str) -> Option<DockerTarget>;   // the pure core, like targets_in_set
+DockerTarget { /* M2a */ .., pub internal: (String, u16) }  // T16 (Q6): compose service and internal port, for paths through SSH
+#[cfg(feature = "ssh")] pub mod ssh_server;  // Q23, T9 implements:
+//   TestSshServer::start(TestSshConfig) -> TestSshServer { pub addr: SocketAddr, pub host_key: HostKey }
+//   impl TestSshServer { host() -> String; auth_attempts() -> usize; sessions_open() -> usize; sessions_accepted() -> usize;
+//                        channels_opened() -> usize; kill_sessions(); stop();
+//                        open_server_channel() -> BoxFuture<Result<(), _>>; last_originator() -> Option<(String, u32)> }   // Q46 probes
+//   TestSshConfig builders: user_pw(name, pw), user_key(name, PublicKey), user_kbd(name, &[(prompt, echo, answer)]),
+//                           forward(ForwardPolicy::{Allow, Deny}), forward_to(ForwardTarget::{Any, Redirect(SocketAddr)}),
+//                           max_auth_tries(u32), slow_banner(Duration), ipv6()
+//   ForwardTarget::Redirect sends every direct-tcpip to one address (for unresolvable hosts such as `db.internal`)
+#[cfg(feature = "ssh")] pub mod agent;       // TestAgent::start(keys) -> TestAgent { socket: PathBuf } (#[cfg(unix)])
 pub mod chaos;                               // ChaosProxy::start(upstream) -> ChaosProxy { addr }; cut(d), blackhole(bool), restore()
 
 // hacivat-ui
@@ -897,7 +1029,8 @@ CapsuleModel::Reconnecting { env: EnvKind, env_label: SharedString, name: Shared
 
 // hacivat-app::connections (stubs answer Cancelled / do nothing; owners fill them)
 pub(crate) fn cert_dialog::open(q: Question, reply: oneshot::Sender<Answer>, window: &mut Window, cx: &mut App);   // T19
-pub(crate) fn cert_dialog::review(err: Arc<ConnectError>, window: &mut Window, cx: &mut App);                    // T19 (fix)
+pub(crate) fn cert_dialog::review(err: Arc<ConnectError>, window: &mut Window, cx: &mut App);                    // T19 (fix); builds
+                                       // ProfileChange::ReplacePin itself on "Replace pin", applies it, then reconnects (Q26)
 pub(crate) fn plaintext_prompt::open(q, reply, window, cx);                                                       // T19
 pub(crate) fn hostkey_prompt::open(q, reply, window, cx); pub(crate) fn hostkey_prompt::review_changed(m: HostKeyMismatch, profile: ProfileId, window, cx);  // T21
 pub(crate) fn kbd_prompt::open(q, reply, window, cx); pub(crate) fn secret_prompt::open(q, reply, window, cx);  // T21
@@ -905,10 +1038,17 @@ pub(crate) fn vault_dialog::open(q, reply, window, cx); pub(crate) fn vault_dial
 pub(crate) enum VaultReady { NotNeeded, Ready, Declined }
 pub(crate) fn vault_dialog::ensure_vault_before_forever(cx: &mut App) -> Task<VaultReady>;   // T21; T1 stub → NotNeeded;
                                                                            // ConnectionsModel::save calls it before a Forever put (one T1 line)
-pub(crate) fn session_toasts::{lost(profile, lost, cx), idle(profile, cx), idle_tx(profile, minutes, cx), gap(profile, cx)};  // T22
+pub(crate) fn session_toasts::{lost(profile, lost, cx), idle(profile, cx), idle_tx(profile, minutes, cx), gap(profile, reason, cx)};  // T22
 pub(crate) fn dialog::ssh::section(draft: &ProfileDraft, window, cx) -> AnyElement; pub(crate) fn dialog::ssh::open_with_ssh(id: ProfileId, window, cx);  // T20
-impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, changes: Vec<ProfileChange>) -> Task<Result<(), SaveError>> }  // T19
-// interaction.rs (working): every Question variant → its module's `open`; events.rs (working): every ConnectionEvent → its handler
+pub(crate) enum DialogFocus { Default, Ssh }                                                                     // Q9
+pub(crate) fn dialog::open_edit(id: ProfileId, focus: DialogFocus, window: &mut Window, cx: &mut App);          // T1, working for
+                                       // Default; Ssh opens the SSH disclosure with the checkbox on and focuses the SSH host (T20)
+// fixes.rs (T1, one line each): FixAction::ConnectThroughSsh → dialog::ssh::open_with_ssh; ReviewHostKey → hostkey_prompt::review_changed
+impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, changes: Vec<ProfileChange>) -> Task<Result<(), SaveError>>;  // T19
+                        pub fn known_hosts(&self) -> Arc<KnownHosts>; pub fn tunnels(&self) -> Arc<TunnelManager>; }   // T1 (Q23)
+// interaction.rs (working): PromptRequest { question, reply } replaces PasswordRequest; every Question variant → its module's `open`.
+// events.rs (working): a core-side relay of ConnectionManager::events() into a tokio::sync::mpsc, awaited by a foreground task
+//   (the AppUiPort pattern; allowed by the Q4 ruling); every ConnectionEvent → its handler; RecvError::Lagged re-reads state (Q42).
 ```
 
 - [ ] **Step 1: Write the failing tests.**
@@ -917,10 +1057,14 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 #[test] fn three_new_error_classes() { assert_eq!(ErrClass::ALL.len(), 51);
     for (c, id) in [(ErrClass::TlsPinChanged, "tls.pin_changed"), (ErrClass::AuthInsecureMethod, "auth.insecure_method"),
                     (ErrClass::SshHostKeyRevoked, "ssh.host_key_revoked")] { assert_eq!(c.id(), id); assert_eq!(ErrClass::from_id(id), Some(c)); } }
-#[test] fn debug_redaction_m2b() {   // Answer, HopSecrets, Question secrets, FileVault: never print a secret
+#[test] fn debug_redaction_m2b() {   // Answer, HopSecrets, TunnelRequest, ProfileDraft.ssh_secrets, SessionSecrets, FileVault (Q32)
+    let hop = || HopSecrets { password: Some(SecretString::from("s3cret")), passphrase: Some(SecretString::from("s3cret")) };
     for s in [format!("{:?}", Answer::Secret(SecretString::from("s3cret"))), format!("{:?}", Answer::Master(SecretString::from("s3cret"))),
-              format!("{:?}", Answer::Keyboard(vec![SecretString::from("s3cret")])),
-              format!("{:?}", HopSecrets { password: Some(SecretString::from("s3cret")), passphrase: Some(SecretString::from("s3cret")) })] {
+              format!("{:?}", Answer::Keyboard(vec![SecretString::from("s3cret")])), format!("{:?}", hop()),
+              format!("{:?}", TunnelRequest { spec: SshSpec::default(), secrets: vec![hop()], share: true, connect_timeout: Duration::ZERO }),
+              format!("{:?}", ProfileDraft { ssh_secrets: vec![hop()], ..Default::default() }),
+              format!("{:?}", SessionSecrets { db: Some(SecretString::from("s3cret")), hops: vec![hop()], tls_key_passphrase: None }),
+              format!("{:?}", FileVault::open(PathBuf::from("/nonexistent/vault.bin")))] {
         assert!(!s.contains("s3cret"), "{s}"); } }
 #[test] fn profile_m2b_defaults() { let p = Profile::default(); assert!(!p.single_session); assert_eq!(p.tx_mode, None);
     assert_eq!(p.ssh_retention, Retention::Forever); assert!(p.tls.pins.is_empty() && !p.tls.allow_public_plaintext);
@@ -929,46 +1073,75 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
         FakeExec { prefix: "BEGIN", result: Ok(ExecSummary::default()), delay: Duration::ZERO, tx_after: Some(TxStatus::InTx), panics: false }]);
     let mut c = connect_fake(&f).await; c.execute("BEGIN", ExecOpts::default()).await.unwrap(); assert_eq!(c.tx_status(), TxStatus::InTx);
     c.execute("select 1", ExecOpts::default()).await.unwrap(); assert_eq!(f.executed(), ["BEGIN", "select 1"]); }
+#[tokio::test] async fn fake_exec_entries_are_consumed_once() { let f = FakeDriver::new(DbmsKind::Postgres).exec(vec![
+        FakeExec { prefix: "SELECT x", result: Err(raw(RawErrorKind::Io)), delay: Duration::ZERO, tx_after: None, panics: false }]);
+    let mut c = connect_fake(&f).await; assert!(c.execute("SELECT x", ExecOpts::default()).await.is_err());
+    assert!(c.execute("SELECT x", ExecOpts::default()).await.is_ok()); assert_eq!(c.tx_status(), TxStatus::Idle); }   // unmatched → Ok, status unchanged
+#[test] fn ssh_address_class_rule() { assert_eq!(ssh_address_class("db.internal"), AddressClass::Private);
+    assert_eq!(ssh_address_class("localhost"), AddressClass::Loopback); assert_eq!(ssh_address_class("8.8.8.8"), AddressClass::Public); }
 #[tokio::test] async fn read_only_stub_fails_closed() { let f = FakeDriver::new(DbmsKind::Postgres); let mut c = connect_fake(&f).await;
-    assert_eq!(run_guarded(&mut *c, DbmsKind::Postgres, "select 1", ExecOpts::default()).await.unwrap_err().kind, ExecErrorKind::Internal); }
+    assert_eq!(run_guarded(&mut *c, DbmsKind::Postgres, "select 1", ExecOpts::default(), &[]).await.unwrap_err().kind, ExecErrorKind::Internal); }
 #[test] fn mysql_async_is_the_vendored_copy() { let md = cargo_metadata(); let p = md.packages.iter().find(|p| p.name == "mysql_async").unwrap();
     assert!(p.manifest_path.as_str().contains("third_party/mysql_async"), "{}", p.manifest_path); }
-// xtask/src/check_deps.rs (append to its tests)
-#[test] fn guard_crate_is_core_and_runtime_free() { let md = metadata(); assert_eq!(layer_of(&md, pkg(&md, "hacivat-guard")), Some(Layer::Core));
-    assert!(violations(&md).iter().all(|v| v.krate != "hacivat-guard")); assert_eq!(rule_of_fixture("guard-with-tokio"), Rule::GuardNotRuntimeFree); }
-// crates/app/hacivat-app/tests/m2b_routing.rs
+// xtask/src/check_deps.rs (append to its tests; uses the existing fx_at / rule_of helpers, Q23)
+#[test] fn guard_with_tokio_is_flagged() { let md = fx_at(&[("hacivat-guard", "crates/core", &["tokio"])]);
+    assert_eq!(rule_of(&md, "hacivat-guard"), Rule::GuardNotRuntimeFree); }
+//   plus: the real-metadata test `new_core_crates_are_core_layer_and_clean` gains `hacivat-guard` (Core layer, no violation)
+// crates/core/hacivat-testkit/tests/require_target.rs (no Docker)
+#[test] fn require_target_is_none_outside_the_active_set() { assert!(require_target_in_set(Some("pr"), "mariadb114").is_none());
+    assert!(require_target_in_set(None, "no-such-id").is_none()); }   // pure variant, like targets_in_set (no env mutation: no unsafe)
+// crates/app/hacivat-app/tests/m2b_routing.rs — the shell helper calls allow_parking(); waits are settle_until (Q4 ruling)
 #[gpui::test] fn every_new_question_routes_and_stub_answers_cancelled(cx: &mut TestAppContext) { let vcx = shell_with_connections(cx);
-    for q in all_m2b_questions() { assert!(matches!(ask_through_port(&vcx, q), Answer::Cancelled)); } }
+    for q in all_m2b_questions() { let a = ask_through_port(&vcx, q); settle_until(&vcx, secs(2), || a.get().is_some());
+        assert!(matches!(a.get(), Some(Answer::Cancelled))); } }
 #[gpui::test] fn connection_events_reach_their_handlers(cx: &mut TestAppContext) { let vcx = shell_with_connections(cx);
-    emit_all_connection_events(&vcx); assert_eq!(handler_hits(&vcx), 5); }
+    emit_all_connection_events(&vcx); settle_until(&vcx, secs(2), || handler_hits(&vcx) == 5); assert_eq!(handler_hits(&vcx), 5); }
+#[gpui::test] fn connect_through_ssh_fix_opens_the_edit_dialog(cx: &mut TestAppContext) { let vcx = with_failed(cx, dns_error());   // Q9 seam
+    click_fix(&vcx, FixAction::ConnectThroughSsh); settle_until(&vcx, secs(2), || layer_open(&vcx, "connection-dialog")); }
+#[gpui::test] fn save_stores_typed_ssh_secrets_by_hop(cx: &mut TestAppContext) { let vcx = shell_with_connections(cx);   // Q23
+    save_draft(&vcx, ssh_draft_with_secrets("pw0", "pp0")); settle_until(&vcx, secs(2), || stored(&vcx, SecretSlot::SshPassword { hop: 0 }).is_some());
+    assert_eq!(stored(&vcx, SecretSlot::SshPassphrase { hop: 0 }).as_deref(), Some("pp0")); }
 ```
-- [ ] **Step 2:** Run `cargo test -p hacivat-session --test m2b_interfaces`, then `cargo test -p xtask check_deps`, then `cargo test -p hacivat-app --test m2b_routing`. Expected: FAIL, because the types are missing.
+- [ ] **Step 2:** Run `cargo test -p hacivat-session --test m2b_interfaces`, then `cargo test -p xtask check_deps`, then `cargo test -p hacivat-testkit --test require_target`, then `cargo test -p hacivat-app --test m2b_routing`. Expected: FAIL, because the types are missing.
 - [ ] **Step 3: Implement the interfaces, stubs and manifests.** This is the manifest table, and it is exhaustive:
 
   | Manifest | Adds |
   |---|---|
-  | workspace `Cargo.toml` | `russh` (`default-features = false`; the ring backend and RSA features; check the names against the version) · `x509-parser` · `sha2` · `pkcs8` (`encryption`, `pkcs5`, `std`) · `chacha20poly1305` · `argon2` · `rand_core` (`getrandom`) · `hmac` · `sha1` · `hacivat-guard` path · `[workspace] exclude = ["third_party"]` · `[patch.crates-io] mysql_async = { path = "third_party/mysql_async" }` |
+  | workspace `Cargo.toml` | `russh = { version = "<current>", default-features = false, features = ["ring", "rsa", "flate2"] }` (Q28) · `x509-parser` · `sha2` · `pkcs8` (`encryption`, `pkcs5`, `pem`, `std`, `sha1-insecure`; Q5, Q36) · `chacha20poly1305` · `argon2` · `getrandom` (the version already in the lock that offers `getrandom::fill`; Q30) · `secrecy` adds the `serde` feature (Q30) · `hmac` · `sha1` · `tracing-log` (already in the lock; `capture_tracing`'s `log` bridge, Q33) · `hacivat-guard` path · `[workspace] exclude = ["third_party"]` · `[patch.crates-io] mysql_async = { path = "third_party/mysql_async" }` |
   | `hacivat-guard` | `hacivat-proto` only. `[lints] workspace = true` |
-  | `hacivat-net` | `russh`, `sha2`, `x509-parser`, `pkcs8`, `hmac`, `sha1`, `base64`, `secrecy`, `tokio-util`, `tokio` (`sync`, `time`, `net`, `io-util`, `rt`). Dev: `hacivat-testkit` (`features = ["ssh"]`), `rcgen`, `tempfile` |
-  | `hacivat-secrets` | `chacha20poly1305`, `argon2`, `rand_core`, `serde_json`. Dev: `tempfile` |
+  | `hacivat-net` | `russh`, `sha2`, `x509-parser`, `pkcs8`, `hmac`, `sha1`, `base64`, `secrecy`, `tokio-util`, `tokio` (`sync`, `time`, `net`, `io-util`, `rt`). Dev: `hacivat-testkit = { workspace = true, features = ["ssh"] }`, `tokio` (`test-util`, `macros`, `rt-multi-thread`; Q5), `rcgen`, `tempfile`, `tracing-log` |
+  | `hacivat-secrets` | `chacha20poly1305`, `argon2`, `getrandom`, `serde_json`, `secrecy` (`serde`). Dev: `tempfile` |
+  | `hacivat-driver` | tokio adds `sync` (FakeDriver cancel uses `tokio::sync::Notify`; Q5) |
   | `hacivat-driver-sqlite` | `hacivat-guard`; `rusqlite` adds `hooks`, `limits`, `modern_sqlite` (crate-local feature list) |
-  | `hacivat-session` | `hacivat-guard`, `rand_core` |
-  | `hacivat-testkit` | `[features] ssh = ["dep:russh"]`, `russh` (optional), `tokio` (`net`, `io-util`, `sync`, `time`) |
+  | `hacivat-driver-mysql` | Dev: `tokio-rustls`, `rcgen` (Task 8's in-process greeting server; Q2) |
+  | `hacivat-session` | `hacivat-guard`, `getrandom` (recovery jitter). Dev: `hacivat-testkit` with `features = ["ssh"]` (Q5), `tracing-log`. `lib.rs`: `pub use hacivat_guard::{RoleWarning, GapReason, remediation};` (no new app → guard edge) |
+  | `hacivat-testkit` | `[features] ssh = ["dep:russh", "dep:hacivat-net"]`; `russh` (optional); `hacivat-net` (optional; `TestSshServer.host_key` is a `hacivat-net` type); `tokio` (`rt`, `net`, `io-util`, `sync`, `time`, `macros`) (Q5) |
+  | `hacivat-app` | Dev: `hacivat-testkit` with `features = ["ssh"]` (Q5) |
+
+  Without the `ssh` feature on each test crate's testkit dev-dependency, `cargo test -p hacivat-session` (each task's own command) would not compile files that `cargo test --workspace` compiles through feature unification (the M2a "passes in one, fails in the other" lesson).
 
   Then:
   - Run `cargo tree -i aws-lc-rs --workspace`. Expected: "nothing to print". If russh cannot build without it, stop and report BLOCKED with the feature graph.
-  - Record `cargo tree -i rsa` in ADR 0003's T1 section.
+  - Record in ADR 0003's T1 section: `cargo tree -e features -i russh`, `cargo tree -i ring`, `cargo tree -i rsa` and `cargo tree -i pageant --target x86_64-pc-windows-msvc` (Q28).
   - The `check-deps` rule `GuardNotRuntimeFree`: `hacivat-guard`'s normal-dependency closure may contain no `tokio`, `futures`, `salsa`, `hacivat-l10n`, `sql-sema` or `gpui` (§5.1 rule 3).
-  - `interaction.rs` replaces `PasswordRequest` with `PromptRequest { question, reply }` and routes by variant. `events.rs` subscribes to `ConnectionManager::events()` on the foreground (an `mpsc` relay through the core runtime, the same pattern as `AppUiPort`) and calls each handler.
+  - `plan_for` ships **working** (Q8): the constant table with Task 5's exact values (the PostgreSQL, MySQL/MariaDB and SQLite plans under Task 5 Produces). Every other guard function is a fail-closed stub.
+  - `require_target` and `require_target_in_set` ship working in the testkit (Q6).
+  - `interaction.rs` replaces `PasswordRequest` with `PromptRequest { question, reply }` (also in `password_prompt.rs`) and routes by variant. `events.rs` subscribes to `ConnectionManager::events()` through a core-side relay into a `tokio::sync::mpsc` and **awaits it in a foreground task**, the same pattern as `AppUiPort` (Q4 ruling: allowed; no polling), and calls each handler. `RecvError::Lagged` re-reads state (Q42).
+  - The app's `dialog::open_edit(id, DialogFocus, ..)` seam works for `Default`; `fixes.rs` routes `ConnectThroughSsh` and `ReviewHostKey` to their owners' stubs (Q9).
+  - `ConnectionsModel::save` stores `ProfileDraft.ssh_secrets` (Q23); `boot.rs` builds `KnownHosts::load(..)` (no I/O) and `TunnelManager::new` into `ConnectDeps` (Q23, Q42).
   - `CapsuleModel::Reconnecting` renders like `Connecting`, with no clock. Task 22 finishes it.
-- [ ] **Step 4:** Run Step 2's commands, then `cargo test -p hacivat-driver --features fake`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo xtask check-deps` and `cargo deny check licenses bans sources`. Expected: PASS, and all M2a tests still green (`cargo test -p hacivat-session -p hacivat-net -p hacivat-secrets -p hacivat-driver`).
-- [ ] **Step 5: Commit** with the message `feat(m2b): interface commit — guard crate, ssh/tls/vault types, RawConn execution surface, session types, vendored mysql_async, app prompt routing`.
+  - The five new `IssueCode`s map to Task 1's placeholder messages in `issue_text` (Q3).
+- [ ] **Step 4:** Run Step 2's commands, then `cargo test -p hacivat-driver --features fake`, `cargo check --workspace --all-targets`, `cargo test -p hacivat-session --no-run`, `cargo test -p hacivat-net --no-run` and `cargo test -p hacivat-app --no-run` (no features; Q5), `cargo clippy --workspace --all-targets -- -D warnings`, `cargo xtask check-deps` and `cargo deny check licenses bans sources`. Expected: PASS, and all M2a tests still green (`cargo test -p hacivat-session -p hacivat-net -p hacivat-secrets -p hacivat-driver -p hacivat-driver-pg -p hacivat-driver-mysql -p hacivat-driver-sqlite` and `cargo test -p hacivat-app --features scene-check,pseudo`).
+- [ ] **Step 5: Commit** with the message `feat(m2b): interface commit — guard crate, ssh/tls/vault types, RawConn execution surface, session types, vendored mysql_async, app prompt routing`. The commit body lists the `mysql_async` `Cargo.lock` entry change (path package: no `source`, no `checksum`) and any `--precise` bump.
 
 **Review:** opus, adversarial. Probes:
 - Does any stub succeed without its check (No silent weakening)?
 - Is `aws-lc` absent from `cargo tree`?
 - Does any new type that holds a secret derive `PartialEq` or print in `Debug`?
-- Is the vendored copy byte-identical to the registry source, apart from the documented manifest edits? (`diff -r` against `~/.cargo/registry/src/*/mysql_async-0.37.1/src`.)
+- Is the vendored copy byte-identical to the registry source, apart from the documented manifest edits? (`diff -r` against `~/.cargo/registry/src/*/mysql_async-0.37.1/src`.) Are `tests/`, `Cargo.lock`, `Cargo.toml.orig`, `azure-pipelines.yml` and `[profile.bench]` gone, and is `mysql_async` absent from `cargo metadata`'s workspace members?
+- Is `plan_for` exactly Task 5's table, string for string?
+- Does every Q3 site compile with a minimal arm (no `todo!()`, no `unreachable!()` on a reachable variant)?
+- Does any new app test wait on a fixed sleep instead of `settle_until`?
 
 ### Task 2: Mocks for the new M2b surfaces (W0, parallel with Task 1)
 
@@ -1030,18 +1203,28 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     2. If a pin exists for `pin_endpoint(tls_host, port)`: the leaf's `cert_sha256` must equal it, and the leaf's validity window must contain now. Otherwise `PinMismatch` or `Expired`/`NotYetValid`. A match writes `outcome = Pinned` and skips the chain and name checks.
     3. With no pin, the M2a mode behaviour applies. On success, write `outcome`: `Full` for Auto and VerifyFull, `CaOnly` for VerifyCa, `No` for Require.
     4. Handshake signatures are always verified.
-  - `build_tls_params(.., port, .., key_passphrase)` decrypts encrypted PKCS #8 (PBES2) keys:
+  - **A pin forbids the plaintext fallback (Q13):** `build_tls_params` sets `plaintext_allowed = false` whenever `settings.pins` holds an entry for `pin_endpoint(tls_host, port)`, even with `allow_public_plaintext`.
+  - The same `TlsParams.config` (verifier, roots, client identity) is what MySQL uses through vendored patch §5 (Q2), so nothing in this task is PostgreSQL-specific.
+  - `build_tls_params(.., port, .., key_passphrase)` decrypts encrypted PKCS #8 keys (PBES2 with PBKDF2-SHA2 or scrypt, and the SHA-1 PRF of OpenSSL 1.0 keys through `sha1-insecure`; Q36):
     - an encrypted key with no passphrase → `KeyEncrypted`;
     - a wrong passphrase → `KeyPassphraseWrong`;
     - `Proc-Type: 4,ENCRYPTED` → `KeyEncryptedLegacy`.
   - `cert_review` parses with `x509-parser`. Subject and issuer are RFC 4514 strings, verbatim. The chain roles come by position: leaf, intermediates, and the last entry as Root when it is self-issued. Malformed DER gives `None`, never a panic.
-  - `tls_server_end_point` follows B9.
+  - `tls_server_end_point` follows B9: `ecdsa-with-SHA512` → SHA-512, RSASSA-PSS → the hash from its parameters (Q36), Ed25519 → `None`.
   - `fingerprint_lines` produces upper-case hex with colons, 16 bytes per line.
 
 - [ ] **Step 1: Write the failing tests.** They use in-process `tokio-rustls` servers with `rcgen` certificates; `handshake(settings, port) -> Result<TlsVerified, TlsFailure>` is a test helper.
 ```rust
 #[tokio::test] async fn ca_true_self_signed_can_be_pinned() { let srv = server(self_signed_ca_true("db")); let pin = pin_of(&srv);
     assert_eq!(handshake(auto_with(&[pin]), srv.port()).await, Ok(TlsVerified::Pinned)); }
+#[tokio::test] async fn ip_only_san_can_be_pinned() { let srv = server(self_signed_ip_san("10.0.0.5"));   // Q33
+    assert_eq!(handshake_as(auto_with(&[pin_of_as(&srv, "10.0.0.5")]), "10.0.0.5", srv.port()).await, Ok(TlsVerified::Pinned)); }
+#[tokio::test] async fn long_validity_cert_can_be_pinned() { let srv = server(self_signed_valid_days("db", 3650));   // the 825-day case (Q33)
+    assert_eq!(handshake(auto_with(&[pin_of(&srv)]), srv.port()).await, Ok(TlsVerified::Pinned)); }
+#[test] fn pinned_endpoint_never_allows_plaintext() {   // Q13
+    let s = TlsSettings { allow_public_plaintext: true, ..auto_with(&[pin("db:5432")]) };
+    assert!(!build_tls_params(&s, "db", 5432, AddressClass::Private, None).unwrap().unwrap().plaintext_allowed);
+    assert!(build_tls_params(&auto_with(&[pin("db:5433")]), "db", 5432, AddressClass::Private, None).unwrap().unwrap().plaintext_allowed); }
 #[tokio::test] async fn unknown_issuer_captures_the_presented_chain() { let srv = server(self_signed("db"));
     let (r, params) = handshake_keep(auto_with(&[]), srv.port()).await; assert_eq!(r, Err(TlsFailure::UnknownIssuer));
     let rev = cert_review(params.presented.lock().unwrap().as_ref().unwrap(), "db:5432", None).unwrap();
@@ -1068,9 +1251,12 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     assert!(build_tls_params(&with_client(&cert, &key_enc), "db", 5432, AddressClass::Private, Some(&SecretString::from("pw1"))).is_ok());
     assert_eq!(err_of(&with_client(&cert, &key_enc), Some("nope")), TlsSetupError::KeyPassphraseWrong(key_enc.clone()));
     assert_eq!(err_of(&with_client(&cert, &key_enc), None), TlsSetupError::KeyEncrypted(key_enc.clone()));
-    assert!(matches!(err_of(&with_client(&cert, &legacy_encrypted_pem()), Some("pw1")), TlsSetupError::KeyEncryptedLegacy(_))); }
+    assert!(matches!(err_of(&with_client(&cert, &legacy_encrypted_pem()), Some("pw1")), TlsSetupError::KeyEncryptedLegacy(_)));
+    assert!(build_tls_params(&with_client(&cert, &client_key_pbes2_sha1_prf("pw1")), "db", 5432, AddressClass::Private, Some(&SecretString::from("pw1"))).is_ok()); }   // Q36
 #[test] fn end_point_hash_follows_rfc_5929() { assert_eq!(tls_server_end_point(&sha256_signed_der()).unwrap(), sha256(&sha256_signed_der()).to_vec());
-    assert_eq!(tls_server_end_point(&sha384_signed_der()).unwrap().len(), 48); assert!(tls_server_end_point(&ed25519_signed_der()).is_none()); }
+    assert_eq!(tls_server_end_point(&sha384_signed_der()).unwrap().len(), 48); assert!(tls_server_end_point(&ed25519_signed_der()).is_none());
+    assert_eq!(tls_server_end_point(&ecdsa_sha512_signed_der()).unwrap().len(), 64);
+    assert_eq!(tls_server_end_point(&rsa_pss_sha384_signed_der()).unwrap().len(), 48); }   // Q36
 ```
 - [ ] **Step 2:** Run `cargo test -p hacivat-net --test tls_pins --test tls_review`. Expected: FAIL.
 - [ ] **Step 3: Implement** the bodies described in Produces. `TlsParams` is built fresh per attempt (M2a ruling), so `presented` and `outcome` never mix two handshakes.
@@ -1094,10 +1280,11 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 **Interfaces:**
 - Consumes: Task 1's ssh types and `hacivat_driver::url::carries_secret`. That is a dev-only consumption through the session layer: `hacivat-net` cannot depend on `hacivat-driver`, so `read_ssh_config` takes the predicate as a parameter. Its signature becomes `read_ssh_config(path, home, local_user, is_secret: &dyn Fn(&str) -> bool)`, and Task 1's stub must already use that signature.
 - Produces:
-  - **Config parsing per B12.** `resolve_alias` builds hops from `ProxyJump`: `ProxyJump j1,j2` on alias `a` gives `[j1, j2, a]`, each resolved through its own `Host` block. A cycle is `ConfigIssue::IncludeTooDeep`, after 8 levels.
+  - **Config parsing per B12.** `resolve_alias` builds hops from `ProxyJump`: `ProxyJump j1,j2` on alias `a` gives `[j1, j2, a]`, each resolved through its own `Host` block. A cycle is `ConfigIssue::IncludeTooDeep`, after 8 levels. `HostName` with `%h` expands like `IdentityFile`; `IdentityAgent` gives `ConfigNotice::IdentityAgentIgnored { alias }` (Q43).
   - **`KnownHosts`:**
     - Parsing: plain lines, `[host]:port`, `|1|salt|hash` (HMAC-SHA1 over `host` or `[host]:port`), comma lists, `@revoked` and `@cert-authority` markers, `#` comments, CRLF, and lines up to 16 KiB (longer lines are skipped and logged).
-    - Every OpenSSH file is read on `load`. The Hacivat file is created on the first `trust`, `0600`, in a `0700` directory.
+    - `load` does no I/O (Q42): every file is read lazily at the first `check` or `trust` (the pipeline calls them on the core runtime). The Hacivat file is created on the first `trust`, `0600`, in a `0700` directory.
+    - `check` re-reads an OpenSSH file when its `(mtime, len)` changed since the last read: one `stat` per file per check, under the same mutex as the writer (Q24). The copied `ssh-keygen -R` advice therefore works on the next retry without a restart.
     - `trust` and `replace` go through one ordered writer (`Mutex<()>` around read-modify-rename).
 
 - [ ] **Step 1: Write the failing tests.**
@@ -1110,7 +1297,11 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     assert_eq!(host(&c, "b").identity_files, [PathBuf::from("/home/me/.ssh/u@b.io_22")]); }
 #[test] fn unsupported_token_marks_entry_unusable() { assert_eq!(host(&cfg("Host b\n IdentityFile ~/.ssh/%C\n"), "b").unusable, Some(ConfigIssue::UnsupportedToken("%C".into()))); }
 #[test] fn proxycommand_entries_are_listed_but_unusable() { assert_eq!(host(&cfg("Host p\n ProxyCommand nc %h %p\n"), "p").unusable, Some(ConfigIssue::ProxyCommand)); }
-#[test] fn include_loop_stops_at_depth_8() { let c = cfg_files(&[("config", "Include a\n"), ("a", "Include config\n")]); assert!(c.hosts.is_empty() || c.hosts.iter().all(|h| h.unusable.is_none())); /* no hang, no stack overflow */ }
+#[test] fn include_loop_stops_at_depth_8() { let c = cfg_files(&[("config", "Include a\nHost x\n HostName x.io\n"), ("a", "Include config\n")]);   // no hang, no stack overflow
+    assert!(c.notices.iter().any(|n| matches!(n, ConfigNotice::IncludeTooDeep { .. }))); assert!(find(&c, "x").is_some()); }   // Q32
+#[test] fn hostname_percent_h_expands() { assert_eq!(host(&cfg("Host db\n HostName %h.acme.io\n"), "db").hostname.as_deref(), Some("db.acme.io")); }   // Q43
+#[test] fn identity_agent_is_noted_not_imported() { assert!(cfg("Host b\n IdentityAgent ~/.1password/agent.sock\n").notices.iter()
+    .any(|n| matches!(n, ConfigNotice::IdentityAgentIgnored { alias } if alias == "b"))); }   // Q43
 #[test] fn match_blocks_are_skipped_with_a_notice() { assert!(matches!(cfg("Match host x\n User y\n").notices[0], ConfigNotice::MatchSkipped { line: 1 })); }
 #[test] fn secret_looking_values_are_refused() { assert_eq!(host(&cfg("Host b\n HostName h\n IdentityFile /k?password=x\n"), "b").unusable, Some(ConfigIssue::SecretInValue)); }
 #[test] fn strict_host_key_checking_never_maps_to_accept_all() { for (v, p) in [("yes", HostKeyPolicy::Strict), ("accept-new", HostKeyPolicy::AcceptNew), ("no", HostKeyPolicy::Ask), ("off", HostKeyPolicy::Ask), ("ask", HostKeyPolicy::Ask)] {
@@ -1122,14 +1313,18 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     assert!(matches!(kh.check("db", 22, &K2), HostKeyCheck::Changed { old, source: KnownSource::OpenSsh { line: 1, .. } } if old == K1)); }
 #[test] fn revoked_marker_is_a_hard_stop() { assert!(matches!(known(&[&format!("@revoked * {}", K1.openssh)]).check("db", 22, &K1), HostKeyCheck::Revoked { .. })); }
 #[test] fn trust_writes_hacivat_store_only() { let (kh, ssh_file, store) = known_tmp(); let before = std::fs::read(&ssh_file).unwrap();
-    kh.trust("db", 22, &K1).unwrap(); assert_eq!(std::fs::read(&ssh_file).unwrap(), before); assert_eq!(mode_of(&store), 0o600);
+    kh.trust("db", 22, &K1).unwrap(); assert_eq!(std::fs::read(&ssh_file).unwrap(), before); #[cfg(unix)] assert_eq!(mode_of(&store), 0o600);   // Q5
     assert!(matches!(kh.check("db", 22, &K1), HostKeyCheck::Known(KnownSource::Hacivat))); }
 #[test] fn replace_only_touches_the_hacivat_store() { let (kh, _, store) = known_tmp(); kh.trust("db", 22, &K1).unwrap(); kh.replace("db", 22, &K1, &K2).unwrap();
     assert!(!read(&store).contains(&K1.openssh)); assert!(matches!(kh.check("db", 22, &K2), HostKeyCheck::Known(KnownSource::Hacivat))); }
 #[test] fn concurrent_trusts_are_ordered() { let (kh, _, store) = known_tmp(); std::thread::scope(|s| { for i in 0..8 { let kh = &kh; s.spawn(move || kh.trust(&format!("h{i}"), 22, &K1).unwrap()); } });
     assert_eq!(read(&store).lines().count(), 8); }
 #[test] fn cert_authority_line_is_recognised() { let r = known(&[&format!("@cert-authority *.acme.io {}", CA.openssh)]).check("db.acme.io", 22, &K1);
-    assert!(matches!(r, HostKeyCheck::Unknown | HostKeyCheck::Known(_))); /* pin the behaviour actually implemented; ADR records which */ }
+    assert_eq!(r, HostKeyCheck::Unknown); }   // Q32: assert the exact variant implemented (Unknown unless russh exposes host certificates); ADR records it
+#[test] fn openssh_file_edit_is_seen_without_restart() { let (kh, ssh_file) = known_openssh_tmp(&format!("db {}", K1.openssh));   // Q24
+    assert!(matches!(kh.check("db", 22, &K2), HostKeyCheck::Changed { .. })); rewrite_with_new_mtime(&ssh_file, "");   // as `ssh-keygen -R db` would
+    assert_eq!(kh.check("db", 22, &K2), HostKeyCheck::Unknown); }
+#[test] fn load_does_no_io() { let kh = KnownHosts::load(vec![PathBuf::from("/nonexistent/known_hosts")], tmp_store()); assert_eq!(kh.check("db", 22, &K1), HostKeyCheck::Unknown); }   // Q42
 #[test] fn fingerprint_is_sha256_base64_unpadded() { assert!(K1.fingerprint().starts_with("SHA256:")); assert!(!K1.fingerprint().ends_with('=')); }
 ```
 - [ ] **Step 2:** Run `cargo test -p hacivat-net --test ssh_config --test known_hosts`. Expected: FAIL.
@@ -1153,13 +1348,13 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 
 **Interfaces:**
 - Consumes: `hacivat-proto` (`DbmsKind`, `AccessLabel`).
-- Produces: the bodies of Task 1's guard functions, with these exact values.
+- Produces: the bodies of Task 1's guard functions, with these exact values, **except `plan_for`, which Task 1 ships working with the plan values below; Task 5 tests it** (`plans.rs`; Q8). If Task 5 finds a plan value wrong, it fixes `plan_for` and reports it to the controller, because Task 7 tests against the same values.
   - **PostgreSQL plan:**
     - `session_setup` = `["SET default_transaction_read_only = on", "SET standard_conforming_strings = on", "SET client_encoding = 'UTF8'", "SET idle_in_transaction_session_timeout = '30s'"]`;
     - `before` = `["BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "SELECT 1"]`;
     - `canary` = `Some("SELECT txid_current_if_assigned()")`;
     - `after` = `["ROLLBACK"]`;
-    - `reset` = `DiscardAll`.
+    - `reset` = `DiscardAll` (the name is kept; the driver runs the `DISCARD ALL` sequence without `DEALLOCATE ALL`, Task 10, Q10; ADR 0004 records the equivalence with S-02/#pg-discard).
   - **MySQL and MariaDB plan:**
     - `session_setup` = `["SET SESSION TRANSACTION READ ONLY", "SET NAMES utf8mb4"]`;
     - `before` = `["START TRANSACTION READ ONLY"]`;
@@ -1178,7 +1373,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
   - **`sqlite_authorize`** denies by default. It allows:
     - `Read`, `Select` and `Recursive`;
     - `Function` except `load_extension`, `readfile`, `writefile`, `edit` and `fts3_tokenizer`;
-    - `Pragma` named in `SQLITE_READ_PRAGMAS` **with no argument**. The list: `table_info`, `table_xinfo`, `index_list`, `index_info`, `index_xinfo`, `foreign_key_list`, `database_list`, `collation_list`, `function_list`, `pragma_list`, `schema_version`, `user_version`, `page_count`, `page_size`, `encoding`, `compile_options`.
+    - `Pragma` named in `SQLITE_READ_PRAGMAS` **with no argument**. The list: `table_info`, `table_xinfo`, `index_list`, `index_info`, `index_xinfo`, `foreign_key_list`, `database_list`, `collation_list`, `function_list`, `pragma_list`, `schema_version`, `user_version`, `page_count`, `page_size`, `encoding`, `compile_options`, `query_only`, `journal_mode`, `trusted_schema`, `foreign_keys` (the last four read by Task 11's test and M2a's probe; with an argument they stay denied; Q16).
 
     It denies everything else: `Attach`, `Detach`, writes (temp included), `Create`, `Drop`, `Alter`, `Transaction`, `Savepoint`, `Analyze`, `Other`, and any pragma with an argument.
   - **`role_probe_sql`:**
@@ -1191,12 +1386,12 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     - MySQL and MariaDB, 1 statement: `SHOW GRANTS`.
     - SQLite: none.
   - **`interpret_probe`:**
-    - PostgreSQL: least privilege means no `t` in row 1, no rows in 2, `f` in 3, `f` in 4, and no rows in 5. Each hit adds its `RoleWarning`.
+    - PostgreSQL: least privilege means no `t` in row 1, no rows in 2, `f` in 3, and no rows in 5. A `t` in 4 adds `RoleWarning::TempPrivilege` only and does **not** clear `least_privilege` (MCP-09 parity: temp creation is already blocked inside the read-only transaction, #pg-ro-temp; Q21). Each other hit adds its `RoleWarning`.
     - MySQL: every `GRANT` line's privilege list is within {`USAGE`, `SELECT`, `SHOW VIEW`}, with no `WITH GRANT OPTION` and no `PROXY`. A role-grant line (`GRANT \`r\`@\`%\` TO …`) is `RoleGrantNotExpanded`, so not least privilege (fail closed).
     - Anything unparsable is `Unparsed`, so not least privilege.
   - **`access_label`:** not read-only → `ReadWrite`. Read-only, PostgreSQL or MySQL, with least privilege → `ReadOnlyEnforced`. Everything else → `ReadOnlyGuarded`, which includes MariaDB (C19) and SQLite.
   - **`remediation`:**
-    - PostgreSQL: `CREATE ROLE <role> LOGIN PASSWORD '<password>' NOINHERIT;\nGRANT pg_read_all_data TO <role>;\nREVOKE TEMP ON DATABASE <database> FROM PUBLIC;`
+    - PostgreSQL: `CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT pg_read_all_data TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;` (no `NOINHERIT`: a non-inheriting member would not get `pg_read_all_data` and could read nothing; Q21)
     - MySQL: `CREATE USER '<role>'@'%' IDENTIFIED BY '<password>';\nGRANT SELECT, SHOW VIEW ON <database>.* TO '<role>'@'%';`
     - MariaDB and SQLite: `None`.
 
@@ -1218,13 +1413,16 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 #[test] fn sqlite_authorizer_default_deny() { use SqliteAction::*; for (a, want) in [
         (Read { table: "t", column: "a" }, Authorization::Allow), (Select, Authorization::Allow), (Function { name: "count" }, Authorization::Allow),
         (Function { name: "load_extension" }, Authorization::Deny), (Function { name: "writefile" }, Authorization::Deny),
-        (Pragma { name: "table_info", arg: None }, Authorization::Allow), (Pragma { name: "query_only", arg: Some("0") }, Authorization::Deny),
+        (Pragma { name: "table_info", arg: None }, Authorization::Allow), (Pragma { name: "query_only", arg: None }, Authorization::Allow),
+        (Pragma { name: "journal_mode", arg: None }, Authorization::Allow), (Pragma { name: "query_only", arg: Some("0") }, Authorization::Deny),
         (Pragma { name: "journal_mode", arg: Some("delete") }, Authorization::Deny), (Pragma { name: "writable_schema", arg: None }, Authorization::Deny),
         (Attach { file: "new.db" }, Authorization::Deny), (Detach, Authorization::Deny), (Insert { table: "temp_t" }, Authorization::Deny),
         (Transaction, Authorization::Deny), (Other(99), Authorization::Deny)] { assert_eq!(sqlite_authorize(&a), want, "{a:?}"); } }
 #[test] fn pg_probe_least_privilege_and_warnings() { assert!(interpret_probe(DbmsKind::Postgres, &pg_rows(false, &[], false, false, &[])).least_privilege);
     let f = interpret_probe(DbmsKind::Postgres, &pg_rows(true, &["pg_signal_backend"], true, true, &["dblink"]));
-    assert!(!f.least_privilege); for w in [RoleWarning::Superuser, RoleWarning::SignalBackend, RoleWarning::WritePrivileges, RoleWarning::TempPrivilege, RoleWarning::EgressExtension("dblink".into())] { assert!(f.warnings.contains(&w), "{w:?}"); } }
+    assert!(!f.least_privilege); for w in [RoleWarning::Superuser, RoleWarning::SignalBackend, RoleWarning::WritePrivileges, RoleWarning::TempPrivilege, RoleWarning::EgressExtension("dblink".into())] { assert!(f.warnings.contains(&w), "{w:?}"); }
+    let t = interpret_probe(DbmsKind::Postgres, &pg_rows(false, &[], false, true, &[]));   // TEMP alone (Q21)
+    assert!(t.least_privilege); assert_eq!(t.warnings, [RoleWarning::TempPrivilege]); }
 #[test] fn mysql_grants() { assert!(interpret_probe(DbmsKind::MySql, &grants(&["GRANT USAGE ON *.* TO `hv_ro`@`%`", "GRANT SELECT, SHOW VIEW ON `hv_test`.* TO `hv_ro`@`%`"])).least_privilege);
     assert!(!interpret_probe(DbmsKind::MySql, &grants(&["GRANT SELECT, INSERT ON `d`.* TO `u`@`%`"])).least_privilege);
     assert!(!interpret_probe(DbmsKind::MySql, &grants(&["GRANT FILE ON *.* TO `u`@`%`"])).least_privilege);
@@ -1233,7 +1431,8 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 #[test] fn labels() { let lp = RoleFindings { least_privilege: true, warnings: vec![] };
     assert_eq!(access_label(DbmsKind::Postgres, true, Some(&lp)), AccessLabel::ReadOnlyEnforced); assert_eq!(access_label(DbmsKind::MariaDb, true, Some(&lp)), AccessLabel::ReadOnlyGuarded);
     assert_eq!(access_label(DbmsKind::Sqlite, true, None), AccessLabel::ReadOnlyGuarded); assert_eq!(access_label(DbmsKind::MySql, false, Some(&lp)), AccessLabel::ReadWrite); }
-#[test] fn remediation_has_only_placeholders() { let s = remediation(DbmsKind::Postgres).unwrap(); assert!(s.contains("<role>") && s.contains("<database>")); assert!(remediation(DbmsKind::MariaDb).is_none()); }
+#[test] fn remediation_has_only_placeholders() { let s = remediation(DbmsKind::Postgres).unwrap(); assert!(s.contains("<role>") && s.contains("<database>"));
+    assert!(!s.contains("NOINHERIT")); assert!(remediation(DbmsKind::MariaDb).is_none()); }   // Q21
 ```
 - [ ] **Step 2:** Run `cargo test -p hacivat-guard`. Expected: FAIL.
 - [ ] **Step 3: Implement** the bodies. Keywords and pragma names are compared with `eq_ignore_ascii_case` (INV-3). The crate has no I/O and no async.
@@ -1249,7 +1448,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 ### Task 6: Vault, fallback backend and pgpass (HV-SEC-05, D-016; B13, B27)
 
 **Files:**
-- Modify: `crates/core/hacivat-secrets/src/backend/{vault,fallback,mod}.rs`, `crates/core/hacivat-secrets/src/store.rs` (`backend_choice`) and `crates/core/hacivat-secrets/src/files/pgpass.rs`.
+- Modify: `crates/core/hacivat-secrets/src/backend/{vault,fallback,mod}.rs`, `crates/core/hacivat-secrets/src/store.rs` (`backend_choice`, `vault()`, the Forever-put fallback) and `crates/core/hacivat-secrets/src/files/pgpass.rs`.
 - Create: `crates/core/hacivat-secrets/tests/{vault,fallback}.rs`. Append to `tests/pgpass.rs`.
 - Append: an ADR 0003 section, `## m2b-t06 — vault`.
 
@@ -1271,14 +1470,17 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
       | 40–63 | nonce |
 
     - The body is the ciphertext. The AAD is the 64-byte header.
-    - The plaintext is a JSON object `{ "<service>": "<secret>" }`, built and parsed inside `Zeroizing<Vec<u8>>`.
-    - Every write draws a fresh nonce and keeps the salt.
+    - **Header bounds before deriving (Q30):** `m_kib` in 8,192–1,048,576, `t` in 1–10, `p` in 1–8; anything else is `VaultCorrupt` and no key is derived. A `FileVault` built with `with_params(p)` (the tests' fast params) also accepts a header equal to its own `p`; `FileVault::open` accepts only the bounds.
+    - The plaintext is a JSON object `{ "<service>": "<secret>" }`, built inside `Zeroizing<Vec<u8>>` and parsed straight into `SecretString` values (secrecy's `serde` feature), never a plain `String` (Q30).
+    - Salt and nonce come from `getrandom::fill` (Q30). Every write draws a fresh nonce and keeps the salt.
     - `create` refuses a master password under 8 characters (`SecretError::Backend("master-too-short")` is never shown; Task 21 validates first) and refuses when the file exists.
     - `unlock` derives the key and decrypts. A wrong password is `WrongMasterPassword`; an AEAD failure with a header that parses is the same. A header that does not parse, or a truncated file, is `VaultCorrupt`.
     - A newer `format_major` is `VaultReadOnly`: `get` works, `put` and `delete` refuse.
     - `get` while locked is `VaultLocked`.
     - `lock` zeroizes the key. `reset` deletes the file and locks.
-  - **`FallbackBackend`.** On the first call it runs `probe` once (`OnceLock`). Probe true routes everything to the keyring; probe false routes to the vault. `choice()` reports which. `as_vault()` returns the vault once it has been chosen.
+  - **`FallbackBackend`.** On the first call it runs `probe` once (`OnceLock`). Probe true routes everything to the keyring; probe false routes to the vault. `SecretBackend::choice()` reports which (`KeyringBackend` reports `Some(Keyring)` once probed, `MemoryBackend` `Some(Memory)`). `as_vault()` returns the vault once it has been chosen. `probe_available()` returns `true` when the vault is chosen, so Forever stays enabled with the vault label (Q23).
+  - **`SecretStore`:** `backend_choice()` reads `SecretBackend::choice`; `vault()` returns `as_vault()` (Q23).
+  - **Forever-put fallback (Q38).** `SecretStore::put(.., Forever)` adds `VaultLocked`, `VaultReadOnly` and `VaultCorrupt` to the errors that become `Stored::FellBackTo { retention: UntilRestart, reason }` (the M2a toast path, `store.rs:208-213`), never a hard error. Callers run `create` and `unlock` on the blocking pool (Argon2).
   - **pgpass:** an empty password field gives `None`.
 
 - [ ] **Step 1: Write the failing tests.** The tests use fast Argon2 params through `with_params(.., VaultParams { m_kib: 64, t: 1, p: 1 })`.
@@ -1286,14 +1488,17 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 #[test] fn vault_round_trip() { let v = vault_tmp(); v.create(sec("correct horse")).unwrap(); v.put(&key(), &sec("s3cret")).unwrap(); v.lock();
     assert_eq!(v.get(&key()), Err(SecretError::VaultLocked)); v.unlock(sec("correct horse")).unwrap(); assert_eq!(expose(v.get(&key()).unwrap()), "s3cret"); }
 #[test] fn vault_file_never_contains_plaintext() { let (v, path) = vault_tmp_path(); v.create(sec("correct horse")).unwrap(); v.put(&key(), &sec("s3cret-value")).unwrap();
-    let bytes = std::fs::read(&path).unwrap(); assert!(!contains(&bytes, b"s3cret-value") && !contains(&bytes, key().service().as_bytes())); assert_eq!(mode_of(&path), 0o600); }
+    let bytes = std::fs::read(&path).unwrap(); assert!(!contains(&bytes, b"s3cret-value") && !contains(&bytes, key().service().as_bytes())); #[cfg(unix)] assert_eq!(mode_of(&path), 0o600); }   // Q5
 #[test] fn wrong_master_password() { let v = created("correct horse"); v.lock(); assert_eq!(v.unlock(sec("wrong horse")), Err(SecretError::WrongMasterPassword)); assert!(!v.is_unlocked()); }
-#[test] fn tampered_vault_is_untouched_and_reports_corrupt() { let (v, path) = created_with_secret(); v.lock(); flip_byte(&path, 70); let before = std::fs::read(&path).unwrap();
+#[test] fn tampered_vault_is_untouched() { let (v, path) = created_with_secret(); v.lock(); flip_byte(&path, 70); let before = std::fs::read(&path).unwrap();   // Q30: the AEAD cannot tell tamper from a wrong password
     assert!(matches!(v.unlock(sec("correct horse")), Err(SecretError::WrongMasterPassword | SecretError::VaultCorrupt))); assert!(v.put(&key(), &sec("x")).is_err()); assert_eq!(std::fs::read(&path).unwrap(), before); }
 #[test] fn truncated_vault_is_corrupt() { let (v, path) = created_with_secret(); v.lock(); truncate(&path, 20); assert_eq!(v.unlock(sec("correct horse")), Err(SecretError::VaultCorrupt)); }
 #[test] fn newer_vault_version_is_read_only() { let (v, path) = created_with_secret(); v.lock(); set_major(&path, 2); let v = FileVault::with_params(path, fast());
-    assert!(v.unlock(sec("correct horse")).is_ok() || matches!(v.unlock(sec("correct horse")), Err(SecretError::VaultReadOnly)));
+    assert!(v.unlock(sec("correct horse")).is_ok()); assert_eq!(expose(v.get(&key()).unwrap()), "s3cret");   // Q30: one unlock, Ok
     assert_eq!(v.put(&key(), &sec("x")), Err(SecretError::VaultReadOnly)); }
+#[test] fn crafted_header_params_are_corrupt() { for (m, t, p) in [(u32::MAX, 3, 1), (4, 3, 1), (65536, 0, 1), (65536, 11, 1), (65536, 3, 9)] {   // Q30
+    let (v, path) = created_with_secret(); v.lock(); set_params(&path, m, t, p); let v = FileVault::open(path);
+    assert_eq!(v.unlock(sec("correct horse")), Err(SecretError::VaultCorrupt), "{m} {t} {p}"); } }
 #[test] fn master_shorter_than_8_is_refused() { assert!(vault_tmp().create(sec("short")).is_err()); }
 #[test] fn every_write_uses_a_fresh_nonce() { let (v, path) = created_with_secret(); let n1 = nonce_of(&path); v.put(&key(), &sec("y")).unwrap(); assert_ne!(nonce_of(&path), n1); assert_eq!(salt_of_before_after(&path), true); }
 #[test] fn reset_deletes_file_and_locks() { let (v, path) = created_with_secret(); v.reset().unwrap(); assert!(!path.exists() && !v.is_unlocked() && !v.exists()); }
@@ -1306,7 +1511,10 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     let fb = FallbackBackend::new(Arc::new(KeyringBackend::new(None)), Arc::new(vault_fast_tmp()), Box::new(|| KeyringBackend::new(None).probe_available()));
     let _ = fb.get(&key()); /* first call runs the probe */ fb.as_vault().unwrap().create(sec("correct horse")).unwrap();
     fb.put(&key(), &sec("x")).unwrap(); assert_eq!(fb.choice(), Some(BackendChoice::Vault)); }
-#[test] fn store_reports_backend_choice() { let s = SecretStore::new(Some(Arc::new(fallback(false).0))); assert_eq!(s.backend_choice(), None); let _ = s.keyring_available(); assert_eq!(s.backend_choice(), Some(BackendChoice::Vault)); }
+#[test] fn store_reports_backend_choice() { let s = SecretStore::new(Some(Arc::new(fallback(false).0))); assert_eq!(s.backend_choice(), None); let _ = s.keyring_available(); assert_eq!(s.backend_choice(), Some(BackendChoice::Vault));
+    assert!(s.vault().is_some()); assert!(s.keyring_available()); }   // Q23: the vault keeps Forever enabled
+#[test] fn locked_vault_forever_put_falls_back_to_until_restart() { let s = store_with_locked_vault();   // Q38
+    assert!(matches!(s.put(&key(), sec("x"), Retention::Forever), Ok(Stored::FellBackTo { retention: Retention::UntilRestart, reason: SecretError::VaultLocked }))); }
 // tests/pgpass.rs (append)
 #[test] fn empty_password_field_is_none() { assert!(lookup(&file(0o600, "h:5432:d:u:\n"), "h", 5432, "d", "u").unwrap().password.is_none()); }
 ```
@@ -1336,25 +1544,29 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
   - **`spawn_session`:** a Tokio task that owns the `LiveConnection`.
     - It runs a FIFO `VecDeque` of requests, one at a time, and publishes a `watch` of `SessionSnapshot` (the generation bumps on every change) and a `broadcast` of `SessionEvent`.
     - A panic or `JoinError` in the driver call is caught (`AssertUnwindSafe` plus `catch_unwind` on the future) and marks the session `Broken(Internal)`. The connection is discarded, other sessions are unaffected, and the panic message is logged without SQL.
-    - Read-only sessions send `Exec` through `readonly::run_guarded`, which is Task 18's.
+    - Read-only sessions send `Exec` through `readonly::run_guarded(.., replay)`, which is Task 18's. `replay` is the session's current `EnvPlan::statements()` (including `RestoreSchema`), minus the PostgreSQL client identity, which the startup parameter restores (Q15).
+    - `spawn_session` runs neither the environment plan nor a schema probe: connect already set the identity and read-only (Q27).
   - **Transactions, per B22 and HV-SESS-03:**
     - status comes from `RawConn::tx_status()` after every round trip;
     - Manual on PostgreSQL and SQLite sends `begin_sql(..)` before the next statement when the status is `Idle`. MySQL sends `SET autocommit = 0` at `SetMode(Manual)` and `SET autocommit = 1` at `SetMode(Auto)`;
     - Manual → Auto while `InTx` or `Failed` is `TxError::InProgress`. `SetMode(Smart)` is `NeedsClassifier`. In `Failed`, any `Exec` other than ROLLBACK is `TxError::FailedNeedsRollback`. That check is on the first keyword only and is advisory; the server rejects anyway;
+    - **Read-only sessions are always Auto (Q14):** `Profile.tx_mode` and `default_mode` apply only to read-write sessions; on a read-only session `SetMode(Manual | Smart)` and `TxCommand::Begin` are `TxError::Unsupported`;
     - `begin_sql(Postgres, Serializable, false)` = `["BEGIN ISOLATION LEVEL SERIALIZABLE"]`. For MySQL it is `["SET TRANSACTION ISOLATION LEVEL SERIALIZABLE", "START TRANSACTION"]`. For SQLite it is `["BEGIN"]`; SQLite always uses `BEGIN IMMEDIATE` when the first statement is not `SELECT`/`WITH`, by first keyword.
-  - **Cancel, per B23:** `cancel()` marks `Cancelling(seq)`, completes every queued request with `Cancelled`, and calls the connection's `CancelHandle`. For MySQL (no handle), it opens a side connection through `SessionHooks.side` and executes `KILL QUERY <backend_id>`. The stale-cancel guard holds. The outcome comes within `CANCEL_WAIT` (2 s), otherwise `StillRunning`, and `SlowCancel` fires at 10 s. `escalate(Terminate)` runs `pg_terminate_backend(<pid>)` or `KILL CONNECTION <id>` on a side connection. `escalate(Deactivate)` closes and marks `Broken(Cancelled)`.
+  - **Cancel, per B23:** `cancel(seq)` answers `AlreadyFinished` unless `seq` is the running request (the stale-cancel guard, Q18). Otherwise it marks `Cancelling(seq)`, completes every queued request with `Cancelled`, and calls the connection's `CancelHandle`. For MySQL (no handle), it opens a side connection through `SessionHooks.side` and executes `KILL QUERY <backend_id>`; the side connection is **pre-opened once a statement has run for 500 ms** (Q37). The outcome comes within `CANCEL_WAIT` (2 s), otherwise `StillRunning`, and `SlowCancel` fires at 10 s. `escalate(seq, Terminate)` runs `pg_terminate_backend(<pid>)` or `KILL CONNECTION <id>` on a side connection. `escalate(seq, Deactivate)` closes and marks `Broken(Cancelled)`. ADR 0004 records the `KILL` limits behind proxies (Q37).
   - **`build_env_plan`:**
     1. client identity: PostgreSQL `SET application_name = '<escaped>'`; MySQL needs nothing, because the connect attribute already carries it;
     2. read-only setup: `plan_for(kind).session_setup` when `read_only`;
     3. time zone: none until the settings model (M3);
-    4. schema restore: `switch_schema_sql` when `last_schema` has a value.
+    4. schema restore: `switch_schema_sql` only when `last_schema.schema.is_some()` (Q27).
+
+    With Task 1's working `plan_for`, `env_plan_order` is green in W1 without Task 5 (Q8).
 
     `apply` runs each statement through `batch`.
   - **Schema:**
     - `schema_probe_sql`: PostgreSQL `SELECT current_database(), current_schema(), array_to_string(current_schemas(true), ','), current_user`; MySQL `SELECT DATABASE(), CURRENT_USER()`; SQLite `PRAGMA database_list`.
     - `switch_schema_sql`: PostgreSQL `SET search_path TO "<name with "" doubled>"`; MySQL `` USE `<name with `` doubled>` ``. The exact name is sent, never case-folded.
     - `needs_schema_reprobe(sql)`: the first keyword, ASCII-folded and with leading whitespace and comments skipped, is one of `SET`, `RESET`, `USE`, `BEGIN`, `START`, `COMMIT`, `END`, `ROLLBACK`, `ABORT` or `DISCARD`.
-    - The actor re-probes after such statements, after any transaction end, and after `Reset`, and emits `SchemaChanged` on a difference.
+    - **The actor re-probes (Q27) only** after an `ExecOrigin::User` statement matching `needs_schema_reprobe`, after a user `TxCommand::{Commit, Rollback}`, and after `SwitchSchema`, and emits `SchemaChanged` on a difference. **Never** after internal control statements (Manual's `BEGIN`, `SET autocommit`, the reset's `ROLLBACK`) or after `Reset`: Reset's environment plan restores the last schema.
   - **`Reset`, per HV-SESS-08:**
     1. ROLLBACK if not `Idle`;
     2. `RawConn::reset()`;
@@ -1383,19 +1595,26 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 // tests/cancel.rs
 #[tokio::test] async fn cancel_resolves_running_and_drops_queue() { let (h, f) = session(fake_pg().exec(vec![slow("select pg_sleep(60)", secs(60))]));
     let a = h.submit(exec("select pg_sleep(60)")); let b = h.submit(exec("select 2")); settle().await;
-    assert_eq!(h.cancel().await.unwrap(), CancelOutcome::Cancelled); assert_eq!(a.reply.await.unwrap().unwrap_err().kind, ExecErrorKind::Cancelled);
+    assert_eq!(h.cancel(a.seq).await.unwrap(), CancelOutcome::Cancelled); assert_eq!(a.reply.await.unwrap().unwrap_err().kind, ExecErrorKind::Cancelled);
     assert_eq!(b.reply.await.unwrap().unwrap_err().kind, ExecErrorKind::Cancelled); assert_eq!(f.cancel_calls(), 1); assert_eq!(snap(&h).state, SessionState::Idle); }
-#[tokio::test] async fn stale_cancel_never_hits_the_next_request() { let (h, f) = session(fake_pg()); run(&h, "select 1").await;
-    assert_eq!(h.cancel().await.unwrap(), CancelOutcome::AlreadyFinished); assert_eq!(f.cancel_calls(), 0); }
+#[tokio::test] async fn stale_cancel_never_hits_the_next_request() { let (h, f) = session(fake_pg()); let a = h.submit(exec("select 1")); a.reply.await.unwrap().unwrap();
+    assert_eq!(h.cancel(a.seq).await.unwrap(), CancelOutcome::AlreadyFinished); assert_eq!(f.cancel_calls(), 0); }
+#[tokio::test] async fn stale_cancel_with_old_seq_does_not_cancel_the_next_request() {   // Q18
+    let (h, f) = session(fake_pg().exec(vec![slow("select 2", ms(200))])); let a = h.submit(exec("select 1")); let b = h.submit(exec("select 2"));
+    a.reply.await.unwrap().unwrap(); assert_eq!(h.cancel(a.seq).await.unwrap(), CancelOutcome::AlreadyFinished);
+    assert!(b.reply.await.unwrap().is_ok()); assert_eq!(f.cancel_calls(), 0); }
 #[tokio::test(start_paused = true)] async fn cancel_waits_two_seconds_then_still_running_and_slow_at_ten() { let (h, _) = session(fake_pg().ignores_cancel().exec(vec![slow("select x", secs(60))]));
-    let _a = h.submit(exec("select x")); let mut ev = h.events(); settle().await; let c = h.cancel(); tokio::time::advance(secs(2)).await;
+    let a = h.submit(exec("select x")); let mut ev = h.events(); settle().await; let c = h.cancel(a.seq); tokio::time::advance(secs(2)).await;
     assert_eq!(c.await.unwrap(), CancelOutcome::StillRunning); tokio::time::advance(secs(8)).await; assert!(matches!(next(&mut ev).await, SessionEvent::SlowCancel { .. })); }
 #[tokio::test] async fn mysql_cancel_uses_kill_query_on_a_side_connection() { let side = FakeDriver::new(DbmsKind::MySql);
     let (h, _) = session_with_side(fake_mysql().backend(42).exec(vec![slow("select sleep(60)", secs(60))]), &side);
-    let _a = h.submit(exec("select sleep(60)")); settle().await; let _ = h.cancel().await; assert_eq!(side.executed(), ["KILL QUERY 42"]); }
+    let a = h.submit(exec("select sleep(60)")); settle().await; let _ = h.cancel(a.seq).await; assert_eq!(side.executed(), ["KILL QUERY 42"]); }
+#[tokio::test(start_paused = true)] async fn mysql_side_connection_is_prewarmed_at_500ms() { let side = FakeDriver::new(DbmsKind::MySql);   // Q37
+    let (h, _) = session_with_side(fake_mysql().backend(42).exec(vec![slow("select sleep(60)", secs(60))]), &side); let _a = h.submit(exec("select sleep(60)"));
+    tokio::time::advance(ms(400)).await; settle().await; assert_eq!(side.connect_calls(), 0); tokio::time::advance(ms(200)).await; settle().await; assert_eq!(side.connect_calls(), 1); }
 #[tokio::test] async fn terminate_escalation_uses_a_side_connection() { let side = FakeDriver::new(DbmsKind::Postgres);
-    let (h, _) = session_with_side(fake_pg().backend(7).ignores_cancel().exec(vec![slow("select x", secs(60))]), &side); let _a = h.submit(exec("select x")); settle().await;
-    let _ = h.escalate(Escalation::Terminate).await; assert_eq!(side.executed(), ["SELECT pg_terminate_backend(7)"]); }
+    let (h, _) = session_with_side(fake_pg().backend(7).ignores_cancel().exec(vec![slow("select x", secs(60))]), &side); let a = h.submit(exec("select x")); settle().await;
+    let _ = h.escalate(a.seq, Escalation::Terminate).await; assert_eq!(side.executed(), ["SELECT pg_terminate_backend(7)"]); }
 #[tokio::test] async fn driver_panic_marks_session_broken_internal() { let (h, _) = session(fake_pg().exec(vec![panics("select boom")]));
     let r = h.submit(exec("select boom")).reply.await.unwrap(); assert_eq!(r.unwrap_err().kind, ExecErrorKind::Internal); assert_eq!(snap(&h).state, SessionState::Broken(ErrClass::Internal)); }
 // tests/env_schema.rs
@@ -1406,8 +1625,14 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     assert_eq!(switch_schema_sql(DbmsKind::Postgres, "a\"b"), "SET search_path TO \"a\"\"b\""); assert_eq!(switch_schema_sql(DbmsKind::MySql, "an`x"), "USE `an``x`"); }
 #[test] fn reprobe_rule() { for s in ["SET search_path=x", "  /* c */ use db", "rollback", "Begin"] { assert!(needs_schema_reprobe(s), "{s}"); }
     for s in ["select 1", "settings", "user"] { assert!(!needs_schema_reprobe(s), "{s}"); } }
-#[tokio::test] async fn schema_reprobed_after_rollback() { let (h, f) = session(fake_pg()); let mut ev = h.events(); run(&h, "ROLLBACK").await;
-    assert!(f.executed().iter().any(|s| s.starts_with("SELECT current_database()"))); let _ = next(&mut ev).await; }
+#[tokio::test] async fn schema_reprobed_after_rollback() { let (h, f) = session(fake_pg().exec(vec![rows("SELECT current_database()", &[&["d", "app", "app,public", "u"]])]));
+    let mut ev = h.events(); run(&h, "ROLLBACK").await;   // a user statement
+    assert!(f.executed().iter().any(|s| s.starts_with("SELECT current_database()"))); assert!(matches!(next_schema_changed(&mut ev).await, SessionEvent::SchemaChanged(_))); }   // Q32
+#[tokio::test] async fn internal_control_statements_never_reprobe() { let (h, f) = session(fake_mysql()); tx_cmd(&h, TxCommand::SetMode(TxMode::Manual)).await.unwrap();   // Q27
+    assert!(!f.executed().iter().any(|s| s.starts_with("SELECT DATABASE()"))); }
+#[tokio::test] async fn read_only_session_is_always_auto() { let (h, _) = ro_session(fake_pg(), production_profile());   // Q14
+    assert_eq!(snap(&h).tx.mode, TxMode::Auto); assert_eq!(tx_cmd(&h, TxCommand::SetMode(TxMode::Manual)).await.unwrap_err().kind, ExecErrorKind::Tx(TxError::Unsupported));
+    assert_eq!(tx_cmd(&h, TxCommand::Begin).await.unwrap_err().kind, ExecErrorKind::Tx(TxError::Unsupported)); }
 #[tokio::test] async fn reset_rolls_back_then_resets_then_reapplies_env() { let (h, f) = in_tx_session().await; h.submit(Request::Reset).reply.await.unwrap().unwrap();
     assert_eq!(&f.executed()[f.executed().len() - 3..], ["ROLLBACK", "SELECT current_user = session_user", "SET application_name = 'Hacivat'"]); assert_eq!(f.reset_calls(), 1); }
 #[tokio::test] async fn failed_reset_breaks_and_closes() { let (h, f) = session(fake_pg().reset_fails()); let _ = h.submit(Request::Reset).reply.await;
@@ -1426,35 +1651,42 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - Is quoting complete for names with NUL, backticks or quotes?
 - Is a session ever reused after `Broken`?
 
-### Task 8: `mysql_async` patches (B10)
+### Task 8: `mysql_async` patches (B10; Q2)
 
 **Files:**
-- Modify: `third_party/mysql_async/src/**` (the four patches) and `third_party/mysql_async/PATCHES.md` (§1–§4, each with the diff summary, rationale and an upstream PR text).
+- Modify: `third_party/mysql_async/src/**` (the five patches) and `third_party/mysql_async/PATCHES.md` (§1–§5, each with the diff summary, rationale and an upstream PR text).
+- Modify: `crates/core/hacivat-driver-mysql/tests/docker_mysql.rs` (the superseded VerifyCa defect test's `#[ignore]` only; Q29, Q40).
 - Create: `crates/core/hacivat-driver-mysql/tests/patches.rs`.
 
 **Interfaces:**
 - Consumes: the pristine vendored copy from Task 1.
 - Produces, in `mysql_async` (vendored):
-  - `OptsBuilder::insecure_password_refused(bool)`, `OptsBuilder::multi_statements(bool)` and `OptsBuilder::local_infile_capability(bool)`, with the getters `Opts::{insecure_password_refused, multi_statements, local_infile_capability}() -> bool`;
-  - defaults: `false`, `true`, `true`, so upstream behaviour is unchanged;
-  - `get_capabilities` honours the last two;
-  - with `insecure_password_refused == true`, every path that would send the password, or request the server's RSA public key, returns `DriverError::InsecurePasswordRefused`. The paths: `caching_sha2_password` "perform full auth" (`0x04`) on any transport, `sha256_password`, and `mysql_clear_password`. That variant is new, and Task 13 maps it to `RawErrorKind::InsecureAuthRefused`;
-  - `skip_domain_validation` matches `rustls::CertificateError::{NotValidForName, NotValidForNameContext { .. }}` by **variant**.
+  - **§1** `skip_domain_validation` matches `rustls::CertificateError::{NotValidForName, NotValidForNameContext { .. }}` by **variant**. It stays as an upstream bug fix; Hacivat's VerifyCa runs through its own `ChainOnly` verifier via §5.
+  - **§2** `OptsBuilder::password_guard(Option<Arc<dyn Fn() -> bool + Send + Sync>>)`, getter `Opts::password_guard()`. Default `None` (upstream behaviour). It is evaluated at the `caching_sha2_password` "perform full auth" point (`0x04`, `conn/mod.rs:807-827`), before either branch: sending the password in clear (`is_secure() || is_socket()`) or requesting the server's RSA key (`0x02`). `false` returns the new `DriverError::InsecurePasswordRefused`, which Task 13 maps to `RawErrorKind::InsecureAuthRefused`. `sha256_password` is unreachable (the handshake maps every plugin except `caching_sha2` to native, `:550-555`), and `mysql_clear_password` stays gated by `enable_cleartext_plugin(false)`; `PATCHES.md` records both facts.
+  - **§3** `OptsBuilder::multi_statements(bool)` and **§4** `OptsBuilder::local_infile_capability(bool)`, with getters; defaults `true`, so upstream behaviour is unchanged; `get_capabilities` (`opts/mod.rs:1152-1158`) honours them.
+  - **§5** `SslOpts::with_rustls_client_config(Arc<rustls::ClientConfig>)`, getter `SslOpts::rustls_client_config()`. When set, `build_tls_connector` (`src/io/tls/rustls_io.rs`) returns `TlsConnector::from(cfg)` and ignores the root certificates, the client identity and the danger flags; `with_danger_tls_hostname_override` still supplies the server name. Default `None` (upstream behaviour).
 
 - [ ] **Step 1: Write the failing tests** (`crates/core/hacivat-driver-mysql/tests/patches.rs`).
 ```rust
-#[test] fn knobs_default_to_upstream_behaviour() { let o = Opts::from(OptsBuilder::default()); assert!(!o.insecure_password_refused()); assert!(o.multi_statements() && o.local_infile_capability()); }
-#[test] fn knobs_set() { let o = Opts::from(OptsBuilder::default().insecure_password_refused(true).multi_statements(false).local_infile_capability(false));
-    assert!(o.insecure_password_refused() && !o.multi_statements() && !o.local_infile_capability()); }
+#[test] fn knobs_default_to_upstream_behaviour() { let o = Opts::from(OptsBuilder::default()); assert!(o.password_guard().is_none()); assert!(o.multi_statements() && o.local_infile_capability());
+    assert!(SslOpts::default().rustls_client_config().is_none()); }
+#[test] fn knobs_set() { let o = Opts::from(OptsBuilder::default().password_guard(Some(Arc::new(|| false))).multi_statements(false).local_infile_capability(false));
+    assert!(!(o.password_guard().unwrap())() && !o.multi_statements() && !o.local_infile_capability()); }
 #[test] fn insecure_password_refused_error_exists() { let e = mysql_async::DriverError::InsecurePasswordRefused; assert!(!format!("{e}").is_empty()); }
+#[tokio::test] async fn custom_client_config_is_used() {   // §5: an in-process tokio-rustls server that speaks only the MySQL greeting + SSL switch
+    let srv = mysql_greeting_tls_server(self_signed("db")).await; let (cfg, calls) = counting_verifier_config();
+    let opts = OptsBuilder::default().ip_or_hostname("127.0.0.1").tcp_port(srv.port())
+        .ssl_opts(SslOpts::default().with_rustls_client_config(cfg).with_danger_tls_hostname_override(Some("db".into())));
+    let _ = Conn::new(opts).await; assert_eq!(calls.load(Ordering::SeqCst), 1); assert_eq!(srv.sni(), Some("db".into())); }
 ```
 - [ ] **Step 2:** Run `cargo test -p hacivat-driver-mysql --test patches`. Expected: FAIL to compile.
-- [ ] **Step 3: Implement** the four patches. Each is the smallest diff that does the job, and each is fenced by a `// HACIVAT PATCH §N` comment. `PATCHES.md` lists every touched file and line range. Do not reformat upstream code.
+- [ ] **Step 3: Implement** the five patches. Each is the smallest diff that does the job, and each is fenced by a `// HACIVAT PATCH §N` comment. `PATCHES.md` lists every touched file and line range. Do not reformat upstream code.
 - [ ] **Step 4:** Run Step 2's command, then `cargo test -p hacivat-driver-mysql` (the M2a unit tests), then `cargo xtask docker test --set pr -p hacivat-driver-mysql` (the M2a Docker tests stay green; the VerifyCa defect test now **fails as expected**, so mark it `#[ignore = "superseded by Task 13"]` with a note). Expected: PASS.
-- [ ] **Step 5: Commit** with the message `fix(vendor): mysql_async 0.37.1 patches — VerifyCa variant match, insecure-password refusal, multi-statements and local-infile capability knobs`.
+- [ ] **Step 5: Commit** with the message `fix(vendor): mysql_async 0.37.1 patches — VerifyCa variant match, password guard at full auth, multi-statements and local-infile capability knobs, custom rustls ClientConfig`.
 
 **Review:** opus, adversarial.
-- Probes: is there any auth path that still sends the password, or asks for the key, when refused? Trace every call of `write_bytes` in `src/conn/mod.rs` auth code.
+- Probes: is there any auth path that still sends the password, or asks for the key, when the guard returns `false`? Trace every call of `write_bytes` in `src/conn/mod.rs` auth code.
+- With §5 set, does any code path still build a `ClientConfig` of its own (roots, `DangerousVerifier`, identity) or fall back to it on error?
 - Does the capability knob also stop `COM_SET_OPTION` from turning multi-statements back on? (The driver never sends it; assert that it is not reachable from `Queryable`.)
 
 ### Task 9: SSH `TunnelManager`, testkit SSH server and agent (HV-SEC-01; B11, B20)
@@ -1486,12 +1718,14 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     - **Keep-alive** runs per hop (`TunnelConfig`). After `keepalive_max` failures the generation bumps and `TunnelEvent::Dead` is sent once.
     - **Release** happens in reverse order, after `idle_grace` with zero users. On partial failure, the hops already up are released at once.
   - **`TunnelLease::factory(host, port)`** opens a `direct-tcpip` channel per call. The database host is resolved remotely.
-  - **testkit `TestSshServer`** (russh server, `feature = "ssh"`):
-    - `TestSshConfig { host_key: Option<KeyPair>, users: Vec<TestUser{name, password: Option<String>, keys: Vec<PublicKey>, kbd: Option<Vec<(String, bool, String)>>}>, forward: ForwardPolicy::{Allow, Deny}, forward_to: ForwardTarget::{Any, Only(SocketAddr)}, max_auth_tries: u32 }`;
-    - `TestSshServer::start(cfg) -> TestSshServer { pub addr: SocketAddr, pub host_key: HostKey }`, with `sessions_open()`, `channels_opened()`, `kill_sessions()` and `stop()`.
+  - **testkit `TestSshServer`** (russh server, `feature = "ssh"`), exactly Task 1's declared API (Q23):
+    - `TestSshServer::start(cfg) -> TestSshServer { pub addr: SocketAddr, pub host_key: HostKey }`, with `host()`, `auth_attempts()`, `sessions_open()`, `sessions_accepted()`, `channels_opened()`, `kill_sessions()` and `stop()`;
+    - `TestSshConfig` builders `user_pw`, `user_key`, `user_kbd`, `forward(ForwardPolicy::{Allow, Deny})`, `forward_to(ForwardTarget::{Any, Redirect(SocketAddr)})`, `max_auth_tries`, `slow_banner` and `ipv6`. `Redirect` sends every `direct-tcpip` to one address, so tests can use unresolvable database hosts such as `db.internal`.
+    - `open_server_channel()` lets a test try a server-initiated channel, and `last_originator()` reports the last `direct-tcpip` originator (Q46).
 
-    It binds `127.0.0.1:0` (or `[::1]:0` with `ipv6: true`).
-  - **testkit `TestAgent::start(keys) -> TestAgent { pub socket: PathBuf }`**, Unix only, over russh's agent server.
+    It binds `127.0.0.1:0` (or `[::1]:0` with `ipv6()`).
+  - **testkit `TestAgent::start(keys) -> TestAgent { pub socket: PathBuf }`**, `#[cfg(unix)]` only, over russh's agent server. Every test that uses it is `#[cfg(unix)]` (Windows CI runs `cargo test --workspace`; Q5).
+  - **Channel hygiene (B11, Q46):** the client never requests agent forwarding, X11, a pty, a shell or exec, refuses every server-initiated channel, and sends `127.0.0.1:0` as the `direct-tcpip` originator.
 
 - [ ] **Step 1: Write the failing tests** (all in-process; `echo_target()` is a tokio TCP echo server).
 ```rust
@@ -1513,9 +1747,12 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     mgr(&a).acquire(chain_req(&a, &b), Some(p.clone()), tok()).await.unwrap(); assert_eq!(p.secret_asks(), [(0, "passphrase"), (1, "passphrase")]); }
 #[cfg(unix)] #[tokio::test] async fn agent_auth_with_in_process_agent() { let k = ed25519(); let agent = TestAgent::start(vec![k.clone()]).await;
     let s = ssh(cfg().user_key("u", k.public())).await; assert!(mgr(&s).acquire(req(&s, SshAuth::Agent).agent(&agent.socket), None, tok()).await.is_ok()); }
-#[tokio::test] async fn identities_only_tries_the_key_file_first() { let s = ssh(cfg().user_key("u", KEY_A.public()).max_auth_tries(1)).await;
+#[cfg(unix)] #[tokio::test] async fn identities_only_tries_the_key_file_first() { let s = ssh(cfg().user_key("u", KEY_A.public()).max_auth_tries(1)).await;
     let agent = agent_with_wrong_keys(5).await; let r = req_key(&s, &KEY_A_FILE).identities_only(true).agent(&agent.socket);
     assert!(mgr(&s).acquire(r, None, tok()).await.is_ok()); }
+#[cfg(unix)] #[tokio::test] async fn many_agent_keys_without_identities_only_reports_auth_with_hop() {   // MaxAuthTries (Q33)
+    let s = ssh(cfg().user_key("u", KEY_A.public()).max_auth_tries(2)).await; let agent = agent_with_wrong_keys(5).await;
+    let e = mgr(&s).acquire(req(&s, SshAuth::Agent).agent(&agent.socket), None, tok()).await.unwrap_err(); assert!(matches!(e, SshError::Auth { hop: 0, .. })); }
 #[tokio::test] async fn keyboard_interactive_prompts_are_forwarded_verbatim() { let s = ssh(cfg().user_kbd("u", &[("Doğrulama kodu: ", false, "123456")])).await;
     let p = prompter().keyboard(["123456"]).trusts(); mgr(&s).acquire(req(&s, SshAuth::KeyboardInteractive), Some(p.clone()), tok()).await.unwrap();
     assert_eq!(p.kbd_requests()[0].prompts[0].text, "Doğrulama kodu: "); assert!(!p.kbd_requests()[0].prompts[0].echo); }
@@ -1524,14 +1761,20 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     let _c = m.acquire(req_user(&s, "v"), None, tok()).await.unwrap(); assert_eq!(s.sessions_open(), 2); }
 #[tokio::test] async fn test_connection_never_shares() { let s = ssh(cfg().user_pw("u", "pw")).await; let m = mgr(&s);
     let _a = m.acquire(req_user(&s, "u"), None, tok()).await.unwrap(); let _t = m.acquire(req_user(&s, "u").no_share(), None, tok()).await.unwrap(); assert_eq!(s.sessions_open(), 2); }
-#[tokio::test(start_paused = true)] async fn idle_session_closes_after_grace() { let s = ssh(cfg().user_pw("u", "pw")).await; let m = mgr(&s);
-    drop(m.acquire(req_user(&s, "u"), None, tok()).await.unwrap()); tokio::time::advance(secs(29)).await; assert_eq!(m.sessions_open(), 1);
-    tokio::time::advance(secs(2)).await; settle().await; assert_eq!(m.sessions_open(), 0); }
+#[tokio::test] async fn idle_session_closes_after_grace() {   // real time (Q25): never start_paused with real sockets
+    let s = ssh(cfg().user_pw("u", "pw")).await; let m = mgr_fast(&s);   // TunnelConfig { idle_grace: ms(200), keepalive: ms(100), .. }
+    drop(m.acquire(req_user(&s, "u"), None, tok()).await.unwrap()); tokio::time::sleep(ms(100)).await; assert_eq!(m.sessions_open(), 1);
+    timeout(secs(1), wait_until(|| m.sessions_open() == 0)).await.unwrap(); }
 #[tokio::test] async fn partial_chain_failure_releases_in_reverse() { let (a, b) = jump_pair().await; let e = mgr(&a).acquire(chain_req(&a, &b).bad_password_at(1), None, tok()).await.unwrap_err();
     assert!(matches!(e, SshError::Auth { hop: 1, .. })); settle().await; assert_eq!(a.sessions_open(), 0); }
 #[tokio::test] async fn forwarding_refused_names_the_hop() { let s = ssh(cfg().user_pw("u", "pw").forward(ForwardPolicy::Deny)).await;
     let lease = mgr(&s).acquire(req_user(&s, "u"), None, tok()).await.unwrap(); let e = lease.factory("db", 5432).open().await.unwrap_err();
-    assert!(e.to_string().contains("hop 0") || matches!(classify_channel_err(&e), Some(SshError::ChannelOpen { hop: 0, .. }))); }
+    assert!(matches!(classify_channel_err(&e), Some(SshError::ChannelOpen { hop: 0, .. }))); }   // the classified error only (Q32)
+#[tokio::test] async fn server_initiated_channels_are_refused() { let s = ssh(cfg().user_pw("u", "pw")).await;   // Q46
+    let _lease = mgr(&s).acquire(req_user(&s, "u"), None, tok()).await.unwrap(); assert!(s.open_server_channel().await.is_err()); }
+#[tokio::test] async fn direct_tcpip_originator_is_loopback_zero() { let t = echo_target().await; let s = ssh(cfg().user_pw("u", "pw")).await;   // Q46
+    let lease = mgr(&s).acquire(req_user(&s, "u"), None, tok()).await.unwrap(); let _ = echo_through(&lease, t).await;
+    assert_eq!(s.last_originator(), Some(("127.0.0.1".into(), 0))); }
 #[tokio::test] async fn keepalive_failure_emits_dead_once_with_generation() { let s = ssh(cfg().user_pw("u", "pw")).await; let m = mgr_fast_keepalive(&s); let mut ev = m.events();
     let lease = m.acquire(req_user(&s, "u"), None, tok()).await.unwrap(); let g = lease.generation(); s.kill_sessions();
     assert_eq!(timeout(secs(5), ev.recv()).await.unwrap().unwrap(), TunnelEvent::Dead { key: g.key.clone(), generation: g.generation });
@@ -1555,6 +1798,8 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - Is a channel leaked when `open()` is cancelled?
 - Does a prompter that never answers block other profiles' tunnels? (It must be per-acquire.)
 - Is the agent socket path taken from an untrusted profile? (No: from the environment only.)
+- Does the client ever request agent forwarding, X11, a pty, a shell or exec, or accept a server-initiated channel? Does a `direct-tcpip` originator leak a local address (Q46)?
+- Is any test `start_paused` while talking to the in-process server over real sockets (Q25)?
 
 ### Task 10: PostgreSQL driver M2b: execution, wire observer, insecure-auth guard, channel binding, cancel, reset (B2, B3, B8, B9, B23)
 
@@ -1567,20 +1812,26 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - Consumes:
   - Task 1's `RawConn` surface and `InsecureAuth`;
   - Task 3's `TlsParams.outcome` and `tls_server_end_point` (merged in W1);
-  - Task 16's `pg17-auth` target. Its Docker tests run in W3 after Task 16 merges, so they are written now, marked `#[ignore = "docker"]`, and gated on the target existing.
+  - Task 16's `pg17-auth` target. Its Docker tests run in W3 after Task 16 merges, so they are written now, marked `#[ignore = "docker"]`, and get their targets only through `require_target(..)`/`targets(..)` (Task 1; Q6): no literal target id outside a `require_target` call.
 - Produces:
   - **`wire::Observer<S>`** wraps the stream that `tokio-postgres` reads.
     - It has states `AwaitSslResponse` (when SSL is requested), `Framed` and `Passthrough`.
     - It frames backend messages: one type byte, then an i32 big-endian length.
     - Until `AuthenticationOk` it inspects `R` messages. Code 3 or 5 with `InsecureAuth::RefuseUnlessVerified`, and a TLS outcome not in {Full, CaOnly, Pinned}, fails the read with an `io::Error` whose inner value is `InsecureAuthRefusedMarker`. That maps to `RawErrorKind::InsecureAuthRefused`, and no response is ever written.
-    - After `AuthenticationOk` it records every `Z` status byte into an `Arc<AtomicU8>` that `tx_status()` reads.
-    - It is placed under TLS on the encrypted path (inside `PgTlsStream`) and on `Injected` for plaintext.
+    - It records the PID from `BackendKeyData` (`K`, after `AuthenticationOk`, before the first `Z`) into an `AtomicI32`; **`backend_id` reads it** (`tokio-postgres` exposes no public PID: `CancelToken.process_id` is `pub(crate)`; Q11).
+    - After `AuthenticationOk` it records every `Z` status byte into an `Arc<AtomicU8>` that `tx_status()` reads, and **counts `Z` messages** (`AtomicU64`, with a `tokio::sync::Notify`). `execute`, `batch` and `reset` record the count before sending; after an `Err` they wait (bounded, 1 s) until the count advances, because `tokio-postgres` returns at `ErrorResponse` before `ReadyForQuery` is read. `tx_status()` is then exact (Q12).
+    - **Layering (Q12):** `PgTlsStream(Observer<Framed>(tokio_rustls::client::TlsStream<Observer<AwaitSslResponse>(Injected)>))`. The inner observer sees only the 1-byte `S`/`N` SSL response, then becomes `Passthrough` after `S` or `Framed` after `N`; with `SslMode::Disable` the raw observer starts in `Framed`. Both share one state (`Arc`). Every `R` and `Z` after `S` is read on the **decrypted** side. `channel_binding()` is computed from the inner rustls connection's `peer_certificates()[0]`.
   - **`PgTlsStream::channel_binding()`** returns `ChannelBinding::tls_server_end_point(hash)` when `tls_server_end_point(leaf)` is `Some`.
   - **`execute`:**
     - `Protocol::Simple` → `simple_query`, with rows as text up to `max_rows`;
     - `Protocol::Extended` → `client.query_raw(sql, [])`, counting rows and dropping the values; the command tag comes from `RowStream::rows_affected`.
-    - A notice SQLSTATE goes into `notice_codes`. The connection task forwards `AsyncMessage::Notice` into a bounded per-connection buffer that `execute` drains.
-  - **`batch`** is `batch_execute`. **`reset`** is `batch_execute("DISCARD ALL")`. **`backend_id`** is the backend PID from `client.cancel_token()`.
+    - A notice SQLSTATE goes into `notice_codes`. The connection is driven with `futures::stream::poll_fn(|cx| connection.poll_message(cx))` (replacing M2a's spawned `connection.await`, which logged and dropped notices), and `AsyncMessage::Notice` goes into a bounded per-connection buffer (100 entries) that `execute` drains. No notice text is logged (Q12).
+  - **`batch`** is `batch_execute`. **`backend_id`** is the PID the observer recorded (Q11).
+  - **`reset` (Q10)** is the documented `DISCARD ALL` sequence **without `DEALLOCATE ALL`**, then a by-name deallocation of SQL-level prepared statements:
+    - `CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *; SELECT pg_advisory_unlock_all(); DISCARD PLANS; DISCARD TEMP; DISCARD SEQUENCES;`
+    - then `SELECT name FROM pg_prepared_statements WHERE from_sql`, and `DEALLOCATE "<quoted>"` for each.
+
+    `DEALLOCATE ALL` would drop `tokio-postgres`'s cached `typeinfo` statements (`client.rs:74-130`; `clear_type_cache()` does not drop them), and the next query on an enum, domain, composite, `citext`, `hstore` or PostGIS column would fail with `26000`. ADR 0004 records the equivalence with S-02/#pg-discard.
   - **`cancel_handle()`** returns `PgCancel { token, factory, connector }`. Its `cancel()` opens a stream from the connection's `StreamFactory` and calls `token.cancel_query_raw(stream, connector)` with the same TLS settings.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -1594,7 +1845,13 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 #[test] fn observer_lets_scram_through_and_sees_ssl_response() { assert!(feed_ok(&mut observer(InsecureAuth::RefuseUnlessVerified, None), &auth_request(10)));
     let mut o = observer_ssl(InsecureAuth::RefuseUnlessVerified); feed_ok(&mut o, b"N"); assert!(is_insecure_marker(&feed_err(&mut o, &auth_request(3)))); }
 #[test] fn failed_status_is_e() { let mut o = observer(InsecureAuth::Allow, None); feed_bytewise(&mut o, &[auth_ok(), ready(b'E')].concat()); assert_eq!(o.tx(), TxStatus::Failed); }
+#[test] fn observer_records_backend_key_data_pid() { let mut o = observer(InsecureAuth::Allow, None); feed_bytewise(&mut o, &[auth_ok(), backend_key_data(4242, 7), ready(b'I')].concat());
+    assert_eq!(o.backend_pid(), Some(4242)); assert_eq!(o.ready_count(), 1); }   // Q11, Q12
+#[tokio::test] async fn observer_on_tls_path_sees_decrypted_messages() {   // TLS over a duplex: an R(5) after the handshake is refused (Q12)
+    let (client, server) = tls_duplex_after_ssl_response(b'S').await; let e = read_through_pg_tls_stream(client, InsecureAuth::RefuseUnlessVerified, None, server.send(&auth_request(5))).await.unwrap_err();
+    assert!(is_insecure_marker(&e)); }
 // tests/docker_exec.rs (#[ignore = "docker"])
+// every Docker test takes its target from require_target(..) (Q6): `let Some(t) = require_target("pg17") else { return };`
 #[tokio::test] #[ignore = "docker"] async fn execute_simple_and_extended() { let mut c = pg("pg17").await;
     let s = c.execute("SELECT 1 AS a, 'ş' AS b", simple()).await.unwrap(); assert_eq!(s.rows, [vec![Some("1".into()), Some("ş".into())]]);
     let e = c.execute("SELECT generate_series(1, 5)", ExecOpts::default()).await.unwrap(); assert_eq!(e.row_count, 5); assert!(e.rows.is_empty()); }
@@ -1602,24 +1859,30 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     assert_eq!(c.execute("SELECT 1; SELECT 2", ExecOpts::default()).await.unwrap_err().server.unwrap().code.as_deref(), Some("42601")); }
 #[tokio::test] #[ignore = "docker"] async fn tx_status_follows_protocol() { let mut c = pg("pg17").await; c.batch("BEGIN").await.unwrap(); assert_eq!(c.tx_status(), TxStatus::InTx);
     let _ = c.execute("SELECT 1/0", ExecOpts::default()).await; assert_eq!(c.tx_status(), TxStatus::Failed); c.batch("ROLLBACK").await.unwrap(); assert_eq!(c.tx_status(), TxStatus::Idle); }
+#[tokio::test] #[ignore = "docker"] async fn tx_status_is_failed_right_after_error() { let mut c = pg("pg17").await; c.batch("BEGIN").await.unwrap();   // no sleep (Q12)
+    assert!(c.execute("SELECT 1/0", ExecOpts::default()).await.is_err()); assert_eq!(c.tx_status(), TxStatus::Failed); }
 #[tokio::test] #[ignore = "docker"] async fn rollback_outside_tx_reports_25p01_notice() { let mut c = pg("pg17").await; assert!(c.execute("ROLLBACK", simple()).await.unwrap().notice_codes.contains(&"25P01".to_string())); }
-#[tokio::test] #[ignore = "docker"] async fn cancel_pg_sleep_within_one_second() { for t in ["pg17", "pg17-tls"] { let mut c = pg(t).await; let h = c.cancel_handle().unwrap();
+#[tokio::test] #[ignore = "docker"] async fn cancel_pg_sleep_within_one_second() { for t in ["pg17", "pg17-tls"].into_iter().filter_map(require_target) { let mut c = pg_on(&t).await; let h = c.cancel_handle().unwrap();
     let start = Instant::now(); let (r, _) = tokio::join!(c.execute("SELECT pg_sleep(60)", ExecOpts::default()), async { tokio::time::sleep(ms(200)).await; h.cancel().await });
     assert_eq!(r.unwrap_err().server.unwrap().code.as_deref(), Some("57014")); assert!(start.elapsed() < secs(2)); assert!(c.execute("SELECT 1", simple()).await.is_ok()); } }
 #[tokio::test] #[ignore = "docker"] async fn reset_discards_all() { let mut c = pg("pg17").await;
     c.batch("PREPARE p AS SELECT 1; LISTEN ch; CREATE TEMP TABLE t(a int); SELECT pg_advisory_lock(1)").await.unwrap(); c.reset().await.unwrap();
-    assert_eq!(scalar(&mut c, "SELECT count(*) FROM pg_prepared_statements").await, "0"); assert_eq!(scalar(&mut c, "SELECT count(*) FROM pg_listening_channels()").await, "0");
+    assert_eq!(scalar(&mut c, "SELECT count(*) FROM pg_prepared_statements WHERE from_sql").await, "0");   // Q10 assert_eq!(scalar(&mut c, "SELECT count(*) FROM pg_listening_channels()").await, "0");
     assert_eq!(scalar(&mut c, "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()").await, "0"); }
 #[tokio::test] #[ignore = "docker"] async fn md5_and_cleartext_users_refused_without_verified_tls() { for user in ["hv_md5", "hv_clear"] {
     let e = pg_as("pg17-auth", user, InsecureAuth::RefuseUnlessVerified).await.unwrap_err(); assert_eq!(e.kind, RawErrorKind::InsecureAuthRefused, "{user}");
     assert!(pg_as("pg17-auth", user, InsecureAuth::Allow).await.is_ok(), "{user}"); } }
 #[tokio::test] #[ignore = "docker"] async fn scram_channel_binding_require_succeeds_on_pg17_tls() { assert!(pg_with_channel_binding_required("pg17-tls").await.is_ok()); }
+#[tokio::test] #[ignore = "docker"] async fn extended_query_on_enum_column_after_reset() { let mut c = pg("pg17").await;   // Q10
+    c.batch("DROP TABLE IF EXISTS hv_mood_t; DROP TYPE IF EXISTS hv_mood; CREATE TYPE hv_mood AS ENUM ('ok', 'sad'); CREATE TABLE hv_mood_t(m hv_mood); INSERT INTO hv_mood_t VALUES ('ok')").await.unwrap();
+    assert!(c.execute("SELECT m FROM hv_mood_t", ExecOpts::default()).await.is_ok()); c.reset().await.unwrap();
+    assert!(c.execute("SELECT m FROM hv_mood_t", ExecOpts::default()).await.is_ok()); }
 #[tokio::test] #[ignore = "docker"] async fn backend_id_is_pid() { let mut c = pg("pg17").await; assert_eq!(c.backend_id().unwrap().to_string(), scalar(&mut c, "SELECT pg_backend_pid()").await); }
 ```
 - [ ] **Step 2:** Run `cargo test -p hacivat-driver-pg --test wire`. Expected: FAIL. The Docker file runs in Step 4 once `pg17-auth` exists; until then, its `pg17-auth` tests are written and listed as pending in the report.
 - [ ] **Step 3: Implement** the bodies in Produces. The observer allocates nothing per message beyond a small header buffer. A frame length below 4 or above 1 GiB is `io::ErrorKind::InvalidData`.
 - [ ] **Step 4:** Run `cargo test -p hacivat-driver-pg`, then `cargo xtask docker test --set pr -p hacivat-driver-pg`. Expected: PASS. The `pg17-auth` tests run after Task 16 merges: the controller re-runs this command in W3 and records the result in the ledger.
-- [ ] **Step 5: Commit** with the message `feat(driver-pg): bounded execution, wire observer for tx status and the insecure-auth guard, tls-server-end-point channel binding, cancel over the same transport, DISCARD ALL reset`.
+- [ ] **Step 5: Commit** with the message `feat(driver-pg): bounded execution, wire observer for tx status, backend pid and the insecure-auth guard, tls-server-end-point channel binding, cancel over the same transport, type-cache-safe session reset`.
 
 **Review:** opus, adversarial. Probes:
 - Can a server split an `R` header across reads to slip past the observer? (Byte-wise test.)
@@ -1627,6 +1890,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - Does the observer desync on `CopyData` or large `DataRow` messages?
 - Does the cancel request go over plaintext when the session is TLS?
 - Is the notice buffer bounded (100 entries)?
+- Can `reset` reach a `DEALLOCATE ALL` by any path (Q10)? Does an inner observer ever see ciphertext as frames (Q12)?
 
 ### Task 11: SQLite driver M2b: execution, interrupt, read-only hardening (B2, B21; ADR 0002 M2b notes)
 
@@ -1647,13 +1911,14 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     6. finally, the authorizer (`Connection::authorizer`). It maps rusqlite's `AuthAction` to `SqliteAction` and returns `sqlite_authorize`'s verdict.
   - **`execute`** prepares with rusqlite. A non-empty tail is refused (rusqlite's `MultipleStatement`). On a read-only connection `stmt.readonly()` must be true, otherwise `RawErrorKind::Db` with the `SQLITE_AUTH`-like reason `readonly-required`. Rows come back as text.
   - **`tx_status`** comes from `is_autocommit()`. **`reset`** is `Ok(())`. **`backend_id`** is `None`.
+  - **`ExecSummary.command_tag`** is the first keyword in ASCII upper case, so the guard's `WriteSucceeded` post-check works (Q35).
   - **`cancel_handle()`** returns the `InterruptHandle` wrapper.
   - The authorizer is installed only on read-only connections. A read-write profile is unchanged.
 
 - [ ] **Step 1: Write the failing tests.**
 ```rust
-#[tokio::test] async fn read_only_open_applies_hardening() { let mut c = ro(db_with_table()).await;
-    assert_eq!(text(&mut c, "PRAGMA query_only").await, "1"); }
+#[tokio::test] async fn read_only_open_applies_hardening() { let mut c = ro(db_with_table()).await;   // allowed by Q16's pragma list
+    assert_eq!(text(&mut c, "PRAGMA query_only").await, "1"); assert!(!text(&mut c, "PRAGMA journal_mode").await.is_empty()); }   // M2a's probe still reads it
 #[tokio::test] async fn attach_and_vacuum_into_leave_no_file() { let dir = tempdir(); let mut c = ro(db_in(&dir)).await;
     for sql in [format!("ATTACH '{}' AS n", dir.path().join("new.db").display()), format!("VACUUM INTO '{}'", dir.path().join("copy.db").display())] {
         assert!(c.execute(&sql, simple()).await.is_err(), "{sql}"); }
@@ -1691,7 +1956,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - Create: `crates/core/hacivat-session/tests/{profiles_m2b,validate_m2b}.rs`.
 
 **Interfaces:**
-- Consumes: Task 1's profile fields, `SshSpec`, `HopSpec`, `CertPin` and `IssueCode`.
+- Consumes: Task 1's profile fields, `SshSpec`, `HopSpec`, `CertPin` and `IssueCode`, and Task 1's minimal `ssh_tunnel` parse/write in `store.rs` (an empty `SshSpec`), which this task replaces with the real `[ssh]` table (Q3).
 - Produces:
   - **TOML** (B30). `[connections.ssh]` holds `host_keys`, `keepalive_s` and `[[connections.ssh.hops]]` (`host`, `port`, `user`, `auth` = `agent|key_file|password|keyboard_interactive`, `key_file`, `identities_only`, `identity_files`).
     - `tls.pins = [{ endpoint, sha256 = "<64 hex>" }]` and `tls.allow_public_plaintext`.
@@ -1704,7 +1969,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     - Karagöz still gives `TransportUnavailable`;
     - VerifyCa is accepted for MySQL and MariaDB (`TlsModeUnsupported` stays as a variant but is no longer produced for them);
     - `TlsSetupError::KeyEncryptedLegacy` maps to `IssueCode::TlsKeyLegacyEncrypted`;
-    - **every TLS, SQLite and SSH key path of an untrusted origin is canonicalized, then checked against `ApprovedRoots`** (B26).
+    - **every TLS, SQLite and SSH key path of an untrusted origin is checked against `ApprovedRoots` on canonical forms, per B26 (Q22):** path and roots both canonicalised; `\\?\C:\` stripped to `C:\` by a local helper; M2a's text and prefix rules on the typed path; a missing file through its parent directory; UNC, device and verbatim-UNC canonical forms refused.
 
 - [ ] **Step 1: Write the failing tests.**
 ```rust
@@ -1721,9 +1986,16 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     p.transport = TransportSpec::SshTunnel(SshSpec { hops: vec![hop("h", "u", SshAuth::Agent); 10], ..Default::default() }); assert!(codes(&p).contains(&IssueCode::SshTooManyHops)); }
 #[test] fn karagoz_still_transport_unavailable() { assert!(codes(&karagoz_profile()).contains(&IssueCode::TransportUnavailable)); }
 #[test] fn mysql_verify_ca_is_accepted_now() { assert!(validate(&mysql_profile(TlsMode::VerifyCa), EngineCatalog::embedded()).is_empty()); }
-#[test] fn canonicalize_before_roots_rejects_symlink_escape() { let home = tempdir(); let link = home.path().join("ca.pem"); symlink("/etc/hosts", &link);
+#[cfg(unix)] #[test] fn canonicalize_before_roots_rejects_symlink_escape() { let home = tempdir(); let link = home.path().join("ca.pem"); std::os::unix::fs::symlink("/etc/hosts", &link).unwrap();   // Q5
     let p = imported(pg_with_ca(&link)); assert!(codes_with_roots(&p, &[home.path()]).contains(&IssueCode::PathRefused)); }
-#[test] fn imported_ssh_key_outside_roots_refused() { let p = imported(ssh_profile(vec![hop("b", "u", key_file("/etc/ssh/ssh_host_ed25519_key"))])); assert!(codes(&p).contains(&IssueCode::PathRefused)); }
+#[test] fn imported_ssh_key_outside_roots_refused() { let outside = tempdir(); let key = outside.path().join("id_ed25519"); std::fs::write(&key, "k").unwrap();   // portable (Q5)
+    let home = tempdir(); let p = imported(ssh_profile(vec![hop("b", "u", key_file(key.to_str().unwrap()))])); assert!(codes_with_roots(&p, &[home.path()]).contains(&IssueCode::PathRefused)); }
+#[cfg(target_os = "macos")] #[test] fn canonical_root_on_macos_temp_is_accepted() { let root = tempdir();   // /var/folders → /private/var (Q22)
+    let f = root.path().join("ca.pem"); std::fs::write(&f, "x").unwrap(); assert!(!codes_with_roots(&imported(pg_with_ca(&f)), &[root.path()]).contains(&IssueCode::PathRefused)); }
+#[cfg(windows)] #[test] fn windows_verbatim_disk_is_normalised() { let root = tempdir(); let f = root.path().join("ca.pem"); std::fs::write(&f, "x").unwrap();   // Q22
+    assert!(!codes_with_roots(&imported(pg_with_ca(&f)), &[root.path()]).contains(&IssueCode::PathRefused)); }
+#[test] fn missing_sqlite_file_is_checked_through_its_parent() { let root = tempdir(); let f = root.path().join("new.sqlite");   // Q22
+    assert!(!codes_with_roots(&imported(sqlite_at(&f)), &[root.path()]).contains(&IssueCode::PathRefused)); }
 ```
 - [ ] **Step 2:** Run `cargo test -p hacivat-session --test profiles_m2b --test validate_m2b`. Expected: FAIL.
 - [ ] **Step 3: Implement** the bodies in Produces, with toml_edit as in M2a T12. The hex for `sha256` is lower-case on write and accepted in either case on read. That is ASCII only, so INV-3 is respected.
@@ -1735,58 +2007,75 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - Does a pin hex of the wrong length load?
 - Is there a TOCTOU between canonicalize and use? (Record it: the driver reopens by path; the risk is accepted and noted in ADR 0003.)
 
-### Task 13: MySQL/MariaDB driver M2b: execution, status flags, read-only capabilities, VerifyCa, insecure-password refusal (B2, B3, B8, B10, B21)
+### Task 13: MySQL/MariaDB driver M2b: execution, status flags, read-only capabilities, Hacivat's TLS config, outcome-based password guard (B2, B3, B5, B8, B10, B21; Q2, Q20)
 
 **Files:**
-- Modify: `crates/core/hacivat-driver-mysql/src/{lib,connect,tls,probe,exec}.rs`.
+- Modify: `crates/core/hacivat-driver-mysql/src/{lib,connect,tls,probe,exec}.rs` and `crates/core/hacivat-driver-mysql/Cargo.toml` (remove `rustls-native-certs` only; the named exception in Global Constraints).
 - Create: `crates/core/hacivat-driver-mysql/tests/docker_exec.rs`.
-- Append: an ADR 0002 section, `## m2b-t13 — hacivat-driver-mysql`, which supersedes the P11 defect note.
+- Append: an ADR 0002 section, `## m2b-t13 — hacivat-driver-mysql`, which supersedes the P11 defect note and records the removal of the OS-roots path (MySQL now uses the platform verifier, as PostgreSQL does).
 
 **Interfaces:**
-- Consumes: Task 8's knobs; Task 1's `RawConn` surface; Task 16's `hv_ro` role and targets.
+- Consumes: Task 8's patches §1–§5; Task 3's `TlsParams` (pin-aware verifier, `presented`, `outcome`, decrypted client identity); Task 1's `RawConn` surface; Task 16's targets, through `require_target`/`targets(Some(engine))` only (Q6).
 - Produces:
   - **`opts_for(req)`:**
-    - `insecure_password_refused(req.insecure_auth == RefuseUnlessVerified && !tls_verified(req))`, where `tls_verified` means TLS is on and the mode is not Require (pins verify through the verifier);
+    - **TLS (Q2):** `ssl_opts` = `SslOpts::default().with_rustls_client_config(tls.config.clone()).with_danger_tls_hostname_override(Some(tls_host))`. Every mode (Require, VerifyCa, VerifyFull, Auto) goes through Hacivat's `TlsParams.config`, so pins, the presented-chain capture for review, `TlsParams.outcome`, the platform verifier, the CA file and the client key Hacivat decrypted (encrypted PKCS #8, B25) all apply to MySQL and MariaDB. The M2a `rustls-native-certs` roots path and the VerifyCa `skip_domain_validation` path are removed; VerifyCa runs through Task 3's `ChainOnly` verifier.
+    - **Password guard (Q2 §2, Q20):** `password_guard(Some(Arc::new(move || req.insecure_auth == InsecureAuth::Allow || matches!(*outcome.lock().unwrap(), Some(TlsVerified::Full | TlsVerified::CaOnly | TlsVerified::Pinned)))))`: outcome-based, never mode-based, so Require with a pin is allowed.
     - `multi_statements(!req.read_only)`;
     - `local_infile_capability(false)` always;
-    - VerifyCa → `ssl_opts` with `skip_domain_validation(true)` and the CA roots.
+    - `enable_cleartext_plugin(false)` (M2a, unchanged).
   - **`execute`:**
     - `Simple` → `query_iter`, with rows as text;
     - `Extended` → `exec_iter(sql, ())`, a prepared statement. `ER_UNSUPPORTED_PS` (1295) on a read-only connection is `RawErrorKind::Unsupported` and never falls back to `COM_QUERY`. On a read-write connection it falls back to `query_iter`.
     - `tx` comes from `last_ok_packet().status_flags()`, and an `ERR` keeps the previous value.
+    - **`ExecSummary.command_tag`** is the statement's first keyword in ASCII upper case (MySQL has no command tags), so the guard's `WriteSucceeded` post-check works (Q35). Task 11 does the same for SQLite.
   - **`reset`** is `conn.reset()` (`COM_RESET_CONNECTION`), then `SET SESSION TRANSACTION READ ONLY` again when read-only. **`backend_id`** is `conn.id()`.
   - **`DriverError::InsecurePasswordRefused`** maps to `RawErrorKind::InsecureAuthRefused`. Errors 1317 (query interrupted) and 3024 (`max_execution_time`) map to `RawErrorKind::Cancelled`.
+  - **Docker fixtures (Q7):** the test helpers create their fixtures idempotently through the admin connection: `ensure_probe_table` (`hv_probe`) and `ensure_ro_role` (`CREATE USER IF NOT EXISTS 'hv_ro'@'%' … ; GRANT SELECT, SHOW VIEW ON hv_test.* TO 'hv_ro'@'%'`), so the tests do not depend on Task 16's init scripts having run on a fresh volume.
 
-- [ ] **Step 1: Write the failing tests** (Docker; every MySQL and MariaDB target in the `full` set loops through `for_each_mysql_family`).
+- [ ] **Step 1: Write the failing tests** (Docker; family loops use `targets(Some(DbmsKind::MySql))` and `targets(Some(DbmsKind::MariaDb))`, single targets use `require_target(..)`; Q6).
 ```rust
 #[tokio::test] #[ignore = "docker"] async fn execute_and_status_flags() { for_each_mysql_family(|mut c| async move { c.batch("START TRANSACTION").await.unwrap(); assert_eq!(c.tx_status(), TxStatus::InTx);
     let _ = c.execute("SELECT * FROM no_such_table", simple()).await; assert_eq!(c.tx_status(), TxStatus::InTx); c.batch("ROLLBACK").await.unwrap(); assert_eq!(c.tx_status(), TxStatus::Idle); }).await; }
-#[tokio::test] #[ignore = "docker"] async fn read_only_connection_has_no_multi_statements() { let mut c = mysql_ro("mysql84").await;
+#[tokio::test] #[ignore = "docker"] async fn command_tag_is_the_first_keyword() { let mut c = mysql("mysql84").await; ensure_probe_table(&admin("mysql84").await).await;   // Q35
+    assert_eq!(c.execute("insert into hv_probe values (1)", simple()).await.unwrap().command_tag.as_deref(), Some("INSERT")); }
+#[tokio::test] #[ignore = "docker"] async fn read_only_connection_has_no_multi_statements() { ensure_ro_role(&admin("mysql84").await).await; let mut c = mysql_ro("mysql84").await;
     assert!(c.execute("SELECT 1; DROP TABLE hv_probe", simple()).await.is_err()); assert!(table_exists(&admin("mysql84").await, "hv_probe").await); }
-#[tokio::test] #[ignore = "docker"] async fn read_only_extended_never_falls_back() { let mut c = mysql_ro("mysql84").await;
+#[tokio::test] #[ignore = "docker"] async fn read_only_extended_never_falls_back() { ensure_ro_role(&admin("mysql84").await).await; let mut c = mysql_ro("mysql84").await;
     assert_eq!(c.execute("PREPARE s FROM 'SELECT 1'", ExecOpts::default()).await.unwrap_err().kind, RawErrorKind::Unsupported); }
-#[tokio::test] #[ignore = "docker"] async fn kill_query_side_connection_cancels_sleep() { let mut a = mysql("mysql84").await; let id = a.backend_id().unwrap(); let mut b = mysql("mysql84").await;
+#[tokio::test] #[ignore = "docker"] async fn kill_query_side_connection_cancels_sleep() { let mut a = mysql("mysql84").await; let id = a.backend_id().unwrap(); let mut b = mysql("mysql84").await; let start = Instant::now();
     let (r, _) = tokio::join!(a.execute("SELECT SLEEP(60)", simple()), async { tokio::time::sleep(ms(200)).await; b.batch(&format!("KILL QUERY {id}")).await });
-    assert!(matches!(r, Ok(_) | Err(RawError { kind: RawErrorKind::Cancelled, .. }))); assert!(a.execute("SELECT 1", simple()).await.is_ok()); }
+    assert!(matches!(r, Ok(_) | Err(RawError { kind: RawErrorKind::Cancelled, .. }))); assert!(start.elapsed() < secs(2)); assert!(a.execute("SELECT 1", simple()).await.is_ok()); }   // Q32
 #[tokio::test] #[ignore = "docker"] async fn reset_connection_clears_user_vars_and_temp_tables() { let mut c = mysql("mysql84").await;
-    c.batch("SET @x = 1").await.unwrap(); c.batch("CREATE TEMPORARY TABLE tt(a int)").await.unwrap(); c.reset().await.unwrap();
-    assert_eq!(text(&mut c, "SELECT @x IS NULL").await, "1"); assert!(c.execute("SELECT * FROM tt", simple()).await.is_err()); }
-#[tokio::test] #[ignore = "docker"] async fn get_lock_after_reset_is_recorded() { let mut c = mysql("mysql84").await; c.batch("DO GET_LOCK('hv', 0)").await.unwrap(); c.reset().await.unwrap();
-    let free = text(&mut admin("mysql84").await, "SELECT IS_FREE_LOCK('hv')").await; record_finding("mysql84 GET_LOCK after COM_RESET_CONNECTION", &free); }  // ADR 0004 records (Inferred → verified)
+    c.batch("USE hv_test").await.unwrap(); c.batch("SET @x = 1").await.unwrap(); c.batch("CREATE TEMPORARY TABLE tt(a int)").await.unwrap(); c.reset().await.unwrap();
+    assert_eq!(text(&mut c, "SELECT @x IS NULL").await, "1"); assert!(c.execute("SELECT * FROM tt", simple()).await.is_err());
+    assert_eq!(text(&mut c, "SELECT DATABASE()").await, "hv_test"); }   // Q15: the default database survives COM_RESET_CONNECTION
+#[tokio::test] #[ignore = "docker"] async fn get_lock_after_reset_is_released() { let mut c = mysql("mysql84").await; c.batch("DO GET_LOCK('hv', 0)").await.unwrap(); c.reset().await.unwrap();
+    let free = text(&mut admin("mysql84").await, "SELECT IS_FREE_LOCK('hv')").await; assert_eq!(free, "1"); }   // Q32: the documented behaviour; on failure ADR 0004 records it
 #[tokio::test] #[ignore = "docker"] async fn verify_ca_with_container_ca_skips_the_name() { assert!(mysql_tls("mysql84", TlsMode::VerifyCa, Some(artifact("mysql84-ca.pem"))).await.is_ok()); }
+#[tokio::test] #[ignore = "docker"] async fn pin_flow_on_mysql84() {   // Q2: the presented chain is captured on UnknownIssuer; a retry with the pin gives Pinned
+    let (e, params) = mysql_tls_keep("mysql84", auto_with(&[])).await; assert_eq!(e.unwrap_err().kind, RawErrorKind::Tls(TlsFailure::UnknownIssuer));
+    let pin = pin_from(&params, "127.0.0.1", port_of("mysql84")); let (r, p2) = mysql_tls_keep("mysql84", auto_with(&[pin])).await;
+    assert!(r.is_ok()); assert_eq!(*p2.outcome.lock().unwrap(), Some(TlsVerified::Pinned)); }
+#[tokio::test] #[ignore = "docker"] async fn encrypted_pkcs8_client_key() {   // Q2: the ClientConfig carries the client cert Hacivat decrypted
+    let params = tls_params_with_encrypted_client_key("hv_test_pw"); assert!(params.config.client_auth_cert_resolver.has_certs());
+    assert!(mysql_with_params("mysql84", params).await.is_ok()); }   // a `REQUIRE X509` user is optional; the resolver assertion is mandatory
 #[tokio::test] #[ignore = "docker"] async fn insecure_password_refused_over_plaintext_full_auth() { flush_privileges(&mut admin("mysql84").await).await;
     let e = mysql_as("mysql84", TlsMode::Disable, InsecureAuth::RefuseUnlessVerified).await.unwrap_err(); assert_eq!(e.kind, RawErrorKind::InsecureAuthRefused);
     assert!(mysql_as("mysql84", TlsMode::Disable, InsecureAuth::Allow).await.is_ok()); }
+#[tokio::test] #[ignore = "docker"] async fn require_with_pin_full_auth_is_allowed() { flush_privileges(&mut admin("mysql84").await).await;   // Q20: outcome-based
+    let pin = pin_of_target("mysql84").await; assert!(mysql_as_with(&"mysql84", TlsSettings { mode: TlsMode::Require, ..auto_with(&[pin]) }, InsecureAuth::RefuseUnlessVerified).await.is_ok()); }
+#[test] fn password_guard_matrix() { for (mode, outcome, ia, want) in insecure_matrix() { assert_eq!(guard_allows(mode, outcome, ia), want, "{mode:?} {outcome:?} {ia:?}"); } }   // every mode × outcome × InsecureAuth
 ```
-- [ ] **Step 2:** Run `cargo xtask docker test --set full -p hacivat-driver-mysql`. Expected: FAIL.
-- [ ] **Step 3: Implement** the bodies in Produces. Remove the M2a `TlsModeUnsupported` refusal in the driver, and drop the `#[ignore]` from Task 8's superseded defect test (it now asserts success).
-- [ ] **Step 4:** Run Step 2's command and `cargo test -p hacivat-driver-mysql`. Expected: PASS.
-- [ ] **Step 5: Commit** with the message `feat(driver-mysql): bounded execution, status-flag tx state, read-only without multi-statements, COM_RESET_CONNECTION, VerifyCa, insecure-password refusal`.
+- [ ] **Step 2:** Run `cargo xtask docker test --set full -p hacivat-driver-mysql` and `cargo test -p hacivat-driver-mysql`. Expected: FAIL. **Coordination (Q7):** this Docker run happens before Task 16 Step 5 recreates the stack; tell the controller when it is finished. The controller re-runs this task's Docker set after Task 16 merges.
+- [ ] **Step 3: Implement** the bodies in Produces. Remove the M2a `TlsModeUnsupported` refusal in the driver and the `rustls-native-certs` path, and drop the `#[ignore]` from Task 8's superseded defect test (it now asserts success).
+- [ ] **Step 4:** Run Step 2's commands. Expected: PASS.
+- [ ] **Step 5: Commit** with the message `feat(driver-mysql): bounded execution, status-flag tx state, read-only without multi-statements, COM_RESET_CONNECTION, Hacivat's rustls config (pins, review, VerifyCa, encrypted keys), outcome-based password guard`.
 
 **Review:** opus, adversarial. Probes:
 - Is a prepared `CALL` executed in read-only mode? (Session RO and privileges must stop its writes. Test with `hv_ro`.)
 - Does a `max_execution_time` interruption leave the connection usable?
-- Is `insecure_password_refused` false anywhere it should be true? (Trace each mode × `InsecureAuth` combination in a table test.)
+- Is the password guard ever `true` when the outcome is `No` or `None` and `InsecureAuth` is `RefuseUnlessVerified`? (`password_guard_matrix`.)
+- Does any connect path still build `mysql_async`'s own `ClientConfig` (roots, `DangerousVerifier`)?
 
 ### Task 14: Pipeline M2b: interactive TLS, the plaintext question, the SSH transport step, secrets and prompts, the insecure-auth policy, new error classes (HV-CONN-01, -03; B5–B8, B11, B19, B24, B25)
 
@@ -1807,33 +2096,37 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - Produces:
   - **Transport step (order 40).**
     - With `TransportSpec::SshTunnel(spec)`:
-      1. Read the hop secrets from the store (`SshPassword { hop }`, `SshPassphrase { hop }`, with `ssh_retention`) on `spawn_blocking`, outside the deadline.
-      2. `TunnelManager::acquire(.., share = purpose != Test, prompter = PipelinePrompter)`. The `PipelinePrompter` maps SSH prompts to `Question::{HostKey, Secret, Keyboard}` through the `Interaction`; Headless has no prompter.
+      1. Hop secrets: `ConnectRequest.overlay_secrets` first (reconnects and side connections, Q17), then `ConnectRequest.draft_ssh` (Test from the dialog, Q23), then the store (`SshPassword { hop }`, `SshPassphrase { hop }`, with `ssh_retention`) on `spawn_blocking`, outside the deadline.
+      2. `TunnelManager::acquire(.., share = purpose != Test, prompter = PipelinePrompter)`. The `PipelinePrompter` maps SSH prompts to `Question::{HostKey, Secret, Keyboard}` through the `Interaction`; Headless has no prompter. `acquire` is **not** wrapped in `clock.run`: hop network timeouts come from `TunnelRequest.connect_timeout`, and prompt time never counts toward the deadline (P23, Q44).
       3. The factory is `lease.factory(db_host, db_port)`, and `Endpoint::Network.direct = None`, so MySQL goes through the forwarder.
-      4. The trail gets `Ssh` (Resolve is skipped).
+      4. The trail gets `Ssh`. `ResolveStep::applies` is `false` for `TransportSpec::SshTunnel`: no local DNS lookup of the database host (Q44).
       5. The lease becomes a `CleanupGuard`. `LiveConnection.transport`, `path = Ssh` and `via = lease.bastion()` are set.
     - Prompted SSH secrets are stored only after the whole connect succeeds (R8).
+    - Every secret that worked (DB password, hop secrets, TLS key passphrase) is returned in `LiveConnection.secrets_used`, and the one-gesture plaintext consent in `LiveConnection.plaintext_consent`, for Task 15's session overlay (Q17).
   - **TLS step (order 50).**
     - `tls_host` is the database host. The class is `classify_host` for Direct and the B11 rule for SSH.
     - With a client key, `TlsKeyPassphrase` is read (blocking, outside the deadline). It is asked through `Question::Secret(TlsKeyPassphrase)` when missing and the key is encrypted.
-    - Pins come from the profile.
+    - Pins come from the profile. A pinned endpoint never gets `plaintext_allowed` (Task 3, Q13).
+    - The same `TlsParams` serves MySQL through patch §5 (Q2): this step is engine-neutral.
   - **Insecure-auth policy** (B8): `insecure_auth_for(profile, class, mode) -> InsecureAuth`.
   - **DriverConnect step (order 70).**
     - On `tls.untrusted`, Interactive: build the review from `TlsParams.presented`, ask `Question::Certificate`, and then:
       - `Pin` → push `AddPin`, rebuild `TlsParams` with the pin, and retry once;
       - `ImportCa(p)` → push `SetCaFile(p)`, `ApprovedRoots::add(p)`, rebuild and retry once;
       - `Cancelled` → the error with `certificate = Some(review)`.
-    - On `PinMismatch` → `tls.pin_changed`, with `certificate` holding both fingerprints. Never asked.
-    - On `tls.not_supported_by_server` under Auto, Interactive → `Question::PlaintextPublic`:
+    - On `PinMismatch` → `tls.pin_changed`, with `certificate` holding both fingerprints. Never asked. **The pipeline never produces `ProfileChange::ReplacePin`**; only `cert_dialog::review` builds it, from the error (Task 19, Q26).
+    - On `tls.not_supported_by_server` for a **pinned endpoint** → the error with fixes `[EditConnection]`, never asked (Q13).
+    - On `tls.not_supported_by_server` under Auto, Interactive → `Question::PlaintextPublic` (skipped when `ConnectRequest.plaintext_consent` is set: the retry uses it directly, Q17):
       - `ConnectPlaintext { remember }` → retry once with `plaintext_allowed = true` and `InsecureAuth::Allow`, plus `AllowPublicPlaintext` when `remember`;
       - `UseSsh` → the error with fixes `[ConnectThroughSsh, EditConnection]`.
     - At most one retry per question kind per connect.
+    - On `auth.insecure_method` when TLS was up, `ConnectError.certificate` carries the presented chain's review, so "Review certificate" can pin; after the pin the outcome is `Pinned` and the guard allows the password (Q20).
   - **Secrets resolution** (`resolve_auth` stays). When the backend is a locked vault, Interactive asks `Question::UnlockVault { attempt }` up to 3 times. Then:
     - `Master` → `vault.unlock`;
     - `WrongMasterPassword` → the next attempt;
     - `Cancelled`, or 3 failures → continue as if nothing is stored, which leads to the password prompt.
 
-    On a first Forever save with a vault backend that does not exist, `Question::CreateVault` is asked by **the save path, not connect** (Task 21 drives it from the model). Headless → `needs_interaction`.
+    **Creating the vault (Q38).** When a prompted Forever secret is stored after success (`remember_password`) and `SecretStore::vault()` reports a vault that does not exist, Interactive asks `Question::CreateVault`; `Master` → `vault.create` on the blocking pool, then the put; `Cancelled` → the secret is kept Until restart (M2a toast). This is the common Linux path. The dialog's save path is Task 21's (`ensure_vault_before_forever`). Headless → never asks; the put falls back. `VaultLocked`, `VaultReadOnly` and `VaultCorrupt` on any Forever put fall back to `UntilRestart` with a reason (Task 6), never a hard error.
   - **`ProfileChange`s** are returned in `LiveConnection.profile_changes`, and also in `ConnectError.profile_changes` when the connect fails later.
   - **`classify_ssh` table:**
 
@@ -1880,7 +2173,10 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 #[tokio::test] async fn pin_changed_is_hard_stop_with_both_fingerprints() { let f = FakeDriver::new(DbmsKind::Postgres).presented(vec![leaf_der()]).connect_result(Err(tls(TlsFailure::PinMismatch)));
     let e = connect_ix(&f, pinned(pg_auto("db", 5432), [1; 32]), &ScriptedUi::answers_m2b([])).await.unwrap_err();
     assert_eq!(e.class, ErrClass::TlsPinChanged); assert_eq!(e.certificate.unwrap().pinned, Some([1; 32])); }
-#[tokio::test] async fn public_plaintext_asks_and_retries_once_without_sending_credentials_first() { let f = FakeDriver::new(DbmsKind::Postgres).script(vec![Err(tls_not_offered()), Ok(())]);
+#[tokio::test] async fn pinned_endpoint_tls_not_offered_is_not_asked() { let f = FakeDriver::new(DbmsKind::Postgres).connect_result(Err(tls_not_offered()));   // Q13
+    let ui = ScriptedUi::answers_m2b([]); let e = connect_ix(&f, pinned(pg_auto("203.0.113.10", 5432), [1; 32]), &ui).await.unwrap_err();
+    assert_eq!(e.class, ErrClass::TlsNotSupportedByServer); assert_eq!(e.fixes, [FixId::EditConnection]); assert!(ui.asked().is_empty()); }
+#[tokio::test] async fn public_plaintext_asks_and_retries_once() { let f = FakeDriver::new(DbmsKind::Postgres).script(vec![Err(tls_not_offered()), Ok(())]);   // renamed (Q44): T10's Require path proves "not sent"
     let ui = ScriptedUi::answers_m2b([Answer::ConnectPlaintext { remember: true }]); let live = connect_ix(&f, pg_auto("203.0.113.10", 5432), &ui).await.unwrap();
     let reqs = f.requests(); assert!(!reqs[0].tls.as_ref().unwrap().plaintext_allowed); assert!(reqs[1].tls.as_ref().map_or(true, |t| t.plaintext_allowed));
     assert_eq!(reqs[1].insecure_auth, InsecureAuth::Allow); assert_eq!(live.profile_changes, [ProfileChange::AllowPublicPlaintext]); }
@@ -1891,6 +2187,12 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     assert_eq!(insecure_auth_for(&pg_with(host, mode, consent), classify_host(host, &[]), mode), want, "{host} {mode:?}"); } }
 #[tokio::test] async fn insecure_method_class_and_fixes() { let e = err_with(&FakeDriver::new(DbmsKind::Postgres).connect_result(Err(raw(RawErrorKind::InsecureAuthRefused))), pg_auto("10.0.0.5", 5432)).await;
     assert_eq!(e.class, ErrClass::AuthInsecureMethod); assert_eq!(e.fixes, [FixId::ReviewCertificate, FixId::EditConnection]); }
+#[tokio::test] async fn insecure_method_keeps_certificate_when_tls_was_up() {   // Q20
+    let f = FakeDriver::new(DbmsKind::Postgres).presented(vec![leaf_der()]).tls_outcome(TlsVerified::No).connect_result(Err(raw(RawErrorKind::InsecureAuthRefused)));
+    let e = err_with(&f, pg_require("10.0.0.5", 5432)).await; assert_eq!(e.class, ErrClass::AuthInsecureMethod); assert!(e.certificate.is_some()); }
+#[tokio::test] async fn pipeline_never_produces_replace_pin() { let f = FakeDriver::new(DbmsKind::Postgres).presented(vec![leaf_der()]).connect_result(Err(tls(TlsFailure::PinMismatch)));   // Q26
+    let e = connect_ix(&f, pinned(pg_auto("db", 5432), [1; 32]), &ScriptedUi::answers_m2b([Answer::Pin])).await.unwrap_err();
+    assert!(!e.profile_changes.iter().any(|c| matches!(c, ProfileChange::ReplacePin { .. }))); }
 #[test] fn tls_untrusted_never_offers_encrypt_without_verifying() { assert!(!fixes_for(ErrClass::TlsUntrusted).contains(&FixId::EncryptWithoutVerifying)); }
 // tests/pipeline_ssh.rs
 #[tokio::test] async fn ssh_profile_trail_is_ssh_connect_tls_signin_check() { let s = ssh(cfg().user_pw("u", "pw")).await; let f = FakeDriver::new(DbmsKind::Postgres).consumes_factory();
@@ -1898,7 +2200,13 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     assert_eq!(steps(&live), [TrailStep::Ssh, TrailStep::Connect, TrailStep::Tls, TrailStep::SignIn, TrailStep::CheckServer]); assert_eq!(live.path, PathKind::Ssh); }
 #[tokio::test] async fn tls_through_ssh_sends_the_database_host_as_sni() { let s = ssh(cfg().user_pw("u", "pw")).await; let f = FakeDriver::new(DbmsKind::Postgres).consumes_factory();
     connect_ssh(&f, &s, pg_auto("db.internal", 5432), Answer::TrustHostKey, "pw").await.unwrap();
-    assert_eq!(f.last_request().unwrap().tls.unwrap().server_name, ServerName::try_from("db.internal").unwrap()); }
+    assert_eq!(f.last_request().unwrap().tls.unwrap().server_name, "db.internal"); }   // a String in FakeTls (Q44)
+#[tokio::test] async fn ssh_profile_never_resolves_the_database_host_locally() { let s = ssh(cfg().user_pw("u", "pw").forward_to(ForwardTarget::Redirect(echo_pg_like().await))).await;   // Q44
+    let live = connect_ssh(&FakeDriver::new(DbmsKind::Postgres).consumes_factory(), &s, pg_auto("db.internal", 5432), Answer::TrustHostKey, "pw").await.unwrap();
+    assert!(!steps(&live).contains(&TrailStep::Resolve)); assert_eq!(local_dns_lookups(), 0); }
+#[tokio::test] async fn host_key_prompt_time_does_not_count_toward_the_deadline() { let s = ssh(cfg().user_pw("u", "pw")).await;   // P23, Q44
+    let ui = ScriptedUi::answers_m2b([Answer::TrustHostKey, Answer::Password(sec("pw"))]).delay(secs(3));
+    assert!(connect_ssh_with_deadline(&FakeDriver::new(DbmsKind::Postgres).consumes_factory(), &s, pg_auto("db.internal", 5432), &ui, secs(2)).await.is_ok()); }
 #[test] fn ssh_address_class_names_are_private() { assert_eq!(ssh_address_class("db.internal"), AddressClass::Private); assert_eq!(ssh_address_class("localhost"), AddressClass::Loopback);
     assert_eq!(ssh_address_class("8.8.8.8"), AddressClass::Public); }
 #[tokio::test] async fn ssh_failure_names_the_hop() { let (a, b) = jump_pair().await; let e = connect_chain_bad_pw_at(&a, &b, 1).await.unwrap_err();
@@ -1917,6 +2225,16 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     connect_chain(&a, &b, &ui).await.unwrap(); assert_eq!(secret_prompt_hops(&ui), [0, 1]); }
 #[tokio::test] async fn vault_locked_asks_unlock_then_reads() { let (deps, vault) = deps_with_locked_vault("correct horse", "pw"); let ui = ScriptedUi::answers_m2b([Answer::Master(sec("wrong horse")), Answer::Master(sec("correct horse"))]);
     connect(&deps, req(forever_profile()), ui.ix(), token(), progress()).await.unwrap(); assert_eq!(unlock_attempts(&ui), [1, 2]); assert!(vault.is_unlocked()); }
+#[tokio::test] async fn three_wrong_master_passwords_fall_back_to_password_prompt() { let (deps, vault) = deps_with_locked_vault("correct horse", "pw");   // Q33
+    let ui = ScriptedUi::answers_m2b([Answer::Master(sec("w1")), Answer::Master(sec("w2")), Answer::Master(sec("w3")), Answer::Password(sec("pw"))]);
+    connect(&deps, req(forever_profile()), ui.ix(), token(), progress()).await.unwrap(); assert_eq!(unlock_attempts(&ui), [1, 2, 3]);
+    assert!(matches!(ui.asked()[3], Question::Password { .. })); assert!(!vault.is_unlocked()); }
+#[tokio::test] async fn first_forever_secret_on_vault_machine_asks_create_vault() { let deps = deps_with_absent_vault();   // Q38
+    let ui = ScriptedUi::answers_m2b([Answer::Password(sec("pw")), Answer::Master(sec("correct horse"))]);
+    connect(&deps, req(forever_profile()), ui.ix(), token(), progress()).await.unwrap(); assert!(matches!(ui.asked()[1], Question::CreateVault)); assert!(vault_of(&deps).exists()); }
+#[tokio::test] async fn overlay_secrets_are_used_before_the_store_and_returned() { let deps = deps_never_retention();   // Q17
+    let live = connect(&deps, req(never_profile()).overlay_secrets(db_secret("pw")), Interaction::Headless, token(), progress()).await.unwrap();
+    assert_eq!(expose(live.secrets_used.db.as_ref().unwrap()), "pw"); }
 #[tokio::test] async fn vault_unlock_cancel_falls_back_to_password_prompt() { let (deps, _) = deps_with_locked_vault("correct horse", "pw"); let ui = ScriptedUi::answers_m2b([Answer::Cancelled, Answer::Password(sec("pw"))]);
     connect(&deps, req(forever_profile()), ui.ix(), token(), progress()).await.unwrap(); assert!(matches!(ui.asked()[1], Question::Password { .. })); }
 #[tokio::test] async fn encrypted_tls_key_passphrase_asked_when_missing() { let ui = ScriptedUi::answers_m2b([Answer::Secret(sec("pw1"))]); let live = connect_with_encrypted_client_key(&ui).await.unwrap();
@@ -1934,6 +2252,8 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - Can a scripted UI make the pipeline loop (`Pin` → still untrusted → ask again)? It must not.
 - Does a `ProfileChange` reach a profile of a different id?
 - Is a pin added during a **Test** persisted? (Only through the dialog draft, Task 19.)
+- Can a pinned endpoint end up in plaintext through any answer or retry (Q13)?
+- Is `TunnelManager::acquire` inside `clock.run` anywhere (Q44)? Does the SSH path call the local resolver?
 - Does Headless prompt anywhere?
 - Are prompted SSH secrets stored on failure?
 - Can `ImportCa` with a path outside home bypass `ApprovedRoots`? (`ImportCa` paths come from the file picker and are approved by design. Assert that it is the picker path, not a typed one.)
@@ -1941,8 +2261,9 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 ### Task 15: `SessionManager`, router and pools (HV-SESS-01, -02, -08; D-035)
 
 **Files:**
-- Modify: `crates/core/hacivat-session/src/session/{router,pool}.rs`.
+- Modify: `crates/core/hacivat-session/src/session/{router,pool}.rs` (`SessionManager` and its overlay live in `pool.rs`).
 - Create: `crates/core/hacivat-session/tests/{router,pool}.rs`.
+- Append: an ADR 0003 section, `## m2b-t15 — session overlay` (secrets with retention `Never` live in memory for the live session's duration; Q17).
 
 **Interfaces:**
 - Consumes: Task 7's `spawn_session`, `SessionHooks` and `Request::Reset`; M2a's `Budget`, `Priority` and `connect`.
@@ -1958,7 +2279,8 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
   - **`SessionManager`:**
     - `open(spec)` takes a budget permit by kind (Console → `Priority::Console`, Editor → `Editor`, Job → `Job`, Introspection and Service → `Introspection`), connects with `ConnectRequest { read_only: profile.read_only || spec.read_only, department: spec.department, .. }`, and spawns the session. The permit lives as long as the session.
     - `pooled(kind)` reuses an idle pooled session or opens one. Dropping the `PooledSession` sends `Request::Reset` and returns it to idle. A failed reset closes it and frees the permit. An idle pooled session closes after 60 s.
-    - Single-session mode (profile flag), or SQLite (budget 1), makes `open` and `pooled` return the default session.
+    - Single-session mode (profile flag), or SQLite (budget 1), makes `open` and `pooled` return the default session. **A `PooledSession` resets only sessions the pool owns (Q19):** a borrow of the default session is a borrow guard, never resets on drop (no `ROLLBACK` of the user's transaction), and its requests queue behind the console's (HV-SESS-02).
+    - **The session overlay (Q17):** after each successful connect the manager applies the connect's `profile_changes` to its in-memory profile copy, records `plaintext_consent`, and keeps `secrets_used` (`SessionSecrets`, `SecretString`/`Zeroizing` buffers). Reconnects (Task 17) and side connections connect with `ConnectRequest { profile: overlay.profile, overlay_secrets: Some(overlay.secrets), plaintext_consent: overlay.plaintext_consent, .. }`. `update_profile(p)` replaces the overlay's profile and keeps consent and secrets. The overlay is dropped at `close_all` (disconnect, `forget`, quit) and is never persisted.
     - Idle pools are keyed by `(kind, read_only)`, so a read-only request is never served by a read-write pooled session.
     - The side connector (`Department::Cancel`) connects outside the budget, and caches the connection for 30 s.
     - MCP sessions never share with user consoles.
@@ -1984,23 +2306,31 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 #[tokio::test] async fn failed_reset_discards_and_frees_the_permit() { let (sm, f) = manager_n(fake_pg().reset_fails(), 1); drop(sm.pooled(SessionKind::Service).await.unwrap()); settle().await;
     assert_eq!(f.open_connections(), 0); assert!(timeout(ms(200), sm.open(console_spec(1), ix_none())).await.is_ok()); }
 #[tokio::test] async fn single_session_mode_shares_one_connection() { let (sm, f) = manager_single(fake_pg()); let a = sm.open(console_spec(1), ix_none()).await.unwrap();
-    let b = sm.pooled(SessionKind::Service).await.unwrap(); assert_eq!(a.id(), b.id()); assert_eq!(f.connect_calls(), 1); }
+    let b = sm.pooled(SessionKind::Service).await.unwrap(); assert_eq!(a.id(), b.id()); assert_eq!(f.connect_calls(), 1); drop(b); settle().await; assert_eq!(f.reset_calls(), 0); }
+#[tokio::test] async fn single_session_pooled_drop_never_resets() { let (sm, f) = manager_single(fake_pg().exec(vec![tx("BEGIN", TxStatus::InTx)]));   // Q19
+    let console = sm.open(console_spec(1), ix_none()).await.unwrap(); run(&console, "BEGIN").await; drop(sm.pooled(SessionKind::Service).await.unwrap()); settle().await;
+    assert_eq!(f.reset_calls(), 0); assert_eq!(snap(&console).tx.status, TxStatus::InTx); }
+#[tokio::test] async fn overlay_keeps_profile_changes_and_secrets_for_side_connections() { let (sm, f) = manager4(fake_pg_with_pin_answer_and_never_retention());   // Q17
+    let _s = sm.open(console_spec(1), ix_interactive_pin_and_pw("pw")).await.unwrap(); let o = sm.overlay().unwrap();
+    assert_eq!(o.profile.tls.pins.len(), 1); assert!(o.secrets.db.is_some()); sm.update_profile(Arc::new(renamed(&o.profile)));
+    assert_eq!(sm.overlay().unwrap().profile.tls.pins.len(), 1); assert!(sm.overlay().unwrap().secrets.db.is_some()); let _ = f; }
 #[tokio::test] async fn sqlite_is_single_session() { let (sm, f) = manager_sqlite(); let _a = sm.open(console_spec(1), ix_none()).await.unwrap(); let _b = sm.open(console_spec(2), ix_none()).await.unwrap(); assert_eq!(f.connect_calls(), 1); }
 #[tokio::test] async fn read_only_spec_reaches_connect() { let (sm, f) = manager4(fake_pg()); sm.open(SessionSpec { read_only: true, ..console_spec(1) }, ix_none()).await.unwrap(); assert!(f.last_request().unwrap().read_only); }
 #[tokio::test] async fn cancel_side_connection_is_outside_budget() { let (sm, _) = manager_n(fake_mysql().backend(5), 1); let s = sm.open(console_spec(1), ix_none()).await.unwrap();
-    let _q = s.submit(exec_slow("select sleep(60)")); settle().await; assert_eq!(timeout(secs(3), s.cancel()).await.unwrap().unwrap(), CancelOutcome::Cancelled); }
+    let q = s.submit(exec_slow("select sleep(60)")); settle().await; assert_eq!(timeout(secs(3), s.cancel(q.seq)).await.unwrap().unwrap(), CancelOutcome::Cancelled); }
 #[tokio::test] async fn mcp_sessions_never_share_with_user_console() { let (sm, _) = manager4(fake_pg()); let user = sm.open(console_spec(1), ix_none()).await.unwrap();
     let mcp = sm.open(SessionSpec { kind: SessionKind::Console(ClientId(77)), department: Department::Mcp, read_only: true }, ix_none()).await.unwrap(); assert_ne!(user.id(), mcp.id()); }
 ```
 - [ ] **Step 2:** Run `cargo test -p hacivat-session --test router --test pool`. Expected: FAIL.
 - [ ] **Step 3: Implement** the bodies in Produces. The `Priority` order is M2a's. The fair semaphore is M2a's `Budget`; it is not replaced.
 - [ ] **Step 4:** Run Step 2's command, then `cargo test -p hacivat-session --test budget`. Expected: PASS.
-- [ ] **Step 5: Commit** with the message `feat(session): router by department, SessionManager with budgeted consoles, reset-on-release pools with idle close, single-session mode, side connections`.
+- [ ] **Step 5: Commit** with the message `feat(session): router by department, SessionManager with budgeted consoles, reset-on-release pools with idle close, single-session borrows, side connections, session overlay`.
 
 **Review:** opus. Probes:
 - Is a permit leaked when `open` is cancelled midway?
 - Does a pooled session cross read-only boundaries (a read-only spec served by a read-write pooled session)? It must not; the pools are keyed by `read_only`.
 - Can two concurrent releases double-reset?
+- Can a borrow of the default session ever reset it (Q19)? Does an overlay secret outlive `close_all` or reach `Debug` (Q17)?
 
 ### Task 16: Docker matrix, digest pinning, CI matrix and keyring jobs, `ChaosProxy` (L15, §7.1; B15, B17)
 
@@ -2010,7 +2340,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
   - Create `docker/m2a/sshd/{Dockerfile,entrypoint.sh,sshd_config}` and `docker/m2a/pg-auth/{pg_hba.conf,init.sh}`;
   - append to `docker/m2a/init/{pg.sql,mysql.sql}` (the `hv_ro` roles) and `docker/m2a/pg-tr/Dockerfile` (`FROM` digest);
   - `docker/m2a/README.md`.
-- Modify: `crates/core/hacivat-testkit/src/{lib,chaos}.rs`, `xtask/src/docker.rs` and `xtask/src/main.rs` (one arm), and `.github/workflows/ci.yml` (blocks `# ## m2b-t16-…`).
+- Modify: `crates/core/hacivat-testkit/src/{lib,chaos}.rs` (Task 1's `require_target` stays as is), `crates/core/hacivat-testkit/tests/targets.rs` (the new `pr` set: `targets.rs:123` asserts `["mysql84","pg17"]` today; Q6), `xtask/src/docker.rs` and `xtask/src/main.rs` (one arm), and `.github/workflows/ci.yml` (blocks `# ## m2b-t16-…`).
 - Create: `crates/core/hacivat-testkit/tests/{chaos,ssh_targets}.rs`.
 
 **Interfaces:**
@@ -2020,7 +2350,8 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     - **`sshd-a`**: `127.0.0.1:2222`; networks `default` and `ssh-inner`.
     - **`sshd-b`**: no published port; networks `ssh-inner` and `default`. The topology test asserts that it is reachable from the host only through `sshd-a`.
     - **`pg17-auth`**: `127.0.0.1:54327`; users `hv_md5` (md5) and `hv_clear` (password); `password_encryption = md5` for those two users at init.
-  - **Fixture tables** in `init/{pg.sql,mysql.sql}`: `hv_probe(a int)` and `hv_probe_log(id serial or auto_increment, v int)`, used by Tasks 13 and 23. Task 13 runs in the same wave, so its tests create `hv_probe` themselves when it is missing (`ensure_probe_table` through the admin connection).
+  - **Fixture tables and roles** in `init/{pg.sql,mysql.sql}`: `hv_probe(a int)`, `hv_probe_log(id serial or auto_increment, v int)` and the `hv_ro` roles (PostgreSQL: `CREATE ROLE hv_ro LOGIN PASSWORD …; GRANT pg_read_all_data TO hv_ro; REVOKE TEMP ON DATABASE hv_test FROM PUBLIC;`, **no `NOINHERIT`**, Q21; MySQL/MariaDB: `SELECT, SHOW VIEW`), used by Tasks 13, 18 and 23. Task 13 runs in the same wave, so its tests create `hv_probe` and `hv_ro` themselves when missing (`ensure_probe_table`, `ensure_ro_role`, idempotent, through the admin connection; Q7).
+  - **`targets.toml` `[[target]]` gains `service` (compose name) and `internal_port`**, and `DockerTarget` gains `internal: (String, u16)`: the in-network endpoint that tests through `sshd-a`/`sshd-b` connect to (`pg17:5432`, not `127.0.0.1:54317`; Q6). The `pr` set update goes into `tests/targets.rs` too.
   - **Generated at startup.** The sshd entrypoint generates host keys and writes `ssh-host-<id>.pub` to `/artifacts`. A one-shot `ssh-client-keys` service writes `ssh-client-ed25519` and `ssh-client-ed25519-enc` (passphrase `hv_test_pw`) plus their `.pub` files; the sshd containers mount the `.pub` into `authorized_keys`. Nothing private is committed.
   - **`targets.toml`** gains `[[ssh_target]] id, port, user = "hv_ssh", via = Option<id>`. Testkit gains `ssh_targets()`, `ssh_target(id)` and `ssh_client_key(encrypted: bool) -> PathBuf` (through `artifact`).
   - **`ChaosProxy`:** `start(upstream) -> ChaosProxy { addr }`, plus `cut(for_: Duration)` (close every relay and refuse new connections for the duration), `blackhole(on)` (stop forwarding without closing) and `restore()`. It counts `accepted()`.
@@ -2029,7 +2360,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
   - **CI:**
     - `docker-pr` runs `check-pins`, then `up --set pr`, then `test --set pr`;
     - `docker-full` is new, on schedule and `workflow_dispatch`, and runs `up --set full` then `test --set full`;
-    - `keyring-linux` (ubuntu): `sudo apt-get install -y gnome-keyring dbus-x11`, then `dbus-run-session -- bash -c 'echo hv | gnome-keyring-daemon --unlock --components=secrets && HACIVAT_KEYRING_LIVE=1 cargo test -p hacivat-secrets -- --ignored live_keyring_round_trip'`;
+    - `keyring-linux` (ubuntu): `sudo apt-get install -y gnome-keyring dbus-x11`, then `dbus-run-session -- bash -c 'echo hv | gnome-keyring-daemon --unlock --components=secrets && HACIVAT_KEYRING_LIVE=1 cargo test -p hacivat-secrets -- --ignored live_keyring_round_trip'`; the test asserts `KeyringBackend::probe_available()` is `true` before the round trip, so a broken D-Bus setup fails loudly instead of silently testing the vault;
     - `keyring-windows` (windows-latest): the same test;
     - `vault-linux` (ubuntu, no D-Bus): `cargo test -p hacivat-secrets --test fallback -- --include-ignored linux_without_secret_service_uses_vault`. **Task 6 owns that test, and this job runs it**: Task 6 writes it as `#[ignore = "ci-linux"]`.
 - **Docker test ownership:** Tasks 10, 13, 18 and 23 write the Docker tests that use these targets.
@@ -2043,6 +2374,8 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 #[test] fn pr_set_includes_sshd() { let ids = services_in_set(&read("docker/m2a/targets.toml"), "pr").unwrap(); for id in ["pg17", "mysql84", "sshd-a", "sshd-b"] { assert!(ids.contains(&id.to_string()), "{id}"); } }
 #[test] fn repo_compose_and_dockerfiles_are_pinned() { assert!(unpinned(&read("docker/m2a/compose.yml")).is_empty()); }
 #[test] fn sshd_b_is_not_published() { assert!(service(&read("docker/m2a/compose.yml"), "sshd-b").ports.is_empty()); }
+#[test] fn every_target_has_an_internal_endpoint() { for t in targets_in_set(None, None) { assert!(!t.internal.0.is_empty() && t.internal.1 > 0, "{}", t.id); } }   // testkit (Q6)
+#[test] fn pg_init_never_uses_noinherit() { assert!(!read("docker/m2a/init/pg.sql").to_uppercase().contains("NOINHERIT")); }   // Q21
 // testkit tests/chaos.rs
 #[tokio::test] async fn chaos_proxy_relays_cuts_and_refuses() { let up = echo().await; let p = ChaosProxy::start(up).await; assert_eq!(echo_via(p.addr).await, b"ping");
     let held = connect(p.addr).await; p.cut(ms(300)); assert!(read_eof(held).await); assert!(connect(p.addr).await.is_err() || refused_soon(p.addr).await);
@@ -2054,7 +2387,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - [ ] **Step 2:** Run `cargo test -p xtask docker` and `cargo test -p hacivat-testkit`. Expected: FAIL.
 - [ ] **Step 3: Implement** the bodies in Produces. `sshd_config` contains: `AllowTcpForwarding yes`, `PermitOpen any`, `PasswordAuthentication yes`, `KbdInteractiveAuthentication no` (keyboard-interactive is covered by the in-process server), `PubkeyAuthentication yes`, `ClientAliveInterval 0`, `MaxAuthTries 6`, `LogLevel VERBOSE`. Run `xtask docker pin` once, with network access (controller), and commit the digests.
 - [ ] **Step 4:** Run Step 2's commands, then `cargo xtask docker check-pins`. Expected: PASS.
-- [ ] **Step 5: Docker (this task only).** Run `cargo xtask docker down`, then `cargo xtask docker up --set full`. Every service must be healthy within 90 s. Then run `cargo xtask docker test --set full -p hacivat-testkit`. Leave the stack up for the controller, and record the health table and the resolved image digests in the report.
+- [ ] **Step 5: Docker (this task only). After the controller confirms Task 13's Docker run is finished (Q7)**, run `cargo xtask docker down`, then `cargo xtask docker up --set full`. This step runs last in W3; the controller then re-runs Task 13's and Task 10's Docker sets on the new stack and records them in the ledger. Every service must be healthy within 90 s. Then run `cargo xtask docker test --set full -p hacivat-testkit`. Leave the stack up for the controller, and record the health table and the resolved image digests in the report.
 - [ ] **Step 6: Commit** with the message `test(docker): sshd bastions with generated keys, md5/password PG, read-only roles, digest-pinned images, ChaosProxy; CI docker-full, keyring-linux/windows, vault-linux`.
 
 **Review:** sonnet, plus a controller check. Probes:
@@ -2079,7 +2412,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - Produces:
   - **`Supervisor`, per HV-CONN-04:**
     1. When `busy` → `None`.
-    2. Clock jump: `(wall − last_wall) − (mono − last_mono) > 5 s` → `Suspect` once, then `Ping` at the next tick. Missed ticks are never replayed.
+    2. Clock jump (Q31): `wall_delta − mono_delta > 5 s` **or** `mono_delta > tick + 5 s` (Windows `Instant` may include suspended time) → `Suspect` once. At the next tick, with the transaction Idle, the idle threshold is compared against **wall** time since the last activity: `Disconnect` if exceeded, else `Ping`. Missed ticks are never replayed.
     3. Idle threshold reached: with `tx` in `{InTx, Failed}` → `IdleTransaction` once per idle period; otherwise → `Disconnect`.
     4. Keep-alive due (counted from the later of the last activity and the last ping) → `Ping`.
 
@@ -2093,10 +2426,13 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     - `LiveState::Connected` is published once the default session is `Idle`.
     - On a recovery case for the default session:
       1. `LiveState::Reconnecting { attempt, next_in }`.
-      2. Reconnect Headless through `SessionHooks.reconnect` (a pipeline `connect` with `Purpose::Main`).
+      2. Reconnect Headless through `SessionHooks.reconnect` (a pipeline `connect` with `Purpose::Main`), using the **session overlay** (Task 15, Q17): the profile with this session's `ProfileChange`s applied and any `update_profile` edits, the one-gesture plaintext consent, and the `SessionSecrets` that worked. So a pin, CA or consent answered at connect time holds on reconnect, and a secret with retention `Never` (or a one-time-code-free SSH passphrase typed once) is reused.
       3. Replay the environment plan (schema, transaction mode and isolation, read-only).
       4. `LiveState::Connected`, then `ConnectionEvent::SessionLost { lost }` (always, B19).
     - An `auth.*` failure during reconnect → `LiveState::Failed` and stop.
+    - **A reconnect that still needs interaction** (`ConnectError.needs_interaction`: a one-time code, an unknown host key, a locked vault) → `LiveState::Lost { class }` at once, no backoff loop. The capsule's Retry starts an interactive connect. Recovery never prompts (Q17).
+    - `ConnectionManager::update_profile(id, profile)` forwards to that profile's `SessionManager::update_profile` (Q17); the app calls it after every save and `apply_changes`.
+    - `ConnectionEvent::EnforcementGap` carries the session's `GapReason` (Q35).
     - After the give-up time → `LiveState::Lost { class }` (Retry, as in M2a).
     - A user statement in flight when the connection dies fails with `ConnectionLost { outcome_unknown: true }` and is never re-run. An `Internal { idempotent: true }` request is re-queued once at the head.
     - **Group invalidation:** on `TunnelEvent::Dead { key, generation }`, every profile whose `LiveConnection.transport` matches goes into recovery **once**, under a per-`(key, generation)` lock (B20).
@@ -2115,6 +2451,9 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     assert_eq!(disconnect_at(&acts), Some(120)); }
 #[test] fn clock_jump_pings_once_not_per_missed_tick() { let mut s = sup(Some(60), None); let acts = jump_wall(&mut s, Duration::from_secs(7200));
     assert_eq!(acts, [LivenessAction::Suspect, LivenessAction::Ping]); }
+#[test] fn monotonic_jump_alone_is_suspect() { let mut s = sup(Some(60), None); assert_eq!(jump_mono_and_wall(&mut s, secs(7200)), [LivenessAction::Suspect, LivenessAction::Ping]); }   // Windows QPC (Q31)
+#[test] fn sleep_past_idle_threshold_disconnects() { let mut s = sup(None, Some(3600)); idle_for(&mut s, secs(59 * 60));   // Q31
+    assert_eq!(jump_wall(&mut s, secs(8 * 3600)), [LivenessAction::Suspect, LivenessAction::Disconnect]); }
 #[test] fn presets() { assert_eq!(LivenessPolicy::for_profile(&env(EnvTag::Production)).idle_disconnect, Some(secs(3600)));
     assert_eq!(LivenessPolicy::for_profile(&env(EnvTag::Dev)).idle_disconnect, Some(secs(4 * 3600))); assert_eq!(LivenessPolicy::for_profile(&env(EnvTag::Local)).idle_disconnect, None);
     assert_eq!(LivenessPolicy::for_profile(&ssh_profile()).keepalive, Some(secs(60))); assert_eq!(LivenessPolicy::for_profile(&direct_profile()).keepalive, None); }
@@ -2136,9 +2475,15 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     let s = m.sessions(p().id).unwrap().default_session().unwrap(); let t = s.submit(user_exec("INSERT INTO t VALUES (1)")); settle().await; f.kill_connections();
     assert_eq!(t.reply.await.unwrap().unwrap_err().kind, ExecErrorKind::ConnectionLost { outcome_unknown: true }); wait_connected(&m, p().id).await;
     assert_eq!(f.executed().iter().filter(|s| s.starts_with("INSERT")).count(), 1); }
-#[tokio::test] async fn internal_idempotent_read_is_retried_once() { let (m, f) = manager(ok_pg().exec(vec![fails_once_with_reset("SELECT current_database()")])); connect_and_wait(&m).await;
-    let s = default_session(&m); assert!(s.submit(internal_exec("SELECT current_database()")).reply.await.unwrap().is_ok());
-    assert_eq!(f.executed().iter().filter(|x| x.starts_with("SELECT current_database()")).count(), 2); }
+#[tokio::test] async fn internal_idempotent_read_is_retried_once() { let (m, f) = manager(ok_pg().exec(vec![fails_once_with_reset("SELECT 42")])); connect_and_wait(&m).await;   // not the schema probe's text (Q27)
+    let s = default_session(&m); assert!(s.submit(internal_exec("SELECT 42")).reply.await.unwrap().is_ok());
+    assert_eq!(f.executed().iter().filter(|x| x.starts_with("SELECT 42")).count(), 2); }
+#[tokio::test] async fn reconnect_after_pin_answer_uses_the_pin() { let (m, f) = manager_with_pin_answer(); connect_and_wait(&m).await; f.kill_connections();   // Q17
+    wait_connected(&m, p().id).await; assert_eq!(f.last_request().unwrap().tls.unwrap().settings.pins.len(), 1); }
+#[tokio::test] async fn reconnect_with_never_retention_reuses_session_secret() { let (m, f) = manager_never_retention_prompted("pw"); connect_and_wait(&m).await;   // Q17
+    f.kill_connections(); wait_connected(&m, p().id).await; assert_eq!(f.connect_calls(), 2); assert!(nothing_stored(&m)); }
+#[tokio::test] async fn reconnect_needing_interaction_stops_with_lost() { let (m, f) = manager_kbd_otp(); connect_and_wait(&m).await; f.kill_connections();   // Q17
+    wait_state(&m, |s| matches!(s, LiveState::Lost { .. })).await; assert_eq!(f.connect_calls(), 1); }
 #[tokio::test] async fn replay_restores_schema_tx_mode_and_read_only() { let (m, f) = manager_ro(ok_pg()); connect_and_wait(&m).await; set_schema(&m, "app").await; set_mode(&m, TxMode::Manual).await;
     f.kill_connections(); wait_connected(&m, p().id).await; let after = after_last_connect(&f.executed());
     assert!(after.contains(&"SET default_transaction_read_only = on".to_string()) && after.contains(&"SET search_path TO \"app\"".to_string()));
@@ -2153,7 +2498,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     assert!(matches!(ev.recv().await.unwrap(), ConnectionEvent::ProfileChanges { changes, .. } if matches!(changes[0], ProfileChange::AddPin(_)))); }
 ```
 - [ ] **Step 2:** Run `cargo test -p hacivat-session --test liveness --test recovery --test manager_m2b`. Expected: FAIL.
-- [ ] **Step 3: Implement** the bodies in Produces. Keep `ManagerConfig.liveness` as the default keep-alive for profiles with none set (M2a compatibility). Its default of 30 s still applies to Direct profiles under the M2a manager tests: B18's off-by-default applies only to `LivenessPolicy::for_profile` when `ManagerConfig::m2b()` is used; the app boot (Task 22) switches to it. The jitter RNG is `rand_core::OsRng`, with an injectable `fn() -> f32` in tests.
+- [ ] **Step 3: Implement** the bodies in Produces. Keep `ManagerConfig.liveness` as the default keep-alive for profiles with none set (M2a compatibility). Its default of 30 s still applies to Direct profiles under the M2a manager tests: B18's off-by-default applies only to `LivenessPolicy::for_profile` when `ManagerConfig::m2b()` is used; the app boot (Task 22) switches to it. The jitter RNG draws from `getrandom::fill` (Q30: no `rand_core`), with an injectable `fn() -> f32` in tests. The pure `Supervisor` tests drive `Instant`/`SystemTime` by hand; `start_paused` is used only with FakeDriver (Q25).
 - [ ] **Step 4:** Run Step 2's command, then `cargo test -p hacivat-session` (the M2a `manager.rs` tests included). Expected: PASS.
 - [ ] **Step 5: Commit** with the message `feat(session): liveness supervisor with clock-jump detection, reconnect with backoff and state replay, session-lost events, SSH group invalidation, ConnectionManager over SessionManager`.
 
@@ -2173,49 +2518,58 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 **Interfaces:**
 - Consumes: Task 5's plans, checks and probe; Tasks 10, 11 and 13 (driver surfaces); Task 7's actor (which calls `run_guarded`); the pipeline's PostConnect (which calls `access_for`).
 - Produces:
-  - **`run_guarded(conn, kind, sql, opts)`:**
+  - **`run_guarded(conn, kind, sql, opts, replay)`:**
     1. `check_input(sql)`, else `ReadOnlyDenied(Input)`.
+    1a. A first keyword of `COMMIT`, `ROLLBACK`, `BEGIN`, `START`, `END`, `ABORT`, `SAVEPOINT` or `RELEASE` (ASCII-folded, leading whitespace and comments skipped) is `ReadOnlyDenied(Transaction)` before any I/O (Q35). This is the producer of `DenyLayer::Transaction`, not a classifier; steps 5–7 still catch smuggled cases.
     2. `plan.before` through `batch`.
     3. `conn.execute(sql, ExecOpts { protocol: Extended, .. })`. A server rejection with a read-only class code becomes `ExecErrorKind::Db` with the server message (codes PG `25006`, `42501`; MySQL `1792`, `1142`, `1290`; SQLite `SQLITE_READONLY`/`SQLITE_AUTH`).
     4. Note `tx_status()` → `PostFacts.tx_after_statement`.
     5. The canary (PostgreSQL) through `execute(Simple)`.
     6. `plan.after` (ROLLBACK) through `execute(Simple)`, collecting its `notice_codes`.
     7. `check_post`. On `Gap` → return `EnforcementGap(reason)`; the actor marks the session `Broken`, closes the connection and emits `SessionEvent::EnforcementGap`.
-    8. `conn.reset()` when `plan.reset != None`, then the `session_setup` statements again.
+    8. `conn.reset()` when `plan.reset != None`, then `replay` (Q15): the session's full environment plan (read-only setup, `RestoreSchema`), so the schema survives every guarded request and `SchemaChanged` does not flip.
 
     If step 2 fails, the request fails and nothing else runs. If step 3 errors, steps 6 and 8 still run.
 
-    SQLite: only step 1, then `execute`. Hardening is connection-level, through Task 11.
+    SQLite: only steps 1 and 1a, then `execute`. Hardening is connection-level, through Task 11.
+    Read-only sessions are always Auto (B22, Q14), so `run_guarded` never runs inside a user transaction.
   - **`access_for(conn, kind, read_only)`:** when `read_only` and the engine is PostgreSQL or MySQL, run `role_probe_sql` through `execute(Simple)` and return `(access_label(..), findings.warnings)`. A probe that fails is treated as `Unparsed`, so `Guarded`. MariaDB and SQLite return `(ReadOnlyGuarded, [])` with no probe. Read-write returns `(ReadWrite, [])`.
 
 - [ ] **Step 1: Write the failing tests.**
 ```rust
 // tests/readonly.rs (FakeDriver)
-#[tokio::test] async fn pg_guarded_exec_sequence() { let f = fake_pg_ro_clean(); let mut c = conn(&f).await; run_guarded(&mut *c, DbmsKind::Postgres, "select * from t", ExecOpts::default()).await.unwrap();
+#[tokio::test] async fn pg_guarded_exec_sequence() { let f = fake_pg_ro_clean(); let mut c = conn(&f).await; run_guarded(&mut *c, DbmsKind::Postgres, "select * from t", ExecOpts::default(), &pg_session_setup()).await.unwrap();   // replay = the four session_setup statements (Q15)
     assert_eq!(f.executed(), ["BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "SELECT 1", "select * from t", "SELECT txid_current_if_assigned()", "ROLLBACK",
         "SET default_transaction_read_only = on", "SET standard_conforming_strings = on", "SET client_encoding = 'UTF8'", "SET idle_in_transaction_session_timeout = '30s'"]);
     assert_eq!(f.reset_calls(), 1); }
-#[tokio::test] async fn smuggled_commit_is_an_enforcement_gap_and_discards_the_connection() { let (h, f) = ro_session(fake_pg_ro_clean().exec(vec![tx("COMMIT", TxStatus::Idle)]));
-    let r = h.submit(user_exec("COMMIT")).reply.await.unwrap(); assert_eq!(r.unwrap_err().kind, ExecErrorKind::EnforcementGap(GapReason::TransactionEndedByStatement));
+#[tokio::test] async fn smuggled_commit_is_an_enforcement_gap_and_discards_the_connection() { let (h, f) = ro_session(fake_pg_ro_clean().exec(vec![tx("SELECT 1; COMMIT", TxStatus::Idle)]));
+    let r = h.submit(user_exec("SELECT 1; COMMIT")).reply.await.unwrap(); assert_eq!(r.unwrap_err().kind, ExecErrorKind::EnforcementGap(GapReason::TransactionEndedByStatement));   // smuggled past 1a
     assert!(matches!(snap(&h).state, SessionState::Broken(_))); assert_eq!(f.open_connections(), 0); }
 #[tokio::test] async fn canary_non_null_is_a_gap() { let f = fake_pg_ro_clean().exec(vec![rows("SELECT txid_current_if_assigned()", &[&["731"]])]); let mut c = conn(&f).await;
-    assert_eq!(run_guarded(&mut *c, DbmsKind::Postgres, "select 1", ExecOpts::default()).await.unwrap_err().kind, ExecErrorKind::EnforcementGap(GapReason::CanaryAssigned)); }
+    assert_eq!(run_guarded(&mut *c, DbmsKind::Postgres, "select 1", ExecOpts::default(), &[]).await.unwrap_err().kind, ExecErrorKind::EnforcementGap(GapReason::CanaryAssigned)); }
+#[tokio::test] async fn transaction_keywords_are_denied_before_io() { for sql in ["COMMIT", "  /* x */ begin", "SAVEPOINT a", "release a", "END"] {   // Q35
+    let f = fake_pg_ro_clean(); let mut c = conn(&f).await; assert_eq!(run_guarded(&mut *c, DbmsKind::Postgres, sql, ExecOpts::default(), &[]).await.unwrap_err().kind,
+        ExecErrorKind::ReadOnlyDenied(DenyLayer::Transaction), "{sql}"); assert!(f.executed().is_empty()); } }
+#[tokio::test] async fn schema_survives_a_guarded_request() { let (h, f) = ro_session(fake_pg_ro_clean());   // Q15
+    h.submit(Request::SwitchSchema("app".into())).reply.await.unwrap().unwrap(); run(&h, "select 1").await.unwrap();
+    assert_eq!(f.executed().last().unwrap(), "SET search_path TO \"app\""); }
 #[tokio::test] async fn input_over_1mib_rejected_before_io() { let f = fake_pg_ro_clean(); let mut c = conn(&f).await; let big = "x".repeat(MAX_STATEMENT_BYTES + 1);
-    assert_eq!(run_guarded(&mut *c, DbmsKind::Postgres, &big, ExecOpts::default()).await.unwrap_err().kind, ExecErrorKind::ReadOnlyDenied(DenyLayer::Input)); assert!(f.executed().is_empty()); }
+    assert_eq!(run_guarded(&mut *c, DbmsKind::Postgres, &big, ExecOpts::default(), &[]).await.unwrap_err().kind, ExecErrorKind::ReadOnlyDenied(DenyLayer::Input)); assert!(f.executed().is_empty()); }
 #[tokio::test] async fn statement_error_still_rolls_back_and_resets() { let f = fake_pg_ro_clean().exec(vec![err("insert into t values (1)", "25006")]); let mut c = conn(&f).await;
-    assert_eq!(run_guarded(&mut *c, DbmsKind::Postgres, "insert into t values (1)", ExecOpts::default()).await.unwrap_err().kind, ExecErrorKind::Db);
+    assert_eq!(run_guarded(&mut *c, DbmsKind::Postgres, "insert into t values (1)", ExecOpts::default(), &[]).await.unwrap_err().kind, ExecErrorKind::Db);
     assert!(f.executed().contains(&"ROLLBACK".to_string())); assert_eq!(f.reset_calls(), 1); }
-#[tokio::test] async fn mysql_guarded_sequence() { let f = fake_mysql_ro_clean(); let mut c = conn(&f).await; run_guarded(&mut *c, DbmsKind::MySql, "select 1", ExecOpts::default()).await.unwrap();
+#[tokio::test] async fn mysql_guarded_sequence() { let f = fake_mysql_ro_clean(); let mut c = conn(&f).await; run_guarded(&mut *c, DbmsKind::MySql, "select 1", ExecOpts::default(), &mysql_session_setup()).await.unwrap();
     assert_eq!(f.executed(), ["START TRANSACTION READ ONLY", "select 1", "ROLLBACK", "SET SESSION TRANSACTION READ ONLY", "SET NAMES utf8mb4"]); assert_eq!(f.reset_calls(), 1); }
 #[tokio::test] async fn access_for_probes_only_when_read_only() { let f = fake_pg_probe_least(); let mut c = conn(&f).await;
     assert_eq!(access_for(&mut *c, DbmsKind::Postgres, false).await.0, AccessLabel::ReadWrite); assert!(f.executed().is_empty());
     assert_eq!(access_for(&mut *c, DbmsKind::Postgres, true).await.0, AccessLabel::ReadOnlyEnforced);
     assert_eq!(access_for(&mut *conn(&fake_mariadb()).await, DbmsKind::MariaDb, true).await.0, AccessLabel::ReadOnlyGuarded); }
-// tests/docker_readonly.rs
+// tests/docker_readonly.rs — targets only through require_target/targets(..) (Q6); hv_ro created idempotently by the helpers (Q7)
+#[tokio::test] #[ignore = "docker"] async fn pg_hv_ro_can_read_a_table() { let s = ro_session_as_on("pg17", "hv_ro").await; assert!(run(&s, "SELECT count(*) FROM hv_probe").await.is_ok()); }   // Q21
 #[tokio::test] #[ignore = "docker"] async fn pg_hv_ro_is_enforced_and_superuser_is_guarded() { assert_eq!(connect_ro_as("pg17", "hv_ro").await.access, AccessLabel::ReadOnlyEnforced);
     let su = connect_ro_as("pg17", "hv_test").await; assert_eq!(su.access, AccessLabel::ReadOnlyGuarded); assert!(su.access_warnings.contains(&RoleWarning::Superuser)); }
 #[tokio::test] #[ignore = "docker"] async fn mysql_hv_ro_enforced_mariadb_guarded() { assert_eq!(connect_ro_as("mysql84", "hv_ro").await.access, AccessLabel::ReadOnlyEnforced);
-    for t in ["mariadb106", "mariadb1011", "mariadb114"] { assert_eq!(connect_ro_as(t, "hv_ro").await.access, AccessLabel::ReadOnlyGuarded, "{t}"); } }
+    for t in targets(Some(DbmsKind::MariaDb)) { assert_eq!(connect_ro_as(&t.id, "hv_ro").await.access, AccessLabel::ReadOnlyGuarded, "{}", t.id); } }
 #[tokio::test] #[ignore = "docker"] async fn pg_advisory_lock_and_listen_do_not_survive_a_request() { let s = ro_session_on("pg17").await; run(&s, "SELECT pg_advisory_lock(42)").await.unwrap();
     let _ = run(&s, "LISTEN ch").await; let admin = admin("pg17").await; assert_eq!(scalar(&admin, &format!("SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND pid={}", backend(&s))).await, "0");
     assert_eq!(scalar_on_session(&s, "SELECT count(*) FROM pg_listening_channels()").await, "0"); }
@@ -2239,7 +2593,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
   - `crates/app/hacivat-app/src/connections/{cert_dialog,plaintext_prompt,fixes,error_view}.rs` and `dialog/{mod,form}.rs` (the TLS section, the Remember Select label through `vault_dialog::forever_label`, and the passphrase field);
   - `model.rs` (the `apply_changes` body only).
 - Create: `crates/app/hacivat-app/tests/connections_tls.rs`.
-- Append: the FTL block `## m2b-t19-tls` in EN and TR. `CARGO_TARGET_DIR=<main>/target-ui/m2b-t19`.
+- Append: the FTL block `## m2b-t19-tls` in EN and TR, and rewrite Task 1's placeholder `hv-conn-issue-tls-key-legacy-encrypted` (named exception; Q3). `CARGO_TARGET_DIR=<main>/target-core/m2b-t19`, `CARGO_INCREMENTAL=0` (Q1).
 
 **Interfaces:**
 - Consumes: Task 14's `Question::{Certificate, PlaintextPublic, Secret(TlsKeyPassphrase)}`, `ConnectError.certificate` and `ProfileChange`; Task 3's `fingerprint_lines`; M2a's dialog, the 480 px wide size, the fingerprint inset, the chain list and the inline notice.
@@ -2247,15 +2601,16 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
   - **`cert_dialog::open`** (surface 5).
     - A 480 px dialog: subject, issuer, the valid-until date (the region format, M1 I2), the two fingerprint lines in mono with Copy, the chain rows with their roles, and the pin note.
     - Buttons: Cancel (left), Import CA… (a file picker; the chosen path answers `ImportCa`) and **Pin this certificate** (primary, Enter).
-    - With `review.pinned.is_some()` it is the **pin-changed** variant (new surface 5): "Pinned" and "Now" fingerprints, primary Cancel (initial focus), and secondary "Replace pin", which answers `Pin`. The pipeline turns that into `ReplacePin`.
-  - **`cert_dialog::review(err)`** opens the same dialog from an error (the `ReviewCertificate` fix). Its answer starts a new connect gesture with the answer pre-applied as a `ProfileChange`.
+    - With `review.pinned.is_some()` it is the **pin-changed** variant (new surface 5): "Pinned" and "Now" fingerprints, primary Cancel (initial focus, the only Enter default; Q34), and secondary "Replace pin". It is reachable only from the error (the pipeline never asks on `PinMismatch`).
+  - **`cert_dialog::review(err)`** opens the same dialog from an error (the `ReviewCertificate` fix). **It builds the `ProfileChange` itself (Q26):** "Replace pin" → `ProfileChange::ReplacePin { old: review.pinned.unwrap(), new: CertPin { endpoint: review.endpoint, sha256: review.sha256 } }`; "Pin" → `AddPin`; Import CA → `SetCaFile`. It applies the change through `apply_changes` (or the dialog draft, for Test), then starts a new connect gesture. The pipeline never produces `ReplacePin`, so every pin replacement is an explicit, traceable user action.
   - **`plaintext_prompt::open`:** 420 px, with the "Don't ask again for this connection" checkbox. Buttons: Cancel, Connect without encryption, and **Use an SSH tunnel…** (primary). `UseSsh` also calls `dialog::ssh::open_with_ssh(profile)`.
-  - **Fixes.** `FixAction::{ReviewCertificate, ImportCa, ConnectThroughSsh, ReviewHostKey}` are wired. `ReviewHostKey` calls `hostkey_prompt::review_changed`. `EncryptWithoutVerifying` is removed (the enum arm and the button), and so is `hv-conn-fix-require` (the named exception).
+  - **Fixes.** `FixAction::{ReviewCertificate, ImportCa}` are wired here. `ConnectThroughSsh` and `ReviewHostKey` are already wired by Task 1 (one line each in `fixes.rs`, Q9); do not touch them. `EncryptWithoutVerifying` is removed (the enum arm and the button), and so is `hv-conn-fix-require` (the named exception).
   - **TLS section:**
     - a "Pinned certificate" row (`hv-conn-tls-pin`, a short fingerprint or `hv-conn-tls-pin-none`) with "Remove pin";
     - a "Key passphrase" field, masked with Remember, shown when a client certificate is set;
     - VerifyCa enabled for MySQL and MariaDB.
-  - **`ConnectionsModel::apply_changes`** applies each `ProfileChange` to the stored profile and saves it through the ordered writer. A Test run in the dialog applies changes to the **draft** only.
+  - **`ConnectionsModel::apply_changes`** applies each `ProfileChange` to the stored profile and saves it through the ordered writer, then calls `ConnectionManager::update_profile(id, profile)` so the live session overlay sees it (Q17). A Test run in the dialog applies changes to the **draft** only.
+  - **UI lessons (Q34):** the dialogs follow the Global Constraints "Modal layers" rules (Enter on key-down only; key-up Enter suppressed; Escape, Enter and Tab bubble out of a nested Select; hard stops default to Cancel). Waits in tests use `settle_until` on a condition, never a fixed sleep.
 
 - [ ] **Step 1: Write the failing tests** (gpui; `settle` as in M2a).
 ```rust
@@ -2265,9 +2620,13 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 #[gpui::test] fn enter_pins_escape_cancels(cx: &mut TestAppContext) { let vcx = shell_with_connections(cx); let a = ask(&vcx, cert_question(review_fixture("db", [1; 32]))); press(&vcx, "enter"); assert!(matches!(a.get(), Some(Answer::Pin)));
     let b = ask(&vcx, cert_question(review_fixture("db", [1; 32]))); press(&vcx, "escape"); assert!(matches!(b.get(), Some(Answer::Cancelled))); }
 #[gpui::test] fn import_ca_answers_the_picked_path(cx: &mut TestAppContext) { let vcx = shell_with_picker(cx, "/home/me/corp-ca.pem"); let a = ask(&vcx, cert_question(review_fixture("db", [1; 32])));
-    click(&vcx, "cert-import"); settle(&vcx, ms(50)); assert!(matches!(a.get(), Some(Answer::ImportCa(p)) if p == PathBuf::from("/home/me/corp-ca.pem"))); }
+    click(&vcx, "cert-import"); settle_until(&vcx, secs(2), || a.get().is_some()); assert!(matches!(a.get(), Some(Answer::ImportCa(p)) if p == PathBuf::from("/home/me/corp-ca.pem"))); }
 #[gpui::test] fn pin_changed_dialog_has_cancel_as_default(cx: &mut TestAppContext) { let vcx = shell_with_connections(cx); ask(&vcx, cert_question(pinned_review([1; 32], [2; 32])));
-    assert_eq!(focused_id(&vcx), "cert-cancel"); assert!(!is_primary(&vcx, "cert-replace-pin")); assert_eq!(mono_lines(&vcx, "cert-fingerprint-old").len(), 2); }
+    assert_eq!(focused_id(&vcx), "cert-cancel"); assert!(!is_primary(&vcx, "cert-replace-pin")); assert_eq!(mono_lines(&vcx, "cert-fingerprint-old").len(), 2);
+    press(&vcx, "enter"); assert!(!layer_open(&vcx, "cert-dialog")); }   // Enter = Cancel on a hard stop (Q34)
+#[gpui::test] fn replace_pin_from_error_writes_replace_pin(cx: &mut TestAppContext) { let vcx = with_failed(cx, pin_changed_error([1; 32], [2; 32]));   // Q26
+    click_fix(&vcx, FixAction::ReviewCertificate); click(&vcx, "cert-replace-pin"); settle_until(&vcx, secs(2), || read_connections_toml(&vcx).contains(&"02".repeat(32)));
+    assert!(!read_connections_toml(&vcx).contains(&"01".repeat(32))); assert_eq!(last_applied_change(&vcx), Some(ProfileChange::ReplacePin { old: [1; 32], new: pin("db:5432", [2; 32]) })); }
 #[gpui::test] fn plaintext_question_dialog(cx: &mut TestAppContext) { let vcx = shell_with_connections(cx); let a = ask(&vcx, plaintext_question("db.acme.io", "203.0.113.10"));
     assert_eq!(layer_width(&vcx, "plaintext-prompt"), px(420.0)); click(&vcx, "plain-remember"); click(&vcx, "plain-connect");
     assert!(matches!(a.get(), Some(Answer::ConnectPlaintext { remember: true }))); }
@@ -2279,7 +2638,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 #[gpui::test] fn key_passphrase_field_visible_with_client_cert(cx: &mut TestAppContext) { let vcx = dialog_editing(cx, client_cert_profile()); assert!(visible(&vcx, "tls-key-passphrase")); assert!(is_masked(&vcx, "tls-key-passphrase")); }
 #[gpui::test] fn mysql_verify_ca_enabled(cx: &mut TestAppContext) { let vcx = dialog_new_mysql(cx); assert!(select_option_enabled(&vcx, "tls-mode", "verify_ca")); }
 #[gpui::test] fn apply_changes_persists_pin(cx: &mut TestAppContext) { let vcx = shell_with_profile(cx, pg_profile()); emit(&vcx, ConnectionEvent::ProfileChanges { profile: pg_id(), changes: vec![ProfileChange::AddPin(pin("db:5432", [0xAB; 32]))] });
-    settle(&vcx, ms(100)); assert!(read_connections_toml(&vcx).contains(&"ab".repeat(32))); }
+    settle_until(&vcx, secs(2), || read_connections_toml(&vcx).contains(&"ab".repeat(32))); assert_eq!(overlay_pins(&vcx, pg_id()), 1); }   // update_profile reached the overlay (Q17)
 #[gpui::test] fn test_dialog_pin_updates_draft_only(cx: &mut TestAppContext) { let vcx = dialog_test_with_pin_answer(cx); assert_eq!(draft(&vcx).profile.tls.pins.len(), 1); assert!(!read_connections_toml(&vcx).contains("pins")); }
 ```
 - [ ] **Step 2:** Run `cargo test -p hacivat-app --features scene-check --test connections_tls`. Expected: FAIL.
@@ -2297,27 +2656,30 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - Is the fingerprint ever truncated in a way that changes its meaning (the full 64 hex shown)?
 - Does the Copy button copy exactly the fingerprint?
 - Does `apply_changes` write to a different profile when two dialogs are open?
+- Can any path other than an explicit "Replace pin" click produce `ReplacePin` (Q26)?
+- Raised Ink: do fingerprint insets on the raised dialog use text-2 (Q34)?
 
 ### Task 20: SSH settings in the connection dialog and `~/.ssh/config` import (NOTES surface 6)
 
 **Files:**
 - Modify: `crates/app/hacivat-app/src/connections/dialog/ssh.rs`.
 - Create: `crates/app/hacivat-app/tests/connections_ssh_form.rs`.
-- Append: the FTL block `## m2b-t20-ssh`. `CARGO_TARGET_DIR=<main>/target-ui/m2b-t20`.
+- Append: the FTL block `## m2b-t20-ssh`, and rewrite Task 1's `hv-conn-issue-ssh-*` placeholders (named exception; Q3). `CARGO_TARGET_DIR=<main>/target-core/m2b-t20`, `CARGO_INCREMENTAL=0` (Q1).
 
 **Interfaces:**
-- Consumes: Task 4's `read_ssh_config` (run on the core runtime) and `resolve_alias`; Task 12's profile fields and SSH issues; M2a's Disclosure, Checkbox, Segmented, Select, TextInput, PopupMenu and InlineNotice.
+- Consumes: Task 4's `read_ssh_config` (run on the core runtime) and `resolve_alias`; Task 12's profile fields and SSH issues; Task 1's `dialog::open_edit(id, DialogFocus, ..)` seam, its `fixes.rs` wiring of `ConnectThroughSsh` and the `ProfileDraft.ssh_secrets` save path (Q9, Q23); M2a's Disclosure, Checkbox, Segmented, Select, TextInput, PopupMenu and InlineNotice. This task edits only `dialog/ssh.rs`: never `dialog/mod.rs`, `form.rs` or `fixes.rs` (Task 19's files).
 - Produces:
   - **`section(draft, ..)`.** The SSH disclosure with its summary: `hv-conn-ssh-sum-off`, `-sum-on` (`$host`) or `-sum-hops` (`$host`, `$n`). Inside:
     - the checkbox "Connect through an SSH tunnel" and Import from `~/.ssh/config…`;
     - SSH host and port, and SSH user;
-    - auth as a Segmented (Agent / Key file / Password / Keyboard-interactive), with the fields for each method: the agent note with its key count (read off-thread), the key file with Choose…, the passphrase with Remember, the password with Remember (`ssh_retention`), and the keyboard-interactive note;
-    - the jump hosts as an ordered list (number, host, user, remove; Add jump host; ↑/↓ moves the focused row with Alt);
+    - auth as a Segmented (Agent / Key file / Password / Keyboard-interactive), with the fields for each method: the agent note with its key count (read off-thread), the key file with Choose…, the passphrase with Remember, the password with Remember (`ssh_retention`), and the keyboard-interactive note. Typed passwords and passphrases go into `ProfileDraft.ssh_secrets[hop]` (`SecretString`), which Task 1's `ConnectionsModel::save` stores under `SecretSlot::{SshPassword, SshPassphrase} { hop }` and Test passes as `ConnectRequest.draft_ssh` (Q23);
+    - the jump hosts as an ordered list (number, host, user, remove; Add jump host; Alt+↑/↓ moves the focused row, through element-level `on_key_down` on the row, never `cx.bind_keys`: `menus::rebuild` owns bindings; Q34);
     - the route row ("this Mac → … → db:5432");
     - the Host keys Select (three options, never accept-all).
   - **The import menu** lists the aliases with their resolution. `ProxyCommand` entries are disabled with `hv-conn-ssh-proxycmd`; any other `unusable` entry is disabled with its reason. Picking an alias fills the fields, tints them (M2a paste tint) and shows `hv-conn-ssh-imported` (`$alias`). Config notices are listed in the notice.
-  - **`open_with_ssh(id)`** opens the edit dialog with the disclosure open and the checkbox on, and focuses the SSH host.
-  - **SSH issues** render inline, next to their fields, through the M2a issue renderer (`hv-conn-issue-ssh-*`).
+  - **`open_with_ssh(id)`** calls `dialog::open_edit(id, DialogFocus::Ssh, ..)` (Task 1's seam): the edit dialog opens with the disclosure open and the checkbox on, and focuses the SSH host (Q9).
+  - **SSH issues** render inside `section()`, matched by `IssueCode` (`SshHostMissing` beside the host, `SshUserMissing` beside the user, `SshKeyFileMissing` beside the key file, `SshTooManyHops` under the jump list), with the rewritten `hv-conn-issue-ssh-*` text. `ValidationIssue.field` has no SSH `FieldId`, so the M2a field renderer is not used (Q9).
+  - **UI lessons (Q34):** the Global Constraints "Modal layers" rules apply (Escape, Enter and Tab bubble out of the nested Selects); tests wait with `settle_until`.
   - **`hv-conn-step-ssh`** is the trail label.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -2337,6 +2699,9 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 #[gpui::test] fn connect_through_ssh_fix_opens_dialog_with_ssh_open(cx: &mut TestAppContext) { let vcx = with_failed(cx, dns_error()); click_fix(&vcx, FixAction::ConnectThroughSsh);
     assert!(disclosure_open(&vcx, "ssh") && checkbox(&vcx, "ssh-use")); assert_eq!(focused_id(&vcx), "ssh-host"); }
 #[gpui::test] fn ssh_issues_render_inline(cx: &mut TestAppContext) { let vcx = dialog_ssh_on(cx); press(&vcx, "cmd-s"); assert!(issue_visible(&vcx, "ssh-host", IssueCode::SshHostMissing)); }
+#[gpui::test] fn typed_ssh_password_goes_into_the_draft_by_hop(cx: &mut TestAppContext) { let vcx = dialog_ssh_on(cx); pick_segment(&vcx, "ssh-auth", "password");   // Q23
+    type_into(&vcx, "ssh-password", "pw0"); assert!(draft(&vcx).ssh_secrets[0].password.is_some()); assert!(!format!("{:?}", draft(&vcx)).contains("pw0")); }
+#[gpui::test] fn alt_arrows_do_not_register_a_global_binding(cx: &mut TestAppContext) { let vcx = dialog_ssh_on(cx); assert!(!global_bindings(&vcx).iter().any(|b| b.contains("alt-up"))); }   // Q34
 ```
 - [ ] **Step 2:** Run `cargo test -p hacivat-app --features scene-check --test connections_ssh_form`. Expected: FAIL.
 - [ ] **Step 3: Implement** the bodies in Produces. The config file is read on the core runtime and the result is sent back over a `oneshot` (§5.4). Values that fail `carries_secret` are never shown.
@@ -2353,16 +2718,17 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 **Files:**
 - Modify: `crates/app/hacivat-app/src/connections/{hostkey_prompt,kbd_prompt,secret_prompt,vault_dialog}.rs`.
 - Create: `crates/app/hacivat-app/tests/connections_prompts.rs`.
-- Append: the FTL block `## m2b-t21-prompts`. `CARGO_TARGET_DIR=<main>/target-ui/m2b-t21`.
+- Append: the FTL block `## m2b-t21-prompts`. `CARGO_TARGET_DIR=<main>/target-core/m2b-t21`, `CARGO_INCREMENTAL=0`. **Dispatch:** T21 starts when T19 or T20 finishes, unless `df` shows ≥ 60 GiB free (Q1).
 
 **Interfaces:**
-- Consumes: Task 14's `Question::{HostKey, Secret(Ssh*), Keyboard, UnlockVault, CreateVault}`; Task 4's `KnownHosts::replace` (run on the core runtime); Task 6's vault (`create`, `reset`, `exists`, through `SecretStore` and `as_vault`); `ConnectError.host_key`.
+- Consumes: Task 14's `Question::{HostKey, Secret(Ssh*), Keyboard, UnlockVault, CreateVault}`; Task 4's `KnownHosts::replace` (run on the core runtime, through `ConnectionsModel::known_hosts()`, Q23); Task 6's vault (`create`, `reset`, `exists`, through `SecretStore::vault()`, Q23; `create` on the core runtime's blocking pool, Argon2, Q38); `SecretBackend::choice` through `SecretStore::backend_choice()`; `ConnectError.host_key`.
 - Produces:
   - **`hostkey_prompt::open`:** 420 px. "First connection to `$host`", the algorithm and the `SHA256:` fingerprint inset, the store note, and the buttons Cancel and **Trust and connect** (primary).
   - **`hostkey_prompt::review_changed(mismatch)`** (new surface 1):
     - 480 px, primary Cancel (initial focus);
     - Hacivat source: "Remove the old key and trust the new one" calls `KnownHosts::replace` on the core runtime, then reconnects;
-    - OpenSSH source: a copyable `ssh-keygen -R "[host]:port"` (or `ssh-keygen -R host` on port 22) and no replace button.
+    - OpenSSH source: a copyable `ssh-keygen -R "[host]:port"` (or `ssh-keygen -R host` on port 22) and no replace button. After the user runs it, Retry works without a restart: `KnownHosts::check` re-reads the file on an `(mtime, len)` change (Task 4, Q24).
+    - Hard stop: Cancel is the only Enter default (Q34).
   - **`kbd_prompt::open`** (new surface 2): the server's name and instructions verbatim, in their own fields; one TextInput per prompt (masked unless `echo`); "Attempt `$n` of 3"; answers in order.
   - **`secret_prompt::open`** (new surface 3): the M2a password-prompt anatomy, naming the hop (`$hop_host`, "hop `$n` of `$total`") or the key file; masked; Remember shows the profile's `ssh_retention`.
   - **`vault_dialog`** (new surface 4):
@@ -2373,6 +2739,8 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 
     `ensure_vault_before_forever` (called by `ConnectionsModel::save` through Task 1's line) opens `CreateVault` before the first Forever save when `backend_choice() == Some(Vault)` and the vault does not exist. It returns `Ready` once the vault is created, and `Declined` when the user cancels. On `Declined`, the save keeps the secret Until restart, with the M2a toast.
   - Every input in these dialogs is masked, and `text_for_range` is masked too (the M2a I2 rule).
+  - **UI lessons (Q34):** the Global Constraints "Modal layers" rules apply; fingerprint insets on raised surfaces use text-2 (Raised Ink). Core-runtime calls return through a `oneshot` the foreground task awaits (the Q4 ruling: allowed).
+  - **Probe-dependent tests (Q34):** `forever_label_…` and `first_forever_save_…` inject `FallbackBackend { probe: || false }` over `MemoryBackend` (never the platform keyring) and wait with `settle_until` for `backend_choice()` to land (the `144b38c` pattern).
 
 - [ ] **Step 1: Write the failing tests.**
 ```rust
@@ -2394,10 +2762,14 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 #[gpui::test] fn vault_unlock_counts_attempts(cx: &mut TestAppContext) { let vcx = shell_with_connections(cx); ask(&vcx, Question::UnlockVault { attempt: 2 });
     assert_eq!(text_of(&vcx, "vault-attempt"), tf(&vcx, "hv-conn-vault-attempt", &[("n", "2")])); }
 #[gpui::test] fn vault_reset_needs_typed_confirmation(cx: &mut TestAppContext) { let vcx = shell_with_vault(cx); open_vault_reset(&vcx); assert!(!enabled(&vcx, "vault-reset-confirm"));
-    type_into(&vcx, "vault-reset-word", &t(&vcx, "hv-conn-vault-reset-word")); click(&vcx, "vault-reset-confirm"); settle(&vcx, ms(100)); assert!(!vault_exists(&vcx)); }
-#[gpui::test] fn forever_label_reads_encrypted_file_when_vault(cx: &mut TestAppContext) { let vcx = shell_with_backend_choice(cx, BackendChoice::Vault);
+    type_into(&vcx, "vault-reset-word", &t(&vcx, "hv-conn-vault-reset-word")); click(&vcx, "vault-reset-confirm"); settle_until(&vcx, secs(2), || !vault_exists(&vcx)); }
+#[gpui::test] fn forever_label_reads_encrypted_file_when_vault(cx: &mut TestAppContext) { let vcx = shell_with_fallback_probe_false(cx);   // injected FallbackBackend over MemoryBackend (Q34)
+    settle_until(&vcx, secs(2), || backend_choice(&vcx) == Some(BackendChoice::Vault));
     assert_eq!(select_option_label(&vcx, "remember", "forever"), t(&vcx, "hv-conn-ret-forever-vault")); }
-#[gpui::test] fn first_forever_save_asks_to_create_vault(cx: &mut TestAppContext) { let vcx = shell_with_backend_choice_no_vault(cx); save_forever_profile(&vcx); assert!(layer_open(&vcx, "vault-dialog")); }
+#[gpui::test] fn first_forever_save_asks_to_create_vault(cx: &mut TestAppContext) { let vcx = shell_with_fallback_probe_false_no_vault(cx);
+    settle_until(&vcx, secs(2), || backend_choice(&vcx).is_some()); save_forever_profile(&vcx); settle_until(&vcx, secs(2), || layer_open(&vcx, "vault-dialog")); }
+#[gpui::test] fn host_key_changed_enter_cancels(cx: &mut TestAppContext) { let vcx = shell_with_connections(cx); review_changed(&vcx, mismatch(KnownSource::Hacivat));   // Q34
+    press(&vcx, "enter"); assert!(!layer_open(&vcx, "hk-changed")); assert_eq!(replace_calls(&vcx), 0); }
 #[gpui::test] fn prompt_inputs_mask_text_for_range(cx: &mut TestAppContext) { let vcx = shell_with_connections(cx); ask(&vcx, Question::UnlockVault { attempt: 1 }); type_into(&vcx, "vault-unlock", "s3cret");
     assert!(!ime_text(&vcx, "vault-unlock").contains("s3cret")); }
 ```
@@ -2411,27 +2783,31 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - Is the `ssh-keygen` command shell-safe for hosts with spaces or quotes? (Refuse them; host names were validated.)
 - Does a Cancel after a wrong master password leak attempts across gestures?
 - Does any prompt keep a secret in a `SharedString`? (It must be in `SecretString`, and the field cleared on close.)
+- Does any test touch the platform keyring, or wait a fixed time for the probe (Q34)?
 
 ### Task 22: Live-state UI: reconnecting, session lost, idle, read-only labels, SSH path (NOTES surface 7; new surfaces 6–7; B4, B19, B21)
 
 **Files:**
-- Modify: `crates/app/hacivat-app/src/connections/{session_toasts,live,capsule,sheet,status,explorer,boot}.rs` (in `boot.rs`, only the `ManagerConfig::m2b()` switch and the `KnownHosts`/`TunnelManager` construction) and `crates/ui/hacivat-ui/src/capsule.rs` (`Reconnecting` rendering).
+- Modify: `crates/app/hacivat-app/src/connections/{session_toasts,live,capsule,sheet,status,explorer,boot}.rs` (in `boot.rs`, only the `ManagerConfig::m2b()` switch and the Linux `FallbackBackend`; Task 1 already builds `KnownHosts` and `TunnelManager`, Q23), `crates/app/hacivat-app/src/commands/debug.rs` (the debug-build cancel demo, Q39) and `crates/ui/hacivat-ui/src/capsule.rs` (`Reconnecting` rendering).
+- **`live.rs` is not converted to polling** (Q4 ruling): its foreground mirror keeps awaiting `changes.changed()` on its `watch` channel, as M2a ships. Only the new states are added.
 - Create: `crates/app/hacivat-app/tests/connections_live_m2b.rs`.
-- Append: the FTL block `## m2b-t22-live`. `CARGO_TARGET_DIR=<main>/target-ui/m2b-t22`.
+- Append: the FTL block `## m2b-t22-live`. `CARGO_TARGET_DIR=<main>/target-core/m2b-t22`, `CARGO_INCREMENTAL=0` (Q1).
 
 **Interfaces:**
 - Consumes: Task 17's `LiveState::Reconnecting` and `ConnectionEvent`; Task 18's `AccessLabel`, `access_warnings` and `remediation`; M2a's capsule, sticky toast, explanation popover and status segments.
 - Produces:
-  - **Boot.** `KnownHosts::load(~/.ssh/known_hosts{,2}, <config>/known_hosts)` and `TunnelManager::new` go into `ConnectDeps`. `FallbackBackend` (Linux only, `cfg(target_os = "linux")`) wraps the keyring with `FileVault::open(<data>/vault.bin)`. `ManagerConfig::m2b()` is set.
+  - **Boot.** Task 1's boot already puts `KnownHosts::load(~/.ssh/known_hosts{,2}, <config>/known_hosts)` (no I/O at boot: the files are read lazily on the core runtime at the first SSH connect, Q42) and `TunnelManager::new` into `ConnectDeps`. This task adds `FallbackBackend` (Linux only, `cfg(target_os = "linux")`), which wraps the keyring with `FileVault::open(<data>/vault.bin)`, and sets `ManagerConfig::m2b()`.
+  - **Debug cancel demo (Q39).** In debug builds only, `commands/debug.rs` gains two palette commands: "Run `SELECT pg_sleep(30)` on the default session" and "Cancel" (`RequestTicket::cancel` on that request). B1 leaves no other user-visible cancel in M2b; the PO demo uses these.
   - **`CapsuleModel::Reconnecting`:** the run marker, `hv-capsule-reconnecting` (`$n`) and `hv-capsule-next` (`$seconds`, with the unit inside the message, INV-1). For production the filled block stays first, and there is exactly one filled badge.
   - **`session_toasts::lost`.** A sticky toast:
     - title `hv-conn-lost-title` (`$name`) and body `hv-conn-lost-body`;
     - `hv-conn-lost-tx` only when `open_tx`;
     - `hv-conn-lost-other` with a locale list of the other lost items (ICU list format, Turkish `ve`);
     - Show details (opens the M2a sheet section) and Dismiss.
-  - **`session_toasts::idle`** shows one toast, `hv-conn-idle-disconnected` (`$name`, `$hours`). **`idle_tx`** shows a notice (M3 adds the prompt). **`gap`** shows a sticky alert: "Hacivat stopped a statement that changed data on a read-only connection and closed that session."
+  - **`session_toasts::idle`** shows one toast, `hv-conn-idle-disconnected` (`$name`, `$hours`); `$hours` is recomputed from `LivenessPolicy::for_profile` (the event carries only the profile). **`idle_tx`** shows a notice (M3 adds the prompt). **`gap(profile, reason)`** shows a sticky alert whose copy varies by `GapReason` (Q35): `TransactionEndedByStatement` → "Hacivat stopped a statement that ended the read-only transaction on a read-only connection and closed that session."; `CanaryAssigned` and `WriteSucceeded` → "…that changed data…"
   - **Read-only labels.** Capsule and sheet: `hv-conn-access-ro-enforced` vs `hv-conn-access-ro-guarded` (M2a). Guarded opens the 300 px popover with the warnings (`hv-conn-ro-warn-*`) and the remediation snippet in a mono inset with Copy.
   - **SSH path.** The capsule path segment is `hv-conn-path-ssh` (`$host`) plus latency. The explorer row gets the route flag. The status bar mirrors the capsule (state, path, encryption).
+  - **UI lessons (Q34):** the remediation popover on the raised capsule uses text-2 for its inset (Raised Ink); tests wait with `settle_until`.
 
 - [ ] **Step 1: Write the failing tests.**
 ```rust
@@ -2451,7 +2827,11 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     let vcx2 = connected_with(cx, AccessLabel::ReadOnlyEnforced, vec![]); assert_eq!(capsule_text(&vcx2, "access"), t(&vcx2, "hv-conn-access-ro-enforced")); }
 #[gpui::test] fn ssh_path_segment_and_explorer_flag(cx: &mut TestAppContext) { let vcx = connected_ssh(cx, "bastion.acme.io"); assert!(capsule_text(&vcx, "path").contains("bastion.acme.io"));
     assert!(explorer_row_has_flag(&vcx, "route")); assert_eq!(status_text(&vcx, "path"), capsule_text(&vcx, "path")); }
-#[gpui::test] fn enforcement_gap_sticky_alert(cx: &mut TestAppContext) { let vcx = shell_with_profile(cx, pg_profile()); emit(&vcx, ConnectionEvent::EnforcementGap { profile: pg_id() }); assert_eq!(sticky_toast(&vcx).role, Role::Alert); }
+#[gpui::test] fn enforcement_gap_sticky_alert(cx: &mut TestAppContext) { let vcx = shell_with_profile(cx, pg_profile());
+    emit(&vcx, ConnectionEvent::EnforcementGap { profile: pg_id(), reason: GapReason::TransactionEndedByStatement }); settle_until(&vcx, secs(2), || has_sticky_toast(&vcx));
+    assert_eq!(sticky_toast(&vcx).role, Role::Alert); assert_eq!(sticky_toast(&vcx).lines[0], t(&vcx, "hv-conn-gap-tx-ended")); }   // one whole message per GapReason: hv-conn-gap-tx-ended / hv-conn-gap-changed-data (Q35)
+#[gpui::test] fn debug_cancel_command_cancels_the_demo_sleep(cx: &mut TestAppContext) { let vcx = connected_with_fake_pg_sleep(cx);   // Q39
+    run_command(&vcx, "debug-run-pg-sleep"); run_command(&vcx, "debug-cancel"); settle_until(&vcx, secs(2), || fake_cancel_calls(&vcx) == 1); }
 ```
 - [ ] **Step 2:** Run `cargo test -p hacivat-app --features scene-check --test connections_live_m2b`. Expected: FAIL.
 - [ ] **Step 3: Implement** the bodies in Produces. Every count or duration is one message with its unit inside it (INV-1, M2a P28).
@@ -2461,7 +2841,8 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 **Review:** opus. Probes:
 - Is there a second filled badge in any state?
 - Does the toast double on two quick reconnects? (One per event: the second replaces the first for the same profile.)
-- Does boot touch the keychain or D-Bus on the UI thread? (It must not, P36.)
+- Does boot touch the keychain, D-Bus or `known_hosts` files on the UI thread? (It must not, P36, Q42.)
+- Are the debug cancel commands compiled out of release builds (Q39)?
 
 ### Task 23: Conformance suite over the Docker matrix (M2 exit criteria; Review Focus 1, 3, 4)
 
@@ -2472,6 +2853,8 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 **Interfaces:**
 - Consumes: everything core from W1–W4; the Task 16 targets; `ChaosProxy`.
 - Produces: the evidence for gate criteria E1–E8. **Every TCP test runs twice: direct and through `sshd-a`** (`alg/01` §5). The PostgreSQL and MySQL rows run a third time through the `sshd-a` → `sshd-b` jump chain.
+- **Targets (Q6):** every target comes from `require_target(..)` or `targets(Some(engine))`; no literal id appears outside a `require_target` call. A target outside the active set skips with its `eprintln!`; a target in the set never skips. Through SSH, connect to `DockerTarget.internal` (compose service and internal port), never the published `127.0.0.1` port.
+- MySQL rows now verify pins, review and `TlsVerified::Pinned` through patch §5 (Q2); `tls_auto_pin_and_verify_ca` on `mysql84` is expected to pass.
 
 - [ ] **Step 1: Write the tests.** They are RED until the stack and every earlier task are merged.
 ```rust
@@ -2480,11 +2863,12 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     assert_eq!(live.path, path.kind(), "{}", t.id); } } }
 #[tokio::test] #[ignore = "docker"] async fn two_profiles_share_one_ssh_session() { let (m, tunnels) = manager_ssh_matrix().await; connect(&m, pg17_via("sshd-a")).await; connect(&m, mysql84_via("sshd-a")).await;
     assert_eq!(tunnels.sessions_open(), 1); }
-#[tokio::test] #[ignore = "docker"] async fn cancel_matrix() { for (t, sql) in [("pg17", "SELECT pg_sleep(60)"), ("mysql84", "SELECT SLEEP(60)"), ("mariadb114", "SELECT SLEEP(60)")] { for path in [Path::Direct, Path::Ssh("sshd-a")] {
-    let s = session_on(t, path).await; let q = s.submit(user_exec(sql)); tokio::time::sleep(ms(300)).await; let start = Instant::now();
-    assert_eq!(s.cancel().await.unwrap(), CancelOutcome::Cancelled, "{t} {path:?}"); assert!(start.elapsed() < secs(1)); assert_eq!(q.reply.await.unwrap().unwrap_err().kind, ExecErrorKind::Cancelled);
+#[tokio::test] #[ignore = "docker"] async fn cancel_matrix() { for (t, sql) in [("pg17", "SELECT pg_sleep(60)"), ("mysql84", "SELECT SLEEP(60)"), ("mariadb114", "SELECT SLEEP(60)")] {
+    let Some(t) = require_target(t) else { continue }; for path in [Path::Direct, Path::Ssh("sshd-a")] {
+    let s = session_on(&t, path).await; let q = s.submit(user_exec(sql)); tokio::time::sleep(ms(600)).await; let start = Instant::now();   // past the 500 ms MySQL pre-warm (Q37)
+    assert_eq!(q.cancel(&s).await.unwrap(), CancelOutcome::Cancelled, "{} {path:?}", t.id); assert!(start.elapsed() < secs(1)); assert_eq!(q.reply.await.unwrap().unwrap_err().kind, ExecErrorKind::Cancelled);
     assert!(run(&s, "SELECT 1").await.is_ok()); } } assert_sqlite_long_cte_interrupted().await; }
-#[tokio::test] #[ignore = "docker"] async fn terminated_backend_with_open_tx_reports_lost_tx() { for t in ["pg17", "mysql84", "mariadb114"] { let (m, mut ev) = manager_connected(t).await; let s = default_session(&m);
+#[tokio::test] #[ignore = "docker"] async fn terminated_backend_with_open_tx_reports_lost_tx() { for t in ["pg17", "mysql84", "mariadb114"].into_iter().filter(|id| require_target(id).is_some()) { let (m, mut ev) = manager_connected(t).await; let s = default_session(&m);
     run(&s, "BEGIN").await.unwrap(); run(&s, "CREATE TEMPORARY TABLE hv_tmp(a int)").await.unwrap(); kill_backend(t, s.backend_id()).await;
     let lost = wait_session_lost(&mut ev).await; assert!(lost.open_tx && lost.temp_objects, "{t}"); assert!(matches!(m.state(pid(t)), LiveState::Connected(_))); } }
 #[tokio::test] #[ignore = "docker"] async fn insert_killed_mid_flight_reports_outcome_unknown_without_duplicate() { let (m, _) = manager_connected_via_chaos("mysql84").await; let s = default_session(&m);
@@ -2493,19 +2877,20 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
     assert!(count(&admin("mysql84").await, "SELECT count(*) FROM hv_probe_log").await <= 1); }
 #[tokio::test] #[ignore = "docker"] async fn server_outage_reconnects_within_backoff() { let (m, _) = manager_connected_via_chaos("pg17").await; chaos("pg17").cut(secs(20)); wait_state(&m, |s| matches!(s, LiveState::Reconnecting { .. })).await;
     timeout(secs(45), wait_connected(&m, pid("pg17"))).await.unwrap(); }
-#[tokio::test] #[ignore = "docker"] async fn pg_bypass_rows_blocked_without_classifier() { for t in ["pg14", "pg15", "pg16", "pg17", "pg18"] { let s = ro_session_as(t, "hv_ro").await; let admin = admin(t).await;
+#[tokio::test] #[ignore = "docker"] async fn pg_bypass_rows_blocked_without_classifier() { for t in targets(Some(DbmsKind::Postgres)).iter().map(|t| t.id.as_str()).filter(|id| !id.contains("-")) { let s = ro_session_as(t, "hv_ro").await;   // pg14..pg18 in the active set (Q6) let admin = admin(t).await;
     for (id, sql) in PG_SERVER_BLOCKED { let r = run(&s, sql).await; assert!(r.is_err(), "{t} {id}: {sql}"); assert_no_side_effect(&admin, id).await; }   // P1 P2 P3 P4 P5 P7 P8 P14(COPY FROM) P26 P37 P38
     for (id, sql) in PG_NEUTRALISED { let _ = run(&s, sql).await; assert_no_lingering_state(&admin, &s, id).await; }                      // P6 P15(advisory) P25(NOTIFY) P26(LISTEN, WITH HOLD)
     for (id, sql) in PG_PRIVILEGE_ONLY { assert!(run(&s, sql).await.is_err(), "{t} {id}"); } } }                                           // P11 P13 P14(read) P16 P31 P33 P34 with hv_ro
-#[tokio::test] #[ignore = "docker"] async fn mysql_bypass_rows_blocked_without_classifier() { for t in ["mysql80", "mysql84"] { let s = ro_session_as(t, "hv_ro").await; let admin = admin(t).await;
+#[tokio::test] #[ignore = "docker"] async fn mysql_bypass_rows_blocked_without_classifier() { for t in targets(Some(DbmsKind::MySql)).iter().map(|t| t.id.as_str()) { let s = ro_session_as(t, "hv_ro").await;   // Q6 let admin = admin(t).await;
     for (id, sql) in MYSQL_SERVER_BLOCKED { assert!(run(&s, sql).await.is_err(), "{t} {id}: {sql}"); assert_no_side_effect(&admin, id).await; }   // M1 M2 M5(FOR UPDATE) M6 M8 M17
     run(&s, "SET SESSION TRANSACTION READ WRITE").await.ok(); assert!(run(&s, "CREATE TABLE hv_m9(a int)").await.is_err(), "{t} M9");
     let _ = run(&s, "SELECT GET_LOCK('hv_m5', 0)").await; assert_eq!(scalar(&admin, "SELECT IS_FREE_LOCK('hv_m5')").await, "1", "{t} M5 GET_LOCK"); } }
-#[tokio::test] #[ignore = "docker"] async fn mariadb_bypass_rows_recorded() { for t in ["mariadb106", "mariadb1011", "mariadb114"] { record_bypass_results(t, MYSQL_SERVER_BLOCKED).await; } }   // results → ADR 0004; label stays guarded (C19)
-#[tokio::test] #[ignore = "docker"] async fn sqlite_bypass_rows_blocked_without_classifier() { let (s, dir) = ro_sqlite_session().await;
+#[tokio::test] #[ignore = "docker"] async fn mariadb_bypass_rows_recorded() { for t in targets(Some(DbmsKind::MariaDb)) { let rows = record_bypass_results(&t, MYSQL_SERVER_BLOCKED).await;
+    assert!(rows.iter().all(|r| r.result != BypassResult::Unknown), "{}", t.id); } }   // every row has a recorded result (Q32); results → ADR 0004; label stays guarded (C19)
+#[tokio::test] async fn sqlite_bypass_rows_blocked_without_classifier() {   // no server: runs on every PR (Q32) let (s, dir) = ro_sqlite_session().await;
     for sql in ["INSERT INTO t VALUES (1)", "ATTACH 'n.db' AS n", "VACUUM INTO 'c.db'", "PRAGMA query_only = 0", "CREATE TEMP TABLE x(a)", "SELECT writefile('w', 'x')"] { assert!(run(&s, sql).await.is_err(), "{sql}"); }
     assert_eq!(files_in(&dir), ["db.sqlite"]); }
-#[tokio::test] #[ignore = "docker"] async fn tls_auto_pin_and_verify_ca() { for t in ["pg17-tls", "mysql84"] { let ui = ScriptedUi::answers_m2b([Answer::Pin]);
+#[tokio::test] #[ignore = "docker"] async fn tls_auto_pin_and_verify_ca() { for t in ["pg17-tls", "mysql84"].into_iter().filter_map(require_target) { let ui = ScriptedUi::answers_m2b([Answer::Pin]);   // MySQL pins via patch §5 (Q2)
     let live = connect_main_ix(&t, TlsMode::Auto, &ui).await.unwrap(); assert_eq!(live.tls.verified, TlsVerified::Pinned, "{t}"); assert_eq!(live.profile_changes.len(), 1); }
     assert!(connect_mysql_verify_ca("mysql84").await.is_ok()); }
 #[tokio::test] #[ignore = "docker"] async fn insecure_auth_refused_through_ssh_on_md5() { let e = connect_via_ssh_as("pg17-auth", "hv_md5", "sshd-a").await.unwrap_err();
@@ -2520,13 +2905,14 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 **Review:** opus, adversarial. Probes:
 - Is any bypass row asserted only by "error happened", without a side-channel check?
 - Do the MariaDB results claim "enforced"?
-- Does a test pass by skipping when a target is missing? (M2a ruling: a full-set test must not silently skip.)
+- Does a test pass by skipping when a target is missing? (M2a ruling: a full-set test must not silently skip; Q6: `require_target` panics for an unhealthy in-set target.)
+- Is any literal target id used outside `require_target` (Q6)?
 
 ### Task 24: Shots, cross-surface tests, DESIGN.md (W6)
 
 **Files:**
 - Modify: `crates/app/hacivat-app/tests/shots.rs` (append the M2b surfaces; it stays `harness = false`) and `DESIGN.md` (append the section "Secure Network and Sessions (M2b)").
-- Create: `crates/app/hacivat-app/tests/cross_surface_m2b.rs`. `CARGO_TARGET_DIR=<main>/target-ui/m2b-t24`.
+- Create: `crates/app/hacivat-app/tests/cross_surface_m2b.rs`. `CARGO_TARGET_DIR=<main>/target-core/m2b-t24`, `CARGO_INCREMENTAL=0` (Q1). Waits use `settle_until` (Q4).
 
 **Interfaces:**
 - Consumes: every M2b `*_fixture` that Tasks 19–22 wrote, behind the `shots` feature (M2a R28).
@@ -2602,7 +2988,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
   1. `pg17-tls` in Auto: the certificate dialog. Check the fingerprint against `docker/m2a/README.md`. Pin. The capsule shows "TLS 1.3 · pinned".
   2. Restart `pg17-tls` (its certificate regenerates): connect again, and the pin-changed hard stop shows the old and new fingerprints. Cancel is the default; Replace pin; connected.
   3. `mysql84` in VerifyCa with the container CA: connected (E8).
-  4. A profile on `203.0.113.10` (Hacivat's public-plaintext question can be demoed with a FakeDriver build only: `cargo run -p hacivat --features demo-fakes`; otherwise skip and point to T19's shots).
+  4. The public-plaintext question cannot be reached against the local Docker matrix (every target is loopback). Show T19's `plaintext-prompt` shots and the cross-surface test instead (Q39: no `demo-fakes` feature is built).
   5. A new profile `pg17` through SSH: Import from `~/.ssh/config` (a sample is in the README) → `sshd-a`. Connect: the new-host-key prompt; Trust. The capsule shows "SSH via 127.0.0.1" and latency. Connect `mysql84` through the same bastion. Then run `docker exec m2a-sshd-a ss -tn | grep -c ESTAB` and check the shared session count.
   6. A jump chain `sshd-a` → `sshd-b` → `pg17` with the encrypted client key: two passphrase prompts naming each hop; Remember Forever; disconnect and reconnect, with no prompt.
   7. Change `sshd-a`'s host key (`docker exec m2a-sshd-a /regen-hostkey.sh`): the host-key-changed dialog offers "Remove the old key and trust the new one" (Hacivat store).
@@ -2611,6 +2997,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
   10. Idle: set `idle_disconnect_s = 60` by hand in `connections.toml`, wait 61 s, and the idle toast appears.
   11. Switch EN↔TR on each new dialog: no English leaks.
   12. Quit while connected through SSH: the app exits within 2 s.
+  13. Cancel (debug build, Q39): palette "Run `SELECT pg_sleep(30)` on the default session", then "Cancel". The statement ends with "cancelled" within 1 s and the session stays usable.
 - [ ] **Step 5: Linux and Windows.** Record the CI keyring and vault jobs, and the `docker-full` results. If the PO provides hosts, run demo steps 1, 5 and 6 there. Otherwise list them as open items.
 - [ ] **Step 6:** The PO reviews the shots and the Turkish strings. After sign-off, copy the macOS PNGs to `design/baselines/m2b/macos/`.
 - [ ] **Step 7: Write `m2b.md`:**
@@ -2619,7 +3006,10 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
   - the resolved image digests;
   - the bypass-suite table (a link to ADR 0004);
   - the open items with owners:
-    - upstream PRs for the four `mysql_async` patches (PO);
+    - upstream PRs for the five `mysql_async` patches (PO);
+    - M2a profiles set to Require by "Encrypt without verifying" now hit `auth.insecure_method` (PostgreSQL md5/password: always; MySQL: on a `caching_sha2` cache miss); the fix is Review certificate → Pin (PO, Q20);
+    - widen MySQL's Auto plaintext fallback from loopback to Private now that patch §2 removes M2a's reason (PO question, Q41);
+    - RUSTSEC-2023-0071 (`rsa` via russh) is a documented acceptance, not a CI pass (`deny` checks no advisories; Q45);
     - the MariaDB "enforced" label decision (PO, C19);
     - the PO review of every M2b TR string;
     - the controller-approved M2b mocks (B28);
@@ -2652,14 +3042,15 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
   - `Question`/`Answer` variants, `ProfileChange`, `InsecureAuth::RefuseUnlessVerified`;
   - `TlsVerified::Pinned`, `TlsFailure::PinMismatch`, `CertPin { endpoint, sha256 }`, `cert_review`;
   - `HostKeyCheck`, `KnownSource`, `TunnelManager::acquire`, `TransportGeneration`;
-  - `SessionHandle::{submit, cancel, escalate}`, `ExecErrorKind::ConnectionLost { outcome_unknown }`, `LiveState::Reconnecting { attempt, next_in }`, `ConnectionEvent::*`;
-  - `run_guarded`, `access_for`, `plan_for`, `check_post`.
+  - `SessionHandle::{submit, cancel(seq), escalate(seq, e)}`, `RequestTicket::cancel`, `ExecErrorKind::ConnectionLost { outcome_unknown }`, `LiveState::Reconnecting { attempt, next_in }`, `ConnectionEvent::*` (with `EnforcementGap { profile, reason }`);
+  - `run_guarded(.., replay)`, `access_for`, `plan_for`, `check_post`;
+  - `SessionSecrets`, `SessionOverlay`, `ConnectionManager::update_profile`, `SecretBackend::choice`, `SecretStore::vault`, `require_target`, `dialog::open_edit`/`DialogFocus`.
 
   The `read_ssh_config` signature carries the `is_secret` predicate (Task 4 Consumes). Task 1's stub must use that exact signature.
 - **Conflict control.** Files that two tasks would both want are split by ownership:
   - `steps.rs` (T14) vs `readonly::access_for` (T18), through T1's call site;
   - `interaction.rs` and `events.rs` (T1, working routing) vs the dialog modules;
-  - `dialog/form.rs` (T19) vs `dialog/ssh.rs` (T20), through T1's hook line;
+  - `dialog/form.rs`, `dialog/mod.rs` and `fixes.rs` (T19) vs `dialog/ssh.rs` (T20), through T1's hook line, `open_edit` seam and `fixes.rs` wiring (Q9);
   - `model.rs` (`apply_changes`, T19) vs the `vault_dialog::ensure_vault_before_forever` call (one T1 line in `save`, body filled by T21);
   - `boot.rs` (T22 only).
 
@@ -2668,7 +3059,7 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 - **Known risks** (also in the report to the PO):
   - russh's feature names for a ring-only build must be verified in T1 (BLOCKED path defined);
   - the vendored `mysql_async` must track upstream security fixes by hand until the PRs land;
-  - per-task gpui target directories cost disk (three agents at most);
+  - disk is the binding constraint: the admission rule (≥ 25 GiB per gpui agent, ≥ 8 GiB per core agent), `CARGO_INCREMENTAL=0`, per-task directories deleted at merge, and at most two gpui agents unless ≥ 60 GiB are free (Q1);
   - the M2a `ConnectionManager` rewrite (T17) touches the code the capsule depends on, so the M2a manager and live tests are the regression net;
   - B8 changes behaviour for md5-only private servers.
 
@@ -2676,14 +3067,63 @@ impl ConnectionsModel { pub fn apply_changes(cx: &mut App, id: ProfileId, change
 
 ## Appendix: pre-flight rulings applied (M2b)
 
-*Empty until the pre-flight pass.* Before T1 is dispatched, the controller runs the M2a pre-flight procedure: a fresh opus reviewer reads this plan against the code and the spec, and writes `<main>/.superpowers/sdd/2026-11-13-m2b-secure-network-sessions/preflight.md`. The controller then adopts the rulings in one plan-amend pass and lists them here, as `| # | What changed | Where |`, the same shape as M2a P1–P49.
+The pre-flight review (`<main>/.superpowers/sdd/2026-11-13-m2b-secure-network-sessions/preflight.md`, Q1–Q46) was adopted in one amend pass before T1's dispatch. **Q4 was overridden by the controller**: awaiting `tokio::sync` channels from GPUI foreground tasks stays allowed; determinism comes from `allow_parking()` in shared test helpers and condition-based waits; nothing is converted to polling. Q39 took the "point to the shots" option (no `demo-fakes` feature).
 
-The pre-flight reviewer must check at least:
-1. russh's current version and features build ring-only, with the client, agent client, server (testkit) and agent server.
-2. `tokio-postgres` 0.7.x exposes `ChannelBinding::tls_server_end_point`, `CancelToken::cancel_query_raw` with a custom `TlsConnect`, `RowStream::rows_affected`, and notice delivery through the `Connection` stream.
-3. rusqlite 0.42 exposes `SQLITE_DBCONFIG_ENABLE_ATTACH_CREATE`/`_WRITE` (feature `modern_sqlite`), `set_limit(SQLITE_LIMIT_ATTACHED)` and the authorizer `AuthAction` set that Task 11 maps.
-4. The vendored `mysql_async` builds as a `[patch]` path crate with the dev sections removed, and `cargo deny` accepts it.
-5. The `pkcs8` encryption features are licence-clean, and their PBES2 support covers OpenSSL's default `-v2 aes-256-cbc` output.
-6. The `gnome-keyring` unlock recipe works on `ubuntu-24.04` runners.
-7. Disk headroom for three gpui target directories, plus `target-core` per task.
-8. Every interface name in Task 1 matches its use in Tasks 3–24 (the type-consistency list above).
+| # | What changed | Where |
+|---|---|---|
+| Q1 | Disk admission (≥ 25 GiB gpui, ≥ 8 GiB core), `CARGO_INCREMENTAL=0`, T1 in `<main>/target`, others in `target-core/m2b-tNN` deleted at merge, ≤ 2 gpui agents unless ≥ 60 GiB | Global Constraints; Waves; T1, T19–T22, T24 |
+| Q2 | Patch §5 `with_rustls_client_config`; §2 becomes the outcome predicate `password_guard`; MySQL uses `TlsParams.config` | Architecture; Tech Stack; B5, B8, B10; T1 (vendored-copy note); T3; T8; T13; T23 |
+| Q3 | T1 Files list every broken match, literal, rename and the five placeholder issue messages; named exception for T19/T20 | T1 Files; Global Constraints |
+| Q4 | **Overridden:** awaiting `tokio::sync` channels is allowed; `allow_parking()` in shared helpers; `settle_until` condition waits; no polling; T22 does not convert `live.rs` | Global Constraints (Threading, Test timing); T1; T22 |
+| Q5 | Manifest rows (testkit `ssh` on test crates, tokio `test-util`, testkit → net, driver tokio `sync`, pkcs8 `pem`, guard re-exports); compile without features; `#[cfg(unix)]` gating | T1 Step 3; Global Constraints; T4, T6, T9, T12 |
+| Q6 | `require_target` (T1), `service`/`internal_port`/`internal` and `tests/targets.rs` (T16); no literal ids | Global Constraints; T1; T10, T13, T16, T18, T23 |
+| Q7 | T13's Docker run precedes T16 Step 5; idempotent `hv_ro`/`hv_probe`; controller re-runs | Waves; Global Constraints; T13; T16 |
+| Q8 | `plan_for` ships working in T1; T5 tests it | Waves; T1; T5; T7 |
+| Q9 | `dialog::open_edit(id, DialogFocus)` seam and two `fixes.rs` lines in T1; T20 renders SSH issues by `IssueCode` | T1; T19; T20 |
+| Q10 | PostgreSQL reset = `DISCARD ALL` minus `DEALLOCATE ALL`, plus by-name `from_sql` deallocation; enum test | B21; T1; T5; T10 |
+| Q11 | Observer records the `BackendKeyData` PID | T1; T10 |
+| Q12 | Observer layering, `Z` counter after errors, notices via `poll_message` | T10 |
+| Q13 | A pin forbids the plaintext fallback | B5; T1; T3; T14 |
+| Q14 | Read-only sessions always Auto; Manual/Smart/Begin `Unsupported` | B22; T7; T18 |
+| Q15 | `run_guarded(.., replay)` replays the full environment plan | B21; T1; T7; T13; T18 |
+| Q16 | `query_only`, `journal_mode`, `trusted_schema`, `foreign_keys` readable without argument | T5; T11 |
+| Q17 | Session overlay, `SessionSecrets`, `ConnectionManager::update_profile`, interaction-needing reconnect → `Lost` | Global Constraints; B19, B23; T1; T14; T15; T17; T19 |
+| Q18 | `cancel(seq)`, `escalate(seq, e)`, `RequestTicket::cancel` | B23; T1; T7; T15; T23 |
+| Q19 | A single-session borrow never resets | T1; T15 |
+| Q20 | Outcome-based guard for both engines; `auth.insecure_method` carries the certificate; PO note | B8; T13; T14; T25 |
+| Q21 | No `NOINHERIT`; TEMP is a warning only | B17; T5; T16; T18 |
+| Q22 | Canonical roots, verbatim-disk strip, typed-path text rules, missing files via parent | B26; T12 |
+| Q23 | `SecretBackend::choice`, `SecretStore::vault`, Fallback probe semantics, SSH secrets in draft/request/save, model accessors, `TestSshServer` API with `Redirect`, `FakeExec` consume-once, `Default` derives, `pub` helpers, `fx_at`/`rule_of` test | T1; T6; T9; T14; T20; T21 |
+| Q24 | `KnownHosts` re-reads OpenSSH files on `(mtime, len)` change | B11; T1; T4; T21 |
+| Q25 | No `start_paused` with real sockets; T9 uses a 200 ms real grace | Global Constraints; T9; T17 |
+| Q26 | `cert_dialog::review` builds `ReplacePin`; the pipeline never does | T1; T14; T19 |
+| Q27 | Re-probe only after user statements, user tx ends and `SwitchSchema`; nothing at spawn; T17 uses `SELECT 42` | T7; T17 |
+| Q28 | russh `default-features = false, features = ["ring", "rsa", "flate2"]`; `cargo tree` records | Tech Stack; Global Constraints; T1 |
+| Q29 | Vendored-copy hygiene; `Cargo.lock` entry change listed; T8 owns the `docker_mysql.rs` ignore | Global Constraints; T1; T8 |
+| Q30 | Vault header bounds, `SecretString` JSON, `getrandom`; test renames | Tech Stack; B13; T1; T6; T17 |
+| Q31 | Clock jump also on monotonic delta; idle compared on wall time after sleep | B18; T17 |
+| Q32 | Real asserts in weak tests (F9) | T1, T4, T7, T9, T13, T23 |
+| Q33 | Review Focus tests; `capture_tracing` at TRACE with `LogTracer` | Review Focus; T1 table; T3; T9; T14 |
+| Q34 | Key phases, hard-stop Enter = Cancel, element-level row keys, Raised Ink, probe-waiting tests | Global Constraints (Modal layers); T19–T22 |
+| Q35 | MySQL/SQLite `command_tag`; gap copy by `GapReason`; transaction keywords denied on read-only | B21; T1; T11; T13; T17; T18; T22 |
+| Q36 | pkcs8 `sha1-insecure`; ECDSA-SHA512 and RSA-PSS channel-binding hashes | Tech Stack; B9; T1; T3 |
+| Q37 | MySQL side connection pre-warmed at 500 ms; `KILL` limits in ADR 0004 | B23; T7; T23 |
+| Q38 | `CreateVault` on the connect path; vault errors on Forever put fall back; create on the blocking pool | B13; T6; T14; T21 |
+| Q39 | Debug-build cancel commands (T22); demo step 4 points to shots; step 13 shows cancel | Ownership; T22; T25 |
+| Q40 | Ownership list synced with task Files | Waves (file ownership) |
+| Q41 | MySQL Auto fallback widening is a PO question | B10; T25 |
+| Q42 | `KnownHosts::load` lazy; `Lagged` re-reads state | B11; T1; T4; T22 |
+| Q43 | `IdentityAgent` notice, `HostName %h`, one passphrase per hop | B11, B12; T1; T4 |
+| Q44 | T14 SNI compare, plaintext test rename, Resolve skipped under SSH, `acquire` outside `clock.run` | B11; T14 |
+| Q45 | `m2b` cut after `m2a-finalfix` merges; ledger records `144b38c` and the advisory acceptance | Execution; Global Constraints; T25 |
+| Q46 | SSH channel hygiene probes and tests | B11; T1; T9 |
+
+The pre-flight reviewer's checklist (kept for the record):
+1. russh's current version and features build ring-only, with the client, agent client, server (testkit) and agent server. *(Not verifiable offline; Q28; T1 keeps the BLOCKED path.)*
+2. `tokio-postgres` 0.7.x exposes `ChannelBinding::tls_server_end_point`, `CancelToken::cancel_query_raw` with a custom `TlsConnect`, `RowStream::rows_affected`, and notice delivery through the `Connection` stream. *(Yes; no public PID, Q11; type-info cache vs `DEALLOCATE ALL`, Q10.)*
+3. rusqlite 0.42 exposes `SQLITE_DBCONFIG_ENABLE_ATTACH_CREATE`/`_WRITE` (feature `modern_sqlite`), `set_limit(SQLITE_LIMIT_ATTACHED)` and the authorizer `AuthAction` set that Task 11 maps. *(Yes; Q16.)*
+4. The vendored `mysql_async` builds as a `[patch]` path crate with the dev sections removed, and `cargo deny` accepts it. *(Yes with `exclude`; Q29; TLS needs §5, Q2.)*
+5. The `pkcs8` encryption features are licence-clean, and their PBES2 support covers OpenSSL's default `-v2 aes-256-cbc` output. *(Yes; add `pem`, `sha1-insecure`; Q5, Q36.)*
+6. The `gnome-keyring` unlock recipe works on `ubuntu-24.04` runners. *(Not verifiable offline; the job asserts `probe_available()` first.)*
+7. Disk headroom. *(Q1.)*
+8. Every interface name in Task 1 matches its use in Tasks 3–24. *(Q3, Q9, Q11, Q15, Q17, Q18, Q23, Q26, Q44.)*
