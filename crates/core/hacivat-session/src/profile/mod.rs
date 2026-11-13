@@ -96,7 +96,8 @@ pub struct Profile {
     pub isolation: Option<IsolationLevel>,
     /// Seconds idle before the connection closes; `None` keeps it open.
     pub idle_disconnect_s: Option<u32>,
-    /// How long the SSH passwords and passphrases are kept.
+    /// How long the SSH passwords and passphrases are kept (default Forever, B30); never the
+    /// database `retention` (Q23).
     pub ssh_retention: Retention,
 }
 
