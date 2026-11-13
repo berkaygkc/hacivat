@@ -7,14 +7,20 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
-use hacivat_driver::{CancelHandle, ProbeWarning, RawConn, RawError, SemVerLoose, ServerInfo};
+use hacivat_driver::{
+    CancelHandle, ExecOpts, ExecSummary, ProbeWarning, RawConn, RawError, SemVerLoose, ServerInfo,
+    TxStatus,
+};
 use hacivat_net::{TlsMode, TlsSummary, TlsVerified};
 use hacivat_proto::DbmsKind;
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, SimpleQueryMessage};
 
+use crate::cancel::PgCancel;
 use crate::connect::pg_error;
+use crate::exec::{Exec, Notices};
 use crate::tls::LocalTls;
+use crate::wire::WireState;
 
 /// How long `close` waits for the server to see the `Terminate` before dropping the socket.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
@@ -46,7 +52,8 @@ pub fn server_version(version_num: Option<&str>, version: &str) -> Option<SemVer
     }
 }
 
-/// How far the certificate was checked in `mode`.
+/// How far the certificate was checked in `mode` (the fallback when the handshake recorded no
+/// outcome).
 fn verified_for(mode: Option<TlsMode>) -> TlsVerified {
     match mode {
         Some(TlsMode::Auto | TlsMode::VerifyFull) => TlsVerified::Full,
@@ -90,6 +97,12 @@ pub struct PgConn {
     tls_mode: Option<TlsMode>,
     /// What the handshake negotiated, when it ran.
     local_tls: Option<LocalTls>,
+    // ## m2b-t10-pg
+    /// What the wire observer records: PID, transaction status, command tags (Q11, Q12).
+    wire: Arc<WireState>,
+    /// Notice codes collected by the connection task (Q12).
+    notices: Notices,
+    cancel: Arc<PgCancel>,
 }
 
 impl PgConn {
@@ -98,12 +111,36 @@ impl PgConn {
         task: JoinHandle<()>,
         tls_mode: Option<TlsMode>,
         local_tls: Option<LocalTls>,
+        wire: Arc<WireState>,
+        notices: Notices,
+        cancel: PgCancel,
     ) -> Self {
         PgConn {
             client,
             task: TaskGuard(Some(task)),
             tls_mode,
             local_tls,
+            wire,
+            notices,
+            cancel: Arc::new(cancel),
+        }
+    }
+
+    /// A connection whose status could not be resynchronized is cut at once (fix round 1,
+    /// I2): no later reply can be matched to the wrong request.
+    fn drop_if_broken(&self) {
+        if self.wire.is_broken()
+            && let Some(task) = &self.task.0
+        {
+            task.abort();
+        }
+    }
+
+    fn exec(&self) -> Exec<'_> {
+        Exec {
+            client: &self.client,
+            wire: &self.wire,
+            notices: &self.notices,
         }
     }
 
@@ -149,8 +186,11 @@ impl PgConn {
             encrypted: local.is_some() || server_ssl,
             version: cell(1).or_else(|| local.and_then(|l| l.version.clone())),
             cipher: cell(2).or_else(|| local.and_then(|l| l.cipher.clone())),
+            // The handshake's own outcome (a pin is `Pinned` in any mode), else the mode's.
             verified: if local.is_some() {
-                verified_for(self.tls_mode)
+                self.wire
+                    .outcome()
+                    .unwrap_or_else(|| verified_for(self.tls_mode))
             } else {
                 TlsVerified::No
             },
@@ -240,9 +280,50 @@ impl RawConn for PgConn {
         })
     }
 
-    /// `None` in M2a; the CancelRequest over a fresh factory stream arrives in M2b.
+    /// The `CancelRequest` over a fresh stream from the connection's factory, with its TLS
+    /// settings (B23).
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
-        None
+        Some(self.cancel.clone())
+    }
+
+    // ## m2b-t10-pg
+
+    fn execute<'a>(
+        &'a mut self,
+        sql: &'a str,
+        opts: ExecOpts,
+    ) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
+        Box::pin(async move {
+            let r = self.exec().execute(sql, opts).await;
+            self.drop_if_broken();
+            r
+        })
+    }
+
+    fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
+        Box::pin(async move {
+            let r = self.exec().batch(sql).await;
+            self.drop_if_broken();
+            r
+        })
+    }
+
+    fn tx_status(&self) -> TxStatus {
+        self.wire.tx()
+    }
+
+    fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>> {
+        Box::pin(async move {
+            let r = self.exec().reset().await;
+            self.drop_if_broken();
+            r
+        })
+    }
+
+    fn backend_id(&self) -> Option<u64> {
+        self.wire
+            .backend_pid()
+            .and_then(|pid| u64::try_from(pid).ok())
     }
 }
 

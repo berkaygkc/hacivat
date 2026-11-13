@@ -9,16 +9,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use hacivat_driver::{
-    Driver, DriverConnect, DriverEvent, Endpoint, ProbeWarning, RawError, RawErrorKind,
-    ServerMessage,
+    Driver, DriverConnect, DriverEvent, Endpoint, InsecureAuth, ProbeWarning, RawError,
+    RawErrorKind, ServerMessage, TxStatus,
 };
 use hacivat_driver_mysql::{
-    MySqlDriver, opts_for, opts_for_forwarded, os_roots, plaintext_fallback_allowed,
-    probe_warnings, raw_error, ssl_opts, trail_events, user_databases,
+    MySqlDriver, command_tag, opts_for, opts_for_forwarded, plaintext_fallback_allowed,
+    probe_warnings, raw_error, trail_events, tx_from_status, user_databases,
 };
 use hacivat_net::{
     AddressClass, BoxedStream, StreamFactory, Target, TlsFailure, TlsMode, TlsSettings,
-    build_tls_params, install_crypto_provider,
+    TlsVerified, build_tls_params, install_crypto_provider,
 };
 use secrecy::SecretString;
 
@@ -49,7 +49,7 @@ fn base(host: &str, direct: bool, tls: TlsMode, opens: Arc<AtomicUsize>) -> Driv
             resolved,
             tls_host: host.to_string(),
         },
-        tls: build_tls_params(&settings, host, AddressClass::Private).unwrap(),
+        tls: build_tls_params(&settings, host, 3306, AddressClass::Private, None).unwrap(),
         user: Some("deploy".into()),
         password: Some(SecretString::from("s3cret")),
         database: Some("orders".into()),
@@ -58,6 +58,7 @@ fn base(host: &str, direct: bool, tls: TlsMode, opens: Arc<AtomicUsize>) -> Driv
         options: vec![],
         connect_timeout: Duration::from_secs(5),
         events: Arc::new(|_| {}),
+        insecure_auth: Default::default(),
     }
 }
 
@@ -75,23 +76,6 @@ fn no_local_infile_handler_and_no_socket_reconnect() {
     assert!(o.local_infile_handler().is_none());
     assert!(!o.prefer_socket());
     assert!(o.socket().is_none());
-}
-
-#[test]
-fn ssl_opts_mapping() {
-    assert!(ssl_opts(TlsMode::Disable).is_none());
-    let r = ssl_opts(TlsMode::Require).unwrap();
-    assert!(r.accept_invalid_certs());
-    assert!(r.skip_domain_validation());
-    assert!(r.disable_built_in_roots());
-    let f = ssl_opts(TlsMode::VerifyFull).unwrap();
-    assert!(!f.accept_invalid_certs());
-    assert!(!f.skip_domain_validation());
-    assert!(f.disable_built_in_roots());
-    let a = ssl_opts(TlsMode::Auto).unwrap();
-    assert!(!a.accept_invalid_certs());
-    assert!(!a.skip_domain_validation());
-    assert!(a.disable_built_in_roots());
 }
 
 #[test]
@@ -119,30 +103,6 @@ fn direct_connect_dials_the_tls_host_with_the_resolved_addresses() {
     assert!(!o.prefer_socket());
     assert_eq!(o.user(), Some("deploy"));
     assert_eq!(o.db_name(), Some("orders"));
-}
-
-#[tokio::test]
-async fn trust_is_the_os_roots_never_the_built_in_ones() {
-    let o = opts_for(&req_any());
-    let ssl = o.ssl_opts().expect("Auto asks for TLS");
-    assert!(ssl.disable_built_in_roots());
-    assert_eq!(ssl.root_certs().len(), os_roots().len());
-    // Every root is handed over as the OS's DER bytes.
-    for (given, os) in ssl.root_certs().iter().zip(os_roots()) {
-        assert_eq!(given.read().await.unwrap().as_ref(), os.as_slice());
-    }
-}
-
-#[test]
-fn os_roots_are_all_usable_trust_anchors() {
-    for der in os_roots() {
-        let mut store = rustls::RootCertStore::empty();
-        assert!(
-            store
-                .add(rustls::pki_types::CertificateDer::from(der.clone()))
-                .is_ok()
-        );
-    }
 }
 
 #[test]
@@ -302,19 +262,6 @@ fn system_schemas_are_not_listed() {
     assert_eq!(user_databases(names.to_vec(), 1), ["orders"]);
 }
 
-#[tokio::test]
-async fn verify_ca_is_refused_before_any_byte_is_sent() {
-    // P11: Validate rejects VerifyCa for MySQL; the driver refuses it again.
-    let opens = Arc::new(AtomicUsize::new(0));
-    let req = base("db.internal", false, TlsMode::VerifyCa, opens.clone());
-    let e = match MySqlDriver::new().connect(req).await {
-        Ok(_) => panic!("VerifyCa must be refused"),
-        Err(e) => e,
-    };
-    assert_eq!(e.kind, RawErrorKind::Unsupported);
-    assert_eq!(opens.load(Ordering::SeqCst), 0);
-}
-
 #[test]
 fn the_mariadb_handshake_prefix_is_stripped_only_before_a_digit() {
     use hacivat_driver_mysql::server_version_text;
@@ -354,7 +301,7 @@ fn auto_at(host: &str, ip: [u8; 4], factory: StreamFactory) -> DriverConnect {
             resolved,
             tls_host: host.to_string(),
         },
-        tls: build_tls_params(&settings, host, class).unwrap(),
+        tls: build_tls_params(&settings, host, 3306, class, None).unwrap(),
         user: Some("deploy".into()),
         password: Some(SecretString::from("s3cret")),
         database: None,
@@ -363,6 +310,7 @@ fn auto_at(host: &str, ip: [u8; 4], factory: StreamFactory) -> DriverConnect {
         options: vec![],
         connect_timeout: Duration::from_secs(5),
         events: Arc::new(|_| {}),
+        insecure_auth: Default::default(),
     }
 }
 
@@ -388,7 +336,8 @@ fn plaintext_fallback_only_toward_loopback() {
         mode: TlsMode::Require,
         ..TlsSettings::default()
     };
-    require.tls = build_tls_params(&settings, "localhost", AddressClass::Loopback).unwrap();
+    require.tls =
+        build_tls_params(&settings, "localhost", 3306, AddressClass::Loopback, None).unwrap();
     assert!(!plaintext_fallback_allowed(&require));
 }
 
@@ -509,11 +458,11 @@ fn the_trail_follows_what_the_handshake_reached() {
 }
 
 // ## m2a-finalfix
-/// M6: the driver trusts exactly the CA certificates the pipeline read and checked
-/// (`TlsParams::ca_certs`) and never reads the file again, so a CA file that becomes
-/// unreadable after the check cannot silently leave only the OS roots.
-#[tokio::test]
-async fn the_ca_file_is_never_read_again_by_the_driver() {
+/// M6: the driver trusts exactly what the pipeline read and checked and never reads the CA
+/// file again. M2b (Task 13, Q2): the CA certificates live in `TlsParams.config`'s verifier,
+/// so `mysql_async` gets that configuration and no roots of its own.
+#[test]
+fn the_ca_file_is_never_read_again_by_the_driver() {
     install_crypto_provider();
     let path = std::env::temp_dir().join(format!("hv-mysql-ca-{}.pem", std::process::id()));
     std::fs::write(
@@ -527,13 +476,269 @@ async fn the_ca_file_is_never_read_again_by_the_driver() {
         ..TlsSettings::default()
     };
     let mut req = req_any();
-    req.tls = build_tls_params(&settings, "db.internal", AddressClass::Private).unwrap();
+    req.tls =
+        build_tls_params(&settings, "db.internal", 3306, AddressClass::Private, None).unwrap();
     std::fs::remove_file(&path).unwrap();
-    let ca = req.tls.as_ref().unwrap().ca_certs.clone();
-    assert_eq!(ca.len(), 1);
     let o = opts_for(&req);
     let ssl = o.ssl_opts().expect("VerifyFull asks for TLS");
-    assert_eq!(ssl.root_certs().len(), os_roots().len() + 1);
-    let first = ssl.root_certs()[0].read().await.unwrap();
-    assert_eq!(first.as_ref(), ca[0].as_ref());
+    assert!(ssl.root_certs().is_empty());
+    let config = ssl.rustls_client_config().expect("Hacivat's configuration");
+    assert!(Arc::ptr_eq(config, &req.tls.as_ref().unwrap().config));
+}
+
+// ## m2b-t13-mysql
+
+/// Q2: every TLS mode hands `mysql_async` Hacivat's own `ClientConfig` (pins, review, outcome,
+/// platform verifier, CA file, decrypted client key) and the name to verify; none of
+/// `mysql_async`'s own trust settings is used.
+#[test]
+fn every_tls_mode_uses_hacivats_client_config() {
+    for mode in [
+        TlsMode::Auto,
+        TlsMode::Require,
+        TlsMode::VerifyCa,
+        TlsMode::VerifyFull,
+    ] {
+        for direct in [true, false] {
+            let req = base("db.acme.io", direct, mode, Arc::default());
+            let o = if direct {
+                opts_for(&req)
+            } else {
+                opts_for_forwarded(&req, 49505)
+            };
+            let ssl = o
+                .ssl_opts()
+                .unwrap_or_else(|| panic!("{mode:?} asks for TLS"));
+            let config = ssl.rustls_client_config().expect("Hacivat's configuration");
+            assert!(
+                Arc::ptr_eq(config, &req.tls.as_ref().unwrap().config),
+                "{mode:?}"
+            );
+            assert_eq!(ssl.tls_hostname_override(), Some("db.acme.io"), "{mode:?}");
+            assert!(ssl.root_certs().is_empty(), "{mode:?}");
+            assert!(ssl.client_identity().is_none(), "{mode:?}");
+            assert!(!ssl.accept_invalid_certs(), "{mode:?}");
+            assert!(!ssl.skip_domain_validation(), "{mode:?}");
+        }
+    }
+}
+
+#[test]
+fn read_write_connections_have_multi_statements_and_none_has_local_infile() {
+    let mut req = req_any();
+    let o = opts_for(&req);
+    assert!(o.multi_statements());
+    assert!(!o.local_infile_capability());
+    assert!(o.local_infile_handler().is_none());
+    assert!(!o.enable_cleartext_plugin());
+    req.read_only = true;
+    let o = opts_for(&req);
+    assert!(!o.multi_statements());
+    assert!(!o.local_infile_capability());
+}
+
+/// Q20: the guard reads the attempt's live TLS outcome when the server asks for the password;
+/// it is not decided from the mode when the `Opts` are built.
+#[test]
+fn the_password_guard_reads_the_live_outcome() {
+    let mut req = base("db.internal", true, TlsMode::Require, Arc::default());
+    let outcome = req.tls.as_ref().unwrap().outcome.clone();
+    let guard = opts_for(&req).password_guard().expect("a guard").clone();
+    assert!(!guard(), "no handshake yet");
+    for (o, want) in [
+        (None, false),
+        (Some(TlsVerified::No), false),
+        (Some(TlsVerified::Pinned), true),
+        (Some(TlsVerified::Full), true),
+        (Some(TlsVerified::CaOnly), true),
+    ] {
+        *outcome.lock().unwrap() = o;
+        assert_eq!(guard(), want, "{o:?}");
+    }
+    // `Allow` lets the password go whatever the outcome.
+    req.insecure_auth = InsecureAuth::Allow;
+    *outcome.lock().unwrap() = None;
+    let guard = opts_for(&req).password_guard().expect("a guard").clone();
+    assert!(guard());
+}
+
+#[test]
+fn a_plaintext_attempt_never_reads_an_outcome() {
+    let req = base("db.internal", true, TlsMode::Disable, Arc::default());
+    assert!(req.tls.is_none());
+    let guard = opts_for(&req).password_guard().expect("a guard").clone();
+    assert!(!guard());
+}
+
+#[tokio::test]
+async fn verify_ca_is_no_longer_refused() {
+    // P11 superseded: VerifyCa runs through Hacivat's `ChainOnly` verifier, so the driver dials.
+    let opens = Arc::new(AtomicUsize::new(0));
+    let req = base("db.internal", false, TlsMode::VerifyCa, opens.clone());
+    let e = match MySqlDriver::new().connect(req).await {
+        Ok(_) => panic!("the factory refuses"),
+        Err(e) => e,
+    };
+    assert_eq!(e.kind, RawErrorKind::Io(io::ErrorKind::ConnectionRefused));
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn insecure_password_refusal_and_interruptions_are_mapped() {
+    let refused = mysql_async::Error::Driver(mysql_async::DriverError::InsecurePasswordRefused);
+    assert_eq!(raw_error(&refused).kind, RawErrorKind::InsecureAuthRefused);
+    for code in [1317, 3024, 1969] {
+        let e = raw_error(&mysql_async::Error::Server(mysql_async::ServerError {
+            code,
+            message: "Query execution was interrupted".into(),
+            state: "70100".into(),
+        }));
+        assert_eq!(e.kind, RawErrorKind::Cancelled, "{code}");
+        // The server's code stays: the session reads 1317 once a cancel was asked for.
+        assert_eq!(e.server.and_then(|s| s.vendor_code), Some(i64::from(code)));
+    }
+    let other = raw_error(&mysql_async::Error::Server(mysql_async::ServerError {
+        code: 1146,
+        message: String::new(),
+        state: "42S02".into(),
+    }));
+    assert_eq!(other.kind, RawErrorKind::Db);
+}
+
+#[test]
+fn a_refused_password_stops_the_trail_at_sign_in() {
+    use DriverEvent::*;
+    let refused = RawError {
+        kind: RawErrorKind::InsecureAuthRefused,
+        server: None,
+    };
+    assert_eq!(
+        trail_events(true, Err(&refused)),
+        [TlsStarted, TlsDone, AuthStarted]
+    );
+    assert_eq!(trail_events(false, Err(&refused)), [AuthStarted]);
+}
+
+/// Q35: MySQL has no command tags; the tag is the statement's first keyword, ASCII upper case.
+#[test]
+fn command_tag_is_the_first_keyword_in_ascii_upper_case() {
+    for (sql, want) in [
+        ("insert into t values (1)", Some("INSERT")),
+        ("  \n\tSelect 1", Some("SELECT")),
+        ("-- note\n# more\n/* block */ delete from t", Some("DELETE")),
+        ("with x as (select 1) delete from t", Some("WITH")),
+        ("call p()", Some("CALL")),
+        ("do sleep(1)", Some("DO")),
+        // MySQL and MariaDB executable comments run their contents: the keyword inside counts.
+        ("/*!50000 DROP TABLE t */", Some("DROP")),
+        ("/*! update t set a = 1 */", Some("UPDATE")),
+        ("/*M!100000 REPLACE INTO t VALUES (1) */", Some("REPLACE")),
+        ("/*!*/ delete from t", Some("DELETE")),
+        (
+            "/*!50000*/ /* c */ insert into t values (1)",
+            Some("INSERT"),
+        ),
+        (
+            "/*!50000 /* nested */ load data infile 'x' into table t */",
+            Some("LOAD"),
+        ),
+        ("/*+ BKA(t) */ select 1", Some("SELECT")),
+        ("(select 1)", None),
+        ("", None),
+        ("-- only a comment", None),
+        ("/* unterminated", None),
+        ("\u{130}NSERT", None),
+    ] {
+        assert_eq!(command_tag(sql).as_deref(), want, "{sql:?}");
+    }
+}
+
+#[test]
+fn the_transaction_status_comes_from_the_status_flags() {
+    use mysql_async::consts::StatusFlags as F;
+    assert_eq!(tx_from_status(F::empty()), TxStatus::Idle);
+    assert_eq!(tx_from_status(F::SERVER_STATUS_AUTOCOMMIT), TxStatus::Idle);
+    assert_eq!(
+        tx_from_status(F::SERVER_STATUS_IN_TRANS | F::SERVER_STATUS_AUTOCOMMIT),
+        TxStatus::InTx
+    );
+    assert_eq!(
+        tx_from_status(F::SERVER_STATUS_IN_TRANS | F::SERVER_STATUS_IN_TRANS_READONLY),
+        TxStatus::InTx
+    );
+}
+
+// ## m2b-t17-liveness
+#[test]
+fn the_autocommit_setting_comes_from_the_status_flags() {
+    use hacivat_driver_mysql::autocommit_from_status;
+    use mysql_async::consts::StatusFlags as F;
+    assert!(autocommit_from_status(F::SERVER_STATUS_AUTOCOMMIT));
+    assert!(autocommit_from_status(
+        F::SERVER_STATUS_AUTOCOMMIT | F::SERVER_STATUS_IN_TRANS
+    ));
+    assert!(!autocommit_from_status(F::empty()));
+    assert!(!autocommit_from_status(F::SERVER_STATUS_IN_TRANS));
+}
+
+// ## m2b-fix-f2
+/// F2: MySQL 8.0/8.4 answer the prepare of a refused `SET GLOBAL`/`SET PERSIST` with a bare OK
+/// packet, which ends the connection, so a `SET` asked for as a prepared statement runs over
+/// `COM_QUERY`; everything else stays prepared. A read-only connection never sends a text
+/// that may also be read as something other than a `SET` (the prepared protocol's refusal
+/// stays the server's).
+#[test]
+fn a_set_asked_for_as_a_prepared_statement_runs_as_text() {
+    use hacivat_driver_mysql::ExtendedRoute::{Prepared, Refused, Text};
+    use hacivat_driver_mysql::extended_route;
+    for (sql, read_write, read_only) in [
+        // Every SET form, whatever its scope.
+        ("SET GLOBAL max_connections = 999", Text, Text),
+        ("set persist max_connections = 999", Text, Text),
+        ("SET PERSIST_ONLY max_connections = 999", Text, Text),
+        ("SET @@global.max_connections = 999", Text, Text),
+        ("SET @a = 1, GLOBAL max_connections = 999", Text, Text),
+        ("SET GLOBAL TRANSACTION READ WRITE", Text, Text),
+        ("SET SESSION sql_log_bin = 0", Text, Text),
+        ("SET NAMES utf8mb4", Text, Text),
+        ("  \n\t-- why\n# more\n/* block */ SET @a = 1", Text, Text),
+        // An unversioned executable comment always runs.
+        ("/*!SET GLOBAL max_connections = 999*/", Text, Text),
+        ("/*!*/ SET @a = 1", Text, Text),
+        // A version-gated one that holds the whole SET: read inside, or skipped (no statement).
+        ("/*!80000 SET GLOBAL max_connections = 999 */", Text, Text),
+        ("/*!40101 SET NAMES utf8 */", Text, Text),
+        ("/*M!100000 SET @a = 1 */", Text, Text),
+        // Read either way, one reading is not a SET: never sent on a read-only connection.
+        (
+            "/*!99999 SELECT 1 */ SET GLOBAL max_connections = 999",
+            Text,
+            Refused,
+        ),
+        ("/*M!100000 SELECT 1 */ SET @a = 1", Text, Refused),
+        ("/*!80000 SET @a = 1 */ LOCK TABLES t WRITE", Text, Refused),
+        (
+            "/*!99999 SELECT 1 */ /*!80000 SET @a = 1 */ DO 1",
+            Text,
+            Refused,
+        ),
+        // No reading is a SET: prepared, as before.
+        ("SELECT 1", Prepared, Prepared),
+        ("SETTINGS", Prepared, Prepared),
+        ("RESET PERSIST max_connections", Prepared, Prepared),
+        ("SHOW VARIABLES LIKE 'max_connections'", Prepared, Prepared),
+        ("/*!50000 DROP TABLE t */", Prepared, Prepared),
+        ("/* SET */ SELECT 1", Prepared, Prepared),
+        ("-- SET\nSELECT 1", Prepared, Prepared),
+        ("SELECT 1 /*!80000 , (SET) */", Prepared, Prepared),
+        // `--x` is not a comment to MySQL: the text starts with a minus sign.
+        ("--x\nSET @a = 1", Prepared, Prepared),
+        (";SET @a = 1", Prepared, Prepared),
+        ("(SET @a = 1)", Prepared, Prepared),
+        ("", Prepared, Prepared),
+        ("/* unterminated SET", Prepared, Prepared),
+    ] {
+        assert_eq!(extended_route(sql, false), read_write, "read-write {sql:?}");
+        assert_eq!(extended_route(sql, true), read_only, "read-only {sql:?}");
+    }
 }

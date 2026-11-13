@@ -1244,3 +1244,94 @@ fn the_natural_width_counts_whole_labels_and_marks(cx: &mut TestAppContext) {
         assert_eq!(two - short, short - px(2.0) + px(1.0));
     });
 }
+
+// ## m2b-t24-shots
+
+/// T20 review M1a: the folded summary may lead with a 12 px text-2 glyph; it goes with the
+/// summary when the section opens, and the row declares its expanded state.
+#[gpui::test]
+fn disclosure_summary_icon_shows_only_while_folded(cx: &mut TestAppContext) {
+    use hacivat_ui::icon::{IconName, icon_record, icon_take};
+
+    let open = Rc::new(Cell::new(false));
+    let state = open.clone();
+    let vcx = host(cx, move |_, _| {
+        let state = state.clone();
+        div()
+            .w(px(600.0))
+            .child(
+                Disclosure::new("ssh", "SSH tunnel".into())
+                    .summary("On · bastion.acme.io".into())
+                    .summary_icon(Some(IconName::Route))
+                    .open(state.get())
+                    .on_toggle(move |open, window, _| {
+                        state.set(open);
+                        window.refresh();
+                    }),
+            )
+            .into_any_element()
+    });
+    let frame = |vcx: &mut VisualTestContext| {
+        icon_record();
+        a11y_record();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        let icons: Vec<IconName> = icon_take().into_iter().map(|i| i.name).collect();
+        let row = a11y_take()
+            .into_iter()
+            .find(|d| d.role == Some(Role::Button) && d.name.as_ref() == "SSH tunnel")
+            .expect("the row declared itself");
+        (icons, row.expanded)
+    };
+    let (icons, expanded) = frame(vcx);
+    assert_eq!(icons, [IconName::ChevronRight, IconName::Route]);
+    assert_eq!(expanded, Some(false));
+    open.set(true);
+    let (icons, expanded) = frame(vcx);
+    assert_eq!(icons, [IconName::ChevronDown], "no summary, no glyph");
+    assert_eq!(expanded, Some(true));
+    // Without the option the folded row draws only its chevron (M2a, unchanged).
+    let vcx = host(cx, |_, _| {
+        Disclosure::new("tls", "TLS".into())
+            .summary(TLS_SUMMARY.into())
+            .into_any_element()
+    });
+    icon_record();
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    let icons: Vec<IconName> = icon_take().into_iter().map(|i| i.name).collect();
+    assert_eq!(icons, [IconName::ChevronRight]);
+}
+
+/// A placeholder wider than its field ends in an ellipsis (the long-locale rule for one-line
+/// values) and is recorded as truncated, never clipped; a short one is drawn whole.
+#[gpui::test]
+fn a_long_placeholder_ends_in_an_ellipsis(cx: &mut TestAppContext) {
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    let long = "[şȧȧȧṽḗḗḗḓ ıııƞ ŧħḗḗḗ Ķḗḗḗẏçħȧȧȧiiƞ, şȧȧȧṽḗḗḗḓ ıııƞ ŧħḗḗḗ Ķḗḗḗẏçħȧȧȧiiƞ]";
+    let (_, vcx) = cx.add_window_view(|_, cx| InputHost {
+        input: cx.new(|cx| TextInput::new(cx, text(long))),
+    });
+    enable_registry(vcx);
+    let placeholder = |vcx: &mut VisualTestContext| {
+        vcx.read(|cx| {
+            cx.global::<TextRegistry>()
+                .frame
+                .iter()
+                .find(|r| r.path.ends_with("#placeholder"))
+                .cloned()
+                .expect("the placeholder is drawn")
+        })
+    };
+    let drawn = placeholder(vcx);
+    assert!(drawn.truncated && !drawn.clipped, "{drawn:?}");
+    assert_eq!(drawn.text.as_ref(), long, "the record keeps the whole text");
+    assert!(drawn.painted_px <= 300.5, "{}", drawn.painted_px);
+
+    let (_, vcx) = cx.add_window_view(|_, cx| InputHost {
+        input: cx.new(|cx| TextInput::new(cx, text("Password"))),
+    });
+    enable_registry(vcx);
+    let drawn = placeholder(vcx);
+    assert!(!drawn.truncated && !drawn.clipped, "{drawn:?}");
+}

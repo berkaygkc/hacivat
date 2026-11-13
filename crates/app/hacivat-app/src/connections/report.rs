@@ -158,6 +158,8 @@ pub(crate) fn step_label(f: &Fmt, step: TrailStep) -> String {
         TrailStep::SignIn => f.t(ids::hv::CONN_STEP_AUTH, NoArgs),
         TrailStep::CheckServer => f.t(ids::hv::CONN_STEP_CHECK, NoArgs),
         TrailStep::OpenFile => f.t(ids::hv::CONN_STEP_OPEN, NoArgs),
+        // ## m2b-t22-live: the tunnel's own step (T20 carry; NOTES M2b surface 7).
+        TrailStep::Ssh => f.t(ids::hv::CONN_STEP_SSH, NoArgs),
     }
 }
 
@@ -270,12 +272,25 @@ fn tls_text(f: &Fmt, tls: Option<&TlsSummary>, file: bool) -> String {
         return f.t(ids::hv::CONN_DIAG_TLS_NONE, NoArgs);
     };
     use ids::hv::{HvConnDiagTlsNovState as N, HvConnDiagTlsVState as V};
+    let version = tls.version.as_deref().map(tls_version_number);
+    // ## m2b-t24-shots (fix round 1, I3): a pinned certificate says so (M2a NOTES `enc-pinned`).
+    if tls.verified == TlsVerified::Pinned {
+        return match version {
+            Some(version) if !version.is_empty() => f.t(
+                ids::hv::CONN_DIAG_TLS_PINNED,
+                ids::hv::HvConnDiagTlsPinned {
+                    version: Text(version.to_string()),
+                },
+            ),
+            _ => f.t(ids::hv::CONN_DIAG_TLS_NOV_PINNED, NoArgs),
+        };
+    }
     let (v, n) = match tls.verified {
-        TlsVerified::Full => (V::Full, N::Full),
+        TlsVerified::Full | TlsVerified::Pinned => (V::Full, N::Full),
         TlsVerified::CaOnly => (V::CaOnly, N::CaOnly),
         TlsVerified::No => (V::No, N::No),
     };
-    match tls.version.as_deref().map(tls_version_number) {
+    match version {
         Some(version) if !version.is_empty() => f.t(
             ids::hv::CONN_DIAG_TLS_V,
             ids::hv::HvConnDiagTlsV {
@@ -464,6 +479,13 @@ fn error_args(e: &ConnectError) -> Vec<(&'static str, ArgValue)> {
     opt("db", a.database.clone());
     opt("file", a.file.clone());
     opt("version", a.version.clone());
+    // ## m2b-t14-pipeline (fix round 1, one-time ownership exception): the SSH hop an error
+    // happened at. `$hop_host` is its host; `$hop` counts from 1, as the copy names hops
+    // ("hop 2"), while `ErrArgs.hop` counts from 0.
+    opt("hop_host", a.hop_host.clone());
+    if let Some(hop) = a.hop {
+        args.push(("hop", ArgValue::Count(u64::from(hop) + 1)));
+    }
     args
 }
 
@@ -596,7 +618,9 @@ fn issue_sentence(f: &Fmt, code: &IssueCode) -> String {
         IssueCode::TransportUnavailable => ids::hv::CONN_ISSUE_TRANSPORT_UNAVAILABLE,
         IssueCode::TlsCaUnreadable => ids::hv::CONN_ISSUE_TLS_CA_UNREADABLE,
         IssueCode::TlsCertUnreadable => ids::hv::CONN_ISSUE_TLS_CERT_UNREADABLE,
-        IssueCode::TlsKeyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_ENCRYPTED,
+        // ## m2b-t19-tls (fix round 1, I2; named exception): an encrypted key wants its
+        // passphrase (B25), never an unencrypted file.
+        IssueCode::TlsKeyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_PASSPHRASE,
         IssueCode::TlsModeUnsupported { mode } => {
             return f.t(
                 ids::hv::CONN_ISSUE_TLS_MODE_UNSUPPORTED,
@@ -621,6 +645,14 @@ fn issue_sentence(f: &Fmt, code: &IssueCode) -> String {
                 },
             );
         }
+        // m2b: the SSH and legacy-key issues, worded as in the dialog (`dialog::form`).
+        IssueCode::SshHostMissing => ids::hv::CONN_ISSUE_SSH_HOST_MISSING,
+        IssueCode::SshUserMissing => ids::hv::CONN_ISSUE_SSH_USER_MISSING,
+        IssueCode::SshTooManyHops => ids::hv::CONN_ISSUE_SSH_TOO_MANY_HOPS,
+        IssueCode::SshKeyFileMissing => ids::hv::CONN_ISSUE_SSH_KEY_FILE_MISSING,
+        IssueCode::TlsKeyLegacyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_LEGACY_ENCRYPTED,
+        // ## m2b-t19-tls: a notice the dialog shows; Validate never reports it.
+        IssueCode::TlsDisableIgnoresPin => ids::hv::CONN_ISSUE_TLS_DISABLE_IGNORES_PIN,
     };
     f.t(msg, NoArgs)
 }

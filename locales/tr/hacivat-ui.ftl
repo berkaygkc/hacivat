@@ -473,10 +473,6 @@ hv-conn-fix-connect = Bağlan
 # Review: PO
 hv-conn-fix-close = Kapat
 # Review: PO
-hv-conn-fix-require = Doğrulamadan şifrele
-# Review: PO
-hv-conn-fix-require-note = Bağlantı şifrelenir, ama { -brand-hacivat } sunucunun gerçekten iddia ettiği sunucu olduğunu denetlemez.
-# Review: PO
 hv-conn-fix-read-only = Bağlantılar dosyanız değiştirilemiyor; bu yüzden bağlantıyı düzenleyen düzeltmeler kapalı.
 # Review: PO
 hv-conn-fix-save-failed = Değişiklik bağlantılar dosyanıza kaydedilemedi.
@@ -799,8 +795,6 @@ hv-conn-issue-tls-ca-unreadable = CA sertifikası okunamıyor. CA doğrulaması 
 # Review: PO
 hv-conn-issue-tls-cert-unreadable = İstemci sertifikası ya da anahtarı okunamıyor.
 # Review: PO
-hv-conn-issue-tls-key-encrypted = Özel anahtar şifreli. Şifresiz bir anahtar dosyası kullanın.
-# Review: PO
 hv-conn-issue-tls-mode-unsupported = { $mode } bu motor için henüz kullanılamıyor.
 # Review: PO
 hv-conn-issue-option-rejected = { $key } özelliğine burada izin verilmiyor.
@@ -820,6 +814,115 @@ hv-conn-toast-delete-secret = Bağlantı silindi, ancak kayıtlı parolası sist
 hv-conn-enc-ca-only = { $version } · CA doğrulandı
 # Review: PO
 hv-conn-issue-option-secret = { $key } özelliği bir parola taşıyor. Özelliği kaldırın, parolayı Parola alanına yazın.
+
+## m2b-t01-interfaces
+
+# Review: PO
+hv-conn-issue-ssh-host-missing = SSH sunucusunu girin.
+# Review: PO
+hv-conn-issue-ssh-user-missing = Oturum açılacak kullanıcıyı girin.
+# Review: PO
+hv-conn-issue-ssh-too-many-hops = Bir tünel en fazla 8 ara sunucudan geçebilir.
+# Review: PO
+hv-conn-issue-ssh-key-file-missing = Bu anahtar dosyası bulunamıyor. ~/.ssh/id_ed25519 gibi özel anahtarı seçin.
+# Review: PO
+hv-conn-issue-tls-key-legacy-encrypted = Bu anahtar, { -brand-hacivat } uygulamasının okuyamadığı eski bir biçimde şifrelenmiş. Anahtarı şifreli bir PKCS #8 anahtarına dönüştürün (openssl pkcs8 -topk8), sonra yeni dosyayı seçin.
+
+## m2b-t20-ssh
+
+# Review: PO
+hv-conn-section-ssh = SSH tüneli
+# Review: PO
+hv-conn-ssh-sum-off = Kapalı
+# Review: PO
+hv-conn-ssh-sum-on = { $host } üzerinden
+# Review: PO
+hv-conn-ssh-sum-hops = { $host } üzerinden · { $n } ara sunucu
+# Review: PO
+hv-conn-ssh-use = SSH tüneli üzerinden bağlan
+# Review: PO
+hv-conn-ssh-import = ~/.ssh/config'den içe aktar…
+# Review: PO
+hv-conn-ssh-host = SSH sunucusu
+# Review: PO
+hv-conn-ssh-user = SSH kullanıcısı
+# Review: PO
+hv-conn-ssh-auth-agent = Ajan
+# Review: PO
+hv-conn-ssh-auth-key = Anahtar dosyası
+# Review: PO
+hv-conn-ssh-auth-password = Parola
+# Review: PO
+hv-conn-ssh-auth-kbd = Klavye etkileşimli
+# Review: PO
+hv-conn-ssh-agent-note = ssh-agent'a yüklü anahtarları kullanır.
+# Review: PO
+hv-conn-ssh-key = Anahtar dosyası
+# Review: PO
+hv-conn-ssh-passphrase = Parola ifadesi
+# Review: PO
+hv-conn-ssh-kbd-note = Sunucunun soruları, örneğin tek kullanımlık kod, bağlanırken gösterilir.
+# Review: PO
+hv-conn-ssh-jumps = Ara sunucular
+# Review: PO
+hv-conn-ssh-add-jump = Ara sunucu ekle
+# Review: PO
+hv-conn-ssh-remove-jump = { $n }. ara sunucuyu kaldır
+# Review: PO
+hv-conn-ssh-jump-host-missing = Ara sunucuyu girin.
+# Review: PO
+hv-conn-ssh-jump-key-missing = Bir ara sunucunun anahtar dosyası bulunamıyor. ~/.ssh/config içindeki IdentityFile satırını düzeltip sunucuyu yeniden içe aktarın.
+# Review: PO
+hv-conn-ssh-route = Rota
+# Review: PO
+hv-conn-ssh-this-mac = { $os ->
+        [mac] bu Mac
+       *[other] bu bilgisayar
+    }
+# Review: PO
+hv-conn-ssh-hostkeys = Sunucu anahtarları
+# Review: PO
+hv-conn-ssh-hk-ask = Yeni sunucularda sor
+# Review: PO
+hv-conn-ssh-hk-accept = Yeniyi kabul et, değişirse dur
+# Review: PO
+hv-conn-ssh-hk-strict = Yalnızca bilinen sunucular
+# Review: PO
+hv-conn-ssh-import-title = ~/.ssh/config içindeki sunucular
+# Review: PO
+hv-conn-ssh-proxycmd = ProxyCommand kullanıyor, desteklenmiyor
+# Review: PO
+hv-conn-ssh-unusable-secret = parolaya benzeyen bir değer içeriyor, içe aktarılmadı
+# Review: PO
+hv-conn-ssh-unusable-token = { $token } kullanıyor, desteklenmiyor
+# Review: PO
+hv-conn-ssh-unusable-depth = ara sunucuları çok derin iç içe
+# Review: PO
+hv-conn-ssh-unusable-unknown = dosyada olmayan bir ara sunucuyu adlandırıyor
+# Review: PO
+hv-conn-ssh-import-via = { $target } · ProxyJump { $jumps }
+# Review: PO
+hv-conn-ssh-import-key = { $target } · IdentityFile { $key }
+# Review: PO
+hv-conn-ssh-import-none = ~/.ssh/config içinde sunucu yok
+# Review: PO
+hv-conn-ssh-import-unreadable = ~/.ssh/config okunamıyor
+# Review: PO
+hv-conn-ssh-imported = { $alias }, ~/.ssh/config'den içe aktarıldı: adres, kullanıcı, anahtar ve ara sunucu.
+# Review: PO
+hv-conn-ssh-notice-match = { $line }. satır: Match blokları atlandı.
+# Review: PO
+hv-conn-ssh-notice-include = { $line }. satır: Include çok derin iç içe, adlandırdığı dosyalar atlandı.
+# Review: PO
+hv-conn-ssh-notice-known-hosts = { $alias }: UserKnownHostsFile yok sayıldı. { -brand-hacivat } kendi bilinen sunucular listesini ve ~/.ssh/known_hosts dosyasını denetler.
+# Review: PO
+hv-conn-ssh-notice-strict-no = { $alias }: StrictHostKeyChecking no, Yeni sunucularda sor olarak okundu.
+# Review: PO
+hv-conn-ssh-notice-agent = { $alias }: IdentityAgent yok sayıldı. { -brand-hacivat } SSH_AUTH_SOCK içindeki ajanı kullanır.
+# Review: PO
+hv-conn-ssh-notice-jump-password = { $alias }: ProxyJump bir parola içeriyordu; parola kaldırıldı ve saklanmadı.
+# Review: PO
+hv-conn-step-ssh = SSH
 
 ## m2a-demo-extra
 
@@ -850,3 +953,373 @@ hv-conn-err-refused = { $name } — { $reason ->
 hv-conn-err-attempts-used = 3 denemenin hepsi kullanıldı. Hesap kilitlenmesin diye { -brand-hacivat } başka parola göndermez.
 # Review: PO
 hv-conn-dlg-attempts-used = Bu sunucu için deneme hakkı kalmadı. Yeniden denemek için adresi, portu ya da kullanıcıyı değiştirin veya bu pencereyi kapatıp yeniden açın.
+
+## m2b-t22-live
+
+# Review: PO
+hv-capsule-reconnecting = Yeniden bağlanıyor · { $n }. deneme
+# Review: PO
+hv-capsule-next = { $seconds } sn sonra
+# Review: PO
+hv-conn-path-ssh = { $host } üzerinden SSH
+# Review: PO
+hv-conn-idle-cap = Bağlantı kesik (boşta)
+# Review: PO
+hv-conn-idle-disconnected = { $name } bağlantısı { $hours } sa boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.
+# Review: PO
+hv-conn-idle-disconnected-minutes = { $name } bağlantısı { $minutes } dk boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.
+# Review: PO
+hv-conn-idle-tx = { $name } üzerindeki bir işlem { $minutes } dakikadır açık ve boşta. Commit edilene ya da geri alınana kadar kilitlerini tutar.
+# Review: PO
+hv-conn-lost-title = { $state ->
+        [reconnected] { $name } ile yeniden bağlanıldı
+       *[lost] { $name } oturumu kayboldu
+    }
+# Review: PO
+hv-conn-lost-body = { $state ->
+        [reconnected] Sunucu oturumu sona erdi; { -brand-hacivat } yeni bir oturum açtı.
+       *[lost] Sunucu oturumu süren bir iş varken sona erdi; bu yüzden { -brand-hacivat } kendiliğinden yeniden bağlanmadı. Yeniden dene ile tekrar bağlanabilirsiniz.
+    }
+# Review: PO
+hv-conn-lost-tx = Açık işleminiz sona erdi ve sunucu commit edilmemiş değişikliklerini geri aldı.
+# Review: PO
+hv-conn-lost-other = Ayrıca kayboldu: { $items }
+# Review: PO
+hv-conn-lost-item-temp = geçici tablolar
+# Review: PO
+hv-conn-lost-item-vars = oturum değişkenleri
+# Review: PO
+hv-conn-lost-item-prepared = { $count } hazırlanmış ifade
+# Review: PO
+hv-conn-lost-item-locks = oturum kilitleri
+# Review: PO
+hv-conn-lost-details = Ayrıntıları göster
+# Review: PO
+hv-conn-lost-dismiss = Kapat
+# Review: PO
+hv-conn-gap-title = { $name } üzerinde salt okunur koruma
+# Review: PO
+hv-conn-gap-tx-ended = { -brand-hacivat }, salt okunur bir bağlantıda salt okunur işlemi sonlandıran bir ifadeyi durdurdu ve o oturumu kapattı.
+# Review: PO
+hv-conn-gap-changed-data = { -brand-hacivat }, salt okunur bir bağlantıda veri değiştiren bir ifadeyi durdurdu ve o oturumu kapattı.
+# Review: PO
+hv-conn-access-ro-enforced = salt okunur (sunucu rolüyle zorunlu)
+# Review: PO
+hv-conn-ro-sheet-enforced = salt okunur · zorunlu
+# Review: PO
+hv-conn-ro-sheet-guarded = salt okunur · korumalı
+# Review: PO
+hv-conn-ro-pop-enf-title = Salt okunur, sunucu tarafından zorunlu
+# Review: PO
+hv-conn-ro-pop-enf-body = { $user } rolü burada yalnızca okuyabilir. { -brand-hacivat } içinde ne çalışırsa çalışsın, yazmaları sunucunun kendisi reddeder.
+# Review: PO
+hv-conn-ro-pop-enf-temp = Tek başına TEMP yetkisi zorunluluğu zayıflatmaz; etiket zorunlu kalır.
+# Review: PO
+hv-conn-ro-pop-g-title = Salt okunurluk korumalı, zorunlu değil
+# Review: PO
+hv-conn-ro-pop-g-body = { $user } rolü burada yalnızca okumayla sınırlı değil; bu yüzden yazmaları { -brand-hacivat } kendisi durdurur: her ifadeyi denetler ve salt okunur çalıştırır.
+# Review: PO
+hv-conn-ro-pop-g-limit = Bu, hataları yakalar. Kesin güvence ancak sunucudaki salt okunur bir rolle sağlanır.
+# Review: PO
+hv-conn-ro-pop-g-fix = Zorunlu hale getirmek için veritabanı yöneticinizden böyle bir rol isteyin ve onu bu bağlantının kullanıcısı yapın:
+# Review: PO
+hv-conn-ro-pop-maria-body = { -brand-hacivat } bir MariaDB rolünün salt okunur olduğunu henüz doğrulayamıyor; bu yüzden MariaDB bağlantılarını her zaman kendisi korur.
+# Review: PO
+hv-conn-ro-pop-no-fix = Hiçbir rol değişikliği bu etiketi zorunlu yapmaz; bu yüzden kopyalanacak SQL yok.
+# Review: PO
+hv-conn-ro-pop-sqlite-body = SQLite'ta sunucu rolü yoktur. { -brand-hacivat } dosyayı salt okunur açar ve yalnızca okuyan ifadelere izin verir.
+# Review: PO
+hv-conn-ro-copy-sql = SQL'i kopyala
+# Review: PO
+hv-conn-ro-copied = SQL kopyalandı. Çalıştırmadan önce köşeli parantez içindeki değerleri değiştirin.
+# Review: PO
+hv-conn-ro-warn-head = Bu rolde bulunanlar:
+# Review: PO
+hv-conn-ro-warn-superuser = Süper kullanıcı.
+# Review: PO
+hv-conn-ro-warn-bypass-rls = Satır düzeyi güvenliği atlıyor.
+# Review: PO
+hv-conn-ro-warn-replication = Çoğaltma başlatabilir.
+# Review: PO
+hv-conn-ro-warn-create-role = Rol oluşturup değiştirebilir.
+# Review: PO
+hv-conn-ro-warn-server-file-roles = Veritabanı sunucusundaki dosyaları okuyabilir ya da yazabilir.
+# Review: PO
+hv-conn-ro-warn-execute-server-program = Veritabanı sunucusunda program çalıştırabilir.
+# Review: PO
+hv-conn-ro-warn-signal-backend = Başka oturumları iptal edebilir ya da sonlandırabilir.
+# Review: PO
+hv-conn-ro-warn-write-privileges = Bazı tablolardaki verileri değiştirebilir.
+# Review: PO
+hv-conn-ro-warn-temp-privilege = Geçici tablo oluşturabilir; salt okunur işlemler bunları engeller.
+# Review: PO
+hv-conn-ro-warn-egress-extension = { $name } eklentisi başka sunuculara erişebilir.
+# Review: PO
+hv-conn-ro-warn-role-grant-not-expanded = Ona başka roller verilmiş; { -brand-hacivat } bunların neye izin verdiğini göremiyor.
+# Review: PO
+hv-conn-ro-warn-unparsed = { -brand-hacivat } yetkilerini okuyamadı.
+# Review: PO
+hv-cmd-connection-explain-access = Salt okunur erişimi açıkla
+# Review: PO
+hv-cmd-debug-run-pg-sleep = Hata ayıklama: geçerli bağlantıda SELECT pg_sleep(30) çalıştır
+# Review: PO
+hv-cmd-debug-cancel = Hata ayıklama: deneme ifadesini iptal et
+# Review: PO
+hv-debug-demo-result = { $outcome ->
+        [done] Deneme ifadesi tamamlandı.
+        [cancelled] Deneme ifadesi iptal edildi.
+       *[failed] Deneme ifadesi başarısız oldu.
+    }
+
+## m2b-t21-prompts
+
+# Review: PO
+hv-conn-hk-title = { $host } ile ilk bağlantı
+# Review: PO
+hv-conn-hk-body = { $os ->
+        [mac] Bu Mac bu SSH sunucusuna daha önce bağlanmadı. Parmak izini yöneticinizin verdiğiyle karşılaştırın.
+       *[other] Bu bilgisayar bu SSH sunucusuna daha önce bağlanmadı. Parmak izini yöneticinizin verdiğiyle karşılaştırın.
+    }
+# Review: PO
+hv-conn-hk-fp = Sunucu anahtarı
+# Review: PO
+hv-conn-hk-store = { -brand-hacivat } bunu kendi bilinen sunucular listesine kaydeder. ~/.ssh/known_hosts değişmez.
+# Review: PO
+hv-conn-hk-trust = Güven ve bağlan
+# Review: PO
+hv-conn-hk-copy-fp = Parmak izini kopyala
+
+# Review: PO
+hv-conn-hk-changed-title = { $host } sunucusunun anahtarı değişti
+# Review: PO
+hv-conn-hk-changed-body = Sunucu, kayıtlı anahtarından farklı bir anahtarla yanıt verdi. Bu, sunucu yeniden kurulduğunda ya da anahtarları yenilendiğinde olur; biri bağlantının arasına girdiğinde de olur. { -brand-hacivat } oturum açmadan önce durdu.
+# Review: PO
+hv-conn-hk-changed-old = Kayıtlı anahtar
+# Review: PO
+hv-conn-hk-changed-new = Şimdi gönderilen
+# Review: PO
+hv-conn-hk-changed-stored-in = Kayıtlı olduğu yer
+# Review: PO
+hv-conn-hk-changed-src-hacivat = Hacivat'ın bilinen sunucuları
+# Review: PO
+hv-conn-hk-changed-src-openssh = { $file }, { NUMBER($n, useGrouping: "false") }. satır
+# Review: PO
+hv-conn-hk-changed-ask = { $host } sunucusunu yöneten kişiye anahtarın değişip değişmediğini sorun ve güvenmeden önce yeni parmak izini karşılaştırın.
+# Review: PO
+hv-conn-hk-changed-replace = Eski anahtarı sil, yenisine güven
+# Review: PO
+hv-conn-hk-changed-openssh-note = { -brand-hacivat } { $file } dosyasını değiştirmez. Yeni anahtar gerçekse eski satırı bir terminalde silin, sonra yeniden deneyin:
+# Review: PO
+hv-conn-hk-changed-copy = Komutu kopyala
+# Review: PO
+hv-conn-hk-changed-copied = Komut kopyalandı
+# Review: PO
+hv-conn-hk-changed-trusted = { $host } sunucusunun yeni anahtarına güvenildi
+
+# Review: PO
+hv-conn-kbd-title = { $host } oturumu
+# Review: PO
+hv-conn-kbd-asks = { $host } soruyor:
+# Review: PO
+hv-conn-kbd-from-server = Sunucunun gönderdiği metin, olduğu gibi
+# Review: PO
+hv-conn-kbd-no-text = Sunucu bir ad ya da açıklama göndermedi.
+# Review: PO
+hv-conn-kbd-attempt = 3 denemeden { $n }.
+# Review: PO
+hv-conn-kbd-not-kept = Yanıtlar yalnızca bu sunucuya gider ve saklanmaz.
+# Review: PO
+hv-conn-kbd-rejected = Sunucu yanıtları kabul etmedi ve yeniden sordu.
+# Review: PO
+hv-conn-kbd-continue = Devam et
+
+# Review: PO
+hv-conn-ssh-secret-hop = { $host }, { $total } atlamadan { $n }.
+# Review: PO
+hv-conn-ssh-secret-pw-title = { $host } için SSH parolası
+# Review: PO
+hv-conn-ssh-secret-pw-body = { $user } için SSH parolasını girin. Yalnızca bağlantı kurulursa saklanır.
+# Review: PO
+hv-conn-ssh-secret-pass-title = { $key } için parola ifadesi
+# Review: PO
+hv-conn-ssh-secret-pass-body = Bu anahtar dosyası şifreli. Parola ifadesini girin. Yalnızca bağlantı kurulursa saklanır.
+# Review: PO
+hv-conn-ssh-secret-wrong = { $host } parolayı kabul etmedi.
+# Review: PO
+hv-conn-ssh-secret-pass-wrong = Bu parola ifadesi anahtarı açmadı.
+# Review: PO
+hv-conn-ssh-secret-attempt = 3 denemeden { $n }.
+# Review: PO
+hv-conn-ssh-secret-continue = Devam et
+
+# Review: PO
+hv-conn-vault-create-title = Kayıtlı parolalar için bir kasa oluşturun
+# Review: PO
+hv-conn-vault-create-why = Bu bilgisayarda sistem anahtarlığı yok.
+# Review: PO
+hv-conn-vault-create-what = { -brand-hacivat }, kalıcı olarak kaydettiğiniz parolaları ana parolayla kilitlenen şifreli bir dosyada tutar.
+# Review: PO
+hv-conn-vault-master = Ana parola
+# Review: PO
+hv-conn-vault-repeat = Tekrar
+# Review: PO
+hv-conn-vault-min = En az 8 karakter
+# Review: PO
+hv-conn-vault-match = İki giriş eşleşiyor
+# Review: PO
+hv-conn-vault-mismatch = İki giriş eşleşmiyor
+# Review: PO
+hv-conn-vault-norecover = { -brand-hacivat } bu parolayı kurtaramaz. Unutursanız kasayı sıfırlar ve kayıtlı parolalarınızı yeniden girersiniz.
+# Review: PO
+hv-conn-vault-notnow-note = Şimdi değil derseniz bu parola { -brand-hacivat } yeniden başlayana kadar tutulur.
+# Review: PO
+hv-conn-vault-notnow = Şimdi değil
+# Review: PO
+hv-conn-vault-create-btn = Kasayı oluştur
+# Review: PO
+hv-conn-vault-created = Kasa oluşturuldu. Kalıcı kaydettiğiniz parolalar oraya gider.
+# Review: PO
+hv-conn-vault-unlock-title = Kasanın kilidini açın
+# Review: PO
+hv-conn-vault-unlock-body = Hacivat'ın { $name } için kayıtlı parolayı okuyabilmesi için ana parola gerekiyor. Kasa, uygulamadan çıkana kadar açık kalır.
+# Review: PO
+hv-conn-vault-unlock-body-any = Hacivat'ın kayıtlı parolalarınızı okuyabilmesi için ana parola gerekiyor. Kasa, uygulamadan çıkana kadar açık kalır.
+# Review: PO
+hv-conn-vault-unlock-wrong = Bu, ana parola değil.
+# Review: PO
+hv-conn-vault-attempt = 3 denemeden { $n }.
+# Review: PO
+hv-conn-vault-unlock-btn = Kilidi aç
+# Review: PO
+hv-conn-vault-reset-link = Kasayı sıfırla…
+# Review: PO
+hv-conn-vault-reset-title = Kasa sıfırlansın mı?
+# Review: PO
+hv-conn-vault-reset-body = Bu işlem kasayı ve içindeki bütün kayıtlı parolaları siler. Bağlantılarınız kalır; { -brand-hacivat } her parolayı bir sonraki bağlanışta sorar. Bu işlem geri alınamaz.
+# Review: PO
+hv-conn-vault-reset-type = Onaylamak için { $word } yazın
+# Review: PO
+hv-conn-vault-reset-word = reset
+# Review: PO
+hv-conn-vault-reset-btn = Kasayı sıfırla
+# Review: PO
+hv-conn-vault-reset-done = Kasa sıfırlandı. İçindeki kayıtlı parolalar silindi.
+# Review: PO
+hv-conn-vault-damaged-title = Kasa okunamıyor
+# Review: PO
+hv-conn-vault-damaged-body = Kasa dosyası bütünlük denetiminden geçemedi; { -brand-hacivat } dosyayı kullanmadı ve değiştirmedi. Bir yedekten geri yükleyin ya da kasayı sıfırlayın.
+# Review: PO
+hv-conn-vault-damaged-meanwhile = O zamana kadar girdiğiniz parolalar { -brand-hacivat } yeniden başlayana kadar tutulur.
+# Review: PO
+hv-conn-ret-forever-vault = Kalıcı (şifreli dosya)
+# Review: PO
+hv-conn-ret-forever-vault-h = Hacivat'ın kasasında, ana parolayla
+
+# Review: PO
+hv-conn-fix-review-host-key = Sunucu anahtarını incele…
+
+# Review: PO
+hv-conn-ssh-secret-remember-all = Bu bağlantının tüm atlamalarındaki kayıtlı SSH parolalarına ve parola ifadelerine uygulanır.
+# Review: PO
+hv-conn-save-unchanged = Hiçbir şey değiştirilmedi: kayıtlı parolalar taşınamadı ya da silinemedi. { -brand-hacivat } sorarsa kasanın kilidini açın, sonra yeniden deneyin.
+# Review: PO
+hv-conn-vault-denied = { -brand-hacivat } kasa dosyasını kullanamıyor: dosya normal bir dosya değil. Girdiğiniz parolalar { -brand-hacivat } yeniden başlayana kadar tutulur.
+
+## m2b-t19-tls
+
+# Review: PO
+hv-conn-fix-review-cert = Sertifikayı incele…
+# Review: PO
+hv-conn-fix-import-ca = CA içe aktar…
+# Review: PO
+hv-conn-tls-title = Sertifikaya güvenilmiyor
+# Review: PO
+hv-conn-tls-body = { $host }:{ $port }, bu Mac'in güvendiği hiçbir CA'nın imzalamadığı bir sertifika sundu. Devam etmeden önce parmak izini sunucuyu yöneten kişiyle karşılaştırın.
+# Review: PO
+hv-conn-tls-subject = Verildiği ad
+# Review: PO
+hv-conn-tls-issuer = Veren
+# Review: PO
+hv-conn-tls-valid = Geçerlilik sonu
+hv-conn-tls-valid-date = { DATETIME($when, dateStyle: "long") }
+# Review: PO
+hv-conn-tls-fp = SHA-256 parmak izi
+# Review: PO
+hv-conn-tls-copy-fp = Parmak izini kopyala
+# Review: PO
+hv-conn-tls-chain = Zincir
+# Review: PO
+hv-conn-tls-leaf = sunucu
+# Review: PO
+hv-conn-tls-inter = ara sertifika
+# Review: PO
+hv-conn-tls-root = kök · bu Mac güvenmiyor
+# Review: PO
+hv-conn-tls-pin-note = Sabitleme, { $host }:{ $port } için yalnızca bu sertifikaya güvenir. Sertifika bir gün değişirse { -brand-hacivat } durur ve yeniden sorar. Sabitleme geçerlilik süresini uzatmaz.
+# Review: PO
+hv-conn-tls-pin-btn = Bu sertifikayı sabitle
+# Review: PO
+hv-conn-tls-import = CA içe aktar…
+# Review: PO
+hv-conn-tls-dates-note = { $state ->
+        [expired] Bu sertifikanın süresi dolmuş. Sabitleme geçerlilik süresini uzatmadığı için sertifika sabitlenemez. Sunucuyu yöneten kişiden sertifikayı yenilemesini isteyin.
+       *[early] Bu sertifika henüz geçerli değil. Bu Mac'in tarih ve saatini denetleyin ya da sunucuyu yöneten kişiye sorun.
+    }
+# Review: PO
+# Fix round 1 (review M2): shorter than the mock's "Sabitlenmiş sertifika", which the 140 px
+# form label column cut off; it reads with "Sabitlemeyi kaldır" beside it.
+hv-conn-tls-pin = Sabitleme
+# Review: PO
+hv-conn-tls-pin-none = Yok
+# Review: PO
+hv-conn-tls-remove-pin = Sabitlemeyi kaldır
+# Review: PO
+hv-conn-issue-tls-disable-ignores-pin = Şifreleme kapalıyken sabitlenmiş sertifika denetlenmez. Sabitlemeyi kullanmak için başka bir mod seçin.
+# Review: PO
+hv-conn-dlg-key-pass = Anahtar parolası
+# Review: PO
+hv-conn-issue-tls-key-passphrase = Bu anahtar şifreli. Parolasını girin.
+# Review: PO
+hv-conn-tls-pin-changed-title = { $host }:{ $port } sertifikası değişti
+# Review: PO
+hv-conn-tls-pin-changed-body = Bu bağlantı tek bir sertifikaya sabitlendi; sunucu şimdi farklı bir sertifika sunuyor. { -brand-hacivat } oturum açmadan önce durdu.
+# Review: PO
+hv-conn-tls-pin-changed-old = Sabitlenen
+# Review: PO
+hv-conn-tls-pin-changed-new = Şimdiki
+# Review: PO
+hv-conn-tls-pin-changed-ask = Yenilenmiş bir sertifika da böyle görünür. Sabitlemeyi değiştirmeden önce sunucuyu yöneten kişiye sorun.
+# Review: PO
+hv-conn-tls-pin-changed-note = Sabitlemeyi değiştirmek, { $host }:{ $port } için yalnızca yeni sertifikaya güvenir ve eski sabitlemeyi kaldırır. Sabitleme geçerlilik süresini uzatmaz.
+# Review: PO
+hv-conn-tls-pin-changed-replace = Sabitlemeyi değiştir
+# Review: PO
+hv-conn-tls-pin-changed-done = { $host } sunucusunun yeni sertifikası sabitlendi
+# Review: PO
+hv-conn-plain-title = { $host } şifreleme sunmuyor
+# Review: PO
+hv-conn-plain-body = { $ip } yalnızca şifresiz bağlantı kabul ediyor ve özel bir ağda değil. Parolanız ve sorgu sonuçlarınız ağda düz metin olarak taşınır.
+# Review: PO
+hv-conn-plain-ssh = SSH tüneli kullan…
+# Review: PO
+hv-conn-plain-connect = Şifrelemeden bağlan
+# Review: PO
+hv-conn-plain-remember = Bu bağlantı için bir daha sorma
+
+## m2b-t23-f1
+
+# Review: PO
+hv-conn-ro-warn-non-transactional-write = Etkileri ROLLBACK ile geri alınamayan fonksiyonlar çalıştırabilir.
+
+## m2b-t24-shots
+
+# Review: PO
+hv-conn-enc-pinned = { $version } · sabitlendi
+# Review: PO
+hv-conn-diag-tls-pinned = TLS { $version } · sabitlendi
+# Review: PO
+hv-conn-diag-tls-nov-pinned = TLS · sabitlendi
+# Review: PO
+hv-conn-fix-ssh = SSH üzerinden bağlan…
+# Review: PO
+hv-conn-secret-vault = kasa · kalıcı

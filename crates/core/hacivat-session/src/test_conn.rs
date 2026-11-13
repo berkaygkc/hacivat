@@ -12,8 +12,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::pipeline::{
-    CLOSE_BUDGET, ConnectDeps, ConnectError, ConnectRequest, Interaction, Progress, Purpose,
-    StepTrace, connect, short_version,
+    ApprovedRoots, CLOSE_BUDGET, ConnectDeps, ConnectError, ConnectRequest, Interaction,
+    ProfileChange, Progress, Purpose, SessionSecrets, StepTrace, connect, short_version,
 };
 use crate::profile::{ProfileDraft, ProfileEndpoint};
 
@@ -41,6 +41,11 @@ pub struct TestReport {
     pub ping_median: Option<Duration>,
     pub warnings: Vec<TestWarning>,
     pub error: Option<ConnectError>,
+    // ## m2b-t19-tls
+    /// What the test's answers changed (a pin, a CA file, the plaintext consent), on success
+    /// and on failure: the connection dialog applies them to its draft, never to the saved
+    /// profile (T14 review M3).
+    pub profile_changes: Vec<ProfileChange>,
 }
 
 /// How many pings the median is taken over (HV-CONN-07).
@@ -77,17 +82,47 @@ pub async fn test_connection_continuing(
 ) -> TestReport {
     let started = tokio::time::Instant::now();
     let ProfileDraft {
-        profile, password, ..
+        profile,
+        password,
+        ssh_secrets,
+        tls_key_passphrase,
+        ..
     } = draft;
     let auth = profile.auth;
     let profile_user = profile.user.clone();
+    // ## m2b-t19-tls: a Test approves no path app-wide (T14 review M3). The CA file a Test's
+    // certificate question imports joins a copy of the roots that ends with the test; the
+    // dialog approves it when the profile that names it is saved.
+    let deps = &ConnectDeps {
+        drivers: deps.drivers.clone(),
+        catalog: deps.catalog,
+        secrets: deps.secrets.clone(),
+        files: deps.files.clone(),
+        transport_wrap: deps.transport_wrap.clone(),
+        extra_steps: deps.extra_steps.clone(),
+        approved_roots: ApprovedRoots::new(deps.approved_roots.list()),
+        timeout_override: deps.timeout_override,
+        tunnels: deps.tunnels.clone(),
+        known_hosts: deps.known_hosts.clone(),
+    };
     let network = !matches!(profile.endpoint, ProfileEndpoint::File { .. });
     let req = ConnectRequest {
+        read_only: profile.read_only,
         profile: Arc::new(profile),
         draft_password: password,
         purpose: Purpose::Test,
         department: Department::Unknown,
         prior_rejections,
+        // ## m2b-t01-interfaces: the dialog's typed SSH secrets, for Test (Q23).
+        draft_ssh: ssh_secrets,
+        // ## m2b-t14-pipeline: the dialog's TLS key passphrase, used (never stored) like the
+        // draft password. A Test never shares an SSH tunnel: the pipeline acquires with
+        // `share = false` for `Purpose::Test` (CONN-07), and the tunnel closes with the test.
+        overlay_secrets: tls_key_passphrase.map(|passphrase| SessionSecrets {
+            tls_key_passphrase: Some(passphrase),
+            ..SessionSecrets::default()
+        }),
+        plaintext_consent: false,
     };
     let mut live = match connect(deps, req, ix, cancel.clone(), progress).await {
         Ok(live) => live,
@@ -103,6 +138,7 @@ pub async fn test_connection_continuing(
                 user: e.args.user.clone().or(profile_user),
                 ping_median: None,
                 warnings: Vec::new(),
+                profile_changes: e.profile_changes.clone(),
                 error: Some(e),
             };
         }
@@ -153,6 +189,7 @@ pub async fn test_connection_continuing(
         ping_median,
         warnings,
         error: None,
+        profile_changes: live.profile_changes.clone(),
     };
     let _ = tokio::time::timeout(CLOSE_BUDGET, live.close()).await;
     report

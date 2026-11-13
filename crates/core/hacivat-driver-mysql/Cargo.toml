@@ -12,8 +12,6 @@ hacivat-driver.workspace = true
 mysql_async.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
-# The OS trust roots, fed to mysql_async as DER (P10).
-rustls-native-certs.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "io-util", "time"] }
 futures.workspace = true
 secrecy.workspace = true
@@ -21,6 +19,9 @@ secrecy.workspace = true
 [dev-dependencies]
 hacivat-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# M2b (Task 1, Q2): Task 8's in-process greeting server.
+tokio-rustls.workspace = true
+rcgen.workspace = true
 
 [lints]
 workspace = true

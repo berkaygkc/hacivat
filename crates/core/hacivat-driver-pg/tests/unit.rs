@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hacivat_driver::{
-    Driver, DriverConnect, DriverEvent, Endpoint, EngineCatalog, RawErrorKind, ServerInfo, Support,
-    support_status,
+    Driver, DriverConnect, DriverEvent, Endpoint, EngineCatalog, InsecureAuth, RawErrorKind,
+    ServerInfo, Support, support_status,
 };
 use hacivat_driver_pg::{PgDriver, SslMode, config_for, server_version, ssl_mode};
 use hacivat_net::{
@@ -42,6 +42,7 @@ fn base_req(factory: StreamFactory) -> DriverConnect {
         options: vec![],
         connect_timeout: Duration::from_secs(5),
         events: Arc::new(|_| {}),
+        insecure_auth: Default::default(),
     }
 }
 
@@ -59,7 +60,9 @@ fn tls(mode: TlsMode, class: AddressClass) -> Option<TlsParams> {
             ..TlsSettings::default()
         },
         "127.0.0.1",
+        5432,
         class,
+        None,
     )
     .unwrap()
 }
@@ -128,7 +131,7 @@ fn sslmode_and_startup_options() {
     assert_eq!(ssl_mode(TlsMode::Auto, false), SslMode::Require);
     assert_eq!(ssl_mode(TlsMode::VerifyCa, true), SslMode::Require);
     assert_eq!(ssl_mode(TlsMode::Disable, true), SslMode::Disable);
-    let c = config_for(&req_ro("hv"));
+    let c = config_for(&req_ro("hv")).unwrap();
     assert_eq!(c.get_application_name(), Some("hv"));
     assert_eq!(c.get_options(), Some("-c default_transaction_read_only=on"));
 }
@@ -144,7 +147,7 @@ fn every_verifying_mode_requires_tls() {
 
 #[test]
 fn config_carries_identity_and_redacts_the_password() {
-    let c = config_for(&base_req(noop_factory()));
+    let c = config_for(&base_req(noop_factory())).unwrap();
     assert_eq!(c.get_user(), Some("hv_test"));
     assert_eq!(c.get_dbname(), Some("hv_test"));
     assert_eq!(c.get_password(), Some(&b"s3cret"[..]));
@@ -167,7 +170,7 @@ fn extras_join_the_options_and_read_only_comes_last() {
         ("connect_timeout".into(), "1".into()),
         ("application_name".into(), "other".into()),
     ];
-    let c = config_for(&r);
+    let c = config_for(&r).unwrap();
     assert_eq!(
         c.get_options(),
         Some(
@@ -183,15 +186,31 @@ fn a_dangling_backslash_cannot_swallow_the_read_only_option() {
     let mut r = req_ro("hv");
     r.options = vec![("options".into(), "-c search_path=app\\".into())];
     assert_eq!(
-        config_for(&r).get_options(),
+        config_for(&r).unwrap().get_options(),
         Some("-c search_path=app -c default_transaction_read_only=on")
     );
     let mut r = req_ro("hv");
     r.options = vec![("options".into(), "-c search_path=a\\\\".into())];
     assert_eq!(
-        config_for(&r).get_options(),
+        config_for(&r).unwrap().get_options(),
         Some("-c search_path=a\\\\ -c default_transaction_read_only=on")
     );
+}
+
+// ## m2b-t18-guarded-exec
+#[test]
+fn a_read_only_config_refuses_a_role_switch() {
+    // Task 18 fix round 2 (I-3b): the role probe would judge one identity and the guard's reset
+    // return to another.
+    let mut r = req_ro("hv");
+    r.options = vec![("options".into(), "-c session_authorization=hv_ro".into())];
+    assert_eq!(
+        config_for(&r).unwrap_err().kind,
+        hacivat_driver::RawErrorKind::Unsupported
+    );
+    let mut r = base_req(noop_factory());
+    r.options = vec![("options".into(), "-c role=hv_ro".into())];
+    assert_eq!(config_for(&r).unwrap().get_options(), Some("-c role=hv_ro"));
 }
 
 #[test]
@@ -199,7 +218,7 @@ fn generated_values_escape_spaces_and_backslashes() {
     let mut r = base_req(noop_factory());
     r.options = vec![("extra_float_digits".into(), "1 \\x".into())];
     assert_eq!(
-        config_for(&r).get_options(),
+        config_for(&r).unwrap().get_options(),
         Some("-c extra_float_digits=1\\ \\\\x")
     );
 }
@@ -468,22 +487,33 @@ async fn transport_errors_keep_their_io_kind() {
 
 #[tokio::test]
 async fn a_password_request_without_a_password_is_password_required() {
-    let (factory, mut server) = piped();
-    let mut r = base_req(factory);
-    r.password = None;
-    let srv = tokio::spawn(async move {
-        read_untyped(&mut server).await;
-        // AuthenticationCleartextPassword: 'R', length 8, code 3.
-        server
-            .write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 3])
-            .await
-            .unwrap();
-        server
-    });
-    let e = PgDriver::new().connect(r).await.err().unwrap();
-    assert_eq!(e.kind, RawErrorKind::PasswordRequired);
-    assert!(e.server.is_none());
-    drop(srv.await.unwrap());
+    // M2b (Task 10): where the insecure-auth guard allows the method (B8); otherwise the
+    // refusal comes first, so nobody is asked for a password that could not be sent.
+    for (policy, want) in [
+        (InsecureAuth::Allow, RawErrorKind::PasswordRequired),
+        (
+            InsecureAuth::RefuseUnlessVerified,
+            RawErrorKind::InsecureAuthRefused,
+        ),
+    ] {
+        let (factory, mut server) = piped();
+        let mut r = base_req(factory);
+        r.password = None;
+        r.insecure_auth = policy;
+        let srv = tokio::spawn(async move {
+            read_untyped(&mut server).await;
+            // AuthenticationCleartextPassword: 'R', length 8, code 3.
+            server
+                .write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 3])
+                .await
+                .unwrap();
+            server
+        });
+        let e = PgDriver::new().connect(r).await.err().unwrap();
+        assert_eq!(e.kind, want, "{policy:?}");
+        assert!(e.server.is_none());
+        drop(srv.await.unwrap());
+    }
 }
 
 #[tokio::test]

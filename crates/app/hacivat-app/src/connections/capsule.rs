@@ -5,23 +5,38 @@
 //! "No connection" next to a connected capsule. The helpers here (environment marks and words,
 //! the engine label, the encryption fact) are shared by the explorer, the sheet and the status
 //! bar.
+//!
+//! M2b (Task 22, NOTES M2a §7 and M2b surfaces 6–7):
+//! - **Reconnecting** shows the attempt and, between attempts, a countdown to the next one
+//!   (the GPUI executor clock, `live::reconnect_seconds`).
+//! - **Access** says how read-only is held: `hv-conn-access-ro-enforced` when the server role
+//!   enforces it, `hv-conn-access-ro-guarded` otherwise (B21). The segment opens the read-only
+//!   explanation (`access_popover`), as does `connection.explain_access`.
+//! - **SSH path**: `hv-conn-path-ssh` with the bastion (the last hop) and the latency.
+//! - **Idle**: after an idle disconnect the capsule keeps the profile and says so; its body
+//!   connects again (B18, NOTES M2b open question 5).
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_driver::Support;
 use hacivat_l10n::{Count, ExactDecimal, MsgRef, NoArgs, Text, ids};
 use hacivat_net::{AddressClass, TlsVerified};
 use hacivat_proto::{AccessLabel, DbmsKind, EnvTag, ProfileId};
-use hacivat_session::profile::{Profile, ProfileEndpoint};
-use hacivat_session::{LiveInfo, LiveState};
-use hacivat_ui::capsule::{CapsuleModel, CapsuleSegment, EnvKind};
+use hacivat_session::profile::{Profile, ProfileEndpoint, TransportSpec};
+use hacivat_session::{LiveInfo, LiveState, PathKind};
+use hacivat_ui::actions::{ActionDef, ActionRegistry};
+use hacivat_ui::capsule::{CapsuleModel, CapsuleSegment, EnvKind, ExpandedSegment};
 use hacivat_ui::explain::ExplainPopover;
 use hacivat_ui::icon::IconName;
-use hacivat_ui_core::gpui_surface::{App, Pixels, Point, SharedString, Window, point, px};
+use hacivat_ui_core::gpui_surface::{
+    App, Bounds, Entity, Pixels, Point, SharedString, Window, point, px, size,
+};
 
 use crate::connections::error_view::open_error_dialog;
-use crate::connections::live::{clock_seconds, note_started};
+use crate::connections::live::{clock_seconds, note_started, reconnect_seconds};
 use crate::connections::model::ConnectionsModel;
+use crate::connections::{access_popover, session_toasts};
 use crate::l10n_global::tr;
 use crate::shell::Workspace;
 
@@ -120,6 +135,13 @@ pub fn encryption_label(cx: &App, p: &Profile, info: &LiveInfo) -> SharedString 
             ids::hv::CONN_ENC_VERIFIED,
             ids::hv::HvConnEncVerified { version },
         ),
+        // ## m2b-t24-shots (fix round 1, I3): a pinned certificate says so (M2a NOTES
+        // `enc-pinned`), no longer the interim "verified".
+        TlsVerified::Pinned => tr(
+            cx,
+            ids::hv::CONN_ENC_PINNED,
+            ids::hv::HvConnEncPinned { version },
+        ),
         // ## m2a-finalfix (I3): the chain was checked, the host name was not.
         TlsVerified::CaOnly => tr(
             cx,
@@ -131,6 +153,24 @@ pub fn encryption_label(cx: &App, p: &Profile, info: &LiveInfo) -> SharedString 
             ids::hv::CONN_ENC_UNVERIFIED,
             ids::hv::HvConnEncUnverified { version },
         ),
+    }
+}
+
+// ## m2b-t24-shots (follow-up)
+/// Which [`encryption_label`] a live connection reads, as an ID suffix (`sheet-enc-pinned`,
+/// `status-enc-pinned`): `file`, `none`, `verified`, `pinned`, `ca-only` or `unverified`.
+pub fn encryption_key(p: &Profile, info: &LiveInfo) -> &'static str {
+    if p.engine == DbmsKind::Sqlite {
+        return "file";
+    }
+    if !info.tls.encrypted {
+        return "none";
+    }
+    match info.tls.verified {
+        TlsVerified::Full => "verified",
+        TlsVerified::Pinned => "pinned",
+        TlsVerified::CaOnly => "ca-only",
+        TlsVerified::No => "unverified",
     }
 }
 
@@ -147,6 +187,65 @@ pub fn latency_label(cx: &App, info: &LiveInfo) -> SharedString {
 /// Whether the live connection is read-only (guarded or enforced, R10).
 pub fn is_read_only(info: &LiveInfo) -> bool {
     info.access != AccessLabel::ReadWrite
+}
+
+// ## m2b-t22-live
+
+/// How a live connection's access reads in the capsule, the status bar and the popover (B21):
+/// read-write, read-only enforced by the server's role, or only guarded by Hacivat.
+pub fn access_label(cx: &App, access: AccessLabel) -> SharedString {
+    let id = match access {
+        AccessLabel::ReadWrite => ids::hv::CAPSULE_ACCESS_READ_WRITE,
+        AccessLabel::ReadOnlyEnforced => ids::hv::CONN_ACCESS_RO_ENFORCED,
+        AccessLabel::ReadOnlyGuarded => ids::hv::CONN_ACCESS_RO_GUARDED,
+    };
+    tr(cx, id, NoArgs)
+}
+
+/// The SSH host a profile's database is reached from: the last hop (the bastion).
+fn profile_bastion(p: &Profile) -> Option<String> {
+    match &p.transport {
+        TransportSpec::SshTunnel(ssh) => ssh.hops.last().map(|h| h.host.clone()),
+        _ => None,
+    }
+}
+
+/// The path of `p` (the capsule, the status bar and the sheet): `SSH via <bastion>` through a
+/// tunnel (the live connection's bastion, else the profile's last hop), else Direct; and
+/// whether it is direct.
+pub fn path_label(cx: &App, p: &Profile, info: Option<&LiveInfo>) -> (SharedString, bool) {
+    let bastion = match info {
+        Some(info) if info.path == PathKind::Ssh => Some(
+            info.via
+                .clone()
+                .or_else(|| profile_bastion(p))
+                .unwrap_or_default(),
+        ),
+        Some(_) => None,
+        None => profile_bastion(p),
+    };
+    match bastion {
+        Some(host) => (
+            tr(
+                cx,
+                ids::hv::CONN_PATH_SSH,
+                ids::hv::HvConnPathSsh { host: Text(host) },
+            ),
+            false,
+        ),
+        None => (tr(cx, ids::hv::CAPSULE_PATH_DIRECT, NoArgs), true),
+    }
+}
+
+/// The reconnect label (`Reconnecting · attempt n`).
+pub fn reconnecting_label(cx: &App, attempt: u32) -> SharedString {
+    tr(
+        cx,
+        ids::hv::CAPSULE_RECONNECTING,
+        ids::hv::HvCapsuleReconnecting {
+            n: Count(u64::from(attempt)),
+        },
+    )
 }
 
 fn step_label(cx: &App, step: hacivat_session::pipeline::TrailStep) -> SharedString {
@@ -175,6 +274,14 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
     let env_label = capsule_env_label(cx, p.environment);
     let name: SharedString = p.name.clone().into();
     match m.live(p.id) {
+        // ## m2b-t22-live: an idle disconnect keeps the profile in the capsule.
+        LiveState::Disconnected if session_toasts::is_idle(cx, p.id) => Some(CapsuleModel::Idle {
+            env,
+            env_label,
+            name,
+            engine: engine_label(&p, None),
+            label: tr(cx, ids::hv::CONN_IDLE_CAP, NoArgs),
+        }),
         LiveState::Disconnected => None,
         LiveState::Connecting(progress) => Some(CapsuleModel::Connecting {
             env,
@@ -190,19 +297,17 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
         }),
         LiveState::Connected(info) => {
             let read_only = is_read_only(&info);
+            // ## m2b-t22-live: the honest access label (B21) and the SSH path.
+            let (path, direct) = path_label(cx, &p, Some(&info));
             Some(CapsuleModel::Connection {
                 env,
                 env_label,
                 name,
                 engine: engine_label(&p, Some(&info)),
-                access: if read_only {
-                    tr(cx, ids::hv::CAPSULE_ACCESS_READ_ONLY, NoArgs)
-                } else {
-                    tr(cx, ids::hv::CAPSULE_ACCESS_READ_WRITE, NoArgs)
-                },
+                access: access_label(cx, session_toasts::effective_access(cx, p.id, info.access)),
                 read_only,
-                path: tr(cx, ids::hv::CAPSULE_PATH_DIRECT, NoArgs),
-                direct: true,
+                path,
+                direct,
                 latency: Some(latency_label(cx, &info)),
                 unencrypted: is_unencrypted(&p, &info)
                     .then(|| tr(cx, ids::hv::CONN_ENC_UNENCRYPTED, NoArgs)),
@@ -216,6 +321,26 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
             label: tr(cx, ids::hv::CAPSULE_FAILED, NoArgs),
             name,
             retry: tr(cx, ids::hv::CAPSULE_RETRY, NoArgs),
+        }),
+        // ## m2b-t22-live: the attempt, and between attempts the countdown to the next.
+        LiveState::Reconnecting { attempt, next_in } => Some(CapsuleModel::Reconnecting {
+            env,
+            env_label,
+            name,
+            engine: engine_label(&p, None),
+            label: reconnecting_label(cx, attempt),
+            next: next_in
+                .map(|next| reconnect_seconds(cx, p.id, attempt, next))
+                .filter(|seconds| *seconds > 0)
+                .map(|seconds| {
+                    tr(
+                        cx,
+                        ids::hv::CAPSULE_NEXT,
+                        ids::hv::HvCapsuleNext {
+                            seconds: Count(seconds),
+                        },
+                    )
+                }),
         }),
     }
 }
@@ -232,10 +357,13 @@ pub fn on_segment(
         CapsuleSegment::Body => open_failure(window, cx),
         CapsuleSegment::Retry => retry(cx),
         CapsuleSegment::Unencrypted => explain_unencrypted(anchor, window, cx),
+        // ## m2b-t22-live: the read-only explanation under the segment.
+        CapsuleSegment::Access => explain_access(segment_bounds(anchor, cx), window, cx),
     }
 }
 
-/// Opens the error dialog of the current profile's failed connect; a lost one reconnects.
+/// Opens the error dialog of the current profile's failed connect; a lost one reconnects, and
+/// so does one disconnected while idle (B18: it reconnects when used).
 fn open_failure(window: &mut Window, cx: &mut App) {
     let Some(p) = current_profile(cx) else {
         return;
@@ -244,6 +372,11 @@ fn open_failure(window: &mut Window, cx: &mut App) {
         LiveState::Failed(error) => open_error_dialog(p.id, error, window, cx),
         // A lost connection has no connect error to show: the body retries, like Retry.
         LiveState::Lost { .. } => retry(cx),
+        // ## m2b-t22-live
+        LiveState::Disconnected if session_toasts::is_idle(cx, p.id) => {
+            note_started(cx, p.id);
+            ConnectionsModel::connect(cx, p.id, None);
+        }
         _ => {}
     }
 }
@@ -302,7 +435,7 @@ pub fn explain_unencrypted(anchor: Point<Pixels>, window: &mut Window, cx: &mut 
         ),
         tr(cx, ids::hv::CONN_UNENC_FIX, NoArgs),
     ];
-    let view = ExplainPopover::view(
+    let popover = ExplainPopover::new(
         tr(cx, ids::hv::CONN_UNENC_TITLE, NoArgs),
         IconName::LockOpen,
         body,
@@ -311,10 +444,42 @@ pub fn explain_unencrypted(anchor: Point<Pixels>, window: &mut Window, cx: &mut 
     let Some(ws) = window.root::<Workspace>().flatten() else {
         return;
     };
+    let view = popover.clone().into();
     ws.update(cx, |ws, cx| {
         ws.open_anchored(POPOVER_LAYER, anchor, view, window, cx);
     });
+    // ## m2b-t24-shots
+    note_expanded(CapsuleSegment::Unencrypted, &popover, cx);
 }
+
+// ## m2b-t24-shots
+/// Records that `segment`'s explanation (`popover`) is open, so its trigger declares itself
+/// expanded (`aria-expanded`; the capsule segment and the sheet's Access value), and clears the
+/// record when that popover is released. A newer popover keeps its own record.
+pub(crate) fn note_expanded<T: 'static>(
+    segment: CapsuleSegment,
+    popover: &Entity<T>,
+    cx: &mut App,
+) {
+    let view = popover.entity_id();
+    cx.set_global(ExpandedSegment(Some(segment)));
+    cx.default_global::<ExpandedView>().0 = Some(view);
+    cx.observe_release(popover, move |_, cx| {
+        if cx.default_global::<ExpandedView>().0 == Some(view) {
+            cx.default_global::<ExpandedView>().0 = None;
+            cx.set_global(ExpandedSegment(None));
+            cx.refresh_windows();
+        }
+    })
+    .detach();
+    cx.refresh_windows();
+}
+
+/// The popover [`ExpandedSegment`] was recorded for.
+#[derive(Default)]
+struct ExpandedView(Option<hacivat_ui_core::gpui_surface::EntityId>);
+
+impl hacivat_ui_core::gpui_surface::Global for ExpandedView {}
 
 /// The keyboard path to the explanation (`connection.explain_unencrypted`): anchored under
 /// the title bar's middle, where the capsule sits. The segment's real bounds are known only
@@ -325,6 +490,55 @@ pub fn explain_unencrypted_from_keyboard(window: &mut Window, cx: &mut App) {
     let t = hacivat_ui_core::theme::Theme::get(cx).tokens;
     let anchor = point(size.width / 2.0 - px(150.0), px(t.spacing.titlebar_height));
     explain_unencrypted(anchor, window, cx);
+}
+
+// ## m2b-t22-live
+
+/// The bounds of a capsule segment whose bottom-left is `anchor` (the segment hook reports
+/// only that corner): the capsule's height above it.
+fn segment_bounds(anchor: Point<Pixels>, cx: &App) -> Bounds<Pixels> {
+    let t = hacivat_ui_core::theme::Theme::get(cx).tokens;
+    let h = px(t.spacing.control_height);
+    Bounds {
+        origin: point(anchor.x, anchor.y - h),
+        size: size(px(1.0), h),
+    }
+}
+
+/// Whether the capsule's connection is live and read-only (its access can be explained).
+pub fn has_access_explanation(cx: &App) -> bool {
+    current_profile(cx).is_some_and(|p| access_popover::facts_for(cx, p.id).is_some())
+}
+
+/// Opens the read-only explanation of the capsule's connection under `trigger`.
+pub fn explain_access(trigger: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    if let Some(p) = current_profile(cx) {
+        access_popover::open(p.id, trigger, window, cx);
+    }
+}
+
+/// The keyboard path to the explanation (`connection.explain_access`): under the title bar's
+/// middle, where the capsule sits (as `explain_unencrypted_from_keyboard`).
+pub fn explain_access_from_keyboard(window: &mut Window, cx: &mut App) {
+    let viewport = window.viewport_size();
+    let t = hacivat_ui_core::theme::Theme::get(cx).tokens;
+    let trigger = Bounds {
+        origin: point(viewport.width / 2.0 - px(150.0), px(0.0)),
+        size: size(px(1.0), px(t.spacing.titlebar_height - 6.0)),
+    };
+    explain_access(trigger, window, cx);
+}
+
+/// Registers `connection.explain_access` (the palette's "Explain read-only access", NOTES M2b
+/// surface 6), enabled while the capsule shows a live read-only connection.
+pub fn register(cx: &mut App) {
+    let _ = cx.default_global::<ActionRegistry>().register(ActionDef {
+        id: "connection.explain_access",
+        title_id: ids::hv::CMD_CONNECTION_EXPLAIN_ACCESS.id,
+        context: "Workspace",
+        run: Rc::new(explain_access_from_keyboard),
+        enabled: has_access_explanation,
+    });
 }
 
 // ## m2a-t18-explorer: shots fixtures (R28, P19)
@@ -338,12 +552,14 @@ mod fixtures {
     use std::time::Duration;
 
     use hacivat_driver::{SemVerLoose, ServerInfo, Support};
+    use hacivat_net::ssh::{HopSpec, SshAuth, SshSpec};
     use hacivat_net::{AddressClass, TlsSummary, TlsVerified};
     use hacivat_proto::{AccessLabel, DbmsKind, EnvTag, ErrClass, ProfileId};
     use hacivat_secrets::AuthProviderId;
     use hacivat_session::pipeline::{Progress, StepOutcome, StepTrace, TrailStep};
-    use hacivat_session::profile::{Profile, ProfileDraft, ProfileEndpoint};
-    use hacivat_session::{LiveInfo, LiveState, PathKind};
+    use hacivat_session::profile::{Profile, ProfileDraft, ProfileEndpoint, TransportSpec};
+    use hacivat_session::session::LostState;
+    use hacivat_session::{GapReason, LiveInfo, LiveState, PathKind, RoleWarning};
     use hacivat_ui_core::gpui_surface::{App, Window, point, px};
 
     use crate::connections::live::note_started;
@@ -413,6 +629,9 @@ mod fixtures {
             path: PathKind::Direct,
             user: Some("deploy".to_string()),
             auth: AuthProviderId::Password,
+            via: None,
+            hops: 0,
+            access_warnings: Vec::new(),
         }
     }
 
@@ -499,5 +718,347 @@ mod fixtures {
     pub fn unencrypted_popover_fixture(window: &mut Window, cx: &mut App) {
         connected_unencrypted_fixture(window, cx);
         super::explain_unencrypted(point(px(520.0), px(34.0)), window, cx);
+    }
+
+    // ## m2b-t22-live (fix round 1, M1): the T22 states for the shots harness (Task 24
+    // consumes them too).
+
+    /// Saves `profile` and makes it the capsule's current profile in `state`.
+    fn show_profile(cx: &mut App, profile: Profile, state: LiveState) -> ProfileId {
+        let id = profile.id;
+        ConnectionsModel::save(
+            cx,
+            ProfileDraft {
+                is_new: true,
+                ..ProfileDraft::edit(profile)
+            },
+        )
+        .detach();
+        let m = cx.global_mut::<ConnectionsModel>();
+        m.set_live(id, state);
+        m.note_attempt(id);
+        ConnectionsModel::select(cx, Some(id));
+        id
+    }
+
+    /// A profile `name` at 10.0.4.12, through `bastion` when given.
+    fn profile(name: &str, env: EnvTag, read_only: bool, bastion: Option<&str>) -> Profile {
+        let mut p = Profile {
+            name: name.to_string(),
+            environment: Some(env),
+            read_only,
+            endpoint: ProfileEndpoint::Server {
+                host: "10.0.4.12".to_string(),
+                port: None,
+            },
+            database: Some("orders".to_string()),
+            user: Some("deploy".to_string()),
+            ..Profile::default()
+        };
+        if let Some(host) = bastion {
+            p.transport = TransportSpec::SshTunnel(SshSpec {
+                hops: vec![HopSpec {
+                    host: host.to_string(),
+                    port: 22,
+                    user: "deploy".to_string(),
+                    auth: SshAuth::Agent,
+                    identities_only: false,
+                    identity_files: Vec::new(),
+                }],
+                host_keys: Default::default(),
+                keepalive_s: None,
+            });
+        }
+        p
+    }
+
+    /// A live PostgreSQL connection of `version` with `access` and the probe's `warnings`,
+    /// through `bastion` when given, encrypted or not.
+    fn live(
+        version: &str,
+        access: AccessLabel,
+        warnings: Vec<RoleWarning>,
+        bastion: Option<&str>,
+        encrypted: bool,
+    ) -> LiveState {
+        let mut info = sample_live_info(
+            encrypted,
+            access != AccessLabel::ReadWrite,
+            Support::Supported,
+        );
+        info.server.version = SemVerLoose::parse(version);
+        info.server.raw_version = version.to_string();
+        info.access = access;
+        info.access_warnings = warnings;
+        info.user = Some("app_ro".to_string());
+        if let Some(host) = bastion {
+            info.path = PathKind::Ssh;
+            info.via = Some(host.to_string());
+            info.hops = 1;
+        }
+        LiveState::Connected(Arc::new(info))
+    }
+
+    /// Production, reconnecting: attempt 3, the next in 4 s.
+    pub fn reconnecting_fixture(_window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile("orders-prod", EnvTag::Production, false, None),
+            LiveState::Reconnecting {
+                attempt: 3,
+                next_in: Some(Duration::from_secs(4)),
+            },
+        );
+    }
+
+    // ## m2b-t24-shots
+    /// A dev session reconnected with nothing lost: the toast's body line only.
+    pub fn lost_clean_fixture(_window: &mut Window, cx: &mut App) {
+        let id = show_profile(
+            cx,
+            profile("orders-dev", EnvTag::Dev, false, None),
+            live("16.4", AccessLabel::ReadWrite, Vec::new(), None, true),
+        );
+        crate::connections::session_toasts::lost(
+            id,
+            LostState {
+                open_tx: false,
+                temp_objects: false,
+                session_vars: false,
+                prepared: 0,
+                locks: false,
+            },
+            cx,
+        );
+    }
+
+    /// Staging, reconnecting between attempts: attempt 2, the next in 12 s (no filled block).
+    pub fn reconnecting_staging_fixture(_window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile("orders-staging", EnvTag::Staging, false, None),
+            LiveState::Reconnecting {
+                attempt: 2,
+                next_in: Some(Duration::from_secs(12)),
+            },
+        );
+    }
+
+    /// Disconnected after being idle, with its toast.
+    pub fn idle_fixture(_window: &mut Window, cx: &mut App) {
+        let id = show_profile(
+            cx,
+            profile("orders-dev", EnvTag::Dev, false, None),
+            LiveState::Disconnected,
+        );
+        crate::connections::session_toasts::idle(id, cx);
+    }
+
+    /// A production session lost inside a transaction (temp tables and variables too).
+    pub fn lost_tx_fixture(_window: &mut Window, cx: &mut App) {
+        let id = show_profile(
+            cx,
+            profile("orders-prod", EnvTag::Production, false, None),
+            LiveState::Lost {
+                class: ErrClass::NetworkReset,
+            },
+        );
+        crate::connections::session_toasts::lost(
+            id,
+            LostState {
+                open_tx: true,
+                temp_objects: true,
+                session_vars: true,
+                prepared: 0,
+                locks: false,
+            },
+            cx,
+        );
+    }
+
+    /// A production session reconnected: temp tables, two prepared statements and locks lost.
+    pub fn lost_reconnected_fixture(_window: &mut Window, cx: &mut App) {
+        let id = show_profile(
+            cx,
+            profile("orders-prod", EnvTag::Production, false, None),
+            live("16.4", AccessLabel::ReadWrite, Vec::new(), None, true),
+        );
+        crate::connections::session_toasts::lost(
+            id,
+            LostState {
+                open_tx: false,
+                temp_objects: true,
+                session_vars: false,
+                prepared: 2,
+                locks: true,
+            },
+            cx,
+        );
+    }
+
+    /// A gap that changed data on a production read-only connection (the label downgrades).
+    pub fn gap_fixture(_window: &mut Window, cx: &mut App) {
+        let id = show_profile(
+            cx,
+            profile("orders-prod", EnvTag::Production, true, None),
+            live(
+                "16.4",
+                AccessLabel::ReadOnlyEnforced,
+                Vec::new(),
+                None,
+                true,
+            ),
+        );
+        crate::connections::session_toasts::gap(id, GapReason::CanaryAssigned, cx);
+    }
+
+    /// Production, enforced (TEMP found) through SSH, with its explanation open.
+    pub fn ro_enforced_fixture(window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile(
+                "orders-prod",
+                EnvTag::Production,
+                true,
+                Some("bastion.acme.io"),
+            ),
+            live(
+                "16.4",
+                AccessLabel::ReadOnlyEnforced,
+                vec![RoleWarning::TempPrivilege],
+                Some("bastion.acme.io"),
+                true,
+            ),
+        );
+        super::explain_access_from_keyboard(window, cx);
+    }
+
+    /// Test, guarded with every finding, with its explanation open (it scrolls at 960x600).
+    /// PostgreSQL 17: the longest remediation (the four-argument `pg_logical_emit_message`).
+    pub fn ro_guarded_fixture(window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile("orders-qa", EnvTag::Test, true, None),
+            live(
+                "17.2",
+                AccessLabel::ReadOnlyGuarded,
+                vec![
+                    RoleWarning::Superuser,
+                    RoleWarning::BypassRls,
+                    RoleWarning::Replication,
+                    RoleWarning::CreateRole,
+                    RoleWarning::ServerFileRoles,
+                    RoleWarning::ExecuteServerProgram,
+                    RoleWarning::SignalBackend,
+                    RoleWarning::WritePrivileges,
+                    RoleWarning::TempPrivilege,
+                    RoleWarning::EgressExtension("postgres_fdw".to_string()),
+                    RoleWarning::RoleGrantNotExpanded,
+                    RoleWarning::Unparsed,
+                    RoleWarning::NonTransactionalWrite,
+                ],
+                None,
+                true,
+            ),
+        );
+        super::explain_access_from_keyboard(window, cx);
+    }
+
+    /// Staging on PostgreSQL 13, guarded: the schema-grant remediation. The findings of the
+    /// mock's realistic case (`PUBLIC` holds TEMP and `EXECUTE` on `pg_logical_emit_message`).
+    pub fn ro_pg13_fixture(window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile("orders-staging", EnvTag::Staging, true, None),
+            live(
+                "13.12",
+                AccessLabel::ReadOnlyGuarded,
+                vec![
+                    RoleWarning::Superuser,
+                    RoleWarning::WritePrivileges,
+                    RoleWarning::TempPrivilege,
+                    RoleWarning::NonTransactionalWrite,
+                ],
+                None,
+                true,
+            ),
+        );
+        super::explain_access_from_keyboard(window, cx);
+    }
+
+    /// The widest production capsule: enforced, through SSH, unencrypted; and a direct row.
+    pub fn ssh_ro_fixture(_window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile("orders-replica", EnvTag::Production, true, None),
+            live("16.4", AccessLabel::ReadOnlyGuarded, Vec::new(), None, true),
+        );
+        show_profile(
+            cx,
+            profile(
+                "orders-prod",
+                EnvTag::Production,
+                true,
+                Some("bastion.acme.io"),
+            ),
+            live(
+                "16.4",
+                AccessLabel::ReadOnlyEnforced,
+                Vec::new(),
+                Some("bastion.acme.io"),
+                false,
+            ),
+        );
+    }
+
+    // ## m2b-t24-shots (follow-up)
+    /// A live test connection whose certificate is pinned (the review's `reports-qa`): the
+    /// status bar and the sheet's Encryption row read "TLS 1.3 · pinned"; the sheet shows its
+    /// last rows.
+    pub fn tls_pinned_fixture(_window: &mut Window, cx: &mut App) {
+        let mut info = sample_live_info(true, false, Support::Supported);
+        info.tls.verified = TlsVerified::Pinned;
+        show(
+            cx,
+            "reports-qa",
+            EnvTag::Test,
+            false,
+            LiveState::Connected(Arc::new(info)),
+        );
+        crate::connections::sheet::shots::scroll_rows_to_end(cx);
+    }
+
+    /// A live dev connection on a machine whose Forever passwords live in Hacivat's vault (the
+    /// harness boots the vault backend, its keyring probe already run): the sheet's Password
+    /// row reads "vault · forever".
+    pub fn vault_secret_fixture(_window: &mut Window, cx: &mut App) {
+        show(
+            cx,
+            "orders-dev",
+            EnvTag::Dev,
+            false,
+            LiveState::Connected(Arc::new(sample_live_info(true, false, Support::Supported))),
+        );
+        crate::connections::sheet::shots::scroll_rows_to_end(cx);
+    }
+
+    /// A read-write staging connection through SSH, unencrypted.
+    pub fn ssh_rw_fixture(_window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile(
+                "orders-staging",
+                EnvTag::Staging,
+                false,
+                Some("bastion.acme.io"),
+            ),
+            live(
+                "16.4",
+                AccessLabel::ReadWrite,
+                Vec::new(),
+                Some("bastion.acme.io"),
+                false,
+            ),
+        );
     }
 }

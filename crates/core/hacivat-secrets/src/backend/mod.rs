@@ -1,12 +1,15 @@
 //! Secret backends: the blocking storage interface and its implementations (HV-SEC-05).
 
+// ## m2b-t01-interfaces
+mod fallback;
 mod keyring;
 mod memory;
 mod vault;
 
+pub use fallback::FallbackBackend;
 pub use keyring::KeyringBackend;
 pub use memory::MemoryBackend;
-pub use vault::VaultBackend;
+pub use vault::{FileVault, VaultBackend, VaultParams};
 
 use secrecy::SecretString;
 
@@ -23,6 +26,24 @@ pub enum SecretError {
     TooLarge { limit: usize },
     /// Any other backend failure, as the backend describes it.
     Backend(String),
+    // ## m2b-t01-interfaces
+    /// The vault exists but is not unlocked.
+    VaultLocked,
+    /// The vault file cannot be read as a vault (Task 6).
+    VaultCorrupt,
+    /// The master password does not open the vault.
+    WrongMasterPassword,
+    /// The vault was written by a newer Hacivat, or its file cannot be written.
+    VaultReadOnly,
+}
+
+// ## m2b-t01-interfaces
+/// Which backend holds `Forever` secrets (Q23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BackendChoice {
+    Keyring,
+    Vault,
+    Memory,
 }
 
 /// A secret storage backend (HV-SEC-05). Every method blocks; callers run them on the core
@@ -43,5 +64,15 @@ pub trait SecretBackend: Send + Sync + 'static {
     /// probe); `SecretStore::keyring_available` calls it once and caches the answer.
     fn probe_available(&self) -> bool {
         true
+    }
+    // ## m2b-t01-interfaces
+    /// The vault behind this backend, when it is one (or chose one).
+    fn as_vault(&self) -> Option<&dyn VaultBackend> {
+        None
+    }
+    /// Which backend this is, once known: the keyring once probed, the memory backend always,
+    /// the fallback backend its probed choice (Q23). `None` until then.
+    fn choice(&self) -> Option<BackendChoice> {
+        None
     }
 }

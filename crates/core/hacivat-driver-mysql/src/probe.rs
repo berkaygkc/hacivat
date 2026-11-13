@@ -10,7 +10,6 @@ use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Row, Value};
 
 use crate::connect::raw_error;
-use crate::tls::verified;
 
 /// The server variables detection and the probe need.
 const VARS: &str = "SELECT @@version, @@version_comment, @@read_only, @@wait_timeout, \
@@ -186,11 +185,13 @@ async fn session_status(conn: &mut Conn, sql: &str) -> Result<Option<String>, ()
         .filter(|v| !v.is_empty()))
 }
 
-/// The summary for a connection whose TLS ran in `mode` (`Disable` when plaintext).
-/// `encrypted` is the server's answer when there is one (`Ssl_version` is empty on a plaintext
-/// session), else what was negotiated.
+/// The summary for a connection whose TLS ran in `mode` (`Disable` when plaintext) and whose
+/// handshake recorded `verified` (M2b: the outcome, never a guess from the mode, so a pinned
+/// Require shows `Pinned` and VerifyCa `CaOnly`). `encrypted` is the server's answer when there
+/// is one (`Ssl_version` is empty on a plaintext session), else what was negotiated.
 pub(crate) fn summary(
     mode: TlsMode,
+    verified: TlsVerified,
     answered: Option<bool>,
     version: Option<String>,
     cipher: Option<String>,
@@ -200,8 +201,8 @@ pub(crate) fn summary(
         encrypted,
         version,
         cipher,
-        verified: if encrypted {
-            verified(mode)
+        verified: if encrypted && mode != TlsMode::Disable {
+            verified
         } else {
             TlsVerified::No
         },
@@ -209,12 +210,17 @@ pub(crate) fn summary(
 }
 
 /// The session's TLS from `Ssl_version` and `Ssl_cipher`.
-pub(crate) async fn tls_summary(conn: &mut Conn, mode: TlsMode) -> TlsSummary {
+pub(crate) async fn tls_summary(
+    conn: &mut Conn,
+    mode: TlsMode,
+    verified: TlsVerified,
+) -> TlsSummary {
     let version = session_status(conn, "SHOW SESSION STATUS LIKE 'Ssl_version'").await;
     let cipher = session_status(conn, "SHOW SESSION STATUS LIKE 'Ssl_cipher'").await;
     let answered = version.as_ref().ok().map(Option::is_some);
     summary(
         mode,
+        verified,
         answered,
         version.ok().flatten(),
         cipher.ok().flatten(),

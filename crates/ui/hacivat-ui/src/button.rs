@@ -15,7 +15,7 @@ use hacivat_ui_core::theme::{Theme, TypeStyle, focus_outline};
 
 use crate::accesskey::AccessKey;
 use crate::icon::{Icon, IconName, IconSize};
-use crate::popover::{A11yNode, Declare, Tip, lazy};
+use crate::popover::{A11yDecl, A11yNode, Declare, Tip, lazy};
 use crate::text::{Label, TextSource};
 
 /// A click handler shared between the widgets that take one.
@@ -50,6 +50,8 @@ pub struct Button {
     inert: bool,
     // ## m2a-t17-dialog
     on_raised: bool,
+    // ## m2b-t24-shots
+    expanded: Option<bool>,
 }
 
 impl Button {
@@ -67,6 +69,7 @@ impl Button {
             fixed_width: None,
             inert: false,
             on_raised: false,
+            expanded: None,
         }
     }
 
@@ -135,6 +138,14 @@ impl Button {
     /// (DESIGN.md Raised Ink Rule; the mock's `.dlg` maps text-3 to text-2).
     pub fn on_raised(mut self, on_raised: bool) -> Self {
         self.on_raised = on_raised;
+        self
+    }
+
+    // ## m2b-t24-shots
+    /// The button opens a popup (a menu, a popover): it declares whether that popup is open
+    /// (`aria-expanded`).
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.expanded = Some(expanded);
         self
     }
 }
@@ -206,13 +217,35 @@ fn look(kind: ButtonKind, disabled: bool, hot: bool, theme: &Theme) -> Look {
 }
 
 /// `text` as a label with its access key shown: underlined in the label, or as a `(K)` suffix.
+/// `id`, when given, is every text piece's ID (`#id` in the rendered-text records).
+// ## m2b-t24-shots (follow-up): the `id` parameter.
 pub(crate) fn key_label(
     text: &SharedString,
     key: Option<AccessKey>,
     style: TypeStyle,
     color: Hsla,
+    id: Option<&ElementId>,
 ) -> AnyElement {
-    let plain = |s: SharedString| Label::new(s, TextSource::Fluent, style, color);
+    key_label_from(text, TextSource::Fluent, key, style, color, id)
+}
+
+// ## m2b-t24-shots
+/// [`key_label`] for a text from `source` (data, such as a host alias in a menu).
+pub(crate) fn key_label_from(
+    text: &SharedString,
+    source: TextSource,
+    key: Option<AccessKey>,
+    style: TypeStyle,
+    color: Hsla,
+    id: Option<&ElementId>,
+) -> AnyElement {
+    let plain = |s: SharedString| {
+        let label = Label::new(s, source, style, color);
+        match id {
+            Some(id) => label.id(id.clone()),
+            None => label,
+        }
+    };
     match key {
         Some(AccessKey::InLabel(at)) if at < text.len() && text.is_char_boundary(at) => {
             let key_len = text[at..].chars().next().map_or(0, char::len_utf8);
@@ -310,6 +343,7 @@ impl Button {
             fixed_width,
             inert,
             on_raised,
+            expanded,
         } = self;
 
         // Hover and focus state live with the element across frames.
@@ -327,6 +361,9 @@ impl Button {
         let icon_only = kind == ButtonKind::Icon;
         let selector = format!("button-{id}");
         let node_id = ElementId::from((id.clone(), "node"));
+        // ## m2b-t24-shots (follow-up): the label's ID (`button-label-<id>`), so a test or a
+        // shot can name one button's text.
+        let label_id = ElementId::Name(format!("button-label-{id}").into());
 
         let mut body = div()
             .id(id)
@@ -357,7 +394,13 @@ impl Button {
             body = body.child(Icon::new(name).size(IconSize::Chrome).color(look.ink));
         }
         if !icon_only {
-            body = body.child(key_label(&label, access_key, style, look.ink));
+            body = body.child(key_label(
+                &label,
+                access_key,
+                style,
+                look.ink,
+                Some(&label_id),
+            ));
         }
         if let Some(hint) = key_hint {
             // A primary's hint takes its own ink (on-accent) on every surface: text-3 on its
@@ -381,8 +424,15 @@ impl Button {
                 .disabled(true)
                 .into_any_element();
         }
+        // ## m2b-t24-shots: a popup trigger says whether its popup is open.
+        let mut decl = A11yDecl::new(Role::Button, label.clone());
+        decl.expanded = expanded;
+        // ## m2b-t24-shots (fix round 1, I2): a following scroll container keeps it in view.
+        let body = body
+            .relative()
+            .child(crate::follow::focus_probe(handle.clone()));
         let mut body = focus_outline(body.track_focus(&handle).tab_stop(true), &theme, focused)
-            .declare(Role::Button, label.clone(), None)
+            .declare_full(decl)
             .cursor_pointer()
             .on_hover(hover_listener(hover));
         if let Some(handler) = on_click {

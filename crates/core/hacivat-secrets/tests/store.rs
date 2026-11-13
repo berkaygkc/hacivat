@@ -348,7 +348,7 @@ fn secrets_never_debug_print() {
     let pg = PgPassMatch {
         line: 1,
         user: None,
-        password: sec("s3cret"),
+        password: Some(sec("s3cret")),
     };
     for s in [
         format!("{:?}", m()),

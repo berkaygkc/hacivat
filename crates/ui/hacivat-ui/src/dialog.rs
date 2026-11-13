@@ -75,7 +75,8 @@ impl DialogSize {
 /// its parts, stacked in a column no taller than its host.
 pub fn dialog_frame(theme: &Theme, size: DialogSize) -> Div {
     let t = theme.tokens;
-    popover_surface(theme)
+    // ## m2b-t24-shots (fix round 1, I1): text that runs past the card is recorded as such.
+    crate::text::card_scope(popover_surface(theme))
         .w(px(size.width_px()))
         .max_h_full()
         .p(px(t.spacing.s_3xl))
@@ -95,6 +96,31 @@ pub fn form_dialog(
     strip: Option<AnyElement>,
     footer: AnyElement,
 ) -> Div {
+    form_dialog_with(theme, header, body, strip, footer, None)
+}
+
+// ## m2b-t24-shots (fix round 1, I2)
+/// [`form_dialog`] whose body follows the focus (`follow`, kept by the caller across frames):
+/// a control the focus moves to below or above the body's fold scrolls into view.
+pub fn form_dialog_following(
+    theme: &Theme,
+    header: AnyElement,
+    body: AnyElement,
+    strip: Option<AnyElement>,
+    footer: AnyElement,
+    follow: &crate::follow::FollowFocus,
+) -> Div {
+    form_dialog_with(theme, header, body, strip, footer, Some(follow))
+}
+
+fn form_dialog_with(
+    theme: &Theme,
+    header: AnyElement,
+    body: AnyElement,
+    strip: Option<AnyElement>,
+    footer: AnyElement,
+    follow: Option<&crate::follow::FollowFocus>,
+) -> Div {
     let t = theme.tokens;
     let seam = t.colors.seam.to_hsla();
     let edge = |name: &'static str| {
@@ -109,27 +135,38 @@ pub fn form_dialog(
             .px(px(t.spacing.s_3xl))
             .border_color(seam)
     };
+    // ## m2b-t24-shots (fix round 1, I2): a real scroll handle and the focus-following scope.
+    let mut scroll_body = div();
+    if let Some(follow) = follow {
+        let end = follow.clone();
+        scroll_body = scroll_body
+            .child(follow.scope_start())
+            .on_children_prepainted(move |_, window, cx| end.scope_end(window, cx));
+    }
+    let mut scroll_body = scroll_body
+        .id("form-dialog-body")
+        .debug_selector(|| "form-dialog-body".to_string())
+        .flex()
+        .flex_col()
+        .flex_shrink(1.0)
+        .min_h_0()
+        .overflow_y_scroll();
+    if let Some(follow) = follow {
+        scroll_body = scroll_body.track_scroll(follow.scroll_handle());
+    }
+    let scroll_body = scroll_body
+        .pt(px(t.spacing.xl))
+        .px(px(t.spacing.s_3xl))
+        .pb(px(t.spacing.s_2xl))
+        // ## m2a-t21-shots: the frame checks treat this clip as a scroll viewport.
+        .child(crate::text::scroll_viewport())
+        .child(body);
     dialog_frame(theme, DialogSize::Form)
         .debug_selector(|| "form-dialog".to_string())
         .p(px(0.0))
         .gap(px(0.0))
         .child(edge("form-dialog-header").border_b_1().child(header))
-        .child(
-            div()
-                .id("form-dialog-body")
-                .debug_selector(|| "form-dialog-body".to_string())
-                .flex()
-                .flex_col()
-                .flex_shrink(1.0)
-                .min_h_0()
-                .overflow_y_scroll()
-                .pt(px(t.spacing.xl))
-                .px(px(t.spacing.s_3xl))
-                .pb(px(t.spacing.s_2xl))
-                // ## m2a-t21-shots: the frame checks treat this clip as a scroll viewport.
-                .child(crate::text::scroll_viewport())
-                .child(body),
-        )
+        .child(scroll_body)
         .children(strip)
         .child(edge("form-dialog-footer").border_t_1().child(footer))
 }

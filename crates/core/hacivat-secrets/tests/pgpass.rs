@@ -1,16 +1,20 @@
 //! `.pgpass` lookup, libpq-exact (HV-SEC-03, HV-SEC-04 vectors). Every file is a temp fixture;
 //! the user's own `~/.pgpass` is never read. Secret comparisons never print either value.
 
+// Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
+// systems; the lints still run in full on Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use hacivat_secrets::{ExposeSecret, PgPassMatch, PgPassWarning, pgpass_lookup};
 
-/// Compares a secret without printing either value on failure.
+/// Compares a password (`Option<SecretString>`, B27) without printing either value on failure.
 macro_rules! assert_secret {
     ($got:expr, $want:expr) => {
         assert!(
-            $got.expose_secret() == $want,
+            $got.as_ref().map(|s| s.expose_secret()) == Some($want),
             "secret mismatch (values not shown)"
         )
     };
@@ -87,9 +91,11 @@ fn pgpass_vectors() {
         .password,
         "pass"
     );
-    assert_secret!(
-        hit(&file(0o600, "h:5432:d:u:\n"), "h", 5432, "d", Some("u")).password,
-        ""
+    // B27 (m2b-t06): an empty password field is `None`, see `empty_password_field_is_none`.
+    assert!(
+        hit(&file(0o600, "h:5432:d:u:\n"), "h", 5432, "d", Some("u"))
+            .password
+            .is_none()
     );
     #[cfg(unix)]
     assert_eq!(
@@ -150,7 +156,8 @@ fn escapes_in_every_field() {
         .password,
         "a:b"
     );
-    assert_secret!(
+    // B27 (m2b-t06): an empty field is `None`.
+    assert!(
         hit(
             &file(0o600, "h:5432:d:u::rest\n"),
             "h",
@@ -158,8 +165,8 @@ fn escapes_in_every_field() {
             "d",
             Some("u")
         )
-        .password,
-        ""
+        .password
+        .is_none()
     );
     // A lone trailing backslash is kept.
     assert_secret!(
@@ -337,4 +344,34 @@ fn a_match_never_debug_prints_its_password() {
     );
     let shown = format!("{m:?}");
     assert!(!shown.contains("hv_test_pw"), "the password was printed");
+}
+
+// ## m2b-t06-vault
+/// The match for `user`, if a line matches.
+fn lookup(path: &Path, host: &str, port: u16, db: &str, user: &str) -> Option<PgPassMatch> {
+    pgpass_lookup(path, host, port, db, Some(user)).expect("the file is readable")
+}
+
+/// B27: an empty password field is no password (`None`), not `Some("")` (libpq parity).
+#[test]
+fn empty_password_field_is_none() {
+    assert!(
+        lookup(&file(0o600, "h:5432:d:u:\n"), "h", 5432, "d", "u")
+            .unwrap()
+            .password
+            .is_none()
+    );
+    assert!(
+        lookup(&file(0o600, "h:5432:d:u::extra\n"), "h", 5432, "d", "u")
+            .unwrap()
+            .password
+            .is_none()
+    );
+    // An escaped character is a password, not an empty field.
+    assert_secret!(
+        lookup(&file(0o600, "h:5432:d:u:\\:\n"), "h", 5432, "d", "u")
+            .unwrap()
+            .password,
+        ":"
+    );
 }

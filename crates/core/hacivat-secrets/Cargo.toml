@@ -8,9 +8,16 @@ publish.workspace = true
 [dependencies]
 hacivat-proto.workspace = true
 keyring.workspace = true
+# The workspace entry enables `serde` (M2b, Q30).
 secrecy.workspace = true
 zeroize.workspace = true
 directories.workspace = true
+# M2b (Task 1): the encrypted-file vault (Q30).
+chacha20poly1305.workspace = true
+# m2b-t06 fix round 1 (controller-ruled manifest exception): argon2 wipes its own state.
+argon2 = { workspace = true, features = ["zeroize"] }
+getrandom.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -25,6 +25,19 @@ pub mod report;
 pub mod sheet;
 pub mod status;
 pub mod test_strip;
+// ## m2b-t01-interfaces: the M2b prompts, toasts and the event relay (owners in each module).
+pub mod cert_dialog;
+// ## m2b-t22-live: the read-only explanation (NOTES M2b surface 6).
+pub mod access_popover;
+pub mod events;
+pub mod hostkey_prompt;
+pub mod kbd_prompt;
+pub mod plaintext_prompt;
+pub mod secret_prompt;
+pub mod session_toasts;
+pub mod vault_dialog;
+// ## m2b-t21-prompts: the parts the SSH and vault prompts share.
+pub mod prompt_kit;
 
 pub use boot::ConnectionsBoot;
 pub use model::{ConnectionsModel, SaveError};
@@ -37,6 +50,9 @@ pub fn install(cx: &mut App) {
     commands::register(cx); // ## m2a-t18-explorer
     interaction::install(cx); // ## m2a-t20-errors: the UI port (password prompts, R14)
     dialog::install(cx); // ## m2a-t17-dialog
+    capsule::register(cx); // ## m2b-t22-live: "Explain read-only access"
+    #[cfg(debug_assertions)]
+    crate::commands::debug::register_cancel_demo(cx); // ## m2b-t22-live (Q39)
 }
 
 /// Boots the connections: the `ConnectionsModel` Global and its store diagnostics (Task 12),
@@ -45,4 +61,5 @@ pub fn install(cx: &mut App) {
 pub fn boot(cx: &mut App, boot: ConnectionsBoot) {
     boot::install(cx, boot);
     live::install(cx);
+    events::install(cx); // ## m2b-t01-interfaces: the connection-event relay (Q42)
 }

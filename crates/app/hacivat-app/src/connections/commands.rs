@@ -201,6 +201,8 @@ pub fn toggle_connect(id: ProfileId, cx: &mut App) {
     match state {
         LiveState::Connected(_) => ConnectionsModel::disconnect(cx, id),
         LiveState::Connecting(_) => ConnectionsModel::cancel_connect(cx, id),
+        // ## m2b-t01-interfaces: stopping a reconnect is a disconnect (Task 22 refines it).
+        LiveState::Reconnecting { .. } => ConnectionsModel::disconnect(cx, id),
         LiveState::Disconnected | LiveState::Failed(_) | LiveState::Lost { .. } => {
             note_started(cx, id);
             ConnectionsModel::connect(cx, id, None);
@@ -217,6 +219,8 @@ pub fn show_save_error(error: &SaveError, cx: &mut App) {
         SaveError::Io(_) => ids::hv::CONN_FIX_SAVE_FAILED,
         SaveError::Secret(_) => ids::hv::CONN_DLG_SAVE_SECRET,
         SaveError::NotFound => return,
+        // ## m2b-t21-prompts (fix round 1): nothing changed, and why.
+        SaveError::Unchanged(_) => ids::hv::CONN_SAVE_UNCHANGED,
     };
     let kind = if *error == SaveError::StoreReadOnly {
         ToastKind::Info

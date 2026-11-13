@@ -4,111 +4,187 @@
 # - `engine` is a `DbmsKind` id; `major` is the server line the tests assert on.
 # - `tls_default` is what the server offers out of the box, observed on the first
 #   `cargo xtask docker up --set full` and committed: `none` or `self_signed`.
-# - `sets`: `pr` (CI and quick local runs) = pg17 + mysql84; `full` = every target.
+# - `sets`: `pr` (CI and quick local runs) = pg17 + mysql84 + the two sshd bastions; `full` = every
+#   target.
+# - `service` is the compose service name and `internal_port` the port inside the compose
+#   network: tests that go through `sshd-a`/`sshd-b` connect to `<service>:<internal_port>`.
 #
 # Host 127.0.0.1, user `hv_test`, database `hv_test` everywhere. The throwaway test password
 # lives only in `hacivat-testkit` and the files of this directory.
 
 [[target]]
 id = "pg13"
+service = "pg13"
 engine = "postgres"
 major = "13"
 port = 54313
+internal_port = 5432
 tls_default = "none"
 sets = ["full"]
 
 [[target]]
 id = "pg14"
+service = "pg14"
 engine = "postgres"
 major = "14"
 port = 54314
+internal_port = 5432
 tls_default = "none"
 sets = ["full"]
 
 [[target]]
 id = "pg15"
+service = "pg15"
 engine = "postgres"
 major = "15"
 port = 54315
+internal_port = 5432
 tls_default = "none"
 sets = ["full"]
 
 [[target]]
 id = "pg16"
+service = "pg16"
 engine = "postgres"
 major = "16"
 port = 54316
+internal_port = 5432
 tls_default = "none"
 sets = ["full"]
 
 [[target]]
 id = "pg17"
+service = "pg17"
 engine = "postgres"
 major = "17"
 port = 54317
+internal_port = 5432
 tls_default = "none"
 sets = ["pr", "full"]
 
 [[target]]
 id = "pg18"
+service = "pg18"
 engine = "postgres"
 major = "18"
 port = 54318
+internal_port = 5432
 tls_default = "none"
 sets = ["full"]
 
 [[target]]
 id = "pg17-tls"
+service = "pg17-tls"
 engine = "postgres"
 major = "17"
 port = 54327
+internal_port = 5432
 tls_default = "self_signed"
 sets = ["full"]
 
 [[target]]
+id = "pg17-auth"
+service = "pg17-auth"
+engine = "postgres"
+major = "17"
+port = 54347
+internal_port = 5432
+tls_default = "none"
+sets = ["full"]
+
+[[target]]
 id = "pg17-tr"
+service = "pg17-tr"
 engine = "postgres"
 major = "17"
 port = 54337
+internal_port = 5432
 tls_default = "none"
 sets = ["full"]
 
 [[target]]
 id = "mysql80"
+service = "mysql80"
 engine = "mysql"
 major = "8.0"
 port = 33080
+internal_port = 3306
 tls_default = "self_signed"
 sets = ["full"]
 
 [[target]]
 id = "mysql84"
+service = "mysql84"
 engine = "mysql"
 major = "8.4"
 port = 33084
+internal_port = 3306
 tls_default = "self_signed"
 sets = ["pr", "full"]
 
 [[target]]
 id = "mariadb106"
+service = "mariadb106"
 engine = "mariadb"
 major = "10.6"
 port = 33106
+internal_port = 3306
 tls_default = "none"
 sets = ["full"]
 
 [[target]]
 id = "mariadb1011"
+service = "mariadb1011"
 engine = "mariadb"
 major = "10.11"
 port = 33111
+internal_port = 3306
 tls_default = "none"
 sets = ["full"]
 
 [[target]]
 id = "mariadb114"
+service = "mariadb114"
 engine = "mariadb"
 major = "11.4"
 port = 33114
+internal_port = 3306
+tls_default = "self_signed"
+sets = ["full"]
+
+# ## m2b-t16-ssh-targets
+# The SSH bastions (Task 16). User `hv_ssh` accepts the throwaway password and the generated
+# client keys (`ssh-client-ed25519`, `ssh-client-ed25519-enc`; see `ssh_client_key`). `host` and
+# `port` are what the connecting side dials: the host for sshd-a, and for sshd-b (`via`
+# sshd-a) the in-network name and port. sshd-b has no published port.
+
+[[ssh_target]]
+id = "sshd-a"
+host = "127.0.0.1"
+port = 2222
+user = "hv_ssh"
+sets = ["pr", "full"]
+
+[[ssh_target]]
+id = "sshd-b"
+host = "sshd-b"
+port = 22
+user = "hv_ssh"
+via = "sshd-a"
+sets = ["pr", "full"]
+
+# ## m2b-fix-f2-x509
+# mysql84 that trusts a throwaway test CA (T13 carry): `ssl_ca` is the CA the
+# `mysql-x509-certs` service generates at `docker up`, the server presents a certificate that CA
+# signed, and `hv_x509` signs in only with the matching client certificate (`REQUIRE X509`).
+# The CA and the certificates are Docker artifacts (`mysql-x509-*.pem`), never committed.
+
+[[target]]
+id = "mysql84-x509"
+service = "mysql84-x509"
+engine = "mysql"
+major = "8.4"
+port = 33094
+internal_port = 3306
 tls_default = "self_signed"
 sets = ["full"]

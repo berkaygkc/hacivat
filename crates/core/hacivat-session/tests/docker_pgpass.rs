@@ -16,6 +16,10 @@
 //! No password reaches the test output: the vectors name it `@PW@`, psql gets the file on
 //! stdin, and an outcome is only `Accepted`, `Rejected` or `NoPassword`.
 
+// Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
+// systems; the lints still run in full on Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+
 mod docker_support;
 
 use std::io::Write;
@@ -121,8 +125,12 @@ fn ours(v: &Vector) -> Outcome {
         .unwrap_or_else(|w| panic!("{}: the file was ignored: {w:?}", v.name));
     match found {
         None => Outcome::NoPassword,
-        Some(m) if m.password.expose_secret().is_empty() => Outcome::NoPassword,
-        Some(m) if m.password.expose_secret() == docker_password().expose_secret() => {
+        // B27 (m2b-t06): an empty password field is `None`.
+        Some(m) if m.password.is_none() => Outcome::NoPassword,
+        Some(m)
+            if m.password.as_ref().map(|p| p.expose_secret())
+                == Some(docker_password().expose_secret()) =>
+        {
             Outcome::Accepted
         }
         Some(_) => Outcome::Rejected,

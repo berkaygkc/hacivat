@@ -7,6 +7,11 @@
 //!   connector ([`tls`]) over the caller's rustls configuration.
 //! - **Probes** ([`probe`]): server version, replica state, TLS summary, the current user and
 //!   the database list, on the live client.
+//! - **Execution** ([`exec`], M2b): `execute`, `batch` and the type-cache-safe `reset` (Q10),
+//!   with notices collected through `poll_message` (Q12).
+//! - **Wire observer** ([`wire`], M2b): the insecure-auth guard (B8), the backend PID (Q11), the
+//!   transaction status and command tags (Q12), on the decrypted side of the stream.
+//! - **Cancel** ([`cancel`], M2b): `CancelRequest` over the same factory and TLS settings (B23).
 
 // `RawError` carries the server's message by value (HV-CONN-03, I18N-14), so its size is by
 // design; it travels once per failed call.
@@ -15,9 +20,13 @@
     reason = "RawError is a fixed interface; one per failed call"
 )]
 
+// ## m2b-t01-interfaces: Task 10 fills these.
+mod cancel;
 mod connect;
+mod exec;
 mod probe;
 mod tls;
+mod wire;
 
 use futures::future::BoxFuture;
 use hacivat_driver::{
@@ -28,6 +37,14 @@ use hacivat_proto::DbmsKind;
 pub use connect::{config_for, connect_conn, ssl_mode};
 pub use probe::{PgConn, server_version};
 pub use tokio_postgres::config::SslMode;
+// ## m2b-t10-pg
+#[doc(hidden)]
+pub use connect::connect_conn_with;
+pub use exec::{NOTICE_CAP, RESET_SQL, SQL_PREPARED, deallocate_sql};
+#[doc(hidden)]
+pub use tokio_postgres::config::ChannelBinding as ChannelBindingMode;
+#[doc(hidden)]
+pub use wire::{InsecureAuthRefusedMarker, Observer, ObserverMode, TlsRefusedMarker, WireState};
 
 static DESCRIPTOR: DriverDescriptor = DriverDescriptor {
     kind: DbmsKind::Postgres,

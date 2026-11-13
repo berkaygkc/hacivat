@@ -13,7 +13,7 @@ network.ipv6_unavailable body: The host has only IPv6 addresses, and this networ
 tls.handshake title: The secure connection to db-prod-us.acme.io couldn't be set up.
 tls.handshake body: Hacivat and the server couldn't agree on encryption. Check the connection's TLS settings; the technical details have the reason.
 tls.untrusted title: db-prod-us.acme.io sent a certificate this Mac doesn't trust.
-tls.untrusted body: The server's certificate isn't signed by an authority this Mac trusts. You can encrypt the connection without verifying the certificate, or ask your administrator for the CA.
+tls.untrusted body: It may be self-signed or issued by your company's own CA. Review it before you trust it.
 tls.hostname title: The certificate from db-prod-us.acme.io is for a different name.
 tls.hostname body: The server's certificate doesn't cover the name Hacivat connected to. Connect with a name the certificate lists, such as the server's full domain name instead of an IP address or an alias.
 tls.protocol title: The secure connection to db-prod-us.acme.io failed a safety check.
@@ -22,6 +22,20 @@ tls.client_cert_required title: db-prod-us.acme.io asks for a client certificate
 tls.client_cert_required body: The server only accepts connections that present a certificate of their own. Add the client certificate and its key in the connection's TLS settings.
 tls.not_supported_by_server title: db-prod-us.acme.io doesn't offer encrypted connections.
 tls.not_supported_by_server body: This connection requires TLS, and the server doesn't support it. Turn on TLS on the server, or change the connection's TLS mode if the network is private and trusted.
+tls.pin_changed title: db-prod-us.acme.io sent a different certificate from the pinned one.
+tls.pin_changed body: Hacivat stopped before signing in. Compare the new fingerprint with whoever runs the server before you replace the pin.
+ssh.host_key_unknown title: Hacivat doesn't know the host key of bastion.acme.io yet.
+ssh.host_key_unknown body: This Mac hasn't connected to this SSH server before, and the connection didn't ask whether to trust its key. Try again to review the key, or check the connection's host key setting.
+ssh.host_key_changed title: The host key of bastion.acme.io changed.
+ssh.host_key_changed body: Hacivat stopped before signing in. Review the new key before you trust it.
+ssh.auth title: bastion.acme.io rejected the SSH sign-in.
+ssh.auth body: Hacivat tried the sign-in methods this connection allows. Check that your public key is in ~/.ssh/authorized_keys on that host, or choose another sign-in method.
+ssh.channel_open title: bastion.acme.io doesn't allow tunnels (AllowTcpForwarding)
+ssh.channel_open body: Signing in to bastion.acme.io worked, but it refused to forward the connection to db-prod-us.acme.io. Ask its administrator to allow TCP forwarding, and to allow db-prod-us.acme.io if PermitOpen is set.
+ssh.agent_unavailable title: Hacivat can't reach ssh-agent.
+ssh.agent_unavailable body: This connection signs in to bastion.acme.io with keys from ssh-agent, but SSH_AUTH_SOCK isn't set for Hacivat. Start the agent and add your key with ssh-add, or choose a key file in the connection's SSH settings.
+ssh.host_key_revoked title: bastion.acme.io sent a key that is marked as revoked.
+ssh.host_key_revoked body: Hacivat never connects with a revoked key. Ask the server's administrator for its current key.
 auth.invalid title: The server rejected the password for deploy.
 auth.invalid body: The password may have changed or expired. Hacivat stops after 3 attempts so the account isn't locked.
 auth.expired title: The password for deploy has expired.
@@ -30,6 +44,8 @@ auth.locked title: The account deploy is locked.
 auth.locked body: The server doesn't let this account sign in, often after too many failed attempts or because an administrator locked it. Ask your database administrator to unlock it.
 auth.method_unsupported title: The server wants deploy to sign in with a method Hacivat can't use.
 auth.method_unsupported body: The account uses an authentication method Hacivat doesn't support over this connection. Some methods only work over an encrypted connection: try turning on TLS, or ask your database administrator which method the account uses.
+auth.insecure_method title: The server asked for the password in a form that isn't safe on this connection.
+auth.insecure_method body: The connection isn't encrypted, so the password would cross the network in a form others could read or reuse. Hacivat didn't send it. Turn on TLS on the server, or, if you accept the risk on this network, set Encryption to Disable.
 authz.database title: deploy isn't allowed to open orders_v2.
 authz.database body: The server doesn't let this account connect to this database from here. Ask your database administrator for access, or pick a database the account can open.
 config.invalid title: The settings of orders-prod can't be used.

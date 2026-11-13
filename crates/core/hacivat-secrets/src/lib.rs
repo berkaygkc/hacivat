@@ -10,7 +10,10 @@ pub mod store;
 
 pub use secrecy::{ExposeSecret, SecretString};
 
-pub use backend::{KeyringBackend, MemoryBackend, SecretBackend, SecretError, VaultBackend};
+pub use backend::{
+    BackendChoice, FallbackBackend, FileVault, KeyringBackend, MemoryBackend, SecretBackend,
+    SecretError, VaultBackend, VaultParams,
+};
 pub use files::{
     MAX_CREDENTIAL_FILE_BYTES, PgPassMatch, PgPassWarning, PgService, PgServiceFile,
     ServiceFileWarning, pg_service_path, pg_service_paths, pgpass_lookup, pgpass_path,
@@ -21,4 +24,4 @@ pub use providers::{
     SecretSource, resolve_auth,
 };
 pub use scrub::{scrub_message, scrub_options, scrub_url};
-pub use store::{Retention, SecretKey, SecretSlot, SecretStore, Stored};
+pub use store::{MAX_SSH_HOP, Retention, SecretKey, SecretSlot, SecretStore, Stored};

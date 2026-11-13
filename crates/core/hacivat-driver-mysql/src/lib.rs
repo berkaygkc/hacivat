@@ -1,5 +1,8 @@
-//! The MySQL and MariaDB driver over `mysql_async`: the loopback-forwarder path (R18), TLS
-//! with OS roots (P10) and family detection (HV-DRV-01).
+//! The MySQL and MariaDB driver over the vendored `mysql_async` (`third_party/mysql_async`,
+//! patches §1–§5): the loopback-forwarder path (R18), TLS through Hacivat's own rustls
+//! configuration (Q2), the outcome-based password guard (Q20), execution with the transaction
+//! status from the server status flags, `COM_RESET_CONNECTION` and family detection
+//! (HV-DRV-01, HV-EXEC-05).
 //!
 //! `mysql_async` 0.37 cannot speak over a caller-provided stream (`Conn::new` always dials, and
 //! its `Endpoint` holds a `TcpStream`), so `stream_injection` is false. A Direct TCP endpoint
@@ -16,6 +19,8 @@
 )]
 
 mod connect;
+// ## m2b-t01-interfaces: Task 13 fills it.
+mod exec;
 mod probe;
 mod tls;
 
@@ -32,9 +37,16 @@ pub use connect::{
 };
 #[doc(hidden)]
 pub use probe::{probe_warnings, server_version_text, user_databases};
+// ## m2b-t13-mysql
 #[doc(hidden)]
-pub use tls::os_roots;
-pub use tls::ssl_opts;
+pub use exec::{command_tag, tx_from_status};
+// ## m2b-t17-liveness
+pub use exec::autocommit_from_status;
+// ## m2b-fix-f2
+#[doc(hidden)]
+pub use exec::{ExtendedRoute, extended_route};
+#[doc(hidden)]
+pub use tls::guard_allows;
 
 static DESCRIPTOR: DriverDescriptor = DriverDescriptor {
     kind: DbmsKind::MySql,

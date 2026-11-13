@@ -190,6 +190,9 @@ fn text_run(
         painted_px: 0.0,
         clipped: false,
         truncated: false,
+        // ## m2b-t24-shots: recorded when built, before layout.
+        visible: true,
+        outside_card: false,
         path: format!(
             "{}:{}:{}",
             at.file().replace('\\', "/"),

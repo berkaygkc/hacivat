@@ -12,9 +12,9 @@ use std::rc::Rc;
 
 use hacivat_ui_core::fonts::{font_for, small_caps_glyphs, small_caps_tracking_px};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, AnyView, App, AppContext as _, Bounds, ContentMask, Context, Element, ElementId,
-    Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
-    ParentElement, Pixels, Point, Render, ShapedLine, SharedString,
+    AnyElement, AnyView, App, AppContext as _, Bounds, ContentMask, Context, Div, Element,
+    ElementId, FontStyle, Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement,
+    IntoElement, LayoutId, ParentElement, Pixels, Point, Render, ShapedLine, SharedString,
     StatefulInteractiveElement as _, Style, Styled, TextAlign, TextRun, UnderlineStyle, Window,
     canvas, div, point, px, relative,
 };
@@ -59,6 +59,13 @@ pub struct RenderedText {
     /// Where the text was created (`file:line:column`, plus `#id` for a label with an ID). The
     /// file uses `/` separators on every platform.
     pub path: SharedString,
+    // ## m2b-t24-shots (fix round 1, I1, I2)
+    /// Some of it lies inside the clip it is painted in (the window, a scroll viewport): a
+    /// label scrolled out of its viewport, or laid out below the window, is not visible.
+    pub visible: bool,
+    /// It runs past a side of the dialog card it is drawn in ([`card_scope`]): the card's own
+    /// clip is the window, so check (b) cannot see this.
+    pub outside_card: bool,
 }
 
 /// What the last frame drew, when `enabled` (tests and debug tooling; off by default). Each
@@ -148,6 +155,52 @@ pub fn scroll_viewport() -> impl IntoElement {
     .size_0()
 }
 
+// ## m2b-t24-shots (fix round 1, I1)
+/// The dialog cards being prepainted, innermost last (see [`card_scope`]).
+#[derive(Default)]
+struct CardScopes(Vec<Bounds<Pixels>>);
+
+impl Global for CardScopes {}
+
+/// Marks `card` as a dialog card for the containment check: every label and paragraph
+/// prepainted inside it records whether it runs past the card's left or right side
+/// ([`RenderedText::outside_card`]). The card's first child, an absolute probe that draws
+/// nothing, opens the scope at prepaint; the card's children-prepainted hook closes it. Call it
+/// on the card before adding its children (`dialog_frame` does).
+pub fn card_scope(card: Div) -> Div {
+    card.relative()
+        .child(
+            canvas(
+                |bounds, _, cx| cx.default_global::<CardScopes>().0.push(bounds),
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
+        .on_children_prepainted(|_, _, cx| {
+            cx.default_global::<CardScopes>().0.pop();
+        })
+}
+
+/// Whether a text laid out from `left` to `right` runs past a side of the innermost card being
+/// prepainted (half a pixel of slack).
+pub(crate) fn outside_card(cx: &App, left: Pixels, right: Pixels) -> bool {
+    let slack = px(0.5);
+    cx.try_global::<CardScopes>()
+        .and_then(|c| c.0.last().copied())
+        .is_some_and(|card| left < card.left() - slack || right > card.right() + slack)
+}
+
+/// Whether some of `bounds` lies inside `mask` (the clip it is painted in).
+pub(crate) fn shows_in(bounds: Bounds<Pixels>, mask: Bounds<Pixels>) -> bool {
+    bounds.top() < mask.bottom()
+        && bounds.bottom() > mask.top()
+        && bounds.left() < mask.right()
+        && bounds.right() > mask.left()
+}
+
 /// Whether `mask` is the clip of a scroll viewport noted this frame (each edge within 1 px):
 /// a nested, non-scrolling clip inside a viewport is smaller and does not count.
 fn is_scroll_viewport(cx: &App, mask: Bounds<Pixels>) -> bool {
@@ -174,6 +227,8 @@ pub struct Label {
     highlight: Vec<Range<usize>>,
     highlight_color: Option<Hsla>,
     location: &'static Location<'static>,
+    // ## m2b-t22-live
+    italic: bool,
 }
 
 impl Label {
@@ -194,7 +249,16 @@ impl Label {
             highlight: Vec::new(),
             highlight_color: None,
             location: Location::caller(),
+            italic: false,
         }
+    }
+
+    // ## m2b-t22-live
+    /// Draws the text in the family's italic face (the placeholders and comments of the SQL
+    /// inset, NOTES M2b surface 6). Not applied to synthesized small caps.
+    pub fn italic(mut self, italic: bool) -> Self {
+        self.italic = italic;
+        self
     }
 
     /// Ellipsize with `…` instead of overflowing; the full text becomes the tooltip.
@@ -364,7 +428,10 @@ pub(crate) fn fitting_prefix(
 
 impl LabelElement {
     fn runs(&self, text_len: usize, highlight: &[Range<usize>]) -> Vec<TextRun> {
-        let font = font_for(&self.label.style);
+        let mut font = font_for(&self.label.style);
+        if self.label.italic {
+            font.style = FontStyle::Italic;
+        }
         let run = |len, underline: Option<UnderlineStyle>| TextRun {
             len,
             font: font.clone(),
@@ -628,6 +695,7 @@ impl Element for LabelElement {
         };
         let mask = window.content_mask().bounds;
         let cut = cut_by_clip(bounds, mask, is_scroll_viewport(cx, mask));
+        let outside = outside_card(cx, bounds.left(), bounds.left() + painted_width);
         TextRegistry::record(cx, || RenderedText {
             text: self.label.text.clone(),
             source: self.label.source,
@@ -636,6 +704,8 @@ impl Element for LabelElement {
             clipped: painted_width > bounds.size.width + px(0.5) || cut,
             truncated: ellipsize,
             path: self.label.path(),
+            visible: shows_in(bounds, mask),
+            outside_card: outside,
         });
         painted
     }
@@ -835,6 +905,7 @@ impl IntoElement for Paragraph {
                 let mask = window.content_mask().bounds;
                 let scrolls = is_scroll_viewport(cx, mask);
                 let (painted, clipped) = paragraph_fit(&lines, bounds, mask, scrolls);
+                let outside = outside_card(cx, bounds.left(), bounds.left() + painted);
                 TextRegistry::record(cx, || RenderedText {
                     text: recorded,
                     source,
@@ -843,6 +914,8 @@ impl IntoElement for Paragraph {
                     clipped,
                     truncated: false,
                     path,
+                    visible: shows_in(bounds, mask),
+                    outside_card: outside,
                 });
             },
             |_, (), _, _| {},

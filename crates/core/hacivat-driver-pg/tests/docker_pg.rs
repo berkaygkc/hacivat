@@ -12,7 +12,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use hacivat_driver::{
-    Driver, DriverConnect, DriverEvent, DriverEvents, Endpoint, RawConn, RawError, RawErrorKind,
+    Driver, DriverConnect, DriverEvent, DriverEvents, Endpoint, InsecureAuth, RawConn, RawError,
+    RawErrorKind,
 };
 use hacivat_driver_pg::{PgConn, PgDriver, connect_conn};
 use hacivat_net::{
@@ -153,7 +154,7 @@ fn req_with(
             resolved: vec![],
             tls_host: t.host.clone(),
         },
-        tls: build_tls_params(&settings, &t.host, class).unwrap(),
+        tls: build_tls_params(&settings, &t.host, 5432, class, None).unwrap(),
         user: Some(t.user.clone()),
         password: Some(SecretString::from(t.password.clone())),
         database: Some(t.database.clone()),
@@ -162,6 +163,9 @@ fn req_with(
         options: vec![],
         connect_timeout: Duration::from_secs(10),
         events: Arc::new(|_| {}),
+        // Every target is on loopback, where the pipeline allows any method (B8; Task 10's
+        // `docker_exec.rs` covers the refusal).
+        insecure_auth: InsecureAuth::Allow,
     }
 }
 
@@ -382,7 +386,8 @@ async fn pg_lists_databases_and_reads_user() {
     assert_eq!(c.current_user().await.unwrap().as_deref(), Some("hv_test"));
     assert!(c.ping().await.unwrap() < Duration::from_secs(1));
     assert!(c.probe().await.is_empty());
-    assert!(c.cancel_handle().is_none());
+    // M2b (Task 10): the CancelRequest handle.
+    assert!(c.cancel_handle().is_some());
     assert_eq!(c.kind(), DbmsKind::Postgres);
     c.close().await;
 }

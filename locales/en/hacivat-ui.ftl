@@ -468,10 +468,6 @@ hv-conn-fix-versions = Supported versions
 hv-conn-fix-anyway = Connect anyway, unsupported
 hv-conn-fix-connect = Connect
 hv-conn-fix-close = Close
-# The fix for an untrusted or mismatched certificate (R3): TLS without verification.
-hv-conn-fix-require = Encrypt without verifying
-# Shown with that fix: what it gives up, plainly.
-hv-conn-fix-require-note = The connection will be encrypted, but { -brand-hacivat } won't check that the server is who it claims to be.
 # Shown when the connections file is read-only: fixes that change the connection are off.
 hv-conn-fix-read-only = Your connections file can't be changed, so fixes that edit this connection are off.
 # Shown when a fix's change to the connection could not be saved.
@@ -750,7 +746,6 @@ hv-conn-issue-create-and-read-only = A new file can't be opened read-only. Turn 
 hv-conn-issue-transport-unavailable = This connection uses a tunnel this version can't open yet.
 hv-conn-issue-tls-ca-unreadable = The CA certificate can't be read. Verify CA needs one.
 hv-conn-issue-tls-cert-unreadable = The client certificate or its key can't be read.
-hv-conn-issue-tls-key-encrypted = The private key is encrypted. Use an unencrypted key file.
 # Variables:
 #   $mode (String) - the encryption mode, e.g. "Verify CA".
 hv-conn-issue-tls-mode-unsupported = { $mode } isn't available for this engine yet.
@@ -777,6 +772,135 @@ hv-conn-enc-ca-only = { $version } · CA verified
 # Variables:
 #   $key (String) - the property's name, e.g. "db_password".
 hv-conn-issue-option-secret = The property { $key } holds a password. Remove it and type the password in the Password field.
+
+## m2b-t01-interfaces
+
+# Placeholder issue texts for the SSH section and the TLS key (Task 1); Task 20 rewrites the
+# SSH ones and Task 19 the TLS one.
+# An SSH hop has no host.
+# Review: PO
+hv-conn-issue-ssh-host-missing = Enter the SSH host.
+# An SSH hop has no user.
+# Review: PO
+hv-conn-issue-ssh-user-missing = Enter the user to sign in as.
+# The tunnel has more jump hosts than Hacivat supports.
+# Review: PO
+hv-conn-issue-ssh-too-many-hops = A tunnel can go through at most 8 jump hosts.
+# The SSH key file is missing or can't be read.
+# Review: PO
+hv-conn-issue-ssh-key-file-missing = This key file can't be found. Choose the private key, such as ~/.ssh/id_ed25519.
+# The TLS client key uses the old OpenSSL encryption, which can't be decrypted.
+# m2b-t19-tls (named exception): the placeholder rewritten.
+# Review: PO
+hv-conn-issue-tls-key-legacy-encrypted = This key is encrypted in an old format { -brand-hacivat } can't read. Convert it to an encrypted PKCS #8 key (openssl pkcs8 -topk8), then choose the new file.
+
+## m2b-t20-ssh
+
+# The SSH disclosure of the connection dialog (NOTES M2a surface 6).
+hv-conn-section-ssh = SSH tunnel
+# Summary of the folded SSH section when the connection uses no tunnel.
+hv-conn-ssh-sum-off = Off
+# Summary of the folded SSH section: a tunnel without jump hosts.
+# Variables:
+#   $host (String) - the SSH host, e.g. "bastion.acme.io".
+hv-conn-ssh-sum-on = via { $host }
+# Summary of the folded SSH section: a tunnel through jump hosts.
+# Variables:
+#   $host (String) - the SSH host, e.g. "bastion.acme.io".
+#   $n (Number) - how many jump hosts lead to it, e.g. 1.
+hv-conn-ssh-sum-hops = via { $host } · { $n ->
+        [one] { $n } jump host
+       *[other] { $n } jump hosts
+    }
+hv-conn-ssh-use = Connect through an SSH tunnel
+hv-conn-ssh-import = Import from ~/.ssh/config…
+hv-conn-ssh-host = SSH host
+hv-conn-ssh-user = SSH user
+# The SSH sign-in methods (a segmented control).
+hv-conn-ssh-auth-agent = Agent
+hv-conn-ssh-auth-key = Key file
+hv-conn-ssh-auth-password = Password
+hv-conn-ssh-auth-kbd = Keyboard-interactive
+hv-conn-ssh-agent-note = Uses the keys loaded in ssh-agent.
+hv-conn-ssh-key = Key file
+hv-conn-ssh-passphrase = Passphrase
+hv-conn-ssh-kbd-note = The server's questions, such as a one-time code, appear when you connect.
+hv-conn-ssh-jumps = Jump hosts
+hv-conn-ssh-add-jump = Add jump host
+# The remove button of a jump host row (its tooltip and accessible name).
+# Variables:
+#   $n (Number) - the row's 1-based position, e.g. 2.
+hv-conn-ssh-remove-jump = Remove jump host { $n }
+# Under a jump host row without a host.
+hv-conn-ssh-jump-host-missing = Enter the jump host.
+# Under the jump host list when a jump host's key file (from ~/.ssh/config) is missing.
+hv-conn-ssh-jump-key-missing = A jump host's key file can't be found. Fix its IdentityFile in ~/.ssh/config, then import the host again.
+hv-conn-ssh-route = Route
+# The first stop of the route row: this computer.
+# Variables:
+#   $os (Enum(mac, other)) - whether this computer is a Mac.
+hv-conn-ssh-this-mac = { $os ->
+        [mac] this Mac
+       *[other] this computer
+    }
+hv-conn-ssh-hostkeys = Host keys
+# The host key policies (a select; there is never an "accept everything" choice).
+hv-conn-ssh-hk-ask = Ask for new hosts
+hv-conn-ssh-hk-accept = Accept new, stop on change
+hv-conn-ssh-hk-strict = Known hosts only
+# The accessible name of the import menu.
+hv-conn-ssh-import-title = Hosts in ~/.ssh/config
+# Why an import entry is disabled.
+hv-conn-ssh-proxycmd = uses ProxyCommand, not supported
+# Why an import entry is disabled: one of its values looked like a password (never shown).
+hv-conn-ssh-unusable-secret = holds a value that looks like a password, not imported
+# Why an import entry is disabled.
+# Variables:
+#   $token (String) - the unsupported token, e.g. "%C".
+hv-conn-ssh-unusable-token = uses { $token }, not supported
+# Why an import entry is disabled: a cycle, or a chain longer than a tunnel allows.
+hv-conn-ssh-unusable-depth = its jump hosts nest too deep
+# Why an import entry is disabled: a ProxyJump names a host the file doesn't define.
+hv-conn-ssh-unusable-unknown = names a jump host that isn't in the file
+# What an import entry resolves to, through jump hosts.
+# Variables:
+#   $target (String) - the user and host it signs in to, e.g. "deploy@bastion.acme.io".
+#   $jumps (String) - its ProxyJump hosts, e.g. "jump-eu".
+hv-conn-ssh-import-via = { $target } · ProxyJump { $jumps }
+# What an import entry resolves to, with a key file.
+# Variables:
+#   $target (String) - the user and host it signs in to, e.g. "ci@10.0.4.7".
+#   $key (String) - its first IdentityFile, e.g. "~/.ssh/ci_ed25519".
+hv-conn-ssh-import-key = { $target } · IdentityFile { $key }
+# The import menu's only row when the file names no host.
+hv-conn-ssh-import-none = No hosts in ~/.ssh/config
+# The import menu's only row when the file can't be read.
+hv-conn-ssh-import-unreadable = ~/.ssh/config can't be read
+# The notice after an import.
+# Variables:
+#   $alias (String) - the imported Host alias, e.g. "bastion".
+hv-conn-ssh-imported = Imported { $alias } from ~/.ssh/config: host, user, key and jump host.
+# Lines of the import notice: what the import skipped or changed.
+# Variables:
+#   $line (Number) - the line in ~/.ssh/config, e.g. 12.
+hv-conn-ssh-notice-match = Line { $line }: Match blocks were skipped.
+# Variables:
+#   $line (Number) - the line in ~/.ssh/config, e.g. 3.
+hv-conn-ssh-notice-include = Line { $line }: Include nests too deep, so the files it names were skipped.
+# Variables:
+#   $alias (String) - the Host alias, e.g. "bastion".
+hv-conn-ssh-notice-known-hosts = { $alias }: UserKnownHostsFile was ignored. { -brand-hacivat } checks its own known hosts and ~/.ssh/known_hosts.
+# Variables:
+#   $alias (String) - the Host alias, e.g. "bastion".
+hv-conn-ssh-notice-strict-no = { $alias }: StrictHostKeyChecking no is read as Ask for new hosts.
+# Variables:
+#   $alias (String) - the Host alias, e.g. "bastion".
+hv-conn-ssh-notice-agent = { $alias }: IdentityAgent was ignored. { -brand-hacivat } uses the agent in SSH_AUTH_SOCK.
+# Variables:
+#   $alias (String) - the Host alias, e.g. "bastion".
+hv-conn-ssh-notice-jump-password = { $alias }: its ProxyJump held a password, which was removed and not kept.
+# The SSH step of the connect trail.
+hv-conn-step-ssh = SSH
 
 ## m2a-demo-extra
 
@@ -811,3 +935,453 @@ hv-conn-err-refused = { $name } — { $reason ->
 hv-conn-err-attempts-used = All 3 attempts are used. { -brand-hacivat } won't send another password, so the account isn't locked.
 # Under the connection dialog's Password field after 3 rejected passwords: how to try again.
 hv-conn-dlg-attempts-used = No attempts left for this server. To try again, change the host, port or user, or reopen this dialog.
+
+## m2b-t22-live
+
+# The capsule while a lost connection reconnects (B19): the attempt under way.
+# Variables:
+#   $n (Number) - the attempt, from 1, e.g. 3.
+hv-capsule-reconnecting = Reconnecting · attempt { $n }
+# The capsule between two reconnect attempts: when the next one starts.
+# Variables:
+#   $seconds (Number) - whole seconds until the next attempt, e.g. 4.
+hv-capsule-next = in { $seconds } s
+# The path of a connection through an SSH tunnel (the capsule, the status bar and the sheet).
+# Variables:
+#   $host (String) - the SSH host the database is reached from (the last hop), e.g. "bastion.acme.io".
+hv-conn-path-ssh = SSH via { $host }
+# The capsule, the status bar and the explorer after an idle disconnect (B18).
+hv-conn-idle-cap = Disconnected (idle)
+# Toast after an idle disconnect whose threshold is a whole number of hours.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+#   $hours (Number) - the idle threshold in hours, e.g. 4.
+hv-conn-idle-disconnected = Disconnected { $name } after { $hours } h idle. It reconnects when you use it.
+# Toast after an idle disconnect whose threshold is not a whole number of hours.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+#   $minutes (Number) - the idle threshold in minutes, e.g. 90.
+hv-conn-idle-disconnected-minutes = Disconnected { $name } after { $minutes } min idle. It reconnects when you use it.
+# Toast when a transaction has stayed open and idle for the connection's idle threshold.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+#   $minutes (Number) - how long it has been idle, in minutes, e.g. 60.
+hv-conn-idle-tx = A transaction on { $name } has been open and idle for { $minutes } min. It holds its locks until you commit it or roll it back.
+# The sticky toast after a lost server session (D-085, B19): its title.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+#   $state (Enum(reconnected, lost)) - reconnected: Hacivat opened a new session on its own; lost: it did not, because work was in progress.
+hv-conn-lost-title = { $state ->
+        [reconnected] Reconnected to { $name }
+       *[lost] The session on { $name } was lost
+    }
+# The toast's first line.
+# Variables:
+#   $state (Enum(reconnected, lost)) - as in hv-conn-lost-title.
+hv-conn-lost-body = { $state ->
+        [reconnected] The server session ended, so { -brand-hacivat } opened a new one.
+       *[lost] The server session ended while work was in progress, so { -brand-hacivat } didn't reconnect on its own. Retry connects again.
+    }
+# A line of the toast, only when a transaction was open.
+hv-conn-lost-tx = Your open transaction ended, and the server rolled back its uncommitted changes.
+# A line of the toast: what else the old session held.
+# Variables:
+#   $items (List) - what was lost, each an hv-conn-lost-item-* message, e.g. "temporary tables".
+hv-conn-lost-other = Also gone: { $items }
+hv-conn-lost-item-temp = temporary tables
+hv-conn-lost-item-vars = session variables
+# Variables:
+#   $count (Number) - how many prepared statements were lost, e.g. 2.
+hv-conn-lost-item-prepared = { $count ->
+        [one] a prepared statement
+       *[other] { $count } prepared statements
+    }
+hv-conn-lost-item-locks = session locks
+hv-conn-lost-details = Show details
+hv-conn-lost-dismiss = Dismiss
+# The sticky alert after the read-only guard stopped a statement (Q35): its title.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-gap-title = Read-only guard on { $name }
+# The alert's line when the statement ended the guard's read-only transaction.
+hv-conn-gap-tx-ended = { -brand-hacivat } stopped a statement that ended the read-only transaction on a read-only connection and closed that session.
+# The alert's line when the statement changed data.
+hv-conn-gap-changed-data = { -brand-hacivat } stopped a statement that changed data on a read-only connection and closed that session.
+# A read-only connection whose role the server limits to reading (B21; the capsule, the status bar and the popover).
+hv-conn-access-ro-enforced = read-only (enforced by server role)
+# The sheet's short forms of the access labels (they fit its narrow value column).
+hv-conn-ro-sheet-enforced = read-only · enforced
+hv-conn-ro-sheet-guarded = read-only · guarded
+# The read-only explanation popover (NOTES M2b surface 6).
+hv-conn-ro-pop-enf-title = Read-only, enforced by the server
+# Variables:
+#   $user (String) - the role the connection signs in as, e.g. "app_ro".
+hv-conn-ro-pop-enf-body = The role { $user } can only read here. The server itself refuses writes, whatever runs in { -brand-hacivat }.
+hv-conn-ro-pop-enf-temp = TEMP alone doesn't weaken enforcement, so the label stays enforced.
+hv-conn-ro-pop-g-title = Read-only is guarded, not enforced
+# Variables:
+#   $user (String) - the role the connection signs in as, e.g. "qa".
+hv-conn-ro-pop-g-body = The role { $user } isn't limited to reading here, so { -brand-hacivat } stops writes itself: it checks every statement and runs it read-only.
+hv-conn-ro-pop-g-limit = That catches mistakes. Only a read-only role on the server is a hard guarantee.
+hv-conn-ro-pop-g-fix = To enforce it, ask your DBA for a role like this, then make it this connection's user:
+hv-conn-ro-pop-maria-body = { -brand-hacivat } can't yet confirm that a MariaDB role is read-only, so it always guards MariaDB connections itself.
+hv-conn-ro-pop-no-fix = No role change makes this label enforced, so there is no SQL to copy.
+hv-conn-ro-pop-sqlite-body = SQLite has no server roles. { -brand-hacivat } opens the file read-only and lets through only statements that read.
+hv-conn-ro-copy-sql = Copy SQL
+# Toast after Copy SQL.
+hv-conn-ro-copied = Copied the SQL. Replace the values in angle brackets before you run it.
+# The lead of the role probe's findings, then one line each.
+hv-conn-ro-warn-head = Found on this role:
+hv-conn-ro-warn-superuser = It is a superuser.
+hv-conn-ro-warn-bypass-rls = It bypasses row-level security.
+hv-conn-ro-warn-replication = It can start replication.
+hv-conn-ro-warn-create-role = It can create and change roles.
+hv-conn-ro-warn-server-file-roles = It can read or write files on the database server.
+hv-conn-ro-warn-execute-server-program = It can run programs on the database server.
+hv-conn-ro-warn-signal-backend = It can cancel or end other sessions.
+hv-conn-ro-warn-write-privileges = It can change data in some tables.
+hv-conn-ro-warn-temp-privilege = It can create temporary tables, which read-only transactions block.
+# Variables:
+#   $name (String) - the extension's name, from the probe's fixed list, e.g. "dblink".
+hv-conn-ro-warn-egress-extension = The { $name } extension can reach other servers.
+hv-conn-ro-warn-role-grant-not-expanded = Other roles are granted to it, and { -brand-hacivat } can't see what they allow.
+hv-conn-ro-warn-unparsed = { -brand-hacivat } couldn't read its privileges.
+# The palette command that opens the read-only explanation of the current connection.
+hv-cmd-connection-explain-access = Explain read-only access
+# Debug builds only (Q39): the cancel demo's palette commands and its result.
+hv-cmd-debug-run-pg-sleep = Debug: run SELECT pg_sleep(30) on the current connection
+hv-cmd-debug-cancel = Debug: cancel the demo statement
+# Variables:
+#   $outcome (Enum(done, cancelled, failed)) - how the demo statement ended.
+hv-debug-demo-result = { $outcome ->
+        [done] The demo statement finished.
+        [cancelled] The demo statement was cancelled.
+       *[failed] The demo statement failed.
+    }
+
+## m2b-t21-prompts
+
+# The new-host-key prompt (M2a NOTES surface 6). Its title.
+# Variables:
+#   $host (String) - the SSH host Hacivat dialled, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-hk-title = First connection to { $host }
+# Variables:
+#   $os (Enum(mac, other)) - whether this computer is a Mac.
+# Review: PO
+hv-conn-hk-body = { $os ->
+        [mac] This Mac hasn't connected to this SSH server before. Compare the fingerprint with the one your administrator gave you.
+       *[other] This computer hasn't connected to this SSH server before. Compare the fingerprint with the one your administrator gave you.
+    }
+# The fingerprint inset's label.
+# Review: PO
+hv-conn-hk-fp = Host key
+# Review: PO
+hv-conn-hk-store = { -brand-hacivat } saves it in its own known-hosts list. ~/.ssh/known_hosts isn't changed.
+# The primary button.
+# Review: PO
+hv-conn-hk-trust = Trust and connect
+# The tooltip and accessible name of the Copy button of a fingerprint inset.
+# Review: PO
+hv-conn-hk-copy-fp = Copy fingerprint
+
+# The changed-host-key review (NOTES surface 1): a hard stop whose default is Cancel.
+# Variables:
+#   $host (String) - the SSH host Hacivat dialled, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-hk-changed-title = The host key of { $host } changed
+# Review: PO
+hv-conn-hk-changed-body = The server answered with a different key from the one stored for it. That happens when a server is rebuilt or its keys are rotated, and also when someone is intercepting the connection. { -brand-hacivat } stopped before signing in.
+# The two fingerprint insets.
+# Review: PO
+hv-conn-hk-changed-old = Stored key
+# Review: PO
+hv-conn-hk-changed-new = Offered now
+# Under the stored key: where it is stored.
+# Review: PO
+hv-conn-hk-changed-stored-in = Stored in
+# Review: PO
+hv-conn-hk-changed-src-hacivat = { -brand-hacivat }'s known hosts
+# Variables:
+#   $file (String) - the OpenSSH file, e.g. "~/.ssh/known_hosts".
+#   $n (Number) - the line in that file, e.g. 14.
+# Review: PO
+hv-conn-hk-changed-src-openssh = { $file } line { NUMBER($n, useGrouping: "false") }
+# Variables:
+#   $host (String) - the SSH host, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-hk-changed-ask = Ask whoever runs { $host } whether its key changed, and compare the new fingerprint before you trust it.
+# The trust-widening button: never the default.
+# Review: PO
+hv-conn-hk-changed-replace = Remove the old key and trust the new one
+# Above the ssh-keygen command when the old key is in an OpenSSH file.
+# Variables:
+#   $file (String) - the OpenSSH file, e.g. "~/.ssh/known_hosts".
+# Review: PO
+hv-conn-hk-changed-openssh-note = { -brand-hacivat } doesn't change { $file }. If the new key is genuine, remove the old line in a terminal, then try again:
+# Review: PO
+hv-conn-hk-changed-copy = Copy command
+# Toast after Copy command.
+# Review: PO
+hv-conn-hk-changed-copied = Copied the command
+# Toast after the old key was replaced.
+# Variables:
+#   $host (String) - the SSH host, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-hk-changed-trusted = Trusted the new key of { $host }
+
+# The keyboard-interactive prompt (NOTES surface 2). Server text is never placed in these.
+# Variables:
+#   $host (String) - the SSH host Hacivat dialled, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-kbd-title = Sign in to { $host }
+# Variables:
+#   $host (String) - the SSH host Hacivat dialled, e.g. "bastion.acme.io".
+# Review: PO
+hv-conn-kbd-asks = { $host } asks:
+# The caption of the inset holding the server's own text.
+# Review: PO
+hv-conn-kbd-from-server = Sent by the server, shown as received
+# Review: PO
+hv-conn-kbd-no-text = The server sent no name or instructions.
+# Variables:
+#   $n (Number) - the attempt, 1 to 3.
+# Review: PO
+hv-conn-kbd-attempt = Attempt { $n } of 3
+# Review: PO
+hv-conn-kbd-not-kept = Answers go to this server only and aren't kept.
+# Review: PO
+hv-conn-kbd-rejected = The server didn't accept the answers and asked again.
+# Review: PO
+hv-conn-kbd-continue = Continue
+
+# The SSH password and key passphrase prompts (NOTES surface 3).
+# Variables:
+#   $host (String) - the asking hop's host, e.g. "jump-eu.acme.io".
+#   $n (Number) - the hop's 1-based position, e.g. 1.
+#   $total (Number) - how many hops the route has, e.g. 2.
+# Review: PO
+hv-conn-ssh-secret-hop = { $host }, hop { $n } of { $total }
+# Variables:
+#   $host (String) - the asking hop's host, e.g. "jump-eu.acme.io".
+# Review: PO
+hv-conn-ssh-secret-pw-title = SSH password for { $host }
+# Variables:
+#   $user (String) - the SSH user and host, e.g. "deploy@jump-eu.acme.io".
+# Review: PO
+hv-conn-ssh-secret-pw-body = Enter the SSH password for { $user }. It's kept only if the connection works.
+# Variables:
+#   $key (String) - the key file, e.g. "~/.ssh/id_ed25519".
+# Review: PO
+hv-conn-ssh-secret-pass-title = Passphrase for { $key }
+# Review: PO
+hv-conn-ssh-secret-pass-body = This key file is encrypted. Enter its passphrase. It's kept only if the connection works.
+# Variables:
+#   $host (String) - the asking hop's host, e.g. "jump-eu.acme.io".
+# Review: PO
+hv-conn-ssh-secret-wrong = { $host } didn't accept the password.
+# After a passphrase that didn't decrypt the key (new: the mock shows only the password's line).
+# Review: PO
+hv-conn-ssh-secret-pass-wrong = That passphrase didn't unlock the key.
+# Variables:
+#   $n (Number) - the attempt, 1 to 3.
+# Review: PO
+hv-conn-ssh-secret-attempt = Attempt { $n } of 3
+# Review: PO
+hv-conn-ssh-secret-continue = Continue
+
+# The vault (NOTES surface 4): create, unlock, reset, damaged.
+# Review: PO
+hv-conn-vault-create-title = Create a vault for saved passwords
+# Review: PO
+hv-conn-vault-create-why = This computer has no system keyring.
+# Review: PO
+hv-conn-vault-create-what = { -brand-hacivat } keeps the passwords you save Forever in an encrypted file, locked with a master password.
+# Review: PO
+hv-conn-vault-master = Master password
+# Review: PO
+hv-conn-vault-repeat = Repeat
+# The create dialog's two live rules.
+# Review: PO
+hv-conn-vault-min = At least 8 characters
+# Review: PO
+hv-conn-vault-match = Both entries match
+# Review: PO
+hv-conn-vault-mismatch = The two entries don't match
+# Review: PO
+hv-conn-vault-norecover = { -brand-hacivat } can't recover it. If you forget it, you reset the vault and enter your saved passwords again.
+# Review: PO
+hv-conn-vault-notnow-note = Not now keeps this password until { -brand-hacivat } restarts.
+# Review: PO
+hv-conn-vault-notnow = Not now
+# Review: PO
+hv-conn-vault-create-btn = Create vault
+# Toast after the vault was created.
+# Review: PO
+hv-conn-vault-created = Vault created. Passwords you save Forever go there.
+# Review: PO
+hv-conn-vault-unlock-title = Unlock the vault
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+# Review: PO
+hv-conn-vault-unlock-body = { -brand-hacivat } needs the master password to read the saved password for { $name }. The vault stays unlocked until you quit.
+# The unlock body when no single connection asks (new: the pipeline's question names none).
+# Review: PO
+hv-conn-vault-unlock-body-any = { -brand-hacivat } needs the master password to read your saved passwords. The vault stays unlocked until you quit.
+# Review: PO
+hv-conn-vault-unlock-wrong = That isn't the master password.
+# Variables:
+#   $n (Number) - the attempt, 1 to 3.
+# Review: PO
+hv-conn-vault-attempt = Attempt { $n } of 3
+# Review: PO
+hv-conn-vault-unlock-btn = Unlock
+# Review: PO
+hv-conn-vault-reset-link = Reset vault…
+# Review: PO
+hv-conn-vault-reset-title = Reset the vault?
+# The mock counts the passwords; a locked or damaged vault can't be counted, so the body names none.
+# Review: PO
+hv-conn-vault-reset-body = This deletes the vault and every password saved in it. Your connections stay, and { -brand-hacivat } asks for each password the next time you connect. This can't be undone.
+# Variables:
+#   $word (String) - the word to type, hv-conn-vault-reset-word, e.g. "reset".
+# Review: PO
+hv-conn-vault-reset-type = Type { $word } to confirm
+# The word typed to confirm a reset: the same in every language on purpose (B13).
+# Review: PO
+hv-conn-vault-reset-word = reset
+# Review: PO
+hv-conn-vault-reset-btn = Reset vault
+# Toast after a reset.
+# Review: PO
+hv-conn-vault-reset-done = The vault was reset. Its saved passwords are gone.
+# Review: PO
+hv-conn-vault-damaged-title = The vault can't be read
+# Review: PO
+hv-conn-vault-damaged-body = The vault file failed its integrity check, so { -brand-hacivat } didn't use it and didn't change it. Restore it from a backup, or reset the vault.
+# Review: PO
+hv-conn-vault-damaged-meanwhile = Until then, passwords you enter are kept until { -brand-hacivat } restarts.
+# The Remember choice "Forever" when the vault holds the secrets, with its hint.
+# Review: PO
+hv-conn-ret-forever-vault = Forever (encrypted file)
+# Review: PO
+hv-conn-ret-forever-vault-h = in { -brand-hacivat }'s vault, behind a master password
+
+# The quick fix of ssh.host_key_changed: opens the review (NOTES surface 1).
+# Review: PO
+hv-conn-fix-review-host-key = Review host key…
+
+# Fix round 1. Under the SSH secret prompt's Remember: the choice is the connection's.
+# Review: PO
+hv-conn-ssh-secret-remember-all = Applies to the saved SSH passwords and passphrases of every hop of this connection.
+# Fix round 1. A save or delete that changed nothing because the stored passwords could not be
+# moved or deleted (a locked vault whose unlock was declined, a refused write).
+# Review: PO
+hv-conn-save-unchanged = Nothing was changed: the saved passwords couldn't be moved or removed. If { -brand-hacivat } asks, unlock the vault, then try again.
+# Fix round 1. The vault file is a link or not a regular file, so it can't be used.
+# Review: PO
+hv-conn-vault-denied = { -brand-hacivat } can't use the vault file: it isn't a regular file. Passwords you enter are kept until { -brand-hacivat } restarts.
+
+## m2b-t19-tls
+
+# Quick fixes of an untrusted certificate (B6): open the certificate review, or choose its CA file.
+hv-conn-fix-review-cert = Review certificate…
+hv-conn-fix-import-ca = Import CA…
+# The certificate review's title (NOTES M2a surface 5).
+hv-conn-tls-title = Certificate not trusted
+# Variables:
+#   $host (String) - the server's host as the connection names it, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-body = { $host }:{ $port } offered a certificate that no CA trusted by this Mac has signed. Compare the fingerprint with whoever runs the server before you continue.
+# The certificate's facts.
+hv-conn-tls-subject = Issued to
+hv-conn-tls-issuer = Issued by
+hv-conn-tls-valid = Valid until
+# The certificate's expiry date, in the regional format.
+# Variables:
+#   $when (DateTime) - the moment the certificate expires, e.g. 2027-03-14.
+hv-conn-tls-valid-date = { DATETIME($when, dateStyle: "long") }
+hv-conn-tls-fp = SHA-256 fingerprint
+# The tooltip of the button that copies a fingerprint.
+hv-conn-tls-copy-fp = Copy fingerprint
+hv-conn-tls-chain = Chain
+# A certificate's place in the chain, after its name.
+hv-conn-tls-leaf = server
+hv-conn-tls-inter = intermediate
+hv-conn-tls-root = root · not trusted by this Mac
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-pin-note = Pinning trusts exactly this certificate for { $host }:{ $port }. If it ever changes, { -brand-hacivat } stops and asks again. A pin doesn't extend the expiry date.
+hv-conn-tls-pin-btn = Pin this certificate
+hv-conn-tls-import = Import CA…
+# Under the certificate's facts when today is outside its dates: why nothing can trust it.
+# Variables:
+#   $state (Enum(expired, early)) - expired: past its expiry date; early: not valid yet.
+hv-conn-tls-dates-note = { $state ->
+        [expired] This certificate has expired. A pin doesn't extend the expiry date, so it can't be pinned. Ask whoever runs the server to renew it.
+       *[early] This certificate isn't valid yet. Check the date and time of this Mac, or ask whoever runs the server.
+    }
+# The TLS section of the connection dialog: the endpoint's pinned certificate.
+hv-conn-tls-pin = Pinned certificate
+hv-conn-tls-pin-none = None
+hv-conn-tls-remove-pin = Remove pin
+# In the TLS section when Encryption is Disable and the endpoint has a pinned certificate.
+hv-conn-issue-tls-disable-ignores-pin = With encryption off, the pinned certificate isn't checked. Choose another mode to use the pin.
+# The client certificate's key passphrase field.
+hv-conn-dlg-key-pass = Key passphrase
+# Under the key passphrase field when the key is encrypted and the passphrase is missing or wrong.
+hv-conn-issue-tls-key-passphrase = This key is encrypted. Enter its passphrase.
+# The certificate of a pinned endpoint changed (NOTES M2b surface 5).
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-pin-changed-title = The certificate of { $host }:{ $port } changed
+hv-conn-tls-pin-changed-body = This connection is pinned to one certificate, and the server now presents a different one. { -brand-hacivat } stopped before signing in.
+# The two fingerprints: the pinned one, and the one the server presents now.
+hv-conn-tls-pin-changed-old = Pinned
+hv-conn-tls-pin-changed-new = Now
+hv-conn-tls-pin-changed-ask = A renewed certificate looks like this too. Ask whoever runs the server before you replace the pin.
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-pin-changed-note = Replacing the pin trusts exactly the new certificate for { $host }:{ $port } and removes the old pin. A pin doesn't extend the expiry date.
+hv-conn-tls-pin-changed-replace = Replace pin
+# Toast after Replace pin.
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+hv-conn-tls-pin-changed-done = Pinned the new certificate of { $host }
+# The public-plaintext question (NOTES M2a surface 5): a public host offered no TLS.
+# Variables:
+#   $host (String) - the server's host, e.g. "db.acme.io".
+hv-conn-plain-title = { $host } doesn't offer encryption
+# Variables:
+#   $ip (String) - the server's address, e.g. "203.0.113.10".
+hv-conn-plain-body = { $ip } accepts only unencrypted connections and isn't on a private network. Your password and query results would cross the network in plain text.
+hv-conn-plain-ssh = Use an SSH tunnel…
+hv-conn-plain-connect = Connect without encryption
+hv-conn-plain-remember = Don't ask again for this connection
+
+## m2b-t23-f1
+
+# A line of the read-only popover's findings list (the hv-conn-ro-warn-* family of Task 22):
+# the role may run a PostgreSQL function that writes something a rollback can't undo, such as
+# pg_logical_emit_message (RoleWarning::NonTransactionalWrite).
+hv-conn-ro-warn-non-transactional-write = It can run functions whose effects a rollback can't undo.
+
+## m2b-t24-shots
+
+# The Encryption value of a live connection whose certificate is pinned (M2a NOTES enc-pinned).
+# Variables:
+#   $version (String) - the TLS version the server negotiated, e.g. "TLS 1.3".
+hv-conn-enc-pinned = { $version } · pinned
+# The test report's encryption row for a pinned certificate.
+# Variables:
+#   $version (String) - the TLS version number, e.g. "1.3".
+hv-conn-diag-tls-pinned = TLS { $version } · pinned
+# The same row for a pinned certificate when the TLS version is unknown.
+hv-conn-diag-tls-nov-pinned = TLS · pinned
+# The quick fix of tls.not_supported_by_server: the connection's SSH section (M2a NOTES fix-ssh).
+hv-conn-fix-ssh = Connect through SSH…
+# The sheet's Password row when Forever passwords live in Hacivat's vault (NOTES M2b vault-secret).
+hv-conn-secret-vault = vault · forever

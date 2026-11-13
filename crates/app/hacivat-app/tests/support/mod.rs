@@ -1058,3 +1058,46 @@ pub fn text_of(vcx: &VisualTestContext, id: &str) -> Option<String> {
         .find(|r| r.path.ends_with(&needle))
         .map(|r| r.text.to_string())
 }
+
+// ## m2b-t01-interfaces
+
+/// Waits until `pred` holds (Q4 ruling): each round lets core threads run (`allow_parking` and
+/// a short real sleep), advances the GPUI clock by one frame (16 ms) so its timers fire, and
+/// runs the woken GPUI tasks. Panics naming the predicate after `timeout`. Unlike
+/// [`wait_until`] it moves the executor clock, so use it where GPUI timers must fire too (a
+/// prompt's deferred close, a relay that wakes a timer); a passing wait ends at once.
+#[track_caller]
+pub fn settle_until<F: FnMut() -> bool>(
+    vcx: &VisualTestContext,
+    timeout: std::time::Duration,
+    mut pred: F,
+) {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        vcx.executor().allow_parking();
+        vcx.run_until_parked();
+        if pred() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out after {timeout:?} waiting for {}",
+            std::any::type_name::<F>()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+    }
+}
+
+// ## m2b-t20-ssh
+
+/// A fresh temp folder kept for the app's lifetime (with the shells' own roots), for fixture
+/// files the core runtime reads later (a `~/.ssh/config`).
+pub fn temp_dir(vcx: &VisualTestContext) -> std::path::PathBuf {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().to_path_buf();
+    vcx.cx
+        .update(|cx| cx.default_global::<TempRoots>().0.push(dir));
+    path
+}

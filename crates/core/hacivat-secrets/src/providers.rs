@@ -154,7 +154,7 @@ pub fn resolve_auth(
         return match pgpass_lookup(path, req.host, req.port, database, req.user) {
             Ok(Some(m)) => AuthOutcome::Ready(AuthMaterial {
                 user: m.user,
-                password: Some(m.password),
+                password: m.password,
                 source: SecretSource::PgPass {
                     path: path.clone(),
                     line: m.line,

@@ -241,6 +241,69 @@ fn pg_options_safe(value: &str, gucs: &[String]) -> bool {
     any
 }
 
+// ## m2b-t18-guarded-exec
+
+/// The settings that change which role a PostgreSQL session runs as. On a read-only
+/// connection either one would make the role probe judge another identity than the one the
+/// guard's reset (`SET SESSION AUTHORIZATION DEFAULT`, `RESET ALL`) returns to (Task 18 fix
+/// round 2, I-3b).
+const PG_ROLE_SETTINGS: [&str; 2] = ["role", "session_authorization"];
+
+/// Whether a read-only connect may send this PostgreSQL `options` value. Allowlisted by shape
+/// (Task 18 fix round 3, I-3c): the server parses `options` with POSIX `getopt`, whose
+/// single-dash flags combine (`-ncrole=x` is `-n`, then `-c role=x`), so recognising the
+/// role settings in every spelling is not attempted. Instead, after splitting as the server's
+/// `pg_split_opts` does (C `isspace`, `\` escapes), every word must be one of:
+/// - `-c` followed by a `name=value` word;
+/// - `-cname=value`;
+/// - `--name=value`;
+///
+/// and no name may be `role` or `session_authorization` (ASCII case-insensitive, `-` read as
+/// `_`, surrounding whitespace ignored). Anything else — another backend switch (`-e`, `-P`,
+/// `-f…`), combined flags, a dangling `-c`, a word that is not an option — refuses the value.
+pub fn pg_options_read_only_allowed(value: &str) -> bool {
+    let words = pg_split_opts(value);
+    let mut words = words.iter();
+    while let Some(word) = words.next() {
+        let setting = if word == "-c" {
+            words.next().map(String::as_str)
+        } else {
+            word.strip_prefix("--").or_else(|| word.strip_prefix("-c"))
+        };
+        let Some((name, _)) = setting.and_then(|s| s.split_once('=')) else {
+            return false;
+        };
+        let name = name.trim_matches(c_isspace).replace('-', "_");
+        if name.is_empty()
+            || PG_ROLE_SETTINGS
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(&name))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// The options a read-only profile may not carry, whatever its origin and the unsafe toggle:
+/// a PostgreSQL `options` value outside [`pg_options_read_only_allowed`], as `AlwaysDenied`. A
+/// read-write profile keeps them (`-c role=` is a legitimate feature).
+pub fn read_only_violations(kind: DbmsKind, options: &[(String, String)]) -> Vec<Violation> {
+    if kind != DbmsKind::Postgres {
+        return Vec::new();
+    }
+    options
+        .iter()
+        .filter(|(key, value)| {
+            key.eq_ignore_ascii_case(PG_OPTIONS) && !pg_options_read_only_allowed(value)
+        })
+        .map(|(key, _)| Violation {
+            key: key.clone(),
+            reason: ViolationReason::AlwaysDenied,
+        })
+        .collect()
+}
+
 /// `p` with a leading `~` expanded, made absolute and canonicalized one component at a time:
 /// a component that exists is resolved through the file system (symlinks included), so every
 /// prefix is either canonical or does not exist, and `..` can always drop the last component.

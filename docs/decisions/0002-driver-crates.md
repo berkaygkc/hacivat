@@ -429,3 +429,421 @@ carries the session. This is inherent to a loopback listener and is the same exp
   (`ForwarderMode::Tcp`, R18), so M2a creates no private `0700` socket directory; the unused
   `ConnectDeps::private_dir` and the boot's `fwd` directory are gone. The SSH transport in M2b
   brings one back where a driver can use a Unix socket.
+
+## m2b-t11 — hacivat-driver-sqlite
+
+**Two independent read-only controls.** The file's read-only mode (`Endpoint::File.read_only`
+or a `mode=ro` option) only opens the file `SQLITE_OPEN_READ_ONLY`, as in M2a. A read-only
+profile or session (`DriverConnect.read_only`, which the pipeline sets from the profile OR the
+session, and also passes on the endpoint) opens it read-only too and then hardens the
+connection. A read-write profile gets no authorizer and none of the settings below; M2a's
+defensive and untrusted-schema settings stay on every connection.
+
+**Paths.** `check_path` refuses `hacivat_net::is_network_path` first (two leading separators,
+`\??\`, UNC, device and `GLOBALROOT` prefixes, on every OS), before any file system call; then
+only an absolute path or `:memory:` reaches SQLite (M2a).
+
+**The hardened open** (`harden.rs`, after the header read), in this order, each setting read
+back so an ignored one fails the open (`RawErrorKind::Other`), never a silent weaker session:
+1. `SQLITE_OPEN_READ_ONLY` (the open flags);
+2. `SQLITE_DBCONFIG_DEFENSIVE`;
+3. `SQLITE_DBCONFIG_ENABLE_ATTACH_CREATE` and `_ENABLE_ATTACH_WRITE` off;
+4. `SQLITE_LIMIT_ATTACHED` 0, `LENGTH` 100,000,000, `SQL_LENGTH` 1 MiB, `VARIABLE_NUMBER`
+   32,766 (`hacivat_guard::sqlite_hardening`);
+5. `PRAGMA query_only = 1`;
+6. the authorizer: rusqlite's `AuthAction` mapped to `hacivat_guard::SqliteAction`, answered
+   with `sqlite_authorize`'s verdict. Every action code maps: the nine `CREATE_*` codes
+   (temp, view, trigger, index, virtual table) to `Create`, the nine `DROP_*` codes to `Drop`,
+   `REINDEX` and every `Unknown` code (0 `SQLITE_COPY`, codes past 33, a known code whose
+   arguments rusqlite did not expect) to `Other(code)`, and a variant a later rusqlite adds to
+   `Other(-1)`; `Other` is denied. Tests drive codes 0–33 (and `Unknown` for −1…40, `i32::MIN`,
+   `i32::MAX`) through the adapter, and real statements reach every emitted code 1–33 through
+   a shadow authorizer (controller carry-in from the T5 review).
+
+**Execution** (`exec.rs`). One statement per `execute`: rusqlite's `prepare` refuses a tail
+that holds a statement (`MultipleStatement` → `Db`, `SQLITE_ERROR`, reason
+`multiple-statements`); whitespace, comments and `;` in the tail are fine, and leading `;` are
+empty statements SQLite's parser skips. Text with no statement runs nothing. On a read-only
+profile `sqlite3_stmt_readonly` must also be true, else `Db` with `SQLITE_AUTH` and reason
+`readonly-required`, before the statement steps. This catches what never asks the authorizer
+(`VACUUM`, `VACUUM INTO` by any expression or parameter). Rows come back as text (integers in
+decimal, reals with a fractional digit, blobs as `\x` + hex); at most `max_rows` are kept and
+the rest counted. `command_tag` is the first keyword in ASCII upper case (Q35); a statement
+that is not read-only reports `sqlite3_changes` as `rows_affected` (0 when nothing changed),
+a read reports none. Unbound parameters are NULL (`raw_query`).
+
+**The journal-mode exemption (Q16).** `PRAGMA journal_mode` without an argument compiles to
+`OP_JournalMode` in "query" mode, so `sqlite3_stmt_readonly` calls it a write, yet Q16 lists it
+as readable (the brief's test reads it through `execute`). The authorizer records what it was
+asked while the statement was prepared; the stmt-readonly rule is waived only when that was
+exactly one action, `Pragma { journal_mode, no argument }`. Every form that sets the mode has an
+argument and is denied by the authorizer; the file is read-only and `query_only` is on anyway.
+
+**Transactions and cancel.** `tx_status` is `InTx` exactly when `sqlite3_get_autocommit` is
+off, read on the connection's thread after every `execute` and `batch` (failed ones too).
+`reset` is `Ok(())` and `backend_id` is `None`. `batch` runs trusted control text as several
+statements; the authorizer still applies on a read-only profile.
+
+**Cancel, latched per request (fix round 1, review I1).** `sqlite3_interrupt` alone loses an
+early cancel: SQLite clears the interrupt flag whenever a statement starts while none is active
+(`sqlite3RunParser`, `sqlite3Step`), so a cancel sent after `execute` was submitted but before
+the connection's thread started the statement did nothing (17 of 20 in review). The handle
+(`SqliteCancel`) therefore keeps a latch:
+- `execute` and `batch` take a ticket on the async side before the job is sent. Tickets are
+  handed out in order and their jobs run in order on the connection's thread, which marks the
+  job it runs and records the highest ticket that has ended.
+- `cancel()` acts only while some submitted ticket has not ended: under the latch's lock it
+  cancels every ticket handed out so far (`cancelled_upto = last`) and calls
+  `sqlite3_interrupt`. A cancel while nothing is pending does nothing, and it never covers a
+  ticket handed out later, so it can never reach the next request (Task 7's C1). The latch
+  follows the job, not the future (fix round 2, R1-M1): a request cancelled and then dropped
+  before its job ran still stops, and the next request's ticket does not reset it.
+- The job reads the latch right after `prepare` (before the first step), and a progress handler,
+  installed on every connection, reads it for the job it runs every 1,000 VM steps and
+  interrupts the statement. An interrupt sent just after the last statement stopped is cleared
+  by SQLite when the next statement starts.
+- `close()` (fix round 2, R1-I1) sets a `closing` flag and interrupts before dropping the job
+  sender; the progress handler and the post-prepare checks honour it. A statement whose request
+  future was dropped without a cancel (the session's abandoned path) and any job queued behind
+  it stop, so `close` returns and the connection's thread exits instead of spinning forever.
+- `batch` reads the latch before `execute_batch` only (R1-M2, accepted): a cancel that lands
+  between two short statements of a trusted batch, none of which reaches 1,000 VM steps, lets
+  the batch finish and report `Ok`. Reporting `Cancelled` after the work committed would be
+  wrong, and the text is short and trusted.
+
+An interrupted or latched request is `RawErrorKind::Cancelled` (extended code 9,
+`SQLITE_INTERRUPT`). The handle is safe from any thread and a no-op after close. Tests: 50
+immediate cancels after submit, each bounded and all interrupted; `batch` likewise; a cancel
+before or after a statement, or for a dropped request, never reaches the next one; a cancelled
+then dropped endless request still stops (20 rounds); `close` after dropping two endless
+requests returns within the bound on both profiles. The progress handler is only the latch,
+not a timeout.
+
+**Accepted limitation: WAL side files (fix round 1, review I3; controller ruling).** A
+read-only session on a WAL-mode database may create `-wal` (empty) and `-shm` next to the file
+and leave them after close: SQLite's WAL reader needs the shared-memory index, and a read-only
+connection never checkpoints or unlinks them. The alternatives are unsafe or unavailable:
+`immutable=1` ignores a concurrent writer (wrong reads, possible corruption reports), and
+`readonly_shm` needs existing files and the URI form the driver refuses. The database file
+itself stays byte-identical (test `a_read_only_session_on_a_wal_database_leaves_the_database_file_unchanged`,
+which also checks the `-wal` holds no frames). The other tests now list every file but the
+database itself, so a side file elsewhere would fail them.
+
+**Findings recorded for review.**
+- A denied *function* is `SQLITE_ERROR` with "not authorized to use function: …" (SQLite's
+  resolver rewrites the code); every other denial is `SQLITE_AUTH`. The disabled extension
+  loader on a read-write connection answers "not authorized" only when the statement runs.
+- `readfile`, `writefile` and `edit` are not compiled into the bundled engine ("no such
+  function" comes before the authorizer); they stay on the guard's deny list for any build
+  that adds them, matched with ASCII case folding.
+- A file opened read-only by its own mode without a read-only profile keeps M2a's behaviour
+  (only the flag); the guard and its labels apply to read-only profiles and sessions.
+- Not in this task: a progress-handler timeout (the session's cancel ladder and the latched
+  interrupt cover runaway statements; the progress handler is where a timeout would go).
+- Statements that never ask the authorizer: `VACUUM` and `VACUUM INTO` (refused by
+  `readonly-required`), and `VACUUM temp`, which SQLite skips (`vacuum.c` ignores the temp
+  schema) and which is read-only to `sqlite3_stmt_readonly`: a harmless no-op.
+
+## m2b-t10 — hacivat-driver-pg
+
+- **Wire observer (`wire::Observer`, Q11, Q12).** `tokio-postgres` keeps the backend PID
+  private (`CancelToken.process_id` is `pub(crate)`), returns at an `ErrorResponse` before
+  the `ReadyForQuery` that follows, and exposes no command tag text. A thin stream wrapper reads
+  the protocol as it passes instead of forking the library. It frames backend messages (type
+  byte, big-endian `i32` length counting itself; below 4 or above 1 GiB is `InvalidData`),
+  skips bodies by count and copies only the first bytes of `R` (4), `K` (4), `Z` (1) and `C`
+  (64) into fixed buffers: no allocation per message, so a large `DataRow` or `CopyData` can
+  neither desync it nor cost memory.
+  - **Layering.** `Disable`: one observer, framed from the first byte. With an `SSLRequest`
+    the raw observer reads only the one-byte answer: after `S` it passes the TLS records
+    through untouched, and `PgTlsStream` puts a second, framed observer above rustls, so every
+    `R`, `K`, `Z` and `C` is read **decrypted**; after `N` (`prefer`) the raw observer frames
+    the plaintext itself. Both share one `WireState` (`Arc`).
+  - **PID.** `BackendKeyData` after `AuthenticationOk` and before the first `ReadyForQuery`;
+    `backend_id()` reads it.
+  - **Transaction status, exactly (Q12).** Every `ReadyForQuery` after `AuthenticationOk`
+    records its status byte (`I`/`T`/`E`; anything else is `InvalidData`) and advances a
+    counter with a `tokio::sync::Notify`. The plan's "wait until the count advances" is not
+    exact for the extended protocol: a successful `Parse`/`Sync` round already advanced it
+    before the failing `Bind`/`Execute`/`Sync`, and a dropped statement's `Close`/`Sync` adds
+    one more. So the observer also frames the **frontend** side after `AuthenticationOk` (the
+    startup messages carry no type byte, and nothing is written between `AuthenticationOk` and
+    the first request, so framing starts on a boundary) and counts every `Query`, `Sync` and
+    `FunctionCall`, each of which draws exactly one `ReadyForQuery`. After an error,
+    `execute`, `batch` and `reset` wait (at most 1 s, or until the connection ends) until
+    every one is answered. When all have arrived, `tx_status()` is exact without a sleep.
+    *Fix round 1 (I2):* when the bound expires first (a late segment on a slow tunnel), the
+    status is unknown, so the connection is **broken**: the error becomes a lost connection
+    (`Io(TimedOut)`, the server's message kept), the connection task is aborted, every later
+    call fails with `Io(NotConnected)`, and `tx_status()` reads `Failed`, never the stale
+    status. The session reconnects; a rollback that was not needed is harmless.
+    *Round 1 re-review (R3):* `Io(TimedOut)` means only that the bound expired. When the
+    connection ended first (a FATAL `57P01` from `pg_terminate_backend` or an admin shutdown,
+    then the server closes), it is broken the same way, but a server error keeps its class
+    (`Db`, with its SQLSTATE); any other kind becomes `Io(ConnectionAborted)`.
+  - **Command tag.** The last `CommandComplete` text (cleared before each request) is
+    `ExecSummary::command_tag`, which the read-only post-check reads (`INSERT 0 3`,
+    `CREATE TABLE`); `rows_affected` is its count (`RowStream::rows_affected`, or the simple
+    protocol's `CommandComplete`).
+- **Insecure-auth guard (B8, Q20).** An `AuthenticationCleartextPassword` (code 3) or
+  `AuthenticationMD5Password` (code 5) under `InsecureAuth::RefuseUnlessVerified`, when the TLS
+  outcome is not `Full`, `CaOnly` or `Pinned`, fails the read with an `io::Error` wrapping
+  `InsecureAuthRefusedMarker`, mapped to `RawErrorKind::InsecureAuthRefused`. The refused bytes
+  are removed from the read buffer, so `tokio-postgres` never holds a complete request and
+  never writes a password response, whether the request arrives whole or a byte at a time. The
+  outcome is captured from `TlsParams.outcome` right after this connection's handshake (a later
+  handshake on the same configuration, such as a cancel, cannot change it). The check runs on
+  every `R` message, also after `AuthenticationOk` (a legitimate server never sends one there).
+  It also runs when the profile has no password: the refusal comes before
+  `PasswordRequired`, so nobody is asked for a password that could not be sent. SCRAM (code 10)
+  always passes: it never reveals the password.
+- **Channel binding (B9).** `PgTlsStream::channel_binding()` returns `tls-server-end-point`
+  (`hacivat_net::tls_server_end_point` of the rustls session's `peer_certificates()[0]`), so
+  SCRAM runs as `SCRAM-SHA-256-PLUS` when the server offers it (`channel_binding=prefer`, the
+  `tokio-postgres` default); a leaf without an end-point hash (Ed25519, unknown algorithms)
+  offers none. A scripted server and the `pg17-tls` target with `channel_binding=require`
+  verify it.
+- **Execution.** `Protocol::Simple` streams `simple_query_raw`: the last statement's rows as
+  text, `max_rows` kept and the rest counted (`truncated`), never buffered beyond the cap.
+  `Protocol::Extended` prepares the one statement (several are `42601` from the server),
+  takes the column names from the statement, runs it with no parameters and counts the rows
+  without keeping them. `batch` is `batch_execute`. The command tag, rows and columns of a
+  multi-statement simple query are the **last** statement's, so `INSERT …; SELECT 1` reads as
+  `SELECT 1`: a caller that decides from the tag (Task 18's read-only post-check) must run
+  user statements one at a time through `Protocol::Extended` (review M2). *Fix round 1 (I3):*
+  cells are read with `try_get`; a cell that is not UTF-8 (a `SQL_ASCII` database sends stored
+  bytes unconverted) fails the statement with `RawErrorKind::Other` instead of panicking, and
+  the connection stays in step. *Round 1 re-review (R2):* after the first bad cell the rest of
+  the result is still read to its `ReadyForQuery` (rows dropped, no settle bound), so a decode
+  error early in a large result is `Other` on a usable connection, not a settle timeout.
+- **COPY FROM STDIN (fix round 1, I1).** `tokio-postgres` fails a request that meets a
+  `CopyInResponse` or `CopyBothResponse` (`unexpected message`), while the server waits in
+  copy-in mode: no `ReadyForQuery` would come, `tx_status()` would read the old status and the
+  next request's reply would be matched to the stuck one. The observer therefore answers `G`
+  and `W` (after authentication) itself with `CopyFail("COPY FROM STDIN is not supported
+  yet")`, plus a `Sync` when the last statement-running message was an extended `Execute`
+  (the server ignores the `Sync` already sent during copy-in and then discards until the next
+  one; it is not counted, so the single `ReadyForQuery` settles the one counted `Sync`).
+  *Round 1 re-review (R1):* the `Sync` is injected only when the `Execute`'s own `Sync` has
+  already started out (the writer clears a flag on `E` and sets it on `S`). After a partial
+  write that stopped between `Execute` and `Sync`, the library's `Sync` follows the `CopyFail`
+  and ends the discard itself; a second one would draw an uncounted `ReadyForQuery` and shift
+  every later reply. Exactly one `Sync` reaches the server either way. The layering is
+  unchanged: the injection runs on the framed observer only (above rustls under TLS). The
+  bytes go out only on a frontend message boundary: a message `tokio-postgres` is writing is
+  finished first. The server ends the copy with `ErrorResponse` and one `ReadyForQuery`, which
+  completes the failed request inside `tokio-postgres` too; the call returns
+  `RawErrorKind::Unsupported`, and the status is exact (`Failed` inside `BEGIN`, `Idle` in
+  autocommit). Simple, extended and `batch` paths are Docker-tested; `COPY … TO STDOUT` ends
+  with its own `ReadyForQuery` and is left alone. The driver never uses `Client::copy_in`;
+  it must not while the observer refuses copy-in.
+- **Notices (Q12).** The connection is driven with `poll_fn(|cx| connection.poll_message(cx))`
+  instead of `connection.await` (which logged notice text at `info` and dropped it). Notice
+  SQLSTATEs go into a per-connection buffer of 100 (the oldest dropped first), drained before
+  and after each `execute`; the text is never logged or kept. Notifications are dropped.
+- **Reset (Q10).** `CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *;
+  SELECT pg_advisory_unlock_all(); DISCARD PLANS; DISCARD TEMP; DISCARD SEQUENCES;`, then
+  `SELECT name FROM pg_prepared_statements WHERE from_sql` and one `DEALLOCATE "<name>"`
+  (quoted identifier, `"` doubled) per row. No path sends `DEALLOCATE ALL`: a statement named
+  `ALL` is `DEALLOCATE "ALL"`. `DEALLOCATE ALL` would drop `tokio-postgres`'s cached type-lookup
+  statements and break the next extended query on an enum column (`26000`; Docker-tested).
+  `RESET ALL` returns to the startup values, so the read-only `-c
+  default_transaction_read_only=on` survives a reset (Docker-tested).
+- **Cancel (B23).** `cancel_handle()` returns `PgCancel { token, factory, tls }`: a new stream
+  from the connection's own `StreamFactory` (direct, tunnel or proxy alike) and
+  `CancelToken::cancel_query_raw` over our connector with the connection's `sslmode` and rustls
+  configuration (verifier, pins, CA, client certificate), bounded at 10 s. **A session that ran
+  over TLS never cancels in plaintext:** under `prefer`, a server (or a man in the middle)
+  answering the cancel's `SSLRequest` with `N` fails the request before the PID and secret
+  key are written (`TlsRefusedMarker`, `TlsNotOffered`). The cancel's handshake gets its own
+  failure slot; it runs the same verifier, whose `presented`/`outcome` slots are the
+  connection's (nothing reads them after the connect, and the observer captured the outcome
+  already).
+  - *Fix round 1 (review M1), not closed here.* "One `TlsParams` per handshake" would need
+    a fresh verifier with its own slots. That verifier lives in `hacivat-net` (`Recording`,
+    private) and is built only by `build_tls_params`, which needs the pin endpoint's port and
+    the client key's passphrase; the driver has neither (the endpoint carries no port behind a
+    tunnel, and holding the passphrase in a cancel handle would retain a secret). The residual
+    risk is fail-closed: every handshake through one configuration writes either nothing or
+    the same verified level, so a cancel racing a reconnect that shares the `TlsParams` can
+    only clear `outcome` (the guard then refuses an insecure method once), never raise it. The
+    pipeline (Task 14/17) must build a new `TlsParams` per connect attempt and never reuse one
+    a live cancel handle holds; a `TlsParams::fork()` in `hacivat-net` (same verifier
+    settings, new slots) would let the cancel build its own.
+  - **The cancel race is inherent (review M5).** `cancel()` returning `Ok` means only that the
+    request was written; the server signals the backend asynchronously, and the statement may
+    already have ended (libpq behaves the same). Task 7's sequence guard covers the session
+    side; ADR 0004 is the place for the session's rule.
+  - **Poolers (review M7).** Behind PgBouncer and similar, `BackendKeyData` carries the
+    pooler's key, so `backend_id()` is not a server PID: an escalation that terminates a
+    backend by this PID (Task 7/17) must check `pg_backend_pid()` first or not run through a
+    pooler.
+- **TLS summary.** `verified` is now the handshake's own outcome (a pinned `Require` reads
+  `Pinned`), falling back to the mode's level only when none was recorded.
+- **Known effect until Task 14.** The pipeline's `insecure_auth_for` is still Task 1's
+  fail-closed stub (`RefuseUnlessVerified` everywhere), so an md5 server reached through the
+  pipeline (`pg13` in the Docker matrix, loopback) is refused with `auth.insecure_method` until
+  Task 14 allows loopback, Unix sockets, `Disable` and consented plaintext (B8).
+
+## m2b-t13 — hacivat-driver-mysql
+
+This section supersedes the M2a P11 defect note ("VerifyCa is unsupported in M2a") and the
+"TLS hooks" trust description of `m2a-t14`. The driver runs on the vendored `mysql_async`
+(`third_party/mysql_async`, patches §1–§5, Task 8).
+
+- **TLS is Hacivat's configuration (Q2, patch §5).** Every mode (Auto, Require, VerifyCa,
+  VerifyFull) builds `SslOpts::default().with_rustls_client_config(tls.config.clone())
+  .with_danger_tls_hostname_override(Some(tls_host))`. So MySQL and MariaDB get what
+  PostgreSQL gets: the pin-aware recording verifier (pins, the presented chain for the
+  certificate review, `TlsParams.outcome`), the platform verifier for Auto and VerifyFull,
+  Task 3's `ChainOnly` verifier for VerifyCa, the CA file's certificates, and the client
+  identity Hacivat read and decrypted (an encrypted PKCS #8 key, B25). `mysql_async` builds no
+  `ClientConfig`, root store or `DangerousVerifier` of its own, and never opens a certificate or
+  key file, so the client paths go only through `hacivat_net::paths::local_path` in
+  `build_tls_params` (T12 carry-in).
+  - **The OS-roots path is removed.** `rustls-native-certs` is gone from the crate (the named
+    manifest exception), with `os_roots`, the DER root list, `with_disable_built_in_roots` and
+    the `accept_invalid_certs`/`skip_domain_validation` flags. M2a's "flat trust" difference
+    from PostgreSQL is gone: MySQL now uses the platform verifier, as PostgreSQL does.
+  - **VerifyCa works (P11 superseded).** The driver no longer refuses it; `ChainOnly` checks
+    the chain against the CA file and skips the name. `verify_ca_with_container_ca_skips_the_name`
+    connects to `mysql84` with `mysql84-ca.pem` (`CaOnly`). Patch §1 stays as an upstream bug
+    fix but is no longer on Hacivat's path.
+  - **Platform note.** On Apple, Security.framework refuses MySQL's auto-generated leaf (ten-year
+    validity, no subject alternative name) by policy even with its CA as an extra root; the
+    failure is `UnknownIssuer`, which offers the review/pin flow. Elsewhere VerifyFull with the
+    CA reaches the name check (`NameMismatch`). `pin_flow_on_mysql84` pins it on both.
+  - **One handshake, one `SslOpts`.** `mysql_async` caches a connector per `SslOpts`, so every
+    attempt builds fresh `Opts`, `SslOpts` and guard (T8 carry-in). Auto's plaintext fallback
+    (loopback only, unchanged, Q41) builds `Opts` without TLS.
+- **Password guard, outcome-based (B8, Q20, patch §2).** `password_guard` is evaluated where
+  the server answers "perform full authentication" (`caching_sha2_password` `0x04`, before both
+  the cleartext-over-TLS and the RSA-key branches). The closure reads the attempt's
+  `TlsParams.outcome` at that moment and allows the password when `InsecureAuth::Allow`, or when
+  TLS ran and the outcome is `Full`, `CaOnly` or `Pinned` (`guard_allows`). It is never decided
+  from the mode: Require with a pin passes, Require without one (`No`) is refused. A plaintext
+  attempt never reads an outcome. `DriverError::InsecurePasswordRefused` maps to
+  `RawErrorKind::InsecureAuthRefused`; the trail shows the TLS pair and `AuthStarted`.
+  - **Why reading the shared slot is safe.** rustls gives the verifier no per-connection
+    context, so the slot is shared by every handshake through one `TlsParams.config`. The guard
+    runs only after this connection's handshake completed, which ran the verifier (session
+    resumption is off, Task 3) and wrote the configuration's fixed level. A concurrent
+    handshake through the same configuration can only write the same level or reset the slot
+    to `None` (the guard then refuses once): never raise it. The pipeline still builds one
+    `TlsParams` per attempt (T3/T14 carry); the `KILL QUERY` side connection is a separate
+    `connect` with its own `DriverConnect`.
+  - The Docker tests empty `hv_ro`'s `caching_sha2_password` cache entry before signing in (the
+    account sets its own password again; no account with a known password has `RELOAD`), so
+    full authentication really runs: Disable is refused under `RefuseUnlessVerified` and
+    allowed under `Allow`; Require is refused without a pin and allowed with it.
+- **Capabilities.** `multi_statements(!read_only)` (patch §3): a read-only connection never
+  asks for `CLIENT_MULTI_STATEMENTS`, so `SELECT 1; DROP …` is a syntax error (1064) even for
+  an account that could run both. `local_infile_capability(false)` always (patch §4), and no
+  `LOCAL INFILE` handler is ever installed, so a server's `0xFB` request is refused.
+  `enable_cleartext_plugin(false)` and `secure_auth(true)` stay: the guard's completeness relies
+  on them (Task 8 review).
+- **Execution (HV-EXEC-05).**
+  - `Protocol::Simple` is `query_iter`: rows as text (bytes that are not UTF-8 become U+FFFD,
+    never a panic), `max_rows` kept, the rest counted. With several statements (read-write
+    only) the columns and rows are the last result set's that has columns.
+  - `Protocol::Extended` is `exec_iter(sql, ())`, a prepared statement: rows counted, values
+    dropped. `ER_UNSUPPORTED_PS` (1295) is `Unsupported` on a read-only connection and never
+    re-sent as `COM_QUERY`; on a read-write connection it runs through `query_iter`. A prepared
+    `CALL` runs, but the session's read-only mode (1792) and `hv_ro`'s missing `EXECUTE` (1370)
+    stop its writes (`read_only_prepared_call_cannot_write`).
+  - `rows_affected` is the last OK packet's affected-row count, never the number of rows
+    returned (T5 carry-in): a result set reports 0 there, so the post-check's `SELECT`/`WITH`/
+    `CALL`/`DO` rule reads a positive count as a write.
+  - `command_tag` is the first keyword in ASCII upper case (Q35), after whitespace and
+    comments. An executable comment (`/*!…`, `/*!50000 …`, `/*M!100000 …`) is code, so its
+    keyword counts (`/*!50000 DROP TABLE t */` is `DROP`; `/*!*/ DELETE …` is `DELETE`).
+  - Errors 1317 (`KILL QUERY`), 3024 (`max_execution_time`) and MariaDB's 1969
+    (`max_statement_time`) are `RawErrorKind::Cancelled`; the server's message and code stay
+    (the session reads 1317). The connection stays usable after each
+    (`kill_query_side_connection_cancels_sleep`, the `max_execution_time` test).
+- **Transaction status (HV-SESS-03).** `tx` comes from `SERVER_STATUS_IN_TRANS` in the last OK
+  packet of each call. An ERR packet carries no status flags and never sets it. The brief's "an
+  ERR keeps the previous value" is not exact on its own: `START TRANSACTION; <failing
+  statement>` (read-write multi-statement) leaves the server in a transaction the previous
+  value does not show, a deadlock (1213) rolls one back, and a failing DDL inside a transaction
+  (`CREATE TABLE` of an existing table, 1050) has already committed it implicitly. So after a
+  **server** error (the connection is still in step) the driver sends one `COM_PING` and
+  reads the status flags of its OK packet; if that fails too, or after a transport error, the
+  previous value stays. The Docker tests
+  `a_failed_multi_statement_reports_the_transaction_it_opened` and
+  `a_failing_ddl_inside_a_transaction_commits_it` fail without the re-read.
+  - *Fix round 1 (review I1):* the re-read was a `DO 0` statement, which replaced the
+    diagnostics area: `SHOW WARNINGS`, `SHOW ERRORS`, `GET DIAGNOSTICS`, `@@warning_count` and
+    `ROW_COUNT()` no longer described the failed statement (often the only place a MySQL error
+    names its real cause, such as a foreign-key 150/1005), and every error added a statement to
+    the general and slow logs. `COM_PING` is not a statement and touches none of them
+    (`a_failed_statement_keeps_its_diagnostics`, on MySQL and MariaDB).
+- **Reset and identity.** `reset` is `Conn::reset` (`COM_RESET_CONNECTION`), after which
+  `mysql_async` runs the `setup` statements again, so a read-only connection is
+  `SET SESSION TRANSACTION READ ONLY` again (`reset_keeps_a_read_only_session_read_only`). It
+  clears user variables, temporary tables, prepared statements and `GET_LOCK` locks, ends the
+  transaction, and keeps the current database (Q15: `USE orders` survives). A server without
+  the command is `Unsupported`. `backend_id` is the handshake's thread ID (`CONNECTION_ID()`).
+- **Cancel.** `cancel_handle` stays `None`: the session sends `KILL QUERY <backend_id>` on a
+  side connection it opens through the pipeline (Task 7, Q37), so the driver keeps no
+  credentials for a connection of its own.
+- **TLS summary.** `verified` is the outcome this connection's handshake recorded (`Pinned`,
+  `CaOnly`, `Full`, `No`), read right after the handshake, never a guess from the mode.
+- **Known limits.**
+  - **Client certificates on the matrix.** The MySQL servers verify a presented client
+    certificate against their own auto-generated CA (`ssl_ca = ca.pem`), whose key never leaves
+    the container. `encrypted_pkcs8_client_key` therefore proves the decrypted identity reaches
+    the server by its `unknown_ca` alert; signing in with a client certificate needs a target
+    whose `ssl_ca` trusts a committed test CA (a Task 16/23 fixture).
+  - **Until Task 14** the pipeline's `insecure_auth_for` is the fail-closed stub
+    (`RefuseUnlessVerified` everywhere): a loopback MySQL `Require` profile (outcome `No`) is
+    refused on a `caching_sha2_password` cache miss (`auth.insecure_method`).
+
+## m2b-fix-f2 — hacivat-driver-mysql
+
+Conformance finding F2 (Task 23): on MySQL 8.0 and 8.4 a read-only (or any) session of an
+account without `SYSTEM_VARIABLES_ADMIN` that ran `SET GLOBAL …` or `SET PERSIST …` was told
+"connection lost, outcome unknown", and the session reconnected; over `COM_QUERY` the server
+answers `1227`.
+
+- **Root cause: the server.** A packet capture shows MySQL answering the `COM_STMT_PREPARE` of
+  such a statement with a bare 7-byte OK packet (`00 00 00 02 00 00 00`) instead of the
+  12-byte prepare reply or an ERR packet. `mysql_async` cannot read it as a prepare reply
+  ("can't parse: buf doesn't have enough data", an I/O error), drops the connection, and the
+  server logs the client's hang-up as an aborted connection ("Got an error reading
+  communication packets"). `mysql_async` is right not to accept the packet, so nothing is
+  patched (no `§6`). A scan of 73 statements prepared as `hv_ro` on 8.0 and 8.4 found the
+  same reply for exactly the `SET` forms that change a global or persisted variable:
+  `SET GLOBAL`, `SET PERSIST`, `SET PERSIST_ONLY`, `SET @@global.…`, `SET @@persist.…`,
+  `SET GLOBAL TRANSACTION …`, `SET @a = 1, GLOBAL …`, also inside `/*!…*/`. Every other
+  refusal is an ERR packet (`1227`, `1142`, `1044`), every statement MySQL will not prepare is
+  `1295`, and MariaDB 10.6–11.4 answers `1227` in both protocols.
+- **Fix: a `SET` is never prepared.** `Protocol::Extended` (`exec_iter(sql, ())`) decides the
+  route from the text first (`extended_route`): a `SET` runs over `COM_QUERY` (`query_iter`,
+  rows counted), so the refusal is the server's `1227` with its message, on the same
+  connection, and the status is read again by the `COM_PING` as for any server error. A `SET`
+  binds no parameters here (none are ever bound), returns no rows and is one statement, so
+  its effect is the same over either protocol; every other statement is prepared as before,
+  so the server still finds what it will not prepare (`1295`: read-only `Unsupported`,
+  read-write `COM_QUERY`).
+- **Which texts are a `SET`.** Every reading of the text's start the server may make:
+  whitespace, `#` and `-- ` comments (MySQL's `--` only before whitespace or a control
+  character) and block comments (which do not nest) are skipped; an unversioned `/*!…*/` always
+  runs; a version-gated `/*!NNNNN …*/`, and `/*M!…*/` (MariaDB runs it, MySQL skips it), that
+  holds a statement is read both ways. A read-write connection runs the text as `COM_QUERY`
+  when any reading is a `SET` (it may run a multi-statement text, as `Protocol::Simple` does).
+  A read-only connection does only when every reading that holds a statement is a `SET`, so
+  the prepared protocol's refusal of a statement it cannot prepare is never bypassed; a text
+  read one way as a `SET` and another way as something else is `Unsupported` before anything
+  is sent (`/*!99999 SELECT 1 */ SET …`). More than 64 readings stay prepared.
+- Tests: `a_set_asked_for_as_a_prepared_statement_runs_as_text` (unit, every case above),
+  `a_refused_set_global_is_a_server_error_on_a_live_connection` (Docker, every MySQL-family
+  target, read-write and read-only: `1227`, MariaDB's `SET PERSIST` `1064`, the same backend,
+  `Idle`, nothing changed). The session's F2 test moved to `docker_m2b_bypass.rs`.
+- **Client certificates on the matrix (the `m2b-t13` known limit, closed).** `mysql84-x509`
+  (compose and `targets.toml` `m2b-fix-f2-x509`) trusts a test CA that `mysql-x509-certs`
+  generates at `docker up` into the artifacts directory (nothing committed), serves a
+  certificate that CA signed, and has `hv_x509 … REQUIRE X509`. The session test
+  `mysql_client_certificate_sign_in` (`docker_m2b_tls_ssh.rs`) signs in with the client
+  certificate and its PKCS #8 key, and with the encrypted key and its passphrase, under
+  `VerifyCa` with the test CA (`CaOnly`); without a certificate the server answers `1045`.

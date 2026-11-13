@@ -794,6 +794,51 @@ fn the_sticky_demo_fixture_pushes_one_sticky_toast(cx: &mut TestAppContext) {
     assert!(visible(vcx).is_empty());
 }
 
+// ## m2b-t22-live (fix round 1): an urgent sticky toast (an alert) never waits behind sticky
+// notices: it takes the oldest notice's slot, and that notice shows again when a slot frees.
+#[gpui::test]
+fn an_urgent_sticky_toast_takes_the_oldest_notice_slot(cx: &mut TestAppContext) {
+    let sticky = |urgent: bool| {
+        let mut toast = Toast::new(ToastKind::Info, text("Session lost"));
+        toast.sticky = true;
+        toast.urgent = urgent;
+        toast
+    };
+    let (first, second, alert) = cx.update(|cx| {
+        (
+            ToastQueue::push_id(cx, sticky(false)),
+            ToastQueue::push_id(cx, sticky(false)),
+            ToastQueue::push_id(cx, sticky(true)),
+        )
+    });
+    let vcx = host(cx, |_, _| {
+        div()
+            .size_full()
+            .child(ToastStack::new())
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(1000.0), px(600.0)));
+    vcx.run_until_parked();
+    assert_eq!(visible(vcx), vec![second, alert]);
+    assert_eq!(vcx.read(ToastQueue::waiting), 1);
+
+    // A second alert takes the remaining notice's slot, never the first alert's.
+    let again = vcx.update(|_, cx| ToastQueue::push_id(cx, sticky(true)));
+    vcx.run_until_parked();
+    assert_eq!(visible(vcx), vec![alert, again]);
+
+    vcx.update(|_, cx| ToastQueue::dismiss(cx, alert));
+    vcx.run_until_parked();
+    assert!(visible(vcx).contains(&second), "{:?}", visible(vcx));
+    vcx.update(|_, cx| ToastQueue::dismiss(cx, again));
+    vcx.run_until_parked();
+    let shown = visible(vcx);
+    assert!(
+        shown.contains(&second) && shown.contains(&first),
+        "{shown:?}"
+    );
+}
+
 // ---- explanation popover ----------------------------------------------------------------------
 
 fn explain_fixture(cx: &mut TestAppContext) -> &mut VisualTestContext {
@@ -981,6 +1026,129 @@ fn the_inert_title_bar_keeps_dragging_and_window_buttons_live(cx: &mut TestAppCo
         trace.contains("start_window_move"),
         "the panic did not come from start_window_move:\n{trace}"
     );
+}
+
+// ## m2b-t22-live (fix round 2, R1-I1): every capsule state gives up its text and the capsule
+// is clamped to its room, so the palette field and the trailing controls never move.
+
+/// A title bar holding `model`, `width` wide, drawn until the capsule's fit settles.
+fn mount_bar(cx: &mut TestAppContext, model: CapsuleModel, width: f32) -> &mut VisualTestContext {
+    let vcx = host(cx, move |_, _| {
+        div()
+            .w_full()
+            .child(
+                TitleBar::new(ChromeKind::MacTrafficLights)
+                    .brand("HACIVAT".into())
+                    .capsule(Capsule::new(model.clone()))
+                    .palette_field("Search".into(), "⌘K".into(), |_, _, _| {})
+                    .right(vec![Button::new("theme", "Dark".into()).into_any_element()]),
+            )
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(width), px(300.0)));
+    // The room and the fit are measured in one frame and used in the next.
+    for _ in 0..8 {
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+    }
+    vcx
+}
+
+/// Where the theme button ends in a window wide enough for every capsule: its place.
+fn theme_end(cx: &mut TestAppContext, model: CapsuleModel, width: f32) -> f32 {
+    let vcx = mount_bar(cx, model, width);
+    f32::from(bounds_of(vcx, "button-theme").right())
+}
+
+fn assert_room_kept(vcx: &mut VisualTestContext, width: f32, pad: f32, what: &str) {
+    let palette = bounds_of(vcx, "palette-field");
+    assert!(
+        palette.size.width >= px(170.0 - 0.5),
+        "{what}: the palette field is {palette:?}"
+    );
+    let capsule = bounds_of(vcx, "capsule");
+    assert!(
+        capsule.right() <= palette.left() + px(0.5),
+        "{what}: {capsule:?} runs into {palette:?}"
+    );
+    let theme = bounds_of(vcx, "button-theme");
+    assert!(
+        (f32::from(theme.right()) - (width - pad)).abs() <= 0.5,
+        "{what}: the theme button moved to {theme:?}"
+    );
+}
+
+#[gpui::test]
+fn every_capsule_state_gives_way_and_never_pushes_the_bar(cx: &mut TestAppContext) {
+    let name = "orders-production-replica-eu-west-1";
+    let failed = CapsuleModel::Failed {
+        env: EnvKind::Production,
+        env_label: "PRODUCTION".into(),
+        label: "Couldn't connect to the server".into(),
+        name: name.into(),
+        retry: "Retry the connection".into(),
+    };
+    let reconnecting = CapsuleModel::Reconnecting {
+        env: EnvKind::Production,
+        env_label: "PRODUCTION".into(),
+        name: name.into(),
+        engine: "PostgreSQL 16".into(),
+        label: "Reconnecting · attempt 3".into(),
+        next: Some("in 4 s".into()),
+    };
+    let idle = CapsuleModel::Idle {
+        env: EnvKind::Staging,
+        env_label: "Staging".into(),
+        name: name.into(),
+        engine: "PostgreSQL 16".into(),
+        label: "Disconnected (idle)".into(),
+    };
+    let wide = 6000.0;
+    let pad = wide - theme_end(cx, failed.clone(), wide);
+    for (model, texts_gone, what) in [
+        (
+            failed,
+            vec!["Couldn't connect to the server", "Retry the connection"],
+            "failed",
+        ),
+        (
+            reconnecting,
+            vec!["Reconnecting · attempt 3", "in 4 s"],
+            "reconnecting",
+        ),
+        (idle, vec!["Disconnected (idle)"], "idle"),
+    ] {
+        // Wide: every text shows.
+        let vcx = mount_bar(cx, model.clone(), wide);
+        enable_registry(vcx);
+        let drawn = texts(vcx);
+        for t in &texts_gone {
+            assert!(drawn.contains(&(*t).into()), "{what}: {t} in {drawn:?}");
+        }
+        assert_room_kept(vcx, wide, pad, what);
+        // Narrow: the state's text gives way to its glyph, named by its text.
+        let narrow = 900.0;
+        let vcx = mount_bar(cx, model, narrow);
+        assert_room_kept(vcx, narrow, pad, what);
+        enable_registry(vcx);
+        let drawn = texts(vcx);
+        for t in &texts_gone {
+            assert!(!drawn.contains(&(*t).into()), "{what}: {t} still drawn");
+        }
+        assert!(
+            has(vcx, "capsule-state"),
+            "{what}: no collapsed state glyph"
+        );
+        a11y_record();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        let decls = a11y_take();
+        let first = texts_gone[0];
+        assert!(
+            decls.iter().any(|d| d.name.as_ref() == first),
+            "{what}: the glyph is not named {first}"
+        );
+    }
 }
 
 /// Runs `f`, catching a panic, and returns the panic's message and backtrace as the panic hook
@@ -1396,4 +1564,29 @@ fn a_label_cut_by_a_container_is_clipped(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_label_partly_scrolled_out_of_a_viewport_is_not_clipped(cx: &mut TestAppContext) {
     assert!(!cut_label(cx, true));
+}
+
+// ## m2b-t01-interfaces
+/// M2b Task 1: Reconnecting renders like Connecting (the run marker and its label) with the
+/// next attempt in place of a clock.
+#[gpui::test]
+fn capsule_reconnecting_has_a_run_marker_and_no_clock(cx: &mut TestAppContext) {
+    let model = |next: Option<&'static str>| CapsuleModel::Reconnecting {
+        env: EnvKind::Staging,
+        env_label: "Staging".into(),
+        name: "orders-staging".into(),
+        engine: "PostgreSQL 16".into(),
+        label: "Reconnecting".into(),
+        next: next.map(Into::into),
+    };
+    let (vcx, _) = mount_capsule(cx, model(Some("in 4 s")));
+    assert_eq!(bounds_of(vcx, "capsule-run").size, size(px(7.0), px(7.0)));
+    let drawn = texts(vcx);
+    for t in ["orders-staging", "Reconnecting", "in 4 s"] {
+        assert!(drawn.contains(&t.into()), "{t} in {drawn:?}");
+    }
+    let (vcx, _) = mount_capsule(cx, model(None));
+    let drawn = texts(vcx);
+    assert!(drawn.contains(&"Reconnecting".into()), "{drawn:?}");
+    assert!(!drawn.contains(&"in 4 s".into()), "{drawn:?}");
 }

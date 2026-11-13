@@ -4,7 +4,13 @@
 //! plural selection still works, including decimals and `type: "ordinal"`), `DATETIME` and `LIST`
 //! return custom values. All text is produced by the bundle formatter `hv_format`, which reads the
 //! format locale and time zone from the scoped [`FormatCtx`] (`with_format_ctx`). Plural rules
-//! follow the bundle's (UI) language; digits, separators, dates and lists follow the format locale.
+//! follow the bundle's (UI) language; digits, separators, dates and times follow the format
+//! locale.
+//!
+//! M2b (Task 22, controller ruling): list conjunctions are words inside a UI sentence, so `LIST`
+//! and list arguments follow the language of the bundle that renders the message (a Turkish UI
+//! says "ve" whatever the regional format; an English one "and"). The bundle's language is read
+//! through its memoizer (`BundleLang`).
 //!
 //! Formatters are memoized per thread and per (format locale, options), and the memo is dropped
 //! when the context's generation changes (a language or region switch).
@@ -33,6 +39,7 @@ use icu_decimal::options::{DecimalFormatterOptions, GroupingStrategy};
 use icu_list::ListFormatter;
 use icu_list::options::{ListFormatterOptions, ListLength};
 use icu_locale::Locale;
+use unic_langid::LanguageIdentifier;
 
 use crate::args::{ExactDecimal, ListValue, WhenValue};
 
@@ -98,13 +105,42 @@ where
 }
 
 /// The bundle formatter: numbers and our custom values in the current format context; strings
-/// take Fluent's default path.
-fn hv_format<M>(value: &FluentValue<'_>, _memoizer: &M) -> Option<String> {
+/// take Fluent's default path. Lists take the bundle's language (`memoizer`).
+fn hv_format<M: MemoizerKind>(value: &FluentValue<'_>, memoizer: &M) -> Option<String> {
     match value {
         FluentValue::Number(n) => Some(with_current(|ctx| format_number(ctx, n))),
-        FluentValue::Custom(c) => format_custom(custom_any(c.as_ref())),
+        FluentValue::Custom(c) => {
+            let any = custom_any(c.as_ref());
+            let lang = is_list(any)
+                .then(|| {
+                    memoizer
+                        .with_try_get_threadsafe::<BundleLang, _, _>((), |l| l.0.clone())
+                        .ok()
+                })
+                .flatten();
+            format_custom(any, lang.as_deref())
+        }
         FluentValue::String(_) | FluentValue::None | FluentValue::Error => None,
     }
+}
+
+// ## m2b-t22-live
+/// The language of the bundle a message renders in, as its memoizer knows it: list
+/// conjunctions follow it (see the module docs).
+struct BundleLang(String);
+
+impl intl_memoizer::Memoizable for BundleLang {
+    type Args = ();
+    type Error = std::convert::Infallible;
+
+    fn construct(lang: LanguageIdentifier, _args: ()) -> Result<Self, Self::Error> {
+        Ok(BundleLang(lang.to_string()))
+    }
+}
+
+/// Whether `value` is a list (a `ListValue` argument or what `LIST` returns).
+fn is_list(value: &dyn Any) -> bool {
+    value.is::<ListValue>() || value.is::<ListArg>()
 }
 
 /// The custom value inside the box. (`c.as_any()` on the `Box` itself would resolve to the
@@ -113,7 +149,9 @@ fn custom_any(c: &(dyn FluentType + Send)) -> &dyn Any {
     c.as_any()
 }
 
-fn format_custom(value: &dyn Any) -> Option<String> {
+/// Formats one of our custom values; `ui_lang` is the bundle's language, which lists follow
+/// (the format locale when it is unknown).
+fn format_custom(value: &dyn Any, ui_lang: Option<&str>) -> Option<String> {
     with_current(|ctx| {
         if let Some(d) = value.downcast_ref::<ExactDecimal>() {
             let dec = Decimal::try_from_str(d.0.trim()).ok()?;
@@ -125,11 +163,11 @@ fn format_custom(value: &dyn Any) -> Option<String> {
         } else if let Some(a) = value.downcast_ref::<DateTimeArg>() {
             Some(format_when(ctx, a.when, a.key))
         } else if let Some(l) = value.downcast_ref::<ListValue>() {
-            Some(format_list(ctx, &l.0, ListKind::And))
+            Some(format_list(ctx, &l.0, ListKind::And, ui_lang))
         } else {
             value
                 .downcast_ref::<ListArg>()
-                .map(|l| format_list(ctx, &l.items, l.kind))
+                .map(|l| format_list(ctx, &l.items, l.kind, ui_lang))
         }
     })
 }
@@ -702,8 +740,11 @@ fn list_fn<'a>(positional: &[FluentValue<'a>], named: &FluentArgs) -> FluentValu
     FluentValue::Custom(Box::new(ListArg { items, kind }))
 }
 
-fn format_list(ctx: &FormatCtx, items: &[String], kind: ListKind) -> String {
-    with_memo(ctx, |m, locale| {
+/// `items` joined in `ui_lang` (the language of the sentence they sit in), else in the format
+/// locale.
+fn format_list(ctx: &FormatCtx, items: &[String], kind: ListKind, ui_lang: Option<&str>) -> String {
+    let tag = ui_lang.unwrap_or(ctx.format_locale.as_str());
+    with_memo_at(ctx, tag, |m, locale| {
         m.ensure_list(locale, kind);
         match m.list.get(&kind) {
             Some(Some(f)) => f.format(items.iter().map(String::as_str)).to_string(),
@@ -721,14 +762,24 @@ macro_rules! fluent_type {
             fn duplicate(&self) -> Box<dyn FluentType + Send> {
                 Box::new(self.clone())
             }
-            fn as_string(&self, _: &intl_memoizer::IntlLangMemoizer) -> Cow<'static, str> {
-                format_custom(self.as_any()).unwrap_or_default().into()
+            fn as_string(&self, memoizer: &intl_memoizer::IntlLangMemoizer) -> Cow<'static, str> {
+                let lang = memoizer
+                    .with_try_get::<BundleLang, _, _>((), |l| l.0.clone())
+                    .ok();
+                format_custom(self.as_any(), lang.as_deref())
+                    .unwrap_or_default()
+                    .into()
             }
             fn as_string_threadsafe(
                 &self,
-                _: &intl_memoizer::concurrent::IntlLangMemoizer,
+                memoizer: &intl_memoizer::concurrent::IntlLangMemoizer,
             ) -> Cow<'static, str> {
-                format_custom(self.as_any()).unwrap_or_default().into()
+                let lang = memoizer
+                    .with_try_get::<BundleLang, _, _>((), |l| l.0.clone())
+                    .ok();
+                format_custom(self.as_any(), lang.as_deref())
+                    .unwrap_or_default()
+                    .into()
             }
         }
     };
@@ -759,17 +810,25 @@ struct Memo {
 /// Runs `f` with the memoized formatters of the context's format locale and the parsed locale
 /// (`en-US` when the tag does not parse). The memo is dropped when the generation changes.
 fn with_memo<R>(ctx: &FormatCtx, f: impl FnOnce(&mut LocaleFormatters, &Locale) -> R) -> R {
+    with_memo_at(ctx, ctx.format_locale.as_str(), f)
+}
+
+/// [`with_memo`] for the locale `tag` (a list in the UI language, Task 22).
+fn with_memo_at<R>(
+    ctx: &FormatCtx,
+    tag: &str,
+    f: impl FnOnce(&mut LocaleFormatters, &Locale) -> R,
+) -> R {
     MEMO.with(|memo| {
         let mut memo = memo.borrow_mut();
         if memo.generation != Some(ctx.generation) {
             memo.by_locale.clear();
             memo.generation = Some(ctx.generation);
         }
-        if !memo.by_locale.contains_key(ctx.format_locale.as_str()) {
-            let locale =
-                Locale::try_from_str(&ctx.format_locale).unwrap_or(icu_locale::locale!("en-US"));
+        if !memo.by_locale.contains_key(tag) {
+            let locale = Locale::try_from_str(tag).unwrap_or(icu_locale::locale!("en-US"));
             memo.by_locale.insert(
-                ctx.format_locale.clone(),
+                tag.to_string(),
                 LocaleFormatters {
                     locale: Some(locale),
                     ..LocaleFormatters::default()
@@ -778,7 +837,7 @@ fn with_memo<R>(ctx: &FormatCtx, f: impl FnOnce(&mut LocaleFormatters, &Locale) 
         }
         let entry = memo
             .by_locale
-            .get_mut(ctx.format_locale.as_str())
+            .get_mut(tag)
             .unwrap_or_else(|| unreachable!("inserted above"));
         let locale = entry.locale.take().unwrap_or(icu_locale::locale!("en-US"));
         let out = f(entry, &locale);

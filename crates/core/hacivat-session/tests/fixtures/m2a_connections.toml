@@ -1,0 +1,57 @@
+# Written by an M2a build of Hacivat.
+version = 1
+
+[[connection]]
+id = "6f9619ff-8b86-d011-b42d-00c04fc964ff"
+name = "orders-prod-us"
+engine = "postgres"
+environment = "production"
+read_only = false
+host = "db-prod-us.acme.io"
+port = 5433
+database = "orders"
+user = "deploy"
+auth = "pgpass"
+retention = "forever"
+tls.mode = "verify_full"
+tls.ca_file = "/Users/x/certs/ca.pem"
+transport = "direct"
+connect_timeout_s = 15
+keepalive_s = 60
+application_name = "Hacivat"
+max_connections = 4
+extra = [{ key = "statement_timeout", value = "5000" }]
+origin = "user_typed"
+allow_unsupported_server = false
+
+[[connection]]
+id = "7f9619ff-8b86-d011-b42d-00c04fc964ff"
+name = "shop"
+engine = "mysql"
+read_only = true
+host = "127.0.0.1"
+user = "root"
+retention = "until_restart"
+tls.mode = "auto"
+transport = "ssh_tunnel"
+connect_timeout_s = 30
+application_name = "Hacivat"
+max_connections = 2
+origin = "imported_url"
+allow_unsupported_server = true
+
+[[connection]]
+id = "8f9619ff-8b86-d011-b42d-00c04fc964ff"
+name = "app.db"
+engine = "sqlite"
+read_only = false
+file = "/Users/x/app.db"
+create_if_missing = true
+retention = "never"
+tls.mode = "auto"
+transport = "direct"
+connect_timeout_s = 15
+application_name = "Hacivat"
+max_connections = 1
+origin = "deep_link"
+allow_unsupported_server = false

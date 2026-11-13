@@ -31,7 +31,8 @@ impl Default for Settings {
 pub struct UiSettings {
     /// `ui.language`: the UI language.
     pub language: LanguagePref,
-    /// `ui.regional_format`: the locale for numbers, dates and lists.
+    /// `ui.regional_format`: the locale for numbers, dates and times (list conjunctions follow
+    /// the UI language, m2b-t22-live ruling).
     pub regional_format: LanguagePref,
     /// `ui.time_zone`.
     pub time_zone: TimeZonePref,

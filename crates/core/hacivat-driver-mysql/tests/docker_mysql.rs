@@ -160,6 +160,7 @@ fn build(t: &DockerTarget, s: Spec<'_>) -> DriverConnect {
         mode: s.mode,
         ca_file: s.ca.map(Path::to_path_buf),
         client_cert: None,
+        ..Default::default()
     };
     DriverConnect {
         endpoint: Endpoint::Network {
@@ -171,7 +172,7 @@ fn build(t: &DockerTarget, s: Spec<'_>) -> DriverConnect {
             resolved,
             tls_host: tls_host.clone(),
         },
-        tls: build_tls_params(&settings, &tls_host, class).unwrap(),
+        tls: build_tls_params(&settings, &tls_host, 3306, class, None).unwrap(),
         user: Some(s.user.unwrap_or(&t.user).to_string()),
         password: Some(SecretString::from(s.password.unwrap_or(&t.password))),
         database: Some(s.database.unwrap_or(&t.database).to_string()),
@@ -180,6 +181,9 @@ fn build(t: &DockerTarget, s: Spec<'_>) -> DriverConnect {
         options: vec![],
         connect_timeout: TIMEOUT,
         events: Arc::new(|_| {}),
+        // ## m2b-t13-mysql: the servers are on loopback, where the pipeline allows any sign-in
+        // method (B8); `docker_exec.rs` tests the guard itself.
+        insecure_auth: hacivat_driver::InsecureAuth::Allow,
     }
 }
 
@@ -339,7 +343,19 @@ async fn verify_full_with_the_container_ca_still_checks_the_name() {
         .err()
         .unwrap();
     // The auto-generated leaf's CN is not "localhost".
-    assert_eq!(e.kind, RawErrorKind::Tls(TlsFailure::NameMismatch));
+    // ## m2b-t13-mysql: VerifyFull now runs the platform verifier (Q2). On Apple,
+    // Security.framework refuses that leaf by policy first (a ten-year validity, no subject
+    // alternative name), which `hacivat-net` reports as `UnknownIssuer`; elsewhere the chain
+    // verifies against the CA file and the name check fails. Either way it never connects.
+    let refused = if cfg!(target_vendor = "apple") {
+        matches!(
+            e.kind,
+            RawErrorKind::Tls(TlsFailure::NameMismatch | TlsFailure::UnknownIssuer)
+        )
+    } else {
+        e.kind == RawErrorKind::Tls(TlsFailure::NameMismatch)
+    };
+    assert!(refused, "{:?}", e.kind);
 }
 
 #[tokio::test]

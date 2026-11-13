@@ -226,6 +226,8 @@ fn error_of(class: ErrClass, failed: Option<TrailStep>) -> ConnectError {
             file: None,
             engine: "PostgreSQL".into(),
             version: None,
+            hop: None,
+            hop_host: None,
         },
         server: None,
         fixes: hacivat_driver::fixes_for(class),
@@ -234,6 +236,9 @@ fn error_of(class: ErrClass, failed: Option<TrailStep>) -> ConnectError {
         elapsed: ms(214),
         attempts: 0,
         needs_interaction: false,
+        certificate: None,
+        host_key: None,
+        profile_changes: Vec::new(),
     }
 }
 
@@ -339,14 +344,6 @@ fn profile(vcx: &mut VisualTestContext) -> Arc<Profile> {
 /// The error dialog's count of server rejections in this gesture.
 fn rejections(vcx: &mut VisualTestContext) -> u8 {
     view(vcx).read_with(vcx, |v, _| v.rejections())
-}
-
-/// Waits until a connect started by a fix has reached the fake driver (the first connect of
-/// these tests; it runs on the core runtime).
-fn wait_driver_call(vcx: &mut VisualTestContext) {
-    wait_until_mut(vcx, "the fix's connect to reach the driver", |vcx| {
-        fake(vcx).connect_calls() > 0
-    });
 }
 
 fn live_of(vcx: &mut VisualTestContext) -> LiveState {
@@ -579,6 +576,8 @@ fn ok_report(total: Duration, ping: Duration, server: &str, tls: TlsSummary) -> 
         ping_median: Some(ping),
         warnings: Vec::new(),
         error: None,
+        // ## m2b-t19-tls
+        profile_changes: Vec::new(),
     }
 }
 
@@ -750,6 +749,40 @@ fn ok_strip_lists_every_warning(cx: &mut TestAppContext) {
         text_of(vcx, "diag-warn-value-1"),
         "The server closes idle connections after 60 s."
     );
+}
+
+// ## m2b-t24-shots (follow-up, R6)
+/// A successful test over a pinned certificate, with `version`.
+fn pinned_report(version: Option<&str>) -> TestReport {
+    let tls = TlsSummary {
+        version: version.map(str::to_string),
+        verified: TlsVerified::Pinned,
+        ..tls13_verified()
+    };
+    ok_report(ms(54), ms(12), "PostgreSQL 16.4", tls)
+}
+
+/// A pinned certificate's Encryption row says "pinned", with the version and without it (M2a
+/// NOTES `enc-pinned`), never "verified".
+#[gpui::test]
+fn ok_strip_reads_a_pinned_certificate_as_pinned(cx: &mut TestAppContext) {
+    let vcx = strip_fixture(cx, "en", pinned_report(Some("TLSv1.3")));
+    assert_eq!(diag(vcx, "Encryption"), "TLS 1.3 · pinned");
+    let s = strip(vcx);
+    vcx.cx.update(|cx| {
+        s.update(cx, |s, cx| {
+            s.show(TestStripState::Done(Arc::new(pinned_report(None))), cx)
+        })
+    });
+    vcx.run_until_parked();
+    assert_eq!(diag(vcx, "Encryption"), "TLS · pinned");
+}
+
+/// The same row in Turkish.
+#[gpui::test]
+fn ok_strip_reads_a_pinned_certificate_as_pinned_in_turkish(cx: &mut TestAppContext) {
+    let vcx = strip_fixture(cx, "tr", pinned_report(Some("TLSv1.3")));
+    assert_eq!(text_of(vcx, "diag-tls-value"), "TLS 1.3 · sabitlendi");
 }
 
 #[gpui::test]
@@ -1000,24 +1033,26 @@ fn unsupported_offers_ghost_connect_anyway_and_persists(cx: &mut TestAppContext)
     });
 }
 
+// ## m2b-t14-pipeline (fix round 1, one-time ownership exception): B6 removed M2a's interim
+// "Encrypt without verifying" (R3) from every class; the certificate review replaces it
+// (Task 19 renders Review certificate and Import CA, and deletes `hv-conn-fix-require`).
 #[gpui::test]
-fn tls_untrusted_encrypt_without_verifying(cx: &mut TestAppContext) {
-    let vcx = error_dialog(cx, tls_untrusted("db-qa.acme.io"), ok_fake());
-    assert_eq!(fix_labels(vcx)[0], "Encrypt without verifying");
-    // R3: what the fix gives up is said plainly.
-    assert_eq!(
-        text_of(vcx, "fix-require-note"),
-        "The connection will be encrypted, but Hacivat won't check that the server is who it claims to be."
-    );
-    assert_ne!(button_kind(vcx, "fix-require"), ButtonKind::Primary);
-    click(vcx, "fix-require");
-    wait_driver_call(vcx);
-    assert_eq!(profile(vcx).tls.mode, TlsMode::Require);
-    let sent = fake(vcx).last_request().expect("a connect");
-    assert_eq!(
-        sent.tls.expect("TLS parameters").settings.mode,
-        TlsMode::Require
-    );
+fn tls_untrusted_no_longer_offers_encrypt_without_verifying(cx: &mut TestAppContext) {
+    for class in [ErrClass::TlsUntrusted, ErrClass::TlsHostname] {
+        let mut error = tls_untrusted("db-qa.acme.io");
+        error.class = class;
+        let vcx = error_dialog(cx, error, ok_fake());
+        assert!(
+            !fix_labels(vcx)
+                .iter()
+                .any(|l| l == "Encrypt without verifying"),
+            "{class:?}: {:?}",
+            fix_labels(vcx)
+        );
+        assert!(try_text_of(vcx, "fix-require").is_none(), "{class:?}");
+        assert!(try_text_of(vcx, "fix-require-note").is_none(), "{class:?}");
+        assert!(fix_labels(vcx).contains(&"Edit connection".to_string()));
+    }
 }
 
 #[gpui::test]
@@ -1367,11 +1402,8 @@ fn the_shots_fixtures_open_their_surfaces(cx: &mut TestAppContext) {
             "connection-error",
             "error-title",
         ),
-        (
-            error_view::tls_fixture,
-            "connection-error",
-            "fix-require-note",
-        ),
+        // m2b-t14-pipeline: no "Encrypt without verifying" note any more (B6).
+        (error_view::tls_fixture, "connection-error", "error-title"),
         (
             prod_prompt::preselected_fixture,
             "production-prompt",
@@ -1719,9 +1751,10 @@ fn a_fast_failure_replaces_the_error_shown(cx: &mut TestAppContext) {
 
 // ## m2a-finalfix
 
-/// I2: a service imported with `sslmode=verify-full` is a Verify full profile; "Encrypt without
-/// verifying" saves Require, and the next connect uses Require. No imported extra is left to
-/// override the fix (the form, the fix and the connect agree).
+/// I2: a service imported with `sslmode=verify-full` is a Verify full profile, and no imported
+/// extra is left to override what the form shows. (m2b-t14-pipeline, fix round 1: B6 removed
+/// "Encrypt without verifying", so `tls.untrusted` no longer offers a Require fix; the profile
+/// keeps Verify full.)
 #[gpui::test]
 fn the_require_fix_wins_over_an_imported_sslmode(cx: &mut TestAppContext) {
     use hacivat_app::connections::import::{self, ImportSources};
@@ -1760,14 +1793,8 @@ fn the_require_fix_wins_over_an_imported_sslmode(cx: &mut TestAppContext) {
     assert_eq!(profile(vcx).tls.mode, TlsMode::VerifyFull);
 
     open_dialog_over(vcx, tls_untrusted("127.0.0.1"));
-    click(vcx, "fix-require");
-    wait_driver_call(vcx);
-    assert_eq!(profile(vcx).tls.mode, TlsMode::Require);
-    let sent = fake(vcx).last_request().expect("a connect");
-    assert_eq!(
-        sent.tls.expect("TLS parameters").settings.mode,
-        TlsMode::Require
-    );
+    assert!(try_text_of(vcx, "fix-require").is_none());
+    assert_eq!(profile(vcx).tls.mode, TlsMode::VerifyFull);
 }
 
 /// M4: a server message that is a connection string loses its password on the screen and in
@@ -1803,4 +1830,19 @@ fn a_server_message_is_never_blanked(cx: &mut TestAppContext) {
     let text = clipboard(vcx);
     assert!(!text.contains("s3cret"), "a password reached the clipboard");
     assert!(text.contains("Server message: duplicate key value violates unique constraint"));
+}
+
+// ## m2b-t14-pipeline (fix round 1, one-time ownership exception)
+
+/// An SSH error names the hop's host (`$hop_host`), never a literal `{$hop_host}`.
+#[gpui::test]
+fn an_ssh_error_names_the_hop_host(cx: &mut TestAppContext) {
+    let mut error = error_of(ErrClass::SshAuth, None);
+    error.args.hop = Some(1);
+    error.args.hop_host = Some("bastion.acme.io".into());
+    let vcx = error_dialog(cx, error, ok_fake());
+    assert_eq!(
+        error_title(vcx),
+        "bastion.acme.io rejected the SSH sign-in."
+    );
 }

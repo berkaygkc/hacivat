@@ -9,7 +9,9 @@ publish.workspace = true
 hacivat-proto.workspace = true
 hacivat-driver.workspace = true
 hacivat-net.workspace = true
-rusqlite.workspace = true
+# M2b (Task 1): the read-only hardening and authorizer (Task 11).
+hacivat-guard.workspace = true
+rusqlite = { workspace = true, features = ["hooks", "limits", "modern_sqlite"] }
 tokio = { workspace = true, features = ["rt", "sync"] }
 futures.workspace = true
 

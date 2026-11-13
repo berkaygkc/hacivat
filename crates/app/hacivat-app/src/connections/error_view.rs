@@ -18,10 +18,13 @@
 //!   re-entry passes it to the pipeline as `prior_rejections`, and the pipeline's answer carries
 //!   the gesture's running count (`ConnectError::attempts`). `n` is the count + 1; at 3 the
 //!   field and the fix are gone, so a gesture never causes more than 3 rejections.
-//! - `UseDatabase`, `ConnectAnyway` (persists `allow_unsupported_server`) and
-//!   `EncryptWithoutVerifying` (persists `tls.mode = Require`, R3) save the profile through
-//!   `ConnectionsModel` and connect. A read-only connections file turns them off, with a line
-//!   that says why; a failed save is shown.
+//! - `UseDatabase` and `ConnectAnyway` (persists `allow_unsupported_server`) save the profile
+//!   through `ConnectionsModel` and connect. A read-only connections file turns them off (and the
+//!   certificate fixes, which save a pin or a CA file), with a line that says why; a failed save
+//!   is shown.
+//! - M2b (Task 19): "Review certificate…" and "Import CA…" close the dialog and run in
+//!   `cert_dialog` (it saves the change and connects); M2a's interim "Encrypt without
+//!   verifying" is gone (B6).
 //! - `TryAgain` connects; `EditConnection` opens the connection dialog; `SupportedVersions`
 //!   opens R11's URL.
 //!
@@ -35,7 +38,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_l10n::{Count, NoArgs, Text, ids};
-use hacivat_net::TlsMode;
 use hacivat_proto::{EnvTag, ErrClass, ProfileId};
 use hacivat_session::LiveState;
 use hacivat_session::pipeline::ConnectError;
@@ -221,8 +223,8 @@ impl ErrorView {
     }
 
     /// Where the dialog's focus starts: the primary fix, else Edit connection, else Close.
-    /// A fix that weakens safety (Encrypt without verifying, Connect anyway) never has it, so
-    /// one reflexive Enter cannot run it.
+    /// A fix that weakens safety (Connect anyway) never has it, so one reflexive Enter cannot
+    /// run it.
     fn initial_focus(&mut self, cx: &mut App) -> FocusHandle {
         let buttons = self.fix_buttons(cx);
         let usable = |b: &&FixButton| !b.disabled && !b.action.weakens_safety();
@@ -294,8 +296,16 @@ impl ErrorView {
             FixAction::ConnectAnyway => {
                 self.edit_and_connect(|p| p.allow_unsupported_server = true, window, cx);
             }
-            FixAction::EncryptWithoutVerifying => {
-                self.edit_and_connect(|p| p.tls.mode = TlsMode::Require, window, cx);
+            // ## m2b-t01-interfaces: the M2b flows, after the error dialog closes (Q9).
+            m2b @ (FixAction::ReviewCertificate
+            | FixAction::ImportCa
+            | FixAction::ConnectThroughSsh
+            | FixAction::ReviewHostKey) => {
+                let error = self.error.clone();
+                window.defer(cx, move |window, cx| {
+                    close_layer(window, cx);
+                    crate::connections::fixes::run_m2b_fix(&m2b, &error, profile, window, cx);
+                });
             }
         }
         cx.notify();
@@ -442,7 +452,8 @@ impl ErrorView {
         self.watch = Some(cx.spawn(async move |this, cx| {
             while changes.changed().await.is_ok() {
                 match manager.state(id) {
-                    LiveState::Connecting(_) => continue,
+                    // ## m2b-t01-interfaces: a reconnect is still a connect in progress.
+                    LiveState::Connecting(_) | LiveState::Reconnecting { .. } => continue,
                     LiveState::Connected(_) => {
                         cx.update(|cx| {
                             let _ =
@@ -475,7 +486,8 @@ impl ErrorView {
     /// other than the one shown is shown now: the new error, its count and its trail.
     fn after_start(&mut self, state: LiveState, cx: &mut Context<Self>) -> AfterStart {
         match state {
-            LiveState::Connecting(_) => AfterStart::Watch,
+            // ## m2b-t01-interfaces: a reconnect is still a connect in progress.
+            LiveState::Connecting(_) | LiveState::Reconnecting { .. } => AfterStart::Watch,
             LiveState::Connected(_) => {
                 self.pending = false;
                 AfterStart::Close
@@ -618,9 +630,6 @@ impl ErrorView {
 
         // The fixes.
         let buttons = self.fix_buttons(cx);
-        let offers_require = buttons
-            .iter()
-            .any(|b| b.action == FixAction::EncryptWithoutVerifying);
         let edits_off = buttons
             .iter()
             .any(|b| b.disabled && b.action.edits_profile() && !self.pending);
@@ -642,6 +651,8 @@ impl ErrorView {
                 FixAction::TryAgain => Some(IconName::RotateCw),
                 FixAction::UseDatabase(_) => Some(IconName::Database),
                 FixAction::SupportedVersions => Some(IconName::ExternalLink),
+                // ## m2b-t19-tls: the CA is a file.
+                FixAction::ImportCa => Some(IconName::FileKey),
                 _ => None,
             };
             let mut button = Button::new(b.id.clone(), b.label.clone())
@@ -724,17 +735,7 @@ impl ErrorView {
             ));
         }
 
-        // What "Encrypt without verifying" gives up (R3, ADR known limits), and why fixes are off.
-        if offers_require {
-            block = block.child(paragraph(
-                tr(cx, ids::hv::CONN_FIX_REQUIRE_NOTE, NoArgs),
-                TextSource::Fluent,
-                t.type_ramp.body_sm,
-                c.text_2.to_hsla(),
-                Some("fix-require-note"),
-                cx,
-            ));
-        }
+        // Why fixes are off.
         if edits_off {
             block = block.child(paragraph(
                 tr(cx, ids::hv::CONN_FIX_READ_ONLY, NoArgs),
@@ -1076,6 +1077,9 @@ pub(crate) fn record_text(
             clipped: false,
             truncated: false,
             path: path.into(),
+            // ## m2b-t24-shots
+            visible: true,
+            outside_card: false,
         }
     });
 }
@@ -1193,6 +1197,8 @@ mod shots {
                 file: None,
                 engine: "PostgreSQL".to_string(),
                 version: Some("9.6.24".to_string()),
+                hop: None,
+                hop_host: None,
             },
             server: (!server.is_empty()).then(|| ServerMessage {
                 sqlstate: code.map(str::to_string),
@@ -1209,6 +1215,9 @@ mod shots {
             elapsed: Duration::from_millis(214),
             attempts: u8::from(class == ErrClass::AuthInvalid),
             needs_interaction: false,
+            certificate: None,
+            host_key: None,
+            profile_changes: Vec::new(),
         }
     }
 
@@ -1254,9 +1263,11 @@ mod shots {
         open(e, window, cx);
     }
 
-    /// `tls.untrusted`, with "Encrypt without verifying" and its note.
+    /// `tls.untrusted` with its certificate: Review certificate…, Import CA…, Edit connection
+    /// (m2b-t19-tls: M2a's "Encrypt without verifying" is gone, B6).
     pub fn tls_fixture(window: &mut Window, cx: &mut App) {
-        let e = sample(ErrClass::TlsUntrusted, TrailStep::Tls, None, "");
+        let mut e = sample(ErrClass::TlsUntrusted, TrailStep::Tls, None, "");
+        e.certificate = Some(crate::connections::cert_dialog::sample_review(None));
         open(e, window, cx);
     }
 }
@@ -1266,6 +1277,161 @@ pub use shots::{auth_fixture, tls_fixture, unknown_db_fixture, unsupported_fixtu
 
 #[cfg(feature = "shots")]
 pub(crate) use shots::sample as sample_error;
+
+// ## m2b-t24-shots: the M2b error copy (NOTES M2b surface 7), in M2a's anatomy (R28, P19).
+#[cfg(feature = "shots")]
+mod shots_m2b {
+    use std::time::Duration;
+
+    use hacivat_proto::{ErrClass, FixId, ProfileId};
+    use hacivat_session::pipeline::{ConnectError, StepOutcome, StepTrace, TrailStep};
+    use hacivat_ui_core::gpui_surface::{App, Window};
+
+    use super::{open_error_dialog, sample_error};
+    use crate::connections::cert_dialog::sample_review;
+
+    /// `steps` with every step before `failed` done, `failed` failed and the rest pending.
+    fn trail(steps: &[TrailStep], failed: TrailStep) -> Vec<StepTrace> {
+        let at = steps.iter().position(|s| *s == failed).unwrap_or(0);
+        steps
+            .iter()
+            .enumerate()
+            .map(|(i, &step)| StepTrace {
+                step,
+                outcome: match i.cmp(&at) {
+                    std::cmp::Ordering::Less => StepOutcome::Done,
+                    std::cmp::Ordering::Equal => StepOutcome::Failed,
+                    std::cmp::Ordering::Greater => StepOutcome::Pending,
+                },
+                elapsed: (i < at).then(|| Duration::from_millis(3 + 7 * i as u64)),
+            })
+            .collect()
+    }
+
+    /// `class` before the server was checked (no version), failing at `failed` of `steps`.
+    fn error(class: ErrClass, steps: &[TrailStep], failed: TrailStep) -> ConnectError {
+        let mut e = sample_error(class, failed, None, "");
+        e.trail = trail(steps, failed);
+        e.args.version = None;
+        e
+    }
+
+    /// Under SSH the trail starts with the tunnel (NOTES: Resolve drops out, B11).
+    const SSH_STEPS: [TrailStep; 5] = [
+        TrailStep::Ssh,
+        TrailStep::Connect,
+        TrailStep::Tls,
+        TrailStep::SignIn,
+        TrailStep::CheckServer,
+    ];
+    const TLS_STEPS: [TrailStep; 5] = [
+        TrailStep::Resolve,
+        TrailStep::Connect,
+        TrailStep::Tls,
+        TrailStep::SignIn,
+        TrailStep::CheckServer,
+    ];
+
+    /// An SSH failure at hop `hop` (from 0) of `bastion.acme.io`.
+    fn ssh(class: ErrClass, hop: u8) -> ConnectError {
+        let mut e = error(class, &SSH_STEPS, TrailStep::Ssh);
+        e.args.hop = Some(hop);
+        e.args.hop_host = Some("bastion.acme.io".to_string());
+        e
+    }
+
+    fn open(error: ConnectError, window: &mut Window, cx: &mut App) {
+        open_error_dialog(ProfileId::new(), std::sync::Arc::new(error), window, cx);
+    }
+
+    /// `auth.insecure_method` over unverified TLS: Review certificate…, Edit connection.
+    pub fn insecure_tls_fixture(window: &mut Window, cx: &mut App) {
+        let mut e = error(ErrClass::AuthInsecureMethod, &TLS_STEPS, TrailStep::SignIn);
+        e.certificate = Some(sample_review(None));
+        e.fixes = vec![FixId::ReviewCertificate, FixId::EditConnection];
+        open(e, window, cx);
+    }
+
+    /// `auth.insecure_method` without TLS: no TLS step, Edit connection only (NOTES ruling 10).
+    pub fn insecure_plain_fixture(window: &mut Window, cx: &mut App) {
+        let steps = [
+            TrailStep::Resolve,
+            TrailStep::Connect,
+            TrailStep::SignIn,
+            TrailStep::CheckServer,
+        ];
+        let mut e = error(ErrClass::AuthInsecureMethod, &steps, TrailStep::SignIn);
+        e.fixes = vec![FixId::EditConnection];
+        open(e, window, cx);
+    }
+
+    /// `tls.pin_changed`: Review certificate… (NOTES M2b surface 5).
+    pub fn pin_changed_fixture(window: &mut Window, cx: &mut App) {
+        let mut e = error(ErrClass::TlsPinChanged, &TLS_STEPS, TrailStep::Tls);
+        e.certificate = Some(sample_review(Some([0x5C; 32])));
+        open(e, window, cx);
+    }
+
+    /// `ssh.auth` at hop 2.
+    pub fn ssh_auth_fixture(window: &mut Window, cx: &mut App) {
+        open(ssh(ErrClass::SshAuth, 1), window, cx);
+    }
+
+    /// `ssh.channel_open` at hop 2 (AllowTcpForwarding).
+    pub fn ssh_channel_fixture(window: &mut Window, cx: &mut App) {
+        open(ssh(ErrClass::SshChannelOpen, 1), window, cx);
+    }
+
+    /// `ssh.agent_unavailable` at hop 1.
+    pub fn ssh_agent_fixture(window: &mut Window, cx: &mut App) {
+        open(ssh(ErrClass::SshAgentUnavailable, 0), window, cx);
+    }
+
+    /// `ssh.host_key_changed` at hop 2: Review host key… (NOTES M2b surface 1).
+    pub fn host_key_changed_fixture(window: &mut Window, cx: &mut App) {
+        let mut e = ssh(ErrClass::SshHostKeyChanged, 1);
+        let (old, new) = crate::connections::prompt_kit::shots::host_keys();
+        e.host_key = Some(hacivat_session::pipeline::HostKeyMismatch {
+            hop: 1,
+            host: "bastion.acme.io".to_string(),
+            port: 22,
+            old,
+            new,
+            source: hacivat_net::ssh::KnownSource::Hacivat,
+        });
+        open(e, window, cx);
+    }
+
+    /// `ssh.host_key_revoked` at hop 2.
+    pub fn host_key_revoked_fixture(window: &mut Window, cx: &mut App) {
+        open(ssh(ErrClass::SshHostKeyRevoked, 1), window, cx);
+    }
+
+    /// `ssh.host_key_unknown` at hop 2 (fix round 1, M7): a connect that could not ask.
+    pub fn host_key_unknown_fixture(window: &mut Window, cx: &mut App) {
+        open(ssh(ErrClass::SshHostKeyUnknown, 1), window, cx);
+    }
+
+    // ## m2b-t24-shots (follow-up)
+    /// `tls.not_supported_by_server` of a direct connection under Require: the pipeline keeps
+    /// the registry's fixes, "Connect through SSH…" and Edit connection.
+    pub fn tls_not_offered_fixture(window: &mut Window, cx: &mut App) {
+        let mut e = error(
+            ErrClass::TlsNotSupportedByServer,
+            &TLS_STEPS,
+            TrailStep::Tls,
+        );
+        e.fixes = vec![FixId::ConnectThroughSsh, FixId::EditConnection];
+        open(e, window, cx);
+    }
+}
+
+#[cfg(feature = "shots")]
+pub use shots_m2b::{
+    host_key_changed_fixture, host_key_revoked_fixture, host_key_unknown_fixture,
+    insecure_plain_fixture, insecure_tls_fixture, pin_changed_fixture, ssh_agent_fixture,
+    ssh_auth_fixture, ssh_channel_fixture, tls_not_offered_fixture,
+};
 
 #[cfg(test)]
 mod tests {
@@ -1295,6 +1461,8 @@ mod tests {
                 file: None,
                 engine: "PostgreSQL".into(),
                 version: None,
+                hop: None,
+                hop_host: None,
             },
             server: None,
             fixes: Vec::new(),
@@ -1303,6 +1471,9 @@ mod tests {
             elapsed: Duration::from_millis(5),
             attempts,
             needs_interaction: false,
+            certificate: None,
+            host_key: None,
+            profile_changes: Vec::new(),
         })
     }
 

@@ -105,31 +105,130 @@ fn bare_userinfo(s: &str) -> Option<&str> {
 /// A server's message without a password: [`scrub_url`], unless that would leave nothing of a
 /// message that had text. Free text is no connection string, and `scrub_url` can read a whole
 /// sentence as one `key=value` segment (`duplicate key value … Key (id)=(1) already exists.`)
-/// and drop it. Then only the whitespace-separated `key=value` words whose key is secret (the
-/// scrubber's own rule: a password key, or a `pass`/`pwd`/`secret`/`token`/`key` fragment) lose
-/// their value (`password=<removed>`); every other word, and the whitespace, stays as the
-/// server sent it.
+/// and drop it. Then only the values of secret keys (the scrubber's own rule: a password key,
+/// or a `pass`/`pwd`/`secret`/`token`/`key` fragment) are removed (`password=<removed>`); every
+/// other word, and the whitespace, stays as the server sent it. A value is found:
+/// - in a whitespace-separated word, also after `;` (`user=u;password=<removed>`, R2-2);
+/// - after a spaced `=` (`password = <removed>`, `password =<removed>`, `password= <removed>`);
+/// - over the following words of a quoted value with spaces (`password='a b'`).
 pub fn scrub_message(text: &str) -> String {
     let scrubbed = scrub_url(text);
     if !scrubbed.trim().is_empty() || text.trim().is_empty() {
         return scrubbed;
     }
-    text.split_inclusive(char::is_whitespace)
-        .map(|word| {
-            let body = word.trim_end_matches(char::is_whitespace);
-            let space = &word[body.len()..];
-            match body.split_once('=') {
-                Some((key, _)) if !key_of(key).is_empty() && is_secret_key(key_of(key)) => {
-                    format!("{key}={REMOVED}{space}")
+    let mut out = String::with_capacity(text.len());
+    let mut open = Open::Nothing;
+    for word in text.split_inclusive(char::is_whitespace) {
+        let body = word.trim_end_matches(char::is_whitespace);
+        let space = &word[body.len()..];
+        if body.is_empty() {
+            out.push_str(word);
+            continue;
+        }
+        open = match open {
+            // The rest of a quoted value goes, with the space after it.
+            Open::Quote(q) => {
+                if body.ends_with(q) {
+                    out.push_str(space);
+                    Open::Nothing
+                } else {
+                    Open::Quote(q)
                 }
-                _ => word.to_string(),
             }
-        })
-        .collect()
+            Open::Value => {
+                let next = removed_value(body, &mut out);
+                if next == Open::Nothing {
+                    out.push_str(space);
+                }
+                next
+            }
+            Open::Equals if body == "=" => {
+                out.push_str(word);
+                Open::Value
+            }
+            Open::Equals if body.starts_with('=') => {
+                out.push('=');
+                let next = removed_value(&body[1..], &mut out);
+                if next == Open::Nothing {
+                    out.push_str(space);
+                }
+                next
+            }
+            Open::Nothing | Open::Equals => {
+                let next = scrub_word(body, &mut out);
+                if !matches!(next, Open::Quote(_)) {
+                    out.push_str(space);
+                }
+                next
+            }
+        };
+    }
+    out
 }
 
-/// The option name at the end of `s` (`(password` → `password`, `"pwd` → `pwd`).
+/// What a word of [`scrub_message`]'s fallback leaves open for the next one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Open {
+    Nothing,
+    /// A secret key ended the word: a `=` may follow.
+    Equals,
+    /// A secret key's `=` ended the word: its value follows.
+    Value,
+    /// A quoted secret value goes on until a word ends with this quote.
+    Quote(char),
+}
+
+/// Writes `<removed>` for the secret value `value`; a quoted value that does not close in it
+/// stays open.
+fn removed_value(value: &str, out: &mut String) -> Open {
+    out.push_str(REMOVED);
+    match value.chars().next() {
+        Some(q @ ('\'' | '"')) if value.len() == 1 || !value.ends_with(q) => Open::Quote(q),
+        _ => Open::Nothing,
+    }
+}
+
+/// Writes `body` (a whitespace-free word) with the value of each secret `key=value` among its
+/// `;`-separated parts removed, and says what the word leaves open.
+fn scrub_word(body: &str, out: &mut String) -> Open {
+    let parts: Vec<&str> = body.split_inclusive(';').collect();
+    let last = parts.len() - 1;
+    for (i, part) in parts.into_iter().enumerate() {
+        let (part, semi) = match part.strip_suffix(';') {
+            Some(p) => (p, ";"),
+            None => (part, ""),
+        };
+        let open_end = i == last && semi.is_empty();
+        match part.split_once('=') {
+            Some((key, value)) if !key_of(key).is_empty() && is_secret_key(key_of(key)) => {
+                out.push_str(key);
+                out.push('=');
+                if value.is_empty() && open_end {
+                    return Open::Value;
+                }
+                let open = removed_value(value, out);
+                out.push_str(semi);
+                if open_end {
+                    return open;
+                }
+            }
+            None if open_end && !key_of(part).is_empty() && is_secret_key(key_of(part)) => {
+                out.push_str(part);
+                return Open::Equals;
+            }
+            _ => {
+                out.push_str(part);
+                out.push_str(semi);
+            }
+        }
+    }
+    Open::Nothing
+}
+
+/// The option name at the end of `s` (`(password` → `password`, `"pwd` → `pwd`); closing
+/// quotes after it are skipped (`"password"` → `password`; fix round 1, M12).
 fn key_of(s: &str) -> &str {
+    let s = s.trim_end_matches(['"', '\'', '`']);
     let start = s
         .char_indices()
         .rev()
@@ -564,6 +663,46 @@ mod tests {
         );
         assert_eq!(scrub_message("plain text"), "plain text");
         assert_eq!(scrub_message(""), "");
+    }
+
+    /// M2a re-review R2-2: the word-by-word fallback also hides a password after `;` in one
+    /// word, around a spaced `=`, and in a quoted value with spaces.
+    #[test]
+    fn the_fallback_hides_semicolon_spaced_and_quoted_passwords() {
+        let lead = "duplicate key value violates unique constraint \"t_pkey\" DETAIL: Key (id)=(1)";
+        for (tail, want) in [
+            ("user=u;password=s3cret", "user=u;password=<removed>"),
+            ("password = s3cret user=u", "password = <removed> user=u"),
+            ("password =s3cret user=u", "password =<removed> user=u"),
+            ("password= s3cret user=u", "password= <removed> user=u"),
+            ("password='s3 cret' user=u", "password=<removed> user=u"),
+            ("pwd = \"s3 cr et\" user=u", "pwd = <removed> user=u"),
+        ] {
+            let message = format!("{lead} {tail}");
+            assert_eq!(scrub_url(&message), "", "the fallback runs for {tail:?}");
+            let scrubbed = scrub_message(&message);
+            assert_eq!(scrubbed, format!("{lead} {want}"), "{tail:?}");
+            assert!(!scrubbed.contains("s3"), "{scrubbed}");
+        }
+        // M12 (fix round 1): a quoted key loses its value too.
+        for (tail, want) in [
+            (
+                "\"password\"=\"s3cret\" user=u",
+                "\"password\"=<removed> user=u",
+            ),
+            ("'pwd'='s3cret' user=u", "'pwd'=<removed> user=u"),
+        ] {
+            let message = format!("{lead} {tail}");
+            assert_eq!(scrub_url(&message), "", "the fallback runs for {tail:?}");
+            assert_eq!(
+                scrub_message(&message),
+                format!("{lead} {want}"),
+                "{tail:?}"
+            );
+        }
+        // A secret-looking word without `=` after it stays (`key` here is prose).
+        let prose = format!("{lead} the key is fine");
+        assert_eq!(scrub_message(&prose), prose);
     }
 
     // ## m2a-finalfix

@@ -80,6 +80,69 @@ pub enum Endpoint {
     },
 }
 
+// ## m2b-t01-interfaces
+
+/// A connection's transaction status, as the protocol reports it (HV-SESS-03).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TxStatus {
+    #[default]
+    Idle,
+    InTx,
+    /// In a transaction that failed: only a rollback is accepted (PostgreSQL).
+    Failed,
+}
+
+/// Which wire protocol a statement uses (PostgreSQL's extended or simple query protocol).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Protocol {
+    #[default]
+    Extended,
+    Simple,
+}
+
+/// How one statement runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExecOpts {
+    /// The most rows kept; the rest are counted (`ExecSummary::truncated`).
+    pub max_rows: usize,
+    pub protocol: Protocol,
+}
+
+impl Default for ExecOpts {
+    /// 1,000 rows, the extended protocol.
+    fn default() -> Self {
+        ExecOpts {
+            max_rows: 1000,
+            protocol: Protocol::Extended,
+        }
+    }
+}
+
+/// What one statement did. Values are text as the server sent them (`None` for SQL NULL).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct ExecSummary {
+    pub command_tag: Option<String>,
+    pub rows_affected: Option<u64>,
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Option<String>>>,
+    pub row_count: u64,
+    pub truncated: bool,
+    /// SQLSTATE codes of the notices the statement raised.
+    pub notice_codes: Vec<String>,
+    /// The transaction status after the statement.
+    pub tx: TxStatus,
+}
+
+/// Whether a driver may send a password by an insecure method (cleartext or MD5 over an
+/// unverified channel) (B8, Q20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum InsecureAuth {
+    /// Refuse unless the channel is verified TLS (or local).
+    #[default]
+    RefuseUnlessVerified,
+    Allow,
+}
+
 /// One connect request to a driver (HV-CONN-01). Holds the password: its `Debug` redacts it.
 pub struct DriverConnect {
     pub endpoint: Endpoint,
@@ -93,6 +156,9 @@ pub struct DriverConnect {
     pub options: Vec<(String, String)>,
     pub connect_timeout: Duration,
     pub events: DriverEvents,
+    // ## m2b-t01-interfaces
+    /// The insecure-auth guard (B8, Q20); the drivers enforce it from Tasks 10 and 13.
+    pub insecure_auth: InsecureAuth,
 }
 
 impl fmt::Debug for DriverConnect {
@@ -107,6 +173,7 @@ impl fmt::Debug for DriverConnect {
             .field("read_only", &self.read_only)
             .field("options", &self.options)
             .field("connect_timeout", &self.connect_timeout)
+            .field("insecure_auth", &self.insecure_auth)
             .finish_non_exhaustive()
     }
 }
@@ -147,6 +214,48 @@ pub trait RawConn: Send + 'static {
     fn list_databases(&mut self, limit: usize) -> BoxFuture<'_, Result<Vec<String>, RawError>>;
     fn close(self: Box<Self>) -> BoxFuture<'static, ()>;
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>>;
+    // ## m2b-t01-interfaces
+    /// Runs one user statement (HV-EXEC-05).
+    fn execute<'a>(
+        &'a mut self,
+        sql: &'a str,
+        opts: ExecOpts,
+    ) -> BoxFuture<'a, Result<ExecSummary, RawError>>;
+    /// Runs trusted control text (guard plans, environment), with the simple protocol.
+    fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>>;
+    /// The transaction status after the last statement.
+    fn tx_status(&self) -> TxStatus;
+    /// Returns the connection to a clean session state: PostgreSQL the `DISCARD ALL` sequence
+    /// minus `DEALLOCATE ALL` (Q10), MySQL `COM_RESET_CONNECTION`, SQLite nothing.
+    fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>>;
+    /// The server's ID of this connection: the PostgreSQL backend PID (from `BackendKeyData`,
+    /// Q11), the MySQL thread ID.
+    fn backend_id(&self) -> Option<u64>;
+    // ## m2b-t17-liveness (fix round 4, I9/R5)
+    /// MySQL and MariaDB: whether the session autocommits, from the server's status flags
+    /// (`SERVER_STATUS_AUTOCOMMIT`) as of the last round trip, so a procedure, a prepared
+    /// statement, `SET autocommit = @v`, `init_connect` or a global default are all seen.
+    /// `None` when the engine has no such setting or the driver does not know (yet).
+    fn autocommit(&self) -> Option<bool> {
+        None
+    }
+}
+
+// ## m2b-f3-internal-reads
+impl ExecOpts {
+    /// For a statement whose values the caller reads (Hacivat's own probes: the reset's verify
+    /// probe, the schema probe, the role probe, the guard's canary): the simple protocol, whose
+    /// rows every driver returns as text, at most `max_rows` of them.
+    ///
+    /// [`Protocol::Extended`] (the default) is the count-only path: the PostgreSQL and MySQL
+    /// drivers count its rows and drop their values (`ExecSummary::rows` stays empty), so a
+    /// value read sent there never sees its answer (finding F3). `FakeDriver` does the same.
+    pub fn values(max_rows: usize) -> Self {
+        ExecOpts {
+            max_rows,
+            protocol: Protocol::Simple,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -170,6 +279,7 @@ mod tests {
             options: vec![],
             connect_timeout: Duration::from_secs(15),
             events: Arc::new(|_| {}),
+            insecure_auth: InsecureAuth::default(),
         };
         let s = format!("{req:?}");
         assert!(!s.contains("s3cret"), "{s}");

@@ -456,7 +456,8 @@ fn new_dialog_is_640_and_focuses_host(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn tab_order_matches_the_mock_without_ssh(cx: &mut TestAppContext) {
+// ## m2b-t20-ssh: the mock's order now has the SSH disclosure between TLS and Advanced.
+fn tab_order_matches_the_mock(cx: &mut TestAppContext) {
     let vcx = open_new(cx, "en");
     assert_eq!(
         tab_walk(vcx, "url"),
@@ -474,6 +475,7 @@ fn tab_order_matches_the_mock_without_ssh(cx: &mut TestAppContext) {
             "password",
             "remember",
             "tls",
+            "ssh",
             "advanced",
             "test",
             "cancel",
@@ -624,15 +626,15 @@ fn mysql_hides_pgpass(cx: &mut TestAppContext) {
     );
 }
 
+// ## m2b-t19-tls: MySQL and MariaDB verify the chain since M2b (B10): M2a's P11 is gone.
 #[gpui::test]
-fn mysql_disables_verify_ca(cx: &mut TestAppContext) {
+fn every_engine_offers_verify_ca(cx: &mut TestAppContext) {
     let vcx = open_new(cx, "en");
-    // P11.
     assert!(!tls_option_disabled(vcx, TlsMode::VerifyCa));
     choose_engine(vcx, DbmsKind::MySql);
-    assert!(tls_option_disabled(vcx, TlsMode::VerifyCa));
+    assert!(!tls_option_disabled(vcx, TlsMode::VerifyCa));
     choose_engine(vcx, DbmsKind::MariaDb);
-    assert!(tls_option_disabled(vcx, TlsMode::VerifyCa));
+    assert!(!tls_option_disabled(vcx, TlsMode::VerifyCa));
 }
 
 #[gpui::test]
@@ -652,8 +654,9 @@ fn inline_fix_reenter_clears_and_focuses_password(cx: &mut TestAppContext) {
     emit_strip_fix(vcx, FixAction::ReenterPassword);
     assert_eq!(password_value(vcx), "");
     assert_eq!(focused_field(vcx), "password");
-    emit_strip_fix(vcx, FixAction::EncryptWithoutVerifying);
-    assert_eq!(draft_tls_mode(vcx), TlsMode::Require);
+    // ## m2b-t19-tls: no fix weakens the TLS mode any more (B6: "Encrypt without verifying"
+    // is gone); the mode stays as typed.
+    assert_eq!(draft_tls_mode(vcx), TlsMode::Auto);
 }
 
 #[gpui::test]
@@ -982,15 +985,16 @@ fn creating_a_file_opened_read_only_is_an_issue(cx: &mut TestAppContext) {
     assert!(profile_names(vcx).is_empty());
 }
 
+// ## m2b-t19-tls: the key passphrase field shows with the client certificate (B25).
 #[gpui::test]
-fn client_certificate_has_no_passphrase_field_and_a_pasted_one_is_kept(cx: &mut TestAppContext) {
+fn client_certificate_has_a_passphrase_field_and_a_pasted_one_is_kept(cx: &mut TestAppContext) {
     let vcx = open_new(cx, "en");
     click_selector(vcx, "segmented-conn-auth-2");
     assert_eq!(
         read(vcx, |d, _| d.profile().auth),
         hacivat_secrets::AuthProviderId::ClientCert
     );
-    assert!(has_field(vcx, "cert") && has_field(vcx, "key") && !has_field(vcx, "key-pass"));
+    assert!(has_field(vcx, "cert") && has_field(vcx, "key") && has_field(vcx, "key-pass"));
     // Leaving Client certificate drops its files.
     type_into(vcx, "cert", "/tmp/hv-client.crt");
     click_selector(vcx, "segmented-conn-auth-0");

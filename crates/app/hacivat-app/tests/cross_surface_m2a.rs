@@ -380,6 +380,9 @@ fn the_leak_check_finds_english_text() {
         clipped: false,
         truncated: false,
         path: "x.rs:1:1".into(),
+        // ## m2b-t24-shots (fix round 1): the registry's two new facts.
+        visible: true,
+        outside_card: false,
     };
     let leaks = english_leaks(&[
         label("New connection"),

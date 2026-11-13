@@ -34,6 +34,52 @@ pub enum Rule {
     MissingWorkspaceLints,
     /// The manifest lives outside every known layer directory.
     UnknownLayer,
+    // ## m2b-t01-interfaces
+    /// `hacivat-guard` reaches a runtime crate through its normal dependencies (§5.1 rule 3).
+    GuardNotRuntimeFree,
+}
+
+// ## m2b-t01-interfaces
+/// The sans-I/O read-only guard.
+const GUARD: &str = "hacivat-guard";
+/// What the guard's normal-dependency closure may not contain (§5.1 rule 3).
+const GUARD_FORBIDDEN: [&str; 6] = [
+    "tokio",
+    "futures",
+    "salsa",
+    "hacivat-l10n",
+    "sql-sema",
+    "gpui",
+];
+
+/// The guard rule: a breadth-first walk over normal edges only (dev and build dependencies may
+/// use a runtime); the first path to a forbidden crate is reported.
+fn guard_violation(
+    root: &PackageId,
+    edges: &Edges<'_>,
+    pkgs: &HashMap<&PackageId, &Package>,
+) -> Option<Vec<String>> {
+    let mut seen: BTreeSet<&PackageId> = BTreeSet::from([root]);
+    let mut queue: VecDeque<(&PackageId, Vec<String>)> = VecDeque::from([(root, vec![])]);
+    while let Some((id, path)) = queue.pop_front() {
+        for (dep_id, kinds) in edges.get(id).into_iter().flatten() {
+            if !kinds.contains(&DependencyKind::Normal) {
+                continue;
+            }
+            let Some(dep) = pkgs.get(dep_id) else {
+                continue;
+            };
+            let mut via = path.clone();
+            via.push(dep.name.to_string());
+            if GUARD_FORBIDDEN.contains(&dep.name.as_str()) {
+                return Some(via);
+            }
+            if seen.insert(dep_id) {
+                queue.push_back((dep_id, via));
+            }
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +205,13 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
             add(name, Rule::UnknownLayer, vec![]);
             continue;
         };
+
+        // ## m2b-t01-interfaces
+        if name == GUARD
+            && let Some(via) = guard_violation(&root.id, &edges, &pkgs)
+        {
+            add(name, Rule::GuardNotRuntimeFree, via);
+        }
 
         if PRODUCT_CRATES.contains(&name)
             && let Some(bad) = root.dependencies.iter().find(|d| {
@@ -653,6 +706,39 @@ mod tests {
         }
     }
 
+    /// M2b Task 1 (§5.1 rule 3, Q23): `hacivat-guard` stays sans-I/O and runtime-free.
+    #[test]
+    fn guard_with_tokio_is_flagged() {
+        let md = fx_at(&[("hacivat-guard", "crates/core", &["tokio"])]);
+        assert_eq!(rule_of(&md, "hacivat-guard"), Rule::GuardNotRuntimeFree);
+    }
+
+    #[test]
+    fn guard_reaching_a_runtime_crate_transitively_is_flagged() {
+        let md = fx_at(&[
+            ("hacivat-guard", "crates/core", &["helper"]),
+            ("helper", "crates/core", &["futures"]),
+        ]);
+        let v = violations(&md, &lints_ok);
+        assert_eq!(names(&v), ["hacivat-guard"], "{v:?}");
+        assert_eq!(v[0].rule, Rule::GuardNotRuntimeFree);
+        assert_eq!(v[0].via, ["helper", "futures"]);
+    }
+
+    #[test]
+    fn guard_dev_dependency_on_tokio_is_allowed() {
+        let md = fx_kind_at(
+            "hacivat-guard",
+            "crates/core",
+            "tokio",
+            DepKind::Development,
+            &[],
+        );
+        assert!(violations(&md, &lints_ok).is_empty());
+        let clean = fx_at(&[("hacivat-guard", "crates/core", &["hacivat-proto"])]);
+        assert!(violations(&clean, &lints_ok).is_empty());
+    }
+
     #[test]
     fn unknown_member_directory_fails_closed() {
         let md = fx_at(&[("mystery", "tools", &[])]);
@@ -678,6 +764,8 @@ mod tests {
             "hacivat-driver-sqlite",
             "hacivat-session",
             "hacivat-testkit",
+            // M2b Task 1.
+            "hacivat-guard",
         ] {
             let member = md
                 .workspace_packages()

@@ -14,6 +14,12 @@
 //!   half the budget), then `ConnectionManager::shutdown_blocking` closes every connection (and
 //!   cancels connects) within the rest, then the core runtime stops with its own 200 ms budget.
 //!   This is the only place profile writes may block the UI thread.
+//! - **M2b (Task 22).** A reconnect waiting for its next attempt (`Reconnecting` with
+//!   `next_in`) gets a deadline on the executor clock when the mirror sees it, so the capsule
+//!   counts down to it, repainting once a second (when the shown second changes) while it
+//!   waits; the 50 ms clock runs only while an attempt runs. A profile that leaves
+//!   `Disconnected` is no longer idle (`session_toasts::clear_idle`). The mirror still awaits
+//!   its `watch` channel (Q4 ruling): only the new states are added.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -26,12 +32,15 @@ use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, Global, Window};
 
 use crate::connections::model::ConnectionsModel;
-use crate::connections::{capsule, explorer, home, sheet, status};
+use crate::connections::{capsule, explorer, home, session_toasts, sheet, status};
 use crate::l10n_global::tr;
 use crate::shell;
 
 /// How often the clocks repaint while a profile is connecting.
 pub const TICK: Duration = Duration::from_millis(50);
+// ## m2b-t22-live
+/// The longest a reconnect countdown waits between repaints (Task 22 ruling: 1 s).
+pub const RECONNECT_TICK: Duration = Duration::from_secs(1);
 /// How long the core runtime may take to stop at quit (P15).
 const RUNTIME_SHUTDOWN: Duration = Duration::from_millis(200);
 
@@ -41,6 +50,15 @@ struct LiveClocks {
     started: HashMap<ProfileId, Instant>,
     /// The repaint timer runs.
     ticking: bool,
+    // ## m2b-t22-live
+    /// The running repaint loop: its generation (a newer loop ends the older one) and the
+    /// longest it may sleep (fix round 1, M4: a connect that starts while a countdown sleeps
+    /// gets its 50 ms clock at once).
+    tick_gen: u64,
+    tick_wait: Duration,
+    /// A reconnect waiting for its next attempt: the attempt, its `next_in`, and when it
+    /// starts on the executor clock.
+    reconnects: HashMap<ProfileId, (u32, Duration, Instant)>,
 }
 
 impl Global for LiveClocks {}
@@ -104,8 +122,40 @@ pub fn clock_seconds(cx: &App, id: ProfileId) -> f64 {
         })
 }
 
+// ## m2b-t22-live
+/// Whole seconds until reconnect `attempt` of `id` starts: from the deadline the mirror noted
+/// for that `next_in`, else `next_in` itself (rounded up, so a wait under a second says 1).
+pub fn reconnect_seconds(cx: &App, id: ProfileId, attempt: u32, next_in: Duration) -> u64 {
+    let left = reconnect_left(cx, id, attempt, next_in);
+    u64::try_from(left.as_millis().div_ceil(1000)).unwrap_or(u64::MAX)
+}
+
+/// How long until reconnect `attempt` of `id` starts (see [`reconnect_seconds`]).
+fn reconnect_left(cx: &App, id: ProfileId, attempt: u32, next_in: Duration) -> Duration {
+    let now = cx.background_executor().now();
+    cx.try_global::<LiveClocks>()
+        .and_then(|c| c.reconnects.get(&id))
+        .filter(|(a, n, _)| *a == attempt && *n == next_in)
+        .map_or(next_in, |(_, _, at)| at.saturating_duration_since(now))
+}
+
+/// Notes when `id`'s next reconnect attempt starts, once per `(attempt, next_in)`.
+fn note_reconnect(cx: &mut App, id: ProfileId, attempt: u32, next_in: Duration) {
+    let now = cx.background_executor().now();
+    let clocks = cx.default_global::<LiveClocks>();
+    let same = clocks
+        .reconnects
+        .get(&id)
+        .is_some_and(|(a, n, _)| *a == attempt && *n == next_in);
+    if !same {
+        clocks
+            .reconnects
+            .insert(id, (attempt, next_in, now + next_in));
+    }
+}
+
 /// Copies every profile's manager state into the model.
-fn mirror(cx: &mut App) {
+pub(crate) fn mirror(cx: &mut App) {
     let Some(m) = cx.try_global::<ConnectionsModel>() else {
         return;
     };
@@ -120,49 +170,141 @@ fn mirror(cx: &mut App) {
     }
     let mut connecting = false;
     for (id, state) in states {
-        if matches!(state, LiveState::Connecting(_)) {
-            connecting = true;
-            ensure_started(cx, id);
-        } else {
-            cx.default_global::<LiveClocks>().started.remove(&id);
-        }
-        cx.global_mut::<ConnectionsModel>().set_live(id, state);
+        connecting |= apply_state(cx, id, state);
     }
     if connecting {
         start_ticking(cx);
     }
 }
 
-/// Whether any profile is connecting.
-fn any_connecting(cx: &App) -> bool {
-    cx.try_global::<ConnectionsModel>().is_some_and(|m| {
-        m.profiles()
-            .iter()
-            .any(|p| matches!(m.live(p.id), LiveState::Connecting(_)))
-    })
+/// Copies one profile's new state into the model, with its clocks; whether a clock now ticks.
+fn apply_state(cx: &mut App, id: ProfileId, state: LiveState) -> bool {
+    let mut connecting = false;
+    if matches!(state, LiveState::Connecting(_)) {
+        connecting = true;
+        ensure_started(cx, id);
+    } else {
+        cx.default_global::<LiveClocks>().started.remove(&id);
+    }
+    // ## m2b-t22-live: the countdown to the next attempt, and the end of an idle state and of
+    // a gap's downgraded label (a new state is a new connection or none).
+    match state {
+        LiveState::Reconnecting {
+            attempt,
+            next_in: Some(next_in),
+        } => {
+            connecting = true;
+            note_reconnect(cx, id, attempt, next_in);
+        }
+        _ => {
+            cx.default_global::<LiveClocks>().reconnects.remove(&id);
+        }
+    }
+    if state != LiveState::Disconnected {
+        session_toasts::clear_idle(cx, id);
+    }
+    session_toasts::clear_downgrade(cx, id);
+    cx.global_mut::<ConnectionsModel>().set_live(id, state);
+    connecting
 }
 
-/// Repaints every [`TICK`] while a profile is connecting.
+/// Mirrors `state` for `id` as a manager change would (test seam, feature `test-support`):
+/// the clocks and the repaint loop run as in the app.
+#[cfg(feature = "test-support")]
+pub fn mirror_state(cx: &mut App, id: ProfileId, state: LiveState) {
+    if apply_state(cx, id, state) {
+        start_ticking(cx);
+    }
+}
+
+/// How long the running repaint loop sleeps between repaints (test seam, feature
+/// `test-support`); `None` while none runs.
+#[cfg(feature = "test-support")]
+pub fn tick_wait(cx: &App) -> Option<Duration> {
+    cx.try_global::<LiveClocks>()
+        .filter(|c| c.ticking)
+        .map(|c| c.tick_wait)
+}
+
+/// How long until the next repaint, while one is needed: [`TICK`] while a connect attempt
+/// runs (its clock); while a reconnect waits for its next attempt, until its countdown shows
+/// the next whole second, at most [`RECONNECT_TICK`] (Task 22 ruling: a 1 s repaint). `None`
+/// when nothing ticks.
+fn next_tick(cx: &App) -> Option<Duration> {
+    let m = cx.try_global::<ConnectionsModel>()?;
+    let mut wait: Option<Duration> = None;
+    for p in m.profiles() {
+        match m.live(p.id) {
+            LiveState::Connecting(_) => return Some(TICK),
+            LiveState::Reconnecting {
+                attempt,
+                next_in: Some(next_in),
+            } => {
+                let left = reconnect_left(cx, p.id, attempt, next_in);
+                let to_next_second = Duration::from_nanos(
+                    u64::try_from(left.as_nanos() % RECONNECT_TICK.as_nanos()).unwrap_or(0),
+                );
+                let step = if to_next_second.is_zero() {
+                    RECONNECT_TICK
+                } else {
+                    to_next_second
+                };
+                wait = Some(wait.map_or(step, |w| w.min(step)));
+            }
+            _ => {}
+        }
+    }
+    wait
+}
+
+/// The interval [`next_tick`] gives now (test seam, feature `test-support`).
+#[cfg(feature = "test-support")]
+pub fn repaint_interval(cx: &App) -> Option<Duration> {
+    next_tick(cx)
+}
+
+/// Repaints while something ticks ([`next_tick`]): every [`TICK`] while a profile is
+/// connecting, once a second while a reconnect counts down. A loop that sleeps longer than
+/// what is due now is replaced (fix round 1, M4): the newer generation ends the older one at
+/// its next wake.
 fn start_ticking(cx: &mut App) {
+    let due = next_tick(cx);
     let clocks = cx.default_global::<LiveClocks>();
-    if std::mem::replace(&mut clocks.ticking, true) {
+    let sooner = due.is_some_and(|d| d < clocks.tick_wait);
+    if clocks.ticking && !sooner {
         return;
     }
+    clocks.ticking = true;
+    clocks.tick_gen += 1;
+    let generation = clocks.tick_gen;
     cx.spawn(async move |cx| {
         loop {
-            cx.background_executor().timer(TICK).await;
-            let keep = cx.update(|cx| {
-                let keep = any_connecting(cx);
-                if keep {
-                    cx.refresh_windows();
-                } else {
-                    cx.default_global::<LiveClocks>().ticking = false;
+            let wait = cx.update(|cx| {
+                let clocks = cx.default_global::<LiveClocks>();
+                if clocks.tick_gen != generation {
+                    // A newer loop took over.
+                    return None;
                 }
-                keep
+                let wait = next_tick(cx);
+                let clocks = cx.default_global::<LiveClocks>();
+                match wait {
+                    Some(w) => clocks.tick_wait = w,
+                    None => {
+                        clocks.ticking = false;
+                        clocks.tick_wait = Duration::ZERO;
+                    }
+                }
+                wait
             });
-            if !keep {
+            let Some(wait) = wait else {
                 break;
-            }
+            };
+            cx.background_executor().timer(wait).await;
+            cx.update(|cx| {
+                if cx.default_global::<LiveClocks>().tick_gen == generation {
+                    cx.refresh_windows();
+                }
+            });
         }
     })
     .detach();

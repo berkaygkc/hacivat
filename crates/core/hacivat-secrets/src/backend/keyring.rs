@@ -23,6 +23,9 @@ const WINDOWS_MAX_BLOB: usize = 2560;
 /// Every call blocks and may show an OS prompt: run it on the core runtime's blocking pool.
 pub struct KeyringBackend {
     max_blob: Option<usize>,
+    // ## m2b-t01-interfaces
+    /// `probe_available` ran: the choice is known (Q23).
+    probed: std::sync::atomic::AtomicBool,
 }
 
 impl KeyringBackend {
@@ -34,7 +37,10 @@ impl KeyringBackend {
         } else {
             max_blob
         };
-        KeyringBackend { max_blob }
+        KeyringBackend {
+            max_blob,
+            probed: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// Whether a keyring is reachable, without prompting: true on macOS and Windows; on Linux
@@ -115,7 +121,17 @@ impl SecretBackend for KeyringBackend {
     }
 
     fn probe_available(&self) -> bool {
-        Self::available()
+        let available = Self::available();
+        self.probed.store(true, std::sync::atomic::Ordering::SeqCst);
+        available
+    }
+
+    // ## m2b-t01-interfaces
+    /// `Keyring` once probed (Q23).
+    fn choice(&self) -> Option<super::BackendChoice> {
+        self.probed
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then_some(super::BackendChoice::Keyring)
     }
 
     /// The Windows credential's comment, or the Secret Service item's label. macOS keyring 3

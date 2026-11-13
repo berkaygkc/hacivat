@@ -79,6 +79,20 @@ async fn connects_and_detects_every_matrix_target() {
         };
         let mut p = profile_for(&t, auto_or_require(&t));
         p.allow_unsupported_server = true;
+        // ## m2b-t14-pipeline: pg13 signs in with md5 and no TLS. Under the insecure-auth
+        // policy (B8) it connects on the allowed path, deliberately: its published port is on
+        // loopback, where the password never crosses a network. The same server on a private
+        // address under Auto would be refused (`auth.insecure_method`, pipeline_tls).
+        let mode = p.tls.mode;
+        assert_eq!(
+            hacivat_session::pipeline::insecure_auth_for(
+                &p,
+                hacivat_net::classify_host(&t.host, &[]),
+                mode
+            ),
+            hacivat_driver::InsecureAuth::Allow,
+            "{id}: the matrix reaches its servers on loopback"
+        );
         let live = connect(&deps(), req(p), Interaction::Headless, token(), progress())
             .await
             .unwrap_or_else(|e| panic!("{id}: {:?}", e.class));
