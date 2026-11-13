@@ -790,7 +790,7 @@ impl VaultUnlock {
                 close_self(window, cx);
                 let resettable = self.resettable;
                 window.defer(cx, move |window, cx| {
-                    open_damaged(resettable, window, cx);
+                    let _ = open_damaged(resettable, None, window, cx);
                 });
             }
             // Three misses: the user may try again in a later gesture.
@@ -1241,6 +1241,10 @@ pub struct VaultDamaged {
     root: FocusHandle,
     reset: FocusHandle,
     close: FocusHandle,
+    // ## m2b-t22-live
+    /// The pipeline's `Question::VaultDamaged` (T21 carry): answered `Cancelled` when the
+    /// notice closes, however it closes (a dropped sender answers `Cancelled` too).
+    answer: Option<oneshot::Sender<Answer>>,
 }
 
 impl Focusable for VaultDamaged {
@@ -1251,6 +1255,10 @@ impl Focusable for VaultDamaged {
 
 impl VaultDamaged {
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // ## m2b-t22-live: the connect goes on (it asks for the password).
+        if let Some(answer) = self.answer.take() {
+            let _ = answer.send(Answer::Cancelled);
+        }
         close_self(window, cx);
     }
 
@@ -1365,13 +1373,20 @@ impl Render for VaultDamaged {
     }
 }
 
-/// Opens the damaged-file notice (Close has the focus).
-fn open_damaged(resettable: bool, window: &mut Window, cx: &mut App) {
+/// Opens the damaged-file notice (Close has the focus). `answer` (m2b-t22-live) is the
+/// pipeline's question, answered when the notice closes.
+fn open_damaged(
+    resettable: bool,
+    answer: Option<oneshot::Sender<Answer>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Entity<VaultDamaged>> {
     let view = cx.new(|cx| VaultDamaged {
         resettable,
         root: cx.focus_handle(),
         reset: cx.focus_handle().tab_stop(true),
         close: cx.focus_handle().tab_stop(true),
+        answer,
     });
     let (reset, close) = {
         let v = view.read(cx);
@@ -1379,7 +1394,33 @@ fn open_damaged(resettable: bool, window: &mut Window, cx: &mut App) {
     };
     register_part(cx, "vault-damaged-reset", &reset, None);
     register_part(cx, "vault-damaged-close", &close, None);
-    let _ = prompt_kit::push_modal(DAMAGED_LAYER_ID, view.into(), &close, window, cx);
+    prompt_kit::push_modal(DAMAGED_LAYER_ID, view.clone().into(), &close, window, cx)
+        .then_some(view)
+}
+
+// ## m2b-t22-live
+/// The pipeline met a vault that failed its integrity check (`Question::VaultDamaged`, T21
+/// carry): the damaged-file notice, whose Reset vault… shows once the blocking pool says the
+/// file may be reset (as Unlock's does). Closing it answers `Cancelled`, and the connect asks
+/// for the password as if nothing were stored.
+fn open_damaged_asked(
+    answer: oneshot::Sender<Answer>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Entity<VaultDamaged>> {
+    let view = open_damaged(false, Some(answer), window, cx)?;
+    let may_reset = resettable(cx);
+    let weak = view.downgrade();
+    window
+        .spawn(cx, async move |cx| {
+            let may_reset = matches!(may_reset.await, Ok(Ok(true)));
+            let _ = weak.update(cx, |v, cx| {
+                v.resettable = may_reset;
+                cx.notify();
+            });
+        })
+        .detach();
+    Some(view)
 }
 
 // ---- opening the dialogs ----------------------------------------------------------------------
@@ -1452,7 +1493,8 @@ fn open_unlock(
     Some(view)
 }
 
-/// Asks `q` (`Question::UnlockVault`, `Question::CreateVault`); the answer goes to `reply`.
+/// Asks `q` (`Question::UnlockVault`, `Question::CreateVault`; `Question::VaultDamaged` shows
+/// the damaged-file notice, m2b-t22-live); the answer goes to `reply`.
 /// Any other question, or a window without a workspace, answers `Cancelled`.
 pub(crate) fn open(q: Question, reply: oneshot::Sender<Answer>, window: &mut Window, cx: &mut App) {
     let asker = connecting(cx);
@@ -1465,6 +1507,8 @@ pub(crate) fn open(q: Question, reply: oneshot::Sender<Answer>, window: &mut Win
             open_unlock(Mode::Asked(Some(answer_tx)), asker, attempt, window, cx)
                 .map(|v| v.entity_id())
         }
+        // ## m2b-t22-live (T21 carry): the damaged-file notice, met by a connect.
+        Question::VaultDamaged => open_damaged_asked(answer_tx, window, cx).map(|v| v.entity_id()),
         _ => {
             let _ = reply.send(Answer::Cancelled);
             return;

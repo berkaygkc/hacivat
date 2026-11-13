@@ -16,7 +16,8 @@
 //!   This is the only place profile writes may block the UI thread.
 //! - **M2b (Task 22).** A reconnect waiting for its next attempt (`Reconnecting` with
 //!   `next_in`) gets a deadline on the executor clock when the mirror sees it, so the capsule
-//!   counts down to it; the repaint timer runs while one waits. A profile that leaves
+//!   counts down to it, repainting once a second (when the shown second changes) while it
+//!   waits; the 50 ms clock runs only while an attempt runs. A profile that leaves
 //!   `Disconnected` is no longer idle (`session_toasts::clear_idle`). The mirror still awaits
 //!   its `watch` channel (Q4 ruling): only the new states are added.
 
@@ -37,6 +38,9 @@ use crate::shell;
 
 /// How often the clocks repaint while a profile is connecting.
 pub const TICK: Duration = Duration::from_millis(50);
+// ## m2b-t22-live
+/// The longest a reconnect countdown waits between repaints (Task 22 ruling: 1 s).
+pub const RECONNECT_TICK: Duration = Duration::from_secs(1);
 /// How long the core runtime may take to stop at quit (P15).
 const RUNTIME_SHUTDOWN: Duration = Duration::from_millis(200);
 
@@ -117,13 +121,17 @@ pub fn clock_seconds(cx: &App, id: ProfileId) -> f64 {
 /// Whole seconds until reconnect `attempt` of `id` starts: from the deadline the mirror noted
 /// for that `next_in`, else `next_in` itself (rounded up, so a wait under a second says 1).
 pub fn reconnect_seconds(cx: &App, id: ProfileId, attempt: u32, next_in: Duration) -> u64 {
+    let left = reconnect_left(cx, id, attempt, next_in);
+    u64::try_from(left.as_millis().div_ceil(1000)).unwrap_or(u64::MAX)
+}
+
+/// How long until reconnect `attempt` of `id` starts (see [`reconnect_seconds`]).
+fn reconnect_left(cx: &App, id: ProfileId, attempt: u32, next_in: Duration) -> Duration {
     let now = cx.background_executor().now();
-    let left = cx
-        .try_global::<LiveClocks>()
+    cx.try_global::<LiveClocks>()
         .and_then(|c| c.reconnects.get(&id))
         .filter(|(a, n, _)| *a == attempt && *n == next_in)
-        .map_or(next_in, |(_, _, at)| at.saturating_duration_since(now));
-    u64::try_from(left.as_millis().div_ceil(1000)).unwrap_or(u64::MAX)
+        .map_or(next_in, |(_, _, at)| at.saturating_duration_since(now))
 }
 
 /// Notes when `id`'s next reconnect attempt starts, once per `(attempt, next_in)`.
@@ -186,24 +194,45 @@ pub(crate) fn mirror(cx: &mut App) {
     }
 }
 
-/// Whether any profile is connecting, or waiting for its next reconnect attempt (its
-/// countdown ticks, Task 22).
-fn any_connecting(cx: &App) -> bool {
-    cx.try_global::<ConnectionsModel>().is_some_and(|m| {
-        m.profiles().iter().any(|p| {
-            matches!(
-                m.live(p.id),
-                LiveState::Connecting(_)
-                    | LiveState::Reconnecting {
-                        next_in: Some(_),
-                        ..
-                    }
-            )
-        })
-    })
+/// How long until the next repaint, while one is needed: [`TICK`] while a connect attempt
+/// runs (its clock); while a reconnect waits for its next attempt, until its countdown shows
+/// the next whole second, at most [`RECONNECT_TICK`] (Task 22 ruling: a 1 s repaint). `None`
+/// when nothing ticks.
+fn next_tick(cx: &App) -> Option<Duration> {
+    let m = cx.try_global::<ConnectionsModel>()?;
+    let mut wait: Option<Duration> = None;
+    for p in m.profiles() {
+        match m.live(p.id) {
+            LiveState::Connecting(_) => return Some(TICK),
+            LiveState::Reconnecting {
+                attempt,
+                next_in: Some(next_in),
+            } => {
+                let left = reconnect_left(cx, p.id, attempt, next_in);
+                let to_next_second = Duration::from_nanos(
+                    u64::try_from(left.as_nanos() % RECONNECT_TICK.as_nanos()).unwrap_or(0),
+                );
+                let step = if to_next_second.is_zero() {
+                    RECONNECT_TICK
+                } else {
+                    to_next_second
+                };
+                wait = Some(wait.map_or(step, |w| w.min(step)));
+            }
+            _ => {}
+        }
+    }
+    wait
 }
 
-/// Repaints every [`TICK`] while a profile is connecting.
+/// The interval [`next_tick`] gives now (test seam, feature `test-support`).
+#[cfg(feature = "test-support")]
+pub fn repaint_interval(cx: &App) -> Option<Duration> {
+    next_tick(cx)
+}
+
+/// Repaints while something ticks ([`next_tick`]): every [`TICK`] while a profile is
+/// connecting, once a second while a reconnect counts down.
 fn start_ticking(cx: &mut App) {
     let clocks = cx.default_global::<LiveClocks>();
     if std::mem::replace(&mut clocks.ticking, true) {
@@ -211,19 +240,18 @@ fn start_ticking(cx: &mut App) {
     }
     cx.spawn(async move |cx| {
         loop {
-            cx.background_executor().timer(TICK).await;
-            let keep = cx.update(|cx| {
-                let keep = any_connecting(cx);
-                if keep {
-                    cx.refresh_windows();
-                } else {
+            let wait = cx.update(|cx| {
+                let wait = next_tick(cx);
+                if wait.is_none() {
                     cx.default_global::<LiveClocks>().ticking = false;
                 }
-                keep
+                wait
             });
-            if !keep {
+            let Some(wait) = wait else {
                 break;
-            }
+            };
+            cx.background_executor().timer(wait).await;
+            cx.update(|cx| cx.refresh_windows());
         }
     })
     .detach();

@@ -68,9 +68,17 @@ fn shell_with(
     fake: FakeDriver,
     p: Profile,
 ) -> (&'static mut VisualTestContext, ProfileId) {
-    // A Turkish user's regional format is Turkish too: lists follow the regional format
-    // (`ui.regional_format`, I18N-05), as numbers and dates do.
-    let regional = (lang == "tr").then_some("tr-TR");
+    shell_in(cx, lang, None, fake, p)
+}
+
+/// [`shell_with`] whose regional format (`ui.regional_format`) is `regional`.
+fn shell_in(
+    cx: &mut TestAppContext,
+    lang: &str,
+    regional: Option<&'static str>,
+    fake: FakeDriver,
+    p: Profile,
+) -> (&'static mut VisualTestContext, ProfileId) {
     let vcx = shell_with_fake_prepared(cx, lang, fake, move |paths| {
         if let Some(r) = regional {
             write(
@@ -303,6 +311,53 @@ fn reconnecting_capsule_shows_attempt_and_countdown(cx: &mut TestAppContext) {
     );
     assert_eq!(capsule_text(vcx, "run"), "Reconnecting · attempt 4");
     assert_eq!(text_of(vcx, "capsule-text-next"), None);
+}
+
+/// Ruling (Task 22 round 1): a reconnect's countdown repaints once a second; the 50 ms clock
+/// runs only while an attempt runs; nothing ticks otherwise.
+#[gpui::test]
+fn a_reconnect_countdown_repaints_once_a_second(cx: &mut TestAppContext) {
+    let vcx = with_state(
+        cx,
+        LiveState::Reconnecting {
+            attempt: 2,
+            next_in: Some(secs(4)),
+        },
+    );
+    let interval = || {
+        vcx.cx
+            .read(hacivat_app::connections::live::repaint_interval)
+    };
+    assert_eq!(interval(), Some(secs(1)));
+    // A wait of 2.5 s repaints when the shown second changes (in 0.5 s), then once a second.
+    let id = profile_id(vcx, "orders-staging");
+    set_state(
+        vcx,
+        id,
+        LiveState::Reconnecting {
+            attempt: 3,
+            next_in: Some(Duration::from_millis(2500)),
+        },
+    );
+    assert_eq!(interval(), Some(Duration::from_millis(500)));
+    set_state(
+        vcx,
+        id,
+        LiveState::Reconnecting {
+            attempt: 3,
+            next_in: None,
+        },
+    );
+    assert_eq!(interval(), None, "an attempt under way has no clock");
+    let progress = Progress {
+        trail: Vec::new(),
+        current: None,
+        started: std::time::Instant::now(),
+    };
+    set_state(vcx, id, LiveState::Connecting(progress));
+    assert_eq!(interval(), Some(hacivat_app::connections::live::TICK));
+    set_state(vcx, id, LiveState::Disconnected);
+    assert_eq!(interval(), None);
 }
 
 #[gpui::test]
@@ -551,9 +606,12 @@ fn show_details_selects_the_connection(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn turkish_lost_list_uses_ve(cx: &mut TestAppContext) {
-    let (vcx, id) = shell_with(
+    // Ruling (Task 22 round 1): the conjunction follows the UI language, even over an English
+    // regional format.
+    let (vcx, id) = shell_in(
         cx,
         "tr",
+        Some("en-US"),
         FakeDriver::new(DbmsKind::Postgres),
         pg("orders-prod", EnvTag::Production),
     );
@@ -579,6 +637,32 @@ fn turkish_lost_list_uses_ve(cx: &mut TestAppContext) {
     {
         assert!(!r.clipped, "{} is clipped", r.text);
     }
+}
+
+/// Ruling (Task 22 round 1): an English UI over a Turkish regional format says "and".
+#[gpui::test]
+fn english_lost_list_over_a_turkish_region_uses_and(cx: &mut TestAppContext) {
+    let (vcx, id) = shell_in(
+        cx,
+        "en",
+        Some("tr-TR"),
+        FakeDriver::new(DbmsKind::Postgres),
+        pg("orders-prod", EnvTag::Production),
+    );
+    emit(
+        vcx,
+        ConnectionEvent::SessionLost {
+            profile: id,
+            lost: lost(false, true, true),
+        },
+    );
+    let toast = sticky_toast(vcx);
+    assert!(
+        toast
+            .lines
+            .contains(&"Also gone: temporary tables and session variables".to_string()),
+        "{toast:?}"
+    );
 }
 
 // ---- idle -------------------------------------------------------------------------------------
@@ -1133,6 +1217,78 @@ fn the_ssh_step_has_its_own_label(cx: &mut TestAppContext) {
         panic!("connecting");
     };
     assert_eq!(step.as_ref(), "SSH");
+}
+
+// ---- the damaged vault (T21 carry) ------------------------------------------------------------
+
+/// A connect whose saved password sits in a vault whose file was damaged under it shows the
+/// Damaged notice once; Close goes on to the password prompt, and the typed password connects.
+#[gpui::test]
+fn a_damaged_vault_shows_the_notice_once_then_asks_the_password(cx: &mut TestAppContext) {
+    use hacivat_secrets::{
+        FallbackBackend, FileVault, MemoryBackend, Retention, SecretBackend as _, SecretKey,
+        SecretSlot, SecretString, VaultBackend as _, VaultParams,
+    };
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("vault.bin");
+    let vault = Arc::new(FileVault::with_params(
+        path.clone(),
+        VaultParams {
+            m_kib: 64,
+            t: 1,
+            p: 1,
+        },
+    ));
+    vault
+        .create(SecretString::from("correct horse"))
+        .expect("create");
+    let mut p = pg("orders-dev", EnvTag::Dev);
+    p.auth = AuthProviderId::Password;
+    p.retention = Retention::Forever;
+    vault
+        .put(
+            &SecretKey {
+                profile: p.id,
+                slot: SecretSlot::DbPassword,
+            },
+            &SecretString::from("hv_test_pw"),
+        )
+        .expect("put");
+    // The file is damaged under the unlocked vault: its nonce changed.
+    let mut bytes = std::fs::read(&path).expect("read");
+    bytes[40] ^= 0xFF;
+    std::fs::write(&path, &bytes).expect("write");
+    let backend = FallbackBackend::new(Arc::new(MemoryBackend::new()), vault, Box::new(|| false));
+    assert!(backend.probe_available(), "the vault is chosen");
+    let vcx = shell_with_fake_backend(
+        cx,
+        "en",
+        FakeDriver::new(DbmsKind::Postgres),
+        Arc::new(backend),
+        |_| {},
+    );
+    add_profile(vcx, p);
+    connect(vcx, "orders-dev");
+    wait_until(vcx, "the Damaged notice", |vcx| {
+        layer_ids(vcx) == ["vault-damaged"]
+    });
+    assert_eq!(
+        text_of(vcx, "vault-damaged-title").as_deref(),
+        Some("The vault can't be read")
+    );
+    // Close (it has the focus) goes on: the password, as if nothing were stored.
+    vcx.simulate_keystrokes("enter");
+    wait_until(vcx, "the password prompt", |vcx| {
+        layer_ids(vcx) == ["password-prompt"]
+    });
+    vcx.simulate_input("hv_test_pw");
+    vcx.simulate_keystrokes("enter");
+    wait_until(vcx, "the connect", |vcx| {
+        matches!(live(vcx, "orders-dev"), LiveState::Connected(_))
+    });
+    assert!(layer_ids(vcx).is_empty(), "the notice showed once");
+    drop(dir);
 }
 
 // ---- the debug cancel demo (Q39) --------------------------------------------------------------
