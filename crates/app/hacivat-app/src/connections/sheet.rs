@@ -292,7 +292,15 @@ impl SheetView {
                 .child(value)
                 // Fix round 1 (M5): what it does, as its tooltip and its description.
                 .tooltip(move |_, cx| Tip::view(hint.clone(), cx))
-                .declare_full(A11yDecl::new(Role::Button, label).description(description)),
+                // ## m2b-t24-shots: whether the explanation it opens is open.
+                .declare_full(
+                    A11yDecl::new(Role::Button, label)
+                        .description(description)
+                        .expanded(
+                            hacivat_ui::capsule::expanded_segment(cx)
+                                == Some(hacivat_ui::capsule::CapsuleSegment::Access),
+                        ),
+                ),
             theme,
             focused,
         )

@@ -572,3 +572,62 @@ pub(crate) fn open(q: Question, reply: oneshot::Sender<Answer>, window: &mut Win
     }
     prompt_kit::forward(reply, answer_rx, window.window_handle(), id, cx);
 }
+
+// ## m2b-t24-shots: shots fixtures (R28, P19).
+#[cfg(feature = "shots")]
+mod shots {
+    use hacivat_proto::EnvTag;
+    use hacivat_secrets::Retention;
+    use hacivat_session::pipeline::{Question, SecretPrompt};
+    use hacivat_ui_core::gpui_surface::{App, Window};
+
+    use crate::connections::prompt_kit::shots::{held_reply, key_file, save_profile, two_hops};
+
+    fn ask(prompt: SecretPrompt, attempt: u8, window: &mut Window, cx: &mut App) {
+        let id = save_profile(cx, "orders-prod", EnvTag::Production, two_hops());
+        let reply = held_reply(cx);
+        super::open(
+            Question::Secret {
+                profile: id,
+                name: "orders-prod".to_string(),
+                prompt,
+                attempt,
+                remember: Some(Retention::Forever),
+            },
+            reply,
+            window,
+            cx,
+        );
+    }
+
+    /// The SSH password of `jump-eu.acme.io` (hop 1 of 2), first attempt, with Remember.
+    pub fn password_fixture(window: &mut Window, cx: &mut App) {
+        ask(
+            SecretPrompt::SshPassword {
+                hop: 0,
+                host: "jump-eu.acme.io".to_string(),
+                user: "deploy".to_string(),
+            },
+            1,
+            window,
+            cx,
+        );
+    }
+
+    /// The key passphrase for `bastion.acme.io` (hop 2 of 2), after a miss (the alert line and
+    /// "Attempt 2 of 3").
+    pub fn passphrase_fixture(window: &mut Window, cx: &mut App) {
+        ask(
+            SecretPrompt::SshPassphrase {
+                hop: 1,
+                key: key_file(),
+            },
+            2,
+            window,
+            cx,
+        );
+    }
+}
+
+#[cfg(feature = "shots")]
+pub use shots::{passphrase_fixture, password_fixture};

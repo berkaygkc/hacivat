@@ -41,20 +41,32 @@
 //!   them, and the capsule ends before the palette field. A pushed-off icon button draws no
 //!   clipped text, so (b) alone cannot see it.
 //!
+//! The M2b surfaces (Task 24) render at 1280x800 and the 960x600 minimum, from the fixtures of
+//! Tasks 19 to 22 and Task 24's own: the certificate review, the pin-changed stop and the
+//! plaintext question; the TLS section; the SSH section (off, folded, one hop, two jumps, the
+//! import menu); the host-key prompts; keyboard-interactive; the SSH secret prompts; the vault
+//! dialogs; the live states (T22's, plus reconnecting outside production and a session lost
+//! without losses); the new error copy.
+//! The import menu opens once the core runtime has read the config: the harness waits for it
+//! (a condition, never a fixed sleep).
+//!
 //! Windows has no headless renderer at the pin: the test prints `shots: no headless renderer
 //! (R8)` and passes.
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use hacivat_app::connections::dialog::ssh::{self, SshImportEnv};
 use hacivat_app::connections::{
-    ConnectionsBoot, capsule, delete, dialog, error_view, explorer, import, prod_prompt, test_strip,
+    ConnectionsBoot, ConnectionsModel, capsule, cert_dialog, delete, dialog, error_view, explorer,
+    hostkey_prompt, import, kbd_prompt, plaintext_prompt, prod_prompt, secret_prompt, test_strip,
+    vault_dialog,
 };
 use hacivat_app::l10n_global::text_fn_id;
 use hacivat_app::menus;
 use hacivat_app::shell::DemoCapsule;
 use hacivat_app::shell::Workspace;
-use hacivat_app::{Startup, start};
+use hacivat_app::{AppState, Startup, start};
 use hacivat_driver::DriverRegistry;
 use hacivat_driver::fake::FakeDriver;
 use hacivat_l10n::OsLocale;
@@ -123,9 +135,39 @@ enum Surface {
     LiveRoPg13,
     LiveSshRo,
     LiveSshRw,
+    // ## m2b-t24-shots: every other M2b surface, at 1280x800 and 960x600.
+    CertReview,
+    CertPinChanged,
+    PlaintextQuestion,
+    ConnDialogTlsPinned,
+    SshSectionOff,
+    SshSectionFolded,
+    SshSectionHop,
+    SshSectionJumps,
+    SshImportMenu,
+    HostKeyNew,
+    HostKeyChanged,
+    HostKeyChangedOpenSsh,
+    KbdPrompt,
+    SshPassword,
+    SshPassphrase,
+    VaultCreate,
+    VaultUnlock,
+    VaultReset,
+    VaultDamaged,
+    LiveReconnectingStaging,
+    LiveLostClean,
+    ErrInsecureTls,
+    ErrInsecurePlain,
+    ErrPinChanged,
+    ErrSshAuth,
+    ErrSshChannel,
+    ErrSshAgent,
+    ErrHostKeyChanged,
+    ErrHostKeyRevoked,
 }
 
-const SURFACES: [Surface; 44] = [
+const SURFACES: [Surface; 73] = [
     Surface::Shell,
     Surface::ShellDemoProduction,
     Surface::ShellNarrow,
@@ -172,7 +214,40 @@ const SURFACES: [Surface; 44] = [
     Surface::LiveRoPg13,
     Surface::LiveSshRo,
     Surface::LiveSshRw,
+    // ## m2b-t24-shots
+    Surface::CertReview,
+    Surface::CertPinChanged,
+    Surface::PlaintextQuestion,
+    Surface::ConnDialogTlsPinned,
+    Surface::SshSectionOff,
+    Surface::SshSectionFolded,
+    Surface::SshSectionHop,
+    Surface::SshSectionJumps,
+    Surface::SshImportMenu,
+    Surface::HostKeyNew,
+    Surface::HostKeyChanged,
+    Surface::HostKeyChangedOpenSsh,
+    Surface::KbdPrompt,
+    Surface::SshPassword,
+    Surface::SshPassphrase,
+    Surface::VaultCreate,
+    Surface::VaultUnlock,
+    Surface::VaultReset,
+    Surface::VaultDamaged,
+    Surface::LiveReconnectingStaging,
+    Surface::LiveLostClean,
+    Surface::ErrInsecureTls,
+    Surface::ErrInsecurePlain,
+    Surface::ErrPinChanged,
+    Surface::ErrSshAuth,
+    Surface::ErrSshChannel,
+    Surface::ErrSshAgent,
+    Surface::ErrHostKeyChanged,
+    Surface::ErrHostKeyRevoked,
 ];
+// ## m2b-t24-shots
+/// Where Task 24's surfaces start in [`SURFACES`].
+const FIRST_T24: usize = 44;
 const LOCALES: [&str; 4] = ["en", "tr", "en-XA", "tr-XT"];
 const THEMES: [ThemePref; 2] = [ThemePref::Dark, ThemePref::Light];
 const PSEUDO: [&str; 2] = ["en-XA", "tr-XT"];
@@ -225,6 +300,36 @@ impl Surface {
             Surface::LiveRoPg13 => "live-ro-pg13",
             Surface::LiveSshRo => "live-ssh-ro",
             Surface::LiveSshRw => "live-ssh-rw",
+            // ## m2b-t24-shots
+            Surface::CertReview => "cert-review",
+            Surface::CertPinChanged => "cert-pin-changed",
+            Surface::PlaintextQuestion => "plaintext-question",
+            Surface::ConnDialogTlsPinned => "conn-dialog-tls-pinned",
+            Surface::SshSectionOff => "ssh-section-off",
+            Surface::SshSectionFolded => "ssh-section-folded",
+            Surface::SshSectionHop => "ssh-section-hop",
+            Surface::SshSectionJumps => "ssh-section-jumps",
+            Surface::SshImportMenu => "ssh-import-menu",
+            Surface::HostKeyNew => "hostkey-new",
+            Surface::HostKeyChanged => "hostkey-changed",
+            Surface::HostKeyChangedOpenSsh => "hostkey-changed-openssh",
+            Surface::KbdPrompt => "kbd-prompt",
+            Surface::SshPassword => "ssh-password",
+            Surface::SshPassphrase => "ssh-passphrase",
+            Surface::VaultCreate => "vault-create",
+            Surface::VaultUnlock => "vault-unlock",
+            Surface::VaultReset => "vault-reset",
+            Surface::VaultDamaged => "vault-damaged",
+            Surface::LiveReconnectingStaging => "live-reconnecting-staging",
+            Surface::LiveLostClean => "live-lost-clean",
+            Surface::ErrInsecureTls => "conn-error-insecure-tls",
+            Surface::ErrInsecurePlain => "conn-error-insecure-plain",
+            Surface::ErrPinChanged => "conn-error-pin-changed",
+            Surface::ErrSshAuth => "conn-error-ssh-auth",
+            Surface::ErrSshChannel => "conn-error-ssh-channel",
+            Surface::ErrSshAgent => "conn-error-ssh-agent",
+            Surface::ErrHostKeyChanged => "conn-error-host-key-changed",
+            Surface::ErrHostKeyRevoked => "conn-error-host-key-revoked",
         }
     }
 
@@ -250,7 +355,8 @@ impl Surface {
     /// connection dialog (the Overflow Rule); `shell-narrow` only at 1024x700 and
     /// `shell-minimum` only at the 960x600 minimum window (DESIGN.md).
     fn sizes(self) -> &'static [(f32, f32)] {
-        if self.is_live() {
+        // ## m2b-t24-shots: every M2b surface, at the default window and the minimum one.
+        if self.is_live() || self.is_m2b() {
             // ## m2b-t22-live: the default window and the minimum one (ruling I1).
             return &[(1280.0, 800.0), (960.0, 600.0)];
         }
@@ -267,6 +373,15 @@ impl Surface {
 
     fn is_demo(self) -> bool {
         self == Surface::ShellDemoProduction
+    }
+
+    // ## m2b-t24-shots
+    /// Whether the surface is one Task 24 added (every M2b surface outside T22's live set).
+    fn is_m2b(self) -> bool {
+        SURFACES
+            .iter()
+            .position(|s| *s == self)
+            .is_some_and(|at| at >= FIRST_T24)
     }
 
     /// Whether the title-bar capsule shows production (the one filled badge): the demo, and
@@ -362,6 +477,45 @@ impl Surface {
             Surface::LiveRoEnforced | Surface::LiveRoGuarded | Surface::LiveRoPg13 => {
                 ("hacivat-app/src/connections/access_popover.rs:", None)
             }
+            // ## m2b-t24-shots
+            Surface::CertReview | Surface::CertPinChanged => {
+                ("hacivat-app/src/connections/cert_dialog.rs:", None)
+            }
+            Surface::PlaintextQuestion => {
+                ("hacivat-app/src/connections/plaintext_prompt.rs:", None)
+            }
+            Surface::ConnDialogTlsPinned => ("hacivat-app/src/connections/dialog/", None),
+            // Off draws only the checkbox and Import inside the section.
+            Surface::SshSectionOff => ("hacivat-ui/src/checkbox.rs:", None),
+            Surface::SshSectionHop | Surface::SshSectionJumps => {
+                ("hacivat-app/src/connections/dialog/ssh.rs:", None)
+            }
+            Surface::SshSectionFolded => ("hacivat-ui/src/disclosure.rs:", None),
+            // An alias of the fixture config, drawn by the open menu's row label.
+            Surface::SshImportMenu => ("hacivat-ui/src/button.rs:", Some("bastion")),
+            Surface::HostKeyNew | Surface::HostKeyChanged | Surface::HostKeyChangedOpenSsh => {
+                ("hacivat-app/src/connections/hostkey_prompt.rs:", None)
+            }
+            Surface::KbdPrompt => ("hacivat-app/src/connections/kbd_prompt.rs:", None),
+            Surface::SshPassword | Surface::SshPassphrase => {
+                ("hacivat-app/src/connections/secret_prompt.rs:", None)
+            }
+            Surface::VaultCreate
+            | Surface::VaultUnlock
+            | Surface::VaultReset
+            | Surface::VaultDamaged => ("hacivat-app/src/connections/vault_dialog.rs:", None),
+            Surface::LiveReconnectingStaging => {
+                ("hacivat-ui/src/capsule.rs:", Some("orders-staging"))
+            }
+            Surface::LiveLostClean => ("hacivat-ui/src/toast.rs:", None),
+            Surface::ErrInsecureTls
+            | Surface::ErrInsecurePlain
+            | Surface::ErrPinChanged
+            | Surface::ErrSshAuth
+            | Surface::ErrSshChannel
+            | Surface::ErrSshAgent
+            | Surface::ErrHostKeyChanged
+            | Surface::ErrHostKeyRevoked => ("hacivat-app/src/connections/error_view.rs:", None),
         }
     }
 
@@ -442,6 +596,39 @@ fn open_m2a(surface: Surface, window: &mut Window, cx: &mut App) {
         Surface::LiveRoPg13 => capsule::ro_pg13_fixture(window, cx),
         Surface::LiveSshRo => capsule::ssh_ro_fixture(window, cx),
         Surface::LiveSshRw => capsule::ssh_rw_fixture(window, cx),
+        // ## m2b-t24-shots
+        Surface::CertReview => cert_dialog::untrusted_fixture(window, cx),
+        Surface::CertPinChanged => cert_dialog::pin_changed_fixture(window, cx),
+        Surface::PlaintextQuestion => plaintext_prompt::fixture(window, cx),
+        Surface::ConnDialogTlsPinned => dialog::tls_pinned_fixture(window, cx),
+        Surface::SshSectionOff => ssh::off_fixture(window, cx),
+        Surface::SshSectionFolded => ssh::folded_fixture(window, cx),
+        Surface::SshSectionHop => ssh::hop_fixture(window, cx),
+        Surface::SshSectionJumps => ssh::jumps_fixture(window, cx),
+        Surface::SshImportMenu => {
+            point_import_at_fixture_config(cx);
+            ssh::import_fixture(window, cx);
+        }
+        Surface::HostKeyNew => hostkey_prompt::new_fixture(window, cx),
+        Surface::HostKeyChanged => hostkey_prompt::changed_fixture(window, cx),
+        Surface::HostKeyChangedOpenSsh => hostkey_prompt::changed_openssh_fixture(window, cx),
+        Surface::KbdPrompt => kbd_prompt::fixture(window, cx),
+        Surface::SshPassword => secret_prompt::password_fixture(window, cx),
+        Surface::SshPassphrase => secret_prompt::passphrase_fixture(window, cx),
+        Surface::VaultCreate => vault_dialog::create_fixture(window, cx),
+        Surface::VaultUnlock => vault_dialog::unlock_fixture(window, cx),
+        Surface::VaultReset => vault_dialog::reset_fixture(window, cx),
+        Surface::VaultDamaged => vault_dialog::damaged_fixture(window, cx),
+        Surface::LiveReconnectingStaging => capsule::reconnecting_staging_fixture(window, cx),
+        Surface::LiveLostClean => capsule::lost_clean_fixture(window, cx),
+        Surface::ErrInsecureTls => error_view::insecure_tls_fixture(window, cx),
+        Surface::ErrInsecurePlain => error_view::insecure_plain_fixture(window, cx),
+        Surface::ErrPinChanged => error_view::pin_changed_fixture(window, cx),
+        Surface::ErrSshAuth => error_view::ssh_auth_fixture(window, cx),
+        Surface::ErrSshChannel => error_view::ssh_channel_fixture(window, cx),
+        Surface::ErrSshAgent => error_view::ssh_agent_fixture(window, cx),
+        Surface::ErrHostKeyChanged => error_view::host_key_changed_fixture(window, cx),
+        Surface::ErrHostKeyRevoked => error_view::host_key_revoked_fixture(window, cx),
         // The widget owns no copy: the app's strings (the Copy as URL toast, the keyring
         // fallback as a long bullet that wraps, the toast's own Dismiss).
         Surface::ToastStickyDemo => hacivat_ui::toast::sticky_demo_fixture(
@@ -455,6 +642,40 @@ fn open_m2a(surface: Surface, window: &mut Window, cx: &mut App) {
             cx,
         ),
         _ => unreachable!("an M1 surface opens through its action"),
+    }
+}
+
+// ## m2b-t24-shots
+
+/// The `~/.ssh/config` the import menu shot reads: a bastion behind a jump host, a plain host
+/// and a `ProxyCommand` entry (listed, disabled with its reason). No key files: a path under the
+/// fixture's temp home would draw a different folder on every run.
+const SSH_CONFIG: &str = "Host bastion\n HostName bastion.acme.io\n User deploy\n ProxyJump jump-eu\n\
+Host jump-eu\n HostName jump-eu.acme.io\n User deploy\n\
+Host reports\n HostName 10.0.4.7\n User ops\n\
+Host legacy\n HostName old.acme.io\n ProxyCommand ssh -W %h:%p gw.acme.io\n";
+
+/// Writes [`SSH_CONFIG`] under the shot app's temp root and points the import at it.
+fn point_import_at_fixture_config(cx: &mut App) {
+    let home = cx.global::<AppState>().paths.config.join("ssh-home");
+    let config = home.join(".ssh").join("config");
+    std::fs::create_dir_all(config.parent().expect("a folder")).expect("the fixture's ~/.ssh");
+    std::fs::write(&config, SSH_CONFIG).expect("the fixture config");
+    cx.set_global(SshImportEnv {
+        config,
+        home,
+        local_user: "deploy".to_string(),
+    });
+}
+
+/// Whether the surface's asynchronous step has landed (the import menu opens once the core
+/// runtime has read the config); every other surface is ready at once.
+fn ready(surface: Surface, window: &mut Window, cx: &mut App) -> bool {
+    match surface {
+        Surface::SshImportMenu => {
+            ssh::section_state(window, cx).is_some_and(|s| s.read(cx).import_open())
+        }
+        _ => true,
     }
 }
 
@@ -582,11 +803,15 @@ fn strip(s: &str) -> String {
 /// Assertions (a) to (c) on what the frame drew; one message per violation.
 fn check_labels(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String> {
     let mut out = Vec::new();
+    // ## m2b-t24-shots
+    let split = split_sites(frame);
     for r in frame {
         let text = strip(&r.text);
         if PSEUDO.contains(&locale)
             && r.source == TextSource::Fluent
-            && !(text.starts_with('[') && text.ends_with(']'))
+            && !text.is_empty()
+            && !bracketed(&text)
+            && !split.contains(r.path.as_ref())
         {
             out.push(format!(
                 "{name}: (a) Fluent label not bracketed: {:?} at {}",
@@ -607,6 +832,33 @@ fn check_labels(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String>
         }
     }
     out
+}
+
+// ## m2b-t24-shots
+fn bracketed(text: &str) -> bool {
+    text.starts_with('[') && text.ends_with(']')
+}
+
+/// (a)'s two exceptions (Task 24): an empty label shows nothing to localize (a field without a
+/// placeholder), and one Fluent message may be drawn in pieces from one site (around a mono
+/// literal: "Type `reset` to confirm"). A site is such a split message when it drew two or more
+/// pieces, none bracketed on its own, whose concatenation in frame order is bracketed; its
+/// pieces pass. A site that draws whole messages (a list) still has each one checked.
+fn split_sites(frame: &[RenderedText]) -> std::collections::BTreeSet<String> {
+    let mut sites: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for r in frame {
+        let text = strip(&r.text);
+        if r.source == TextSource::Fluent && !text.is_empty() {
+            sites.entry(r.path.to_string()).or_default().push(text);
+        }
+    }
+    sites
+        .into_iter()
+        .filter(|(_, pieces)| {
+            pieces.len() > 1 && pieces.iter().all(|p| !bracketed(p)) && bracketed(&pieces.concat())
+        })
+        .map(|(site, _)| site)
+        .collect()
 }
 
 // ## m2b-t22-live (fix round 2, R1-I1)
@@ -711,6 +963,20 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         std::thread::sleep(std::time::Duration::from_millis(30));
         cx.run_until_parked();
     }
+    // ## m2b-t24-shots: wait for the surface's own core work (a condition, bounded).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !cx
+        .update_window(handle, |_, window, cx| ready(shot.surface, window, cx))
+        .expect("the window is open")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{}: timed out waiting for the surface",
+            shot.surface.name()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        cx.run_until_parked();
+    }
     cx.update(|cx| cx.refresh_windows());
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
@@ -774,7 +1040,27 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     }
     image.save(dir.join(&name)).expect("write the PNG");
     println!("shot {name}: {} labels", frame.len());
+    stop_core_runtime(&mut cx);
     failures
+}
+
+// ## m2b-t24-shots
+/// How long the core runtime may take to stop before a shot's app is dropped.
+const TEARDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The teardown deadlock (T22 round 1; it recurred in Task 24): the quit handler stops the core
+/// runtime with a 200 ms budget while GPUI's test scheduler blocks on the quit futures, and a
+/// worker that outlives the budget drops the event relay's sender, whose wake-up takes the
+/// scheduler's locks in the other order (a lock-order inversion in the GPUI fork's
+/// `TestScheduler`). Stopping the runtime here first, outside that block and with room to
+/// finish, leaves no worker to race the teardown; the quit handler's own stop is then a no-op.
+fn stop_core_runtime(cx: &mut HeadlessAppContext) {
+    cx.update(|cx| {
+        if let Some(m) = cx.try_global::<ConnectionsModel>() {
+            m.core_runtime().shutdown(TEARDOWN_BUDGET);
+        }
+    });
+    cx.run_until_parked();
 }
 
 /// The main check: renders the shots named in `names` (file names), then fails with every
@@ -825,9 +1111,25 @@ fn render_all_surfaces(names: &[String], all: bool) {
 fn the_matrix_covers_every_surface_locale_and_theme() {
     let all = shots();
     // M1: 8 surfaces x 8 + 4 VF; M2a: 26 surfaces x 8 + the 4 dialog surfaces again at 1024x700;
-    // M2b T22: 10 surfaces x 8 at 1280x800 and again at 960x600.
-    assert_eq!(all.len(), 8 * 4 * 2 + 4 + 26 * 8 + 4 * 8 + 10 * 8 * 2);
+    // M2b T22: 10 surfaces x 8 at 1280x800 and again at 960x600; M2b T24: 29 surfaces likewise.
+    assert_eq!(
+        all.len(),
+        8 * 4 * 2 + 4 + 26 * 8 + 4 * 8 + 10 * 8 * 2 + 29 * 8 * 2
+    );
+    assert_eq!(all.len(), 932);
     let names: Vec<String> = all.iter().map(|s| s.file_name(2.0)).collect();
+    // ## m2b-t24-shots: every T24 surface at both sizes, in every locale and theme.
+    for surface in &SURFACES[FIRST_T24..] {
+        assert!(surface.is_m2b() && !surface.is_live(), "{surface:?}");
+        assert_eq!(
+            all.iter().filter(|s| s.surface == *surface).count(),
+            16,
+            "{surface:?}"
+        );
+    }
+    assert!(!Surface::LiveSshRw.is_m2b() && !Surface::ConnDialogNew.is_m2b());
+    assert!(names.contains(&"kbd-prompt-light-tr-960x600@2x.png".to_string()));
+    assert!(names.contains(&"vault-reset-dark-tr-XT-960x600@2x.png".to_string()));
     assert!(names.contains(&"live-ssh-ro-dark-tr-XT-960x600@2x.png".to_string()));
     assert!(names.contains(&"shell-dark-en-1280x800@2x.png".to_string()));
     assert!(names.contains(&"shell-narrow-light-tr-XT-1024x700@2x.png".to_string()));
@@ -866,6 +1168,31 @@ fn pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px() {
     assert!(found[2].contains("(c) 10.5 px"));
     // Outside the pseudo locales an unbracketed Fluent label is fine.
     assert!(check_labels("s", "tr", &frame[3..4]).is_empty());
+    // ## m2b-t24-shots: an empty label passes; a message split around a literal passes as a
+    // whole, never a site whose pieces are whole messages or never close the bracket.
+    let at = |text: &str, path: &str| RenderedText {
+        path: path.to_string().into(),
+        ..label(text, TextSource::Fluent, 13.0, false)
+    };
+    assert!(check_labels("s", "en-XA", &[at("", "x.rs:1:1")]).is_empty());
+    let split = [
+        at("[Ŧẏƥḗ ", "v.rs:9:9"),
+        RenderedText {
+            path: "v.rs:9:9#word".into(),
+            ..label("reset", TextSource::Data, 11.5, false)
+        },
+        at(" ŧö çöƞƒıřḿ]", "v.rs:9:9"),
+    ];
+    assert!(check_labels("s", "en-XA", &split).is_empty());
+    let broken = [at("[Ŧẏƥḗ ", "v.rs:9:9"), at(" ŧö çöƞƒıřḿ", "v.rs:9:9")];
+    assert_eq!(check_labels("s", "en-XA", &broken).len(), 2);
+    let list = [
+        at("[a]", "l.rs:1:1"),
+        at("b", "l.rs:1:1"),
+        at("[c]", "l.rs:1:1"),
+    ];
+    let found = check_labels("s", "en-XA", &list);
+    assert!(found.len() == 1 && found[0].contains("\"b\""), "{found:?}");
 }
 
 /// The ignored test: it renders, so it runs only on request.
@@ -1107,6 +1434,21 @@ fn a_missing_surface_fails_its_frame() {
     ] {
         assert!(surface.missing_from("s", &shell).is_some(), "{surface:?}");
     }
+    // ## m2b-t24-shots: so does every T24 surface; the import menu needs its alias drawn.
+    for surface in &SURFACES[FIRST_T24..] {
+        assert!(surface.missing_from("s", &shell).is_some(), "{surface:?}");
+    }
+    let menu = |text| [at("crates/ui/hacivat-ui/src/button.rs:240:21", text)];
+    assert!(
+        Surface::SshImportMenu
+            .missing_from("s", &menu("No hosts in ~/.ssh/config"))
+            .is_some()
+    );
+    assert!(
+        Surface::SshImportMenu
+            .missing_from("s", &menu("bastion"))
+            .is_none()
+    );
     let explorer = [at(
         "crates/app/hacivat-app/src/connections/explorer.rs:420:17",
         "orders-prod",
@@ -1131,7 +1473,7 @@ fn the_command_line_reads_like_libtest() {
     let all: Vec<String> = shots().iter().map(|s| s.file_name(2.0)).collect();
     // No filter: everything; the render is ignored unless asked for.
     let cli = parse("--nocapture --test-threads 1");
-    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(468));
+    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(932));
     assert!(!cli.runs_ignored());
     // nextest: `--list --format terse --ignored` lists only the render.
     let cli = parse("--list --format terse --ignored");
@@ -1145,7 +1487,7 @@ fn the_command_line_reads_like_libtest() {
     );
     assert_eq!(
         parse("--ignored render_all").shots(&all).map(|s| s.len()),
-        Some(468)
+        Some(932)
     );
     // A dialog surface renders at both sizes.
     assert_eq!(

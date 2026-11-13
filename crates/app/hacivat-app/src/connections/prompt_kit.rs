@@ -48,9 +48,8 @@ use crate::shell::layers::{DIALOG_CONTEXT, Layer};
 /// The label column of the 420 and 480 px dialogs (NOTES cross-cutting #5).
 pub(crate) const LABEL_PX: f32 = 120.0;
 
-/// The separator between the subtitle's parts, and the arrow between route stops (symbols).
+/// The separator between the subtitle's parts (a symbol).
 const SEPARATOR: &str = "·";
-const ROUTE_ARROW: &str = "→";
 /// What a cut-off server text ends with.
 const CUT: char = '…';
 
@@ -594,12 +593,14 @@ pub(crate) fn route_row(
             .min_w_0()
             .max_w_full();
         if k > 0 {
-            item = item.child(div().flex_none().child(Label::new(
-                ROUTE_ARROW,
-                TextSource::Data,
-                t.type_ramp.caption,
-                c.text_2.to_hsla(),
-            )));
+            // ## m2b-t24-shots: the 12 px `arrow-right` of the hop route (NOTES "Hop route").
+            item = item.child(
+                div().flex_none().child(
+                    Icon::new(IconName::ArrowRight)
+                        .size(IconSize::Chrome)
+                        .color(c.text_2.to_hsla()),
+                ),
+            );
         }
         route = route.child(item.child(stop));
     }
@@ -791,6 +792,115 @@ pub(crate) fn note_flag(cx: &mut App, name: &str, value: bool) {
     parts::set_flag(cx, name, value);
     #[cfg(not(feature = "test-support"))]
     let _ = (cx, name, value);
+}
+
+// ## m2b-t24-shots: what the M2b prompts' shots fixtures share (R28, P19).
+#[cfg(feature = "shots")]
+pub(crate) mod shots {
+    use std::path::PathBuf;
+
+    use hacivat_net::ssh::{HopSpec, HostKey, HostKeyPolicy, SshAuth, SshSpec};
+    use hacivat_proto::{EnvTag, ProfileId};
+    use hacivat_secrets::{AuthProviderId, Retention};
+    use hacivat_session::pipeline::Answer;
+    use hacivat_session::profile::{Profile, ProfileDraft, ProfileEndpoint, TransportSpec};
+    use hacivat_ui_core::gpui_surface::{App, Global};
+    use tokio::sync::oneshot;
+
+    use crate::connections::ConnectionsModel;
+
+    /// The askers' ends of the fixtures' questions, kept so each question stays open (a prompt
+    /// whose asker went away closes itself).
+    #[derive(Default)]
+    struct HeldAnswers(Vec<oneshot::Receiver<Answer>>);
+
+    impl Global for HeldAnswers {}
+
+    /// A reply channel whose asker never answers and never goes away.
+    pub(crate) fn held_reply(cx: &mut App) -> oneshot::Sender<Answer> {
+        let (tx, rx) = oneshot::channel();
+        cx.default_global::<HeldAnswers>().0.push(rx);
+        tx
+    }
+
+    /// Two Ed25519 host keys: the one stored and the one offered now.
+    pub(crate) fn host_keys() -> (HostKey, HostKey) {
+        let parse = |line: &str| HostKey::from_openssh(line).expect("a valid OpenSSH key");
+        (
+            parse(
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOuVLheCpX+NUVs/ugNOZWrf35rsu+B7r+RAQY/Vw9RL",
+            ),
+            parse(
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID9pE6RxMxhop1zW4gTobAyPP5Ew5mPyAsFtrvZm5Vlc",
+            ),
+        )
+    }
+
+    /// The key file the mock's bastion signs in with, stored as `~/…` (as an import writes it),
+    /// so no shot ever draws a home folder.
+    pub(crate) fn key_file() -> PathBuf {
+        PathBuf::from("~/.ssh/id_ed25519")
+    }
+
+    /// A hop of the mock's route, as `deploy`.
+    pub(crate) fn hop(host: &str, auth: SshAuth) -> HopSpec {
+        HopSpec {
+            host: host.to_string(),
+            port: 22,
+            user: "deploy".to_string(),
+            auth,
+            identities_only: false,
+            identity_files: Vec::new(),
+        }
+    }
+
+    /// The mock's route: `jump-eu.acme.io` (a password), then `bastion.acme.io` (a key file).
+    pub(crate) fn two_hops() -> Vec<HopSpec> {
+        vec![
+            hop("jump-eu.acme.io", SshAuth::Password),
+            hop("bastion.acme.io", SshAuth::KeyFile { path: key_file() }),
+        ]
+    }
+
+    /// Saves `name` (tagged `env`) at `db-prod-eu.acme.io:5432` through `hops` (direct when
+    /// empty), signing in with a password; returns its ID. Nothing is ever dialled.
+    pub(crate) fn save_profile(
+        cx: &mut App,
+        name: &str,
+        env: EnvTag,
+        hops: Vec<HopSpec>,
+    ) -> ProfileId {
+        let mut profile = Profile {
+            name: name.to_string(),
+            environment: Some(env),
+            endpoint: ProfileEndpoint::Server {
+                host: "db-prod-eu.acme.io".to_string(),
+                port: Some(5432),
+            },
+            database: Some("orders".to_string()),
+            user: Some("deploy".to_string()),
+            auth: AuthProviderId::Password,
+            ssh_retention: Retention::Forever,
+            ..Profile::default()
+        };
+        if !hops.is_empty() {
+            profile.transport = TransportSpec::SshTunnel(SshSpec {
+                hops,
+                host_keys: HostKeyPolicy::Ask,
+                keepalive_s: None,
+            });
+        }
+        let id = profile.id;
+        ConnectionsModel::save(
+            cx,
+            ProfileDraft {
+                is_new: true,
+                ..ProfileDraft::edit(profile)
+            },
+        )
+        .detach();
+        id
+    }
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@ use hacivat_ui_core::theme::{Theme, TypeStyle, focus_outline};
 
 use crate::accesskey::AccessKey;
 use crate::icon::{Icon, IconName, IconSize};
-use crate::popover::{A11yNode, Declare, Tip, lazy};
+use crate::popover::{A11yDecl, A11yNode, Declare, Tip, lazy};
 use crate::text::{Label, TextSource};
 
 /// A click handler shared between the widgets that take one.
@@ -50,6 +50,8 @@ pub struct Button {
     inert: bool,
     // ## m2a-t17-dialog
     on_raised: bool,
+    // ## m2b-t24-shots
+    expanded: Option<bool>,
 }
 
 impl Button {
@@ -67,6 +69,7 @@ impl Button {
             fixed_width: None,
             inert: false,
             on_raised: false,
+            expanded: None,
         }
     }
 
@@ -135,6 +138,14 @@ impl Button {
     /// (DESIGN.md Raised Ink Rule; the mock's `.dlg` maps text-3 to text-2).
     pub fn on_raised(mut self, on_raised: bool) -> Self {
         self.on_raised = on_raised;
+        self
+    }
+
+    // ## m2b-t24-shots
+    /// The button opens a popup (a menu, a popover): it declares whether that popup is open
+    /// (`aria-expanded`).
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.expanded = Some(expanded);
         self
     }
 }
@@ -212,7 +223,19 @@ pub(crate) fn key_label(
     style: TypeStyle,
     color: Hsla,
 ) -> AnyElement {
-    let plain = |s: SharedString| Label::new(s, TextSource::Fluent, style, color);
+    key_label_from(text, TextSource::Fluent, key, style, color)
+}
+
+// ## m2b-t24-shots
+/// [`key_label`] for a text from `source` (data, such as a host alias in a menu).
+pub(crate) fn key_label_from(
+    text: &SharedString,
+    source: TextSource,
+    key: Option<AccessKey>,
+    style: TypeStyle,
+    color: Hsla,
+) -> AnyElement {
+    let plain = |s: SharedString| Label::new(s, source, style, color);
     match key {
         Some(AccessKey::InLabel(at)) if at < text.len() && text.is_char_boundary(at) => {
             let key_len = text[at..].chars().next().map_or(0, char::len_utf8);
@@ -310,6 +333,7 @@ impl Button {
             fixed_width,
             inert,
             on_raised,
+            expanded,
         } = self;
 
         // Hover and focus state live with the element across frames.
@@ -381,8 +405,11 @@ impl Button {
                 .disabled(true)
                 .into_any_element();
         }
+        // ## m2b-t24-shots: a popup trigger says whether its popup is open.
+        let mut decl = A11yDecl::new(Role::Button, label.clone());
+        decl.expanded = expanded;
         let mut body = focus_outline(body.track_focus(&handle).tab_stop(true), &theme, focused)
-            .declare(Role::Button, label.clone(), None)
+            .declare_full(decl)
             .cursor_pointer()
             .on_hover(hover_listener(hover));
         if let Some(handler) = on_click {

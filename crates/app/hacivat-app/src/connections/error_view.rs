@@ -1275,6 +1275,143 @@ pub use shots::{auth_fixture, tls_fixture, unknown_db_fixture, unsupported_fixtu
 #[cfg(feature = "shots")]
 pub(crate) use shots::sample as sample_error;
 
+// ## m2b-t24-shots: the M2b error copy (NOTES M2b surface 7), in M2a's anatomy (R28, P19).
+#[cfg(feature = "shots")]
+mod shots_m2b {
+    use std::time::Duration;
+
+    use hacivat_proto::{ErrClass, FixId, ProfileId};
+    use hacivat_session::pipeline::{ConnectError, StepOutcome, StepTrace, TrailStep};
+    use hacivat_ui_core::gpui_surface::{App, Window};
+
+    use super::{open_error_dialog, sample_error};
+    use crate::connections::cert_dialog::sample_review;
+
+    /// `steps` with every step before `failed` done, `failed` failed and the rest pending.
+    fn trail(steps: &[TrailStep], failed: TrailStep) -> Vec<StepTrace> {
+        let at = steps.iter().position(|s| *s == failed).unwrap_or(0);
+        steps
+            .iter()
+            .enumerate()
+            .map(|(i, &step)| StepTrace {
+                step,
+                outcome: match i.cmp(&at) {
+                    std::cmp::Ordering::Less => StepOutcome::Done,
+                    std::cmp::Ordering::Equal => StepOutcome::Failed,
+                    std::cmp::Ordering::Greater => StepOutcome::Pending,
+                },
+                elapsed: (i < at).then(|| Duration::from_millis(3 + 7 * i as u64)),
+            })
+            .collect()
+    }
+
+    /// `class` before the server was checked (no version), failing at `failed` of `steps`.
+    fn error(class: ErrClass, steps: &[TrailStep], failed: TrailStep) -> ConnectError {
+        let mut e = sample_error(class, failed, None, "");
+        e.trail = trail(steps, failed);
+        e.args.version = None;
+        e
+    }
+
+    /// Under SSH the trail starts with the tunnel (NOTES: Resolve drops out, B11).
+    const SSH_STEPS: [TrailStep; 5] = [
+        TrailStep::Ssh,
+        TrailStep::Connect,
+        TrailStep::Tls,
+        TrailStep::SignIn,
+        TrailStep::CheckServer,
+    ];
+    const TLS_STEPS: [TrailStep; 5] = [
+        TrailStep::Resolve,
+        TrailStep::Connect,
+        TrailStep::Tls,
+        TrailStep::SignIn,
+        TrailStep::CheckServer,
+    ];
+
+    /// An SSH failure at hop `hop` (from 0) of `bastion.acme.io`.
+    fn ssh(class: ErrClass, hop: u8) -> ConnectError {
+        let mut e = error(class, &SSH_STEPS, TrailStep::Ssh);
+        e.args.hop = Some(hop);
+        e.args.hop_host = Some("bastion.acme.io".to_string());
+        e
+    }
+
+    fn open(error: ConnectError, window: &mut Window, cx: &mut App) {
+        open_error_dialog(ProfileId::new(), std::sync::Arc::new(error), window, cx);
+    }
+
+    /// `auth.insecure_method` over unverified TLS: Review certificate…, Edit connection.
+    pub fn insecure_tls_fixture(window: &mut Window, cx: &mut App) {
+        let mut e = error(ErrClass::AuthInsecureMethod, &TLS_STEPS, TrailStep::SignIn);
+        e.certificate = Some(sample_review(None));
+        e.fixes = vec![FixId::ReviewCertificate, FixId::EditConnection];
+        open(e, window, cx);
+    }
+
+    /// `auth.insecure_method` without TLS: no TLS step, Edit connection only (NOTES ruling 10).
+    pub fn insecure_plain_fixture(window: &mut Window, cx: &mut App) {
+        let steps = [
+            TrailStep::Resolve,
+            TrailStep::Connect,
+            TrailStep::SignIn,
+            TrailStep::CheckServer,
+        ];
+        let mut e = error(ErrClass::AuthInsecureMethod, &steps, TrailStep::SignIn);
+        e.fixes = vec![FixId::EditConnection];
+        open(e, window, cx);
+    }
+
+    /// `tls.pin_changed`: Review certificate… (NOTES M2b surface 5).
+    pub fn pin_changed_fixture(window: &mut Window, cx: &mut App) {
+        let mut e = error(ErrClass::TlsPinChanged, &TLS_STEPS, TrailStep::Tls);
+        e.certificate = Some(sample_review(Some([0x5C; 32])));
+        open(e, window, cx);
+    }
+
+    /// `ssh.auth` at hop 2.
+    pub fn ssh_auth_fixture(window: &mut Window, cx: &mut App) {
+        open(ssh(ErrClass::SshAuth, 1), window, cx);
+    }
+
+    /// `ssh.channel_open` at hop 2 (AllowTcpForwarding).
+    pub fn ssh_channel_fixture(window: &mut Window, cx: &mut App) {
+        open(ssh(ErrClass::SshChannelOpen, 1), window, cx);
+    }
+
+    /// `ssh.agent_unavailable` at hop 1.
+    pub fn ssh_agent_fixture(window: &mut Window, cx: &mut App) {
+        open(ssh(ErrClass::SshAgentUnavailable, 0), window, cx);
+    }
+
+    /// `ssh.host_key_changed` at hop 2: Review host key… (NOTES M2b surface 1).
+    pub fn host_key_changed_fixture(window: &mut Window, cx: &mut App) {
+        let mut e = ssh(ErrClass::SshHostKeyChanged, 1);
+        let (old, new) = crate::connections::prompt_kit::shots::host_keys();
+        e.host_key = Some(hacivat_session::pipeline::HostKeyMismatch {
+            hop: 1,
+            host: "bastion.acme.io".to_string(),
+            port: 22,
+            old,
+            new,
+            source: hacivat_net::ssh::KnownSource::Hacivat,
+        });
+        open(e, window, cx);
+    }
+
+    /// `ssh.host_key_revoked` at hop 2.
+    pub fn host_key_revoked_fixture(window: &mut Window, cx: &mut App) {
+        open(ssh(ErrClass::SshHostKeyRevoked, 1), window, cx);
+    }
+}
+
+#[cfg(feature = "shots")]
+pub use shots_m2b::{
+    host_key_changed_fixture, host_key_revoked_fixture, insecure_plain_fixture,
+    insecure_tls_fixture, pin_changed_fixture, ssh_agent_fixture, ssh_auth_fixture,
+    ssh_channel_fixture,
+};
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

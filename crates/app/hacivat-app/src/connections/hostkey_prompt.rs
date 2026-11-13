@@ -717,6 +717,8 @@ impl Render for HostKeyChanged {
                 tr(cx, ids::hv::CONN_HK_CHANGED_REPLACE, NoArgs),
             )
             .kind(ButtonKind::Default)
+            // ## m2b-t24-shots: the mock's key icon (T21 review m10).
+            .icon(IconName::KeyRound)
             .disabled(self.busy)
             .focus_handle(self.action.clone())
             .on_click(cx.listener(|this, _, window, cx| this.replace(window, cx)));
@@ -823,6 +825,77 @@ pub fn review_changed(m: HostKeyMismatch, profile: ProfileId, window: &mut Windo
     // Q34: Cancel is the primary and has the initial focus.
     let _ = prompt_kit::push_modal(CHANGED_LAYER_ID, view.into(), &cancel, window, cx);
 }
+
+// ## m2b-t24-shots: shots fixtures (R28, P19).
+#[cfg(feature = "shots")]
+mod shots {
+    use hacivat_net::ssh::KnownSource;
+    use hacivat_proto::EnvTag;
+    use hacivat_session::pipeline::{HostKeyMismatch, Question};
+    use hacivat_ui_core::gpui_surface::{App, Window};
+
+    use crate::connections::prompt_kit::shots::{held_reply, host_keys, save_profile, two_hops};
+
+    /// First connection to `bastion.acme.io` (M2a surface 6, as M2b reuses it).
+    pub fn new_fixture(window: &mut Window, cx: &mut App) {
+        let id = save_profile(cx, "orders-prod", EnvTag::Production, two_hops());
+        let reply = held_reply(cx);
+        super::open(
+            Question::HostKey {
+                profile: id,
+                name: "orders-prod".to_string(),
+                hop: 1,
+                host: "bastion.acme.io".to_string(),
+                port: 22,
+                key: host_keys().1,
+            },
+            reply,
+            window,
+            cx,
+        );
+    }
+
+    /// The changed key of `bastion.acme.io` (hop 2 of 2), stored in `source`.
+    fn changed(source: KnownSource, window: &mut Window, cx: &mut App) {
+        let id = save_profile(cx, "orders-prod", EnvTag::Production, two_hops());
+        let (old, new) = host_keys();
+        super::review_changed(
+            HostKeyMismatch {
+                hop: 1,
+                host: "bastion.acme.io".to_string(),
+                port: 22,
+                old,
+                new,
+                source,
+            },
+            id,
+            window,
+            cx,
+        );
+    }
+
+    /// The hard stop for a key in Hacivat's store: the replace button (NOTES M2b surface 1).
+    pub fn changed_fixture(window: &mut Window, cx: &mut App) {
+        changed(KnownSource::Hacivat, window, cx);
+    }
+
+    /// The hard stop for a key in `~/.ssh/known_hosts` line 14: the `ssh-keygen -R` command and
+    /// Try again. The path is under the home folder, so the shot shows it as `~/…`.
+    pub fn changed_openssh_fixture(window: &mut Window, cx: &mut App) {
+        let home = std::env::home_dir().unwrap_or_else(|| "/home/deploy".into());
+        changed(
+            KnownSource::OpenSsh {
+                path: home.join(".ssh").join("known_hosts"),
+                line: 14,
+            },
+            window,
+            cx,
+        );
+    }
+}
+
+#[cfg(feature = "shots")]
+pub use shots::{changed_fixture, changed_openssh_fixture, new_fixture};
 
 #[cfg(test)]
 mod tests {

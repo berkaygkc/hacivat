@@ -101,7 +101,6 @@ const EXAMPLE_USER: &str = "deploy";
 const EXAMPLE_KEY: &str = "~/.ssh/id_ed25519";
 /// A route stop not typed yet, and the arrow between stops (symbols, not text).
 const ROUTE_GAP_MARK: &str = "…";
-const ROUTE_ARROW: &str = "→";
 
 /// The host-key policies, in the select's order: never an "accept everything" choice.
 const HOST_KEY_POLICIES: [HostKeyPolicy; 3] = HostKeyPolicy::ALL;
@@ -1369,7 +1368,23 @@ impl SshSection {
                 .map(|(i, e)| {
                     let alias = SharedString::from(e.alias.clone());
                     let resolution = e.resolution.clone();
+                    // ## m2b-t24-shots: a bare `user@host` is data; every other hint is Fluent.
+                    let hint_source = if matches!(
+                        resolution,
+                        Resolution::Usable {
+                            jumps: None,
+                            key: None,
+                            ..
+                        }
+                    ) {
+                        TextSource::Data
+                    } else {
+                        TextSource::Fluent
+                    };
                     MenuItemSpec::new(Rc::new(move |_: &App| alias.clone()), i.to_string())
+                        // ## m2b-t24-shots: aliases in mono (T20 review M1b).
+                        .mono(true)
+                        .hint_source(hint_source)
                         .disabled(e.spec.is_none())
                         .hint(Rc::new(move |cx: &App| resolution_text(cx, &resolution)))
                 })
@@ -1379,7 +1394,9 @@ impl SshSection {
         let width = self.import_bounds.map(|b| b.size.width).unwrap_or_default();
         menu.update(cx, |m, _| {
             m.set_min_width(width);
-            m.label(text_fn(ids::hv::CONN_SSH_IMPORT_TITLE));
+            // ## m2b-t24-shots: the title row "Hosts in ~/.ssh/config" (T20 review M1b), which
+            // also names the menu.
+            m.title(text_fn(ids::hv::CONN_SSH_IMPORT_TITLE));
         });
         let events = cx.subscribe_in(&menu, window, Self::on_menu_event);
         let focus = menu.focus_handle(cx);
@@ -2213,8 +2230,12 @@ fn render(
         None
     };
     let toggle = state.downgrade();
+    // ## m2b-t24-shots: the folded summary leads with the `route` glyph while the tunnel is on
+    // (T20 review M1a).
+    let tunnel = matches!(draft.profile.transport, TransportSpec::SshTunnel(_));
     let mut disclosure = Disclosure::new("conn-ssh", tr(cx, ids::hv::CONN_SECTION_SSH, NoArgs))
         .summary(summary)
+        .summary_icon(tunnel.then_some(IconName::Route))
         .open(open)
         .on_toggle(move |open, _, cx| {
             let _ = toggle.update(cx, |s, cx| s.set_open(open, cx));
@@ -2290,6 +2311,9 @@ fn render_content(
         });
     let on_import = weak.clone();
     let import = Button::new("ssh-import", tr(cx, ids::hv::CONN_SSH_IMPORT, NoArgs))
+        // ## m2b-t24-shots: the mock's `file-up` (T20 review M1c), and the menu's state.
+        .icon(IconName::FileUp)
+        .expanded(s.import.is_some())
         .focus_handle(s.focus.import.clone())
         .on_raised(true)
         .disabled(s.read_only)
@@ -2461,7 +2485,8 @@ fn render_content(
     match auth {
         AuthKind::Agent => rows.hint(note(
             theme,
-            IconName::FileKey,
+            // ## m2b-t24-shots: the mock's `key-round` (T20 review M1c).
+            IconName::KeyRound,
             tr(cx, ids::hv::CONN_SSH_AGENT_NOTE, NoArgs),
             "ssh-agent-note",
         )),
@@ -2705,16 +2730,13 @@ fn render_route(s: &SshSection, p: &Profile, theme: &Theme, cx: &App) -> Div {
         let mut item = line().min_w_0().max_w_full();
         if k > 0 {
             let arrow = format!("ssh-route-arrow-{k}");
+            // ## m2b-t24-shots: the mock's 12 px `arrow-right` (T20 review M1c).
             item = item.child(
-                div()
-                    .debug_selector(move || arrow)
-                    .flex_none()
-                    .child(Label::new(
-                        ROUTE_ARROW,
-                        TextSource::Data,
-                        t.type_ramp.caption,
-                        c.text_2.to_hsla(),
-                    )),
+                div().debug_selector(move || arrow).flex_none().child(
+                    Icon::new(IconName::ArrowRight)
+                        .size(IconSize::Chrome)
+                        .color(c.text_2.to_hsla()),
+                ),
             );
         }
         let stop = format!("ssh-route-stop-{k}");
@@ -2755,6 +2777,95 @@ fn database_stop(p: &Profile) -> String {
         None => host,
     }
 }
+
+// ## m2b-t24-shots: shots fixtures (R28, P19; T20 review M4).
+#[cfg(feature = "shots")]
+mod shots {
+    use hacivat_net::ssh::SshAuth;
+    use hacivat_proto::EnvTag;
+    use hacivat_ui_core::gpui_surface::{App, Window};
+
+    use super::super::{DialogMode, ensure_connections, open_connection_dialog};
+    use super::*;
+    use crate::connections::prompt_kit::shots::{hop, key_file, save_profile};
+
+    /// The New dialog with the SSH section open and its tunnel off.
+    fn new_dialog_open(window: &mut Window, cx: &mut App) -> Option<Entity<SshSection>> {
+        ensure_connections(cx);
+        open_connection_dialog(DialogMode::New, window, cx);
+        let dialog = open_dialog(window, cx)?;
+        let seed = Seed::of(&dialog.read(cx).draft);
+        let state = state_for(&dialog, || seed, window, cx);
+        state.update(cx, |s, cx| s.set_open(true, cx));
+        Some(state)
+    }
+
+    /// Off: the section open, the checkbox and Import only.
+    pub fn off_fixture(window: &mut Window, cx: &mut App) {
+        let _ = new_dialog_open(window, cx);
+    }
+
+    /// Folded with the tunnel on: the summary leads with the route glyph (T20 review M1a).
+    pub fn folded_fixture(window: &mut Window, cx: &mut App) {
+        ensure_connections(cx);
+        let id = save_profile(
+            cx,
+            "orders-prod",
+            EnvTag::Production,
+            vec![hop(
+                "bastion.acme.io",
+                SshAuth::KeyFile { path: key_file() },
+            )],
+        );
+        open_edit(id, DialogFocus::Default, window, cx);
+    }
+
+    /// A single hop signing in with a key file (the key row, the route, the host keys).
+    pub fn hop_fixture(window: &mut Window, cx: &mut App) {
+        ensure_connections(cx);
+        let id = save_profile(
+            cx,
+            "orders-prod",
+            EnvTag::Production,
+            vec![hop(
+                "bastion.acme.io",
+                SshAuth::KeyFile { path: key_file() },
+            )],
+        );
+        open_with_ssh(id, window, cx);
+    }
+
+    /// Two jump hosts in front of a bastion that asks keyboard-interactive (the note, the jump
+    /// rows, a route that wraps).
+    pub fn jumps_fixture(window: &mut Window, cx: &mut App) {
+        ensure_connections(cx);
+        let id = save_profile(
+            cx,
+            "orders-prod",
+            EnvTag::Production,
+            vec![
+                hop("jump-eu.acme.io", SshAuth::Agent),
+                hop("jump-us.acme.io", SshAuth::Agent),
+                hop("bastion.acme.io", SshAuth::KeyboardInteractive),
+            ],
+        );
+        open_with_ssh(id, window, cx);
+    }
+
+    /// The import menu over the open section, reading the config [`SshImportEnv`] names (the
+    /// harness writes it). The menu opens once the core runtime has read the file.
+    pub fn import_fixture(window: &mut Window, cx: &mut App) {
+        if let Some(state) = new_dialog_open(window, cx) {
+            // As a click does: the button has the focus (the body keeps it in view) first.
+            let import = state.read(cx).focus.import.clone();
+            window.focus(&import, cx);
+            state.update(cx, |s, cx| s.open_import(window, cx));
+        }
+    }
+}
+
+#[cfg(feature = "shots")]
+pub use shots::{folded_fixture, hop_fixture, import_fixture, jumps_fixture, off_fixture};
 
 #[cfg(test)]
 mod tests {

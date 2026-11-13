@@ -26,11 +26,11 @@ use hacivat_proto::{AccessLabel, DbmsKind, EnvTag, ProfileId};
 use hacivat_session::profile::{Profile, ProfileEndpoint, TransportSpec};
 use hacivat_session::{LiveInfo, LiveState, PathKind};
 use hacivat_ui::actions::{ActionDef, ActionRegistry};
-use hacivat_ui::capsule::{CapsuleModel, CapsuleSegment, EnvKind};
+use hacivat_ui::capsule::{CapsuleModel, CapsuleSegment, EnvKind, ExpandedSegment};
 use hacivat_ui::explain::ExplainPopover;
 use hacivat_ui::icon::IconName;
 use hacivat_ui_core::gpui_surface::{
-    App, Bounds, Pixels, Point, SharedString, Window, point, px, size,
+    App, Bounds, Entity, Pixels, Point, SharedString, Window, point, px, size,
 };
 
 use crate::connections::error_view::open_error_dialog;
@@ -411,7 +411,7 @@ pub fn explain_unencrypted(anchor: Point<Pixels>, window: &mut Window, cx: &mut 
         ),
         tr(cx, ids::hv::CONN_UNENC_FIX, NoArgs),
     ];
-    let view = ExplainPopover::view(
+    let popover = ExplainPopover::new(
         tr(cx, ids::hv::CONN_UNENC_TITLE, NoArgs),
         IconName::LockOpen,
         body,
@@ -420,10 +420,42 @@ pub fn explain_unencrypted(anchor: Point<Pixels>, window: &mut Window, cx: &mut 
     let Some(ws) = window.root::<Workspace>().flatten() else {
         return;
     };
+    let view = popover.clone().into();
     ws.update(cx, |ws, cx| {
         ws.open_anchored(POPOVER_LAYER, anchor, view, window, cx);
     });
+    // ## m2b-t24-shots
+    note_expanded(CapsuleSegment::Unencrypted, &popover, cx);
 }
+
+// ## m2b-t24-shots
+/// Records that `segment`'s explanation (`popover`) is open, so its trigger declares itself
+/// expanded (`aria-expanded`; the capsule segment and the sheet's Access value), and clears the
+/// record when that popover is released. A newer popover keeps its own record.
+pub(crate) fn note_expanded<T: 'static>(
+    segment: CapsuleSegment,
+    popover: &Entity<T>,
+    cx: &mut App,
+) {
+    let view = popover.entity_id();
+    cx.set_global(ExpandedSegment(Some(segment)));
+    cx.default_global::<ExpandedView>().0 = Some(view);
+    cx.observe_release(popover, move |_, cx| {
+        if cx.default_global::<ExpandedView>().0 == Some(view) {
+            cx.default_global::<ExpandedView>().0 = None;
+            cx.set_global(ExpandedSegment(None));
+            cx.refresh_windows();
+        }
+    })
+    .detach();
+    cx.refresh_windows();
+}
+
+/// The popover [`ExpandedSegment`] was recorded for.
+#[derive(Default)]
+struct ExpandedView(Option<hacivat_ui_core::gpui_surface::EntityId>);
+
+impl hacivat_ui_core::gpui_surface::Global for ExpandedView {}
 
 /// The keyboard path to the explanation (`connection.explain_unencrypted`): anchored under
 /// the title bar's middle, where the capsule sits. The segment's real bounds are known only
@@ -751,6 +783,39 @@ mod fixtures {
             LiveState::Reconnecting {
                 attempt: 3,
                 next_in: Some(Duration::from_secs(4)),
+            },
+        );
+    }
+
+    // ## m2b-t24-shots
+    /// A dev session reconnected with nothing lost: the toast's body line only.
+    pub fn lost_clean_fixture(_window: &mut Window, cx: &mut App) {
+        let id = show_profile(
+            cx,
+            profile("orders-dev", EnvTag::Dev, false, None),
+            live("16.4", AccessLabel::ReadWrite, Vec::new(), None, true),
+        );
+        crate::connections::session_toasts::lost(
+            id,
+            LostState {
+                open_tx: false,
+                temp_objects: false,
+                session_vars: false,
+                prepared: 0,
+                locks: false,
+            },
+            cx,
+        );
+    }
+
+    /// Staging, reconnecting between attempts: attempt 2, the next in 12 s (no filled block).
+    pub fn reconnecting_staging_fixture(_window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile("orders-staging", EnvTag::Staging, false, None),
+            LiveState::Reconnecting {
+                attempt: 2,
+                next_in: Some(Duration::from_secs(12)),
             },
         );
     }

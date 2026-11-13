@@ -50,6 +50,10 @@ pub enum IconName {
     FolderOpen,
     Undo2,
     FileKey,
+    // ## m2b-t24-shots: the M2b connection icons (T19 M6, T20 M1c).
+    FileUp,
+    KeyRound,
+    ArrowRight,
     /// The Hacivat mark (`icons/hacivat/hv-mark.svg`).
     HvMark,
 }
@@ -96,6 +100,9 @@ impl IconName {
             IconName::FolderOpen => "icons/lucide/folder-open.svg",
             IconName::Undo2 => "icons/lucide/undo-2.svg",
             IconName::FileKey => "icons/lucide/file-key.svg",
+            IconName::FileUp => "icons/lucide/file-up.svg",
+            IconName::KeyRound => "icons/lucide/key-round.svg",
+            IconName::ArrowRight => "icons/lucide/arrow-right.svg",
             IconName::HvMark => "icons/hacivat/hv-mark.svg",
         }
     }
@@ -211,7 +218,7 @@ mod tests {
     use hacivat_ui_core::assets::BundledAssets;
     use hacivat_ui_core::gpui_surface::AssetSource;
 
-    const ALL: [IconName; 39] = [
+    const ALL: [IconName; 42] = [
         IconName::ArrowLeftRight,
         IconName::Check,
         IconName::ChevronDown,
@@ -250,6 +257,10 @@ mod tests {
         IconName::FolderOpen,
         IconName::Undo2,
         IconName::FileKey,
+        // ## m2b-t24-shots
+        IconName::FileUp,
+        IconName::KeyRound,
+        IconName::ArrowRight,
         IconName::HvMark,
     ];
 

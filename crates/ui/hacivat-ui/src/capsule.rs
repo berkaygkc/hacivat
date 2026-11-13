@@ -27,6 +27,9 @@
 //!
 //! Label IDs for tests and tools: `capsule-text-run`, `capsule-text-next`, `capsule-text-access`,
 //! `capsule-text-path`, `capsule-text-idle`.
+//!
+//! M2b (Task 24): the access and unencrypted segments open popovers, so they declare whether
+//! theirs is open (`aria-expanded`), read from the [`ExpandedSegment`] global the app keeps.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -123,6 +126,20 @@ pub enum CapsuleSegment {
     // ## m2b-t22-live
     /// The read-only access segment (NOTES M2b surface 6).
     Access,
+}
+
+// ## m2b-t24-shots
+/// The capsule segment whose popover is open, if any: the app sets it when it opens the
+/// explanation of a segment and clears it when that popover closes. The segment declares it as
+/// its expanded state (`aria-expanded`); nothing is drawn differently.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExpandedSegment(pub Option<CapsuleSegment>);
+
+impl Global for ExpandedSegment {}
+
+/// The segment whose popover is open (see [`ExpandedSegment`]).
+pub fn expanded_segment(cx: &App) -> Option<CapsuleSegment> {
+    cx.try_global::<ExpandedSegment>().and_then(|e| e.0)
 }
 
 /// Called with the clicked segment and the bottom-left of its bounds, the anchor for
@@ -316,6 +333,7 @@ fn access_segment(
     content: Vec<AnyElement>,
     tooltip: Option<SharedString>,
     hint: Option<SharedString>,
+    expanded: bool,
 ) -> AnyElement {
     const ID: &str = "capsule-access";
     let slot = Rc::new(Cell::new(Bounds::default()));
@@ -382,7 +400,7 @@ fn access_segment(
             handler(CapsuleSegment::Access, slot.get().bottom_left(), window, cx);
         });
     }
-    let mut decl = A11yDecl::new(Role::Button, name.clone());
+    let mut decl = A11yDecl::new(Role::Button, name.clone()).expanded(expanded);
     decl.description = hint;
     el.declare_full(decl).into_any_element()
 }
@@ -555,6 +573,8 @@ impl Capsule {
             ..body
         };
         let mono = t.type_ramp.mono_data;
+        // ## m2b-t24-shots
+        let expanded = expanded_segment(cx);
         // Chrome text is Fluent; the connection's name and engine are user data.
         let text = |s: &SharedString, style, color: Hsla| {
             Label::new(s.clone(), TextSource::Fluent, style, color)
@@ -745,8 +765,12 @@ impl Capsule {
                 .disabled(true)
                 .into_any_element()
             } else {
-                el.declare(Role::Button, name.clone(), None)
-                    .into_any_element()
+                // ## m2b-t24-shots: a popover trigger says whether its popover is open.
+                let mut decl = A11yDecl::new(Role::Button, name.clone());
+                if segment == CapsuleSegment::Unencrypted {
+                    decl.expanded = Some(expanded == Some(segment));
+                }
+                el.declare_full(decl).into_any_element()
             }
         };
 
@@ -1010,6 +1034,8 @@ impl Capsule {
                         content,
                         tooltip,
                         self.access_hint.clone(),
+                        // ## m2b-t24-shots
+                        expanded == Some(CapsuleSegment::Access),
                     )
                 } else {
                     cell(t)

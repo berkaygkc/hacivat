@@ -1629,6 +1629,71 @@ pub(crate) fn unlock_vault(cx: &mut App, name: String, env: Option<EnvTag>) -> T
     )
 }
 
+// ## m2b-t24-shots: shots fixtures (R28, P19).
+#[cfg(feature = "shots")]
+mod shots {
+    use hacivat_proto::EnvTag;
+
+    use super::*;
+    use crate::connections::prompt_kit::shots::held_reply;
+
+    /// The asker of the mock's dialogs: `orders-dev`, tagged dev.
+    fn asker() -> Option<Asker> {
+        Some(Asker {
+            name: "orders-dev".to_string(),
+            env: Some(EnvTag::Dev),
+        })
+    }
+
+    /// The vault lives only on Linux, in `~/.local/share/hacivat` (the mock's path): the shot
+    /// app's data folder is a temp folder, which would draw a different path on every run.
+    /// Only the vault's file row reads it here; nothing of this throwaway app writes there.
+    fn linux_data_folder(cx: &mut App) {
+        if let Some(home) = std::env::home_dir() {
+            cx.global_mut::<AppState>().paths.data =
+                home.join(".local").join("share").join("hacivat");
+        }
+    }
+
+    /// Create (NOTES M2b surface 4), asked by a connect.
+    pub fn create_fixture(window: &mut Window, cx: &mut App) {
+        linux_data_folder(cx);
+        let reply = held_reply(cx);
+        let _ = open_create(Mode::Asked(Some(reply)), asker(), window, cx);
+    }
+
+    /// The unlock dialog with Reset vault…, after a miss (the alert line, "Attempt 2 of 3"). The
+    /// blocking pool's reset probe is skipped: the shot's backend has no vault file to probe.
+    fn unlock(window: &mut Window, cx: &mut App) {
+        let reply = held_reply(cx);
+        let view = cx.new(|cx| VaultUnlock::new(Mode::Asked(Some(reply)), asker(), 2, window, cx));
+        view.update(cx, |v, _| v.resettable = true);
+        let field = view.read(cx).field.read(cx).focus_handle(cx);
+        let _ = prompt_kit::push_modal(VAULT_LAYER_ID, view.into(), &field, window, cx);
+    }
+
+    /// Unlock (NOTES M2b surface 4).
+    pub fn unlock_fixture(window: &mut Window, cx: &mut App) {
+        unlock(window, cx);
+    }
+
+    /// Reset, stacked over Unlock (NOTES M2b surface 4): the typed-confirmation field, Reset
+    /// vault disabled.
+    pub fn reset_fixture(window: &mut Window, cx: &mut App) {
+        unlock(window, cx);
+        open_reset(Box::new(|_, _| {}), window, cx);
+    }
+
+    /// The damaged-file notice with Reset vault… (NOTES M2b surface 4).
+    pub fn damaged_fixture(window: &mut Window, cx: &mut App) {
+        linux_data_folder(cx);
+        let _ = open_damaged(true, Some(held_reply(cx)), window, cx);
+    }
+}
+
+#[cfg(feature = "shots")]
+pub use shots::{create_fixture, damaged_fixture, reset_fixture, unlock_fixture};
+
 #[cfg(test)]
 mod tests {
     use super::create_rules;

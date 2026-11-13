@@ -557,3 +557,42 @@ pub(crate) fn open(q: Question, reply: oneshot::Sender<Answer>, window: &mut Win
     }
     prompt_kit::forward(reply, answer_rx, window.window_handle(), view, cx);
 }
+
+// ## m2b-t24-shots: shots fixture (R28, P19).
+/// The mock's three-prompt round from `bastion.acme.io` (hop 2 of 2): a masked password, then
+/// two plain answers, under the server's name and instruction.
+#[cfg(feature = "shots")]
+pub fn fixture(window: &mut Window, cx: &mut App) {
+    use hacivat_net::ssh::KbdPrompt;
+    use hacivat_proto::EnvTag;
+
+    use crate::connections::prompt_kit::shots::{held_reply, save_profile, two_hops};
+
+    let id = save_profile(cx, "orders-prod", EnvTag::Production, two_hops());
+    let reply = held_reply(cx);
+    let prompt = |text: &str, echo: bool| KbdPrompt {
+        text: text.to_string(),
+        echo,
+    };
+    open(
+        Question::Keyboard {
+            profile: id,
+            name: "orders-prod".to_string(),
+            hop: 1,
+            request: KbdRequest {
+                host: "bastion.acme.io".to_string(),
+                name: "ACME bastion sign-in".to_string(),
+                instructions: "All access to this host is logged.".to_string(),
+                prompts: vec![
+                    prompt("Password: ", false),
+                    prompt("Verification code: ", true),
+                    prompt("Ticket or reason for access (logged): ", true),
+                ],
+            },
+            attempt: 1,
+        },
+        reply,
+        window,
+        cx,
+    );
+}

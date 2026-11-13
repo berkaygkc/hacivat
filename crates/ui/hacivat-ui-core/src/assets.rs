@@ -84,6 +84,9 @@ const ICONS: &[(&str, &[u8])] = lucide![
     "circle-x",
     "folder-open",
     "file-key",
+    // ## m2b-t24-shots: the M2b connection icons (`key-round` is above).
+    "file-up",
+    "arrow-right",
 ];
 const HV_MARK: &[u8] = include_bytes!("../assets/icons/hacivat/hv-mark.svg");
 

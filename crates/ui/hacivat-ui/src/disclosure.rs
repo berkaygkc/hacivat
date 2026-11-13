@@ -3,6 +3,10 @@
 //! title at 13 px weight 600 `text`, and while folded the summary right-aligned at 12.5 px
 //! `text-2`, ellipsized. The content is indented 22 px. Space and a click toggle it. Debug
 //! selectors: `disclosure-<id>` (the row) and `disclosure-content`.
+//!
+//! M2b (Task 24, T20 review M1a): the folded summary may lead with a 12 px `text-2` icon (the
+//! SSH section's `route` glyph while its tunnel is on); the row declares its expanded state to
+//! assistive technology (`aria-expanded`).
 
 use std::rc::Rc;
 
@@ -14,7 +18,7 @@ use hacivat_ui_core::theme::{Theme, focus_outline};
 
 use crate::button::{focus_visible, interaction_state};
 use crate::icon::{Icon, IconName, IconSize};
-use crate::popover::{Declare, lazy};
+use crate::popover::{A11yDecl, Declare, lazy};
 use crate::text::{Label, TextSource};
 
 type ToggleHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
@@ -31,6 +35,8 @@ pub struct Disclosure {
     id: ElementId,
     title: SharedString,
     summary: Option<SharedString>,
+    // ## m2b-t24-shots
+    summary_icon: Option<IconName>,
     open: bool,
     on_toggle: Option<ToggleHandler>,
     content: Option<AnyElement>,
@@ -42,6 +48,7 @@ impl Disclosure {
             id: id.into(),
             title,
             summary: None,
+            summary_icon: None,
             open: false,
             on_toggle: None,
             content: None,
@@ -51,6 +58,13 @@ impl Disclosure {
     /// The line shown while closed.
     pub fn summary(mut self, summary: SharedString) -> Self {
         self.summary = Some(summary);
+        self
+    }
+
+    // ## m2b-t24-shots
+    /// A 12 px `text-2` icon before the folded summary (drawn only with a summary).
+    pub fn summary_icon(mut self, icon: Option<IconName>) -> Self {
+        self.summary_icon = icon;
         self
     }
 
@@ -79,6 +93,7 @@ impl Disclosure {
             id,
             title,
             summary,
+            summary_icon,
             open,
             on_toggle,
             content,
@@ -126,28 +141,33 @@ impl Disclosure {
                 c.text.to_hsla(),
             ));
         if let Some(summary) = summary.filter(|_| !open) {
-            row = row.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_w_0()
-                    .justify_end()
-                    .child(
-                        Label::new(
-                            summary,
-                            TextSource::Fluent,
-                            t.type_ramp.body_sm,
-                            c.text_2.to_hsla(),
-                        )
-                        .truncate(true),
+            let mut line = div().flex().flex_row().flex_1().min_w_0().justify_end();
+            // ## m2b-t24-shots: the summary's lead glyph, 6 px before the text.
+            if let Some(icon) = summary_icon {
+                line = line.items_center().gap(px(t.spacing.sm)).child(
+                    div().flex_none().child(
+                        Icon::new(icon)
+                            .size(IconSize::Chrome)
+                            .color(c.text_2.to_hsla()),
                     ),
+                );
+            }
+            row = row.child(
+                line.child(
+                    Label::new(
+                        summary,
+                        TextSource::Fluent,
+                        t.type_ramp.body_sm,
+                        c.text_2.to_hsla(),
+                    )
+                    .truncate(true),
+                ),
             );
         }
         let toggle_on_key = on_toggle.clone();
         let row = focus_outline(row, &theme, focused)
-            .declare(Role::Button, title, None)
-            .aria_expanded(open)
+            // ## m2b-t24-shots: the expanded state is part of the declaration (and recorded).
+            .declare_full(A11yDecl::new(Role::Button, title).expanded(open))
             .capture_key_down(move |event: &KeyDownEvent, window, cx| {
                 let stroke = &event.keystroke;
                 if stroke.key != "space" || stroke.modifiers.modified() {

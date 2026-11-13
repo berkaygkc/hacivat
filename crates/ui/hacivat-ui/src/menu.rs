@@ -9,6 +9,10 @@
 //! and per-row `text-2` hints, and a [`Select`](crate::select::Select) embeds one with
 //! [`PopupMenu::embedded`] inside its own `deferred(anchored())` instead of a workspace layer
 //! (P34), so both share this row anatomy.
+//!
+//! M2b (Task 24, T20 review M1b): a menu can show a title row (12 px `text-2`, padding 4/10,
+//! not selectable; the mock's `.menu .mh`), and an item can draw its label in Fragment Mono
+//! 11.5 (`mono`: host aliases, paths).
 
 use hacivat_ui_core::gpui_surface::Entity;
 use hacivat_ui_core::gpui_surface::{
@@ -19,7 +23,7 @@ use hacivat_ui_core::gpui_surface::{
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
 use crate::accesskey::{AccessKey, AccessKeyAssigner, AccessKeyLocale, typed_matches};
-use crate::button::key_label;
+use crate::button::key_label_from;
 use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::{A11yDecl, A11yNode, Declare};
 use crate::text::{KeyFn, Label, TextFn, TextSource};
@@ -49,6 +53,11 @@ pub struct MenuItemSpec {
     /// A destructive item (NOTES §8: "Delete… in red"): its label is drawn in `red` while it is
     /// enabled. Off by default.
     pub danger: bool,
+    // ## m2b-t24-shots
+    /// The label in Fragment Mono 11.5, as data (a host alias or a path). Off by default.
+    pub mono: bool,
+    /// Where the hint's text comes from: Fluent (default) or data (a resolved address).
+    pub hint_source: TextSource,
 }
 
 impl MenuItemSpec {
@@ -63,6 +72,8 @@ impl MenuItemSpec {
             checked: false,
             hint: None,
             danger: false,
+            mono: false,
+            hint_source: TextSource::Fluent,
         }
     }
 
@@ -77,6 +88,8 @@ impl MenuItemSpec {
             checked: false,
             hint: None,
             danger: false,
+            mono: false,
+            hint_source: TextSource::Fluent,
         }
     }
 
@@ -102,6 +115,19 @@ impl MenuItemSpec {
 
     pub fn hint(mut self, hint: TextFn) -> Self {
         self.hint = Some(hint);
+        self
+    }
+
+    // ## m2b-t24-shots
+    /// Draws the label in Fragment Mono 11.5, as data (`TextSource::Data`).
+    pub fn mono(mut self, mono: bool) -> Self {
+        self.mono = mono;
+        self
+    }
+
+    /// Marks the hint's text as data (or Fluent, the default).
+    pub fn hint_source(mut self, source: TextSource) -> Self {
+        self.hint_source = source;
         self
     }
 
@@ -149,6 +175,9 @@ pub struct PopupMenu {
     selected: Option<usize>,
     focus: FocusHandle,
     label: Option<TextFn>,
+    // ## m2b-t24-shots
+    /// The visible title row, when set.
+    title: Option<TextFn>,
     access_keys: bool,
 }
 
@@ -201,6 +230,7 @@ impl PopupMenu {
                 items,
                 focus,
                 label: None,
+                title: None,
                 access_keys: !cfg!(target_os = "macos"),
             }
         })
@@ -214,6 +244,13 @@ impl PopupMenu {
     /// Names the menu for assistive technology.
     pub fn label(&mut self, label: TextFn) {
         self.label = Some(label);
+    }
+
+    // ## m2b-t24-shots
+    /// Shows `title` as the menu's first row (12 px `text-2`, not selectable). It also names
+    /// the menu for assistive technology unless [`PopupMenu::label`] does.
+    pub fn title(&mut self, title: TextFn) {
+        self.title = Some(title);
     }
 
     /// Whether access keys are shown and accepted (default: Windows and Linux).
@@ -351,7 +388,13 @@ impl Render for PopupMenu {
                 })
                 .sum::<f32>()
                 + 2.0 * t.spacing.xs
-                + 2.0;
+                + 2.0
+                // ## m2b-t24-shots: the title row.
+                + if self.title.is_some() {
+                    t.type_ramp.caption.line_height + 2.0 * t.spacing.xs
+                } else {
+                    0.0
+                };
             let left = if anchor.x + self.min_width > viewport.width {
                 (viewport.width - self.min_width).max(px(0.0))
             } else {
@@ -399,7 +442,13 @@ impl Render for PopupMenu {
                     }
                     lead = lead.child(column);
                 }
-                lead = lead.child(key_label(&text, Some(keys[i]), t.type_ramp.body, ink));
+                // ## m2b-t24-shots: a mono label is data (a host alias, a path).
+                let (style, source) = if item.mono {
+                    (t.type_ramp.mono_data, TextSource::Data)
+                } else {
+                    (t.type_ramp.body, TextSource::Fluent)
+                };
+                lead = lead.child(key_label_from(&text, source, Some(keys[i]), style, ink));
                 let mut row = div()
                     .id(("menu-item", i))
                     .debug_selector(move || format!("menu-item-{i}"))
@@ -424,7 +473,7 @@ impl Render for PopupMenu {
                         // Raised Ink Rule: the hint on the raised menu uses text-2.
                         trail = trail.child(Label::new(
                             hint(cx),
-                            TextSource::Fluent,
+                            item.hint_source,
                             t.type_ramp.caption,
                             c.text_2.to_hsla(),
                         ));
@@ -479,7 +528,12 @@ impl Render for PopupMenu {
             })
             .collect();
 
-        let menu_name = self.label.as_ref().map(|l| l(cx)).unwrap_or_default();
+        let menu_name = self
+            .label
+            .as_ref()
+            .or(self.title.as_ref())
+            .map(|l| l(cx))
+            .unwrap_or_default();
         let mut menu = popover_surface(&theme)
             .id("popup-menu")
             .debug_selector(|| "popup-menu".to_string())
@@ -497,7 +551,21 @@ impl Render for PopupMenu {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.on_key(event, cx)))
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(PopupMenuEvent::Dismissed)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        menu.children(rows)
+        // ## m2b-t24-shots: the title row (the mock's `.menu .mh`: padding 4/10, 12 px text-2;
+        // Raised Ink Rule).
+        let title = self.title.as_ref().map(|title| {
+            div()
+                .debug_selector(|| "popup-menu-title".to_string())
+                .py(px(t.spacing.xs))
+                .px(px(t.spacing.lg))
+                .child(Label::new(
+                    title(cx),
+                    TextSource::Fluent,
+                    t.type_ramp.caption,
+                    c.text_2.to_hsla(),
+                ))
+        });
+        menu.children(title).children(rows)
     }
 }
 

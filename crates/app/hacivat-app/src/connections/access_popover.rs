@@ -386,7 +386,7 @@ pub fn open(id: ProfileId, trigger: Bounds<Pixels>, window: &mut Window, cx: &mu
             Layer {
                 id: POPOVER_LAYER,
                 context: POPOVER_CONTEXT,
-                view: view.into(),
+                view: view.clone().into(),
                 restore_focus: None,
                 modal: false,
             },
@@ -394,6 +394,12 @@ pub fn open(id: ProfileId, trigger: Bounds<Pixels>, window: &mut Window, cx: &mu
             cx,
         );
     });
+    // ## m2b-t24-shots: the triggers (capsule segment, sheet value) say it is open.
+    crate::connections::capsule::note_expanded(
+        hacivat_ui::capsule::CapsuleSegment::Access,
+        &view,
+        cx,
+    );
 }
 
 impl AccessPopover {

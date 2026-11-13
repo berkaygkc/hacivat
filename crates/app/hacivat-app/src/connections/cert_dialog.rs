@@ -1000,7 +1000,8 @@ impl CertDialog {
                 buttons.push(
                     Button::new("cert-import", tr(cx, ids::hv::CONN_TLS_IMPORT, NoArgs))
                         .kind(ButtonKind::Default)
-                        .icon(IconName::FileKey)
+                        // ## m2b-t24-shots: the mock's `file-up` (T19 review M6).
+                        .icon(IconName::FileUp)
                         .focus_handle(self.import.clone())
                         .on_raised(true)
                         .on_click(cx.listener(|this, _, window, cx| this.import(window, cx)))
