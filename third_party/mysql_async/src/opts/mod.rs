@@ -221,6 +221,9 @@ pub struct SslOpts {
     skip_domain_validation: bool,
     accept_invalid_certs: bool,
     tls_hostname_override: Option<Cow<'static, str>>,
+    // HACIVAT PATCH §5
+    #[cfg(feature = "rustls-tls")]
+    rustls_client_config: Option<PtrEq<rustls::ClientConfig>>,
 }
 
 impl SslOpts {
@@ -335,6 +338,45 @@ impl SslOpts {
 
     pub fn tls_hostname_override(&self) -> Option<&str> {
         self.tls_hostname_override.as_deref()
+    }
+
+    // HACIVAT PATCH §5
+    /// Uses this `rustls::ClientConfig` as is. Root certificates, client identity and the
+    /// `danger` flags are then ignored (the hostname override is still honoured).
+    #[cfg(feature = "rustls-tls")]
+    pub fn with_rustls_client_config(mut self, config: Arc<rustls::ClientConfig>) -> Self {
+        self.rustls_client_config = Some(PtrEq(config));
+        self
+    }
+
+    // HACIVAT PATCH §5
+    #[cfg(feature = "rustls-tls")]
+    pub fn rustls_client_config(&self) -> Option<&Arc<rustls::ClientConfig>> {
+        self.rustls_client_config.as_ref().map(|c| &c.0)
+    }
+}
+
+// HACIVAT PATCH §2, §5: identity-compared handle so `Opts` keeps `Eq`/`Hash`.
+pub(crate) struct PtrEq<T: ?Sized>(pub(crate) Arc<T>);
+impl<T: ?Sized> Clone for PtrEq<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl<T: ?Sized> PartialEq for PtrEq<T> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::as_ptr(&self.0).cast::<()>() == Arc::as_ptr(&other.0).cast::<()>()
+    }
+}
+impl<T: ?Sized> Eq for PtrEq<T> {}
+impl<T: ?Sized> std::hash::Hash for PtrEq<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).cast::<()>().hash(state)
+    }
+}
+impl<T: ?Sized> fmt::Debug for PtrEq<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<opaque>")
     }
 }
 
@@ -693,6 +735,13 @@ pub(crate) struct MysqlOpts {
     /// Sending passwords as cleartext may be a security problem in some configurations. Please
     /// consider using TLS or encrypted tunnels for server connection.
     enable_cleartext_plugin: bool,
+
+    // HACIVAT PATCH §2
+    password_guard: Option<PtrEq<dyn Fn() -> bool + Send + Sync>>,
+    // HACIVAT PATCH §3
+    multi_statements: bool,
+    // HACIVAT PATCH §4
+    local_infile_capability: bool,
 
     /// Connection attributes to send in handshake and COM_CHANGE_USER (defaults to `None`).
     ///
@@ -1144,6 +1193,25 @@ impl Opts {
         self.inner.mysql_opts.enable_cleartext_plugin
     }
 
+    // HACIVAT PATCH §2
+    /// Outcome predicate consulted before the password is sent at `caching_sha2_password` full
+    /// authentication. `false` aborts with `DriverError::InsecurePasswordRefused`.
+    pub fn password_guard(&self) -> Option<&Arc<dyn Fn() -> bool + Send + Sync>> {
+        self.inner.mysql_opts.password_guard.as_ref().map(|g| &g.0)
+    }
+
+    // HACIVAT PATCH §3
+    /// `CLIENT_MULTI_STATEMENTS` is advertised (defaults to `true`).
+    pub fn multi_statements(&self) -> bool {
+        self.inner.mysql_opts.multi_statements
+    }
+
+    // HACIVAT PATCH §4
+    /// `CLIENT_LOCAL_FILES` is advertised (defaults to `true`).
+    pub fn local_infile_capability(&self) -> bool {
+        self.inner.mysql_opts.local_infile_capability
+    }
+
     /// Connection attributes to send to the server, if any.
     pub fn connect_attributes(&self) -> Option<&std::collections::HashMap<String, String>> {
         self.inner.mysql_opts.connect_attributes.as_ref()
@@ -1154,12 +1222,18 @@ impl Opts {
             | CapabilityFlags::CLIENT_SECURE_CONNECTION
             | CapabilityFlags::CLIENT_LONG_PASSWORD
             | CapabilityFlags::CLIENT_TRANSACTIONS
-            | CapabilityFlags::CLIENT_LOCAL_FILES
-            | CapabilityFlags::CLIENT_MULTI_STATEMENTS
             | CapabilityFlags::CLIENT_MULTI_RESULTS
             | CapabilityFlags::CLIENT_PS_MULTI_RESULTS
             | CapabilityFlags::CLIENT_DEPRECATE_EOF
             | CapabilityFlags::CLIENT_PLUGIN_AUTH;
+
+        // HACIVAT PATCH §3, §4
+        if self.inner.mysql_opts.local_infile_capability {
+            out |= CapabilityFlags::CLIENT_LOCAL_FILES;
+        }
+        if self.inner.mysql_opts.multi_statements {
+            out |= CapabilityFlags::CLIENT_MULTI_STATEMENTS;
+        }
 
         if self.inner.mysql_opts.db_name.is_some() {
             out |= CapabilityFlags::CLIENT_CONNECT_WITH_DB;
@@ -1212,6 +1286,9 @@ impl Default for MysqlOpts {
             secure_auth: true,
             client_found_rows: false,
             enable_cleartext_plugin: false,
+            password_guard: None,
+            multi_statements: true,
+            local_infile_capability: true,
             connect_attributes: None,
         }
     }
@@ -1559,6 +1636,30 @@ impl OptsBuilder {
     /// ```
     pub fn enable_cleartext_plugin(mut self, enable_cleartext_plugin: bool) -> Self {
         self.opts.enable_cleartext_plugin = enable_cleartext_plugin;
+        self
+    }
+
+    // HACIVAT PATCH §2
+    /// See [`Opts::password_guard`].
+    pub fn password_guard(
+        mut self,
+        guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Self {
+        self.opts.password_guard = guard.map(PtrEq);
+        self
+    }
+
+    // HACIVAT PATCH §3
+    /// See [`Opts::multi_statements`].
+    pub fn multi_statements(mut self, value: bool) -> Self {
+        self.opts.multi_statements = value;
+        self
+    }
+
+    // HACIVAT PATCH §4
+    /// See [`Opts::local_infile_capability`].
+    pub fn local_infile_capability(mut self, value: bool) -> Self {
+        self.opts.local_infile_capability = value;
         self
     }
 
