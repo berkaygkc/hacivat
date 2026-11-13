@@ -14,8 +14,8 @@
 
 use std::time::Duration;
 
-use hacivat_driver::TxStatus;
-use hacivat_proto::{ErrClass, ErrFamily};
+use hacivat_driver::{RawError, TxStatus};
+use hacivat_proto::{DbmsKind, ErrClass, ErrFamily};
 
 use crate::session::schema::first_keyword;
 
@@ -100,6 +100,57 @@ pub fn is_recovery_case(class: ErrClass) -> bool {
                 | ErrClass::KaragozResumeExpired
                 | ErrClass::SshChannelOpen
         )
+}
+
+// ## m2b-t17-liveness (fix round 2)
+
+/// MySQL and MariaDB server errors that come with the end of the connection (I6): the server
+/// is shutting down (1053), the connection was killed (1927, 3169), or the client sat idle too
+/// long (4031); and the client's own server-gone codes (2006, 2013), should a driver ever
+/// report them as server errors.
+const MYSQL_CONNECTION_ENDING: [(i64, ErrClass); 6] = [
+    (1053, ErrClass::ServerShutdown),
+    (1927, ErrClass::NetworkReset),
+    (2006, ErrClass::NetworkReset),
+    (2013, ErrClass::NetworkReset),
+    (3169, ErrClass::NetworkReset),
+    (4031, ErrClass::NetworkReset),
+];
+
+/// The class of the lost connection when the server error `raw` (classified `class`) ended it
+/// (fix round 2, I6): a recovery case after connect (PostgreSQL's `57P01`/`57P02`
+/// `server.shutdown`, `57P03` `server.starting`, `08006` `network.reset`), or one of MySQL's
+/// connection-ending codes. `None`: an ordinary statement error.
+pub(crate) fn connection_ending(
+    kind: DbmsKind,
+    raw: &RawError,
+    class: ErrClass,
+) -> Option<ErrClass> {
+    if is_recovery_case(class) {
+        return Some(class);
+    }
+    if !matches!(kind, DbmsKind::MySql | DbmsKind::MariaDb) {
+        return None;
+    }
+    let code = raw.server.as_ref()?.vendor_code?;
+    MYSQL_CONNECTION_ENDING
+        .iter()
+        .find(|(c, _)| *c == code)
+        .map(|(_, class)| *class)
+}
+
+/// Whether `sql` may open or end a transaction anywhere in it (fix round 2, review R1): any of
+/// its `;`-separated statements starts with `BEGIN` or `START`, or sets `autocommit` (MySQL: an
+/// implicit transaction). A `;` inside quotes splits too, which only errs toward "may".
+pub(crate) fn touches_tx(sql: &str) -> bool {
+    sql.split(';').any(|statement| {
+        let words = words(statement, true);
+        match words.first().map(String::as_str) {
+            Some("BEGIN" | "START") => true,
+            Some("SET") => words.iter().any(|w| w == "AUTOCOMMIT"),
+            _ => false,
+        }
+    })
 }
 
 /// What a session did that a reconnect would lose (a first-keyword scan, B19).
@@ -250,6 +301,58 @@ mod tests {
         };
         let lost = lost_state(&t);
         assert!(lost.open_tx && lost.prepared == 2 && !lost.is_empty());
+    }
+
+    #[test]
+    fn a_transaction_anywhere_in_a_batch_is_seen() {
+        assert!(touches_tx("BEGIN"));
+        assert!(touches_tx(
+            "insert into t values (1); begin; update t set a = 2"
+        ));
+        assert!(touches_tx("/* go */ start transaction"));
+        assert!(touches_tx("SET autocommit = 0"));
+        assert!(touches_tx("set @@session.autocommit=0"));
+        assert!(!touches_tx("SELECT start, begin FROM t"));
+        assert!(!touches_tx("SET work_mem = '1MB'"));
+        assert!(!touches_tx("UPDATE t SET a = 2"));
+    }
+
+    #[test]
+    fn connection_ending_server_errors() {
+        let mysql = |code: i64| RawError {
+            kind: hacivat_driver::RawErrorKind::Db,
+            server: Some(hacivat_driver::ServerMessage {
+                sqlstate: None,
+                vendor_code: Some(code),
+                severity: None,
+                text: String::new(),
+                detail: None,
+                hint: None,
+                lang_hint: None,
+            }),
+        };
+        let internal = ErrClass::Internal;
+        assert_eq!(
+            connection_ending(DbmsKind::MySql, &mysql(4031), internal),
+            Some(ErrClass::NetworkReset)
+        );
+        assert_eq!(
+            connection_ending(DbmsKind::MariaDb, &mysql(1053), internal),
+            Some(ErrClass::ServerShutdown)
+        );
+        assert_eq!(
+            connection_ending(DbmsKind::MySql, &mysql(1062), internal),
+            None
+        );
+        // PostgreSQL decides by class (57P01 is `server.shutdown`); a vendor code means nothing.
+        assert_eq!(
+            connection_ending(DbmsKind::Postgres, &mysql(4031), ErrClass::ServerShutdown),
+            Some(ErrClass::ServerShutdown)
+        );
+        assert_eq!(
+            connection_ending(DbmsKind::Postgres, &mysql(4031), internal),
+            None
+        );
     }
 
     #[test]

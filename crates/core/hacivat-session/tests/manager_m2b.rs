@@ -541,6 +541,231 @@ async fn requests_sent_while_reconnecting_never_run_on_the_new_connection() {
     assert!(after.iter().any(|x| x.starts_with("SELECT 7")));
 }
 
+/// A statement whose run finds the connection lost, after which the driver reports the
+/// transaction `Failed` (the PostgreSQL driver's status for a connection it found closed).
+fn lost_and_failed(prefix: &'static str) -> FakeExec {
+    FakeExec {
+        tx_after: Some(TxStatus::Failed),
+        ..fails_once_with_reset(prefix)
+    }
+}
+
+/// A MySQL server error with `code`.
+fn mysql_error(code: i64) -> hacivat_driver::RawError {
+    hacivat_driver::RawError {
+        kind: hacivat_driver::RawErrorKind::Db,
+        server: Some(hacivat_driver::ServerMessage {
+            sqlstate: Some("HY000".into()),
+            vendor_code: Some(code),
+            severity: None,
+            text: format!("server error {code}"),
+            detail: None,
+            hint: None,
+            lang_hint: None,
+        }),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_autocommit_statement_that_finds_the_loss_reconnects() {
+    // Review H12 / C2: the driver says `Failed` after the loss; the session was idle before the
+    // statement, so it reconnects, and the toast claims no rollback.
+    let (m, f) = manager(ok_pg().exec(vec![lost_and_failed("SELECT 1")]));
+    let mut ev = m.events();
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    assert_eq!(
+        refusal(&s, user_exec("SELECT 1")).await,
+        ExecErrorKind::ConnectionLost {
+            outcome_unknown: true
+        }
+    );
+    let ConnectionEvent::SessionLost { lost, .. } = next_event(&mut ev).await else {
+        panic!("a SessionLost event");
+    };
+    assert!(!lost.open_tx, "{lost:?}");
+    assert!(matches!(m.state(p().id), LiveState::Connected(_)));
+    assert_eq!(f.connect_calls(), 2);
+    let tx = snap(&default_session(&m)).tx;
+    assert_eq!(tx.status, TxStatus::Idle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_read_only_session_whose_schema_switch_finds_the_loss_reconnects() {
+    // C2 on a control statement: a read-only session is always Auto.
+    let (m, f) = manager_profile(
+        ok_pg().exec(vec![lost_and_failed("SET search_path")]),
+        ro(pg_profile(TlsMode::Disable)),
+    );
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    assert_eq!(
+        refusal(&s, Request::SwitchSchema("app".into())).await,
+        ExecErrorKind::ConnectionLost {
+            outcome_unknown: true
+        }
+    );
+    until("the reconnect", || f.connect_calls() == 2).await;
+    wait_connected(&m, p().id).await;
+    assert!(snap(&default_session(&m)).read_only);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_internal_read_that_finds_the_loss_reconnects() {
+    // C2 on the internal path (schema tree, completion).
+    let (m, f) = manager(ok_pg().exec(vec![lost_and_failed("SELECT 7")]));
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    let reply = s
+        .submit(Request::Exec {
+            sql: "SELECT 7".into(),
+            opts: ExecOpts::default(),
+            origin: ExecOrigin::Internal { idempotent: false },
+        })
+        .reply
+        .await
+        .unwrap();
+    assert!(matches!(
+        reply.unwrap_err().kind,
+        ExecErrorKind::ConnectionLost { .. }
+    ));
+    until("the reconnect", || f.connect_calls() == 2).await;
+    wait_connected(&m, p().id).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_statement_inside_a_transaction_that_finds_the_loss_is_lost() {
+    // C1 still holds when the statement (not a ping) finds the loss.
+    let (m, f) =
+        manager(ok_pg().exec(vec![tx("BEGIN", TxStatus::InTx), lost_and_failed("UPDATE")]));
+    let mut ev = m.events();
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    ok(&s, user_exec("BEGIN")).await;
+    assert_eq!(
+        refusal(&s, user_exec("UPDATE t SET a = 2")).await,
+        ExecErrorKind::ConnectionLost {
+            outcome_unknown: true
+        }
+    );
+    wait_state(&m, |s| matches!(s, LiveState::Lost { .. })).await;
+    let ConnectionEvent::SessionLost { lost, .. } = next_event(&mut ev).await else {
+        panic!("a SessionLost event");
+    };
+    assert!(lost.open_tx);
+    tokio::time::sleep(secs(60)).await;
+    assert_eq!(f.connect_calls(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_shutdown_fatal_answering_a_statement_starts_the_recovery() {
+    // Review H11 / I6: PostgreSQL answers with `FATAL 57P01` (`server.shutdown`). The
+    // recovery starts on this request, which keeps the server's message.
+    let (m, f) = manager(ok_pg().exec(vec![FakeExec {
+        result: Err(db("57P01")),
+        ..fails_once_with_reset("SELECT 1")
+    }]));
+    let mut ev = m.events();
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    let e = s
+        .submit(user_exec("SELECT 1"))
+        .reply
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        e.kind,
+        ExecErrorKind::ConnectionLost {
+            outcome_unknown: true
+        }
+    );
+    assert_eq!(e.server.and_then(|m| m.sqlstate).as_deref(), Some("57P01"));
+    let ConnectionEvent::SessionLost { lost, .. } = next_event(&mut ev).await else {
+        panic!("a SessionLost event");
+    };
+    assert!(!lost.open_tx);
+    assert_eq!(f.connect_calls(), 2);
+    ok(&default_session(&m), user_exec("SELECT 1")).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_starting_server_answering_a_statement_starts_the_recovery() {
+    // I6: `57P03` (`server.starting`) after connect ends the connection too.
+    let (m, f) = manager(ok_pg().exec(vec![FakeExec {
+        result: Err(db("57P03")),
+        ..fails_once_with_reset("SELECT 1")
+    }]));
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    assert!(matches!(
+        refusal(&s, user_exec("SELECT 1")).await,
+        ExecErrorKind::ConnectionLost { .. }
+    ));
+    until("the reconnect", || f.connect_calls() == 2).await;
+    wait_connected(&m, p().id).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_mysql_connection_ending_error_starts_the_recovery() {
+    // I6: MySQL's ER_CLIENT_INTERACTION_TIMEOUT (4031) comes as a server error before the
+    // server closes the connection.
+    let (m, f) = manager_profile(
+        FakeDriver::new(DbmsKind::MySql).exec(vec![FakeExec {
+            result: Err(mysql_error(4031)),
+            ..fails_once_with_reset("SELECT 1")
+        }]),
+        mysql_profile(TlsMode::Disable),
+    );
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    assert!(matches!(
+        refusal(&s, user_exec("SELECT 1")).await,
+        ExecErrorKind::ConnectionLost { .. }
+    ));
+    until("the reconnect", || f.connect_calls() == 2).await;
+    wait_connected(&m, p().id).await;
+    // An ordinary server error is no loss.
+    let (m, f) = manager_profile(
+        FakeDriver::new(DbmsKind::MySql).exec(vec![FakeExec {
+            result: Err(mysql_error(1062)),
+            ..fails_once_with_reset("INSERT")
+        }]),
+        mysql_profile(TlsMode::Disable),
+    );
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    assert_eq!(
+        refusal(&s, user_exec("INSERT INTO t VALUES (1)")).await,
+        ExecErrorKind::Db
+    );
+    tokio::time::sleep(secs(40)).await;
+    assert_eq!(f.connect_calls(), 1);
+    assert!(matches!(m.state(p().id), LiveState::Connected(_)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_that_begins_a_transaction_leaves_it_unknown_and_is_lost() {
+    // Review R1: `BEGIN` after the first statement of a batch, or MySQL's `SET autocommit`.
+    for sql in [
+        "INSERT INTO t VALUES (1); BEGIN; UPDATE t SET a = 2",
+        "SET autocommit = 0",
+    ] {
+        let (m, f) = manager(
+            ok_pg().exec(vec![lost_and_failed(if sql.starts_with("SET") {
+                "SET"
+            } else {
+                "INSERT"
+            })]),
+        );
+        connect_and_wait(&m).await;
+        let s = default_session(&m);
+        let _ = s.submit(user_exec(sql)).reply.await;
+        wait_state(&m, |s| matches!(s, LiveState::Lost { .. })).await;
+        assert_eq!(f.connect_calls(), 1, "{sql}");
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_manual_session_sends_nothing_after_a_loss() {
     // C1, Manual mode: no statement sent during the reconnect opens a transaction on the new
@@ -1426,16 +1651,26 @@ async fn a_real_server_ending_the_session_is_reconnected_with_session_lost() {
             .await
             .unwrap_or_else(|e| panic!("{id}: {e:?}"));
         killer.close().await;
-        // The next round trip finds the loss (an idle session reconnects, C1).
-        let _ = session.submit(Request::Ping).reply.await;
-        // `SessionLost` comes right after the profile is `Connected` again.
-        assert!(
-            matches!(
-                next_event(&mut ev).await,
-                ConnectionEvent::SessionLost { .. }
-            ),
-            "{id}"
-        );
+        // An Auto-mode user statement finds the loss (fix round 2, C2 and I6): the server may
+        // first answer with its FATAL, or the driver finds the connection closed. A bounded
+        // number of round trips; the session is idle, so it reconnects.
+        let mut found = false;
+        for _ in 0..3 {
+            let reply = session.submit(user_exec("SELECT 1")).reply.await.unwrap();
+            if let Err(e) = reply
+                && matches!(e.kind, ExecErrorKind::ConnectionLost { .. })
+            {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "{id}: the loss was never seen");
+        // `SessionLost` comes right after the profile is `Connected` again; it claims no
+        // rollback (the session was idle before the statement).
+        let ConnectionEvent::SessionLost { lost, .. } = next_event(&mut ev).await else {
+            panic!("{id}: a SessionLost event");
+        };
+        assert!(!lost.open_tx, "{id}: {lost:?}");
         assert!(
             matches!(m.state(profile.id), LiveState::Connected(_)),
             "{id}"

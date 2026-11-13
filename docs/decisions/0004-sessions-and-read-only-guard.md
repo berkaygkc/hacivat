@@ -481,11 +481,28 @@ restarts. Only recovery asks, so at a first connect `ssh.channel_open` stays a h
 
 - **Only an idle session reconnects (fix round 1, C1, controller ruling).** When the lost
   connection had a transaction open (`InTx`, `Failed`), or the request in flight may have opened
-  one (its state is unknown: a `BEGIN`/`START`, a `Tx(Begin)`, any user statement of a Manual
-  session), nothing is replayed and nothing the user sent for that connection ever runs on
-  another: the session emits `SessionEvent::Lost` (with `open_tx`) and breaks; the profile is
-  `Lost` (Retry), then `SessionLost { lost }`. Rejected: reconnecting and refusing the next
-  `COMMIT` (a later statement would still run outside the lost transaction).
+  one (its state is unknown: a `Tx(Begin)`, a user statement with a `BEGIN`/`START` or a
+  `SET autocommit` anywhere in it, any user statement of a Manual session), nothing is replayed
+  and nothing the user sent for that connection ever runs on another: the session emits
+  `SessionEvent::Lost` (with `open_tx`) and breaks; the profile is `Lost` (Retry), then
+  `SessionLost { lost }`. Rejected: reconnecting and refusing the next `COMMIT` (a later
+  statement would still run outside the lost transaction).
+- **"Had a transaction open" is the status before the request that found the loss (fix round
+  2, C2).** A driver's status after a loss says nothing about the transaction: the PostgreSQL
+  driver reports `Failed` for a connection it found closed (ADR 0002 m2b-t10). So the actor
+  never reads (`observe`) a status after an error that broke the session, and the loss's
+  `open_tx` comes from the status captured before the request (a keep-alive changes none). An
+  idle autocommit session whose statement finds the loss therefore reconnects; that statement
+  alone is `ConnectionLost { outcome_unknown: true }`, and the toast claims no rollback.
+- **A connection-ending server error is a loss (fix round 2, I6).** A server error whose class
+  is a recovery case after connect (PostgreSQL `57P01`/`57P02` `server.shutdown`, `57P03`
+  `server.starting`, `08006` `network.reset`), or one of MySQL's connection-ending codes (1053
+  server shutdown, 1927/3169 connection killed, 4031 interaction timeout; 2006/2013 should a
+  driver report them as server errors), breaks the session on the request it answered, which
+  keeps the server's message. So the recovery starts there, not one request late, and a request
+  that was never sent is never reported "outcome unknown". The MySQL codes live in the session
+  layer (`recovery::connection_ending`), since the driver catalog (`errors.toml`) maps them to no
+  class.
 - An idle session publishes `Connecting`, not `Broken`. The pool's watcher therefore keeps the
   session's budget permit through the reconnect (T15 carry-in: a `Broken` session frees it, and
   an in-place reconnect must never run without one); a session whose recovery fails turns
@@ -563,12 +580,19 @@ into the overlay when it lands (a consent generation, bumped by `update_profile`
 runs ends with `cancelled` and never connects afterwards.
 
 **Tests.** `tests/liveness.rs` (pure supervisor, both clocks driven by hand), `tests/recovery.rs`
-(schedule and jitter bounds, every class, the scan and its limits), `tests/manager_m2b.rs`:
+(schedule and jitter bounds, every class, the scan and its limits; unit tests for the
+connection-ending codes and the batch scan), `tests/manager_m2b.rs`:
 every `FakeDriver`-only test on a paused clock with condition waits (Q25, fix round 1, I5);
 the SSH tests (a one-time code → `Lost`, one SSH death → one reconnect per dependent and one new
 chain) on the in-process testkit server in real time. Regressions of the review's hostile
 scenarios: H1 (a loss inside a transaction; requests during the backoff, Auto and Manual),
 H2 (a failing replay follows the backoff and gives up), H3 (a jump with an open transaction
 pings), H4 (a direct close is not an idle disconnect), H8 (a close during a hanging replay; the
-replay timeout), H10 (an edit during the first connect, same and moved destination). A Docker
-test kills the default session's backend on pg17 and mysql84.
+replay timeout), H10 (an edit during the first connect, same and moved destination); round 2:
+H11 (`57P01`, `57P03`, MySQL 4031 answering a statement start the recovery; an ordinary error
+does not), H12 (an idle autocommit statement, a read-only session's schema switch and an
+internal read that find the loss reconnect; a statement inside a transaction is still `Lost`),
+and a batch with a later `BEGIN` or `SET autocommit` is `Lost`. A Docker test ends the default
+session's backend from the admin connection on pg17 and mysql84 (`pg_terminate_backend`,
+`KILL`); an Auto-mode user `SELECT 1` finds the loss within three round trips, the session
+reconnects, and `SessionLost` claims no rollback.

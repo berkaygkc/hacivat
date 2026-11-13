@@ -26,9 +26,14 @@
 //!   statements and resets are not.
 //! - **Recovery** (HV-CONN-05, B19). When the connection is lost with a recovery case
 //!   (`is_recovery_case`) and the session has `SessionHooks::reconnect`:
-//!   - with a transaction open, or the request in flight possibly opening one (a `BEGIN`, a
-//!     user statement of a Manual session), nothing is replayed (fix round 1, C1): the
-//!     session emits `SessionEvent::Lost` and breaks (the profile is `Lost`, with Retry);
+//!   - a loss is an I/O, protocol, timeout or TLS failure, or a server error that ends the
+//!     connection (`server.shutdown`, `server.starting`, MySQL's server-gone codes; fix round
+//!     2, I6);
+//!   - with a transaction open before the request that found the loss (never the status a
+//!     driver reports after it; fix round 2, C2), or the request in flight possibly opening one
+//!     (a `BEGIN`, `START` or `SET autocommit` in it, a user statement of a Manual session),
+//!     nothing is replayed (fix round 1, C1): the session emits `SessionEvent::Lost` and breaks
+//!     (the profile is `Lost`, with Retry);
 //!   - otherwise (an idle session) it is not broken: it publishes `Connecting` (so it keeps
 //!     its budget permit, T15 carry-in), notes what the loss took (`lost_state`), answers the
 //!     request that was running (a user statement `ConnectionLost { outcome_unknown: true }`,
@@ -78,7 +83,10 @@ use crate::session::cancel::{
 use crate::session::liveness::{LivenessAction, LivenessPolicy, Supervisor};
 use crate::session::readonly::run_guarded;
 // ## m2b-t17-liveness
-use crate::session::recovery::{LostState, Tracked, is_recovery_case, lost_state, track_statement};
+use crate::session::recovery::{
+    LostState, Tracked, connection_ending, is_recovery_case, lost_state, touches_tx,
+    track_statement,
+};
 use crate::session::schema::{Family, family, first_keyword};
 use crate::session::{
     CancelOutcome, CancelState, ClosePolicy, CloseRefused, Command, EnvPlan, Escalation, ExecError,
@@ -294,8 +302,13 @@ impl Core {
             .ok_or_else(not_connected)
     }
 
-    /// Reads the protocol's transaction status after a round trip.
+    /// Reads the protocol's transaction status after a round trip. Nothing once the session is
+    /// broken: a driver may report `Failed` for a connection it found closed, which says
+    /// nothing about the transaction (Task 17 fix round 2, C2).
     pub(crate) fn observe(&mut self, statement: bool) {
+        if self.broken.is_some() {
+            return;
+        }
         if let Some(live) = self.live.as_mut() {
             let status = live.raw().tx_status();
             self.tx.observe(status, statement);
@@ -322,12 +335,26 @@ impl Core {
 
     /// Classifies a driver error; a lost connection breaks the session. `sent`: the statement
     /// may have reached the server.
+    ///
+    /// Task 17 fix round 2 (I6): a server error that ends the connection (`server.shutdown`,
+    /// `server.starting`, `network.*` after connect; MySQL's server-gone codes) is a lost
+    /// connection too, so the recovery starts on the request it answered, with the server's
+    /// message kept.
     pub(crate) fn raw_error(&mut self, e: &RawError, sent: bool) -> ExecError {
         let class = classify(self.kind, Phase::PostConnect, e).class;
         self.last_class = Some(class);
         let kind = match &e.kind {
             RawErrorKind::Cancelled => ExecErrorKind::Cancelled,
-            RawErrorKind::Db => ExecErrorKind::Db,
+            RawErrorKind::Db => match connection_ending(self.kind, e, class) {
+                Some(lost) => {
+                    self.last_class = Some(lost);
+                    self.broken.get_or_insert(lost);
+                    ExecErrorKind::ConnectionLost {
+                        outcome_unknown: sent,
+                    }
+                }
+                None => ExecErrorKind::Db,
+            },
             RawErrorKind::Io(_)
             | RawErrorKind::Protocol
             | RawErrorKind::Timeout
@@ -348,8 +375,10 @@ impl Core {
     /// Runs one trusted control statement.
     pub(crate) async fn control(&mut self, sql: &str) -> Result<(), ExecError> {
         let ran = self.conn()?.batch(sql).await;
+        // The error first: a lost connection's status is never read (C2).
+        let ran = ran.map_err(|e| self.raw_error(&e, true));
         self.observe(false);
-        ran.map_err(|e| self.raw_error(&e, true))
+        ran
     }
 
     async fn handle(&mut self, request: Request) -> Reply {
@@ -389,12 +418,12 @@ impl Core {
             let replay = self.env_plan().replay();
             let kind = self.kind;
             let ran = run_guarded(self.conn()?, kind, sql, opts, &replay).await;
-            self.observe(false);
             if let Err(e) = &ran
                 && matches!(e.kind, ExecErrorKind::ConnectionLost { .. })
             {
                 self.broken.get_or_insert(ErrClass::NetworkReset);
             }
+            self.observe(false);
             ran?
         } else {
             // Hacivat's own statements never open the user's transaction (review M9).
@@ -408,8 +437,9 @@ impl Core {
                 }
             }
             let ran = self.conn()?.execute(sql, opts).await;
+            let ran = ran.map_err(|e| self.raw_error(&e, true));
             self.observe(!control);
-            ran.map_err(|e| self.raw_error(&e, true))?
+            ran?
         };
         // ## m2b-t17-liveness: what a reconnect would lose (B19).
         if origin == ExecOrigin::User {
@@ -445,14 +475,15 @@ impl Core {
             return;
         };
         let probed = conn.execute(sql, ExecOpts::default()).await;
-        self.observe(false);
         match probed {
             Ok(answer) => {
+                self.observe(false);
                 let ctx = parse_schema_probe(self.kind, &answer);
                 self.schema = (ctx != SchemaCtx::default()).then_some(ctx);
             }
             Err(e) => {
                 let e = self.raw_error(&e, false);
+                self.observe(false);
                 tracing::debug!(kind = ?e.kind, "the schema probe failed");
             }
         }
@@ -547,9 +578,11 @@ impl Core {
     // ## m2b-t17-liveness
 
     /// Notes what the loss took: the transaction is gone, its mode and isolation stay (B19).
-    fn note_loss(&mut self) {
+    /// `before` is the status before the request that found the loss (fix round 2, C2): a
+    /// driver's status after a loss says nothing about the transaction.
+    fn note_loss(&mut self, before: TxStatus) {
         let tracked = Tracked {
-            tx: self.tx.status,
+            tx: before,
             ..self.tracked.clone()
         };
         self.lost = Some(lost_state(&tracked));
@@ -985,7 +1018,9 @@ async fn keepalive(core: &mut Core, ctl: &mut Ctl, timeout: std::time::Duration)
             );
             core.broken = Some(class);
             core.close().await;
-            match begin_recovery(core, ctl, class, false) {
+            // A ping changes no transaction: the status is the one before it.
+            let before = core.tx.status;
+            match begin_recovery(core, ctl, class, before, false) {
                 Some(reconnect) => Flow::Recover(reconnect),
                 None => {
                     break_now(core, ctl, class).await;
@@ -1001,13 +1036,15 @@ async fn keepalive(core: &mut Core, ctl: &mut Ctl, timeout: std::time::Duration)
 /// session). The dead connection is already closed.
 ///
 /// Fix round 1, C1: only an idle session reconnects. When the lost connection had a
-/// transaction open, or the request in flight may have opened one (`tx_unknown`), nothing is
-/// replayed and nothing runs on a new connection: the session tells what was lost
-/// (`SessionEvent::Lost`) and returns `None`, so it breaks (`Lost` with Retry).
+/// transaction open (`before`, the status before the request that found the loss; fix round 2,
+/// C2), or the request in flight may have opened one (`tx_unknown`), nothing is replayed and
+/// nothing runs on a new connection: the session tells what was lost (`SessionEvent::Lost`)
+/// and returns `None`, so it breaks (`Lost` with Retry).
 fn begin_recovery(
     core: &mut Core,
     ctl: &mut Ctl,
     class: ErrClass,
+    before: TxStatus,
     tx_unknown: bool,
 ) -> Option<BoxFuture<'static, Result<LiveConnection, ConnectError>>> {
     let reconnector = ctl.hooks.reconnect.clone()?;
@@ -1015,7 +1052,7 @@ fn begin_recovery(
     if !is_recovery_case(class) || closing {
         return None;
     }
-    core.note_loss();
+    core.note_loss(before);
     if tx_unknown || core.lost.as_ref().is_some_and(|l| l.open_tx) {
         tracing::debug!(
             session = ctl.id.0,
@@ -1047,7 +1084,8 @@ fn begin_recovery(
 }
 
 /// Whether `request`, lost in flight, may have opened a transaction (C1): a `BEGIN`, a
-/// `START TRANSACTION`, or any user statement of a Manual session (it begins one first).
+/// `START TRANSACTION` or a `SET autocommit` anywhere in it (fix round 2, R1), or any user
+/// statement of a Manual session (it begins one first).
 fn may_open_tx(request: &Request, mode: TxMode) -> bool {
     match request {
         Request::Tx(TxCommand::Begin) => true,
@@ -1055,7 +1093,7 @@ fn may_open_tx(request: &Request, mode: TxMode) -> bool {
             sql,
             origin: ExecOrigin::User,
             ..
-        } => mode == TxMode::Manual || matches!(first_keyword(sql).as_str(), "BEGIN" | "START"),
+        } => mode == TxMode::Manual || touches_tx(sql),
         _ => false,
     }
 }
@@ -1375,7 +1413,7 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
     let mut reply = Some(reply);
     if let Some(class) = core.broken {
         core.close().await;
-        recovery = begin_recovery(core, ctl, class, tx_unknown);
+        recovery = begin_recovery(core, ctl, class, tx_before.status, tx_unknown);
         if recovery.is_some()
             && let Some(request) = retry
             && matches!(
