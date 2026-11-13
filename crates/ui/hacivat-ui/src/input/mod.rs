@@ -577,6 +577,9 @@ impl Render for TextInput {
         let field = div()
             .id(("text-input", cx.entity_id()))
             .track_focus(&self.focus_handle)
+            // ## m2b-t24-shots (fix round 1, I2): a following scroll container keeps it in view.
+            .relative()
+            .child(crate::follow::focus_probe(self.focus_handle.clone()))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .flex()
@@ -685,7 +688,12 @@ impl Element for InputText {
         let selection = painted(selection.start)..painted(selection.end);
         let marked = input.ime.marked().map(|m| painted(m.start)..painted(m.end));
         let focused = input.focus_handle.is_focused(window);
-        let placeholder = value.is_empty().then(|| (input.placeholder)(cx));
+        // ## m2b-t24-shots (fix round 1, M2): an empty placeholder is no placeholder (nothing is
+        // drawn or recorded for it).
+        let placeholder = value
+            .is_empty()
+            .then(|| (input.placeholder)(cx))
+            .filter(|p| !p.is_empty());
         let placeholder_source = input.placeholder_source;
         let mut scroll_x = input.scroll_x;
 
@@ -782,6 +790,10 @@ impl Element for InputText {
         });
 
         if let Some(p) = &placeholder {
+            // ## m2b-t24-shots (fix round 1)
+            let visible = crate::text::shows_in(bounds, window.content_mask().bounds);
+            let outside_card =
+                crate::text::outside_card(cx, bounds.left(), bounds.left() + shown.width);
             TextRegistry::record(cx, || RenderedText {
                 text: p.clone(),
                 source: placeholder_source,
@@ -790,6 +802,8 @@ impl Element for InputText {
                 clipped: shown.width > width + px(0.5),
                 truncated: placeholder_cut,
                 path: "hacivat-ui/src/input/mod.rs#placeholder".into(),
+                visible,
+                outside_card,
             });
         }
 

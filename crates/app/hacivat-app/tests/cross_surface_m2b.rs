@@ -13,24 +13,31 @@
 
 mod support;
 
+use std::cell::RefCell;
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{EntityInputHandler as _, Focusable as _, TestAppContext, VisualTestContext};
 use hacivat_app::connections::dialog::ssh::{AuthKind, section_state};
 use hacivat_app::connections::dialog::{DialogMode, open_connection_dialog, open_dialog};
+use hacivat_app::connections::error_view::open_error_dialog;
+use hacivat_app::connections::interaction::interaction;
 use hacivat_app::connections::prompt_kit::parts;
 use hacivat_app::connections::{ConnectionsModel, cert_dialog};
 use hacivat_app::l10n_global::tr_id;
 use hacivat_driver::fake::FakeDriver;
 use hacivat_driver::{RawError, RawErrorKind};
 use hacivat_net::ssh::{HopSpec, HostKeyPolicy, SshAuth, SshSpec};
-use hacivat_net::{TlsFailure, TlsSummary, TlsVerified};
-use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
+use hacivat_net::{
+    CertPin, CertReview, ChainEntry, ChainRole, TlsFailure, TlsMode, TlsSummary, TlsVerified,
+};
+use hacivat_proto::{DbmsKind, EnvTag, ErrClass, FixId, ProfileId};
 use hacivat_secrets::{
     BackendChoice, ExposeSecret, FallbackBackend, FileVault, MemoryBackend, Retention,
     SecretBackend as _, SecretKey, SecretSlot, VaultBackend as _, VaultParams,
 };
+use hacivat_session::pipeline::{Answer, ConnectError, ErrArgs, Interaction, Phase, Question};
 use hacivat_session::profile::{Profile, TransportSpec};
 use hacivat_session::{LiveState, PathKind};
 use hacivat_testkit::ssh_server::{ForwardTarget, TestSshConfig, TestSshServer};
@@ -202,8 +209,10 @@ fn trust_host_key_by_keyboard(vcx: &mut VisualTestContext) {
 
 /// A server that refuses the first handshake as untrusted (presenting the test CA) and accepts
 /// the pinned one. The review opens over the connecting capsule, Pin is reached from the
-/// keyboard, the pinned connect lands in the capsule and the status bar as verified TLS, the
-/// pin reaches the file, and the next connect carries it without asking again.
+/// keyboard, and the pin is exactly the certificate the review showed: the retry carries it,
+/// the profile and its file keep it. The connection then reads "TLS 1.3 · pinned" in the status
+/// bar and the sheet (fix round 1, I3; M2a NOTES `enc-pinned`), and the next connect carries
+/// the pin without asking again.
 #[gpui::test]
 fn untrusted_then_pin_then_capsule_shows_pinned(cx: &mut TestAppContext) {
     let driver = FakeDriver::new(DbmsKind::Postgres)
@@ -235,6 +244,11 @@ fn untrusted_then_pin_then_capsule_shows_pinned(cx: &mut TestAppContext) {
         capsule_model(vcx),
         CapsuleModel::Connecting { .. }
     ));
+    // The fingerprint the review shows (two lines of 16 bytes).
+    let reviewed = (1..=2)
+        .map(|n| text_of(vcx, &format!("cert-fingerprint-line-{n}")).expect("a line"))
+        .collect::<Vec<_>>()
+        .join(":");
     // Keyboard alone: Cancel has the focus; Tab, Tab reaches Pin; Enter presses it.
     assert_eq!(review_focus(vcx), Some("cert-cancel"));
     press(vcx, "tab tab");
@@ -245,12 +259,33 @@ fn untrusted_then_pin_then_capsule_shows_pinned(cx: &mut TestAppContext) {
         matches!(live(vcx, "reports-qa"), LiveState::Connected(_))
     });
     assert!(!layer_open(vcx, "cert-dialog"));
-    let LiveState::Connected(info) = live(vcx, "reports-qa") else {
-        panic!("connected");
-    };
-    assert_eq!(info.tls.verified, TlsVerified::Pinned);
+
+    // What Pin did: the profile keeps exactly the reviewed certificate for this endpoint, and
+    // the retry the pipeline ran after the answer carried that pin.
+    settle_until(vcx, WAIT, || saved(vcx, id).tls.pins.len() == 1);
+    let pin = saved(vcx, id).tls.pins[0].clone();
+    assert_eq!(pin.endpoint, "10.0.0.5:5432");
+    let stored = pin
+        .sha256
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":");
+    assert_eq!(
+        stored, reviewed,
+        "the pin is the certificate the review showed"
+    );
+    let retry = fake(vcx).requests()[1]
+        .tls
+        .clone()
+        .expect("the retry uses TLS");
+    assert_eq!(retry.settings.pins, std::slice::from_ref(&pin));
+    wait_until(vcx, "the pin to reach the file", |vcx| {
+        connections_toml(vcx).contains(&stored.replace(':', "").to_ascii_lowercase())
+    });
+
     // The capsule shows the live connection, encrypted (no "unencrypted" segment); the status
-    // bar says how: a pinned certificate reads as verified TLS (no separate "pinned" label).
+    // bar and the sheet say how: pinned.
     assert!(matches!(
         capsule_model(vcx),
         CapsuleModel::Connection {
@@ -258,17 +293,18 @@ fn untrusted_then_pin_then_capsule_shows_pinned(cx: &mut TestAppContext) {
             ..
         }
     ));
-    assert!(text_of(vcx, "capsule-text-access").is_some());
+    vcx.cx.update(|cx| ConnectionsModel::select(cx, Some(id)));
+    vcx.run_until_parked();
     let status = plain(status_bar_text(vcx));
-    assert!(status.contains("TLS 1.3 · verified"), "{status}");
-
-    // The pin reached the profile and its file.
-    settle_until(vcx, WAIT, || saved(vcx, id).tls.pins.len() == 1);
-    let pin = saved(vcx, id).tls.pins[0].clone();
-    assert_eq!(pin.endpoint, "10.0.0.5:5432");
-    wait_until(vcx, "the pin to reach the file", |vcx| {
-        connections_toml(vcx).contains("10.0.0.5:5432")
-    });
+    assert!(status.contains("TLS 1.3 · pinned"), "{status}");
+    assert!(!status.contains("verified"), "{status}");
+    assert!(
+        texts_drawn_by(vcx, "connections/sheet.rs")
+            .iter()
+            .any(|s| plain(s) == "TLS 1.3 · pinned"),
+        "{:?}",
+        texts_drawn_by(vcx, "connections/sheet.rs")
+    );
 
     // The next connect carries the pin and asks nothing.
     vcx.cx.update(|cx| ConnectionsModel::disconnect(cx, id));
@@ -572,6 +608,23 @@ fn first_forever_save_on_vault_machine_creates_vault(cx: &mut TestAppContext) {
         capsule_model(vcx),
         CapsuleModel::Connection { .. }
     ));
+    // Fix round 1 (c): the sheet says where the password is kept, the vault (NOTES M2b
+    // `vault-secret`), never the Keychain.
+    vcx.cx.update(|cx| ConnectionsModel::select(cx, Some(id)));
+    vcx.run_until_parked();
+    let sheet = texts_drawn_by(vcx, "connections/sheet.rs");
+    assert!(
+        sheet
+            .iter()
+            .any(|s| plain(s) == t(vcx, "hv-conn-secret-vault")),
+        "{sheet:?}"
+    );
+    assert!(
+        !sheet
+            .iter()
+            .any(|s| plain(s) == t(vcx, "hv-conn-secret-forever")),
+        "{sheet:?}"
+    );
     // Neither secret reached a file or the screen.
     for secret in [DB_PW, MASTER] {
         assert!(!connections_toml(vcx).contains(secret));
@@ -579,41 +632,12 @@ fn first_forever_save_on_vault_machine_creates_vault(cx: &mut TestAppContext) {
     }
 }
 
-// ---- 5 · "Use an SSH tunnel" end to end ----------------------------------------------------------
+// ---- 5 · "Connect through SSH…" end to end --------------------------------------------------------
 
-/// The server at a public address offers no TLS (`Auto`): the plaintext question opens and its
-/// default, Enter, answers "Use an SSH tunnel"; the connection's dialog opens with the SSH
-/// section on and the SSH host focused; the tunnel is filled in and saved; Save and connect
-/// meets the new-host-key prompt, trusted from the keyboard; the connection lands in the capsule
-/// through the bastion and the saved profile keeps the tunnel.
-#[gpui::test]
-fn connect_through_ssh_fix_end_to_end(cx: &mut TestAppContext) {
-    let driver = FakeDriver::new(DbmsKind::Postgres)
-        .script(vec![
-            Err(RawError {
-                kind: RawErrorKind::TlsNotOffered,
-                server: None,
-            }),
-            Ok(()),
-        ])
-        .tls(TlsSummary {
-            encrypted: true,
-            version: Some("TLSv1.3".into()),
-            cipher: None,
-            verified: TlsVerified::Full,
-        });
-    let vcx = shell_with_fake(cx, "en", driver);
-    let server = start_ssh(vcx);
-    let id = add_profile(
-        vcx,
-        test_profile("analytics-eu", Some(EnvTag::Staging), "203.0.113.10"),
-    );
-    vcx.cx.update(|cx| ConnectionsModel::select(cx, Some(id)));
-    connect(vcx, "analytics-eu");
-
-    // The plaintext question; its safe default is the tunnel.
-    settle_until(vcx, WAIT, || layer_open(vcx, "plaintext-prompt"));
-    press(vcx, "enter");
+/// The SSH section the fix or the answer opened: on, open, the SSH host focused, and, at the
+/// 960x600 minimum, the SSH host field inside the dialog body's visible part (fix round 1, I2:
+/// the body follows the focus).
+fn assert_tunnel_section_landed(vcx: &mut VisualTestContext) {
     settle_until(vcx, WAIT, || {
         in_window(vcx, |window, cx| section_state(window, cx)).is_some()
     });
@@ -624,17 +648,42 @@ fn connect_through_ssh_fix_end_to_end(cx: &mut TestAppContext) {
     );
     let focused = in_window(vcx, |window, cx| section.read(cx).focused(window, cx));
     assert_eq!(focused.as_deref(), Some("ssh-host"));
-    assert!(!matches!(
-        live(vcx, "analytics-eu"),
-        LiveState::Connected(_)
-    ));
+    let shown = |vcx: &mut VisualTestContext| {
+        let (Some(body), Some(field)) = (
+            vcx.debug_bounds("form-dialog-body"),
+            vcx.debug_bounds("ssh-field-ssh-host"),
+        ) else {
+            return false;
+        };
+        field.top() >= body.top() && field.bottom() <= body.bottom()
+    };
+    for _ in 0..20 {
+        if shown(vcx) {
+            break;
+        }
+        vcx.cx.update(|cx| cx.refresh_windows());
+        vcx.run_until_parked();
+    }
+    assert!(shown(vcx), "the SSH host field is in view at 960x600");
+}
 
-    // The tunnel: the bastion's host and port, its user, a password.
-    let ssh_field = |vcx: &mut VisualTestContext, name: &str, text: &str| {
+/// Fills the open SSH section with `server`'s tunnel (a password user), saves and connects,
+/// trusts the new host key from the keyboard, and checks the connection and the saved profile.
+fn fill_tunnel_and_connect(
+    vcx: &mut VisualTestContext,
+    server: &TestSshServer,
+    id: ProfileId,
+    name: &str,
+) {
+    // The rest of the flow at the default window: a click reaches only what is drawn in view.
+    vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(800.0)));
+    vcx.run_until_parked();
+    let section = in_window(vcx, |window, cx| section_state(window, cx)).expect("the section");
+    let ssh_field = |vcx: &mut VisualTestContext, field: &str, text: &str| {
         let input = vcx
             .cx
-            .read(|cx| section.read(cx).input(name))
-            .unwrap_or_else(|| panic!("no SSH field {name}"));
+            .read(|cx| section.read(cx).input(field))
+            .unwrap_or_else(|| panic!("no SSH field {field}"));
         in_window(vcx, |window, cx| {
             input.update(cx, |i, cx| {
                 i.set_value("");
@@ -657,10 +706,10 @@ fn connect_through_ssh_fix_end_to_end(cx: &mut TestAppContext) {
     settle_until(vcx, WAIT, || layer_open(vcx, "hostkey-prompt"));
     trust_host_key_by_keyboard(vcx);
     settle_until(vcx, WAIT, || {
-        matches!(live(vcx, "analytics-eu"), LiveState::Connected(_))
+        matches!(live(vcx, name), LiveState::Connected(_))
     });
 
-    let LiveState::Connected(info) = live(vcx, "analytics-eu") else {
+    let LiveState::Connected(info) = live(vcx, name) else {
         panic!("connected");
     };
     assert_eq!(info.path, PathKind::Ssh);
@@ -678,6 +727,103 @@ fn connect_through_ssh_fix_end_to_end(cx: &mut TestAppContext) {
     assert_eq!(fake(vcx).connect_calls(), 2);
     assert!(!connections_toml(vcx).contains(SSH_PW));
     assert!(!frame_text(vcx).contains(SSH_PW));
+}
+
+/// The fix itself (fix round 1, I4). A server that offers no TLS to a connection that requires
+/// it fails with `tls.not_supported_by_server`; the capsule opens its error dialog, whose fixes
+/// are "Connect through SSH…" (M2a NOTES `fix-ssh`) and Edit connection. From the keyboard,
+/// Shift-Tab from Edit connection reaches the fix and Space runs it: the connection's dialog
+/// opens with the SSH section on and the SSH host in view at 960x600; the tunnel is filled in,
+/// saved and connected through the in-process SSH server.
+#[gpui::test]
+fn connect_through_ssh_fix_end_to_end(cx: &mut TestAppContext) {
+    let driver = FakeDriver::new(DbmsKind::Postgres)
+        .script(vec![
+            Err(RawError {
+                kind: RawErrorKind::TlsNotOffered,
+                server: None,
+            }),
+            Ok(()),
+        ])
+        .tls(TlsSummary {
+            encrypted: true,
+            version: Some("TLSv1.3".into()),
+            cipher: None,
+            verified: TlsVerified::Full,
+        });
+    let vcx = shell_with_fake(cx, "en", driver);
+    vcx.simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
+    let server = start_ssh(vcx);
+    let mut p = test_profile("analytics-eu", Some(EnvTag::Staging), "10.0.0.5");
+    p.tls.mode = TlsMode::Require;
+    let id = add_profile(vcx, p);
+    vcx.cx.update(|cx| ConnectionsModel::select(cx, Some(id)));
+    connect(vcx, "analytics-eu");
+    settle_until(vcx, WAIT, || {
+        matches!(live(vcx, "analytics-eu"), LiveState::Failed(_))
+    });
+
+    // The capsule's body opens the error; its first fix is the SSH one.
+    click_selector(vcx, "capsule-body");
+    settle_until(vcx, WAIT, || layer_open(vcx, "connection-error"));
+    let fix = t(vcx, "hv-conn-fix-ssh");
+    assert!(
+        texts_drawn_by(vcx, "hacivat-ui/src/button.rs")
+            .iter()
+            .any(|s| plain(s) == fix),
+        "{:?}",
+        texts_drawn_by(vcx, "hacivat-ui/src/button.rs")
+    );
+    assert!(vcx.debug_bounds("button-fix-ssh").is_some());
+    // Edit connection has the initial focus (the SSH fix is not the primary); Shift-Tab reaches
+    // the SSH fix and Space runs it. Space on Edit connection would open the dialog with the
+    // tunnel off, and Space anywhere else would not open it: the section check below tells.
+    press(vcx, "shift-tab");
+    press(vcx, "space");
+
+    settle_until(vcx, WAIT, || !layer_open(vcx, "connection-error"));
+    assert_tunnel_section_landed(vcx);
+    fill_tunnel_and_connect(vcx, &server, id, "analytics-eu");
+}
+
+/// The other way in: the server at a public address offers no TLS (`Auto`), the plaintext
+/// question opens, and its default, Enter, answers "Use an SSH tunnel"; the same SSH section
+/// opens with the SSH host in view at 960x600, and the tunnel connects.
+#[gpui::test]
+fn use_an_ssh_tunnel_answer_end_to_end(cx: &mut TestAppContext) {
+    let driver = FakeDriver::new(DbmsKind::Postgres)
+        .script(vec![
+            Err(RawError {
+                kind: RawErrorKind::TlsNotOffered,
+                server: None,
+            }),
+            Ok(()),
+        ])
+        .tls(TlsSummary {
+            encrypted: true,
+            version: Some("TLSv1.3".into()),
+            cipher: None,
+            verified: TlsVerified::Full,
+        });
+    let vcx = shell_with_fake(cx, "en", driver);
+    vcx.simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
+    let server = start_ssh(vcx);
+    let id = add_profile(
+        vcx,
+        test_profile("analytics-eu", Some(EnvTag::Staging), "203.0.113.10"),
+    );
+    vcx.cx.update(|cx| ConnectionsModel::select(cx, Some(id)));
+    connect(vcx, "analytics-eu");
+
+    // The plaintext question; its safe default is the tunnel.
+    settle_until(vcx, WAIT, || layer_open(vcx, "plaintext-prompt"));
+    press(vcx, "enter");
+    assert_tunnel_section_landed(vcx);
+    assert!(!matches!(
+        live(vcx, "analytics-eu"),
+        LiveState::Connected(_)
+    ));
+    fill_tunnel_and_connect(vcx, &server, id, "analytics-eu");
 }
 
 // ---- the explanation's triggers (Task 24 polish: `aria-expanded`) ------------------------------
@@ -749,4 +895,193 @@ fn the_explanations_triggers_say_whether_it_is_open(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("escape");
     assert!(!layer_open(vcx, "popover"));
     assert_eq!(triggers(vcx), [Some(false), Some(false)]);
+}
+
+// ---- the hard stops from the keyboard (fix round 1, M5) -----------------------------------------
+
+/// Asks `q` through the app's UI port, as the pipeline does from the core runtime; the answer
+/// lands in the returned slot.
+fn ask(vcx: &VisualTestContext, q: Question) -> Rc<RefCell<Option<Answer>>> {
+    let slot = Rc::new(RefCell::new(None));
+    let out = slot.clone();
+    vcx.cx.update(|cx| {
+        let Interaction::Interactive(port) = interaction(cx) else {
+            panic!("the UI port is installed");
+        };
+        let answer = port.ask(q);
+        cx.spawn(async move |_| {
+            *out.borrow_mut() = Some(answer.await);
+        })
+        .detach();
+    });
+    vcx.run_until_parked();
+    slot
+}
+
+/// Presses Tab (Shift-Tab when `back`) until the prompt part `name` has the focus.
+fn tab_to(vcx: &mut VisualTestContext, name: &str, back: bool) {
+    for _ in 0..8 {
+        if focused_part(vcx) == name {
+            return;
+        }
+        press(vcx, if back { "shift-tab" } else { "tab" });
+    }
+    assert_eq!(focused_part(vcx), name, "Tab never reached {name}");
+}
+
+/// `tls.pin_changed` for `127.0.0.1:5432`: the pinned certificate is `[1; 32]`, the server's
+/// `[2; 32]`.
+fn pin_changed() -> ConnectError {
+    let leaf = "CN=reports-qa,O=Acme".to_string();
+    ConnectError {
+        class: ErrClass::TlsPinChanged,
+        phase: Phase::DriverConnect,
+        trail: Vec::new(),
+        args: ErrArgs {
+            name: "reports-qa".into(),
+            host: Some("127.0.0.1".into()),
+            port: Some(5432),
+            user: Some("deploy".into()),
+            database: None,
+            file: None,
+            engine: "PostgreSQL".into(),
+            version: None,
+            hop: None,
+            hop_host: None,
+        },
+        server: None,
+        fixes: vec![FixId::ReviewCertificate],
+        suggestions: Vec::new(),
+        issues: Vec::new(),
+        elapsed: std::time::Duration::ZERO,
+        attempts: 0,
+        needs_interaction: false,
+        certificate: Some(CertReview {
+            endpoint: "127.0.0.1:5432".into(),
+            subject: leaf.clone(),
+            issuer: "CN=Acme Internal CA G2,O=Acme".into(),
+            // 2020-01-01 to 2100-01-01: valid today.
+            not_before_unix: 1_577_836_800,
+            not_after_unix: 4_102_444_800,
+            sha256: [2; 32],
+            chain: vec![ChainEntry {
+                subject: leaf,
+                role: ChainRole::Leaf,
+            }],
+            pinned: Some([1; 32]),
+        }),
+        host_key: None,
+        profile_changes: Vec::new(),
+    }
+}
+
+/// Replace pin from the keyboard alone: the error dialog's Review certificate… (its primary,
+/// with the focus) opens the hard stop on Cancel; Shift-Tab reaches Replace pin and Space
+/// presses it (Enter would cancel); the profile then keeps the new pin.
+#[gpui::test]
+fn replace_pin_completes_from_the_keyboard(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", FakeDriver::new(DbmsKind::Postgres));
+    let mut p = test_profile("reports-qa", Some(EnvTag::Test), "127.0.0.1");
+    p.tls.pins = vec![CertPin {
+        endpoint: "127.0.0.1:5432".into(),
+        sha256: [1; 32],
+    }];
+    let id = add_profile(vcx, p);
+    in_window(vcx, |window, cx| {
+        open_error_dialog(id, Arc::new(pin_changed()), window, cx)
+    });
+    settle_until(vcx, WAIT, || layer_open(vcx, "connection-error"));
+    press(vcx, "space");
+    settle_until(vcx, WAIT, || layer_open(vcx, "cert-dialog"));
+    assert_eq!(review_focus(vcx), Some("cert-cancel"));
+    press(vcx, "shift-tab");
+    assert_eq!(review_focus(vcx), Some("cert-replace-pin"));
+    press(vcx, "space");
+    settle_until(vcx, WAIT, || {
+        saved(vcx, id).tls.pins
+            == [CertPin {
+                endpoint: "127.0.0.1:5432".into(),
+                sha256: [2; 32],
+            }]
+    });
+    assert!(!layer_open(vcx, "cert-dialog"));
+}
+
+/// A shell whose `Forever` secrets live in an existing, locked vault (created under
+/// [`MASTER`]); and the vault.
+fn shell_with_locked_vault(
+    cx: &mut TestAppContext,
+) -> (
+    &'static mut VisualTestContext,
+    Arc<FileVault>,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let vault = Arc::new(FileVault::with_params(
+        dir.path().join("vault.bin"),
+        VaultParams {
+            m_kib: 64,
+            t: 1,
+            p: 1,
+        },
+    ));
+    vault.create(MASTER.into()).expect("the vault is created");
+    vault.lock();
+    let backend = FallbackBackend::new(
+        Arc::new(MemoryBackend::new()),
+        vault.clone(),
+        Box::new(|| false),
+    );
+    assert!(backend.probe_available(), "the probe chose the vault");
+    let vcx = shell_with_fake_backend(
+        cx,
+        "en",
+        FakeDriver::new(DbmsKind::Postgres),
+        Arc::new(backend),
+        |_| {},
+    );
+    (vcx, vault, dir)
+}
+
+/// The vault reset from the keyboard alone: Unlock's Reset vault… by Tab and Space; the typed
+/// word; Tab to Reset vault and Space (Enter in the field never resets). The vault is gone.
+#[gpui::test]
+fn vault_reset_completes_from_the_keyboard(cx: &mut TestAppContext) {
+    let (vcx, vault, _dir) = shell_with_locked_vault(cx);
+    let asked = ask(vcx, Question::UnlockVault { attempt: 1 });
+    wait_until_mut(vcx, "the reset entry", |vcx| {
+        vcx.debug_bounds("button-vault-reset-open").is_some()
+    });
+    assert_eq!(focused_part(vcx), "vault-unlock");
+    tab_to(vcx, "vault-reset-open", false);
+    press(vcx, "space");
+    settle_until(vcx, WAIT, || layer_open(vcx, "vault-reset"));
+    assert_eq!(focused_part(vcx), "vault-reset-word");
+    vcx.simulate_input(&t(vcx, "hv-conn-vault-reset-word"));
+    press(vcx, "enter");
+    assert!(vault.exists(), "Enter never resets");
+    tab_to(vcx, "vault-reset-confirm", false);
+    press(vcx, "space");
+    settle_until(vcx, WAIT, || !vault.exists());
+    settle_until(vcx, WAIT, || asked.borrow().is_some());
+    assert!(matches!(*asked.borrow(), Some(Answer::Cancelled)));
+    assert!(layer_ids(vcx).is_empty(), "{:?}", layer_ids(vcx));
+}
+
+/// The damaged-file notice from the keyboard: Close has the focus; Tab reaches Reset vault…
+/// and Space opens the reset confirmation, focused on its field.
+#[gpui::test]
+fn damaged_vault_reset_entry_completes_from_the_keyboard(cx: &mut TestAppContext) {
+    let (vcx, vault, _dir) = shell_with_locked_vault(cx);
+    let _asked = ask(vcx, Question::VaultDamaged);
+    settle_until(vcx, WAIT, || layer_open(vcx, "vault-damaged"));
+    wait_until_mut(vcx, "the damaged notice's reset entry", |vcx| {
+        vcx.debug_bounds("button-vault-damaged-reset").is_some()
+    });
+    assert_eq!(focused_part(vcx), "vault-damaged-close");
+    tab_to(vcx, "vault-damaged-reset", false);
+    press(vcx, "space");
+    settle_until(vcx, WAIT, || layer_open(vcx, "vault-reset"));
+    assert_eq!(focused_part(vcx), "vault-reset-word");
+    assert!(vault.exists(), "opening the confirmation deletes nothing");
 }

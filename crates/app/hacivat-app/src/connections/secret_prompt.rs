@@ -268,9 +268,13 @@ impl SecretPromptView {
         let t = theme.tokens;
         let c = &t.colors;
         if let Some(select) = &self.remember {
+            // ## m2b-t24-shots (fix round 1, I1): as wide as the value column and free to
+            // shrink, so the line wraps inside the card in every locale.
             return div()
                 .flex()
                 .flex_col()
+                .w_full()
+                .min_w_0()
                 .gap(px(t.spacing.xs))
                 .child(
                     div()

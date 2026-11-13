@@ -1077,6 +1077,9 @@ pub(crate) fn record_text(
             clipped: false,
             truncated: false,
             path: path.into(),
+            // ## m2b-t24-shots
+            visible: true,
+            outside_card: false,
         }
     });
 }
@@ -1403,13 +1406,18 @@ mod shots_m2b {
     pub fn host_key_revoked_fixture(window: &mut Window, cx: &mut App) {
         open(ssh(ErrClass::SshHostKeyRevoked, 1), window, cx);
     }
+
+    /// `ssh.host_key_unknown` at hop 2 (fix round 1, M7): a connect that could not ask.
+    pub fn host_key_unknown_fixture(window: &mut Window, cx: &mut App) {
+        open(ssh(ErrClass::SshHostKeyUnknown, 1), window, cx);
+    }
 }
 
 #[cfg(feature = "shots")]
 pub use shots_m2b::{
-    host_key_changed_fixture, host_key_revoked_fixture, insecure_plain_fixture,
-    insecure_tls_fixture, pin_changed_fixture, ssh_agent_fixture, ssh_auth_fixture,
-    ssh_channel_fixture,
+    host_key_changed_fixture, host_key_revoked_fixture, host_key_unknown_fixture,
+    insecure_plain_fixture, insecure_tls_fixture, pin_changed_fixture, ssh_agent_fixture,
+    ssh_auth_fixture, ssh_channel_fixture,
 };
 
 #[cfg(test)]

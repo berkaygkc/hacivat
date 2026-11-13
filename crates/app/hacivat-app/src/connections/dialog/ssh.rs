@@ -328,13 +328,19 @@ pub struct SshSection {
 
 // ---- entry points --------------------------------------------------------------------------------
 
-/// The SSH section of the form for `draft` (the dialog's hook calls it while drawing).
-pub(crate) fn section(draft: &ProfileDraft, window: &mut Window, cx: &mut App) -> AnyElement {
+/// The SSH section of the form for `draft` (the dialog's hook calls it while drawing); `body`
+/// is the visible part of the dialog's body (fix round 1, M8: where the import menu fits).
+pub(crate) fn section(
+    draft: &ProfileDraft,
+    body: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let Some(dialog) = open_dialog(window, cx) else {
         return div().into_any_element();
     };
     let state = state_for(&dialog, || Seed::of(draft), window, cx);
-    render(&state, draft, window, cx)
+    render(&state, draft, body, window, cx)
 }
 
 /// The "Connect through SSH" fix: the edit dialog of `id` with the SSH section open, its
@@ -350,6 +356,15 @@ pub(crate) fn open_with_ssh(id: ProfileId, window: &mut Window, cx: &mut App) {
     }
     let seed = Seed::of(&dialog.read(cx).draft);
     let state = state_for(&dialog, || seed, window, cx);
+    state.update(cx, |s, cx| s.show_tunnel(window, cx));
+}
+
+// ## m2b-t24-shots (fix round 1, I4)
+/// The dialog's own "Connect through SSH…" (a test's fix): `dialog`'s SSH section opens with
+/// its tunnel on and the SSH host focused, as `open_with_ssh` does for a saved profile.
+pub(crate) fn show_tunnel_in(dialog: &Entity<ConnectionDialog>, window: &mut Window, cx: &mut App) {
+    let seed = Seed::of(&dialog.read(cx).draft);
+    let state = state_for(dialog, || seed, window, cx);
     state.update(cx, |s, cx| s.show_tunnel(window, cx));
 }
 
@@ -2216,6 +2231,7 @@ fn top_row(theme: &Theme, label: SharedString, control: impl IntoElement) -> Div
 fn render(
     state: &Entity<SshSection>,
     draft: &ProfileDraft,
+    body: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -2225,7 +2241,15 @@ fn render(
     let open = s.open;
     let root = s.focus.root.clone();
     let content = if open {
-        Some(render_content(state, s, &draft.profile, &theme, window, cx))
+        Some(render_content(
+            state,
+            s,
+            &draft.profile,
+            &theme,
+            body,
+            window,
+            cx,
+        ))
     } else {
         None
     };
@@ -2246,6 +2270,9 @@ fn render(
     div()
         .debug_selector(|| "conn-ssh-section".to_string())
         .track_focus(&root)
+        // ## m2b-t24-shots (fix round 1, I2): focusing the section shows it.
+        .relative()
+        .child(hacivat_ui::follow::focus_probe(root.clone()))
         .child(disclosure)
         .into_any_element()
 }
@@ -2285,6 +2312,7 @@ fn render_content(
     s: &SshSection,
     p: &Profile,
     theme: &Theme,
+    body: Bounds<Pixels>,
     window: &mut Window,
     cx: &App,
 ) -> AnyElement {
@@ -2334,10 +2362,23 @@ fn render_content(
         .size_full(),
     );
     if let Some(menu) = &s.import {
+        // ## m2b-t24-shots (fix round 1, M8): its right edge on the button's (the button ends
+        // the row at the card's right padding), so the menu grows into the card instead of past
+        // its side; under the button, or above it when the dialog body has no room below.
         let place = match s.import_bounds {
-            Some(bounds) => anchored()
-                .attach(bounds, Anchor::BottomLeft)
-                .offset(point(px(0.0), px(MENU_GAP_PX))),
+            Some(bounds) => {
+                if opens_above(bounds, Some(body), menu_height(menu.entries.len(), theme)) {
+                    anchored()
+                        .anchor(Anchor::BottomRight)
+                        .attach(bounds, Anchor::TopRight)
+                        .offset(point(px(0.0), px(-MENU_GAP_PX)))
+                } else {
+                    anchored()
+                        .anchor(Anchor::TopRight)
+                        .attach(bounds, Anchor::BottomRight)
+                        .offset(point(px(0.0), px(MENU_GAP_PX)))
+                }
+            }
             None => anchored(),
         };
         import_cell = import_cell.child(deferred(place.child(menu.menu.clone())).with_priority(1));
@@ -2582,12 +2623,16 @@ fn render_content(
                         .flex_none()
                         .justify_end()
                         .w(px(JUMP_INDEX_PX))
-                        .child(Label::new(
-                            number,
-                            TextSource::Data,
-                            t.type_ramp.mono_micro,
-                            c.text_2.to_hsla(),
-                        )),
+                        .child(
+                            Label::new(
+                                number,
+                                TextSource::Data,
+                                t.type_ramp.mono_micro,
+                                c.text_2.to_hsla(),
+                            )
+                            // ## m2b-t24-shots (fix round 1, I2): for the shots' markers.
+                            .id(SharedString::from(format!("ssh-jump-index-{i}"))),
+                        ),
                 )
                 .child(div().flex_1().min_w_0().child(field_box(
                     s,
@@ -2753,6 +2798,26 @@ fn render_route(s: &SshSection, p: &Profile, theme: &Theme, cx: &App) -> Div {
     route
 }
 
+// ## m2b-t24-shots (fix round 1, M8)
+/// The import menu's height with `entries` rows (at least the "no hosts" row): its title row,
+/// the rows, its padding and border.
+fn menu_height(entries: usize, theme: &Theme) -> f32 {
+    let t = theme.tokens;
+    let title = t.type_ramp.caption.line_height + 2.0 * t.spacing.xs;
+    title + hacivat_ui::menu::MENU_ROW_PX * entries.max(1) as f32 + 2.0 * t.spacing.xs + 2.0
+}
+
+/// Whether the menu of `height` opens above the import button at `button`: when the dialog's
+/// body (`body`, its visible part) has no room for it below the button and has room above.
+fn opens_above(button: Bounds<Pixels>, body: Option<Bounds<Pixels>>, height: f32) -> bool {
+    let Some(body) = body.filter(|b| b.size.height > px(0.0)) else {
+        return false;
+    };
+    let below = f32::from(body.bottom()) - f32::from(button.bottom()) - MENU_GAP_PX;
+    let above = f32::from(button.top()) - f32::from(body.top()) - MENU_GAP_PX;
+    below < height && above >= height
+}
+
 /// The database end of the route: `host:port` (the engine's default port when none is typed).
 fn database_stop(p: &Profile) -> String {
     let default_port = || {
@@ -2778,7 +2843,8 @@ fn database_stop(p: &Profile) -> String {
     }
 }
 
-// ## m2b-t24-shots: shots fixtures (R28, P19; T20 review M4).
+// ## m2b-t24-shots: shots fixtures (R28, P19; T20 review M4). Fix round 1 (I2): each lands
+// with its subject in view at the 960x600 minimum: the body follows the focus.
 #[cfg(feature = "shots")]
 mod shots {
     use hacivat_net::ssh::SshAuth;
@@ -2789,14 +2855,21 @@ mod shots {
     use super::*;
     use crate::connections::prompt_kit::shots::{hop, key_file, save_profile};
 
-    /// The New dialog with the SSH section open and its tunnel off.
+    /// The section of the dialog open in `window`, made now if the dialog has not drawn yet.
+    fn section_of(window: &mut Window, cx: &mut App) -> Option<Entity<SshSection>> {
+        let dialog = open_dialog(window, cx)?;
+        let seed = Seed::of(&dialog.read(cx).draft);
+        Some(state_for(&dialog, || seed, window, cx))
+    }
+
+    /// The New dialog with the SSH section open (tunnel off) and focused: the body shows it.
     fn new_dialog_open(window: &mut Window, cx: &mut App) -> Option<Entity<SshSection>> {
         ensure_connections(cx);
         open_connection_dialog(DialogMode::New, window, cx);
-        let dialog = open_dialog(window, cx)?;
-        let seed = Seed::of(&dialog.read(cx).draft);
-        let state = state_for(&dialog, || seed, window, cx);
+        let state = section_of(window, cx)?;
         state.update(cx, |s, cx| s.set_open(true, cx));
+        let root = state.read(cx).focus.root.clone();
+        window.focus(&root, cx);
         Some(state)
     }
 
@@ -2818,6 +2891,20 @@ mod shots {
             )],
         );
         open_edit(id, DialogFocus::Default, window, cx);
+        if let Some(state) = section_of(window, cx) {
+            let root = state.read(cx).focus.root.clone();
+            window.focus(&root, cx);
+        }
+    }
+
+    /// `open_with_ssh` (the SSH host focused), then the host-key policy focused: the route
+    /// above it and the rows before it in view.
+    fn open_tunnel(id: hacivat_proto::ProfileId, window: &mut Window, cx: &mut App) {
+        open_with_ssh(id, window, cx);
+        if let Some(state) = section_of(window, cx) {
+            let policy = state.read(cx).host_keys.read(cx).focus_handle(cx);
+            window.focus(&policy, cx);
+        }
     }
 
     /// A single hop signing in with a key file (the key row, the route, the host keys).
@@ -2832,11 +2919,11 @@ mod shots {
                 SshAuth::KeyFile { path: key_file() },
             )],
         );
-        open_with_ssh(id, window, cx);
+        open_tunnel(id, window, cx);
     }
 
-    /// Two jump hosts in front of a bastion that asks keyboard-interactive (the note, the jump
-    /// rows, a route that wraps).
+    /// Two jump hosts in front of a bastion that asks keyboard-interactive (the jump rows, a
+    /// route that wraps, the host keys).
     pub fn jumps_fixture(window: &mut Window, cx: &mut App) {
         ensure_connections(cx);
         let id = save_profile(
@@ -2849,14 +2936,14 @@ mod shots {
                 hop("bastion.acme.io", SshAuth::KeyboardInteractive),
             ],
         );
-        open_with_ssh(id, window, cx);
+        open_tunnel(id, window, cx);
     }
 
-    /// The import menu over the open section, reading the config [`SshImportEnv`] names (the
-    /// harness writes it). The menu opens once the core runtime has read the file.
+    /// The import menu under its button, reading the config [`SshImportEnv`] names (the
+    /// harness writes it). As a click does: the button takes the focus (the body scrolls to
+    /// it), then the menu opens once the core runtime has read the file.
     pub fn import_fixture(window: &mut Window, cx: &mut App) {
         if let Some(state) = new_dialog_open(window, cx) {
-            // As a click does: the button has the focus (the body keeps it in view) first.
             let import = state.read(cx).focus.import.clone();
             window.focus(&import, cx);
             state.update(cx, |s, cx| s.open_import(window, cx));
@@ -3010,5 +3097,30 @@ mod tests {
             Path::new("~").join(".ssh/id_ed25519").to_string_lossy()
         );
         assert_eq!(home_relative(Path::new("/keys/k"), home), "/keys/k");
+    }
+}
+
+// ## m2b-t24-shots (fix round 1, M8)
+#[cfg(test)]
+mod import_menu_tests {
+    use hacivat_ui_core::gpui_surface::{Bounds, point, px, size};
+
+    use super::opens_above;
+
+    fn at(top: f32, height: f32) -> Bounds<hacivat_ui_core::gpui_surface::Pixels> {
+        Bounds::new(point(px(600.0), px(top)), size(px(200.0), px(height)))
+    }
+
+    #[test]
+    fn the_menu_opens_above_only_when_the_body_has_no_room_below() {
+        let body = Some(at(100.0, 500.0)); // 100..600
+        // Room below (button 200..226; 130 px fits under it).
+        assert!(!opens_above(at(200.0, 26.0), body, 130.0));
+        // No room below, room above: above.
+        assert!(opens_above(at(520.0, 26.0), body, 130.0));
+        // No room either way: below (the window may still hold it).
+        assert!(!opens_above(at(150.0, 400.0), body, 130.0));
+        // Before the body is laid out: below.
+        assert!(!opens_above(at(520.0, 26.0), None, 130.0));
     }
 }

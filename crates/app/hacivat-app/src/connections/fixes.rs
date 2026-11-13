@@ -147,6 +147,9 @@ pub fn fix_actions(error: &ConnectError, rejections: u8, with_edit: bool) -> Vec
             FixId::ReviewHostKey if with_edit && error.host_key.is_some() => {
                 out.push(FixAction::ReviewHostKey);
             }
+            // ## m2b-t24-shots (fix round 1, I4): the connection's SSH section, from the error
+            // dialog (`open_with_ssh`) and inline (the dialog's own section).
+            FixId::ConnectThroughSsh => out.push(FixAction::ConnectThroughSsh),
             // M2b flows of other tasks (SSH), M2a's retired `EncryptWithoutVerifying` (B6) and
             // the edit button inline.
             _ => {}
@@ -164,8 +167,6 @@ pub fn fix_buttons(actions: &[FixAction], cx: &App) -> Vec<FixButton> {
     let mut primary_taken = false;
     actions
         .iter()
-        // ## m2b-t01-interfaces: no label yet (their owners add them).
-        .filter(|action| !matches!(action, FixAction::ConnectThroughSsh))
         .map(|action| {
             let (id, label): (SharedString, SharedString) = match action {
                 FixAction::EditConnection => {
@@ -212,8 +213,10 @@ pub fn fix_buttons(actions: &[FixAction], cx: &App) -> Vec<FixButton> {
                     "fix-review-host-key".into(),
                     tr(cx, ids::hv::CONN_FIX_REVIEW_HOST_KEY, NoArgs),
                 ),
-                // Filtered out above until their owners add the labels.
-                FixAction::ConnectThroughSsh => (SharedString::default(), SharedString::default()),
+                // ## m2b-t24-shots (fix round 1, I4): the M2a NOTES `fix-ssh`.
+                FixAction::ConnectThroughSsh => {
+                    ("fix-ssh".into(), tr(cx, ids::hv::CONN_FIX_SSH, NoArgs))
+                }
             };
             let kind = match action {
                 FixAction::ConnectAnyway => ButtonKind::Ghost,

@@ -87,6 +87,8 @@ const ICONS: &[(&str, &[u8])] = lucide![
     // ## m2b-t24-shots: the M2b connection icons (`key-round` is above).
     "file-up",
     "arrow-right",
+    // ## m2b-t24-shots (fix round 1): Pin and Replace pin (NOTES M2b surface 5).
+    "fingerprint",
 ];
 const HV_MARK: &[u8] = include_bytes!("../assets/icons/hacivat/hv-mark.svg");
 

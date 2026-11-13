@@ -270,6 +270,10 @@ pub struct ConnectionDialog {
     /// Changes `apply_changes` saved for this profile while a save of the dialog was in flight,
     /// with the endpoint they were made for: the save carries them too (review I1).
     absorbed_while_saving: Vec<(ProfileEndpoint, ProfileChange)>,
+    // ## m2b-t24-shots (fix round 1, I2)
+    /// The body's scroll, which follows the focus: "Use an SSH tunnel…", the SSH fix and Tab
+    /// land on controls below the fold at the minimum window.
+    pub(crate) follow: hacivat_ui::follow::FollowFocus,
 }
 
 // ## m2a-dialog-retries
@@ -681,6 +685,7 @@ impl ConnectionDialog {
             test_ca_imports: Vec::new(),
             pending_approval: None,
             absorbed_while_saving: Vec::new(),
+            follow: hacivat_ui::follow::FollowFocus::new(),
         };
         if dialog.draft.profile.tls.allow_public_plaintext {
             dialog.consent_endpoint = Some(dialog.draft.profile.endpoint.clone());
@@ -1605,9 +1610,14 @@ impl ConnectionDialog {
                     });
                 });
             }
-            // ## m2b-t01-interfaces: the dialog's SSH flows belong to Tasks 20 and 21; the test
-            // strip never offers them before that.
-            FixAction::ConnectThroughSsh | FixAction::ReviewHostKey => {}
+            // ## m2b-t24-shots (fix round 1, I4): in the dialog, "Connect through SSH…" opens
+            // its own SSH section with the tunnel on and the SSH host focused.
+            FixAction::ConnectThroughSsh => {
+                let me = cx.entity();
+                window.defer(cx, move |window, cx| ssh::show_tunnel_in(&me, window, cx));
+            }
+            // ## m2b-t01-interfaces: the host-key review belongs to Task 21's error dialog.
+            FixAction::ReviewHostKey => {}
         }
     }
 

@@ -15,7 +15,9 @@
 //! overrides the output directory.
 //!
 //! Every surface must show in its frame: a label drawn by its own source file (palette, dialog,
-//! toast, menu, settings page; the title bar for the shells, the capsule for the demo).
+//! toast, menu, settings page; the title bar for the shells, the capsule for the demo), and
+//! visible: inside the window and its scroll viewport (Task 24 fix round 1). The SSH section's
+//! surfaces name labels only that section draws, and their route and jump rows must show too.
 //!
 //! The M2a surfaces (Task 21) render the connection flow through `ConnectionsBoot::for_tests`
 //! with a `FakeDriver` registry and a memory secret store, from the fixtures Tasks 9, 17, 18 and
@@ -35,6 +37,8 @@
 //! - (d) the One Filled Badge rule holds inside the title-bar capsule, expecting production
 //!   only where the capsule shows it, and no badge-sized `cp_fill` quad sits anywhere else (the
 //!   7 px production marks of dialogs and the explorer are not badges; T21 ruling);
+//! - (f) (Task 24 fix round 1) no label runs past a side of the dialog card it is drawn in
+//!   (`RenderedText::outside_card`): a card's own clip is the window, so (b) cannot see it;
 //! - (e) (Task 22 fix round 2) the title bar's layout, read from `TitleBarProbe`: the trailing
 //!   controls (EN/TR, theme, window controls) lie wholly inside the window and end at the
 //!   bar's right padding, the palette field is at least `PALETTE_MIN_PX` wide and ends before
@@ -165,9 +169,11 @@ enum Surface {
     ErrSshAgent,
     ErrHostKeyChanged,
     ErrHostKeyRevoked,
+    // ## m2b-t24-shots (fix round 1, M7)
+    ErrHostKeyUnknown,
 }
 
-const SURFACES: [Surface; 73] = [
+const SURFACES: [Surface; 74] = [
     Surface::Shell,
     Surface::ShellDemoProduction,
     Surface::ShellNarrow,
@@ -244,6 +250,7 @@ const SURFACES: [Surface; 73] = [
     Surface::ErrSshAgent,
     Surface::ErrHostKeyChanged,
     Surface::ErrHostKeyRevoked,
+    Surface::ErrHostKeyUnknown,
 ];
 // ## m2b-t24-shots
 /// Where Task 24's surfaces start in [`SURFACES`].
@@ -330,6 +337,7 @@ impl Surface {
             Surface::ErrSshAgent => "conn-error-ssh-agent",
             Surface::ErrHostKeyChanged => "conn-error-host-key-changed",
             Surface::ErrHostKeyRevoked => "conn-error-host-key-revoked",
+            Surface::ErrHostKeyUnknown => "conn-error-host-key-unknown",
         }
     }
 
@@ -485,12 +493,12 @@ impl Surface {
                 ("hacivat-app/src/connections/plaintext_prompt.rs:", None)
             }
             Surface::ConnDialogTlsPinned => ("hacivat-app/src/connections/dialog/", None),
-            // Off draws only the checkbox and Import inside the section.
-            Surface::SshSectionOff => ("hacivat-ui/src/checkbox.rs:", None),
-            Surface::SshSectionHop | Surface::SshSectionJumps => {
-                ("hacivat-app/src/connections/dialog/ssh.rs:", None)
-            }
-            Surface::SshSectionFolded => ("hacivat-ui/src/disclosure.rs:", None),
+            // Fix round 1 (I2): labels only the SSH section draws (the tunnel's checkbox, the
+            // folded summary, the route's stops), which must also be visible.
+            Surface::SshSectionOff => ("#checkbox-label-ssh-use", None),
+            Surface::SshSectionFolded => ("#disclosure-summary-conn-ssh", None),
+            Surface::SshSectionHop => ("#ssh-route-1", None),
+            Surface::SshSectionJumps => ("#ssh-route-3", None),
             // An alias of the fixture config, drawn by the open menu's row label.
             Surface::SshImportMenu => ("hacivat-ui/src/button.rs:", Some("bastion")),
             Surface::HostKeyNew | Surface::HostKeyChanged | Surface::HostKeyChangedOpenSsh => {
@@ -515,17 +523,46 @@ impl Surface {
             | Surface::ErrSshChannel
             | Surface::ErrSshAgent
             | Surface::ErrHostKeyChanged
-            | Surface::ErrHostKeyRevoked => ("hacivat-app/src/connections/error_view.rs:", None),
+            | Surface::ErrHostKeyRevoked
+            | Surface::ErrHostKeyUnknown => ("hacivat-app/src/connections/error_view.rs:", None),
         }
     }
 
-    /// A violation when the frame shows no label of this surface.
+    // ## m2b-t24-shots (fix round 1, I2)
+    /// Labels (`#id`) that must be visible too: the rows a surface is about.
+    fn also_shown(self) -> &'static [&'static str] {
+        match self {
+            // The whole route: this computer, the bastion, the database.
+            Surface::SshSectionHop => &["#ssh-route-0", "#ssh-route-2"],
+            // Both jump rows and the route's end.
+            Surface::SshSectionJumps => &["#ssh-jump-index-0", "#ssh-jump-index-1", "#ssh-route-4"],
+            // The menu's title row.
+            Surface::SshImportMenu => &["#popup-menu-title"],
+            _ => &[],
+        }
+    }
+
+    /// A violation when the frame shows no visible label of this surface (fix round 1: a label
+    /// scrolled out of its viewport, or laid out below the window, does not count), or does not
+    /// show one of [`Surface::also_shown`].
     fn missing_from(self, name: &str, frame: &[RenderedText]) -> Option<String> {
         let (file, text) = self.marker();
-        let shown = frame
+        let shown = frame.iter().any(|r| {
+            r.visible && r.path.contains(file) && text.is_none_or(|t| strip(&r.text) == t)
+        });
+        if !shown {
+            return Some(format!(
+                "{name}: the surface is missing: no visible label from {file} {text:?}"
+            ));
+        }
+        let hidden: Vec<&str> = self
+            .also_shown()
             .iter()
-            .any(|r| r.path.contains(file) && text.is_none_or(|t| strip(&r.text) == t));
-        (!shown).then(|| format!("{name}: the surface is missing: no label from {file} {text:?}"))
+            .filter(|id| !frame.iter().any(|r| r.visible && r.path.ends_with(**id)))
+            .copied()
+            .collect();
+        (!hidden.is_empty())
+            .then(|| format!("{name}: the surface is missing: {hidden:?} not visible"))
     }
 
     /// Brings the surface on screen in a freshly started shell.
@@ -629,6 +666,7 @@ fn open_m2a(surface: Surface, window: &mut Window, cx: &mut App) {
         Surface::ErrSshAgent => error_view::ssh_agent_fixture(window, cx),
         Surface::ErrHostKeyChanged => error_view::host_key_changed_fixture(window, cx),
         Surface::ErrHostKeyRevoked => error_view::host_key_revoked_fixture(window, cx),
+        Surface::ErrHostKeyUnknown => error_view::host_key_unknown_fixture(window, cx),
         // The widget owns no copy: the app's strings (the Copy as URL toast, the keyring
         // fallback as a long bullet that wraps, the toast's own Dismiss).
         Surface::ToastStickyDemo => hacivat_ui::toast::sticky_demo_fixture(
@@ -804,14 +842,13 @@ fn strip(s: &str) -> String {
 fn check_labels(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String> {
     let mut out = Vec::new();
     // ## m2b-t24-shots
-    let split = split_sites(frame);
-    for r in frame {
+    let split = split_pieces(frame);
+    for (i, r) in frame.iter().enumerate() {
         let text = strip(&r.text);
         if PSEUDO.contains(&locale)
             && r.source == TextSource::Fluent
-            && !text.is_empty()
             && !bracketed(&text)
-            && !split.contains(r.path.as_ref())
+            && !split.contains(&i)
         {
             out.push(format!(
                 "{name}: (a) Fluent label not bracketed: {:?} at {}",
@@ -830,6 +867,13 @@ fn check_labels(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String>
                 r.size_px, text, r.path
             ));
         }
+        // ## m2b-t24-shots (fix round 1, I1)
+        if r.outside_card {
+            out.push(format!(
+                "{name}: (f) runs past its dialog card: {:?} at {}",
+                text, r.path
+            ));
+        }
     }
     out
 }
@@ -839,26 +883,49 @@ fn bracketed(text: &str) -> bool {
     text.starts_with('[') && text.ends_with(']')
 }
 
-/// (a)'s two exceptions (Task 24): an empty label shows nothing to localize (a field without a
-/// placeholder), and one Fluent message may be drawn in pieces from one site (around a mono
-/// literal: "Type `reset` to confirm"). A site is such a split message when it drew two or more
-/// pieces, none bracketed on its own, whose concatenation in frame order is bracketed; its
-/// pieces pass. A site that draws whole messages (a list) still has each one checked.
-fn split_sites(frame: &[RenderedText]) -> std::collections::BTreeSet<String> {
-    let mut sites: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-    for r in frame {
-        let text = strip(&r.text);
-        if r.source == TextSource::Fluent && !text.is_empty() {
-            sites.entry(r.path.to_string()).or_default().push(text);
+/// (a)'s one exception (Task 24; fix round 1, M2): a Fluent message drawn in pieces around a
+/// literal ("Type `reset` to confirm", the word in mono). In frame order: a Fluent piece that
+/// opens the bracket, then, alternately, one data piece and a Fluent piece from the first
+/// piece's site, up to the piece that closes the bracket; no piece is bracketed on its own.
+/// Returns the frame indices of those pieces; anything else is checked label by label.
+fn split_pieces(frame: &[RenderedText]) -> std::collections::BTreeSet<usize> {
+    let fluent = |r: &RenderedText| r.source == TextSource::Fluent;
+    let mut pieces = std::collections::BTreeSet::new();
+    let mut i = 0;
+    while i < frame.len() {
+        let first = strip(&frame[i].text);
+        if !(fluent(&frame[i]) && first.starts_with('[') && !first.ends_with(']')) {
+            i += 1;
+            continue;
+        }
+        let mut run = vec![i];
+        let mut at = i;
+        let closed = loop {
+            let (Some(literal), Some(next)) = (frame.get(at + 1), frame.get(at + 2)) else {
+                break false;
+            };
+            let piece = strip(&next.text);
+            if fluent(literal)
+                || !fluent(next)
+                || next.path != frame[i].path
+                || piece.starts_with('[')
+            {
+                break false;
+            }
+            run.push(at + 2);
+            at += 2;
+            if piece.ends_with(']') {
+                break true;
+            }
+        };
+        if closed {
+            pieces.extend(run);
+            i = at + 1;
+        } else {
+            i += 1;
         }
     }
-    sites
-        .into_iter()
-        .filter(|(_, pieces)| {
-            pieces.len() > 1 && pieces.iter().all(|p| !bracketed(p)) && bracketed(&pieces.concat())
-        })
-        .map(|(site, _)| site)
-        .collect()
+    pieces
 }
 
 // ## m2b-t22-live (fix round 2, R1-I1)
@@ -1054,6 +1121,13 @@ const TEARDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 /// scheduler's locks in the other order (a lock-order inversion in the GPUI fork's
 /// `TestScheduler`). Stopping the runtime here first, outside that block and with room to
 /// finish, leaves no worker to race the teardown; the quit handler's own stop is then a no-op.
+///
+/// Residual (fix round 1, M1): the inversion is in the fork's test scheduler, not in this
+/// harness, so a `TestAppContext` test that quits for real while core workers still run (the
+/// quit tests of `connections_live.rs`: `quit_closes_every_connection`,
+/// `quit_during_connect_cancels_within_budget`, `quit_drains_queued_profile_writes`) can hit
+/// the same deadlock intermittently. Shipped code is not affected: production runs GPUI's
+/// platform scheduler.
 fn stop_core_runtime(cx: &mut HeadlessAppContext) {
     cx.update(|cx| {
         if let Some(m) = cx.try_global::<ConnectionsModel>() {
@@ -1111,12 +1185,12 @@ fn render_all_surfaces(names: &[String], all: bool) {
 fn the_matrix_covers_every_surface_locale_and_theme() {
     let all = shots();
     // M1: 8 surfaces x 8 + 4 VF; M2a: 26 surfaces x 8 + the 4 dialog surfaces again at 1024x700;
-    // M2b T22: 10 surfaces x 8 at 1280x800 and again at 960x600; M2b T24: 29 surfaces likewise.
+    // M2b T22: 10 surfaces x 8 at 1280x800 and again at 960x600; M2b T24: 30 surfaces likewise.
     assert_eq!(
         all.len(),
-        8 * 4 * 2 + 4 + 26 * 8 + 4 * 8 + 10 * 8 * 2 + 29 * 8 * 2
+        8 * 4 * 2 + 4 + 26 * 8 + 4 * 8 + 10 * 8 * 2 + 30 * 8 * 2
     );
-    assert_eq!(all.len(), 932);
+    assert_eq!(all.len(), 948);
     let names: Vec<String> = all.iter().map(|s| s.file_name(2.0)).collect();
     // ## m2b-t24-shots: every T24 surface at both sizes, in every locale and theme.
     for surface in &SURFACES[FIRST_T24..] {
@@ -1152,6 +1226,8 @@ fn pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px() {
         clipped,
         truncated: false,
         path: "x.rs:1:1".into(),
+        visible: true,
+        outside_card: false,
     };
     let frame = [
         label("[Ŝéåŕçĥ]", TextSource::Fluent, 13.0, false),
@@ -1168,31 +1244,62 @@ fn pseudo_labels_must_be_bracketed_and_unclipped_and_at_least_11_px() {
     assert!(found[2].contains("(c) 10.5 px"));
     // Outside the pseudo locales an unbracketed Fluent label is fine.
     assert!(check_labels("s", "tr", &frame[3..4]).is_empty());
-    // ## m2b-t24-shots: an empty label passes; a message split around a literal passes as a
-    // whole, never a site whose pieces are whole messages or never close the bracket.
+    // ## m2b-t24-shots (fix round 1, M2): an empty Fluent label is a violation again (a field
+    // with no placeholder draws none). A message split around a literal passes as a whole only
+    // when its pieces are adjacent, a data piece between each pair, and close the bracket.
     let at = |text: &str, path: &str| RenderedText {
         path: path.to_string().into(),
         ..label(text, TextSource::Fluent, 13.0, false)
     };
-    assert!(check_labels("s", "en-XA", &[at("", "x.rs:1:1")]).is_empty());
+    let word = |text: &str| RenderedText {
+        path: "v.rs:9:20#word".into(),
+        ..label(text, TextSource::Data, 11.5, false)
+    };
+    assert_eq!(check_labels("s", "en-XA", &[at("", "x.rs:1:1")]).len(), 1);
     let split = [
         at("[Ŧẏƥḗ ", "v.rs:9:9"),
-        RenderedText {
-            path: "v.rs:9:9#word".into(),
-            ..label("reset", TextSource::Data, 11.5, false)
-        },
+        word("reset"),
         at(" ŧö çöƞƒıřḿ]", "v.rs:9:9"),
     ];
     assert!(check_labels("s", "en-XA", &split).is_empty());
-    let broken = [at("[Ŧẏƥḗ ", "v.rs:9:9"), at(" ŧö çöƞƒıřḿ", "v.rs:9:9")];
-    assert_eq!(check_labels("s", "en-XA", &broken).len(), 2);
-    let list = [
-        at("[a]", "l.rs:1:1"),
-        at("b", "l.rs:1:1"),
-        at("[c]", "l.rs:1:1"),
+    // Two literals in one message.
+    let two = [
+        at("[Ŧẏƥḗ ", "v.rs:9:9"),
+        word("a"),
+        at(" öř ", "v.rs:9:9"),
+        word("b"),
+        at(" ŧö çöƞƒıřḿ]", "v.rs:9:9"),
     ];
-    let found = check_labels("s", "en-XA", &list);
-    assert!(found.len() == 1 && found[0].contains("\"b\""), "{found:?}");
+    assert!(check_labels("s", "en-XA", &two).is_empty());
+    // Not adjacent around a literal, not closed, or not one site: each piece is checked.
+    let no_literal = [at("[Ŧẏƥḗ ", "v.rs:9:9"), at(" ŧö çöƞƒıřḿ]", "v.rs:9:9")];
+    assert_eq!(check_labels("s", "en-XA", &no_literal).len(), 2);
+    let apart = [
+        at("[Ŧẏƥḗ ", "v.rs:9:9"),
+        word("reset"),
+        label("[Ŝéåŕçĥ]", TextSource::Fluent, 13.0, false),
+        at(" ŧö çöƞƒıřḿ]", "v.rs:9:9"),
+    ];
+    assert_eq!(check_labels("s", "en-XA", &apart).len(), 2);
+    let open = [
+        at("[Ŧẏƥḗ ", "v.rs:9:9"),
+        word("reset"),
+        at(" ŧö çöƞƒıřḿ", "v.rs:9:9"),
+    ];
+    assert_eq!(check_labels("s", "en-XA", &open).len(), 2);
+    let elsewhere = [
+        at("[Ŧẏƥḗ ", "v.rs:9:9"),
+        word("reset"),
+        at(" ŧö çöƞƒıřḿ]", "w.rs:1:1"),
+    ];
+    assert_eq!(check_labels("s", "en-XA", &elsewhere).len(), 2);
+    // (f) A label that runs past its dialog card, in any locale.
+    let past = RenderedText {
+        outside_card: true,
+        ..label("Applies to every hop", TextSource::Fluent, 12.0, false)
+    };
+    let found = check_labels("s", "en", &[past]);
+    assert!(found.len() == 1 && found[0].contains("(f)"), "{found:?}");
 }
 
 /// The ignored test: it renders, so it runs only on request.
@@ -1405,6 +1512,8 @@ fn a_missing_surface_fails_its_frame() {
         clipped: false,
         truncated: false,
         path: path.to_string().into(),
+        visible: true,
+        outside_card: false,
     };
     let shell = [at(
         "crates/ui/hacivat-ui/src/titlebar.rs:297:25#palette-placeholder",
@@ -1434,11 +1543,57 @@ fn a_missing_surface_fails_its_frame() {
     ] {
         assert!(surface.missing_from("s", &shell).is_some(), "{surface:?}");
     }
+    // ## m2b-t24-shots (fix round 1, I2): a marker that is not visible (scrolled out, below the
+    // window) does not count, and the SSH rows a surface is about must show too.
+    let route = |k: usize, visible: bool| RenderedText {
+        visible,
+        ..at(
+            &format!("crates/app/hacivat-app/src/connections/dialog/ssh.rs:2760:21#ssh-route-{k}"),
+            "x",
+        )
+    };
+    let hop = [route(0, true), route(1, true), route(2, true)];
+    assert!(Surface::SshSectionHop.missing_from("s", &hop).is_none());
+    let scrolled_out = [route(0, true), route(1, false), route(2, true)];
+    let found = Surface::SshSectionHop
+        .missing_from("s", &scrolled_out)
+        .expect("an off-screen marker does not count");
+    assert!(found.contains("no visible label"), "{found}");
+    let cut_route = [route(0, true), route(1, true), route(2, false)];
+    let found = Surface::SshSectionHop
+        .missing_from("s", &cut_route)
+        .expect("the whole route must show");
+    assert!(found.contains("#ssh-route-2"), "{found}");
+    // A Read-only checkbox or the TLS disclosure never stands in for the SSH section.
+    let others = [
+        at(
+            "crates/ui/hacivat-ui/src/checkbox.rs:150:17#checkbox-label-read-only",
+            "Read-only",
+        ),
+        at(
+            "crates/ui/hacivat-ui/src/disclosure.rs:160:21#disclosure-summary-conn-tls",
+            "Auto",
+        ),
+    ];
+    assert!(Surface::SshSectionOff.missing_from("s", &others).is_some());
+    assert!(
+        Surface::SshSectionFolded
+            .missing_from("s", &others)
+            .is_some()
+    );
     // ## m2b-t24-shots: so does every T24 surface; the import menu needs its alias drawn.
     for surface in &SURFACES[FIRST_T24..] {
         assert!(surface.missing_from("s", &shell).is_some(), "{surface:?}");
     }
-    let menu = |text| [at("crates/ui/hacivat-ui/src/button.rs:240:21", text)];
+    let menu = |text| {
+        [
+            at("crates/ui/hacivat-ui/src/button.rs:240:21", text),
+            at(
+                "crates/ui/hacivat-ui/src/menu.rs:560:21#popup-menu-title",
+                "Hosts",
+            ),
+        ]
+    };
     assert!(
         Surface::SshImportMenu
             .missing_from("s", &menu("No hosts in ~/.ssh/config"))
@@ -1473,7 +1628,7 @@ fn the_command_line_reads_like_libtest() {
     let all: Vec<String> = shots().iter().map(|s| s.file_name(2.0)).collect();
     // No filter: everything; the render is ignored unless asked for.
     let cli = parse("--nocapture --test-threads 1");
-    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(932));
+    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(948));
     assert!(!cli.runs_ignored());
     // nextest: `--list --format terse --ignored` lists only the render.
     let cli = parse("--list --format terse --ignored");
@@ -1487,7 +1642,7 @@ fn the_command_line_reads_like_libtest() {
     );
     assert_eq!(
         parse("--ignored render_all").shots(&all).map(|s| s.len()),
-        Some(932)
+        Some(948)
     );
     // A dialog surface renders at both sizes.
     assert_eq!(

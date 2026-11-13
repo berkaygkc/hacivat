@@ -1310,3 +1310,16 @@ hv-conn-plain-remember = Bu bağlantı için bir daha sorma
 
 # Review: PO
 hv-conn-ro-warn-non-transactional-write = Etkileri ROLLBACK ile geri alınamayan fonksiyonlar çalıştırabilir.
+
+## m2b-t24-shots
+
+# Review: PO
+hv-conn-enc-pinned = { $version } · sabitlendi
+# Review: PO
+hv-conn-diag-tls-pinned = TLS { $version } · sabitlendi
+# Review: PO
+hv-conn-diag-tls-nov-pinned = TLS · sabitlendi
+# Review: PO
+hv-conn-fix-ssh = SSH üzerinden bağlan…
+# Review: PO
+hv-conn-secret-vault = kasa · kalıcı

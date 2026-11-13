@@ -263,6 +263,9 @@ impl Render for Select {
             .id("select-field")
             .debug_selector(|| "select-field".to_string())
             .track_focus(&self.focus)
+            // ## m2b-t24-shots (fix round 1, I2): a following scroll container keeps it in view.
+            .relative()
+            .child(crate::follow::focus_probe(self.focus.clone()))
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(
                 MouseButton::Left,

@@ -109,9 +109,12 @@ impl Disclosure {
         };
         let selector = format!("disclosure-{id}");
         let mut row = div()
-            .id(id)
+            .id(id.clone())
             .debug_selector(move || selector)
             .track_focus(&handle)
+            // ## m2b-t24-shots (fix round 1, I2): a following scroll container keeps it in view.
+            .relative()
+            .child(crate::follow::focus_probe(handle.clone()))
             .flex()
             .flex_row()
             .items_center()
@@ -160,7 +163,10 @@ impl Disclosure {
                         t.type_ramp.body_sm,
                         c.text_2.to_hsla(),
                     )
-                    .truncate(true),
+                    .truncate(true)
+                    // ## m2b-t24-shots (fix round 1, I2): the summary's ID, for the shots'
+                    // surface markers.
+                    .id(SharedString::from(format!("disclosure-summary-{id}"))),
                 ),
             );
         }

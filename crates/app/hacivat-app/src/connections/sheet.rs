@@ -79,12 +79,24 @@ pub fn build(_window: &mut Window, cx: &mut App) -> AnyView {
     .into()
 }
 
+// ## m2b-t24-shots (fix round 1)
+/// Whether `Forever` secrets go to Hacivat's vault: the backend's probe chose it (read, never
+/// probed here).
+fn keeps_in_vault(cx: &App) -> bool {
+    cx.try_global::<ConnectionsModel>().is_some_and(|m| {
+        m.secrets().backend_choice() == Some(hacivat_secrets::BackendChoice::Vault)
+    })
+}
+
 /// Where the password comes from (`secret-*`).
 fn secret_label(cx: &App, p: &Profile) -> SharedString {
     let id = match p.auth {
         AuthProviderId::PgPass => ids::hv::CONN_SECRET_PGPASS,
         AuthProviderId::None | AuthProviderId::ClientCert => ids::hv::CONN_SECRET_NONE,
         AuthProviderId::Password => match p.retention {
+            // ## m2b-t24-shots (fix round 1): Forever on a machine without a keyring is the
+            // vault (NOTES M2b `vault-secret`).
+            Retention::Forever if keeps_in_vault(cx) => ids::hv::CONN_SECRET_VAULT,
             Retention::Forever => ids::hv::CONN_SECRET_FOREVER,
             Retention::ForSession => ids::hv::CONN_SECRET_SESSION,
             Retention::UntilRestart => ids::hv::CONN_SECRET_RESTART,

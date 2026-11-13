@@ -8,4 +8,4 @@ The M2a connection icons, from the same package with the same modifications: `lo
 
 ## m2b-t24-shots
 
-The M2b icons, from the same package with the same modifications: `file-up` and `arrow-right`. M2b also draws the already bundled `key-round`.
+The M2b icons, from the same package with the same modifications: `file-up`, `arrow-right` and `fingerprint` (fix round 1). M2b also draws the already bundled `key-round`.

@@ -408,6 +408,10 @@ impl Button {
         // ## m2b-t24-shots: a popup trigger says whether its popup is open.
         let mut decl = A11yDecl::new(Role::Button, label.clone());
         decl.expanded = expanded;
+        // ## m2b-t24-shots (fix round 1, I2): a following scroll container keeps it in view.
+        let body = body
+            .relative()
+            .child(crate::follow::focus_probe(handle.clone()));
         let mut body = focus_outline(body.track_focus(&handle).tab_stop(true), &theme, focused)
             .declare_full(decl)
             .cursor_pointer()

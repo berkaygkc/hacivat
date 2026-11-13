@@ -272,13 +272,25 @@ fn tls_text(f: &Fmt, tls: Option<&TlsSummary>, file: bool) -> String {
         return f.t(ids::hv::CONN_DIAG_TLS_NONE, NoArgs);
     };
     use ids::hv::{HvConnDiagTlsNovState as N, HvConnDiagTlsVState as V};
+    let version = tls.version.as_deref().map(tls_version_number);
+    // ## m2b-t24-shots (fix round 1, I3): a pinned certificate says so (M2a NOTES `enc-pinned`).
+    if tls.verified == TlsVerified::Pinned {
+        return match version {
+            Some(version) if !version.is_empty() => f.t(
+                ids::hv::CONN_DIAG_TLS_PINNED,
+                ids::hv::HvConnDiagTlsPinned {
+                    version: Text(version.to_string()),
+                },
+            ),
+            _ => f.t(ids::hv::CONN_DIAG_TLS_NOV_PINNED, NoArgs),
+        };
+    }
     let (v, n) = match tls.verified {
-        // ## m2b-t01-interfaces: a pinned certificate reads as verified until Task 19's state.
         TlsVerified::Full | TlsVerified::Pinned => (V::Full, N::Full),
         TlsVerified::CaOnly => (V::CaOnly, N::CaOnly),
         TlsVerified::No => (V::No, N::No),
     };
-    match tls.version.as_deref().map(tls_version_number) {
+    match version {
         Some(version) if !version.is_empty() => f.t(
             ids::hv::CONN_DIAG_TLS_V,
             ids::hv::HvConnDiagTlsV {

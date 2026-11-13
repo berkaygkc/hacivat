@@ -23,7 +23,7 @@ use hacivat_session::profile::{Profile, ProfileEndpoint, TransportSpec, suggest_
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::capsule::{EnvKind, env_swatch_on_raised};
 use hacivat_ui::checkbox::Checkbox;
-use hacivat_ui::dialog::{DialogSize, form_dialog};
+use hacivat_ui::dialog::{DialogSize, form_dialog_following};
 use hacivat_ui::disclosure::Disclosure;
 use hacivat_ui::form::{FORM_LABEL_PX, form_row, hint_row};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
@@ -785,12 +785,14 @@ impl ConnectionDialog {
         let header = self.render_header(title.clone(), &theme, cx);
         let body = self.render_body(&theme, window, cx);
         let footer = self.render_footer(&theme, cx);
-        let card = form_dialog(
+        // ## m2b-t24-shots (fix round 1, I2): the body follows the focus.
+        let card = form_dialog_following(
             &theme,
             header,
             body.into_any_element(),
             Some(self.strip.clone().into_any_element()),
             footer,
+            &self.follow,
         )
         .id("connection-dialog")
         .track_focus(&self.focus.root)
@@ -1346,7 +1348,14 @@ impl ConnectionDialog {
             // between TLS and Advanced (the mock's order; its checkbox turns the tunnel on).
             rows.push(
                 Kind::Disclosure,
-                super::ssh::section(&self.draft, window, cx),
+                // ## m2b-t24-shots (fix round 1, M8): with the body's visible part, where the
+                // import menu has to fit.
+                super::ssh::section(
+                    &self.draft,
+                    self.follow.scroll_handle().bounds(),
+                    window,
+                    cx,
+                ),
             );
             self.render_advanced(&mut rows, &p, theme, window, cx);
         }

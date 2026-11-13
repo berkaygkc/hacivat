@@ -244,6 +244,9 @@ pub(crate) fn paragraph(
                 painted_px: 0.0,
                 clipped: false,
                 truncated: false,
+                // ## m2b-t24-shots
+                visible: true,
+                outside_card: false,
                 path: format!(
                     "{}:{}:{}#{id}",
                     at.file().replace('\\', "/"),

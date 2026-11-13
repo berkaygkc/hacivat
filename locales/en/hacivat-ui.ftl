@@ -1368,3 +1368,20 @@ hv-conn-plain-remember = Don't ask again for this connection
 # the role may run a PostgreSQL function that writes something a rollback can't undo, such as
 # pg_logical_emit_message (RoleWarning::NonTransactionalWrite).
 hv-conn-ro-warn-non-transactional-write = It can run functions whose effects a rollback can't undo.
+
+## m2b-t24-shots
+
+# The Encryption value of a live connection whose certificate is pinned (M2a NOTES enc-pinned).
+# Variables:
+#   $version (String) - the TLS version the server negotiated, e.g. "TLS 1.3".
+hv-conn-enc-pinned = { $version } · pinned
+# The test report's encryption row for a pinned certificate.
+# Variables:
+#   $version (String) - the TLS version number, e.g. "1.3".
+hv-conn-diag-tls-pinned = TLS { $version } · pinned
+# The same row for a pinned certificate when the TLS version is unknown.
+hv-conn-diag-tls-nov-pinned = TLS · pinned
+# The quick fix of tls.not_supported_by_server: the connection's SSH section (M2a NOTES fix-ssh).
+hv-conn-fix-ssh = Connect through SSH…
+# The sheet's Password row when Forever passwords live in Hacivat's vault (NOTES M2b vault-secret).
+hv-conn-secret-vault = vault · forever

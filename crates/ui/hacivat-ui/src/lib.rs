@@ -10,6 +10,8 @@ pub mod choice_list;
 pub mod dialog;
 pub mod disclosure;
 pub mod explain;
+// ## m2b-t24-shots (fix round 1, I2): scroll containers that follow the focus.
+pub mod follow;
 pub mod form;
 pub mod icon;
 pub mod input;

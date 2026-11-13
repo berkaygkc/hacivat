@@ -558,12 +558,15 @@ impl Render for PopupMenu {
                 .debug_selector(|| "popup-menu-title".to_string())
                 .py(px(t.spacing.xs))
                 .px(px(t.spacing.lg))
-                .child(Label::new(
-                    title(cx),
-                    TextSource::Fluent,
-                    t.type_ramp.caption,
-                    c.text_2.to_hsla(),
-                ))
+                .child(
+                    Label::new(
+                        title(cx),
+                        TextSource::Fluent,
+                        t.type_ramp.caption,
+                        c.text_2.to_hsla(),
+                    )
+                    .id("popup-menu-title"),
+                )
         });
         menu.children(title).children(rows)
     }

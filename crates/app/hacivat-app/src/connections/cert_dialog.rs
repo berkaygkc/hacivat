@@ -987,6 +987,8 @@ impl CertDialog {
                         tr(cx, ids::hv::CONN_TLS_PIN_CHANGED_REPLACE, NoArgs),
                     )
                     .kind(ButtonKind::Default)
+                    // ## m2b-t24-shots (fix round 1): the mock's `fingerprint` (T19 review M6).
+                    .icon(IconName::Fingerprint)
                     .focus_handle(self.replace.clone())
                     .on_raised(true)
                     .on_click(cx.listener(|this, _, window, cx| this.replace(window, cx)))
@@ -1012,6 +1014,8 @@ impl CertDialog {
                 buttons.push(
                     Button::new("cert-pin", tr(cx, ids::hv::CONN_TLS_PIN_BTN, NoArgs))
                         .kind(kind("cert-pin", ButtonKind::Default))
+                        // ## m2b-t24-shots (fix round 1): the mock's `fingerprint` (T19 M6).
+                        .icon(IconName::Fingerprint)
                         .focus_handle(self.pin.clone())
                         .on_raised(true)
                         .on_click(cx.listener(|this, _, window, cx| this.pin(window, cx)))

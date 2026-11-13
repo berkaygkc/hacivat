@@ -130,11 +130,17 @@ pub fn encryption_label(cx: &App, p: &Profile, info: &LiveInfo) -> SharedString 
         _ => "TLS".to_string(),
     });
     match info.tls.verified {
-        // ## m2b-t01-interfaces: a pinned certificate reads as verified until Task 19's label.
-        TlsVerified::Full | TlsVerified::Pinned => tr(
+        TlsVerified::Full => tr(
             cx,
             ids::hv::CONN_ENC_VERIFIED,
             ids::hv::HvConnEncVerified { version },
+        ),
+        // ## m2b-t24-shots (fix round 1, I3): a pinned certificate says so (M2a NOTES
+        // `enc-pinned`), no longer the interim "verified".
+        TlsVerified::Pinned => tr(
+            cx,
+            ids::hv::CONN_ENC_PINNED,
+            ids::hv::HvConnEncPinned { version },
         ),
         // ## m2a-finalfix (I3): the chain was checked, the host name was not.
         TlsVerified::CaOnly => tr(

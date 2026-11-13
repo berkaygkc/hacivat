@@ -549,10 +549,7 @@ impl Render for VaultCreate {
         let c = &t.colors;
         let title = tr(cx, ids::hv::CONN_VAULT_CREATE_TITLE, NoArgs);
         let why = tr(cx, ids::hv::CONN_VAULT_CREATE_WHY, NoArgs);
-        let file = cx
-            .try_global::<AppState>()
-            .map(|s| tilde(&s.paths.vault_bin()))
-            .unwrap_or_default();
+        let file = shown_vault_file(cx);
         let ok = self.ok(cx);
         let not_now = Button::new("vault-not-now", tr(cx, ids::hv::CONN_VAULT_NOTNOW, NoArgs))
             .kind(ButtonKind::Ghost)
@@ -649,6 +646,19 @@ impl Render for VaultCreate {
             ));
         A11yNode::new("vault-create-node", Role::Dialog, title, true, card).description(why)
     }
+}
+
+// ## m2b-t24-shots (fix round 1, M3)
+/// The vault file as the dialogs show it: `~/…` under the home folder. A shots fixture shows
+/// the Linux path instead of the shot app's temp folder; that override is display only.
+fn shown_vault_file(cx: &App) -> String {
+    #[cfg(feature = "shots")]
+    if let Some(shown) = cx.try_global::<shots::ShownVaultFile>() {
+        return shown.0.clone();
+    }
+    cx.try_global::<AppState>()
+        .map(|s| tilde(&s.paths.vault_bin()))
+        .unwrap_or_default()
 }
 
 /// `path` with the home directory written as `~`.
@@ -1311,10 +1321,7 @@ impl Render for VaultDamaged {
         let c = &t.colors;
         let title = tr(cx, ids::hv::CONN_VAULT_DAMAGED_TITLE, NoArgs);
         let body = tr(cx, ids::hv::CONN_VAULT_DAMAGED_BODY, NoArgs);
-        let file = cx
-            .try_global::<AppState>()
-            .map(|s| tilde(&s.paths.vault_bin()))
-            .unwrap_or_default();
+        let file = shown_vault_file(cx);
         let reset = self.resettable.then(|| {
             Button::new(
                 "vault-damaged-reset",
@@ -1645,14 +1652,18 @@ mod shots {
         })
     }
 
-    /// The vault lives only on Linux, in `~/.local/share/hacivat` (the mock's path): the shot
-    /// app's data folder is a temp folder, which would draw a different path on every run.
-    /// Only the vault's file row reads it here; nothing of this throwaway app writes there.
+    /// The vault file the dialogs show in a shot (display only, fix round 1 M3).
+    pub(super) struct ShownVaultFile(pub(super) String);
+
+    impl hacivat_ui_core::gpui_surface::Global for ShownVaultFile {}
+
+    /// The vault lives only on Linux, in `~/.local/share/hacivat` (the mock's path); the shot
+    /// app's data folder is a temp folder that would draw a different path on every run. Only
+    /// the dialogs' file row reads this; the app's data folder is left as it is.
     fn linux_data_folder(cx: &mut App) {
-        if let Some(home) = std::env::home_dir() {
-            cx.global_mut::<AppState>().paths.data =
-                home.join(".local").join("share").join("hacivat");
-        }
+        cx.set_global(ShownVaultFile(
+            "~/.local/share/hacivat/vault.bin".to_string(),
+        ));
     }
 
     /// Create (NOTES M2b surface 4), asked by a connect.

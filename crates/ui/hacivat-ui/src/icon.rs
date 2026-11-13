@@ -54,6 +54,7 @@ pub enum IconName {
     FileUp,
     KeyRound,
     ArrowRight,
+    Fingerprint,
     /// The Hacivat mark (`icons/hacivat/hv-mark.svg`).
     HvMark,
 }
@@ -103,6 +104,7 @@ impl IconName {
             IconName::FileUp => "icons/lucide/file-up.svg",
             IconName::KeyRound => "icons/lucide/key-round.svg",
             IconName::ArrowRight => "icons/lucide/arrow-right.svg",
+            IconName::Fingerprint => "icons/lucide/fingerprint.svg",
             IconName::HvMark => "icons/hacivat/hv-mark.svg",
         }
     }
@@ -218,7 +220,7 @@ mod tests {
     use hacivat_ui_core::assets::BundledAssets;
     use hacivat_ui_core::gpui_surface::AssetSource;
 
-    const ALL: [IconName; 42] = [
+    const ALL: [IconName; 43] = [
         IconName::ArrowLeftRight,
         IconName::Check,
         IconName::ChevronDown,
@@ -261,6 +263,7 @@ mod tests {
         IconName::FileUp,
         IconName::KeyRound,
         IconName::ArrowRight,
+        IconName::Fingerprint,
         IconName::HvMark,
     ];
 

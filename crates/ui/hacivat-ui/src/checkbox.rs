@@ -142,12 +142,19 @@ impl Checkbox {
             .flex_shrink(1.0)
             .min_w(px(0.0))
             .child(div().flex_none().child(mark))
-            .child(div().flex_none().child(Label::new(
-                label.clone(),
-                TextSource::Fluent,
-                t.type_ramp.body,
-                ink.to_hsla(),
-            )));
+            .child(
+                div().flex_none().child(
+                    Label::new(
+                        label.clone(),
+                        TextSource::Fluent,
+                        t.type_ramp.body,
+                        ink.to_hsla(),
+                    )
+                    // ## m2b-t24-shots (fix round 1, I2): the label's ID, for the shots'
+                    // surface markers.
+                    .id(SharedString::from(format!("checkbox-label-{id}"))),
+                ),
+            );
         if let Some(sub) = sub_label.clone() {
             row = row.child(
                 Label::new(sub, TextSource::Fluent, t.type_ramp.body, sub_ink.to_hsla())
@@ -175,6 +182,10 @@ impl Checkbox {
         let handle = focus.unwrap_or(keyed).tab_stop(true);
         let focused = focus_visible(&handle, window);
         let toggle_on_key = on_toggle.clone();
+        // ## m2b-t24-shots (fix round 1, I2): a following scroll container keeps it in view.
+        let row = row
+            .relative()
+            .child(crate::follow::focus_probe(handle.clone()));
         let row = focus_outline(row.track_focus(&handle), &theme, focused)
             .declare_full(decl)
             .cursor_pointer()

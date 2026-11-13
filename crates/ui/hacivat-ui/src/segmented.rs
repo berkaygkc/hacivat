@@ -255,6 +255,11 @@ impl IntoElement for Segmented {
                 let on_click = item.on_click;
                 let tooltip = item.tooltip;
                 let (handles, clicks) = (handles.clone(), clicks.clone());
+                // ## m2b-t24-shots (fix round 1, I2): a following scroll container keeps it in
+                // view.
+                let segment = segment
+                    .relative()
+                    .child(crate::follow::focus_probe(handles[i].clone()));
                 let segment = focus_outline(segment.track_focus(&handles[i]), &theme, focused)
                     .on_hover(hover_listener(hover))
                     .on_click(move |event, window, cx| on_click(event, window, cx))
