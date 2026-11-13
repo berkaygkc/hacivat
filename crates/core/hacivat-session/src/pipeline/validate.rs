@@ -67,6 +67,11 @@ pub enum IssueCode {
     /// A legacy OpenSSL-encrypted TLS key (`Proc-Type: 4,ENCRYPTED`), which cannot be
     /// decrypted (Task 3, Task 19).
     TlsKeyLegacyEncrypted,
+    // ## m2b-t19-tls
+    /// `Disable` while the endpoint has a pin (`TlsSettings::disable_ignores_pin`, T3 ruling
+    /// M2): the pin is not checked. A notice, never a refusal: Validate does not report it
+    /// (Disable is the user's explicit choice and wins, B5); the connection dialog shows it.
+    TlsDisableIgnoresPin,
 }
 
 /// One issue, with the field it belongs to (HV-CONN-01).

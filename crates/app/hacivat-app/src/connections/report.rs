@@ -637,6 +637,8 @@ fn issue_sentence(f: &Fmt, code: &IssueCode) -> String {
         IssueCode::SshTooManyHops => ids::hv::CONN_ISSUE_SSH_TOO_MANY_HOPS,
         IssueCode::SshKeyFileMissing => ids::hv::CONN_ISSUE_SSH_KEY_FILE_MISSING,
         IssueCode::TlsKeyLegacyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_LEGACY_ENCRYPTED,
+        // ## m2b-t19-tls: a notice the dialog shows; Validate never reports it.
+        IssueCode::TlsDisableIgnoresPin => ids::hv::CONN_ISSUE_TLS_DISABLE_IGNORES_PIN,
     };
     f.t(msg, NoArgs)
 }

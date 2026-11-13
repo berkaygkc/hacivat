@@ -779,3 +779,51 @@ the vault, the session overlay, the keyring CI and the deferrals.
 - **Debug.** `SessionOverlay` derives `Debug`, and every secret in it is a `SecretString`, which
   prints redacted. `SessionManager`'s `Debug` shows only whether an overlay exists. Neither
   type derives `PartialEq`.
+
+## m2b-t19 — TLS UI: certificate review, pin changed, plaintext question
+
+- **The safe answer is the default (Q34; PO question pending, default Cancel).** The
+  certificate review opens with Cancel focused, in both variants. Enter acts on key down only
+  (never held, never with a modifier) and its key up is suppressed, so the focused button's
+  keyboard click never runs twice. In the untrusted variant Enter presses the focused button:
+  a pin takes a deliberate Tab to "Pin this certificate". The pin-changed variant is a hard
+  stop: Enter cancels whatever has the focus, and "Replace pin" runs only on its own click (the
+  pointer, or Space on the focused button). The public-plaintext question opens on "Use an SSH
+  tunnel…"; "Connect without encryption" is never the default.
+- **Only an explicit click replaces a pin (Q26).** `cert_dialog::change_for` builds
+  `ReplacePin { old: review.pinned, new: { review.endpoint, review.sha256 } }` only for the
+  Replace pin choice, and that choice exists only in a review opened from an error (the
+  "Review certificate" fix, or the dialog's test strip): a pipeline question never offers it.
+  Applying a change (`cert_dialog::apply_change`, used by `ConnectionsModel::apply_changes` and
+  by the dialog's draft) is guarded the same way: `AddPin` never replaces an endpoint's pin,
+  and `ReplacePin` replaces it only while it still is `old`, the fingerprint the user compared.
+  A stale review, or two reviews of one profile, therefore change nothing. Changes apply to
+  the profile the review was opened for, by ID, and to nothing else.
+- **Dates (B5).** When today is outside the reviewed certificate's validity window (the wall
+  clock), the review offers neither Pin, Replace pin nor Import CA, and says why. The error's
+  own fix list wins over the registry's (`ConnectError::fixes`, Task 14's narrowing), so an
+  expired certificate's error offers only Edit connection, and "Review certificate…" needs a
+  certificate to review.
+- **What is shown.** The full SHA-256 (32 bytes, two mono lines of 16) in every review; Copy
+  writes exactly those 32 colon-separated bytes. Certificate names are RFC 4514 strings with
+  controls and bidi marks already escaped (Task 3); they are drawn verbatim in mono, never inside
+  a translated sentence. The TLS section's "Pinned certificate" row abbreviates the fingerprint
+  with an ellipsis (its first four and last two bytes, the mock's form); it identifies the pin,
+  the review is where fingerprints are compared.
+- **A Test writes nothing outside the dialog (T14 review M3).** `TestReport` carries the test's
+  `profile_changes`; the dialog applies them to its draft only, and only while the draft still
+  names the tested engine and endpoint. A Test connects with a copy of the approved roots, so
+  the CA file its certificate question imports is approved for that test only; the dialog
+  approves it app-wide when the profile that names it is saved. A file picked from the error
+  dialog's "Import CA…" (a saved profile, connected again at once) or from the dialog's own
+  pickers is approved when picked (T16 ruling A).
+- **The remembered plaintext consent is bound to an endpoint (T14 review I2).** The dialog
+  drops `tls.allow_public_plaintext` as soon as the host or the port changes, whatever changed
+  them (typing, a paste, an engine switch); a Test's "Don't ask again" binds it to the tested
+  endpoint.
+- **Disable with a pin (T3 ruling M2).** `IssueCode::TlsDisableIgnoresPin` is a notice the TLS
+  section shows; Validate never reports it, so it neither blocks a save nor a connect.
+- **Key passphrase (B25).** The client certificate's key passphrase is a masked field beside
+  the Remember select, stored like the password under the profile's retention; Save validates
+  the key with it (`validate_with_passphrase`), so an encrypted key with the right passphrase is
+  no issue.
