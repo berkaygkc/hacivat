@@ -145,6 +145,10 @@ pub enum DenyLayer {
     Protocol,
     Transaction,
     Engine,
+    // ## m2b-t23-f1
+    /// PostgreSQL: the statement calls a function whose effect a rollback does not undo
+    /// (`hacivat_guard::check_functions`; Task 23 finding F1).
+    Function,
 }
 
 /// Why a request failed.

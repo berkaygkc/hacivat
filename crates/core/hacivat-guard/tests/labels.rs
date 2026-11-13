@@ -123,13 +123,9 @@ fn remediation_has_only_placeholders() {
 
 #[test]
 fn remediation_is_exact() {
-    assert_eq!(
-        remediation(DbmsKind::Postgres),
-        Some(
-            "CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT pg_read_all_data TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;\n-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;"
-        )
-    );
-    // Both revokes from PUBLIC stay comments: they affect every role (Q21, fix round 2).
+    // F1: an unknown version gets the newest form, whose REVOKE names the 17+ signatures.
+    assert_eq!(remediation(DbmsKind::Postgres), Some(PG17_REMEDIATION));
+    // Every revoke from PUBLIC stays a comment: they affect every role (Q21, fix round 2, F1).
     let pg = remediation(DbmsKind::Postgres).unwrap();
     for line in pg.lines().filter(|l| l.contains("PUBLIC")) {
         assert!(line.starts_with("-- optional: "), "{line}");
@@ -145,30 +141,50 @@ fn remediation_is_exact() {
     }
 }
 
-const PG13_REMEDIATION: &str = "CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT USAGE ON SCHEMA <schema> TO <role>;\nGRANT SELECT ON ALL TABLES IN SCHEMA <schema> TO <role>;\nGRANT SELECT ON ALL SEQUENCES IN SCHEMA <schema> TO <role>;\nALTER DEFAULT PRIVILEGES IN SCHEMA <schema> GRANT SELECT ON TABLES TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;\n-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;";
+const PG13_REMEDIATION: &str = "CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT USAGE ON SCHEMA <schema> TO <role>;\nGRANT SELECT ON ALL TABLES IN SCHEMA <schema> TO <role>;\nGRANT SELECT ON ALL SEQUENCES IN SCHEMA <schema> TO <role>;\nALTER DEFAULT PRIVILEGES IN SCHEMA <schema> GRANT SELECT ON TABLES TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;\n-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;\n-- optional: REVOKE EXECUTE ON FUNCTION pg_logical_emit_message(boolean, text, text), pg_logical_emit_message(boolean, text, bytea) FROM PUBLIC;";
+
+/// PostgreSQL 14–16 (F1: the REVOKE names the three-argument signatures of 13–16).
+const PG14_REMEDIATION: &str = "CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT pg_read_all_data TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;\n-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;\n-- optional: REVOKE EXECUTE ON FUNCTION pg_logical_emit_message(boolean, text, text), pg_logical_emit_message(boolean, text, bytea) FROM PUBLIC;";
+
+/// PostgreSQL 17 and later, and an unknown version (F1: 17 added the `flush` argument, so the
+/// three-argument signatures no longer exist there).
+const PG17_REMEDIATION: &str = "CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT pg_read_all_data TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;\n-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;\n-- optional: REVOKE EXECUTE ON FUNCTION pg_logical_emit_message(boolean, text, text, boolean), pg_logical_emit_message(boolean, text, bytea, boolean) FROM PUBLIC;";
 
 #[test]
 fn postgres_remediation_follows_the_server_version() {
-    // Round 3, m-7: `pg_read_all_data` exists from PostgreSQL 14.
-    let current = remediation(DbmsKind::Postgres);
-    for major in [None, Some(14), Some(15), Some(18), Some(u32::MAX)] {
-        assert_eq!(
-            remediation_for(DbmsKind::Postgres, major),
-            current,
-            "{major:?}"
-        );
+    // Round 3, m-7: `pg_read_all_data` exists from PostgreSQL 14. F1: the REVOKE of
+    // `pg_logical_emit_message` names 13–16's signatures, or 17's (with `flush`).
+    for (majors, want) in [
+        (
+            &[Some(13), Some(12), Some(9), Some(0)][..],
+            PG13_REMEDIATION,
+        ),
+        (&[Some(14), Some(15), Some(16)], PG14_REMEDIATION),
+        (
+            &[None, Some(17), Some(18), Some(u32::MAX)],
+            PG17_REMEDIATION,
+        ),
+    ] {
+        for &major in majors {
+            assert_eq!(
+                remediation_for(DbmsKind::Postgres, major),
+                Some(want),
+                "{major:?}"
+            );
+        }
     }
-    for major in [Some(13), Some(12), Some(9), Some(0)] {
-        assert_eq!(
-            remediation_for(DbmsKind::Postgres, major),
-            Some(PG13_REMEDIATION),
-            "{major:?}"
+    assert!(!PG13_REMEDIATION.contains("pg_read_all_data"));
+    for s in [PG13_REMEDIATION, PG14_REMEDIATION, PG17_REMEDIATION] {
+        assert!(!s.contains("NOINHERIT"));
+        for line in s.lines().filter(|l| l.contains("PUBLIC")) {
+            assert!(line.starts_with("-- optional: "), "{line}");
+        }
+        // The F1 line is the last one, after the two earlier optional comments.
+        assert!(
+            s.lines().last().is_some_and(|l| l
+                .starts_with("-- optional: REVOKE EXECUTE ON FUNCTION pg_logical_emit_message(")),
+            "{s}"
         );
-    }
-    let s = PG13_REMEDIATION;
-    assert!(!s.contains("pg_read_all_data") && !s.contains("NOINHERIT"));
-    for line in s.lines().filter(|l| l.contains("PUBLIC")) {
-        assert!(line.starts_with("-- optional: "), "{line}");
     }
 }
 
@@ -207,6 +223,43 @@ fn mysql_remediation_role_probes_as_enforced() {
     let f = interpret_probe(DbmsKind::MySql, &rows);
     assert_eq!(
         access_label(DbmsKind::MySql, true, Some(&f)),
+        AccessLabel::ReadOnlyEnforced
+    );
+}
+
+#[test]
+fn a_postgres_role_that_may_emit_wal_messages_is_guarded_until_the_revoke() {
+    // Task 23 finding F1 (controller ruling): the guard's text layer refuses the call, but SQL
+    // built at run time gets past it, so only a revoked `EXECUTE` keeps the label enforced.
+    let answer = |functions: &[&str]| {
+        let rows: Vec<Vec<Vec<Option<String>>>> = vec![
+            vec![vec![Some("f".into()); 4]],
+            vec![],
+            vec![vec![Some("f".into())]],
+            vec![vec![Some("t".into())]],
+            vec![],
+            functions
+                .iter()
+                .map(|n| vec![Some((*n).to_owned())])
+                .collect(),
+        ];
+        interpret_probe(DbmsKind::Postgres, &rows)
+    };
+    let default = answer(&["pg_logical_emit_message"]);
+    assert_eq!(
+        access_label(DbmsKind::Postgres, true, Some(&default)),
+        AccessLabel::ReadOnlyGuarded
+    );
+    assert_eq!(
+        default.warnings,
+        [
+            RoleWarning::TempPrivilege,
+            RoleWarning::NonTransactionalWrite
+        ]
+    );
+    let revoked = answer(&[]);
+    assert_eq!(
+        access_label(DbmsKind::Postgres, true, Some(&revoked)),
         AccessLabel::ReadOnlyEnforced
     );
 }

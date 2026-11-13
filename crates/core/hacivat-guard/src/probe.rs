@@ -24,6 +24,10 @@ pub enum RoleWarning {
     RoleGrantNotExpanded,
     /// A probe answer the interpreter could not read (fails closed).
     Unparsed,
+    // ## m2b-t23-f1
+    /// PostgreSQL: it may execute a function whose effect a rollback does not undo (row 6;
+    /// `PUBLIC` may run `pg_logical_emit_message` until the remediation's optional `REVOKE`).
+    NonTransactionalWrite,
 }
 
 /// What the probe found.
@@ -52,16 +56,24 @@ pub struct RoleFindings {
 ///    `standard_conforming_strings`.
 /// 4. TEMP on the database.
 /// 5. The extensions that reach other servers.
+/// 6. (Task 23 finding F1) The functions a rollback cannot undo that any of them may `EXECUTE`
+///    ([`PG_EXECUTE_GATED`]): `PUBLIC` holds `EXECUTE` on `pg_logical_emit_message` on 13–18,
+///    so a role reads least privilege only once the remediation's optional `REVOKE` ran. The
+///    names are looked up in `pg_proc` (every overload, any version: the signatures differ from
+///    17). The replication-origin functions count from 14, when `EXECUTE` became their gate;
+///    before, they check for a superuser themselves.
 ///
 /// T18 review m-3: every function, aggregate and relation is `pg_catalog.`-qualified, so a
 /// `search_path` that names another schema before `pg_catalog` (an imported URL may set it)
 /// cannot shadow them. Operators stay unqualified (ADR 0004 `m2b-t18`).
-const PG_PROBE: [&str; 5] = [
+const PG_PROBE: [&str; 6] = [
     "SELECT pg_catalog.bool_or(rolsuper), pg_catalog.bool_or(rolbypassrls), pg_catalog.bool_or(rolreplication), pg_catalog.bool_or(rolcreaterole) FROM pg_catalog.pg_roles WHERE pg_catalog.pg_has_role(current_user, oid, 'MEMBER')",
     "SELECT r.rolname FROM pg_catalog.pg_roles r WHERE pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') AND r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program','pg_signal_backend','pg_write_all_data','pg_maintain')",
     "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace JOIN pg_catalog.pg_roles r ON pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') WHERE c.relkind IN ('r','p','v','m','f','S') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND (c.relowner = r.oid OR CASE WHEN c.relkind = 'S' THEN pg_catalog.has_sequence_privilege(r.oid, c.oid, 'USAGE, UPDATE') ELSE pg_catalog.has_table_privilege(r.oid, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') OR pg_catalog.has_any_column_privilege(r.oid, c.oid, 'INSERT, UPDATE') END)) OR EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_roles r ON pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE')) OR EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') AND (r.rolcreatedb OR pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'CREATE')))",
     "SELECT pg_catalog.has_database_privilege(pg_catalog.current_database(), 'TEMP')",
     "SELECT extname FROM pg_catalog.pg_extension WHERE extname IN ('dblink','postgres_fdw','pg_net','http')",
+    // ## m2b-t23-f1
+    "SELECT DISTINCT p.proname FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace JOIN pg_catalog.pg_roles r ON pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname = 'pg_catalog' AND p.proname IN ('pg_logical_emit_message','pg_switch_wal','pg_create_restore_point','pg_log_standby_snapshot','pg_backup_start','pg_backup_stop','pg_start_backup','pg_stop_backup','pg_promote','pg_wal_replay_pause','pg_wal_replay_resume','pg_replication_origin_create','pg_replication_origin_drop','pg_replication_origin_advance','pg_replication_origin_session_setup','pg_replication_origin_session_reset','pg_replication_origin_xact_setup','pg_replication_origin_xact_reset') AND (p.proname !~ '^pg_replication_origin_' OR pg_catalog.current_setting('server_version_num')::pg_catalog.int4 >= 140000) AND pg_catalog.has_function_privilege(r.oid, p.oid, 'EXECUTE')",
 ];
 
 const MYSQL_PROBE: [&str; 1] = ["SHOW GRANTS"];
@@ -92,6 +104,32 @@ const PG_PREDEFINED_ROLES: [(&str, RoleWarning); 6] = [
 /// Row set 5's names (the probe's `IN` list). A warning carries the name from this list, never
 /// the server's text.
 const PG_EGRESS_EXTENSIONS: [&str; 4] = ["dblink", "postgres_fdw", "pg_net", "http"];
+
+// ## m2b-t23-f1
+/// Row set 6's names (the probe's `IN` list): the functions of
+/// `functions::PG_NON_TRANSACTIONAL_FUNCTIONS` whose `EXECUTE` privilege is what lets a role
+/// call them. The replication-slot functions are left out: `PUBLIC` may execute them, and they
+/// refuse a role without `REPLICATION` at run time (row 1 reports it).
+const PG_EXECUTE_GATED: [&str; 18] = [
+    "pg_logical_emit_message",
+    "pg_switch_wal",
+    "pg_create_restore_point",
+    "pg_log_standby_snapshot",
+    "pg_backup_start",
+    "pg_backup_stop",
+    "pg_start_backup",
+    "pg_stop_backup",
+    "pg_promote",
+    "pg_wal_replay_pause",
+    "pg_wal_replay_resume",
+    "pg_replication_origin_create",
+    "pg_replication_origin_drop",
+    "pg_replication_origin_advance",
+    "pg_replication_origin_session_setup",
+    "pg_replication_origin_session_reset",
+    "pg_replication_origin_xact_setup",
+    "pg_replication_origin_xact_reset",
+];
 
 /// Privileges a least-privilege MySQL role may hold.
 const MYSQL_READ_PRIVILEGES: [&str; 3] = ["USAGE", "SELECT", "SHOW VIEW"];
@@ -135,7 +173,7 @@ const MYSQL_WRITE_PRIVILEGES: [&str; 17] = [
     "DELETE HISTORY",
 ];
 
-/// The probe statements of `kind`, in order: five for PostgreSQL, `SHOW GRANTS` for MySQL and
+/// The probe statements of `kind`, in order: six for PostgreSQL, `SHOW GRANTS` for MySQL and
 /// MariaDB, none for any other engine.
 pub fn role_probe_sql(kind: DbmsKind) -> &'static [&'static str] {
     match kind {
@@ -149,8 +187,9 @@ pub fn role_probe_sql(kind: DbmsKind) -> &'static [&'static str] {
 /// SQL NULL).
 ///
 /// - PostgreSQL: least privilege is no `true` in row set 1, no rows in 2, `false` in 3 and no
-///   rows in 5. A `true` in 4 adds [`RoleWarning::TempPrivilege`] only and keeps least
-///   privilege (Q21: the read-only transaction already blocks temporary tables).
+///   rows in 5 or 6. A `true` in 4 adds [`RoleWarning::TempPrivilege`] only and keeps least
+///   privilege (Q21: the read-only transaction already blocks temporary tables). A row in 6 is
+///   [`RoleWarning::NonTransactionalWrite`] (Task 23 finding F1).
 /// - MySQL and MariaDB: every `GRANT` line grants only `USAGE`, `SELECT` and `SHOW VIEW`, with
 ///   no grant option and no `PROXY`; a role grant is [`RoleWarning::RoleGrantNotExpanded`].
 /// - Any other engine has no probe, so its answer is [`RoleWarning::Unparsed`].
@@ -200,7 +239,7 @@ impl Findings {
 type RowSet = Vec<Vec<Option<String>>>;
 
 fn read_pg(results: &[RowSet], f: &mut Findings) {
-    let [flags, roles, write, temp, extensions] = results else {
+    let [flags, roles, write, temp, extensions, functions] = results else {
         f.deny(RoleWarning::Unparsed);
         return;
     };
@@ -253,6 +292,21 @@ fn read_pg(results: &[RowSet], f: &mut Findings) {
             Some(e) => f.deny(RoleWarning::EgressExtension((*e).to_owned())),
             None => f.deny(RoleWarning::Unparsed),
         }
+    }
+
+    // ## m2b-t23-f1: a role that may run a function no rollback undoes is not read-only,
+    // whatever the guard's text layer refuses (SQL built at run time names no function).
+    for row in functions {
+        let known = single_cell(row).is_some_and(|name| {
+            PG_EXECUTE_GATED
+                .iter()
+                .any(|g| name.eq_ignore_ascii_case(g))
+        });
+        f.deny(if known {
+            RoleWarning::NonTransactionalWrite
+        } else {
+            RoleWarning::Unparsed
+        });
     }
 }
 

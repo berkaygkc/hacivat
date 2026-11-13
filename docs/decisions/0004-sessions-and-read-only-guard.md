@@ -442,6 +442,133 @@ aggregate row; MySQL non-ASCII outside quotes; MySQL grant lines with odd whites
 role grants, grant options, partial revokes and a smuggled second statement; labels, including
 self-contradicting findings; the exact remediation strings.
 
+### F1 — calls no rollback undoes (Task 23 finding, controller ruling)
+
+Task 23's bypass suite found that `PUBLIC` may execute `pg_logical_emit_message` on PostgreSQL
+13–18. Its non-transactional form (`pg_logical_emit_message(false, …)`) writes a WAL record at
+once: no `ROLLBACK` undoes it, the canary does not see it, and the read-only transaction does not
+refuse it. `hv_ro`, labelled **Read-only (enforced)**, could do it, so the label claimed more than
+the server enforced (B21). The fix has three parts.
+
+**1. The guard refuses the call before any I/O (`check_functions`, `functions.rs`).** A
+statement of a read-only PostgreSQL session that calls a function of
+`PG_NON_TRANSACTIONAL_FUNCTIONS` is refused as `ReadOnlyDenied(Function)` (Task 18's step 1b,
+after 1a). Every overload of a listed name is refused. The list is the catalogue's functions
+whose effect is outside the transaction, checked on PostgreSQL 13–18 (`pg_proc`, ACLs as
+`hv_ro`):
+
+| Group | Functions | Who may call them by default |
+|---|---|---|
+| WAL records | `pg_logical_emit_message`, `pg_switch_wal`, `pg_create_restore_point`, `pg_log_standby_snapshot` (16+) | `PUBLIC` for `pg_logical_emit_message`; the others are revoked from `PUBLIC` and commonly granted to backup roles |
+| Backup and recovery | `pg_backup_start`, `pg_backup_stop` (15+), `pg_start_backup`, `pg_stop_backup` (to 14), `pg_promote`, `pg_wal_replay_pause`, `pg_wal_replay_resume` | revoked from `PUBLIC`; granted to backup and failover roles |
+| Replication slots | `pg_create_physical_replication_slot`, `pg_create_logical_replication_slot`, `pg_copy_physical_replication_slot`, `pg_copy_logical_replication_slot`, `pg_drop_replication_slot`, `pg_replication_slot_advance`, `pg_logical_slot_get_changes`, `pg_logical_slot_get_binary_changes`, `pg_sync_replication_slots` (17+) | `PUBLIC` may execute them; at run time they refuse a role without `REPLICATION` |
+| Replication origins | `pg_replication_origin_create`, `_drop`, `_advance`, `_session_setup`, `_session_reset`, `_xact_setup`, `_xact_reset` | a superuser check of their own on 13; revoked from `PUBLIC` and grantable from 14 |
+
+Left out on purpose:
+
+- `pg_notify` and `NOTIFY` are transactional (delivered on `COMMIT` only).
+- Advisory locks, `LISTEN` and holdable cursors are released by the reset (L6, neutralised).
+- Large objects, `nextval`/`setval` and `txid_current` are transactional or refused by L3, and
+  the canary catches the rest.
+- `pg_cancel_backend` and `pg_terminate_backend` are signals, not writes. By default they reach
+  only the role's own sessions; other roles' need `pg_signal_backend` (probe row 2).
+- `pg_reload_conf`, `pg_rotate_logfile`, `pg_stat_reset*` and `pg_log_backend_memory_contexts`
+  change no data and write no WAL record. They are superuser-only by default and rarely granted.
+- The read-only functions of the same families stay allowed: `pg_logical_slot_peek_*`, which
+  moves no slot, and `pg_replication_origin_oid`, `_progress`, `_session_progress` and
+  `_session_is_setup`.
+
+The check reads the statement as PostgreSQL's lexer does, closely enough to find a call. A
+call is an identifier that names a listed function, followed by `(` after whitespace and
+comments. The identifier may be unquoted in any case, quoted, or a `U&"…"` identifier with its
+`\XXXX`, `\+XXXXXX` and `UESCAPE` escapes, after any schema qualification.
+
+The text of every string literal is read again as SQL, because a `DO` block, a PL/pgSQL
+`EXECUTE` or `query_to_xml` can run it. That covers `'…'` with doubled quotes and line-break
+continuations, `E'…'` and its escapes, `U&'…'`, and `$tag$…$tag$`. A `'…'` literal that holds a
+backslash is also read with backslash escapes, as it reads where `standard_conforming_strings`
+is off when the text runs.
+
+Comments are skipped, and a name that is not called passes: `WHERE proname =
+'pg_switch_wal'`, a column named so. Failing closed, it refuses:
+
+- a quoted name in another case (`"PG_SWITCH_WAL"()`, another function);
+- a literal that merely looks like a call (`SELECT 'pg_switch_wal()'`);
+- an unterminated literal that holds a call;
+- literals nested deeper than 16 levels, or a statement whose nested literals would take more
+  than 16 MiB of reading (`FunctionViolation::TooComplex`), instead of reading on.
+
+Other engines pass; MySQL's equivalents need privileges outside least privilege, which the
+probe reports.
+
+**It is a tripwire, not a guarantee.** SQL built at run time names no function the check can
+see: `EXECUTE 'SELECT pg_switch' || '_wal()'` in a `DO` block, `format()`, `chr()`. The Docker
+run shows exactly that: the built forms reach the server and meet `42501` only because the
+privilege is missing (`m2b-t23`, P31/P32). So the label cannot rest on this layer.
+
+**2. The probe reports the privilege (row 6, `RoleWarning::NonTransactionalWrite`).** The
+ruling: keep **enforced** only when `EXECUTE` is revoked; otherwise the label is guarded, with
+the warning. Row 6 lists, by name in `pg_proc`, the listed functions whose `EXECUTE` privilege
+is the gate (`PG_EXECUTE_GATED`). It includes `pg_logical_emit_message` and the WAL, backup and
+recovery functions above, plus the origin functions from PostgreSQL 14
+(`current_setting('server_version_num')`). The row returns a function when any role
+`current_user` is a member of may execute it. Any row denies least privilege. A name outside the
+list is `Unparsed`. The slot functions are left out because `PUBLIC` may execute them and
+`REPLICATION` is their gate (row 1).
+
+Rejected: `has_function_privilege(current_user,
+'pg_catalog.pg_logical_emit_message(boolean,text,text)', 'EXECUTE')`. PostgreSQL 17 added a
+`flush` argument, so that signature does not exist on 17 and 18. The probe would fail there,
+`Unparsed`, and so would every role. The `pg_proc` lookup holds every overload of every version.
+
+Validated as `hv_ro` and as the superuser on the matrix's PostgreSQL 13–18 (read-only
+transactions):
+
+- `hv_ro` gets exactly `pg_logical_emit_message` on every line;
+- the superuser gets every function its version has, the origin functions from 14 only;
+- after the version's `REVOKE` (rolled back), `hv_ro` gets nothing.
+
+Consequence: on a default cluster **no PostgreSQL role reads enforced** until `EXECUTE` on
+`pg_logical_emit_message` is revoked from `PUBLIC`. A role granted a backup or failover function
+reads guarded too.
+
+**3. The remediation offers the revoke (`remediation_for`).** A third optional comment, as for
+TEMP and `CREATE` on `public`. It stays a comment because revoking from `PUBLIC` affects every
+role, such as a logical-replication tool that emits messages. Function privileges are kept
+**per database**, so it is run in each database the role reads, and in `template1` for databases
+created later. The signature follows the server:
+
+- 13–16: `-- optional: REVOKE EXECUTE ON FUNCTION pg_logical_emit_message(boolean, text,
+  text), pg_logical_emit_message(boolean, text, bytea) FROM PUBLIC;` (the ruling's string);
+- 17 and later, and an unknown version: `-- optional: REVOKE EXECUTE ON FUNCTION
+  pg_logical_emit_message(boolean, text, text, boolean), pg_logical_emit_message(boolean,
+  text, bytea, boolean) FROM PUBLIC;`. The ruling's three-argument form fails there with
+  `function … does not exist` (checked on pg17).
+
+So `remediation_for` has three PostgreSQL forms: below 14, 14–16, and 17+. `remediation(kind)`
+returns the 17+ one, which the mock now shows.
+
+The matrix does the same: the init script revokes every overload by name in `hv_test`, and so
+do the Task 18 fixtures, idempotently, with the version's exact line. The 100,000-table probe
+database also revokes it, because `hv_ro` must read enforced there. The bypass suite's `hv_t23`
+starts from the default and revokes it itself.
+
+**Tests.**
+
+- `hacivat-guard`:
+  - `tests/functions.rs`: the list; every listed name refused; both overloads and every arity;
+    qualification, quoting, case, comments and `U&` escapes; calls inside `DO`, `EXECUTE` and
+    `query_to_xml` literals with every escape form, continuations, nested quoting and the
+    `standard_conforming_strings = off` reading; names that are read, not called, and unlisted
+    look-alikes pass; other engines pass; the nesting bound and the reading budget.
+  - `probe.rs`: row 6's exact SQL and list; each name gives `NonTransactionalWrite`; the
+    pre-F1 five-row answer and bad row-6 values are `Unparsed`.
+  - `labels.rs`: guarded until the revoke; the three exact remediation forms by version.
+- `hacivat-session`:
+  - `readonly.rs`: refused before I/O in six spellings; the session stays usable and a read of
+    the name runs; MySQL sends the name on; the probe's row 6 reads guarded.
+  - Docker: `docker_m2b_bypass.rs` (`m2b-t23`).
+
 ## m2b-t17 — liveness and recovery
 
 **Supervisor (HV-CONN-04, B18, Q31).** A pure `Supervisor` decides; the default session's actor
@@ -948,3 +1075,483 @@ executable-comment `COMMIT`s (both readings, and one nested level), and a refuse
 `CREATE TABLE` is `Db`, the session stays usable and the table is absent (the I-2 premise,
 confirmed); advisory lock and `LISTEN` do not survive a request; the 100k-table measurement
 (above); and, without a server, SQLite guarded and a SQLite session that reads and refuses.
+
+**Step 1b (Task 23 finding F1, controller ruling; `m2b-t05`, "F1").** After 1a,
+`hacivat_guard::check_functions` refuses a PostgreSQL statement that calls a function whose
+effect a rollback does not undo, such as `pg_logical_emit_message`. The refusal is
+`ReadOnlyDenied(DenyLayer::Function)`, a new variant, before any I/O, and the connection is kept
+(`Guarded::keep`). Other engines pass. It is a tripwire like 1a: SQL built at run time gets past
+it. So `access_for` now runs **six** probe statements, and a role that may execute one of those
+functions reads guarded (`NonTransactionalWrite`). The Docker fixtures (`ensure_pg_fixtures`,
+the 100k-table database) run the remediation's `REVOKE` for their version, so `hv_ro` still
+reads enforced where these tests assert it. With row 6, the 100,000-table probe took 144 ms on
+pg17 (`--set full`, F1 run).
+
+## m2b-t23 — bypass-suite results
+
+Task 23 runs the SQL-SAFE-06 catalogue against the Docker matrix with **no classifier** (Review
+Focus 4, exit criterion E4). Hacivat has none in M2b: every read-only statement goes through the
+session's guard (Task 18). So each row is stopped, or neutralised by the request's end, by the
+layers alone: 1a (the transaction-keyword refusal, before any I/O), 1b (PostgreSQL: the refusal
+of a call no rollback undoes, before any I/O; finding F1), L3 (the read-only transaction and its
+pinned snapshot), L4 (the session settings: `default_transaction_read_only`,
+MySQL's `SESSION TRANSACTION READ ONLY`), L5 (the principal's privileges), L6 (the post-checks,
+the `ROLLBACK`, the canary, the reset and the environment replay) and the extended protocol (one
+statement per request; MySQL never re-sends an unpreparable statement as text).
+
+**Method (`crates/core/hacivat-session/tests/docker_m2b_bypass.rs`).**
+
+- Each row runs in a real read-only default session (`ConnectionManager`, `ManagerConfig::m2b()`)
+  as `hv_ro` (least privilege). The **server-blocked rows also run as the test account** — a
+  superuser on PostgreSQL, the owner of every fixture on MySQL and MariaDB — where no privilege
+  can stop them: only 1a, L3, L4 and the protocol do. That is the "stand alone" evidence.
+- **A side channel judges every row**, never "an error happened" alone. An admin connection takes a
+  snapshot before the rows and after each one: on PostgreSQL the fixture table's count and sum,
+  the relations of `public`, the sequence, the large objects and the fixture object's content,
+  replication slots, prepared transactions, temporary relations and the session's advisory locks;
+  on MySQL and MariaDB the table's count and sum, the test database's tables and routines, two
+  user locks, `max_connections` and `read_only`. After a neutralised row the session itself must
+  show nothing left (no channel, holdable cursor or SQL-level prepared statement; the read-only
+  default, `standard_conforming_strings` and `search_path` as before; MySQL's read-only setting,
+  no user variable, the pinned `sql_mode`), and a write must still be refused (`25006`) or the
+  test account's DDL (`1792`). The brief's M9 line (`SET SESSION TRANSACTION READ WRITE`, then
+  `CREATE TABLE`) is judged by the snapshot too, and allows only `1792` or `1142`.
+- **A stopped row passes only with the outcome its row allows** (the exact SQLSTATE or vendor
+  code, `1a`, `protocol`, `gap` or `lost`, each only where it was observed) **and an unchanged
+  side channel**. So a `gap` that passes is one whose effect the `ROLLBACK` undid. A gap after
+  which the side channel shows a committed change is its own outcome, **committed; L6 gap**
+  (detected, not stopped): it is never recorded as `gap`. The owner's `CALL` rows (T18 I-2) are
+  not stopped rows; they record what L6 detected and what it missed (below). MariaDB rows are
+  recorded, not judged (none may stay unknown, Q32); its label stays guarded (C19), and the test
+  asserts that.
+- Fixtures never touch the matrix's own objects (Q7): PostgreSQL's live in a database of their
+  own, `hv_t23`, dropped first and last; MySQL's are `hv_t23_*` objects of the test database,
+  dropped first and last. `hv_ro` is (re)created only when missing, as Task 18 does. What an
+  escaped row would leave outside them is undone at teardown, and the escape fails the test:
+  P31's replication slot (`DROP DATABASE` does not drop a physical slot), the server files of
+  P14 and P33, and a changed `max_connections` (set back, and `RESET PERSIST`, by the account
+  that changed it). An M4 `INTO OUTFILE` file could not be removed by SQL; it would fail the row
+  (and every later run, as the file then exists). The fixture names are fixed, so two runs at once
+  would collide; the controller's lock wrapper serialises the Docker runs.
+- Under `--set full` every line (PostgreSQL 13–18, MySQL 8.0/8.4, MariaDB 10.6/10.11/11.4) must be
+  present, or the test fails; a narrower set skips its missing lines with a line on stderr (Q6).
+- **Paths (accepted narrowing).** The rows run on every line directly; only the server-blocked
+  rows of the `pr` lines (pg17, mysql84) run again **through `sshd-a`**. Across the suite, the
+  connect matrix runs every TCP target directly and through `sshd-a`, and the cancel, TLS-pin and
+  insecure-auth tests run each of their targets on both paths (the shared-session test is
+  SSH-only by nature); the terminated-backend test runs through `sshd-a` on the `pr` lines
+  only; the INSERT-cut and outage tests run directly only (their `ChaosProxy` sits in front of the
+  database's published port), and SSH death is covered by the parked-session test. This narrows
+  the brief's "every TCP test runs twice"; the controller accepted it (fix round 1, m4).
+- Each target's results go to the Docker artifact `t23-bypass-<target>.tsv`; the tables below
+  are generated from those of the final `--set full` run (the integration branch of Task 23
+  with the F1, F2 and F3 fixes and `m2b`). SQLite has its own test without a server (below).
+
+Cell values: a server code (SQLSTATE or vendor code), `1a`, `protocol`, `function` (the guard's
+text layer 1b refused a call no rollback undoes, before any I/O; F1 below), `gap` (L6 found the
+statement's effect after it ran and discarded the connection; the side channel shows nothing
+persisted, because the `ROLLBACK` undid it), **committed; L6 gap** (L6 found it and discarded the
+connection, but the change had been committed), `neutralised` (it ran; nothing was left), `lost`
+(the connection ended and the session recovered; nothing changed; seen only before the F2 fix,
+and no row allows it now), **escaped** (a side effect persisted and nothing caught it).
+
+**PostgreSQL** (pg13 = 13, pg14 = 14, pg15 = 15, pg16 = 16, pg17 = 17, pg18 = 18)
+
+| Row | Account | Statement | pg13 | pg14 | pg15 | pg16 | pg17 | pg18 |
+|---|---|---|---|---|---|---|---|---|
+| P1 | hv_ro | `WITH d AS (DELETE FROM hv_t23 RETURNING *) SELECT * FROM d` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P2 | hv_ro | `SELECT * INTO hv_t23_p2 FROM hv_t23` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P3 | hv_ro | `EXPLAIN (ANALYZE) DELETE FROM hv_t23` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P4 | hv_ro | `SELECT 1; DROP TABLE hv_t23` | 42601 | 42601 | 42601 | 42601 | 42601 | 42601 |
+| P4 | hv_ro | `COMMIT; DROP TABLE hv_t23` | 1a | 1a | 1a | 1a | 1a | 1a |
+| P5 | hv_ro | `SET TRANSACTION READ WRITE` | 25001 | 25001 | 25001 | 25001 | 25001 | 25001 |
+| P5 | hv_ro | `SET transaction_read_only = off` | 25001 | 25001 | 25001 | 25001 | 25001 | 25001 |
+| P5 | hv_ro | `SELECT set_config('transaction_read_only', 'off', true)` | 25001 | 25001 | 25001 | 25001 | 25001 | 25001 |
+| P7 | hv_ro | `COMMIT` | 1a | 1a | 1a | 1a | 1a | 1a |
+| P7 | hv_ro | `COMMIT AND CHAIN` | 1a | 1a | 1a | 1a | 1a | 1a |
+| P7 | hv_ro | `/* x */ END` | 1a | 1a | 1a | 1a | 1a | 1a |
+| P7 | hv_ro | `ROLLBACK` | 1a | 1a | 1a | 1a | 1a | 1a |
+| P8 | hv_ro | `CALL hv_t23_commit()` | 2D000 | 2D000 | 2D000 | 2D000 | 2D000 | 2D000 |
+| P9 | hv_ro | `DO $$ BEGIN INSERT INTO hv_t23 VALUES (9); END $$` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P14 | hv_ro | `COPY hv_t23 FROM '/etc/hostname'` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P26 | hv_ro | `CREATE TEMP TABLE hv_t23_tmp (a int)` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P37 | hv_ro | `SELECT nextval('hv_t23_seq')` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P37 | hv_ro | `SELECT setval('hv_t23_seq', 100)` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P38 | hv_ro | `SELECT hv_t23_sd_write()` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P38 | hv_ro | `SELECT hv_t23_dyn_write()` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P38 | hv_ro | `SELECT query_to_xml('DELETE FROM hv_t23 RETURNING a', true, true, '')` | 0A000 | 0A000 | 0A000 | 0A000 | 0A000 | 0A000 |
+| P38 | hv_ro | `SELECT lo_from_bytea(0, '\x6876')` | gap | gap | gap | 25006 | 25006 | 25006 |
+| P38 | hv_ro | `SELECT lo_create(0)` | gap | gap | gap | 25006 | 25006 | 25006 |
+| P38 | hv_ro | `SELECT lo_put(230023, 0, '\x00')` | 42501 | 42501 | 42501 | 25006 | 25006 | 25006 |
+| P38 | hv_ro | `SELECT lo_unlink(230023)` | 42501 | 42501 | 42501 | 25006 | 25006 | 25006 |
+| P38 | hv_ro | `SELECT lo_import('/etc/hostname')` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P35 | hv_ro | `SELECT txid_current()` | gap | gap | gap | gap | gap | gap |
+| P1 | hv_test | `WITH d AS (DELETE FROM hv_t23 RETURNING *) SELECT * FROM d` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P2 | hv_test | `SELECT * INTO hv_t23_p2 FROM hv_t23` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P3 | hv_test | `EXPLAIN (ANALYZE) DELETE FROM hv_t23` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P4 | hv_test | `SELECT 1; DROP TABLE hv_t23` | 42601 | 42601 | 42601 | 42601 | 42601 | 42601 |
+| P4 | hv_test | `COMMIT; DROP TABLE hv_t23` | 1a | 1a | 1a | 1a | 1a | 1a |
+| P5 | hv_test | `SET TRANSACTION READ WRITE` | 25001 | 25001 | 25001 | 25001 | 25001 | 25001 |
+| P5 | hv_test | `SET transaction_read_only = off` | 25001 | 25001 | 25001 | 25001 | 25001 | 25001 |
+| P5 | hv_test | `SELECT set_config('transaction_read_only', 'off', true)` | 25001 | 25001 | 25001 | 25001 | 25001 | 25001 |
+| P7 | hv_test | `COMMIT` | 1a | 1a | 1a | 1a | 1a | 1a |
+| P7 | hv_test | `COMMIT AND CHAIN` | 1a | 1a | 1a | 1a | 1a | 1a |
+| P7 | hv_test | `/* x */ END` | 1a | 1a | 1a | 1a | 1a | 1a |
+| P7 | hv_test | `ROLLBACK` | 1a | 1a | 1a | 1a | 1a | 1a |
+| P8 | hv_test | `CALL hv_t23_commit()` | 2D000 | 2D000 | 2D000 | 2D000 | 2D000 | 2D000 |
+| P9 | hv_test | `DO $$ BEGIN INSERT INTO hv_t23 VALUES (9); END $$` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P14 | hv_test | `COPY hv_t23 FROM '/etc/hostname'` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P26 | hv_test | `CREATE TEMP TABLE hv_t23_tmp (a int)` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P37 | hv_test | `SELECT nextval('hv_t23_seq')` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P37 | hv_test | `SELECT setval('hv_t23_seq', 100)` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P38 | hv_test | `SELECT hv_t23_sd_write()` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P38 | hv_test | `SELECT hv_t23_dyn_write()` | 25006 | 25006 | 25006 | 25006 | 25006 | 25006 |
+| P38 | hv_test | `SELECT query_to_xml('DELETE FROM hv_t23 RETURNING a', true, true, '')` | 0A000 | 0A000 | 0A000 | 0A000 | 0A000 | 0A000 |
+| P38 | hv_test | `SELECT lo_from_bytea(0, '\x6876')` | gap | gap | gap | 25006 | 25006 | 25006 |
+| P38 | hv_test | `SELECT lo_create(0)` | gap | gap | gap | 25006 | 25006 | 25006 |
+| P38 | hv_test | `SELECT lo_put(230023, 0, '\x00')` | gap | gap | gap | 25006 | 25006 | 25006 |
+| P38 | hv_test | `SELECT lo_unlink(230023)` | gap | gap | gap | 25006 | 25006 | 25006 |
+| P38 | hv_test | `SELECT lo_import('/etc/hostname')` | gap | gap | gap | 25006 | 25006 | 25006 |
+| P35 | hv_test | `SELECT txid_current()` | gap | gap | gap | gap | gap | gap |
+| P5 | hv_ro | `RESET transaction_read_only` | neutralised | neutralised | neutralised | 0A000 | 0A000 | 0A000 |
+| P6 | hv_ro | `SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE` | neutralised | neutralised | neutralised | neutralised | neutralised | neutralised |
+| P6 | hv_ro | `SET default_transaction_read_only = off` | neutralised | neutralised | neutralised | neutralised | neutralised | neutralised |
+| P6 | hv_ro | `RESET ALL` | neutralised | neutralised | neutralised | neutralised | neutralised | neutralised |
+| P10 | hv_ro | `PREPARE hv_t23_s AS SELECT 1` | neutralised | neutralised | neutralised | neutralised | neutralised | neutralised |
+| P15 | hv_ro | `SELECT pg_advisory_lock(230023)` | neutralised | neutralised | neutralised | neutralised | neutralised | neutralised |
+| P15 | hv_ro | `LOCK TABLE hv_t23 IN ACCESS EXCLUSIVE MODE` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P17 | hv_ro | `SET search_path = pg_catalog` | neutralised | neutralised | neutralised | neutralised | neutralised | neutralised |
+| P23 | hv_ro | `SET standard_conforming_strings = off` | neutralised | neutralised | neutralised | neutralised | neutralised | neutralised |
+| P25 | hv_ro | `NOTIFY hv_t23, 'x'` | neutralised | neutralised | neutralised | neutralised | neutralised | neutralised |
+| P25 | hv_ro | `SELECT pg_notify('hv_t23', 'x')` | neutralised | neutralised | neutralised | neutralised | neutralised | neutralised |
+| P26 | hv_ro | `LISTEN hv_t23` | neutralised | neutralised | neutralised | neutralised | neutralised | neutralised |
+| P26 | hv_ro | `DECLARE hv_t23_c CURSOR WITH HOLD FOR SELECT 1` | neutralised | neutralised | neutralised | neutralised | neutralised | neutralised |
+| P11 | hv_ro | `SELECT pg_terminate_backend(<admin's backend>)` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P13 | hv_ro | `COPY (SELECT 1) TO PROGRAM 'true'` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P14 | hv_ro | `SELECT pg_read_file('/etc/hostname')` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P14 | hv_ro | `COPY hv_t23 TO '/tmp/hv_t23_copy'` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P16 | hv_ro | `SET ROLE hv_test` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P16 | hv_ro | `SET SESSION AUTHORIZATION hv_test` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P31 | hv_ro | `SELECT pg_create_physical_replication_slot('hv_t23_slot')` | function | function | function | function | function | function |
+| P31 | hv_ro | `DO $$ BEGIN EXECUTE 'SELECT pg_create_physical_' \|\| 'replication_slot(''hv_t23_slot'')'; END $$` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P32 | hv_ro | `SELECT pg_switch_wal()` | function | function | function | function | function | function |
+| P32 | hv_ro | `DO $$ BEGIN EXECUTE 'SELECT pg_switch' \|\| '_wal()'; END $$` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P32 | hv_ro | `SELECT pg_logical_emit_message(true, 'hv_t23', 'x')` | function | function | function | function | function | function |
+| P32 | hv_ro | `SELECT pg_logical_emit_message(false, 'hv_t23', 'x')` | function | function | function | function | function | function |
+| P32 | hv_ro | `DO $$ BEGIN EXECUTE 'SELECT pg_logical_' \|\| 'emit_message(true, ''hv_t23'', ''x'')'; END $$` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P32 | hv_ro | `DO $$ BEGIN EXECUTE 'SELECT pg_logical_' \|\| 'emit_message(false, ''hv_t23'', ''x'')'; END $$` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P33 | hv_ro | `SELECT lo_export(230023, '/tmp/hv_t23_lo')` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P34 | hv_ro | `CHECKPOINT` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P34 | hv_ro | `SELECT pg_stat_reset()` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+
+Through `sshd-a` (pg17): 54 server-blocked rows, 0 different from the direct leg.
+
+*F1 fix (finding F1, `m2b-t05` "F1").* The P31 and P32 rows above changed with it:
+
+- `function` is the guard's text layer (1b), before any I/O.
+- The `DO … EXECUTE` rows build the name at run time. They pass the text layer and meet
+  `hv_ro`'s missing privilege, after the remediation's `REVOKE` of `pg_logical_emit_message`.
+  That is why the label rests on the probe, not on the text layer.
+
+Before that `REVOKE`, while `PUBLIC` still holds `EXECUTE` (the default of `hv_t23` as
+created), the suite runs these rows. On every line `hv_ro` reads guarded with
+`NonTransactionalWrite`, and after the version's `REVOKE` line it reads enforced again:
+
+| Row | Account | Statement | pg13 | pg14 | pg15 | pg16 | pg17 | pg18 |
+|---|---|---|---|---|---|---|---|---|
+| P32 | hv_ro (PUBLIC EXECUTE) | `SELECT pg_logical_emit_message(false, 'hv_t23', 'x')` | function | function | function | function | function | function |
+| P32 | hv_ro (PUBLIC EXECUTE) | `SELECT pg_catalog.pg_logical_emit_message(false, 'hv_t23', 'x'::bytea)` | function | function | function | function | function | function |
+| P32 | hv_ro (PUBLIC EXECUTE) | `SELECT "pg_catalog"."pg_logical_emit_message"(false, 'hv_t23', 'x')` | function | function | function | function | function | function |
+| P32 | hv_ro (PUBLIC EXECUTE) | `SELECT PG_LOGICAL_EMIT_MESSAGE /* c */ (false, 'hv_t23', 'x')` | function | function | function | function | function | function |
+| P32 | hv_ro (PUBLIC EXECUTE) | `SELECT U&"pg\005flogical_emit_message"(false, 'hv_t23', 'x')` | function | function | function | function | function | function |
+| P32 | hv_ro (PUBLIC EXECUTE) | `DO $$ BEGIN PERFORM pg_logical_emit_message(false, 'hv_t23', 'x'); END $$` | function | function | function | function | function | function |
+| P32 | hv_ro (PUBLIC EXECUTE) | `SELECT pg_logical_emit_message(true, 'hv_t23', 'x')` | function | function | function | function | function | function |
+
+**MySQL** (mysql80 = 8.0, mysql84 = 8.4)
+
+| Row | Account | Statement | mysql80 | mysql84 |
+|---|---|---|---|---|
+| M1 | hv_ro | `/*!50000 DROP TABLE hv_t23_bypass */` | 1792 | 1792 |
+| M1 | hv_ro | `/*!50000 INSERT INTO hv_t23_bypass VALUES (50) */` | 1142 | 1142 |
+| M2 | hv_ro | `SELECT 1; DROP TABLE hv_t23_bypass` | 1064 | 1064 |
+| M5 | hv_ro | `SELECT * FROM hv_t23_bypass FOR UPDATE` | 1142 | 1142 |
+| M5 | hv_ro | `LOCK TABLES hv_t23_bypass WRITE` | protocol | protocol |
+| M6 | hv_ro | `PREPARE hv_t23_s FROM 'DELETE FROM hv_t23_bypass'` | protocol | protocol |
+| M8 | hv_ro | `CREATE TABLE hv_t23_m8 (a int)` | 1142 | 1142 |
+| M8 | hv_ro | `TRUNCATE TABLE hv_t23_bypass` | 1792 | 1792 |
+| M8 | hv_ro | `DELETE FROM hv_t23_bypass` | 1142 | 1142 |
+| M12 | hv_ro | `HANDLER hv_t23_bypass OPEN` | protocol | protocol |
+| M13 | hv_ro | `XA START 'hv_t23'` | protocol | protocol |
+| M17 | hv_ro | `CREATE TEMPORARY TABLE hv_t23_tmp (a int)` | 1044 | 1044 |
+| M9 | hv_ro | `SET SESSION TRANSACTION READ WRITE, then CREATE TABLE` | 1142 | 1142 |
+| M5 | hv_ro | `SELECT GET_LOCK('hv_m5', 0)` | neutralised | neutralised |
+| M1 | hv_test | `/*!50000 DROP TABLE hv_t23_bypass */` | 1792 | 1792 |
+| M1 | hv_test | `/*!50000 INSERT INTO hv_t23_bypass VALUES (50) */` | 1792 | 1792 |
+| M2 | hv_test | `SELECT 1; DROP TABLE hv_t23_bypass` | 1064 | 1064 |
+| M5 | hv_test | `SELECT * FROM hv_t23_bypass FOR UPDATE` | 1792 | 1792 |
+| M5 | hv_test | `LOCK TABLES hv_t23_bypass WRITE` | protocol | protocol |
+| M6 | hv_test | `PREPARE hv_t23_s FROM 'DELETE FROM hv_t23_bypass'` | protocol | protocol |
+| M8 | hv_test | `CREATE TABLE hv_t23_m8 (a int)` | 1792 | 1792 |
+| M8 | hv_test | `TRUNCATE TABLE hv_t23_bypass` | 1792 | 1792 |
+| M8 | hv_test | `DELETE FROM hv_t23_bypass` | 1792 | 1792 |
+| M12 | hv_test | `HANDLER hv_t23_bypass OPEN` | protocol | protocol |
+| M13 | hv_test | `XA START 'hv_t23'` | protocol | protocol |
+| M17 | hv_test | `CREATE TEMPORARY TABLE hv_t23_tmp (a int)` | 1792 | 1792 |
+| M9 | hv_test | `SET SESSION TRANSACTION READ WRITE, then CREATE TABLE` | 1792 | 1792 |
+| M5 | hv_test | `SELECT GET_LOCK('hv_m5', 0)` | neutralised | neutralised |
+| M1 | hv_ro | `SELECT 1 /*!50000 , (SELECT GET_LOCK('hv_t23_m1', 0)) */` | neutralised | neutralised |
+| M3 | hv_ro | `SET sql_mode = 'NO_BACKSLASH_ESCAPES'` | neutralised | neutralised |
+| M5 | hv_ro | `SELECT GET_LOCK('hv_t23_m5', 0)` | neutralised | neutralised |
+| M9 | hv_ro | `SET SESSION TRANSACTION READ WRITE` | neutralised | neutralised |
+| M9 | hv_ro | `SET @@session.transaction_read_only = 0` | neutralised | neutralised |
+| M14 | hv_ro | `SET @hv_t23 = 1` | neutralised | neutralised |
+| M4 | hv_ro | `SELECT a FROM hv_t23_bypass INTO OUTFILE '/tmp/hv_t23_out'` | 1227 | 1227 |
+| M10 | hv_ro | `SET GLOBAL max_connections = 999` | 1227 | 1227 |
+| M10 | hv_ro | `SET PERSIST max_connections = 999` | 1227 | 1227 |
+| M10 | hv_ro | `RESET PERSIST max_connections` | 3615 | 3615 |
+| M10 | hv_ro | `FLUSH TABLES` | 1227 | 1227 |
+| M10 | hv_ro | `KILL <admin's backend>` | 1095 | 1095 |
+| M11 | hv_ro | `CREATE FUNCTION hv_t23_udf RETURNS STRING SONAME 'hv_t23.so'` | protocol | protocol |
+| M7 | hv_ro | `CALL hv_t23_escape()` | 1370 | 1370 |
+| n-3 | hv_ro | `ALTER USER USER() IDENTIFIED BY '…'` | 1792 | 1792 |
+| n-3 | hv_ro | `ALTER USER CURRENT_USER() IDENTIFIED BY '…'` | 1792 | 1792 |
+| n-3 | hv_ro | `SET PASSWORD = '…'` | gap | gap |
+| M7/I-2 | hv_test | `CALL hv_t23_escape()` | **committed; L6 gap** | **committed; L6 gap** |
+| M7/I-2 | hv_test | `CALL hv_t23_escape_ro()` | **escaped** (committed; guarded) | **escaped** (committed; guarded) |
+
+Through `sshd-a` (mysql84): 24 server-blocked rows, 0 different from the direct leg.
+
+**MariaDB (recorded, not judged; the label stays guarded, C19)** (mariadb106 = 10.6, mariadb1011 = 10.11, mariadb114 = 11.4)
+
+| Row | Account | Statement | mariadb106 | mariadb1011 | mariadb114 |
+|---|---|---|---|---|---|
+| M1 | hv_ro | `/*!50000 DROP TABLE hv_t23_bypass */` | 1792 | 1792 | 1792 |
+| M1 | hv_ro | `/*!50000 INSERT INTO hv_t23_bypass VALUES (50) */` | 1142 | 1142 | 1142 |
+| M2 | hv_ro | `SELECT 1; DROP TABLE hv_t23_bypass` | 1064 | 1064 | 1064 |
+| M5 | hv_ro | `SELECT * FROM hv_t23_bypass FOR UPDATE` | 1792 | 1792 | 1792 |
+| M5 | hv_ro | `LOCK TABLES hv_t23_bypass WRITE` | gap | gap | gap |
+| M6 | hv_ro | `PREPARE hv_t23_s FROM 'DELETE FROM hv_t23_bypass'` | protocol | protocol | protocol |
+| M8 | hv_ro | `CREATE TABLE hv_t23_m8 (a int)` | 1142 | 1142 | 1142 |
+| M8 | hv_ro | `TRUNCATE TABLE hv_t23_bypass` | 1792 | 1792 | 1792 |
+| M8 | hv_ro | `DELETE FROM hv_t23_bypass` | 1142 | 1142 | 1142 |
+| M12 | hv_ro | `HANDLER hv_t23_bypass OPEN` | neutralised | neutralised | neutralised |
+| M13 | hv_ro | `XA START 'hv_t23'` | 1400 | 1400 | 1400 |
+| M17 | hv_ro | `CREATE TEMPORARY TABLE hv_t23_tmp (a int)` | 1044 | 1044 | 1044 |
+| M9 | hv_ro | `SET SESSION TRANSACTION READ WRITE, then CREATE TABLE` | 1142 | 1142 | 1142 |
+| M5 | hv_ro | `SELECT GET_LOCK('hv_m5', 0)` | neutralised | neutralised | neutralised |
+| M1 | hv_test | `/*!50000 DROP TABLE hv_t23_bypass */` | 1792 | 1792 | 1792 |
+| M1 | hv_test | `/*!50000 INSERT INTO hv_t23_bypass VALUES (50) */` | 1792 | 1792 | 1792 |
+| M2 | hv_test | `SELECT 1; DROP TABLE hv_t23_bypass` | 1064 | 1064 | 1064 |
+| M5 | hv_test | `SELECT * FROM hv_t23_bypass FOR UPDATE` | 1792 | 1792 | 1792 |
+| M5 | hv_test | `LOCK TABLES hv_t23_bypass WRITE` | gap | gap | gap |
+| M6 | hv_test | `PREPARE hv_t23_s FROM 'DELETE FROM hv_t23_bypass'` | protocol | protocol | protocol |
+| M8 | hv_test | `CREATE TABLE hv_t23_m8 (a int)` | 1792 | 1792 | 1792 |
+| M8 | hv_test | `TRUNCATE TABLE hv_t23_bypass` | 1792 | 1792 | 1792 |
+| M8 | hv_test | `DELETE FROM hv_t23_bypass` | 1792 | 1792 | 1792 |
+| M12 | hv_test | `HANDLER hv_t23_bypass OPEN` | neutralised | neutralised | neutralised |
+| M13 | hv_test | `XA START 'hv_t23'` | 1400 | 1400 | 1400 |
+| M17 | hv_test | `CREATE TEMPORARY TABLE hv_t23_tmp (a int)` | 1792 | 1792 | 1792 |
+| M9 | hv_test | `SET SESSION TRANSACTION READ WRITE, then CREATE TABLE` | 1792 | 1792 | 1792 |
+| M5 | hv_test | `SELECT GET_LOCK('hv_m5', 0)` | neutralised | neutralised | neutralised |
+| M1 | hv_ro | `SELECT 1 /*!50000 , (SELECT GET_LOCK('hv_t23_m1', 0)) */` | neutralised | neutralised | neutralised |
+| M3 | hv_ro | `SET sql_mode = 'NO_BACKSLASH_ESCAPES'` | neutralised | neutralised | neutralised |
+| M5 | hv_ro | `SELECT GET_LOCK('hv_t23_m5', 0)` | neutralised | neutralised | neutralised |
+| M9 | hv_ro | `SET SESSION TRANSACTION READ WRITE` | neutralised | neutralised | neutralised |
+| M9 | hv_ro | `SET @@session.transaction_read_only = 0` | neutralised | neutralised | neutralised |
+| M14 | hv_ro | `SET @hv_t23 = 1` | neutralised | neutralised | neutralised |
+| M4 | hv_ro | `SELECT a FROM hv_t23_bypass INTO OUTFILE '/tmp/hv_t23_out'` | 1227 | 1227 | 1227 |
+| M10 | hv_ro | `SET GLOBAL max_connections = 999` | 1227 | 1227 | 1227 |
+| M10 | hv_ro | `SET PERSIST max_connections = 999` | 1064 | 1064 | 1064 |
+| M10 | hv_ro | `RESET PERSIST max_connections` | 1064 | 1064 | 1064 |
+| M10 | hv_ro | `FLUSH TABLES` | 1227 | 1227 | 1227 |
+| M10 | hv_ro | `KILL <admin's backend>` | 1095 | 1095 | 1095 |
+| M11 | hv_ro | `CREATE FUNCTION hv_t23_udf RETURNS STRING SONAME 'hv_t23.so'` | 1792 | 1792 | 1792 |
+| M7 | hv_ro | `CALL hv_t23_escape()` | 1370 | 1370 | 1370 |
+| n-3 | hv_ro | `ALTER USER USER() IDENTIFIED BY '…'` | 1064 | 1064 | 1064 |
+| n-3 | hv_ro | `ALTER USER CURRENT_USER() IDENTIFIED BY '…'` | 1792 | 1792 | 1792 |
+| n-3 | hv_ro | `SET PASSWORD = '…'` | gap | gap | gap |
+| M7/I-2 | hv_test | `CALL hv_t23_escape()` | **committed; L6 gap** | **committed; L6 gap** | **committed; L6 gap** |
+| M7/I-2 | hv_test | `CALL hv_t23_escape_ro()` | **committed; L6 gap** | **committed; L6 gap** | **committed; L6 gap** |
+
+**SQLite (no server; runs on every PR).** A read-only session over a fresh file refused `INSERT`
+(L9), `ATTACH '<dir>/n.db'` and `VACUUM INTO '<dir>/c.db'` (L2), `PRAGMA query_only = 0` (L1),
+`CREATE TEMP TABLE` (L8), `writefile` and `load_extension` (L3), `PRAGMA writable_schema = 1`
+(L4), `PRAGMA user_version = 7` and `PRAGMA journal_mode = WAL` (L9), and `BEGIN IMMEDIATE`
+(1a), staying usable after each. Side channel: the directory holds only `db.sqlite`, and the
+database is byte-identical.
+
+**What the results say.**
+
+- **PostgreSQL 13–18: every server-blocked row is stopped by L3, 1a or the protocol alone** — the
+  superuser rows show it — and no row left a trace. `hv_ro` meets its missing privilege first on
+  `COPY FROM` a file, `nextval`/`setval` and the large-object rows of PostgreSQL 13–15 (`42501`).
+  P9's `DO` block is `25006`.
+- **Large objects (T5 review m-5).** The read-only transaction refuses `lo_create`,
+  `lo_from_bytea`, `lo_put`, `lo_unlink` and `lo_import` only from **PostgreSQL 16** (`25006`).
+  On 13–15 they run: they assign a transaction ID, the guard's `ROLLBACK` undoes them, and L6's
+  canary reports the gap and discards the connection. Nothing persisted on any line (the side
+  channel counts the large objects and reads the fixture one). So on 13–15 it is L6, not L3, that
+  stops them; m-5's "only the read-only transaction stops it" holds from 16.
+- `RESET transaction_read_only` runs on 13–15 — it restores L4's `default_transaction_read_only
+  = on`, a no-op — and is `0A000` from 16. `query_to_xml` cannot run a `DELETE` at all (`0A000`);
+  a PL/pgSQL `EXECUTE` (`hv_t23_dyn_write`) stands for P38's dynamic SQL and is `25006`.
+  `txid_current()` (P35) is a gap on every line: the canary trips with no write (the S-10 false
+  positive class, fail closed).
+- **P32 (finding F1).** Before the fix, `pg_logical_emit_message(true, …)` was a gap (rolled
+  back), and its non-transactional form, executable by `PUBLIC` on 13–18, let `hv_ro`, labelled
+  enforced, write a WAL record that no rollback undoes and no canary sees (the failing test
+  `zz_docker_m2b_findings::f1_pg_enforced_role_cannot_write_wal_messages` held it).
+  **Fixed** (`m2b-t05`, "F1"; controller ruling). The guard refuses the call in every spelling
+  before any I/O (`function`). The probe reads a role that may execute it as guarded
+  (`NonTransactionalWrite`) until the remediation's new optional `REVOKE`. The finding test is
+  now the rows above.
+- **MySQL 8.0/8.4: every server-blocked row is stopped by L4 or the protocol alone** — the owner
+  rows are `1792` or `protocol` — and no row left a trace. The brief's M9 is `1792` for the owner
+  (the reset and the replay restore the read-only setting; the snapshot shows no `hv_m9`) and
+  `1142` for `hv_ro`. User locks (`GET_LOCK`, also inside an executable comment) do not survive
+  the request.
+- **T18 carries.** `CALL` of a procedure that commits, opens a read-write transaction, writes and
+  commits: `hv_ro` has no `EXECUTE` (`1370`). The owner's `hv_t23_escape` (ends with no
+  transaction) is a **committed; L6 gap** on MySQL and MariaDB: L6 detects it and discards the
+  connection, but the row **was committed** — L3 and L4 cannot stop a procedure that overrides the
+  session's read-only setting. The owner's `hv_t23_escape_ro` (ends inside a new read-only
+  transaction) **escapes every runtime layer** on MySQL (on MariaDB it too ends as a committed
+  gap); only L5 is honest: the account is labelled guarded (asserted). Both are the `EXECUTE`
+  residual Task 18 recorded; least privilege (no `EXECUTE`) is the remedy. `SET GLOBAL` and
+  `SET PERSIST` as `hv_ro` are `1227` and change nothing (side channel); before the F2 fix they
+  ended the connection (`lost`, `m2b-fix-f2` below); `RESET PERSIST` is `3615` — nothing is persisted, so the server answers before
+  any privilege check, and **L5 for `RESET PERSIST` is untested by this fixture**. Review n-3:
+  `ALTER USER USER()` and `ALTER USER CURRENT_USER()` are `1792`, `SET PASSWORD` a gap (refused
+  after its implicit commit, judged), and `hv_ro` still signs in with the matrix password.
+- **MariaDB (recorded).** Like MySQL on the read-only setting (`1792`), with these differences:
+  `LOCK TABLES` is preparable and commits implicitly (a gap, nothing persisted, discarded);
+  `HANDLER … OPEN` runs (neutralised by `COM_RESET_CONNECTION`); `XA START` is `1400`;
+  `SET PERSIST`, `RESET PERSIST` and `ALTER USER USER()` are syntax errors there
+  (`CURRENT_USER()` is `1792`); `SET GLOBAL` is `1227` in both protocols. The label stays guarded
+  (C19); nothing here is claimed as enforced.
+- **Through `sshd-a`** (pg17 over the channel's stream, mysql84 through the loopback forwarder)
+  every server-blocked row gave the direct leg's result.
+
+**Findings.** Task 23 held each finding as a failing test in `tests/zz_docker_m2b_findings.rs`
+(the file sorted last on purpose: cargo stops at the first failing test binary, and a known-red
+finding must not hide the rest of the Docker suite), routed by the controller. All three are
+fixed and their tests are now normal tests of the suite; the file is gone.
+
+- **F1** (role probe / remediation, T5/T18): above. Fixed. Its test moved into
+  `docker_m2b_bypass.rs` as normal rows.
+- **F2** (MySQL driver, T13, vendored `mysql_async`): on MySQL 8.0 and 8.4 an account without
+  `SYSTEM_VARIABLES_ADMIN` that sends `SET GLOBAL …` or `SET PERSIST …` through the
+  prepared-statement protocol (every user statement of a session) loses the connection: the
+  client reads EOF and the server counts an aborted client. Over `COM_QUERY` the same text is
+  `1227`, as is every other privilege refusal tried (`SET SESSION sql_log_bin`, `FLUSH TABLES`, a
+  `SELECT` on `mysql.user`); MariaDB answers `1227` in both protocols. The user is told
+  "connection lost, outcome unknown" for a statement the server refused, and the session
+  reconnects. Nothing changes on the server. **Fixed** (`m2b-fix-f2` below; ADR 0002
+  `m2b-fix-f2`).
+- **F3** (session reset, T7; pool, T15) — **fixed** on `m2b-fix-f3` (merged into this branch;
+  ADR section `m2b-t07 — internal value reads`): released PostgreSQL pooled sessions were never
+  parked, because the reset's verify probe ran on the count-only extended protocol. Its test is
+  now `docker_m2b_cancel_reconnect::a_released_pooled_session_is_parked_and_reused`, and the T17
+  R2 test runs on pg17 as well as mysql84.
+
+**Other conformance results (exit criteria E1–E3, E6–E8, E14).** `docker_m2b_connect.rs`: every
+TCP target of the matrix (PostgreSQL 14–18, pg17-tls, MySQL 8.0/8.4, MariaDB 10.6/10.11/11.4)
+connects directly and through `sshd-a`, and pg17 and mysql84 also through the `sshd-a` → `sshd-b`
+chain (the first hop with the encrypted key's passphrase, the second with the bastion password,
+from the overlay); the bastions' host keys are trusted `Strict` from their published keys. Through
+SSH the trail is `Ssh, Connect, [Tls,] SignIn, CheckServer`, the address private, `via` the last
+hop, PostgreSQL on the channel's stream and MySQL through the forwarder. A MySQL-family server
+without TLS needs `Disable` through SSH: its `Auto` falls back to plaintext on loopback only (the
+open PO question Q41). Two profiles share one SSH session, and it stays up after one profile's
+connection has closed on the server. `docker_m2b_tls_ssh.rs`: pg17-tls and mysql84 in `Auto` are
+reviewed once, pinned (`TlsVerified::Pinned`, one `AddPin` for the database host, its in-network
+name through SSH) and reconnect pinned headless; mysql84 `VerifyCa` with its container CA is
+`CaOnly`; pg17-auth's md5 and cleartext roles are refused through SSH under `Auto`
+(`auth.insecure_method`), allowed with `Disable` and on loopback, and SCRAM connects.
+`docker_m2b_cancel_reconnect.rs`: a cancel ends `pg_sleep(60)` and a `SLEEP` over a table within
+1 s on pg17, mysql84 and mariadb114, directly and through SSH, and an endless SQLite CTE (MySQL's
+`SELECT SLEEP(60)` alone is answered with its result when killed, so it finishes,
+`AlreadyFinished`, also within 1 s); a terminated backend inside a transaction gives `SessionLost
+{ open_tx, temp_objects }` and `Lost` (T17 C1: never replayed; the brief's `Connected` predates
+C1), and Retry connects without the old temporary table; an `INSERT` cut mid-flight is
+`ConnectionLost { outcome_unknown: true }` and ran at most once; a 20 s outage reconnects within
+the B19 schedule (bounded at 75 s: the sixth attempt is due 45 s ± 20 % after the loss, past the
+brief's 45 s); the read-only guard's `BEGIN` answered by `FATAL 57P01` reconnects (T17 P1; the
+named exception in `readonly.rs`: `lost_class` takes `recovery::connection_ending`, the reply is
+`ConnectionLost`); an SSH chain's death closes the parked pooled sessions (`close_idle`, T17 R2;
+a mutation run without it timed out on MySQL). The waits are conditions, never fixed sleeps
+(fix round 1, I1): a request "has run for 600 ms" is read from the session's own `Busy { since }`,
+and a released session "is parked" from `SessionManager::parked_count` (a read-only accessor added
+to the pool as a named exception).
+
+**MySQL client-certificate sign-in (T13 carry).** Not done in Task 23 (it needs a compose
+change and an init script that only `cargo xtask docker up` applies); done on `m2b-fix-f2` with
+the `mysql84-x509` target (below).
+
+## m2b-t07 — internal value reads (finding F3)
+
+**The defect.** T23's F3: the reset's verify probe and the schema probe ran with
+`ExecOpts::default()`, the extended protocol, which the PostgreSQL and MySQL drivers run
+count-only (ADR 0002 m2b-t10, m2b-t13: the rows are counted, their values dropped). The verify
+probe never read its `t`, so on PostgreSQL every pooled release broke its session and every
+borrow opened a new connection. The schema probe read no row on PostgreSQL and MySQL, so a
+re-probe forgot the context (`schema: None`) instead of updating it, and no reset or guarded
+replay restored a schema. `FakeDriver` answered scripted rows on either protocol, so the T7 and
+T15 tests passed.
+
+**The rule.** Every statement of Hacivat's own whose values it reads runs through
+`ExecOpts::values(max_rows)` (`hacivat-driver`: the simple protocol, whose rows every driver
+returns as text): the verify probe (one row), the schema probe (`SCHEMA_PROBE_MAX_ROWS`, 128:
+SQLite answers one row per attached database, at most 125) and, as before, the role probe, its
+PostgreSQL identity check and the guard's canary (T18's `simple(..)`, the same options). User
+statements stay on the extended protocol, whose command tag the read-only post-check reads
+(review M2). Audited, reading no value: the environment plan, `ROLLBACK`, `SET autocommit`, the
+guard's `before`, `after` (its notice codes only) and reset replay, and the side connection's
+`KILL`/`pg_terminate_backend` (`batch`). A verify probe that answers no row, or anything but
+true, still breaks the session (fail closed).
+
+**The fake cannot hide it again.** `FakeDriver::execute` with `Protocol::Extended` returns a
+scripted answer without its row values (the row count stays), on every engine, as the real
+count-only path does; a script reaches a value read only through `ExecOpts::values`. Before the
+session fix this turned 13 session tests red (pool 5, env_schema 4, manager_m2b, readonly and
+session_actor 1 each); `fake::tests::the_count_only_path_keeps_no_values` holds the contract.
+
+**Behaviour change.** With the context known after a re-probe, a pooled session's reset and a
+read-only session's guarded replay now restore the schema (PostgreSQL the whole `search_path`,
+M11), as the m2b-t07 section always specified.
+
+**Tests.** Driver contract on a real server: `hacivat-driver-pg`
+`docker_exec::internal_value_reads_decode_through_the_values_path` (after the driver's reset the
+verify probe decodes `t` and the schema probe's five columns decode; the default path keeps no
+value). Session over Docker, in `docker_m2b_cancel_reconnect.rs` (F3 moved there from
+`zz_docker_m2b_findings.rs`): `a_released_pooled_session_is_parked_and_reused` and
+`the_schema_probe_reads_the_servers_answer` on pg17 and mysql84, and T17 R2's
+`ssh_death_closes_parked_pooled_sessions` now runs pg17 too (T23 deviation 7).
+
+## m2b-fix-f2 — F2 fixed
+
+- **F2 is fixed in the MySQL driver** (ADR 0002 `m2b-fix-f2`): MySQL 8.0 and 8.4 answered the
+  prepare of a refused `SET GLOBAL`/`SET PERSIST` with a bare OK packet, which the client
+  cannot read as a prepare reply, so the connection ended. The driver now runs a `SET` asked
+  for over the extended protocol as `COM_QUERY`. A read-only or read-write session of an
+  account without the privilege gets `Db` with the server's `1227` and its message, keeps its
+  connection (no `SessionLost`, no reconnect), and its next statement runs.
+- **Bypass suite.** M10 `SET GLOBAL max_connections = 999` and `SET PERSIST
+  max_connections = 999` as `hv_ro` are `1227` on mysql80 and mysql84 (before the fix, the
+  `lost` cells of the `m2b-t23` MySQL table); `lost` is no longer an accepted outcome for those rows. Every
+  other MySQL and MariaDB row gave the `m2b-t23` result again, the `SET` rows that run (M3, M9,
+  M14) still `neutralised` and n-3's `SET PASSWORD` still a gap.
+- `f2_mysql_refused_set_global_is_a_refusal_not_a_lost_connection` left
+  `zz_docker_m2b_findings.rs` for `docker_m2b_bypass.rs`
+  (`mysql_refused_set_global_is_a_refusal_on_a_live_session`, under the bypass rows' fixture
+  lock, since a row may change `hv_ro`'s password for a moment; on the lines mysql80 and
+  mysql84, every one required under `--set full`). F1 and F3 had left it already, so the
+  integration branch deletes the file.
+- **MySQL client-certificate sign-in (the `m2b-t23` "Not done", T13 carry).** A new full-set
+  target, `mysql84-x509` (port 33094; ADR 0002 `m2b-fix-f2`), and its generator service
+  `mysql-x509-certs`. `mysql_client_certificate_sign_in` connects `hv_x509` directly under
+  `VerifyCa` with the generated CA, with the plain and the encrypted client key (passphrase
+  from the overlay), and is refused (`1045`) without a certificate. It takes the target through
+  `require_target`; like every full-set target it needs the controller's `cargo xtask docker up
+  --set full` before a `--set full` run (the `pr` set leaves it out). The generic MySQL loops of
+  the full set run on it too: it is mysql84 with the same fixtures.

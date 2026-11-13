@@ -172,3 +172,19 @@ port = 22
 user = "hv_ssh"
 via = "sshd-a"
 sets = ["pr", "full"]
+
+# ## m2b-fix-f2-x509
+# mysql84 that trusts a throwaway test CA (T13 carry): `ssl_ca` is the CA the
+# `mysql-x509-certs` service generates at `docker up`, the server presents a certificate that CA
+# signed, and `hv_x509` signs in only with the matching client certificate (`REQUIRE X509`).
+# The CA and the certificates are Docker artifacts (`mysql-x509-*.pem`), never committed.
+
+[[target]]
+id = "mysql84-x509"
+service = "mysql84-x509"
+engine = "mysql"
+major = "8.4"
+port = 33094
+internal_port = 3306
+tls_default = "self_signed"
+sets = ["full"]

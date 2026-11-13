@@ -42,6 +42,11 @@ pub(crate) fn family(kind: DbmsKind) -> Family {
     }
 }
 
+/// The most rows the schema probe keeps: SQLite answers one per attached database (at most
+/// 125), the others one. The probe reads values, so it runs through `ExecOpts::values`, never
+/// the count-only extended protocol (finding F3).
+pub(crate) const SCHEMA_PROBE_MAX_ROWS: usize = 128;
+
 /// The probe statement of `kind` (empty for an engine without one).
 pub fn schema_probe_sql(kind: DbmsKind) -> &'static str {
     match family(kind) {

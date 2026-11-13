@@ -22,6 +22,10 @@
 //! M2b (Task 17 fix round 1, review I4): a connection that holds its endpoint's stream
 //! (`consumes_factory`) fails its ping with `Io(ConnectionReset)` once that stream has ended,
 //! so a test sees an SSH channel die with its tunnel, as a real driver would.
+//!
+//! M2b (finding F3): `execute` with [`Protocol::Extended`] answers a scripted result without
+//! its row values (the row count stays), as the PostgreSQL and MySQL drivers do. A statement
+//! whose values the caller reads must run with `ExecOpts::values`, or its script is not seen.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -39,7 +43,8 @@ use tokio::sync::Notify;
 
 use crate::driver::{
     CancelHandle, CancelMechanism, Driver, DriverCaps, DriverConnect, DriverDescriptor,
-    DriverEvent, Endpoint, ExecOpts, ExecSummary, InsecureAuth, ProbeWarning, RawConn, TxStatus,
+    DriverEvent, Endpoint, ExecOpts, ExecSummary, InsecureAuth, ProbeWarning, Protocol, RawConn,
+    TxStatus,
 };
 use crate::errors::{RawError, RawErrorKind};
 use crate::server::ServerInfo;
@@ -673,6 +678,21 @@ impl FakeConn {
     }
 }
 
+// ## m2b-f3-internal-reads
+/// A scripted answer as `opts` returns it: [`Protocol::Extended`] is the count-only path, so
+/// its rows are counted and their values dropped, whatever the script says (a value read takes
+/// `ExecOpts::values`).
+fn count_only(summary: ExecSummary, opts: ExecOpts) -> ExecSummary {
+    match opts.protocol {
+        Protocol::Extended => ExecSummary {
+            rows: Vec::new(),
+            truncated: false,
+            ..summary
+        },
+        Protocol::Simple => summary,
+    }
+}
+
 /// A [`FakeConn`]'s cancel state (M10): whether a statement runs, and a cancel that reached it
 /// before it was first polled.
 #[derive(Default)]
@@ -771,9 +791,12 @@ impl RawConn for FakeConn {
     fn execute<'a>(
         &'a mut self,
         sql: &'a str,
-        _opts: ExecOpts,
+        opts: ExecOpts,
     ) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
-        self.run(sql)
+        let run = self.run(sql);
+        // ## m2b-f3-internal-reads: the count-only path keeps no values, as the PostgreSQL
+        // and MySQL drivers run it, so a script can never answer a value read sent there.
+        Box::pin(async move { run.await.map(|summary| count_only(summary, opts)) })
     }
 
     fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
@@ -1090,5 +1113,39 @@ mod tests {
             "the idle cancel did not reach the next statement"
         );
         assert_eq!(fake.cancel_calls(), 2);
+    }
+
+    // ## m2b-f3-internal-reads
+
+    /// Finding F3: a scripted answer reaches a value read only through the values path; the
+    /// count-only path counts its rows and drops their values, as the real drivers do, so a
+    /// probe sent there cannot pass over the fake and fail on a server.
+    #[tokio::test]
+    async fn the_count_only_path_keeps_no_values() {
+        let answer = || FakeExec {
+            prefix: "SELECT current_user = session_user",
+            result: Ok(ExecSummary {
+                rows: vec![vec![Some("t".into())]],
+                row_count: 1,
+                ..ExecSummary::default()
+            }),
+            delay: Duration::ZERO,
+            tx_after: None,
+            panics: false,
+        };
+        for kind in [DbmsKind::Postgres, DbmsKind::MySql, DbmsKind::Sqlite] {
+            let fake = FakeDriver::new(kind).exec(vec![answer(), answer()]);
+            let mut conn = fake.connect(request(None, Arc::new(|_| {}))).await.unwrap();
+            let counted = conn
+                .execute("SELECT current_user = session_user", ExecOpts::default())
+                .await
+                .unwrap();
+            assert_eq!((counted.row_count, counted.rows.len()), (1, 0), "{kind:?}");
+            let read = conn
+                .execute("SELECT current_user = session_user", ExecOpts::values(1))
+                .await
+                .unwrap();
+            assert_eq!(read.rows, [vec![Some("t".to_string())]], "{kind:?}");
+        }
     }
 }

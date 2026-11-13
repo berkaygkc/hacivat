@@ -1305,3 +1305,8 @@ hv-conn-plain-ssh = SSH tüneli kullan…
 hv-conn-plain-connect = Şifrelemeden bağlan
 # Review: PO
 hv-conn-plain-remember = Bu bağlantı için bir daha sorma
+
+## m2b-t23-f1
+
+# Review: PO
+hv-conn-ro-warn-non-transactional-write = Etkileri ROLLBACK ile geri alınamayan fonksiyonlar çalıştırabilir.

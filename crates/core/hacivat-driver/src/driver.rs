@@ -241,6 +241,23 @@ pub trait RawConn: Send + 'static {
     }
 }
 
+// ## m2b-f3-internal-reads
+impl ExecOpts {
+    /// For a statement whose values the caller reads (Hacivat's own probes: the reset's verify
+    /// probe, the schema probe, the role probe, the guard's canary): the simple protocol, whose
+    /// rows every driver returns as text, at most `max_rows` of them.
+    ///
+    /// [`Protocol::Extended`] (the default) is the count-only path: the PostgreSQL and MySQL
+    /// drivers count its rows and drop their values (`ExecSummary::rows` stays empty), so a
+    /// value read sent there never sees its answer (finding F3). `FakeDriver` does the same.
+    pub fn values(max_rows: usize) -> Self {
+        ExecOpts {
+            max_rows,
+            protocol: Protocol::Simple,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

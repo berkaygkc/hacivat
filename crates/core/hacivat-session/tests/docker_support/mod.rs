@@ -345,3 +345,23 @@ pub fn sqlite_profile(path: &std::path::Path) -> Profile {
         ..Profile::default()
     }
 }
+
+// ## m2b-t23-f1
+/// The remediation's optional `REVOKE EXECUTE ON FUNCTION pg_logical_emit_message(…) FROM
+/// PUBLIC` for PostgreSQL target `t`: the exact line `remediation_for` offers for its version
+/// (Task 23 finding F1), so the Docker runs check that it is valid there. `PUBLIC` holds that
+/// `EXECUTE` on every cluster, and the role probe reads every role as guarded until it is
+/// revoked. Function privileges are per database: run it in each database where `hv_ro` must
+/// read enforced (the init script does it for the test database).
+pub fn revoke_emit_message(t: &DockerTarget) -> String {
+    let major = t.major.parse().ok();
+    hacivat_guard::remediation_for(DbmsKind::Postgres, major)
+        .and_then(|sql| {
+            sql.lines().find_map(|line| {
+                line.strip_prefix("-- optional: ")
+                    .filter(|l| l.contains("pg_logical_emit_message"))
+            })
+        })
+        .unwrap_or_else(|| panic!("{}: no REVOKE of pg_logical_emit_message", t.id))
+        .to_owned()
+}
