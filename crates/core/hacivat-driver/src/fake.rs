@@ -205,6 +205,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+// ## m2b-t17-liveness
+/// The statements that set a fake connection's `autocommit` flag: a prefix and the value.
+type AutocommitEffects = Arc<Vec<(&'static str, bool)>>;
+
 /// A scripted driver (F4). Build it, register an `Arc` clone, and read its counters.
 pub struct FakeDriver {
     descriptor: DriverDescriptor,
@@ -228,6 +232,9 @@ pub struct FakeDriver {
     ignores_cancel: bool,
     reset_fails: bool,
     consumes_factory: bool,
+    // ## m2b-t17-liveness
+    /// `Some`: connections report `autocommit` (from `true`), and these statements set it.
+    autocommit: Option<AutocommitEffects>,
 }
 
 impl FakeDriver {
@@ -274,6 +281,7 @@ impl FakeDriver {
             ignores_cancel: false,
             reset_fails: false,
             consumes_factory: false,
+            autocommit: None,
         }
     }
 
@@ -395,6 +403,15 @@ impl FakeDriver {
         self
     }
 
+    // ## m2b-t17-liveness
+    /// Connections report `RawConn::autocommit` as MySQL's status flags would: on at connect,
+    /// then set by every statement starting with one of `effects`' prefixes, whatever its
+    /// result (a batch's `SET` applies even when a later statement fails).
+    pub fn autocommit_flag(mut self, effects: Vec<(&'static str, bool)>) -> Self {
+        self.autocommit = Some(Arc::new(effects));
+        self
+    }
+
     /// Each connect opens the network endpoint's stream (as the PostgreSQL driver does) and
     /// fails with its I/O error. The connection holds the stream: once it ends (an SSH channel
     /// whose tunnel died), every ping fails with `Io(ConnectionReset)`.
@@ -463,6 +480,10 @@ impl Driver for FakeDriver {
             reset_fails: self.reset_fails,
             backend: self.backend,
             stream: None,
+            autocommit: self
+                .autocommit
+                .as_ref()
+                .map(|effects| (true, effects.clone())),
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
@@ -549,6 +570,9 @@ struct FakeConn {
     backend: Option<u64>,
     /// The endpoint's stream, held open (`consumes_factory`).
     stream: Option<BoxedStream>,
+    // ## m2b-t17-liveness
+    /// What `autocommit` reports, and the statements that change it (`autocommit_flag`).
+    autocommit: Option<(bool, AutocommitEffects)>,
 }
 
 impl FakeConn {
@@ -592,6 +616,14 @@ impl FakeConn {
     /// Runs one statement from the script; it counts as running from this call (M10).
     fn run<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
         self.cancel.begin();
+        // ## m2b-t17-liveness: the server applies the setting whatever the statement's (or
+        // the batch's) outcome.
+        if let Some((on, effects)) = self.autocommit.as_mut() {
+            let text = sql.trim_start();
+            if let Some((_, set)) = effects.iter().find(|(prefix, _)| text.starts_with(prefix)) {
+                *on = *set;
+            }
+        }
         Box::pin(async move {
             let result = self.run_entry(sql).await;
             self.cancel.running.store(false, Ordering::SeqCst);
@@ -770,6 +802,11 @@ impl RawConn for FakeConn {
 
     fn backend_id(&self) -> Option<u64> {
         self.backend
+    }
+
+    // ## m2b-t17-liveness
+    fn autocommit(&self) -> Option<bool> {
+        self.autocommit.as_ref().map(|(on, _)| *on)
     }
 }
 

@@ -192,6 +192,7 @@ pub(crate) fn spawn_supervised(
         ..TxState::default()
     };
     tx.observe(live.raw().tx_status(), false);
+    let server_autocommit = live.raw().autocommit();
     let snapshot = SessionSnapshot {
         state: SessionState::Idle,
         tx: tx.clone(),
@@ -233,6 +234,7 @@ pub(crate) fn spawn_supervised(
         tracked: Tracked::default(),
         lost: None,
         autocommit_off: false,
+        server_autocommit,
     };
     let ctl = Ctl {
         id,
@@ -286,9 +288,14 @@ pub(crate) struct Core {
     tracked: Tracked,
     /// What the last loss took, until the reconnect reports it.
     lost: Option<LostState>,
-    /// MySQL: the user's own `SET autocommit = 0` is in force (fix round 3, I8). Every
-    /// statement then runs in an implicit transaction, as in Manual mode.
+    /// MySQL: the user's own `SET autocommit = 0` was seen (fix round 3, I8), the fallback when
+    /// the driver does not report the server's flag. An "off" is kept whatever the statement's
+    /// outcome (a batch's `SET` applies even when a later statement fails; fix round 4, I9).
     autocommit_off: bool,
+    /// MySQL: the server's `SERVER_STATUS_AUTOCOMMIT` as of the last round trip, when the
+    /// driver reports it (fix round 4, R5): procedures, prepared statements, variables,
+    /// `init_connect` and global defaults are all seen.
+    server_autocommit: Option<bool>,
 }
 
 fn not_connected() -> ExecError {
@@ -316,8 +323,23 @@ impl Core {
         }
         if let Some(live) = self.live.as_mut() {
             let status = live.raw().tx_status();
+            let autocommit = live.raw().autocommit();
             self.tx.observe(status, statement);
+            if autocommit.is_some() {
+                self.server_autocommit = autocommit;
+            }
         }
+    }
+
+    // ## m2b-t17-liveness (fix rounds 3 and 4, I8, I9, R5)
+    /// Whether the user turned MySQL's `autocommit` off: then every statement runs in an
+    /// implicit transaction, and a reconnect would silently turn it back on. The server's flag
+    /// decides when the driver reports it, else the statements seen. Never in the app's own
+    /// Manual mode, which sets it itself and replays it.
+    fn users_autocommit_off(&self) -> bool {
+        family(self.kind) == Family::MySql
+            && self.tx.mode != TxMode::Manual
+            && self.server_autocommit.map_or(self.autocommit_off, |on| !on)
     }
 
     /// The reply of a request without rows.
@@ -444,6 +466,14 @@ impl Core {
                 for statement in self.manual_begin(&keyword) {
                     self.control(&statement).await?;
                 }
+            }
+            // ## m2b-t17-liveness (fix round 4, I9): a user's "autocommit off" counts whatever
+            // happens next (it errs toward "off").
+            if origin == ExecOrigin::User
+                && family(self.kind) == Family::MySql
+                && autocommit_set(sql) == Some(false)
+            {
+                self.autocommit_off = true;
             }
             let ran = self.conn()?.execute(sql, opts).await;
             let ran = ran.map_err(|e| self.raw_error(&e, true));
@@ -618,6 +648,8 @@ impl Core {
             live.access
         };
         let status = live.raw().tx_status();
+        self.server_autocommit = live.raw().autocommit();
+        self.autocommit_off = false;
         self.live = Some(live);
         self.broken = None;
         self.last_class = None;
@@ -1072,7 +1104,7 @@ fn begin_recovery(
     core.note_loss(before);
     // I8: under the user's own `autocommit = 0` a transaction may be open whatever the status
     // says, and a reconnect would silently turn autocommit back on.
-    let unknown = tx_unknown || core.autocommit_off;
+    let unknown = tx_unknown || core.users_autocommit_off();
     if unknown || core.lost.as_ref().is_some_and(|l| l.open_tx) {
         tracing::debug!(
             session = ctl.id.0,

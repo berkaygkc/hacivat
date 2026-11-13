@@ -497,28 +497,40 @@ restarts. Only recovery asks, so at a first connect `ssh.channel_open` stays a h
   left `Idle`, so no rollback is claimed for a transaction that committed). An idle autocommit
   session whose statement finds the loss therefore reconnects; that statement alone is
   `ConnectionLost { outcome_unknown: true }`, and the toast claims no rollback.
-- **The user's own MySQL `autocommit = 0` (fix round 3, I8).** A successful user
-  `SET [SESSION | LOCAL | @@session. | @@local. | @@]autocommit = 0 | OFF | FALSE` (MySQL,
-  MariaDB) is remembered until `= 1 | ON | TRUE | DEFAULT`, a reset, or the app's own switch to
-  Auto. While it holds, the server runs every statement in an implicit transaction, so the
-  session treats a loss as one inside a transaction (`Lost`, `SessionLost { open_tx }`): it
-  never reconnects, which would also silently turn autocommit back on. `SET GLOBAL` (only the
-  word right before the variable is read) changes other sessions and is ignored; any doubt
-  reads as this session's.
+- **The user's own MySQL `autocommit = 0` (fix rounds 3 and 4, I8, I9, R5).** The session
+  follows the server's `SERVER_STATUS_AUTOCOMMIT` flag, which every OK packet carries (the
+  MySQL driver reports it through `RawConn::autocommit`, a provided trait method; after a
+  server error its `COM_PING` re-reads the flags). So a procedure, a prepared statement,
+  `SET autocommit = @v`, `init_connect` or a global default are all seen. When a driver
+  reports no flag, the statements are the fallback: a user
+  `SET [SESSION | LOCAL | @@session. | @@local. | @@]autocommit = 0 | OFF | FALSE` is
+  remembered whatever its outcome (a batch's `SET` applies even when a later statement fails,
+  I9; it errs toward "off"), and `= 1 | ON | TRUE | DEFAULT` clears it on success, as do a
+  reset and the app's own switch to Auto. `SET GLOBAL` (only the word right before the variable
+  is read) changes other sessions and is ignored. While autocommit is off outside the app's own
+  Manual mode (which sets it itself and replays it), the server runs every statement in an
+  implicit transaction, so the session treats any loss as one inside a transaction (`Lost`,
+  `SessionLost { open_tx }`): it never reconnects, which would also silently turn autocommit
+  back on.
 - **A connection-ending server error is a loss (fix round 2, I6).** A server error whose class
   is a recovery case after connect (PostgreSQL `57P01`/`57P02` `server.shutdown`, `57P03`
   `server.starting`, `08006` `network.reset`; on PostgreSQL only at severity `FATAL` or `PANIC`,
   fix round 3, I7: an `ERROR` with these SQLSTATEs is a remote server's failure relayed by
-  `postgres_fdw` or `dblink`, and the local session and its transaction stay; the severity is
-  the server's `S`, which is the non-localized `V` unless the server translates it, and a
-  translated one that does not read `FATAL` is found closed at the next round trip instead), or
+  `postgres_fdw` or `dblink`, and the local session and its transaction stay), or
   one of MySQL's connection-ending codes (1053
   server shutdown, 1927/3169 connection killed, 4031 interaction timeout; 2006/2013 should a
   driver report them as server errors), breaks the session on the request it answered, which
   keeps the server's message. So the recovery starts there, not one request late, and a request
   that was never sent is never reported "outcome unknown". The MySQL codes live in the session
   layer (`recovery::connection_ending`), since the driver catalog (`errors.toml`) maps them to no
-  class.
+  class. Known limits (fix round 4, R6, R7): the severity read is the server's `S` field
+  (`ServerMessage.severity`), which is the non-localized `V` only when the server does not
+  translate it; a translated `FATAL` (the Turkish `ÖLÜMCÜL`) is not recognised, so that
+  connection is found closed one round trip later, and that next request, never sent, is
+  answered `ConnectionLost { outcome_unknown: true }`. No locale renders `ERROR` as `FATAL`, so
+  the rule never misfires. The rule applies to `DbmsKind::Postgres`; when the PostgreSQL-wire
+  engines (Timescale, Yugabyte, Redshift, Cockroach; `Family::Other` today) get drivers, they
+  must take it too (by family, not kind), or be detected one round trip later in the same way.
 - An idle session publishes `Connecting`, not `Broken`. The pool's watcher therefore keeps the
   session's budget permit through the reconnect (T15 carry-in: a `Broken` session frees it, and
   an in-place reconnect must never run without one); a session whose recovery fails turns
@@ -570,6 +582,15 @@ operator, so a lock call after it is still seen); a backslash inside quotes leav
 string unsure (MySQL escapes, PostgreSQL does not), so quoted text is read too. M3 replaces the
 scan with the classifier.
 
+**Events before ends (fix round 4, I10, the Task 18 merge).** A session sends what explains
+its end before it publishes that end: `Lost` before `Broken`, `IdleDisconnected` before
+`Disconnected`, and Task 18's `EnforcementGap` before `Broken` (moved at the merge). The
+manager's monitor reads events before states (`biased`), and before it stops on `Broken` or
+`Disconnected` it drains and relays whatever is still queued, so a read-only default session's
+gap notice is never lost behind its `Lost`. In the read-only path the guard's discard breaks
+the session before the status is read (T17's order kept at the merge), so C2 cannot come back
+there.
+
 **Idle disconnect.** The session emits `SessionEvent::IdleDisconnected` (an additive variant,
 fix round 1, M2), then closes itself gracefully; the manager reports `LiveState::Disconnected`
 and `ConnectionEvent::IdleDisconnected`, and the profile's sessions and overlay are dropped
@@ -612,7 +633,15 @@ and a batch with a later `BEGIN`, `SET autocommit` or `XA START` is `Lost`; roun
 user's MySQL `autocommit = 0`: a lost `UPDATE` and an idle loss are `Lost`, a later `COMMIT`
 never runs, `= 1` and `SET GLOBAL` reconnect), H14 (a relayed `ERROR` `08006`/`08001`/`57P01`
 keeps the session and its `Failed` transaction), H15 (a `COMMIT` whose follow-up probe finds the
-loss reconnects with no rollback claimed). A Docker test ends the default
+loss reconnects with no rollback claimed); round 4: H16 (`SET autocommit = 0; <typo>` then a
+lost `UPDATE` is `Lost`, with and without the server's flag), R5 (a procedure, a prepared
+statement, a variable and a server default seen through the flag; the flag back on reconnects;
+the app's own Manual mode still reconnects and replays), I10 (a read-only default session's
+guard gap relayed before `Lost`, 20 rounds on a multi-thread runtime; a read-only statement that
+finds the loss reconnects with no rollback claimed). A Docker test on mysql84 runs
+`SET autocommit = 0; SELEC 1` (the SET applies, the batch fails), then an `UPDATE` in flight
+killed from the admin connection: `Lost` with `SessionLost { open_tx }`, never a reconnect. A
+Docker test ends the default
 session's backend from the admin connection on pg17 and mysql84 (`pg_terminate_backend`,
 `KILL`); an Auto-mode user `SELECT 1` finds the loss within three round trips, the session
 reconnects, and `SessionLost` claims no rollback.

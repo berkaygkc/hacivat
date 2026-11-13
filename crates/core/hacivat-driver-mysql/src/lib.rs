@@ -40,6 +40,8 @@ pub use probe::{probe_warnings, server_version_text, user_databases};
 // ## m2b-t13-mysql
 #[doc(hidden)]
 pub use exec::{command_tag, tx_from_status};
+// ## m2b-t17-liveness
+pub use exec::autocommit_from_status;
 #[doc(hidden)]
 pub use tls::guard_allows;
 

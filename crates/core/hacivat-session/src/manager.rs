@@ -681,10 +681,7 @@ async fn monitor(
     mut events: broadcast::Receiver<SessionEvent>,
     stop: CancellationToken,
 ) {
-    let mut lost: Option<LostState> = None;
-    // A reconnect is under way (`Lost` seen or `Connecting` seen) and not yet reported.
-    let mut recovering = false;
-    let mut idle = false;
+    let mut seen = Seen::default();
     let mut events_open = true;
     loop {
         tokio::select! {
@@ -693,23 +690,8 @@ async fn monitor(
             event = events.recv(), if events_open => {
                 let Some(shared) = shared.upgrade() else { return };
                 match event {
-                    Ok(SessionEvent::Lost(l)) => {
-                        lost = Some(l);
-                        recovering = true;
-                    }
-                    Ok(SessionEvent::Reconnected) => {
-                        if std::mem::take(&mut recovering) {
-                            shared.session_back(id, seq, lost.take().unwrap_or_default());
-                        }
-                    }
-                    Ok(SessionEvent::IdleDisconnected) => idle = true,
-                    Ok(SessionEvent::IdleTransaction { minutes }) => {
-                        shared.emit(ConnectionEvent::IdleTransaction { profile: id, minutes });
-                    }
-                    Ok(SessionEvent::EnforcementGap(reason)) => {
-                        shared.emit(ConnectionEvent::EnforcementGap { profile: id, reason });
-                    }
-                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Ok(event) => seen.relay(&shared, id, seq, event),
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => events_open = false,
                 }
             }
@@ -722,10 +704,21 @@ async fn monitor(
                 } else {
                     now
                 };
+                if !usable(&now) {
+                    // Fix round 4 (I10): whatever the session sent before it ended is relayed
+                    // before the monitor stops (an enforcement gap, the idle disconnect).
+                    loop {
+                        match events.try_recv() {
+                            Ok(event) => seen.relay(&shared, id, seq, event),
+                            Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                            Err(_) => break,
+                        }
+                    }
+                }
                 match now {
-                    SessionState::Connecting => recovering = true,
+                    SessionState::Connecting => seen.recovering = true,
                     SessionState::Disconnected => {
-                        if shared.end_live(id, seq, LiveState::Disconnected) && idle {
+                        if shared.end_live(id, seq, LiveState::Disconnected) && seen.idle {
                             shared.emit(ConnectionEvent::IdleDisconnected { profile: id });
                         }
                         return;
@@ -737,20 +730,62 @@ async fn monitor(
                     SessionState::Broken(class) => {
                         if shared.end_live(id, seq, LiveState::Lost { class }) {
                             tracing::debug!(profile = %id, class = class.id(), "the session is lost");
-                            if let Some(lost) = lost.take() {
+                            if let Some(lost) = seen.lost.take() {
                                 // C1: lost inside a transaction; nothing was replayed.
                                 shared.emit(ConnectionEvent::SessionLost { profile: id, lost });
                             }
                         }
                         return;
                     }
-                    _ if recovering => {
-                        recovering = false;
-                        shared.session_back(id, seq, lost.take().unwrap_or_default());
+                    _ if seen.recovering => {
+                        seen.recovering = false;
+                        shared.session_back(id, seq, seen.lost.take().unwrap_or_default());
                     }
                     _ => {}
                 }
             }
+        }
+    }
+}
+
+/// What the monitor has heard from the default session so far.
+#[derive(Default)]
+struct Seen {
+    /// What the last loss took, until it is reported.
+    lost: Option<LostState>,
+    /// A reconnect is under way (`Lost` or `Connecting` seen) and not yet reported.
+    recovering: bool,
+    /// The supervisor announced its idle disconnect.
+    idle: bool,
+}
+
+impl Seen {
+    /// Takes in one session event, relaying what the app shows (Q35).
+    fn relay(&mut self, shared: &Shared, id: ProfileId, seq: u64, event: SessionEvent) {
+        match event {
+            SessionEvent::Lost(l) => {
+                self.lost = Some(l);
+                self.recovering = true;
+            }
+            SessionEvent::Reconnected => {
+                if std::mem::take(&mut self.recovering) {
+                    shared.session_back(id, seq, self.lost.take().unwrap_or_default());
+                }
+            }
+            SessionEvent::IdleDisconnected => self.idle = true,
+            SessionEvent::IdleTransaction { minutes } => {
+                shared.emit(ConnectionEvent::IdleTransaction {
+                    profile: id,
+                    minutes,
+                });
+            }
+            SessionEvent::EnforcementGap(reason) => {
+                shared.emit(ConnectionEvent::EnforcementGap {
+                    profile: id,
+                    reason,
+                });
+            }
+            _ => {}
         }
     }
 }

@@ -880,6 +880,176 @@ async fn an_idle_loss_under_the_users_autocommit_off_is_lost_and_turning_it_on_r
     wait_connected(&m, p().id).await;
 }
 
+/// A MySQL manager whose user statement `UPDATE` is lost in flight, after `setup`.
+async fn mysql_update_lost_after(
+    fake: FakeDriver,
+    setup: &str,
+) -> (Arc<ConnectionManager>, Arc<FakeDriver>) {
+    let (m, f) = manager_profile(
+        fake.exec(vec![
+            FakeExec {
+                result: Err(mysql_error(1064)),
+                ..fails_once_with_reset("SET autocommit = 0; SELEC")
+            },
+            fails_once_with_reset("UPDATE"),
+        ]),
+        mysql_profile(TlsMode::Disable),
+    );
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    let _ = s.submit(user_exec(setup)).reply.await.unwrap();
+    assert_eq!(
+        refusal(&s, user_exec("UPDATE t SET a = 1")).await,
+        ExecErrorKind::ConnectionLost {
+            outcome_unknown: true
+        }
+    );
+    (m, f)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_whose_set_autocommit_off_applied_before_an_error_is_remembered() {
+    // Review H16 / I9: `SET autocommit = 0; <typo>` answers an error, but the SET applied. A
+    // lost UPDATE afterwards is `Lost`, never a silent reconnect with autocommit back on.
+    // Without the server's flag (the statement fallback) and with it.
+    for fake in [
+        FakeDriver::new(DbmsKind::MySql),
+        FakeDriver::new(DbmsKind::MySql)
+            .autocommit_flag(vec![("SET autocommit = 0; SELEC", false)]),
+    ] {
+        let (m, f) = mysql_update_lost_after(fake, "SET autocommit = 0; SELEC broken").await;
+        wait_state(&m, |s| matches!(s, LiveState::Lost { .. })).await;
+        tokio::time::sleep(secs(60)).await;
+        assert_eq!(f.connect_calls(), 1);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_servers_autocommit_flag_sees_procedures_prepared_statements_and_defaults() {
+    // Review R5: a procedure, a prepared statement, a variable, or a server default
+    // (`init_connect`, the global setting) turn autocommit off without a literal SET; the
+    // server's status flag shows it, so even an idle loss is `Lost`.
+    for (statement, effect) in [
+        ("CALL turn_autocommit_off()", "CALL turn_autocommit_off"),
+        ("EXECUTE s", "EXECUTE s"),
+        ("SET autocommit = @v", "SET autocommit = @v"),
+        // A server default: every statement reports it off.
+        ("SELECT 1", ""),
+    ] {
+        let (m, f) = manager_profile(
+            FakeDriver::new(DbmsKind::MySql).autocommit_flag(vec![(effect, false)]),
+            mysql_profile(TlsMode::Disable),
+        );
+        connect_and_wait(&m).await;
+        ok(&default_session(&m), user_exec(statement)).await;
+        drop_connections(&m, &f);
+        wait_state(&m, |s| matches!(s, LiveState::Lost { .. })).await;
+        tokio::time::sleep(secs(60)).await;
+        assert_eq!(f.connect_calls(), 1, "{statement}");
+    }
+    // The flag back on: an idle loss reconnects.
+    let (m, f) = manager_profile(
+        FakeDriver::new(DbmsKind::MySql)
+            .autocommit_flag(vec![("CALL off", false), ("CALL on", true)]),
+        mysql_profile(TlsMode::Disable),
+    );
+    connect_and_wait(&m).await;
+    let s = default_session(&m);
+    ok(&s, user_exec("CALL off()")).await;
+    ok(&s, user_exec("CALL on()")).await;
+    lose_connection(&m, &f).await;
+    wait_connected(&m, p().id).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_apps_own_manual_mode_on_mysql_still_reconnects_when_idle() {
+    // Manual mode sets `autocommit = 0` itself and replays it: that is not the user's.
+    let manual = Profile {
+        tx_mode: Some(TxMode::Manual),
+        ..mysql_profile(TlsMode::Disable)
+    };
+    let (m, f) = manager_profile(
+        FakeDriver::new(DbmsKind::MySql).autocommit_flag(vec![
+            ("SET autocommit = 0", false),
+            ("SET autocommit = 1", true),
+        ]),
+        manual,
+    );
+    connect_and_wait(&m).await;
+    let mark = f.executed().len();
+    lose_connection(&m, &f).await;
+    wait_connected(&m, p().id).await;
+    assert!(
+        executed_since(&f, mark).contains(&"SET autocommit = 0".to_string()),
+        "the replay keeps the mode"
+    );
+    assert_eq!(snap(&default_session(&m)).tx.mode, TxMode::Manual);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guard_gap_on_the_default_session_is_relayed_before_lost() {
+    // Review I10 (the Task 18 merge): the gap event goes out before the session publishes
+    // `Broken`, and the monitor relays whatever is pending before it stops. On a
+    // multi-thread runtime, many times.
+    for round in 0..20 {
+        let (m, _) = manager_profile(
+            ok_pg().exec(vec![
+                tx("BEGIN ISOLATION LEVEL", TxStatus::InTx),
+                tx("SELECT 1; COMMIT", TxStatus::Idle),
+            ]),
+            ro(pg_profile(TlsMode::Disable)),
+        );
+        let mut ev = m.events();
+        connect_and_wait(&m).await;
+        assert_eq!(
+            refusal(&default_session(&m), user_exec("SELECT 1; COMMIT")).await,
+            ExecErrorKind::EnforcementGap(hacivat_session::GapReason::TransactionEndedByStatement),
+            "round {round}"
+        );
+        wait_state(&m, |s| matches!(s, LiveState::Lost { .. })).await;
+        loop {
+            match next_event(&mut ev).await {
+                ConnectionEvent::EnforcementGap { profile, reason } => {
+                    assert_eq!(profile, p().id);
+                    assert_eq!(
+                        reason,
+                        hacivat_session::GapReason::TransactionEndedByStatement
+                    );
+                    break;
+                }
+                _ => continue,
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_read_only_statement_that_finds_the_loss_reconnects() {
+    // Review I10 / C2 on the read-only path: the guard's discard breaks the session before any
+    // status is read, so the driver's post-loss `Failed` never reaches the verdict.
+    let (m, f) = manager_profile(
+        ok_pg().exec(vec![
+            tx("BEGIN ISOLATION LEVEL", TxStatus::InTx),
+            lost_and_failed("SELECT 9"),
+        ]),
+        ro(pg_profile(TlsMode::Disable)),
+    );
+    let mut ev = m.events();
+    connect_and_wait(&m).await;
+    assert_eq!(
+        refusal(&default_session(&m), user_exec("SELECT 9")).await,
+        ExecErrorKind::ConnectionLost {
+            outcome_unknown: true
+        }
+    );
+    let ConnectionEvent::SessionLost { lost, .. } = next_event(&mut ev).await else {
+        panic!("a SessionLost event");
+    };
+    assert!(!lost.open_tx, "{lost:?}");
+    assert!(matches!(m.state(p().id), LiveState::Connected(_)));
+    assert_eq!(f.connect_calls(), 2);
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_commit_whose_follow_up_probe_finds_the_loss_reports_no_rollback() {
     // Review H15 / R4: the COMMIT succeeded (Idle observed); the schema re-probe after it
@@ -1823,4 +1993,108 @@ async fn a_real_server_ending_the_session_is_reconnected_with_session_lost() {
 
 fn default_session_of(m: &ConnectionManager, id: ProfileId) -> SessionHandle {
     m.sessions(id).unwrap().default_session().unwrap()
+}
+
+/// A user statement over the simple (text) protocol: MySQL runs a multi-statement batch.
+fn simple_exec(sql: &str) -> Request {
+    Request::Exec {
+        sql: sql.to_string(),
+        opts: ExecOpts {
+            protocol: hacivat_driver::Protocol::Simple,
+            ..ExecOpts::default()
+        },
+        origin: ExecOrigin::User,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "docker"]
+async fn a_real_mysql_session_with_autocommit_off_is_lost_never_silently_reconnected() {
+    // Fix round 4 (I9/R5): `SET autocommit = 0; <typo>` applies the SET and answers an error;
+    // the server's status flag says autocommit is off. The UPDATE in flight is then lost
+    // (the admin connection kills the session): `Lost` with `SessionLost { open_tx }`, never a
+    // reconnect that would turn autocommit back on.
+    if !docker_support::docker_enabled() {
+        return;
+    }
+    let Some(t) = docker_support::target_required("mysql84") else {
+        return;
+    };
+    let mode = docker_support::auto_or_require(&t);
+    let m = ConnectionManager::new(
+        tokio::runtime::Handle::current(),
+        Arc::new(docker_support::deps()),
+        ManagerConfig::m2b(),
+    );
+    let profile = Arc::new(docker_support::profile_for(&t, mode));
+    let mut ev = m.events();
+    m.connect(
+        profile.clone(),
+        Some(docker_support::docker_password()),
+        Interaction::Headless,
+    );
+    wait_state_of(&m, profile.id, |s| {
+        assert!(!matches!(s, LiveState::Failed(_)), "{s:?}");
+        matches!(s, LiveState::Connected(_))
+    })
+    .await;
+    let s = default_session_of(&m, profile.id);
+    ok(&s, simple_exec("CREATE TEMPORARY TABLE hv_t17_ac (a INT)")).await;
+    ok(&s, simple_exec("INSERT INTO hv_t17_ac VALUES (1)")).await;
+    let id = s
+        .submit(simple_exec("SELECT CONNECTION_ID()"))
+        .reply
+        .await
+        .unwrap()
+        .expect("the connection ID")
+        .rows[0][0]
+        .clone()
+        .expect("an ID");
+    let batch = s
+        .submit(simple_exec("SET autocommit = 0; SELEC 1"))
+        .reply
+        .await
+        .unwrap();
+    assert!(
+        matches!(&batch, Err(e) if e.kind == ExecErrorKind::Db),
+        "{batch:?}"
+    );
+    let update = s.submit(simple_exec("UPDATE hv_t17_ac SET a = SLEEP(5)"));
+    until("the UPDATE to run", || {
+        matches!(snap(&s).state, SessionState::Busy { .. })
+    })
+    .await;
+    tokio::time::sleep(ms(300)).await;
+    let mut killer = docker_support::connect_target(&t, mode).await;
+    killer
+        .raw()
+        .batch(&format!("KILL {id}"))
+        .await
+        .expect("the admin connection kills the session");
+    killer.close().await;
+    let first = update.reply.await.unwrap();
+    // The server may answer the killed statement as interrupted; the next round trip then
+    // finds the loss. A bounded number of tries.
+    let mut lost =
+        matches!(&first, Err(e) if matches!(e.kind, ExecErrorKind::ConnectionLost { .. }));
+    for _ in 0..3 {
+        if lost {
+            break;
+        }
+        let reply = s.submit(simple_exec("SELECT 1")).reply.await.unwrap();
+        lost = matches!(&reply, Err(e) if matches!(
+            e.kind,
+            ExecErrorKind::ConnectionLost { .. } | ExecErrorKind::NotConnected
+        ));
+    }
+    assert!(lost, "the loss was never seen: {first:?}");
+    wait_state_of(&m, profile.id, |s| matches!(s, LiveState::Lost { .. })).await;
+    let ConnectionEvent::SessionLost { lost, .. } = next_event(&mut ev).await else {
+        panic!("a SessionLost event");
+    };
+    assert!(lost.open_tx && lost.temp_objects, "{lost:?}");
+    // Never a silent reconnect.
+    tokio::time::sleep(secs(2)).await;
+    assert!(matches!(m.state(profile.id), LiveState::Lost { .. }));
+    m.shutdown().await;
 }

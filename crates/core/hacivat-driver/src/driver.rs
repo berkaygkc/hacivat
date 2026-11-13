@@ -231,6 +231,14 @@ pub trait RawConn: Send + 'static {
     /// The server's ID of this connection: the PostgreSQL backend PID (from `BackendKeyData`,
     /// Q11), the MySQL thread ID.
     fn backend_id(&self) -> Option<u64>;
+    // ## m2b-t17-liveness (fix round 4, I9/R5)
+    /// MySQL and MariaDB: whether the session autocommits, from the server's status flags
+    /// (`SERVER_STATUS_AUTOCOMMIT`) as of the last round trip, so a procedure, a prepared
+    /// statement, `SET autocommit = @v`, `init_connect` or a global default are all seen.
+    /// `None` when the engine has no such setting or the driver does not know (yet).
+    fn autocommit(&self) -> Option<bool> {
+        None
+    }
 }
 
 #[cfg(test)]
