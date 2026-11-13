@@ -764,3 +764,33 @@ fn an_imported_sslmode_is_what_the_form_shows(cx: &mut TestAppContext) {
     assert!(text.contains("tls.mode = \"disable\""), "{text}");
     assert!(!text.contains("sslmode"), "{text}");
 }
+
+/// PO demo (M2a): a real double-click on a row connects. The listener holds the explorer view,
+/// so the connect action (which reads that view) must run after it returns, not inside it.
+#[gpui::test]
+fn double_click_on_a_row_connects_without_reentering_the_view(cx: &mut TestAppContext) {
+    let vcx = with_profiles(cx, [("orders-local", None)]);
+    vcx.run_until_parked();
+    let row = vcx
+        .debug_bounds("explorer-row-0")
+        .expect("the row is drawn");
+    let at = row.center();
+    for click_count in [1, 2] {
+        vcx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: at,
+            modifiers: gpui::Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        vcx.simulate_event(gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            position: at,
+            modifiers: gpui::Modifiers::none(),
+            click_count,
+        });
+    }
+    wait_until(vcx, "the double-click connect", |vcx| {
+        connect_calls(vcx) == ["orders-local"]
+    });
+}
