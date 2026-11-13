@@ -131,7 +131,8 @@ impl ConnectionsModel {
     /// Applies `changes` (a pin, a CA file, the plaintext consent) to the saved profile `id`
     /// (Task 19): the model's list changes at once, the connected profile's sessions get it
     /// (`ConnectionManager::update_profile`, Q17), and the list is written through the ordered
-    /// writer. Only `id` changes, whatever else is open. `AddPin` never replaces a pin, and
+    /// writer. Only `id` changes, whatever else is open; an open edit dialog of `id` gets the
+    /// same changes in its draft, so its Save keeps them. `AddPin` never replaces a pin, and
     /// `ReplacePin` replaces only the pin it names (`cert_dialog::apply_change`). Changes that
     /// change nothing write nothing. A read-only store and a profile deleted meanwhile refuse.
     pub fn apply_changes(
@@ -157,6 +158,14 @@ impl ConnectionsModel {
         if !changed {
             return Task::ready(Ok(()));
         }
+        // Fix round 1 (I1): an open edit dialog of `id` takes them too, so its Save never
+        // writes an older draft over them.
+        crate::connections::dialog::absorb_saved_changes(
+            id,
+            stored.endpoint.clone(),
+            changes.clone(),
+            cx,
+        );
         let m = cx.global_mut::<ConnectionsModel>();
         let profile = Arc::new(profile);
         m.manager.update_profile(id, profile.clone());

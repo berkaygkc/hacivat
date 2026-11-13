@@ -261,6 +261,13 @@ pub struct ConnectionDialog {
     /// CA files a Test's certificate question imported: approved (app-wide) only when the
     /// profile that names one is saved (T14 review M3).
     test_ca_imports: Vec<PathBuf>,
+    // ## m2b-t19-tls (fix round 1)
+    /// The Test-imported CA file of the save in flight, approved app-wide once it succeeded
+    /// (review M7).
+    pending_approval: Option<PathBuf>,
+    /// Changes `apply_changes` saved for this profile while a save of the dialog was in flight,
+    /// with the endpoint they were made for: the save carries them too (review I1).
+    absorbed_while_saving: Vec<(ProfileEndpoint, ProfileChange)>,
 }
 
 // ## m2a-dialog-retries
@@ -306,6 +313,46 @@ pub fn open_dialog(window: &Window, cx: &App) -> Option<Entity<ConnectionDialog>
     cx.try_global::<OpenDialogs>()
         .and_then(|g| g.0.get(&window_key(window)))
         .and_then(WeakEntity::upgrade)
+}
+
+// ## m2b-t19-tls (fix round 1, I1)
+/// Hands the changes `ConnectionsModel::apply_changes` just saved for profile `id` (made for
+/// its saved `endpoint`) to every open edit dialog of `id`, so none saves an older draft over
+/// them. Deferred to the end of the current update: the caller may be updating that window.
+pub(crate) fn absorb_saved_changes(
+    id: ProfileId,
+    endpoint: ProfileEndpoint,
+    changes: Vec<ProfileChange>,
+    cx: &mut App,
+) {
+    let open: Vec<(u64, Entity<ConnectionDialog>)> = cx
+        .try_global::<OpenDialogs>()
+        .map(|g| {
+            g.0.iter()
+                .filter_map(|(window, d)| Some((*window, d.upgrade()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (window_id, dialog) in open {
+        if dialog.read(cx).draft.profile.id != id {
+            continue;
+        }
+        let Some(window) = cx
+            .windows()
+            .into_iter()
+            .find(|w| w.window_id().as_u64() == window_id)
+        else {
+            continue;
+        };
+        let (endpoint, changes) = (endpoint.clone(), changes.clone());
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                dialog.update(cx, |d, cx| {
+                    d.absorb_saved_changes(&endpoint, &changes, window, cx);
+                });
+            });
+        });
+    }
 }
 
 /// Whether a connection dialog is open (the `enabled` of its commands; `run` then finds the
@@ -630,6 +677,8 @@ impl ConnectionDialog {
             testing: None,
             consent_endpoint: None,
             test_ca_imports: Vec::new(),
+            pending_approval: None,
+            absorbed_while_saving: Vec::new(),
         };
         if dialog.draft.profile.tls.allow_public_plaintext {
             dialog.consent_endpoint = Some(dialog.draft.profile.endpoint.clone());
@@ -1642,6 +1691,36 @@ impl ConnectionDialog {
         self.after_edit(window, cx);
     }
 
+    // ## m2b-t19-tls (fix round 1, I1)
+    /// Changes `ConnectionsModel::apply_changes` just saved for this dialog's profile (a pin, a
+    /// CA file, the plaintext consent), made for the saved `endpoint`: into the draft too, so
+    /// its Save never writes an older draft over them. The consent joins only a draft that still
+    /// names that endpoint (`after_edit` drops it otherwise). A save in flight carries them too.
+    fn absorb_saved_changes(
+        &mut self,
+        endpoint: &ProfileEndpoint,
+        changes: &[ProfileChange],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for change in changes {
+            if *change == ProfileChange::AllowPublicPlaintext {
+                if self.draft.profile.endpoint != *endpoint {
+                    // The draft names another server now: that consent is not for it.
+                    continue;
+                }
+                self.consent_endpoint = Some(endpoint.clone());
+            }
+            cert_dialog::apply_change(&mut self.draft.profile, change);
+            if self.saving {
+                self.absorbed_while_saving
+                    .push((endpoint.clone(), change.clone()));
+            }
+        }
+        self.write_fields(cx);
+        self.after_edit(window, cx);
+    }
+
     /// The effective TLS endpoint of the draft: the host (`localhost` for a socket) and the
     /// port, the engine's default when none is typed (as the pipeline names pins).
     pub(crate) fn tls_endpoint(&self) -> (String, u16) {
@@ -1722,13 +1801,25 @@ impl ConnectionDialog {
             .try_global::<DialogEnv>()
             .map(|e| e.approved_roots.clone())
             .unwrap_or_else(ApprovedRoots::for_user);
-        // ## m2b-t19-tls: a CA file a Test imported is approved now that the profile naming it
-        // is saved (the Test itself approved nothing app-wide).
-        if let Some(ca) = self.draft.profile.tls.ca_file.clone()
-            && self.test_ca_imports.contains(&ca)
-        {
-            roots.add(ca);
-        }
+        // ## m2b-t19-tls: a CA file a Test imported counts as approved for this save's check, and
+        // joins the app-wide roots once the save succeeded (fix round 1, M7; the Test itself
+        // approved nothing app-wide).
+        self.pending_approval = self
+            .draft
+            .profile
+            .tls
+            .ca_file
+            .clone()
+            .filter(|ca| self.test_ca_imports.contains(ca));
+        let roots = match &self.pending_approval {
+            Some(ca) => {
+                let checked = ApprovedRoots::new(roots.list());
+                checked.add(ca.clone());
+                checked
+            }
+            None => roots,
+        };
+        self.absorbed_while_saving.clear();
         let profile = self.profile_to_save();
         let checked = profile.clone();
         // ## m2b-t19-tls: an encrypted client key opens with the typed passphrase (T3 carry).
@@ -1829,11 +1920,18 @@ impl ConnectionDialog {
 
     fn commit(
         &mut self,
-        profile: Profile,
+        mut profile: Profile,
         connect: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // ## m2b-t19-tls (fix round 1, I1): what `apply_changes` saved meanwhile stays saved.
+        for (endpoint, change) in std::mem::take(&mut self.absorbed_while_saving) {
+            if change == ProfileChange::AllowPublicPlaintext && profile.endpoint != endpoint {
+                continue;
+            }
+            cert_dialog::apply_change(&mut profile, &change);
+        }
         let draft = self.draft_of(profile);
         let password = draft.password.clone();
         let name = draft.profile.name.clone();
@@ -1873,6 +1971,12 @@ impl ConnectionDialog {
             )
         });
         ToastQueue::push(cx, Toast::new(ToastKind::Info, text));
+        // ## m2b-t19-tls (fix round 1, M7): a Test-imported CA joins the roots once saved.
+        if let Some(ca) = self.pending_approval.take()
+            && let Some(env) = cx.try_global::<DialogEnv>()
+        {
+            env.approved_roots.add(ca);
+        }
         if let Some(password) = connect {
             // ## m2a-dialog-retries: the connect continues the dialog's count (P8).
             ConnectionsModel::connect_continuing(cx, id, password, self.rejections());

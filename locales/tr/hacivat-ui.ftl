@@ -997,7 +997,9 @@ hv-conn-tls-dates-note = { $state ->
        *[early] Bu sertifika henüz geçerli değil. Bu Mac'in tarih ve saatini denetleyin ya da sunucuyu yöneten kişiye sorun.
     }
 # Review: PO
-hv-conn-tls-pin = Sabitlenmiş sertifika
+# Fix round 1 (review M2): shorter than the mock's "Sabitlenmiş sertifika", which the 140 px
+# form label column cut off; it reads with "Sabitlemeyi kaldır" beside it.
+hv-conn-tls-pin = Sabitleme
 # Review: PO
 hv-conn-tls-pin-none = Yok
 # Review: PO

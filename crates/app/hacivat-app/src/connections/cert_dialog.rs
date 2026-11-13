@@ -932,11 +932,21 @@ impl CertDialog {
                     .child(now),
             )
             .children(self.dates_note(theme, cx))
-            .child(Self::sentence(ask, t.type_ramp.body_sm, theme, "cert-ask"))
-            .children(
-                (self.trust_offered() && self.replace_offered)
-                    .then(|| Self::sentence(note, t.type_ramp.body_sm, theme, "cert-pin-note")),
-            )
+            // Both speak of replacing the pin: only where Replace pin is offered (fix round 1,
+            // M3).
+            .children((self.trust_offered() && self.replace_offered).then(|| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(t.spacing.lg))
+                    .child(Self::sentence(ask, t.type_ramp.body_sm, theme, "cert-ask"))
+                    .child(Self::sentence(
+                        note,
+                        t.type_ramp.body_sm,
+                        theme,
+                        "cert-pin-note",
+                    ))
+            }))
     }
 
     fn footer(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -1286,9 +1296,23 @@ pub(crate) fn pick_ca(cx: &mut App, then: impl FnOnce(PathBuf, &mut App) + 'stat
     .detach();
 }
 
+/// Whether `profile` holds what `change` asks for (the pin, the CA file, the consent).
+fn holds(profile: &Profile, change: &ProfileChange) -> bool {
+    let tls = &profile.tls;
+    match change {
+        ProfileChange::AddPin(pin) | ProfileChange::ReplacePin { new: pin, .. } => {
+            tls.pins.contains(pin)
+        }
+        ProfileChange::SetCaFile(path) => tls.ca_file.as_deref() == Some(path.as_path()),
+        ProfileChange::AllowPublicPlaintext => tls.allow_public_plaintext,
+    }
+}
+
 /// Applies `change` to the saved profile `id` and connects it again (a new gesture). A CA file
 /// the user picked joins the approved roots first (T16 ruling A); a replaced pin is confirmed
-/// with a toast naming the endpoint's host.
+/// with a toast naming the endpoint's host. A change the saved profile did not take (a stale
+/// `ReplacePin`, a read-only store, a profile deleted meanwhile) is neither confirmed nor
+/// followed by a connect (fix round 1, M1).
 fn apply_and_connect(id: ProfileId, change: ProfileChange, endpoint: &str, cx: &mut App) {
     if let ProfileChange::SetCaFile(path) = &change
         && let Some(env) = cx.try_global::<DialogEnv>()
@@ -1297,7 +1321,21 @@ fn apply_and_connect(id: ProfileId, change: ProfileChange, endpoint: &str, cx: &
     }
     let replaced = matches!(change, ProfileChange::ReplacePin { .. });
     // The model's list changes at once; the write follows on the profile writer.
-    let saved = ConnectionsModel::apply_changes(cx, id, vec![change]);
+    let saved = ConnectionsModel::apply_changes(cx, id, vec![change.clone()]);
+    cx.spawn(async move |_| {
+        if let Err(e) = saved.await {
+            tracing::debug!(error = ?e, "connections: the reviewed change was not saved");
+        }
+    })
+    .detach();
+    let taken = cx
+        .try_global::<ConnectionsModel>()
+        .and_then(|m| m.get(id))
+        .is_some_and(|p| holds(&p, &change));
+    if !taken {
+        tracing::debug!("connections: the reviewed change no longer applies; not connecting");
+        return;
+    }
     if replaced {
         let host = host_and_port(endpoint).0;
         let text = std::rc::Rc::new(move |cx: &App| {
@@ -1312,12 +1350,6 @@ fn apply_and_connect(id: ProfileId, change: ProfileChange, endpoint: &str, cx: &
         ToastQueue::push(cx, Toast::new(ToastKind::Info, text));
     }
     ConnectionsModel::connect(cx, id, None);
-    cx.spawn(async move |_| {
-        if let Err(e) = saved.await {
-            tracing::debug!(error = ?e, "connections: the reviewed change was not saved");
-        }
-    })
-    .detach();
 }
 
 // ## shots fixtures (R28, P19)

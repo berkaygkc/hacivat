@@ -631,6 +631,39 @@ fn a_stale_replace_pin_changes_nothing(cx: &mut TestAppContext) {
     click_button(vcx, "cert-replace-pin");
     settle(vcx, std::time::Duration::ZERO);
     assert_eq!(saved(vcx, id).tls.pins, [pin("127.0.0.1:5432", [3; 32])]);
+    // Fix round 1 (review M1, H5): nothing claims success, and nothing connects.
+    assert!(
+        !toast_texts(vcx)
+            .iter()
+            .any(|s| plain(s).starts_with("Pinned the new certificate")),
+        "{:?}",
+        toast_texts(vcx)
+    );
+    assert!(matches!(
+        live(vcx, "orders"),
+        hacivat_session::LiveState::Disconnected
+    ));
+}
+
+/// Fix round 1 (review M3): an expired new certificate offers no Replace pin, so the review
+/// does not speak of replacing it either.
+#[gpui::test]
+fn an_expired_changed_certificate_never_speaks_of_replacing(cx: &mut TestAppContext) {
+    let (vcx, id) = with_profile(cx, Some([1; 32]));
+    let mut error = pin_changed_error([1; 32], [2; 32]);
+    if let Some(review) = error.certificate.as_mut() {
+        review.not_after_unix = NOT_BEFORE + 1;
+    }
+    open_error(vcx, id, error);
+    click_button(vcx, "fix-review-cert");
+    wait_layer(vcx, CERT_LAYER_ID);
+    assert_eq!(
+        review(vcx, |r| r.buttons()),
+        ["cert-copy-old", "cert-copy", "cert-cancel"]
+    );
+    assert!(text_of(vcx, "cert-dates-note").is_some());
+    assert!(text_of(vcx, "cert-ask").is_none());
+    assert!(text_of(vcx, "cert-pin-note").is_none());
 }
 
 #[gpui::test]
@@ -1015,6 +1048,88 @@ fn test_dialog_pin_updates_draft_only(cx: &mut TestAppContext) {
     assert_eq!(draft(vcx).tls.pins[0].endpoint, "10.0.0.5:5432");
     assert!(saved(vcx, id).tls.pins.is_empty());
     assert!(!connections_toml(vcx).contains("pins"));
+    // The review gave the focus back to the connection dialog (review M5).
+    let d = dialog(vcx);
+    assert!(
+        in_window(vcx, |window, cx| d.read(cx).focused_field(window, cx)).is_some(),
+        "the focus is back inside the connection dialog"
+    );
+}
+
+/// Fix round 1 (review I1, hostile H4): an edit dialog already open on the profile takes what
+/// `apply_changes` saved, so its Save never writes the older draft over the pin.
+#[gpui::test]
+fn an_open_edit_dialog_keeps_a_pin_apply_changes_saved(cx: &mut TestAppContext) {
+    let (vcx, id) = with_profile(cx, None);
+    open_edit(vcx, id);
+    let task = vcx.cx.update(|cx| {
+        ConnectionsModel::apply_changes(
+            cx,
+            id,
+            vec![ProfileChange::AddPin(pin("127.0.0.1:5432", [0xAB; 32]))],
+        )
+    });
+    wait_task(vcx, task).expect("the pin is saved");
+    assert_eq!(draft(vcx).tls.pins, [pin("127.0.0.1:5432", [0xAB; 32])]);
+    type_into(vcx, "database", "x");
+    assert!(run(vcx, "connection_dialog.save"));
+    settle_until(vcx, WAIT, || {
+        saved(vcx, id).database.as_deref() == Some("x")
+    });
+    assert_eq!(saved(vcx, id).tls.pins, [pin("127.0.0.1:5432", [0xAB; 32])]);
+    wait_until(vcx, "the pin to stay in the file", |vcx| {
+        connections_toml(vcx).contains(&"ab".repeat(32))
+    });
+}
+
+/// The same for the CA file and the remembered consent: the dialog shows the CA and saves both.
+#[gpui::test]
+fn an_open_edit_dialog_keeps_a_ca_and_the_consent(cx: &mut TestAppContext) {
+    let (vcx, id) = with_profile(cx, None);
+    let ca = temp_dir(vcx).join("corp-ca.pem");
+    write(&ca, TEST_CA_PEM);
+    open_edit(vcx, id);
+    let task = vcx.cx.update(|cx| {
+        ConnectionsModel::apply_changes(
+            cx,
+            id,
+            vec![
+                ProfileChange::SetCaFile(ca.clone()),
+                ProfileChange::AllowPublicPlaintext,
+            ],
+        )
+    });
+    wait_task(vcx, task).expect("the changes are saved");
+    let d = dialog(vcx);
+    assert_eq!(
+        vcx.cx
+            .read(|cx| d.read(cx).field_value("ca", cx))
+            .as_deref(),
+        Some(ca.to_string_lossy().as_ref())
+    );
+    assert!(draft(vcx).tls.allow_public_plaintext);
+    type_into(vcx, "database", "x");
+    assert!(run(vcx, "connection_dialog.save"));
+    settle_until(vcx, WAIT, || {
+        saved(vcx, id).database.as_deref() == Some("x")
+    });
+    let p = saved(vcx, id);
+    assert_eq!(p.tls.ca_file.as_deref(), Some(ca.as_path()));
+    assert!(p.tls.allow_public_plaintext);
+}
+
+/// A consent saved for the stored endpoint never joins a draft that names another host now.
+#[gpui::test]
+fn a_consent_for_the_old_endpoint_never_joins_an_edited_draft(cx: &mut TestAppContext) {
+    let (vcx, id) = with_profile(cx, None);
+    open_edit(vcx, id);
+    type_into(vcx, "host", "9");
+    let task = vcx.cx.update(|cx| {
+        ConnectionsModel::apply_changes(cx, id, vec![ProfileChange::AllowPublicPlaintext])
+    });
+    wait_task(vcx, task).expect("the consent is saved");
+    assert!(saved(vcx, id).tls.allow_public_plaintext);
+    assert!(!draft(vcx).tls.allow_public_plaintext);
 }
 
 /// T14 review M3 (carry-in): a Test's Import CA approves nothing app-wide; the draft gets the
@@ -1043,7 +1158,8 @@ fn a_tests_import_ca_approves_nothing_app_wide(cx: &mut TestAppContext) {
     settle_until(vcx, WAIT, || {
         saved(vcx, id).tls.ca_file.as_deref() == Some(picked.as_path())
     });
-    assert!(approved_roots(vcx).contains(&picked));
+    // Approved once the write succeeded (fix round 1, M7), never before the save.
+    settle_until(vcx, WAIT, || approved_roots(vcx).contains(&picked));
 }
 
 // ---- long locales -----------------------------------------------------------------------------
@@ -1121,4 +1237,35 @@ fn turkish_fits_the_review_and_the_question(cx: &mut TestAppContext) {
 #[gpui::test]
 fn the_pseudo_locale_fits_the_review_and_the_question(cx: &mut TestAppContext) {
     long_locale_surfaces(cx, "tr-XT");
+}
+
+/// Fix round 1 (review M2, hostile H6): in Turkish the TLS section's pinned row reads whole,
+/// its label included, and Remove pin stays inside the card.
+#[cfg(feature = "scene-check")]
+#[gpui::test]
+fn turkish_shows_the_pinned_row_whole(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "tr");
+    vcx.simulate_resize(gpui::size(gpui::px(960.0), gpui::px(900.0)));
+    let mut p = test_profile("orders", Some(EnvTag::Dev), "127.0.0.1");
+    p.tls.pins = vec![pin("127.0.0.1:5432", [0xAB; 32])];
+    let id = add_profile(vcx, p);
+    open_edit(vcx, id);
+    open_tls_section(vcx);
+    let label = t(vcx, "hv-conn-tls-pin");
+    let drawn: Vec<_> = registry_frame(vcx)
+        .into_iter()
+        .filter(|r| plain(&r.text) == label)
+        .collect();
+    assert!(!drawn.is_empty(), "the pinned row's label is drawn");
+    assert!(
+        drawn.iter().all(|r| !r.truncated && !r.clipped),
+        "{drawn:?}"
+    );
+    let card = vcx
+        .debug_bounds("form-dialog")
+        .expect("the dialog is drawn");
+    let remove = vcx
+        .debug_bounds("button-tls-remove-pin")
+        .expect("Remove pin is drawn");
+    assert!(remove.right() <= card.right());
 }

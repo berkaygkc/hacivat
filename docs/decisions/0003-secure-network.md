@@ -827,3 +827,10 @@ the vault, the session overlay, the keyring CI and the deferrals.
   the Remember select, stored like the password under the profile's retention; Save validates
   the key with it (`validate_with_passphrase`), so an encrypted key with the right passphrase is
   no issue.
+- **Fix round 1.** `apply_changes` hands the same changes to an open edit dialog of the
+  profile (its draft, a save in flight included), so no Save writes an older draft over a pin,
+  a CA file or the consent; the consent joins only a draft that still names the endpoint it
+  was given for. A review's change that the saved profile did not take (a stale `ReplacePin`,
+  a read-only store) is neither confirmed nor followed by a connect. A Test-imported CA joins
+  the app-wide roots only once the save that names it succeeded (it counts as approved for
+  that save's check). The error report's encrypted-key line asks for the passphrase (B25).
