@@ -17,9 +17,9 @@
 use std::rc::Rc;
 
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, ClickEvent, Div, ElementId, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Role, SharedString, StatefulInteractiveElement, Styled, Window,
-    WindowControlArea, div, px,
+    AnyElement, App, Bounds, ClickEvent, Div, ElementId, Global, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Pixels, Role, SharedString, StatefulInteractiveElement, Styled,
+    Window, WindowControlArea, div, px,
 };
 use hacivat_ui_core::theme::{Caps, Theme, TypeStyle};
 use hacivat_ui_core::window::{ChromeKind, TRAFFIC_LIGHTS_INSET_PX};
@@ -183,14 +183,9 @@ struct BarRoom {
 }
 
 /// An empty canvas over its parent that hands the parent's bounds to `note` each frame.
-fn measure(
-    note: impl Fn(
-        hacivat_ui_core::gpui_surface::Bounds<hacivat_ui_core::gpui_surface::Pixels>,
-        &mut Window,
-    ) + 'static,
-) -> impl IntoElement {
+fn measure(note: impl Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static) -> impl IntoElement {
     hacivat_ui_core::gpui_surface::canvas(
-        move |bounds, window, _| note(bounds, window),
+        move |bounds, window, cx| note(bounds, window, cx),
         |_, _, _, _| {},
     )
     .absolute()
@@ -198,6 +193,22 @@ fn measure(
     .left_0()
     .size_full()
 }
+
+// ## m2b-t22-live (fix round 2, R1-I1)
+/// Where the palette field (its frame, border included) and the trailing controls were laid
+/// out in the last frame, recorded only while this global is installed: the shots harness
+/// checks on every shot that the trailing controls sit inside the window at their place and
+/// that the palette field keeps [`PALETTE_MIN_PX`] (a layout check, not a text one). The app
+/// never installs it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TitleBarProbe {
+    pub palette: Option<Bounds<Pixels>>,
+    pub trailing: Option<Bounds<Pixels>>,
+    /// The bar's right padding: where the trailing controls end, from the window's right edge.
+    pub right_padding: f32,
+}
+
+impl Global for TitleBarProbe {}
 
 /// Lays a transparent cover over `el` that takes every press, so the controls under it do
 /// nothing while the bar is inert (and show no hover).
@@ -329,12 +340,16 @@ impl TitleBar {
         }
         if let Some(capsule) = self.capsule {
             let at = room.clone();
+            // Fix round 2 (R1-I1): the capsule never shrinks with the bar (the palette field
+            // gives way, down to its minimum, which `capsule_max` leaves it); it is clamped to
+            // its room instead, where only its name gives way.
             bar = bar.child(inert_cover(
                 div()
                     .relative()
+                    .flex_none()
                     .ml(px(t.spacing.xl))
                     .child(capsule.inert(inert).max_width(capsule_max))
-                    .child(measure(move |bounds, window| {
+                    .child(measure(move |bounds, window, _| {
                         let left = Some(f32::from(bounds.left()));
                         let mut r = at.get();
                         if r.capsule_left != left {
@@ -397,7 +412,24 @@ impl TitleBar {
                     TextSource::Shortcut,
                     t.type_ramp.mono_kbd,
                     c.text_3.to_hsla(),
-                ));
+                ))
+                // ## m2b-t22-live (fix round 2): its frame, border included, for the probe.
+                .relative()
+                .child(
+                    hacivat_ui_core::gpui_surface::canvas(
+                        |bounds, _, cx| {
+                            if cx.has_global::<TitleBarProbe>() {
+                                cx.global_mut::<TitleBarProbe>().palette = Some(bounds);
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .left(px(-1.0))
+                    .top(px(-1.0))
+                    .right(px(-1.0))
+                    .bottom(px(-1.0)),
+                );
             // As `Button`: declared on the clickable field while enabled (an assistive-technology
             // Click reaches `on_click`), wrapped in a disabled node while inert.
             let field = if inert {
@@ -470,7 +502,13 @@ impl TitleBar {
             trailing = trailing.child(caption_buttons(chrome, window, cx));
         }
         let at = room;
-        trailing = trailing.child(measure(move |bounds, window| {
+        let right_padding = t.spacing.lg;
+        trailing = trailing.child(measure(move |bounds, window, cx| {
+            if cx.has_global::<TitleBarProbe>() {
+                let probe = cx.global_mut::<TitleBarProbe>();
+                probe.trailing = Some(bounds);
+                probe.right_padding = right_padding;
+            }
             let w = Some(f32::from(bounds.size.width));
             let mut r = at.get();
             if r.trailing != w {

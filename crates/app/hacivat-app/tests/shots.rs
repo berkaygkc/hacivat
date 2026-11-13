@@ -34,7 +34,12 @@
 //!   size; their 0.7x glyph runs are the one exception);
 //! - (d) the One Filled Badge rule holds inside the title-bar capsule, expecting production
 //!   only where the capsule shows it, and no badge-sized `cp_fill` quad sits anywhere else (the
-//!   7 px production marks of dialogs and the explorer are not badges; T21 ruling).
+//!   7 px production marks of dialogs and the explorer are not badges; T21 ruling);
+//! - (e) (Task 22 fix round 2) the title bar's layout, read from `TitleBarProbe`: the trailing
+//!   controls (EN/TR, theme, window controls) lie wholly inside the window and end at the
+//!   bar's right padding, the palette field is at least `PALETTE_MIN_PX` wide and ends before
+//!   them, and the capsule ends before the palette field. A pushed-off icon button draws no
+//!   clipped text, so (b) alone cannot see it.
 //!
 //! Windows has no headless renderer at the pin: the test prints `shots: no headless renderer
 //! (R8)` and passes.
@@ -58,11 +63,12 @@ use hacivat_settings::{LanguagePref, LocalPaths, ThemePref};
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::capsule::CapsuleProbe;
 use hacivat_ui::text::{RenderedText, TextRegistry, TextSource};
+use hacivat_ui::titlebar::{PALETTE_MIN_PX, TitleBarProbe};
 use hacivat_ui_core::app::{TextRendering, bootstrap};
 use hacivat_ui_core::assets::BundledAssets;
 use hacivat_ui_core::gpui_surface::{
-    AnyWindowHandle, App, HeadlessAppContext, Window, current_headless_renderer, current_platform,
-    px, size,
+    AnyWindowHandle, App, Bounds, HeadlessAppContext, Pixels, Window, current_headless_renderer,
+    current_platform, point, px, size,
 };
 use hacivat_ui_core::named_rules::assert_one_filled_badge_in;
 use hacivat_ui_core::platform::apply_text_rendering;
@@ -603,6 +609,56 @@ fn check_labels(name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String>
     out
 }
 
+// ## m2b-t22-live (fix round 2, R1-I1)
+/// (e) The title bar's layout (a geometry check: an icon button pushed off the window draws no
+/// clipped text): the trailing controls sit wholly inside the window and end where the bar's
+/// right padding puts them, the palette field keeps `PALETTE_MIN_PX` and ends before them,
+/// and the capsule ends before the palette field begins.
+fn check_title_bar(width: f32, bar: TitleBarProbe, capsule: Option<Bounds<Pixels>>) -> Vec<String> {
+    const SLACK: f32 = 0.5;
+    let mut out = Vec::new();
+    let Some(trailing) = bar.trailing else {
+        return vec!["the title bar drew no trailing controls".to_string()];
+    };
+    let (left, right) = (f32::from(trailing.left()), f32::from(trailing.right()));
+    let end = width - bar.right_padding;
+    if left < -SLACK || right > width + SLACK {
+        out.push(format!(
+            "the trailing controls ({left:.1}..{right:.1}) leave the {width} px window"
+        ));
+    } else if (right - end).abs() > SLACK {
+        out.push(format!(
+            "the trailing controls end at {right:.1}, not at {end:.1}: something pushed them"
+        ));
+    }
+    let Some(palette) = bar.palette else {
+        out.push("the title bar drew no palette field".to_string());
+        return out;
+    };
+    let (p_left, p_right) = (f32::from(palette.left()), f32::from(palette.right()));
+    let palette_w = f32::from(palette.size.width);
+    if palette_w < PALETTE_MIN_PX - SLACK {
+        out.push(format!(
+            "the palette field is {palette_w:.1} px, under its {PALETTE_MIN_PX} px minimum"
+        ));
+    }
+    if p_left < -SLACK || p_right > left + SLACK {
+        out.push(format!(
+            "the palette field ({p_left:.1}..{p_right:.1}) runs into the trailing controls at \
+             {left:.1}"
+        ));
+    }
+    if let Some(capsule) = capsule {
+        let c_right = f32::from(capsule.right());
+        if c_right > p_left + SLACK {
+            out.push(format!(
+                "the capsule ends at {c_right:.1}, past the palette field's start at {p_left:.1}"
+            ));
+        }
+    }
+    out
+}
+
 /// Renders `shot` in a fresh app, checks the frame and writes the PNG. Returns the violations.
 fn render(shot: Shot, dir: &Path) -> Vec<String> {
     let platform = current_platform(true);
@@ -619,6 +675,7 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
             frame: Vec::new(),
         });
         cx.set_global(CapsuleProbe::default());
+        cx.set_global(TitleBarProbe::default());
     });
     let root = tempfile::tempdir().expect("temp dir");
     let paths = LocalPaths::under(root.path());
@@ -695,6 +752,17 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
             .unwrap_or_else(|| "One Filled Badge rule".to_string());
         failures.push(format!("{name}: (d) {msg}"));
     }
+    let (bar, capsule) = cx.update(|cx| {
+        (
+            *cx.global::<TitleBarProbe>(),
+            cx.global::<CapsuleProbe>().bounds,
+        )
+    });
+    failures.extend(
+        check_title_bar(w, bar, capsule)
+            .into_iter()
+            .map(|v| format!("{name}: (e) {v}")),
+    );
 
     let image = cx.capture_screenshot(handle).expect("the frame renders");
     let want = ((w * scale).round() as u32, (h * scale).round() as u32);
@@ -891,10 +959,14 @@ impl Cli {
 /// one test), the binary fails instead of passing without rendering.
 fn main() {
     let cli = Cli::parse(std::env::args().skip(1));
-    let checks: [(&str, fn()); 4] = [
+    let checks: [(&str, fn()); 5] = [
         (
             "a_missing_surface_fails_its_frame",
             a_missing_surface_fails_its_frame,
+        ),
+        (
+            "a_pushed_title_bar_fails_its_frame",
+            a_pushed_title_bar_fails_its_frame,
         ),
         (
             "the_matrix_covers_every_surface_locale_and_theme",
@@ -953,6 +1025,48 @@ fn main() {
         None => {}
     }
     println!("\ntest result: ok. {passed} passed; 0 failed; {ignored} ignored");
+}
+
+// ## m2b-t22-live (fix round 2, R1-I1)
+fn a_pushed_title_bar_fails_its_frame() {
+    let b = |x: f32, w: f32| Bounds::new(point(px(x), px(0.0)), size(px(w), px(40.0)));
+    // A 960 px window, right padding 10: trailing controls 830..950, palette 400..620.
+    let good = TitleBarProbe {
+        palette: Some(b(400.0, 220.0)),
+        trailing: Some(b(830.0, 120.0)),
+        right_padding: 10.0,
+    };
+    assert!(check_title_bar(960.0, good, Some(b(100.0, 280.0))).is_empty());
+    // Pushed right by a wide capsule: the theme button leaves the window.
+    let pushed = TitleBarProbe {
+        trailing: Some(b(865.0, 120.0)),
+        ..good
+    };
+    let found = check_title_bar(960.0, pushed, None);
+    assert!(found.iter().any(|v| v.contains("leave the")), "{found:?}");
+    // Pushed by less than its padding: still inside, but no longer at its place.
+    let nudged = TitleBarProbe {
+        trailing: Some(b(834.0, 120.0)),
+        ..good
+    };
+    let found = check_title_bar(960.0, nudged, None);
+    assert!(
+        found.iter().any(|v| v.contains("something pushed them")),
+        "{found:?}"
+    );
+    // A squeezed palette field, and a capsule running under it.
+    let squeezed = TitleBarProbe {
+        palette: Some(b(500.0, 160.0)),
+        ..good
+    };
+    let found = check_title_bar(960.0, squeezed, Some(b(100.0, 420.0)));
+    assert!(found.iter().any(|v| v.contains("under its")), "{found:?}");
+    assert!(
+        found.iter().any(|v| v.contains("past the palette")),
+        "{found:?}"
+    );
+    // No title bar drawn at all.
+    assert!(!check_title_bar(960.0, TitleBarProbe::default(), None).is_empty());
 }
 
 fn a_missing_surface_fails_its_frame() {
@@ -1017,7 +1131,7 @@ fn the_command_line_reads_like_libtest() {
     let all: Vec<String> = shots().iter().map(|s| s.file_name(2.0)).collect();
     // No filter: everything; the render is ignored unless asked for.
     let cli = parse("--nocapture --test-threads 1");
-    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(308));
+    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(468));
     assert!(!cli.runs_ignored());
     // nextest: `--list --format terse --ignored` lists only the render.
     let cli = parse("--list --format terse --ignored");
@@ -1031,7 +1145,7 @@ fn the_command_line_reads_like_libtest() {
     );
     assert_eq!(
         parse("--ignored render_all").shots(&all).map(|s| s.len()),
-        Some(308)
+        Some(468)
     );
     // A dialog surface renders at both sizes.
     assert_eq!(

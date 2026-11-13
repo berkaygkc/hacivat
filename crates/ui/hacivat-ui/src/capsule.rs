@@ -34,7 +34,7 @@ use std::rc::Rc;
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, Bounds, ClickEvent, Div, ElementId, Global, Hsla, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Pixels, Point, Role, SharedString, Stateful,
+    IntoElement, KeyDownEvent, ParentElement, Pixels, Point, Role, SharedString,
     StatefulInteractiveElement, Styled, TextRun, Window, canvas, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeTokens, TypeStyle};
@@ -220,6 +220,11 @@ impl Capsule {
     /// unencrypted segments keep only their icons (their full text stays the tooltip and the
     /// accessible name), and last the connection's name ellipsizes. The environment block
     /// never shrinks.
+    ///
+    /// Fix round 2 (R1-I1): the other states degrade too (the engine, a reconnect's
+    /// countdown, then the state's text to its glyph: connecting, reconnecting, idle,
+    /// "Couldn't connect"; then Retry's text to its icon), and the capsule is clamped to
+    /// `max_width`: it is never laid out wider, whatever is left to give up.
     pub fn max_width(mut self, max_width: Option<f32>) -> Self {
         self.max_width = max_width;
         self
@@ -402,15 +407,20 @@ fn text_width(window: &Window, text: &SharedString, style: TypeStyle) -> f32 {
     )
 }
 
-/// The narrowest a name ellipsizes to (about six characters).
-const NAME_MIN_PX: f32 = 48.0;
+/// The narrowest a name ellipsizes to once every step is spent: a glyph and the ellipsis (fix
+/// round 2, R1-I1: round 1 stopped at about six characters and let the capsule push the
+/// palette).
+const NAME_FLOOR_PX: f32 = 20.0;
 /// Room kept in hand when fitting, against rounding.
 const FIT_SLACK_PX: f32 = 2.0;
 
 /// What the capsule gives up to fit its room (ruling I1), in this order: the connected
 /// capsule's latency, path text, access text and unencrypted text (the ruling's order); then,
 /// in any state, the engine (the status bar and the explorer show it) and a reconnect's
-/// countdown (pseudo locales); last the name.
+/// countdown (pseudo locales); then (fix round 2, R1-I1) the state's own text (connecting,
+/// "Reconnecting · attempt n", idle, "Couldn't connect"), which keeps its glyph, and Retry's
+/// text, which keeps its icon; last the name. A collapsed segment keeps its whole text as its
+/// tooltip and accessible name.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Fit {
     hide_latency: bool,
@@ -419,17 +429,20 @@ struct Fit {
     unencrypted_icon_only: bool,
     hide_engine: bool,
     hide_next: bool,
+    // ## m2b-t22-live (fix round 2, R1-I1)
+    state_icon_only: bool,
+    retry_icon_only: bool,
     /// How much narrower the name is drawn (it ellipsizes).
     name_cut: f32,
 }
 
 /// The steps of [`Fit`], in order.
-const STEPS: usize = 6;
+const STEPS: usize = 8;
 
 impl Fit {
     /// The degradation that brings a capsule `full` px wide (nothing given up) within `max`:
     /// each step of `steps` (in [`Fit`]'s order; 0 when the step does not apply), then the name
-    /// down to [`NAME_MIN_PX`]. Returns the fit and the width it saves.
+    /// down to [`NAME_FLOOR_PX`]. Returns the fit and the width it saves.
     fn plan(full: f32, max: f32, steps: [f32; STEPS], name_w: f32) -> (Fit, f32) {
         let mut fit = Fit::default();
         let mut over = full - max + FIT_SLACK_PX;
@@ -447,13 +460,15 @@ impl Fit {
                 2 => fit.access_icon_only = true,
                 3 => fit.unencrypted_icon_only = true,
                 4 => fit.hide_engine = true,
-                _ => fit.hide_next = true,
+                5 => fit.hide_next = true,
+                6 => fit.state_icon_only = true,
+                _ => fit.retry_icon_only = true,
             }
             over -= step;
             saved += step;
         }
         if over > 0.0 {
-            let cut = over.min((name_w - NAME_MIN_PX).max(0.0));
+            let cut = over.min((name_w - NAME_FLOOR_PX).max(0.0));
             fit.name_cut = cut;
             saved += cut;
         }
@@ -461,8 +476,9 @@ impl Fit {
     }
 }
 
-/// The capsule's natural width (nothing given up), as the last frame measured it: its drawn
-/// width plus what that frame gave up. Kept per window.
+/// The capsule's natural width (nothing given up), as the last frame measured it: the width
+/// of its segments' row (which the clamp never squeezes, fix round 2) and the frame's border,
+/// plus what that frame gave up. Kept per window.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct FitMemo {
     full: Option<f32>,
@@ -575,9 +591,16 @@ impl Capsule {
                     .map_or(0.0, |u| gap + text_width(window, u, body)),
                 engine_w(engine),
                 0.0,
+                0.0,
+                0.0,
             ],
             // The countdown keeps at least its 44 px column.
-            CapsuleModel::Reconnecting { engine, next, .. } => [
+            CapsuleModel::Reconnecting {
+                engine,
+                next,
+                label,
+                ..
+            } => [
                 0.0,
                 0.0,
                 0.0,
@@ -586,11 +609,32 @@ impl Capsule {
                 next.as_ref().map_or(0.0, |n| {
                     gap + text_width(window, n, mono).max(RUN_MONO_MIN_PX)
                 }),
+                gap + text_width(window, label, body),
+                0.0,
             ],
-            CapsuleModel::Connecting { engine, .. } | CapsuleModel::Idle { engine, .. } => {
-                [0.0, 0.0, 0.0, 0.0, engine_w(engine), 0.0]
-            }
-            _ => [0.0; STEPS],
+            CapsuleModel::Connecting { engine, label, .. }
+            | CapsuleModel::Idle { engine, label, .. } => [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                engine_w(engine),
+                0.0,
+                gap + text_width(window, label, body),
+                0.0,
+            ],
+            // ## m2b-t22-live (fix round 2, R1-I1): "Couldn't connect", then Retry's text.
+            CapsuleModel::Failed { label, retry, .. } => [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                gap + text_width(window, label, body),
+                gap + text_width(window, retry, body),
+            ],
+            CapsuleModel::Placeholder { .. } => [0.0; STEPS],
         };
         let name_w = model_name(&self.model).map_or(0.0, |n| text_width(window, n, strong));
         let memo = window.use_keyed_state(ElementId::from("capsule-fit"), cx, |_, _| {
@@ -602,6 +646,7 @@ impl Capsule {
             _ => (Fit::default(), 0.0),
         };
 
+        let max_width = self.max_width;
         let frame_id = ElementId::from("capsule");
         let (hover, _) = interaction_state(&frame_id, window, cx);
         let hovered = *hover.read(cx);
@@ -623,13 +668,31 @@ impl Capsule {
             .bg(c.panel.to_hsla())
             .on_hover(hover_listener(hover))
             .child(bounds_probe(frame_bounds.clone(), 1.0, 1.0))
-            .child(record_frame())
-            // ## m2b-t22-live: the natural width for the next frame's fit (its drawn width,
-            // border included, plus what this frame gave up); a change draws again.
+            .child(record_frame());
+        // ## m2b-t22-live (fix round 2, R1-I1): the hard clamp. The frame is never laid out
+        // wider than its room, so the palette field and the trailing controls never move. The
+        // segments sit in a row of their own, which the clamp never squeezes: the row's width
+        // is always the capsule's natural width, so one frame's measure plans the next exactly
+        // (round 1's convergence). The plan ends with the name ellipsized down to
+        // `NAME_FLOOR_PX`; only a frame planned with a stale width (the first frame of a window
+        // or of a wider state) is cut at the frame's edge, and the next one fits.
+        if let Some(max) = max_width {
+            frame = frame.max_w(px(max));
+        }
+        let mut row = div()
+            .relative()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h_full()
+            .flex_none()
+            // ## m2b-t22-live: the natural width for the next frame's fit (the row and the
+            // frame's 1 px border on each side, plus what this frame gave up); a change draws
+            // again.
             .child(
                 canvas(
                     move |bounds, window, _| {
-                        let full = f32::from(bounds.size.width) + saved;
+                        let full = f32::from(bounds.size.width) + 2.0 + saved;
                         if memo.get().full.is_none_or(|f| (f - full).abs() > 0.5) {
                             memo.set(FitMemo { full: Some(full) });
                             window.refresh();
@@ -638,10 +701,9 @@ impl Capsule {
                     |_, _, _, _| {},
                 )
                 .absolute()
-                .left(px(-1.0))
-                .top(px(-1.0))
-                .right(px(-1.0))
-                .bottom(px(-1.0)),
+                .top_0()
+                .left_0()
+                .size_full(),
             );
 
         // A segment that reports itself (and not `Body`) when clicked; announced as a button,
@@ -688,8 +750,8 @@ impl Capsule {
             }
         };
 
-        let head = |frame: Stateful<Div>, head: Head<'_>| {
-            let mut frame = frame;
+        let head = |row: Div, head: Head<'_>| {
+            let mut frame = row;
             match head.env {
                 Some((EnvKind::Production, env_label)) => {
                     // The one cp_fill quad in the window (named rule), always first.
@@ -736,7 +798,7 @@ impl Capsule {
             let name_label: AnyElement = if fit.name_cut > 0.0 {
                 div()
                     .min_w(px(0.0))
-                    .max_w(px((name_w - fit.name_cut).max(NAME_MIN_PX)))
+                    .max_w(px((name_w - fit.name_cut).max(NAME_FLOOR_PX)))
                     .child(
                         data(head.name, strong, c.text.to_hsla())
                             .truncate(true)
@@ -760,12 +822,23 @@ impl Capsule {
             frame.child(name_cell)
         };
 
+        // ## m2b-t22-live (fix round 2, R1-I1): a state segment whose text collapsed keeps its
+        // glyph; the text becomes its tooltip and accessible name.
+        let collapsed = |el: Div, id: &'static str, tip: &SharedString| {
+            let (tip, name) = (tip.clone(), tip.clone());
+            el.id(id)
+                .debug_selector(move || id.to_string())
+                .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
+                .declare(Role::Label, name, None)
+                .into_any_element()
+        };
+
         let name_for_label;
         let mut description = None;
         match &self.model {
             CapsuleModel::Placeholder { label } => {
                 name_for_label = label.clone();
-                frame = frame.child(div().flex().items_center().px(px(9.0)).child(text(
+                row = row.child(div().flex().items_center().px(px(9.0)).child(text(
                     label,
                     body,
                     c.text_3.to_hsla(),
@@ -782,29 +855,35 @@ impl Capsule {
             } => {
                 name_for_label = name.clone();
                 description = Some(SharedString::from(format!("{env_label}, {label}, {step}")));
-                frame = head(
-                    frame,
+                row = head(
+                    row,
                     Head {
                         env: Some((*env, env_label)),
                         name,
                         engine: Some(engine),
                     },
                 );
-                frame = frame.child(
-                    cell(t)
-                        .child(run_marker(&theme).debug_selector(|| "capsule-run".to_string()))
-                        .child(text(label, body, c.text.to_hsla()))
-                        .child(div().min_w(px(RUN_MONO_MIN_PX)).child(text(
-                            step,
-                            mono,
-                            c.text_2.to_hsla(),
-                        )))
-                        .child(div().min_w(px(RUN_MONO_MIN_PX)).child(text(
-                            clock,
-                            mono,
-                            c.text_2.to_hsla(),
-                        ))),
-                );
+                let mut run =
+                    cell(t).child(run_marker(&theme).debug_selector(|| "capsule-run".to_string()));
+                if !fit.state_icon_only {
+                    run = run.child(text(label, body, c.text.to_hsla()).id("capsule-text-run"));
+                }
+                let run = run
+                    .child(div().min_w(px(RUN_MONO_MIN_PX)).child(text(
+                        step,
+                        mono,
+                        c.text_2.to_hsla(),
+                    )))
+                    .child(div().min_w(px(RUN_MONO_MIN_PX)).child(text(
+                        clock,
+                        mono,
+                        c.text_2.to_hsla(),
+                    )));
+                row = row.child(if fit.state_icon_only {
+                    collapsed(run, "capsule-state", label)
+                } else {
+                    run.into_any_element()
+                });
             }
             // ## m2b-t22-live: the run marker, "Reconnecting · attempt n" and, between
             // attempts, "in n s" (NOTES M2a §7, HV-CONN-05).
@@ -820,17 +899,20 @@ impl Capsule {
                 let mut said = vec![env_label.clone(), label.clone()];
                 said.extend(next.iter().cloned());
                 description = Some(SharedString::from(said.join(", ")));
-                frame = head(
-                    frame,
+                row = head(
+                    row,
                     Head {
                         env: Some((*env, env_label)),
                         name,
                         engine: Some(engine),
                     },
                 );
-                let mut run = cell(t)
-                    .child(run_marker(&theme).debug_selector(|| "capsule-run".to_string()))
-                    .child(text(label, body, c.text.to_hsla()).id("capsule-text-run"));
+                let mut run =
+                    cell(t).child(run_marker(&theme).debug_selector(|| "capsule-run".to_string()));
+                // Collapsed (R1-I1): the run marker, "Reconnecting · attempt n" its tooltip.
+                if !fit.state_icon_only {
+                    run = run.child(text(label, body, c.text.to_hsla()).id("capsule-text-run"));
+                }
                 if let Some(next) = next.as_ref().filter(|_| !fit.hide_next) {
                     run = run.child(
                         div()
@@ -838,7 +920,11 @@ impl Capsule {
                             .child(text(next, mono, c.text_2.to_hsla()).id("capsule-text-next")),
                     );
                 }
-                frame = frame.child(run);
+                row = row.child(if fit.state_icon_only {
+                    collapsed(run, "capsule-state", label)
+                } else {
+                    run.into_any_element()
+                });
             }
             CapsuleModel::Idle {
                 env,
@@ -849,21 +935,26 @@ impl Capsule {
             } => {
                 name_for_label = name.clone();
                 description = Some(SharedString::from(format!("{env_label}, {label}")));
-                frame = head(
-                    frame,
+                row = head(
+                    row,
                     Head {
                         env: Some((*env, env_label)),
                         name,
                         engine: Some(engine),
                     },
                 );
-                // NOTES M2b surface 7: the unplug glyph and its label, both text-2.
-                frame = frame.child(
-                    cell(t)
-                        .debug_selector(|| "capsule-idle".to_string())
-                        .child(icon(IconName::Unplug, c.text_2.to_hsla()))
-                        .child(text(label, body, c.text_2.to_hsla()).id("capsule-text-idle")),
-                );
+                // NOTES M2b surface 7: the unplug glyph and its label, both text-2. Collapsed
+                // (R1-I1): the glyph alone, the label its tooltip.
+                let mut idle = cell(t)
+                    .debug_selector(|| "capsule-idle".to_string())
+                    .child(icon(IconName::Unplug, c.text_2.to_hsla()));
+                row = row.child(if fit.state_icon_only {
+                    collapsed(idle, "capsule-state", label)
+                } else {
+                    idle =
+                        idle.child(text(label, body, c.text_2.to_hsla()).id("capsule-text-idle"));
+                    idle.into_any_element()
+                });
             }
             CapsuleModel::Connection {
                 env,
@@ -883,8 +974,8 @@ impl Capsule {
                 parts.extend(unencrypted.iter().cloned());
                 parts.extend(unsupported.iter().cloned());
                 description = Some(SharedString::from(parts.join(", ")));
-                frame = head(
-                    frame,
+                row = head(
+                    row,
                     Head {
                         env: Some((*env, env_label)),
                         name,
@@ -948,14 +1039,14 @@ impl Capsule {
                         .tooltip(move |_, cx| Tip::view(tip.clone(), cx))
                         .declare(Role::Label, path.clone(), None);
                 }
-                frame = frame.child(access_cell).child(path_cell);
+                row = row.child(access_cell).child(path_cell);
                 if let Some(label) = unencrypted {
                     let mut content =
                         vec![icon(IconName::LockOpen, c.text_2.to_hsla()).into_any_element()];
                     if !fit.unencrypted_icon_only {
                         content.push(text(label, body, c.text.to_hsla()).into_any_element());
                     }
-                    frame = frame.child(clickable(
+                    row = row.child(clickable(
                         "capsule-unencrypted",
                         CapsuleSegment::Unencrypted,
                         label,
@@ -965,7 +1056,7 @@ impl Capsule {
                 }
                 if let Some(label) = unsupported {
                     // A permanent, hue-free mark (PO Q3).
-                    frame = frame.child(
+                    row = row.child(
                         cell(t)
                             .debug_selector(|| "capsule-unsupported".to_string())
                             .child(icon(IconName::CircleAlert, c.text_2.to_hsla()))
@@ -982,8 +1073,8 @@ impl Capsule {
             } => {
                 name_for_label = name.clone();
                 description = Some(SharedString::from(format!("{env_label}, {label}")));
-                frame = head(
-                    frame,
+                row = head(
+                    row,
                     Head {
                         env: Some((*env, env_label)),
                         name,
@@ -992,31 +1083,42 @@ impl Capsule {
                 );
                 // No new hue for errors: the alert glyph is ink.
                 let retry_ink = if hovered { c.text } else { c.text_2 };
-                frame = frame
-                    .child(
-                        cell(t)
-                            .child(icon(IconName::TriangleAlert, c.text.to_hsla()))
-                            .child(text(label, body, c.text.to_hsla())),
-                    )
-                    .child(clickable(
-                        "capsule-retry",
-                        CapsuleSegment::Retry,
-                        retry,
-                        vec![
-                            icon(IconName::RotateCw, retry_ink.to_hsla()).into_any_element(),
-                            text(retry, body, retry_ink.to_hsla()).into_any_element(),
-                        ],
-                        None,
-                    ));
+                // Collapsed (R1-I1): the alert glyph alone, then Retry's icon alone; each text
+                // its tooltip and accessible name.
+                let alert = cell(t).child(icon(IconName::TriangleAlert, c.text.to_hsla()));
+                let alert = if fit.state_icon_only {
+                    collapsed(alert, "capsule-state", label)
+                } else {
+                    alert
+                        .child(text(label, body, c.text.to_hsla()).id("capsule-text-failed"))
+                        .into_any_element()
+                };
+                let mut retry_content =
+                    vec![icon(IconName::RotateCw, retry_ink.to_hsla()).into_any_element()];
+                if !fit.retry_icon_only {
+                    retry_content.push(
+                        text(retry, body, retry_ink.to_hsla())
+                            .id("capsule-text-retry")
+                            .into_any_element(),
+                    );
+                }
+                row = row.child(alert).child(clickable(
+                    "capsule-retry",
+                    CapsuleSegment::Retry,
+                    retry,
+                    retry_content,
+                    fit.retry_icon_only.then(|| retry.clone()),
+                ));
             }
         }
-        frame = frame.child(
+        row = row.child(
             cell(t).px(px(6.0)).child(
                 Icon::new(IconName::ChevronsUpDown)
                     .size(IconSize::Chrome)
                     .color(c.text_3.to_hsla()),
             ),
         );
+        frame = frame.child(row);
         // Exactly one handler per click: the segment handler wins, `on_click` is the M1 fallback.
         if !inert {
             frame = frame.cursor_pointer();
@@ -1072,5 +1174,38 @@ mod raised_swatch_tests {
             staging.style().border_color,
             Some(DARK.colors.text_2.to_hsla())
         );
+    }
+}
+
+// ## m2b-t22-live (fix round 2, R1-I1)
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+
+    /// A failed capsule: "Couldn't connect" (60 px) goes first, then Retry's text (40 px).
+    const FAILED: [f32; STEPS] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 60.0, 40.0];
+
+    #[test]
+    fn a_failed_capsule_gives_up_its_text_then_retry_then_the_name() {
+        let (fit, saved) = Fit::plan(500.0, 470.0, FAILED, 100.0);
+        assert!(fit.state_icon_only && !fit.retry_icon_only);
+        assert_eq!((fit.name_cut, saved), (0.0, 60.0));
+        let (fit, saved) = Fit::plan(500.0, 420.0, FAILED, 100.0);
+        assert!(fit.state_icon_only && fit.retry_icon_only);
+        assert_eq!((fit.name_cut, saved), (0.0, 100.0));
+        // Every step spent: the name ellipsizes, down to its floor.
+        let (fit, saved) = Fit::plan(500.0, 300.0, FAILED, 100.0);
+        assert_eq!(fit.name_cut, 100.0 - NAME_FLOOR_PX);
+        assert_eq!(saved, 100.0 + 100.0 - NAME_FLOOR_PX);
+    }
+
+    #[test]
+    fn a_reconnect_gives_up_the_engine_the_countdown_then_its_label() {
+        let steps = [0.0, 0.0, 0.0, 0.0, 30.0, 50.0, 120.0, 0.0];
+        let (fit, _) = Fit::plan(600.0, 560.0, steps, 90.0);
+        assert!(fit.hide_engine && fit.hide_next && !fit.state_icon_only);
+        let (fit, _) = Fit::plan(600.0, 500.0, steps, 90.0);
+        assert!(fit.state_icon_only);
+        assert_eq!(fit.name_cut, 0.0);
     }
 }

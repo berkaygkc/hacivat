@@ -1028,6 +1028,129 @@ fn the_inert_title_bar_keeps_dragging_and_window_buttons_live(cx: &mut TestAppCo
     );
 }
 
+// ## m2b-t22-live (fix round 2, R1-I1): every capsule state gives up its text and the capsule
+// is clamped to its room, so the palette field and the trailing controls never move.
+
+/// A title bar holding `model`, `width` wide, drawn until the capsule's fit settles.
+fn mount_bar(cx: &mut TestAppContext, model: CapsuleModel, width: f32) -> &mut VisualTestContext {
+    let vcx = host(cx, move |_, _| {
+        div()
+            .w_full()
+            .child(
+                TitleBar::new(ChromeKind::MacTrafficLights)
+                    .brand("HACIVAT".into())
+                    .capsule(Capsule::new(model.clone()))
+                    .palette_field("Search".into(), "⌘K".into(), |_, _, _| {})
+                    .right(vec![Button::new("theme", "Dark".into()).into_any_element()]),
+            )
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(width), px(300.0)));
+    // The room and the fit are measured in one frame and used in the next.
+    for _ in 0..8 {
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+    }
+    vcx
+}
+
+/// Where the theme button ends in a window wide enough for every capsule: its place.
+fn theme_end(cx: &mut TestAppContext, model: CapsuleModel, width: f32) -> f32 {
+    let vcx = mount_bar(cx, model, width);
+    f32::from(bounds_of(vcx, "button-theme").right())
+}
+
+fn assert_room_kept(vcx: &mut VisualTestContext, width: f32, pad: f32, what: &str) {
+    let palette = bounds_of(vcx, "palette-field");
+    assert!(
+        palette.size.width >= px(170.0 - 0.5),
+        "{what}: the palette field is {palette:?}"
+    );
+    let capsule = bounds_of(vcx, "capsule");
+    assert!(
+        capsule.right() <= palette.left() + px(0.5),
+        "{what}: {capsule:?} runs into {palette:?}"
+    );
+    let theme = bounds_of(vcx, "button-theme");
+    assert!(
+        (f32::from(theme.right()) - (width - pad)).abs() <= 0.5,
+        "{what}: the theme button moved to {theme:?}"
+    );
+}
+
+#[gpui::test]
+fn every_capsule_state_gives_way_and_never_pushes_the_bar(cx: &mut TestAppContext) {
+    let name = "orders-production-replica-eu-west-1";
+    let failed = CapsuleModel::Failed {
+        env: EnvKind::Production,
+        env_label: "PRODUCTION".into(),
+        label: "Couldn't connect to the server".into(),
+        name: name.into(),
+        retry: "Retry the connection".into(),
+    };
+    let reconnecting = CapsuleModel::Reconnecting {
+        env: EnvKind::Production,
+        env_label: "PRODUCTION".into(),
+        name: name.into(),
+        engine: "PostgreSQL 16".into(),
+        label: "Reconnecting · attempt 3".into(),
+        next: Some("in 4 s".into()),
+    };
+    let idle = CapsuleModel::Idle {
+        env: EnvKind::Staging,
+        env_label: "Staging".into(),
+        name: name.into(),
+        engine: "PostgreSQL 16".into(),
+        label: "Disconnected (idle)".into(),
+    };
+    let wide = 6000.0;
+    let pad = wide - theme_end(cx, failed.clone(), wide);
+    for (model, texts_gone, what) in [
+        (
+            failed,
+            vec!["Couldn't connect to the server", "Retry the connection"],
+            "failed",
+        ),
+        (
+            reconnecting,
+            vec!["Reconnecting · attempt 3", "in 4 s"],
+            "reconnecting",
+        ),
+        (idle, vec!["Disconnected (idle)"], "idle"),
+    ] {
+        // Wide: every text shows.
+        let vcx = mount_bar(cx, model.clone(), wide);
+        enable_registry(vcx);
+        let drawn = texts(vcx);
+        for t in &texts_gone {
+            assert!(drawn.contains(&(*t).into()), "{what}: {t} in {drawn:?}");
+        }
+        assert_room_kept(vcx, wide, pad, what);
+        // Narrow: the state's text gives way to its glyph, named by its text.
+        let narrow = 900.0;
+        let vcx = mount_bar(cx, model, narrow);
+        assert_room_kept(vcx, narrow, pad, what);
+        enable_registry(vcx);
+        let drawn = texts(vcx);
+        for t in &texts_gone {
+            assert!(!drawn.contains(&(*t).into()), "{what}: {t} still drawn");
+        }
+        assert!(
+            has(vcx, "capsule-state"),
+            "{what}: no collapsed state glyph"
+        );
+        a11y_record();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        let decls = a11y_take();
+        let first = texts_gone[0];
+        assert!(
+            decls.iter().any(|d| d.name.as_ref() == first),
+            "{what}: the glyph is not named {first}"
+        );
+    }
+}
+
 /// Runs `f`, catching a panic, and returns the panic's message and backtrace as the panic hook
 /// saw them on this thread (other threads keep the previous hook).
 fn with_panic_trace(f: impl FnOnce()) -> (std::thread::Result<()>, String) {
