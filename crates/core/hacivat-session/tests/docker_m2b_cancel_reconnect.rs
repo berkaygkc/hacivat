@@ -2,9 +2,10 @@
 //! 1 s on every engine, directly and through SSH; a terminated backend with an open
 //! transaction reports what was lost; an `INSERT` cut mid-flight reports "outcome unknown" and
 //! is never replayed; a server outage reconnects within the backoff; carried cases: a read-only
-//! session whose guard `BEGIN` is answered by a `FATAL` reconnects (T17 P1), and an SSH chain's
-//! death closes the parked pooled sessions (T17 R2). Run with `cargo xtask docker test --set
-//! pr|full -p hacivat-session`.
+//! session whose guard `BEGIN` is answered by a `FATAL` reconnects (T17 P1), an SSH chain's
+//! death closes the parked pooled sessions (T17 R2), and finding F3: a released pooled session
+//! is parked and reused, and the session's probes read the server's values. Run with `cargo
+//! xtask docker test --set pr|full -p hacivat-session`.
 //!
 //! - Targets come only from `require_target` (Q6); through SSH a test dials the target's
 //!   in-network endpoint.
@@ -25,7 +26,7 @@ use hacivat_net::TlsMode;
 use hacivat_proto::DbmsKind;
 use hacivat_session::LiveState;
 use hacivat_session::pipeline::Interaction;
-use hacivat_session::session::{CancelOutcome, ExecErrorKind, SessionKind, SessionState};
+use hacivat_session::session::{CancelOutcome, ExecErrorKind, Request, SessionKind, SessionState};
 use hacivat_testkit::chaos::ChaosProxy;
 use hacivat_testkit::require_target;
 
@@ -395,6 +396,97 @@ async fn ro_fatal_on_the_guards_begin_reconnects() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Finding F3: a released pooled session is parked, and the session's own probes read values
+
+/// F3 (the reset, T7; the pool, T15): a released pooled session is reset and parked, and the
+/// next borrow of its kind gets the same session back. On PostgreSQL the reset's verify probe
+/// (`SELECT current_user = session_user`) must read its `t`, which only the values path
+/// returns: on the count-only extended protocol every release broke the session and every
+/// borrow opened a new connection. MySQL has no verify probe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn a_released_pooled_session_is_parked_and_reused() {
+    if !docker_enabled() {
+        return;
+    }
+    for t in ["pg17", "mysql84"].into_iter().filter_map(require_target) {
+        let on = session_on(&t, Path::Direct).await;
+        let sessions = on.m.sessions(on.id()).expect("connected");
+        let kind = SessionKind::Introspection { database: None };
+        let first = sessions
+            .pooled(kind.clone())
+            .await
+            .expect("a pooled session");
+        assert!(run(&first, "SELECT 1").await.is_ok(), "{}", t.id);
+        let released = (*first).clone();
+        let from = released.state().borrow().generation;
+        drop(first);
+        // Parked: reset (busy, then idle), never broken and closed.
+        parked_after_reset(&released, from, &t.id).await;
+        let again = sessions.pooled(kind).await.expect("a pooled session");
+        assert_eq!(
+            again.id(),
+            released.id(),
+            "{}: the released session is reused",
+            t.id
+        );
+        let reply = run(&again, "SELECT 1").await;
+        assert!(reply.is_ok(), "{}: {:?}", t.id, reply.map_err(|e| e.kind));
+        drop(again);
+        on.shutdown().await;
+    }
+}
+
+/// F3's sibling (HV-SESS-07): the schema probe reads values too, so after `SwitchSchema` the
+/// session knows the server's database, schema and user (on the count-only path it read no
+/// row and forgot the context instead).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn the_schema_probe_reads_the_servers_answer() {
+    if !docker_enabled() {
+        return;
+    }
+    for t in ["pg17", "mysql84"].into_iter().filter_map(require_target) {
+        let on = session_on(&t, Path::Direct).await;
+        let s = on.session();
+        let name = match t.engine {
+            DbmsKind::Postgres => "public",
+            _ => t.database.as_str(),
+        };
+        let reply = s
+            .submit(Request::SwitchSchema(name.to_string()))
+            .reply
+            .await
+            .expect("the actor replies");
+        assert!(reply.is_ok(), "{}: {:?}", t.id, reply.map_err(|e| e.kind));
+        let ctx = s
+            .state()
+            .borrow()
+            .schema
+            .clone()
+            .unwrap_or_else(|| panic!("{}: the probe read no context", t.id));
+        assert_eq!(
+            ctx.database.as_deref(),
+            Some(t.database.as_str()),
+            "{}",
+            t.id
+        );
+        assert_eq!(ctx.schema.as_deref(), Some(name), "{}", t.id);
+        // MySQL's CURRENT_USER() is `user@host`.
+        assert!(
+            ctx.user.as_deref().is_some_and(|u| u.starts_with(&t.user)),
+            "{}: {:?}",
+            t.id,
+            ctx.user
+        );
+        if t.engine == DbmsKind::Postgres {
+            assert_eq!(ctx.search_path_setting, [name], "{}", t.id);
+        }
+        on.shutdown().await;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Carried: an SSH chain's death closes the parked pooled sessions (T17 R2, review M6)
 
 /// Waits until released session `s` (its state generation `from` before the release) is reset
@@ -428,11 +520,11 @@ async fn ssh_death_closes_parked_pooled_sessions() {
     let Some(bastion) = require_ssh("sshd-a") else {
         return;
     };
-    // MySQL: it reaches the chain through the loopback forwarder, and an idle MySQL connection
-    // does not notice the chain's death by itself, so only the manager's `close_idle` closes its
-    // parked session. (PostgreSQL never parks a session today: finding F3,
-    // `zz_docker_m2b_findings`; its leg joins once that is fixed.)
-    for t in ["mysql84"].into_iter().filter_map(require_target) {
+    // MySQL reaches the chain through the loopback forwarder, and an idle MySQL connection does
+    // not notice the chain's death by itself, so only the manager's `close_idle` closes its
+    // parked session. PostgreSQL runs on the channel's stream (its leg joined with the F3 fix:
+    // before it, a released PostgreSQL session was never parked).
+    for t in ["mysql84", "pg17"].into_iter().filter_map(require_target) {
         // The bastion behind a chaos proxy, so the test kills exactly its own SSH session.
         let proxy = ChaosProxy::start(
             format!("{}:{}", bastion.host, bastion.port)

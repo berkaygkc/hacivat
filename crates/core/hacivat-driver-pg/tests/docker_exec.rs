@@ -438,3 +438,47 @@ async fn copy_from_stdin_is_refused_and_the_session_stays_in_step() {
     );
     assert_eq!(scalar(&mut c, "SELECT 7").await, "7");
 }
+
+// ## m2b-f3-internal-reads
+
+/// Finding F3: Hacivat's own probes read values, and on PostgreSQL only the values path
+/// (`ExecOpts::values`, the simple protocol) decodes them; the extended protocol (the default)
+/// counts the rows and drops their values. The session's reset verify probe runs right after
+/// the driver's reset sequence, so this does too; the schema probe's five columns all decode.
+#[tokio::test]
+#[ignore = "docker"]
+async fn internal_value_reads_decode_through_the_values_path() {
+    const VERIFY: &str = "SELECT current_user = session_user";
+    let Some(t) = require_target("pg17") else {
+        return;
+    };
+    let mut c = pg_on(&t).await;
+
+    // The count-only path: the row is there, its value is not (the cause of F3).
+    let counted = c.execute(VERIFY, ExecOpts::default()).await.unwrap();
+    assert_eq!((counted.row_count, counted.rows.len()), (1, 0));
+
+    c.reset().await.unwrap();
+    let verify = c.execute(VERIFY, ExecOpts::values(1)).await.unwrap();
+    assert_eq!(verify.rows, [vec![Some("t".to_string())]]);
+    assert!(!verify.truncated);
+
+    let schema = c
+        .execute(
+            "SELECT current_database(), current_schema(), \
+             array_to_string(current_schemas(true), ','), current_user, \
+             current_setting('search_path')",
+            ExecOpts::values(128),
+        )
+        .await
+        .unwrap();
+    let [row] = schema.rows.as_slice() else {
+        panic!("one row: {:?}", schema.rows);
+    };
+    assert_eq!(row.len(), 5);
+    assert_eq!(row[0].as_deref(), Some(t.database.as_str()));
+    assert_eq!(row[3].as_deref(), Some(t.user.as_str()));
+    assert!(row.iter().all(Option::is_some), "{row:?}");
+    assert_eq!(c.tx_status(), TxStatus::Idle);
+    Box::new(c).close().await;
+}

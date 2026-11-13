@@ -88,7 +88,7 @@ use crate::session::recovery::{
     LostState, Tracked, autocommit_set, connection_ending, is_recovery_case, lost_state,
     touches_tx, track_statement,
 };
-use crate::session::schema::{Family, family, first_keyword};
+use crate::session::schema::{Family, SCHEMA_PROBE_MAX_ROWS, family, first_keyword};
 use crate::session::{
     CancelOutcome, CancelState, ClosePolicy, CloseRefused, Command, EnvPlan, Escalation, ExecError,
     ExecErrorKind, ExecOrigin, IsolationLevel, Reply, Request, SchemaCtx, SessionEvent,
@@ -518,7 +518,10 @@ impl Core {
         let Ok(conn) = self.conn() else {
             return;
         };
-        let probed = conn.execute(sql, ExecOpts::default()).await;
+        // F3: the values path; the extended protocol only counts the probe's rows.
+        let probed = conn
+            .execute(sql, ExecOpts::values(SCHEMA_PROBE_MAX_ROWS))
+            .await;
         match probed {
             Ok(answer) => {
                 self.observe(false);

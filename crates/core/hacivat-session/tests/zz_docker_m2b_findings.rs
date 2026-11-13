@@ -15,7 +15,7 @@ mod common;
 use common::conformance::*;
 use hacivat_proto::{AccessLabel, DbmsKind};
 use hacivat_session::LiveState;
-use hacivat_session::session::{ExecErrorKind, SessionKind, SessionState};
+use hacivat_session::session::ExecErrorKind;
 use hacivat_testkit::{DockerTarget, targets};
 
 /// `t`'s read-only profile as `user`, on its own M2b manager.
@@ -125,48 +125,4 @@ async fn f2_mysql_refused_set_global_is_a_refusal_not_a_lost_connection() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "docker"]
-async fn f3_pg_released_pooled_session_is_parked_and_reused() {
-    // F3 (owner: the session reset, T7, and the pool, T15). A pooled session goes back to the
-    // pool through `Request::Reset`, whose PostgreSQL step 3 is the verify probe
-    // `SELECT current_user = session_user`, run with `ExecOpts::default()` — the extended
-    // protocol, whose rows the PostgreSQL driver counts without decoding. The probe therefore
-    // never reads `t`: "the reset's role check did not answer true", the session breaks and is
-    // closed, and every borrow opens a new connection (the pool never parks on PostgreSQL; the
-    // T15 tests script the probe's answer, so they pass). MySQL has no verify probe and parks.
-    if !docker_enabled() {
-        return;
-    }
-    let Some(t) = hacivat_testkit::require_target("pg17") else {
-        return;
-    };
-    let on = session_on(&t, Path::Direct).await;
-    let sessions = on.m.sessions(on.id()).expect("connected");
-    let kind = SessionKind::Introspection { database: None };
-    let first = sessions
-        .pooled(kind.clone())
-        .await
-        .expect("a pooled session");
-    assert!(run(&first, "SELECT 1").await.is_ok());
-    let released = (*first).clone();
-    let from = released.state().borrow().generation;
-    drop(first);
-    // The release's reset ends either way: parked (idle) or broken and closed.
-    wait_until("the release's reset", secs(10), || {
-        let now = released.state().borrow().clone();
-        now.generation >= from + 2 && !matches!(now.state, SessionState::Busy { .. })
-    })
-    .await;
-    let state = released.state().borrow().state.clone();
-    let again = sessions.pooled(kind).await.expect("a pooled session");
-    let reused = again.id() == released.id();
-    drop(again);
-    on.shutdown().await;
-    assert!(
-        reused,
-        "pg17: the released session was not reused; after its reset it was {state:?}"
-    );
 }

@@ -2,7 +2,9 @@
 //! 1. `ROLLBACK` when a transaction is open;
 //! 2. the driver's `RawConn::reset` (PostgreSQL: the `DISCARD ALL` sequence without
 //!    `DEALLOCATE ALL`, Q10; MySQL: `COM_RESET_CONNECTION`; SQLite: nothing);
-//! 3. a verify probe (PostgreSQL `SELECT current_user = session_user`, which must answer true);
+//! 3. a verify probe (PostgreSQL `SELECT current_user = session_user`, which must answer true),
+//!    read through the values path (`ExecOpts::values`): the extended protocol only counts rows,
+//!    so the probe would never read its `t` and every release would break (finding F3);
 //! 4. the environment plan again (identity, read-only setup, the last schema), and MySQL's
 //!    `autocommit = 0` when the session starts Manual.
 //!
@@ -61,7 +63,7 @@ impl Core {
         self.observe(false);
         reset.map_err(|e| self.raw_error(&e, true))?;
         if let Some(sql) = verify_sql(self.kind) {
-            let probe = self.conn()?.execute(sql, ExecOpts::default()).await;
+            let probe = self.conn()?.execute(sql, ExecOpts::values(1)).await;
             self.observe(false);
             let answer = probe.map_err(|e| self.raw_error(&e, true))?;
             if !verified(&answer) {

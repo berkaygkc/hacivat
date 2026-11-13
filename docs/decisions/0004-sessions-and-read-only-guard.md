@@ -1285,3 +1285,43 @@ parked pooled MySQL session (`close_idle`, T17 R2; a mutation run without it tim
 `ssl_ca` trusts a committed test CA and an account `REQUIRE X509`: a compose change and an init
 script that only take effect on `cargo xtask docker up`, which only the controller runs. Routed
 back.
+
+## m2b-t07 — internal value reads (finding F3)
+
+**The defect.** T23's F3: the reset's verify probe and the schema probe ran with
+`ExecOpts::default()`, the extended protocol, which the PostgreSQL and MySQL drivers run
+count-only (ADR 0002 m2b-t10, m2b-t13: the rows are counted, their values dropped). The verify
+probe never read its `t`, so on PostgreSQL every pooled release broke its session and every
+borrow opened a new connection. The schema probe read no row on PostgreSQL and MySQL, so a
+re-probe forgot the context (`schema: None`) instead of updating it, and no reset or guarded
+replay restored a schema. `FakeDriver` answered scripted rows on either protocol, so the T7 and
+T15 tests passed.
+
+**The rule.** Every statement of Hacivat's own whose values it reads runs through
+`ExecOpts::values(max_rows)` (`hacivat-driver`: the simple protocol, whose rows every driver
+returns as text): the verify probe (one row), the schema probe (`SCHEMA_PROBE_MAX_ROWS`, 128:
+SQLite answers one row per attached database, at most 125) and, as before, the role probe, its
+PostgreSQL identity check and the guard's canary (T18's `simple(..)`, the same options). User
+statements stay on the extended protocol, whose command tag the read-only post-check reads
+(review M2). Audited, reading no value: the environment plan, `ROLLBACK`, `SET autocommit`, the
+guard's `before`, `after` (its notice codes only) and reset replay, and the side connection's
+`KILL`/`pg_terminate_backend` (`batch`). A verify probe that answers no row, or anything but
+true, still breaks the session (fail closed).
+
+**The fake cannot hide it again.** `FakeDriver::execute` with `Protocol::Extended` returns a
+scripted answer without its row values (the row count stays), on every engine, as the real
+count-only path does; a script reaches a value read only through `ExecOpts::values`. Before the
+session fix this turned 13 session tests red (pool 5, env_schema 4, manager_m2b, readonly and
+session_actor 1 each); `fake::tests::the_count_only_path_keeps_no_values` holds the contract.
+
+**Behaviour change.** With the context known after a re-probe, a pooled session's reset and a
+read-only session's guarded replay now restore the schema (PostgreSQL the whole `search_path`,
+M11), as the m2b-t07 section always specified.
+
+**Tests.** Driver contract on a real server: `hacivat-driver-pg`
+`docker_exec::internal_value_reads_decode_through_the_values_path` (after the driver's reset the
+verify probe decodes `t` and the schema probe's five columns decode; the default path keeps no
+value). Session over Docker, in `docker_m2b_cancel_reconnect.rs` (F3 moved there from
+`zz_docker_m2b_findings.rs`): `a_released_pooled_session_is_parked_and_reused` and
+`the_schema_probe_reads_the_servers_answer` on pg17 and mysql84, and T17 R2's
+`ssh_death_closes_parked_pooled_sessions` now runs pg17 too (T23 deviation 7).
