@@ -112,7 +112,7 @@ pub struct SessionSnapshot {
     pub cancel: CancelState,
     pub read_only: bool,
     pub access: AccessLabel,
-    /// Bumped by every reconnect.
+    /// Bumped by every change (so by every reconnect too).
     pub generation: u64,
 }
 
@@ -220,9 +220,8 @@ pub enum SessionEvent {
     TxChanged(TxState),
 }
 
-/// What a handle sends its actor (Task 7 runs them).
+/// What a handle sends its actor.
 #[derive(Debug)]
-#[allow(dead_code, reason = "Task 7's actor reads them")]
 pub(crate) enum Command {
     Submit {
         seq: u64,
