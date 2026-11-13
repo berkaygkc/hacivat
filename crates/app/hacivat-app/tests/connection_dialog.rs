@@ -1420,7 +1420,11 @@ fn a_pasted_url_is_an_import_and_a_picked_file_still_passes(cx: &mut TestAppCont
         include_bytes!("../../../core/hacivat-session/tests/fixtures/test-ca.pem"),
     )
     .expect("the CA file");
-    let outside_home = std::env::home_dir().is_none_or(|home| !ca.starts_with(home));
+    // Compare canonical paths: on Windows CI the temp dir is spelled with an 8.3 short name
+    // (`RUNNER~1`) while home is not, and the approved-roots check canonicalises both.
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let outside_home =
+        std::env::home_dir().is_none_or(|home| !canon(&ca).starts_with(canon(&home)));
     paste_into(
         vcx,
         "host",
