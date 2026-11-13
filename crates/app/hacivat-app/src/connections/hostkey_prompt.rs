@@ -3,8 +3,12 @@
 //!
 //! - [`open`] asks `Question::HostKey`: a 420 px modal layer `hostkey-prompt`, "First connection
 //!   to <host>", the algorithm and the `SHA256:` fingerprint in an inset, the store note, and
-//!   Cancel / **Trust and connect** (primary, with the initial focus, as in the M2a mock). Enter
-//!   presses the focused button; Escape, Cancel or the close button answer `Cancelled`.
+//!   Cancel / **Trust and connect** (the visual primary). Fix round 1 (review I2, controller
+//!   ruling; the PO's rule for the certificate dialog): the prompt opens mid-connect, perhaps
+//!   while the user types elsewhere, so **Cancel has the initial focus and Enter cancels**
+//!   (on a Copy button it copies); trusting a first-seen key takes a click or Space on Trust
+//!   and connect. This departs from the M2a mock, which focused Trust. Escape, Cancel or the
+//!   close button answer `Cancelled`.
 //! - [`review_changed`] is the "Review host key…" fix of `ssh.host_key_changed`: a hard stop
 //!   (Q34), a 480 px alertdialog `hk-changed` with both keys. Cancel is the primary with the
 //!   initial focus and the only Enter default: Enter cancels wherever the focus is, except on a
@@ -192,13 +196,13 @@ impl HostKeyPrompt {
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => self.answer(Answer::Cancelled, window, cx),
+            // ## m2b-t21-prompts (fix round 1, I2): Enter never trusts a key; it copies on the
+            // Copy button and cancels anywhere else, Trust and connect included.
             "enter" if acting_enter(event) => {
-                if self.trust_focus.is_focused(window) {
-                    self.answer(Answer::TrustHostKey, window, cx);
-                } else if self.cancel_focus.is_focused(window) {
-                    self.answer(Answer::Cancelled, window, cx);
-                } else if self.copy_focus.is_focused(window) {
+                if self.copy_focus.is_focused(window) {
                     self.copy(cx);
+                } else {
+                    self.answer(Answer::Cancelled, window, cx);
                 }
             }
             "enter" => {}
@@ -347,7 +351,8 @@ pub(crate) fn open(q: Question, reply: oneshot::Sender<Answer>, window: &mut Win
     register_part(cx, "hk-cancel", &cancel, None);
     register_part(cx, "hk-trust", &trust, None);
     let view = prompt.entity_id();
-    if !prompt_kit::push_modal(HOSTKEY_LAYER_ID, prompt.into(), &trust, window, cx) {
+    // Fix round 1 (I2): Cancel has the initial focus.
+    if !prompt_kit::push_modal(HOSTKEY_LAYER_ID, prompt.into(), &cancel, window, cx) {
         return;
     }
     prompt_kit::forward(reply, answer_rx, window.window_handle(), view, cx);

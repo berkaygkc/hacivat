@@ -129,6 +129,8 @@ const READ_ATTEMPTS: usize = 16;
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// How often the lock is tried meanwhile.
 const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+/// How long a lock that timed out is taken as still held (fix round 1, review m9).
+const LOCK_STUCK: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The header bounds checked before any key is derived (Q30).
 const M_KIB_BOUNDS: RangeInclusive<u32> = 8_192..=1_048_576;
@@ -208,6 +210,12 @@ pub struct FileVault {
     path: PathBuf,
     params: VaultParams,
     state: Mutex<Option<Unlocked>>,
+    // ## m2b-t21-prompts (fix round 1, review m9)
+    /// How long a call waits for `vault.bin.lock` held elsewhere.
+    lock_wait: std::time::Duration,
+    /// Until when a lock that timed out is taken as still held: calls then try once and go on
+    /// at once, so a hung instance costs one wait, not one per slot (`delete_all` visits ~20).
+    lock_stuck_until: Mutex<Option<std::time::Instant>>,
 }
 
 impl fmt::Debug for FileVault {
@@ -242,7 +250,16 @@ impl FileVault {
             path,
             params: p,
             state: Mutex::new(None),
+            lock_wait: LOCK_WAIT,
+            lock_stuck_until: Mutex::new(None),
         }
+    }
+
+    // ## m2b-t21-prompts (fix round 1, review m9)
+    /// The vault with another wait for a lock held elsewhere (tests use a short one).
+    pub fn with_lock_wait(mut self, wait: std::time::Duration) -> FileVault {
+        self.lock_wait = wait;
+        self
     }
 
     fn state(&self) -> MutexGuard<'_, Option<Unlocked>> {
@@ -311,12 +328,29 @@ impl FileVault {
         // ## m2b-t21-prompts (T6 review N2): a stopped or hung instance holding the lock must not
         // stall every vault call: try for at most `LOCK_WAIT`, then go on as without a lock (a
         // read reads, a write refuses with `VaultReadOnly`, which a Forever put falls back from).
-        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        // Fix round 1 (m9): after a timeout, calls try once for `LOCK_STUCK` and go on at once.
+        let now = std::time::Instant::now();
+        let mut stuck = self
+            .lock_stuck_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let wait = match *stuck {
+            Some(until) if now < until => std::time::Duration::ZERO,
+            _ => self.lock_wait,
+        };
+        let deadline = now + wait;
         loop {
             match file.try_lock() {
-                Ok(()) => return Some(file),
+                Ok(()) => {
+                    *stuck = None;
+                    return Some(file);
+                }
                 Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(LOCK_POLL);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    *stuck = Some(std::time::Instant::now() + LOCK_STUCK);
+                    return None;
                 }
                 Err(_) => return None,
             }

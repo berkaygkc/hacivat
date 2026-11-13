@@ -787,6 +787,11 @@ the vault, the session overlay, the keyring CI and the deferrals.
   only a click or Space on "Remove the old key and trust the new one" runs it. Enter still
   copies on a Copy button and retries on Try again, which widen nothing. The key-up Enter is
   suppressed in the capture phase, so a focused button is never pressed twice.
+- **A first-seen key is never trusted by Enter (fix round 1, review I2, controller ruling).** The
+  new-host-key prompt opens mid-connect, perhaps while the user types elsewhere, so it opens
+  with Cancel focused and Enter cancels (on a Copy button it copies); Trust and connect stays the
+  visual primary and runs only from a click or Space. This departs from the M2a mock (Trust
+  focused) and follows the PO's rule for the certificate dialog.
 - **Hacivat never edits `~/.ssh`.** The replace button exists only when the stored key is in
   Hacivat's own store; it calls `KnownHosts::replace` on the core runtime, then reconnects. The
   reconnect checks the key again, so a replace that failed (the line went meanwhile, the key is
@@ -803,20 +808,28 @@ the vault, the session overlay, the keyring CI and the deferrals.
   and prompt labels are shown in their own mono fields, never inside a translated sentence. They
   are made visible as OpenSSH's `strnvis` does: a backslash is doubled first; C0 and C1
   controls (ANSI escapes included; only `\n` kept) become `\ooo`; bidi controls and invisible
-  format characters (U+061C, U+180E, U+200B–U+200F, U+2028–U+202E, U+2060–U+2069, U+FEFF)
-  become `\u{…}`. The name and each label are capped at 256 characters, the instruction at
+  format characters become `\u{…}`: every Unicode `Cf` character (the tag characters
+  U+E0000–U+E007F included, which can smuggle invisible ASCII), the line and paragraph
+  separators, U+034F and the Hangul fillers that draw blank (fix round 1, review m4). The name and each label are capped at 256 characters, the instruction at
   2,048, and the server text scrolls on its own (119 px). A round with more than 8 prompts is
-  refused (answered `Cancelled`) without opening a dialog.
+  refused (answered `Cancelled`) without opening a dialog. The prompt's body scrolls, so the
+  footer always stays in the window (fix round 1, review m5).
 - **Secret fields.** Every prompt field that holds a secret is the M2a masked `TextInput`:
   bullets painted, nothing copied, an empty accessible value, and `text_for_range` answers
   bullets (the I2 rule). A value becomes a `SecretString` the moment it is read and the field is
   cleared then; a prompt clears every field when it closes, cancelled or answered. The typed
   text in `TextInput`'s own buffer is not zeroized (B14, M9).
-- **Remember in the SSH secret prompt is shown, not chosen.** The answer carries only the
-  secret, and the connect stores it under the profile's `ssh_retention` after it worked; a
-  choice made in the prompt could not take effect, and saving the profile mid-connect would
-  cancel the connect (RF5). The row shows where the secret will go, with the vault's label when
-  the vault holds Forever secrets.
+- **Remember in the SSH secret prompt (fix round 1, controller ruling on the reviewer's seam;
+  a named exception in Task 14's files).** The prompt offers the dialog's retention choices in a
+  Select (the vault's label for Forever when the vault holds Forever secrets) and answers
+  `Answer::SshSecret { secret, remember }`. `PipelinePrompter` records `remember` (the last
+  answer wins), and the connect stores its typed SSH secrets under it. When it differs from the
+  profile's `ssh_retention`, the typed slots first leave the old retention's place (`Forever`'s
+  fallback and `UntilRestart` share one map), and a successful **Main** connect only reports
+  `ProfileChange::SshRetention`, never a Test or a probe. The app saves it through
+  `apply_changes` after the connect (a save mid-connect would cancel it, RF5): the save moves
+  every other hop's stored secrets to the new retention, behind the vault gate. The TLS key
+  passphrase prompt keeps a static row (the DB retention).
 - **A Forever put waits for the vault (T1 review M7, Q38).** Unless the keyring or the memory
   backend holds Forever secrets, a save's queued job reads the vault's state on the blocking
   pool. Only when the vault is missing or locked does it ask the UI (Create or Unlock) and wait;
@@ -829,14 +842,24 @@ the vault, the session overlay, the keyring CI and the deferrals.
   (Task 14). A delete, duplicate or save that unlocks the vault itself counts in its dialog,
   from 1 for each gesture; Cancel after a wrong password ends the gesture, and three misses end
   it too. There is no lockout (B13: the file is offline-attackable anyway).
-- **A locked vault never orphans a secret (T6 carry).** A delete or duplicate that meets
-  `VaultLocked` asks to unlock, then runs its secret calls again; declined, the error is
-  reported, never swallowed.
-- **SSH secrets follow their hop (T20 carry).** Slots are keyed by hop index. An edit that adds,
-  removes or reorders jump hosts moves each hop's stored password and passphrase with the hop
-  (matched by host, ASCII-folded, port, user and sign-in method). A hop that is gone or changed
-  loses its secrets (read first, then removed), so a secret is never sent to the wrong hop and
-  none waits past the end for a future hop.
+- **A locked vault and a delete (T6 carry; fix round 1, review m2).** Where the vault may hold
+  the profile's secrets, a delete deletes them first, in a secrets-only job; a locked vault asks
+  to be unlocked. Declined (or three misses), nothing is deleted: the profile stays and the
+  delete fails with `Unchanged`, which says why. Only a vault that cannot be used at all (a
+  damaged or non-regular file, whose entries nobody can read) lets the profile go as in M2a,
+  with the error reported. A duplicate that meets a locked vault asks to unlock and copies
+  again; declined, the copy has no secrets and the error is reported.
+- **SSH secrets follow their hop, all or nothing (T20 carry; fix round 1, review I1).** Slots are
+  keyed by hop index. A save that adds, removes or reorders jump hosts first moves the stored
+  SSH secrets in a secrets-only job: every old slot is read (any failure stops before a write),
+  the moved values are written (hops matched by host, ASCII-folded, port, user and sign-in
+  method), then every slot nothing replaces is removed. A failed write puts back what was
+  written (a slot that cannot be put back is removed). Only when the move fully succeeded is the
+  new hop order saved; a declined unlock, a refused write or any other error leaves the stored
+  profile and its slots as they were, and the save fails with `Unchanged`, which the dialog
+  shows. So a secret is never on a hop it was not typed for, and a.example's password never
+  reaches b.example. A second save of the same profile waits until the move is done. Moved
+  Forever secrets are labelled (P44) and a fallback shows the M2a toast (review m1).
 - **Reset needs the typed word and a regular file.** The Danger button stays disabled until
   the field equals `hv-conn-vault-reset-word` exactly (no casing, no trimming) and is never the
   default: Enter does nothing in the reset dialog. A symlink or any other non-file at
@@ -845,6 +868,10 @@ the vault, the session overlay, the keyring CI and the deferrals.
   (T6 review N3).
 - **A hung instance cannot stall the vault (T6 review N2).** `vault.bin.lock` is taken with
   `try_lock` for at most 5 s (polled every 20 ms); after that a read goes on unlocked and a
-  write refuses with `VaultReadOnly`, which a Forever put falls back from (Q38).
+  write refuses with `VaultReadOnly`, which a Forever put falls back from (Q38). Fix round 1
+  (review m9): after a timeout the next calls try once for 30 s, so a hung instance costs one
+  wait, not one per slot; `FileVault::with_lock_wait` shortens the wait for tests.
+- **A vault file that is not a regular file says so (fix round 1, review m3).** A Hacivat-driven
+  unlock that meets `Denied` closes with a notice instead of silently.
 - **`copy_all` is not for SSH slots (T1 re-review N1).** Its doc says so; a duplicate copies the
   DB slots and the SSH slots with `copy_slots`, each under its own retention.

@@ -451,22 +451,36 @@ impl Render for KbdPrompt {
                 cx.listener(|this, _, window, cx| this.cancel(window, cx)),
                 cx,
             ))
+            // Fix round 1 (review m5): the body scrolls inside the window, so many long prompts
+            // never push the footer (Cancel, Continue) out of the dialog.
             .child(
                 div()
+                    .id("kbd-body")
+                    .debug_selector(|| "kbd-body".to_string())
                     .flex()
                     .flex_col()
-                    .gap(px(t.spacing.sm))
-                    .child(asks)
-                    .child(self.server_text(&theme, cx)),
+                    .gap(px(t.spacing.xl))
+                    .flex_shrink(1.0)
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(scroll_viewport())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(t.spacing.sm))
+                            .child(asks)
+                            .child(self.server_text(&theme, cx)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(t.spacing.lg))
+                            .children(prompts),
+                    )
+                    .child(meta),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(t.spacing.lg))
-                    .children(prompts),
-            )
-            .child(meta)
             .child(footer(
                 &theme,
                 Vec::new(),

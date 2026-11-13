@@ -103,6 +103,9 @@ pub enum ProfileChange {
     },
     SetCaFile(PathBuf),
     AllowPublicPlaintext,
+    // ## m2b-t21-prompts (fix round 1): the Remember of an SSH secret prompt, reported by a
+    // successful Main connect only; the app re-saves the profile with it.
+    SshRetention(Retention),
 }
 
 /// The secrets that worked for a live connection, kept in the session overlay for its
@@ -540,6 +543,20 @@ async fn run(
     // undoes what was stored and fails the connect like any other cancel.
     let todo = typed_secrets(&profile, &cx.state);
     let (ix, store) = (cx.state.ix.clone(), cx.state.secrets.clone());
+    // ## m2b-t21-prompts (fix round 1, Remember seam): a Remember that differs from the
+    // profile's `ssh_retention` moves the typed SSH slots: they leave the old retention's place
+    // first (before the store, since `Forever`'s fallback and `UntilRestart` share one map), so
+    // the app's re-save, which moves every hop's stored secrets to the new retention, never
+    // brings an older secret back over the one just typed.
+    let chosen = cx
+        .state
+        .ssh
+        .remember
+        .filter(|r| cx.state.purpose == Purpose::Main && *r != profile.ssh_retention);
+    if chosen.is_some() && !cancel.is_cancelled() {
+        let typed = cx.state.ssh.typed.clone();
+        retire_ssh_slots(&store, profile.id, profile.ssh_retention, typed).await;
+    }
     let stored = remember_secrets(profile.id, ix, store.clone(), todo, &cancel).await;
     if cancel.is_cancelled() {
         // Re-review N1: a cancelled connect stores nothing (R8), so every key this connect
@@ -547,6 +564,12 @@ async fn run(
         forget_stored(&store, stored).await;
         let e = error(ErrClass::Cancelled, Phase::PostConnect);
         return Err(fail(e, cx, guards, started).await);
+    }
+    // ## m2b-t21-prompts (fix round 1): the new retention is reported after the connect
+    // succeeded only, for a Main connect only, so the app re-saves the profile with it
+    // (`ConnectionEvent::ProfileChanges`; a save never runs mid-connect, RF5).
+    if let Some(chosen) = chosen {
+        cx.state.changes.push(ProfileChange::SshRetention(chosen));
     }
 
     let (conn, server, support) = (
@@ -825,6 +848,38 @@ async fn forget_stored(secrets: &Arc<SecretStore>, written: Vec<(SecretKey, Rete
     }
 }
 
+// ## m2b-t21-prompts (fix round 1)
+/// Removes the typed SSH slots from where the profile's own `ssh_retention` keeps them (the
+/// prompt's Remember chose another place). On the blocking pool; a failure is logged.
+async fn retire_ssh_slots(
+    store: &Arc<SecretStore>,
+    profile: ProfileId,
+    old: Retention,
+    typed: Vec<(u8, prompts::SshSlot)>,
+) {
+    let keys: Vec<SecretKey> = typed
+        .iter()
+        .filter(|(hop, _)| *hop <= hacivat_secrets::MAX_SSH_HOP)
+        .map(|(hop, slot)| SecretKey {
+            profile,
+            slot: match slot {
+                prompts::SshSlot::Password => SecretSlot::SshPassword { hop: *hop },
+                prompts::SshSlot::Passphrase => SecretSlot::SshPassphrase { hop: *hop },
+            },
+        })
+        .collect();
+    if keys.is_empty() {
+        return;
+    }
+    let store = store.clone();
+    let removed =
+        tokio::task::spawn_blocking(move || keys.iter().all(|k| store.remove(k, old).is_ok()))
+            .await;
+    if !matches!(removed, Ok(true)) {
+        tracing::warn!("an SSH secret could not leave its old retention");
+    }
+}
+
 /// What [`remember_secrets`] stores: the user's secrets of a Main connect, by slot.
 fn typed_secrets(p: &Profile, st: &StepState) -> Vec<(SecretSlot, SecretString, Retention)> {
     if st.purpose != Purpose::Main {
@@ -838,6 +893,8 @@ fn typed_secrets(p: &Profile, st: &StepState) -> Vec<(SecretSlot, SecretString, 
     {
         todo.push((SecretSlot::DbPassword, password, p.retention));
     }
+    // ## m2b-t21-prompts (fix round 1): the prompt's Remember, else the profile's.
+    let ssh_retention = st.ssh.remember.unwrap_or(p.ssh_retention);
     for (hop, slot) in &st.ssh.typed {
         let used = st.ssh.hops.get(usize::from(*hop));
         let (slot, secret) = match slot {
@@ -854,7 +911,7 @@ fn typed_secrets(p: &Profile, st: &StepState) -> Vec<(SecretSlot, SecretString, 
         if let Some(secret) = secret
             && *hop <= hacivat_secrets::MAX_SSH_HOP
         {
-            todo.push((slot, secret, p.ssh_retention));
+            todo.push((slot, secret, ssh_retention));
         }
     }
     if st.tls_passphrase_typed

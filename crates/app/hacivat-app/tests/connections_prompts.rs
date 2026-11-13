@@ -427,10 +427,21 @@ fn new_host_key_prompt(cx: &mut TestAppContext) {
             }
         )))
     );
-    // M2a mock: Trust and connect is the primary and has the focus.
-    assert_eq!(focused_id(vcx), "hk-trust");
+    // Fix round 1 (review I2, controller ruling; deviates from the M2a mock): Cancel has the
+    // initial focus and a bare Enter cancels, so a reflexive Enter never trusts a key.
+    assert_eq!(focused_id(vcx), "hk-cancel");
     press(vcx, "enter");
-    assert!(matches!(*a.get(), Some(Answer::TrustHostKey)));
+    assert!(matches!(*a.get(), Some(Answer::Cancelled)));
+    assert!(!layer_open(vcx, "hostkey-prompt"));
+    // Trusting takes Tab to Trust and connect, then Space (or a click).
+    let b = ask(
+        vcx,
+        host_key_question(ProfileId::new(), "bastion.acme.io", K1),
+    );
+    press(vcx, "tab");
+    assert_eq!(focused_id(vcx), "hk-trust");
+    press(vcx, "space");
+    assert!(matches!(*b.get(), Some(Answer::TrustHostKey)));
     assert!(!layer_open(vcx, "hostkey-prompt"));
 }
 
@@ -447,11 +458,17 @@ fn new_host_key_prompt_cancels_from_escape_and_cancel(cx: &mut TestAppContext) {
         vcx,
         host_key_question(ProfileId::new(), "bastion.acme.io", K1),
     );
-    // Enter on Cancel cancels: the focus decides, never a default trust.
-    press(vcx, "shift-tab");
-    assert_eq!(focused_id(vcx), "hk-cancel");
+    // Enter with the focus on Trust and connect still cancels (I2): never a keyboard trust.
+    press(vcx, "tab");
+    assert_eq!(focused_id(vcx), "hk-trust");
     press(vcx, "enter");
     assert!(matches!(*b.get(), Some(Answer::Cancelled)));
+    let c = ask(
+        vcx,
+        host_key_question(ProfileId::new(), "bastion.acme.io", K1),
+    );
+    click_button(vcx, "hk-trust");
+    assert!(matches!(*c.get(), Some(Answer::TrustHostKey)));
     assert!(layer_ids(vcx).is_empty());
 }
 
@@ -786,12 +803,83 @@ fn ssh_secret_prompt_names_the_hop(cx: &mut TestAppContext) {
             ids::hv::HvConnSshSecretAttempt { n: Count(2) }
         )))
     );
-    // Remember shows the profile's ssh_retention (Forever, the keyring's label here).
-    assert_eq!(text(vcx, "secret-remember"), t(vcx, "hv-conn-ret-forever"));
+    // Remember starts on the profile's ssh_retention (Forever, the keyring's label here).
+    assert!(
+        select_texts(vcx).contains(&t(vcx, "hv-conn-ret-forever")),
+        "{:?}",
+        select_texts(vcx)
+    );
+    assert_eq!(
+        text(vcx, "secret-remember-all"),
+        t(vcx, "hv-conn-ssh-secret-remember-all")
+    );
     type_into(vcx, "secret-input", "hv_test_pw");
     press(vcx, "enter");
-    assert!(matches!(&*a.get(), Some(Answer::Secret(s)) if s.expose_secret() == "hv_test_pw"));
+    assert!(matches!(
+        &*a.get(),
+        Some(Answer::SshSecret { secret, remember: Retention::Forever })
+            if secret.expose_secret() == "hv_test_pw"
+    ));
     assert!(!layer_open(vcx, "secret-prompt"));
+}
+
+/// What the Selects of the frame draw (their current values).
+fn select_texts(vcx: &VisualTestContext) -> Vec<String> {
+    texts_drawn_by(vcx, "hacivat-ui/src/select.rs")
+}
+
+/// Fix round 1 (Remember seam): the prompt's Remember travels with the answer.
+#[gpui::test]
+fn ssh_secret_prompt_answers_the_chosen_remember(cx: &mut TestAppContext) {
+    let vcx = shell(cx);
+    let id = add_profile(vcx, ssh_profile("orders-prod"));
+    let a = ask(vcx, ssh_password_question(id, 0, "jump-eu.acme.io", 1));
+    // Tab to the Select, open it with Enter, one row up (For this session), pick it.
+    press(vcx, "tab");
+    assert_eq!(focused_id(vcx), "secret-remember");
+    press(vcx, "enter");
+    press(vcx, "up");
+    press(vcx, "enter");
+    assert!(
+        a.get().is_none(),
+        "Enter in the Select picks, it never submits"
+    );
+    assert!(select_texts(vcx).contains(&t(vcx, "hv-conn-ret-session")));
+    type_into(vcx, "secret-input", "hv_test_pw");
+    press(vcx, "enter");
+    assert!(matches!(
+        &*a.get(),
+        Some(Answer::SshSecret {
+            remember: Retention::ForSession,
+            ..
+        })
+    ));
+    // The next prompt of this profile starts from that choice.
+    let _b = ask(vcx, ssh_password_question(id, 1, "bastion.acme.io", 1));
+    assert!(select_texts(vcx).contains(&t(vcx, "hv-conn-ret-session")));
+}
+
+/// A TLS key passphrase keeps the static row (the DB retention) and answers a plain secret.
+#[gpui::test]
+fn tls_key_passphrase_prompt_has_no_remember_choice(cx: &mut TestAppContext) {
+    let vcx = shell(cx);
+    let id = add_profile(vcx, ssh_profile("orders-prod"));
+    let a = ask(
+        vcx,
+        Question::Secret {
+            profile: id,
+            name: "orders-prod".into(),
+            prompt: SecretPrompt::TlsKeyPassphrase {
+                key: PathBuf::from("/keys/client.key"),
+            },
+            attempt: 1,
+        },
+    );
+    assert_eq!(text(vcx, "secret-remember"), t(vcx, "hv-conn-ret-forever"));
+    assert!(select_texts(vcx).is_empty());
+    type_into(vcx, "secret-input", "hv_test_pw");
+    press(vcx, "enter");
+    assert!(matches!(&*a.get(), Some(Answer::Secret(_))));
 }
 
 #[gpui::test]
@@ -1394,4 +1482,240 @@ fn attempt_text(vcx: &VisualTestContext, n: u64) -> String {
             ids::hv::HvConnVaultAttempt { n: Count(n) },
         )
     }))
+}
+
+// ---- fix round 1 ----------------------------------------------------------------------------
+
+/// A profile through `a.example` then `b.example` (password hops), its SSH secrets Forever.
+fn ab_profile() -> Profile {
+    let mut p = test_profile("hops", Some(EnvTag::Dev), "10.0.0.5");
+    p.transport = TransportSpec::SshTunnel(SshSpec {
+        hops: vec![
+            hop("a.example", 22, SshAuth::Password),
+            hop("b.example", 22, SshAuth::Password),
+        ],
+        host_keys: HostKeyPolicy::Ask,
+        keepalive_s: None,
+    });
+    p.ssh_retention = Retention::Forever;
+    p
+}
+
+fn hop_key(id: ProfileId, hop: u8) -> SecretKey {
+    SecretKey {
+        profile: id,
+        slot: SecretSlot::SshPassword { hop },
+    }
+}
+
+/// The vault's password at `hop`, compared without printing it.
+fn vault_pw_is(vault: &FileVault, id: ProfileId, hop: u8, want: Option<&str>) -> bool {
+    let got = vault.get(&hop_key(id, hop)).expect("readable");
+    got.as_ref().map(|s| s.expose_secret()) == want
+}
+
+fn hosts_of(vcx: &VisualTestContext, id: ProfileId) -> Vec<String> {
+    let p = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().get(id))
+        .expect("saved");
+    match &p.transport {
+        TransportSpec::SshTunnel(spec) => spec.hops.iter().map(|h| h.host.clone()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn save_task(
+    vcx: &VisualTestContext,
+    id: ProfileId,
+    hops: Vec<HopSpec>,
+) -> gpui::Task<Result<ProfileId, hacivat_app::connections::SaveError>> {
+    let mut p = (*vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().get(id))
+        .expect("saved"))
+    .clone();
+    if let TransportSpec::SshTunnel(spec) = &mut p.transport {
+        spec.hops = hops;
+    }
+    vcx.cx
+        .update(|cx| ConnectionsModel::save(cx, ProfileDraft::edit(p)))
+}
+
+/// Review I1 (the reviewer's hostile scenario): a locked vault, the hops reordered or one
+/// removed, the unlock declined. Nothing changes: the stored order stays, and every slot still
+/// holds its own hop's password, so a.example's password never reaches b.example.
+#[gpui::test]
+fn a_hop_change_with_a_declined_unlock_changes_nothing(cx: &mut TestAppContext) {
+    let (vcx, vault) = shell_with_vault_state(cx, true);
+    let id = add_profile(vcx, ab_profile());
+    for (hop, pw) in [(0, "pw-for-a"), (1, "pw-for-b")] {
+        secrets(vcx)
+            .put(
+                &hop_key(id, hop),
+                SecretString::from(pw),
+                Retention::Forever,
+            )
+            .expect("stored in the vault");
+    }
+    let a = hop("a.example", 22, SshAuth::Password);
+    let b = hop("b.example", 22, SshAuth::Password);
+    for hops in [vec![b.clone(), a.clone()], vec![b.clone()]] {
+        vault.lock();
+        let task = save_task(vcx, id, hops);
+        settle_until(vcx, WAIT, || layer_open(vcx, "vault-dialog"));
+        press(vcx, "escape");
+        let saved = wait_task(vcx, task);
+        assert!(
+            matches!(
+                saved,
+                Err(hacivat_app::connections::SaveError::Unchanged(_))
+            ),
+            "{saved:?}"
+        );
+        assert_eq!(hosts_of(vcx, id), ["a.example", "b.example"], "order kept");
+        vault.unlock(SecretString::from(MASTER)).expect("unlocked");
+        assert!(
+            vault_pw_is(&vault, id, 0, Some("pw-for-a")),
+            "slot 0 is a's"
+        );
+        assert!(
+            vault_pw_is(&vault, id, 1, Some("pw-for-b")),
+            "slot 1 is b's"
+        );
+    }
+    // Unlocked when asked: the move happens, then the new order is saved.
+    vault.lock();
+    let task = save_task(vcx, id, vec![b, a]);
+    settle_until(vcx, WAIT, || layer_open(vcx, "vault-dialog"));
+    type_into(vcx, "vault-unlock", MASTER);
+    press(vcx, "enter");
+    let saved = wait_task(vcx, task);
+    assert!(saved.is_ok(), "{saved:?}");
+    assert_eq!(hosts_of(vcx, id), ["b.example", "a.example"]);
+    assert!(
+        vault_pw_is(&vault, id, 0, Some("pw-for-b")),
+        "b's password follows b"
+    );
+    assert!(
+        vault_pw_is(&vault, id, 1, Some("pw-for-a")),
+        "a's password follows a"
+    );
+}
+
+/// Review m2: a delete whose unlock is declined keeps the profile and its vault secrets, and
+/// says why (`Unchanged`); nothing is orphaned under a dead profile ID.
+#[gpui::test]
+fn a_delete_with_a_declined_unlock_keeps_the_profile(cx: &mut TestAppContext) {
+    let (vcx, id, vault) = locked_vault_with_profile(cx);
+    let task = vcx.cx.update(|cx| ConnectionsModel::delete(cx, id));
+    settle_until(vcx, WAIT, || layer_open(vcx, "vault-dialog"));
+    press(vcx, "escape");
+    let deleted = wait_task(vcx, task);
+    assert!(
+        matches!(
+            deleted,
+            Err(hacivat_app::connections::SaveError::Unchanged(_))
+        ),
+        "{deleted:?}"
+    );
+    assert!(
+        vcx.cx
+            .read(|cx| cx.global::<ConnectionsModel>().get(id))
+            .is_some(),
+        "the profile stays"
+    );
+    vault.unlock(SecretString::from(MASTER)).expect("unlocked");
+    let key = SecretKey {
+        profile: id,
+        slot: SecretSlot::DbPassword,
+    };
+    assert!(
+        vault.get(&key).expect("readable").is_some(),
+        "its secret stays with it"
+    );
+}
+
+/// The Remember seam, app side: a connect's `SshRetention` change re-saves the profile, and the
+/// save moves the hops' stored secrets to the new retention.
+#[gpui::test]
+fn an_ssh_retention_change_re_saves_the_profile_and_moves_the_secrets(cx: &mut TestAppContext) {
+    let vcx = shell(cx);
+    let id = add_profile(vcx, ssh_profile("orders-prod"));
+    secrets(vcx)
+        .put(
+            &hop_key(id, 1),
+            SecretString::from("hv_test_pw"),
+            Retention::Forever,
+        )
+        .expect("stored");
+    let manager = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().manager().clone());
+    settle_until(vcx, WAIT, || manager.event_subscribers() > 0);
+    manager.publish_event(hacivat_session::ConnectionEvent::ProfileChanges {
+        profile: id,
+        changes: vec![hacivat_session::pipeline::ProfileChange::SshRetention(
+            Retention::UntilRestart,
+        )],
+    });
+    settle_until(vcx, WAIT, || {
+        vcx.cx
+            .read(|cx| cx.global::<ConnectionsModel>().get(id))
+            .is_some_and(|p| p.ssh_retention == Retention::UntilRestart)
+    });
+    wait_until(vcx, "the hop secret to move", |vcx| {
+        secret_backend(vcx)
+            .get(&hop_key(id, 1))
+            .is_ok_and(|v| v.is_none())
+    });
+    assert!(
+        stored(
+            vcx,
+            id,
+            SecretSlot::SshPassword { hop: 1 },
+            Retention::UntilRestart
+        )
+        .as_deref()
+            == Some("hv_test_pw"),
+        "kept until restart now (values not shown)"
+    );
+}
+
+/// Review m7: the buttons are really disabled (their accessibility node says so), not only
+/// guarded in their handlers.
+#[gpui::test]
+fn the_guarded_buttons_are_really_disabled(cx: &mut TestAppContext) {
+    let vcx = shell_with_vault(cx);
+    let _create = ask(vcx, Question::CreateVault);
+    let create = t(vcx, "hv-conn-vault-create-btn");
+    assert_eq!(button_disabled(vcx, &create), Some(true));
+    set_field(vcx, "vault-new", MASTER);
+    set_field(vcx, "vault-repeat", MASTER);
+    assert_eq!(button_disabled(vcx, &create), Some(false));
+    press(vcx, "escape");
+
+    let _unlock = open_vault_reset(vcx);
+    let reset = t(vcx, "hv-conn-vault-reset-btn");
+    assert_eq!(button_disabled(vcx, &reset), Some(true));
+    set_field(vcx, "vault-reset-word", &t(vcx, "hv-conn-vault-reset-word"));
+    assert_eq!(button_disabled(vcx, &reset), Some(false));
+    assert_eq!(
+        text(vcx, "vault-reset-type-word"),
+        "reset",
+        "the word is drawn on its own"
+    );
+}
+
+/// Whether the button labelled `label` is declared disabled in a fresh frame.
+fn button_disabled(vcx: &mut VisualTestContext, label: &str) -> Option<bool> {
+    use hacivat_ui::popover::{a11y_record, a11y_take};
+    a11y_record();
+    vcx.cx.update(|cx| cx.refresh_windows());
+    vcx.run_until_parked();
+    a11y_take()
+        .into_iter()
+        .rev()
+        .find(|d| d.role == Some(gpui::Role::Button) && d.name.as_ref() == label)
+        .map(|d| d.disabled)
 }

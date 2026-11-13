@@ -417,6 +417,8 @@ pub(crate) struct PipelinePrompter {
     profile: ProfileId,
     name: String,
     typed: Arc<Mutex<Vec<(u8, SshSlot)>>>,
+    // ## m2b-t21-prompts (fix round 1): the Remember of the last SSH secret prompt answered.
+    remember: Arc<Mutex<Option<hacivat_secrets::Retention>>>,
 }
 
 impl PipelinePrompter {
@@ -426,6 +428,7 @@ impl PipelinePrompter {
             profile: p.id,
             name: p.name.clone(),
             typed: Arc::default(),
+            remember: Arc::default(),
         })
     }
 
@@ -435,6 +438,12 @@ impl PipelinePrompter {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    // ## m2b-t21-prompts (fix round 1)
+    /// The retention the user chose at an SSH secret prompt (the last answer wins), if any.
+    pub(crate) fn remember(&self) -> Option<hacivat_secrets::Retention> {
+        *self.remember.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -482,11 +491,18 @@ impl SshPrompter for PipelinePrompter {
             attempt,
         });
         let typed = self.typed.clone();
+        let chosen = self.remember.clone();
         Box::pin(async move {
             match asked.await {
                 Answer::Secret(s) | Answer::Password(s) => {
                     note(&typed, hop, slot);
                     Some(s)
+                }
+                // ## m2b-t21-prompts (fix round 1): the prompt's Remember travels with it.
+                Answer::SshSecret { secret, remember } => {
+                    note(&typed, hop, slot);
+                    *chosen.lock().unwrap_or_else(PoisonError::into_inner) = Some(remember);
+                    Some(secret)
                 }
                 _ => None,
             }

@@ -987,7 +987,7 @@ hv-conn-hk-changed-src-hacivat = { -brand-hacivat }'s known hosts
 #   $file (String) - the OpenSSH file, e.g. "~/.ssh/known_hosts".
 #   $n (Number) - the line in that file, e.g. 14.
 # Review: PO
-hv-conn-hk-changed-src-openssh = { $file } line { $n }
+hv-conn-hk-changed-src-openssh = { $file } line { NUMBER($n, useGrouping: "false") }
 # Variables:
 #   $host (String) - the SSH host, e.g. "bastion.acme.io".
 # Review: PO
@@ -1151,3 +1151,14 @@ hv-conn-ret-forever-vault-h = in { -brand-hacivat }'s vault, behind a master pas
 # The quick fix of ssh.host_key_changed: opens the review (NOTES surface 1).
 # Review: PO
 hv-conn-fix-review-host-key = Review host key…
+
+# Fix round 1. Under the SSH secret prompt's Remember: the choice is the connection's.
+# Review: PO
+hv-conn-ssh-secret-remember-all = Applies to the saved SSH passwords and passphrases of every hop of this connection.
+# Fix round 1. A save or delete that changed nothing because the stored passwords could not be
+# moved or deleted (a locked vault whose unlock was declined, a refused write).
+# Review: PO
+hv-conn-save-unchanged = Nothing was changed: the saved passwords couldn't be moved or removed. If { -brand-hacivat } asks, unlock the vault, then try again.
+# Fix round 1. The vault file is a link or not a regular file, so it can't be used.
+# Review: PO
+hv-conn-vault-denied = { -brand-hacivat } can't use the vault file: it isn't a regular file. Passwords you enter are kept until { -brand-hacivat } restarts.

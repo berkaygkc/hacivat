@@ -1094,6 +1094,8 @@ impl ConnectionDialog {
                 SaveProblem::Failed => ids::hv::CONN_DLG_SAVE_FAILED,
                 SaveProblem::Gone => ids::hv::CONN_DLG_SAVE_GONE,
                 SaveProblem::SecretNotStored => ids::hv::CONN_DLG_SAVE_SECRET,
+                // ## m2b-t21-prompts (fix round 1, I1)
+                SaveProblem::Unchanged => ids::hv::CONN_SAVE_UNCHANGED,
             };
             rows.push(
                 Kind::Row,

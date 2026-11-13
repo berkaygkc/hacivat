@@ -539,7 +539,13 @@ fn a_symlinked_vault_is_never_reset() {
 #[cfg(unix)]
 #[test]
 fn a_held_lock_never_stalls_a_vault_call_forever() {
-    let (v, path) = created_with_secret();
+    let (made, path) = created_with_secret();
+    drop(made);
+    // Fix round 1 (m9): a short wait for the test, and a timed-out lock makes the next calls
+    // fail fast instead of waiting again, slot after slot.
+    let v = FileVault::with_params(path.clone(), fast())
+        .with_lock_wait(std::time::Duration::from_millis(100));
+    v.unlock(sec(MASTER)).unwrap();
     let mut lock_path = path.clone().into_os_string();
     lock_path.push(".lock");
     let holder = std::fs::OpenOptions::new()
@@ -548,12 +554,11 @@ fn a_held_lock_never_stalls_a_vault_call_forever() {
         .open(&lock_path)
         .unwrap();
     holder.lock().unwrap();
-    let started = std::time::Instant::now();
     assert_eq!(v.put(&key(), &sec("x")), Err(SecretError::VaultReadOnly));
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(30),
-        "bounded"
-    );
+    // The next writes give up at once (one try each), so a delete of every slot stays short.
+    for _ in 0..20 {
+        assert_eq!(v.put(&key(), &sec("x")), Err(SecretError::VaultReadOnly));
+    }
     holder.unlock().unwrap();
     v.put(&key(), &sec("x")).unwrap();
 }

@@ -991,7 +991,7 @@ hv-conn-hk-changed-stored-in = Kayıtlı olduğu yer
 # Review: PO
 hv-conn-hk-changed-src-hacivat = Hacivat'ın bilinen sunucuları
 # Review: PO
-hv-conn-hk-changed-src-openssh = { $file }, { $n }. satır
+hv-conn-hk-changed-src-openssh = { $file }, { NUMBER($n, useGrouping: "false") }. satır
 # Review: PO
 hv-conn-hk-changed-ask = { $host } sunucusunu yöneten kişiye anahtarın değişip değişmediğini sorun ve güvenmeden önce yeni parmak izini karşılaştırın.
 # Review: PO
@@ -1106,3 +1106,10 @@ hv-conn-ret-forever-vault-h = Hacivat'ın kasasında, ana parolayla
 
 # Review: PO
 hv-conn-fix-review-host-key = Sunucu anahtarını incele…
+
+# Review: PO
+hv-conn-ssh-secret-remember-all = Bu bağlantının tüm atlamalarındaki kayıtlı SSH parolalarına ve parola ifadelerine uygulanır.
+# Review: PO
+hv-conn-save-unchanged = Hiçbir şey değiştirilmedi: kayıtlı parolalar taşınamadı ya da silinemedi. { -brand-hacivat } sorarsa kasanın kilidini açın, sonra yeniden deneyin.
+# Review: PO
+hv-conn-vault-denied = { -brand-hacivat } kasa dosyasını kullanamıyor: dosya normal bir dosya değil. Girdiğiniz parolalar { -brand-hacivat } yeniden başlayana kadar tutulur.

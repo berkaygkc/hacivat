@@ -618,15 +618,39 @@ pub(crate) fn on_mac() -> bool {
 /// Whether `c` is a bidi control or an invisible format character that could reorder or hide
 /// text: the NOTES set (U+061C, U+200E/F, U+202A–U+202E, U+2066–U+2069) plus the zero-width
 /// characters, the line and paragraph separators, the invisible operators and the BOM.
+///
+/// Fix round 1 (review m4): every format character (Unicode `Cf`: the soft hyphen, the Arabic
+/// and Syriac marks, the invisible operators, the interlinear annotation marks, the shorthand,
+/// musical and Egyptian format controls and the tag characters that can smuggle invisible
+/// ASCII), the line and paragraph separators, the combining grapheme joiner, and the Hangul
+/// fillers that draw blank.
 fn is_format_control(c: char) -> bool {
     matches!(
         c,
-        '\u{061C}'
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{115F}'..='\u{1160}'
             | '\u{180E}'
             | '\u{200B}'..='\u{200F}'
             | '\u{2028}'..='\u{202E}'
-            | '\u{2060}'..='\u{2069}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
             | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
     )
 }
 
@@ -794,6 +818,11 @@ mod tests {
             "exe.\\u{202E}edoc\\u{202C}"
         );
         assert_eq!(visible("a\u{200B}b\u{FEFF}", 100), "a\\u{200B}b\\u{FEFF}");
+        // Fix round 1 (m4): tag characters, the soft hyphen and blank Hangul fillers.
+        assert_eq!(
+            visible("ok\u{E0069}\u{E0067}\u{00AD}\u{3164}\u{2064}", 100),
+            "ok\\u{E0069}\\u{E0067}\\u{00AD}\\u{3164}\\u{2064}"
+        );
         assert_eq!(
             visible("Doğrulama", 100),
             "Doğrulama",

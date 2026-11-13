@@ -252,12 +252,25 @@ fn asker_subtitle(theme: &Theme, asker: Option<&Asker>) -> Option<Div> {
 enum Mode {
     /// The pipeline asked: the master password goes back on the reply; the pipeline acts.
     Asked(Option<oneshot::Sender<Answer>>),
-    /// Hacivat needs the vault: the dialog acts here and reports whether the vault is ready.
-    Driven(Option<oneshot::Sender<bool>>),
+    /// Hacivat needs the vault: the dialog acts here and reports how the flow ended.
+    Driven(Option<oneshot::Sender<FlowEnd>>),
+}
+
+// ## m2b-t21-prompts (fix round 1)
+/// How a vault flow Hacivat runs itself ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum FlowEnd {
+    /// The vault exists and is unlocked.
+    Ready,
+    /// The user said Not now or Cancel, or missed the master password three times: a later
+    /// gesture may try again.
+    Declined,
+    /// The vault can't be used (damaged, not a regular file, a refused create).
+    Unusable,
 }
 
 impl Mode {
-    fn finish(&mut self, ready: bool) {
+    fn finish(&mut self, ready: FlowEnd) {
         match self {
             Mode::Asked(reply) => {
                 if let Some(reply) = reply.take() {
@@ -393,7 +406,7 @@ impl VaultCreate {
             return;
         }
         clear_all(&[self.master.clone(), self.repeat.clone()], cx);
-        self.mode.finish(false);
+        self.mode.finish(FlowEnd::Declined);
         close_self(window, cx);
     }
 
@@ -420,12 +433,14 @@ impl VaultCreate {
                     let created = matches!(created.await, Ok(Ok(())));
                     let _ = this.update_in(cx, |this, window, cx| {
                         this.busy = false;
-                        if created {
+                        let end = if created {
                             toast(cx, ids::hv::CONN_VAULT_CREATED);
+                            FlowEnd::Ready
                         } else {
                             tracing::warn!("connections: the vault could not be created");
-                        }
-                        this.mode.finish(created);
+                            FlowEnd::Unusable
+                        };
+                        this.mode.finish(end);
                         close_self(window, cx);
                     });
                 })
@@ -717,7 +732,7 @@ impl VaultUnlock {
             return;
         }
         clear_all(std::slice::from_ref(&self.field), cx);
-        self.mode.finish(false);
+        self.mode.finish(FlowEnd::Declined);
         close_self(window, cx);
     }
 
@@ -761,7 +776,7 @@ impl VaultUnlock {
     ) {
         match result {
             Ok(()) => {
-                self.mode.finish(true);
+                self.mode.finish(FlowEnd::Ready);
                 close_self(window, cx);
             }
             Err(SecretError::WrongMasterPassword) if self.attempt < UNLOCK_ATTEMPTS => {
@@ -771,16 +786,29 @@ impl VaultUnlock {
                 cx.notify();
             }
             Err(SecretError::VaultCorrupt) => {
-                self.mode.finish(false);
+                self.mode.finish(FlowEnd::Unusable);
                 close_self(window, cx);
                 let resettable = self.resettable;
                 window.defer(cx, move |window, cx| {
                     open_damaged(resettable, window, cx);
                 });
             }
+            // Three misses: the user may try again in a later gesture.
+            Err(SecretError::WrongMasterPassword) => {
+                self.mode.finish(FlowEnd::Declined);
+                close_self(window, cx);
+            }
+            // ## m2b-t21-prompts (fix round 1, review m3): a vault path that is not a regular
+            // file (T6 N3) says so instead of closing silently.
+            Err(SecretError::Denied) => {
+                self.mode.finish(FlowEnd::Unusable);
+                close_self(window, cx);
+                let text = Rc::new(|cx: &App| tr(cx, ids::hv::CONN_VAULT_DENIED, NoArgs));
+                ToastQueue::push(cx, Toast::new(ToastKind::Error, text));
+            }
             Err(e) => {
                 tracing::debug!(error = ?e, "connections: the vault was not unlocked");
-                self.mode.finish(false);
+                self.mode.finish(FlowEnd::Unusable);
                 close_self(window, cx);
             }
         }
@@ -798,7 +826,7 @@ impl VaultUnlock {
                 if let Some(me) = me.upgrade() {
                     me.update(cx, |this, cx| {
                         clear_all(std::slice::from_ref(&this.field), cx);
-                        this.mode.finish(false);
+                        this.mode.finish(FlowEnd::Declined);
                         let view = cx.entity_id();
                         window.defer(cx, move |window, cx| remove_modal(view, window, cx));
                     });
@@ -1081,21 +1109,16 @@ impl Render for VaultReset {
                     .flex()
                     .flex_col()
                     .gap(px(t.spacing.xs))
-                    .child(
-                        paragraph(
-                            tr(
-                                cx,
-                                ids::hv::CONN_VAULT_RESET_TYPE,
-                                ids::hv::HvConnVaultResetType {
-                                    word: Text(word.to_string()),
-                                },
-                            ),
-                            TextSource::Fluent,
-                            t.type_ramp.body,
-                            c.text_2.to_hsla(),
-                        )
-                        .id("vault-reset-type"),
-                    )
+                    .child(reset_type_line(
+                        &theme,
+                        tr(
+                            cx,
+                            ids::hv::CONN_VAULT_RESET_TYPE,
+                            ids::hv::HvConnVaultResetType {
+                                word: Text(word.to_string()),
+                            },
+                        ),
+                    ))
                     .child(
                         div()
                             .debug_selector(|| "vault-reset-word".to_string())
@@ -1110,6 +1133,63 @@ impl Render for VaultReset {
             ));
         A11yNode::new("vault-reset-node", Role::AlertDialog, title, true, card).description(body)
     }
+}
+
+// ## m2b-t21-prompts (fix round 1, review m6)
+/// "Type `reset` to confirm" with the word in Fragment Mono and text ink (the mock): the
+/// message's one placeable is split out on its isolation marks; the parts around it stay in the
+/// body face, text-2, and wrap. A message without the marks is drawn whole.
+fn reset_type_line(theme: &Theme, message: SharedString) -> Div {
+    let t = theme.tokens;
+    let c = &t.colors;
+    let line = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_baseline()
+        .debug_selector(|| "vault-reset-type".to_string());
+    let Some((before, word, after)) = split_isolated(&message) else {
+        return line.child(
+            paragraph(
+                message,
+                TextSource::Fluent,
+                t.type_ramp.body,
+                c.text_2.to_hsla(),
+            )
+            .id("vault-reset-type"),
+        );
+    };
+    let plain = |text: String| {
+        Label::new(
+            text,
+            TextSource::Fluent,
+            t.type_ramp.body,
+            c.text_2.to_hsla(),
+        )
+    };
+    line.children((!before.is_empty()).then(|| plain(before)))
+        .child(
+            Label::new(
+                word,
+                TextSource::Data,
+                t.type_ramp.mono_data,
+                c.text.to_hsla(),
+            )
+            .id("vault-reset-type-word"),
+        )
+        .children((!after.is_empty()).then(|| plain(after)))
+}
+
+/// Splits a rendered message around its first isolated placeable (U+2068 … U+2069).
+fn split_isolated(s: &str) -> Option<(String, String, String)> {
+    let open = s.find('\u{2068}')?;
+    let rest = &s[open + '\u{2068}'.len_utf8()..];
+    let close = rest.find('\u{2069}')?;
+    Some((
+        s[..open].to_string(),
+        rest[..close].to_string(),
+        rest[close + '\u{2069}'.len_utf8()..].to_string(),
+    ))
 }
 
 /// Stacks the reset confirmation over the top layer and focuses its field; `on_reset` runs
@@ -1402,7 +1482,7 @@ pub(crate) fn open(q: Question, reply: oneshot::Sender<Answer>, window: &mut Win
 #[derive(Default)]
 struct VaultFlows {
     running: bool,
-    waiting: Vec<oneshot::Sender<bool>>,
+    waiting: Vec<oneshot::Sender<FlowEnd>>,
 }
 
 impl Global for VaultFlows {}
@@ -1422,8 +1502,8 @@ fn workspace_window(cx: &App) -> Option<hacivat_ui_core::gpui_surface::AnyWindow
         .find(|w| w.downcast::<Workspace>().is_some())
 }
 
-/// Runs `flow` (or joins the one running); resolves with whether the vault is ready.
-fn run_flow(flow: Flow, cx: &mut App) -> oneshot::Receiver<bool> {
+/// Runs `flow` (or joins the one running); resolves with how it ended.
+fn run_flow(flow: Flow, cx: &mut App) -> oneshot::Receiver<FlowEnd> {
     let (tx, rx) = oneshot::channel();
     let flows = cx.default_global::<VaultFlows>();
     flows.waiting.push(tx);
@@ -1443,8 +1523,8 @@ fn run_flow(flow: Flow, cx: &mut App) -> oneshot::Receiver<bool> {
         });
     }
     cx.spawn(async move |cx| {
-        // A dialog that could not open, or closed unanswered, is not ready.
-        let ready = done_rx.await.unwrap_or(false);
+        // A dialog that could not open, or closed unanswered, is declined.
+        let ready = done_rx.await.unwrap_or(FlowEnd::Declined);
         cx.update(|cx| {
             let flows = cx.default_global::<VaultFlows>();
             flows.running = false;
@@ -1480,7 +1560,7 @@ pub(crate) fn ensure_vault_before_forever(
     };
     let ready = run_flow(flow, cx);
     cx.spawn(async move |_| {
-        if ready.await.unwrap_or(false) {
+        if ready.await == Ok(FlowEnd::Ready) {
             VaultReady::Ready
         } else {
             VaultReady::Declined
@@ -1489,18 +1569,18 @@ pub(crate) fn ensure_vault_before_forever(
 }
 
 /// Unlocks the locked vault for a change to the profile `name` (a delete or a duplicate met
-/// `VaultLocked`; T6 carry): the unlock dialog, three attempts. Resolves `true` once unlocked.
-pub(crate) fn unlock_vault(cx: &mut App, name: String, env: Option<EnvTag>) -> Task<bool> {
+/// `VaultLocked`; T6 carry): the unlock dialog, three attempts per gesture.
+pub(crate) fn unlock_vault(cx: &mut App, name: String, env: Option<EnvTag>) -> Task<FlowEnd> {
     let found = probe(cx);
     let asker = Some(Asker { name, env });
     cx.spawn(
         async move |cx| match found.await.unwrap_or(VaultState::NotVault) {
             VaultState::Locked => {
                 let ready = cx.update(|cx| run_flow(Flow::Unlock(asker), cx));
-                ready.await.unwrap_or(false)
+                ready.await.unwrap_or(FlowEnd::Declined)
             }
-            VaultState::Unlocked => true,
-            VaultState::NotVault | VaultState::Absent => false,
+            VaultState::Unlocked => FlowEnd::Ready,
+            VaultState::NotVault | VaultState::Absent => FlowEnd::Unusable,
         },
     )
 }

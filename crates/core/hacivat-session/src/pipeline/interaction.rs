@@ -94,6 +94,14 @@ pub enum Answer {
     Keyboard(Vec<SecretString>),
     /// The vault's master password.
     Master(SecretString),
+    // ## m2b-t21-prompts (fix round 1, Remember seam; named exception in Task 14's files)
+    /// An SSH password or key passphrase, with the retention the prompt's Remember chose: the
+    /// connect stores its typed SSH secrets under it and, when it differs from the profile's
+    /// `ssh_retention`, a successful Main connect reports `ProfileChange::SshRetention`.
+    SshSecret {
+        secret: SecretString,
+        remember: hacivat_secrets::Retention,
+    },
 }
 
 /// The UI side of a connect: shows a question and resolves with the answer (HV-CONN-01).

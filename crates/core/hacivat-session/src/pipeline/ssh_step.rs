@@ -154,6 +154,8 @@ async fn open(cx: &mut StepCx) -> Result<Option<CleanupGuard>, ConnectError> {
     } else {
         used
     };
+    // ## m2b-t21-prompts (fix round 1): the Remember chosen at a hop prompt, if any.
+    st.ssh.remember = prompter.as_ref().and_then(|p| p.remember());
     st.ssh.typed = prompter.map(|p| p.typed()).unwrap_or_default();
     st.ssh.transport = Some(lease.generation());
     st.ssh.via = Some(lease.bastion().to_string());
@@ -393,6 +395,9 @@ pub(crate) struct SshState {
     pub(crate) path: PathKind,
     /// The hops' hosts, in order (an error names the hop that failed).
     pub(crate) hop_hosts: Vec<String>,
+    // ## m2b-t21-prompts (fix round 1)
+    /// The retention an SSH secret prompt's Remember chose (the last answer wins).
+    pub(crate) remember: Option<hacivat_secrets::Retention>,
 }
 
 impl SshState {
@@ -405,6 +410,7 @@ impl SshState {
             via: None,
             path: PathKind::Direct,
             hop_hosts: Vec::new(),
+            remember: None,
         }
     }
 }
