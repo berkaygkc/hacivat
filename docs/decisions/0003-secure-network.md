@@ -715,7 +715,14 @@ the vault, the session overlay, the keyring CI and the deferrals.
     `secrets_used`, so the overlay can serve a headless reconnect. Only a connect that typed a
     secret stores it (R8): a joining connect stores nothing, because the chain may have been
     opened by another profile with the same hops, users and methods, whose typed secret must
-    not be written into this profile's slots.
+    not be written into this profile's slots. Residual (re-review N2): a lease of another
+    profile that joins the same chain receives the chain's SSH secrets in its in-memory overlay
+    (never stored). They can outlive the first profile's forget or disconnect, but they only
+    ever go back to the same hops (same `ChainKey`), and the overlay drops them on any
+    destination change.
+  - **A cancelled connect stores nothing (re-review N1).** `remember_secrets` returns every key
+    it wrote; when the connect turns out cancelled, all of them are removed (the database
+    password, the hop secrets and the TLS key passphrase), not only the one in flight.
   - **No pin or CA for dates (M1).** An expired or not-yet-valid certificate offers only Edit
     connection and carries no review; an unknown issuer without a reviewable chain offers
     Import CA and Edit connection.

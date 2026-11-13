@@ -532,8 +532,11 @@ async fn run(
     // undoes what was stored and fails the connect like any other cancel.
     let todo = typed_secrets(&profile, &cx.state);
     let (ix, store) = (cx.state.ix.clone(), cx.state.secrets.clone());
-    remember_secrets(profile.id, ix, store, todo, &cancel).await;
+    let stored = remember_secrets(profile.id, ix, store.clone(), todo, &cancel).await;
     if cancel.is_cancelled() {
+        // Re-review N1: a cancelled connect stores nothing (R8), so every key this connect
+        // wrote goes again, decided at the same point as the cancelled result.
+        forget_stored(&store, stored).await;
         let e = error(ErrClass::Cancelled, Phase::PostConnect);
         return Err(fail(e, cx, guards, started).await);
     }
@@ -760,28 +763,57 @@ fn args(
 /// and passphrases typed at a hop prompt (`ssh_retention`, by hop), and a typed TLS key
 /// passphrase (`retention`). Never for a Test or a probe, never for `.pgpass`, a stored, the
 /// overlay's or a draft SSH secret, never a keyboard-interactive answer, and never for a
-/// cancelled connect: `cancel` is checked right before each write, and a secret written while
-/// a cancel raced it is removed again (M2a final review M2). A Delete cancels the connect before
-/// it queues its own `delete_all`, so either the put lands first and the Delete removes it, or
-/// the put sees the cancel here and removes it itself: no `Forever` entry outlives its profile.
-/// Before the first `Forever` secret, a vault that does not exist yet is offered (Q38). On the
-/// blocking pool.
+/// cancelled connect: `cancel` is checked right before each write, and when the connect turns
+/// out cancelled the caller removes every key this call wrote (it returns them; M2a final
+/// review M2, T14 re-review N1). A Delete cancels the connect before it queues its own
+/// `delete_all`, so either the puts land first and the Delete removes them, or the cancel is
+/// seen here and they are removed again: no `Forever` entry outlives its profile. Before the
+/// first `Forever` secret, a vault that does not exist yet is offered (Q38). On the blocking
+/// pool.
 async fn remember_secrets(
     profile: ProfileId,
     ix: Interaction,
     secrets: Arc<SecretStore>,
     todo: Vec<(SecretSlot, SecretString, Retention)>,
     cancel: &CancellationToken,
-) {
+) -> Vec<(SecretKey, Retention)> {
+    let mut written = Vec::new();
     if todo.is_empty() || cancel.is_cancelled() {
-        return;
+        return written;
     }
     if todo.iter().any(|(_, _, r)| *r == Retention::Forever) {
         prompts::ensure_vault(&ix, &secrets, cancel).await;
     }
     for (slot, secret, retention) in todo {
+        if cancel.is_cancelled() {
+            break;
+        }
         let key = SecretKey { profile, slot };
-        store_one(&secrets, key, secret, retention, cancel).await;
+        written.push((key, retention));
+        let store = secrets.clone();
+        let stored = tokio::task::spawn_blocking(move || store.put(&key, secret, retention)).await;
+        if !matches!(stored, Ok(Ok(_))) {
+            tracing::warn!("a secret that worked could not be stored");
+        }
+    }
+    written
+}
+
+/// Removes every key a cancelled connect wrote, wherever its retention keeps it (the backend
+/// and its `UntilRestart` fallback for `Forever`). On the blocking pool.
+async fn forget_stored(secrets: &Arc<SecretStore>, written: Vec<(SecretKey, Retention)>) {
+    if written.is_empty() {
+        return;
+    }
+    let store = secrets.clone();
+    let removed = tokio::task::spawn_blocking(move || {
+        written
+            .iter()
+            .all(|(key, retention)| store.remove(key, *retention).is_ok())
+    })
+    .await;
+    if !matches!(removed, Ok(true)) {
+        tracing::warn!("a secret stored by a cancelled connect could not be removed");
     }
 }
 
@@ -824,32 +856,6 @@ fn typed_secrets(p: &Profile, st: &StepState) -> Vec<(SecretSlot, SecretString, 
     }
     todo.retain(|(_, _, retention)| *retention != Retention::Never);
     todo
-}
-
-/// Stores one secret, undoing it when the connect was cancelled while it was written.
-async fn store_one(
-    secrets: &Arc<SecretStore>,
-    key: SecretKey,
-    secret: SecretString,
-    retention: Retention,
-    cancel: &CancellationToken,
-) {
-    if cancel.is_cancelled() {
-        return;
-    }
-    let store = secrets.clone();
-    let stored = tokio::task::spawn_blocking(move || store.put(&key, secret, retention)).await;
-    if !matches!(stored, Ok(Ok(_))) {
-        tracing::warn!("a secret that worked could not be stored");
-    }
-    if cancel.is_cancelled() {
-        // The connect was cancelled (a disconnect, a Delete) while the write ran: undo it.
-        let store = secrets.clone();
-        let removed = tokio::task::spawn_blocking(move || store.remove(&key, retention)).await;
-        if !matches!(removed, Ok(Ok(()))) {
-            tracing::warn!("a secret stored by a cancelled connect could not be removed");
-        }
-    }
 }
 
 /// An empty trail starting now.

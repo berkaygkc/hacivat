@@ -720,3 +720,78 @@ async fn a_cancel_during_the_create_vault_question_stores_nothing() {
     }
     assert_eq!(f.open_connections(), 0, "the connection was closed");
 }
+
+// ## m2b-t14-pipeline re-review N1
+
+/// A memory backend that cancels `token` when it is asked to store the TLS key passphrase:
+/// the user disconnects while the connect stores what it was given (after the database
+/// password, which it stores first).
+struct CancelsAtTlsPassphrase {
+    inner: hacivat_secrets::MemoryBackend,
+    token: tokio_util::sync::CancellationToken,
+}
+
+impl SecretBackend for CancelsAtTlsPassphrase {
+    fn get(
+        &self,
+        key: &SecretKey,
+    ) -> Result<Option<hacivat_secrets::SecretString>, hacivat_secrets::SecretError> {
+        self.inner.get(key)
+    }
+    fn put(
+        &self,
+        key: &SecretKey,
+        value: &hacivat_secrets::SecretString,
+    ) -> Result<(), hacivat_secrets::SecretError> {
+        self.inner.put(key, value)?;
+        if key.slot == SecretSlot::TlsKeyPassphrase {
+            self.token.cancel();
+        }
+        Ok(())
+    }
+    fn delete(&self, key: &SecretKey) -> Result<(), hacivat_secrets::SecretError> {
+        self.inner.delete(key)
+    }
+    fn name(&self) -> &'static str {
+        "cancels-at-tls-passphrase"
+    }
+}
+
+/// A cancel while the connect stores its secrets undoes every key it stored: the database
+/// password stored first is gone too, not only the one in flight (R8: a cancelled connect
+/// stores nothing).
+#[tokio::test]
+async fn a_cancel_while_storing_undoes_every_stored_secret() {
+    let cancel = token();
+    let backend = Arc::new(CancelsAtTlsPassphrase {
+        inner: hacivat_secrets::MemoryBackend::new(),
+        token: cancel.clone(),
+    });
+    let store = Arc::new(SecretStore::new(Some(
+        backend.clone() as Arc<dyn SecretBackend>
+    )));
+    let deps = deps_over_store(ok_pg(), store);
+    let mut p = with_client_key(forever_profile(), "tls-client-key.enc.der");
+    p.tls.mode = hacivat_net::TlsMode::Auto;
+    let ui = ScriptedUi::answers_m2b([Answer::Secret(sec("pw1")), Answer::Password(sec("pw"))]);
+    let e = connect(&deps, req(p), ui.ix(), cancel, progress())
+        .await
+        .unwrap_err();
+    assert_eq!(e.class, ErrClass::Cancelled);
+    for slot in [SecretSlot::DbPassword, SecretSlot::TlsKeyPassphrase] {
+        let key = SecretKey {
+            profile: pid(),
+            slot,
+        };
+        assert!(
+            backend.inner.get(&key).unwrap().is_none(),
+            "{slot:?} remained"
+        );
+        for retention in [Retention::Forever, Retention::UntilRestart] {
+            assert!(
+                deps.secrets.get(&key, retention).unwrap().is_none(),
+                "{slot:?} {retention:?}"
+            );
+        }
+    }
+}
