@@ -161,6 +161,9 @@ pub(crate) struct StepState {
     pub(crate) read_only: bool,
     /// What the role probe found (Task 18).
     pub(crate) access_warnings: Vec<hacivat_guard::RoleWarning>,
+    // ## m2b-t18-guarded-exec
+    /// Whether the role probe runs: not on a `Department::Cancel` side connection (review m-2).
+    pub(crate) probe_role: bool,
 }
 
 impl StepState {
@@ -1064,8 +1067,14 @@ impl ConnectStep for PostConnectStep {
                 .or_else(|| st.user.clone());
             // ## m2b-t01-interfaces: the access label and the role probe's warnings (Task 18;
             // until then the M2a R10 label).
-            let (access, warnings) =
-                crate::session::readonly::access_for(&mut **conn, p.engine, st.read_only).await;
+            // ## m2b-t18-guarded-exec (review m-2): a side connection is labelled without a probe.
+            let (access, warnings) = if st.probe_role {
+                crate::session::readonly::access_for(&mut **conn, p.engine, st.read_only).await
+            } else if st.read_only {
+                (AccessLabel::ReadOnlyGuarded, Vec::new())
+            } else {
+                (AccessLabel::ReadWrite, Vec::new())
+            };
             st.access = access;
             st.access_warnings = warnings;
             st.trail.done(TrailStep::CheckServer);

@@ -213,23 +213,21 @@ async fn a_read_only_profile_never_yields_a_read_write_session() {
         ExecErrorKind::Tx(TxError::Unsupported)
     );
     // Task 18: the statement runs only inside the guard's read-only transaction; this fake
-    // never opens one, so the guard reports a gap and the session is discarded.
+    // never opens one, so the guard reports a gap, never sends the statement (fix round 1,
+    // m-1) and discards the session.
     assert_eq!(
         run(&h, "delete from t").await.unwrap_err().kind,
         ExecErrorKind::EnforcementGap(hacivat_session::GapReason::TransactionEndedByStatement)
     );
-    // After the connect's role probe (the profile is read-only, so the connect is too).
-    let ran = f.executed();
-    let probe = hacivat_guard::role_probe_sql(DbmsKind::Postgres);
-    assert_eq!(ran[..probe.len()], *probe);
+    // After the connect's identity check (the profile is read-only, so the connect is too;
+    // the fake answers nothing, so the probe stops there, guarded).
     assert_eq!(
-        ran[probe.len()..probe.len() + 3],
+        f.executed(),
         [
+            "SELECT current_user, session_user",
             "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
-            "SELECT 1",
-            "delete from t"
-        ],
-        "{ran:?}"
+            "SELECT 1"
+        ]
     );
     assert!(matches!(
         snap(&h).state,
@@ -239,26 +237,21 @@ async fn a_read_only_profile_never_yields_a_read_write_session() {
 
 #[tokio::test]
 async fn a_read_only_statement_goes_through_the_guard() {
-    // Task 18 (T7 carry): the read-only connect runs the role probe first; then the statement
-    // runs inside the guard. This fake never opens the guard's transaction, so it is a gap.
+    // Task 18 (T7 carry): the read-only connect runs the role probe first (its identity check;
+    // this fake answers nothing, so the probe stops there). Then the statement would run
+    // inside the guard, but this fake never opens the guard's transaction: a gap, and the
+    // statement is never sent.
     let (h, f) = ro_session(fake_pg(), ro_profile()).await;
-    let probe: Vec<String> = hacivat_guard::role_probe_sql(DbmsKind::Postgres)
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    assert_eq!(f.executed(), probe);
+    assert_eq!(f.executed(), ["SELECT current_user, session_user"]);
     assert_eq!(
         run(&h, "select 1").await.unwrap_err().kind,
         ExecErrorKind::EnforcementGap(hacivat_session::GapReason::TransactionEndedByStatement)
     );
     assert_eq!(
-        f.executed()[probe.len()..],
+        f.executed()[1..],
         [
             "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
-            "SELECT 1",
-            "select 1",
-            "SELECT txid_current_if_assigned()",
-            "ROLLBACK"
+            "SELECT 1"
         ]
     );
 }

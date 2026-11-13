@@ -20,7 +20,9 @@ use hacivat_driver::{
     SemVerLoose, ServerInfo, TxStatus,
 };
 use hacivat_guard::{MAX_STATEMENT_BYTES, plan_for, role_probe_sql};
-use hacivat_proto::{AccessLabel, DbmsKind};
+use hacivat_net::TlsMode;
+use hacivat_proto::{AccessLabel, DbmsKind, Department};
+use hacivat_session::pipeline::connect;
 use hacivat_session::session::readonly::{access_for, remediation_for_server, run_guarded};
 use hacivat_session::session::{
     DenyLayer, ExecErrorKind, ExecOrigin, Request, SessionEvent, SessionHandle, SessionState,
@@ -66,7 +68,14 @@ impl Deref for RoFake {
     }
 }
 
-const CANARY: &str = "SELECT txid_current_if_assigned()";
+const CANARY: &str = "SELECT pg_catalog.txid_current_if_assigned()";
+/// Fix round 1 (I-3): the probe's identity check.
+const IDENTITY: &str = "SELECT current_user, session_user";
+
+/// The identity check's answer for a session that did not switch roles.
+fn same_role() -> FakeExec {
+    rows(IDENTITY, &[&["hv_ro", "hv_ro"]])
+}
 const SCHEMA_PROBE: &str = "SELECT current_database()";
 
 fn entry(prefix: &'static str, result: Result<ExecSummary, RawError>) -> FakeExec {
@@ -146,10 +155,19 @@ fn fake_mariadb() -> FakeDriver {
 fn fake_pg_probe_least() -> FakeDriver {
     let probe = role_probe_sql(DbmsKind::Postgres);
     FakeDriver::new(DbmsKind::Postgres).exec(vec![
+        same_role(),
         rows(probe[0], &[&["f", "f", "f", "f"]]),
         rows(probe[2], &[&["f"]]),
         rows(probe[3], &[&["t"]]),
     ])
+}
+
+/// What a PostgreSQL read-only connect runs: the identity check, then the probe.
+fn pg_probe_lines() -> Vec<String> {
+    std::iter::once(IDENTITY)
+        .chain(role_probe_sql(DbmsKind::Postgres).iter().copied())
+        .map(String::from)
+        .collect()
 }
 
 fn statements(kind: DbmsKind) -> Vec<String> {
@@ -240,7 +258,7 @@ async fn pg_guarded_exec_sequence() {
             "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
             "SELECT 1",
             "select * from t",
-            "SELECT txid_current_if_assigned()",
+            "SELECT pg_catalog.txid_current_if_assigned()",
             "ROLLBACK",
             "SET default_transaction_read_only = on",
             "SET standard_conforming_strings = on",
@@ -419,21 +437,83 @@ async fn access_for_probes_only_when_read_only() {
 #[tokio::test]
 async fn mysql_executable_comments_are_statement_text() {
     // T13 carry: MySQL runs `/*!…*/` (and MariaDB `/*M!…*/`), so its content is the statement.
-    for sql in [
-        "/*!COMMIT*/",
-        "/*!50000 commit */",
-        "/*!80000ROLLBACK*/",
-        "/*M!100100 BEGIN */",
-        "/*! */ /*!START TRANSACTION*/",
-        "-- note\n/*!50000 SAVEPOINT a*/",
+    for (kind, sql) in [
+        (DbmsKind::MySql, "/*!COMMIT*/"),
+        (DbmsKind::MySql, "/*!50000 commit */"),
+        (DbmsKind::MySql, "/*!80000ROLLBACK*/"),
+        (DbmsKind::MariaDb, "/*M!100100 BEGIN */"),
+        (DbmsKind::MariaDb, "/*M! BEGIN */"),
+        (DbmsKind::MySql, "/*! */ /*!START TRANSACTION*/"),
+        (DbmsKind::MySql, "-- note\n/*!50000 SAVEPOINT a*/"),
     ] {
         let f = fake_mysql_ro_clean();
         assert_eq!(
-            guarded_on(&f, DbmsKind::MySql, sql).await.unwrap_err(),
+            guarded_on(&f, kind, sql).await.unwrap_err(),
             ExecErrorKind::ReadOnlyDenied(DenyLayer::Transaction),
-            "{sql}"
+            "{kind:?} {sql}"
         );
         assert!(f.executed().is_empty(), "{sql}");
+    }
+}
+
+#[tokio::test]
+async fn step_1a_reads_mysql_comments_as_the_server_does() {
+    // Fix round 1 (I-1, review H1): each of these is `COMMIT` to the server, so each is
+    // refused before any I/O.
+    for (kind, sql) in [
+        // A version-gated comment newer than the server is skipped: read both ways.
+        (DbmsKind::MySql, "/*!99999 SELECT 1 */ COMMIT"),
+        (DbmsKind::MariaDb, "/*!999999 SELECT 1 */ COMMIT"),
+        (DbmsKind::MariaDb, "/*M!999999 SELECT 1 */ COMMIT"),
+        // `/*M!` is an ordinary comment on MySQL.
+        (DbmsKind::MySql, "/*M!100100 SELECT 1 */ COMMIT"),
+        // MySQL line comments end at a line feed only.
+        (DbmsKind::MySql, "-- x\rSELECT 1\nCOMMIT"),
+        (DbmsKind::MySql, "# x\rSELECT 1\nCOMMIT"),
+        // Both readings of a version-gated comment, one after another.
+        (DbmsKind::MySql, "/*!50000 COMMIT */ SELECT 1"),
+        (
+            DbmsKind::MySql,
+            "/*!50000 SELECT 1 */ /*!50000 ROLLBACK */ SELECT 2",
+        ),
+    ] {
+        let f = fake_mysql_ro_clean();
+        let mut c = conn(&f).await;
+        let r = run_guarded(&mut *c, kind, sql, ExecOpts::default(), &[]).await;
+        assert_eq!(
+            r.unwrap_err().kind,
+            ExecErrorKind::ReadOnlyDenied(DenyLayer::Transaction),
+            "{kind:?} {sql:?}"
+        );
+        assert!(f.executed().is_empty(), "{kind:?} {sql:?}");
+    }
+    // Too many version-gated comments to follow every reading: refused, never guessed. A
+    // statement near the 1 MiB limit made of them is refused the same way.
+    for count in [17, 45_000] {
+        let sql = "/*!50000 SELECT 1 */ ".repeat(count) + "SELECT 2";
+        let f = fake_mysql_ro_clean();
+        assert_eq!(
+            guarded_on(&f, DbmsKind::MySql, &sql).await.unwrap_err(),
+            ExecErrorKind::ReadOnlyDenied(DenyLayer::Transaction),
+            "{count}"
+        );
+        assert!(f.executed().is_empty());
+    }
+    // What the server reads as a read stays a read.
+    for (kind, sql) in [
+        // MySQL: `/*M!` is a comment, so its `COMMIT` is never run.
+        (DbmsKind::MySql, "/*M!100100 COMMIT */ SELECT 1"),
+        // MySQL: the comment runs to the line feed, so the statement is `SELECT 1`.
+        (DbmsKind::MySql, "-- x\rCOMMIT\nSELECT 1"),
+        // SQLite ends a line comment at a line feed too.
+        (DbmsKind::Sqlite, "-- x\rCOMMIT\nSELECT 1"),
+    ] {
+        let f = if kind == DbmsKind::Sqlite {
+            RoFake::new(kind, Vec::new())
+        } else {
+            fake_mysql_ro_clean()
+        };
+        assert!(guarded_on(&f, kind, sql).await.is_ok(), "{kind:?} {sql:?}");
     }
 }
 
@@ -560,6 +640,95 @@ async fn a_before_step_that_leaves_a_transaction_open_breaks_the_session() {
 }
 
 #[tokio::test]
+async fn the_statement_never_runs_without_the_guard_transaction() {
+    // Fix round 1 (m-1, review H3): a `before` that did not open the read-only transaction is a
+    // gap, and the user statement is never sent.
+    for (kind, begin) in [
+        (DbmsKind::MySql, "START TRANSACTION READ ONLY"),
+        (DbmsKind::MariaDb, "START TRANSACTION READ ONLY"),
+        (DbmsKind::Postgres, "BEGIN ISOLATION LEVEL"),
+    ] {
+        let f = FakeDriver::new(kind).exec(vec![tx(begin, TxStatus::Idle)]);
+        assert_eq!(
+            guarded_on(&f, kind, "delete from t").await.unwrap_err(),
+            ExecErrorKind::EnforcementGap(GapReason::TransactionEndedByStatement),
+            "{kind:?}"
+        );
+        assert!(
+            !f.executed().iter().any(|s| s == "delete from t"),
+            "{kind:?}: {:?}",
+            f.executed()
+        );
+        assert_eq!(f.reset_calls(), 0, "{kind:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_mysql_call_that_ended_the_transaction_is_a_gap() {
+    // Fix round 1 (I-2, review H2): a procedure may commit, write, commit and then fail. The
+    // failed statement is still judged: no transaction afterwards is a gap.
+    for kind in [DbmsKind::MySql, DbmsKind::MariaDb] {
+        let f = fake_mysql_ro_clean().exec(vec![tx_err("CALL", "45000", TxStatus::Idle)]);
+        assert_eq!(
+            guarded_on(&f, kind, "CALL p()").await.unwrap_err(),
+            ExecErrorKind::EnforcementGap(GapReason::TransactionEndedByStatement),
+            "{kind:?}"
+        );
+        assert_eq!(f.reset_calls(), 0, "discarded unreset");
+    }
+    // Any keyword outside the implicit-commit list is judged, and so is a statement one of
+    // whose readings is outside it.
+    for sql in [
+        "DO p()",
+        "/*!99999 CREATE TABLE x (a int) */ CALL p()",
+        "(SELECT 1)",
+        // Skipped, this version-gated DDL leaves no statement: not every reading is DDL.
+        "/*!50000 ALTER TABLE t ADD b int */",
+    ] {
+        let f = mysql_failing("45000");
+        assert_eq!(
+            guarded_on(&f, DbmsKind::MySql, sql).await.unwrap_err(),
+            ExecErrorKind::EnforcementGap(GapReason::TransactionEndedByStatement),
+            "{sql}"
+        );
+    }
+}
+
+/// A MySQL guard whose user statement (whatever its text) fails with `code` and leaves no
+/// transaction, as a statement that committed (implicitly or not) before failing does.
+fn mysql_failing(code: &str) -> FakeDriver {
+    // First match wins: `START TRANSACTION` takes its own entry, the user statement the
+    // empty-prefix one, `ROLLBACK` the last.
+    FakeDriver::new(DbmsKind::MySql).exec(vec![
+        tx("START TRANSACTION READ ONLY", TxStatus::InTx),
+        tx_err("", code, TxStatus::Idle),
+        tx("ROLLBACK", TxStatus::Idle),
+    ])
+}
+
+#[tokio::test]
+async fn a_failed_mysql_ddl_that_committed_implicitly_is_only_an_error() {
+    // MySQL commits before a DDL statement and then refuses it (1792): the statement failed,
+    // nothing escaped, and the session stays usable.
+    for sql in [
+        "CREATE TABLE x (a int)",
+        "drop table t",
+        "/*! ALTER TABLE t ADD b int */",
+        "TRUNCATE t",
+        "GRANT SELECT ON t TO u",
+        "RENAME TABLE t TO u",
+    ] {
+        let f = mysql_failing("1792");
+        assert_eq!(
+            guarded_on(&f, DbmsKind::MySql, sql).await.unwrap_err(),
+            ExecErrorKind::Db,
+            "{sql}"
+        );
+        assert_eq!(f.reset_calls(), 1, "{sql}");
+    }
+}
+
+#[tokio::test]
 async fn a_mysql_write_that_succeeded_is_a_gap() {
     let f = fake_mysql_ro_clean().exec(vec![wrote("CALL", "CALL", 1)]);
     assert_eq!(
@@ -660,6 +829,7 @@ async fn a_cancelled_statement_still_rolls_back_and_resets() {
 async fn a_probe_that_fails_is_unparsed_and_guarded() {
     let probe = role_probe_sql(DbmsKind::Postgres);
     let f = FakeDriver::new(DbmsKind::Postgres).exec(vec![
+        same_role(),
         rows(probe[0], &[&["f", "f", "f", "f"]]),
         err(probe[1], "42501"),
     ]);
@@ -667,7 +837,7 @@ async fn a_probe_that_fails_is_unparsed_and_guarded() {
     assert_eq!(label, AccessLabel::ReadOnlyGuarded);
     assert_eq!(warnings, [RoleWarning::Unparsed]);
     // It stopped at the failure.
-    assert_eq!(f.executed().len(), 2);
+    assert_eq!(f.executed().len(), 3);
 }
 
 #[tokio::test]
@@ -677,13 +847,94 @@ async fn the_probe_runs_its_fixed_statements_only() {
     assert_eq!(label, AccessLabel::ReadOnlyEnforced);
     // Q21: TEMP is a warning that keeps the enforced label.
     assert_eq!(warnings, [RoleWarning::TempPrivilege]);
-    assert_eq!(f.executed(), role_probe_sql(DbmsKind::Postgres));
+    assert_eq!(f.executed(), pg_probe_lines());
+}
+
+#[tokio::test]
+async fn a_switched_role_reads_guarded() {
+    // Fix round 1 (I-3): with `-c role=…` or a role default, `current_user` is not the session
+    // user, and `SET ROLE NONE` returns to the session user, whom the probe never saw. Such a
+    // session is `Unparsed` (guarded), and the probe does not run.
+    for answer in [
+        rows(IDENTITY, &[&["app_reader", "app_login"]]),
+        entry(IDENTITY, Ok(ExecSummary::default())),
+        err(IDENTITY, "42501"),
+        rows(IDENTITY, &[&["hv_ro"]]),
+    ] {
+        let probe = role_probe_sql(DbmsKind::Postgres);
+        let f = FakeDriver::new(DbmsKind::Postgres).exec(vec![
+            answer,
+            rows(probe[0], &[&["f", "f", "f", "f"]]),
+            rows(probe[2], &[&["f"]]),
+            rows(probe[3], &[&["f"]]),
+        ]);
+        let (label, warnings) = access_for(&mut *conn(&f).await, DbmsKind::Postgres, true).await;
+        assert_eq!(label, AccessLabel::ReadOnlyGuarded);
+        assert_eq!(warnings, [RoleWarning::Unparsed]);
+        assert_eq!(f.executed(), [IDENTITY]);
+    }
+    // A NULL is not a name.
+    let f = FakeDriver::new(DbmsKind::Postgres).exec(vec![entry(
+        IDENTITY,
+        Ok(ExecSummary {
+            rows: vec![vec![None, None]],
+            row_count: 1,
+            ..ExecSummary::default()
+        }),
+    )]);
+    assert_eq!(
+        access_for(&mut *conn(&f).await, DbmsKind::Postgres, true).await,
+        (AccessLabel::ReadOnlyGuarded, vec![RoleWarning::Unparsed])
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_probe_is_unparsed_and_guarded() {
+    // Review H4: the 5 s bound (FakeDriver only, so the paused clock is safe).
+    let probe = role_probe_sql(DbmsKind::Postgres);
+    let slow = FakeExec {
+        delay: Duration::from_secs(6),
+        ..rows(probe[0], &[&["f", "f", "f", "f"]])
+    };
+    let f = FakeDriver::new(DbmsKind::Postgres).exec(vec![same_role(), slow]);
+    assert_eq!(
+        access_for(&mut *conn(&f).await, DbmsKind::Postgres, true).await,
+        (AccessLabel::ReadOnlyGuarded, vec![RoleWarning::Unparsed])
+    );
+}
+
+#[tokio::test]
+async fn side_connections_run_no_probe() {
+    // Fix round 1 (m-2, review H5): a cancel or kill connection runs no user SQL and shows no
+    // label, so it is labelled guarded without a probe.
+    let (deps, fake) = deps_with(fake_pg());
+    let mut request = req(ro_profile());
+    request.read_only = true;
+    request.department = Department::Cancel;
+    let live = connect(&deps, request, ix_none(), token(), progress())
+        .await
+        .expect("connects");
+    assert!(fake.executed().is_empty(), "{:?}", fake.executed());
+    assert_eq!(live.access, AccessLabel::ReadOnlyGuarded);
+    assert!(live.access_warnings.is_empty());
+    live.close().await;
+    // A read-write side connection stays read-write.
+    let (deps, fake) = deps_with(fake_pg());
+    let mut request = req(rw(pg_profile(TlsMode::Disable)));
+    request.department = Department::Cancel;
+    let live = connect(&deps, request, ix_none(), token(), progress())
+        .await
+        .expect("connects");
+    assert!(fake.executed().is_empty());
+    assert_eq!(live.access, AccessLabel::ReadWrite);
+    live.close().await;
 }
 
 #[tokio::test]
 async fn a_superuser_reads_guarded_with_its_warning() {
     let probe = role_probe_sql(DbmsKind::Postgres);
     let f = FakeDriver::new(DbmsKind::Postgres).exec(vec![
+        same_role(),
         rows(probe[0], &[&["t", "t", "f", "f"]]),
         rows(probe[2], &[&["t"]]),
         rows(probe[3], &[&["t"]]),
@@ -741,13 +992,14 @@ async fn mariadb_and_sqlite_are_guarded_without_a_probe() {
 async fn the_connect_labels_a_read_only_session_from_the_probe() {
     let probe = role_probe_sql(DbmsKind::Postgres);
     let fake = fake_pg().exec(vec![
+        same_role(),
         rows(probe[0], &[&["f", "f", "f", "f"]]),
         rows(probe[2], &[&["f"]]),
         rows(probe[3], &[&["f"]]),
     ]);
     let (h, f) = spawn_over(fake, ro_profile(), true, Arc::new(fake_pg())).await;
     assert_eq!(snap(&h).access, AccessLabel::ReadOnlyEnforced);
-    assert_eq!(f.executed(), role_probe_sql(DbmsKind::Postgres));
+    assert_eq!(f.executed(), pg_probe_lines());
 }
 
 #[test]

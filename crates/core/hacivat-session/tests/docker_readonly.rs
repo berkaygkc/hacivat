@@ -39,6 +39,9 @@ const RO: &str = "hv_ro";
 const RO_SUPERUSER_MEMBER: &str = "hv_ro_su";
 const RO_COLUMN_UPDATE: &str = "hv_ro_col";
 const RO_CREATE_PUBLIC: &str = "hv_ro_create";
+/// A login that is a member of the superuser and of `hv_ro`, with `role = hv_ro` as its default
+/// (fix round 1, I-3): `current_user` is `hv_ro`, but `SET ROLE NONE` returns to the login.
+const RO_SWITCHED: &str = "hv_ro_setrole";
 
 // ---------------------------------------------------------------------------------------------
 // Connections and sessions
@@ -170,13 +173,20 @@ fn unique(prefix: &str) -> String {
 // ---------------------------------------------------------------------------------------------
 // Fixtures (Q7)
 
-/// `hv_probe`, `hv_ro` and the three fixture roles on PostgreSQL target `t`, idempotently.
+/// `hv_probe`, `hv_ro` and the four fixture roles on PostgreSQL target `t`, idempotently.
 /// `hv_ro` reads every table (`pg_read_all_data`, or `SELECT` on `public` before 14), with
-/// TEMP and `CREATE` on `public` revoked from `PUBLIC` as the init script does.
+/// TEMP and `CREATE` on `public` revoked from `PUBLIC` as the init script does (the same
+/// statements, so the matrix volumes end as the init script leaves them).
 async fn ensure_pg_fixtures(t: &DockerTarget) {
     let mut a = admin(t).await;
     let password = t.password.replace('\'', "''");
-    let roles = [RO, RO_SUPERUSER_MEMBER, RO_COLUMN_UPDATE, RO_CREATE_PUBLIC];
+    let roles = [
+        RO,
+        RO_SUPERUSER_MEMBER,
+        RO_COLUMN_UPDATE,
+        RO_CREATE_PUBLIC,
+        RO_SWITCHED,
+    ];
     let mut create = String::new();
     for role in roles {
         create.push_str(&format!(
@@ -201,6 +211,10 @@ async fn ensure_pg_fixtures(t: &DockerTarget) {
         format!("GRANT \"{}\" TO {RO_SUPERUSER_MEMBER}", t.user),
         format!("GRANT UPDATE (a) ON hv_probe TO {RO_COLUMN_UPDATE}"),
         format!("GRANT CREATE ON SCHEMA public TO {RO_CREATE_PUBLIC}"),
+        // Fix round 1 (I-3): signs in as itself (a superuser member), runs as `hv_ro`.
+        format!("GRANT {RO} TO {RO_SWITCHED}"),
+        format!("GRANT \"{}\" TO {RO_SWITCHED}", t.user),
+        format!("ALTER ROLE {RO_SWITCHED} SET role = '{RO}'"),
     ];
     for sql in &statements {
         batch(&mut a, &t.id, sql).await;
@@ -335,6 +349,30 @@ async fn pg_fixture_roles_with_more_than_read_are_guarded() {
 
 #[tokio::test]
 #[ignore = "docker"]
+async fn pg_a_session_running_as_another_role_is_guarded() {
+    // Fix round 1 (I-3): the probe would see `hv_ro`, but `SET ROLE NONE` returns to the login.
+    // A role default and a typed `-c role=` both read guarded, `Unparsed`.
+    if !docker_enabled() {
+        return;
+    }
+    let Some(t) = require_target("pg17") else {
+        return;
+    };
+    ensure_pg_fixtures(&t).await;
+    let by_default = connect_ro_as(&t, RO_SWITCHED).await;
+    assert_eq!(by_default.access, AccessLabel::ReadOnlyGuarded);
+    assert_eq!(by_default.access_warnings, [RoleWarning::Unparsed]);
+    by_default.close().await;
+    let mut typed = profile_as(&t, &t.user, true);
+    typed.extra = vec![("options".into(), format!("-c role={RO}"))];
+    let typed = connect_profile(&t, typed).await;
+    assert_eq!(typed.access, AccessLabel::ReadOnlyGuarded);
+    assert_eq!(typed.access_warnings, [RoleWarning::Unparsed]);
+    typed.close().await;
+}
+
+#[tokio::test]
+#[ignore = "docker"]
 async fn pg_hv_ro_is_enforced_on_every_postgres_line() {
     // The plan amendment (cd4c538): with CREATE on `public` revoked from PUBLIC, `hv_ro` reads
     // enforced on every PostgreSQL line, 13 and 14 included.
@@ -399,9 +437,13 @@ async fn pg_advisory_lock_and_listen_do_not_survive_a_request() {
 
 #[tokio::test]
 #[ignore = "docker"]
-async fn pg_probe_on_100k_tables_finishes_within_2s() {
-    // Review probe: row 3's EXISTS over every relation. The 100k-table database is created once
-    // per volume (about a minute), so this runs only under the full set.
+async fn pg_probe_on_100k_tables_is_measured() {
+    // Review probe: row 3's EXISTS over every relation. The test builds a throwaway database of
+    // 100,000 tables (about a minute), so it runs only under the full set, and drops it again
+    // (fix round 1, m-6: the matrix volumes keep no trace; a database left by an interrupted
+    // run is dropped first). It records the time (stderr; ADR 0004 `m2b-t18`) and asserts only
+    // the label, which already means the probe ended within its 5 s bound (fix round 1, I-4:
+    // no wall-clock assertion).
     if !docker_enabled() || std::env::var("HACIVAT_DOCKER_SET").ok().as_deref() != Some("full") {
         return;
     }
@@ -411,29 +453,14 @@ async fn pg_probe_on_100k_tables_finishes_within_2s() {
     ensure_pg_fixtures(&t).await;
     const DB: &str = "hv_probe_scale";
     const TABLES: u32 = 100_000;
+    let drop_db = format!("DROP DATABASE IF EXISTS {DB} WITH (FORCE)");
     let mut a = admin(&t).await;
-    if scalar(
-        &mut a,
-        &format!("SELECT count(*) FROM pg_database WHERE datname = '{DB}'"),
-    )
-    .await
-        == "0"
-    {
-        batch(&mut a, &t.id, &format!("CREATE DATABASE {DB}")).await;
-    }
-    a.close().await;
+    batch(&mut a, &t.id, &drop_db).await;
+    batch(&mut a, &t.id, &format!("CREATE DATABASE {DB}")).await;
     let mut scale = connect_profile(&t, profile_as(&t, &t.user, false).database(DB)).await;
-    batch(&mut scale, &t.id, "CREATE SCHEMA IF NOT EXISTS scale").await;
-    let have: u32 = scalar(
-        &mut scale,
-        "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = 'scale' AND c.relkind = 'r'",
-    )
-    .await
-    .parse()
-    .unwrap_or(0);
-    // In chunks: each table takes a lock until its transaction ends.
-    let mut from = have;
+    batch(&mut scale, &t.id, "CREATE SCHEMA scale").await;
+    // In chunks: each table holds a lock until its transaction ends.
+    let mut from = 0;
     while from < TABLES {
         let to = (from + 2_000).min(TABLES);
         batch(
@@ -441,7 +468,7 @@ async fn pg_probe_on_100k_tables_finishes_within_2s() {
             &t.id,
             &format!(
                 "DO $$ BEGIN FOR i IN {from}..{} LOOP \
-                 EXECUTE format('CREATE TABLE IF NOT EXISTS scale.t%s (a int)', i); \
+                 EXECUTE format('CREATE TABLE scale.t%s (a int)', i); \
                  END LOOP; END $$",
                 to - 1
             ),
@@ -455,10 +482,11 @@ async fn pg_probe_on_100k_tables_finishes_within_2s() {
     let started = Instant::now();
     let (label, warnings) = access_for(ro.raw(), DbmsKind::Postgres, true).await;
     let took = started.elapsed();
-    eprintln!("{}: role probe over {TABLES} tables took {took:?}", t.id);
-    assert_eq!(label, AccessLabel::ReadOnlyEnforced, "{warnings:?}");
-    assert!(took.as_secs_f64() < 2.0, "{}: {took:?}", t.id);
     ro.close().await;
+    eprintln!("{}: role probe over {TABLES} tables took {took:?}", t.id);
+    batch(&mut a, &t.id, &drop_db).await;
+    a.close().await;
+    assert_eq!(label, AccessLabel::ReadOnlyEnforced, "{warnings:?}");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -518,14 +546,37 @@ async fn mysql_guarded_session_reads_and_refuses() {
             "{}",
             t.id
         );
-        // T13 carry: an executable comment is statement text.
-        assert_eq!(
-            run(&s, "/*!50000 COMMIT */").await.unwrap_err().kind,
-            ExecErrorKind::ReadOnlyDenied(DenyLayer::Transaction),
-            "{}",
-            t.id
-        );
+        // T13 carry: an executable comment is statement text; a version-gated one is read both
+        // ways (fix round 1, I-1).
+        for sql in ["/*!50000 COMMIT */", "/*!99999 SELECT 1 */ COMMIT"] {
+            assert_eq!(
+                run(&s, sql).await.unwrap_err().kind,
+                ExecErrorKind::ReadOnlyDenied(DenyLayer::Transaction),
+                "{}: {sql}",
+                t.id
+            );
+        }
+        // Fix round 1 (I-2) premise: MySQL commits implicitly before a DDL statement, then the
+        // read-only session refuses it (1792). That is only an error: the session stays usable
+        // and the table does not exist.
+        let mut a = admin(&t).await;
+        batch(&mut a, &t.id, "DROP TABLE IF EXISTS hv_t18_ddl").await;
+        let ddl = run(&s, "CREATE TABLE hv_t18_ddl (a int)")
+            .await
+            .unwrap_err();
+        assert_eq!(ddl.kind, ExecErrorKind::Db, "{}", t.id);
         assert!(run(&s, "SELECT 1").await.is_ok(), "{}", t.id);
+        let exists = scalar(
+            &mut a,
+            &format!(
+                "SELECT count(*) FROM information_schema.tables \
+                 WHERE table_schema = '{}' AND table_name = 'hv_t18_ddl'",
+                t.database
+            ),
+        )
+        .await;
+        assert_eq!(exists, "0", "{}", t.id);
+        a.close().await;
     }
 }
 

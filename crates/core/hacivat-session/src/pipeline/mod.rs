@@ -323,7 +323,7 @@ async fn run(
         profile,
         draft_password,
         purpose,
-        department: _,
+        department,
         prior_rejections,
         read_only,
         // ## m2b-t01-interfaces: Task 14 uses the SSH drafts and the overlay.
@@ -404,6 +404,9 @@ async fn run(
         rejections: prior_rejections,
         read_only,
         access_warnings: Vec::new(),
+        // ## m2b-t18-guarded-exec (review m-2): a cancel or kill connection runs no user SQL
+        // and shows no label, so it skips the role probe.
+        probe_role: department != Department::Cancel,
     };
     let mut cx = StepCx::new(profile.clone(), cancel.clone(), state);
 
