@@ -508,13 +508,31 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
 /* Copyable command (ssh-keygen -R) and SQL snippet: the fingerprint-inset anatomy */
 .cmd { display:flex; align-items:center; gap:8px; }
 .cmd code { flex:1; min-width:0; font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); overflow-wrap:anywhere; }
-.sql { margin:0; font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); white-space:pre; overflow:hidden; }
+/* SQL inset: Task 5's remediation() string as is. One block per line; a long line wraps inside the inset (no clip,
+   no horizontal scroll) and lines are 4px apart, so a wrapped continuation reads as part of its statement. */
+:root, :root[data-theme="dark"] { --syn-cm:#828A96; }
+:root[data-theme="light"] { --syn-cm:#7C7C86; }
+.sql { margin:0; font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); }
+.sql .sl { white-space:pre-wrap; overflow-wrap:anywhere; }
+.sql .sl + .sl { margin-top:4px; }
 .sql .kw { color:var(--syn-kw); }
 .sql .str { color:var(--syn-str); }
 .sql .phd { color:var(--text-2); font-style:italic; }
+.sql .cm { color:var(--syn-cm); font-style:italic; }
+/* Role-probe findings in the popover: the sticky-toast list anatomy (3px square text-2 bullets) */
+.pop .warns { margin:0 0 6px; padding:0; list-style:none; }
+.pop .warns li { display:flex; gap:7px; align-items:flex-start; color:var(--text); font-size:12px; line-height:1.4; }
+.pop .warns li::before { content:""; width:3px; height:3px; background:var(--text-2); flex:none; margin-top:7px; }
+.pop .warns li + li { margin-top:2px; }
+.pop .warns .mono { font-size:11.5px; }
+.pop .nofix { margin:0; }
+.pop:focus { outline:none; }
+.pop:focus-visible { outline:1px solid var(--blue); outline-offset:1px; }
+.cp-ro:focus-visible { outline:1px solid var(--blue); outline-offset:-2px; }
 
 /* Keyboard-interactive: server text in its own field, prompts stacked (labels are server text too) */
 .srv .cap2 { color:var(--text-2); font-size:12px; margin-bottom:4px; }
+.srv { max-height:160px; overflow-y:auto; }      /* a hostile or chatty server can't push the prompts out of the dialog */
 .srvtext { font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); white-space:pre-wrap; overflow-wrap:anywhere; }
 .srvtext + .srvtext { margin-top:4px; color:var(--text-2); }
 .srvtext.none { font-family:"Source Sans 3", system-ui, sans-serif; font-size:12.5px; color:var(--text-2); }
@@ -535,7 +553,8 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
 .hroute .h.fail .mono { color:var(--text); font-weight:600; }
 .hroute .h.fail svg { color:var(--text); }
 .hroute .h.pend .dot { width:7px; height:7px; border:1px solid var(--seam-2); display:block; }
-.hroute > svg { color:var(--text-2); }
+.rs { display:flex; align-items:center; gap:6px; white-space:nowrap; }     /* an arrow travels with the stop after it */
+.rs > svg { color:var(--text-2); flex:none; }
 .hopline { margin-top:8px; font-size:12.5px; color:var(--text); font-weight:600; }
 
 /* Validation lines (vault): green check only when a rule is met; never red */
@@ -951,13 +970,14 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
   "vault-reset-title":"Reset the vault?",
   "vault-reset-body":"This deletes the vault and the {n} passwords saved in it. Your connections stay, and Hacivat asks for each password the next time you connect. This can't be undone.",
   "vault-reset-type":"Type {word} to confirm",
+  "vault-reset-word":"reset",
   "vault-reset-btn":"Reset vault",
   "vault-reset-done":"The vault was reset. Its saved passwords are gone.",
   "vault-damaged-title":"The vault can't be read",
   "vault-damaged-body":"The vault file failed its integrity check, so Hacivat didn't use it and didn't change it. Restore it from a backup, or reset the vault.",
   "vault-damaged-meanwhile":"Until then, passwords you enter are kept until Hacivat restarts.",
-  "vault-ret-forever":"Forever (encrypted file)",
-  "vault-ret-forever-h":"in Hacivat's vault, behind a master password",
+  "ret-forever-vault":"Forever (encrypted file)",
+  "ret-forever-vault-h":"in Hacivat's vault, behind a master password",
   "vault-secret":"vault · forever",
   "pin-changed-title":"The certificate of {host}:{port} changed",
   "pin-changed-body":"This connection is pinned to one certificate, and the server now presents a different one. Hacivat stopped before signing in.",
@@ -967,8 +987,7 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
   "pin-changed-note":"Replacing the pin trusts exactly the new certificate for {host}:{port} and removes the old pin. A pin doesn't extend the expiry date.",
   "pin-changed-replace":"Replace pin",
   "pin-changed-done":"Pinned the new certificate of {host}",
-  "ro-enforced":"read-only (enforced by server role)",
-  "ro-guarded":"read-only (guarded)",
+  "access-ro-enforced":"read-only (enforced by server role)",
   "ro-kv-access":"Access",
   "ro-sheet-enforced":"read-only · enforced",
   "ro-sheet-guarded":"read-only · guarded",
@@ -980,13 +999,27 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
   "ro-pop-g-limit":"That catches mistakes. Only a read-only role on the server is a hard guarantee.",
   "ro-pop-g-fix":"To enforce it, ask your DBA for a role like this, then make it this connection's user:",
   "ro-pop-maria-body":"Hacivat can't yet confirm that a MariaDB role is read-only, so it always guards MariaDB connections itself.",
-  "ro-pop-maria-fix":"A read-only role still makes the server refuse writes. The label stays guarded:",
+  "ro-pop-no-fix":"No role change makes this label enforced, so there is no SQL to copy.",
   "ro-pop-sqlite-body":"SQLite has no server roles. Hacivat opens the file read-only and lets through only statements that read.",
   "ro-copy-sql":"Copy SQL",
   "ro-copied":"Copied the SQL. Replace the values in angle brackets before you run it.",
-  "idle-toast":"Disconnected {name} after {duration} idle. It reconnects when you use it.",
-  "idle-hours":"{n} h",
+  "ro-warn-head":"Found on this role:",
+  "ro-warn-superuser":"It is a superuser.",
+  "ro-warn-bypass-rls":"It bypasses row-level security.",
+  "ro-warn-replication":"It can start replication.",
+  "ro-warn-create-role":"It can create and change roles.",
+  "ro-warn-server-file-roles":"It can read or write files on the database server.",
+  "ro-warn-execute-server-program":"It can run programs on the database server.",
+  "ro-warn-signal-backend":"It can cancel or end other sessions.",
+  "ro-warn-write-privileges":"It can change data in some tables.",
+  "ro-warn-temp-privilege":"It can create temporary tables. Read-only transactions block them, so the label stays enforced.",
+  "ro-warn-egress-extension":"The {name} extension can reach other servers.",
+  "ro-warn-role-grant-not-expanded":"Other roles are granted to it, and Hacivat can't see what they allow.",
+  "ro-warn-unparsed":"Hacivat couldn't read its privileges.",
+  "ro-cmd":"Explain read-only access",
   "idle-cap":"Disconnected (idle)",
+  "idle-disconnected":"Disconnected {name} after {hours} h idle. It reconnects when you use it.",
+  "idle-disconnected-minutes":"Disconnected {name} after {minutes} min idle. It reconnects when you use it.",
   "err-ssh-auth-title":"{host} rejected the SSH sign-in for {user}.",
   "err-ssh-auth-body":"Hacivat tried the keys in ssh-agent and {key}. Check that your public key is in ~/.ssh/authorized_keys on that host, or choose another sign-in method.",
   "err-ssh-hop":"Failed at hop {n} ({host})",
@@ -1060,13 +1093,14 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
   "vault-reset-title":"Kasa sıfırlansın mı?",
   "vault-reset-body":"Bu işlem kasayı ve içindeki {n} kayıtlı parolayı siler. Bağlantılarınız kalır; Hacivat her parolayı bir sonraki bağlanışta sorar. Bu işlem geri alınamaz.",
   "vault-reset-type":"Onaylamak için {word} yazın",
+  "vault-reset-word":"reset",
   "vault-reset-btn":"Kasayı sıfırla",
   "vault-reset-done":"Kasa sıfırlandı. İçindeki kayıtlı parolalar silindi.",
   "vault-damaged-title":"Kasa okunamıyor",
   "vault-damaged-body":"Kasa dosyası bütünlük denetiminden geçemedi; Hacivat dosyayı kullanmadı ve değiştirmedi. Bir yedekten geri yükleyin ya da kasayı sıfırlayın.",
   "vault-damaged-meanwhile":"O zamana kadar girdiğiniz parolalar Hacivat yeniden başlayana kadar tutulur.",
-  "vault-ret-forever":"Kalıcı (şifreli dosya)",
-  "vault-ret-forever-h":"Hacivat'ın kasasında, ana parolayla",
+  "ret-forever-vault":"Kalıcı (şifreli dosya)",
+  "ret-forever-vault-h":"Hacivat'ın kasasında, ana parolayla",
   "vault-secret":"kasa · kalıcı",
   "pin-changed-title":"{host}:{port} sertifikası değişti",
   "pin-changed-body":"Bu bağlantı tek bir sertifikaya sabitlendi; sunucu şimdi farklı bir sertifika sunuyor. Hacivat oturum açmadan önce durdu.",
@@ -1076,8 +1110,7 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
   "pin-changed-note":"Sabitlemeyi değiştirmek, {host}:{port} için yalnızca yeni sertifikaya güvenir ve eski sabitlemeyi kaldırır. Sabitleme geçerlilik süresini uzatmaz.",
   "pin-changed-replace":"Sabitlemeyi değiştir",
   "pin-changed-done":"{host} sunucusunun yeni sertifikası sabitlendi",
-  "ro-enforced":"salt okunur (sunucu rolüyle zorunlu)",
-  "ro-guarded":"salt okunur (korumalı)",
+  "access-ro-enforced":"salt okunur (sunucu rolüyle zorunlu)",
   "ro-kv-access":"Erişim",
   "ro-sheet-enforced":"salt okunur · zorunlu",
   "ro-sheet-guarded":"salt okunur · korumalı",
@@ -1089,13 +1122,27 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
   "ro-pop-g-limit":"Bu, hataları yakalar. Kesin güvence ancak sunucudaki salt okunur bir rolle sağlanır.",
   "ro-pop-g-fix":"Zorunlu hale getirmek için veritabanı yöneticinizden böyle bir rol isteyin ve onu bu bağlantının kullanıcısı yapın:",
   "ro-pop-maria-body":"Hacivat bir MariaDB rolünün salt okunur olduğunu henüz doğrulayamıyor; bu yüzden MariaDB bağlantılarını her zaman kendisi korur.",
-  "ro-pop-maria-fix":"Salt okunur bir rol yine de sunucunun yazmaları reddetmesini sağlar. Etiket korumalı kalır:",
+  "ro-pop-no-fix":"Hiçbir rol değişikliği bu etiketi zorunlu yapmaz; bu yüzden kopyalanacak SQL yok.",
   "ro-pop-sqlite-body":"SQLite'ta sunucu rolü yoktur. Hacivat dosyayı salt okunur açar ve yalnızca okuyan ifadelere izin verir.",
   "ro-copy-sql":"SQL'i kopyala",
   "ro-copied":"SQL kopyalandı. Çalıştırmadan önce köşeli parantez içindeki değerleri değiştirin.",
-  "idle-toast":"{name} bağlantısı {duration} boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.",
-  "idle-hours":"{n} sa",
+  "ro-warn-head":"Bu rolde bulunanlar:",
+  "ro-warn-superuser":"Süper kullanıcı.",
+  "ro-warn-bypass-rls":"Satır düzeyi güvenliği atlıyor.",
+  "ro-warn-replication":"Çoğaltma başlatabilir.",
+  "ro-warn-create-role":"Rol oluşturup değiştirebilir.",
+  "ro-warn-server-file-roles":"Veritabanı sunucusundaki dosyaları okuyabilir ya da yazabilir.",
+  "ro-warn-execute-server-program":"Veritabanı sunucusunda program çalıştırabilir.",
+  "ro-warn-signal-backend":"Başka oturumları iptal edebilir ya da sonlandırabilir.",
+  "ro-warn-write-privileges":"Bazı tablolardaki verileri değiştirebilir.",
+  "ro-warn-temp-privilege":"Geçici tablo oluşturabilir. Salt okunur işlemler bunu engeller; etiket zorunlu kalır.",
+  "ro-warn-egress-extension":"{name} eklentisi başka sunuculara erişebilir.",
+  "ro-warn-role-grant-not-expanded":"Ona başka roller verilmiş; Hacivat bunların neye izin verdiğini göremiyor.",
+  "ro-warn-unparsed":"Hacivat yetkilerini okuyamadı.",
+  "ro-cmd":"Salt okunur erişimi açıkla",
   "idle-cap":"Bağlantı kesik (boşta)",
+  "idle-disconnected":"{name} bağlantısı {hours} sa boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.",
+  "idle-disconnected-minutes":"{name} bağlantısı {minutes} dk boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.",
   "err-ssh-auth-title":"{host}, {user} için SSH oturumunu reddetti.",
   "err-ssh-auth-body":"Hacivat ssh-agent'taki anahtarları ve {key} dosyasını denedi. Açık anahtarınızın o sunucudaki ~/.ssh/authorized_keys dosyasında olduğunu denetleyin ya da başka bir oturum açma yöntemi seçin.",
   "err-ssh-hop":"{n}. atlamada başarısız ({host})",
@@ -1121,8 +1168,8 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
 /* ═════════════ i18n + helpers (M2a, unchanged) ═════════════ */
 const A = JSON.parse(document.getElementById("i18n-m2a").textContent);
 const B = JSON.parse(document.getElementById("i18n").textContent);
-// Already shipped in the locales (hv-conn-enc-unverified), so it is in neither mock's copy table.
-const SHIPPED = { en: { "enc-unverified":"TLS 1.3 · not verified" }, tr: { "enc-unverified":"TLS 1.3 · doğrulanmadı" } };
+// Already shipped in the locales (hv-conn-enc-unverified, hv-conn-access-ro-guarded), so they are in neither mock's copy table.
+const SHIPPED = { en: { "enc-unverified":"TLS 1.3 · not verified", "access-ro-guarded":"read-only (guarded)" }, tr: { "enc-unverified":"TLS 1.3 · doğrulanmadı", "access-ro-guarded":"salt okunur (korumalı)" } };
 const I18N = { en: { ...A.en, ...SHIPPED.en, ...B.en }, tr: { ...A.tr, ...SHIPPED.tr, ...B.tr } };
 let LANG = "en";
 const t = (k, v) => { let s = I18N[LANG][k] ?? I18N.en[k] ?? k; if (v) s = s.replace(/\{(\w+)\}/g, (m, n) => v[n] ?? m); return s; };
@@ -1148,17 +1195,18 @@ const ENG = {
   sqlite: { label: "SQLite",     short: "sqlite" },
 };
 const ENV_ORDER = ["production", "staging", "test", "dev", "local"];
-/* ro: "enforced" (role probe found a least-privilege role) | "guarded" | false (B21) */
+/* ro: "enforced" (role probe found a least-privilege role) | "guarded" | false (B21).
+   warn: the probe's RoleWarning list (Task 5 interpret_probe), as ro-warn-* ids; egress carries the extension name. */
 const SSH_PROD = { host:"bastion.acme.io", port:22, user:"deploy", auth:"agent", key:"~/.ssh/id_ed25519", hops:[{ host:"jump-eu.acme.io", user:"deploy" }] };
 const SEED = [
   { id:"orders-prod", engine:"pg", ver:"16.4", env:"production", ro:"enforced", host:"db-prod-eu.acme.io", port:5432, db:"orders", user:"app_ro", ret:"forever", tls:"verified", ssh:SSH_PROD, lat:31 },
   { id:"billing-prod", engine:"mysql", ver:"8.4.3", env:"production", ro:"enforced", host:"billing-db.acme.io", port:3306, db:"billing", user:"reader", ret:"never", tls:"verified", lat:22 },
   { id:"orders-staging", engine:"pg", ver:"16.4", env:"staging", ro:false, host:"db-stg.acme.io", port:5432, db:"orders", user:"deploy", ret:"pgpass", tls:"verified", lat:4 },
-  { id:"reports-test", engine:"pg", ver:"16.4", env:"test", ro:"guarded", host:"db-qa.acme.io", port:5432, db:"reports", user:"qa", ret:"session", tls:"pinned", lat:9 },
+  { id:"reports-test", engine:"pg", ver:"16.4", env:"test", ro:"guarded", warn:["superuser", "write-privileges"], host:"db-qa.acme.io", port:5432, db:"reports", user:"qa", ret:"session", tls:"pinned", lat:9 },
   { id:"hr-legacy", engine:"pg", ver:"15.8", env:"test", ro:false, host:"hr-db.acme.io", port:5432, db:"hr", user:"hr_app", ret:"forever", tls:"unverified", lat:11 },
   { id:"ci-mariadb", engine:"maria", ver:"11.4.4", env:"test", ro:"guarded", host:"10.0.4.21", port:3306, db:"ci", user:"ci", ret:"forever", tls:"none", lat:2 },
   { id:"orders-dev", engine:"pg", ver:"17.2", env:"dev", ro:false, host:"db-dev.acme.io", port:5432, db:"orders", user:"dev", ret:"forever", tls:"verified", lat:6 },
-  { id:"api-dev", engine:"mysql", ver:"8.0.40", env:"dev", ro:"guarded", host:"dev-db.acme.internal", port:3306, db:"api", user:"dev", ret:"restart", tls:"verified", lat:6 },
+  { id:"api-dev", engine:"mysql", ver:"8.0.40", env:"dev", ro:"guarded", warn:["role-grant-not-expanded"], host:"dev-db.acme.internal", port:3306, db:"api", user:"dev", ret:"restart", tls:"verified", lat:6 },
   { id:"metrics-dev", engine:"pg", ver:"16.4", env:"dev", ro:false, host:"10.0.7.12", port:5432, db:"metrics", user:"grafana", ret:"forever", tls:"none", lat:3 },
   { id:"local-pg", engine:"pg", ver:"17.2", env:"local", ro:false, host:"localhost", port:5432, db:"shop", user:"postgres", ret:"none", tls:"none", lat:1 },
   { id:"app.db", engine:"sqlite", ver:"3.47.2", env:"local", ro:"guarded", path:"~/code/shop/app.db", lat:0 },
@@ -1175,13 +1223,21 @@ const KH = { hacivatOld:"SHA256:pX0fV2qk7mJ3bWcLr9TzE1uYhN4sGd8aKoQ6iRvM5yA", no
 const FP_PINNED = "3F:9A:C2:7E:15:B0:4D:88:E1:2C:6F:93:0A:D7:5B:31:C4:68:9E:F2:07:BA:43:1D:8C:E5:72:39:A6:0F:D4:71";   /* the pin M2a surface 5 created */
 const FP_NOW    = "A1:07:5E:D2:9C:41:F8:3B:66:0D:E4:92:17:C5:7A:28:B3:5F:0E:89:D6:24:71:CA:3E:95:12:6B:F0:4C:87:DD";
 const fp2 = fp => { const p = fp.split(":"); return p.slice(0, 16).join(":") + "<br>" + p.slice(16).join(":"); };
-/* ssh-keygen -R needs the bracket form only off port 22: OpenSSH writes "host" for 22 and "[host]:port" otherwise */
+/* ssh-keygen -R needs the bracket form only off port 22: OpenSSH writes "host" for 22 and "[host]:port" otherwise.
+   It edits ~/.ssh/known_hosts unless told otherwise, so any other file (known_hosts2) needs -f. */
+const KH_DEFAULT = "~/.ssh/known_hosts";
 const khName = (host, port) => +port === 22 ? host : `"[${host}]:${port}"`;
+const khCmd = (host, port, file = KH_DEFAULT) => `ssh-keygen ${file !== KH_DEFAULT ? `-f ${file} ` : ""}-R ${khName(host, port)}`;
+/* Server text is shown verbatim but made visible, like OpenSSH's strnvis: C0/C1 controls (ANSI escapes included) become
+   \ooo octal, and bidi controls become \u{…}, so a server can't draw colour, move the cursor or reorder text. \n is kept. */
+const vis = s => String(s).replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, c => "\\" + c.charCodeAt(0).toString(8).padStart(3, "0"))
+  .replace(/[؜‎‏‪-‮⁦-⁩]/g, c => "\\u{" + c.charCodeAt(0).toString(16).toUpperCase() + "}");
 /* Keyboard-interactive rounds as a server sends them: name, instruction, prompts[{ text, echo }] (RFC 4256). Server text, verbatim. */
 const KBD = {
   otp:   { name:"Duo two-factor login", instruction:"Enter a passcode from Duo Mobile,\nor type \"push\" to get a notification on your phone.", prompts:[{ text:"Passcode or option (1-1): ", echo:true }] },
   three: { name:"ACME bastion sign-in", instruction:"All access to this host is logged.", prompts:[{ text:"Password: ", echo:false }, { text:"Verification code: ", echo:true }, { text:"Ticket or reason for access (logged): ", echo:true }] },
   blank: { name:"", instruction:"", prompts:[{ text:"Password: ", echo:false }] },
+  hostile: { name:"\u001b[1;32mHacivat: identity verified\u001b[0m", instruction:"Paste the code from ‮exe.edoc‬ below.\n" + "Line\n".repeat(14) + "(the server sent 16 lines)", prompts:[{ text:"Code:\u001b[8m ", echo:true }] },
 };
 
 /* ═════════════ State ═════════════ */
@@ -1196,7 +1252,7 @@ const clearTimers = () => { TIMERS.forEach(clearTimeout); TIMERS = []; clearInte
 const topLayer = () => S.layers[S.layers.length - 1];
 
 /* ═════════════ Workspace rendering (M2a anatomy) ═════════════ */
-const roLabel = c => t(c.ro === "enforced" ? "ro-enforced" : "ro-guarded");
+const roLabel = c => t(c.ro === "enforced" ? "access-ro-enforced" : "access-ro-guarded");
 function capsuleHTML() {
   const c = S.cap, k = c.conn && conn(c.conn);
   if (!k || c.state === "none")
@@ -1214,7 +1270,8 @@ function capsuleHTML() {
     return `<button class="capsule" data-act="capClick" data-fk="cap">${envSeg}${name}<span class="cp-fail">${ic("triangle-alert","i12")}<span>${esc(t("cap-failed"))}</span></span><span class="cp-retry">${ic("rotate-cw","i12")}<span>${esc(t("cap-retry"))}</span></span>${chev}</button>`;
   if (c.state === "idle")
     return `<button class="capsule" data-act="capClick" data-fk="cap">${envSeg}${name}<span class="cp-idle">${ic("unplug","i12")}<span>${esc(t("idle-cap"))}</span></span>${chev}</button>`;
-  const acc = k.ro ? `<span class="cp-ro${k.env === "production" ? " prod" : ""}" data-act="roPop" data-anchor="roSeg" id="roSeg">${ic("lock","i12")}<span>${esc(roLabel(k))}</span></span>`
+  /* The access segment is its own Tab stop: Enter or Space opens the explanation popover (I5) */
+  const acc = k.ro ? `<span class="cp-ro${k.env === "production" ? " prod" : ""}" data-act="roPop" id="roSeg" tabindex="0" role="button" aria-haspopup="dialog" title="${esc(t("ro-cmd"))}" aria-expanded="${!!(S.pop && S.pop.anchor === "roSeg")}">${ic("lock","i12")}<span>${esc(roLabel(k))}</span></span>`
     : (k.engine === "sqlite" ? "" : `<span class="cp-rw"><span>${esc(t("acc-rw"))}</span></span>`);
   const path = k.engine === "sqlite" ? `<span class="cp-path">${ic("hard-drive","i12 ssh")}<span class="mono">${esc(k.path)}</span></span>`
     : k.ssh ? `<span class="cp-path">${ic("route","i12 ssh")}<span>${esc(t("path-ssh", { host: k.ssh.host.split(".")[0] }))}</span><span class="mono">${ms(k.lat)}</span></span>`
@@ -1271,7 +1328,7 @@ function renderSheet() {
   if (!c) { $("sheet").innerHTML = `<div class="ph"><span class="meta">${esc(t("sheet-meta"))}</span></div>`; return; }
   const path = c.engine === "sqlite" ? `<span class="d">—</span>` : c.ssh ? `${ic("route","i12")}<span>${esc(t("path-ssh", { host: c.ssh.host }))}</span>` : `${ic("arrow-left-right","i12 g")}<span>${esc(t("path-direct"))}</span>`;
   const access = c.ro
-    ? `<button class="kvbtn" data-act="roPop" id="roKv" aria-haspopup="dialog" title="${esc(t("ro-why"))}" tabindex="-1">${ic("lock","i12 lk" + (c.env === "production" ? " prod" : ""))}<span>${esc(t(c.ro === "enforced" ? "ro-sheet-enforced" : "ro-sheet-guarded"))}</span></button>`
+    ? `<button class="kvbtn" data-act="roPop" id="roKv" aria-haspopup="dialog" aria-expanded="${!!(S.pop && S.pop.anchor === "roKv")}" title="${esc(t("ro-why"))}">${ic("lock","i12 lk" + (c.env === "production" ? " prod" : ""))}<span>${esc(t(c.ro === "enforced" ? "ro-sheet-enforced" : "ro-sheet-guarded"))}</span></button>`
     : `<span class="d">${esc(t("acc-rw"))}</span>`;
   $("sheet").innerHTML = `<div class="ph"><span class="id mono">${esc(c.id)}</span><span class="grow"></span><span class="meta">${esc(t("sheet-meta"))}</span><kbd>⌘I</kbd></div>
   <dl class="sheet">
@@ -1330,8 +1387,10 @@ const eyeTail = (fk, shown) => `<button type="button" class="btn ghost icon" dat
 const secretIn = (L, fk, label) => input(fk, L.v[fk] || "", { type: L.shown[fk] ? "text" : "password", label, tail: eyeTail(fk, L.shown[fk]) });
 const frow = (label, cell) => `<div class="frow"><span class="flab">${esc(label)}</span><div class="fcell">${cell}</div></div>`;
 const RET = ["never", "restart", "session", "forever"];
-const retLabel = v => v === "forever" && S.platform === "linux" ? t("vault-ret-forever") : t("ret-" + v);
-const retHint = v => v === "forever" && S.platform === "linux" ? t("vault-ret-forever-h") : t("ret-" + v + "-h");
+const retLabel = v => v === "forever" && S.platform === "linux" ? t("ret-forever-vault") : t("ret-" + v);
+const retHint = v => v === "forever" && S.platform === "linux" ? t("ret-forever-vault-h") : t("ret-" + v + "-h");
+/* Arrows bind to the stop that follows them, so a wrapped route never ends a line on an arrow (M6) */
+const joinRoute = parts => parts.map((p, i) => i ? `<span class="rs">${ic("arrow-right","i12")}${p}</span>` : p).join("");
 const selectBtn = (fk, label, w) => `<button type="button" class="select" data-act="select" data-fk="${fk}" aria-haspopup="listbox" style="width:${w}px"><span class="v">${esc(label)}</span>${ic("chevrons-up-down","i12")}</button>`;
 function fpInset(label, alg, fpHTML, extra = "", fk = "") {
   return `<div class="inset"><div class="fphead"><span>${esc(label)}</span>${alg ? `<span class="alg">${esc(alg)}</span>` : ""}<span class="grow"></span><button class="btn ghost icon" data-act="copyFp" data-fk="cp-${fk}" title="${esc(t("tls-copy-fp"))}">${ic("copy","i12")}</button></div><div class="fp">${fpHTML}</div>${extra}</div>`;
@@ -1349,21 +1408,21 @@ function hopRouteHTML(c, failHop) {
   const r = route(c), parts = [`<span class="h">${esc(t("ssh-this-mac"))}</span>`];
   r.forEach((h, i) => parts.push(`<span class="h ${i < failHop ? "done" : i === failHop ? "fail" : "pend"}">${i < failHop ? ic("check","i12") : i === failHop ? ic("x","i12") : `<i class="dot"></i>`}<span class="mono">${esc(h)}</span></span>`));
   parts.push(`<span class="h pend"><i class="dot"></i><span class="mono">${esc(c.host)}:${esc(c.port)}</span></span>`);
-  return `<div class="hroute">${parts.join(ic("arrow-right","i12"))}</div>`;
+  return `<div class="hroute">${joinRoute(parts)}</div>`;
 }
 
 /* ═════════════ Surface 1 · Host key changed ═════════════ */
 function hkChangedHTML(L) {
-  const c = conn(L.conn), host = c.ssh.host, port = L.port || 22;
-  const src = L.source === "hacivat" ? esc(t("hk-changed-src-hacivat")) : th("hk-changed-src-openssh", { file: mono("~/.ssh/known_hosts"), n: nf(14) });
+  const c = conn(L.conn), host = c.ssh.host, port = L.port || 22, file = L.file || KH_DEFAULT;
+  const src = L.source === "hacivat" ? esc(t("hk-changed-src-hacivat")) : th("hk-changed-src-openssh", { file: mono(file), n: nf(L.line || 14) });
   const body = `<p>${esc(t("hk-changed-body"))}</p>
     <div class="fpstack">
       ${fpInset(t("hk-changed-old"), "ED25519", esc(KH.hacivatOld), `<div class="src"><span>${esc(t("hk-changed-stored-in"))}</span><span${L.source === "hacivat" ? ` style="color:var(--text)"` : ""}>${src}</span></div>`, "old")}
       ${fpInset(t("hk-changed-new"), "ED25519", esc(KH.now), "", "new")}
     </div>
     <p class="small">${esc(t("hk-changed-ask", { host }))}</p>
-    ${L.source === "openssh" ? `<p class="small" style="margin-bottom:6px">${th("hk-changed-openssh-note", { file: mono("~/.ssh/known_hosts") })}</p>
-      <div class="inset cmd" style="margin-bottom:10px"><code>ssh-keygen -R ${esc(khName(host, port))}</code><button class="btn ghost" data-act="copyCmd" data-fk="copycmd">${ic(L.copied ? "copy-check" : "copy","i12")}<span>${esc(t("hk-changed-copy"))}</span></button></div>` : ""}`;
+    ${L.source === "openssh" ? `<p class="small" style="margin-bottom:6px">${th("hk-changed-openssh-note", { file: mono(file) })}</p>
+      <div class="inset cmd" style="margin-bottom:10px"><code>${esc(khCmd(host, port, file))}</code><button class="btn ghost" data-act="copyCmd" data-fk="copycmd">${ic(L.copied ? "copy-check" : "copy","i12")}<span>${esc(t("hk-changed-copy"))}</span></button></div>` : ""}`;
   const foot = L.source === "hacivat"
     ? `<button class="btn" data-act="hkReplace" data-fk="hkreplace">${ic("key-round","i12")}<span>${esc(t("hk-changed-replace"))}</span></button><span class="grow"></span><button class="btn primary" data-act="cancelPrompt" data-fk="hkcancel">${esc(t("dlg-cancel"))}<span class="k">esc</span></button>`
     : `<span class="grow"></span><button class="btn" data-act="hkRetry" data-fk="hkretry">${ic("rotate-cw","i12")}<span>${esc(t("fix-retry"))}</span></button><button class="btn primary" data-act="cancelPrompt" data-fk="hkcancel">${esc(t("dlg-cancel"))}<span class="k">esc</span></button>`;
@@ -1381,11 +1440,11 @@ function hostkeyHTML(L) {
 function kbdHTML(L) {
   const c = conn(L.conn), host = c.ssh.host, R = KBD[L.round];
   const server = R.name || R.instruction
-    ? `${R.name ? `<div class="srvtext">${esc(R.name)}</div>` : ""}${R.instruction ? `<div class="srvtext">${esc(R.instruction)}</div>` : ""}`
+    ? `${R.name ? `<div class="srvtext">${esc(vis(R.name))}</div>` : ""}${R.instruction ? `<div class="srvtext">${esc(vis(R.instruction))}</div>` : ""}`
     : `<div class="srvtext none">${esc(t("kbd-no-text"))}</div>`;
   const prompts = R.prompts.map((p, i) => {
     const fk = "kp" + i;
-    return `<div class="kp"><span class="kl">${esc(p.text)}</span>${p.echo ? input(fk, L.v[fk] || "", { label: p.text }) : secretIn(L, fk, p.text)}</div>`;
+    return `<div class="kp"><span class="kl">${esc(vis(p.text))}</span>${p.echo ? input(fk, L.v[fk] || "", { label: p.text }) : secretIn(L, fk, p.text)}</div>`;
   }).join("");
   const body = `<p class="lead">${esc(t("kbd-asks", { host }))}</p>
     <div class="inset srv">${R.name || R.instruction ? `<div class="cap2">${esc(t("kbd-from-server"))}</div>` : ""}${server}</div>
@@ -1401,7 +1460,7 @@ function sshSecretHTML(L) {
   const c = conn(L.conn), host = L.hop, r = route(c), user = L.kind === "password" ? (c.ssh.hops.find(h => h.host === host)?.user || c.ssh.user) : c.ssh.user;
   const stops = [`<span class="dim">${esc(t("ssh-this-mac"))}</span>`, ...r.map(h => `<span class="mono ${h === host ? "cur" : "dim"}">${esc(h)}</span>`), `<span class="mono dim">${esc(c.host)}:${esc(c.port)}</span>`];
   let b = `<p>${esc(t(L.kind === "password" ? "sshsec-pw-body" : "sshsec-pass-body", { user: `${user}@${host}` }))}</p>`;
-  b += frow(t("ssh-route"), `<div class="route">${stops.join(ic("arrow-right","i12"))}</div>`);
+  b += frow(t("ssh-route"), `<div class="route">${joinRoute(stops)}</div>`);
   if (L.kind === "password") {
     b += frow(t("ssh-user"), `<span class="static">${esc(user)}</span>`);
     b += frow(t("dlg-password"), secretIn(L, "sec", t("dlg-password")));
@@ -1410,8 +1469,9 @@ function sshSecretHTML(L) {
     b += frow(t("sshsec-pubkey"), `<span class="static">ED25519 SHA256:Zk3hQm8VtR1yLc5Nw0aPe7XuJ2sBd9GfH4oKi6TxWqY</span>`);
     b += frow(t("ssh-passphrase"), secretIn(L, "sec", t("ssh-passphrase")));
   }
+  /* The refusal sits right under the field it is about (M4), as in vault Unlock */
+  if (L.attempt > 1) b += `<div class="frow" style="margin-top:6px"><span></span><div class="metaline" style="margin:0"><span class="lft">${ic("circle-alert","i12")}<span>${esc(t("sshsec-wrong", { host }))}</span></span><span>${esc(t("sshsec-attempt", { n: nf(L.attempt) }))}</span></div></div>`;
   b += frow(t("dlg-remember"), selectBtn("sel-ret", retLabel(L.ret), 240));
-  if (L.attempt > 1) b += `<div class="frow" style="margin-top:8px"><span></span><div class="metaline" style="margin:0"><span class="lft">${ic("circle-alert","i12")}<span>${esc(t("sshsec-wrong", { host }))}</span></span><span>${esc(t("sshsec-attempt", { n: nf(L.attempt) }))}</span></div></div>`;
   const title = L.kind === "password" ? t("sshsec-pw-title", { host }) : t("sshsec-pass-title", { key: c.ssh.key });
   return dlgShell("w480", title, b,
     `<span class="grow"></span><button class="btn ghost" data-act="cancelPrompt" data-fk="scancel">${esc(t("dlg-cancel"))}</button><button class="btn primary" data-act="secretGo" data-fk="sgo">${esc(t("sshsec-continue"))}<span class="k">↵</span></button>`,
@@ -1445,10 +1505,10 @@ function vaultUnlockHTML(L) {
     { sub: subOf(c) });
 }
 function vaultResetHTML(L) {
-  const ok = (L.v.word || "") === "reset";
+  const word = t("vault-reset-word"), ok = (L.v.word || "") === word;   /* hv-conn-vault-reset-word: "reset" in EN and TR, deliberately */
   const b = `<p>${esc(t("vault-reset-body", { n: nf(6) }))}</p>
-    <span class="flab" style="display:block;margin:0 0 5px">${th("vault-reset-type", { word: `<span class="mono" style="color:var(--text)">reset</span>` })}</span>
-    ${input("word", L.v.word || "", { mono:true, label: t("vault-reset-type", { word:"reset" }) })}`;
+    <span class="flab" style="display:block;margin:0 0 5px">${th("vault-reset-type", { word: `<span class="mono" style="color:var(--text)">${esc(word)}</span>` })}</span>
+    ${input("word", L.v.word || "", { mono:true, label: t("vault-reset-type", { word }) })}`;
   return dlgShell("w420", t("vault-reset-title"), b,
     `<span class="grow"></span><button class="btn ghost" data-act="closeLayer" data-fk="vr0">${esc(t("dlg-cancel"))}</button><button class="btn danger" data-act="vaultReset" data-fk="vr1" ${ok ? "" : "disabled"}>${ic("trash-2","i12")}<span>${esc(t("vault-reset-btn"))}</span></button>`, { alert:true });
 }
@@ -1476,9 +1536,10 @@ function pinChangedHTML(L) {
 /* ═════════════ Surface 7 · Error copy in the M2a error-dialog anatomy ═════════════ */
 const SSH_STEPS = ["ssh", "tcp", "tls", "auth", "check"];   /* B11: Resolve drops out under SSH, SSH comes first */
 const DIRECT_STEPS = ["resolve", "tcp", "tls", "auth", "check"];
+const PLAIN_STEPS = ["resolve", "tcp", "auth", "check"];     /* no TLS step when the server offers none (M2a stepsFor) */
 const ERRS = {
   insecure: { conn:"hr-legacy", cls:"auth.insecure_method", title:"err-auth-insecure-method-title", body:"err-auth-insecure-method-body-tls", steps:DIRECT_STEPS, failAt:3, code:"AuthenticationMD5Password", server:null, elapsed:0.087, fixes:[["fixCert","fix-review-cert","fingerprint",1], ["fixEdit","fix-edit"]] },
-  plain:    { conn:"metrics-dev", cls:"auth.insecure_method", title:"err-auth-insecure-method-title", body:"err-auth-insecure-method-body-plain", steps:DIRECT_STEPS, failAt:3, code:"AuthenticationCleartextPassword", server:null, elapsed:0.009, fixes:[["fixEdit","fix-edit",null,1]] },
+  plain:    { conn:"metrics-dev", cls:"auth.insecure_method", title:"err-auth-insecure-method-title", body:"err-auth-insecure-method-body-plain", steps:PLAIN_STEPS, failAt:2, code:"AuthenticationCleartextPassword", server:null, elapsed:0.009, fixes:[["fixEdit","fix-edit",null,1]] },
   sshauth:  { conn:"orders-prod", cls:"ssh.auth", title:"err-ssh-auth-title", body:"err-ssh-auth-body", steps:SSH_STEPS, failAt:0, hop:1, code:"SSH_MSG_USERAUTH_FAILURE", server:"publickey,keyboard-interactive", elapsed:0.412, fixes:[["fixEdit","fix-edit",null,1], ["fixRetry","fix-retry","rotate-cw"]] },
   channel:  { conn:"orders-prod", cls:"ssh.channel_open", title:"err-ssh-channel-open-title", body:"err-ssh-channel-open-body", steps:SSH_STEPS, failAt:0, hop:1, code:"SSH_OPEN_ADMINISTRATIVELY_PROHIBITED (1)", server:"open failed", elapsed:0.388, fixes:[["fixRetry","fix-retry","rotate-cw",1], ["fixEdit","fix-edit"]] },
   agent:    { conn:"orders-prod", cls:"ssh.agent_unavailable", title:"err-ssh-agent-unavailable-title", body:"err-ssh-agent-unavailable-body", steps:SSH_STEPS, failAt:0, hop:0, code:"SSH_AUTH_SOCK", server:null, elapsed:0.002, fixes:[["fixRetry","fix-retry","rotate-cw",1], ["fixEdit","fix-edit"]] },
@@ -1521,23 +1582,36 @@ function menuHTML() {
   return `<div class="menu" id="menu" role="menu" tabindex="-1" style="left:${M.x}px;top:${M.y}px;${M.w ? `min-width:${M.w}px` : ""}">` + M.items.map((it, i) =>
     `<div class="mi${i === M.active ? " on" : ""}" role="menuitemradio" aria-checked="${!!it.checked}" data-mi="${i}"><span class="ck">${it.checked ? ic("check","i12") : ""}</span><span class="lab">${esc(it.label)}</span>${it.hint ? `<span class="h">${esc(it.hint)}</span>` : ""}</div>`).join("") + `</div>`;
 }
-const SQL = {
-  pg: `<span class="kw">CREATE ROLE</span> <span class="phd">&lt;role&gt;</span> <span class="kw">LOGIN</span>\n  <span class="kw">PASSWORD</span> <span class="str">'<span class="phd">&lt;password&gt;</span>'</span>;\n<span class="kw">GRANT</span> pg_read_all_data <span class="kw">TO</span> <span class="phd">&lt;role&gt;</span>;\n<span class="kw">REVOKE TEMP ON DATABASE</span> <span class="phd">&lt;database&gt;</span>\n  <span class="kw">FROM</span> PUBLIC;`,
-  my: `<span class="kw">CREATE USER</span> <span class="str">'<span class="phd">&lt;role&gt;</span>'</span>@<span class="str">'%'</span>\n  <span class="kw">IDENTIFIED BY</span> <span class="str">'<span class="phd">&lt;password&gt;</span>'</span>;\n<span class="kw">GRANT SELECT</span>, <span class="kw">SHOW VIEW</span>\n  <span class="kw">ON</span> <span class="phd">&lt;database&gt;</span>.* <span class="kw">TO</span> <span class="str">'<span class="phd">&lt;role&gt;</span>'</span>@<span class="str">'%'</span>;`,
+/* Exactly what plan Task 5's remediation() returns (Q21: TEMP is an optional comment; MariaDB and SQLite: None).
+   The UI shows and copies this string unchanged; the inset wraps long lines instead of pre-breaking them. */
+const REMEDIATION = {
+  pg: "CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT pg_read_all_data TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;",
+  mysql: "CREATE USER '<role>'@'%' IDENTIFIED BY '<password>';\nGRANT SELECT, SHOW VIEW ON <database>.* TO '<role>'@'%';",
 };
+const SQL_KW = /\b(CREATE|ROLE|USER|LOGIN|PASSWORD|IDENTIFIED|BY|GRANT|SELECT|SHOW|VIEW|ON|TO)\b/g;
+const sqlLine = line => {
+  if (line.startsWith("--")) return `<div class="sl cm">${esc(line)}</div>`;
+  const ph = s => s.replace(/&lt;(\w+)&gt;/g, `<span class="phd">&lt;$1&gt;</span>`);
+  const parts = line.split(/('[^']*')/).map((p, i) => i % 2 ? `<span class="str">${ph(esc(p))}</span>` : ph(esc(p).replace(SQL_KW, `<span class="kw">$1</span>`)));
+  return `<div class="sl">${parts.join("")}</div>`;
+};
+const sqlHTML = s => s.split("\n").map(sqlLine).join("");
+/* RoleWarning → ro-warn-* (Task 22's hv-conn-ro-warn-*). Egress names come from the probe's fixed list (dblink, postgres_fdw, pg_net, http). */
+const warnHTML = list => !list?.length ? "" : `<p class="anchor-note">${esc(t("ro-warn-head"))}</p><ul class="warns">${list.map(w => typeof w === "string"
+  ? `<li>${esc(t("ro-warn-" + w))}</li>` : `<li><span>${th("ro-warn-" + w.id, { name: mono(w.name) })}</span></li>`).join("")}</ul>`;
 function roPopHTML(k) {
-  const sqlBlock = kind => `<div class="inset"><pre class="sql">${SQL[kind]}</pre></div><div class="pacts"><button class="btn" data-act="copySql" data-fk="copysql">${ic("copy","i12")}<span>${esc(t("ro-copy-sql"))}</span></button></div>`;
+  const sqlBlock = kind => `<div class="inset"><div class="sql">${sqlHTML(REMEDIATION[kind])}</div></div><div class="pacts"><button class="btn" data-act="copySql" data-fk="ro-copy-snippet" data-kind="${kind}">${ic("copy","i12")}<span>${esc(t("ro-copy-sql"))}</span></button></div>`;
   const lockCls = k.env === "production" ? ` style="color:var(--red)"` : "";
   if (k.ro === "enforced")
-    return `<b><span${lockCls}>${ic("lock","i12")}</span>${esc(t("ro-pop-enf-title"))}</b><p style="margin:0">${esc(t("ro-pop-enf-body", { user: k.user }))}</p>`;
-  const title = `<b><span${lockCls}>${ic("lock","i12")}</span>${esc(t("ro-pop-g-title"))}</b>`;
+    return `<b id="popTitle"><span${lockCls}>${ic("lock","i12")}</span>${esc(t("ro-pop-enf-title"))}</b><p${k.warn?.length ? "" : ` style="margin:0"`}>${esc(t("ro-pop-enf-body", { user: k.user }))}</p>${warnHTML(k.warn)}`;
+  const title = `<b id="popTitle"><span${lockCls}>${ic("lock","i12")}</span>${esc(t("ro-pop-g-title"))}</b>`;
   if (k.engine === "sqlite") return title + `<p style="margin:0">${esc(t("ro-pop-sqlite-body"))}</p>`;
-  if (k.engine === "maria") return title + `<p>${esc(t("ro-pop-maria-body"))}</p><p class="anchor-note">${esc(t("ro-pop-maria-fix"))}</p>${sqlBlock("my")}`;
-  return title + `<p>${esc(t("ro-pop-g-body", { user: k.user }))}</p><p>${esc(t("ro-pop-g-limit"))}</p><p class="anchor-note">${esc(t("ro-pop-g-fix"))}</p>${sqlBlock(k.engine === "pg" ? "pg" : "my")}`;
+  if (k.engine === "maria") return title + `<p>${esc(t("ro-pop-maria-body"))}</p>${warnHTML(k.warn)}<p class="nofix">${esc(t("ro-pop-no-fix"))}</p>`;
+  return title + `<p>${esc(t("ro-pop-g-body", { user: k.user }))}</p>${warnHTML(k.warn)}<p>${esc(t("ro-pop-g-limit"))}</p><p class="anchor-note">${esc(t("ro-pop-g-fix"))}</p>${sqlBlock(k.engine === "pg" ? "pg" : "mysql")}`;
 }
 function renderMenus() {
   let h = menuHTML();
-  if (S.pop) { const k = conn(S.pop.conn); if (k) h += `<div class="pop" id="pop" role="dialog" aria-label="${esc(roLabel(k))}" style="left:0;top:0;visibility:hidden">${roPopHTML(k)}</div>`; }
+  if (S.pop) { const k = conn(S.pop.conn); if (k) h += `<div class="pop" id="pop" role="dialog" aria-labelledby="popTitle" tabindex="-1" style="left:0;top:0;visibility:hidden">${roPopHTML(k)}</div>`; }
   $("menus").innerHTML = h;
   if (S.pop) placePop();
   if (S.menu) $("menu").focus({ preventScroll: true });
@@ -1558,7 +1632,13 @@ function toast(html, o = {}) {
   renderToasts();
   if (!o.keep) later(() => { S.toasts = S.toasts.filter(x => x.id !== id); renderToasts(); }, 6000);
 }
-function idleToast(id) { toast(`<div>${esc(t("idle-toast", { name: id, duration: t("idle-hours", { n: nf(4) }) }))}</div>`, { icon:"unplug", keep:true }); }
+/* hv-conn-idle-disconnected ($name, $hours) for whole hours, -minutes otherwise (idle_disconnect_s is free per profile, B18).
+   keep:true is mock-only, so the toast stays for review; the product uses the standard toast TTL. */
+function idleToast(id) {
+  const s = S.idleSecs || 4 * 3600;
+  const msg = s % 3600 === 0 ? t("idle-disconnected", { name: id, hours: nf(s / 3600) }) : t("idle-disconnected-minutes", { name: id, minutes: nf(Math.round(s / 60)) });
+  toast(`<div>${esc(msg)}</div>`, { icon:"unplug", keep:true });
+}
 function renderAll() {
   document.documentElement.dataset.theme = S.theme;
   document.documentElement.lang = LANG;
@@ -1569,13 +1649,13 @@ function renderAll() {
 
 /* ═════════════ Mock bar + notes (mock only) ═════════════ */
 const SURF = [
-  { id:"hk", label:"Host key", sc:[["hacivat","Hacivat store"],["openssh","~/.ssh line 14"],["openssh2222","~/.ssh · port 2222"]] },
-  { id:"kbd", label:"Kbd-int.", sc:[["otp","One prompt"],["three","Three prompts"],["retry","Attempt 2 of 3"],["blank","No instructions"]] },
+  { id:"hk", label:"Host key", sc:[["hacivat","Hacivat store"],["openssh","~/.ssh line 14"],["openssh2222","~/.ssh · port 2222"],["openssh2","known_hosts2"]] },
+  { id:"kbd", label:"Kbd-int.", sc:[["otp","One prompt"],["three","Three prompts"],["retry","Attempt 2 of 3"],["blank","No instructions"],["hostile","Hostile text"]] },
   { id:"secret", label:"SSH secrets", sc:[["password","Password · hop 1"],["passphrase","Passphrase · hop 2"],["wrong","Wrong password"]] },
   { id:"vault", label:"Vault", sc:[["create","Create"],["mismatch","Create · mismatch"],["unlock","Unlock · 2 of 3"],["reset","Reset"],["damaged","Damaged file"],["remember","Remember Select"]] },
   { id:"pin", label:"Pin", sc:[["review","Pinned cert changed"]] },
-  { id:"ro", label:"Read-only", sc:[["enforced","Enforced · prod"],["guarded","Guarded · PostgreSQL"],["mysql","Guarded · MySQL"],["maria","MariaDB"],["sqlite","SQLite"]] },
-  { id:"idle", label:"Idle, errors", sc:[["idle","Idle"],["insecure","insecure·TLS"],["plain","insecure·plain"],["sshauth","ssh.auth"],["channel","channel"],["agent","agent"],["pin","pin"],["hk","host key"],["revoked","revoked"]] },
+  { id:"ro", label:"Read-only", sc:[["enforced","Enforced · prod"],["temp","Enforced · TEMP"],["guarded","Guarded · PG"],["all","All findings"],["mysql","Guarded · MySQL"],["maria","MariaDB"],["sqlite","SQLite"]] },
+  { id:"idle", label:"Idle, errors", sc:[["idle","Idle"],["idle90","Idle 90 min"],["insecure","insecure·TLS"],["plain","insecure·plain"],["sshauth","ssh.auth"],["channel","channel"],["agent","agent"],["pin","pin"],["hk","host key"],["revoked","revoked"]] },
 ];
 function renderMockbar() {
   const s = SURF[S.surface], cur = S.sc[s.id] || s.sc[0][0];
@@ -1590,22 +1670,22 @@ function renderMockbar() {
 }
 const NOTES = {
   hk: { intent:"A changed SSH host key is a hard stop that states the fact, shows both keys, and says where the old one lives. The safe answer is the default; trusting the new key takes a deliberate second button.",
-    points:["No warning icon and no hue: the title states the fact (\"The host key of bastion.acme.io changed\"). The stored and offered SHA256 fingerprints sit in two fingerprint insets, labelled by fact, never by colour.","Cancel is the primary button and has the initial focus, so Enter and Esc both stop. The capsule then shows Failed; its body opens the ssh.host_key_changed error.","Hacivat store: the outline button \"Remove the old key and trust the new one\" is on the far left, away from Cancel. It rewrites only Hacivat's own known_hosts.","~/.ssh source: Hacivat never writes ~/.ssh/known_hosts (B11), so the dialog shows a copyable ssh-keygen -R command instead, plus Try again. The check re-reads the file when its mtime changes (Q24), so Try again works without a restart and leads to M2a's new-host-key prompt.","Command form: OpenSSH stores port 22 as a bare host name, so the command is ssh-keygen -R bastion.acme.io. The bracket form [host]:port is only for other ports (scenario \"~/.ssh · port 2222\"). See the open questions in NOTES.md.","The hop is named in the subtitle (\"bastion.acme.io, hop 2 of 2\")."] },
+    points:["No warning icon and no hue: the title states the fact (\"The host key of bastion.acme.io changed\"). The stored and offered SHA256 fingerprints sit in two fingerprint insets, labelled by fact, never by colour.","Cancel is the primary button and has the initial focus, so Enter and Esc both stop. The capsule then shows Failed; its body opens the ssh.host_key_changed error.","Hacivat store: the outline button \"Remove the old key and trust the new one\" is on the far left, away from Cancel. It rewrites only Hacivat's own known_hosts.","~/.ssh source: Hacivat never writes ~/.ssh/known_hosts (B11), so the dialog shows a copyable ssh-keygen -R command instead, plus Try again. The check re-reads the file when its mtime changes (Q24), so Try again works without a restart and leads to M2a's new-host-key prompt.","Command form: OpenSSH stores port 22 as a bare host name, so the command is ssh-keygen -R bastion.acme.io. The bracket form [host]:port is only for other ports (scenario \"~/.ssh · port 2222\"). A key stored in any file other than ~/.ssh/known_hosts adds -f <file> (scenario \"known_hosts2\"). See the open questions in NOTES.md.","The hop is named in the subtitle (\"bastion.acme.io, hop 2 of 2\")."] },
   kbd: { intent:"Keyboard-interactive shows exactly what the server sent, in its own field, and never mixes it into a Hacivat sentence.",
-    points:["The lead line is ours (\"bastion.acme.io asks:\", built from the host Hacivat dialled). The server's name and instruction follow verbatim in a mono inset labelled \"Sent by the server, shown as received\". Line breaks are kept.","Each prompt label is server text too, so prompts are stacked (label above the field, verbatim, mono) rather than squeezed into the 120 px label column. A 40-character prompt wraps instead of clipping.","Masked or echoed follows the server's echo flag per prompt. Masked fields get the eye toggle; echoed fields show what you type.","\"Attempt 1 of 3\" counts rounds. After a rejected round the line reads \"The server didn't accept the answers and asked again.\" in our words, not the server's.","Answers are never stored and never offered to Remember (they are usually one-time codes).","Switch to TR: the server's English text stays English. Only Hacivat's own words translate."] },
+    points:["The lead line is ours (\"bastion.acme.io asks:\", built from the host Hacivat dialled). The server's name and instruction follow verbatim in a mono inset labelled \"Sent by the server, shown as received\". Line breaks are kept.","Each prompt label is server text too, so prompts are stacked (label above the field, verbatim, mono) rather than squeezed into the 120 px label column. A 40-character prompt wraps instead of clipping.","Masked or echoed follows the server's echo flag per prompt. Masked fields get the eye toggle; echoed fields show what you type.","\"Attempt 1 of 3\" counts rounds. After a rejected round the line reads \"The server didn't accept the answers and asked again.\" in our words, not the server's.","Answers are never stored and never offered to Remember (they are usually one-time codes).","Switch to TR: the server's English text stays English. Only Hacivat's own words translate.","Enter in a prompt that isn't the last moves to the next prompt. Enter in the last prompt continues, but only when every masked prompt has an answer; otherwise it moves to the first empty one. An accidental Enter never spends an attempt.","Verbatim but visible: control characters, ANSI escapes and bidi overrides are shown escaped (\\033, \\u{202E}), like OpenSSH's strnvis, and the server-text inset scrolls past 160 px (scenario \"Hostile text\")."] },
   secret: { intent:"The M2a password prompt, per hop: it always says which machine on the route is asking.",
-    points:["Title names what is asked and for which host (\"SSH password for jump-eu.acme.io\" / \"Passphrase for ~/.ssh/id_ed25519\"). The subtitle names the hop: \"jump-eu.acme.io, hop 1 of 2\".","The Route row draws the real chain with the asking hop boxed (seam-strong outline, no hue).","Remember is its own row in the 480 px dialog (a 240 px Select). It defaults to Forever, the SSH retention default (B11).","A wrong password keeps the dialog, names the host that refused, and counts \"Attempt 2 of 3\".","The passphrase variant shows the key file and its public-key fingerprint, so the user knows which key is being unlocked."] },
+    points:["Title names what is asked and for which host (\"SSH password for jump-eu.acme.io\" / \"Passphrase for ~/.ssh/id_ed25519\"). The subtitle names the hop: \"jump-eu.acme.io, hop 1 of 2\".","The Route row draws the real chain with the asking hop boxed (seam-strong outline, no hue).","Remember is its own row in the 480 px dialog (a 240 px Select). It defaults to Forever, the SSH retention default (B11).","A wrong password keeps the dialog and, directly under the field, names the host that refused and counts \"Attempt 2 of 3\".","The passphrase variant shows the key file and its public-key fingerprint, so the user knows which key is being unlocked."] },
   vault: { intent:"On Linux without a keyring, Forever means an encrypted file behind a master password. Say why, say the cost (no recovery), and never block the connect on it.",
-    points:["The window chrome switches to Linux (controls on the right) because the vault exists only there (B13).","Create: the first line is the reason (\"This computer has no system keyring.\"), then what happens, the file path, the master password twice, live rules (at least 8 characters; both entries match) and the no-recovery notice. Create is disabled until both rules hold.","Not now keeps the secret until restart (Q38), and the dialog says so before you choose.","Unlock: one field, \"Attempt 2 of 3\" after a miss, no lockout (B13). Reset vault… sits on the left as a ghost button.","Reset: an alertdialog. Type the literal word reset (it is not translated, so Turkish keyboards and İ/i never interfere). The Danger button stays disabled until it matches, is outline-only until hover or focus, and is never the default: Enter in the field does nothing.","Damaged file: the AEAD check failed, the file is untouched, and reset is offered as a secondary button. Close is the default.","Remember Select: the fourth option reads \"Forever (encrypted file)\" with the hint \"in Hacivat's vault, behind a master password\". The sheet's Password row reads \"vault · forever\"."] },
+    points:["The window chrome switches to Linux (controls on the right) because the vault exists only there (B13).","Create: the first line is the reason (\"This computer has no system keyring.\"), then what happens, the file path, the master password twice, live rules (at least 8 characters; both entries match) and the no-recovery notice. Create is disabled until both rules hold. Enter in Master password moves to Repeat; Enter in Repeat creates once both rules hold.","Not now keeps the secret until restart (Q38), and the dialog says so before you choose.","Unlock: one field, \"Attempt 2 of 3\" after a miss, no lockout (B13). Reset vault… sits on the left as a ghost button.","Reset: an alertdialog. Type the word hv-conn-vault-reset-word shows, which is reset in both languages (deliberately untranslated, so Turkish keyboards and İ/i never interfere). The Danger button stays disabled until it matches, is outline-only until hover or focus, and is never the default: Enter in the field does nothing.","Damaged file: the AEAD check failed, the file is untouched, and reset is offered as a secondary button. Close is the default.","Remember Select: the fourth option reads \"Forever (encrypted file)\" with the hint \"in Hacivat's vault, behind a master password\". The sheet's Password row reads \"vault · forever\"."] },
   pin: { intent:"M2a surface 5's anatomy for the case where a pinned certificate changed: both fingerprints, the new certificate's facts, and an explicit Replace pin that is never the default.",
     points:["Title states the fact: \"The certificate of db-qa.acme.io:5432 changed\". No warning icon, no hue.","Two fingerprint insets labelled Pinned and Now, each 2 × 16 bytes with Copy. The Now inset also carries issuer, expiry (locale-formatted) and the chain.","The body says a renewal looks the same, so the user asks before replacing.","Cancel is primary with initial focus. Replace pin is a plain outline button on the far left (B5: replacing is explicit, never the default).","Replace pin swaps the pin and reconnects; the toast confirms which host was pinned."] },
   ro: { intent:"Read-only says how it is enforced: by the server's role, or only guarded by Hacivat. The difference is one click away, with the fix.",
-    points:["Capsule: \"read-only (enforced by server role)\" only when the role probe found a least-privilege role (PostgreSQL, MySQL; B21). Every other read-only connection shows \"read-only (guarded)\".","The lock is red only on production (DESIGN.md). On other environments it is text-2. The Explorer flag follows the same rule.","Click the access segment (or the ⓘ in the sheet's Access row) for a 300 px popover. Guarded explains why, states the limit, and gives a SQL snippet with <role>, <password> and <database> placeholders, plus Copy SQL.","MariaDB is always guarded (C19), so its popover says so and still offers the role snippet. SQLite has no roles: no snippet.","The sheet gains an Access row with the short form (\"read-only · enforced\" / \"read-only · guarded\") so it fits the 150 px value column in Turkish.","Status bar: the environment segment carries the same access label."] },
+    points:["Capsule: \"read-only (enforced by server role)\" only when the role probe found a least-privilege role (PostgreSQL, MySQL; B21). Every other read-only connection shows \"read-only (guarded)\".","The lock is red only on production (DESIGN.md). On other environments it is text-2. The Explorer flag follows the same rule.","Click the access segment or the sheet's Access value for a 300 px popover. Both are Tab stops; Enter or Space opens it, focus lands on the popover, Tab reaches Copy SQL, Esc closes and returns focus to the trigger. The palette command \"Explain read-only access\" opens it too.","Guarded explains why, lists what the role probe found (one ro-warn-* line per RoleWarning), states the limit, and shows exactly the SQL of Task 5's remediation(), wrapped inside the inset, with Copy SQL. PostgreSQL's TEMP line is an optional comment (Q21).","Enforced with TEMP (scenario \"Enforced · TEMP\"): the label stays enforced and the popover notes the TEMP finding (Q21).","MariaDB is always guarded (C19). remediation(MariaDb) is None, so the popover shows the findings and \"No role change makes this label enforced, so there is no SQL to copy.\" SQLite has no roles: no snippet.","The sheet gains an Access row with the short form (\"read-only · enforced\" / \"read-only · guarded\") so it fits the 150 px value column in Turkish.","Status bar: the environment segment carries the same access label."] },
   idle: { intent:"Idle disconnects are quiet and reversible; new error classes use the M2a error-dialog anatomy unchanged.",
-    points:["Idle toast: \"Disconnected orders-dev after 4 h idle. It reconnects when you use it.\" (dev default 4 h, B18). The capsule keeps the connection's identity and shows \"Disconnected (idle)\" with the unplug glyph, no hue.","auth.insecure_method: the headline is the brief's sentence. The body differs by situation (TLS unverified → Review certificate…; no TLS → Edit connection, with the Disable advice from B8).","ssh.auth names the failing hop (\"Failed at hop 2 (bastion.acme.io)\") and draws the route with ✓ / ✕ / pending per hop.","ssh.channel_open: \"bastion.acme.io doesn't allow tunnels (AllowTcpForwarding)\". The body also names PermitOpen, the other server setting that refuses forwarding.","ssh.agent_unavailable, tls.pin_changed, ssh.host_key_changed and ssh.host_key_revoked complete the M2b class list (B24). Fixes use only existing FixIds (EditConnection, TryAgain, ReviewCertificate, ReviewHostKey).","Server text (the auth-method list, the channel-open description) appears only in Technical details, verbatim."] },
+    points:["Idle toast: \"Disconnected orders-dev after 4 h idle. It reconnects when you use it.\" (dev default 4 h, B18), with a minutes form for thresholds that aren't whole hours (scenario \"Idle 90 min\"). The capsule keeps the connection's identity and shows \"Disconnected (idle)\" with the unplug glyph, no hue. Clicking the capsule body reconnects; the chevron still opens the connection switcher.","auth.insecure_method: the headline is the brief's sentence. The body differs by situation (TLS unverified → Review certificate…; no TLS → Edit connection, with the Disable advice from B8).","ssh.auth names the failing hop (\"Failed at hop 2 (bastion.acme.io)\") and draws the route with ✓ / ✕ / pending per hop.","ssh.channel_open: \"bastion.acme.io doesn't allow tunnels (AllowTcpForwarding)\". The body also names PermitOpen, the other server setting that refuses forwarding.","ssh.agent_unavailable, tls.pin_changed, ssh.host_key_changed and ssh.host_key_revoked complete the M2b class list (B24). Fixes use only existing FixIds (EditConnection, TryAgain, ReviewCertificate, ReviewHostKey).","Server text (the auth-method list, the channel-open description) appears only in Technical details, verbatim."] },
 };
 const NEW_PRIMS = ["Key comparison: two fingerprint insets labelled by fact (Stored / Offered now, Pinned / Now)","Copyable command inset (ssh-keygen -R)","Server-text inset (keyboard-interactive) with stacked verbatim prompts","Hop route with the asking hop boxed; per-hop ✓ / ✕ / pending in errors","Validation lines (rule met = green check; mismatch = ink ✕)","SQL inset in the explanation popover, with Copy SQL","Capsule: access segment variants; Disconnected (idle) segment","Linux window chrome (vault scenarios only)"];
-const KEY_PREFIX = { hk:["hk-"], kbd:["kbd-","sshsec-hop"], secret:["sshsec-","dlg-remember","ret-"], vault:["vault-"], pin:["pin-changed-","tls-"], ro:["ro-","acc-"], idle:["idle-","err-","fix-"] };
+const KEY_PREFIX = { hk:["hk-"], kbd:["kbd-","sshsec-hop"], secret:["sshsec-","dlg-remember","ret-"], vault:["vault-","ret-forever-vault"], pin:["pin-changed-","tls-"], ro:["ro-","acc-","access-"], idle:["idle-","err-","fix-"] };
 function renderNotes() {
   const el = $("notes"); el.classList.toggle("on", S.notes);
   if (!S.notes) return;
@@ -1615,7 +1695,7 @@ function renderNotes() {
   <div class="nbody"><h3>Intent</h3><p style="color:var(--text)">${esc(N.intent)}</p><h3>Decisions</h3><ul>${N.points.map(p => `<li>${esc(p)}</li>`).join("")}</ul>
   <h3>NEW primitives (all surfaces)</h3><ul>${NEW_PRIMS.map(p => `<li>${esc(p)}</li>`).join("")}</ul>
   <h3>Strings on this surface</h3><p>New M2b strings first; reused M2a strings (already in the M2a table) are marked <code>M2a</code>. Turkish strings carry a <span class="por">PO review</span> marker until the PO signs them off.</p>
-  <table>${keys.map(k => `<tr><td class="k">${esc(k)}${k in B.en ? "" : " · M2a"}</td><td class="en">${esc(I18N.en[k])}</td><td>${esc(I18N.tr[k] ?? "")}<span class="por">PO review</span></td></tr>`).join("")}</table>
+  <table>${keys.map(k => `<tr><td class="k">${esc(k)}${k in B.en ? "" : k in SHIPPED.en ? " · shipped" : " · M2a"}</td><td class="en">${esc(I18N.en[k])}</td><td>${esc(I18N.tr[k] ?? "")}<span class="por">PO review</span></td></tr>`).join("")}</table>
   <h3>Mock keys</h3><p><code>1</code>–<code>7</code> surface · <code>[</code> <code>]</code> scenario · <code>T</code> theme · <code>L</code> language · <code>N</code> notes. Deep links: <code>?s=4&amp;sc=reset&amp;theme=light&amp;lang=tr&amp;notes=1</code>.</p></div>`;
 }
 
@@ -1627,7 +1707,8 @@ function setup(id, sc) {
   const connecting = (cid, stage, elapsed = 0.2) => { S.sel = cid; S.cap = { state:"connecting", conn:cid, stage, elapsed }; };
   if (id === "hk") {
     connecting("orders-prod", "ssh", 0.24);
-    S.layers.push(layer("hkchanged", { conn:"orders-prod", source: sc === "hacivat" ? "hacivat" : "openssh", port: sc === "openssh2222" ? 2222 : 22 }));
+    S.layers.push(layer("hkchanged", { conn:"orders-prod", source: sc === "hacivat" ? "hacivat" : "openssh", port: sc === "openssh2222" ? 2222 : 22,
+      file: sc === "openssh2" ? "~/.ssh/known_hosts2" : KH_DEFAULT, line: sc === "openssh2" ? 3 : 14 }));
   }
   if (id === "kbd") {
     connecting("orders-prod", "ssh", 0.31);
@@ -1648,11 +1729,14 @@ function setup(id, sc) {
   }
   if (id === "pin") { connecting("reports-test", "tls", 0.06); S.layers.push(layer("pinchanged", { conn:"reports-test" })); }
   if (id === "ro") {
-    const cid = { enforced:"orders-prod", guarded:"reports-test", mysql:"api-dev", maria:"ci-mariadb", sqlite:"app.db" }[sc];
+    const cid = { enforced:"orders-prod", temp:"orders-prod", guarded:"reports-test", all:"reports-test", mysql:"api-dev", maria:"ci-mariadb", sqlite:"app.db" }[sc];
+    if (sc === "temp") conn(cid).warn = ["temp-privilege"];          /* Q21: TEMP alone keeps the label enforced */
+    if (sc === "all") conn(cid).warn = ["superuser", "bypass-rls", "replication", "create-role", "server-file-roles", "execute-server-program", "signal-backend",
+      "write-privileges", "temp-privilege", { id:"egress-extension", name:"dblink" }, "role-grant-not-expanded", "unparsed"];
     S.sel = cid; S.cap = { state:"connected", conn:cid }; S.pop = { conn:cid, anchor:"roSeg" };
   }
   if (id === "idle") {
-    if (sc === "idle") { S.sel = "orders-dev"; S.cap = { state:"idle", conn:"orders-dev" }; S.idleToast = true; }
+    if (sc === "idle" || sc === "idle90") { S.sel = "orders-dev"; S.cap = { state:"idle", conn:"orders-dev" }; S.idleToast = true; S.idleSecs = sc === "idle90" ? 5400 : 4 * 3600; }
     else { const E = ERRS[sc]; S.sel = E.conn; S.cap = { state:"failed", conn:E.conn, kind:sc }; S.layers.push(layer("error", { kind:sc, techOpen:true })); }
   }
 }
@@ -1709,7 +1793,7 @@ const ACT = {
   },
   eye: a => { const L = topLayer(), f = a.dataset.for; L.shown[f] = !L.shown[f]; renderLayers(); document.querySelector(`[data-fk="f-${f}"]`)?.focus(); },
   copyFp: () => toast(`<div>${esc(t("tls-copy-fp"))} ✓</div>`, { icon:"copy" }),
-  copyCmd: () => { const L = topLayer(), c = conn(L.conn); try { navigator.clipboard?.writeText(`ssh-keygen -R ${khName(c.ssh.host, L.port)}`).catch(() => {}); } catch {} L.copied = true; renderLayers(); toast(`<div>${esc(t("hk-changed-copied"))}</div>`, { icon:"copy" }); },
+  copyCmd: () => { const L = topLayer(), c = conn(L.conn); try { navigator.clipboard?.writeText(khCmd(c.ssh.host, L.port, L.file)).catch(() => {}); } catch {} L.copied = true; renderLayers(); toast(`<div>${esc(t("hk-changed-copied"))}</div>`, { icon:"copy" }); },
   hkReplace: () => { const L = topLayer(), c = conn(L.conn); finishConnect(c.id, t("hk-changed-trusted", { host:c.ssh.host })); },
   hkRetry: () => { const L = topLayer(); S.layers = [layer("hostkey", { conn:L.conn, port:L.port })]; renderLayers(); focusInitial(); },
   hkTrust: () => finishConnect(topLayer().conn),
@@ -1721,8 +1805,14 @@ const ACT = {
   vaultResetOpen: () => { S.layers.push(layer("vreset", { conn:topLayer().conn })); renderLayers(); focusInitial(); },
   vaultReset: () => { clearTimers(); S.layers = []; S.cap = { state:"none" }; renderAll(); toast(`<div>${esc(t("vault-reset-done"))}</div>`, { icon:"trash-2" }); },
   pinReplace: () => { const L = topLayer(), c = conn(L.conn); finishConnect(c.id, t("pin-changed-done", { host:c.host })); },
-  roPop: (a, e) => { e?.stopPropagation(); const k = conn(a.id === "roKv" ? S.sel : S.cap.conn); if (!k) return; S.pop = S.pop && S.pop.anchor === a.id ? null : { conn:k.id, anchor:a.id }; renderMenus(); },
-  copySql: () => toast(`<div>${esc(t("ro-copied"))}</div>`, { icon:"copy", wide:true }),
+  /* Opening moves focus onto the popover (its title is announced); Tab reaches Copy SQL; Esc closes and returns focus to the trigger. */
+  roPop: (a, e) => {
+    e?.stopPropagation(); const anchor = a.id, k = conn(anchor === "roKv" ? S.sel : S.cap.conn); if (!k) return;
+    S.pop = S.pop && S.pop.anchor === anchor ? null : { conn:k.id, anchor };
+    renderTitle(); renderSheet(); renderMenus();
+    if (S.pop) $("pop")?.focus({ preventScroll:true }); else $(anchor)?.focus({ preventScroll:true });
+  },
+  copySql: a => { try { navigator.clipboard?.writeText(REMEDIATION[a.dataset.kind]).catch(() => {}); } catch {} S.copiedSql = REMEDIATION[a.dataset.kind]; toast(`<div>${esc(t("ro-copied"))}</div>`, { icon:"copy", wide:true }); },
   techToggle: () => { const L = topLayer(); L.techOpen = !L.techOpen; renderLayers(); },
   copyErr: () => toast(`<div>${esc(t("err-copy"))} ✓</div>`, { icon:"copy" }),
   fixEdit: () => toast(`<div>${esc(t("fix-edit"))}</div><div class="l2">M2a surface 1 (connection dialog)</div>`, { icon:"pencil" }),
@@ -1732,7 +1822,8 @@ const ACT = {
   dismissToast: a => { S.toasts = S.toasts.filter(x => x.id !== +a.dataset.id); S.idleToast = false; renderToasts(); },
   capClick: (a, e) => {
     if (e.target.closest("#roSeg")) return ACT.roPop(e.target.closest("#roSeg"), e);
-    if (S.cap.state === "idle") { S.idleToast = false; S.toasts = []; return finishConnect(S.cap.conn); }      /* "It reconnects when you use it" */
+    /* "It reconnects when you use it": the capsule body reconnects; the chevron keeps opening the connection switcher (M2a), not mocked here */
+    if (S.cap.state === "idle" && !e.target.closest(".cp-chev")) { S.idleToast = false; S.toasts = []; return finishConnect(S.cap.conn); }
     if (S.cap.state === "failed" && S.cap.kind && ERRS[S.cap.kind]) { S.layers = [layer("error", { kind:S.cap.kind })]; renderLayers(); focusInitial(); }
   },
 };
@@ -1774,6 +1865,15 @@ document.addEventListener("keydown", e => {
     if (e.key === "Tab") { const fs = focusables($("layers").lastElementChild); if (!fs.length) return; const i = fs.indexOf(document.activeElement); e.preventDefault(); (e.shiftKey ? fs[(i - 1 + fs.length) % fs.length] : fs[(i + 1) % fs.length]).focus(); return; }
     if (e.target.classList?.contains("select") && (e.key === "ArrowDown" || e.key === " " || e.key === "Enter")) { e.preventDefault(); openRetSelect(e.target); return; }
     if (e.key === "Enter" && inField) {
+      /* Multi-field prompts (I4): Enter in a field that isn't the last moves on; it never spends an attempt on a half-filled round. */
+      if (L.type === "kbd" || L.type === "vcreate") {
+        const fields = [...document.querySelectorAll(".layer:last-child .dbody input")], i = fields.indexOf(e.target);
+        if (i < fields.length - 1) { e.preventDefault(); fields[i + 1].focus(); return; }
+        if (L.type === "kbd") {
+          const emptyMasked = KBD[L.round].prompts.findIndex((p, j) => !p.echo && !(L.v["kp" + j] || ""));
+          if (emptyMasked >= 0) { e.preventDefault(); fields[emptyMasked].focus(); return; }
+        }
+      }
       /* Enter submits the primary only where the primary is safe; the vault reset field never submits (Danger is never the default). */
       const primary = { kbd:"kbdGo", secret:"secretGo", vcreate:"vaultCreate", vunlock:"vaultUnlock" }[L.type];
       const btn = primary && document.querySelector(`.layer:last-child [data-act="${primary}"]`);
@@ -1782,7 +1882,9 @@ document.addEventListener("keydown", e => {
     if (inField || mod(e)) return;
     return mockKeys(e);
   }
-  if (e.key === "Escape" && S.pop) { const a = S.pop.anchor; S.pop = null; renderMenus(); $(a)?.focus?.(); return; }
+  if (e.key === "Escape" && S.pop) { const a = S.pop.anchor; S.pop = null; renderTitle(); renderSheet(); renderMenus(); $(a)?.focus?.({ preventScroll:true }); return; }
+  /* The capsule's access segment is a span Tab stop: Enter or Space opens the popover (the sheet value is a real button) */
+  if (e.target.id === "roSeg" && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); return ACT.roPop(e.target, e); }
   if (inField || mod(e)) return;
   mockKeys(e);
 });
