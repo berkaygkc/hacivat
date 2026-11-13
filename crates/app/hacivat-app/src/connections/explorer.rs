@@ -205,6 +205,24 @@ fn name_min_width(name: &str, style: TypeStyle, window: &mut Window) -> Pixels {
         .width
 }
 
+// ## m2b-t22-live
+/// The laid-out width of `text` in `style` (a whole name, for the SSH flag's room).
+fn text_width(text: &str, style: TypeStyle, window: &mut Window) -> Pixels {
+    let text: SharedString = text.to_string().into();
+    let run = hacivat_ui_core::gpui_surface::TextRun {
+        len: text.len(),
+        font: font_for(&style),
+        color: hacivat_ui_core::gpui_surface::hsla(0.0, 0.0, 0.0, 1.0),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(text, px(style.size_px), &[run], None)
+        .width
+}
+
 /// A wrapping paragraph recorded in the text registry like a label (`Label` draws one line),
 /// so the pseudo-locale and test checks see it. `id` is appended to its path as `#id`.
 #[track_caller]
@@ -572,23 +590,49 @@ impl ExplorerView {
                     .size(IconSize::Chrome)
                     .color(c.text_2.to_hsla()),
             )
-            .child(
+            .child({
                 // ## m2a-t21-shots: the name gives way last (the meta ellipsizes first)
                 // and never below about six characters.
-                div()
+                let name = Label::new(
+                    p.name.clone(),
+                    TextSource::Data,
+                    t.type_ramp.body,
+                    c.text.to_hsla(),
+                )
+                .truncate(true)
+                .id(SharedString::from(format!("explorer-row-name-{index}")));
+                let cell = div()
                     .min_w(name_min_width(&p.name, t.type_ramp.body, window))
-                    .flex_shrink(NAME_SHRINK)
-                    .child(
-                        Label::new(
-                            p.name.clone(),
-                            TextSource::Data,
-                            t.type_ramp.body,
-                            c.text.to_hsla(),
+                    .flex_shrink(NAME_SHRINK);
+                if matches!(p.transport, TransportSpec::SshTunnel(_)) {
+                    // ## m2b-t22-live (fix round 1, ruling I2): the SSH route flag sits in the
+                    // name's column, right after the name. The column keeps the name's own
+                    // width as its basis and grows into free room for the flag, so in a tight
+                    // row the name ellipsizes and the meta keeps its M2a widths.
+                    let name_w = text_width(&p.name, t.type_ramp.body, window);
+                    let flag = px(IconSize::Chrome.px() + t.spacing.sm);
+                    cell.flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(t.spacing.sm))
+                        .flex_basis(name_w)
+                        .flex_grow(1.0)
+                        .max_w(name_w + flag)
+                        .child(div().min_w(px(0.0)).flex_shrink(1.0).child(name))
+                        .child(
+                            div()
+                                .debug_selector(move || format!("explorer-row-route-{index}"))
+                                .flex_none()
+                                .child(
+                                    Icon::new(IconName::Route)
+                                        .size(IconSize::Chrome)
+                                        .color(c.text_2.to_hsla()),
+                                ),
                         )
-                        .truncate(true)
-                        .id(SharedString::from(format!("explorer-row-name-{index}"))),
-                    ),
-            )
+                } else {
+                    cell.child(name)
+                }
+            })
             .child(env_swatch(env_kind(p.environment), theme));
         if selected {
             row = row.bg(c.blue_tint.to_hsla());
@@ -602,19 +646,6 @@ impl ExplorerView {
                 Icon::new(IconName::Lock)
                     .size(IconSize::Chrome)
                     .color(ink.to_hsla()),
-            );
-        }
-        // ## m2b-t22-live: the SSH route flag (NOTES M2a §8, M2b surface 7).
-        if matches!(p.transport, TransportSpec::SshTunnel(_)) {
-            row = row.child(
-                div()
-                    .debug_selector(move || format!("explorer-row-route-{index}"))
-                    .flex_none()
-                    .child(
-                        Icon::new(IconName::Route)
-                            .size(IconSize::Chrome)
-                            .color(c.text_2.to_hsla()),
-                    ),
             );
         }
         if let Some(info) = &info

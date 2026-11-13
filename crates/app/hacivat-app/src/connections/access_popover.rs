@@ -41,8 +41,8 @@ use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, FocusHandle,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Render,
-    Role, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Window, canvas, div,
-    px,
+    Role, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
+    Window, canvas, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, TypeStyle, popover_surface};
 
@@ -61,6 +61,10 @@ const SQL_LINE_PX: f32 = 17.0;
 const SQL_GAP_PX: f32 = 4.0;
 /// The square bullet of a finding (the sticky-toast list anatomy: 3 px, text-2).
 const BULLET_PX: f32 = 3.0;
+/// The gap between a finding's bullet and its text (mock `.warns li { gap: 7px }`).
+const FINDING_GAP_PX: f32 = 7.0;
+/// A finding's line height.
+const FINDING_LINE_PX: f32 = 17.0;
 /// The scroll thumb's width and shortest length (M2a's 4 px seam-strong thumb).
 const THUMB_PX: f32 = 4.0;
 const THUMB_MIN_PX: f32 = 16.0;
@@ -132,7 +136,11 @@ pub fn facts_for(cx: &App, id: ProfileId) -> Option<AccessFacts> {
     let p = m.get(id)?;
     match m.live(id) {
         LiveState::Connected(info) if info.access != AccessLabel::ReadWrite => {
-            Some(AccessFacts::of(&p, &info))
+            let mut facts = AccessFacts::of(&p, &info);
+            // Fix round 1 (M8): a gap that changed data leaves "enforced" behind.
+            facts.access =
+                crate::connections::session_toasts::effective_access(cx, id, facts.access);
+            Some(facts)
         }
         _ => None,
     }
@@ -322,6 +330,10 @@ fn sql_words(line: &str) -> Vec<Vec<Piece>> {
 
 /// The read-only explanation, a non-modal layer (see the module docs).
 pub struct AccessPopover {
+    // ## fix round 1 (M10): it follows its connection.
+    profile: ProfileId,
+    facts: AccessFacts,
+    _follow: Subscription,
     title: SharedString,
     body: Vec<Block>,
     sql: Option<&'static str>,
@@ -346,6 +358,9 @@ pub fn open(id: ProfileId, trigger: Bounds<Pixels>, window: &mut Window, cx: &mu
     };
     let (title, body, sql) = content(cx, &facts);
     let view = cx.new(|cx| AccessPopover {
+        profile: id,
+        facts: facts.clone(),
+        _follow: cx.observe_global::<ConnectionsModel>(|_, cx| cx.notify()),
         title,
         body,
         sql,
@@ -361,6 +376,10 @@ pub fn open(id: ProfileId, trigger: Bounds<Pixels>, window: &mut Window, cx: &mu
         return;
     };
     ws.update(cx, |ws, cx| {
+        // Fix round 1 (M9): one explanation at a time; the trigger keeps the focus to restore.
+        if ws.layer_ids().last() == Some(&POPOVER_LAYER) {
+            ws.pop_layer(window, cx);
+        }
         ws.push_layer(
             Layer {
                 id: POPOVER_LAYER,
@@ -437,7 +456,16 @@ impl AccessPopover {
 fn findings_block(theme: &Theme, lead: SharedString, lines: &[SharedString]) -> AnyElement {
     let t = theme.tokens;
     let c = &t.colors;
-    let line_h = t.type_ramp.caption.line_height;
+    // Fix round 1 (M2): 12 px on a whole-pixel 17 px line (mock `line-height: 1.4`), so a
+    // wrapped finding's height never rounds below its lines.
+    let style = TypeStyle {
+        line_height: FINDING_LINE_PX,
+        ..t.type_ramp.caption
+    };
+    let line_h = style.line_height;
+    // Fix round 1 (M2): the text column's exact width (the card less its border, padding, the
+    // bullet and the gap), so a line wraps at the width it is drawn in.
+    let text_w = WIDTH_PX - 2.0 - 2.0 * t.spacing.xl - BULLET_PX - FINDING_GAP_PX;
     div()
         .flex()
         .flex_col()
@@ -454,7 +482,7 @@ fn findings_block(theme: &Theme, lead: SharedString, lines: &[SharedString]) -> 
                 .flex()
                 .flex_row()
                 .items_start()
-                .gap(px(7.0))
+                .gap(px(FINDING_GAP_PX))
                 .child(
                     div()
                         .mt(px((line_h - BULLET_PX) / 2.0))
@@ -462,10 +490,10 @@ fn findings_block(theme: &Theme, lead: SharedString, lines: &[SharedString]) -> 
                         .flex_none()
                         .bg(c.text_2.to_hsla()),
                 )
-                .child(div().flex_1().min_w(px(0.0)).child(paragraph(
+                .child(div().w(px(text_w)).flex_none().child(paragraph(
                     line.clone(),
                     TextSource::Fluent,
-                    t.type_ramp.caption,
+                    style,
                     c.text.to_hsla(),
                 )))
         }))
@@ -569,6 +597,20 @@ fn copy_sql(sql: &'static str, cx: &mut App) {
 
 impl Render for AccessPopover {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Fix round 1 (M10): the connection is no longer live and read-only: nothing left to
+        // explain; new facts (a reconnect, a downgraded label) are explained anew.
+        match facts_for(cx, self.profile) {
+            None => self.close(window, cx),
+            Some(facts) if facts != self.facts => {
+                let (title, body, sql) = content(cx, &facts);
+                self.title = title;
+                self.body = body;
+                self.sql = sql;
+                self.production = facts.production;
+                self.facts = facts;
+            }
+            Some(_) => {}
+        }
         if !self.opened {
             // Take the focus once the first frame is drawn: the dialog is announced by title.
             self.opened = true;
@@ -786,9 +828,19 @@ mod tests {
 
     #[test]
     fn the_words_rebuild_every_remediation_line() {
+        // Fix round 1 (M13): PostgreSQL 13's schema-grant form too.
+        let pg13 = remediation_for_server(&hacivat_driver::ServerInfo {
+            kind: DbmsKind::Postgres,
+            product: "PostgreSQL".into(),
+            version: hacivat_driver::SemVerLoose::parse("13.12"),
+            raw_version: "13.12".into(),
+            is_replica: Some(false),
+        });
+        assert!(pg13.is_some_and(|s| s.contains("<schema>")));
         for sql in [
             hacivat_session::remediation(DbmsKind::Postgres),
             hacivat_session::remediation(DbmsKind::MySql),
+            pg13,
         ] {
             for line in sql.expect("a remediation").lines() {
                 let words: Vec<String> = sql_words(line)

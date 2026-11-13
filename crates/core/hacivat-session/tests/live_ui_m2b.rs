@@ -38,16 +38,34 @@ async fn next_gap(
     .expect("an enforcement gap event")
 }
 
-/// How many `EnforcementGap` events are queued now.
-fn queued_gaps(ev: &mut broadcast::Receiver<ConnectionEvent>) -> usize {
+/// How many more `EnforcementGap` events arrive within `quiet` of real time (fix round 1, M12:
+/// the window must elapse, so a late duplicate is seen).
+async fn later_gaps(ev: &mut broadcast::Receiver<ConnectionEvent>, quiet: Duration) -> usize {
     let mut n = 0;
+    let until = tokio::time::Instant::now() + quiet;
     loop {
-        match ev.try_recv() {
-            Ok(ConnectionEvent::EnforcementGap { .. }) => n += 1,
-            Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+        match tokio::time::timeout_at(until, ev.recv()).await {
             Err(_) => return n,
+            Ok(Ok(ConnectionEvent::EnforcementGap { .. })) => n += 1,
+            Ok(Ok(_) | Err(broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(broadcast::error::RecvError::Closed)) => return n,
         }
     }
+}
+
+/// Waits until `h`'s session has ended (`Broken` or `Disconnected`).
+async fn ended(h: &hacivat_session::session::SessionHandle) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !matches!(
+            snap(h).state,
+            hacivat_session::session::SessionState::Broken(_)
+                | hacivat_session::session::SessionState::Disconnected
+        ) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the session ends");
 }
 
 /// A PostgreSQL fake whose guard opens its transaction and whose `SELECT 1; COMMIT` ends it:
@@ -89,9 +107,13 @@ async fn a_pooled_read_only_sessions_gap_is_relayed_once() {
     assert_eq!(id, profile.id);
     assert_eq!(reason, GapReason::TransactionEndedByStatement);
     // The pooled session broke; the profile stays connected on its default session.
-    settle().await;
+    ended(&pooled).await;
+    assert_eq!(
+        later_gaps(&mut ev, Duration::from_millis(300)).await,
+        0,
+        "relayed once"
+    );
     assert!(matches!(m.state(profile.id), LiveState::Connected(_)));
-    assert_eq!(queued_gaps(&mut ev), 0, "relayed once");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -119,8 +141,12 @@ async fn the_default_sessions_gap_is_still_relayed_once() {
             .expect("the profile ends Lost")
             .expect("the manager runs");
     }
-    settle().await;
-    assert_eq!(queued_gaps(&mut ev), 0, "the monitor's relay only");
+    ended(&default).await;
+    assert_eq!(
+        later_gaps(&mut ev, Duration::from_millis(300)).await,
+        0,
+        "the monitor's relay only"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

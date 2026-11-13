@@ -51,6 +51,11 @@ struct LiveClocks {
     /// The repaint timer runs.
     ticking: bool,
     // ## m2b-t22-live
+    /// The running repaint loop: its generation (a newer loop ends the older one) and the
+    /// longest it may sleep (fix round 1, M4: a connect that starts while a countdown sleeps
+    /// gets its 50 ms clock at once).
+    tick_gen: u64,
+    tick_wait: Duration,
     /// A reconnect waiting for its next attempt: the attempt, its `next_in`, and when it
     /// starts on the executor clock.
     reconnects: HashMap<ProfileId, (u32, Duration, Instant)>,
@@ -165,33 +170,60 @@ pub(crate) fn mirror(cx: &mut App) {
     }
     let mut connecting = false;
     for (id, state) in states {
-        if matches!(state, LiveState::Connecting(_)) {
-            connecting = true;
-            ensure_started(cx, id);
-        } else {
-            cx.default_global::<LiveClocks>().started.remove(&id);
-        }
-        // ## m2b-t22-live: the countdown to the next attempt, and the end of an idle state.
-        match state {
-            LiveState::Reconnecting {
-                attempt,
-                next_in: Some(next_in),
-            } => {
-                connecting = true;
-                note_reconnect(cx, id, attempt, next_in);
-            }
-            _ => {
-                cx.default_global::<LiveClocks>().reconnects.remove(&id);
-            }
-        }
-        if state != LiveState::Disconnected {
-            session_toasts::clear_idle(cx, id);
-        }
-        cx.global_mut::<ConnectionsModel>().set_live(id, state);
+        connecting |= apply_state(cx, id, state);
     }
     if connecting {
         start_ticking(cx);
     }
+}
+
+/// Copies one profile's new state into the model, with its clocks; whether a clock now ticks.
+fn apply_state(cx: &mut App, id: ProfileId, state: LiveState) -> bool {
+    let mut connecting = false;
+    if matches!(state, LiveState::Connecting(_)) {
+        connecting = true;
+        ensure_started(cx, id);
+    } else {
+        cx.default_global::<LiveClocks>().started.remove(&id);
+    }
+    // ## m2b-t22-live: the countdown to the next attempt, and the end of an idle state and of
+    // a gap's downgraded label (a new state is a new connection or none).
+    match state {
+        LiveState::Reconnecting {
+            attempt,
+            next_in: Some(next_in),
+        } => {
+            connecting = true;
+            note_reconnect(cx, id, attempt, next_in);
+        }
+        _ => {
+            cx.default_global::<LiveClocks>().reconnects.remove(&id);
+        }
+    }
+    if state != LiveState::Disconnected {
+        session_toasts::clear_idle(cx, id);
+    }
+    session_toasts::clear_downgrade(cx, id);
+    cx.global_mut::<ConnectionsModel>().set_live(id, state);
+    connecting
+}
+
+/// Mirrors `state` for `id` as a manager change would (test seam, feature `test-support`):
+/// the clocks and the repaint loop run as in the app.
+#[cfg(feature = "test-support")]
+pub fn mirror_state(cx: &mut App, id: ProfileId, state: LiveState) {
+    if apply_state(cx, id, state) {
+        start_ticking(cx);
+    }
+}
+
+/// How long the running repaint loop sleeps between repaints (test seam, feature
+/// `test-support`); `None` while none runs.
+#[cfg(feature = "test-support")]
+pub fn tick_wait(cx: &App) -> Option<Duration> {
+    cx.try_global::<LiveClocks>()
+        .filter(|c| c.ticking)
+        .map(|c| c.tick_wait)
 }
 
 /// How long until the next repaint, while one is needed: [`TICK`] while a connect attempt
@@ -232,18 +264,35 @@ pub fn repaint_interval(cx: &App) -> Option<Duration> {
 }
 
 /// Repaints while something ticks ([`next_tick`]): every [`TICK`] while a profile is
-/// connecting, once a second while a reconnect counts down.
+/// connecting, once a second while a reconnect counts down. A loop that sleeps longer than
+/// what is due now is replaced (fix round 1, M4): the newer generation ends the older one at
+/// its next wake.
 fn start_ticking(cx: &mut App) {
+    let due = next_tick(cx);
     let clocks = cx.default_global::<LiveClocks>();
-    if std::mem::replace(&mut clocks.ticking, true) {
+    let sooner = due.is_some_and(|d| d < clocks.tick_wait);
+    if clocks.ticking && !sooner {
         return;
     }
+    clocks.ticking = true;
+    clocks.tick_gen += 1;
+    let generation = clocks.tick_gen;
     cx.spawn(async move |cx| {
         loop {
             let wait = cx.update(|cx| {
+                let clocks = cx.default_global::<LiveClocks>();
+                if clocks.tick_gen != generation {
+                    // A newer loop took over.
+                    return None;
+                }
                 let wait = next_tick(cx);
-                if wait.is_none() {
-                    cx.default_global::<LiveClocks>().ticking = false;
+                let clocks = cx.default_global::<LiveClocks>();
+                match wait {
+                    Some(w) => clocks.tick_wait = w,
+                    None => {
+                        clocks.ticking = false;
+                        clocks.tick_wait = Duration::ZERO;
+                    }
                 }
                 wait
             });
@@ -251,7 +300,11 @@ fn start_ticking(cx: &mut App) {
                 break;
             };
             cx.background_executor().timer(wait).await;
-            cx.update(|cx| cx.refresh_windows());
+            cx.update(|cx| {
+                if cx.default_global::<LiveClocks>().tick_gen == generation {
+                    cx.refresh_windows();
+                }
+            });
         }
     })
     .detach();

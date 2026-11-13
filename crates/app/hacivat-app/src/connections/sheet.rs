@@ -22,7 +22,7 @@ use hacivat_session::LiveState;
 use hacivat_session::profile::{Profile, ProfileEndpoint};
 use hacivat_ui::capsule::env_swatch;
 use hacivat_ui::icon::{Icon, IconName, IconSize};
-use hacivat_ui::popover::Declare as _;
+use hacivat_ui::popover::{A11yDecl, Declare as _, Tip};
 use hacivat_ui::text::{Label, TextSource};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, Bounds, Context, FocusHandle,
@@ -32,10 +32,10 @@ use hacivat_ui_core::gpui_surface::{
 };
 use hacivat_ui_core::theme::{Theme, focus_outline};
 
-use crate::connections::access_popover;
 use crate::connections::capsule::{encryption_label, engine_label, env_kind, env_word, path_label};
 use crate::connections::explorer::endpoint_text;
 use crate::connections::model::ConnectionsModel;
+use crate::connections::{access_popover, session_toasts};
 use crate::l10n_global::tr;
 use crate::shell::tiles::{self, empty_state_wrapping, panel_header, panel_title};
 use hacivat_ui::text::scroll_viewport;
@@ -187,7 +187,7 @@ impl SheetView {
         let c = &t.colors;
         let live = cx.global::<ConnectionsModel>().live(p.id);
         let access = match &live {
-            LiveState::Connected(info) => info.access,
+            LiveState::Connected(info) => session_toasts::effective_access(cx, p.id, info.access),
             _ if p.read_only => AccessLabel::ReadOnlyGuarded,
             _ => AccessLabel::ReadWrite,
         };
@@ -246,6 +246,8 @@ impl SheetView {
         let id = p.id;
         let (on_click_focus, on_click_bounds) = (focus.clone(), bounds.clone());
         let key_bounds = bounds.clone();
+        let hint = tr(cx, ids::hv::CMD_CONNECTION_EXPLAIN_ACCESS, NoArgs);
+        let description = hint.clone();
         focus_outline(
             div()
                 .id("sheet-access")
@@ -288,7 +290,9 @@ impl SheetView {
                         .size_full(),
                 )
                 .child(value)
-                .declare(Role::Button, label, None),
+                // Fix round 1 (M5): what it does, as its tooltip and its description.
+                .tooltip(move |_, cx| Tip::view(hint.clone(), cx))
+                .declare_full(A11yDecl::new(Role::Button, label).description(description)),
             theme,
             focused,
         )

@@ -280,7 +280,7 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
                 env_label,
                 name,
                 engine: engine_label(&p, Some(&info)),
-                access: access_label(cx, info.access),
+                access: access_label(cx, session_toasts::effective_access(cx, p.id, info.access)),
                 read_only,
                 path,
                 direct,
@@ -496,12 +496,14 @@ mod fixtures {
     use std::time::Duration;
 
     use hacivat_driver::{SemVerLoose, ServerInfo, Support};
+    use hacivat_net::ssh::{HopSpec, SshAuth, SshSpec};
     use hacivat_net::{AddressClass, TlsSummary, TlsVerified};
     use hacivat_proto::{AccessLabel, DbmsKind, EnvTag, ErrClass, ProfileId};
     use hacivat_secrets::AuthProviderId;
     use hacivat_session::pipeline::{Progress, StepOutcome, StepTrace, TrailStep};
-    use hacivat_session::profile::{Profile, ProfileDraft, ProfileEndpoint};
-    use hacivat_session::{LiveInfo, LiveState, PathKind};
+    use hacivat_session::profile::{Profile, ProfileDraft, ProfileEndpoint, TransportSpec};
+    use hacivat_session::session::LostState;
+    use hacivat_session::{GapReason, LiveInfo, LiveState, PathKind, RoleWarning};
     use hacivat_ui_core::gpui_surface::{App, Window, point, px};
 
     use crate::connections::live::note_started;
@@ -660,5 +662,275 @@ mod fixtures {
     pub fn unencrypted_popover_fixture(window: &mut Window, cx: &mut App) {
         connected_unencrypted_fixture(window, cx);
         super::explain_unencrypted(point(px(520.0), px(34.0)), window, cx);
+    }
+
+    // ## m2b-t22-live (fix round 1, M1): the T22 states for the shots harness (Task 24
+    // consumes them too).
+
+    /// Saves `profile` and makes it the capsule's current profile in `state`.
+    fn show_profile(cx: &mut App, profile: Profile, state: LiveState) -> ProfileId {
+        let id = profile.id;
+        ConnectionsModel::save(
+            cx,
+            ProfileDraft {
+                is_new: true,
+                ..ProfileDraft::edit(profile)
+            },
+        )
+        .detach();
+        let m = cx.global_mut::<ConnectionsModel>();
+        m.set_live(id, state);
+        m.note_attempt(id);
+        ConnectionsModel::select(cx, Some(id));
+        id
+    }
+
+    /// A profile `name` at 10.0.4.12, through `bastion` when given.
+    fn profile(name: &str, env: EnvTag, read_only: bool, bastion: Option<&str>) -> Profile {
+        let mut p = Profile {
+            name: name.to_string(),
+            environment: Some(env),
+            read_only,
+            endpoint: ProfileEndpoint::Server {
+                host: "10.0.4.12".to_string(),
+                port: None,
+            },
+            database: Some("orders".to_string()),
+            user: Some("deploy".to_string()),
+            ..Profile::default()
+        };
+        if let Some(host) = bastion {
+            p.transport = TransportSpec::SshTunnel(SshSpec {
+                hops: vec![HopSpec {
+                    host: host.to_string(),
+                    port: 22,
+                    user: "deploy".to_string(),
+                    auth: SshAuth::Agent,
+                    identities_only: false,
+                    identity_files: Vec::new(),
+                }],
+                host_keys: Default::default(),
+                keepalive_s: None,
+            });
+        }
+        p
+    }
+
+    /// A live PostgreSQL connection of `version` with `access` and the probe's `warnings`,
+    /// through `bastion` when given, encrypted or not.
+    fn live(
+        version: &str,
+        access: AccessLabel,
+        warnings: Vec<RoleWarning>,
+        bastion: Option<&str>,
+        encrypted: bool,
+    ) -> LiveState {
+        let mut info = sample_live_info(
+            encrypted,
+            access != AccessLabel::ReadWrite,
+            Support::Supported,
+        );
+        info.server.version = SemVerLoose::parse(version);
+        info.server.raw_version = version.to_string();
+        info.access = access;
+        info.access_warnings = warnings;
+        info.user = Some("app_ro".to_string());
+        if let Some(host) = bastion {
+            info.path = PathKind::Ssh;
+            info.via = Some(host.to_string());
+            info.hops = 1;
+        }
+        LiveState::Connected(Arc::new(info))
+    }
+
+    /// Production, reconnecting: attempt 3, the next in 4 s.
+    pub fn reconnecting_fixture(_window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile("orders-prod", EnvTag::Production, false, None),
+            LiveState::Reconnecting {
+                attempt: 3,
+                next_in: Some(Duration::from_secs(4)),
+            },
+        );
+    }
+
+    /// Disconnected after being idle, with its toast.
+    pub fn idle_fixture(_window: &mut Window, cx: &mut App) {
+        let id = show_profile(
+            cx,
+            profile("orders-dev", EnvTag::Dev, false, None),
+            LiveState::Disconnected,
+        );
+        crate::connections::session_toasts::idle(id, cx);
+    }
+
+    /// A production session lost inside a transaction (temp tables and variables too).
+    pub fn lost_tx_fixture(_window: &mut Window, cx: &mut App) {
+        let id = show_profile(
+            cx,
+            profile("orders-prod", EnvTag::Production, false, None),
+            LiveState::Lost {
+                class: ErrClass::NetworkReset,
+            },
+        );
+        crate::connections::session_toasts::lost(
+            id,
+            LostState {
+                open_tx: true,
+                temp_objects: true,
+                session_vars: true,
+                prepared: 0,
+                locks: false,
+            },
+            cx,
+        );
+    }
+
+    /// A production session reconnected: temp tables, two prepared statements and locks lost.
+    pub fn lost_reconnected_fixture(_window: &mut Window, cx: &mut App) {
+        let id = show_profile(
+            cx,
+            profile("orders-prod", EnvTag::Production, false, None),
+            live("16.4", AccessLabel::ReadWrite, Vec::new(), None, true),
+        );
+        crate::connections::session_toasts::lost(
+            id,
+            LostState {
+                open_tx: false,
+                temp_objects: true,
+                session_vars: false,
+                prepared: 2,
+                locks: true,
+            },
+            cx,
+        );
+    }
+
+    /// A gap that changed data on a production read-only connection (the label downgrades).
+    pub fn gap_fixture(_window: &mut Window, cx: &mut App) {
+        let id = show_profile(
+            cx,
+            profile("orders-prod", EnvTag::Production, true, None),
+            live(
+                "16.4",
+                AccessLabel::ReadOnlyEnforced,
+                Vec::new(),
+                None,
+                true,
+            ),
+        );
+        crate::connections::session_toasts::gap(id, GapReason::CanaryAssigned, cx);
+    }
+
+    /// Production, enforced (TEMP found) through SSH, with its explanation open.
+    pub fn ro_enforced_fixture(window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile(
+                "orders-prod",
+                EnvTag::Production,
+                true,
+                Some("bastion.acme.io"),
+            ),
+            live(
+                "16.4",
+                AccessLabel::ReadOnlyEnforced,
+                vec![RoleWarning::TempPrivilege],
+                Some("bastion.acme.io"),
+                true,
+            ),
+        );
+        super::explain_access_from_keyboard(window, cx);
+    }
+
+    /// Test, guarded with every finding, with its explanation open (it scrolls at 960x600).
+    pub fn ro_guarded_fixture(window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile("orders-qa", EnvTag::Test, true, None),
+            live(
+                "16.4",
+                AccessLabel::ReadOnlyGuarded,
+                vec![
+                    RoleWarning::Superuser,
+                    RoleWarning::BypassRls,
+                    RoleWarning::Replication,
+                    RoleWarning::CreateRole,
+                    RoleWarning::ServerFileRoles,
+                    RoleWarning::ExecuteServerProgram,
+                    RoleWarning::SignalBackend,
+                    RoleWarning::WritePrivileges,
+                    RoleWarning::TempPrivilege,
+                    RoleWarning::EgressExtension("postgres_fdw".to_string()),
+                    RoleWarning::RoleGrantNotExpanded,
+                    RoleWarning::Unparsed,
+                ],
+                None,
+                true,
+            ),
+        );
+        super::explain_access_from_keyboard(window, cx);
+    }
+
+    /// Staging on PostgreSQL 13, guarded: the schema-grant remediation.
+    pub fn ro_pg13_fixture(window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile("orders-staging", EnvTag::Staging, true, None),
+            live(
+                "13.12",
+                AccessLabel::ReadOnlyGuarded,
+                vec![RoleWarning::Superuser, RoleWarning::WritePrivileges],
+                None,
+                true,
+            ),
+        );
+        super::explain_access_from_keyboard(window, cx);
+    }
+
+    /// The widest production capsule: enforced, through SSH, unencrypted; and a direct row.
+    pub fn ssh_ro_fixture(_window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile("orders-replica", EnvTag::Production, true, None),
+            live("16.4", AccessLabel::ReadOnlyGuarded, Vec::new(), None, true),
+        );
+        show_profile(
+            cx,
+            profile(
+                "orders-prod",
+                EnvTag::Production,
+                true,
+                Some("bastion.acme.io"),
+            ),
+            live(
+                "16.4",
+                AccessLabel::ReadOnlyEnforced,
+                Vec::new(),
+                Some("bastion.acme.io"),
+                false,
+            ),
+        );
+    }
+
+    /// A read-write staging connection through SSH, unencrypted.
+    pub fn ssh_rw_fixture(_window: &mut Window, cx: &mut App) {
+        show_profile(
+            cx,
+            profile(
+                "orders-staging",
+                EnvTag::Staging,
+                false,
+                Some("bastion.acme.io"),
+            ),
+            live(
+                "16.4",
+                AccessLabel::ReadWrite,
+                Vec::new(),
+                Some("bastion.acme.io"),
+                false,
+            ),
+        );
     }
 }

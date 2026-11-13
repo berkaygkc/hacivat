@@ -67,8 +67,13 @@ pub fn segments(theme: &Theme, cx: &App) -> Vec<AnyElement> {
         return no_connection();
     };
     let kind = env_kind(p.environment);
-    let fluent =
-        |text: SharedString| status_label(theme, text, TextSource::Fluent).into_any_element();
+    // ## m2b-t22-live (fix round 1): every segment after the environment may ellipsize when
+    // the bar is full (long locales at the minimum window; the tooltip keeps the whole text).
+    let fluent = |text: SharedString| {
+        status_label(theme, text, TextSource::Fluent)
+            .truncate(true)
+            .into_any_element()
+    };
     let profile_env = || {
         env_segment(
             theme,
@@ -104,10 +109,15 @@ pub fn segments(theme: &Theme, cx: &App) -> Vec<AnyElement> {
                 env_segment(
                     theme,
                     kind,
-                    env_text(cx, &p, access_label(cx, info.access)),
+                    env_text(
+                        cx,
+                        &p,
+                        access_label(cx, session_toasts::effective_access(cx, p.id, info.access)),
+                    ),
                     read_only,
                 ),
                 status_label(theme, path, TextSource::Fluent)
+                    .truncate(true)
                     .id("status-path")
                     .into_any_element(),
                 fluent(latency_label(cx, &info)),
@@ -121,7 +131,12 @@ pub fn segments(theme: &Theme, cx: &App) -> Vec<AnyElement> {
             } else {
                 format!("{} {}", info.server.product, info.server.raw_version)
             };
-            out.push(status_label(theme, version, TextSource::Data).into_any_element());
+            // ## m2b-t22-live (fix round 1): the last segment, it ellipsizes when the bar is full.
+            out.push(
+                status_label(theme, version, TextSource::Data)
+                    .truncate(true)
+                    .into_any_element(),
+            );
             out
         }
     }

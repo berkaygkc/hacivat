@@ -78,6 +78,10 @@ pub struct Toast {
     /// The glyph in place of the kind's (the session toasts: rotate-cw, unplug); it keeps the
     /// kind's ink.
     pub icon: Option<IconName>,
+    /// A sticky alert that must be seen now (an enforcement gap, T22 fix round 1, M7): with
+    /// both sticky slots taken, the oldest sticky toast that is not urgent waits again (first
+    /// in line) and this one shows.
+    pub urgent: bool,
 }
 
 /// A button on a toast (M2a, NOTES surface 4).
@@ -102,6 +106,7 @@ impl Toast {
             wide: false,
             data: None,
             icon: None,
+            urgent: false,
         }
     }
 
@@ -216,6 +221,21 @@ impl ToastQueue {
                 ..entry
             };
             let id = entry.id;
+            // ## m2b-t22-live: an urgent sticky toast takes the slot of the oldest one that is
+            // not urgent, which waits first in line.
+            if entry.toast.sticky && entry.toast.urgent && !q.has_room(true) {
+                let oldest = q
+                    .visible
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.toast.sticky && !e.toast.urgent)
+                    .min_by_key(|(_, e)| e.id)
+                    .map(|(i, _)| i);
+                if let Some(i) = oldest {
+                    let demoted = q.visible.remove(i);
+                    q.waiting.push_front(demoted);
+                }
+            }
             if q.has_room(entry.toast.sticky) {
                 let started = (entry.id, entry.toast.lifetime());
                 q.visible.push(entry);

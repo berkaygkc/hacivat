@@ -6,6 +6,13 @@
 //! (inset, brand, spacers) start a drag so buttons keep their clicks. The Overflow Rule is
 //! [`titlebar_fit`]: trailing segments collapse into an overflow button before the palette
 //! field shrinks; a placeholder that no longer fits ellipsizes.
+//!
+//! M2b (Task 22 fix round 1, ruling I1): the capsule gets the title bar's free space as its
+//! [`Capsule::max_width`]: the window less everything before it, the palette field at its
+//! minimum and the trailing controls at their own widths, so a long capsule never pushes the
+//! palette below `PALETTE_MIN_PX` or the trailing controls off the window. The bar measures
+//! where the capsule starts and how wide the trailing controls are in each frame
+//! (`BarRoom`); a change draws again.
 
 use std::rc::Rc;
 
@@ -166,6 +173,32 @@ impl TitleBar {
     }
 }
 
+// ## m2b-t22-live (fix round 1, ruling I1)
+/// Where the capsule starts and how wide the trailing controls are, as the last frame laid
+/// them out (neither depends on the capsule). Kept per window.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct BarRoom {
+    capsule_left: Option<f32>,
+    trailing: Option<f32>,
+}
+
+/// An empty canvas over its parent that hands the parent's bounds to `note` each frame.
+fn measure(
+    note: impl Fn(
+        hacivat_ui_core::gpui_surface::Bounds<hacivat_ui_core::gpui_surface::Pixels>,
+        &mut Window,
+    ) + 'static,
+) -> impl IntoElement {
+    hacivat_ui_core::gpui_surface::canvas(
+        move |bounds, window, _| note(bounds, window),
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
 /// Lays a transparent cover over `el` that takes every press, so the controls under it do
 /// nothing while the bar is inert (and show no hover).
 /// Debug selector: `titlebar-inert-<what>`.
@@ -220,6 +253,23 @@ impl TitleBar {
             .fit
             .as_ref()
             .map(|f| titlebar_fit(width, f.fixed, PALETTE_PREF_PX, f.segments));
+        // ## m2b-t22-live (ruling I1): the capsule's room.
+        let room = window.use_keyed_state(ElementId::from("titlebar-room"), cx, |_, _| {
+            std::rc::Rc::new(std::cell::Cell::new(BarRoom::default()))
+        });
+        let room = room.read(cx).clone();
+        let palette_room = if self.palette.is_some() {
+            PALETTE_MIN_PX + t.spacing.s_2xl
+        } else {
+            0.0
+        };
+        let capsule_max = match room.get() {
+            BarRoom {
+                capsule_left: Some(left),
+                trailing: Some(trailing),
+            } => Some((width - left - trailing - palette_room - t.spacing.lg).max(0.0)),
+            _ => None,
+        };
 
         let mut bar = div()
             .debug_selector(|| "title-bar".to_string())
@@ -278,8 +328,21 @@ impl TitleBar {
                 );
         }
         if let Some(capsule) = self.capsule {
+            let at = room.clone();
             bar = bar.child(inert_cover(
-                div().ml(px(t.spacing.xl)).child(capsule.inert(inert)),
+                div()
+                    .relative()
+                    .ml(px(t.spacing.xl))
+                    .child(capsule.inert(inert).max_width(capsule_max))
+                    .child(measure(move |bounds, window| {
+                        let left = Some(f32::from(bounds.left()));
+                        let mut r = at.get();
+                        if r.capsule_left != left {
+                            r.capsule_left = left;
+                            at.set(r);
+                            window.refresh();
+                        }
+                    })),
                 inert,
                 "capsule",
             ));
@@ -351,11 +414,19 @@ impl TitleBar {
             bar = bar.child(field).child(drag_region(div().flex_1().h_full()));
         }
 
+        // ## m2b-t22-live (ruling I1): the trailing controls in one measured row (the same
+        // layout: a row of the same children).
+        let mut trailing = div()
+            .relative()
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_none();
         let overflowed = fit.is_some_and(|f| f.segments_in_overflow);
         if overflowed {
             if let Some(f) = &self.fit {
                 let on_overflow = f.on_overflow.clone();
-                bar = bar.child(inert_cover(
+                trailing = trailing.child(inert_cover(
                     div().child(
                         Button::new("titlebar-overflow", ui_text(cx, "hui-menu-more"))
                             .kind(ButtonKind::Icon)
@@ -369,7 +440,7 @@ impl TitleBar {
                 ));
             }
         } else if !self.right.is_empty() {
-            bar = bar.child(inert_cover(
+            trailing = trailing.child(inert_cover(
                 div()
                     .flex()
                     .flex_row()
@@ -384,7 +455,7 @@ impl TitleBar {
         let controls = matches!(chrome, ChromeKind::WindowsCaption | ChromeKind::LinuxClient);
         if controls {
             if let Some(on_click) = self.app_menu {
-                bar = bar.child(inert_cover(
+                trailing = trailing.child(inert_cover(
                     div().ml(px(t.spacing.md)).child(
                         Button::new("titlebar-app-menu", ui_text(cx, "hui-menu-app"))
                             .kind(ButtonKind::Icon)
@@ -396,8 +467,19 @@ impl TitleBar {
                     "app-menu",
                 ));
             }
-            bar = bar.child(caption_buttons(chrome, window, cx));
+            trailing = trailing.child(caption_buttons(chrome, window, cx));
         }
+        let at = room;
+        trailing = trailing.child(measure(move |bounds, window| {
+            let w = Some(f32::from(bounds.size.width));
+            let mut r = at.get();
+            if r.trailing != w {
+                r.trailing = w;
+                at.set(r);
+                window.refresh();
+            }
+        }));
+        bar = bar.child(trailing);
         bar.into_any_element()
     }
 }

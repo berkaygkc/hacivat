@@ -794,6 +794,51 @@ fn the_sticky_demo_fixture_pushes_one_sticky_toast(cx: &mut TestAppContext) {
     assert!(visible(vcx).is_empty());
 }
 
+// ## m2b-t22-live (fix round 1): an urgent sticky toast (an alert) never waits behind sticky
+// notices: it takes the oldest notice's slot, and that notice shows again when a slot frees.
+#[gpui::test]
+fn an_urgent_sticky_toast_takes_the_oldest_notice_slot(cx: &mut TestAppContext) {
+    let sticky = |urgent: bool| {
+        let mut toast = Toast::new(ToastKind::Info, text("Session lost"));
+        toast.sticky = true;
+        toast.urgent = urgent;
+        toast
+    };
+    let (first, second, alert) = cx.update(|cx| {
+        (
+            ToastQueue::push_id(cx, sticky(false)),
+            ToastQueue::push_id(cx, sticky(false)),
+            ToastQueue::push_id(cx, sticky(true)),
+        )
+    });
+    let vcx = host(cx, |_, _| {
+        div()
+            .size_full()
+            .child(ToastStack::new())
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(1000.0), px(600.0)));
+    vcx.run_until_parked();
+    assert_eq!(visible(vcx), vec![second, alert]);
+    assert_eq!(vcx.read(ToastQueue::waiting), 1);
+
+    // A second alert takes the remaining notice's slot, never the first alert's.
+    let again = vcx.update(|_, cx| ToastQueue::push_id(cx, sticky(true)));
+    vcx.run_until_parked();
+    assert_eq!(visible(vcx), vec![alert, again]);
+
+    vcx.update(|_, cx| ToastQueue::dismiss(cx, alert));
+    vcx.run_until_parked();
+    assert!(visible(vcx).contains(&second), "{:?}", visible(vcx));
+    vcx.update(|_, cx| ToastQueue::dismiss(cx, again));
+    vcx.run_until_parked();
+    let shown = visible(vcx);
+    assert!(
+        shown.contains(&second) && shown.contains(&first),
+        "{shown:?}"
+    );
+}
+
 // ---- explanation popover ----------------------------------------------------------------------
 
 fn explain_fixture(cx: &mut TestAppContext) -> &mut VisualTestContext {

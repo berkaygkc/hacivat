@@ -134,6 +134,26 @@ impl IntoElement for StatusBar {
                     .child(child);
                 if left { d.border_r_1() } else { d.border_l_1() }
             };
+            // ## m2b-t22-live (fix round 1): when the left segments outgrow the bar (long
+            // locales at the minimum window), the segments after the first give way, the later
+            // ones far more (shrink weights 1, 8, 27, …), and their truncating labels
+            // ellipsize instead of the bar running off the window. The first (the environment)
+            // never shrinks.
+            let left: Vec<AnyElement> = self
+                .left
+                .into_iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    let d = segment(s, true);
+                    if i == 0 {
+                        d
+                    } else {
+                        let weight = (i * i * i) as f32;
+                        d.flex_shrink(weight).min_w(px(0.0)).overflow_hidden()
+                    }
+                    .into_any_element()
+                })
+                .collect();
             div()
                 .debug_selector(|| "status-bar".to_string())
                 .flex()
@@ -146,7 +166,7 @@ impl IntoElement for StatusBar {
                 .border_color(c.seam.to_hsla())
                 .bg(c.ground.to_hsla())
                 .text_color(c.text_2.to_hsla())
-                .children(self.left.into_iter().map(|s| segment(s, true)))
+                .children(left)
                 .child(div().flex_1())
                 .children(self.right.into_iter().map(|s| segment(s, false)))
                 .into_any_element()

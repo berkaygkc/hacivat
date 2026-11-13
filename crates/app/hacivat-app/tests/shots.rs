@@ -106,9 +106,20 @@ enum Surface {
     UnencryptedPopover,
     ToastStickyDemo,
     ShellMinimum,
+    // ## m2b-t22-live (fix round 1, M1): every T22 state, at 1280x800 and the 960x600 minimum.
+    LiveReconnecting,
+    LiveIdle,
+    LiveLostTx,
+    LiveLostReconnected,
+    LiveGap,
+    LiveRoEnforced,
+    LiveRoGuarded,
+    LiveRoPg13,
+    LiveSshRo,
+    LiveSshRw,
 }
 
-const SURFACES: [Surface; 34] = [
+const SURFACES: [Surface; 44] = [
     Surface::Shell,
     Surface::ShellDemoProduction,
     Surface::ShellNarrow,
@@ -144,6 +155,17 @@ const SURFACES: [Surface; 34] = [
     Surface::UnencryptedPopover,
     Surface::ToastStickyDemo,
     Surface::ShellMinimum,
+    // ## m2b-t22-live
+    Surface::LiveReconnecting,
+    Surface::LiveIdle,
+    Surface::LiveLostTx,
+    Surface::LiveLostReconnected,
+    Surface::LiveGap,
+    Surface::LiveRoEnforced,
+    Surface::LiveRoGuarded,
+    Surface::LiveRoPg13,
+    Surface::LiveSshRo,
+    Surface::LiveSshRw,
 ];
 const LOCALES: [&str; 4] = ["en", "tr", "en-XA", "tr-XT"];
 const THEMES: [ThemePref; 2] = [ThemePref::Dark, ThemePref::Light];
@@ -186,13 +208,46 @@ impl Surface {
             Surface::UnencryptedPopover => "unencrypted-popover",
             Surface::ToastStickyDemo => "toast-sticky-demo",
             Surface::ShellMinimum => "shell-minimum",
+            // ## m2b-t22-live
+            Surface::LiveReconnecting => "live-reconnecting",
+            Surface::LiveIdle => "live-idle",
+            Surface::LiveLostTx => "live-lost-tx",
+            Surface::LiveLostReconnected => "live-lost-reconnected",
+            Surface::LiveGap => "live-gap",
+            Surface::LiveRoEnforced => "live-ro-enforced",
+            Surface::LiveRoGuarded => "live-ro-guarded",
+            Surface::LiveRoPg13 => "live-ro-pg13",
+            Surface::LiveSshRo => "live-ssh-ro",
+            Surface::LiveSshRw => "live-ssh-rw",
         }
+    }
+
+    // ## m2b-t22-live
+    /// Whether the surface is one of Task 22's live states.
+    fn is_live(self) -> bool {
+        matches!(
+            self,
+            Surface::LiveReconnecting
+                | Surface::LiveIdle
+                | Surface::LiveLostTx
+                | Surface::LiveLostReconnected
+                | Surface::LiveGap
+                | Surface::LiveRoEnforced
+                | Surface::LiveRoGuarded
+                | Surface::LiveRoPg13
+                | Surface::LiveSshRo
+                | Surface::LiveSshRw
+        )
     }
 
     /// The logical window sizes of the matrix shots: 1280x800, plus 1024x700 for the
     /// connection dialog (the Overflow Rule); `shell-narrow` only at 1024x700 and
     /// `shell-minimum` only at the 960x600 minimum window (DESIGN.md).
     fn sizes(self) -> &'static [(f32, f32)] {
+        if self.is_live() {
+            // ## m2b-t22-live: the default window and the minimum one (ruling I1).
+            return &[(1280.0, 800.0), (960.0, 600.0)];
+        }
         match self {
             Surface::ShellNarrow => &[(1024.0, 700.0)],
             Surface::ShellMinimum => &[(960.0, 600.0)],
@@ -214,7 +269,16 @@ impl Surface {
     fn shows_production(self) -> bool {
         matches!(
             self,
-            Surface::ShellDemoProduction | Surface::CapsuleProductionRo | Surface::CapsuleFailed
+            Surface::ShellDemoProduction
+                | Surface::CapsuleProductionRo
+                | Surface::CapsuleFailed
+                // ## m2b-t22-live
+                | Surface::LiveReconnecting
+                | Surface::LiveLostTx
+                | Surface::LiveLostReconnected
+                | Surface::LiveGap
+                | Surface::LiveRoEnforced
+                | Surface::LiveSshRo
         )
     }
 
@@ -280,6 +344,18 @@ impl Surface {
             Surface::CapsuleUnsupported => ("hacivat-ui/src/capsule.rs:", Some("legacy")),
             Surface::UnencryptedPopover => ("hacivat-ui/src/explain.rs:", None),
             Surface::ToastStickyDemo => ("hacivat-ui/src/toast.rs:", None),
+            // ## m2b-t22-live
+            Surface::LiveReconnecting | Surface::LiveSshRo => {
+                ("hacivat-ui/src/capsule.rs:", Some("orders-prod"))
+            }
+            Surface::LiveSshRw => ("hacivat-ui/src/capsule.rs:", Some("orders-staging")),
+            Surface::LiveIdle
+            | Surface::LiveLostTx
+            | Surface::LiveLostReconnected
+            | Surface::LiveGap => ("hacivat-ui/src/toast.rs:", None),
+            Surface::LiveRoEnforced | Surface::LiveRoGuarded | Surface::LiveRoPg13 => {
+                ("hacivat-app/src/connections/access_popover.rs:", None)
+            }
         }
     }
 
@@ -349,6 +425,17 @@ fn open_m2a(surface: Surface, window: &mut Window, cx: &mut App) {
         Surface::CapsuleFailed => capsule::failed_fixture(window, cx),
         Surface::CapsuleUnsupported => capsule::unsupported_fixture(window, cx),
         Surface::UnencryptedPopover => capsule::unencrypted_popover_fixture(window, cx),
+        // ## m2b-t22-live
+        Surface::LiveReconnecting => capsule::reconnecting_fixture(window, cx),
+        Surface::LiveIdle => capsule::idle_fixture(window, cx),
+        Surface::LiveLostTx => capsule::lost_tx_fixture(window, cx),
+        Surface::LiveLostReconnected => capsule::lost_reconnected_fixture(window, cx),
+        Surface::LiveGap => capsule::gap_fixture(window, cx),
+        Surface::LiveRoEnforced => capsule::ro_enforced_fixture(window, cx),
+        Surface::LiveRoGuarded => capsule::ro_guarded_fixture(window, cx),
+        Surface::LiveRoPg13 => capsule::ro_pg13_fixture(window, cx),
+        Surface::LiveSshRo => capsule::ssh_ro_fixture(window, cx),
+        Surface::LiveSshRw => capsule::ssh_rw_fixture(window, cx),
         // The widget owns no copy: the app's strings (the Copy as URL toast, the keyring
         // fallback as a long bullet that wraps, the toast's own Dismiss).
         Surface::ToastStickyDemo => hacivat_ui::toast::sticky_demo_fixture(
@@ -669,9 +756,11 @@ fn render_all_surfaces(names: &[String], all: bool) {
 
 fn the_matrix_covers_every_surface_locale_and_theme() {
     let all = shots();
-    // M1: 8 surfaces x 8 + 4 VF; M2a: 26 surfaces x 8 + the 4 dialog surfaces again at 1024x700.
-    assert_eq!(all.len(), 8 * 4 * 2 + 4 + 26 * 8 + 4 * 8);
+    // M1: 8 surfaces x 8 + 4 VF; M2a: 26 surfaces x 8 + the 4 dialog surfaces again at 1024x700;
+    // M2b T22: 10 surfaces x 8 at 1280x800 and again at 960x600.
+    assert_eq!(all.len(), 8 * 4 * 2 + 4 + 26 * 8 + 4 * 8 + 10 * 8 * 2);
     let names: Vec<String> = all.iter().map(|s| s.file_name(2.0)).collect();
+    assert!(names.contains(&"live-ssh-ro-dark-tr-XT-960x600@2x.png".to_string()));
     assert!(names.contains(&"shell-dark-en-1280x800@2x.png".to_string()));
     assert!(names.contains(&"shell-narrow-light-tr-XT-1024x700@2x.png".to_string()));
     assert!(names.contains(&"shell-demo-production-light-tr-1440x900@2x.png".to_string()));

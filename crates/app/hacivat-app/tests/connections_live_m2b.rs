@@ -235,6 +235,18 @@ fn sticky_toast(vcx: &VisualTestContext) -> session_toasts::ShownToast {
     toast
 }
 
+/// How the toast whose headline is `headline` is announced, as `toast.rs` declares it to
+/// assistive technology in the next frame (fix round 1, M3: never the seam's own rule).
+fn announced_role(vcx: &VisualTestContext, headline: &str) -> Option<Role> {
+    hacivat_ui::popover::a11y_record();
+    vcx.cx.update(|cx| cx.refresh_windows());
+    vcx.run_until_parked();
+    hacivat_ui::popover::a11y_take()
+        .into_iter()
+        .find(|d| plain(&d.name) == headline && matches!(d.role, Some(Role::Alert | Role::Status)))
+        .and_then(|d| d.role)
+}
+
 /// How many visible toasts read as message `id` (drawn without the localization).
 fn toasts_with(vcx: &VisualTestContext, id: &str) -> usize {
     toast_ids(vcx).iter().filter(|t| t.as_str() == id).count()
@@ -479,7 +491,10 @@ fn session_lost_toast_lists_lost_items(cx: &mut TestAppContext) {
     );
     assert_eq!(toast.actions.len(), 2);
     assert_eq!(toast.actions, ["Show details", "Dismiss"]);
-    assert_eq!(toast.role, Role::Alert);
+    assert_eq!(
+        announced_role(vcx, toast.title.as_deref().expect("a title")),
+        Some(Role::Alert)
+    );
     // A transaction was open, so nothing reconnected on its own: the title says so.
     assert_eq!(
         toast.title.as_deref(),
@@ -802,7 +817,10 @@ fn an_idle_transaction_is_a_notice(cx: &mut TestAppContext) {
         .collect();
     assert_eq!(notices.len(), 1);
     assert!(!notices[0].sticky);
-    assert_eq!(notices[0].role, Role::Status);
+    assert_eq!(
+        announced_role(vcx, &plain(&notices[0].lines[0])),
+        Some(Role::Status)
+    );
     assert!(plain(&notices[0].lines[0]).contains("open and idle for 60 min"));
 }
 
@@ -824,7 +842,8 @@ fn enforcement_gap_sticky_alert(cx: &mut TestAppContext) {
         },
     );
     settle_until(vcx, secs(2), || has_sticky_toast(vcx));
-    assert_eq!(sticky_toast(vcx).role, Role::Alert);
+    let title = sticky_toast(vcx).title.expect("a title");
+    assert_eq!(announced_role(vcx, &title), Some(Role::Alert));
     assert_eq!(
         sticky_toast(vcx).lines[0],
         t(vcx, ids::hv::CONN_GAP_TX_ENDED)
@@ -1156,7 +1175,8 @@ fn turkish_read_only_texts_fit(cx: &mut TestAppContext) {
     click(vcx, "capsule-access");
     // Turkish is longer: the popover's texts wrap inside its 300 px and none is cut. (The
     // single-line labels of the capsule and the sheet are checked with the platform's real
-    // text system by the shots harness: this test platform's glyph advances are not a font's.)
+    // text system by the shots harness's `live-*` surfaces, in en/tr/en-XA/tr-XT at 1280x800
+    // and 960x600: this test platform's glyph advances are not a font's.)
     let popover: Vec<_> = registry_frame(vcx)
         .into_iter()
         .filter(|r| r.path.contains("connections/access_popover.rs:"))
@@ -1217,6 +1237,282 @@ fn the_ssh_step_has_its_own_label(cx: &mut TestAppContext) {
         panic!("connecting");
     };
     assert_eq!(step.as_ref(), "SSH");
+}
+
+// ---- fix round 1 ------------------------------------------------------------------------------
+
+/// The widest capsule: production, enforced, through SSH, unencrypted.
+fn widest(cx: &mut TestAppContext, lang: &str) -> (&'static mut VisualTestContext, ProfileId) {
+    let (vcx, id) = shell_with(
+        cx,
+        lang,
+        FakeDriver::new(DbmsKind::Postgres),
+        ro(ssh(
+            pg("orders-prod", EnvTag::Production),
+            "bastion.acme.io",
+        )),
+    );
+    let mut live = info("16.4", AccessLabel::ReadOnlyEnforced, vec![]);
+    live.path = PathKind::Ssh;
+    live.via = Some("bastion.acme.io".into());
+    live.hops = 1;
+    live.tls.encrypted = false;
+    live.tls.version = None;
+    live.tls.verified = TlsVerified::No;
+    set_state(vcx, id, LiveState::Connected(Arc::new(live)));
+    (vcx, id)
+}
+
+/// Ruling I1: at the 960x600 minimum window the capsule degrades in its fixed order; the palette
+/// field keeps its minimum width and the trailing controls stay on the window.
+#[gpui::test]
+fn the_capsule_degrades_to_fit_the_minimum_window(cx: &mut TestAppContext) {
+    for lang in ["en", "tr"] {
+        let (vcx, _) = widest(cx, lang);
+        // Wide: everything shows. (This test platform's glyphs are wider than a font's, so
+        // "wide" is wider than a real screen; the shots harness checks the real sizes.)
+        vcx.simulate_resize(gpui::size(gpui::px(4000.0), gpui::px(900.0)));
+        settle_until(vcx, WAIT, || text_of(vcx, "capsule-text-latency").is_some());
+        assert!(text_of(vcx, "capsule-text-path").is_some());
+        assert!(text_of(vcx, "capsule-text-access").is_some());
+        // The minimum window: the latency goes first, then the path text, then the access text.
+        vcx.simulate_resize(gpui::size(gpui::px(960.0), gpui::px(600.0)));
+        settle_until(vcx, WAIT, || text_of(vcx, "capsule-text-latency").is_none());
+        wait_until_mut(vcx, "the palette field at its minimum or wider", |vcx| {
+            let palette = vcx.debug_bounds("palette-field");
+            palette.is_some_and(|b| b.size.width >= gpui::px(170.0) - gpui::px(0.5))
+        });
+        let palette = vcx
+            .debug_bounds("palette-field")
+            .expect("the palette field");
+        assert!(palette.right() <= gpui::px(960.0), "{palette:?}");
+        let capsule = vcx.debug_bounds("capsule").expect("the capsule");
+        assert!(
+            capsule.right() <= palette.left(),
+            "{capsule:?} then {palette:?}"
+        );
+        // The trailing controls stay on the window, unclipped.
+        for r in registry_frame(vcx)
+            .iter()
+            .filter(|r| r.path.contains("hacivat-ui/src/titlebar.rs:"))
+        {
+            assert!(!r.clipped, "{} is clipped ({lang})", r.text);
+        }
+        // The collapsed access segment stays a button that explains, named by its full label.
+        assert!(vcx.debug_bounds("capsule-access").is_some());
+        hacivat_ui::popover::a11y_record();
+        vcx.cx.update(|cx| cx.refresh_windows());
+        vcx.run_until_parked();
+        let declared = hacivat_ui::popover::a11y_take();
+        let label = t(vcx, ids::hv::CONN_ACCESS_RO_ENFORCED);
+        let access = declared
+            .iter()
+            .find(|d| d.role == Some(Role::Button) && plain(&d.name) == label)
+            .expect("the access segment is a button named by its label");
+        assert_eq!(
+            access.description.as_deref().map(plain),
+            Some(t(vcx, ids::hv::CMD_CONNECTION_EXPLAIN_ACCESS))
+        );
+        click(vcx, "capsule-access");
+        assert!(layer_open(vcx));
+        vcx.simulate_keystrokes("escape");
+        // The status bar keeps the full text.
+        assert_eq!(
+            status_text(vcx, "path"),
+            tf(vcx, |cx| tr(
+                cx,
+                ids::hv::CONN_PATH_SSH,
+                ids::hv::HvConnPathSsh {
+                    host: hacivat_l10n::Text("bastion.acme.io".into())
+                }
+            ))
+        );
+        // Wide again: everything comes back.
+        vcx.simulate_resize(gpui::size(gpui::px(4000.0), gpui::px(900.0)));
+        settle_until(vcx, WAIT, || text_of(vcx, "capsule-text-latency").is_some());
+        assert!(text_of(vcx, "capsule-text-access").is_some());
+        close_all_windows(vcx);
+    }
+}
+
+/// Ruling I2: the SSH route flag sits in the name column; the live meta keeps its widths.
+#[gpui::test]
+fn the_ssh_flag_never_squeezes_the_explorer_meta(cx: &mut TestAppContext) {
+    // Two live production read-only rows whose names are as long, one through SSH: the meta
+    // (latency, engine) is laid out exactly as wide in both; the SSH name gives the room.
+    let (vcx, a) = shell_with(
+        cx,
+        "tr",
+        FakeDriver::new(DbmsKind::Postgres),
+        ro(ssh(pg("orders-aaa", EnvTag::Production), "bastion.acme.io")),
+    );
+    let b = add_profile(vcx, ro(pg("orders-bbb", EnvTag::Production)));
+    let mut through_ssh = info("16.4", AccessLabel::ReadOnlyEnforced, vec![]);
+    through_ssh.path = PathKind::Ssh;
+    through_ssh.via = Some("bastion.acme.io".into());
+    set_state(
+        vcx,
+        b,
+        LiveState::Connected(Arc::new(info(
+            "16.4",
+            AccessLabel::ReadOnlyEnforced,
+            vec![],
+        ))),
+    );
+    set_state(vcx, a, LiveState::Connected(Arc::new(through_ssh)));
+    let route = vcx
+        .debug_bounds("explorer-row-route-0")
+        .expect("the route flag");
+    let row = vcx.debug_bounds("explorer-row-0").expect("the row");
+    assert!(route.left() > row.left());
+    let latency = |i: usize| {
+        registry_frame(vcx)
+            .into_iter()
+            .find(|r| r.path.ends_with(&format!("#explorer-row-latency-{i}")))
+            .unwrap_or_else(|| panic!("row {i} draws its latency"))
+    };
+    let engine = |i: usize| {
+        registry_frame(vcx)
+            .into_iter()
+            .find(|r| r.path.ends_with(&format!("#explorer-row-engine-{i}")))
+            .unwrap_or_else(|| panic!("row {i} draws its engine"))
+    };
+    assert_eq!(latency(0).painted_px, latency(1).painted_px);
+    assert_eq!(latency(0).truncated, latency(1).truncated);
+    assert_eq!(engine(0).painted_px, engine(1).painted_px);
+}
+
+/// M4: a connect that starts while a countdown sleeps gets its 50 ms clock at once.
+#[gpui::test]
+fn a_connect_clock_never_waits_for_a_countdown(cx: &mut TestAppContext) {
+    let (vcx, a) = shell_with(
+        cx,
+        "en",
+        FakeDriver::new(DbmsKind::Postgres),
+        pg("orders-staging", EnvTag::Staging),
+    );
+    let b = add_profile(vcx, pg("orders-dev", EnvTag::Dev));
+    vcx.cx.update(|cx| {
+        hacivat_app::connections::live::mirror_state(
+            cx,
+            a,
+            LiveState::Reconnecting {
+                attempt: 3,
+                next_in: Some(secs(4)),
+            },
+        )
+    });
+    vcx.run_until_parked();
+    let wait = || vcx.cx.read(hacivat_app::connections::live::tick_wait);
+    assert_eq!(wait(), Some(secs(1)));
+    // The countdown follows the executor clock.
+    vcx.executor().advance_clock(Duration::from_millis(1500));
+    vcx.run_until_parked();
+    assert_eq!(capsule_text(vcx, "next"), "in 3 s");
+    let progress = Progress {
+        trail: Vec::new(),
+        current: None,
+        started: std::time::Instant::now(),
+    };
+    vcx.cx.update(|cx| {
+        hacivat_app::connections::live::mirror_state(cx, b, LiveState::Connecting(progress))
+    });
+    vcx.run_until_parked();
+    assert_eq!(wait(), Some(hacivat_app::connections::live::TICK));
+}
+
+/// M7: a gap alert never waits behind two sticky session-lost toasts.
+#[gpui::test]
+fn a_gap_alert_takes_a_sticky_slot_at_once(cx: &mut TestAppContext) {
+    let (vcx, a) = shell_with(
+        cx,
+        "en",
+        FakeDriver::new(DbmsKind::Postgres),
+        pg("orders-a", EnvTag::Dev),
+    );
+    let b = add_profile(vcx, pg("orders-b", EnvTag::Dev));
+    let c = add_profile(vcx, ro(pg("orders-c", EnvTag::Production)));
+    for p in [a, b] {
+        emit(
+            vcx,
+            ConnectionEvent::SessionLost {
+                profile: p,
+                lost: lost(true, false, false),
+            },
+        );
+    }
+    assert_eq!(shown(vcx).iter().filter(|s| s.sticky).count(), 2);
+    emit(
+        vcx,
+        ConnectionEvent::EnforcementGap {
+            profile: c,
+            reason: GapReason::WriteSucceeded,
+        },
+    );
+    let visible = shown(vcx);
+    assert!(visible.iter().any(|s| s.kind == "gap"), "{visible:?}");
+    assert_eq!(visible.iter().filter(|s| s.sticky).count(), 2);
+    // The demoted lost toast waits first in line and shows when a slot frees.
+    assert_eq!(vcx.cx.read(hacivat_ui::toast::ToastQueue::waiting), 1);
+}
+
+/// M8: a gap that changed data downgrades "enforced" to guarded until the connection changes.
+#[gpui::test]
+fn a_gap_that_changed_data_downgrades_the_enforced_label(cx: &mut TestAppContext) {
+    let (vcx, id) = connected_with(cx, AccessLabel::ReadOnlyEnforced, vec![]);
+    assert_eq!(
+        capsule_text(vcx, "access"),
+        t(vcx, ids::hv::CONN_ACCESS_RO_ENFORCED)
+    );
+    emit(
+        vcx,
+        ConnectionEvent::EnforcementGap {
+            profile: id,
+            reason: GapReason::CanaryAssigned,
+        },
+    );
+    assert_eq!(
+        capsule_text(vcx, "access"),
+        t(vcx, ids::hv::CONN_ACCESS_RO_GUARDED)
+    );
+    click(vcx, "capsule-access");
+    assert!(popover_text(vcx).contains("Read-only is guarded, not enforced"));
+    vcx.simulate_keystrokes("escape");
+    // A new connection is probed anew.
+    vcx.cx.update(|cx| {
+        hacivat_app::connections::live::mirror_state(
+            cx,
+            id,
+            LiveState::Connected(Arc::new(info(
+                "16.4",
+                AccessLabel::ReadOnlyEnforced,
+                vec![],
+            ))),
+        )
+    });
+    vcx.run_until_parked();
+    assert_eq!(
+        capsule_text(vcx, "access"),
+        t(vcx, ids::hv::CONN_ACCESS_RO_ENFORCED)
+    );
+}
+
+/// M9 and M10: one explanation at a time, and it closes when its connection ends.
+#[gpui::test]
+fn one_explanation_at_a_time_and_it_follows_the_connection(cx: &mut TestAppContext) {
+    let (vcx, id) = connected_with(cx, AccessLabel::ReadOnlyGuarded, vec![]);
+    click(vcx, "capsule-access");
+    assert!(run(vcx, "connection.explain_access"));
+    assert_eq!(layer_ids(vcx), ["popover"]);
+    set_state(
+        vcx,
+        id,
+        LiveState::Lost {
+            class: hacivat_proto::ErrClass::NetworkReset,
+        },
+    );
+    vcx.cx.update(|cx| cx.refresh_windows());
+    settle_until(vcx, WAIT, || !layer_open(vcx));
 }
 
 // ---- the damaged vault (T21 carry) ------------------------------------------------------------

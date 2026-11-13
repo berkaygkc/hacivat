@@ -924,7 +924,12 @@ impl Workspace {
         let keys: SharedString = shortcut_label(cx, PALETTE_ACTION)
             .unwrap_or_default()
             .into();
-        let mut capsule = Capsule::new(self.capsule_model(cx));
+        // ## m2b-t22-live (fix round 1, M5): what the read-only access segment does.
+        let mut capsule = Capsule::new(self.capsule_model(cx)).access_hint(tr(
+            cx,
+            ids::hv::CMD_CONNECTION_EXPLAIN_ACCESS,
+            NoArgs,
+        ));
         if let Some(on_segment) = hooks(cx).capsule_segment {
             capsule = capsule.on_segment(move |segment, anchor, window, cx| {
                 on_segment(segment, anchor, window, cx)

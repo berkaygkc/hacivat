@@ -15,12 +15,16 @@
 //!
 //! One toast of each kind per profile: a newer one replaces the older (two quick reconnects
 //! show one toast). Every text follows a language switch.
+//!
+//! Fix round 1: a gap alert is urgent (it never waits behind two session-lost toasts, M7),
+//! and a gap that changed data downgrades the profile's "enforced" label to guarded until its
+//! connection changes (M8: a write got past what the label promised).
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use hacivat_l10n::{Count, NoArgs, Text, ids};
-use hacivat_proto::ProfileId;
+use hacivat_proto::{AccessLabel, ProfileId};
 use hacivat_session::GapReason;
 use hacivat_session::LiveState;
 use hacivat_session::session::{LivenessPolicy, LostState};
@@ -47,6 +51,8 @@ enum Kind {
 struct SessionToasts {
     shown: HashMap<(ProfileId, Kind), u64>,
     idle: HashSet<ProfileId>,
+    /// Profiles whose read-only session let a write through (M8).
+    downgraded: HashSet<ProfileId>,
     /// What each toast says, for the tests (feature `test-support`).
     #[cfg(feature = "test-support")]
     record: Vec<(u64, &'static str, Toast)>,
@@ -290,7 +296,42 @@ pub(crate) fn gap(profile: ProfileId, reason: GapReason, cx: &mut App) {
     toast.title = Some(title);
     // No new hue (NOTES M2b cross-cutting #1): an ink alert glyph.
     toast.icon = Some(IconName::TriangleAlert);
+    // Fix round 1 (M7): a security alert is seen now, never queued behind sticky toasts.
+    toast.urgent = true;
     show(cx, profile, Kind::Gap, toast);
+    // Fix round 1 (M8): data changed on a read-only connection, so "enforced by the server"
+    // no longer holds for it.
+    if matches!(
+        reason,
+        GapReason::CanaryAssigned | GapReason::WriteSucceeded
+    ) {
+        cx.default_global::<SessionToasts>()
+            .downgraded
+            .insert(profile);
+        cx.refresh_windows();
+    }
+}
+
+/// The access label `profile`'s live connection shows: `access`, except that "enforced" reads
+/// guarded after a gap that changed data (M8).
+pub fn effective_access(cx: &App, profile: ProfileId, access: AccessLabel) -> AccessLabel {
+    let downgraded = cx
+        .try_global::<SessionToasts>()
+        .is_some_and(|t| t.downgraded.contains(&profile));
+    if downgraded && access == AccessLabel::ReadOnlyEnforced {
+        AccessLabel::ReadOnlyGuarded
+    } else {
+        access
+    }
+}
+
+/// `profile`'s connection changed (the live mirror): a new one is probed anew.
+pub(crate) fn clear_downgrade(cx: &mut App, profile: ProfileId) {
+    if let Some(t) = cx.try_global::<SessionToasts>()
+        && t.downgraded.contains(&profile)
+    {
+        cx.global_mut::<SessionToasts>().downgraded.remove(&profile);
+    }
 }
 
 // ## test seam (feature `test-support`)
@@ -316,15 +357,13 @@ pub struct ShownToast {
     pub lines: Vec<String>,
     pub actions: Vec<String>,
     pub sticky: bool,
-    /// How it is announced: `Alert` (sticky or an error) or `Status`.
-    pub role: hacivat_ui_core::gpui_surface::Role,
+    pub urgent: bool,
 }
 
 /// The session toasts still visible, oldest first, read in the current language (feature
 /// `test-support`).
 #[cfg(feature = "test-support")]
 pub fn shown(cx: &App) -> Vec<ShownToast> {
-    use hacivat_ui_core::gpui_surface::Role;
     let visible = ToastQueue::visible_ids(cx);
     let Some(t) = cx.try_global::<SessionToasts>() else {
         return Vec::new();
@@ -349,11 +388,7 @@ pub fn shown(cx: &App) -> Vec<ShownToast> {
                     .map(|a| (a.label)(cx).to_string())
                     .collect(),
                 sticky: toast.sticky,
-                role: if toast.sticky || toast.kind == ToastKind::Error {
-                    Role::Alert
-                } else {
-                    Role::Status
-                },
+                urgent: toast.urgent,
             }
         })
         .collect()
