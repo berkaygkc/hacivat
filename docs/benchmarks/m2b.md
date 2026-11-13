@@ -41,13 +41,12 @@ reading of E13 also wait for the PO.
 | E9 | Secrets: the vault on Linux CI, keyring CI on Linux and Windows, live keyring on the PO's Mac; no secret at rest outside the keyring or vault | **PASS (CI and Mac); post-demo grep PO-pending** | CI `vault-linux`, `keyring-linux`, `keyring-windows` green, each running its real test (section 3). `live_keyring_round_trip` x2 on this Mac: `ok`, `ok`, no dialog (section 4). Automated: `connections_toml_never_contains_a_secret`; the cross-surface flows assert that no password reaches `connections.toml`, Hacivat's `known_hosts` or a frame. The grep after the demo is in `po-demo-m2b.md` |
 | E10 | The Docker matrix in CI: `docker-pr` green on the PR; `docker-full` green nightly; every image pinned by digest | **PASS** (`docker-full` by manual dispatch) | `docker-pr` green on PR #3 (263 tests: 164 FakeDriver + 99 Docker); `docker-full` green on dispatch run 43476270529 (99/99, 56 binaries). `cargo xtask docker check-pins` ok locally and in both jobs. Scheduled workflows run only on the default branch, so "nightly" applies once M2 reaches `main`; until then a dispatch stands in (G8). Digests in section 6 |
 | E11 | Shots are clean, and the PO signs off the M2b surfaces and the Turkish strings | **PO-pending (harness half PASS)** | Section 7: 1012 shots rendered at `ce992cc` with 0 violations (checks a–f), 5/5 harness self-checks; CI's macOS `pseudo-screens` render also 1012/0. Against a render at the `m2a` tip (`a645c5f`, 308 shots): 200 identical (0.0000 %), 108 changed (all intended M2b changes, section 7), 704 new. Sign-off and the Turkish review are the PO's |
-| E12 | Gates are green: clippy `-D warnings`, the full test set, `check-deps` (with `GuardNotRuntimeFree`), `l10n check`, `tokens --check`, `cargo deny`, and `cargo tree -i aws-lc-rs` empty | **PASS locally; FAIL on CI** | Section 2: every line green on macOS. CI `build-test` fails on Windows (clippy: an import used only by a `#[cfg(unix)]` test) and on Linux and macOS (`mysql_async_is_the_vendored_copy` needs every platform's packages offline); `turkey-test` fails on the second. Findings G1 and G2 (section 3.2) |
+| E12 | Gates are green: clippy `-D warnings`, the full test set, `check-deps` (with `GuardNotRuntimeFree`), `l10n check`, `tokens --check`, `cargo deny`, and `cargo tree -i aws-lc-rs` empty | **PASS** (locally and on CI after the follow-up fixes) | Section 2 (local). CI: PR run 43512432001 on `m2b` @ `ffa78ea` is green, 14 jobs successful and 8 skipped by trigger (section 3.3). G1, G2 and the further Windows/Linux findings were fixed by the controller |
 | E13 | Budgets: first frame ≤ 500 ms and idle RSS ≤ 200 MB with no connection; idle RSS with one direct and one SSH connection recorded | **PASS (no connection); connected reading PO-pending** | `--smoke` x3: 245, 194, 208 ms and 108, 107, 108 MiB (section 4). `--smoke` cannot connect and the app does not reconnect at boot, so the one-direct-plus-one-SSH reading is the demo's post-check 2 |
 | E14 | Driver stream injection verified (§5.7): PostgreSQL over SSH channel streams, MySQL through the forwarder over SSH | **PASS** | `connect_matrix_direct_and_via_ssh` asserts `forwarded() == (engine != PostgreSQL)` on every SSH leg of every target; `mysql_over_ssh_uses_forwarder` (hacivat-session, in-process SSH server) |
 
 Summary: E1, E2, E3, E4, E8, E10 and E14 PASS. E5, E6, E7 and E9 pass their automated halves and wait
-for the demo. E11 and the connected half of E13 wait for the PO. **E12 fails on CI** until findings G1
-and G2 are fixed (two small test changes, section 3.2).
+for the demo. E11 and the connected half of E13 wait for the PO. E12 passed on CI once G1, G2 and the findings they had masked were fixed (section 3.3).
 
 ## 2. Step 2 gates (local, on `m2b-gate` at `ce992cc`)
 
@@ -143,6 +142,26 @@ authentication challenges locally with the user's own key, and the copy prefers 
   `ssh-import-menu` 16 (M2b). The macOS render of the same job is clean (1012, 0 violations), as is
   the local one. So this is the inherited Linux-harness problem with popup menus and alert dialogs,
   growing with each new popup surface, not an M2b regression. Owner: follow-up (Linux harness).
+
+### 3.3 After the gate: CI fixes and the green run (controller)
+
+The first runs stopped at G1 and G2, so each fix uncovered the next platform-specific failure.
+All were fixed on `m2b` and re-run on PR #3:
+
+| Commit | Finding | Kind |
+|---|---|---|
+| `9909839` | G1 Windows unused import (`pipeline_ssh.rs`); G2 `cargo metadata --filter-platform <host>` | test |
+| `e270506` | Windows dead `reset_probe` (cfg(unix)); Linux access-key runs split a menu label (`a11y.rs`); `manager_m2b` reconnect test waited a fixed number of yields | test |
+| `b6b5331`, `e429c58`, `bc54fae` | Windows: Unix-only helpers unused on other systems; the twelve M2b test files with `#[cfg(unix)]` cases allow `dead_code`/`unused_imports`/`unused_variables` on non-Unix only; SQLite dropped-request cancel test raced the blocking pool | test |
+| `3400918` | **Product, Windows:** the `ssh-keygen -R` command for a changed host key never showed (backslash paths refused); paths now use `/`, drive prefixes allowed | fix |
+| `ffa78ea` | **Product, Windows:** `is_network_path` treated a verbatim disk path (`\\?\C:\…`) as a share, so SQLite refused it; the parsed prefix now decides | fix |
+
+Also merged before the demo: `m2a` into `m2b` (`2362bdf`: P47 and the M2a demo-doc fix; G6).
+
+Final PR run **43512432001**: success. 14 jobs passed (build-test on macOS, Windows and Linux,
+turkey-test, docker-pr, launch-smoke ×3, switch ×2, cargo-deny, check-deps, l10n-check, tokens);
+8 were skipped because they run only on `schedule`/`workflow_dispatch` (their dispatch results are in
+section 3.1).
 
 ## 4. Smoke (E13) and the live keyring test (E9)
 
@@ -356,8 +375,8 @@ Owners: **PO**, **controller** (merge, push, Docker stack), **M3**, **M4**, **M8
 
 | Item | Owner | How |
 |---|---|---|
-| G1: Windows clippy, unused `IssueCode` import in `pipeline_ssh.rs` | follow-up (before merge) | section 3.2; then re-run `build-test (windows-2022)` |
-| G2: `mysql_async_is_the_vendored_copy` needs `--filter-platform` (or no `--offline`) | follow-up (before merge) | section 3.2; then re-run `build-test` x3 and `turkey-test` |
+| G1: Windows clippy, unused `IssueCode` import in `pipeline_ssh.rs` | **done** (`9909839`) | section 3.3 |
+| G2: `mysql_async_is_the_vendored_copy` needs `--filter-platform` (or no `--offline`) | **done** (`9909839`) | section 3.3 |
 | Run the 13-step demo and fill its table, including the E9 grep and the E13 connected RSS | PO | `docs/benchmarks/po-demo-m2b.md` |
 | Sign off the shots and the Turkish strings; then copy the macOS PNGs to `design/baselines/m2b/macos/` | PO, then any implementer | section 7 |
 | `m2b` lacks `m2a`'s last two commits: `a645c5f` (P47: global commands and menu items inert under a modal layer) and `977111d` (M2a demo doc). They merge cleanly (`git merge-tree`: no conflict). Merge `m2a` into `m2b` before the demo, so the new M2b dialogs get P47's menu greying | controller | `git merge origin/m2a` on `m2b` |
