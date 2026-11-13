@@ -455,7 +455,8 @@ fn new_dialog_is_640_and_focuses_host(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn tab_order_matches_the_mock_without_ssh(cx: &mut TestAppContext) {
+// ## m2b-t20-ssh: the mock's order now has the SSH disclosure between TLS and Advanced.
+fn tab_order_matches_the_mock(cx: &mut TestAppContext) {
     let vcx = open_new(cx, "en");
     assert_eq!(
         tab_walk(vcx, "url"),
@@ -473,6 +474,7 @@ fn tab_order_matches_the_mock_without_ssh(cx: &mut TestAppContext) {
             "password",
             "remember",
             "tls",
+            "ssh",
             "advanced",
             "test",
             "cancel",

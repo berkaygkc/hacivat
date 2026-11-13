@@ -13,7 +13,7 @@ use hacivat_net::{ClientCertPaths, TlsMode};
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_secrets::{AuthProviderId, Retention};
 use hacivat_session::pipeline::{IssueCode, ValidationIssue};
-use hacivat_session::profile::{Profile, ProfileEndpoint, TransportSpec, suggest_name};
+use hacivat_session::profile::{Profile, ProfileEndpoint, suggest_name};
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::capsule::{EnvKind, env_swatch_on_raised};
 use hacivat_ui::checkbox::Checkbox;
@@ -1089,11 +1089,10 @@ impl ConnectionDialog {
                 InlineNotice::new(NoticeIcon::Info).line(tr(cx, msg, NoArgs)),
             );
         }
-        for issue in self
-            .issues
-            .iter()
-            .filter(|i| self.issue_field(i, cx).is_none())
-        {
+        // ## m2b-t01-interfaces: the SSH section draws its own issues (Task 20, Q9).
+        for issue in self.issues.iter().filter(|i| {
+            self.issue_field(i, cx).is_none() && !super::ssh::owns_issue(&self.draft.profile, i)
+        }) {
             rows.push(
                 Kind::Row,
                 InlineNotice::new(NoticeIcon::Info).line(issue_text(cx, issue)),
@@ -1285,14 +1284,13 @@ impl ConnectionDialog {
         } else {
             self.render_server(&mut rows, theme, window, cx);
             self.render_auth(&mut rows, &p, theme, window, cx);
-            // ## m2b-t01-interfaces: the SSH section's hook (Task 20 decides when it shows).
-            if matches!(p.transport, TransportSpec::SshTunnel(_)) {
-                rows.push(
-                    Kind::Disclosure,
-                    super::ssh::section(&self.draft, window, cx),
-                );
-            }
             self.render_tls(&mut rows, &p, theme, window, cx);
+            // ## m2b-t01-interfaces: the SSH section's hook. Task 20: on every server form,
+            // between TLS and Advanced (the mock's order; its checkbox turns the tunnel on).
+            rows.push(
+                Kind::Disclosure,
+                super::ssh::section(&self.draft, window, cx),
+            );
             self.render_advanced(&mut rows, &p, theme, window, cx);
         }
         rows.into_column()
