@@ -13,6 +13,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use hacivat_driver::ServerInfo;
+use hacivat_driver::ViolationReason;
+use hacivat_driver::url::FieldId;
+use hacivat_l10n::ids::hv::HvConnErrRefusedReason as Refused;
 use hacivat_l10n::{
     ArgValue, Catalogs, Count, ExactDecimal, FormatInputs, IntoFluentArgs, L10n, MsgRef,
     NegotiationCtx, NoArgs, PrefSource, Sink, Text, build_runtime, ids, negotiate,
@@ -20,11 +23,14 @@ use hacivat_l10n::{
 use hacivat_net::{TlsSummary, TlsVerified};
 use hacivat_proto::ErrClass;
 use hacivat_secrets::AuthProviderId;
-use hacivat_session::pipeline::{ConnectError, StepOutcome, StepTrace, TrailStep};
+use hacivat_session::pipeline::{
+    ConnectError, IssueCode, StepOutcome, StepTrace, TrailStep, ValidationIssue,
+};
 use hacivat_session::{TestReport, TestWarning};
 use hacivat_ui::step_trail::{TrailA11y, TrailItem, TrailState};
 use hacivat_ui_core::gpui_surface::{App, Global, SharedString};
 
+use crate::connections::dialog::form::tls_label;
 use crate::l10n_global::L10nGlobal;
 
 /// Renders messages for one sink: the UI (the installed chain, isolated placeables) or an
@@ -506,6 +512,8 @@ pub(crate) fn tech_rows(f: &Fmt, e: &ConnectError) -> Vec<(&'static str, String,
         f.t(ids::hv::CONN_ERR_CLASS, NoArgs),
         e.class.id().to_string(),
     ));
+    // ## m2a-demo-extra: what stopped the connect before any I/O, named.
+    rows.extend(e.issues.iter().map(|i| issue_row(f, e, i)));
     if let Some(code) = error_code(e) {
         rows.push(("code", f.t(ids::hv::CONN_ERR_CODE, NoArgs), code));
     }
@@ -530,6 +538,91 @@ pub(crate) fn tech_rows(f: &Fmt, e: &ConnectError) -> Vec<(&'static str, String,
         ),
     ));
     rows
+}
+
+// ## m2a-demo-extra
+/// The technical details' row of an issue that stopped the connect before anything was sent
+/// (`config.invalid`): a refused property names its key and why, a refused SQLite file names
+/// the file, and any other issue says what is wrong, as the connection dialog does.
+fn issue_row(f: &Fmt, e: &ConnectError, issue: &ValidationIssue) -> (&'static str, String, String) {
+    let refused = |name: &str, reason: Refused| {
+        f.t(
+            ids::hv::CONN_ERR_REFUSED,
+            ids::hv::HvConnErrRefused {
+                name: Text(name.to_string()),
+                reason,
+            },
+        )
+    };
+    let property = f.t(ids::hv::CONN_ERR_PROPERTY, NoArgs);
+    match &issue.code {
+        IssueCode::OptionRejected { key, reason } => {
+            let reason = match reason {
+                ViolationReason::UnknownOption => Refused::Unknown,
+                ViolationReason::DoubleEncoding => Refused::Encoding,
+                ViolationReason::QuarantinedScript => Refused::Script,
+                ViolationReason::PathOutsideRoots => Refused::Path,
+                ViolationReason::AlwaysDenied => Refused::Denied,
+            };
+            ("property", property, refused(key, reason))
+        }
+        IssueCode::OptionSecret { key } => ("property", property, refused(key, Refused::Secret)),
+        IssueCode::PathRefused if issue.field == Some(FieldId::File) && e.args.file.is_some() => {
+            let file = e.args.file.as_deref().unwrap_or_default();
+            (
+                "path",
+                f.t(ids::hv::CONN_ERR_PATH, NoArgs),
+                refused(file, Refused::Path),
+            )
+        }
+        code => (
+            "problem",
+            f.t(ids::hv::CONN_ERR_PROBLEM, NoArgs),
+            issue_sentence(f, code),
+        ),
+    }
+}
+
+/// The dialog's sentence for an issue (`hv-conn-issue-*`).
+fn issue_sentence(f: &Fmt, code: &IssueCode) -> String {
+    let msg = match code {
+        IssueCode::NameMissing => ids::hv::CONN_ISSUE_NAME_MISSING,
+        IssueCode::HostMissing => ids::hv::CONN_ISSUE_HOST_MISSING,
+        IssueCode::HostInvalid => ids::hv::CONN_ISSUE_HOST_INVALID,
+        IssueCode::PortInvalid => ids::hv::CONN_ISSUE_PORT_INVALID,
+        IssueCode::FileMissing => ids::hv::CONN_ISSUE_FILE_MISSING,
+        IssueCode::PathRefused => ids::hv::CONN_ISSUE_PATH_REFUSED,
+        IssueCode::CreateAndReadOnly => ids::hv::CONN_ISSUE_CREATE_AND_READ_ONLY,
+        IssueCode::TransportUnavailable => ids::hv::CONN_ISSUE_TRANSPORT_UNAVAILABLE,
+        IssueCode::TlsCaUnreadable => ids::hv::CONN_ISSUE_TLS_CA_UNREADABLE,
+        IssueCode::TlsCertUnreadable => ids::hv::CONN_ISSUE_TLS_CERT_UNREADABLE,
+        IssueCode::TlsKeyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_ENCRYPTED,
+        IssueCode::TlsModeUnsupported { mode } => {
+            return f.t(
+                ids::hv::CONN_ISSUE_TLS_MODE_UNSUPPORTED,
+                ids::hv::HvConnIssueTlsModeUnsupported {
+                    mode: Text(f.t(tls_label(*mode), NoArgs)),
+                },
+            );
+        }
+        IssueCode::OptionRejected { key, .. } => {
+            return f.t(
+                ids::hv::CONN_ISSUE_OPTION_REJECTED,
+                ids::hv::HvConnIssueOptionRejected {
+                    key: Text(key.clone()),
+                },
+            );
+        }
+        IssueCode::OptionSecret { key } => {
+            return f.t(
+                ids::hv::CONN_ISSUE_OPTION_SECRET,
+                ids::hv::HvConnIssueOptionSecret {
+                    key: Text(key.clone()),
+                },
+            );
+        }
+    };
+    f.t(msg, NoArgs)
 }
 
 // ---- the copies --------------------------------------------------------------------------------

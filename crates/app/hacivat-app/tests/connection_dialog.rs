@@ -501,7 +501,7 @@ fn paste_url_into_host_fills_tints_and_explains(cx: &mut TestAppContext) {
             "The password was taken out of the URL. It goes to the Keychain when you save.",
             "sslmode=verify-full became Encryption: Verify full",
             "application_name=hv became Application name",
-            "foo=bar kept as an extra property"
+            "foo=bar isn't a connection option for PostgreSQL, so it was left out"
         ]
     );
     vcx.executor().advance_clock(Duration::from_millis(1840));
@@ -1114,10 +1114,13 @@ fn closing_removes_the_dialog_layer_even_under_another_layer(cx: &mut TestAppCon
 #[gpui::test]
 fn rebuilding_extra_rows_drops_their_subscriptions(cx: &mut TestAppContext) {
     let vcx = open_new(cx, "en");
-    paste_into(vcx, "url", "postgres://u@db.acme.io/shop?foo=1&bar=2");
+    // An option a pasted URL may set, so the paste builds a row.
+    let url = "postgres://u@db.acme.io/shop?target_session_attrs=any";
+    paste_into(vcx, "url", url);
+    assert_eq!(extra_key_texts(vcx), ["target_session_attrs"]);
     let first = read(vcx, |d, _| d.subscription_count());
     for _ in 0..3 {
-        paste_into(vcx, "url", "postgres://u@db.acme.io/shop?foo=1&bar=2");
+        paste_into(vcx, "url", url);
     }
     assert_eq!(read(vcx, |d, _| d.subscription_count()), first);
 }
@@ -1491,4 +1494,89 @@ fn the_url_rows_typed_text_keeps_the_users_origin(cx: &mut TestAppContext) {
         read(vcx, |d, _| d.profile().origin.clone()),
         hacivat_proto::Origin::UserTyped
     );
+}
+
+// ## m2a-demo-extra
+
+/// The PO demo's URL (step 2): `foo` is no PostgreSQL option, and a pasted URL is an import
+/// (I5), so DRV-05 would refuse it. The notice says it was left out (still five lines), no
+/// extra row is added, and Save and connect goes through (step 3).
+#[gpui::test]
+fn a_pasted_parameter_the_import_rule_refuses_is_left_out_and_said_so(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    paste_into(
+        vcx,
+        "host",
+        "postgres://hv_test:hv_test_pw@localhost:54317/orders?sslmode=prefer&application_name=demo&foo=bar",
+    );
+    assert_eq!(
+        notice_lines(vcx),
+        [
+            "Filled from the pasted URL.",
+            "The password was taken out of the URL. It goes to the Keychain when you save.",
+            "sslmode=prefer became Encryption: Auto",
+            "application_name=demo became Application name",
+            "foo=bar isn't a connection option for PostgreSQL, so it was left out"
+        ]
+    );
+    assert!(extra_key_texts(vcx).is_empty());
+    assert!(read(vcx, |d, _| d.profile().extra.is_empty()));
+    keys(vcx, &primary("enter"));
+    wait(vcx);
+    assert!(layer_ids(vcx).is_empty(), "saved, no blocking issue");
+    let (names, current, first, extra) = vcx.cx.read(|cx| {
+        let m = cx.global::<ConnectionsModel>();
+        let first = m.profiles().first().cloned().expect("a saved profile");
+        (
+            m.profiles()
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>(),
+            m.current(),
+            first.id,
+            first.extra.clone(),
+        )
+    });
+    assert_eq!(names.len(), 1);
+    assert_eq!(
+        current,
+        Some(first),
+        "the saved profile is the one connecting"
+    );
+    assert!(extra.is_empty(), "{extra:?}");
+}
+
+/// Text typed into the URL row keeps the user's origin, where any option is the user's own:
+/// `foo` is kept as an extra property, as before.
+#[gpui::test]
+fn a_typed_url_keeps_an_unknown_parameter_as_an_extra(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    set_field(vcx, "url", "postgres://u@db.acme.io/shop?foo=bar");
+    keys(vcx, "enter");
+    assert!(
+        notice_lines(vcx).contains(&"foo=bar kept as an extra property".to_string()),
+        "{:?}",
+        notice_lines(vcx)
+    );
+    assert_eq!(extra_key_texts(vcx), ["foo"]);
+}
+
+/// A refused property typed into an imported profile's extras is a blocking issue like any
+/// other (the M2a pattern: the save stops, the issue shows under its field, the section
+/// opens), never a save that fails at connect.
+#[gpui::test]
+fn a_refused_extra_of_an_imported_profile_blocks_the_save_inline(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    paste_into(vcx, "host", "postgres://u@localhost/shop");
+    click_selector(vcx, "disclosure-conn-advanced");
+    add_extra(vcx, "foo", "bar");
+    focus_field(vcx, "name");
+    keys(vcx, &primary("enter"));
+    wait(vcx);
+    assert_eq!(layer_ids(vcx), ["connection-dialog"]);
+    assert!(profile_names(vcx).is_empty());
+    let shown = issue_under(vcx, "app-name")
+        .expect("the issue is shown under Advanced")
+        .replace(['\u{2068}', '\u{2069}'], "");
+    assert_eq!(shown, "The property foo isn't allowed here.");
 }

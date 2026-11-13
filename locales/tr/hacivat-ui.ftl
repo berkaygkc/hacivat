@@ -820,3 +820,26 @@ hv-conn-toast-delete-secret = Bağlantı silindi, ancak kayıtlı parolası sist
 hv-conn-enc-ca-only = { $version } · CA doğrulandı
 # Review: PO
 hv-conn-issue-option-secret = { $key } özelliği bir parola taşıyor. Özelliği kaldırın, parolayı Parola alanına yazın.
+
+## m2a-demo-extra
+
+# Review: PO
+hv-conn-url-left-out = { $reason ->
+        [unknown] { $engine } için bir bağlantı seçeneği değil, bu yüzden alınmadı
+       *[refused] izin verilmiyor, bu yüzden alınmadı
+    }
+# Review: PO
+hv-conn-err-property = Özellik
+# Review: PO
+hv-conn-err-path = Yol
+# Review: PO
+hv-conn-err-problem = Sorun
+# Review: PO
+hv-conn-err-refused = { $name } — { $reason ->
+        [unknown] içe aktarılan bağlantılarda izin verilmiyor
+        [encoding] iki kez kodlanmış
+        [script] komut çalıştırıyor, içe aktarılan bağlantılarda izin verilmiyor
+        [secret] bir parola taşıyor; parolayı Parola alanına yazın
+        [path] { -brand-hacivat } bu yolu açmaz
+       *[denied] hiçbir zaman izin verilmiyor
+    }
