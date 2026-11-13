@@ -513,7 +513,7 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
 :root, :root[data-theme="dark"] { --syn-cm:#828A96; }
 :root[data-theme="light"] { --syn-cm:#7C7C86; }
 .sql { margin:0; font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); }
-.sql .sl { white-space:pre-wrap; overflow-wrap:anywhere; }
+.sql .sl { white-space:pre-wrap; overflow-wrap:anywhere; padding-left:2ch; text-indent:-2ch; }   /* wrapped continuations hang 2ch (N2) */
 .sql .sl + .sl { margin-top:4px; }
 .sql .kw { color:var(--syn-kw); }
 .sql .str { color:var(--syn-str); }
@@ -532,7 +532,18 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
 
 /* Keyboard-interactive: server text in its own field, prompts stacked (labels are server text too) */
 .srv .cap2 { color:var(--text-2); font-size:12px; margin-bottom:4px; }
-.srv { max-height:160px; overflow-y:auto; }      /* a hostile or chatty server can't push the prompts out of the dialog */
+/* The caption stays put; only the server's text scrolls, capped at 119px = 7 mono lines (the whole inset stays ≤ 160px),
+   with M2a's 4px seam-strong thumb (N4). A hostile or chatty server can't push the prompts out of the dialog. */
+.srvscroll { max-height:119px; overflow-y:auto; padding-right:6px; }
+/* M2a's scroll thumb (DESIGN.md "Minimum window"): 4px, seam-strong, radius 3, no track */
+.srvscroll::-webkit-scrollbar, .pop .pbody::-webkit-scrollbar { width:4px; }
+.srvscroll::-webkit-scrollbar-track, .pop .pbody::-webkit-scrollbar-track { background:transparent; }
+.srvscroll::-webkit-scrollbar-thumb, .pop .pbody::-webkit-scrollbar-thumb { background:var(--seam-2); border-radius:3px; }
+/* Popover height cap (N5): title and Copy SQL stay in view, the body scrolls */
+.pop { display:flex; flex-direction:column; }
+.pop > b { flex:none; }
+.pop .pbody { flex:1 1 auto; min-height:0; overflow-y:auto; margin-right:-6px; padding-right:6px; }
+.pop .pacts { flex:none; margin-top:6px; }
 .srvtext { font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); white-space:pre-wrap; overflow-wrap:anywhere; }
 .srvtext + .srvtext { margin-top:4px; color:var(--text-2); }
 .srvtext.none { font-family:"Source Sans 3", system-ui, sans-serif; font-size:12.5px; color:var(--text-2); }
@@ -994,6 +1005,7 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
   "ro-why":"Why",
   "ro-pop-enf-title":"Read-only, enforced by the server",
   "ro-pop-enf-body":"The role {user} can only read here. The server itself refuses writes, whatever runs in Hacivat.",
+  "ro-pop-enf-temp":"TEMP alone doesn't weaken enforcement, so the label stays enforced.",
   "ro-pop-g-title":"Read-only is guarded, not enforced",
   "ro-pop-g-body":"The role {user} isn't limited to reading here, so Hacivat stops writes itself: it checks every statement and runs it read-only.",
   "ro-pop-g-limit":"That catches mistakes. Only a read-only role on the server is a hard guarantee.",
@@ -1012,7 +1024,7 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
   "ro-warn-execute-server-program":"It can run programs on the database server.",
   "ro-warn-signal-backend":"It can cancel or end other sessions.",
   "ro-warn-write-privileges":"It can change data in some tables.",
-  "ro-warn-temp-privilege":"It can create temporary tables. Read-only transactions block them, so the label stays enforced.",
+  "ro-warn-temp-privilege":"It can create temporary tables, which read-only transactions block.",
   "ro-warn-egress-extension":"The {name} extension can reach other servers.",
   "ro-warn-role-grant-not-expanded":"Other roles are granted to it, and Hacivat can't see what they allow.",
   "ro-warn-unparsed":"Hacivat couldn't read its privileges.",
@@ -1117,6 +1129,7 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
   "ro-why":"Neden",
   "ro-pop-enf-title":"Salt okunur, sunucu tarafından zorunlu",
   "ro-pop-enf-body":"{user} rolü burada yalnızca okuyabilir. Hacivat'ta ne çalışırsa çalışsın, yazmaları sunucunun kendisi reddeder.",
+  "ro-pop-enf-temp":"Tek başına TEMP yetkisi zorunluluğu zayıflatmaz; etiket zorunlu kalır.",
   "ro-pop-g-title":"Salt okunurluk korumalı, zorunlu değil",
   "ro-pop-g-body":"{user} rolü burada yalnızca okumayla sınırlı değil; bu yüzden yazmaları Hacivat kendisi durdurur: her ifadeyi denetler ve salt okunur çalıştırır.",
   "ro-pop-g-limit":"Bu, hataları yakalar. Kesin güvence ancak sunucudaki salt okunur bir rolle sağlanır.",
@@ -1135,7 +1148,7 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
   "ro-warn-execute-server-program":"Veritabanı sunucusunda program çalıştırabilir.",
   "ro-warn-signal-backend":"Başka oturumları iptal edebilir ya da sonlandırabilir.",
   "ro-warn-write-privileges":"Bazı tablolardaki verileri değiştirebilir.",
-  "ro-warn-temp-privilege":"Geçici tablo oluşturabilir. Salt okunur işlemler bunu engeller; etiket zorunlu kalır.",
+  "ro-warn-temp-privilege":"Geçici tablo oluşturabilir; salt okunur işlemler bunları engeller.",
   "ro-warn-egress-extension":"{name} eklentisi başka sunuculara erişebilir.",
   "ro-warn-role-grant-not-expanded":"Ona başka roller verilmiş; Hacivat bunların neye izin verdiğini göremiyor.",
   "ro-warn-unparsed":"Hacivat yetkilerini okuyamadı.",
@@ -1202,7 +1215,7 @@ const SEED = [
   { id:"orders-prod", engine:"pg", ver:"16.4", env:"production", ro:"enforced", host:"db-prod-eu.acme.io", port:5432, db:"orders", user:"app_ro", ret:"forever", tls:"verified", ssh:SSH_PROD, lat:31 },
   { id:"billing-prod", engine:"mysql", ver:"8.4.3", env:"production", ro:"enforced", host:"billing-db.acme.io", port:3306, db:"billing", user:"reader", ret:"never", tls:"verified", lat:22 },
   { id:"orders-staging", engine:"pg", ver:"16.4", env:"staging", ro:false, host:"db-stg.acme.io", port:5432, db:"orders", user:"deploy", ret:"pgpass", tls:"verified", lat:4 },
-  { id:"reports-test", engine:"pg", ver:"16.4", env:"test", ro:"guarded", warn:["superuser", "write-privileges"], host:"db-qa.acme.io", port:5432, db:"reports", user:"qa", ret:"session", tls:"pinned", lat:9 },
+  { id:"reports-test", engine:"pg", ver:"16.4", env:"test", ro:"guarded", warn:["superuser", "write-privileges", "temp-privilege"], host:"db-qa.acme.io", port:5432, db:"reports", user:"qa", ret:"session", tls:"pinned", lat:9 },
   { id:"hr-legacy", engine:"pg", ver:"15.8", env:"test", ro:false, host:"hr-db.acme.io", port:5432, db:"hr", user:"hr_app", ret:"forever", tls:"unverified", lat:11 },
   { id:"ci-mariadb", engine:"maria", ver:"11.4.4", env:"test", ro:"guarded", host:"10.0.4.21", port:3306, db:"ci", user:"ci", ret:"forever", tls:"none", lat:2 },
   { id:"orders-dev", engine:"pg", ver:"17.2", env:"dev", ro:false, host:"db-dev.acme.io", port:5432, db:"orders", user:"dev", ret:"forever", tls:"verified", lat:6 },
@@ -1229,15 +1242,16 @@ const KH_DEFAULT = "~/.ssh/known_hosts";
 const khName = (host, port) => +port === 22 ? host : `"[${host}]:${port}"`;
 const khCmd = (host, port, file = KH_DEFAULT) => `ssh-keygen ${file !== KH_DEFAULT ? `-f ${file} ` : ""}-R ${khName(host, port)}`;
 /* Server text is shown verbatim but made visible, like OpenSSH's strnvis: C0/C1 controls (ANSI escapes included) become
-   \ooo octal, and bidi controls become \u{…}, so a server can't draw colour, move the cursor or reorder text. \n is kept. */
-const vis = s => String(s).replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, c => "\\" + c.charCodeAt(0).toString(8).padStart(3, "0"))
+   \ooo octal, and bidi controls become \u{…}, so a server can't draw colour, move the cursor or reorder text. \n is kept.
+   A literal backslash is doubled first, so server text can't imitate an escape (N3). */
+const vis = s => String(s).replace(/\\/g, "\\\\").replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, c => "\\" + c.charCodeAt(0).toString(8).padStart(3, "0"))
   .replace(/[؜‎‏‪-‮⁦-⁩]/g, c => "\\u{" + c.charCodeAt(0).toString(16).toUpperCase() + "}");
 /* Keyboard-interactive rounds as a server sends them: name, instruction, prompts[{ text, echo }] (RFC 4256). Server text, verbatim. */
 const KBD = {
   otp:   { name:"Duo two-factor login", instruction:"Enter a passcode from Duo Mobile,\nor type \"push\" to get a notification on your phone.", prompts:[{ text:"Passcode or option (1-1): ", echo:true }] },
   three: { name:"ACME bastion sign-in", instruction:"All access to this host is logged.", prompts:[{ text:"Password: ", echo:false }, { text:"Verification code: ", echo:true }, { text:"Ticket or reason for access (logged): ", echo:true }] },
   blank: { name:"", instruction:"", prompts:[{ text:"Password: ", echo:false }] },
-  hostile: { name:"\u001b[1;32mHacivat: identity verified\u001b[0m", instruction:"Paste the code from ‮exe.edoc‬ below.\n" + "Line\n".repeat(14) + "(the server sent 16 lines)", prompts:[{ text:"Code:\u001b[8m ", echo:true }] },
+  hostile: { name:"\u001b[1;32mHacivat: identity verified\u001b[0m", instruction:"Paste the code from ‮exe.edoc‬ below. A literal \\033[0m stays visibly different.\n" + "Line\n".repeat(14) + "(the server sent 16 lines)", prompts:[{ text:"Code:\u001b[8m ", echo:true }] },
 };
 
 /* ═════════════ State ═════════════ */
@@ -1447,7 +1461,7 @@ function kbdHTML(L) {
     return `<div class="kp"><span class="kl">${esc(vis(p.text))}</span>${p.echo ? input(fk, L.v[fk] || "", { label: p.text }) : secretIn(L, fk, p.text)}</div>`;
   }).join("");
   const body = `<p class="lead">${esc(t("kbd-asks", { host }))}</p>
-    <div class="inset srv">${R.name || R.instruction ? `<div class="cap2">${esc(t("kbd-from-server"))}</div>` : ""}${server}</div>
+    <div class="inset srv">${R.name || R.instruction ? `<div class="cap2">${esc(t("kbd-from-server"))}</div>` : ""}<div class="srvscroll">${server}</div></div>
     ${prompts}
     <div class="metaline">${L.attempt > 1 ? `<span class="lft">${ic("circle-alert","i12")}<span>${esc(t("kbd-rejected"))}</span></span>` : ""}<span>${esc(t("kbd-attempt", { n: nf(L.attempt) }))}</span><span>${esc(t("kbd-not-kept"))}</span></div>`;
   return dlgShell("w480", t("kbd-title", { host }), body,
@@ -1599,15 +1613,22 @@ const sqlHTML = s => s.split("\n").map(sqlLine).join("");
 /* RoleWarning → ro-warn-* (Task 22's hv-conn-ro-warn-*). Egress names come from the probe's fixed list (dblink, postgres_fdw, pg_net, http). */
 const warnHTML = list => !list?.length ? "" : `<p class="anchor-note">${esc(t("ro-warn-head"))}</p><ul class="warns">${list.map(w => typeof w === "string"
   ? `<li>${esc(t("ro-warn-" + w))}</li>` : `<li><span>${th("ro-warn-" + w.id, { name: mono(w.name) })}</span></li>`).join("")}</ul>`;
+/* Title stays on top, the body scrolls (4px seam-strong thumb) and Copy SQL stays in view: the popover never grows past the
+   space between the title bar and the status bar (N5, the Overflow Rule). */
 function roPopHTML(k) {
-  const sqlBlock = kind => `<div class="inset"><div class="sql">${sqlHTML(REMEDIATION[kind])}</div></div><div class="pacts"><button class="btn" data-act="copySql" data-fk="ro-copy-snippet" data-kind="${kind}">${ic("copy","i12")}<span>${esc(t("ro-copy-sql"))}</span></button></div>`;
+  const copy = kind => `<div class="pacts"><button class="btn" data-act="copySql" data-fk="ro-copy-snippet" data-kind="${kind}">${ic("copy","i12")}<span>${esc(t("ro-copy-sql"))}</span></button></div>`;
+  const sqlBlock = kind => `<div class="inset"><div class="sql">${sqlHTML(REMEDIATION[kind])}</div></div>`;
   const lockCls = k.env === "production" ? ` style="color:var(--red)"` : "";
-  if (k.ro === "enforced")
-    return `<b id="popTitle"><span${lockCls}>${ic("lock","i12")}</span>${esc(t("ro-pop-enf-title"))}</b><p${k.warn?.length ? "" : ` style="margin:0"`}>${esc(t("ro-pop-enf-body", { user: k.user }))}</p>${warnHTML(k.warn)}`;
-  const title = `<b id="popTitle"><span${lockCls}>${ic("lock","i12")}</span>${esc(t("ro-pop-g-title"))}</b>`;
-  if (k.engine === "sqlite") return title + `<p style="margin:0">${esc(t("ro-pop-sqlite-body"))}</p>`;
-  if (k.engine === "maria") return title + `<p>${esc(t("ro-pop-maria-body"))}</p>${warnHTML(k.warn)}<p class="nofix">${esc(t("ro-pop-no-fix"))}</p>`;
-  return title + `<p>${esc(t("ro-pop-g-body", { user: k.user }))}</p>${warnHTML(k.warn)}<p>${esc(t("ro-pop-g-limit"))}</p><p class="anchor-note">${esc(t("ro-pop-g-fix"))}</p>${sqlBlock(k.engine === "pg" ? "pg" : "mysql")}`;
+  const shell = (titleKey, body, foot = "") => `<b id="popTitle"><span${lockCls}>${ic("lock","i12")}</span>${esc(t(titleKey))}</b><div class="pbody">${body}</div>${foot}`;
+  if (k.ro === "enforced") {
+    /* The "stays enforced" reassurance lives only here, never in the label-neutral finding (N1) */
+    const temp = k.warn?.includes("temp-privilege") ? `<p class="nofix">${esc(t("ro-pop-enf-temp"))}</p>` : "";
+    return shell("ro-pop-enf-title", `<p${k.warn?.length ? "" : ` style="margin:0"`}>${esc(t("ro-pop-enf-body", { user: k.user }))}</p>${warnHTML(k.warn)}${temp}`);
+  }
+  if (k.engine === "sqlite") return shell("ro-pop-g-title", `<p style="margin:0">${esc(t("ro-pop-sqlite-body"))}</p>`);
+  if (k.engine === "maria") return shell("ro-pop-g-title", `<p>${esc(t("ro-pop-maria-body"))}</p>${warnHTML(k.warn)}<p class="nofix">${esc(t("ro-pop-no-fix"))}</p>`);
+  const kind = k.engine === "pg" ? "pg" : "mysql";
+  return shell("ro-pop-g-title", `<p>${esc(t("ro-pop-g-body", { user: k.user }))}</p>${warnHTML(k.warn)}<p>${esc(t("ro-pop-g-limit"))}</p><p class="anchor-note">${esc(t("ro-pop-g-fix"))}</p>${sqlBlock(kind)}`, copy(kind));
 }
 function renderMenus() {
   let h = menuHTML();
@@ -1618,9 +1639,13 @@ function renderMenus() {
 }
 function placePop() {
   const p = $("pop"), a = $(S.pop.anchor); if (!p || !a) return;
-  const W = $("win").getBoundingClientRect(), r = a.getBoundingClientRect(), ph = p.offsetHeight;
-  let top = r.bottom - W.top + 6; if (top + ph > W.height - 30) top = r.top - W.top - ph - 6;
-  p.style.left = Math.max(8, Math.min(r.left - W.left - 8, W.width - 312)) + "px"; p.style.top = Math.max(44, top) + "px"; p.style.visibility = "visible";
+  const W = $("win").getBoundingClientRect(), r = a.getBoundingClientRect();
+  const minTop = 40 + 6, maxBottom = W.height - 24 - 6;          /* below the title bar, above the status bar */
+  p.style.maxHeight = (maxBottom - minTop) + "px";
+  const ph = p.offsetHeight;
+  let top = r.bottom - W.top + 6; if (top + ph > maxBottom) top = r.top - W.top - ph - 6;
+  top = Math.max(minTop, Math.min(top, maxBottom - ph));
+  p.style.left = Math.max(8, Math.min(r.left - W.left - 8, W.width - 312)) + "px"; p.style.top = top + "px"; p.style.visibility = "visible";
 }
 function renderToasts() {
   $("toasts").innerHTML = S.toasts.map(x => `<div class="toast${x.wide ? " wide" : ""}" role="${x.sticky ? "alert" : "status"}">${ic(x.icon || "info", x.ok ? "ok" : "")}<div class="tb">${x.html}</div><button class="x" data-act="dismissToast" data-id="${x.id}" title="${esc(t("lost-dismiss"))}">${ic("x","i12")}</button></div>`).join("");

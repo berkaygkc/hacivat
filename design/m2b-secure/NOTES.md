@@ -52,7 +52,7 @@ Clickable mock: `design/m2b-secure/index.html` (one file, one app, surface switc
 - 480 px dialog. Title "Sign in to bastion.acme.io"; subtitle: env mark, connection, SSH user, hop.
 - Lead line (ours): "bastion.acme.io asks:".
 - A mono inset captioned "Sent by the server, shown as received": the server's name (text), then its instruction (text-2), line breaks kept. When both are empty: "The server sent no name or instructions." in the UI face (no caption), so it can't be mistaken for server text.
-- **Verbatim but visible** (OpenSSH `strnvis` parity): in the name, the instruction and every prompt label, C0/C1 control characters (ANSI escapes included) render as `\ooo` octal (ESC → `\033`) and bidi controls (U+061C, U+200E/F, U+202A–202E, U+2066–2069) as `\u{202E}`; only `\n` is kept. The inset stops at 160 px and scrolls, so a hostile or chatty server can neither draw UI-looking text nor push the prompts out of the dialog (scenario "Hostile text").
+- **Verbatim but visible** (OpenSSH `strnvis` parity): in the name, the instruction and every prompt label, a literal backslash is doubled first (`\` → `\\`, as `strnvis` does), so server text can't imitate an escape. Then C0/C1 control characters (ANSI escapes included) render as `\ooo` octal (ESC → `\033`) and bidi controls (U+061C, U+200E/F, U+202A–202E, U+2066–2069) as `\u{202E}`; only `\n` is kept. The caption stays fixed at the top of the inset; only the server's text scrolls, capped at 119 px (7 mono lines, so the whole inset stays ≤ 160 px), with M2a's 4 px seam-strong scroll thumb (radius 3, no track). A hostile or chatty server can neither draw UI-looking text nor push the prompts out of the dialog (scenario "Hostile text").
 - One to three prompts, stacked: the prompt label verbatim in mono above a full-width field. `echo = false` gives a masked field with the eye toggle; `echo = true` gives a plain field.
 - Meta line: "Attempt 1 of 3" and "Answers go to this server only and aren't kept." After a rejected round, an ink alert glyph and "The server didn't accept the answers and asked again." come first.
 - Footer: Cancel (ghost), Continue (primary, ↵).
@@ -109,13 +109,13 @@ Clickable mock: `design/m2b-secure/index.html` (one file, one app, surface switc
   - Lock + "read-only (enforced by server role)" (`access-ro-enforced` → `hv-conn-access-ro-enforced`) when the role probe found a least-privilege role (PostgreSQL, MySQL).
   - Lock + "read-only (guarded)" otherwise, which is the shipped `hv-conn-access-ro-guarded`, reused and not duplicated. MariaDB and SQLite always show this.
   - The lock is red only on production; elsewhere it is text-2. The Explorer's lock flag follows the same rule (M2a drew every read-only lock red).
-- **Popover** (300 px, the M2a explanation popover anatomy) under the segment:
+- **Popover** (300 px, the M2a explanation popover anatomy) under the segment. **Height cap:** it never grows past the space between the title bar and the status bar (6 px clear of each); beyond that the body scrolls with the 4 px seam-strong thumb while the title stays on top and Copy SQL stays at the bottom (the Overflow Rule; at the 960 × 600 minimum window "All findings" scrolls).
   - **Enforced:** "Read-only, enforced by the server" and "The role app_ro can only read here. The server itself refuses writes, whatever runs in Hacivat."
-    - If the probe still reported `TempPrivilege`, the findings list follows with that one line. TEMP alone keeps the label enforced (Task 5, Q21; scenario "Enforced · TEMP").
+    - If the probe still reported `TempPrivilege`, the findings list follows with that one (label-neutral) line, then the enforced-only reassurance `ro-pop-enf-temp`: "TEMP alone doesn't weaken enforcement, so the label stays enforced." (Task 5, Q21; scenario "Enforced · TEMP"). That sentence appears nowhere else.
   - **Guarded (PostgreSQL, MySQL):**
     - the title "Read-only is guarded, not enforced";
     - why ("The role qa isn't limited to reading here, so Hacivat stops writes itself…");
-    - **the findings list**: "Found on this role:", then one line per `RoleWarning` from the probe;
+    - **the findings list**: "Found on this role:", then one line per `RoleWarning` from the probe. The realistic PostgreSQL case (scenario "Guarded · PG") lists Superuser, WritePrivileges and TempPrivilege, since PUBLIC holds TEMP by default;
     - the limit ("Only a read-only role on the server is a hard guarantee.") and the fix line;
     - the SQL inset showing exactly what Task 5's `remediation(engine)` returns, then Copy SQL, which copies that same string.
   - **MariaDB:**
@@ -135,7 +135,7 @@ Clickable mock: `design/m2b-secure/index.html` (one file, one app, surface switc
 | `ExecuteServerProgram` | `ro-warn-execute-server-program` | It can run programs on the database server. |
 | `SignalBackend` | `ro-warn-signal-backend` | It can cancel or end other sessions. |
 | `WritePrivileges` | `ro-warn-write-privileges` | It can change data in some tables. |
-| `TempPrivilege` | `ro-warn-temp-privilege` | It can create temporary tables. Read-only transactions block them, so the label stays enforced. |
+| `TempPrivilege` | `ro-warn-temp-privilege` | It can create temporary tables, which read-only transactions block. (Label-neutral: it appears in guarded and enforced popovers alike.) |
 | `EgressExtension(name)` | `ro-warn-egress-extension` | The `{name}` extension can reach other servers. |
 | `RoleGrantNotExpanded` | `ro-warn-role-grant-not-expanded` | Other roles are granted to it, and Hacivat can't see what they allow. |
 | `Unparsed` | `ro-warn-unparsed` | Hacivat couldn't read its privileges. |
@@ -155,7 +155,7 @@ MySQL:
 CREATE USER '<role>'@'%' IDENTIFIED BY '<password>';
 GRANT SELECT, SHOW VIEW ON <database>.* TO '<role>'@'%';
 ```
-In the inset each line is its own block (Fragment Mono 11.5/17), and blocks sit 4 px apart. A line longer than the inset wraps inside it (`pre-wrap`, breaking anywhere as a last resort), so a continuation reads as part of its statement; nothing is clipped and nothing scrolls sideways. Keywords use the syntax keyword colour and strings the syntax string colour. Placeholders are italic text-2. The `-- optional:` line is a comment, in the syntax comment colour and italic.
+In the inset each line is its own block (Fragment Mono 11.5/17), and blocks sit 4 px apart. A line longer than the inset wraps inside it (`pre-wrap`, breaking anywhere as a last resort) with a 2ch hanging indent (`padding-left: 2ch; text-indent: -2ch`; in GPUI, the wrapped line's indent), so a continuation such as `'<password>';` reads as part of its statement; nothing is clipped and nothing scrolls sideways. Copy SQL still copies Task 5's string unchanged. Keywords use the syntax keyword colour and strings the syntax string colour. Placeholders are italic text-2. The `-- optional:` line is a comment, in the syntax comment colour and italic.
 
 **Keyboard.**
 - The capsule access segment and the sheet's Access value are both Tab stops (in the capsule, the segment after the capsule itself). Enter or Space opens the popover.
@@ -205,11 +205,12 @@ All use harman tokens only and are reproducible in GPUI (solid fills, 1 px borde
 |---|---|
 | **Key comparison** | Two fingerprint insets stacked 8 px apart (panel / ground, 1 px seam-strong, radius 4, padding 8/10). Header: label 12.5 text-2, algorithm Fragment Mono 11.5 text, a ghost icon Copy on the right. Value Fragment Mono 11.5/17 text. An optional "Stored in" line under a 1 px seam (12 px text-2 + mono 11.5 text). Labels state facts (Stored key / Offered now, Pinned / Now); no hue distinguishes them. |
 | **Command inset** | The same inset with the command in Fragment Mono 11.5/17 text (wraps anywhere) and a ghost Copy command button on the right. |
-| **Server-text inset** | The same inset, max height 160 px with a vertical scroll. Caption 12 text-2 "Sent by the server, shown as received"; name in mono 11.5 text; instruction in mono 11.5 text-2; `white-space: pre-wrap`; controls and bidi marks shown escaped. Prompts below it: a mono 11.5 label (text) above a full-width TextInput, 10 px apart. |
+| **Server-text inset** | The same inset, at most 160 px tall. Caption 12 text-2 "Sent by the server, shown as received", fixed at the top. Below it, the server's text scrolls on its own (max 119 px, 4 px seam-strong thumb, radius 3): name in mono 11.5 text; instruction in mono 11.5 text-2; `white-space: pre-wrap`; backslashes doubled, controls and bidi marks shown escaped. Prompts below it: a mono 11.5 label (text) above a full-width TextInput, 10 px apart. |
 | **Hop route** | The M2a route row (12 px text-2, arrows 12 px). Each arrow is bound to the stop after it (no line ends on an arrow). The asking hop is boxed: 1 px seam-strong, radius 3, padding 0/4, text; other stops text-2. In errors each hop carries the step-trail marks: check 12 px green, ✕ 12 px ink with the host at weight 600, 7 px hollow seam-strong square for pending. |
 | **Validation lines** | 12 px rows, 3 px apart, under the field column: 7 px hollow seam-strong square (unmet), check 12 px green (met), ✕ 12 px ink with text ink (mismatch). |
 | **Findings list in the popover** | The sticky-toast list anatomy: a 12.5 text-2 lead ("Found on this role:"), then 12 px text rows, 2 px apart, each with a 3 px square text-2 bullet; literals in mono 11.5. |
-| **SQL inset in the popover** | Fingerprint-inset anatomy inside the 300 px popover. One Fragment Mono 11.5/17 block per line, 4 px apart, wrapping inside the inset. Keywords syntax-keyword, strings syntax-string, placeholders text-2 italic, comments syntax-comment italic. Copy SQL is a 22 px Button right-aligned under it. |
+| **SQL inset in the popover** | Fingerprint-inset anatomy inside the 300 px popover. One Fragment Mono 11.5/17 block per line, 4 px apart, wrapping inside the inset with a 2ch hanging indent. Keywords syntax-keyword, strings syntax-string, placeholders text-2 italic, comments syntax-comment italic. Copy SQL is a 22 px Button right-aligned under it. |
+| **Popover height cap** | The explanation popover is a column: title (fixed), body (scrolls, 4 px seam-strong thumb), Copy SQL row (fixed). Max height = window height − 40 px title bar − 24 px status bar − 2 × 6 px; it opens below its trigger, or above when that fits better, and never crosses either bar. |
 | **Capsule: access and idle segments** | Access: lock 12 px (red on production, text-2 otherwise) + label text; a Tab stop (focus ring: 1 px blue inset), and Enter or Space opens the popover. Idle: unplug 12 px + label, both text-2. |
 | **Sheet Access row** | The kv row; the value is a borderless button (lock 12 px + label 12.5 text, ellipsis), underline on hover, a Tab stop. |
 | **Linux window chrome** | No traffic lights; three 28 × 24 icon slots (minus, square, x at 12 px text-2) after the palette. Mock-only stand-in for the platform frame. |
@@ -356,6 +357,7 @@ None of the Turkish below has been signed off yet; the Status column says so for
 | `ro-why` | Why | Neden | PO review |
 | `ro-pop-enf-title` | Read-only, enforced by the server | Salt okunur, sunucu tarafından zorunlu | PO review |
 | `ro-pop-enf-body` | The role {user} can only read here. The server itself refuses writes, whatever runs in Hacivat. | {user} rolü burada yalnızca okuyabilir. Hacivat'ta ne çalışırsa çalışsın, yazmaları sunucunun kendisi reddeder. | PO review |
+| `ro-pop-enf-temp` | TEMP alone doesn't weaken enforcement, so the label stays enforced. | Tek başına TEMP yetkisi zorunluluğu zayıflatmaz; etiket zorunlu kalır. | PO review |
 | `ro-pop-g-title` | Read-only is guarded, not enforced | Salt okunurluk korumalı, zorunlu değil | PO review |
 | `ro-pop-g-body` | The role {user} isn't limited to reading here, so Hacivat stops writes itself: it checks every statement and runs it read-only. | {user} rolü burada yalnızca okumayla sınırlı değil; bu yüzden yazmaları Hacivat kendisi durdurur: her ifadeyi denetler ve salt okunur çalıştırır. | PO review |
 | `ro-pop-g-limit` | That catches mistakes. Only a read-only role on the server is a hard guarantee. | Bu, hataları yakalar. Kesin güvence ancak sunucudaki salt okunur bir rolle sağlanır. | PO review |
@@ -374,7 +376,7 @@ None of the Turkish below has been signed off yet; the Status column says so for
 | `ro-warn-execute-server-program` | It can run programs on the database server. | Veritabanı sunucusunda program çalıştırabilir. | PO review |
 | `ro-warn-signal-backend` | It can cancel or end other sessions. | Başka oturumları iptal edebilir ya da sonlandırabilir. | PO review |
 | `ro-warn-write-privileges` | It can change data in some tables. | Bazı tablolardaki verileri değiştirebilir. | PO review |
-| `ro-warn-temp-privilege` | It can create temporary tables. Read-only transactions block them, so the label stays enforced. | Geçici tablo oluşturabilir. Salt okunur işlemler bunu engeller; etiket zorunlu kalır. | PO review |
+| `ro-warn-temp-privilege` | It can create temporary tables, which read-only transactions block. | Geçici tablo oluşturabilir; salt okunur işlemler bunları engeller. | PO review |
 | `ro-warn-egress-extension` | The {name} extension can reach other servers. | {name} eklentisi başka sunuculara erişebilir. | PO review |
 | `ro-warn-role-grant-not-expanded` | Other roles are granted to it, and Hacivat can't see what they allow. | Ona başka roller verilmiş; Hacivat bunların neye izin verdiğini göremiyor. | PO review |
 | `ro-warn-unparsed` | Hacivat couldn't read its privileges. | Hacivat yetkilerini okuyamadı. | PO review |
@@ -400,4 +402,4 @@ None of the Turkish below has been signed off yet; the Status column says so for
 | `err-ssh-host-key-revoked-body` | Hacivat never connects with a revoked key. Ask the server's administrator for its current key. | Hacivat iptal edilmiş bir anahtarla asla bağlanmaz. Sunucunun güncel anahtarını yöneticisinden isteyin. | PO review |
 | `fix-review-host-key` | Review host key… | Sunucu anahtarını incele… | PO review |
 
-121 strings. Not included: mock-only labels (mock bar, Notes drawer) and literal data.
+122 strings. Not included: mock-only labels (mock bar, Notes drawer) and literal data.
