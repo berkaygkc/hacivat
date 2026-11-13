@@ -50,6 +50,12 @@ pub enum Question {
         name: String,
         prompt: SecretPrompt,
         attempt: u8,
+        // ## m2b-t21-prompts (fix round 2, R2)
+        /// The retention the typed SSH secret will be kept under, which the prompt's Remember
+        /// starts from: the saved profile's `ssh_retention`, or a choice made earlier in this
+        /// same connect. `None` where no choice applies (a Test, which stores nothing; a TLS
+        /// key passphrase, kept under the DB retention): the prompt then offers none.
+        remember: Option<hacivat_secrets::Retention>,
     },
     /// A keyboard-interactive round (one-time codes; Task 21).
     Keyboard {

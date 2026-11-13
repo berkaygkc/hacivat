@@ -9,13 +9,16 @@
 //!   user (and the route for an SSH hop);
 //! - after a rejected attempt, the ink alert line and "Attempt n of 3" right under the field.
 //!
-//! **Remember** (fix round 1, controller ruling on the reviewer's seam): for an SSH secret, a
+//! **Remember** (fix rounds 1 and 2, controller rulings): for an SSH secret of a connect, a
 //! 240 px Select over the dialog's retention choices (the vault's label for Forever when the
-//! vault holds Forever secrets), defaulting to the profile's `ssh_retention` (or the choice an
-//! earlier prompt of this profile made in this run). The answer is `Answer::SshSecret { secret,
-//! remember }`: the connect stores the typed secret under it and, after it worked, reports the
-//! new retention, which the app saves (`ConnectionsModel::apply_changes`), moving the other
-//! hops' stored secrets with it. A TLS key passphrase keeps a static row (the DB retention).
+//! vault holds Forever secrets). It starts from what the question says (`Question::Secret
+//! remember`): the saved profile's `ssh_retention`, or a choice made earlier in this same
+//! connect; nothing older, and the prompt keeps nothing itself. The answer is
+//! `Answer::SshSecret { secret, remember }`: the connect stores the typed secret under it and,
+//! after it worked, reports the new retention, which the app saves
+//! (`ConnectionsModel::apply_changes`), moving the other hops' stored secrets with it. A Test
+//! (the question offers no Remember) shows the static row "Never" and answers the plain
+//! secret: it stores nothing. A TLS key passphrase keeps a static row (the DB retention).
 //!
 //! Keys: the focus starts in the field; Enter (in the field or on Continue) answers with the
 //! secret, which becomes a `SecretString` at once while the field is cleared; an empty field
@@ -36,7 +39,7 @@ use hacivat_ui::popover::A11yNode;
 use hacivat_ui::select::Select;
 use hacivat_ui::text::{Label, TextSource, paragraph};
 use hacivat_ui_core::gpui_surface::{
-    App, AppContext as _, Context, Div, Entity, FocusHandle, Focusable, Global, InteractiveElement,
+    App, AppContext as _, Context, Div, Entity, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyDownEvent, ParentElement, Render, Role, Styled, Subscription, Window, div, px,
 };
 use hacivat_ui_core::theme::Theme;
@@ -71,17 +74,9 @@ pub struct SecretPromptView {
     continue_focus: FocusHandle,
     enter: EnterGate,
     _subscription: Subscription,
-    // ## m2b-t21-prompts (fix round 1): the Remember select (SSH secrets only).
+    // ## m2b-t21-prompts (fix round 1): the Remember select (SSH secrets of a connect only).
     remember: Option<Entity<Select>>,
-    profile_id: hacivat_proto::ProfileId,
 }
-
-/// The Remember an SSH secret prompt last answered with, per profile, in this run: a later
-/// prompt of the same profile starts from it ("the last answer wins").
-#[derive(Default)]
-struct LastRemember(Vec<(hacivat_proto::ProfileId, Retention)>);
-
-impl Global for LastRemember {}
 
 impl Focusable for SecretPromptView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -102,26 +97,19 @@ fn shown_path(path: &Path) -> String {
 
 impl SecretPromptView {
     fn new(
-        asked: (SecretPrompt, u8, hacivat_proto::ProfileId),
+        asked: (SecretPrompt, u8, Option<Retention>),
         profile: Option<Subject>,
         reply: oneshot::Sender<Answer>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (prompt, attempt, profile_id) = asked;
+        let (prompt, attempt, remember) = asked;
         let input = secret_input(cx);
-        // ## m2b-t21-prompts (fix round 1): Remember, for an SSH secret.
+        // ## m2b-t21-prompts (fix round 2, R2): Remember only where the question offers one (an
+        // SSH secret of a connect), starting from what the connect says: the saved profile's
+        // `ssh_retention`, or this same connect's earlier choice. Nothing is kept here.
         let ssh = !matches!(prompt, SecretPrompt::TlsKeyPassphrase { .. });
-        let remember = ssh.then(|| {
-            let start = cx
-                .try_global::<LastRemember>()
-                .and_then(|l| {
-                    l.0.iter()
-                        .find(|(id, _)| *id == profile_id)
-                        .map(|(_, r)| *r)
-                })
-                .or(profile.as_ref().map(|s| s.ssh_retention))
-                .unwrap_or(Retention::Forever);
+        let remember = remember.filter(|_| ssh).map(|start| {
             let selected = RETENTIONS.iter().position(|r| *r == start).unwrap_or(3);
             cx.new(|cx| {
                 let mut select = Select::new(retention_options(true), selected, cx);
@@ -155,13 +143,14 @@ impl SecretPromptView {
             enter: EnterGate::default(),
             _subscription: subscription,
             remember,
-            profile_id,
         }
     }
 
     // ## m2b-t21-prompts (fix round 1)
     /// Asks the core runtime once whether the keyring can store secrets (P36), as the dialog
     /// does: without one (and without the vault), Forever is offered disabled with its reason.
+    /// The selection never moves by itself (fix round 2): a bare Enter keeps the retention the
+    /// connect starts from, and a Forever put then falls back as in M2a (Q38).
     fn probe_keyring(&self, cx: &mut Context<Self>) {
         let (Some(select), Some(model)) =
             (self.remember.clone(), cx.try_global::<ConnectionsModel>())
@@ -175,16 +164,7 @@ impl SecretPromptView {
         });
         cx.spawn(async move |_, cx| {
             if let Ok(false) = rx.await {
-                select.update(cx, |s, cx| {
-                    s.set_options(retention_options(false), cx);
-                    if RETENTIONS.get(s.selected()) == Some(&Retention::Forever) {
-                        let fallback = RETENTIONS
-                            .iter()
-                            .position(|r| *r == Retention::UntilRestart)
-                            .unwrap_or(1);
-                        s.set_selected(fallback, cx);
-                    }
-                });
+                select.update(cx, |s, cx| s.set_options(retention_options(false), cx));
             }
         })
         .detach();
@@ -219,13 +199,7 @@ impl SecretPromptView {
         };
         let answer = match self.chosen(cx) {
             // ## m2b-t21-prompts (fix round 1): an SSH secret carries its Remember.
-            Some(remember) => {
-                let id = self.profile_id;
-                let last = cx.default_global::<LastRemember>();
-                last.0.retain(|(p, _)| *p != id);
-                last.0.push((id, remember));
-                Answer::SshSecret { secret, remember }
-            }
+            Some(remember) => Answer::SshSecret { secret, remember },
             None => Answer::Secret(secret),
         };
         self.answer(answer, window, cx);
@@ -274,20 +248,22 @@ impl SecretPromptView {
         }
     }
 
-    /// How the secret will be kept, as the Remember row shows it.
+    /// How the secret will be kept, as the static Remember row shows it. An SSH secret without
+    /// a Remember choice belongs to a Test (or a probe), which keeps nothing (fix round 2).
     fn retention(&self) -> Retention {
-        let profile = self.profile.as_ref();
         match self.prompt {
-            SecretPrompt::TlsKeyPassphrase { .. } => {
-                profile.map_or(Retention::Forever, |s| s.retention)
-            }
-            _ => profile.map_or(Retention::Forever, |s| s.ssh_retention),
+            SecretPrompt::TlsKeyPassphrase { .. } => self
+                .profile
+                .as_ref()
+                .map_or(Retention::Forever, |s| s.retention),
+            _ => Retention::Never,
         }
     }
 
-    /// The Remember row's value. An SSH secret: the Select (240 px) and a line saying the choice
-    /// applies to every hop. A TLS key passphrase: the retention's label and hint (the vault's
-    /// for Forever when the vault holds Forever secrets).
+    /// The Remember row's value. An SSH secret of a connect: the Select (240 px) and a line
+    /// saying the choice applies to every hop. Otherwise the retention's label and hint (the
+    /// vault's for Forever when the vault holds Forever secrets): a TLS key passphrase's DB
+    /// retention, or Never for an SSH secret of a Test.
     fn remember(&self, theme: &Theme, cx: &App) -> Div {
         let t = theme.tokens;
         let c = &t.colors;
@@ -560,6 +536,7 @@ pub(crate) fn open(q: Question, reply: oneshot::Sender<Answer>, window: &mut Win
         profile,
         prompt,
         attempt,
+        remember,
         ..
     } = q
     else {
@@ -569,7 +546,7 @@ pub(crate) fn open(q: Question, reply: oneshot::Sender<Answer>, window: &mut Win
     let subject = subject(cx, profile);
     let (answer_tx, answer_rx) = oneshot::channel();
     let view = cx.new(|cx| {
-        let v = SecretPromptView::new((prompt, attempt, profile), subject, answer_tx, window, cx);
+        let v = SecretPromptView::new((prompt, attempt, remember), subject, answer_tx, window, cx);
         v.probe_keyring(cx);
         v
     });

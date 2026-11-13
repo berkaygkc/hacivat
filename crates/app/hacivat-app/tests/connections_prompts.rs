@@ -27,8 +27,8 @@ use hacivat_net::ssh::{SshAuth, SshSpec};
 use hacivat_proto::{EnvTag, ErrClass, FixId, ProfileId};
 use hacivat_secrets::{
     AuthProviderId, BackendChoice, ExposeSecret, FallbackBackend, FileVault, MemoryBackend,
-    Retention, SecretBackend, SecretKey, SecretSlot, SecretStore, SecretString, VaultBackend,
-    VaultParams,
+    Retention, SecretBackend, SecretError, SecretKey, SecretSlot, SecretStore, SecretString,
+    VaultBackend, VaultParams,
 };
 use hacivat_session::pipeline::{
     Answer, ConnectError, ErrArgs, HostKeyMismatch, Interaction, Phase, Question, SecretPrompt,
@@ -245,7 +245,19 @@ fn kbd_question(name: &str, instructions: &str, prompts: &[(&str, bool)]) -> Que
     }
 }
 
+/// An SSH password question of a connect whose saved `ssh_retention` is Forever.
 fn ssh_password_question(profile: ProfileId, hop: u8, host: &str, attempt: u8) -> Question {
+    ssh_password_question_remembering(profile, hop, host, attempt, Some(Retention::Forever))
+}
+
+/// An SSH password question whose Remember starts from `remember` (`None`: a Test).
+fn ssh_password_question_remembering(
+    profile: ProfileId,
+    hop: u8,
+    host: &str,
+    attempt: u8,
+    remember: Option<Retention>,
+) -> Question {
     Question::Secret {
         profile,
         name: "orders-prod".into(),
@@ -255,6 +267,7 @@ fn ssh_password_question(profile: ProfileId, hop: u8, host: &str, attempt: u8) -
             user: "deploy".into(),
         },
         attempt,
+        remember,
     }
 }
 
@@ -803,7 +816,8 @@ fn ssh_secret_prompt_names_the_hop(cx: &mut TestAppContext) {
             ids::hv::HvConnSshSecretAttempt { n: Count(2) }
         )))
     );
-    // Remember starts on the profile's ssh_retention (Forever, the keyring's label here).
+    // Remember starts where the question says: the saved ssh_retention (Forever, the
+    // keyring's label here).
     assert!(
         select_texts(vcx).contains(&t(vcx, "hv-conn-ret-forever")),
         "{:?}",
@@ -854,9 +868,71 @@ fn ssh_secret_prompt_answers_the_chosen_remember(cx: &mut TestAppContext) {
             ..
         })
     ));
-    // The next prompt of this profile starts from that choice.
-    let _b = ask(vcx, ssh_password_question(id, 1, "bastion.acme.io", 1));
+    // Fix round 2 (R2): the prompt keeps nothing. The next question starts where it says: this
+    // same connect's choice, or the saved retention.
+    let b = ask(
+        vcx,
+        ssh_password_question_remembering(id, 1, "bastion.acme.io", 1, Some(Retention::ForSession)),
+    );
     assert!(select_texts(vcx).contains(&t(vcx, "hv-conn-ret-session")));
+    press(vcx, "escape");
+    assert!(matches!(&*b.get(), Some(Answer::Cancelled)));
+    let _c = ask(vcx, ssh_password_question(id, 1, "bastion.acme.io", 1));
+    assert!(select_texts(vcx).contains(&t(vcx, "hv-conn-ret-forever")));
+    assert!(!select_texts(vcx).contains(&t(vcx, "hv-conn-ret-session")));
+}
+
+/// Fix round 2 (R2, the review's r1-f and r1-g at the prompt): a bare Enter answers the
+/// retention the question starts from, whatever an earlier prompt chose; a Test's question
+/// (no Remember) shows the static Never row and answers the plain secret.
+#[gpui::test]
+fn a_bare_enter_answers_the_questions_remember(cx: &mut TestAppContext) {
+    let vcx = shell(cx);
+    let id = add_profile(vcx, ssh_profile("orders-prod"));
+    // A Test: no Select, "Never", a plain secret.
+    let test = ask(
+        vcx,
+        ssh_password_question_remembering(id, 0, "jump-eu.acme.io", 1, None),
+    );
+    assert!(select_texts(vcx).is_empty());
+    assert_eq!(text(vcx, "secret-remember"), t(vcx, "hv-conn-ret-never"));
+    type_into(vcx, "secret-input", "hv_test_pw");
+    press(vcx, "enter");
+    assert!(matches!(&*test.get(), Some(Answer::Secret(_))));
+    // A connect picks Forever explicitly (Tab to the Select, open, three rows down from Never).
+    let picked = ask(
+        vcx,
+        ssh_password_question_remembering(id, 0, "jump-eu.acme.io", 1, Some(Retention::Never)),
+    );
+    press(vcx, "tab");
+    press(vcx, "enter");
+    for _ in 0..3 {
+        press(vcx, "down");
+    }
+    press(vcx, "enter");
+    assert!(select_texts(vcx).contains(&t(vcx, "hv-conn-ret-forever")));
+    type_into(vcx, "secret-input", "hv_test_pw");
+    press(vcx, "enter");
+    assert!(matches!(
+        &*picked.get(),
+        Some(Answer::SshSecret {
+            remember: Retention::Forever,
+            ..
+        })
+    ));
+    // The user set Never again; the next connect asks from Never and a bare Enter keeps it.
+    let next = ask(
+        vcx,
+        ssh_password_question_remembering(id, 0, "jump-eu.acme.io", 1, Some(Retention::Never)),
+    );
+    assert!(select_texts(vcx).contains(&t(vcx, "hv-conn-ret-never")));
+    type_into(vcx, "secret-input", "hv_test_pw");
+    press(vcx, "enter");
+    assert!(matches!(
+        &*next.get(),
+        Some(Answer::SshSecret { secret, remember: Retention::Never })
+            if secret.expose_secret() == "hv_test_pw"
+    ));
 }
 
 /// A TLS key passphrase keeps the static row (the DB retention) and answers a plain secret.
@@ -873,6 +949,7 @@ fn tls_key_passphrase_prompt_has_no_remember_choice(cx: &mut TestAppContext) {
                 key: PathBuf::from("/keys/client.key"),
             },
             attempt: 1,
+            remember: None,
         },
     );
     assert_eq!(text(vcx, "secret-remember"), t(vcx, "hv-conn-ret-forever"));
@@ -896,6 +973,7 @@ fn ssh_passphrase_prompt_names_the_key_and_empty_enter_sends_nothing(cx: &mut Te
                 key: PathBuf::from("/keys/id_ed25519"),
             },
             attempt: 1,
+            remember: Some(Retention::Forever),
         },
     );
     assert!(text(vcx, "secret-title").contains("/keys/id_ed25519"));
@@ -1767,4 +1845,282 @@ fn an_open_edit_dialog_takes_an_ssh_retention_change(cx: &mut TestAppContext) {
         .read(|cx| cx.global::<ConnectionsModel>().get(id))
         .expect("saved");
     assert_eq!(saved.ssh_retention, Retention::UntilRestart);
+}
+
+// ---- fix round 2 ----------------------------------------------------------------------------
+
+/// A keyring stand-in for the slot-move tests (fix round 2, R1): `choice()` says Keyring, so no
+/// vault gate; the values live in a memory map. Once armed, the reads and puts its rules name
+/// fail, and every put and delete is recorded (`n` counts the armed puts of a key, from 0).
+#[derive(Default)]
+struct Flaky {
+    inner: MemoryBackend,
+    armed: std::sync::atomic::AtomicBool,
+    get_fails: std::sync::Mutex<Vec<(SecretKey, SecretError)>>,
+    put_fails: std::sync::Mutex<Vec<(SecretKey, usize, SecretError)>>,
+    writes: std::sync::Mutex<Vec<SecretKey>>,
+}
+
+impl Flaky {
+    fn arm(&self, gets: Vec<(SecretKey, SecretError)>, puts: Vec<(SecretKey, usize, SecretError)>) {
+        *self.get_fails.lock().unwrap() = gets;
+        *self.put_fails.lock().unwrap() = puts;
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn armed(&self) -> bool {
+        self.armed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The backend's value at `hop`, compared without printing it.
+    fn holds(&self, id: ProfileId, hop: u8, want: Option<&str>) -> bool {
+        let got = self.inner.get(&hop_key(id, hop)).expect("readable");
+        got.as_ref().map(|s| s.expose_secret()) == want
+    }
+}
+
+impl SecretBackend for Flaky {
+    fn get(&self, key: &SecretKey) -> Result<Option<SecretString>, SecretError> {
+        if self.armed()
+            && let Some((_, e)) = self
+                .get_fails
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(k, _)| k == key)
+        {
+            return Err(e.clone());
+        }
+        self.inner.get(key)
+    }
+
+    fn put(&self, key: &SecretKey, value: &SecretString) -> Result<(), SecretError> {
+        if self.armed() {
+            let mut writes = self.writes.lock().unwrap();
+            let n = writes.iter().filter(|k| *k == key).count();
+            writes.push(*key);
+            let fails = self.put_fails.lock().unwrap();
+            if let Some((_, _, e)) = fails.iter().find(|(k, at, _)| k == key && *at == n) {
+                return Err(e.clone());
+            }
+        }
+        self.inner.put(key, value)
+    }
+
+    fn delete(&self, key: &SecretKey) -> Result<(), SecretError> {
+        if self.armed() {
+            self.writes.lock().unwrap().push(*key);
+        }
+        self.inner.delete(key)
+    }
+
+    fn name(&self) -> &'static str {
+        "flaky"
+    }
+
+    fn choice(&self) -> Option<BackendChoice> {
+        Some(BackendChoice::Keyring)
+    }
+}
+
+/// A shell over a [`Flaky`] keyring holding [`ab_profile`] with a.example's and b.example's
+/// passwords (Forever) at hops 0 and 1.
+fn flaky_ab(cx: &mut TestAppContext) -> (&'static mut VisualTestContext, Arc<Flaky>, ProfileId) {
+    let flaky = Arc::new(Flaky::default());
+    let vcx = shell_with_backend(cx, "en", None, flaky.clone());
+    let id = add_profile(vcx, ab_profile());
+    for (hop, pw) in [(0, "pw-for-a"), (1, "pw-for-b")] {
+        let stored = secrets(vcx)
+            .put(
+                &hop_key(id, hop),
+                SecretString::from(pw),
+                Retention::Forever,
+            )
+            .expect("stored");
+        assert!(matches!(stored, hacivat_secrets::Stored::AsRequested));
+    }
+    (vcx, flaky, id)
+}
+
+fn a_hop() -> HopSpec {
+    hop("a.example", 22, SshAuth::Password)
+}
+
+fn b_hop() -> HopSpec {
+    hop("b.example", 22, SshAuth::Password)
+}
+
+/// Nothing changed: the order stays, each backend slot holds its own hop's password, and the
+/// in-memory fallback holds no stray copy.
+#[track_caller]
+fn nothing_moved(vcx: &VisualTestContext, flaky: &Flaky, id: ProfileId) {
+    assert_eq!(hosts_of(vcx, id), ["a.example", "b.example"], "order kept");
+    assert!(flaky.holds(id, 0, Some("pw-for-a")), "slot 0 is a's");
+    assert!(flaky.holds(id, 1, Some("pw-for-b")), "slot 1 is b's");
+    for hop in [0, 1] {
+        let slot = SecretSlot::SshPassword { hop };
+        assert!(
+            stored(vcx, id, slot, Retention::UntilRestart).is_none(),
+            "no stray copy"
+        );
+    }
+}
+
+fn unchanged(saved: &Result<ProfileId, hacivat_app::connections::SaveError>) -> bool {
+    matches!(
+        saved,
+        Err(hacivat_app::connections::SaveError::Unchanged(_))
+    )
+}
+
+/// R1 (a), the review's r1-b: hop 1's put is refused with a Q38-class error, so the store would
+/// keep it in memory only (Until restart) while the backend keeps b's password there. That is a
+/// failure: hop 0's write is undone, the fallback copy dropped, and the save says `Unchanged`.
+#[gpui::test]
+fn a_hop_move_whose_put_falls_back_changes_nothing(cx: &mut TestAppContext) {
+    let (vcx, flaky, id) = flaky_ab(cx);
+    flaky.arm(Vec::new(), vec![(hop_key(id, 1), 0, SecretError::Denied)]);
+    let saved = wait_task(vcx, save_task(vcx, id, vec![b_hop(), a_hop()]));
+    assert!(unchanged(&saved), "{saved:?}");
+    assert!(matches!(
+        saved,
+        Err(hacivat_app::connections::SaveError::Unchanged(
+            SecretError::Denied
+        ))
+    ));
+    nothing_moved(vcx, &flaky, id);
+}
+
+/// R1 (b), the review's r1-c: hop 0 replaced by a new host while hop 0's slot read is `Denied`
+/// (keychain access refused). The move stops before any write, so a.example's password never
+/// stays at hop 0 for x.example.
+#[gpui::test]
+fn a_hop_move_with_a_denied_read_writes_nothing(cx: &mut TestAppContext) {
+    let (vcx, flaky, id) = flaky_ab(cx);
+    flaky.arm(vec![(hop_key(id, 0), SecretError::Denied)], Vec::new());
+    let x = hop("x.example", 22, SshAuth::Password);
+    let saved = wait_task(vcx, save_task(vcx, id, vec![x, b_hop()]));
+    assert!(
+        matches!(
+            saved,
+            Err(hacivat_app::connections::SaveError::Unchanged(
+                SecretError::Denied
+            ))
+        ),
+        "{saved:?}"
+    );
+    assert!(flaky.writes.lock().unwrap().is_empty(), "nothing written");
+    nothing_moved(vcx, &flaky, id);
+}
+
+/// R1 (c): hop 1's put fails hard, and the undo's restore of hop 0 falls back (it would land in
+/// memory only, over b's password in the backend). The undo then clears hop 0 instead: never
+/// b's password at a.example's hop; the save says `Unchanged`.
+#[gpui::test]
+fn a_hop_move_whose_undo_falls_back_clears_the_slot(cx: &mut TestAppContext) {
+    let (vcx, flaky, id) = flaky_ab(cx);
+    flaky.arm(
+        Vec::new(),
+        vec![
+            (hop_key(id, 1), 0, SecretError::Backend("disk full".into())),
+            (hop_key(id, 0), 1, SecretError::Denied),
+        ],
+    );
+    let saved = wait_task(vcx, save_task(vcx, id, vec![b_hop(), a_hop()]));
+    assert!(unchanged(&saved), "{saved:?}");
+    assert_eq!(hosts_of(vcx, id), ["a.example", "b.example"], "order kept");
+    assert!(
+        flaky.holds(id, 0, None),
+        "hop 0 cleared, never b's password"
+    );
+    assert!(flaky.holds(id, 1, Some("pw-for-b")), "slot 1 is b's");
+    let slot = SecretSlot::SshPassword { hop: 0 };
+    assert!(
+        stored(vcx, id, slot, Retention::UntilRestart).is_none(),
+        "no stray copy"
+    );
+}
+
+fn saved_profile(vcx: &VisualTestContext, id: ProfileId) -> Arc<Profile> {
+    vcx.cx
+        .read(|cx| cx.global::<ConnectionsModel>().get(id))
+        .expect("saved")
+}
+
+/// R3, the review's r1-d: a connect's changes arriving while a hop move waits on the vault's
+/// unlock wait for it, then build from the saved profile: the hop edit, the CA file and the new
+/// SSH retention all survive, and the moved secrets follow both.
+#[gpui::test]
+fn changes_during_a_hop_move_wait_and_keep_the_hop_edit(cx: &mut TestAppContext) {
+    use hacivat_session::pipeline::ProfileChange;
+
+    let (vcx, vault) = shell_with_vault_state(cx, true);
+    let id = add_profile(vcx, ab_profile());
+    for (hop, pw) in [(0, "pw-for-a"), (1, "pw-for-b")] {
+        secrets(vcx)
+            .put(
+                &hop_key(id, hop),
+                SecretString::from(pw),
+                Retention::Forever,
+            )
+            .expect("stored in the vault");
+    }
+    vault.lock();
+    let saving = save_task(vcx, id, vec![b_hop(), a_hop()]);
+    settle_until(vcx, WAIT, || layer_open(vcx, "vault-dialog"));
+    let ca = PathBuf::from("/certs/ca.pem");
+    let applying = vcx.cx.update(|cx| {
+        ConnectionsModel::apply_changes(
+            cx,
+            id,
+            vec![
+                ProfileChange::SetCaFile(ca.clone()),
+                ProfileChange::SshRetention(Retention::UntilRestart),
+            ],
+        )
+    });
+    vcx.run_until_parked();
+    assert!(
+        saved_profile(vcx, id).tls.ca_file.is_none(),
+        "the changes wait for the move"
+    );
+    assert_eq!(saved_profile(vcx, id).ssh_retention, Retention::Forever);
+
+    type_into(vcx, "vault-unlock", MASTER);
+    press(vcx, "enter");
+    let saved = wait_task(vcx, saving);
+    assert!(saved.is_ok(), "{saved:?}");
+    let applied = wait_task(vcx, applying);
+    assert!(applied.is_ok(), "{applied:?}");
+    assert_eq!(
+        hosts_of(vcx, id),
+        ["b.example", "a.example"],
+        "the hop edit stays"
+    );
+    assert_eq!(
+        saved_profile(vcx, id).ssh_retention,
+        Retention::UntilRestart
+    );
+    assert_eq!(
+        saved_profile(vcx, id).tls.ca_file.as_deref(),
+        Some(ca.as_path())
+    );
+    let kept = |hop| {
+        stored(
+            vcx,
+            id,
+            SecretSlot::SshPassword { hop },
+            Retention::UntilRestart,
+        )
+    };
+    assert!(
+        kept(0).as_deref() == Some("pw-for-b"),
+        "b's password follows b"
+    );
+    assert!(
+        kept(1).as_deref() == Some("pw-for-a"),
+        "a's password follows a"
+    );
+    assert!(vault_pw_is(&vault, id, 0, None), "moved out of the vault");
+    assert!(vault_pw_is(&vault, id, 1, None), "moved out of the vault");
 }

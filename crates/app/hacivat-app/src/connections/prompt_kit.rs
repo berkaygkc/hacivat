@@ -500,7 +500,6 @@ pub(crate) struct Subject {
     /// `host:port` of the database (the engine's default port when none is set).
     pub(crate) database: String,
     pub(crate) retention: Retention,
-    pub(crate) ssh_retention: Retention,
 }
 
 /// The saved profile `id`, as a prompt shows it; `None` when it is not (or no longer) saved.
@@ -532,7 +531,6 @@ pub(crate) fn subject(cx: &App, id: ProfileId) -> Option<Subject> {
         hops,
         database,
         retention: p.retention,
-        ssh_retention: p.ssh_retention,
     })
 }
 

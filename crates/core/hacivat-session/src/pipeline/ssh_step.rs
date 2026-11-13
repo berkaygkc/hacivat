@@ -100,7 +100,12 @@ async fn open(cx: &mut StepCx) -> Result<Option<CleanupGuard>, ConnectError> {
         })
         .collect();
     let prompter = match &st.ix {
-        Interaction::Interactive(ui) => Some(PipelinePrompter::new(ui.clone(), &p)),
+        // ## m2b-t21-prompts (fix round 2, R2): only a Main connect stores typed secrets.
+        Interaction::Interactive(ui) => Some(PipelinePrompter::new(
+            ui.clone(),
+            &p,
+            st.purpose == Purpose::Main,
+        )),
         Interaction::Headless => None,
     };
     let req = TunnelRequest {

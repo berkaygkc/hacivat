@@ -77,6 +77,8 @@ fn all_m2b_questions() -> Vec<Question> {
                 user: "deploy".into(),
             },
             attempt: 1,
+            // ## m2b-t21-prompts (fix round 2): a connect's Remember.
+            remember: Some(Retention::Forever),
         },
         Question::Keyboard {
             profile,

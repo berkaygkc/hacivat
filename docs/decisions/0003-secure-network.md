@@ -830,6 +830,14 @@ the vault, the session overlay, the keyring CI and the deferrals.
   `apply_changes` after the connect (a save mid-connect would cancel it, RF5): the save moves
   every other hop's stored secrets to the new retention, behind the vault gate. The TLS key
   passphrase prompt keeps a static row (the DB retention).
+- **Where Remember starts (fix round 2, review R2).** The question says it:
+  `Question::Secret { remember }` is the saved profile's `ssh_retention`, or a choice made
+  earlier in the same connect (the next hop's prompt); a bare Enter answers exactly that. The
+  choice lives in that connect's `PipelinePrompter` and ends with it; the app's prompt keeps
+  nothing. A Test or a probe stores nothing, so its question has `remember: None`: the prompt
+  shows the static row "Never" and answers the plain secret, and nothing is recorded or
+  reported. So a profile set to Never is never stored Forever by a bare Enter, and an unsaved
+  draft's Test never chooses a retention for the profile.
 - **A Forever put waits for the vault (T1 review M7, Q38).** Unless the keyring or the memory
   backend holds Forever secrets, a save's queued job reads the vault's state on the blocking
   pool. Only when the vault is missing or locked does it ask the UI (Create or Unlock) and wait;
@@ -859,7 +867,35 @@ the vault, the session overlay, the keyring CI and the deferrals.
   profile and its slots as they were, and the save fails with `Unchanged`, which the dialog
   shows. So a secret is never on a hop it was not typed for, and a.example's password never
   reaches b.example. A second save of the same profile waits until the move is done. Moved
-  Forever secrets are labelled (P44) and a fallback shows the M2a toast (review m1).
+  Forever secrets are labelled (P44).
+- **The move is fail-closed (fix round 2, review R1).** Three cases that round 1 counted as
+  success are failures, undone, and the save fails with `Unchanged` and the reason:
+  - a put the store keeps elsewhere (`Stored::FellBackTo`, a Q38 fallback to Until restart): the
+    backend still holds the old value at that index, so it would come back on the wrong hop
+    after a restart. The undo gives the in-memory fallback back what it held;
+  - a read error other than `Unavailable` (no backend, nothing stored), `Denied` included: the
+    move stops before any write;
+  - an undo whose restore does not land as requested: the slot is cleared instead (backend and
+    memory), so the secret is lost and asked again rather than misplaced. The reason then says
+    so (`ssh-slot-rollback-cleared`, or `ssh-slot-rollback-failed` when even the clear failed).
+  The move never shows the fallback toast any more: there is nothing to fall back to.
+- **Changes wait for a pending move (fix round 2, review R3).** `apply_changes` (every change
+  kind: T19's pins, CA file and plaintext consent, and `SshRetention`) first waits for a pending
+  hop move of the profile and the save it leads to, then builds from the profile as stored then,
+  never from a copy read before. So a connect's changes that arrive while the move waits on the
+  vault's unlock keep the user's hop edit, and the edit keeps them.
+- **An open edit dialog takes `SshRetention` at once (fix round 1 follow-up; review n2).** It is
+  forwarded when the change is applied, before the re-save is done and whatever its outcome:
+  the re-save writes the profile even when a secret move fails, so the dialog and the stored
+  profile agree. If that re-save ever becomes refusable, the forward must wait for it.
+- **A failed retention move can leave the old entry (review n1).** Moving SSH secrets out of a
+  retention can fail (a locked vault when leaving Forever, the unlock declined): the connect's
+  retirement of the typed slots only logs it, and the app's re-save reports it. The old entry
+  then stays where it was, unused while the profile's retention differs, and it would be read
+  again if the user switched back to that retention later, perhaps after a hop edit made under
+  the other one. This is the M2a class of failed retention moves; a sweep of SSH slots kept
+  under a retention other than the current one, on the next unlocked save, is carried to a
+  later milestone.
 - **Reset needs the typed word and a regular file.** The Danger button stays disabled until
   the field equals `hv-conn-vault-reset-word` exactly (no casing, no trimming) and is never the
   default: Enter does nothing in the reset dialog. A symlink or any other non-file at
