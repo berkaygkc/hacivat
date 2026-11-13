@@ -429,3 +429,117 @@ carries the session. This is inherent to a loopback listener and is the same exp
   (`ForwarderMode::Tcp`, R18), so M2a creates no private `0700` socket directory; the unused
   `ConnectDeps::private_dir` and the boot's `fwd` directory are gone. The SSH transport in M2b
   brings one back where a driver can use a Unix socket.
+
+## m2b-t11 — hacivat-driver-sqlite
+
+**Two independent read-only controls.** The file's read-only mode (`Endpoint::File.read_only`
+or a `mode=ro` option) only opens the file `SQLITE_OPEN_READ_ONLY`, as in M2a. A read-only
+profile or session (`DriverConnect.read_only`, which the pipeline sets from the profile OR the
+session, and also passes on the endpoint) opens it read-only too and then hardens the
+connection. A read-write profile gets no authorizer and none of the settings below; M2a's
+defensive and untrusted-schema settings stay on every connection.
+
+**Paths.** `check_path` refuses `hacivat_net::is_network_path` first (two leading separators,
+`\??\`, UNC, device and `GLOBALROOT` prefixes, on every OS), before any file system call; then
+only an absolute path or `:memory:` reaches SQLite (M2a).
+
+**The hardened open** (`harden.rs`, after the header read), in this order, each setting read
+back so an ignored one fails the open (`RawErrorKind::Other`), never a silent weaker session:
+1. `SQLITE_OPEN_READ_ONLY` (the open flags);
+2. `SQLITE_DBCONFIG_DEFENSIVE`;
+3. `SQLITE_DBCONFIG_ENABLE_ATTACH_CREATE` and `_ENABLE_ATTACH_WRITE` off;
+4. `SQLITE_LIMIT_ATTACHED` 0, `LENGTH` 100,000,000, `SQL_LENGTH` 1 MiB, `VARIABLE_NUMBER`
+   32,766 (`hacivat_guard::sqlite_hardening`);
+5. `PRAGMA query_only = 1`;
+6. the authorizer: rusqlite's `AuthAction` mapped to `hacivat_guard::SqliteAction`, answered
+   with `sqlite_authorize`'s verdict. Every action code maps: the nine `CREATE_*` codes
+   (temp, view, trigger, index, virtual table) to `Create`, the nine `DROP_*` codes to `Drop`,
+   `REINDEX` and every `Unknown` code (0 `SQLITE_COPY`, codes past 33, a known code whose
+   arguments rusqlite did not expect) to `Other(code)`, and a variant a later rusqlite adds to
+   `Other(-1)`; `Other` is denied. Tests drive codes 0–33 (and `Unknown` for −1…40, `i32::MIN`,
+   `i32::MAX`) through the adapter, and real statements reach every emitted code 1–33 through
+   a shadow authorizer (controller carry-in from the T5 review).
+
+**Execution** (`exec.rs`). One statement per `execute`: rusqlite's `prepare` refuses a tail
+that holds a statement (`MultipleStatement` → `Db`, `SQLITE_ERROR`, reason
+`multiple-statements`); whitespace, comments and `;` in the tail are fine, and leading `;` are
+empty statements SQLite's parser skips. Text with no statement runs nothing. On a read-only
+profile `sqlite3_stmt_readonly` must also be true, else `Db` with `SQLITE_AUTH` and reason
+`readonly-required`, before the statement steps. This catches what never asks the authorizer
+(`VACUUM`, `VACUUM INTO` by any expression or parameter). Rows come back as text (integers in
+decimal, reals with a fractional digit, blobs as `\x` + hex); at most `max_rows` are kept and
+the rest counted. `command_tag` is the first keyword in ASCII upper case (Q35); a statement
+that is not read-only reports `sqlite3_changes` as `rows_affected` (0 when nothing changed),
+a read reports none. Unbound parameters are NULL (`raw_query`).
+
+**The journal-mode exemption (Q16).** `PRAGMA journal_mode` without an argument compiles to
+`OP_JournalMode` in "query" mode, so `sqlite3_stmt_readonly` calls it a write, yet Q16 lists it
+as readable (the brief's test reads it through `execute`). The authorizer records what it was
+asked while the statement was prepared; the stmt-readonly rule is waived only when that was
+exactly one action, `Pragma { journal_mode, no argument }`. Every form that sets the mode has an
+argument and is denied by the authorizer; the file is read-only and `query_only` is on anyway.
+
+**Transactions and cancel.** `tx_status` is `InTx` exactly when `sqlite3_get_autocommit` is
+off, read on the connection's thread after every `execute` and `batch` (failed ones too).
+`reset` is `Ok(())` and `backend_id` is `None`. `batch` runs trusted control text as several
+statements; the authorizer still applies on a read-only profile.
+
+**Cancel, latched per request (fix round 1, review I1).** `sqlite3_interrupt` alone loses an
+early cancel: SQLite clears the interrupt flag whenever a statement starts while none is active
+(`sqlite3RunParser`, `sqlite3Step`), so a cancel sent after `execute` was submitted but before
+the connection's thread started the statement did nothing (17 of 20 in review). The handle
+(`SqliteCancel`) therefore keeps a latch:
+- `execute` and `batch` take a ticket on the async side before the job is sent. Tickets are
+  handed out in order and their jobs run in order on the connection's thread, which marks the
+  job it runs and records the highest ticket that has ended.
+- `cancel()` acts only while some submitted ticket has not ended: under the latch's lock it
+  cancels every ticket handed out so far (`cancelled_upto = last`) and calls
+  `sqlite3_interrupt`. A cancel while nothing is pending does nothing, and it never covers a
+  ticket handed out later, so it can never reach the next request (Task 7's C1). The latch
+  follows the job, not the future (fix round 2, R1-M1): a request cancelled and then dropped
+  before its job ran still stops, and the next request's ticket does not reset it.
+- The job reads the latch right after `prepare` (before the first step), and a progress handler,
+  installed on every connection, reads it for the job it runs every 1,000 VM steps and
+  interrupts the statement. An interrupt sent just after the last statement stopped is cleared
+  by SQLite when the next statement starts.
+- `close()` (fix round 2, R1-I1) sets a `closing` flag and interrupts before dropping the job
+  sender; the progress handler and the post-prepare checks honour it. A statement whose request
+  future was dropped without a cancel (the session's abandoned path) and any job queued behind
+  it stop, so `close` returns and the connection's thread exits instead of spinning forever.
+- `batch` reads the latch before `execute_batch` only (R1-M2, accepted): a cancel that lands
+  between two short statements of a trusted batch, none of which reaches 1,000 VM steps, lets
+  the batch finish and report `Ok`. Reporting `Cancelled` after the work committed would be
+  wrong, and the text is short and trusted.
+
+An interrupted or latched request is `RawErrorKind::Cancelled` (extended code 9,
+`SQLITE_INTERRUPT`). The handle is safe from any thread and a no-op after close. Tests: 50
+immediate cancels after submit, each bounded and all interrupted; `batch` likewise; a cancel
+before or after a statement, or for a dropped request, never reaches the next one; a cancelled
+then dropped endless request still stops (20 rounds); `close` after dropping two endless
+requests returns within the bound on both profiles. The progress handler is only the latch,
+not a timeout.
+
+**Accepted limitation: WAL side files (fix round 1, review I3; controller ruling).** A
+read-only session on a WAL-mode database may create `-wal` (empty) and `-shm` next to the file
+and leave them after close: SQLite's WAL reader needs the shared-memory index, and a read-only
+connection never checkpoints or unlinks them. The alternatives are unsafe or unavailable:
+`immutable=1` ignores a concurrent writer (wrong reads, possible corruption reports), and
+`readonly_shm` needs existing files and the URI form the driver refuses. The database file
+itself stays byte-identical (test `a_read_only_session_on_a_wal_database_leaves_the_database_file_unchanged`,
+which also checks the `-wal` holds no frames). The other tests now list every file but the
+database itself, so a side file elsewhere would fail them.
+
+**Findings recorded for review.**
+- A denied *function* is `SQLITE_ERROR` with "not authorized to use function: …" (SQLite's
+  resolver rewrites the code); every other denial is `SQLITE_AUTH`. The disabled extension
+  loader on a read-write connection answers "not authorized" only when the statement runs.
+- `readfile`, `writefile` and `edit` are not compiled into the bundled engine ("no such
+  function" comes before the authorizer); they stay on the guard's deny list for any build
+  that adds them, matched with ASCII case folding.
+- A file opened read-only by its own mode without a read-only profile keeps M2a's behaviour
+  (only the flag); the guard and its labels apply to read-only profiles and sessions.
+- Not in this task: a progress-handler timeout (the session's cancel ladder and the latched
+  interrupt cover runaway statements; the progress handler is where a timeout would go).
+- Statements that never ask the authorizer: `VACUUM` and `VACUUM INTO` (refused by
+  `readonly-required`), and `VACUUM temp`, which SQLite skips (`vacuum.c` ignores the temp
+  schema) and which is read-only to `sqlite3_stmt_readonly`: a harmless no-op.

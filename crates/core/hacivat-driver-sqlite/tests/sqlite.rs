@@ -288,7 +288,7 @@ async fn ping_user_databases_and_cancel() {
     assert!(rtt < Duration::from_secs(5), "{rtt:?}");
     assert_eq!(c.current_user().await.unwrap(), None);
     assert_eq!(c.list_databases(100).await.unwrap(), Vec::<String>::new());
-    assert!(c.cancel_handle().is_none(), "the interrupt handle is M2b");
+    assert!(c.cancel_handle().is_some(), "the interrupt handle (M2b)");
 }
 
 #[tokio::test]

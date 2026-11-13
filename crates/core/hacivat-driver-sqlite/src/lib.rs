@@ -1,6 +1,7 @@
 //! The SQLite driver over bundled `rusqlite` (HV-DRV-01): a local file opened with safe flags
 //! on its own blocking thread, with journal and writability probes (HV-CONN-07). There is no
-//! network, TLS or authentication.
+//! network, TLS or authentication. M2b (Task 11): one statement per `execute`, the interrupt
+//! as the cancel handle, and the read-only profile's hardening (`harden`).
 
 // `RawError` carries the engine's message by value (HV-CONN-03), so its size is by design.
 #![allow(
@@ -8,7 +9,7 @@
     reason = "RawError is a fixed interface; one per failed call"
 )]
 
-// ## m2b-t01-interfaces: Task 11 fills these.
+// ## m2b-t01-interfaces: filled by Task 11.
 mod exec;
 mod harden;
 mod open;
@@ -49,9 +50,11 @@ impl Driver for SqliteDriver {
         &DESCRIPTOR
     }
 
-    /// Opens an [`Endpoint::File`]; any other endpoint is `Unsupported`. The connection is
-    /// read-only when the endpoint, the request or a `mode=ro` option says so: options can only
-    /// tighten, and every other option is ignored.
+    /// Opens an [`Endpoint::File`]; any other endpoint is `Unsupported`. Two independent
+    /// controls make it read-only: the file's read-only mode (the endpoint's flag or a
+    /// `mode=ro` option; options can only tighten, and every other option is ignored), and the
+    /// read-only profile (`DriverConnect.read_only`), which also hardens the connection with
+    /// the default-deny authorizer (B21).
     fn connect(
         &self,
         req: DriverConnect,
@@ -68,8 +71,15 @@ impl Driver for SqliteDriver {
                     server: None,
                 });
             };
-            let read_only = read_only || req.read_only || mode_is_ro(&req.options);
-            let conn = open::open(path, create_if_missing, read_only, req.connect_timeout).await?;
+            let read_only = read_only || mode_is_ro(&req.options);
+            let conn = open::open(
+                path,
+                create_if_missing,
+                read_only,
+                req.read_only,
+                req.connect_timeout,
+            )
+            .await?;
             Ok(Box::new(conn) as Box<dyn RawConn>)
         })
     }
@@ -83,20 +93,24 @@ fn mode_is_ro(options: &[(String, String)]) -> bool {
 }
 
 /// An SQLite failure keeps its extended result code in `vendor_code` (HV-CONN-03); the text
-/// is the engine's own, shown verbatim. SQLite has no SQLSTATE.
+/// is the engine's own, shown verbatim. SQLite has no SQLSTATE. An interrupted statement
+/// (`SQLITE_INTERRUPT`) is `Cancelled`. A second statement in the text is refused like a
+/// syntax error (`SQLITE_ERROR`, reason `multiple-statements`).
 fn raw_error(e: rusqlite::Error) -> RawError {
     match e {
-        rusqlite::Error::SqliteFailure(failure, message) => RawError {
+        rusqlite::Error::SqliteFailure(failure, message) => engine_error(failure, message),
+        // A statement SQLite could not prepare (rusqlite's `modern_sqlite` reports where).
+        rusqlite::Error::SqlInputError { error, msg, .. } => engine_error(error, Some(msg)),
+        rusqlite::Error::MultipleStatement => RawError {
             kind: RawErrorKind::Db,
             server: Some(ServerMessage {
                 sqlstate: None,
-                vendor_code: Some(i64::from(failure.extended_code)),
+                vendor_code: Some(i64::from(rusqlite::ffi::SQLITE_ERROR)),
                 severity: None,
-                text: message.unwrap_or_else(|| failure.to_string()),
+                text: "multiple-statements".to_string(),
                 detail: None,
                 hint: None,
-                // SQLite's messages are English and never localized.
-                lang_hint: Some("en".to_string()),
+                lang_hint: None,
             }),
         },
         rusqlite::Error::NulError(_) | rusqlite::Error::InvalidPath(_) => invalid_path(),
@@ -104,6 +118,27 @@ fn raw_error(e: rusqlite::Error) -> RawError {
             kind: RawErrorKind::Other,
             server: None,
         },
+    }
+}
+
+/// The engine's own error: its extended code and text.
+fn engine_error(failure: rusqlite::ffi::Error, message: Option<String>) -> RawError {
+    RawError {
+        kind: if failure.code == rusqlite::ErrorCode::OperationInterrupted {
+            RawErrorKind::Cancelled
+        } else {
+            RawErrorKind::Db
+        },
+        server: Some(ServerMessage {
+            sqlstate: None,
+            vendor_code: Some(i64::from(failure.extended_code)),
+            severity: None,
+            text: message.unwrap_or_else(|| failure.to_string()),
+            detail: None,
+            hint: None,
+            // SQLite's messages are English and never localized.
+            lang_hint: Some("en".to_string()),
+        }),
     }
 }
 
@@ -150,6 +185,7 @@ mod tests {
             path.to_path_buf(),
             create_if_missing,
             read_only,
+            false,
             std::time::Duration::from_secs(15),
         )
         .await
@@ -199,6 +235,69 @@ mod tests {
                 .await
                 .unwrap(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_network_path_is_refused_before_any_file_call() {
+        // `//host/share/a.db` is absolute on Unix, so only the network-path rule refuses it
+        // (otherwise SQLite would answer CANTOPEN, a `Db` error).
+        for p in [
+            "//host/share/a.db",
+            r"\\host\share\a.db",
+            r"\??\UNC\host\a.db",
+        ] {
+            for guarded in [false, true] {
+                let r = open(
+                    PathBuf::from(p),
+                    true,
+                    false,
+                    guarded,
+                    std::time::Duration::from_secs(15),
+                )
+                .await;
+                match r {
+                    Ok(_) => panic!("{p} opened"),
+                    Err(e) => {
+                        assert_eq!(e.kind, RawErrorKind::Io(io::ErrorKind::InvalidInput), "{p}")
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_file_mode_and_the_profile_guard_are_independent() {
+        let (_dir, f) = tmp_db();
+        // The file's read-only mode alone: SQLite refuses the write (SQLITE_READONLY), no
+        // authorizer is asked.
+        let mut c = open_at(&f, false, true).await;
+        assert_eq!(c.query_i64("PRAGMA query_only").await.unwrap(), 0);
+        assert_eq!(
+            exec_err_code(&mut c, "INSERT INTO seed VALUES (2)").await,
+            8
+        );
+        // The profile guard alone also opens the file read-only, and the authorizer refuses
+        // the write before the file is asked (SQLITE_AUTH).
+        let mut c = open(
+            f.clone(),
+            true,
+            false,
+            true,
+            std::time::Duration::from_secs(15),
+        )
+        .await
+        .unwrap();
+        assert_eq!(c.query_i64("PRAGMA query_only").await.unwrap(), 1);
+        assert_eq!(
+            exec_err_code(&mut c, "INSERT INTO seed VALUES (2)").await,
+            23
+        );
+        assert!(
+            c.call(|c| c.is_readonly(rusqlite::MAIN_DB))
+                .await
+                .unwrap()
+                .unwrap()
         );
     }
 
