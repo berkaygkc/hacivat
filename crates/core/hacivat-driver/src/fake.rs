@@ -14,12 +14,16 @@
 //! `batch` text in order. A cancel (through `cancel_handle`) ends the running statement with
 //! `RawErrorKind::Cancelled` unless the driver `ignores_cancel`. `kill_connections` makes every
 //! live connection fail with `Io(ConnectionReset)`.
+//!
+//! M2b (Task 7, T1 review M10): a statement counts as running from the `execute`/`batch` call,
+//! so a cancel sent before its future is first polled is latched and still ends it; a cancel
+//! sent while nothing runs is a no-op (as on a real server) and never reaches a later statement.
 
 use std::collections::VecDeque;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -448,7 +452,7 @@ impl Driver for FakeDriver {
             exec: self.exec.clone(),
             tx: TxStatus::Idle,
             born: self.counters.killed.load(Ordering::SeqCst),
-            cancel: Arc::new(Notify::new()),
+            cancel: Arc::default(),
             ignores_cancel: self.ignores_cancel,
             reset_fails: self.reset_fails,
             backend: self.backend,
@@ -521,7 +525,7 @@ struct FakeConn {
     tx: TxStatus,
     /// `Counters::killed` when the connection was made.
     born: u64,
-    cancel: Arc<Notify>,
+    cancel: Arc<CancelLatch>,
     ignores_cancel: bool,
     reset_fails: bool,
     backend: Option<u64>,
@@ -542,8 +546,17 @@ impl FakeConn {
         Ok(())
     }
 
-    /// Runs one statement from the script.
-    async fn run(&mut self, sql: &str) -> Result<ExecSummary, RawError> {
+    /// Runs one statement from the script; it counts as running from this call (M10).
+    fn run<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
+        self.cancel.begin();
+        Box::pin(async move {
+            let result = self.run_entry(sql).await;
+            self.cancel.running.store(false, Ordering::SeqCst);
+            result
+        })
+    }
+
+    async fn run_entry(&mut self, sql: &str) -> Result<ExecSummary, RawError> {
         let entry = self.exec.take(sql);
         self.alive()?;
         let Some(entry) = entry else {
@@ -558,10 +571,17 @@ impl FakeConn {
             entry.prefix
         );
         if !entry.delay.is_zero() {
-            let cancelled = self.cancel.notified();
+            let cancelled = self.cancel.notify.notified();
             tokio::pin!(cancelled);
             cancelled.as_mut().enable();
             let ignores = self.ignores_cancel;
+            // A cancel that came before this first poll (M10).
+            if !ignores && self.cancel.latched.swap(false, Ordering::SeqCst) {
+                return Err(RawError {
+                    kind: RawErrorKind::Cancelled,
+                    server: None,
+                });
+            }
             tokio::select! {
                 () = tokio::time::sleep(entry.delay) => {}
                 () = &mut cancelled, if !ignores => {
@@ -578,16 +598,36 @@ impl FakeConn {
     }
 }
 
+/// A [`FakeConn`]'s cancel state (M10): whether a statement runs, and a cancel that reached it
+/// before it was first polled.
+#[derive(Default)]
+struct CancelLatch {
+    notify: Notify,
+    running: AtomicBool,
+    latched: AtomicBool,
+}
+
+impl CancelLatch {
+    /// A statement starts: it runs, and no earlier cancel applies to it.
+    fn begin(&self) {
+        self.latched.store(false, Ordering::SeqCst);
+        self.running.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Cancels the statement running on one [`FakeConn`].
 struct FakeCancel {
-    notify: Arc<Notify>,
+    latch: Arc<CancelLatch>,
     counters: Arc<Counters>,
 }
 
 impl CancelHandle for FakeCancel {
     fn cancel(&self) -> BoxFuture<'static, Result<(), RawError>> {
         self.counters.cancel.fetch_add(1, Ordering::SeqCst);
-        self.notify.notify_waiters();
+        if self.latch.running.load(Ordering::SeqCst) {
+            self.latch.latched.store(true, Ordering::SeqCst);
+        }
+        self.latch.notify.notify_waiters();
         Box::pin(async { Ok(()) })
     }
 }
@@ -643,7 +683,7 @@ impl RawConn for FakeConn {
 
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
         Some(Arc::new(FakeCancel {
-            notify: self.cancel.clone(),
+            latch: self.cancel.clone(),
             counters: self.counters.clone(),
         }))
     }
@@ -655,11 +695,12 @@ impl RawConn for FakeConn {
         sql: &'a str,
         _opts: ExecOpts,
     ) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
-        Box::pin(self.run(sql))
+        self.run(sql)
     }
 
     fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
-        Box::pin(async move { self.run(sql).await.map(|_| ()) })
+        let run = self.run(sql);
+        Box::pin(async move { run.await.map(|_| ()) })
     }
 
     fn tx_status(&self) -> TxStatus {
@@ -908,5 +949,33 @@ mod tests {
             err.kind,
             RawErrorKind::Io(std::io::ErrorKind::ConnectionRefused)
         );
+    }
+
+    // ## m2b-t07-session-actor
+
+    /// T1 review M10: a cancel sent after `execute` but before its first poll still ends the
+    /// statement; a cancel sent while nothing runs never reaches the next statement.
+    #[tokio::test]
+    async fn an_early_cancel_is_latched_and_an_idle_cancel_is_a_no_op() {
+        let fake = FakeDriver::new(DbmsKind::Postgres).exec(vec![
+            slow("SELECT pg_sleep", Duration::from_secs(3600)),
+            // Short: it runs to its end unless the idle cancel wrongly reaches it.
+            slow("SELECT later", Duration::from_millis(20)),
+        ]);
+        let mut conn = fake.connect(request(None, Arc::new(|_| {}))).await.unwrap();
+        let cancel = conn.cancel_handle().unwrap();
+        let early = conn.execute("SELECT pg_sleep(60)", ExecOpts::default());
+        cancel.cancel().await.unwrap();
+        assert_eq!(early.await.unwrap_err().kind, RawErrorKind::Cancelled);
+
+        // Nothing runs now: this cancel is lost, as on a real server.
+        cancel.cancel().await.unwrap();
+        assert!(
+            conn.execute("SELECT later", ExecOpts::default())
+                .await
+                .is_ok(),
+            "the idle cancel did not reach the next statement"
+        );
+        assert_eq!(fake.cancel_calls(), 2);
     }
 }

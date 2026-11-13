@@ -1063,3 +1063,260 @@ pub fn ssh_stubs() -> (
     let tunnels = hacivat_net::ssh::TunnelManager::new(known.clone(), Default::default());
     (tunnels, known)
 }
+
+// ## m2b-t07-session-actor
+// Session actor fixtures (Task 7): sessions over a `FakeDriver` connected through the real
+// pipeline, scripted statements, and condition waits.
+
+use hacivat_driver::fake::FakeExec;
+use hacivat_driver::{ExecSummary, TxStatus};
+use hacivat_proto::EnvTag;
+use hacivat_session::session::{
+    ClientId, ExecOrigin, Reply, Request, SchemaCtx, SessionEvent, SessionHandle, SessionHooks,
+    SessionKind, SessionSnapshot, SessionSpec, SideConnector, TxCommand, spawn_session,
+};
+
+pub fn secs(n: u64) -> Duration {
+    Duration::from_secs(n)
+}
+
+pub fn fake_pg() -> FakeDriver {
+    FakeDriver::new(DbmsKind::Postgres)
+}
+
+pub fn fake_mysql() -> FakeDriver {
+    FakeDriver::new(DbmsKind::MySql)
+}
+
+fn scripted(prefix: &'static str, result: Result<ExecSummary, RawError>) -> FakeExec {
+    FakeExec {
+        prefix,
+        result,
+        delay: Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    }
+}
+
+/// A statement that runs for `delay` (a cancel ends it early).
+pub fn slow(prefix: &'static str, delay: Duration) -> FakeExec {
+    FakeExec {
+        delay,
+        ..scripted(prefix, Ok(ExecSummary::default()))
+    }
+}
+
+/// A statement after which the connection's transaction status is `status`.
+pub fn tx(prefix: &'static str, status: TxStatus) -> FakeExec {
+    FakeExec {
+        tx_after: Some(status),
+        ..scripted(prefix, Ok(ExecSummary::default()))
+    }
+}
+
+/// A statement the server refuses with `sqlstate`, leaving the status `status`.
+pub fn tx_err(prefix: &'static str, sqlstate: &str, status: TxStatus) -> FakeExec {
+    FakeExec {
+        tx_after: Some(status),
+        ..scripted(prefix, Err(db(sqlstate)))
+    }
+}
+
+/// A statement that answers `rows` (text values).
+pub fn rows(prefix: &'static str, rows: &[&[&str]]) -> FakeExec {
+    let rows: Vec<Vec<Option<String>>> = rows
+        .iter()
+        .map(|r| r.iter().map(|v| Some((*v).to_string())).collect())
+        .collect();
+    scripted(
+        prefix,
+        Ok(ExecSummary {
+            row_count: rows.len() as u64,
+            rows,
+            ..ExecSummary::default()
+        }),
+    )
+}
+
+/// A statement whose driver call panics.
+pub fn panics(prefix: &'static str) -> FakeExec {
+    FakeExec {
+        panics: true,
+        ..scripted(prefix, Ok(ExecSummary::default()))
+    }
+}
+
+/// A user statement.
+pub fn exec(sql: &str) -> Request {
+    Request::Exec {
+        sql: sql.to_string(),
+        opts: hacivat_driver::ExecOpts::default(),
+        origin: ExecOrigin::User,
+    }
+}
+
+fn profile_of(kind: DbmsKind) -> Profile {
+    match kind {
+        DbmsKind::MySql | DbmsKind::MariaDb => mysql_profile(TlsMode::Disable),
+        DbmsKind::Sqlite => sqlite_profile(),
+        _ => pg_profile(TlsMode::Disable),
+    }
+}
+
+/// A read-only PostgreSQL profile.
+pub fn ro_profile() -> Profile {
+    ro(pg_profile(TlsMode::Disable))
+}
+
+/// A PostgreSQL profile tagged production (default mode Manual).
+pub fn production_profile() -> Profile {
+    Profile {
+        environment: Some(EnvTag::Production),
+        ..pg_profile(TlsMode::Disable)
+    }
+}
+
+/// A schema context whose current schema is `name`.
+pub fn schema(name: &str) -> SchemaCtx {
+    SchemaCtx {
+        schema: Some(name.to_string()),
+        ..SchemaCtx::default()
+    }
+}
+
+/// Side connections over a fake (cancel, kill), through the real pipeline.
+struct FakeSide {
+    fake: Arc<FakeDriver>,
+    profile: Profile,
+}
+
+impl SideConnector for FakeSide {
+    fn open_side(&self) -> BoxFuture<'static, Result<LiveConnection, ConnectError>> {
+        let deps = deps_shared(&self.fake);
+        let mut request = req(self.profile.clone());
+        request.department = Department::Cancel;
+        Box::pin(async move { connect(&deps, request, ix_none(), token(), progress()).await })
+    }
+}
+
+/// Connects `profile` over `fake` and spawns its session; side connections go to `side`.
+pub async fn spawn_over(
+    fake: FakeDriver,
+    profile: Profile,
+    read_only: bool,
+    side: Arc<FakeDriver>,
+) -> (SessionHandle, Arc<FakeDriver>) {
+    let fake = Arc::new(fake);
+    let mut request = req(profile.clone());
+    request.read_only = read_only;
+    let live = connect(&deps_shared(&fake), request, ix_none(), token(), progress())
+        .await
+        .expect("the session's connect succeeds");
+    let side: Arc<dyn SideConnector> = Arc::new(FakeSide {
+        fake: side,
+        profile: profile.clone(),
+    });
+    let hooks = SessionHooks {
+        side,
+        reconnect: None,
+    };
+    let spec = SessionSpec {
+        kind: SessionKind::Console(ClientId::DEFAULT),
+        read_only,
+        department: Department::Console,
+    };
+    let h = spawn_session(
+        &tokio::runtime::Handle::current(),
+        spec,
+        Arc::new(profile),
+        live,
+        hooks,
+    );
+    (h, fake)
+}
+
+/// A read-write session over `fake` (its engine's test profile).
+pub async fn session(fake: FakeDriver) -> (SessionHandle, Arc<FakeDriver>) {
+    let kind = hacivat_driver::Driver::descriptor(&fake).kind;
+    let side = Arc::new(FakeDriver::new(kind));
+    spawn_over(fake, profile_of(kind), false, side).await
+}
+
+/// A read-only session of `profile` over `fake`.
+pub async fn ro_session(fake: FakeDriver, profile: Profile) -> (SessionHandle, Arc<FakeDriver>) {
+    let side = Arc::new(FakeDriver::new(profile.engine));
+    spawn_over(fake, ro(profile), true, side).await
+}
+
+/// A read-write session over `fake` whose side connections go to `side`.
+pub async fn session_with_side(
+    fake: FakeDriver,
+    side: &Arc<FakeDriver>,
+) -> (SessionHandle, Arc<FakeDriver>) {
+    let kind = hacivat_driver::Driver::descriptor(&fake).kind;
+    spawn_over(fake, profile_of(kind), false, side.clone()).await
+}
+
+/// A PostgreSQL session inside a transaction (the user ran `BEGIN`); its reset verify probe
+/// answers `t`.
+pub async fn in_tx_session() -> (SessionHandle, Arc<FakeDriver>) {
+    let (h, f) = session(fake_pg().exec(vec![
+        tx("BEGIN", TxStatus::InTx),
+        rows("SELECT current_user = session_user", &[&["t"]]),
+    ]))
+    .await;
+    run(&h, "BEGIN").await.expect("BEGIN runs");
+    assert_eq!(snap(&h).tx.status, TxStatus::InTx);
+    (h, f)
+}
+
+/// Runs the user statement `sql` and waits for its reply.
+pub async fn run(h: &SessionHandle, sql: &str) -> Reply {
+    h.submit(exec(sql)).reply.await.expect("the actor replies")
+}
+
+/// Runs a transaction command and waits for its reply.
+pub async fn tx_cmd(h: &SessionHandle, cmd: TxCommand) -> Reply {
+    h.submit(Request::Tx(cmd))
+        .reply
+        .await
+        .expect("the actor replies")
+}
+
+/// The session's current snapshot.
+pub fn snap(h: &SessionHandle) -> SessionSnapshot {
+    h.state().borrow().clone()
+}
+
+/// The next event, within [`WAIT`].
+pub async fn next(ev: &mut tokio::sync::broadcast::Receiver<SessionEvent>) -> SessionEvent {
+    tokio::time::timeout(WAIT, ev.recv())
+        .await
+        .expect("an event within the wait")
+        .expect("the event channel is open")
+}
+
+/// The next `SchemaChanged` event, skipping the others.
+pub async fn next_schema_changed(
+    ev: &mut tokio::sync::broadcast::Receiver<SessionEvent>,
+) -> SessionEvent {
+    loop {
+        let e = next(ev).await;
+        if matches!(e, SessionEvent::SchemaChanged(_)) {
+            return e;
+        }
+    }
+}
+
+/// Yields (never sleeps, so a paused clock does not move) until `done` holds; panics naming
+/// `what` after [`WAIT`] of real time.
+pub async fn settle_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out after {WAIT:?} waiting for {what}"
+        );
+        tokio::task::yield_now().await;
+    }
+}
