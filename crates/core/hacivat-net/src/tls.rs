@@ -12,6 +12,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
 use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme};
 use secrecy::SecretString;
+use secrecy::zeroize::Zeroizing;
 
 use crate::address::{AddressClass, parse_ip_literal};
 
@@ -294,12 +295,21 @@ pub struct CertReview {
 
 /// The pin endpoint of `tls_host` and `port`: the host in ASCII lowercase without a trailing
 /// dot, an IPv6 literal in brackets (`db:5432`, `[::1]:5432`).
+///
+/// M2b (Task 3 fix round 1): an IP literal is written in its canonical form, so `0::1`,
+/// `0:0:0:0:0:0:0:1` and `::1` are one endpoint, and an IPv4-mapped IPv6 address
+/// (`::ffff:10.0.0.5`) is its IPv4 address (`10.0.0.5`), which is where it connects.
 pub fn pin_endpoint(tls_host: &str, port: u16) -> String {
     let bare = tls_host
         .strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(tls_host);
     let bare = bare.strip_suffix('.').unwrap_or(bare).to_ascii_lowercase();
+    // ## m2b-t03-tls-pins
+    let bare = match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.to_canonical().to_string(),
+        Err(_) => bare,
+    };
     if bare.contains(':') {
         format!("[{bare}]:{port}")
     } else {
@@ -445,7 +455,10 @@ fn attribute_text(atv: &x509_parser::x509::AttributeTypeAndValue<'_>) -> Option<
 }
 
 /// RFC 4514 §2.4: `"+,;<>\` and NUL anywhere, `#` or a space first, and a space last are
-/// escaped. Everything else, non-ASCII text included, stays as it is.
+/// escaped. Everything else, non-ASCII text included, stays as it is, except (Task 3 fix
+/// round 1) control characters (C0, DEL, C1) and Unicode bidirectional formatting characters,
+/// which are written as RFC 4514 hex pairs of their UTF-8 (`\E2\80\AE` for U+202E), so a
+/// hostile name cannot reorder or break the text the review shows.
 fn escape_rfc4514(value: &str) -> String {
     let last = value.chars().count().saturating_sub(1);
     let mut out = String::with_capacity(value.len());
@@ -456,12 +469,27 @@ fn escape_rfc4514(value: &str) -> String {
                 out.push(c);
             }
             '\0' => out.push_str("\\00"),
+            c if c.is_control() || is_bidi_format(c) => {
+                let mut utf8 = [0u8; 4];
+                for b in c.encode_utf8(&mut utf8).bytes() {
+                    out.push_str(&format!("\\{b:02X}"));
+                }
+            }
             '#' if i == 0 => out.push_str("\\#"),
             ' ' if i == 0 || i == last => out.push_str("\\ "),
             _ => out.push(c),
         }
     }
     out
+}
+
+/// Unicode's bidirectional formatting characters: ALM, LRM, RLM, the embeddings and
+/// overrides (U+202A to U+202E) and the isolates (U+2066 to U+2069).
+fn is_bidi_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 /// The DER of a non-string attribute value, for RFC 4514's `#hex` form.
@@ -714,16 +742,25 @@ pub fn build_tls_params(
         .dangerous()
         .with_custom_certificate_verifier(verifier);
     let mut config = match client {
-        Some(client) => builder
-            .with_client_auth_cert(client.chain, client.key)
-            .map_err(|e| match e {
+        // The checks of rustls's `with_client_auth_cert`, on a key ring already holds (so the
+        // key's DER never reaches rustls as an owned copy).
+        Some(client) => {
+            let certified = rustls::sign::CertifiedKey::new(client.chain, client.key);
+            match certified.keys_match() {
+                // rustls does not treat an unknown consistency as an error either.
+                Ok(())
+                | Err(rustls::Error::InconsistentKeys(rustls::InconsistentKeys::Unknown)) => {}
                 // rustls could not use the certificate itself (a v1 certificate, say).
-                rustls::Error::InvalidCertificate(_) => {
-                    TlsSetupError::CertFileUnreadable(client.cert_path)
+                Err(rustls::Error::InvalidCertificate(_)) => {
+                    return Err(TlsSetupError::CertFileUnreadable(client.cert_path));
                 }
-                // An unsupported key, or one that does not belong to the certificate.
-                _ => TlsSetupError::KeyUnreadable(client.key_path),
-            })?,
+                // A key that does not belong to the certificate.
+                Err(_) => return Err(TlsSetupError::KeyUnreadable(client.key_path)),
+            }
+            builder.with_client_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(
+                certified,
+            )))
+        }
         None => builder.with_no_client_auth(),
     };
     // ## m2b-t03-tls-pins: a resumed session skips the verifier, which would leave `presented`
@@ -808,7 +845,8 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 struct ClientCert {
     chain: Vec<CertificateDer<'static>>,
-    key: PrivateKeyDer<'static>,
+    /// The key as ring holds it; the DER it was loaded from is zeroized (Task 3 fix round 1).
+    key: Arc<dyn rustls::sign::SigningKey>,
     cert_path: PathBuf,
     key_path: PathBuf,
 }
@@ -834,7 +872,12 @@ fn read_client_cert(
     let chain = parse_certs(&cert_bytes).ok_or_else(cert_err)?;
     crate::paths::fs_probe::note(&paths.key);
     let key_bytes = std::fs::read(&paths.key).map_err(|_| key_err())?;
-    // ## m2b-t03-tls-pins
+    // ## m2b-t03-tls-pins: every copy of the key's DER is zeroized once ring has loaded it
+    // (`Zeroizing`, or pkcs8's `SecretDocument` for a decrypted key, borrowed, never copied).
+    let key_bytes = Zeroizing::new(key_bytes);
+    let load = |der: &PrivateKeyDer<'_>| {
+        rustls::crypto::ring::sign::any_supported_type(der).map_err(|_| key_err())
+    };
     let key = match encrypted_key(&key_bytes) {
         Some(EncryptedKey::Legacy) => {
             return Err(TlsSetupError::KeyEncryptedLegacy(paths.key.clone()));
@@ -843,12 +886,13 @@ fn read_client_cert(
             let Some(passphrase) = passphrase else {
                 return Err(TlsSetupError::KeyEncrypted(paths.key.clone()));
             };
-            decrypt_pkcs8(&der, passphrase, &paths.key)?
+            let plain = decrypt_pkcs8(&der, passphrase, &paths.key)?;
+            load(&PrivateKeyDer::Pkcs8(plain.as_bytes().into()))?
         }
-        None if is_pem(&key_bytes) => {
-            PrivateKeyDer::from_pem_slice(&key_bytes).map_err(|_| key_err())?
-        }
-        None => PrivateKeyDer::try_from(key_bytes).map_err(|_| key_err())?,
+        None if is_pem(&key_bytes) => load(&Zeroizing::new(
+            PrivateKeyDer::from_pem_slice(&key_bytes).map_err(|_| key_err())?,
+        ))?,
+        None => load(&PrivateKeyDer::try_from(&key_bytes[..]).map_err(|_| key_err())?)?,
     };
     Ok(ClientCert {
         chain,
@@ -911,7 +955,7 @@ fn decrypt_pkcs8(
     der: &[u8],
     passphrase: &SecretString,
     path: &Path,
-) -> Result<PrivateKeyDer<'static>, TlsSetupError> {
+) -> Result<pkcs8::SecretDocument, TlsSetupError> {
     use pkcs8::pkcs5::{EncryptionScheme, pbes2::Kdf};
     use secrecy::ExposeSecret as _;
     let unreadable = || TlsSetupError::KeyUnreadable(path.to_path_buf());
@@ -948,7 +992,7 @@ fn decrypt_pkcs8(
     if pkcs8::PrivateKeyInfo::try_from(plain.as_bytes()).is_err() {
         return Err(wrong());
     }
-    Ok(PrivateKeyDer::Pkcs8(plain.as_bytes().to_vec().into()))
+    Ok(plain)
 }
 
 /// The platform verifier, with the CA file's certificates as extra roots. If the platform has
@@ -990,8 +1034,13 @@ struct Recording {
 }
 
 impl Recording {
+    /// Records the first error into `failure`. M2b (Task 3 fix round 1): any verifier error
+    /// also clears `outcome`, so a certificate check that passed is not reported once the
+    /// handshake signature fails (an impostor replaying the pinned leaf): `outcome` holds a
+    /// value only when every check passed.
     fn record<T>(&self, result: Result<T, rustls::Error>) -> Result<T, rustls::Error> {
         if let Err(e) = &result {
+            *self.outcome.lock().unwrap_or_else(PoisonError::into_inner) = None;
             let mut slot = self.failure.lock().unwrap_or_else(PoisonError::into_inner);
             if slot.is_none() {
                 *slot = Some(TlsFailure::from_rustls(e));
@@ -1397,6 +1446,52 @@ mod tests {
         assert_eq!(escape_rfc4514("q\"<>;\\"), "q\\\"\\<\\>\\;\\\\");
         assert_eq!(escape_rfc4514("İş\0"), "İş\\00");
         assert_eq!(escape_rfc4514(""), "");
+    }
+
+    /// Review Minor 4: controls and bidi formatting characters are hex pairs; letters stay.
+    #[test]
+    fn rfc4514_escapes_controls_and_bidi_marks() {
+        assert_eq!(escape_rfc4514("a\u{202e}b"), "a\\E2\\80\\AEb");
+        assert_eq!(escape_rfc4514("a\nb\rc\u{7f}"), "a\\0Ab\\0Dc\\7F");
+        assert_eq!(escape_rfc4514("\u{85}"), "\\C2\\85");
+        for c in [
+            '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{2066}', '\u{2069}',
+        ] {
+            let escaped = escape_rfc4514(&format!("x{c}y"));
+            assert!(!escaped.contains(c), "{c:?}");
+            assert!(
+                escaped.starts_with("x\\") && escaped.ends_with('y'),
+                "{escaped}"
+            );
+        }
+        assert_eq!(escape_rfc4514("Müşteri İşlemleri"), "Müşteri İşlemleri");
+    }
+
+    /// Review Minor 3: IP literals are canonical, IPv4-mapped addresses are IPv4.
+    #[test]
+    fn pin_endpoints_canonicalize_ip_literals() {
+        for host in ["::1", "[::1]", "0::1", "0:0:0:0:0:0:0:1", "[0:0::1]"] {
+            assert_eq!(pin_endpoint(host, 5432), "[::1]:5432", "{host}");
+        }
+        assert_eq!(pin_endpoint("2001:DB8::0:1", 5432), "[2001:db8::1]:5432");
+        assert_eq!(pin_endpoint("::ffff:10.0.0.5", 5432), "10.0.0.5:5432");
+        assert_eq!(pin_endpoint("[::FFFF:a00:5]", 5432), "10.0.0.5:5432");
+        assert_eq!(pin_endpoint("10.0.0.5", 5432), "10.0.0.5:5432");
+        // Not an IP literal: as typed, in ASCII lowercase (a zone id included).
+        assert_eq!(pin_endpoint("fe80::1%EN0", 5432), "[fe80::1%en0]:5432");
+        assert_eq!(pin_endpoint("010.0.0.5", 5432), "010.0.0.5:5432");
+        // Stored endpoints compare in the same form.
+        assert!(pinned("[0:0::1]:5432").pin_for("::1", 5432).is_some());
+        assert!(
+            pinned("::ffff:10.0.0.5:5432")
+                .pin_for("10.0.0.5", 5432)
+                .is_some()
+        );
+        assert!(
+            pinned("10.0.0.5:5432")
+                .pin_for("[::ffff:10.0.0.5]", 5432)
+                .is_some()
+        );
     }
 
     #[test]

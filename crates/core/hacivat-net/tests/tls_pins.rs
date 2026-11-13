@@ -22,6 +22,7 @@ use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyPair, KeyUsagePurpose,
 };
+use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use secrecy::SecretString;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -189,18 +190,44 @@ impl Srv {
 /// Serves TLS with `leaf` on loopback (inside a Tokio runtime). After each handshake the server
 /// writes one byte (and, under TLS 1.3, its session tickets) and waits for EOF.
 fn server(leaf: TestLeaf) -> Srv {
+    let config = server_builder(rustls::ALL_VERSIONS)
+        .with_no_client_auth()
+        .with_single_cert(leaf.chain.clone(), leaf.key)
+        .unwrap();
+    serve(config, leaf.chain[0].clone())
+}
+
+fn server_builder(
+    versions: &[&'static rustls::SupportedProtocolVersion],
+) -> rustls::ConfigBuilder<rustls::ServerConfig, rustls::WantsVerifier> {
+    rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_protocol_versions(versions)
+        .unwrap()
+}
+
+/// An impostor: it presents the genuine `leaf` chain but signs the handshake with a key of
+/// its own (a replay of the pinned certificate without its key).
+fn impostor_server(leaf: &TestLeaf, versions: &[&'static rustls::SupportedProtocolVersion]) -> Srv {
+    let own_key = KeyPair::generate().unwrap();
+    let signer = rustls::crypto::ring::sign::any_supported_type(
+        &PrivatePkcs8KeyDer::from(own_key.serialize_der()).into(),
+    )
+    .unwrap();
+    let certified = rustls::sign::CertifiedKey::new(leaf.chain.clone(), signer);
+    let config = server_builder(versions)
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified)));
+    serve(config, leaf.chain[0].clone())
+}
+
+/// Serves `config` on loopback (inside a Tokio runtime). After each handshake the server
+/// writes one byte, 1, plus 2 when the client presented a certificate (and, under TLS 1.3,
+/// its session tickets), then waits for EOF.
+fn serve(config: rustls::ServerConfig, leaf: CertificateDer<'static>) -> Srv {
     let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     std_listener.set_nonblocking(true).unwrap();
     let addr = std_listener.local_addr().unwrap();
     let listener = TcpListener::from_std(std_listener).unwrap();
-    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(leaf.chain.clone(), leaf.key)
-    .unwrap();
     let acceptor = TlsAcceptor::from(Arc::new(config));
     tokio::spawn(async move {
         while let Ok((tcp, _)) = listener.accept().await {
@@ -209,17 +236,15 @@ fn server(leaf: TestLeaf) -> Srv {
                 let Ok(mut tls) = acceptor.accept(tcp).await else {
                     return;
                 };
-                let _ = tls.write_all(&[1]).await;
+                let client_cert = tls.get_ref().1.peer_certificates().is_some();
+                let _ = tls.write_all(&[1 + 2 * u8::from(client_cert)]).await;
                 let _ = tls.flush().await;
                 let mut sink = [0u8; 1];
                 let _ = tls.read(&mut sink).await;
             });
         }
     });
-    Srv {
-        addr,
-        leaf: leaf.chain[0].clone(),
-    }
+    Srv { addr, leaf }
 }
 
 // ---- settings -----------------------------------------------------------------------------
@@ -754,7 +779,8 @@ fn encrypted_keys_beyond_the_default() {
 }
 
 /// A key file that asks for an absurd KDF cost is refused before any derivation, so a crafted
-/// file cannot hold the core runtime.
+/// file cannot hold the core runtime. (With the right passphrase, a derivation that ran would
+/// end in success or a wrong passphrase, never `KeyUnreadable`.)
 #[test]
 fn an_excessive_kdf_cost_is_unreadable() {
     let (cert, _) = client_cert_encrypted("pw1");
@@ -783,12 +809,10 @@ fn an_excessive_kdf_cost_is_unreadable() {
     let der = pkcs8::der::Encode::to_der(&costly).unwrap();
     let path = fixture_dir().join("costly.der");
     std::fs::write(&path, der).unwrap();
-    let started = std::time::Instant::now();
     assert_eq!(
         err_of(&with_client(&cert, &path), Some("pw1")),
         TlsSetupError::KeyUnreadable(path)
     );
-    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 /// The passphrase never appears in what the params or errors print.
@@ -808,4 +832,133 @@ fn the_passphrase_never_shows() {
     assert!(!format!("{params:?}").contains("hv_test_pw"));
     let err = err_of(&with_client(&cert, &key_enc), Some("hv_test_pw_wrong"));
     assert!(!format!("{err:?}").contains("hv_test_pw"));
+}
+
+// ## m2b-t03-tls-pins fix round 1
+
+/// Review Minor 1: an impostor that replays the pinned leaf without its key fails at the
+/// handshake signature, and `outcome` is not left at `Pinned` (nor `Full`/`No`): the
+/// certificate check passed, but the handshake did not.
+#[tokio::test]
+async fn an_impostor_with_the_pinned_leaf_leaves_no_outcome() {
+    let genuine = self_signed("db");
+    let pin = CertPin {
+        endpoint: "DB.:5432".into(),
+        sha256: cert_sha256(&genuine.chain[0]),
+    };
+    for versions in [
+        &[&rustls::version::TLS13][..],
+        &[&rustls::version::TLS12][..],
+    ] {
+        let srv = impostor_server(&genuine, versions);
+        for m in [TlsMode::Auto, TlsMode::Require, TlsMode::VerifyFull] {
+            let settings = TlsSettings {
+                pins: vec![pin.clone()],
+                ..mode(m)
+            };
+            // `handshake_with` also asserts that `outcome` is `None` after the failure.
+            let (r, params) = handshake_keep(settings, srv.port()).await;
+            assert_eq!(r, Err(TlsFailure::Protocol), "{m:?} {versions:?}");
+            assert!(params.presented.lock().unwrap().is_some());
+            assert!(!params.plaintext_allowed);
+        }
+        // Without a pin, Require accepts any certificate, but not a bad signature either.
+        let (r, params) = handshake_keep(mode(TlsMode::Require), srv.port()).await;
+        assert_eq!(r, Err(TlsFailure::Protocol), "{versions:?}");
+        assert_eq!(*params.outcome.lock().unwrap(), None);
+    }
+}
+
+/// Review Minor 2: the decrypted key (now loaded by ring from a borrowed, zeroizing buffer)
+/// is the one that signs the client's handshake.
+#[tokio::test]
+async fn a_decrypted_client_key_authenticates() {
+    install_crypto_provider();
+    let (cert, key_enc) = client_cert_encrypted("pw1");
+    let client_pem = std::fs::read(&cert).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    for der in CertificateDer::pem_slice_iter(&client_pem) {
+        roots.add(der.unwrap()).unwrap();
+    }
+    let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+        Arc::new(roots),
+        Arc::new(rustls::crypto::ring::default_provider()),
+    )
+    .build()
+    .unwrap();
+    let leaf = self_signed("db");
+    let config = server_builder(rustls::ALL_VERSIONS)
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(leaf.chain.clone(), leaf.key)
+        .unwrap();
+    let srv = serve(config, leaf.chain[0].clone());
+
+    let settings = TlsSettings {
+        pins: vec![pin_of(&srv)],
+        ..with_client(&cert, &key_enc)
+    };
+    let params = build_tls_params(
+        &settings,
+        "db",
+        PROFILE_PORT,
+        AddressClass::Private,
+        Some(&SecretString::from("pw1")),
+    )
+    .unwrap()
+    .unwrap();
+    let tcp = TcpStream::connect(srv.addr).await.unwrap();
+    let mut tls = TlsConnector::from(params.config.clone())
+        .connect(params.server_name.clone(), tcp)
+        .await
+        .unwrap();
+    let mut status = [0u8; 1];
+    tls.read_exact(&mut status).await.unwrap();
+    assert_eq!(status[0], 1 + 2, "the server saw the client certificate");
+    assert_eq!(*params.outcome.lock().unwrap(), Some(TlsVerified::Pinned));
+}
+
+/// Review Minor 3: IP spellings name one endpoint, so another spelling cannot drop the pin.
+#[tokio::test]
+async fn an_ip_pin_applies_to_every_spelling() {
+    let srv = server(self_signed_ip_san("::1"));
+    let stored = CertPin {
+        endpoint: "[0:0:0:0:0:0:0:1]:5432".into(),
+        sha256: cert_sha256(srv.leaf_der()),
+    };
+    for host in ["::1", "[::1]", "0::1"] {
+        assert_eq!(
+            handshake_as(auto_with(std::slice::from_ref(&stored)), host, srv.port()).await,
+            Ok(TlsVerified::Pinned),
+            "{host}"
+        );
+    }
+    assert!(
+        !build_tls_params(
+            &auto_with(&[stored]),
+            "0::1",
+            5432,
+            AddressClass::Private,
+            None
+        )
+        .unwrap()
+        .unwrap()
+        .plaintext_allowed
+    );
+    let mapped = CertPin {
+        endpoint: "10.0.0.5:5432".into(),
+        sha256: [7; 32],
+    };
+    assert!(
+        !build_tls_params(
+            &auto_with(&[mapped]),
+            "::ffff:10.0.0.5",
+            5432,
+            AddressClass::Private,
+            None
+        )
+        .unwrap()
+        .unwrap()
+        .plaintext_allowed,
+        "an IPv4-mapped address is its IPv4 address"
+    );
 }

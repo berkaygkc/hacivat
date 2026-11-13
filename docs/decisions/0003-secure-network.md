@@ -118,6 +118,11 @@ the vault, the session overlay, the keyring CI and the deferrals.
   case-insensitive, so a case-sensitive match would let `DB` skip the pin of `db` and fall back
   to chain trust and plaintext). Stored endpoints are normalised the same way when they are
   compared (`TlsSettings::pin_for`). An IP literal and a host name are different endpoints.
+  *Fix round 1:* an IP literal is written in its canonical form (`0::1` and
+  `0:0:0:0:0:0:0:1` are `[::1]`), and an IPv4-mapped IPv6 address is its IPv4 address
+  (`::ffff:10.0.0.5` is `10.0.0.5`, where it connects), so re-typing an address in another
+  spelling cannot drop its pin. A zone id is not an IP literal to Rust's parser and stays as
+  typed (lowercase).
 - **A pin forbids plaintext (Q13).** `plaintext_allowed` is false whenever the endpoint has a
   pin, `allow_public_plaintext` included. **Disable with a pin (T1 review M2):** Disable never
   runs TLS, so the pin cannot be checked. `build_tls_params` keeps returning `None` for
@@ -133,7 +138,11 @@ the vault, the session overlay, the keyring CI and the deferrals.
   `ApplicationVerificationFailure` plus the slot (lost when the slot is replaced).
 - **Recording.** The verifier writes the presented chain (leaf first) before its verdict, so a
   failed handshake can be reviewed; each certificate check first clears `outcome` and
-  `failure`, and writes `outcome` only on success. **TLS session resumption is off** in the
+  `failure`, and writes `outcome` only on success. *Fix round 1:* any verifier error (the
+  handshake signature included) clears `outcome` again, so an impostor that replays the pinned
+  leaf without its key fails as `Protocol` with no outcome, never `Pinned`. Errors after the
+  verifier (a bad `Finished`) are the driver's: an outcome is meaningful only after a
+  successful handshake. **TLS session resumption is off** in the
   configuration: a resumed session skips the verifier and would leave `presented` and
   `outcome` empty (MySQL's side connection reuses the configuration, and the insecure-auth
   guard reads `outcome`). One `TlsParams` serves one connect attempt: its slots belong to the
@@ -146,7 +155,12 @@ the vault, the session overlay, the keyring CI and the deferrals.
   well-formed DER certificate (trailing bytes included) makes the review `None`, so no "trust"
   action is offered. Names are RFC 4514 strings (last RDN first, `,` and `+`, RFC 4514's
   escapes, short names CN/L/ST/O/OU/C/STREET/DC/UID, else the dotted OID; UTF-8 values
-  verbatim, `BMPString` decoded, other values as `#hex`). Roles go by position: the first is
+  verbatim, `BMPString` decoded, other values as `#hex`). *Fix round 1:* control characters
+  (C0, DEL, C1) and Unicode bidi formatting characters (U+061C, U+200E/F, U+202A–202E,
+  U+2066–2069) are written as RFC 4514 hex pairs of their UTF-8 (`\E2\80\AE`), so a
+  hostile name cannot reorder or split the text the review shows; letters such as `ş` and
+  `İ` stay verbatim. RFC 4514's own `\XX` form was chosen over a `\u{..}` notation so the
+  string stays a valid RFC 4514 name. Roles go by position: the first is
   the leaf, the last is `Root` when its subject equals its issuer, the rest are intermediates.
   10,000 deterministic DER mutations run in `tls_review.rs` without a panic.
 - **Channel binding (B9, Q36).** `tls_server_end_point` hashes the leaf DER with the hash of its
@@ -162,8 +176,12 @@ the vault, the session overlay, the keyring CI and the deferrals.
   offered (Hacivat does not implement OpenSSL's legacy EVP_BytesToKey). A key file that asks for
   more than 10 million PBKDF2 iterations or 256 MiB of scrypt memory is `KeyUnreadable` before
   any derivation, so a crafted file in an imported profile cannot hold the core runtime. The
-  passphrase is a `SecretString`, exposed only to the KDF; the decrypted key lives in rustls'
-  `PrivateKeyDer` as an unencrypted key did in M2a. `is_network_path` stays the first check
+  passphrase is a `SecretString`, exposed only to the KDF. *Fix round 1:* the key is loaded
+  by ring (`ring::sign::any_supported_type`) from a borrowed buffer and installed through a
+  one-key resolver (`SingleCertAndKey`, with rustls' own `keys_match` check), so no owned copy
+  of the DER reaches rustls: a decrypted key stays in pkcs8's zeroizing `SecretDocument`, and a
+  file's bytes and a PEM-decoded DER sit in `Zeroizing`, all wiped once ring holds the key.
+  pkcs5 0.7's derived AES key is not zeroized (upstream). `is_network_path` stays the first check
   before any file is opened (M2a N2).
 - **Fails closed.** A pin mismatch, an expired or not-yet-valid pinned leaf, or an unparsable
   pinned leaf refuses the handshake; a pin turns the plaintext fallback off; a review that

@@ -62,6 +62,20 @@ fn turkish_subject_is_verbatim() {
     assert!(rev.subject.contains("Müşteri İşlemleri"));
 }
 
+/// Review Minor 4: a hostile name cannot reorder or split the text the review shows.
+#[test]
+fn control_and_bidi_characters_are_escaped_in_names() {
+    let rev = review_of(self_signed_cn("evil\u{202e}moc.knab\nOU=x"));
+    assert!(!rev.subject.contains('\u{202e}'));
+    assert!(!rev.subject.contains('\n'));
+    assert!(
+        rev.subject.contains("evil\\E2\\80\\AEmoc.knab\\0AOU=x"),
+        "{}",
+        rev.subject
+    );
+    assert!(!rev.chain[0].subject.contains('\u{202e}'));
+}
+
 #[test]
 fn malformed_der_gives_none() {
     assert!(
