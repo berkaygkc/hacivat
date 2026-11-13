@@ -196,6 +196,11 @@ the vault, the session overlay, the keyring CI and the deferrals.
   - **A password in a `ProxyJump` URI** (`user:password@host`, which `carries_secret` does not
     flag) is stripped before the value is stored: only `user@host` reaches `proxy_jump` and the
     hops, and `ConfigNotice::ProxyJumpPasswordIgnored { alias }` tells the user (fix round 1).
+    The password starts at the first `:` of the user part, literal or percent-encoded (`%3A`,
+    since OpenSSH URL-decodes the user of an `ssh://` URI), and the `ssh://` scheme is matched in
+    any ASCII case (round 2).
+  - An empty or unknown `StrictHostKeyChecking` value (an error to OpenSSH) counts as Ask and
+    takes the first-value slot, so a later, weaker `accept-new` cannot win (round 2).
   - Fix round 1 also: a keyword without a value is ignored (OpenSSH rejects it); an alias
     declared in a file included under a `Host` whose patterns it does not match is not listed
     (it could never get that file's settings); resolving the import is linear in practice

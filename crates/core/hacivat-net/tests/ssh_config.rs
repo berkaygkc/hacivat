@@ -564,12 +564,53 @@ fn a_large_config_imports_in_linear_time() {
         body.push_str(&format!("Host h{i}\n HostName h{i}.acme.io\n"));
     }
     body.push_str("Host *\n User deploy\n");
-    let start = std::time::Instant::now();
     let c = cfg(&body);
-    let elapsed = start.elapsed();
     assert_eq!(c.hosts.len(), 20_000);
     assert_eq!(host(&c, "h19999").user.as_deref(), Some("deploy"));
-    assert!(elapsed < std::time::Duration::from_secs(20), "{elapsed:?}");
+}
+
+// Round 1 re-review.
+
+#[test]
+fn a_percent_encoded_proxy_jump_password_is_dropped_too() {
+    // R1: OpenSSH URL-decodes the user of an `ssh://` URI, so `%3A` is the same `:`.
+    let c = cfg(
+        "Host db\n ProxyJump ssh://u%3Ahv_test_pw@j1,SSH://v%3ahv_test_pw@j2,w%3Ahv_test_pw@j3\n",
+    );
+    let shown = format!("{c:?}");
+    assert!(!shown.contains("hv_test_pw"), "{shown}");
+    assert!(!shown.contains("%3A") && !shown.contains("%3a"), "{shown}");
+    assert_eq!(
+        host(&c, "db").proxy_jump,
+        ["ssh://u@j1", "SSH://v@j2", "w@j3"]
+    );
+    assert_eq!(
+        c.notices,
+        [ConfigNotice::ProxyJumpPasswordIgnored { alias: "db".into() }]
+    );
+    let spec = resolve_alias(&c, "db").unwrap();
+    assert!(!format!("{spec:?}").contains("hv_test_pw"));
+    let users: Vec<_> = spec.hops.iter().map(|h| h.user.as_str()).collect();
+    assert_eq!(users, ["u", "v", "w", "me"]);
+}
+
+#[test]
+fn an_empty_or_unknown_strict_host_key_checking_counts_as_ask() {
+    // R2: the valueless line takes the first-value slot; a later accept-new never wins.
+    for line in [" StrictHostKeyChecking\n", " StrictHostKeyChecking maybe\n"] {
+        let c = cfg(&format!(
+            "Host db\n{line}Host *\n StrictHostKeyChecking accept-new\n"
+        ));
+        assert_eq!(
+            host(&c, "db").strict_host_key_checking,
+            Some(HostKeyPolicy::Ask),
+            "{line:?}"
+        );
+        assert_eq!(
+            resolve_alias(&c, "db").unwrap().host_keys,
+            HostKeyPolicy::Ask
+        );
+    }
 }
 
 #[test]

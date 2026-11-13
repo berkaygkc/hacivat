@@ -305,17 +305,36 @@ fn strictness(policy: HostKeyPolicy) -> u8 {
 /// `spec` without a password in its user part (`user:password@host` gives `user@host`), or
 /// `None` when it has none. OpenSSH never uses such a password; Hacivat never keeps it.
 fn strip_jump_password(spec: &str) -> Option<String> {
-    let (scheme, rest) = match spec.strip_prefix("ssh://") {
-        Some(rest) => ("ssh://", rest),
-        None => ("", spec),
-    };
+    let (scheme, rest) = split_scheme(spec);
     let (user, host) = rest.rsplit_once('@')?;
-    let (user, _password) = user.split_once(':')?;
+    let user = &user[..password_at(user)?];
     Some(if user.is_empty() {
         format!("{scheme}{host}")
     } else {
         format!("{scheme}{user}@{host}")
     })
+}
+
+/// `ssh://` (any ASCII case) and the rest of a jump spec.
+fn split_scheme(spec: &str) -> (&str, &str) {
+    match spec.get(..6) {
+        Some(scheme) if scheme.eq_ignore_ascii_case("ssh://") => (scheme, &spec[6..]),
+        _ => ("", spec),
+    }
+}
+
+/// Where a password starts in a jump spec's user part: at its `:`, literal or percent-encoded
+/// (`%3A`; OpenSSH URL-decodes the user of an `ssh://` URI).
+fn password_at(user: &str) -> Option<usize> {
+    let colon = user.find(':');
+    let encoded = user
+        .as_bytes()
+        .windows(3)
+        .position(|w| w.eq_ignore_ascii_case(b"%3a"));
+    match (colon, encoded) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// `[user@]host[:port]` or `ssh://[user@]host[:port]`; an IPv6 host is in brackets.
@@ -327,11 +346,11 @@ struct JumpSpec {
 
 impl JumpSpec {
     fn parse(spec: &str) -> Option<JumpSpec> {
-        let spec = spec.strip_prefix("ssh://").unwrap_or(spec);
+        let (_, spec) = split_scheme(spec);
         let (user, rest) = match spec.rsplit_once('@') {
             // Never a password (`user:password`): only the part before `:` is the user.
             Some((user, rest)) if !user.is_empty() => {
-                let user = user.split_once(':').map_or(user, |(u, _)| u);
+                let user = &user[..password_at(user).unwrap_or(user.len())];
                 ((!user.is_empty()).then(|| user.to_string()), rest)
             }
             Some(_) => return None,
@@ -499,8 +518,10 @@ impl Parser<'_> {
                 // The rest of this file continues the block the `Include` sat in.
                 current = self.open_block(guards, patterns);
             } else if let Some(key) = Key::from_keyword(&keyword) {
-                // A keyword without a value is an error to OpenSSH: ignored here.
-                if args.iter().all(String::is_empty) {
+                // A keyword without a value is an error to OpenSSH: ignored here, except a policy
+                // line, which still takes its first-value slot (as Ask, below) so a later, weaker
+                // value cannot win.
+                if args.iter().all(String::is_empty) && key != Key::StrictHostKeyChecking {
                     continue;
                 }
                 let secret = (self.is_secret)(&args.join(" "));
@@ -683,7 +704,8 @@ fn resolve_host(
                             notices.push(ConfigNotice::StrictNoMappedToAsk { alias });
                             Some(HostKeyPolicy::Ask)
                         }
-                        _ => None,
+                        // Empty or unknown (OpenSSH rejects both): Ask, never weaker.
+                        _ => Some(HostKeyPolicy::Ask),
                     }
                 }
                 Key::UserKnownHostsFile => {
