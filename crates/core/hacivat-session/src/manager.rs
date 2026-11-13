@@ -23,7 +23,7 @@ use crate::pipeline::{
 };
 use crate::profile::{Profile, ProfileDraft};
 use crate::session::{LostState, SessionManager};
-use crate::test_conn::{TestReport, test_connection};
+use crate::test_conn::{TestReport, test_connection_continuing};
 
 /// How the bytes travel, as the capsule shows it (HV-CONN-01). Only `Direct` in M2a.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -549,6 +549,18 @@ impl ConnectionManager {
         self.start(profile, Some(password), prior_rejections, ix);
     }
 
+    /// The connection dialog's Save and connect after rejected tests (P8): connects with the
+    /// draft password, if any, continuing the dialog's count of server rejections.
+    pub fn connect_continuing(
+        &self,
+        profile: Arc<Profile>,
+        draft_password: Option<SecretString>,
+        prior_rejections: u8,
+        ix: Interaction,
+    ) {
+        self.start(profile, draft_password, prior_rejections, ix);
+    }
+
     fn start(
         &self,
         profile: Arc<Profile>,
@@ -668,13 +680,25 @@ impl ConnectionManager {
     /// Starts a test of `draft` on the core runtime (HV-CONN-07): fresh resources, no budget
     /// permit, nothing stored. Dropping the handle (or `cancel`) stops it.
     pub fn test(&self, draft: ProfileDraft, ix: Interaction) -> TestHandle {
+        self.test_continuing(draft, 0, ix)
+    }
+
+    /// [`Self::test`] continuing the connection dialog's count of server rejections (P8).
+    pub fn test_continuing(
+        &self,
+        draft: ProfileDraft,
+        prior_rejections: u8,
+        ix: Interaction,
+    ) -> TestHandle {
         let token = CancellationToken::new();
         let (progress_tx, progress) = watch::channel(fresh_progress());
         let (result_tx, result) = oneshot::channel();
         let deps = self.shared.deps.clone();
         let cancel = token.clone();
         self.shared.rt.spawn(async move {
-            let report = test_connection(&deps, draft, ix, cancel, progress_tx).await;
+            let report =
+                test_connection_continuing(&deps, draft, prior_rejections, ix, cancel, progress_tx)
+                    .await;
             let _ = result_tx.send(report);
         });
         TestHandle::new(progress, result, token)

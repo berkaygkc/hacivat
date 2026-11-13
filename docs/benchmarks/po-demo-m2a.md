@@ -162,17 +162,36 @@ Tek rozet kuralı kapsülle sınırlıdır: `assert_one_filled_badge` (cross_sur
 
 ## 6. Yanlış parola
 
-**Yap:** Yeni bağlantı: Host `localhost`, Port `54317`, Kullanıcı `hv_test`, Veritabanı `hv_test`,
-**yanlış** bir parola (örneğin `yanlis`). "Save and connect".
+**Yap (A, bağlantı penceresinde):** Yeni bağlantı: Host `localhost`, Port `54317`, Kullanıcı
+`hv_test`, Veritabanı `hv_test`, **yanlış** bir parola (örneğin `yanlis`). "Test connection" (⌘T).
 
-**İyi görünüm:**
+**İyi görünüm (A):**
+- Pencerenin altındaki satır içi hata "The server rejected the password for hv_test." der; izlemede
+  ✕ işareti **Sign in** adımındadır. Password alanının altında "Attempt 2 of 3" yazar.
+- "Enter password again" Password alanını boşaltıp imleci oraya koyar; "Attempt 2 of 3" yerinde
+  kalır. Yine yanlış bir parola yazıp ⌘T: ikinci ret, alanın altında "Attempt 3 of 3".
+- Üçüncü yanlış parolada "Enter password again" artık **çıkmaz**; satır içi hata "All 3 attempts
+  are used…" der, Password alanının altında "No attempts left for this server…" yazar. "Test
+  connection" ve "Save and connect" devre dışıdır (nedeni bu satırda yazılı); ⌘T ve ⌘↵ hiçbir şey
+  göndermez. "Save" (⌘S) yine kaydeder.
+- Host, Port, Kullanıcı, motor ya da oturum açma yöntemi değişince ya da pencere kapatılıp yeniden
+  açılınca sayaç sıfırlanır. Doğru parolayla (`hv_test_pw`) başarılı bir sınama da sayacı sıfırlar.
+
+**Yap (B, hata iletişim kutusunda):** Yeni bir pencerede aynı bilgiler ve yanlış parola; bu kez
+"Save and connect". Pencere kapanır; kapsül bağlantının başarısız olduğunu gösterir. Kapsüle
+tıklayın.
+
+**İyi görünüm (B):**
 - Hata iletişim kutusu açılır; izlemede ✕ işareti **Sign in** adımındadır.
-- "Enter password again" ile parolayı yeniden girin. Sayaç her reddedilişte artar: 1, 2, 3. Üçüncü
-  reddedişte durur (tek bağlantı hareketi için en çok 3 sunucu reddi).
+- "Enter password again" maskeli bir alan ve "Attempt 2 of 3" açar. Sayaç her reddedilişte artar;
+  üçüncü reddedişte alan ve düğme kaybolur (tek bağlantı hareketi için en çok 3 sunucu reddi).
+  "Save and connect"ten önce aynı pencerede ⌘T ile reddedilen denemeler de bu sayıya katılır.
 - Doğru parolayı (`hv_test_pw`) girince bağlanır ve iletişim kutusu kapanır.
 - Girilen parola ekranda ve panoda hiçbir yerde görünmez.
 
-**Ön doğrulama:** `auth_invalid_reenter_counts_and_stops_at_three`,
+**Ön doğrulama:** `rejected_tests_count_attempts_and_stop_at_three`,
+`a_new_host_starts_a_new_count`, `a_successful_test_clears_the_count` (connection_dialog);
+`auth_invalid_reenter_counts_and_stops_at_three`,
 `a_reentered_password_that_works_closes_the_dialog`,
 `a_reentered_password_never_reaches_the_screen_or_the_clipboard`,
 `an_empty_reentry_sends_nothing` (connections_errors).

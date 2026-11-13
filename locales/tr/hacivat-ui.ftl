@@ -856,3 +856,10 @@ hv-conn-err-refused = { $name } — { $reason ->
         [path] { -brand-hacivat } bu yolu açmaz
        *[denied] hiçbir zaman izin verilmiyor
     }
+
+## m2a-dialog-retries
+
+# Review: PO
+hv-conn-err-attempts-used = 3 denemenin hepsi kullanıldı. Hesap kilitlenmesin diye { -brand-hacivat } başka parola göndermez.
+# Review: PO
+hv-conn-dlg-attempts-used = Bu sunucu için deneme hakkı kalmadı. Yeniden denemek için adresi, portu ya da kullanıcıyı değiştirin veya bu pencereyi kapatıp yeniden açın.

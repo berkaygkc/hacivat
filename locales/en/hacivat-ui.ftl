@@ -824,3 +824,10 @@ hv-conn-err-refused = { $name } — { $reason ->
         [path] { -brand-hacivat } won't open this path
        *[denied] never allowed
     }
+
+## m2a-dialog-retries
+
+# Under a rejected password's error, once the server rejected 3 passwords in a row: no more are sent.
+hv-conn-err-attempts-used = All 3 attempts are used. { -brand-hacivat } won't send another password, so the account isn't locked.
+# Under the connection dialog's Password field after 3 rejected passwords: how to try again.
+hv-conn-dlg-attempts-used = No attempts left for this server. To try again, change the host, port or user, or reopen this dialog.
