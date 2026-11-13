@@ -340,17 +340,23 @@ err_classes! {
     TlsProtocol = "tls.protocol" in Tls,
     TlsClientCertRequired = "tls.client_cert_required" in Tls,
     TlsNotSupportedByServer = "tls.not_supported_by_server" in Tls,
+    // ## m2b-t01-interfaces
+    TlsPinChanged = "tls.pin_changed" in Tls,
     SshHostKeyUnknown = "ssh.host_key_unknown" in Ssh,
     SshHostKeyChanged = "ssh.host_key_changed" in Ssh,
     SshAuth = "ssh.auth" in Ssh,
     SshChannelOpen = "ssh.channel_open" in Ssh,
     SshAgentUnavailable = "ssh.agent_unavailable" in Ssh,
+    // ## m2b-t01-interfaces
+    SshHostKeyRevoked = "ssh.host_key_revoked" in Ssh,
     AuthInvalid = "auth.invalid" in Auth,
     AuthExpired = "auth.expired" in Auth,
     AuthExpiring = "auth.expiring" in Auth,
     AuthLocked = "auth.locked" in Auth,
     AuthMethodUnsupported = "auth.method_unsupported" in Auth,
     AuthMfaRequired = "auth.mfa_required" in Auth,
+    // ## m2b-t01-interfaces
+    AuthInsecureMethod = "auth.insecure_method" in Auth,
     AuthzDatabase = "authz.database" in Authz,
     AuthzObject = "authz.object" in Authz,
     ConfigInvalid = "config.invalid" in Config,
@@ -517,7 +523,7 @@ mod tests {
             ErrClass::ServerUnsupportedVersion.fluent_stem(),
             "error-conn-server-unsupported-version"
         );
-        assert_eq!(ErrClass::ALL.len(), 48);
+        assert_eq!(ErrClass::ALL.len(), 51);
         assert_eq!(EnvTag::Production.severity_rank(), 0);
         assert_eq!(EnvTag::Local.severity_rank(), 4);
     }
@@ -542,7 +548,7 @@ mod tests {
         let mut ids: Vec<&str> = ErrClass::ALL.iter().map(|c| c.id()).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 48);
+        assert_eq!(ids.len(), 51);
         assert_eq!(DbmsKind::from_id("MySQL"), None); // IDs are exact, never case-folded
     }
 

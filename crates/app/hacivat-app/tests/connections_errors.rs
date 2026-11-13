@@ -226,6 +226,8 @@ fn error_of(class: ErrClass, failed: Option<TrailStep>) -> ConnectError {
             file: None,
             engine: "PostgreSQL".into(),
             version: None,
+            hop: None,
+            hop_host: None,
         },
         server: None,
         fixes: hacivat_driver::fixes_for(class),
@@ -234,6 +236,9 @@ fn error_of(class: ErrClass, failed: Option<TrailStep>) -> ConnectError {
         elapsed: ms(214),
         attempts: 0,
         needs_interaction: false,
+        certificate: None,
+        host_key: None,
+        profile_changes: Vec::new(),
     }
 }
 

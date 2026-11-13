@@ -79,6 +79,11 @@ id = "tls.not_supported_by_server"
 reachable = true
 fixes = ["edit_connection"]
 
+# M2b Task 1: reached once Task 3 (pins) and Task 14 (the pipeline) land.
+[[class]]
+id = "tls.pin_changed"
+reachable = false
+
 [[class]]
 id = "ssh.host_key_unknown"
 reachable = false
@@ -97,6 +102,11 @@ reachable = false
 
 [[class]]
 id = "ssh.agent_unavailable"
+reachable = false
+
+# M2b Task 1: reached once Task 4 (known hosts) and Task 14 land.
+[[class]]
+id = "ssh.host_key_revoked"
 reachable = false
 
 [[class]]
@@ -125,6 +135,11 @@ fixes = ["edit_connection"]
 
 [[class]]
 id = "auth.mfa_required"
+reachable = false
+
+# M2b Task 1: reached once the drivers' insecure-auth guard (Tasks 10, 13) and Task 14 land.
+[[class]]
+id = "auth.insecure_method"
 reachable = false
 
 [[class]]

@@ -620,6 +620,7 @@ fn read_entry(t: &Table) -> Read<(Profile, Vec<&'static str>)> {
         extra,
         origin,
         allow_unsupported_server: opt_bool(t, "allow_unsupported_server")?.unwrap_or(false),
+        ..Default::default()
     };
     // An older file's `sslmode`, `sslrootcert`, ... extras become the typed settings (I2).
     fold_typed_options(&mut profile);
@@ -661,6 +662,7 @@ fn read_tls(t: &Table) -> Read<TlsSettings> {
         mode,
         ca_file,
         client_cert,
+        ..Default::default()
     })
 }
 
@@ -671,7 +673,8 @@ fn read_transport(t: &Table) -> Read<TransportSpec> {
             if let Some(kind) = item.as_str() {
                 return match kind {
                     "direct" => Ok(TransportSpec::Direct),
-                    "ssh_tunnel" => Ok(TransportSpec::SshTunnel),
+                    // ## m2b-t01-interfaces: Task 12 reads the `[ssh]` table.
+                    "ssh_tunnel" => Ok(TransportSpec::SshTunnel(Default::default())),
                     _ => invalid("transport"),
                 };
             }
@@ -868,7 +871,8 @@ fn write_tls(t: &mut Table, tls: &TlsSettings) {
 fn transport_item(t: &TransportSpec) -> Item {
     match t {
         TransportSpec::Direct => value("direct"),
-        TransportSpec::SshTunnel => value("ssh_tunnel"),
+        // ## m2b-t01-interfaces: Task 12 writes the `[ssh]` table.
+        TransportSpec::SshTunnel(_) => value("ssh_tunnel"),
         TransportSpec::Karagoz {
             org,
             agent_id,

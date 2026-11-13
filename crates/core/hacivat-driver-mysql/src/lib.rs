@@ -16,6 +16,8 @@
 )]
 
 mod connect;
+// ## m2b-t01-interfaces: Task 13 fills it.
+mod exec;
 mod probe;
 mod tls;
 

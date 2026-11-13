@@ -42,6 +42,7 @@ fn base_req(factory: StreamFactory) -> DriverConnect {
         options: vec![],
         connect_timeout: Duration::from_secs(5),
         events: Arc::new(|_| {}),
+        insecure_auth: Default::default(),
     }
 }
 
@@ -59,7 +60,9 @@ fn tls(mode: TlsMode, class: AddressClass) -> Option<TlsParams> {
             ..TlsSettings::default()
         },
         "127.0.0.1",
+        5432,
         class,
+        None,
     )
     .unwrap()
 }

@@ -15,9 +15,13 @@
     reason = "RawError is a fixed interface; one per failed call"
 )]
 
+// ## m2b-t01-interfaces: Task 10 fills these.
+mod cancel;
 mod connect;
+mod exec;
 mod probe;
 mod tls;
+mod wire;
 
 use futures::future::BoxFuture;
 use hacivat_driver::{

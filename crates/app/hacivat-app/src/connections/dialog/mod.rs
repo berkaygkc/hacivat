@@ -27,6 +27,8 @@
 
 pub mod form;
 pub mod paste;
+// ## m2b-t01-interfaces: the SSH section (Task 20).
+pub mod ssh;
 pub mod url_row;
 
 use std::collections::HashMap;
@@ -313,6 +315,28 @@ pub fn open_connection_dialog(mode: DialogMode, window: &mut Window, cx: &mut Ap
             d.apply_text(&text, window, cx);
         }
     });
+}
+
+// ## m2b-t01-interfaces
+/// Where the edit dialog opens its focus (Q9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum DialogFocus {
+    /// The dialog's usual first field.
+    #[default]
+    Default,
+    /// The SSH section, opened with its checkbox on and the SSH host focused (Task 20).
+    Ssh,
+}
+
+/// Opens the edit dialog of `id` with `focus` (Q9). `Default` works since Task 1; Task 20
+/// makes `Ssh` open the SSH disclosure and focus the SSH host (until then it opens like
+/// `Default`).
+pub(crate) fn open_edit(id: ProfileId, focus: DialogFocus, window: &mut Window, cx: &mut App) {
+    match focus {
+        DialogFocus::Default | DialogFocus::Ssh => {
+            open_connection_dialog(DialogMode::Edit(id), window, cx);
+        }
+    }
 }
 
 /// Registers the `connection_dialog.*` commands, enabled while a dialog is open (P41).
@@ -1004,6 +1028,8 @@ impl ConnectionDialog {
             tls_key_passphrase,
             is_new: self.draft.is_new,
             touched: self.draft.touched.clone(),
+            // ## m2b-t01-interfaces: Task 20 passes the typed SSH secrets to Test.
+            ssh_secrets: Vec::new(),
         }
     }
 
@@ -1383,6 +1409,12 @@ impl ConnectionDialog {
                 self.run_test(window, cx);
             }
             FixAction::SupportedVersions => cx.open_url(SUPPORTED_VERSIONS_URL),
+            // ## m2b-t01-interfaces: the dialog's M2b flows belong to their owners (Tasks 19,
+            // 20, 21); the test strip never offers them before that.
+            FixAction::ReviewCertificate
+            | FixAction::ImportCa
+            | FixAction::ConnectThroughSsh
+            | FixAction::ReviewHostKey => {}
         }
     }
 

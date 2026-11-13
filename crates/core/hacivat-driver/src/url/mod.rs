@@ -13,6 +13,8 @@ pub mod template;
 use std::collections::BTreeMap;
 
 pub use matcher::match_template;
+// ## m2b-t01-interfaces: public for the secret-scan invariant (Q3, Global Constraints).
+pub use native::carries_secret;
 pub use parse::{
     MappedParam, MappedTo, ParseOutcome, ParseResult, ParseWarning, UnrecognisedReason,
     looks_like_connection, parse,

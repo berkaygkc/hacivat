@@ -8,6 +8,9 @@
     reason = "RawError is a fixed interface; one per failed call"
 )]
 
+// ## m2b-t01-interfaces: Task 11 fills these.
+mod exec;
+mod harden;
 mod open;
 mod probe;
 
@@ -228,6 +231,7 @@ mod tests {
             options,
             connect_timeout: std::time::Duration::from_secs(15),
             events: std::sync::Arc::new(|_| {}),
+            insecure_auth: Default::default(),
         };
         // The probe stays quiet about a read-only file only when read-only was asked for, so
         // a write-protected file tells the two apart. The read-only bit (Unix) or attribute
@@ -335,6 +339,7 @@ mod tests {
             options: vec![],
             connect_timeout: std::time::Duration::from_secs(15),
             events: std::sync::Arc::new(|_| {}),
+            insecure_auth: Default::default(),
         };
         match SqliteDriver::new().connect(req).await {
             Ok(_) => panic!("a network endpoint opened"),

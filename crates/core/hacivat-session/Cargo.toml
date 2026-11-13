@@ -20,11 +20,17 @@ futures.workspace = true
 secrecy.workspace = true
 toml_edit.workspace = true
 tracing.workspace = true
+# M2b (Task 1): the read-only guard (partly re-exported, Q5) and the reconnect jitter.
+hacivat-guard.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 hacivat-driver = { workspace = true, features = ["fake"] }
-hacivat-testkit.workspace = true
+# M2b (Task 1, Q5): `ssh` here too, so `cargo test -p hacivat-session` builds what
+# `cargo test --workspace` builds through feature unification.
+hacivat-testkit = { workspace = true, features = ["ssh"] }
 tracing-subscriber.workspace = true
+tracing-log.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

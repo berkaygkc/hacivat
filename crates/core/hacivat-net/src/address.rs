@@ -44,6 +44,19 @@ pub fn classify_host(host: &str, resolved: &[SocketAddr]) -> AddressClass {
         .unwrap_or(AddressClass::Public)
 }
 
+// ## m2b-t01-interfaces
+/// The class of a database host reached through an SSH tunnel (B11): the client never
+/// resolves it (the last hop does), so an IP literal is classified as itself, `localhost` (and
+/// `*.localhost`) is Loopback, and any other name is Private: it is the bastion's network, and
+/// the tunnel already encrypts the path to it.
+pub fn ssh_address_class(host: &str) -> AddressClass {
+    match parse_ip_literal(host) {
+        Some(ip) => classify_ip(ip),
+        None if is_localhost_name(host) => AddressClass::Loopback,
+        None => AddressClass::Private,
+    }
+}
+
 /// How far an address class reaches; a host takes its widest address.
 fn exposure(class: AddressClass) -> u8 {
     match class {

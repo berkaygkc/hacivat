@@ -1397,3 +1397,28 @@ fn a_label_cut_by_a_container_is_clipped(cx: &mut TestAppContext) {
 fn a_label_partly_scrolled_out_of_a_viewport_is_not_clipped(cx: &mut TestAppContext) {
     assert!(!cut_label(cx, true));
 }
+
+// ## m2b-t01-interfaces
+/// M2b Task 1: Reconnecting renders like Connecting (the run marker and its label) with the
+/// next attempt in place of a clock.
+#[gpui::test]
+fn capsule_reconnecting_has_a_run_marker_and_no_clock(cx: &mut TestAppContext) {
+    let model = |next: Option<&'static str>| CapsuleModel::Reconnecting {
+        env: EnvKind::Staging,
+        env_label: "Staging".into(),
+        name: "orders-staging".into(),
+        engine: "PostgreSQL 16".into(),
+        label: "Reconnecting".into(),
+        next: next.map(Into::into),
+    };
+    let (vcx, _) = mount_capsule(cx, model(Some("in 4 s")));
+    assert_eq!(bounds_of(vcx, "capsule-run").size, size(px(7.0), px(7.0)));
+    let drawn = texts(vcx);
+    for t in ["orders-staging", "Reconnecting", "in 4 s"] {
+        assert!(drawn.contains(&t.into()), "{t} in {drawn:?}");
+    }
+    let (vcx, _) = mount_capsule(cx, model(None));
+    let drawn = texts(vcx);
+    assert!(drawn.contains(&"Reconnecting".into()), "{drawn:?}");
+    assert!(!drawn.contains(&"in 4 s".into()), "{drawn:?}");
+}

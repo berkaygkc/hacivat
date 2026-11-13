@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/ui/*", "crates/core/*", "crates/app/*", "crates/bin/*", "xtask", "spikes/*"]
+# M2b (Task 1, Q29): the vendored `mysql_async` is a `[patch]` path crate, never a member.
+exclude = ["third_party"]
 
 [workspace.package]
 edition = "2024"
@@ -43,6 +45,8 @@ hacivat-driver-mysql = { path = "crates/core/hacivat-driver-mysql" }
 hacivat-driver-sqlite = { path = "crates/core/hacivat-driver-sqlite" }
 hacivat-session = { path = "crates/core/hacivat-session" }
 hacivat-testkit = { path = "crates/core/hacivat-testkit" }
+# M2b (Task 1): the sans-I/O read-only guard.
+hacivat-guard = { path = "crates/core/hacivat-guard" }
 
 # Localization (Fluent + ICU4X 2.4).
 fluent-bundle = "0.16.0"
@@ -113,7 +117,8 @@ rustls-pki-types = { version = "1", features = ["std"] }
 rustls-native-certs = "0.8"
 # Without these features keyring silently falls back to its non-persistent mock store.
 keyring = { version = "3", features = ["apple-native", "windows-native", "async-secret-service", "crypto-rust", "tokio"] }
-secrecy = "0.10"
+# `serde`: the vault JSON is parsed straight into `SecretString` (M2b, Q30).
+secrecy = { version = "0.10", features = ["serde"] }
 zeroize = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 percent-encoding = "2"
@@ -121,7 +126,27 @@ regex = "1"
 # Test certificates; its default crypto backend is ring.
 rcgen = "0.14"
 
+# M2b secure network and sessions (Task 1). SSH uses ring, never aws-lc (Q28): no default
+# features, so russh's `aws-lc-rs` default is off.
+russh = { version = "0.65.1", default-features = false, features = ["ring", "rsa", "flate2"] }
+x509-parser = "0.18"
+sha2 = "0.10"
+# Encrypted client keys (PKCS #8 PBES2, OpenSSL's default `-v2 aes-256-cbc`; Q5, Q36).
+pkcs8 = { version = "0.10.2", features = ["encryption", "pkcs5", "pem", "std", "sha1-insecure"] }
+# The vault (Q30): XChaCha20-Poly1305 under an Argon2id key; nonces and salts from
+# `getrandom::fill`.
+chacha20poly1305 = "0.10.1"
+argon2 = "0.5.3"
+getrandom = "0.3"
+# Hashed `known_hosts` entries (`|1|salt|hash`, HMAC-SHA1).
+hmac = "0.12"
+sha1 = "0.10"
+# `capture_tracing`'s `log` bridge (Q33).
+tracing-log = "0.2"
+
 [patch.crates-io]
+# M2b (Task 1, Q2, Q29): Hacivat's patched copy (third_party/mysql_async/PATCHES.md).
+mysql_async = { path = "third_party/mysql_async" }
 # zed Cargo.toml:1045
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 # zed Cargo.toml:1046

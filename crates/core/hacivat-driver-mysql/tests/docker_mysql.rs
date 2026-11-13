@@ -160,6 +160,7 @@ fn build(t: &DockerTarget, s: Spec<'_>) -> DriverConnect {
         mode: s.mode,
         ca_file: s.ca.map(Path::to_path_buf),
         client_cert: None,
+        ..Default::default()
     };
     DriverConnect {
         endpoint: Endpoint::Network {
@@ -171,7 +172,7 @@ fn build(t: &DockerTarget, s: Spec<'_>) -> DriverConnect {
             resolved,
             tls_host: tls_host.clone(),
         },
-        tls: build_tls_params(&settings, &tls_host, class).unwrap(),
+        tls: build_tls_params(&settings, &tls_host, 3306, class, None).unwrap(),
         user: Some(s.user.unwrap_or(&t.user).to_string()),
         password: Some(SecretString::from(s.password.unwrap_or(&t.password))),
         database: Some(s.database.unwrap_or(&t.database).to_string()),
@@ -180,6 +181,7 @@ fn build(t: &DockerTarget, s: Spec<'_>) -> DriverConnect {
         options: vec![],
         connect_timeout: TIMEOUT,
         events: Arc::new(|_| {}),
+        insecure_auth: Default::default(),
     }
 }
 

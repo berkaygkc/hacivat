@@ -7,7 +7,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
-use hacivat_driver::{CancelHandle, ProbeWarning, RawConn, RawError, SemVerLoose, ServerInfo};
+use hacivat_driver::{
+    CancelHandle, ExecOpts, ExecSummary, ProbeWarning, RawConn, RawError, SemVerLoose, ServerInfo,
+    TxStatus,
+};
 use hacivat_net::{TlsMode, TlsSummary, TlsVerified};
 use hacivat_proto::DbmsKind;
 use tokio::task::JoinHandle;
@@ -242,6 +245,32 @@ impl RawConn for PgConn {
 
     /// `None` in M2a; the CancelRequest over a fresh factory stream arrives in M2b.
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
+        None
+    }
+
+    // ## m2b-t01-interfaces: Task 10 (`exec`) fills these; until then nothing runs.
+
+    fn execute<'a>(
+        &'a mut self,
+        _sql: &'a str,
+        _opts: ExecOpts,
+    ) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
+        Box::pin(async { Err(crate::exec::not_yet()) })
+    }
+
+    fn batch<'a>(&'a mut self, _sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
+        Box::pin(async { Err(crate::exec::not_yet()) })
+    }
+
+    fn tx_status(&self) -> TxStatus {
+        TxStatus::Idle
+    }
+
+    fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>> {
+        Box::pin(async { Err(crate::exec::not_yet()) })
+    }
+
+    fn backend_id(&self) -> Option<u64> {
         None
     }
 }

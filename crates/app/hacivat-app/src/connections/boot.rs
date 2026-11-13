@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use hacivat_driver::{DriverRegistry, EngineCatalog};
+use hacivat_net::ssh::{KnownHosts, TunnelConfig, TunnelManager};
 use hacivat_secrets::{CredentialFiles, KeyringBackend, MemoryBackend, SecretBackend, SecretStore};
 use hacivat_session::pipeline::{ApprovedRoots, ConnectDeps};
 use hacivat_session::profile::{LoadedProfiles, ProfileStore};
@@ -22,6 +23,10 @@ pub struct ConnectionsBoot {
     pub drivers: Arc<DriverRegistry>,
     /// The credential files connects read (`.pgpass`, `pg_service.conf`); none in tests.
     pub files: CredentialFiles,
+    // ## m2b-t01-interfaces
+    /// The known-host stores: Hacivat's `known_hosts` in the data folder and the user's
+    /// OpenSSH files (read only). Loading does no I/O (Q42).
+    pub known_hosts: Arc<KnownHosts>,
 }
 
 impl ConnectionsBoot {
@@ -76,7 +81,20 @@ fn boot_with(
         secrets: Arc::new(SecretStore::new(Some(backend))),
         drivers: Arc::new(drivers),
         files,
+        known_hosts: KnownHosts::load(openssh_known_hosts(), paths.data.join("known_hosts")),
     }
+}
+
+// ## m2b-t01-interfaces
+/// The user's OpenSSH `known_hosts` files (`~/.ssh/known_hosts`, `~/.ssh/known_hosts2`), read
+/// only; none without a home directory. Paths only: nothing is read here.
+fn openssh_known_hosts() -> Vec<std::path::PathBuf> {
+    std::env::home_dir()
+        .map(|home| {
+            let ssh = home.join(".ssh");
+            vec![ssh.join("known_hosts"), ssh.join("known_hosts2")]
+        })
+        .unwrap_or_default()
 }
 
 /// Sets the `ConnectionsModel` Global from `boot` (with its `ConnectionManager`) and shows the
@@ -93,7 +111,10 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         secrets,
         drivers,
         files,
+        known_hosts,
     } = boot;
+    // ## m2b-t01-interfaces: the SSH chains, shared by every connect (Q23).
+    let tunnels = TunnelManager::new(known_hosts.clone(), TunnelConfig::default());
     // ## m2a-t17-dialog: the dialog's file pickers approve into the roots connects check.
     let approved_roots = ApprovedRoots::for_user();
     cx.set_global(crate::connections::dialog::DialogEnv {
@@ -110,6 +131,8 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         // Home plus paths the user picks in the connection dialog (T17 adds them).
         approved_roots,
         timeout_override: None,
+        tunnels: tunnels.clone(),
+        known_hosts: known_hosts.clone(),
     };
     let manager =
         ConnectionManager::new(runtime.handle(), Arc::new(deps), ManagerConfig::default());
@@ -119,7 +142,13 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         quarantined,
     } = loaded;
     cx.set_global(ConnectionsModel::new(
-        runtime, store, profiles, secrets, manager,
+        runtime,
+        store,
+        profiles,
+        secrets,
+        manager,
+        known_hosts,
+        tunnels,
     ));
     cx.on_app_quit(|cx| {
         if let Some(m) = cx.try_global::<ConnectionsModel>() {

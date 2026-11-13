@@ -25,7 +25,7 @@ use secrecy::SecretString;
 use tokio::sync::oneshot;
 
 use crate::connections::error_view::paragraph;
-use crate::connections::interaction::PasswordRequest;
+use crate::connections::interaction::PromptRequest;
 use crate::l10n_global::tr;
 use crate::shell::Workspace;
 use crate::shell::layers::{DIALOG_CONTEXT, Layer};
@@ -55,19 +55,25 @@ impl Focusable for PasswordPrompt {
     }
 }
 
+/// What a password question asks (`Question::Password` without its profile ID).
+struct Asked {
+    name: String,
+    user: String,
+    attempt: u8,
+}
+
 impl PasswordPrompt {
     /// A prompt for `question`; its answer goes to `reply` (the forwarding task in [`open`]).
     fn new(
-        question: Question,
+        question: Asked,
         reply: oneshot::Sender<Answer>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let Question::Password {
+        let Asked {
             name,
             user,
             attempt,
-            ..
         } = question;
         let placeholder_user = user.clone();
         let placeholder = Rc::new(move |cx: &App| {
@@ -262,7 +268,7 @@ fn close_layer(window: &mut Window, cx: &mut App) {
 /// Opens the prompt for `request` in the workspace window (the active one, else the first),
 /// and focuses its field. Without a workspace window the request is dropped, which answers
 /// `Cancelled`.
-pub(crate) fn open(request: PasswordRequest, cx: &mut App) {
+pub(crate) fn open(request: PromptRequest, cx: &mut App) {
     let window = cx
         .active_window()
         .into_iter()
@@ -271,10 +277,27 @@ pub(crate) fn open(request: PasswordRequest, cx: &mut App) {
     let Some(window) = window else {
         return;
     };
-    let PasswordRequest {
+    let PromptRequest {
         question,
         mut reply,
     } = request;
+    // ## m2b-t01-interfaces: only password questions open this prompt; any other is cancelled.
+    let question = match question {
+        Question::Password {
+            name,
+            user,
+            attempt,
+            ..
+        } => Asked {
+            name,
+            user,
+            attempt,
+        },
+        _ => {
+            let _ = reply.send(Answer::Cancelled);
+            return;
+        }
+    };
     // The prompt answers on its own channel; a task forwards that answer to the asker, or,
     // when the asker goes away first (the connect or test was cancelled, the profile
     // forgotten), closes the orphaned prompt.

@@ -5,12 +5,15 @@
 //! and are not shown. `UseDatabase` becomes one button per suggested database (at most 3); with
 //! no suggestion (SQLite, or no list) it offers nothing.
 
+use std::sync::Arc;
+
 use hacivat_l10n::{NoArgs, Text, ids};
-use hacivat_proto::FixId;
+use hacivat_proto::{FixId, ProfileId};
 use hacivat_session::pipeline::ConnectError;
 use hacivat_ui::button::ButtonKind;
-use hacivat_ui_core::gpui_surface::{App, SharedString};
+use hacivat_ui_core::gpui_surface::{App, SharedString, Window};
 
+use crate::connections::{cert_dialog, dialog, hostkey_prompt};
 use crate::l10n_global::tr;
 
 /// R11: where "Supported versions" leads (a placeholder URL, an open item for the PO).
@@ -32,6 +35,37 @@ pub enum FixAction {
     SupportedVersions,
     ConnectAnyway,
     EncryptWithoutVerifying,
+    // ## m2b-t01-interfaces: M2b flows, run by [`run_m2b_fix`]. Their owners add the labels
+    // and map their `FixId`s in `fix_actions` (Tasks 19, 20, 21); until then no button shows.
+    ReviewCertificate,
+    ImportCa,
+    ConnectThroughSsh,
+    ReviewHostKey,
+}
+
+// ## m2b-t01-interfaces
+/// Runs an M2b quick fix for `profile`'s failed connect `error` (Q9); `false` for any other
+/// fix (the surfaces run those themselves).
+pub fn run_m2b_fix(
+    action: &FixAction,
+    error: &Arc<ConnectError>,
+    profile: ProfileId,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    match action {
+        FixAction::ReviewCertificate => cert_dialog::review(error.clone(), window, cx),
+        // Task 19 picks and imports the CA file.
+        FixAction::ImportCa => {}
+        FixAction::ConnectThroughSsh => dialog::ssh::open_with_ssh(profile, window, cx),
+        FixAction::ReviewHostKey => {
+            if let Some(m) = error.host_key.clone() {
+                hostkey_prompt::review_changed(m, profile, window, cx);
+            }
+        }
+        _ => return false,
+    }
+    true
 }
 
 impl FixAction {
@@ -110,6 +144,16 @@ pub fn fix_buttons(actions: &[FixAction], cx: &App) -> Vec<FixButton> {
     let mut primary_taken = false;
     actions
         .iter()
+        // ## m2b-t01-interfaces: no label yet (their owners add them).
+        .filter(|action| {
+            !matches!(
+                action,
+                FixAction::ReviewCertificate
+                    | FixAction::ImportCa
+                    | FixAction::ConnectThroughSsh
+                    | FixAction::ReviewHostKey
+            )
+        })
         .map(|action| {
             let (id, label): (SharedString, SharedString) = match action {
                 FixAction::EditConnection => {
@@ -146,6 +190,11 @@ pub fn fix_buttons(actions: &[FixAction], cx: &App) -> Vec<FixButton> {
                     "fix-require".into(),
                     tr(cx, ids::hv::CONN_FIX_REQUIRE, NoArgs),
                 ),
+                // Filtered out above until their owners add the labels.
+                FixAction::ReviewCertificate
+                | FixAction::ImportCa
+                | FixAction::ConnectThroughSsh
+                | FixAction::ReviewHostKey => (SharedString::default(), SharedString::default()),
             };
             let kind = match action {
                 FixAction::ConnectAnyway => ButtonKind::Ghost,

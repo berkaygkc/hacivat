@@ -129,6 +129,17 @@ pub enum CapsuleModel {
         step: SharedString,
         clock: SharedString,
     },
+    // ## m2b-t01-interfaces
+    /// Reconnecting after a lost connection (Task 22): the attempt label and, between
+    /// attempts, when the next one starts.
+    Reconnecting {
+        env: EnvKind,
+        env_label: SharedString,
+        name: SharedString,
+        engine: SharedString,
+        label: SharedString,
+        next: Option<SharedString>,
+    },
     Connection {
         env: EnvKind,
         /// Pre-cased by Fluent (`PRODUCTION` in English, `PROD` in Turkish).
@@ -463,6 +474,37 @@ impl Capsule {
                             c.text_2.to_hsla(),
                         ))),
                 );
+            }
+            // ## m2b-t01-interfaces: like Connecting, without a clock (Task 22 finishes it).
+            CapsuleModel::Reconnecting {
+                env,
+                env_label,
+                name,
+                engine,
+                label,
+                next,
+            } => {
+                name_for_label = name.clone();
+                description = Some(SharedString::from(format!("{env_label}, {label}")));
+                frame = head(
+                    frame,
+                    Head {
+                        env: Some((*env, env_label)),
+                        name,
+                        engine: Some(engine),
+                    },
+                );
+                let mut run = cell(t)
+                    .child(run_marker(&theme).debug_selector(|| "capsule-run".to_string()))
+                    .child(text(label, body, c.text.to_hsla()));
+                if let Some(next) = next {
+                    run = run.child(div().min_w(px(RUN_MONO_MIN_PX)).child(text(
+                        next,
+                        mono,
+                        c.text_2.to_hsla(),
+                    )));
+                }
+                frame = frame.child(run);
             }
             CapsuleModel::Connection {
                 env,

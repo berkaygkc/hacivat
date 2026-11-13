@@ -63,17 +63,25 @@ pub async fn test_connection(
 ) -> TestReport {
     let started = tokio::time::Instant::now();
     let ProfileDraft {
-        profile, password, ..
+        profile,
+        password,
+        ssh_secrets,
+        ..
     } = draft;
     let auth = profile.auth;
     let profile_user = profile.user.clone();
     let network = !matches!(profile.endpoint, ProfileEndpoint::File { .. });
     let req = ConnectRequest {
+        read_only: profile.read_only,
         profile: Arc::new(profile),
         draft_password: password,
         purpose: Purpose::Test,
         department: Department::Unknown,
         prior_rejections: 0,
+        // ## m2b-t01-interfaces: the dialog's typed SSH secrets, for Test (Q23).
+        draft_ssh: ssh_secrets,
+        overlay_secrets: None,
+        plaintext_consent: false,
     };
     let mut live = match connect(deps, req, ix, cancel.clone(), progress).await {
         Ok(live) => live,

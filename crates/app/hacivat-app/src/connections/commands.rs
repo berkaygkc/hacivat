@@ -201,6 +201,8 @@ pub fn toggle_connect(id: ProfileId, cx: &mut App) {
     match state {
         LiveState::Connected(_) => ConnectionsModel::disconnect(cx, id),
         LiveState::Connecting(_) => ConnectionsModel::cancel_connect(cx, id),
+        // ## m2b-t01-interfaces: stopping a reconnect is a disconnect (Task 22 refines it).
+        LiveState::Reconnecting { .. } => ConnectionsModel::disconnect(cx, id),
         LiveState::Disconnected | LiveState::Failed(_) | LiveState::Lost { .. } => {
             note_started(cx, id);
             ConnectionsModel::connect(cx, id, None);

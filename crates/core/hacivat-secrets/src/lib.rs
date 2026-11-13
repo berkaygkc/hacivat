@@ -10,7 +10,10 @@ pub mod store;
 
 pub use secrecy::{ExposeSecret, SecretString};
 
-pub use backend::{KeyringBackend, MemoryBackend, SecretBackend, SecretError, VaultBackend};
+pub use backend::{
+    BackendChoice, FallbackBackend, FileVault, KeyringBackend, MemoryBackend, SecretBackend,
+    SecretError, VaultBackend, VaultParams,
+};
 pub use files::{
     MAX_CREDENTIAL_FILE_BYTES, PgPassMatch, PgPassWarning, PgService, PgServiceFile,
     ServiceFileWarning, pg_service_path, pg_service_paths, pgpass_lookup, pgpass_path,

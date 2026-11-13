@@ -7,26 +7,67 @@
 //! (with TLS params) and `AuthStarted`/`AuthDone` to the request's event callback. A gated
 //! driver (`gated`) holds every connect until `release`, so a test can observe a connect in
 //! flight without racing a delay.
+//!
+//! M2b (Task 1, Q23): connections run statements from a script (`exec`). The first unconsumed
+//! [`FakeExec`] whose prefix matches is used once; an unmatched statement succeeds with an
+//! empty summary and leaves the transaction status unchanged. `executed` records `execute` and
+//! `batch` text in order. A cancel (through `cancel_handle`) ends the running statement with
+//! `RawErrorKind::Cancelled` unless the driver `ignores_cancel`. `kill_connections` makes every
+//! live connection fail with `Io(ConnectionReset)`.
 
 use std::collections::VecDeque;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use hacivat_net::{Target, TlsSettings, TlsSummary, TlsVerified};
+use hacivat_net::{BoxedStream, PresentedChain, Target, TlsSettings, TlsSummary, TlsVerified};
 use hacivat_proto::DbmsKind;
 use secrecy::ExposeSecret;
+use tokio::sync::Notify;
 
 use crate::driver::{
     CancelHandle, CancelMechanism, Driver, DriverCaps, DriverConnect, DriverDescriptor,
-    DriverEvent, Endpoint, ProbeWarning, RawConn,
+    DriverEvent, Endpoint, ExecOpts, ExecSummary, InsecureAuth, ProbeWarning, RawConn, TxStatus,
 };
-use crate::errors::RawError;
+use crate::errors::{RawError, RawErrorKind};
 use crate::server::ServerInfo;
+
+// ## m2b-t01-interfaces
+/// One scripted statement (Q23): used once, by the first statement starting with `prefix`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FakeExec {
+    pub prefix: &'static str,
+    pub result: Result<ExecSummary, RawError>,
+    /// How long the statement runs (a cancel ends it early).
+    pub delay: Duration,
+    /// The connection's transaction status after the statement.
+    pub tx_after: Option<TxStatus>,
+    /// The statement panics (an actor's panic handling).
+    pub panics: bool,
+}
+
+/// The statement script and log, shared by the driver and its connections.
+#[derive(Default)]
+struct ExecState {
+    script: Mutex<Vec<Option<FakeExec>>>,
+    executed: Mutex<Vec<String>>,
+}
+
+impl ExecState {
+    /// Logs `sql` and takes the first unconsumed entry whose prefix matches it.
+    fn take(&self, sql: &str) -> Option<FakeExec> {
+        lock(&self.executed).push(sql.to_string());
+        let text = sql.trim_start();
+        lock(&self.script)
+            .iter_mut()
+            .find(|e| e.as_ref().is_some_and(|e| text.starts_with(e.prefix)))
+            .and_then(Option::take)
+    }
+}
 
 /// A [`DriverConnect`] endpoint without its stream factory.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -65,6 +106,8 @@ pub struct FakeRequest {
     pub read_only: bool,
     pub options: Vec<(String, String)>,
     pub connect_timeout: Duration,
+    // ## m2b-t01-interfaces
+    pub insecure_auth: InsecureAuth,
 }
 
 impl fmt::Debug for FakeRequest {
@@ -89,6 +132,7 @@ impl fmt::Debug for FakeRequest {
             .field("read_only", &self.read_only)
             .field("options", &self.options)
             .field("connect_timeout", &self.connect_timeout)
+            .field("insecure_auth", &self.insecure_auth)
             .finish()
     }
 }
@@ -130,6 +174,7 @@ impl FakeRequest {
             read_only: req.read_only,
             options: req.options.clone(),
             connect_timeout: req.connect_timeout,
+            insecure_auth: req.insecure_auth,
         }
     }
 }
@@ -141,6 +186,11 @@ struct Counters {
     /// Connection objects alive: made for a connect, not yet dropped (closed or abandoned,
     /// e.g. with a pending connect when its runtime stops). M2a Task 18.
     alive: AtomicUsize,
+    // ## m2b-t01-interfaces
+    cancel: AtomicUsize,
+    reset: AtomicUsize,
+    /// Bumped by `kill_connections`: a connection made before the bump is dead.
+    killed: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -161,6 +211,15 @@ pub struct FakeDriver {
     databases: Vec<String>,
     counters: Arc<Counters>,
     last: Mutex<Option<FakeRequest>>,
+    // ## m2b-t01-interfaces
+    exec: Arc<ExecState>,
+    requests: Mutex<Vec<FakeRequest>>,
+    backend: Option<u64>,
+    presented: Option<Vec<Vec<u8>>>,
+    tls_outcome: Option<TlsVerified>,
+    ignores_cancel: bool,
+    reset_fails: bool,
+    consumes_factory: bool,
 }
 
 impl FakeDriver {
@@ -199,6 +258,14 @@ impl FakeDriver {
             databases: Vec::new(),
             counters: Arc::default(),
             last: Mutex::new(None),
+            exec: Arc::default(),
+            requests: Mutex::new(Vec::new()),
+            backend: None,
+            presented: None,
+            tls_outcome: None,
+            ignores_cancel: false,
+            reset_fails: false,
+            consumes_factory: false,
         }
     }
 
@@ -274,6 +341,81 @@ impl FakeDriver {
     pub fn last_request(&self) -> Option<FakeRequest> {
         lock(&self.last).clone()
     }
+
+    // ## m2b-t01-interfaces
+
+    /// The statement script (see the module docs).
+    pub fn exec(self, script: Vec<FakeExec>) -> Self {
+        *lock(&self.exec.script) = script.into_iter().map(Some).collect();
+        self
+    }
+
+    /// What every connection's `backend_id` reports.
+    pub fn backend(mut self, id: u64) -> Self {
+        self.backend = Some(id);
+        self
+    }
+
+    /// The chain (DER, leaf first) written into `TlsParams.presented` when a connect with TLS
+    /// fails with a TLS error.
+    pub fn presented(mut self, der: Vec<Vec<u8>>) -> Self {
+        self.presented = Some(der);
+        self
+    }
+
+    /// The outcome written into `TlsParams.outcome` when a connect with TLS succeeds.
+    pub fn tls_outcome(mut self, v: TlsVerified) -> Self {
+        self.tls_outcome = Some(v);
+        self
+    }
+
+    /// The text of every `execute` and `batch`, in order.
+    pub fn executed(&self) -> Vec<String> {
+        lock(&self.exec.executed).clone()
+    }
+
+    /// A cancel no longer ends the running statement.
+    pub fn ignores_cancel(mut self) -> Self {
+        self.ignores_cancel = true;
+        self
+    }
+
+    /// Every `reset` fails.
+    pub fn reset_fails(mut self) -> Self {
+        self.reset_fails = true;
+        self
+    }
+
+    /// Each connect opens the network endpoint's stream (as the PostgreSQL driver does) and
+    /// fails with its I/O error.
+    pub fn consumes_factory(mut self) -> Self {
+        self.consumes_factory = true;
+        self
+    }
+
+    /// `first` for the next connects, then `then` for every other one.
+    pub fn script_then(self, first: Vec<Result<(), RawError>>, then: Result<(), RawError>) -> Self {
+        self.script(first).connect_result(then)
+    }
+
+    /// Every request, in order.
+    pub fn requests(&self) -> Vec<FakeRequest> {
+        lock(&self.requests).clone()
+    }
+
+    pub fn cancel_calls(&self) -> usize {
+        self.counters.cancel.load(Ordering::SeqCst)
+    }
+
+    pub fn reset_calls(&self) -> usize {
+        self.counters.reset.load(Ordering::SeqCst)
+    }
+
+    /// Every live connection fails from now on with `Io(ConnectionReset)`; later connections
+    /// are fine.
+    pub fn kill_connections(&self) {
+        self.counters.killed.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 impl Driver for FakeDriver {
@@ -286,14 +428,16 @@ impl Driver for FakeDriver {
         req: DriverConnect,
     ) -> BoxFuture<'static, Result<Box<dyn RawConn>, RawError>> {
         // Recorded before it is counted: a test that saw the count also sees the request.
-        *lock(&self.last) = Some(FakeRequest::of(&req));
+        let recorded = FakeRequest::of(&req);
+        lock(&self.requests).push(recorded.clone());
+        *lock(&self.last) = Some(recorded);
         self.counters.connect.fetch_add(1, Ordering::SeqCst);
         let scripted = lock(&self.script).pop_front();
         let result = match scripted {
             Some(result) => result,
             None => self.result.clone(),
         };
-        let conn = FakeConn {
+        let mut conn = FakeConn {
             kind: self.descriptor.kind,
             server: self.server.clone(),
             pings: self.pings.clone().into(),
@@ -301,6 +445,14 @@ impl Driver for FakeDriver {
             databases: self.databases.clone(),
             user: req.user.clone(),
             counters: self.counters.clone(),
+            exec: self.exec.clone(),
+            tx: TxStatus::Idle,
+            born: self.counters.killed.load(Ordering::SeqCst),
+            cancel: Arc::new(Notify::new()),
+            ignores_cancel: self.ignores_cancel,
+            reset_fails: self.reset_fails,
+            backend: self.backend,
+            stream: None,
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
@@ -309,6 +461,15 @@ impl Driver for FakeDriver {
             .as_ref()
             .map(tokio::sync::watch::Sender::subscribe);
         let with_tls = req.tls.is_some();
+        let tls_slots = req
+            .tls
+            .as_ref()
+            .map(|t| (t.presented.clone(), t.outcome.clone()));
+        let (presented, outcome) = (self.presented.clone(), self.tls_outcome);
+        let factory = match &req.endpoint {
+            Endpoint::Network { factory, .. } if self.consumes_factory => Some(factory.clone()),
+            _ => None,
+        };
         let events = req.events.clone();
         drop(req);
         Box::pin(async move {
@@ -316,10 +477,25 @@ impl Driver for FakeDriver {
                 // The driver (the sender) outlives its connects in tests; if it is gone, go on.
                 let _ = gate.wait_for(|open| *open).await;
             }
+            if let Some(factory) = factory {
+                let stream = factory.open().await.map_err(|e| RawError {
+                    kind: RawErrorKind::Io(e.kind()),
+                    server: None,
+                })?;
+                conn.stream = Some(stream);
+            }
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
+            if let (Err(e), Some((slot, _)), Some(der)) = (&result, &tls_slots, presented)
+                && matches!(e.kind, RawErrorKind::Tls(_))
+            {
+                *lock(slot) = Some(PresentedChain::from_der(der));
+            }
             result?;
+            if let (Some((_, slot)), Some(v)) = (&tls_slots, outcome) {
+                *lock(slot) = Some(v);
+            }
             if with_tls {
                 events(DriverEvent::TlsStarted);
                 events(DriverEvent::TlsDone);
@@ -340,6 +516,80 @@ struct FakeConn {
     databases: Vec<String>,
     user: Option<String>,
     counters: Arc<Counters>,
+    // ## m2b-t01-interfaces
+    exec: Arc<ExecState>,
+    tx: TxStatus,
+    /// `Counters::killed` when the connection was made.
+    born: u64,
+    cancel: Arc<Notify>,
+    ignores_cancel: bool,
+    reset_fails: bool,
+    backend: Option<u64>,
+    /// The endpoint's stream, held open (`consumes_factory`).
+    #[allow(dead_code, reason = "held so the peer sees an open connection")]
+    stream: Option<BoxedStream>,
+}
+
+impl FakeConn {
+    /// `Io(ConnectionReset)` once `kill_connections` ran after this connection was made.
+    fn alive(&self) -> Result<(), RawError> {
+        if self.counters.killed.load(Ordering::SeqCst) > self.born {
+            return Err(RawError {
+                kind: RawErrorKind::Io(std::io::ErrorKind::ConnectionReset),
+                server: None,
+            });
+        }
+        Ok(())
+    }
+
+    /// Runs one statement from the script.
+    async fn run(&mut self, sql: &str) -> Result<ExecSummary, RawError> {
+        let entry = self.exec.take(sql);
+        self.alive()?;
+        let Some(entry) = entry else {
+            return Ok(ExecSummary {
+                tx: self.tx,
+                ..ExecSummary::default()
+            });
+        };
+        assert!(
+            !entry.panics,
+            "FakeExec `{}` panics (scripted)",
+            entry.prefix
+        );
+        if !entry.delay.is_zero() {
+            let cancelled = self.cancel.notified();
+            tokio::pin!(cancelled);
+            cancelled.as_mut().enable();
+            let ignores = self.ignores_cancel;
+            tokio::select! {
+                () = tokio::time::sleep(entry.delay) => {}
+                () = &mut cancelled, if !ignores => {
+                    return Err(RawError { kind: RawErrorKind::Cancelled, server: None });
+                }
+            }
+            self.alive()?;
+        }
+        if let Some(tx) = entry.tx_after {
+            self.tx = tx;
+        }
+        let tx = self.tx;
+        entry.result.map(|summary| ExecSummary { tx, ..summary })
+    }
+}
+
+/// Cancels the statement running on one [`FakeConn`].
+struct FakeCancel {
+    notify: Arc<Notify>,
+    counters: Arc<Counters>,
+}
+
+impl CancelHandle for FakeCancel {
+    fn cancel(&self) -> BoxFuture<'static, Result<(), RawError>> {
+        self.counters.cancel.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_waiters();
+        Box::pin(async { Ok(()) })
+    }
 }
 
 impl Drop for FakeConn {
@@ -359,10 +609,11 @@ impl RawConn for FakeConn {
     }
 
     fn ping(&mut self) -> BoxFuture<'_, Result<Duration, RawError>> {
-        let next = self
-            .pings
-            .pop_front()
-            .unwrap_or(Ok(Duration::from_millis(1)));
+        let next = self.alive().and_then(|()| {
+            self.pings
+                .pop_front()
+                .unwrap_or(Ok(Duration::from_millis(1)))
+        });
         Box::pin(async move { next })
     }
 
@@ -391,7 +642,47 @@ impl RawConn for FakeConn {
     }
 
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
-        None
+        Some(Arc::new(FakeCancel {
+            notify: self.cancel.clone(),
+            counters: self.counters.clone(),
+        }))
+    }
+
+    // ## m2b-t01-interfaces
+
+    fn execute<'a>(
+        &'a mut self,
+        sql: &'a str,
+        _opts: ExecOpts,
+    ) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
+        Box::pin(self.run(sql))
+    }
+
+    fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
+        Box::pin(async move { self.run(sql).await.map(|_| ()) })
+    }
+
+    fn tx_status(&self) -> TxStatus {
+        self.tx
+    }
+
+    fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>> {
+        self.counters.reset.fetch_add(1, Ordering::SeqCst);
+        let result = match self.alive() {
+            Ok(()) if self.reset_fails => Err(RawError {
+                kind: RawErrorKind::Other,
+                server: None,
+            }),
+            alive => alive,
+        };
+        if result.is_ok() {
+            self.tx = TxStatus::Idle;
+        }
+        Box::pin(async move { result })
+    }
+
+    fn backend_id(&self) -> Option<u64> {
+        self.backend
     }
 }
 
@@ -417,6 +708,7 @@ mod tests {
             options: vec![("k".into(), "v".into())],
             connect_timeout: Duration::from_secs(15),
             events,
+            insecure_auth: InsecureAuth::default(),
         }
     }
 
@@ -501,5 +793,120 @@ mod tests {
         let printed = format!("{last:?}");
         assert!(!printed.contains("s3cret"), "{printed}");
         assert!(printed.contains("password: <redacted>"), "{printed}");
+    }
+
+    // ## m2b-t01-interfaces
+
+    fn slow(prefix: &'static str, delay: Duration) -> FakeExec {
+        FakeExec {
+            prefix,
+            result: Ok(ExecSummary::default()),
+            delay,
+            tx_after: None,
+            panics: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancel_ends_the_running_statement_unless_ignored() {
+        // An hour: only the cancel can end it within the test.
+        let fake = FakeDriver::new(DbmsKind::Postgres)
+            .exec(vec![slow("SELECT pg_sleep", Duration::from_secs(3600))])
+            .backend(4242);
+        let mut conn = fake.connect(request(None, Arc::new(|_| {}))).await.unwrap();
+        assert_eq!(conn.backend_id(), Some(4242));
+        let cancel = conn.cancel_handle().expect("a cancel handle");
+        let (result, ()) = tokio::join!(
+            conn.execute("SELECT pg_sleep(60)", ExecOpts::default()),
+            async {
+                tokio::task::yield_now().await;
+                cancel.cancel().await.unwrap();
+            }
+        );
+        assert_eq!(result.unwrap_err().kind, RawErrorKind::Cancelled);
+        assert_eq!(fake.cancel_calls(), 1);
+
+        let stubborn = FakeDriver::new(DbmsKind::Postgres)
+            .exec(vec![slow("SELECT", Duration::from_millis(20))])
+            .ignores_cancel();
+        let mut conn = stubborn
+            .connect(request(None, Arc::new(|_| {})))
+            .await
+            .unwrap();
+        let cancel = conn.cancel_handle().unwrap();
+        let (result, ()) = tokio::join!(conn.execute("SELECT 1", ExecOpts::default()), async {
+            tokio::task::yield_now().await;
+            cancel.cancel().await.unwrap();
+        });
+        assert!(result.is_ok(), "the statement ran to its end");
+    }
+
+    #[tokio::test]
+    async fn killed_connections_fail_and_reset_is_counted() {
+        let fake = FakeDriver::new(DbmsKind::MySql).exec(vec![FakeExec {
+            prefix: "START TRANSACTION",
+            result: Ok(ExecSummary::default()),
+            delay: Duration::ZERO,
+            tx_after: Some(TxStatus::InTx),
+            panics: false,
+        }]);
+        let mut conn = fake.connect(request(None, Arc::new(|_| {}))).await.unwrap();
+        conn.batch("START TRANSACTION READ ONLY").await.unwrap();
+        assert_eq!(conn.tx_status(), TxStatus::InTx);
+        conn.reset().await.unwrap();
+        assert_eq!((conn.tx_status(), fake.reset_calls()), (TxStatus::Idle, 1));
+
+        fake.kill_connections();
+        let reset = RawErrorKind::Io(std::io::ErrorKind::ConnectionReset);
+        assert_eq!(
+            conn.execute("SELECT 1", ExecOpts::default())
+                .await
+                .unwrap_err()
+                .kind,
+            reset
+        );
+        assert_eq!(conn.ping().await.unwrap_err().kind, reset);
+        let mut fresh = fake.connect(request(None, Arc::new(|_| {}))).await.unwrap();
+        assert!(fresh.execute("SELECT 1", ExecOpts::default()).await.is_ok());
+        assert_eq!(
+            fake.executed(),
+            ["START TRANSACTION READ ONLY", "SELECT 1", "SELECT 1"]
+        );
+        assert_eq!(fake.requests().len(), 2);
+        assert_eq!(
+            fake.requests()[0].insecure_auth,
+            InsecureAuth::RefuseUnlessVerified
+        );
+
+        let failing = FakeDriver::new(DbmsKind::MySql).reset_fails();
+        let mut conn = failing
+            .connect(request(None, Arc::new(|_| {})))
+            .await
+            .unwrap();
+        assert!(conn.reset().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_factory_consumer_fails_with_the_streams_error() {
+        let refused = hacivat_net::StreamFactory::new(|| {
+            Box::pin(async { Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)) })
+        });
+        let fake = FakeDriver::new(DbmsKind::Postgres).consumes_factory();
+        let mut req = request(None, Arc::new(|_| {}));
+        req.endpoint = Endpoint::Network {
+            factory: refused,
+            direct: None,
+            resolved: Vec::new(),
+            tls_host: "db".into(),
+        };
+        let err = fake
+            .connect(req)
+            .await
+            .err()
+            .expect("the stream was refused");
+        assert_eq!(
+            err.kind,
+            RawErrorKind::Io(std::io::ErrorKind::ConnectionRefused)
+        );
     }
 }

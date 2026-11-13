@@ -294,6 +294,33 @@ impl RawConn for SqliteConn {
         // M2b: an `InterruptHandle` (`sqlite3_interrupt`), taken before the connection moves.
         None
     }
+
+    // ## m2b-t01-interfaces: Task 11 (`exec`) fills these; until then nothing runs.
+
+    fn execute<'a>(
+        &'a mut self,
+        _sql: &'a str,
+        _opts: hacivat_driver::ExecOpts,
+    ) -> BoxFuture<'a, Result<hacivat_driver::ExecSummary, RawError>> {
+        Box::pin(async { Err(crate::exec::not_yet()) })
+    }
+
+    fn batch<'a>(&'a mut self, _sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
+        Box::pin(async { Err(crate::exec::not_yet()) })
+    }
+
+    fn tx_status(&self) -> hacivat_driver::TxStatus {
+        hacivat_driver::TxStatus::Idle
+    }
+
+    /// SQLite keeps no session state to reset (a no-op by design, not a stub).
+    fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn backend_id(&self) -> Option<u64> {
+        None
+    }
 }
 
 #[cfg(test)]

@@ -23,10 +23,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use hacivat_l10n::{Count, NoArgs, Text, ids};
+use hacivat_net::ssh::{HopSecrets, KnownHosts, TunnelManager};
 use hacivat_proto::{ProfileId, TagSource};
 use hacivat_secrets::{Retention, SecretError, SecretKey, SecretSlot, SecretStore, Stored};
+use hacivat_session::pipeline::ProfileChange;
 use hacivat_session::profile::{
-    Profile, ProfileDiag, ProfileDraft, ProfileStore, StoreError, duplicate_name,
+    Profile, ProfileDiag, ProfileDraft, ProfileStore, StoreError, TransportSpec, duplicate_name,
     fold_typed_options, strip_secret_options,
 };
 use hacivat_session::{ConnectionManager, CoreRuntime, LiveState, TestHandle};
@@ -37,6 +39,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::connections::interaction::interaction;
+use crate::connections::vault_dialog;
 use crate::l10n_global::tr;
 
 /// Why a profile write failed (M2a).
@@ -75,6 +78,9 @@ pub struct ConnectionsModel {
     writer: ProfileWriter,
     /// The keyring fallback toast was shown this session.
     keyring_notice_shown: bool,
+    // ## m2b-t01-interfaces
+    known_hosts: Arc<KnownHosts>,
+    tunnels: Arc<TunnelManager>,
 }
 
 impl Global for ConnectionsModel {}
@@ -87,6 +93,8 @@ impl ConnectionsModel {
         profiles: Vec<Profile>,
         secrets: Arc<SecretStore>,
         manager: Arc<ConnectionManager>,
+        known_hosts: Arc<KnownHosts>,
+        tunnels: Arc<TunnelManager>,
     ) -> Self {
         let runtime = core.handle();
         ConnectionsModel {
@@ -101,7 +109,31 @@ impl ConnectionsModel {
             runtime,
             core,
             keyring_notice_shown: false,
+            known_hosts,
+            tunnels,
         }
+    }
+
+    // ## m2b-t01-interfaces
+
+    /// The known-host stores (Q23).
+    pub fn known_hosts(&self) -> Arc<KnownHosts> {
+        self.known_hosts.clone()
+    }
+
+    /// The SSH chains (Q23).
+    pub fn tunnels(&self) -> Arc<TunnelManager> {
+        self.tunnels.clone()
+    }
+
+    /// Applies `changes` (a pin, a CA file, the plaintext consent) to the saved profile `id`
+    /// (Task 19). Task 1 stub: refuses, so no change is reported as saved before Task 19.
+    pub fn apply_changes(
+        _cx: &mut App,
+        _id: ProfileId,
+        _changes: Vec<ProfileChange>,
+    ) -> Task<Result<(), SaveError>> {
+        Task::ready(Err(SaveError::Io("apply_changes: Task 19".to_string())))
     }
 
     pub fn profiles(&self) -> &[Arc<Profile>] {
@@ -160,6 +192,7 @@ impl ConnectionsModel {
             password,
             tls_key_passphrase,
             is_new,
+            ssh_secrets,
             ..
         } = draft;
         let id = profile.id;
@@ -184,22 +217,44 @@ impl ConnectionsModel {
         if !is_new && matches!(m.manager.state(id), LiveState::Connecting(_)) {
             m.manager.cancel(id);
         }
-        let old_retention = stored.map(|p| p.retention);
+        let old_retention = stored.as_ref().map(|p| p.retention);
         let retention = profile.retention;
+        // ## m2b-t01-interfaces: the typed SSH secrets, per hop, with `ssh_retention` (Q23).
+        let old_ssh_retention = stored.map(|p| p.ssh_retention);
+        let ssh_retention = profile.ssh_retention;
+        let ssh_values = ssh_slot_values(&profile, ssh_secrets);
         let name = profile.name.clone();
         let secrets = m.secrets.clone();
+        // Task 21 makes a `Forever` put wait for the vault (`VaultReady`).
+        let vault_ready = vault_dialog::ensure_vault_before_forever(cx);
 
         let m = cx.global_mut::<ConnectionsModel>();
         let profile = Arc::new(profile);
+        // Q17: a connected profile's sessions reconnect with the saved values.
+        m.manager.update_profile(id, profile.clone());
         match m.profiles.iter_mut().find(|p| p.id == id) {
             Some(slot) => *slot = profile,
             None => m.profiles.push(profile),
         }
         let done = m.writer.run(m.snapshot(), move || {
-            let values = [password, tls_key_passphrase];
-            store_secrets(&secrets, id, &name, old_retention, retention, values)
+            let values = DRAFT_SLOTS
+                .into_iter()
+                .zip([password, tls_key_passphrase])
+                .collect();
+            let (db_fell_back, db_error) =
+                store_secrets(&secrets, id, &name, old_retention, retention, values);
+            let (ssh_fell_back, ssh_error) = store_secrets(
+                &secrets,
+                id,
+                &name,
+                old_ssh_retention,
+                ssh_retention,
+                ssh_values,
+            );
+            (db_fell_back || ssh_fell_back, db_error.or(ssh_error))
         });
         cx.spawn(async move |cx| {
+            let _ready = vault_ready.await;
             let ((fell_back, secret), written) = done.await.map_err(|_| cancelled())?;
             if fell_back {
                 cx.update(notice_keyring_unavailable);
@@ -386,21 +441,48 @@ fn label_entry(secrets: &SecretStore, key: SecretKey, name: &str) {
     }
 }
 
-/// Moves the profile's stored secrets from `old` to `retention` (an edit that changed it),
-/// then stores the draft's new `values` (the password, the TLS key passphrase) under
-/// `retention`. Returns whether the keyring refused (a fallback) and the first hard error.
-/// Blocking: runs on the core runtime's blocking pool.
+// ## m2b-t01-interfaces
+/// The SSH slots of `profile`'s hops with the draft's typed `secrets` (Q23): a password and a
+/// passphrase slot per hop of the tunnel (and per typed entry), `None` where nothing was typed,
+/// so an edit that changes `ssh_retention` still moves every hop's stored secrets.
+fn ssh_slot_values(
+    profile: &Profile,
+    secrets: Vec<HopSecrets>,
+) -> Vec<(SecretSlot, Option<SecretString>)> {
+    let hops = match &profile.transport {
+        TransportSpec::SshTunnel(spec) => spec.hops.len(),
+        _ => 0,
+    };
+    let mut typed = secrets.into_iter();
+    (0..hops.max(typed.len()))
+        .map_while(|i| u8::try_from(i).ok())
+        .flat_map(|hop| {
+            let (password, passphrase) = typed
+                .next()
+                .map_or((None, None), |s| (s.password, s.passphrase));
+            [
+                (SecretSlot::SshPassword { hop }, password),
+                (SecretSlot::SshPassphrase { hop }, passphrase),
+            ]
+        })
+        .collect()
+}
+
+/// Moves the profile's stored secrets in `values`' slots from `old` to `retention` (an edit
+/// that changed it), then stores the draft's new values (the password, the TLS key passphrase;
+/// M2b: the SSH secrets) under `retention`. Returns whether the keyring refused (a fallback)
+/// and the first hard error. Blocking: runs on the core runtime's blocking pool.
 fn store_secrets(
     secrets: &SecretStore,
     profile: ProfileId,
     name: &str,
     old: Option<Retention>,
     retention: Retention,
-    values: [Option<SecretString>; 2],
+    values: Vec<(SecretSlot, Option<SecretString>)>,
 ) -> (bool, Option<SecretError>) {
     let mut fell_back = false;
     let mut first_error = None;
-    for (slot, value) in DRAFT_SLOTS.into_iter().zip(values) {
+    for (slot, value) in values {
         let key = SecretKey { profile, slot };
         if let Some(old) = old.filter(|old| *old != retention) {
             match secrets.change_retention(&key, old, retention) {

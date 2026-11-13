@@ -330,6 +330,17 @@ impl SecretStore {
         }
     }
 
+    // ## m2b-t01-interfaces
+    /// Which backend holds `Forever` secrets: `None` until the backend was probed (Q23).
+    pub fn backend_choice(&self) -> Option<crate::backend::BackendChoice> {
+        self.backend.as_ref().and_then(|backend| backend.choice())
+    }
+
+    /// The vault behind the backend, when the backend is (or chose) the vault (Q23).
+    pub fn vault(&self) -> Option<&dyn crate::backend::VaultBackend> {
+        self.backend.as_ref().and_then(|backend| backend.as_vault())
+    }
+
     // ## m2a-finalfix
     /// Removes `key` from wherever `retention` keeps it (for `Forever`, the backend and its
     /// `UntilRestart` fallback): the undo of a `put` that should not have landed (a connect
@@ -463,5 +474,32 @@ mod label_tests {
             vec![(key, "orders-prod".to_string())]
         );
         assert_eq!(SecretStore::new(None).set_label(&key, "x"), Ok(()));
+    }
+}
+
+// ## m2b-t01-interfaces
+#[cfg(test)]
+mod choice_tests {
+    use super::*;
+    use crate::backend::{BackendChoice, FallbackBackend, FileVault, MemoryBackend};
+
+    #[test]
+    fn the_store_reports_its_backend_choice_and_vault() {
+        let memory = SecretStore::new(Some(Arc::new(MemoryBackend::new())));
+        assert_eq!(memory.backend_choice(), Some(BackendChoice::Memory));
+        assert!(memory.vault().is_none());
+        assert_eq!(SecretStore::new(None).backend_choice(), None);
+
+        let vault = Arc::new(FileVault::open("/nonexistent/vault.bin".into()));
+        let fallback =
+            FallbackBackend::new(Arc::new(MemoryBackend::new()), vault, Box::new(|| false));
+        let store = SecretStore::new(Some(Arc::new(fallback)));
+        assert_eq!(store.backend_choice(), None, "not probed yet");
+        assert!(
+            store.keyring_available(),
+            "Forever stays enabled with the vault"
+        );
+        assert_eq!(store.backend_choice(), Some(BackendChoice::Vault));
+        assert!(store.vault().is_some_and(|v| !v.is_unlocked()));
     }
 }

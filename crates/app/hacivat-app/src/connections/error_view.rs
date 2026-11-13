@@ -297,6 +297,17 @@ impl ErrorView {
             FixAction::EncryptWithoutVerifying => {
                 self.edit_and_connect(|p| p.tls.mode = TlsMode::Require, window, cx);
             }
+            // ## m2b-t01-interfaces: the M2b flows, after the error dialog closes (Q9).
+            m2b @ (FixAction::ReviewCertificate
+            | FixAction::ImportCa
+            | FixAction::ConnectThroughSsh
+            | FixAction::ReviewHostKey) => {
+                let error = self.error.clone();
+                window.defer(cx, move |window, cx| {
+                    close_layer(window, cx);
+                    crate::connections::fixes::run_m2b_fix(&m2b, &error, profile, window, cx);
+                });
+            }
         }
         cx.notify();
     }
@@ -442,7 +453,8 @@ impl ErrorView {
         self.watch = Some(cx.spawn(async move |this, cx| {
             while changes.changed().await.is_ok() {
                 match manager.state(id) {
-                    LiveState::Connecting(_) => continue,
+                    // ## m2b-t01-interfaces: a reconnect is still a connect in progress.
+                    LiveState::Connecting(_) | LiveState::Reconnecting { .. } => continue,
                     LiveState::Connected(_) => {
                         cx.update(|cx| {
                             let _ =
@@ -475,7 +487,8 @@ impl ErrorView {
     /// other than the one shown is shown now: the new error, its count and its trail.
     fn after_start(&mut self, state: LiveState, cx: &mut Context<Self>) -> AfterStart {
         match state {
-            LiveState::Connecting(_) => AfterStart::Watch,
+            // ## m2b-t01-interfaces: a reconnect is still a connect in progress.
+            LiveState::Connecting(_) | LiveState::Reconnecting { .. } => AfterStart::Watch,
             LiveState::Connected(_) => {
                 self.pending = false;
                 AfterStart::Close
@@ -1181,6 +1194,8 @@ mod shots {
                 file: None,
                 engine: "PostgreSQL".to_string(),
                 version: Some("9.6.24".to_string()),
+                hop: None,
+                hop_host: None,
             },
             server: (!server.is_empty()).then(|| ServerMessage {
                 sqlstate: code.map(str::to_string),
@@ -1197,6 +1212,9 @@ mod shots {
             elapsed: Duration::from_millis(214),
             attempts: u8::from(class == ErrClass::AuthInvalid),
             needs_interaction: false,
+            certificate: None,
+            host_key: None,
+            profile_changes: Vec::new(),
         }
     }
 
@@ -1283,6 +1301,8 @@ mod tests {
                 file: None,
                 engine: "PostgreSQL".into(),
                 version: None,
+                hop: None,
+                hop_host: None,
             },
             server: None,
             fixes: Vec::new(),
@@ -1291,6 +1311,9 @@ mod tests {
             elapsed: Duration::from_millis(5),
             attempts,
             needs_interaction: false,
+            certificate: None,
+            host_key: None,
+            profile_changes: Vec::new(),
         })
     }
 

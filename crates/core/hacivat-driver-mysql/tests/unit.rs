@@ -49,7 +49,7 @@ fn base(host: &str, direct: bool, tls: TlsMode, opens: Arc<AtomicUsize>) -> Driv
             resolved,
             tls_host: host.to_string(),
         },
-        tls: build_tls_params(&settings, host, AddressClass::Private).unwrap(),
+        tls: build_tls_params(&settings, host, 3306, AddressClass::Private, None).unwrap(),
         user: Some("deploy".into()),
         password: Some(SecretString::from("s3cret")),
         database: Some("orders".into()),
@@ -58,6 +58,7 @@ fn base(host: &str, direct: bool, tls: TlsMode, opens: Arc<AtomicUsize>) -> Driv
         options: vec![],
         connect_timeout: Duration::from_secs(5),
         events: Arc::new(|_| {}),
+        insecure_auth: Default::default(),
     }
 }
 
@@ -354,7 +355,7 @@ fn auto_at(host: &str, ip: [u8; 4], factory: StreamFactory) -> DriverConnect {
             resolved,
             tls_host: host.to_string(),
         },
-        tls: build_tls_params(&settings, host, class).unwrap(),
+        tls: build_tls_params(&settings, host, 3306, class, None).unwrap(),
         user: Some("deploy".into()),
         password: Some(SecretString::from("s3cret")),
         database: None,
@@ -363,6 +364,7 @@ fn auto_at(host: &str, ip: [u8; 4], factory: StreamFactory) -> DriverConnect {
         options: vec![],
         connect_timeout: Duration::from_secs(5),
         events: Arc::new(|_| {}),
+        insecure_auth: Default::default(),
     }
 }
 
@@ -388,7 +390,8 @@ fn plaintext_fallback_only_toward_loopback() {
         mode: TlsMode::Require,
         ..TlsSettings::default()
     };
-    require.tls = build_tls_params(&settings, "localhost", AddressClass::Loopback).unwrap();
+    require.tls =
+        build_tls_params(&settings, "localhost", 3306, AddressClass::Loopback, None).unwrap();
     assert!(!plaintext_fallback_allowed(&require));
 }
 
@@ -527,7 +530,8 @@ async fn the_ca_file_is_never_read_again_by_the_driver() {
         ..TlsSettings::default()
     };
     let mut req = req_any();
-    req.tls = build_tls_params(&settings, "db.internal", AddressClass::Private).unwrap();
+    req.tls =
+        build_tls_params(&settings, "db.internal", 3306, AddressClass::Private, None).unwrap();
     std::fs::remove_file(&path).unwrap();
     let ca = req.tls.as_ref().unwrap().ca_certs.clone();
     assert_eq!(ca.len(), 1);

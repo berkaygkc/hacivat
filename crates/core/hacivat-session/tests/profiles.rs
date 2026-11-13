@@ -134,6 +134,7 @@ fn full_profile() -> Profile {
                 cert: "/etc/ssl/client.pem".into(),
                 key: "/etc/ssl/client.key".into(),
             }),
+            ..Default::default()
         },
         transport: TransportSpec::Karagoz {
             org: "acme".into(),
@@ -152,6 +153,7 @@ fn full_profile() -> Profile {
             source: ImportSource::PgService,
         },
         allow_unsupported_server: true,
+        ..Default::default()
     }
 }
 
@@ -180,7 +182,7 @@ fn round_trip_covers_every_endpoint_transport_and_origin() {
             path: "/var/run/postgresql".into(),
             port: Some(5433),
         },
-        transport: TransportSpec::SshTunnel,
+        transport: TransportSpec::SshTunnel(Default::default()),
         origin: Origin::PerdeManaged { org: "acme".into() },
         env_source: TagSource::Org,
         environment: Some(EnvTag::Staging),

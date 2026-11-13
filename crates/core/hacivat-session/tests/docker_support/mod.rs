@@ -123,6 +123,12 @@ pub fn docker_password() -> SecretString {
 
 pub fn deps() -> ConnectDeps {
     let backend: Arc<dyn SecretBackend> = Arc::new(MemoryBackend::new());
+    // M2b: SSH stores whose files do not exist (loading does no I/O, Q42).
+    let known_hosts = hacivat_net::ssh::KnownHosts::load(
+        Vec::new(),
+        std::path::PathBuf::from("/nonexistent/hacivat/known_hosts"),
+    );
+    let tunnels = hacivat_net::ssh::TunnelManager::new(known_hosts.clone(), Default::default());
     ConnectDeps {
         drivers: Arc::new(default_drivers()),
         catalog: EngineCatalog::embedded(),
@@ -135,6 +141,8 @@ pub fn deps() -> ConnectDeps {
         extra_steps: Vec::new(),
         approved_roots: ApprovedRoots::for_user(),
         timeout_override: None,
+        tunnels,
+        known_hosts,
     }
 }
 
@@ -236,11 +244,15 @@ pub fn progress() -> watch::Sender<Progress> {
 
 fn main_request(p: Profile, password: Option<SecretString>) -> ConnectRequest {
     ConnectRequest {
+        read_only: p.read_only,
         profile: Arc::new(p),
         draft_password: password,
         purpose: Purpose::Main,
         department: Department::Console,
         prior_rejections: 0,
+        draft_ssh: Vec::new(),
+        overlay_secrets: None,
+        plaintext_consent: false,
     }
 }
 

@@ -13,7 +13,7 @@ use hacivat_net::{ClientCertPaths, TlsMode};
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_secrets::{AuthProviderId, Retention};
 use hacivat_session::pipeline::{IssueCode, ValidationIssue};
-use hacivat_session::profile::{Profile, ProfileEndpoint, suggest_name};
+use hacivat_session::profile::{Profile, ProfileEndpoint, TransportSpec, suggest_name};
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::capsule::{EnvKind, env_swatch_on_raised};
 use hacivat_ui::checkbox::Checkbox;
@@ -627,6 +627,12 @@ fn issue_text(cx: &App, issue: &ValidationIssue) -> SharedString {
                 },
             );
         }
+        // ## m2b-t01-interfaces: placeholders until Tasks 19 and 20 (Q3).
+        IssueCode::SshHostMissing => ids::hv::CONN_ISSUE_SSH_HOST_MISSING,
+        IssueCode::SshUserMissing => ids::hv::CONN_ISSUE_SSH_USER_MISSING,
+        IssueCode::SshTooManyHops => ids::hv::CONN_ISSUE_SSH_TOO_MANY_HOPS,
+        IssueCode::SshKeyFileMissing => ids::hv::CONN_ISSUE_SSH_KEY_FILE_MISSING,
+        IssueCode::TlsKeyLegacyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_LEGACY_ENCRYPTED,
     };
     tr(cx, msg, NoArgs)
 }
@@ -1279,6 +1285,13 @@ impl ConnectionDialog {
         } else {
             self.render_server(&mut rows, theme, window, cx);
             self.render_auth(&mut rows, &p, theme, window, cx);
+            // ## m2b-t01-interfaces: the SSH section's hook (Task 20 decides when it shows).
+            if matches!(p.transport, TransportSpec::SshTunnel(_)) {
+                rows.push(
+                    Kind::Disclosure,
+                    super::ssh::section(&self.draft, window, cx),
+                );
+            }
             self.render_tls(&mut rows, &p, theme, window, cx);
             self.render_advanced(&mut rows, &p, theme, window, cx);
         }

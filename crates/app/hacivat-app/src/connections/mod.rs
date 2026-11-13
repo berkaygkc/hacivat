@@ -25,6 +25,15 @@ pub mod report;
 pub mod sheet;
 pub mod status;
 pub mod test_strip;
+// ## m2b-t01-interfaces: the M2b prompts, toasts and the event relay (owners in each module).
+pub mod cert_dialog;
+pub mod events;
+pub mod hostkey_prompt;
+pub mod kbd_prompt;
+pub mod plaintext_prompt;
+pub mod secret_prompt;
+pub mod session_toasts;
+pub mod vault_dialog;
 
 pub use boot::ConnectionsBoot;
 pub use model::{ConnectionsModel, SaveError};
@@ -45,4 +54,5 @@ pub fn install(cx: &mut App) {
 pub fn boot(cx: &mut App, boot: ConnectionsBoot) {
     boot::install(cx, boot);
     live::install(cx);
+    events::install(cx); // ## m2b-t01-interfaces: the connection-event relay (Q42)
 }

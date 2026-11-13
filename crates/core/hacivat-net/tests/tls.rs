@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hacivat_net::AddressClass::{Loopback, Private, Public};
 use hacivat_net::{
-    ClientCertPaths, TlsFailure, TlsMode, TlsSettings, TlsSetupError, build_tls_params,
-    install_crypto_provider,
+    CertPin, ClientCertPaths, TlsFailure, TlsMode, TlsParams, TlsSettings, TlsSetupError,
+    TlsVerified, build_tls_params, cert_sha256, install_crypto_provider, pin_endpoint,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
@@ -186,7 +186,7 @@ async fn handshake_with(
     host: &str,
 ) -> Result<u8, HandshakeError> {
     install_crypto_provider();
-    let params = build_tls_params(&settings, host, Loopback)
+    let params = build_tls_params(&settings, host, srv.addr.port(), Loopback, None)
         .unwrap()
         .unwrap();
     let tcp = TcpStream::connect(srv.addr).await.unwrap();
@@ -216,6 +216,7 @@ async fn handshake(
         mode,
         ca_file,
         client_cert: None,
+        ..Default::default()
     };
     handshake_with(srv, settings, host).await
 }
@@ -232,6 +233,7 @@ fn with_ca(mode: TlsMode, ca: impl Into<PathBuf>) -> TlsSettings {
         mode,
         ca_file: Some(ca.into()),
         client_cert: None,
+        ..Default::default()
     }
 }
 
@@ -248,6 +250,7 @@ fn with_client_key(dir: &Path, key_pem: &str) -> (TlsSettings, PathBuf) {
             cert,
             key: key.clone(),
         }),
+        ..Default::default()
     };
     (settings, key)
 }
@@ -447,6 +450,7 @@ async fn require_presents_the_client_certificate() {
                 client_key.serialize_pem().as_bytes(),
             ),
         }),
+        ..Default::default()
     };
     assert_eq!(
         handshake_with(&srv, settings, "localhost").await.unwrap(),
@@ -459,56 +463,87 @@ async fn require_presents_the_client_certificate() {
 fn tls_params_shape() {
     install_crypto_provider();
     assert!(
-        build_tls_params(&settings(TlsMode::Disable), "db", Public)
+        build_tls_params(&settings(TlsMode::Disable), "db", 5432, Public, None)
             .unwrap()
             .is_none()
     );
     assert!(
-        build_tls_params(&settings(TlsMode::Auto), "localhost", Loopback)
+        build_tls_params(&settings(TlsMode::Auto), "localhost", 5432, Loopback, None)
             .unwrap()
             .unwrap()
             .plaintext_allowed
     );
     assert!(
-        build_tls_params(&settings(TlsMode::Auto), "db.lan", Private)
+        build_tls_params(&settings(TlsMode::Auto), "db.lan", 5432, Private, None)
             .unwrap()
             .unwrap()
             .plaintext_allowed
     );
     assert!(
-        !build_tls_params(&settings(TlsMode::Auto), "db.acme.io", Public)
+        !build_tls_params(&settings(TlsMode::Auto), "db.acme.io", 5432, Public, None)
             .unwrap()
             .unwrap()
             .plaintext_allowed
     );
     assert!(
-        !build_tls_params(&settings(TlsMode::Require), "localhost", Loopback)
-            .unwrap()
-            .unwrap()
-            .plaintext_allowed
-    );
-    let p = build_tls_params(&settings(TlsMode::VerifyFull), "127.0.0.1", Loopback)
+        !build_tls_params(
+            &settings(TlsMode::Require),
+            "localhost",
+            5432,
+            Loopback,
+            None
+        )
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .plaintext_allowed
+    );
+    let p = build_tls_params(
+        &settings(TlsMode::VerifyFull),
+        "127.0.0.1",
+        5432,
+        Loopback,
+        None,
+    )
+    .unwrap()
+    .unwrap();
     assert!(matches!(p.server_name, ServerName::IpAddress(_)));
-    let p = build_tls_params(&settings(TlsMode::VerifyFull), "[::1]", Loopback)
-        .unwrap()
-        .unwrap();
+    let p = build_tls_params(
+        &settings(TlsMode::VerifyFull),
+        "[::1]",
+        5432,
+        Loopback,
+        None,
+    )
+    .unwrap()
+    .unwrap();
     assert!(matches!(p.server_name, ServerName::IpAddress(_)));
-    let p = build_tls_params(&settings(TlsMode::VerifyFull), "db.acme.io", Public)
-        .unwrap()
-        .unwrap();
+    let p = build_tls_params(
+        &settings(TlsMode::VerifyFull),
+        "db.acme.io",
+        5432,
+        Public,
+        None,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(p.server_name.to_str(), "db.acme.io");
     assert_eq!(p.settings, settings(TlsMode::VerifyFull));
     assert_eq!(*p.failure.lock().unwrap(), None);
     assert_eq!(
-        build_tls_params(&with_ca(TlsMode::VerifyCa, "/nope.pem"), "db", Public).unwrap_err(),
+        build_tls_params(
+            &with_ca(TlsMode::VerifyCa, "/nope.pem"),
+            "db",
+            5432,
+            Public,
+            None
+        )
+        .unwrap_err(),
         TlsSetupError::CaFileUnreadable("/nope.pem".into())
     );
     let dir = tempfile::tempdir().unwrap();
     let (s, key) = with_client_key(dir.path(), ENCRYPTED_PKCS8_PEM);
     assert_eq!(
-        build_tls_params(&s, "db", Public).unwrap_err(),
+        build_tls_params(&s, "db", 5432, Public, None).unwrap_err(),
         TlsSetupError::KeyEncrypted(key)
     );
 }
@@ -539,7 +574,7 @@ async fn tls_1_2_and_1_3_servers_both_handshake_with_ring() {
             version.version
         );
     }
-    let p = build_tls_params(&settings(TlsMode::Require), "db", Public)
+    let p = build_tls_params(&settings(TlsMode::Require), "db", 5432, Public, None)
         .unwrap()
         .unwrap();
     let suites = |p: &rustls::crypto::CryptoProvider| -> Vec<rustls::CipherSuite> {
@@ -559,37 +594,50 @@ fn tls_file_problems_are_reported_before_connecting() {
 
     let (s, key) = with_client_key(d, ENCRYPTED_PKCS1_PEM);
     assert_eq!(
-        build_tls_params(&s, "db", Public).unwrap_err(),
+        build_tls_params(&s, "db", 5432, Public, None).unwrap_err(),
         TlsSetupError::KeyEncrypted(key)
     );
     let (s, key) = with_client_key(d, "not a key\n");
     assert_eq!(
-        build_tls_params(&s, "db", Public).unwrap_err(),
+        build_tls_params(&s, "db", 5432, Public, None).unwrap_err(),
         TlsSetupError::KeyUnreadable(key)
     );
     let (mut s, key) = with_client_key(d, "");
     std::fs::remove_file(&key).unwrap();
     assert_eq!(
-        build_tls_params(&s, "db", Public).unwrap_err(),
+        build_tls_params(&s, "db", 5432, Public, None).unwrap_err(),
         TlsSetupError::KeyUnreadable(key.clone())
     );
     let missing_cert = d.join("missing.crt");
     s.client_cert.as_mut().unwrap().cert = missing_cert.clone();
     assert_eq!(
-        build_tls_params(&s, "db", Public).unwrap_err(),
+        build_tls_params(&s, "db", 5432, Public, None).unwrap_err(),
         TlsSetupError::CertFileUnreadable(missing_cert)
     );
     let empty_ca = write(d, "empty.pem", b"# no certificates here\n");
     assert_eq!(
-        build_tls_params(&with_ca(TlsMode::VerifyFull, &empty_ca), "db", Public).unwrap_err(),
+        build_tls_params(
+            &with_ca(TlsMode::VerifyFull, &empty_ca),
+            "db",
+            5432,
+            Public,
+            None
+        )
+        .unwrap_err(),
         TlsSetupError::CaFileUnreadable(empty_ca)
     );
     // A DER CA file works as well as PEM.
     let der_ca = write(d, "ca.der", ca().der());
     assert!(
-        build_tls_params(&with_ca(TlsMode::VerifyCa, &der_ca), "db", Public)
-            .unwrap()
-            .is_some()
+        build_tls_params(
+            &with_ca(TlsMode::VerifyCa, &der_ca),
+            "db",
+            5432,
+            Public,
+            None
+        )
+        .unwrap()
+        .is_some()
     );
 }
 
@@ -691,23 +739,38 @@ fn pkcs1_sec1_and_der_pkcs8_keys_load() {
             cert: fixture(cert),
             key: fixture(key),
         }),
+        ..Default::default()
     };
     for (cert, key) in [
         ("rsa-pkcs1.crt", "rsa-pkcs1-key.pem"),
         ("ec-sec1.crt", "ec-sec1-key.pem"),
         ("ec-pkcs8.crt", "ec-pkcs8-key.der"),
     ] {
-        let p = build_tls_params(&client(cert, key), "db", Public);
+        let p = build_tls_params(&client(cert, key), "db", 5432, Public, None);
         assert!(matches!(p, Ok(Some(_))), "{key}: {p:?}");
     }
     // Keys that load but belong to another certificate are still refused.
     assert_eq!(
-        build_tls_params(&client("rsa-pkcs1.crt", "ec-sec1-key.pem"), "db", Public).unwrap_err(),
+        build_tls_params(
+            &client("rsa-pkcs1.crt", "ec-sec1-key.pem"),
+            "db",
+            5432,
+            Public,
+            None
+        )
+        .unwrap_err(),
         TlsSetupError::KeyUnreadable(fixture("ec-sec1-key.pem"))
     );
     // A certificate rustls cannot use (X.509 v1) is the certificate's fault, not the key's.
     assert_eq!(
-        build_tls_params(&client("ec-sec1-v1.crt", "ec-sec1-key.pem"), "db", Public).unwrap_err(),
+        build_tls_params(
+            &client("ec-sec1-v1.crt", "ec-sec1-key.pem"),
+            "db",
+            5432,
+            Public,
+            None
+        )
+        .unwrap_err(),
         TlsSetupError::CertFileUnreadable(fixture("ec-sec1-v1.crt"))
     );
 }
@@ -722,21 +785,27 @@ fn an_unusable_server_name_fails_closed() {
         TlsMode::VerifyFull,
     ] {
         assert_eq!(
-            build_tls_params(&settings(mode), "db bad", Public).unwrap_err(),
+            build_tls_params(&settings(mode), "db bad", 5432, Public, None).unwrap_err(),
             TlsSetupError::InvalidServerName("db bad".into()),
             "{mode:?}"
         );
     }
     // Disable never needs a name.
     assert!(
-        build_tls_params(&settings(TlsMode::Disable), "db bad", Public)
+        build_tls_params(&settings(TlsMode::Disable), "db bad", 5432, Public, None)
             .unwrap()
             .is_none()
     );
     // A trailing dot is a valid absolute name.
-    let p = build_tls_params(&settings(TlsMode::VerifyFull), "db.acme.io.", Public)
-        .unwrap()
-        .unwrap();
+    let p = build_tls_params(
+        &settings(TlsMode::VerifyFull),
+        "db.acme.io.",
+        5432,
+        Public,
+        None,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(p.server_name.to_str(), "db.acme.io");
 }
 
@@ -750,7 +819,7 @@ fn debug_output_never_shows_the_client_key() {
     // A key that does not belong to the certificate is refused.
     let (mismatched, key_path) = with_client_key(dir.path(), &key_pem);
     assert_eq!(
-        build_tls_params(&mismatched, "db", Public).unwrap_err(),
+        build_tls_params(&mismatched, "db", 5432, Public, None).unwrap_err(),
         TlsSetupError::KeyUnreadable(key_path)
     );
 
@@ -762,8 +831,11 @@ fn debug_output_never_shows_the_client_key() {
             cert: write(dir.path(), "own.crt", cert.pem().as_bytes()),
             key: write(dir.path(), "own.key", key_pem.as_bytes()),
         }),
+        ..Default::default()
     };
-    let params = build_tls_params(&settings, "db", Public).unwrap().unwrap();
+    let params = build_tls_params(&settings, "db", 5432, Public, None)
+        .unwrap()
+        .unwrap();
     let debug = format!("{params:?}");
     for line in key_pem.lines().filter(|l| !l.starts_with("-----")) {
         assert!(!debug.contains(line), "a key line leaked into Debug");
@@ -771,4 +843,61 @@ fn debug_output_never_shows_the_client_key() {
     let der = key.serialize_der();
     let tail = format!("{:?}", &der[der.len() - 16..]);
     assert!(!debug.contains(tail.trim_matches(['[', ']'])));
+}
+
+// ## m2b-t01-interfaces
+
+/// A handshake toward `localhost` that keeps its params, for the M2b recording checks.
+async fn handshake_params(srv: &Srv, settings: TlsSettings) -> (Result<u8, ()>, TlsParams) {
+    install_crypto_provider();
+    let params = build_tls_params(&settings, "localhost", srv.addr.port(), Loopback, None)
+        .unwrap()
+        .unwrap();
+    let tcp = TcpStream::connect(srv.addr).await.unwrap();
+    let connector = TlsConnector::from(params.config.clone());
+    let result = async {
+        let mut tls = connector
+            .connect(params.server_name.clone(), tcp)
+            .await
+            .map_err(|_| ())?;
+        let mut status = [0u8; 1];
+        tls.read_exact(&mut status).await.map_err(|_| ())?;
+        Ok(status[0])
+    }
+    .await;
+    (result, params)
+}
+
+/// Until Task 3 compares pins, a pin for the endpoint refuses every certificate (Global
+/// Constraints, "No silent weakening"); the verifier records the presented chain either way,
+/// and the outcome only on success.
+#[tokio::test]
+async fn a_pinned_endpoint_fails_closed_and_the_chain_is_recorded() {
+    let srv = rcgen_server("localhost").await;
+    let accepted = settings(TlsMode::Require);
+    let (ok, params) = handshake_params(&srv, accepted.clone()).await;
+    assert!(ok.is_ok());
+    assert_eq!(*params.outcome.lock().unwrap(), Some(TlsVerified::No));
+    let leaf = params.presented.lock().unwrap().clone().expect("a chain");
+    assert_eq!(leaf.0.len(), 1);
+
+    let pinned = TlsSettings {
+        pins: vec![CertPin {
+            endpoint: pin_endpoint("localhost", srv.addr.port()),
+            sha256: cert_sha256(&leaf.0[0]),
+        }],
+        ..accepted
+    };
+    let (refused, params) = handshake_params(&srv, pinned).await;
+    assert!(
+        refused.is_err(),
+        "the pin stub refuses even the pinned leaf"
+    );
+    assert_eq!(
+        *params.failure.lock().unwrap(),
+        Some(TlsFailure::PinMismatch)
+    );
+    assert_eq!(*params.outcome.lock().unwrap(), None);
+    assert!(params.presented.lock().unwrap().is_some());
+    assert!(!params.plaintext_allowed);
 }
