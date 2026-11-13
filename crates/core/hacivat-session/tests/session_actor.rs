@@ -132,3 +132,26 @@ async fn a_lost_connection_breaks_the_session_with_an_unknown_outcome() {
     assert_eq!(snap(&h).state, SessionState::Broken(ErrClass::NetworkReset));
     assert_eq!(f.open_connections(), 0);
 }
+
+// ## m2b-t07 fix round 1
+
+/// Review M2: a close waits for the requests queued before it (FIFO), so a queued COMMIT
+/// ends the transaction before the close looks at it.
+#[tokio::test]
+async fn a_close_waits_for_requests_queued_before_it() {
+    let (h, f) = session(fake_pg().exec(vec![
+        tx("BEGIN", TxStatus::InTx),
+        slow("select 1", ms(50)),
+        tx("COMMIT", TxStatus::Idle),
+    ]))
+    .await;
+    run(&h, "BEGIN").await.unwrap();
+    let a = h.submit(exec("select 1"));
+    let b = h.submit(exec("COMMIT"));
+    assert_eq!(h.close(ClosePolicy::RefuseIfOpenTx).await, Ok(()));
+    a.reply.await.unwrap().unwrap();
+    b.reply.await.unwrap().unwrap();
+    assert!(f.executed().contains(&"COMMIT".to_string()));
+    assert!(!f.executed().contains(&"ROLLBACK".to_string()));
+    assert_eq!(snap(&h).state, SessionState::Disconnected);
+}

@@ -21,16 +21,19 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use hacivat_driver::{
-    CancelHandle, ExecOpts, ExecSummary, Phase, RawConn, RawError, RawErrorKind, TxStatus, classify,
+    CancelHandle, ExecOpts, ExecSummary, Phase, RawConn, RawError, RawErrorKind, TxStatus,
+    carries_secret, classify,
 };
-use hacivat_proto::{DbmsKind, ErrClass};
+use hacivat_proto::{AccessLabel, DbmsKind, ErrClass};
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinHandle};
@@ -126,7 +129,13 @@ pub fn spawn_session(
         schema: None,
         cancel: CancelState::Idle,
         read_only,
-        access: live.access,
+        // Review M4: the label follows the session; a read-only session is never labelled
+        // read-write, whatever the connect was asked for.
+        access: if read_only && live.access == AccessLabel::ReadWrite {
+            AccessLabel::ReadOnlyGuarded
+        } else {
+            live.access
+        },
         generation: 0,
     };
     let id = next_id();
@@ -159,7 +168,6 @@ pub fn spawn_session(
         events,
         commands: receiver,
         queue: VecDeque::new(),
-        closes: VecDeque::new(),
         hooks,
     };
     rt.spawn(async move {
@@ -311,7 +319,12 @@ impl Core {
             }
             ran?
         } else {
-            if self.tx.mode == TxMode::Manual && self.tx.status == TxStatus::Idle && !control {
+            // Hacivat's own statements never open the user's transaction (review M9).
+            if origin == ExecOrigin::User
+                && self.tx.mode == TxMode::Manual
+                && self.tx.status == TxStatus::Idle
+                && !control
+            {
                 for statement in self.manual_begin(&keyword) {
                     self.control(&statement).await?;
                 }
@@ -410,6 +423,10 @@ impl Core {
                     self.control(&statement).await?;
                 }
             }
+            // Q14: no manual transaction control on a read-only session (review M8).
+            TxCommand::Commit | TxCommand::Rollback if self.read_only => {
+                return Err(tx_error(TxError::Unsupported));
+            }
             TxCommand::Commit => {
                 self.control("COMMIT").await?;
                 self.reprobe().await;
@@ -457,14 +474,19 @@ struct Queued {
 
 type CloseReply = oneshot::Sender<Result<(), CloseRefused>>;
 
+/// What waits its turn: requests and closes, in the order they came (review M2: a close never
+/// jumps ahead of a request queued before it).
+enum Job {
+    Request(Queued),
+    Close(ClosePolicy, CloseReply),
+}
+
 struct Ctl {
     id: SessionId,
     state: Arc<watch::Sender<SessionSnapshot>>,
     events: broadcast::Sender<SessionEvent>,
     commands: mpsc::UnboundedReceiver<Command>,
-    queue: VecDeque<Queued>,
-    /// Closes asked for while a request ran, in order.
-    closes: VecDeque<(ClosePolicy, CloseReply)>,
+    queue: VecDeque<Job>,
     hooks: SessionHooks,
 }
 
@@ -482,10 +504,15 @@ impl Ctl {
         let _ = self.events.send(event);
     }
 
-    /// Answers every queued request with `kind`.
+    /// Answers every queued request with `kind`; queued closes keep their turn.
     fn drain(&mut self, kind: &ExecErrorKind) {
-        for q in self.queue.drain(..) {
-            let _ = q.reply.send(Err(ExecError::of(kind.clone())));
+        for job in std::mem::take(&mut self.queue) {
+            match job {
+                Job::Request(q) => {
+                    let _ = q.reply.send(Err(ExecError::of(kind.clone())));
+                }
+                close @ Job::Close(..) => self.queue.push_back(close),
+            }
         }
     }
 
@@ -496,16 +523,16 @@ impl Ctl {
                 seq,
                 request,
                 reply,
-            } => self.queue.push_back(Queued {
+            } => self.queue.push_back(Job::Request(Queued {
                 seq,
                 request,
                 reply,
-            }),
+            })),
             // Q18: only a running request can be cancelled.
             Command::Cancel { reply, .. } | Command::Escalate { reply, .. } => {
                 let _ = reply.send(CancelOutcome::AlreadyFinished);
             }
-            Command::Close { policy, reply } => self.closes.push_back((policy, reply)),
+            Command::Close { policy, reply } => self.queue.push_back(Job::Close(policy, reply)),
         }
     }
 
@@ -525,38 +552,66 @@ impl Ctl {
                 }
             }
         }
-        self.drain(&ExecErrorKind::NotConnected);
-        for (_, reply) in self.closes.drain(..) {
-            let _ = reply.send(Ok(()));
+        for job in self.queue.drain(..) {
+            match job {
+                Job::Request(q) => {
+                    let _ = q.reply.send(Err(not_connected()));
+                }
+                Job::Close(_, reply) => {
+                    let _ = reply.send(Ok(()));
+                }
+            }
         }
     }
 }
 
+/// Breaks the session now: closes the connection, answers the queued requests
+/// `NotConnected` and publishes `Broken(class)`.
+async fn break_now(core: &mut Core, ctl: &mut Ctl, class: ErrClass) {
+    core.broken = Some(class);
+    core.close().await;
+    ctl.drain(&ExecErrorKind::NotConnected);
+    ctl.publish(|s| {
+        s.state = SessionState::Broken(class);
+        s.cancel = CancelState::Idle;
+    });
+}
+
 async fn run(mut core: Core, mut ctl: Ctl) {
-    if !core.read_only
-        && core.tx.mode == TxMode::Manual
-        && family(core.kind) == Family::MySql
-        && core.control("SET autocommit = 0").await.is_err()
-    {
-        let class = core
-            .broken
-            .or(core.last_class)
-            .unwrap_or(ErrClass::Internal);
-        core.close().await;
-        ctl.publish(|s| s.state = SessionState::Broken(class));
+    // Mode enforcement, not the environment plan (Q27 clarification): a Manual MySQL session
+    // must not autocommit. A driver panic here breaks the session like any other (review M5).
+    if !core.read_only && core.tx.mode == TxMode::Manual && family(core.kind) == Family::MySql {
+        let set = AssertUnwindSafe(core.control("SET autocommit = 0"))
+            .catch_unwind()
+            .await;
+        let class = match set {
+            Ok(Ok(())) => None,
+            Ok(Err(_)) => Some(
+                core.broken
+                    .or(core.last_class)
+                    .unwrap_or(ErrClass::Internal),
+            ),
+            Err(_) => Some(ErrClass::Internal),
+        };
+        if let Some(class) = class {
+            break_now(&mut core, &mut ctl, class).await;
+        }
     }
     loop {
-        if let Some((policy, reply)) = ctl.closes.pop_front() {
-            if close(&mut core, &mut ctl, policy, reply).await {
-                return;
+        match ctl.queue.pop_front() {
+            Some(Job::Close(policy, reply)) => {
+                if close(&mut core, &mut ctl, policy, reply).await {
+                    return;
+                }
+                continue;
             }
-            continue;
-        }
-        if let Some(job) = ctl.queue.pop_front() {
-            if !run_one(&mut core, &mut ctl, job).await {
-                return;
+            Some(Job::Request(job)) => {
+                if !run_one(&mut core, &mut ctl, job).await {
+                    return;
+                }
+                continue;
             }
-            continue;
+            None => {}
         }
         match ctl.commands.recv().await {
             Some(cmd) => ctl.idle_command(cmd),
@@ -614,14 +669,18 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> bool {
         let _ = reply.send(Err(not_connected()));
         return true;
     };
-    let raw = live.raw();
-    let mut ladder = Ladder::new(
-        seq,
-        core.kind,
-        raw.backend_id(),
-        raw.cancel_handle(),
-        ctl.hooks.side.clone(),
-    );
+    // Driver calls, so guarded like the request itself (review M5).
+    let probed = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let raw = live.raw();
+        (raw.backend_id(), raw.cancel_handle())
+    }));
+    let Ok((backend, handle)) = probed else {
+        tracing::error!(session = ctl.id.0, req = seq, "a driver call panicked");
+        break_now(core, ctl, ErrClass::Internal).await;
+        let _ = reply.send(Err(ExecError::of(ExecErrorKind::Internal)));
+        return true;
+    };
+    let mut ladder = Ladder::new(seq, core.kind, backend, handle, ctl.hooks.side.clone());
     let since = Instant::now();
     ctl.publish(|s| s.state = SessionState::Busy { req: seq, since });
     let (tx_before, schema_before) = (core.tx.clone(), core.schema.clone());
@@ -672,7 +731,7 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> bool {
             tracing::error!(
                 session = ctl.id.0,
                 req = seq,
-                panic = panic_text(panic.as_ref()),
+                panic = %loggable(panic_text(panic.as_ref())),
                 "a driver call panicked; the session is broken"
             );
             core.broken = Some(ErrClass::Internal);
@@ -693,8 +752,19 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> bool {
         e.kind = ExecErrorKind::Cancelled;
     }
     if core.broken.is_none() {
-        // Q18: a cancel still in flight lands before the next request starts.
-        ladder.settle().await;
+        // Q18, review C1: a cancel still in flight must land before the next request starts.
+        // One that has not ended after the wait is aborted, but its kill may still reach the
+        // server, so the connection is never used again.
+        if !ladder.settle().await {
+            tracing::warn!(
+                session = ctl.id.0,
+                req = seq,
+                "a cancel did not end in time; the session is broken"
+            );
+            core.broken = Some(ErrClass::Cancelled);
+        }
+    } else {
+        ladder.abort();
     }
     ladder.release();
 
@@ -725,6 +795,9 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> bool {
     }
     let outcome = match &result {
         Err(e) if e.kind == ExecErrorKind::Cancelled => CancelOutcome::Cancelled,
+        // A rung was climbed and the request then failed: a terminate ends it with a lost
+        // connection (review M1).
+        Err(_) if ladder.requested() => CancelOutcome::Cancelled,
         _ => CancelOutcome::AlreadyFinished,
     };
     let _ = reply.send(result);
@@ -735,11 +808,41 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> bool {
     true
 }
 
+/// How much of a panic message is logged.
+const PANIC_LOG_CHARS: usize = 200;
+
+/// A panic message as logged: redacted when it looks like it carries a secret, and cut short,
+/// since a driver's message may quote connection details (review M13).
+fn loggable(text: &str) -> String {
+    if carries_secret(text) {
+        return "<redacted>".to_string();
+    }
+    text.chars().take(PANIC_LOG_CHARS).collect()
+}
+
 fn panic_text(p: &(dyn Any + Send)) -> &str {
     p.downcast_ref::<&'static str>()
         .copied()
         .or_else(|| p.downcast_ref::<String>().map(String::as_str))
         .unwrap_or("a panic without a message")
+}
+
+/// A task that is aborted when its handle is dropped: a mechanism that is aborted takes the
+/// tasks it waits for with it, so none of them is left detached (review C1).
+struct AbortOnDrop<T>(JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T> Future for AbortOnDrop<T> {
+    type Output = Result<T, JoinError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().0).poll(cx)
+    }
 }
 
 /// Waits for the task in `slot`; never, when there is none.
@@ -908,7 +1011,7 @@ impl Ladder {
             self.fail(ErrClass::Internal);
             return;
         };
-        let opened = self.prewarmed.take();
+        let opened = self.prewarmed.take().map(AbortOnDrop);
         let side = self.side.clone();
         let kind = self.kind;
         self.spawn(async move {
@@ -928,7 +1031,7 @@ impl Ladder {
 
     /// Starts `f` after the mechanism already in flight, if any (one slot, in order).
     fn spawn(&mut self, f: impl Future<Output = Result<(), ErrClass>> + Send + 'static) {
-        let before = self.mechanism.take();
+        let before = self.mechanism.take().map(AbortOnDrop);
         self.mechanism = Some(tokio::spawn(async move {
             let first = match before {
                 Some(task) => task.await.unwrap_or(Err(ErrClass::Internal)),
@@ -992,12 +1095,25 @@ impl Ladder {
         self.prewarmed = Some(tokio::spawn(self.side.open_side()));
     }
 
-    /// Waits (bounded) for the cancel in flight.
-    async fn settle(&mut self) {
-        if let Some(task) = self.mechanism.take()
-            && tokio::time::timeout(CANCEL_WAIT, task).await.is_err()
-        {
-            tracing::debug!("a cancel was still in flight when its request ended");
+    /// Waits up to [`CANCEL_WAIT`] for the cancel in flight. False when it did not end: it is
+    /// then aborted (and awaited, so nothing more of it runs), but what it already sent may
+    /// still land, so the caller must not reuse the connection (review C1).
+    async fn settle(&mut self) -> bool {
+        let Some(mut task) = self.mechanism.take() else {
+            return true;
+        };
+        if tokio::time::timeout(CANCEL_WAIT, &mut task).await.is_ok() {
+            return true;
+        }
+        task.abort();
+        let _ = task.await;
+        false
+    }
+
+    /// Aborts the cancel in flight (the connection is closing anyway).
+    fn abort(&mut self) {
+        if let Some(task) = self.mechanism.take() {
+            task.abort();
         }
     }
 

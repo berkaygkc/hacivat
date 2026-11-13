@@ -84,6 +84,8 @@ async fn cancel_waits_two_seconds_then_still_running_and_slow_at_ten() {
     let mut ev = h.events();
     settle().await;
     let c = h.cancel(a.seq);
+    // The actor reads the cancel at t = 0, so its 2 s wait is pinned (review M7).
+    settle().await;
     tokio::time::advance(secs(2)).await;
     assert_eq!(c.await.unwrap(), CancelOutcome::StillRunning);
     assert!(matches!(
@@ -110,8 +112,11 @@ async fn mysql_cancel_uses_kill_query_on_a_side_connection() {
     .await;
     let a = h.submit(exec("select sleep(60)"));
     settle().await;
-    let _ = h.cancel(a.seq).await;
-    assert_eq!(side.executed(), ["KILL QUERY 42"]);
+    let _c = h.cancel(a.seq);
+    eventually("the kill on the side connection", || {
+        side.executed() == ["KILL QUERY 42"]
+    })
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -152,8 +157,11 @@ async fn terminate_escalation_uses_a_side_connection() {
     .await;
     let a = h.submit(exec("select x"));
     settle().await;
-    let _ = h.escalate(a.seq, Escalation::Terminate).await;
-    assert_eq!(side.executed(), ["SELECT pg_terminate_backend(7)"]);
+    let _e = h.escalate(a.seq, Escalation::Terminate);
+    eventually("the terminate on the side connection", || {
+        side.executed() == ["SELECT pg_terminate_backend(7)"]
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -168,8 +176,11 @@ async fn mysql_terminate_kills_the_connection() {
     .await;
     let a = h.submit(exec("select sleep(60)"));
     settle().await;
-    let _ = h.escalate(a.seq, Escalation::Terminate).await;
-    assert_eq!(side.executed(), ["KILL CONNECTION 42"]);
+    let _e = h.escalate(a.seq, Escalation::Terminate);
+    eventually("the kill on the side connection", || {
+        side.executed() == ["KILL CONNECTION 42"]
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -210,4 +221,66 @@ async fn escalating_a_request_that_is_not_running_is_already_finished() {
     );
     assert_eq!(snap(&h).state, SessionState::Idle);
     assert_eq!(f.open_connections(), 1);
+}
+
+// ## m2b-t07 fix round 1
+
+/// Review C1: a kill still in flight when its request ends on its own is aborted after the
+/// wait, and the session breaks, so the kill can never reach the next request.
+#[tokio::test(start_paused = true)]
+async fn a_late_kill_never_reaches_the_next_request() {
+    let side = Arc::new(FakeDriver::new(DbmsKind::MySql).gated());
+    let (h, f) = session_with_side(
+        fake_mysql()
+            .backend(42)
+            .exec(vec![slow("select a", ms(300))]),
+        &side,
+    )
+    .await;
+    let a = h.submit(exec("select a"));
+    settle().await;
+    let _c = h.cancel(a.seq);
+    settle_until("the kill to wait at the side connection's gate", || {
+        side.connect_calls() == 1
+    })
+    .await;
+    let b = h.submit(exec("select b"));
+    assert!(a.reply.await.unwrap().is_ok(), "a ended on its own");
+    assert_eq!(
+        b.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::NotConnected
+    );
+    assert_eq!(snap(&h).state, SessionState::Broken(ErrClass::Cancelled));
+    assert_eq!(f.open_connections(), 0);
+    // The side connection may now open: the aborted kill is gone.
+    side.release();
+    settle().await;
+    assert!(side.executed().is_empty(), "{:?}", side.executed());
+    assert!(!f.executed().contains(&"select b".to_string()));
+}
+
+/// Review M1: a terminate that ends the request is a success.
+#[tokio::test(start_paused = true)]
+async fn a_terminate_that_ends_the_request_reports_cancelled() {
+    let side = Arc::new(FakeDriver::new(DbmsKind::Postgres));
+    let (h, f) = session_with_side(
+        fake_pg().backend(7).exec(vec![slow("select x", secs(1))]),
+        &side,
+    )
+    .await;
+    let a = h.submit(exec("select x"));
+    settle().await;
+    let e = h.escalate(a.seq, Escalation::Terminate);
+    settle_until("the terminate on the side connection", || {
+        side.executed() == ["SELECT pg_terminate_backend(7)"]
+    })
+    .await;
+    // What the terminate does to the server connection.
+    f.kill_connections();
+    assert_eq!(e.await.unwrap(), CancelOutcome::Cancelled);
+    assert!(matches!(
+        a.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::ConnectionLost { .. }
+    ));
+    assert!(matches!(snap(&h).state, SessionState::Broken(_)));
 }

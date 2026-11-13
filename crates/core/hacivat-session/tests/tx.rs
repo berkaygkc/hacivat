@@ -5,10 +5,11 @@ mod common;
 use common::*;
 use hacivat_driver::TxStatus;
 use hacivat_driver::fake::FakeDriver;
-use hacivat_proto::{DbmsKind, EnvTag};
+use hacivat_proto::{AccessLabel, DbmsKind, EnvTag};
 use hacivat_session::profile::Profile;
 use hacivat_session::session::{
-    ExecErrorKind, IsolationLevel, TxCommand, TxError, TxMode, begin_sql, default_mode,
+    ExecErrorKind, ExecOrigin, IsolationLevel, Request, TxCommand, TxError, TxMode, begin_sql,
+    default_mode,
 };
 
 #[tokio::test]
@@ -195,6 +196,15 @@ async fn a_read_only_profile_never_yields_a_read_write_session() {
     )
     .await;
     assert!(snap(&h).read_only);
+    // Review M4: the label follows the session, not the connect.
+    assert_eq!(snap(&h).access, AccessLabel::ReadOnlyGuarded);
+    // Review M8: no manual transaction control on a read-only session (Q14).
+    for cmd in [TxCommand::Commit, TxCommand::Rollback] {
+        assert_eq!(
+            tx_cmd(&h, cmd).await.unwrap_err().kind,
+            ExecErrorKind::Tx(TxError::Unsupported)
+        );
+    }
     assert_eq!(
         tx_cmd(&h, TxCommand::SetMode(TxMode::Manual))
             .await
@@ -258,4 +268,25 @@ fn defaults_and_begin_sql() {
         begin_sql(DbmsKind::MariaDb, IsolationLevel::Default, true),
         ["START TRANSACTION READ ONLY"]
     );
+}
+
+// ## m2b-t07 fix round 1
+
+/// Review M9: Hacivat's own statements never open the user's Manual transaction.
+#[tokio::test]
+async fn internal_statements_never_open_a_manual_transaction() {
+    let (h, f) = session(fake_pg()).await;
+    tx_cmd(&h, TxCommand::SetMode(TxMode::Manual))
+        .await
+        .unwrap();
+    h.submit(Request::Exec {
+        sql: "select 1".into(),
+        opts: hacivat_driver::ExecOpts::default(),
+        origin: ExecOrigin::Internal { idempotent: true },
+    })
+    .reply
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(f.executed(), ["select 1"]);
 }

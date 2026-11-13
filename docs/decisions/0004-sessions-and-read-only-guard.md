@@ -52,7 +52,16 @@ on a `broadcast`.
   nothing runs unguarded before Task 18.
 - Spawning runs neither the environment plan nor a schema probe (Q27). One exception, a
   safety one: a read-write MySQL session that starts Manual sends `SET autocommit = 0`, so the
-  server never autocommits under a Manual badge.
+  server never autocommits under a Manual badge. **Q27 clarification (fix round 1):** this is
+  mode enforcement (B22), not the environment plan: it is internal, never re-probes, is
+  re-applied after a reset, and its failure breaks the session.
+- Requests and closes share one FIFO: a close never jumps ahead of a request queued before
+  it, so a queued `COMMIT` runs before a close looks at the transaction (fix round 1, M2).
+- The access label follows the session: a read-only session is never labelled `ReadWrite`,
+  even when its connect was asked for read-write (fix round 1, M4).
+- Driver calls outside the request (`backend_id`, `cancel_handle`, the spawn-time
+  `autocommit`) are guarded too; a panic there breaks the session the same way. A panic
+  message is logged redacted when `carries_secret` flags it, and cut to 200 characters.
 - Rejected: one task per request (no single owner of the connection, harder cancel races);
   `JoinError`-based panic capture through `spawn` (would move the connection into a second
   task and lose it on panic anyway, with an extra hop per request).
@@ -60,7 +69,9 @@ on a `broadcast`.
 **Transaction state (HV-SESS-03, B22, Q14).** The status always comes from
 `RawConn::tx_status()` after every round trip, never from parsing SQL. Manual mode on
 PostgreSQL and SQLite sends `begin_sql(..)` before a statement when the status is `Idle`
-(not before `BEGIN`/`START`/`COMMIT`/`END`/`ROLLBACK`/`ABORT`); SQLite uses `BEGIN IMMEDIATE`
+(not before `BEGIN`/`START`/`COMMIT`/`END`/`ROLLBACK`/`ABORT`, and never before Hacivat's own
+`ExecOrigin::Internal` statements, which must not open the user's transaction); SQLite uses
+`BEGIN IMMEDIATE`
 unless the first keyword is `SELECT` or `WITH`. MySQL switches `autocommit` at `SetMode`.
 Manual → Auto with an open or failed transaction is `InProgress`; `SetIsolation` is refused
 the same way and applies to the next `begin_sql` (MySQL's implicit Manual transactions keep the
@@ -68,7 +79,7 @@ server's level: a known limit). `Smart` needs the classifier (M3): `SetMode(Smar
 `NeedsClassifier`, and a profile that asks for Smart starts Manual (the safer mode) until then.
 In `Failed`, any statement whose first keyword is not `ROLLBACK` is refused before it is sent
 (advisory; the server refuses anyway). Read-only sessions are always Auto: `SetMode(Manual |
-Smart)` and `Begin` are `Unsupported`.
+Smart)`, `Begin`, `Commit` and `Rollback` are `Unsupported`.
 
 **Cancel ladder (HV-SESS-05, B23, Q18, Q37).** `cancel(seq)` acts only on the running request
 (the stale-cancel guard): anything else is `AlreadyFinished`. The first rung drops the queue
@@ -79,11 +90,18 @@ outcome within 2 s (`CANCEL_WAIT`), else `StillRunning`; at 10 s the session rep
 `SlowCancel`. `Terminate` runs `SELECT pg_terminate_backend(<pid>)` or `KILL CONNECTION <id>` on
 a side connection; `Deactivate` drops the request and the connection and marks
 `Broken(Cancelled)`. PostgreSQL `57014` and MySQL `1317` count as cancelled only once a cancel
-was asked for (a statement timeout also answers `57014`). **Cancel race:** a cancel or kill
-still in flight when its request ends is awaited (bounded by 2 s) before the next request
-starts, so it cannot hit that request; the server-side race of a protocol cancel that arrives
-after the statement ended remains the server's (PostgreSQL's CancelRequest is
-fire-and-forget).
+was asked for (a statement timeout also answers `57014`). Once a rung was climbed, a request
+that ends with any error answers its callers `Cancelled` (a successful terminate ends it with a
+lost connection). **Cancel race (corrected in fix round 1, review C1):** a cancel or kill still
+in flight when its request ends is awaited for up to 2 s before the next request starts. If it
+has ended, the session goes on. If not, it is aborted (with the side connect or pre-opened
+connection it waits for) and awaited, and since what it already sent may still land, the
+session is marked `Broken(Cancelled)` and its connection closed: the next request never runs
+on it, and the session goes the lost/reconnect way (Task 17). A late kill therefore costs a
+reconnect, never another statement. The server-side race of a protocol cancel that the server
+processes after the statement ended remains the server's (PostgreSQL's CancelRequest is
+fire-and-forget). Known cost (review M3, not changed): the finished request's reply also waits
+for that bound, because the snapshot is published before the reply.
 
 **`KILL` limits behind proxies (Q37).** `KILL QUERY`/`KILL CONNECTION` name a server thread ID
 read at connect. Behind a connection-multiplexing proxy (ProxySQL, MaxScale, RDS Proxy,
@@ -118,7 +136,10 @@ PostgreSQL's verify probe `SELECT current_user = session_user`, which must answe
 `autocommit = 0` for a Manual session; mode and isolation return to the session's start.
 Any failure breaks the session and closes the connection.
 
-**Tests.** `crates/core/hacivat-session/tests/{session_actor,tx,cancel,env_schema}.rs` (49
-tests over `FakeDriver` through the real connect pipeline). The fake now latches a cancel sent
+**Tests.** `crates/core/hacivat-session/tests/{session_actor,tx,cancel,env_schema}.rs` (53
+tests over `FakeDriver` through the real connect pipeline; fix round 1 adds
+`a_late_kill_never_reaches_the_next_request`, `a_terminate_that_ends_the_request_reports_cancelled`,
+`a_close_waits_for_requests_queued_before_it` and
+`internal_statements_never_open_a_manual_transaction`). The fake now latches a cancel sent
 between `execute` and its first poll, and drops one sent while nothing runs (T1 review M10;
 `hacivat-driver` `fake::tests::an_early_cancel_is_latched_and_an_idle_cancel_is_a_no_op`).

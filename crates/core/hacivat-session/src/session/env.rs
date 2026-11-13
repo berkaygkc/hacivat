@@ -147,7 +147,9 @@ pub fn quote_pg_literal(s: &str) -> String {
 }
 
 /// A MySQL string literal: `'`, with `'` doubled and backslashes doubled (safe with and without
-/// `NO_BACKSLASH_ESCAPES`: the quote can never be escaped away).
+/// `NO_BACKSLASH_ESCAPES`: the quote can never be escaped away). Under `NO_BACKSLASH_ESCAPES`
+/// a value with a backslash reads with the backslash doubled: safe, but not the value meant
+/// (only the M3 time zone uses it, and zone names have no backslash).
 pub fn quote_my_literal(s: &str) -> String {
     format!(
         "'{}'",
