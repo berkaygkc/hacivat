@@ -74,6 +74,10 @@ pub struct Toast {
     /// Machine text shown verbatim under the title in mono (`TextSource::Data`), e.g. the URL
     /// "Copy as URL" put on the clipboard (NOTES surface 2).
     pub data: Option<SharedString>,
+    // ## m2b-t22-live
+    /// The glyph in place of the kind's (the session toasts: rotate-cw, unplug); it keeps the
+    /// kind's ink.
+    pub icon: Option<IconName>,
 }
 
 /// A button on a toast (M2a, NOTES surface 4).
@@ -97,6 +101,7 @@ impl Toast {
             actions: Vec::new(),
             wide: false,
             data: None,
+            icon: None,
         }
     }
 
@@ -189,6 +194,13 @@ impl Global for ToastQueue {}
 impl ToastQueue {
     /// Shows `toast` now, or after a visible toast of its kind (sticky or transient) goes.
     pub fn push(cx: &mut App, toast: Toast) {
+        Self::push_id(cx, toast);
+    }
+
+    // ## m2b-t22-live
+    /// [`ToastQueue::push`], returning the toast's id (for [`ToastQueue::dismiss`]: a toast
+    /// that replaces an older one of the same subject).
+    pub fn push_id(cx: &mut App, toast: Toast) -> u64 {
         let entry = Entry {
             id: 0,
             actions_focus: toast.actions.iter().map(|_| cx.focus_handle()).collect(),
@@ -196,26 +208,28 @@ impl ToastQueue {
             restore: None,
             toast,
         };
-        let started = {
+        let (id, started) = {
             let q = cx.default_global::<ToastQueue>();
             q.next_id += 1;
             let entry = Entry {
                 id: q.next_id,
                 ..entry
             };
+            let id = entry.id;
             if q.has_room(entry.toast.sticky) {
                 let started = (entry.id, entry.toast.lifetime());
                 q.visible.push(entry);
-                Some(started)
+                (id, Some(started))
             } else {
                 q.waiting.push_back(entry);
-                None
+                (id, None)
             }
         };
         if let Some((id, Some(ttl))) = started {
             Self::start_timer(cx, id, ttl);
         }
         cx.refresh_windows();
+        id
     }
 
     /// Whether a toast of this kind can show now.
@@ -343,6 +357,7 @@ struct Shown {
     bullets: Vec<SharedString>,
     actions: Vec<(SharedString, ActionFn, FocusHandle)>,
     dismiss_focus: FocusHandle,
+    icon: Option<IconName>,
 }
 
 impl IntoElement for ToastStack {
@@ -377,6 +392,7 @@ impl IntoElement for ToastStack {
                                 .map(|(a, h)| ((a.label)(cx), a.run.clone(), h.clone()))
                                 .collect(),
                             dismiss_focus: e.dismiss_focus.clone(),
+                            icon: e.toast.icon,
                         })
                         .collect()
                 })
@@ -401,6 +417,8 @@ impl IntoElement for ToastStack {
                         ToastKind::Info => (IconName::Info, c.text_2),
                         ToastKind::Error => (IconName::TriangleAlert, c.red),
                     };
+                    // ## m2b-t22-live: a toast's own glyph keeps the kind's ink.
+                    let icon = shown.icon.unwrap_or(icon);
                     let rich = shown.title.is_some()
                         || shown.data.is_some()
                         || !shown.bullets.is_empty()

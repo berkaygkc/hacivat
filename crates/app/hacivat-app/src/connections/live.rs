@@ -14,6 +14,11 @@
 //!   half the budget), then `ConnectionManager::shutdown_blocking` closes every connection (and
 //!   cancels connects) within the rest, then the core runtime stops with its own 200 ms budget.
 //!   This is the only place profile writes may block the UI thread.
+//! - **M2b (Task 22).** A reconnect waiting for its next attempt (`Reconnecting` with
+//!   `next_in`) gets a deadline on the executor clock when the mirror sees it, so the capsule
+//!   counts down to it; the repaint timer runs while one waits. A profile that leaves
+//!   `Disconnected` is no longer idle (`session_toasts::clear_idle`). The mirror still awaits
+//!   its `watch` channel (Q4 ruling): only the new states are added.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -26,7 +31,7 @@ use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, Global, Window};
 
 use crate::connections::model::ConnectionsModel;
-use crate::connections::{capsule, explorer, home, sheet, status};
+use crate::connections::{capsule, explorer, home, session_toasts, sheet, status};
 use crate::l10n_global::tr;
 use crate::shell;
 
@@ -41,6 +46,10 @@ struct LiveClocks {
     started: HashMap<ProfileId, Instant>,
     /// The repaint timer runs.
     ticking: bool,
+    // ## m2b-t22-live
+    /// A reconnect waiting for its next attempt: the attempt, its `next_in`, and when it
+    /// starts on the executor clock.
+    reconnects: HashMap<ProfileId, (u32, Duration, Instant)>,
 }
 
 impl Global for LiveClocks {}
@@ -104,6 +113,34 @@ pub fn clock_seconds(cx: &App, id: ProfileId) -> f64 {
         })
 }
 
+// ## m2b-t22-live
+/// Whole seconds until reconnect `attempt` of `id` starts: from the deadline the mirror noted
+/// for that `next_in`, else `next_in` itself (rounded up, so a wait under a second says 1).
+pub fn reconnect_seconds(cx: &App, id: ProfileId, attempt: u32, next_in: Duration) -> u64 {
+    let now = cx.background_executor().now();
+    let left = cx
+        .try_global::<LiveClocks>()
+        .and_then(|c| c.reconnects.get(&id))
+        .filter(|(a, n, _)| *a == attempt && *n == next_in)
+        .map_or(next_in, |(_, _, at)| at.saturating_duration_since(now));
+    u64::try_from(left.as_millis().div_ceil(1000)).unwrap_or(u64::MAX)
+}
+
+/// Notes when `id`'s next reconnect attempt starts, once per `(attempt, next_in)`.
+fn note_reconnect(cx: &mut App, id: ProfileId, attempt: u32, next_in: Duration) {
+    let now = cx.background_executor().now();
+    let clocks = cx.default_global::<LiveClocks>();
+    let same = clocks
+        .reconnects
+        .get(&id)
+        .is_some_and(|(a, n, _)| *a == attempt && *n == next_in);
+    if !same {
+        clocks
+            .reconnects
+            .insert(id, (attempt, next_in, now + next_in));
+    }
+}
+
 /// Copies every profile's manager state into the model.
 pub(crate) fn mirror(cx: &mut App) {
     let Some(m) = cx.try_global::<ConnectionsModel>() else {
@@ -126,6 +163,22 @@ pub(crate) fn mirror(cx: &mut App) {
         } else {
             cx.default_global::<LiveClocks>().started.remove(&id);
         }
+        // ## m2b-t22-live: the countdown to the next attempt, and the end of an idle state.
+        match state {
+            LiveState::Reconnecting {
+                attempt,
+                next_in: Some(next_in),
+            } => {
+                connecting = true;
+                note_reconnect(cx, id, attempt, next_in);
+            }
+            _ => {
+                cx.default_global::<LiveClocks>().reconnects.remove(&id);
+            }
+        }
+        if state != LiveState::Disconnected {
+            session_toasts::clear_idle(cx, id);
+        }
         cx.global_mut::<ConnectionsModel>().set_live(id, state);
     }
     if connecting {
@@ -133,12 +186,20 @@ pub(crate) fn mirror(cx: &mut App) {
     }
 }
 
-/// Whether any profile is connecting.
+/// Whether any profile is connecting, or waiting for its next reconnect attempt (its
+/// countdown ticks, Task 22).
 fn any_connecting(cx: &App) -> bool {
     cx.try_global::<ConnectionsModel>().is_some_and(|m| {
-        m.profiles()
-            .iter()
-            .any(|p| matches!(m.live(p.id), LiveState::Connecting(_)))
+        m.profiles().iter().any(|p| {
+            matches!(
+                m.live(p.id),
+                LiveState::Connecting(_)
+                    | LiveState::Reconnecting {
+                        next_in: Some(_),
+                        ..
+                    }
+            )
+        })
     })
 }
 

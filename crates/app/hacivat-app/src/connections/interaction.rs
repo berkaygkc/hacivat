@@ -101,7 +101,8 @@ fn open_prompt(q: Question, reply: oneshot::Sender<Answer>, window: &mut Window,
         Question::HostKey { .. } => hostkey_prompt::open(q, reply, window, cx),
         Question::Secret { .. } => secret_prompt::open(q, reply, window, cx),
         Question::Keyboard { .. } => kbd_prompt::open(q, reply, window, cx),
-        Question::UnlockVault { .. } | Question::CreateVault => {
+        // ## m2b-t22-live: the damaged-file notice is the vault dialog's too (T21 carry).
+        Question::UnlockVault { .. } | Question::CreateVault | Question::VaultDamaged => {
             vault_dialog::open(q, reply, window, cx);
         }
     }

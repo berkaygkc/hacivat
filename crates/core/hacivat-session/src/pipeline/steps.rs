@@ -862,6 +862,13 @@ impl ConnectStep for AuthStep {
             {
                 outcome = resolve_blocking(&cx.profile, st, lookup_host(&cx.profile)).await?;
             }
+            // ## m2b-t22-live (T21 carry): a damaged vault says so before the password prompt.
+            if matches!(
+                outcome,
+                AuthOutcome::Failed(AuthError::Store(SecretError::VaultCorrupt))
+            ) {
+                prompts::vault_damaged(st).await;
+            }
             let (ix, user) = (st.ix.clone(), st.user.clone());
             let attempt = st.rejections + 1;
             let m = material(&cx.profile, &ix, user, outcome, Phase::Auth, attempt).await?;

@@ -388,6 +388,17 @@ impl Shared {
             self.deps.clone(),
             budget.clone(),
         );
+        // ## m2b-t22-live (T17 carry): the gaps of the profile's other sessions (pooled
+        // read-only ones) are relayed as the default session's are (Q35).
+        let weak = Arc::downgrade(self);
+        sessions.relay_gaps(Arc::new(move |reason| {
+            if let Some(shared) = weak.upgrade() {
+                shared.emit(ConnectionEvent::EnforcementGap {
+                    profile: id,
+                    reason,
+                });
+            }
+        }));
         let stop = CancellationToken::new();
         let reconnect = self.config.reconnect.then(|| {
             Arc::new(Recovery {

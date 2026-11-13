@@ -15,18 +15,30 @@
 //! The production block always comes first. Debug selectors: `capsule`, `cp-fill`,
 //! `capsule-body` (the name segment), `capsule-run`, `capsule-retry`, `capsule-unencrypted` and
 //! `capsule-unsupported`.
+//!
+//! M2b (Task 22, NOTES M2a §7 and M2b surfaces 6–7):
+//! - reconnecting: the run marker, the attempt label in `text` and, between attempts, when the
+//!   next one starts in mono `text-2`;
+//! - a read-only access segment is a button and a Tab stop (`capsule-access`): a click, Enter or
+//!   Space reports [`CapsuleSegment::Access`] (the explanation popover); the focus ring is a 1 px
+//!   `blue` line inset 2 px;
+//! - idle: after an idle disconnect, the environment, the name and an unplug glyph with its
+//!   label, both `text-2` (`capsule-idle`).
+//!
+//! Label IDs for tests and tools: `capsule-text-run`, `capsule-text-next`, `capsule-text-access`,
+//! `capsule-text-path`, `capsule-text-idle`.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, Bounds, ClickEvent, Div, ElementId, Global, Hsla, InteractiveElement,
-    IntoElement, ParentElement, Pixels, Point, Role, SharedString, Stateful,
+    IntoElement, KeyDownEvent, ParentElement, Pixels, Point, Role, SharedString, Stateful,
     StatefulInteractiveElement, Styled, Window, canvas, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeTokens, TypeStyle};
 
-use crate::button::{ClickHandler, hover_listener, interaction_state};
+use crate::button::{ClickHandler, focus_visible, hover_listener, interaction_state};
 use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::{A11yDecl, A11yNode, Declare, lazy};
 use crate::step_trail::run_marker;
@@ -107,6 +119,9 @@ pub enum CapsuleSegment {
     Body,
     Retry,
     Unencrypted,
+    // ## m2b-t22-live
+    /// The read-only access segment (NOTES M2b surface 6).
+    Access,
 }
 
 /// Called with the clicked segment and the bottom-left of its bounds, the anchor for
@@ -155,6 +170,15 @@ pub enum CapsuleModel {
         unencrypted: Option<SharedString>,
         /// The unsupported-version badge's label.
         unsupported: Option<SharedString>,
+    },
+    // ## m2b-t22-live
+    /// Disconnected after being idle (B18): it reconnects when used (NOTES M2b surface 7).
+    Idle {
+        env: EnvKind,
+        env_label: SharedString,
+        name: SharedString,
+        engine: SharedString,
+        label: SharedString,
     },
     /// The last connect failed. The environment block still comes first (a failed production
     /// connection keeps its PRODUCTION block, NOTES §7).
@@ -240,6 +264,89 @@ fn bounds_probe(slot: Rc<Cell<Bounds<Pixels>>>, left: f32, rest: f32) -> impl In
         .top(px(-rest))
         .right(px(-rest))
         .bottom(px(-rest))
+}
+
+// ## m2b-t22-live
+/// The read-only access segment (NOTES M2b surface 6): a button and a Tab stop. A click, or
+/// Enter or Space while it has the focus (GPUI's keyboard click), reports
+/// [`CapsuleSegment::Access`] at its bottom-left. A pointer click focuses it first, so the
+/// popover gives the focus back here when it closes. The focus ring is a 1 px `blue` line inset
+/// 2 px (mock `.cp-ro:focus-visible`), shown for keyboard focus only. An inert capsule (a modal
+/// layer is open) announces it as disabled and takes no focus.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one private call site in `Capsule::build`"
+)]
+fn access_segment(
+    t: &ThemeTokens,
+    window: &mut Window,
+    cx: &mut App,
+    inert: bool,
+    on_segment: Option<SegmentHandler>,
+    name: &SharedString,
+    content: [AnyElement; 2],
+) -> AnyElement {
+    const ID: &str = "capsule-access";
+    let slot = Rc::new(Cell::new(Bounds::default()));
+    let mut el = cell(t)
+        .id(ID)
+        .debug_selector(|| ID.to_string())
+        .relative()
+        .child(bounds_probe(slot.clone(), 1.0, 0.0))
+        .children(content);
+    if inert {
+        return A11yNode::new("capsule-access-node", Role::Button, name.clone(), false, el)
+            .disabled(true)
+            .into_any_element();
+    }
+    let focus = window.use_keyed_state(ElementId::from("capsule-access-focus"), cx, |_, cx| {
+        cx.focus_handle()
+    });
+    let handle = focus.read(cx).clone();
+    if focus_visible(&handle, window) {
+        el = el.child(
+            div()
+                .debug_selector(|| "capsule-access-ring".to_string())
+                .absolute()
+                .top(px(2.0))
+                .bottom(px(2.0))
+                .left(px(2.0))
+                .right(px(2.0))
+                .border_1()
+                .border_color(t.colors.blue.to_hsla())
+                .rounded(px(t.radii.xs)),
+        );
+    }
+    el = el.track_focus(&handle.clone().tab_stop(true));
+    if let Some(handler) = on_segment {
+        // Enter or Space on key-down (never held, never with a modifier), as the dialogs act;
+        // the default is prevented, so GPUI's key-up click does not open it a second time.
+        let (on_key, key_slot) = (handler.clone(), slot.clone());
+        el = el.on_key_down(move |event: &KeyDownEvent, window, cx| {
+            let stroke = &event.keystroke;
+            if event.is_held
+                || stroke.modifiers.modified()
+                || !matches!(stroke.key.as_str(), "enter" | "space")
+            {
+                return;
+            }
+            window.prevent_default();
+            cx.stop_propagation();
+            on_key(
+                CapsuleSegment::Access,
+                key_slot.get().bottom_left(),
+                window,
+                cx,
+            );
+        });
+        el = el.on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            window.focus(&handle, cx);
+            handler(CapsuleSegment::Access, slot.get().bottom_left(), window, cx);
+        });
+    }
+    el.declare(Role::Button, name.clone(), None)
+        .into_any_element()
 }
 
 // ## m2a-t21-shots
@@ -475,7 +582,8 @@ impl Capsule {
                         ))),
                 );
             }
-            // ## m2b-t01-interfaces: like Connecting, without a clock (Task 22 finishes it).
+            // ## m2b-t22-live: the run marker, "Reconnecting · attempt n" and, between
+            // attempts, "in n s" (NOTES M2a §7, HV-CONN-05).
             CapsuleModel::Reconnecting {
                 env,
                 env_label,
@@ -483,6 +591,37 @@ impl Capsule {
                 engine,
                 label,
                 next,
+            } => {
+                name_for_label = name.clone();
+                let mut said = vec![env_label.clone(), label.clone()];
+                said.extend(next.iter().cloned());
+                description = Some(SharedString::from(said.join(", ")));
+                frame = head(
+                    frame,
+                    Head {
+                        env: Some((*env, env_label)),
+                        name,
+                        engine: Some(engine),
+                    },
+                );
+                let mut run = cell(t)
+                    .child(run_marker(&theme).debug_selector(|| "capsule-run".to_string()))
+                    .child(text(label, body, c.text.to_hsla()).id("capsule-text-run"));
+                if let Some(next) = next {
+                    run = run.child(
+                        div()
+                            .min_w(px(RUN_MONO_MIN_PX))
+                            .child(text(next, mono, c.text_2.to_hsla()).id("capsule-text-next")),
+                    );
+                }
+                frame = frame.child(run);
+            }
+            CapsuleModel::Idle {
+                env,
+                env_label,
+                name,
+                engine,
+                label,
             } => {
                 name_for_label = name.clone();
                 description = Some(SharedString::from(format!("{env_label}, {label}")));
@@ -494,17 +633,13 @@ impl Capsule {
                         engine: Some(engine),
                     },
                 );
-                let mut run = cell(t)
-                    .child(run_marker(&theme).debug_selector(|| "capsule-run".to_string()))
-                    .child(text(label, body, c.text.to_hsla()));
-                if let Some(next) = next {
-                    run = run.child(div().min_w(px(RUN_MONO_MIN_PX)).child(text(
-                        next,
-                        mono,
-                        c.text_2.to_hsla(),
-                    )));
-                }
-                frame = frame.child(run);
+                // NOTES M2b surface 7: the unplug glyph and its label, both text-2.
+                frame = frame.child(
+                    cell(t)
+                        .debug_selector(|| "capsule-idle".to_string())
+                        .child(icon(IconName::Unplug, c.text_2.to_hsla()))
+                        .child(text(label, body, c.text_2.to_hsla()).id("capsule-text-idle")),
+                );
             }
             CapsuleModel::Connection {
                 env,
@@ -534,13 +669,28 @@ impl Capsule {
                 );
                 let production = *env == EnvKind::Production;
                 // Hue Is Meaning: the lock is red only on production.
+                // ## m2b-t22-live: a read-only access segment is a button and a Tab stop that
+                // opens the explanation (NOTES M2b surface 6).
                 let access_cell = if *read_only {
                     let lock = if production { c.red } else { c.text_2 };
-                    cell(t)
-                        .child(icon(IconName::Lock, lock.to_hsla()))
-                        .child(text(access, body, c.text.to_hsla()))
+                    access_segment(
+                        t,
+                        window,
+                        cx,
+                        inert,
+                        on_segment.clone(),
+                        access,
+                        [
+                            icon(IconName::Lock, lock.to_hsla()).into_any_element(),
+                            text(access, body, c.text.to_hsla())
+                                .id("capsule-text-access")
+                                .into_any_element(),
+                        ],
+                    )
                 } else {
-                    cell(t).child(text(access, body, c.text_2.to_hsla()))
+                    cell(t)
+                        .child(text(access, body, c.text_2.to_hsla()).id("capsule-text-access"))
+                        .into_any_element()
                 };
                 let (path_icon, path_ink) = if *direct {
                     (IconName::ArrowLeftRight, c.green)
@@ -549,7 +699,7 @@ impl Capsule {
                 };
                 let mut path_cell = cell(t)
                     .child(icon(path_icon, path_ink.to_hsla()))
-                    .child(text(path, body, c.text.to_hsla()));
+                    .child(text(path, body, c.text.to_hsla()).id("capsule-text-path"));
                 if let Some(latency) = latency {
                     path_cell = path_cell.child(text(latency, mono, c.text_2.to_hsla()));
                 }

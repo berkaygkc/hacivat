@@ -307,6 +307,12 @@ pub(crate) async fn unlock_vault(st: &mut StepState) -> bool {
             Ok(Err(SecretError::WrongMasterPassword)) => {
                 tracing::debug!(attempt, "wrong vault master password");
             }
+            // ## m2b-t22-live: a damaged file says so (the T21 notice), then nothing is stored.
+            Ok(Err(SecretError::VaultCorrupt)) => {
+                tracing::warn!("the vault failed its integrity check");
+                let _ = ui.ask(Question::VaultDamaged).await;
+                return false;
+            }
             _ => {
                 tracing::warn!("the vault could not be unlocked");
                 return false;
@@ -314,6 +320,25 @@ pub(crate) async fn unlock_vault(st: &mut StepState) -> bool {
         }
     }
     false
+}
+
+// ## m2b-t22-live
+/// A store read met a vault that failed its integrity check (T21 carry): an interactive
+/// connect shows the damaged-file notice (`Question::VaultDamaged`) once, and this connect
+/// tries the vault no further (a damaged file cannot be unlocked either). The caller then goes
+/// on as if nothing were stored.
+pub(crate) async fn vault_damaged(st: &mut StepState) {
+    if st.vault_tried {
+        return;
+    }
+    st.vault_tried = true;
+    let Interaction::Interactive(ui) = st.ix.clone() else {
+        return;
+    };
+    // A prompt after the transport opened its first stream may let it idle out.
+    st.interacted |= st.first_stream.is_some();
+    tracing::warn!("the vault failed its integrity check");
+    let _ = ui.ask(Question::VaultDamaged).await;
 }
 
 /// Reads `keys` from the store on the blocking pool (outside the deadline, P23). A locked vault
@@ -341,6 +366,13 @@ pub(crate) async fn read_store(
         .any(|r| matches!(r, Err(SecretError::VaultLocked)));
     if locked && unlock_vault(st).await {
         got = read(st.secrets.clone(), keys).await;
+    }
+    // ## m2b-t22-live
+    if got
+        .iter()
+        .any(|r| matches!(r, Err(SecretError::VaultCorrupt)))
+    {
+        vault_damaged(st).await;
     }
     got.into_iter()
         .map(|r| match r {

@@ -63,6 +63,11 @@ pub enum Question {
     UnlockVault { attempt: u8 },
     /// A new vault's master password, before the first `Forever` secret (Q38, Task 21).
     CreateVault,
+    // ## m2b-t22-live
+    /// The vault file failed its integrity check while this connect read it (T21 carry): the
+    /// UI shows the damaged-file notice. Any answer goes on: the connect then asks for the
+    /// secrets as if nothing were stored. Asked at most once per connect.
+    VaultDamaged,
 }
 
 // ## m2b-t01-interfaces

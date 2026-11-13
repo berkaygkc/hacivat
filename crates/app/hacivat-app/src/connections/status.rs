@@ -4,6 +4,11 @@
 //! mirrored live state): the environment segment (`hv-status-env`), then the state or the path
 //! with its latency, the encryption fact, the "unsupported" mark and the engine version. With
 //! no current connection it shows M1's "No connection".
+//!
+//! M2b (Task 22): the environment segment carries the capsule's access label ("production ·
+//! read-only (enforced by server role)", NOTES M2b surface 6); a reconnect shows its attempt,
+//! an idle disconnect "Disconnected (idle)", and an SSH path `SSH via <bastion>` (label ID
+//! `status-path`, the capsule's path text).
 
 use hacivat_driver::Support;
 use hacivat_l10n::{NoArgs, Text, ids};
@@ -15,26 +20,33 @@ use hacivat_ui_core::gpui_surface::{AnyElement, App, IntoElement, SharedString};
 use hacivat_ui_core::theme::Theme;
 
 use crate::connections::capsule::{
-    current_profile, encryption_label, env_kind, env_word, is_read_only, latency_label,
+    access_label, current_profile, encryption_label, env_kind, env_word, is_read_only,
+    latency_label, path_label, reconnecting_label,
 };
 use crate::connections::model::ConnectionsModel;
+use crate::connections::session_toasts;
 use crate::l10n_global::tr;
 
-/// `production · read-only` and the like: the environment word (`hv-conn-env-*`) and the
-/// access word (`hv-capsule-access-*`) in `hv-status-env`.
-fn env_text(cx: &App, p: &Profile, read_only: bool) -> SharedString {
+/// The access word of a profile without a live connection (`hv-capsule-access-*`).
+fn profile_access(cx: &App, read_only: bool) -> SharedString {
     // ## m2a-t21-shots: no second copy of the environment and access words.
     let access = if read_only {
         ids::hv::CAPSULE_ACCESS_READ_ONLY
     } else {
         ids::hv::CAPSULE_ACCESS_READ_WRITE
     };
+    tr(cx, access, NoArgs)
+}
+
+/// `production · read-only` and the like: the environment word (`hv-conn-env-*`) and the
+/// access text in `hv-status-env`.
+fn env_text(cx: &App, p: &Profile, access: SharedString) -> SharedString {
     tr(
         cx,
         ids::hv::STATUS_ENV,
         ids::hv::HvStatusEnv {
             env: Text(env_word(cx, p.environment).to_string()),
-            access: Text(tr(cx, access, NoArgs).to_string()),
+            access: Text(access.to_string()),
         },
     )
 }
@@ -57,22 +69,47 @@ pub fn segments(theme: &Theme, cx: &App) -> Vec<AnyElement> {
     let kind = env_kind(p.environment);
     let fluent =
         |text: SharedString| status_label(theme, text, TextSource::Fluent).into_any_element();
+    let profile_env = || {
+        env_segment(
+            theme,
+            kind,
+            env_text(cx, &p, profile_access(cx, p.read_only)),
+            p.read_only,
+        )
+    };
     match m.live(p.id) {
+        // ## m2b-t22-live: an idle disconnect keeps the profile (NOTES M2b surface 7).
+        LiveState::Disconnected if session_toasts::is_idle(cx, p.id) => vec![
+            profile_env(),
+            fluent(tr(cx, ids::hv::CONN_IDLE_CAP, NoArgs)),
+        ],
         LiveState::Disconnected => no_connection(),
-        // ## m2b-t01-interfaces: a reconnect reads like a connect (Task 22 refines it).
-        LiveState::Connecting(_) | LiveState::Reconnecting { .. } => vec![
-            env_segment(theme, kind, env_text(cx, &p, p.read_only), p.read_only),
+        LiveState::Connecting(_) => vec![
+            profile_env(),
             fluent(tr(cx, ids::hv::CAPSULE_CONNECTING, NoArgs)),
         ],
+        // ## m2b-t22-live: the attempt, as the capsule says it.
+        LiveState::Reconnecting { attempt, .. } => {
+            vec![profile_env(), fluent(reconnecting_label(cx, attempt))]
+        }
         LiveState::Failed(_) | LiveState::Lost { .. } => vec![
-            env_segment(theme, kind, env_text(cx, &p, p.read_only), p.read_only),
+            profile_env(),
             fluent(tr(cx, ids::hv::CAPSULE_FAILED, NoArgs)),
         ],
         LiveState::Connected(info) => {
             let read_only = is_read_only(&info);
+            // ## m2b-t22-live: the capsule's access label and path (B21, SSH).
+            let (path, _) = path_label(cx, &p, Some(&info));
             let mut out = vec![
-                env_segment(theme, kind, env_text(cx, &p, read_only), read_only),
-                fluent(tr(cx, ids::hv::CAPSULE_PATH_DIRECT, NoArgs)),
+                env_segment(
+                    theme,
+                    kind,
+                    env_text(cx, &p, access_label(cx, info.access)),
+                    read_only,
+                ),
+                status_label(theme, path, TextSource::Fluent)
+                    .id("status-path")
+                    .into_any_element(),
                 fluent(latency_label(cx, &info)),
                 fluent(encryption_label(cx, &p, &info)),
             ];

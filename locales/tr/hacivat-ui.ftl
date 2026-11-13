@@ -959,3 +959,120 @@ hv-conn-err-refused = { $name } — { $reason ->
 hv-conn-err-attempts-used = 3 denemenin hepsi kullanıldı. Hesap kilitlenmesin diye { -brand-hacivat } başka parola göndermez.
 # Review: PO
 hv-conn-dlg-attempts-used = Bu sunucu için deneme hakkı kalmadı. Yeniden denemek için adresi, portu ya da kullanıcıyı değiştirin veya bu pencereyi kapatıp yeniden açın.
+
+## m2b-t22-live
+
+# Review: PO
+hv-capsule-reconnecting = Yeniden bağlanıyor · { $n }. deneme
+# Review: PO
+hv-capsule-next = { $seconds } sn sonra
+# Review: PO
+hv-conn-path-ssh = { $host } üzerinden SSH
+# Review: PO
+hv-conn-idle-cap = Bağlantı kesik (boşta)
+# Review: PO
+hv-conn-idle-disconnected = { $name } bağlantısı { $hours } sa boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.
+# Review: PO
+hv-conn-idle-disconnected-minutes = { $name } bağlantısı { $minutes } dk boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.
+# Review: PO
+hv-conn-idle-tx = { $name } üzerindeki bir işlem { $minutes } dakikadır açık ve boşta. Commit edilene ya da geri alınana kadar kilitlerini tutar.
+# Review: PO
+hv-conn-lost-title = { $state ->
+        [reconnected] { $name } ile yeniden bağlanıldı
+       *[lost] { $name } oturumu kayboldu
+    }
+# Review: PO
+hv-conn-lost-body = { $state ->
+        [reconnected] Sunucu oturumu sona erdi; { -brand-hacivat } yeni bir oturum açtı.
+       *[lost] Sunucu oturumu süren bir iş varken sona erdi; bu yüzden { -brand-hacivat } kendiliğinden yeniden bağlanmadı. Yeniden dene ile tekrar bağlanabilirsiniz.
+    }
+# Review: PO
+hv-conn-lost-tx = Açık işleminiz sona erdi ve sunucu commit edilmemiş değişikliklerini geri aldı.
+# Review: PO
+hv-conn-lost-other = Ayrıca kayboldu: { $items }
+# Review: PO
+hv-conn-lost-item-temp = geçici tablolar
+# Review: PO
+hv-conn-lost-item-vars = oturum değişkenleri
+# Review: PO
+hv-conn-lost-item-prepared = { $count } hazırlanmış ifade
+# Review: PO
+hv-conn-lost-item-locks = oturum kilitleri
+# Review: PO
+hv-conn-lost-details = Ayrıntıları göster
+# Review: PO
+hv-conn-lost-dismiss = Kapat
+# Review: PO
+hv-conn-gap-title = { $name } üzerinde salt okunur koruma
+# Review: PO
+hv-conn-gap-tx-ended = { -brand-hacivat }, salt okunur bir bağlantıda salt okunur işlemi sonlandıran bir ifadeyi durdurdu ve o oturumu kapattı.
+# Review: PO
+hv-conn-gap-changed-data = { -brand-hacivat }, salt okunur bir bağlantıda veri değiştiren bir ifadeyi durdurdu ve o oturumu kapattı.
+# Review: PO
+hv-conn-access-ro-enforced = salt okunur (sunucu rolüyle zorunlu)
+# Review: PO
+hv-conn-ro-sheet-enforced = salt okunur · zorunlu
+# Review: PO
+hv-conn-ro-sheet-guarded = salt okunur · korumalı
+# Review: PO
+hv-conn-ro-pop-enf-title = Salt okunur, sunucu tarafından zorunlu
+# Review: PO
+hv-conn-ro-pop-enf-body = { $user } rolü burada yalnızca okuyabilir. { -brand-hacivat } içinde ne çalışırsa çalışsın, yazmaları sunucunun kendisi reddeder.
+# Review: PO
+hv-conn-ro-pop-enf-temp = Tek başına TEMP yetkisi zorunluluğu zayıflatmaz; etiket zorunlu kalır.
+# Review: PO
+hv-conn-ro-pop-g-title = Salt okunurluk korumalı, zorunlu değil
+# Review: PO
+hv-conn-ro-pop-g-body = { $user } rolü burada yalnızca okumayla sınırlı değil; bu yüzden yazmaları { -brand-hacivat } kendisi durdurur: her ifadeyi denetler ve salt okunur çalıştırır.
+# Review: PO
+hv-conn-ro-pop-g-limit = Bu, hataları yakalar. Kesin güvence ancak sunucudaki salt okunur bir rolle sağlanır.
+# Review: PO
+hv-conn-ro-pop-g-fix = Zorunlu hale getirmek için veritabanı yöneticinizden böyle bir rol isteyin ve onu bu bağlantının kullanıcısı yapın:
+# Review: PO
+hv-conn-ro-pop-maria-body = { -brand-hacivat } bir MariaDB rolünün salt okunur olduğunu henüz doğrulayamıyor; bu yüzden MariaDB bağlantılarını her zaman kendisi korur.
+# Review: PO
+hv-conn-ro-pop-no-fix = Hiçbir rol değişikliği bu etiketi zorunlu yapmaz; bu yüzden kopyalanacak SQL yok.
+# Review: PO
+hv-conn-ro-pop-sqlite-body = SQLite'ta sunucu rolü yoktur. { -brand-hacivat } dosyayı salt okunur açar ve yalnızca okuyan ifadelere izin verir.
+# Review: PO
+hv-conn-ro-copy-sql = SQL'i kopyala
+# Review: PO
+hv-conn-ro-copied = SQL kopyalandı. Çalıştırmadan önce köşeli parantez içindeki değerleri değiştirin.
+# Review: PO
+hv-conn-ro-warn-head = Bu rolde bulunanlar:
+# Review: PO
+hv-conn-ro-warn-superuser = Süper kullanıcı.
+# Review: PO
+hv-conn-ro-warn-bypass-rls = Satır düzeyi güvenliği atlıyor.
+# Review: PO
+hv-conn-ro-warn-replication = Çoğaltma başlatabilir.
+# Review: PO
+hv-conn-ro-warn-create-role = Rol oluşturup değiştirebilir.
+# Review: PO
+hv-conn-ro-warn-server-file-roles = Veritabanı sunucusundaki dosyaları okuyabilir ya da yazabilir.
+# Review: PO
+hv-conn-ro-warn-execute-server-program = Veritabanı sunucusunda program çalıştırabilir.
+# Review: PO
+hv-conn-ro-warn-signal-backend = Başka oturumları iptal edebilir ya da sonlandırabilir.
+# Review: PO
+hv-conn-ro-warn-write-privileges = Bazı tablolardaki verileri değiştirebilir.
+# Review: PO
+hv-conn-ro-warn-temp-privilege = Geçici tablo oluşturabilir; salt okunur işlemler bunları engeller.
+# Review: PO
+hv-conn-ro-warn-egress-extension = { $name } eklentisi başka sunuculara erişebilir.
+# Review: PO
+hv-conn-ro-warn-role-grant-not-expanded = Ona başka roller verilmiş; { -brand-hacivat } bunların neye izin verdiğini göremiyor.
+# Review: PO
+hv-conn-ro-warn-unparsed = { -brand-hacivat } yetkilerini okuyamadı.
+# Review: PO
+hv-cmd-connection-explain-access = Salt okunur erişimi açıkla
+# Review: PO
+hv-cmd-debug-run-pg-sleep = Hata ayıklama: geçerli bağlantıda SELECT pg_sleep(30) çalıştır
+# Review: PO
+hv-cmd-debug-cancel = Hata ayıklama: deneme ifadesini iptal et
+# Review: PO
+hv-debug-demo-result = { $outcome ->
+        [done] Deneme ifadesi tamamlandı.
+        [cancelled] Deneme ifadesi iptal edildi.
+       *[failed] Deneme ifadesi başarısız oldu.
+    }

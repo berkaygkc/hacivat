@@ -58,8 +58,8 @@ use crate::profile::Profile;
 use crate::session::actor::{Reconnector, SessionHooks, SideConnector, spawn_supervised};
 use crate::session::liveness::LivenessPolicy;
 use crate::session::{
-    ClientId, ClosePolicy, Command, Escalation, Request, SessionHandle, SessionId, SessionKind,
-    SessionSnapshot, SessionSpec, SessionState,
+    ClientId, ClosePolicy, Command, Escalation, Request, SessionEvent, SessionHandle, SessionId,
+    SessionKind, SessionSnapshot, SessionSpec, SessionState,
 };
 
 /// How long a released pooled session stays idle before it closes (HV-SESS-01).
@@ -303,7 +303,17 @@ struct State {
     /// unticked "allow public plaintext"): a connect started before it never brings the consent
     /// back when it lands (T15 re-review R1).
     consent_gen: u64,
+    // ## m2b-t22-live
+    /// Where the enforcement gaps of the sessions this manager starts go (the
+    /// `ConnectionManager` relays them as `ConnectionEvent::EnforcementGap`; its monitor
+    /// already relays the default session's).
+    gap_sink: Option<GapSink>,
 }
+
+// ## m2b-t22-live
+/// Receives a session's enforcement gap (T17 carry: a pooled read-only session's gap reaches
+/// the app as the default session's does).
+pub(crate) type GapSink = Arc<dyn Fn(hacivat_guard::GapReason) + Send + Sync>;
 
 /// A `pooled` request waiting for a released session or a permit, whichever comes first.
 struct Waiter {
@@ -480,6 +490,7 @@ impl SessionManager {
                 waiting: HashMap::new(),
                 next_waiter: 0,
                 consent_gen: 0,
+                gap_sink: None,
             }),
             default_lock: tokio::sync::Mutex::new(()),
             me: me.clone(),
@@ -808,7 +819,11 @@ impl SessionManager {
             as_default,
             Hooked::default(),
         ) {
-            Ok(handle) => Ok(handle),
+            Ok(handle) => {
+                // ## m2b-t22-live: no monitor watches this session; its gaps go to the sink.
+                self.forward_gaps(&handle);
+                Ok(handle)
+            }
             Err(live) => {
                 live.close().await;
                 Err(closed())
@@ -1195,6 +1210,56 @@ impl SessionManager {
         // permit is already back.
         self.register(spec, profile, live, permit, epoch, true, hooked)
             .map_err(|live| (live, None))
+    }
+
+    // ## m2b-t22-live
+    /// Sends the enforcement gaps of every session this manager starts from now on (pooled,
+    /// dedicated, a single-mode default it reopens) to `sink`. The `ConnectionManager` sets it
+    /// as it builds the manager; the default session it adopts is relayed by its own monitor.
+    pub(crate) fn relay_gaps(&self, sink: GapSink) {
+        self.lock().gap_sink = Some(sink);
+    }
+
+    /// Forwards `handle`'s enforcement gaps to the sink until the session ends. A gap is
+    /// emitted before the session publishes `Broken` (T17 I10), so what is still queued when
+    /// it ends is drained first.
+    fn forward_gaps(&self, handle: &SessionHandle) {
+        use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+
+        let Some(sink) = self.lock().gap_sink.clone() else {
+            return;
+        };
+        let mut events = handle.events();
+        let mut state = handle.state();
+        self.rt.spawn(async move {
+            let relay = |event: SessionEvent| {
+                if let SessionEvent::EnforcementGap(reason) = event {
+                    sink(reason);
+                }
+            };
+            loop {
+                tokio::select! {
+                    biased;
+                    event = events.recv() => match event {
+                        Ok(event) => relay(event),
+                        Err(RecvError::Lagged(_)) => {}
+                        Err(RecvError::Closed) => return,
+                    },
+                    changed = state.changed() => {
+                        if changed.is_ok() && usable(&state.borrow_and_update().state) {
+                            continue;
+                        }
+                        loop {
+                            match events.try_recv() {
+                                Ok(event) => relay(event),
+                                Err(TryRecvError::Lagged(_)) => {}
+                                Err(_) => return,
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// Closes every parked pooled session (fix round 1, review M6): their SSH chain died, so

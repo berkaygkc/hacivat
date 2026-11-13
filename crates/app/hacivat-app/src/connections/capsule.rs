@@ -5,23 +5,38 @@
 //! "No connection" next to a connected capsule. The helpers here (environment marks and words,
 //! the engine label, the encryption fact) are shared by the explorer, the sheet and the status
 //! bar.
+//!
+//! M2b (Task 22, NOTES M2a §7 and M2b surfaces 6–7):
+//! - **Reconnecting** shows the attempt and, between attempts, a countdown to the next one
+//!   (the GPUI executor clock, `live::reconnect_seconds`).
+//! - **Access** says how read-only is held: `hv-conn-access-ro-enforced` when the server role
+//!   enforces it, `hv-conn-access-ro-guarded` otherwise (B21). The segment opens the read-only
+//!   explanation (`access_popover`), as does `connection.explain_access`.
+//! - **SSH path**: `hv-conn-path-ssh` with the bastion (the last hop) and the latency.
+//! - **Idle**: after an idle disconnect the capsule keeps the profile and says so; its body
+//!   connects again (B18, NOTES M2b open question 5).
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_driver::Support;
 use hacivat_l10n::{Count, ExactDecimal, MsgRef, NoArgs, Text, ids};
 use hacivat_net::{AddressClass, TlsVerified};
 use hacivat_proto::{AccessLabel, DbmsKind, EnvTag, ProfileId};
-use hacivat_session::profile::{Profile, ProfileEndpoint};
-use hacivat_session::{LiveInfo, LiveState};
+use hacivat_session::profile::{Profile, ProfileEndpoint, TransportSpec};
+use hacivat_session::{LiveInfo, LiveState, PathKind};
+use hacivat_ui::actions::{ActionDef, ActionRegistry};
 use hacivat_ui::capsule::{CapsuleModel, CapsuleSegment, EnvKind};
 use hacivat_ui::explain::ExplainPopover;
 use hacivat_ui::icon::IconName;
-use hacivat_ui_core::gpui_surface::{App, Pixels, Point, SharedString, Window, point, px};
+use hacivat_ui_core::gpui_surface::{
+    App, Bounds, Pixels, Point, SharedString, Window, point, px, size,
+};
 
 use crate::connections::error_view::open_error_dialog;
-use crate::connections::live::{clock_seconds, note_started};
+use crate::connections::live::{clock_seconds, note_started, reconnect_seconds};
 use crate::connections::model::ConnectionsModel;
+use crate::connections::{access_popover, session_toasts};
 use crate::l10n_global::tr;
 use crate::shell::Workspace;
 
@@ -150,6 +165,65 @@ pub fn is_read_only(info: &LiveInfo) -> bool {
     info.access != AccessLabel::ReadWrite
 }
 
+// ## m2b-t22-live
+
+/// How a live connection's access reads in the capsule, the status bar and the popover (B21):
+/// read-write, read-only enforced by the server's role, or only guarded by Hacivat.
+pub fn access_label(cx: &App, access: AccessLabel) -> SharedString {
+    let id = match access {
+        AccessLabel::ReadWrite => ids::hv::CAPSULE_ACCESS_READ_WRITE,
+        AccessLabel::ReadOnlyEnforced => ids::hv::CONN_ACCESS_RO_ENFORCED,
+        AccessLabel::ReadOnlyGuarded => ids::hv::CONN_ACCESS_RO_GUARDED,
+    };
+    tr(cx, id, NoArgs)
+}
+
+/// The SSH host a profile's database is reached from: the last hop (the bastion).
+fn profile_bastion(p: &Profile) -> Option<String> {
+    match &p.transport {
+        TransportSpec::SshTunnel(ssh) => ssh.hops.last().map(|h| h.host.clone()),
+        _ => None,
+    }
+}
+
+/// The path of `p` (the capsule, the status bar and the sheet): `SSH via <bastion>` through a
+/// tunnel (the live connection's bastion, else the profile's last hop), else Direct; and
+/// whether it is direct.
+pub fn path_label(cx: &App, p: &Profile, info: Option<&LiveInfo>) -> (SharedString, bool) {
+    let bastion = match info {
+        Some(info) if info.path == PathKind::Ssh => Some(
+            info.via
+                .clone()
+                .or_else(|| profile_bastion(p))
+                .unwrap_or_default(),
+        ),
+        Some(_) => None,
+        None => profile_bastion(p),
+    };
+    match bastion {
+        Some(host) => (
+            tr(
+                cx,
+                ids::hv::CONN_PATH_SSH,
+                ids::hv::HvConnPathSsh { host: Text(host) },
+            ),
+            false,
+        ),
+        None => (tr(cx, ids::hv::CAPSULE_PATH_DIRECT, NoArgs), true),
+    }
+}
+
+/// The reconnect label (`Reconnecting · attempt n`).
+pub fn reconnecting_label(cx: &App, attempt: u32) -> SharedString {
+    tr(
+        cx,
+        ids::hv::CAPSULE_RECONNECTING,
+        ids::hv::HvCapsuleReconnecting {
+            n: Count(u64::from(attempt)),
+        },
+    )
+}
+
 fn step_label(cx: &App, step: hacivat_session::pipeline::TrailStep) -> SharedString {
     // ## m2a-t21-shots: the trail's own step names (`hv-conn-step-*`).
     crate::connections::report::step_label(&crate::connections::report::Fmt::ui(cx), step).into()
@@ -176,6 +250,14 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
     let env_label = capsule_env_label(cx, p.environment);
     let name: SharedString = p.name.clone().into();
     match m.live(p.id) {
+        // ## m2b-t22-live: an idle disconnect keeps the profile in the capsule.
+        LiveState::Disconnected if session_toasts::is_idle(cx, p.id) => Some(CapsuleModel::Idle {
+            env,
+            env_label,
+            name,
+            engine: engine_label(&p, None),
+            label: tr(cx, ids::hv::CONN_IDLE_CAP, NoArgs),
+        }),
         LiveState::Disconnected => None,
         LiveState::Connecting(progress) => Some(CapsuleModel::Connecting {
             env,
@@ -191,19 +273,17 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
         }),
         LiveState::Connected(info) => {
             let read_only = is_read_only(&info);
+            // ## m2b-t22-live: the honest access label (B21) and the SSH path.
+            let (path, direct) = path_label(cx, &p, Some(&info));
             Some(CapsuleModel::Connection {
                 env,
                 env_label,
                 name,
                 engine: engine_label(&p, Some(&info)),
-                access: if read_only {
-                    tr(cx, ids::hv::CAPSULE_ACCESS_READ_ONLY, NoArgs)
-                } else {
-                    tr(cx, ids::hv::CAPSULE_ACCESS_READ_WRITE, NoArgs)
-                },
+                access: access_label(cx, info.access),
                 read_only,
-                path: tr(cx, ids::hv::CAPSULE_PATH_DIRECT, NoArgs),
-                direct: true,
+                path,
+                direct,
                 latency: Some(latency_label(cx, &info)),
                 unencrypted: is_unencrypted(&p, &info)
                     .then(|| tr(cx, ids::hv::CONN_ENC_UNENCRYPTED, NoArgs)),
@@ -218,14 +298,25 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
             name,
             retry: tr(cx, ids::hv::CAPSULE_RETRY, NoArgs),
         }),
-        // ## m2b-t01-interfaces: Task 22 gives it its own label and the next attempt.
-        LiveState::Reconnecting { .. } => Some(CapsuleModel::Reconnecting {
+        // ## m2b-t22-live: the attempt, and between attempts the countdown to the next.
+        LiveState::Reconnecting { attempt, next_in } => Some(CapsuleModel::Reconnecting {
             env,
             env_label,
             name,
             engine: engine_label(&p, None),
-            label: tr(cx, ids::hv::CAPSULE_CONNECTING, NoArgs),
-            next: None,
+            label: reconnecting_label(cx, attempt),
+            next: next_in
+                .map(|next| reconnect_seconds(cx, p.id, attempt, next))
+                .filter(|seconds| *seconds > 0)
+                .map(|seconds| {
+                    tr(
+                        cx,
+                        ids::hv::CAPSULE_NEXT,
+                        ids::hv::HvCapsuleNext {
+                            seconds: Count(seconds),
+                        },
+                    )
+                }),
         }),
     }
 }
@@ -242,10 +333,13 @@ pub fn on_segment(
         CapsuleSegment::Body => open_failure(window, cx),
         CapsuleSegment::Retry => retry(cx),
         CapsuleSegment::Unencrypted => explain_unencrypted(anchor, window, cx),
+        // ## m2b-t22-live: the read-only explanation under the segment.
+        CapsuleSegment::Access => explain_access(segment_bounds(anchor, cx), window, cx),
     }
 }
 
-/// Opens the error dialog of the current profile's failed connect; a lost one reconnects.
+/// Opens the error dialog of the current profile's failed connect; a lost one reconnects, and
+/// so does one disconnected while idle (B18: it reconnects when used).
 fn open_failure(window: &mut Window, cx: &mut App) {
     let Some(p) = current_profile(cx) else {
         return;
@@ -254,6 +348,11 @@ fn open_failure(window: &mut Window, cx: &mut App) {
         LiveState::Failed(error) => open_error_dialog(p.id, error, window, cx),
         // A lost connection has no connect error to show: the body retries, like Retry.
         LiveState::Lost { .. } => retry(cx),
+        // ## m2b-t22-live
+        LiveState::Disconnected if session_toasts::is_idle(cx, p.id) => {
+            note_started(cx, p.id);
+            ConnectionsModel::connect(cx, p.id, None);
+        }
         _ => {}
     }
 }
@@ -335,6 +434,55 @@ pub fn explain_unencrypted_from_keyboard(window: &mut Window, cx: &mut App) {
     let t = hacivat_ui_core::theme::Theme::get(cx).tokens;
     let anchor = point(size.width / 2.0 - px(150.0), px(t.spacing.titlebar_height));
     explain_unencrypted(anchor, window, cx);
+}
+
+// ## m2b-t22-live
+
+/// The bounds of a capsule segment whose bottom-left is `anchor` (the segment hook reports
+/// only that corner): the capsule's height above it.
+fn segment_bounds(anchor: Point<Pixels>, cx: &App) -> Bounds<Pixels> {
+    let t = hacivat_ui_core::theme::Theme::get(cx).tokens;
+    let h = px(t.spacing.control_height);
+    Bounds {
+        origin: point(anchor.x, anchor.y - h),
+        size: size(px(1.0), h),
+    }
+}
+
+/// Whether the capsule's connection is live and read-only (its access can be explained).
+pub fn has_access_explanation(cx: &App) -> bool {
+    current_profile(cx).is_some_and(|p| access_popover::facts_for(cx, p.id).is_some())
+}
+
+/// Opens the read-only explanation of the capsule's connection under `trigger`.
+pub fn explain_access(trigger: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    if let Some(p) = current_profile(cx) {
+        access_popover::open(p.id, trigger, window, cx);
+    }
+}
+
+/// The keyboard path to the explanation (`connection.explain_access`): under the title bar's
+/// middle, where the capsule sits (as `explain_unencrypted_from_keyboard`).
+pub fn explain_access_from_keyboard(window: &mut Window, cx: &mut App) {
+    let viewport = window.viewport_size();
+    let t = hacivat_ui_core::theme::Theme::get(cx).tokens;
+    let trigger = Bounds {
+        origin: point(viewport.width / 2.0 - px(150.0), px(0.0)),
+        size: size(px(1.0), px(t.spacing.titlebar_height - 6.0)),
+    };
+    explain_access(trigger, window, cx);
+}
+
+/// Registers `connection.explain_access` (the palette's "Explain read-only access", NOTES M2b
+/// surface 6), enabled while the capsule shows a live read-only connection.
+pub fn register(cx: &mut App) {
+    let _ = cx.default_global::<ActionRegistry>().register(ActionDef {
+        id: "connection.explain_access",
+        title_id: ids::hv::CMD_CONNECTION_EXPLAIN_ACCESS.id,
+        context: "Workspace",
+        run: Rc::new(explain_access_from_keyboard),
+        enabled: has_access_explanation,
+    });
 }
 
 // ## m2a-t18-explorer: shots fixtures (R28, P19)

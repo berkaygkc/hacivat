@@ -6,8 +6,9 @@
 //! - **Groups** follow `EnvTag::severity_rank`, then "No environment" last (R31), each with a
 //!   small-caps header and its count.
 //! - **Rows** (23 px): the engine glyph, the name, the environment mark, flags (a read-only lock,
-//!   red only on production; lock-open while the live connection is plaintext), then the live
-//!   state (✓ and latency, the run marker, or ⚠) and the engine on the right.
+//!   red only on production; the route through an SSH tunnel; lock-open while the live
+//!   connection is plaintext), then the live state (✓ and latency, the run marker, ⚠, or the
+//!   unplug glyph after an idle disconnect) and the engine on the right.
 //! - **Selection** is `blue-tint` with a 1 px blue edge. The list registers the key context
 //!   `Explorer` (R20, P4): its bindings (Enter, ⌘E, ⌘D, ⌘⇧C, ⌫, Shift-F10) act on the
 //!   selection; ↑/↓ move it here. Focusing the list with nothing selected selects the first
@@ -27,7 +28,7 @@ use std::sync::Arc;
 use hacivat_l10n::{MatchMode, NoArgs, PreparedQuery, SearchOpts, build_key, ids};
 use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
 use hacivat_session::LiveState;
-use hacivat_session::profile::{Profile, ProfileEndpoint};
+use hacivat_session::profile::{Profile, ProfileEndpoint, TransportSpec};
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::capsule::env_swatch;
@@ -48,6 +49,7 @@ use hacivat_ui_core::theme::{Theme, ThemeMode, TypeStyle};
 use crate::commands::palette::search_opts;
 use crate::connections::capsule::{engine_label, env_kind, is_unencrypted, latency_label};
 use crate::connections::model::ConnectionsModel;
+use crate::connections::session_toasts;
 use crate::l10n_global::{text_fn, tr};
 use crate::shell::hooks::ShellHooks;
 use crate::shell::keymap_state::shortcut_label;
@@ -602,6 +604,19 @@ impl ExplorerView {
                     .color(ink.to_hsla()),
             );
         }
+        // ## m2b-t22-live: the SSH route flag (NOTES M2a §8, M2b surface 7).
+        if matches!(p.transport, TransportSpec::SshTunnel(_)) {
+            row = row.child(
+                div()
+                    .debug_selector(move || format!("explorer-row-route-{index}"))
+                    .flex_none()
+                    .child(
+                        Icon::new(IconName::Route)
+                            .size(IconSize::Chrome)
+                            .color(c.text_2.to_hsla()),
+                    ),
+            );
+        }
         if let Some(info) = &info
             && is_unencrypted(p, info)
         {
@@ -653,6 +668,19 @@ impl ExplorerView {
                             .size(IconSize::Chrome)
                             .color(c.text.to_hsla()),
                     ),
+                );
+            }
+            // ## m2b-t22-live: disconnected while idle (B18).
+            LiveState::Disconnected if session_toasts::is_idle(cx, id) => {
+                meta = meta.child(
+                    div()
+                        .debug_selector(move || format!("explorer-row-idle-{index}"))
+                        .flex_none()
+                        .child(
+                            Icon::new(IconName::Unplug)
+                                .size(IconSize::Chrome)
+                                .color(c.text_3.to_hsla()),
+                        ),
                 );
             }
             LiveState::Disconnected => {}

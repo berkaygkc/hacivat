@@ -13,8 +13,8 @@ use std::rc::Rc;
 use hacivat_ui_core::fonts::{font_for, small_caps_glyphs, small_caps_tracking_px};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, Bounds, ContentMask, Context, Element, ElementId,
-    Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
-    ParentElement, Pixels, Point, Render, ShapedLine, SharedString,
+    FontStyle, Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement,
+    LayoutId, ParentElement, Pixels, Point, Render, ShapedLine, SharedString,
     StatefulInteractiveElement as _, Style, Styled, TextAlign, TextRun, UnderlineStyle, Window,
     canvas, div, point, px, relative,
 };
@@ -174,6 +174,8 @@ pub struct Label {
     highlight: Vec<Range<usize>>,
     highlight_color: Option<Hsla>,
     location: &'static Location<'static>,
+    // ## m2b-t22-live
+    italic: bool,
 }
 
 impl Label {
@@ -194,7 +196,16 @@ impl Label {
             highlight: Vec::new(),
             highlight_color: None,
             location: Location::caller(),
+            italic: false,
         }
+    }
+
+    // ## m2b-t22-live
+    /// Draws the text in the family's italic face (the placeholders and comments of the SQL
+    /// inset, NOTES M2b surface 6). Not applied to synthesized small caps.
+    pub fn italic(mut self, italic: bool) -> Self {
+        self.italic = italic;
+        self
     }
 
     /// Ellipsize with `…` instead of overflowing; the full text becomes the tooltip.
@@ -364,7 +375,10 @@ pub(crate) fn fitting_prefix(
 
 impl LabelElement {
     fn runs(&self, text_len: usize, highlight: &[Range<usize>]) -> Vec<TextRun> {
-        let font = font_for(&self.label.style);
+        let mut font = font_for(&self.label.style);
+        if self.label.italic {
+            font.style = FontStyle::Italic;
+        }
         let run = |len, underline: Option<UnderlineStyle>| TextRun {
             len,
             font: font.clone(),

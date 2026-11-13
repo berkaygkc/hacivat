@@ -939,3 +939,126 @@ hv-conn-err-refused = { $name } — { $reason ->
 hv-conn-err-attempts-used = All 3 attempts are used. { -brand-hacivat } won't send another password, so the account isn't locked.
 # Under the connection dialog's Password field after 3 rejected passwords: how to try again.
 hv-conn-dlg-attempts-used = No attempts left for this server. To try again, change the host, port or user, or reopen this dialog.
+
+## m2b-t22-live
+
+# The capsule while a lost connection reconnects (B19): the attempt under way.
+# Variables:
+#   $n (Number) - the attempt, from 1, e.g. 3.
+hv-capsule-reconnecting = Reconnecting · attempt { $n }
+# The capsule between two reconnect attempts: when the next one starts.
+# Variables:
+#   $seconds (Number) - whole seconds until the next attempt, e.g. 4.
+hv-capsule-next = in { $seconds } s
+# The path of a connection through an SSH tunnel (the capsule, the status bar and the sheet).
+# Variables:
+#   $host (String) - the SSH host the database is reached from (the last hop), e.g. "bastion.acme.io".
+hv-conn-path-ssh = SSH via { $host }
+# The capsule, the status bar and the explorer after an idle disconnect (B18).
+hv-conn-idle-cap = Disconnected (idle)
+# Toast after an idle disconnect whose threshold is a whole number of hours.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+#   $hours (Number) - the idle threshold in hours, e.g. 4.
+hv-conn-idle-disconnected = Disconnected { $name } after { $hours } h idle. It reconnects when you use it.
+# Toast after an idle disconnect whose threshold is not a whole number of hours.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+#   $minutes (Number) - the idle threshold in minutes, e.g. 90.
+hv-conn-idle-disconnected-minutes = Disconnected { $name } after { $minutes } min idle. It reconnects when you use it.
+# Toast when a transaction has stayed open and idle for the connection's idle threshold.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+#   $minutes (Number) - how long it has been idle, in minutes, e.g. 60.
+hv-conn-idle-tx = A transaction on { $name } has been open and idle for { $minutes } min. It holds its locks until you commit it or roll it back.
+# The sticky toast after a lost server session (D-085, B19): its title.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+#   $state (Enum(reconnected, lost)) - reconnected: Hacivat opened a new session on its own; lost: it did not, because work was in progress.
+hv-conn-lost-title = { $state ->
+        [reconnected] Reconnected to { $name }
+       *[lost] The session on { $name } was lost
+    }
+# The toast's first line.
+# Variables:
+#   $state (Enum(reconnected, lost)) - as in hv-conn-lost-title.
+hv-conn-lost-body = { $state ->
+        [reconnected] The server session ended, so { -brand-hacivat } opened a new one.
+       *[lost] The server session ended while work was in progress, so { -brand-hacivat } didn't reconnect on its own. Retry connects again.
+    }
+# A line of the toast, only when a transaction was open.
+hv-conn-lost-tx = Your open transaction ended, and the server rolled back its uncommitted changes.
+# A line of the toast: what else the old session held.
+# Variables:
+#   $items (List) - what was lost, each an hv-conn-lost-item-* message, e.g. "temporary tables".
+hv-conn-lost-other = Also gone: { $items }
+hv-conn-lost-item-temp = temporary tables
+hv-conn-lost-item-vars = session variables
+# Variables:
+#   $count (Number) - how many prepared statements were lost, e.g. 2.
+hv-conn-lost-item-prepared = { $count ->
+        [one] a prepared statement
+       *[other] { $count } prepared statements
+    }
+hv-conn-lost-item-locks = session locks
+hv-conn-lost-details = Show details
+hv-conn-lost-dismiss = Dismiss
+# The sticky alert after the read-only guard stopped a statement (Q35): its title.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-conn-gap-title = Read-only guard on { $name }
+# The alert's line when the statement ended the guard's read-only transaction.
+hv-conn-gap-tx-ended = { -brand-hacivat } stopped a statement that ended the read-only transaction on a read-only connection and closed that session.
+# The alert's line when the statement changed data.
+hv-conn-gap-changed-data = { -brand-hacivat } stopped a statement that changed data on a read-only connection and closed that session.
+# A read-only connection whose role the server limits to reading (B21; the capsule, the status bar and the popover).
+hv-conn-access-ro-enforced = read-only (enforced by server role)
+# The sheet's short forms of the access labels (they fit its narrow value column).
+hv-conn-ro-sheet-enforced = read-only · enforced
+hv-conn-ro-sheet-guarded = read-only · guarded
+# The read-only explanation popover (NOTES M2b surface 6).
+hv-conn-ro-pop-enf-title = Read-only, enforced by the server
+# Variables:
+#   $user (String) - the role the connection signs in as, e.g. "app_ro".
+hv-conn-ro-pop-enf-body = The role { $user } can only read here. The server itself refuses writes, whatever runs in { -brand-hacivat }.
+hv-conn-ro-pop-enf-temp = TEMP alone doesn't weaken enforcement, so the label stays enforced.
+hv-conn-ro-pop-g-title = Read-only is guarded, not enforced
+# Variables:
+#   $user (String) - the role the connection signs in as, e.g. "qa".
+hv-conn-ro-pop-g-body = The role { $user } isn't limited to reading here, so { -brand-hacivat } stops writes itself: it checks every statement and runs it read-only.
+hv-conn-ro-pop-g-limit = That catches mistakes. Only a read-only role on the server is a hard guarantee.
+hv-conn-ro-pop-g-fix = To enforce it, ask your DBA for a role like this, then make it this connection's user:
+hv-conn-ro-pop-maria-body = { -brand-hacivat } can't yet confirm that a MariaDB role is read-only, so it always guards MariaDB connections itself.
+hv-conn-ro-pop-no-fix = No role change makes this label enforced, so there is no SQL to copy.
+hv-conn-ro-pop-sqlite-body = SQLite has no server roles. { -brand-hacivat } opens the file read-only and lets through only statements that read.
+hv-conn-ro-copy-sql = Copy SQL
+# Toast after Copy SQL.
+hv-conn-ro-copied = Copied the SQL. Replace the values in angle brackets before you run it.
+# The lead of the role probe's findings, then one line each.
+hv-conn-ro-warn-head = Found on this role:
+hv-conn-ro-warn-superuser = It is a superuser.
+hv-conn-ro-warn-bypass-rls = It bypasses row-level security.
+hv-conn-ro-warn-replication = It can start replication.
+hv-conn-ro-warn-create-role = It can create and change roles.
+hv-conn-ro-warn-server-file-roles = It can read or write files on the database server.
+hv-conn-ro-warn-execute-server-program = It can run programs on the database server.
+hv-conn-ro-warn-signal-backend = It can cancel or end other sessions.
+hv-conn-ro-warn-write-privileges = It can change data in some tables.
+hv-conn-ro-warn-temp-privilege = It can create temporary tables, which read-only transactions block.
+# Variables:
+#   $name (String) - the extension's name, from the probe's fixed list, e.g. "dblink".
+hv-conn-ro-warn-egress-extension = The { $name } extension can reach other servers.
+hv-conn-ro-warn-role-grant-not-expanded = Other roles are granted to it, and { -brand-hacivat } can't see what they allow.
+hv-conn-ro-warn-unparsed = { -brand-hacivat } couldn't read its privileges.
+# The palette command that opens the read-only explanation of the current connection.
+hv-cmd-connection-explain-access = Explain read-only access
+# Debug builds only (Q39): the cancel demo's palette commands and its result.
+hv-cmd-debug-run-pg-sleep = Debug: run SELECT pg_sleep(30) on the current connection
+hv-cmd-debug-cancel = Debug: cancel the demo statement
+# Variables:
+#   $outcome (Enum(done, cancelled, failed)) - how the demo statement ended.
+hv-debug-demo-result = { $outcome ->
+        [done] The demo statement finished.
+        [cancelled] The demo statement was cancelled.
+       *[failed] The demo statement failed.
+    }
