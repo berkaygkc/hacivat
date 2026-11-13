@@ -624,6 +624,12 @@ fn issue_sentence(f: &Fmt, code: &IssueCode) -> String {
                 },
             );
         }
+        // m2b: the SSH and legacy-key issues, worded as in the dialog (`dialog::form`).
+        IssueCode::SshHostMissing => ids::hv::CONN_ISSUE_SSH_HOST_MISSING,
+        IssueCode::SshUserMissing => ids::hv::CONN_ISSUE_SSH_USER_MISSING,
+        IssueCode::SshTooManyHops => ids::hv::CONN_ISSUE_SSH_TOO_MANY_HOPS,
+        IssueCode::SshKeyFileMissing => ids::hv::CONN_ISSUE_SSH_KEY_FILE_MISSING,
+        IssueCode::TlsKeyLegacyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_LEGACY_ENCRYPTED,
     };
     f.t(msg, NoArgs)
 }
