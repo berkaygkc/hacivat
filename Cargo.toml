@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/ui/*", "crates/core/*", "crates/app/*", "crates/bin/*", "xtask", "spikes/*"]
-# M2b (Task 1, Q29): the vendored `mysql_async` is a `[patch]` path crate, never a member.
+members = ["crates/ui/*", "crates/core/*", "crates/sql/*", "crates/app/*", "crates/bin/*", "xtask", "spikes/*"]
+# M2b (Task 1, Q29): the vendored `mysql_async` is a `[patch]` path crate, never a member;
+# so is the vendored `pg_query` (M3a Task 1a, P1).
 exclude = ["third_party"]
 
 [workspace.package]
@@ -19,11 +20,12 @@ disallowed_methods = "deny"
 
 [workspace.dependencies]
 # GPUI pin: the zed fork berkaygkc/zed, branch hacivat/912159c, which is zed-industries/zed @ 912159c
-# plus the carried IME patch (R1; see crates/ui/hacivat-ui-core/patches/README.md).
+# plus the carried IME patches (R1) and the TestScheduler lock-order patch (R-M3-13); see
+# crates/ui/hacivat-ui-core/patches/README.md.
 # Only crates/ui/hacivat-ui-core may depend on these
 # (crates/ui and crates/app may add `gpui` with `test-support` as a dev-dependency, F1).
-gpui = { git = "https://github.com/berkaygkc/zed", rev = "a1eaa20480d5bfe62e21ab1248e3900232dab92b" }
-gpui_platform = { git = "https://github.com/berkaygkc/zed", rev = "a1eaa20480d5bfe62e21ab1248e3900232dab92b", features = ["font-kit", "wayland", "x11"] }
+gpui = { git = "https://github.com/berkaygkc/zed", rev = "6607045170abc9654afad74be2e868a829744737" }
+gpui_platform = { git = "https://github.com/berkaygkc/zed", rev = "6607045170abc9654afad74be2e868a829744737", features = ["font-kit", "wayland", "x11"] }
 anyhow = "1"
 cargo_metadata = "0.19"
 
@@ -47,6 +49,8 @@ hacivat-session = { path = "crates/core/hacivat-session" }
 hacivat-testkit = { path = "crates/core/hacivat-testkit" }
 # M2b (Task 1): the sans-I/O read-only guard.
 hacivat-guard = { path = "crates/core/hacivat-guard" }
+# M3a (Task 1a): the PostgreSQL parser oracle (libpg_query; R-M3-1).
+sql-oracle-pg = { path = "crates/sql/sql-oracle-pg" }
 
 # Localization (Fluent + ICU4X 2.4).
 fluent-bundle = "0.16.0"
@@ -126,6 +130,11 @@ regex = "1"
 # Test certificates; its default crypto backend is ring.
 rcgen = "0.14"
 
+# M3a (Task 1a): SQL text. `pg_query` is the vendored third_party/pg_query (see
+# `[patch.crates-io]`); only `sql-oracle-pg` may depend on it (`BackendOutsideOwner`).
+pg_query = "=18.1.0"
+text-size = "1.1.1"
+
 # M2b secure network and sessions (Task 1). SSH uses ring, never aws-lc (Q28): no default
 # features, so russh's `aws-lc-rs` default is off.
 russh = { version = "0.65.1", default-features = false, features = ["ring", "rsa", "flate2"] }
@@ -147,6 +156,9 @@ tracing-log = "0.2"
 [patch.crates-io]
 # M2b (Task 1, Q2, Q29): Hacivat's patched copy (third_party/mysql_async/PATCHES.md).
 mysql_async = { path = "third_party/mysql_async" }
+# M3a (Task 1a, R-M3-1, P1): no protobuf regeneration in `build.rs`
+# (third_party/pg_query/PATCHES.md), so a `protoc` on PATH never rewrites the source.
+pg_query = { path = "third_party/pg_query" }
 # zed Cargo.toml:1045
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 # zed Cargo.toml:1046
@@ -159,3 +171,7 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# M3a (Task 1a): libpg_query's C code at -O1 in debug builds; tests parse a lot of SQL.
+[profile.dev.package.pg_query]
+opt-level = 1
