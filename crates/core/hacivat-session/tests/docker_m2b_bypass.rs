@@ -1,7 +1,8 @@
 //! M2b conformance over Docker (Task 23; exit criterion E4; Review Focus 4): the SQL-SAFE-06
 //! bypass catalogue against real servers with no classifier. Hacivat has none in M2b: the
 //! session runs every read-only statement through the guard (Task 18) — the transaction-keyword
-//! layer 1a, the read-only transaction (L3), the session settings (L4), the least-privilege
+//! layer 1a, the refusal of calls no rollback undoes (1b, finding F1), the read-only
+//! transaction (L3), the session settings (L4), the least-privilege
 //! principal (L5), the post-checks and the reset (L6). Each row must be stopped by those layers,
 //! or neutralised by the request's end, and a side channel (an admin connection, or the session
 //! itself after the request) must find nothing left. Run with `cargo xtask docker test --set
@@ -34,10 +35,10 @@ use std::sync::Arc;
 
 use common::conformance::*;
 use hacivat_proto::{AccessLabel, DbmsKind};
-use hacivat_session::LiveState;
 use hacivat_session::pipeline::{Interaction, LiveConnection, connect};
 use hacivat_session::profile::Profile;
 use hacivat_session::session::{DenyLayer, ExecErrorKind, Reply};
+use hacivat_session::{LiveState, RoleWarning};
 use hacivat_testkit::{DockerTarget, targets};
 
 // ---------------------------------------------------------------------------------------------
@@ -150,8 +151,59 @@ const PG_NEUTRALISED: &[(&str, &str)] = &[
     ("P26", "DECLARE hv_t23_c CURSOR WITH HOLD FOR SELECT 1"),
 ];
 
+// ## m2b-t23-f1
+/// The guard's text layer refused a call no rollback undoes, before any I/O (1b).
+const FUNCTION: &str = "function";
+
+/// Task 23 finding F1, run as `hv_ro` while `PUBLIC` still holds `EXECUTE` on
+/// `pg_logical_emit_message` (every cluster's default): the label must be guarded
+/// (`NonTransactionalWrite`), and the guard's text layer refuses the call in every spelling, so
+/// nothing reaches the server.
+const PG_NON_TRANSACTIONAL_TEXT: &[Row] = &[
+    (
+        "P32",
+        "SELECT pg_logical_emit_message(false, 'hv_t23', 'x')",
+        &[FUNCTION],
+    ),
+    (
+        "P32",
+        "SELECT pg_catalog.pg_logical_emit_message(false, 'hv_t23', 'x'::bytea)",
+        &[FUNCTION],
+    ),
+    (
+        "P32",
+        "SELECT \"pg_catalog\".\"pg_logical_emit_message\"(false, 'hv_t23', 'x')",
+        &[FUNCTION],
+    ),
+    (
+        "P32",
+        "SELECT PG_LOGICAL_EMIT_MESSAGE /* c */ (false, 'hv_t23', 'x')",
+        &[FUNCTION],
+    ),
+    (
+        "P32",
+        "SELECT U&\"pg\\005flogical_emit_message\"(false, 'hv_t23', 'x')",
+        &[FUNCTION],
+    ),
+    (
+        "P32",
+        "DO $$ BEGIN PERFORM pg_logical_emit_message(false, 'hv_t23', 'x'); END $$",
+        &[FUNCTION],
+    ),
+    (
+        "P32",
+        "SELECT pg_logical_emit_message(true, 'hv_t23', 'x')",
+        &[FUNCTION],
+    ),
+];
+
 /// Rows the read-only transaction does not stop: only the principal's privileges (L5) do. Run
 /// as `hv_ro` only. P11 P13 P14 (read, `COPY TO` a file) P16 P31 P32 P33 P34.
+///
+/// ## m2b-t23-f1: the guard's text layer (1b) refuses a direct call of a function no rollback
+/// undoes (`function`); SQL built at run time gets past it and meets `hv_ro`'s missing
+/// privilege (after the remediation's `REVOKE` of `pg_logical_emit_message`), which is why the
+/// label is enforced only once that `REVOKE` ran.
 const PG_PRIVILEGE_ONLY: &[Row] = &[
     ("P11", "SELECT pg_terminate_backend({victim})", &[PG_PRIV]),
     ("P13", "COPY (SELECT 1) TO PROGRAM 'true'", &[PG_PRIV]),
@@ -162,13 +214,38 @@ const PG_PRIVILEGE_ONLY: &[Row] = &[
     (
         "P31",
         "SELECT pg_create_physical_replication_slot('hv_t23_slot')",
+        &[FUNCTION],
+    ),
+    (
+        "P31",
+        "DO $$ BEGIN EXECUTE 'SELECT pg_create_physical_' || 'replication_slot(''hv_t23_slot'')'; END $$",
         &[PG_PRIV],
     ),
-    ("P32", "SELECT pg_switch_wal()", &[PG_PRIV]),
+    ("P32", "SELECT pg_switch_wal()", &[FUNCTION]),
+    (
+        "P32",
+        "DO $$ BEGIN EXECUTE 'SELECT pg_switch' || '_wal()'; END $$",
+        &[PG_PRIV],
+    ),
     (
         "P32",
         "SELECT pg_logical_emit_message(true, 'hv_t23', 'x')",
-        &[PG_PRIV, PG_RO, GAP],
+        &[FUNCTION],
+    ),
+    (
+        "P32",
+        "SELECT pg_logical_emit_message(false, 'hv_t23', 'x')",
+        &[FUNCTION],
+    ),
+    (
+        "P32",
+        "DO $$ BEGIN EXECUTE 'SELECT pg_logical_' || 'emit_message(true, ''hv_t23'', ''x'')'; END $$",
+        &[PG_PRIV],
+    ),
+    (
+        "P32",
+        "DO $$ BEGIN EXECUTE 'SELECT pg_logical_' || 'emit_message(false, ''hv_t23'', ''x'')'; END $$",
+        &[PG_PRIV],
     ),
     (
         "P33",
@@ -334,6 +411,7 @@ fn outcome(reply: &Reply) -> String {
             ExecErrorKind::Db => code_of(e.server.as_ref()).unwrap_or_else(|| "db".into()),
             ExecErrorKind::ReadOnlyDenied(DenyLayer::Transaction) => "1a".into(),
             ExecErrorKind::ReadOnlyDenied(DenyLayer::Protocol) => "protocol".into(),
+            ExecErrorKind::ReadOnlyDenied(DenyLayer::Function) => FUNCTION.into(),
             ExecErrorKind::EnforcementGap(_) => "gap".into(),
             ExecErrorKind::ConnectionLost { .. } => LOST.into(),
             other => format!("{other:?} {:?}", code_of(e.server.as_ref())),
@@ -505,6 +583,15 @@ impl Ro {
         match self.on.m.state(self.on.id()) {
             LiveState::Connected(info) => Some(info.access),
             _ => None,
+        }
+    }
+
+    // ## m2b-t23-f1
+    /// The role probe's warnings (empty when not connected).
+    fn warnings(&self) -> Vec<RoleWarning> {
+        match self.on.m.state(self.on.id()) {
+            LiveState::Connected(info) => info.access_warnings.clone(),
+            _ => Vec::new(),
         }
     }
 
@@ -687,8 +774,51 @@ async fn pg_server_blocked(
     }
 }
 
+// ## m2b-t23-f1
+/// Task 23 finding F1 on `t`, in `hv_t23` as created (`PUBLIC` holds `EXECUTE` on
+/// `pg_logical_emit_message`, every cluster's default): `hv_ro` reads guarded with
+/// `NonTransactionalWrite`, and the guard refuses every spelling of the call before any I/O.
+/// Then the remediation's optional `REVOKE` for this version (its exact line, so the run also
+/// checks that it is valid here), after which `hv_ro` reads enforced, as the rest of the suite
+/// asserts.
+async fn pg_non_transactional_rows(t: &DockerTarget, a: &mut LiveConnection, record: &mut Record) {
+    let ro = Ro::open(t, "hv_ro", PG_DB).await;
+    let (label, warnings) = (ro.label(), ro.warnings());
+    if label != Some(AccessLabel::ReadOnlyGuarded)
+        || !warnings.contains(&RoleWarning::NonTransactionalWrite)
+    {
+        record.fail(format!(
+            "{} hv_ro with EXECUTE on pg_logical_emit_message: {label:?} {warnings:?}",
+            t.id
+        ));
+    }
+    let baseline = pg_snapshot(a, ro.app()).await;
+    for (id, sql, allowed) in PG_NON_TRANSACTIONAL_TEXT {
+        let reply = ro.try_row(sql).await;
+        let after = pg_snapshot(a, ro.app()).await;
+        let result = judge(&reply, &baseline, &after);
+        let ok = stopped(&result, allowed);
+        record.row(t, "hv_ro (PUBLIC EXECUTE)", id, sql, result, ok);
+    }
+    ro.close().await;
+    batch(a, &t.id, &revoke_emit_message(t)).await;
+    let revoked = Ro::open(t, "hv_ro", PG_DB).await;
+    if revoked
+        .warnings()
+        .contains(&RoleWarning::NonTransactionalWrite)
+    {
+        record.fail(format!(
+            "{} hv_ro after the remediation's REVOKE: {:?}",
+            t.id,
+            revoked.warnings()
+        ));
+    }
+    revoked.close().await;
+}
+
 /// The PostgreSQL rows on `t`: server-blocked as `hv_ro` and as the superuser, directly and
-/// (the `pr` line) through `sshd-a`; neutralised and privilege-only as `hv_ro`.
+/// (the `pr` line) through `sshd-a`; neutralised and privilege-only as `hv_ro`. First (F1) the
+/// calls no rollback undoes, while `PUBLIC` may still run `pg_logical_emit_message`.
 async fn pg_bypass_rows(t: &DockerTarget) -> Record {
     let _one = fixture_lock(t).await;
     pg_fixture(t).await;
@@ -696,6 +826,8 @@ async fn pg_bypass_rows(t: &DockerTarget) -> Record {
     let mut a = admin_on(t, PG_DB).await;
     let search_path = scalar(&mut a, "SHOW search_path").await;
     let checks = pg_linger_checks(&search_path);
+
+    pg_non_transactional_rows(t, &mut a, &mut record).await;
 
     pg_server_blocked(t, Path::Direct, &mut a, &mut record).await;
     let ssh = Path::Ssh("sshd-a");

@@ -7,6 +7,8 @@
 //! - 1: `check_input`, else `ReadOnlyDenied(Input)`;
 //! - 1a: any reading of the first keyword (`guard_keywords`, as the server's lexer reads it)
 //!   is a transaction keyword → `ReadOnlyDenied(Transaction)` (Q35);
+//! - 1b (Task 23 finding F1): PostgreSQL, a call of a function whose effect a rollback does not
+//!   undo (`hacivat_guard::check_functions`) → `ReadOnlyDenied(Function)`;
 //! - 2: the plan's `before` statements (`batch`): if one fails, nothing else runs; then the
 //!   guard's transaction must be open, else a gap and the statement is never sent;
 //! - 3: the user statement, always through the extended protocol (one statement, prepared);
@@ -17,9 +19,9 @@
 //!   is `EnforcementGap(reason)`, and the connection is discarded unreset;
 //! - 8: the connection's reset and the session's environment again (`replay`, Q15).
 //!
-//! If step 3 fails, steps 4 to 8 still run. SQLite runs steps 1 and 1a, then the statement and
-//! the post-check (a tripwire): its layers are connection-level (Task 11), its plan has no
-//! statements and no reset.
+//! If step 3 fails, steps 4 to 8 still run. SQLite runs steps 1, 1a and 1b (which passes every
+//! engine but PostgreSQL), then the statement and the post-check (a tripwire): its layers are
+//! connection-level (Task 11), its plan has no statements and no reset.
 //!
 //! Everything fails closed. The connection is discarded (`Guarded::discard`, which the actor
 //! turns into a broken session) after a gap, a lost connection, a guard statement that failed
@@ -37,8 +39,8 @@ use hacivat_driver::{
 };
 use hacivat_guard::{
     GapReason, PostCheck, PostFacts, ResetKind, RoleFindings, RoleWarning, TxStatusLite,
-    access_label, check_input, check_post, interpret_probe, plan_for, remediation_for,
-    role_probe_sql,
+    access_label, check_functions, check_input, check_post, interpret_probe, plan_for,
+    remediation_for, role_probe_sql,
 };
 use hacivat_proto::{AccessLabel, DbmsKind, ErrClass};
 
@@ -123,6 +125,17 @@ pub(crate) async fn guarded(
     if keywords.controls_transaction() {
         return Guarded::keep(Err(ExecError::of(ExecErrorKind::ReadOnlyDenied(
             DenyLayer::Transaction,
+        ))));
+    }
+    // ## m2b-t23-f1: 1b. A call no rollback undoes (PostgreSQL; a tripwire, the probe's row 6
+    // keeps the label honest).
+    if let Err(violation) = check_functions(kind, sql) {
+        tracing::debug!(
+            ?violation,
+            "a read-only statement calls a non-transactional function"
+        );
+        return Guarded::keep(Err(ExecError::of(ExecErrorKind::ReadOnlyDenied(
+            DenyLayer::Function,
         ))));
     }
     // An engine without a guard plan has no read-only guard: nothing runs.

@@ -442,6 +442,133 @@ aggregate row; MySQL non-ASCII outside quotes; MySQL grant lines with odd whites
 role grants, grant options, partial revokes and a smuggled second statement; labels, including
 self-contradicting findings; the exact remediation strings.
 
+### F1 — calls no rollback undoes (Task 23 finding, controller ruling)
+
+Task 23's bypass suite found that `PUBLIC` may execute `pg_logical_emit_message` on PostgreSQL
+13–18. Its non-transactional form (`pg_logical_emit_message(false, …)`) writes a WAL record at
+once: no `ROLLBACK` undoes it, the canary does not see it, and the read-only transaction does not
+refuse it. `hv_ro`, labelled **Read-only (enforced)**, could do it, so the label claimed more than
+the server enforced (B21). The fix has three parts.
+
+**1. The guard refuses the call before any I/O (`check_functions`, `functions.rs`).** A
+statement of a read-only PostgreSQL session that calls a function of
+`PG_NON_TRANSACTIONAL_FUNCTIONS` is refused as `ReadOnlyDenied(Function)` (Task 18's step 1b,
+after 1a). Every overload of a listed name is refused. The list is the catalogue's functions
+whose effect is outside the transaction, checked on PostgreSQL 13–18 (`pg_proc`, ACLs as
+`hv_ro`):
+
+| Group | Functions | Who may call them by default |
+|---|---|---|
+| WAL records | `pg_logical_emit_message`, `pg_switch_wal`, `pg_create_restore_point`, `pg_log_standby_snapshot` (16+) | `PUBLIC` for `pg_logical_emit_message`; the others are revoked from `PUBLIC` and commonly granted to backup roles |
+| Backup and recovery | `pg_backup_start`, `pg_backup_stop` (15+), `pg_start_backup`, `pg_stop_backup` (to 14), `pg_promote`, `pg_wal_replay_pause`, `pg_wal_replay_resume` | revoked from `PUBLIC`; granted to backup and failover roles |
+| Replication slots | `pg_create_physical_replication_slot`, `pg_create_logical_replication_slot`, `pg_copy_physical_replication_slot`, `pg_copy_logical_replication_slot`, `pg_drop_replication_slot`, `pg_replication_slot_advance`, `pg_logical_slot_get_changes`, `pg_logical_slot_get_binary_changes`, `pg_sync_replication_slots` (17+) | `PUBLIC` may execute them; at run time they refuse a role without `REPLICATION` |
+| Replication origins | `pg_replication_origin_create`, `_drop`, `_advance`, `_session_setup`, `_session_reset`, `_xact_setup`, `_xact_reset` | a superuser check of their own on 13; revoked from `PUBLIC` and grantable from 14 |
+
+Left out on purpose:
+
+- `pg_notify` and `NOTIFY` are transactional (delivered on `COMMIT` only).
+- Advisory locks, `LISTEN` and holdable cursors are released by the reset (L6, neutralised).
+- Large objects, `nextval`/`setval` and `txid_current` are transactional or refused by L3, and
+  the canary catches the rest.
+- `pg_cancel_backend` and `pg_terminate_backend` are signals, not writes. By default they reach
+  only the role's own sessions; other roles' need `pg_signal_backend` (probe row 2).
+- `pg_reload_conf`, `pg_rotate_logfile`, `pg_stat_reset*` and `pg_log_backend_memory_contexts`
+  change no data and write no WAL record. They are superuser-only by default and rarely granted.
+- The read-only functions of the same families stay allowed: `pg_logical_slot_peek_*`, which
+  moves no slot, and `pg_replication_origin_oid`, `_progress`, `_session_progress` and
+  `_session_is_setup`.
+
+The check reads the statement as PostgreSQL's lexer does, closely enough to find a call. A
+call is an identifier that names a listed function, followed by `(` after whitespace and
+comments. The identifier may be unquoted in any case, quoted, or a `U&"…"` identifier with its
+`\XXXX`, `\+XXXXXX` and `UESCAPE` escapes, after any schema qualification.
+
+The text of every string literal is read again as SQL, because a `DO` block, a PL/pgSQL
+`EXECUTE` or `query_to_xml` can run it. That covers `'…'` with doubled quotes and line-break
+continuations, `E'…'` and its escapes, `U&'…'`, and `$tag$…$tag$`. A `'…'` literal that holds a
+backslash is also read with backslash escapes, as it reads where `standard_conforming_strings`
+is off when the text runs.
+
+Comments are skipped, and a name that is not called passes: `WHERE proname =
+'pg_switch_wal'`, a column named so. Failing closed, it refuses:
+
+- a quoted name in another case (`"PG_SWITCH_WAL"()`, another function);
+- a literal that merely looks like a call (`SELECT 'pg_switch_wal()'`);
+- an unterminated literal that holds a call;
+- literals nested deeper than 16 levels, or a statement whose nested literals would take more
+  than 16 MiB of reading (`FunctionViolation::TooComplex`), instead of reading on.
+
+Other engines pass; MySQL's equivalents need privileges outside least privilege, which the
+probe reports.
+
+**It is a tripwire, not a guarantee.** SQL built at run time names no function the check can
+see: `EXECUTE 'SELECT pg_switch' || '_wal()'` in a `DO` block, `format()`, `chr()`. The Docker
+run shows exactly that: the built forms reach the server and meet `42501` only because the
+privilege is missing (`m2b-t23`, P31/P32). So the label cannot rest on this layer.
+
+**2. The probe reports the privilege (row 6, `RoleWarning::NonTransactionalWrite`).** The
+ruling: keep **enforced** only when `EXECUTE` is revoked; otherwise the label is guarded, with
+the warning. Row 6 lists, by name in `pg_proc`, the listed functions whose `EXECUTE` privilege
+is the gate (`PG_EXECUTE_GATED`). It includes `pg_logical_emit_message` and the WAL, backup and
+recovery functions above, plus the origin functions from PostgreSQL 14
+(`current_setting('server_version_num')`). The row returns a function when any role
+`current_user` is a member of may execute it. Any row denies least privilege. A name outside the
+list is `Unparsed`. The slot functions are left out because `PUBLIC` may execute them and
+`REPLICATION` is their gate (row 1).
+
+Rejected: `has_function_privilege(current_user,
+'pg_catalog.pg_logical_emit_message(boolean,text,text)', 'EXECUTE')`. PostgreSQL 17 added a
+`flush` argument, so that signature does not exist on 17 and 18. The probe would fail there,
+`Unparsed`, and so would every role. The `pg_proc` lookup holds every overload of every version.
+
+Validated as `hv_ro` and as the superuser on the matrix's PostgreSQL 13–18 (read-only
+transactions):
+
+- `hv_ro` gets exactly `pg_logical_emit_message` on every line;
+- the superuser gets every function its version has, the origin functions from 14 only;
+- after the version's `REVOKE` (rolled back), `hv_ro` gets nothing.
+
+Consequence: on a default cluster **no PostgreSQL role reads enforced** until `EXECUTE` on
+`pg_logical_emit_message` is revoked from `PUBLIC`. A role granted a backup or failover function
+reads guarded too.
+
+**3. The remediation offers the revoke (`remediation_for`).** A third optional comment, as for
+TEMP and `CREATE` on `public`. It stays a comment because revoking from `PUBLIC` affects every
+role, such as a logical-replication tool that emits messages. Function privileges are kept
+**per database**, so it is run in each database the role reads, and in `template1` for databases
+created later. The signature follows the server:
+
+- 13–16: `-- optional: REVOKE EXECUTE ON FUNCTION pg_logical_emit_message(boolean, text,
+  text), pg_logical_emit_message(boolean, text, bytea) FROM PUBLIC;` (the ruling's string);
+- 17 and later, and an unknown version: `-- optional: REVOKE EXECUTE ON FUNCTION
+  pg_logical_emit_message(boolean, text, text, boolean), pg_logical_emit_message(boolean,
+  text, bytea, boolean) FROM PUBLIC;`. The ruling's three-argument form fails there with
+  `function … does not exist` (checked on pg17).
+
+So `remediation_for` has three PostgreSQL forms: below 14, 14–16, and 17+. `remediation(kind)`
+returns the 17+ one, which the mock now shows.
+
+The matrix does the same: the init script revokes every overload by name in `hv_test`, and so
+do the Task 18 fixtures, idempotently, with the version's exact line. The 100,000-table probe
+database also revokes it, because `hv_ro` must read enforced there. The bypass suite's `hv_t23`
+starts from the default and revokes it itself.
+
+**Tests.**
+
+- `hacivat-guard`:
+  - `tests/functions.rs`: the list; every listed name refused; both overloads and every arity;
+    qualification, quoting, case, comments and `U&` escapes; calls inside `DO`, `EXECUTE` and
+    `query_to_xml` literals with every escape form, continuations, nested quoting and the
+    `standard_conforming_strings = off` reading; names that are read, not called, and unlisted
+    look-alikes pass; other engines pass; the nesting bound and the reading budget.
+  - `probe.rs`: row 6's exact SQL and list; each name gives `NonTransactionalWrite`; the
+    pre-F1 five-row answer and bad row-6 values are `Unparsed`.
+  - `labels.rs`: guarded until the revoke; the three exact remediation forms by version.
+- `hacivat-session`:
+  - `readonly.rs`: refused before I/O in six spellings; the session stays usable and a read of
+    the name runs; MySQL sends the name on; the probe's row 6 reads guarded.
+  - Docker: `docker_m2b_bypass.rs` (`m2b-t23`).
+
 ## m2b-t17 — liveness and recovery
 
 **Supervisor (HV-CONN-04, B18, Q31).** A pure `Supervisor` decides; the default session's actor
@@ -949,6 +1076,17 @@ executable-comment `COMMIT`s (both readings, and one nested level), and a refuse
 confirmed); advisory lock and `LISTEN` do not survive a request; the 100k-table measurement
 (above); and, without a server, SQLite guarded and a SQLite session that reads and refuses.
 
+**Step 1b (Task 23 finding F1, controller ruling; `m2b-t05`, "F1").** After 1a,
+`hacivat_guard::check_functions` refuses a PostgreSQL statement that calls a function whose
+effect a rollback does not undo, such as `pg_logical_emit_message`. The refusal is
+`ReadOnlyDenied(DenyLayer::Function)`, a new variant, before any I/O, and the connection is kept
+(`Guarded::keep`). Other engines pass. It is a tripwire like 1a: SQL built at run time gets past
+it. So `access_for` now runs **six** probe statements, and a role that may execute one of those
+functions reads guarded (`NonTransactionalWrite`). The Docker fixtures (`ensure_pg_fixtures`,
+the 100k-table database) run the remediation's `REVOKE` for their version, so `hv_ro` still
+reads enforced where these tests assert it. With row 6, the 100,000-table probe took 144 ms on
+pg17 (`--set full`, F1 run).
+
 ## m2b-t23 — bypass-suite results
 
 Task 23 runs the SQL-SAFE-06 catalogue against the Docker matrix with **no classifier** (Review
@@ -1067,14 +1205,40 @@ connection), `neutralised` (it ran; nothing was left), `lost` (the connection en
 | P14 | hv_ro | `COPY hv_t23 TO '/tmp/hv_t23_copy'` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
 | P16 | hv_ro | `SET ROLE hv_test` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
 | P16 | hv_ro | `SET SESSION AUTHORIZATION hv_test` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
-| P31 | hv_ro | `SELECT pg_create_physical_replication_slot('hv_t23_slot')` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
-| P32 | hv_ro | `SELECT pg_switch_wal()` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
-| P32 | hv_ro | `SELECT pg_logical_emit_message(true, 'hv_t23', 'x')` | gap | gap | gap | gap | gap | gap |
+| P31 | hv_ro | `SELECT pg_create_physical_replication_slot('hv_t23_slot')` | function | function | function | function | function | function |
+| P31 | hv_ro | `DO $$ BEGIN EXECUTE 'SELECT pg_create_physical_' \|\| 'replication_slot(''hv_t23_slot'')'; END $$` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P32 | hv_ro | `SELECT pg_switch_wal()` | function | function | function | function | function | function |
+| P32 | hv_ro | `DO $$ BEGIN EXECUTE 'SELECT pg_switch' \|\| '_wal()'; END $$` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P32 | hv_ro | `SELECT pg_logical_emit_message(true, 'hv_t23', 'x')` | function | function | function | function | function | function |
+| P32 | hv_ro | `SELECT pg_logical_emit_message(false, 'hv_t23', 'x')` | function | function | function | function | function | function |
+| P32 | hv_ro | `DO $$ BEGIN EXECUTE 'SELECT pg_logical_' \|\| 'emit_message(true, ''hv_t23'', ''x'')'; END $$` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
+| P32 | hv_ro | `DO $$ BEGIN EXECUTE 'SELECT pg_logical_' \|\| 'emit_message(false, ''hv_t23'', ''x'')'; END $$` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
 | P33 | hv_ro | `SELECT lo_export(230023, '/tmp/hv_t23_lo')` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
 | P34 | hv_ro | `CHECKPOINT` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
 | P34 | hv_ro | `SELECT pg_stat_reset()` | 42501 | 42501 | 42501 | 42501 | 42501 | 42501 |
 
 Through `sshd-a` (pg17): 52 server-blocked rows, 0 different from the direct leg.
+
+*F1 fix (finding F1, `m2b-t05` "F1").* The P31 and P32 rows above changed with it:
+
+- `function` is the guard's text layer (1b), before any I/O.
+- The `DO … EXECUTE` rows build the name at run time. They pass the text layer and meet
+  `hv_ro`'s missing privilege, after the remediation's `REVOKE` of `pg_logical_emit_message`.
+  That is why the label rests on the probe, not on the text layer.
+
+Before that `REVOKE`, while `PUBLIC` still holds `EXECUTE` (the default of `hv_t23` as
+created), the suite runs these rows. On every line `hv_ro` reads guarded with
+`NonTransactionalWrite`, and after the version's `REVOKE` line it reads enforced again:
+
+| Row | Account | Statement | pg13 | pg14 | pg15 | pg16 | pg17 | pg18 |
+|---|---|---|---|---|---|---|---|---|
+| P32 | hv_ro (PUBLIC EXECUTE) | `SELECT pg_logical_emit_message(false, 'hv_t23', 'x')` | function | function | function | function | function | function |
+| P32 | hv_ro (PUBLIC EXECUTE) | `SELECT pg_catalog.pg_logical_emit_message(false, 'hv_t23', 'x'::bytea)` | function | function | function | function | function | function |
+| P32 | hv_ro (PUBLIC EXECUTE) | `SELECT "pg_catalog"."pg_logical_emit_message"(false, 'hv_t23', 'x')` | function | function | function | function | function | function |
+| P32 | hv_ro (PUBLIC EXECUTE) | `SELECT PG_LOGICAL_EMIT_MESSAGE /* c */ (false, 'hv_t23', 'x')` | function | function | function | function | function | function |
+| P32 | hv_ro (PUBLIC EXECUTE) | `SELECT U&"pg\005flogical_emit_message"(false, 'hv_t23', 'x')` | function | function | function | function | function | function |
+| P32 | hv_ro (PUBLIC EXECUTE) | `DO $$ BEGIN PERFORM pg_logical_emit_message(false, 'hv_t23', 'x'); END $$` | function | function | function | function | function | function |
+| P32 | hv_ro (PUBLIC EXECUTE) | `SELECT pg_logical_emit_message(true, 'hv_t23', 'x')` | function | function | function | function | function | function |
 
 **MySQL** (mysql80 = 8.0, mysql84 = 8.4)
 
@@ -1209,6 +1373,10 @@ database is byte-identical.
   WAL record that no rollback undoes and no canary sees. Not in the tables; the failing test
   `zz_docker_m2b_findings::f1_pg_enforced_role_cannot_write_wal_messages` holds it. Either the probe
   must not read such a role as enforced, or the remediation must revoke `EXECUTE` on it.
+  **Fixed** (`m2b-t05`, "F1"; controller ruling). The guard refuses the call in every spelling
+  before any I/O (`function`). The probe reads a role that may execute it as guarded
+  (`NonTransactionalWrite`) until the remediation's new optional `REVOKE`. The finding test is
+  now the rows above.
 - **MySQL 8.0/8.4: every server-blocked row is stopped by L4 or the protocol alone** — the owner
   rows are `1792` or `protocol` — and no row left a trace. The brief's M9 (`SET SESSION
   TRANSACTION READ WRITE`, then `CREATE TABLE`) is `1792` for the owner: the reset and the replay
@@ -1238,7 +1406,8 @@ database is byte-identical.
 file sorts last on purpose: cargo stops at the first failing test binary, and a known-red finding
 must not hide the rest of the Docker suite.
 
-- **F1** (role probe / remediation, T5/T18): above.
+- **F1** (role probe / remediation, T5/T18): above. Fixed. Its test moved into
+  `docker_m2b_bypass.rs` as normal rows.
 - **F2** (MySQL driver, T13, vendored `mysql_async`): on MySQL 8.0 and 8.4 an account without
   `SYSTEM_VARIABLES_ADMIN` that sends `SET GLOBAL …` or `SET PERSIST …` through the
   prepared-statement protocol (every user statement of a session) loses the connection: the

@@ -1028,6 +1028,7 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
   "ro-warn-egress-extension":"The {name} extension can reach other servers.",
   "ro-warn-role-grant-not-expanded":"Other roles are granted to it, and Hacivat can't see what they allow.",
   "ro-warn-unparsed":"Hacivat couldn't read its privileges.",
+  "ro-warn-non-transactional-write":"It can run functions whose effects a rollback can't undo.",
   "ro-cmd":"Explain read-only access",
   "idle-cap":"Disconnected (idle)",
   "idle-disconnected":"Disconnected {name} after {hours} h idle. It reconnects when you use it.",
@@ -1152,6 +1153,7 @@ kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1p
   "ro-warn-egress-extension":"{name} eklentisi başka sunuculara erişebilir.",
   "ro-warn-role-grant-not-expanded":"Ona başka roller verilmiş; Hacivat bunların neye izin verdiğini göremiyor.",
   "ro-warn-unparsed":"Hacivat yetkilerini okuyamadı.",
+  "ro-warn-non-transactional-write":"Etkileri ROLLBACK ile geri alınamayan fonksiyonlar çalıştırabilir.",
   "ro-cmd":"Salt okunur erişimi açıkla",
   "idle-cap":"Bağlantı kesik (boşta)",
   "idle-disconnected":"{name} bağlantısı {hours} sa boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.",
@@ -1215,7 +1217,7 @@ const SEED = [
   { id:"orders-prod", engine:"pg", ver:"16.4", env:"production", ro:"enforced", host:"db-prod-eu.acme.io", port:5432, db:"orders", user:"app_ro", ret:"forever", tls:"verified", ssh:SSH_PROD, lat:31 },
   { id:"billing-prod", engine:"mysql", ver:"8.4.3", env:"production", ro:"enforced", host:"billing-db.acme.io", port:3306, db:"billing", user:"reader", ret:"never", tls:"verified", lat:22 },
   { id:"orders-staging", engine:"pg", ver:"16.4", env:"staging", ro:false, host:"db-stg.acme.io", port:5432, db:"orders", user:"deploy", ret:"pgpass", tls:"verified", lat:4 },
-  { id:"reports-test", engine:"pg", ver:"16.4", env:"test", ro:"guarded", warn:["superuser", "write-privileges", "temp-privilege"], host:"db-qa.acme.io", port:5432, db:"reports", user:"qa", ret:"session", tls:"pinned", lat:9 },
+  { id:"reports-test", engine:"pg", ver:"16.4", env:"test", ro:"guarded", warn:["superuser", "write-privileges", "temp-privilege", "non-transactional-write"], host:"db-qa.acme.io", port:5432, db:"reports", user:"qa", ret:"session", tls:"pinned", lat:9 },
   { id:"hr-legacy", engine:"pg", ver:"15.8", env:"test", ro:false, host:"hr-db.acme.io", port:5432, db:"hr", user:"hr_app", ret:"forever", tls:"unverified", lat:11 },
   { id:"ci-mariadb", engine:"maria", ver:"11.4.4", env:"test", ro:"guarded", host:"10.0.4.21", port:3306, db:"ci", user:"ci", ret:"forever", tls:"none", lat:2 },
   { id:"orders-dev", engine:"pg", ver:"17.2", env:"dev", ro:false, host:"db-dev.acme.io", port:5432, db:"orders", user:"dev", ret:"forever", tls:"verified", lat:6 },
@@ -1599,7 +1601,7 @@ function menuHTML() {
 /* Exactly what plan Task 5's remediation() returns (Q21: TEMP is an optional comment; MariaDB and SQLite: None).
    The UI shows and copies this string unchanged; the inset wraps long lines instead of pre-breaking them. */
 const REMEDIATION = {
-  pg: "CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT pg_read_all_data TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;\n-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;",
+  pg: "CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT pg_read_all_data TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;\n-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;\n-- optional: REVOKE EXECUTE ON FUNCTION pg_logical_emit_message(boolean, text, text, boolean), pg_logical_emit_message(boolean, text, bytea, boolean) FROM PUBLIC;",
   mysql: "CREATE USER '<role>'@'%' IDENTIFIED BY '<password>';\nGRANT SELECT, SHOW VIEW ON <database>.* TO '<role>'@'%';",
 };
 const SQL_KW = /\b(CREATE|ROLE|USER|LOGIN|PASSWORD|IDENTIFIED|BY|GRANT|SELECT|SHOW|VIEW|ON|TO)\b/g;
@@ -1757,7 +1759,7 @@ function setup(id, sc) {
     const cid = { enforced:"orders-prod", temp:"orders-prod", guarded:"reports-test", all:"reports-test", mysql:"api-dev", maria:"ci-mariadb", sqlite:"app.db" }[sc];
     if (sc === "temp") conn(cid).warn = ["temp-privilege"];          /* Q21: TEMP alone keeps the label enforced */
     if (sc === "all") conn(cid).warn = ["superuser", "bypass-rls", "replication", "create-role", "server-file-roles", "execute-server-program", "signal-backend",
-      "write-privileges", "temp-privilege", { id:"egress-extension", name:"dblink" }, "role-grant-not-expanded", "unparsed"];
+      "write-privileges", "temp-privilege", { id:"egress-extension", name:"dblink" }, "role-grant-not-expanded", "unparsed", "non-transactional-write"];
     S.sel = cid; S.cap = { state:"connected", conn:cid }; S.pop = { conn:cid, anchor:"roSeg" };
   }
   if (id === "idle") {
