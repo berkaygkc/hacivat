@@ -108,6 +108,10 @@ const HOST_KEY_POLICIES: [HostKeyPolicy; 3] = HostKeyPolicy::ALL;
 
 /// Where the import reads the config. Without it: `~/.ssh/config` under the user's home, and
 /// the login name from the environment (`USER`, `USERNAME`). Tests point it at a fixture.
+///
+/// An imported key under `home` is written `~/…` only when `home` is the user's real home
+/// folder: Validate and the tunnel expand `~` with the real one (`local_path`), so a fixture
+/// home keeps its absolute paths (review R1).
 #[derive(Debug, Clone)]
 pub struct SshImportEnv {
     pub config: PathBuf,
@@ -1531,13 +1535,14 @@ fn load_config(env: Option<SshImportEnv>) -> Loaded {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => SshConfig::default(),
         Err(_) => return Loaded::Unreadable,
     };
+    let tilde_home = Some(env.home.clone()).filter(|h| std::env::home_dir().as_ref() == Some(h));
     let entries = cfg
         .hosts
         .iter()
         // The parser already drops a `Host` pattern that holds a secret; never list one, nor
         // one shaped like credentials (`admin:password@host`).
         .filter(|h| !carries_secret(&h.alias) && !h.alias.contains('@'))
-        .map(|h| entry_of(&cfg, &h.alias, &env.home))
+        .map(|h| entry_of(&cfg, &h.alias, tilde_home.as_deref()))
         .collect();
     Loaded::Config {
         entries,
@@ -1547,7 +1552,7 @@ fn load_config(env: Option<SshImportEnv>) -> Loaded {
 
 /// The import entry of `alias`: its tunnel and what the menu says about it. A value that
 /// `carries_secret` refuses is never shown nor imported.
-fn entry_of(cfg: &SshConfig, alias: &str, home: &Path) -> ImportEntry {
+fn entry_of(cfg: &SshConfig, alias: &str, home: Option<&Path>) -> ImportEntry {
     let chain = chain_of(cfg, alias);
     let resolved = resolve_alias(cfg, alias).and_then(|spec| {
         if spec_carries_secret(&spec) {
@@ -1561,7 +1566,7 @@ fn entry_of(cfg: &SshConfig, alias: &str, home: &Path) -> ImportEntry {
             // The key field shows `~/.ssh/…`, as the menu does (Validate and the tunnel expand
             // a leading `~` the same way: `hacivat_net::paths::local_path`).
             for hop in &mut spec.hops {
-                if let SshAuth::KeyFile { path } = &mut hop.auth {
+                if let (SshAuth::KeyFile { path }, Some(home)) = (&mut hop.auth, home) {
                     *path = PathBuf::from(home_relative(path, home));
                 }
             }
@@ -1592,12 +1597,14 @@ fn entry_of(cfg: &SshConfig, alias: &str, home: &Path) -> ImportEntry {
 
 /// Whether any value of `spec` carries a secret (the parser checks every value; this guards
 /// what reaches the form). A credential-shaped value counts too (review I2): a host with `@`
-/// (`admin:password@host`) or one Validate refuses as a hop host, and a user with `:` or `@`.
-/// Such an entry only says it held a password; its values are never shown.
+/// (`admin:password@host`) or one Validate refuses as a hop host, and a user with `:` (the
+/// password separator; a POSIX user name never holds one). A user with `@` is a real login
+/// (`alice@corp.acme.io`, review I3). Such an entry only says it held a password; its values
+/// are never shown.
 fn spec_carries_secret(spec: &SshSpec) -> bool {
     spec.hops.iter().any(|h| {
         host_invalid(&h.host)
-            || h.user.contains([':', '@'])
+            || h.user.contains(':')
             || carries_secret(&h.host)
             || carries_secret(&h.user)
             || h.identity_files
@@ -1658,12 +1665,22 @@ fn notice_alias(n: &ConfigNotice) -> Option<&str> {
     }
 }
 
-/// `user@host`, or the host alone.
+/// `user@host`, or the host alone; an IPv6 host in brackets.
 fn hop_target(h: &HopSpec) -> String {
+    let host = bracketed(&h.host);
     if h.user.is_empty() {
-        h.host.clone()
+        host
     } else {
-        format!("{}@{}", h.user, h.host)
+        format!("{}@{}", h.user, host)
+    }
+}
+
+/// `host`, in brackets when it holds a `:` (an IPv6 address), as OpenSSH writes it.
+fn bracketed(host: &str) -> String {
+    if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
     }
 }
 
@@ -2642,7 +2659,7 @@ fn render_route(s: &SshSection, p: &Profile, theme: &Theme, cx: &App) -> Div {
         if host.is_empty() {
             ROUTE_GAP_MARK.to_string()
         } else {
-            host.to_string()
+            bracketed(host)
         }
     };
     for hop in &s.spec.hops {
@@ -2849,7 +2866,17 @@ mod tests {
         assert!(spec_carries_secret(&spec("admin:pw@h.acme.io", "deploy")));
         assert!(spec_carries_secret(&spec("h acme", "deploy")));
         assert!(spec_carries_secret(&spec("h.acme.io", "admin:pw")));
-        assert!(spec_carries_secret(&spec("h.acme.io", "a@b")));
+        // A UPN-style login is a real user (review I3).
+        assert!(!spec_carries_secret(&spec(
+            "h.acme.io",
+            "alice@corp.acme.io"
+        )));
+        assert!(spec_carries_secret(&spec("h.acme.io", "alice@corp:pw")));
+        let v6 = HopSpec {
+            host: "2001:db8::2".into(),
+            ..new_hop("ops".into())
+        };
+        assert_eq!(hop_target(&v6), "ops@[2001:db8::2]");
     }
 
     #[test]

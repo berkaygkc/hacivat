@@ -608,6 +608,7 @@ fn an_import_never_shows_a_refused_secret(cx: &mut TestAppContext) {
          Host hn\n HostName admin:hunter3@h.acme.io\n User deploy\n\
          Host hu\n HostName u.acme.io\n User admin:hunter3\n\
          Host admin:hunter3@a.acme.io\n User deploy\n\
+         Host ad\n HostName ad.acme.io\n User alice@corp.acme.io\n\
          Host viaj\n HostName v.acme.io\n User deploy\n ProxyJump deploy:hv_test_pw@jump\n",
     );
     open_import(vcx);
@@ -661,6 +662,20 @@ fn an_import_never_shows_a_refused_secret(cx: &mut TestAppContext) {
     });
     assert!(notice_text(vcx).contains(&stripped), "{}", notice_text(vcx));
     assert!(!draft(vcx, |d| format!("{:?}", d.profile)).contains("hv_test_pw"));
+    // A UPN-style login (`alice@corp.acme.io`) is a real user, never a refused secret
+    // (review I3): it imports, and still nothing drawn holds a password.
+    open_import(vcx);
+    let (_, usable, hint) = entry(vcx, "ad");
+    assert!(usable, "a user with @ can be picked");
+    assert_eq!(hint, "alice@corp.acme.io@ad.acme.io");
+    pick(vcx, "ad");
+    assert_eq!(field(vcx, "ssh-host"), "ad.acme.io");
+    assert_eq!(field(vcx, "ssh-user"), "alice@corp.acme.io");
+    assert_eq!(
+        leaked(vcx),
+        Vec::<String>::new(),
+        "nothing drawn holds a secret"
+    );
 }
 
 /// A connections shell whose import reads `config`, with the New dialog and its SSH section
