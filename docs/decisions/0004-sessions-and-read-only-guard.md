@@ -1303,3 +1303,11 @@ back.
   `zz_docker_m2b_findings.rs` for `docker_m2b_bypass.rs`
   (`mysql_refused_set_global_is_a_refusal_on_a_live_session`, under the bypass rows' fixture
   lock, since a row may change `hv_ro`'s password for a moment). F1 and F3 stay there.
+- **MySQL client-certificate sign-in (the `m2b-t23` "Not done", T13 carry).** A new full-set
+  target, `mysql84-x509` (port 33094; ADR 0002 `m2b-fix-f2`), and its generator service
+  `mysql-x509-certs`. `mysql_client_certificate_sign_in` connects `hv_x509` directly under
+  `VerifyCa` with the generated CA, with the plain and the encrypted client key (passphrase
+  from the overlay), and is refused (`1045`) without a certificate. It takes the target through
+  `require_target`; like every full-set target it needs the controller's `cargo xtask docker up
+  --set full` before a `--set full` run (the `pr` set leaves it out). The generic MySQL loops of
+  the full set run on it too: it is mysql84 with the same fixtures.

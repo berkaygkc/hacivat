@@ -16,13 +16,15 @@ mod common;
 
 use common::ScriptedUi;
 use common::conformance::*;
-use hacivat_net::{TlsMode, TlsVerified};
+use hacivat_net::{ClientCertPaths, TlsMode, TlsVerified};
 use hacivat_proto::ErrClass;
+use hacivat_secrets::SecretString;
 use hacivat_session::pipeline::{
-    Answer, ConnectError, Interaction, LiveConnection, ProfileChange, Question, connect,
+    Answer, ConnectError, Interaction, LiveConnection, ProfileChange, Question, SessionSecrets,
+    connect,
 };
 use hacivat_session::profile::Profile;
-use hacivat_testkit::{DockerTarget, require_target};
+use hacivat_testkit::{DockerTarget, MYSQL_X509_KEY_PASSPHRASE, require_target};
 
 /// Connects `p` with `ix`; the chain's secrets are not needed (one bastion, plain key).
 async fn connect_ix(p: Profile, ix: Interaction) -> Result<LiveConnection, ConnectError> {
@@ -153,4 +155,80 @@ async fn insecure_auth_refused_through_ssh_on_md5() {
         .await
         .unwrap_or_else(|e| panic!("hv_test through SSH: {:?}", e.class));
     live.close().await;
+}
+
+// ## m2b-fix-f2-x509 (T13 carry)
+
+/// A file `mysql-x509-certs` generated for `mysql84-x509` at `docker up`
+/// (`mysql-x509-<name>`, a Docker artifact).
+fn x509_file(name: &str) -> std::path::PathBuf {
+    hacivat_testkit::artifact(&format!("mysql-x509-{name}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "docker"]
+async fn mysql_client_certificate_sign_in() {
+    // T13 carry: `mysql84-x509`'s `ssl_ca` is a test CA generated at `docker up` (nothing
+    // committed), and `hv_x509` is `REQUIRE X509`. `VerifyCa` with that CA checks the server's
+    // chain (`CaOnly`, Task 3's `ChainOnly` through patch §5). Without a client certificate the
+    // server refuses the account (`1045`); with the one Hacivat reads (PKCS #8, and its
+    // encrypted twin opened with the passphrase from the overlay, B25) it signs in, directly.
+    if !docker_enabled() {
+        return;
+    }
+    let Some(t) = require_target("mysql84-x509") else {
+        return;
+    };
+    let profile = |key: Option<&str>| {
+        let mut p = profile_for(&t, TlsMode::VerifyCa).user("hv_x509");
+        p.tls.ca_file = Some(x509_file("ca.pem"));
+        p.tls.client_cert = key.map(|key| ClientCertPaths {
+            cert: x509_file("client.pem"),
+            key: x509_file(key),
+        });
+        p
+    };
+
+    let refused = connect_ix(profile(None), Interaction::Headless)
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("REQUIRE X509 let hv_x509 in without a client certificate"));
+    assert_eq!(
+        code_of(refused.server.as_ref()).as_deref(),
+        Some("1045"),
+        "{:?}",
+        refused.class
+    );
+
+    let mut plain = connect_ix(profile(Some("client-key.pem")), Interaction::Headless)
+        .await
+        .unwrap_or_else(|e| panic!("hv_x509 with its certificate: {:?}", e.class));
+    assert!(plain.tls.encrypted);
+    assert_eq!(plain.tls.verified, TlsVerified::CaOnly);
+    assert_eq!(
+        scalar(&mut plain, "SELECT CURRENT_USER()").await,
+        "hv_x509@%"
+    );
+    plain.close().await;
+
+    let mut r = req(profile(Some("client-key-enc.pem")));
+    r.overlay_secrets = Some(SessionSecrets {
+        tls_key_passphrase: Some(SecretString::from(MYSQL_X509_KEY_PASSPHRASE.to_string())),
+        ..SessionSecrets::default()
+    });
+    let mut encrypted = connect(
+        &matrix_deps(),
+        r,
+        Interaction::Headless,
+        token(),
+        progress(),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("hv_x509 with its encrypted key: {:?}", e.class));
+    assert_eq!(encrypted.tls.verified, TlsVerified::CaOnly);
+    assert_eq!(
+        scalar(&mut encrypted, "SELECT CURRENT_USER()").await,
+        "hv_x509@%"
+    );
+    encrypted.close().await;
 }

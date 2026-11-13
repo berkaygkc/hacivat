@@ -840,3 +840,10 @@ answers `1227`.
   `a_refused_set_global_is_a_server_error_on_a_live_connection` (Docker, every MySQL-family
   target, read-write and read-only: `1227`, MariaDB's `SET PERSIST` `1064`, the same backend,
   `Idle`, nothing changed). The session's F2 test moved to `docker_m2b_bypass.rs`.
+- **Client certificates on the matrix (the `m2b-t13` known limit, closed).** `mysql84-x509`
+  (compose and `targets.toml` `m2b-fix-f2-x509`) trusts a test CA that `mysql-x509-certs`
+  generates at `docker up` into the artifacts directory (nothing committed), serves a
+  certificate that CA signed, and has `hv_x509 … REQUIRE X509`. The session test
+  `mysql_client_certificate_sign_in` (`docker_m2b_tls_ssh.rs`) signs in with the client
+  certificate and its PKCS #8 key, and with the encrypted key and its passphrase, under
+  `VerifyCa` with the test CA (`CaOnly`); without a certificate the server answers `1045`.

@@ -692,8 +692,10 @@ mod tests {
             ["pg17", "mysql84", "sshd-a", "sshd-b"]
         );
         let full = services_in_set(&text, "full").unwrap();
-        assert_eq!(full.len(), 16);
+        // ## m2b-fix-f2-x509: and mysql84-x509 (its certificate generator is no target).
+        assert_eq!(full.len(), 17);
         assert!(full.iter().any(|s| s == CA_SERVICE));
+        assert!(full.iter().any(|s| s == "mysql84-x509"));
         assert!(services_in_set(&text, "nightly").is_err());
     }
 
