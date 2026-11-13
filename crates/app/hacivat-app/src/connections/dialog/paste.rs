@@ -500,8 +500,14 @@ impl ConnectionDialog {
     }
 }
 
-/// `key=value` as the URL had it (machine text, shown in mono).
+/// `key=value` as the URL had it (machine text, shown in mono). The value of a password-like
+/// key is never shown, only the mask (M2a final-fix round 2, N1).
 fn param_text(key: &str, value: &str) -> SharedString {
+    let value = if hacivat_proto::is_secret_param(key) {
+        DISPLAY_MASK
+    } else {
+        value
+    };
     [key, value].join("=").into()
 }
 
@@ -556,4 +562,26 @@ fn mapped_setting(cx: &App, m: &MappedParam) -> Option<SharedString> {
         MappedTo::ReadOnly(_) => tr(cx, ids::hv::CONN_DLG_SQLITE_RO, NoArgs),
         MappedTo::PgOptions => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ## m2a-finalfix (round 2, N1)
+    #[test]
+    fn the_notice_never_shows_the_value_of_a_password_like_key() {
+        for key in [
+            "trustCertificateKeyStorePassword",
+            "keyStorePassword",
+            "password1",
+            "ssl_passphrase",
+            "db_password",
+        ] {
+            let shown = param_text(key, "hunter2");
+            assert!(!shown.contains("hunter2"), "{key}");
+            assert_eq!(shown.as_ref(), format!("{key}=****"));
+        }
+        assert_eq!(param_text("foo", "bar").as_ref(), "foo=bar");
+    }
 }

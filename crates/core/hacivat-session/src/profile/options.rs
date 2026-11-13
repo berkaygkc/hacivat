@@ -378,10 +378,11 @@ mod tests {
             &[
                 ("pgpassword", "hv_test_pw"),
                 ("db_password", "hv_test_pw"),
-                ("password_db", "kept"),
+                ("keyStorePassword", "hv_test_pw"),
+                ("pass_through", "kept"),
             ],
         );
-        assert_eq!(strip_secret_options(&mut p), 2);
-        assert_eq!(p.extra, vec![("password_db".into(), "kept".into())]);
+        assert_eq!(strip_secret_options(&mut p), 3);
+        assert_eq!(p.extra, vec![("pass_through".into(), "kept".into())]);
     }
 }

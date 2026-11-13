@@ -101,6 +101,43 @@ fn bare_userinfo(s: &str) -> Option<&str> {
     token.contains('@').then_some(rest)
 }
 
+// ## m2a-finalfix (round 2, N4)
+/// A server's message without a password: [`scrub_url`], unless that would leave nothing of a
+/// message that had text. Free text is no connection string, and `scrub_url` can read a whole
+/// sentence as one `key=value` segment (`duplicate key value … Key (id)=(1) already exists.`)
+/// and drop it. Then only the whitespace-separated `key=value` words whose key is secret (the
+/// scrubber's own rule: a password key, or a `pass`/`pwd`/`secret`/`token`/`key` fragment) lose
+/// their value (`password=<removed>`); every other word, and the whitespace, stays as the
+/// server sent it.
+pub fn scrub_message(text: &str) -> String {
+    let scrubbed = scrub_url(text);
+    if !scrubbed.trim().is_empty() || text.trim().is_empty() {
+        return scrubbed;
+    }
+    text.split_inclusive(char::is_whitespace)
+        .map(|word| {
+            let body = word.trim_end_matches(char::is_whitespace);
+            let space = &word[body.len()..];
+            match body.split_once('=') {
+                Some((key, _)) if !key_of(key).is_empty() && is_secret_key(key_of(key)) => {
+                    format!("{key}={REMOVED}{space}")
+                }
+                _ => word.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// The option name at the end of `s` (`(password` → `password`, `"pwd` → `pwd`).
+fn key_of(s: &str) -> &str {
+    let start = s
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    &s[start..]
+}
+
 /// `opts` with the value of every secret-bearing key replaced by `<removed>`; the keys and
 /// their order stay.
 pub fn scrub_options(opts: &[(String, String)]) -> Vec<(String, String)> {
@@ -507,6 +544,26 @@ mod tests {
         for k in ["host", "sslmode", "user", "dbname"] {
             assert!(!is_secret_key(k), "{k}");
         }
+    }
+
+    // ## m2a-finalfix (round 2, N4)
+    #[test]
+    fn a_server_message_is_never_blanked_and_still_loses_its_password() {
+        let duplicate = "duplicate key value violates unique constraint \"t_pkey\" \
+                         DETAIL: Key (id)=(1) already exists.";
+        assert_eq!(scrub_url(duplicate), "", "scrub_url alone blanks it");
+        assert_eq!(scrub_message(duplicate), duplicate);
+        assert_eq!(
+            scrub_message("could not connect: key=value password=s3cret\n(pwd=x2) token=t user=u"),
+            "could not connect: key=<removed> password=<removed>\n(pwd=<removed> token=<removed> user=u"
+        );
+        // What `scrub_url` handles keeps its result.
+        assert_eq!(
+            scrub_message("host=db user=u password=s3cret"),
+            "host=db user=u"
+        );
+        assert_eq!(scrub_message("plain text"), "plain text");
+        assert_eq!(scrub_message(""), "");
     }
 
     // ## m2a-finalfix

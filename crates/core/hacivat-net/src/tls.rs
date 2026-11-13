@@ -313,6 +313,11 @@ struct CaFile {
 /// of them must be usable as a trust anchor.
 fn read_ca_file(path: &Path) -> Result<CaFile, TlsSetupError> {
     let unreadable = || TlsSetupError::CaFileUnreadable(path.to_path_buf());
+    // A share or a device is never opened (N2): reading it could send credentials.
+    if crate::paths::is_network_path(path) {
+        return Err(unreadable());
+    }
+    crate::paths::fs_probe::note(path);
     let bytes = std::fs::read(path).map_err(|_| unreadable())?;
     let certs = parse_certs(&bytes).ok_or_else(unreadable)?;
     let mut store = RootCertStore::empty();
@@ -354,8 +359,17 @@ struct ClientCert {
 fn read_client_cert(paths: &ClientCertPaths) -> Result<ClientCert, TlsSetupError> {
     let cert_err = || TlsSetupError::CertFileUnreadable(paths.cert.clone());
     let key_err = || TlsSetupError::KeyUnreadable(paths.key.clone());
+    // A share or a device is never opened (N2): reading it could send credentials.
+    if crate::paths::is_network_path(&paths.cert) {
+        return Err(cert_err());
+    }
+    if crate::paths::is_network_path(&paths.key) {
+        return Err(key_err());
+    }
+    crate::paths::fs_probe::note(&paths.cert);
     let cert_bytes = std::fs::read(&paths.cert).map_err(|_| cert_err())?;
     let chain = parse_certs(&cert_bytes).ok_or_else(cert_err)?;
+    crate::paths::fs_probe::note(&paths.key);
     let key_bytes = std::fs::read(&paths.key).map_err(|_| key_err())?;
     if is_encrypted_key(&key_bytes) {
         return Err(TlsSetupError::KeyEncrypted(paths.key.clone()));

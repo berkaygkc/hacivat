@@ -1708,3 +1708,20 @@ fn a_server_message_never_shows_a_password(cx: &mut TestAppContext) {
     assert!(!text.contains("s3cret"), "a password reached the clipboard");
     assert!(text.contains("Server message: host=db.acme.io user=deploy"));
 }
+
+/// N4 (round 2): a server message that only looks like one `key=value` segment to the URL
+/// scrubber is never blanked; only a password-like word loses its value.
+#[gpui::test]
+fn a_server_message_is_never_blanked(cx: &mut TestAppContext) {
+    let message = "duplicate key value violates unique constraint \"t_pkey\" password=s3cret-x";
+    let vcx = error_dialog(cx, auth_invalid_with_server("23505", message), ok_fake());
+    expand(vcx, "tech-details");
+    assert_eq!(
+        tech_row(vcx, "Server message"),
+        "duplicate key value violates unique constraint \"t_pkey\" password=<removed>"
+    );
+    click(vcx, "copy-details");
+    let text = clipboard(vcx);
+    assert!(!text.contains("s3cret"), "a password reached the clipboard");
+    assert!(text.contains("Server message: duplicate key value violates unique constraint"));
+}

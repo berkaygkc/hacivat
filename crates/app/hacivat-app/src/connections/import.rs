@@ -700,7 +700,9 @@ mod tests {
                 // ## m2a-t21-shots: kept out by the driver's rule now (no local copy).
                 ("sslkeypassword".into(), "hv_test_pw".into()),
                 ("sslmode".into(), "require".into()),
-                ("password_db".into(), "kept".into()),
+                ("password_db".into(), "hv_test_pw".into()),
+                ("trustStorePassword".into(), "hv_test_pw".into()),
+                ("pass_through".into(), "kept".into()),
             ],
             false,
         );
@@ -714,7 +716,7 @@ mod tests {
         // ## m2a-finalfix: `sslmode` went to the typed TLS mode (I2).
         assert_eq!(
             p.extra,
-            vec![("password_db".to_string(), "kept".to_string())]
+            vec![("pass_through".to_string(), "kept".to_string())]
         );
         assert_eq!(p.tls.mode, hacivat_net::TlsMode::Require);
         let text = format!("{p:?}");

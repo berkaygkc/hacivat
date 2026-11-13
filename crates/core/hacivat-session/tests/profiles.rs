@@ -693,6 +693,98 @@ fn the_store_drops_every_password_like_key() {
     assert!(!text.contains("typed-"), "{text}");
 }
 
+// ## m2a-finalfix (round 2, N1, N6)
+
+/// Whether the store keeps an `extra` entry keyed `key` through a load and a save.
+fn store_keeps(key: &str) -> bool {
+    let quoted = key.replace('\\', "\\\\").replace('"', "\\\"");
+    let path = write_tmp(&format!(
+        "version = 1\n[[connection]]\nid = \"6f9619ff-8b86-d011-b42d-00c04fc964ff\"\nname = \"a\"\n\
+         engine = \"postgres\"\nhost = \"h\"\n\
+         extra = [{{ key = \"{quoted}\", value = \"typed-v\" }}]\n"
+    ));
+    let (store, loaded) = ProfileStore::open(path.clone());
+    let kept_on_load = !loaded.profiles[0].extra.is_empty();
+    let mut p = loaded.profiles[0].clone();
+    p.extra = vec![(key.to_string(), "typed-v".to_string())];
+    store.save(&[p]).unwrap();
+    let kept_on_save = read(&path).contains("typed-v");
+    assert_eq!(
+        kept_on_load, kept_on_save,
+        "{key:?}: load and save disagree"
+    );
+    kept_on_load
+}
+
+/// Whether the scrubber removes `key`'s value from an option list.
+fn scrubber_removes(key: &str) -> bool {
+    hacivat_secrets::scrub_options(&[(key.to_string(), "typed-v".to_string())])[0].1 != "typed-v"
+}
+
+/// N1: the store, the scrubber, the import and render (both through
+/// `hacivat_driver::url::is_secret_param`, the same function) give one answer for every key:
+/// the re-review's camelCase JDBC and passphrase keys, the earlier spellings, a key with
+/// surrounding whitespace (N6), and plain options that are no secret.
+#[test]
+fn the_store_and_the_scrubber_agree_on_every_password_key() {
+    let secret = [
+        "password",
+        "PASSWORD",
+        " password",
+        "password ",
+        "\tpgpassword",
+        "--password",
+        "pass",
+        "pwd",
+        "passwd",
+        "sslpassword",
+        "sslkeypassword",
+        "pgpassword",
+        "mysql_pwd",
+        "db_password",
+        "x-pwd",
+        "x-password",
+        "password_db",
+        "trustCertificateKeyStorePassword",
+        "clientCertificateKeyStorePassword",
+        "keyStorePassword",
+        "trustStorePassword",
+        "keyPassword",
+        "password1",
+        "password2",
+        "password3",
+        "passphrase",
+        "ssl_passphrase",
+        "tls_passphrase",
+        "key_passphrase",
+    ];
+    let plain = [
+        "sslmode",
+        "user",
+        "host",
+        "dbname",
+        "client_encoding",
+        "target_session_attrs",
+        "options",
+        "characterEncoding",
+    ];
+    for key in secret {
+        assert!(hacivat_driver::url::is_secret_param(key), "{key:?}");
+        assert!(!store_keeps(key), "the store keeps {key:?}");
+        assert!(scrubber_removes(key), "the scrubber keeps {key:?}");
+    }
+    for key in plain {
+        assert!(!hacivat_driver::url::is_secret_param(key), "{key:?}");
+        assert!(store_keeps(key), "the store drops {key:?}");
+        assert!(!scrubber_removes(key), "the scrubber removes {key:?}");
+    }
+    // The scrubber is a documented superset: it also hides tokens and key material that are
+    // not passwords (and so stay in a profile, like the `sslkey` path).
+    for key in ["sslkey", "access_token", "client_secret"] {
+        assert!(store_keeps(key) && scrubber_removes(key), "{key:?}");
+    }
+}
+
 #[test]
 fn apply_parse_sqlite_and_the_key_passphrase() {
     let mut d = ProfileDraft::new();

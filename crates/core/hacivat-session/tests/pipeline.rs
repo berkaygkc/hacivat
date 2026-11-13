@@ -767,6 +767,91 @@ async fn an_unreadable_ca_file_is_config_invalid_for_every_engine() {
     }
 }
 
+// ## m2a-finalfix (round 2, N2)
+/// A TLS file on a share or a device is refused before any file system call: Save (the
+/// dialog's `validate_with`) and Test (the pipeline's validation) open, stat and resolve none
+/// of these paths, for the CA, the client certificate and key, and a DRV-05 path option, for a
+/// typed and an imported profile. `hacivat_net::paths::fs_probe` records every path the TLS
+/// readers and the DRV-05 resolver touch; a local file is recorded (the probe works).
+#[tokio::test]
+async fn a_tls_file_on_a_share_or_a_device_is_never_opened() {
+    use hacivat_net::ClientCertPaths;
+    use hacivat_net::paths::fs_probe;
+    use hacivat_proto::{ImportSource, Origin};
+    use hacivat_session::pipeline::{ApprovedRoots, Purpose, validate_with};
+    use std::path::PathBuf;
+
+    fs_probe::enable();
+    let bad = [
+        r"\\attacker-hvprobe\s\ca.pem",
+        "//host-hvprobe/s/ca.pem",
+        r"\\?\UNC\hvprobe\s\x",
+        r"\??\hvprobe-x",
+        r"\\.\pipe\hvprobe-x",
+    ];
+    let home = tempfile::tempdir().unwrap();
+    let roots = ApprovedRoots::new(vec![home.path().to_path_buf()]);
+    for path in bad {
+        for origin in [
+            Origin::UserTyped,
+            Origin::Imported {
+                source: ImportSource::Url,
+            },
+        ] {
+            let mut ca = pg_profile(TlsMode::VerifyFull);
+            ca.origin = origin.clone();
+            ca.tls.ca_file = Some(PathBuf::from(path));
+            let mut cert = pg_profile(TlsMode::Require);
+            cert.origin = origin.clone();
+            cert.tls.client_cert = Some(ClientCertPaths {
+                cert: PathBuf::from(path),
+                key: PathBuf::from(path),
+            });
+            let mut option = pg_profile(TlsMode::Require);
+            option.origin = origin.clone();
+            option.extra = vec![("sslrootcert".into(), path.into())];
+            for p in [ca, cert, option] {
+                // Save.
+                let codes: Vec<IssueCode> = validate_with(&p, EngineCatalog::embedded(), &roots)
+                    .into_iter()
+                    .map(|i| i.code)
+                    .collect();
+                let refused = codes.contains(&IssueCode::PathRefused)
+                    || codes
+                        .iter()
+                        .any(|c| matches!(c, IssueCode::OptionRejected { .. }));
+                if p.extra.is_empty() || origin != Origin::UserTyped {
+                    assert!(refused, "{path}: {codes:?}");
+                }
+                // Test.
+                let (mut deps, fake) = deps_with(ok_pg());
+                deps.approved_roots = roots.clone();
+                let mut r = req(p.clone());
+                r.purpose = Purpose::Test;
+                let outcome = connect(&deps, r, ix_none(), token(), progress()).await;
+                if p.extra.is_empty() {
+                    let e = outcome.expect_err("refused");
+                    assert_eq!(e.class, ErrClass::ConfigInvalid, "{path}");
+                    assert_eq!(fake.connect_calls(), 0, "{path}");
+                }
+            }
+        }
+    }
+    let touched = fs_probe::touched();
+    assert!(
+        !touched
+            .iter()
+            .any(|t| t.to_string_lossy().contains("hvprobe")),
+        "a share or device path was touched: {touched:?}"
+    );
+    // The probe sees the readers: a local file is recorded when Save checks it.
+    let local = home.path().join("hvprobe-local-ca.pem");
+    let mut p = pg_profile(TlsMode::VerifyFull);
+    p.tls.ca_file = Some(local.clone());
+    let _ = validate_with(&p, EngineCatalog::embedded(), &roots);
+    assert!(fs_probe::touched().contains(&local));
+}
+
 #[tokio::test]
 async fn validation_uses_the_deps_approved_roots() {
     let home = tempfile::tempdir().unwrap();

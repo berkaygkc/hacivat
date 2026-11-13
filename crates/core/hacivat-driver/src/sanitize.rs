@@ -19,13 +19,15 @@
 //! 8. From an untrusted origin, an option whose key is one of the catalog's `path_keys` names a
 //!    file, so its value takes the path rule (`sslrootcert=system` is not a path).
 //!
-//! The path rule: the path, after `~` expansion and canonicalization with symlinks resolved,
-//! must lie inside an approved root. It applies to the `path_keys` options and to every entry
+//! The path rule: a share or device path (`hacivat_net::is_network_path`) is refused before
+//! any file system call; otherwise the path, after `~` expansion and canonicalization with
+//! symlinks resolved, must lie inside an approved root. It applies to the `path_keys` options and to every entry
 //! of `SanitizeInput::paths`. The user's "unsafe" toggle lifts steps 4 to 8 and the path rule,
 //! never step 1 or the quarantine.
 
 use std::path::{Component, Path, PathBuf};
 
+use hacivat_net::is_network_path;
 use hacivat_proto::{DbmsKind, Origin};
 
 use crate::catalog::EngineCatalog;
@@ -91,13 +93,16 @@ pub fn sanitize(
         input
             .approved_roots
             .iter()
+            .filter(|r| !is_network_path(r))
             .filter_map(|r| resolve(r))
             .collect()
     } else {
         Vec::new()
     };
-    let inside_roots =
-        |p: &Path| resolve(p).is_some_and(|p| roots.iter().any(|r| p.starts_with(r)));
+    // A share or a device is refused before `resolve` touches it (N2).
+    let inside_roots = |p: &Path| {
+        !is_network_path(p) && resolve(p).is_some_and(|p| roots.iter().any(|r| p.starts_with(r)))
+    };
 
     let mut out = Vec::with_capacity(input.options.len());
     let mut violations = Vec::new();
@@ -258,6 +263,7 @@ fn resolve(p: &Path) -> Option<PathBuf> {
             Component::Normal(name) => {
                 out.push(name);
                 if exists {
+                    hacivat_net::paths::fs_probe::note(&out);
                     match out.symlink_metadata() {
                         Ok(_) => out = out.canonicalize().ok()?,
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => exists = false,

@@ -8,7 +8,7 @@
 //! it) and goes through DRV-05 like any other option.
 
 use std::fmt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use hacivat_driver::url::FieldId;
@@ -193,9 +193,17 @@ pub(crate) fn checked(
     if !matches!(p.transport, TransportSpec::Direct) {
         push(None, IssueCode::TransportUnavailable);
     }
+    // A TLS file on a share or a device is refused before anything opens, resolves or stats it
+    // (N2): neither the TLS check below nor the DRV-05 path rule may touch it.
+    let all_paths = tls_paths(p);
+    let tls_refused = all_paths.iter().any(|(_, path)| network_path(path));
+    if tls_refused {
+        push(None, IssueCode::PathRefused);
+    }
     if let ProfileEndpoint::Server { host, .. } = &p.endpoint
         && !file_based
         && p.tls.mode != TlsMode::Disable
+        && !tls_refused
     {
         let mysql_family = catalog.chain(p.engine).contains(&DbmsKind::MySql);
         if mysql_family && p.tls.mode == TlsMode::VerifyCa {
@@ -215,10 +223,10 @@ pub(crate) fn checked(
             }
         }
     }
-    let paths = tls_paths(p);
-    if paths.iter().any(|(_, path)| network_path(path)) {
-        push(None, IssueCode::PathRefused);
-    }
+    let paths: Vec<(String, PathBuf)> = all_paths
+        .into_iter()
+        .filter(|(_, path)| !network_path(path))
+        .collect();
     for (key, _) in &p.extra {
         if hacivat_proto::is_secret_param(key) {
             push(None, IssueCode::OptionSecret { key: key.clone() });
@@ -319,28 +327,10 @@ fn sqlite_path_issue(path: &Path, create_if_missing: bool) -> Option<IssueCode> 
     }
 }
 
-/// A path that never names a local file, on any OS: it starts with two separators (`\\`,
-/// `//`, which covers `\\?\UNC\` and `\\.\`) or with `\??\`, or it has a UNC or device prefix.
-/// Opening one on Windows can send the user's credentials to another host.
+/// A path that never names a local file, on any OS (`hacivat_net::is_network_path`): a UNC
+/// share, `//host`, `\\?\UNC\`, `\\.\` or `\??\`. Checked before any file system call.
 fn network_path(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    text.starts_with("\\\\")
-        || text.starts_with("//")
-        || text.starts_with("\\??\\")
-        || refused_prefix(path)
-}
-
-/// A Windows prefix that never names a local file: a UNC share or a device namespace.
-fn refused_prefix(path: &Path) -> bool {
-    use std::path::Prefix;
-    match path.components().next() {
-        Some(Component::Prefix(p)) => match p.kind() {
-            Prefix::DeviceNS(_) | Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
-            Prefix::Verbatim(name) => name.eq_ignore_ascii_case("GLOBALROOT"),
-            Prefix::Disk(_) | Prefix::VerbatimDisk(_) => false,
-        },
-        _ => false,
-    }
+    hacivat_net::is_network_path(path)
 }
 
 #[cfg(test)]
@@ -399,7 +389,14 @@ mod tests {
     /// I1: a password never sits in the extras, whatever its key's spelling.
     #[test]
     fn a_password_option_is_an_issue() {
-        for key in ["pgpassword", "db_password", "--pwd", "SSLPassword"] {
+        for key in [
+            "pgpassword",
+            "db_password",
+            "--pwd",
+            "SSLPassword",
+            "trustCertificateKeyStorePassword",
+            "ssl_passphrase",
+        ] {
             let p = pg(&[(key, "hv_test_pw")]);
             assert_eq!(
                 codes(&p, &ApprovedRoots::new(Vec::new())),
@@ -409,7 +406,7 @@ mod tests {
         }
         assert_eq!(
             codes(
-                &pg(&[("password_db", "x")]),
+                &pg(&[("pass_through", "x")]),
                 &ApprovedRoots::new(Vec::new())
             ),
             []

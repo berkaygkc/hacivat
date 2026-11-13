@@ -74,8 +74,10 @@ fn startup_options(read_only: bool, extras: &[(String, String)]) -> Option<Strin
         } else if let Some(name) = SETTING_KEYS.iter().find(|k| key.eq_ignore_ascii_case(k)) {
             parts.push(format!("-c {name}={}", escape_option_value(value)));
         }
-        // Every other key is ignored here. libpq's client-side keys (`sslmode`, `sslrootcert`,
-        // `connect_timeout`, `target_session_attrs`, ...) are applied by the pipeline;
+        // Every other key is ignored here. libpq's client-side keys with a typed setting
+        // (`sslmode`, `sslrootcert`, `sslcert`/`sslkey`, `connect_timeout`) are folded into the
+        // profile's typed settings where options enter a profile (`fold_typed_options`), so one
+        // left over here has no effect, and neither has `target_session_attrs`;
         // `application_name` comes from the profile and `client_encoding` is always UTF8 in
         // `tokio-postgres`, which sends only fixed startup parameters.
     }

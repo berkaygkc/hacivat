@@ -320,6 +320,11 @@ mod tests {
             "/tmp/password%3D",
             "/tmp/password=1.db",
             "şifre password=x",
+            // M2a final-fix round 2 (N1): a key that only mentions a password is one too.
+            "/s&passwords=x",
+            "/s&mypassword=x",
+            "-c password_encryption=scram-sha-256",
+            "x.password_hash=1",
         ] {
             assert!(carries_secret(v), "{v}");
         }
@@ -328,18 +333,14 @@ mod tests {
             "/var/run/postgresql",
             "/run/passwordless",
             "password_db",
-            "/s&passwords=x",
-            "/s&mypassword=x",
             "/s&password",
             "x=password",
             "-c search_path=public",
-            "-c password_encryption=scram-sha-256",
             "password-reset-service",
             "app=password-reset-service",
             "şifre_db",
             "/tmp/şifre.db",
             "şifre=x",
-            "x.password_hash=1",
             "",
             "=",
             " = = ",

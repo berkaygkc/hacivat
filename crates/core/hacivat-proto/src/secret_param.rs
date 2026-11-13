@@ -5,33 +5,31 @@
 //! key one of them treats as a password is a password for all of them. It lives here because
 //! every one of those crates already depends on this one.
 
-/// Extra-parameter keys that carry a password, compared ASCII-case-insensitively.
-const SECRET_PARAMS: [&str; 8] = [
-    "password",
-    "sslpassword",
-    "pass",
-    "pwd",
-    "passwd",
-    "pgpassword",
-    "mysql_pwd",
-    // The suffix rule needs a separator, so it misses this run-together name.
-    "sslkeypassword",
-];
+/// Words that make a key a password key wherever they appear in its normalized form.
+const SECRET_WORDS: [&str; 3] = ["password", "passphrase", "passwd"];
 
-/// Key endings that make a key a password key (`db_password`, `x-pwd`).
-const SECRET_SUFFIXES: [&str; 4] = ["_password", "-password", "_pwd", "-pwd"];
-
-/// Whether the option `key` carries a password. Leading dashes are ignored (`--password`), and
-/// so is ASCII case. A key that only starts with a password word (`password_db`) does not
-/// count; one that ends with it (`x_password`) does.
+/// Whether the option `key` carries a password. The key is normalized first: surrounding
+/// whitespace and leading dashes (`--password`) dropped, ASCII lowercased, and the separators
+/// `_`, `-` and `.` removed (`db_password`, `ssl.key-password`, JDBC `keyStorePassword` all
+/// become one shape). It is a password key when that form:
+/// - contains `password`, `passphrase` or `passwd` (`trustCertificateKeyStorePassword`,
+///   `password1`, `tls_passphrase`, `sslkeypassword`, `password_db`); or
+/// - ends with `pwd` (`pwd`, `mysql_pwd`, `x-pwd`); or
+/// - is `pass`.
+///
+/// It errs on the side of refusing: a key that merely mentions a password is kept out of every
+/// file, log and driver option too.
 pub fn is_secret_param(key: &str) -> bool {
-    let key = key.trim_start_matches('-');
-    SECRET_PARAMS.iter().any(|s| s.eq_ignore_ascii_case(key))
-        || SECRET_SUFFIXES.iter().any(|s| {
-            key.len() >= s.len()
-                && key.is_char_boundary(key.len() - s.len())
-                && key[key.len() - s.len()..].eq_ignore_ascii_case(s)
-        })
+    let normalized: String = key
+        .trim()
+        .trim_start_matches('-')
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-' | '.'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    SECRET_WORDS.iter().any(|w| normalized.contains(w))
+        || normalized.ends_with("pwd")
+        || normalized == "pass"
 }
 
 #[cfg(test)]
@@ -39,29 +37,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn password_keys_and_suffixes_match_other_keys_do_not() {
+    fn password_keys_in_every_spelling_match_other_keys_do_not() {
         for key in [
             "password",
             "PASSWORD",
             "--password",
+            " password",
+            "password\t",
+            "pass",
+            "pwd",
+            "passwd",
             "sslpassword",
             "SSLKeyPassword",
             "pgpassword",
             "mysql_pwd",
             "db_password",
             "x-pwd",
-        ] {
-            assert!(is_secret_param(key), "{key}");
-        }
-        for key in [
-            "password_db",
-            "sslmode",
-            "user",
+            "x-password",
+            // M2a final-fix round 2 (N1): camelCase JDBC keys and passphrases.
+            "trustCertificateKeyStorePassword",
+            "clientCertificateKeyStorePassword",
+            "keyStorePassword",
+            "trustStorePassword",
+            "keyPassword",
+            "password1",
+            "password2",
+            "password3",
+            "passphrase",
+            "ssl_passphrase",
+            "tls-passphrase",
+            "key.passphrase",
             "passphrase_hint",
-            "",
+            "password_db",
+            "ssl.key-password",
             "ı_pwd_",
         ] {
-            assert!(!is_secret_param(key), "{key}");
+            assert!(is_secret_param(key), "{key:?}");
+        }
+        for key in [
+            "sslmode",
+            "user",
+            "host",
+            "passfile",
+            "pass_through",
+            "sslkey",
+            "application_name",
+            "",
+        ] {
+            assert!(!is_secret_param(key), "{key:?}");
         }
     }
 }
