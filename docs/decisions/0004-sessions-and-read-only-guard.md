@@ -130,6 +130,23 @@ after whitespace and comments) is `SET`, `RESET`, `USE`, `BEGIN`, `START`, `COMM
 `SchemaChanged` fires on a difference. Never after internal control statements or a reset.
 Cost (accepted): the context can lag behind a change made by any other statement.
 
+**Plan amendment (controller ruling on review M11): PostgreSQL restores the whole
+`search_path`.** The plan's `RestoreSchema` emitted `SET search_path TO "<current_schema()>"`,
+which narrowed a path such as `"$user", public` to one schema on every reset and every guarded
+read-only statement. The PostgreSQL probe now also reads `current_setting('search_path')` (a
+fifth column), parsed as the server reads it (commas outside double quotes split; a quoted
+element is unquoted, `""` is `"`; an unquoted one is trimmed and ASCII-lower-cased) into
+`SchemaCtx.search_path_setting`. The environment plan then carries
+`EnvStep::RestoreSearchPath(list)` and emits `SET search_path TO "e1", "e2"`, each element
+through `quote_pg_ident` (`"$user"` is PostgreSQL's documented spelling of the token, so
+`$user` stays the token and is never resolved). An empty list, an empty element or a NUL is
+never sent; the plan then falls back to `RestoreSchema(current_schema)` as before, as it does
+when the setting is unknown and on MySQL. Tests:
+`the_search_path_setting_is_restored_whole_with_user_kept`,
+`the_setting_is_parsed_like_postgresql_reads_it` and
+`a_two_element_search_path_survives_a_reset_and_a_reprobe` (a name that needs quotes). The
+queue cap (review M12) is parked to M3, unchanged.
+
 **Reset (HV-SESS-08, Q10, Q19).** `ROLLBACK` when not `Idle`, `RawConn::reset()`, then
 PostgreSQL's verify probe `SELECT current_user = session_user`, which must answer true
 (no row fails closed), then the full environment plan (identity included) and MySQL's

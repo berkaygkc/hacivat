@@ -17,6 +17,10 @@ pub struct SchemaCtx {
     pub schema: Option<String>,
     pub search_path: Vec<String>,
     pub user: Option<String>,
+    /// PostgreSQL: the elements of the `search_path` setting as set (`$user` kept as the
+    /// token, names unquoted), restored whole by the environment plan (M11 ruling). Empty when
+    /// unknown.
+    pub search_path_setting: Vec<String>,
 }
 
 /// The engine families whose SQL the session layer writes.
@@ -43,7 +47,8 @@ pub fn schema_probe_sql(kind: DbmsKind) -> &'static str {
     match family(kind) {
         Family::Postgres => {
             "SELECT current_database(), current_schema(), \
-             array_to_string(current_schemas(true), ','), current_user"
+             array_to_string(current_schemas(true), ','), current_user, \
+             current_setting('search_path')"
         }
         Family::MySql => "SELECT DATABASE(), CURRENT_USER()",
         Family::Sqlite => "PRAGMA database_list",
@@ -81,6 +86,9 @@ pub fn parse_schema_probe(kind: DbmsKind, s: &ExecSummary) -> SchemaCtx {
                 })
                 .unwrap_or_default(),
             user: cell(row, 3),
+            search_path_setting: cell(row, 4)
+                .map(|setting| split_search_path(&setting))
+                .unwrap_or_default(),
         },
         // A MySQL database is its schema.
         Family::MySql => {
@@ -90,6 +98,7 @@ pub fn parse_schema_probe(kind: DbmsKind, s: &ExecSummary) -> SchemaCtx {
                 search_path: database.iter().cloned().collect(),
                 database,
                 user: cell(row, 1),
+                search_path_setting: Vec::new(),
             }
         }
         Family::Sqlite | Family::Other => SchemaCtx::default(),
@@ -108,6 +117,51 @@ pub fn switch_schema_sql(kind: DbmsKind, name: &str) -> String {
         Family::MySql => format!("USE {}", quote_my_ident(name)),
         Family::Sqlite | Family::Other => String::new(),
     }
+}
+
+/// The elements of a PostgreSQL `search_path` setting as the server reads them: split at
+/// commas outside double quotes; a quoted element is unquoted (`""` is `"`), an unquoted one
+/// trimmed and folded to ASCII lower case (PostgreSQL's identifier folding in UTF-8). `$user`
+/// stays the token it is.
+pub(crate) fn split_search_path(setting: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = setting.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        let Some(&first) = chars.peek() else {
+            break;
+        };
+        if first == '"' {
+            chars.next();
+            let mut name = String::new();
+            while let Some(c) = chars.next() {
+                if c != '"' {
+                    name.push(c);
+                } else if chars.next_if_eq(&'"').is_some() {
+                    name.push('"');
+                } else {
+                    break;
+                }
+            }
+            // Up to the next element.
+            for c in chars.by_ref() {
+                if c == ',' {
+                    break;
+                }
+            }
+            out.push(name);
+        } else {
+            let mut raw = String::new();
+            for c in chars.by_ref() {
+                if c == ',' {
+                    break;
+                }
+                raw.push(c);
+            }
+            out.push(raw.trim_end().to_ascii_lowercase());
+        }
+    }
+    out
 }
 
 /// The first keywords after which the schema context may have changed.

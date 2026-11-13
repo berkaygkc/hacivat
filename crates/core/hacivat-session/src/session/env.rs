@@ -22,6 +22,8 @@ pub enum EnvStep {
     ReadOnly(Vec<String>),
     TimeZone(String),
     RestoreSchema(String),
+    /// PostgreSQL: the whole `search_path` setting, element by element (M11 ruling).
+    RestoreSearchPath(Vec<String>),
     /// A user startup script (M3).
     StartupScript,
 }
@@ -76,6 +78,9 @@ fn step_statements(kind: DbmsKind, step: &EnvStep) -> Vec<String> {
         (EnvStep::TimeZone(zone), Family::MySql) => {
             vec![format!("SET time_zone = {}", quote_my_literal(zone))]
         }
+        (EnvStep::RestoreSearchPath(path), Family::Postgres) => {
+            search_path_sql(path).into_iter().collect()
+        }
         (EnvStep::RestoreSchema(name), _) => {
             let sql = switch_schema_sql(kind, name);
             if sql.is_empty() {
@@ -109,12 +114,30 @@ pub fn build_env_plan(
             steps.push(EnvStep::ReadOnly(setup));
         }
     }
-    if let Some(name) = last_schema.and_then(|s| s.schema.as_ref())
+    // PostgreSQL restores the whole setting when it is known (M11 ruling), else the schema.
+    let path = last_schema.map(|s| &s.search_path_setting);
+    if family(kind) == Family::Postgres
+        && let Some(path) = path
+        && search_path_sql(path).is_some()
+    {
+        steps.push(EnvStep::RestoreSearchPath(path.clone()));
+    } else if let Some(name) = last_schema.and_then(|s| s.schema.as_ref())
         && !switch_schema_sql(kind, name).is_empty()
     {
         steps.push(EnvStep::RestoreSchema(name.clone()));
     }
     EnvPlan { kind, steps }
+}
+
+/// `SET search_path TO "a", "b"`, each element quoted exactly (`"$user"` is PostgreSQL's
+/// documented spelling of the token). `None` for an empty list or one with an empty element or
+/// a NUL, which is never sent.
+fn search_path_sql(path: &[String]) -> Option<String> {
+    if path.is_empty() || path.iter().any(|e| e.is_empty() || e.contains('\0')) {
+        return None;
+    }
+    let list: Vec<String> = path.iter().map(|e| quote_pg_ident(e)).collect();
+    Some(format!("SET search_path TO {}", list.join(", ")))
 }
 
 /// `s` without NUL characters: no engine stores one in a name or a setting, and the server

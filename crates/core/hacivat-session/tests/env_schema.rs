@@ -134,7 +134,7 @@ fn reprobe_rule() {
 fn probe_statements_and_their_parse() {
     assert_eq!(
         schema_probe_sql(DbmsKind::Postgres),
-        "SELECT current_database(), current_schema(), array_to_string(current_schemas(true), ','), current_user"
+        "SELECT current_database(), current_schema(), array_to_string(current_schemas(true), ','), current_user, current_setting('search_path')"
     );
     assert_eq!(
         schema_probe_sql(DbmsKind::MySql),
@@ -148,13 +148,20 @@ fn probe_statements_and_their_parse() {
     assert_eq!(
         parse_schema_probe(
             DbmsKind::Postgres,
-            &row(&[Some("d"), Some("app"), Some("app,public"), Some("u")])
+            &row(&[
+                Some("d"),
+                Some("app"),
+                Some("app,public"),
+                Some("u"),
+                Some("\"$user\", public")
+            ])
         ),
         SchemaCtx {
             database: Some("d".into()),
             schema: Some("app".into()),
             search_path: vec!["app".into(), "public".into()],
             user: Some("u".into()),
+            search_path_setting: vec!["$user".into(), "public".into()],
         }
     );
     assert_eq!(
@@ -284,4 +291,92 @@ async fn a_schema_name_with_nul_is_refused() {
         .unwrap();
     assert!(matches!(r.unwrap_err().kind, ExecErrorKind::Internal));
     assert!(f.executed().is_empty());
+}
+
+// ## m2b-t07 M11 ruling: PostgreSQL restores the whole `search_path` setting
+
+#[test]
+fn the_search_path_setting_is_restored_whole_with_user_kept() {
+    let ctx = SchemaCtx {
+        schema: Some("public".into()),
+        search_path_setting: vec!["$user".into(), "public".into()],
+        ..SchemaCtx::default()
+    };
+    let p = build_env_plan(DbmsKind::Postgres, &ro_profile(), false, Some(&ctx));
+    assert_eq!(
+        p.statements(),
+        [
+            "SET application_name = 'Hacivat'",
+            "SET search_path TO \"$user\", \"public\""
+        ]
+    );
+    // A name with a quote and a space is quoted exactly; one with NUL is never sent.
+    let odd = SchemaCtx {
+        search_path_setting: vec!["My \"Schema\"".into(), "public".into()],
+        ..SchemaCtx::default()
+    };
+    let p = build_env_plan(DbmsKind::Postgres, &ro_profile(), false, Some(&odd));
+    assert_eq!(
+        p.statements()[1],
+        "SET search_path TO \"My \"\"Schema\"\"\", \"public\""
+    );
+    let nul = SchemaCtx {
+        schema: Some("app".into()),
+        search_path_setting: vec!["a\0b".into()],
+        ..SchemaCtx::default()
+    };
+    let p = build_env_plan(DbmsKind::Postgres, &ro_profile(), false, Some(&nul));
+    // The setting with NUL is never sent; the current schema is restored instead.
+    assert_eq!(p.statements()[1], "SET search_path TO \"app\"");
+    assert!(!p.statements().iter().any(|s| s.contains('\0')));
+}
+
+#[test]
+fn the_setting_is_parsed_like_postgresql_reads_it() {
+    let parse = |setting: &str| {
+        parse_schema_probe(
+            DbmsKind::Postgres,
+            &ExecSummary {
+                rows: vec![vec![None, None, None, None, Some(setting.to_string())]],
+                ..ExecSummary::default()
+            },
+        )
+        .search_path_setting
+    };
+    assert_eq!(parse("\"$user\", public"), ["$user", "public"]);
+    // Unquoted names fold to ASCII lower case; quoted ones keep case, commas and `""`.
+    assert_eq!(
+        parse(" Foo ,\"My \"\"S\"\"\",\"x,y\""),
+        ["foo", "My \"S\"", "x,y"]
+    );
+    assert!(parse("").is_empty());
+}
+
+#[tokio::test]
+async fn a_two_element_search_path_survives_a_reset_and_a_reprobe() {
+    let probe_answer: &[&str] = &[
+        "d",
+        "My Schema",
+        "My Schema,public",
+        "u",
+        "\"My Schema\", public",
+    ];
+    let (h, f) = session(fake_pg().exec(vec![
+        rows("SELECT current_database()", &[probe_answer]),
+        rows("SELECT current_user = session_user", &[&["t"]]),
+        rows("SELECT current_database()", &[probe_answer]),
+    ]))
+    .await;
+    run(&h, "SET search_path TO \"My Schema\", public")
+        .await
+        .unwrap();
+    let want = ["My Schema".to_string(), "public".to_string()];
+    assert_eq!(snap(&h).schema.unwrap().search_path_setting, want);
+    h.submit(Request::Reset).reply.await.unwrap().unwrap();
+    assert_eq!(
+        f.executed().last().map(String::as_str),
+        Some("SET search_path TO \"My Schema\", \"public\"")
+    );
+    run(&h, "ROLLBACK").await.unwrap(); // a re-probe
+    assert_eq!(snap(&h).schema.unwrap().search_path_setting, want);
 }
