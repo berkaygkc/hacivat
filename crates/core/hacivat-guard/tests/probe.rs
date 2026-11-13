@@ -50,9 +50,10 @@ fn probe_sql_per_engine() {
     assert_eq!(
         pg,
         [
-            "SELECT rolsuper, rolbypassrls, rolreplication, rolcreaterole FROM pg_roles WHERE rolname = current_user",
+            // Fix round 2 (I-1): rows 1 and 3 cover every role current_user is a MEMBER of.
+            "SELECT bool_or(rolsuper), bool_or(rolbypassrls), bool_or(rolreplication), bool_or(rolcreaterole) FROM pg_roles WHERE pg_has_role(current_user, oid, 'MEMBER')",
             "SELECT r.rolname FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program','pg_signal_backend','pg_write_all_data')",
-            "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p','v','m','f') AND n.nspname NOT IN ('pg_catalog','information_schema') AND (pg_has_role(current_user, c.relowner, 'USAGE') OR has_table_privilege(c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE')))",
+            "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE c.relkind IN ('r','p','v','m','f','S') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND (c.relowner = r.oid OR CASE WHEN c.relkind = 'S' THEN has_sequence_privilege(r.oid, c.oid, 'USAGE, UPDATE') ELSE has_table_privilege(r.oid, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') OR has_any_column_privilege(r.oid, c.oid, 'INSERT, UPDATE') END)) OR EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND has_schema_privilege(r.oid, n.oid, 'CREATE'))",
             "SELECT has_database_privilege(current_database(), 'TEMP')",
             "SELECT extname FROM pg_extension WHERE extname IN ('dblink','postgres_fdw','pg_net','http')",
         ]
@@ -63,6 +64,86 @@ fn probe_sql_per_engine() {
     for k in [DbmsKind::Sqlite, DbmsKind::MsSql, DbmsKind::Redis] {
         assert!(role_probe_sql(k).is_empty(), "{k:?}");
     }
+}
+
+/// What PostgreSQL 13, 15 and 18 returned for rows 1 and 3 of the corrected probe, run as
+/// `hv_ro` in each scenario (fix round 2, I-1; throwaway containers; the versions agreed, and
+/// `pg_read_all_data`, new in 14, ran on 15 and 18 only). Rows 2 and 5 were empty and row 4
+/// (TEMP, granted to PUBLIC by default) true throughout.
+const PG_SCENARIOS: [(&str, [bool; 4], bool); 11] = [
+    ("SELECT only", [false; 4], false),
+    ("pg_read_all_data (the remediation)", [false; 4], false),
+    ("member of a superuser role", [true; 4], true),
+    ("column-level UPDATE grant", [false; 4], true),
+    ("sequence USAGE", [false; 4], true),
+    ("sequence UPDATE", [false; 4], true),
+    ("CREATE on schema public", [false; 4], true),
+    ("member of a role with INSERT", [false; 4], true),
+    ("member of a table's owner", [false; 4], true),
+    ("database owner", [false; 4], true),
+    ("SELECT only, after revokes", [false; 4], false),
+];
+
+#[test]
+fn pg_scenarios_read_as_their_findings() {
+    for (scenario, flags, write) in PG_SCENARIOS {
+        let f = interpret_probe(DbmsKind::Postgres, &pg_flags(flags, &[], write, true, &[]));
+        let mut want = Vec::new();
+        if flags[0] {
+            want.extend([
+                RoleWarning::Superuser,
+                RoleWarning::BypassRls,
+                RoleWarning::Replication,
+                RoleWarning::CreateRole,
+            ]);
+        }
+        if write {
+            want.push(RoleWarning::WritePrivileges);
+        }
+        want.push(RoleWarning::TempPrivilege);
+        let least = !flags[0] && !write;
+        assert_eq!(
+            f,
+            RoleFindings {
+                least_privilege: least,
+                warnings: want
+            },
+            "{scenario}"
+        );
+    }
+}
+
+#[test]
+fn pg_superuser_membership_alone_is_not_least_privilege() {
+    // Row 1 is aggregated over member roles: a superuser membership shows there even when
+    // row 3 finds nothing to write (for example, no user tables yet).
+    let f = interpret_probe(
+        DbmsKind::Postgres,
+        &pg_flags([true, false, false, false], &[], false, false, &[]),
+    );
+    assert_eq!(
+        f,
+        RoleFindings {
+            least_privilege: false,
+            warnings: vec![RoleWarning::Superuser]
+        }
+    );
+}
+
+#[test]
+fn pg_null_aggregate_row_is_unparsed() {
+    // `bool_or` over no rows is NULL. It cannot happen (a role is a member of itself), so it
+    // fails closed.
+    let mut c = pg_rows(false, &[], false, false, &[]);
+    c[0] = vec![vec![None, None, None, None]];
+    let f = interpret_probe(DbmsKind::Postgres, &c);
+    assert_eq!(
+        f,
+        RoleFindings {
+            least_privilege: false,
+            warnings: vec![RoleWarning::Unparsed]
+        }
+    );
 }
 
 #[test]
@@ -440,6 +521,33 @@ fn mysql_odd_lines_fail_closed() {
             "{rows:?}"
         );
     }
+}
+
+#[test]
+fn mysql_non_ascii_outside_quotes_is_unparsed() {
+    // Fix round 2, M-2: a no-break space or a look-alike letter outside quotes is Unparsed
+    // (it used to read as a role grant; closed either way).
+    for line in [
+        "GRANT SELECT\u{a0}ON `d`.* TO `u`@`%`",
+        "GRANT SELECT ON `d`.* TO\u{a0}`u`@`%`",
+        "GRANT SELECT, SHOW V\u{130}EW ON `d`.* TO `u`@`%`",
+    ] {
+        let f = interpret_probe(DbmsKind::MySql, &grants(&[line]));
+        assert_eq!(
+            f,
+            RoleFindings {
+                least_privilege: false,
+                warnings: vec![RoleWarning::Unparsed]
+            },
+            "{line:?}"
+        );
+    }
+    // Non-ASCII inside quotes is a name, and fine.
+    let f = interpret_probe(
+        DbmsKind::MySql,
+        &grants(&["GRANT SELECT ON `veri_tabanı`.* TO `kullanıcı`@`%`"]),
+    );
+    assert!(f.least_privilege, "{f:?}");
 }
 
 #[test]

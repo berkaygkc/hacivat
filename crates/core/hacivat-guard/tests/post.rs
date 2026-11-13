@@ -150,11 +150,54 @@ fn dml_tags_need_affected_rows() {
             "{tag}"
         );
     }
-    for tag in ["SELECT 5", "SHOW", "EXPLAIN", "INSERTX", ""] {
+    for tag in ["SHOW", "EXPLAIN", "INSERTX", "WITHOUT", ""] {
         assert_eq!(
             check_post(DbmsKind::MySql, &facts().tag(tag).rows(5)),
             PostCheck::Clean,
             "{tag:?}"
+        );
+    }
+}
+
+#[test]
+fn mysql_reads_that_report_affected_rows_are_writes() {
+    // Fix round 2, M-1: `WITH … UPDATE`, `CALL p()`, `DO f()` and `SELECT … INTO OUTFILE`
+    // report affected rows on MySQL; a statement returning a result set reports 0.
+    for k in [DbmsKind::MySql, DbmsKind::MariaDb] {
+        for tag in ["WITH", "with", "CALL", "Do", "SELECT"] {
+            assert_eq!(
+                check_post(k, &facts().tag(tag).rows(3)),
+                GAP_WRITE,
+                "{k:?} {tag}"
+            );
+            assert_eq!(
+                check_post(k, &facts().tag(tag).rows(0)),
+                PostCheck::Clean,
+                "{k:?} {tag}"
+            );
+            assert_eq!(
+                check_post(k, &facts().tag(tag)),
+                PostCheck::Clean,
+                "{k:?} {tag}"
+            );
+        }
+    }
+}
+
+#[test]
+fn postgres_select_row_counts_are_reads() {
+    // PostgreSQL's `SELECT n` counts the rows returned, and its tags never start with `WITH`,
+    // `CALL` or `DO` carrying a write count: the MySQL rule stays off.
+    for tag in ["SELECT 5", "WITH", "CALL", "DO"] {
+        assert_eq!(
+            check_post(DbmsKind::Postgres, &facts().tag(tag).rows(5)),
+            PostCheck::Clean,
+            "{tag}"
+        );
+        assert_eq!(
+            check_post(DbmsKind::Sqlite, &facts().tag(tag).rows(5)),
+            PostCheck::Clean,
+            "{tag}"
         );
     }
 }

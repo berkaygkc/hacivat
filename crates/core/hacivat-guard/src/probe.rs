@@ -33,13 +33,26 @@ pub struct RoleFindings {
     pub warnings: Vec<RoleWarning>,
 }
 
-/// PostgreSQL's probe, one row set per statement: the role's flags, its dangerous predefined
-/// roles, whether it can write any user table, whether it may create temporary tables, and the
-/// extensions that reach other servers.
+/// PostgreSQL's probe, one row set per statement. Everything a role can reach with `SET ROLE`
+/// counts, so rows 1, 2 and 3 look at every role `current_user` is a `MEMBER` of (fix round 2,
+/// I-1: role attributes are never inherited, and membership in a superuser role is one
+/// `set_config('role', …)` away).
+///
+/// 1. The role flags, `bool_or` over those roles (always one row: a role is a member of
+///    itself).
+/// 2. The dangerous predefined roles among them.
+/// 3. Whether any of them can write: owns a user relation; holds `INSERT`/`UPDATE`/`DELETE`/
+///    `TRUNCATE` on one, or column-level `INSERT`/`UPDATE` (`has_any_column_privilege`); holds
+///    `USAGE` or `UPDATE` on a sequence; or holds `CREATE` on a user schema (`public` on
+///    clusters created before PostgreSQL 15 or upgraded from one, and the database owner's
+///    `public` on 15+). Schemas are filtered with `!~ '^pg_'`, which needs no escape and so
+///    does not depend on `standard_conforming_strings`.
+/// 4. TEMP on the database.
+/// 5. The extensions that reach other servers.
 const PG_PROBE: [&str; 5] = [
-    "SELECT rolsuper, rolbypassrls, rolreplication, rolcreaterole FROM pg_roles WHERE rolname = current_user",
+    "SELECT bool_or(rolsuper), bool_or(rolbypassrls), bool_or(rolreplication), bool_or(rolcreaterole) FROM pg_roles WHERE pg_has_role(current_user, oid, 'MEMBER')",
     "SELECT r.rolname FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program','pg_signal_backend','pg_write_all_data')",
-    "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p','v','m','f') AND n.nspname NOT IN ('pg_catalog','information_schema') AND (pg_has_role(current_user, c.relowner, 'USAGE') OR has_table_privilege(c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE')))",
+    "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE c.relkind IN ('r','p','v','m','f','S') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND (c.relowner = r.oid OR CASE WHEN c.relkind = 'S' THEN has_sequence_privilege(r.oid, c.oid, 'USAGE, UPDATE') ELSE has_table_privilege(r.oid, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') OR has_any_column_privilege(r.oid, c.oid, 'INSERT, UPDATE') END)) OR EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND has_schema_privilege(r.oid, n.oid, 'CREATE'))",
     "SELECT has_database_privilege(current_database(), 'TEMP')",
     "SELECT extname FROM pg_extension WHERE extname IN ('dblink','postgres_fdw','pg_net','http')",
 ];
@@ -416,7 +429,8 @@ impl Token<'_> {
 
 /// Splits a grant line into words, quoted names (`` ` ``, `'`, `"`; a doubled quote escapes
 /// itself, and `\` escapes inside `'` and `"`), commas and parentheses. `None` for an
-/// unterminated quote, unbalanced parentheses or a `;` outside quotes (a second statement).
+/// unterminated quote, unbalanced parentheses, a `;` outside quotes (a second statement) or a
+/// non-ASCII character outside quotes.
 fn tokenize(line: &str) -> Option<Vec<Token<'_>>> {
     let bytes = line.as_bytes();
     let mut tokens = Vec::new();
@@ -464,6 +478,11 @@ fn tokenize(line: &str) -> Option<Vec<Token<'_>>> {
         }
         // `i` only ever stops on an ASCII byte or the end, so the slice is on char boundaries.
         let text = line.get(start..i)?;
+        // Servers print keywords, `*.*` and `@` in ASCII; anything else outside quotes (a
+        // no-break space, a look-alike letter) is a line the parser does not know (M-2).
+        if !quoted && !text.is_ascii() {
+            return None;
+        }
         tokens.push(Token {
             text,
             quoted,

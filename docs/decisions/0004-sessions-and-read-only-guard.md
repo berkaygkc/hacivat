@@ -73,6 +73,18 @@ folded (PostgreSQL tags; MySQL and SQLite report the first keyword, Q35):
   literal "`rows_affected > 0`" rule could never fire for them. Added beyond the plan's list:
   `RENAME`, `GRANT`, `REVOKE`. None of these can succeed inside a read-only transaction, so
   there are no false positives.
+- MySQL and MariaDB only (fix round 2, review M-1): `WITH`, `CALL`, `DO` and `SELECT` with
+  `rows_affected > 0`. Each can write: `WITH … UPDATE/DELETE`, a procedure, a function with side
+  effects, or `SELECT … INTO OUTFILE/DUMPFILE`. MySQL has no canary, so the tag is its only
+  post-check signal. A statement that returns a result set reports 0 affected rows in its final
+  OK packet, so a positive count is a write. **Task 13 contract:** `rows_affected` comes from
+  the server's OK packet (mysql_async `affected_rows()`), never from the number of rows
+  returned (that is `row_count`). Otherwise every MySQL `SELECT` would trip the gap: loud, but
+  closed. The first keyword must skip leading comments and parentheses the way Task 18 step 1a
+  does, or `/* x */ INSERT …` yields no tag. PostgreSQL is left out: its `SELECT n` tag counts
+  the rows returned. `INTO OUTFILE` stays primarily the role probe's job (`FILE` →
+  `ServerFileRoles` → guarded), and so do `COPY … TO PROGRAM`, `lo_export` and `dblink_exec`,
+  which no read-only transaction stops.
 
 Rejected: trusting `rows_affected` alone (DDL has none); treating an unknown transaction state
 as clean (the session may not have recorded it, and the guard cannot then confirm that the
@@ -114,13 +126,81 @@ reads table `t` the same way. Assigning to a pragma that has a setter stays deni
 every other pragma is refused whenever it carries an argument. A text-level refusal of
 `= …` would have to sit in Task 11's adapter, which sees the SQL. It would add no safety.
 
-**Role probe (MCP-09 step 1).** PostgreSQL runs five statements (role flags; membership in
-`pg_read_server_files`, `pg_write_server_files`, `pg_execute_server_program`,
-`pg_signal_backend`, `pg_write_all_data`; any owned or writable user relation; TEMP on the
-database; `dblink`, `postgres_fdw`, `pg_net`, `http`). Least privilege is all of: no flag set,
-no predefined-role row, no writable relation, no egress extension. TEMP adds `TempPrivilege`
-and keeps least privilege (Q21: the read-only transaction already refuses `CREATE TEMP`,
-#pg-ro-temp; the reset drops temp objects). MySQL and MariaDB run `SHOW GRANTS`; least
+**Role probe (MCP-09 step 1).** PostgreSQL runs five statements:
+
+1. the role flags;
+2. membership in `pg_read_server_files`, `pg_write_server_files`,
+   `pg_execute_server_program`, `pg_signal_backend` and `pg_write_all_data`;
+3. any user relation, sequence or schema the role could write;
+4. TEMP on the database;
+5. the `dblink`, `postgres_fdw`, `pg_net` and `http` extensions.
+
+Least privilege is all of: no flag set, no predefined-role row, nothing writable, no egress
+extension. TEMP adds `TempPrivilege` and keeps least privilege (Q21: the read-only transaction
+already refuses `CREATE TEMP`, #pg-ro-temp; the reset drops temp objects).
+
+*Fix round 2 (review I-1; controller ruling: the plan's rows 1 and 3 were a plan defect).*
+The plan's row 1 read the attributes of `current_user` alone, and its row 3 checked only
+ownership through `USAGE`, table-level privileges and tables. That missed:
+
+- role attributes, which are never inherited, so `GRANT postgres TO hv_ro` reads clean while
+  one `set_config('role', 'postgres', true)` in a guarded statement makes it a superuser, and
+  `pg_read_file`, `lo_export` or `COPY … TO PROGRAM` then run inside the read-only transaction;
+- column-level grants (`GRANT UPDATE (email) ON users`), which `has_table_privilege` ignores;
+- `CREATE` on a schema: `public` on clusters created before PostgreSQL 15 or upgraded from one,
+  and the database owner (through `pg_database_owner`) on 15+;
+- sequences (`USAGE`/`UPDATE` let `nextval`/`setval` write).
+
+The corrected statements keep the row shapes (one row of four booleans; one boolean), so
+`interpret_probe` and Task 18 are unchanged.
+
+- Row 1 is `bool_or` of each flag over every role `current_user` is a `MEMBER` of. That is
+  always one row: a role is a member of itself, and a NULL fails closed as `Unparsed`.
+- Row 3 is true when any member role:
+  - owns a user relation (`r`, `p`, `v`, `m`, `f`, `S`);
+  - holds `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE` on one, or column-level `INSERT`/`UPDATE`
+    (`has_any_column_privilege`);
+  - holds `USAGE`/`UPDATE` on a sequence (`has_sequence_privilege`, behind a `CASE` because
+    it errors on a non-sequence);
+  - or holds `CREATE` on a schema outside `pg_*` and `information_schema`.
+
+  Schemas are filtered with `!~ '^pg_'`, not `LIKE 'pg\_%'`, so the filter does not depend on
+  `standard_conforming_strings`.
+
+Validated on throwaway `postgres:13`, `:15` and `:18` containers (not the M2a matrix), as
+`hv_ro`. The corrected rows flag every one of these (row 1 all true for the superuser
+membership; row 3 true for all of them):
+
+- a member of a superuser role;
+- a column-level `UPDATE`;
+- sequence `USAGE`;
+- sequence `UPDATE`;
+- `CREATE` on `public`;
+- a member of a role with `INSERT`;
+- a member of a table's owner;
+- the database owner.
+
+They stay clean for a `SELECT`-only role and for `pg_read_all_data` (15 and 18). On
+PostgreSQL 18 the plan's rows read five of them as all clean, which would have shown
+**Read-only (enforced)**:
+
+- the superuser membership;
+- the column-level `UPDATE`;
+- sequence `USAGE`;
+- `CREATE` on `public`;
+- the database owner.
+
+The plan's row 3 does catch inherited ownership and inherited table privileges.
+
+Consequence: on a cluster where `PUBLIC` still holds `CREATE` on `public` (PostgreSQL ≤ 14, or
+upgraded from one), the remediation role reads as `WritePrivileges` (guarded) until
+`REVOKE CREATE ON SCHEMA public FROM PUBLIC`, because any role there can create tables. The
+remediation string is unchanged (brief, mock, Q21); see the report. Task 18's Docker run
+should cover:
+
+- a superuser membership;
+- a column-level `UPDATE`;
+- `CREATE` on `public`. MySQL and MariaDB run `SHOW GRANTS`; least
 privilege is every `GRANT` line within `USAGE`, `SELECT`, `SHOW VIEW` (a column list such as
 `SELECT (a)` counts as `SELECT`), with no `WITH GRANT OPTION`/`WITH ADMIN OPTION` and no
 `PROXY`. A role grant is `RoleGrantNotExpanded` (fails closed: the probe does not expand it).
@@ -136,7 +216,9 @@ keep least privilege, per the plan's three-privilege rule).
 `Unparsed`, and not least privilege, for: the wrong number of row sets; a row set of the wrong
 shape (missing, extra rows, extra columns, NULL); a boolean other than `t`/`f`/`true`/`false`;
 a role or extension name outside the probe's own lists; an empty `SHOW GRANTS`; a line that is
-not `GRANT`/`REVOKE`; an unterminated quote, unbalanced parentheses or an unquoted `;`; no
+not `GRANT`/`REVOKE`; an unterminated quote, unbalanced parentheses, an unquoted `;` or an
+unquoted non-ASCII character (fix round 2, M-2: a no-break space used to read as a role
+grant); no
 `TO`; a second `ON`/`TO` after the grantee; an empty or quoted privilege; a privilege without a
 row in the table (`PROCESS`, `SHOW DATABASES`, dynamic `*_ADMIN` privileges); any engine
 without a probe. An `EgressExtension` warning carries the name from the probe's list, never
@@ -160,11 +242,13 @@ their label enforced. The strings carry only the `<role>`, `<password>` and `<da
 placeholders; the UI shows and copies them unchanged.
 
 **Tests.** `crates/core/hacivat-guard/tests/{plans,post,sqlite_authorizer,probe,labels}.rs`
-(52 tests): exact plan values; every gap and its order; unknown transaction state; tags in any
-case, with and without row counts; byte-counted input limits; every pragma of the list without
+(58 tests): exact plan values; every gap and its order; unknown transaction state; tags in any
+case, with and without row counts; MySQL `WITH`/`CALL`/`DO`/`SELECT` with affected rows, and
+PostgreSQL `SELECT n` left alone; byte-counted input limits; every pragma of the list without
 an argument and every setting pragma with one, in both cases; the six introspection pragmas
 with a name argument; malformed and look-alike names; every write, attach and raw
 action code (-1..=40 and the `i32` extremes) denied; every PostgreSQL warning and every
-malformed probe shape; MySQL grant lines with odd whitespace, case, quoting, column lists,
+malformed probe shape; the PostgreSQL 13/15/18 answers of each fix-round-2 scenario; a NULL
+aggregate row; MySQL non-ASCII outside quotes; MySQL grant lines with odd whitespace, case, quoting, column lists,
 role grants, grant options, partial revokes and a smuggled second statement; labels, including
 self-contradicting findings; the exact remediation strings.

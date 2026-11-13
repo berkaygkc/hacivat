@@ -51,6 +51,15 @@ const ROW_WRITE_TAGS: [&str; 7] = [
     "INSERT", "UPDATE", "DELETE", "MERGE", "COPY", "REPLACE", "LOAD",
 ];
 
+/// MySQL and MariaDB only (fix round 2, M-1): first keywords whose statement can write while
+/// reporting a row count. `WITH` heads a data-changing CTE statement, `CALL` and `DO` run code
+/// that may write, and `SELECT … INTO OUTFILE/DUMPFILE` writes a file. On MySQL a statement
+/// that returns a result set reports 0 affected rows in its final OK packet, so a positive
+/// count on one of these is a write. This relies on the driver taking `rows_affected` from
+/// the server's OK packet, never from the number of rows returned (Task 13). PostgreSQL is
+/// left out: its `SELECT n` tag counts the rows returned.
+const MYSQL_ROW_WRITE_TAGS: [&str; 4] = ["WITH", "CALL", "DO", "SELECT"];
+
 /// First keywords of statements that change the schema or privileges. They never carry a row
 /// count, so one that succeeded inside the read-only transaction is an escape on its own.
 const SCHEMA_WRITE_TAGS: [&str; 7] = [
@@ -62,8 +71,9 @@ const SCHEMA_WRITE_TAGS: [&str; 7] = [
 /// 1. PostgreSQL, MySQL and MariaDB: the statement left the guard's transaction (`Idle`, or
 ///    an unknown state, which fails closed), or the guard's `ROLLBACK` drew `25P01` →
 ///    `TransactionEndedByStatement`.
-/// 2. A write tag succeeded: a row-writing tag with `rows_affected > 0`, or any schema or
-///    privilege tag → `WriteSucceeded`.
+/// 2. A write tag succeeded: a row-writing tag with `rows_affected > 0` (on MySQL and MariaDB
+///    also `WITH`, `CALL`, `DO` and `SELECT`), or any schema or privilege tag →
+///    `WriteSucceeded`.
 /// 3. The canary returned a transaction ID (`Some(Some(_))`) → `CanaryAssigned`.
 ///
 /// SQLite runs in autocommit (its layers are connection-level), so only step 2 applies. An
@@ -74,7 +84,7 @@ pub fn check_post(kind: DbmsKind, facts: &PostFacts) -> PostCheck {
             if transaction_ended(facts) {
                 return PostCheck::Gap(GapReason::TransactionEndedByStatement);
             }
-            if write_succeeded(facts) {
+            if write_succeeded(kind, facts) {
                 return PostCheck::Gap(GapReason::WriteSucceeded);
             }
             if matches!(facts.canary, Some(Some(_))) {
@@ -83,7 +93,7 @@ pub fn check_post(kind: DbmsKind, facts: &PostFacts) -> PostCheck {
             PostCheck::Clean
         }
         DbmsKind::Sqlite => {
-            if write_succeeded(facts) {
+            if write_succeeded(kind, facts) {
                 PostCheck::Gap(GapReason::WriteSucceeded)
             } else {
                 PostCheck::Clean
@@ -104,7 +114,7 @@ fn transaction_ended(facts: &PostFacts) -> bool {
         .any(|c| c.trim().eq_ignore_ascii_case(NO_TRANSACTION_IN_PROGRESS))
 }
 
-fn write_succeeded(facts: &PostFacts) -> bool {
+fn write_succeeded(kind: DbmsKind, facts: &PostFacts) -> bool {
     let Some(first) = facts
         .command_tag
         .as_deref()
@@ -113,5 +123,7 @@ fn write_succeeded(facts: &PostFacts) -> bool {
         return false;
     };
     let is = |tags: &[&str]| tags.iter().any(|t| first.eq_ignore_ascii_case(t));
-    is(&SCHEMA_WRITE_TAGS) || (is(&ROW_WRITE_TAGS) && facts.rows_affected.is_some_and(|n| n > 0))
+    let mysql = matches!(kind, DbmsKind::MySql | DbmsKind::MariaDb);
+    let row_write = is(&ROW_WRITE_TAGS) || (mysql && is(&MYSQL_ROW_WRITE_TAGS));
+    is(&SCHEMA_WRITE_TAGS) || (row_write && facts.rows_affected.is_some_and(|n| n > 0))
 }
