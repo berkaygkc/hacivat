@@ -242,6 +242,41 @@ fn connections_toml_never_contains_a_secret(cx: &mut TestAppContext) {
     assert!(!text.contains("s3cret-pw"));
     assert!(!text.contains("password"));
     assert_secret(backend(vcx).get(&db_key(vcx)).unwrap(), "s3cret-pw");
+
+    // ## m2a-finalfix (E9, I1): the extras path. Every key the shared rule calls a password
+    // stays out of the profile and the file, whatever its spelling; other extras are kept.
+    let mut draft = ProfileDraft::edit(only_profile(vcx));
+    draft.profile.extra = [
+        ("pgpassword", "s3cret-x1"),
+        ("PGPASSWORD", "s3cret-x2"),
+        ("db_password", "s3cret-x3"),
+        ("--pwd", "s3cret-x4"),
+        ("sslpassword", "s3cret-x5"),
+        ("sslkeypassword", "s3cret-x6"),
+        ("mysql_pwd", "s3cret-x7"),
+        ("x-password", "s3cret-x8"),
+        ("target_session_attrs", "read-write"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    save(vcx, draft);
+    let text = read(&paths(vcx).connections_toml());
+    assert!(
+        !text.contains("s3cret"),
+        "a secret reached connections.toml"
+    );
+    assert!(!text.to_ascii_lowercase().contains("password"));
+    assert!(!text.contains("pwd"));
+    assert!(
+        text.contains("target_session_attrs"),
+        "other extras are kept"
+    );
+    let kept = only_profile(vcx).extra;
+    assert_eq!(
+        kept,
+        vec![("target_session_attrs".to_string(), "read-write".to_string())]
+    );
 }
 
 #[gpui::test]
@@ -439,39 +474,17 @@ fn saved_profiles_load_back_in_order(cx: &mut TestAppContext) {
     assert_eq!(names, ["a", "b"]);
 }
 
-#[cfg(unix)]
+// ## m2a-finalfix
+/// M4: the MySQL forwarder listens on loopback TCP (it never uses a Unix socket, R18), so a
+/// boot creates no private socket directory.
 #[test]
-fn private_dir_is_0700_under_the_local_data() {
-    use std::os::unix::fs::PermissionsExt;
+fn a_boot_creates_no_forwarder_socket_directory() {
     let root = tempfile::tempdir().unwrap();
     let paths = LocalPaths::under(root.path());
-    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-
     let boot = ConnectionsBoot::for_tests(&paths, DriverRegistry::new());
-    assert_ne!(boot.private_dir, std::env::temp_dir());
-    assert!(boot.private_dir.ends_with("fwd"), "{:?}", boot.private_dir);
-    assert!(
-        boot.private_dir.starts_with(&paths.data) || boot.private_dir.starts_with(&paths.cache),
-        "{:?}",
-        boot.private_dir
-    );
-    assert_eq!(mode(&boot.private_dir), 0o700);
-
-    // An existing directory with a looser mode is tightened.
-    std::fs::set_permissions(&boot.private_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let again = ConnectionsBoot::for_tests(&paths, DriverRegistry::new());
-    assert_eq!(mode(&again.private_dir), 0o700);
-    again.runtime.shutdown(Duration::from_millis(100));
+    assert!(!paths.data.join("fwd").exists());
+    assert!(!paths.cache.join("fwd").exists());
     boot.runtime.shutdown(Duration::from_millis(100));
-
-    // A data path too long for a socket path falls back to the cache directory.
-    let long = LocalPaths {
-        data: root.path().join("d".repeat(90)),
-        ..LocalPaths::under(root.path())
-    };
-    let dir = hacivat_app::connections::boot::private_dir_for(&long);
-    assert_eq!(dir, long.cache.join("fwd"));
-    assert_eq!(mode(&dir), 0o700);
 }
 
 #[test]
@@ -531,15 +544,45 @@ fn an_org_tag_survives_an_edit_and_a_user_cannot_claim_one(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn a_duplicate_of_a_managed_profile_is_the_users_own(cx: &mut TestAppContext) {
+fn a_duplicate_of_a_managed_profile_tags_as_the_user(cx: &mut TestAppContext) {
     let vcx = shell_with_connections_file(cx, "en", MANAGED);
     let original = only_profile(vcx);
     let copy_id = duplicate(vcx, original.id);
     let copy = profiles(vcx).into_iter().find(|p| p.id == copy_id).unwrap();
     assert_eq!(copy.env_source, TagSource::User);
-    assert_eq!(copy.origin, Origin::UserTyped);
+    // ## m2a-finalfix (M1): only the tag's source is reset; the origin is kept.
+    assert_eq!(copy.origin, original.origin);
     assert_eq!(copy.environment, Some(EnvTag::Production));
     assert_eq!(only_profile(vcx).env_source, TagSource::Org);
+}
+
+// ## m2a-finalfix
+/// M1: a duplicate never launders an untrusted origin: a copy of a pasted or imported profile
+/// is still `Imported`, in memory and in the file, so DRV-05 still checks its options.
+#[gpui::test]
+fn a_duplicate_keeps_the_origin(cx: &mut TestAppContext) {
+    use hacivat_proto::ImportSource;
+    let vcx = shell_with_connections(cx, "en");
+    for source in [ImportSource::Url, ImportSource::PgService] {
+        let mut draft = named_draft("pasted");
+        draft.profile.origin = Origin::Imported { source };
+        let id = save(vcx, draft);
+        let copy_id = duplicate(vcx, id);
+        let copy = profiles(vcx).into_iter().find(|p| p.id == copy_id).unwrap();
+        assert_eq!(copy.origin, Origin::Imported { source });
+        assert_eq!(copy.env_source, TagSource::User);
+    }
+    let text = read(&paths(vcx).connections_toml());
+    assert_eq!(
+        text.matches("origin = \"imported_url\"").count(),
+        2,
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("origin = \"imported_pg_service\"").count(),
+        2,
+        "{text}"
+    );
 }
 
 #[gpui::test]

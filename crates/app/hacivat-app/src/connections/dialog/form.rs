@@ -481,7 +481,9 @@ pub(crate) fn field_of_issue(issue: &ValidationIssue) -> Option<Field> {
         ) => Some(Field::Ca),
         (_, IssueCode::TlsCertUnreadable) => Some(Field::Cert),
         (_, IssueCode::TlsKeyEncrypted) => Some(Field::Key),
-        (_, IssueCode::OptionRejected { .. }) => Some(Field::AppName),
+        (_, IssueCode::OptionRejected { .. } | IssueCode::OptionSecret { .. }) => {
+            Some(Field::AppName)
+        }
         _ => None,
     }
 }
@@ -611,6 +613,16 @@ fn issue_text(cx: &App, issue: &ValidationIssue) -> SharedString {
                 cx,
                 ids::hv::CONN_ISSUE_OPTION_REJECTED,
                 ids::hv::HvConnIssueOptionRejected {
+                    key: Text(key.clone()),
+                },
+            );
+        }
+        // ## m2a-finalfix
+        IssueCode::OptionSecret { key } => {
+            return tr(
+                cx,
+                ids::hv::CONN_ISSUE_OPTION_SECRET,
+                ids::hv::HvConnIssueOptionSecret {
                     key: Text(key.clone()),
                 },
             );

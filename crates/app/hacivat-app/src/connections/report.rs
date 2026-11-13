@@ -5,7 +5,8 @@
 //! Every line comes from Fluent: the step names, the diagnostics, the warnings, the error's
 //! heading and explanation (`error-conn-<class>-title`/`-body` with the error's arguments, never
 //! the server's text), and each copied line (`hv-conn-diag-row`). The server's own message is
-//! data and is copied verbatim. Nothing here ever holds a password.
+//! data and is copied verbatim, after `hacivat_secrets::scrub_url` (a message that is a
+//! connection string loses its password). Nothing here ever holds a password.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -509,10 +510,12 @@ pub(crate) fn tech_rows(f: &Fmt, e: &ConnectError) -> Vec<(&'static str, String,
         rows.push(("code", f.t(ids::hv::CONN_ERR_CODE, NoArgs), code));
     }
     if let Some(server) = &e.server {
+        // ## m2a-finalfix (M4): the server's message is data, shown and copied as sent, except
+        // a password `scrub_url` recognizes (a server that echoes a connection string).
         rows.push((
             "server",
             f.t(ids::hv::CONN_ERR_SERVER, NoArgs),
-            server.text.clone(),
+            hacivat_secrets::scrub_url(&server.text),
         ));
     }
     rows.push((

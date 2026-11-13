@@ -428,3 +428,32 @@ fn editing_a_connecting_profile_cancels_then_saves(cx: &mut TestAppContext) {
     assert_eq!(live(vcx, "a"), LiveState::Disconnected);
     assert_eq!(profile(vcx, "a").database.as_deref(), Some("orders"));
 }
+
+// ## m2a-finalfix
+/// I3: a chain checked without the host name (`VerifyCa`) is "CA verified" on every surface
+/// that names the encryption (the status bar and the sheet share `encryption_label`), never
+/// plain "verified".
+#[gpui::test]
+fn ca_only_verification_is_not_called_verified(cx: &mut TestAppContext) {
+    use hacivat_net::{TlsSummary, TlsVerified};
+    let vcx = with_fake(
+        cx,
+        ok_pg().tls(TlsSummary {
+            encrypted: true,
+            version: Some("TLSv1.3".into()),
+            cipher: None,
+            verified: TlsVerified::CaOnly,
+        }),
+    );
+    connect_and_wait(vcx, "a");
+    let status = strip_marks(&status_bar_text(vcx));
+    assert!(status.contains("TLS 1.3 · CA verified"), "{status}");
+    let LiveState::Connected(info) = live(vcx, "a") else {
+        panic!("connected");
+    };
+    let p = profile(vcx, "a");
+    let sheet = vcx
+        .cx
+        .read(|cx| hacivat_app::connections::capsule::encryption_label(cx, &p, &info).to_string());
+    assert_eq!(strip_marks(&sheet), "TLS 1.3 · CA verified");
+}

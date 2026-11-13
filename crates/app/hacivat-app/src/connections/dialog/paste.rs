@@ -12,6 +12,11 @@
 //!   240 ms. An inline notice lists exactly what happened (the password moved out, parameters
 //!   mapped, unknown ones kept) with Undo; a URL for another engine asks before switching a form
 //!   that already has input; text that is no connection changes nothing and lists the formats.
+//! - **Trust (M2a final review I5).** A profile created or filled from pasted text is
+//!   `Origin::Imported { source: Url }` (unless it already has an untrusted or managed
+//!   origin), so DRV-05 checks its options and its TLS files must lie under the approved roots
+//!   (the home directory, or a file picked in the dialog). Text typed into the URL row is the
+//!   user's own and keeps the origin.
 
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -22,9 +27,9 @@ use hacivat_driver::url::{
     parse,
 };
 use hacivat_l10n::{Count, NoArgs, Text, ids};
-use hacivat_proto::DbmsKind;
+use hacivat_proto::{DbmsKind, ImportSource, Origin};
 use hacivat_secrets::Retention;
-use hacivat_session::profile::{EngineChange, Profile, apply_parse};
+use hacivat_session::profile::{EngineChange, FoldedOption, FoldedTo, Profile, apply_parse};
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::icon::IconName;
 use hacivat_ui::input::PasteFilter;
@@ -83,6 +88,8 @@ pub(crate) enum Notice {
         secret: bool,
         retention: Retention,
         mapped: Vec<MappedParam>,
+        /// Extras with a typed setting, which went to it (I2).
+        folded: Vec<FoldedOption>,
         extras: Vec<(String, String)>,
         /// The host used and how many the URL named.
         multihost: Option<(String, usize)>,
@@ -92,6 +99,8 @@ pub(crate) enum Notice {
         url: DbmsKind,
         form: DbmsKind,
         outcome: Box<ParseOutcome>,
+        /// The text was pasted (not typed into the URL row): it fills as an import (I5).
+        pasted: bool,
     },
     /// Text that is not a connection: nothing changed.
     Unrecognised,
@@ -145,7 +154,7 @@ impl ConnectionDialog {
                 self.notice = Some(Notice::Unrecognised);
                 cx.notify();
             }
-            ParseResult::Recognised(outcome) => self.apply_outcome(outcome, window, cx),
+            ParseResult::Recognised(outcome) => self.apply_outcome(outcome, true, window, cx),
         }
     }
 
@@ -174,16 +183,17 @@ impl ConnectionDialog {
                 {
                     outcome.tls_key_passphrase = None;
                 }
-                self.apply_outcome(outcome, window, cx);
+                self.apply_outcome(outcome, false, window, cx);
             }
         }
     }
 
     /// Applies a recognised outcome: fills the form, or asks before switching the engine of a
-    /// form with input.
+    /// form with input. `pasted`: the text came from a paste, not the URL row's own text.
     fn apply_outcome(
         &mut self,
         outcome: ParseOutcome,
+        pasted: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -194,18 +204,21 @@ impl ConnectionDialog {
                 url: outcome.kind,
                 form,
                 outcome: Box::new(outcome),
+                pasted,
             });
         } else {
-            self.fill(outcome, false, window, cx);
+            self.fill(outcome, false, pasted, window, cx);
         }
         cx.notify();
     }
 
-    /// Fills the form from `outcome` (`force`: the user accepted another engine).
+    /// Fills the form from `outcome` (`force`: the user accepted another engine; `pasted`:
+    /// the text was pasted, so the profile becomes an import from a URL, I5).
     fn fill(
         &mut self,
         outcome: ParseOutcome,
         force: bool,
+        pasted: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -218,6 +231,19 @@ impl ConnectionDialog {
         });
         let read_only_before = self.draft.profile.read_only;
         let report = apply_parse(&mut self.draft, outcome, force);
+        // ## m2a-finalfix (I5): pasted text is an untrusted origin. A profile that already
+        // has one (an import, a managed profile) keeps it.
+        if pasted && self.draft.profile.origin == Origin::UserTyped {
+            self.draft.profile.origin = Origin::Imported {
+                source: ImportSource::Url,
+            };
+        }
+        // Extras with a typed setting went to it (I2): listed as mapped, not as kept.
+        let folded = report.folded.clone();
+        let extras: Vec<(String, String)> = extras
+            .into_iter()
+            .filter(|(k, v)| !folded.iter().any(|f| &f.key == k && &f.value == v))
+            .collect();
         // SQLite `mode=ro` is the file option "Open the file read-only", not the Hacivat guard
         // (ruling A): the guard keeps its value, the option is set.
         if self.draft.profile.engine == hacivat_proto::DbmsKind::Sqlite
@@ -252,6 +278,7 @@ impl ConnectionDialog {
             secret: report.password_moved,
             retention: self.draft.profile.retention,
             mapped,
+            folded,
             extras,
             multihost,
         });
@@ -262,12 +289,15 @@ impl ConnectionDialog {
 
     /// "Switch to <engine> and fill": the held URL replaces what the form had.
     pub(crate) fn accept_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Notice::Switch { outcome, .. }) = self.notice.take() else {
+        let Some(Notice::Switch {
+            outcome, pasted, ..
+        }) = self.notice.take()
+        else {
             return;
         };
         let before = self.snapshot();
         self.draft.touched.clear();
-        self.fill(*outcome, true, window, cx);
+        self.fill(*outcome, true, pasted, window, cx);
         // Undo goes back to the form as it was before the switch.
         self.undo = Some(before);
     }
@@ -348,6 +378,7 @@ impl ConnectionDialog {
                 secret,
                 retention,
                 mapped,
+                folded,
                 extras,
                 multihost,
             } => {
@@ -391,6 +422,18 @@ impl ConnectionDialog {
                             ),
                         );
                     }
+                }
+                for f in folded {
+                    n = n.param(
+                        param_text(&f.key, &f.value),
+                        tr(
+                            cx,
+                            ids::hv::CONN_URL_MAPPED,
+                            ids::hv::HvConnUrlMapped {
+                                setting: Text(folded_setting(cx, &f.to).to_string()),
+                            },
+                        ),
+                    );
                 }
                 for (k, v) in extras {
                     n = n.param(param_text(k, v), tr(cx, ids::hv::CONN_URL_EXTRA, NoArgs));
@@ -476,6 +519,25 @@ fn secret_line(cx: &App, retention: Retention) -> SharedString {
         ids::hv::CONN_URL_SECRET_OTHER,
         ids::hv::HvConnUrlSecretOther { ret },
     )
+}
+
+// ## m2a-finalfix
+/// The form setting a folded extra became (I2).
+fn folded_setting(cx: &App, to: &FoldedTo) -> SharedString {
+    match to {
+        FoldedTo::TlsMode(mode) => tr(
+            cx,
+            ids::hv::CONN_URL_SETTING_TLS,
+            ids::hv::HvConnUrlSettingTls {
+                mode: Text(tr(cx, tls_label(*mode), NoArgs).to_string()),
+            },
+        ),
+        FoldedTo::CaFile(_) => tr(cx, ids::hv::CONN_TLS_CA, NoArgs),
+        FoldedTo::ClientCert => tr(cx, ids::hv::CONN_DLG_CERT, NoArgs),
+        FoldedTo::ClientKey => tr(cx, ids::hv::CONN_DLG_KEY, NoArgs),
+        FoldedTo::ConnectTimeout(_) => tr(cx, ids::hv::CONN_ADV_TIMEOUT, NoArgs),
+        FoldedTo::ApplicationName => tr(cx, ids::hv::CONN_ADV_APP, NoArgs),
+    }
 }
 
 /// The form setting a mapped parameter became (`None` for `options`, which also stays an extra

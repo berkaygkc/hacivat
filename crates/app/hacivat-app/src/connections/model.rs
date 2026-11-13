@@ -23,10 +23,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use hacivat_l10n::{Count, NoArgs, Text, ids};
-use hacivat_proto::{Origin, ProfileId, TagSource};
+use hacivat_proto::{ProfileId, TagSource};
 use hacivat_secrets::{Retention, SecretError, SecretKey, SecretSlot, SecretStore, Stored};
 use hacivat_session::profile::{
     Profile, ProfileDiag, ProfileDraft, ProfileStore, StoreError, duplicate_name,
+    fold_typed_options, strip_secret_options,
 };
 use hacivat_session::{ConnectionManager, CoreRuntime, LiveState, TestHandle};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
@@ -166,6 +167,11 @@ impl ConnectionsModel {
         if !is_new && stored.is_none() {
             return Task::ready(Err(SaveError::NotFound));
         }
+        // ## m2a-finalfix: one value per setting, and never a password in `extra` (I1, I2):
+        // options with a typed setting go to it, password-like ones are dropped, in memory as
+        // in the file.
+        strip_secret_options(&mut profile);
+        fold_typed_options(&mut profile);
         match stored.as_deref() {
             Some(old) if old.env_source == TagSource::Org => {
                 profile.environment = old.environment;
@@ -230,9 +236,11 @@ impl ConnectionsModel {
     }
 
     /// Saves a copy of `id` right after it, named `<name>-2` (or the next free number), with
-    /// copies of its secrets, selects it and shows the `hv-conn-toast-dup` toast. The copy is
-    /// the user's own: its tag is the user's and its origin `UserTyped` (D-004), even when the
-    /// original is managed by the organization.
+    /// copies of its secrets, selects it and shows the `hv-conn-toast-dup` toast. The copy's
+    /// tag is the user's (`env_source` `User`, D-004), even when the organization set the
+    /// original's. It keeps the original's origin (M2a final review M1): a copy of an imported
+    /// or pasted profile is still untrusted, so a duplicate never launders its options past
+    /// DRV-05.
     pub fn duplicate(cx: &mut App, id: ProfileId) -> Task<Result<ProfileId, SaveError>> {
         let m = cx.global::<ConnectionsModel>();
         if m.read_only {
@@ -246,7 +254,6 @@ impl ConnectionsModel {
         copy.id = ProfileId::new();
         copy.name = duplicate_name(&m.profiles[at].name, &names);
         copy.env_source = TagSource::User;
-        copy.origin = Origin::UserTyped;
         let (new_id, name, retention) = (copy.id, copy.name.clone(), copy.retention);
         let secrets = m.secrets.clone();
 
