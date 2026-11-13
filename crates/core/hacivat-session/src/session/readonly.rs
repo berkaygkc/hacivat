@@ -42,6 +42,8 @@ use hacivat_guard::{
 };
 use hacivat_proto::{AccessLabel, DbmsKind, ErrClass};
 
+// ## m2b-t23-conformance (named exception, T17 carry P1)
+use crate::session::recovery::connection_ending;
 use crate::session::schema::{Family, family};
 use crate::session::{DenyLayer, ExecError, ExecErrorKind, Reply};
 
@@ -131,8 +133,10 @@ pub(crate) async fn guarded(
     // 2.
     for statement in &plan.before {
         if let Err(e) = conn.batch(statement).await {
-            let error = statement_error(&e, false);
-            // Kept only when nothing of the guard is left open on a live connection.
+            let error = statement_error(kind, &e, false);
+            // Kept only when nothing of the guard is left open on a live connection. A lost
+            // connection's status is never read (T23, T17 carry P1: a driver's status after a
+            // loss says nothing about the guard's transaction).
             let discard = lost_class(kind, &e)
                 .or_else(|| (conn.tx_status() != TxStatus::Idle).then_some(ErrClass::Internal));
             return Guarded {
@@ -166,7 +170,7 @@ pub(crate) async fn guarded(
     if let Err(e) = &ran
         && let Some(class) = lost_class(kind, e)
     {
-        return Guarded::discard(statement_error(e, true), class);
+        return Guarded::discard(statement_error(kind, e, true), class);
     }
 
     // 4.
@@ -195,7 +199,7 @@ pub(crate) async fn guarded(
             },
             Err(e) => {
                 if let Some(class) = lost_class(kind, &e) {
-                    return Guarded::discard(statement_error(&e, true), class);
+                    return Guarded::discard(statement_error(kind, &e, true), class);
                 }
                 canary_unread = true;
             }
@@ -209,7 +213,7 @@ pub(crate) async fn guarded(
             Err(e) => {
                 tracing::warn!(kind = ?e.kind, "the guard's rollback failed");
                 let class = lost_class(kind, &e).unwrap_or(ErrClass::Internal);
-                return Guarded::discard(statement_error(&e, true), class);
+                return Guarded::discard(statement_error(kind, &e, true), class);
             }
         }
     }
@@ -259,7 +263,7 @@ pub(crate) async fn guarded(
         return Guarded::discard(ExecError::of(ExecErrorKind::Internal), ErrClass::Internal);
     }
 
-    Guarded::keep(ran.map_err(|e| statement_error(&e, true)))
+    Guarded::keep(ran.map_err(|e| statement_error(kind, &e, true)))
 }
 
 /// `ExecOpts` for the guard's own statements: the simple protocol (several results, notices),
@@ -280,12 +284,22 @@ fn lite(status: TxStatus) -> TxStatusLite {
 }
 
 /// The class of a lost connection, when `e` is one.
+///
+/// ## m2b-t23-conformance (named exception, T17 carry P1): a server error that ends the
+/// connection is a loss too, by the session's own rule (`recovery::connection_ending`: a
+/// PostgreSQL `FATAL`/`PANIC` of a recovery class such as `57P01`, MySQL's connection-ending
+/// codes). Before, a `FATAL 57P01` answering the guard's `BEGIN` read the dead connection's
+/// status and ended the profile `Lost { internal }` instead of reconnecting the idle session.
 fn lost_class(kind: DbmsKind, e: &RawError) -> Option<ErrClass> {
-    matches!(
-        e.kind,
-        RawErrorKind::Io(_) | RawErrorKind::Protocol | RawErrorKind::Timeout | RawErrorKind::Tls(_)
-    )
-    .then(|| classify(kind, Phase::PostConnect, e).class)
+    let class = || classify(kind, Phase::PostConnect, e).class;
+    match e.kind {
+        RawErrorKind::Io(_)
+        | RawErrorKind::Protocol
+        | RawErrorKind::Timeout
+        | RawErrorKind::Tls(_) => Some(class()),
+        RawErrorKind::Db => connection_ending(kind, e, class()),
+        _ => None,
+    }
 }
 
 /// A failed statement as the session reports it. A server refusal is `Db` with the server's
@@ -293,8 +307,15 @@ fn lost_class(kind: DbmsKind, e: &RawError) -> Option<ErrClass> {
 /// MySQL `1792`, `1142`, `1290`; SQLite `SQLITE_READONLY`, `SQLITE_AUTH`). A statement the
 /// read-only connection will not prepare (MySQL's `ER_UNSUPPORTED_PS`) is refused by the
 /// protocol layer. `sent`: the statement may have reached the server.
-fn statement_error(e: &RawError, sent: bool) -> ExecError {
+///
+/// ## m2b-t23-conformance (named exception, T17 carry P1): a server error that ends the
+/// connection ([`lost_class`]) is `ConnectionLost`, with the server's message kept, as on a
+/// read-write session (T17 I6).
+fn statement_error(engine: DbmsKind, e: &RawError, sent: bool) -> ExecError {
     let kind = match e.kind {
+        RawErrorKind::Db if lost_class(engine, e).is_some() => ExecErrorKind::ConnectionLost {
+            outcome_unknown: sent,
+        },
         RawErrorKind::Db => ExecErrorKind::Db,
         RawErrorKind::Cancelled => ExecErrorKind::Cancelled,
         RawErrorKind::Unsupported => ExecErrorKind::ReadOnlyDenied(DenyLayer::Protocol),
