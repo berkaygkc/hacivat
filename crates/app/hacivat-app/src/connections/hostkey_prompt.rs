@@ -381,7 +381,8 @@ pub fn keygen_command(host: &str, port: u16, file: &Path, home: Option<&Path>) -
         return Some(format!("ssh-keygen -R {name}"));
     }
     let shown = tilde(file, home);
-    let path_safe = |ch: char| ch.is_ascii_alphanumeric() || "._/~+@,-".contains(ch);
+    // `:` for a Windows drive prefix (`C:/…`); a shell reads it literally.
+    let path_safe = |ch: char| ch.is_ascii_alphanumeric() || "._/~+@,-:".contains(ch);
     if shown.is_empty() || shown.starts_with('-') || !shown.chars().all(path_safe) {
         return None;
     }
@@ -399,12 +400,33 @@ fn is_default_known_hosts(file: &Path) -> bool {
             .is_some_and(|d| d == ".ssh")
 }
 
-/// `file` with the home directory written as `~`.
+/// `file` with the home directory written as `~` and `/` between components on every system:
+/// OpenSSH for Windows takes forward slashes, and a backslash would be refused as unsafe (the
+/// command would vanish on Windows). A backslash inside a Unix file name stays, and is refused.
 fn tilde(file: &Path, home: Option<&Path>) -> String {
     match home.and_then(|h| file.strip_prefix(h).ok()) {
-        Some(rest) => format!("~/{}", rest.to_string_lossy()),
-        None => file.to_string_lossy().into_owned(),
+        Some(rest) => format!("~/{}", slashed(rest)),
+        None => slashed(file),
     }
+}
+
+/// `path` with its components joined by `/` (a Windows prefix such as `C:` kept as is).
+fn slashed(path: &Path) -> String {
+    use std::path::Component;
+    let mut out = String::new();
+    for part in path.components() {
+        match part {
+            Component::Prefix(prefix) => out.push_str(&prefix.as_os_str().to_string_lossy()),
+            Component::RootDir => out.push('/'),
+            other => {
+                if !out.is_empty() && !out.ends_with('/') {
+                    out.push('/');
+                }
+                out.push_str(&other.as_os_str().to_string_lossy());
+            }
+        }
+    }
+    out
 }
 
 /// The review of a changed host key (NOTES surface 1).
@@ -927,6 +949,50 @@ mod tests {
             .as_deref(),
             Some("ssh-keygen -f ~/.ssh/known_hosts2 -R bastion.acme.io"),
             "another file needs -f"
+        );
+    }
+
+    /// Windows paths are shown with forward slashes (OpenSSH for Windows takes them); before,
+    /// the backslashes were refused and the command vanished on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_path_uses_forward_slashes() {
+        let home = Some(Path::new(r"C:\Users\me"));
+        assert_eq!(
+            keygen_command(
+                "bastion.acme.io",
+                22,
+                Path::new(r"C:\Users\me\.ssh\known_hosts2"),
+                home
+            )
+            .as_deref(),
+            Some("ssh-keygen -f ~/.ssh/known_hosts2 -R bastion.acme.io")
+        );
+        assert_eq!(
+            keygen_command(
+                "bastion.acme.io",
+                22,
+                Path::new(r"D:\keys\known_hosts2"),
+                home
+            )
+            .as_deref(),
+            Some("ssh-keygen -f D:/keys/known_hosts2 -R bastion.acme.io")
+        );
+    }
+
+    /// On Unix a backslash is part of a file name, and a shell would read it: refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_backslash_in_a_unix_file_name_is_refused() {
+        let home = Some(Path::new("/home/me"));
+        assert_eq!(
+            keygen_command(
+                "bastion.acme.io",
+                22,
+                Path::new("/home/me/.ssh/known\\hosts2"),
+                home
+            ),
+            None
         );
     }
 
