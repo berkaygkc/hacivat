@@ -15,6 +15,28 @@
 //!   badge.
 //! - A read-only session is always Auto (Q14) and runs every statement through
 //!   `readonly::run_guarded`, which replays the environment plan after its reset (Q15).
+//!
+//! M2b Task 17 (`// ## m2b-t17-liveness` blocks):
+//! - **Liveness** (HV-CONN-04, B18). A session spawned with a [`LivenessPolicy`] ticks its
+//!   [`Supervisor`] on a 1 s `interval` (`MissedTickBehavior::Skip`) while it is idle. A `Ping`
+//!   is `RawConn::ping` within `LivenessPolicy::ping_timeout`, still serving commands (a close
+//!   aborts it); a `Suspect` ticks again at once; `Disconnect` closes the session gracefully
+//!   (`Disconnected`); `IdleTransaction` emits `SessionEvent::IdleTransaction`. A user request
+//!   (a user statement, a transaction command, a schema switch) is activity; pings, internal
+//!   statements and resets are not.
+//! - **Recovery** (HV-CONN-05, B19). When the connection is lost with a recovery case
+//!   (`is_recovery_case`) and the session has `SessionHooks::reconnect`, it is not broken: it
+//!   publishes `Connecting` (so it keeps its budget permit, T15 carry-in), notes what the loss
+//!   took (`lost_state`), answers the request that was running (a user statement
+//!   `ConnectionLost { outcome_unknown: true }`, never re-run; an internal idempotent one is
+//!   re-queued once at the head) and the queued ones that never ran (`ConnectionLost {
+//!   outcome_unknown: false }`, internal idempotent ones stay queued), and calls the
+//!   reconnector once (it runs the backoff). While it waits, requests queue and a close ends
+//!   the session at once. On success the connection is replaced in place, the environment
+//!   plan is replayed (identity, read-only setup, last schema; MySQL's `autocommit = 0` when
+//!   Manual), the transaction mode and isolation are kept, and the session emits
+//!   `SessionEvent::Lost` then publishes `Idle` then emits `SessionEvent::Reconnected`. A
+//!   failed reconnect breaks the session with its class.
 
 use std::any::Any;
 use std::collections::VecDeque;
@@ -25,7 +47,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
@@ -43,7 +65,11 @@ use crate::profile::Profile;
 use crate::session::cancel::{
     CANCEL_WAIT, SIDE_PREWARM, SLOW_CANCEL, kill_query_sql, terminate_sql,
 };
+// ## m2b-t17-liveness
+use crate::session::liveness::{LivenessAction, LivenessPolicy, Supervisor};
 use crate::session::readonly::run_guarded;
+// ## m2b-t17-liveness
+use crate::session::recovery::{Tracked, is_recovery_case, lost_state, track_statement};
 use crate::session::schema::{Family, family, first_keyword};
 use crate::session::{
     CancelOutcome, CancelState, ClosePolicy, CloseRefused, Command, EnvPlan, Escalation, ExecError,
@@ -60,6 +86,10 @@ pub trait SideConnector: Send + Sync {
 }
 
 /// Reconnects a lost session (Task 17); `attempt` counts from 1.
+///
+/// The actor calls it once per loss with `attempt` 1, synchronously before it answers the
+/// request that found the loss; the future runs the whole recovery (the backoff, B19) and
+/// resolves with a new connection, or with the error that ended the recovery.
 pub trait Reconnector: Send + Sync {
     fn reconnect(&self, attempt: u32) -> BoxFuture<'static, Result<LiveConnection, ConnectError>>;
 }
@@ -99,8 +129,22 @@ pub fn spawn_session(
     rt: &Handle,
     spec: SessionSpec,
     profile: Arc<Profile>,
+    live: LiveConnection,
+    hooks: SessionHooks,
+) -> SessionHandle {
+    spawn_supervised(rt, spec, profile, live, hooks, None)
+}
+
+// ## m2b-t17-liveness
+/// [`spawn_session`] with `liveness` ticking a [`Supervisor`] (the module docs); `None` never
+/// ticks.
+pub(crate) fn spawn_supervised(
+    rt: &Handle,
+    spec: SessionSpec,
+    profile: Arc<Profile>,
     mut live: LiveConnection,
     hooks: SessionHooks,
+    liveness: Option<LivenessPolicy>,
 ) -> SessionHandle {
     let read_only = spec.read_only || profile.read_only;
     let kind = live.raw().kind();
@@ -161,6 +205,8 @@ pub fn spawn_session(
         initial_isolation,
         broken: None,
         last_class: None,
+        tracked: Tracked::default(),
+        lost: None,
     };
     let ctl = Ctl {
         id,
@@ -169,8 +215,12 @@ pub fn spawn_session(
         commands: receiver,
         queue: VecDeque::new(),
         hooks,
+        liveness: None,
     };
     rt.spawn(async move {
+        let mut ctl = ctl;
+        // On the runtime: an interval needs its timer.
+        ctl.liveness = liveness.map(Liveness::new);
         // The driver calls have their own guard (`run_one`); this one keeps a defect in the
         // actor itself from leaving a session that claims to be usable.
         if AssertUnwindSafe(run(core, ctl))
@@ -205,6 +255,11 @@ pub(crate) struct Core {
     pub(crate) broken: Option<ErrClass>,
     /// The class of the last driver error.
     pub(crate) last_class: Option<ErrClass>,
+    // ## m2b-t17-liveness
+    /// What the user's statements did since the connection was made (B19).
+    tracked: Tracked,
+    /// What the last loss took, until the reconnect reports it.
+    lost: Option<crate::session::LostState>,
 }
 
 fn not_connected() -> ExecError {
@@ -296,7 +351,14 @@ impl Core {
                     Err(e) => Err(self.raw_error(&e, false)),
                 }
             }
-            Request::Reset => self.reset().await,
+            Request::Reset => {
+                let reset = self.reset().await;
+                // ## m2b-t17-liveness: a reset session starts with nothing to lose.
+                if reset.is_ok() {
+                    self.tracked = Tracked::default();
+                }
+                reset
+            }
         }
     }
 
@@ -333,6 +395,10 @@ impl Core {
             self.observe(!control);
             ran.map_err(|e| self.raw_error(&e, true))?
         };
+        // ## m2b-t17-liveness: what a reconnect would lose (B19).
+        if origin == ExecOrigin::User {
+            track_statement(&mut self.tracked, sql);
+        }
         if origin == ExecOrigin::User && needs_schema_reprobe(sql) {
             self.reprobe().await;
         }
@@ -461,6 +527,50 @@ impl Core {
             tracing::error!("closing a session's connection panicked");
         }
     }
+
+    // ## m2b-t17-liveness
+
+    /// Notes what the loss took: the transaction is gone, its mode and isolation stay (B19).
+    fn note_loss(&mut self) {
+        let tracked = Tracked {
+            tx: self.tx.status,
+            ..self.tracked.clone()
+        };
+        self.lost = Some(lost_state(&tracked));
+        self.tracked = Tracked::default();
+        self.tx = TxState {
+            mode: self.tx.mode,
+            isolation: self.tx.isolation,
+            ..TxState::default()
+        };
+    }
+
+    /// Puts a reconnect's connection in place of the lost one; its access label.
+    fn install(&mut self, mut live: LiveConnection) -> AccessLabel {
+        let access = if self.read_only && live.access == AccessLabel::ReadWrite {
+            AccessLabel::ReadOnlyGuarded
+        } else {
+            live.access
+        };
+        let status = live.raw().tx_status();
+        self.live = Some(live);
+        self.broken = None;
+        self.last_class = None;
+        self.tx.observe(status, false);
+        access
+    }
+
+    /// Replays the environment after a reconnect (B19): the plan (identity, read-only setup,
+    /// the last schema), then MySQL's `autocommit = 0` for a Manual session.
+    async fn replay(&mut self) -> Result<(), ExecError> {
+        for statement in self.env_plan().statements() {
+            self.control(&statement).await?;
+        }
+        if !self.read_only && self.tx.mode == TxMode::Manual && family(self.kind) == Family::MySql {
+            self.control("SET autocommit = 0").await?;
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -470,6 +580,9 @@ struct Queued {
     seq: u64,
     request: Request,
     reply: oneshot::Sender<Reply>,
+    // ## m2b-t17-liveness
+    /// Already re-queued once after a lost connection (B19: internal idempotent reads only).
+    retried: bool,
 }
 
 type CloseReply = oneshot::Sender<Result<(), CloseRefused>>;
@@ -488,6 +601,76 @@ struct Ctl {
     commands: mpsc::UnboundedReceiver<Command>,
     queue: VecDeque<Job>,
     hooks: SessionHooks,
+    // ## m2b-t17-liveness
+    liveness: Option<Liveness>,
+}
+
+// ## m2b-t17-liveness
+
+/// A session's liveness: its supervisor and the interval that ticks it.
+struct Liveness {
+    sup: Supervisor,
+    ticker: tokio::time::Interval,
+}
+
+impl Liveness {
+    fn new(policy: LivenessPolicy) -> Liveness {
+        let mut ticker = tokio::time::interval(policy.tick);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let (now, wall) = clocks();
+        Liveness {
+            sup: Supervisor::new(policy, now, wall),
+            ticker,
+        }
+    }
+}
+
+/// Both clocks now. The monotonic one is Tokio's, so a paused test clock drives it.
+fn clocks() -> (Instant, SystemTime) {
+    (tokio::time::Instant::now().into_std(), SystemTime::now())
+}
+
+/// Whether `request` is the user's activity (B18): pings, internal statements and resets are
+/// not.
+fn is_activity(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Exec {
+            origin: ExecOrigin::User,
+            ..
+        } | Request::Tx(_)
+            | Request::SwitchSchema(_)
+    )
+}
+
+/// Whether `request` may run again after a reconnect (B19): an internal idempotent statement.
+fn is_retryable(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Exec {
+            origin: ExecOrigin::Internal { idempotent: true },
+            ..
+        }
+    )
+}
+
+/// Waits for the next tick; never, without liveness.
+async fn next_tick(liveness: &mut Option<Liveness>) {
+    match liveness {
+        Some(l) => {
+            l.ticker.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// How a request (or a ping) left the session.
+enum Flow {
+    Go,
+    /// Every handle is gone, or the session closed.
+    Stop,
+    /// The connection was lost; the reconnect runs.
+    Recover(BoxFuture<'static, Result<LiveConnection, ConnectError>>),
 }
 
 impl Ctl {
@@ -516,6 +699,41 @@ impl Ctl {
         }
     }
 
+    // ## m2b-t17-liveness
+    /// The connection is lost while these wait: a request that never ran is answered
+    /// `ConnectionLost { outcome_unknown: false }` (it never runs on the new connection, where
+    /// the transaction it belonged to is gone), except an internal idempotent one, which waits
+    /// for the reconnect. Queued closes keep their turn.
+    fn drain_lost(&mut self) {
+        for job in std::mem::take(&mut self.queue) {
+            match job {
+                Job::Request(q) if is_retryable(&q.request) => {
+                    self.queue.push_back(Job::Request(q));
+                }
+                Job::Request(q) => {
+                    let lost = ExecErrorKind::ConnectionLost {
+                        outcome_unknown: false,
+                    };
+                    let _ = q.reply.send(Err(ExecError::of(lost)));
+                }
+                close @ Job::Close(..) => self.queue.push_back(close),
+            }
+        }
+    }
+
+    /// Work outside the idle loop ended: a user request was activity; anything else only moves
+    /// the supervisor's clocks past the time it took.
+    fn after_work(&mut self, activity: bool, tx: TxStatus) {
+        if let Some(l) = self.liveness.as_mut() {
+            let (now, wall) = clocks();
+            if activity {
+                let _ = l.sup.tick(now, wall, true, tx);
+            } else {
+                l.sup.resync(now, wall);
+            }
+        }
+    }
+
     /// A command while no request runs.
     fn idle_command(&mut self, cmd: Command) {
         match cmd {
@@ -527,6 +745,7 @@ impl Ctl {
                 seq,
                 request,
                 reply,
+                retried: false,
             })),
             // Q18: only a running request can be cancelled.
             Command::Cancel { reply, .. } | Command::Escalate { reply, .. } => {
@@ -606,21 +825,263 @@ async fn run(mut core: Core, mut ctl: Ctl) {
                 continue;
             }
             Some(Job::Request(job)) => {
-                if !run_one(&mut core, &mut ctl, job).await {
+                // ## m2b-t17-liveness
+                let activity = is_activity(&job.request);
+                let flow = run_one(&mut core, &mut ctl, job).await;
+                if !follow(&mut core, &mut ctl, flow).await {
                     return;
                 }
+                ctl.after_work(activity, core.tx.status);
                 continue;
             }
             None => {}
         }
-        match ctl.commands.recv().await {
-            Some(cmd) => ctl.idle_command(cmd),
-            // Every handle is gone.
-            None => {
-                core.close().await;
-                return;
+        // ## m2b-t17-liveness: commands first, so a request that comes with a tick runs.
+        tokio::select! {
+            biased;
+            cmd = ctl.commands.recv() => match cmd {
+                Some(cmd) => ctl.idle_command(cmd),
+                // Every handle is gone.
+                None => {
+                    core.close().await;
+                    return;
+                }
+            },
+            () = next_tick(&mut ctl.liveness), if ctl.liveness.is_some() => {
+                let flow = on_tick(&mut core, &mut ctl).await;
+                if !follow(&mut core, &mut ctl, flow).await {
+                    return;
+                }
+                ctl.after_work(false, core.tx.status);
             }
         }
+    }
+}
+
+// ## m2b-t17-liveness
+
+/// Acts on how a request or a tick ended; false when the actor is done.
+async fn follow(core: &mut Core, ctl: &mut Ctl, flow: Flow) -> bool {
+    match flow {
+        Flow::Go => true,
+        Flow::Stop => false,
+        Flow::Recover(reconnect) => recover(core, ctl, reconnect).await,
+    }
+}
+
+/// One supervisor tick while the session is idle (the module docs).
+async fn on_tick(core: &mut Core, ctl: &mut Ctl) -> Flow {
+    if core.live.is_none() {
+        // Broken: nothing to watch.
+        return Flow::Go;
+    }
+    let Some(l) = ctl.liveness.as_mut() else {
+        return Flow::Go;
+    };
+    let (now, wall) = clocks();
+    let mut action = l.sup.tick(now, wall, false, core.tx.status);
+    if action == Some(LivenessAction::Suspect) {
+        // Q31: one check at once, never one per missed tick.
+        tracing::debug!(
+            session = ctl.id.0,
+            "the clocks jumped; checking the connection"
+        );
+        action = l.sup.tick(now, wall, false, core.tx.status);
+    }
+    let minutes = l.sup.policy().idle_minutes();
+    let timeout = l.sup.policy().ping_timeout();
+    match action {
+        None | Some(LivenessAction::Suspect) => Flow::Go,
+        Some(LivenessAction::IdleTransaction) => {
+            ctl.emit(SessionEvent::IdleTransaction { minutes });
+            Flow::Go
+        }
+        Some(LivenessAction::Disconnect) => {
+            tracing::debug!(session = ctl.id.0, "idle disconnect");
+            // Nothing is open (the supervisor never disconnects an open transaction).
+            let (reply, _) = oneshot::channel();
+            close(core, ctl, ClosePolicy::RollBack, reply).await;
+            Flow::Stop
+        }
+        Some(LivenessAction::Ping) => keepalive(core, ctl, timeout).await,
+    }
+}
+
+/// How a keep-alive ping ended.
+enum Pinged {
+    Answered(Result<Result<std::time::Duration, RawError>, tokio::time::error::Elapsed>),
+    /// A close came: it runs next, the ping is dropped.
+    Aborted,
+    Abandoned,
+}
+
+/// A keep-alive ping within `timeout`, serving commands meanwhile. A failure is a loss.
+async fn keepalive(core: &mut Core, ctl: &mut Ctl, timeout: std::time::Duration) -> Flow {
+    let pinged = {
+        let Ok(conn) = core.conn() else {
+            return Flow::Go;
+        };
+        let ping = tokio::time::timeout(timeout, conn.ping());
+        tokio::pin!(ping);
+        loop {
+            tokio::select! {
+                biased;
+                answered = &mut ping => break Pinged::Answered(answered),
+                cmd = ctl.commands.recv() => match cmd {
+                    None => break Pinged::Abandoned,
+                    Some(Command::Close { policy, reply }) => {
+                        ctl.queue.push_back(Job::Close(policy, reply));
+                        break Pinged::Aborted;
+                    }
+                    Some(other) => ctl.idle_command(other),
+                },
+            }
+        }
+    };
+    match pinged {
+        Pinged::Abandoned => {
+            core.close().await;
+            Flow::Stop
+        }
+        Pinged::Aborted => Flow::Go,
+        Pinged::Answered(Ok(Ok(_))) => {
+            if let Some(l) = ctl.liveness.as_mut() {
+                l.sup.note_ping(clocks().0);
+            }
+            Flow::Go
+        }
+        Pinged::Answered(answered) => {
+            let class = match answered {
+                Ok(Err(e)) => {
+                    let _ = core.raw_error(&e, false);
+                    core.broken
+                        .or(core.last_class)
+                        .unwrap_or(ErrClass::Internal)
+                }
+                _ => ErrClass::NetworkTimeout,
+            };
+            tracing::debug!(
+                session = ctl.id.0,
+                class = class.id(),
+                "the keep-alive failed"
+            );
+            core.broken = Some(class);
+            core.close().await;
+            match begin_recovery(core, ctl, class) {
+                Some(reconnect) => Flow::Recover(reconnect),
+                None => {
+                    break_now(core, ctl, class).await;
+                    Flow::Go
+                }
+            }
+        }
+    }
+}
+
+/// Starts recovering from a loss of `class` (the module docs), when it is a recovery case, the
+/// session has a reconnector and no close waits; `None` otherwise (the caller breaks the
+/// session). The dead connection is already closed.
+fn begin_recovery(
+    core: &mut Core,
+    ctl: &mut Ctl,
+    class: ErrClass,
+) -> Option<BoxFuture<'static, Result<LiveConnection, ConnectError>>> {
+    let reconnector = ctl.hooks.reconnect.clone()?;
+    let closing = ctl.queue.iter().any(|j| matches!(j, Job::Close(..)));
+    if !is_recovery_case(class) || closing {
+        return None;
+    }
+    tracing::debug!(
+        session = ctl.id.0,
+        class = class.id(),
+        "connection lost; reconnecting"
+    );
+    core.note_loss();
+    ctl.drain_lost();
+    let tx = core.tx.clone();
+    ctl.publish(|s| {
+        s.state = SessionState::Connecting;
+        s.cancel = CancelState::Idle;
+        s.tx = tx;
+    });
+    // Synchronously, before the caller answers the request that found the loss: whoever sees
+    // that answer already sees the reconnect under way.
+    Some(reconnector.reconnect(1))
+}
+
+/// Waits for `reconnect` while serving commands, then replays the environment (the module
+/// docs). False when the actor is done (closed, or every handle gone).
+async fn recover(
+    core: &mut Core,
+    ctl: &mut Ctl,
+    mut reconnect: BoxFuture<'static, Result<LiveConnection, ConnectError>>,
+) -> bool {
+    loop {
+        let landed = loop {
+            tokio::select! {
+                biased;
+                cmd = ctl.commands.recv() => match cmd {
+                    None => return false,
+                    // A close ends the recovery at once (disconnect, quit).
+                    Some(Command::Close { reply, .. }) => {
+                        ctl.shut();
+                        ctl.publish(|s| {
+                            s.state = SessionState::Disconnected;
+                            s.cancel = CancelState::Idle;
+                        });
+                        let _ = reply.send(Ok(()));
+                        return false;
+                    }
+                    Some(other) => ctl.idle_command(other),
+                },
+                landed = &mut reconnect => break landed,
+            }
+        };
+        let live = match landed {
+            Ok(live) => live,
+            Err(e) => {
+                tracing::debug!(
+                    session = ctl.id.0,
+                    class = e.class.id(),
+                    "the reconnect ended"
+                );
+                break_now(core, ctl, e.class).await;
+                return true;
+            }
+        };
+        let access = core.install(live);
+        if let Err(e) = core.replay().await {
+            let class = core
+                .broken
+                .or(core.last_class)
+                .unwrap_or(ErrClass::Internal);
+            tracing::debug!(session = ctl.id.0, kind = ?e.kind, "the replay failed");
+            core.close().await;
+            if is_recovery_case(class)
+                && let Some(reconnector) = ctl.hooks.reconnect.clone()
+            {
+                reconnect = reconnector.reconnect(1);
+                continue;
+            }
+            break_now(core, ctl, class).await;
+            return true;
+        }
+        let lost = core.lost.take().unwrap_or_default();
+        ctl.emit(SessionEvent::Lost(lost));
+        let (tx, schema) = (core.tx.clone(), core.schema.clone());
+        ctl.publish(|s| {
+            s.state = SessionState::Idle;
+            s.cancel = CancelState::Idle;
+            s.tx = tx;
+            s.schema = schema;
+            s.access = access;
+        });
+        ctl.emit(SessionEvent::Reconnected);
+        if let Some(l) = ctl.liveness.as_mut() {
+            // A fresh connection: the next keep-alive is a full period away.
+            l.sup.note_ping(clocks().0);
+        }
+        return true;
     }
 }
 
@@ -658,17 +1119,21 @@ enum Ended {
     Abandoned,
 }
 
-/// Runs one request while serving commands; false when every handle is gone.
-async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> bool {
+/// Runs one request while serving commands: `Stop` when every handle is gone, `Recover` when
+/// the connection was lost and the session reconnects (Task 17).
+async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
     let Queued {
         seq,
         request,
         reply,
+        retried,
     } = job;
     let Some(live) = core.live.as_mut() else {
         let _ = reply.send(Err(not_connected()));
-        return true;
+        return Flow::Go;
     };
+    // ## m2b-t17-liveness: an internal idempotent read may run once more after a reconnect.
+    let retry = (!retried && is_retryable(&request)).then(|| request.clone());
     // Driver calls, so guarded like the request itself (review M5).
     let probed = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let raw = live.raw();
@@ -678,7 +1143,7 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> bool {
         tracing::error!(session = ctl.id.0, req = seq, "a driver call panicked");
         break_now(core, ctl, ErrClass::Internal).await;
         let _ = reply.send(Err(ExecError::of(ExecErrorKind::Internal)));
-        return true;
+        return Flow::Go;
     };
     let mut ladder = Ladder::new(seq, core.kind, backend, handle, ctl.hooks.side.clone());
     let since = Instant::now();
@@ -724,7 +1189,7 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> bool {
             ladder.release();
             ladder.finish(CancelOutcome::Disconnected);
             core.close().await;
-            return false;
+            return Flow::Stop;
         }
         Ended::Done(Ok(result)) => result,
         Ended::Done(Err(panic)) => {
@@ -768,8 +1233,32 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> bool {
     }
     ladder.release();
 
+    // ## m2b-t17-liveness: a lost connection the session recovers from (B19).
+    let mut recovery = None;
+    let mut reply = Some(reply);
     if let Some(class) = core.broken {
         core.close().await;
+        recovery = begin_recovery(core, ctl, class);
+        if recovery.is_some()
+            && let Some(request) = retry
+            && matches!(
+                &result,
+                Err(e) if matches!(e.kind, ExecErrorKind::ConnectionLost { .. })
+            )
+            && let Some(reply) = reply.take()
+        {
+            // Once, at the head, after the reconnect (B19).
+            ctl.queue.push_front(Job::Request(Queued {
+                seq,
+                request,
+                reply,
+                retried: true,
+            }));
+        }
+    }
+    if recovery.is_some() {
+        // `begin_recovery` published `Connecting`.
+    } else if let Some(class) = core.broken {
         ctl.drain(&ExecErrorKind::NotConnected);
         ctl.publish(|s| {
             s.state = SessionState::Broken(class);
@@ -800,12 +1289,14 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> bool {
         Err(_) if ladder.requested() => CancelOutcome::Cancelled,
         _ => CancelOutcome::AlreadyFinished,
     };
-    let _ = reply.send(result);
+    if let Some(reply) = reply {
+        let _ = reply.send(result);
+    }
     ladder.finish(outcome);
     if let Some(reply) = deactivated {
         let _ = reply.send(CancelOutcome::Cancelled);
     }
-    true
+    recovery.map_or(Flow::Go, Flow::Recover)
 }
 
 /// How much of a panic message is logged.
