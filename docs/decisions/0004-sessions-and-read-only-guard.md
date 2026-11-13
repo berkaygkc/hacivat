@@ -1092,8 +1092,9 @@ pg17 (`--set full`, F1 run).
 Task 23 runs the SQL-SAFE-06 catalogue against the Docker matrix with **no classifier** (Review
 Focus 4, exit criterion E4). Hacivat has none in M2b: every read-only statement goes through the
 session's guard (Task 18). So each row is stopped, or neutralised by the request's end, by the
-layers alone: 1a (the transaction-keyword refusal, before any I/O), L3 (the read-only
-transaction and its pinned snapshot), L4 (the session settings: `default_transaction_read_only`,
+layers alone: 1a (the transaction-keyword refusal, before any I/O), 1b (PostgreSQL: the refusal
+of a call no rollback undoes, before any I/O; finding F1), L3 (the read-only transaction and its
+pinned snapshot), L4 (the session settings: `default_transaction_read_only`,
 MySQL's `SESSION TRANSACTION READ ONLY`), L5 (the principal's privileges), L6 (the post-checks,
 the `ROLLBACK`, the canary, the reset and the environment replay) and the extended protocol (one
 statement per request; MySQL never re-sends an unpreparable statement as text).
@@ -1143,15 +1144,16 @@ statement per request; MySQL never re-sends an unpreparable statement as text).
   database's published port), and SSH death is covered by the parked-session test. This narrows
   the brief's "every TCP test runs twice"; the controller accepted it (fix round 1, m4).
 - Each target's results go to the Docker artifact `t23-bypass-<target>.tsv`; the tables below
-  are generated from those of the final `--set full` run. SQLite has its own test without a
-  server (below).
+  are generated from those of the final `--set full` run (the integration branch of Task 23
+  with the F1, F2 and F3 fixes and `m2b`). SQLite has its own test without a server (below).
 
-Cell values: a server code (SQLSTATE or vendor code), `1a`, `protocol`, `gap` (L6 found the
+Cell values: a server code (SQLSTATE or vendor code), `1a`, `protocol`, `function` (the guard's
+text layer 1b refused a call no rollback undoes, before any I/O; F1 below), `gap` (L6 found the
 statement's effect after it ran and discarded the connection; the side channel shows nothing
 persisted, because the `ROLLBACK` undid it), **committed; L6 gap** (L6 found it and discarded the
 connection, but the change had been committed), `neutralised` (it ran; nothing was left), `lost`
-(the connection ended and the session recovered; nothing changed; F2 below), **escaped** (a side
-effect persisted and nothing caught it).
+(the connection ended and the session recovered; nothing changed; seen only before the F2 fix,
+and no row allows it now), **escaped** (a side effect persisted and nothing caught it).
 
 **PostgreSQL** (pg13 = 13, pg14 = 14, pg15 = 15, pg16 = 16, pg17 = 17, pg18 = 18)
 
@@ -1304,8 +1306,8 @@ created), the suite runs these rows. On every line `hv_ro` reads guarded with
 | M9 | hv_ro | `SET @@session.transaction_read_only = 0` | neutralised | neutralised |
 | M14 | hv_ro | `SET @hv_t23 = 1` | neutralised | neutralised |
 | M4 | hv_ro | `SELECT a FROM hv_t23_bypass INTO OUTFILE '/tmp/hv_t23_out'` | 1227 | 1227 |
-| M10 | hv_ro | `SET GLOBAL max_connections = 999` | lost | lost |
-| M10 | hv_ro | `SET PERSIST max_connections = 999` | lost | lost |
+| M10 | hv_ro | `SET GLOBAL max_connections = 999` | 1227 | 1227 |
+| M10 | hv_ro | `SET PERSIST max_connections = 999` | 1227 | 1227 |
 | M10 | hv_ro | `RESET PERSIST max_connections` | 3615 | 3615 |
 | M10 | hv_ro | `FLUSH TABLES` | 1227 | 1227 |
 | M10 | hv_ro | `KILL <admin's backend>` | 1095 | 1095 |
@@ -1535,8 +1537,8 @@ value). Session over Docker, in `docker_m2b_cancel_reconnect.rs` (F3 moved there
   account without the privilege gets `Db` with the server's `1227` and its message, keeps its
   connection (no `SessionLost`, no reconnect), and its next statement runs.
 - **Bypass suite.** M10 `SET GLOBAL max_connections = 999` and `SET PERSIST
-  max_connections = 999` as `hv_ro` are `1227` on mysql80 and mysql84 (the `lost` cells of
-  the `m2b-t23` MySQL table); `lost` is no longer an accepted outcome for those rows. Every
+  max_connections = 999` as `hv_ro` are `1227` on mysql80 and mysql84 (before the fix, the
+  `lost` cells of the `m2b-t23` MySQL table); `lost` is no longer an accepted outcome for those rows. Every
   other MySQL and MariaDB row gave the `m2b-t23` result again, the `SET` rows that run (M3, M9,
   M14) still `neutralised` and n-3's `SET PASSWORD` still a gap.
 - `f2_mysql_refused_set_global_is_a_refusal_not_a_lost_connection` left
