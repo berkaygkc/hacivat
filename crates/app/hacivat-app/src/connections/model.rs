@@ -1136,6 +1136,14 @@ fn apply_ssh_retention(
     let mut profile = (*stored).clone();
     profile.ssh_retention = retention;
     let saved = ConnectionsModel::save(cx, ProfileDraft::edit(profile));
+    // An open edit dialog of `id` takes it too (as T19's pins, CA file and consent), so its
+    // Save never writes the old retention back; its Remember select follows the draft.
+    crate::connections::dialog::absorb_saved_changes(
+        id,
+        stored.endpoint.clone(),
+        vec![ProfileChange::SshRetention(retention)],
+        cx,
+    );
     cx.spawn(async move |_| saved.await.map(|_| ()))
 }
 

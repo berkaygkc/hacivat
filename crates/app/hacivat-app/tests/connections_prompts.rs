@@ -1719,3 +1719,52 @@ fn button_disabled(vcx: &mut VisualTestContext, label: &str) -> Option<bool> {
         .find(|d| d.role == Some(gpui::Role::Button) && d.name.as_ref() == label)
         .map(|d| d.disabled)
 }
+
+/// Fix round 1 (follow-up): an `SshRetention` change also reaches an open edit dialog of the
+/// profile (its draft and its SSH Remember select), as T19's pins, CA file and consent do, so
+/// a later Save from that dialog never writes the old retention back.
+#[gpui::test]
+fn an_open_edit_dialog_takes_an_ssh_retention_change(cx: &mut TestAppContext) {
+    use hacivat_app::connections::dialog::DIALOG_LAYER_ID;
+    use hacivat_app::connections::dialog::ssh::section_state;
+
+    let vcx = shell(cx);
+    // Password hops only: a missing key file would make the dialog refuse to save.
+    let id = add_profile(vcx, ab_profile());
+    in_window(vcx, |window, cx| {
+        open_connection_dialog(DialogMode::Edit(id), window, cx)
+    });
+    vcx.run_until_parked();
+    let task = vcx.cx.update(|cx| {
+        ConnectionsModel::apply_changes(
+            cx,
+            id,
+            vec![hacivat_session::pipeline::ProfileChange::SshRetention(
+                Retention::UntilRestart,
+            )],
+        )
+    });
+    wait_task(vcx, task).expect("saved");
+    let dialog = in_window(vcx, |window, cx| open_dialog(window, cx)).expect("the dialog");
+    settle_until(vcx, WAIT, || {
+        vcx.cx
+            .read(|cx| dialog.read(cx).profile().ssh_retention == Retention::UntilRestart)
+    });
+    let section = in_window(vcx, |window, cx| section_state(window, cx)).expect("SSH section");
+    let until_restart = Retention::ALL
+        .iter()
+        .position(|r| *r == Retention::UntilRestart)
+        .expect("a retention");
+    settle_until(vcx, WAIT, || {
+        vcx.cx
+            .read(|cx| section.read(cx).remember_select().read(cx).selected() == until_restart)
+    });
+    // Save from the dialog: the saved retention stays the new one.
+    assert!(run(vcx, "connection_dialog.save"));
+    settle_until(vcx, WAIT, || !layer_ids(vcx).contains(&DIALOG_LAYER_ID));
+    let saved = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().get(id))
+        .expect("saved");
+    assert_eq!(saved.ssh_retention, Retention::UntilRestart);
+}

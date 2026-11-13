@@ -210,9 +210,12 @@ pub(crate) fn apply_change(profile: &mut Profile, change: &ProfileChange) -> boo
         ProfileChange::AllowPublicPlaintext => {
             !std::mem::replace(&mut tls.allow_public_plaintext, true)
         }
-        // ## m2b-t21-prompts: `apply_changes` saves the SSH retention through
-        // `ConnectionsModel::save` (it moves the stored secrets); nothing changes here.
-        ProfileChange::SshRetention(_) => false,
+        // ## m2b-t21-prompts: `apply_changes` saves the saved profile's SSH retention through
+        // `ConnectionsModel::save` (it moves the stored secrets); this applies it to an open
+        // dialog's draft, so the dialog's Save never writes the old retention back.
+        ProfileChange::SshRetention(retention) => {
+            !std::mem::replace(&mut profile.ssh_retention, *retention).eq(retention)
+        }
     }
 }
 
