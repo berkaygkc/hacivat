@@ -10,13 +10,18 @@
 //!   count.
 //! - After an error, the call waits (at most 1 s) until every `ReadyForQuery` it is owed has
 //!   been read, because `tokio-postgres` returns at the `ErrorResponse`: the transaction status
-//!   is then exact (Q12).
+//!   is then exact (Q12). When the wait expires the connection is broken, never trusted with a
+//!   stale status (fix round 1, I2).
+//! - The command tag, rows and columns of a multi-statement simple query are the last
+//!   statement's: a caller that decides from the tag (the read-only post-check) runs single
+//!   statements through the extended protocol (review M2).
 
 use std::collections::VecDeque;
+use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::{StreamExt, TryStreamExt};
-use hacivat_driver::{ExecOpts, ExecSummary, Protocol, RawError};
+use hacivat_driver::{ExecOpts, ExecSummary, Protocol, RawError, RawErrorKind};
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{AsyncMessage, Client, Connection, SimpleQueryMessage};
 
@@ -100,17 +105,41 @@ pub(crate) struct Exec<'a> {
 impl Exec<'_> {
     /// Runs `op` as one request: stale notices and tag dropped first, and after an error the
     /// outstanding `ReadyForQuery` messages awaited.
+    ///
+    /// Fix round 1: when they do not all arrive within [`SETTLE`] (I2), the connection is
+    /// marked broken and the error is a lost connection (`Io(TimedOut)`, the server's message
+    /// kept), so the session breaks instead of trusting a stale status. A `COPY … FROM STDIN`
+    /// the observer refused (I1) is `Unsupported`.
     async fn request<R>(
         &self,
         op: impl Future<Output = Result<R, tokio_postgres::Error>>,
     ) -> Result<R, RawError> {
+        if self.wire.is_broken() {
+            return Err(RawError {
+                kind: RawErrorKind::Io(io::ErrorKind::NotConnected),
+                server: None,
+            });
+        }
         drain_notices(self.notices);
         self.wire.clear_tag();
+        let _ = self.wire.take_copy_refused();
         match op.await {
             Ok(r) => Ok(r),
             Err(e) => {
-                self.wire.settle(SETTLE).await;
-                Err(pg_error(&e))
+                let synced = self.wire.settle(SETTLE).await;
+                let mut raw = pg_error(&e);
+                if !synced {
+                    self.wire.mark_broken();
+                    if !matches!(raw.kind, RawErrorKind::Io(_)) {
+                        raw.kind = RawErrorKind::Io(io::ErrorKind::TimedOut);
+                    }
+                } else if self.wire.take_copy_refused() {
+                    raw = RawError {
+                        kind: RawErrorKind::Unsupported,
+                        server: None,
+                    };
+                }
+                Err(raw)
             }
         }
     }
@@ -142,9 +171,14 @@ impl Exec<'_> {
                 Ok(messages
                     .into_iter()
                     .filter_map(|m| match m {
-                        SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+                        SimpleQueryMessage::Row(row) => {
+                            Some(row.try_get(0).map(|c| c.map(str::to_string)))
+                        }
                         _ => None,
                     })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
                     .collect::<Vec<_>>())
             })
             .await?;
@@ -182,11 +216,12 @@ async fn simple(
             SimpleQueryMessage::Row(row) => {
                 s.row_count += 1;
                 if s.rows.len() < max_rows {
-                    s.rows.push(
-                        (0..row.len())
-                            .map(|i| row.get(i).map(str::to_string))
-                            .collect(),
-                    );
+                    // A cell that is not UTF-8 (a SQL_ASCII database) fails the statement with
+                    // a decode error (`RawErrorKind::Other`), never a panic (fix round 1, I3).
+                    let cells = (0..row.len())
+                        .map(|i| row.try_get(i).map(|c| c.map(str::to_string)))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    s.rows.push(cells);
                 } else {
                     s.truncated = true;
                 }

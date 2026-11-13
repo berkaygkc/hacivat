@@ -457,7 +457,12 @@ carries the session. This is inherent to a loopback listener and is the same exp
     the first request, so framing starts on a boundary) and counts every `Query`, `Sync` and
     `FunctionCall`, each of which draws exactly one `ReadyForQuery`. After an error,
     `execute`, `batch` and `reset` wait (at most 1 s, or until the connection ends) until
-    every one is answered; `tx_status()` is then exact without a sleep.
+    every one is answered. When all have arrived, `tx_status()` is exact without a sleep.
+    *Fix round 1 (I2):* when the bound expires first (a late segment on a slow tunnel), the
+    status is unknown, so the connection is **broken**: the error becomes a lost connection
+    (`Io(TimedOut)`, the server's message kept), the connection task is aborted, every later
+    call fails with `Io(NotConnected)`, and `tx_status()` reads `Failed`, never the stale
+    status. The session reconnects; a rollback that was not needed is harmless.
   - **Command tag.** The last `CommandComplete` text (cleared before each request) is
     `ExecSummary::command_tag`, which the read-only post-check reads (`INSERT 0 3`,
     `CREATE TABLE`); `rows_affected` is its count (`RowStream::rows_affected`, or the simple
@@ -484,7 +489,28 @@ carries the session. This is inherent to a loopback listener and is the same exp
   text, `max_rows` kept and the rest counted (`truncated`), never buffered beyond the cap.
   `Protocol::Extended` prepares the one statement (several are `42601` from the server),
   takes the column names from the statement, runs it with no parameters and counts the rows
-  without keeping them. `batch` is `batch_execute`.
+  without keeping them. `batch` is `batch_execute`. The command tag, rows and columns of a
+  multi-statement simple query are the **last** statement's, so `INSERT …; SELECT 1` reads as
+  `SELECT 1`: a caller that decides from the tag (Task 18's read-only post-check) must run
+  user statements one at a time through `Protocol::Extended` (review M2). *Fix round 1 (I3):*
+  cells are read with `try_get`; a cell that is not UTF-8 (a `SQL_ASCII` database sends stored
+  bytes unconverted) fails the statement with `RawErrorKind::Other` instead of panicking, and
+  the connection stays in step.
+- **COPY FROM STDIN (fix round 1, I1).** `tokio-postgres` fails a request that meets a
+  `CopyInResponse` or `CopyBothResponse` (`unexpected message`), while the server waits in
+  copy-in mode: no `ReadyForQuery` would come, `tx_status()` would read the old status and the
+  next request's reply would be matched to the stuck one. The observer therefore answers `G`
+  and `W` (after authentication) itself with `CopyFail("COPY FROM STDIN is not supported
+  yet")`, plus a `Sync` when the last statement-running message was an extended `Execute`
+  (the server ignores the `Sync` already sent during copy-in and then discards until the next
+  one; it is not counted, so the single `ReadyForQuery` settles the one counted `Sync`). The
+  bytes go out only on a frontend message boundary: a message `tokio-postgres` is writing is
+  finished first. The server ends the copy with `ErrorResponse` and one `ReadyForQuery`, which
+  completes the failed request inside `tokio-postgres` too; the call returns
+  `RawErrorKind::Unsupported`, and the status is exact (`Failed` inside `BEGIN`, `Idle` in
+  autocommit). Simple, extended and `batch` paths are Docker-tested; `COPY … TO STDOUT` ends
+  with its own `ReadyForQuery` and is left alone. The driver never uses `Client::copy_in`;
+  it must not while the observer refuses copy-in.
 - **Notices (Q12).** The connection is driven with `poll_fn(|cx| connection.poll_message(cx))`
   instead of `connection.await` (which logged notice text at `info` and dropped it). Notice
   SQLSTATEs go into a per-connection buffer of 100 (the oldest dropped first), drained before
@@ -507,6 +533,25 @@ carries the session. This is inherent to a loopback listener and is the same exp
   failure slot; it runs the same verifier, whose `presented`/`outcome` slots are the
   connection's (nothing reads them after the connect, and the observer captured the outcome
   already).
+  - *Fix round 1 (review M1), not closed here.* "One `TlsParams` per handshake" would need
+    a fresh verifier with its own slots. That verifier lives in `hacivat-net` (`Recording`,
+    private) and is built only by `build_tls_params`, which needs the pin endpoint's port and
+    the client key's passphrase; the driver has neither (the endpoint carries no port behind a
+    tunnel, and holding the passphrase in a cancel handle would retain a secret). The residual
+    risk is fail-closed: every handshake through one configuration writes either nothing or
+    the same verified level, so a cancel racing a reconnect that shares the `TlsParams` can
+    only clear `outcome` (the guard then refuses an insecure method once), never raise it. The
+    pipeline (Task 14/17) must build a new `TlsParams` per connect attempt and never reuse one
+    a live cancel handle holds; a `TlsParams::fork()` in `hacivat-net` (same verifier
+    settings, new slots) would let the cancel build its own.
+  - **The cancel race is inherent (review M5).** `cancel()` returning `Ok` means only that the
+    request was written; the server signals the backend asynchronously, and the statement may
+    already have ended (libpq behaves the same). Task 7's sequence guard covers the session
+    side; ADR 0004 is the place for the session's rule.
+  - **Poolers (review M7).** Behind PgBouncer and similar, `BackendKeyData` carries the
+    pooler's key, so `backend_id()` is not a server PID: an escalation that terminates a
+    backend by this PID (Task 7/17) must check `pg_backend_pid()` first or not run through a
+    pooler.
 - **TLS summary.** `verified` is now the handshake's own outcome (a pinned `Require` reads
   `Pinned`), falling back to the mode's level only when none was recorded.
 - **Known effect until Task 14.** The pipeline's `insecure_auth_for` is still Task 1's

@@ -127,6 +127,8 @@ struct Script {
     data: Vec<u8>,
     pos: usize,
     chunk: usize,
+    /// Everything written to the stream.
+    written: Vec<u8>,
 }
 
 impl AsyncRead for Script {
@@ -147,7 +149,12 @@ impl AsyncRead for Script {
 }
 
 impl AsyncWrite for Script {
-    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, b: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        b: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.written.extend_from_slice(b);
         Poll::Ready(Ok(b.len()))
     }
     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -184,6 +191,19 @@ impl Obs {
             other => panic!("{other:?}"),
         }
     }
+    /// Writes `bytes` as `tokio-postgres` would: until all of it went through.
+    fn write_all(&mut self, mut bytes: &[u8]) {
+        let mut cx = Context::from_waker(Waker::noop());
+        while !bytes.is_empty() {
+            match Pin::new(&mut self.o).poll_write(&mut cx, bytes) {
+                Poll::Ready(Ok(n)) => bytes = &bytes[n..],
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+    fn written(&self) -> &[u8] {
+        &self.o.get_ref().written
+    }
 }
 
 fn make(policy: InsecureAuth, outcome: Option<TlsVerified>, mode: ObserverMode) -> Obs {
@@ -193,6 +213,7 @@ fn make(policy: InsecureAuth, outcome: Option<TlsVerified>, mode: ObserverMode) 
         data: vec![],
         pos: 0,
         chunk: usize::MAX,
+        written: vec![],
     };
     Obs {
         o: Observer::new(script, state, mode),
@@ -865,4 +886,179 @@ async fn reset_never_deallocates_all() {
         seen.iter()
             .all(|q| !q.to_ascii_uppercase().contains("DEALLOCATE ALL"))
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 1: COPY FROM STDIN (I1), a late ReadyForQuery (I2), a non-UTF-8 cell (I3).
+
+/// The `CopyFail` the observer sends for a refused `COPY … FROM STDIN`.
+fn copy_fail() -> Vec<u8> {
+    frame(b'f', b"COPY FROM STDIN is not supported yet\0")
+}
+
+/// `CopyInResponse`: text format, one column.
+fn copy_in_response() -> Vec<u8> {
+    frame(b'G', &[0, 0, 1, 0, 0])
+}
+
+#[test]
+fn a_copy_in_after_a_simple_query_is_answered_with_copy_fail() {
+    let mut o = observer(InsecureAuth::Allow, None);
+    feed_bytewise(&mut o, &[auth_ok(), ready(b'I')].concat());
+    let q = frame(b'Q', b"BEGIN; COPY t FROM STDIN\0");
+    o.write(&q);
+    feed_ok(
+        &mut o,
+        &[command_complete("BEGIN"), copy_in_response()].concat(),
+    );
+    assert_eq!(o.written(), [q, copy_fail()].concat());
+    assert!(o.state().take_copy_refused());
+    // One ReadyForQuery is still owed for the Query; the server's answer to the CopyFail is it.
+    assert!(!o.state().synced());
+    feed_ok(&mut o, &[error("57014"), ready(b'E')].concat());
+    assert!(o.state().synced());
+    assert_eq!(o.tx(), TxStatus::Failed);
+}
+
+#[test]
+fn a_copy_in_after_an_extended_execute_also_gets_a_sync() {
+    let mut o = observer(InsecureAuth::Allow, None);
+    feed_bytewise(&mut o, &[auth_ok(), ready(b'I')].concat());
+    let round = [frame(b'B', &[0; 8]), frame(b'E', &[0; 5]), frame(b'S', &[])].concat();
+    o.write(&round);
+    feed_ok(&mut o, &copy_in_response());
+    assert_eq!(o.written(), [round, copy_fail(), frame(b'S', &[])].concat());
+    // The Sync sent with the Execute is ignored in copy-in; the injected one is not counted, so
+    // the single ReadyForQuery the server sends settles the round.
+    feed_ok(&mut o, &[error("57014"), ready(b'I')].concat());
+    assert!(o.state().synced());
+}
+
+#[test]
+fn copy_fail_waits_for_the_frontend_message_in_flight() {
+    let mut o = observer(InsecureAuth::Allow, None);
+    feed_bytewise(&mut o, &[auth_ok(), ready(b'I')].concat());
+    o.write(&frame(b'Q', b"COPY t FROM STDIN\0"));
+    // A message tokio-postgres is half-way through writing (a dropped statement's Close).
+    let close = frame(b'C', b"Ss0\0");
+    let next = frame(b'S', &[]);
+    o.write(&close[..3]);
+    feed_ok(&mut o, &copy_in_response());
+    let written = o.written().len();
+    // Nothing injected inside the Close.
+    assert!(o.written().ends_with(&close[..3]));
+    // The rest of the Close, then the Sync: the CopyFail goes between them.
+    o.write_all(&[&close[3..], &next[..]].concat());
+    let tail = &o.written()[written..];
+    assert_eq!(tail, [&close[3..], &copy_fail()[..], &next[..]].concat());
+}
+
+#[test]
+fn copy_responses_before_authentication_are_left_alone() {
+    let mut o = observer(InsecureAuth::Allow, None);
+    feed_ok(&mut o, &copy_in_response());
+    assert!(o.written().is_empty());
+    assert!(!o.state().take_copy_refused());
+}
+
+#[tokio::test]
+async fn copy_from_stdin_is_refused_and_the_connection_stays_in_sync() {
+    // Review I1 (hostile_copy_in_leaves_tx_status_stale_and_accounting_desynced): the server
+    // enters copy-in inside BEGIN; the status must not read Idle and the next request must not
+    // hang on a shifted reply.
+    let (mut conn, mut s) = plaintext_session().await;
+    let server = tokio::spawn(async move {
+        assert_eq!(read_query(&mut s).await, "BEGIN; COPY t FROM STDIN");
+        s.write_all(&[command_complete("BEGIN"), copy_in_response()].concat())
+            .await
+            .unwrap();
+        let (typ, body) = read_typed(&mut s).await;
+        assert_eq!(frame(typ, &body), copy_fail());
+        s.write_all(&[error("57014"), ready(b'E')].concat())
+            .await
+            .unwrap();
+        assert_eq!(read_query(&mut s).await, "ROLLBACK");
+        s.write_all(&[command_complete("ROLLBACK"), ready(b'I')].concat())
+            .await
+            .unwrap();
+        s
+    });
+    let e = conn
+        .execute("BEGIN; COPY t FROM STDIN", simple(10))
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind, RawErrorKind::Unsupported);
+    assert_eq!(conn.tx_status(), TxStatus::Failed);
+    let next = tokio::time::timeout(Duration::from_secs(4), conn.execute("ROLLBACK", simple(10)))
+        .await
+        .expect("the next request is answered")
+        .unwrap();
+    assert_eq!(next.command_tag.as_deref(), Some("ROLLBACK"));
+    assert_eq!(conn.tx_status(), TxStatus::Idle);
+    drop(server.await.unwrap());
+}
+
+#[tokio::test]
+async fn a_late_ready_for_query_breaks_the_connection() {
+    // Review I2 (hostile_late_ready_for_query_reports_idle_inside_a_failed_tx): the
+    // ReadyForQuery comes after the 1 s bound. The stale `Idle` is never reported.
+    let (mut conn, mut s) = plaintext_session().await;
+    let server = tokio::spawn(async move {
+        read_query(&mut s).await;
+        s.write_all(&[command_complete("BEGIN"), error("22012")].concat())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let _ = s.write_all(&ready(b'E')).await;
+        s
+    });
+    let e = conn.batch("BEGIN; SELECT 1/0").await.unwrap_err();
+    assert!(matches!(e.kind, RawErrorKind::Io(_)), "{:?}", e.kind);
+    assert_eq!(
+        e.server.and_then(|m| m.sqlstate).as_deref(),
+        Some("22012"),
+        "the server's message is kept"
+    );
+    assert_eq!(conn.tx_status(), TxStatus::Failed);
+    // Never used again.
+    let again = conn.execute("SELECT 1", simple(10)).await.unwrap_err();
+    assert_eq!(again.kind, RawErrorKind::Io(io::ErrorKind::NotConnected));
+    drop(server.await.unwrap());
+}
+
+#[tokio::test]
+async fn a_non_utf8_cell_fails_the_statement_without_a_panic() {
+    // Review I3 (hostile_non_utf8_cell_in_simple_execute): a SQL_ASCII database.
+    let (mut conn, mut s) = plaintext_session().await;
+    let server = tokio::spawn(async move {
+        read_query(&mut s).await;
+        let mut body = 1i16.to_be_bytes().to_vec();
+        body.extend_from_slice(&3i32.to_be_bytes());
+        body.extend_from_slice(&[0xff, 0xfe, b'x']);
+        s.write_all(
+            &[
+                row_description(&["a"]),
+                frame(b'D', &body),
+                command_complete("SELECT 1"),
+                ready(b'I'),
+            ]
+            .concat(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read_query(&mut s).await, "SELECT 2");
+        s.write_all(&[command_complete("SELECT 0"), ready(b'I')].concat())
+            .await
+            .unwrap();
+        s
+    });
+    let e = conn
+        .execute("SELECT a FROM latin1", simple(10))
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind, RawErrorKind::Other);
+    // The connection is still in step.
+    let next = conn.execute("SELECT 2", simple(10)).await.unwrap();
+    assert_eq!(next.command_tag.as_deref(), Some("SELECT 0"));
+    drop(server.await.unwrap());
 }

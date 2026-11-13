@@ -387,3 +387,54 @@ async fn backend_id_is_pid() {
         scalar(&mut c, "SELECT pg_backend_pid()").await
     );
 }
+
+#[tokio::test]
+#[ignore = "docker"]
+async fn copy_from_stdin_is_refused_and_the_session_stays_in_step() {
+    // Fix round 1, I1: every path into copy-in mode (simple inside BEGIN, extended, batch)
+    // ends with a clear error, an exact status and a usable connection.
+    let Some(t) = require_target("pg17") else {
+        return;
+    };
+    let mut c = pg_on(&t).await;
+    c.batch("CREATE TEMP TABLE hv_t10_copy(a int)")
+        .await
+        .unwrap();
+
+    let e = c
+        .execute("BEGIN; COPY hv_t10_copy FROM STDIN", simple())
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind, RawErrorKind::Unsupported);
+    assert_eq!(c.tx_status(), TxStatus::Failed);
+    c.batch("ROLLBACK").await.unwrap();
+    assert_eq!(c.tx_status(), TxStatus::Idle);
+
+    c.batch("BEGIN").await.unwrap();
+    let e = c
+        .execute("COPY hv_t10_copy FROM STDIN", ExecOpts::default())
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind, RawErrorKind::Unsupported);
+    assert_eq!(c.tx_status(), TxStatus::Failed);
+    c.batch("ROLLBACK").await.unwrap();
+    assert_eq!(c.tx_status(), TxStatus::Idle);
+
+    let e = c.batch("COPY hv_t10_copy FROM STDIN").await.unwrap_err();
+    assert_eq!(e.kind, RawErrorKind::Unsupported);
+    assert_eq!(c.tx_status(), TxStatus::Idle);
+
+    // Still in step: each reply belongs to its own request.
+    assert_eq!(scalar(&mut c, "SELECT 41 + 1").await, "42");
+    assert_eq!(
+        scalar(&mut c, "SELECT count(*) FROM hv_t10_copy").await,
+        "0"
+    );
+    // COPY TO STDOUT ends with its own ReadyForQuery and is left alone.
+    assert!(
+        c.execute("COPY hv_t10_copy TO STDOUT", simple())
+            .await
+            .is_err()
+    );
+    assert_eq!(scalar(&mut c, "SELECT 7").await, "7");
+}

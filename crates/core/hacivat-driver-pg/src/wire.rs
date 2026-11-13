@@ -16,6 +16,15 @@
 //!   until every one has been answered, and the status is then exact.
 //! - **Command tag.** The text of the last `CommandComplete` (first 64 bytes), which the
 //!   read-only guard's post-check reads (`INSERT 0 1`, `CREATE TABLE`).
+//! - **COPY FROM STDIN (fix round 1, I1).** `tokio-postgres` fails a request that meets a
+//!   `CopyInResponse` (`G`) or `CopyBothResponse` (`W`), and the server would wait in copy-in
+//!   mode for data that never comes, with no `ReadyForQuery`. The observer answers it itself
+//!   with a `CopyFail`, followed by a `Sync` when the statement came through the extended
+//!   protocol (the server ignores the `Sync` already sent during copy-in, then discards until
+//!   the next one). The server ends the copy with `ErrorResponse` and exactly one
+//!   `ReadyForQuery`, which completes the failed request in `tokio-postgres` and in the count
+//!   below, so the connection stays usable and the status exact. The bytes go out on a frontend
+//!   message boundary only, never inside a message `tokio-postgres` is writing.
 //!
 //! **Layering (Q12).** Without TLS the raw observer runs [`ObserverMode::Framed`] from the
 //! start. With an `SSLRequest` it starts in [`ObserverMode::AwaitSslResponse`] and sees only the
@@ -47,6 +56,10 @@ const MAX_LEN: u32 = 1 << 30;
 const TAG_CAP: usize = 64;
 /// How long a caller waits for the outstanding `ReadyForQuery` messages after an error.
 pub(crate) const SETTLE: Duration = Duration::from_secs(1);
+/// The reason the observer gives the server when it refuses a `COPY … FROM STDIN`.
+const COPY_FAIL_REASON: &[u8] = b"COPY FROM STDIN is not supported yet";
+/// `CopyFail` (header, reason, NUL) plus an optional `Sync`.
+const INJECT_CAP: usize = 64;
 
 /// The inner value of the `io::Error` that refuses an insecure password request (B8). It maps
 /// to `RawErrorKind::InsecureAuthRefused`.
@@ -114,6 +127,12 @@ pub struct WireState {
     closed: AtomicBool,
     notify: Notify,
     tag: Mutex<Option<Tag>>,
+    // ## m2b-t10 fix round 1
+    /// The status could not be resynchronized (I2): the connection is never used again, and
+    /// `tx()` reports `Failed`, never a stale status.
+    broken: AtomicBool,
+    /// The observer refused a `COPY … FROM STDIN` since [`WireState::take_copy_refused`] (I1).
+    copy_refused: AtomicBool,
 }
 
 impl fmt::Debug for WireState {
@@ -140,6 +159,8 @@ impl WireState {
             closed: AtomicBool::new(false),
             notify: Notify::new(),
             tag: Mutex::new(None),
+            broken: AtomicBool::new(false),
+            copy_refused: AtomicBool::new(false),
         })
     }
 
@@ -163,8 +184,12 @@ impl WireState {
             )
     }
 
-    /// The transaction status of the last `ReadyForQuery`.
+    /// The transaction status of the last `ReadyForQuery`; `Failed` once the connection is
+    /// broken (a rollback is harmless, a stale `Idle` is not).
     pub fn tx(&self) -> TxStatus {
+        if self.is_broken() {
+            return TxStatus::Failed;
+        }
         match self.status.load(Ordering::SeqCst) {
             b'T' => TxStatus::InTx,
             b'E' => TxStatus::Failed,
@@ -205,8 +230,24 @@ impl WireState {
         self.notify.notify_waiters();
     }
 
-    /// Waits until [`WireState::synced`], at most `limit`.
-    pub async fn settle(&self, limit: Duration) {
+    /// Marks the connection unusable (I2).
+    pub fn mark_broken(&self) {
+        self.broken.store(true, Ordering::SeqCst);
+        self.close();
+    }
+
+    pub fn is_broken(&self) -> bool {
+        self.broken.load(Ordering::SeqCst)
+    }
+
+    /// Whether the observer refused a `COPY … FROM STDIN` since the last call.
+    pub fn take_copy_refused(&self) -> bool {
+        self.copy_refused.swap(false, Ordering::SeqCst)
+    }
+
+    /// Waits until [`WireState::synced`], at most `limit`; whether every `ReadyForQuery` owed
+    /// arrived (`false` also when the connection ended first).
+    pub async fn settle(&self, limit: Duration) -> bool {
         let wait = async {
             loop {
                 let mut notified = std::pin::pin!(self.notify.notified());
@@ -218,6 +259,8 @@ impl WireState {
             }
         };
         let _ = tokio::time::timeout(limit, wait).await;
+        !self.closed.load(Ordering::SeqCst)
+            && self.ready.load(Ordering::SeqCst) >= self.expected.load(Ordering::SeqCst)
     }
 
     fn on_auth_ok(&self) {
@@ -282,6 +325,8 @@ struct Reader {
     capture_len: usize,
     capture_want: usize,
     acted: bool,
+    /// A `CopyInResponse` or `CopyBothResponse` arrived after authentication (I1).
+    copy_in: bool,
 }
 
 impl Reader {
@@ -294,6 +339,7 @@ impl Reader {
             capture_len: 0,
             capture_want: 0,
             acted: false,
+            copy_in: false,
         }
     }
 
@@ -357,7 +403,7 @@ impl Reader {
         Ok(())
     }
 
-    fn act(&self, typ: u8, state: &WireState) -> io::Result<()> {
+    fn act(&mut self, typ: u8, state: &WireState) -> io::Result<()> {
         let prefix = &self.capture[..self.capture_len];
         let int = || {
             prefix
@@ -385,6 +431,10 @@ impl Reader {
                 None => return Err(invalid("ReadyForQuery without a status")),
             },
             b'C' => state.on_tag(prefix),
+            b'G' | b'W' if state.auth_ok.load(Ordering::SeqCst) => {
+                state.copy_refused.store(true, Ordering::SeqCst);
+                self.copy_in = true;
+            }
             _ => {}
         }
         Ok(())
@@ -399,9 +449,22 @@ struct Writer {
     header: [u8; 5],
     header_len: usize,
     left: u32,
+    /// The type of the last statement-running message written: `Q` (simple) or `E`
+    /// (extended `Execute`).
+    last_command: u8,
 }
 
 impl Writer {
+    /// Bytes until the next message boundary: 0 on a boundary, else what is left of the
+    /// header, else of the body.
+    fn until_boundary(&self) -> usize {
+        match self.header_len {
+            0 => 0,
+            n if n < 5 => 5 - n,
+            _ => self.left as usize,
+        }
+    }
+
     fn feed(&mut self, mut data: &[u8], state: &WireState) {
         if !self.active {
             // Nothing is written between the server's AuthenticationOk and the first request,
@@ -415,6 +478,9 @@ impl Writer {
             if self.header_len < 5 {
                 if self.header_len == 0 && matches!(data[0], b'Q' | b'S' | b'F') {
                     state.expected.fetch_add(1, Ordering::SeqCst);
+                }
+                if self.header_len == 0 && matches!(data[0], b'Q' | b'E') {
+                    self.last_command = data[0];
                 }
                 let n = (5 - self.header_len).min(data.len());
                 self.header[self.header_len..self.header_len + n].copy_from_slice(&data[..n]);
@@ -451,6 +517,12 @@ pub struct Observer<S> {
     mode: ObserverMode,
     reader: Reader,
     writer: Writer,
+    /// Frontend bytes the observer itself must send (`CopyFail`, I1), and how many went out.
+    inject: [u8; INJECT_CAP],
+    inject_len: usize,
+    inject_pos: usize,
+    /// The injected bytes went out but are not flushed yet.
+    inject_flush: bool,
 }
 
 impl<S> fmt::Debug for Observer<S> {
@@ -473,7 +545,12 @@ impl<S> Observer<S> {
                 header: [0; 5],
                 header_len: 0,
                 left: 0,
+                last_command: 0,
             },
+            inject: [0; INJECT_CAP],
+            inject_len: 0,
+            inject_pos: 0,
+            inject_flush: false,
         }
     }
 
@@ -518,13 +595,67 @@ impl<S> Observer<S> {
             data = rest;
         }
         match self.mode {
-            ObserverMode::Framed => self.reader.feed(data, &self.state),
+            ObserverMode::Framed => {
+                self.reader.feed(data, &self.state)?;
+                if std::mem::take(&mut self.reader.copy_in) {
+                    self.queue_copy_fail();
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
+
+    /// Queues `CopyFail` (and `Sync` after an extended `Execute`) for the copy just refused.
+    fn queue_copy_fail(&mut self) {
+        let mut msg = [0u8; INJECT_CAP];
+        let body = COPY_FAIL_REASON.len() + 1;
+        msg[0] = b'f';
+        msg[1..5].copy_from_slice(&u32::try_from(body + 4).unwrap_or(0).to_be_bytes());
+        msg[5..5 + COPY_FAIL_REASON.len()].copy_from_slice(COPY_FAIL_REASON);
+        let mut len = 5 + body;
+        if self.writer.last_command == b'E' {
+            msg[len..len + 5].copy_from_slice(&[b'S', 0, 0, 0, 4]);
+            len += 5;
+        }
+        // At most one copy is pending at a time: the server waits in copy-in mode.
+        self.inject = msg;
+        self.inject_len = len;
+        self.inject_pos = 0;
+    }
 }
 
-impl<S: AsyncRead + Unpin> AsyncRead for Observer<S> {
+impl<S: AsyncWrite + Unpin> Observer<S> {
+    /// Writes and flushes the queued bytes, on a frontend message boundary only. `Ready(Ok)`
+    /// when nothing is left to do now (also when it must wait for the boundary).
+    fn poll_inject(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        while self.inject_pos < self.inject_len {
+            if self.writer.until_boundary() > 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let pending = &self.inject[self.inject_pos..self.inject_len];
+            match Pin::new(&mut self.inner).poll_write(cx, pending) {
+                Poll::Ready(Ok(0)) => return Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
+                Poll::Ready(Ok(n)) => {
+                    self.inject_pos += n;
+                    self.inject_flush = self.inject_pos == self.inject_len;
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        if self.inject_flush {
+            match Pin::new(&mut self.inner).poll_flush(cx) {
+                Poll::Ready(Ok(())) => self.inject_flush = false,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for Observer<S> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -532,6 +663,11 @@ impl<S: AsyncRead + Unpin> AsyncRead for Observer<S> {
     ) -> Poll<io::Result<()>> {
         let before = buf.filled().len();
         let this = &mut *self;
+        // A queued `CopyFail` goes out even while nothing is read (`Pending` has registered the
+        // waker for the write).
+        if let Poll::Ready(Err(e)) = this.poll_inject(cx) {
+            return Poll::Ready(Err(e));
+        }
         match Pin::new(&mut this.inner).poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {}
             other => return other,
@@ -539,6 +675,9 @@ impl<S: AsyncRead + Unpin> AsyncRead for Observer<S> {
         if let Err(e) = this.observe_read(&buf.filled()[before..]) {
             // The refused bytes never reach the reader above.
             buf.set_filled(before);
+            return Poll::Ready(Err(e));
+        }
+        if let Poll::Ready(Err(e)) = this.poll_inject(cx) {
             return Poll::Ready(Err(e));
         }
         Poll::Ready(Ok(()))
@@ -552,6 +691,22 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Observer<S> {
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = &mut *self;
+        let mut data = data;
+        if this.inject_pos < this.inject_len {
+            match this.writer.until_boundary() {
+                // On a boundary: the queued bytes first.
+                0 => {
+                    if let Poll::Ready(Err(e)) = this.poll_inject(cx) {
+                        return Poll::Ready(Err(e));
+                    }
+                    if this.inject_pos < this.inject_len {
+                        return Poll::Pending;
+                    }
+                }
+                // Inside a message: only up to its end.
+                n => data = &data[..n.min(data.len())],
+            }
+        }
         let r = Pin::new(&mut this.inner).poll_write(cx, data);
         if let Poll::Ready(Ok(n)) = &r
             && this.mode == ObserverMode::Framed
@@ -562,7 +717,12 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Observer<S> {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+        let this = &mut *self;
+        match this.poll_inject(cx) {
+            Poll::Ready(Ok(())) => {}
+            other => return other,
+        }
+        Pin::new(&mut this.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

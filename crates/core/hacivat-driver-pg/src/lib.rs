@@ -43,6 +43,7 @@ pub use connect::connect_conn_with;
 pub use exec::{NOTICE_CAP, RESET_SQL, SQL_PREPARED, deallocate_sql};
 #[doc(hidden)]
 pub use tokio_postgres::config::ChannelBinding as ChannelBindingMode;
+#[doc(hidden)]
 pub use wire::{InsecureAuthRefusedMarker, Observer, ObserverMode, TlsRefusedMarker, WireState};
 
 static DESCRIPTOR: DriverDescriptor = DriverDescriptor {

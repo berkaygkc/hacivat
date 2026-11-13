@@ -126,6 +126,16 @@ impl PgConn {
         }
     }
 
+    /// A connection whose status could not be resynchronized is cut at once (fix round 1,
+    /// I2): no later reply can be matched to the wrong request.
+    fn drop_if_broken(&self) {
+        if self.wire.is_broken()
+            && let Some(task) = &self.task.0
+        {
+            task.abort();
+        }
+    }
+
     fn exec(&self) -> Exec<'_> {
         Exec {
             client: &self.client,
@@ -283,11 +293,19 @@ impl RawConn for PgConn {
         sql: &'a str,
         opts: ExecOpts,
     ) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
-        Box::pin(async move { self.exec().execute(sql, opts).await })
+        Box::pin(async move {
+            let r = self.exec().execute(sql, opts).await;
+            self.drop_if_broken();
+            r
+        })
     }
 
     fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
-        Box::pin(async move { self.exec().batch(sql).await })
+        Box::pin(async move {
+            let r = self.exec().batch(sql).await;
+            self.drop_if_broken();
+            r
+        })
     }
 
     fn tx_status(&self) -> TxStatus {
@@ -295,7 +313,11 @@ impl RawConn for PgConn {
     }
 
     fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>> {
-        Box::pin(async move { self.exec().reset().await })
+        Box::pin(async move {
+            let r = self.exec().reset().await;
+            self.drop_if_broken();
+            r
+        })
     }
 
     fn backend_id(&self) -> Option<u64> {
