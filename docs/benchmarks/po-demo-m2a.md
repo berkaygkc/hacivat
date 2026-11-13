@@ -87,13 +87,17 @@ postgres://hv_test:hv_test_pw@localhost:54317/orders?sslmode=prefer&application_
 - Alanlar dolar ve dolan alanlar renk tonuyla işaretlenir (tint).
 - Bildirim tam olarak **beş satır** listeler (P37): doldurulan alanlar, parola, `sslmode`,
   `application_name`, `foo`.
+- Yapıştırılan URL içe aktarılmış sayılır (I5); `foo` PostgreSQL seçeneği olmadığı için
+  alınmaz. Son satır tam olarak şudur: `foo=bar isn't a connection option for PostgreSQL, so it
+  was left out`. Gelişmiş (Advanced) bölümüne ek özellik satırı eklenmez; bu yüzden adım 3'te
+  kaydetme engellenmez.
 - Geri Al (Undo) yapıştırmayı geri alır. Sonra tekrar yapıştırın, aynı sonuç gelir.
 - Parola alanı noktalarla maskelidir; URL satırında parola `****` görünür, gerçek parola hiçbir
   yerde düz metin olarak görünmez.
 
 **Ön doğrulama:** `paste_url_into_host_fills_tints_and_explains`, `paste_into_password_field_is_literal`,
-`url_row_mirrors_and_masks`, `a_pasted_password_never_reaches_the_url_row_or_the_clipboard`
-(connection_dialog).
+`url_row_mirrors_and_masks`, `a_pasted_password_never_reaches_the_url_row_or_the_clipboard`,
+`a_pasted_parameter_the_import_rule_refuses_is_left_out_and_said_so` (connection_dialog).
 
 ## 3. Kaydet ve bağlan (yerel)
 
@@ -108,8 +112,8 @@ postgres://hv_test:hv_test_pw@localhost:54317/orders?sslmode=prefer&application_
 - "unencrypted" parçasına tıklamak açıklama balonunu (popover) açar.
 - Gezgindeki satır bağlı işaretini ve gecikmeyi gösterir.
 
-**Ön doğrulama:** `save_local_profile_without_prompt`, `save_and_connect_saves_then_connects`
-(connection_dialog); `capsule_and_status_follow_the_current_connection`,
+**Ön doğrulama:** `save_local_profile_without_prompt`, `save_and_connect_saves_then_connects`,
+`a_pasted_parameter_the_import_rule_refuses_is_left_out_and_said_so` (connection_dialog); `capsule_and_status_follow_the_current_connection`,
 `unencrypted_segment_opens_explanation`, `the_explanation_has_a_keyboard_path` (connections_live).
 
 ## 4. Uzak ana bilgisayar ve üretim istemi
@@ -158,17 +162,36 @@ Tek rozet kuralı kapsülle sınırlıdır: `assert_one_filled_badge` (cross_sur
 
 ## 6. Yanlış parola
 
-**Yap:** Yeni bağlantı: Host `localhost`, Port `54317`, Kullanıcı `hv_test`, Veritabanı `hv_test`,
-**yanlış** bir parola (örneğin `yanlis`). "Save and connect".
+**Yap (A, bağlantı penceresinde):** Yeni bağlantı: Host `localhost`, Port `54317`, Kullanıcı
+`hv_test`, Veritabanı `hv_test`, **yanlış** bir parola (örneğin `yanlis`). "Test connection" (⌘T).
 
-**İyi görünüm:**
+**İyi görünüm (A):**
+- Pencerenin altındaki satır içi hata "The server rejected the password for hv_test." der; izlemede
+  ✕ işareti **Sign in** adımındadır. Password alanının altında "Attempt 2 of 3" yazar.
+- "Enter password again" Password alanını boşaltıp imleci oraya koyar; "Attempt 2 of 3" yerinde
+  kalır. Yine yanlış bir parola yazıp ⌘T: ikinci ret, alanın altında "Attempt 3 of 3".
+- Üçüncü yanlış parolada "Enter password again" artık **çıkmaz**; satır içi hata "All 3 attempts
+  are used…" der, Password alanının altında "No attempts left for this server…" yazar. "Test
+  connection" ve "Save and connect" devre dışıdır (nedeni bu satırda yazılı); ⌘T ve ⌘↵ hiçbir şey
+  göndermez. "Save" (⌘S) yine kaydeder.
+- Host, Port, Kullanıcı, motor ya da oturum açma yöntemi değişince ya da pencere kapatılıp yeniden
+  açılınca sayaç sıfırlanır. Doğru parolayla (`hv_test_pw`) başarılı bir sınama da sayacı sıfırlar.
+
+**Yap (B, hata iletişim kutusunda):** Yeni bir pencerede aynı bilgiler ve yanlış parola; bu kez
+"Save and connect". Pencere kapanır; kapsül bağlantının başarısız olduğunu gösterir. Kapsüle
+tıklayın.
+
+**İyi görünüm (B):**
 - Hata iletişim kutusu açılır; izlemede ✕ işareti **Sign in** adımındadır.
-- "Enter password again" ile parolayı yeniden girin. Sayaç her reddedilişte artar: 1, 2, 3. Üçüncü
-  reddedişte durur (tek bağlantı hareketi için en çok 3 sunucu reddi).
+- "Enter password again" maskeli bir alan ve "Attempt 2 of 3" açar. Sayaç her reddedilişte artar;
+  üçüncü reddedişte alan ve düğme kaybolur (tek bağlantı hareketi için en çok 3 sunucu reddi).
+  "Save and connect"ten önce aynı pencerede ⌘T ile reddedilen denemeler de bu sayıya katılır.
 - Doğru parolayı (`hv_test_pw`) girince bağlanır ve iletişim kutusu kapanır.
 - Girilen parola ekranda ve panoda hiçbir yerde görünmez.
 
-**Ön doğrulama:** `auth_invalid_reenter_counts_and_stops_at_three`,
+**Ön doğrulama:** `rejected_tests_count_attempts_and_stop_at_three`,
+`a_new_host_starts_a_new_count`, `a_successful_test_clears_the_count` (connection_dialog);
+`auth_invalid_reenter_counts_and_stops_at_three`,
 `a_reentered_password_that_works_closes_the_dialog`,
 `a_reentered_password_never_reaches_the_screen_or_the_clipboard`,
 `an_empty_reentry_sends_nothing` (connections_errors).

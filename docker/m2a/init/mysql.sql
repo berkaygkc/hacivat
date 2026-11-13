@@ -19,3 +19,8 @@ GRANT SELECT, SHOW VIEW ON orders.* TO 'hv_ro'@'%';
 GRANT SELECT, SHOW VIEW ON orders_archive.* TO 'hv_ro'@'%';
 
 FLUSH PRIVILEGES;
+
+-- ## m2b-t16-fixtures
+USE hv_test;
+CREATE TABLE IF NOT EXISTS hv_probe (a int);
+CREATE TABLE IF NOT EXISTS hv_probe_log (id int AUTO_INCREMENT PRIMARY KEY, v int);

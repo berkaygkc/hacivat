@@ -692,3 +692,51 @@ the vault, the session overlay, the keyring CI and the deferrals.
 - **Validate and the TLS key passphrase (T3 carry-in).** The pipeline's Validate does not
   report an encrypted client key (its TLS step opens it); `validate_with_passphrase` gives the
   dialog the same check with its passphrase field.
+
+## m2b-t15 — session overlay
+
+- **What is kept (Q17).** Each profile's `SessionManager` keeps one in-memory overlay while the
+  profile is connected: the profile with every `ProfileChange` of its successful connects
+  applied (a pin, a CA file, the remembered public-plaintext answer), the one-gesture plaintext
+  consent, and the `SessionSecrets` that worked (database password, SSH hop passwords and
+  passphrases, TLS key passphrase). The secrets live only in `SecretString` buffers, which
+  zeroize on drop. They are taken out of the `LiveConnection` (`mem::take`) as the connect
+  lands, so the session actor's connection does not hold a second copy.
+- **Accepted cost.** A secret with retention `Never` (or a passphrase typed once) stays in
+  memory for as long as the profile is connected, not only for the connect that used it. That
+  is what lets a reconnect (Task 17), a pooled introspection session or a cancel's side
+  connection connect headless without asking again.
+- **Where it goes.** Every later connect of the same profile passes the overlay as
+  `ConnectRequest { profile, overlay_secrets, plaintext_consent }`: sessions, pooled sessions,
+  side connections (`Department::Cancel`, outside the budget, headless), and Task 17's
+  reconnects, which read `SessionManager::overlay()`. Each connect gets its own copy, which
+  zeroizes when the connect ends. Nothing else reads it: no file, no log, no event.
+- **When it goes.** `close_all` (disconnect, `forget`, quit) drops it. It also cancels every
+  connect still in flight and bumps an epoch: a connect that lands after `close_all` is closed
+  and registers neither a session nor an overlay, so a secret cannot come back after
+  disconnect through a late connect. It is never persisted.
+- **`update_profile`** replaces the overlay's profile and keeps the consent and secrets, as the
+  plan says, but only while the profile still names the same destination (id, engine,
+  endpoint, user, auth provider, transport and client certificate). An edit that points the
+  profile elsewhere drops the secrets and the consent, so a password typed for one server is
+  never sent to another. The next connect then asks, or a headless reconnect stops with
+  `needs_interaction`, as the plan's recovery rule already handles. The plaintext consent
+  alone also goes when the TLS mode changes or "allow public plaintext" is unticked: the user
+  took back what the consent answered (fix round 1, M3).
+- **A connect in flight across an edit (fix round 1, I1).** A connect is absorbed only while
+  the saved profile still names the destination it connected to; otherwise it is closed and
+  refused, as after `close_all`, so another server's password, plaintext consent or pin and CA
+  changes never reach the overlay. A new overlay always starts from the saved profile, never
+  from a connect's snapshot, so a saved edit is never lost to a slow connect.
+- **Q17 clarification (controller ruling).** The overlay applies to every later connect of a
+  connected profile, pooled sessions included, not only to reconnects and side connections:
+  pooled connects are headless and would otherwise fail on a `Never` password or a pin
+  answered once. One-time codes never reach it (Task 9 excludes keyboard-interactive answers).
+- **No side-connection cache in M2b (controller ruling).** The plan's "cached for 30 s" is
+  dropped: each cancel or kill opens a fresh side connection through the overlay, and Task 7's
+  actor closes it after its one statement (an unused MySQL prewarm too). The 500 ms prewarm
+  (Q37) already hides the slow first connect. A cache would keep an idle authenticated
+  connection open for no request; revisit in M3 if cancel latency through SSH needs it.
+- **Debug.** `SessionOverlay` derives `Debug`, and every secret in it is a `SecretString`, which
+  prints redacted. `SessionManager`'s `Debug` shows only whether an overlay exists. Neither
+  type derives `PartialEq`.

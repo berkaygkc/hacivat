@@ -26,7 +26,7 @@ use tokio_postgres::types::ToSql;
 use tokio_postgres::{AsyncMessage, Client, Connection, SimpleQueryMessage};
 
 use crate::connect::pg_error;
-use crate::wire::{SETTLE, WireState};
+use crate::wire::{SETTLE, Settled, WireState};
 
 /// The most notice codes a connection keeps between two statements; the oldest go first.
 pub const NOTICE_CAP: usize = 100;
@@ -108,7 +108,9 @@ impl Exec<'_> {
     ///
     /// Fix round 1: when they do not all arrive within [`SETTLE`] (I2), the connection is
     /// marked broken and the error is a lost connection (`Io(TimedOut)`, the server's message
-    /// kept), so the session breaks instead of trusting a stale status. A `COPY … FROM STDIN`
+    /// kept), so the session breaks instead of trusting a stale status. When the connection
+    /// ended instead (R3), it is broken too, but a server error keeps its class (`Db`, with
+    /// the SQLSTATE); `Io(TimedOut)` means only that the wait expired. A `COPY … FROM STDIN`
     /// the observer refused (I1) is `Unsupported`.
     async fn request<R>(
         &self,
@@ -126,18 +128,31 @@ impl Exec<'_> {
         match op.await {
             Ok(r) => Ok(r),
             Err(e) => {
-                let synced = self.wire.settle(SETTLE).await;
+                let settled = self.wire.settle(SETTLE).await;
                 let mut raw = pg_error(&e);
-                if !synced {
-                    self.wire.mark_broken();
-                    if !matches!(raw.kind, RawErrorKind::Io(_)) {
-                        raw.kind = RawErrorKind::Io(io::ErrorKind::TimedOut);
+                match settled {
+                    Settled::Synced => {
+                        if self.wire.take_copy_refused() {
+                            raw = RawError {
+                                kind: RawErrorKind::Unsupported,
+                                server: None,
+                            };
+                        }
                     }
-                } else if self.wire.take_copy_refused() {
-                    raw = RawError {
-                        kind: RawErrorKind::Unsupported,
-                        server: None,
-                    };
+                    // The server ended the connection (a FATAL `57P01`, say): its own class
+                    // and SQLSTATE stand (R3).
+                    Settled::Closed => {
+                        self.wire.mark_broken();
+                        if !matches!(raw.kind, RawErrorKind::Db | RawErrorKind::Io(_)) {
+                            raw.kind = RawErrorKind::Io(io::ErrorKind::ConnectionAborted);
+                        }
+                    }
+                    Settled::Expired => {
+                        self.wire.mark_broken();
+                        if !matches!(raw.kind, RawErrorKind::Io(_)) {
+                            raw.kind = RawErrorKind::Io(io::ErrorKind::TimedOut);
+                        }
+                    }
                 }
                 Err(raw)
             }
@@ -200,7 +215,14 @@ async fn simple(
     let mut s = ExecSummary::default();
     // A statement's results start after the previous statement's CommandComplete.
     let mut next_statement = false;
+    // The first cell that would not decode. The rest of the result is still read up to the
+    // ReadyForQuery, however long it takes, so the connection stays in step and the error is
+    // `Other`, never a settle timeout on a large result (R2).
+    let mut decode_error = None;
     while let Some(message) = stream.try_next().await? {
+        if decode_error.is_some() {
+            continue;
+        }
         if next_statement {
             s.columns.clear();
             s.rows.clear();
@@ -218,10 +240,13 @@ async fn simple(
                 if s.rows.len() < max_rows {
                     // A cell that is not UTF-8 (a SQL_ASCII database) fails the statement with
                     // a decode error (`RawErrorKind::Other`), never a panic (fix round 1, I3).
-                    let cells = (0..row.len())
+                    match (0..row.len())
                         .map(|i| row.try_get(i).map(|c| c.map(str::to_string)))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    s.rows.push(cells);
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        Ok(cells) => s.rows.push(cells),
+                        Err(e) => decode_error = Some(e),
+                    }
                 } else {
                     s.truncated = true;
                 }
@@ -233,7 +258,10 @@ async fn simple(
             _ => {}
         }
     }
-    Ok(s)
+    match decode_error {
+        Some(e) => Err(e),
+        None => Ok(s),
+    }
 }
 
 /// The extended protocol: one statement, its rows counted and dropped.

@@ -27,7 +27,7 @@ pub use manager::{
 };
 pub use registry::default_drivers;
 pub use runtime::CoreRuntime;
-pub use test_conn::{TestReport, TestWarning, test_connection};
+pub use test_conn::{TestReport, TestWarning, test_connection, test_connection_continuing};
 // ## m2b-t01-interfaces: the guard's names the app needs, so the app never depends on the
 // guard crate itself (Q5).
 pub use hacivat_guard::{GapReason, RoleWarning, remediation};

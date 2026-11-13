@@ -26,6 +26,8 @@ use hacivat_driver::url::{
     FieldId, MappedParam, MappedTo, ParseOutcome, ParseResult, ParseWarning, looks_like_connection,
     parse,
 };
+use hacivat_driver::{EngineCatalog, SanitizeInput, ViolationReason, sanitize};
+use hacivat_l10n::ids::hv::HvConnUrlLeftOutReason as LeftOut;
 use hacivat_l10n::{Count, NoArgs, Text, ids};
 use hacivat_proto::{DbmsKind, ImportSource, Origin};
 use hacivat_secrets::Retention;
@@ -91,6 +93,9 @@ pub(crate) enum Notice {
         /// Extras with a typed setting, which went to it (I2).
         folded: Vec<FoldedOption>,
         extras: Vec<(String, String)>,
+        // ## m2a-demo-extra
+        /// Parameters DRV-05 refuses for this origin and engine: left out, never a row.
+        left_out: Vec<(String, String, ViolationReason)>,
         /// The host used and how many the URL named.
         multihost: Option<(String, usize)>,
     },
@@ -240,9 +245,17 @@ impl ConnectionDialog {
         }
         // Extras with a typed setting went to it (I2): listed as mapped, not as kept.
         let folded = report.folded.clone();
+        // ## m2a-demo-extra: a parameter DRV-05 refuses for this origin and engine would only
+        // block the save: it is left out, and the notice says so (never "kept").
+        let left_out = refused_extras(&self.draft.profile);
+        self.draft
+            .profile
+            .extra
+            .retain(|(k, _)| !left_out.iter().any(|(r, _, _)| r == k));
         let extras: Vec<(String, String)> = extras
             .into_iter()
             .filter(|(k, v)| !folded.iter().any(|f| &f.key == k && &f.value == v))
+            .filter(|(k, _)| !left_out.iter().any(|(r, _, _)| r == k))
             .collect();
         // SQLite `mode=ro` is the file option "Open the file read-only", not the Hacivat guard
         // (ruling A): the guard keeps its value, the option is set.
@@ -280,6 +293,7 @@ impl ConnectionDialog {
             mapped,
             folded,
             extras,
+            left_out,
             multihost,
         });
         self.after_edit(window, cx);
@@ -380,6 +394,7 @@ impl ConnectionDialog {
                 mapped,
                 folded,
                 extras,
+                left_out,
                 multihost,
             } => {
                 let mut n = InlineNotice::new(NoticeIcon::Done).line(tr(
@@ -437,6 +452,25 @@ impl ConnectionDialog {
                 }
                 for (k, v) in extras {
                     n = n.param(param_text(k, v), tr(cx, ids::hv::CONN_URL_EXTRA, NoArgs));
+                }
+                // ## m2a-demo-extra
+                let form_engine = self.draft.profile.engine;
+                for (k, v, reason) in left_out {
+                    let reason = match reason {
+                        ViolationReason::UnknownOption => LeftOut::Unknown,
+                        _ => LeftOut::Refused,
+                    };
+                    n = n.param(
+                        param_text(k, v),
+                        tr(
+                            cx,
+                            ids::hv::CONN_URL_LEFT_OUT,
+                            ids::hv::HvConnUrlLeftOut {
+                                reason,
+                                engine: engine(&form_engine),
+                            },
+                        ),
+                    );
                 }
                 n.trailing(
                     Button::new("notice-undo", tr(cx, ids::hv::CONN_URL_UNDO, NoArgs))
@@ -562,6 +596,35 @@ fn mapped_setting(cx: &App, m: &MappedParam) -> Option<SharedString> {
         MappedTo::ReadOnly(_) => tr(cx, ids::hv::CONN_DLG_SQLITE_RO, NoArgs),
         MappedTo::PgOptions => return None,
     })
+}
+
+// ## m2a-demo-extra
+/// The extras of `p` that DRV-05 refuses for its origin and engine (an unknown option from an
+/// untrusted origin, an always-denied one, ...), each with the first reason. A file outside
+/// the approved roots is not among them: the user can still pick that file in the dialog.
+fn refused_extras(p: &Profile) -> Vec<(String, String, ViolationReason)> {
+    let Err(violations) = sanitize(
+        &SanitizeInput {
+            kind: p.engine,
+            origin: &p.origin,
+            options: &p.extra,
+            paths: &[],
+            unsafe_toggle: false,
+            approved_roots: &[],
+        },
+        EngineCatalog::embedded(),
+    ) else {
+        return Vec::new();
+    };
+    p.extra
+        .iter()
+        .filter_map(|(k, v)| {
+            violations
+                .iter()
+                .find(|x| &x.key == k && x.reason != ViolationReason::PathOutsideRoots)
+                .map(|x| (k.clone(), v.clone(), x.reason))
+        })
+        .collect()
 }
 
 #[cfg(test)]

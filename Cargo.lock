@@ -3267,7 +3267,6 @@ dependencies = [
  "mysql_async",
  "rcgen",
  "rustls",
- "rustls-native-certs",
  "rustls-pki-types",
  "secrecy",
  "tokio",

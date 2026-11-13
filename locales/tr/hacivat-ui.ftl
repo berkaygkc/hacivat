@@ -833,3 +833,33 @@ hv-conn-issue-ssh-too-many-hops = Bu tünelde çok fazla ara sunucu var.
 hv-conn-issue-ssh-key-file-missing = SSH anahtar dosyası okunamıyor.
 # Review: PO
 hv-conn-issue-tls-key-legacy-encrypted = Bu özel anahtar eski bir şifreleme biçimi kullanıyor. Anahtarı PKCS #8'e dönüştürün.
+
+## m2a-demo-extra
+
+# Review: PO
+hv-conn-url-left-out = { $reason ->
+        [unknown] { $engine } için bir bağlantı seçeneği değil, bu yüzden alınmadı
+       *[refused] izin verilmiyor, bu yüzden alınmadı
+    }
+# Review: PO
+hv-conn-err-property = Özellik
+# Review: PO
+hv-conn-err-path = Yol
+# Review: PO
+hv-conn-err-problem = Sorun
+# Review: PO
+hv-conn-err-refused = { $name } — { $reason ->
+        [unknown] içe aktarılan bağlantılarda izin verilmiyor
+        [encoding] iki kez kodlanmış
+        [script] komut çalıştırıyor, içe aktarılan bağlantılarda izin verilmiyor
+        [secret] bir parola taşıyor; parolayı Parola alanına yazın
+        [path] { -brand-hacivat } bu yolu açmaz
+       *[denied] hiçbir zaman izin verilmiyor
+    }
+
+## m2a-dialog-retries
+
+# Review: PO
+hv-conn-err-attempts-used = 3 denemenin hepsi kullanıldı. Hesap kilitlenmesin diye { -brand-hacivat } başka parola göndermez.
+# Review: PO
+hv-conn-dlg-attempts-used = Bu sunucu için deneme hakkı kalmadı. Yeniden denemek için adresi, portu ya da kullanıcıyı değiştirin veya bu pencereyi kapatıp yeniden açın.

@@ -842,6 +842,9 @@ impl ConnectionDialog {
             || cx
                 .try_global::<crate::connections::ConnectionsModel>()
                 .is_some_and(|m| m.store_read_only());
+        // ## m2a-dialog-retries: the destination's attempts are used up; the Password field's
+        // hint says why (P8). Save alone stays.
+        let used_up = self.attempts_used_up();
         let mut test = if running {
             Button::new("conn-test", tr(cx, ids::hv::CONN_DLG_TEST_STOP, NoArgs))
                 .icon(IconName::Square)
@@ -855,6 +858,7 @@ impl ConnectionDialog {
         }
         .focus_handle(self.focus.test.clone())
         .on_raised(true)
+        .disabled(used_up && !running)
         .on_click(cx.listener(|this, _, window, cx| this.toggle_test(window, cx)));
         if running && let Some(h) = escape_label(cx) {
             test = test.key_hint(h);
@@ -874,7 +878,7 @@ impl ConnectionDialog {
         .kind(ButtonKind::Primary)
         .focus_handle(self.focus.save_connect.clone())
         .on_raised(true)
-        .disabled(read_only)
+        .disabled(read_only || used_up)
         .on_click(cx.listener(|this, _, window, cx| this.save(true, window, cx)));
         if let Some(h) = hint(cx, "connection_dialog.save_and_connect") {
             save_connect = save_connect.key_hint(h);
@@ -1552,6 +1556,37 @@ impl ConnectionDialog {
                     Kind::Row,
                     form_row(theme, tr(cx, ids::hv::CONN_DLG_PASSWORD, NoArgs), row),
                 );
+                // ## m2a-dialog-retries: after a rejection, which of the 3 attempts the next
+                // test or connect is (the error dialog's caption); once all 3 are used, why
+                // Test and Save and connect send nothing (P8).
+                let rejections = self.rejections();
+                if self.attempts_used_up() {
+                    rows.push(
+                        Kind::Hint,
+                        Self::hint(
+                            theme,
+                            Some(IconName::TriangleAlert),
+                            tr(cx, ids::hv::CONN_DLG_ATTEMPTS_USED, NoArgs),
+                            "password-attempts-used",
+                        ),
+                    );
+                } else if rejections > 0 {
+                    rows.push(
+                        Kind::Hint,
+                        Self::hint(
+                            theme,
+                            None,
+                            tr(
+                                cx,
+                                ids::hv::CONN_ERR_ATTEMPT,
+                                ids::hv::HvConnErrAttempt {
+                                    n: Count(u64::from(rejections) + 1),
+                                },
+                            ),
+                            "password-attempt",
+                        ),
+                    );
+                }
             }
             AuthProviderId::PgPass => {
                 let line = self.pgpass.as_ref().and_then(|s| s.line);

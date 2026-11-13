@@ -16,7 +16,8 @@ use hacivat_app::connections::dialog::{
     ConnectionDialog, DialogMode, open_connection_dialog, open_dialog,
 };
 use hacivat_app::connections::fixes::FixAction;
-use hacivat_app::connections::test_strip::TestStripEvent;
+use hacivat_app::connections::test_strip::{TestStripEvent, TestStripState};
+use hacivat_driver::fake::FakeDriver;
 use hacivat_net::TlsMode;
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_secrets::{
@@ -501,7 +502,7 @@ fn paste_url_into_host_fills_tints_and_explains(cx: &mut TestAppContext) {
             "The password was taken out of the URL. It goes to the Keychain when you save.",
             "sslmode=verify-full became Encryption: Verify full",
             "application_name=hv became Application name",
-            "foo=bar kept as an extra property"
+            "foo=bar isn't a connection option for PostgreSQL, so it was left out"
         ]
     );
     vcx.executor().advance_clock(Duration::from_millis(1840));
@@ -1114,10 +1115,13 @@ fn closing_removes_the_dialog_layer_even_under_another_layer(cx: &mut TestAppCon
 #[gpui::test]
 fn rebuilding_extra_rows_drops_their_subscriptions(cx: &mut TestAppContext) {
     let vcx = open_new(cx, "en");
-    paste_into(vcx, "url", "postgres://u@db.acme.io/shop?foo=1&bar=2");
+    // An option a pasted URL may set, so the paste builds a row.
+    let url = "postgres://u@db.acme.io/shop?target_session_attrs=any";
+    paste_into(vcx, "url", url);
+    assert_eq!(extra_key_texts(vcx), ["target_session_attrs"]);
     let first = read(vcx, |d, _| d.subscription_count());
     for _ in 0..3 {
-        paste_into(vcx, "url", "postgres://u@db.acme.io/shop?foo=1&bar=2");
+        paste_into(vcx, "url", url);
     }
     assert_eq!(read(vcx, |d, _| d.subscription_count()), first);
 }
@@ -1490,5 +1494,294 @@ fn the_url_rows_typed_text_keeps_the_users_origin(cx: &mut TestAppContext) {
     assert_eq!(
         read(vcx, |d, _| d.profile().origin.clone()),
         hacivat_proto::Origin::UserTyped
+    );
+}
+
+// ## m2a-demo-extra
+
+/// The PO demo's URL (step 2): `foo` is no PostgreSQL option, and a pasted URL is an import
+/// (I5), so DRV-05 would refuse it. The notice says it was left out (still five lines), no
+/// extra row is added, and Save and connect goes through (step 3).
+#[gpui::test]
+fn a_pasted_parameter_the_import_rule_refuses_is_left_out_and_said_so(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    paste_into(
+        vcx,
+        "host",
+        "postgres://hv_test:hv_test_pw@localhost:54317/orders?sslmode=prefer&application_name=demo&foo=bar",
+    );
+    assert_eq!(
+        notice_lines(vcx),
+        [
+            "Filled from the pasted URL.",
+            "The password was taken out of the URL. It goes to the Keychain when you save.",
+            "sslmode=prefer became Encryption: Auto",
+            "application_name=demo became Application name",
+            "foo=bar isn't a connection option for PostgreSQL, so it was left out"
+        ]
+    );
+    assert!(extra_key_texts(vcx).is_empty());
+    assert!(read(vcx, |d, _| d.profile().extra.is_empty()));
+    keys(vcx, &primary("enter"));
+    wait(vcx);
+    assert!(layer_ids(vcx).is_empty(), "saved, no blocking issue");
+    let (names, current, first, extra) = vcx.cx.read(|cx| {
+        let m = cx.global::<ConnectionsModel>();
+        let first = m.profiles().first().cloned().expect("a saved profile");
+        (
+            m.profiles()
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>(),
+            m.current(),
+            first.id,
+            first.extra.clone(),
+        )
+    });
+    assert_eq!(names.len(), 1);
+    assert_eq!(
+        current,
+        Some(first),
+        "the saved profile is the one connecting"
+    );
+    assert!(extra.is_empty(), "{extra:?}");
+}
+
+/// Text typed into the URL row keeps the user's origin, where any option is the user's own:
+/// `foo` is kept as an extra property, as before.
+#[gpui::test]
+fn a_typed_url_keeps_an_unknown_parameter_as_an_extra(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    set_field(vcx, "url", "postgres://u@db.acme.io/shop?foo=bar");
+    keys(vcx, "enter");
+    assert!(
+        notice_lines(vcx).contains(&"foo=bar kept as an extra property".to_string()),
+        "{:?}",
+        notice_lines(vcx)
+    );
+    assert_eq!(extra_key_texts(vcx), ["foo"]);
+}
+
+/// A refused property typed into an imported profile's extras is a blocking issue like any
+/// other (the M2a pattern: the save stops, the issue shows under its field, the section
+/// opens), never a save that fails at connect.
+#[gpui::test]
+fn a_refused_extra_of_an_imported_profile_blocks_the_save_inline(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    paste_into(vcx, "host", "postgres://u@localhost/shop");
+    click_selector(vcx, "disclosure-conn-advanced");
+    add_extra(vcx, "foo", "bar");
+    focus_field(vcx, "name");
+    keys(vcx, &primary("enter"));
+    wait(vcx);
+    assert_eq!(layer_ids(vcx), ["connection-dialog"]);
+    assert!(profile_names(vcx).is_empty());
+    let shown = issue_under(vcx, "app-name")
+        .expect("the issue is shown under Advanced")
+        .replace(['\u{2068}', '\u{2069}'], "");
+    assert_eq!(shown, "The property foo isn't allowed here.");
+}
+
+// ## m2a-dialog-retries ---------------------------------------------------------------------------
+
+/// The server's answer to a wrong password (SQLSTATE 28P01).
+fn rejected() -> hacivat_driver::RawError {
+    hacivat_driver::RawError {
+        kind: hacivat_driver::RawErrorKind::Db,
+        server: Some(hacivat_driver::ServerMessage {
+            sqlstate: Some("28P01".into()),
+            vendor_code: None,
+            severity: Some("FATAL".into()),
+            text: "password authentication failed".into(),
+            detail: None,
+            hint: None,
+            lang_hint: None,
+        }),
+    }
+}
+
+/// A New dialog in a shell whose PostgreSQL server is `server`, filled with a loopback
+/// destination (an IP literal: no DNS query) and a password.
+fn open_against(cx: &mut TestAppContext, server: FakeDriver) -> &'static mut VisualTestContext {
+    let vcx = open(shell_with_fake(cx, "en", server), DialogMode::New);
+    fill(
+        vcx,
+        &[
+            ("host", "127.0.0.1"),
+            ("user", "deploy"),
+            ("password", "hv_test_pw"),
+        ],
+    );
+    vcx
+}
+
+/// Clicks Test connection and waits until the server answered the new test.
+fn test_and_wait(vcx: &mut VisualTestContext) {
+    let before = fake(vcx).connect_calls();
+    click(vcx, "conn-test");
+    wait_until(vcx, "the test to finish", |vcx| {
+        fake(vcx).connect_calls() > before
+            && read(vcx, |d, cx| {
+                matches!(d.strip().read(cx).state(), TestStripState::Done(_))
+            })
+    });
+}
+
+/// The inline error's fixes.
+fn inline_fixes(vcx: &VisualTestContext) -> Vec<FixAction> {
+    read(vcx, |d, cx| {
+        d.strip()
+            .read(cx)
+            .error_view()
+            .map(|v| {
+                v.read(cx)
+                    .fix_buttons(cx)
+                    .into_iter()
+                    .map(|b| b.action)
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// "Enter password again", then a new password, then Test.
+fn reenter_and_test(vcx: &mut VisualTestContext, password: &str) {
+    emit_strip_fix(vcx, FixAction::ReenterPassword);
+    assert_eq!(password_value(vcx), "");
+    assert_eq!(focused_field(vcx), "password");
+    vcx.simulate_input(password);
+    vcx.run_until_parked();
+    test_and_wait(vcx);
+}
+
+fn rejections(vcx: &VisualTestContext) -> u8 {
+    read(vcx, |d, _| d.rejections())
+}
+
+#[gpui::test]
+fn rejected_tests_count_attempts_and_stop_at_three(cx: &mut TestAppContext) {
+    let vcx = open_against(
+        cx,
+        FakeDriver::new(DbmsKind::Postgres).connect_result(Err(rejected())),
+    );
+    assert_eq!(label(vcx, "password-attempt"), None);
+
+    test_and_wait(vcx);
+    assert_eq!(rejections(vcx), 1);
+    assert!(inline_fixes(vcx).contains(&FixAction::ReenterPassword));
+    emit_strip_fix(vcx, FixAction::ReenterPassword);
+    assert_eq!(password_value(vcx), "");
+    assert_eq!(focused_field(vcx), "password");
+    assert_eq!(
+        label(vcx, "password-attempt").as_deref(),
+        Some("Attempt 2 of 3")
+    );
+
+    vcx.simulate_input("x1");
+    vcx.run_until_parked();
+    test_and_wait(vcx);
+    assert_eq!(rejections(vcx), 2);
+    assert!(inline_fixes(vcx).contains(&FixAction::ReenterPassword));
+    emit_strip_fix(vcx, FixAction::ReenterPassword);
+    assert_eq!(
+        label(vcx, "password-attempt").as_deref(),
+        Some("Attempt 3 of 3")
+    );
+
+    vcx.simulate_input("x2");
+    vcx.run_until_parked();
+    test_and_wait(vcx);
+    assert_eq!(rejections(vcx), 3);
+    assert_eq!(fake(vcx).connect_calls(), 3);
+    // Test (clicked, now disabled) keeps no stranded focus: Host, which the hint says to change.
+    assert_eq!(focused_field(vcx), "host");
+
+    // All 3 used: no re-entry; the reason is said inline and under the Password field.
+    assert!(!inline_fixes(vcx).contains(&FixAction::ReenterPassword));
+    assert!(
+        label(vcx, "attempts-used").is_some_and(|t| t.starts_with("All 3 attempts are used")),
+        "the inline error says the attempts are used up"
+    );
+    assert_eq!(label(vcx, "password-attempt"), None);
+    assert!(
+        label(vcx, "password-attempts-used")
+            .is_some_and(|t| t.starts_with("No attempts left for this server")),
+        "the Password field says why nothing is sent"
+    );
+
+    // Neither Test nor Save and connect sends another password, by click or by key: no new
+    // test starts (the third one's report stays), nothing is saved or connected.
+    let report = |vcx: &VisualTestContext| {
+        read(vcx, |d, cx| match d.strip().read(cx).state() {
+            TestStripState::Done(r) => Some(r.clone()),
+            _ => None,
+        })
+        .expect("the third test's report")
+    };
+    let third = report(vcx);
+    click(vcx, "conn-test");
+    keys(vcx, &primary("t"));
+    click(vcx, "conn-save-connect");
+    keys(vcx, &primary("enter"));
+    settle(vcx, Duration::from_millis(50));
+    assert!(Arc::ptr_eq(&third, &report(vcx)), "no test was started");
+    assert_eq!(fake(vcx).connect_calls(), 3);
+    assert_eq!(layer_ids(vcx), ["connection-dialog"]);
+    assert!(profile_names(vcx).is_empty());
+    // Save alone still saves, and connects nothing.
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    assert!(layer_ids(vcx).is_empty());
+    assert_eq!(profile_names(vcx).len(), 1);
+    assert_eq!(fake(vcx).connect_calls(), 3);
+}
+
+#[gpui::test]
+fn a_new_host_starts_a_new_count(cx: &mut TestAppContext) {
+    let vcx = open_against(
+        cx,
+        FakeDriver::new(DbmsKind::Postgres).connect_result(Err(rejected())),
+    );
+    test_and_wait(vcx);
+    reenter_and_test(vcx, "x1");
+    reenter_and_test(vcx, "x2");
+    assert!(read(vcx, |d, _| d.attempts_used_up()));
+
+    set_field(vcx, "host", "127.0.0.2");
+    assert_eq!(rejections(vcx), 0);
+    assert_eq!(label(vcx, "password-attempts-used"), None);
+    assert_eq!(label(vcx, "password-attempt"), None);
+    // A new destination has a fresh budget: the test is sent, with no earlier rejections.
+    test_and_wait(vcx);
+    assert_eq!(fake(vcx).connect_calls(), 4);
+    assert_eq!(rejections(vcx), 1);
+    assert_eq!(
+        label(vcx, "password-attempt").as_deref(),
+        Some("Attempt 2 of 3")
+    );
+}
+
+#[gpui::test]
+fn a_successful_test_clears_the_count(cx: &mut TestAppContext) {
+    let server = FakeDriver::new(DbmsKind::Postgres).script(vec![Err(rejected()), Err(rejected())]);
+    let vcx = open_against(cx, server);
+    test_and_wait(vcx);
+    reenter_and_test(vcx, "x1");
+    assert_eq!(rejections(vcx), 2);
+    assert_eq!(
+        label(vcx, "password-attempt").as_deref(),
+        Some("Attempt 3 of 3")
+    );
+
+    // The third password works: the count starts again.
+    reenter_and_test(vcx, "hv_test_pw");
+    assert_eq!(rejections(vcx), 0);
+    assert_eq!(label(vcx, "password-attempt"), None);
+    assert!(inline_fixes(vcx).is_empty());
+    assert!(
+        registry_frame(vcx)
+            .iter()
+            .all(|r| !r.text.contains("hv_test_pw")),
+        "no password is drawn"
     );
 }

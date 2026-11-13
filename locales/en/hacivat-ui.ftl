@@ -797,3 +797,37 @@ hv-conn-issue-ssh-key-file-missing = The SSH key file can't be read.
 # The TLS client key uses the old OpenSSL encryption, which can't be decrypted.
 # Review: PO
 hv-conn-issue-tls-key-legacy-encrypted = This private key uses an old encryption format. Convert it to PKCS #8.
+
+## m2a-demo-extra
+
+# After a URL parameter the connection may not use (the paste notice): it is not added.
+# Variables:
+#   $reason (Enum(unknown, refused)) - unknown: not an option Hacivat allows for this engine when the connection comes from a pasted or imported text; refused: never allowed here.
+#   $engine (String) - the database engine, e.g. "PostgreSQL".
+hv-conn-url-left-out = { $reason ->
+        [unknown] isn't a connection option for { $engine }, so it was left out
+       *[refused] isn't allowed, so it was left out
+    }
+# Technical details rows of a setting that stopped the connect before anything was sent.
+hv-conn-err-property = Property
+hv-conn-err-path = Path
+hv-conn-err-problem = Problem
+# The value of the Property or Path row: what was refused, then why.
+# Variables:
+#   $name (String) - the property's name (e.g. "foo") or the file's path.
+#   $reason (Enum(unknown, encoding, script, secret, path, denied)) - why it was refused.
+hv-conn-err-refused = { $name } — { $reason ->
+        [unknown] not allowed for imported connections
+        [encoding] encoded twice
+        [script] runs commands, not allowed for imported connections
+        [secret] holds a password; type it in the Password field
+        [path] { -brand-hacivat } won't open this path
+       *[denied] never allowed
+    }
+
+## m2a-dialog-retries
+
+# Under a rejected password's error, once the server rejected 3 passwords in a row: no more are sent.
+hv-conn-err-attempts-used = All 3 attempts are used. { -brand-hacivat } won't send another password, so the account isn't locked.
+# Under the connection dialog's Password field after 3 rejected passwords: how to try again.
+hv-conn-dlg-attempts-used = No attempts left for this server. To try again, change the host, port or user, or reopen this dialog.
