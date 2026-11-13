@@ -95,3 +95,84 @@ the vault, the session overlay, the keyring CI and the deferrals.
   for the endpoint makes every handshake fail with `TlsFailure::PinMismatch` and forbids the
   plaintext fallback; the host-key check and the tunnel refuse; the vault is locked and stores
   nothing; the SSH transport is still refused at Validate (`TransportUnavailable`).
+
+## m2b-t03 — TLS pins and review
+
+- **A pin is the SHA-256 of the leaf certificate's DER (B5), not of its SPKI.** It is the
+  fingerprint the review shows and users compare (`openssl x509 -fingerprint -sha256`), and it
+  is what the copy promises ("trusts exactly this certificate"). `alg/01` says SPKI; a leaf pin
+  is stricter (a re-issued certificate with the same key is a change to review), which is the
+  safe direction. *Rejected:* SPKI pins (survive renewal silently), CA pins (a different trust
+  question, covered by Import CA).
+- **What a pin checks.** In every mode except Disable, the endpoint's pin replaces the
+  certificate check: the leaf's SHA-256 must equal the pin, and now must lie inside the leaf's
+  `notBefore`…`notAfter` (D-005: a pin never extends the dates). The chain, the name, CA:TRUE,
+  key usages and Apple's lifetime policy are not checked, because the user reviewed exactly
+  this certificate. Handshake signatures are always verified with ring's algorithms, so the
+  server proves it holds the pinned certificate's key. Require with a pin verifies the pin.
+  The outcome is `Pinned`; without a pin the M2a mode check applies and the outcome is `Full`
+  (Auto, VerifyFull), `CaOnly` (VerifyCa) or `No` (Require).
+- **The endpoint rule.** A pin applies to `pin_endpoint(tls_host, port)` only: the TLS host as
+  typed, compared in ASCII lowercase without a trailing dot, IPv6 in brackets, and the same
+  port. A pin for `db:5432` never applies to `db:5433`; `DB` and `db.` are `db` (DNS names are
+  case-insensitive, so a case-sensitive match would let `DB` skip the pin of `db` and fall back
+  to chain trust and plaintext). Stored endpoints are normalised the same way when they are
+  compared (`TlsSettings::pin_for`). An IP literal and a host name are different endpoints.
+- **A pin forbids plaintext (Q13).** `plaintext_allowed` is false whenever the endpoint has a
+  pin, `allow_public_plaintext` included. **Disable with a pin (T1 review M2):** Disable never
+  runs TLS, so the pin cannot be checked. `build_tls_params` keeps returning `None` for
+  Disable (B5; Disable is an explicit choice, never a fallback), and
+  `TlsSettings::disable_ignores_pin(host, port)` is the flag Validate and the dialog show.
+  *Rejected:* refusing Disable outright (B5 and the brief's `pins_never_apply_in_disable`
+  keep Disable working).
+- **Classification (T1 review M1).** A mismatch is a `rustls::Error::InvalidCertificate(
+  CertificateError::Other(..))` carrying Hacivat's own `PinMismatchError`, which
+  `TlsFailure::from_rustls` maps to `PinMismatch` by type (a downcast, never by text). A driver
+  that reads a fresh, empty `failure` slot (the pipeline's `fresh_tls`) therefore still reports
+  `tls.pin_changed`; MySQL through patch §5 gets the same. *Rejected:*
+  `ApplicationVerificationFailure` plus the slot (lost when the slot is replaced).
+- **Recording.** The verifier writes the presented chain (leaf first) before its verdict, so a
+  failed handshake can be reviewed; each certificate check first clears `outcome` and
+  `failure`, and writes `outcome` only on success. **TLS session resumption is off** in the
+  configuration: a resumed session skips the verifier and would leave `presented` and
+  `outcome` empty (MySQL's side connection reuses the configuration, and the insecure-auth
+  guard reads `outcome`). One `TlsParams` serves one connect attempt: its slots belong to the
+  configuration, so two concurrent handshakes through one `TlsParams` would share them (the
+  pipeline builds the params per attempt; M2a ruling).
+- **One configuration for both engines (Q2).** `TlsParams.config` holds the pin-aware verifier,
+  the roots and the decrypted client identity; PostgreSQL uses it through `tokio-rustls`, MySQL
+  through patch §5. Nothing in it is engine-specific. ring is the only provider.
+- **Certificate review.** `x509-parser` 0.18 parses each certificate; anything that is not one
+  well-formed DER certificate (trailing bytes included) makes the review `None`, so no "trust"
+  action is offered. Names are RFC 4514 strings (last RDN first, `,` and `+`, RFC 4514's
+  escapes, short names CN/L/ST/O/OU/C/STREET/DC/UID, else the dotted OID; UTF-8 values
+  verbatim, `BMPString` decoded, other values as `#hex`). Roles go by position: the first is
+  the leaf, the last is `Root` when its subject equals its issuer, the rest are intermediates.
+  10,000 deterministic DER mutations run in `tls_review.rs` without a panic.
+- **Channel binding (B9, Q36).** `tls_server_end_point` hashes the leaf DER with the hash of its
+  `signatureAlgorithm`: MD5 and SHA-1 become SHA-256 (RFC 5929 §4.1); SHA-224/256/384/512 for
+  RSA PKCS #1 v1.5, ECDSA (`ecdsa-with-SHA512` included) and DSA; RSASSA-PSS uses the hash in
+  its parameters (SHA-1, the RFC 4055 default when absent, becomes SHA-256). Ed25519, Ed448,
+  unknown algorithms, unknown PSS hashes and malformed DER give `None`: no binding is offered.
+- **Encrypted client keys (B25, Q36).** PKCS #8 `EncryptedPrivateKeyInfo` (PEM or DER) with
+  PBES2: PBKDF2 with HMAC-SHA-1 (OpenSSL 1.0, `sha1-insecure`) or SHA-2, or scrypt; AES-CBC.
+  No passphrase is `KeyEncrypted`; a failed decryption, or plaintext that is not a PKCS #8 key
+  (valid padding by chance), is `KeyPassphraseWrong`; an unsupported scheme is `KeyUnreadable`;
+  a legacy `Proc-Type: 4,ENCRYPTED` key is `KeyEncryptedLegacy` whether or not a passphrase is
+  offered (Hacivat does not implement OpenSSL's legacy EVP_BytesToKey). A key file that asks for
+  more than 10 million PBKDF2 iterations or 256 MiB of scrypt memory is `KeyUnreadable` before
+  any derivation, so a crafted file in an imported profile cannot hold the core runtime. The
+  passphrase is a `SecretString`, exposed only to the KDF; the decrypted key lives in rustls'
+  `PrivateKeyDer` as an unencrypted key did in M2a. `is_network_path` stays the first check
+  before any file is opened (M2a N2).
+- **Fails closed.** A pin mismatch, an expired or not-yet-valid pinned leaf, or an unparsable
+  pinned leaf refuses the handshake; a pin turns the plaintext fallback off; a review that
+  cannot parse offers no trust action; an unknown signature algorithm offers no channel
+  binding.
+- **Tests.** `crates/core/hacivat-net/tests/tls_pins.rs` (pins in every mode, IP-only SAN,
+  CA:TRUE and 10-year certificates, rotation with both fingerprints, trusted chain with another
+  pin, expiry and not-yet-valid, name mismatch, the endpoint rule, fresh recording without
+  resumption, Q13, Disable, encrypted keys and the KDF cap, no passphrase in `Debug`);
+  `tests/tls_review.rs` (RFC 4514, roles, malformed DER, the fuzz run, fingerprints, end-point
+  hashes); the `src/tls.rs` unit tests (endpoint normalisation, the Disable flag, M1
+  classification, escapes).

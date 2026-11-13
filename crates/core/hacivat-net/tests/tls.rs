@@ -592,10 +592,11 @@ fn tls_file_problems_are_reported_before_connecting() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
 
+    // m2b-t03 (B25): a legacy OpenSSL-encrypted key is its own refusal, not "encrypted".
     let (s, key) = with_client_key(d, ENCRYPTED_PKCS1_PEM);
     assert_eq!(
         build_tls_params(&s, "db", 5432, Public, None).unwrap_err(),
-        TlsSetupError::KeyEncrypted(key)
+        TlsSetupError::KeyEncryptedLegacy(key)
     );
     let (s, key) = with_client_key(d, "not a key\n");
     assert_eq!(
@@ -868,11 +869,11 @@ async fn handshake_params(srv: &Srv, settings: TlsSettings) -> (Result<u8, ()>, 
     (result, params)
 }
 
-/// Until Task 3 compares pins, a pin for the endpoint refuses every certificate (Global
-/// Constraints, "No silent weakening"); the verifier records the presented chain either way,
-/// and the outcome only on success.
+/// Task 3 replaced the Task 1 pin stub: the pinned leaf passes as `Pinned`, any other leaf
+/// fails as `PinMismatch`; the verifier records the presented chain either way, and the
+/// outcome only on success.
 #[tokio::test]
-async fn a_pinned_endpoint_fails_closed_and_the_chain_is_recorded() {
+async fn a_pinned_endpoint_is_checked_and_the_chain_is_recorded() {
     let srv = rcgen_server("localhost").await;
     let accepted = settings(TlsMode::Require);
     let (ok, params) = handshake_params(&srv, accepted.clone()).await;
@@ -881,18 +882,28 @@ async fn a_pinned_endpoint_fails_closed_and_the_chain_is_recorded() {
     let leaf = params.presented.lock().unwrap().clone().expect("a chain");
     assert_eq!(leaf.0.len(), 1);
 
+    let pin = CertPin {
+        endpoint: pin_endpoint("localhost", srv.addr.port()),
+        sha256: cert_sha256(&leaf.0[0]),
+    };
     let pinned = TlsSettings {
+        pins: vec![pin.clone()],
+        ..accepted.clone()
+    };
+    let (ok, params) = handshake_params(&srv, pinned).await;
+    assert!(ok.is_ok(), "the pinned leaf passes");
+    assert_eq!(*params.outcome.lock().unwrap(), Some(TlsVerified::Pinned));
+    assert!(!params.plaintext_allowed);
+
+    let wrong = TlsSettings {
         pins: vec![CertPin {
-            endpoint: pin_endpoint("localhost", srv.addr.port()),
-            sha256: cert_sha256(&leaf.0[0]),
+            sha256: [0; 32],
+            ..pin
         }],
         ..accepted
     };
-    let (refused, params) = handshake_params(&srv, pinned).await;
-    assert!(
-        refused.is_err(),
-        "the pin stub refuses even the pinned leaf"
-    );
+    let (refused, params) = handshake_params(&srv, wrong).await;
+    assert!(refused.is_err(), "another leaf is refused");
     assert_eq!(
         *params.failure.lock().unwrap(),
         Some(TlsFailure::PinMismatch)
