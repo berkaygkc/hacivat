@@ -966,7 +966,17 @@ async fn a_read_only_connect_refuses_a_role_switch_in_its_options() {
         key: "options".into(),
         reason: hacivat_driver::ViolationReason::AlwaysDenied,
     };
-    for value in ["-c role=hv_ro", "-c session_authorization=hv_ro"] {
+    // Fix round 3 (I-3c): any shape but `-c name=value`, `-cname=value` or `--name=value` too,
+    // such as `getopt`-combined flags.
+    for value in [
+        "-c role=hv_ro",
+        "-c session_authorization=hv_ro",
+        "-ncrole=hv_ro",
+        "-nc role=hv_ro",
+        "-n-role=hv_ro",
+        "-Pcsession_authorization=hv_ro",
+        "-e",
+    ] {
         // A read-only profile.
         let fake = Arc::new(fake_pg());
         let e = err_with(&fake, with_role(ro_profile(), value)).await;

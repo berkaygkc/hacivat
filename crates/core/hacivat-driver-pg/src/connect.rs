@@ -72,12 +72,14 @@ fn without_dangling_escape(s: &str) -> &str {
 /// The startup `options` string: the sanitized extras in order, then the read-only default
 /// last, so nothing before it can turn it off (a later `-c` wins).
 ///
-/// ## m2b-t18-guarded-exec (Task 18 fix round 2, I-3b): a read-only connect refuses an
-/// `options` value that sets `role` or `session_authorization`
-/// (`hacivat_driver::sanitize::pg_options_switch_role`), never dropping it silently: the role
-/// probe would judge one identity and the guard's reset return to another. The session's
-/// validation refuses it first, as a visible issue; this is the driver's own belt. A
-/// read-write connect keeps it.
+/// ## m2b-t18-guarded-exec (Task 18 fix rounds 2 and 3, I-3b, I-3c): a read-only connect
+/// sends an `options` value only in the shapes `hacivat_driver::sanitize::
+/// pg_options_read_only_allowed` accepts (`-c name=value`, `-cname=value`, `--name=value`, no
+/// `role` or `session_authorization`) and refuses anything else, never dropping it silently:
+/// combined `getopt` flags (`-ncrole=x`) or a role switch would let the role probe judge one
+/// identity and the guard's reset return to another. The session's validation refuses it
+/// first, as a visible issue; this is the driver's own belt, checked on the text it sends. A
+/// read-write connect keeps any value.
 fn startup_options(
     read_only: bool,
     extras: &[(String, String)],
@@ -85,10 +87,10 @@ fn startup_options(
     let mut parts: Vec<String> = Vec::new();
     for (key, value) in extras {
         if key.eq_ignore_ascii_case("options") {
-            if read_only && hacivat_driver::sanitize::pg_options_switch_role(value) {
+            let trimmed = without_dangling_escape(value.trim());
+            if read_only && !hacivat_driver::sanitize::pg_options_read_only_allowed(trimmed) {
                 return Err(raw(RawErrorKind::Unsupported));
             }
-            let trimmed = without_dangling_escape(value.trim());
             if !trimmed.is_empty() {
                 parts.push(trimmed.to_string());
             }
@@ -348,8 +350,10 @@ mod tests {
     // ## m2b-t18-guarded-exec
     #[test]
     fn a_read_only_connect_refuses_a_role_switch() {
-        // Task 18 fix round 2 (I-3b): every spelling the server reads as `role` or
-        // `session_authorization` is refused on a read-only connect, never dropped.
+        // Task 18 fix rounds 2 and 3 (I-3b, I-3c): a read-only connect sends only
+        // `-c name=value`, `-cname=value` and `--name=value` words, none naming `role` or
+        // `session_authorization`; anything else is refused, never dropped. Combined `getopt`
+        // flags (review round 2) are among them.
         for value in [
             "-c role=hv_ro",
             "-crole=hv_ro",
@@ -360,6 +364,17 @@ mod tests {
             "--Session_Authorization=hv_ro",
             "-c\tsession_authorization=x",
             "-c \\ role=x",
+            "-ncrole=x",
+            "-nc role=x",
+            "-n-role=x",
+            "-n- role=x",
+            "-ec role=x",
+            "-Pcsession_authorization=x",
+            "-TEjnc role=x",
+            "-e",
+            "-c",
+            "-c search_path=app -P",
+            "x",
         ] {
             let extras = [("options".to_string(), value.to_string())];
             assert_eq!(
@@ -375,11 +390,13 @@ mod tests {
                 "{value:?}"
             );
         }
-        // Names that only look alike are left alone.
+        // The allowed shapes, with names that only look alike, are sent.
         for value in [
             "-c rolex=1",
             "-c search_path=role",
             "-c application_name=role=x",
+            "-csearch_path=app --statement-timeout=5s -c work_mem=4MB",
+            "",
         ] {
             let extras = [("options".to_string(), value.to_string())];
             assert!(startup_options(true, &extras).is_ok(), "{value:?}");

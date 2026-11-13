@@ -604,17 +604,26 @@ Q14): `run_guarded` never runs inside a user transaction.
   `current_user` and `session_user` are SQL keywords, not names `search_path` resolves);
   anything but one row of two equal non-NULL names is `Unparsed`, guarded, and the probe does
   not run.
-- **No role switch in a read-only connect's options** (fix round 2, I-3b, named exceptions in
-  `hacivat-driver` `sanitize.rs`, `hacivat-driver-pg` `connect.rs` and the pipeline's
-  `validate.rs`/`mod.rs`, blocks `m2b-t18-guarded-exec`). `sanitize::pg_options_switch_role`
-  reads an `options` value as the server does (`pg_split_opts`; `-c name=value`,
-  `-cname=value`, `-c` then `name=value`, `--name=value`; names ASCII-folded, `-` as `_`) and
-  finds `role` or `session_authorization`. `sanitize::read_only_violations` turns that into an
+- **A read-only connect's `options` are allowlisted by shape** (fix rounds 2 and 3, I-3b and
+  I-3c; named exceptions in `hacivat-driver` `sanitize.rs`, `hacivat-driver-pg` `connect.rs`
+  and the pipeline's `validate.rs`/`mod.rs`, blocks `m2b-t18-guarded-exec`). The server parses
+  `options` with POSIX `getopt`, whose single-dash flags combine: `-ncrole=x`, `-nc role=x`,
+  `-n-role=x`, `-ec role=x`, `-Pcsession_authorization=x` all set the setting (review round 2
+  connected with three of them on pg17, `current_user = pg_read_all_data`). Round 2's reader
+  of "every spelling" missed them, so round 3 stops recognising spellings and allowlists
+  shapes: `sanitize::pg_options_read_only_allowed` splits the value as the server's
+  `pg_split_opts` does (C `isspace`, `\` escapes) and accepts only `-c` followed by a
+  `name=value` word, `-cname=value` and `--name=value`, none naming `role` or
+  `session_authorization` (ASCII-folded, `-` read as `_`, surrounding whitespace ignored). Any
+  other word — another backend switch (`-e`, `-P`, `-fs`), combined flags, a dangling `-c`, a
+  non-option word — refuses the value. `sanitize::read_only_violations` turns a refusal into an
   `AlwaysDenied` violation, whatever the origin and the unsafe toggle; the pipeline's
   validation shows it as `OptionRejected` (`ConfigInvalid`, before any I/O) for a read-only
   profile and for a read-only session of a read-write profile. The PostgreSQL driver's
-  `startup_options` refuses it too on a read-only connect (`Unsupported`, never dropped
-  silently), the belt for a caller outside the pipeline. A read-write connect keeps `-c role=`.
+  `startup_options` applies the same allowlist to the text it sends on a read-only connect
+  (`Unsupported`, never dropped silently), the belt for a caller outside the pipeline. A
+  read-write connect keeps any value (`-c role=` is a legitimate feature). Imported URLs were
+  already limited to `pg_options_safe`'s shapes and safe GUCs.
   Observed on pg17: a startup `-c session_authorization=` left `current_user` the login, so
   the reset is what guards the in-session switches (`SET SESSION AUTHORIZATION`, `SET ROLE`),
   tested on pg17.
@@ -661,9 +670,9 @@ asserts the label only, which already means the probe ended within its 5 s bound
 wall-clock assertion gates CI (fix round 1, I-4). It also writes the Docker artifact
 `t18-probe-timing.txt`. **Measured (fix round 2, `--set full`, pg17, local Docker on the
 development Mac): the whole probe — reset, identity check and the five statements — took
-153 ms over 100,000 tables** (`hv_ro`, enforced). Row 3's `EXISTS` finds nothing for a
-least-privilege role, so it scans every relation once; well under the 2 s the review asked
-about and the 5 s bound.
+153 ms over 100,000 tables** (`hv_ro`, enforced); the round 2 re-review measured 139 ms and
+the fix round 3 run 143 ms. Row 3's `EXISTS` finds nothing for a least-privilege role, so it
+scans every relation once; well under the 2 s the review asked about and the 5 s bound.
 
 **Docker fixtures (review m-6).** The fixture roles are created idempotently and stay on the
 matrix volumes: `hv_ro` (as the init script makes it), `hv_ro_su` (superuser member),
@@ -683,7 +692,11 @@ leak, not a write): use `pg_catalog.pg_advisory_unlock_all()`. To Task 23's bypa
 a MySQL account can always change its own password (`ALTER USER USER() IDENTIFIED BY …`,
 `SET PASSWORD = …`), which L5 cannot prevent; assert both are refused in a guarded read-only
 session (1792, or a gap). Also to Task 23 (I-2): a `CALL` of a procedure that commits, writes
-and commits.
+and commits. And (round 2 re-review note): MySQL `RESET PERSIST`, `SET PERSIST` and
+`SET GLOBAL` run inside the read-only transaction without an implicit commit and change server
+state that L4 does not stop; they need administrative privileges outside the least-privilege
+set, so only L5 (guarded) covers them, the same class as the `EXECUTE` residual above. Task 23
+should assert them.
 
 **Tests.** `crates/core/hacivat-session/tests/readonly.rs` (FakeDriver, 37): the exact
 PostgreSQL and MySQL sequences with replay and one reset; a smuggled `COMMIT` → gap, `Broken`,
@@ -703,21 +716,26 @@ broken; a PostgreSQL error with no transaction → gap; a failed reset breaks th
 engine without a plan runs nothing; SQLite runs only the statement; the probe: read-only only,
 reset, identity check, then the fixed statements; a failed reset is `Unparsed` (I-3b); a
 switched role (and an unreadable identity answer) → `Unparsed` without the probe (I-3); a
-read-only connect (profile or session) with `-c role=`/`-c session_authorization=` refused as a
-visible `OptionRejected` before I/O, read-write kept (I-3b); a failure is `Unparsed`, a 6 s
+read-only connect (profile or session) with `-c role=`/`-c session_authorization=`, combined
+`getopt` flags (`-ncrole=`, `-nc role=`, `-n-role=`, `-Pcsession_authorization=`) or another
+switch (`-e`) refused as a visible `OptionRejected` before I/O, read-write kept (I-3b, I-3c); a
+failure is `Unparsed`, a 6 s
 probe is `Unparsed` (H4),
 TEMP keeps the enforced label, superuser, MySQL `SHOW GRANTS`, MariaDB/SQLite unprobed, a MySQL
 profile on MariaDB; a side connection runs no probe (H5); the label on a pipeline connect;
 remediation by version. `hacivat-guard` `plans.rs`/`probe.rs`: the qualified SQL.
 `hacivat-driver` `tests/sanitize.rs` and `hacivat-driver-pg` (`connect.rs` unit,
-`tests/unit.rs`): the role-switch reader, the read-only violation, the driver's refusal and
-read-write's `-c role=`.
-`tests/docker_readonly.rs` (**run in fix round 2 with `--set full`: 10/10 pass**, plus the
-other session Docker files and `hacivat-driver-pg`'s, all green): `hv_ro` reads a table, a
+`tests/unit.rs`): the read-only shape allowlist (the review's seven combined-flag bypasses,
+other switches, a dangling `-c`, non-option words refused; the three shapes accepted), the
+read-only violation, the driver's refusal and read-write's `-c role=`.
+`tests/docker_readonly.rs` (**run in fix rounds 2 and 3 with `--set full`: 10/10 pass**, plus
+the other session Docker files and `hacivat-driver-pg`'s, all green): `hv_ro` reads a table, a
 write is refused, `COMMIT` denied (pg17); `hv_ro` enforced and the superuser guarded with its
 warning; the three T5 fixture roles guarded with their warnings; a role default reads guarded
 `Unparsed`, and a typed `-c role=`/`-c session_authorization=` on a read-only connect is
-refused (`ConfigInvalid`, `OptionRejected`); a superuser connection switched in-session to
+refused (`ConfigInvalid`, `OptionRejected`), as are `-ncrole=`, `-nc role=`, `-n-role=`,
+`-ncsession_authorization=` and `-e` (I-3c, the forms the review connected with), while
+`-c statement_timeout=30s --lock-timeout=5s` connects `hv_ro` enforced; a superuser connection switched in-session to
 `hv_ro` (`SET SESSION AUTHORIZATION`, `SET ROLE`) reads guarded with `Superuser` after the
 probe's reset (I-3b); `hv_ro` enforced on every PostgreSQL line (13–18; this also confirms the
 `pg_catalog`-qualified probe SQL on every server); MySQL 8.4 `hv_ro` enforced, MariaDB guarded

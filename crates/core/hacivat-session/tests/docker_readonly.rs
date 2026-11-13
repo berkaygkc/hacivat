@@ -383,11 +383,20 @@ async fn pg_a_session_running_as_another_role_is_guarded() {
     assert_eq!(by_default.access, AccessLabel::ReadOnlyGuarded);
     assert_eq!(by_default.access_warnings, [RoleWarning::Unparsed]);
     by_default.close().await;
-    // Fix round 2 (I-3b): a typed `-c role=` or `-c session_authorization=` is refused on a
-    // read-only connect before any I/O, as a visible issue.
-    for setting in ["role", "session_authorization"] {
+    // Fix rounds 2 and 3 (I-3b, I-3c): a typed role switch is refused on a read-only connect
+    // before any I/O, as a visible issue — in every shape, including the `getopt`-combined
+    // flags the review's round 2 connected with (`-ncrole=…`, `-nc role=…`, `-n-role=…`).
+    for options in [
+        format!("-c role={RO}"),
+        format!("-c session_authorization={RO}"),
+        format!("-ncrole={RO}"),
+        format!("-nc role={RO}"),
+        format!("-n-role={RO}"),
+        format!("-ncsession_authorization={RO}"),
+        "-e".to_string(),
+    ] {
         let mut typed = profile_as(&t, &t.user, true);
-        typed.extra = vec![("options".into(), format!("-c {setting}={RO}"))];
+        typed.extra = vec![("options".into(), options.clone())];
         let refused = connect(
             &deps(),
             req_pw(typed, &t.password),
@@ -397,16 +406,25 @@ async fn pg_a_session_running_as_another_role_is_guarded() {
         )
         .await
         .err()
-        .unwrap_or_else(|| panic!("{}: -c {setting}= connected read-only", t.id));
-        assert_eq!(refused.class, ErrClass::ConfigInvalid, "{setting}");
+        .unwrap_or_else(|| panic!("{}: `{options}` connected read-only", t.id));
+        assert_eq!(refused.class, ErrClass::ConfigInvalid, "{options}");
         assert!(
             refused
                 .issues
                 .iter()
                 .any(|i| matches!(i.code, IssueCode::OptionRejected { .. })),
-            "{setting}"
+            "{options}"
         );
     }
+    // The allowed shapes still connect read-only (and keep the guard's label honest).
+    let mut typed = profile_as(&t, RO, true);
+    typed.extra = vec![(
+        "options".into(),
+        "-c statement_timeout=30s --lock-timeout=5s".into(),
+    )];
+    let allowed = connect_profile(&t, typed).await;
+    assert_eq!(allowed.access, AccessLabel::ReadOnlyEnforced);
+    allowed.close().await;
 }
 
 #[tokio::test]
