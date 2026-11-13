@@ -34,6 +34,11 @@ impl SslOpts {
     }
 
     pub(crate) async fn build_tls_connector(&self) -> Result<TlsConnector> {
+        // HACIVAT PATCH §5
+        if let Some(config) = self.rustls_client_config() {
+            return Ok(TlsConnector::from(config.clone()));
+        }
+
         let mut root_store = RootCertStore::empty();
         if !self.disable_built_in_roots() {
             root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().map(|x| x.to_owned()));
@@ -170,11 +175,11 @@ impl ServerCertVerifier for DangerousVerifier {
                 now,
             ) {
                 Ok(assertion) => Ok(assertion),
-                Err(ref e)
-                    if e.to_string().contains("NotValidForName") && self.skip_domain_validation =>
-                {
-                    Ok(ServerCertVerified::assertion())
-                }
+                // HACIVAT PATCH §1
+                Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::NotValidForName
+                    | rustls::CertificateError::NotValidForNameContext { .. },
+                )) if self.skip_domain_validation => Ok(ServerCertVerified::assertion()),
                 Err(e) => Err(e),
             }
         }

@@ -805,6 +805,12 @@ impl Conn {
                     self.drop_packet().await
                 }
                 Some(0x04) => {
+                    // HACIVAT PATCH §2
+                    if let Some(guard) = self.inner.opts.password_guard() {
+                        if !guard() {
+                            return Err(DriverError::InsecurePasswordRefused.into());
+                        }
+                    }
                     let pass = self.inner.opts.pass().unwrap_or_default();
                     let mut pass = crate::buffer_pool().get_with(pass.as_bytes());
                     pass.as_mut().push(0);

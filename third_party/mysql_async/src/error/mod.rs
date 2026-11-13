@@ -111,6 +111,10 @@ pub enum DriverError {
     #[error("Connection to the server is closed.")]
     ConnectionClosed,
 
+    // HACIVAT PATCH §2
+    #[error("Refused to send the password: the password guard rejected this connection.")]
+    InsecurePasswordRefused,
+
     #[error("Error converting from mysql value.")]
     FromValue { value: Value },
 
