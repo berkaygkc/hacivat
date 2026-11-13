@@ -577,6 +577,10 @@ database itself, so a side file elsewhere would fail them.
     (`Io(TimedOut)`, the server's message kept), the connection task is aborted, every later
     call fails with `Io(NotConnected)`, and `tx_status()` reads `Failed`, never the stale
     status. The session reconnects; a rollback that was not needed is harmless.
+    *Round 1 re-review (R3):* `Io(TimedOut)` means only that the bound expired. When the
+    connection ended first (a FATAL `57P01` from `pg_terminate_backend` or an admin shutdown,
+    then the server closes), it is broken the same way, but a server error keeps its class
+    (`Db`, with its SQLSTATE); any other kind becomes `Io(ConnectionAborted)`.
   - **Command tag.** The last `CommandComplete` text (cleared before each request) is
     `ExecSummary::command_tag`, which the read-only post-check reads (`INSERT 0 3`,
     `CREATE TABLE`); `rows_affected` is its count (`RowStream::rows_affected`, or the simple
@@ -609,7 +613,9 @@ database itself, so a side file elsewhere would fail them.
   user statements one at a time through `Protocol::Extended` (review M2). *Fix round 1 (I3):*
   cells are read with `try_get`; a cell that is not UTF-8 (a `SQL_ASCII` database sends stored
   bytes unconverted) fails the statement with `RawErrorKind::Other` instead of panicking, and
-  the connection stays in step.
+  the connection stays in step. *Round 1 re-review (R2):* after the first bad cell the rest of
+  the result is still read to its `ReadyForQuery` (rows dropped, no settle bound), so a decode
+  error early in a large result is `Other` on a usable connection, not a settle timeout.
 - **COPY FROM STDIN (fix round 1, I1).** `tokio-postgres` fails a request that meets a
   `CopyInResponse` or `CopyBothResponse` (`unexpected message`), while the server waits in
   copy-in mode: no `ReadyForQuery` would come, `tx_status()` would read the old status and the
@@ -617,7 +623,13 @@ database itself, so a side file elsewhere would fail them.
   and `W` (after authentication) itself with `CopyFail("COPY FROM STDIN is not supported
   yet")`, plus a `Sync` when the last statement-running message was an extended `Execute`
   (the server ignores the `Sync` already sent during copy-in and then discards until the next
-  one; it is not counted, so the single `ReadyForQuery` settles the one counted `Sync`). The
+  one; it is not counted, so the single `ReadyForQuery` settles the one counted `Sync`).
+  *Round 1 re-review (R1):* the `Sync` is injected only when the `Execute`'s own `Sync` has
+  already started out (the writer clears a flag on `E` and sets it on `S`). After a partial
+  write that stopped between `Execute` and `Sync`, the library's `Sync` follows the `CopyFail`
+  and ends the discard itself; a second one would draw an uncounted `ReadyForQuery` and shift
+  every later reply. Exactly one `Sync` reaches the server either way. The layering is
+  unchanged: the injection runs on the framed observer only (above rustls under TLS). The
   bytes go out only on a frontend message boundary: a message `tokio-postgres` is writing is
   finished first. The server ends the copy with `ErrorResponse` and one `ReadyForQuery`, which
   completes the failed request inside `tokio-postgres` too; the call returns
