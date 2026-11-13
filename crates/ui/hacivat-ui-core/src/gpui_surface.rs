@@ -19,7 +19,7 @@ pub use gpui::ScrollHandle;
 // `tooltip` live on `StatefulInteractiveElement` at the pin), builders, pointer events.
 #[rustfmt::skip] pub use gpui::{AssetSource, DragMoveEvent, MouseMoveEvent, MouseUpEvent, Stateful, StatefulInteractiveElement, WeakEntity};
 // M2a (Task 1): anchored popovers and selects (`deferred(anchored())`), file pickers.
-pub use crate::actions::RunCommand;
+pub use crate::actions::{InertCommand, RunCommand};
 /// `.when(..)`/`.map(..)` builders (`gpui::prelude::FluentBuilder` at the pin).
 pub use gpui::prelude::FluentBuilder;
 pub use gpui::{Anchor, AnchoredPositionMode, PathPromptOptions, anchored, deferred};

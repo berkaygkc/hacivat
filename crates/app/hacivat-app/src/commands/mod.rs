@@ -16,7 +16,9 @@ use std::time::Instant;
 
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::input::FocusedInput;
-use hacivat_ui_core::gpui_surface::{App, Global, KeyDownEvent, RunCommand, SharedString, Window};
+use hacivat_ui_core::gpui_surface::{
+    AnyWindowHandle, App, Global, KeyDownEvent, RunCommand, SharedString, Window, WindowHandle,
+};
 use hacivat_ui_core::keymap::{ContextStack, KeyboardLayoutId, Keymap};
 
 use crate::PendingChord;
@@ -86,19 +88,36 @@ fn empty_keymap() -> Arc<Keymap> {
 
 /// Runs `id` in the active workspace window (or the first one). A key equivalent pressed during
 /// an IME composition reaches the menu when the window lets the key through: like every
-/// binding, it does not run then (F15).
+/// binding, it does not run then (F15). Under a modal layer only `app.quit` runs (P47), as
+/// with the keys: the macOS menu greys the other items, and this guard covers a menu built
+/// before the layer opened.
 fn run_in_workspace_window(id: &str, cx: &mut App) {
     if cx.try_global::<FocusedInput>().is_some_and(|f| f.composing) {
         return;
     }
-    let window = cx
-        .active_window()
-        .into_iter()
-        .chain(cx.windows())
-        .find(|w| w.downcast::<Workspace>().is_some());
-    if let Some(window) = window {
+    if id != QUIT_ACTION && modal_open(cx) {
+        return;
+    }
+    // Through the window alone: the command may update the workspace itself.
+    if let Some(window) = workspace_window(cx).map(AnyWindowHandle::from) {
         let _ = window.update(cx, |_, window, cx| ActionRegistry::run(id, window, cx));
     }
+}
+
+/// The workspace window the menus act on: the active window, or else the first workspace one.
+fn workspace_window(cx: &App) -> Option<WindowHandle<Workspace>> {
+    cx.active_window()
+        .into_iter()
+        .chain(cx.windows())
+        .find_map(|w| w.downcast::<Workspace>())
+}
+
+/// Whether a modal layer is open in the workspace window the menus act on; while one is, the
+/// menus run only `app.quit` (P47). False while that window is being updated.
+pub(crate) fn modal_open(cx: &App) -> bool {
+    workspace_window(cx)
+        .and_then(|w| w.read(cx).ok())
+        .is_some_and(|ws| ws.modal_context().is_some())
 }
 
 /// Sets the `PendingChord` global when it changes (the status bar observes it).
@@ -152,8 +171,9 @@ fn on_key_down(ev: &KeyDownEvent, ctx: &ContextStack, window: &mut Window, cx: &
     }
 }
 
-/// The action that quits the app; its binding stays live under a modal layer (P47).
-const QUIT_ACTION: &str = "app.quit";
+/// The action that quits the app; its binding and menu item stay live under a modal layer
+/// (P47).
+pub(crate) const QUIT_ACTION: &str = "app.quit";
 
 /// Resolves a key while a modal layer is open (P47): only the bindings of the top layer's
 /// context `top`, plus `app.quit` from the full stack `ctx`.
