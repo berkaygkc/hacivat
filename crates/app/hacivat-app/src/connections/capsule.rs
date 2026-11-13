@@ -156,6 +156,24 @@ pub fn encryption_label(cx: &App, p: &Profile, info: &LiveInfo) -> SharedString 
     }
 }
 
+// ## m2b-t24-shots (follow-up)
+/// Which [`encryption_label`] a live connection reads, as an ID suffix (`sheet-enc-pinned`,
+/// `status-enc-pinned`): `file`, `none`, `verified`, `pinned`, `ca-only` or `unverified`.
+pub fn encryption_key(p: &Profile, info: &LiveInfo) -> &'static str {
+    if p.engine == DbmsKind::Sqlite {
+        return "file";
+    }
+    if !info.tls.encrypted {
+        return "none";
+    }
+    match info.tls.verified {
+        TlsVerified::Full => "verified",
+        TlsVerified::Pinned => "pinned",
+        TlsVerified::CaOnly => "ca-only",
+        TlsVerified::No => "unverified",
+    }
+}
+
 /// A latency in whole milliseconds (`12 ms`).
 pub fn latency_label(cx: &App, info: &LiveInfo) -> SharedString {
     let ms = u64::try_from(info.latency.as_millis()).unwrap_or(u64::MAX);
@@ -991,6 +1009,37 @@ mod fixtures {
                 false,
             ),
         );
+    }
+
+    // ## m2b-t24-shots (follow-up)
+    /// A live test connection whose certificate is pinned (the review's `reports-qa`): the
+    /// status bar and the sheet's Encryption row read "TLS 1.3 · pinned"; the sheet shows its
+    /// last rows.
+    pub fn tls_pinned_fixture(_window: &mut Window, cx: &mut App) {
+        let mut info = sample_live_info(true, false, Support::Supported);
+        info.tls.verified = TlsVerified::Pinned;
+        show(
+            cx,
+            "reports-qa",
+            EnvTag::Test,
+            false,
+            LiveState::Connected(Arc::new(info)),
+        );
+        crate::connections::sheet::shots::scroll_rows_to_end(cx);
+    }
+
+    /// A live dev connection on a machine whose Forever passwords live in Hacivat's vault (the
+    /// harness boots the vault backend, its keyring probe already run): the sheet's Password
+    /// row reads "vault · forever".
+    pub fn vault_secret_fixture(_window: &mut Window, cx: &mut App) {
+        show(
+            cx,
+            "orders-dev",
+            EnvTag::Dev,
+            false,
+            LiveState::Connected(Arc::new(sample_live_info(true, false, Support::Supported))),
+        );
+        crate::connections::sheet::shots::scroll_rows_to_end(cx);
     }
 
     /// A read-write staging connection through SSH, unencrypted.

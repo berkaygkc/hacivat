@@ -600,7 +600,26 @@ mod shots {
 
     /// A successful test: PostgreSQL 16.4 over verified TLS 1.3.
     pub fn ok_fixture(window: &mut Window, cx: &mut App) {
-        let report = TestReport {
+        open(
+            TestStripState::Done(ok(TlsVerified::Full).into()),
+            window,
+            cx,
+        );
+    }
+
+    // ## m2b-t24-shots (follow-up)
+    /// A successful test of a pinned certificate: the Encryption row reads "TLS 1.3 · pinned".
+    pub fn ok_pinned_fixture(window: &mut Window, cx: &mut App) {
+        open(
+            TestStripState::Done(ok(TlsVerified::Pinned).into()),
+            window,
+            cx,
+        );
+    }
+
+    /// PostgreSQL 16.4 over TLS 1.3, its certificate `verified` so.
+    fn ok(verified: TlsVerified) -> TestReport {
+        TestReport {
             ok: true,
             trail: trail(STEPS.len()),
             total: Duration::from_millis(54),
@@ -616,7 +635,7 @@ mod shots {
                 encrypted: true,
                 version: Some("TLSv1.3".to_string()),
                 cipher: Some("TLS13_AES_256_GCM_SHA384".to_string()),
-                verified: TlsVerified::Full,
+                verified,
             }),
             auth: AuthProviderId::Password,
             user: Some("deploy".to_string()),
@@ -625,8 +644,7 @@ mod shots {
             error: None,
             // ## m2b-t19-tls
             profile_changes: Vec::new(),
-        };
-        open(TestStripState::Done(report.into()), window, cx);
+        }
     }
 
     /// A failed test: the password was rejected.
@@ -657,4 +675,4 @@ mod shots {
 }
 
 #[cfg(feature = "shots")]
-pub use shots::{failed_fixture, ok_fixture, running_fixture};
+pub use shots::{failed_fixture, ok_fixture, ok_pinned_fixture, running_fixture};

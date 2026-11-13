@@ -6,14 +6,15 @@
 //! database (at most 3); with no suggestion (SQLite, or no list) it offers nothing.
 //!
 //! M2b (Task 19): "Review certificate…" (only with a certificate to review) and "Import CA…"
-//! replace M2a's interim "Encrypt without verifying" (B6). `ConnectThroughSsh` and
-//! `ReviewHostKey` belong to Tasks 20 and 21 and show no button until their owners add one.
+//! replace M2a's interim "Encrypt without verifying" (B6). `ReviewHostKey` (Task 21) shows in
+//! the error dialog only. "Connect through SSH…" (Task 24) opens the connection's SSH section;
+//! a connection that already goes through SSH is not offered it.
 
 use std::sync::Arc;
 
 use hacivat_l10n::{NoArgs, Text, ids};
 use hacivat_proto::{FixId, ProfileId};
-use hacivat_session::pipeline::ConnectError;
+use hacivat_session::pipeline::{ConnectError, TrailStep};
 use hacivat_ui::button::ButtonKind;
 use hacivat_ui_core::gpui_surface::{App, SharedString, Window};
 
@@ -121,6 +122,12 @@ pub fn fix_actions(error: &ConnectError, rejections: u8, with_edit: bool) -> Vec
     } else {
         error.fixes.clone()
     };
+    // ## m2b-t24-shots (follow-up, R5): a connect whose trail starts with the tunnel already
+    // goes through SSH.
+    let through_ssh = error
+        .trail
+        .first()
+        .is_some_and(|s| s.step == TrailStep::Ssh);
     for fix in fixes {
         match fix {
             FixId::EditConnection if with_edit => out.push(FixAction::EditConnection),
@@ -149,7 +156,7 @@ pub fn fix_actions(error: &ConnectError, rejections: u8, with_edit: bool) -> Vec
             }
             // ## m2b-t24-shots (fix round 1, I4): the connection's SSH section, from the error
             // dialog (`open_with_ssh`) and inline (the dialog's own section).
-            FixId::ConnectThroughSsh => out.push(FixAction::ConnectThroughSsh),
+            FixId::ConnectThroughSsh if !through_ssh => out.push(FixAction::ConnectThroughSsh),
             // M2b flows of other tasks (SSH), M2a's retired `EncryptWithoutVerifying` (B6) and
             // the edit button inline.
             _ => {}

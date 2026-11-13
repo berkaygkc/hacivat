@@ -18,14 +18,17 @@ use hacivat_app::connections::dialog::ssh::{AuthKind, SshImportEnv, SshSection, 
 use hacivat_app::connections::dialog::{
     ConnectionDialog, DialogMode, open_connection_dialog, open_dialog,
 };
-use hacivat_app::connections::fixes::{FixAction, run_m2b_fix};
+use hacivat_app::connections::fixes::{FixAction, fix_actions, run_m2b_fix};
+use hacivat_app::connections::test_strip::TestStripEvent;
 use hacivat_app::l10n_global::{tr, tr_id};
 use hacivat_l10n::{Count, Text, ids};
 use hacivat_net::ssh::{HopSpec, SshAuth, SshSpec};
-use hacivat_proto::{ErrClass, ProfileId};
+use hacivat_proto::{ErrClass, FixId, ProfileId};
 use hacivat_secrets::Retention;
 use hacivat_session::LiveState;
-use hacivat_session::pipeline::{ConnectError, ErrArgs, IssueCode, Phase};
+use hacivat_session::pipeline::{
+    ConnectError, ErrArgs, IssueCode, Phase, StepOutcome, StepTrace, TrailStep,
+};
 use hacivat_session::profile::{ProfileDraft, TransportSpec};
 use hacivat_ui::select::SelectEvent;
 
@@ -473,6 +476,70 @@ fn connect_through_ssh_fix_opens_dialog_with_ssh_open(cx: &mut TestAppContext) {
     )));
     assert_eq!(focused_id(vcx), "ssh-host");
     assert!(vcx.debug_bounds("checkbox-ssh-use").is_some());
+}
+
+// ## m2b-t24-shots (follow-up)
+
+/// `tls.not_supported_by_server` with the pipeline's Require-mode fixes; its trail starts with
+/// `first`.
+fn tls_not_offered(first: TrailStep) -> ConnectError {
+    let mut e = dns_error();
+    e.class = ErrClass::TlsNotSupportedByServer;
+    e.phase = Phase::DriverConnect;
+    e.fixes = vec![FixId::ConnectThroughSsh, FixId::EditConnection];
+    e.trail = [first, TrailStep::Connect, TrailStep::Tls]
+        .into_iter()
+        .map(|step| StepTrace {
+            step,
+            outcome: if step == TrailStep::Tls {
+                StepOutcome::Failed
+            } else {
+                StepOutcome::Done
+            },
+            elapsed: None,
+        })
+        .collect();
+    e
+}
+
+/// R5: "Connect through SSH…" is offered to a direct connection, never to one whose trail
+/// already starts with the tunnel (it would reopen a section whose tunnel is on).
+#[test]
+fn the_ssh_fix_is_not_offered_through_ssh() {
+    let direct = fix_actions(&tls_not_offered(TrailStep::Resolve), 0, true);
+    assert_eq!(
+        direct,
+        [FixAction::ConnectThroughSsh, FixAction::EditConnection]
+    );
+    let tunnelled = fix_actions(&tls_not_offered(TrailStep::Ssh), 0, true);
+    assert_eq!(tunnelled, [FixAction::EditConnection]);
+    // The registry's own list (an error that carries none) is narrowed the same way.
+    let mut registry = tls_not_offered(TrailStep::Ssh);
+    registry.fixes.clear();
+    assert!(!fix_actions(&registry, 0, true).contains(&FixAction::ConnectThroughSsh));
+}
+
+/// R6: the test strip's "Connect through SSH…" opens the dialog's own SSH section
+/// (`ssh::show_tunnel_in`): on, open, the SSH host focused, the draft a tunnel.
+#[gpui::test]
+fn the_inline_ssh_fix_opens_the_dialogs_own_section(cx: &mut TestAppContext) {
+    let vcx = dialog_new(cx);
+    assert!(ssh(vcx, |s, _| !s.is_on()));
+    let open = dialog(vcx);
+    let strip = vcx.cx.read(|cx| open.read(cx).strip());
+    vcx.cx.update(|cx| {
+        strip.update(cx, |_, cx| {
+            cx.emit(TestStripEvent::Fix(FixAction::ConnectThroughSsh))
+        })
+    });
+    settle_until(vcx, WAIT, || ssh(vcx, |s, _| s.is_on() && s.is_open()));
+    assert_eq!(focused_id(vcx), "ssh-host");
+    assert!(draft(vcx, |d| matches!(
+        d.profile.transport,
+        TransportSpec::SshTunnel(_)
+    )));
+    // The same dialog, not a second one.
+    assert_eq!(layer_ids(vcx).len(), 1, "{:?}", layer_ids(vcx));
 }
 
 #[gpui::test]

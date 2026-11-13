@@ -4,7 +4,8 @@
 //! while it holds the focus ([`focus_probe`], [`note_focus_bounds`]), and when the focus has
 //! moved to a control the container shows only in part (or not at all), the container scrolls
 //! by the least amount that shows it, 8 px clear of the edge. A control the user scrolled away
-//! from stays where it is until the focus moves again. Nothing is drawn.
+//! from stays where it is until the focus moves again; leaving the container (a footer button)
+//! and coming back to the same control is such a move. Nothing is drawn.
 
 // ## m2b-t24-shots
 
@@ -96,12 +97,17 @@ impl FollowFocus {
     /// a control the container does not show whole, scrolls to it (applied in the next frame).
     pub fn scope_end(&self, window: &mut Window, cx: &mut App) {
         cx.default_global::<FollowScopes>().0.pop();
-        let Some((focus, bounds)) = self.found.borrow_mut().take() else {
-            return;
-        };
-        if self.followed.borrow().as_ref() == Some(&focus) {
+        let found = self.found.borrow_mut().take();
+        // ## m2b-t24-shots (follow-up, R3)
+        if !is_new_focus(
+            found.as_ref().map(|(focus, _)| focus),
+            &mut self.followed.borrow_mut(),
+        ) {
             return;
         }
+        let Some((focus, bounds)) = found else {
+            return;
+        };
         let view = self.scroll.bounds();
         if view.size.height <= px(0.0) {
             // Not laid out yet: the next frame tries again.
@@ -120,6 +126,20 @@ impl FollowFocus {
             self.scroll.set_offset(offset);
             window.refresh();
         }
+    }
+}
+
+// ## m2b-t24-shots (follow-up, R3)
+/// Whether `found`, the control holding the focus inside the container this frame (`None` when
+/// the focus is elsewhere), is one to reveal: not the one `followed` last. With the focus outside
+/// the container, `followed` is forgotten, so coming back to the same control reveals it again.
+fn is_new_focus<T: PartialEq>(found: Option<&T>, followed: &mut Option<T>) -> bool {
+    match found {
+        None => {
+            *followed = None;
+            false
+        }
+        Some(found) => followed.as_ref() != Some(found),
     }
 }
 
@@ -143,7 +163,26 @@ fn reveal_offset(y: f32, max: f32, view: (f32, f32), control: (f32, f32)) -> f32
 
 #[cfg(test)]
 mod tests {
-    use super::reveal_offset;
+    use super::{is_new_focus, reveal_offset};
+
+    // ## m2b-t24-shots (follow-up, R3)
+    #[test]
+    fn leaving_the_container_forgets_the_followed_control() {
+        let mut followed = None;
+        // The focus lands on control 1: revealed (`scope_end` then remembers it).
+        assert!(is_new_focus(Some(&1), &mut followed));
+        followed = Some(1);
+        // Still on 1, the user scrolled it away: left where it is.
+        assert!(!is_new_focus(Some(&1), &mut followed));
+        assert_eq!(followed, Some(1));
+        // Another control: revealed.
+        assert!(is_new_focus(Some(&2), &mut followed));
+        // Tab to a footer button, outside the container: nothing to reveal, 1 is forgotten.
+        assert!(!is_new_focus(None, &mut followed));
+        assert_eq!(followed, None);
+        // Shift-Tab back onto 1: revealed again.
+        assert!(is_new_focus(Some(&1), &mut followed));
+    }
 
     #[test]
     fn a_control_is_revealed_by_the_least_move() {

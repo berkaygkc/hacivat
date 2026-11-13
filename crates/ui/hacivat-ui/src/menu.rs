@@ -448,7 +448,14 @@ impl Render for PopupMenu {
                 } else {
                     (t.type_ramp.body, TextSource::Fluent)
                 };
-                lead = lead.child(key_label_from(&text, source, Some(keys[i]), style, ink));
+                lead = lead.child(key_label_from(
+                    &text,
+                    source,
+                    Some(keys[i]),
+                    style,
+                    ink,
+                    None,
+                ));
                 let mut row = div()
                     .id(("menu-item", i))
                     .debug_selector(move || format!("menu-item-{i}"))

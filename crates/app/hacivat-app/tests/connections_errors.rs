@@ -751,6 +751,40 @@ fn ok_strip_lists_every_warning(cx: &mut TestAppContext) {
     );
 }
 
+// ## m2b-t24-shots (follow-up, R6)
+/// A successful test over a pinned certificate, with `version`.
+fn pinned_report(version: Option<&str>) -> TestReport {
+    let tls = TlsSummary {
+        version: version.map(str::to_string),
+        verified: TlsVerified::Pinned,
+        ..tls13_verified()
+    };
+    ok_report(ms(54), ms(12), "PostgreSQL 16.4", tls)
+}
+
+/// A pinned certificate's Encryption row says "pinned", with the version and without it (M2a
+/// NOTES `enc-pinned`), never "verified".
+#[gpui::test]
+fn ok_strip_reads_a_pinned_certificate_as_pinned(cx: &mut TestAppContext) {
+    let vcx = strip_fixture(cx, "en", pinned_report(Some("TLSv1.3")));
+    assert_eq!(diag(vcx, "Encryption"), "TLS 1.3 · pinned");
+    let s = strip(vcx);
+    vcx.cx.update(|cx| {
+        s.update(cx, |s, cx| {
+            s.show(TestStripState::Done(Arc::new(pinned_report(None))), cx)
+        })
+    });
+    vcx.run_until_parked();
+    assert_eq!(diag(vcx, "Encryption"), "TLS · pinned");
+}
+
+/// The same row in Turkish.
+#[gpui::test]
+fn ok_strip_reads_a_pinned_certificate_as_pinned_in_turkish(cx: &mut TestAppContext) {
+    let vcx = strip_fixture(cx, "tr", pinned_report(Some("TLSv1.3")));
+    assert_eq!(text_of(vcx, "diag-tls-value"), "TLS 1.3 · sabitlendi");
+}
+
 #[gpui::test]
 fn running_strip_ticks_in_region_format(cx: &mut TestAppContext) {
     let vcx = strip_running(cx, "tr-TR");

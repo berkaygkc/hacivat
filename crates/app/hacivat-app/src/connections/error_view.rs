@@ -1411,13 +1411,26 @@ mod shots_m2b {
     pub fn host_key_unknown_fixture(window: &mut Window, cx: &mut App) {
         open(ssh(ErrClass::SshHostKeyUnknown, 1), window, cx);
     }
+
+    // ## m2b-t24-shots (follow-up)
+    /// `tls.not_supported_by_server` of a direct connection under Require: the pipeline keeps
+    /// the registry's fixes, "Connect through SSH…" and Edit connection.
+    pub fn tls_not_offered_fixture(window: &mut Window, cx: &mut App) {
+        let mut e = error(
+            ErrClass::TlsNotSupportedByServer,
+            &TLS_STEPS,
+            TrailStep::Tls,
+        );
+        e.fixes = vec![FixId::ConnectThroughSsh, FixId::EditConnection];
+        open(e, window, cx);
+    }
 }
 
 #[cfg(feature = "shots")]
 pub use shots_m2b::{
     host_key_changed_fixture, host_key_revoked_fixture, host_key_unknown_fixture,
     insecure_plain_fixture, insecure_tls_fixture, pin_changed_fixture, ssh_agent_fixture,
-    ssh_auth_fixture, ssh_channel_fixture,
+    ssh_auth_fixture, ssh_channel_fixture, tls_not_offered_fixture,
 };
 
 #[cfg(test)]

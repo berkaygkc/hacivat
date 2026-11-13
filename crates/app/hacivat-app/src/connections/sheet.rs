@@ -32,7 +32,9 @@ use hacivat_ui_core::gpui_surface::{
 };
 use hacivat_ui_core::theme::{Theme, focus_outline};
 
-use crate::connections::capsule::{encryption_label, engine_label, env_kind, env_word, path_label};
+use crate::connections::capsule::{
+    encryption_key, encryption_label, engine_label, env_kind, env_word, path_label,
+};
 use crate::connections::explorer::endpoint_text;
 use crate::connections::model::ConnectionsModel;
 use crate::connections::{access_popover, session_toasts};
@@ -88,22 +90,23 @@ fn keeps_in_vault(cx: &App) -> bool {
     })
 }
 
-/// Where the password comes from (`secret-*`).
-fn secret_label(cx: &App, p: &Profile) -> SharedString {
-    let id = match p.auth {
-        AuthProviderId::PgPass => ids::hv::CONN_SECRET_PGPASS,
-        AuthProviderId::None | AuthProviderId::ClientCert => ids::hv::CONN_SECRET_NONE,
+/// Where the password comes from (`secret-*`), and which label it is as an ID suffix
+/// (`sheet-secret-vault`; m2b-t24-shots follow-up).
+fn secret_label(cx: &App, p: &Profile) -> (SharedString, &'static str) {
+    let (id, key) = match p.auth {
+        AuthProviderId::PgPass => (ids::hv::CONN_SECRET_PGPASS, "pgpass"),
+        AuthProviderId::None | AuthProviderId::ClientCert => (ids::hv::CONN_SECRET_NONE, "none"),
         AuthProviderId::Password => match p.retention {
             // ## m2b-t24-shots (fix round 1): Forever on a machine without a keyring is the
             // vault (NOTES M2b `vault-secret`).
-            Retention::Forever if keeps_in_vault(cx) => ids::hv::CONN_SECRET_VAULT,
-            Retention::Forever => ids::hv::CONN_SECRET_FOREVER,
-            Retention::ForSession => ids::hv::CONN_SECRET_SESSION,
-            Retention::UntilRestart => ids::hv::CONN_SECRET_RESTART,
-            Retention::Never => ids::hv::CONN_SECRET_NEVER,
+            Retention::Forever if keeps_in_vault(cx) => (ids::hv::CONN_SECRET_VAULT, "vault"),
+            Retention::Forever => (ids::hv::CONN_SECRET_FOREVER, "forever"),
+            Retention::ForSession => (ids::hv::CONN_SECRET_SESSION, "session"),
+            Retention::UntilRestart => (ids::hv::CONN_SECRET_RESTART, "restart"),
+            Retention::Never => (ids::hv::CONN_SECRET_NEVER, "never"),
         },
     };
-    tr(cx, id, NoArgs)
+    (tr(cx, id, NoArgs), key)
 }
 
 impl SheetView {
@@ -382,16 +385,38 @@ impl SheetView {
                 fluent(path_label(cx, p, info.as_deref()).0),
             ));
         }
+        // ## m2b-t24-shots (follow-up): the Encryption and Password values say which label
+        // they are in their IDs (`sheet-enc-pinned`, `sheet-secret-vault`), for the shots.
         if let Some(info) = &info {
             rows.push((
                 tr(cx, ids::hv::CONN_KV_ENC, NoArgs),
-                fluent(encryption_label(cx, p, info)),
+                Label::new(
+                    encryption_label(cx, p, info),
+                    TextSource::Fluent,
+                    t.type_ramp.body_sm,
+                    c.text.to_hsla(),
+                )
+                .truncate(true)
+                .id(SharedString::from(format!(
+                    "sheet-enc-{}",
+                    encryption_key(p, info)
+                )))
+                .into_any_element(),
             ));
         }
         if p.engine != DbmsKind::Sqlite {
+            let (secret, key) = secret_label(cx, p);
             rows.push((
                 tr(cx, ids::hv::CONN_KV_SECRET, NoArgs),
-                fluent(secret_label(cx, p)),
+                Label::new(
+                    secret,
+                    TextSource::Fluent,
+                    t.type_ramp.body_sm,
+                    c.text.to_hsla(),
+                )
+                .truncate(true)
+                .id(SharedString::from(format!("sheet-secret-{key}")))
+                .into_any_element(),
             ));
         }
         rows
@@ -446,6 +471,17 @@ impl Render for SheetView {
                 // ones off under the status bar, and a scroll thumb says there is more.
                 // Keyboard: a Tab stop only while the rows overflow; ↑/↓ by a row, PgUp/PgDn
                 // by a page, Home/End to the ends.
+                // ## m2b-t24-shots (follow-up): a shot of the last rows scrolls to them, as the
+                // End key does.
+                #[cfg(feature = "shots")]
+                if cx.has_global::<shots::RowsScrolledToEnd>() {
+                    let max = self.scroll.max_offset().y;
+                    if max > px(0.0) && self.scroll.offset().y != -max {
+                        let x = self.scroll.offset().x;
+                        self.scroll.set_offset(point(x, -max));
+                        cx.notify();
+                    }
+                }
                 let overflows = f32::from(self.scroll.max_offset().y) >= 0.5;
                 let focus = self.focus.clone().tab_stop(overflows);
                 let focused = overflows && focus.is_focused(window);
@@ -480,5 +516,22 @@ impl Render for SheetView {
             .child(header)
             .child(body)
             .into_any_element()
+    }
+}
+
+// ## m2b-t24-shots (follow-up): shots fixtures (R28, P19).
+#[cfg(feature = "shots")]
+pub mod shots {
+    use hacivat_ui_core::gpui_surface::{App, Global};
+
+    /// While set, the sheet keeps its rows scrolled to the end (its last rows, Encryption and
+    /// Password, sit below a short tile's fold).
+    pub(super) struct RowsScrolledToEnd;
+
+    impl Global for RowsScrolledToEnd {}
+
+    /// Scrolls the sheet's rows to their end from the next frame on.
+    pub fn scroll_rows_to_end(cx: &mut App) {
+        cx.set_global(RowsScrolledToEnd);
     }
 }

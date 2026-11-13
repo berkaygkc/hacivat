@@ -50,7 +50,12 @@
 //! plaintext question; the TLS section; the SSH section (off, folded, one hop, two jumps, the
 //! import menu); the host-key prompts; keyboard-interactive; the SSH secret prompts; the vault
 //! dialogs; the live states (T22's, plus reconnecting outside production and a session lost
-//! without losses); the new error copy.
+//! without losses); the new error copy. The follow-up adds the three labels of fix round 1: a
+//! pinned connection (status bar, sheet, test report), the "Connect through SSH…" fix and the
+//! sheet's vault Password row (the harness boots that shot on a vault backend whose keyring
+//! probe already ran); their markers are the labels' own `#id`s, which also say which label
+//! they show (`#sheet-enc-pinned`). The sheet's pinned label must show whole in every locale,
+//! its vault label in English and Turkish (`Surface::uncut`).
 //! The import menu opens once the core runtime has read the config: the harness waits for it
 //! (a condition, never a fixed sleep).
 //!
@@ -75,6 +80,9 @@ use hacivat_driver::DriverRegistry;
 use hacivat_driver::fake::FakeDriver;
 use hacivat_l10n::OsLocale;
 use hacivat_proto::DbmsKind;
+use hacivat_secrets::{
+    BackendChoice, FallbackBackend, FileVault, MemoryBackend, SecretBackend as _, SecretStore,
+};
 use hacivat_settings::{LanguagePref, LocalPaths, ThemePref};
 use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::capsule::CapsuleProbe;
@@ -171,9 +179,14 @@ enum Surface {
     ErrHostKeyRevoked,
     // ## m2b-t24-shots (fix round 1, M7)
     ErrHostKeyUnknown,
+    // ## m2b-t24-shots (follow-up)
+    LiveTlsPinned,
+    ConnTestOkPinned,
+    ErrTlsNotOffered,
+    LiveVaultSecret,
 }
 
-const SURFACES: [Surface; 74] = [
+const SURFACES: [Surface; 78] = [
     Surface::Shell,
     Surface::ShellDemoProduction,
     Surface::ShellNarrow,
@@ -251,6 +264,10 @@ const SURFACES: [Surface; 74] = [
     Surface::ErrHostKeyChanged,
     Surface::ErrHostKeyRevoked,
     Surface::ErrHostKeyUnknown,
+    Surface::LiveTlsPinned,
+    Surface::ConnTestOkPinned,
+    Surface::ErrTlsNotOffered,
+    Surface::LiveVaultSecret,
 ];
 // ## m2b-t24-shots
 /// Where Task 24's surfaces start in [`SURFACES`].
@@ -338,6 +355,10 @@ impl Surface {
             Surface::ErrHostKeyChanged => "conn-error-host-key-changed",
             Surface::ErrHostKeyRevoked => "conn-error-host-key-revoked",
             Surface::ErrHostKeyUnknown => "conn-error-host-key-unknown",
+            Surface::LiveTlsPinned => "live-tls-pinned",
+            Surface::ConnTestOkPinned => "conn-test-ok-pinned",
+            Surface::ErrTlsNotOffered => "conn-error-tls-not-offered",
+            Surface::LiveVaultSecret => "live-vault-secret",
         }
     }
 
@@ -525,6 +546,11 @@ impl Surface {
             | Surface::ErrHostKeyChanged
             | Surface::ErrHostKeyRevoked
             | Surface::ErrHostKeyUnknown => ("hacivat-app/src/connections/error_view.rs:", None),
+            // ## m2b-t24-shots (follow-up): the labels themselves, by IDs that name them.
+            Surface::LiveTlsPinned => ("#sheet-enc-pinned", None),
+            Surface::ConnTestOkPinned => ("#diag-tls-value", None),
+            Surface::ErrTlsNotOffered => ("#button-label-fix-ssh", None),
+            Surface::LiveVaultSecret => ("#sheet-secret-vault", None),
         }
     }
 
@@ -538,6 +564,23 @@ impl Surface {
             Surface::SshSectionJumps => &["#ssh-jump-index-0", "#ssh-jump-index-1", "#ssh-route-4"],
             // The menu's title row.
             Surface::SshImportMenu => &["#popup-menu-title"],
+            // ## m2b-t24-shots (follow-up): the status bar says it too; the fix's neighbour.
+            Surface::LiveTlsPinned => &["#status-enc-pinned"],
+            Surface::ErrTlsNotOffered => &["#button-label-fix-edit"],
+            _ => &[],
+        }
+    }
+
+    // ## m2b-t24-shots (follow-up)
+    /// Labels (`#id`) that must show whole in the sheet's value column (about 150 px at either
+    /// window size), and whether in the pseudo-locales too. "TLS 1.3 · pinned" ends in the word
+    /// that tells it from "verified", so it must fit everywhere. "vault · forever" leads with
+    /// its word; a pseudo-locale's padding may ellipsize "forever" by the sheet's one-line value
+    /// rule (DESIGN.md), as it does "Keychain · forever".
+    fn uncut(self) -> &'static [(&'static str, bool)] {
+        match self {
+            Surface::LiveTlsPinned => &[("#sheet-enc-pinned", true)],
+            Surface::LiveVaultSecret => &[("#sheet-secret-vault", false)],
             _ => &[],
         }
     }
@@ -563,6 +606,22 @@ impl Surface {
             .collect();
         (!hidden.is_empty())
             .then(|| format!("{name}: the surface is missing: {hidden:?} not visible"))
+    }
+
+    // ## m2b-t24-shots (follow-up)
+    /// A violation for each [`Surface::uncut`] label the frame ellipsized or clipped in
+    /// `locale` (a pseudo-locale only where the label must fit there too).
+    fn cut_short(self, name: &str, locale: &str, frame: &[RenderedText]) -> Vec<String> {
+        self.uncut()
+            .iter()
+            .filter(|(_, in_pseudo)| *in_pseudo || !PSEUDO.contains(&locale))
+            .filter(|(id, _)| {
+                frame
+                    .iter()
+                    .any(|r| r.path.ends_with(*id) && (r.truncated || r.clipped))
+            })
+            .map(|(id, _)| format!("{name}: {id} is cut short"))
+            .collect()
     }
 
     /// Brings the surface on screen in a freshly started shell.
@@ -667,6 +726,11 @@ fn open_m2a(surface: Surface, window: &mut Window, cx: &mut App) {
         Surface::ErrHostKeyChanged => error_view::host_key_changed_fixture(window, cx),
         Surface::ErrHostKeyRevoked => error_view::host_key_revoked_fixture(window, cx),
         Surface::ErrHostKeyUnknown => error_view::host_key_unknown_fixture(window, cx),
+        // ## m2b-t24-shots (follow-up)
+        Surface::LiveTlsPinned => capsule::tls_pinned_fixture(window, cx),
+        Surface::ConnTestOkPinned => test_strip::ok_pinned_fixture(window, cx),
+        Surface::ErrTlsNotOffered => error_view::tls_not_offered_fixture(window, cx),
+        Surface::LiveVaultSecret => capsule::vault_secret_fixture(window, cx),
         // The widget owns no copy: the app's strings (the Copy as URL toast, the keyring
         // fallback as a long bullet that wraps, the toast's own Dismiss).
         Surface::ToastStickyDemo => hacivat_ui::toast::sticky_demo_fixture(
@@ -738,6 +802,20 @@ fn fake_connections(paths: &LocalPaths) -> ConnectionsBoot {
         drivers.register(Arc::new(FakeDriver::new(kind)));
     }
     ConnectionsBoot::for_tests(paths, drivers)
+}
+
+// ## m2b-t24-shots (follow-up)
+/// A secret store whose keyring probe has chosen Hacivat's vault, as on Linux without a keyring
+/// (B13). The vault file under the shot's temp root is never created.
+fn vault_store(paths: &LocalPaths) -> Arc<SecretStore> {
+    let backend = FallbackBackend::new(
+        Arc::new(MemoryBackend::new()),
+        Arc::new(FileVault::open(paths.data.join("vault.bin"))),
+        Box::new(|| false),
+    );
+    assert!(backend.probe_available(), "the probe ran");
+    assert_eq!(backend.choice(), Some(BackendChoice::Vault));
+    Arc::new(SecretStore::new(Some(Arc::new(backend))))
 }
 
 /// `app.show_menu`'s popup. The action exists only where the title bar draws the app-menu
@@ -1002,10 +1080,16 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     let mut outcome = hacivat_settings::load(&paths.settings_toml());
     outcome.settings.ui.language = LanguagePref::Tag(shot.locale.to_string());
     outcome.settings.ui.theme = shot.theme;
-    let connections = shot
+    let mut connections = shot
         .surface
         .needs_connections()
         .then(|| fake_connections(&paths));
+    // ## m2b-t24-shots (follow-up): the vault shot runs on a machine without a keyring.
+    if shot.surface == Surface::LiveVaultSecret
+        && let Some(boot) = connections.as_mut()
+    {
+        boot.secrets = vault_store(&paths);
+    }
     let mut startup = Startup::new(paths, outcome, OsLocale::default());
     startup.connections = connections;
     let demo = shot.surface.is_demo().then(DemoCapsule::harman);
@@ -1064,6 +1148,8 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         failures.push(format!("{name}: the frame drew no label"));
     }
     failures.extend(shot.surface.missing_from(&name, &frame));
+    // ## m2b-t24-shots (follow-up)
+    failures.extend(shot.surface.cut_short(&name, shot.locale, &frame));
     let badge = cx
         .update_window(handle, |_, window, cx| {
             let cp_fill = Theme::get(cx).tokens.colors.cp_fill.to_hsla();
@@ -1185,12 +1271,12 @@ fn render_all_surfaces(names: &[String], all: bool) {
 fn the_matrix_covers_every_surface_locale_and_theme() {
     let all = shots();
     // M1: 8 surfaces x 8 + 4 VF; M2a: 26 surfaces x 8 + the 4 dialog surfaces again at 1024x700;
-    // M2b T22: 10 surfaces x 8 at 1280x800 and again at 960x600; M2b T24: 30 surfaces likewise.
+    // M2b T22: 10 surfaces x 8 at 1280x800 and again at 960x600; M2b T24: 34 surfaces likewise.
     assert_eq!(
         all.len(),
-        8 * 4 * 2 + 4 + 26 * 8 + 4 * 8 + 10 * 8 * 2 + 30 * 8 * 2
+        8 * 4 * 2 + 4 + 26 * 8 + 4 * 8 + 10 * 8 * 2 + 34 * 8 * 2
     );
-    assert_eq!(all.len(), 948);
+    assert_eq!(all.len(), 1012);
     let names: Vec<String> = all.iter().map(|s| s.file_name(2.0)).collect();
     // ## m2b-t24-shots: every T24 surface at both sizes, in every locale and theme.
     for surface in &SURFACES[FIRST_T24..] {
@@ -1581,6 +1667,108 @@ fn a_missing_surface_fails_its_frame() {
             .missing_from("s", &others)
             .is_some()
     );
+    // ## m2b-t24-shots (follow-up): the new labels' markers name the label shown: a verified
+    // connection does not stand in for a pinned one, nor the Keychain for the vault; and the
+    // sheet's value must show whole.
+    let pinned = |key: &str| {
+        [
+            at(
+                &format!("crates/app/hacivat-app/src/connections/sheet.rs:390:17#sheet-enc-{key}"),
+                "x",
+            ),
+            at(
+                &format!(
+                    "crates/app/hacivat-app/src/connections/status.rs:126:17#status-enc-{key}"
+                ),
+                "x",
+            ),
+        ]
+    };
+    assert!(
+        Surface::LiveTlsPinned
+            .missing_from("s", &pinned("pinned"))
+            .is_none()
+    );
+    assert!(
+        Surface::LiveTlsPinned
+            .missing_from("s", &pinned("verified"))
+            .is_some()
+    );
+    let cut = [
+        RenderedText {
+            truncated: true,
+            ..pinned("pinned")[0].clone()
+        },
+        pinned("pinned")[1].clone(),
+    ];
+    // An ellipsized pinned label fails in every locale; a whole one passes.
+    for locale in LOCALES {
+        let found = Surface::LiveTlsPinned.cut_short("s", locale, &cut);
+        assert!(
+            found.len() == 1 && found[0].contains("cut short"),
+            "{locale}: {found:?}"
+        );
+        assert!(
+            Surface::LiveTlsPinned
+                .cut_short("s", locale, &pinned("pinned"))
+                .is_empty()
+        );
+    }
+    let secret = |key: &str| {
+        [at(
+            &format!("crates/app/hacivat-app/src/connections/sheet.rs:410:17#sheet-secret-{key}"),
+            "x",
+        )]
+    };
+    assert!(
+        Surface::LiveVaultSecret
+            .missing_from("s", &secret("vault"))
+            .is_none()
+    );
+    assert!(
+        Surface::LiveVaultSecret
+            .missing_from("s", &secret("forever"))
+            .is_some()
+    );
+    // The vault label must fit in English and Turkish; a pseudo-locale may ellipsize it.
+    let cut_vault = [RenderedText {
+        truncated: true,
+        ..secret("vault")[0].clone()
+    }];
+    for (locale, fails) in [
+        ("en", true),
+        ("tr", true),
+        ("en-XA", false),
+        ("tr-XT", false),
+    ] {
+        assert_eq!(
+            Surface::LiveVaultSecret
+                .cut_short("s", locale, &cut_vault)
+                .len(),
+            usize::from(fails),
+            "{locale}"
+        );
+    }
+    let fixes = |ids: &[&str]| -> Vec<RenderedText> {
+        ids.iter()
+            .map(|id| {
+                at(
+                    &format!("crates/ui/hacivat-ui/src/button.rs:256:25#button-label-{id}"),
+                    "x",
+                )
+            })
+            .collect()
+    };
+    assert!(
+        Surface::ErrTlsNotOffered
+            .missing_from("s", &fixes(&["fix-ssh", "fix-edit"]))
+            .is_none()
+    );
+    assert!(
+        Surface::ErrTlsNotOffered
+            .missing_from("s", &fixes(&["fix-edit"]))
+            .is_some()
+    );
     // ## m2b-t24-shots: so does every T24 surface; the import menu needs its alias drawn.
     for surface in &SURFACES[FIRST_T24..] {
         assert!(surface.missing_from("s", &shell).is_some(), "{surface:?}");
@@ -1628,7 +1816,7 @@ fn the_command_line_reads_like_libtest() {
     let all: Vec<String> = shots().iter().map(|s| s.file_name(2.0)).collect();
     // No filter: everything; the render is ignored unless asked for.
     let cli = parse("--nocapture --test-threads 1");
-    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(948));
+    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(1012));
     assert!(!cli.runs_ignored());
     // nextest: `--list --format terse --ignored` lists only the render.
     let cli = parse("--list --format terse --ignored");
@@ -1642,7 +1830,7 @@ fn the_command_line_reads_like_libtest() {
     );
     assert_eq!(
         parse("--ignored render_all").shots(&all).map(|s| s.len()),
-        Some(948)
+        Some(1012)
     );
     // A dialog surface renders at both sizes.
     assert_eq!(

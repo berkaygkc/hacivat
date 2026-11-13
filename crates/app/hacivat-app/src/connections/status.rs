@@ -20,8 +20,8 @@ use hacivat_ui_core::gpui_surface::{AnyElement, App, IntoElement, SharedString};
 use hacivat_ui_core::theme::Theme;
 
 use crate::connections::capsule::{
-    access_label, current_profile, encryption_label, env_kind, env_word, is_read_only,
-    latency_label, path_label, reconnecting_label,
+    access_label, current_profile, encryption_key, encryption_label, env_kind, env_word,
+    is_read_only, latency_label, path_label, reconnecting_label,
 };
 use crate::connections::model::ConnectionsModel;
 use crate::connections::session_toasts;
@@ -121,7 +121,14 @@ pub fn segments(theme: &Theme, cx: &App) -> Vec<AnyElement> {
                     .id("status-path")
                     .into_any_element(),
                 fluent(latency_label(cx, &info)),
-                fluent(encryption_label(cx, &p, &info)),
+                // ## m2b-t24-shots (follow-up): which label it is, for the shots' markers.
+                status_label(theme, encryption_label(cx, &p, &info), TextSource::Fluent)
+                    .truncate(true)
+                    .id(SharedString::from(format!(
+                        "status-enc-{}",
+                        encryption_key(&p, &info)
+                    )))
+                    .into_any_element(),
             ];
             if matches!(info.support, Support::Unsupported { .. }) {
                 out.push(fluent(tr(cx, ids::hv::CAPSULE_UNSUPPORTED, NoArgs)));
