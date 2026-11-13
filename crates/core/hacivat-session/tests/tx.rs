@@ -212,22 +212,48 @@ async fn a_read_only_profile_never_yields_a_read_write_session() {
             .kind,
         ExecErrorKind::Tx(TxError::Unsupported)
     );
+    // Task 18: the statement runs only inside the guard's read-only transaction; this fake
+    // never opens one, so the guard reports a gap, never sends the statement (fix round 1,
+    // m-1) and discards the session.
     assert_eq!(
         run(&h, "delete from t").await.unwrap_err().kind,
-        ExecErrorKind::Internal
+        ExecErrorKind::EnforcementGap(hacivat_session::GapReason::TransactionEndedByStatement)
     );
-    assert!(f.executed().is_empty(), "{:?}", f.executed());
+    // After the connect's identity check (the profile is read-only, so the connect is too;
+    // the fake answers nothing, so the probe stops there, guarded).
+    assert_eq!(
+        f.executed(),
+        [
+            "SELECT current_user, session_user",
+            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            "SELECT 1"
+        ]
+    );
+    assert!(matches!(
+        snap(&h).state,
+        hacivat_session::session::SessionState::Broken(_)
+    ));
 }
 
 #[tokio::test]
 async fn a_read_only_statement_goes_through_the_guard() {
-    // Until Task 18 the guard fails closed: nothing runs unguarded.
+    // Task 18 (T7 carry): the read-only connect runs the role probe first (its identity check;
+    // this fake answers nothing, so the probe stops there). Then the statement would run
+    // inside the guard, but this fake never opens the guard's transaction: a gap, and the
+    // statement is never sent.
     let (h, f) = ro_session(fake_pg(), ro_profile()).await;
+    assert_eq!(f.executed(), ["SELECT current_user, session_user"]);
     assert_eq!(
         run(&h, "select 1").await.unwrap_err().kind,
-        ExecErrorKind::Internal
+        ExecErrorKind::EnforcementGap(hacivat_session::GapReason::TransactionEndedByStatement)
     );
-    assert!(f.executed().is_empty(), "{:?}", f.executed());
+    assert_eq!(
+        f.executed()[1..],
+        [
+            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            "SELECT 1"
+        ]
+    );
 }
 
 #[test]

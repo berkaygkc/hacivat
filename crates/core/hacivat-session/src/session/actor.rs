@@ -82,7 +82,7 @@ use crate::session::cancel::{
 };
 // ## m2b-t17-liveness
 use crate::session::liveness::{LivenessAction, LivenessPolicy, Supervisor};
-use crate::session::readonly::run_guarded;
+use crate::session::readonly::guarded;
 // ## m2b-t17-liveness
 use crate::session::recovery::{
     LostState, Tracked, autocommit_set, connection_ending, is_recovery_case, lost_state,
@@ -424,14 +424,16 @@ impl Core {
         let mut summary = if self.read_only {
             let replay = self.env_plan().replay();
             let kind = self.kind;
-            let ran = run_guarded(self.conn()?, kind, sql, opts, &replay).await;
-            if let Err(e) = &ran
-                && matches!(e.kind, ExecErrorKind::ConnectionLost { .. })
-            {
-                self.broken.get_or_insert(ErrClass::NetworkReset);
+            let ran = guarded(self.conn()?, kind, sql, opts, &replay).await;
+            // Task 18: a gap, a lost connection or a guard that could not finish discards the
+            // connection; `run_one` closes it and reports the gap. Task 17 (C2): the discard
+            // first, then `observe`, which reads no status once the session is broken (a
+            // driver's status after a loss says nothing about the transaction).
+            if let Some(class) = ran.discard {
+                self.broken.get_or_insert(class);
             }
             self.observe(false);
-            ran?
+            ran.reply?
         } else {
             // Hacivat's own statements never open the user's transaction (review M9).
             if origin == ExecOrigin::User
@@ -1425,6 +1427,16 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
         ladder.abort();
     }
     ladder.release();
+
+    // Task 18: a gap breaks the session. Task 17 fix round 4 (I10): the event goes out before
+    // the session publishes `Broken`, so an owner that stops at `Broken` has already got it.
+    if let Err(ExecError {
+        kind: ExecErrorKind::EnforcementGap(reason),
+        ..
+    }) = &result
+    {
+        ctl.emit(SessionEvent::EnforcementGap(*reason));
+    }
 
     // ## m2b-t17-liveness: a lost connection the session recovers from (B19).
     let mut recovery = None;

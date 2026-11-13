@@ -154,8 +154,10 @@ fn ssh_address_class_rule() {
     assert_eq!(ssh_address_class("8.8.8.8"), AddressClass::Public);
 }
 
+/// Task 18 replaced the stub: the read-only executor still fails closed, now on what the server
+/// reports (a server whose `BEGIN` never opens the guard's transaction is a gap).
 #[tokio::test]
-async fn read_only_stub_fails_closed() {
+async fn read_only_executor_fails_closed() {
     let f = FakeDriver::new(DbmsKind::Postgres);
     let mut c = connect_fake(&f).await;
     assert_eq!(
@@ -169,9 +171,9 @@ async fn read_only_stub_fails_closed() {
         .await
         .unwrap_err()
         .kind,
-        ExecErrorKind::Internal
+        ExecErrorKind::EnforcementGap(hacivat_session::GapReason::TransactionEndedByStatement)
     );
-    assert!(f.executed().is_empty(), "nothing ran unguarded");
+    assert_eq!(f.reset_calls(), 0, "the connection is discarded, not reset");
 }
 
 /// Fix round 1 (I1): `ConnectRequest.read_only` (profile OR session) is what the driver gets,
