@@ -414,3 +414,102 @@ the vault, the session overlay, the keyring CI and the deferrals.
     is used only where no keyring exists, in practice Linux. **M6:** no KDF upgrade path in v1:
     a vault keeps the parameters it was created with; a later default does not re-key existing
     vaults (a future format minor can add re-keying on unlock).
+
+## m2b-t09 — SSH tunnels
+
+- **Host keys are checked inside the key exchange, before any authentication byte.** Every hop's
+  russh handler delegates `check_server_key` to the policy; the only `Ok(true)` follows a passed
+  check, and `connect` also refuses a handshake whose handler never recorded one
+  (`host_key_is_checked_before_any_auth`, `jump_hop_host_key_is_checked_before_its_auth`: the
+  server counts zero authentication requests).
+  - `Known` passes. `Changed` and `Revoked` refuse in every policy, with or without a prompter
+    (`changed_key_is_never_accepted_in_any_policy`, `revoked_key_is_refused_in_every_policy`).
+    `Unknown`: `Ask` with a prompter asks, `true` stores the key; `Ask` headless and `Strict`
+    refuse (`ssh.host_key_unknown`); `AcceptNew` stores without a question.
+  - `AcceptNew` is only as safe as the stored key, so a failed write refuses the connect. A key
+    the user accepted is used even when the write fails (the next connect asks again). `trust`
+    refusing (a revoked key, or a changed one appearing between check and write) maps back to
+    `Revoked` or `Changed`.
+  - **Other key types (T4 carry-in).** Before each hop, the stores are asked which key types
+    they list for `host:port` (a probe key per type; `Changed` means "a key of this type is
+    listed"). When any is listed, only those types' host-key algorithms are offered. A server
+    without them fails the negotiation, and the hop is retried once offering every type so the
+    presented key can be shown. An `Unknown` key for a host listed under another type is
+    reported as `HostKeyChanged` (old: the listed key), never as new, so `AcceptNew` cannot
+    accept and store it (`key_of_another_type_than_the_known_one_is_changed_not_new`). Types
+    russh cannot negotiate (`ssh-dss`, `sk-*`) count as listed too: such a host can only be
+    changed, never new. A type name outside the eight probed is not seen (none is known today).
+  - Certificate host-key algorithms are never offered (`host_key_certificates` empty); a
+    certificate presented anyway is refused (`Protocol`). SHA-1 `ssh-rsa` signatures are not
+    negotiated (OpenSSH ≥ 8.8 default); a server that only signs with SHA-1 fails to connect.
+  - `HostKey` is built from the key's own OpenSSH form (`PublicKey::to_openssh` →
+    `HostKey::from_openssh`): RSA keys are `ssh-rsa`, never `rsa-sha2-512` (T4 fix-round
+    carry-in; `rsa_host_keys_are_named_by_their_key_type`).
+  - russh only calls `check_server_key` at the initial exchange; a re-key runs inside the
+    encrypted session it authenticated.
+- **Authentication order (B11).** Per hop: agent, then key files (the hop's own; the bastion's
+  for a jump host; the imported `IdentityFile`s, deduplicated), then password, then
+  keyboard-interactive. `IdentitiesOnly` moves the key files before the agent
+  (`identities_only_tries_the_key_file_first`). A hop whose method is a password tries password
+  then keyboard-interactive (servers that take passwords through PAM offer only the latter); a
+  keyboard-interactive hop tries only that. A method the server stopped offering is skipped,
+  and a closed session ends the hop as `ssh.auth` (MaxAuthTries:
+  `many_agent_keys_without_identities_only_reports_auth_with_hop`).
+  - Secrets: a budget of three attempts per key and per password, the stored secret first and
+    then `prompter.secret` (attempts numbered from 1, as the pipeline's password prompt).
+    Keyboard-interactive: three logins of at most eight rounds each, prompts forwarded verbatim
+    (`KbdRequest.prompts[i].text`, `echo`). A prompter answering `None` is `SshError::Cancelled`.
+  - Agent: `SSH_AUTH_SOCK` on Unix, `\\.\pipe\openssh-ssh-agent` on Windows, read from the
+    environment when the manager is built (`AgentEndpoint::from_env`); never from a profile. Tests
+    inject one (`TunnelManager::with_agent`). An `Agent` hop with no reachable agent and no
+    other method that succeeds is `AgentUnavailable`. Agent certificates are not offered (v1).
+- **Secrets in memory.** Key files are read into `Zeroizing` buffers (at most 1 MiB, regular
+  files only) and decrypted on the blocking pool; passphrases and passwords stay
+  `SecretString` until the call into russh. **Accepted gap:** russh's API takes the password
+  and keyboard-interactive answers as `String` (`authenticate_password(.., impl Into<String>)`,
+  `authenticate_keyboard_interactive_respond(Vec<String>)`), so one copy per attempt lives in
+  russh's buffers unzeroized until freed. The decrypted `PrivateKey` (ssh-key) zeroizes on drop.
+  russh's `Debug` for auth methods redacts the password, and nothing of Hacivat's logs; the
+  test captures every `log` record at TRACE (`ssh_secrets_never_logged`).
+- **Time (P23, Q44).** `connect_timeout` bounds each hop's TCP connect, handshake and
+  authentication on a clock that stops while a host-key, secret or keyboard prompt is open
+  (`prompt_time_never_counts_toward_the_connect_timeout`, `slow_server_times_out_with_the_hop`).
+  Prompts are per acquire: the acquire's child token ends them on cancel or when the acquire
+  future is dropped, so a prompter that never answers holds only its own handshake
+  (`cancel_during_host_key_prompt_releases_everything`).
+- **Sharing (`ChainKey`).** SHA-256 over a domain tag, the policy, and per hop the lower-cased
+  host, port, user, auth method (and key path), `IdentitiesOnly` and the identity files, each
+  length-prefixed. Secrets are not part of it: two profiles with the same bastion, user and
+  method share one session. A shared chain is reused only while alive; `share = false` (test
+  connection, CONN-07) never reuses and is never reused. Two concurrent acquires of one chain
+  may both connect; the second to finish joins the first and closes its own.
+- **Release.** A lease's drop decrements its chain (saturating; a drop runs once). At zero users
+  a timer closes the chain after `idle_grace` unless a lease came back meanwhile (an epoch
+  counter guards stale timers; `reacquire_within_grace_reuses_the_session`). An unshared chain
+  closes at once. Closing disconnects hops last first, waiting (at most 2 s each) for each
+  session to end; a chain that fails part-way closes the hops already up the same way before
+  `acquire` returns (`partial_chain_failure_releases_in_reverse`). Without a runtime (a drop
+  outside tokio), the handles are dropped instead and each session ends on its own, inner hops
+  first.
+- **Death and generations (B20).** Keep-alives run per hop (`keepalive_s` from the profile,
+  else `TunnelConfig.keepalive`; `keepalive_max`). When any hop's session ends while the chain
+  is not closing (a cut, keep-alive exhaustion), the chain leaves the registry, the rest of it
+  closes, and `TunnelEvent::Dead { key, generation }` is sent once; the next acquire builds
+  generation + 1 (`keepalive_failure_emits_dead_once_with_generation`). A release is not a
+  death.
+- **Channel hygiene (Q46).** The client only opens `direct-tcpip` channels, originator
+  `127.0.0.1:0` (`direct_tcpip_originator_is_loopback_zero`); every server-initiated channel
+  type is refused (`server_initiated_channels_are_refused`); no pty, shell, exec, X11 or agent
+  forwarding is ever requested. The database host goes into the last `direct-tcpip` request and
+  is resolved by the bastion (`database_host_is_resolved_by_the_bastion`). A channel `open`
+  runs on its own task, so a caller that gives up (cancel or timeout) never leaks a channel the
+  server confirms later. A refused channel is `SshError::ChannelOpen { hop, reason }` inside the
+  `io::Error` (`classify_channel_err`); `reason` is a stable id, never the server's text.
+- **Logging is the caller's.** `hacivat-net` has no logger: the lease reports the keys it
+  stored (`TunnelLease::trusted_keys`) and `KnownHosts::skipped_lines` stays on the store; the
+  pipeline (Task 14) logs both.
+- **testkit.** `TestSshServer` is russh's server on loopback (IPv4 or IPv6) with a fresh
+  Ed25519 key, OpenSSH-like `MaxAuthTries` (key probes count) and every method kept on offer
+  after a failure. `TestAgent` speaks the agent protocol's identity and sign requests itself:
+  russh's agent server takes a `futures::Stream` and the testkit has no `futures` dependency
+  (Task 1 owns the manifests). Ed25519 and ECDSA keys sign; RSA keys refuse.

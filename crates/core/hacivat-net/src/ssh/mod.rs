@@ -2,9 +2,7 @@
 //! `known_hosts` stores, `~/.ssh/config` import, and the tunnel manager that opens jump-host
 //! chains and hands out stream factories through them.
 //!
-//! Types are complete since Task 1. Task 4 fills `config` and `known_hosts`, Task 9 `tunnel`.
-//! Until then every stub fails closed: the host-key check refuses, the tunnel refuses, and
-//! `~/.ssh/config` imports nothing.
+//! Types are complete since Task 1; Task 4 filled `config` and `known_hosts`, Task 9 `tunnel`.
 
 pub mod config;
 pub mod known_hosts;
@@ -23,7 +21,7 @@ pub use config::{
     ConfigIssue, ConfigNotice, SshConfig, SshConfigHost, read_ssh_config, resolve_alias,
 };
 pub use known_hosts::KnownHosts;
-pub use tunnel::{TunnelConfig, TunnelLease, TunnelManager};
+pub use tunnel::{AgentEndpoint, TunnelConfig, TunnelLease, TunnelManager, classify_channel_err};
 
 /// How one hop authenticates.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -249,6 +247,59 @@ pub enum SshError {
         hop: u8,
     },
 }
+
+/// Machine text for logs: the hop index and the host, never a secret (an `SshError` holds none).
+impl std::fmt::Display for SshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SshError::HostKeyUnknown {
+                hop,
+                host,
+                port,
+                key,
+            } => write!(
+                f,
+                "ssh hop {hop}: unknown host key {} for {host} port {port}",
+                key.fingerprint()
+            ),
+            SshError::HostKeyChanged {
+                hop,
+                host,
+                port,
+                old,
+                new,
+                ..
+            } => write!(
+                f,
+                "ssh hop {hop}: host key for {host} port {port} changed from {} to {}",
+                old.fingerprint(),
+                new.fingerprint()
+            ),
+            SshError::HostKeyRevoked { hop, host, port } => {
+                write!(
+                    f,
+                    "ssh hop {hop}: host key for {host} port {port} is revoked"
+                )
+            }
+            SshError::Auth { hop, user, host } => {
+                write!(
+                    f,
+                    "ssh hop {hop}: authentication failed for {user} at {host}"
+                )
+            }
+            SshError::AgentUnavailable { hop } => write!(f, "ssh hop {hop}: no SSH agent"),
+            SshError::ChannelOpen { hop, reason } => {
+                write!(f, "ssh hop {hop}: channel refused ({reason})")
+            }
+            SshError::Unreachable { hop, net } => write!(f, "ssh hop {hop}: unreachable ({net:?})"),
+            SshError::Timeout { hop } => write!(f, "ssh hop {hop}: timed out"),
+            SshError::Cancelled => f.write_str("ssh: cancelled"),
+            SshError::Protocol { hop } => write!(f, "ssh hop {hop}: protocol error"),
+        }
+    }
+}
+
+impl std::error::Error for SshError {}
 
 #[cfg(test)]
 mod tests {
