@@ -212,22 +212,55 @@ async fn a_read_only_profile_never_yields_a_read_write_session() {
             .kind,
         ExecErrorKind::Tx(TxError::Unsupported)
     );
+    // Task 18: the statement runs only inside the guard's read-only transaction; this fake
+    // never opens one, so the guard reports a gap and the session is discarded.
     assert_eq!(
         run(&h, "delete from t").await.unwrap_err().kind,
-        ExecErrorKind::Internal
+        ExecErrorKind::EnforcementGap(hacivat_session::GapReason::TransactionEndedByStatement)
     );
-    assert!(f.executed().is_empty(), "{:?}", f.executed());
+    // After the connect's role probe (the profile is read-only, so the connect is too).
+    let ran = f.executed();
+    let probe = hacivat_guard::role_probe_sql(DbmsKind::Postgres);
+    assert_eq!(ran[..probe.len()], *probe);
+    assert_eq!(
+        ran[probe.len()..probe.len() + 3],
+        [
+            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            "SELECT 1",
+            "delete from t"
+        ],
+        "{ran:?}"
+    );
+    assert!(matches!(
+        snap(&h).state,
+        hacivat_session::session::SessionState::Broken(_)
+    ));
 }
 
 #[tokio::test]
 async fn a_read_only_statement_goes_through_the_guard() {
-    // Until Task 18 the guard fails closed: nothing runs unguarded.
+    // Task 18 (T7 carry): the read-only connect runs the role probe first; then the statement
+    // runs inside the guard. This fake never opens the guard's transaction, so it is a gap.
     let (h, f) = ro_session(fake_pg(), ro_profile()).await;
+    let probe: Vec<String> = hacivat_guard::role_probe_sql(DbmsKind::Postgres)
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(f.executed(), probe);
     assert_eq!(
         run(&h, "select 1").await.unwrap_err().kind,
-        ExecErrorKind::Internal
+        ExecErrorKind::EnforcementGap(hacivat_session::GapReason::TransactionEndedByStatement)
     );
-    assert!(f.executed().is_empty(), "{:?}", f.executed());
+    assert_eq!(
+        f.executed()[probe.len()..],
+        [
+            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            "SELECT 1",
+            "select 1",
+            "SELECT txid_current_if_assigned()",
+            "ROLLBACK"
+        ]
+    );
 }
 
 #[test]
