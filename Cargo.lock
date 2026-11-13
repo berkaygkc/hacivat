@@ -2827,7 +2827,6 @@ dependencies = [
  "serde",
  "tokio",
  "toml 1.2.1+spec-1.1.0",
- "url",
 ]
 
 [[package]]
@@ -2947,10 +2946,8 @@ dependencies = [
  "directories",
  "hacivat-proto",
  "keyring",
- "regex",
  "secrecy",
  "tempfile",
- "url",
  "zeroize",
 ]
 

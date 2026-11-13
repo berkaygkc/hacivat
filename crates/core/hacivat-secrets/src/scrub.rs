@@ -1,8 +1,14 @@
 //! Scrubbing: removes passwords from URLs and option lists before they reach a log, the
 //! clipboard or a file (HV-SEC-05).
 //!
-//! A key is secret when its ASCII-lowercased form contains `pass`, `pwd`, `secret`, `token` or
-//! `key`. Matching is locale-invariant and errs on the side of removing too much.
+//! A key is secret when `hacivat_proto::is_secret_param` (the one password-key rule the parser,
+//! the import, the dialog and the store share) says so, or when its ASCII-lowercased form
+//! contains `pass`, `pwd`, `secret`, `token` or `key`. The fragments are a deliberate superset:
+//! a scrub errs on the side of removing too much. Matching is locale-invariant.
+//!
+//! Callers: the connect error's technical details and the copied reports scrub the server's
+//! message (`hacivat-app` `connections::report`), so a server that echoes a connection string
+//! never puts its password on the screen or the clipboard.
 
 /// The key fragments that mark a secret-bearing option.
 const SECRET_FRAGMENTS: [&str; 5] = ["pass", "pwd", "secret", "token", "key"];
@@ -10,9 +16,14 @@ const SECRET_FRAGMENTS: [&str; 5] = ["pass", "pwd", "secret", "token", "key"];
 /// What a scrubbed option value becomes in [`scrub_options`].
 const REMOVED: &str = "<removed>";
 
-/// Whether an option key names a secret (`(?i)pass|pwd|secret|token|key`, ASCII only).
+/// Whether an option key names a secret: the shared password-key rule, or a secret fragment
+/// (`(?i)pass|pwd|secret|token|key`, ASCII only).
 fn is_secret_key(key: &str) -> bool {
-    let key = percent_decode_ascii(key.trim()).to_ascii_lowercase();
+    let key = percent_decode_ascii(key.trim());
+    if hacivat_proto::is_secret_param(&key) {
+        return true;
+    }
+    let key = key.to_ascii_lowercase();
     SECRET_FRAGMENTS.iter().any(|f| key.contains(f))
 }
 
@@ -495,6 +506,24 @@ mod tests {
         }
         for k in ["host", "sslmode", "user", "dbname"] {
             assert!(!is_secret_key(k), "{k}");
+        }
+    }
+
+    // ## m2a-finalfix
+    /// Every key the shared rule calls a password is scrubbed (the scrub is a superset).
+    #[test]
+    fn every_shared_password_key_is_scrubbed() {
+        for k in [
+            "password",
+            "--password",
+            "pgpassword",
+            "mysql_pwd",
+            "sslkeypassword",
+            "db_password",
+            "x-pwd",
+        ] {
+            assert!(hacivat_proto::is_secret_param(k), "{k}");
+            assert!(is_secret_key(k), "{k}");
         }
     }
 }

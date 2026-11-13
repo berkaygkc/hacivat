@@ -27,10 +27,14 @@
 //! allow_unsupported_server = false
 //! ```
 //!
-//! - **Secrets.** A `password`, `passwd`, `pwd`, `pass` or `sslpassword` key (ASCII case
-//!   ignored, at any depth of an entry, or as an `extra` key) is dropped on load with
-//!   `SecretKeyIgnored`; outside the entries (top level, unknown tables) with
-//!   `SecretKeyOutsideEntries`. It is never echoed and never written back.
+//! - **Secrets.** A key that `hacivat_proto::is_secret_param` calls a password (`password`,
+//!   `pgpassword`, `sslpassword`, `db_password`, `--pwd`, ...; ASCII case ignored), at any
+//!   depth of an entry or as an `extra` key, is dropped on load with `SecretKeyIgnored`; outside
+//!   the entries (top level, unknown tables) with `SecretKeyOutsideEntries`. It is never echoed
+//!   and never written back. This is the rule the URL parser, the import and the dialog use.
+//! - **Options with a typed setting** (`sslmode`, `sslrootcert`, `connect_timeout`, ... in
+//!   `extra`, from an older file) are folded into the typed settings on load
+//!   (`fold_typed_options`), so the form, the fixes and the connect all see one value.
 //! - **Unknown keys** are kept: a save re-reads the file and edits it with `toml_edit`, so
 //!   unknown top-level keys, unknown keys of an entry and whole entries this version cannot read
 //!   (an unknown engine, an invalid value) stay as they are. A saved profile keeps the unknown
@@ -64,13 +68,11 @@ use toml_edit::{
     Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, Value, value,
 };
 
+use super::options::fold_typed_options;
 use super::{Profile, ProfileEndpoint, TransportSpec};
 
 /// The file format version this build writes.
 const VERSION: i64 = 1;
-
-/// Keys that hold a secret in other tools' files; never kept (ASCII case ignored).
-const SECRET_KEYS: [&str; 5] = ["password", "passwd", "pwd", "pass", "sslpassword"];
 
 /// A problem found while loading `connections.toml`; shown, never dropped (P29).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -389,8 +391,9 @@ fn load_entry(index: usize, entry: &Table, out: &mut LoadedProfiles) {
 
 // ---- secrets ---------------------------------------------------------------------------------
 
+/// A key that holds a password: the shared rule (M2a final review I1).
 fn is_secret_key(key: &str) -> bool {
-    SECRET_KEYS.iter().any(|s| key.eq_ignore_ascii_case(s))
+    hacivat_proto::is_secret_param(key)
 }
 
 /// Whether `item` is an `extra` pair `{ key = "<secret key>", value = … }`.
@@ -589,7 +592,7 @@ fn read_entry(t: &Table) -> Read<(Profile, Vec<&'static str>)> {
             TagSource::User
         }
     };
-    let profile = Profile {
+    let mut profile = Profile {
         id,
         name,
         engine,
@@ -618,6 +621,8 @@ fn read_entry(t: &Table) -> Read<(Profile, Vec<&'static str>)> {
         origin,
         allow_unsupported_server: opt_bool(t, "allow_unsupported_server")?.unwrap_or(false),
     };
+    // An older file's `sslmode`, `sslrootcert`, ... extras become the typed settings (I2).
+    fold_typed_options(&mut profile);
     Ok((profile, ignored))
 }
 

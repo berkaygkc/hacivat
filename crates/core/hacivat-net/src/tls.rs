@@ -164,6 +164,12 @@ pub struct TlsParams {
     /// Auto may fall back to plaintext (never on a public address without TLS, P9).
     pub plaintext_allowed: bool,
     pub failure: Arc<Mutex<Option<TlsFailure>>>,
+    // ## m2a-finalfix
+    /// The CA file's certificates (DER), read once by [`build_tls_params`]; empty without a CA
+    /// file. A driver that builds its own TLS configuration (MySQL) trusts exactly these and
+    /// never reads the file again, so a file that became unreadable after the check cannot
+    /// silently drop the CA (M2a final review M6).
+    pub ca_certs: Arc<[CertificateDer<'static>]>,
 }
 
 /// How far a server certificate was verified (HV-SEC-02).
@@ -226,6 +232,10 @@ pub fn build_tls_params(
         Some(path) => Some((read_ca_file(path)?, path.as_path())),
         None => None,
     };
+    let ca_certs: Arc<[CertificateDer<'static>]> = ca
+        .as_ref()
+        .map_or_else(Vec::new, |(ca, _)| ca.certs.clone())
+        .into();
     let client = match &settings.client_cert {
         Some(paths) => Some(read_client_cert(paths)?),
         None => None,
@@ -272,6 +282,7 @@ pub fn build_tls_params(
         server_name,
         plaintext_allowed: settings.mode == TlsMode::Auto && class != AddressClass::Public,
         failure,
+        ca_certs,
     }))
 }
 

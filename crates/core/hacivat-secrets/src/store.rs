@@ -330,6 +330,14 @@ impl SecretStore {
         }
     }
 
+    // ## m2a-finalfix
+    /// Removes `key` from wherever `retention` keeps it (for `Forever`, the backend and its
+    /// `UntilRestart` fallback): the undo of a `put` that should not have landed (a connect
+    /// cancelled while it stored the password, M2a final review M2).
+    pub fn remove(&self, key: &SecretKey, retention: Retention) -> Result<(), SecretError> {
+        self.clear(key, retention, Place::Nowhere)
+    }
+
     /// Deletes `key`'s backend entry. With no backend, or an `Unavailable` one, nothing is
     /// stored there, so there is nothing to delete.
     fn backend_delete(&self, key: &SecretKey) -> Result<(), SecretError> {

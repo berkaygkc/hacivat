@@ -33,7 +33,7 @@ use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
 use secrecy::ExposeSecret;
 
 use crate::probe;
-use crate::tls::{ca_file_der, full_ssl_opts, read_ca};
+use crate::tls::{full_ssl_opts, read_ca};
 
 /// Runs on the session at connect when the profile is read-only (HV-CONN-07).
 const READ_ONLY_SESSION: &str = "SET SESSION TRANSACTION READ ONLY";
@@ -300,11 +300,9 @@ async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn
         tokio::task::spawn_blocking(crate::tls::os_roots)
             .await
             .map_err(|_| err(RawErrorKind::Other))?;
-        if let Some(path) = req.tls.as_ref().and_then(|t| t.settings.ca_file.as_deref()) {
-            ca = tokio::fs::read(path)
-                .await
-                .map(|b| ca_file_der(&b))
-                .unwrap_or_default();
+        // The CA certificates the pipeline read and checked; never the file again (M6).
+        if let Some(tls) = req.tls.as_ref() {
+            ca = read_ca(tls);
         }
     }
     let report = |tls: bool, outcome: Result<(), &RawError>| {

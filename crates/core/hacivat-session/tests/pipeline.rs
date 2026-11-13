@@ -664,6 +664,109 @@ async fn a_cancelled_connect_stores_nothing() {
     assert_eq!(fake.connect_calls(), 0);
 }
 
+// ## m2a-finalfix
+
+/// A memory backend whose `put` says it started, then waits until it is released (a slow
+/// keychain write).
+struct GatedBackend {
+    inner: hacivat_secrets::MemoryBackend,
+    entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl hacivat_secrets::SecretBackend for GatedBackend {
+    fn get(
+        &self,
+        key: &hacivat_secrets::SecretKey,
+    ) -> Result<Option<hacivat_secrets::SecretString>, hacivat_secrets::SecretError> {
+        self.inner.get(key)
+    }
+    fn put(
+        &self,
+        key: &hacivat_secrets::SecretKey,
+        value: &hacivat_secrets::SecretString,
+    ) -> Result<(), hacivat_secrets::SecretError> {
+        if let Some(tx) = self.entered.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        let _ = self
+            .release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5));
+        self.inner.put(key, value)
+    }
+    fn delete(&self, key: &hacivat_secrets::SecretKey) -> Result<(), hacivat_secrets::SecretError> {
+        self.inner.delete(key)
+    }
+    fn name(&self) -> &'static str {
+        "gated"
+    }
+}
+
+/// M2: a Delete cancels the connect, then deletes every slot. When the connect was already
+/// storing the password that worked, its `Forever` put lands after that delete; the pipeline
+/// sees the cancel and removes the entry again, so nothing outlives the profile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_password_stored_while_the_connect_is_cancelled_is_removed() {
+    use hacivat_secrets::{MemoryBackend, SecretBackend, SecretStore};
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let backend = Arc::new(GatedBackend {
+        inner: MemoryBackend::new(),
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let store = Arc::new(SecretStore::new(Some(
+        backend.clone() as Arc<dyn SecretBackend>
+    )));
+    let deps = deps_with_store(ok_pg(), store.clone());
+    let mut r = req(forever_profile());
+    r.draft_password = Some(hacivat_secrets::SecretString::from("hv_test_pw"));
+    let cancel = token();
+    let running = tokio::spawn(connect_owned(deps, r, ix_none(), cancel.clone()));
+    // The keychain write of the password that worked has started.
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .expect("the password is being stored");
+    // Delete: the manager cancels the connect, then the writer deletes every slot.
+    cancel.cancel();
+    store.delete_all(pid()).unwrap();
+    release_tx.send(()).unwrap();
+    let _ = running.await.unwrap();
+    assert!(
+        backend.inner.get(&db_key(pid())).unwrap().is_none(),
+        "an orphaned keychain entry outlived the deleted profile"
+    );
+}
+
+/// M6: an unreadable CA file is `config.invalid` with `TlsCaUnreadable` for MySQL as for
+/// PostgreSQL, before any I/O; the driver never falls back to the OS roots alone.
+#[tokio::test]
+async fn an_unreadable_ca_file_is_config_invalid_for_every_engine() {
+    for p in [
+        pg_profile(TlsMode::VerifyFull),
+        mysql_profile(TlsMode::VerifyFull),
+        mariadb_profile(TlsMode::VerifyFull),
+    ] {
+        let mut p = p;
+        p.tls.ca_file = Some("/nonexistent/hv-ca.pem".into());
+        let (deps, fake) = deps_with(FakeDriver::new(p.engine));
+        let e = connect(&deps, req(p.clone()), ix_none(), token(), progress())
+            .await
+            .unwrap_err();
+        assert_eq!(e.class, ErrClass::ConfigInvalid, "{:?}", p.engine);
+        assert_eq!(
+            e.issues[0].code,
+            IssueCode::TlsCaUnreadable,
+            "{:?}",
+            p.engine
+        );
+        assert_eq!(fake.connect_calls(), 0);
+    }
+}
+
 #[tokio::test]
 async fn validation_uses_the_deps_approved_roots() {
     let home = tempfile::tempdir().unwrap();

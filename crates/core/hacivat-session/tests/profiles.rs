@@ -400,10 +400,25 @@ fn local_endpoints() {
         "127.0.0.1",
         "127.5.5.5",
         "::1",
+        // ## m2a-finalfix: the connect path's rule (RFC 6761), M3.
+        "db.localhost",
+        "API.LOCALHOST.",
+        "[::1]",
+        "::ffff:127.0.0.1",
     ] {
         assert!(is_local_endpoint(&server(h)), "{h}");
+        assert_eq!(
+            hacivat_net::classify_host(h, &[]),
+            hacivat_net::AddressClass::Loopback,
+            "{h}"
+        );
     }
-    for h in ["10.0.0.5", "192.168.1.10", "db.acme.io"] {
+    for h in [
+        "10.0.0.5",
+        "192.168.1.10",
+        "db.acme.io",
+        "localhost.acme.io",
+    ] {
         assert!(!is_local_endpoint(&server(h)), "{h}");
     }
     assert!(is_local_endpoint(&ProfileEndpoint::Socket {
@@ -609,6 +624,73 @@ fn apply_parse_keeps_touched_fields_and_forces_on_request() {
         })
     );
     assert_eq!(d.profile.engine, DbmsKind::MySql);
+}
+
+// ## m2a-finalfix
+/// I2: a pasted URL's TLS file options go to the typed settings, like its mapped ones, and are
+/// reported as such; no extra is left to override them.
+#[test]
+fn apply_parse_folds_tls_file_options_into_the_typed_settings() {
+    let mut d = ProfileDraft::new();
+    let r = apply_parse(
+        &mut d,
+        outcome(
+            "postgres://u@h/db?sslmode=allow&sslrootcert=/certs/ca.pem&sslcert=/certs/me.pem&sslkey=/certs/me.key&foo=bar",
+        ),
+        false,
+    );
+    assert_eq!(d.profile.tls.mode, TlsMode::Auto);
+    assert_eq!(d.profile.tls.ca_file, Some(PathBuf::from("/certs/ca.pem")));
+    assert_eq!(
+        d.profile.tls.client_cert,
+        Some(ClientCertPaths {
+            cert: "/certs/me.pem".into(),
+            key: "/certs/me.key".into()
+        })
+    );
+    assert_eq!(d.profile.extra, vec![("foo".into(), "bar".into())]);
+    assert_eq!(r.extras_kept, ["foo"]);
+    let folded: Vec<&str> = r.folded.iter().map(|f| f.key.as_str()).collect();
+    assert_eq!(folded, ["sslmode", "sslrootcert", "sslcert", "sslkey"]);
+}
+
+/// I2: an older file whose extras still name a TLS mode or a timeout loads them as the typed
+/// settings (the form, the fixes and the connect then agree), and the next save writes them
+/// typed.
+#[test]
+fn typed_options_left_in_an_older_file_load_as_typed_settings() {
+    let path = write_tmp(
+        "version = 1\n[[connection]]\nid = \"6f9619ff-8b86-d011-b42d-00c04fc964ff\"\nname = \"a\"\n\
+         engine = \"postgres\"\nhost = \"db.acme.io\"\ntls.mode = \"auto\"\n\
+         extra = [{ key = \"sslmode\", value = \"disable\" }, { key = \"connect_timeout\", value = \"9\" }, { key = \"k\", value = \"v\" }]\n",
+    );
+    let (store, loaded) = ProfileStore::open(path.clone());
+    let p = &loaded.profiles[0];
+    assert_eq!((p.tls.mode, p.connect_timeout_s), (TlsMode::Disable, 9));
+    assert_eq!(p.extra, vec![("k".into(), "v".into())]);
+    store.save(&loaded.profiles).unwrap();
+    let text = read(&path);
+    assert!(text.contains("tls.mode = \"disable\""), "{text}");
+    assert!(!text.contains("sslmode"), "{text}");
+}
+
+/// I1: the store drops every key the shared rule calls a password, not only the five
+/// spellings it used to know.
+#[test]
+fn the_store_drops_every_password_like_key() {
+    let path = write_tmp(
+        "version = 1\n[[connection]]\nid = \"6f9619ff-8b86-d011-b42d-00c04fc964ff\"\nname = \"a\"\n\
+         engine = \"postgres\"\nhost = \"h\"\n\
+         extra = [{ key = \"pgpassword\", value = \"typed-1\" }, { key = \"db_password\", value = \"typed-2\" }, { key = \"mysql_pwd\", value = \"typed-3\" }, { key = \"k\", value = \"v\" }]\n",
+    );
+    let (store, loaded) = ProfileStore::open(path.clone());
+    assert_eq!(loaded.diags, [ProfileDiag::SecretKeyIgnored { index: 0 }]);
+    assert_eq!(loaded.profiles[0].extra, vec![("k".into(), "v".into())]);
+    let mut p = loaded.profiles[0].clone();
+    p.extra.push(("x-password".into(), "typed-4".into()));
+    store.save(&[p]).unwrap();
+    let text = read(&path);
+    assert!(!text.contains("typed-"), "{text}");
 }
 
 #[test]
