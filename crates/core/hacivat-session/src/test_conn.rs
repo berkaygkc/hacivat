@@ -61,6 +61,20 @@ pub async fn test_connection(
     cancel: CancellationToken,
     progress: watch::Sender<Progress>,
 ) -> TestReport {
+    test_connection_continuing(deps, draft, 0, ix, cancel, progress).await
+}
+
+/// [`test_connection`] continuing a gesture that already had `prior_rejections` server
+/// rejections (the connection dialog's password re-entry, P8): the pipeline's budget of 3
+/// includes them, and a gesture that already has 3 fails at once, before any I/O.
+pub async fn test_connection_continuing(
+    deps: &ConnectDeps,
+    draft: ProfileDraft,
+    prior_rejections: u8,
+    ix: Interaction,
+    cancel: CancellationToken,
+    progress: watch::Sender<Progress>,
+) -> TestReport {
     let started = tokio::time::Instant::now();
     let ProfileDraft {
         profile, password, ..
@@ -73,7 +87,7 @@ pub async fn test_connection(
         draft_password: password,
         purpose: Purpose::Test,
         department: Department::Unknown,
-        prior_rejections: 0,
+        prior_rejections,
     };
     let mut live = match connect(deps, req, ix, cancel.clone(), progress).await {
         Ok(live) => live,

@@ -712,6 +712,18 @@ impl ErrorView {
             );
         }
 
+        // ## m2a-dialog-retries: the gesture's 3 rejections are spent, so no re-entry is offered.
+        if error.class == ErrClass::AuthInvalid && self.rejections >= MAX_REJECTIONS {
+            block = block.child(paragraph(
+                tr(cx, ids::hv::CONN_ERR_ATTEMPTS_USED, NoArgs),
+                TextSource::Fluent,
+                t.type_ramp.body_sm,
+                c.text_2.to_hsla(),
+                Some("attempts-used"),
+                cx,
+            ));
+        }
+
         // What "Encrypt without verifying" gives up (R3, ADR known limits), and why fixes are off.
         if offers_require {
             block = block.child(paragraph(

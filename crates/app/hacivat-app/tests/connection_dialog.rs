@@ -16,7 +16,8 @@ use hacivat_app::connections::dialog::{
     ConnectionDialog, DialogMode, open_connection_dialog, open_dialog,
 };
 use hacivat_app::connections::fixes::FixAction;
-use hacivat_app::connections::test_strip::TestStripEvent;
+use hacivat_app::connections::test_strip::{TestStripEvent, TestStripState};
+use hacivat_driver::fake::FakeDriver;
 use hacivat_net::TlsMode;
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_secrets::{
@@ -1579,4 +1580,208 @@ fn a_refused_extra_of_an_imported_profile_blocks_the_save_inline(cx: &mut TestAp
         .expect("the issue is shown under Advanced")
         .replace(['\u{2068}', '\u{2069}'], "");
     assert_eq!(shown, "The property foo isn't allowed here.");
+}
+
+// ## m2a-dialog-retries ---------------------------------------------------------------------------
+
+/// The server's answer to a wrong password (SQLSTATE 28P01).
+fn rejected() -> hacivat_driver::RawError {
+    hacivat_driver::RawError {
+        kind: hacivat_driver::RawErrorKind::Db,
+        server: Some(hacivat_driver::ServerMessage {
+            sqlstate: Some("28P01".into()),
+            vendor_code: None,
+            severity: Some("FATAL".into()),
+            text: "password authentication failed".into(),
+            detail: None,
+            hint: None,
+            lang_hint: None,
+        }),
+    }
+}
+
+/// A New dialog in a shell whose PostgreSQL server is `server`, filled with a loopback
+/// destination (an IP literal: no DNS query) and a password.
+fn open_against(cx: &mut TestAppContext, server: FakeDriver) -> &'static mut VisualTestContext {
+    let vcx = open(shell_with_fake(cx, "en", server), DialogMode::New);
+    fill(
+        vcx,
+        &[
+            ("host", "127.0.0.1"),
+            ("user", "deploy"),
+            ("password", "hv_test_pw"),
+        ],
+    );
+    vcx
+}
+
+/// Clicks Test connection and waits until the server answered the new test.
+fn test_and_wait(vcx: &mut VisualTestContext) {
+    let before = fake(vcx).connect_calls();
+    click(vcx, "conn-test");
+    wait_until(vcx, "the test to finish", |vcx| {
+        fake(vcx).connect_calls() > before
+            && read(vcx, |d, cx| {
+                matches!(d.strip().read(cx).state(), TestStripState::Done(_))
+            })
+    });
+}
+
+/// The inline error's fixes.
+fn inline_fixes(vcx: &VisualTestContext) -> Vec<FixAction> {
+    read(vcx, |d, cx| {
+        d.strip()
+            .read(cx)
+            .error_view()
+            .map(|v| {
+                v.read(cx)
+                    .fix_buttons(cx)
+                    .into_iter()
+                    .map(|b| b.action)
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// "Enter password again", then a new password, then Test.
+fn reenter_and_test(vcx: &mut VisualTestContext, password: &str) {
+    emit_strip_fix(vcx, FixAction::ReenterPassword);
+    assert_eq!(password_value(vcx), "");
+    assert_eq!(focused_field(vcx), "password");
+    vcx.simulate_input(password);
+    vcx.run_until_parked();
+    test_and_wait(vcx);
+}
+
+fn rejections(vcx: &VisualTestContext) -> u8 {
+    read(vcx, |d, _| d.rejections())
+}
+
+#[gpui::test]
+fn rejected_tests_count_attempts_and_stop_at_three(cx: &mut TestAppContext) {
+    let vcx = open_against(
+        cx,
+        FakeDriver::new(DbmsKind::Postgres).connect_result(Err(rejected())),
+    );
+    assert_eq!(label(vcx, "password-attempt"), None);
+
+    test_and_wait(vcx);
+    assert_eq!(rejections(vcx), 1);
+    assert!(inline_fixes(vcx).contains(&FixAction::ReenterPassword));
+    emit_strip_fix(vcx, FixAction::ReenterPassword);
+    assert_eq!(password_value(vcx), "");
+    assert_eq!(focused_field(vcx), "password");
+    assert_eq!(
+        label(vcx, "password-attempt").as_deref(),
+        Some("Attempt 2 of 3")
+    );
+
+    vcx.simulate_input("x1");
+    vcx.run_until_parked();
+    test_and_wait(vcx);
+    assert_eq!(rejections(vcx), 2);
+    assert!(inline_fixes(vcx).contains(&FixAction::ReenterPassword));
+    emit_strip_fix(vcx, FixAction::ReenterPassword);
+    assert_eq!(
+        label(vcx, "password-attempt").as_deref(),
+        Some("Attempt 3 of 3")
+    );
+
+    vcx.simulate_input("x2");
+    vcx.run_until_parked();
+    test_and_wait(vcx);
+    assert_eq!(rejections(vcx), 3);
+    assert_eq!(fake(vcx).connect_calls(), 3);
+    // Test (clicked, now disabled) keeps no stranded focus: Host, which the hint says to change.
+    assert_eq!(focused_field(vcx), "host");
+
+    // All 3 used: no re-entry; the reason is said inline and under the Password field.
+    assert!(!inline_fixes(vcx).contains(&FixAction::ReenterPassword));
+    assert!(
+        label(vcx, "attempts-used").is_some_and(|t| t.starts_with("All 3 attempts are used")),
+        "the inline error says the attempts are used up"
+    );
+    assert_eq!(label(vcx, "password-attempt"), None);
+    assert!(
+        label(vcx, "password-attempts-used")
+            .is_some_and(|t| t.starts_with("No attempts left for this server")),
+        "the Password field says why nothing is sent"
+    );
+
+    // Neither Test nor Save and connect sends another password, by click or by key: no new
+    // test starts (the third one's report stays), nothing is saved or connected.
+    let report = |vcx: &VisualTestContext| {
+        read(vcx, |d, cx| match d.strip().read(cx).state() {
+            TestStripState::Done(r) => Some(r.clone()),
+            _ => None,
+        })
+        .expect("the third test's report")
+    };
+    let third = report(vcx);
+    click(vcx, "conn-test");
+    keys(vcx, &primary("t"));
+    click(vcx, "conn-save-connect");
+    keys(vcx, &primary("enter"));
+    settle(vcx, Duration::from_millis(50));
+    assert!(Arc::ptr_eq(&third, &report(vcx)), "no test was started");
+    assert_eq!(fake(vcx).connect_calls(), 3);
+    assert_eq!(layer_ids(vcx), ["connection-dialog"]);
+    assert!(profile_names(vcx).is_empty());
+    // Save alone still saves, and connects nothing.
+    keys(vcx, &primary("s"));
+    wait(vcx);
+    assert!(layer_ids(vcx).is_empty());
+    assert_eq!(profile_names(vcx).len(), 1);
+    assert_eq!(fake(vcx).connect_calls(), 3);
+}
+
+#[gpui::test]
+fn a_new_host_starts_a_new_count(cx: &mut TestAppContext) {
+    let vcx = open_against(
+        cx,
+        FakeDriver::new(DbmsKind::Postgres).connect_result(Err(rejected())),
+    );
+    test_and_wait(vcx);
+    reenter_and_test(vcx, "x1");
+    reenter_and_test(vcx, "x2");
+    assert!(read(vcx, |d, _| d.attempts_used_up()));
+
+    set_field(vcx, "host", "127.0.0.2");
+    assert_eq!(rejections(vcx), 0);
+    assert_eq!(label(vcx, "password-attempts-used"), None);
+    assert_eq!(label(vcx, "password-attempt"), None);
+    // A new destination has a fresh budget: the test is sent, with no earlier rejections.
+    test_and_wait(vcx);
+    assert_eq!(fake(vcx).connect_calls(), 4);
+    assert_eq!(rejections(vcx), 1);
+    assert_eq!(
+        label(vcx, "password-attempt").as_deref(),
+        Some("Attempt 2 of 3")
+    );
+}
+
+#[gpui::test]
+fn a_successful_test_clears_the_count(cx: &mut TestAppContext) {
+    let server = FakeDriver::new(DbmsKind::Postgres).script(vec![Err(rejected()), Err(rejected())]);
+    let vcx = open_against(cx, server);
+    test_and_wait(vcx);
+    reenter_and_test(vcx, "x1");
+    assert_eq!(rejections(vcx), 2);
+    assert_eq!(
+        label(vcx, "password-attempt").as_deref(),
+        Some("Attempt 3 of 3")
+    );
+
+    // The third password works: the count starts again.
+    reenter_and_test(vcx, "hv_test_pw");
+    assert_eq!(rejections(vcx), 0);
+    assert_eq!(label(vcx, "password-attempt"), None);
+    assert!(inline_fixes(vcx).is_empty());
+    assert!(
+        registry_frame(vcx)
+            .iter()
+            .all(|r| !r.text.contains("hv_test_pw")),
+        "no password is drawn"
+    );
 }

@@ -22,6 +22,13 @@
 //! (`sslmode`, `sslrootcert`, `connect_timeout`, ...) is folded into that setting the same way,
 //! so the form, the fixes and the connect agree.
 //!
+//! **Rejected passwords (P8).** The dialog counts the server's rejections of a password for one
+//! destination (engine, host, port, user, sign-in method) across its tests, and passes the
+//! count as `prior_rejections` to the next test or Save and connect, so the pipeline's budget
+//! of 3 includes them. After a rejection the Password field shows "Attempt n of 3"; after the
+//! third, Test and Save and connect send nothing (the field's hint says why; Save still saves).
+//! A success, a new destination, or a new dialog starts the count again.
+//!
 //! **Threading (§5.4).** Validation (it reads TLS files), the keyring probe (P36) and the pgpass
 //! lookup run on the core runtime; the dialog awaits only `oneshot` channels.
 
@@ -58,7 +65,7 @@ use hacivat_ui_core::gpui_surface::{
 use secrecy::SecretString;
 use tokio::sync::oneshot;
 
-use crate::connections::fixes::FixAction;
+use crate::connections::fixes::{FixAction, MAX_REJECTIONS};
 use crate::connections::model::{ConnectionsModel, SaveError};
 use crate::connections::prod_prompt::ask_environment;
 use crate::connections::test_strip::{TestStrip, TestStripEvent, TestStripState};
@@ -233,6 +240,42 @@ pub struct ConnectionDialog {
     pub(crate) read_only: bool,
     pub(crate) focus: Focus,
     subscriptions: Vec<Subscription>,
+    // ## m2a-dialog-retries
+    /// The server's rejections of a password for one destination, counted across this
+    /// dialog's tests (P8).
+    pub(crate) retries: Retries,
+    /// The destination of the test running now.
+    testing: Option<Destination>,
+}
+
+// ## m2a-dialog-retries
+
+/// Where a password goes: what a rejection count belongs to (P8). Changing any of these
+/// starts a new count; the database, TLS and the rest do not.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Destination {
+    engine: DbmsKind,
+    endpoint: ProfileEndpoint,
+    user: Option<String>,
+    auth: AuthProviderId,
+}
+
+impl Destination {
+    fn of(p: &Profile) -> Self {
+        Destination {
+            engine: p.engine,
+            endpoint: p.endpoint.clone(),
+            user: p.user.clone(),
+            auth: p.auth,
+        }
+    }
+}
+
+/// The consecutive server rejections of `destination`'s password (P8).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Retries {
+    destination: Option<Destination>,
+    rejections: u8,
 }
 
 impl EventEmitter<ConnectionDialogEvent> for ConnectionDialog {}
@@ -435,8 +478,9 @@ impl ConnectionDialog {
             &strip,
             window,
             |this, _, event: &TestStripEvent, window, cx| {
-                if let TestStripEvent::Fix(fix) = event {
-                    this.apply_fix(fix.clone(), window, cx);
+                match event {
+                    TestStripEvent::Fix(fix) => this.apply_fix(fix.clone(), window, cx),
+                    TestStripEvent::Finished => this.test_finished(window, cx),
                 }
                 cx.notify();
             },
@@ -544,6 +588,8 @@ impl ConnectionDialog {
             saving: false,
             focus: Focus::new(cx),
             subscriptions,
+            retries: Retries::default(),
+            testing: None,
         };
         let extras = dialog.draft.profile.extra.clone();
         for (k, v) in extras {
@@ -1330,11 +1376,66 @@ impl ConnectionDialog {
     }
 
     pub(crate) fn run_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // ## m2a-dialog-retries: 3 rejections for this destination: no password is sent (the
+        // Password field's hint and the inline error say why).
+        if self.attempts_used_up() {
+            cx.notify();
+            return;
+        }
         // ## m2a-finalfix: the rows' secrets and typed settings first (I1, I2).
         self.commit_extra_rows(window, cx);
         let draft = self.draft_of(self.profile_to_save());
-        self.strip.update(cx, |strip, cx| strip.run(draft, cx));
+        let prior = self.rejections();
+        self.testing = Some(Destination::of(&draft.profile));
+        self.strip
+            .update(cx, |strip, cx| strip.run_continuing(draft, prior, cx));
         cx.notify();
+    }
+
+    // ## m2a-dialog-retries
+
+    /// The server's rejections of a password for the form's destination so far (P8): 0 once
+    /// the engine, host, port, user or sign-in method changed.
+    pub fn rejections(&self) -> u8 {
+        let current = Destination::of(&self.draft.profile);
+        if self.retries.destination.as_ref() == Some(&current) {
+            self.retries.rejections
+        } else {
+            0
+        }
+    }
+
+    /// Whether the form's destination used up its 3 attempts: Test and Save and connect send
+    /// no password until the destination changes or the dialog is opened again.
+    pub fn attempts_used_up(&self) -> bool {
+        self.rejections() >= MAX_REJECTIONS
+    }
+
+    /// A test ended: a success clears the count; a failure keeps the pipeline's count of the
+    /// gesture's rejections (it started from ours, so it only grows). Once the attempts are
+    /// used up, the focus leaves Test or Save and connect (now disabled) for Host.
+    fn test_finished(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(destination) = self.testing.take() else {
+            return;
+        };
+        let TestStripState::Done(report) = self.strip.read(cx).state() else {
+            return;
+        };
+        if report.ok {
+            self.retries = Retries::default();
+        } else if let Some(error) = &report.error
+            && error.attempts > 0
+        {
+            self.retries = Retries {
+                destination: Some(destination),
+                rejections: error.attempts,
+            };
+            let stranded =
+                self.focus.test.is_focused(window) || self.focus.save_connect.is_focused(window);
+            if self.attempts_used_up() && stranded {
+                self.focus_field(Field::Host, window, cx);
+            }
+        }
     }
 
     /// A quick fix from the test strip (P40).
@@ -1407,6 +1508,12 @@ impl ConnectionDialog {
     /// when the host is not on this machine, then save through the model, close and toast.
     pub(crate) fn save(&mut self, connect: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.saving {
+            return;
+        }
+        // ## m2a-dialog-retries: Save and connect sends no password once the destination's
+        // attempts are used up; Save alone still saves.
+        if connect && self.attempts_used_up() {
+            cx.notify();
             return;
         }
         let Some(model) = cx.try_global::<ConnectionsModel>() else {
@@ -1562,7 +1669,8 @@ impl ConnectionDialog {
         });
         ToastQueue::push(cx, Toast::new(ToastKind::Info, text));
         if let Some(password) = connect {
-            ConnectionsModel::connect(cx, id, password);
+            // ## m2a-dialog-retries: the connect continues the dialog's count (P8).
+            ConnectionsModel::connect_continuing(cx, id, password, self.rejections());
         }
         self.close(cx);
     }

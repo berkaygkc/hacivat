@@ -23,4 +23,4 @@ pub use budget::{Budget, BudgetPermit, Priority, budget_for};
 pub use manager::{ConnectionManager, LiveInfo, LiveState, ManagerConfig, PathKind, TestHandle};
 pub use registry::default_drivers;
 pub use runtime::CoreRuntime;
-pub use test_conn::{TestReport, TestWarning, test_connection};
+pub use test_conn::{TestReport, TestWarning, test_connection, test_connection_continuing};

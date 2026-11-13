@@ -318,8 +318,32 @@ impl ConnectionsModel {
 
     /// Tests `draft` through the manager. Needs the model (call it only after `boot`).
     pub fn test(cx: &mut App, draft: ProfileDraft) -> TestHandle {
+        Self::test_continuing(cx, draft, 0)
+    }
+
+    /// [`Self::test`] continuing the connection dialog's count of server rejections (P8).
+    pub fn test_continuing(cx: &mut App, draft: ProfileDraft, prior_rejections: u8) -> TestHandle {
         let ix = interaction(cx);
-        cx.global::<ConnectionsModel>().manager.test(draft, ix)
+        cx.global::<ConnectionsModel>()
+            .manager
+            .test_continuing(draft, prior_rejections, ix)
+    }
+
+    /// [`Self::connect`] continuing the connection dialog's count of server rejections (P8).
+    pub fn connect_continuing(
+        cx: &mut App,
+        id: ProfileId,
+        draft_password: Option<SecretString>,
+        prior_rejections: u8,
+    ) {
+        let ix = interaction(cx);
+        let m = cx.global_mut::<ConnectionsModel>();
+        let Some(profile) = m.get(id) else {
+            return;
+        };
+        m.note_attempt(id);
+        m.manager
+            .connect_continuing(profile, draft_password, prior_rejections, ix);
     }
 
     pub fn manager(&self) -> &Arc<ConnectionManager> {
