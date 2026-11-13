@@ -44,6 +44,9 @@ pub struct DockerTarget {
     pub tls_default: TlsDefault,
     /// The test sets it belongs to (`pr`, `full`).
     pub sets: Vec<String>,
+    /// The in-network endpoint `(compose service, container port)`: what a test that goes
+    /// through `sshd-a`/`sshd-b` dials (`pg17:5432`, not `127.0.0.1:54317`; Q6).
+    pub internal: (String, u16),
 }
 
 impl fmt::Debug for DockerTarget {
@@ -59,6 +62,7 @@ impl fmt::Debug for DockerTarget {
             .field("database", &self.database)
             .field("tls_default", &self.tls_default)
             .field("sets", &self.sets)
+            .field("internal", &self.internal)
             .finish()
     }
 }
@@ -67,15 +71,30 @@ impl fmt::Debug for DockerTarget {
 #[serde(deny_unknown_fields)]
 struct TargetsFile {
     target: Vec<RawTarget>,
+    #[serde(default)]
+    ssh_target: Vec<RawSshTarget>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSshTarget {
+    id: String,
+    host: String,
+    port: u16,
+    user: String,
+    via: Option<String>,
+    sets: Vec<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawTarget {
     id: String,
+    service: String,
     engine: DbmsKind,
     major: String,
     port: u16,
+    internal_port: u16,
     tls_default: RawTls,
     sets: Vec<String>,
 }
@@ -102,9 +121,8 @@ pub fn docker_enabled_from(v: Option<&str>) -> bool {
 /// # Panics
 /// When the committed file does not parse (a repository bug, caught by this crate's tests).
 pub fn all_targets_unfiltered() -> Vec<DockerTarget> {
-    let file: TargetsFile = toml::from_str(TARGETS_TOML)
-        .unwrap_or_else(|e| panic!("docker/m2a/targets.toml does not parse: {e}"));
-    file.target
+    targets_file()
+        .target
         .into_iter()
         .map(|t| DockerTarget {
             id: t.id,
@@ -120,8 +138,14 @@ pub fn all_targets_unfiltered() -> Vec<DockerTarget> {
                 RawTls::SelfSigned => TlsDefault::SelfSigned,
             },
             sets: t.sets,
+            internal: (t.service, t.internal_port),
         })
         .collect()
+}
+
+fn targets_file() -> TargetsFile {
+    toml::from_str(TARGETS_TOML)
+        .unwrap_or_else(|e| panic!("docker/m2a/targets.toml does not parse: {e}"))
 }
 
 /// The ids of the targets in `set`, sorted.
@@ -224,4 +248,98 @@ pub fn artifact_in(dir: Option<&str>, name: &str) -> PathBuf {
         );
     };
     PathBuf::from(dir).join(name)
+}
+
+// ## m2b-t16-ssh-targets
+
+/// The password of the SSH bastions' user (throwaway, like [`PASSWORD`]).
+const SSH_PASSWORD: &str = "hv_ssh_pw";
+/// The passphrase of the encrypted generated client key (`ssh_client_key(true)`).
+pub const SSH_CLIENT_KEY_PASSPHRASE: &str = "hv_test_pw";
+
+/// One SSH bastion of the Docker compose project (`sshd-a`, `sshd-b`). `host` and `port` are
+/// what the connecting side dials: the loopback port for `sshd-a`; for `sshd-b` (`via`
+/// `sshd-a`) the in-network name and port, since it publishes nothing.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct SshTarget {
+    pub id: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    /// The bastion this one is reached through (ProxyJump), if any.
+    pub via: Option<String>,
+    pub sets: Vec<String>,
+}
+
+impl fmt::Debug for SshTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SshTarget")
+            .field("id", &self.id)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("password", &"<redacted>")
+            .field("via", &self.via)
+            .field("sets", &self.sets)
+            .finish()
+    }
+}
+
+/// The SSH targets in `set` (every one with `None`), in file order.
+pub fn ssh_targets_in_set(set: Option<&str>) -> Vec<SshTarget> {
+    targets_file()
+        .ssh_target
+        .into_iter()
+        .filter(|t| set.is_none_or(|s| t.sets.iter().any(|x| x == s)))
+        .map(|t| SshTarget {
+            id: t.id,
+            host: t.host,
+            port: t.port,
+            user: t.user,
+            password: SSH_PASSWORD.to_string(),
+            via: t.via,
+            sets: t.sets,
+        })
+        .collect()
+}
+
+/// The SSH targets in the set named by `HACIVAT_DOCKER_SET` (all when it is unset).
+pub fn ssh_targets() -> Vec<SshTarget> {
+    ssh_targets_in_set(std::env::var("HACIVAT_DOCKER_SET").ok().as_deref())
+}
+
+/// The SSH target `id`, when it is in the `HACIVAT_DOCKER_SET` set.
+pub fn ssh_target(id: &str) -> Option<SshTarget> {
+    ssh_targets().into_iter().find(|t| t.id == id)
+}
+
+/// The generated client private key (`encrypted`: the one protected by
+/// [`SSH_CLIENT_KEY_PASSPHRASE`]); its `.pub` sits next to it. Written by the `ssh-client-keys`
+/// service into the artifacts directory.
+pub fn ssh_client_key(encrypted: bool) -> PathBuf {
+    ssh_client_key_in(
+        std::env::var("HACIVAT_DOCKER_ARTIFACTS").ok().as_deref(),
+        encrypted,
+    )
+}
+
+/// [`ssh_client_key`] for a given `HACIVAT_DOCKER_ARTIFACTS` value.
+///
+/// # Panics
+/// When `dir` is `None` (see [`artifact_in`]).
+pub fn ssh_client_key_in(dir: Option<&str>, encrypted: bool) -> PathBuf {
+    artifact_in(
+        dir,
+        if encrypted {
+            "ssh-client-ed25519-enc"
+        } else {
+            "ssh-client-ed25519"
+        },
+    )
+}
+
+/// The public host key (`ssh-host-<id>.pub`) the bastion `id` generated at startup.
+pub fn ssh_host_pub(id: &str) -> PathBuf {
+    artifact(&format!("ssh-host-{id}.pub"))
 }

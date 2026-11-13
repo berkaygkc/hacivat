@@ -100,11 +100,22 @@ impl TestStrip {
     /// runtime; its progress and result come back over `tokio::sync` channels. Needs the
     /// connections model (does nothing without it).
     pub fn run(&mut self, draft: ProfileDraft, cx: &mut Context<Self>) {
+        self.run_continuing(draft, 0, cx);
+    }
+
+    /// [`Self::run`] continuing the dialog's count of server rejections (P8): the pipeline's
+    /// budget of 3 includes `prior_rejections`.
+    pub fn run_continuing(
+        &mut self,
+        draft: ProfileDraft,
+        prior_rejections: u8,
+        cx: &mut Context<Self>,
+    ) {
         self.stop(cx);
         if cx.try_global::<ConnectionsModel>().is_none() {
             return;
         }
-        let mut handle = ConnectionsModel::test(cx, draft);
+        let mut handle = ConnectionsModel::test_continuing(cx, draft, prior_rejections);
         let mut progress = handle.progress.clone();
         // The handle stays whole (its guard cancels the test when it drops); the result
         // receiver is taken out of it.

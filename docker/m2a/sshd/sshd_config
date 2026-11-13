@@ -1,0 +1,16 @@
+# Test bastions (Task 16). Everything the tunnel tests need: forwarding to any host, password
+# and public-key logins. Keyboard-interactive is covered by the in-process server.
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+AllowTcpForwarding yes
+PermitOpen any
+GatewayPorts no
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+PermitRootLogin no
+UsePAM no
+StrictModes no
+ClientAliveInterval 0
+MaxAuthTries 6
+LogLevel VERBOSE

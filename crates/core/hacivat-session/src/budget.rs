@@ -132,6 +132,19 @@ impl Budget {
         self.inner.lock().in_use
     }
 
+    // ## m2b-t15-session-manager (named exception, fix round 1 C1)
+    /// The priority of the best request still waiting for a slot, if any (a waiter that gave
+    /// up does not count): the session pool closes a released session instead of parking it
+    /// when someone waits.
+    pub fn first_waiter(&self) -> Option<Priority> {
+        self.inner
+            .lock()
+            .waiters
+            .iter()
+            .find(|(_, tx)| !tx.is_closed())
+            .map(|((p, _), _)| *p)
+    }
+
     /// A slot now, or `None` when the budget is spent.
     pub fn try_acquire(&self, _p: Priority) -> Option<BudgetPermit> {
         let mut state = self.inner.lock();
@@ -179,5 +192,29 @@ pub fn budget_for(p: &Profile) -> Budget {
         Budget::new(1)
     } else {
         Budget::new(p.max_connections.max(1))
+    }
+}
+
+// ## m2b-t15-session-manager
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn first_waiter_names_the_best_live_waiter() {
+        let b = Budget::new(1);
+        let held = b.try_acquire(Priority::Console).unwrap();
+        assert_eq!(b.first_waiter(), None);
+        let intro = b.acquire(Priority::Introspection);
+        assert_eq!(b.first_waiter(), Some(Priority::Introspection));
+        let console = b.acquire(Priority::Console);
+        assert_eq!(b.first_waiter(), Some(Priority::Console));
+        // A waiter that gave up no longer counts.
+        drop(console);
+        assert_eq!(b.first_waiter(), Some(Priority::Introspection));
+        drop(intro);
+        assert_eq!(b.first_waiter(), None);
+        drop(held);
+        assert_eq!(b.in_use(), 0);
     }
 }

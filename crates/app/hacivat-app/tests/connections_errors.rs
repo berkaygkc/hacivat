@@ -1033,6 +1033,86 @@ fn config_invalid_offers_edit_connection(cx: &mut TestAppContext) {
     assert!(!has_id(vcx, "step-trail"));
 }
 
+// ## m2a-demo-extra
+/// `config.invalid` says "the technical details name it": they do. A refused property names
+/// its key and why, a refused SQLite file names the file, and any other issue says what is
+/// wrong, on screen and in the English copy.
+#[gpui::test]
+fn config_invalid_details_name_what_was_refused(cx: &mut TestAppContext) {
+    use hacivat_driver::ViolationReason;
+    use hacivat_driver::url::FieldId;
+    use hacivat_session::pipeline::{IssueCode, ValidationIssue};
+    let mut e = error_of(ErrClass::ConfigInvalid, None);
+    e.phase = Phase::Validate;
+    e.issues = vec![
+        ValidationIssue {
+            field: None,
+            code: IssueCode::OptionRejected {
+                key: "foo".into(),
+                reason: ViolationReason::UnknownOption,
+            },
+        },
+        ValidationIssue {
+            field: Some(FieldId::Host),
+            code: IssueCode::HostInvalid,
+        },
+    ];
+    let vcx = error_dialog(cx, e, ok_fake());
+    expand(vcx, "tech-details");
+    assert_eq!(
+        strip_marks(&tech_row(vcx, "Property")),
+        "foo — not allowed for imported connections"
+    );
+    assert_eq!(
+        tech_row(vcx, "Problem"),
+        "This host can't be used. Remove spaces and URL characters."
+    );
+    assert_eq!(tech_row(vcx, "Class"), "config.invalid");
+    click(vcx, "copy-details");
+    let text = clipboard(vcx);
+    assert!(
+        text.contains("Property: foo — not allowed for imported connections"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Problem: This host can't be used. Remove spaces and URL characters."),
+        "{text}"
+    );
+}
+
+/// A refused SQLite file is named in the Path row; a password-like property says where the
+/// password goes.
+#[gpui::test]
+fn config_invalid_details_name_a_refused_file_and_a_secret_property(cx: &mut TestAppContext) {
+    use hacivat_driver::url::FieldId;
+    use hacivat_session::pipeline::{IssueCode, ValidationIssue};
+    let mut e = error_of(ErrClass::ConfigInvalid, None);
+    e.phase = Phase::Validate;
+    e.args.file = Some("//server/share/app.db".into());
+    e.issues = vec![
+        ValidationIssue {
+            field: Some(FieldId::File),
+            code: IssueCode::PathRefused,
+        },
+        ValidationIssue {
+            field: None,
+            code: IssueCode::OptionSecret {
+                key: "db_password".into(),
+            },
+        },
+    ];
+    let vcx = error_dialog(cx, e, ok_fake());
+    expand(vcx, "tech-details");
+    assert_eq!(
+        strip_marks(&tech_row(vcx, "Path")),
+        "//server/share/app.db — Hacivat won't open this path"
+    );
+    assert_eq!(
+        strip_marks(&tech_row(vcx, "Property")),
+        "db_password — holds a password; type it in the Password field"
+    );
+}
+
 #[gpui::test]
 fn technical_details_keep_server_text_verbatim_and_out_of_the_title(cx: &mut TestAppContext) {
     let vcx = error_dialog(

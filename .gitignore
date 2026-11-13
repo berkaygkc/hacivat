@@ -8,3 +8,4 @@ target/docker/
 .DS_Store
 *.key
 .claude/worktrees/
+docker/m2a/artifacts/

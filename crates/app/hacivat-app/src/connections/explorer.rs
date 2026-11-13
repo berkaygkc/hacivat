@@ -676,7 +676,11 @@ impl ExplorerView {
                 ConnectionsModel::select(cx, Some(id));
                 window.focus(&list, cx);
                 if event.click_count == 2 {
-                    ActionRegistry::run("connection.toggle_connect", window, cx);
+                    // Deferred: the action reads this view (the visible-row check), which is
+                    // leased to this listener until it returns.
+                    window.defer(cx, |window, cx| {
+                        ActionRegistry::run("connection.toggle_connect", window, cx);
+                    });
                 }
             }),
         )
