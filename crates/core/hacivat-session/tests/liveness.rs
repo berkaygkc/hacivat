@@ -289,6 +289,20 @@ fn a_jump_with_an_open_transaction_never_disconnects() {
 }
 
 #[test]
+fn a_jump_with_an_open_transaction_and_no_keepalive_still_pings_once() {
+    // Review H3 (M1): B18's "Suspect ⇒ one immediate ping" holds with a transaction open; only
+    // the disconnect is reserved for an idle one.
+    for tx in [TxStatus::InTx, TxStatus::Failed] {
+        let mut s = sup(None, Some(3600));
+        idle_for(&mut s, secs(59 * 60));
+        let mut acts = Vec::new();
+        acts.extend(s.step(secs(1), secs(8 * 3600), false, tx));
+        acts.extend(s.step(secs(1), secs(1), false, tx));
+        assert_eq!(acts, [LivenessAction::Suspect, LivenessAction::Ping], "{tx:?}");
+    }
+}
+
+#[test]
 fn small_drift_is_no_jump_and_busy_ticks_are_never_suspect() {
     let mut s = sup(Some(60), None);
     // Four seconds of drift: under the 5 s threshold.

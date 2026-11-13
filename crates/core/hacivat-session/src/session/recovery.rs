@@ -7,7 +7,10 @@
 //! - **What is lost** is read from the first keyword of each user statement (M3 replaces the
 //!   scan with the classifier): temporary objects, session variables, session locks and
 //!   prepared statements. Transaction-scoped state (`SET LOCAL`, `SET TRANSACTION`,
-//!   `pg_advisory_xact_lock`) goes with the transaction and is not counted.
+//!   `pg_advisory_xact_lock`) goes with the transaction and is not counted. When the scan cannot
+//!   be sure where a string ends (a backslash inside quotes: MySQL escapes, PostgreSQL does
+//!   not), it also reads quoted text, so it errs toward reporting more (fix round 1, M5). `#` is
+//!   not taken for a comment (it is an operator in PostgreSQL).
 
 use std::time::Duration;
 
@@ -82,7 +85,11 @@ impl RecoveryPolicy {
 }
 
 /// Whether a lost connection of `class` is worth reconnecting: the network, a server that is
-/// shutting down or starting, and the two Karagöz upstream losses.
+/// shutting down or starting, the two Karagöz upstream losses, and (plan amendment, fix round
+/// 1, I3) `ssh.channel_open`: a bastion that cannot reach the database while it restarts.
+///
+/// Only recovery asks: it reconnects a connection that worked, so a first connect that fails
+/// with any of these is still a plain failure.
 pub fn is_recovery_case(class: ErrClass) -> bool {
     class.family() == ErrFamily::Network
         || matches!(
@@ -91,6 +98,7 @@ pub fn is_recovery_case(class: ErrClass) -> bool {
                 | ErrClass::ServerStarting
                 | ErrClass::KaragozUpstreamUnreachable
                 | ErrClass::KaragozResumeExpired
+                | ErrClass::SshChannelOpen
         )
 }
 
@@ -106,16 +114,17 @@ pub struct Tracked {
 
 /// Notes what the user statement `sql` does to the session's state (the module docs).
 pub fn track_statement(t: &mut Tracked, sql: &str) {
-    let words = words(sql);
+    // A backslash in quoted text leaves the end of the string unsure: read the quotes too.
+    let words = words(sql, !sql.contains('\\'));
     let word = |i: usize| words.get(i).map(String::as_str).unwrap_or_default();
     match first_keyword(sql).as_str() {
         "CREATE" => {
-            // CREATE [GLOBAL | LOCAL] {TEMP | TEMPORARY} …
+            // CREATE [OR REPLACE] [GLOBAL | LOCAL] {TEMP | TEMPORARY} …
             let temp = words
                 .iter()
                 .skip(1)
-                .take(2)
-                .any(|w| w == "TEMP" || w == "TEMPORARY");
+                .find(|w| !matches!(w.as_str(), "OR" | "REPLACE" | "GLOBAL" | "LOCAL"))
+                .is_some_and(|w| w == "TEMP" || w == "TEMPORARY");
             t.temp_created |= temp;
         }
         "SET" => {
@@ -146,8 +155,9 @@ const SESSION_LOCKS: [&str; 6] = [
     "SP_GETAPPLOCK",
 ];
 
-/// The words of `sql` outside comments and quoted text, ASCII upper-cased (INV-3).
-fn words(sql: &str) -> Vec<String> {
+/// The words of `sql` outside comments (and outside quoted text when `skip_quotes`), ASCII
+/// upper-cased (INV-3).
+fn words(sql: &str, skip_quotes: bool) -> Vec<String> {
     let mut out = Vec::new();
     let mut word = String::new();
     let mut chars = sql.chars().peekable();
@@ -158,7 +168,7 @@ fn words(sql: &str) -> Vec<String> {
     };
     while let Some(c) = chars.next() {
         match c {
-            '\'' | '"' | '`' => {
+            '\'' | '"' | '`' if skip_quotes => {
                 flush(&mut word, &mut out);
                 // To the closing quote; a doubled quote stays inside.
                 while let Some(q) = chars.next() {
@@ -172,14 +182,6 @@ fn words(sql: &str) -> Vec<String> {
                 }
             }
             '-' if chars.peek() == Some(&'-') => {
-                flush(&mut word, &mut out);
-                for n in chars.by_ref() {
-                    if n == '\n' {
-                        break;
-                    }
-                }
-            }
-            '#' => {
                 flush(&mut word, &mut out);
                 for n in chars.by_ref() {
                     if n == '\n' {
@@ -253,8 +255,9 @@ mod tests {
     #[test]
     fn words_skip_comments_and_quotes() {
         assert_eq!(
-            words("select 'it''s -- x' /* y */ \"q\"\"r\" a_b # z\n c"),
-            ["SELECT", "A_B", "C"]
+            words("select 'it''s -- x' /* y */ \"q\"\"r\" a_b # z\n c", true),
+            ["SELECT", "A_B", "Z", "C"]
         );
+        assert_eq!(words("select 'x' y", false), ["SELECT", "X", "Y"]);
     }
 }

@@ -88,6 +88,8 @@ fn every_recovery_case_and_none_other() {
                     | ErrClass::ServerStarting
                     | ErrClass::KaragozUpstreamUnreachable
                     | ErrClass::KaragozResumeExpired
+                    // Fix round 1, I3 (plan amendment): a DB restarting behind a live bastion.
+                    | ErrClass::SshChannelOpen
             )
     };
     for c in ErrClass::ALL {
@@ -157,4 +159,23 @@ fn the_scan_reads_the_first_keyword_only_and_ignores_transaction_scoped_state() 
         ..Tracked::default()
     };
     assert!(lost_state(&failed).open_tx);
+}
+
+#[test]
+fn the_scan_errs_toward_reporting_when_it_cannot_be_sure() {
+    // Review M5. PostgreSQL's `#>>` is an operator, not a MySQL comment.
+    let mut t = Tracked::default();
+    track_statement(&mut t, "SELECT data #>> '{a}', pg_advisory_lock(1) FROM t");
+    assert!(t.locks_seen);
+    // A MySQL backslash escape: where the string ends is unsure, so quotes are read too.
+    let mut t = Tracked::default();
+    track_statement(&mut t, "SELECT 'it\\'s', GET_LOCK('job', 10)");
+    assert!(t.locks_seen);
+    // `CREATE OR REPLACE TEMP VIEW`.
+    let mut t = Tracked::default();
+    track_statement(&mut t, "CREATE OR REPLACE TEMP VIEW v AS SELECT 1");
+    assert!(t.temp_created);
+    let mut t = Tracked::default();
+    track_statement(&mut t, "CREATE OR REPLACE VIEW v AS SELECT 'temp'");
+    assert!(!t.temp_created);
 }

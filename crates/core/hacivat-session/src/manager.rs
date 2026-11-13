@@ -17,6 +17,10 @@
 //!   `Default`) a loss is `Lost` (R12).
 //! - Events: the idle disconnect (`Disconnected` + `IdleDisconnected`), the idle transaction,
 //!   the guard's gaps, each connect's profile changes (success or failure).
+//! - Fix round 1: an edit saved while the first connect runs is kept (the sessions start from
+//!   the saved profile, and a moved destination is connected anew, I2); only an idle session
+//!   reconnects, and a loss inside a transaction ends `Lost` then `SessionLost` (C1); a failed
+//!   replay continues the backoff (I1).
 //! - B20: a dead SSH chain makes every default session over its generation check its
 //!   connection; their reconnects take the generation's lock one at a time, so the chain comes
 //!   back once and the others share it.
@@ -129,26 +133,29 @@ pub enum LiveState {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ManagerConfig {
     /// How often a live connection is pinged: the keep-alive of every profile without one of
-    /// its own, unless `keepalive_presets` (M2a compatibility).
+    /// its own, unless `presets` (M2a compatibility).
     pub liveness: Duration,
     /// How long quitting waits for connections to close.
     pub shutdown_budget: Duration,
     // ## m2b-t17-liveness
-    /// B18: a profile without a keep-alive of its own gets `LivenessPolicy::for_profile`'s
-    /// (60 s over SSH, otherwise none) instead of `liveness`.
-    pub keepalive_presets: bool,
+    /// B18's presets (`LivenessPolicy::for_profile`): a profile without its own keep-alive gets
+    /// 60 s over SSH and none otherwise (instead of `liveness`), and one without its own idle
+    /// disconnect gets its environment's (instead of none). Without them only the profile's
+    /// own `idle_disconnect_s` applies (review M3).
+    pub presets: bool,
     /// B19: a lost default session reconnects with backoff; without it (M2a, R12) the profile
     /// is `Lost`.
     pub reconnect: bool,
 }
 
 impl Default for ManagerConfig {
-    /// M2a's: 30 s liveness for every profile, 2 s shutdown budget, no reconnect.
+    /// M2a's: 30 s liveness for every profile, 2 s shutdown budget, no reconnect, no B18
+    /// presets.
     fn default() -> Self {
         ManagerConfig {
             liveness: Duration::from_secs(30),
             shutdown_budget: Duration::from_secs(2),
-            keepalive_presets: false,
+            presets: false,
             reconnect: false,
         }
     }
@@ -160,7 +167,7 @@ impl ManagerConfig {
     /// reconnects (B19). The app boot switches to it (Task 22).
     pub fn m2b() -> ManagerConfig {
         ManagerConfig {
-            keepalive_presets: true,
+            presets: true,
             reconnect: true,
             ..ManagerConfig::default()
         }
@@ -231,6 +238,9 @@ struct Entry {
     /// The connect in flight: its id and cancel token (single-flight).
     attempt: Option<(u64, CancellationToken)>,
     live: Option<Live>,
+    // ## m2b-t17-liveness (fix round 1, I2)
+    /// The profile as last saved (`connect`, `update_profile`): a connect in flight lands on it.
+    saved: Option<Arc<Profile>>,
 }
 
 struct Inner {
@@ -319,27 +329,41 @@ impl Shared {
     }
 
     /// The liveness of `p`'s default session (B18). Without the presets (`ManagerConfig`'s
-    /// M2a default) a profile without a keep-alive of its own pings every `config.liveness`.
+    /// M2a default) a profile without a keep-alive of its own pings every `config.liveness`,
+    /// and only its own idle disconnect applies (review M3).
     fn policy_for(&self, p: &Profile) -> LivenessPolicy {
         let preset = LivenessPolicy::for_profile(p);
-        if self.config.keepalive_presets || p.keepalive_s.is_some() {
+        if self.config.presets {
             return preset;
         }
         LivenessPolicy {
-            keepalive: Some(self.config.liveness),
+            keepalive: if p.keepalive_s.is_some() {
+                preset.keepalive
+            } else {
+                Some(self.config.liveness)
+            },
+            idle_disconnect: p.idle_disconnect_s.and(preset.idle_disconnect),
             ..preset
         }
     }
 
     /// A connection arrived: it becomes `id`'s default console session (B4), or is closed at
     /// once when the attempt was cancelled, forgotten or overtaken by shutdown.
+    ///
+    /// Fix round 1, I2: the sessions start from the profile as saved now (`used` is the one the
+    /// connect started with), so an edit saved during the connect is kept. When that edit sends
+    /// the connection elsewhere (T15's destination rule), this connection is closed and the
+    /// saved destination connected instead, without the draft password (it was typed for the
+    /// old one).
+    #[allow(clippy::too_many_arguments, reason = "one private call site")]
     fn landed(
         self: &Arc<Self>,
         id: ProfileId,
         attempt: u64,
-        profile: Arc<Profile>,
+        used: Arc<Profile>,
         live: LiveConnection,
         permit: BudgetPermit,
+        ix: Interaction,
     ) {
         let mut inner = self.lock();
         let budget = inner.budgets.get(&id).cloned();
@@ -351,10 +375,19 @@ impl Shared {
             });
             return;
         };
+        let profile = inner
+            .entries
+            .get(&id)
+            .and_then(|e| e.saved.clone())
+            .unwrap_or_else(|| used.clone());
         let info = Arc::new(info_of(&live, &profile));
         let (changes, transport) = (live.profile_changes.clone(), live.transport);
-        let sessions =
-            SessionManager::new(self.rt.clone(), profile.clone(), self.deps.clone(), budget);
+        let sessions = SessionManager::new(
+            self.rt.clone(),
+            profile.clone(),
+            self.deps.clone(),
+            budget.clone(),
+        );
         let stop = CancellationToken::new();
         let reconnect = self.config.reconnect.then(|| {
             Arc::new(Recovery {
@@ -363,20 +396,31 @@ impl Shared {
                 id,
                 seq: attempt,
                 stop: stop.clone(),
+                loss: Arc::new(Mutex::new(None)),
             }) as Arc<dyn Reconnector>
         });
         let policy = self.policy_for(&profile);
-        let default = match sessions.adopt_default(&profile, live, permit, reconnect, Some(policy))
-        {
+        let default = match sessions.adopt_default(&used, live, permit, reconnect, Some(policy)) {
             Ok(handle) => handle,
-            Err(live) => {
-                // The session manager was made from this very profile: never, but safe.
-                if let Some(entry) = inner.entries.get_mut(&id) {
-                    entry.attempt = None;
-                }
-                self.set(&mut inner, id, LiveState::Disconnected);
+            Err((live, permit)) => {
+                tracing::debug!(profile = %id, "the profile moved during the connect; reconnecting");
+                let token = inner
+                    .entries
+                    .get(&id)
+                    .and_then(|e| e.attempt.as_ref())
+                    .map(|(_, token)| token.clone())
+                    .unwrap_or_default();
+                self.set(&mut inner, id, LiveState::Connecting(fresh_progress()));
                 drop(inner);
-                self.rt.spawn(live.close());
+                // The permit goes only once the connection is closed (SQLite's budget of 1).
+                self.rt.spawn(async move {
+                    live.close().await;
+                    drop(permit);
+                });
+                let again = self
+                    .clone()
+                    .run_connect(profile, None, 0, ix, attempt, token, budget);
+                self.rt.spawn(again);
                 return;
             }
         };
@@ -489,18 +533,20 @@ impl Shared {
     /// connection now. The check fails over the dead chain and the session recovers, once (its
     /// actor runs one recovery at a time), under the generation's lock.
     fn tunnel_dead(&self, generation: TransportGeneration) {
-        let dependents: Vec<SessionHandle> = self
+        let dependents: Vec<(SessionHandle, Arc<SessionManager>)> = self
             .lock()
             .entries
             .values()
             .filter_map(|e| e.live.as_ref())
             .filter(|l| l.transport == Some(generation))
-            .map(|l| l.default.clone())
+            .map(|l| (l.default.clone(), l.sessions.clone()))
             .collect();
         tracing::debug!(dependents = dependents.len(), "an SSH chain died");
-        for session in dependents {
+        for (session, sessions) in dependents {
             // The answer is not needed: a failed ping starts the recovery.
             let _ = session.submit(Request::Ping);
+            // Parked pooled sessions rode the same chain: never hand one out (review M6).
+            sessions.close_idle();
         }
     }
 
@@ -534,7 +580,7 @@ impl Shared {
             plaintext_consent: false,
         };
         let deps = self.deps.clone();
-        let pipeline = connect(&deps, req, ix, token, progress_tx);
+        let pipeline = connect(&deps, req, ix.clone(), token, progress_tx);
         tokio::pin!(pipeline);
         let result = loop {
             tokio::select! {
@@ -546,7 +592,7 @@ impl Shared {
             }
         };
         match result {
-            Ok(live) => self.landed(id, attempt, profile, live, permit),
+            Ok(live) => self.landed(id, attempt, profile, live, permit, ix),
             Err(e) => self.failed(id, attempt, e),
         }
     }
@@ -616,8 +662,17 @@ fn info_of(live: &LiveConnection, profile: &Profile) -> LiveInfo {
 
 /// Relays what the default session of live connection `seq` tells (B19, Q35): the reconnect
 /// it finished (`Connected`, then `SessionLost`), the idle transaction, the guard's gap, and
-/// its end: `Disconnected` (only the supervisor's idle disconnect closes it on its own) or
-/// `Broken` (a loss it did not recover from, unless the recovery already said how it ended).
+/// its end:
+/// - `Disconnected` after `SessionEvent::IdleDisconnected`: the idle disconnect (state and
+///   event); any other `Disconnected` (someone closed the session) only ends the profile's
+///   connection (review M2);
+/// - `Broken(cancelled)` (a deactivated request, an unsettled cancel): `Disconnected` (M7);
+/// - `Broken(class)`: `Lost { class }` (Retry), unless the recovery already said how it ended;
+///   after a loss inside a transaction (C1) it is followed by `SessionLost { lost }`.
+///
+/// A finished reconnect is read from `SessionEvent::Reconnected` (a broadcast, never
+/// coalesced) or, should that event be lagged away, from the session leaving `Connecting`
+/// (review M4); either way once.
 async fn monitor(
     shared: Weak<Shared>,
     id: ProfileId,
@@ -626,8 +681,10 @@ async fn monitor(
     mut events: broadcast::Receiver<SessionEvent>,
     stop: CancellationToken,
 ) {
-    let mut lost = LostState::default();
+    let mut lost: Option<LostState> = None;
+    // A reconnect is under way (`Lost` seen or `Connecting` seen) and not yet reported.
     let mut recovering = false;
+    let mut idle = false;
     let mut events_open = true;
     loop {
         tokio::select! {
@@ -636,7 +693,16 @@ async fn monitor(
             event = events.recv(), if events_open => {
                 let Some(shared) = shared.upgrade() else { return };
                 match event {
-                    Ok(SessionEvent::Lost(l)) => lost = l,
+                    Ok(SessionEvent::Lost(l)) => {
+                        lost = Some(l);
+                        recovering = true;
+                    }
+                    Ok(SessionEvent::Reconnected) => {
+                        if std::mem::take(&mut recovering) {
+                            shared.session_back(id, seq, lost.take().unwrap_or_default());
+                        }
+                    }
+                    Ok(SessionEvent::IdleDisconnected) => idle = true,
                     Ok(SessionEvent::IdleTransaction { minutes }) => {
                         shared.emit(ConnectionEvent::IdleTransaction { profile: id, minutes });
                     }
@@ -659,21 +725,28 @@ async fn monitor(
                 match now {
                     SessionState::Connecting => recovering = true,
                     SessionState::Disconnected => {
-                        if shared.end_live(id, seq, LiveState::Disconnected) {
+                        if shared.end_live(id, seq, LiveState::Disconnected) && idle {
                             shared.emit(ConnectionEvent::IdleDisconnected { profile: id });
                         }
                         return;
                     }
+                    SessionState::Broken(ErrClass::Cancelled) => {
+                        shared.end_live(id, seq, LiveState::Disconnected);
+                        return;
+                    }
                     SessionState::Broken(class) => {
-                        let ended = shared.end_live(id, seq, LiveState::Lost { class });
-                        if ended {
+                        if shared.end_live(id, seq, LiveState::Lost { class }) {
                             tracing::debug!(profile = %id, class = class.id(), "the session is lost");
+                            if let Some(lost) = lost.take() {
+                                // C1: lost inside a transaction; nothing was replayed.
+                                shared.emit(ConnectionEvent::SessionLost { profile: id, lost });
+                            }
                         }
                         return;
                     }
                     _ if recovering => {
                         recovering = false;
-                        shared.session_back(id, seq, std::mem::take(&mut lost));
+                        shared.session_back(id, seq, lost.take().unwrap_or_default());
                     }
                     _ => {}
                 }
@@ -687,6 +760,18 @@ fn usable(state: &SessionState) -> bool {
     !matches!(state, SessionState::Disconnected | SessionState::Broken(_))
 }
 
+/// One loss's place in the backoff, kept across the reconnects of that loss (fix round 1,
+/// I1): a replay that fails continues the schedule and the give-up clock.
+#[derive(Debug)]
+struct Loss {
+    lost_at: tokio::time::Instant,
+    /// The next attempt's number (from 1).
+    next: u32,
+    last_class: ErrClass,
+    /// `Reconnector::replay_failed` was called: the next `reconnect` continues this loss.
+    continuing: bool,
+}
+
 /// The default session's recovery (B19, Q17): the backoff, `Reconnecting`, a headless connect
 /// with the session overlay, and how it ends. It never prompts: a connect that would have to
 /// ask (`needs_interaction`) ends it with `Lost` at once; an `auth.*` failure (or any other
@@ -698,30 +783,63 @@ struct Recovery {
     seq: u64,
     /// Cancelled when the profile disconnects, is forgotten, or the manager shuts down.
     stop: CancellationToken,
+    loss: Arc<Mutex<Option<Loss>>>,
+}
+
+impl Recovery {
+    fn loss(&self) -> MutexGuard<'_, Option<Loss>> {
+        self.loss.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl Reconnector for Recovery {
-    fn reconnect(&self, attempt: u32) -> BoxFuture<'static, Result<LiveConnection, ConnectError>> {
+    /// Runs the recovery of a new loss, or continues the current one after a failed replay
+    /// (`replay_failed`); `attempt` is not used (the loss keeps the count).
+    fn reconnect(&self, _attempt: u32) -> BoxFuture<'static, Result<LiveConnection, ConnectError>> {
         let policy = RecoveryPolicy::default();
         let mut rng = RecoveryPolicy::jitter_source();
-        let mut attempt = attempt.max(1);
-        let mut delay = policy
-            .delay(attempt - 1, Duration::ZERO, &mut rng)
-            .unwrap_or_default();
+        let cancelled = || error(ErrClass::Cancelled, Phase::PostConnect);
+        let (lost_at, mut attempt, mut last_class) = {
+            let mut loss = self.loss();
+            let resume = loss.as_mut().is_some_and(|l| std::mem::take(&mut l.continuing));
+            if !resume {
+                *loss = Some(Loss {
+                    lost_at: tokio::time::Instant::now(),
+                    next: 1,
+                    last_class: ErrClass::NetworkReset,
+                    continuing: false,
+                });
+            }
+            let l = loss.as_ref().expect("set above");
+            (l.lost_at, l.next, l.last_class)
+        };
+        let Some(mut delay) = policy.delay(attempt - 1, lost_at.elapsed(), &mut rng) else {
+            // A failed replay used up the five minutes.
+            if let Some(shared) = self.shared.upgrade() {
+                shared.end_live(self.id, self.seq, LiveState::Lost { class: last_class });
+            }
+            return Box::pin(std::future::ready(Err(error(last_class, Phase::PostConnect))));
+        };
         // Synchronously: the capsule shows the reconnect before the failed request answers.
         if let Some(shared) = self.shared.upgrade() {
             shared.reconnecting(self.id, self.seq, attempt, Some(delay));
         }
-        let (shared, sessions, id, seq, stop) = (
+        let (shared, sessions, id, seq, stop, loss) = (
             self.shared.clone(),
             self.sessions.clone(),
             self.id,
             self.seq,
             self.stop.clone(),
+            self.loss.clone(),
         );
-        let cancelled = || error(ErrClass::Cancelled, Phase::PostConnect);
+        let note = move |next: u32, class: ErrClass| {
+            let mut loss = loss.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(l) = loss.as_mut() {
+                l.next = next;
+                l.last_class = class;
+            }
+        };
         Box::pin(async move {
-            let lost_at = tokio::time::Instant::now();
             loop {
                 tokio::select! {
                     biased;
@@ -753,13 +871,15 @@ impl Reconnector for Recovery {
                 };
                 let e = match landed {
                     Ok((live, profile)) => {
+                        // A failed replay continues with the attempt after this one.
+                        note(attempt + 1, last_class);
                         manager.reconnected(id, seq, &live, &profile);
                         return Ok(live);
                     }
                     Err(e) => e,
                 };
                 manager.publish_changes(id, &e.profile_changes);
-                if stop.is_cancelled() || e.class == ErrClass::Cancelled {
+                if stop.is_cancelled() {
                     // A disconnect, a forget or the shutdown says how it ends.
                     return Err(e);
                 }
@@ -769,26 +889,39 @@ impl Reconnector for Recovery {
                     manager.end_live(id, seq, LiveState::Lost { class: e.class });
                     return Err(e);
                 }
-                if !is_recovery_case(e.class) {
+                // `cancelled` without a stop: the saved profile moved while this connect ran
+                // (T15 I1 refused it); the next attempt goes to the new destination (M7).
+                if !is_recovery_case(e.class) && e.class != ErrClass::Cancelled {
                     // `auth.*` (a rejected password, or one the server wants and the overlay
                     // no longer has: the error dialog offers the re-entry) and every other
                     // failure a retry cannot fix (B19).
                     manager.end_live(id, seq, LiveState::Failed(Arc::new(e.clone())));
                     return Err(e);
                 }
+                if e.class != ErrClass::Cancelled {
+                    last_class = e.class;
+                }
                 attempt += 1;
+                note(attempt, last_class);
                 match policy.delay(attempt - 1, lost_at.elapsed(), &mut rng) {
                     Some(next) => {
                         delay = next;
                         manager.reconnecting(id, seq, attempt, Some(next));
                     }
                     None => {
-                        manager.end_live(id, seq, LiveState::Lost { class: e.class });
+                        manager.end_live(id, seq, LiveState::Lost { class: last_class });
                         return Err(e);
                     }
                 }
             }
         })
+    }
+
+    fn replay_failed(&self, class: ErrClass) {
+        if let Some(l) = self.loss().as_mut() {
+            l.continuing = true;
+            l.last_class = class;
+        }
     }
 }
 
@@ -903,7 +1036,16 @@ impl ConnectionManager {
     /// Gives a connected profile's sessions the saved `profile` (Q17): the app calls it after
     /// every save and `apply_changes`. Reconnects and new sessions connect with it.
     pub fn update_profile(&self, id: ProfileId, profile: Arc<Profile>) {
-        if let Some(sessions) = self.sessions(id) {
+        let sessions = {
+            let mut inner = self.shared.lock();
+            let Some(entry) = inner.entries.get_mut(&id) else {
+                return;
+            };
+            // A connect in flight lands on it (fix round 1, I2).
+            entry.saved = Some(profile.clone());
+            entry.live.as_ref().map(|l| l.sessions.clone())
+        };
+        if let Some(sessions) = sessions {
             sessions.update_profile(profile);
         }
     }
@@ -963,10 +1105,12 @@ impl ConnectionManager {
             state: LiveState::Disconnected,
             attempt: None,
             live: None,
+            saved: None,
         });
         if entry.attempt.is_some() || entry.live.is_some() {
             return;
         }
+        entry.saved = Some(profile.clone());
         let token = CancellationToken::new();
         entry.attempt = Some((attempt, token.clone()));
         let wanted = budget_for(&profile);

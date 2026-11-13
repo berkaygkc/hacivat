@@ -25,18 +25,27 @@
 //!   (a user statement, a transaction command, a schema switch) is activity; pings, internal
 //!   statements and resets are not.
 //! - **Recovery** (HV-CONN-05, B19). When the connection is lost with a recovery case
-//!   (`is_recovery_case`) and the session has `SessionHooks::reconnect`, it is not broken: it
-//!   publishes `Connecting` (so it keeps its budget permit, T15 carry-in), notes what the loss
-//!   took (`lost_state`), answers the request that was running (a user statement
-//!   `ConnectionLost { outcome_unknown: true }`, never re-run; an internal idempotent one is
-//!   re-queued once at the head) and the queued ones that never ran (`ConnectionLost {
-//!   outcome_unknown: false }`, internal idempotent ones stay queued), and calls the
-//!   reconnector once (it runs the backoff). While it waits, requests queue and a close ends
-//!   the session at once. On success the connection is replaced in place, the environment
-//!   plan is replayed (identity, read-only setup, last schema; MySQL's `autocommit = 0` when
-//!   Manual), the transaction mode and isolation are kept, and the session emits
-//!   `SessionEvent::Lost` then publishes `Idle` then emits `SessionEvent::Reconnected`. A
-//!   failed reconnect breaks the session with its class.
+//!   (`is_recovery_case`) and the session has `SessionHooks::reconnect`:
+//!   - with a transaction open, or the request in flight possibly opening one (a `BEGIN`, a
+//!     user statement of a Manual session), nothing is replayed (fix round 1, C1): the
+//!     session emits `SessionEvent::Lost` and breaks (the profile is `Lost`, with Retry);
+//!   - otherwise (an idle session) it is not broken: it publishes `Connecting` (so it keeps
+//!     its budget permit, T15 carry-in), notes what the loss took (`lost_state`), answers the
+//!     request that was running (a user statement `ConnectionLost { outcome_unknown: true }`,
+//!     never re-run; an internal idempotent one is re-queued once at the head) and the queued
+//!     ones that never ran (`ConnectionLost { outcome_unknown: false }`; internal idempotent
+//!     ones stay queued), and calls the reconnector once (it runs the backoff);
+//!   - while it recovers, every request is answered `ConnectionLost { outcome_unknown: false
+//!     }` at once (only internal idempotent reads wait), so nothing sent for the lost
+//!     connection runs on the new one (C1), and a close ends the session at once;
+//!   - on success the connection is replaced in place and the environment plan replayed
+//!     (identity, read-only setup, last schema; MySQL's `autocommit = 0` when Manual), within
+//!     the profile's connect timeout and still serving commands; a replay failure continues the
+//!     same backoff (I1). Mode and isolation are kept, and the session emits
+//!     `SessionEvent::Lost`, publishes `Idle`, then emits `SessionEvent::Reconnected`. A failed
+//!     reconnect breaks the session with its class.
+//! - The supervisor's idle disconnect emits `SessionEvent::IdleDisconnected` before the session
+//!   publishes `Disconnected`.
 
 use std::any::Any;
 use std::collections::VecDeque;
@@ -69,7 +78,9 @@ use crate::session::cancel::{
 use crate::session::liveness::{LivenessAction, LivenessPolicy, Supervisor};
 use crate::session::readonly::run_guarded;
 // ## m2b-t17-liveness
-use crate::session::recovery::{Tracked, is_recovery_case, lost_state, track_statement};
+use crate::session::recovery::{
+    LostState, Tracked, is_recovery_case, lost_state, track_statement,
+};
 use crate::session::schema::{Family, family, first_keyword};
 use crate::session::{
     CancelOutcome, CancelState, ClosePolicy, CloseRefused, Command, EnvPlan, Escalation, ExecError,
@@ -92,6 +103,13 @@ pub trait SideConnector: Send + Sync {
 /// resolves with a new connection, or with the error that ended the recovery.
 pub trait Reconnector: Send + Sync {
     fn reconnect(&self, attempt: u32) -> BoxFuture<'static, Result<LiveConnection, ConnectError>>;
+
+    // ## m2b-t17-liveness (fix round 1, I1)
+    /// The connection the last `reconnect` gave failed its environment replay with `class` (a
+    /// recovery case) before the session could use it. The actor calls `reconnect` again right
+    /// after: that call continues this loss's backoff and give-up clock instead of starting
+    /// over. The default does nothing.
+    fn replay_failed(&self, _class: ErrClass) {}
 }
 
 /// What an actor may call outside itself.
@@ -259,7 +277,7 @@ pub(crate) struct Core {
     /// What the user's statements did since the connection was made (B19).
     tracked: Tracked,
     /// What the last loss took, until the reconnect reports it.
-    lost: Option<crate::session::LostState>,
+    lost: Option<LostState>,
 }
 
 fn not_connected() -> ExecError {
@@ -898,6 +916,8 @@ async fn on_tick(core: &mut Core, ctl: &mut Ctl) -> Flow {
         }
         Some(LivenessAction::Disconnect) => {
             tracing::debug!(session = ctl.id.0, "idle disconnect");
+            // Before `Disconnected`: the owner tells it from any other close (review M2).
+            ctl.emit(SessionEvent::IdleDisconnected);
             // Nothing is open (the supervisor never disconnects an open transaction).
             let (reply, _) = oneshot::channel();
             close(core, ctl, ClosePolicy::RollBack, reply).await;
@@ -967,7 +987,7 @@ async fn keepalive(core: &mut Core, ctl: &mut Ctl, timeout: std::time::Duration)
             );
             core.broken = Some(class);
             core.close().await;
-            match begin_recovery(core, ctl, class) {
+            match begin_recovery(core, ctl, class, false) {
                 Some(reconnect) => Flow::Recover(reconnect),
                 None => {
                     break_now(core, ctl, class).await;
@@ -981,14 +1001,34 @@ async fn keepalive(core: &mut Core, ctl: &mut Ctl, timeout: std::time::Duration)
 /// Starts recovering from a loss of `class` (the module docs), when it is a recovery case, the
 /// session has a reconnector and no close waits; `None` otherwise (the caller breaks the
 /// session). The dead connection is already closed.
+///
+/// Fix round 1, C1: only an idle session reconnects. When the lost connection had a
+/// transaction open, or the request in flight may have opened one (`tx_unknown`), nothing is
+/// replayed and nothing runs on a new connection: the session tells what was lost
+/// (`SessionEvent::Lost`) and returns `None`, so it breaks (`Lost` with Retry).
 fn begin_recovery(
     core: &mut Core,
     ctl: &mut Ctl,
     class: ErrClass,
+    tx_unknown: bool,
 ) -> Option<BoxFuture<'static, Result<LiveConnection, ConnectError>>> {
     let reconnector = ctl.hooks.reconnect.clone()?;
     let closing = ctl.queue.iter().any(|j| matches!(j, Job::Close(..)));
     if !is_recovery_case(class) || closing {
+        return None;
+    }
+    core.note_loss();
+    if tx_unknown || core.lost.as_ref().is_some_and(|l| l.open_tx) {
+        tracing::debug!(
+            session = ctl.id.0,
+            class = class.id(),
+            "connection lost inside a transaction; not reconnecting"
+        );
+        let lost = core.lost.take().unwrap_or_default();
+        ctl.emit(SessionEvent::Lost(LostState {
+            open_tx: true,
+            ..lost
+        }));
         return None;
     }
     tracing::debug!(
@@ -996,7 +1036,6 @@ fn begin_recovery(
         class = class.id(),
         "connection lost; reconnecting"
     );
-    core.note_loss();
     ctl.drain_lost();
     let tx = core.tx.clone();
     ctl.publish(|s| {
@@ -1009,30 +1048,94 @@ fn begin_recovery(
     Some(reconnector.reconnect(1))
 }
 
-/// Waits for `reconnect` while serving commands, then replays the environment (the module
-/// docs). False when the actor is done (closed, or every handle gone).
+/// Whether `request`, lost in flight, may have opened a transaction (C1): a `BEGIN`, a
+/// `START TRANSACTION`, or any user statement of a Manual session (it begins one first).
+fn may_open_tx(request: &Request, mode: TxMode) -> bool {
+    match request {
+        Request::Tx(TxCommand::Begin) => true,
+        Request::Exec {
+            sql,
+            origin: ExecOrigin::User,
+            ..
+        } => mode == TxMode::Manual || matches!(first_keyword(sql).as_str(), "BEGIN" | "START"),
+        _ => false,
+    }
+}
+
+/// What the actor does with a command while it recovers.
+enum Recovering {
+    Go,
+    Close(CloseReply),
+    Abandoned,
+}
+
+/// A command while the session recovers (fix round 1, C1): nothing the user sends for the lost
+/// connection ever runs on the new one, so every request is answered `ConnectionLost {
+/// outcome_unknown: false }` (it never ran), except an internal idempotent read, which waits.
+fn recovering_command(ctl: &mut Ctl, cmd: Option<Command>) -> Recovering {
+    match cmd {
+        None => Recovering::Abandoned,
+        Some(Command::Close { reply, .. }) => Recovering::Close(reply),
+        Some(Command::Submit {
+            seq,
+            request,
+            reply,
+        }) if is_retryable(&request) => {
+            ctl.queue.push_back(Job::Request(Queued {
+                seq,
+                request,
+                reply,
+                retried: false,
+            }));
+            Recovering::Go
+        }
+        Some(Command::Submit { reply, .. }) => {
+            let lost = ExecErrorKind::ConnectionLost {
+                outcome_unknown: false,
+            };
+            let _ = reply.send(Err(ExecError::of(lost)));
+            Recovering::Go
+        }
+        Some(other) => {
+            ctl.idle_command(other);
+            Recovering::Go
+        }
+    }
+}
+
+/// Ends a recovery on a close: the session is `Disconnected`.
+async fn close_recovering(core: &mut Core, ctl: &mut Ctl, reply: CloseReply) {
+    core.close().await;
+    ctl.shut();
+    ctl.publish(|s| {
+        s.state = SessionState::Disconnected;
+        s.cancel = CancelState::Idle;
+    });
+    let _ = reply.send(Ok(()));
+}
+
+/// Waits for `reconnect`, then replays the environment, serving commands all along (the module
+/// docs). The replay is part of the attempt (fix round 1, I1): it is bounded by the profile's
+/// connect timeout, a close ends it at once, and a failure continues the same backoff and
+/// give-up clock (`Reconnector::replay_failed`). False when the actor is done (closed, or
+/// every handle gone).
 async fn recover(
     core: &mut Core,
     ctl: &mut Ctl,
     mut reconnect: BoxFuture<'static, Result<LiveConnection, ConnectError>>,
 ) -> bool {
+    let limit = std::time::Duration::from_secs(u64::from(core.profile.connect_timeout_s.max(1)));
     loop {
         let landed = loop {
             tokio::select! {
                 biased;
-                cmd = ctl.commands.recv() => match cmd {
-                    None => return false,
-                    // A close ends the recovery at once (disconnect, quit).
-                    Some(Command::Close { reply, .. }) => {
-                        ctl.shut();
-                        ctl.publish(|s| {
-                            s.state = SessionState::Disconnected;
-                            s.cancel = CancelState::Idle;
-                        });
-                        let _ = reply.send(Ok(()));
+                cmd = ctl.commands.recv() => match recovering_command(ctl, cmd) {
+                    Recovering::Go => {}
+                    Recovering::Close(reply) => {
+                        close_recovering(core, ctl, reply).await;
                         return false;
                     }
-                    Some(other) => ctl.idle_command(other),
+                    Recovering::Abandoned => return false,
                 },
                 landed = &mut reconnect => break landed,
             }
@@ -1050,16 +1153,50 @@ async fn recover(
             }
         };
         let access = core.install(live);
-        if let Err(e) = core.replay().await {
-            let class = core
-                .broken
-                .or(core.last_class)
-                .unwrap_or(ErrClass::Internal);
-            tracing::debug!(session = ctl.id.0, kind = ?e.kind, "the replay failed");
+        let replayed = {
+            let replay = tokio::time::timeout(limit, core.replay());
+            tokio::pin!(replay);
+            loop {
+                tokio::select! {
+                    biased;
+                    cmd = ctl.commands.recv() => match recovering_command(ctl, cmd) {
+                        Recovering::Go => {}
+                        Recovering::Close(reply) => break Err(Some(reply)),
+                        Recovering::Abandoned => break Err(None),
+                    },
+                    replayed = &mut replay => break Ok(replayed),
+                }
+            }
+        };
+        let failed = match replayed {
+            Err(Some(reply)) => {
+                close_recovering(core, ctl, reply).await;
+                return false;
+            }
+            Err(None) => {
+                core.close().await;
+                return false;
+            }
+            Ok(Ok(Ok(()))) => None,
+            Ok(Ok(Err(e))) => {
+                tracing::debug!(session = ctl.id.0, kind = ?e.kind, "the replay failed");
+                Some(
+                    core.broken
+                        .or(core.last_class)
+                        .unwrap_or(ErrClass::Internal),
+                )
+            }
+            Ok(Err(_)) => {
+                tracing::debug!(session = ctl.id.0, "the replay timed out");
+                Some(ErrClass::NetworkTimeout)
+            }
+        };
+        if let Some(class) = failed {
             core.close().await;
             if is_recovery_case(class)
                 && let Some(reconnector) = ctl.hooks.reconnect.clone()
             {
+                reconnector.replay_failed(class);
                 reconnect = reconnector.reconnect(1);
                 continue;
             }
@@ -1132,8 +1269,10 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
         let _ = reply.send(Err(not_connected()));
         return Flow::Go;
     };
-    // ## m2b-t17-liveness: an internal idempotent read may run once more after a reconnect.
+    // ## m2b-t17-liveness: an internal idempotent read may run once more after a reconnect; a
+    // request that may open a transaction leaves its state unknown if it is lost (C1).
     let retry = (!retried && is_retryable(&request)).then(|| request.clone());
+    let tx_unknown = !core.read_only && may_open_tx(&request, core.tx.mode);
     // Driver calls, so guarded like the request itself (review M5).
     let probed = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let raw = live.raw();
@@ -1238,7 +1377,7 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
     let mut reply = Some(reply);
     if let Some(class) = core.broken {
         core.close().await;
-        recovery = begin_recovery(core, ctl, class);
+        recovery = begin_recovery(core, ctl, class, tx_unknown);
         if recovery.is_some()
             && let Some(request) = retry
             && matches!(

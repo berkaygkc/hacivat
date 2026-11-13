@@ -641,6 +641,10 @@ impl SessionManager {
     }
 
     /// The default session, while it can run requests.
+    ///
+    /// Only the `ConnectionManager` (and this manager's `close_all`) closes it: a client that
+    /// closes it directly ends the profile's connection (`Disconnected`), since the profile
+    /// lives on its default session (B4; fix round 1, review M2).
     pub fn default_session(&self) -> Option<SessionHandle> {
         self.lock().default.clone().filter(alive)
     }
@@ -1153,8 +1157,10 @@ impl SessionManager {
     /// Adopts `live`, the `ConnectionManager`'s own connect of `used` (its progress, draft
     /// password and rejection count stay the manager's, M2a), as the default console session
     /// (B4), with its `reconnect` and `liveness` (Task 17). The connect's part of the overlay is
-    /// taken as for any other connect. `Err` (the connection, to close) when the saved profile
-    /// no longer names `used`'s destination.
+    /// taken as for any other connect. `Err` (the connection to close, then its permit) when the
+    /// saved profile no longer names `used`'s destination (fix round 1, I2: the manager builds
+    /// this `SessionManager` from the profile as saved when the connect lands); a consent the
+    /// saved profile took back since `used` is dropped, as R1 drops it.
     pub(crate) fn adopt_default(
         &self,
         used: &Profile,
@@ -1162,13 +1168,18 @@ impl SessionManager {
         permit: BudgetPermit,
         reconnect: Option<Arc<dyn Reconnector>>,
         liveness: Option<LivenessPolicy>,
-    ) -> Result<SessionHandle, LiveConnection> {
+    ) -> Result<SessionHandle, (LiveConnection, Option<BudgetPermit>)> {
         let (profile, epoch) = {
             let mut st = self.lock();
+            if takes_consent_back(used, &st.profile) {
+                live.plaintext_consent = false;
+                live.profile_changes
+                    .retain(|c| *c != ProfileChange::AllowPublicPlaintext);
+            }
             let consent_gen = st.consent_gen;
             match st.absorb(used, &mut live, consent_gen) {
                 Some(profile) => (profile, st.epoch),
-                None => return Err(live),
+                None => return Err((live, Some(permit))),
             }
         };
         let spec = SessionSpec {
@@ -1180,7 +1191,27 @@ impl SessionManager {
             reconnect,
             liveness,
         };
+        // A fresh manager: `close_all` cannot have run, so the epoch matches; if it did, the
+        // permit is already back.
         self.register(spec, profile, live, permit, epoch, true, hooked)
+            .map_err(|live| (live, None))
+    }
+
+    /// Closes every parked pooled session (fix round 1, review M6): their SSH chain died, so
+    /// none may be handed out again.
+    pub(crate) fn close_idle(&self) {
+        let parked: Vec<SessionHandle> = {
+            let mut st = self.lock();
+            st.idle
+                .drain()
+                .flat_map(|(_, parked)| parked.into_iter().map(|i| i.handle))
+                .collect()
+        };
+        for handle in parked {
+            self.rt.spawn(async move {
+                let _ = handle.close(ClosePolicy::RollBack).await;
+            });
+        }
     }
 
     /// One headless connect for a reconnect of the default session (B19), with the overlay

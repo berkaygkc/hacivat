@@ -9,7 +9,8 @@
 //!    a Windows `Instant` may include suspended time, Q31) returns `Suspect` once; the tick
 //!    after it, with the transaction idle, compares the idle threshold against the time since
 //!    the last activity on the wall clock (or the monotonic one, whichever is longer):
-//!    `Disconnect` when it is exceeded, else `Ping`. Missed ticks are never replayed;
+//!    `Disconnect` when it is exceeded, else `Ping`; with a transaction open it is always
+//!    `Ping`. Missed ticks are never replayed;
 //! 3. at the idle threshold returns `IdleTransaction` once per idle period while a transaction
 //!    is open (`InTx` or `Failed`; D-014: notify only), otherwise `Disconnect`;
 //! 4. when a keep-alive is due, counted from the later of the last activity and the last
@@ -158,14 +159,17 @@ impl Supervisor {
             return Some(LivenessAction::Suspect);
         }
         let open_tx = matches!(tx, TxStatus::InTx | TxStatus::Failed);
-        if std::mem::take(&mut self.suspect) && !open_tx {
+        if std::mem::take(&mut self.suspect) {
+            // B18: one immediate check. Only an idle transaction may end in a disconnect; an
+            // open one is pinged (valid in `InTx` and `Failed`), never closed (fix round 1, M1).
             let idle = self
                 .idle_wall
                 .max(now.saturating_duration_since(self.last_activity));
-            if self
-                .policy
-                .idle_disconnect
-                .is_some_and(|limit| idle >= limit)
+            if !open_tx
+                && self
+                    .policy
+                    .idle_disconnect
+                    .is_some_and(|limit| idle >= limit)
             {
                 return Some(LivenessAction::Disconnect);
             }
