@@ -30,13 +30,18 @@
 //! **Sharing and release.** Leases of one [`ChainKey`] share a chain unless the request says
 //! `share = false` (test connections). A shared chain closes `idle_grace` after its last lease,
 //! an unshared one as soon as its lease goes; both close in reverse hop order, as does a chain
-//! that failed part-way. Keep-alives run per hop; when any hop's session ends on its own, the
+//! that failed part-way. Every hop's transport has a kill switch, tripped unless the hop
+//! verified, authenticated and joined its chain, and again when it closes: a session stuck in a
+//! key exchange never outlives its acquire or its chain. Keep-alives run per hop; when any hop's session ends on its own, the
 //! chain's generation is retired, it is never handed out again, and [`TunnelEvent::Dead`] is
 //! sent once.
 //!
 //! **Channel hygiene (Q46).** The client opens only `direct-tcpip` channels, with `127.0.0.1:0`
 //! as the originator; it never requests a pty, a shell, exec, X11 or agent forwarding, and
 //! refuses every channel the server opens.
+//!
+//! **Secrets back (Q17).** [`TunnelLease::take_secrets`] hands the caller the passwords and
+//! passphrases that authenticated, once, for its session overlay; never keyboard answers.
 //!
 //! `hacivat-net` has no logger: the caller logs [`TunnelLease::trusted_keys`] (keys stored
 //! without a question) and `KnownHosts::skipped_lines`.
@@ -54,13 +59,16 @@ use std::fmt;
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use futures::future::{BoxFuture, Either, select};
+use futures::task::AtomicWaker;
 use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse, Msg};
 use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::{AgentClient, AgentStream};
@@ -72,6 +80,7 @@ use russh::{AlgorithmKind, Channel, ChannelOpenFailure, Disconnect, MethodKind, 
 use secrecy::zeroize::Zeroizing;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Notify, broadcast, oneshot};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -291,7 +300,7 @@ impl TunnelManager {
         }
         let key = chain_key(&req.spec);
         if req.share
-            && let Some(lease) = self.share(key, Vec::new())
+            && let Ok(lease) = self.share(key, Vec::new(), Vec::new())
         {
             return Ok(lease);
         }
@@ -323,28 +332,43 @@ impl TunnelManager {
             cancel,
             chain: chain.clone(),
             trusted: Arc::new(Mutex::new(Vec::new())),
+            used: Mutex::new(
+                (0..hops.len())
+                    .map(|_| HopSecrets {
+                        password: None,
+                        passphrase: None,
+                    })
+                    .collect(),
+            ),
         };
         for i in 0..hops.len() {
             if let Err(e) = build.hop(i).await {
-                // Partial failure: release the hops already up, last first, at once.
+                // Partial failure: release the hops already up, last first, at once. The
+                // secrets collected so far drop here (zeroized).
                 chain.close().await;
                 return Err(e);
             }
         }
         let trusted = std::mem::take(&mut *lock(&build.trusted));
+        let secrets = std::mem::take(&mut *lock(&build.used));
+        // `established` first, then `dead` (M2): a session that ends in between either sees
+        // `established` (and sends `Dead`) or is seen here.
+        chain.established.store(true, Ordering::SeqCst);
         if chain.dead.load(Ordering::SeqCst) {
             chain.close().await;
             return Err(SshError::Protocol { hop: last as u8 });
         }
-        chain.established.store(true, Ordering::SeqCst);
         if !req.share {
-            return Ok(TunnelLease::new(chain, trusted));
+            return Ok(TunnelLease::new(chain, trusted, secrets));
         }
         // Another acquire of the same chain may have finished meanwhile: keep one session.
-        if let Some(lease) = self.share(key, trusted.clone()) {
-            chain.close_detached();
-            return Ok(lease);
-        }
+        let (trusted, secrets) = match self.share(key, trusted, secrets) {
+            Ok(lease) => {
+                chain.close_detached();
+                return Ok(lease);
+            }
+            Err(back) => back,
+        };
         self.registry.lock().shared.insert(
             key,
             Slot {
@@ -353,19 +377,27 @@ impl TunnelManager {
                 epoch: 0,
             },
         );
-        Ok(TunnelLease::new(chain, trusted))
+        Ok(TunnelLease::new(chain, trusted, secrets))
     }
 
-    /// A lease on the live shared chain of `key`, if there is one.
-    fn share(&self, key: ChainKey, trusted: Vec<(u8, HostKey)>) -> Option<TunnelLease> {
+    /// A lease on the live shared chain of `key`, if there is one; else the notes back.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the two notes a lease carries, handed back"
+    )]
+    fn share(
+        &self,
+        key: ChainKey,
+        trusted: Vec<(u8, HostKey)>,
+        secrets: Vec<HopSecrets>,
+    ) -> Result<TunnelLease, (Vec<(u8, HostKey)>, Vec<HopSecrets>)> {
         let mut state = self.registry.lock();
-        let slot = state.shared.get_mut(&key)?;
-        if !slot.chain.alive() {
-            return None;
-        }
+        let Some(slot) = state.shared.get_mut(&key).filter(|s| s.chain.alive()) else {
+            return Err((trusted, secrets));
+        };
         slot.users += 1;
         slot.epoch += 1;
-        Some(TunnelLease::new(slot.chain.clone(), trusted))
+        Ok(TunnelLease::new(slot.chain.clone(), trusted, secrets))
     }
 }
 
@@ -395,11 +427,107 @@ struct Chain {
     registry: Weak<Registry>,
 }
 
-/// An authenticated hop: its session handle, and a receiver that resolves when the session's
-/// task has ended (its handler, which holds the sender, is dropped then).
+/// An authenticated hop: its session handle, a receiver that resolves when the session's task
+/// has ended (its handler, which holds the sender, is dropped then), and its transport's kill
+/// switch.
 struct HopConn {
     handle: Arc<Handle<HopHandler>>,
     ended: oneshot::Receiver<()>,
+    kill: Arc<KillSwitch>,
+}
+
+/// Ends a hop's transport from outside the session (I1). russh does not notice a dropped
+/// `Handle` while a key exchange is running (it stops reading its handle channel then), so a
+/// hop that stalls mid-exchange, or a re-key that never finishes, would keep its task and socket
+/// forever. Once tripped, the hop's stream reads end of file and refuses writes, so the session
+/// task ends and drops the socket.
+#[derive(Default)]
+struct KillSwitch {
+    tripped: AtomicBool,
+    waker: AtomicWaker,
+}
+
+impl KillSwitch {
+    fn trip(&self) {
+        self.tripped.store(true, Ordering::SeqCst);
+        self.waker.wake();
+    }
+
+    fn tripped(&self) -> bool {
+        self.tripped.load(Ordering::SeqCst)
+    }
+}
+
+/// Trips its switch when dropped, unless disarmed: a hop is kept only once its handshake
+/// passed the host-key check, it authenticated and it joined its chain.
+struct KillGuard(Option<Arc<KillSwitch>>);
+
+impl KillGuard {
+    fn disarm(mut self) -> Arc<KillSwitch> {
+        self.0.take().unwrap_or_default()
+    }
+}
+
+impl Drop for KillGuard {
+    fn drop(&mut self) {
+        if let Some(kill) = self.0.take() {
+            kill.trip();
+        }
+    }
+}
+
+/// A hop's transport behind its kill switch.
+struct Killable {
+    inner: BoxedStream,
+    kill: Arc<KillSwitch>,
+}
+
+fn killed() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "ssh hop closed")
+}
+
+impl AsyncRead for Killable {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.kill.tripped() {
+            return Poll::Ready(Ok(()));
+        }
+        self.kill.waker.register(cx.waker());
+        if self.kill.tripped() {
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Killable {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.kill.tripped() {
+            return Poll::Ready(Err(killed()));
+        }
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.kill.tripped() {
+            return Poll::Ready(Err(killed()));
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.kill.tripped() {
+            return Poll::Ready(Err(killed()));
+        }
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 impl Chain {
@@ -537,8 +665,14 @@ async fn close_hops(mut hops: Vec<HopConn>) {
     }
 }
 
+/// Sends a disconnect, waits (bounded) for the session to end, then trips the hop's transport
+/// so a session stuck in a key exchange ends too.
 async fn close_hop(hop: HopConn) {
-    let HopConn { handle, ended } = hop;
+    let HopConn {
+        handle,
+        ended,
+        kill,
+    } = hop;
     let _ = tokio::time::timeout(
         RELEASE_WAIT,
         handle.disconnect(Disconnect::ByApplication, "", "en"),
@@ -546,10 +680,14 @@ async fn close_hop(hop: HopConn) {
     .await;
     drop(handle);
     let _ = tokio::time::timeout(RELEASE_WAIT, ended).await;
+    kill.trip();
 }
 
+/// Ends hops from synchronous code, last first: each transport is tripped, so every session
+/// ends whatever it is doing.
 fn drop_hops(mut hops: Vec<HopConn>) {
     while let Some(hop) = hops.pop() {
+        hop.kill.trip();
         drop(hop);
     }
 }
@@ -562,6 +700,8 @@ pub struct TunnelLease {
     hops: u8,
     chain: Arc<Chain>,
     trusted: Vec<(u8, HostKey)>,
+    /// Never in `Debug`.
+    secrets: Vec<HopSecrets>,
 }
 
 impl fmt::Debug for TunnelLease {
@@ -575,7 +715,11 @@ impl fmt::Debug for TunnelLease {
 }
 
 impl TunnelLease {
-    fn new(chain: Arc<Chain>, trusted: Vec<(u8, HostKey)>) -> TunnelLease {
+    fn new(
+        chain: Arc<Chain>,
+        trusted: Vec<(u8, HostKey)>,
+        secrets: Vec<HopSecrets>,
+    ) -> TunnelLease {
         TunnelLease {
             generation: TransportGeneration {
                 key: chain.key,
@@ -585,14 +729,25 @@ impl TunnelLease {
             hops: chain.hop_count,
             chain,
             trusted,
+            secrets,
         }
+    }
+
+    /// The secrets that authenticated this acquire's hops, indexed by hop and shaped like
+    /// `TunnelRequest.secrets` (a reconnect passes them straight back): the password that was
+    /// accepted and the passphrase that decrypted the accepted key, stored or typed (Q17: the
+    /// session overlay keeps them in memory). Keyboard-interactive answers are never included:
+    /// they are often one-time codes and must not be replayed. Empty for a lease that joined an
+    /// open chain, and on every call after the first.
+    pub fn take_secrets(&mut self) -> Vec<HopSecrets> {
+        std::mem::take(&mut self.secrets)
     }
 
     /// A factory of `direct-tcpip` streams to `host:port` as the bastion sees it: each `open`
     /// opens one channel on the last hop (the bastion resolves `host`). A refused channel fails
     /// with an `io::Error` that [`classify_channel_err`] turns back into the [`SshError`]; a
-    /// factory that outlives its chain fails with `NotConnected`. Dropping an `open` future
-    /// never leaks the channel: one confirmed after the caller left is closed at once.
+    /// factory that outlives its chain fails with `NotConnected`. An `open` that times out or
+    /// is dropped never leaks the channel: one confirmed after the caller left is closed at once.
     pub fn factory(&self, host: &str, port: u16) -> StreamFactory {
         let chain = Arc::downgrade(&self.chain);
         let host: Arc<str> = Arc::from(host);
@@ -606,7 +761,7 @@ impl TunnelLease {
                 let handle = chain.last_handle().ok_or_else(gone)?;
                 let limit = chain.channel_timeout;
                 drop(chain);
-                let channel = open_channel(handle, host.to_string(), port, hop, limit)
+                let channel = open_channel(handle, host.to_string(), port, hop, Some(limit))
                     .await
                     .map_err(channel_io_error)?;
                 Ok(Box::new(channel.into_stream()) as BoxedStream)
@@ -655,34 +810,41 @@ fn channel_io_error(e: SshError) -> io::Error {
     io::Error::new(kind, e)
 }
 
-/// Opens a `direct-tcpip` channel on `handle` (originator `127.0.0.1:0`). The open runs on its
-/// own task: when the caller gives up first, a channel confirmed later is closed, not leaked.
+/// Opens a `direct-tcpip` channel on `handle` (originator `127.0.0.1:0`). The open runs to its
+/// end on its own task (russh fails a pending open when the session ends, so the task is
+/// bounded by the session); `limit` bounds only the caller's wait. When the caller gives up
+/// first (a timeout, a cancel, a dropped future), a channel confirmed later is closed at once,
+/// never left open on the server (I2).
 async fn open_channel(
     handle: Arc<Handle<HopHandler>>,
     host: String,
     port: u16,
     hop: u8,
-    limit: Duration,
+    limit: Option<Duration>,
 ) -> Result<Channel<Msg>, SshError> {
     let (tx, rx) = oneshot::channel();
     tokio::spawn(async move {
-        let opened = tokio::time::timeout(
-            limit,
-            handle.channel_open_direct_tcpip(host, u32::from(port), ORIGINATOR.0, ORIGINATOR.1),
-        )
-        .await;
-        if let Err(Ok(Ok(channel))) = tx.send(opened) {
+        let opened = handle
+            .channel_open_direct_tcpip(host, u32::from(port), ORIGINATOR.0, ORIGINATOR.1)
+            .await;
+        drop(handle);
+        if let Err(Ok(channel)) = tx.send(opened) {
             let _ = channel.close().await;
         }
     });
-    match rx.await {
-        Ok(Ok(Ok(channel))) => Ok(channel),
-        Ok(Ok(Err(russh::Error::ChannelOpenFailure(reason)))) => Err(SshError::ChannelOpen {
+    let answer = match limit {
+        Some(limit) => tokio::time::timeout(limit, rx)
+            .await
+            .map_err(|_elapsed| SshError::Timeout { hop })?,
+        None => rx.await,
+    };
+    match answer {
+        Ok(Ok(channel)) => Ok(channel),
+        Ok(Err(russh::Error::ChannelOpenFailure(reason))) => Err(SshError::ChannelOpen {
             hop,
             reason: channel_failure_id(&reason).to_string(),
         }),
-        Ok(Err(_elapsed)) => Err(SshError::Timeout { hop }),
-        Ok(Ok(Err(_))) | Err(_) => Err(SshError::Protocol { hop }),
+        Ok(Err(_)) | Err(_) => Err(SshError::Protocol { hop }),
     }
 }
 
@@ -708,6 +870,8 @@ struct Build<'a> {
     cancel: CancellationToken,
     chain: Arc<Chain>,
     trusted: Arc<Mutex<Vec<(u8, HostKey)>>>,
+    /// Per hop, the password and passphrase that authenticated (Q17; handed over on success).
+    used: Mutex<Vec<HopSecrets>>,
 }
 
 impl Build<'_> {
@@ -716,10 +880,15 @@ impl Build<'_> {
         let spec = &self.req.spec.hops[i];
         let n = i as u8;
         let clock = Clock::new(self.req.connect_timeout);
-        let others = self.other_kinds(n, spec).await?;
-        let restricted = !others.is_empty();
-        let (mut handle, ended, armed) = match self.connect(i, &clock, &others, restricted).await {
-            Err(Retry) => self.connect(i, &clock, &others, false).await,
+        let listed = self.listed_keys(n, spec).await?;
+        let restricted = !listed.kinds.is_empty();
+        let Connected {
+            mut handle,
+            ended,
+            armed,
+            guard,
+        } = match self.connect(i, &clock, &listed, restricted).await {
+            Err(Retry) => self.connect(i, &clock, &listed, false).await,
             done => done,
         }
         .map_err(|Retry| SshError::Protocol { hop: n })??;
@@ -738,11 +907,14 @@ impl Build<'_> {
                 }
                 _ => None,
             },
+            used: &self.used,
         };
+        // Until the hop joins its chain, `guard` trips its transport if this future is dropped.
         if let Err(e) = auth.run(&mut handle).await {
             close_hop(HopConn {
                 handle: Arc::new(handle),
                 ended,
+                kill: guard.disarm(),
             })
             .await;
             return Err(e);
@@ -751,29 +923,34 @@ impl Build<'_> {
         lock(&self.chain.hops).push(HopConn {
             handle: Arc::new(handle),
             ended,
+            kill: guard.disarm(),
         });
         Ok(())
     }
 
-    /// The keys the stores list for this hop under other types than the one it will present,
-    /// with their sources (blocking reads, on the blocking pool).
-    async fn other_kinds(
-        &self,
-        n: u8,
-        spec: &HopSpec,
-    ) -> Result<Vec<(String, HostKey, KnownSource)>, SshError> {
+    /// What the stores list for this hop (blocking reads, on the blocking pool): the key types
+    /// among [`KNOWN_KINDS`] (to restrict the negotiation), and any listed key of any type (an
+    /// undecodable probe makes `check` count every listed key as a change, so a type outside
+    /// the list is seen too, M1).
+    async fn listed_keys(&self, n: u8, spec: &HopSpec) -> Result<Listed, SshError> {
         let known = self.manager.known.clone();
         let (host, port) = (spec.host.clone(), spec.port);
         blocking(move || {
-            KNOWN_KINDS
+            let kinds = KNOWN_KINDS
                 .iter()
-                .filter_map(|kind| match known.check(&host, port, &kind_probe(kind)) {
-                    HostKeyCheck::Changed { old, source } => {
-                        Some(((*kind).to_string(), old, source))
-                    }
-                    _ => None,
+                .filter(|kind| {
+                    matches!(
+                        known.check(&host, port, &kind_probe(kind)),
+                        HostKeyCheck::Changed { .. }
+                    )
                 })
-                .collect()
+                .map(|kind| (*kind).to_string())
+                .collect();
+            let any = match known.check(&host, port, &any_kind_probe()) {
+                HostKeyCheck::Changed { old, source } => Some((old, source)),
+                _ => None,
+            };
+            Listed { kinds, any }
         })
         .await
         .ok_or(SshError::Protocol { hop: n })
@@ -781,20 +958,27 @@ impl Build<'_> {
 
     /// The transport and the SSH handshake (host key included) of hop `i`. `Err(Retry)` when
     /// the server offers none of the known key types: the caller retries offering every type,
-    /// so the check sees the presented key and reports the change.
+    /// so the check sees the presented key and reports the change. The returned guard still
+    /// holds the transport's kill switch: every other outcome (an error, a timeout, a cancel,
+    /// this future dropped) trips it, so no session task outlives a failed handshake (I1).
     async fn connect(
         &self,
         i: usize,
         clock: &Arc<Clock>,
-        others: &[(String, HostKey, KnownSource)],
+        listed: &Listed,
         restricted: bool,
-    ) -> Result<Result<(Handle<HopHandler>, oneshot::Receiver<()>, Arc<AtomicBool>), SshError>, Retry>
-    {
+    ) -> Result<Result<Connected, SshError>, Retry> {
         let spec = &self.req.spec.hops[i];
         let n = i as u8;
         let stream = match self.transport(i, clock).await {
             Ok(s) => s,
             Err(e) => return Ok(Err(e)),
+        };
+        let kill = Arc::new(KillSwitch::default());
+        let guard = KillGuard(Some(kill.clone()));
+        let stream = Killable {
+            inner: stream,
+            kill,
         };
         let keepalive = self
             .req
@@ -803,7 +987,7 @@ impl Build<'_> {
             .filter(|s| *s > 0)
             .map(|s| Duration::from_secs(u64::from(s)))
             .unwrap_or(self.manager.config.keepalive);
-        let kinds: Vec<&str> = others.iter().map(|(k, ..)| k.as_str()).collect();
+        let kinds: Vec<&str> = listed.kinds.iter().map(String::as_str).collect();
         let config = Arc::new(client::Config {
             preferred: preferred(if restricted { &kinds } else { &[] }),
             keepalive_interval: Some(keepalive),
@@ -821,9 +1005,7 @@ impl Build<'_> {
             port: spec.port,
             policy: self.req.spec.host_keys,
             known: self.manager.known.clone(),
-            other: others
-                .first()
-                .map(|(_, old, source)| (old.clone(), source.clone())),
+            other: listed.any.clone(),
             prompter: self.prompter.clone(),
             cancel: self.cancel.clone(),
             clock: clock.clone(),
@@ -851,7 +1033,12 @@ impl Build<'_> {
         if !verified.load(Ordering::SeqCst) {
             return Ok(Err(SshError::Protocol { hop: n }));
         }
-        Ok(Ok((handle, ended, armed)))
+        Ok(Ok(Connected {
+            handle,
+            ended,
+            armed,
+            guard,
+        }))
     }
 
     /// Hop 0: a TCP connect. Hop i > 0: a `direct-tcpip` channel through hop i − 1.
@@ -882,13 +1069,14 @@ impl Build<'_> {
             .get(i - 1)
             .map(|h| h.handle.clone())
             .ok_or(SshError::Protocol { hop: n - 1 })?;
+        // `clock.run` is the (pausable) bound; dropping the open closes a late channel.
         let channel = clock
             .run(open_channel(
                 previous,
                 spec.host.clone(),
                 spec.port,
                 n - 1,
-                self.req.connect_timeout,
+                None,
             ))
             .await
             .ok_or(SshError::Timeout { hop: n })??;
@@ -898,6 +1086,33 @@ impl Build<'_> {
 
 /// The handshake must be retried offering every host-key type.
 struct Retry;
+
+/// A hop after its handshake: the session, its end signal, the flag that hands its end to the
+/// chain, and the still-armed kill switch of its transport.
+struct Connected {
+    handle: Handle<HopHandler>,
+    ended: oneshot::Receiver<()>,
+    armed: Arc<AtomicBool>,
+    guard: KillGuard,
+}
+
+/// What the stores list for a hop.
+struct Listed {
+    /// Types among [`KNOWN_KINDS`] with a listed key.
+    kinds: Vec<String>,
+    /// A listed key of any type, with its source.
+    any: Option<(HostKey, KnownSource)>,
+}
+
+/// A probe whose type does not decode: `KnownHosts::check` then counts every listed plain key
+/// for the host as a change (it fails closed), so `Changed` answers "is any key listed?".
+fn any_kind_probe() -> HostKey {
+    HostKey {
+        algorithm: String::new(),
+        sha256: [0; 32],
+        openssh: "x !".to_string(),
+    }
+}
 
 /// A probe key of `kind` for [`KnownHosts::check`]: the blob names the type and nothing else,
 /// and its hash matches no real key, so the answer is `Changed` exactly when a key of that type
@@ -1006,6 +1221,8 @@ fn chain_key(spec: &SshSpec) -> ChainKey {
     let mut h = Sha256::new();
     field(&mut h, b"hacivat-ssh-chain-v1");
     field(&mut h, spec.host_keys.id().as_bytes());
+    // Profiles that differ only in keep-alive keep their own interval (M4).
+    field(&mut h, &spec.keepalive_s.unwrap_or(0).to_be_bytes());
     for hop in &spec.hops {
         field(&mut h, hop.host.to_ascii_lowercase().as_bytes());
         field(&mut h, &hop.port.to_be_bytes());
@@ -1361,6 +1578,8 @@ struct Auth<'a> {
     cancel: &'a CancellationToken,
     /// For a jump host: the bastion's key file (B11).
     bastion_key: Option<&'a Path>,
+    /// Where the secrets that authenticated are recorded (indexed by hop).
+    used: &'a Mutex<Vec<HopSecrets>>,
 }
 
 /// What the server still accepts (`None` until it said).
@@ -1373,7 +1592,8 @@ impl Offered {
 }
 
 impl Auth<'_> {
-    fn steps(&self) -> Vec<Step<'_>> {
+    /// The hop's key files, deduplicated: its own, the bastion's (jump hosts), the imported.
+    fn key_files(&self) -> Vec<&Path> {
         let mut keys: Vec<&Path> = Vec::new();
         let own = match &self.spec.auth {
             SshAuth::KeyFile { path } => Some(path.as_path()),
@@ -1388,6 +1608,11 @@ impl Auth<'_> {
                 keys.push(path);
             }
         }
+        keys
+    }
+
+    fn steps(&self) -> Vec<Step<'_>> {
+        let keys = self.key_files();
         match self.spec.auth {
             SshAuth::Password => vec![Step::Password, Step::Keyboard],
             SshAuth::KeyboardInteractive => vec![Step::Keyboard],
@@ -1400,6 +1625,18 @@ impl Auth<'_> {
                 };
                 steps.extend([Step::Password, Step::Keyboard]);
                 steps
+            }
+        }
+    }
+
+    /// Records a secret that authenticated this hop.
+    fn record(&self, password: Option<SecretString>, passphrase: Option<SecretString>) {
+        if let Some(slot) = lock(self.used).get_mut(usize::from(self.hop)) {
+            if password.is_some() {
+                slot.password = password;
+            }
+            if passphrase.is_some() {
+                slot.passphrase = passphrase;
             }
         }
     }
@@ -1511,11 +1748,29 @@ impl Auth<'_> {
             *missing = true;
             return Ok(Outcome::Failed);
         };
+        // With IdentitiesOnly, only the agent keys of the configured identities (OpenSSH, M6).
+        let allowed = if self.spec.identities_only {
+            let files: Vec<PathBuf> = self.key_files().iter().map(|p| p.to_path_buf()).collect();
+            Some(
+                blocking(move || files.iter().filter_map(|f| identity_public(f)).collect())
+                    .await
+                    .unwrap_or_else(Vec::new),
+            )
+        } else {
+            None
+        };
         for identity in identities {
             // Certificates are not offered (v1).
             let AgentIdentity::PublicKey { key, .. } = identity else {
                 continue;
             };
+            if let Some(allowed) = &allowed
+                && !allowed
+                    .iter()
+                    .any(|k: &PublicKey| k.key_data() == key.key_data())
+            {
+                continue;
+            }
             let hash = self.rsa_hash(h, &key).await?;
             let user = self.spec.user.clone();
             match self
@@ -1544,14 +1799,17 @@ impl Auth<'_> {
         path: &Path,
         offered: &mut Offered,
     ) -> Result<Outcome, SshError> {
-        let Some(key) = self.load_key(path).await? else {
+        let Some((key, passphrase)) = self.load_key(path).await? else {
             return Ok(Outcome::Failed);
         };
         let hash = self.rsa_hash(h, key.public_key()).await?;
         let user = self.spec.user.clone();
         let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
         match self.timed(h.authenticate_publickey(user, key)).await? {
-            Ok(AuthResult::Success) => Ok(Outcome::Success),
+            Ok(AuthResult::Success) => {
+                self.record(None, passphrase);
+                Ok(Outcome::Success)
+            }
             Ok(AuthResult::Failure {
                 remaining_methods, ..
             }) => {
@@ -1564,14 +1822,18 @@ impl Auth<'_> {
 
     /// Reads and decrypts a key file: plain keys at once; encrypted ones with the stored
     /// passphrase, then the prompter, three attempts in all. `None`: unreadable or not unlocked.
-    async fn load_key(&self, path: &Path) -> Result<Option<PrivateKey>, SshError> {
+    /// With the key, the passphrase that decrypted it.
+    async fn load_key(
+        &self,
+        path: &Path,
+    ) -> Result<Option<(PrivateKey, Option<SecretString>)>, SshError> {
         let file = path.to_path_buf();
         let Some(Some(text)) = blocking(move || read_key_file(&file)).await else {
             return Ok(None);
         };
         let plain = text.clone();
         match blocking(move || russh::keys::decode_secret_key(&plain, None)).await {
-            Some(Ok(key)) => return Ok(Some(key)),
+            Some(Ok(key)) => return Ok(Some((key, None))),
             Some(Err(russh::keys::Error::KeyIsEncrypted)) => {}
             _ if text.contains("ENCRYPTED") => {}
             _ => return Ok(None),
@@ -1596,12 +1858,13 @@ impl Auth<'_> {
                 },
             };
             let text = text.clone();
+            let tried = passphrase.clone();
             let decoded = blocking(move || {
-                russh::keys::decode_secret_key(&text, Some(passphrase.expose_secret()))
+                russh::keys::decode_secret_key(&text, Some(tried.expose_secret()))
             })
             .await;
             if let Some(Ok(key)) = decoded {
-                return Ok(Some(key));
+                return Ok(Some((key, Some(passphrase))));
             }
         }
         Ok(None)
@@ -1638,7 +1901,10 @@ impl Auth<'_> {
                 .timed(h.authenticate_password(user, password.expose_secret()))
                 .await?
             {
-                Ok(AuthResult::Success) => return Ok(Outcome::Success),
+                Ok(AuthResult::Success) => {
+                    self.record(Some(password), None);
+                    return Ok(Outcome::Success);
+                }
                 Ok(AuthResult::Failure {
                     remaining_methods, ..
                 }) => self.refused(h, offered, remaining_methods),
@@ -1761,6 +2027,22 @@ fn read_key_file(path: &Path) -> Option<Zeroizing<String>> {
     }
     let text = std::str::from_utf8(&bytes).ok()?;
     Some(Zeroizing::new(text.to_string()))
+}
+
+/// The public key of an identity file, without its passphrase: an OpenSSH private key carries
+/// it in the clear; other formats are read unencrypted or from `<file>.pub`.
+fn identity_public(path: &Path) -> Option<PublicKey> {
+    if let Some(text) = read_key_file(path) {
+        if let Ok(key) = russh::keys::ssh_key::PrivateKey::from_openssh(text.as_bytes()) {
+            return Some(key.public_key().clone());
+        }
+        if let Ok(key) = russh::keys::decode_secret_key(&text, None) {
+            return Some(key.public_key().clone());
+        }
+    }
+    let mut public = path.as_os_str().to_owned();
+    public.push(".pub");
+    russh::keys::load_public_key(PathBuf::from(public)).ok()
 }
 
 // ---------------------------------------------------------------------------------------------

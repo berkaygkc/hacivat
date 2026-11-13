@@ -122,12 +122,13 @@ fn mgr_with(known: Arc<KnownHosts>, _policy: HostKeyPolicy) -> Arc<TunnelManager
     mgr_known(known, TunnelConfig::default())
 }
 
-/// 200 ms grace, 100 ms keep-alive (Q25: a short real grace, never a paused clock).
+/// 500 ms grace, 100 ms keep-alive (Q25: a short real grace, never a paused clock; M5: wide
+/// enough for a starved runner).
 fn mgr_fast(s: &TestSshServer) -> Arc<TunnelManager> {
     mgr_known(
         known_of(s),
         TunnelConfig {
-            idle_grace: ms(200),
+            idle_grace: ms(500),
             keepalive: ms(100),
             keepalive_max: 2,
         },
@@ -818,11 +819,11 @@ async fn test_connection_never_shares() {
 async fn idle_session_closes_after_grace() {
     // real time (Q25): never start_paused with real sockets
     let s = ssh(cfg().user_pw("u", "pw")).await;
-    let m = mgr_fast(&s); // TunnelConfig { idle_grace: ms(200), keepalive: ms(100), .. }
+    let m = mgr_fast(&s); // TunnelConfig { idle_grace: ms(500), keepalive: ms(100), .. }
     drop(m.acquire(req_user(&s, "u"), None, tok()).await.unwrap());
     tokio::time::sleep(ms(100)).await;
     assert_eq!(m.sessions_open(), 1);
-    timeout(secs(1), wait_until(|| m.sessions_open() == 0))
+    timeout(secs(3), wait_until(|| m.sessions_open() == 0))
         .await
         .unwrap();
     settle_until("the server saw the close", || s.sessions_open() == 0).await;
@@ -838,7 +839,7 @@ async fn reacquire_within_grace_reuses_the_session() {
     let again = m.acquire(req_user(&s, "u"), None, tok()).await.unwrap();
     assert_eq!(again.generation(), g);
     // The first release's timer must not close the re-used chain.
-    tokio::time::sleep(ms(400)).await;
+    tokio::time::sleep(ms(1000)).await;
     assert_eq!(m.sessions_open(), 1);
     assert_eq!(s.sessions_accepted(), 1);
 }
@@ -1030,8 +1031,8 @@ async fn cancel_during_host_key_prompt_releases_everything() {
 #[tokio::test]
 async fn prompt_time_never_counts_toward_the_connect_timeout() {
     let s = ssh(cfg().user_pw("u", "pw")).await;
-    let p = prompter().trusts().slow_host_key(ms(800));
-    let r = req(&s, SshAuth::Password).secret_pw("pw").timeout(ms(400));
+    let p = prompter().trusts().slow_host_key(ms(2000));
+    let r = req(&s, SshAuth::Password).secret_pw("pw").timeout(ms(1000));
     assert!(mgr(&s).acquire(r, p.dyn_(), tok()).await.is_ok());
 }
 
@@ -1163,4 +1164,305 @@ async fn errors_name_the_hop_and_never_a_secret() {
             .password
             .is_some_and(|p| !p.expose_secret().is_empty())
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 1
+
+/// A server that sends its banner, then reads (and never answers) until the client goes: a
+/// peer that stalls inside the key exchange (I1).
+struct Stall {
+    addr: SocketAddr,
+    read: Arc<AtomicUsize>,
+    closed: Arc<AtomicUsize>,
+}
+
+async fn stall_server() -> Stall {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let read = Arc::new(AtomicUsize::new(0));
+    let closed = Arc::new(AtomicUsize::new(0));
+    let (r, c) = (read.clone(), closed.clone());
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let (r, c) = (r.clone(), c.clone());
+            tokio::spawn(async move {
+                let _ = sock.write_all(b"SSH-2.0-Stall\r\n").await;
+                let mut buf = [0u8; 4096];
+                loop {
+                    match sock.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            r.fetch_add(n, Ordering::SeqCst);
+                        }
+                    }
+                }
+                c.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+    });
+    Stall { addr, read, closed }
+}
+
+fn stall_hop(st: &Stall) -> HopSpec {
+    HopSpec {
+        host: "127.0.0.1".into(),
+        port: st.addr.port(),
+        user: "u".into(),
+        auth: SshAuth::Password,
+        identities_only: false,
+        identity_files: Vec::new(),
+    }
+}
+
+/// The client's id and KEXINIT have reached the stalling server: its session task is running.
+async fn in_kex(st: &Stall) {
+    timeout(secs(5), wait_until(|| st.read.load(Ordering::SeqCst) > 100))
+        .await
+        .unwrap();
+}
+
+/// h1 (review): a timeout inside a stalled key exchange ends the session and its socket.
+#[tokio::test]
+async fn a_key_exchange_that_stalls_is_released_on_timeout() {
+    let st = stall_server().await;
+    let m = mgr_known(known_empty(), TunnelConfig::default());
+    let mut r = request(vec![stall_hop(&st)], HostKeyPolicy::AcceptNew).secret_pw("pw");
+    r.connect_timeout = ms(300);
+    let e = m.acquire(r, None, tok()).await.unwrap_err();
+    assert_eq!(e, SshError::Timeout { hop: 0 });
+    settle_until("no session left", || m.sessions_open() == 0).await;
+    settle_until("the server saw the close", || {
+        st.closed.load(Ordering::SeqCst) == 1
+    })
+    .await;
+}
+
+/// h2 (review): a cancel inside a stalled key exchange ends the session and its socket.
+#[tokio::test]
+async fn a_key_exchange_that_stalls_is_released_on_cancel() {
+    let st = stall_server().await;
+    let m = mgr_known(known_empty(), TunnelConfig::default());
+    let r = request(vec![stall_hop(&st)], HostKeyPolicy::AcceptNew).secret_pw("pw");
+    let t = tok();
+    let h = tokio::spawn(m.acquire(r, None, t.clone()));
+    in_kex(&st).await;
+    t.cancel();
+    assert_eq!(h.await.unwrap().unwrap_err(), SshError::Cancelled);
+    settle_until("no session left", || m.sessions_open() == 0).await;
+    settle_until("the server saw the close", || {
+        st.closed.load(Ordering::SeqCst) == 1
+    })
+    .await;
+}
+
+/// A jump chain whose hop 1 stalls in its key exchange: cancel (and timeout) close hop 1's
+/// session and hop 0 behind it.
+#[tokio::test]
+async fn a_stalled_inner_hop_releases_the_hops_before_it() {
+    for cancel in [true, false] {
+        let st = stall_server().await;
+        let a = ssh(cfg().user_pw("u", "pw")).await;
+        let m = mgr_known(known_empty(), TunnelConfig::default());
+        let mut r = request(
+            vec![hop(&a, "u", SshAuth::Password), stall_hop(&st)],
+            HostKeyPolicy::AcceptNew,
+        );
+        r.secrets = (0..2).map(|_| secrets(Some("pw"), None)).collect();
+        r.connect_timeout = secs(2);
+        let t = tok();
+        let h = tokio::spawn(m.acquire(r, None, t.clone()));
+        let e = if cancel {
+            in_kex(&st).await;
+            t.cancel();
+            h.await.unwrap().unwrap_err()
+        } else {
+            timeout(secs(10), h).await.unwrap().unwrap().unwrap_err()
+        };
+        let want = if cancel {
+            SshError::Cancelled
+        } else {
+            SshError::Timeout { hop: 1 }
+        };
+        assert_eq!(e, want);
+        settle_until("no session left", || m.sessions_open() == 0).await;
+        settle_until("hop 1's server saw the close", || {
+            st.closed.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        settle_until("hop 0 released", || a.sessions_open() == 0).await;
+    }
+}
+
+/// I2: a `direct-tcpip` channel the server confirms after the open timed out is closed, not
+/// left open on the server.
+#[tokio::test]
+async fn a_channel_confirmed_after_the_timeout_is_closed() {
+    let t = echo_target().await;
+    let s = ssh(cfg().user_pw("u", "pw").forward_delay(ms(1500))).await;
+    let m = mgr(&s);
+    let lease = m
+        .acquire(req_user(&s, "u").timeout(ms(500)), None, tok())
+        .await
+        .unwrap();
+    let e = lease
+        .factory("127.0.0.1", t.port())
+        .open()
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(classify_channel_err(&e), Some(SshError::Timeout { hop: 0 }));
+    settle_until("the server confirmed it late", || s.channels_opened() == 1).await;
+    settle_until("the late channel was closed", || s.channels_live() == 0).await;
+    assert_eq!(s.sessions_open(), 1, "the session itself stays");
+}
+
+/// I3 (Q17): the typed password that authenticated is handed back once; a rejected one is not.
+#[tokio::test]
+async fn the_password_that_authenticated_is_handed_back_once() {
+    let s = ssh(cfg().user_pw("u", "s3cret-typed")).await;
+    let p = prompter()
+        .passphrases(["wrong-typed", "s3cret-typed"])
+        .trusts();
+    let mut lease = mgr(&s)
+        .acquire(req(&s, SshAuth::Password), p.dyn_(), tok())
+        .await
+        .unwrap();
+    assert!(!format!("{lease:?}").contains("s3cret-typed"));
+    let secrets = lease.take_secrets();
+    assert_eq!(secrets.len(), 1);
+    assert!(
+        secrets[0]
+            .password
+            .as_ref()
+            .is_some_and(|pw| pw.expose_secret() == "s3cret-typed")
+    );
+    assert!(secrets[0].passphrase.is_none());
+    assert!(!format!("{secrets:?}").contains("s3cret-typed"));
+    assert!(lease.take_secrets().is_empty(), "handed over once");
+}
+
+/// I3: secrets are indexed by hop: a stored password at hop 0, a typed passphrase at hop 1.
+#[tokio::test]
+async fn secrets_are_handed_back_by_hop() {
+    let kb = ed25519();
+    let a = ssh(cfg().user_pw("u", "pw")).await;
+    let b = ssh(cfg().user_key("u", kb.public_key().clone())).await;
+    let fb = write_key(&kb, Some("pb-typed"), &format!("enc_hop1-{}", port(&b)));
+    let mut r = request(
+        vec![
+            hop(&a, "u", SshAuth::Password),
+            hop(&b, "u", SshAuth::KeyFile { path: fb }),
+        ],
+        HostKeyPolicy::AcceptNew,
+    );
+    r.secrets = vec![secrets(Some("pw"), None), secrets(None, None)];
+    let p = prompter().passphrases(["pb-typed"]);
+    let mut lease = mgr(&a).acquire(r, p.dyn_(), tok()).await.unwrap();
+    let got = lease.take_secrets();
+    assert_eq!(got.len(), 2);
+    assert!(
+        got[0]
+            .password
+            .as_ref()
+            .is_some_and(|s| s.expose_secret() == "pw")
+    );
+    assert!(got[0].passphrase.is_none());
+    assert!(got[1].password.is_none());
+    assert!(
+        got[1]
+            .passphrase
+            .as_ref()
+            .is_some_and(|s| s.expose_secret() == "pb-typed")
+    );
+}
+
+/// I3: a lease that joined an open chain carries no secrets; keyboard-interactive answers
+/// (one-time codes) are never handed back.
+#[tokio::test]
+async fn joined_leases_and_keyboard_answers_hand_back_nothing() {
+    let s = ssh(cfg().user_pw("u", "pw")).await;
+    let m = mgr(&s);
+    let mut first = m.acquire(req_user(&s, "u"), None, tok()).await.unwrap();
+    let mut joined = m.acquire(req_user(&s, "u"), None, tok()).await.unwrap();
+    assert!(joined.take_secrets().is_empty());
+    assert_eq!(first.take_secrets().len(), 1);
+
+    let k = ssh(cfg().user_kbd("u", &[("Code: ", false, "123456")])).await;
+    let p = prompter().keyboard(["123456"]).trusts();
+    let mut lease = mgr(&k)
+        .acquire(req(&k, SshAuth::KeyboardInteractive), p.dyn_(), tok())
+        .await
+        .unwrap();
+    let got = lease.take_secrets();
+    assert_eq!(got.len(), 1);
+    assert!(got[0].password.is_none() && got[0].passphrase.is_none());
+}
+
+/// h3 (review, M1): a host listed only under a key type outside the probed list is not new:
+/// `AcceptNew` must not store a key of another type for it.
+#[tokio::test]
+async fn a_host_listed_under_an_unprobed_type_is_changed_not_new() {
+    use base64::Engine as _;
+    let s = ssh(cfg().user_pw("u", "pw")).await;
+    let mut blob = Vec::new();
+    for part in [&b"ssh-xmss@openssh.com"[..], &[9u8; 40][..]] {
+        blob.extend_from_slice(&u32::try_from(part.len()).unwrap().to_be_bytes());
+        blob.extend_from_slice(part);
+    }
+    let xmss = HostKey::from_openssh(&format!(
+        "ssh-xmss@openssh.com {}",
+        base64::engine::general_purpose::STANDARD.encode(&blob)
+    ))
+    .unwrap();
+    let known = known_with(&s, &xmss);
+    let e = mgr_known(known.clone(), TunnelConfig::default())
+        .acquire(req_policy(&s, HostKeyPolicy::AcceptNew), None, tok())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&e, SshError::HostKeyChanged { hop: 0, old, new, .. } if *old == xmss && *new == s.host_key),
+        "{e:?}"
+    );
+    assert_eq!(s.auth_attempts(), 0);
+    assert!(!matches!(
+        known.check(&host(&s), port(&s), &s.host_key),
+        HostKeyCheck::Known(_)
+    ));
+}
+
+/// M6: with IdentitiesOnly the agent offers only the configured identities' keys (OpenSSH), so
+/// unrelated agent keys never burn MaxAuthTries.
+#[cfg(unix)]
+#[tokio::test]
+async fn identities_only_offers_only_the_configured_agent_key() {
+    let s = ssh(cfg()
+        .user_key("u", KEY_A.public_key().clone())
+        .max_auth_tries(2))
+    .await;
+    let mut keys: Vec<PrivateKey> = (0..5).map(|_| ed25519()).collect();
+    keys.push(KEY_A.clone());
+    let agent = hacivat_testkit::agent::TestAgent::start(keys).await;
+    // The file is encrypted and nothing can unlock it: only the agent can sign for it.
+    let locked = write_key(&KEY_A, Some("unknown"), &format!("locked_a-{}", port(&s)));
+    let r = req_key(&s, &locked).identities_only(true);
+    assert!(
+        mgr_agent(&s, &agent.socket)
+            .acquire(r, None, tok())
+            .await
+            .is_ok()
+    );
+}
+
+/// M4: profiles that differ only in keep-alive do not share a chain.
+#[tokio::test]
+async fn keepalive_is_part_of_the_chain_key() {
+    let s = ssh(cfg().user_pw("u", "pw")).await;
+    let m = mgr(&s);
+    let a = m.acquire(req_user(&s, "u"), None, tok()).await.unwrap();
+    let mut r = req_user(&s, "u");
+    r.spec.keepalive_s = Some(15);
+    let b = m.acquire(r, None, tok()).await.unwrap();
+    assert_ne!(a.generation().key, b.generation().key);
+    assert_eq!(s.sessions_open(), 2);
 }

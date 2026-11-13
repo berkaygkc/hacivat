@@ -116,6 +116,8 @@ pub struct TestSshConfig {
     pub forward_to: ForwardTarget,
     pub max_auth_tries: Option<u32>,
     pub slow_banner: Option<Duration>,
+    /// How long an allowed `direct-tcpip` open waits before it is confirmed.
+    pub forward_delay: Option<Duration>,
     pub ipv6: bool,
 }
 
@@ -168,6 +170,12 @@ impl TestSshConfig {
     }
 
     /// The server waits `d` before its banner (timeout tests).
+    /// Every allowed `direct-tcpip` open is confirmed `d` late (late-channel tests).
+    pub fn forward_delay(mut self, d: Duration) -> Self {
+        self.forward_delay = Some(d);
+        self
+    }
+
     pub fn slow_banner(mut self, d: Duration) -> Self {
         self.slow_banner = Some(d);
         self
@@ -205,6 +213,7 @@ struct Shared {
     sessions_open: AtomicUsize,
     sessions_accepted: AtomicUsize,
     channels_opened: AtomicUsize,
+    channels_live: AtomicUsize,
     next_id: AtomicU64,
     state: Mutex<State>,
 }
@@ -270,6 +279,7 @@ impl TestSshServer {
             sessions_open: AtomicUsize::new(0),
             sessions_accepted: AtomicUsize::new(0),
             channels_opened: AtomicUsize::new(0),
+            channels_live: AtomicUsize::new(0),
             next_id: AtomicU64::new(0),
             state: Mutex::new(State::default()),
         });
@@ -305,6 +315,12 @@ impl TestSshServer {
     /// `direct-tcpip` channels the server opened (allowed and connected).
     pub fn channels_opened(&self) -> usize {
         self.shared.channels_opened.load(Ordering::SeqCst)
+    }
+
+    /// `direct-tcpip` channels open now (from confirmation until the relay ends, which is when
+    /// the client closes the channel or the target closes its socket).
+    pub fn channels_live(&self) -> usize {
+        self.shared.channels_live.load(Ordering::SeqCst)
     }
 
     /// Drops every client session (a network cut): both directions of each socket shut down.
@@ -622,10 +638,15 @@ impl Handler for Client {
                 reply.reject(ChannelOpenFailure::ConnectFailed).await;
                 return;
             };
+            if let Some(d) = shared.config.forward_delay {
+                tokio::time::sleep(d).await;
+            }
             reply.accept().await;
             shared.channels_opened.fetch_add(1, Ordering::SeqCst);
+            shared.channels_live.fetch_add(1, Ordering::SeqCst);
             let mut stream = channel.into_stream();
             let _ = tokio::io::copy_bidirectional(&mut stream, &mut tcp).await;
+            shared.channels_live.fetch_sub(1, Ordering::SeqCst);
         });
         Ok(())
     }

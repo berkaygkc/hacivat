@@ -438,7 +438,11 @@ the vault, the session overlay, the keyring CI and the deferrals.
     reported as `HostKeyChanged` (old: the listed key), never as new, so `AcceptNew` cannot
     accept and store it (`key_of_another_type_than_the_known_one_is_changed_not_new`). Types
     russh cannot negotiate (`ssh-dss`, `sk-*`) count as listed too: such a host can only be
-    changed, never new. A type name outside the eight probed is not seen (none is known today).
+    changed, never new. The "listed under another type" answer comes from one more probe whose
+    type does not decode, which `check` answers with any listed key of any type (fix round 1,
+    M1), so a type outside the eight probed (`ssh-xmss@openssh.com`) counts as well
+    (`a_host_listed_under_an_unprobed_type_is_changed_not_new`); the eight-type probe only
+    restricts the negotiation.
   - Certificate host-key algorithms are never offered (`host_key_certificates` empty); a
     certificate presented anyway is refused (`Protocol`). SHA-1 `ssh-rsa` signatures are not
     negotiated (OpenSSH ≥ 8.8 default); a server that only signs with SHA-1 fails to connect.
@@ -450,7 +454,10 @@ the vault, the session overlay, the keyring CI and the deferrals.
 - **Authentication order (B11).** Per hop: agent, then key files (the hop's own; the bastion's
   for a jump host; the imported `IdentityFile`s, deduplicated), then password, then
   keyboard-interactive. `IdentitiesOnly` moves the key files before the agent
-  (`identities_only_tries_the_key_file_first`). A hop whose method is a password tries password
+  (`identities_only_tries_the_key_file_first`) and, as in OpenSSH, the agent then offers only
+  the keys of the configured identities (the public key read from the identity file, which an
+  OpenSSH key carries unencrypted, or from `<file>.pub`), so unrelated agent keys never spend
+  MaxAuthTries (fix round 1, M6; `identities_only_offers_only_the_configured_agent_key`). A hop whose method is a password tries password
   then keyboard-interactive (servers that take passwords through PAM offer only the latter); a
   keyboard-interactive hop tries only that. A method the server stopped offering is skipped,
   and a closed session ends the hop as `ssh.auth` (MaxAuthTries:
@@ -471,6 +478,17 @@ the vault, the session overlay, the keyring CI and the deferrals.
   russh's buffers unzeroized until freed. The decrypted `PrivateKey` (ssh-key) zeroizes on drop.
   russh's `Debug` for auth methods redacts the password, and nothing of Hacivat's logs; the
   test captures every `log` record at TRACE (`ssh_secrets_never_logged`).
+  - **Session overlay (Q17; fix round 1, I3).** `TunnelLease::take_secrets()` hands back, once
+    and only on success, the password the server accepted and the passphrase that decrypted the
+    accepted key, per hop (stored or typed), shaped like `TunnelRequest.secrets` so a reconnect
+    passes them straight back; a rejected or unused secret is never reported, a failed acquire
+    drops (zeroizes) what it collected, and a lease that joined an open chain gets none
+    (`the_password_that_authenticated_is_handed_back_once`, `secrets_are_handed_back_by_hop`).
+    **Keyboard-interactive answers are deliberately excluded** (controller ruling): they are
+    often one-time codes, and replaying one on a reconnect is both useless and a
+    security-relevant reuse; a reconnect through such a hop prompts again
+    (`joined_leases_and_keyboard_answers_hand_back_nothing`). `HopSecrets` and the lease keep a
+    redacted `Debug`.
 - **Time (P23, Q44).** `connect_timeout` bounds each hop's TCP connect, handshake and
   authentication on a clock that stops while a host-key, secret or keyboard prompt is open
   (`prompt_time_never_counts_toward_the_connect_timeout`, `slow_server_times_out_with_the_hop`).
@@ -479,7 +497,9 @@ the vault, the session overlay, the keyring CI and the deferrals.
   (`cancel_during_host_key_prompt_releases_everything`).
 - **Sharing (`ChainKey`).** SHA-256 over a domain tag, the policy, and per hop the lower-cased
   host, port, user, auth method (and key path), `IdentitiesOnly` and the identity files, each
-  length-prefixed. Secrets are not part of it: two profiles with the same bastion, user and
+  length-prefixed, and the profile's `keepalive_s` (fix round 1, M4: profiles that differ only
+  in keep-alive keep their own interval; `keepalive_is_part_of_the_chain_key`). Secrets are not
+  part of it: two profiles with the same bastion, user and
   method share one session. A shared chain is reused only while alive; `share = false` (test
   connection, CONN-07) never reuses and is never reused. Two concurrent acquires of one chain
   may both connect; the second to finish joins the first and closes its own.
@@ -491,25 +511,40 @@ the vault, the session overlay, the keyring CI and the deferrals.
   `acquire` returns (`partial_chain_failure_releases_in_reverse`). Without a runtime (a drop
   outside tokio), the handles are dropped instead and each session ends on its own, inner hops
   first.
+  - **Kill switch (fix round 1, I1).** russh does not read its handle channel while a key
+    exchange runs, so dropping the `connect_stream` future or the `Handle` of a hop that stalls
+    mid-exchange (a silent bastion or middlebox, a re-key that never finishes) would leave its
+    task, socket and `sessions_open` count forever. Every hop's transport therefore sits behind
+    a kill switch: once tripped it reads end of file and refuses writes, so the session task
+    ends and drops the socket. A guard trips it unless the handshake returned, the host key was
+    verified, the hop authenticated and it joined its chain, which covers a timeout, a cancel,
+    a dropped acquire and a refusal; closing (and dropping) a chain trips every hop's switch
+    after its disconnect (`a_key_exchange_that_stalls_is_released_on_timeout`,
+    `a_key_exchange_that_stalls_is_released_on_cancel`,
+    `a_stalled_inner_hop_releases_the_hops_before_it`).
 - **Death and generations (B20).** Keep-alives run per hop (`keepalive_s` from the profile,
   else `TunnelConfig.keepalive`; `keepalive_max`). When any hop's session ends while the chain
   is not closing (a cut, keep-alive exhaustion), the chain leaves the registry, the rest of it
   closes, and `TunnelEvent::Dead { key, generation }` is sent once; the next acquire builds
   generation + 1 (`keepalive_failure_emits_dead_once_with_generation`). A release is not a
-  death.
+  death. A chain is marked established before its last death check (fix round 1, M2), so a
+  session ending at hand-over either fails the acquire or sends `Dead`, never neither.
 - **Channel hygiene (Q46).** The client only opens `direct-tcpip` channels, originator
   `127.0.0.1:0` (`direct_tcpip_originator_is_loopback_zero`); every server-initiated channel
   type is refused (`server_initiated_channels_are_refused`); no pty, shell, exec, X11 or agent
   forwarding is ever requested. The database host goes into the last `direct-tcpip` request and
   is resolved by the bastion (`database_host_is_resolved_by_the_bastion`). A channel `open`
-  runs on its own task, so a caller that gives up (cancel or timeout) never leaks a channel the
-  server confirms later. A refused channel is `SshError::ChannelOpen { hop, reason }` inside the
+  runs to its end on its own task, without a timeout of its own (russh fails a pending open
+  when the session ends); the timeout bounds only the caller's wait. When the caller gives up
+  first (its timeout, a cancel, a dropped future), a channel the server confirms later is
+  closed at once (fix round 1, I2; `a_channel_confirmed_after_the_timeout_is_closed`). A refused channel is `SshError::ChannelOpen { hop, reason }` inside the
   `io::Error` (`classify_channel_err`); `reason` is a stable id, never the server's text.
 - **Logging is the caller's.** `hacivat-net` has no logger: the lease reports the keys it
   stored (`TunnelLease::trusted_keys`) and `KnownHosts::skipped_lines` stays on the store; the
   pipeline (Task 14) logs both.
 - **testkit.** `TestSshServer` is russh's server on loopback (IPv4 or IPv6) with a fresh
   Ed25519 key, OpenSSH-like `MaxAuthTries` (key probes count) and every method kept on offer
-  after a failure. `TestAgent` speaks the agent protocol's identity and sign requests itself:
+  after a failure; `forward_delay` confirms `direct-tcpip` opens late and `channels_live`
+  counts the relays still open. `TestAgent` speaks the agent protocol's identity and sign requests itself:
   russh's agent server takes a `futures::Stream` and the testkit has no `futures` dependency
   (Task 1 owns the manifests). Ed25519 and ECDSA keys sign; RSA keys refuse.
