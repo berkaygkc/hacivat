@@ -442,6 +442,210 @@ aggregate row; MySQL non-ASCII outside quotes; MySQL grant lines with odd whites
 role grants, grant options, partial revokes and a smuggled second statement; labels, including
 self-contradicting findings; the exact remediation strings.
 
+## m2b-t17 — liveness and recovery
+
+**Supervisor (HV-CONN-04, B18, Q31).** A pure `Supervisor` decides; the default session's actor
+ticks it every second (Tokio `interval`, `MissedTickBehavior::Skip`) while idle. Rules, in
+order: busy → nothing (a running request is activity); a clock jump (`wall_delta − mono_delta >
+5 s` or `mono_delta > tick + 5 s`, since a Windows `Instant` counts suspended time) →
+`Suspect` once, and the actor ticks again at once: with the transaction idle the idle threshold
+is compared against the time since the last activity on the wall clock or the monotonic one,
+whichever is longer (`Disconnect`), else `Ping`; with a transaction open it is always `Ping`
+(one immediate check, never a disconnect; fix round 1, M1); missed ticks are never replayed.
+At the idle threshold an open (`InTx` or `Failed`) transaction gets `IdleTransaction` once per
+idle period (D-014: notify only), otherwise `Disconnect`. A keep-alive is due from the later of
+the last activity and the last ping. Activity is a user statement, a transaction command or a
+schema switch; pings, internal statements and resets are not, so neither keep-alives nor
+background introspection keep an idle production session open. Time the actor spends away from
+its ticks (a ping, a reconnect) is resynced, never taken for a jump. The monotonic clock is
+Tokio's, so a paused test clock drives it. Rejected: OS sleep notifications and the App Nap
+opt-out (platform FFI, M9).
+
+**Policies.** `LivenessPolicy::for_profile`: the profile's `keepalive_s` / `idle_disconnect_s`
+(0 turns either off), else 60 s keep-alive over SSH and none otherwise, and idle by environment
+(dev 4 h, test and staging 2 h, production 1 h, local or untagged off). A ping may take
+`min(keepalive / 2, 10 s)`. `ManagerConfig::default()` stays M2a's: every profile without its
+own keep-alive pings every `liveness`, no environment idle preset applies (only a profile's own
+`idle_disconnect_s`; fix round 1, M3), and a loss is `Lost` (R12). So every M2a test and the
+app boot keep their behaviour until Task 22 switches to `ManagerConfig::m2b()` (`presets` and
+`reconnect`, two separate fields). Nothing on this branch calls `m2b()` but the Docker test;
+Task 22's `boot.rs` line must.
+
+**Recovery (HV-CONN-05, B4, B19).** Only the default console session reconnects, eagerly, in
+place: its handle stays valid. Other sessions of the profile break as before (M3 reconnects
+consoles lazily; pools open new ones), so one lost server or tunnel never starts a reconnect per
+session. A loss is a recovery case when its class is `network.*`, `server.shutdown`,
+`server.starting`, `karagoz.upstream_unreachable`, `karagoz.resume_expired`, or (plan
+amendment, fix round 1, I3) `ssh.channel_open`: a bastion that cannot reach a database while it
+restarts. Only recovery asks, so at a first connect `ssh.channel_open` stays a hard failure.
+
+- **Only an idle session reconnects (fix round 1, C1, controller ruling).** When the lost
+  connection had a transaction open (`InTx`, `Failed`), or the request in flight may have opened
+  one (its state is unknown: a `Tx(Begin)`, a user statement with a `BEGIN`/`START`/`XA` or a
+  `SET autocommit` anywhere in it, any user statement of a Manual session), or the user's own
+  MySQL `autocommit = 0` is in force (see below), nothing is replayed
+  and nothing the user sent for that connection ever runs on another: the session emits
+  `SessionEvent::Lost` (with `open_tx`) and breaks; the profile is `Lost` (Retry), then
+  `SessionLost { lost }`. Rejected: reconnecting and refusing the next `COMMIT` (a later
+  statement would still run outside the lost transaction).
+- **"Had a transaction open" is the last status seen before the loss (fix rounds 2 and 3, C2
+  and R4).** A driver's status after a loss says nothing about the transaction: the PostgreSQL
+  driver reports `Failed` for a connection it found closed (ADR 0002 m2b-t10). So the actor
+  never reads (`observe`) a status after an error that broke the session, and the loss's
+  `open_tx` is the session's status at that point: the last one observed before the loss (a
+  keep-alive changes none; a `COMMIT` that succeeded before its follow-up probe found the loss
+  left `Idle`, so no rollback is claimed for a transaction that committed). An idle autocommit
+  session whose statement finds the loss therefore reconnects; that statement alone is
+  `ConnectionLost { outcome_unknown: true }`, and the toast claims no rollback.
+- **The user's own MySQL `autocommit = 0` (fix rounds 3 and 4, I8, I9, R5).** The session
+  follows the server's `SERVER_STATUS_AUTOCOMMIT` flag, which every OK packet carries (the
+  MySQL driver reports it through `RawConn::autocommit`, a provided trait method; after a
+  server error its `COM_PING` re-reads the flags). So a procedure, a prepared statement,
+  `SET autocommit = @v`, `init_connect` or a global default are all seen. When a driver
+  reports no flag, the statements are the fallback: a user
+  `SET [SESSION | LOCAL | @@session. | @@local. | @@]autocommit = 0 | OFF | FALSE` is
+  remembered whatever its outcome (a batch's `SET` applies even when a later statement fails,
+  I9; it errs toward "off"), and `= 1 | ON | TRUE | DEFAULT` clears it on success, as do a
+  reset and the app's own switch to Auto. `SET GLOBAL` (only the word right before the variable
+  is read) changes other sessions and is ignored. While autocommit is off outside the app's own
+  Manual mode (which sets it itself and replays it), the server runs every statement in an
+  implicit transaction, so the session treats any loss as one inside a transaction (`Lost`,
+  `SessionLost { open_tx }`): it never reconnects, which would also silently turn autocommit
+  back on.
+- **A connection-ending server error is a loss (fix round 2, I6).** A server error whose class
+  is a recovery case after connect (PostgreSQL `57P01`/`57P02` `server.shutdown`, `57P03`
+  `server.starting`, `08006` `network.reset`; on PostgreSQL only at severity `FATAL` or `PANIC`,
+  fix round 3, I7: an `ERROR` with these SQLSTATEs is a remote server's failure relayed by
+  `postgres_fdw` or `dblink`, and the local session and its transaction stay), or
+  one of MySQL's connection-ending codes (1053
+  server shutdown, 1927/3169 connection killed, 4031 interaction timeout; 2006/2013 should a
+  driver report them as server errors), breaks the session on the request it answered, which
+  keeps the server's message. So the recovery starts there, not one request late, and a request
+  that was never sent is never reported "outcome unknown". The MySQL codes live in the session
+  layer (`recovery::connection_ending`), since the driver catalog (`errors.toml`) maps them to no
+  class. Known limits (fix round 4, R6, R7): the severity read is the server's `S` field
+  (`ServerMessage.severity`), which is the non-localized `V` only when the server does not
+  translate it; a translated `FATAL` (the Turkish `ÖLÜMCÜL`) is not recognised, so that
+  connection is found closed one round trip later, and that next request, never sent, is
+  answered `ConnectionLost { outcome_unknown: true }`. No locale renders `ERROR` as `FATAL`, so
+  the rule never misfires. The rule applies to `DbmsKind::Postgres`; when the PostgreSQL-wire
+  engines (Timescale, Yugabyte, Redshift, Cockroach; `Family::Other` today) get drivers, they
+  must take it too (by family, not kind), or be detected one round trip later in the same way.
+- An idle session publishes `Connecting`, not `Broken`. The pool's watcher therefore keeps the
+  session's budget permit through the reconnect (T15 carry-in: a `Broken` session frees it, and
+  an in-place reconnect must never run without one); a session whose recovery fails turns
+  `Broken` and frees it then.
+- The request that found the loss is answered `ConnectionLost { outcome_unknown: true }` and
+  never re-run; queued requests that never ran, and every request sent while the session
+  recovers, are answered `ConnectionLost { outcome_unknown: false }` at once (C1: nothing is
+  queued onto the new connection). The only exception is an internal idempotent read (schema
+  tree, completion): the one that found the loss is re-queued once at the head, and others wait
+  for the new connection; none belongs to a transaction.
+- The reconnector (`SessionHooks.reconnect`) is called once per loss, synchronously, before that
+  answer, so whoever sees the answer already sees `Reconnecting`. It runs the B19 backoff (0, 1,
+  2, 4, 8 s, then 30 s, ±20 % jitter from `getrandom`, Q30; five minutes) with headless
+  `Purpose::Main` connects over the session overlay (Q17): the saved profile with this session's
+  profile changes and every `update_profile` edit, the one-gesture plaintext consent, and the
+  secrets that worked. It never prompts.
+- **The replay is part of the attempt (fix round 1, I1).** Once a connect lands, the actor
+  replays the environment plan (identity, read-only setup, last schema; MySQL's
+  `autocommit = 0` when Manual) within the profile's connect timeout, still serving commands (a
+  close ends it at once). A replay that fails or times out tells the reconnector
+  (`Reconnector::replay_failed`, a provided trait method) and calls it again: that call
+  continues the same loss's schedule and five-minute clock instead of starting over, so a
+  server that accepts and then drops is never hammered.
+- Endings: success → mode and isolation kept, the profile `Connected`, then `SessionLost { lost }`
+  (always); an `auth.*` failure → `Failed` (also when the pipeline marks it `needs_interaction`:
+  the server wants a password the overlay no longer has, and the error dialog offers the
+  re-entry; the brief's `auth_failure_during_reconnect_stops_with_failed`); any other
+  `needs_interaction` (an SSH one-time code or password, an unknown host key) → `Lost` at once,
+  and the capsule's Retry connects interactively; a `cancelled` connect without a stop (the
+  saved profile moved while it ran; T15 I1 refused it) → the next attempt, to the new
+  destination (M7); any other non-recovery class → `Failed`; five minutes → `Lost` with the last
+  failure's class; disconnect, `forget` or quit → ends at once (mid-backoff, mid-connect or
+  mid-replay; the shutdown budget is kept).
+- **Edits during the first connect (fix round 1, I2).** The manager keeps each profile's latest
+  saved profile; when the connect lands, the `SessionManager` starts from it, not from the
+  profile the connect started with. If the edit sent the connection elsewhere (T15's
+  destination rule), the landed connection is closed (its permit returns after the close) and
+  the saved destination is connected anew, without the draft password typed for the old one; a
+  consent the saved profile took back is stripped as R1 strips it.
+
+**What a reconnect loses (B19).** A first-keyword scan of successful user statements, outside
+comments and quoted text: `CREATE [OR REPLACE] [GLOBAL|LOCAL] TEMP[ORARY]`, `SET` (not
+`SET LOCAL` or `SET TRANSACTION`), `LOCK`, `PREPARE`/`DEALLOCATE`, and the session lock
+functions (`pg_advisory_lock`, `pg_try_advisory_lock`, their `_shared` forms, `GET_LOCK`,
+`sp_getapplock`; not `pg_advisory_xact_lock`). The transaction status at the loss gives
+`open_tx`. The scan starts over after each reconnect and each reset. Known limits (fix round 1,
+M5), each erring toward reporting more: `#` is never taken for a comment (it is a PostgreSQL
+operator, so a lock call after it is still seen); a backslash inside quotes leaves the end of a
+string unsure (MySQL escapes, PostgreSQL does not), so quoted text is read too. M3 replaces the
+scan with the classifier.
+
+**Events before ends (fix round 4, I10, the Task 18 merge).** A session sends what explains
+its end before it publishes that end: `Lost` before `Broken`, `IdleDisconnected` before
+`Disconnected`, and Task 18's `EnforcementGap` before `Broken` (moved at the merge). The
+manager's monitor reads events before states (`biased`), and before it stops on `Broken` or
+`Disconnected` it drains and relays whatever is still queued, so a read-only default session's
+gap notice is never lost behind its `Lost`. In the read-only path the guard's discard breaks
+the session before the status is read (T17's order kept at the merge), so C2 cannot come back
+there.
+
+**Idle disconnect.** The session emits `SessionEvent::IdleDisconnected` (an additive variant,
+fix round 1, M2), then closes itself gracefully; the manager reports `LiveState::Disconnected`
+and `ConnectionEvent::IdleDisconnected`, and the profile's sessions and overlay are dropped
+(Q17). `ForSession` secrets stay (it is not the user's disconnect). Any other close of the
+default session (only the `ConnectionManager` should close it; `default_session`'s docs say so)
+ends the profile's connection as `Disconnected` without that event. A default session broken by
+`cancelled` (a deactivated request, an unsettled cancel) also ends `Disconnected`, not
+`Lost { cancelled }` (M7). Carried to M3: idle time is the default session's alone, and its end
+closes every session of the profile.
+
+**SSH group invalidation (B20).** On `TunnelEvent::Dead { key, generation }` every default
+session over that generation is pinged; the ping fails over the dead chain and each session
+starts its one recovery; the dependents' parked pooled sessions are closed, so none is handed out
+again (fix round 1, M6). Reconnects of one generation's dependents take a per-generation lock,
+so the first brings the chain back and the others share it (one SSH session, not one per
+profile). Locks nobody holds are forgotten. `FakeDriver` connections that hold their stream
+(`consumes_factory`) now fail their ping once that stream ends, so the tests see a connection
+die with its tunnel (fix round 1, I4).
+
+**T15 re-review carry-ins.** R1: a connect started before a TLS-mode change or an unticked
+"allow public plaintext" never brings the consent (or an `AllowPublicPlaintext` change) back
+into the overlay when it lands (a consent generation, bumped by `update_profile`). R2: an
+`open` or `pooled` request still waiting for a permit or a released session when `close_all`
+runs ends with `cancelled` and never connects afterwards.
+
+**Tests.** `tests/liveness.rs` (pure supervisor, both clocks driven by hand), `tests/recovery.rs`
+(schedule and jitter bounds, every class, the scan and its limits; unit tests for the
+connection-ending codes and the batch scan), `tests/manager_m2b.rs`:
+every `FakeDriver`-only test on a paused clock with condition waits (Q25, fix round 1, I5);
+the SSH tests (a one-time code → `Lost`, one SSH death → one reconnect per dependent and one new
+chain) on the in-process testkit server in real time. Regressions of the review's hostile
+scenarios: H1 (a loss inside a transaction; requests during the backoff, Auto and Manual),
+H2 (a failing replay follows the backoff and gives up), H3 (a jump with an open transaction
+pings), H4 (a direct close is not an idle disconnect), H8 (a close during a hanging replay; the
+replay timeout), H10 (an edit during the first connect, same and moved destination); round 2:
+H11 (`57P01`, `57P03`, MySQL 4031 answering a statement start the recovery; an ordinary error
+does not), H12 (an idle autocommit statement, a read-only session's schema switch and an
+internal read that find the loss reconnect; a statement inside a transaction is still `Lost`),
+and a batch with a later `BEGIN`, `SET autocommit` or `XA START` is `Lost`; round 3: H13 (the
+user's MySQL `autocommit = 0`: a lost `UPDATE` and an idle loss are `Lost`, a later `COMMIT`
+never runs, `= 1` and `SET GLOBAL` reconnect), H14 (a relayed `ERROR` `08006`/`08001`/`57P01`
+keeps the session and its `Failed` transaction), H15 (a `COMMIT` whose follow-up probe finds the
+loss reconnects with no rollback claimed); round 4: H16 (`SET autocommit = 0; <typo>` then a
+lost `UPDATE` is `Lost`, with and without the server's flag), R5 (a procedure, a prepared
+statement, a variable and a server default seen through the flag; the flag back on reconnects;
+the app's own Manual mode still reconnects and replays), I10 (a read-only default session's
+guard gap relayed before `Lost`, 20 rounds on a multi-thread runtime; a read-only statement that
+finds the loss reconnects with no rollback claimed). A Docker test on mysql84 runs
+`SET autocommit = 0; SELEC 1` (the SET applies, the batch fails), then an `UPDATE` in flight
+killed from the admin connection: `Lost` with `SessionLost { open_tx }`, never a reconnect. A
+Docker test ends the default
+session's backend from the admin connection on pg17 and mysql84 (`pg_terminate_backend`,
+`KILL`); an Auto-mode user `SELECT 1` finds the loss within three round trips, the session
+reconnects, and `SessionLost` claims no rollback.
+
 ## m2b-t18 — read-only execution and labels
 
 `hacivat-session::session::readonly` runs what `hacivat-guard` decides (HV-SESS-04,

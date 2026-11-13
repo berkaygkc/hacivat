@@ -667,3 +667,16 @@ fn the_transaction_status_comes_from_the_status_flags() {
         TxStatus::InTx
     );
 }
+
+// ## m2b-t17-liveness
+#[test]
+fn the_autocommit_setting_comes_from_the_status_flags() {
+    use hacivat_driver_mysql::autocommit_from_status;
+    use mysql_async::consts::StatusFlags as F;
+    assert!(autocommit_from_status(F::SERVER_STATUS_AUTOCOMMIT));
+    assert!(autocommit_from_status(
+        F::SERVER_STATUS_AUTOCOMMIT | F::SERVER_STATUS_IN_TRANS
+    ));
+    assert!(!autocommit_from_status(F::empty()));
+    assert!(!autocommit_from_status(F::SERVER_STATUS_IN_TRANS));
+}

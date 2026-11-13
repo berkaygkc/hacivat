@@ -121,7 +121,15 @@ fn ask_through_port(vcx: &VisualTestContext, q: Question) -> Rc<RefCell<Option<A
 #[gpui::test]
 fn every_new_question_routes_and_escape_answers_cancelled(cx: &mut TestAppContext) {
     let vcx = shell_with_connections(cx, "en");
-    for q in all_m2b_questions() {
+    // ## m2b-t19-tls: the certificate and public-plaintext questions open their prompts now
+    // (Task 19; `connections_tls.rs` routes and answers them).
+    let stubs = all_m2b_questions().into_iter().filter(|q| {
+        !matches!(
+            q,
+            Question::Certificate { .. } | Question::PlaintextPublic { .. }
+        )
+    });
+    for q in stubs {
         let what = format!("{q:?}");
         let a = ask_through_port(vcx, q);
         settle_until(vcx, WAIT, || {

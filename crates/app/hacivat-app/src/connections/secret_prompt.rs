@@ -175,7 +175,7 @@ impl SecretPromptView {
         });
         cx.spawn(async move |_, cx| {
             if let Ok(false) = rx.await {
-                let _ = select.update(cx, |s, cx| {
+                select.update(cx, |s, cx| {
                     s.set_options(retention_options(false), cx);
                     if RETENTIONS.get(s.selected()) == Some(&Retention::Forever) {
                         let fallback = RETENTIONS

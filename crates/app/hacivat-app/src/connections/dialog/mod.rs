@@ -49,7 +49,9 @@ use hacivat_l10n::{Text, ids};
 use hacivat_net::TlsMode;
 use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
 use hacivat_secrets::{AuthProviderId, Retention};
-use hacivat_session::pipeline::{ApprovedRoots, IssueCode, ValidationIssue, validate_with};
+use hacivat_session::pipeline::{
+    ApprovedRoots, IssueCode, ProfileChange, ValidationIssue, validate_with_passphrase,
+};
 use hacivat_session::profile::{
     Profile, ProfileDraft, ProfileEndpoint, fold_typed_options, is_local_endpoint,
     needs_environment_prompt, production_hint, suggest_name,
@@ -67,6 +69,7 @@ use hacivat_ui_core::gpui_surface::{
 use secrecy::SecretString;
 use tokio::sync::oneshot;
 
+use crate::connections::cert_dialog;
 use crate::connections::fixes::{FixAction, MAX_REJECTIONS};
 use crate::connections::model::{ConnectionsModel, SaveError};
 use crate::connections::prod_prompt::ask_environment;
@@ -159,6 +162,8 @@ pub(crate) struct Focus {
     pub(crate) choose_ca: FocusHandle,
     pub(crate) choose_cert: FocusHandle,
     pub(crate) choose_key: FocusHandle,
+    // ## m2b-t19-tls
+    pub(crate) remove_pin: FocusHandle,
     pub(crate) add_extra: FocusHandle,
     pub(crate) notice_primary: FocusHandle,
     pub(crate) notice_secondary: FocusHandle,
@@ -188,6 +193,7 @@ impl Focus {
             choose_ca: stop(cx),
             choose_cert: stop(cx),
             choose_key: stop(cx),
+            remove_pin: stop(cx),
             add_extra: stop(cx),
             notice_primary: stop(cx),
             notice_secondary: stop(cx),
@@ -250,6 +256,20 @@ pub struct ConnectionDialog {
     pub(crate) retries: Retries,
     /// The destination of the test running now.
     testing: Option<Destination>,
+    // ## m2b-t19-tls
+    /// The endpoint `tls.allow_public_plaintext` was given for: the consent goes when the host
+    /// or the port changes (T14 review I2), whatever changed them.
+    consent_endpoint: Option<ProfileEndpoint>,
+    /// CA files a Test's certificate question imported: approved (app-wide) only when the
+    /// profile that names one is saved (T14 review M3).
+    test_ca_imports: Vec<PathBuf>,
+    // ## m2b-t19-tls (fix round 1)
+    /// The Test-imported CA file of the save in flight, approved app-wide once it succeeded
+    /// (review M7).
+    pending_approval: Option<PathBuf>,
+    /// Changes `apply_changes` saved for this profile while a save of the dialog was in flight,
+    /// with the endpoint they were made for: the save carries them too (review I1).
+    absorbed_while_saving: Vec<(ProfileEndpoint, ProfileChange)>,
 }
 
 // ## m2a-dialog-retries
@@ -295,6 +315,46 @@ pub fn open_dialog(window: &Window, cx: &App) -> Option<Entity<ConnectionDialog>
     cx.try_global::<OpenDialogs>()
         .and_then(|g| g.0.get(&window_key(window)))
         .and_then(WeakEntity::upgrade)
+}
+
+// ## m2b-t19-tls (fix round 1, I1)
+/// Hands the changes `ConnectionsModel::apply_changes` just saved for profile `id` (made for
+/// its saved `endpoint`) to every open edit dialog of `id`, so none saves an older draft over
+/// them. Deferred to the end of the current update: the caller may be updating that window.
+pub(crate) fn absorb_saved_changes(
+    id: ProfileId,
+    endpoint: ProfileEndpoint,
+    changes: Vec<ProfileChange>,
+    cx: &mut App,
+) {
+    let open: Vec<(u64, Entity<ConnectionDialog>)> = cx
+        .try_global::<OpenDialogs>()
+        .map(|g| {
+            g.0.iter()
+                .filter_map(|(window, d)| Some((*window, d.upgrade()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (window_id, dialog) in open {
+        if dialog.read(cx).draft.profile.id != id {
+            continue;
+        }
+        let Some(window) = cx
+            .windows()
+            .into_iter()
+            .find(|w| w.window_id().as_u64() == window_id)
+        else {
+            continue;
+        };
+        let (endpoint, changes) = (endpoint.clone(), changes.clone());
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                dialog.update(cx, |d, cx| {
+                    d.absorb_saved_changes(&endpoint, &changes, window, cx);
+                });
+            });
+        });
+    }
 }
 
 /// Whether a connection dialog is open (the `enabled` of its commands; `run` then finds the
@@ -447,7 +507,8 @@ pub(crate) const ENGINES: [DbmsKind; 4] = [
     DbmsKind::Sqlite,
 ];
 
-/// MySQL and MariaDB: no VerifyCa in M2a (P11), plaintext under Auto only to loopback.
+/// MySQL and MariaDB: plaintext under Auto only to loopback (VerifyCa works for them since M2b,
+/// B10).
 pub(crate) fn is_mysql_family(kind: DbmsKind) -> bool {
     matches!(kind, DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb)
 }
@@ -616,7 +677,14 @@ impl ConnectionDialog {
             subscriptions,
             retries: Retries::default(),
             testing: None,
+            consent_endpoint: None,
+            test_ca_imports: Vec::new(),
+            pending_approval: None,
+            absorbed_while_saving: Vec::new(),
         };
+        if dialog.draft.profile.tls.allow_public_plaintext {
+            dialog.consent_endpoint = Some(dialog.draft.profile.endpoint.clone());
+        }
         let extras = dialog.draft.profile.extra.clone();
         for (k, v) in extras {
             dialog.push_extra_row(&k, &v, window, cx);
@@ -718,11 +786,6 @@ impl ConnectionDialog {
         self.strip.clone()
     }
 
-    /// Whether the TLS mode select offers `mode` disabled (P11).
-    pub fn tls_option_disabled(&self, mode: TlsMode) -> bool {
-        form::tls_mode_disabled(self.draft.profile.engine, mode)
-    }
-
     /// Whether the Remember select offers `retention` disabled (no keyring, P36).
     pub fn remember_option_disabled(&self, retention: Retention) -> bool {
         retention == Retention::Forever && !self.keyring_available
@@ -759,6 +822,7 @@ impl ConnectionDialog {
             ("choose-ca", &f.choose_ca),
             ("choose-cert", &f.choose_cert),
             ("choose-key", &f.choose_key),
+            ("remove-pin", &f.remove_pin),
             ("add-extra", &f.add_extra),
             ("notice-primary", &f.notice_primary),
             ("notice-secondary", &f.notice_secondary),
@@ -916,8 +980,17 @@ impl ConnectionDialog {
         self.after_edit(window, cx);
     }
 
-    /// After any change of the draft: the automatic environment, the URL row, the pgpass line.
+    /// After any change of the draft: the plaintext consent of another endpoint, the automatic
+    /// environment, the URL row, the pgpass line.
     pub(crate) fn after_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // ## m2b-t19-tls: "Don't ask again" was answered for one host and port (B7, T14 I2).
+        let tls = &mut self.draft.profile.tls;
+        if tls.allow_public_plaintext
+            && self.consent_endpoint.as_ref() != Some(&self.draft.profile.endpoint)
+        {
+            tls.allow_public_plaintext = false;
+            self.consent_endpoint = None;
+        }
         self.apply_env_rule();
         self.sync_env_select(cx);
         self.sync_url(window, cx);
@@ -1067,8 +1140,8 @@ impl ConnectionDialog {
     }
 
     /// A draft of `profile` with its password (when it signs in with one) and the TLS key
-    /// passphrase a pasted `sslpassword` gave (kept as `TlsKeyPassphrase`; the field is hidden
-    /// until encrypted keys are supported, ruling B).
+    /// passphrase (the Key passphrase field, or a pasted `sslpassword`; kept as
+    /// `TlsKeyPassphrase`).
     fn draft_of(&self, profile: Profile) -> ProfileDraft {
         let password = match profile.auth {
             AuthProviderId::Password => self.draft.password.clone(),
@@ -1449,6 +1522,13 @@ impl ConnectionDialog {
     /// gesture's rejections (it started from ours, so it only grows). Once the attempts are
     /// used up, the focus leaves Test or Save and connect (now disabled) for Host.
     fn test_finished(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // ## m2b-t19-tls: what the test's answers changed goes to the draft.
+        let changes = match self.strip.read(cx).state() {
+            TestStripState::Done(report) => report.profile_changes.clone(),
+            _ => Vec::new(),
+        };
+        let tested = self.testing.clone();
+        self.apply_test_changes(tested.as_ref(), changes, window, cx);
         let Some(destination) = self.testing.take() else {
             return;
         };
@@ -1511,20 +1591,175 @@ impl ConnectionDialog {
                 self.draft.profile.allow_unsupported_server = true;
                 self.run_test(window, cx);
             }
-            FixAction::EncryptWithoutVerifying => {
-                self.draft.profile.tls.mode = TlsMode::Require;
-                self.write_fields(cx);
-                self.after_edit(window, cx);
-                self.run_test(window, cx);
-            }
             FixAction::SupportedVersions => cx.open_url(SUPPORTED_VERSIONS_URL),
-            // ## m2b-t01-interfaces: the dialog's M2b flows belong to their owners (Tasks 19,
-            // 20, 21); the test strip never offers them before that.
-            FixAction::ReviewCertificate
-            | FixAction::ImportCa
-            | FixAction::ConnectThroughSsh
-            | FixAction::ReviewHostKey => {}
+            // ## m2b-t19-tls: the review's change goes to the draft, then the test runs again.
+            FixAction::ReviewCertificate => self.review_certificate(window, cx),
+            FixAction::ImportCa => {
+                let me = cx.weak_entity();
+                let window_handle = window.window_handle();
+                cert_dialog::pick_ca(cx, move |path, cx| {
+                    let _ = window_handle.update(cx, |_, window, cx| {
+                        let _ = me.update(cx, |d, cx| {
+                            d.apply_review_change(ProfileChange::SetCaFile(path), window, cx);
+                        });
+                    });
+                });
+            }
+            // ## m2b-t01-interfaces: the dialog's SSH flows belong to Tasks 20 and 21; the test
+            // strip never offers them before that.
+            FixAction::ConnectThroughSsh | FixAction::ReviewHostKey => {}
         }
+    }
+
+    // ## m2b-t19-tls
+
+    /// "Review certificate…" from the test strip: the review of the failed test's certificate;
+    /// its change goes to the draft (a Test never writes the saved profile).
+    fn review_certificate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let review = match self.strip.read(cx).state() {
+            TestStripState::Done(report) => {
+                report.error.as_ref().and_then(|e| e.certificate.clone())
+            }
+            _ => None,
+        };
+        let Some(review) = review else {
+            return;
+        };
+        let name = self.profile_to_save().name;
+        let env = self.draft.profile.environment;
+        let me = cx.weak_entity();
+        cert_dialog::review_for_draft(
+            review,
+            name,
+            env,
+            move |change, window, cx| {
+                let _ = me.update(cx, |d, cx| d.apply_review_change(change, window, cx));
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// A change the review (or Import CA) made from the test strip: into the draft, then the
+    /// test again. A CA file the user picked is a pick of this dialog: it joins the approved
+    /// roots like one chosen with Choose… (T16 ruling A).
+    fn apply_review_change(
+        &mut self,
+        change: ProfileChange,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match change {
+            ProfileChange::SetCaFile(path) => {
+                self.open_tls = true;
+                self.picked(Field::Ca, path, window, cx);
+            }
+            change => {
+                cert_dialog::apply_change(&mut self.draft.profile, &change);
+                self.after_edit(window, cx);
+            }
+        }
+        self.run_test(window, cx);
+    }
+
+    /// What a finished Test's answers changed (a pin, a CA file, the plaintext consent), into
+    /// the draft only (T14 review M3), and only while the draft still names the tested server.
+    fn apply_test_changes(
+        &mut self,
+        tested: Option<&Destination>,
+        changes: Vec<ProfileChange>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let p = &self.draft.profile;
+        let same_server = tested.is_some_and(|d| d.engine == p.engine && d.endpoint == p.endpoint);
+        if changes.is_empty() || !same_server {
+            return;
+        }
+        for change in &changes {
+            match change {
+                ProfileChange::SetCaFile(path) => self.test_ca_imports.push(path.clone()),
+                ProfileChange::AllowPublicPlaintext => {
+                    self.consent_endpoint = Some(self.draft.profile.endpoint.clone());
+                }
+                // ## m2b-t21-prompts: a Test never reports an SSH retention (Main only).
+                ProfileChange::AddPin(_)
+                | ProfileChange::ReplacePin { .. }
+                | ProfileChange::SshRetention(_) => {}
+            }
+            cert_dialog::apply_change(&mut self.draft.profile, change);
+        }
+        if self.draft.profile.tls.ca_file.is_some() {
+            self.open_tls = true;
+        }
+        self.write_fields(cx);
+        self.after_edit(window, cx);
+    }
+
+    // ## m2b-t19-tls (fix round 1, I1)
+    /// Changes `ConnectionsModel::apply_changes` just saved for this dialog's profile (a pin, a
+    /// CA file, the plaintext consent), made for the saved `endpoint`: into the draft too, so
+    /// its Save never writes an older draft over them. The consent joins only a draft that still
+    /// names that endpoint (`after_edit` drops it otherwise). A save in flight carries them too.
+    fn absorb_saved_changes(
+        &mut self,
+        endpoint: &ProfileEndpoint,
+        changes: &[ProfileChange],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for change in changes {
+            if *change == ProfileChange::AllowPublicPlaintext {
+                if self.draft.profile.endpoint != *endpoint {
+                    // The draft names another server now: that consent is not for it.
+                    continue;
+                }
+                self.consent_endpoint = Some(endpoint.clone());
+            }
+            cert_dialog::apply_change(&mut self.draft.profile, change);
+            if self.saving {
+                self.absorbed_while_saving
+                    .push((endpoint.clone(), change.clone()));
+            }
+        }
+        self.write_fields(cx);
+        self.after_edit(window, cx);
+    }
+
+    /// The effective TLS endpoint of the draft: the host (`localhost` for a socket) and the
+    /// port, the engine's default when none is typed (as the pipeline names pins).
+    pub(crate) fn tls_endpoint(&self) -> (String, u16) {
+        let p = &self.draft.profile;
+        let host = match &p.endpoint {
+            ProfileEndpoint::Server { host, .. } => host.trim().to_string(),
+            _ => "localhost".to_string(),
+        };
+        let port = form::endpoint_port(&p.endpoint)
+            .or_else(|| {
+                EngineCatalog::embedded()
+                    .get(p.engine)
+                    .and_then(|e| e.default_port)
+            })
+            .unwrap_or_default();
+        (host, port)
+    }
+
+    /// The pin of the draft's endpoint, if any.
+    pub(crate) fn current_pin(&self) -> Option<hacivat_net::CertPin> {
+        let (host, port) = self.tls_endpoint();
+        self.draft.profile.tls.pin_for(&host, port).cloned()
+    }
+
+    /// "Remove pin": the endpoint's pin goes from the draft (saved with the profile).
+    pub(crate) fn remove_pin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (host, port) = self.tls_endpoint();
+        let endpoint = hacivat_net::pin_endpoint(&host, port);
+        self.draft
+            .profile
+            .tls
+            .pins
+            .retain(|p| !cert_dialog::same_endpoint(&p.endpoint, &endpoint));
+        self.after_edit(window, cx);
     }
 
     /// Focuses `field`, opening its section first.
@@ -1571,12 +1806,38 @@ impl ConnectionDialog {
             .try_global::<DialogEnv>()
             .map(|e| e.approved_roots.clone())
             .unwrap_or_else(ApprovedRoots::for_user);
+        // ## m2b-t19-tls: a CA file a Test imported counts as approved for this save's check, and
+        // joins the app-wide roots once the save succeeded (fix round 1, M7; the Test itself
+        // approved nothing app-wide).
+        self.pending_approval = self
+            .draft
+            .profile
+            .tls
+            .ca_file
+            .clone()
+            .filter(|ca| self.test_ca_imports.contains(ca));
+        let roots = match &self.pending_approval {
+            Some(ca) => {
+                let checked = ApprovedRoots::new(roots.list());
+                checked.add(ca.clone());
+                checked
+            }
+            None => roots,
+        };
+        self.absorbed_while_saving.clear();
         let profile = self.profile_to_save();
         let checked = profile.clone();
+        // ## m2b-t19-tls: an encrypted client key opens with the typed passphrase (T3 carry).
+        let passphrase = self.draft.tls_key_passphrase.clone();
         let (tx, rx) = oneshot::channel();
         // `validate` reads the TLS files and stats the SQLite path: never on the UI thread.
         runtime.spawn_blocking(move || {
-            let _ = tx.send(validate_with(&checked, EngineCatalog::embedded(), &roots));
+            let _ = tx.send(validate_with_passphrase(
+                &checked,
+                EngineCatalog::embedded(),
+                &roots,
+                passphrase.as_ref(),
+            ));
         });
         self.saving = true;
         cx.spawn_in(window, async move |this, cx| {
@@ -1664,11 +1925,18 @@ impl ConnectionDialog {
 
     fn commit(
         &mut self,
-        profile: Profile,
+        mut profile: Profile,
         connect: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // ## m2b-t19-tls (fix round 1, I1): what `apply_changes` saved meanwhile stays saved.
+        for (endpoint, change) in std::mem::take(&mut self.absorbed_while_saving) {
+            if change == ProfileChange::AllowPublicPlaintext && profile.endpoint != endpoint {
+                continue;
+            }
+            cert_dialog::apply_change(&mut profile, &change);
+        }
         let draft = self.draft_of(profile);
         let password = draft.password.clone();
         let name = draft.profile.name.clone();
@@ -1710,6 +1978,12 @@ impl ConnectionDialog {
             )
         });
         ToastQueue::push(cx, Toast::new(ToastKind::Info, text));
+        // ## m2b-t19-tls (fix round 1, M7): a Test-imported CA joins the roots once saved.
+        if let Some(ca) = self.pending_approval.take()
+            && let Some(env) = cx.try_global::<DialogEnv>()
+        {
+            env.approved_roots.add(ca);
+        }
         if let Some(password) = connect {
             // ## m2a-dialog-retries: the connect continues the dialog's count (P8).
             ConnectionsModel::connect_continuing(cx, id, password, self.rejections());
@@ -1850,6 +2124,47 @@ pub fn sqlite_fixture(window: &mut Window, cx: &mut App) {
                 cx.notify();
             });
             d.edit_field(Field::File, "~/code/shop/app.db".to_string(), window, cx);
+        });
+    }
+}
+
+// ## m2b-t19-tls
+/// Shots fixture: an edit dialog whose TLS section is open on a pinned endpoint, signing in
+/// with a client certificate (the pinned row, Remove pin and the key passphrase with Remember).
+#[cfg(feature = "shots")]
+pub fn tls_pinned_fixture(window: &mut Window, cx: &mut App) {
+    ensure_connections(cx);
+    let mut profile = Profile {
+        name: "reports-qa".to_string(),
+        environment: Some(EnvTag::Test),
+        endpoint: ProfileEndpoint::Server {
+            host: "db-qa.acme.io".to_string(),
+            port: Some(5432),
+        },
+        user: Some("deploy".to_string()),
+        auth: AuthProviderId::ClientCert,
+        ..Profile::default()
+    };
+    profile.tls.client_cert = Some(hacivat_net::ClientCertPaths {
+        cert: PathBuf::from("/Users/deploy/.postgresql/postgresql.crt"),
+        key: PathBuf::from("/Users/deploy/.postgresql/postgresql.key"),
+    });
+    profile.tls.pins = vec![hacivat_net::CertPin {
+        endpoint: "db-qa.acme.io:5432".to_string(),
+        sha256: crate::connections::cert_dialog::sample_review(None).sha256,
+    }];
+    let id = profile.id;
+    let draft = ProfileDraft {
+        is_new: true,
+        ..ProfileDraft::edit(profile)
+    };
+    // The model's list changes at once; the write runs on the profile writer.
+    ConnectionsModel::save(cx, draft).detach();
+    open_connection_dialog(DialogMode::Edit(id), window, cx);
+    if let Some(dialog) = open_dialog(window, cx) {
+        dialog.update(cx, |d, cx| {
+            d.open_tls = true;
+            cx.notify();
         });
     }
 }

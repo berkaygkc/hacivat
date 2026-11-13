@@ -558,4 +558,12 @@ impl RawConn for MySqlConn {
     fn backend_id(&self) -> Option<u64> {
         self.conn.as_ref().map(|c| u64::from(c.id()))
     }
+
+    // ## m2b-t17-liveness (Task 17 fix round 4, I9/R5)
+    /// `SERVER_STATUS_AUTOCOMMIT` in the last OK packet: after a statement, and after a server
+    /// error from the `COM_PING` that re-reads the flags (`exec::settle`).
+    fn autocommit(&self) -> Option<bool> {
+        let ok = self.conn.as_ref()?.last_ok_packet()?;
+        Some(crate::exec::autocommit_from_status(ok.status_flags()))
+    }
 }

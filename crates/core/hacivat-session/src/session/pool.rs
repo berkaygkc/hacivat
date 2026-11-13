@@ -55,7 +55,8 @@ use crate::pipeline::{
     ProfileChange, Purpose, SessionSecrets,
 };
 use crate::profile::Profile;
-use crate::session::actor::{SessionHooks, SideConnector, spawn_session};
+use crate::session::actor::{Reconnector, SessionHooks, SideConnector, spawn_supervised};
+use crate::session::liveness::LivenessPolicy;
 use crate::session::{
     ClientId, ClosePolicy, Command, Escalation, Request, SessionHandle, SessionId, SessionKind,
     SessionSnapshot, SessionSpec, SessionState,
@@ -163,8 +164,7 @@ impl Overlay {
             self.secrets = SessionSecrets::default();
             self.plaintext_consent = false;
         }
-        let (old, new) = (&self.profile.tls, &profile.tls);
-        if old.mode != new.mode || (old.allow_public_plaintext && !new.allow_public_plaintext) {
+        if takes_consent_back(&self.profile, &profile) {
             self.plaintext_consent = false;
         }
         self.profile = profile;
@@ -300,6 +300,11 @@ struct State {
     /// (review C1).
     waiting: HashMap<PoolKey, VecDeque<Waiter>>,
     next_waiter: u64,
+    // ## m2b-t17-liveness
+    /// Bumped when the saved profile takes the plaintext consent back (a TLS-mode change, an
+    /// unticked "allow public plaintext"): a connect started before it never brings the consent
+    /// back when it lands (T15 re-review R1).
+    consent_gen: u64,
 }
 
 /// A `pooled` request waiting for a released session or a permit, whichever comes first.
@@ -342,10 +347,22 @@ impl State {
     /// destination `used` connected to (review I1): nothing of that connect is kept, and the
     /// caller closes it. A new overlay starts from the saved profile, never from the
     /// connect's snapshot.
-    fn absorb(&mut self, used: &Profile, live: &mut LiveConnection) -> Option<Arc<Profile>> {
+    fn absorb(
+        &mut self,
+        used: &Profile,
+        live: &mut LiveConnection,
+        consent_gen: u64,
+    ) -> Option<Arc<Profile>> {
         if !same_destination(used, &self.profile) {
             return None;
         }
+        // ## m2b-t17-liveness (T15 R1)
+        live.plaintext_consent = keep_consent(
+            consent_gen,
+            self.consent_gen,
+            live.plaintext_consent,
+            &mut live.profile_changes,
+        );
         let secrets = mem::take(&mut live.secrets_used);
         let saved = self.profile.clone();
         let overlay = self.overlay.get_or_insert_with(|| Overlay::new(saved));
@@ -464,6 +481,7 @@ impl SessionManager {
                 default: None,
                 waiting: HashMap::new(),
                 next_waiter: 0,
+                consent_gen: 0,
             }),
             default_lock: tokio::sync::Mutex::new(()),
             me: me.clone(),
@@ -492,10 +510,11 @@ impl SessionManager {
         ix: Interaction,
     ) -> BoxFuture<'static, Result<SessionHandle, ConnectError>> {
         let this = self.clone();
+        let gate = self.gate();
         if self.single() {
             return Box::pin(async move {
                 if spec.department != Department::Mcp
-                    && let Some(handle) = this.shared(spec.read_only, ix.clone()).await?
+                    && let Some(handle) = this.shared(spec.read_only, ix.clone(), &gate).await?
                 {
                     return Ok(handle);
                 }
@@ -504,8 +523,8 @@ impl SessionManager {
                 if this.budget.max() <= 1 {
                     return Err(no_room());
                 }
-                let permit = this.permit(priority(&spec.kind)).await;
-                this.start(spec, ix, permit, false).await
+                let permit = gate.wait(this.permit(priority(&spec.kind))).await?;
+                this.start(spec, ix, permit, false, &gate).await
             });
         }
         // Queued now, not at the first poll: the order of calls is the order of service.
@@ -514,8 +533,8 @@ impl SessionManager {
         let as_default = spec.kind == SessionKind::Console(ClientId::DEFAULT)
             && spec.department != Department::Mcp;
         Box::pin(async move {
-            let permit = permit.await;
-            this.start(spec, ix, permit, as_default).await
+            let permit = gate.wait(permit).await?;
+            this.start(spec, ix, permit, as_default, &gate).await
         })
     }
 
@@ -529,8 +548,9 @@ impl SessionManager {
         let read_only = self.lock().current().read_only;
         if self.single() {
             let this = self.clone();
+            let gate = self.gate();
             return Box::pin(async move {
-                if let Some(handle) = this.shared(read_only, Interaction::Headless).await? {
+                if let Some(handle) = this.shared(read_only, Interaction::Headless, &gate).await? {
                     return Ok(PooledSession {
                         handle,
                         release: None,
@@ -565,12 +585,15 @@ impl SessionManager {
                 })
             });
         }
+        let gate = self.gate();
         let permit = self.permit(priority(&kind));
         let (mut handed, waiter) = self.wait_for_release(key);
         let this = self.clone();
         Box::pin(async move {
             let handed_over = tokio::select! {
                 biased;
+                // ## m2b-t17-liveness (T15 R2): `close_all` ends the wait.
+                () = gate.closed.cancelled() => return Err(closed()),
                 Ok(handle) = &mut handed => Ok(handle),
                 permit = permit => {
                     // Out of the list first; a session handed meanwhile still wins.
@@ -590,7 +613,7 @@ impl SessionManager {
                         read_only,
                         department: Department::Introspection,
                     };
-                    this.start(spec, Interaction::Headless, permit, false)
+                    this.start(spec, Interaction::Headless, permit, false, &gate)
                         .await?
                 }
             };
@@ -620,6 +643,10 @@ impl SessionManager {
     }
 
     /// The default session, while it can run requests.
+    ///
+    /// Only the `ConnectionManager` (and this manager's `close_all`) closes it: a client that
+    /// closes it directly ends the profile's connection (`Disconnected`), since the profile
+    /// lives on its default session (B4; fix round 1, review M2).
     pub fn default_session(&self) -> Option<SessionHandle> {
         self.lock().default.clone().filter(alive)
     }
@@ -661,6 +688,10 @@ impl SessionManager {
     /// profile still names the same destination.
     pub fn update_profile(&self, profile: Arc<Profile>) {
         let mut st = self.lock();
+        // ## m2b-t17-liveness (T15 R1): connects in flight lose the consent too.
+        if takes_consent_back(&st.profile, &profile) {
+            st.consent_gen += 1;
+        }
         if let Some(overlay) = st.overlay.as_mut() {
             overlay.replace_profile(profile.clone());
         }
@@ -716,6 +747,7 @@ impl SessionManager {
         self: &Arc<Self>,
         read_only: bool,
         ix: Interaction,
+        gate: &Gate,
     ) -> Result<Option<SessionHandle>, ConnectError> {
         let serves = |h: SessionHandle| (!read_only || h.state.borrow().read_only).then_some(h);
         let mut one_at_a_time = self.default_lock.lock().await;
@@ -730,7 +762,7 @@ impl SessionManager {
             Some(permit) => permit,
             None => {
                 drop(one_at_a_time);
-                let permit = self.permit(Priority::Console).await;
+                let permit = gate.wait(self.permit(Priority::Console)).await?;
                 one_at_a_time = self.default_lock.lock().await;
                 if let Some(handle) = self.default_session() {
                     // Someone else opened it meanwhile; this permit goes back.
@@ -744,19 +776,24 @@ impl SessionManager {
             read_only: false,
             department: Department::Console,
         };
-        let handle = self.start(spec, ix, permit, true).await?;
+        let handle = self.start(spec, ix, permit, true, gate).await?;
         drop(one_at_a_time);
         Ok(Some(handle))
     }
 
-    /// Connects and spawns a session for `spec` on `permit`.
+    /// Connects and spawns a session for `spec` on `permit`; nothing when `close_all` ran since
+    /// the request was made (`gate`, T15 R2).
     async fn start(
         self: &Arc<Self>,
         spec: SessionSpec,
         ix: Interaction,
         permit: BudgetPermit,
         as_default: bool,
+        gate: &Gate,
     ) -> Result<SessionHandle, ConnectError> {
+        if self.lock().epoch != gate.epoch {
+            return Err(closed());
+        }
         let (live, profile, epoch) = self
             .connect_live(spec.department, spec.read_only, ix, purpose(&spec.kind))
             .await?;
@@ -764,7 +801,15 @@ impl SessionManager {
             read_only: spec.read_only || profile.read_only,
             ..spec
         };
-        match self.register(spec, profile, live, permit, epoch, as_default) {
+        match self.register(
+            spec,
+            profile,
+            live,
+            permit,
+            epoch,
+            as_default,
+            Hooked::default(),
+        ) {
             Ok(handle) => Ok(handle),
             Err(live) => {
                 live.close().await;
@@ -783,7 +828,7 @@ impl SessionManager {
         ix: Interaction,
         purpose: Purpose,
     ) -> Result<(LiveConnection, Arc<Profile>, u64), ConnectError> {
-        let (profile, secrets, consent, epoch, token) = {
+        let (profile, secrets, consent, epoch, token, consent_gen) = {
             let st = self.lock();
             let (secrets, consent) = st.overlay.as_ref().map_or((None, false), |o| {
                 (Some(copy_secrets(&o.secrets)), o.plaintext_consent)
@@ -794,6 +839,7 @@ impl SessionManager {
                 consent,
                 st.epoch,
                 st.cancel.child_token(),
+                st.consent_gen,
             )
         };
         let req = ConnectRequest {
@@ -831,7 +877,7 @@ impl SessionManager {
             // After `close_all`, or once the saved profile points elsewhere (review I1),
             // nothing of this connect is kept.
             if st.epoch == epoch {
-                st.absorb(&profile, &mut live)
+                st.absorb(&profile, &mut live, consent_gen)
             } else {
                 None
             }
@@ -846,7 +892,9 @@ impl SessionManager {
     }
 
     /// Spawns the session and keeps track of it; its permit goes to the watcher. `Err` (the
-    /// connection, to close) when `close_all` ran since the connect started.
+    /// connection, to close) when `close_all` ran since the connect started. `hooked`: the
+    /// default session's reconnects and liveness (Task 17); none for the others.
+    #[allow(clippy::too_many_arguments, reason = "private; two call sites")]
     fn register(
         &self,
         spec: SessionSpec,
@@ -855,6 +903,7 @@ impl SessionManager {
         permit: BudgetPermit,
         epoch: u64,
         as_default: bool,
+        hooked: Hooked,
     ) -> Result<SessionHandle, LiveConnection> {
         let mut st = self.lock();
         if st.epoch != epoch {
@@ -864,10 +913,9 @@ impl SessionManager {
             side: Arc::new(Side {
                 manager: self.me.clone(),
             }),
-            // Task 17 supplies reconnects.
-            reconnect: None,
+            reconnect: hooked.reconnect,
         };
-        let handle = spawn_session(&self.rt, spec, profile, live, hooks);
+        let handle = spawn_supervised(&self.rt, spec, profile, live, hooks, hooked.liveness);
         st.sessions.insert(
             handle.id,
             Tracked {
@@ -1047,6 +1095,176 @@ impl SideConnector for Side {
                 .await?;
             Ok(live)
         })
+    }
+}
+
+// ## m2b-t17-liveness
+// The default session's reconnects and liveness (Task 17), and two carry-ins of the T15
+// re-review: R1 (the consent generation) and R2 (`close_all` ends requests still waiting).
+
+/// What the default session gets beyond the others: its reconnects and its liveness.
+#[derive(Default)]
+struct Hooked {
+    reconnect: Option<Arc<dyn Reconnector>>,
+    liveness: Option<LivenessPolicy>,
+}
+
+/// What a request saw when it was made: a `close_all` since then ends it (T15 R2), whether it
+/// waits for a permit, for a released session or for its connect.
+struct Gate {
+    epoch: u64,
+    closed: CancellationToken,
+}
+
+impl Gate {
+    /// Waits for `permit` unless `close_all` comes first.
+    async fn wait(
+        &self,
+        permit: BoxFuture<'static, BudgetPermit>,
+    ) -> Result<BudgetPermit, ConnectError> {
+        tokio::select! {
+            biased;
+            () = self.closed.cancelled() => Err(closed()),
+            permit = permit => Ok(permit),
+        }
+    }
+}
+
+/// Whether saving `new` over `old` takes the plaintext consent back: the TLS mode changed, or
+/// "allow public plaintext" was unticked (review M3).
+fn takes_consent_back(old: &Profile, new: &Profile) -> bool {
+    let (old, new) = (&old.tls, &new.tls);
+    old.mode != new.mode || (old.allow_public_plaintext && !new.allow_public_plaintext)
+}
+
+/// The consent a landing connect keeps (R1): when the consent was taken back since the connect
+/// started (`then` is not `now`), none, and no `AllowPublicPlaintext` reaches the overlay.
+fn keep_consent(then: u64, now: u64, consent: bool, changes: &mut Vec<ProfileChange>) -> bool {
+    if then == now {
+        return consent;
+    }
+    changes.retain(|c| *c != ProfileChange::AllowPublicPlaintext);
+    false
+}
+
+impl SessionManager {
+    fn gate(&self) -> Gate {
+        let st = self.lock();
+        Gate {
+            epoch: st.epoch,
+            closed: st.cancel.clone(),
+        }
+    }
+
+    /// Adopts `live`, the `ConnectionManager`'s own connect of `used` (its progress, draft
+    /// password and rejection count stay the manager's, M2a), as the default console session
+    /// (B4), with its `reconnect` and `liveness` (Task 17). The connect's part of the overlay is
+    /// taken as for any other connect. `Err` (the connection to close, then its permit) when the
+    /// saved profile no longer names `used`'s destination (fix round 1, I2: the manager builds
+    /// this `SessionManager` from the profile as saved when the connect lands); a consent the
+    /// saved profile took back since `used` is dropped, as R1 drops it.
+    pub(crate) fn adopt_default(
+        &self,
+        used: &Profile,
+        mut live: LiveConnection,
+        permit: BudgetPermit,
+        reconnect: Option<Arc<dyn Reconnector>>,
+        liveness: Option<LivenessPolicy>,
+    ) -> Result<SessionHandle, (LiveConnection, Option<BudgetPermit>)> {
+        let (profile, epoch) = {
+            let mut st = self.lock();
+            if takes_consent_back(used, &st.profile) {
+                live.plaintext_consent = false;
+                live.profile_changes
+                    .retain(|c| *c != ProfileChange::AllowPublicPlaintext);
+            }
+            let consent_gen = st.consent_gen;
+            match st.absorb(used, &mut live, consent_gen) {
+                Some(profile) => (profile, st.epoch),
+                None => return Err((live, Some(permit))),
+            }
+        };
+        let spec = SessionSpec {
+            kind: SessionKind::Console(ClientId::DEFAULT),
+            read_only: profile.read_only,
+            department: Department::Console,
+        };
+        let hooked = Hooked {
+            reconnect,
+            liveness,
+        };
+        // A fresh manager: `close_all` cannot have run, so the epoch matches; if it did, the
+        // permit is already back.
+        self.register(spec, profile, live, permit, epoch, true, hooked)
+            .map_err(|live| (live, None))
+    }
+
+    /// Closes every parked pooled session (fix round 1, review M6): their SSH chain died, so
+    /// none may be handed out again.
+    pub(crate) fn close_idle(&self) {
+        let parked: Vec<SessionHandle> = {
+            let mut st = self.lock();
+            st.idle
+                .drain()
+                .flat_map(|(_, parked)| parked.into_iter().map(|i| i.handle))
+                .collect()
+        };
+        for handle in parked {
+            self.rt.spawn(async move {
+                let _ = handle.close(ClosePolicy::RollBack).await;
+            });
+        }
+    }
+
+    /// One headless connect for a reconnect of the default session (B19), with the overlay
+    /// (Q17), and the profile it connected with. It never prompts: a connect that would have
+    /// to ask fails with `needs_interaction`.
+    pub(crate) async fn reconnect_live(
+        &self,
+    ) -> Result<(LiveConnection, Arc<Profile>), ConnectError> {
+        let (live, profile, _) = self
+            .connect_live(
+                Department::Console,
+                false,
+                Interaction::Headless,
+                Purpose::Main,
+            )
+            .await?;
+        Ok((live, profile))
+    }
+}
+
+#[cfg(test)]
+mod t17_tests {
+    use super::*;
+
+    #[test]
+    fn a_connect_older_than_a_consent_take_back_keeps_no_consent() {
+        let mut changes = vec![
+            ProfileChange::AllowPublicPlaintext,
+            ProfileChange::SetCaFile("/ca.pem".into()),
+        ];
+        assert!(keep_consent(3, 3, true, &mut changes));
+        assert_eq!(changes.len(), 2);
+        assert!(!keep_consent(2, 3, true, &mut changes));
+        assert_eq!(changes, [ProfileChange::SetCaFile("/ca.pem".into())]);
+    }
+
+    #[test]
+    fn the_consent_is_taken_back_by_a_mode_change_or_an_untick_only() {
+        let base = Profile::default();
+        let mut ticked = base.clone();
+        ticked.tls.allow_public_plaintext = true;
+        let mut require = base.clone();
+        require.tls.mode = hacivat_net::TlsMode::Require;
+        assert!(takes_consent_back(&base, &require));
+        assert!(takes_consent_back(&ticked, &base));
+        assert!(!takes_consent_back(&base, &ticked));
+        let renamed = Profile {
+            name: "renamed".into(),
+            ..base.clone()
+        };
+        assert!(!takes_consent_back(&base, &renamed));
     }
 }
 

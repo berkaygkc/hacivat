@@ -146,18 +146,74 @@ impl ConnectionsModel {
     }
 
     /// Applies `changes` (a pin, a CA file, the plaintext consent) to the saved profile `id`
-    /// (Task 19). Task 1 stub: refuses, so no change is reported as saved before Task 19.
+    /// (Task 19): the model's list changes at once, the connected profile's sessions get it
+    /// (`ConnectionManager::update_profile`, Q17), and the list is written through the ordered
+    /// writer. Only `id` changes, whatever else is open; an open edit dialog of `id` gets the
+    /// same changes in its draft, so its Save keeps them. `AddPin` never replaces a pin, and
+    /// `ReplacePin` replaces only the pin it names (`cert_dialog::apply_change`). Changes that
+    /// change nothing write nothing. A read-only store and a profile deleted meanwhile refuse.
     pub fn apply_changes(
         cx: &mut App,
         id: ProfileId,
         changes: Vec<ProfileChange>,
     ) -> Task<Result<(), SaveError>> {
-        // ## m2b-t21-prompts (fix round 1, Remember seam): a connect that reports only the
-        // Remember of an SSH secret prompt re-saves the profile with that `ssh_retention`.
-        if let [ProfileChange::SshRetention(retention)] = changes[..] {
-            return apply_ssh_retention(cx, id, retention);
+        // ## m2b-t21-prompts (fix round 1, Remember seam): the Remember of an SSH secret prompt
+        // (`SshRetention`, the last one wins) re-saves the profile through `save`, which moves
+        // every hop's stored SSH secrets to the new retention behind the vault gate; the other
+        // changes apply as below first.
+        let ssh = changes.iter().rev().find_map(|c| match c {
+            ProfileChange::SshRetention(r) => Some(*r),
+            _ => None,
+        });
+        if let Some(retention) = ssh {
+            let others: Vec<ProfileChange> = changes
+                .into_iter()
+                .filter(|c| !matches!(c, ProfileChange::SshRetention(_)))
+                .collect();
+            let applied = Self::apply_changes(cx, id, others);
+            let saved = apply_ssh_retention(cx, id, retention);
+            return cx.spawn(async move |_| {
+                applied.await?;
+                saved.await
+            });
         }
-        Task::ready(Err(SaveError::Io("apply_changes: Task 19".to_string())))
+        // ## m2b-t19-tls
+        let Some(m) = cx.try_global::<ConnectionsModel>() else {
+            return Task::ready(Err(SaveError::NotFound));
+        };
+        if m.read_only {
+            return Task::ready(Err(SaveError::StoreReadOnly));
+        }
+        let Some(stored) = m.get(id) else {
+            return Task::ready(Err(SaveError::NotFound));
+        };
+        let mut profile = (*stored).clone();
+        let mut changed = false;
+        for change in &changes {
+            changed |= crate::connections::cert_dialog::apply_change(&mut profile, change);
+        }
+        if !changed {
+            return Task::ready(Ok(()));
+        }
+        // Fix round 1 (I1): an open edit dialog of `id` takes them too, so its Save never
+        // writes an older draft over them.
+        crate::connections::dialog::absorb_saved_changes(
+            id,
+            stored.endpoint.clone(),
+            changes.clone(),
+            cx,
+        );
+        let m = cx.global_mut::<ConnectionsModel>();
+        let profile = Arc::new(profile);
+        m.manager.update_profile(id, profile.clone());
+        if let Some(slot) = m.profiles.iter_mut().find(|p| p.id == id) {
+            *slot = profile;
+        }
+        let done = m.writer.run(m.snapshot(), || ());
+        cx.spawn(async move |cx| {
+            let ((), written) = done.await.map_err(|_| cancelled())?;
+            cx.update(|cx| written.surface(cx))
+        })
     }
 
     pub fn profiles(&self) -> &[Arc<Profile>] {
