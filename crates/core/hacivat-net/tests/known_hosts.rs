@@ -3,6 +3,10 @@
 //! change (Q24) and Hacivat's own `0600` store with one ordered writer. Every file lives in a
 //! temp directory: no test reads the real `~/.ssh`.
 
+// Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
+// systems; the lints still run in full on Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+
 use std::fs;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};

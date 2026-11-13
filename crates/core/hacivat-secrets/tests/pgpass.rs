@@ -1,6 +1,10 @@
 //! `.pgpass` lookup, libpq-exact (HV-SEC-03, HV-SEC-04 vectors). Every file is a temp fixture;
 //! the user's own `~/.pgpass` is never read. Secret comparisons never print either value.
 
+// Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
+// systems; the lints still run in full on Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 

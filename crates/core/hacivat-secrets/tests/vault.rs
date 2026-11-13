@@ -1,6 +1,10 @@
 //! The encrypted-file vault (HV-SEC-05, D-016, B13, Q30). Every vault is a temp fixture with
 //! fast Argon2 parameters; secret comparisons never print either value.
 
+// Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
+// systems; the lints still run in full on Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 

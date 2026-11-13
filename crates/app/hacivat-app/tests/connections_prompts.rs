@@ -5,6 +5,10 @@
 //! to land (Q34). Every wait is a condition (`settle_until`, `wait_until`), never a fixed sleep.
 //! Secret fixtures appear only inside assertions that compare them without printing them.
 
+// Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
+// systems; the lints still run in full on Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+
 mod support;
 
 use std::cell::RefCell;

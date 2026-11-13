@@ -1,5 +1,9 @@
 //! The loopback forwarder (R18, P10): relays local connections into a stream factory.
 
+// Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
+// systems; the lints still run in full on Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+
 use std::io;
 use std::net::SocketAddr;
 #[cfg(unix)]

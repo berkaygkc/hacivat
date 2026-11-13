@@ -16,6 +16,10 @@
 //! No password reaches the test output: the vectors name it `@PW@`, psql gets the file on
 //! stdin, and an outcome is only `Accepted`, `Rejected` or `NoPassword`.
 
+// Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
+// systems; the lints still run in full on Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+
 mod docker_support;
 
 use std::io::Write;

@@ -2,6 +2,10 @@
 //! `ProxyJump` chains, `%` tokens, `Include` (globs, loops, depth), notices and the secret scan.
 //! Every config lives in a temp directory: no test reads the real `~/.ssh`.
 
+// Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
+// systems; the lints still run in full on Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

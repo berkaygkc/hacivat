@@ -5,6 +5,10 @@
 //! `known_hosts` file lives in a temp directory. Real sockets set the pace, so no test uses a
 //! paused clock (Q25); waits are bounded condition polls.
 
+// Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
+// systems; the lints still run in full on Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;

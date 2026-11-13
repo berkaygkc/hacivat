@@ -1,6 +1,10 @@
 //! Validate in M2b (Task 12; B10, B26): SSH hop issues, VerifyCa for MySQL and MariaDB, the
 //! legacy encrypted TLS key, and the approved-roots check on canonical paths (Q22).
 
+// Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
+// systems; the lints still run in full on Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+
 mod common;
 
 use std::path::{Path, PathBuf};

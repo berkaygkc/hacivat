@@ -6,6 +6,10 @@
 //! The shell helpers call `allow_parking()`; every wait is a condition (`settle_until`,
 //! `wait_until`), never a fixed sleep (Q4 ruling).
 
+// Unix-only tests (file modes, Unix sockets, ssh-agent) leave their helpers unused on other
+// systems; the lints still run in full on Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
+
 mod support;
 
 use std::cell::RefCell;
