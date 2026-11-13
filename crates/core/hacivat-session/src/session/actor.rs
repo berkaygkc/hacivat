@@ -43,7 +43,7 @@ use crate::profile::Profile;
 use crate::session::cancel::{
     CANCEL_WAIT, SIDE_PREWARM, SLOW_CANCEL, kill_query_sql, terminate_sql,
 };
-use crate::session::readonly::run_guarded;
+use crate::session::readonly::guarded;
 use crate::session::schema::{Family, family, first_keyword};
 use crate::session::{
     CancelOutcome, CancelState, ClosePolicy, CloseRefused, Command, EnvPlan, Escalation, ExecError,
@@ -310,14 +310,14 @@ impl Core {
         let mut summary = if self.read_only {
             let replay = self.env_plan().replay();
             let kind = self.kind;
-            let ran = run_guarded(self.conn()?, kind, sql, opts, &replay).await;
+            let ran = guarded(self.conn()?, kind, sql, opts, &replay).await;
             self.observe(false);
-            if let Err(e) = &ran
-                && matches!(e.kind, ExecErrorKind::ConnectionLost { .. })
-            {
-                self.broken.get_or_insert(ErrClass::NetworkReset);
+            // Task 18: a gap, a lost connection or a guard that could not finish discards the
+            // connection; `run_one` closes it and reports the gap.
+            if let Some(class) = ran.discard {
+                self.broken.get_or_insert(class);
             }
-            ran?
+            ran.reply?
         } else {
             // Hacivat's own statements never open the user's transaction (review M9).
             if origin == ExecOrigin::User
@@ -792,6 +792,14 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> bool {
         ctl.emit(SessionEvent::SchemaChanged(
             core.schema.clone().unwrap_or_default(),
         ));
+    }
+    // Task 18: the session is already broken and its connection closed.
+    if let Err(ExecError {
+        kind: ExecErrorKind::EnforcementGap(reason),
+        ..
+    }) = &result
+    {
+        ctl.emit(SessionEvent::EnforcementGap(*reason));
     }
     let outcome = match &result {
         Err(e) if e.kind == ExecErrorKind::Cancelled => CancelOutcome::Cancelled,

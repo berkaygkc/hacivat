@@ -40,7 +40,9 @@ pub fn plan_for(kind: DbmsKind) -> Option<GuardPlan> {
                 "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
                 "SELECT 1",
             ],
-            canary: Some("SELECT txid_current_if_assigned()"),
+            // T18 review m-3: qualified, so a `search_path` that names another schema before
+            // `pg_catalog` cannot shadow the tripwire.
+            canary: Some("SELECT pg_catalog.txid_current_if_assigned()"),
             after: vec!["ROLLBACK"],
             reset: ResetKind::DiscardAll,
         }),

@@ -559,3 +559,82 @@ fn mysql_async_native_options_are_always_denied() {
         }
     }
 }
+
+// ## m2b-t18-guarded-exec
+
+/// Task 18 fix rounds 2 and 3 (I-3b, I-3c): a read-only profile's PostgreSQL `options` is
+/// allowlisted by shape (`-c name=value`, `-cname=value`, `--name=value`, no `role` or
+/// `session_authorization`), whatever its origin; anything else is a visible violation, and a
+/// read-write profile keeps the option.
+#[test]
+fn a_read_only_profile_may_not_switch_the_role() {
+    use hacivat_driver::sanitize::{pg_options_read_only_allowed, read_only_violations};
+    for value in [
+        "-c role=hv_ro",
+        "-crole=hv_ro",
+        "-c  search_path=app   -c Role=hv_ro",
+        "--role=hv_ro",
+        "-c session_authorization=hv_ro",
+        "--session-authorization=hv_ro",
+        "-c ro\\le=x",
+        // Review round 2 (I-3c): `getopt` combines single-dash flags, so each of these sets the
+        // role (or session authorization) on the server; none has an allowed shape.
+        "-ncrole=x",
+        "-nc role=x",
+        "-n-role=x",
+        "-n- role=x",
+        "-ec role=x",
+        "-Pcsession_authorization=x",
+        "-TEjnc role=x",
+        // Other switches, a dangling `-c`, a word that is not an option.
+        "-e",
+        "-c",
+        "-c role",
+        "role=x",
+        "-c search_path=app -fs",
+    ] {
+        assert!(!pg_options_read_only_allowed(value), "{value:?}");
+        assert_eq!(
+            read_only_violations(DbmsKind::Postgres, &owned(&[("options", value)])),
+            [Violation {
+                key: "options".into(),
+                reason: ViolationReason::AlwaysDenied,
+            }],
+            "{value:?}"
+        );
+        // The ordinary sanitizer still passes it from the user (a read-write profile keeps it).
+        assert!(
+            sanitize(
+                &input(DbmsKind::Postgres, UserTyped, &[("options", value)], &[]),
+                cat()
+            )
+            .is_ok(),
+            "{value:?}"
+        );
+    }
+    // The server's own splitting (a vertical tab separates words); such a value is refused by
+    // the control-character rule anyway, for every origin.
+    assert!(!pg_options_read_only_allowed(
+        "-c\x0bsession_authorization=x"
+    ));
+    // The allowed shapes, with names that only look alike.
+    for value in [
+        "-c rolex=1",
+        "-c search_path=role",
+        "-csearch_path=app --statement-timeout=5s -c application_name=role=x",
+        "",
+        "   ",
+    ] {
+        assert!(pg_options_read_only_allowed(value), "{value:?}");
+        assert!(
+            read_only_violations(DbmsKind::Postgres, &owned(&[("options", value)])).is_empty(),
+            "{value:?}"
+        );
+    }
+    // Other engines and other keys are left alone.
+    assert!(read_only_violations(DbmsKind::MySql, &owned(&[("options", "-c role=x")])).is_empty());
+    assert!(
+        read_only_violations(DbmsKind::Postgres, &owned(&[("search_path", "-c role=x")]))
+            .is_empty()
+    );
+}

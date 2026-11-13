@@ -131,7 +131,7 @@ fn sslmode_and_startup_options() {
     assert_eq!(ssl_mode(TlsMode::Auto, false), SslMode::Require);
     assert_eq!(ssl_mode(TlsMode::VerifyCa, true), SslMode::Require);
     assert_eq!(ssl_mode(TlsMode::Disable, true), SslMode::Disable);
-    let c = config_for(&req_ro("hv"));
+    let c = config_for(&req_ro("hv")).unwrap();
     assert_eq!(c.get_application_name(), Some("hv"));
     assert_eq!(c.get_options(), Some("-c default_transaction_read_only=on"));
 }
@@ -147,7 +147,7 @@ fn every_verifying_mode_requires_tls() {
 
 #[test]
 fn config_carries_identity_and_redacts_the_password() {
-    let c = config_for(&base_req(noop_factory()));
+    let c = config_for(&base_req(noop_factory())).unwrap();
     assert_eq!(c.get_user(), Some("hv_test"));
     assert_eq!(c.get_dbname(), Some("hv_test"));
     assert_eq!(c.get_password(), Some(&b"s3cret"[..]));
@@ -170,7 +170,7 @@ fn extras_join_the_options_and_read_only_comes_last() {
         ("connect_timeout".into(), "1".into()),
         ("application_name".into(), "other".into()),
     ];
-    let c = config_for(&r);
+    let c = config_for(&r).unwrap();
     assert_eq!(
         c.get_options(),
         Some(
@@ -186,15 +186,31 @@ fn a_dangling_backslash_cannot_swallow_the_read_only_option() {
     let mut r = req_ro("hv");
     r.options = vec![("options".into(), "-c search_path=app\\".into())];
     assert_eq!(
-        config_for(&r).get_options(),
+        config_for(&r).unwrap().get_options(),
         Some("-c search_path=app -c default_transaction_read_only=on")
     );
     let mut r = req_ro("hv");
     r.options = vec![("options".into(), "-c search_path=a\\\\".into())];
     assert_eq!(
-        config_for(&r).get_options(),
+        config_for(&r).unwrap().get_options(),
         Some("-c search_path=a\\\\ -c default_transaction_read_only=on")
     );
+}
+
+// ## m2b-t18-guarded-exec
+#[test]
+fn a_read_only_config_refuses_a_role_switch() {
+    // Task 18 fix round 2 (I-3b): the role probe would judge one identity and the guard's reset
+    // return to another.
+    let mut r = req_ro("hv");
+    r.options = vec![("options".into(), "-c session_authorization=hv_ro".into())];
+    assert_eq!(
+        config_for(&r).unwrap_err().kind,
+        hacivat_driver::RawErrorKind::Unsupported
+    );
+    let mut r = base_req(noop_factory());
+    r.options = vec![("options".into(), "-c role=hv_ro".into())];
+    assert_eq!(config_for(&r).unwrap().get_options(), Some("-c role=hv_ro"));
 }
 
 #[test]
@@ -202,7 +218,7 @@ fn generated_values_escape_spaces_and_backslashes() {
     let mut r = base_req(noop_factory());
     r.options = vec![("extra_float_digits".into(), "1 \\x".into())];
     assert_eq!(
-        config_for(&r).get_options(),
+        config_for(&r).unwrap().get_options(),
         Some("-c extra_float_digits=1\\ \\\\x")
     );
 }

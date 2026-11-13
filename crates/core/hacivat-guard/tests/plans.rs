@@ -13,7 +13,11 @@ fn pg_plan_matches_safe_05() {
             "SELECT 1"
         ]
     );
-    assert_eq!(p.canary, Some("SELECT txid_current_if_assigned()"));
+    // T18 review m-3: qualified, so `search_path` cannot shadow it.
+    assert_eq!(
+        p.canary,
+        Some("SELECT pg_catalog.txid_current_if_assigned()")
+    );
     assert_eq!(p.after, ["ROLLBACK"]);
     assert_eq!(p.reset, ResetKind::DiscardAll);
     assert!(
