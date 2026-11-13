@@ -115,7 +115,7 @@ Clickable mock: `design/m2b-secure/index.html` (one file, one app, surface switc
   - **Guarded (PostgreSQL, MySQL):**
     - the title "Read-only is guarded, not enforced";
     - why ("The role qa isn't limited to reading here, so Hacivat stops writes itself…");
-    - **the findings list**: "Found on this role:", then one line per `RoleWarning` from the probe. The realistic PostgreSQL case (scenario "Guarded · PG") lists Superuser, WritePrivileges and TempPrivilege, since PUBLIC holds TEMP by default;
+    - **the findings list**: "Found on this role:", then one line per `RoleWarning` from the probe. The realistic PostgreSQL case (scenario "Guarded · PG") lists Superuser, WritePrivileges, TempPrivilege and NonTransactionalWrite, since PUBLIC holds TEMP and (Task 23 finding F1) `EXECUTE` on `pg_logical_emit_message` by default;
     - the limit ("Only a read-only role on the server is a hard guarantee.") and the fix line;
     - the SQL inset showing exactly what Task 5's `remediation(engine)` returns, then Copy SQL, which copies that same string.
   - **MariaDB:**
@@ -139,8 +139,9 @@ Clickable mock: `design/m2b-secure/index.html` (one file, one app, surface switc
 | `EgressExtension(name)` | `ro-warn-egress-extension` | The `{name}` extension can reach other servers. |
 | `RoleGrantNotExpanded` | `ro-warn-role-grant-not-expanded` | Other roles are granted to it, and Hacivat can't see what they allow. |
 | `Unparsed` | `ro-warn-unparsed` | Hacivat couldn't read its privileges. |
+| `NonTransactionalWrite` | `ro-warn-non-transactional-write` | It can run functions whose effects a rollback can't undo. (Task 23 finding F1: PostgreSQL row 6, e.g. `pg_logical_emit_message`.) |
 
-  `{name}` is rendered as a mono literal. It is never server prose: the probe only returns names from its fixed list (`dblink`, `postgres_fdw`, `pg_net`, `http`). Scenario "All findings" shows all twelve in Turkish inside the 300 px popover.
+  `{name}` is rendered as a mono literal. It is never server prose: the probe only returns names from its fixed list (`dblink`, `postgres_fdw`, `pg_net`, `http`). Scenario "All findings" shows all thirteen in Turkish inside the 300 px popover.
 - **Sheet Access row** (new row under Environment): lock + "read-only · enforced" or "read-only · guarded". These are short forms, so Turkish fits the 150 px column. The whole value is a button that opens the popover, underlined on hover. Read-write rows show "read-write" in text-2.
 - **Status bar:** the environment segment carries the capsule's label ("production · read-only (enforced by server role)").
 
@@ -150,7 +151,10 @@ CREATE ROLE <role> LOGIN PASSWORD '<password>';
 GRANT pg_read_all_data TO <role>;
 -- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;
 -- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+-- optional: REVOKE EXECUTE ON FUNCTION pg_logical_emit_message(boolean, text, text, boolean), pg_logical_emit_message(boolean, text, bytea, boolean) FROM PUBLIC;
 ```
+(Task 23 finding F1: this is the form for PostgreSQL 17 and later, which `remediation()` returns; `remediation_for` gives 13–16 the three-argument signatures, `pg_logical_emit_message(boolean, text, text), pg_logical_emit_message(boolean, text, bytea)`, and 13 its schema-grant form.)
+
 MySQL:
 ```sql
 CREATE USER '<role>'@'%' IDENTIFIED BY '<password>';
@@ -381,6 +385,7 @@ None of the Turkish below has been signed off yet; the Status column says so for
 | `ro-warn-egress-extension` | The {name} extension can reach other servers. | {name} eklentisi başka sunuculara erişebilir. | PO review |
 | `ro-warn-role-grant-not-expanded` | Other roles are granted to it, and Hacivat can't see what they allow. | Ona başka roller verilmiş; Hacivat bunların neye izin verdiğini göremiyor. | PO review |
 | `ro-warn-unparsed` | Hacivat couldn't read its privileges. | Hacivat yetkilerini okuyamadı. | PO review |
+| `ro-warn-non-transactional-write` | It can run functions whose effects a rollback can't undo. | Etkileri ROLLBACK ile geri alınamayan fonksiyonlar çalıştırabilir. | PO review |
 | `ro-cmd` | Explain read-only access | Salt okunur erişimi açıkla | PO review |
 | `idle-cap` | Disconnected (idle) | Bağlantı kesik (boşta) | PO review |
 | `idle-disconnected` | Disconnected {name} after {hours} h idle. It reconnects when you use it. | {name} bağlantısı {hours} sa boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır. | PO review |

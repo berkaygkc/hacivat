@@ -24,3 +24,22 @@ END
 $$;
 REVOKE TEMP ON DATABASE hv_test FROM PUBLIC;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+-- ## m2b-t23-f1
+-- Task 23 finding F1: PUBLIC may execute pg_logical_emit_message, whose non-transactional form
+-- writes a WAL record no rollback undoes, so the role probe reads every role as guarded until
+-- it is revoked (the remediation's third optional line). Its signatures gained `flush` in 17,
+-- so every overload is revoked by name. Function privileges are per database: hv_test only
+-- (the bypass suite's own database starts from the default and revokes it itself).
+DO $$
+DECLARE
+    f regprocedure;
+BEGIN
+    FOR f IN
+        SELECT p.oid FROM pg_proc p
+        WHERE p.pronamespace = 'pg_catalog'::regnamespace AND p.proname = 'pg_logical_emit_message'
+    LOOP
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', f);
+    END LOOP;
+END
+$$;

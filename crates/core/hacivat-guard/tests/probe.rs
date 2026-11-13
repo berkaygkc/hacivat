@@ -13,8 +13,9 @@ fn names(ns: &[&str]) -> RowSet {
     ns.iter().map(|n| vec![Some((*n).to_owned())]).collect()
 }
 
-/// The five PostgreSQL row sets: `rolsuper` (the other three role flags false), the
-/// predefined roles, the write check, the TEMP check and the egress extensions.
+/// The six PostgreSQL row sets: `rolsuper` (the other three role flags false), the
+/// predefined roles, the write check, the TEMP check, the egress extensions and (F1) no
+/// function a rollback cannot undo.
 fn pg_rows(superuser: bool, roles: &[&str], write: bool, temp: bool, exts: &[&str]) -> Vec<RowSet> {
     pg_flags([superuser, false, false, false], roles, write, temp, exts)
 }
@@ -32,8 +33,38 @@ fn pg_flags(
         vec![vec![b(write)]],
         vec![vec![b(temp)]],
         names(exts),
+        names(&[]),
     ]
 }
+
+/// A clean PostgreSQL answer whose row 6 names `functions` (F1).
+fn pg_functions(functions: &[&str]) -> Vec<RowSet> {
+    let mut c = pg_rows(false, &[], false, false, &[]);
+    c[5] = names(functions);
+    c
+}
+
+/// Row 6's `IN` list (F1): the functions whose `EXECUTE` privilege is what lets a role call them.
+const PG_EXECUTE_GATED: [&str; 18] = [
+    "pg_logical_emit_message",
+    "pg_switch_wal",
+    "pg_create_restore_point",
+    "pg_log_standby_snapshot",
+    "pg_backup_start",
+    "pg_backup_stop",
+    "pg_start_backup",
+    "pg_stop_backup",
+    "pg_promote",
+    "pg_wal_replay_pause",
+    "pg_wal_replay_resume",
+    "pg_replication_origin_create",
+    "pg_replication_origin_drop",
+    "pg_replication_origin_advance",
+    "pg_replication_origin_session_setup",
+    "pg_replication_origin_session_reset",
+    "pg_replication_origin_xact_setup",
+    "pg_replication_origin_xact_reset",
+];
 
 /// `SHOW GRANTS`: one row set, one line per row.
 fn grants(lines: &[&str]) -> Vec<RowSet> {
@@ -59,6 +90,9 @@ fn probe_sql_per_engine() {
             "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace JOIN pg_catalog.pg_roles r ON pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') WHERE c.relkind IN ('r','p','v','m','f','S') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND (c.relowner = r.oid OR CASE WHEN c.relkind = 'S' THEN pg_catalog.has_sequence_privilege(r.oid, c.oid, 'USAGE, UPDATE') ELSE pg_catalog.has_table_privilege(r.oid, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') OR pg_catalog.has_any_column_privilege(r.oid, c.oid, 'INSERT, UPDATE') END)) OR EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_roles r ON pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE')) OR EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') AND (r.rolcreatedb OR pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'CREATE')))",
             "SELECT pg_catalog.has_database_privilege(pg_catalog.current_database(), 'TEMP')",
             "SELECT extname FROM pg_catalog.pg_extension WHERE extname IN ('dblink','postgres_fdw','pg_net','http')",
+            // F1: the functions a rollback cannot undo that any member role may execute. The
+            // replication-origin ones check for a superuser themselves before PostgreSQL 14.
+            "SELECT DISTINCT p.proname FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace JOIN pg_catalog.pg_roles r ON pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname = 'pg_catalog' AND p.proname IN ('pg_logical_emit_message','pg_switch_wal','pg_create_restore_point','pg_log_standby_snapshot','pg_backup_start','pg_backup_stop','pg_start_backup','pg_stop_backup','pg_promote','pg_wal_replay_pause','pg_wal_replay_resume','pg_replication_origin_create','pg_replication_origin_drop','pg_replication_origin_advance','pg_replication_origin_session_setup','pg_replication_origin_session_reset','pg_replication_origin_xact_setup','pg_replication_origin_xact_reset') AND (p.proname !~ '^pg_replication_origin_' OR pg_catalog.current_setting('server_version_num')::pg_catalog.int4 >= 140000) AND pg_catalog.has_function_privilege(r.oid, p.oid, 'EXECUTE')",
         ]
     );
     for k in [DbmsKind::MySql, DbmsKind::MariaDb] {
@@ -286,9 +320,10 @@ fn pg_egress_extensions_use_the_fixed_names() {
 fn pg_unexpected_values_fail_closed() {
     let ok = || pg_rows(false, &[], false, false, &[]);
     let mut cases: Vec<Vec<RowSet>> = Vec::new();
-    // Wrong number of row sets.
+    // Wrong number of row sets (five is the answer of the probe before F1).
     cases.push(vec![]);
     cases.push(ok()[..4].to_vec());
+    cases.push(ok()[..5].to_vec());
     let mut extra = ok();
     extra.push(vec![]);
     cases.push(extra);
@@ -317,8 +352,8 @@ fn pg_unexpected_values_fail_closed() {
             cases.push(c);
         }
     }
-    // Rows 2 and 5: an unknown name, a NULL, two columns.
-    for i in [1, 4] {
+    // Rows 2, 5 and 6: an unknown name, a NULL, two columns.
+    for i in [1, 4, 5] {
         for r in [
             names(&["pg_monitor"]),
             vec![vec![None]],
@@ -333,6 +368,55 @@ fn pg_unexpected_values_fail_closed() {
         let f = interpret_probe(DbmsKind::Postgres, &c);
         assert!(unparsed(&f), "{c:?} -> {f:?}");
     }
+}
+
+#[test]
+fn pg_non_transactional_functions_are_not_least_privilege() {
+    // F1: `PUBLIC` may execute `pg_logical_emit_message` on PostgreSQL 13–18 until the
+    // remediation's optional REVOKE, so a default role reads guarded.
+    for name in PG_EXECUTE_GATED {
+        assert_eq!(
+            interpret_probe(DbmsKind::Postgres, &pg_functions(&[name])),
+            RoleFindings {
+                least_privilege: false,
+                warnings: vec![RoleWarning::NonTransactionalWrite]
+            },
+            "{name}"
+        );
+    }
+    // Several names, in any case, are one warning; with TEMP it is still guarded.
+    let mut c = pg_functions(&["PG_LOGICAL_EMIT_MESSAGE", "pg_switch_wal", "pg_promote"]);
+    c[3] = vec![vec![b(true)]];
+    assert_eq!(
+        interpret_probe(DbmsKind::Postgres, &c),
+        RoleFindings {
+            least_privilege: false,
+            warnings: vec![
+                RoleWarning::TempPrivilege,
+                RoleWarning::NonTransactionalWrite
+            ]
+        }
+    );
+    // Row 6 names only functions of the guard's text layer.
+    for name in PG_EXECUTE_GATED {
+        assert!(
+            hacivat_guard::PG_NON_TRANSACTIONAL_FUNCTIONS.contains(&name),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn pg_row_6_lists_exactly_the_execute_gated_functions() {
+    let row6 = role_probe_sql(DbmsKind::Postgres)[5];
+    let list = format!(
+        "p.proname IN ({})",
+        PG_EXECUTE_GATED.map(|n| format!("'{n}'")).join(",")
+    );
+    assert!(row6.contains(&list), "{row6}");
+    // Replication slots are executable by PUBLIC and refused at run time without REPLICATION
+    // (row 1), so they are not in row 6.
+    assert!(!row6.contains("replication_slot"), "{row6}");
 }
 
 #[test]

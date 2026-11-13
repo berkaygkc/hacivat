@@ -185,8 +185,9 @@ fn unique(prefix: &str) -> String {
 
 /// `hv_probe`, `hv_ro` and the four fixture roles on PostgreSQL target `t`, idempotently.
 /// `hv_ro` reads every table (`pg_read_all_data`, or `SELECT` on `public` before 14), with
-/// TEMP and `CREATE` on `public` revoked from `PUBLIC` as the init script does (the same
-/// statements, so the matrix volumes end as the init script leaves them).
+/// TEMP, `CREATE` on `public` and (Task 23 finding F1) `EXECUTE` on `pg_logical_emit_message`
+/// revoked from `PUBLIC` as the init script does (the same effect, so the matrix volumes end as
+/// the init script leaves them).
 async fn ensure_pg_fixtures(t: &DockerTarget) {
     let mut done = FIXTURES.lock().await;
     if done.contains(&t.id) {
@@ -222,6 +223,8 @@ async fn ensure_pg_fixtures(t: &DockerTarget) {
         ),
         format!("REVOKE TEMP ON DATABASE \"{}\" FROM PUBLIC", t.database),
         "REVOKE CREATE ON SCHEMA public FROM PUBLIC".to_string(),
+        // ## m2b-t23-f1: the remediation's third optional line, as the init script runs it.
+        revoke_emit_message(t),
         format!("GRANT \"{}\" TO {RO_SUPERUSER_MEMBER}", t.user),
         format!("GRANT UPDATE (a) ON hv_probe TO {RO_COLUMN_UPDATE}"),
         format!("GRANT CREATE ON SCHEMA public TO {RO_CREATE_PUBLIC}"),
@@ -555,6 +558,8 @@ async fn pg_probe_on_100k_tables_is_measured() {
     batch(&mut a, &t.id, &format!("CREATE DATABASE {DB}")).await;
     let mut scale = connect_profile(&t, profile_as(&t, &t.user, false).database(DB)).await;
     batch(&mut scale, &t.id, "CREATE SCHEMA scale").await;
+    // ## m2b-t23-f1: function privileges are per database; without it `hv_ro` reads guarded.
+    batch(&mut scale, &t.id, &revoke_emit_message(&t)).await;
     // In chunks: each table holds a lock until its transaction ends.
     let mut from = 0;
     while from < TABLES {

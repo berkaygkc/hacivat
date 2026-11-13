@@ -939,3 +939,10 @@ hv-conn-err-refused = { $name } — { $reason ->
 hv-conn-err-attempts-used = All 3 attempts are used. { -brand-hacivat } won't send another password, so the account isn't locked.
 # Under the connection dialog's Password field after 3 rejected passwords: how to try again.
 hv-conn-dlg-attempts-used = No attempts left for this server. To try again, change the host, port or user, or reopen this dialog.
+
+## m2b-t23-f1
+
+# A line of the read-only popover's findings list (the hv-conn-ro-warn-* family of Task 22):
+# the role may run a PostgreSQL function that writes something a rollback can't undo, such as
+# pg_logical_emit_message (RoleWarning::NonTransactionalWrite).
+hv-conn-ro-warn-non-transactional-write = It can run functions whose effects a rollback can't undo.

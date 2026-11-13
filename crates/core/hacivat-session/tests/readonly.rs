@@ -338,6 +338,80 @@ async fn transaction_keywords_are_denied_before_io() {
     }
 }
 
+// ## m2b-t23-f1
+#[tokio::test]
+async fn calls_a_rollback_cannot_undo_are_denied_before_io() {
+    // Task 23 finding F1: `pg_logical_emit_message(false, …)` writes a WAL record at once, which
+    // the guard's ROLLBACK cannot undo and its canary cannot see. The guard's text layer refuses
+    // it, and its siblings, in any spelling, before the guard's BEGIN.
+    for sql in [
+        "SELECT pg_logical_emit_message(false, 'hv', 'x')",
+        "select PG_CATALOG.\"pg_logical_emit_message\" (true, 'hv', 'x'::bytea)",
+        "SELECT U&\"pg\\005flogical_emit_message\"(false, 'hv', 'x', true)",
+        "DO $$ BEGIN PERFORM pg_switch_wal(); END $$",
+        "SELECT * FROM pg_create_physical_replication_slot('hv')",
+        "SELECT query_to_xml(E'SELECT pg\\x5fpromote()', true, true, '')",
+    ] {
+        let f = fake_pg_ro_clean();
+        let mut c = conn(&f).await;
+        assert_eq!(
+            run_guarded(&mut *c, DbmsKind::Postgres, sql, ExecOpts::default(), &[])
+                .await
+                .unwrap_err()
+                .kind,
+            ExecErrorKind::ReadOnlyDenied(DenyLayer::Function),
+            "{sql}"
+        );
+        assert!(f.executed().is_empty(), "{sql}: {:?}", f.executed());
+    }
+}
+
+#[tokio::test]
+async fn a_denied_call_keeps_the_session_usable() {
+    let (h, f) = ro_session(fake_pg_ro_clean()).await;
+    assert_eq!(
+        run(
+            &h,
+            "SELECT pg_catalog.pg_logical_emit_message(false, 'hv', 'x')"
+        )
+        .await
+        .unwrap_err()
+        .kind,
+        ExecErrorKind::ReadOnlyDenied(DenyLayer::Function)
+    );
+    // Reading the catalogue by name is not a call.
+    run(
+        &h,
+        "SELECT proname FROM pg_proc WHERE proname = 'pg_logical_emit_message'",
+    )
+    .await
+    .unwrap();
+    assert!(
+        !f.executed()
+            .iter()
+            .any(|s| s.contains("pg_logical_emit_message(")),
+        "{:?}",
+        f.executed()
+    );
+}
+
+#[tokio::test]
+async fn other_engines_send_those_names_to_the_server() {
+    // Only PostgreSQL has these functions; on MySQL the name is the server's to judge.
+    let f = fake_mysql_ro_clean();
+    let mut c = conn(&f).await;
+    run_guarded(
+        &mut *c,
+        DbmsKind::MySql,
+        "SELECT pg_switch_wal()",
+        ExecOpts::default(),
+        &[],
+    )
+    .await
+    .unwrap();
+    assert!(f.executed().iter().any(|s| s == "SELECT pg_switch_wal()"));
+}
+
 #[tokio::test]
 async fn schema_survives_a_guarded_request() {
     // Q15
@@ -884,6 +958,33 @@ async fn the_probe_runs_its_fixed_statements_only() {
     assert_eq!(label, AccessLabel::ReadOnlyEnforced);
     // Q21: TEMP is a warning that keeps the enforced label.
     assert_eq!(warnings, [RoleWarning::TempPrivilege]);
+    assert_eq!(f.executed(), pg_probe_lines());
+}
+
+// ## m2b-t23-f1
+#[tokio::test]
+async fn a_role_that_may_emit_wal_messages_reads_guarded() {
+    // Task 23 finding F1 (controller ruling): `PUBLIC` may execute `pg_logical_emit_message` on
+    // PostgreSQL 13–18. The guard refuses the call, but SQL built at run time gets past a text
+    // check, so the label is enforced only once `EXECUTE` is revoked (row 6 answers nothing).
+    let probe = role_probe_sql(DbmsKind::Postgres);
+    assert_eq!(probe.len(), 6);
+    let f = FakeDriver::new(DbmsKind::Postgres).exec(vec![
+        same_role(),
+        rows(probe[0], &[&["f", "f", "f", "f"]]),
+        rows(probe[2], &[&["f"]]),
+        rows(probe[3], &[&["t"]]),
+        rows(probe[5], &[&["pg_logical_emit_message"]]),
+    ]);
+    let (label, warnings) = access_for(&mut *conn(&f).await, DbmsKind::Postgres, true).await;
+    assert_eq!(label, AccessLabel::ReadOnlyGuarded);
+    assert_eq!(
+        warnings,
+        [
+            RoleWarning::TempPrivilege,
+            RoleWarning::NonTransactionalWrite
+        ]
+    );
     assert_eq!(f.executed(), pg_probe_lines());
 }
 

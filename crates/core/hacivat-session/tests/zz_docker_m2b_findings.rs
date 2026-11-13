@@ -12,72 +12,13 @@
 
 mod common;
 
+// ## m2b-t23-f1: F1 (an enforced PostgreSQL role could write WAL messages) is fixed; its rows
+// live in `docker_m2b_bypass.rs` (`PG_NON_TRANSACTIONAL_TEXT`, P31/P32).
+
 use common::conformance::*;
-use hacivat_proto::{AccessLabel, DbmsKind};
-use hacivat_session::LiveState;
+use hacivat_proto::DbmsKind;
 use hacivat_session::session::ExecErrorKind;
-use hacivat_testkit::{DockerTarget, targets};
-
-/// `t`'s read-only profile as `user`, on its own M2b manager.
-async fn read_only_as(t: &DockerTarget, user: &str) -> OnManager {
-    let mut p = profile_for(t, auto_or_require(t)).user(user);
-    p.read_only = true;
-    p.allow_unsupported_server = true;
-    OnManager::connect(deps(), p).await
-}
-
-fn label(on: &OnManager) -> Option<AccessLabel> {
-    match on.m.state(on.id()) {
-        LiveState::Connected(info) => Some(info.access),
-        _ => None,
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "docker"]
-async fn f1_pg_enforced_role_cannot_write_wal_messages() {
-    // F1 (SQL-SAFE-06 P32; owner: the role probe and remediation, T5/T18). PostgreSQL 13–18
-    // grant EXECUTE on `pg_logical_emit_message` to PUBLIC. Its transactional form assigns a
-    // transaction ID (L6's canary: a gap, rolled back); the non-transactional one writes its
-    // WAL record at once, which no rollback undoes and no canary sees. `hv_ro` (least privilege
-    // by the matrix's grants) is labelled "enforced" and can do it: the label claims more than
-    // the server enforces (B21). Either the probe must not read such a role as enforced, or the
-    // role must be refused (`42501`, e.g. by the remediation's REVOKE).
-    if !docker_enabled() {
-        return;
-    }
-    let lines: Vec<DockerTarget> = targets(Some(DbmsKind::Postgres))
-        .into_iter()
-        .filter(|t| !t.id.contains('-'))
-        .collect();
-    let mut failures = Vec::new();
-    for t in lines {
-        let on = read_only_as(&t, "hv_ro").await;
-        let label = label(&on);
-        let reply = run(
-            &on.s,
-            "SELECT pg_logical_emit_message(false, 'hv_t23', 'x')",
-        )
-        .await;
-        let refused = matches!(
-            &reply,
-            Err(e) if e.kind == ExecErrorKind::Db
-                && code_of(e.server.as_ref()).as_deref() == Some("42501")
-        );
-        if label == Some(AccessLabel::ReadOnlyEnforced) && !refused {
-            failures.push(format!(
-                "{}: hv_ro is labelled enforced, and pg_logical_emit_message(false, …) {}",
-                t.id,
-                match &reply {
-                    Ok(_) => "wrote its WAL record".to_string(),
-                    Err(e) => format!("failed with {:?}", e.kind),
-                }
-            ));
-        }
-        on.shutdown().await;
-    }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
+use hacivat_testkit::targets;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "docker"]
