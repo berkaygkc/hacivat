@@ -672,3 +672,108 @@ database itself, so a side file elsewhere would fail them.
   fail-closed stub (`RefuseUnlessVerified` everywhere), so an md5 server reached through the
   pipeline (`pg13` in the Docker matrix, loopback) is refused with `auth.insecure_method` until
   Task 14 allows loopback, Unix sockets, `Disable` and consented plaintext (B8).
+
+## m2b-t13 — hacivat-driver-mysql
+
+This section supersedes the M2a P11 defect note ("VerifyCa is unsupported in M2a") and the
+"TLS hooks" trust description of `m2a-t14`. The driver runs on the vendored `mysql_async`
+(`third_party/mysql_async`, patches §1–§5, Task 8).
+
+- **TLS is Hacivat's configuration (Q2, patch §5).** Every mode (Auto, Require, VerifyCa,
+  VerifyFull) builds `SslOpts::default().with_rustls_client_config(tls.config.clone())
+  .with_danger_tls_hostname_override(Some(tls_host))`. So MySQL and MariaDB get what
+  PostgreSQL gets: the pin-aware recording verifier (pins, the presented chain for the
+  certificate review, `TlsParams.outcome`), the platform verifier for Auto and VerifyFull,
+  Task 3's `ChainOnly` verifier for VerifyCa, the CA file's certificates, and the client
+  identity Hacivat read and decrypted (an encrypted PKCS #8 key, B25). `mysql_async` builds no
+  `ClientConfig`, root store or `DangerousVerifier` of its own, and never opens a certificate or
+  key file, so the client paths go only through `hacivat_net::paths::local_path` in
+  `build_tls_params` (T12 carry-in).
+  - **The OS-roots path is removed.** `rustls-native-certs` is gone from the crate (the named
+    manifest exception), with `os_roots`, the DER root list, `with_disable_built_in_roots` and
+    the `accept_invalid_certs`/`skip_domain_validation` flags. M2a's "flat trust" difference
+    from PostgreSQL is gone: MySQL now uses the platform verifier, as PostgreSQL does.
+  - **VerifyCa works (P11 superseded).** The driver no longer refuses it; `ChainOnly` checks
+    the chain against the CA file and skips the name. `verify_ca_with_container_ca_skips_the_name`
+    connects to `mysql84` with `mysql84-ca.pem` (`CaOnly`). Patch §1 stays as an upstream bug
+    fix but is no longer on Hacivat's path.
+  - **Platform note.** On Apple, Security.framework refuses MySQL's auto-generated leaf (ten-year
+    validity, no subject alternative name) by policy even with its CA as an extra root; the
+    failure is `UnknownIssuer`, which offers the review/pin flow. Elsewhere VerifyFull with the
+    CA reaches the name check (`NameMismatch`). `pin_flow_on_mysql84` pins it on both.
+  - **One handshake, one `SslOpts`.** `mysql_async` caches a connector per `SslOpts`, so every
+    attempt builds fresh `Opts`, `SslOpts` and guard (T8 carry-in). Auto's plaintext fallback
+    (loopback only, unchanged, Q41) builds `Opts` without TLS.
+- **Password guard, outcome-based (B8, Q20, patch §2).** `password_guard` is evaluated where
+  the server answers "perform full authentication" (`caching_sha2_password` `0x04`, before both
+  the cleartext-over-TLS and the RSA-key branches). The closure reads the attempt's
+  `TlsParams.outcome` at that moment and allows the password when `InsecureAuth::Allow`, or when
+  TLS ran and the outcome is `Full`, `CaOnly` or `Pinned` (`guard_allows`). It is never decided
+  from the mode: Require with a pin passes, Require without one (`No`) is refused. A plaintext
+  attempt never reads an outcome. `DriverError::InsecurePasswordRefused` maps to
+  `RawErrorKind::InsecureAuthRefused`; the trail shows the TLS pair and `AuthStarted`.
+  - **Why reading the shared slot is safe.** rustls gives the verifier no per-connection
+    context, so the slot is shared by every handshake through one `TlsParams.config`. The guard
+    runs only after this connection's handshake completed, which ran the verifier (session
+    resumption is off, Task 3) and wrote the configuration's fixed level. A concurrent
+    handshake through the same configuration can only write the same level or reset the slot
+    to `None` (the guard then refuses once): never raise it. The pipeline still builds one
+    `TlsParams` per attempt (T3/T14 carry); the `KILL QUERY` side connection is a separate
+    `connect` with its own `DriverConnect`.
+  - The Docker tests empty `hv_ro`'s `caching_sha2_password` cache entry before signing in (the
+    account sets its own password again; no account with a known password has `RELOAD`), so
+    full authentication really runs: Disable is refused under `RefuseUnlessVerified` and
+    allowed under `Allow`; Require is refused without a pin and allowed with it.
+- **Capabilities.** `multi_statements(!read_only)` (patch §3): a read-only connection never
+  asks for `CLIENT_MULTI_STATEMENTS`, so `SELECT 1; DROP …` is a syntax error (1064) even for
+  an account that could run both. `local_infile_capability(false)` always (patch §4), and no
+  `LOCAL INFILE` handler is ever installed, so a server's `0xFB` request is refused.
+  `enable_cleartext_plugin(false)` and `secure_auth(true)` stay: the guard's completeness relies
+  on them (Task 8 review).
+- **Execution (HV-EXEC-05).**
+  - `Protocol::Simple` is `query_iter`: rows as text (bytes that are not UTF-8 become U+FFFD,
+    never a panic), `max_rows` kept, the rest counted. With several statements (read-write
+    only) the columns and rows are the last result set's that has columns.
+  - `Protocol::Extended` is `exec_iter(sql, ())`, a prepared statement: rows counted, values
+    dropped. `ER_UNSUPPORTED_PS` (1295) is `Unsupported` on a read-only connection and never
+    re-sent as `COM_QUERY`; on a read-write connection it runs through `query_iter`. A prepared
+    `CALL` runs, but the session's read-only mode (1792) and `hv_ro`'s missing `EXECUTE` (1370)
+    stop its writes (`read_only_prepared_call_cannot_write`).
+  - `rows_affected` is the last OK packet's affected-row count, never the number of rows
+    returned (T5 carry-in): a result set reports 0 there, so the post-check's `SELECT`/`WITH`/
+    `CALL`/`DO` rule reads a positive count as a write.
+  - `command_tag` is the first keyword in ASCII upper case (Q35), after whitespace and
+    comments. An executable comment (`/*!…`, `/*!50000 …`, `/*M!100000 …`) is code, so its
+    keyword counts (`/*!50000 DROP TABLE t */` is `DROP`; `/*!*/ DELETE …` is `DELETE`).
+  - Errors 1317 (`KILL QUERY`), 3024 (`max_execution_time`) and MariaDB's 1969
+    (`max_statement_time`) are `RawErrorKind::Cancelled`; the server's message and code stay
+    (the session reads 1317). The connection stays usable after each
+    (`kill_query_side_connection_cancels_sleep`, the `max_execution_time` test).
+- **Transaction status (HV-SESS-03).** `tx` comes from `SERVER_STATUS_IN_TRANS` in the last OK
+  packet of each call. An ERR packet carries no status flags and never sets it. The brief's "an
+  ERR keeps the previous value" is not exact on its own: `START TRANSACTION; <failing
+  statement>` (read-write multi-statement) leaves the server in a transaction the previous
+  value does not show, and a deadlock (1213) rolls one back. So after a **server** error (the
+  connection is still in step) the driver sends one `DO 0` and reads its flags; if that fails
+  too, or after a transport error, the previous value stays. The Docker test
+  `a_failed_multi_statement_reports_the_transaction_it_opened` fails without the probe.
+- **Reset and identity.** `reset` is `Conn::reset` (`COM_RESET_CONNECTION`), after which
+  `mysql_async` runs the `setup` statements again, so a read-only connection is
+  `SET SESSION TRANSACTION READ ONLY` again (`reset_keeps_a_read_only_session_read_only`). It
+  clears user variables, temporary tables, prepared statements and `GET_LOCK` locks, ends the
+  transaction, and keeps the current database (Q15: `USE orders` survives). A server without
+  the command is `Unsupported`. `backend_id` is the handshake's thread ID (`CONNECTION_ID()`).
+- **Cancel.** `cancel_handle` stays `None`: the session sends `KILL QUERY <backend_id>` on a
+  side connection it opens through the pipeline (Task 7, Q37), so the driver keeps no
+  credentials for a connection of its own.
+- **TLS summary.** `verified` is the outcome this connection's handshake recorded (`Pinned`,
+  `CaOnly`, `Full`, `No`), read right after the handshake, never a guess from the mode.
+- **Known limits.**
+  - **Client certificates on the matrix.** The MySQL servers verify a presented client
+    certificate against their own auto-generated CA (`ssl_ca = ca.pem`), whose key never leaves
+    the container. `encrypted_pkcs8_client_key` therefore proves the decrypted identity reaches
+    the server by its `unknown_ca` alert; signing in with a client certificate needs a target
+    whose `ssl_ca` trusts a committed test CA (a Task 16/23 fixture).
+  - **Until Task 14** the pipeline's `insecure_auth_for` is the fail-closed stub
+    (`RefuseUnlessVerified` everywhere): a loopback MySQL `Require` profile (outcome `No`) is
+    refused on a `caching_sha2_password` cache miss (`auth.insecure_method`).

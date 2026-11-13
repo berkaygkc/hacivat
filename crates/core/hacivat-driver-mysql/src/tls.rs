@@ -1,90 +1,73 @@
-//! `SslOpts` from TLS settings, with OS roots as DER (P10, HV-SEC-02).
+//! TLS through Hacivat's own rustls configuration (Q2, vendored patch §5) and the
+//! outcome-based password guard (Q20, patch §2).
 //!
-//! `mysql_async` builds its own rustls `ClientConfig` (a `WebPkiServerVerifier` over the roots
-//! it is given), so Hacivat's `TlsParams::config` cannot be used here. Trust is the CA file
-//! plus the OS roots from `rustls-native-certs`, each handed over as DER; the compiled-in
-//! `webpki-roots` are switched off.
+//! - Every TLS mode (Auto, Require, VerifyCa, VerifyFull) hands `mysql_async` the attempt's
+//!   `TlsParams.config` as is: the pin-aware recording verifier, the platform verifier (or
+//!   `ChainOnly` for VerifyCa), the CA file and the client identity Hacivat read and decrypted.
+//!   `mysql_async` builds no `ClientConfig`, root store or `DangerousVerifier` of its own, and
+//!   never reads a certificate or key file.
+//! - The name to verify (and send as SNI) is always the profile's TLS host, through
+//!   `with_danger_tls_hostname_override` (the forwarder dials `127.0.0.1`).
+//! - `mysql_async` caches one connector per `SslOpts` value, so a fresh `SslOpts` is built for
+//!   every attempt (T8 carry-in).
 
-use std::sync::OnceLock;
+use std::sync::{Arc, PoisonError};
 
+use hacivat_driver::InsecureAuth;
 use hacivat_net::{TlsMode, TlsParams, TlsVerified};
-use mysql_async::{ClientIdentity, SslOpts};
-use rustls::RootCertStore;
+use mysql_async::SslOpts;
 
-/// The mode part of the TLS options; `None` sends no TLS request (Disable).
+/// The TLS options of one handshake attempt: Hacivat's `ClientConfig` and the name to verify.
+pub(crate) fn ssl_opts(tls: &TlsParams, tls_host: &str) -> SslOpts {
+    SslOpts::default()
+        .with_rustls_client_config(tls.config.clone())
+        .with_danger_tls_hostname_override(Some(tls_host.to_owned()))
+}
+
+/// Whether the password may go to a server that asked for it by full authentication
+/// (`caching_sha2_password` "perform full authentication": the cleartext password over TLS, or
+/// the RSA-encrypted one without) (B8, Q20).
 ///
-/// Every other mode trusts only the roots the connect path adds (never `webpki-roots`):
-/// - Require: any certificate, any name (`accept_invalid_certs` and `skip_domain_validation`);
-/// - Auto and VerifyFull: the chain and the host name are verified;
-/// - VerifyCa: never reached, because Validate rejects it for MySQL and MariaDB (P11) and the
-///   connect path refuses it; it maps to the VerifyFull checks, the stricter choice.
-pub fn ssl_opts(mode: TlsMode) -> Option<SslOpts> {
-    let base = SslOpts::default().with_disable_built_in_roots(true);
-    match mode {
-        TlsMode::Disable => None,
-        TlsMode::Require => Some(
-            base.with_danger_accept_invalid_certs(true)
-                .with_danger_skip_domain_validation(true),
-        ),
-        TlsMode::Auto | TlsMode::VerifyCa | TlsMode::VerifyFull => Some(base),
+/// `mode` is the mode the attempt's TLS ran in: `Disable` for a plaintext attempt (including
+/// Auto's plaintext fallback), whose `outcome` is never read. For every TLS mode the answer
+/// depends on the outcome only, never on the mode: `Allow`, or a server verified as `Full`,
+/// `CaOnly` or `Pinned` (so Require with a pin passes and Require without one does not).
+#[doc(hidden)]
+pub fn guard_allows(mode: TlsMode, outcome: Option<TlsVerified>, insecure: InsecureAuth) -> bool {
+    insecure == InsecureAuth::Allow
+        || (mode != TlsMode::Disable
+            && matches!(
+                outcome,
+                Some(TlsVerified::Full | TlsVerified::CaOnly | TlsVerified::Pinned)
+            ))
+}
+
+/// The patch §2 guard of one attempt. With TLS it reads the attempt's `TlsParams.outcome` at
+/// the moment the server asks for the password, after this connection's handshake ran the
+/// verifier (session resumption is off, so every handshake writes it); `None` (no TLS, or a
+/// slot another handshake just reset) refuses.
+pub(crate) fn password_guard(
+    tls: Option<&TlsParams>,
+    insecure: InsecureAuth,
+) -> Arc<dyn Fn() -> bool + Send + Sync> {
+    match tls {
+        Some(tls) => {
+            let mode = tls.settings.mode;
+            let outcome = tls.outcome.clone();
+            Arc::new(move || {
+                let seen = *outcome.lock().unwrap_or_else(PoisonError::into_inner);
+                guard_allows(mode, seen, insecure)
+            })
+        }
+        None => Arc::new(move || guard_allows(TlsMode::Disable, None, insecure)),
     }
 }
 
-/// How far a connection in `mode` verified the server (HV-SEC-02). VerifyCa matches
-/// [`ssl_opts`]: it would run the full checks, so it would report `Full` (it is refused before
-/// connecting in M2a, P11).
-pub(crate) fn verified(mode: TlsMode) -> TlsVerified {
-    match mode {
-        TlsMode::Auto | TlsMode::VerifyCa | TlsMode::VerifyFull => TlsVerified::Full,
-        TlsMode::Disable | TlsMode::Require => TlsVerified::No,
-    }
-}
-
-/// The OS trust roots as DER, loaded once (a blocking read of the system store). Only roots
-/// that rustls accepts as trust anchors are kept: `mysql_async` adds each root with
-/// `RootCertStore::add` and fails the whole connect on the first one it cannot parse.
-pub fn os_roots() -> &'static [Vec<u8>] {
-    static ROOTS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
-    ROOTS.get_or_init(|| {
-        rustls_native_certs::load_native_certs()
-            .certs
-            .into_iter()
-            .filter(|c| RootCertStore::empty().add(c.clone()).is_ok())
-            .map(|c| c.as_ref().to_vec())
-            .collect()
-    })
-}
-
-/// The CA file's certificates as DER: the ones `build_tls_params` read and checked
-/// (`TlsParams::ca_certs`). The file is never read again here, so an unreadable CA is the
-/// pipeline's `config.invalid` (`TlsCaUnreadable`), as for PostgreSQL, and never a silent
-/// fall-back to the OS roots alone (M2a final review M6).
-pub(crate) fn read_ca(tls: &TlsParams) -> Vec<Vec<u8>> {
-    tls.ca_certs.iter().map(|c| c.as_ref().to_vec()).collect()
-}
-
-/// The full TLS options for a connect: the mode part, the CA-file and OS roots as DER, the
-/// client identity and, through the forwarder, the real host name to verify.
-///
-/// The client certificate and key are passed as paths, so no key material is copied into
-/// `Opts`; `mysql_async` reads them during the handshake.
-pub(crate) fn full_ssl_opts(
-    tls: &TlsParams,
-    ca: Vec<Vec<u8>>,
-    host_override: Option<&str>,
-) -> Option<SslOpts> {
-    let mut roots: Vec<Vec<u8>> = ca;
-    roots.extend(os_roots().iter().cloned());
-    let identity = tls
-        .settings
-        .client_cert
-        .as_ref()
-        .map(|c| ClientIdentity::new(c.cert.clone().into(), c.key.clone().into()));
-    let mut opts = ssl_opts(tls.settings.mode)?
-        .with_root_certs(roots.into_iter().map(Into::into).collect())
-        .with_client_identity(identity);
-    if let Some(host) = host_override {
-        opts = opts.with_danger_tls_hostname_override(Some(host.to_owned()));
-    }
-    Some(opts)
+/// How far the server of a TLS connection was verified: the outcome its handshake recorded.
+/// A missing outcome is `No`, never a guess from the mode.
+pub(crate) fn verified(tls: &TlsParams) -> TlsVerified {
+    tls.outcome
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .unwrap_or(TlsVerified::No)
 }
