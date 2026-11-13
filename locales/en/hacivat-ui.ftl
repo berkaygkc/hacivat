@@ -837,6 +837,8 @@ hv-conn-ssh-add-jump = Add jump host
 hv-conn-ssh-remove-jump = Remove jump host { $n }
 # Under a jump host row without a host.
 hv-conn-ssh-jump-host-missing = Enter the jump host.
+# Under the jump host list when a jump host's key file (from ~/.ssh/config) is missing.
+hv-conn-ssh-jump-key-missing = A jump host's key file can't be found. Fix its IdentityFile in ~/.ssh/config, then import the host again.
 hv-conn-ssh-route = Route
 # The first stop of the route row: this computer.
 # Variables:

@@ -58,7 +58,7 @@ use hacivat_ui::menu::{MenuItemSpec, PopupMenu, PopupMenuEvent};
 use hacivat_ui::notice::{InlineNotice, NoticeIcon};
 use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
 use hacivat_ui::select::{Select, SelectEvent, SelectOption};
-use hacivat_ui::text::{Label, TextFn, TextSource};
+use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui_core::gpui_surface::{
     Anchor, AnyElement, App, AppContext as _, Bounds, Context, Div, Entity, EntityId, FocusHandle,
     Focusable as _, Global, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement,
@@ -259,21 +259,32 @@ struct Tint {
 struct Seed {
     transport: TransportSpec,
     ssh_retention: Retention,
-    /// An edit of a tunnel whose secrets are kept in the keyring.
-    stored: bool,
+    saved: Option<(usize, AuthKind)>,
 }
 
 impl Seed {
     fn of(draft: &ProfileDraft) -> Seed {
         let transport = draft.profile.transport.clone();
-        let stored = !draft.is_new
-            && draft.profile.ssh_retention == Retention::Forever
-            && matches!(transport, TransportSpec::SshTunnel(_));
+        let keeps = !draft.is_new && draft.profile.ssh_retention == Retention::Forever;
+        let saved = match &transport {
+            TransportSpec::SshTunnel(spec) if keeps => saved_secret(spec),
+            _ => None,
+        };
         Seed {
             transport,
             ssh_retention: draft.profile.ssh_retention,
-            stored,
+            saved,
         }
+    }
+}
+
+/// The SSH host's hop and the method whose secret a saved tunnel keeps in the keyring: a
+/// password (Password) or a key passphrase (Key file). The other methods keep none.
+fn saved_secret(spec: &SshSpec) -> Option<(usize, AuthKind)> {
+    let last = spec.hops.len().checked_sub(1)?;
+    match AuthKind::of(&spec.hops[last].auth) {
+        kind @ (AuthKind::Password | AuthKind::Key) => Some((last, kind)),
+        AuthKind::Agent | AuthKind::Kbd => None,
     }
 }
 
@@ -306,6 +317,9 @@ pub struct SshSection {
     loading: bool,
     notice: Option<ImportNotice>,
     tint: Option<Tint>,
+    /// The saved tunnel's secret (its hop and method): its field says it is saved only while
+    /// the SSH host is still that hop and signs in with that method.
+    saved: Option<(usize, AuthKind)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -461,22 +475,31 @@ impl SshSection {
             false,
             cx,
         );
-        let (secret_placeholder, secret_source): (TextFn, TextSource) = if seed.stored {
-            (Rc::new(stored), TextSource::Fluent)
-        } else {
-            (data(""), TextSource::Data)
+        // "Saved in the Keychain" only where a secret is kept (I1); the source follows it
+        // (`sync_saved_placeholders`).
+        let me = cx.weak_entity();
+        let saved_text = |field: SshField| -> TextFn {
+            let me = me.clone();
+            Rc::new(move |cx: &App| {
+                let shows = me.upgrade().is_some_and(|s| s.read(cx).shows_saved(field));
+                if shows {
+                    stored(cx)
+                } else {
+                    SharedString::default()
+                }
+            })
         };
         let passphrase = make(
             SshField::Passphrase,
-            secret_placeholder.clone(),
-            secret_source,
+            saved_text(SshField::Passphrase),
+            TextSource::Data,
             true,
             cx,
         );
         let password = make(
             SshField::Password,
-            secret_placeholder,
-            secret_source,
+            saved_text(SshField::Password),
+            TextSource::Data,
             true,
             cx,
         );
@@ -553,6 +576,7 @@ impl SshSection {
             loading: false,
             notice: None,
             tint: None,
+            saved: seed.saved,
             _subscriptions: subscriptions,
         };
         section.write_fields(window, cx);
@@ -563,6 +587,41 @@ impl SshSection {
             }
         });
         section
+    }
+
+    /// Whether the secret `field` shows "saved in the Keychain": the saved tunnel kept that
+    /// field's secret for the hop that is still the SSH host, and it still signs in that way.
+    fn shows_saved(&self, field: SshField) -> bool {
+        let wanted = match field {
+            SshField::Password => AuthKind::Password,
+            SshField::Passphrase => AuthKind::Key,
+            _ => return false,
+        };
+        let Some((hop, kind)) = self.saved else {
+            return false;
+        };
+        self.on
+            && kind == wanted
+            && self.main_auth() == wanted
+            && self.spec.hops.len().checked_sub(1) == Some(hop)
+    }
+
+    /// The secret fields' placeholder is a message only while it says "saved" (else data).
+    fn sync_saved_placeholders(&self, cx: &mut Context<Self>) {
+        for (field, input) in [
+            (SshField::Password, &self.password),
+            (SshField::Passphrase, &self.passphrase),
+        ] {
+            let source = if self.shows_saved(field) {
+                TextSource::Fluent
+            } else {
+                TextSource::Data
+            };
+            input.update(cx, |i, cx| {
+                i.set_placeholder_source(source);
+                cx.notify();
+            });
+        }
     }
 
     // ---- reading (tests read the section through these) ----------------------------------------
@@ -808,6 +867,7 @@ impl SshSection {
             });
         }
         self.issues.retain(|i| !cleared.contains(&i.code));
+        self.sync_saved_placeholders(cx);
         cx.notify();
     }
 
@@ -957,6 +1017,7 @@ impl SshSection {
         let policy = policy_index(self.spec.host_keys);
         self.host_keys
             .update(cx, |s, cx| s.set_selected(policy, cx));
+        self.sync_saved_placeholders(cx);
     }
 
     fn new_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> JumpRow {
@@ -1377,6 +1438,8 @@ impl SshSection {
         self.on = true;
         self.open = true;
         self.spec = spec;
+        // An imported tunnel is a new one: nothing of it is in the keyring yet.
+        self.saved = None;
         self.write_fields(window, cx);
         let mut fields = vec![SshField::Host, SshField::Port, SshField::User];
         if self.main_auth() == AuthKind::Key {
@@ -1471,8 +1534,9 @@ fn load_config(env: Option<SshImportEnv>) -> Loaded {
     let entries = cfg
         .hosts
         .iter()
-        // The parser already drops a `Host` pattern that holds a secret; never list one.
-        .filter(|h| !carries_secret(&h.alias))
+        // The parser already drops a `Host` pattern that holds a secret; never list one, nor
+        // one shaped like credentials (`admin:password@host`).
+        .filter(|h| !carries_secret(&h.alias) && !h.alias.contains('@'))
         .map(|h| entry_of(&cfg, &h.alias, &env.home))
         .collect();
     Loaded::Config {
@@ -1493,7 +1557,14 @@ fn entry_of(cfg: &SshConfig, alias: &str, home: &Path) -> ImportEntry {
         }
     });
     let (resolution, spec) = match resolved {
-        Ok(spec) => {
+        Ok(mut spec) => {
+            // The key field shows `~/.ssh/…`, as the menu does (Validate and the tunnel expand
+            // a leading `~` the same way: `hacivat_net::paths::local_path`).
+            for hop in &mut spec.hops {
+                if let SshAuth::KeyFile { path } = &mut hop.auth {
+                    *path = PathBuf::from(home_relative(path, home));
+                }
+            }
             let main = spec.hops.last();
             let target = main.map(hop_target).unwrap_or_default();
             let host = cfg
@@ -1504,7 +1575,7 @@ fn entry_of(cfg: &SshConfig, alias: &str, home: &Path) -> ImportEntry {
                 .filter(|h| !h.proxy_jump.is_empty())
                 .map(|h| h.proxy_jump.join(", "));
             let key = main.and_then(|m| match &m.auth {
-                SshAuth::KeyFile { path } => Some(home_relative(path, home)),
+                SshAuth::KeyFile { path } => Some(path.to_string_lossy().into_owned()),
                 _ => None,
             });
             (Resolution::Usable { target, jumps, key }, Some(spec))
@@ -1520,10 +1591,14 @@ fn entry_of(cfg: &SshConfig, alias: &str, home: &Path) -> ImportEntry {
 }
 
 /// Whether any value of `spec` carries a secret (the parser checks every value; this guards
-/// what reaches the form).
+/// what reaches the form). A credential-shaped value counts too (review I2): a host with `@`
+/// (`admin:password@host`) or one Validate refuses as a hop host, and a user with `:` or `@`.
+/// Such an entry only says it held a password; its values are never shown.
 fn spec_carries_secret(spec: &SshSpec) -> bool {
     spec.hops.iter().any(|h| {
-        carries_secret(&h.host)
+        host_invalid(&h.host)
+            || h.user.contains([':', '@'])
+            || carries_secret(&h.host)
             || carries_secret(&h.user)
             || h.identity_files
                 .iter()
@@ -1907,6 +1982,8 @@ fn hops_where(hops: &[HopSpec], f: impl Fn(&HopSpec) -> bool) -> Vec<usize> {
 fn issue_text(cx: &App, place: Place, code: &IssueCode) -> SharedString {
     let msg = match (place, code) {
         (Place::Jump(_), IssueCode::SshHostMissing) => ids::hv::CONN_SSH_JUMP_HOST_MISSING,
+        // A jump row has no key field: say where its key comes from (review M5).
+        (Place::Jumps, IssueCode::SshKeyFileMissing) => ids::hv::CONN_SSH_JUMP_KEY_MISSING,
         (_, IssueCode::SshHostMissing) => ids::hv::CONN_ISSUE_SSH_HOST_MISSING,
         (_, IssueCode::SshUserMissing) => ids::hv::CONN_ISSUE_SSH_USER_MISSING,
         (_, IssueCode::SshTooManyHops) => ids::hv::CONN_ISSUE_SSH_TOO_MANY_HOPS,
@@ -2028,22 +2105,34 @@ fn note(theme: &Theme, icon: IconName, text: SharedString, id: &'static str) -> 
             .debug_selector(move || selector)
             .flex()
             .flex_row()
-            .items_center()
+            .items_start()
             .gap(px(t.spacing.sm))
+            .flex_1()
             .min_w_0()
             .child(
-                Icon::new(icon)
-                    .size(IconSize::Chrome)
-                    .color(c.text_2.to_hsla()),
+                // Level with the first line of the note.
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .h(px(t.type_ramp.caption.line_height))
+                    .child(
+                        Icon::new(icon)
+                            .size(IconSize::Chrome)
+                            .color(c.text_2.to_hsla()),
+                    ),
             )
             .child(
-                Label::new(
-                    text,
-                    TextSource::Fluent,
-                    t.type_ramp.caption,
-                    c.text_2.to_hsla(),
-                )
-                .id(id),
+                // Wrapping prose: a long locale never clips the note (review M4).
+                div().flex_1().min_w_0().child(
+                    paragraph(
+                        text,
+                        TextSource::Fluent,
+                        t.type_ramp.caption,
+                        c.text_2.to_hsla(),
+                    )
+                    .id(id),
+                ),
             ),
     )
 }
@@ -2569,29 +2658,46 @@ fn render_route(s: &SshSection, p: &Profile, theme: &Theme, cx: &App) -> Div {
         .w_full()
         .min_w_0();
     // Every line is a field tall, so a wrapped route keeps its label level with the first.
-    let line = || div().flex().items_center().h(px(t.spacing.field_height));
-    let count = stops.len();
+    let line = || {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(ROUTE_GAP_PX))
+            .h(px(t.spacing.field_height))
+    };
     for (k, (text, source)) in stops.into_iter().enumerate() {
         let (style, ink) = if k == 0 {
             (t.type_ramp.caption, c.text_2)
         } else {
             (t.type_ramp.mono_data, c.text)
         };
+        // An arrow travels with the stop after it: a wrapped line never ends on an arrow.
+        let mut item = line().min_w_0().max_w_full();
+        if k > 0 {
+            let arrow = format!("ssh-route-arrow-{k}");
+            item = item.child(
+                div()
+                    .debug_selector(move || arrow)
+                    .flex_none()
+                    .child(Label::new(
+                        ROUTE_ARROW,
+                        TextSource::Data,
+                        t.type_ramp.caption,
+                        c.text_2.to_hsla(),
+                    )),
+            );
+        }
+        let stop = format!("ssh-route-stop-{k}");
         route = route.child(
-            line().min_w_0().max_w_full().child(
-                Label::new(text, source, style, ink.to_hsla())
-                    .truncate(true)
-                    .id(SharedString::from(format!("ssh-route-{k}"))),
+            item.child(
+                div().debug_selector(move || stop).min_w_0().child(
+                    Label::new(text, source, style, ink.to_hsla())
+                        .truncate(true)
+                        .id(SharedString::from(format!("ssh-route-{k}"))),
+                ),
             ),
         );
-        if k + 1 < count {
-            route = route.child(line().flex_none().child(Label::new(
-                ROUTE_ARROW,
-                TextSource::Data,
-                t.type_ramp.caption,
-                c.text_2.to_hsla(),
-            )));
-        }
     }
     route
 }
@@ -2688,6 +2794,62 @@ mod tests {
         )));
         assert!(!is_ssh_issue(&issue(None, IssueCode::TransportUnavailable)));
         assert!(is_ssh_issue(&issue(None, IssueCode::SshTooManyHops)));
+    }
+
+    /// Review M8: the section claims field-less `HostInvalid` / `PortInvalid` as a hop's. Pins
+    /// that Validate gives the database host's and port's their field.
+    #[test]
+    fn the_database_hosts_issues_carry_their_field() {
+        let profile = Profile {
+            name: "x".into(),
+            endpoint: ProfileEndpoint::Server {
+                host: "db host/with@url".into(),
+                port: Some(0),
+            },
+            ..Profile::default()
+        };
+        let issues = hacivat_session::pipeline::validate(&profile, EngineCatalog::embedded());
+        let codes: Vec<_> = issues
+            .iter()
+            .filter(|i| matches!(i.code, IssueCode::HostInvalid | IssueCode::PortInvalid))
+            .collect();
+        assert_eq!(codes.len(), 2, "{issues:?}");
+        assert!(codes.iter().all(|i| i.field.is_some() && !is_ssh_issue(i)));
+    }
+
+    #[test]
+    fn only_a_tunnel_takes_the_typed_secrets() {
+        let mut draft = ProfileDraft::new();
+        draft.ssh_secrets = vec![HopSecrets {
+            password: Some(SecretString::from("hv_test_pw")),
+            passphrase: None,
+        }];
+        assert!(secrets_for(&draft.profile, &draft).is_empty());
+        let mut tunnel = draft.profile.clone();
+        tunnel.transport = TransportSpec::SshTunnel(SshSpec {
+            hops: vec![new_hop("deploy".into())],
+            ..SshSpec::default()
+        });
+        let secrets = secrets_for(&tunnel, &draft);
+        assert_eq!(secrets.len(), 1);
+        assert!(secrets[0].password.is_some() && secrets[0].passphrase.is_none());
+    }
+
+    #[test]
+    fn credential_shaped_hops_are_refused() {
+        let spec = |host: &str, user: &str| SshSpec {
+            hops: vec![HopSpec {
+                host: host.into(),
+                ..new_hop(user.into())
+            }],
+            ..SshSpec::default()
+        };
+        assert!(!spec_carries_secret(&spec("h.acme.io", "deploy")));
+        assert!(!spec_carries_secret(&spec("fe80::1", "deploy")));
+        assert!(spec_carries_secret(&spec("admin:pw@h.acme.io", "deploy")));
+        assert!(spec_carries_secret(&spec("h acme", "deploy")));
+        assert!(spec_carries_secret(&spec("h.acme.io", "admin:pw")));
+        assert!(spec_carries_secret(&spec("h.acme.io", "a@b")));
     }
 
     #[test]

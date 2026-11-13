@@ -21,10 +21,13 @@ use hacivat_app::connections::dialog::{
 use hacivat_app::connections::fixes::{FixAction, run_m2b_fix};
 use hacivat_app::l10n_global::{tr, tr_id};
 use hacivat_l10n::{Count, Text, ids};
+use hacivat_net::ssh::{HopSpec, SshAuth, SshSpec};
 use hacivat_proto::{ErrClass, ProfileId};
+use hacivat_secrets::Retention;
 use hacivat_session::LiveState;
 use hacivat_session::pipeline::{ConnectError, ErrArgs, IssueCode, Phase};
 use hacivat_session::profile::{ProfileDraft, TransportSpec};
+use hacivat_ui::select::SelectEvent;
 
 use support::*;
 
@@ -64,18 +67,17 @@ fn dialog_ssh_full(cx: &mut TestAppContext) -> &'static mut VisualTestContext {
 /// The New dialog whose import reads `config` (a fixture `~/.ssh/config`).
 fn dialog_with_ssh_config(cx: &mut TestAppContext, config: &str) -> &'static mut VisualTestContext {
     let vcx = shell_with_connections(cx, "en");
-    let home = tempfile::tempdir().expect("temp home");
-    let path = home.path().join(".ssh").join("config");
+    // Kept for the app's lifetime: the import reads it on the core runtime.
+    let home = temp_dir(vcx);
+    let path = home.join(".ssh").join("config");
     std::fs::create_dir_all(path.parent().expect("a folder")).expect("~/.ssh");
     write(&path, config);
     let env = SshImportEnv {
         config: path,
-        home: home.path().to_path_buf(),
+        home,
         local_user: "tester".to_string(),
     };
     vcx.cx.update(|cx| cx.set_global(env));
-    // Kept for the app's lifetime (the import reads it on the core runtime).
-    std::mem::forget(home);
     let vcx = open_new(vcx);
     click_selector(vcx, "disclosure-conn-ssh");
     vcx
@@ -597,45 +599,111 @@ fn a_jump_row_takes_a_port_and_port_zero_is_an_issue(cx: &mut TestAppContext) {
 #[gpui::test]
 fn an_import_never_shows_a_refused_secret(cx: &mut TestAppContext) {
     // Hostile values (M2a T7 invariant): a ProxyJump with a password, a User that looks like
-    // a DSN with a password.
+    // a DSN with a password, credentials in a HostName and in a User (review I2), and a Host
+    // alias shaped like credentials.
     let vcx = dialog_with_ssh_config(
         cx,
         "Host jump\n HostName jump.acme.io\n\
          Host leaky\n HostName l.acme.io\n User x password=hv_test_pw\n\
+         Host hn\n HostName admin:hunter3@h.acme.io\n User deploy\n\
+         Host hu\n HostName u.acme.io\n User admin:hunter3\n\
+         Host admin:hunter3@a.acme.io\n User deploy\n\
          Host viaj\n HostName v.acme.io\n User deploy\n ProxyJump deploy:hv_test_pw@jump\n",
     );
     open_import(vcx);
-    let (_, usable, hint) = entry(vcx, "leaky");
-    assert!(!usable);
-    assert_eq!(hint, t(vcx, "hv-conn-ssh-unusable-secret"));
-    let all: Vec<String> = ssh(vcx, |s, cx| {
-        s.import_entries(cx)
+    let refused = t(vcx, "hv-conn-ssh-unusable-secret");
+    for alias in ["leaky", "hn", "hu"] {
+        let (_, usable, hint) = entry(vcx, alias);
+        assert!(!usable, "{alias} can't be picked");
+        assert_eq!(hint, refused, "{alias} says only why");
+    }
+    let leaked = |vcx: &VisualTestContext| {
+        let drawn = registry_frame(vcx)
             .into_iter()
-            .map(|(a, _, h)| format!("{a} {h}"))
-            .collect()
-    });
-    assert!(!all.iter().any(|e| e.contains("hv_test_pw")), "{all:?}");
-    pick(vcx, "viaj");
-    let notice = notice_text(vcx);
-    assert!(
-        notice.contains("viaj") && !notice.contains("hv_test_pw"),
-        "{notice}"
+            .map(|r| plain(&r.text))
+            .chain(ssh(vcx, |s, cx| {
+                s.import_entries(cx)
+                    .into_iter()
+                    .map(|(a, _, h)| format!("{a} {h}"))
+                    .collect::<Vec<_>>()
+            }))
+            .collect::<Vec<_>>();
+        drawn
+            .into_iter()
+            .filter(|t| t.contains("hv_test_pw") || t.contains("hunter3"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        leaked(vcx),
+        Vec::<String>::new(),
+        "nothing drawn holds a secret"
     );
+    // A disabled row does nothing when clicked.
+    pick(vcx, "hn");
+    assert!(draft(vcx, |d| matches!(
+        d.profile.transport,
+        TransportSpec::Direct
+    )));
+    pick(vcx, "viaj");
+    assert_eq!(
+        leaked(vcx),
+        Vec::<String>::new(),
+        "nothing drawn holds a secret"
+    );
+    let stripped = vcx.cx.read(|cx| {
+        plain(tr(
+            cx,
+            ids::hv::CONN_SSH_NOTICE_JUMP_PASSWORD,
+            ids::hv::HvConnSshNoticeJumpPassword {
+                alias: Text("viaj".into()),
+            },
+        ))
+    });
+    assert!(notice_text(vcx).contains(&stripped), "{}", notice_text(vcx));
     assert!(!draft(vcx, |d| format!("{:?}", d.profile)).contains("hv_test_pw"));
+}
+
+/// A connections shell whose import reads `config`, with the New dialog and its SSH section
+/// open.
+fn dialog_reading(
+    cx: &mut TestAppContext,
+    config: impl FnOnce(&std::path::Path) -> std::path::PathBuf,
+) -> &'static mut VisualTestContext {
+    let vcx = shell_with_connections(cx, "en");
+    let home = temp_dir(vcx);
+    let env = SshImportEnv {
+        config: config(&home),
+        home,
+        local_user: "tester".into(),
+    };
+    vcx.cx.update(|cx| cx.set_global(env));
+    let vcx = open_new(vcx);
+    click_selector(vcx, "disclosure-conn-ssh");
+    vcx
 }
 
 #[gpui::test]
 fn an_unreadable_config_says_so(cx: &mut TestAppContext) {
-    let vcx = shell_with_connections(cx, "en");
-    vcx.cx.update(|cx| {
-        cx.set_global(SshImportEnv {
-            config: "/nonexistent/hacivat-ssh-config".into(),
-            home: "/nonexistent".into(),
-            local_user: "tester".into(),
-        })
+    // A folder where the file should be: it exists but can't be read as a config.
+    let vcx = dialog_reading(cx, |home| {
+        let dir = home.join(".ssh").join("config");
+        std::fs::create_dir_all(&dir).expect("a folder named config");
+        dir
     });
-    let vcx = open_new(vcx);
-    click_selector(vcx, "disclosure-conn-ssh");
+    open_import(vcx);
+    assert!(ssh(vcx, |s, cx| s.import_entries(cx).is_empty()));
+    let unreadable = t(vcx, "hv-conn-ssh-import-unreadable");
+    assert!(
+        registry_frame(vcx)
+            .iter()
+            .any(|r| plain(&r.text) == unreadable),
+        "{unreadable} is drawn"
+    );
+}
+
+#[gpui::test]
+fn a_missing_config_lists_no_hosts(cx: &mut TestAppContext) {
+    let vcx = dialog_reading(cx, |home| home.join(".ssh").join("config"));
     open_import(vcx);
     assert!(ssh(vcx, |s, cx| s.import_entries(cx).is_empty()));
     let none = t(vcx, "hv-conn-ssh-import-none");
@@ -709,4 +777,125 @@ fn a_pasted_url_in_an_ssh_field_fills_the_form(cx: &mut TestAppContext) {
         "",
         "the SSH host is not the database"
     );
+}
+
+// ---- fix round 1 ----------------------------------------------------------------------------------
+
+/// A shell with a saved tunnel `via-bastion` whose SSH host signs in with `auth` and keeps its
+/// secrets Forever, and its Edit dialog open on the SSH section.
+fn edit_saved_tunnel(cx: &mut TestAppContext, auth: SshAuth) -> &'static mut VisualTestContext {
+    let vcx = shell_with_connections(cx, "en");
+    let mut profile = test_profile("via-bastion", None, "10.0.0.5");
+    profile.ssh_retention = Retention::Forever;
+    profile.transport = TransportSpec::SshTunnel(SshSpec {
+        hops: vec![HopSpec {
+            host: "bastion.acme.io".into(),
+            port: 22,
+            user: "deploy".into(),
+            auth,
+            identities_only: false,
+            identity_files: Vec::new(),
+        }],
+        ..Default::default()
+    });
+    let id = add_profile(vcx, profile);
+    in_window(vcx, |window, cx| {
+        open_connection_dialog(DialogMode::Edit(id), window, cx)
+    });
+    settle_until(vcx, WAIT, || section(vcx).is_some());
+    click_selector(vcx, "disclosure-conn-ssh");
+    vcx
+}
+
+/// What the secret field `name` paints while empty: its placeholder.
+fn placeholder(vcx: &mut VisualTestContext, name: &str) -> String {
+    vcx.run_until_parked();
+    let input = ssh(vcx, |s, _| s.input(name)).expect("the field");
+    vcx.cx.read(|cx| plain(input.read(cx).painted_text()))
+}
+
+#[gpui::test]
+fn an_agent_tunnel_claims_no_saved_secret(cx: &mut TestAppContext) {
+    // Review I1: an agent tunnel keeps no secret; switching it to Password or Key file must
+    // not say one is saved in the Keychain.
+    let vcx = edit_saved_tunnel(cx, SshAuth::Agent);
+    pick_segment(vcx, AuthKind::Password);
+    assert_eq!(placeholder(vcx, "ssh-password"), "");
+    pick_segment(vcx, AuthKind::Key);
+    assert_eq!(placeholder(vcx, "ssh-passphrase"), "");
+}
+
+#[gpui::test]
+fn a_saved_password_is_claimed_for_its_hop_and_method_only(cx: &mut TestAppContext) {
+    let vcx = edit_saved_tunnel(cx, SshAuth::Password);
+    let saved = t(vcx, "hv-conn-dlg-pw-saved");
+    assert_eq!(placeholder(vcx, "ssh-password"), saved);
+    // Another method: its secret was never saved.
+    pick_segment(vcx, AuthKind::Key);
+    assert_eq!(placeholder(vcx, "ssh-passphrase"), "");
+    pick_segment(vcx, AuthKind::Password);
+    assert_eq!(placeholder(vcx, "ssh-password"), saved);
+    // A jump host in front moves the SSH host to hop 1: the saved slot is hop 0's.
+    add_jump(vcx, "jump-eu.acme.io", "deploy");
+    assert_eq!(placeholder(vcx, "ssh-password"), "");
+}
+
+#[gpui::test]
+fn ssh_remember_writes_ssh_retention_only(cx: &mut TestAppContext) {
+    let vcx = dialog_ssh_on(cx);
+    pick_segment(vcx, AuthKind::Password);
+    let before = draft(vcx, |d| d.profile.retention);
+    let select = ssh(vcx, |s, _| s.remember_select());
+    let at = Retention::ALL
+        .iter()
+        .position(|r| *r == Retention::UntilRestart)
+        .expect("a retention");
+    vcx.cx.update(|cx| {
+        select.update(cx, |s, cx| {
+            s.set_selected(at, cx);
+            cx.emit(SelectEvent::Changed(at));
+        })
+    });
+    vcx.run_until_parked();
+    assert_eq!(
+        draft(vcx, |d| d.profile.ssh_retention),
+        Retention::UntilRestart
+    );
+    assert_eq!(
+        draft(vcx, |d| d.profile.retention),
+        before,
+        "the database's retention stays (Q23)"
+    );
+}
+
+#[gpui::test]
+fn a_wrapped_route_never_ends_a_line_on_an_arrow(cx: &mut TestAppContext) {
+    let vcx = dialog_ssh_on(cx);
+    type_into_form(
+        vcx,
+        "host",
+        "db-prod-eu-west-1-replica-02.internal.acme-corporation.io",
+    );
+    type_into(vcx, "ssh-host", "bastion-eu-west-1.ops.acme-corporation.io");
+    add_jump(vcx, "jump-eu-west-1.edge.acme-corporation.io", "deploy");
+    vcx.run_until_parked();
+    let middle = |vcx: &mut VisualTestContext, selector: String| {
+        let selector: &'static str = Box::leak(selector.into_boxed_str());
+        let bounds = vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("`{selector}` is drawn"));
+        f32::from(bounds.center().y)
+    };
+    let first = middle(vcx, "ssh-route-stop-0".to_string());
+    let last = middle(vcx, "ssh-route-stop-3".to_string());
+    assert!(last > first + 1.0, "the long route wraps");
+    // Every arrow sits on the line of the stop after it.
+    for k in 1..=3 {
+        let arrow = middle(vcx, format!("ssh-route-arrow-{k}"));
+        let stop = middle(vcx, format!("ssh-route-stop-{k}"));
+        assert!(
+            (arrow - stop).abs() < 1.0,
+            "arrow {k} shares its stop's line"
+        );
+    }
 }

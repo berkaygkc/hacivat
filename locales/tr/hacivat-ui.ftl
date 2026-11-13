@@ -877,6 +877,8 @@ hv-conn-ssh-remove-jump = { $n }. ara sunucuyu kaldır
 # Review: PO
 hv-conn-ssh-jump-host-missing = Ara sunucuyu girin.
 # Review: PO
+hv-conn-ssh-jump-key-missing = Bir ara sunucunun anahtar dosyası bulunamıyor. ~/.ssh/config içindeki IdentityFile satırını düzeltip sunucuyu yeniden içe aktarın.
+# Review: PO
 hv-conn-ssh-route = Rota
 # Review: PO
 hv-conn-ssh-this-mac = { $os ->
