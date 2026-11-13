@@ -4,6 +4,12 @@
 //! accepted the `SSLRequest`. Ours runs `tokio-rustls` with the caller's [`TlsParams`]
 //! (configuration, server name and verifier), reports `TlsStarted` / `TlsDone`, and turns a
 //! failed handshake into a [`TlsFailure`] that is also written into `TlsParams::failure`.
+//!
+//! M2b (Task 10): the stream it wraps is the raw [`Observer`] (now passing TLS records through),
+//! and the stream it returns puts a second, framed observer above rustls, so every message after
+//! the handshake is observed decrypted (Q12). The handshake's verification outcome is captured
+//! into the shared [`crate::wire::WireState`] for the insecure-auth guard (B8, Q20), and the
+//! stream offers `tls-server-end-point` channel binding (B9).
 
 use std::error::Error;
 use std::fmt;
@@ -15,12 +21,14 @@ use std::task::{Context, Poll};
 
 use futures::future::BoxFuture;
 use hacivat_driver::{DriverEvent, DriverEvents};
-use hacivat_net::{BoxedStream, TlsFailure, TlsParams};
+use hacivat_net::{BoxedStream, TlsFailure, TlsParams, TlsVerified, tls_server_end_point};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_postgres::tls::{ChannelBinding, TlsConnect, TlsStream};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream as RustlsStream;
+
+use crate::wire::{Observer, ObserverMode};
 
 /// The injected stream under a named type. `connect_raw` is generic over the stream, and a
 /// bare `Box<dyn AsyncStream>` there trips the compiler's higher-ranked lifetime check when
@@ -92,6 +100,8 @@ struct Handshake {
     connector: TlsConnector,
     server_name: ServerName<'static>,
     failure: Arc<Mutex<Option<TlsFailure>>>,
+    /// Written by the verifier on success; captured right after the handshake.
+    outcome: Arc<Mutex<Option<TlsVerified>>>,
 }
 
 impl Connector {
@@ -100,6 +110,7 @@ impl Connector {
             connector: TlsConnector::from(p.config.clone()),
             server_name: p.server_name.clone(),
             failure: p.failure.clone(),
+            outcome: p.outcome.clone(),
         });
         Connector {
             tls,
@@ -146,12 +157,12 @@ fn protocol_name(v: rustls::ProtocolVersion) -> Option<String> {
     }
 }
 
-impl TlsConnect<Injected> for Connector {
+impl TlsConnect<Observer<Injected>> for Connector {
     type Stream = PgTlsStream;
     type Error = HandshakeError;
     type Future = BoxFuture<'static, Result<PgTlsStream, HandshakeError>>;
 
-    fn connect(self, stream: Injected) -> Self::Future {
+    fn connect(self, stream: Observer<Injected>) -> Self::Future {
         Box::pin(async move {
             let Some(hs) = self.tls else {
                 // Unreachable: without parameters the mode is Disable and no SSLRequest is sent.
@@ -161,8 +172,11 @@ impl TlsConnect<Injected> for Connector {
                 });
             };
             (self.events)(DriverEvent::TlsStarted);
+            let wire = stream.state().clone();
             match hs.connector.connect(hs.server_name, stream).await {
                 Ok(tls) => {
+                    // The outcome of this handshake, before anything else can touch the slot.
+                    wire.set_outcome(*hs.outcome.lock().unwrap_or_else(PoisonError::into_inner));
                     let (_, session) = tls.get_ref();
                     let local = LocalTls {
                         version: session.protocol_version().and_then(protocol_name),
@@ -179,7 +193,7 @@ impl TlsConnect<Injected> for Connector {
                     (self.events)(DriverEvent::TlsDone);
                     self.shared.auth_started.store(true, Ordering::SeqCst);
                     (self.events)(DriverEvent::AuthStarted);
-                    Ok(PgTlsStream(tls))
+                    Ok(PgTlsStream(Observer::new(tls, wire, ObserverMode::Framed)))
                 }
                 Err(e) => {
                     let mut slot = hs.failure.lock().unwrap_or_else(PoisonError::into_inner);
@@ -197,11 +211,22 @@ impl TlsConnect<Injected> for Connector {
     }
 }
 
-/// A rustls session over the injected stream, as `tokio-postgres` wants it.
+/// A rustls session over the injected stream, as `tokio-postgres` wants it, with the framed
+/// observer on its decrypted side (Q12).
 ///
-/// It offers no channel binding, so SCRAM runs as `SCRAM-SHA-256` (not `-PLUS`), as libpq does
-/// with `channel_binding=prefer` when it cannot bind.
-pub struct PgTlsStream(RustlsStream<Injected>);
+/// It offers `tls-server-end-point` channel binding (RFC 5929, B9) when the leaf's signature
+/// algorithm defines one, so SCRAM runs as `SCRAM-SHA-256-PLUS` where the server offers it;
+/// otherwise (Ed25519 and unknown algorithms) none, and SCRAM runs as `SCRAM-SHA-256`.
+pub struct PgTlsStream(Observer<RustlsStream<Observer<Injected>>>);
+
+impl PgTlsStream {
+    /// The `tls-server-end-point` hash of the server's leaf certificate, if it has one.
+    pub fn end_point_hash(&self) -> Option<Vec<u8>> {
+        let (_, session) = self.0.get_ref().get_ref();
+        let leaf = session.peer_certificates()?.first()?;
+        tls_server_end_point(leaf.as_ref())
+    }
+}
 
 impl AsyncRead for PgTlsStream {
     fn poll_read(
@@ -233,7 +258,10 @@ impl AsyncWrite for PgTlsStream {
 
 impl TlsStream for PgTlsStream {
     fn channel_binding(&self) -> ChannelBinding {
-        ChannelBinding::none()
+        match self.end_point_hash() {
+            Some(hash) => ChannelBinding::tls_server_end_point(hash),
+            None => ChannelBinding::none(),
+        }
     }
 }
 

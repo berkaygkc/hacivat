@@ -4,6 +4,11 @@
 //! database, options and application name of the [`Config`], never a host or port. The
 //! password is copied into the `Config` (as bytes; its `Debug` redacts it) only here, at
 //! connect time, and the `Config` is dropped as soon as the handshake ends (P49).
+//!
+//! M2b (Task 10): the injected stream runs under the wire observer ([`crate::wire`]), which
+//! enforces the insecure-auth guard (B8) and records the PID, the transaction status and the
+//! command tags; the connection is driven through `poll_message`, so notices reach `execute`
+//! (Q12); and the connection keeps a cancel handle over the same factory and TLS settings (B23).
 
 use std::io;
 use std::sync::PoisonError;
@@ -15,8 +20,11 @@ use secrecy::ExposeSecret;
 use tokio_postgres::Config;
 use tokio_postgres::config::SslMode;
 
+use crate::cancel::PgCancel;
+use crate::exec::{Notices, drive};
 use crate::probe::PgConn;
 use crate::tls::{Connector, HandshakeError, Injected, Shared};
+use crate::wire::{InsecureAuthRefusedMarker, Observer, ObserverMode, TlsRefusedMarker, WireState};
 
 /// The `sslmode` for a profile's TLS mode (P9).
 ///
@@ -116,6 +124,16 @@ pub fn config_for(req: &DriverConnect) -> Config {
 /// to reach the client.
 #[doc(hidden)]
 pub async fn connect_conn(req: DriverConnect) -> Result<PgConn, RawError> {
+    connect_conn_with(req, |_| {}).await
+}
+
+/// [`connect_conn`] with the `tokio-postgres` configuration adjusted by `adjust` before the
+/// handshake (the driver's own tests: `channel_binding=require`).
+#[doc(hidden)]
+pub async fn connect_conn_with(
+    req: DriverConnect,
+    adjust: impl FnOnce(&mut Config),
+) -> Result<PgConn, RawError> {
     let Endpoint::Network { factory, .. } = &req.endpoint else {
         return Err(raw(RawErrorKind::Unsupported));
     };
@@ -125,17 +143,25 @@ pub async fn connect_conn(req: DriverConnect) -> Result<PgConn, RawError> {
     }
     let shared = Shared::default();
     let connector = Connector::new(req.tls.as_ref(), req.events.clone(), shared.clone());
-    let config = config_for(&req);
+    let mut config = config_for(&req);
+    adjust(&mut config);
     let mode = config.get_ssl_mode();
     let events = req.events.clone();
+    let wire = WireState::new(req.insecure_auth);
     let attempt = async {
         let stream = factory.open().await.map_err(io_error)?;
-        if mode == SslMode::Disable {
+        let observed = if mode == SslMode::Disable {
             shared.auth_started.store(true, Ordering::SeqCst);
             events(DriverEvent::AuthStarted);
-        }
+            ObserverMode::Framed
+        } else {
+            ObserverMode::AwaitSslResponse
+        };
         config
-            .connect_raw(Injected(stream), connector)
+            .connect_raw(
+                Observer::new(Injected(stream), wire.clone(), observed),
+                connector,
+            )
             .await
             .map_err(|e| pg_error(&e))
     };
@@ -150,21 +176,29 @@ pub async fn connect_conn(req: DriverConnect) -> Result<PgConn, RawError> {
         events(DriverEvent::AuthStarted);
     }
     events(DriverEvent::AuthDone);
-    let task = tokio::spawn(async move {
-        // The error (if any) reaches the client as a closed connection.
-        let _ = connection.await;
-    });
-    let tls_mode = shared
-        .local()
+    let notices = Notices::default();
+    let task = tokio::spawn(drive(connection, notices.clone(), wire.clone()));
+    let local = shared.local();
+    let cancel = PgCancel::new(
+        client.cancel_token(),
+        factory.clone(),
+        req.tls.as_ref(),
+        mode,
+        local.is_some(),
+    );
+    let tls_mode = local
+        .as_ref()
         .and(req.tls.as_ref().map(|t| t.settings.mode));
-    Ok(PgConn::new(client, task, tls_mode, shared.local()))
+    Ok(PgConn::new(
+        client, task, tls_mode, local, wire, notices, cancel,
+    ))
 }
 
 fn raw(kind: RawErrorKind) -> RawError {
     RawError { kind, server: None }
 }
 
-fn io_error(e: io::Error) -> RawError {
+pub(crate) fn io_error(e: io::Error) -> RawError {
     raw(RawErrorKind::Io(e.kind()))
 }
 
@@ -206,6 +240,16 @@ pub(crate) fn pg_error(e: &tokio_postgres::Error) -> RawError {
             Some(failure) => RawErrorKind::Tls(failure),
             None => RawErrorKind::Io(hs.io_kind),
         });
+    }
+    let inner = source
+        .and_then(|s| s.downcast_ref::<io::Error>())
+        .and_then(io::Error::get_ref);
+    // The wire observer's refusals (B8; a TLS session's cancel answered in plaintext).
+    if inner.is_some_and(|i| i.is::<InsecureAuthRefusedMarker>()) {
+        return raw(RawErrorKind::InsecureAuthRefused);
+    }
+    if inner.is_some_and(|i| i.is::<TlsRefusedMarker>()) {
+        return raw(RawErrorKind::TlsNotOffered);
     }
     if source.is_some_and(|s| s.to_string() == TLS_NOT_OFFERED) {
         return raw(RawErrorKind::TlsNotOffered);

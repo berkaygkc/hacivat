@@ -16,8 +16,11 @@ use hacivat_proto::DbmsKind;
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, SimpleQueryMessage};
 
+use crate::cancel::PgCancel;
 use crate::connect::pg_error;
+use crate::exec::{Exec, Notices};
 use crate::tls::LocalTls;
+use crate::wire::WireState;
 
 /// How long `close` waits for the server to see the `Terminate` before dropping the socket.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
@@ -49,7 +52,8 @@ pub fn server_version(version_num: Option<&str>, version: &str) -> Option<SemVer
     }
 }
 
-/// How far the certificate was checked in `mode`.
+/// How far the certificate was checked in `mode` (the fallback when the handshake recorded no
+/// outcome).
 fn verified_for(mode: Option<TlsMode>) -> TlsVerified {
     match mode {
         Some(TlsMode::Auto | TlsMode::VerifyFull) => TlsVerified::Full,
@@ -93,6 +97,12 @@ pub struct PgConn {
     tls_mode: Option<TlsMode>,
     /// What the handshake negotiated, when it ran.
     local_tls: Option<LocalTls>,
+    // ## m2b-t10-pg
+    /// What the wire observer records: PID, transaction status, command tags (Q11, Q12).
+    wire: Arc<WireState>,
+    /// Notice codes collected by the connection task (Q12).
+    notices: Notices,
+    cancel: Arc<PgCancel>,
 }
 
 impl PgConn {
@@ -101,12 +111,26 @@ impl PgConn {
         task: JoinHandle<()>,
         tls_mode: Option<TlsMode>,
         local_tls: Option<LocalTls>,
+        wire: Arc<WireState>,
+        notices: Notices,
+        cancel: PgCancel,
     ) -> Self {
         PgConn {
             client,
             task: TaskGuard(Some(task)),
             tls_mode,
             local_tls,
+            wire,
+            notices,
+            cancel: Arc::new(cancel),
+        }
+    }
+
+    fn exec(&self) -> Exec<'_> {
+        Exec {
+            client: &self.client,
+            wire: &self.wire,
+            notices: &self.notices,
         }
     }
 
@@ -152,8 +176,11 @@ impl PgConn {
             encrypted: local.is_some() || server_ssl,
             version: cell(1).or_else(|| local.and_then(|l| l.version.clone())),
             cipher: cell(2).or_else(|| local.and_then(|l| l.cipher.clone())),
+            // The handshake's own outcome (a pin is `Pinned` in any mode), else the mode's.
             verified: if local.is_some() {
-                verified_for(self.tls_mode)
+                self.wire
+                    .outcome()
+                    .unwrap_or_else(|| verified_for(self.tls_mode))
             } else {
                 TlsVerified::No
             },
@@ -243,35 +270,38 @@ impl RawConn for PgConn {
         })
     }
 
-    /// `None` in M2a; the CancelRequest over a fresh factory stream arrives in M2b.
+    /// The `CancelRequest` over a fresh stream from the connection's factory, with its TLS
+    /// settings (B23).
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
-        None
+        Some(self.cancel.clone())
     }
 
-    // ## m2b-t01-interfaces: Task 10 (`exec`) fills these; until then nothing runs.
+    // ## m2b-t10-pg
 
     fn execute<'a>(
         &'a mut self,
-        _sql: &'a str,
-        _opts: ExecOpts,
+        sql: &'a str,
+        opts: ExecOpts,
     ) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
-        Box::pin(async { Err(crate::exec::not_yet()) })
+        Box::pin(async move { self.exec().execute(sql, opts).await })
     }
 
-    fn batch<'a>(&'a mut self, _sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
-        Box::pin(async { Err(crate::exec::not_yet()) })
+    fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
+        Box::pin(async move { self.exec().batch(sql).await })
     }
 
     fn tx_status(&self) -> TxStatus {
-        TxStatus::Idle
+        self.wire.tx()
     }
 
     fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>> {
-        Box::pin(async { Err(crate::exec::not_yet()) })
+        Box::pin(async move { self.exec().reset().await })
     }
 
     fn backend_id(&self) -> Option<u64> {
-        None
+        self.wire
+            .backend_pid()
+            .and_then(|pid| u64::try_from(pid).ok())
     }
 }
 
