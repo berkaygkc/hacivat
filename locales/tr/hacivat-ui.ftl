@@ -826,10 +826,104 @@ hv-conn-issue-option-secret = { $key } özelliği bir parola taşıyor. Özelli�
 # Review: PO
 hv-conn-issue-ssh-host-missing = SSH sunucusunu girin.
 # Review: PO
-hv-conn-issue-ssh-user-missing = SSH kullanıcısını girin.
+hv-conn-issue-ssh-user-missing = Oturum açılacak kullanıcıyı girin.
 # Review: PO
-hv-conn-issue-ssh-too-many-hops = Bu tünelde çok fazla ara sunucu var.
+hv-conn-issue-ssh-too-many-hops = Bir tünel en fazla 8 ara sunucudan geçebilir.
 # Review: PO
-hv-conn-issue-ssh-key-file-missing = SSH anahtar dosyası okunamıyor.
+hv-conn-issue-ssh-key-file-missing = Bu anahtar dosyası bulunamıyor. ~/.ssh/id_ed25519 gibi özel anahtarı seçin.
 # Review: PO
 hv-conn-issue-tls-key-legacy-encrypted = Bu özel anahtar eski bir şifreleme biçimi kullanıyor. Anahtarı PKCS #8'e dönüştürün.
+
+## m2b-t20-ssh
+
+# Review: PO
+hv-conn-section-ssh = SSH tüneli
+# Review: PO
+hv-conn-ssh-sum-off = Kapalı
+# Review: PO
+hv-conn-ssh-sum-on = { $host } üzerinden
+# Review: PO
+hv-conn-ssh-sum-hops = { $host } üzerinden · { $n } ara sunucu
+# Review: PO
+hv-conn-ssh-use = SSH tüneli üzerinden bağlan
+# Review: PO
+hv-conn-ssh-import = ~/.ssh/config'den içe aktar…
+# Review: PO
+hv-conn-ssh-host = SSH sunucusu
+# Review: PO
+hv-conn-ssh-user = SSH kullanıcısı
+# Review: PO
+hv-conn-ssh-auth-agent = Ajan
+# Review: PO
+hv-conn-ssh-auth-key = Anahtar dosyası
+# Review: PO
+hv-conn-ssh-auth-password = Parola
+# Review: PO
+hv-conn-ssh-auth-kbd = Klavye etkileşimli
+# Review: PO
+hv-conn-ssh-agent-note = ssh-agent'a yüklü anahtarları kullanır.
+# Review: PO
+hv-conn-ssh-key = Anahtar dosyası
+# Review: PO
+hv-conn-ssh-passphrase = Parola ifadesi
+# Review: PO
+hv-conn-ssh-kbd-note = Sunucunun soruları, örneğin tek kullanımlık kod, bağlanırken gösterilir.
+# Review: PO
+hv-conn-ssh-jumps = Ara sunucular
+# Review: PO
+hv-conn-ssh-add-jump = Ara sunucu ekle
+# Review: PO
+hv-conn-ssh-remove-jump = { $n }. ara sunucuyu kaldır
+# Review: PO
+hv-conn-ssh-jump-host-missing = Ara sunucuyu girin.
+# Review: PO
+hv-conn-ssh-route = Rota
+# Review: PO
+hv-conn-ssh-this-mac = { $os ->
+        [mac] bu Mac
+       *[other] bu bilgisayar
+    }
+# Review: PO
+hv-conn-ssh-hostkeys = Sunucu anahtarları
+# Review: PO
+hv-conn-ssh-hk-ask = Yeni sunucularda sor
+# Review: PO
+hv-conn-ssh-hk-accept = Yeniyi kabul et, değişirse dur
+# Review: PO
+hv-conn-ssh-hk-strict = Yalnızca bilinen sunucular
+# Review: PO
+hv-conn-ssh-import-title = ~/.ssh/config içindeki sunucular
+# Review: PO
+hv-conn-ssh-proxycmd = ProxyCommand kullanıyor, desteklenmiyor
+# Review: PO
+hv-conn-ssh-unusable-secret = parolaya benzeyen bir değer içeriyor, içe aktarılmadı
+# Review: PO
+hv-conn-ssh-unusable-token = { $token } kullanıyor, desteklenmiyor
+# Review: PO
+hv-conn-ssh-unusable-depth = ara sunucuları çok derin iç içe
+# Review: PO
+hv-conn-ssh-unusable-unknown = dosyada olmayan bir ara sunucuyu adlandırıyor
+# Review: PO
+hv-conn-ssh-import-via = { $target } · ProxyJump { $jumps }
+# Review: PO
+hv-conn-ssh-import-key = { $target } · IdentityFile { $key }
+# Review: PO
+hv-conn-ssh-import-none = ~/.ssh/config içinde sunucu yok
+# Review: PO
+hv-conn-ssh-import-unreadable = ~/.ssh/config okunamıyor
+# Review: PO
+hv-conn-ssh-imported = { $alias }, ~/.ssh/config'den içe aktarıldı: adres, kullanıcı, anahtar ve ara sunucu.
+# Review: PO
+hv-conn-ssh-notice-match = { $line }. satır: Match blokları atlandı.
+# Review: PO
+hv-conn-ssh-notice-include = { $line }. satır: Include çok derin iç içe, adlandırdığı dosyalar atlandı.
+# Review: PO
+hv-conn-ssh-notice-known-hosts = { $alias }: UserKnownHostsFile yok sayıldı. { -brand-hacivat } kendi bilinen sunucular listesini ve ~/.ssh/known_hosts dosyasını denetler.
+# Review: PO
+hv-conn-ssh-notice-strict-no = { $alias }: StrictHostKeyChecking no, Yeni sunucularda sor olarak okundu.
+# Review: PO
+hv-conn-ssh-notice-agent = { $alias }: IdentityAgent yok sayıldı. { -brand-hacivat } SSH_AUTH_SOCK içindeki ajanı kullanır.
+# Review: PO
+hv-conn-ssh-notice-jump-password = { $alias }: ProxyJump bir parola içeriyordu; parola kaldırıldı ve saklanmadı.
+# Review: PO
+hv-conn-step-ssh = SSH
