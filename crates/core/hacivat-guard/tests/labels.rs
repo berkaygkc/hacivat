@@ -125,9 +125,14 @@ fn remediation_is_exact() {
     assert_eq!(
         remediation(DbmsKind::Postgres),
         Some(
-            "CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT pg_read_all_data TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;"
+            "CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT pg_read_all_data TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;\n-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;"
         )
     );
+    // Both revokes from PUBLIC stay comments: they affect every role (Q21, fix round 2).
+    let pg = remediation(DbmsKind::Postgres).unwrap();
+    for line in pg.lines().filter(|l| l.contains("PUBLIC")) {
+        assert!(line.starts_with("-- optional: "), "{line}");
+    }
     assert_eq!(
         remediation(DbmsKind::MySql),
         Some(

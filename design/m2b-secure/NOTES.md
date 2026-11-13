@@ -149,6 +149,7 @@ The SQL, exactly as `remediation()` returns it. PostgreSQL:
 CREATE ROLE <role> LOGIN PASSWORD '<password>';
 GRANT pg_read_all_data TO <role>;
 -- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;
+-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 ```
 MySQL:
 ```sql

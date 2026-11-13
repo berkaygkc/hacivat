@@ -195,7 +195,7 @@ The plan's row 3 does catch inherited ownership and inherited table privileges.
 Consequence: on a cluster where `PUBLIC` still holds `CREATE` on `public` (PostgreSQL ≤ 14, or
 upgraded from one), the remediation role reads as `WritePrivileges` (guarded) until
 `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, because any role there can create tables. The
-remediation string is unchanged (brief, mock, Q21); see the report. Task 18's Docker run
+remediation now offers that revoke as an optional comment line (see Remediation below). Task 18's Docker run
 should cover:
 
 - a superuser membership;
@@ -234,7 +234,13 @@ probe, a failed probe. Rejected: labelling MariaDB enforced on a clean `SHOW GRA
 **Remediation.** PostgreSQL: `CREATE ROLE <role> LOGIN PASSWORD '<password>'`,
 `GRANT pg_read_all_data TO <role>`, and `-- optional: REVOKE TEMP ON DATABASE <database> FROM
 PUBLIC;` as a comment (revoking from `PUBLIC` affects every role, and TEMP alone keeps the label
-enforced). No `NOINHERIT`: a non-inheriting member would not get `pg_read_all_data` and could
+enforced). Then `-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;`, also a comment
+(controller ruling, fix round 2). Where `PUBLIC` still holds `CREATE` on `public` (clusters
+created before PostgreSQL 15 or upgraded from one), the corrected probe reads every role as
+`WritePrivileges`, so this line is what lets the remediation reach the enforced label there.
+It stays optional because it affects every role, and it changes nothing on clusters that
+never granted it. The approved mock (`design/m2b-secure/NOTES.md` and `index.html`) shows the
+same string. No `NOINHERIT`: a non-inheriting member would not get `pg_read_all_data` and could
 read nothing (Q21). MySQL: `CREATE USER '<role>'@'%' IDENTIFIED BY '<password>'`,
 `GRANT SELECT, SHOW VIEW ON <database>.* TO '<role>'@'%'`, which the probe reads as least
 privilege (tested). MariaDB, SQLite and every other engine: `None`, since no role change makes

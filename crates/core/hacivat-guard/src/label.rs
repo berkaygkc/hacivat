@@ -36,10 +36,14 @@ pub fn access_label(
 /// PostgreSQL: a login role that inherits `pg_read_all_data`. No `NOINHERIT`: a non-inheriting
 /// member would not get `pg_read_all_data` and could read nothing. TEMP is an optional comment,
 /// because revoking it from `PUBLIC` affects every role, and TEMP alone keeps the label
-/// enforced (Q21).
+/// enforced (Q21). `CREATE` on `public` is an optional comment too, for the same reason: it is
+/// needed only where `PUBLIC` still holds it (clusters created before PostgreSQL 15 or
+/// upgraded from one), and there the probe reads every role as `WritePrivileges` until it is
+/// revoked (fix round 2 ruling).
 const PG_REMEDIATION: &str = "CREATE ROLE <role> LOGIN PASSWORD '<password>';\n\
 GRANT pg_read_all_data TO <role>;\n\
--- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;";
+-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;\n\
+-- optional: REVOKE CREATE ON SCHEMA public FROM PUBLIC;";
 
 /// MySQL: a user with `SELECT` and `SHOW VIEW` on one database, which the probe reads as least
 /// privilege.
