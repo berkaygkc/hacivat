@@ -141,6 +141,8 @@ pub(crate) enum SaveProblem {
     Failed,
     Gone,
     SecretNotStored,
+    // ## m2b-t21-prompts (fix round 1, I1): nothing was saved; the stored secrets could not move.
+    Unchanged,
 }
 
 /// The focus targets of the dialog that are not text fields (tests name them, P16 keyboard
@@ -1680,7 +1682,10 @@ impl ConnectionDialog {
                 ProfileChange::AllowPublicPlaintext => {
                     self.consent_endpoint = Some(self.draft.profile.endpoint.clone());
                 }
-                ProfileChange::AddPin(_) | ProfileChange::ReplacePin { .. } => {}
+                // ## m2b-t21-prompts: a Test never reports an SSH retention (Main only).
+                ProfileChange::AddPin(_)
+                | ProfileChange::ReplacePin { .. }
+                | ProfileChange::SshRetention(_) => {}
             }
             cert_dialog::apply_change(&mut self.draft.profile, change);
         }
@@ -1946,6 +1951,8 @@ impl ConnectionDialog {
                     Err(SaveError::StoreReadOnly) => d.problem = Some(SaveProblem::StoreReadOnly),
                     Err(SaveError::NotFound) => d.problem = Some(SaveProblem::Gone),
                     Err(SaveError::Io(_)) => d.problem = Some(SaveProblem::Failed),
+                    // ## m2b-t21-prompts (fix round 1, I1)
+                    Err(SaveError::Unchanged(_)) => d.problem = Some(SaveProblem::Unchanged),
                 }
                 cx.notify();
             });

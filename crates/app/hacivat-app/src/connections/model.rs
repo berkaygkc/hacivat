@@ -15,6 +15,16 @@
 //! shows, once per session. A secret error never loses the profile's fields: they are written
 //! and the error is returned. `test` never stores a secret; a password re-entered at connect is
 //! stored only after the connect succeeds (Task 16).
+//!
+//! **M2b (Task 21).** Where the vault holds `Forever` secrets, a save's job reads the vault's
+//! state on the blocking pool and, when the vault is missing or locked, waits for the Create or
+//! Unlock dialog before any `Forever` put (`Declined` falls back to Until restart, Q38). An edit
+//! that adds, removes or reorders jump hosts moves each hop's stored SSH secrets with the hop and
+//! drops those of a hop that is gone or changed, all or nothing: anything short of a full move (a
+//! fallback, a refused read or write) is undone and the save fails with `Unchanged` (fix rounds 1
+//! and 2). `apply_changes` waits for a pending move, then builds from the stored profile. A
+//! delete or duplicate that meets a locked vault asks to unlock it, then runs its secret calls
+//! again.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,10 +33,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use hacivat_l10n::{Count, NoArgs, Text, ids};
-use hacivat_net::ssh::{HopSecrets, KnownHosts, TunnelManager};
+use hacivat_net::ssh::{HopSecrets, HopSpec, KnownHosts, SshAuth, TunnelManager};
 use hacivat_proto::{ProfileId, TagSource};
 use hacivat_secrets::{
-    MAX_SSH_HOP, Retention, SecretError, SecretKey, SecretSlot, SecretStore, Stored,
+    BackendChoice, MAX_SSH_HOP, Retention, SecretError, SecretKey, SecretSlot, SecretStore, Stored,
 };
 use hacivat_session::pipeline::ProfileChange;
 use hacivat_session::profile::{
@@ -52,6 +62,12 @@ pub enum SaveError {
     Secret(SecretError),
     /// The profile is not in the list (deleted meanwhile): an edit never brings it back.
     NotFound,
+    // ## m2b-t21-prompts (fix round 1, I1, m2)
+    /// Nothing was changed: the profile's stored secrets could not be moved (a jump-host
+    /// change) or deleted (a delete) — a locked vault whose unlock was declined, a write the
+    /// store refused. The profile stays as it was, so no secret is ever left on the wrong hop
+    /// or orphaned under a deleted profile.
+    Unchanged(SecretError),
 }
 
 impl From<StoreError> for SaveError {
@@ -83,6 +99,9 @@ pub struct ConnectionsModel {
     // ## m2b-t01-interfaces
     known_hosts: Arc<KnownHosts>,
     tunnels: Arc<TunnelManager>,
+    // ## m2b-t21-prompts (fix round 1, I1): profiles whose SSH slots are being moved; a save
+    // of one waits until the move is done (its hop layout is then the saved one).
+    remapping: HashMap<ProfileId, Vec<oneshot::Sender<()>>>,
 }
 
 impl Global for ConnectionsModel {}
@@ -113,6 +132,7 @@ impl ConnectionsModel {
             keyring_notice_shown: false,
             known_hosts,
             tunnels,
+            remapping: HashMap::new(),
         }
     }
 
@@ -140,6 +160,41 @@ impl ConnectionsModel {
         id: ProfileId,
         changes: Vec<ProfileChange>,
     ) -> Task<Result<(), SaveError>> {
+        // ## m2b-t21-prompts (fix round 2, R3): every change kind waits for a pending hop remap
+        // of `id` (and the save it leads to, whose profile is in the list once the remap ends),
+        // then starts over from the stored profile as it is then, so neither the hop edit nor
+        // these changes are lost. A save that is not remapping updates the list at once, so
+        // it needs no wait.
+        if cx.has_global::<ConnectionsModel>()
+            && let Some(waiting) = cx.global_mut::<ConnectionsModel>().remapping.get_mut(&id)
+        {
+            let (tx, rx) = oneshot::channel();
+            waiting.push(tx);
+            return cx.spawn(async move |cx| {
+                let _ = rx.await;
+                cx.update(|cx| Self::apply_changes(cx, id, changes)).await
+            });
+        }
+        // ## m2b-t21-prompts (fix round 1, Remember seam): the Remember of an SSH secret prompt
+        // (`SshRetention`, the last one wins) re-saves the profile through `save`, which moves
+        // every hop's stored SSH secrets to the new retention behind the vault gate; the other
+        // changes apply as below first.
+        let ssh = changes.iter().rev().find_map(|c| match c {
+            ProfileChange::SshRetention(r) => Some(*r),
+            _ => None,
+        });
+        if let Some(retention) = ssh {
+            let others: Vec<ProfileChange> = changes
+                .into_iter()
+                .filter(|c| !matches!(c, ProfileChange::SshRetention(_)))
+                .collect();
+            let applied = Self::apply_changes(cx, id, others);
+            let saved = apply_ssh_retention(cx, id, retention);
+            return cx.spawn(async move |_| {
+                applied.await?;
+                saved.await
+            });
+        }
         // ## m2b-t19-tls
         let Some(m) = cx.try_global::<ConnectionsModel>() else {
             return Task::ready(Err(SaveError::NotFound));
@@ -226,9 +281,42 @@ impl ConnectionsModel {
     /// `environment` and `env_source`, whatever the draft says; any other profile's tag is the
     /// user's (`env_source` is always `User`).
     pub fn save(cx: &mut App, draft: ProfileDraft) -> Task<Result<ProfileId, SaveError>> {
+        Self::save_checked(cx, draft, false)
+    }
+
+    // ## m2b-t21-prompts (fix round 1, I1)
+    /// [`Self::save`]; `remapped` once the SSH slots already follow the draft's hops. A draft
+    /// that adds, removes or reorders jump hosts first moves the stored SSH secrets in a
+    /// secrets-only job (the vault unlocked first when needed); only when every read and write
+    /// succeeded is the new hop order saved. Otherwise nothing changes and the save fails with
+    /// `Unchanged`, so a secret never stays on a hop it was not typed for.
+    fn save_checked(
+        cx: &mut App,
+        draft: ProfileDraft,
+        remapped: bool,
+    ) -> Task<Result<ProfileId, SaveError>> {
         let m = cx.global::<ConnectionsModel>();
         if m.read_only {
             return Task::ready(Err(SaveError::StoreReadOnly));
+        }
+        let id = draft.profile.id;
+        if !remapped && m.remapping.contains_key(&id) {
+            let (tx, rx) = oneshot::channel();
+            if let Some(waiting) = cx.global_mut::<ConnectionsModel>().remapping.get_mut(&id) {
+                waiting.push(tx);
+            }
+            return cx.spawn(async move |cx| {
+                let _ = rx.await;
+                cx.update(|cx| Self::save(cx, draft)).await
+            });
+        }
+        let stored = m.get(id);
+        if !remapped
+            && let Some(old) = stored.as_deref()
+            && let Some(remap) = hop_remap(old, &draft.profile)
+        {
+            let retention = old.ssh_retention;
+            return Self::remap_then_save(cx, draft, retention, remap);
         }
         let ProfileDraft {
             mut profile,
@@ -268,8 +356,26 @@ impl ConnectionsModel {
         let ssh_values = ssh_slot_values(&profile, ssh_secrets);
         let name = profile.name.clone();
         let secrets = m.secrets.clone();
-        // Task 21 makes a `Forever` put wait for the vault (`VaultReady`).
-        let vault_ready = vault_dialog::ensure_vault_before_forever(cx);
+        // ## m2b-t21-prompts: a `Forever` put waits for the vault (T1 review M7, Q38). Unless
+        // the keyring or the memory backend holds Forever secrets, the job below reads the
+        // vault's state on the blocking pool; only when the vault is missing or locked does it
+        // ask the UI (Create or Unlock) and wait for the answer. Declined: the put falls back to
+        // Until restart, with the M2a toast. A save that needs no dialog never waits for the UI
+        // thread, so a quit right after it still drains the queue (P15).
+        let touches = touches_forever(
+            Change {
+                old: old_retention,
+                new: retention,
+                typed: password.is_some() || tls_key_passphrase.is_some(),
+            },
+            Change {
+                old: old_ssh_retention,
+                new: ssh_retention,
+                typed: ssh_values.iter().any(|(_, v)| v.is_some()),
+            },
+        );
+        let (job_gate, ui_gate) = vault_gate(touches && maybe_vault(&secrets));
+        let env = profile.environment;
 
         let m = cx.global_mut::<ConnectionsModel>();
         let profile = Arc::new(profile);
@@ -279,7 +385,11 @@ impl ConnectionsModel {
             Some(slot) => *slot = profile,
             None => m.profiles.push(profile),
         }
+        let asker = name.clone();
         let done = m.writer.run(m.snapshot(), move || {
+            // ## m2b-t21-prompts: on the blocking pool. A dropped channel (the app quit, the
+            // dialog could not open) goes on, and the put falls back (Q38).
+            pass_vault_gate(job_gate, &secrets);
             let values = DRAFT_SLOTS
                 .into_iter()
                 .zip([password, tls_key_passphrase])
@@ -297,7 +407,9 @@ impl ConnectionsModel {
             (db_fell_back || ssh_fell_back, db_error.or(ssh_error))
         });
         cx.spawn(async move |cx| {
-            let _ready = vault_ready.await;
+            // ## m2b-t21-prompts: the job asks only when the vault must be created or unlocked.
+            cx.update(|cx| answer_vault_gate(ui_gate, asker, env, cx))
+                .await;
             let ((fell_back, secret), written) = done.await.map_err(|_| cancelled())?;
             if fell_back {
                 cx.update(notice_keyring_unavailable);
@@ -307,13 +419,122 @@ impl ConnectionsModel {
         })
     }
 
+    // ## m2b-t21-prompts (fix round 1, I1)
+    /// Moves the stored SSH slots of `draft`'s profile to its new hop layout (`remap`, kept
+    /// under `retention`) in a secrets-only job, unlocking the vault first when it holds them;
+    /// then, only if the move fully succeeded, saves `draft` as usual. Any failure (a declined
+    /// unlock, a refused write) leaves the stored profile and its slots as they were and fails
+    /// with `Unchanged`.
+    fn remap_then_save(
+        cx: &mut App,
+        draft: ProfileDraft,
+        retention: Retention,
+        remap: HopRemap,
+    ) -> Task<Result<ProfileId, SaveError>> {
+        let id = draft.profile.id;
+        let (name, env) = (draft.profile.name.clone(), draft.profile.environment);
+        let m = cx.global_mut::<ConnectionsModel>();
+        m.remapping.insert(id, Vec::new());
+        let secrets = m.secrets.clone();
+        let needs_vault = retention == Retention::Forever && maybe_vault(&secrets);
+        let (job_gate, ui_gate) = vault_gate(needs_vault);
+        let label = name.clone();
+        let moved = m.writer.run_only(move || {
+            pass_vault_gate(job_gate, &secrets);
+            remap_ssh_slots(&secrets, id, retention, &remap, &label)
+        });
+        cx.spawn(async move |cx| {
+            cx.update(|cx| answer_vault_gate(ui_gate, name, env, cx))
+                .await;
+            let moved = moved.await.map_err(|_| cancelled());
+            match moved {
+                Ok(Ok(())) => {
+                    let saving = cx.update(|cx| {
+                        let saving = Self::save_checked(cx, draft, true);
+                        finish_remap(cx, id);
+                        saving
+                    });
+                    saving.await
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(error = ?e, "connections: SSH secrets not moved; not saved");
+                    cx.update(|cx| finish_remap(cx, id));
+                    Err(SaveError::Unchanged(e))
+                }
+                Err(e) => {
+                    cx.update(|cx| finish_remap(cx, id));
+                    Err(e)
+                }
+            }
+        })
+    }
+
     /// Deletes `id`: the manager forgets it (cancels, disconnects, drops its session secrets),
     /// the profile leaves the list and the file, and every secret slot is deleted. A secret
     /// that cannot be deleted is reported after the profile is gone.
+    ///
+    /// ## m2b-t21-prompts (fix round 1, m2): where the vault may hold the profile's `Forever`
+    /// secrets, they are deleted first, in a secrets-only job: a locked vault asks to be
+    /// unlocked. When the user declines (or misses three times), nothing is deleted and the
+    /// delete fails with `Unchanged`, so no secret outlives its profile in the vault. A vault
+    /// that cannot be used at all (a damaged or non-regular file) cannot be read either, so the
+    /// profile then goes as in M2a and the error is reported.
     pub fn delete(cx: &mut App, id: ProfileId) -> Task<Result<(), SaveError>> {
         if cx.global::<ConnectionsModel>().read_only {
             return Task::ready(Err(SaveError::StoreReadOnly));
         }
+        let m = cx.global::<ConnectionsModel>();
+        if !maybe_vault(&m.secrets) {
+            return Self::delete_now(cx, id, None);
+        }
+        let asker = m.get(id).map(|p| (p.name.clone(), p.environment));
+        let secrets = m.secrets.clone();
+        let again = secrets.clone();
+        let first = m.writer.run_only(move || secrets.delete_all(id));
+        cx.spawn(async move |cx| {
+            let mut deleted = first.await.map_err(|_| cancelled())?;
+            if deleted == Err(SecretError::VaultLocked)
+                && let Some((name, env)) = asker
+            {
+                let unlocked = cx.update(|cx| vault_dialog::unlock_vault(cx, name, env));
+                match unlocked.await {
+                    vault_dialog::FlowEnd::Ready => {
+                        let retry = cx.update(|cx| {
+                            let m = cx.global::<ConnectionsModel>();
+                            m.writer.run_only(move || again.delete_all(id))
+                        });
+                        deleted = retry.await.map_err(|_| cancelled())?;
+                    }
+                    vault_dialog::FlowEnd::Declined => {
+                        return Err(SaveError::Unchanged(SecretError::VaultLocked));
+                    }
+                    // The vault can't be used: its entries can't be read by anyone either, so
+                    // the profile goes (M2a) and the secret error is reported.
+                    vault_dialog::FlowEnd::Unusable => {
+                        let gone = Some(Err(SecretError::VaultLocked));
+                        return cx.update(|cx| Self::delete_now(cx, id, gone)).await;
+                    }
+                }
+            }
+            match deleted {
+                Err(SecretError::VaultLocked) => {
+                    Err(SaveError::Unchanged(SecretError::VaultLocked))
+                }
+                deleted => {
+                    cx.update(|cx| Self::delete_now(cx, id, Some(deleted)))
+                        .await
+                }
+            }
+        })
+    }
+
+    /// The M2a delete: the profile leaves the list and the file at once; its secrets are
+    /// deleted in the same job unless `secrets_done` already says how that went.
+    fn delete_now(
+        cx: &mut App,
+        id: ProfileId,
+        secrets_done: Option<Result<(), SecretError>>,
+    ) -> Task<Result<(), SaveError>> {
         let m = cx.global_mut::<ConnectionsModel>();
         m.manager.forget(id);
         m.profiles.retain(|p| p.id != id);
@@ -325,7 +546,10 @@ impl ConnectionsModel {
             m.current = None;
         }
         let secrets = m.secrets.clone();
-        let done = m.writer.run(m.snapshot(), move || secrets.delete_all(id));
+        let done = m.writer.run(m.snapshot(), move || match secrets_done {
+            Some(result) => result,
+            None => secrets.delete_all(id),
+        });
         cx.spawn(async move |cx| {
             let (deleted, written) = done.await.map_err(|_| cancelled())?;
             cx.update(|cx| written.surface(cx))?;
@@ -361,37 +585,41 @@ impl ConnectionsModel {
             .collect();
         let secrets = m.secrets.clone();
 
+        // ## m2b-t21-prompts: named in the unlock dialog should the vault be locked.
+        let env = copy.environment;
+        let original = m.profiles[at].name.clone();
+
         let m = cx.global_mut::<ConnectionsModel>();
         m.profiles.insert(at + 1, Arc::new(copy));
         m.selected = Some(new_id);
-        let label = name.clone();
-        let done = m.writer.run(m.snapshot(), move || {
-            let not_ssh = |slot: SecretSlot| !is_ssh_slot(slot);
-            let copied = secrets
-                .copy_slots(id, new_id, retention, &not_ssh)
-                .and_then(|()| secrets.copy_slots(id, new_id, ssh_retention, &is_ssh_slot));
-            if copied.is_ok() {
-                let forever = |r: Retention| r == Retention::Forever;
-                let slots = DRAFT_SLOTS
-                    .into_iter()
-                    .filter(|_| forever(retention))
-                    .chain(ssh_labels.into_iter().filter(|_| forever(ssh_retention)));
-                for slot in slots {
-                    label_entry(
-                        &secrets,
-                        SecretKey {
-                            profile: new_id,
-                            slot,
-                        },
-                        &label,
-                    );
+        let copier = Arc::new(CopySecrets {
+            secrets,
+            from: id,
+            to: new_id,
+            retention,
+            ssh_retention,
+            ssh_labels,
+            label: name.clone(),
+        });
+        let first = copier.clone();
+        let done = m.writer.run(m.snapshot(), move || first.run());
+        cx.spawn(async move |cx| {
+            let (mut copied, written) = done.await.map_err(|_| cancelled())?;
+            cx.update(|cx| written.surface(cx))?;
+            // ## m2b-t21-prompts (T6 carry): a locked vault holds the original's Forever
+            // secrets: unlock it, then copy them.
+            if copied == Err(SecretError::VaultLocked) {
+                let unlocked = cx.update(|cx| vault_dialog::unlock_vault(cx, original, env));
+                if unlocked.await == vault_dialog::FlowEnd::Ready {
+                    let again = cx.update(|cx| {
+                        let m = cx.global::<ConnectionsModel>();
+                        m.writer.run(m.snapshot(), move || copier.run())
+                    });
+                    let (result, written) = again.await.map_err(|_| cancelled())?;
+                    cx.update(|cx| written.surface(cx))?;
+                    copied = result;
                 }
             }
-            copied
-        });
-        cx.spawn(async move |cx| {
-            let (copied, written) = done.await.map_err(|_| cancelled())?;
-            cx.update(|cx| written.surface(cx))?;
             cx.update(|cx| {
                 let text = Rc::new(move |cx: &App| {
                     tr(
@@ -602,6 +830,419 @@ fn store_secrets(
     (fell_back, first_error)
 }
 
+// ## m2b-t21-prompts
+
+/// A duplicate's secret copy, repeatable after the vault was unlocked: the DB slots under the
+/// profile's retention and the SSH slots under `ssh_retention` (never `copy_all`, which would
+/// put the SSH slots under the DB retention; T1 re-review N1), then the `Forever` copies are
+/// labelled with the copy's name (P44).
+struct CopySecrets {
+    secrets: Arc<SecretStore>,
+    from: ProfileId,
+    to: ProfileId,
+    retention: Retention,
+    ssh_retention: Retention,
+    ssh_labels: Vec<SecretSlot>,
+    label: String,
+}
+
+impl CopySecrets {
+    /// Blocking: runs on the core runtime's blocking pool.
+    fn run(&self) -> Result<(), SecretError> {
+        let not_ssh = |slot: SecretSlot| !is_ssh_slot(slot);
+        let (secrets, from, to) = (&self.secrets, self.from, self.to);
+        secrets
+            .copy_slots(from, to, self.retention, &not_ssh)
+            .and_then(|()| secrets.copy_slots(from, to, self.ssh_retention, &is_ssh_slot))?;
+        let forever = |r: Retention| r == Retention::Forever;
+        let slots = DRAFT_SLOTS
+            .into_iter()
+            .filter(|_| forever(self.retention))
+            .chain(
+                self.ssh_labels
+                    .iter()
+                    .copied()
+                    .filter(|_| forever(self.ssh_retention)),
+            );
+        for slot in slots {
+            label_entry(secrets, SecretKey { profile: to, slot }, &self.label);
+        }
+        Ok(())
+    }
+}
+
+/// One retention of a save: the stored one (`None` for a new profile), the new one, and
+/// whether the draft typed a secret kept under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Change {
+    old: Option<Retention>,
+    new: Retention,
+    typed: bool,
+}
+
+/// Whether a save reaches the `Forever` backend: it puts a typed secret under `Forever`, moves
+/// stored secrets into or out of `Forever`, or moves SSH slots that live under `Forever`.
+fn touches_forever(db: Change, ssh: Change) -> bool {
+    let forever = Retention::Forever;
+    let reaches = |c: Change| {
+        (c.typed && c.new == forever)
+            || c.old
+                .is_some_and(|old| old != c.new && (old == forever || c.new == forever))
+    };
+    reaches(db) || reaches(ssh)
+}
+
+/// A hop's identity for its stored secrets: host (ASCII-folded), port, user and sign-in method
+/// (a key file's path included). A hop whose identity changed is a different hop.
+fn hop_identity(hop: &HopSpec) -> (String, u16, &str, &SshAuth) {
+    (
+        hop.host.to_ascii_lowercase(),
+        hop.port,
+        &hop.user,
+        &hop.auth,
+    )
+}
+
+/// The SSH hops of `p` (none without a tunnel).
+fn hops_of(p: &Profile) -> &[HopSpec] {
+    match &p.transport {
+        TransportSpec::SshTunnel(spec) => &spec.hops,
+        _ => &[],
+    }
+}
+
+/// How the stored SSH slots of `old` map onto `new`'s hops (T20 carry): for every hop of `new`,
+/// the index of the same hop in `old` (`None`: a new or changed hop), plus how many hops `old`
+/// had. `None` when every hop kept its place (nothing to move).
+fn hop_remap(old: &Profile, new: &Profile) -> Option<HopRemap> {
+    let (old, new) = (hops_of(old), hops_of(new));
+    let mut used = vec![false; old.len()];
+    let mut map = Vec::with_capacity(new.len());
+    for (j, hop) in new.iter().enumerate() {
+        let id = hop_identity(hop);
+        // The same place first, then the first unused match.
+        let at = (old
+            .get(j)
+            .is_some_and(|o| !used[j] && hop_identity(o) == id))
+        .then_some(j)
+        .or_else(|| {
+            old.iter()
+                .enumerate()
+                .position(|(i, o)| !used[i] && hop_identity(o) == id)
+        });
+        if let Some(i) = at {
+            used[i] = true;
+        }
+        map.push(at);
+    }
+    let unchanged = old.len() == new.len() && map.iter().enumerate().all(|(j, at)| *at == Some(j));
+    (!unchanged).then_some(HopRemap {
+        map,
+        old_len: old.len(),
+    })
+}
+
+/// The result of [`hop_remap`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HopRemap {
+    /// For each new hop, the old hop it was.
+    map: Vec<Option<usize>>,
+    old_len: usize,
+}
+
+/// Moves the stored SSH slots (password, passphrase) of `profile` by `remap`, under `retention`
+/// (where they are kept now), all or nothing and fail-closed (fix rounds 1 and 2, I1 and R1):
+/// - every old hop's value is read first; any read error other than `Unavailable` (no backend:
+///   nothing stored), `Denied` included, stops here, before any write;
+/// - the moved values are written at their new index, then every slot that is not kept in
+///   place and got no value is removed. Only a put that lands as requested counts: a put the
+///   store kept elsewhere (a `Forever` fallback to Until restart) leaves the old value in the
+///   backend, so it is a failure too;
+/// - on the first failure everything done so far is undone: a fallen-back put gives the
+///   in-memory fallback back what it held (the backend never changed), a written or removed
+///   slot gets its old value back. A restore that does not land as requested clears the slot
+///   instead (never a secret on the wrong hop). The save fails with the first failure's
+///   reason when the undo was exact, `Backend("ssh-slot-rollback-cleared")` when a slot had to
+///   be cleared and `Backend("ssh-slot-rollback-failed")` when even that failed.
+///
+/// A moved `Forever` secret is labelled with `name` (P44). Blocking: on the core runtime's
+/// blocking pool.
+fn remap_ssh_slots(
+    secrets: &SecretStore,
+    profile: ProfileId,
+    retention: Retention,
+    remap: &HopRemap,
+    name: &str,
+) -> Result<(), SecretError> {
+    let key = |hop: usize, password: bool| {
+        let hop = u8::try_from(hop).ok().filter(|h| *h <= MAX_SSH_HOP)?;
+        let slot = if password {
+            SecretSlot::SshPassword { hop }
+        } else {
+            SecretSlot::SshPassphrase { hop }
+        };
+        Some(SecretKey { profile, slot })
+    };
+    // 1. Read every slot of every old hop; only "no backend" counts as nothing stored. For
+    // `Forever`, what the in-memory fallback holds too (a fallen-back put replaces it).
+    let mut old: HashMap<SecretKey, SecretString> = HashMap::new();
+    let mut fallback: HashMap<SecretKey, SecretString> = HashMap::new();
+    for hop in 0..remap.old_len {
+        for password in [true, false] {
+            let Some(k) = key(hop, password) else {
+                continue;
+            };
+            if retention == Retention::Forever
+                && let Ok(Some(value)) = secrets.get(&k, Retention::UntilRestart)
+            {
+                fallback.insert(k, value);
+            }
+            match secrets.get(&k, retention) {
+                Ok(Some(value)) => {
+                    old.insert(k, value);
+                }
+                Ok(None) | Err(SecretError::Unavailable) => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    // 2. The writes: moved values first, then removals of what nothing replaces.
+    let mut puts = Vec::new();
+    let mut removals = Vec::new();
+    for at in 0..remap.old_len.max(remap.map.len()) {
+        let from = remap.map.get(at).copied().flatten();
+        if from == Some(at) {
+            continue;
+        }
+        for password in [true, false] {
+            let Some(target) = key(at, password) else {
+                continue;
+            };
+            let value = from
+                .and_then(|from| key(from, password))
+                .and_then(|source| old.get(&source).cloned());
+            match value {
+                Some(value) => puts.push((target, value)),
+                None if old.contains_key(&target) => removals.push(target),
+                None => {}
+            }
+        }
+    }
+    // 3. Apply; undo on the first failure.
+    let mut done: Vec<Done> = Vec::new();
+    let mut failed = None;
+    for (target, value) in puts {
+        match secrets.put(&target, value, retention) {
+            Ok(Stored::AsRequested) => {
+                if retention == Retention::Forever {
+                    label_entry(secrets, target, name);
+                }
+                done.push(Done::Written(target));
+            }
+            Ok(Stored::FellBackTo { reason, .. }) => {
+                done.push(Done::FellBack(target));
+                failed = Some(reason);
+                break;
+            }
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
+    if failed.is_none() {
+        for target in removals {
+            match secrets.remove(&target, retention) {
+                Ok(()) => done.push(Done::Written(target)),
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+    }
+    let Some(e) = failed else {
+        return Ok(());
+    };
+    match undo(secrets, retention, &old, &fallback, done) {
+        Undone::Exactly => Err(e),
+        undone => {
+            tracing::debug!(error = ?e, "connections: SSH slot move failed; undo was not exact");
+            let reason = if matches!(undone, Undone::Cleared) {
+                "ssh-slot-rollback-cleared"
+            } else {
+                "ssh-slot-rollback-failed"
+            };
+            Err(SecretError::Backend(reason.to_string()))
+        }
+    }
+}
+
+/// One step of a slot move, for the undo.
+enum Done {
+    /// The slot was written or removed in its place (the backend changed).
+    Written(SecretKey),
+    /// The put fell back: only the in-memory fallback holds the moved value.
+    FellBack(SecretKey),
+}
+
+/// How far [`undo`] got.
+#[derive(PartialEq, Eq)]
+enum Undone {
+    /// Every slot is as it was.
+    Exactly,
+    /// A slot could not get its old value back and was cleared instead.
+    Cleared,
+    /// A slot could be neither restored nor cleared.
+    Failed,
+}
+
+/// Undoes `done` (see [`remap_ssh_slots`]), last step first.
+fn undo(
+    secrets: &SecretStore,
+    retention: Retention,
+    old: &HashMap<SecretKey, SecretString>,
+    fallback: &HashMap<SecretKey, SecretString>,
+    done: Vec<Done>,
+) -> Undone {
+    let mut undone = Undone::Exactly;
+    for step in done.into_iter().rev() {
+        match step {
+            // Only the in-memory fallback changed (Until restart's map, which never fails).
+            Done::FellBack(target) => {
+                let _ = match fallback.get(&target) {
+                    Some(value) => secrets
+                        .put(&target, value.clone(), Retention::UntilRestart)
+                        .map(|_| ()),
+                    None => secrets.remove(&target, Retention::UntilRestart),
+                };
+            }
+            Done::Written(target) => {
+                let restored = match old.get(&target) {
+                    Some(value) => matches!(
+                        secrets.put(&target, value.clone(), retention),
+                        Ok(Stored::AsRequested)
+                    ),
+                    None => secrets.remove(&target, retention).is_ok(),
+                };
+                if restored {
+                    continue;
+                }
+                // Never a secret on the wrong hop: clear the slot rather than leave it.
+                if secrets.remove(&target, retention).is_ok() {
+                    if undone == Undone::Exactly {
+                        undone = Undone::Cleared;
+                    }
+                } else {
+                    undone = Undone::Failed;
+                }
+            }
+        }
+    }
+    undone
+}
+
+/// The two ends of a save's vault gate (M7): the job's (it says when a dialog is due and waits
+/// for the answer) and the UI's. Both `None` unless `needed`.
+type JobGate = (
+    oneshot::Sender<vault_dialog::VaultState>,
+    std::sync::mpsc::Receiver<vault_dialog::VaultReady>,
+);
+type UiGate = (
+    oneshot::Receiver<vault_dialog::VaultState>,
+    std::sync::mpsc::Sender<vault_dialog::VaultReady>,
+);
+
+fn vault_gate(needed: bool) -> (Option<JobGate>, Option<UiGate>) {
+    needed
+        .then(|| {
+            let (need_tx, need_rx) = oneshot::channel::<vault_dialog::VaultState>();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<vault_dialog::VaultReady>();
+            ((need_tx, ready_rx), (need_rx, ready_tx))
+        })
+        .unzip()
+}
+
+/// The job's side, on the blocking pool: reads the vault's state and, when it is missing or
+/// locked, waits for the UI's answer. A dropped channel (the app quit, the dialog could not
+/// open) goes on; the secret calls then fall back or fail as without a vault (Q38).
+fn pass_vault_gate(gate: Option<JobGate>, secrets: &SecretStore) {
+    if let Some((need_tx, ready_rx)) = gate {
+        let state = vault_dialog::vault_state(secrets);
+        if state.needs_dialog() && need_tx.send(state).is_ok() {
+            let _ = ready_rx.recv();
+        }
+    }
+}
+
+/// The UI's side: runs the Create or Unlock dialog when the job asks, and answers it.
+fn answer_vault_gate(
+    gate: Option<UiGate>,
+    name: String,
+    env: Option<hacivat_proto::EnvTag>,
+    cx: &mut App,
+) -> Task<()> {
+    let Some((need_rx, ready_tx)) = gate else {
+        return Task::ready(());
+    };
+    cx.spawn(async move |cx| {
+        if let Ok(state) = need_rx.await {
+            let ready =
+                cx.update(|cx| vault_dialog::ensure_vault_before_forever(cx, state, name, env));
+            let _ = ready_tx.send(ready.await);
+        }
+    })
+}
+
+/// Whether the vault may hold `Forever` secrets: any backend but the keyring or the memory one
+/// (a backend not probed yet may still choose the vault).
+fn maybe_vault(secrets: &SecretStore) -> bool {
+    !matches!(
+        secrets.backend_choice(),
+        Some(BackendChoice::Keyring | BackendChoice::Memory)
+    )
+}
+
+/// The SSH slot move of `id` is over: saves that waited for it go on.
+fn finish_remap(cx: &mut App, id: ProfileId) {
+    let waiting = cx
+        .global_mut::<ConnectionsModel>()
+        .remapping
+        .remove(&id)
+        .unwrap_or_default();
+    for waiter in waiting {
+        let _ = waiter.send(());
+    }
+}
+
+/// Saves the stored profile `id` with `ssh_retention = retention` (the Remember of an SSH secret
+/// prompt, reported by a successful connect; fix round 1). The save moves every hop's stored
+/// SSH secrets to the new retention, behind the vault gate when Forever is involved.
+fn apply_ssh_retention(
+    cx: &mut App,
+    id: ProfileId,
+    retention: Retention,
+) -> Task<Result<(), SaveError>> {
+    let Some(stored) = cx.global::<ConnectionsModel>().get(id) else {
+        return Task::ready(Err(SaveError::NotFound));
+    };
+    if stored.ssh_retention == retention {
+        return Task::ready(Ok(()));
+    }
+    let mut profile = (*stored).clone();
+    profile.ssh_retention = retention;
+    let saved = ConnectionsModel::save(cx, ProfileDraft::edit(profile));
+    // An open edit dialog of `id` takes it too (as T19's pins, CA file and consent), so its
+    // Save never writes the old retention back; its Remember select follows the draft.
+    crate::connections::dialog::absorb_saved_changes(
+        id,
+        stored.endpoint.clone(),
+        vec![ProfileChange::SshRetention(retention)],
+        cx,
+    );
+    cx.spawn(async move |_| saved.await.map(|_| ()))
+}
+
 /// One queued write: secret calls, then the profile list.
 type Job = Box<dyn FnOnce() + Send>;
 
@@ -672,6 +1313,22 @@ impl ProfileWriter {
             let out = work();
             let written = write_pending(&pending, &store);
             let _ = done.send((out, written));
+        });
+        // A closed queue (the runtime shut down) drops the job, which closes `rx`.
+        let _ = self.jobs.send(job);
+        rx
+    }
+
+    // ## m2b-t21-prompts (fix round 1, I1)
+    /// Queues `work` (secret calls only) in order with the other jobs; no profile list is set
+    /// or written. The receiver gets `work`'s result.
+    fn run_only<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> oneshot::Receiver<T> {
+        let (done, rx) = oneshot::channel();
+        let job: Job = Box::new(move || {
+            let _ = done.send(work());
         });
         // A closed queue (the runtime shut down) drops the job, which closes `rx`.
         let _ = self.jobs.send(job);

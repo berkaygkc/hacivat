@@ -954,6 +954,160 @@ hv-conn-err-attempts-used = 3 denemenin hepsi kullanıldı. Hesap kilitlenmesin 
 # Review: PO
 hv-conn-dlg-attempts-used = Bu sunucu için deneme hakkı kalmadı. Yeniden denemek için adresi, portu ya da kullanıcıyı değiştirin veya bu pencereyi kapatıp yeniden açın.
 
+## m2b-t21-prompts
+
+# Review: PO
+hv-conn-hk-title = { $host } ile ilk bağlantı
+# Review: PO
+hv-conn-hk-body = { $os ->
+        [mac] Bu Mac bu SSH sunucusuna daha önce bağlanmadı. Parmak izini yöneticinizin verdiğiyle karşılaştırın.
+       *[other] Bu bilgisayar bu SSH sunucusuna daha önce bağlanmadı. Parmak izini yöneticinizin verdiğiyle karşılaştırın.
+    }
+# Review: PO
+hv-conn-hk-fp = Sunucu anahtarı
+# Review: PO
+hv-conn-hk-store = { -brand-hacivat } bunu kendi bilinen sunucular listesine kaydeder. ~/.ssh/known_hosts değişmez.
+# Review: PO
+hv-conn-hk-trust = Güven ve bağlan
+# Review: PO
+hv-conn-hk-copy-fp = Parmak izini kopyala
+
+# Review: PO
+hv-conn-hk-changed-title = { $host } sunucusunun anahtarı değişti
+# Review: PO
+hv-conn-hk-changed-body = Sunucu, kayıtlı anahtarından farklı bir anahtarla yanıt verdi. Bu, sunucu yeniden kurulduğunda ya da anahtarları yenilendiğinde olur; biri bağlantının arasına girdiğinde de olur. { -brand-hacivat } oturum açmadan önce durdu.
+# Review: PO
+hv-conn-hk-changed-old = Kayıtlı anahtar
+# Review: PO
+hv-conn-hk-changed-new = Şimdi gönderilen
+# Review: PO
+hv-conn-hk-changed-stored-in = Kayıtlı olduğu yer
+# Review: PO
+hv-conn-hk-changed-src-hacivat = Hacivat'ın bilinen sunucuları
+# Review: PO
+hv-conn-hk-changed-src-openssh = { $file }, { NUMBER($n, useGrouping: "false") }. satır
+# Review: PO
+hv-conn-hk-changed-ask = { $host } sunucusunu yöneten kişiye anahtarın değişip değişmediğini sorun ve güvenmeden önce yeni parmak izini karşılaştırın.
+# Review: PO
+hv-conn-hk-changed-replace = Eski anahtarı sil, yenisine güven
+# Review: PO
+hv-conn-hk-changed-openssh-note = { -brand-hacivat } { $file } dosyasını değiştirmez. Yeni anahtar gerçekse eski satırı bir terminalde silin, sonra yeniden deneyin:
+# Review: PO
+hv-conn-hk-changed-copy = Komutu kopyala
+# Review: PO
+hv-conn-hk-changed-copied = Komut kopyalandı
+# Review: PO
+hv-conn-hk-changed-trusted = { $host } sunucusunun yeni anahtarına güvenildi
+
+# Review: PO
+hv-conn-kbd-title = { $host } oturumu
+# Review: PO
+hv-conn-kbd-asks = { $host } soruyor:
+# Review: PO
+hv-conn-kbd-from-server = Sunucunun gönderdiği metin, olduğu gibi
+# Review: PO
+hv-conn-kbd-no-text = Sunucu bir ad ya da açıklama göndermedi.
+# Review: PO
+hv-conn-kbd-attempt = 3 denemeden { $n }.
+# Review: PO
+hv-conn-kbd-not-kept = Yanıtlar yalnızca bu sunucuya gider ve saklanmaz.
+# Review: PO
+hv-conn-kbd-rejected = Sunucu yanıtları kabul etmedi ve yeniden sordu.
+# Review: PO
+hv-conn-kbd-continue = Devam et
+
+# Review: PO
+hv-conn-ssh-secret-hop = { $host }, { $total } atlamadan { $n }.
+# Review: PO
+hv-conn-ssh-secret-pw-title = { $host } için SSH parolası
+# Review: PO
+hv-conn-ssh-secret-pw-body = { $user } için SSH parolasını girin. Yalnızca bağlantı kurulursa saklanır.
+# Review: PO
+hv-conn-ssh-secret-pass-title = { $key } için parola ifadesi
+# Review: PO
+hv-conn-ssh-secret-pass-body = Bu anahtar dosyası şifreli. Parola ifadesini girin. Yalnızca bağlantı kurulursa saklanır.
+# Review: PO
+hv-conn-ssh-secret-wrong = { $host } parolayı kabul etmedi.
+# Review: PO
+hv-conn-ssh-secret-pass-wrong = Bu parola ifadesi anahtarı açmadı.
+# Review: PO
+hv-conn-ssh-secret-attempt = 3 denemeden { $n }.
+# Review: PO
+hv-conn-ssh-secret-continue = Devam et
+
+# Review: PO
+hv-conn-vault-create-title = Kayıtlı parolalar için bir kasa oluşturun
+# Review: PO
+hv-conn-vault-create-why = Bu bilgisayarda sistem anahtarlığı yok.
+# Review: PO
+hv-conn-vault-create-what = { -brand-hacivat }, kalıcı olarak kaydettiğiniz parolaları ana parolayla kilitlenen şifreli bir dosyada tutar.
+# Review: PO
+hv-conn-vault-master = Ana parola
+# Review: PO
+hv-conn-vault-repeat = Tekrar
+# Review: PO
+hv-conn-vault-min = En az 8 karakter
+# Review: PO
+hv-conn-vault-match = İki giriş eşleşiyor
+# Review: PO
+hv-conn-vault-mismatch = İki giriş eşleşmiyor
+# Review: PO
+hv-conn-vault-norecover = { -brand-hacivat } bu parolayı kurtaramaz. Unutursanız kasayı sıfırlar ve kayıtlı parolalarınızı yeniden girersiniz.
+# Review: PO
+hv-conn-vault-notnow-note = Şimdi değil derseniz bu parola { -brand-hacivat } yeniden başlayana kadar tutulur.
+# Review: PO
+hv-conn-vault-notnow = Şimdi değil
+# Review: PO
+hv-conn-vault-create-btn = Kasayı oluştur
+# Review: PO
+hv-conn-vault-created = Kasa oluşturuldu. Kalıcı kaydettiğiniz parolalar oraya gider.
+# Review: PO
+hv-conn-vault-unlock-title = Kasanın kilidini açın
+# Review: PO
+hv-conn-vault-unlock-body = Hacivat'ın { $name } için kayıtlı parolayı okuyabilmesi için ana parola gerekiyor. Kasa, uygulamadan çıkana kadar açık kalır.
+# Review: PO
+hv-conn-vault-unlock-body-any = Hacivat'ın kayıtlı parolalarınızı okuyabilmesi için ana parola gerekiyor. Kasa, uygulamadan çıkana kadar açık kalır.
+# Review: PO
+hv-conn-vault-unlock-wrong = Bu, ana parola değil.
+# Review: PO
+hv-conn-vault-attempt = 3 denemeden { $n }.
+# Review: PO
+hv-conn-vault-unlock-btn = Kilidi aç
+# Review: PO
+hv-conn-vault-reset-link = Kasayı sıfırla…
+# Review: PO
+hv-conn-vault-reset-title = Kasa sıfırlansın mı?
+# Review: PO
+hv-conn-vault-reset-body = Bu işlem kasayı ve içindeki bütün kayıtlı parolaları siler. Bağlantılarınız kalır; { -brand-hacivat } her parolayı bir sonraki bağlanışta sorar. Bu işlem geri alınamaz.
+# Review: PO
+hv-conn-vault-reset-type = Onaylamak için { $word } yazın
+# Review: PO
+hv-conn-vault-reset-word = reset
+# Review: PO
+hv-conn-vault-reset-btn = Kasayı sıfırla
+# Review: PO
+hv-conn-vault-reset-done = Kasa sıfırlandı. İçindeki kayıtlı parolalar silindi.
+# Review: PO
+hv-conn-vault-damaged-title = Kasa okunamıyor
+# Review: PO
+hv-conn-vault-damaged-body = Kasa dosyası bütünlük denetiminden geçemedi; { -brand-hacivat } dosyayı kullanmadı ve değiştirmedi. Bir yedekten geri yükleyin ya da kasayı sıfırlayın.
+# Review: PO
+hv-conn-vault-damaged-meanwhile = O zamana kadar girdiğiniz parolalar { -brand-hacivat } yeniden başlayana kadar tutulur.
+# Review: PO
+hv-conn-ret-forever-vault = Kalıcı (şifreli dosya)
+# Review: PO
+hv-conn-ret-forever-vault-h = Hacivat'ın kasasında, ana parolayla
+
+# Review: PO
+hv-conn-fix-review-host-key = Sunucu anahtarını incele…
+
+# Review: PO
+hv-conn-ssh-secret-remember-all = Bu bağlantının tüm atlamalarındaki kayıtlı SSH parolalarına ve parola ifadelerine uygulanır.
+# Review: PO
+hv-conn-save-unchanged = Hiçbir şey değiştirilmedi: kayıtlı parolalar taşınamadı ya da silinemedi. { -brand-hacivat } sorarsa kasanın kilidini açın, sonra yeniden deneyin.
+# Review: PO
+hv-conn-vault-denied = { -brand-hacivat } kasa dosyasını kullanamıyor: dosya normal bir dosya değil. Girdiğiniz parolalar { -brand-hacivat } yeniden başlayana kadar tutulur.
+
 ## m2b-t19-tls
 
 # Review: PO
