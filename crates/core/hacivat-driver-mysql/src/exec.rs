@@ -42,6 +42,13 @@ pub fn tx_from_status(flags: StatusFlags) -> TxStatus {
     }
 }
 
+// ## m2b-t17-liveness (Task 17 fix round 4, I9/R5)
+/// Whether a server's status flags say the session autocommits (`SERVER_STATUS_AUTOCOMMIT`).
+#[doc(hidden)]
+pub fn autocommit_from_status(flags: StatusFlags) -> bool {
+    flags.contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT)
+}
+
 /// The statement's first keyword in ASCII upper case, `None` when it does not start with one
 /// (Q35). Leading whitespace and comments (`-- `, `#`, `/* */`) are skipped. A MySQL or MariaDB
 /// executable comment (`/*!…`, `/*!50000 …`, `/*M!100000 …`) is code the server runs, so the

@@ -18,6 +18,10 @@
 //! M2b (Task 7, T1 review M10): a statement counts as running from the `execute`/`batch` call,
 //! so a cancel sent before its future is first polled is latched and still ends it; a cancel
 //! sent while nothing runs is a no-op (as on a real server) and never reaches a later statement.
+//!
+//! M2b (Task 17 fix round 1, review I4): a connection that holds its endpoint's stream
+//! (`consumes_factory`) fails its ping with `Io(ConnectionReset)` once that stream has ended,
+//! so a test sees an SSH channel die with its tunnel, as a real driver would.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -201,6 +205,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+// ## m2b-t17-liveness
+/// The statements that set a fake connection's `autocommit` flag: a prefix and the value.
+type AutocommitEffects = Arc<Vec<(&'static str, bool)>>;
+
 /// A scripted driver (F4). Build it, register an `Arc` clone, and read its counters.
 pub struct FakeDriver {
     descriptor: DriverDescriptor,
@@ -224,6 +232,9 @@ pub struct FakeDriver {
     ignores_cancel: bool,
     reset_fails: bool,
     consumes_factory: bool,
+    // ## m2b-t17-liveness
+    /// `Some`: connections report `autocommit` (from `true`), and these statements set it.
+    autocommit: Option<AutocommitEffects>,
 }
 
 impl FakeDriver {
@@ -270,6 +281,7 @@ impl FakeDriver {
             ignores_cancel: false,
             reset_fails: false,
             consumes_factory: false,
+            autocommit: None,
         }
     }
 
@@ -391,8 +403,18 @@ impl FakeDriver {
         self
     }
 
+    // ## m2b-t17-liveness
+    /// Connections report `RawConn::autocommit` as MySQL's status flags would: on at connect,
+    /// then set by every statement starting with one of `effects`' prefixes, whatever its
+    /// result (a batch's `SET` applies even when a later statement fails).
+    pub fn autocommit_flag(mut self, effects: Vec<(&'static str, bool)>) -> Self {
+        self.autocommit = Some(Arc::new(effects));
+        self
+    }
+
     /// Each connect opens the network endpoint's stream (as the PostgreSQL driver does) and
-    /// fails with its I/O error.
+    /// fails with its I/O error. The connection holds the stream: once it ends (an SSH channel
+    /// whose tunnel died), every ping fails with `Io(ConnectionReset)`.
     pub fn consumes_factory(mut self) -> Self {
         self.consumes_factory = true;
         self
@@ -458,6 +480,10 @@ impl Driver for FakeDriver {
             reset_fails: self.reset_fails,
             backend: self.backend,
             stream: None,
+            autocommit: self
+                .autocommit
+                .as_ref()
+                .map(|effects| (true, effects.clone())),
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
@@ -543,11 +569,39 @@ struct FakeConn {
     reset_fails: bool,
     backend: Option<u64>,
     /// The endpoint's stream, held open (`consumes_factory`).
-    #[allow(dead_code, reason = "held so the peer sees an open connection")]
     stream: Option<BoxedStream>,
+    // ## m2b-t17-liveness
+    /// What `autocommit` reports, and the statements that change it (`autocommit_flag`).
+    autocommit: Option<(bool, AutocommitEffects)>,
 }
 
 impl FakeConn {
+    // ## m2b-t17-liveness
+    /// `Io(ConnectionReset)` once the held endpoint stream has ended (EOF or an error); a
+    /// stream with nothing to read is alive. Polled once, without waiting.
+    fn stream_alive(&mut self) -> Result<(), RawError> {
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+        use tokio::io::ReadBuf;
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(());
+        };
+        let mut byte = [0u8; 1];
+        let mut buf = ReadBuf::new(&mut byte);
+        let mut cx = Context::from_waker(Waker::noop());
+        match Pin::new(&mut **stream).poll_read(&mut cx, &mut buf) {
+            Poll::Ready(Ok(())) if buf.filled().is_empty() => Err(RawError {
+                kind: RawErrorKind::Io(std::io::ErrorKind::ConnectionReset),
+                server: None,
+            }),
+            Poll::Ready(Err(e)) => Err(RawError {
+                kind: RawErrorKind::Io(e.kind()),
+                server: None,
+            }),
+            _ => Ok(()),
+        }
+    }
+
     /// `Io(ConnectionReset)` once `kill_connections` ran after this connection was made.
     fn alive(&self) -> Result<(), RawError> {
         if self.counters.killed.load(Ordering::SeqCst) > self.born {
@@ -562,6 +616,14 @@ impl FakeConn {
     /// Runs one statement from the script; it counts as running from this call (M10).
     fn run<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
         self.cancel.begin();
+        // ## m2b-t17-liveness: the server applies the setting whatever the statement's (or
+        // the batch's) outcome.
+        if let Some((on, effects)) = self.autocommit.as_mut() {
+            let text = sql.trim_start();
+            if let Some((_, set)) = effects.iter().find(|(prefix, _)| text.starts_with(prefix)) {
+                *on = *set;
+            }
+        }
         Box::pin(async move {
             let result = self.run_entry(sql).await;
             self.cancel.running.store(false, Ordering::SeqCst);
@@ -662,11 +724,14 @@ impl RawConn for FakeConn {
     }
 
     fn ping(&mut self) -> BoxFuture<'_, Result<Duration, RawError>> {
-        let next = self.alive().and_then(|()| {
-            self.pings
-                .pop_front()
-                .unwrap_or(Ok(Duration::from_millis(1)))
-        });
+        let next = self
+            .alive()
+            .and_then(|()| self.stream_alive())
+            .and_then(|()| {
+                self.pings
+                    .pop_front()
+                    .unwrap_or(Ok(Duration::from_millis(1)))
+            });
         Box::pin(async move { next })
     }
 
@@ -737,6 +802,11 @@ impl RawConn for FakeConn {
 
     fn backend_id(&self) -> Option<u64> {
         self.backend
+    }
+
+    // ## m2b-t17-liveness
+    fn autocommit(&self) -> Option<bool> {
+        self.autocommit.as_ref().map(|(on, _)| *on)
     }
 }
 
@@ -938,6 +1008,36 @@ mod tests {
             .await
             .unwrap();
         assert!(conn.reset().await.is_err());
+    }
+
+    // ## m2b-t17-liveness
+    #[tokio::test]
+    async fn a_held_stream_that_ends_fails_the_ping() {
+        let far = Arc::new(Mutex::new(None));
+        let keep = far.clone();
+        let factory = hacivat_net::StreamFactory::new(move || {
+            let keep = keep.clone();
+            Box::pin(async move {
+                let (near, far) = tokio::io::duplex(64);
+                *lock(&keep) = Some(far);
+                Ok(Box::new(near) as BoxedStream)
+            })
+        });
+        let fake = FakeDriver::new(DbmsKind::Postgres).consumes_factory();
+        let mut req = request(None, Arc::new(|_| {}));
+        req.endpoint = Endpoint::Network {
+            factory,
+            direct: None,
+            resolved: Vec::new(),
+            tls_host: "db".into(),
+        };
+        let mut conn = fake.connect(req).await.unwrap();
+        assert!(conn.ping().await.is_ok(), "an open, quiet stream is alive");
+        drop(lock(&far).take());
+        assert_eq!(
+            conn.ping().await.unwrap_err().kind,
+            RawErrorKind::Io(std::io::ErrorKind::ConnectionReset)
+        );
     }
 
     #[tokio::test]

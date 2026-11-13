@@ -211,13 +211,21 @@ pub enum CloseRefused {
 /// What a session tells its owner.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SessionEvent {
-    SlowCancel { req: u64 },
-    IdleTransaction { minutes: u32 },
+    SlowCancel {
+        req: u64,
+    },
+    IdleTransaction {
+        minutes: u32,
+    },
     EnforcementGap(GapReason),
     Lost(LostState),
     Reconnected,
     SchemaChanged(SchemaCtx),
     TxChanged(TxState),
+    // ## m2b-t17-liveness (fix round 1, review M2/H4)
+    /// The liveness supervisor closed the session after its idle threshold (B18); sent just
+    /// before it publishes `Disconnected`, so a close by anyone else is never taken for one.
+    IdleDisconnected,
 }
 
 /// What a handle sends its actor.
