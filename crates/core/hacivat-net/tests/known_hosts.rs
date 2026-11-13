@@ -182,6 +182,8 @@ fn revoked_marker_is_a_hard_stop() {
 #[test]
 fn trust_writes_hacivat_store_only() {
     let (kh, ssh_file, store) = known_tmp();
+    #[cfg(not(unix))]
+    let _ = &store; // only the Unix mode check reads it
     let before = std::fs::read(&ssh_file).unwrap();
     kh.trust("db", 22, &K1).unwrap();
     assert_eq!(std::fs::read(&ssh_file).unwrap(), before);
