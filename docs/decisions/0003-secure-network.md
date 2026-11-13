@@ -164,3 +164,39 @@ the vault, the session overlay, the keyring CI and the deferrals.
   the temp path, a failed write, network paths, `Debug`), `tests/fallback.rs` (probe once,
   keyring or vault, the store's choice, Q38 fallbacks; `linux_without_secret_service_uses_vault`
   runs in CI `vault-linux`), `tests/pgpass.rs` (`empty_password_field_is_none`).
+- **Fix round 1 (review I1, I2, M1–M8; controller ruling: both Importants now, not at M8).**
+  - **Several instances (I2).** Until M8's single-instance lock, two Hacivat processes may
+    share `vault.bin`. Every unlock, `get`, read-modify-write (`put`, `delete`), `create` and
+    `reset` holds an exclusive `std::fs::File::lock` on `vault.bin.lock` (mode `0600`, never
+    deleted, a symlink there is not used). Under it the instance re-reads the header: a changed
+    nonce reloads the map with the held key before the change is applied (no lost update); a
+    changed salt or parameters, or a missing file (reset or re-created elsewhere), locks the
+    instance (`VaultLocked`), so the old vault is never written back; a file the held key cannot
+    open locks it with `VaultCorrupt`. A write without the lock (a read-only directory) is
+    refused (`VaultReadOnly`); a read without it goes ahead. Rejected: deferring to M8 (a reset
+    in one window would be undone by the next save in another).
+  - **Temp files (I2).** Each write uses its own `vault.bin.<32 random hex>.tmp` (`create_new`,
+    `0600`); temp files a crash left behind are removed under the lock, which no write in flight
+    can hold. No more collisions between writers.
+  - **Racing replace (I1).** The read is check (`lstat`) → open → compare dev/inode; a mismatch
+    or a vanished file is a replace in progress and the read is retried (16 times), then
+    `Backend("vault-read")`, never `VaultCorrupt`. Writers take the lock, so in practice only a
+    writer outside Hacivat can cause a retry.
+  - **A symlink at `vault.bin` on a write** is now `VaultCorrupt` (the write re-reads the file
+    first and a link is not a vault file) instead of `VaultReadOnly`; it is still never
+    followed and nothing is written.
+  - **M1** `Debug` uses `try_lock` and shows `unlocked: "busy"` rather than wait. **M2** the key
+    is one heap `Box<Zeroizing<[u8; 32]>>`, so moves copy only the pointer. **M3** `reset`
+    `fsync`s the directory. **M4** only "not found" (or "not a directory") means no vault; any
+    other failure to look is `Denied`/`Backend`, so a locked vault in an unreadable directory
+    is never reported empty or deleted. **M7** Argon2's memory is reserved with
+    `try_reserve_exact`: a reservation the machine cannot make is `Backend("vault-memory")`, not
+    an abort (the Q30 bounds stay as ruled). **M8** `unlock` holds the state lock and the file
+    lock from the read to the install. The `argon2` `zeroize` feature is on (controller-ruled
+    manifest exception) and the working blocks are still wiped here, since argon2 does not wipe
+    caller-supplied memory.
+  - **Recorded, not changed.** **M5:** off Unix the symlink refusal is check-then-use only
+    (`File::open` follows a reparse point swapped in after the check); accepted because the vault
+    is used only where no keyring exists, in practice Linux. **M6:** no KDF upgrade path in v1:
+    a vault keeps the parameters it was created with; a later default does not re-key existing
+    vaults (a future format minor can add re-keying on unlock).

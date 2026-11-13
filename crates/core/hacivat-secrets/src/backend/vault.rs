@@ -24,33 +24,45 @@
 //! - The header is unauthenticated until the key is derived, so its parameters are bounded
 //!   first (Q30): anything outside `m_kib` 8,192–1,048,576, `t` 1–10, `p` 1–8 is `VaultCorrupt`
 //!   and no key is derived (a vault built `with_params` also accepts its own parameters).
+//!   Argon2's memory is reserved fallibly: a reservation the machine cannot make is an error,
+//!   never an abort.
 //! - Salt and nonce come from `getrandom::fill`. Every write draws a fresh nonce and keeps the
 //!   salt (and therefore the key).
-//! - The key lives in a `Zeroizing` buffer, the decrypted map in `SecretString` values: the
-//!   JSON is built and decrypted inside `Zeroizing<Vec<u8>>` buffers sized up front (never
-//!   reallocated while they hold plaintext) and parsed straight into `SecretString`. Argon2's
-//!   working memory is overwritten before it is freed.
-//! - A write is atomic: `vault.bin.tmp` is created fresh (`create_new`, mode `0600`), written,
-//!   `fsync`ed and renamed over `vault.bin`, then the directory is `fsync`ed (Unix). The temp
-//!   file only ever holds ciphertext. A symlink or any non-file at `vault.bin` is refused, and
-//!   a share or device path is refused before any file system call.
+//! - The key lives in one heap `Zeroizing` buffer, the decrypted map in `SecretString` values:
+//!   the JSON is built and decrypted inside `Zeroizing<Vec<u8>>` buffers sized up front (never
+//!   reallocated while they hold plaintext) and parsed straight into `SecretString`. Argon2
+//!   wipes its own state (`zeroize` feature) and its working memory is wiped here.
+//! - **Several instances (fix round 1, I1/I2).** Until the single-instance lock (M8) two
+//!   Hacivat processes may share one vault. Every unlock, read, read-modify-write, create and
+//!   reset holds an exclusive advisory lock on `vault.bin.lock` (`std::fs::File::lock`). Under
+//!   it the vault re-reads the header: a changed nonce (another instance wrote) reloads the map
+//!   with the held key before the change is applied; a changed salt or a missing file (the vault
+//!   was reset or re-created elsewhere) locks this instance, so it never writes the old vault
+//!   back. A read that races a replace by something outside the lock is retried; it is never
+//!   reported `VaultCorrupt`.
+//! - A write is atomic: a temp file with a fresh random name (`vault.bin.<hex>.tmp`,
+//!   `create_new`, mode `0600`) is written, `fsync`ed and renamed over `vault.bin`, then the
+//!   directory is `fsync`ed (Unix). The temp file only ever holds ciphertext. A symlink or any
+//!   non-file at `vault.bin` is refused, and a share or device path is refused before any file
+//!   system call.
 //! - A failed write changes nothing: the in-memory map is replaced only after the rename.
 //! - Every method blocks (Argon2 takes about a second with the default parameters): callers run
 //!   them on the core runtime's blocking pool.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf, Prefix};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 
 use argon2::{Algorithm, Argon2, Block, Params, Version};
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use secrecy::{ExposeSecret, SecretString};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{BackendChoice, SecretBackend, SecretError};
 use crate::store::SecretKey;
@@ -103,11 +115,16 @@ const KEY_LEN: usize = 32;
 const MIN_MASTER_CHARS: usize = 8;
 /// The largest vault file read (16 MiB); a larger one is corrupt, never loaded.
 const MAX_VAULT_BYTES: u64 = 16 << 20;
+/// How often a read is retried when the file was replaced between its check and its open.
+const READ_ATTEMPTS: usize = 16;
 
 /// The header bounds checked before any key is derived (Q30).
 const M_KIB_BOUNDS: RangeInclusive<u32> = 8_192..=1_048_576;
 const T_BOUNDS: RangeInclusive<u32> = 1..=10;
 const P_BOUNDS: RangeInclusive<u32> = 1..=8;
+
+/// The vault key, allocated once on the heap so moves never copy it.
+type VaultKey = Box<Zeroizing<[u8; KEY_LEN]>>;
 
 /// The decoded 64-byte header.
 struct Header {
@@ -133,7 +150,7 @@ impl Header {
     }
 
     /// The header at the start of `file`, when the file is long enough to hold a header and a
-    /// tag and starts with the magic.
+    /// tag, starts with the magic and has a non-zero major.
     fn decode(file: &[u8]) -> Option<Header> {
         if file.len() < HEADER_LEN + TAG_LEN || &file[0..8] != MAGIC {
             return None;
@@ -145,7 +162,7 @@ impl Header {
         salt.copy_from_slice(&file[24..40]);
         let mut nonce = [0u8; NONCE_LEN];
         nonce.copy_from_slice(&file[40..64]);
-        Some(Header {
+        let header = Header {
             major: u16_at(8),
             minor: u16_at(10),
             params: VaultParams {
@@ -155,15 +172,19 @@ impl Header {
             },
             salt,
             nonce,
-        })
+        };
+        (header.major != 0).then_some(header)
     }
 }
 
-/// An unlocked vault: the key and the decrypted map. Deliberately without `Debug`.
+/// An unlocked vault: the key, the decrypted map and the header it was read from or last
+/// written with. Deliberately without `Debug`.
 struct Unlocked {
-    key: Zeroizing<[u8; KEY_LEN]>,
+    key: VaultKey,
     params: VaultParams,
     salt: [u8; SALT_LEN],
+    /// The nonce of the file as this instance last read or wrote it.
+    nonce: [u8; NONCE_LEN],
     /// Written by a newer Hacivat: readable, never written.
     read_only: bool,
     entries: BTreeMap<String, SecretString>,
@@ -178,11 +199,19 @@ pub struct FileVault {
 }
 
 impl fmt::Debug for FileVault {
+    /// Never blocks: a vault busy in another call shows `unlocked: "busy"` (fix round 1, M1).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let unlocked: &dyn fmt::Debug = match self.state.try_lock() {
+            Ok(state) if state.is_some() => &true,
+            Ok(_) => &false,
+            Err(TryLockError::Poisoned(state)) if state.get_ref().is_some() => &true,
+            Err(TryLockError::Poisoned(_)) => &false,
+            Err(TryLockError::WouldBlock) => &"busy",
+        };
         f.debug_struct("FileVault")
             .field("path", &self.path)
             .field("params", &self.params)
-            .field("unlocked", &self.is_unlocked())
+            .field("unlocked", unlocked)
             .finish()
     }
 }
@@ -216,72 +245,172 @@ impl FileVault {
                 && P_BOUNDS.contains(&params.p))
     }
 
-    /// Seals `entries` under `u`'s key with a fresh nonce and writes the file atomically. An
-    /// I/O failure is `VaultReadOnly` (the file cannot be written).
-    fn write(
-        &self,
-        u: &Unlocked,
-        entries: &BTreeMap<String, SecretString>,
-    ) -> Result<(), SecretError> {
-        let file = seal(u, entries)?;
-        write_atomic(&self.path, &file).map_err(|_| SecretError::VaultReadOnly)
+    /// Whether anything is at the vault path. Only "not found" means no vault; any other
+    /// failure to look is an error (fix round 1, M4), so a vault that cannot be seen is never
+    /// taken for an empty one.
+    fn presence(&self) -> Result<bool, SecretError> {
+        if names_another_machine(&self.path) {
+            return Ok(false);
+        }
+        match fs::symlink_metadata(&self.path) {
+            Ok(_) => Ok(true),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(io_error(&e)),
+        }
     }
 
-    /// Writes `entries` and, once they are on disk, makes them the vault's map.
-    fn commit(
+    /// The answer for a locked vault: nothing stored when there is no vault (`none`),
+    /// `VaultLocked` when there is one.
+    fn when_locked<T>(&self, none: T) -> Result<T, SecretError> {
+        if self.presence()? {
+            Err(SecretError::VaultLocked)
+        } else {
+            Ok(none)
+        }
+    }
+
+    /// The exclusive lock on `<vault>.lock`, held while this instance reads or writes the vault
+    /// file. `None` when the lock file cannot be opened or locked (a read-only directory): a
+    /// read then goes ahead unlocked (and retries a racing replace), a write refuses.
+    fn file_lock(&self) -> Option<File> {
+        // A share or device path is never touched, not even for its lock file.
+        if names_another_machine(&self.path) {
+            return None;
+        }
+        let path = sibling(&self.path, ".lock");
+        if fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_file()) {
+            return None;
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path).or_else(|_| File::open(&path)).ok()?;
+        file.lock().ok()?;
+        Some(file)
+    }
+
+    /// [`file_lock`](Self::file_lock) for a write: missing is `VaultReadOnly` (the vault cannot
+    /// be written safely).
+    fn write_lock(&self) -> Result<File, SecretError> {
+        self.file_lock().ok_or(SecretError::VaultReadOnly)
+    }
+
+    /// Under the file lock: brings `slot` up to date with the file. A changed nonce (another
+    /// instance wrote) reloads the map with the held key. A changed salt or parameters, or a
+    /// missing file (reset or re-created elsewhere), locks this instance and is `VaultLocked`;
+    /// a file the held key cannot open is `VaultCorrupt` and locks too. Either way nothing of
+    /// the old vault is ever written back.
+    fn refresh(&self, slot: &mut Option<Unlocked>) -> Result<(), SecretError> {
+        let Some(u) = slot.as_mut() else {
+            return Err(SecretError::VaultLocked);
+        };
+        let file = match read_vault(&self.path) {
+            Ok(file) => file,
+            Err(SecretError::Unavailable) => {
+                *slot = None;
+                return Err(SecretError::VaultLocked);
+            }
+            Err(e) => return Err(e),
+        };
+        let Some(header) = Header::decode(&file) else {
+            *slot = None;
+            return Err(SecretError::VaultCorrupt);
+        };
+        if header.salt != u.salt || header.params != u.params {
+            *slot = None;
+            return Err(SecretError::VaultLocked);
+        }
+        if header.nonce == u.nonce {
+            return Ok(());
+        }
+        match open_body(&u.key, &header, &file) {
+            Ok(entries) => {
+                u.entries = entries;
+                u.nonce = header.nonce;
+                u.read_only = header.major > FORMAT_MAJOR;
+                Ok(())
+            }
+            Err(_) => {
+                *slot = None;
+                Err(SecretError::VaultCorrupt)
+            }
+        }
+    }
+
+    /// The read-modify-write of `put` and `delete` (fix round 1, I2): under the file lock, the
+    /// map is refreshed from the file, `change` is applied to a copy, and the copy is written
+    /// and then installed. `change` returns false when nothing changed (nothing is written).
+    fn modify(
         &self,
-        u: &mut Unlocked,
-        entries: BTreeMap<String, SecretString>,
+        change: impl FnOnce(&mut BTreeMap<String, SecretString>) -> bool,
     ) -> Result<(), SecretError> {
-        self.write(u, &entries)?;
-        u.entries = entries;
-        Ok(())
+        let mut state = self.state();
+        if state.is_none() {
+            return Err(SecretError::VaultLocked);
+        }
+        let _lock = self.write_lock()?;
+        self.refresh(&mut state)?;
+        let u = state.as_mut().ok_or(SecretError::VaultLocked)?;
+        if u.read_only {
+            return Err(SecretError::VaultReadOnly);
+        }
+        let mut entries = u.entries.clone();
+        if !change(&mut entries) {
+            return Ok(());
+        }
+        write_entries(&self.path, u, entries)
     }
 }
 
 impl SecretBackend for FileVault {
     /// `VaultLocked` while locked; with no vault file there is nothing stored (`None`).
     fn get(&self, key: &SecretKey) -> Result<Option<SecretString>, SecretError> {
-        match self.state().as_ref() {
-            Some(u) => Ok(u.entries.get(&key.service()).cloned()),
-            None if !self.exists() => Ok(None),
-            None => Err(SecretError::VaultLocked),
+        let mut state = self.state();
+        if state.is_none() {
+            return self.when_locked(None);
         }
+        let lock = self.file_lock();
+        match self.refresh(&mut state) {
+            Ok(()) => {}
+            Err(SecretError::VaultLocked) => {
+                drop(lock);
+                return self.when_locked(None);
+            }
+            Err(e) => return Err(e),
+        }
+        Ok(state
+            .as_ref()
+            .and_then(|u| u.entries.get(&key.service()).cloned()))
     }
 
-    /// `VaultLocked` while locked (or before the vault exists), `VaultReadOnly` for a newer
-    /// format or a file that cannot be written.
+    /// `VaultLocked` while locked (or before the vault exists, or once it was reset
+    /// elsewhere), `VaultReadOnly` for a newer format or a file that cannot be written.
     fn put(&self, key: &SecretKey, value: &SecretString) -> Result<(), SecretError> {
-        let mut state = self.state();
-        let u = state.as_mut().ok_or(SecretError::VaultLocked)?;
-        if u.read_only {
-            return Err(SecretError::VaultReadOnly);
-        }
-        let mut entries = u.entries.clone();
-        entries.insert(key.service(), value.clone());
-        self.commit(u, entries)
+        let service = key.service();
+        self.modify(|entries| {
+            entries.insert(service, value.clone());
+            true
+        })
     }
 
     /// Deleting a missing entry, or from a vault that does not exist, succeeds.
     fn delete(&self, key: &SecretKey) -> Result<(), SecretError> {
-        let mut state = self.state();
-        let Some(u) = state.as_mut() else {
-            return if self.exists() {
-                Err(SecretError::VaultLocked)
-            } else {
-                Ok(())
-            };
-        };
-        if u.read_only {
-            return Err(SecretError::VaultReadOnly);
-        }
         let service = key.service();
-        if !u.entries.contains_key(&service) {
-            return Ok(());
+        match self.modify(|entries| entries.remove(&service).is_some()) {
+            Err(SecretError::VaultLocked) => self.when_locked(()),
+            other => other,
         }
-        let mut entries = u.entries.clone();
-        entries.remove(&service);
-        self.commit(u, entries)
     }
 
     fn name(&self) -> &'static str {
@@ -298,9 +427,10 @@ impl SecretBackend for FileVault {
 }
 
 impl VaultBackend for FileVault {
-    /// Whether anything is at the vault path (a share or device path never exists).
+    /// Whether something is (or may be) at the vault path: only "not found" is false. A share
+    /// or device path never exists.
     fn exists(&self) -> bool {
-        !names_another_machine(&self.path) && fs::symlink_metadata(&self.path).is_ok()
+        !matches!(self.presence(), Ok(false))
     }
 
     fn is_unlocked(&self) -> bool {
@@ -317,23 +447,28 @@ impl VaultBackend for FileVault {
         if names_another_machine(&self.path) {
             return Err(SecretError::Unavailable);
         }
-        // Held across the check and the write, so two creates cannot both succeed.
         let mut state = self.state();
-        if self.exists() {
+        create_dir(&parent_dir(&self.path)).map_err(|_| SecretError::VaultReadOnly)?;
+        let _lock = self.write_lock()?;
+        if self.presence()? {
             return Err(SecretError::Backend("vault-exists".to_string()));
         }
         let mut salt = [0u8; SALT_LEN];
         random(&mut salt)?;
-        let key = derive_key(&master, &salt, self.params)
-            .ok_or_else(|| SecretError::Backend("vault-params".to_string()))?;
-        let u = Unlocked {
+        let key = derive_key(&master, &salt, self.params).map_err(|e| match e {
+            KdfError::Params => SecretError::Backend("vault-params".to_string()),
+            KdfError::Memory => SecretError::Backend("vault-memory".to_string()),
+        })?;
+        drop(master);
+        let mut u = Unlocked {
             key,
             params: self.params,
             salt,
+            nonce: [0u8; NONCE_LEN],
             read_only: false,
             entries: BTreeMap::new(),
         };
-        self.write(&u, &u.entries)?;
+        write_entries(&self.path, &mut u, BTreeMap::new())?;
         *state = Some(u);
         Ok(())
     }
@@ -341,28 +476,30 @@ impl VaultBackend for FileVault {
     /// A wrong password, or a body that fails the AEAD under a header that parses, is
     /// `WrongMasterPassword` (the AEAD cannot tell tampering from a wrong password, Q30); a
     /// header that does not parse, a truncated file, out-of-bounds parameters or a non-file at
-    /// the path is `VaultCorrupt`. Nothing is written either way.
+    /// the path is `VaultCorrupt`. Nothing is written either way. Holds the state lock and the
+    /// file lock from the read to the install (fix round 1, M8).
     fn unlock(&self, master: SecretString) -> Result<(), SecretError> {
+        if names_another_machine(&self.path) {
+            return Err(SecretError::Unavailable);
+        }
+        let mut state = self.state();
+        let _lock = self.file_lock();
         let file = read_vault(&self.path)?;
         let header = Header::decode(&file).ok_or(SecretError::VaultCorrupt)?;
-        if header.major == 0 || !self.accepts(header.params) {
+        if !self.accepts(header.params) {
             return Err(SecretError::VaultCorrupt);
         }
-        let key =
-            derive_key(&master, &header.salt, header.params).ok_or(SecretError::VaultCorrupt)?;
+        let key = derive_key(&master, &header.salt, header.params).map_err(|e| match e {
+            KdfError::Params => SecretError::VaultCorrupt,
+            KdfError::Memory => SecretError::Backend("vault-memory".to_string()),
+        })?;
         drop(master);
-        let (aad, body) = file.split_at(HEADER_LEN);
-        let mut plain = Zeroizing::new(Vec::with_capacity(body.len()));
-        plain.extend_from_slice(body);
-        XChaCha20Poly1305::new(Key::from_slice(&key[..]))
-            .decrypt_in_place(XNonce::from_slice(&header.nonce), aad, &mut *plain)
-            .map_err(|_| SecretError::WrongMasterPassword)?;
-        let entries: BTreeMap<String, SecretString> =
-            serde_json::from_slice(&plain).map_err(|_| SecretError::VaultCorrupt)?;
-        *self.state() = Some(Unlocked {
+        let entries = open_body(&key, &header, &file)?;
+        *state = Some(Unlocked {
             key,
             params: header.params,
             salt: header.salt,
+            nonce: header.nonce,
             read_only: header.major > FORMAT_MAJOR,
             entries,
         });
@@ -374,20 +511,33 @@ impl VaultBackend for FileVault {
         *self.state() = None;
     }
 
-    /// Locks, then deletes the vault file (and a stale temp file). A missing file is fine.
+    /// Locks, then deletes the vault file and any stale temp file under the file lock, and
+    /// syncs the directory (fix round 1, M3). A missing file is fine; the lock file stays.
     fn reset(&self) -> Result<(), SecretError> {
         let mut state = self.state();
         *state = None;
         if names_another_machine(&self.path) {
             return Err(SecretError::Unavailable);
         }
+        let _lock = self.file_lock();
         match fs::remove_file(&self.path) {
             Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(_) => return Err(SecretError::VaultReadOnly),
         }
-        let _ = fs::remove_file(temp_path(&self.path));
+        let dir = parent_dir(&self.path);
+        remove_stale_temps(&dir, &self.path);
+        sync_dir(&dir);
         Ok(())
+    }
+}
+
+/// Maps an I/O error on the vault file, never carrying a path or content.
+fn io_error(e: &io::Error) -> SecretError {
+    match e.kind() {
+        io::ErrorKind::NotFound => SecretError::Unavailable,
+        io::ErrorKind::PermissionDenied => SecretError::Denied,
+        _ => SecretError::Backend("vault-read".to_string()),
     }
 }
 
@@ -396,33 +546,67 @@ fn random(buf: &mut [u8]) -> Result<(), SecretError> {
     getrandom::fill(buf).map_err(|_| SecretError::Backend("random".to_string()))
 }
 
-/// The Argon2id key for `master` (`None` when Argon2 refuses the parameters). Argon2's working
-/// memory is supplied here and overwritten before it is freed.
+/// Why no key was derived.
+enum KdfError {
+    /// Argon2 refuses the parameters.
+    Params,
+    /// The working memory could not be reserved.
+    Memory,
+}
+
+/// The Argon2id key for `master`. The working memory is reserved fallibly (fix round 1, M7)
+/// and wiped before it is freed; Argon2 wipes its own state (`zeroize` feature).
 fn derive_key(
     master: &SecretString,
     salt: &[u8; SALT_LEN],
     params: VaultParams,
-) -> Option<Zeroizing<[u8; KEY_LEN]>> {
-    let params = Params::new(params.m_kib, params.t, params.p, Some(KEY_LEN)).ok()?;
-    let mut blocks = vec![Block::new(); params.block_count()];
+) -> Result<VaultKey, KdfError> {
+    let params = Params::new(params.m_kib, params.t, params.p, Some(KEY_LEN))
+        .map_err(|_| KdfError::Params)?;
+    let count = params.block_count();
+    let mut blocks: Vec<Block> = Vec::new();
+    blocks
+        .try_reserve_exact(count)
+        .map_err(|_| KdfError::Memory)?;
+    blocks.resize(count, Block::new());
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    let mut key: VaultKey = Box::new(Zeroizing::new([0u8; KEY_LEN]));
     let derived = argon.hash_password_into_with_memory(
         master.expose_secret().as_bytes(),
         salt,
         &mut key[..],
         &mut blocks,
     );
-    // argon2 is built without its `zeroize` feature, so wipe the blocks here; `black_box`
-    // keeps the stores from being optimised away before the free.
-    blocks.fill(Block::new());
-    std::hint::black_box(&blocks);
-    derived.ok().map(|()| key)
+    blocks.iter_mut().for_each(Zeroize::zeroize);
+    derived.map_err(|_| KdfError::Params)?;
+    Ok(key)
 }
 
-/// The file bytes for `entries` under `u`'s key, salt and parameters, with a fresh nonce.
-fn seal(u: &Unlocked, entries: &BTreeMap<String, SecretString>) -> Result<Vec<u8>, SecretError> {
-    let mut buf = json_map(entries, TAG_LEN);
+/// The map sealed in `file` under `header`: `WrongMasterPassword` when the AEAD fails,
+/// `VaultCorrupt` when the authenticated plaintext is not a JSON map.
+fn open_body(
+    key: &VaultKey,
+    header: &Header,
+    file: &[u8],
+) -> Result<BTreeMap<String, SecretString>, SecretError> {
+    let (aad, body) = file.split_at(HEADER_LEN);
+    let mut plain = Zeroizing::new(Vec::with_capacity(body.len()));
+    plain.extend_from_slice(body);
+    XChaCha20Poly1305::new(Key::from_slice(&key[..]))
+        .decrypt_in_place(XNonce::from_slice(&header.nonce), aad, &mut *plain)
+        .map_err(|_| SecretError::WrongMasterPassword)?;
+    serde_json::from_slice(&plain).map_err(|_| SecretError::VaultCorrupt)
+}
+
+/// Seals `entries` under `u`'s key with a fresh nonce, writes the file atomically and, once it
+/// is on disk, installs `entries` and the nonce in `u`. An I/O failure is `VaultReadOnly` (the
+/// file cannot be written) and changes nothing.
+fn write_entries(
+    path: &Path,
+    u: &mut Unlocked,
+    entries: BTreeMap<String, SecretString>,
+) -> Result<(), SecretError> {
+    let mut buf = json_map(&entries, TAG_LEN);
     let mut nonce = [0u8; NONCE_LEN];
     random(&mut nonce)?;
     let header = Header {
@@ -439,7 +623,10 @@ fn seal(u: &Unlocked, entries: &BTreeMap<String, SecretString>) -> Result<Vec<u8
     let mut file = Vec::with_capacity(HEADER_LEN + buf.len());
     file.extend_from_slice(&header);
     file.extend_from_slice(&buf);
-    Ok(file)
+    write_atomic(path, &file).map_err(|_| SecretError::VaultReadOnly)?;
+    u.entries = entries;
+    u.nonce = nonce;
+    Ok(())
 }
 
 /// `entries` as a JSON object, in a buffer sized exactly up front (plus `spare` bytes for the
@@ -502,34 +689,45 @@ fn push_json_str(out: &mut Vec<u8>, s: &str) {
 
 /// The vault file's bytes (ciphertext only). A share or device path is `Unavailable` without
 /// any file system call; a symlink, a non-file or an oversized file is `VaultCorrupt`; a
-/// missing file is `Unavailable`.
+/// missing file is `Unavailable`. When the file is replaced between the check and the open (a
+/// writer outside the lock), the read is retried; a replace that never settles is
+/// `Backend("vault-read")`, never `VaultCorrupt` (fix round 1, I1).
 fn read_vault(path: &Path) -> Result<Vec<u8>, SecretError> {
     if names_another_machine(path) {
         return Err(SecretError::Unavailable);
     }
-    let io_error = |e: io::Error| match e.kind() {
-        io::ErrorKind::NotFound => SecretError::Unavailable,
-        io::ErrorKind::PermissionDenied => SecretError::Denied,
-        _ => SecretError::Backend("vault-read".to_string()),
-    };
-    let link = fs::symlink_metadata(path).map_err(io_error)?;
+    for _ in 0..READ_ATTEMPTS {
+        if let Some(bytes) = read_vault_once(path)? {
+            return Ok(bytes);
+        }
+    }
+    Err(SecretError::Backend("vault-read".to_string()))
+}
+
+/// One check-open-compare-read; `None` when the path was replaced in between.
+fn read_vault_once(path: &Path) -> Result<Option<Vec<u8>>, SecretError> {
+    let link = fs::symlink_metadata(path).map_err(|e| io_error(&e))?;
     if !link.file_type().is_file() || link.len() > MAX_VAULT_BYTES {
         return Err(SecretError::VaultCorrupt);
     }
-    let file = File::open(path).map_err(io_error)?;
-    let meta = file.metadata().map_err(io_error)?;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        // Removed between the check and the open: look again.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_error(&e)),
+    };
+    let meta = file.metadata().map_err(|e| io_error(&e))?;
     if !meta.is_file() || !same_file(&link, &meta) {
-        // Swapped for something else between the check and the open.
-        return Err(SecretError::VaultCorrupt);
+        return Ok(None);
     }
     let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
     file.take(MAX_VAULT_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(io_error)?;
+        .map_err(|e| io_error(&e))?;
     if bytes.len() as u64 > MAX_VAULT_BYTES {
         return Err(SecretError::VaultCorrupt);
     }
-    Ok(bytes)
+    Ok(Some(bytes))
 }
 
 #[cfg(unix)]
@@ -538,21 +736,69 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     a.dev() == b.dev() && a.ino() == b.ino()
 }
 
+/// Off Unix the symlink refusal is check-then-use only (`File::open` follows a reparse point
+/// swapped in after the check). Accepted: the vault is used only where no keyring is usable,
+/// which in practice is Linux; Windows and macOS always have one (B13, fix round 1, M5).
 #[cfg(not(unix))]
 fn same_file(_a: &fs::Metadata, _b: &fs::Metadata) -> bool {
     true
 }
 
-/// `<path>.tmp`, next to the vault.
-fn temp_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
+/// `<path><suffix>`, next to the vault.
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name: OsString = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
     path.with_file_name(name)
 }
 
-/// Replaces the file at `path` with `bytes` atomically (B13): a fresh temp file (mode `0600`,
-/// never through an existing entry), `fsync`, rename, then the directory's `fsync` on Unix. A
-/// symlink or other non-file at `path` is refused, never followed or replaced.
+/// The directory that holds `path`.
+fn parent_dir(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// A fresh temp path for one write: `<name>.<32 random hex>.tmp` (fix round 1, I2).
+fn temp_path(path: &Path) -> Result<PathBuf, SecretError> {
+    let mut id = [0u8; 16];
+    random(&mut id)?;
+    let mut suffix = String::with_capacity(1 + 32 + 4);
+    suffix.push('.');
+    for b in id {
+        suffix.push(char::from(HEX_DIGITS[usize::from(b >> 4)]));
+        suffix.push(char::from(HEX_DIGITS[usize::from(b & 15)]));
+    }
+    suffix.push_str(".tmp");
+    Ok(sibling(path, &suffix))
+}
+
+/// Removes temp files a crashed write left next to `path` (`<name>.*.tmp`, including M2b's
+/// first `<name>.tmp`). Called only under the file lock, when no other write is in flight.
+/// `remove_file` removes a link itself, never its target.
+fn remove_stale_temps(dir: &Path, path: &Path) {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let prefix = format!("{name}.");
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        if file_name
+            .to_str()
+            .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".tmp"))
+        {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Replaces the file at `path` with `bytes` atomically (B13): a fresh, randomly named temp file
+/// (mode `0600`, `create_new`), `fsync`, rename, then the directory's `fsync` on Unix. A
+/// symlink or other non-file at `path` is refused, never followed or replaced. Called under
+/// the file lock.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if names_another_machine(path) {
         return Err(io::Error::other("network path"));
@@ -563,18 +809,10 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    let dir = match path.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
+    let dir = parent_dir(path);
     create_dir(&dir)?;
-    let tmp = temp_path(path);
-    // A stale temp file (or anything planted there) is removed, never written through.
-    match fs::remove_file(&tmp) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
+    remove_stale_temps(&dir, path);
+    let tmp = temp_path(path).map_err(|_| io::Error::other("random"))?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -590,10 +828,17 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
-    // The rename is done; a failed directory sync only weakens durability, not the content.
-    #[cfg(unix)]
-    let _ = File::open(&dir).and_then(|d| d.sync_all());
+    sync_dir(&dir);
     Ok(())
+}
+
+/// `fsync`s `dir` on Unix, so a rename or removal in it survives a crash. Best effort: the
+/// change itself is done; a failed sync only weakens durability.
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    let _ = File::open(dir).and_then(|d| d.sync_all());
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 /// Creates `dir` (owner-only on Unix) when it is missing.
@@ -698,9 +943,28 @@ mod tests {
         for p in ["/home/u/.local/share/hacivat/vault.bin", "vault.bin", "./v"] {
             assert!(!names_another_machine(Path::new(p)), "{p}");
         }
-        assert_eq!(
-            temp_path(Path::new("/d/vault.bin")),
-            PathBuf::from("/d/vault.bin.tmp")
-        );
+    }
+
+    #[test]
+    fn temp_names_are_fresh_siblings() {
+        let path = Path::new("/d/vault.bin");
+        let (a, b) = (temp_path(path).unwrap(), temp_path(path).unwrap());
+        assert_ne!(a, b);
+        let name = a.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("vault.bin.") && name.ends_with(".tmp"));
+        assert_eq!(name.len(), "vault.bin.".len() + 32 + ".tmp".len());
+        assert_eq!(a.parent(), Some(Path::new("/d")));
+        assert_eq!(sibling(path, ".lock"), PathBuf::from("/d/vault.bin.lock"));
+    }
+
+    /// Debug never waits on (or deadlocks against) a held state lock (M1).
+    #[test]
+    fn debug_never_blocks_on_the_state_lock() {
+        let v = FileVault::open(PathBuf::from("/nonexistent/vault.bin"));
+        let guard = v.state();
+        let shown = format!("{v:?}");
+        drop(guard);
+        assert!(shown.contains("busy"), "{shown}");
+        assert!(format!("{v:?}").contains("unlocked: false"));
     }
 }

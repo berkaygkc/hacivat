@@ -459,6 +459,19 @@ fn a_network_path_is_never_opened() {
         assert!(v.create(sec(MASTER)).is_err(), "{p}");
         assert!(v.unlock(sec(MASTER)).is_err(), "{p}");
         assert!(!v.is_unlocked(), "{p}");
+        assert!(v.get(&key()).unwrap().is_none(), "{p}");
+        assert!(v.put(&key(), &sec("x")).is_err(), "{p}");
+        assert!(v.reset().is_err(), "{p}");
+    }
+    // On Unix a backslash path is a relative file name: nothing (not even a lock file) was
+    // created for it in the working directory (fix round 1).
+    #[cfg(unix)]
+    for entry in std::fs::read_dir(".").unwrap() {
+        let name = entry.unwrap().file_name();
+        assert!(
+            !name.to_string_lossy().starts_with('\\'),
+            "created {name:?}"
+        );
     }
 }
 
@@ -472,7 +485,9 @@ fn a_symlink_at_the_vault_path_is_refused() {
     std::fs::write(&victim, b"untouched").unwrap();
     std::fs::remove_file(&path).unwrap();
     std::os::unix::fs::symlink(&victim, &path).unwrap();
-    assert_eq!(v.put(&key(), &sec("x")), Err(SecretError::VaultReadOnly));
+    // Fix round 1: every write re-reads the file under the lock first, and a link is not a
+    // vault file, so the write stops there (`VaultCorrupt`) without writing anything.
+    assert_eq!(v.put(&key(), &sec("x")), Err(SecretError::VaultCorrupt));
     assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
     assert!(
         std::fs::symlink_metadata(&path)
@@ -480,7 +495,7 @@ fn a_symlink_at_the_vault_path_is_refused() {
             .file_type()
             .is_symlink()
     );
-    assert_secret!(v.get(&key()).unwrap(), "s3cret");
+    assert!(v.get(&key()).is_err());
 
     // A link to a real vault is not read either.
     let (real, real_path) = created_with_secret();
@@ -528,4 +543,175 @@ fn a_failed_write_changes_nothing() {
     assert_eq!(put, Err(SecretError::VaultReadOnly));
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_secret!(v.get(&key()).unwrap(), "s3cret");
+}
+
+// ## m2b-t06-vault fix round 1 (I1, I2, M4): several instances on one vault file.
+
+/// Another instance on the same file (a second Hacivat process until M8's single-instance
+/// lock), unlocked.
+fn second_instance(path: &Path) -> FileVault {
+    let v = FileVault::with_params(path.to_path_buf(), fast());
+    v.unlock(sec(MASTER)).expect("the second instance unlocks");
+    v
+}
+
+/// A key of its own for every `n`.
+fn nth_key(n: u8) -> SecretKey {
+    SecretKey {
+        slot: SecretSlot::SshPassphrase { hop: n % 9 },
+        profile: format!("0b0f5a3c-2f7e-4a54-9d3b-6c1e8f2a7d{n:02x}")
+            .parse()
+            .expect("a valid UUID"),
+    }
+}
+
+/// Every temp file left next to the vault.
+fn temps_in(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect()
+}
+
+#[test]
+fn two_instances_interleaving_saves_keep_both_secrets() {
+    let (a, path) = created_with_secret();
+    let b = second_instance(&path);
+    a.put(&other_key(), &sec("from-a")).unwrap();
+    b.put(&nth_key(1), &sec("from-b")).unwrap();
+    a.put(&nth_key(2), &sec("from-a-again")).unwrap();
+    // Each instance sees the other's writes, and a fresh unlock sees all of them.
+    assert_secret!(a.get(&nth_key(1)).unwrap(), "from-b");
+    assert_secret!(b.get(&nth_key(2)).unwrap(), "from-a-again");
+    let fresh = second_instance(&path);
+    assert_secret!(fresh.get(&key()).unwrap(), "s3cret");
+    assert_secret!(fresh.get(&other_key()).unwrap(), "from-a");
+    assert_secret!(fresh.get(&nth_key(1)).unwrap(), "from-b");
+    assert_secret!(fresh.get(&nth_key(2)).unwrap(), "from-a-again");
+    // A delete in one instance is not undone by the other's next write.
+    b.delete(&other_key()).unwrap();
+    a.put(&nth_key(3), &sec("z")).unwrap();
+    assert!(second_instance(&path).get(&other_key()).unwrap().is_none());
+}
+
+#[test]
+fn a_reset_elsewhere_is_never_undone() {
+    let (a, path) = created_with_secret();
+    let b = second_instance(&path);
+    b.reset().unwrap();
+    b.create(sec("brand new horse")).unwrap();
+    b.put(&nth_key(1), &sec("new")).unwrap();
+    // A still holds the old key: its write must not bring the old vault back.
+    assert_eq!(
+        a.put(&other_key(), &sec("x")),
+        Err(SecretError::VaultLocked)
+    );
+    assert!(!a.is_unlocked());
+    assert!(matches!(a.get(&key()), Err(SecretError::VaultLocked)));
+    assert_eq!(a.unlock(sec(MASTER)), Err(SecretError::WrongMasterPassword));
+    let fresh = FileVault::with_params(path.clone(), fast());
+    fresh.unlock(sec("brand new horse")).unwrap();
+    assert_secret!(fresh.get(&nth_key(1)).unwrap(), "new");
+    assert!(fresh.get(&key()).unwrap().is_none());
+
+    // A reset with no new vault: the old instance holds nothing and writes nothing.
+    let (a, path) = created_with_secret();
+    second_instance(&path).reset().unwrap();
+    assert!(a.get(&key()).unwrap().is_none());
+    assert_eq!(a.put(&key(), &sec("x")), Err(SecretError::VaultLocked));
+    assert_eq!(a.delete(&key()), Ok(()));
+    assert!(!path.exists());
+}
+
+/// Two instances writing at once: no write fails on a temp-file collision, nothing is lost
+/// and no temp file survives.
+#[test]
+fn concurrent_writers_never_collide_or_lose_writes() {
+    let (a, path) = created_with_secret();
+    let b = second_instance(&path);
+    let per_writer = 25u8;
+    std::thread::scope(|s| {
+        for (offset, v) in [(0u8, &a), (100u8, &b)] {
+            s.spawn(move || {
+                for n in 0..per_writer {
+                    assert_eq!(v.put(&nth_key(offset + n), &sec("w")), Ok(()));
+                }
+            });
+        }
+    });
+    let fresh = second_instance(&path);
+    for n in (0..per_writer).chain(100..100 + per_writer) {
+        assert_secret!(fresh.get(&nth_key(n)).unwrap(), "w");
+    }
+    assert_secret!(fresh.get(&key()).unwrap(), "s3cret");
+    assert!(temps_in(path.parent().unwrap()).is_empty());
+}
+
+/// A healthy vault replaced atomically, by a writer that does not take the lock, is never
+/// reported `VaultCorrupt` (I1): every unlock succeeds.
+#[test]
+fn a_racing_replace_is_never_corrupt() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (v, path) = created_with_secret();
+    v.lock();
+    let bytes = std::fs::read(&path).unwrap();
+    let done = AtomicBool::new(false);
+    let scratch = path.with_file_name("racer");
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            while !done.load(Ordering::SeqCst) {
+                std::fs::write(&scratch, &bytes).unwrap();
+                std::fs::rename(&scratch, &path).unwrap();
+            }
+        });
+        let outcomes: Vec<_> = (0..300)
+            .map(|_| {
+                let unlocked = v.unlock(sec(MASTER));
+                v.lock();
+                unlocked
+            })
+            .collect();
+        done.store(true, Ordering::SeqCst);
+        assert!(!outcomes.contains(&Err(SecretError::VaultCorrupt)));
+        assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+    });
+}
+
+/// A vault that cannot be looked at (an unreadable directory) is an error, never "no vault":
+/// a locked vault's secret is never reported deleted or absent (M4).
+#[cfg(unix)]
+#[test]
+fn an_unreadable_directory_is_an_error_not_no_vault() {
+    use std::os::unix::fs::PermissionsExt;
+    let (v, path) = created_with_secret();
+    v.lock();
+    let dir = path.parent().unwrap().to_path_buf();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root ignores directory permissions: nothing to prove there.
+    let blind = std::fs::symlink_metadata(&path).is_err();
+    let get = v.get(&key()).map(|_| ());
+    let delete = v.delete(&key());
+    let exists = v.exists();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if !blind {
+        return;
+    }
+    assert_eq!(get, Err(SecretError::Denied));
+    assert_eq!(delete, Err(SecretError::Denied));
+    assert!(exists, "an unknown state is never \"no vault\"");
+    v.unlock(sec(MASTER)).unwrap();
+    assert_secret!(v.get(&key()).unwrap(), "s3cret");
+}
+
+/// Every write uses a temp file of its own, and none survives; the lock file is owner-only.
+#[test]
+fn temp_files_are_per_write_and_never_survive() {
+    let (v, path) = created_with_secret();
+    for n in 0..5 {
+        v.put(&nth_key(n), &sec("t")).unwrap();
+    }
+    assert!(temps_in(path.parent().unwrap()).is_empty());
+    #[cfg(unix)]
+    assert_eq!(mode_of(&path.with_file_name("vault.bin.lock")), 0o600);
 }
