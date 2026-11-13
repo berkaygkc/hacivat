@@ -1120,6 +1120,7 @@ fn vault_reset_escape_returns_to_unlock(cx: &mut TestAppContext) {
 }
 
 /// What the blocking pool said about resetting the vault, for the open unlock dialog.
+#[cfg(unix)]
 fn reset_probe(vcx: &VisualTestContext) -> Option<bool> {
     vcx.cx.read(|cx| parts::flag(cx, "vault-resettable"))
 }

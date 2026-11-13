@@ -260,8 +260,9 @@ async fn auth_failure_during_reconnect_stops_with_failed() {
     );
     connect_and_wait(&m).await;
     tokio::time::advance(secs(60)).await;
-    settle().await;
-    assert!(matches!(m.state(p().id), LiveState::Failed(_)));
+    // Wait on the state, not a fixed number of yields: the reconnect's failure lands on
+    // another worker, later on a slower runner (a CI flake on Linux).
+    wait_state(&m, |s| matches!(s, LiveState::Failed(_))).await;
     assert_eq!(f.connect_calls(), 2);
 }
 
