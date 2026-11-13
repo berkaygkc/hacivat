@@ -55,11 +55,14 @@
 //!   profile never loads without one of its pins. So does a malformed `[ssh]` table. An entry
 //!   with `transport = "ssh_tunnel"` and no `[ssh]` table loads with no hops, for Validate to
 //!   report. The hops of a saved profile are written into the existing hop tables in order,
-//!   keeping their unknown keys; any other transport drops the `[ssh]` table.
+//!   keeping their unknown keys; any other transport drops the `[ssh]` table. A hop's
+//!   `key_file` next to another `auth` is never used: it loads with `ValueIgnored`
+//!   (`ssh.hops.key_file`) and the next save drops it.
 //! - **SSH secrets.** Inside `[ssh]`, a key that names a secret (`password`, `passphrase`,
-//!   `client_secret`, ...: the shared rule, plus any key containing `secret`) is dropped and
-//!   reported like any other password key (`SecretKeyIgnored`). SSH passwords and passphrases
-//!   live in the secret store under `ssh_retention`, never here.
+//!   `client_secret`, `token`, `otp`, ...: the shared rule, plus any key containing `secret`,
+//!   `token`, `otp` or `answer`) is dropped and reported like any other password key
+//!   (`SecretKeyIgnored`). SSH passwords and passphrases live in the secret store under
+//!   `ssh_retention`, never here.
 //!
 //! - **Secrets.** A key that `hacivat_proto::is_secret_param` calls a password (`password`,
 //!   `pgpassword`, `sslpassword`, `db_password`, `--pwd`, ...; ASCII case ignored), at any
@@ -445,10 +448,15 @@ fn is_secret_pair(table: &dyn TableLike) -> bool {
 /// Which keys hold a secret at one level of the file.
 type SecretRule = fn(&str) -> bool;
 
-/// Inside the `[ssh]` table a key that names a secret (`client_secret`) counts as well (B30):
-/// nothing in it is ever a secret, so anything that looks like one was typed there by hand.
+/// Inside the `[ssh]` table a key that names a secret (`client_secret`) or a one-time answer
+/// (`token`, `otp`, `answer`) counts as well (B30; review M5): nothing in it is ever a secret,
+/// so anything that looks like one was typed there by hand.
 fn is_ssh_secret_key(key: &str) -> bool {
-    is_secret_key(key) || key.to_ascii_lowercase().contains("secret")
+    let folded = key.to_ascii_lowercase();
+    is_secret_key(key)
+        || ["secret", "token", "otp", "answer"]
+            .iter()
+            .any(|w| folded.contains(w))
 }
 
 /// The rule for the items under `key`: the `[ssh]` table's from there down.
@@ -609,7 +617,7 @@ fn opt_id<T>(
 }
 
 /// The profile of entry `t`, and the keys whose values were not understood and were ignored
-/// (`environment`, `env_source`; D-004).
+/// (`environment`, `env_source`; D-004; `ssh.hops.key_file`, M2b).
 fn read_entry(t: &Table) -> Read<(Profile, Vec<&'static str>)> {
     let mut ignored = Vec::new();
     let id: ProfileId = match opt_str(t, "id")? {
@@ -671,7 +679,7 @@ fn read_entry(t: &Table) -> Read<(Profile, Vec<&'static str>)> {
         auth: opt_id(t, "auth", AuthProviderId::from_id)?.unwrap_or(defaults.auth),
         retention: opt_id(t, "retention", Retention::from_id)?.unwrap_or(defaults.retention),
         tls: read_tls(t)?,
-        transport: read_transport(t)?,
+        transport: read_transport(t, &mut ignored)?,
         connect_timeout_s: opt_int(t, "connect_timeout_s", 0)?
             .unwrap_or(defaults.connect_timeout_s),
         keepalive_s: opt_int(t, "keepalive_s", 0)?,
@@ -830,7 +838,9 @@ fn sha256_hex(sha256: &[u8; 32]) -> String {
 }
 
 /// The `[ssh]` table of an SSH entry; none is a tunnel without hops (Validate reports it).
-fn read_ssh(item: Option<&Item>) -> Read<SshSpec> {
+/// A hop's `key_file` that its `auth` does not use is reported in `ignored`
+/// (`ssh.hops.key_file`): the next save drops it (T12 review M3).
+fn read_ssh(item: Option<&Item>, ignored: &mut Vec<&'static str>) -> Read<SshSpec> {
     let Some(item) = item else {
         return Ok(SshSpec::default());
     };
@@ -845,7 +855,7 @@ fn read_ssh(item: Option<&Item>) -> Read<SshSpec> {
         Some(item) => tables_of(item)
             .ok_or(Skip::Invalid("ssh.hops"))?
             .into_iter()
-            .map(read_hop)
+            .map(|t| read_hop(t, ignored))
             .collect::<Read<_>>()?,
     };
     Ok(SshSpec {
@@ -857,10 +867,18 @@ fn read_ssh(item: Option<&Item>) -> Read<SshSpec> {
 
 /// One hop. A missing host or user loads as blank (Validate reports it); a missing `auth` is
 /// the key file when one is named, else the agent.
-fn read_hop(t: &dyn TableLike) -> Read<HopSpec> {
+fn read_hop(t: &dyn TableLike, ignored: &mut Vec<&'static str>) -> Read<HopSpec> {
     let bad = |_| Skip::Invalid("ssh.hops");
     let key_file = opt_str(t, "key_file").map_err(bad)?.map(PathBuf::from);
-    let auth = match opt_str(t, "auth").map_err(bad)?.as_deref() {
+    let auth_id = opt_str(t, "auth").map_err(bad)?;
+    // ## m2b-t12-profiles (fix round 1, M3): a key file next to another method is never used.
+    if key_file.is_some()
+        && auth_id.as_deref().is_some_and(|a| a != "key_file")
+        && !ignored.contains(&"ssh.hops.key_file")
+    {
+        ignored.push("ssh.hops.key_file");
+    }
+    let auth = match auth_id.as_deref() {
         None if key_file.is_some() => SshAuth::KeyFile {
             path: key_file.unwrap_or_default(),
         },
@@ -900,7 +918,7 @@ fn read_hop(t: &dyn TableLike) -> Read<HopSpec> {
 /// A hop's default port.
 const SSH_PORT: u16 = 22;
 
-fn read_transport(t: &Table) -> Read<TransportSpec> {
+fn read_transport(t: &Table, ignored: &mut Vec<&'static str>) -> Read<TransportSpec> {
     match t.get("transport") {
         None => Ok(TransportSpec::Direct),
         Some(item) => {
@@ -908,7 +926,7 @@ fn read_transport(t: &Table) -> Read<TransportSpec> {
                 return match kind {
                     "direct" => Ok(TransportSpec::Direct),
                     // ## m2b-t12-profiles: the `[ssh]` table (B30).
-                    "ssh_tunnel" => Ok(TransportSpec::SshTunnel(read_ssh(t.get("ssh"))?)),
+                    "ssh_tunnel" => Ok(TransportSpec::SshTunnel(read_ssh(t.get("ssh"), ignored)?)),
                     _ => invalid("transport"),
                 };
             }

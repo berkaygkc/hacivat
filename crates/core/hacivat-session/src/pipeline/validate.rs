@@ -13,7 +13,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use hacivat_driver::url::FieldId;
 use hacivat_driver::{EngineCatalog, SanitizeInput, ViolationReason, sanitize};
-use hacivat_net::paths::fs_probe;
+use hacivat_net::paths::{fs_probe, local_path};
 use hacivat_net::ssh::{SshAuth, SshSpec};
 use hacivat_net::{AddressClass, TlsMode, TlsSetupError, build_tls_params};
 use hacivat_proto::{DbmsKind, Origin};
@@ -136,7 +136,8 @@ pub fn validate(p: &Profile, catalog: &EngineCatalog) -> Vec<ValidationIssue> {
 /// - The Karagöz transport cannot connect (R4, `TransportUnavailable`), and neither can an SSH
 ///   tunnel until the pipeline's SSH step exists (Task 14). An SSH tunnel needs at least one
 ///   hop and at most nine (`SshTooManyHops`: `MAX_SSH_HOP` is the last hop with a secret slot),
-///   each with a host and a user (`SshHostMissing`, `SshUserMissing`); a hop that signs in with
+///   each with a host and a user (`SshHostMissing`, `SshUserMissing`), a host as usable as the
+///   database host's (`HostInvalid`) and a port that is not 0 (`PortInvalid`); a hop that signs in with
 ///   a key file needs a path naming an existing file (`SshKeyFileMissing`). A key file or an
 ///   imported `IdentityFile` on a share or a device is `PathRefused`.
 /// - TLS: `VerifyCa` needs a CA file, for every engine (libpq parity: `verify-ca` without a
@@ -254,7 +255,8 @@ pub(crate) fn checked(
     // A TLS file on a share or a device is refused before anything opens, resolves or stats it
     // (N2): neither the TLS check below nor the roots check may touch it.
     let all_paths = tls_paths(p);
-    let tls_refused = all_paths.iter().any(|path| network_path(path));
+    // ## m2b-t12-profiles (fix round 1, M2): also once `~` is expanded, as the reader opens it.
+    let tls_refused = all_paths.iter().any(|path| local_path(path).is_none());
     if tls_refused {
         push(None, IssueCode::PathRefused);
     }
@@ -375,8 +377,17 @@ fn ssh_issues(
         push(None, IssueCode::SshTooManyHops);
     }
     for hop in &spec.hops {
-        if hop.host.trim().is_empty() {
+        // The database host's rules (fix round 1, I1): a hop host with credentials
+        // (`user:pw@host`), whitespace, a control character or URL syntax never reaches a
+        // resolver or russh, and port 0 is never dialled.
+        let host = hop.host.trim();
+        if host.is_empty() {
             push(None, IssueCode::SshHostMissing);
+        } else if host_invalid(host) {
+            push(None, IssueCode::HostInvalid);
+        }
+        if hop.port == 0 {
+            push(None, IssueCode::PortInvalid);
         }
         if hop.user.trim().is_empty() {
             push(None, IssueCode::SshUserMissing);
@@ -391,38 +402,34 @@ fn ssh_issues(
         if hop
             .identity_files
             .iter()
-            .any(|file| network_path(file) || outside(file))
+            .any(|file| local_path(file).is_none() || outside(file))
         {
             push(None, IssueCode::PathRefused);
         }
     }
 }
 
-/// The issue of a hop's key file, if any: none set, on a share or a device, outside the roots,
-/// or not naming an existing file (a relative path names none: the tunnel has no folder to
-/// read it from).
+/// The issue of a hop's key file, if any: none set, on a share or a device (as typed or once
+/// `~` is expanded) or `~` without a home folder, outside the roots, or not naming an existing
+/// file (a relative path names none: the tunnel has no folder to read it from). The file
+/// checked is `hacivat_net::paths::local_path(path)`, the one the tunnel must open (Task 14).
 fn ssh_key_issue(path: &Path, outside: &dyn Fn(&Path) -> bool) -> Option<IssueCode> {
     if path.as_os_str().is_empty() {
         return Some(IssueCode::SshKeyFileMissing);
     }
-    if network_path(path) || outside(path) {
+    let Some(full) = local_path(path) else {
+        return Some(IssueCode::PathRefused);
+    };
+    if outside(path) {
         return Some(IssueCode::PathRefused);
     }
-    let Some(full) = expand_home(path).filter(|p| p.is_absolute()) else {
+    if !full.is_absolute() {
         return Some(IssueCode::SshKeyFileMissing);
-    };
+    }
     fs_probe::note(&full);
     match std::fs::metadata(&full) {
         Ok(meta) if meta.is_file() => None,
         _ => Some(IssueCode::SshKeyFileMissing),
-    }
-}
-
-/// `path` with a leading `~` component read as the home directory; `None` when there is none.
-fn expand_home(path: &Path) -> Option<PathBuf> {
-    match path.strip_prefix("~") {
-        Ok(rest) => Some(std::env::home_dir()?.join(rest)),
-        Err(_) => Some(path.to_path_buf()),
     }
 }
 
@@ -437,11 +444,9 @@ fn inside_roots(path: &Path, roots: &[PathBuf]) -> bool {
 /// typed or canonical, a relative path, a dangling symlink (what it names may lie anywhere,
 /// and SQLite would create the file there), a missing folder, or an I/O error.
 fn canonical(path: &Path) -> Option<PathBuf> {
-    // Before any file system call (N2).
-    if network_path(path) {
-        return None;
-    }
-    let path = expand_home(path)?;
+    // Before any file system call (N2), on the typed and the `~`-expanded path (M2): the same
+    // expansion the readers use (M1).
+    let path = local_path(path)?;
     if !path.is_absolute() {
         return None;
     }

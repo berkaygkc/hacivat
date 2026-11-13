@@ -255,6 +255,9 @@ fn unknown_ssh_keys_preserved_and_typed_password_ignored() {
         "secret",
         "Key_Passphrase",
         "client_secret",
+        "token",
+        "otp",
+        "kbd_answer",
     ] {
         let r = load_report(&entry(&format!(
             "transport = \"ssh_tunnel\"\n\n[connection.ssh]\nfuture = 1\n{secret} = \"hv_test_pw\"\n\n\
@@ -298,6 +301,38 @@ fn ssh_transport_without_table_loads_and_validate_reports() {
         IssueCode::SshKeyFileMissing,
     ] {
         assert!(found.contains(&code), "{code:?}: {found:?}");
+    }
+}
+
+/// Fix round 1, M3: a `key_file` next to another method is never used; it loads with a notice
+/// and the save that drops it is no surprise.
+#[test]
+fn an_unused_key_file_is_reported_then_dropped() {
+    let hop_with = |auth: &str| {
+        entry(&format!(
+            "transport = \"ssh_tunnel\"\n[[connection.ssh.hops]]\nhost = \"b\"\nuser = \"u\"\n\
+             {auth}key_file = \"/k/id_ed25519\"\n"
+        ))
+    };
+    let ignored = |r: &Report| {
+        r.diags()
+            .iter()
+            .any(|d| matches!(d, ProfileDiag::ValueIgnored { index: 0, key } if key == "ssh.hops.key_file"))
+    };
+    for auth in ["agent", "password", "keyboard_interactive"] {
+        let r = load_report(&hop_with(&format!("auth = \"{auth}\"\n")));
+        assert!(ignored(&r), "{auth}: {:?}", r.diags());
+        assert!(!resave_report(&r).contains("key_file"), "{auth}");
+    }
+    // Used: no notice, and the key file stays.
+    for auth in ["auth = \"key_file\"\n", ""] {
+        let r = load_report(&hop_with(auth));
+        assert!(!ignored(&r), "{auth:?}: {:?}", r.diags());
+        let TransportSpec::SshTunnel(spec) = &r.loaded.profiles[0].transport else {
+            panic!("ssh")
+        };
+        assert_eq!(spec.hops[0].auth, key_file("/k/id_ed25519"));
+        assert!(resave_report(&r).contains("key_file = \"/k/id_ed25519\""));
     }
 }
 

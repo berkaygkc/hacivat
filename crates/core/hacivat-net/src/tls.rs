@@ -810,11 +810,12 @@ struct CaFile {
 fn read_ca_file(path: &Path) -> Result<CaFile, TlsSetupError> {
     let unreadable = || TlsSetupError::CaFileUnreadable(path.to_path_buf());
     // A share or a device is never opened (N2): reading it could send credentials.
-    if crate::paths::is_network_path(path) {
+    // ## m2b-t12-profiles: `local_path` also expands `~`, exactly as Validate checked it.
+    let Some(local) = crate::paths::local_path(path) else {
         return Err(unreadable());
-    }
-    crate::paths::fs_probe::note(path);
-    let bytes = std::fs::read(path).map_err(|_| unreadable())?;
+    };
+    crate::paths::fs_probe::note(&local);
+    let bytes = std::fs::read(&local).map_err(|_| unreadable())?;
     let certs = parse_certs(&bytes).ok_or_else(unreadable)?;
     let mut store = RootCertStore::empty();
     let (added, _ignored) = store.add_parsable_certificates(certs.iter().cloned());
@@ -861,17 +862,18 @@ fn read_client_cert(
     let cert_err = || TlsSetupError::CertFileUnreadable(paths.cert.clone());
     let key_err = || TlsSetupError::KeyUnreadable(paths.key.clone());
     // A share or a device is never opened (N2): reading it could send credentials.
-    if crate::paths::is_network_path(&paths.cert) {
+    // ## m2b-t12-profiles: `local_path` also expands `~`, exactly as Validate checked it.
+    let Some(cert) = crate::paths::local_path(&paths.cert) else {
         return Err(cert_err());
-    }
-    if crate::paths::is_network_path(&paths.key) {
+    };
+    let Some(key) = crate::paths::local_path(&paths.key) else {
         return Err(key_err());
-    }
-    crate::paths::fs_probe::note(&paths.cert);
-    let cert_bytes = std::fs::read(&paths.cert).map_err(|_| cert_err())?;
+    };
+    crate::paths::fs_probe::note(&cert);
+    let cert_bytes = std::fs::read(&cert).map_err(|_| cert_err())?;
     let chain = parse_certs(&cert_bytes).ok_or_else(cert_err)?;
-    crate::paths::fs_probe::note(&paths.key);
-    let key_bytes = std::fs::read(&paths.key).map_err(|_| key_err())?;
+    crate::paths::fs_probe::note(&key);
+    let key_bytes = std::fs::read(&key).map_err(|_| key_err())?;
     // ## m2b-t03-tls-pins: every copy of the key's DER is zeroized once ring has loaded it
     // (`Zeroizing`, or pkcs8's `SecretDocument` for a decrypted key, borrowed, never copied).
     let key_bytes = Zeroizing::new(key_bytes);

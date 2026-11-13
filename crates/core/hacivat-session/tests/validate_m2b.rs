@@ -142,6 +142,83 @@ fn ssh_issues() {
     }
 }
 
+/// Fix round 1, I1: a hop's host and port take the database host's rules, shown next to
+/// (not hidden by) `TransportUnavailable`.
+#[test]
+fn hop_hosts_and_ports_take_the_database_host_rules() {
+    for bad in [
+        "u:hv_pw@bastion",
+        "b c",
+        "b\u{7}x",
+        "b/x",
+        "b?x",
+        "b#x",
+        r"b\x",
+    ] {
+        let found = codes(&ssh_profile(vec![hop(bad, "u", SshAuth::Agent)]));
+        assert!(
+            found.contains(&IssueCode::HostInvalid),
+            "{bad:?}: {found:?}"
+        );
+        assert!(found.contains(&IssueCode::TransportUnavailable), "{bad:?}");
+        assert!(!found.contains(&IssueCode::SshHostMissing), "{bad:?}");
+    }
+    let port_zero = HopSpec {
+        port: 0,
+        ..hop("bastion", "u", SshAuth::Agent)
+    };
+    let found = codes(&ssh_profile(vec![port_zero]));
+    assert!(found.contains(&IssueCode::PortInvalid), "{found:?}");
+    assert!(found.contains(&IssueCode::TransportUnavailable));
+    // One bad hop among good ones is still found.
+    let found = codes(&ssh_profile(vec![
+        hop("jump.acme.io", "u", SshAuth::Agent),
+        hop("u:hv_pw@bastion", "u", SshAuth::Agent),
+    ]));
+    assert!(found.contains(&IssueCode::HostInvalid), "{found:?}");
+    // Valid hops: no false positives.
+    for good in ["bastion.acme.io", "10.0.0.1", "[::1]", "::1", " bastion "] {
+        let p = ssh_profile(vec![
+            HopSpec {
+                port: 2222,
+                ..hop(good, "u", SshAuth::Agent)
+            },
+            hop("b2", "u", SshAuth::Password),
+        ]);
+        assert_eq!(codes(&p), [IssueCode::TransportUnavailable], "{good:?}");
+    }
+}
+
+/// Fix round 1, M1: a `~` path is read where Validate checked it (`local_path`), never as a
+/// folder named `~` under the working directory.
+#[test]
+fn tilde_paths_are_checked_and_read_as_the_home_folder() {
+    use hacivat_net::paths::fs_probe;
+    let Some(home) = std::env::home_dir() else {
+        return;
+    };
+    fs_probe::enable();
+    let ca = "hv-t12-tilde-probe-missing-ca.pem";
+    let key = "hv-t12-tilde-probe-missing-key";
+    let mut p = pg_profile(TlsMode::VerifyFull);
+    p.tls.ca_file = Some(Path::new("~").join(ca));
+    assert!(codes(&p).contains(&IssueCode::TlsCaUnreadable));
+    let p = ssh_profile(vec![hop(
+        "b",
+        "u",
+        key_file(Path::new("~").join(key).to_str().unwrap()),
+    )]);
+    assert!(codes(&p).contains(&IssueCode::SshKeyFileMissing));
+    let touched = fs_probe::touched();
+    for name in [ca, key] {
+        assert!(touched.contains(&home.join(name)), "{name}: {touched:?}");
+        assert!(
+            !touched.iter().any(|t| t.starts_with("~")),
+            "a literal ~ path was touched: {touched:?}"
+        );
+    }
+}
+
 #[test]
 fn ssh_key_file_must_name_an_existing_file() {
     let dir = tempdir();

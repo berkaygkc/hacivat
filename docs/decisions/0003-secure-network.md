@@ -448,3 +448,12 @@ the vault, the session overlay, the keyring CI and the deferrals.
   `TransportUnavailable` (one marked line in `validate.rs`) besides its hop issues, because
   until Task 14's transport step the pipeline would reach the database directly. Task 14
   removes that line.
+- **Fix round 1.** A hop's host takes the database host's rules (`HostInvalid` for
+  credentials such as `user:pw@host`, whitespace, control characters or URL syntax) and port 0
+  is `PortInvalid`, so removing that line never lets a malformed hop reach a resolver. `~` is
+  expanded by one function, `hacivat_net::paths::local_path`, which both Validate's roots check
+  and the TLS readers use (Task 14's tunnel must use it for key files), so the checked file is
+  the opened file; it also refuses a share or device once `~` is expanded (a home folder on a
+  share) before any file system call. Inside `[ssh]`, keys containing `token`, `otp` or
+  `answer` are dropped as secrets too. A hop `key_file` next to another `auth` loads with
+  `ValueIgnored` before the next save drops it.
