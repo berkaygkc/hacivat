@@ -87,13 +87,17 @@ postgres://hv_test:hv_test_pw@localhost:54317/orders?sslmode=prefer&application_
 - Alanlar dolar ve dolan alanlar renk tonuyla işaretlenir (tint).
 - Bildirim tam olarak **beş satır** listeler (P37): doldurulan alanlar, parola, `sslmode`,
   `application_name`, `foo`.
+- Yapıştırılan URL içe aktarılmış sayılır (I5); `foo` PostgreSQL seçeneği olmadığı için
+  alınmaz. Son satır tam olarak şudur: `foo=bar isn't a connection option for PostgreSQL, so it
+  was left out`. Gelişmiş (Advanced) bölümüne ek özellik satırı eklenmez; bu yüzden adım 3'te
+  kaydetme engellenmez.
 - Geri Al (Undo) yapıştırmayı geri alır. Sonra tekrar yapıştırın, aynı sonuç gelir.
 - Parola alanı noktalarla maskelidir; URL satırında parola `****` görünür, gerçek parola hiçbir
   yerde düz metin olarak görünmez.
 
 **Ön doğrulama:** `paste_url_into_host_fills_tints_and_explains`, `paste_into_password_field_is_literal`,
-`url_row_mirrors_and_masks`, `a_pasted_password_never_reaches_the_url_row_or_the_clipboard`
-(connection_dialog).
+`url_row_mirrors_and_masks`, `a_pasted_password_never_reaches_the_url_row_or_the_clipboard`,
+`a_pasted_parameter_the_import_rule_refuses_is_left_out_and_said_so` (connection_dialog).
 
 ## 3. Kaydet ve bağlan (yerel)
 
@@ -108,8 +112,8 @@ postgres://hv_test:hv_test_pw@localhost:54317/orders?sslmode=prefer&application_
 - "unencrypted" parçasına tıklamak açıklama balonunu (popover) açar.
 - Gezgindeki satır bağlı işaretini ve gecikmeyi gösterir.
 
-**Ön doğrulama:** `save_local_profile_without_prompt`, `save_and_connect_saves_then_connects`
-(connection_dialog); `capsule_and_status_follow_the_current_connection`,
+**Ön doğrulama:** `save_local_profile_without_prompt`, `save_and_connect_saves_then_connects`,
+`a_pasted_parameter_the_import_rule_refuses_is_left_out_and_said_so` (connection_dialog); `capsule_and_status_follow_the_current_connection`,
 `unencrypted_segment_opens_explanation`, `the_explanation_has_a_keyboard_path` (connections_live).
 
 ## 4. Uzak ana bilgisayar ve üretim istemi
