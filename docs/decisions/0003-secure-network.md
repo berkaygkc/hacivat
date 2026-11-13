@@ -607,3 +607,35 @@ the vault, the session overlay, the keyring CI and the deferrals.
 - **Cancel keys stay encrypted (B23).** A cancel request travels over the session's own
   transport with its TLS configuration; a TLS session's cancel is never sent in plaintext,
   even when the server answers its `SSLRequest` with `N`.
+
+## m2b-t15 — session overlay
+
+- **What is kept (Q17).** Each profile's `SessionManager` keeps one in-memory overlay while the
+  profile is connected: the profile with every `ProfileChange` of its successful connects
+  applied (a pin, a CA file, the remembered public-plaintext answer), the one-gesture plaintext
+  consent, and the `SessionSecrets` that worked (database password, SSH hop passwords and
+  passphrases, TLS key passphrase). The secrets live only in `SecretString` buffers, which
+  zeroize on drop. They are taken out of the `LiveConnection` (`mem::take`) as the connect
+  lands, so the session actor's connection does not hold a second copy.
+- **Accepted cost.** A secret with retention `Never` (or a passphrase typed once) stays in
+  memory for as long as the profile is connected, not only for the connect that used it. That
+  is what lets a reconnect (Task 17), a pooled introspection session or a cancel's side
+  connection connect headless without asking again.
+- **Where it goes.** Every later connect of the same profile passes the overlay as
+  `ConnectRequest { profile, overlay_secrets, plaintext_consent }`: sessions, pooled sessions,
+  side connections (`Department::Cancel`, outside the budget, headless), and Task 17's
+  reconnects, which read `SessionManager::overlay()`. Each connect gets its own copy, which
+  zeroizes when the connect ends. Nothing else reads it: no file, no log, no event.
+- **When it goes.** `close_all` (disconnect, `forget`, quit) drops it. It also cancels every
+  connect still in flight and bumps an epoch: a connect that lands after `close_all` is closed
+  and registers neither a session nor an overlay, so a secret cannot come back after
+  disconnect through a late connect. It is never persisted.
+- **`update_profile`** replaces the overlay's profile and keeps the consent and secrets, as the
+  plan says, but only while the profile still names the same destination (id, engine,
+  endpoint, user, auth provider, transport and client certificate). An edit that points the
+  profile elsewhere drops the secrets and the consent, so a password typed for one server is
+  never sent to another. The next connect then asks, or a headless reconnect stops with
+  `needs_interaction`, as the plan's recovery rule already handles.
+- **Debug.** `SessionOverlay` derives `Debug`, and every secret in it is a `SecretString`, which
+  prints redacted. `SessionManager`'s `Debug` shows only whether an overlay exists. Neither
+  type derives `PartialEq`.
