@@ -142,8 +142,8 @@ fn ssh_issues() {
     }
 }
 
-/// Fix round 1, I1: a hop's host and port take the database host's rules, shown next to
-/// (not hidden by) `TransportUnavailable`.
+/// Fix round 1, I1: a hop's host and port take the database host's rules. (m2b-t14-pipeline,
+/// named exception: an SSH tunnel is no longer `TransportUnavailable`; the SSH step exists.)
 #[test]
 fn hop_hosts_and_ports_take_the_database_host_rules() {
     for bad in [
@@ -160,7 +160,7 @@ fn hop_hosts_and_ports_take_the_database_host_rules() {
             found.contains(&IssueCode::HostInvalid),
             "{bad:?}: {found:?}"
         );
-        assert!(found.contains(&IssueCode::TransportUnavailable), "{bad:?}");
+        assert!(!found.contains(&IssueCode::TransportUnavailable), "{bad:?}");
         assert!(!found.contains(&IssueCode::SshHostMissing), "{bad:?}");
     }
     let port_zero = HopSpec {
@@ -169,7 +169,7 @@ fn hop_hosts_and_ports_take_the_database_host_rules() {
     };
     let found = codes(&ssh_profile(vec![port_zero]));
     assert!(found.contains(&IssueCode::PortInvalid), "{found:?}");
-    assert!(found.contains(&IssueCode::TransportUnavailable));
+    assert!(!found.contains(&IssueCode::TransportUnavailable));
     // One bad hop among good ones is still found.
     let found = codes(&ssh_profile(vec![
         hop("jump.acme.io", "u", SshAuth::Agent),
@@ -185,7 +185,7 @@ fn hop_hosts_and_ports_take_the_database_host_rules() {
             },
             hop("b2", "u", SshAuth::Password),
         ]);
-        assert_eq!(codes(&p), [IssueCode::TransportUnavailable], "{good:?}");
+        assert!(codes(&p).is_empty(), "{good:?}");
     }
 }
 
