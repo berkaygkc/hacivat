@@ -591,3 +591,19 @@ the vault, the session overlay, the keyring CI and the deferrals.
   counts the relays still open. `TestAgent` speaks the agent protocol's identity and sign requests itself:
   russh's agent server takes a `futures::Stream` and the testkit has no `futures` dependency
   (Task 1 owns the manifests). Ed25519 and ECDSA keys sign; RSA keys refuse.
+
+## m2b-t10 — PostgreSQL insecure-auth guard, channel binding and cancel transport
+
+- **The insecure-auth guard is enforced on the wire (B8, Q20).** The PostgreSQL driver refuses
+  `AuthenticationCleartextPassword` and `AuthenticationMD5Password` before `tokio-postgres`
+  can answer them, unless `InsecureAuth::Allow` or the handshake's recorded outcome is `Full`,
+  `CaOnly` or `Pinned`. It is outcome-based: Require with a pin is allowed, Require without one
+  is not. Details, including why the refused bytes never reach the library, are in ADR 0002
+  `m2b-t10`.
+- **Channel binding (B9).** SCRAM binds to `tls-server-end-point` when the server offers
+  `SCRAM-SHA-256-PLUS`, so a man in the middle that terminates TLS with another certificate
+  cannot relay a SCRAM exchange. Without a binding hash (Ed25519 leaves) SCRAM runs unbound,
+  as libpq does with `channel_binding=prefer`.
+- **Cancel keys stay encrypted (B23).** A cancel request travels over the session's own
+  transport with its TLS configuration; a TLS session's cancel is never sent in plaintext,
+  even when the server answers its `SSLRequest` with `N`.

@@ -543,3 +543,132 @@ database itself, so a side file elsewhere would fail them.
 - Statements that never ask the authorizer: `VACUUM` and `VACUUM INTO` (refused by
   `readonly-required`), and `VACUUM temp`, which SQLite skips (`vacuum.c` ignores the temp
   schema) and which is read-only to `sqlite3_stmt_readonly`: a harmless no-op.
+
+## m2b-t10 — hacivat-driver-pg
+
+- **Wire observer (`wire::Observer`, Q11, Q12).** `tokio-postgres` keeps the backend PID
+  private (`CancelToken.process_id` is `pub(crate)`), returns at an `ErrorResponse` before
+  the `ReadyForQuery` that follows, and exposes no command tag text. A thin stream wrapper reads
+  the protocol as it passes instead of forking the library. It frames backend messages (type
+  byte, big-endian `i32` length counting itself; below 4 or above 1 GiB is `InvalidData`),
+  skips bodies by count and copies only the first bytes of `R` (4), `K` (4), `Z` (1) and `C`
+  (64) into fixed buffers: no allocation per message, so a large `DataRow` or `CopyData` can
+  neither desync it nor cost memory.
+  - **Layering.** `Disable`: one observer, framed from the first byte. With an `SSLRequest`
+    the raw observer reads only the one-byte answer: after `S` it passes the TLS records
+    through untouched, and `PgTlsStream` puts a second, framed observer above rustls, so every
+    `R`, `K`, `Z` and `C` is read **decrypted**; after `N` (`prefer`) the raw observer frames
+    the plaintext itself. Both share one `WireState` (`Arc`).
+  - **PID.** `BackendKeyData` after `AuthenticationOk` and before the first `ReadyForQuery`;
+    `backend_id()` reads it.
+  - **Transaction status, exactly (Q12).** Every `ReadyForQuery` after `AuthenticationOk`
+    records its status byte (`I`/`T`/`E`; anything else is `InvalidData`) and advances a
+    counter with a `tokio::sync::Notify`. The plan's "wait until the count advances" is not
+    exact for the extended protocol: a successful `Parse`/`Sync` round already advanced it
+    before the failing `Bind`/`Execute`/`Sync`, and a dropped statement's `Close`/`Sync` adds
+    one more. So the observer also frames the **frontend** side after `AuthenticationOk` (the
+    startup messages carry no type byte, and nothing is written between `AuthenticationOk` and
+    the first request, so framing starts on a boundary) and counts every `Query`, `Sync` and
+    `FunctionCall`, each of which draws exactly one `ReadyForQuery`. After an error,
+    `execute`, `batch` and `reset` wait (at most 1 s, or until the connection ends) until
+    every one is answered. When all have arrived, `tx_status()` is exact without a sleep.
+    *Fix round 1 (I2):* when the bound expires first (a late segment on a slow tunnel), the
+    status is unknown, so the connection is **broken**: the error becomes a lost connection
+    (`Io(TimedOut)`, the server's message kept), the connection task is aborted, every later
+    call fails with `Io(NotConnected)`, and `tx_status()` reads `Failed`, never the stale
+    status. The session reconnects; a rollback that was not needed is harmless.
+  - **Command tag.** The last `CommandComplete` text (cleared before each request) is
+    `ExecSummary::command_tag`, which the read-only post-check reads (`INSERT 0 3`,
+    `CREATE TABLE`); `rows_affected` is its count (`RowStream::rows_affected`, or the simple
+    protocol's `CommandComplete`).
+- **Insecure-auth guard (B8, Q20).** An `AuthenticationCleartextPassword` (code 3) or
+  `AuthenticationMD5Password` (code 5) under `InsecureAuth::RefuseUnlessVerified`, when the TLS
+  outcome is not `Full`, `CaOnly` or `Pinned`, fails the read with an `io::Error` wrapping
+  `InsecureAuthRefusedMarker`, mapped to `RawErrorKind::InsecureAuthRefused`. The refused bytes
+  are removed from the read buffer, so `tokio-postgres` never holds a complete request and
+  never writes a password response, whether the request arrives whole or a byte at a time. The
+  outcome is captured from `TlsParams.outcome` right after this connection's handshake (a later
+  handshake on the same configuration, such as a cancel, cannot change it). The check runs on
+  every `R` message, also after `AuthenticationOk` (a legitimate server never sends one there).
+  It also runs when the profile has no password: the refusal comes before
+  `PasswordRequired`, so nobody is asked for a password that could not be sent. SCRAM (code 10)
+  always passes: it never reveals the password.
+- **Channel binding (B9).** `PgTlsStream::channel_binding()` returns `tls-server-end-point`
+  (`hacivat_net::tls_server_end_point` of the rustls session's `peer_certificates()[0]`), so
+  SCRAM runs as `SCRAM-SHA-256-PLUS` when the server offers it (`channel_binding=prefer`, the
+  `tokio-postgres` default); a leaf without an end-point hash (Ed25519, unknown algorithms)
+  offers none. A scripted server and the `pg17-tls` target with `channel_binding=require`
+  verify it.
+- **Execution.** `Protocol::Simple` streams `simple_query_raw`: the last statement's rows as
+  text, `max_rows` kept and the rest counted (`truncated`), never buffered beyond the cap.
+  `Protocol::Extended` prepares the one statement (several are `42601` from the server),
+  takes the column names from the statement, runs it with no parameters and counts the rows
+  without keeping them. `batch` is `batch_execute`. The command tag, rows and columns of a
+  multi-statement simple query are the **last** statement's, so `INSERT …; SELECT 1` reads as
+  `SELECT 1`: a caller that decides from the tag (Task 18's read-only post-check) must run
+  user statements one at a time through `Protocol::Extended` (review M2). *Fix round 1 (I3):*
+  cells are read with `try_get`; a cell that is not UTF-8 (a `SQL_ASCII` database sends stored
+  bytes unconverted) fails the statement with `RawErrorKind::Other` instead of panicking, and
+  the connection stays in step.
+- **COPY FROM STDIN (fix round 1, I1).** `tokio-postgres` fails a request that meets a
+  `CopyInResponse` or `CopyBothResponse` (`unexpected message`), while the server waits in
+  copy-in mode: no `ReadyForQuery` would come, `tx_status()` would read the old status and the
+  next request's reply would be matched to the stuck one. The observer therefore answers `G`
+  and `W` (after authentication) itself with `CopyFail("COPY FROM STDIN is not supported
+  yet")`, plus a `Sync` when the last statement-running message was an extended `Execute`
+  (the server ignores the `Sync` already sent during copy-in and then discards until the next
+  one; it is not counted, so the single `ReadyForQuery` settles the one counted `Sync`). The
+  bytes go out only on a frontend message boundary: a message `tokio-postgres` is writing is
+  finished first. The server ends the copy with `ErrorResponse` and one `ReadyForQuery`, which
+  completes the failed request inside `tokio-postgres` too; the call returns
+  `RawErrorKind::Unsupported`, and the status is exact (`Failed` inside `BEGIN`, `Idle` in
+  autocommit). Simple, extended and `batch` paths are Docker-tested; `COPY … TO STDOUT` ends
+  with its own `ReadyForQuery` and is left alone. The driver never uses `Client::copy_in`;
+  it must not while the observer refuses copy-in.
+- **Notices (Q12).** The connection is driven with `poll_fn(|cx| connection.poll_message(cx))`
+  instead of `connection.await` (which logged notice text at `info` and dropped it). Notice
+  SQLSTATEs go into a per-connection buffer of 100 (the oldest dropped first), drained before
+  and after each `execute`; the text is never logged or kept. Notifications are dropped.
+- **Reset (Q10).** `CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *;
+  SELECT pg_advisory_unlock_all(); DISCARD PLANS; DISCARD TEMP; DISCARD SEQUENCES;`, then
+  `SELECT name FROM pg_prepared_statements WHERE from_sql` and one `DEALLOCATE "<name>"`
+  (quoted identifier, `"` doubled) per row. No path sends `DEALLOCATE ALL`: a statement named
+  `ALL` is `DEALLOCATE "ALL"`. `DEALLOCATE ALL` would drop `tokio-postgres`'s cached type-lookup
+  statements and break the next extended query on an enum column (`26000`; Docker-tested).
+  `RESET ALL` returns to the startup values, so the read-only `-c
+  default_transaction_read_only=on` survives a reset (Docker-tested).
+- **Cancel (B23).** `cancel_handle()` returns `PgCancel { token, factory, tls }`: a new stream
+  from the connection's own `StreamFactory` (direct, tunnel or proxy alike) and
+  `CancelToken::cancel_query_raw` over our connector with the connection's `sslmode` and rustls
+  configuration (verifier, pins, CA, client certificate), bounded at 10 s. **A session that ran
+  over TLS never cancels in plaintext:** under `prefer`, a server (or a man in the middle)
+  answering the cancel's `SSLRequest` with `N` fails the request before the PID and secret
+  key are written (`TlsRefusedMarker`, `TlsNotOffered`). The cancel's handshake gets its own
+  failure slot; it runs the same verifier, whose `presented`/`outcome` slots are the
+  connection's (nothing reads them after the connect, and the observer captured the outcome
+  already).
+  - *Fix round 1 (review M1), not closed here.* "One `TlsParams` per handshake" would need
+    a fresh verifier with its own slots. That verifier lives in `hacivat-net` (`Recording`,
+    private) and is built only by `build_tls_params`, which needs the pin endpoint's port and
+    the client key's passphrase; the driver has neither (the endpoint carries no port behind a
+    tunnel, and holding the passphrase in a cancel handle would retain a secret). The residual
+    risk is fail-closed: every handshake through one configuration writes either nothing or
+    the same verified level, so a cancel racing a reconnect that shares the `TlsParams` can
+    only clear `outcome` (the guard then refuses an insecure method once), never raise it. The
+    pipeline (Task 14/17) must build a new `TlsParams` per connect attempt and never reuse one
+    a live cancel handle holds; a `TlsParams::fork()` in `hacivat-net` (same verifier
+    settings, new slots) would let the cancel build its own.
+  - **The cancel race is inherent (review M5).** `cancel()` returning `Ok` means only that the
+    request was written; the server signals the backend asynchronously, and the statement may
+    already have ended (libpq behaves the same). Task 7's sequence guard covers the session
+    side; ADR 0004 is the place for the session's rule.
+  - **Poolers (review M7).** Behind PgBouncer and similar, `BackendKeyData` carries the
+    pooler's key, so `backend_id()` is not a server PID: an escalation that terminates a
+    backend by this PID (Task 7/17) must check `pg_backend_pid()` first or not run through a
+    pooler.
+- **TLS summary.** `verified` is now the handshake's own outcome (a pinned `Require` reads
+  `Pinned`), falling back to the mode's level only when none was recorded.
+- **Known effect until Task 14.** The pipeline's `insecure_auth_for` is still Task 1's
+  fail-closed stub (`RefuseUnlessVerified` everywhere), so an md5 server reached through the
+  pipeline (`pg13` in the Docker matrix, loopback) is refused with `auth.insecure_method` until
+  Task 14 allows loopback, Unix sockets, `Disable` and consented plaintext (B8).
