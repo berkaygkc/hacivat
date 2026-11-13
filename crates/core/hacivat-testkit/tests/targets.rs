@@ -60,13 +60,15 @@ fn compose_services() -> BTreeMap<String, Service> {
 fn targets_and_compose_agree() {
     let compose = compose_services();
     let targets = all_targets_unfiltered();
-    // One service per database target, per SSH bastion, and the key generator.
+    // One service per database target, per SSH bastion, and the two generators: the SSH keys
+    // and (## m2b-fix-f2-x509) mysql84-x509's certificates.
     assert_eq!(
-        targets.len() + ssh_targets_in_set(None).len() + 1,
+        targets.len() + ssh_targets_in_set(None).len() + 2,
         compose.len(),
         "one target per compose service"
     );
     assert!(compose.contains_key("ssh-client-keys"));
+    assert!(compose.contains_key("mysql-x509-certs"));
     for t in targets {
         let s = compose
             .get(&t.id)
@@ -184,7 +186,8 @@ fn full_set_is_every_target() {
     let mut sorted = all.clone();
     sorted.sort();
     assert_eq!(ids_in_set("full"), sorted);
-    assert_eq!(all.len(), 14);
+    // ## m2b-fix-f2-x509: mysql84-x509 is the fifteenth.
+    assert_eq!(all.len(), 15);
 }
 
 #[test]
@@ -200,7 +203,7 @@ fn set_filter_and_engine_filter_combine() {
         .collect();
     assert_eq!(full_maria, ["mariadb106", "mariadb1011", "mariadb114"]);
     // No set selected: every target.
-    assert_eq!(targets_in_set(None, None).len(), 14);
+    assert_eq!(targets_in_set(None, None).len(), 15);
     assert!(targets_in_set(Some("nightly"), None).is_empty());
 }
 

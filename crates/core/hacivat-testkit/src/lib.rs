@@ -343,3 +343,9 @@ pub fn ssh_client_key_in(dir: Option<&str>, encrypted: bool) -> PathBuf {
 pub fn ssh_host_pub(id: &str) -> PathBuf {
     artifact(&format!("ssh-host-{id}.pub"))
 }
+
+// ## m2b-fix-f2-x509
+
+/// The passphrase of `mysql-x509-client-key-enc.pem`, the encrypted client key the
+/// `mysql-x509-certs` service writes for `mysql84-x509` (throwaway, like [`PASSWORD`]).
+pub const MYSQL_X509_KEY_PASSPHRASE: &str = "hv_test_pw";

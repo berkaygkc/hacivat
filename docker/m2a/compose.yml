@@ -244,6 +244,48 @@ services:
         condition: service_healthy
     healthcheck: *ssh-health
 
+  # ## m2b-fix-f2-x509 (T13 carry): MySQL client certificates.
+  # Writes a throwaway test CA, mysql84-x509's server certificate and a client certificate for
+  # `hv_x509` into the artifacts directory (mysql-x509/certs.sh; never committed), then stays up
+  # so its healthcheck can see them. The pinned mysql:8.4 image, for its OpenSSL; no server runs.
+  mysql-x509-certs:
+    image: mysql:8.4@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    container_name: m2a-mysql-x509-certs
+    entrypoint: ["/bin/bash", "/hv-x509/certs.sh"]
+    command: ["sleep", "infinity"]
+    init: true
+    volumes:
+      - ./mysql-x509:/hv-x509:ro
+      - ${HV_ARTIFACTS:-./artifacts}:/artifacts
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /artifacts/mysql-x509-ca.pem && test -s /artifacts/mysql-x509-server-key.pem && test -s /artifacts/mysql-x509-client-key-enc.pem"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  # mysql84 whose `ssl_ca` is that test CA, serving the certificate the CA signed (giving
+  # `--ssl-*` turns MySQL's own certificate generation off), with the M2a fixtures plus
+  # `hv_x509 … REQUIRE X509` (mysql-x509/init.sql).
+  mysql84-x509:
+    image: mysql:8.4@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    container_name: m2a-mysql84-x509
+    command:
+      - mysqld
+      - --ssl-ca=/artifacts/mysql-x509-ca.pem
+      - --ssl-cert=/artifacts/mysql-x509-server.pem
+      - --ssl-key=/artifacts/mysql-x509-server-key.pem
+    environment: *mysql-env
+    volumes:
+      - ./init/mysql.sql:/docker-entrypoint-initdb.d/00-fixtures.sql:ro
+      - ./mysql-x509/init.sql:/docker-entrypoint-initdb.d/10-x509.sql:ro
+      - ${HV_ARTIFACTS:-./artifacts}:/artifacts:ro
+    ports: ["127.0.0.1:33094:3306"]
+    depends_on:
+      mysql-x509-certs:
+        condition: service_healthy
+    healthcheck: *mysql-health
+
 networks:
   default: {}
   ssh-inner: {}

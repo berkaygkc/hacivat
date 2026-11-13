@@ -1416,8 +1416,8 @@ database is byte-identical.
   transaction) **escapes every runtime layer** on MySQL (on MariaDB it too ends as a committed
   gap); only L5 is honest: the account is labelled guarded (asserted). Both are the `EXECUTE`
   residual Task 18 recorded; least privilege (no `EXECUTE`) is the remedy. `SET GLOBAL` and
-  `SET PERSIST` as `hv_ro` change nothing (side channel) but end the connection until the F2 fix
-  lands (`lost`); `RESET PERSIST` is `3615` — nothing is persisted, so the server answers before
+  `SET PERSIST` as `hv_ro` are `1227` and change nothing (side channel); before the F2 fix they
+  ended the connection (`lost`, `m2b-fix-f2` below); `RESET PERSIST` is `3615` — nothing is persisted, so the server answers before
   any privilege check, and **L5 for `RESET PERSIST` is untested by this fixture**. Review n-3:
   `ALTER USER USER()` and `ALTER USER CURRENT_USER()` are `1792`, `SET PASSWORD` a gap (refused
   after its implicit commit, judged), and `hv_ro` still signs in with the matrix password.
@@ -1430,9 +1430,10 @@ database is byte-identical.
 - **Through `sshd-a`** (pg17 over the channel's stream, mysql84 through the loopback forwarder)
   every server-blocked row gave the direct leg's result.
 
-**Findings.** Failing tests in `tests/zz_docker_m2b_findings.rs` (the file sorts last on
-purpose: cargo stops at the first failing test binary, and a known-red finding must not hide the
-rest of the Docker suite), routed by the controller:
+**Findings.** Task 23 held each finding as a failing test in `tests/zz_docker_m2b_findings.rs`
+(the file sorted last on purpose: cargo stops at the first failing test binary, and a known-red
+finding must not hide the rest of the Docker suite), routed by the controller. All three are
+fixed and their tests are now normal tests of the suite; the file is gone.
 
 - **F1** (role probe / remediation, T5/T18): above. Fixed. Its test moved into
   `docker_m2b_bypass.rs` as normal rows.
@@ -1443,7 +1444,8 @@ rest of the Docker suite), routed by the controller:
   `1227`, as is every other privilege refusal tried (`SET SESSION sql_log_bin`, `FLUSH TABLES`, a
   `SELECT` on `mysql.user`); MariaDB answers `1227` in both protocols. The user is told
   "connection lost, outcome unknown" for a statement the server refused, and the session
-  reconnects. Nothing changes on the server.
+  reconnects. Nothing changes on the server. **Fixed** (`m2b-fix-f2` below; ADR 0002
+  `m2b-fix-f2`).
 - **F3** (session reset, T7; pool, T15) — **fixed** on `m2b-fix-f3` (merged into this branch;
   ADR section `m2b-t07 — internal value reads`): released PostgreSQL pooled sessions were never
   parked, because the reset's verify probe ran on the count-only extended protocol. Its test is
@@ -1480,10 +1482,9 @@ a mutation run without it timed out on MySQL). The waits are conditions, never f
 and a released session "is parked" from `SessionManager::parked_count` (a read-only accessor added
 to the pool as a named exception).
 
-**Not done: MySQL client-certificate sign-in (T13 carry).** It needs a MySQL target whose
-`ssl_ca` trusts a committed test CA and an account `REQUIRE X509`: a compose change and an init
-script that only take effect on `cargo xtask docker up`, which only the controller runs. Routed
-back.
+**MySQL client-certificate sign-in (T13 carry).** Not done in Task 23 (it needs a compose
+change and an init script that only `cargo xtask docker up` applies); done on `m2b-fix-f2` with
+the `mysql84-x509` target (below).
 
 ## m2b-t07 — internal value reads (finding F3)
 
@@ -1524,3 +1525,31 @@ value). Session over Docker, in `docker_m2b_cancel_reconnect.rs` (F3 moved there
 `zz_docker_m2b_findings.rs`): `a_released_pooled_session_is_parked_and_reused` and
 `the_schema_probe_reads_the_servers_answer` on pg17 and mysql84, and T17 R2's
 `ssh_death_closes_parked_pooled_sessions` now runs pg17 too (T23 deviation 7).
+
+## m2b-fix-f2 — F2 fixed
+
+- **F2 is fixed in the MySQL driver** (ADR 0002 `m2b-fix-f2`): MySQL 8.0 and 8.4 answered the
+  prepare of a refused `SET GLOBAL`/`SET PERSIST` with a bare OK packet, which the client
+  cannot read as a prepare reply, so the connection ended. The driver now runs a `SET` asked
+  for over the extended protocol as `COM_QUERY`. A read-only or read-write session of an
+  account without the privilege gets `Db` with the server's `1227` and its message, keeps its
+  connection (no `SessionLost`, no reconnect), and its next statement runs.
+- **Bypass suite.** M10 `SET GLOBAL max_connections = 999` and `SET PERSIST
+  max_connections = 999` as `hv_ro` are `1227` on mysql80 and mysql84 (the `lost` cells of
+  the `m2b-t23` MySQL table); `lost` is no longer an accepted outcome for those rows. Every
+  other MySQL and MariaDB row gave the `m2b-t23` result again, the `SET` rows that run (M3, M9,
+  M14) still `neutralised` and n-3's `SET PASSWORD` still a gap.
+- `f2_mysql_refused_set_global_is_a_refusal_not_a_lost_connection` left
+  `zz_docker_m2b_findings.rs` for `docker_m2b_bypass.rs`
+  (`mysql_refused_set_global_is_a_refusal_on_a_live_session`, under the bypass rows' fixture
+  lock, since a row may change `hv_ro`'s password for a moment; on the lines mysql80 and
+  mysql84, every one required under `--set full`). F1 and F3 had left it already, so the
+  integration branch deletes the file.
+- **MySQL client-certificate sign-in (the `m2b-t23` "Not done", T13 carry).** A new full-set
+  target, `mysql84-x509` (port 33094; ADR 0002 `m2b-fix-f2`), and its generator service
+  `mysql-x509-certs`. `mysql_client_certificate_sign_in` connects `hv_x509` directly under
+  `VerifyCa` with the generated CA, with the plain and the encrypted client key (passphrase
+  from the overlay), and is refused (`1045`) without a certificate. It takes the target through
+  `require_target`; like every full-set target it needs the controller's `cargo xtask docker up
+  --set full` before a `--set full` run (the `pr` set leaves it out). The generic MySQL loops of
+  the full set run on it too: it is mysql84 with the same fixtures.

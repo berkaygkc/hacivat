@@ -680,3 +680,65 @@ fn the_autocommit_setting_comes_from_the_status_flags() {
     assert!(!autocommit_from_status(F::empty()));
     assert!(!autocommit_from_status(F::SERVER_STATUS_IN_TRANS));
 }
+
+// ## m2b-fix-f2
+/// F2: MySQL 8.0/8.4 answer the prepare of a refused `SET GLOBAL`/`SET PERSIST` with a bare OK
+/// packet, which ends the connection, so a `SET` asked for as a prepared statement runs over
+/// `COM_QUERY`; everything else stays prepared. A read-only connection never sends a text
+/// that may also be read as something other than a `SET` (the prepared protocol's refusal
+/// stays the server's).
+#[test]
+fn a_set_asked_for_as_a_prepared_statement_runs_as_text() {
+    use hacivat_driver_mysql::ExtendedRoute::{Prepared, Refused, Text};
+    use hacivat_driver_mysql::extended_route;
+    for (sql, read_write, read_only) in [
+        // Every SET form, whatever its scope.
+        ("SET GLOBAL max_connections = 999", Text, Text),
+        ("set persist max_connections = 999", Text, Text),
+        ("SET PERSIST_ONLY max_connections = 999", Text, Text),
+        ("SET @@global.max_connections = 999", Text, Text),
+        ("SET @a = 1, GLOBAL max_connections = 999", Text, Text),
+        ("SET GLOBAL TRANSACTION READ WRITE", Text, Text),
+        ("SET SESSION sql_log_bin = 0", Text, Text),
+        ("SET NAMES utf8mb4", Text, Text),
+        ("  \n\t-- why\n# more\n/* block */ SET @a = 1", Text, Text),
+        // An unversioned executable comment always runs.
+        ("/*!SET GLOBAL max_connections = 999*/", Text, Text),
+        ("/*!*/ SET @a = 1", Text, Text),
+        // A version-gated one that holds the whole SET: read inside, or skipped (no statement).
+        ("/*!80000 SET GLOBAL max_connections = 999 */", Text, Text),
+        ("/*!40101 SET NAMES utf8 */", Text, Text),
+        ("/*M!100000 SET @a = 1 */", Text, Text),
+        // Read either way, one reading is not a SET: never sent on a read-only connection.
+        (
+            "/*!99999 SELECT 1 */ SET GLOBAL max_connections = 999",
+            Text,
+            Refused,
+        ),
+        ("/*M!100000 SELECT 1 */ SET @a = 1", Text, Refused),
+        ("/*!80000 SET @a = 1 */ LOCK TABLES t WRITE", Text, Refused),
+        (
+            "/*!99999 SELECT 1 */ /*!80000 SET @a = 1 */ DO 1",
+            Text,
+            Refused,
+        ),
+        // No reading is a SET: prepared, as before.
+        ("SELECT 1", Prepared, Prepared),
+        ("SETTINGS", Prepared, Prepared),
+        ("RESET PERSIST max_connections", Prepared, Prepared),
+        ("SHOW VARIABLES LIKE 'max_connections'", Prepared, Prepared),
+        ("/*!50000 DROP TABLE t */", Prepared, Prepared),
+        ("/* SET */ SELECT 1", Prepared, Prepared),
+        ("-- SET\nSELECT 1", Prepared, Prepared),
+        ("SELECT 1 /*!80000 , (SET) */", Prepared, Prepared),
+        // `--x` is not a comment to MySQL: the text starts with a minus sign.
+        ("--x\nSET @a = 1", Prepared, Prepared),
+        (";SET @a = 1", Prepared, Prepared),
+        ("(SET @a = 1)", Prepared, Prepared),
+        ("", Prepared, Prepared),
+        ("/* unterminated SET", Prepared, Prepared),
+    ] {
+        assert_eq!(extended_route(sql, false), read_write, "read-write {sql:?}");
+        assert_eq!(extended_route(sql, true), read_only, "read-only {sql:?}");
+    }
+}
