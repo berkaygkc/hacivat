@@ -414,3 +414,46 @@ the vault, the session overlay, the keyring CI and the deferrals.
     is used only where no keyring exists, in practice Linux. **M6:** no KDF upgrade path in v1:
     a vault keeps the parameters it was created with; a later default does not re-key existing
     vaults (a future format minor can add re-keying on unlock).
+
+## m2b-t12 — profiles and paths
+
+- **Pins in `connections.toml` fail closed.** `tls.pins = [{ endpoint, sha256 }]`, the hash
+  written as 64 lower-case hex digits and read in either case (ASCII hex only, no prefix or
+  separators). A pin with the wrong length, a non-hex digit or no endpoint makes the whole entry
+  invalid (`InvalidEntry`, kept on disk untouched): the profile does not load rather than load
+  without its pin, which would trust the chain again and allow the plaintext fallback the pin
+  forbids (Q13). *Rejected:* dropping the bad pin with a `ValueIgnored` notice (the next save
+  would erase it from disk). The same holds for a malformed `[ssh]` table.
+- **No secret in `[ssh]`.** The SSH table holds no secret by design (passwords and passphrases
+  live in the secret store per hop, under `ssh_retention`, Q23). Inside it, a key matching the
+  shared rule (`is_secret_param`) or containing `secret` is dropped on load
+  (`SecretKeyIgnored`, never echoed) and never written back.
+- **Approved roots on canonical forms (B26, Q22).** For an untrusted origin, every TLS file,
+  the SQLite file and every SSH key path (the hop's key file and imported `IdentityFile`s) must
+  lie under an approved root. The path and every root are canonicalised (symlinks resolved), a
+  Windows `\\?\C:\` is read as `C:\`, and a missing file is resolved through its parent folder.
+  Refused: a path that cannot be canonicalised (relative, a missing folder), a dangling symlink
+  (SQLite would create the file wherever it points), and a canonical form on a share, a device
+  or a verbatim UNC path. Share and device paths are refused on the typed text first, before
+  any file system call (M2a N2). A TLS file outside the roots is not read at all (a FIFO there
+  would hang Validate).
+- **Check-then-use window, accepted.** Validate checks paths; it does not hand the driver or the
+  tunnel an open file. They open the file again by path, so a symlink swapped in between the
+  check and the open escapes the check. Closing it would mean opening every file once in
+  Validate and passing descriptors down to rustls, SQLite and russh, which none of them take.
+  The attacker would need write access to a folder inside the user's approved roots (their own
+  home), which already lets them replace the file itself; the check exists against a profile
+  that names a file elsewhere, and that it stops.
+- **SSH stays refused until the SSH step exists.** Validate still gives an SSH tunnel
+  `TransportUnavailable` (one marked line in `validate.rs`) besides its hop issues, because
+  until Task 14's transport step the pipeline would reach the database directly. Task 14
+  removes that line.
+- **Fix round 1.** A hop's host takes the database host's rules (`HostInvalid` for
+  credentials such as `user:pw@host`, whitespace, control characters or URL syntax) and port 0
+  is `PortInvalid`, so removing that line never lets a malformed hop reach a resolver. `~` is
+  expanded by one function, `hacivat_net::paths::local_path`, which both Validate's roots check
+  and the TLS readers use (Task 14's tunnel must use it for key files), so the checked file is
+  the opened file; it also refuses a share or device once `~` is expanded (a home folder on a
+  share) before any file system call. Inside `[ssh]`, keys containing `token`, `otp` or
+  `answer` are dropped as secrets too. A hop `key_file` next to another `auth` loads with
+  `ValueIgnored` before the next save drops it.

@@ -13,8 +13,11 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use hacivat_driver::url::FieldId;
 use hacivat_driver::{EngineCatalog, SanitizeInput, ViolationReason, sanitize};
+use hacivat_net::paths::{fs_probe, local_path};
+use hacivat_net::ssh::{SshAuth, SshSpec};
 use hacivat_net::{AddressClass, TlsMode, TlsSetupError, build_tls_params};
-use hacivat_proto::DbmsKind;
+use hacivat_proto::{DbmsKind, Origin};
+use hacivat_secrets::MAX_SSH_HOP;
 
 use crate::profile::{Profile, ProfileEndpoint, TransportSpec};
 
@@ -37,7 +40,8 @@ pub enum IssueCode {
     TlsCaUnreadable,
     TlsCertUnreadable,
     TlsKeyEncrypted,
-    /// MySQL and MariaDB with `VerifyCa` in M2a (P11).
+    /// MySQL and MariaDB with `VerifyCa` in M2a (P11). No longer produced since M2b, which
+    /// verifies the chain through Hacivat's own TLS configuration for them too (B10).
     TlsModeUnsupported {
         mode: TlsMode,
     },
@@ -129,17 +133,35 @@ pub fn validate(p: &Profile, catalog: &EngineCatalog) -> Vec<ValidationIssue> {
 ///   share (`\\server\share`, `\\?\UNC\…`) or a device path (`\\.\…`, `\??\…`), and when
 ///   something exists there it must be a regular file (`PathRefused`). A missing file is
 ///   `FileMissing` only when it may not be created; creating a read-only database is an issue.
-/// - SSH tunnels and the Karagöz transport cannot connect in M2a (R4).
-/// - TLS: `VerifyCa` is unsupported for MySQL and MariaDB (P11); elsewhere it needs a CA file
-///   (libpq parity: `verify-ca` without a root file trusts nothing). The CA, certificate and
-///   key files must be readable, the key unencrypted, and the host usable as a TLS name. For
-///   every origin, a TLS file is never a UNC share or a device path (`\\server\share`, `//`,
-///   `\\?\UNC\`, `\\.\`, `\??\`): `PathRefused`, as for SQLite.
+/// - The Karagöz transport cannot connect (R4, `TransportUnavailable`), and neither can an SSH
+///   tunnel until the pipeline's SSH step exists (Task 14). An SSH tunnel needs at least one
+///   hop and at most nine (`SshTooManyHops`: `MAX_SSH_HOP` is the last hop with a secret slot),
+///   each with a host and a user (`SshHostMissing`, `SshUserMissing`), a host as usable as the
+///   database host's (`HostInvalid`) and a port that is not 0 (`PortInvalid`); a hop that signs in with
+///   a key file needs a path naming an existing file (`SshKeyFileMissing`). A key file or an
+///   imported `IdentityFile` on a share or a device is `PathRefused`.
+/// - TLS: `VerifyCa` needs a CA file, for every engine (libpq parity: `verify-ca` without a
+///   root file trusts nothing; MySQL and MariaDB verify the chain since M2b, B10). The CA,
+///   certificate and key files must be readable, the key not encrypted the legacy OpenSSL way
+///   (`TlsKeyLegacyEncrypted`), and the host usable as a TLS name. For every origin, a TLS file
+///   is never a UNC share or a device path (`\\server\share`, `//`, `\\?\UNC\`, `\\.\`,
+///   `\??\`): `PathRefused`, as for SQLite.
+/// - **Approved roots (B26, Q22).** For a profile from an untrusted origin (anything the user
+///   did not type), every TLS file, the SQLite file and every SSH key path must lie under one of
+///   `roots`, compared on canonical forms: the path and each root are canonicalised (symlinks
+///   resolved, so `/var/folders/…` and `/private/var/…` match, and a link out of a root is
+///   outside it), a Windows `\\?\C:\` is read as `C:\`, and a missing file (a new SQLite
+///   database) is resolved through its parent directory. A path is outside when it cannot be
+///   canonicalised (relative, a dangling symlink, a missing folder) or canonicalises to a share
+///   or a device. Outside is `PathRefused`, and a TLS file outside is never read. The text
+///   rules above run first, on the path as typed.
 /// - An extra option whose key carries a password is `OptionSecret`.
-/// - Options go through DRV-05 [`sanitize`] with the TLS files listed as paths and `roots`
-///   approved; a file outside them (untrusted origins only) is `PathRefused`.
+/// - Options go through DRV-05 [`sanitize`] with `roots` approved; a path option outside them
+///   (untrusted origins only) is `PathRefused`.
 ///
-/// Blocking: it reads the TLS files and checks the SQLite path. Call it off the UI thread.
+/// Blocking: it reads the TLS files and checks the SQLite and key paths. Call it off the UI
+/// thread. The paths are checked, not handed over open: the driver and the tunnel open them
+/// again by path (a check-then-use window, accepted in ADR 0003, `m2b-t12`).
 pub fn validate_with(
     p: &Profile,
     catalog: &EngineCatalog,
@@ -164,6 +186,14 @@ pub(crate) fn checked(
     if p.name.trim().is_empty() {
         push(None, IssueCode::NameMissing);
     }
+    // ## m2b-t12-profiles: the approved roots apply to untrusted origins, on canonical forms.
+    let untrusted = !matches!(p.origin, Origin::UserTyped);
+    let canonical_roots: Vec<PathBuf> = if untrusted {
+        roots.iter().filter_map(|r| canonical(r)).collect()
+    } else {
+        Vec::new()
+    };
+    let outside = |path: &Path| untrusted && !inside_roots(path, &canonical_roots);
     let file_based = p.engine == DbmsKind::Sqlite;
     match &p.endpoint {
         ProfileEndpoint::Server { host, port } => {
@@ -194,38 +224,54 @@ pub(crate) fn checked(
         } => {
             if !file_based {
                 push(Some(FieldId::Host), IssueCode::HostMissing);
-            } else if let Some(code) = sqlite_path_issue(path, *create_if_missing) {
-                push(Some(FieldId::File), code);
+            } else {
+                let issue = sqlite_path_issue(path, *create_if_missing);
+                let typed_ok = matches!(issue, None | Some(IssueCode::FileMissing));
+                if let Some(code) = issue {
+                    push(Some(FieldId::File), code);
+                }
+                // ## m2b-t12-profiles: after the text rules, the roots (B26).
+                let named = !path.as_os_str().is_empty() && path.as_os_str() != SQLITE_MEMORY;
+                if typed_ok && named && outside(path) {
+                    push(Some(FieldId::File), IssueCode::PathRefused);
+                }
             }
             if file_based && *create_if_missing && p.read_only {
                 push(Some(FieldId::File), IssueCode::CreateAndReadOnly);
             }
         }
     }
-    if !matches!(p.transport, TransportSpec::Direct) {
-        push(None, IssueCode::TransportUnavailable);
+    match &p.transport {
+        TransportSpec::Direct => {}
+        TransportSpec::SshTunnel(spec) => {
+            // ## m2b-t12-profiles: fail closed (no silent weakening) until Task 14's SSH step
+            // exists; without it the pipeline would reach the database directly. Task 14
+            // removes this one line.
+            push(None, IssueCode::TransportUnavailable);
+            ssh_issues(spec, &mut push, &outside);
+        }
+        TransportSpec::Karagoz { .. } => push(None, IssueCode::TransportUnavailable),
     }
     // A TLS file on a share or a device is refused before anything opens, resolves or stats it
-    // (N2): neither the TLS check below nor the DRV-05 path rule may touch it.
+    // (N2): neither the TLS check below nor the roots check may touch it.
     let all_paths = tls_paths(p);
-    let tls_refused = all_paths.iter().any(|(_, path)| network_path(path));
+    // ## m2b-t12-profiles (fix round 1, M2): also once `~` is expanded, as the reader opens it.
+    let tls_refused = all_paths.iter().any(|path| local_path(path).is_none());
     if tls_refused {
+        push(None, IssueCode::PathRefused);
+    }
+    // ## m2b-t12-profiles: a TLS file of an untrusted profile outside the roots is never read.
+    let tls_outside = !tls_refused && all_paths.iter().any(|path| outside(path));
+    if tls_outside {
         push(None, IssueCode::PathRefused);
     }
     if let ProfileEndpoint::Server { host, .. } = &p.endpoint
         && !file_based
         && p.tls.mode != TlsMode::Disable
         && !tls_refused
+        && !tls_outside
     {
-        let mysql_family = catalog.chain(p.engine).contains(&DbmsKind::MySql);
-        if mysql_family && p.tls.mode == TlsMode::VerifyCa {
-            push(
-                None,
-                IssueCode::TlsModeUnsupported {
-                    mode: TlsMode::VerifyCa,
-                },
-            );
-        } else if p.tls.mode == TlsMode::VerifyCa && p.tls.ca_file.is_none() {
+        if p.tls.mode == TlsMode::VerifyCa && p.tls.ca_file.is_none() {
             push(None, IssueCode::TlsCaUnreadable);
         } else if !host.trim().is_empty() && !host_invalid(host.trim()) {
             // The address class only decides `plaintext_allowed`, which is not checked here;
@@ -243,10 +289,6 @@ pub(crate) fn checked(
             }
         }
     }
-    let paths: Vec<(String, PathBuf)> = all_paths
-        .into_iter()
-        .filter(|(_, path)| !network_path(path))
-        .collect();
     for (key, _) in &p.extra {
         if hacivat_proto::is_secret_param(key) {
             push(None, IssueCode::OptionSecret { key: key.clone() });
@@ -257,7 +299,8 @@ pub(crate) fn checked(
             kind: p.engine,
             origin: &p.origin,
             options: &p.extra,
-            paths: &paths,
+            // The profile's own files took the canonical roots check above (B26).
+            paths: &[],
             unsafe_toggle: false,
             approved_roots: roots,
         },
@@ -306,22 +349,135 @@ pub(crate) fn tls_issue(e: &TlsSetupError) -> (Option<FieldId>, IssueCode) {
     }
 }
 
-/// The profile's TLS files, under the engine's option names, for the DRV-05 path rule.
-fn tls_paths(p: &Profile) -> Vec<(String, PathBuf)> {
-    let (ca, cert, key) = if p.engine == DbmsKind::Postgres {
-        ("sslrootcert", "sslcert", "sslkey")
-    } else {
-        ("sslCa", "sslCert", "sslKey")
-    };
+/// The profile's TLS files.
+fn tls_paths(p: &Profile) -> Vec<&Path> {
     let mut paths = Vec::new();
     if let Some(file) = &p.tls.ca_file {
-        paths.push((ca.to_string(), file.clone()));
+        paths.push(file.as_path());
     }
     if let Some(client) = &p.tls.client_cert {
-        paths.push((cert.to_string(), client.cert.clone()));
-        paths.push((key.to_string(), client.key.clone()));
+        paths.push(client.cert.as_path());
+        paths.push(client.key.as_path());
     }
     paths
+}
+
+// ## m2b-t12-profiles
+/// The issues of an SSH tunnel (see [`validate_with`]). `outside` says whether a path lies
+/// outside the approved roots (always `false` for a profile the user typed).
+fn ssh_issues(
+    spec: &SshSpec,
+    push: &mut impl FnMut(Option<FieldId>, IssueCode),
+    outside: &dyn Fn(&Path) -> bool,
+) {
+    if spec.hops.is_empty() {
+        push(None, IssueCode::SshHostMissing);
+    }
+    if spec.hops.len() > usize::from(MAX_SSH_HOP) + 1 {
+        push(None, IssueCode::SshTooManyHops);
+    }
+    for hop in &spec.hops {
+        // The database host's rules (fix round 1, I1): a hop host with credentials
+        // (`user:pw@host`), whitespace, a control character or URL syntax never reaches a
+        // resolver or russh, and port 0 is never dialled.
+        let host = hop.host.trim();
+        if host.is_empty() {
+            push(None, IssueCode::SshHostMissing);
+        } else if host_invalid(host) {
+            push(None, IssueCode::HostInvalid);
+        }
+        if hop.port == 0 {
+            push(None, IssueCode::PortInvalid);
+        }
+        if hop.user.trim().is_empty() {
+            push(None, IssueCode::SshUserMissing);
+        }
+        if let SshAuth::KeyFile { path } = &hop.auth
+            && let Some(code) = ssh_key_issue(path, outside)
+        {
+            push(None, code);
+        }
+        // An imported `IdentityFile` that does not exist is skipped, as OpenSSH does; one on a
+        // share or a device, or outside the roots, is refused.
+        if hop
+            .identity_files
+            .iter()
+            .any(|file| local_path(file).is_none() || outside(file))
+        {
+            push(None, IssueCode::PathRefused);
+        }
+    }
+}
+
+/// The issue of a hop's key file, if any: none set, on a share or a device (as typed or once
+/// `~` is expanded) or `~` without a home folder, outside the roots, or not naming an existing
+/// file (a relative path names none: the tunnel has no folder to read it from). The file
+/// checked is `hacivat_net::paths::local_path(path)`, the one the tunnel must open (Task 14).
+fn ssh_key_issue(path: &Path, outside: &dyn Fn(&Path) -> bool) -> Option<IssueCode> {
+    if path.as_os_str().is_empty() {
+        return Some(IssueCode::SshKeyFileMissing);
+    }
+    let Some(full) = local_path(path) else {
+        return Some(IssueCode::PathRefused);
+    };
+    if outside(path) {
+        return Some(IssueCode::PathRefused);
+    }
+    if !full.is_absolute() {
+        return Some(IssueCode::SshKeyFileMissing);
+    }
+    fs_probe::note(&full);
+    match std::fs::metadata(&full) {
+        Ok(meta) if meta.is_file() => None,
+        _ => Some(IssueCode::SshKeyFileMissing),
+    }
+}
+
+/// Whether `path` lies under one of `roots` (canonical already), on canonical forms.
+fn inside_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    canonical(path).is_some_and(|c| roots.iter().any(|r| c.starts_with(r)))
+}
+
+/// The canonical form of `path` (B26, Q22): `~` expanded, symlinks resolved, and a Windows
+/// verbatim disk (`\\?\C:\`) read as the plain disk (`C:\`). A missing file canonicalises its
+/// parent directory and appends its name. `None` (inside no root) for a share or a device,
+/// typed or canonical, a relative path, a dangling symlink (what it names may lie anywhere,
+/// and SQLite would create the file there), a missing folder, or an I/O error.
+fn canonical(path: &Path) -> Option<PathBuf> {
+    // Before any file system call (N2), on the typed and the `~`-expanded path (M2): the same
+    // expansion the readers use (M1).
+    let path = local_path(path)?;
+    if !path.is_absolute() {
+        return None;
+    }
+    fs_probe::note(&path);
+    let resolved = match std::fs::canonicalize(&path) {
+        Ok(resolved) => resolved,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if path.symlink_metadata().is_ok() {
+                return None;
+            }
+            let name = path.file_name()?;
+            std::fs::canonicalize(path.parent()?).ok()?.join(name)
+        }
+        Err(_) => return None,
+    };
+    let resolved = strip_verbatim_disk(resolved);
+    (!network_path(&resolved)).then_some(resolved)
+}
+
+/// `\\?\C:\x` as `C:\x`; any other path as it is (a verbatim UNC or device path stays, and is
+/// then refused as a network path). Text-based, so it behaves the same on every OS.
+fn strip_verbatim_disk(path: PathBuf) -> PathBuf {
+    let Some(rest) = path.to_str().and_then(|t| t.strip_prefix(r"\\?\")) else {
+        return path;
+    };
+    match rest.as_bytes() {
+        [drive, b':'] | [drive, b':', b'\\', ..] if drive.is_ascii_alphabetic() => {
+            PathBuf::from(rest)
+        }
+        _ => path,
+    }
 }
 
 /// The issue of a SQLite path, if any (T15's rules, checked before any I/O so the form can
@@ -399,14 +555,40 @@ mod tests {
         my.engine = DbmsKind::MySql;
         assert_eq!(codes(&my, &ApprovedRoots::new(Vec::new())), []);
         crate::profile::fold_typed_options(&mut my);
-        assert!(
-            validate(&my, EngineCatalog::embedded()).contains(&ValidationIssue {
+        // ## m2b-t12-profiles: VerifyCa is a MySQL mode since M2b (B10); without a CA file it
+        // trusts nothing, as for PostgreSQL.
+        assert_eq!(
+            validate(&my, EngineCatalog::embedded()),
+            [ValidationIssue {
                 field: None,
-                code: IssueCode::TlsModeUnsupported {
-                    mode: TlsMode::VerifyCa
-                }
-            })
+                code: IssueCode::TlsCaUnreadable
+            }]
         );
+    }
+
+    // ## m2b-t12-profiles
+    #[test]
+    fn verbatim_disks_are_read_as_plain_disks_and_nothing_else_is() {
+        for (given, expected) in [
+            (r"\\?\C:\Users\me\ca.pem", r"C:\Users\me\ca.pem"),
+            (r"\\?\d:\", r"d:\"),
+            (r"\\?\C:", "C:"),
+            (r"\\?\UNC\host\share\x", r"\\?\UNC\host\share\x"),
+            (r"\\?\GLOBALROOT\Device\x", r"\\?\GLOBALROOT\Device\x"),
+            (r"\\?\1:\x", r"\\?\1:\x"),
+            (r"C:\x", r"C:\x"),
+            ("/private/var/x", "/private/var/x"),
+        ] {
+            assert_eq!(
+                strip_verbatim_disk(PathBuf::from(given)),
+                PathBuf::from(expected),
+                "{given}"
+            );
+        }
+        // What stays verbatim is a share or a device: never inside a root.
+        assert!(network_path(&strip_verbatim_disk(PathBuf::from(
+            r"\\?\UNC\host\share\x"
+        ))));
     }
 
     /// I1: a password never sits in the extras, whatever its key's spelling.

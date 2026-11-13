@@ -140,27 +140,21 @@ async fn ssh_transport_rejected_in_m2a() {
     );
 }
 
+// ## m2b-t12-profiles: M2a's P11 refusal is gone; MySQL and MariaDB verify the chain through
+// Hacivat's own TLS configuration (B10), so Validate accepts VerifyCa for every engine.
 #[tokio::test]
-async fn mysql_verify_ca_is_rejected_at_validate() {
-    // P11
-    assert_eq!(
-        err(mysql_profile(TlsMode::VerifyCa)).await.issues[0].code,
-        IssueCode::TlsModeUnsupported {
-            mode: TlsMode::VerifyCa
-        }
-    );
-    assert!(
-        validate(
-            &mariadb_profile(TlsMode::VerifyCa),
-            EngineCatalog::embedded()
-        )
-        .iter()
-        .any(|i| i.code
-            == IssueCode::TlsModeUnsupported {
-                mode: TlsMode::VerifyCa
-            })
-    );
-    assert!(validate(&pg_profile(TlsMode::VerifyCa), EngineCatalog::embedded()).is_empty());
+async fn verify_ca_passes_validate_for_every_engine() {
+    for p in [
+        mysql_profile(TlsMode::VerifyCa),
+        mariadb_profile(TlsMode::VerifyCa),
+        pg_profile(TlsMode::VerifyCa),
+    ] {
+        assert!(
+            validate(&p, EngineCatalog::embedded()).is_empty(),
+            "{:?}",
+            p.engine
+        );
+    }
 }
 
 #[tokio::test]

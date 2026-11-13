@@ -25,7 +25,44 @@
 //! extra = [{ key = "charset", value = "utf8mb4" }]
 //! origin = "user_typed"               # or { kind = "perde_managed", org = "acme" }
 //! allow_unsupported_server = false
+//! # M2b (B30); each key is left out at its default:
+//! tls.pins = [{ endpoint = "db-prod-us.acme.io:5433", sha256 = "<64 hex digits>" }]
+//! tls.allow_public_plaintext = true    # the remembered public-plaintext answer
+//! single_session = true
+//! tx_mode = "manual"                   # "auto", "manual", "smart"
+//! isolation = "serializable"           # "default", "read_uncommitted", "read_committed", ...
+//! idle_disconnect_s = 900
+//! ssh_retention = "until_restart"      # SSH passwords and passphrases; default "forever"
+//!
+//! [connection.ssh]                     # with transport = "ssh_tunnel"
+//! host_keys = "strict"                 # "ask" (default), "accept_new", "strict"
+//! keepalive_s = 30
+//!
+//! [[connection.ssh.hops]]              # jump hosts first, the bastion last
+//! host = "bastion.acme.io"
+//! port = 2222                          # default 22
+//! user = "deploy"
+//! auth = "key_file"                    # "agent", "key_file", "password", "keyboard_interactive"
+//! key_file = "/Users/x/.ssh/id_ed25519"
+//! identities_only = true
+//! identity_files = ["/Users/x/.ssh/id_rsa"]
 //! ```
+//!
+//! - **M2b keys (B30)** are written only when they differ from their default, so a file an M2a
+//!   build wrote round-trips byte for byte, and an M2a build keeps them as unknown keys. A pin's
+//!   `sha256` is written in lower case and read in either case (ASCII hex digits only). A pin
+//!   that is not 64 hex digits for a named endpoint makes the entry invalid (`InvalidEntry`): a
+//!   profile never loads without one of its pins. So does a malformed `[ssh]` table. An entry
+//!   with `transport = "ssh_tunnel"` and no `[ssh]` table loads with no hops, for Validate to
+//!   report. The hops of a saved profile are written into the existing hop tables in order,
+//!   keeping their unknown keys; any other transport drops the `[ssh]` table. A hop's
+//!   `key_file` next to another `auth` is never used: it loads with `ValueIgnored`
+//!   (`ssh.hops.key_file`) and the next save drops it.
+//! - **SSH secrets.** Inside `[ssh]`, a key that names a secret (`password`, `passphrase`,
+//!   `client_secret`, `token`, `otp`, ...: the shared rule, plus any key containing `secret`,
+//!   `token`, `otp` or `answer`) is dropped and reported like any other password key
+//!   (`SecretKeyIgnored`). SSH passwords and passphrases live in the secret store under
+//!   `ssh_retention`, never here.
 //!
 //! - **Secrets.** A key that `hacivat_proto::is_secret_param` calls a password (`password`,
 //!   `pgpassword`, `sslpassword`, `db_password`, `--pwd`, ...; ASCII case ignored), at any
@@ -60,7 +97,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
-use hacivat_net::{ClientCertPaths, TlsMode, TlsSettings};
+use hacivat_net::ssh::{HopSpec, HostKeyPolicy, SshAuth, SshSpec};
+use hacivat_net::{CertPin, ClientCertPaths, TlsMode, TlsSettings};
 use hacivat_proto::{DbmsKind, EnvTag, ImportSource, Origin, ProfileId, TagSource};
 use hacivat_secrets::{AuthProviderId, Retention};
 use hacivat_settings::fsio;
@@ -70,6 +108,7 @@ use toml_edit::{
 
 use super::options::fold_typed_options;
 use super::{Profile, ProfileEndpoint, TransportSpec};
+use crate::session::{IsolationLevel, TxMode};
 
 /// The file format version this build writes.
 const VERSION: i64 = 1;
@@ -178,7 +217,8 @@ impl ProfileStore {
             });
         }
         let secret_outside = doc.iter().any(|(key, item)| {
-            key != "connection" && (is_secret_key(key) || item_has_secrets(item))
+            key != "connection"
+                && (is_secret_key(key) || item_has_secrets(item, rule_under(key, is_secret_key)))
         });
         if secret_outside {
             out.diags.push(ProfileDiag::SecretKeyOutsideEntries);
@@ -404,22 +444,52 @@ fn is_secret_pair(table: &dyn TableLike) -> bool {
         .is_some_and(is_secret_key)
 }
 
+// ## m2b-t12-profiles
+/// Which keys hold a secret at one level of the file.
+type SecretRule = fn(&str) -> bool;
+
+/// Inside the `[ssh]` table a key that names a secret (`client_secret`) or a one-time answer
+/// (`token`, `otp`, `answer`) counts as well (B30; review M5): nothing in it is ever a secret,
+/// so anything that looks like one was typed there by hand.
+fn is_ssh_secret_key(key: &str) -> bool {
+    let folded = key.to_ascii_lowercase();
+    is_secret_key(key)
+        || ["secret", "token", "otp", "answer"]
+            .iter()
+            .any(|w| folded.contains(w))
+}
+
+/// The rule for the items under `key`: the `[ssh]` table's from there down.
+fn rule_under(key: &str, rule: SecretRule) -> SecretRule {
+    if key == "ssh" {
+        is_ssh_secret_key
+    } else {
+        rule
+    }
+}
+
 /// Whether the entry holds a secret key anywhere (see [`strip_secrets`]).
 fn has_secrets(entry: &dyn TableLike) -> bool {
+    has_secrets_by(entry, is_secret_key)
+}
+
+fn has_secrets_by(entry: &dyn TableLike, rule: SecretRule) -> bool {
     entry.iter().any(|(key, item)| {
-        is_secret_key(key) || (key == "extra" && extra_has_secret(item)) || item_has_secrets(item)
+        rule(key)
+            || (key == "extra" && extra_has_secret(item))
+            || item_has_secrets(item, rule_under(key, rule))
     })
 }
 
-fn item_has_secrets(item: &Item) -> bool {
+fn item_has_secrets(item: &Item, rule: SecretRule) -> bool {
     match item {
-        Item::Table(t) => has_secrets(t),
-        Item::Value(Value::InlineTable(t)) => has_secrets(t),
+        Item::Table(t) => has_secrets_by(t, rule),
+        Item::Value(Value::InlineTable(t)) => has_secrets_by(t, rule),
         Item::Value(Value::Array(a)) => a.iter().any(|v| match v {
-            Value::InlineTable(t) => has_secrets(t),
+            Value::InlineTable(t) => has_secrets_by(t, rule),
             _ => false,
         }),
-        Item::ArrayOfTables(a) => a.iter().any(|t| has_secrets(t)),
+        Item::ArrayOfTables(a) => a.iter().any(|t| has_secrets_by(t, rule)),
         _ => false,
     }
 }
@@ -438,9 +508,13 @@ fn extra_has_secret(item: &Item) -> bool {
 /// Removes every secret key of the entry, at any depth, and every `extra` pair with a secret
 /// key.
 fn strip_secrets(entry: &mut dyn TableLike) {
+    strip_secrets_by(entry, is_secret_key);
+}
+
+fn strip_secrets_by(entry: &mut dyn TableLike, rule: SecretRule) {
     let secret: Vec<String> = entry
         .iter()
-        .filter(|(key, _)| is_secret_key(key))
+        .filter(|(key, _)| rule(key))
         .map(|(key, _)| key.to_string())
         .collect();
     for key in secret {
@@ -450,24 +524,24 @@ fn strip_secrets(entry: &mut dyn TableLike) {
         if key.get() == "extra" {
             strip_secret_pairs(item);
         }
-        strip_item(item);
+        strip_item(item, rule_under(key.get(), rule));
     }
 }
 
-fn strip_item(item: &mut Item) {
+fn strip_item(item: &mut Item, rule: SecretRule) {
     match item {
-        Item::Table(t) => strip_secrets(t),
-        Item::Value(Value::InlineTable(t)) => strip_secrets(t),
+        Item::Table(t) => strip_secrets_by(t, rule),
+        Item::Value(Value::InlineTable(t)) => strip_secrets_by(t, rule),
         Item::Value(Value::Array(a)) => {
             for v in a.iter_mut() {
                 if let Value::InlineTable(t) = v {
-                    strip_secrets(t);
+                    strip_secrets_by(t, rule);
                 }
             }
         }
         Item::ArrayOfTables(a) => {
             for t in a.iter_mut() {
-                strip_secrets(t);
+                strip_secrets_by(t, rule);
             }
         }
         _ => {}
@@ -543,7 +617,7 @@ fn opt_id<T>(
 }
 
 /// The profile of entry `t`, and the keys whose values were not understood and were ignored
-/// (`environment`, `env_source`; D-004).
+/// (`environment`, `env_source`; D-004; `ssh.hops.key_file`, M2b).
 fn read_entry(t: &Table) -> Read<(Profile, Vec<&'static str>)> {
     let mut ignored = Vec::new();
     let id: ProfileId = match opt_str(t, "id")? {
@@ -605,7 +679,7 @@ fn read_entry(t: &Table) -> Read<(Profile, Vec<&'static str>)> {
         auth: opt_id(t, "auth", AuthProviderId::from_id)?.unwrap_or(defaults.auth),
         retention: opt_id(t, "retention", Retention::from_id)?.unwrap_or(defaults.retention),
         tls: read_tls(t)?,
-        transport: read_transport(t)?,
+        transport: read_transport(t, &mut ignored)?,
         connect_timeout_s: opt_int(t, "connect_timeout_s", 0)?
             .unwrap_or(defaults.connect_timeout_s),
         keepalive_s: opt_int(t, "keepalive_s", 0)?,
@@ -620,11 +694,40 @@ fn read_entry(t: &Table) -> Read<(Profile, Vec<&'static str>)> {
         extra,
         origin,
         allow_unsupported_server: opt_bool(t, "allow_unsupported_server")?.unwrap_or(false),
-        ..Default::default()
+        // ## m2b-t12-profiles: the session defaults (B30).
+        single_session: opt_bool(t, "single_session")?.unwrap_or(defaults.single_session),
+        tx_mode: opt_id(t, "tx_mode", TxMode::from_id)?,
+        isolation: opt_id(t, "isolation", isolation_from_id)?,
+        idle_disconnect_s: opt_int(t, "idle_disconnect_s", 1)?,
+        ssh_retention: opt_id(t, "ssh_retention", Retention::from_id)?
+            .unwrap_or(defaults.ssh_retention),
     };
     // An older file's `sslmode`, `sslrootcert`, ... extras become the typed settings (I2).
     fold_typed_options(&mut profile);
     Ok((profile, ignored))
+}
+
+// ## m2b-t12-profiles
+const ISOLATION_IDS: [(IsolationLevel, &str); 5] = [
+    (IsolationLevel::Default, "default"),
+    (IsolationLevel::ReadUncommitted, "read_uncommitted"),
+    (IsolationLevel::ReadCommitted, "read_committed"),
+    (IsolationLevel::RepeatableRead, "repeatable_read"),
+    (IsolationLevel::Serializable, "serializable"),
+];
+
+fn isolation_from_id(id: &str) -> Option<IsolationLevel> {
+    ISOLATION_IDS
+        .iter()
+        .find(|(_, i)| *i == id)
+        .map(|(level, _)| *level)
+}
+
+fn isolation_id(level: IsolationLevel) -> &'static str {
+    ISOLATION_IDS
+        .iter()
+        .find(|(l, _)| *l == level)
+        .map_or("default", |(_, id)| id)
 }
 
 fn tag_source_from_id(id: &str) -> Option<TagSource> {
@@ -658,23 +761,172 @@ fn read_tls(t: &Table) -> Read<TlsSettings> {
         (Some(_), None) => return invalid("tls.client_key"),
         (None, Some(_)) => return invalid("tls.client_cert"),
     };
+    // ## m2b-t12-profiles
+    let pins = match tls.get("pins") {
+        None => Vec::new(),
+        Some(item) => read_pins(item)?,
+    };
+    let allow_public_plaintext = opt_bool(tls, "allow_public_plaintext")
+        .map_err(|_| Skip::Invalid("tls.allow_public_plaintext"))?
+        .unwrap_or(false);
     Ok(TlsSettings {
         mode,
         ca_file,
         client_cert,
-        ..Default::default()
+        pins,
+        allow_public_plaintext,
     })
 }
 
-fn read_transport(t: &Table) -> Read<TransportSpec> {
+// ## m2b-t12-profiles
+/// The tables of an array of inline tables or of an array of tables; `None` for anything else.
+fn tables_of(item: &Item) -> Option<Vec<&dyn TableLike>> {
+    match item {
+        Item::Value(Value::Array(a)) => a
+            .iter()
+            .map(|v| v.as_inline_table().map(|t| t as &dyn TableLike))
+            .collect(),
+        Item::ArrayOfTables(a) => Some(a.iter().map(|t| t as &dyn TableLike).collect()),
+        _ => None,
+    }
+}
+
+/// `tls.pins = [{ endpoint = "db:5432", sha256 = "<64 hex digits>" }, …]`. Any pin that is not
+/// exactly that makes the entry invalid: dropping it would connect without it.
+fn read_pins(item: &Item) -> Read<Vec<CertPin>> {
+    let bad = || Skip::Invalid("tls.pins");
+    tables_of(item)
+        .ok_or_else(bad)?
+        .into_iter()
+        .map(|t| {
+            let endpoint = opt_str(t, "endpoint")
+                .ok()
+                .flatten()
+                .filter(|e| !e.trim().is_empty())
+                .ok_or_else(bad)?;
+            let sha256 = opt_str(t, "sha256")
+                .ok()
+                .flatten()
+                .and_then(|h| sha256_from_hex(&h))
+                .ok_or_else(bad)?;
+            Ok(CertPin { endpoint, sha256 })
+        })
+        .collect()
+}
+
+/// 64 ASCII hex digits, either case; nothing else (no prefix, no separators).
+fn sha256_from_hex(hex: &str) -> Option<[u8; 32]> {
+    let digits = hex.as_bytes();
+    if digits.len() != 64 {
+        return None;
+    }
+    let digit = |b: u8| {
+        char::from(b)
+            .to_digit(16)
+            .and_then(|d| u8::try_from(d).ok())
+    };
+    let mut out = [0u8; 32];
+    for (byte, [high, low]) in out.iter_mut().zip(digits.as_chunks::<2>().0) {
+        *byte = (digit(*high)? << 4) | digit(*low)?;
+    }
+    Some(out)
+}
+
+/// Lower-case hex.
+fn sha256_hex(sha256: &[u8; 32]) -> String {
+    sha256.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The `[ssh]` table of an SSH entry; none is a tunnel without hops (Validate reports it).
+/// A hop's `key_file` that its `auth` does not use is reported in `ignored`
+/// (`ssh.hops.key_file`): the next save drops it (T12 review M3).
+fn read_ssh(item: Option<&Item>, ignored: &mut Vec<&'static str>) -> Read<SshSpec> {
+    let Some(item) = item else {
+        return Ok(SshSpec::default());
+    };
+    let ssh = item.as_table_like().ok_or(Skip::Invalid("ssh"))?;
+    let host_keys = opt_id(ssh, "host_keys", HostKeyPolicy::from_id)
+        .map_err(|_| Skip::Invalid("ssh.host_keys"))?
+        .unwrap_or_default();
+    let keepalive_s =
+        opt_int(ssh, "keepalive_s", 0).map_err(|_| Skip::Invalid("ssh.keepalive_s"))?;
+    let hops = match ssh.get("hops") {
+        None => Vec::new(),
+        Some(item) => tables_of(item)
+            .ok_or(Skip::Invalid("ssh.hops"))?
+            .into_iter()
+            .map(|t| read_hop(t, ignored))
+            .collect::<Read<_>>()?,
+    };
+    Ok(SshSpec {
+        hops,
+        host_keys,
+        keepalive_s,
+    })
+}
+
+/// One hop. A missing host or user loads as blank (Validate reports it); a missing `auth` is
+/// the key file when one is named, else the agent.
+fn read_hop(t: &dyn TableLike, ignored: &mut Vec<&'static str>) -> Read<HopSpec> {
+    let bad = |_| Skip::Invalid("ssh.hops");
+    let key_file = opt_str(t, "key_file").map_err(bad)?.map(PathBuf::from);
+    let auth_id = opt_str(t, "auth").map_err(bad)?;
+    // ## m2b-t12-profiles (fix round 1, M3): a key file next to another method is never used.
+    if key_file.is_some()
+        && auth_id.as_deref().is_some_and(|a| a != "key_file")
+        && !ignored.contains(&"ssh.hops.key_file")
+    {
+        ignored.push("ssh.hops.key_file");
+    }
+    let auth = match auth_id.as_deref() {
+        None if key_file.is_some() => SshAuth::KeyFile {
+            path: key_file.unwrap_or_default(),
+        },
+        None | Some("agent") => SshAuth::Agent,
+        Some("key_file") => SshAuth::KeyFile {
+            path: key_file.unwrap_or_default(),
+        },
+        Some("password") => SshAuth::Password,
+        Some("keyboard_interactive") => SshAuth::KeyboardInteractive,
+        Some(_) => return invalid("ssh.hops"),
+    };
+    let identity_files = match t.get("identity_files") {
+        None => Vec::new(),
+        Some(item) => item
+            .as_array()
+            .ok_or(Skip::Invalid("ssh.hops"))?
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(PathBuf::from)
+                    .ok_or(Skip::Invalid("ssh.hops"))
+            })
+            .collect::<Read<_>>()?,
+    };
+    Ok(HopSpec {
+        host: opt_str(t, "host").map_err(bad)?.unwrap_or_default(),
+        port: opt_int(t, "port", 1).map_err(bad)?.unwrap_or(SSH_PORT),
+        user: opt_str(t, "user").map_err(bad)?.unwrap_or_default(),
+        auth,
+        identities_only: opt_bool(t, "identities_only")
+            .map_err(bad)?
+            .unwrap_or(false),
+        identity_files,
+    })
+}
+
+/// A hop's default port.
+const SSH_PORT: u16 = 22;
+
+fn read_transport(t: &Table, ignored: &mut Vec<&'static str>) -> Read<TransportSpec> {
     match t.get("transport") {
         None => Ok(TransportSpec::Direct),
         Some(item) => {
             if let Some(kind) = item.as_str() {
                 return match kind {
                     "direct" => Ok(TransportSpec::Direct),
-                    // ## m2b-t01-interfaces: Task 12 reads the `[ssh]` table.
-                    "ssh_tunnel" => Ok(TransportSpec::SshTunnel(Default::default())),
+                    // ## m2b-t12-profiles: the `[ssh]` table (B30).
+                    "ssh_tunnel" => Ok(TransportSpec::SshTunnel(read_ssh(t.get("ssh"), ignored)?)),
                     _ => invalid("transport"),
                 };
             }
@@ -841,6 +1093,146 @@ fn write_entry(t: &mut Table, p: &Profile) {
         "allow_unsupported_server",
         value(p.allow_unsupported_server),
     );
+    // ## m2b-t12-profiles: B30 keys, each left out at its default (an M2a file round-trips).
+    let defaults = Profile::default();
+    set_opt(
+        t,
+        "single_session",
+        (p.single_session != defaults.single_session).then(|| value(p.single_session)),
+    );
+    set_opt(t, "tx_mode", p.tx_mode.map(|m| value(m.id())));
+    set_opt(t, "isolation", p.isolation.map(|l| value(isolation_id(l))));
+    set_opt(
+        t,
+        "idle_disconnect_s",
+        p.idle_disconnect_s.map(|s| value(i64::from(s))),
+    );
+    set_opt(
+        t,
+        "ssh_retention",
+        (p.ssh_retention != defaults.ssh_retention).then(|| value(p.ssh_retention.id())),
+    );
+    write_ssh(t, &p.transport);
+}
+
+// ## m2b-t12-profiles
+/// The `[ssh]` table of an SSH profile, in the entry's existing table when it has one (keeping
+/// its unknown keys); none for a tunnel at its defaults without one, and none for any other
+/// transport.
+fn write_ssh(t: &mut Table, transport: &TransportSpec) {
+    let TransportSpec::SshTunnel(spec) = transport else {
+        t.remove("ssh");
+        return;
+    };
+    if !t.get("ssh").is_some_and(|i| i.as_table_like().is_some()) {
+        if *spec == SshSpec::default() {
+            t.remove("ssh");
+            return;
+        }
+        t.insert("ssh", Item::Table(Table::new()));
+    }
+    let Some(ssh) = t.get_mut("ssh").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    set_opt(
+        ssh,
+        "host_keys",
+        (spec.host_keys != HostKeyPolicy::default()).then(|| value(spec.host_keys.id())),
+    );
+    set_opt(
+        ssh,
+        "keepalive_s",
+        spec.keepalive_s.map(|k| value(i64::from(k))),
+    );
+    write_hops(ssh, &spec.hops);
+    if ssh.is_empty() {
+        t.remove("ssh");
+    }
+}
+
+/// `[[ssh.hops]]`: hop `i` is written into the existing hop table `i` (keeping its unknown
+/// keys), extra tables are dropped, new ones appended.
+fn write_hops(ssh: &mut dyn TableLike, hops: &[HopSpec]) {
+    let mut old: Vec<Table> = match ssh.remove("hops") {
+        Some(Item::ArrayOfTables(a)) => a.into_iter().collect(),
+        Some(Item::Value(Value::Array(a))) => a
+            .into_iter()
+            .filter_map(|v| match v {
+                Value::InlineTable(t) => Some(t.into_table()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    if hops.is_empty() {
+        return;
+    }
+    old.truncate(hops.len());
+    let mut old = old.into_iter();
+    let mut tables = ArrayOfTables::new();
+    for hop in hops {
+        let mut table = old.next().unwrap_or_default();
+        write_hop(&mut table, hop);
+        tables.push(table);
+    }
+    ssh.insert("hops", Item::ArrayOfTables(tables));
+}
+
+fn write_hop(t: &mut Table, hop: &HopSpec) {
+    set_opt(
+        t,
+        "host",
+        (!hop.host.is_empty()).then(|| value(hop.host.clone())),
+    );
+    set_opt(
+        t,
+        "port",
+        (hop.port != SSH_PORT).then(|| value(i64::from(hop.port))),
+    );
+    set_opt(
+        t,
+        "user",
+        (!hop.user.is_empty()).then(|| value(hop.user.clone())),
+    );
+    let (auth, key_file) = match &hop.auth {
+        SshAuth::Agent => ("agent", None),
+        SshAuth::KeyFile { path } => (
+            "key_file",
+            (!path.as_os_str().is_empty()).then(|| path_value(path)),
+        ),
+        SshAuth::Password => ("password", None),
+        SshAuth::KeyboardInteractive => ("keyboard_interactive", None),
+    };
+    t.insert("auth", value(auth));
+    set_opt(t, "key_file", key_file);
+    set_opt(
+        t,
+        "identities_only",
+        hop.identities_only.then(|| value(true)),
+    );
+    set_opt(
+        t,
+        "identity_files",
+        (!hop.identity_files.is_empty()).then(|| {
+            let files: Array = hop
+                .identity_files
+                .iter()
+                .map(|f| f.to_string_lossy().into_owned())
+                .collect();
+            value(files)
+        }),
+    );
+}
+
+fn pins_item(pins: &[CertPin]) -> Item {
+    let mut array = Array::new();
+    for pin in pins {
+        let mut table = InlineTable::new();
+        table.insert("endpoint", pin.endpoint.as_str().into());
+        table.insert("sha256", sha256_hex(&pin.sha256).into());
+        array.push(table);
+    }
+    value(array)
 }
 
 /// `tls.*`, in the entry's existing `tls` table when it has one (keeping its unknown keys),
@@ -866,12 +1258,23 @@ fn write_tls(t: &mut Table, tls: &TlsSettings) {
         "client_key",
         tls.client_cert.as_ref().map(|c| path_value(&c.key)),
     );
+    // ## m2b-t12-profiles
+    set_opt(
+        table,
+        "pins",
+        (!tls.pins.is_empty()).then(|| pins_item(&tls.pins)),
+    );
+    set_opt(
+        table,
+        "allow_public_plaintext",
+        tls.allow_public_plaintext.then(|| value(true)),
+    );
 }
 
 fn transport_item(t: &TransportSpec) -> Item {
     match t {
         TransportSpec::Direct => value("direct"),
-        // ## m2b-t01-interfaces: Task 12 writes the `[ssh]` table.
+        // ## m2b-t12-profiles: the hops go to the `[ssh]` table (`write_ssh`).
         TransportSpec::SshTunnel(_) => value("ssh_tunnel"),
         TransportSpec::Karagoz {
             org,

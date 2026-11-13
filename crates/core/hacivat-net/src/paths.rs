@@ -2,7 +2,7 @@
 //! that is never a local file (M2a final-fix round 2, N2), and a probe tests use to prove
 //! such a path is never touched.
 
-use std::path::{Component, Path, Prefix};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 /// Whether `path` names another machine or the NT object namespace, on any OS: it starts with
 /// two separators (`\\host\share`, `//host/share`, which covers `\\?\UNC\` and `\\.\`), with
@@ -25,6 +25,23 @@ pub fn is_network_path(path: &Path) -> bool {
         },
         _ => false,
     }
+}
+
+// ## m2b-t12-profiles
+/// The local file a profile's path names: the one path every reader opens (TLS files; the SSH
+/// key files from Task 14 on) and Validate's approved-roots check canonicalises, so the
+/// checked file is the opened file (T12 review M1). A leading `~` component is the user's home
+/// directory. `None` for a share or a device, as typed or once `~` is expanded (a home folder
+/// on a share; review M2), and for `~` without a home directory. No file system call.
+pub fn local_path(path: &Path) -> Option<PathBuf> {
+    if is_network_path(path) {
+        return None;
+    }
+    let expanded = match path.strip_prefix("~") {
+        Ok(rest) => std::env::home_dir()?.join(rest),
+        Err(_) => path.to_path_buf(),
+    };
+    (!is_network_path(&expanded)).then_some(expanded)
 }
 
 /// A record of the paths the connect stack's file readers touched, for tests that prove a
@@ -88,6 +105,23 @@ mod tests {
             "",
         ] {
             assert!(!is_network_path(Path::new(p)), "{p}");
+        }
+    }
+
+    // ## m2b-t12-profiles
+    #[test]
+    fn local_paths_expand_the_home_folder_and_refuse_shares() {
+        let home = std::env::home_dir();
+        assert_eq!(
+            local_path(Path::new("~/.ssh/id_ed25519")),
+            home.as_ref().map(|h| h.join(".ssh/id_ed25519"))
+        );
+        assert_eq!(local_path(Path::new("~")), home.map(|h| h.join("")));
+        for p in ["/etc/ssl/ca.pem", "ca.pem", "~user/x", "a/~/b"] {
+            assert_eq!(local_path(Path::new(p)), Some(PathBuf::from(p)), "{p}");
+        }
+        for p in [r"\\host\s\x", "//host/s/x", r"\??\x", r"\\.\pipe\x"] {
+            assert_eq!(local_path(Path::new(p)), None, "{p}");
         }
     }
 }
