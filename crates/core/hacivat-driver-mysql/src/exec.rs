@@ -86,6 +86,159 @@ pub fn command_tag(sql: &str) -> Option<String> {
     (!keyword.is_empty()).then_some(keyword)
 }
 
+// ## m2b-fix-f2
+/// How [`execute`] sends a statement the caller asked to run as a prepared statement
+/// (`Protocol::Extended`), decided from its text before anything is sent (finding F2).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtendedRoute {
+    /// `COM_STMT_PREPARE` and `COM_STMT_EXECUTE`, no parameters.
+    Prepared,
+    /// `COM_QUERY`: the statement is a `SET`.
+    Text,
+    /// Refused before anything is sent, as a statement the read-only connection will not
+    /// prepare (`Unsupported`): a read of the text the server may make is a `SET`, another is
+    /// not.
+    Refused,
+}
+
+/// What a reading of a statement starts with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lead {
+    /// The keyword `SET`.
+    Set,
+    /// Anything else: another keyword, or a character that starts no keyword (`(`, `-`).
+    Other,
+    /// Nothing: only whitespace and comments (the server runs no statement).
+    Nothing,
+}
+
+/// More readings than any statement written by hand has (one per leading version-gated
+/// executable comment that holds a keyword, plus one). Past it the readings are incomplete.
+const MAX_LEADS: usize = 64;
+
+/// Skips a MySQL line comment at the start of `s`: `#`, or `--` followed by whitespace, a
+/// control character or the end (MySQL reads `--x` as two minus signs).
+fn skip_line_comment(s: &str) -> Option<&str> {
+    let after = s.strip_prefix('#').or_else(|| {
+        s.strip_prefix("--").filter(|r| {
+            r.chars()
+                .next()
+                .is_none_or(|c| c.is_ascii_whitespace() || c.is_ascii_control())
+        })
+    })?;
+    Some(after.find('\n').map_or("", |i| &after[i + 1..]))
+}
+
+/// What `s` starts with after whitespace, line comments and ordinary block comments. An
+/// executable comment is not looked into: [`leads`] handles those.
+fn lead_of(mut s: &str) -> Lead {
+    loop {
+        s = s.trim_start();
+        if let Some(r) = skip_line_comment(s) {
+            s = r;
+        } else if let Some(r) = s.strip_prefix("/*") {
+            let Some(end) = r.find("*/") else {
+                return Lead::Nothing;
+            };
+            s = &r[end + 2..];
+        } else {
+            break;
+        }
+    }
+    let word: String = s.chars().take_while(char::is_ascii_alphabetic).collect();
+    if s.is_empty() {
+        Lead::Nothing
+    } else if word.eq_ignore_ascii_case("SET") {
+        Lead::Set
+    } else {
+        Lead::Other
+    }
+}
+
+/// Every way the server may read the start of `sql`; `None` when there are more than
+/// [`MAX_LEADS`]. Whitespace, line comments and ordinary block comments are skipped (MySQL's
+/// block comments do not nest). An unversioned executable comment (`/*!…*/`) always runs, so a
+/// statement inside it is the only reading. A version-gated one (`/*!80000 …*/`), and MariaDB's
+/// `/*M!…*/` (an ordinary comment to MySQL), runs or not depending on the server, so one that
+/// holds a statement is read both ways: that statement, and what follows the comment. One that
+/// holds nothing reads the same either way.
+fn leads(sql: &str) -> Option<Vec<Lead>> {
+    let mut found = Vec::new();
+    let mut rest = sql;
+    loop {
+        if found.len() > MAX_LEADS {
+            return None;
+        }
+        rest = rest.trim_start();
+        if let Some(r) = skip_line_comment(rest) {
+            rest = r;
+            continue;
+        }
+        let Some(r) = rest.strip_prefix("/*") else {
+            break;
+        };
+        let Some(end) = r.find("*/") else {
+            break;
+        };
+        let (inside, after) = (&r[..end], &r[end + 2..]);
+        let code = match (inside.strip_prefix('!'), inside.strip_prefix("M!")) {
+            (Some(code), _) => Some((code, false)),
+            (None, Some(code)) => Some((code, true)),
+            (None, None) => None,
+        };
+        if let Some((code, mariadb)) = code {
+            let body = code.trim_start_matches(|c: char| c.is_ascii_digit());
+            let gated = mariadb || body.len() != code.len();
+            match lead_of(body) {
+                Lead::Nothing => {}
+                inner if !gated => {
+                    found.push(inner);
+                    return Some(found);
+                }
+                inner => found.push(inner),
+            }
+        }
+        rest = after;
+    }
+    found.push(lead_of(rest));
+    Some(found)
+}
+
+/// How [`execute`] sends `sql` when the caller asked for a prepared statement (finding F2).
+///
+/// MySQL 8.0 and 8.4 answer the `COM_STMT_PREPARE` of a `SET` that changes a global or
+/// persisted variable the account may not change (`SET GLOBAL`, `SET PERSIST`,
+/// `SET PERSIST_ONLY`, `SET @@global.…`, `SET GLOBAL TRANSACTION …`) with a bare OK packet
+/// instead of the prepare reply or `1227`; `mysql_async` cannot parse it as a prepare reply,
+/// and the connection is dropped. Every `SET` therefore runs over `COM_QUERY`, where the
+/// server answers `1227`. A `SET` takes no parameters here (none are ever bound), returns no
+/// rows and is one statement, so its effect is the same; every other statement stays
+/// prepared, so a statement the server will not prepare (`ER_UNSUPPORTED_PS`, 1295) is still
+/// found by the server.
+///
+/// - Read-write: `Text` when any reading of the text is a `SET` (a read-write connection may
+///   run a multi-statement text: so does `Protocol::Simple`).
+/// - Read-only: `Text` only when every reading that holds a statement is a `SET`, so the
+///   prepared protocol's refusal of what it cannot prepare is never bypassed. A text that may
+///   be read either as a `SET` or as something else (a version-gated executable comment) is
+///   `Refused`; one that holds no `SET` is `Prepared`.
+#[doc(hidden)]
+pub fn extended_route(sql: &str, read_only: bool) -> ExtendedRoute {
+    let Some(found) = leads(sql) else {
+        // More readings than any hand-written text: keep the server's own refusal.
+        return ExtendedRoute::Prepared;
+    };
+    let any_set = found.contains(&Lead::Set);
+    let any_other = found.contains(&Lead::Other);
+    match (any_set, any_other) {
+        (false, _) => ExtendedRoute::Prepared,
+        (true, false) => ExtendedRoute::Text,
+        (true, true) if read_only => ExtendedRoute::Refused,
+        (true, true) => ExtendedRoute::Text,
+    }
+}
+
 /// What a statement's rows are kept as.
 #[derive(Clone, Copy)]
 enum Keep {
@@ -194,16 +347,27 @@ pub(crate) async fn execute(
 ) -> Result<ExecSummary, RawError> {
     let ran = match opts.protocol {
         Protocol::Simple => text(conn, sql, Keep::Text(opts.max_rows)).await,
-        Protocol::Extended => match prepared(conn, sql).await {
-            // The refused prepare changed nothing, so the status stays as it was.
-            Err(e) if is_unsupported_ps(&e) && read_only => {
+        // ## m2b-fix-f2: a `SET` is never prepared (see `extended_route`).
+        Protocol::Extended => match extended_route(sql, read_only) {
+            ExtendedRoute::Text => text(conn, sql, Keep::Count).await,
+            // Nothing was sent, so the status stays as it was.
+            ExtendedRoute::Refused => {
                 return Err(RawError {
                     kind: RawErrorKind::Unsupported,
                     server: None,
                 });
             }
-            Err(e) if is_unsupported_ps(&e) => text(conn, sql, Keep::Count).await,
-            other => other,
+            ExtendedRoute::Prepared => match prepared(conn, sql).await {
+                // The refused prepare changed nothing, so the status stays as it was.
+                Err(e) if is_unsupported_ps(&e) && read_only => {
+                    return Err(RawError {
+                        kind: RawErrorKind::Unsupported,
+                        server: None,
+                    });
+                }
+                Err(e) if is_unsupported_ps(&e) => text(conn, sql, Keep::Count).await,
+                other => other,
+            },
         },
     };
     let mut summary = settle(conn, tx, ran).await.map_err(|e| raw_error(&e))?;

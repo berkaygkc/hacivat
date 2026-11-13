@@ -798,3 +798,45 @@ This section supersedes the M2a P11 defect note ("VerifyCa is unsupported in M2a
   - **Until Task 14** the pipeline's `insecure_auth_for` is the fail-closed stub
     (`RefuseUnlessVerified` everywhere): a loopback MySQL `Require` profile (outcome `No`) is
     refused on a `caching_sha2_password` cache miss (`auth.insecure_method`).
+
+## m2b-fix-f2 — hacivat-driver-mysql
+
+Conformance finding F2 (Task 23): on MySQL 8.0 and 8.4 a read-only (or any) session of an
+account without `SYSTEM_VARIABLES_ADMIN` that ran `SET GLOBAL …` or `SET PERSIST …` was told
+"connection lost, outcome unknown", and the session reconnected; over `COM_QUERY` the server
+answers `1227`.
+
+- **Root cause: the server.** A packet capture shows MySQL answering the `COM_STMT_PREPARE` of
+  such a statement with a bare 7-byte OK packet (`00 00 00 02 00 00 00`) instead of the
+  12-byte prepare reply or an ERR packet. `mysql_async` cannot read it as a prepare reply
+  ("can't parse: buf doesn't have enough data", an I/O error), drops the connection, and the
+  server logs the client's hang-up as an aborted connection ("Got an error reading
+  communication packets"). `mysql_async` is right not to accept the packet, so nothing is
+  patched (no `§6`). A scan of 73 statements prepared as `hv_ro` on 8.0 and 8.4 found the
+  same reply for exactly the `SET` forms that change a global or persisted variable:
+  `SET GLOBAL`, `SET PERSIST`, `SET PERSIST_ONLY`, `SET @@global.…`, `SET @@persist.…`,
+  `SET GLOBAL TRANSACTION …`, `SET @a = 1, GLOBAL …`, also inside `/*!…*/`. Every other
+  refusal is an ERR packet (`1227`, `1142`, `1044`), every statement MySQL will not prepare is
+  `1295`, and MariaDB 10.6–11.4 answers `1227` in both protocols.
+- **Fix: a `SET` is never prepared.** `Protocol::Extended` (`exec_iter(sql, ())`) decides the
+  route from the text first (`extended_route`): a `SET` runs over `COM_QUERY` (`query_iter`,
+  rows counted), so the refusal is the server's `1227` with its message, on the same
+  connection, and the status is read again by the `COM_PING` as for any server error. A `SET`
+  binds no parameters here (none are ever bound), returns no rows and is one statement, so
+  its effect is the same over either protocol; every other statement is prepared as before,
+  so the server still finds what it will not prepare (`1295`: read-only `Unsupported`,
+  read-write `COM_QUERY`).
+- **Which texts are a `SET`.** Every reading of the text's start the server may make:
+  whitespace, `#` and `-- ` comments (MySQL's `--` only before whitespace or a control
+  character) and block comments (which do not nest) are skipped; an unversioned `/*!…*/` always
+  runs; a version-gated `/*!NNNNN …*/`, and `/*M!…*/` (MariaDB runs it, MySQL skips it), that
+  holds a statement is read both ways. A read-write connection runs the text as `COM_QUERY`
+  when any reading is a `SET` (it may run a multi-statement text, as `Protocol::Simple` does).
+  A read-only connection does only when every reading that holds a statement is a `SET`, so
+  the prepared protocol's refusal of a statement it cannot prepare is never bypassed; a text
+  read one way as a `SET` and another way as something else is `Unsupported` before anything
+  is sent (`/*!99999 SELECT 1 */ SET …`). More than 64 readings stay prepared.
+- Tests: `a_set_asked_for_as_a_prepared_statement_runs_as_text` (unit, every case above),
+  `a_refused_set_global_is_a_server_error_on_a_live_connection` (Docker, every MySQL-family
+  target, read-write and read-only: `1227`, MariaDB's `SET PERSIST` `1064`, the same backend,
+  `Idle`, nothing changed). The session's F2 test moved to `docker_m2b_bypass.rs`.

@@ -1285,3 +1285,21 @@ parked pooled MySQL session (`close_idle`, T17 R2; a mutation run without it tim
 `ssl_ca` trusts a committed test CA and an account `REQUIRE X509`: a compose change and an init
 script that only take effect on `cargo xtask docker up`, which only the controller runs. Routed
 back.
+
+## m2b-fix-f2 — F2 fixed
+
+- **F2 is fixed in the MySQL driver** (ADR 0002 `m2b-fix-f2`): MySQL 8.0 and 8.4 answered the
+  prepare of a refused `SET GLOBAL`/`SET PERSIST` with a bare OK packet, which the client
+  cannot read as a prepare reply, so the connection ended. The driver now runs a `SET` asked
+  for over the extended protocol as `COM_QUERY`. A read-only or read-write session of an
+  account without the privilege gets `Db` with the server's `1227` and its message, keeps its
+  connection (no `SessionLost`, no reconnect), and its next statement runs.
+- **Bypass suite.** M10 `SET GLOBAL max_connections = 999` and `SET PERSIST
+  max_connections = 999` as `hv_ro` are `1227` on mysql80 and mysql84 (the `lost` cells of
+  the `m2b-t23` MySQL table); `lost` is no longer an accepted outcome for those rows. Every
+  other MySQL and MariaDB row gave the `m2b-t23` result again, the `SET` rows that run (M3, M9,
+  M14) still `neutralised` and n-3's `SET PASSWORD` still a gap.
+- `f2_mysql_refused_set_global_is_a_refusal_not_a_lost_connection` left
+  `zz_docker_m2b_findings.rs` for `docker_m2b_bypass.rs`
+  (`mysql_refused_set_global_is_a_refusal_on_a_live_session`, under the bypass rows' fixture
+  lock, since a row may change `hv_ro`'s password for a moment). F1 and F3 stay there.

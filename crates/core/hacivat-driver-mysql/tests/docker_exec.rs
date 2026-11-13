@@ -923,3 +923,83 @@ fn password_guard_matrix() {
         InsecureAuth::RefuseUnlessVerified
     ));
 }
+
+// ## m2b-fix-f2
+#[tokio::test]
+#[ignore = "docker"]
+async fn a_refused_set_global_is_a_server_error_on_a_live_connection() {
+    // F2: MySQL 8.0/8.4 answer the prepare of a `SET GLOBAL`/`SET PERSIST` the account may not
+    // run with a bare OK packet, which `mysql_async` cannot read as a prepare reply, so the
+    // connection ended. Asked for as a prepared statement, a `SET` now runs over `COM_QUERY`:
+    // the refusal is the server's `1227` (MariaDB: `SET PERSIST` is a syntax error there), on
+    // the same connection, read-only or not, and nothing changed.
+    if !hacivat_testkit::docker_enabled() {
+        return;
+    }
+    for t in mysql_family() {
+        let mut a = admin(&t).await;
+        ensure_ro_role(&mut a, &t).await;
+        let before = text(&mut a, "SELECT @@global.max_connections").await;
+        for read_only in [false, true] {
+            let mut c = {
+                let _signing_in = RO_SIGN_IN.lock().await;
+                let settings = mode(default_mode(&t));
+                connect_conn(request(
+                    &t,
+                    params(&t, &settings),
+                    RO_USER,
+                    read_only,
+                    InsecureAuth::Allow,
+                ))
+                .await
+                .unwrap_or_else(|e| panic!("{}: {:?}", t.id, e.kind))
+            };
+            let id = c.backend_id();
+            // A version-gated executable comment the server runs: MariaDB skips MySQL's
+            // `/*!80000 …*/` (it is then an empty statement) and runs its own `/*M!…*/`.
+            let gated = if t.engine == DbmsKind::MariaDb {
+                "/*M!100000 SET @@global.max_connections = 999 */"
+            } else {
+                "/*!80000 SET @@global.max_connections = 999 */"
+            };
+            for sql in [
+                "SET GLOBAL max_connections = 999",
+                "SET PERSIST max_connections = 999",
+                "/*!SET @@global.max_connections = 999 */",
+                gated,
+            ] {
+                let Err(e) = c.execute(sql, ExecOpts::default()).await else {
+                    panic!("{} read_only={read_only} {sql}: it ran", t.id);
+                };
+                let want = if t.engine == DbmsKind::MariaDb && sql.contains("PERSIST") {
+                    1064
+                } else {
+                    1227
+                };
+                assert_eq!(
+                    (e.kind.clone(), vendor(&e)),
+                    (RawErrorKind::Db, Some(want)),
+                    "{} read_only={read_only} {sql}",
+                    t.id
+                );
+                assert_eq!(c.tx_status(), TxStatus::Idle, "{} {sql}", t.id);
+                assert_eq!(c.backend_id(), id, "{}: the same connection", t.id);
+                assert_eq!(text(&mut c, "SELECT 7").await, "7", "{} {sql}", t.id);
+            }
+            // A SET the account may run still runs, and keeps its effect.
+            let s = c
+                .execute("SET @hv_f2 = 2", ExecOpts::default())
+                .await
+                .unwrap_or_else(|e| panic!("{}: {:?}", t.id, e.kind));
+            assert_eq!(s.command_tag.as_deref(), Some("SET"));
+            assert_eq!(text(&mut c, "SELECT @hv_f2").await, "2", "{}", t.id);
+            Box::new(c).close().await;
+        }
+        assert_eq!(
+            text(&mut a, "SELECT @@global.max_connections").await,
+            before,
+            "{}",
+            t.id
+        );
+    }
+}

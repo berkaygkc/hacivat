@@ -34,11 +34,12 @@ use std::sync::Arc;
 
 use common::conformance::*;
 use hacivat_proto::{AccessLabel, DbmsKind};
-use hacivat_session::LiveState;
 use hacivat_session::pipeline::{Interaction, LiveConnection, connect};
 use hacivat_session::profile::Profile;
 use hacivat_session::session::{DenyLayer, ExecErrorKind, Reply};
+use hacivat_session::{ConnectionEvent, LiveState};
 use hacivat_testkit::{DockerTarget, targets};
+use tokio::sync::broadcast;
 
 // ---------------------------------------------------------------------------------------------
 // Rows
@@ -246,14 +247,13 @@ const MYSQL_PRIVILEGE_ONLY: &[Row] = &[
         "SELECT a FROM hv_t23_bypass INTO OUTFILE '/tmp/hv_t23_out'",
         &[MY_ACCESS, MY_PRIV, "1290"],
     ),
-    // MySQL 8 ends the connection when an account without SYSTEM_VARIABLES_ADMIN sends
-    // `SET GLOBAL`/`SET PERSIST` as a prepared statement (finding F2, `zz_docker_m2b_findings`):
-    // the session sees a lost connection and reconnects; the side channel shows nothing changed.
-    ("M10", "SET GLOBAL max_connections = 999", &[MY_PRIV, LOST]),
+    // ## m2b-fix-f2: F2 is fixed (a `SET` runs over `COM_QUERY`), so a lost connection no
+    // longer counts as stopped here: the server's refusal is owed.
+    ("M10", "SET GLOBAL max_connections = 999", &[MY_PRIV]),
     (
         "M10",
         "SET PERSIST max_connections = 999",
-        &[MY_PRIV, "1064", LOST],
+        &[MY_PRIV, "1064"],
     ),
     // 3615: the variable is not persisted; nothing to reset, nothing reset.
     (
@@ -1081,6 +1081,77 @@ async fn mariadb_bypass_rows_recorded() {
         let record = mysql_bypass_rows(&t, false).await;
         record.write(&t);
         failures.extend(record.failures);
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// ## m2b-fix-f2
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn mysql_refused_set_global_is_a_refusal_on_a_live_session() {
+    // F2 (moved from `zz_docker_m2b_findings`; fixed in the MySQL driver). MySQL 8.0 and 8.4
+    // answer the prepare of a `SET GLOBAL …`/`SET PERSIST …` that an account without
+    // SYSTEM_VARIABLES_ADMIN sends with a bare OK packet, which `mysql_async` cannot read as a
+    // prepare reply: the connection ended, the user was told "connection lost, outcome
+    // unknown" for a statement the server refused, and the session reconnected. The driver now
+    // runs every `SET` asked for as a prepared statement over `COM_QUERY`, where the server
+    // answers `1227`: the refusal, with the server's message, on a session that stays up (no
+    // `SessionLost`, the next statement runs), read-write and read-only.
+    if !docker_enabled() {
+        return;
+    }
+    let mut failures = Vec::new();
+    for t in targets(Some(DbmsKind::MySql)) {
+        // The bypass rows may change `hv_ro`'s password for a moment (n-3).
+        let _one = fixture_lock(&t).await;
+        for read_only in [false, true] {
+            let mut p = profile_for(&t, auto_or_require(&t)).user("hv_ro");
+            p.read_only = read_only;
+            let on = OnManager::connect(deps(), p).await;
+            let mut events = on.m.events();
+            for sql in [
+                "SET GLOBAL max_connections = 999",
+                "SET PERSIST max_connections = 999",
+            ] {
+                let reply = run(&on.s, sql).await;
+                let refused = matches!(
+                    &reply,
+                    Err(e) if e.kind == ExecErrorKind::Db
+                        && code_of(e.server.as_ref()).as_deref() == Some("1227")
+                        && e.server.as_ref().is_some_and(|m| !m.text.is_empty())
+                );
+                if !refused {
+                    failures.push(format!(
+                        "{} read_only={read_only} `{sql}`: {:?}",
+                        t.id,
+                        reply.map(|s| s.row_count).map_err(|e| e.kind)
+                    ));
+                }
+            }
+            // The next statement runs on the same session, which never lost its connection.
+            let next = run(&on.s, "SELECT 1").await;
+            if let Err(e) = next {
+                failures.push(format!("{} read_only={read_only}: {:?}", t.id, e.kind));
+            }
+            loop {
+                match events.try_recv() {
+                    Ok(ConnectionEvent::SessionLost { lost, .. }) => failures.push(format!(
+                        "{} read_only={read_only}: the session was lost ({lost:?})",
+                        t.id
+                    )),
+                    Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                    Err(_) => break,
+                }
+            }
+            if !matches!(on.m.state(on.id()), LiveState::Connected(_)) {
+                failures.push(format!(
+                    "{} read_only={read_only}: {:?}",
+                    t.id,
+                    on.m.state(on.id())
+                ));
+            }
+            on.shutdown().await;
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
