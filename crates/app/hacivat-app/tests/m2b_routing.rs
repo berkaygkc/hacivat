@@ -116,16 +116,25 @@ fn ask_through_port(vcx: &VisualTestContext, q: Question) -> Rc<RefCell<Option<A
     slot
 }
 
+// ## m2b-t21-prompts: the prompts are real now: each question opens its layer (or, for a stub,
+// answers at once), and Escape answers `Cancelled` and leaves no layer behind.
 #[gpui::test]
-fn every_new_question_routes_and_stub_answers_cancelled(cx: &mut TestAppContext) {
+fn every_new_question_routes_and_escape_answers_cancelled(cx: &mut TestAppContext) {
     let vcx = shell_with_connections(cx, "en");
     for q in all_m2b_questions() {
         let what = format!("{q:?}");
         let a = ask_through_port(vcx, q);
+        settle_until(vcx, WAIT, || {
+            a.borrow().is_some() || !layer_ids(vcx).is_empty()
+        });
+        if a.borrow().is_none() {
+            vcx.simulate_keystrokes("escape");
+        }
         settle_until(vcx, WAIT, || a.borrow().is_some());
         assert!(matches!(*a.borrow(), Some(Answer::Cancelled)), "{what}");
+        settle_until(vcx, WAIT, || layer_ids(vcx).is_empty());
     }
-    assert!(layer_ids(vcx).is_empty(), "no stub leaves a layer behind");
+    assert!(layer_ids(vcx).is_empty(), "no prompt leaves a layer behind");
 }
 
 /// One of each event M2b's `ConnectionManager` sends.

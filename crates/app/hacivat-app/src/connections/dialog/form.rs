@@ -338,8 +338,15 @@ pub(crate) fn retention_options(keyring: bool) -> Vec<SelectOption> {
                 Retention::Never => (ids::hv::CONN_RET_NEVER, ids::hv::CONN_RET_NEVER_H),
                 Retention::UntilRestart => (ids::hv::CONN_RET_RESTART, ids::hv::CONN_RET_RESTART_H),
                 Retention::ForSession => (ids::hv::CONN_RET_SESSION, ids::hv::CONN_RET_SESSION_H),
+                // ## m2b-t21-prompts: "Forever (encrypted file)" while the vault holds the
+                // Forever secrets (Q23); re-read on every render, so it follows the probe.
                 Retention::Forever if keyring => {
-                    (ids::hv::CONN_RET_FOREVER, ids::hv::CONN_RET_FOREVER_H)
+                    let (label, hint) = crate::connections::vault_dialog::forever_texts();
+                    return SelectOption {
+                        label,
+                        hint: Some(hint),
+                        disabled: false,
+                    };
                 }
                 Retention::Forever => (ids::hv::CONN_RET_FOREVER, ids::hv::CONN_RET_FOREVER_OFF_H),
             };

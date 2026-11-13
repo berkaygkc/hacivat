@@ -779,3 +779,72 @@ the vault, the session overlay, the keyring CI and the deferrals.
 - **Debug.** `SessionOverlay` derives `Debug`, and every secret in it is a `SecretString`, which
   prints redacted. `SessionManager`'s `Debug` shows only whether an overlay exists. Neither
   type derives `PartialEq`.
+
+## m2b-t21 — SSH and vault prompts
+
+- **Host key changed is a hard stop (Q34).** Cancel is the primary, has the initial focus and is
+  the only Enter default: Enter cancels wherever the focus is, the trust action included, and
+  only a click or Space on "Remove the old key and trust the new one" runs it. Enter still
+  copies on a Copy button and retries on Try again, which widen nothing. The key-up Enter is
+  suppressed in the capture phase, so a focused button is never pressed twice.
+- **Hacivat never edits `~/.ssh`.** The replace button exists only when the stored key is in
+  Hacivat's own store; it calls `KnownHosts::replace` on the core runtime, then reconnects. The
+  reconnect checks the key again, so a replace that failed (the line went meanwhile, the key is
+  revoked) trusts nothing. For an OpenSSH file the dialog shows `ssh-keygen -R` built from
+  `known_hosts::host_pattern` (the bare host on port 22, else `"[host]:port"`), with `-f` for
+  any file other than `~/.ssh/known_hosts`; Try again works without a restart because the
+  stores re-read a changed file (Q24).
+- **The command is shell-safe or absent.** The host pattern may hold only ASCII letters,
+  digits and `.-_:%[]`, and the file only `._/~+@,-` besides letters and digits; neither may
+  start with a dash (it would read as an option). Anything else gets no command at all, rather
+  than a quoted one a user might paste into the wrong shell. Host names were validated when the
+  profile was saved; this is the second check.
+- **Server text is data, never prose (T9 review M3).** Keyboard-interactive name, instruction
+  and prompt labels are shown in their own mono fields, never inside a translated sentence. They
+  are made visible as OpenSSH's `strnvis` does: a backslash is doubled first; C0 and C1
+  controls (ANSI escapes included; only `\n` kept) become `\ooo`; bidi controls and invisible
+  format characters (U+061C, U+180E, U+200B–U+200F, U+2028–U+202E, U+2060–U+2069, U+FEFF)
+  become `\u{…}`. The name and each label are capped at 256 characters, the instruction at
+  2,048, and the server text scrolls on its own (119 px). A round with more than 8 prompts is
+  refused (answered `Cancelled`) without opening a dialog.
+- **Secret fields.** Every prompt field that holds a secret is the M2a masked `TextInput`:
+  bullets painted, nothing copied, an empty accessible value, and `text_for_range` answers
+  bullets (the I2 rule). A value becomes a `SecretString` the moment it is read and the field is
+  cleared then; a prompt clears every field when it closes, cancelled or answered. The typed
+  text in `TextInput`'s own buffer is not zeroized (B14, M9).
+- **Remember in the SSH secret prompt is shown, not chosen.** The answer carries only the
+  secret, and the connect stores it under the profile's `ssh_retention` after it worked; a
+  choice made in the prompt could not take effect, and saving the profile mid-connect would
+  cancel the connect (RF5). The row shows where the secret will go, with the vault's label when
+  the vault holds Forever secrets.
+- **A Forever put waits for the vault (T1 review M7, Q38).** Unless the keyring or the memory
+  backend holds Forever secrets, a save's queued job reads the vault's state on the blocking
+  pool. Only when the vault is missing or locked does it ask the UI (Create or Unlock) and wait;
+  Not now or Cancel lets the put fall back to Until restart with the M2a toast. A save that needs
+  no dialog never waits for the UI thread, so the bounded quit drain still lands it (P15).
+- **Vault calls never run on the UI thread (T6 review N1).** `exists`, `is_unlocked`, `create`,
+  `unlock`, `reset` and `resettable` run on the core runtime's blocking pool and answer through
+  a `oneshot`. The Remember label reads only the backend's cached choice.
+- **Attempts never leak across gestures.** The pipeline counts unlock attempts per connect
+  (Task 14). A delete, duplicate or save that unlocks the vault itself counts in its dialog,
+  from 1 for each gesture; Cancel after a wrong password ends the gesture, and three misses end
+  it too. There is no lockout (B13: the file is offline-attackable anyway).
+- **A locked vault never orphans a secret (T6 carry).** A delete or duplicate that meets
+  `VaultLocked` asks to unlock, then runs its secret calls again; declined, the error is
+  reported, never swallowed.
+- **SSH secrets follow their hop (T20 carry).** Slots are keyed by hop index. An edit that adds,
+  removes or reorders jump hosts moves each hop's stored password and passphrase with the hop
+  (matched by host, ASCII-folded, port, user and sign-in method). A hop that is gone or changed
+  loses its secrets (read first, then removed), so a secret is never sent to the wrong hop and
+  none waits past the end for a future hop.
+- **Reset needs the typed word and a regular file.** The Danger button stays disabled until
+  the field equals `hv-conn-vault-reset-word` exactly (no casing, no trimming) and is never the
+  default: Enter does nothing in the reset dialog. A symlink or any other non-file at
+  `vault.bin` is now `Denied` (it was `VaultCorrupt`, which offers a reset) and `reset` refuses
+  it; the dialog offers no reset until the blocking pool said the path holds a regular file
+  (T6 review N3).
+- **A hung instance cannot stall the vault (T6 review N2).** `vault.bin.lock` is taken with
+  `try_lock` for at most 5 s (polled every 20 ms); after that a read goes on unlocked and a
+  write refuses with `VaultReadOnly`, which a Forever put falls back from (Q38).
+- **`copy_all` is not for SSH slots (T1 re-review N1).** Its doc says so; a duplicate copies the
+  DB slots and the SSH slots with `copy_slots`, each under its own retention.

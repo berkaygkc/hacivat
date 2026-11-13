@@ -486,8 +486,9 @@ fn a_symlink_at_the_vault_path_is_refused() {
     std::fs::remove_file(&path).unwrap();
     std::os::unix::fs::symlink(&victim, &path).unwrap();
     // Fix round 1: every write re-reads the file under the lock first, and a link is not a
-    // vault file, so the write stops there (`VaultCorrupt`) without writing anything.
-    assert_eq!(v.put(&key(), &sec("x")), Err(SecretError::VaultCorrupt));
+    // vault file, so the write stops there without writing anything. ## m2b-t21-prompts (T6
+    // review N3): a link is `Denied`, not `VaultCorrupt` (no reset is ever offered for it).
+    assert_eq!(v.put(&key(), &sec("x")), Err(SecretError::Denied));
     assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
     assert!(
         std::fs::symlink_metadata(&path)
@@ -503,7 +504,58 @@ fn a_symlink_at_the_vault_path_is_refused() {
     std::fs::remove_file(&path).unwrap();
     std::os::unix::fs::symlink(&real_path, &path).unwrap();
     v.lock();
-    assert_eq!(v.unlock(sec(MASTER)), Err(SecretError::VaultCorrupt));
+    assert_eq!(v.unlock(sec(MASTER)), Err(SecretError::Denied));
+}
+
+// ## m2b-t21-prompts
+
+/// T6 review N3: a symlink at `vault.bin` is never reset (the link stays, and so does what it
+/// points to), and the vault says so before anyone offers a reset.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_vault_is_never_reset() {
+    let (v, path) = created_with_secret();
+    assert!(v.resettable(), "a regular vault file may be reset");
+    let elsewhere = tmp_dir().join("dotfiles-vault.bin");
+    std::fs::rename(&path, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+    assert!(!v.resettable());
+    assert_eq!(v.reset(), Err(SecretError::Denied));
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link stays"
+    );
+    assert!(elsewhere.exists(), "the file behind it stays");
+    std::fs::remove_file(&path).unwrap();
+    assert!(v.resettable(), "nothing at the path may be reset (a no-op)");
+}
+
+/// T6 review N2: a lock another instance holds for good makes a vault call give up after a
+/// bounded wait (a write refuses with `VaultReadOnly`, which a Forever put falls back from)
+/// instead of stalling the blocking pool forever.
+#[cfg(unix)]
+#[test]
+fn a_held_lock_never_stalls_a_vault_call_forever() {
+    let (v, path) = created_with_secret();
+    let mut lock_path = path.clone().into_os_string();
+    lock_path.push(".lock");
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    holder.lock().unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(v.put(&key(), &sec("x")), Err(SecretError::VaultReadOnly));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "bounded"
+    );
+    holder.unlock().unwrap();
+    v.put(&key(), &sec("x")).unwrap();
 }
 
 /// A stale temp file (or a symlink planted there) is replaced, never written through, and the

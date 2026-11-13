@@ -128,6 +128,11 @@ pub fn fix_actions(error: &ConnectError, rejections: u8, with_edit: bool) -> Vec
             FixId::SupportedVersions => out.push(FixAction::SupportedVersions),
             FixId::ConnectAnyway => out.push(FixAction::ConnectAnyway),
             FixId::EncryptWithoutVerifying => out.push(FixAction::EncryptWithoutVerifying),
+            // ## m2b-t21-prompts: the review opens over the error dialog only (the inline test
+            // strip has no saved connection to reconnect); it needs the changed key.
+            FixId::ReviewHostKey if with_edit && error.host_key.is_some() => {
+                out.push(FixAction::ReviewHostKey);
+            }
             // M2b flows (certificate review, SSH, …) and the edit button inline.
             _ => {}
         }
@@ -148,10 +153,7 @@ pub fn fix_buttons(actions: &[FixAction], cx: &App) -> Vec<FixButton> {
         .filter(|action| {
             !matches!(
                 action,
-                FixAction::ReviewCertificate
-                    | FixAction::ImportCa
-                    | FixAction::ConnectThroughSsh
-                    | FixAction::ReviewHostKey
+                FixAction::ReviewCertificate | FixAction::ImportCa | FixAction::ConnectThroughSsh
             )
         })
         .map(|action| {
@@ -190,14 +192,25 @@ pub fn fix_buttons(actions: &[FixAction], cx: &App) -> Vec<FixButton> {
                     "fix-require".into(),
                     tr(cx, ids::hv::CONN_FIX_REQUIRE, NoArgs),
                 ),
+                // ## m2b-t21-prompts
+                FixAction::ReviewHostKey => (
+                    "fix-review-host-key".into(),
+                    tr(cx, ids::hv::CONN_FIX_REVIEW_HOST_KEY, NoArgs),
+                ),
                 // Filtered out above until their owners add the labels.
                 FixAction::ReviewCertificate
                 | FixAction::ImportCa
-                | FixAction::ConnectThroughSsh
-                | FixAction::ReviewHostKey => (SharedString::default(), SharedString::default()),
+                | FixAction::ConnectThroughSsh => {
+                    (SharedString::default(), SharedString::default())
+                }
             };
             let kind = match action {
                 FixAction::ConnectAnyway => ButtonKind::Ghost,
+                // ## m2b-t21-prompts: reviewing is safe (the review's default is Cancel).
+                FixAction::ReviewHostKey if !primary_taken => {
+                    primary_taken = true;
+                    ButtonKind::Primary
+                }
                 FixAction::ReenterPassword | FixAction::TryAgain | FixAction::UseDatabase(_)
                     if !primary_taken =>
                 {
