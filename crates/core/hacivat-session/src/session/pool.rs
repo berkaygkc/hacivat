@@ -11,25 +11,31 @@
 //!   read-write session, nor the other way round. Dropping a [`PooledSession`] resets it
 //!   (`Request::Reset`, HV-SESS-08) and only then returns it to the idle pool, so no two
 //!   borrowers ever hold one session. A failed reset closes it (Task 7 already broke it), and
-//!   the permit goes. An idle session closes 60 s after its release. A `Broken` or
-//!   `Disconnected` session is never handed out again.
+//!   the permit goes. A reset session never parks while a request waits for a permit (review
+//!   C1): a console, editor or job gets its permit (the session closes), else a `pooled`
+//!   request of the same key gets the session itself, else any other waiter gets the permit.
+//!   An idle session closes 60 s after its release. A `Broken` or `Disconnected` session is
+//!   never handed out again.
 //! - **Single-session mode** (`Profile::single_session`, and SQLite) gives `open` and `pooled`
 //!   the default session. A borrow of it is a guard that never resets (Q19: no `ROLLBACK` of the
 //!   user's transaction); its requests queue behind the console's in the actor's FIFO.
 //!   An MCP session never shares a user's session (HV-SESS-02), and a read-only request never
-//!   shares a read-write default: both get their own session.
+//!   shares a read-write default (decided on the default's own snapshot): both get their own
+//!   session, or are refused at once when the budget is 1 (SQLite), where they could only wait
+//!   forever.
 //! - **The overlay (Q17).** After each successful connect the manager applies the connect's
 //!   `profile_changes` to its in-memory profile, records the plaintext consent and keeps the
 //!   secrets that worked (`SecretString`, zeroized on drop). Every later connect of the
 //!   profile (sessions, pools, side connections; Task 17's reconnects read [`overlay`]) uses
 //!   them, so a pin, a CA or a `Never` password answered once holds for the live connection.
 //!   `close_all` (disconnect, `forget`, quit) drops it; it is never persisted, and its `Debug`
-//!   redacts the secrets.
+//!   redacts the secrets. A connect is absorbed only while the saved profile still names the
+//!   destination it connected to (review I1); a new overlay starts from the saved profile.
 //! - No environment plan or probe runs at spawn (Q27): connect already set the session up.
 //!
 //! [`overlay`]: SessionManager::overlay
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::mem;
 use std::ops::Deref;
@@ -71,6 +77,9 @@ pub struct SessionOverlay {
 /// A session borrowed from the pool. Dropping it resets it and returns it to the idle pool
 /// (closed after 60 s idle); a borrow of the default session (Single mode, SQLite) is never
 /// reset (Q19).
+///
+/// It derefs to the session's [`SessionHandle`], which is `Clone`: a clone must not outlive
+/// the borrow, since the session goes to the next borrower once this guard drops.
 pub struct PooledSession {
     handle: SessionHandle,
     /// `None` for a borrow of the default session: nothing happens on drop.
@@ -146,10 +155,16 @@ impl Overlay {
 
     /// Replaces the profile (the app saved it). The consent and the secrets stay while the
     /// profile still names the same destination; an edit that sends the connection elsewhere
-    /// drops them, so a secret never reaches a server it was not typed for.
+    /// drops them, so a secret never reaches a server it was not typed for. The plaintext
+    /// consent also goes when the TLS mode changes or "allow public plaintext" is unticked
+    /// (review M3): the user took back what it answered.
     fn replace_profile(&mut self, profile: Arc<Profile>) {
         if !same_destination(&self.profile, &profile) {
             self.secrets = SessionSecrets::default();
+            self.plaintext_consent = false;
+        }
+        let (old, new) = (&self.profile.tls, &profile.tls);
+        if old.mode != new.mode || (old.allow_public_plaintext && !new.allow_public_plaintext) {
             self.plaintext_consent = false;
         }
         self.profile = profile;
@@ -257,6 +272,16 @@ struct Idle {
 
 type PoolKey = (SessionKind, bool);
 
+/// Where a released session goes once it is reset.
+enum AfterReset {
+    /// To a `pooled` request that waited for one.
+    Handed,
+    /// Closed: its permit goes to a waiting request, or the manager closed everything.
+    Close,
+    /// Into the idle pool, from this release's token.
+    Parked(u64),
+}
+
 struct State {
     /// The profile as saved (`update_profile`).
     profile: Arc<Profile>,
@@ -269,6 +294,37 @@ struct State {
     idle: HashMap<PoolKey, Vec<Idle>>,
     next_token: u64,
     default: Option<SessionHandle>,
+    /// `pooled` requests waiting for a permit, by key: a released session goes to the first
+    /// (review C1).
+    waiting: HashMap<PoolKey, VecDeque<Waiter>>,
+    next_waiter: u64,
+}
+
+/// A `pooled` request waiting for a released session or a permit, whichever comes first.
+struct Waiter {
+    id: u64,
+    tx: oneshot::Sender<SessionHandle>,
+}
+
+/// Takes a waiter out of the list when its request ends (served, or dropped).
+struct WaiterGuard {
+    manager: Weak<SessionManager>,
+    key: PoolKey,
+    id: u64,
+}
+
+impl Drop for WaiterGuard {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            let mut st = manager.lock();
+            if let Some(queue) = st.waiting.get_mut(&self.key) {
+                queue.retain(|w| w.id != self.id);
+                if queue.is_empty() {
+                    st.waiting.remove(&self.key);
+                }
+            }
+        }
+    }
 }
 
 impl State {
@@ -280,14 +336,32 @@ impl State {
     }
 
     /// Takes the overlay's part of `live` (its secrets leave the connection) and returns the
-    /// profile the session runs with.
-    fn absorb(&mut self, used: &Arc<Profile>, live: &mut LiveConnection) -> Arc<Profile> {
+    /// profile the session runs with. `None` when the saved profile no longer names the
+    /// destination `used` connected to (review I1): nothing of that connect is kept, and the
+    /// caller closes it. A new overlay starts from the saved profile, never from the
+    /// connect's snapshot.
+    fn absorb(&mut self, used: &Profile, live: &mut LiveConnection) -> Option<Arc<Profile>> {
+        if !same_destination(used, &self.profile) {
+            return None;
+        }
         let secrets = mem::take(&mut live.secrets_used);
-        let overlay = self
-            .overlay
-            .get_or_insert_with(|| Overlay::new(used.clone()));
+        let saved = self.profile.clone();
+        let overlay = self.overlay.get_or_insert_with(|| Overlay::new(saved));
         overlay.absorb(&live.profile_changes, secrets, live.plaintext_consent);
-        overlay.profile.clone()
+        Some(overlay.profile.clone())
+    }
+
+    /// Hands a reset session to a request of `key` waiting for one; false when none waits.
+    fn hand_to_waiter(&mut self, key: &PoolKey, handle: &SessionHandle) -> bool {
+        let Some(queue) = self.waiting.get_mut(key) else {
+            return false;
+        };
+        while let Some(waiter) = queue.pop_front() {
+            if waiter.tx.send(handle.clone()).is_ok() {
+                return true;
+            }
+        }
+        false
     }
 
     /// Drops what the manager keeps of session `id`.
@@ -327,6 +401,12 @@ fn purpose(kind: &SessionKind) -> Purpose {
         SessionKind::Introspection { .. } | SessionKind::Service => Purpose::Probe,
         _ => Purpose::Main,
     }
+}
+
+/// The error of a dedicated session that a budget of 1 can never serve next to the default
+/// one (review M2): it would wait forever.
+fn no_room() -> ConnectError {
+    pipeline::error(ErrClass::ServerTooManyConnections, Phase::Validate)
 }
 
 /// The error of work that `close_all` overtook.
@@ -380,6 +460,8 @@ impl SessionManager {
                 idle: HashMap::new(),
                 next_token: 0,
                 default: None,
+                waiting: HashMap::new(),
+                next_waiter: 0,
             }),
             default_lock: tokio::sync::Mutex::new(()),
             me: me.clone(),
@@ -400,13 +482,6 @@ impl SessionManager {
         p.single_session || p.engine == hacivat_proto::DbmsKind::Sqlite
     }
 
-    /// Whether `spec` is served by the shared default session.
-    fn shares_default(&self, spec: &SessionSpec) -> bool {
-        self.single()
-            && spec.department != Department::Mcp
-            && (!spec.read_only || self.lock().current().read_only)
-    }
-
     /// Opens a session for `spec` (the module docs). Dropping the future at any point gives
     /// back its place in the budget queue or its permit, and cancels its connect.
     pub fn open(
@@ -415,60 +490,131 @@ impl SessionManager {
         ix: Interaction,
     ) -> BoxFuture<'static, Result<SessionHandle, ConnectError>> {
         let this = self.clone();
-        if self.shares_default(&spec) {
-            return Box::pin(async move { this.default_or_open(ix).await });
+        if self.single() {
+            return Box::pin(async move {
+                if spec.department != Department::Mcp
+                    && let Some(handle) = this.shared(spec.read_only, ix.clone()).await?
+                {
+                    return Ok(handle);
+                }
+                // MCP, or a read-only request the read-write default cannot serve: its own
+                // session (HV-SESS-02), if the budget has room for one next to the default.
+                if this.budget.max() <= 1 {
+                    return Err(no_room());
+                }
+                let permit = this.permit(priority(&spec.kind)).await;
+                this.start(spec, ix, permit, false).await
+            });
         }
         // Queued now, not at the first poll: the order of calls is the order of service.
         let permit = self.permit(priority(&spec.kind));
+        // Only `open` makes the app's own console the default (review M1: never a borrow).
+        let as_default = spec.kind == SessionKind::Console(ClientId::DEFAULT)
+            && spec.department != Department::Mcp;
         Box::pin(async move {
             let permit = permit.await;
-            this.start(spec, ix, permit, false).await
+            this.start(spec, ix, permit, as_default).await
         })
     }
 
     /// Borrows a pooled session of `kind`: an idle one of the same `(kind, read_only)`, else a
-    /// new one (headless).
+    /// new one (headless). A request that waits for a permit also takes the first session of
+    /// its key released meanwhile (review C1).
     pub fn pooled(
         self: &Arc<Self>,
         kind: SessionKind,
     ) -> BoxFuture<'static, Result<PooledSession, ConnectError>> {
-        let this = self.clone();
+        let read_only = self.lock().current().read_only;
         if self.single() {
+            let this = self.clone();
             return Box::pin(async move {
-                let handle = this.default_or_open(Interaction::Headless).await?;
+                if let Some(handle) = this.shared(read_only, Interaction::Headless).await? {
+                    return Ok(PooledSession {
+                        handle,
+                        release: None,
+                    });
+                }
+                // The profile turned read-only under a read-write default (review I2).
+                if this.budget.max() <= 1 {
+                    return Err(no_room());
+                }
+                this.pooled_owned(kind, read_only).await
+            });
+        }
+        self.pooled_owned(kind, read_only)
+    }
+
+    /// A pooled session the pool owns (reset on release).
+    fn pooled_owned(
+        self: &Arc<Self>,
+        kind: SessionKind,
+        read_only: bool,
+    ) -> BoxFuture<'static, Result<PooledSession, ConnectError>> {
+        let key = (kind.clone(), read_only);
+        let release = Release {
+            manager: self.me.clone(),
+            kind: kind.clone(),
+        };
+        if let Some(handle) = self.take_idle(&key) {
+            return Box::pin(async move {
                 Ok(PooledSession {
                     handle,
-                    release: None,
+                    release: Some(release),
                 })
             });
         }
-        let read_only = self.lock().current().read_only;
-        if let Some(handle) = self.take_idle(&(kind.clone(), read_only)) {
-            let release = Some(Release {
-                manager: self.me.clone(),
-                kind,
-            });
-            return Box::pin(async move { Ok(PooledSession { handle, release }) });
-        }
         let permit = self.permit(priority(&kind));
+        let (mut handed, waiter) = self.wait_for_release(key);
+        let this = self.clone();
         Box::pin(async move {
-            let permit = permit.await;
-            let spec = SessionSpec {
-                kind: kind.clone(),
-                read_only,
-                department: Department::Introspection,
+            let handed_over = tokio::select! {
+                biased;
+                Ok(handle) = &mut handed => Ok(handle),
+                permit = permit => {
+                    // Out of the list first; a session handed meanwhile still wins.
+                    drop(waiter);
+                    match handed.try_recv() {
+                        Ok(handle) => Ok(handle),
+                        Err(_) => Err(permit),
+                    }
+                }
             };
-            let handle = this
-                .start(spec, Interaction::Headless, permit, false)
-                .await?;
+            let handle = match handed_over {
+                // Any permit this request won goes straight back to the budget.
+                Ok(handle) => handle,
+                Err(permit) => {
+                    let spec = SessionSpec {
+                        kind,
+                        read_only,
+                        department: Department::Introspection,
+                    };
+                    this.start(spec, Interaction::Headless, permit, false)
+                        .await?
+                }
+            };
             Ok(PooledSession {
                 handle,
-                release: Some(Release {
-                    manager: this.me.clone(),
-                    kind,
-                }),
+                release: Some(release),
             })
         })
+    }
+
+    /// Puts a `pooled` request on the list a released session of `key` is handed to.
+    fn wait_for_release(&self, key: PoolKey) -> (oneshot::Receiver<SessionHandle>, WaiterGuard) {
+        let (tx, rx) = oneshot::channel();
+        let mut st = self.lock();
+        let id = st.next_waiter;
+        st.next_waiter += 1;
+        st.waiting
+            .entry(key.clone())
+            .or_default()
+            .push_back(Waiter { id, tx });
+        let guard = WaiterGuard {
+            manager: self.me.clone(),
+            key,
+            id,
+        };
+        (rx, guard)
     }
 
     /// The default session, while it can run requests.
@@ -560,22 +706,45 @@ impl SessionManager {
         }
     }
 
-    /// The default session, opened (once, whoever asks) when there is none that can run.
-    async fn default_or_open(
+    /// Single mode: the default session for a request, opened (once, whoever asks) when there
+    /// is none that can run. `None` when a `read_only` request would land on a read-write
+    /// default: the decision reads the session's own snapshot, not the profile flag (review
+    /// I2). The default-session lock is never held while waiting for a permit (review M2).
+    async fn shared(
         self: &Arc<Self>,
+        read_only: bool,
         ix: Interaction,
-    ) -> Result<SessionHandle, ConnectError> {
-        let _one_at_a_time = self.default_lock.lock().await;
+    ) -> Result<Option<SessionHandle>, ConnectError> {
+        let serves = |h: SessionHandle| (!read_only || h.state.borrow().read_only).then_some(h);
+        let mut one_at_a_time = self.default_lock.lock().await;
         if let Some(handle) = self.default_session() {
-            return Ok(handle);
+            return Ok(serves(handle));
         }
-        let permit = self.permit(Priority::Console).await;
+        // A new default is read-only exactly when the profile is.
+        if read_only && !self.lock().current().read_only {
+            return Ok(None);
+        }
+        let permit = match self.budget.try_acquire(Priority::Console) {
+            Some(permit) => permit,
+            None => {
+                drop(one_at_a_time);
+                let permit = self.permit(Priority::Console).await;
+                one_at_a_time = self.default_lock.lock().await;
+                if let Some(handle) = self.default_session() {
+                    // Someone else opened it meanwhile; this permit goes back.
+                    return Ok(serves(handle));
+                }
+                permit
+            }
+        };
         let spec = SessionSpec {
             kind: SessionKind::Console(ClientId::DEFAULT),
             read_only: false,
             department: Department::Console,
         };
-        self.start(spec, ix, permit, true).await
+        let handle = self.start(spec, ix, permit, true).await?;
+        drop(one_at_a_time);
+        Ok(Some(handle))
     }
 
     /// Connects and spawns a session for `spec` on `permit`.
@@ -593,9 +762,6 @@ impl SessionManager {
             read_only: spec.read_only || profile.read_only,
             ..spec
         };
-        let as_default = as_default
-            || (spec.kind == SessionKind::Console(ClientId::DEFAULT)
-                && spec.department != Department::Mcp);
         match self.register(spec, profile, live, permit, epoch, as_default) {
             Ok(handle) => Ok(handle),
             Err(live) => {
@@ -660,7 +826,13 @@ impl SessionManager {
         };
         let used = {
             let mut st = self.lock();
-            (st.epoch == epoch).then(|| st.absorb(&profile, &mut live))
+            // After `close_all`, or once the saved profile points elsewhere (review I1),
+            // nothing of this connect is kept.
+            if st.epoch == epoch {
+                st.absorb(&profile, &mut live)
+            } else {
+                None
+            }
         };
         match used {
             Some(profile) => Ok((live, profile, epoch)),
@@ -759,12 +931,17 @@ impl SessionManager {
                 return;
             }
             let key = (kind, handle.state.borrow().read_only);
-            let parked = manager
-                .upgrade()
-                .and_then(|m| m.park(&handle, key.clone(), epoch));
-            let Some(token) = parked else {
-                let _ = handle.close(ClosePolicy::RollBack).await;
-                return;
+            let next = manager.upgrade().map_or(AfterReset::Close, |m| {
+                m.after_reset(&handle, key.clone(), epoch)
+            });
+            let token = match next {
+                AfterReset::Handed => return,
+                AfterReset::Close => {
+                    // Its permit goes to the request that waits for one.
+                    let _ = handle.close(ClosePolicy::RollBack).await;
+                    return;
+                }
+                AfterReset::Parked(token) => token,
             };
             let id = handle.id;
             // The pool holds it now.
@@ -777,12 +954,27 @@ impl SessionManager {
         });
     }
 
-    /// Parks a reset session; `None` when `close_all` ran since its release, or the manager
-    /// already forgot it.
-    fn park(&self, handle: &SessionHandle, key: PoolKey, epoch: u64) -> Option<u64> {
+    /// Where a reset session goes: `Close` when `close_all` ran since its release or the
+    /// manager already forgot it.
+    ///
+    /// Requests waiting for a permit come first (review C1): a higher-priority one (a console,
+    /// an editor, a job) gets the permit (the session closes); otherwise a `pooled` request of
+    /// the same key gets the session itself; otherwise any other waiter gets the permit. Only
+    /// when nobody waits is the session parked.
+    fn after_reset(&self, handle: &SessionHandle, key: PoolKey, epoch: u64) -> AfterReset {
         let mut st = self.lock();
         if st.epoch != epoch || !st.sessions.contains_key(&handle.id) {
-            return None;
+            return AfterReset::Close;
+        }
+        let first = self.budget.first_waiter();
+        if first.is_some_and(|p| p < priority(&key.0)) {
+            return AfterReset::Close;
+        }
+        if st.hand_to_waiter(&key, handle) {
+            return AfterReset::Handed;
+        }
+        if first.is_some() {
+            return AfterReset::Close;
         }
         let token = st.next_token;
         st.next_token += 1;
@@ -790,7 +982,7 @@ impl SessionManager {
             handle: handle.clone(),
             token,
         });
-        Some(token)
+        AfterReset::Parked(token)
     }
 
     /// Takes session `id` out of the pool if it is still parked from release `token`.
@@ -995,6 +1187,35 @@ mod tests {
             ..Profile::clone(&base)
         }));
         assert!(o.view().secrets.db.is_none());
+    }
+
+    #[test]
+    fn the_plaintext_consent_goes_with_a_tls_change_and_the_secrets_stay() {
+        let base = profile();
+        // The TLS mode changes.
+        let mut o = Overlay::new(base.clone());
+        o.absorb(&[], secrets(Some("s3cret"), &[]), true);
+        let mut p = Profile::clone(&base);
+        p.tls.mode = hacivat_net::TlsMode::Require;
+        o.replace_profile(Arc::new(p));
+        assert!(!o.view().plaintext_consent);
+        assert!(o.view().secrets.db.is_some());
+        // "Allow public plaintext" is unticked.
+        let mut ticked = Profile::clone(&base);
+        ticked.tls.allow_public_plaintext = true;
+        let mut o = Overlay::new(Arc::new(ticked.clone()));
+        o.absorb(&[], SessionSecrets::default(), true);
+        ticked.tls.allow_public_plaintext = false;
+        o.replace_profile(Arc::new(ticked));
+        assert!(!o.view().plaintext_consent);
+        // A rename keeps it.
+        let mut o = Overlay::new(base.clone());
+        o.absorb(&[], SessionSecrets::default(), true);
+        o.replace_profile(Arc::new(Profile {
+            name: "renamed".into(),
+            ..Profile::clone(&base)
+        }));
+        assert!(o.view().plaintext_consent);
     }
 
     #[test]

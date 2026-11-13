@@ -635,7 +635,23 @@ the vault, the session overlay, the keyring CI and the deferrals.
   endpoint, user, auth provider, transport and client certificate). An edit that points the
   profile elsewhere drops the secrets and the consent, so a password typed for one server is
   never sent to another. The next connect then asks, or a headless reconnect stops with
-  `needs_interaction`, as the plan's recovery rule already handles.
+  `needs_interaction`, as the plan's recovery rule already handles. The plaintext consent
+  alone also goes when the TLS mode changes or "allow public plaintext" is unticked: the user
+  took back what the consent answered (fix round 1, M3).
+- **A connect in flight across an edit (fix round 1, I1).** A connect is absorbed only while
+  the saved profile still names the destination it connected to; otherwise it is closed and
+  refused, as after `close_all`, so another server's password, plaintext consent or pin and CA
+  changes never reach the overlay. A new overlay always starts from the saved profile, never
+  from a connect's snapshot, so a saved edit is never lost to a slow connect.
+- **Q17 clarification (controller ruling).** The overlay applies to every later connect of a
+  connected profile, pooled sessions included, not only to reconnects and side connections:
+  pooled connects are headless and would otherwise fail on a `Never` password or a pin
+  answered once. One-time codes never reach it (Task 9 excludes keyboard-interactive answers).
+- **No side-connection cache in M2b (controller ruling).** The plan's "cached for 30 s" is
+  dropped: each cancel or kill opens a fresh side connection through the overlay, and Task 7's
+  actor closes it after its one statement (an unused MySQL prewarm too). The 500 ms prewarm
+  (Q37) already hides the slow first connect. A cache would keep an idle authenticated
+  connection open for no request; revisit in M3 if cancel latency through SSH needs it.
 - **Debug.** `SessionOverlay` derives `Debug`, and every secret in it is a `SecretString`, which
   prints redacted. `SessionManager`'s `Debug` shows only whether an overlay exists. Neither
   type derives `PartialEq`.

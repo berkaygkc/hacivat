@@ -101,6 +101,38 @@ fn manager_sqlite() -> (Arc<SessionManager>, Arc<FakeDriver>) {
     manager_over(FakeDriver::new(DbmsKind::Sqlite), sqlite_profile())
 }
 
+/// Waits until `n` resets ran, then lets the releases park their sessions.
+async fn parked(f: &FakeDriver, n: usize) {
+    settle_until("the releases reset their sessions", || f.reset_calls() >= n).await;
+    settle().await;
+}
+
+/// The profile of the test fixtures, moved to another server.
+fn moved(p: Profile) -> Profile {
+    Profile {
+        endpoint: hacivat_session::profile::ProfileEndpoint::Server {
+            host: "10.9.9.9".into(),
+            port: None,
+        },
+        ..p
+    }
+}
+
+/// The host the last connect went to.
+fn last_host(f: &FakeDriver) -> String {
+    match f.last_request().and_then(|r| r.endpoint) {
+        Some(hacivat_driver::fake::FakeEndpoint::Network { tls_host, .. }) => tls_host,
+        other => panic!("no network connect: {other:?}"),
+    }
+}
+
+fn host_of(p: &Profile) -> String {
+    match &p.endpoint {
+        hacivat_session::profile::ProfileEndpoint::Server { host, .. } => host.clone(),
+        other => panic!("not a server profile: {other:?}"),
+    }
+}
+
 async fn open_n(sm: &Arc<SessionManager>, n: u64) -> Vec<SessionHandle> {
     let mut held = Vec::new();
     for i in 1..=n {
@@ -235,7 +267,8 @@ async fn budget_of_four_queues_the_fifth_console_first() {
     let console = tokio::spawn(sm.open(console_spec(5), ix_none()));
     // One session ends (its only handle goes); the other three stay.
     drop(held.remove(0));
-    let fifth = timeout(ms(200), console).await;
+    // Fix round 1 (review I3, plan amended): a condition wait, not a 200 ms budget.
+    let fifth = timeout(WAIT, console).await;
     assert!(fifth.is_ok());
     // Held, so its permit stays taken.
     let _fifth = fifth.unwrap().unwrap().expect("the fifth console opens");
@@ -270,8 +303,9 @@ async fn failed_reset_discards_and_frees_the_permit() {
     drop(sm.pooled(SessionKind::Service).await.unwrap());
     settle().await;
     assert_eq!(f.open_connections(), 0);
+    // Fix round 1 (review I3, plan amended): a condition wait, not a 200 ms budget.
     assert!(
-        timeout(ms(200), sm.open(console_spec(1), ix_none()))
+        timeout(WAIT, sm.open(console_spec(1), ix_none()))
             .await
             .is_ok()
     );
@@ -391,7 +425,7 @@ async fn a_read_only_request_is_never_served_by_a_read_write_pooled_session() {
         assert!(!snap(&s).read_only);
         s.id()
     };
-    settle().await;
+    parked(&f, 1).await;
     // The profile turns read-only (the app saved it): the idle read-write session is not
     // handed out for it.
     sm.update_profile(Arc::new(ro(pg_profile(TlsMode::Disable))));
@@ -409,7 +443,7 @@ async fn a_broken_pooled_session_is_never_handed_out_again() {
         let s = sm.pooled(SessionKind::Service).await.unwrap();
         s.id()
     };
-    settle().await;
+    parked(&f, 1).await;
     f.kill_connections();
     let broken = {
         let s = sm.pooled(SessionKind::Service).await.unwrap();
@@ -418,7 +452,7 @@ async fn a_broken_pooled_session_is_never_handed_out_again() {
         assert!(matches!(snap(&s).state, SessionState::Broken(_)));
         s.id()
     };
-    settle().await;
+    settle_until("the broken session is forgotten", || sm.open_count() == 0).await;
     let s = sm.pooled(SessionKind::Service).await.unwrap();
     assert_ne!(s.id(), broken);
     assert_eq!(f.connect_calls(), 2);
@@ -435,7 +469,7 @@ async fn a_session_broken_while_idle_in_the_pool_is_discarded_at_borrow() {
     // pool's back once it is idle.
     let behind = (*idle).clone();
     drop(idle);
-    settle().await;
+    parked(&f, 1).await;
     behind.close(ClosePolicy::RollBack).await.unwrap();
     let s = sm.pooled(SessionKind::Service).await.unwrap();
     assert_ne!(s.id(), id);
@@ -450,7 +484,7 @@ async fn concurrent_borrowers_get_distinct_sessions_and_each_release_resets_once
     assert_ne!(a.id(), b.id());
     drop(a);
     drop(b);
-    settle().await;
+    parked(&f, 2).await;
     assert_eq!(f.reset_calls(), 2);
     let c = sm.pooled(SessionKind::Service).await.unwrap();
     let d = sm.pooled(SessionKind::Service).await.unwrap();
@@ -462,7 +496,7 @@ async fn concurrent_borrowers_get_distinct_sessions_and_each_release_resets_once
 async fn pools_are_kept_by_kind() {
     let (sm, f) = manager4(fake_pg());
     drop(sm.pooled(SessionKind::Service).await.unwrap());
-    settle().await;
+    parked(&f, 1).await;
     let _intro = sm
         .pooled(SessionKind::Introspection { database: None })
         .await
@@ -530,7 +564,7 @@ async fn close_all_closes_every_session_and_drops_the_overlay() {
     let returned = sm.pooled(SessionKind::Service).await.unwrap();
     let _borrowed = sm.pooled(SessionKind::Service).await.unwrap();
     drop(returned);
-    settle().await;
+    parked(&f, 1).await;
     assert!(sm.overlay().is_some());
     assert_eq!(sm.open_count(), 3);
     sm.close_all().await;
@@ -588,16 +622,27 @@ async fn single_mode_default_session_is_reopened_once_it_is_broken() {
     assert_eq!(f.connect_calls(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn single_mode_borrows_queue_behind_the_console() {
-    let (sm, _) = manager_single(fake_pg().exec(vec![slow("SELECT pg_sleep", ms(300))]));
+    // Fix round 1 (review I3): the console's statement lasts 60 s on a paused clock, so the
+    // borrow's request provably waits behind it; no real-time window.
+    let (sm, _) = manager_single(fake_pg().exec(vec![slow("SELECT pg_sleep", secs(60))]));
     let console = sm.open(console_spec(1), ix_none()).await.unwrap();
-    let running = console.submit(exec("SELECT pg_sleep(0.3)"));
+    let running = console.submit(exec("SELECT pg_sleep(60)"));
+    settle_until(
+        "the console's statement runs",
+        || matches!(snap(&console).state, SessionState::Busy { req, .. } if req == running.seq),
+    )
+    .await;
     let borrowed = sm.pooled(SessionKind::Service).await.unwrap();
-    let queued = borrowed.submit(exec("SELECT 1"));
-    // FIFO: the borrow's request answers after the console's.
-    let mut queued = queued.reply;
-    assert!(timeout(ms(50), &mut queued).await.is_err());
+    assert_eq!(borrowed.id(), console.id());
+    let mut queued = borrowed.submit(exec("SELECT 1")).reply;
+    settle().await;
+    // FIFO: nothing can end the console's statement while the clock stands still.
+    assert!(matches!(
+        queued.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
     running.reply.await.unwrap().unwrap();
     queued.await.unwrap().unwrap();
 }
@@ -620,6 +665,206 @@ async fn single_mode_never_shares_with_mcp() {
     assert_ne!(user.id(), mcp.id());
     assert!(snap(&mcp).read_only);
     assert_eq!(f.connect_calls(), 2);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 1: the review's scenarios (paused clock, FakeDriver; times are virtual)
+
+/// C1 (H8b): a released session goes straight to the borrower of its kind that waits for one.
+#[tokio::test(start_paused = true)]
+async fn a_released_session_goes_to_a_waiting_borrower_of_its_kind() {
+    let (sm, f) = manager_n(fake_pg(), 1);
+    let a = sm.pooled(SessionKind::Service).await.unwrap();
+    let id = a.id();
+    let waiting = tokio::spawn(sm.pooled(SessionKind::Service));
+    settle().await;
+    let t0 = tokio::time::Instant::now();
+    drop(a);
+    let b = waiting.await.unwrap().unwrap();
+    assert!(t0.elapsed() < secs(1), "waited {:?}", t0.elapsed());
+    assert_eq!(b.id(), id);
+    assert_eq!((f.connect_calls(), f.reset_calls()), (1, 1));
+}
+
+/// C1 (H8): a waiter of another kind gets the permit of a released session.
+#[tokio::test(start_paused = true)]
+async fn a_released_session_frees_its_permit_for_a_waiter_of_another_kind() {
+    let (sm, f) = manager_n(fake_pg(), 2);
+    let a = sm.pooled(SessionKind::Service).await.unwrap();
+    let b = sm.pooled(SessionKind::Service).await.unwrap();
+    let waiting = tokio::spawn(sm.pooled(SessionKind::Introspection { database: None }));
+    settle().await;
+    let t0 = tokio::time::Instant::now();
+    drop(a);
+    drop(b);
+    let _intro = waiting.await.unwrap().unwrap();
+    assert!(t0.elapsed() < secs(1), "waited {:?}", t0.elapsed());
+    assert_eq!(f.connect_calls(), 3);
+}
+
+/// C1 (H1): idle sessions never starve a console, even when it queued while the borrow was
+/// still out.
+#[tokio::test(start_paused = true)]
+async fn a_console_queued_while_a_borrow_is_out_gets_its_permit_at_release() {
+    let (sm, _) = manager_n(fake_pg(), 2);
+    let _first = sm.open(console_spec(1), ix_none()).await.unwrap();
+    let borrow = sm.pooled(SessionKind::Service).await.unwrap();
+    let waiting = tokio::spawn(sm.open(console_spec(2), ix_none()));
+    settle().await;
+    let t0 = tokio::time::Instant::now();
+    drop(borrow);
+    let _second = waiting.await.unwrap().unwrap();
+    assert!(t0.elapsed() < secs(1), "waited {:?}", t0.elapsed());
+}
+
+/// C1: a console outranks a borrower waiting for the same released session.
+#[tokio::test(start_paused = true)]
+async fn a_waiting_console_outranks_a_waiting_borrower() {
+    let (sm, _) = manager_n(fake_pg(), 1);
+    let borrow = sm.pooled(SessionKind::Service).await.unwrap();
+    let borrower = tokio::spawn(sm.pooled(SessionKind::Service));
+    let console = tokio::spawn(sm.open(console_spec(1), ix_none()));
+    settle().await;
+    let t0 = tokio::time::Instant::now();
+    drop(borrow);
+    let console = console.await.unwrap().unwrap();
+    assert!(t0.elapsed() < secs(1), "waited {:?}", t0.elapsed());
+    assert!(!borrower.is_finished());
+    drop(console);
+    let t0 = tokio::time::Instant::now();
+    let _b = borrower.await.unwrap().unwrap();
+    assert!(t0.elapsed() < secs(1), "waited {:?}", t0.elapsed());
+}
+
+/// I1 (H3, case A): the profile moves to another server while the first connect is in flight;
+/// the late connect is refused, and the overlay and the next connect follow the saved profile.
+#[tokio::test(start_paused = true)]
+async fn a_first_connect_in_flight_across_a_move_is_never_absorbed() {
+    let (sm, f) = manager4(fake_pg().delay(secs(5)));
+    let opening = tokio::spawn(sm.open(console_spec(1), ix_none()));
+    settle_until("the connect is in flight", || f.connect_calls() == 1).await;
+    sm.update_profile(Arc::new(moved(pg_profile(TlsMode::Disable))));
+    assert!(opening.await.unwrap().is_err());
+    assert!(sm.overlay().is_none());
+    settle_until("the late connection is closed", || {
+        f.open_connections() == 0
+    })
+    .await;
+    assert_eq!(sm.open_count(), 0);
+    let _s = sm.open(console_spec(2), ix_none()).await.unwrap();
+    assert_eq!(last_host(&f), "10.9.9.9");
+    assert_eq!(host_of(&sm.overlay().unwrap().profile), "10.9.9.9");
+}
+
+/// I1 (case B): with an overlay already there, a background connect to the old server that
+/// lands after the move adds nothing to the new server's overlay.
+#[tokio::test(start_paused = true)]
+async fn a_background_connect_to_the_old_server_never_reaches_the_new_overlay() {
+    let (sm, f) = manager4(fake_pg().delay(secs(5)));
+    let _console = sm.open(console_spec(1), ix_none()).await.unwrap();
+    assert_eq!(host_of(&sm.overlay().unwrap().profile), "127.0.0.1");
+    let late = tokio::spawn(sm.pooled(SessionKind::Service));
+    settle_until("the pooled connect is in flight", || f.connect_calls() == 2).await;
+    sm.update_profile(Arc::new(moved(pg_profile(TlsMode::Disable))));
+    assert!(late.await.unwrap().is_err());
+    let o = sm.overlay().unwrap();
+    assert_eq!(host_of(&o.profile), "10.9.9.9");
+    assert!(o.secrets.db.is_none() && !o.plaintext_consent);
+    settle_until("the late connection is closed", || {
+        f.open_connections() == 1
+    })
+    .await;
+    assert_eq!(sm.open_count(), 1);
+}
+
+/// I2 (H2): Single mode decides on the default session's own state: once the profile is
+/// read-only, a read-only request never gets the read-write default.
+#[tokio::test]
+async fn single_mode_read_only_requests_never_get_a_read_write_default() {
+    let (sm, f) = manager_single(fake_pg());
+    let rw = sm.open(console_spec(1), ix_none()).await.unwrap();
+    assert!(!snap(&rw).read_only);
+    // A read-only request while the profile is still read-write.
+    let ro_spec = SessionSpec {
+        read_only: true,
+        ..console_spec(2)
+    };
+    let own = sm.open(ro_spec.clone(), ix_none()).await.unwrap();
+    assert_ne!(own.id(), rw.id());
+    assert!(snap(&own).read_only);
+    // The app saves the profile read-only.
+    sm.update_profile(Arc::new(Profile {
+        single_session: true,
+        ..ro(pg_profile(TlsMode::Disable))
+    }));
+    let again = sm.open(ro_spec, ix_none()).await.unwrap();
+    assert_ne!(again.id(), rw.id());
+    assert!(snap(&again).read_only);
+    let borrowed = sm.pooled(SessionKind::Service).await.unwrap();
+    assert_ne!(borrowed.id(), rw.id());
+    assert!(snap(&borrowed).read_only);
+    assert_eq!(f.connect_calls(), 4);
+}
+
+/// M1 (H4): a borrow never becomes the default session.
+#[tokio::test]
+async fn a_borrow_of_the_default_console_kind_is_never_the_default_session() {
+    let (sm, f) = manager4(fake_pg());
+    let borrowed = sm
+        .pooled(SessionKind::Console(ClientId::DEFAULT))
+        .await
+        .unwrap();
+    assert!(sm.default_session().is_none());
+    let id = borrowed.id();
+    drop(borrowed);
+    parked(&f, 1).await;
+    let default = sm
+        .open(
+            SessionSpec {
+                kind: SessionKind::Console(ClientId::DEFAULT),
+                read_only: false,
+                department: Department::Console,
+            },
+            ix_none(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(default.id(), id);
+    assert_eq!(sm.default_session().map(|d| d.id()), Some(default.id()));
+}
+
+/// M2: on SQLite (budget 1) a session that may not share the default is refused at once,
+/// never left waiting forever.
+#[tokio::test]
+async fn sqlite_refuses_a_session_it_could_never_open() {
+    let (sm, f) = manager_sqlite();
+    let _default = sm.open(console_spec(1), ix_none()).await.unwrap();
+    let mcp = SessionSpec {
+        kind: SessionKind::Console(ClientId(77)),
+        department: Department::Mcp,
+        read_only: true,
+    };
+    let e = timeout(WAIT, sm.open(mcp, ix_none()))
+        .await
+        .expect("answered at once")
+        .unwrap_err();
+    assert_eq!(e.class, hacivat_proto::ErrClass::ServerTooManyConnections);
+    let ro_spec = SessionSpec {
+        read_only: true,
+        ..console_spec(2)
+    };
+    assert!(
+        timeout(WAIT, sm.open(ro_spec, ix_none()))
+            .await
+            .expect("answered at once")
+            .is_err()
+    );
+    // The default still serves everyone else.
+    let _b = timeout(WAIT, sm.pooled(SessionKind::Service))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(f.connect_calls(), 1);
 }
 
 // ---------------------------------------------------------------------------------------------
