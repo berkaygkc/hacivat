@@ -1,0 +1,1938 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1440, initial-scale=1">
+<title>Hacivat Secure Sessions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Fragment+Mono:ital@0;1&display=block" rel="stylesheet">
+<style>
+/* ═══════════════════════════════════════════════════════════════
+   M2b Secure network and sessions — clickable mocks inside the approved
+   harman world. The CSS below is the M2a mock's (design/m2-connect),
+   reused unchanged except where marked "M2b"; additions follow it.
+   Scale:  radius 0 · 3 · 4 · 6   seam 1px   spacing 2/4/6/8/10/12/14/16
+           type 11 · 11.5 · 12 · 12.5 · 13 · 13.5 · 15
+   GPUI:   solid fills, 1px borders, popover shadow only, no transforms,
+           no blur, no filters, no masks.
+   ═══════════════════════════════════════════════════════════════ */
+:root, :root[data-theme="dark"] {
+  --ground:#16181D; --panel:#1E2127; --side:#1E2127; --head:#1E2127; --gutter:#1A1D22;
+  --raised:#252931; --hover:#23272E; --seam:#2A2E36; --seam-2:#363B45; --seam-soft:#23262D;
+  --text:#C9D1D9; --text-2:#8B949E; --text-3:#828A96; --text-3-base:#828A96;
+  --on-accent:#10141C; --on-red:#10141C; --cp-fill:#CE2C31; --on-cp-fill:#FFFFFF;
+  --blue:#7AA2F7; --blue-a:rgba(122,162,247,.12); --blue-a2:rgba(122,162,247,.22); --blue-hover:#8DB0F8;
+  --red:#E06C75; --red-a:rgba(224,108,117,.13); --red-line:rgba(224,108,117,.55);
+  --green:#98C379; --green-fill:rgba(152,195,121,.55);
+  --amber:#E5C07B; --amber-a:rgba(229,192,123,.13);
+  --syn-kw:#B4A7F2; --syn-str:#98C379; --syn-num:#E5C07B;
+  --scrim:rgba(22,24,29,.6);                       /* ground @ SCRIM_ALPHA 0.6 (shell/layers.rs) */
+  --shadow-pop:0 10px 28px rgba(0,0,0,.34), 0 1px 2px rgba(0,0,0,.30);
+  --tl-close:#FF5F57; --tl-min:#FEBC2E; --tl-max:#28C840;
+  color-scheme:dark;
+}
+:root[data-theme="light"] {
+  --ground:#F7F7F8; --panel:#FFFFFF; --side:#F7F7F8; --head:#F7F7F8; --gutter:#FAFAFB;
+  --raised:#FFFFFF; --hover:#F1F1F3; --seam:#E5E5E9; --seam-2:#D8D8DE; --seam-soft:#EFEFF2;
+  --text:#1B1B1F; --text-2:#55555E; --text-3:#6C6C76; --text-3-base:#6C6C76;
+  --on-accent:#FFFFFF; --on-red:#FFFFFF; --cp-fill:#CE2C31; --on-cp-fill:#FFFFFF;
+  --blue:#3B5FD9; --blue-a:rgba(59,95,217,.08); --blue-a2:rgba(59,95,217,.15); --blue-hover:#3352C4;
+  --red:#CE2C31; --red-a:rgba(206,44,49,.08); --red-line:rgba(206,44,49,.45);
+  --green:#1F7A50; --green-fill:rgba(31,122,80,.42);
+  --amber:#A35C00; --amber-a:rgba(163,92,0,.10);
+  --syn-kw:#4B57C2; --syn-str:#2B7A30; --syn-num:#B4530A;
+  --scrim:rgba(247,247,248,.6);
+  --shadow-pop:0 12px 32px -6px rgba(20,20,40,.20), 0 0 0 1px rgba(20,20,40,.04), 0 1px 2px rgba(20,20,40,.08);
+  color-scheme:light;
+}
+
+/* ───────── Base (harman) ───────── */
+* { box-sizing:border-box; }
+html, body { margin:0; height:100%; }
+body { background:var(--ground); color:var(--text); font:400 13px/1.35 "Source Sans 3", system-ui, sans-serif;
+  font-variant-numeric:tabular-nums; -webkit-font-smoothing:antialiased; overflow:hidden; }
+::selection { background:var(--blue-a2); color:inherit; }
+button { font:inherit; color:inherit; }
+input { font:inherit; color:inherit; caret-color:var(--blue); }
+.mono { font-family:"Fragment Mono", ui-monospace, monospace; font-variant-numeric:tabular-nums; }
+.sc { font-variant-caps:all-small-caps; letter-spacing:.075em; font-weight:600; }
+svg.ic { width:14px; height:14px; flex:none; display:block; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+svg.ic.i12 { width:12px; height:12px; }
+:focus { outline:none; }
+:focus-visible { outline:1px solid var(--blue); outline-offset:1px; }
+kbd { font:400 11px/1 "Fragment Mono", monospace; color:var(--text-3); border:1px solid var(--seam); border-radius:3px;
+  padding:2px 4px; display:inline-flex; align-items:center; height:16px; background:transparent; flex:none; }
+.grow { flex:1; }
+.vsep { width:1px; height:18px; background:var(--seam); flex:none; }
+
+/* Environment marks. Shape-coded first, hue only for production.
+   local ○ (existing) · dev ◉ (NEW) · test ● (NEW) · staging □ (existing) · production ■ (existing) */
+.env { width:7px; height:7px; border-radius:0; flex:none; display:inline-block; position:relative; }
+.env.production { background:var(--red); }
+.env.staging { border:1px solid var(--text-2); }
+.env.test { background:var(--text-2); border-radius:50%; }
+.env.dev { border:1px solid var(--text-2); border-radius:50%; }
+.env.dev::after { content:""; position:absolute; left:1px; top:1px; width:3px; height:3px; border-radius:50%; background:var(--text-2); }
+.env.local { border:1px solid var(--text-3); border-radius:50%; }
+
+/* ───────── Mock bar (mock only, not product) ───────── */
+.mockbar { height:34px; display:flex; align-items:center; gap:8px; padding:0 10px; background:var(--gutter);
+  border-bottom:1px dashed var(--seam-2); white-space:nowrap; color:var(--text-2); font-size:12px; overflow:hidden; }
+.mockbar .tag { font:400 11px "Fragment Mono", monospace; color:var(--text-2); border:1px dashed var(--seam-2); border-radius:3px; padding:2px 6px; }
+.mockbar .lbl { color:var(--text-3); font-size:11.5px; }
+.mseg { display:flex; height:24px; border:1px solid var(--seam-2); border-radius:4px; overflow:hidden; flex:none; }
+.mseg button { border:0; background:transparent; padding:0 8px; color:var(--text-2); cursor:pointer; display:flex; align-items:center; gap:5px; font-size:12px; }
+.mseg button + button { border-left:1px solid var(--seam-2); }
+.mseg button[aria-pressed="true"] { background:var(--raised); color:var(--text); }
+:root[data-theme="light"] .mseg button[aria-pressed="true"] { background:var(--panel); }
+.mseg button:hover { color:var(--text); }
+.mseg button .n { font:400 11px "Fragment Mono", monospace; color:var(--text-3); }
+.mseg.lang button { font:400 11.5px "Fragment Mono", monospace; }
+
+/* ───────── Window ───────── */
+.win { position:relative; width:100vw; height:calc(100vh - 34px); display:grid; grid-template-rows:40px 1fr 24px; background:var(--ground); min-height:620px; }
+.titlebar { display:flex; align-items:center; padding:0 10px 0 14px; border-bottom:1px solid var(--seam); background:var(--ground);
+  user-select:none; white-space:nowrap; min-width:0; position:relative; z-index:40; }
+.lights { display:flex; gap:8px; margin-right:18px; }
+.lights i { width:12px; height:12px; border-radius:50%; display:block; border:.5px solid rgba(0,0,0,.25); }
+.lights i:nth-child(1){background:var(--tl-close);} .lights i:nth-child(2){background:var(--tl-min);} .lights i:nth-child(3){background:var(--tl-max);}
+.brand { display:flex; align-items:center; gap:8px; color:var(--text); padding-right:14px; }
+.brand .word { font-size:14.5px; letter-spacing:.09em; }
+.mark { width:16px; height:16px; display:block; color:var(--text-2); }
+
+/* Capsule (harman) + M2a states */
+.capsule { display:flex; align-items:stretch; height:26px; margin-left:12px; padding:0; border:1px solid var(--seam-2); border-radius:4px;
+  overflow:hidden; background:var(--panel); cursor:pointer; font-size:13px; flex:none; }
+.capsule > span { display:flex; align-items:center; gap:6px; padding:0 9px; }
+.capsule > span + span { border-left:1px solid var(--seam-2); }
+.capsule:hover > span:not(.cp-env) { background:var(--hover); }
+.cp-env { background:var(--cp-fill); color:var(--on-cp-fill); padding:0 10px 0 9px !important; font-size:13.5px; }
+.cp-env .sc { letter-spacing:.09em; font-weight:700; }
+.cp-tag { color:var(--text-2); }
+.cp-name b { font-weight:600; color:var(--text); }
+.cp-name .dim { color:var(--text-2); }
+.cp-ro svg { color:var(--text-2); }   /* M2b: red only on production, see .cp-ro.prod */
+.cp-rw { color:var(--text-2); }
+.cp-path svg.direct { color:var(--green); }
+.cp-path svg.ssh { color:var(--text-2); }
+.cp-path .mono { font-size:11.5px; color:var(--text-2); }
+.cp-unenc { color:var(--text); }
+.cp-unenc svg { color:var(--text-2); }
+.cp-chev { color:var(--text-3); padding:0 6px !important; }
+.cp-none { color:var(--text-2); }
+.cp-run { color:var(--text); }
+.cp-run .mono { font-size:11.5px; color:var(--text-2); min-width:44px; }
+.run { width:7px; height:7px; background:var(--amber); display:block; flex:none; }          /* splash run marker */
+.cp-fail { color:var(--text); }
+.cp-fail svg { color:var(--text); }
+.cp-retry { color:var(--text-2); }
+.capsule:hover .cp-retry { color:var(--text); }
+
+.palette { margin:0 4px 0 auto; flex:0 1 290px; min-width:170px; height:26px; display:flex; align-items:center; gap:8px; padding:0 6px 0 9px;
+  border:1px solid var(--seam); border-radius:4px; color:var(--text-3); background:transparent; cursor:text; overflow:hidden; }
+.palette:hover { border-color:var(--seam-2); }
+.palette span { flex:1; text-align:left; overflow:hidden; text-overflow:ellipsis; }
+
+/* Tiles */
+.tiles { position:relative; display:grid; grid-template-columns:276px 1fr; gap:1px; background:var(--seam); min-height:0; }
+.col { display:grid; gap:1px; min-height:0; background:var(--seam); }
+.col.left { grid-template-rows:1fr 205px; }
+.panel { background:var(--panel); min-height:0; min-width:0; display:flex; flex-direction:column; position:relative; overflow:hidden; }
+.panel.side { background:var(--side); }
+.ph { height:30px; flex:none; display:flex; align-items:center; gap:10px; padding:0 10px 0 12px; border-bottom:1px solid var(--seam); white-space:nowrap; background:var(--head); }
+.ph .t { color:var(--text-2); font-size:13.5px; }
+.ph .meta { color:var(--text-3); font-size:12px; }
+.ph .id { color:var(--text); font-size:12.5px; }
+.ph .ibtn { margin-right:-4px; }
+
+/* Explorer */
+.xfilter { display:flex; align-items:center; gap:7px; height:28px; margin:8px 8px 4px; padding:0 6px 0 8px; border:1px solid var(--seam); border-radius:4px; color:var(--text-3); background:var(--panel); }
+:root[data-theme="dark"] .xfilter { background:transparent; }
+.xfilter input { flex:1; min-width:0; border:0; background:transparent; outline:none; font-size:12.5px; }
+.xfilter input::placeholder { color:var(--text-3); }
+.tree { padding:2px 0 8px; overflow:auto; flex:1; outline:none; }
+.grp { height:26px; display:flex; align-items:center; gap:7px; padding:6px 10px 0 12px; color:var(--text-3); font-size:13px; }
+.grp .rule { flex:1; height:1px; background:var(--seam-soft); }
+:root[data-theme="light"] .grp .rule { background:var(--seam); }
+.grp .n { font-size:11px; color:var(--text-3); }
+.row { height:23px; display:flex; align-items:center; gap:6px; padding:0 10px 0 12px; cursor:default; white-space:nowrap; color:var(--text); position:relative; }
+.row:hover { background:var(--hover); }
+.row.sel { background:var(--blue-a); }
+.row.sel::before { content:""; position:absolute; left:0; top:0; bottom:0; width:1px; background:var(--blue); }
+.tree:focus-visible .row.sel { outline:1px solid var(--blue); outline-offset:-1px; }
+.row .ic { color:var(--text-2); }
+.row.sel > .ic { color:var(--blue); }
+.row .lbl { overflow:hidden; text-overflow:ellipsis; }
+.row .lbl.on { font-weight:600; }
+.row .flags { display:flex; align-items:center; gap:5px; color:var(--text-2); }
+.row .flags .ro { color:var(--red); }
+.row .meta { color:var(--text-3); font-size:11px; display:flex; align-items:center; gap:4px; }
+.row .meta .ok { color:var(--green); }
+.row .run { width:7px; height:7px; }
+.xempty { flex:1; display:flex; flex-direction:column; align-items:flex-start; padding:18px 14px 0 14px; gap:8px; }
+.xempty .h { font-weight:600; color:var(--text); font-size:13px; display:flex; align-items:center; gap:8px; }
+.xempty .h svg { color:var(--text-2); }
+.xempty p { margin:0 0 4px; color:var(--text-2); font-size:12.5px; line-height:1.4; }
+.xempty .acts { display:flex; flex-direction:column; align-items:stretch; gap:6px; width:100%; }
+.xempty .acts .btn { justify-content:flex-start; }
+.xempty .acts .btn .k { margin-left:auto; }
+
+/* Connection sheet */
+.sheet { padding:6px 0 0; margin:0; }
+.kv { display:grid; grid-template-columns:92px 1fr; align-items:center; height:22px; padding:0 12px; column-gap:10px; font-size:12.5px; white-space:nowrap; }
+.kv dt { color:var(--text-3); margin:0; overflow:hidden; text-overflow:ellipsis; }
+.kv dd { margin:0; display:flex; align-items:center; gap:6px; min-width:0; overflow:hidden; }
+.kv dd .mono { font-size:11.5px; overflow:hidden; text-overflow:ellipsis; }
+.kv .r { color:var(--red); font-weight:600; }
+.kv .d { color:var(--text-2); }
+.kv .g { color:var(--green); }
+
+/* Center: empty workspace */
+.home { flex:1; display:flex; align-items:center; justify-content:center; }
+.home .box { width:420px; display:flex; flex-direction:column; gap:14px; }
+.home .h { color:var(--text-2); font-size:13.5px; }
+.home .keys { display:grid; grid-template-columns:1fr auto; row-gap:9px; column-gap:24px; font-size:13px; }
+.home .keys span { color:var(--text-2); }
+.home .keys .k { display:flex; gap:3px; justify-content:flex-end; }
+.home .hint { color:var(--text-3); font-size:12px; }
+
+/* Buttons (harman) */
+.btn { height:24px; display:inline-flex; align-items:center; gap:6px; padding:0 9px; border:1px solid var(--seam-2); border-radius:4px; background:transparent;
+  color:var(--text); font-size:12.5px; font-weight:500; cursor:pointer; white-space:nowrap; flex:none; }
+.btn:hover { background:var(--hover); }
+.btn .k { font:400 11px "Fragment Mono", monospace; color:var(--text-3); }
+.btn.primary { background:var(--blue); border-color:var(--blue); color:var(--on-accent); font-weight:600; }
+.btn.primary .k { color:var(--on-accent); opacity:.7; }
+.btn.primary:hover { background:var(--blue-hover); border-color:var(--blue-hover); }
+.btn.ghost { border-color:transparent; color:var(--text-2); }
+.btn.ghost:hover { color:var(--text); }
+.btn.icon { padding:0 6px; }
+.btn[disabled], .btn[disabled]:hover { cursor:not-allowed; color:var(--text-3); border-color:var(--seam-2); background:transparent; }
+.btn.ghost[disabled], .btn.ghost[disabled]:hover { border-color:transparent; }
+.btn.danger { color:var(--red); border-color:var(--red-line); background:transparent; }
+.btn.danger:hover, .btn.danger:focus-visible { background:var(--red); border-color:var(--red); color:var(--on-red); outline:none; }
+.void { display:flex; align-items:center; gap:8px; margin-right:28px; padding-right:12px; border-right:1px solid var(--seam); height:20px; flex:none; }
+
+/* Status bar (harman) */
+.status { display:flex; align-items:stretch; border-top:1px solid var(--seam); background:var(--ground); font-size:12px; color:var(--text-2); white-space:nowrap; position:relative; z-index:1; }
+.status .s { display:flex; align-items:center; gap:6px; padding:0 10px; border-right:1px solid var(--seam); }
+.status .s.r { border-right:0; border-left:1px solid var(--seam); }
+.status .envseg { background:var(--red-a); color:var(--red); font-weight:600; padding-left:12px; }
+.status .envseg.np { background:transparent; color:var(--text); font-weight:400; }
+.status .g svg { color:var(--green); }
+.status .mono { font-size:11px; }
+.status button.s { background:transparent; border-top:0; border-bottom:0; border-right:0; cursor:pointer; color:var(--text-2); }
+.status button.s:hover { color:var(--text); background:var(--hover); }
+.status .lang b { color:var(--text); font-weight:600; }
+.status .run { width:7px; height:7px; }
+
+/* ───────── Layers: scrim + dialogs ─────────
+   The scrim starts below the title bar: the capsule is never dimmed (decision M2a-1). */
+.layer { position:absolute; left:0; right:0; top:40px; bottom:0; background:var(--scrim); display:flex; align-items:center; justify-content:center; z-index:30; }
+.dlg { position:relative; background:var(--raised); border:1px solid var(--seam-2); border-radius:6px; box-shadow:var(--shadow-pop);
+  display:flex; flex-direction:column; max-height:calc(100% - 32px); --text-3:var(--text-2); }    /* Raised Ink Rule */
+.dlg.w420 { width:420px; } .dlg.w480 { width:480px; } .dlg.w640 { width:640px; }
+.dlg .dhead { display:flex; align-items:flex-start; gap:12px; padding:16px 16px 0; }
+.dlg .dhead .tt { flex:1; min-width:0; }
+.dlg .dhead .title { font-weight:600; font-size:13px; color:var(--text); }
+.dlg .dhead .sub { color:var(--text-2); font-size:12.5px; margin-top:2px; display:flex; gap:6px; align-items:center; }
+.dlg .x { border:0; background:transparent; padding:4px; border-radius:4px; color:var(--text-3); cursor:pointer; margin:-3px -4px 0 0; }
+.dlg .x:hover { background:var(--hover); color:var(--text); }
+.dlg .dbody { padding:12px 16px 0; color:var(--text-2); font-size:13px; }
+.dlg .dbody p { margin:0 0 10px; line-height:1.4; }
+.dlg .dbody p.strong { color:var(--text); }
+.dlg .dfoot { display:flex; align-items:center; gap:8px; padding:12px 16px 16px; }
+.dlg .dfoot .grow { flex:1; }
+.dlg.form .dhead { padding:12px 14px 12px 16px; border-bottom:1px solid var(--seam); align-items:center; }
+.dlg.form .dscroll { overflow:auto; padding:12px 16px 14px; min-height:0; }
+.dlg.form .dfoot { border-top:1px solid var(--seam); padding:12px 16px; }
+
+/* Form rows */
+.frow { display:grid; grid-template-columns:140px 1fr; align-items:center; column-gap:12px; min-height:26px; }
+.frow + .frow, .frow + .notice, .notice + .frow, .frow + .hintrow, .hintrow + .frow { margin-top:8px; }
+.flab { color:var(--text-2); font-size:13px; line-height:1.25; }
+.fcell { display:flex; align-items:center; gap:8px; min-width:0; }
+.hintrow { display:grid; grid-template-columns:140px 1fr; column-gap:12px; margin-top:4px; }
+.hintrow .h { grid-column:2; color:var(--text-2); font-size:12px; display:flex; gap:6px; align-items:center; line-height:1.35; }
+.hintrow .h svg { flex:none; }
+.inl { color:var(--text-2); font-size:13px; flex:none; }
+.secth { display:flex; align-items:center; gap:7px; height:22px; margin:14px 0 8px; color:var(--text-2); font-size:13px; }
+.secth .rule { flex:1; height:1px; background:var(--seam); }
+
+/* TextInput (existing): 26px, seam-strong, radius 4, padding 0 6 0 9; field well = panel (dark) / ground (light) like the harman query box */
+.in { height:26px; display:flex; align-items:center; gap:6px; padding:0 6px 0 9px; border:1px solid var(--seam-2); border-radius:4px; background:var(--panel);
+  min-width:0; flex:1; --text-3:var(--text-3-base); transition:background-color 240ms cubic-bezier(.16,1,.3,1); }
+:root[data-theme="light"] .in { background:var(--ground); }
+.in input { flex:1; min-width:0; border:0; background:transparent; outline:0; font-size:13px; color:var(--text); padding:0; height:24px; }
+.in input::placeholder { color:var(--text-3); }
+.in.mono input::placeholder { font-family:"Source Sans 3", system-ui, sans-serif; font-size:13px; }
+.in.mono input { font:400 12px "Fragment Mono", monospace; }
+.in:focus-within { outline:1px solid var(--blue); outline-offset:1px; }
+.in.filled { background:var(--blue-a2); }
+.in .tail { color:var(--text-3); font-size:12px; flex:none; display:flex; gap:4px; align-items:center; }
+.in .tail .btn { height:20px; padding:0 5px; margin-right:-3px; }
+.in.port { flex:0 0 76px; }
+.in.short { flex:0 0 96px; }
+.in.err { border-color:var(--text-2); }
+
+/* Segmented (existing). Inside a raised dialog it sits in a field well; pressed = raised (dark) / panel (light). */
+.seg { display:flex; height:26px; border:1px solid var(--seam-2); border-radius:4px; overflow:hidden; flex:none; background:var(--panel); }
+:root[data-theme="light"] .seg { background:var(--ground); }
+.seg button { border:0; background:transparent; padding:0 9px; color:var(--text-2); cursor:pointer; display:flex; align-items:center; gap:6px; font-size:13px; }
+.seg button + button { border-left:1px solid var(--seam-2); }
+.seg button[aria-pressed="true"] { background:var(--raised); color:var(--text); font-weight:600; }
+:root[data-theme="light"] .seg button[aria-pressed="true"] { background:var(--panel); }
+.seg button:hover { color:var(--text); }
+.seg button:focus-visible { outline:1px solid var(--blue); outline-offset:-2px; }
+.seg.unset button[aria-pressed="false"] { color:var(--text-2); }
+
+/* NEW · Checkbox: 14px, radius 3, 1px seam-strong; checked = blue fill + on-accent check */
+.cb { display:inline-flex; align-items:center; gap:8px; cursor:pointer; color:var(--text); font-size:13px; border:0; background:transparent; padding:0; text-align:left; }
+.cb .box { width:14px; height:14px; border:1px solid var(--seam-2); border-radius:3px; background:var(--panel); display:flex; align-items:center; justify-content:center; flex:none; color:var(--on-accent); }
+:root[data-theme="light"] .cb .box { background:var(--ground); }
+:root .cb[aria-checked="true"] .box, :root[data-theme="light"] .cb[aria-checked="true"] .box { background:var(--blue); border-color:var(--blue); }
+.cb .box svg { width:12px; height:12px; stroke-width:2.2; visibility:hidden; }
+.cb[aria-checked="true"] .box svg { visibility:visible; }
+.cb .sub { color:var(--text-2); }
+
+/* NEW · Select: field-shaped button that opens a PopupMenu */
+.select { height:26px; display:inline-flex; align-items:center; gap:8px; padding:0 6px 0 9px; border:1px solid var(--seam-2); border-radius:4px; background:var(--panel);
+  color:var(--text); cursor:pointer; font-size:13px; min-width:0; text-align:left; }
+:root[data-theme="light"] .select { background:var(--ground); }
+.select .v { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.select svg { color:var(--text-2); }
+.select:hover { border-color:var(--text-3-base); }
+
+/* NEW · Disclosure: 30px row, chevron swaps right/down (no rotation), small-caps title, summary at text-2 */
+.disc { width:100%; height:32px; display:flex; align-items:center; gap:8px; border:0; border-top:1px solid var(--seam); background:transparent; padding:0 2px 0 0; cursor:pointer; text-align:left; margin-top:14px; }
+.disc + .dbox + .disc, .disc + .disc { margin-top:0; }
+.disc .chev { color:var(--text-2); width:14px; display:flex; justify-content:center; }
+.disc .ttl { color:var(--text); font-size:13px; font-weight:600; }
+.disc .sum { flex:1; text-align:right; color:var(--text-2); font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:flex; justify-content:flex-end; gap:6px; align-items:center; }
+.disc:hover .ttl { color:var(--text); }
+.disc:focus-visible { outline-offset:-1px; }
+.dbox { padding:4px 0 12px 22px; }
+
+/* NEW · Inline notice: bordered inset, icon carries meaning only when it is a result */
+.notice { display:flex; gap:9px; align-items:flex-start; padding:8px 10px; border:1px solid var(--seam-2); border-radius:4px; background:var(--panel); color:var(--text); font-size:12.5px; line-height:1.4; }
+:root[data-theme="light"] .notice { background:var(--ground); }
+.notice > svg { margin-top:1px; color:var(--text-2); }
+.notice .nb { flex:1; min-width:0; }
+.notice .nb .l2 { color:var(--text-2); }
+.notice .nb ul { margin:4px 0 0; padding:0; list-style:none; }
+.notice .nb li { display:flex; gap:6px; align-items:baseline; color:var(--text-2); }
+.notice .nb li .mono { font-size:11.5px; color:var(--text); }
+.notice .acts { display:flex; gap:6px; margin-top:8px; }
+.notice.ok > svg { color:var(--green); }
+.notice .mono { font-size:11.5px; }
+
+/* Test result strip (above the dialog footer) */
+.tres { border-top:1px solid var(--seam); padding:10px 16px 12px; background:var(--panel); }
+:root[data-theme="light"] .tres { background:var(--ground); }
+.tres { --text-3:var(--text-3-base); }
+.tres .th { display:flex; align-items:center; gap:8px; color:var(--text); font-weight:600; }
+.tres .th .ok { color:var(--green); }
+.tres .sub2 { color:var(--text-2); font-size:12.5px; margin:2px 0 0 22px; }
+.tres .th .mono { font-weight:400; font-size:11.5px; color:var(--text-2); }
+.diag { display:grid; grid-template-columns:auto minmax(0,1fr) auto minmax(0,1fr); column-gap:12px; row-gap:3px; margin-top:8px; font-size:12.5px; }
+.diag dt { color:var(--text-2); margin:0; white-space:nowrap; }
+.diag dd { margin:0; display:flex; align-items:center; gap:6px; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.diag dd .mono { font-size:11.5px; }
+.diag dd svg { color:var(--green); }
+
+/* NEW · Step trail: pipeline stages with done ✓ (green), running ■ (amber), failed ✕ (ink), pending (text-2) */
+.trail { display:flex; align-items:center; column-gap:14px; flex-wrap:wrap; margin-top:8px; row-gap:2px; }
+.trail .st { display:flex; align-items:center; gap:5px; height:20px; font-size:12px; color:var(--text-2); }
+.trail .st .mono { font-size:11px; color:var(--text-2); }
+.trail .st.done svg { color:var(--green); }
+.trail .st.done { color:var(--text); }
+.trail .st.fail { color:var(--text); font-weight:600; }
+.trail .st.fail svg { color:var(--text); }
+.trail .st.run2 { color:var(--text); }
+.trail .st.pend .dot { width:7px; height:7px; border:1px solid var(--seam-2); display:block; }
+.trail .sep { width:14px; height:1px; background:var(--seam-2); margin:0 6px; }
+
+/* Error block */
+.eb .eh { display:flex; gap:9px; align-items:flex-start; }
+.eb .eh svg { margin-top:1px; color:var(--text); flex:none; }
+.eb .eh .t1 { color:var(--text); font-weight:600; font-size:13px; line-height:1.35; }
+.eb .eh .t2 { color:var(--text-2); font-size:12.5px; margin-top:3px; line-height:1.4; }
+.eb .fixes { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; align-items:center; }
+.eb .dbs { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+.eb .dbs .btn { font-family:"Fragment Mono", monospace; font-size:12px; font-weight:400; }
+.eb .pwrow { display:flex; gap:8px; margin-top:10px; align-items:center; }
+.eb .attempt { color:var(--text-2); font-size:12px; }
+.tech { margin-top:10px; }
+.tech .dsc { display:flex; align-items:center; gap:6px; border:0; background:transparent; padding:0; color:var(--text-2); cursor:pointer; font-size:12.5px; }
+.tech .dsc:hover { color:var(--text); }
+.tech .box { margin-top:8px; padding:8px 10px; border:1px solid var(--seam-2); border-radius:4px; background:var(--panel); font-size:12px; }
+:root[data-theme="light"] .tech .box { background:var(--ground); }
+.tech .box { --text-3:var(--text-3-base); }
+.tech .kvx { display:grid; grid-template-columns:110px 1fr; row-gap:4px; column-gap:10px; }
+.tech .kvx dt { color:var(--text-3); margin:0; }
+.tech .kvx dd { margin:0; color:var(--text); min-width:0; overflow-wrap:anywhere; }
+.tech .kvx dd.mono { font-size:11.5px; }
+.tech .code { font:400 11px "Fragment Mono", monospace; border:1px solid var(--seam-2); border-radius:3px; padding:1px 4px; color:var(--text); }
+.tech .copy { margin-top:8px; }
+
+/* NEW · Choice list (radio rows) for the production-tag prompt */
+.choices { border:1px solid var(--seam-2); border-radius:4px; overflow:hidden; margin:2px 0 10px; }
+.choice { display:grid; grid-template-columns:14px 7px 1fr; column-gap:10px; align-items:center; width:100%; min-height:34px; padding:7px 10px;
+  border:0; background:transparent; text-align:left; cursor:pointer; color:var(--text); }
+.choice + .choice { border-top:1px solid var(--seam); }
+.choice:hover { background:var(--hover); }
+.choice[aria-checked="true"] { background:var(--blue-a); }
+.choice:focus-visible { outline-offset:-2px; }
+.choice .radio { width:14px; height:14px; border:1px solid var(--seam-2); border-radius:50%; display:flex; align-items:center; justify-content:center; background:var(--panel); }
+:root[data-theme="light"] .choice .radio { background:var(--ground); }
+.choice[aria-checked="true"] .radio { border-color:var(--blue); }
+.choice[aria-checked="true"] .radio::after { content:""; width:6px; height:6px; border-radius:50%; background:var(--blue); }
+.choice .cl { display:flex; flex-direction:column; min-width:0; }
+.choice .cl b { font-weight:600; font-size:13px; }
+.choice .cl span { color:var(--text-2); font-size:12.5px; }
+.changes { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:7px; }
+.changes li { display:grid; grid-template-columns:16px 1fr; column-gap:8px; align-items:start; color:var(--text); font-size:12.5px; line-height:1.4; }
+.changes li .m { height:17px; display:flex; align-items:center; justify-content:center; color:var(--text-2); }
+.changes .prodword { color:var(--red); font-variant-caps:all-small-caps; letter-spacing:.09em; font-weight:700; }
+.calm { color:var(--text-2); font-size:12.5px; margin:0; }
+.suggest { color:var(--text-2); font-size:12px; display:flex; gap:6px; align-items:center; margin:-2px 0 8px; }
+
+/* Certificate / fingerprint insets (DML-preview anatomy) */
+.inset { padding:8px 10px; border:1px solid var(--seam-2); border-radius:4px; background:var(--panel); --text-3:var(--text-3-base); }
+:root[data-theme="light"] .inset { background:var(--ground); }
+.certkv { display:grid; grid-template-columns:120px 1fr; row-gap:5px; column-gap:10px; font-size:12.5px; margin-bottom:10px; }
+.certkv dt { color:var(--text-2); margin:0; }
+.certkv dd { margin:0; color:var(--text); min-width:0; }
+.certkv dd.mono { font-size:11.5px; }
+.fp { font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); letter-spacing:.02em; }
+.fphead { display:flex; align-items:center; gap:6px; color:var(--text-2); font-size:12.5px; margin-bottom:5px; }
+.chain { margin:10px 0 0; padding:0; list-style:none; font-size:12.5px; }
+.chain li { height:22px; display:flex; align-items:center; gap:7px; white-space:nowrap; }
+.chain li .mono { font-size:11.5px; color:var(--text); }
+.chain li .d { color:var(--text-2); }
+.chain li .tick { width:9px; height:11px; border-left:1px solid var(--seam-2); border-bottom:1px solid var(--seam-2); margin-top:-8px; flex:none; }
+.chain li.l1 { padding-left:8px; } .chain li.l2 { padding-left:24px; }
+.chain li svg { color:var(--text-2); }
+
+/* SSH: route line + jump list */
+.route { display:flex; align-items:center; flex-wrap:wrap; gap:6px; color:var(--text-2); font-size:12px; }
+.route .mono { font-size:11.5px; color:var(--text); }
+.route svg { color:var(--text-2); }
+.hops { display:flex; flex-direction:column; gap:6px; flex:1; min-width:0; }
+.hop { display:flex; align-items:center; gap:8px; }
+.hop .ix { font:400 11px "Fragment Mono", monospace; color:var(--text-2); width:12px; text-align:right; flex:none; }
+
+/* PopupMenu (existing): min 200px, rows 24px, radius 6, popover shadow */
+.menu { position:absolute; z-index:60; min-width:200px; padding:4px; background:var(--raised); border:1px solid var(--seam-2); border-radius:6px; box-shadow:var(--shadow-pop); --text-3:var(--text-2); outline:none; }
+.menu .mi { height:24px; display:flex; align-items:center; gap:12px; padding:0 10px; border-radius:3px; cursor:default; white-space:nowrap; color:var(--text); font-size:13px; }
+.menu .mi .ck { width:12px; color:var(--blue); display:flex; }
+.menu .mi .h { color:var(--text-2); font-size:12px; margin-left:auto; padding-left:16px; }
+.menu .mi .k { font:400 11px "Fragment Mono", monospace; color:var(--text-2); margin-left:auto; padding-left:16px; }
+.menu .mi.on { background:var(--hover); }
+.menu .mi.dis { color:var(--text-2); }
+.menu .mi.danger { color:var(--red); }
+.menu .mi.mono2 .lab { font:400 12px "Fragment Mono", monospace; }
+.menu .sep { height:1px; background:var(--seam); margin:4px 0; }
+.menu .mh { padding:4px 10px 4px; color:var(--text-2); font-size:12px; }
+
+/* Popover explanation (unencrypted badge) */
+.pop { position:absolute; z-index:45; width:300px; padding:10px 12px; background:var(--raised); border:1px solid var(--seam-2); border-radius:6px; box-shadow:var(--shadow-pop); font-size:12.5px; color:var(--text-2); line-height:1.4; --text-3:var(--text-2); }
+.pop b { color:var(--text); font-weight:600; display:flex; gap:7px; align-items:center; margin-bottom:4px; font-size:13px; }
+.pop p { margin:0 0 6px; }
+
+/* Toast (existing) + NEW sticky variant with actions */
+.toasts { position:absolute; right:12px; bottom:36px; display:flex; flex-direction:column; gap:8px; z-index:50; }
+.toast { width:320px; padding:8px 12px; background:var(--raised); border:1px solid var(--seam-2); border-radius:6px; box-shadow:var(--shadow-pop); display:flex; gap:8px; align-items:flex-start; font-size:12.5px; color:var(--text); --text-3:var(--text-2); }
+.toast.wide { width:380px; }
+.toast > svg { margin-top:1px; color:var(--text-2); }
+.toast > svg.ok { color:var(--green); }
+.toast .tb { flex:1; min-width:0; line-height:1.4; }
+.toast .tb .t1 { font-weight:600; }
+.toast .tb .l2 { color:var(--text-2); }
+.toast .tb .mono { font-size:11.5px; overflow-wrap:anywhere; }
+.toast .tb ul { margin:4px 0 0; padding:0 0 0 0; list-style:none; color:var(--text-2); }
+.toast .tb li { display:flex; gap:6px; align-items:flex-start; }
+.toast .tb li::before { content:""; width:3px; height:3px; background:var(--text-2); flex:none; margin-top:7px; }
+.toast .acts { display:flex; gap:6px; margin-top:8px; }
+.toast .x { border:0; background:transparent; padding:2px; color:var(--text-2); cursor:pointer; border-radius:3px; }
+.toast .x:hover { color:var(--text); background:var(--hover); }
+
+/* ───────── Mock notes drawer (mock only) ───────── */
+.notes { position:fixed; top:34px; right:0; bottom:0; width:420px; z-index:80; background:var(--gutter); border-left:1px dashed var(--seam-2);
+  display:none; flex-direction:column; font-size:12.5px; color:var(--text); }
+.notes.on { display:flex; }
+.notes .nh { height:30px; display:flex; align-items:center; gap:8px; padding:0 10px 0 12px; border-bottom:1px solid var(--seam); flex:none; }
+.notes .nh .tag { font:400 11px "Fragment Mono", monospace; color:var(--text-2); border:1px dashed var(--seam-2); border-radius:3px; padding:1px 5px; }
+.notes .nbody { overflow:auto; padding:10px 12px 20px; }
+.notes h3 { margin:12px 0 6px; font-size:13.5px; color:var(--text-2); font-variant-caps:all-small-caps; letter-spacing:.075em; font-weight:600; }
+.notes h3:first-child { margin-top:2px; }
+.notes ul { margin:0; padding-left:16px; color:var(--text); line-height:1.45; }
+.notes li { margin-bottom:4px; }
+.notes li code, .notes p code { font:400 11.5px "Fragment Mono", monospace; color:var(--text); }
+.notes p { margin:0 0 6px; color:var(--text-2); line-height:1.45; }
+.notes table { width:100%; border-collapse:collapse; font-size:12px; table-layout:fixed; }
+.notes td { border-top:1px solid var(--seam); padding:4px 4px 4px 0; vertical-align:top; overflow-wrap:anywhere; }
+.notes td.k { font:400 11px "Fragment Mono", monospace; color:var(--text-2); width:30%; }
+.notes td.en { color:var(--text-2); width:33%; }
+.notes .por { font:400 10.5px "Fragment Mono", monospace; color:var(--amber); border:1px dashed var(--amber); border-radius:3px; padding:0 3px; white-space:nowrap; margin-left:4px; }
+.notes .sample { display:flex; gap:6px; align-items:center; margin:6px 0; }
+.notes .sample code { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:400 11px "Fragment Mono", monospace; border:1px solid var(--seam-2); border-radius:3px; padding:3px 5px; }
+
+/* ═══════════════════════════════════════════════════════════════
+   M2b additions. Everything above this line is the M2a mock's CSS,
+   copied unchanged except two rules marked "M2b". Everything below
+   reuses harman tokens only; NOTES.md lists each one.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Linux window chrome (vault scenarios): no traffic lights, controls on the right */
+.titlebar.linux .lights { display:none; }
+.wctl { display:flex; gap:2px; margin-left:6px; }
+.wctl span { width:28px; height:24px; display:flex; align-items:center; justify-content:center; border-radius:4px; color:var(--text-2); }
+
+/* Dialog bodies scroll when the window is short; 480 rows use a 120px label column */
+.dlg .dbody { overflow:auto; min-height:0; }
+.dlg.w480 .frow, .dlg.w480 .hintrow, .dlg.w420 .frow, .dlg.w420 .hintrow { grid-template-columns:120px 1fr; }
+.dlg .dbody p.small { font-size:12.5px; }
+.dlg .lead { color:var(--text-2); font-size:13px; margin:0 0 6px; }
+.static { font:400 12px "Fragment Mono", monospace; color:var(--text); overflow-wrap:anywhere; }
+.btn.danger[disabled], .btn.danger[disabled]:hover { color:var(--text-3); border-color:var(--seam-2); background:transparent; }
+
+/* Key comparison: two fingerprint insets, labelled by fact, no hue */
+.fpstack { display:flex; flex-direction:column; gap:8px; margin:2px 0 10px; }
+.fphead .alg { font:400 11.5px "Fragment Mono", monospace; color:var(--text); }
+.fphead .btn.icon { height:20px; margin:-3px -5px -3px 0; }
+.src { display:flex; gap:6px; align-items:baseline; margin-top:6px; padding-top:6px; border-top:1px solid var(--seam); font-size:12px; color:var(--text-2); }
+.src .mono { font-size:11.5px; color:var(--text); }
+
+/* Copyable command (ssh-keygen -R) and SQL snippet: the fingerprint-inset anatomy */
+.cmd { display:flex; align-items:center; gap:8px; }
+.cmd code { flex:1; min-width:0; font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); overflow-wrap:anywhere; }
+/* SQL inset: Task 5's remediation() string as is. One block per line; a long line wraps inside the inset (no clip,
+   no horizontal scroll) and lines are 4px apart, so a wrapped continuation reads as part of its statement. */
+:root, :root[data-theme="dark"] { --syn-cm:#828A96; }
+:root[data-theme="light"] { --syn-cm:#7C7C86; }
+.sql { margin:0; font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); }
+.sql .sl { white-space:pre-wrap; overflow-wrap:anywhere; padding-left:2ch; text-indent:-2ch; }   /* wrapped continuations hang 2ch (N2) */
+.sql .sl + .sl { margin-top:4px; }
+.sql .kw { color:var(--syn-kw); }
+.sql .str { color:var(--syn-str); }
+.sql .phd { color:var(--text-2); font-style:italic; }
+.sql .cm { color:var(--syn-cm); font-style:italic; }
+/* Role-probe findings in the popover: the sticky-toast list anatomy (3px square text-2 bullets) */
+.pop .warns { margin:0 0 6px; padding:0; list-style:none; }
+.pop .warns li { display:flex; gap:7px; align-items:flex-start; color:var(--text); font-size:12px; line-height:1.4; }
+.pop .warns li::before { content:""; width:3px; height:3px; background:var(--text-2); flex:none; margin-top:7px; }
+.pop .warns li + li { margin-top:2px; }
+.pop .warns .mono { font-size:11.5px; }
+.pop .nofix { margin:0; }
+.pop:focus { outline:none; }
+.pop:focus-visible { outline:1px solid var(--blue); outline-offset:1px; }
+.cp-ro:focus-visible { outline:1px solid var(--blue); outline-offset:-2px; }
+
+/* Keyboard-interactive: server text in its own field, prompts stacked (labels are server text too) */
+.srv .cap2 { color:var(--text-2); font-size:12px; margin-bottom:4px; }
+/* The caption stays put; only the server's text scrolls, capped at 119px = 7 mono lines (the whole inset stays ≤ 160px),
+   with M2a's 4px seam-strong thumb (N4). A hostile or chatty server can't push the prompts out of the dialog. */
+.srvscroll { max-height:119px; overflow-y:auto; padding-right:6px; }
+/* M2a's scroll thumb (DESIGN.md "Minimum window"): 4px, seam-strong, radius 3, no track */
+.srvscroll::-webkit-scrollbar, .pop .pbody::-webkit-scrollbar { width:4px; }
+.srvscroll::-webkit-scrollbar-track, .pop .pbody::-webkit-scrollbar-track { background:transparent; }
+.srvscroll::-webkit-scrollbar-thumb, .pop .pbody::-webkit-scrollbar-thumb { background:var(--seam-2); border-radius:3px; }
+/* Popover height cap (N5): title and Copy SQL stay in view, the body scrolls */
+.pop { display:flex; flex-direction:column; }
+.pop > b { flex:none; }
+.pop .pbody { flex:1 1 auto; min-height:0; overflow-y:auto; margin-right:-6px; padding-right:6px; }
+.pop .pacts { flex:none; margin-top:6px; }
+.srvtext { font:400 11.5px/17px "Fragment Mono", monospace; color:var(--text); white-space:pre-wrap; overflow-wrap:anywhere; }
+.srvtext + .srvtext { margin-top:4px; color:var(--text-2); }
+.srvtext.none { font-family:"Source Sans 3", system-ui, sans-serif; font-size:12.5px; color:var(--text-2); }
+.kp { margin-top:10px; }
+.kp .kl { display:block; font:400 11.5px/16px "Fragment Mono", monospace; color:var(--text); white-space:pre-wrap; overflow-wrap:anywhere; margin-bottom:4px; }
+.kp .in { width:100%; }
+.metaline { display:flex; flex-wrap:wrap; gap:4px 12px; align-items:center; margin-top:10px; font-size:12px; color:var(--text-2); }
+.metaline .lft { display:flex; gap:6px; align-items:center; color:var(--text); }
+
+/* Hop route: the current hop is boxed (no hue); in errors each hop shows done / failed / pending */
+.route .cur { border:1px solid var(--seam-2); border-radius:3px; padding:0 4px; }
+.route .dim { color:var(--text-2) !important; }
+.hroute { display:flex; align-items:center; flex-wrap:wrap; gap:4px 6px; margin-top:6px; font-size:12px; color:var(--text-2); }
+.hroute .h { display:flex; align-items:center; gap:5px; height:20px; }
+.hroute .h .mono { font-size:11.5px; }
+.hroute .h.done svg { color:var(--green); }
+.hroute .h.done .mono { color:var(--text); }
+.hroute .h.fail .mono { color:var(--text); font-weight:600; }
+.hroute .h.fail svg { color:var(--text); }
+.hroute .h.pend .dot { width:7px; height:7px; border:1px solid var(--seam-2); display:block; }
+.rs { display:flex; align-items:center; gap:6px; white-space:nowrap; }     /* an arrow travels with the stop after it */
+.rs > svg { color:var(--text-2); flex:none; }
+.hopline { margin-top:8px; font-size:12.5px; color:var(--text); font-weight:600; }
+
+/* Validation lines (vault): green check only when a rule is met; never red */
+.vlines { display:flex; flex-direction:column; gap:3px; margin-top:6px; }
+.vline { display:flex; gap:6px; align-items:center; font-size:12px; color:var(--text-2); }
+.vline.ok svg { color:var(--green); }
+.vline.bad { color:var(--text); }
+.vline .sq { width:7px; height:7px; border:1px solid var(--seam-2); display:block; margin:0 2.5px; }
+
+/* Read-only labels: lock is red only on production (M2b changes the M2a rule) */
+.cp-ro { color:var(--text); }
+.cp-ro.prod svg { color:var(--red); }
+.cp-idle { color:var(--text-2); }
+.kv .ibtn { border:0; background:transparent; padding:2px; color:var(--text-2); cursor:pointer; border-radius:3px; display:flex; }
+.kv .ibtn:hover { color:var(--text); background:var(--hover); }
+.kv .lk { color:var(--text-2); }
+.kv .lk.prod { color:var(--red); }
+.pop .inset { margin:8px 0 8px; }
+.pop .pacts { display:flex; justify-content:flex-end; margin-top:-2px; }
+.pop .pacts .btn { height:22px; }
+.pop .anchor-note { margin:0 0 6px; }
+.wctl[hidden] { display:none; }
+/* Sheet Access row: the whole value is the popover trigger (no extra icon, so Turkish fits 150px) */
+.kvbtn { display:flex; align-items:center; gap:6px; min-width:0; border:0; background:transparent; padding:0; color:var(--text); cursor:pointer; font-size:12.5px; }
+.kvbtn span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-underline-offset:2px; }
+.kvbtn:hover span { text-decoration:underline; }
+.kv dd > span:not(.env):not(.mono) { overflow:hidden; text-overflow:ellipsis; min-width:0; }
+</style>
+</head>
+<body>
+<!--ICON-SPRITE-BEGIN: Lucide 0.460 (ISC), inlined; see crates/ui/hacivat-ui-core/assets/icons/lucide/LICENSE -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="hv-mark" viewBox="0 0 16 16"><rect x="1.5" y="1.5" width="13" height="13" rx="2.5" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2.2 1.6"/><path d="M5.6 4.8v6.4M10.4 4.8v6.4M5.6 8h4.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></symbol>
+<symbol id="i-align-left" viewBox="0 0 24 24"><path d="M15 12H3" /> <path d="M17 18H3" /> <path d="M21 6H3" /></symbol>
+<symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14" /> <path d="m19 12-7 7-7-7" /></symbol>
+<symbol id="i-arrow-left-right" viewBox="0 0 24 24"><path d="M8 3 4 7l4 4" /> <path d="M4 7h16" /> <path d="m16 21 4-4-4-4" /> <path d="M20 17H4" /></symbol>
+<symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14" /> <path d="m12 5 7 7-7 7" /></symbol>
+<symbol id="i-badge-check" viewBox="0 0 24 24"><path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z" /> <path d="m9 12 2 2 4-4" /></symbol>
+<symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <path d="m4.9 4.9 14.2 14.2" /></symbol>
+<symbol id="i-brackets" viewBox="0 0 24 24"><path d="M16 3h3v18h-3" /> <path d="M8 21H5V3h3" /></symbol>
+<symbol id="i-calendar" viewBox="0 0 24 24"><path d="M8 2v4" /> <path d="M16 2v4" /> <rect width="18" height="18" x="3" y="4" rx="2" /> <path d="M3 10h18" /></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></symbol>
+<symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></symbol>
+<symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></symbol>
+<symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></symbol>
+<symbol id="i-chevrons-up-down" viewBox="0 0 24 24"><path d="m7 15 5 5 5-5" /> <path d="m7 9 5-5 5 5" /></symbol>
+<symbol id="i-circle-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <line x1="12" x2="12" y1="8" y2="12" /> <line x1="12" x2="12.01" y1="16" y2="16" /></symbol>
+<symbol id="i-circle-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <path d="m9 12 2 2 4-4" /></symbol>
+<symbol id="i-circle-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <circle cx="12" cy="12" r="1" /></symbol>
+<symbol id="i-circle-x" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <path d="m15 9-6 6" /> <path d="m9 9 6 6" /></symbol>
+<symbol id="i-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /></symbol>
+<symbol id="i-clipboard-paste" viewBox="0 0 24 24"><path d="M15 2H9a1 1 0 0 0-1 1v2c0 .6.4 1 1 1h6c.6 0 1-.4 1-1V3c0-.6-.4-1-1-1Z" /> <path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2M16 4h2a2 2 0 0 1 2 2v2M11 14h10" /> <path d="m17 10 4 4-4 4" /></symbol>
+<symbol id="i-columns-2" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M12 3v18" /></symbol>
+<symbol id="i-copy-check" viewBox="0 0 24 24"><path d="m12 15 2 2 4-4" /> <rect width="14" height="14" x="8" y="8" rx="2" ry="2" /> <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /> <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></symbol>
+<symbol id="i-corner-down-left" viewBox="0 0 24 24"><polyline points="9 10 4 15 9 20" /> <path d="M20 4v7a4 4 0 0 1-4 4H4" /></symbol>
+<symbol id="i-cylinder" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3" /> <path d="M3 5v14a9 3 0 0 0 18 0V5" /></symbol>
+<symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3" /> <path d="M3 5V19A9 3 0 0 0 21 19V5" /> <path d="M3 12A9 3 0 0 0 21 12" /></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /> <polyline points="7 10 12 15 17 10" /> <line x1="12" x2="12" y1="15" y2="3" /></symbol>
+<symbol id="i-ellipsis-vertical" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1" /> <circle cx="12" cy="5" r="1" /> <circle cx="12" cy="19" r="1" /></symbol>
+<symbol id="i-ellipsis" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1" /> <circle cx="19" cy="12" r="1" /> <circle cx="5" cy="12" r="1" /></symbol>
+<symbol id="i-external-link" viewBox="0 0 24 24"><path d="M15 3h6v6" /> <path d="M10 14 21 3" /> <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></symbol>
+<symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49" /> <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" /> <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" /> <path d="m2 2 20 20" /></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" /> <circle cx="12" cy="12" r="3" /></symbol>
+<symbol id="i-file-code-2" viewBox="0 0 24 24"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4" /> <path d="M14 2v4a2 2 0 0 0 2 2h4" /> <path d="m5 12-3 3 3 3" /> <path d="m9 18 3-3-3-3" /></symbol>
+<symbol id="i-file-diff" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /> <path d="M9 10h6" /> <path d="M12 13V7" /> <path d="M9 17h6" /></symbol>
+<symbol id="i-file-key" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /> <circle cx="10" cy="16" r="2" /> <path d="m16 10-4.5 4.5" /> <path d="m15 11 1 1" /></symbol>
+<symbol id="i-file-up" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /> <path d="M14 2v4a2 2 0 0 0 2 2h4" /> <path d="M12 12v6" /> <path d="m15 15-3-3-3 3" /></symbol>
+<symbol id="i-filter" viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" /></symbol>
+<symbol id="i-fingerprint" viewBox="0 0 24 24"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4" /> <path d="M14 13.12c0 2.38 0 6.38-1 8.88" /> <path d="M17.29 21.02c.12-.6.43-2.3.5-3.02" /> <path d="M2 12a10 10 0 0 1 18-6" /> <path d="M2 16h.01" /> <path d="M21.8 16c.2-2 .131-5.354 0-6" /> <path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2" /> <path d="M8.65 22c.21-.66.45-1.32.57-2" /> <path d="M9 6.8a6 6 0 0 1 9 5.2v2" /></symbol>
+<symbol id="i-folder-open" viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></symbol>
+<symbol id="i-git-commit-horizontal" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /> <line x1="3" x2="9" y1="12" y2="12" /> <line x1="15" x2="21" y1="12" y2="12" /></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" /> <path d="M2 12h20" /></symbol>
+<symbol id="i-hard-drive" viewBox="0 0 24 24"><line x1="22" x2="2" y1="12" y2="12" /> <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" /> <line x1="6" x2="6.01" y1="16" y2="16" /> <line x1="10" x2="10.01" y1="16" y2="16" /></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /> <path d="M12 16v-4" /> <path d="M12 8h.01" /></symbol>
+<symbol id="i-key-round" viewBox="0 0 24 24"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z" /> <circle cx="16.5" cy="7.5" r=".5" fill="currentColor" /></symbol>
+<symbol id="i-key-square" viewBox="0 0 24 24"><path d="M12.4 2.7a2.5 2.5 0 0 1 3.4 0l5.5 5.5a2.5 2.5 0 0 1 0 3.4l-3.7 3.7a2.5 2.5 0 0 1-3.4 0L8.7 9.8a2.5 2.5 0 0 1 0-3.4z" /> <path d="m14 7 3 3" /> <path d="m9.4 10.6-6.814 6.814A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814" /></symbol>
+<symbol id="i-keyboard" viewBox="0 0 24 24"><path d="M10 8h.01" /> <path d="M12 12h.01" /> <path d="M14 8h.01" /> <path d="M16 12h.01" /> <path d="M18 8h.01" /> <path d="M6 8h.01" /> <path d="M7 16h10" /> <path d="M8 12h.01" /> <rect width="20" height="16" x="2" y="4" rx="2" /></symbol>
+<symbol id="i-languages" viewBox="0 0 24 24"><path d="m5 8 6 6" /> <path d="m4 14 6-6 2-3" /> <path d="M2 5h12" /> <path d="M7 2h1" /> <path d="m22 22-5-10-5 10" /> <path d="M14 18h6" /></symbol>
+<symbol id="i-laptop" viewBox="0 0 24 24"><path d="M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9m16 0H4m16 0 1.28 2.55a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45L4 16" /></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" /> <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" /> <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" /></symbol>
+<symbol id="i-layout-panel-left" viewBox="0 0 24 24"><rect width="7" height="18" x="3" y="3" rx="1" /> <rect width="7" height="7" x="14" y="3" rx="1" /> <rect width="7" height="7" x="14" y="14" rx="1" /></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /> <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></symbol>
+<symbol id="i-list-ordered" viewBox="0 0 24 24"><path d="M10 12h11" /> <path d="M10 18h11" /> <path d="M10 6h11" /> <path d="M4 10h2" /> <path d="M4 6h1v4" /> <path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1" /></symbol>
+<symbol id="i-list-tree" viewBox="0 0 24 24"><path d="M21 12h-8" /> <path d="M21 6H8" /> <path d="M21 18h-8" /> <path d="M3 6v4c0 1.1.9 2 2 2h3" /> <path d="M3 10v6c0 1.1.9 2 2 2h3" /></symbol>
+<symbol id="i-loader-circle" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></symbol>
+<symbol id="i-lock-open" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2" /> <path d="M7 11V7a5 5 0 0 1 9.9-1" /></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2" /> <path d="M7 11V7a5 5 0 0 1 10 0v4" /></symbol>
+<symbol id="i-menu" viewBox="0 0 24 24"><line x1="4" x2="20" y1="12" y2="12" /> <line x1="4" x2="20" y1="6" y2="6" /> <line x1="4" x2="20" y1="18" y2="18" /></symbol>
+<symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14" /></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" /></symbol>
+<symbol id="i-network" viewBox="0 0 24 24"><rect x="16" y="16" width="6" height="6" rx="1" /> <rect x="2" y="16" width="6" height="6" rx="1" /> <rect x="9" y="2" width="6" height="6" rx="1" /> <path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" /> <path d="M12 12V8" /></symbol>
+<symbol id="i-panel-left" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M9 3v18" /></symbol>
+<symbol id="i-panel-right" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M15 3v18" /></symbol>
+<symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /> <path d="m15 5 4 4" /></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3" /></symbol>
+<symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5" /> <path d="M9 8V2" /> <path d="M15 8V2" /> <path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" /></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14" /> <path d="M12 5v14" /></symbol>
+<symbol id="i-radio" viewBox="0 0 24 24"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9" /> <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5" /> <circle cx="12" cy="12" r="2" /> <path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5" /> <path d="M19.1 4.9C23 8.8 23 15.1 19.1 19" /></symbol>
+<symbol id="i-refresh-cw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></symbol>
+<symbol id="i-rotate-cw" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /></symbol>
+<symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="19" r="3" /> <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" /> <circle cx="18" cy="5" r="3" /></symbol>
+<symbol id="i-rows-2" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M3 12h18" /></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8" /> <path d="m21 21-4.3-4.3" /></symbol>
+<symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2" ry="2" /> <rect width="20" height="8" x="2" y="14" rx="2" ry="2" /> <line x1="6" x2="6.01" y1="6" y2="6" /> <line x1="6" x2="6.01" y1="18" y2="18" /></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /> <circle cx="12" cy="12" r="3" /></symbol>
+<symbol id="i-shield-alert" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /> <path d="M12 8v4" /> <path d="M12 16h.01" /></symbol>
+<symbol id="i-shield-check" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /> <path d="m9 12 2 2 4-4" /></symbol>
+<symbol id="i-shield-off" viewBox="0 0 24 24"><path d="m2 2 20 20" /> <path d="M5 5a1 1 0 0 0-1 1v7c0 5 3.5 7.5 7.67 8.94a1 1 0 0 0 .67.01c2.35-.82 4.48-1.97 5.9-3.71" /> <path d="M9.309 3.652A12.252 12.252 0 0 0 11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1v7a9.784 9.784 0 0 1-.08 1.264" /></symbol>
+<symbol id="i-sigma" viewBox="0 0 24 24"><path d="M18 7V5a1 1 0 0 0-1-1H6.5a.5.5 0 0 0-.4.8l4.5 6a2 2 0 0 1 0 2.4l-4.5 6a.5.5 0 0 0 .4.8H17a1 1 0 0 0 1-1v-2" /></symbol>
+<symbol id="i-square-function" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" ry="2" /> <path d="M9 17c2 0 2.8-1 2.8-2.8V10c0-2 1-3.3 3.2-3" /> <path d="M9 11.2h5.7" /></symbol>
+<symbol id="i-square" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /> <path d="M12 2v2" /> <path d="M12 20v2" /> <path d="m4.93 4.93 1.41 1.41" /> <path d="m17.66 17.66 1.41 1.41" /> <path d="M2 12h2" /> <path d="M20 12h2" /> <path d="m6.34 17.66-1.41 1.41" /> <path d="m19.07 4.93-1.41 1.41" /></symbol>
+<symbol id="i-table-2" viewBox="0 0 24 24"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18" /></symbol>
+<symbol id="i-table-properties" viewBox="0 0 24 24"><path d="M15 3v18" /> <rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M21 9H3" /> <path d="M21 15H3" /></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5" /> <line x1="12" x2="20" y1="19" y2="19" /></symbol>
+<symbol id="i-trash-2" viewBox="0 0 24 24"><path d="M3 6h18" /> <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /> <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /> <line x1="10" x2="10" y1="11" y2="17" /> <line x1="14" x2="14" y1="11" y2="17" /></symbol>
+<symbol id="i-triangle-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /> <path d="M12 9v4" /> <path d="M12 17h.01" /></symbol>
+<symbol id="i-undo-2" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5" /> <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11" /></symbol>
+<symbol id="i-unplug" viewBox="0 0 24 24"><path d="m19 5 3-3" /> <path d="m2 22 3-3" /> <path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z" /> <path d="M7.5 13.5 10 11" /> <path d="M10.5 16.5 13 14" /> <path d="m12 6 6 6 2.3-2.3a2.4 2.4 0 0 0 0-3.4l-2.6-2.6a2.4 2.4 0 0 0-3.4 0Z" /></symbol>
+<symbol id="i-wifi-off" viewBox="0 0 24 24"><path d="M12 20h.01" /> <path d="M8.5 16.429a5 5 0 0 1 7 0" /> <path d="M5 12.859a10 10 0 0 1 5.17-2.69" /> <path d="M19 12.859a10 10 0 0 0-2.007-1.523" /> <path d="M2 8.82a15 15 0 0 1 4.177-2.643" /> <path d="M22 8.82a15 15 0 0 0-11.288-3.764" /> <path d="m2 2 20 20" /></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18" /> <path d="m6 6 12 12" /></symbol>
+
+</defs></svg>
+<!--ICON-SPRITE-END-->
+<!-- ═════════════ Mock bar (not product) ═════════════ -->
+<div class="mockbar" id="mockbar"></div>
+
+<div class="win" id="win">
+  <header class="titlebar" id="titlebar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="brand"><svg class="mark" role="img" aria-label="Logo placeholder"><use href="#hv-mark"/></svg><span class="word sc" lang="en">Hacivat</span></div>
+    <span class="vsep"></span>
+    <span id="capslot" style="display:flex"></span>
+    <button class="palette" tabindex="-1"><svg class="ic i12"><use href="#i-search"/></svg><span data-i="app-palette"></span><kbd>⌘K</kbd></button>
+    <span class="wctl" id="wctl" hidden aria-hidden="true"><span><svg class="ic i12"><use href="#i-minus"/></svg></span><span><svg class="ic i12"><use href="#i-square"/></svg></span><span><svg class="ic i12"><use href="#i-x"/></svg></span></span>
+  </header>
+
+  <main class="tiles">
+    <div class="col left">
+      <section class="panel side" id="explorer"></section>
+      <section class="panel side" id="sheet"></section>
+    </div>
+    <section class="panel" id="center"></section>
+  </main>
+
+  <footer class="status" id="status"></footer>
+  <div id="layers"></div>
+  <div id="menus"></div>
+  <div class="toasts" id="toasts"></div>
+</div>
+
+<aside class="notes" id="notes"></aside>
+
+<!-- Strings reused verbatim from design/m2-connect (already in its copy table) -->
+<script type="application/json" id="i18n-m2a">
+{
+"en": {
+  "app-palette":"Search or run a command",
+  "explorer":"Explorer",
+  "filter-conn":"Filter connections",
+  "new-conn-tip":"New connection",
+  "env-local":"local",
+  "env-dev":"dev",
+  "env-test":"test",
+  "env-staging":"staging",
+  "env-production":"production",
+  "env-prod-cap":"production",
+  "acc-ro":"read-only",
+  "acc-rw":"read-write",
+  "path-direct":"Direct",
+  "path-ssh":"SSH via {host}",
+  "enc-verified":"TLS 1.3 · verified",
+  "enc-pinned":"TLS 1.3 · pinned",
+  "enc-unencrypted":"unencrypted",
+  "enc-none-file":"not applicable (file)",
+  "kv-env":"Environment",
+  "kv-engine":"Engine",
+  "kv-host":"Host",
+  "kv-file":"File",
+  "kv-user":"User",
+  "kv-path":"Path",
+  "kv-enc":"Encryption",
+  "kv-secret":"Password",
+  "secret-forever":"Keychain · forever",
+  "secret-never":"asks every time",
+  "secret-session":"for this session",
+  "secret-restart":"until restart",
+  "secret-pgpass":"from ~/.pgpass",
+  "secret-none":"none",
+  "sheet-meta":"connection",
+  "sheet-none":"Select a connection to see its details.",
+  "home-title":"No query open",
+  "home-new":"New connection",
+  "home-paste":"New connection from a copied URL",
+  "home-connect":"Connect to the selected connection",
+  "home-search":"Search or run a command",
+  "home-hint":"Pick a connection in the Explorer, or add one.",
+  "sb-noconn":"No connection",
+  "sb-env":"{env} · {access}",
+  "dlg-cancel":"Cancel",
+  "dlg-remember":"Remember",
+  "dlg-password":"Password",
+  "ret-never":"Never",
+  "ret-never-h":"ask on every connect",
+  "ret-restart":"Until restart",
+  "ret-restart-h":"kept in memory",
+  "ret-session":"For this session",
+  "ret-session-h":"forgotten on disconnect",
+  "ret-forever":"Forever (Keychain)",
+  "ret-forever-h":"stored in the macOS Keychain",
+  "step-resolve":"Resolve",
+  "step-tcp":"Connect",
+  "step-tls":"TLS",
+  "step-auth":"Sign in",
+  "step-check":"Check server",
+  "step-ssh":"SSH",
+  "err-title":"Couldn't connect to {name}",
+  "err-tech":"Technical details",
+  "err-stage":"Failed at",
+  "err-class":"Class",
+  "err-code":"Code",
+  "err-server":"Server message",
+  "err-elapsed":"Elapsed",
+  "err-copy":"Copy details (English)",
+  "fix-edit":"Edit connection",
+  "fix-retry":"Try again",
+  "fix-review-cert":"Review certificate…",
+  "fix-close":"Close",
+  "cap-none":"No connection",
+  "cap-connecting":"Connecting",
+  "cap-failed":"Couldn't connect",
+  "cap-retry":"Retry",
+  "tls-subject":"Issued to",
+  "tls-issuer":"Issued by",
+  "tls-valid":"Valid until",
+  "tls-fp":"SHA-256 fingerprint",
+  "tls-chain":"Chain",
+  "tls-leaf":"server",
+  "tls-root":"root · not trusted by this Mac",
+  "tls-copy-fp":"Copy fingerprint",
+  "unit-s":"s",
+  "toast-connected":"Connected to {name}",
+  "toast-cancelled":"Connecting to {name} was cancelled.",
+  "hk-title":"First connection to {host}",
+  "hk-body":"This Mac hasn't connected to this SSH server before. Compare the fingerprint with the one your administrator gave you.",
+  "hk-fp":"Host key",
+  "hk-store":"Hacivat saves it in its own known-hosts list. ~/.ssh/known_hosts isn't changed.",
+  "hk-trust":"Trust and connect",
+  "ssh-user":"SSH user",
+  "ssh-key":"Key file",
+  "ssh-passphrase":"Passphrase",
+  "ssh-route":"Route",
+  "ssh-this-mac":"this Mac",
+  "lost-dismiss":"Dismiss"
+},
+"tr": {
+  "app-palette":"Ara veya komut çalıştır",
+  "explorer":"Gezgin",
+  "filter-conn":"Bağlantılarda ara",
+  "new-conn-tip":"Yeni bağlantı",
+  "env-local":"yerel",
+  "env-dev":"geliştirme",
+  "env-test":"test",
+  "env-staging":"hazırlık",
+  "env-production":"üretim",
+  "env-prod-cap":"prod",
+  "acc-ro":"salt okunur",
+  "acc-rw":"okuma-yazma",
+  "path-direct":"Doğrudan",
+  "path-ssh":"{host} üzerinden SSH",
+  "enc-verified":"TLS 1.3 · doğrulandı",
+  "enc-pinned":"TLS 1.3 · sabitlendi",
+  "enc-unencrypted":"şifrelenmemiş",
+  "enc-none-file":"geçerli değil (dosya)",
+  "kv-env":"Ortam",
+  "kv-engine":"Motor",
+  "kv-host":"Adres",
+  "kv-file":"Dosya",
+  "kv-user":"Kullanıcı",
+  "kv-path":"Yol",
+  "kv-enc":"Şifreleme",
+  "kv-secret":"Parola",
+  "secret-forever":"Anahtar Zinciri · kalıcı",
+  "secret-never":"her seferinde sorar",
+  "secret-session":"bu oturum boyunca",
+  "secret-restart":"yeniden başlatana kadar",
+  "secret-pgpass":"~/.pgpass dosyasından",
+  "secret-none":"yok",
+  "sheet-meta":"bağlantı",
+  "sheet-none":"Ayrıntılarını görmek için bir bağlantı seçin.",
+  "home-title":"Açık sorgu yok",
+  "home-new":"Yeni bağlantı",
+  "home-paste":"Kopyalanan URL'den yeni bağlantı",
+  "home-connect":"Seçili bağlantıya bağlan",
+  "home-search":"Ara veya komut çalıştır",
+  "home-hint":"Gezgin'den bir bağlantı seçin ya da yeni bir tane ekleyin.",
+  "sb-noconn":"Bağlantı yok",
+  "sb-env":"{env} · {access}",
+  "dlg-cancel":"İptal",
+  "dlg-remember":"Hatırla",
+  "dlg-password":"Parola",
+  "ret-never":"Hiçbir zaman",
+  "ret-never-h":"her bağlanışta sor",
+  "ret-restart":"Yeniden başlatana kadar",
+  "ret-restart-h":"bellekte tutulur",
+  "ret-session":"Bu oturum boyunca",
+  "ret-session-h":"bağlantı kesilince unutulur",
+  "ret-forever":"Kalıcı (Anahtar Zinciri)",
+  "ret-forever-h":"macOS Anahtar Zinciri'nde saklanır",
+  "step-resolve":"Çözümle",
+  "step-tcp":"Bağlan",
+  "step-tls":"TLS",
+  "step-auth":"Oturum aç",
+  "step-check":"Sunucuyu denetle",
+  "step-ssh":"SSH",
+  "err-title":"{name} bağlantısı kurulamadı",
+  "err-tech":"Teknik ayrıntılar",
+  "err-stage":"Hata adımı",
+  "err-class":"Sınıf",
+  "err-code":"Kod",
+  "err-server":"Sunucu mesajı",
+  "err-elapsed":"Geçen süre",
+  "err-copy":"Ayrıntıları kopyala (İngilizce)",
+  "fix-edit":"Bağlantıyı düzenle",
+  "fix-retry":"Yeniden dene",
+  "fix-review-cert":"Sertifikayı incele…",
+  "fix-close":"Kapat",
+  "cap-none":"Bağlantı yok",
+  "cap-connecting":"Bağlanıyor",
+  "cap-failed":"Bağlanılamadı",
+  "cap-retry":"Yeniden dene",
+  "tls-subject":"Verildiği ad",
+  "tls-issuer":"Veren",
+  "tls-valid":"Geçerlilik sonu",
+  "tls-fp":"SHA-256 parmak izi",
+  "tls-chain":"Zincir",
+  "tls-leaf":"sunucu",
+  "tls-root":"kök · bu Mac güvenmiyor",
+  "tls-copy-fp":"Parmak izini kopyala",
+  "unit-s":"sn",
+  "toast-connected":"{name} ile bağlanıldı",
+  "toast-cancelled":"{name} bağlantısı iptal edildi.",
+  "hk-title":"{host} ile ilk bağlantı",
+  "hk-body":"Bu Mac bu SSH sunucusuna daha önce bağlanmadı. Parmak izini yöneticinizin verdiğiyle karşılaştırın.",
+  "hk-fp":"Sunucu anahtarı",
+  "hk-store":"Hacivat bunu kendi bilinen sunucular listesine kaydeder. ~/.ssh/known_hosts değişmez.",
+  "hk-trust":"Güven ve bağlan",
+  "ssh-user":"SSH kullanıcısı",
+  "ssh-key":"Anahtar dosyası",
+  "ssh-passphrase":"Parola ifadesi",
+  "ssh-route":"Rota",
+  "ssh-this-mac":"bu Mac",
+  "lost-dismiss":"Kapat"
+}
+}
+</script>
+<!-- New M2b strings: the copy table in NOTES.md is generated from this block -->
+<script type="application/json" id="i18n">
+{
+"en": {
+  "hk-changed-title":"The host key of {host} changed",
+  "hk-changed-body":"The server answered with a different key from the one stored for it. That happens when a server is rebuilt or its keys are rotated, and also when someone is intercepting the connection. Hacivat stopped before signing in.",
+  "hk-changed-old":"Stored key",
+  "hk-changed-new":"Offered now",
+  "hk-changed-stored-in":"Stored in",
+  "hk-changed-src-hacivat":"Hacivat's known hosts",
+  "hk-changed-src-openssh":"{file} line {n}",
+  "hk-changed-ask":"Ask whoever runs {host} whether its key changed, and compare the new fingerprint before you trust it.",
+  "hk-changed-replace":"Remove the old key and trust the new one",
+  "hk-changed-openssh-note":"Hacivat doesn't change {file}. If the new key is genuine, remove the old line in a terminal, then try again:",
+  "hk-changed-copy":"Copy command",
+  "hk-changed-copied":"Copied the command",
+  "hk-changed-trusted":"Trusted the new key of {host}",
+  "kbd-title":"Sign in to {host}",
+  "kbd-asks":"{host} asks:",
+  "kbd-from-server":"Sent by the server, shown as received",
+  "kbd-no-text":"The server sent no name or instructions.",
+  "kbd-show":"Show",
+  "kbd-hide":"Hide",
+  "kbd-attempt":"Attempt {n} of 3",
+  "kbd-not-kept":"Answers go to this server only and aren't kept.",
+  "kbd-rejected":"The server didn't accept the answers and asked again.",
+  "kbd-continue":"Continue",
+  "sshsec-hop":"{host}, hop {n} of {total}",
+  "sshsec-pw-title":"SSH password for {host}",
+  "sshsec-pw-body":"Enter the SSH password for {user}. It's kept only if the connection works.",
+  "sshsec-pass-title":"Passphrase for {key}",
+  "sshsec-pass-body":"This key file is encrypted. Enter its passphrase. It's kept only if the connection works.",
+  "sshsec-pubkey":"Public key",
+  "sshsec-wrong":"{host} didn't accept the password.",
+  "sshsec-attempt":"Attempt {n} of 3",
+  "sshsec-continue":"Continue",
+  "vault-create-title":"Create a vault for saved passwords",
+  "vault-create-why":"This computer has no system keyring.",
+  "vault-create-what":"Hacivat keeps the passwords you save Forever in an encrypted file, locked with a master password.",
+  "vault-master":"Master password",
+  "vault-repeat":"Repeat",
+  "vault-min":"At least 8 characters",
+  "vault-match":"Both entries match",
+  "vault-mismatch":"The two entries don't match",
+  "vault-norecover":"Hacivat can't recover it. If you forget it, you reset the vault and enter your saved passwords again.",
+  "vault-notnow-note":"Not now keeps this password until Hacivat restarts.",
+  "vault-notnow":"Not now",
+  "vault-create-btn":"Create vault",
+  "vault-created":"Vault created. Passwords you save Forever go there.",
+  "vault-unlock-title":"Unlock the vault",
+  "vault-unlock-body":"Hacivat needs the master password to read the saved password for {name}. The vault stays unlocked until you quit.",
+  "vault-unlock-wrong":"That isn't the master password.",
+  "vault-attempt":"Attempt {n} of 3",
+  "vault-unlock-btn":"Unlock",
+  "vault-reset-link":"Reset vault…",
+  "vault-reset-title":"Reset the vault?",
+  "vault-reset-body":"This deletes the vault and the {n} passwords saved in it. Your connections stay, and Hacivat asks for each password the next time you connect. This can't be undone.",
+  "vault-reset-type":"Type {word} to confirm",
+  "vault-reset-word":"reset",
+  "vault-reset-btn":"Reset vault",
+  "vault-reset-done":"The vault was reset. Its saved passwords are gone.",
+  "vault-damaged-title":"The vault can't be read",
+  "vault-damaged-body":"The vault file failed its integrity check, so Hacivat didn't use it and didn't change it. Restore it from a backup, or reset the vault.",
+  "vault-damaged-meanwhile":"Until then, passwords you enter are kept until Hacivat restarts.",
+  "ret-forever-vault":"Forever (encrypted file)",
+  "ret-forever-vault-h":"in Hacivat's vault, behind a master password",
+  "vault-secret":"vault · forever",
+  "pin-changed-title":"The certificate of {host}:{port} changed",
+  "pin-changed-body":"This connection is pinned to one certificate, and the server now presents a different one. Hacivat stopped before signing in.",
+  "pin-changed-pinned":"Pinned",
+  "pin-changed-now":"Now",
+  "pin-changed-ask":"A renewed certificate looks like this too. Ask whoever runs the server before you replace the pin.",
+  "pin-changed-note":"Replacing the pin trusts exactly the new certificate for {host}:{port} and removes the old pin. A pin doesn't extend the expiry date.",
+  "pin-changed-replace":"Replace pin",
+  "pin-changed-done":"Pinned the new certificate of {host}",
+  "access-ro-enforced":"read-only (enforced by server role)",
+  "ro-kv-access":"Access",
+  "ro-sheet-enforced":"read-only · enforced",
+  "ro-sheet-guarded":"read-only · guarded",
+  "ro-why":"Why",
+  "ro-pop-enf-title":"Read-only, enforced by the server",
+  "ro-pop-enf-body":"The role {user} can only read here. The server itself refuses writes, whatever runs in Hacivat.",
+  "ro-pop-enf-temp":"TEMP alone doesn't weaken enforcement, so the label stays enforced.",
+  "ro-pop-g-title":"Read-only is guarded, not enforced",
+  "ro-pop-g-body":"The role {user} isn't limited to reading here, so Hacivat stops writes itself: it checks every statement and runs it read-only.",
+  "ro-pop-g-limit":"That catches mistakes. Only a read-only role on the server is a hard guarantee.",
+  "ro-pop-g-fix":"To enforce it, ask your DBA for a role like this, then make it this connection's user:",
+  "ro-pop-maria-body":"Hacivat can't yet confirm that a MariaDB role is read-only, so it always guards MariaDB connections itself.",
+  "ro-pop-no-fix":"No role change makes this label enforced, so there is no SQL to copy.",
+  "ro-pop-sqlite-body":"SQLite has no server roles. Hacivat opens the file read-only and lets through only statements that read.",
+  "ro-copy-sql":"Copy SQL",
+  "ro-copied":"Copied the SQL. Replace the values in angle brackets before you run it.",
+  "ro-warn-head":"Found on this role:",
+  "ro-warn-superuser":"It is a superuser.",
+  "ro-warn-bypass-rls":"It bypasses row-level security.",
+  "ro-warn-replication":"It can start replication.",
+  "ro-warn-create-role":"It can create and change roles.",
+  "ro-warn-server-file-roles":"It can read or write files on the database server.",
+  "ro-warn-execute-server-program":"It can run programs on the database server.",
+  "ro-warn-signal-backend":"It can cancel or end other sessions.",
+  "ro-warn-write-privileges":"It can change data in some tables.",
+  "ro-warn-temp-privilege":"It can create temporary tables, which read-only transactions block.",
+  "ro-warn-egress-extension":"The {name} extension can reach other servers.",
+  "ro-warn-role-grant-not-expanded":"Other roles are granted to it, and Hacivat can't see what they allow.",
+  "ro-warn-unparsed":"Hacivat couldn't read its privileges.",
+  "ro-cmd":"Explain read-only access",
+  "idle-cap":"Disconnected (idle)",
+  "idle-disconnected":"Disconnected {name} after {hours} h idle. It reconnects when you use it.",
+  "idle-disconnected-minutes":"Disconnected {name} after {minutes} min idle. It reconnects when you use it.",
+  "err-ssh-auth-title":"{host} rejected the SSH sign-in for {user}.",
+  "err-ssh-auth-body":"Hacivat tried the keys in ssh-agent and {key}. Check that your public key is in ~/.ssh/authorized_keys on that host, or choose another sign-in method.",
+  "err-ssh-hop":"Failed at hop {n} ({host})",
+  "err-ssh-channel-open-title":"{host} doesn't allow tunnels (AllowTcpForwarding)",
+  "err-ssh-channel-open-body":"Signing in to {host} worked, but it refused to forward the connection to {target}. Ask its administrator to allow TCP forwarding for {user}, and to allow {target} if PermitOpen is set.",
+  "err-ssh-agent-unavailable-title":"Hacivat can't reach ssh-agent.",
+  "err-ssh-agent-unavailable-body":"This connection signs in to {host} with keys from ssh-agent, but SSH_AUTH_SOCK isn't set for Hacivat. Start the agent and add your key with ssh-add, or choose a key file in the connection's SSH settings.",
+  "err-auth-insecure-method-title":"The server asked for the password in a form that isn't safe on this connection.",
+  "err-auth-insecure-method-body-tls":"The connection is encrypted, but the certificate isn't verified, so Hacivat can't be sure the password reaches {host}. It didn't send it. Review the certificate and pin it, then connect again.",
+  "err-auth-insecure-method-body-plain":"The connection isn't encrypted, so the password would cross the network in a form others could read or reuse. Hacivat didn't send it. Turn on TLS on the server, or, if you accept the risk on this network, set Encryption to Disable.",
+  "err-tls-pin-changed-title":"{host} sent a different certificate from the pinned one.",
+  "err-tls-pin-changed-body":"Hacivat stopped before signing in. Compare the new fingerprint with whoever runs the server before you replace the pin.",
+  "err-ssh-host-key-changed-title":"The host key of {host} changed.",
+  "err-ssh-host-key-changed-body":"Hacivat stopped before signing in. Review the new key before you trust it.",
+  "err-ssh-host-key-revoked-title":"{host} sent a key that {file} marks as revoked.",
+  "err-ssh-host-key-revoked-body":"Hacivat never connects with a revoked key. Ask the server's administrator for its current key.",
+  "fix-review-host-key":"Review host key…"
+},
+"tr": {
+  "hk-changed-title":"{host} sunucusunun anahtarı değişti",
+  "hk-changed-body":"Sunucu, kayıtlı anahtarından farklı bir anahtarla yanıt verdi. Bu, sunucu yeniden kurulduğunda ya da anahtarları yenilendiğinde olur; biri bağlantının arasına girdiğinde de olur. Hacivat oturum açmadan önce durdu.",
+  "hk-changed-old":"Kayıtlı anahtar",
+  "hk-changed-new":"Şimdi gönderilen",
+  "hk-changed-stored-in":"Kayıtlı olduğu yer",
+  "hk-changed-src-hacivat":"Hacivat'ın bilinen sunucuları",
+  "hk-changed-src-openssh":"{file}, {n}. satır",
+  "hk-changed-ask":"{host} sunucusunu yöneten kişiye anahtarın değişip değişmediğini sorun ve güvenmeden önce yeni parmak izini karşılaştırın.",
+  "hk-changed-replace":"Eski anahtarı sil, yenisine güven",
+  "hk-changed-openssh-note":"Hacivat {file} dosyasını değiştirmez. Yeni anahtar gerçekse eski satırı bir terminalde silin, sonra yeniden deneyin:",
+  "hk-changed-copy":"Komutu kopyala",
+  "hk-changed-copied":"Komut kopyalandı",
+  "hk-changed-trusted":"{host} sunucusunun yeni anahtarına güvenildi",
+  "kbd-title":"{host} oturumu",
+  "kbd-asks":"{host} soruyor:",
+  "kbd-from-server":"Sunucunun gönderdiği metin, olduğu gibi",
+  "kbd-no-text":"Sunucu bir ad ya da açıklama göndermedi.",
+  "kbd-show":"Göster",
+  "kbd-hide":"Gizle",
+  "kbd-attempt":"3 denemeden {n}.",
+  "kbd-not-kept":"Yanıtlar yalnızca bu sunucuya gider ve saklanmaz.",
+  "kbd-rejected":"Sunucu yanıtları kabul etmedi ve yeniden sordu.",
+  "kbd-continue":"Devam et",
+  "sshsec-hop":"{host}, {total} atlamadan {n}.",
+  "sshsec-pw-title":"{host} için SSH parolası",
+  "sshsec-pw-body":"{user} için SSH parolasını girin. Yalnızca bağlantı kurulursa saklanır.",
+  "sshsec-pass-title":"{key} için parola ifadesi",
+  "sshsec-pass-body":"Bu anahtar dosyası şifreli. Parola ifadesini girin. Yalnızca bağlantı kurulursa saklanır.",
+  "sshsec-pubkey":"Açık anahtar",
+  "sshsec-wrong":"{host} parolayı kabul etmedi.",
+  "sshsec-attempt":"3 denemeden {n}.",
+  "sshsec-continue":"Devam et",
+  "vault-create-title":"Kayıtlı parolalar için bir kasa oluşturun",
+  "vault-create-why":"Bu bilgisayarda sistem anahtarlığı yok.",
+  "vault-create-what":"Hacivat, kalıcı olarak kaydettiğiniz parolaları ana parolayla kilitlenen şifreli bir dosyada tutar.",
+  "vault-master":"Ana parola",
+  "vault-repeat":"Tekrar",
+  "vault-min":"En az 8 karakter",
+  "vault-match":"İki giriş eşleşiyor",
+  "vault-mismatch":"İki giriş eşleşmiyor",
+  "vault-norecover":"Hacivat bu parolayı kurtaramaz. Unutursanız kasayı sıfırlar ve kayıtlı parolalarınızı yeniden girersiniz.",
+  "vault-notnow-note":"Şimdi değil derseniz bu parola Hacivat yeniden başlayana kadar tutulur.",
+  "vault-notnow":"Şimdi değil",
+  "vault-create-btn":"Kasayı oluştur",
+  "vault-created":"Kasa oluşturuldu. Kalıcı kaydettiğiniz parolalar oraya gider.",
+  "vault-unlock-title":"Kasanın kilidini açın",
+  "vault-unlock-body":"Hacivat'ın {name} için kayıtlı parolayı okuyabilmesi için ana parola gerekiyor. Kasa, uygulamadan çıkana kadar açık kalır.",
+  "vault-unlock-wrong":"Bu, ana parola değil.",
+  "vault-attempt":"3 denemeden {n}.",
+  "vault-unlock-btn":"Kilidi aç",
+  "vault-reset-link":"Kasayı sıfırla…",
+  "vault-reset-title":"Kasa sıfırlansın mı?",
+  "vault-reset-body":"Bu işlem kasayı ve içindeki {n} kayıtlı parolayı siler. Bağlantılarınız kalır; Hacivat her parolayı bir sonraki bağlanışta sorar. Bu işlem geri alınamaz.",
+  "vault-reset-type":"Onaylamak için {word} yazın",
+  "vault-reset-word":"reset",
+  "vault-reset-btn":"Kasayı sıfırla",
+  "vault-reset-done":"Kasa sıfırlandı. İçindeki kayıtlı parolalar silindi.",
+  "vault-damaged-title":"Kasa okunamıyor",
+  "vault-damaged-body":"Kasa dosyası bütünlük denetiminden geçemedi; Hacivat dosyayı kullanmadı ve değiştirmedi. Bir yedekten geri yükleyin ya da kasayı sıfırlayın.",
+  "vault-damaged-meanwhile":"O zamana kadar girdiğiniz parolalar Hacivat yeniden başlayana kadar tutulur.",
+  "ret-forever-vault":"Kalıcı (şifreli dosya)",
+  "ret-forever-vault-h":"Hacivat'ın kasasında, ana parolayla",
+  "vault-secret":"kasa · kalıcı",
+  "pin-changed-title":"{host}:{port} sertifikası değişti",
+  "pin-changed-body":"Bu bağlantı tek bir sertifikaya sabitlendi; sunucu şimdi farklı bir sertifika sunuyor. Hacivat oturum açmadan önce durdu.",
+  "pin-changed-pinned":"Sabitlenen",
+  "pin-changed-now":"Şimdiki",
+  "pin-changed-ask":"Yenilenmiş bir sertifika da böyle görünür. Sabitlemeyi değiştirmeden önce sunucuyu yöneten kişiye sorun.",
+  "pin-changed-note":"Sabitlemeyi değiştirmek, {host}:{port} için yalnızca yeni sertifikaya güvenir ve eski sabitlemeyi kaldırır. Sabitleme geçerlilik süresini uzatmaz.",
+  "pin-changed-replace":"Sabitlemeyi değiştir",
+  "pin-changed-done":"{host} sunucusunun yeni sertifikası sabitlendi",
+  "access-ro-enforced":"salt okunur (sunucu rolüyle zorunlu)",
+  "ro-kv-access":"Erişim",
+  "ro-sheet-enforced":"salt okunur · zorunlu",
+  "ro-sheet-guarded":"salt okunur · korumalı",
+  "ro-why":"Neden",
+  "ro-pop-enf-title":"Salt okunur, sunucu tarafından zorunlu",
+  "ro-pop-enf-body":"{user} rolü burada yalnızca okuyabilir. Hacivat'ta ne çalışırsa çalışsın, yazmaları sunucunun kendisi reddeder.",
+  "ro-pop-enf-temp":"Tek başına TEMP yetkisi zorunluluğu zayıflatmaz; etiket zorunlu kalır.",
+  "ro-pop-g-title":"Salt okunurluk korumalı, zorunlu değil",
+  "ro-pop-g-body":"{user} rolü burada yalnızca okumayla sınırlı değil; bu yüzden yazmaları Hacivat kendisi durdurur: her ifadeyi denetler ve salt okunur çalıştırır.",
+  "ro-pop-g-limit":"Bu, hataları yakalar. Kesin güvence ancak sunucudaki salt okunur bir rolle sağlanır.",
+  "ro-pop-g-fix":"Zorunlu hale getirmek için veritabanı yöneticinizden böyle bir rol isteyin ve onu bu bağlantının kullanıcısı yapın:",
+  "ro-pop-maria-body":"Hacivat bir MariaDB rolünün salt okunur olduğunu henüz doğrulayamıyor; bu yüzden MariaDB bağlantılarını her zaman kendisi korur.",
+  "ro-pop-no-fix":"Hiçbir rol değişikliği bu etiketi zorunlu yapmaz; bu yüzden kopyalanacak SQL yok.",
+  "ro-pop-sqlite-body":"SQLite'ta sunucu rolü yoktur. Hacivat dosyayı salt okunur açar ve yalnızca okuyan ifadelere izin verir.",
+  "ro-copy-sql":"SQL'i kopyala",
+  "ro-copied":"SQL kopyalandı. Çalıştırmadan önce köşeli parantez içindeki değerleri değiştirin.",
+  "ro-warn-head":"Bu rolde bulunanlar:",
+  "ro-warn-superuser":"Süper kullanıcı.",
+  "ro-warn-bypass-rls":"Satır düzeyi güvenliği atlıyor.",
+  "ro-warn-replication":"Çoğaltma başlatabilir.",
+  "ro-warn-create-role":"Rol oluşturup değiştirebilir.",
+  "ro-warn-server-file-roles":"Veritabanı sunucusundaki dosyaları okuyabilir ya da yazabilir.",
+  "ro-warn-execute-server-program":"Veritabanı sunucusunda program çalıştırabilir.",
+  "ro-warn-signal-backend":"Başka oturumları iptal edebilir ya da sonlandırabilir.",
+  "ro-warn-write-privileges":"Bazı tablolardaki verileri değiştirebilir.",
+  "ro-warn-temp-privilege":"Geçici tablo oluşturabilir; salt okunur işlemler bunları engeller.",
+  "ro-warn-egress-extension":"{name} eklentisi başka sunuculara erişebilir.",
+  "ro-warn-role-grant-not-expanded":"Ona başka roller verilmiş; Hacivat bunların neye izin verdiğini göremiyor.",
+  "ro-warn-unparsed":"Hacivat yetkilerini okuyamadı.",
+  "ro-cmd":"Salt okunur erişimi açıkla",
+  "idle-cap":"Bağlantı kesik (boşta)",
+  "idle-disconnected":"{name} bağlantısı {hours} sa boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.",
+  "idle-disconnected-minutes":"{name} bağlantısı {minutes} dk boşta kaldıktan sonra kesildi. Kullandığınızda yeniden bağlanır.",
+  "err-ssh-auth-title":"{host}, {user} için SSH oturumunu reddetti.",
+  "err-ssh-auth-body":"Hacivat ssh-agent'taki anahtarları ve {key} dosyasını denedi. Açık anahtarınızın o sunucudaki ~/.ssh/authorized_keys dosyasında olduğunu denetleyin ya da başka bir oturum açma yöntemi seçin.",
+  "err-ssh-hop":"{n}. atlamada başarısız ({host})",
+  "err-ssh-channel-open-title":"{host} tünellere izin vermiyor (AllowTcpForwarding)",
+  "err-ssh-channel-open-body":"{host} oturumu açıldı, ancak sunucu bağlantıyı {target} adresine iletmeyi reddetti. Yöneticisinden {user} için TCP iletimine, PermitOpen ayarlıysa {target} adresine de izin vermesini isteyin.",
+  "err-ssh-agent-unavailable-title":"Hacivat ssh-agent'a ulaşamıyor.",
+  "err-ssh-agent-unavailable-body":"Bu bağlantı {host} oturumunu ssh-agent'taki anahtarlarla açar, ancak Hacivat için SSH_AUTH_SOCK ayarlı değil. Ajanı başlatıp anahtarınızı ssh-add ile ekleyin ya da bağlantının SSH ayarlarında bir anahtar dosyası seçin.",
+  "err-auth-insecure-method-title":"Sunucu parolayı bu bağlantıda güvenli olmayan bir biçimde istedi.",
+  "err-auth-insecure-method-body-tls":"Bağlantı şifreli, ancak sertifika doğrulanmadığı için Hacivat parolanın {host} sunucusuna ulaşacağından emin olamıyor ve parolayı göndermedi. Sertifikayı inceleyip sabitleyin, sonra yeniden bağlanın.",
+  "err-auth-insecure-method-body-plain":"Bağlantı şifreli değil; parola ağda başkalarının okuyabileceği ya da yeniden kullanabileceği bir biçimde taşınırdı. Hacivat parolayı göndermedi. Sunucuda TLS'i açın ya da bu ağda riski kabul ediyorsanız Şifreleme'yi Kapalı yapın.",
+  "err-tls-pin-changed-title":"{host}, sabitlenenden farklı bir sertifika gönderdi.",
+  "err-tls-pin-changed-body":"Hacivat oturum açmadan önce durdu. Sabitlemeyi değiştirmeden önce yeni parmak izini sunucuyu yöneten kişiyle karşılaştırın.",
+  "err-ssh-host-key-changed-title":"{host} sunucusunun anahtarı değişti.",
+  "err-ssh-host-key-changed-body":"Hacivat oturum açmadan önce durdu. Güvenmeden önce yeni anahtarı inceleyin.",
+  "err-ssh-host-key-revoked-title":"{host}, {file} dosyasında iptal edilmiş olarak işaretli bir anahtar gönderdi.",
+  "err-ssh-host-key-revoked-body":"Hacivat iptal edilmiş bir anahtarla asla bağlanmaz. Sunucunun güncel anahtarını yöneticisinden isteyin.",
+  "fix-review-host-key":"Sunucu anahtarını incele…"
+}
+}
+</script>
+
+<script>
+/* ═════════════ i18n + helpers (M2a, unchanged) ═════════════ */
+const A = JSON.parse(document.getElementById("i18n-m2a").textContent);
+const B = JSON.parse(document.getElementById("i18n").textContent);
+// Already shipped in the locales (hv-conn-enc-unverified, hv-conn-access-ro-guarded), so they are in neither mock's copy table.
+const SHIPPED = { en: { "enc-unverified":"TLS 1.3 · not verified", "access-ro-guarded":"read-only (guarded)" }, tr: { "enc-unverified":"TLS 1.3 · doğrulanmadı", "access-ro-guarded":"salt okunur (korumalı)" } };
+const I18N = { en: { ...A.en, ...SHIPPED.en, ...B.en }, tr: { ...A.tr, ...SHIPPED.tr, ...B.tr } };
+let LANG = "en";
+const t = (k, v) => { let s = I18N[LANG][k] ?? I18N.en[k] ?? k; if (v) s = s.replace(/\{(\w+)\}/g, (m, n) => v[n] ?? m); return s; };
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+/* t() with HTML-safe variables: the template is ours, every variable is escaped (server text never goes through here) */
+const th = (k, v) => esc(t(k)).replace(/\{(\w+)\}/g, (m, n) => v && n in v ? v[n] : m);
+const ic = (n, cls = "") => `<svg class="ic ${cls}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
+const NF = {};
+const nf = (v, dp = 0) => { const loc = LANG === "tr" ? "tr-TR" : "en-US", k = loc + dp; return (NF[k] ??= new Intl.NumberFormat(loc, { minimumFractionDigits: dp, maximumFractionDigits: dp })).format(v); };
+const ms = v => nf(v) + " ms";
+const secs = (v, dp = 1) => nf(v, dp) + " " + t("unit-s");
+const dateFmt = d => new Intl.DateTimeFormat(LANG === "tr" ? "tr-TR" : "en-US", { day: "numeric", month: "long", year: "numeric" }).format(d);
+const mark = env => env ? `<span class="env ${env}" aria-hidden="true"></span>` : "";
+const $ = id => document.getElementById(id);
+const kbdK = s => `<span class="k">${s}</span>`;
+const mono = s => `<span class="mono">${esc(s)}</span>`;
+
+/* ═════════════ Product data ═════════════ */
+const ENG = {
+  pg:     { label: "PostgreSQL", short: "pg",      port: 5432 },
+  mysql:  { label: "MySQL",      short: "mysql",   port: 3306 },
+  maria:  { label: "MariaDB",    short: "mariadb", port: 3306 },
+  sqlite: { label: "SQLite",     short: "sqlite" },
+};
+const ENV_ORDER = ["production", "staging", "test", "dev", "local"];
+/* ro: "enforced" (role probe found a least-privilege role) | "guarded" | false (B21).
+   warn: the probe's RoleWarning list (Task 5 interpret_probe), as ro-warn-* ids; egress carries the extension name. */
+const SSH_PROD = { host:"bastion.acme.io", port:22, user:"deploy", auth:"agent", key:"~/.ssh/id_ed25519", hops:[{ host:"jump-eu.acme.io", user:"deploy" }] };
+const SEED = [
+  { id:"orders-prod", engine:"pg", ver:"16.4", env:"production", ro:"enforced", host:"db-prod-eu.acme.io", port:5432, db:"orders", user:"app_ro", ret:"forever", tls:"verified", ssh:SSH_PROD, lat:31 },
+  { id:"billing-prod", engine:"mysql", ver:"8.4.3", env:"production", ro:"enforced", host:"billing-db.acme.io", port:3306, db:"billing", user:"reader", ret:"never", tls:"verified", lat:22 },
+  { id:"orders-staging", engine:"pg", ver:"16.4", env:"staging", ro:false, host:"db-stg.acme.io", port:5432, db:"orders", user:"deploy", ret:"pgpass", tls:"verified", lat:4 },
+  { id:"reports-test", engine:"pg", ver:"16.4", env:"test", ro:"guarded", warn:["superuser", "write-privileges", "temp-privilege"], host:"db-qa.acme.io", port:5432, db:"reports", user:"qa", ret:"session", tls:"pinned", lat:9 },
+  { id:"hr-legacy", engine:"pg", ver:"15.8", env:"test", ro:false, host:"hr-db.acme.io", port:5432, db:"hr", user:"hr_app", ret:"forever", tls:"unverified", lat:11 },
+  { id:"ci-mariadb", engine:"maria", ver:"11.4.4", env:"test", ro:"guarded", host:"10.0.4.21", port:3306, db:"ci", user:"ci", ret:"forever", tls:"none", lat:2 },
+  { id:"orders-dev", engine:"pg", ver:"17.2", env:"dev", ro:false, host:"db-dev.acme.io", port:5432, db:"orders", user:"dev", ret:"forever", tls:"verified", lat:6 },
+  { id:"api-dev", engine:"mysql", ver:"8.0.40", env:"dev", ro:"guarded", warn:["role-grant-not-expanded"], host:"dev-db.acme.internal", port:3306, db:"api", user:"dev", ret:"restart", tls:"verified", lat:6 },
+  { id:"metrics-dev", engine:"pg", ver:"16.4", env:"dev", ro:false, host:"10.0.7.12", port:5432, db:"metrics", user:"grafana", ret:"forever", tls:"none", lat:3 },
+  { id:"local-pg", engine:"pg", ver:"17.2", env:"local", ro:false, host:"localhost", port:5432, db:"shop", user:"postgres", ret:"none", tls:"none", lat:1 },
+  { id:"app.db", engine:"sqlite", ver:"3.47.2", env:"local", ro:"guarded", path:"~/code/shop/app.db", lat:0 },
+];
+const clone = o => JSON.parse(JSON.stringify(o));
+let CONNS = clone(SEED);
+const conn = id => CONNS.find(c => c.id === id);
+const engVer = c => `${ENG[c.engine].label} ${String(c.ver || "").split(".").slice(0, c.engine === "sqlite" ? 2 : 1).join(".")}`;
+const route = c => c.ssh ? [...c.ssh.hops.map(h => h.host), c.ssh.host] : [];
+
+/* Literal data used by the surfaces (never translated) */
+const VAULT_FILE = "~/.local/share/hacivat/vault.bin";
+const KH = { hacivatOld:"SHA256:pX0fV2qk7mJ3bWcLr9TzE1uYhN4sGd8aKoQ6iRvM5yA", now:"SHA256:Q7nDk2LwV9cZ1sHf4TbR8eYjM0uPa6GxN3oIq5KtWvE" };
+const FP_PINNED = "3F:9A:C2:7E:15:B0:4D:88:E1:2C:6F:93:0A:D7:5B:31:C4:68:9E:F2:07:BA:43:1D:8C:E5:72:39:A6:0F:D4:71";   /* the pin M2a surface 5 created */
+const FP_NOW    = "A1:07:5E:D2:9C:41:F8:3B:66:0D:E4:92:17:C5:7A:28:B3:5F:0E:89:D6:24:71:CA:3E:95:12:6B:F0:4C:87:DD";
+const fp2 = fp => { const p = fp.split(":"); return p.slice(0, 16).join(":") + "<br>" + p.slice(16).join(":"); };
+/* ssh-keygen -R needs the bracket form only off port 22: OpenSSH writes "host" for 22 and "[host]:port" otherwise.
+   It edits ~/.ssh/known_hosts unless told otherwise, so any other file (known_hosts2) needs -f. */
+const KH_DEFAULT = "~/.ssh/known_hosts";
+const khName = (host, port) => +port === 22 ? host : `"[${host}]:${port}"`;
+const khCmd = (host, port, file = KH_DEFAULT) => `ssh-keygen ${file !== KH_DEFAULT ? `-f ${file} ` : ""}-R ${khName(host, port)}`;
+/* Server text is shown verbatim but made visible, like OpenSSH's strnvis: C0/C1 controls (ANSI escapes included) become
+   \ooo octal, and bidi controls become \u{…}, so a server can't draw colour, move the cursor or reorder text. \n is kept.
+   A literal backslash is doubled first, so server text can't imitate an escape (N3). */
+const vis = s => String(s).replace(/\\/g, "\\\\").replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, c => "\\" + c.charCodeAt(0).toString(8).padStart(3, "0"))
+  .replace(/[؜‎‏‪-‮⁦-⁩]/g, c => "\\u{" + c.charCodeAt(0).toString(16).toUpperCase() + "}");
+/* Keyboard-interactive rounds as a server sends them: name, instruction, prompts[{ text, echo }] (RFC 4256). Server text, verbatim. */
+const KBD = {
+  otp:   { name:"Duo two-factor login", instruction:"Enter a passcode from Duo Mobile,\nor type \"push\" to get a notification on your phone.", prompts:[{ text:"Passcode or option (1-1): ", echo:true }] },
+  three: { name:"ACME bastion sign-in", instruction:"All access to this host is logged.", prompts:[{ text:"Password: ", echo:false }, { text:"Verification code: ", echo:true }, { text:"Ticket or reason for access (logged): ", echo:true }] },
+  blank: { name:"", instruction:"", prompts:[{ text:"Password: ", echo:false }] },
+  hostile: { name:"\u001b[1;32mHacivat: identity verified\u001b[0m", instruction:"Paste the code from ‮exe.edoc‬ below. A literal \\033[0m stays visibly different.\n" + "Line\n".repeat(14) + "(the server sent 16 lines)", prompts:[{ text:"Code:\u001b[8m ", echo:true }] },
+};
+
+/* ═════════════ State ═════════════ */
+const S = {
+  surface: 0, sc: {}, theme: "dark", notes: false, platform: "mac",
+  sel: "orders-prod", cap: { state: "connected", conn: "orders-prod" },
+  layers: [], menu: null, pop: null, toasts: [],
+};
+let TIMERS = [], TICK = 0;
+const later = (fn, d) => { const id = setTimeout(fn, d); TIMERS.push(id); return id; };
+const clearTimers = () => { TIMERS.forEach(clearTimeout); TIMERS = []; clearInterval(TICK); TICK = 0; };
+const topLayer = () => S.layers[S.layers.length - 1];
+
+/* ═════════════ Workspace rendering (M2a anatomy) ═════════════ */
+const roLabel = c => t(c.ro === "enforced" ? "access-ro-enforced" : "access-ro-guarded");
+function capsuleHTML() {
+  const c = S.cap, k = c.conn && conn(c.conn);
+  if (!k || c.state === "none")
+    return `<button class="capsule" data-act="capClick" data-fk="cap"><span class="cp-none">${ic("database","i12")}<span>${esc(t("cap-none"))}</span></span><span class="cp-chev">${ic("chevrons-up-down","i12")}</span></button>`;
+  const envSeg = k.env === "production"
+    ? `<span class="cp-env"><span class="sc">${esc(t("env-prod-cap"))}</span></span>`
+    : `<span class="cp-tag">${mark(k.env)}<span>${esc(t("env-" + k.env))}</span></span>`;
+  const name = `<span class="cp-name"><b>${esc(k.id)}</b><span class="dim">${esc(engVer(k))}</span></span>`;
+  const chev = `<span class="cp-chev">${ic("chevrons-up-down","i12")}</span>`;
+  if (c.state === "connecting") {
+    const st = c.stage ? t("step-" + c.stage) : "";
+    return `<button class="capsule" data-act="capClick" data-fk="cap">${envSeg}${name}<span class="cp-run"><i class="run"></i><span>${esc(t("cap-connecting"))}</span><span class="mono" style="color:var(--text-2)">${esc(st)}</span><span class="mono" id="capClock">${secs(c.elapsed || 0.2, 2)}</span></span>${chev}</button>`;
+  }
+  if (c.state === "failed")
+    return `<button class="capsule" data-act="capClick" data-fk="cap">${envSeg}${name}<span class="cp-fail">${ic("triangle-alert","i12")}<span>${esc(t("cap-failed"))}</span></span><span class="cp-retry">${ic("rotate-cw","i12")}<span>${esc(t("cap-retry"))}</span></span>${chev}</button>`;
+  if (c.state === "idle")
+    return `<button class="capsule" data-act="capClick" data-fk="cap">${envSeg}${name}<span class="cp-idle">${ic("unplug","i12")}<span>${esc(t("idle-cap"))}</span></span>${chev}</button>`;
+  /* The access segment is its own Tab stop: Enter or Space opens the explanation popover (I5) */
+  const acc = k.ro ? `<span class="cp-ro${k.env === "production" ? " prod" : ""}" data-act="roPop" id="roSeg" tabindex="0" role="button" aria-haspopup="dialog" title="${esc(t("ro-cmd"))}" aria-expanded="${!!(S.pop && S.pop.anchor === "roSeg")}">${ic("lock","i12")}<span>${esc(roLabel(k))}</span></span>`
+    : (k.engine === "sqlite" ? "" : `<span class="cp-rw"><span>${esc(t("acc-rw"))}</span></span>`);
+  const path = k.engine === "sqlite" ? `<span class="cp-path">${ic("hard-drive","i12 ssh")}<span class="mono">${esc(k.path)}</span></span>`
+    : k.ssh ? `<span class="cp-path">${ic("route","i12 ssh")}<span>${esc(t("path-ssh", { host: k.ssh.host.split(".")[0] }))}</span><span class="mono">${ms(k.lat)}</span></span>`
+    : `<span class="cp-path">${ic("arrow-left-right","i12 direct")}<span>${esc(t("path-direct"))}</span><span class="mono">${ms(k.lat)}</span></span>`;
+  const unenc = (k.tls === "none" && k.engine !== "sqlite") ? `<span class="cp-unenc">${ic("lock-open","i12")}<span>${esc(t("enc-unencrypted"))}</span></span>` : "";
+  return `<button class="capsule" data-act="capClick" data-fk="cap">${envSeg}${name}${acc}${path}${unenc}${chev}</button>`;
+}
+function renderTitle() {
+  $("capslot").innerHTML = capsuleHTML();
+  $("titlebar").classList.toggle("linux", S.platform === "linux");
+  $("wctl").hidden = S.platform !== "linux";
+}
+function explorerHTML() {
+  let h = `<div class="ph"><span class="t sc">${esc(t("explorer"))}</span><span class="grow"></span><span class="meta mono">${CONNS.length}</span>
+    <button class="btn ghost icon ibtn" tabindex="-1" title="${esc(t("new-conn-tip"))} ⌘N">${ic("plus","i12")}</button><kbd>⌘1</kbd></div>
+    <div class="xfilter">${ic("search","i12")}<input placeholder="${esc(t("filter-conn"))}" tabindex="-1"><kbd>⌘F</kbd></div><div class="tree" id="tree" tabindex="0" role="listbox" aria-label="${esc(t("explorer"))}">`;
+  for (const env of ENV_ORDER) {
+    const rows = CONNS.filter(c => c.env === env);
+    if (!rows.length) continue;
+    h += `<div class="grp"><span class="sc">${esc(t("env-" + env))}</span><span class="rule"></span><span class="n mono">${rows.length}</span></div>`;
+    for (const c of rows) {
+      const live = S.cap.conn === c.id && S.cap.state !== "none";
+      const flags = [];
+      if (c.ro) flags.push(ic("lock", "i12" + (c.env === "production" ? " ro" : "")));      /* M2b: red only on production */
+      if (c.ssh) flags.push(`<span title="SSH">${ic("route","i12")}</span>`);
+      if (c.tls === "none" && c.engine !== "sqlite") flags.push(`<span title="${esc(t("enc-unencrypted"))}">${ic("lock-open","i12")}</span>`);
+      let meta = `<span class="mono">${esc(ENG[c.engine].short)} ${esc(String(c.ver).split(".")[0])}</span>`;
+      if (live && S.cap.state === "connected") meta = `${ic("check","i12 ok")}<span class="mono">${ms(c.lat)}</span>`;
+      if (live && S.cap.state === "connecting") meta = `<i class="run"></i>`;
+      if (live && S.cap.state === "failed") meta = ic("triangle-alert","i12");
+      if (live && S.cap.state === "idle") meta = ic("unplug","i12");
+      h += `<div class="row${S.sel === c.id ? " sel" : ""}" role="option" aria-selected="${S.sel === c.id}" data-row="${esc(c.id)}">
+        ${ic(c.engine === "sqlite" ? "file-code-2" : "database","i12")}<span class="lbl${live && S.cap.state === "connected" ? " on" : ""}">${esc(c.id)}</span>${mark(c.env)}
+        ${flags.length ? `<span class="flags">${flags.join("")}</span>` : ""}<span class="grow"></span><span class="meta">${meta}</span></div>`;
+    }
+  }
+  return h + `</div>`;
+}
+function secretLabel(c) {
+  if (c.engine === "sqlite" || c.ret === "none") return t("secret-none");
+  if (c.ret === "pgpass") return t("secret-pgpass");
+  if (c.ret === "forever" && S.platform === "linux") return t("vault-secret");
+  return t("secret-" + (c.ret || "forever"));
+}
+function encHTML(c) {
+  if (c.engine === "sqlite") return `<span class="d">${esc(t("enc-none-file"))}</span>`;
+  if (c.tls === "none") return `${ic("lock-open","i12")}<span>${esc(t("enc-unencrypted"))}</span>`;
+  if (c.tls === "pinned") return `${ic("lock","i12")}<span>${esc(t("enc-pinned"))}</span>`;
+  if (c.tls === "unverified") return `${ic("lock","i12")}<span>${esc(t("enc-unverified"))}</span>`;
+  return `${ic("lock","i12")}<span>${esc(t("enc-verified"))}</span>`;
+}
+function renderSheet() {
+  const c = conn(S.sel);
+  if (!c) { $("sheet").innerHTML = `<div class="ph"><span class="meta">${esc(t("sheet-meta"))}</span></div>`; return; }
+  const path = c.engine === "sqlite" ? `<span class="d">—</span>` : c.ssh ? `${ic("route","i12")}<span>${esc(t("path-ssh", { host: c.ssh.host }))}</span>` : `${ic("arrow-left-right","i12 g")}<span>${esc(t("path-direct"))}</span>`;
+  const access = c.ro
+    ? `<button class="kvbtn" data-act="roPop" id="roKv" aria-haspopup="dialog" aria-expanded="${!!(S.pop && S.pop.anchor === "roKv")}" title="${esc(t("ro-why"))}">${ic("lock","i12 lk" + (c.env === "production" ? " prod" : ""))}<span>${esc(t(c.ro === "enforced" ? "ro-sheet-enforced" : "ro-sheet-guarded"))}</span></button>`
+    : `<span class="d">${esc(t("acc-rw"))}</span>`;
+  $("sheet").innerHTML = `<div class="ph"><span class="id mono">${esc(c.id)}</span><span class="grow"></span><span class="meta">${esc(t("sheet-meta"))}</span><kbd>⌘I</kbd></div>
+  <dl class="sheet">
+    <div class="kv"><dt>${esc(t("kv-env"))}</dt><dd>${mark(c.env)}<span class="${c.env === "production" ? "r" : ""}">${esc(t("env-" + c.env))}</span></dd></div>
+    <div class="kv"><dt>${esc(t("ro-kv-access"))}</dt><dd>${access}</dd></div>
+    <div class="kv"><dt>${esc(t(c.engine === "sqlite" ? "kv-file" : "kv-host"))}</dt><dd><span class="mono">${esc(c.engine === "sqlite" ? c.path : `${c.host}:${c.port}/${c.db}`)}</span></dd></div>
+    ${c.engine === "sqlite" ? "" : `<div class="kv"><dt>${esc(t("kv-user"))}</dt><dd><span class="mono">${esc(c.user)}</span></dd></div>`}
+    <div class="kv"><dt>${esc(t("kv-path"))}</dt><dd>${path}</dd></div>
+    <div class="kv"><dt>${esc(t("kv-enc"))}</dt><dd>${encHTML(c)}</dd></div>
+    <div class="kv"><dt>${esc(t("kv-secret"))}</dt><dd><span class="d">${esc(secretLabel(c))}</span></dd></div>
+  </dl>`;
+}
+function renderCenter() {
+  $("center").innerHTML = `<div class="ph"><span class="meta">${esc(t("home-title"))}</span><span class="grow"></span><kbd>⌘2</kbd></div>
+  <div class="home"><div class="box"><div class="keys">
+      <span>${esc(t("home-new"))}</span><span class="k"><kbd>⌘N</kbd></span>
+      <span>${esc(t("home-paste"))}</span><span class="k"><kbd>⌘⇧V</kbd></span>
+      <span>${esc(t("home-connect"))}</span><span class="k"><kbd>↵</kbd></span>
+      <span>${esc(t("home-search"))}</span><span class="k"><kbd>⌘K</kbd></span>
+    </div><div class="hint">${esc(t("home-hint"))}</div></div></div>`;
+}
+function renderStatus() {
+  const c = S.cap, k = c.conn && conn(c.conn);
+  let h = "";
+  if (!k || c.state === "none") h += `<span class="s envseg np">${esc(t("sb-noconn"))}</span>`;
+  else {
+    const envTxt = t("sb-env", { env: t("env-" + k.env), access: k.ro ? roLabel(k) : t("acc-rw") });
+    h += k.env === "production"
+      ? `<span class="s envseg">${mark("production")}${k.ro ? ic("lock","i12") : ""}<span>${esc(envTxt)}</span></span>`
+      : `<span class="s envseg np">${mark(k.env)}<span>${esc(envTxt)}</span><span class="mono" style="color:var(--text-2)">${esc(k.id)}</span></span>`;
+    if (c.state === "connecting") h += `<span class="s"><i class="run"></i><span>${esc(t("cap-connecting"))}</span></span>`;
+    else if (c.state === "failed") h += `<span class="s">${ic("triangle-alert","i12")}<span>${esc(t("cap-failed"))}</span></span>`;
+    else if (c.state === "idle") h += `<span class="s">${ic("unplug","i12")}<span>${esc(t("idle-cap"))}</span></span>`;
+    else if (k.engine !== "sqlite") {
+      h += k.ssh ? `<span class="s">${ic("route","i12")}<span>${esc(t("path-ssh", { host: k.ssh.host }))}</span><span class="mono">${ms(k.lat)}</span></span>`
+        : `<span class="s g">${ic("arrow-left-right","i12")}<span>${esc(t("path-direct"))}</span><span class="mono">${ms(k.lat)}</span></span>`;
+      h += `<span class="s">${encHTML(k)}</span>`;
+    }
+  }
+  h += `<span class="grow"></span>`;
+  if (k && c.state !== "none") h += `<span class="s r">${esc(ENG[k.engine].label)} <span class="mono">${esc(k.ver)}</span></span>`;
+  h += `<span class="s r mono">UTF-8</span><button class="s r lang" data-act="toggleLang" tabindex="-1">${ic("languages","i12")}<span>${LANG === "en" ? "<b>EN</b> / TR" : "EN / <b>TR</b>"}</span></button>`;
+  $("status").innerHTML = h;
+}
+
+/* ═════════════ Shared dialog pieces (M2a anatomy) ═════════════ */
+function dlgShell(w, title, body, foot, opts = {}) {
+  return `<div class="dlg ${w}" role="${opts.alert ? "alertdialog" : "dialog"}" aria-modal="true" aria-label="${esc(title)}">
+    <div class="dhead"><div class="tt"><div class="title">${esc(title)}</div>${opts.sub ? `<div class="sub">${opts.sub}</div>` : ""}</div><button class="x" data-act="closeLayer" tabindex="-1" title="esc">${ic("x","i12")}</button></div>
+    <div class="dbody">${body}</div><div class="dfoot">${foot}</div></div>`;
+}
+const subOf = (c, extra) => `${mark(c.env)}<span class="mono" style="font-size:11.5px">${esc(c.id)}</span>${extra ? `<span>·</span><span>${extra}</span>` : ""}`;
+const hopTxt = (c, host) => { const r = route(c); return esc(t("sshsec-hop", { host, n: nf(r.indexOf(host) + 1), total: nf(r.length) })); };
+const input = (fk, val, o = {}) => `<label class="in${o.mono ? " mono" : ""}"><input data-f="${fk}" data-fk="f-${fk}" value="${esc(val)}" ${o.type ? `type="${o.type}"` : ""} spellcheck="false" autocomplete="off" aria-label="${esc(o.label || fk)}">${o.tail ? `<span class="tail">${o.tail}</span>` : ""}</label>`;
+const eyeTail = (fk, shown) => `<button type="button" class="btn ghost icon" data-act="eye" data-for="${fk}" data-fk="eye-${fk}" tabindex="-1" title="${esc(t(shown ? "kbd-hide" : "kbd-show"))}">${ic(shown ? "eye-off" : "eye","i12")}</button>`;
+const secretIn = (L, fk, label) => input(fk, L.v[fk] || "", { type: L.shown[fk] ? "text" : "password", label, tail: eyeTail(fk, L.shown[fk]) });
+const frow = (label, cell) => `<div class="frow"><span class="flab">${esc(label)}</span><div class="fcell">${cell}</div></div>`;
+const RET = ["never", "restart", "session", "forever"];
+const retLabel = v => v === "forever" && S.platform === "linux" ? t("ret-forever-vault") : t("ret-" + v);
+const retHint = v => v === "forever" && S.platform === "linux" ? t("ret-forever-vault-h") : t("ret-" + v + "-h");
+/* Arrows bind to the stop that follows them, so a wrapped route never ends a line on an arrow (M6) */
+const joinRoute = parts => parts.map((p, i) => i ? `<span class="rs">${ic("arrow-right","i12")}${p}</span>` : p).join("");
+const selectBtn = (fk, label, w) => `<button type="button" class="select" data-act="select" data-fk="${fk}" aria-haspopup="listbox" style="width:${w}px"><span class="v">${esc(label)}</span>${ic("chevrons-up-down","i12")}</button>`;
+function fpInset(label, alg, fpHTML, extra = "", fk = "") {
+  return `<div class="inset"><div class="fphead"><span>${esc(label)}</span>${alg ? `<span class="alg">${esc(alg)}</span>` : ""}<span class="grow"></span><button class="btn ghost icon" data-act="copyFp" data-fk="cp-${fk}" title="${esc(t("tls-copy-fp"))}">${ic("copy","i12")}</button></div><div class="fp">${fpHTML}</div>${extra}</div>`;
+}
+function trailHTML(steps, failAt, durs = {}) {
+  return `<div class="trail">` + steps.map((s, i) => {
+    let cls = "pend", mk = `<i class="dot"></i>`, msv = "";
+    if (i === failAt) { cls = "fail"; mk = ic("x","i12"); }
+    else if (i < failAt) { cls = "done"; mk = ic("check","i12"); msv = `<span class="mono">${ms(durs[s] ?? 12)}</span>`; }
+    return `<span class="st ${cls}">${mk}<span>${esc(t("step-" + s))}</span>${msv}</span>`;
+  }).join("") + `</div>`;
+}
+/* hop route with per-hop state: done ✓ / failed ✕ / pending □ */
+function hopRouteHTML(c, failHop) {
+  const r = route(c), parts = [`<span class="h">${esc(t("ssh-this-mac"))}</span>`];
+  r.forEach((h, i) => parts.push(`<span class="h ${i < failHop ? "done" : i === failHop ? "fail" : "pend"}">${i < failHop ? ic("check","i12") : i === failHop ? ic("x","i12") : `<i class="dot"></i>`}<span class="mono">${esc(h)}</span></span>`));
+  parts.push(`<span class="h pend"><i class="dot"></i><span class="mono">${esc(c.host)}:${esc(c.port)}</span></span>`);
+  return `<div class="hroute">${joinRoute(parts)}</div>`;
+}
+
+/* ═════════════ Surface 1 · Host key changed ═════════════ */
+function hkChangedHTML(L) {
+  const c = conn(L.conn), host = c.ssh.host, port = L.port || 22, file = L.file || KH_DEFAULT;
+  const src = L.source === "hacivat" ? esc(t("hk-changed-src-hacivat")) : th("hk-changed-src-openssh", { file: mono(file), n: nf(L.line || 14) });
+  const body = `<p>${esc(t("hk-changed-body"))}</p>
+    <div class="fpstack">
+      ${fpInset(t("hk-changed-old"), "ED25519", esc(KH.hacivatOld), `<div class="src"><span>${esc(t("hk-changed-stored-in"))}</span><span${L.source === "hacivat" ? ` style="color:var(--text)"` : ""}>${src}</span></div>`, "old")}
+      ${fpInset(t("hk-changed-new"), "ED25519", esc(KH.now), "", "new")}
+    </div>
+    <p class="small">${esc(t("hk-changed-ask", { host }))}</p>
+    ${L.source === "openssh" ? `<p class="small" style="margin-bottom:6px">${th("hk-changed-openssh-note", { file: mono(file) })}</p>
+      <div class="inset cmd" style="margin-bottom:10px"><code>${esc(khCmd(host, port, file))}</code><button class="btn ghost" data-act="copyCmd" data-fk="copycmd">${ic(L.copied ? "copy-check" : "copy","i12")}<span>${esc(t("hk-changed-copy"))}</span></button></div>` : ""}`;
+  const foot = L.source === "hacivat"
+    ? `<button class="btn" data-act="hkReplace" data-fk="hkreplace">${ic("key-round","i12")}<span>${esc(t("hk-changed-replace"))}</span></button><span class="grow"></span><button class="btn primary" data-act="cancelPrompt" data-fk="hkcancel">${esc(t("dlg-cancel"))}<span class="k">esc</span></button>`
+    : `<span class="grow"></span><button class="btn" data-act="hkRetry" data-fk="hkretry">${ic("rotate-cw","i12")}<span>${esc(t("fix-retry"))}</span></button><button class="btn primary" data-act="cancelPrompt" data-fk="hkcancel">${esc(t("dlg-cancel"))}<span class="k">esc</span></button>`;
+  return dlgShell("w480", t("hk-changed-title", { host }), body, foot, { alert:true, sub: subOf(c, hopTxt(c, host)) });
+}
+/* M2a surface 6's new-host-key prompt, reused unchanged after ssh-keygen -R */
+function hostkeyHTML(L) {
+  const c = conn(L.conn);
+  const body = `<p>${esc(t("hk-body"))}</p>${fpInset(t("hk-fp"), "ED25519", esc(KH.now), "", "hk")}<p style="margin:10px 0 0;font-size:12.5px">${esc(t("hk-store"))}</p>`;
+  return dlgShell("w420", t("hk-title", { host: c.ssh.host }), body, `<span class="grow"></span><button class="btn ghost" data-act="cancelPrompt" data-fk="hk0">${esc(t("dlg-cancel"))}</button><button class="btn primary" data-act="hkTrust" data-fk="hk1">${ic("check","i12")}<span>${esc(t("hk-trust"))}</span></button>`,
+    { sub: `<span class="mono" style="font-size:11.5px">${esc(c.ssh.host)}:${L.port || 22} · ${esc(c.ssh.user)}</span>` });
+}
+
+/* ═════════════ Surface 2 · Keyboard-interactive ═════════════ */
+function kbdHTML(L) {
+  const c = conn(L.conn), host = c.ssh.host, R = KBD[L.round];
+  const server = R.name || R.instruction
+    ? `${R.name ? `<div class="srvtext">${esc(vis(R.name))}</div>` : ""}${R.instruction ? `<div class="srvtext">${esc(vis(R.instruction))}</div>` : ""}`
+    : `<div class="srvtext none">${esc(t("kbd-no-text"))}</div>`;
+  const prompts = R.prompts.map((p, i) => {
+    const fk = "kp" + i;
+    return `<div class="kp"><span class="kl">${esc(vis(p.text))}</span>${p.echo ? input(fk, L.v[fk] || "", { label: p.text }) : secretIn(L, fk, p.text)}</div>`;
+  }).join("");
+  const body = `<p class="lead">${esc(t("kbd-asks", { host }))}</p>
+    <div class="inset srv">${R.name || R.instruction ? `<div class="cap2">${esc(t("kbd-from-server"))}</div>` : ""}<div class="srvscroll">${server}</div></div>
+    ${prompts}
+    <div class="metaline">${L.attempt > 1 ? `<span class="lft">${ic("circle-alert","i12")}<span>${esc(t("kbd-rejected"))}</span></span>` : ""}<span>${esc(t("kbd-attempt", { n: nf(L.attempt) }))}</span><span>${esc(t("kbd-not-kept"))}</span></div>`;
+  return dlgShell("w480", t("kbd-title", { host }), body,
+    `<span class="grow"></span><button class="btn ghost" data-act="cancelPrompt" data-fk="kcancel">${esc(t("dlg-cancel"))}</button><button class="btn primary" data-act="kbdGo" data-fk="kgo">${esc(t("kbd-continue"))}<span class="k">↵</span></button>`,
+    { sub: subOf(c, `<span class="mono" style="font-size:11.5px">${esc(c.ssh.user)}</span> · ${hopTxt(c, host)}`) });
+}
+
+/* ═════════════ Surface 3 · SSH password and key passphrase, per hop ═════════════ */
+function sshSecretHTML(L) {
+  const c = conn(L.conn), host = L.hop, r = route(c), user = L.kind === "password" ? (c.ssh.hops.find(h => h.host === host)?.user || c.ssh.user) : c.ssh.user;
+  const stops = [`<span class="dim">${esc(t("ssh-this-mac"))}</span>`, ...r.map(h => `<span class="mono ${h === host ? "cur" : "dim"}">${esc(h)}</span>`), `<span class="mono dim">${esc(c.host)}:${esc(c.port)}</span>`];
+  let b = `<p>${esc(t(L.kind === "password" ? "sshsec-pw-body" : "sshsec-pass-body", { user: `${user}@${host}` }))}</p>`;
+  b += frow(t("ssh-route"), `<div class="route">${joinRoute(stops)}</div>`);
+  if (L.kind === "password") {
+    b += frow(t("ssh-user"), `<span class="static">${esc(user)}</span>`);
+    b += frow(t("dlg-password"), secretIn(L, "sec", t("dlg-password")));
+  } else {
+    b += frow(t("ssh-key"), `<span class="static">${esc(c.ssh.key)}</span>`);
+    b += frow(t("sshsec-pubkey"), `<span class="static">ED25519 SHA256:Zk3hQm8VtR1yLc5Nw0aPe7XuJ2sBd9GfH4oKi6TxWqY</span>`);
+    b += frow(t("ssh-passphrase"), secretIn(L, "sec", t("ssh-passphrase")));
+  }
+  /* The refusal sits right under the field it is about (M4), as in vault Unlock */
+  if (L.attempt > 1) b += `<div class="frow" style="margin-top:6px"><span></span><div class="metaline" style="margin:0"><span class="lft">${ic("circle-alert","i12")}<span>${esc(t("sshsec-wrong", { host }))}</span></span><span>${esc(t("sshsec-attempt", { n: nf(L.attempt) }))}</span></div></div>`;
+  b += frow(t("dlg-remember"), selectBtn("sel-ret", retLabel(L.ret), 240));
+  const title = L.kind === "password" ? t("sshsec-pw-title", { host }) : t("sshsec-pass-title", { key: c.ssh.key });
+  return dlgShell("w480", title, b,
+    `<span class="grow"></span><button class="btn ghost" data-act="cancelPrompt" data-fk="scancel">${esc(t("dlg-cancel"))}</button><button class="btn primary" data-act="secretGo" data-fk="sgo">${esc(t("sshsec-continue"))}<span class="k">↵</span></button>`,
+    { sub: subOf(c, hopTxt(c, host)) });
+}
+
+/* ═════════════ Surface 4 · Vault (Linux without a keyring) ═════════════ */
+function vaultCreateHTML(L) {
+  const a = L.v.m1 || "", b2 = L.v.m2 || "", longEnough = a.length >= 8, both = a && b2, match = both && a === b2;
+  const ok = longEnough && match;
+  const v1 = `<span class="vline${longEnough ? " ok" : ""}">${longEnough ? ic("check","i12") : `<i class="sq"></i>`}<span>${esc(t("vault-min"))}</span></span>`;
+  const v2 = both ? `<span class="vline${match ? " ok" : " bad"}">${match ? ic("check","i12") : ic("x","i12")}<span>${esc(t(match ? "vault-match" : "vault-mismatch"))}</span></span>` : "";
+  let b = `<p class="strong" style="margin-bottom:4px">${esc(t("vault-create-why"))}</p><p>${esc(t("vault-create-what"))}</p>`;
+  b += frow(t("kv-file"), `<span class="static">${esc(VAULT_FILE)}</span>`);
+  b += `<div style="margin-top:8px"></div>` + frow(t("vault-master"), secretIn(L, "m1", t("vault-master")));
+  b += `<div style="margin-top:8px"></div>` + frow(t("vault-repeat"), secretIn(L, "m2", t("vault-repeat")));
+  b += `<div class="hintrow"><span class="h" style="display:block"><span class="vlines">${v1}${v2}</span></span></div>`;
+  b += `<div class="notice" style="margin-top:12px">${ic("info")}<div class="nb">${esc(t("vault-norecover"))}</div></div>`;
+  b += `<p class="small" style="margin:10px 0 0">${esc(t("vault-notnow-note"))}</p>`;
+  return dlgShell("w480", t("vault-create-title"), b,
+    `<span class="grow"></span><button class="btn ghost" data-act="closeLayer" data-fk="vnot">${esc(t("vault-notnow"))}</button><button class="btn primary" data-act="vaultCreate" data-fk="vcreate" ${ok ? "" : "disabled"}>${esc(t("vault-create-btn"))}<span class="k">↵</span></button>`,
+    { sub: subOf(conn(L.conn)) });
+}
+function vaultUnlockHTML(L) {
+  const c = conn(L.conn);
+  let b = `<p>${esc(t("vault-unlock-body", { name: c.id }))}</p>`;
+  b += frow(t("vault-master"), secretIn(L, "mu", t("vault-master")));
+  if (L.attempt > 1) b += `<div class="frow" style="margin-top:8px"><span></span><div class="metaline" style="margin:0"><span class="lft">${ic("circle-alert","i12")}<span>${esc(t("vault-unlock-wrong"))}</span></span><span>${esc(t("vault-attempt", { n: nf(L.attempt) }))}</span></div></div>`;
+  return dlgShell("w480", t("vault-unlock-title"), b,
+    `<button class="btn ghost" data-act="vaultResetOpen" data-fk="vreset">${esc(t("vault-reset-link"))}</button><span class="grow"></span><button class="btn ghost" data-act="cancelPrompt" data-fk="vucancel">${esc(t("dlg-cancel"))}</button><button class="btn primary" data-act="vaultUnlock" data-fk="vunlock" ${(L.v.mu || "").length ? "" : "disabled"}>${esc(t("vault-unlock-btn"))}<span class="k">↵</span></button>`,
+    { sub: subOf(c) });
+}
+function vaultResetHTML(L) {
+  const word = t("vault-reset-word"), ok = (L.v.word || "") === word;   /* hv-conn-vault-reset-word: "reset" in EN and TR, deliberately */
+  const b = `<p>${esc(t("vault-reset-body", { n: nf(6) }))}</p>
+    <span class="flab" style="display:block;margin:0 0 5px">${th("vault-reset-type", { word: `<span class="mono" style="color:var(--text)">${esc(word)}</span>` })}</span>
+    ${input("word", L.v.word || "", { mono:true, label: t("vault-reset-type", { word }) })}`;
+  return dlgShell("w420", t("vault-reset-title"), b,
+    `<span class="grow"></span><button class="btn ghost" data-act="closeLayer" data-fk="vr0">${esc(t("dlg-cancel"))}</button><button class="btn danger" data-act="vaultReset" data-fk="vr1" ${ok ? "" : "disabled"}>${ic("trash-2","i12")}<span>${esc(t("vault-reset-btn"))}</span></button>`, { alert:true });
+}
+function vaultDamagedHTML(L) {
+  const b = `<p>${esc(t("vault-damaged-body"))}</p><div class="inset" style="margin-bottom:10px"><span class="static">${esc(VAULT_FILE)}</span></div><p class="small" style="margin:0">${esc(t("vault-damaged-meanwhile"))}</p>`;
+  return dlgShell("w480", t("vault-damaged-title"), b,
+    `<button class="btn" data-act="vaultResetOpen" data-fk="vdreset">${esc(t("vault-reset-link"))}</button><span class="grow"></span><button class="btn primary" data-act="cancelPrompt" data-fk="vdclose">${esc(t("fix-close"))}<span class="k">esc</span></button>`,
+    { alert:true, sub: subOf(conn(L.conn)) });
+}
+
+/* ═════════════ Surface 5 · Certificate changed on a pinned endpoint ═════════════ */
+function pinChangedHTML(L) {
+  const c = conn(L.conn), v = { host: c.host, port: c.port };
+  const now = `<dl class="certkv" style="margin:8px 0 0"><dt>${esc(t("tls-subject"))}</dt><dd class="mono">CN=${esc(c.host)}</dd><dt>${esc(t("tls-issuer"))}</dt><dd class="mono">CN=Acme QA Root 2026, O=Acme</dd><dt>${esc(t("tls-valid"))}</dt><dd>${esc(dateFmt(new Date(2027, 11, 2)))}</dd></dl>
+    <ul class="chain" style="margin-top:4px"><li>${ic("fingerprint","i12")}<span class="mono">${esc(c.host)}</span><span class="d">· ${esc(t("tls-leaf"))}</span></li>
+      <li class="l1"><i class="tick"></i><span class="mono">Acme QA Root 2026</span><span class="d">· ${esc(t("tls-root"))}</span></li></ul>`;
+  const body = `<p>${esc(t("pin-changed-body"))}</p>
+    <div class="fpstack">${fpInset(t("pin-changed-pinned"), "SHA-256", fp2(FP_PINNED), "", "pinned")}${fpInset(t("pin-changed-now"), "SHA-256", fp2(FP_NOW), now, "now")}</div>
+    <p class="small">${esc(t("pin-changed-ask"))}</p><p class="small" style="margin:0">${esc(t("pin-changed-note", v))}</p>`;
+  return dlgShell("w480", t("pin-changed-title", v), body,
+    `<button class="btn" data-act="pinReplace" data-fk="pinreplace">${ic("fingerprint","i12")}<span>${esc(t("pin-changed-replace"))}</span></button><span class="grow"></span><button class="btn primary" data-act="cancelPrompt" data-fk="pincancel">${esc(t("dlg-cancel"))}<span class="k">esc</span></button>`,
+    { alert:true, sub: subOf(c) });
+}
+
+/* ═════════════ Surface 7 · Error copy in the M2a error-dialog anatomy ═════════════ */
+const SSH_STEPS = ["ssh", "tcp", "tls", "auth", "check"];   /* B11: Resolve drops out under SSH, SSH comes first */
+const DIRECT_STEPS = ["resolve", "tcp", "tls", "auth", "check"];
+const PLAIN_STEPS = ["resolve", "tcp", "auth", "check"];     /* no TLS step when the server offers none (M2a stepsFor) */
+const ERRS = {
+  insecure: { conn:"hr-legacy", cls:"auth.insecure_method", title:"err-auth-insecure-method-title", body:"err-auth-insecure-method-body-tls", steps:DIRECT_STEPS, failAt:3, code:"AuthenticationMD5Password", server:null, elapsed:0.087, fixes:[["fixCert","fix-review-cert","fingerprint",1], ["fixEdit","fix-edit"]] },
+  plain:    { conn:"metrics-dev", cls:"auth.insecure_method", title:"err-auth-insecure-method-title", body:"err-auth-insecure-method-body-plain", steps:PLAIN_STEPS, failAt:2, code:"AuthenticationCleartextPassword", server:null, elapsed:0.009, fixes:[["fixEdit","fix-edit",null,1]] },
+  sshauth:  { conn:"orders-prod", cls:"ssh.auth", title:"err-ssh-auth-title", body:"err-ssh-auth-body", steps:SSH_STEPS, failAt:0, hop:1, code:"SSH_MSG_USERAUTH_FAILURE", server:"publickey,keyboard-interactive", elapsed:0.412, fixes:[["fixEdit","fix-edit",null,1], ["fixRetry","fix-retry","rotate-cw"]] },
+  channel:  { conn:"orders-prod", cls:"ssh.channel_open", title:"err-ssh-channel-open-title", body:"err-ssh-channel-open-body", steps:SSH_STEPS, failAt:0, hop:1, code:"SSH_OPEN_ADMINISTRATIVELY_PROHIBITED (1)", server:"open failed", elapsed:0.388, fixes:[["fixRetry","fix-retry","rotate-cw",1], ["fixEdit","fix-edit"]] },
+  agent:    { conn:"orders-prod", cls:"ssh.agent_unavailable", title:"err-ssh-agent-unavailable-title", body:"err-ssh-agent-unavailable-body", steps:SSH_STEPS, failAt:0, hop:0, code:"SSH_AUTH_SOCK", server:null, elapsed:0.002, fixes:[["fixRetry","fix-retry","rotate-cw",1], ["fixEdit","fix-edit"]] },
+  pin:      { conn:"reports-test", cls:"tls.pin_changed", title:"err-tls-pin-changed-title", body:"err-tls-pin-changed-body", steps:DIRECT_STEPS, failAt:2, code:"PinMismatch", server:null, elapsed:0.061, fixes:[["fixCert","fix-review-cert","fingerprint",1], ["fixEdit","fix-edit"]] },
+  hk:       { conn:"orders-prod", cls:"ssh.host_key_changed", title:"err-ssh-host-key-changed-title", body:"err-ssh-host-key-changed-body", steps:SSH_STEPS, failAt:0, hop:1, code:"HostKeyChanged", server:null, elapsed:0.204, fixes:[["fixHk","fix-review-host-key","key-round",1], ["fixEdit","fix-edit"]] },
+  revoked:  { conn:"orders-prod", cls:"ssh.host_key_revoked", title:"err-ssh-host-key-revoked-title", body:"err-ssh-host-key-revoked-body", steps:SSH_STEPS, failAt:0, hop:1, code:"@revoked", server:null, elapsed:0.198, fixes:[["fixEdit","fix-edit"]] },
+};
+const STEP_MS = { ssh:186, resolve:3, tcp:14, tls:22, auth:11, check:4 };
+function errVars(E, c) {
+  const r = route(c), hopHost = E.hop != null ? r[E.hop] : c.host;
+  return { host: hopHost || c.host, user: c.ssh && E.hop != null ? (E.hop < c.ssh.hops.length ? c.ssh.hops[E.hop].user : c.ssh.user) : c.user, key: c.ssh?.key, target: `${c.host}:${c.port}`, file: "~/.ssh/known_hosts" };
+}
+function errorDialogHTML(L) {
+  const E = ERRS[L.kind], c = conn(E.conn), v = errVars(E, c), r = route(c);
+  const hv = Object.fromEntries(Object.entries(v).map(([k, x]) => [k, esc(x)]));
+  const head = `<div class="eh"><div><div class="t1" style="font-weight:400">${th(E.title, hv)}</div><div class="t2">${th(E.body, hv)}</div></div></div>`;
+  const hops = E.hop != null ? `<div class="hopline">${esc(t("err-ssh-hop", { n: nf(E.hop + 1), host: r[E.hop] }))}</div>${hopRouteHTML(c, E.hop)}` : "";
+  const fixes = `<div class="fixes">${E.fixes.map(([act, k, icon, primary], i) => `<button class="btn${primary ? " primary" : ""}" data-act="${act}" data-fk="fx${i + 1}">${icon ? ic(icon,"i12") : ""}<span>${esc(t(k))}</span></button>`).join("")}</div>`;
+  const stage = t("step-" + E.steps[E.failAt]) + (E.hop != null ? " · " + r[E.hop] : "");
+  const open = L.techOpen;
+  const tech = `<div class="tech"><button class="dsc" aria-expanded="${!!open}" data-act="techToggle" data-fk="tech">${ic(open ? "chevron-down" : "chevron-right","i12")}<span>${esc(t("err-tech"))}</span></button>
+    ${open ? `<div class="box"><dl class="kvx"><dt>${esc(t("err-stage"))}</dt><dd>${esc(stage)}</dd><dt>${esc(t("err-class"))}</dt><dd class="mono">${esc(E.cls)}</dd>
+      <dt>${esc(t("err-code"))}</dt><dd><span class="code">${esc(E.code)}</span></dd>${E.server ? `<dt>${esc(t("err-server"))}</dt><dd class="mono">${esc(E.server)}</dd>` : ""}
+      <dt>${esc(t("err-elapsed"))}</dt><dd class="mono">${secs(E.elapsed, 3)}</dd></dl>
+      <div class="copy"><button class="btn ghost" data-act="copyErr" data-fk="copyerr">${ic("copy","i12")}<span>${esc(t("err-copy"))}</span></button></div></div>` : ""}</div>`;
+  const body = `<div class="eb">${head}${trailHTML(E.steps, E.failAt, STEP_MS)}${hops}${fixes}${tech}</div>`;
+  return dlgShell("w480", t("err-title", { name: c.id }), body, `<span class="grow"></span><button class="btn ghost" data-act="closeLayer" data-fk="close">${esc(t("fix-close"))}</button>`,
+    { sub: `${mark(c.env)}<span class="mono" style="font-size:11.5px">${esc(c.host)}:${esc(c.port)}</span>` });
+}
+
+/* ═════════════ Layers, menus, popovers, toasts ═════════════ */
+const LAYER_HTML = { hkchanged:hkChangedHTML, hostkey:hostkeyHTML, kbd:kbdHTML, secret:sshSecretHTML, vcreate:vaultCreateHTML, vunlock:vaultUnlockHTML, vreset:vaultResetHTML, vdamaged:vaultDamagedHTML, pinchanged:pinChangedHTML, error:errorDialogHTML };
+function renderLayers() {
+  const a = document.activeElement, fk = a?.dataset?.fk, selS = a?.selectionStart, selE = a?.selectionEnd;
+  $("layers").innerHTML = S.layers.map(L => `<div class="layer" data-layer="${L.type}">${LAYER_HTML[L.type](L)}</div>`).join("");
+  if (fk) { const el = document.querySelector(`[data-fk="${CSS.escape(fk)}"]`); if (el) { el.focus({ preventScroll:true }); if (selS != null && el.setSelectionRange) try { el.setSelectionRange(selS, selE); } catch {} } }
+}
+function menuHTML() {
+  const M = S.menu; if (!M) return "";
+  return `<div class="menu" id="menu" role="menu" tabindex="-1" style="left:${M.x}px;top:${M.y}px;${M.w ? `min-width:${M.w}px` : ""}">` + M.items.map((it, i) =>
+    `<div class="mi${i === M.active ? " on" : ""}" role="menuitemradio" aria-checked="${!!it.checked}" data-mi="${i}"><span class="ck">${it.checked ? ic("check","i12") : ""}</span><span class="lab">${esc(it.label)}</span>${it.hint ? `<span class="h">${esc(it.hint)}</span>` : ""}</div>`).join("") + `</div>`;
+}
+/* Exactly what plan Task 5's remediation() returns (Q21: TEMP is an optional comment; MariaDB and SQLite: None).
+   The UI shows and copies this string unchanged; the inset wraps long lines instead of pre-breaking them. */
+const REMEDIATION = {
+  pg: "CREATE ROLE <role> LOGIN PASSWORD '<password>';\nGRANT pg_read_all_data TO <role>;\n-- optional: REVOKE TEMP ON DATABASE <database> FROM PUBLIC;",
+  mysql: "CREATE USER '<role>'@'%' IDENTIFIED BY '<password>';\nGRANT SELECT, SHOW VIEW ON <database>.* TO '<role>'@'%';",
+};
+const SQL_KW = /\b(CREATE|ROLE|USER|LOGIN|PASSWORD|IDENTIFIED|BY|GRANT|SELECT|SHOW|VIEW|ON|TO)\b/g;
+const sqlLine = line => {
+  if (line.startsWith("--")) return `<div class="sl cm">${esc(line)}</div>`;
+  const ph = s => s.replace(/&lt;(\w+)&gt;/g, `<span class="phd">&lt;$1&gt;</span>`);
+  const parts = line.split(/('[^']*')/).map((p, i) => i % 2 ? `<span class="str">${ph(esc(p))}</span>` : ph(esc(p).replace(SQL_KW, `<span class="kw">$1</span>`)));
+  return `<div class="sl">${parts.join("")}</div>`;
+};
+const sqlHTML = s => s.split("\n").map(sqlLine).join("");
+/* RoleWarning → ro-warn-* (Task 22's hv-conn-ro-warn-*). Egress names come from the probe's fixed list (dblink, postgres_fdw, pg_net, http). */
+const warnHTML = list => !list?.length ? "" : `<p class="anchor-note">${esc(t("ro-warn-head"))}</p><ul class="warns">${list.map(w => typeof w === "string"
+  ? `<li>${esc(t("ro-warn-" + w))}</li>` : `<li><span>${th("ro-warn-" + w.id, { name: mono(w.name) })}</span></li>`).join("")}</ul>`;
+/* Title stays on top, the body scrolls (4px seam-strong thumb) and Copy SQL stays in view: the popover never grows past the
+   space between the title bar and the status bar (N5, the Overflow Rule). */
+function roPopHTML(k) {
+  const copy = kind => `<div class="pacts"><button class="btn" data-act="copySql" data-fk="ro-copy-snippet" data-kind="${kind}">${ic("copy","i12")}<span>${esc(t("ro-copy-sql"))}</span></button></div>`;
+  const sqlBlock = kind => `<div class="inset"><div class="sql">${sqlHTML(REMEDIATION[kind])}</div></div>`;
+  const lockCls = k.env === "production" ? ` style="color:var(--red)"` : "";
+  const shell = (titleKey, body, foot = "") => `<b id="popTitle"><span${lockCls}>${ic("lock","i12")}</span>${esc(t(titleKey))}</b><div class="pbody">${body}</div>${foot}`;
+  if (k.ro === "enforced") {
+    /* The "stays enforced" reassurance lives only here, never in the label-neutral finding (N1) */
+    const temp = k.warn?.includes("temp-privilege") ? `<p class="nofix">${esc(t("ro-pop-enf-temp"))}</p>` : "";
+    return shell("ro-pop-enf-title", `<p${k.warn?.length ? "" : ` style="margin:0"`}>${esc(t("ro-pop-enf-body", { user: k.user }))}</p>${warnHTML(k.warn)}${temp}`);
+  }
+  if (k.engine === "sqlite") return shell("ro-pop-g-title", `<p style="margin:0">${esc(t("ro-pop-sqlite-body"))}</p>`);
+  if (k.engine === "maria") return shell("ro-pop-g-title", `<p>${esc(t("ro-pop-maria-body"))}</p>${warnHTML(k.warn)}<p class="nofix">${esc(t("ro-pop-no-fix"))}</p>`);
+  const kind = k.engine === "pg" ? "pg" : "mysql";
+  return shell("ro-pop-g-title", `<p>${esc(t("ro-pop-g-body", { user: k.user }))}</p>${warnHTML(k.warn)}<p>${esc(t("ro-pop-g-limit"))}</p><p class="anchor-note">${esc(t("ro-pop-g-fix"))}</p>${sqlBlock(kind)}`, copy(kind));
+}
+function renderMenus() {
+  let h = menuHTML();
+  if (S.pop) { const k = conn(S.pop.conn); if (k) h += `<div class="pop" id="pop" role="dialog" aria-labelledby="popTitle" tabindex="-1" style="left:0;top:0;visibility:hidden">${roPopHTML(k)}</div>`; }
+  $("menus").innerHTML = h;
+  if (S.pop) placePop();
+  if (S.menu) $("menu").focus({ preventScroll: true });
+}
+function placePop() {
+  const p = $("pop"), a = $(S.pop.anchor); if (!p || !a) return;
+  const W = $("win").getBoundingClientRect(), r = a.getBoundingClientRect();
+  const minTop = 40 + 6, maxBottom = W.height - 24 - 6;          /* below the title bar, above the status bar */
+  p.style.maxHeight = (maxBottom - minTop) + "px";
+  const ph = p.offsetHeight;
+  let top = r.bottom - W.top + 6; if (top + ph > maxBottom) top = r.top - W.top - ph - 6;
+  top = Math.max(minTop, Math.min(top, maxBottom - ph));
+  p.style.left = Math.max(8, Math.min(r.left - W.left - 8, W.width - 312)) + "px"; p.style.top = top + "px"; p.style.visibility = "visible";
+}
+function renderToasts() {
+  $("toasts").innerHTML = S.toasts.map(x => `<div class="toast${x.wide ? " wide" : ""}" role="${x.sticky ? "alert" : "status"}">${ic(x.icon || "info", x.ok ? "ok" : "")}<div class="tb">${x.html}</div><button class="x" data-act="dismissToast" data-id="${x.id}" title="${esc(t("lost-dismiss"))}">${ic("x","i12")}</button></div>`).join("");
+}
+let TOASTID = 0;
+function toast(html, o = {}) {
+  const id = ++TOASTID; S.toasts.push({ id, html, ...o });
+  if (S.toasts.length > 3) S.toasts.shift();
+  renderToasts();
+  if (!o.keep) later(() => { S.toasts = S.toasts.filter(x => x.id !== id); renderToasts(); }, 6000);
+}
+/* hv-conn-idle-disconnected ($name, $hours) for whole hours, -minutes otherwise (idle_disconnect_s is free per profile, B18).
+   keep:true is mock-only, so the toast stays for review; the product uses the standard toast TTL. */
+function idleToast(id) {
+  const s = S.idleSecs || 4 * 3600;
+  const msg = s % 3600 === 0 ? t("idle-disconnected", { name: id, hours: nf(s / 3600) }) : t("idle-disconnected-minutes", { name: id, minutes: nf(Math.round(s / 60)) });
+  toast(`<div>${esc(msg)}</div>`, { icon:"unplug", keep:true });
+}
+function renderAll() {
+  document.documentElement.dataset.theme = S.theme;
+  document.documentElement.lang = LANG;
+  document.querySelectorAll("[data-i]").forEach(el => el.textContent = t(el.dataset.i));
+  renderTitle(); $("explorer").innerHTML = explorerHTML(); renderSheet(); renderCenter(); renderStatus(); renderLayers(); renderMenus(); renderToasts(); renderMockbar(); renderNotes();
+  if (S.idleToast) { S.toasts = []; idleToast(S.cap.conn); }
+}
+
+/* ═════════════ Mock bar + notes (mock only) ═════════════ */
+const SURF = [
+  { id:"hk", label:"Host key", sc:[["hacivat","Hacivat store"],["openssh","~/.ssh line 14"],["openssh2222","~/.ssh · port 2222"],["openssh2","known_hosts2"]] },
+  { id:"kbd", label:"Kbd-int.", sc:[["otp","One prompt"],["three","Three prompts"],["retry","Attempt 2 of 3"],["blank","No instructions"],["hostile","Hostile text"]] },
+  { id:"secret", label:"SSH secrets", sc:[["password","Password · hop 1"],["passphrase","Passphrase · hop 2"],["wrong","Wrong password"]] },
+  { id:"vault", label:"Vault", sc:[["create","Create"],["mismatch","Create · mismatch"],["unlock","Unlock · 2 of 3"],["reset","Reset"],["damaged","Damaged file"],["remember","Remember Select"]] },
+  { id:"pin", label:"Pin", sc:[["review","Pinned cert changed"]] },
+  { id:"ro", label:"Read-only", sc:[["enforced","Enforced · prod"],["temp","Enforced · TEMP"],["guarded","Guarded · PG"],["all","All findings"],["mysql","Guarded · MySQL"],["maria","MariaDB"],["sqlite","SQLite"]] },
+  { id:"idle", label:"Idle, errors", sc:[["idle","Idle"],["idle90","Idle 90 min"],["insecure","insecure·TLS"],["plain","insecure·plain"],["sshauth","ssh.auth"],["channel","channel"],["agent","agent"],["pin","pin"],["hk","host key"],["revoked","revoked"]] },
+];
+function renderMockbar() {
+  const s = SURF[S.surface], cur = S.sc[s.id] || s.sc[0][0];
+  $("mockbar").innerHTML = `<span class="tag">MOCK · M2b</span>
+    <div class="mseg" role="group" aria-label="Surface">${SURF.map((x, i) => `<button aria-pressed="${i === S.surface}" data-act="surf" data-i="${i}" tabindex="-1"><span class="n">${i + 1}</span>${x.label}</button>`).join("")}</div>
+    <span class="lbl">[ ]</span>
+    <div class="mseg" role="group" aria-label="Scenario">${s.sc.map(([k, l]) => `<button aria-pressed="${k === cur}" data-act="scen" data-k="${k}" tabindex="-1">${l}</button>`).join("")}</div>
+    <span class="grow"></span>
+    <div class="mseg lang" role="group" aria-label="Language (L)"><button aria-pressed="${LANG === "en"}" data-act="lang" data-v="en" tabindex="-1">EN</button><button aria-pressed="${LANG === "tr"}" data-act="lang" data-v="tr" tabindex="-1">TR</button></div>
+    <div class="mseg" role="group" aria-label="Theme (T)"><button aria-pressed="${S.theme === "dark"}" data-act="theme" data-v="dark" tabindex="-1" title="Dark (T)">${ic("moon","i12")}</button><button aria-pressed="${S.theme === "light"}" data-act="theme" data-v="light" tabindex="-1" title="Light (T)">${ic("sun","i12")}</button></div>
+    <div class="mseg"><button aria-pressed="${S.notes}" data-act="notes" tabindex="-1">Notes <span class="n">N</span></button></div>`;
+}
+const NOTES = {
+  hk: { intent:"A changed SSH host key is a hard stop that states the fact, shows both keys, and says where the old one lives. The safe answer is the default; trusting the new key takes a deliberate second button.",
+    points:["No warning icon and no hue: the title states the fact (\"The host key of bastion.acme.io changed\"). The stored and offered SHA256 fingerprints sit in two fingerprint insets, labelled by fact, never by colour.","Cancel is the primary button and has the initial focus, so Enter and Esc both stop. The capsule then shows Failed; its body opens the ssh.host_key_changed error.","Hacivat store: the outline button \"Remove the old key and trust the new one\" is on the far left, away from Cancel. It rewrites only Hacivat's own known_hosts.","~/.ssh source: Hacivat never writes ~/.ssh/known_hosts (B11), so the dialog shows a copyable ssh-keygen -R command instead, plus Try again. The check re-reads the file when its mtime changes (Q24), so Try again works without a restart and leads to M2a's new-host-key prompt.","Command form: OpenSSH stores port 22 as a bare host name, so the command is ssh-keygen -R bastion.acme.io. The bracket form [host]:port is only for other ports (scenario \"~/.ssh · port 2222\"). A key stored in any file other than ~/.ssh/known_hosts adds -f <file> (scenario \"known_hosts2\"). See the open questions in NOTES.md.","The hop is named in the subtitle (\"bastion.acme.io, hop 2 of 2\")."] },
+  kbd: { intent:"Keyboard-interactive shows exactly what the server sent, in its own field, and never mixes it into a Hacivat sentence.",
+    points:["The lead line is ours (\"bastion.acme.io asks:\", built from the host Hacivat dialled). The server's name and instruction follow verbatim in a mono inset labelled \"Sent by the server, shown as received\". Line breaks are kept.","Each prompt label is server text too, so prompts are stacked (label above the field, verbatim, mono) rather than squeezed into the 120 px label column. A 40-character prompt wraps instead of clipping.","Masked or echoed follows the server's echo flag per prompt. Masked fields get the eye toggle; echoed fields show what you type.","\"Attempt 1 of 3\" counts rounds. After a rejected round the line reads \"The server didn't accept the answers and asked again.\" in our words, not the server's.","Answers are never stored and never offered to Remember (they are usually one-time codes).","Switch to TR: the server's English text stays English. Only Hacivat's own words translate.","Enter in a prompt that isn't the last moves to the next prompt. Enter in the last prompt continues, but only when every masked prompt has an answer; otherwise it moves to the first empty one. An accidental Enter never spends an attempt.","Verbatim but visible: control characters, ANSI escapes and bidi overrides are shown escaped (\\033, \\u{202E}), like OpenSSH's strnvis, and the server-text inset scrolls past 160 px (scenario \"Hostile text\")."] },
+  secret: { intent:"The M2a password prompt, per hop: it always says which machine on the route is asking.",
+    points:["Title names what is asked and for which host (\"SSH password for jump-eu.acme.io\" / \"Passphrase for ~/.ssh/id_ed25519\"). The subtitle names the hop: \"jump-eu.acme.io, hop 1 of 2\".","The Route row draws the real chain with the asking hop boxed (seam-strong outline, no hue).","Remember is its own row in the 480 px dialog (a 240 px Select). It defaults to Forever, the SSH retention default (B11).","A wrong password keeps the dialog and, directly under the field, names the host that refused and counts \"Attempt 2 of 3\".","The passphrase variant shows the key file and its public-key fingerprint, so the user knows which key is being unlocked."] },
+  vault: { intent:"On Linux without a keyring, Forever means an encrypted file behind a master password. Say why, say the cost (no recovery), and never block the connect on it.",
+    points:["The window chrome switches to Linux (controls on the right) because the vault exists only there (B13).","Create: the first line is the reason (\"This computer has no system keyring.\"), then what happens, the file path, the master password twice, live rules (at least 8 characters; both entries match) and the no-recovery notice. Create is disabled until both rules hold. Enter in Master password moves to Repeat; Enter in Repeat creates once both rules hold.","Not now keeps the secret until restart (Q38), and the dialog says so before you choose.","Unlock: one field, \"Attempt 2 of 3\" after a miss, no lockout (B13). Reset vault… sits on the left as a ghost button.","Reset: an alertdialog. Type the word hv-conn-vault-reset-word shows, which is reset in both languages (deliberately untranslated, so Turkish keyboards and İ/i never interfere). The Danger button stays disabled until it matches, is outline-only until hover or focus, and is never the default: Enter in the field does nothing.","Damaged file: the AEAD check failed, the file is untouched, and reset is offered as a secondary button. Close is the default.","Remember Select: the fourth option reads \"Forever (encrypted file)\" with the hint \"in Hacivat's vault, behind a master password\". The sheet's Password row reads \"vault · forever\"."] },
+  pin: { intent:"M2a surface 5's anatomy for the case where a pinned certificate changed: both fingerprints, the new certificate's facts, and an explicit Replace pin that is never the default.",
+    points:["Title states the fact: \"The certificate of db-qa.acme.io:5432 changed\". No warning icon, no hue.","Two fingerprint insets labelled Pinned and Now, each 2 × 16 bytes with Copy. The Now inset also carries issuer, expiry (locale-formatted) and the chain.","The body says a renewal looks the same, so the user asks before replacing.","Cancel is primary with initial focus. Replace pin is a plain outline button on the far left (B5: replacing is explicit, never the default).","Replace pin swaps the pin and reconnects; the toast confirms which host was pinned."] },
+  ro: { intent:"Read-only says how it is enforced: by the server's role, or only guarded by Hacivat. The difference is one click away, with the fix.",
+    points:["Capsule: \"read-only (enforced by server role)\" only when the role probe found a least-privilege role (PostgreSQL, MySQL; B21). Every other read-only connection shows \"read-only (guarded)\".","The lock is red only on production (DESIGN.md). On other environments it is text-2. The Explorer flag follows the same rule.","Click the access segment or the sheet's Access value for a 300 px popover. Both are Tab stops; Enter or Space opens it, focus lands on the popover, Tab reaches Copy SQL, Esc closes and returns focus to the trigger. The palette command \"Explain read-only access\" opens it too.","Guarded explains why, lists what the role probe found (one ro-warn-* line per RoleWarning), states the limit, and shows exactly the SQL of Task 5's remediation(), wrapped inside the inset, with Copy SQL. PostgreSQL's TEMP line is an optional comment (Q21).","Enforced with TEMP (scenario \"Enforced · TEMP\"): the label stays enforced and the popover notes the TEMP finding (Q21).","MariaDB is always guarded (C19). remediation(MariaDb) is None, so the popover shows the findings and \"No role change makes this label enforced, so there is no SQL to copy.\" SQLite has no roles: no snippet.","The sheet gains an Access row with the short form (\"read-only · enforced\" / \"read-only · guarded\") so it fits the 150 px value column in Turkish.","Status bar: the environment segment carries the same access label."] },
+  idle: { intent:"Idle disconnects are quiet and reversible; new error classes use the M2a error-dialog anatomy unchanged.",
+    points:["Idle toast: \"Disconnected orders-dev after 4 h idle. It reconnects when you use it.\" (dev default 4 h, B18), with a minutes form for thresholds that aren't whole hours (scenario \"Idle 90 min\"). The capsule keeps the connection's identity and shows \"Disconnected (idle)\" with the unplug glyph, no hue. Clicking the capsule body reconnects; the chevron still opens the connection switcher.","auth.insecure_method: the headline is the brief's sentence. The body differs by situation (TLS unverified → Review certificate…; no TLS → Edit connection, with the Disable advice from B8).","ssh.auth names the failing hop (\"Failed at hop 2 (bastion.acme.io)\") and draws the route with ✓ / ✕ / pending per hop.","ssh.channel_open: \"bastion.acme.io doesn't allow tunnels (AllowTcpForwarding)\". The body also names PermitOpen, the other server setting that refuses forwarding.","ssh.agent_unavailable, tls.pin_changed, ssh.host_key_changed and ssh.host_key_revoked complete the M2b class list (B24). Fixes use only existing FixIds (EditConnection, TryAgain, ReviewCertificate, ReviewHostKey).","Server text (the auth-method list, the channel-open description) appears only in Technical details, verbatim."] },
+};
+const NEW_PRIMS = ["Key comparison: two fingerprint insets labelled by fact (Stored / Offered now, Pinned / Now)","Copyable command inset (ssh-keygen -R)","Server-text inset (keyboard-interactive) with stacked verbatim prompts","Hop route with the asking hop boxed; per-hop ✓ / ✕ / pending in errors","Validation lines (rule met = green check; mismatch = ink ✕)","SQL inset in the explanation popover, with Copy SQL","Capsule: access segment variants; Disconnected (idle) segment","Linux window chrome (vault scenarios only)"];
+const KEY_PREFIX = { hk:["hk-"], kbd:["kbd-","sshsec-hop"], secret:["sshsec-","dlg-remember","ret-"], vault:["vault-","ret-forever-vault"], pin:["pin-changed-","tls-"], ro:["ro-","acc-","access-"], idle:["idle-","err-","fix-"] };
+function renderNotes() {
+  const el = $("notes"); el.classList.toggle("on", S.notes);
+  if (!S.notes) return;
+  const s = SURF[S.surface], N = NOTES[s.id];
+  const keys = Object.keys(I18N.en).filter(k => KEY_PREFIX[s.id].some(p => k.startsWith(p)));
+  el.innerHTML = `<div class="nh"><span class="tag">MOCK NOTES</span><span style="color:var(--text-2)">${S.surface + 1} · ${esc(s.label)}</span><span class="grow"></span><button class="btn ghost icon" data-act="notes" title="N">${ic("x","i12")}</button></div>
+  <div class="nbody"><h3>Intent</h3><p style="color:var(--text)">${esc(N.intent)}</p><h3>Decisions</h3><ul>${N.points.map(p => `<li>${esc(p)}</li>`).join("")}</ul>
+  <h3>NEW primitives (all surfaces)</h3><ul>${NEW_PRIMS.map(p => `<li>${esc(p)}</li>`).join("")}</ul>
+  <h3>Strings on this surface</h3><p>New M2b strings first; reused M2a strings (already in the M2a table) are marked <code>M2a</code>. Turkish strings carry a <span class="por">PO review</span> marker until the PO signs them off.</p>
+  <table>${keys.map(k => `<tr><td class="k">${esc(k)}${k in B.en ? "" : k in SHIPPED.en ? " · shipped" : " · M2a"}</td><td class="en">${esc(I18N.en[k])}</td><td>${esc(I18N.tr[k] ?? "")}<span class="por">PO review</span></td></tr>`).join("")}</table>
+  <h3>Mock keys</h3><p><code>1</code>–<code>7</code> surface · <code>[</code> <code>]</code> scenario · <code>T</code> theme · <code>L</code> language · <code>N</code> notes. Deep links: <code>?s=4&amp;sc=reset&amp;theme=light&amp;lang=tr&amp;notes=1</code>.</p></div>`;
+}
+
+/* ═════════════ Scenario setup ═════════════ */
+const layer = (type, o = {}) => ({ type, v:{}, shown:{}, attempt:1, ...o });
+function setup(id, sc) {
+  clearTimers(); CONNS = clone(SEED);
+  Object.assign(S, { layers:[], menu:null, pop:null, toasts:[], platform:"mac", idleToast:false, sel:"orders-prod", cap:{ state:"connected", conn:"orders-prod" } });
+  const connecting = (cid, stage, elapsed = 0.2) => { S.sel = cid; S.cap = { state:"connecting", conn:cid, stage, elapsed }; };
+  if (id === "hk") {
+    connecting("orders-prod", "ssh", 0.24);
+    S.layers.push(layer("hkchanged", { conn:"orders-prod", source: sc === "hacivat" ? "hacivat" : "openssh", port: sc === "openssh2222" ? 2222 : 22,
+      file: sc === "openssh2" ? "~/.ssh/known_hosts2" : KH_DEFAULT, line: sc === "openssh2" ? 3 : 14 }));
+  }
+  if (id === "kbd") {
+    connecting("orders-prod", "ssh", 0.31);
+    S.layers.push(layer("kbd", { conn:"orders-prod", round: sc === "retry" ? "otp" : sc, attempt: sc === "retry" ? 2 : 1 }));
+  }
+  if (id === "secret") {
+    const o = conn("orders-prod"); o.ssh.auth = sc === "passphrase" ? "key" : "password";
+    connecting("orders-prod", "ssh", 0.19);
+    S.layers.push(layer("secret", { conn:"orders-prod", kind: sc === "passphrase" ? "passphrase" : "password", hop: sc === "passphrase" ? "bastion.acme.io" : "jump-eu.acme.io", ret:"forever", attempt: sc === "wrong" ? 2 : 1 }));
+  }
+  if (id === "vault") {
+    S.platform = "linux"; S.sel = "orders-dev";
+    if (sc === "create" || sc === "mismatch") { S.cap = { state:"connected", conn:"orders-dev" }; S.layers.push(layer("vcreate", { conn:"orders-dev", v: sc === "mismatch" ? { m1:"correct-horse", m2:"correct-hrose" } : {} })); }
+    if (sc === "unlock") { connecting("orders-dev", "auth", 0.02); S.layers.push(layer("vunlock", { conn:"orders-dev", attempt:2 })); }
+    if (sc === "reset") { connecting("orders-dev", "auth", 0.02); S.layers.push(layer("vunlock", { conn:"orders-dev", attempt:2 }), layer("vreset", { conn:"orders-dev" })); }
+    if (sc === "damaged") { connecting("orders-dev", "auth", 0.02); S.layers.push(layer("vdamaged", { conn:"orders-dev" })); }
+    if (sc === "remember") { connecting("orders-prod", "ssh", 0.19); conn("orders-prod").ssh.auth = "password"; S.layers.push(layer("secret", { conn:"orders-prod", kind:"password", hop:"jump-eu.acme.io", ret:"forever" })); later(() => openRetSelect(document.querySelector('[data-fk="sel-ret"]')), 40); }
+  }
+  if (id === "pin") { connecting("reports-test", "tls", 0.06); S.layers.push(layer("pinchanged", { conn:"reports-test" })); }
+  if (id === "ro") {
+    const cid = { enforced:"orders-prod", temp:"orders-prod", guarded:"reports-test", all:"reports-test", mysql:"api-dev", maria:"ci-mariadb", sqlite:"app.db" }[sc];
+    if (sc === "temp") conn(cid).warn = ["temp-privilege"];          /* Q21: TEMP alone keeps the label enforced */
+    if (sc === "all") conn(cid).warn = ["superuser", "bypass-rls", "replication", "create-role", "server-file-roles", "execute-server-program", "signal-backend",
+      "write-privileges", "temp-privilege", { id:"egress-extension", name:"dblink" }, "role-grant-not-expanded", "unparsed"];
+    S.sel = cid; S.cap = { state:"connected", conn:cid }; S.pop = { conn:cid, anchor:"roSeg" };
+  }
+  if (id === "idle") {
+    if (sc === "idle" || sc === "idle90") { S.sel = "orders-dev"; S.cap = { state:"idle", conn:"orders-dev" }; S.idleToast = true; S.idleSecs = sc === "idle90" ? 5400 : 4 * 3600; }
+    else { const E = ERRS[sc]; S.sel = E.conn; S.cap = { state:"failed", conn:E.conn, kind:sc }; S.layers.push(layer("error", { kind:sc, techOpen:true })); }
+  }
+}
+function go(surface, sc) {
+  S.surface = surface; const s = SURF[surface]; S.sc[s.id] = sc || S.sc[s.id] || s.sc[0][0];
+  setup(s.id, S.sc[s.id]); renderAll(); focusInitial(); syncUrl();
+}
+function syncUrl() {
+  const u = new URLSearchParams(); u.set("s", S.surface + 1); u.set("sc", S.sc[SURF[S.surface].id]); u.set("theme", S.theme); u.set("lang", LANG); if (S.notes) u.set("notes", "1");
+  history.replaceState(null, "", "?" + u.toString());
+}
+const INITIAL = { hkchanged:'[data-fk="hkcancel"]', hostkey:'[data-fk="hk1"]', kbd:'[data-fk="f-kp0"]', secret:'[data-fk="f-sec"]', vcreate:'[data-fk="f-m1"]', vunlock:'[data-fk="f-mu"]', vreset:'[data-fk="f-word"]', vdamaged:'[data-fk="vdclose"]', pinchanged:'[data-fk="pincancel"]', error:'[data-fk="fx1"]' };
+function focusInitial() {
+  const L = topLayer();
+  if (!L) { $("tree")?.focus({ preventScroll:true }); return; }
+  document.querySelector(`.layer:last-child ${INITIAL[L.type]}`)?.focus({ preventScroll:true });
+}
+
+/* ═════════════ Flows ═════════════ */
+function finishConnect(id, msg) {
+  S.layers = []; clearTimers();
+  S.cap = { state:"connecting", conn:id, stage:"tcp", elapsed:(S.cap.elapsed || 0.2) };
+  renderAll();
+  later(() => { S.cap.stage = "auth"; renderTitle(); }, 260);
+  later(() => { S.cap = { state:"connected", conn:id }; renderAll(); toast(`<div>${esc(msg || t("toast-connected", { name:id }))}</div>`, { icon:"check", ok:true }); $("tree")?.focus(); }, 560);
+}
+function failPrompt(kind) {
+  const id = S.cap.conn; clearTimers(); S.layers = [];
+  S.cap = { state:"failed", conn:id, kind }; renderAll(); $("tree")?.focus();
+}
+function openRetSelect(btn) {
+  if (!btn) return;
+  const L = topLayer(), W = $("win").getBoundingClientRect(), r = btn.getBoundingClientRect();
+  const items = RET.map(v => ({ v, label:retLabel(v), hint:retHint(v), checked: v === L.ret }));
+  S.menu = { items, x:r.left - W.left, y:r.bottom - W.top + 4, w:btn.offsetWidth, active:items.findIndex(i => i.checked), opener:btn.dataset.fk, onPick: it => { L.ret = it.v; renderLayers(); } };
+  renderMenus();
+  const m = $("menu").getBoundingClientRect(); if (m.right > W.right - 8) { S.menu.x = W.width - m.width - 8; $("menu").style.left = S.menu.x + "px"; }
+}
+function closeMenu() { const op = S.menu?.opener; S.menu = null; renderMenus(); if (op) document.querySelector(`[data-fk="${CSS.escape(op)}"]`)?.focus({ preventScroll:true }); }
+function pickMenu(i) { const M = S.menu, it = M.items[i]; closeMenu(); M.onPick(it); }
+const KIND_ON_CANCEL = { hkchanged:"hk", hostkey:"hk", kbd:"sshauth", secret:"sshauth", vunlock:null, vdamaged:null, pinchanged:"pin" };
+
+/* ═════════════ Events ═════════════ */
+const ACT = {
+  surf: a => go(+a.dataset.i), scen: a => go(S.surface, a.dataset.k),
+  lang: a => { LANG = a.dataset.v; renderAll(); syncUrl(); }, theme: a => { S.theme = a.dataset.v; renderAll(); syncUrl(); },
+  toggleLang: () => { LANG = LANG === "en" ? "tr" : "en"; renderAll(); syncUrl(); },
+  notes: () => { S.notes = !S.notes; renderMockbar(); renderNotes(); syncUrl(); },
+  closeLayer: () => closeTop(),
+  cancelPrompt: () => {
+    const L = topLayer(), k = KIND_ON_CANCEL[L.type];
+    if (k === undefined || k === null) { if (L.type === "vunlock" || L.type === "vdamaged") { S.layers.pop(); S.cap = { state:"none" }; clearTimers(); renderAll(); toast(`<div>${esc(t("toast-cancelled", { name:L.conn }))}</div>`); return; } return closeTop(); }
+    failPrompt(k);
+  },
+  eye: a => { const L = topLayer(), f = a.dataset.for; L.shown[f] = !L.shown[f]; renderLayers(); document.querySelector(`[data-fk="f-${f}"]`)?.focus(); },
+  copyFp: () => toast(`<div>${esc(t("tls-copy-fp"))} ✓</div>`, { icon:"copy" }),
+  copyCmd: () => { const L = topLayer(), c = conn(L.conn); try { navigator.clipboard?.writeText(khCmd(c.ssh.host, L.port, L.file)).catch(() => {}); } catch {} L.copied = true; renderLayers(); toast(`<div>${esc(t("hk-changed-copied"))}</div>`, { icon:"copy" }); },
+  hkReplace: () => { const L = topLayer(), c = conn(L.conn); finishConnect(c.id, t("hk-changed-trusted", { host:c.ssh.host })); },
+  hkRetry: () => { const L = topLayer(); S.layers = [layer("hostkey", { conn:L.conn, port:L.port })]; renderLayers(); focusInitial(); },
+  hkTrust: () => finishConnect(topLayer().conn),
+  kbdGo: () => finishConnect(topLayer().conn),
+  secretGo: () => { const L = topLayer(); if (L.kind === "password" && L.hop === "jump-eu.acme.io" && S.surface === 2) { S.layers = [layer("secret", { conn:L.conn, kind:"passphrase", hop:"bastion.acme.io", ret:L.ret })]; renderLayers(); focusInitial(); return; } finishConnect(L.conn); },
+  select: a => openRetSelect(a),
+  vaultCreate: () => { const L = topLayer(); S.layers = []; renderAll(); toast(`<div>${esc(t("vault-created"))}</div>`, { icon:"check", ok:true }); },
+  vaultUnlock: () => finishConnect(topLayer().conn),
+  vaultResetOpen: () => { S.layers.push(layer("vreset", { conn:topLayer().conn })); renderLayers(); focusInitial(); },
+  vaultReset: () => { clearTimers(); S.layers = []; S.cap = { state:"none" }; renderAll(); toast(`<div>${esc(t("vault-reset-done"))}</div>`, { icon:"trash-2" }); },
+  pinReplace: () => { const L = topLayer(), c = conn(L.conn); finishConnect(c.id, t("pin-changed-done", { host:c.host })); },
+  /* Opening moves focus onto the popover (its title is announced); Tab reaches Copy SQL; Esc closes and returns focus to the trigger. */
+  roPop: (a, e) => {
+    e?.stopPropagation(); const anchor = a.id, k = conn(anchor === "roKv" ? S.sel : S.cap.conn); if (!k) return;
+    S.pop = S.pop && S.pop.anchor === anchor ? null : { conn:k.id, anchor };
+    renderTitle(); renderSheet(); renderMenus();
+    if (S.pop) $("pop")?.focus({ preventScroll:true }); else $(anchor)?.focus({ preventScroll:true });
+  },
+  copySql: a => { try { navigator.clipboard?.writeText(REMEDIATION[a.dataset.kind]).catch(() => {}); } catch {} S.copiedSql = REMEDIATION[a.dataset.kind]; toast(`<div>${esc(t("ro-copied"))}</div>`, { icon:"copy", wide:true }); },
+  techToggle: () => { const L = topLayer(); L.techOpen = !L.techOpen; renderLayers(); },
+  copyErr: () => toast(`<div>${esc(t("err-copy"))} ✓</div>`, { icon:"copy" }),
+  fixEdit: () => toast(`<div>${esc(t("fix-edit"))}</div><div class="l2">M2a surface 1 (connection dialog)</div>`, { icon:"pencil" }),
+  fixCert: () => { const L = topLayer(); if (L.kind === "pin") { S.layers = [layer("pinchanged", { conn:"reports-test" })]; S.cap = { state:"connecting", conn:"reports-test", stage:"tls", elapsed:0.06 }; renderAll(); focusInitial(); } else toast(`<div>${esc(t("fix-review-cert"))}</div><div class="l2">M2a surface 5 (certificate review)</div>`, { icon:"fingerprint" }); },
+  fixHk: () => { S.layers = [layer("hkchanged", { conn:"orders-prod", source:"hacivat", port:22 })]; S.cap = { state:"connecting", conn:"orders-prod", stage:"ssh", elapsed:0.2 }; renderAll(); focusInitial(); },
+  fixRetry: () => { const L = topLayer(), id = ERRS[L.kind].conn; S.layers = []; S.cap = { state:"connecting", conn:id, stage:"ssh", elapsed:0.1 }; renderAll(); later(() => { S.cap = { state:"failed", conn:id, kind:L.kind }; S.layers = [layer("error", { kind:L.kind })]; renderAll(); focusInitial(); }, 700); },
+  dismissToast: a => { S.toasts = S.toasts.filter(x => x.id !== +a.dataset.id); S.idleToast = false; renderToasts(); },
+  capClick: (a, e) => {
+    if (e.target.closest("#roSeg")) return ACT.roPop(e.target.closest("#roSeg"), e);
+    /* "It reconnects when you use it": the capsule body reconnects; the chevron keeps opening the connection switcher (M2a), not mocked here */
+    if (S.cap.state === "idle" && !e.target.closest(".cp-chev")) { S.idleToast = false; S.toasts = []; return finishConnect(S.cap.conn); }
+    if (S.cap.state === "failed" && S.cap.kind && ERRS[S.cap.kind]) { S.layers = [layer("error", { kind:S.cap.kind })]; renderLayers(); focusInitial(); }
+  },
+};
+document.addEventListener("click", e => {
+  const mi = e.target.closest("[data-mi]");
+  if (mi) { pickMenu(+mi.dataset.mi); return; }
+  if (S.menu && !e.target.closest("#menu")) { S.menu = null; renderMenus(); if (!e.target.closest("[data-act]")) return; }
+  if (S.pop && !e.target.closest(".pop") && !e.target.closest("[data-act=roPop]")) { S.pop = null; renderMenus(); }
+  const a = e.target.closest("[data-act]");
+  if (a && ACT[a.dataset.act] && !a.disabled) { e.preventDefault(); ACT[a.dataset.act](a, e); return; }
+  const row = e.target.closest("[data-row]");
+  if (row) { S.sel = row.dataset.row; $("explorer").innerHTML = explorerHTML(); renderSheet(); $("tree")?.focus({ preventScroll:true }); }
+});
+document.addEventListener("input", e => {
+  const f = e.target.dataset.f, L = topLayer(); if (!f || !L) return;
+  L.v[f] = e.target.value;
+  if (["vcreate", "vunlock", "vreset"].includes(L.type)) renderLayers();      /* live rules and the enabled state */
+});
+function closeTop() {
+  if (S.menu) return closeMenu();
+  const L = topLayer(); if (!L) return;
+  if (KIND_ON_CANCEL[L.type] !== undefined) return ACT.cancelPrompt();
+  S.layers.pop(); renderLayers(); focusInitial();
+}
+function focusables(root) { return [...root.querySelectorAll('button:not([disabled]):not([tabindex="-1"]), input:not([tabindex="-1"]), [tabindex="0"]')].filter(el => el.offsetParent !== null); }
+const mod = e => e.metaKey || e.ctrlKey || e.altKey;
+document.addEventListener("keydown", e => {
+  const inField = e.target.tagName === "INPUT";
+  if (S.menu) {
+    const M = S.menu, n = M.items.length;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); M.active = (M.active + (e.key === "ArrowDown" ? 1 : -1) + n) % n; renderMenus(); }
+    else if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickMenu(M.active); }
+    else if (e.key === "Escape" || e.key === "Tab") { e.preventDefault(); closeMenu(); }
+    return;
+  }
+  const L = topLayer();
+  if (L) {
+    if (e.key === "Escape") { e.preventDefault(); closeTop(); return; }
+    if (e.key === "Tab") { const fs = focusables($("layers").lastElementChild); if (!fs.length) return; const i = fs.indexOf(document.activeElement); e.preventDefault(); (e.shiftKey ? fs[(i - 1 + fs.length) % fs.length] : fs[(i + 1) % fs.length]).focus(); return; }
+    if (e.target.classList?.contains("select") && (e.key === "ArrowDown" || e.key === " " || e.key === "Enter")) { e.preventDefault(); openRetSelect(e.target); return; }
+    if (e.key === "Enter" && inField) {
+      /* Multi-field prompts (I4): Enter in a field that isn't the last moves on; it never spends an attempt on a half-filled round. */
+      if (L.type === "kbd" || L.type === "vcreate") {
+        const fields = [...document.querySelectorAll(".layer:last-child .dbody input")], i = fields.indexOf(e.target);
+        if (i < fields.length - 1) { e.preventDefault(); fields[i + 1].focus(); return; }
+        if (L.type === "kbd") {
+          const emptyMasked = KBD[L.round].prompts.findIndex((p, j) => !p.echo && !(L.v["kp" + j] || ""));
+          if (emptyMasked >= 0) { e.preventDefault(); fields[emptyMasked].focus(); return; }
+        }
+      }
+      /* Enter submits the primary only where the primary is safe; the vault reset field never submits (Danger is never the default). */
+      const primary = { kbd:"kbdGo", secret:"secretGo", vcreate:"vaultCreate", vunlock:"vaultUnlock" }[L.type];
+      const btn = primary && document.querySelector(`.layer:last-child [data-act="${primary}"]`);
+      e.preventDefault(); if (btn && !btn.disabled) ACT[primary](btn, e); return;
+    }
+    if (inField || mod(e)) return;
+    return mockKeys(e);
+  }
+  if (e.key === "Escape" && S.pop) { const a = S.pop.anchor; S.pop = null; renderTitle(); renderSheet(); renderMenus(); $(a)?.focus?.({ preventScroll:true }); return; }
+  /* The capsule's access segment is a span Tab stop: Enter or Space opens the popover (the sheet value is a real button) */
+  if (e.target.id === "roSeg" && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); return ACT.roPop(e.target, e); }
+  if (inField || mod(e)) return;
+  mockKeys(e);
+});
+function mockKeys(e) {
+  const k = e.key;
+  if (/^[1-7]$/.test(k)) return go(+k - 1);
+  if (k === "]" || k === "[") { const s = SURF[S.surface], i = s.sc.findIndex(x => x[0] === S.sc[s.id]); return go(S.surface, s.sc[(i + (k === "]" ? 1 : -1) + s.sc.length) % s.sc.length][0]); }
+  if (k === "t" || k === "T") { S.theme = S.theme === "dark" ? "light" : "dark"; renderAll(); return syncUrl(); }
+  if (k === "l" || k === "L") { LANG = LANG === "en" ? "tr" : "en"; renderAll(); return syncUrl(); }
+  if (k === "n" || k === "N") { S.notes = !S.notes; renderMockbar(); renderNotes(); syncUrl(); }
+}
+window.addEventListener("resize", () => { if (S.pop) placePop(); });
+
+/* ═════════════ Boot ═════════════ */
+(() => {
+  const P = new URLSearchParams(location.search);
+  S.theme = P.get("theme") === "light" ? "light" : "dark";
+  LANG = P.get("lang") === "tr" ? "tr" : "en";
+  S.notes = P.get("notes") === "1";
+  const s = Math.max(1, Math.min(SURF.length, +(P.get("s") || 1))) - 1;
+  go(s, P.get("sc") || undefined);
+  if (document.fonts) document.fonts.ready.then(() => { if (S.pop) placePop(); });
+})();
+</script>
+</body>
+</html>
