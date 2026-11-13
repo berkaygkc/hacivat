@@ -71,6 +71,19 @@ const ICONS: &[(&str, &[u8])] = lucide![
     "keyboard",
     "rows-2",
     "panel-left",
+    // M2a connections (Task 1).
+    "lock-open",
+    "rotate-cw",
+    "clipboard-paste",
+    "plug",
+    "unplug",
+    "pencil",
+    "external-link",
+    "route",
+    "circle-alert",
+    "circle-x",
+    "folder-open",
+    "file-key",
 ];
 const HV_MARK: &[u8] = include_bytes!("../assets/icons/hacivat/hv-mark.svg");
 

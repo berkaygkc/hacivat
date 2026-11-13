@@ -2,6 +2,7 @@
 //! Task 13, commands and menus in Task 16, the settings UI in Task 17.
 
 pub mod commands;
+pub mod connections;
 pub mod l10n_global;
 pub mod menus;
 pub mod settings_ui;
@@ -27,6 +28,8 @@ pub fn init(cx: &mut App) {
     // registrations (append-only)
     commands::install(cx);
     settings_ui::install(cx);
+    // ## m2a-t01-interfaces
+    connections::install(cx);
 }
 
 #[cfg(test)]

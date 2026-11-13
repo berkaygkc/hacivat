@@ -24,6 +24,12 @@ allow = [
 confidence-threshold = 0.9
 unused-allowed-license = "allow"
 
+# `mysql_async`'s rustls TLS always pulls the Mozilla CA bundle crate, whose data licence is
+# permissive (M2a Task 1, P1).
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]   # mysql_async rustls-tls; ruled PO-away 2026-11-12 (ledger)
+
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"
@@ -34,6 +40,9 @@ deny = [
     { crate = "workspace", reason = "zed GPL crate" },
     { crate = "rope", reason = "zed GPL crate" },
     { crate = "text", reason = "zed GPL crate" },
+    # Two rustls providers make `ClientConfig::builder()` panic (M2a Task 1, P5).
+    { crate = "aws-lc-rs", reason = "M2a uses the ring provider" },
+    { crate = "aws-lc-sys", reason = "M2a uses the ring provider; OpenSSL licence" },
 ]
 
 [sources]

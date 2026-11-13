@@ -1,0 +1,33 @@
+[package]
+name = "hacivat-driver"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# `FakeDriver`, a scripted in-process driver for tests (F4).
+fake = []
+
+[dependencies]
+hacivat-proto.workspace = true
+hacivat-net.workspace = true
+secrecy.workspace = true
+futures.workspace = true
+serde.workspace = true
+toml.workspace = true
+regex.workspace = true
+percent-encoding.workspace = true
+tokio = { workspace = true, features = ["time", "sync"] }
+
+[dev-dependencies]
+hacivat-l10n.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+# Test targets that use `FakeDriver` only build with `--features fake` (P45).
+[[test]]
+name = "catalog"
+required-features = ["fake"]
+
+[lints]
+workspace = true

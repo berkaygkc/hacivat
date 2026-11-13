@@ -505,3 +505,30 @@ jobs:
       - name: Compare with the M1 baselines (shot-diff)
         if: steps.guard.outputs.present == 'true' && runner.os == 'macOS' && hashFiles('design/baselines/m1/macos/*.png') != ''
         run: cargo run --locked -p xtask -- shot-diff --baseline design/baselines/m1/macos --candidate target/shots
+
+  # ## m2a-t11-docker
+  # Full test set line 5 (the FakeDriver tests) and line 7 with `--set pr` (R17). CI has no
+  # controller, so this job starts the pr servers (pg17, mysql84) itself. It uses no secrets:
+  # the servers run with the throwaway test credentials of docker/m2a.
+  docker-pr:
+    name: docker-pr
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (5) driver, fake
+        run: cargo test --locked -p hacivat-driver --features fake
+      - name: Start the pr servers
+        run: cargo run --locked -p xtask -- docker up --set pr
+      - name: Docker tests (pr set)
+        run: cargo run --locked -p xtask -- docker test --set pr
+      - name: Server logs
+        if: failure()
+        run: docker compose -f docker/m2a/compose.yml logs --no-color
+      - name: Stop the servers
+        if: always()
+        run: cargo run --locked -p xtask -- docker down

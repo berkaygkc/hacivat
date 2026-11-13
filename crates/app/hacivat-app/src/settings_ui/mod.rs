@@ -8,10 +8,10 @@ pub mod search;
 
 use std::rc::Rc;
 
-use hacivat_l10n::{ArgValue, ExactDecimal, L10n, NoArgs, WhenValue, ids};
+use hacivat_l10n::{ExactDecimal, L10n, NoArgs, WhenValue, ids};
 use hacivat_settings::{Settings, TextRenderingPref};
 use hacivat_ui::button::{Button, ButtonKind};
-use hacivat_ui::dialog::{DialogButton, DialogEvent, DialogSpec};
+use hacivat_ui::dialog::{DialogButton, DialogEvent, DialogSize, DialogSpec};
 use hacivat_ui::input::{InputEvent, TextInput};
 use hacivat_ui::popover::Declare as _;
 use hacivat_ui::segmented::{SegmentContent, SegmentItem, Segmented};
@@ -343,7 +343,9 @@ impl Render for SettingsPage {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            // m2a-t21-shots: the frame checks treat this clip as a scroll viewport.
+            .child(hacivat_ui::text::scroll_viewport());
         if self.query.trim().is_empty() {
             list = list.child(
                 div()
@@ -428,33 +430,21 @@ fn segment_content(cx: &App, choice: &Choice) -> (SegmentContent, SharedString) 
 /// The regional-format sample: `1234.5` and 2026-11-11 14:05 (a wall-clock value, so the time
 /// zone never shifts it, F30), rendered by the installed localization.
 pub fn regional_preview_text(cx: &App) -> SharedString {
-    let Some(global) = cx.try_global::<L10nGlobal>() else {
-        return SharedString::new_static(ids::hv::SETTINGS_REGIONAL_PREVIEW.id);
-    };
-    // follow-up: (Number) -> ExactDecimal arg in codegen, then this goes through `tr`.
-    global
-        .l10n
-        .t_dynamic(
-            ids::hv::SETTINGS_REGIONAL_PREVIEW.id,
-            vec![
-                (
-                    "number",
-                    ArgValue::Decimal(ExactDecimal("1234.5".to_string())),
-                ),
-                (
-                    "when",
-                    ArgValue::When(WhenValue::Local {
-                        year: 2026,
-                        month: 11,
-                        day: 11,
-                        hour: 14,
-                        minute: 5,
-                        second: 0,
-                    }),
-                ),
-            ],
-        )
-        .into()
+    tr(
+        cx,
+        ids::hv::SETTINGS_REGIONAL_PREVIEW,
+        ids::hv::HvSettingsRegionalPreview {
+            number: ExactDecimal("1234.5".to_string()),
+            when: WhenValue::Local {
+                year: 2026,
+                month: 11,
+                day: 11,
+                hour: 14,
+                minute: 5,
+                second: 0,
+            },
+        },
+    )
 }
 
 /// Asks to restart, then restarts: the pending settings and layout writes are flushed first,
@@ -482,6 +472,7 @@ fn open_restart_dialog(window: &mut Window, cx: &mut App) {
         ],
         cancel: 1,
         primary: 0,
+        size: DialogSize::Standard,
     };
     let dialog = workspace.update(cx, |ws, cx| ws.open_dialog(spec, window, cx));
     // The workspace drops its handle to the dialog when it removes the layer, on the same event;

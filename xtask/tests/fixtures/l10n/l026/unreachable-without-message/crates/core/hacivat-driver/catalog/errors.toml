@@ -1,0 +1,9 @@
+# L026 fixture: a class M2a cannot produce needs no messages yet.
+
+[[class]]
+id = "auth.invalid"
+reachable = true
+
+[[class]]
+id = "ssh.host_key_unknown"
+reachable = false

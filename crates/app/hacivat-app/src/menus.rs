@@ -5,7 +5,10 @@
 //! labels. macOS items carry `RunCommand { id }` (F1); their chords are bound as GPUI key
 //! bindings under the context [`MENU_KEY_CONTEXT`], which no element has, so they only label
 //! the native items while Hacivat's dispatcher keeps handling the keys (R7). No menu binds the
-//! clipboard chords, so Cmd/Ctrl-A/C/X/V stay with the focused text input.
+//! clipboard chords, so Cmd/Ctrl-A/C/X/V stay with the focused text input. While a modal layer
+//! is open, every item but Quit carries `InertCommand` instead (greyed, its key equivalent
+//! inert); the workspace rebuilds the menus when the first modal layer opens and the last one
+//! closes (P47).
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -17,12 +20,13 @@ use hacivat_ui::menu::{MENU_MIN_WIDTH_PX, MenuItemSpec};
 use hacivat_ui::text::TextFn;
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
-    App, KeyBinding, Keystroke, Menu, MenuItem, Pixels, Point, RunCommand, SharedString, TextRun,
-    Window, point, px,
+    Action, App, InertCommand, KeyBinding, Keystroke, Menu, MenuItem, Pixels, Point, RunCommand,
+    SharedString, TextRun, Window, point, px,
 };
 use hacivat_ui_core::keymap::chord_string;
 use hacivat_ui_core::theme::{Theme, TypeStyle};
 
+use crate::commands::{QUIT_ACTION, modal_open};
 use crate::l10n_global::{text_fn_id, tr_id};
 use crate::shell::ActiveKeymap;
 use crate::shell::keymap_state::shortcut_label;
@@ -44,8 +48,9 @@ pub struct MenuGroup {
     pub items: Vec<MenuEntry>,
 }
 
-/// The menus' layout by action ID; actions nobody registered are left out.
-fn layout() -> [(&'static str, Vec<MenuEntry>); 4] {
+/// The menus' layout by action ID; actions nobody registered are left out, and so is a group
+/// left without items (the File group until Task 18 registers `connection.new`).
+fn layout() -> [(&'static str, Vec<MenuEntry>); 5] {
     use MenuEntry::{Action as A, Separator as S};
     [
         (
@@ -59,6 +64,8 @@ fn layout() -> [(&'static str, Vec<MenuEntry>); 4] {
                 A("app.quit"),
             ],
         ),
+        // M2a (Task 1, P18).
+        (ids::hv::MENU_FILE.id, vec![A("connection.new")]),
         (
             ids::hv::MENU_VIEW.id,
             vec![
@@ -90,12 +97,13 @@ fn layout() -> [(&'static str, Vec<MenuEntry>); 4] {
     ]
 }
 
-/// The menu model for `reg`: four groups (`hv-menu-app`, `-view`, `-window`, `-help`) of the
-/// registered actions, without leading, trailing or doubled separators.
+/// The menu model for `reg`: the groups (`hv-menu-app`, `-file`, `-view`, `-window`, `-help`)
+/// of the registered actions, without leading, trailing or doubled separators. A group with no
+/// registered action is left out.
 pub fn menu_model(reg: &ActionRegistry) -> Vec<MenuGroup> {
     layout()
         .into_iter()
-        .map(|(title_id, entries)| {
+        .filter_map(|(title_id, entries)| {
             let mut items: Vec<MenuEntry> = Vec::new();
             for entry in entries {
                 match entry {
@@ -111,7 +119,7 @@ pub fn menu_model(reg: &ActionRegistry) -> Vec<MenuGroup> {
             if items.last() == Some(&MenuEntry::Separator) {
                 items.pop();
             }
-            MenuGroup { title_id, items }
+            (!items.is_empty()).then_some(MenuGroup { title_id, items })
         })
         .collect()
 }
@@ -122,8 +130,17 @@ fn action(id: &str, cx: &App) -> Option<(&'static str, bool)> {
     Some((def.title_id, (def.enabled)(cx)))
 }
 
-/// The macOS menu bar for `model`, in the current language.
+/// Whether the menu item of `id` is held back now: a modal layer is open and `id` is not
+/// `app.quit` (P47).
+fn held(id: &str, modal: bool) -> bool {
+    modal && id != QUIT_ACTION
+}
+
+/// The macOS menu bar for `model`, in the current language. While a modal layer is open every
+/// item but Quit carries `InertCommand`, which nothing handles, so macOS greys it (its menu
+/// validation overrides `disabled`) and its key equivalent does nothing (P47).
 pub fn build_menus(model: &[MenuGroup], cx: &App) -> Vec<Menu> {
+    let modal = modal_open(cx);
     model
         .iter()
         .map(|group| Menu {
@@ -135,12 +152,18 @@ pub fn build_menus(model: &[MenuGroup], cx: &App) -> Vec<Menu> {
                     MenuEntry::Separator => Some(MenuItem::Separator),
                     MenuEntry::Action(id) => {
                         let (title_id, enabled) = action(id, cx)?;
+                        let held = held(id, modal);
+                        let action: Box<dyn Action> = if held {
+                            Box::new(InertCommand { id: id.into() })
+                        } else {
+                            Box::new(RunCommand { id: id.into() })
+                        };
                         Some(MenuItem::Action {
                             name: tr_id(cx, title_id),
-                            action: Box::new(RunCommand { id: id.into() }),
+                            action,
                             os_action: None,
                             checked: false,
-                            disabled: !enabled,
+                            disabled: !enabled || held,
                         })
                     }
                 })
@@ -246,11 +269,13 @@ fn intern(chord: String) -> &'static str {
     leaked
 }
 
-/// The GPUI bindings that label the menu items with their chords on the active keymap.
+/// The GPUI bindings that label the menu items with their chords on the active keymap; an item
+/// held back under a modal layer is labelled through its `InertCommand`.
 fn menu_key_bindings(model: &[MenuGroup], cx: &App) -> Vec<KeyBinding> {
     let Some(active) = cx.try_global::<ActiveKeymap>() else {
         return Vec::new();
     };
+    let modal = modal_open(cx);
     let mut seen = Vec::new();
     model
         .iter()
@@ -275,11 +300,12 @@ fn menu_key_bindings(model: &[MenuGroup], cx: &App) -> Vec<KeyBinding> {
             if chord.split(' ').any(|k| Keystroke::parse(k).is_err()) {
                 return None;
             }
-            Some(KeyBinding::new(
-                chord,
-                RunCommand { id: id.into() },
-                Some(MENU_KEY_CONTEXT),
-            ))
+            let id: SharedString = id.into();
+            Some(if held(&id, modal) {
+                KeyBinding::new(chord, InertCommand { id }, Some(MENU_KEY_CONTEXT))
+            } else {
+                KeyBinding::new(chord, RunCommand { id }, Some(MENU_KEY_CONTEXT))
+            })
         })
         .collect()
 }

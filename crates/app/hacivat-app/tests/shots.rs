@@ -17,12 +17,24 @@
 //! Every surface must show in its frame: a label drawn by its own source file (palette, dialog,
 //! toast, menu, settings page; the title bar for the shells, the capsule for the demo).
 //!
+//! The M2a surfaces (Task 21) render the connection flow through `ConnectionsBoot::for_tests`
+//! with a `FakeDriver` registry and a memory secret store, from the fixtures Tasks 9, 17, 18 and
+//! 20 own (R28, P19): the connection dialog (also at 1024x700), the test strip, the error
+//! dialog, the production prompt, the explorer and its menu, the delete and import dialogs,
+//! the live capsule states, the explanation popover and the sticky toast; plus the shell at its
+//! 960x600 minimum with the explorer populated.
+//!
 //! Every frame is checked before it is written:
 //! - (a) in the pseudo locales (`en-XA`, `tr-XT`) every `TextSource::Fluent` label is bracketed;
-//! - (b) no label is clipped;
+//! - (b) no label is clipped: wider than its box, or cut at its container's clip (a control
+//!   row running past its card, a tile cutting its last row), wrapping paragraphs included;
+//!   text partly scrolled out of a marked scroll viewport is not clipped (`text.rs`,
+//!   `cut_by_clip`, has the policy and its limits);
 //! - (c) every label is at least 11 px nominal (synthesized small caps record their nominal
 //!   size; their 0.7x glyph runs are the one exception);
-//! - (d) the One Filled Badge rule holds, expecting production only on the demo surface.
+//! - (d) the One Filled Badge rule holds inside the title-bar capsule, expecting production
+//!   only where the capsule shows it, and no badge-sized `cp_fill` quad sits anywhere else (the
+//!   7 px production marks of dialogs and the explorer are not badges; T21 ruling).
 //!
 //! Windows has no headless renderer at the pin: the test prints `shots: no headless renderer
 //! (R8)` and passes.
@@ -30,14 +42,21 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use hacivat_app::connections::{
+    ConnectionsBoot, capsule, delete, dialog, error_view, explorer, import, prod_prompt, test_strip,
+};
 use hacivat_app::l10n_global::text_fn_id;
 use hacivat_app::menus;
 use hacivat_app::shell::DemoCapsule;
 use hacivat_app::shell::Workspace;
 use hacivat_app::{Startup, start};
+use hacivat_driver::DriverRegistry;
+use hacivat_driver::fake::FakeDriver;
 use hacivat_l10n::OsLocale;
+use hacivat_proto::DbmsKind;
 use hacivat_settings::{LanguagePref, LocalPaths, ThemePref};
 use hacivat_ui::actions::ActionRegistry;
+use hacivat_ui::capsule::CapsuleProbe;
 use hacivat_ui::text::{RenderedText, TextRegistry, TextSource};
 use hacivat_ui_core::app::{TextRendering, bootstrap};
 use hacivat_ui_core::assets::BundledAssets;
@@ -45,11 +64,11 @@ use hacivat_ui_core::gpui_surface::{
     AnyWindowHandle, App, HeadlessAppContext, Window, current_headless_renderer, current_platform,
     px, size,
 };
-use hacivat_ui_core::named_rules::assert_one_filled_badge;
+use hacivat_ui_core::named_rules::assert_one_filled_badge_in;
 use hacivat_ui_core::platform::apply_text_rendering;
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 
-/// The M1 surfaces, in render order.
+/// The surfaces, in render order: M1's, then M2a's (Task 21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Surface {
     Shell,
@@ -60,9 +79,36 @@ enum Surface {
     DialogAbout,
     ToastInfo,
     MenuApp,
+    // ## m2a-t21-shots
+    ConnDialogNew,
+    ConnDialogPasted,
+    ConnDialogEngineSwitch,
+    ConnDialogSqlite,
+    ConnTestRunning,
+    ConnTestOk,
+    ConnTestFailed,
+    ConnErrorAuth,
+    ConnErrorUnknownDb,
+    ConnErrorUnsupported,
+    ConnErrorTls,
+    ConnProdPrompt,
+    ConnProdPromptUnset,
+    ExplorerEmpty,
+    ExplorerList,
+    ExplorerMenu,
+    ConnDeleteConfirm,
+    ConnImportPgService,
+    CapsuleConnecting,
+    CapsuleConnectedUnencrypted,
+    CapsuleProductionRo,
+    CapsuleFailed,
+    CapsuleUnsupported,
+    UnencryptedPopover,
+    ToastStickyDemo,
+    ShellMinimum,
 }
 
-const SURFACES: [Surface; 8] = [
+const SURFACES: [Surface; 34] = [
     Surface::Shell,
     Surface::ShellDemoProduction,
     Surface::ShellNarrow,
@@ -71,6 +117,33 @@ const SURFACES: [Surface; 8] = [
     Surface::DialogAbout,
     Surface::ToastInfo,
     Surface::MenuApp,
+    // ## m2a-t21-shots
+    Surface::ConnDialogNew,
+    Surface::ConnDialogPasted,
+    Surface::ConnDialogEngineSwitch,
+    Surface::ConnDialogSqlite,
+    Surface::ConnTestRunning,
+    Surface::ConnTestOk,
+    Surface::ConnTestFailed,
+    Surface::ConnErrorAuth,
+    Surface::ConnErrorUnknownDb,
+    Surface::ConnErrorUnsupported,
+    Surface::ConnErrorTls,
+    Surface::ConnProdPrompt,
+    Surface::ConnProdPromptUnset,
+    Surface::ExplorerEmpty,
+    Surface::ExplorerList,
+    Surface::ExplorerMenu,
+    Surface::ConnDeleteConfirm,
+    Surface::ConnImportPgService,
+    Surface::CapsuleConnecting,
+    Surface::CapsuleConnectedUnencrypted,
+    Surface::CapsuleProductionRo,
+    Surface::CapsuleFailed,
+    Surface::CapsuleUnsupported,
+    Surface::UnencryptedPopover,
+    Surface::ToastStickyDemo,
+    Surface::ShellMinimum,
 ];
 const LOCALES: [&str; 4] = ["en", "tr", "en-XA", "tr-XT"];
 const THEMES: [ThemePref; 2] = [ThemePref::Dark, ThemePref::Light];
@@ -87,19 +160,78 @@ impl Surface {
             Surface::DialogAbout => "dialog-about",
             Surface::ToastInfo => "toast-info",
             Surface::MenuApp => "menu-app",
+            Surface::ConnDialogNew => "conn-dialog-new",
+            Surface::ConnDialogPasted => "conn-dialog-pasted",
+            Surface::ConnDialogEngineSwitch => "conn-dialog-engine-switch",
+            Surface::ConnDialogSqlite => "conn-dialog-sqlite",
+            Surface::ConnTestRunning => "conn-test-running",
+            Surface::ConnTestOk => "conn-test-ok",
+            Surface::ConnTestFailed => "conn-test-failed",
+            Surface::ConnErrorAuth => "conn-error-auth",
+            Surface::ConnErrorUnknownDb => "conn-error-unknown-db",
+            Surface::ConnErrorUnsupported => "conn-error-unsupported",
+            Surface::ConnErrorTls => "conn-error-tls",
+            Surface::ConnProdPrompt => "conn-prod-prompt",
+            Surface::ConnProdPromptUnset => "conn-prod-prompt-unset",
+            Surface::ExplorerEmpty => "explorer-empty",
+            Surface::ExplorerList => "explorer-list",
+            Surface::ExplorerMenu => "explorer-menu",
+            Surface::ConnDeleteConfirm => "conn-delete-confirm",
+            Surface::ConnImportPgService => "conn-import-pg-service",
+            Surface::CapsuleConnecting => "capsule-connecting",
+            Surface::CapsuleConnectedUnencrypted => "capsule-connected-unencrypted",
+            Surface::CapsuleProductionRo => "capsule-production-ro",
+            Surface::CapsuleFailed => "capsule-failed",
+            Surface::CapsuleUnsupported => "capsule-unsupported",
+            Surface::UnencryptedPopover => "unencrypted-popover",
+            Surface::ToastStickyDemo => "toast-sticky-demo",
+            Surface::ShellMinimum => "shell-minimum",
         }
     }
 
-    /// The logical window size of the matrix shots.
-    fn size(self) -> (f32, f32) {
+    /// The logical window sizes of the matrix shots: 1280x800, plus 1024x700 for the
+    /// connection dialog (the Overflow Rule); `shell-narrow` only at 1024x700 and
+    /// `shell-minimum` only at the 960x600 minimum window (DESIGN.md).
+    fn sizes(self) -> &'static [(f32, f32)] {
         match self {
-            Surface::ShellNarrow => (1024.0, 700.0),
-            _ => (1280.0, 800.0),
+            Surface::ShellNarrow => &[(1024.0, 700.0)],
+            Surface::ShellMinimum => &[(960.0, 600.0)],
+            Surface::ConnDialogNew
+            | Surface::ConnDialogPasted
+            | Surface::ConnDialogEngineSwitch
+            | Surface::ConnDialogSqlite => &[(1280.0, 800.0), (1024.0, 700.0)],
+            _ => &[(1280.0, 800.0)],
         }
     }
 
     fn is_demo(self) -> bool {
         self == Surface::ShellDemoProduction
+    }
+
+    /// Whether the title-bar capsule shows production (the one filled badge): the demo, and
+    /// the capsule fixtures of a production connection (connected, or failed with PRODUCTION
+    /// first, NOTES §7).
+    fn shows_production(self) -> bool {
+        matches!(
+            self,
+            Surface::ShellDemoProduction | Surface::CapsuleProductionRo | Surface::CapsuleFailed
+        )
+    }
+
+    /// Whether the shell boots the M2a connections (a `FakeDriver` registry, a memory secret
+    /// store): every M2a surface. M1's surfaces render the shell without them, as in M1.
+    fn needs_connections(self) -> bool {
+        !matches!(
+            self,
+            Surface::Shell
+                | Surface::ShellDemoProduction
+                | Surface::ShellNarrow
+                | Surface::PaletteOpen
+                | Surface::SettingsGeneral
+                | Surface::DialogAbout
+                | Surface::ToastInfo
+                | Surface::MenuApp
+        )
     }
 
     /// Proof that the surface is on screen: a label created in this source file (and, for the
@@ -113,6 +245,41 @@ impl Surface {
             Surface::DialogAbout => ("hacivat-ui/src/dialog.rs:", None),
             Surface::ToastInfo => ("hacivat-ui/src/toast.rs:", None),
             Surface::MenuApp => ("hacivat-ui/src/menu.rs:", None),
+            Surface::ConnDialogNew | Surface::ConnDialogSqlite => {
+                ("hacivat-app/src/connections/dialog/", None)
+            }
+            Surface::ConnDialogPasted | Surface::ConnDialogEngineSwitch => {
+                ("hacivat-ui/src/notice.rs:", None)
+            }
+            Surface::ConnTestRunning | Surface::ConnTestOk => {
+                ("hacivat-app/src/connections/test_strip.rs:", None)
+            }
+            Surface::ConnTestFailed
+            | Surface::ConnErrorAuth
+            | Surface::ConnErrorUnknownDb
+            | Surface::ConnErrorUnsupported
+            | Surface::ConnErrorTls => ("hacivat-app/src/connections/error_view.rs:", None),
+            Surface::ConnProdPrompt | Surface::ConnProdPromptUnset => {
+                ("hacivat-app/src/connections/prod_prompt.rs:", None)
+            }
+            Surface::ExplorerEmpty => ("hacivat-app/src/connections/explorer.rs:", None),
+            Surface::ExplorerList | Surface::ShellMinimum => (
+                "hacivat-app/src/connections/explorer.rs:",
+                Some("orders-prod"),
+            ),
+            Surface::ExplorerMenu => ("hacivat-ui/src/menu.rs:", None),
+            Surface::ConnDeleteConfirm => ("hacivat-ui/src/dialog.rs:", None),
+            Surface::ConnImportPgService => ("hacivat-app/src/connections/import.rs:", None),
+            Surface::CapsuleConnecting => ("hacivat-ui/src/capsule.rs:", Some("orders-staging")),
+            Surface::CapsuleConnectedUnencrypted => {
+                ("hacivat-ui/src/capsule.rs:", Some("orders-dev"))
+            }
+            Surface::CapsuleProductionRo | Surface::CapsuleFailed => {
+                ("hacivat-ui/src/capsule.rs:", Some("orders-prod"))
+            }
+            Surface::CapsuleUnsupported => ("hacivat-ui/src/capsule.rs:", Some("legacy")),
+            Surface::UnencryptedPopover => ("hacivat-ui/src/explain.rs:", None),
+            Surface::ToastStickyDemo => ("hacivat-ui/src/toast.rs:", None),
         }
     }
 
@@ -127,6 +294,10 @@ impl Surface {
 
     /// Brings the surface on screen in a freshly started shell.
     fn open(self, window: &mut Window, cx: &mut App) {
+        if self.needs_connections() {
+            open_m2a(self, window, cx);
+            return;
+        }
         let action = match self {
             Surface::Shell | Surface::ShellDemoProduction | Surface::ShellNarrow => return,
             Surface::PaletteOpen => "workspace.command_palette",
@@ -137,12 +308,84 @@ impl Surface {
                 open_app_menu(window, cx);
                 return;
             }
+            _ => unreachable!("an M2a surface opens through its fixture"),
         };
         assert!(
             ActionRegistry::run(action, window, cx),
             "{action} did not run"
         );
     }
+}
+
+// ## m2a-t21-shots
+
+/// Opens an M2a surface through the fixture its task owns (R28, P19).
+fn open_m2a(surface: Surface, window: &mut Window, cx: &mut App) {
+    match surface {
+        Surface::ConnDialogNew => dialog::new_fixture(window, cx),
+        Surface::ConnDialogPasted => dialog::pasted_fixture(window, cx),
+        Surface::ConnDialogEngineSwitch => dialog::engine_switch_fixture(window, cx),
+        Surface::ConnDialogSqlite => dialog::sqlite_fixture(window, cx),
+        Surface::ConnTestRunning => test_strip::running_fixture(window, cx),
+        Surface::ConnTestOk => test_strip::ok_fixture(window, cx),
+        Surface::ConnTestFailed => test_strip::failed_fixture(window, cx),
+        Surface::ConnErrorAuth => error_view::auth_fixture(window, cx),
+        Surface::ConnErrorUnknownDb => error_view::unknown_db_fixture(window, cx),
+        Surface::ConnErrorUnsupported => error_view::unsupported_fixture(window, cx),
+        Surface::ConnErrorTls => error_view::tls_fixture(window, cx),
+        Surface::ConnProdPrompt => prod_prompt::preselected_fixture(window, cx),
+        Surface::ConnProdPromptUnset => prod_prompt::unset_fixture(window, cx),
+        Surface::ExplorerEmpty => explorer::empty_fixture(window, cx),
+        // The menu opens in `after_paint`, under the selected row as Shift-F10 does: the
+        // row's bounds exist only once the list has painted.
+        Surface::ExplorerList | Surface::ShellMinimum | Surface::ExplorerMenu => {
+            explorer::list_fixture(window, cx)
+        }
+        Surface::ConnDeleteConfirm => delete::confirm_fixture(window, cx),
+        Surface::ConnImportPgService => import::pg_service_fixture(window, cx),
+        Surface::CapsuleConnecting => capsule::connecting_fixture(window, cx),
+        Surface::CapsuleConnectedUnencrypted => capsule::connected_unencrypted_fixture(window, cx),
+        Surface::CapsuleProductionRo => capsule::production_ro_fixture(window, cx),
+        Surface::CapsuleFailed => capsule::failed_fixture(window, cx),
+        Surface::CapsuleUnsupported => capsule::unsupported_fixture(window, cx),
+        Surface::UnencryptedPopover => capsule::unencrypted_popover_fixture(window, cx),
+        // The widget owns no copy: the app's strings (the Copy as URL toast, the keyring
+        // fallback as a long bullet that wraps, the toast's own Dismiss).
+        Surface::ToastStickyDemo => hacivat_ui::toast::sticky_demo_fixture(
+            text_fn_id("hv-conn-toast-copied"),
+            vec![
+                text_fn_id("hv-conn-toast-nopw"),
+                text_fn_id("hv-conn-keyring-unavailable"),
+            ],
+            text_fn_id("hui-toast-dismiss"),
+            window,
+            cx,
+        ),
+        _ => unreachable!("an M1 surface opens through its action"),
+    }
+}
+
+/// The step of a surface that needs one painted frame first.
+fn after_paint(surface: Surface, window: &mut Window, cx: &mut App) {
+    if surface == Surface::ExplorerMenu {
+        explorer::open_context_menu(None, window, cx);
+    }
+}
+
+/// The connections an M2a shot boots: `ConnectionsBoot::for_tests` (a memory secret store, no
+/// credential files) over a `FakeDriver` per engine, so no shot touches the keyring, a socket
+/// or DNS.
+fn fake_connections(paths: &LocalPaths) -> ConnectionsBoot {
+    let mut drivers = DriverRegistry::new();
+    for kind in [
+        DbmsKind::Postgres,
+        DbmsKind::MySql,
+        DbmsKind::MariaDb,
+        DbmsKind::Sqlite,
+    ] {
+        drivers.register(Arc::new(FakeDriver::new(kind)));
+    }
+    ConnectionsBoot::for_tests(paths, drivers)
 }
 
 /// `app.show_menu`'s popup. The action exists only where the title bar draws the app-menu
@@ -192,19 +435,21 @@ impl Shot {
     }
 }
 
-/// Every shot: the surface matrix at 1280x800 (`shell-narrow` at 1024x700) x locales x
-/// themes, then `shell-demo-production` at 1440x900 x en/tr x dark/light for VF.
+/// Every shot: the surface matrix at each surface's sizes x locales x themes, then
+/// `shell-demo-production` at 1440x900 x en/tr x dark/light for VF.
 fn shots() -> Vec<Shot> {
     let mut out = Vec::new();
     for surface in SURFACES {
-        for theme in THEMES {
-            for locale in LOCALES {
-                out.push(Shot {
-                    surface,
-                    theme,
-                    locale,
-                    size: surface.size(),
-                });
+        for &size in surface.sizes() {
+            for theme in THEMES {
+                for locale in LOCALES {
+                    out.push(Shot {
+                        surface,
+                        theme,
+                        locale,
+                        size,
+                    });
+                }
             }
         }
     }
@@ -286,6 +531,7 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
             enabled: true,
             frame: Vec::new(),
         });
+        cx.set_global(CapsuleProbe::default());
     });
     let root = tempfile::tempdir().expect("temp dir");
     let paths = LocalPaths::under(root.path());
@@ -293,7 +539,12 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     let mut outcome = hacivat_settings::load(&paths.settings_toml());
     outcome.settings.ui.language = LanguagePref::Tag(shot.locale.to_string());
     outcome.settings.ui.theme = shot.theme;
-    let startup = Startup::new(paths, outcome, OsLocale::default());
+    let connections = shot
+        .surface
+        .needs_connections()
+        .then(|| fake_connections(&paths));
+    let mut startup = Startup::new(paths, outcome, OsLocale::default());
+    startup.connections = connections;
     let demo = shot.surface.is_demo().then(DemoCapsule::harman);
     let handle: AnyWindowHandle = cx
         .update(|cx| start(cx, startup, demo))
@@ -311,6 +562,18 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     cx.update_window(handle, |_, window, cx| shot.surface.open(window, cx))
         .expect("the window is open");
     cx.run_until_parked();
+    if shot.surface.needs_connections() {
+        // Profile writes and the keyring probe run on the core runtime (P22); let them land.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        cx.run_until_parked();
+    }
+    cx.update(|cx| cx.refresh_windows());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        after_paint(shot.surface, window, cx)
+    })
+    .expect("the window is open");
+    cx.run_until_parked();
     cx.update(|cx| cx.refresh_windows());
     cx.run_until_parked();
 
@@ -327,8 +590,14 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     let badge = cx
         .update_window(handle, |_, window, cx| {
             let cp_fill = Theme::get(cx).tokens.colors.cp_fill.to_hsla();
+            let capsule = cx.global::<CapsuleProbe>().bounds;
             catch_unwind(AssertUnwindSafe(|| {
-                assert_one_filled_badge(window, cp_fill, shot.surface.is_demo())
+                assert_one_filled_badge_in(
+                    window,
+                    cp_fill,
+                    shot.surface.shows_production(),
+                    capsule,
+                )
             }))
         })
         .expect("the window is open");
@@ -400,12 +669,17 @@ fn render_all_surfaces(names: &[String], all: bool) {
 
 fn the_matrix_covers_every_surface_locale_and_theme() {
     let all = shots();
-    assert_eq!(all.len(), 8 * 4 * 2 + 4);
+    // M1: 8 surfaces x 8 + 4 VF; M2a: 26 surfaces x 8 + the 4 dialog surfaces again at 1024x700.
+    assert_eq!(all.len(), 8 * 4 * 2 + 4 + 26 * 8 + 4 * 8);
     let names: Vec<String> = all.iter().map(|s| s.file_name(2.0)).collect();
     assert!(names.contains(&"shell-dark-en-1280x800@2x.png".to_string()));
     assert!(names.contains(&"shell-narrow-light-tr-XT-1024x700@2x.png".to_string()));
     assert!(names.contains(&"shell-demo-production-light-tr-1440x900@2x.png".to_string()));
     assert!(names.contains(&"menu-app-dark-en-XA-1280x800@2x.png".to_string()));
+    assert!(names.contains(&"conn-dialog-new-light-tr-XT-1024x700@2x.png".to_string()));
+    assert!(names.contains(&"capsule-production-ro-dark-tr-1280x800@2x.png".to_string()));
+    assert!(names.contains(&"shell-minimum-dark-en-960x600@2x.png".to_string()));
+    assert!(!names.contains(&"conn-error-auth-dark-en-1024x700@2x.png".to_string()));
     let unique: std::collections::BTreeSet<&String> = names.iter().collect();
     assert_eq!(unique.len(), names.len());
 }
@@ -620,6 +894,21 @@ fn a_missing_surface_fails_its_frame() {
             .expect("a shell-only frame misses it");
         assert!(found.contains("the surface is missing"), "{found}");
     }
+    // ## m2a-t21-shots: an M2a surface needs its own file's label too.
+    for surface in [
+        Surface::ConnDialogNew,
+        Surface::ConnErrorAuth,
+        Surface::ExplorerList,
+        Surface::UnencryptedPopover,
+        Surface::ToastStickyDemo,
+    ] {
+        assert!(surface.missing_from("s", &shell).is_some(), "{surface:?}");
+    }
+    let explorer = [at(
+        "crates/app/hacivat-app/src/connections/explorer.rs:420:17",
+        "orders-prod",
+    )];
+    assert!(Surface::ExplorerList.missing_from("s", &explorer).is_none());
     // The demo needs the harman capsule, not just any capsule label.
     let capsule = |text| [at("crates/ui/hacivat-ui/src/capsule.rs:111:21", text)];
     assert!(
@@ -639,7 +928,7 @@ fn the_command_line_reads_like_libtest() {
     let all: Vec<String> = shots().iter().map(|s| s.file_name(2.0)).collect();
     // No filter: everything; the render is ignored unless asked for.
     let cli = parse("--nocapture --test-threads 1");
-    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(68));
+    assert_eq!(cli.shots(&all).map(|s| s.len()), Some(308));
     assert!(!cli.runs_ignored());
     // nextest: `--list --format terse --ignored` lists only the render.
     let cli = parse("--list --format terse --ignored");
@@ -653,7 +942,14 @@ fn the_command_line_reads_like_libtest() {
     );
     assert_eq!(
         parse("--ignored render_all").shots(&all).map(|s| s.len()),
-        Some(68)
+        Some(308)
+    );
+    // A dialog surface renders at both sizes.
+    assert_eq!(
+        parse("--ignored conn-dialog-new-dark")
+            .shots(&all)
+            .map(|s| s.len()),
+        Some(8)
     );
     // `--exact` matches whole names (a shot with or without `.png`).
     assert_eq!(parse("--exact render_all").shots(&all), None);

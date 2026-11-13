@@ -2,17 +2,26 @@
 //! `seam_strong` outline and dividers; the pressed segment sits on `raised` (`panel` in the
 //! light theme) with text ink, the others in `text_2` (hover lifts them to `text`). Every segment
 //! has the debug selector `segmented-<id>-<index>` for tests.
+//!
+//! Keyboard (M2a, roving tab stop): the group is one tab stop, the pressed segment (the first when
+//! none is); ← and → move the focus to the neighbouring segment and press it, wrapping at the
+//! ends. Enter and Space press the focused segment.
 
+use std::rc::Rc;
+
+use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, ElementId, InteractiveElement, IntoElement, ParentElement, Role, SharedString,
-    StatefulInteractiveElement, Styled, accesskit, div, px,
+    AnyElement, ClickEvent, ElementId, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Pixels, Role, SharedString, StatefulInteractiveElement, Styled, TextRun, Window,
+    accesskit, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
 
 use crate::button::{ClickHandler, focus_visible, hover_listener, interaction_state};
+use crate::capsule::{EnvKind, env_swatch};
 use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::Declare;
-use crate::popover::{Tip, lazy};
+use crate::popover::{A11yNode, Tip, lazy};
 use crate::text::{Label, TextSource};
 
 pub enum SegmentContent {
@@ -22,6 +31,9 @@ pub enum SegmentContent {
     /// [`TextSource::Data`], so pseudo-locales leave it alone and the registry check accepts it.
     Verbatim(SharedString),
     Icon(IconName),
+    // ## m2a-t17-dialog
+    /// A rendered Fluent message after the environment's 7 px mark (NOTES cross-cutting #2).
+    Marked(EnvKind, SharedString),
 }
 
 pub struct SegmentItem {
@@ -39,6 +51,8 @@ pub struct Segmented {
     id: ElementId,
     items: Vec<SegmentItem>,
     mono: bool,
+    inert: bool,
+    in_well: bool,
 }
 
 impl Segmented {
@@ -47,6 +61,8 @@ impl Segmented {
             id: id.into(),
             items: Vec::new(),
             mono: false,
+            inert: false,
+            in_well: false,
         }
     }
 
@@ -58,6 +74,21 @@ impl Segmented {
     /// Labels in 11.5 px mono (the language segments).
     pub fn mono(mut self, mono: bool) -> Self {
         self.mono = mono;
+        self
+    }
+
+    /// Ignores the pointer and the keyboard and announces every segment as disabled, with the
+    /// same look (the title bar while a modal layer is open, M2a).
+    pub fn inert(mut self, inert: bool) -> Self {
+        self.inert = inert;
+        self
+    }
+
+    // ## m2a-t17-dialog
+    /// Inside a dialog (NOTES cross-cutting #5): the group sits in a field well (`panel` in dark,
+    /// `ground` in light) and the pressed label is weight 600.
+    pub fn in_well(mut self, in_well: bool) -> Self {
+        self.in_well = in_well;
         self
     }
 }
@@ -86,9 +117,46 @@ impl IntoElement for Segmented {
                 .border_color(c.seam_strong.to_hsla())
                 .rounded(px(t.radii.sm))
                 .overflow_hidden();
-            for (i, item) in self.items.into_iter().enumerate() {
-                let id = ElementId::from((self.id.clone(), format!("{i}")));
-                let (hover, handle) = interaction_state(&id, window, cx);
+            if self.in_well {
+                let well = match theme.mode {
+                    ThemeMode::Dark => c.panel,
+                    ThemeMode::Light => c.ground,
+                };
+                // ## m2a-t21-shots: a form control never runs past its card: the group
+                // shrinks to its row and the segment labels ellipsize (tooltip: the whole
+                // label), long locales included.
+                group = group
+                    .bg(well.to_hsla())
+                    .flex_shrink(1.0)
+                    .min_w(px(0.0))
+                    .max_w_full();
+            }
+            let shrink = self.in_well;
+            let count = self.items.len();
+            let ids: Vec<ElementId> = (0..count)
+                .map(|i| ElementId::from((self.id.clone(), format!("{i}"))))
+                .collect();
+            let states: Vec<_> = ids
+                .iter()
+                .map(|id| interaction_state(id, window, cx))
+                .collect();
+            // One tab stop per group: the pressed segment, or the first.
+            let stop = self.items.iter().position(|i| i.pressed).unwrap_or(0);
+            let handles: Rc<Vec<FocusHandle>> = Rc::new(
+                states
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, handle))| handle.clone().tab_stop(i == stop))
+                    .collect(),
+            );
+            let clicks: Rc<Vec<ClickHandler>> =
+                Rc::new(self.items.iter().map(|i| i.on_click.clone()).collect());
+            for ((i, item), (id, (hover, handle))) in self
+                .items
+                .into_iter()
+                .enumerate()
+                .zip(ids.into_iter().zip(states))
+            {
                 let focused = focus_visible(&handle, window);
                 let hovered = *hover.read(cx);
                 // Harman: hover lifts an unpressed segment's ink to `text`; the fill is only for
@@ -104,9 +172,9 @@ impl IntoElement for Segmented {
                     .a11y_name
                     .clone()
                     .unwrap_or_else(|| match &item.content {
-                        SegmentContent::Label(label) | SegmentContent::Verbatim(label) => {
-                            label.clone()
-                        }
+                        SegmentContent::Label(label)
+                        | SegmentContent::Verbatim(label)
+                        | SegmentContent::Marked(_, label) => label.clone(),
                         SegmentContent::Icon(_) => item.tooltip.clone(),
                     });
                 let source = match item.content {
@@ -120,10 +188,27 @@ impl IntoElement for Segmented {
                         } else {
                             t.type_ramp.body
                         };
-                        if item.pressed && self.mono {
+                        if item.pressed && (self.mono || self.in_well) {
                             style.weight = 600;
                         }
-                        Label::new(text, source, style, ink).into_any_element()
+                        Label::new(text, source, style, ink)
+                            .truncate(shrink)
+                            .into_any_element()
+                    }
+                    SegmentContent::Marked(kind, text) => {
+                        let mut style = t.type_ramp.body;
+                        if item.pressed && self.in_well {
+                            style.weight = 600;
+                        }
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .min_w(px(0.0))
+                            .gap(px(t.spacing.sm))
+                            .child(env_swatch(kind, &theme).flex_none())
+                            .child(Label::new(text, source, style, ink).truncate(shrink))
+                            .into_any_element()
                     }
                     SegmentContent::Icon(name) => Icon::new(name)
                         .size(IconSize::Chrome)
@@ -131,11 +216,17 @@ impl IntoElement for Segmented {
                         .into_any_element(),
                 };
                 let selector = format!("segmented-{}-{i}", self.id);
-                let mut segment = div()
-                    .id(id)
-                    .debug_selector(move || selector)
-                    .declare(Role::Button, name, None)
-                    .aria_toggled(accesskit::Toggled::from(item.pressed))
+                let node_id = ElementId::from((self.id.clone(), format!("{i}-node")));
+                let mut segment = div().id(id).debug_selector(move || selector);
+                if !self.inert {
+                    segment = segment
+                        .declare(Role::Button, name.clone(), None)
+                        .aria_toggled(accesskit::Toggled::from(item.pressed));
+                }
+                if shrink {
+                    segment = segment.min_w(px(SEGMENT_MIN_PX)).flex_shrink(1.0);
+                }
+                let mut segment = segment
                     .flex()
                     .flex_row()
                     .items_center()
@@ -148,24 +239,86 @@ impl IntoElement for Segmented {
                     .gap(px(t.spacing.sm))
                     .when_divider(i)
                     .border_color(c.seam_strong.to_hsla())
-                    .cursor_pointer()
                     .child(content);
                 if item.pressed {
                     segment = segment.bg(pressed_fill.to_hsla());
                 }
+                if self.inert {
+                    group = group.child(
+                        A11yNode::new(node_id, Role::Button, name, false, segment)
+                            .toggled(item.pressed)
+                            .disabled(true),
+                    );
+                    continue;
+                }
+                let segment = segment.cursor_pointer();
                 let on_click = item.on_click;
                 let tooltip = item.tooltip;
-                let segment =
-                    focus_outline(segment.track_focus(&handle).tab_stop(true), &theme, focused)
-                        .on_hover(hover_listener(hover))
-                        .on_click(move |event, window, cx| on_click(event, window, cx))
-                        .tooltip(move |_, cx| Tip::view(tooltip.clone(), cx));
+                let (handles, clicks) = (handles.clone(), clicks.clone());
+                let segment = focus_outline(segment.track_focus(&handles[i]), &theme, focused)
+                    .on_hover(hover_listener(hover))
+                    .on_click(move |event, window, cx| on_click(event, window, cx))
+                    .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                        let stroke = &event.keystroke;
+                        if stroke.modifiers.modified() {
+                            return;
+                        }
+                        let next = match stroke.key.as_str() {
+                            "right" => (i + 1) % count,
+                            "left" => (i + count - 1) % count,
+                            _ => return,
+                        };
+                        cx.stop_propagation();
+                        window.focus(&handles[next], cx);
+                        clicks[next](&ClickEvent::default(), window, cx);
+                    })
+                    .tooltip(move |_, cx| Tip::view(tooltip.clone(), cx));
                 group = group.child(segment);
             }
             group.into_any_element()
         })
         .into_any_element()
     }
+}
+
+// ## m2a-t21-shots
+/// The narrowest a shrinking (in-well) segment gets: its padding and a few glyphs with the
+/// ellipsis. A host whose row cannot give every segment its whole label uses
+/// [`natural_width`] to switch to a Select instead of showing ellipsized segments.
+pub const SEGMENT_MIN_PX: f32 = 44.0;
+
+/// The width an in-well group needs to show every label whole: per segment the 9 px padding on
+/// both sides, the label at weight 600 (as when pressed, the widest), and the 7 px mark with its
+/// gap where `marked`; plus the 1 px dividers and the border.
+pub fn natural_width(
+    labels: &[(SharedString, bool)],
+    theme: &Theme,
+    window: &mut Window,
+) -> Pixels {
+    let t = theme.tokens;
+    let mut style = t.type_ramp.body;
+    style.weight = 600;
+    let font = font_for(&style);
+    let mut total = px(2.0 + labels.len().saturating_sub(1) as f32);
+    for (label, marked) in labels {
+        let run = TextRun {
+            len: label.len(),
+            font: font.clone(),
+            color: t.colors.text.to_hsla(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let width = window
+            .text_system()
+            .shape_line(label.clone(), px(style.size_px), &[run], None)
+            .width;
+        total += width + px(18.0);
+        if *marked {
+            total += px(7.0 + t.spacing.sm);
+        }
+    }
+    total
 }
 
 /// Dividers: every segment but the first draws a left seam.

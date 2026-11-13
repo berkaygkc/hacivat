@@ -13,12 +13,16 @@ pub use gpui::{
 #[rustfmt::skip] pub use gpui::{Action, AnyView, AnyWindowHandle, Axis, ClickEvent, Decorations, EntityId, EventEmitter, FocusOutEvent, Global, KeyBinding, Menu, MenuItem, MouseButton, MouseDownEvent, OsAction, Overflow, Subscription, SystemMenuType, Task, WindowAppearance, WindowControlArea, WindowDecorations};
 // Task 13: Linux client-side decoration resize edges (`Window::start_window_resize`).
 pub use gpui::ResizeEdge;
+// M2a Task 21: a scroll viewport's offset and size (the connection sheet's scroll thumb).
+pub use gpui::ScrollHandle;
 // Widgets: stateful elements (`role`, `aria_label`, `aria_selected`, `on_click`, `on_drag`,
 // `tooltip` live on `StatefulInteractiveElement` at the pin), builders, pointer events.
 #[rustfmt::skip] pub use gpui::{AssetSource, DragMoveEvent, MouseMoveEvent, MouseUpEvent, Stateful, StatefulInteractiveElement, WeakEntity};
-pub use crate::actions::RunCommand;
+// M2a (Task 1): anchored popovers and selects (`deferred(anchored())`), file pickers.
+pub use crate::actions::{InertCommand, RunCommand};
 /// `.when(..)`/`.map(..)` builders (`gpui::prelude::FluentBuilder` at the pin).
 pub use gpui::prelude::FluentBuilder;
+pub use gpui::{Anchor, AnchoredPositionMode, PathPromptOptions, anchored, deferred};
 /// GPUI's test contexts, for downstream tests (`test-support`).
 #[cfg(feature = "test-support")]
 pub use gpui::{HeadlessAppContext, TestAppContext, VisualTestContext};

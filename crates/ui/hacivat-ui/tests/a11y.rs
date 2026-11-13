@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use gpui::{App, Role, TestAppContext, VisualTestContext, point, px};
 use hacivat_ui::button::{Button, ButtonKind};
-use hacivat_ui::dialog::{Dialog, DialogButton, DialogSpec};
+use hacivat_ui::dialog::{Dialog, DialogButton, DialogSize, DialogSpec};
 use hacivat_ui::icon::IconName;
 use hacivat_ui::menu::{MenuItemSpec, PopupMenu};
 use hacivat_ui::panes::{PaneId, TabId, TabSpec, TabStrip};
@@ -93,6 +93,7 @@ fn dialog_and_popup_menu_expose_roles_and_names(cx: &mut TestAppContext) {
             .collect(),
         cancel: 0,
         primary: 1,
+        size: DialogSize::Standard,
     };
     let (host_view, vcx) =
         cx.add_window_view(|window, cx| Wrap::Dialog(Dialog::new(spec, window, cx)));
@@ -165,6 +166,7 @@ fn dialog_is_modal_and_described_by_its_body(cx: &mut TestAppContext) {
         }],
         cancel: 0,
         primary: 0,
+        size: DialogSize::Standard,
     };
     let _ = cx.add_window_view(|window, cx| Wrap::Dialog(Dialog::new(spec, window, cx)));
     let dialog = declared(&a11y_take(), Role::Dialog, "Delete?");
@@ -236,6 +238,11 @@ fn capsule_describes_environment_access_and_path(cx: &mut TestAppContext) {
                 engine: "PostgreSQL 16".into(),
                 access: "read-only".into(),
                 path: "Direct".into(),
+                read_only: true,
+                direct: true,
+                latency: None,
+                unencrypted: None,
+                unsupported: None,
             }))
             .into_any_element()
     });

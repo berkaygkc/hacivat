@@ -47,6 +47,9 @@ pub struct Button {
     focus: Option<FocusHandle>,
     access_key: Option<AccessKey>,
     fixed_width: Option<f32>,
+    inert: bool,
+    // ## m2a-t17-dialog
+    on_raised: bool,
 }
 
 impl Button {
@@ -62,6 +65,8 @@ impl Button {
             focus: None,
             access_key: None,
             fixed_width: None,
+            inert: false,
+            on_raised: false,
         }
     }
 
@@ -83,6 +88,13 @@ impl Button {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Ignores the pointer and the keyboard and is announced as disabled, but keeps its look:
+    /// a control a modal layer has made unavailable without dimming it (the title bar, M2a).
+    pub fn inert(mut self, inert: bool) -> Self {
+        self.inert = inert;
         self
     }
 
@@ -115,6 +127,14 @@ impl Button {
     /// Shows the access key in the label (Windows and Linux dialogs).
     pub fn access_key(mut self, key: AccessKey) -> Self {
         self.access_key = Some(key);
+        self
+    }
+
+    // ## m2a-t17-dialog
+    /// The button sits on a raised surface (a dialog): its key hint is `text-2`, never text-3
+    /// (DESIGN.md Raised Ink Rule; the mock's `.dlg` maps text-3 to text-2).
+    pub fn on_raised(mut self, on_raised: bool) -> Self {
+        self.on_raised = on_raised;
         self
     }
 }
@@ -288,13 +308,16 @@ impl Button {
             focus,
             access_key,
             fixed_width,
+            inert,
+            on_raised,
         } = self;
 
         // Hover and focus state live with the element across frames.
         let (hover, keyed_focus) = interaction_state(&id, window, cx);
         let handle = focus.unwrap_or(keyed_focus);
         let focused = !disabled && focus_visible(&handle, window);
-        let hot = !disabled && (*hover.read(cx) || (kind == ButtonKind::Danger && focused));
+        let hot =
+            !disabled && !inert && (*hover.read(cx) || (kind == ButtonKind::Danger && focused));
         let look = look(kind, disabled, hot, &theme);
 
         let mut style = t.type_ramp.control;
@@ -337,7 +360,14 @@ impl Button {
             body = body.child(key_label(&label, access_key, style, look.ink));
         }
         if let Some(hint) = key_hint {
-            let dim = t.colors.text_3.to_hsla();
+            // A primary's hint takes its own ink (on-accent) on every surface: text-3 on its
+            // blue fill is unreadable (m2a-t21-shots). On a raised surface the others use
+            // text-2 (never text-3).
+            let dim = match (on_raised, kind) {
+                (_, ButtonKind::Primary) => look.ink,
+                (true, _) => t.colors.text_2.to_hsla(),
+                (false, _) => t.colors.text_3.to_hsla(),
+            };
             body = body.child(Label::new(
                 hint,
                 TextSource::Shortcut,
@@ -346,7 +376,7 @@ impl Button {
             ));
         }
 
-        if disabled {
+        if disabled || inert {
             return A11yNode::new(node_id, Role::Button, label, false, body)
                 .disabled(true)
                 .into_any_element();

@@ -1,0 +1,9 @@
+# L026 fixture: every class is reachable, and each has both English messages.
+
+[[class]]
+id = "auth.invalid"
+reachable = true
+
+[[class]]
+id = "network.dns"
+reachable = true

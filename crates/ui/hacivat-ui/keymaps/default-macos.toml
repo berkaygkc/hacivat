@@ -46,3 +46,80 @@ context = "Workspace"
 chord = "cmd-q"
 command = "app.quit"
 context = "Workspace"
+
+## m2a-t01-connections
+# Connections (M2a, R20). The commands are registered by Tasks 17 and 18; a binding whose
+# command nobody registered does nothing.
+
+[[binding]]
+chord = "cmd-n"
+command = "connection.new"
+context = "Workspace"
+
+[[binding]]
+chord = "cmd-shift-v"
+command = "connection.paste_url"
+context = "Workspace"
+
+[[binding]]
+chord = "enter"
+command = "connection.toggle_connect"
+context = "Explorer"
+
+[[binding]]
+chord = "cmd-e"
+command = "connection.edit"
+context = "Explorer"
+
+[[binding]]
+chord = "cmd-d"
+command = "connection.duplicate"
+context = "Explorer"
+
+[[binding]]
+chord = "cmd-shift-c"
+command = "connection.copy_url"
+context = "Explorer"
+
+[[binding]]
+chord = "backspace"
+command = "connection.delete"
+context = "Explorer"
+
+[[binding]]
+chord = "delete"
+command = "connection.delete"
+context = "Explorer"
+
+[[binding]]
+chord = "shift-f10"
+command = "connection.context_menu"
+context = "Explorer"
+
+[[binding]]
+chord = "cmd-t"
+command = "connection_dialog.test"
+context = "ConnectionDialog"
+
+[[binding]]
+chord = "cmd-s"
+command = "connection_dialog.save"
+context = "ConnectionDialog"
+
+[[binding]]
+chord = "cmd-enter"
+command = "connection_dialog.save_and_connect"
+context = "ConnectionDialog"
+
+[[binding]]
+chord = "cmd-shift-c"
+command = "connection_dialog.copy_url"
+context = "ConnectionDialog"
+
+## m2a-t18-explorer
+# The newest sticky notification takes the focus (its actions are then keyboard-reachable).
+
+[[binding]]
+chord = "f6"
+command = "workspace.focus_notification"
+context = "Workspace"

@@ -1,0 +1,9 @@
+# L026 fixture: auth.invalid is reachable, and English has its title but no body.
+
+[[class]]
+id = "auth.invalid"
+reachable = true
+
+[[class]]
+id = "network.dns"
+reachable = true

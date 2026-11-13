@@ -1,0 +1,24 @@
+[package]
+name = "hacivat-driver-pg"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hacivat-proto.workspace = true
+hacivat-net.workspace = true
+hacivat-driver.workspace = true
+tokio-postgres.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "io-util", "time"] }
+futures.workspace = true
+secrecy.workspace = true
+
+[dev-dependencies]
+hacivat-testkit.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -447,3 +447,62 @@ fn press_enter(vcx: &mut VisualTestContext) {
     });
     vcx.run_until_parked();
 }
+
+// ## m2a-t06-form-primitives
+
+/// The focus handle the window holds now.
+fn focused_handle(vcx: &mut VisualTestContext) -> Option<gpui::FocusHandle> {
+    vcx.update(|window, cx| window.focused(cx))
+}
+
+#[gpui::test]
+fn the_title_bar_theme_segments_rove_with_the_arrow_keys(cx: &mut TestAppContext) {
+    let (vcx, paths) = settings_tab(cx);
+    let dark = vcx.cx.read(|cx| Theme::get(cx).mode) == ThemeMode::Dark;
+    let (pressed, other) = if dark { (0, 1) } else { (1, 0) };
+    // A press (no release) focuses a segment without clicking it: learn both handles.
+    focus_segment(vcx, &format!("segmented-theme-switch-{other}"));
+    let other_handle = focused_handle(vcx).expect("the other segment takes focus");
+    focus_segment(vcx, &format!("segmented-theme-switch-{pressed}"));
+    let pressed_handle = focused_handle(vcx).expect("the pressed segment takes focus");
+    assert_ne!(pressed_handle, other_handle);
+
+    // Tab (GPUI's tab order) reaches the pressed segment and never the other one.
+    let stops = vcx.update(|window, cx| {
+        window.blur(cx);
+        let mut seen = Vec::new();
+        for _ in 0..256 {
+            window.focus_next(cx);
+            match window.focused(cx) {
+                Some(h) if seen.contains(&h) => break,
+                Some(h) => seen.push(h),
+                None => break,
+            }
+        }
+        seen
+    });
+    assert!(stops.contains(&pressed_handle), "the group is a tab stop");
+    assert!(!stops.contains(&other_handle), "one tab stop per group");
+
+    // Tab to it, then → moves to the other segment and presses it.
+    vcx.update(|window, cx| {
+        window.blur(cx);
+        for _ in 0..256 {
+            window.focus_next(cx);
+            if window.focused(cx).as_ref() == Some(&pressed_handle) {
+                break;
+            }
+        }
+    });
+    assert_eq!(focused_handle(vcx), Some(pressed_handle));
+    vcx.simulate_keystrokes("right");
+    vcx.run_until_parked();
+    let (mode, value) = if dark {
+        (ThemeMode::Light, "light")
+    } else {
+        (ThemeMode::Dark, "dark")
+    };
+    assert_eq!(vcx.cx.read(|cx| Theme::get(cx).mode), mode);
+    assert_eq!(focused_handle(vcx), Some(other_handle));
+    assert!(read(paths.settings_toml()).contains(&format!("theme = \"{value}\"")));
+}
