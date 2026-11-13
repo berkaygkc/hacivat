@@ -497,15 +497,16 @@ impl ConnectionManager {
         self.shared.events.subscribe()
     }
 
-    /// Sends `event` to every `events()` receiver (the senders inside the manager, and tests).
-    #[doc(hidden)]
+    /// Sends `event` to every `events()` receiver: a test seam (fix round 1, M5), only with
+    /// the `test-support` feature, so no production caller can inject profile changes.
+    #[cfg(feature = "test-support")]
     pub fn publish_event(&self, event: ConnectionEvent) {
         // No receiver is not an error: nobody listens yet.
         let _ = self.shared.events.send(event);
     }
 
-    /// How many `events()` receivers are open.
-    #[doc(hidden)]
+    /// How many `events()` receivers are open (test seam, feature `test-support`).
+    #[cfg(feature = "test-support")]
     pub fn event_subscribers(&self) -> usize {
         self.shared.events.receiver_count()
     }

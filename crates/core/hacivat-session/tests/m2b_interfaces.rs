@@ -174,7 +174,92 @@ async fn read_only_stub_fails_closed() {
     assert!(f.executed().is_empty(), "nothing ran unguarded");
 }
 
-/// `cargo metadata` for the workspace, as JSON text.
+/// Fix round 1 (I1): `ConnectRequest.read_only` (profile OR session) is what the driver gets,
+/// on the request and on a SQLite file endpoint, even for a read-write profile.
+#[tokio::test]
+async fn a_read_only_session_reaches_the_driver_read_only() {
+    use hacivat_driver::fake::FakeEndpoint;
+    use hacivat_driver::{DriverRegistry, EngineCatalog};
+    use hacivat_proto::Department;
+    use hacivat_secrets::{CredentialFiles, MemoryBackend, SecretStore};
+    use hacivat_session::pipeline::{
+        ApprovedRoots, ConnectDeps, ConnectRequest, Interaction, Progress, Purpose, connect,
+    };
+    use hacivat_session::profile::ProfileEndpoint;
+    use tokio_util::sync::CancellationToken;
+
+    let fake = Arc::new(FakeDriver::new(DbmsKind::Sqlite));
+    let mut drivers = DriverRegistry::new();
+    drivers.register(fake.clone());
+    let known_hosts = hacivat_net::ssh::KnownHosts::load(
+        Vec::new(),
+        PathBuf::from("/nonexistent/hacivat/known_hosts"),
+    );
+    let deps = ConnectDeps {
+        drivers: Arc::new(drivers),
+        catalog: EngineCatalog::embedded(),
+        secrets: Arc::new(SecretStore::new(Some(Arc::new(MemoryBackend::new())))),
+        files: CredentialFiles {
+            pgpass: None,
+            pg_service: None,
+        },
+        transport_wrap: None,
+        extra_steps: Vec::new(),
+        approved_roots: ApprovedRoots::for_user(),
+        timeout_override: None,
+        tunnels: hacivat_net::ssh::TunnelManager::new(known_hosts.clone(), Default::default()),
+        known_hosts,
+    };
+    for (session_read_only, want) in [(true, true), (false, false)] {
+        let profile = Profile {
+            name: "ro-session".into(),
+            engine: DbmsKind::Sqlite,
+            endpoint: ProfileEndpoint::File {
+                path: PathBuf::from(":memory:"),
+                create_if_missing: false,
+            },
+            read_only: false,
+            ..Profile::default()
+        };
+        let req = ConnectRequest {
+            profile: Arc::new(profile),
+            draft_password: None,
+            purpose: Purpose::Main,
+            department: Department::Console,
+            prior_rejections: 0,
+            read_only: session_read_only,
+            draft_ssh: Vec::new(),
+            overlay_secrets: None,
+            plaintext_consent: false,
+        };
+        let progress = tokio::sync::watch::Sender::new(Progress {
+            trail: Vec::new(),
+            current: None,
+            started: std::time::Instant::now(),
+        });
+        let live = connect(
+            &deps,
+            req,
+            Interaction::Headless,
+            CancellationToken::new(),
+            progress,
+        )
+        .await
+        .expect("the fake connects");
+        let sent = fake.last_request().expect("a request");
+        assert_eq!(sent.read_only, want, "request, session {session_read_only}");
+        assert!(
+            matches!(sent.endpoint, Some(FakeEndpoint::File { read_only, .. }) if read_only == want),
+            "endpoint, session {session_read_only}: {:?}",
+            sent.endpoint
+        );
+        live.close().await;
+    }
+}
+
+/// `cargo metadata` for the workspace, as JSON text. (The brief's pseudo-code uses the
+/// `cargo_metadata` crate; the manifest table adds no such dev-dependency, so this reads the
+/// JSON text.)
 fn cargo_metadata() -> String {
     let out = std::process::Command::new(env!("CARGO"))
         .args(["metadata", "--format-version", "1", "--offline"])

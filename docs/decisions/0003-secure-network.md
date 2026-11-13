@@ -70,6 +70,21 @@ the vault, the session overlay, the keyring CI and the deferrals.
   user's own key; no remote party can time repeated private-key operations on attacker-chosen
   input. Ed25519 keys are preferred in the copy. The `deny` CI job checks licences, bans and
   sources only (unchanged from M2a), so this is a documented acceptance, not a CI pass (Q45).
+- **russh 0.65.1 and its pre-release dependencies (fix round 1, M8).**
+  - russh 0.65.1 (published 2026-11-03) pins exact pre-releases: `rsa =0.10.0-rc.18`,
+    `ssh-key =0.7.0-rc.11` and `pkcs1 =0.8.0-rc.4`. They are pinned with `=`, so
+    `Cargo.lock` cannot drift to another release candidate.
+  - `ring` covers only part of russh. The graph also brings the RustCrypto 0.5/0.14
+    generation: aes, ctr, chacha20, curve25519-dalek 5, ed25519-dalek 3, p256/p384/p521,
+    ml-kem, scrypt and bcrypt-pbkdf, next to the digest-0.10 crates Hacivat uses itself.
+    None of it is aws-lc or OpenSSL; every licence is on the allow-list.
+  - **Rejected: russh 0.54.x**, the last line on stable `rsa ^0.9` / `pkcs1 ^0.7`. It
+    depends on an unofficial fork (`internal-russh-forked-ssh-key =0.6.11`),
+    `libcrux-ml-kem ^0.0.3` and `rand 0.8`/`getrandom 0.2`, and it is over a year behind on
+    SSH fixes. By 0.60 russh already pins `rsa` release candidates.
+  - Downgrading buys nothing on the advisory: RUSTSEC-2023-0071 affects `rsa` 0.9 equally.
+  - Revisit when russh moves to stable `rsa` 0.10 / `ssh-key` 0.7. A bump is a reviewed
+    change: `cargo update -p russh --precise <v>`, listed in the commit body.
 - **Other crypto crates** (all on the cargo-deny allow-list): `x509-parser` 0.18 (certificate
   review), `sha2` 0.10 (pins, fingerprints, the RFC 5929 end-point hash), `pkcs8` 0.10.2 with
   `encryption`, `pkcs5`, `pem`, `std` and `sha1-insecure` (encrypted client keys, including

@@ -11,7 +11,9 @@
 //! are read again from the manager instead (Q42).
 
 use hacivat_session::ConnectionEvent;
-use hacivat_ui_core::gpui_surface::{App, Global};
+use hacivat_ui_core::gpui_surface::App;
+#[cfg(feature = "test-support")]
+use hacivat_ui_core::gpui_surface::Global;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 
@@ -25,10 +27,12 @@ enum Relayed {
     Lagged,
 }
 
-/// How many events reached a handler (for tests).
+/// How many events reached a handler (test seam, feature `test-support`).
+#[cfg(feature = "test-support")]
 #[derive(Default)]
 struct HandledEvents(usize);
 
+#[cfg(feature = "test-support")]
 impl Global for HandledEvents {}
 
 /// Starts the relay and the foreground task (from `connections::boot`, after the model is set).
@@ -52,6 +56,7 @@ pub fn install(cx: &mut App) {
             }
         }
     });
+    #[cfg(feature = "test-support")]
     cx.set_global(HandledEvents::default());
     cx.spawn(async move |cx| {
         while let Some(item) = incoming.recv().await {
@@ -88,11 +93,14 @@ fn handle(item: Relayed, cx: &mut App) {
             .detach();
         }
     }
-    cx.default_global::<HandledEvents>().0 += 1;
+    #[cfg(feature = "test-support")]
+    {
+        cx.default_global::<HandledEvents>().0 += 1;
+    }
 }
 
-/// How many connection events reached their handler since boot.
-#[doc(hidden)]
+/// How many connection events reached their handler since boot (test seam, fix round 1 M5).
+#[cfg(feature = "test-support")]
 pub fn handled_events(cx: &App) -> usize {
     cx.try_global::<HandledEvents>().map_or(0, |h| h.0)
 }

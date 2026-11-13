@@ -25,7 +25,9 @@ pub struct ConnectionsBoot {
     pub files: CredentialFiles,
     // ## m2b-t01-interfaces
     /// The known-host stores: Hacivat's `known_hosts` in the data folder and the user's
-    /// OpenSSH files (read only). Loading does no I/O (Q42).
+    /// OpenSSH files (read only): `~/.ssh/known_hosts{,2}` in `load`, files under the temp
+    /// root in `for_tests`, so a test never reads the developer's `~/.ssh` (fix round 1, M6).
+    /// Replaceable before boot. Loading does no I/O (Q42).
     pub known_hosts: Arc<KnownHosts>,
 }
 
@@ -40,6 +42,7 @@ impl ConnectionsBoot {
             default_drivers(),
             secret_backend_from(choice.as_deref()),
             CredentialFiles::from_env(),
+            openssh_known_hosts(),
         )
     }
 
@@ -53,6 +56,7 @@ impl ConnectionsBoot {
                 pgpass: None,
                 pg_service: None,
             },
+            vec![paths.config.join("ssh").join("known_hosts")],
         )
     }
 }
@@ -71,6 +75,7 @@ fn boot_with(
     drivers: DriverRegistry,
     backend: Arc<dyn SecretBackend>,
     files: CredentialFiles,
+    openssh_known_hosts: Vec<std::path::PathBuf>,
 ) -> ConnectionsBoot {
     let runtime = CoreRuntime::new().expect("the core runtime starts");
     let (store, loaded) = ProfileStore::open(paths.connections_toml());
@@ -81,7 +86,7 @@ fn boot_with(
         secrets: Arc::new(SecretStore::new(Some(backend))),
         drivers: Arc::new(drivers),
         files,
-        known_hosts: KnownHosts::load(openssh_known_hosts(), paths.data.join("known_hosts")),
+        known_hosts: KnownHosts::load(openssh_known_hosts, paths.data.join("known_hosts")),
     }
 }
 

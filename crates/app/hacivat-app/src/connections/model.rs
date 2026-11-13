@@ -25,7 +25,9 @@ use std::time::Duration;
 use hacivat_l10n::{Count, NoArgs, Text, ids};
 use hacivat_net::ssh::{HopSecrets, KnownHosts, TunnelManager};
 use hacivat_proto::{ProfileId, TagSource};
-use hacivat_secrets::{Retention, SecretError, SecretKey, SecretSlot, SecretStore, Stored};
+use hacivat_secrets::{
+    MAX_SSH_HOP, Retention, SecretError, SecretKey, SecretSlot, SecretStore, Stored,
+};
 use hacivat_session::pipeline::ProfileChange;
 use hacivat_session::profile::{
     Profile, ProfileDiag, ProfileDraft, ProfileStore, StoreError, TransportSpec, duplicate_name,
@@ -310,6 +312,12 @@ impl ConnectionsModel {
         copy.name = duplicate_name(&m.profiles[at].name, &names);
         copy.env_source = TagSource::User;
         let (new_id, name, retention) = (copy.id, copy.name.clone(), copy.retention);
+        // ## m2b-t01-interfaces (fix round 1, I2): the SSH slots keep their own retention.
+        let ssh_retention = copy.ssh_retention;
+        let ssh_labels: Vec<SecretSlot> = ssh_slot_values(&copy, Vec::new())
+            .into_iter()
+            .map(|(slot, _)| slot)
+            .collect();
         let secrets = m.secrets.clone();
 
         let m = cx.global_mut::<ConnectionsModel>();
@@ -317,9 +325,17 @@ impl ConnectionsModel {
         m.selected = Some(new_id);
         let label = name.clone();
         let done = m.writer.run(m.snapshot(), move || {
-            let copied = secrets.copy_all(id, new_id, retention);
-            if copied.is_ok() && retention == Retention::Forever {
-                for slot in DRAFT_SLOTS {
+            let not_ssh = |slot: SecretSlot| !is_ssh_slot(slot);
+            let copied = secrets
+                .copy_slots(id, new_id, retention, &not_ssh)
+                .and_then(|()| secrets.copy_slots(id, new_id, ssh_retention, &is_ssh_slot));
+            if copied.is_ok() {
+                let forever = |r: Retention| r == Retention::Forever;
+                let slots = DRAFT_SLOTS
+                    .into_iter()
+                    .filter(|_| forever(retention))
+                    .chain(ssh_labels.into_iter().filter(|_| forever(ssh_retention)));
+                for slot in slots {
                     label_entry(
                         &secrets,
                         SecretKey {
@@ -442,9 +458,18 @@ fn label_entry(secrets: &SecretStore, key: SecretKey, name: &str) {
 }
 
 // ## m2b-t01-interfaces
+/// Whether `slot` holds an SSH secret (kept under `Profile::ssh_retention`).
+fn is_ssh_slot(slot: SecretSlot) -> bool {
+    matches!(
+        slot,
+        SecretSlot::SshPassword { .. } | SecretSlot::SshPassphrase { .. }
+    )
+}
+
 /// The SSH slots of `profile`'s hops with the draft's typed `secrets` (Q23): a password and a
 /// passphrase slot per hop of the tunnel (and per typed entry), `None` where nothing was typed,
-/// so an edit that changes `ssh_retention` still moves every hop's stored secrets.
+/// so an edit that changes `ssh_retention` still moves every hop's stored secrets. At most
+/// `MAX_SSH_HOP + 1` hops.
 fn ssh_slot_values(
     profile: &Profile,
     secrets: Vec<HopSecrets>,
@@ -454,8 +479,10 @@ fn ssh_slot_values(
         _ => 0,
     };
     let mut typed = secrets.into_iter();
+    // Fix round 1 (M3): never beyond `MAX_SSH_HOP`, the last hop `delete_all` reaches.
     (0..hops.max(typed.len()))
         .map_while(|i| u8::try_from(i).ok())
+        .take_while(|hop| *hop <= MAX_SSH_HOP)
         .flat_map(|hop| {
             let (password, passphrase) = typed
                 .next()

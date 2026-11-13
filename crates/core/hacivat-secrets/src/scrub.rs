@@ -225,8 +225,10 @@ fn scrub_word(body: &str, out: &mut String) -> Open {
     Open::Nothing
 }
 
-/// The option name at the end of `s` (`(password` → `password`, `"pwd` → `pwd`).
+/// The option name at the end of `s` (`(password` → `password`, `"pwd` → `pwd`); closing
+/// quotes after it are skipped (`"password"` → `password`; fix round 1, M12).
 fn key_of(s: &str) -> &str {
+    let s = s.trim_end_matches(['"', '\'', '`']);
     let start = s
         .char_indices()
         .rev()
@@ -681,6 +683,22 @@ mod tests {
             let scrubbed = scrub_message(&message);
             assert_eq!(scrubbed, format!("{lead} {want}"), "{tail:?}");
             assert!(!scrubbed.contains("s3"), "{scrubbed}");
+        }
+        // M12 (fix round 1): a quoted key loses its value too.
+        for (tail, want) in [
+            (
+                "\"password\"=\"s3cret\" user=u",
+                "\"password\"=<removed> user=u",
+            ),
+            ("'pwd'='s3cret' user=u", "'pwd'=<removed> user=u"),
+        ] {
+            let message = format!("{lead} {tail}");
+            assert_eq!(scrub_url(&message), "", "the fallback runs for {tail:?}");
+            assert_eq!(
+                scrub_message(&message),
+                format!("{lead} {want}"),
+                "{tail:?}"
+            );
         }
         // A secret-looking word without `=` after it stays (`key` here is prose).
         let prose = format!("{lead} the key is fine");

@@ -3214,6 +3214,7 @@ dependencies = [
  "anyhow",
  "futures",
  "gpui",
+ "hacivat-app",
  "hacivat-driver",
  "hacivat-l10n",
  "hacivat-net",

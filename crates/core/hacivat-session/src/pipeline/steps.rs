@@ -750,7 +750,8 @@ fn request(
         ) => Endpoint::File {
             path: path.clone(),
             create_if_missing: *create_if_missing,
-            read_only: p.read_only,
+            // Fix round 1 (I1): the profile OR the session (`ConnectRequest::read_only`).
+            read_only: st.read_only,
         },
         (_, Some(e)) => e.clone(),
         // The transport step always runs before for a network endpoint.
@@ -770,7 +771,7 @@ fn request(
         password: auth.and_then(|a| a.password.clone()),
         database,
         application_name: p.application_name.clone(),
-        read_only: p.read_only,
+        read_only: st.read_only,
         options: st.options.clone(),
         connect_timeout: st.clock.remaining(),
         events,

@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# M2b (Task 1, fix round 1): test seams (`ConnectionManager::{publish_event,
+# event_subscribers}`), enabled only by test dev-dependencies, never by a product build.
+test-support = []
+
 [dependencies]
 hacivat-proto.workspace = true
 hacivat-net.workspace = true

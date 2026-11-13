@@ -15,7 +15,6 @@ use super::{HostKey, HostKeyCheck, KnownSource};
 /// The known-host stores.
 #[derive(Debug)]
 pub struct KnownHosts {
-    #[allow(dead_code, reason = "Task 4 reads the OpenSSH files")]
     openssh_files: Vec<PathBuf>,
     hacivat_file: PathBuf,
 }
@@ -56,6 +55,11 @@ impl KnownHosts {
     pub fn hacivat_path(&self) -> &Path {
         &self.hacivat_file
     }
+
+    /// The OpenSSH files the stores read (never write).
+    pub fn openssh_files(&self) -> &[PathBuf] {
+        &self.openssh_files
+    }
 }
 
 fn unsupported() -> io::Error {
@@ -71,6 +75,7 @@ mod tests {
         let missing = PathBuf::from("/nonexistent/hacivat/known_hosts");
         let known = KnownHosts::load(vec![PathBuf::from("/nonexistent/.ssh")], missing.clone());
         assert_eq!(known.hacivat_path(), missing);
+        assert_eq!(known.openssh_files(), [PathBuf::from("/nonexistent/.ssh")]);
         let key = HostKey {
             algorithm: "ssh-ed25519".into(),
             sha256: [1; 32],

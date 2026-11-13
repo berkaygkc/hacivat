@@ -17,7 +17,7 @@ use hacivat_app::connections::{dialog, events};
 use hacivat_net::ssh::{HopSecrets, HopSpec, HostKey, KbdPrompt, KbdRequest, SshAuth, SshSpec};
 use hacivat_net::{CertReview, ChainEntry, ChainRole};
 use hacivat_proto::{ErrClass, ProfileId};
-use hacivat_secrets::{ExposeSecret, SecretKey, SecretSlot, SecretString};
+use hacivat_secrets::{ExposeSecret, MAX_SSH_HOP, Retention, SecretKey, SecretSlot, SecretString};
 use hacivat_session::pipeline::{
     Answer, ConnectError, ErrArgs, Interaction, Phase, ProfileChange, Question, SecretPrompt,
 };
@@ -297,4 +297,119 @@ fn save_stores_typed_ssh_secrets_by_hop(cx: &mut TestAppContext) {
         Some("pp0")
     );
     assert_eq!(stored(vcx, id, SecretSlot::SshPassword { hop: 1 }), None);
+}
+
+// ## fix round 1
+
+/// What the model's secret store keeps for `slot` of `profile` under `retention`.
+fn kept(
+    vcx: &VisualTestContext,
+    profile: ProfileId,
+    slot: SecretSlot,
+    retention: Retention,
+) -> Option<String> {
+    let store = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().secrets().clone());
+    store
+        .get(&SecretKey { profile, slot }, retention)
+        .expect("the store answers")
+        .map(|s| s.expose_secret().to_string())
+}
+
+/// I2 and M4: the DB password and the SSH secrets keep their own retentions, on save and on
+/// duplicate; an `UntilRestart` SSH secret never reaches the keyring.
+#[gpui::test]
+fn ssh_secrets_keep_ssh_retention_on_save_and_duplicate(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    let mut draft = ssh_draft_with_secrets("pw0", "pp0");
+    draft.profile.retention = Retention::Forever;
+    draft.profile.ssh_retention = Retention::UntilRestart;
+    draft.profile.auth = hacivat_secrets::AuthProviderId::Password;
+    draft.password = Some(SecretString::from("db0"));
+    let id = save_draft(vcx, draft);
+    let ssh = SecretSlot::SshPassword { hop: 0 };
+    settle_until(vcx, WAIT, || {
+        kept(vcx, id, ssh, Retention::UntilRestart).is_some()
+            && stored(vcx, id, SecretSlot::DbPassword).is_some()
+    });
+    assert_eq!(
+        stored(vcx, id, ssh),
+        None,
+        "UntilRestart never reaches the keyring"
+    );
+    assert_eq!(
+        stored(vcx, id, SecretSlot::DbPassword).as_deref(),
+        Some("db0")
+    );
+
+    let task = vcx.cx.update(|cx| ConnectionsModel::duplicate(cx, id));
+    let copy = wait_task(vcx, task).expect("the duplicate is saved");
+    assert_eq!(
+        stored(vcx, copy, SecretSlot::DbPassword).as_deref(),
+        Some("db0")
+    );
+    assert_eq!(
+        kept(vcx, copy, ssh, Retention::UntilRestart).as_deref(),
+        Some("pw0")
+    );
+    assert_eq!(
+        kept(
+            vcx,
+            copy,
+            SecretSlot::SshPassphrase { hop: 0 },
+            Retention::UntilRestart
+        )
+        .as_deref(),
+        Some("pp0")
+    );
+    assert_eq!(
+        stored(vcx, copy, ssh),
+        None,
+        "the copy's SSH secret stays out of the keyring"
+    );
+    assert_eq!(
+        stored(vcx, copy, SecretSlot::SshPassphrase { hop: 0 }),
+        None
+    );
+}
+
+/// M3: no SSH slot is written beyond `MAX_SSH_HOP`, the last hop `delete_all` reaches.
+#[gpui::test]
+fn ssh_secret_slots_stop_at_max_ssh_hop(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    let mut draft = ssh_draft_with_secrets("pw0", "pp0");
+    draft.ssh_secrets = (0..=usize::from(MAX_SSH_HOP) + 1)
+        .map(|_| HopSecrets {
+            password: Some(SecretString::from("pwN")),
+            passphrase: None,
+        })
+        .collect();
+    let id = save_draft(vcx, draft);
+    let last = SecretSlot::SshPassword { hop: MAX_SSH_HOP };
+    settle_until(vcx, WAIT, || stored(vcx, id, last).is_some());
+    assert_eq!(
+        stored(
+            vcx,
+            id,
+            SecretSlot::SshPassword {
+                hop: MAX_SSH_HOP + 1
+            }
+        ),
+        None
+    );
+}
+
+/// M6: a test shell's known-hosts stores read nothing outside its temp root.
+#[gpui::test]
+fn test_shells_never_read_the_real_ssh_folder(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    let root = paths(vcx).config;
+    let known = vcx
+        .cx
+        .read(|cx| cx.global::<ConnectionsModel>().known_hosts());
+    assert!(!known.openssh_files().is_empty());
+    for file in known.openssh_files() {
+        assert!(file.starts_with(&root), "{}", file.display());
+    }
 }

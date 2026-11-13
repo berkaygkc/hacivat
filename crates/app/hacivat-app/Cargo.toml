@@ -10,6 +10,9 @@ scene-check = ["hacivat-ui-core/scene-check"]
 pseudo = ["hacivat-l10n/pseudo"]
 # The screenshot harness (Task 18); M2a shots drive connections through `FakeDriver`.
 shots = ["scene-check", "pseudo", "hacivat-ui-core/test-support", "hacivat-driver/fake"]
+# M2b (Task 1, fix round 1, M5): test seams (`events::handled_events`, the session crate's
+# `publish_event`), enabled only by this crate's own dev-dependency on itself below.
+test-support = ["hacivat-session/test-support"]
 
 [dependencies]
 hacivat-ui-core.workspace = true
@@ -40,6 +43,8 @@ hacivat-ui-core = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 # M2b (Task 1, Q5): the in-process SSH server for the app's SSH tests.
 hacivat-testkit = { workspace = true, features = ["ssh"] }
+# M2b (Task 1, fix round 1, M5): the app's own test seams, for its tests only.
+hacivat-app = { workspace = true, features = ["test-support"] }
 
 # The screenshot harness owns `main` (Task 18): on macOS the platform text system can only be
 # created on the main thread, and libtest runs every test on a spawned thread.
