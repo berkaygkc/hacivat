@@ -607,3 +607,88 @@ the vault, the session overlay, the keyring CI and the deferrals.
 - **Cancel keys stay encrypted (B23).** A cancel request travels over the session's own
   transport with its TLS configuration; a TLS session's cancel is never sent in plaintext,
   even when the server answers its `SSLRequest` with `N`.
+
+## m2b-t14 — pipeline policies
+
+- **The insecure-auth policy (B8, Q20).** `insecure_auth_for(profile, class, mode)` is `Allow`
+  for a loopback address or a Unix socket, for `Disable`, and under `Auto` for a profile that
+  remembered the public-plaintext answer (`tls.allow_public_plaintext`); otherwise
+  `RefuseUnlessVerified`, and the drivers then allow an insecure password method only after a
+  `Full`, `CaOnly` or `Pinned` handshake (outcome-based for both engines, never mode-based).
+  The one-gesture consent (`Answer::ConnectPlaintext`, or the session overlay's) sends `Allow`
+  for the retry it answers. Through SSH the class is `ssh_address_class` of the database host,
+  so a private name behind a bastion is still guarded (B11). Cost, as B8 records: an md5-only
+  private server without TLS under `Auto` needs an explicit `Disable`. The Docker matrix's pg13
+  (md5) connects on loopback, the allowed path; it is not a refusal case.
+- **Questions never loop.** `prompts::ask_and_retry` retries the driver connect at most once
+  per question kind (certificate, plaintext) per connect. A pin that still fails, or a second
+  plaintext refusal, returns the error; a scripted UI that answers `Pin` forever gets one
+  question.
+- **The certificate question (B6).** Asked only for `tls.untrusted` with an unknown issuer and a
+  chain that parses: a pin never extends a certificate's dates (B5), so an expired or
+  not-yet-valid one is never offered a pin (the review is still attached). `Pin` adds
+  `ProfileChange::AddPin` for `pin_endpoint(tls host, port)` and rebuilds the TLS parameters
+  with it; `ImportCa(path)` adds `SetCaFile`, approves the path (`ApprovedRoots::add`) and
+  rebuilds with it as the CA file. `ImportCa` is the file picker's answer (Task 19); the
+  pipeline still refuses a relative path or a share/device path (`local_path`) before it
+  opens, approves or records anything. `tls.hostname` is never offered a pin. The interim
+  "Encrypt without verifying" (M2a R3) is offered by no class any more.
+- **Pins are hard stops (B5, Q13, Q26).** `tls.pin_changed` is never asked; its error carries
+  the review with both fingerprints. The pipeline never builds `ProfileChange::ReplacePin`
+  (only `cert_dialog::review`, Task 19). A pinned endpoint never reaches plaintext: the TLS
+  parameters keep `plaintext_allowed = false` even with `allow_public_plaintext`, a
+  `tls.not_supported_by_server` there is never asked and offers only Edit connection, and
+  neither the overlay's consent nor any answer applies. `Disable` with a pin only logs a warning
+  (T3 ruling M2: Disable is the user's choice; the dialog shows the flag).
+- **The public-plaintext question (B7).** Only under `Auto`, after a first attempt that stopped
+  at the TLS step with no credential sent (P9). `ConnectPlaintext { remember }` retries with
+  plaintext allowed and `InsecureAuth::Allow`, plus `AllowPublicPlaintext` with `remember`;
+  `UseSsh` returns `[ConnectThroughSsh, EditConnection]`. The overlay's one-gesture consent
+  (Q17) retries without asking, headless included.
+- **`auth.insecure_method` carries the certificate when TLS was up (Q20)**, so "Review
+  certificate" can pin and the next handshake is `Pinned`. Without a recorded chain (no TLS)
+  the fixes narrow to Edit connection (Task 2 ruling 10).
+- **One verifier record per handshake.** `TlsParams::fork` (hacivat-net) gives a copy empty
+  `failure`, `presented` and `outcome` slots and a configuration whose recording verifier
+  writes into them, with the same checks (mode verifier, pin, dates) and the same client
+  certificate; it holds no secret. Every driver attempt and every PostgreSQL cancel uses a
+  fork, so no handshake reads another's chain or outcome (T3 carry-in, T10 review M1).
+- **SSH transport (B11, Q44).** The tunnel is acquired outside the connect clock: the hops'
+  own timeouts bound the network and prompt time never counts. The database host is never
+  resolved locally (Resolve is skipped; it goes into the `direct-tcpip` request) and is the TLS
+  server name. `Endpoint::Network.direct` is `None`, so MySQL uses its forwarder. A Test never
+  shares a tunnel (`share = false`). Hop key files are opened through
+  `hacivat_net::paths::local_path` (the path Validate checked), and a private key file that
+  the group or others can access is refused like OpenSSH's `sshkey_perm_ok` (the hop's own key
+  fails the connect; an imported `IdentityFile` is skipped). Without `getuid` (no `unsafe`) the
+  check applies to every file, not only the user's own: it can only refuse more. The trusted
+  host keys (`TunnelLease::trusted_keys`) and `KnownHosts::skipped_lines` are logged
+  (fingerprints and counts only).
+- **Secrets order and storage (R8, Q17, Q23).** Per hop: the session overlay, then the dialog's
+  draft (Test), then the store with `ssh_retention`; the database password: the draft, then the
+  overlay, then the store. Store reads run on the blocking pool, outside the deadline, and only
+  for the slots a hop can use. What the user typed (the database password, an SSH password or
+  key passphrase at a hop prompt, a TLS key passphrase) is stored only after the whole connect
+  succeeded, never by a Test or a probe, never when the connect was cancelled, and never a
+  keyboard-interactive answer. A failed connect's typed SSH secret is dropped: a tunnel left in
+  its idle grace authenticates the next connect without a prompt, so that secret is asked for
+  (and stored) the next time a tunnel is opened.
+- **The vault on the connect path (B13, Q33, Q38).** A locked vault is unlocked before a read
+  (interactive, up to 3 master passwords, once per connect); cancelled, wrong three times or
+  headless, the connect goes on as if nothing were stored (the password is then asked for, or a
+  headless connect fails with `needs_interaction`). Before the first `Forever` secret is
+  stored, a vault that does not exist yet is offered (`Question::CreateVault`, created on the
+  blocking pool); declining keeps the secret until restart. A locked, read-only or damaged
+  vault on a `Forever` put falls back to `UntilRestart` (Task 6), never a hard error.
+- **What the overlay gets (Q17).** `LiveConnection.secrets_used` holds the database password
+  of a password profile, the hop secrets that authenticated (`TunnelLease::take_secrets`; for a
+  lease that joined an open chain, the overlay's own, unchanged) and the TLS key passphrase in
+  use; `plaintext_consent` the consent; `profile_changes` every change (also on a later
+  failure, in `ConnectError.profile_changes`). The overlay keeps them in memory only (Task 15).
+- **Headless never asks.** An unknown host key under `Ask`, a password hop without a password,
+  a keyboard-interactive hop, an untrusted pinnable certificate, the public-plaintext question
+  and an encrypted TLS key without a passphrase all fail with `needs_interaction`, so a
+  reconnect becomes Lost with Retry (Q17).
+- **Validate and the TLS key passphrase (T3 carry-in).** The pipeline's Validate does not
+  report an encrypted client key (its TLS step opens it); `validate_with_passphrase` gives the
+  dialog the same check with its passphrase field.

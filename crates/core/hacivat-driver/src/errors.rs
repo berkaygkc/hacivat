@@ -117,10 +117,54 @@ pub fn classify_tls_setup(err: &TlsSetupError) -> Classified {
 }
 
 // ## m2b-t01-interfaces
-/// Classifies an SSH tunnel failure (Task 14). Task 1 stub: every SSH failure is `internal`
-/// until Task 14 maps them to the `ssh.*` classes.
-pub fn classify_ssh(_err: &hacivat_net::ssh::SshError) -> Classified {
-    classified(ErrClass::Internal)
+// ## m2b-t14-pipeline
+/// Classifies an SSH tunnel failure (Task 14, B11, B24):
+///
+/// | `SshError` | class |
+/// |---|---|
+/// | `HostKeyUnknown` | `ssh.host_key_unknown` |
+/// | `HostKeyChanged` | `ssh.host_key_changed` |
+/// | `HostKeyRevoked` | `ssh.host_key_revoked` |
+/// | `Auth` | `ssh.auth` |
+/// | `AgentUnavailable` | `ssh.agent_unavailable` |
+/// | `ChannelOpen` | `ssh.channel_open` |
+/// | `Unreachable { net }` | the class `net` maps to as a transport failure |
+/// | `Timeout` | `network.timeout` |
+/// | `Cancelled` | `cancelled` |
+/// | `Protocol` | `network.reset` |
+///
+/// The hop (`ErrArgs.hop`, `hop_host`) is the pipeline's to fill in.
+pub fn classify_ssh(err: &hacivat_net::ssh::SshError) -> Classified {
+    use hacivat_net::ssh::SshError as S;
+    let class = match err {
+        S::HostKeyUnknown { .. } => ErrClass::SshHostKeyUnknown,
+        S::HostKeyChanged { .. } => ErrClass::SshHostKeyChanged,
+        S::HostKeyRevoked { .. } => ErrClass::SshHostKeyRevoked,
+        S::Auth { .. } => ErrClass::SshAuth,
+        S::AgentUnavailable { .. } => ErrClass::SshAgentUnavailable,
+        S::ChannelOpen { .. } => ErrClass::SshChannelOpen,
+        S::Unreachable { net, .. } => net_class(net),
+        S::Timeout { .. } => ErrClass::NetworkTimeout,
+        S::Cancelled => ErrClass::Cancelled,
+        S::Protocol { .. } => ErrClass::NetworkReset,
+    };
+    classified(class)
+}
+
+/// The class of a resolver or socket failure toward an SSH hop: the transport rules of
+/// [`classify`] (an I/O kind they do not know is `internal`, as for a database host).
+fn net_class(net: &hacivat_net::NetError) -> ErrClass {
+    use hacivat_net::NetError as N;
+    match net {
+        N::Dns { .. } => ErrClass::NetworkDns,
+        N::Refused => ErrClass::NetworkRefused,
+        N::Timeout => ErrClass::NetworkTimeout,
+        N::Unreachable => ErrClass::NetworkUnreachable,
+        N::Reset => ErrClass::NetworkReset,
+        N::Io { kind, .. } => {
+            by_transport(Phase::Transport, &RawErrorKind::Io(*kind)).unwrap_or(ErrClass::Internal)
+        }
+    }
 }
 
 /// The quick fixes of `class`, in button order, from `errors.toml`.

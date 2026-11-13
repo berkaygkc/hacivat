@@ -26,3 +26,5 @@ pub use tls::{
     cert_review, cert_sha256, fingerprint_lines, install_crypto_provider, pin_endpoint,
     tls_server_end_point,
 };
+// ## m2b-t14-pipeline
+pub use tls::VerifierSeed;

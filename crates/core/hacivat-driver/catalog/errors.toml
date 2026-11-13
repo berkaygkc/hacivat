@@ -52,17 +52,18 @@ id = "tls.handshake"
 reachable = true
 fixes = ["edit_connection"]
 
-# R3 (PO-away): until M2b's certificate review, the interim fix sets the profile's TLS mode to
-# Require and connects.
+# ## m2b-t14-pipeline: M2a's interim "Encrypt without verifying" (R3) is gone (B6): an untrusted
+# certificate is reviewed (pin it, or import its CA); a name mismatch on a trusted chain offers
+# no pin.
 [[class]]
 id = "tls.untrusted"
 reachable = true
-fixes = ["encrypt_without_verifying", "edit_connection"]
+fixes = ["review_certificate", "import_ca", "edit_connection"]
 
 [[class]]
 id = "tls.hostname"
 reachable = true
-fixes = ["encrypt_without_verifying", "edit_connection"]
+fixes = ["edit_connection"]
 
 [[class]]
 id = "tls.protocol"
@@ -74,40 +75,48 @@ id = "tls.client_cert_required"
 reachable = true
 fixes = ["edit_connection"]
 
+# ## m2b-t14-pipeline: Auto toward a public host asks before plaintext (B7); a pinned endpoint
+# narrows the fixes to Edit connection in the pipeline (Q13).
 [[class]]
 id = "tls.not_supported_by_server"
 reachable = true
-fixes = ["edit_connection"]
+fixes = ["connect_through_ssh", "edit_connection"]
 
-# M2b Task 1: reached once Task 3 (pins) and Task 14 (the pipeline) land.
+# ## m2b-t14-pipeline: reached since Task 3 (pins) and Task 14 (the pipeline).
 [[class]]
 id = "tls.pin_changed"
-reachable = false
+reachable = true
+fixes = ["review_certificate"]
 
 [[class]]
 id = "ssh.host_key_unknown"
-reachable = false
+reachable = true
+fixes = ["try_again", "edit_connection"]
 
 [[class]]
 id = "ssh.host_key_changed"
-reachable = false
+reachable = true
+fixes = ["review_host_key"]
 
 [[class]]
 id = "ssh.auth"
-reachable = false
+reachable = true
+fixes = ["try_again", "edit_connection"]
 
 [[class]]
 id = "ssh.channel_open"
-reachable = false
+reachable = true
+fixes = ["try_again", "edit_connection"]
 
 [[class]]
 id = "ssh.agent_unavailable"
-reachable = false
+reachable = true
+fixes = ["try_again", "edit_connection"]
 
-# M2b Task 1: reached once Task 4 (known hosts) and Task 14 land.
 [[class]]
 id = "ssh.host_key_revoked"
-reachable = false
+reachable = true
+fixes = ["try_again", "edit_connection"]
 
 [[class]]
 id = "auth.invalid"
@@ -137,10 +146,12 @@ fixes = ["edit_connection"]
 id = "auth.mfa_required"
 reachable = false
 
-# M2b Task 1: reached once the drivers' insecure-auth guard (Tasks 10, 13) and Task 14 land.
+# ## m2b-t14-pipeline: reached since the drivers' insecure-auth guard (Tasks 10, 13) and Task 14.
+# Without a presented certificate (no TLS) the pipeline narrows the fixes to Edit connection.
 [[class]]
 id = "auth.insecure_method"
-reachable = false
+reachable = true
+fixes = ["review_certificate", "edit_connection"]
 
 [[class]]
 id = "authz.database"

@@ -34,7 +34,7 @@ use hacivat_net::{
     AddressClass, CertPin, CertReview, CleanupGuard, StreamFactory, TlsMode, TlsSummary,
     TlsVerified,
 };
-use hacivat_proto::{AccessLabel, DbmsKind, Department, ErrClass, ErrFamily, FixId};
+use hacivat_proto::{AccessLabel, DbmsKind, Department, ErrClass, ErrFamily, FixId, ProfileId};
 use hacivat_secrets::{
     AuthProviderId, CredentialFiles, Retention, SecretKey, SecretSlot, SecretSource, SecretStore,
 };
@@ -49,10 +49,14 @@ pub use hacivat_driver::errors::Phase;
 pub use interaction::{Answer, Interaction, Question, SecretPrompt, UiPort};
 pub use steps::{ConnectStep, StepCx};
 pub use trail::{Progress, StepOutcome, StepTrace, TrailStep};
-pub use validate::{ApprovedRoots, IssueCode, ValidationIssue, validate, validate_with};
+pub use validate::{
+    ApprovedRoots, IssueCode, ValidationIssue, validate, validate_with, validate_with_passphrase,
+};
 
 pub(crate) use steps::{CLOSE_BUDGET, error, short_version};
 use steps::{Deadline, MAX_REJECTIONS, StepState, builtin_steps, close_bounded};
+// ## m2b-t14-pipeline
+use ssh_step::SshState;
 use trail::Recorder;
 
 use crate::profile::{Profile, ProfileEndpoint};
@@ -121,11 +125,27 @@ pub struct HostKeyMismatch {
     pub source: KnownSource,
 }
 
-/// Whether the drivers may send a password by an insecure method for `profile` over an
-/// address of `class` with TLS `mode` (B8, Q20, Q23). Task 1 stub: always refuses unless the
-/// channel is verified (the strictest answer) until Task 14.
-pub fn insecure_auth_for(_profile: &Profile, _class: AddressClass, _mode: TlsMode) -> InsecureAuth {
-    InsecureAuth::RefuseUnlessVerified
+// ## m2b-t14-pipeline
+/// Whether the drivers may send a password by an insecure method (PostgreSQL cleartext or MD5,
+/// MySQL's `caching_sha2_password` full authentication) for `profile` over an address of `class`
+/// with TLS `mode` (B8, Q20, Q23). `Allow` when any of these holds:
+/// - the address is loopback or a Unix socket (the password never crosses a network);
+/// - the mode is `Disable` (the user's explicit choice of plaintext);
+/// - under `Auto`, the user consented to plaintext toward a public host and remembered it
+///   (`tls.allow_public_plaintext`, B7). The one-gesture consent is the pipeline's (it sends
+///   `Allow` for the retry it answers).
+///
+/// Otherwise `RefuseUnlessVerified`: the drivers refuse unless the TLS outcome is `Full`,
+/// `CaOnly` or `Pinned` (outcome-based for both engines, Q20). Through SSH, `class` is
+/// `ssh_address_class` of the database host (B11: the guard still applies).
+pub fn insecure_auth_for(profile: &Profile, class: AddressClass, mode: TlsMode) -> InsecureAuth {
+    let local = matches!(class, AddressClass::Loopback | AddressClass::UnixSocket);
+    let consented = mode == TlsMode::Auto && profile.tls.allow_public_plaintext;
+    if local || mode == TlsMode::Disable || consented {
+        InsecureAuth::Allow
+    } else {
+        InsecureAuth::RefuseUnlessVerified
+    }
 }
 
 /// A failed connect, classified (HV-CONN-03).
@@ -294,6 +314,24 @@ pub struct ConnectDeps {
 /// - A password that worked (prompted, or the draft) is stored with the profile's retention
 ///   only after success, never by a Test, and never once the connect was cancelled (R8).
 /// - On failure or cancel the connection is closed and the cleanup guards run LIFO.
+///
+/// M2b (Task 14):
+/// - **SSH** (order 40, `ssh_step`): a `TransportSpec::SshTunnel` profile acquires its tunnel
+///   outside the connect clock (prompt time never counts, Q44), never resolves the database
+///   host locally, and shows `Ssh` then `Connect`. Prompted SSH secrets are stored only after
+///   the whole connect succeeded, with `ssh_retention`.
+/// - **TLS** (order 50): the database host is the TLS host, an encrypted client key is opened
+///   with the overlay's, the stored or a typed passphrase (B25), and the profile's pins apply.
+/// - **Questions** (order 70, `prompts::ask_and_retry`, at most one retry per kind): the
+///   certificate review on an unknown issuer (pin, import CA), the public-plaintext question
+///   under `Auto` (never for a pinned endpoint, Q13), and the errors' certificate for
+///   `tls.pin_changed` and `auth.insecure_method` (Q20). Headless never asks: it fails with
+///   `needs_interaction` where it would have.
+/// - **Secrets**: the session overlay (`ConnectRequest.overlay_secrets`) comes before the store,
+///   a locked vault is unlocked first (up to 3 master passwords, Q33), and a vault that does
+///   not exist yet is offered before the first `Forever` secret is stored (Q38). What worked is
+///   returned in `LiveConnection.secrets_used`, the plaintext consent in `plaintext_consent`,
+///   and the profile changes in `profile_changes` (also on a later failure, in the error).
 pub async fn connect(
     deps: &ConnectDeps,
     req: ConnectRequest,
@@ -326,9 +364,9 @@ async fn run(
         department: _,
         prior_rejections,
         read_only,
-        // ## m2b-t01-interfaces: Task 14 uses the SSH drafts and the overlay.
-        draft_ssh: _,
-        overlay_secrets: _,
+        // ## m2b-t14-pipeline: the SSH drafts (Test, Q23) and the session overlay (Q17).
+        draft_ssh,
+        overlay_secrets,
         plaintext_consent,
     } = req;
     // A connect is read-only if the profile or the session is (never weaker than the profile).
@@ -337,8 +375,14 @@ async fn run(
     let port = effective_port(&profile, deps.catalog);
     let user = effective_user(&profile);
 
-    let (mut issues, options) =
-        validate::checked(&profile, deps.catalog, &deps.approved_roots.list());
+    // ## m2b-t14-pipeline: an encrypted TLS client key is not a problem here: the TLS step
+    // opens it with the overlay's, the stored or a typed passphrase (T3 carry-in, B25).
+    let (mut issues, options) = validate::checked(
+        &profile,
+        deps.catalog,
+        &deps.approved_roots.list(),
+        validate::KeyCheck::Deferred,
+    );
     if purpose == Purpose::Test {
         issues.retain(|i| i.code != IssueCode::NameMissing);
     }
@@ -366,6 +410,18 @@ async fn run(
     }
 
     let file_based = matches!(profile.endpoint, ProfileEndpoint::File { .. });
+    // ## m2b-t14-pipeline
+    let tls_host = match &profile.endpoint {
+        ProfileEndpoint::Server { host, .. } => host.trim().to_string(),
+        _ => "localhost".to_string(),
+    };
+    if profile
+        .tls
+        .disable_ignores_pin(&tls_host, port.unwrap_or_default())
+    {
+        // T3 ruling M2: Disable is the user's choice and wins; the dialog shows the flag.
+        tracing::warn!("TLS is disabled for an endpoint that has a pin: the pin is not checked");
+    }
     let trail = Recorder::new(&plan(&profile), progress);
     let timeout = deps
         .timeout_override
@@ -404,6 +460,24 @@ async fn run(
         rejections: prior_rejections,
         read_only,
         access_warnings: Vec::new(),
+        // ## m2b-t14-pipeline
+        purpose,
+        timeout,
+        approved_roots: deps.approved_roots.clone(),
+        tunnels: deps.tunnels.clone(),
+        known_hosts: deps.known_hosts.clone(),
+        overlay: overlay_secrets.unwrap_or_default(),
+        draft_ssh,
+        tls_host,
+        tls_settings: profile.tls.clone(),
+        tls_passphrase: None,
+        tls_passphrase_typed: false,
+        attempt_tls: None,
+        consent: plaintext_consent,
+        changes: Vec::new(),
+        retries: Default::default(),
+        vault_tried: false,
+        ssh: SshState::direct(),
     };
     let mut cx = StepCx::new(profile.clone(), cancel.clone(), state);
 
@@ -462,8 +536,20 @@ async fn run(
         let e = error(ErrClass::Internal, Phase::PostConnect);
         return Err(fail(e, cx, guards, started).await);
     };
-    let StepCx { state: st, .. } = cx;
-    remember_password(&profile, purpose, &st.secrets, st.auth.as_ref(), &cancel).await;
+    let StepCx { state: mut st, .. } = cx;
+    // ## m2b-t14-pipeline: every secret a successful Main connect was given by the user is
+    // stored now, never before (R8), with the vault created first when needed (Q38).
+    let todo = typed_secrets(&profile, &st);
+    remember_secrets(profile.id, st.ix.clone(), st.secrets.clone(), todo, &cancel).await;
+    let secrets_used = SessionSecrets {
+        db: st
+            .auth
+            .as_ref()
+            .filter(|_| profile.auth == AuthProviderId::Password)
+            .and_then(|a| a.password.clone()),
+        hops: std::mem::take(&mut st.ssh.hops),
+        tls_key_passphrase: st.tls_passphrase.take(),
+    };
     let trail = st.trail.snapshot();
     tracing::debug!(
         trail = ?trail.iter().map(|t| t.step.id()).collect::<Vec<_>>(),
@@ -483,13 +569,13 @@ async fn run(
         user: st.current_user,
         access: st.access,
         trail,
-        profile_changes: Vec::new(),
-        transport: None,
-        path: PathKind::Direct,
-        via: None,
+        profile_changes: st.changes,
+        transport: st.ssh.transport,
+        path: st.ssh.path,
+        via: st.ssh.via,
         access_warnings: st.access_warnings,
-        secrets_used: SessionSecrets::default(),
-        plaintext_consent,
+        secrets_used,
+        plaintext_consent: st.consent,
         conn,
         guards,
         forwarded: st.forwarded,
@@ -513,6 +599,7 @@ async fn fail(
         server,
         rejections,
         auth,
+        changes,
         ..
     } = state;
     if let Some(conn) = conn {
@@ -529,7 +616,15 @@ async fn fail(
         trail.fail(failure_step(&e, &profile))
     };
     let user = current_user.or(user);
+    // ## m2b-t14-pipeline: the SSH step names the hop; the changes made before the failure
+    // still apply (a pin, a CA file, the plaintext consent).
+    let (hop, hop_host) = (e.args.hop, e.args.hop_host.take());
     e.args = args(&profile, port, user, server.as_ref());
+    e.args.hop = hop;
+    e.args.hop_host = hop_host;
+    let mut changes = changes;
+    changes.append(&mut e.profile_changes);
+    e.profile_changes = changes;
     if e.fixes.is_empty() {
         e.fixes = fixes_for(e.class);
     }
@@ -544,6 +639,11 @@ fn failure_step(e: &ConnectError, p: &Profile) -> Option<TrailStep> {
     if e.phase == Phase::CredentialFiles {
         return Some(TrailStep::PgPass);
     }
+    // ## m2b-t14-pipeline: through SSH, a transport failure lands where it happened: the
+    // tunnel (`Ssh`) or its first channel (`Connect`).
+    if e.phase == Phase::Transport && steps::is_ssh(p) {
+        return None;
+    }
     if matches!(e.class, ErrClass::Cancelled | ErrClass::Internal) {
         // A prompt is part of signing in.
         return (e.phase == Phase::Auth).then_some(TrailStep::SignIn);
@@ -556,7 +656,9 @@ fn failure_step(e: &ConnectError, p: &Profile) -> Option<TrailStep> {
     }
     Some(match e.class.family() {
         ErrFamily::Network if e.class == ErrClass::NetworkDns => TrailStep::Resolve,
-        ErrFamily::Network | ErrFamily::Ssh | ErrFamily::Karagoz => TrailStep::Connect,
+        ErrFamily::Network | ErrFamily::Karagoz => TrailStep::Connect,
+        // ## m2b-t14-pipeline
+        ErrFamily::Ssh => TrailStep::Ssh,
         ErrFamily::Tls => TrailStep::Tls,
         ErrFamily::Auth
         | ErrFamily::Authz
@@ -577,7 +679,12 @@ fn plan(p: &Profile) -> Vec<TrailStep> {
             if p.auth == AuthProviderId::PgPass {
                 steps.push(TrailStep::PgPass);
             }
-            steps.extend([TrailStep::Resolve, TrailStep::Connect]);
+            // ## m2b-t14-pipeline: through SSH the tunnel replaces the local lookup (B11).
+            if steps::is_ssh(p) {
+                steps.extend([TrailStep::Ssh, TrailStep::Connect]);
+            } else {
+                steps.extend([TrailStep::Resolve, TrailStep::Connect]);
+            }
             if matches!(endpoint, ProfileEndpoint::Server { .. })
                 && p.tls.mode != hacivat_net::TlsMode::Disable
             {
@@ -640,47 +747,99 @@ fn args(
     }
 }
 
-/// Stores the password a successful Main connect used when it came from the prompt or the
-/// dialog's draft, with the profile's retention (R8). Never for a Test or a probe, never for
-/// `.pgpass` or a stored password, and never for a cancelled connect: `cancel` is checked
-/// right before the write, and a secret written while a cancel raced it is removed again
-/// (M2a final review M2). A Delete cancels the connect before it queues its own `delete_all`,
-/// so either the put lands first and the Delete removes it, or the put sees the cancel here
-/// and removes it itself: no `Forever` entry outlives its profile. On the blocking pool.
-async fn remember_password(
-    p: &Profile,
-    purpose: Purpose,
-    secrets: &Arc<SecretStore>,
-    auth: Option<&hacivat_secrets::AuthMaterial>,
+/// Stores what a successful Main connect was given by the user, with the profile's retentions
+/// (R8): the password from the prompt or the dialog's draft (`retention`), the SSH passwords
+/// and passphrases typed at a hop prompt (`ssh_retention`, by hop), and a typed TLS key
+/// passphrase (`retention`). Never for a Test or a probe, never for `.pgpass`, a stored, the
+/// overlay's or a draft SSH secret, never a keyboard-interactive answer, and never for a
+/// cancelled connect: `cancel` is checked right before each write, and a secret written while
+/// a cancel raced it is removed again (M2a final review M2). A Delete cancels the connect before
+/// it queues its own `delete_all`, so either the put lands first and the Delete removes it, or
+/// the put sees the cancel here and removes it itself: no `Forever` entry outlives its profile.
+/// Before the first `Forever` secret, a vault that does not exist yet is offered (Q38). On the
+/// blocking pool.
+async fn remember_secrets(
+    profile: ProfileId,
+    ix: Interaction,
+    secrets: Arc<SecretStore>,
+    todo: Vec<(SecretSlot, SecretString, Retention)>,
     cancel: &CancellationToken,
 ) {
-    let Some(auth) = auth else { return };
-    let worth_storing = purpose == Purpose::Main
-        && p.auth == AuthProviderId::Password
-        && p.retention != Retention::Never
-        && matches!(auth.source, SecretSource::Prompt | SecretSource::Draft);
-    let Some(password) = auth.password.clone().filter(|_| worth_storing) else {
+    if todo.is_empty() || cancel.is_cancelled() {
         return;
-    };
-    let key = SecretKey {
-        profile: p.id,
-        slot: SecretSlot::DbPassword,
-    };
-    let retention = p.retention;
+    }
+    if todo.iter().any(|(_, _, r)| *r == Retention::Forever) {
+        prompts::ensure_vault(&ix, &secrets).await;
+    }
+    for (slot, secret, retention) in todo {
+        let key = SecretKey { profile, slot };
+        store_one(&secrets, key, secret, retention, cancel).await;
+    }
+}
+
+/// What [`remember_secrets`] stores: the user's secrets of a Main connect, by slot.
+fn typed_secrets(p: &Profile, st: &StepState) -> Vec<(SecretSlot, SecretString, Retention)> {
+    if st.purpose != Purpose::Main {
+        return Vec::new();
+    }
+    let mut todo: Vec<(SecretSlot, SecretString, Retention)> = Vec::new();
+    if let Some(auth) = st.auth.as_ref()
+        && p.auth == AuthProviderId::Password
+        && matches!(auth.source, SecretSource::Prompt | SecretSource::Draft)
+        && let Some(password) = auth.password.clone()
+    {
+        todo.push((SecretSlot::DbPassword, password, p.retention));
+    }
+    for (hop, slot) in &st.ssh.typed {
+        let used = st.ssh.hops.get(usize::from(*hop));
+        let (slot, secret) = match slot {
+            prompts::SshSlot::Password => (
+                SecretSlot::SshPassword { hop: *hop },
+                used.and_then(|h| h.password.clone()),
+            ),
+            prompts::SshSlot::Passphrase => (
+                SecretSlot::SshPassphrase { hop: *hop },
+                used.and_then(|h| h.passphrase.clone()),
+            ),
+        };
+        // `MAX_SSH_HOP` bounds the slots `delete_all` can reach (T1 fix round 1, M3).
+        if let Some(secret) = secret
+            && *hop <= hacivat_secrets::MAX_SSH_HOP
+        {
+            todo.push((slot, secret, p.ssh_retention));
+        }
+    }
+    if st.tls_passphrase_typed
+        && let Some(passphrase) = st.tls_passphrase.clone()
+    {
+        todo.push((SecretSlot::TlsKeyPassphrase, passphrase, p.retention));
+    }
+    todo.retain(|(_, _, retention)| *retention != Retention::Never);
+    todo
+}
+
+/// Stores one secret, undoing it when the connect was cancelled while it was written.
+async fn store_one(
+    secrets: &Arc<SecretStore>,
+    key: SecretKey,
+    secret: SecretString,
+    retention: Retention,
+    cancel: &CancellationToken,
+) {
     if cancel.is_cancelled() {
         return;
     }
     let store = secrets.clone();
-    let stored = tokio::task::spawn_blocking(move || store.put(&key, password, retention)).await;
+    let stored = tokio::task::spawn_blocking(move || store.put(&key, secret, retention)).await;
     if !matches!(stored, Ok(Ok(_))) {
-        tracing::warn!("the password that worked could not be stored");
+        tracing::warn!("a secret that worked could not be stored");
     }
     if cancel.is_cancelled() {
         // The connect was cancelled (a disconnect, a Delete) while the write ran: undo it.
         let store = secrets.clone();
         let removed = tokio::task::spawn_blocking(move || store.remove(&key, retention)).await;
         if !matches!(removed, Ok(Ok(()))) {
-            tracing::warn!("a password stored by a cancelled connect could not be removed");
+            tracing::warn!("a secret stored by a cancelled connect could not be removed");
         }
     }
 }

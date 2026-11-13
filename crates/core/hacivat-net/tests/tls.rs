@@ -912,3 +912,82 @@ async fn a_pinned_endpoint_is_checked_and_the_chain_is_recorded() {
     assert!(params.presented.lock().unwrap().is_some());
     assert!(!params.plaintext_allowed);
 }
+
+// ## m2b-t14-pipeline
+
+/// One handshake over `params`' own configuration (its verifier records into its slots).
+async fn handshake_over(srv: &Srv, params: &TlsParams) -> Result<u8, ()> {
+    let tcp = TcpStream::connect(srv.addr).await.unwrap();
+    let connector = TlsConnector::from(params.config.clone());
+    let mut tls = connector
+        .connect(params.server_name.clone(), tcp)
+        .await
+        .map_err(|_| ())?;
+    let mut status = [0u8; 1];
+    tls.read_exact(&mut status).await.map_err(|_| ())?;
+    Ok(status[0])
+}
+
+/// `TlsParams::fork` (T10 review M1, T3 carry-in): a fork starts with empty slots, and its
+/// handshakes record into its own slots only, with the same checks (here a pin) as the
+/// original. The original's record is untouched by the fork's handshake.
+#[tokio::test]
+async fn a_fork_records_its_own_handshake_with_the_same_checks() {
+    install_crypto_provider();
+    let srv = rcgen_server("localhost").await;
+    let (ok, first) = handshake_params(&srv, settings(TlsMode::Require)).await;
+    assert!(ok.is_ok());
+    let leaf = first.presented.lock().unwrap().clone().expect("a chain");
+    let pinned = TlsSettings {
+        pins: vec![CertPin {
+            endpoint: pin_endpoint("localhost", srv.addr.port()),
+            sha256: cert_sha256(&leaf.0[0]),
+        }],
+        ..settings(TlsMode::Require)
+    };
+    let original = build_tls_params(&pinned, "localhost", srv.addr.port(), Loopback, None)
+        .unwrap()
+        .unwrap();
+    assert!(handshake_over(&srv, &original).await.is_ok());
+    assert_eq!(*original.outcome.lock().unwrap(), Some(TlsVerified::Pinned));
+
+    let fork = original.fork();
+    assert!(
+        fork.presented.lock().unwrap().is_none(),
+        "a fork starts empty"
+    );
+    assert!(fork.outcome.lock().unwrap().is_none());
+    assert!(fork.failure.lock().unwrap().is_none());
+    assert_eq!(fork.settings, original.settings);
+    assert_eq!(fork.plaintext_allowed, original.plaintext_allowed);
+    // The original's slots are cleared by hand; the fork's handshake must not refill them.
+    *original.outcome.lock().unwrap() = None;
+    *original.presented.lock().unwrap() = None;
+    assert!(
+        handshake_over(&srv, &fork).await.is_ok(),
+        "the pin still passes"
+    );
+    assert_eq!(*fork.outcome.lock().unwrap(), Some(TlsVerified::Pinned));
+    assert!(fork.presented.lock().unwrap().is_some());
+    assert!(
+        original.outcome.lock().unwrap().is_none(),
+        "never the original's slot"
+    );
+    assert!(original.presented.lock().unwrap().is_none());
+
+    // A fork of a wrongly pinned endpoint still refuses, into its own failure slot.
+    let wrong = TlsSettings {
+        pins: vec![CertPin {
+            endpoint: pin_endpoint("localhost", srv.addr.port()),
+            sha256: [0; 32],
+        }],
+        ..settings(TlsMode::Require)
+    };
+    let original = build_tls_params(&wrong, "localhost", srv.addr.port(), Loopback, None)
+        .unwrap()
+        .unwrap();
+    let fork = original.fork();
+    assert!(handshake_over(&srv, &fork).await.is_err());
+    assert_eq!(*fork.failure.lock().unwrap(), Some(TlsFailure::PinMismatch));
+    assert!(original.failure.lock().unwrap().is_none());
+}

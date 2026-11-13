@@ -155,9 +155,14 @@ fn fixes_and_retryable() {
             FixId::ConnectAnyway
         ]
     );
+    // m2b-t14-pipeline: the certificate review replaces M2a's interim fix (B6).
     assert_eq!(
         fixes_for(TlsUntrusted),
-        [FixId::EncryptWithoutVerifying, FixId::EditConnection]
+        [
+            FixId::ReviewCertificate,
+            FixId::ImportCa,
+            FixId::EditConnection
+        ]
     );
     // Controller ruling B (T10 review) overrides the brief's `[]`.
     assert_eq!(fixes_for(ConfigInvalid), [FixId::EditConnection]);
@@ -170,7 +175,8 @@ fn registry_lists_every_class_once() {
         registry_ids(),
         ErrClass::ALL.iter().map(|c| c.id()).collect::<Vec<_>>()
     );
-    assert_eq!(reachable_classes().len(), 26);
+    // m2b-t14-pipeline: + tls.pin_changed, six ssh.* classes and auth.insecure_method.
+    assert_eq!(reachable_classes().len(), 34);
 }
 
 // --- The rest of the tables ---
@@ -411,10 +417,8 @@ fn the_normative_fix_table() {
             NetworkIpv6Unavailable,
             &[FixId::TryAgain, FixId::EditConnection],
         ),
-        (
-            TlsHostname,
-            &[FixId::EncryptWithoutVerifying, FixId::EditConnection],
-        ),
+        // m2b-t14-pipeline: nothing offers "Encrypt without verifying" any more (B6).
+        (TlsHostname, &[FixId::EditConnection]),
         (
             ConfigUnknownDatabase,
             &[FixId::UseDatabase, FixId::EditConnection],
@@ -430,7 +434,8 @@ fn the_normative_fix_table() {
         (Cancelled, &[FixId::EditConnection]),
         (Internal, &[FixId::EditConnection]),
         (KaragozForbidden, &[FixId::EditConnection]),
-        (SshHostKeyChanged, &[FixId::EditConnection]),
+        // m2b-t14-pipeline
+        (SshHostKeyChanged, &[FixId::ReviewHostKey]),
     ] {
         assert_eq!(fixes_for(class), fixes, "{class:?}");
     }
@@ -454,10 +459,19 @@ fn reachable_classes_are_the_m2a_set() {
             "tls.protocol",
             "tls.client_cert_required",
             "tls.not_supported_by_server",
+            // m2b-t14-pipeline
+            "tls.pin_changed",
+            "ssh.host_key_unknown",
+            "ssh.host_key_changed",
+            "ssh.auth",
+            "ssh.channel_open",
+            "ssh.agent_unavailable",
+            "ssh.host_key_revoked",
             "auth.invalid",
             "auth.expired",
             "auth.locked",
             "auth.method_unsupported",
+            "auth.insecure_method",
             "authz.database",
             "config.invalid",
             "config.unknown_database",
@@ -566,5 +580,127 @@ fn tls_setup_errors_are_configuration_problems() {
         assert_eq!(c.class, ConfigInvalid, "{e:?}");
         assert!(!c.retryable);
         assert_eq!(c.fixes, [FixId::EditConnection]);
+    }
+}
+
+// ## m2b-t14-pipeline
+
+/// `classify_ssh` (Task 14 table, B11, B24): every `SshError` to its class, the network ones
+/// as a database host's transport failure would be.
+#[test]
+fn ssh_errors_classify_by_the_task_14_table() {
+    use hacivat_driver::errors::classify_ssh;
+    use hacivat_net::NetError;
+    use hacivat_net::ssh::{HostKey, KnownSource, SshError};
+    let key = HostKey {
+        algorithm: "ssh-ed25519".into(),
+        sha256: [7; 32],
+        openssh: String::new(),
+    };
+    let unreachable = |net| SshError::Unreachable { hop: 0, net };
+    for (e, class) in [
+        (
+            SshError::HostKeyUnknown {
+                hop: 0,
+                host: "b".into(),
+                port: 22,
+                key: key.clone(),
+            },
+            SshHostKeyUnknown,
+        ),
+        (
+            SshError::HostKeyChanged {
+                hop: 1,
+                host: "b".into(),
+                port: 22,
+                old: key.clone(),
+                new: key.clone(),
+                source: KnownSource::Hacivat,
+            },
+            SshHostKeyChanged,
+        ),
+        (
+            SshError::HostKeyRevoked {
+                hop: 0,
+                host: "b".into(),
+                port: 22,
+            },
+            SshHostKeyRevoked,
+        ),
+        (
+            SshError::Auth {
+                hop: 0,
+                user: "u".into(),
+                host: "b".into(),
+            },
+            SshAuth,
+        ),
+        (SshError::AgentUnavailable { hop: 0 }, SshAgentUnavailable),
+        (
+            SshError::ChannelOpen {
+                hop: 0,
+                reason: "administratively prohibited".into(),
+            },
+            SshChannelOpen,
+        ),
+        (unreachable(NetError::Dns { host: "b".into() }), NetworkDns),
+        (unreachable(NetError::Refused), NetworkRefused),
+        (unreachable(NetError::Timeout), NetworkTimeout),
+        (unreachable(NetError::Unreachable), NetworkUnreachable),
+        (unreachable(NetError::Reset), NetworkReset),
+        (
+            unreachable(NetError::Io {
+                kind: io::ErrorKind::ConnectionAborted,
+                message: String::new(),
+            }),
+            NetworkReset,
+        ),
+        (
+            unreachable(NetError::Io {
+                kind: io::ErrorKind::Other,
+                message: String::new(),
+            }),
+            Internal,
+        ),
+        (SshError::Timeout { hop: 2 }, NetworkTimeout),
+        (SshError::Cancelled, Cancelled),
+        (SshError::Protocol { hop: 0 }, NetworkReset),
+    ] {
+        let c = classify_ssh(&e);
+        assert_eq!(c.class, class, "{e:?}");
+        assert_eq!(c.fixes, fixes_for(class), "{e:?}");
+        assert!(reachable_classes().contains(&class), "{class:?}");
+    }
+}
+
+/// The Task 14 fix lists, verbatim.
+#[test]
+fn the_task_14_fix_lists() {
+    use FixId::*;
+    for (class, fixes) in [
+        (
+            TlsUntrusted,
+            &[ReviewCertificate, ImportCa, EditConnection][..],
+        ),
+        (TlsPinChanged, &[ReviewCertificate]),
+        (AuthInsecureMethod, &[ReviewCertificate, EditConnection]),
+        (SshHostKeyChanged, &[ReviewHostKey]),
+        (SshHostKeyUnknown, &[TryAgain, EditConnection]),
+        (
+            TlsNotSupportedByServer,
+            &[ConnectThroughSsh, EditConnection],
+        ),
+        (SshAuth, &[TryAgain, EditConnection]),
+        (SshChannelOpen, &[TryAgain, EditConnection]),
+        (SshAgentUnavailable, &[TryAgain, EditConnection]),
+        (SshHostKeyRevoked, &[TryAgain, EditConnection]),
+    ] {
+        assert_eq!(fixes_for(class), fixes, "{class:?}");
+    }
+    for class in ErrClass::ALL {
+        assert!(
+            !fixes_for(*class).contains(&EncryptWithoutVerifying),
+            "{class:?} still offers the interim fix (B6)"
+        );
     }
 }

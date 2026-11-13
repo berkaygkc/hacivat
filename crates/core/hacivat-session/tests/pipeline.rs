@@ -134,9 +134,14 @@ async fn validation_fails_before_any_io() {
 
 #[tokio::test]
 async fn ssh_transport_rejected_in_m2a() {
-    assert_eq!(
-        err(ssh_profile()).await.issues[0].code,
-        IssueCode::TransportUnavailable
+    // m2b-t14-pipeline (named exception): the SSH step exists, so an SSH tunnel is no longer
+    // refused as a transport; a tunnel without hops is still refused at Validate.
+    let e = err(ssh_profile()).await;
+    assert_eq!(e.issues[0].code, IssueCode::SshHostMissing);
+    assert!(
+        !e.issues
+            .iter()
+            .any(|i| i.code == IssueCode::TransportUnavailable)
     );
 }
 
