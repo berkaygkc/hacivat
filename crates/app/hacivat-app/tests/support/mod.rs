@@ -1089,3 +1089,15 @@ pub fn settle_until<F: FnMut() -> bool>(
             .advance_clock(std::time::Duration::from_millis(16));
     }
 }
+
+// ## m2b-t20-ssh
+
+/// A fresh temp folder kept for the app's lifetime (with the shells' own roots), for fixture
+/// files the core runtime reads later (a `~/.ssh/config`).
+pub fn temp_dir(vcx: &VisualTestContext) -> std::path::PathBuf {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().to_path_buf();
+    vcx.cx
+        .update(|cx| cx.default_global::<TempRoots>().0.push(dir));
+    path
+}

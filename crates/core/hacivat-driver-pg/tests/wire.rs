@@ -204,6 +204,14 @@ impl Obs {
     fn written(&self) -> &[u8] {
         &self.o.get_ref().written
     }
+    /// Flushes, as `tokio-postgres` does after each write.
+    fn flush(&mut self) {
+        let mut cx = Context::from_waker(Waker::noop());
+        match Pin::new(&mut self.o).poll_flush(&mut cx) {
+            Poll::Ready(Ok(())) => {}
+            other => panic!("{other:?}"),
+        }
+    }
 }
 
 fn make(policy: InsecureAuth, outcome: Option<TlsVerified>, mode: ObserverMode) -> Obs {
@@ -1061,4 +1069,138 @@ async fn a_non_utf8_cell_fails_the_statement_without_a_panic() {
     let next = conn.execute("SELECT 2", simple(10)).await.unwrap();
     assert_eq!(next.command_tag.as_deref(), Some("SELECT 0"));
     drop(server.await.unwrap());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Round 1 re-review: one Sync per copy-in (R1), a decode error before a long drain (R2), a
+// FATAL error that closes the connection (R3).
+
+#[test]
+fn a_copy_in_before_the_execute_sync_is_written_draws_no_second_sync() {
+    // R1: a partial write left the Sync after B/E unwritten when the CopyInResponse arrived.
+    // The library's own Sync ends the discard, so the observer must not add one.
+    let mut o = observer(InsecureAuth::Allow, None);
+    feed_bytewise(&mut o, &[auth_ok(), ready(b'I')].concat());
+    let be = [frame(b'B', &[0; 8]), frame(b'E', &[0; 5])].concat();
+    o.write(&be);
+    feed_ok(&mut o, &copy_in_response());
+    let sync = frame(b'S', &[]);
+    o.write_all(&sync);
+    o.flush();
+    let tail = o.written()[be.len()..].to_vec();
+    assert_eq!(
+        tail,
+        [copy_fail(), sync].concat(),
+        "CopyFail, then one Sync"
+    );
+    // The server answers the CopyFail and its single Sync: one ReadyForQuery, exactly owed.
+    feed_ok(&mut o, &[error("57014"), ready(b'I')].concat());
+    assert!(o.state().synced());
+    assert_eq!(o.ready_count(), 2, "startup + the one Sync");
+    // Not ahead: the next Query is owed its own ReadyForQuery.
+    o.write(&frame(b'Q', b"SELECT 1\0"));
+    assert!(!o.state().synced());
+}
+
+#[test]
+fn a_copy_in_while_the_execute_sync_is_half_written_still_gets_a_sync() {
+    // The Sync tokio-postgres is writing reaches the server during copy-in (ignored there), so
+    // the discard after the CopyFail needs the injected one.
+    let mut o = observer(InsecureAuth::Allow, None);
+    feed_bytewise(&mut o, &[auth_ok(), ready(b'I')].concat());
+    let sync = frame(b'S', &[]);
+    let head = [
+        frame(b'B', &[0; 8]),
+        frame(b'E', &[0; 5]),
+        sync[..2].to_vec(),
+    ]
+    .concat();
+    o.write(&head);
+    feed_ok(&mut o, &copy_in_response());
+    o.write_all(&sync[2..]);
+    o.flush();
+    let tail = o.written()[head.len()..].to_vec();
+    assert_eq!(tail, [&sync[2..], &copy_fail()[..], &sync[..]].concat());
+    feed_ok(&mut o, &[error("57014"), ready(b'I')].concat());
+    assert!(o.state().synced());
+    assert_eq!(o.ready_count(), 2);
+}
+
+#[tokio::test]
+async fn a_decode_error_early_in_a_long_result_keeps_the_connection() {
+    // R2: the rest of the result takes longer than the settle bound to arrive; the bad cell is
+    // still a decode error (`Other`), and the connection stays in step.
+    let (mut conn, mut s) = plaintext_session().await;
+    let server = tokio::spawn(async move {
+        read_query(&mut s).await;
+        let mut body = 1i16.to_be_bytes().to_vec();
+        body.extend_from_slice(&1i32.to_be_bytes());
+        body.push(0xff);
+        s.write_all(&[row_description(&["a"]), frame(b'D', &body)].concat())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        s.write_all(
+            &[
+                data_row(&[Some("b")]),
+                command_complete("SELECT 2"),
+                ready(b'T'),
+            ]
+            .concat(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read_query(&mut s).await, "SELECT 2");
+        s.write_all(&[command_complete("SELECT 0"), ready(b'T')].concat())
+            .await
+            .unwrap();
+        s
+    });
+    let e = conn
+        .execute("SELECT a FROM big_latin1", simple(10))
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind, RawErrorKind::Other);
+    assert_eq!(conn.tx_status(), TxStatus::InTx);
+    let next = conn.execute("SELECT 2", simple(10)).await.unwrap();
+    assert_eq!(next.command_tag.as_deref(), Some("SELECT 0"));
+    drop(server.await.unwrap());
+}
+
+#[tokio::test]
+async fn a_fatal_error_that_closes_the_connection_keeps_the_server_class() {
+    // R3: `pg_terminate_backend` or an admin shutdown: FATAL 57P01, then the server closes.
+    let (mut conn, mut s) = plaintext_session().await;
+    let server = tokio::spawn(async move {
+        read_query(&mut s).await;
+        let mut body = vec![];
+        for (f, v) in [
+            (b'S', "FATAL"),
+            (b'V', "FATAL"),
+            (b'C', "57P01"),
+            (b'M', "scripted"),
+        ] {
+            body.push(f);
+            body.extend_from_slice(v.as_bytes());
+            body.push(0);
+        }
+        body.push(0);
+        s.write_all(&frame(b'E', &body)).await.unwrap();
+        drop(s);
+    });
+    let started = std::time::Instant::now();
+    let e = conn
+        .execute("SELECT pg_sleep(60)", simple(10))
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind, RawErrorKind::Db, "{:?}", e.kind);
+    assert_eq!(e.server.and_then(|m| m.sqlstate).as_deref(), Some("57P01"));
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "the closed connection ends the wait"
+    );
+    assert_eq!(conn.tx_status(), TxStatus::Failed);
+    let again = conn.execute("SELECT 1", simple(10)).await.unwrap_err();
+    assert_eq!(again.kind, RawErrorKind::Io(io::ErrorKind::NotConnected));
+    server.await.unwrap();
 }
