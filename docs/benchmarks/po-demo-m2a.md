@@ -304,25 +304,40 @@ yazın.
 **Ön doğrulama:** `escape_cancels_connect_and_toasts` (connections_live);
 `escape_in_the_filter_runs_the_escape_hook` (connections_explorer).
 
-## 13. EN ↔ TR geçişi, iletişim kutusu açıkken
+## 13. EN ↔ TR geçişi ve iletişim kutusu
 
-**Yap:** ⌘N ile iletişim kutusunu açın ve birkaç alanı doldurun (ad, host `db.acme.io`, port). Kutu açıkken
-dili Türkçeye çevirmeyi deneyin: macOS menü çubuğunda *Hacivat → Settings…* satırına ya da ⌘,'ye
-basın, Language bölümünden Türkçe'yi seçin. Sonra tersini yapın (Türkçeden İngilizceye).
+İletişim kutusu modal bir katmandır. Modal açıkken yalnızca o katmanın kendi kısayolları ile ⌘Q
+çalışır (P47). Bu tasarım gereğidir: kutu açıkken dil arayüzden değiştirilemez.
 
-Kutu modal bir katmandır ve modal açıkken yalnızca o katmanın kısayolları ile ⌘Q çalışır (P47). Bu
-yüzden ⌘, kutu açıkken **çalışmayabilir**. Böyle olursa bunu not edin ("dil, modal açıkken
-arayüzden değişmiyor"), kutuyu kapatıp dili ayarlardan değiştirin, kutuyu yeniden açıp etiketleri
-kontrol edin. Testin kapsadığı davranış (dil olayı kutu açıkken gelir, değerler kalır) arayüz
-yolundan bağımsızdır.
+**Yap:**
+1. ⌘N ile iletişim kutusunu açın ve birkaç alanı doldurun (ad, host `db.acme.io`, port).
+2. Kutu açıkken ⌘,'ye, sonra ⌘K'ye ve ⌘N'ye basın. macOS menü çubuğunda *Hacivat* menüsünü açıp
+   bakın. Bir alanda ⌘A, ⌘C, sağ ok ve ⌘V'yi deneyin.
+3. Kutuyu Esc ya da Cancel ile kapatın. ⌘, ile ayarları açın ve Language bölümünden Türkçe'yi seçin.
+4. ⌘N ile kutuyu yeniden açın ve etiketleri kontrol edin.
+5. Aynısını Türkçeden İngilizceye doğru yapın: kutuyu kapatın, dili ayarlardan değiştirin, kutuyu
+   yeniden açın.
 
 **İyi görünüm:**
-- Dil değişimi sırasında yazdığınız değerler **kaybolmaz** (testte kutu açıkken dil değişir).
+- Kutu açıkken ⌘, **hiçbir şey açmaz**. Ayarlar kutunun arkasında da açılmaz. ⌘K ve ⌘N de bir şey
+  yapmaz: palet açılmaz, ikinci bir kutu açılmaz. macOS bu sırada bir uyarı sesi çalabilir; bu
+  normaldir.
+- Kutu açıkken menü çubuğunda Quit Hacivat (⌘Q) dışındaki her öğe soluk ve tıklanamaz durumdadır,
+  ama kısayolu yanında görünmeye devam eder. Kutu kapanınca bütün öğeler yeniden etkin olur ve ⌘,
+  ayarları açar.
+- Kutunun alanlarında ⌘A, ⌘C, ⌘X ve ⌘V çalışmaya devam eder.
+- Yeniden açılan kutunun alanları **boştur**. Bu beklenen davranıştır: iptal edilen bir kutu hiçbir
+  değer saklamaz.
 - Her etiket, ipucu ve düğme Türkçeleşir; **İngilizce kalıntı yoktur** ("Save", "Test connection",
   "Remember", "Environment" gibi). İngilizce kalıntı görürseniz ekran görüntüsü alıp not edin.
 - Türkçe metinlerin yazımı ve anlamı PO inceleme listesindedir (`m2a.md`, bölüm 7.2, "PO copy review").
 
-**Ön doğrulama:** `language_switch_keeps_typed_values` (connection_dialog),
+"Kutu açıkken dil değişirse yazılan değerler kalır" davranışı arayüzden denenemez. Bu davranışı
+yalnızca otomatik test sınar: test, dili kutu açıkken programla değiştirir.
+
+**Ön doğrulama:** `global_commands_do_nothing_while_the_dialog_is_open`,
+`the_menu_bar_greys_all_but_quit_while_the_dialog_is_open`, `clipboard_chords_work_in_a_dialog_field`,
+`quit_still_runs_while_the_dialog_is_open`, `language_switch_keeps_typed_values` (connection_dialog),
 `tr_ui_end_to_end_strings`, `the_leak_check_finds_english_text` (cross_surface_m2a). Sözcük
 sızıntısı denetimi `english_leaks` ile kendi denetimini de sınar.
 
@@ -359,9 +374,13 @@ PGSERVICEFILE="$HOME/hv-demo-pg_service.conf" cargo run -p hacivat -- --lang en
 
 **İyi görünüm:**
 - 480 px'lik iletişim kutusu iki servisi onay kutularıyla listeler.
-- **demo_remote** satırı için ortam seçilene dek "Import" düğmesi pasiftir; demo_remote için
-  **Production** önceden seçili gelir (ana bilgisayar adı `prod` içeriyor). demo_local için
-  ortam gerekmez (yerel).
+- demo_remote için **Production** önceden seçili gelir (ana bilgisayar adı `prod` içeriyor);
+  demo_local için **Local** seçili gelir (yerel ana bilgisayar). Bu yüzden "Import" düğmesi **baştan
+  etkindir**.
+- "Import" yalnızca işaretli bir uzak satırın ortamı temizlenince pasifleşir. Bunu deneyin:
+  demo_remote satırının ortam seçicisinde "Choose…" seçin; "Import" pasifleşir. Yeniden bir ortam
+  seçin (örneğin Production); "Import" yeniden etkinleşir. demo_local yerel olduğu için, onun
+  ortamını temizlemek "Import"u pasifleştirmez. Hiçbir satır işaretli değilken de "Import" pasiftir.
 - Ortamı onayladıktan sonra "Import" ile içe aktarın; iki profil gezginde görünür.
 - `demo_local` parolası Keychain'e girer (`hacivat-dev/<uuid>/db-password`). Dosyanın izni 644 ise
   ("chmod 644") parola **yoksayılır** ve "The password of demo_local was ignored because other

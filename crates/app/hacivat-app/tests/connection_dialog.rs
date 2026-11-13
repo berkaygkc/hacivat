@@ -1785,3 +1785,209 @@ fn a_successful_test_clears_the_count(cx: &mut TestAppContext) {
         "no password is drawn"
     );
 }
+
+// ## m2a-modal-shortcuts -------------------------------------------------------------------------
+
+/// What a macOS menu item and its key equivalent deliver: `RunCommand { id }` (F1).
+fn menu_command(vcx: &mut VisualTestContext, id: &'static str) {
+    let window = gpui::VisualContext::window_handle(vcx);
+    vcx.cx.dispatch_action(
+        window,
+        hacivat_ui_core::gpui_surface::RunCommand { id: id.into() },
+    );
+    vcx.run_until_parked();
+}
+
+/// What a global command would change: the layers, the tabs and the active one, the explorer,
+/// the theme and the focused field.
+type ShellState = (
+    Vec<&'static str>,
+    usize,
+    Option<hacivat_app::shell::TabKind>,
+    bool,
+    hacivat_ui_core::theme::ThemeMode,
+    String,
+);
+
+fn shell_state(vcx: &VisualTestContext) -> ShellState {
+    let ws = workspace(vcx);
+    let kind = vcx.cx.read(|cx| ws.read(cx).active_tab_kind());
+    let mode = vcx
+        .cx
+        .read(|cx| hacivat_ui_core::theme::Theme::get(cx).mode);
+    (
+        layer_ids(vcx),
+        tab_count(vcx),
+        kind,
+        layout(vcx).1.explorer_visible,
+        mode,
+        focused_field(vcx),
+    )
+}
+
+/// P47 (demo step 13): while the connection dialog is open, the global commands do nothing,
+/// whether they come from a key or from the menu bar (a menu item or its macOS key equivalent);
+/// once the dialog is closed, ⌘, opens the settings again.
+#[gpui::test]
+fn global_commands_do_nothing_while_the_dialog_is_open(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    type_into(vcx, "name", "orders");
+    let before = shell_state(vcx);
+    assert_eq!(before.0, ["connection-dialog"]);
+    for key in [",", "k", "n"] {
+        keys(vcx, &primary(key));
+        assert_eq!(shell_state(vcx), before, "{key}");
+    }
+    for id in [
+        "workspace.open_settings",
+        "workspace.command_palette",
+        "connection.new",
+        "workspace.toggle_explorer",
+        "explorer.focus_filter",
+        "workspace.new_console_tab",
+        "workspace.toggle_theme",
+        "app.about",
+    ] {
+        menu_command(vcx, id);
+        assert_eq!(shell_state(vcx), before, "{id}");
+    }
+    assert_eq!(field(vcx, "name"), "orders");
+
+    // Closed (Esc from the field), the same commands run again: the key, then the menu items.
+    keys(vcx, "escape");
+    assert!(layer_ids(vcx).is_empty());
+    keys(vcx, &primary(","));
+    let ws = workspace(vcx);
+    let settings = Some(hacivat_app::shell::TabKind::Registered("settings"));
+    assert_eq!(vcx.cx.read(|cx| ws.read(cx).active_tab_kind()), settings);
+    let tabs = tab_count(vcx);
+    menu_command(vcx, "workspace.new_console_tab");
+    assert_eq!(tab_count(vcx), tabs + 1);
+    menu_command(vcx, "connection.new");
+    assert_eq!(layer_ids(vcx), ["connection-dialog"]);
+}
+
+/// The clipboard chords stay with the dialog's own fields under the modal layer: P47 holds back
+/// only the global commands.
+#[gpui::test]
+fn clipboard_chords_work_in_a_dialog_field(cx: &mut TestAppContext) {
+    let vcx = open_new(cx, "en");
+    type_into(vcx, "name", "orders");
+    keys(vcx, &format!("{} {}", primary("a"), primary("c")));
+    assert_eq!(
+        vcx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+        Some("orders")
+    );
+    keys(vcx, &format!("right {}", primary("v")));
+    assert_eq!(field(vcx, "name"), "ordersorders");
+    keys(vcx, &format!("{} {}", primary("a"), primary("x")));
+    assert_eq!(field(vcx, "name"), "");
+    assert_eq!(
+        vcx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+        Some("ordersorders")
+    );
+    focus_field(vcx, "database");
+    keys(vcx, &primary("v"));
+    assert_eq!(field(vcx, "database"), "ordersorders");
+    assert_eq!(layer_ids(vcx), ["connection-dialog"]);
+}
+
+/// `app.quit` still runs while the dialog is open (P47), from the menu and from its key.
+#[gpui::test]
+fn quit_still_runs_while_the_dialog_is_open(cx: &mut TestAppContext) {
+    use hacivat_ui::actions::ActionRegistry;
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let vcx = open_new(cx, "en");
+    // The same registry, with an `app.quit` that counts instead of quitting (the first
+    // definition of an ID wins).
+    let quits = Rc::new(Cell::new(0));
+    let hits = quits.clone();
+    vcx.cx.update(|cx| {
+        let old = cx.global::<ActionRegistry>().clone();
+        let mut quit = old
+            .get("app.quit")
+            .cloned()
+            .expect("app.quit is registered");
+        quit.run = Rc::new(move |_, _| hits.set(hits.get() + 1));
+        let mut reg = ActionRegistry::default();
+        reg.register(quit).expect("a fresh registry");
+        for def in old.all() {
+            let _ = reg.register(def.clone());
+        }
+        cx.set_global(reg);
+    });
+    menu_command(vcx, "app.quit");
+    assert_eq!(quits.get(), 1);
+    // Windows binds no quit chord (Alt-F4 closes the window).
+    if !cfg!(target_os = "windows") {
+        keys(vcx, &primary("q"));
+        assert_eq!(quits.get(), 2);
+    }
+    assert_eq!(layer_ids(vcx), ["connection-dialog"]);
+}
+
+/// One macOS menu-bar item: its name, whether it is marked disabled, whether macOS enables it
+/// (the menu validation asks `App::is_action_available`), whether it still shows a key
+/// equivalent, and whether it is Quit.
+#[cfg(target_os = "macos")]
+type MenuBarItem = (String, bool, bool, bool, bool);
+
+#[cfg(target_os = "macos")]
+fn menu_bar(vcx: &VisualTestContext) -> Vec<MenuBarItem> {
+    let quit = hacivat_ui_core::gpui_surface::RunCommand {
+        id: "app.quit".into(),
+    };
+    vcx.cx.update(|cx| {
+        let menus = cx.get_menus().expect("the menu bar is set");
+        let mut items = Vec::new();
+        for menu in menus {
+            for item in menu.items {
+                if let gpui::OwnedMenuItem::Action {
+                    name,
+                    action,
+                    disabled,
+                    ..
+                } = item
+                {
+                    let available = cx.is_action_available(action.as_ref());
+                    let keyed = cx
+                        .key_bindings()
+                        .borrow()
+                        .bindings_for_action(action.as_ref())
+                        .next()
+                        .is_some();
+                    let is_quit = action.partial_eq(&quit);
+                    items.push((name, disabled, available, keyed, is_quit));
+                }
+            }
+        }
+        items
+    })
+}
+
+/// The menu bar mirrors the keys (P47): while the dialog is open every item but Quit is greyed
+/// and keeps its key equivalent; once the dialog is closed every item is live again.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn the_menu_bar_greys_all_but_quit_while_the_dialog_is_open(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    let closed = menu_bar(vcx);
+    assert!(closed.iter().all(|i| i.2), "{closed:?}");
+    let vcx = open(vcx, DialogMode::New);
+    let opened = menu_bar(vcx);
+    let names = |bar: &[MenuBarItem]| -> Vec<String> { bar.iter().map(|i| i.0.clone()).collect() };
+    assert_eq!(names(&opened), names(&closed));
+    assert_eq!(opened.iter().filter(|i| i.4).count(), 1, "{opened:?}");
+    for (name, disabled, available, _, quit) in &opened {
+        assert_eq!(*available, *quit, "{name}");
+        assert_eq!(*disabled, !*quit, "{name}");
+    }
+    // A greyed item keeps its key equivalent (Open settings keeps ⌘,).
+    let keyed = |bar: &[MenuBarItem]| -> Vec<bool> { bar.iter().map(|i| i.3).collect() };
+    assert_eq!(keyed(&opened), keyed(&closed));
+    assert!(keyed(&opened).iter().filter(|k| **k).count() > 1);
+    keys(vcx, "escape");
+    assert!(layer_ids(vcx).is_empty());
+    assert_eq!(menu_bar(vcx), closed);
+}

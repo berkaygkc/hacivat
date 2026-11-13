@@ -489,7 +489,11 @@ impl Workspace {
         if layer.restore_focus.is_none() {
             layer.restore_focus = window.focused(cx);
         }
+        let first_modal = layer.modal && !self.layers.has_modal();
         self.layers.push(layer, subscription);
+        if first_modal {
+            rebuild_menus_later(cx);
+        }
         cx.notify();
     }
 
@@ -520,6 +524,9 @@ impl Workspace {
         match &layer.restore_focus {
             Some(handle) => window.focus(handle, cx),
             None => window.focus(&self.focus, cx),
+        }
+        if layer.modal && !self.layers.has_modal() {
+            rebuild_menus_later(cx);
         }
         cx.notify();
         layer.id
@@ -718,6 +725,12 @@ impl Render for AnchoredHost {
             ),
         )
     }
+}
+
+/// The menus follow the first modal layer opening and the last one closing (P47: their items
+/// turn inert, all but Quit). Rebuilt once this update is done, when the workspace is readable.
+fn rebuild_menus_later(cx: &mut App) {
+    cx.defer(crate::menus::rebuild);
 }
 
 /// Writes `workspace.json`; a failure keeps the previous file and the next change tries again.
