@@ -26,8 +26,7 @@ use hacivat_net::ssh::{
 use hacivat_net::{AddressClass, TlsMode, ssh_address_class};
 use hacivat_proto::{DbmsKind, ErrClass};
 use hacivat_session::pipeline::{
-    Answer, ConnectDeps, ConnectError, IssueCode, LiveConnection, Question, SessionSecrets,
-    TrailStep, connect,
+    Answer, ConnectDeps, ConnectError, LiveConnection, Question, SessionSecrets, TrailStep, connect,
 };
 use hacivat_session::profile::{Profile, ProfileEndpoint, TransportSpec};
 use hacivat_session::{ConnectionManager, LiveState, ManagerConfig, PathKind, test_connection};
@@ -499,7 +498,10 @@ async fn a_key_file_other_users_can_read_is_refused() {
         .await
         .unwrap_err();
     assert_eq!(e.class, ErrClass::ConfigInvalid);
-    assert_eq!(e.issues[0].code, IssueCode::PathRefused);
+    assert_eq!(
+        e.issues[0].code,
+        hacivat_session::pipeline::IssueCode::PathRefused
+    );
     assert_eq!(s.sessions_accepted(), 0, "nothing connected");
 }
 

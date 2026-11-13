@@ -262,13 +262,39 @@ async fn a_read_only_session_reaches_the_driver_read_only() {
 /// `cargo metadata` for the workspace, as JSON text. (The brief's pseudo-code uses the
 /// `cargo_metadata` crate; the manifest table adds no such dev-dependency, so this reads the
 /// JSON text.)
+///
+/// `--offline` needs every platform's crates unless the graph is filtered to the host: a CI
+/// runner only has its own platform's crates (e.g. no `pageant` off Windows), so the call
+/// passes `--filter-platform <host>`, with the host read from `cargo -vV`.
 fn cargo_metadata() -> String {
+    let version = std::process::Command::new(env!("CARGO"))
+        .arg("-vV")
+        .output()
+        .expect("cargo -vV runs");
+    let version = String::from_utf8(version.stdout).expect("UTF-8 cargo -vV");
+    let host = version
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
+        .expect("cargo -vV names the host")
+        .trim()
+        .to_owned();
     let out = std::process::Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1", "--offline"])
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--offline",
+            "--filter-platform",
+        ])
+        .arg(&host)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("cargo metadata runs");
-    assert!(out.status.success(), "cargo metadata failed");
+    assert!(
+        out.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).expect("UTF-8 metadata")
 }
 
