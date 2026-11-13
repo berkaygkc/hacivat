@@ -576,6 +576,8 @@ fn ok_report(total: Duration, ping: Duration, server: &str, tls: TlsSummary) -> 
         ping_median: Some(ping),
         warnings: Vec::new(),
         error: None,
+        // ## m2b-t19-tls
+        profile_changes: Vec::new(),
     }
 }
 

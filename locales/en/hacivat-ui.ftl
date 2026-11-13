@@ -468,10 +468,6 @@ hv-conn-fix-versions = Supported versions
 hv-conn-fix-anyway = Connect anyway, unsupported
 hv-conn-fix-connect = Connect
 hv-conn-fix-close = Close
-# The fix for an untrusted or mismatched certificate (R3): TLS without verification.
-hv-conn-fix-require = Encrypt without verifying
-# Shown with that fix: what it gives up, plainly.
-hv-conn-fix-require-note = The connection will be encrypted, but { -brand-hacivat } won't check that the server is who it claims to be.
 # Shown when the connections file is read-only: fixes that change the connection are off.
 hv-conn-fix-read-only = Your connections file can't be changed, so fixes that edit this connection are off.
 # Shown when a fix's change to the connection could not be saved.
@@ -795,8 +791,9 @@ hv-conn-issue-ssh-too-many-hops = A tunnel can go through at most 8 jump hosts.
 # Review: PO
 hv-conn-issue-ssh-key-file-missing = This key file can't be found. Choose the private key, such as ~/.ssh/id_ed25519.
 # The TLS client key uses the old OpenSSL encryption, which can't be decrypted.
+# m2b-t19-tls (named exception): the placeholder rewritten.
 # Review: PO
-hv-conn-issue-tls-key-legacy-encrypted = This private key uses an old encryption format. Convert it to PKCS #8.
+hv-conn-issue-tls-key-legacy-encrypted = This key is encrypted in an old format { -brand-hacivat } can't read. Convert it to an encrypted PKCS #8 key (openssl pkcs8 -topk8), then choose the new file.
 
 ## m2b-t20-ssh
 
@@ -939,3 +936,83 @@ hv-conn-err-refused = { $name } — { $reason ->
 hv-conn-err-attempts-used = All 3 attempts are used. { -brand-hacivat } won't send another password, so the account isn't locked.
 # Under the connection dialog's Password field after 3 rejected passwords: how to try again.
 hv-conn-dlg-attempts-used = No attempts left for this server. To try again, change the host, port or user, or reopen this dialog.
+
+## m2b-t19-tls
+
+# Quick fixes of an untrusted certificate (B6): open the certificate review, or choose its CA file.
+hv-conn-fix-review-cert = Review certificate…
+hv-conn-fix-import-ca = Import CA…
+# The certificate review's title (NOTES M2a surface 5).
+hv-conn-tls-title = Certificate not trusted
+# Variables:
+#   $host (String) - the server's host as the connection names it, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-body = { $host }:{ $port } offered a certificate that no CA trusted by this Mac has signed. Compare the fingerprint with whoever runs the server before you continue.
+# The certificate's facts.
+hv-conn-tls-subject = Issued to
+hv-conn-tls-issuer = Issued by
+hv-conn-tls-valid = Valid until
+# The certificate's expiry date, in the regional format.
+# Variables:
+#   $when (DateTime) - the moment the certificate expires, e.g. 2027-03-14.
+hv-conn-tls-valid-date = { DATETIME($when, dateStyle: "long") }
+hv-conn-tls-fp = SHA-256 fingerprint
+# The tooltip of the button that copies a fingerprint.
+hv-conn-tls-copy-fp = Copy fingerprint
+hv-conn-tls-chain = Chain
+# A certificate's place in the chain, after its name.
+hv-conn-tls-leaf = server
+hv-conn-tls-inter = intermediate
+hv-conn-tls-root = root · not trusted by this Mac
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-pin-note = Pinning trusts exactly this certificate for { $host }:{ $port }. If it ever changes, { -brand-hacivat } stops and asks again. A pin doesn't extend the expiry date.
+hv-conn-tls-pin-btn = Pin this certificate
+hv-conn-tls-import = Import CA…
+# Under the certificate's facts when today is outside its dates: why nothing can trust it.
+# Variables:
+#   $state (Enum(expired, early)) - expired: past its expiry date; early: not valid yet.
+hv-conn-tls-dates-note = { $state ->
+        [expired] This certificate has expired. A pin doesn't extend the expiry date, so it can't be pinned. Ask whoever runs the server to renew it.
+       *[early] This certificate isn't valid yet. Check the date and time of this Mac, or ask whoever runs the server.
+    }
+# The TLS section of the connection dialog: the endpoint's pinned certificate.
+hv-conn-tls-pin = Pinned certificate
+hv-conn-tls-pin-none = None
+hv-conn-tls-remove-pin = Remove pin
+# In the TLS section when Encryption is Disable and the endpoint has a pinned certificate.
+hv-conn-issue-tls-disable-ignores-pin = With encryption off, the pinned certificate isn't checked. Choose another mode to use the pin.
+# The client certificate's key passphrase field.
+hv-conn-dlg-key-pass = Key passphrase
+# Under the key passphrase field when the key is encrypted and the passphrase is missing or wrong.
+hv-conn-issue-tls-key-passphrase = This key is encrypted. Enter its passphrase.
+# The certificate of a pinned endpoint changed (NOTES M2b surface 5).
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-pin-changed-title = The certificate of { $host }:{ $port } changed
+hv-conn-tls-pin-changed-body = This connection is pinned to one certificate, and the server now presents a different one. { -brand-hacivat } stopped before signing in.
+# The two fingerprints: the pinned one, and the one the server presents now.
+hv-conn-tls-pin-changed-old = Pinned
+hv-conn-tls-pin-changed-new = Now
+hv-conn-tls-pin-changed-ask = A renewed certificate looks like this too. Ask whoever runs the server before you replace the pin.
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+#   $port (String) - its port, e.g. "5432".
+hv-conn-tls-pin-changed-note = Replacing the pin trusts exactly the new certificate for { $host }:{ $port } and removes the old pin. A pin doesn't extend the expiry date.
+hv-conn-tls-pin-changed-replace = Replace pin
+# Toast after Replace pin.
+# Variables:
+#   $host (String) - the server's host, e.g. "db-qa.acme.io".
+hv-conn-tls-pin-changed-done = Pinned the new certificate of { $host }
+# The public-plaintext question (NOTES M2a surface 5): a public host offered no TLS.
+# Variables:
+#   $host (String) - the server's host, e.g. "db.acme.io".
+hv-conn-plain-title = { $host } doesn't offer encryption
+# Variables:
+#   $ip (String) - the server's address, e.g. "203.0.113.10".
+hv-conn-plain-body = { $ip } accepts only unencrypted connections and isn't on a private network. Your password and query results would cross the network in plain text.
+hv-conn-plain-ssh = Use an SSH tunnel…
+hv-conn-plain-connect = Connect without encryption
+hv-conn-plain-remember = Don't ask again for this connection

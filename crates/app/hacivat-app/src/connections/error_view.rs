@@ -18,10 +18,13 @@
 //!   re-entry passes it to the pipeline as `prior_rejections`, and the pipeline's answer carries
 //!   the gesture's running count (`ConnectError::attempts`). `n` is the count + 1; at 3 the
 //!   field and the fix are gone, so a gesture never causes more than 3 rejections.
-//! - `UseDatabase`, `ConnectAnyway` (persists `allow_unsupported_server`) and
-//!   `EncryptWithoutVerifying` (persists `tls.mode = Require`, R3) save the profile through
-//!   `ConnectionsModel` and connect. A read-only connections file turns them off, with a line
-//!   that says why; a failed save is shown.
+//! - `UseDatabase` and `ConnectAnyway` (persists `allow_unsupported_server`) save the profile
+//!   through `ConnectionsModel` and connect. A read-only connections file turns them off (and the
+//!   certificate fixes, which save a pin or a CA file), with a line that says why; a failed save
+//!   is shown.
+//! - M2b (Task 19): "Review certificate…" and "Import CA…" close the dialog and run in
+//!   `cert_dialog` (it saves the change and connects); M2a's interim "Encrypt without
+//!   verifying" is gone (B6).
 //! - `TryAgain` connects; `EditConnection` opens the connection dialog; `SupportedVersions`
 //!   opens R11's URL.
 //!
@@ -35,7 +38,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_l10n::{Count, NoArgs, Text, ids};
-use hacivat_net::TlsMode;
 use hacivat_proto::{EnvTag, ErrClass, ProfileId};
 use hacivat_session::LiveState;
 use hacivat_session::pipeline::ConnectError;
@@ -221,8 +223,8 @@ impl ErrorView {
     }
 
     /// Where the dialog's focus starts: the primary fix, else Edit connection, else Close.
-    /// A fix that weakens safety (Encrypt without verifying, Connect anyway) never has it, so
-    /// one reflexive Enter cannot run it.
+    /// A fix that weakens safety (Connect anyway) never has it, so one reflexive Enter cannot
+    /// run it.
     fn initial_focus(&mut self, cx: &mut App) -> FocusHandle {
         let buttons = self.fix_buttons(cx);
         let usable = |b: &&FixButton| !b.disabled && !b.action.weakens_safety();
@@ -293,9 +295,6 @@ impl ErrorView {
             FixAction::SupportedVersions => cx.open_url(SUPPORTED_VERSIONS_URL),
             FixAction::ConnectAnyway => {
                 self.edit_and_connect(|p| p.allow_unsupported_server = true, window, cx);
-            }
-            FixAction::EncryptWithoutVerifying => {
-                self.edit_and_connect(|p| p.tls.mode = TlsMode::Require, window, cx);
             }
             // ## m2b-t01-interfaces: the M2b flows, after the error dialog closes (Q9).
             m2b @ (FixAction::ReviewCertificate
@@ -631,9 +630,6 @@ impl ErrorView {
 
         // The fixes.
         let buttons = self.fix_buttons(cx);
-        let offers_require = buttons
-            .iter()
-            .any(|b| b.action == FixAction::EncryptWithoutVerifying);
         let edits_off = buttons
             .iter()
             .any(|b| b.disabled && b.action.edits_profile() && !self.pending);
@@ -655,6 +651,8 @@ impl ErrorView {
                 FixAction::TryAgain => Some(IconName::RotateCw),
                 FixAction::UseDatabase(_) => Some(IconName::Database),
                 FixAction::SupportedVersions => Some(IconName::ExternalLink),
+                // ## m2b-t19-tls: the CA is a file.
+                FixAction::ImportCa => Some(IconName::FileKey),
                 _ => None,
             };
             let mut button = Button::new(b.id.clone(), b.label.clone())
@@ -737,17 +735,7 @@ impl ErrorView {
             ));
         }
 
-        // What "Encrypt without verifying" gives up (R3, ADR known limits), and why fixes are off.
-        if offers_require {
-            block = block.child(paragraph(
-                tr(cx, ids::hv::CONN_FIX_REQUIRE_NOTE, NoArgs),
-                TextSource::Fluent,
-                t.type_ramp.body_sm,
-                c.text_2.to_hsla(),
-                Some("fix-require-note"),
-                cx,
-            ));
-        }
+        // Why fixes are off.
         if edits_off {
             block = block.child(paragraph(
                 tr(cx, ids::hv::CONN_FIX_READ_ONLY, NoArgs),
@@ -1272,9 +1260,11 @@ mod shots {
         open(e, window, cx);
     }
 
-    /// `tls.untrusted`, with "Encrypt without verifying" and its note.
+    /// `tls.untrusted` with its certificate: Review certificate…, Import CA…, Edit connection
+    /// (m2b-t19-tls: M2a's "Encrypt without verifying" is gone, B6).
     pub fn tls_fixture(window: &mut Window, cx: &mut App) {
-        let e = sample(ErrClass::TlsUntrusted, TrailStep::Tls, None, "");
+        let mut e = sample(ErrClass::TlsUntrusted, TrailStep::Tls, None, "");
+        e.certificate = Some(crate::connections::cert_dialog::sample_review(None));
         open(e, window, cx);
     }
 }

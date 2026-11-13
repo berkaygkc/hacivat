@@ -606,7 +606,9 @@ fn issue_sentence(f: &Fmt, code: &IssueCode) -> String {
         IssueCode::TransportUnavailable => ids::hv::CONN_ISSUE_TRANSPORT_UNAVAILABLE,
         IssueCode::TlsCaUnreadable => ids::hv::CONN_ISSUE_TLS_CA_UNREADABLE,
         IssueCode::TlsCertUnreadable => ids::hv::CONN_ISSUE_TLS_CERT_UNREADABLE,
-        IssueCode::TlsKeyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_ENCRYPTED,
+        // ## m2b-t19-tls (fix round 1, I2; named exception): an encrypted key wants its
+        // passphrase (B25), never an unencrypted file.
+        IssueCode::TlsKeyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_PASSPHRASE,
         IssueCode::TlsModeUnsupported { mode } => {
             return f.t(
                 ids::hv::CONN_ISSUE_TLS_MODE_UNSUPPORTED,
@@ -637,6 +639,8 @@ fn issue_sentence(f: &Fmt, code: &IssueCode) -> String {
         IssueCode::SshTooManyHops => ids::hv::CONN_ISSUE_SSH_TOO_MANY_HOPS,
         IssueCode::SshKeyFileMissing => ids::hv::CONN_ISSUE_SSH_KEY_FILE_MISSING,
         IssueCode::TlsKeyLegacyEncrypted => ids::hv::CONN_ISSUE_TLS_KEY_LEGACY_ENCRYPTED,
+        // ## m2b-t19-tls: a notice the dialog shows; Validate never reports it.
+        IssueCode::TlsDisableIgnoresPin => ids::hv::CONN_ISSUE_TLS_DISABLE_IGNORES_PIN,
     };
     f.t(msg, NoArgs)
 }
