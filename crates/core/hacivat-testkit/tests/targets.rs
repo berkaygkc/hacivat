@@ -6,15 +6,15 @@ use std::path::PathBuf;
 use hacivat_proto::DbmsKind::{MariaDb as Maria, MySql as My, Postgres as Pg};
 use hacivat_testkit::{
     TlsDefault, all_targets_unfiltered, artifact_in, docker_enabled_from, ids_in_set,
-    targets_in_set,
+    ssh_targets_in_set, targets_in_set,
 };
 use yaml_rust2::{Yaml, YamlLoader};
 
 /// One compose service, as far as these tests look at it.
 struct Service {
     container_name: String,
-    bind: String,
-    host_port: u16,
+    /// The single `bind:host:container` mapping; `None` for a service without a published port.
+    published: Option<(String, u16)>,
     has_healthcheck: bool,
 }
 
@@ -31,7 +31,7 @@ fn compose_doc() -> Yaml {
         .expect("compose.yml has a document")
 }
 
-/// `services.<id>` with its single `bind:host:container` port mapping.
+/// `services.<id>` with its optional single `bind:host:container` port mapping.
 fn compose_services() -> BTreeMap<String, Service> {
     let doc = compose_doc();
     let services = doc["services"].as_hash().expect("services is a mapping");
@@ -39,15 +39,16 @@ fn compose_services() -> BTreeMap<String, Service> {
         .iter()
         .map(|(id, s)| {
             let id = id.as_str().expect("service id").to_string();
-            let ports = s["ports"].as_vec().expect("ports is a list");
-            assert_eq!(ports.len(), 1, "{id}: one port mapping");
-            let mapping = ports[0].as_str().expect("port mapping is a string");
-            let parts: Vec<&str> = mapping.split(':').collect();
-            assert_eq!(parts.len(), 3, "{id}: bind:host:container, got {mapping}");
+            let published = s["ports"].as_vec().map(|ports| {
+                assert_eq!(ports.len(), 1, "{id}: one port mapping");
+                let mapping = ports[0].as_str().expect("port mapping is a string");
+                let parts: Vec<&str> = mapping.split(':').collect();
+                assert_eq!(parts.len(), 3, "{id}: bind:host:container, got {mapping}");
+                (parts[0].to_string(), parts[1].parse().expect("host port"))
+            });
             let service = Service {
                 container_name: s["container_name"].as_str().unwrap_or_default().to_string(),
-                bind: parts[0].to_string(),
-                host_port: parts[1].parse().expect("host port"),
+                published,
                 has_healthcheck: !s["healthcheck"]["test"].is_badvalue(),
             };
             (id, service)
@@ -59,20 +60,73 @@ fn compose_services() -> BTreeMap<String, Service> {
 fn targets_and_compose_agree() {
     let compose = compose_services();
     let targets = all_targets_unfiltered();
+    // One service per database target, per SSH bastion, and the key generator.
     assert_eq!(
-        targets.len(),
+        targets.len() + ssh_targets_in_set(None).len() + 1,
         compose.len(),
         "one target per compose service"
     );
+    assert!(compose.contains_key("ssh-client-keys"));
     for t in targets {
         let s = compose
             .get(&t.id)
             .unwrap_or_else(|| panic!("no service {}", t.id));
-        assert_eq!(s.host_port, t.port);
-        assert_eq!(s.bind, "127.0.0.1");
+        assert_eq!(
+            s.published,
+            Some(("127.0.0.1".to_string(), t.port)),
+            "{}",
+            t.id
+        );
         assert!(s.has_healthcheck, "{} has no healthcheck", t.id);
         assert_eq!(t.host, "127.0.0.1");
     }
+}
+
+#[test]
+fn ssh_targets_and_compose_agree() {
+    let compose = compose_services();
+    for t in ssh_targets_in_set(None) {
+        let s = compose
+            .get(&t.id)
+            .unwrap_or_else(|| panic!("no service {}", t.id));
+        assert!(s.has_healthcheck, "{} has no healthcheck", t.id);
+        match t.via {
+            // Reached only through its bastion: nothing published on the host.
+            Some(_) => assert_eq!(s.published, None, "{}", t.id),
+            None => assert_eq!(
+                s.published,
+                Some(("127.0.0.1".to_string(), t.port)),
+                "{}",
+                t.id
+            ),
+        }
+    }
+}
+
+#[test]
+fn every_target_has_an_internal_endpoint() {
+    let compose = compose_services();
+    for t in targets_in_set(None, None) {
+        assert!(!t.internal.0.is_empty() && t.internal.1 > 0, "{}", t.id);
+        // The in-network name is the compose service, and the port is the container's.
+        assert!(compose.contains_key(&t.internal.0), "{}", t.id);
+        let default_port = if t.engine == Pg { 5432 } else { 3306 };
+        assert_eq!(t.internal.1, default_port, "{}", t.id);
+    }
+}
+
+#[test]
+fn pg17_auth_has_its_own_port() {
+    let ports: BTreeSet<u16> = all_targets_unfiltered()
+        .into_iter()
+        .map(|t| t.port)
+        .collect();
+    assert_eq!(
+        ports.len(),
+        all_targets_unfiltered().len(),
+        "host ports clash"
+    );
+    assert!(!ports.contains(&2222), "2222 is sshd-a");
 }
 
 #[test]
@@ -120,6 +174,7 @@ fn compose_names_the_project_and_containers() {
 
 #[test]
 fn pr_set_is_pg17_and_mysql84() {
+    // The sshd bastions are `[[ssh_target]]`s: see tests/ssh_targets.rs.
     assert_eq!(ids_in_set("pr"), ["mysql84", "pg17"]);
 }
 
@@ -129,7 +184,7 @@ fn full_set_is_every_target() {
     let mut sorted = all.clone();
     sorted.sort();
     assert_eq!(ids_in_set("full"), sorted);
-    assert_eq!(all.len(), 13);
+    assert_eq!(all.len(), 14);
 }
 
 #[test]
@@ -145,7 +200,7 @@ fn set_filter_and_engine_filter_combine() {
         .collect();
     assert_eq!(full_maria, ["mariadb106", "mariadb1011", "mariadb114"]);
     // No set selected: every target.
-    assert_eq!(targets_in_set(None, None).len(), 13);
+    assert_eq!(targets_in_set(None, None).len(), 14);
     assert!(targets_in_set(Some("nightly"), None).is_empty());
 }
 

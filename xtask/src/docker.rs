@@ -10,6 +10,10 @@
 //!   and names it. Otherwise it runs the Docker tests (`cargo test … -- --ignored`) with
 //!   `HACIVAT_DOCKER=1`, `HACIVAT_DOCKER_SET` and `HACIVAT_DOCKER_ARTIFACTS`.
 //!
+//! - `pin` rewrites every `image:` and `FROM` tag of the compose file and the Dockerfiles as
+//!   `tag@sha256:<index digest>` (read from the registry with `docker buildx imagetools
+//!   inspect`; no container is touched). `check-pins` fails on any that has no digest.
+//!
 //! The main checkout is the parent of `git rev-parse --git-common-dir`, so a worktree resolves
 //! the same artifacts directory as the main checkout.
 
@@ -21,13 +25,19 @@ use anyhow::{Context, Result, bail};
 /// How long `up` waits for every selected service to report healthy.
 const WAIT_TIMEOUT_SECS: u32 = 180;
 /// The crates whose `#[ignore = "docker"]` tests `test` runs when no `-p` is given.
-const DEFAULT_TEST_CRATES: [&str; 4] = [
+const DEFAULT_TEST_CRATES: [&str; 5] = [
     "hacivat-driver-pg",
     "hacivat-driver-mysql",
     "hacivat-driver-sqlite",
     "hacivat-session",
+    // ## m2b-t16-docker-matrix
+    "hacivat-testkit",
 ];
 const COMPOSE_FILE: &str = "docker/m2a/compose.yml";
+/// The Dockerfiles whose `FROM` lines are pinned too.
+const DOCKERFILES: [&str; 2] = ["docker/m2a/pg-tr/Dockerfile", "docker/m2a/sshd/Dockerfile"];
+/// Images that `compose build` produces locally: never pulled, so never pinned.
+const LOCAL_IMAGE_PREFIX: &str = "hacivat-m2a-";
 const TARGETS_FILE: &str = "docker/m2a/targets.toml";
 /// The service whose auto-generated CA certificate the MySQL TLS tests trust.
 const CA_SERVICE: &str = "mysql84";
@@ -37,7 +47,9 @@ const CA_ARTIFACT: &str = "mysql84-ca.pem";
 const USAGE: &str = "usage: xtask docker up --set pr|full\n       \
                      xtask docker down\n       \
                      xtask docker status [--set pr|full]\n       \
-                     xtask docker test --set pr|full [-p <crate>]...";
+                     xtask docker test --set pr|full [-p <crate>]...\n       \
+                     xtask docker pin\n       \
+                     xtask docker check-pins";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -45,6 +57,10 @@ pub enum Action {
     Down,
     Status,
     Test,
+    /// Rewrites every image tag with its digest (needs the network; run by the controller).
+    Pin,
+    /// Fails on any image or `FROM` without a digest.
+    CheckPins,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -64,6 +80,8 @@ pub fn parse_args(args: &[String]) -> Result<Cmd> {
         Some("down") => Action::Down,
         Some("status") => Action::Status,
         Some("test") => Action::Test,
+        Some("pin") => Action::Pin,
+        Some("check-pins") => Action::CheckPins,
         other => bail!("unknown docker command {other:?}"),
     };
     let mut set = None;
@@ -86,6 +104,9 @@ pub fn parse_args(args: &[String]) -> Result<Cmd> {
     }
     match action {
         Action::Up | Action::Test if set.is_none() => bail!("--set pr|full is required"),
+        Action::Pin | Action::CheckPins if set.is_some() || !crates.is_empty() => {
+            bail!("pin and check-pins take no arguments")
+        }
         Action::Down if set.is_some() => bail!("down stops the whole project; it takes no --set"),
         Action::Up | Action::Down | Action::Status if !crates.is_empty() => {
             bail!("-p is only for `docker test`")
@@ -106,8 +127,13 @@ pub fn services_in_set(targets_toml: &str, set: &str) -> Result<Vec<String>> {
         .get("target")
         .and_then(toml::Value::as_array)
         .context("targets.toml has no [[target]] entries")?;
+    // The SSH bastions are compose services too (`[[ssh_target]]`, Task 16).
+    let ssh = doc
+        .get("ssh_target")
+        .and_then(toml::Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
     let mut ids = Vec::new();
-    for t in targets {
+    for t in targets.iter().chain(ssh) {
         let id = t
             .get("id")
             .and_then(toml::Value::as_str)
@@ -318,8 +344,12 @@ fn run_status(statuses: &[(String, Health)]) -> Result<bool> {
 fn run_up(root: &Path, set: &str) -> Result<bool> {
     let services = selected_services(root, set)?;
     let compose = root.join(COMPOSE_FILE);
+    let artifacts = artifacts_dir(&main_checkout()?);
+    std::fs::create_dir_all(&artifacts)
+        .with_context(|| format!("creating {}", artifacts.display()))?;
     let status = Command::new("docker")
         .args(up_args(&compose, &services))
+        .env("HV_ARTIFACTS", &artifacts)
         .status()
         .context("running docker compose up")?;
     let now = statuses(&services);
@@ -359,6 +389,7 @@ fn run_down(root: &Path) -> Result<bool> {
     let status = Command::new("docker")
         .args(["compose", "-f", &compose.display().to_string()])
         .args(["down", "--volumes", "--remove-orphans"])
+        .env("HV_ARTIFACTS", artifacts_dir(&main_checkout()?))
         .status()
         .context("running docker compose down")?;
     Ok(status.success())
@@ -393,11 +424,191 @@ fn run_test(root: &Path, set: &str, crates: &[String]) -> Result<bool> {
     Ok(status.success())
 }
 
+// ## m2b-t16-docker-matrix
+
+/// The image reference of an `image:` line of a compose file.
+fn compose_ref(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("image:")?.trim();
+    let reference = rest.split_whitespace().next()?;
+    Some(reference.trim_matches(['"', '\'']))
+}
+
+/// The base-image reference of a `FROM [--flag…] <ref> [AS name]` line.
+fn dockerfile_ref(line: &str) -> Option<&str> {
+    let mut words = line.split_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("from") {
+        return None;
+    }
+    words.find(|w| !w.starts_with("--"))
+}
+
+/// The reference on a pinnable line that still needs a digest.
+fn needs_pin(line: &str) -> Option<&str> {
+    let reference = compose_ref(line).or_else(|| dockerfile_ref(line))?;
+    let local = reference.starts_with(LOCAL_IMAGE_PREFIX) || reference == "scratch";
+    (!local && !reference.contains("@sha256:")).then_some(reference)
+}
+
+/// The `image:` tags of a compose file that have no `@sha256:` digest.
+pub fn unpinned(compose: &str) -> Vec<String> {
+    compose
+        .lines()
+        .filter(|l| compose_ref(l).is_some())
+        .filter_map(needs_pin)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The `FROM` bases of a Dockerfile that have no `@sha256:` digest.
+pub fn unpinned_dockerfile(dockerfile: &str) -> Vec<String> {
+    dockerfile
+        .lines()
+        .filter(|l| dockerfile_ref(l).is_some())
+        .filter_map(needs_pin)
+        .map(str::to_string)
+        .collect()
+}
+
+/// `line` with `@<digest>` appended to its image reference (unchanged when it has none, or
+/// is already pinned).
+pub fn pin_line(line: &str, digest: &str) -> String {
+    let Some(reference) = needs_pin(line) else {
+        return line.to_string();
+    };
+    // `reference` is a subslice of `line`: split at its offset.
+    let start = reference.as_ptr() as usize - line.as_ptr() as usize;
+    let end = start + reference.len();
+    format!("{}@{digest}{}", &line[..end], &line[end..])
+}
+
+/// Pins every pinnable line of `text`, asking `resolve` once per distinct tag.
+pub fn pin_text(text: &str, mut resolve: impl FnMut(&str) -> Result<String>) -> Result<String> {
+    let mut cache: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut out = String::with_capacity(text.len() + 256);
+    for line in text.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let pinned = match needs_pin(body) {
+            Some(reference) => {
+                let digest = match cache.get(reference) {
+                    Some(d) => d.clone(),
+                    None => {
+                        let d = resolve(reference)?;
+                        cache.insert(reference.to_string(), d.clone());
+                        d
+                    }
+                };
+                pin_line(body, &digest)
+            }
+            None => body.to_string(),
+        };
+        out.push_str(&pinned);
+        if line.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
+/// The digest in the output of `docker buildx imagetools inspect --format '{{json
+/// .Manifest.Digest}}'`: a JSON string `"sha256:…"`.
+pub fn parse_digest(output: &str) -> Result<String> {
+    let digest = output.trim().trim_matches('"');
+    let hex = digest.strip_prefix("sha256:").unwrap_or_default();
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("unexpected digest output {:?}", output.trim());
+    }
+    Ok(digest.to_string())
+}
+
+/// The index (multi-platform) digest of `tag`, read from its registry; no container is touched.
+fn resolve_digest(tag: &str) -> Result<String> {
+    let out = Command::new("docker")
+        .args(["buildx", "imagetools", "inspect", tag])
+        .args(["--format", "{{json .Manifest.Digest}}"])
+        .output()
+        .context("running docker buildx imagetools inspect")?;
+    if !out.status.success() {
+        bail!(
+            "cannot resolve {tag}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    parse_digest(&String::from_utf8_lossy(&out.stdout)).with_context(|| format!("resolving {tag}"))
+}
+
+/// The text of `services.<name>` in `compose` (its header line to the next sibling key).
+#[cfg(test)]
+pub fn service_block(compose: &str, name: &str) -> Option<String> {
+    let header = format!("  {name}:");
+    let mut lines = compose.lines().skip_while(|l| l.trim_end() != header);
+    let first = lines.next()?;
+    let mut block = vec![first];
+    for l in lines {
+        let top_level = !l.is_empty() && !l.starts_with(' ') && !l.starts_with('#');
+        let sibling = l.starts_with("  ") && !l.starts_with("   ") && !l.trim().starts_with('#');
+        if top_level || sibling {
+            break;
+        }
+        block.push(l);
+    }
+    Some(block.join("\n"))
+}
+
+fn pinned_files(root: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    std::iter::once(COMPOSE_FILE)
+        .chain(DOCKERFILES)
+        .map(|p| root.join(p))
+}
+
+fn run_pin(root: &Path) -> Result<bool> {
+    for path in pinned_files(root) {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let pinned = pin_text(&text, resolve_digest)?;
+        if pinned != text {
+            std::fs::write(&path, pinned).with_context(|| format!("writing {}", path.display()))?;
+            println!("pinned {}", path.display());
+        }
+    }
+    Ok(true)
+}
+
+fn run_check_pins(root: &Path) -> Result<bool> {
+    let mut bad = Vec::new();
+    for path in pinned_files(root) {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let missing = if path.ends_with("compose.yml") {
+            unpinned(&text)
+        } else {
+            unpinned_dockerfile(&text)
+        };
+        bad.extend(
+            missing
+                .into_iter()
+                .map(|r| format!("{}: {r}", path.display())),
+        );
+    }
+    for b in &bad {
+        eprintln!("unpinned: {b}");
+    }
+    if !bad.is_empty() {
+        eprintln!("run `cargo xtask docker pin` (needs network) and commit the digests");
+    }
+    Ok(bad.is_empty())
+}
+
 fn run_inner(args: &[String]) -> Result<bool> {
     let cmd = parse_args(args)?;
     let root = repo_root()?;
+    match cmd.action {
+        Action::Pin => return run_pin(&root),
+        Action::CheckPins => return run_check_pins(&root),
+        _ => {}
+    }
     ensure_engine()?;
     match cmd.action {
+        Action::Pin | Action::CheckPins => unreachable!("handled above"),
         Action::Up => run_up(&root, cmd.set.as_deref().unwrap_or("full")),
         Action::Down => run_down(&root),
         Action::Status => {
@@ -466,6 +677,8 @@ mod tests {
             "down --set pr",
             "up --set pr -p hacivat-driver-pg",
             "status --verbose",
+            "pin --set pr",
+            "check-pins -p hacivat-session",
         ] {
             assert!(parse_args(&args(bad)).is_err(), "{bad:?} parsed");
         }
@@ -474,9 +687,12 @@ mod tests {
     #[test]
     fn repository_sets_name_the_services() {
         let text = std::fs::read_to_string(crate::workspace_root().join(TARGETS_FILE)).unwrap();
-        assert_eq!(services_in_set(&text, "pr").unwrap(), ["pg17", "mysql84"]);
+        assert_eq!(
+            services_in_set(&text, "pr").unwrap(),
+            ["pg17", "mysql84", "sshd-a", "sshd-b"]
+        );
         let full = services_in_set(&text, "full").unwrap();
-        assert_eq!(full.len(), 13);
+        assert_eq!(full.len(), 16);
         assert!(full.iter().any(|s| s == CA_SERVICE));
         assert!(services_in_set(&text, "nightly").is_err());
     }
@@ -547,7 +763,7 @@ mod tests {
         assert_eq!(
             test_args(&[]).join(" "),
             "test -p hacivat-driver-pg -p hacivat-driver-mysql -p hacivat-driver-sqlite \
-             -p hacivat-session -- --ignored"
+             -p hacivat-session -p hacivat-testkit -- --ignored"
         );
         assert_eq!(
             test_args(&["hacivat-session".to_string()]).join(" "),
@@ -565,5 +781,184 @@ mod tests {
             a.join(" "),
             "compose -f /r/docker/m2a/compose.yml up --detach --wait --wait-timeout 180 pg17 mysql84"
         );
+    }
+
+    // ## m2b-t16-docker-matrix
+    fn read(rel: &str) -> String {
+        std::fs::read_to_string(crate::workspace_root().join(rel)).unwrap()
+    }
+
+    #[test]
+    fn check_pins_flags_unpinned_lines() {
+        assert_eq!(
+            unpinned("services:\n a:\n  image: postgres:17\n b:\n  image: mysql:8.4@sha256:0123\n"),
+            ["postgres:17"]
+        );
+        assert_eq!(unpinned_dockerfile("FROM alpine:3.20\n"), ["alpine:3.20"]);
+        // A locally built image is not pulled; `scratch` and pinned bases are fine.
+        assert!(unpinned("  image: hacivat-m2a-sshd:2\n").is_empty());
+        assert!(
+            unpinned_dockerfile("FROM scratch\nFROM --platform=x a:1@sha256:9 AS b\n").is_empty()
+        );
+        assert_eq!(unpinned_dockerfile("FROM --platform=x a:1 AS b\n"), ["a:1"]);
+    }
+
+    #[test]
+    fn pin_rewrites_tag_with_digest() {
+        assert_eq!(
+            pin_line("    image: postgres:17", "sha256:abcd"),
+            "    image: postgres:17@sha256:abcd"
+        );
+        assert_eq!(
+            pin_line("FROM alpine:3.20", "sha256:ef"),
+            "FROM alpine:3.20@sha256:ef"
+        );
+        assert_eq!(
+            pin_line("FROM --platform=p alpine:3.20 AS b", "sha256:ef"),
+            "FROM --platform=p alpine:3.20@sha256:ef AS b"
+        );
+        assert_eq!(
+            pin_line("  image: mysql:8.4@sha256:0123", "sha256:ef"),
+            "  image: mysql:8.4@sha256:0123"
+        );
+    }
+
+    #[test]
+    fn pin_text_resolves_each_tag_once_and_skips_local_images() {
+        let mut asked = Vec::new();
+        let out = pin_text(
+            "  image: postgres:17\n  image: postgres:17\n  image: hacivat-m2a-sshd:2\n  x: y\n",
+            |tag| {
+                asked.push(tag.to_string());
+                Ok("sha256:aa".to_string())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "  image: postgres:17@sha256:aa\n  image: postgres:17@sha256:aa\n  image: hacivat-m2a-sshd:2\n  x: y\n"
+        );
+        assert_eq!(asked, ["postgres:17"]);
+    }
+
+    #[test]
+    fn digest_comes_from_the_json_output() {
+        let good = format!("sha256:{}", "ab12".repeat(16));
+        assert_eq!(parse_digest(&format!("\"{good}\"\n")).unwrap(), good);
+        assert!(parse_digest("\"sha256:ab12\"").is_err());
+        assert!(parse_digest("not json").is_err());
+        assert!(parse_digest("\"latest\"").is_err());
+    }
+
+    #[test]
+    fn pr_set_includes_sshd() {
+        let ids = services_in_set(&read(TARGETS_FILE), "pr").unwrap();
+        for id in ["pg17", "mysql84", "sshd-a", "sshd-b"] {
+            assert!(ids.contains(&id.to_string()), "{id}");
+        }
+    }
+
+    #[test]
+    fn repo_compose_and_dockerfiles_are_pinned() {
+        assert!(unpinned(&read(COMPOSE_FILE)).is_empty());
+        for d in ["docker/m2a/pg-tr/Dockerfile", "docker/m2a/sshd/Dockerfile"] {
+            assert!(unpinned_dockerfile(&read(d)).is_empty(), "{d}");
+        }
+    }
+
+    #[test]
+    fn sshd_b_is_not_published() {
+        let compose = read(COMPOSE_FILE);
+        let b = service_block(&compose, "sshd-b").unwrap();
+        assert!(!b.contains("ports:"), "{b}");
+        assert!(b.contains("ssh-inner"));
+        let a = service_block(&compose, "sshd-a").unwrap();
+        assert!(a.contains("127.0.0.1:2222:22"), "{a}");
+        assert!(service_block(&compose, "nope").is_none());
+    }
+
+    #[test]
+    fn pg_init_never_uses_noinherit() {
+        assert!(
+            !read("docker/m2a/init/pg.sql")
+                .to_ascii_uppercase()
+                .contains("NOINHERIT")
+        );
+    }
+
+    #[test]
+    fn pin_and_check_pins_parse() {
+        assert_eq!(parse_args(&args("pin")).unwrap().action, Action::Pin);
+        assert_eq!(
+            parse_args(&args("check-pins")).unwrap().action,
+            Action::CheckPins
+        );
+    }
+
+    /// The sshd entrypoint run twice against a temp directory (a container restart): the
+    /// second start must not die on the existing host key, and must publish a fresh one.
+    #[cfg(unix)]
+    #[test]
+    fn sshd_entrypoint_survives_a_restart() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (bin, ssh, art, home) = (
+            root.join("bin"),
+            root.join("ssh"),
+            root.join("artifacts"),
+            root.join("home"),
+        );
+        for d in [&bin, &ssh, &art, &home] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let stub = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // Like the real tool: refuses to overwrite an existing key file.
+        stub(
+            "ssh-keygen",
+            "while [ $# -gt 1 ]; do [ \"$1\" = -f ] && f=\"$2\"; shift; done\n\
+             [ -e \"$f\" ] && exit 1\n\
+             echo \"key-$$-$(date +%s%N)\" > \"$f\"; echo \"pub-$$-$(date +%s%N)\" > \"$f.pub\"",
+        );
+        stub("chown", "exit 0");
+        stub("sshd", "exit 0");
+        for n in ["ssh-client-ed25519.pub", "ssh-client-ed25519-enc.pub"] {
+            std::fs::write(art.join(n), "client-key\n").unwrap();
+        }
+        let scripts = crate::workspace_root().join("docker/m2a/sshd");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let start = || {
+            Command::new("sh")
+                .arg(scripts.join("entrypoint.sh"))
+                .env("PATH", &path)
+                .env("HV_SSHD_ID", "sshd-t")
+                .env("HV_SSH_DIR", &ssh)
+                .env("HV_ARTIFACTS", &art)
+                .env("HV_HOME_SSH", &home)
+                .env("HV_SSHD_BIN", bin.join("sshd"))
+                .output()
+                .unwrap()
+        };
+        let first = start();
+        assert!(first.status.success(), "{first:?}");
+        let pub1 = std::fs::read_to_string(art.join("ssh-host-sshd-t.pub")).unwrap();
+        let second = start();
+        assert!(second.status.success(), "{second:?}");
+        let pub2 = std::fs::read_to_string(art.join("ssh-host-sshd-t.pub")).unwrap();
+        assert_ne!(pub1, pub2, "the restart publishes a fresh host key");
+        assert_eq!(
+            pub2,
+            std::fs::read_to_string(ssh.join("ssh_host_ed25519_key.pub")).unwrap()
+        );
+        let auth = std::fs::read_to_string(home.join("authorized_keys")).unwrap();
+        assert_eq!(auth.lines().count(), 2);
     }
 }
