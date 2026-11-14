@@ -14,14 +14,19 @@
 //! - **Cancel.** [`SqliteCancel`] latches a cancel per request (see there): `sqlite3_interrupt`
 //!   alone is lost when it lands before the statement starts, because SQLite clears the
 //!   interrupt flag whenever a statement starts with none active.
+//! - **Column names** (## m3a-t15-sqlite-typed). rusqlite `expect`s on a name that is not
+//!   UTF-8 (`column.rs:137-147`), and a database file is untrusted input, so names are read
+//!   inside `catch_unwind` ([`column_name`]); such a column is named `?` (R12).
 
 use std::fmt::Write as _;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
 use futures::future::BoxFuture;
 use hacivat_driver::{CancelHandle, ExecSummary, RawError, RawErrorKind, ServerMessage, TxStatus};
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, InterruptHandle, ffi};
+use rusqlite::{Connection, InterruptHandle, Statement, ffi};
 
 use crate::harden::AuthTrail;
 use crate::raw_error;
@@ -44,11 +49,19 @@ struct Latch {
     cancelled_upto: u64,
     /// `close` was called: every job, running or queued, stops.
     closing: bool,
+    // ## m3a-t15-sqlite-typed
+    /// The running job must stop at this instant: a typed query's `close_query(Drain(d))`.
+    deadline: Option<Instant>,
 }
 
 impl Latch {
     fn stops(&self, ticket: u64) -> bool {
         self.closing || ticket <= self.cancelled_upto
+    }
+
+    /// The running job's deadline has passed.
+    fn overdue(&self) -> bool {
+        self.deadline.is_some_and(|at| Instant::now() >= at)
     }
 }
 
@@ -114,11 +127,18 @@ impl SqliteCancel {
         self.latch().stops(ticket)
     }
 
-    /// For the progress handler: the job the connection runs must stop. Outside a request's
-    /// job (the open, probes) only closing stops it.
+    /// For the progress handler: the job the connection runs must stop (cancelled, past its
+    /// deadline, or closing). Outside a request's job (the open, probes) only closing stops it.
     pub(crate) fn pending(&self) -> bool {
         let latch = self.latch();
-        latch.closing || latch.job.is_some_and(|t| latch.stops(t))
+        latch.closing || latch.job.is_some_and(|t| latch.stops(t) || latch.overdue())
+    }
+
+    // ## m3a-t15-sqlite-typed
+    /// The running job stops at `at` (`None`: no deadline): the progress handler interrupts a
+    /// step past it, so a typed drain is bounded even inside one long step.
+    pub(crate) fn set_deadline(&self, at: Option<Instant>) {
+        self.latch().deadline = at;
     }
 
     /// The connection is closing: stop the running statement and every queued job.
@@ -214,7 +234,10 @@ pub(crate) fn execute(
     if cancelled() {
         return Err(interrupted());
     }
-    let columns: Vec<String> = stmt.column_names().map(str::to_string).collect();
+    // ## m3a-t15-sqlite-typed: names read inside `catch_unwind` (R12).
+    let columns: Vec<String> = (0..stmt.column_count())
+        .map(|i| column_name(&stmt, i).unwrap_or_else(|| UNREADABLE_NAME.to_string()))
+        .collect();
     let width = columns.len();
     let before = conn.total_changes();
     let mut kept = Vec::new();
@@ -251,6 +274,20 @@ pub(crate) fn execute(
         notice_codes: Vec::new(),
         tx: tx_status(conn),
     })
+}
+
+// ## m3a-t15-sqlite-typed
+/// The name M2b's `execute` and the typed path give a column whose name is not UTF-8 (R12).
+pub(crate) const UNREADABLE_NAME: &str = "?";
+
+/// The name of result column `i`, or `None` when it cannot be read: rusqlite `expect`s on a
+/// name that is not UTF-8 (`column.rs:137-147`, and on a NULL name pointer, out of memory), so
+/// the read runs inside `catch_unwind`. The panic unwinds only through this read on the
+/// connection's thread; the statement and the connection are untouched by it.
+pub(crate) fn column_name(stmt: &Statement<'_>, i: usize) -> Option<String> {
+    catch_unwind(AssertUnwindSafe(|| stmt.column_name(i).map(str::to_string)))
+        .ok()?
+        .ok()
 }
 
 /// A value as text: integers in decimal, reals with at least one fractional digit (`2.0`),

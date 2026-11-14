@@ -210,3 +210,8 @@ error-conn-auth-insecure-method-body-tls = Bağlantı şifreli, ancak sertifika 
 error-conn-auth-insecure-method-body-plain = Bağlantı şifreli değil; parola ağda başkalarının okuyabileceği ya da yeniden kullanabileceği bir biçimde taşınırdı. Hacivat parolayı göndermedi. Sunucuda TLS'i açın ya da bu ağda riski kabul ediyorsanız Şifreleme'yi Kapalı yapın.
 # Review: PO
 error-conn-auth-insecure-method-body = { error-conn-auth-insecure-method-body-plain }
+
+## m3a-t15-sqlite-typed
+
+# Review: PO
+error-exec-sqlite-busy-hint = Bu veritabanı dosyası başka bir program tarafından kilitlenmiş. O program dosyayla işini bitirince deyimi yeniden çalıştırın.

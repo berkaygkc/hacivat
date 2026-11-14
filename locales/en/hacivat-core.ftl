@@ -298,3 +298,11 @@ error-conn-auth-insecure-method-body-plain = The connection isn't encrypted, so 
 # The class's default explanation (L026): the no-TLS one.
 # Review: PO
 error-conn-auth-insecure-method-body = { error-conn-auth-insecure-method-body-plain }
+
+## m3a-t15-sqlite-typed
+
+# The hint under an SQLite statement that failed with SQLITE_BUSY: another program holds a
+# lock on the database file, and Hacivat stopped waiting for it (5 s; there is no retry). The
+# engine's own message is shown verbatim next to it.
+# Review: PO
+error-exec-sqlite-busy-hint = Another program has locked this database file. Run the statement again when that program is done with it.

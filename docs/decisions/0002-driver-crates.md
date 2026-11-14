@@ -847,3 +847,125 @@ answers `1227`.
   `mysql_client_certificate_sign_in` (`docker_m2b_tls_ssh.rs`) signs in with the client
   certificate and its PKCS #8 key, and with the encrypted key and its passphrase, under
   `VerifyCa` with the test CA (`CaOnly`); without a certificate the server answers `1045`.
+
+## m3a-t15 — SQLite typed
+
+**One job per typed query** (`typed.rs`, the methods in `open.rs`). `query` takes a cancel
+ticket and sends one job to the connection's thread; the job prepares, checks, and answers
+`Started` (or the error), so `query` returns once the statement is prepared: SQLite's refusals
+(syntax, two statements, the read-only authorizer, `readonly-required`) fail `query` itself,
+errors while stepping (`SQLITE_BUSY`, constraints, the interrupt) come from `next_event`. The job
+then steps the statement (`Statement<'conn>` on its stack: no self-referential type, no borrow
+across threads) into `ChunkBuilder::with_schema` chunks and sends each one on a channel of depth
+4. A consumer that stops reading stops the stepping: the job parks on the full channel, so the
+memory of an unread result is the first chunk plus four (unit test
+`memory_is_bounded_by_the_channel_depth`: 100,000 rows, the job parked after at most 901).
+
+- `typed_caps() = { suspend: true, binds: false, close_needs_kill: false, idle_bound }`.
+- **Suspension.** A suspendable query stops after `first_rows` rows, then after each
+  `fetch_more(n)` batch of `n` (`0` means `chunk_rows`). At that read-ahead point the job steps
+  one row more: no row → the result ends with no `Suspended` (the statement is finalized, so no
+  cursor and no lock stay behind; `FakeDriver` behaves the same, PostgreSQL does not); a row →
+  it is held as the next batch's first, `Suspended` goes out and the job blocks on its command
+  channel (`FetchMore(n)` / `Close(how)`). Rejected: suspending exactly at the limit, as
+  PostgreSQL does, which keeps a SHARED lock for a cursor that has nothing left to give. Cost of
+  the read-ahead: when the next matching row is far away (a selective scan), the step that finds
+  it runs before `Suspended`; the rows already sent are on screen, and a cancel stops the step.
+- **Chunks.** Sealed at `first_rows` rows (the first), `chunk_rows` (later ones), `chunk_bytes`
+  or `is_full()`, and at each batch's end. A statement without columns (DML, DDL) is one result
+  with an empty schema; `ResultEnd.rows_affected` is `sqlite3_changes` for a statement that
+  writes (0 when nothing changed, as M2b), none for a read; the command tag is the first keyword
+  (Q35). Text without a statement is one empty result with no tag.
+- **One open query per connection.** The job holds the thread while the query streams or waits,
+  and any other job would queue behind a command only the same owner can send, so `execute`,
+  `batch`, `ping` and `server_info` answer `Unsupported` while a query is open and `probe`
+  reports nothing; a second `query` is `Unsupported`.
+- **Closing.** `Close(Now)` (and `AfterKill`, never needed) finalizes; `Close(Drain(d))` steps
+  on, counting rows, until the result ends (`Completed { rows }`) or `d` passes (`Closed`). The
+  cancel latch gained a deadline (`SqliteCancel::set_deadline`) that the progress handler honours,
+  so even one long step stops at `d`. The job answers after it finalized: the lock is gone when
+  `close_query` returns. A `Close` while rows stream is seen at the next row (the job polls its
+  command channel each row); chunks already in flight are dropped by `close_query`, so `Closed {
+  rows }` counts what `next_event` handed out. A closed command channel (the connection dropped
+  without `close`) ends the job and finalizes the statement; a closed event channel too. The job
+  sees its channels only between rows, so dropping a connection with a query open also closes
+  the cancel latch (`Drop for SqliteConn`), which stops a step that never yields a row.
+- **Cancel.** The ticket covers the whole job, suspension included: the progress handler and
+  `sqlite3_interrupt` stop a running step (the interrupt flag stays set while the suspended
+  statement is active, so it also stops the next step), and the job reads the latch after
+  prepare and when a batch resumes. A cancel never reaches the next query (the M2b latch rules).
+
+**Types** (`decode.rs`). SQLite's five affinity rules on the declared type (ASCII case folding):
+INTEGER → `I64`, TEXT → `Var(Text)`, REAL → `F64`; `BOOL`/`BOOLEAN` → `Bool` while a value is 0
+or 1; `DATE`/`DATETIME`/`TIMESTAMP` → text verbatim; other NUMERIC, BLOB affinity, no declared
+type and expressions → the storage class of the column's first non-NULL value in the first chunk
+(fallback `Int` for NUMERIC, `Bytes` for the rest). Until every such column has a value the rows
+are held as whole `Value`s and replayed once the plan is known (usually at the first row), so
+`ResultStart` waits for that. A value whose storage class is not its column's is a whole-value
+exception of its own class (`TEXT` `'abc'` in an `INTEGER` column reads back as text); integers
+are never widened to floats. Text and blobs go through `push_bytes` or
+`ChunkBuilder::capped_value` (cell cap, total length, `Lossy` for text that is not UTF-8, never
+replaced). `NativeType::Sqlite { decl, affinity }`; `OriginHint::Sqlite { database, table,
+column }` from the `column_metadata` feature (workspace dependency), captured for M6.
+
+**Hostile files (R12, P28).** rusqlite `expect`s on metadata that is not UTF-8
+(`column.rs:137-147, 181-212`). Every read runs inside `catch_unwind` on the connection's thread:
+the name (`exec::column_name`, also used by M2b's `execute` now), the declared type
+(`columns().nth(i)`, which maps only that column) and the origin. A valid name is kept when only
+the declared type is unreadable, and the column is `Opaque` (`NativeType::Unknown`, a `Values`
+buffer holding each value whole, of its own class); an unreadable name becomes `?` and, because
+rusqlite reads the name first, its declared type is unreadable too; an origin with any
+unreadable part is left out. Cell values have no such exposure (rusqlite asserts only on NULL
+pointers, which is out of memory). The caught panic's message is printed by the default hook;
+the connection stays usable. The workspace builds with `panic = "unwind"` everywhere.
+
+**Read-only hardening, unchanged on the typed path.** The job clears the authorizer trail,
+prepares (the authorizer judges here), then requires `sqlite3_stmt_readonly` unless the
+statement was exactly the journal-mode query (Q16), as `execute` does; `query_only`,
+`LIMIT_ATTACHED` 0 and the attach settings are untouched. A statement with a parameter is
+`Unsupported` on the typed path (binds are M3b; an unbound parameter would run as NULL, which can
+silently change what a `DELETE … WHERE id = ?` does). `Protocol::Simple` and binds are
+`Unsupported`.
+
+**Busy (R4).** After the open the busy timeout is 5 s (`EXEC_BUSY_TIMEOUT`; the header read
+still waits the connect timeout). `SQLITE_BUSY` stays the engine's error (`Db`, extended code,
+text verbatim) with no retry; `hacivat_driver_sqlite::error_hint` maps it to the Fluent id
+`error-exec-sqlite-busy-hint` (`hacivat-core.ftl`, EN and TR), which the error view shows under
+the server text. The id is in the `error-` family: the catalog grammar
+(`hacivat-l10n-schema::is_valid_id`) does not admit `exec-` yet. `ServerMessage::hint` (the
+server's own hint) stays empty: a Hacivat sentence there would be shown as server text. The
+class stays `internal` (the M2a catalog's `5 = "internal"`):
+the taxonomy has no "locked" class, and adding one is not this task's. A cancel during a busy
+wait takes effect only when the wait ends (SQLite's busy handler sleeps without checking the
+interrupt), so up to 5 s.
+
+**Idle bound (ER6).** A live statement holds a SHARED lock in a rollback-journal mode, so no
+other process can commit: `idle_bound` is 30 s. It is `None` only when every database with a
+file (`PRAGMA database_list`) is in WAL mode, where a cursor only keeps a checkpoint from
+completing; a database without a file (`:memory:`, `temp`) holds no lock another process sees.
+An attached rollback-journal file makes it 30 s again; modes that cannot be read make it 30 s
+(fail closed). Read when the connection opens, on `probe`, and by every typed query after
+prepare, so the bound read after `query` is the open cursor's.
+
+**Known limits.** The read-ahead step can be long (above). `typed_caps()` read between queries
+reflects the last query's start; a `PRAGMA journal_mode = …` takes effect at the next query.
+`OriginHint` needs a table column (expressions have none).
+
+**Tests.** `tests/typed.rs` (19 + 1 perf): the million-row suspend/resume/finalize (first chunk
+501, `fetch_more(10000)` → 4,096/4,096/1,808, `Closed { rows: 10501 }`, another connection can
+commit at once); whole results without suspension; sealing by rows and bytes; the read-ahead end;
+DML/DDL; storage-class exceptions; the affinity table; declared types, native types and origins;
+large and invalid text; the read-only authorizer refusing `ATTACH`, writes and `VACUUM` on the
+typed path; the interrupt during one long step, at a suspended cursor and while the consumer
+stalls; `SQLITE_BUSY` with the hint (`PRAGMA busy_timeout` = 5000); a closed command channel
+ending the job; a dropped connection stopping one endless step, also while a drain waits on it;
+one open query per connection; drains (complete, endless rows, one endless step); the idle bound
+per journal mode; `Simple`, binds and parameters refused. Calls that a regression would block
+forever are wrapped in a two-minute guard (`unhung`), so they fail instead of hanging. The perf
+test (`HACIVAT_PERF=1`, release) asserts the first chunk of a million rows within 20 ms (median
+of 10). `tests/typed_hostile.rs` (7): a declared type and names that are not UTF-8, the M2b
+path, an origin through a view of a table whose name is not UTF-8, 300 generated cells kept
+exactly, and every decoder over every storage class. Unit tests: the memory bound
+(`open.rs`), the busy hint's codes (`lib.rs`), the limits and caps (`typed.rs`). Mutation
+checks: each of the column-name guard, the declared-type guard, the parameter refusal, the
+channel depth, the busy timeout and the drain deadline, removed, fails its test.
