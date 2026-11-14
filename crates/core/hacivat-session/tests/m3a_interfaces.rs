@@ -807,3 +807,48 @@ async fn a_simple_protocol_query_is_refused() {
         );
     }
 }
+
+// ## m3a-t01b-seams (round 2): the review's round-1 probe.
+
+/// PostgreSQL closes a portal created inside a savepoint when that savepoint is rolled back
+/// (R-M3-23's `SAVEPOINT hv_cursor`); one created before the savepoint survives (above).
+#[tokio::test]
+async fn a_portal_opened_inside_a_savepoint_does_not_survive_rollback_to_it() {
+    let f = fake_pg()
+        .tracks_transactions()
+        .queries(vec![select(10_000), select(10_000)]);
+    let mut c = connect_fake(&f).await;
+    c.batch("BEGIN").await.unwrap(); // the user's transaction
+    c.batch("SAVEPOINT hv_cursor").await.unwrap(); // Hacivat's, around the cursor
+    c.query(spec("SELECT * FROM t", true)).await.unwrap();
+    c.next_event().await.unwrap();
+    c.next_event().await.unwrap();
+    assert_eq!(c.next_event().await.unwrap(), QueryEvent::Suspended);
+    c.batch("ROLLBACK TO SAVEPOINT hv_cursor").await.unwrap();
+    let resumed = c.fetch_more(10).await;
+    let next = if resumed.is_ok() {
+        Some(c.next_event().await)
+    } else {
+        None
+    };
+    assert!(
+        resumed.is_err() || next.as_ref().is_some_and(|n| n.is_err()),
+        "fetch_more after ROLLBACK TO the portal's own savepoint: {resumed:?} then {next:?}"
+    );
+    assert_eq!(resumed.as_ref().err().and_then(sqlstate), Some("34000"));
+    // The transaction goes on, and so does the savepoint: a portal opened inside a later
+    // savepoint that is released (not rolled back) survives.
+    assert_eq!(c.tx_status(), TxStatus::InTx);
+    assert_eq!(
+        c.close_query(CloseHow::Now).await.unwrap(),
+        Closed::Closed { rows: 0 }
+    );
+    c.batch("SAVEPOINT inner").await.unwrap();
+    c.query(spec("SELECT * FROM u", true)).await.unwrap();
+    c.next_event().await.unwrap();
+    c.next_event().await.unwrap();
+    assert_eq!(c.next_event().await.unwrap(), QueryEvent::Suspended);
+    c.batch("RELEASE SAVEPOINT inner").await.unwrap();
+    c.fetch_more(10).await.unwrap();
+    assert_eq!(rows_of(&c.next_event().await.unwrap()), 10);
+}

@@ -42,10 +42,11 @@ pub(crate) fn on_blur(v: &mut EditorView, window: &mut Window, cx: &mut Context<
     let _ = (v, window, cx);
 }
 
-/// After every committed transaction, with the `UserEvent` that made it (Task 27: owe the
-/// platform `notify_text_input_changed` unless the edit came from the IME). The view calls it
-/// from `commit`, which has no window; Task 27 records here and notifies in `on_frame`.
-/// Task 1b: nothing.
+/// After every `Committed`, with the `UserEvent` that made it (Task 27: owe the platform
+/// `notify_text_input_changed` unless the edit came from the IME). The view calls it from
+/// `apply_committed`, which has no window; Task 27 records here and notifies in `on_frame`.
+/// Task 27's own marked text commits through `ImeCore::mark`/`commit` and hands the
+/// `Committed` to `EditorView::apply_committed` too. Task 1b: nothing.
 pub(crate) fn after_commit(
     v: &mut EditorView,
     committed: &Committed,
@@ -55,8 +56,8 @@ pub(crate) fn after_commit(
     let _ = (v, committed, event, cx);
 }
 
-/// Once per painted frame, before the element's paint (Task 27: send what `after_commit`
-/// owes). Task 1b: nothing.
+/// Once per frame, at the start of the element's prepaint (`element::prepaint_frame`; Task 27:
+/// send what `after_commit` owes). Task 1b: nothing.
 pub(crate) fn on_frame(v: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) {
     let _ = (v, window, cx);
 }

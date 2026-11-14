@@ -48,6 +48,18 @@ pub fn request_window_close(window: &mut Window, cx: &mut App) -> CloseDecision 
     crate::shell::hooks::quit_decision(cx)
 }
 
+/// The title bar's client-drawn close button (Linux client decorations): asks the quit guard
+/// once ([`request_window_close`]) and removes the window on `Proceed`; removing it does not
+/// ask again (round 2). The platform's own close goes through the should-close callback
+/// `Workspace::new` installs.
+pub fn close_window(window: &mut Window, cx: &mut App) -> CloseDecision {
+    let decision = request_window_close(window, cx);
+    if decision == CloseDecision::Proceed {
+        window.remove_window();
+    }
+    decision
+}
+
 /// How often the app asked the platform to quit (test seam, feature `test-support`: the test
 /// platform's quit does nothing observable).
 #[cfg(feature = "test-support")]

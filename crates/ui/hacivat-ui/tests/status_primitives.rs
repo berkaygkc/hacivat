@@ -1590,3 +1590,36 @@ fn capsule_reconnecting_has_a_run_marker_and_no_clock(cx: &mut TestAppContext) {
     assert!(drawn.contains(&"Reconnecting".into()), "{drawn:?}");
     assert!(!drawn.contains(&"in 4 s".into()), "{drawn:?}");
 }
+
+// ## m3a-t01b-seams (round 2)
+
+/// The Linux client-drawn close button calls the host's `on_close` (the app's quit guard,
+/// D-014) instead of removing the window itself, once per click.
+#[gpui::test]
+fn the_linux_close_button_calls_the_hosts_on_close(cx: &mut TestAppContext) {
+    let closes = Rc::new(Cell::new(0u32));
+    let seen = closes.clone();
+    let vcx = host(cx, move |_, _| {
+        let seen = seen.clone();
+        div()
+            .w_full()
+            .child(
+                TitleBar::new(ChromeKind::LinuxClient)
+                    .brand("HACIVAT".into())
+                    .on_close(move |_, _| seen.set(seen.get() + 1)),
+            )
+            .into_any_element()
+    });
+    vcx.simulate_resize(gpui::size(px(1400.0), px(300.0)));
+    vcx.run_until_parked();
+    let before = vcx.update(|_, cx| cx.windows().len());
+    let close = bounds_of(vcx, "window-close");
+    vcx.simulate_click(close.center(), Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(closes.get(), 1);
+    assert_eq!(
+        cx.update(|cx| cx.windows().len()),
+        before,
+        "the host decides"
+    );
+}

@@ -100,6 +100,12 @@ pub trait LanguageService: 'static {
     fn change(&self, doc: DocId, snap: &Snapshot, changes: &ChangeDesc, cx: &mut App);
     fn close(&self, doc: DocId);
     /// Registers the repaint callback for a fresh analysis of `doc`.
+    ///
+    /// **Reentrancy (review round 2):** never call `notify` synchronously from `open`,
+    /// `set_context` or `change`, nor from inside any other call of this trait. The editor calls
+    /// them while it is itself being updated, and its `notify` updates the editor again
+    /// (`preview::on_update`), which GPUI refuses. Call it from a later foreground task (the
+    /// worker's result landing on the UI thread), as Task 24's design does.
     fn on_update(&self, doc: DocId, notify: InvalidateFn);
     fn statements(&self, doc: DocId, version: u64, range: Range<usize>) -> Arc<[StatementSpan]>;
     /// The preview only (never what runs); `None` when there is no analysis at `version`.

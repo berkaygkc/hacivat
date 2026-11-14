@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use hacivat_text::{ChangeLog, Committed, Snapshot};
 use hacivat_ui::text::TextFn;
-use hacivat_ui_core::gpui_surface::{App, SharedString, Window};
+use hacivat_ui_core::gpui_surface::{App, Hitbox, SharedString, Window};
 
 use crate::element::FrameLayout;
 use crate::gutter::GutterCtx;
@@ -149,14 +149,35 @@ pub fn on_commit(s: &mut MarkStore, c: &Committed, log: &ChangeLog, snap: &Snaps
     let _ = (s, c, log, snap);
 }
 
+/// The gutter's hit targets of one frame (a stale mark's "Edited since execution" tooltip, a
+/// clickable glyph): inserted in prepaint, read in paint.
+#[derive(Debug, Default)]
+pub struct MarkHitboxes {
+    pub glyphs: Vec<(MarkKey, Hitbox)>,
+}
+
+/// Inserts the marks' hit targets (Task 28: `window.insert_hitbox`, which GPUI allows only in
+/// prepaint; round 2 of Task 1b's review). Task 1b: none.
+pub fn prepaint(
+    m: &MarkStore,
+    g: &GutterCtx<'_>,
+    window: &mut Window,
+    cx: &mut App,
+) -> MarkHitboxes {
+    let _ = (m, g, window, cx);
+    MarkHitboxes::default()
+}
+
 /// Paints the marks into the gutter, and each end-of-line status where `layout` says it does
-/// not collide with the text (Task 28). Task 1b: nothing.
+/// not collide with the text; `hits` are this frame's [`prepaint`] targets (Task 28). Task 1b:
+/// nothing.
 pub fn paint(
     m: &MarkStore,
     g: &GutterCtx<'_>,
     layout: &FrameLayout,
+    hits: &MarkHitboxes,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let _ = (m, g, layout, window, cx);
+    let _ = (m, g, layout, hits, window, cx);
 }

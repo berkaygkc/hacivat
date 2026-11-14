@@ -57,10 +57,18 @@ pub enum Rule {
     /// `hacivat-text` (the headless editor core) reaches `hacivat-ui-core`, GPUI or a zed
     /// crate through its normal dependencies.
     TextCoreNotHeadless,
-    /// A member depends on `ropey` with its default features or `unicode_lines`, or the
-    /// workspace's resolved `ropey` has `unicode_lines`: feature unification would then make
-    /// U+2028, U+2029, NEL, VT and FF line breaks in `hacivat-text` whenever that member is
-    /// built too (fix round 1; CI run 43545681877). Every member uses `ropey.workspace = true`.
+    /// A member depends on `ropey` with its default features or `unicode_lines`, a member's
+    /// `[features]` can turn `ropey/unicode_lines` (or `ropey/default`) on, or the ropey
+    /// `hacivat-text` resolves to has `unicode_lines` in the workspace's resolve: feature
+    /// unification would then make U+2028, U+2029, NEL, VT and FF line breaks in `hacivat-text`
+    /// whenever that member is built too (fix round 1; CI run 43545681877). Every member uses
+    /// `ropey.workspace = true`.
+    ///
+    /// Limits (review round 2): the resolve is `cargo metadata`'s, i.e. the members' default
+    /// features over the whole workspace, which is what `cargo build`/`test --workspace` build;
+    /// a feature that reaches ropey only through a non-member's optional feature is not seen,
+    /// and the declaration check matches the crate name (another ropey major with its defaults
+    /// is flagged too: fail closed).
     RopeLineBreaks,
 }
 
@@ -339,6 +347,18 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
         }) {
             add(name, Rule::RopeLineBreaks, vec![ROPE.into()]);
         }
+        // Round 2: a member feature that would turn the line features on when it is built.
+        if root.features.values().flatten().any(|f| {
+            ROPE_LINE_FEATURES
+                .iter()
+                .any(|line| *f == format!("{ROPE}/{line}") || *f == format!("{ROPE}?/{line}"))
+        }) {
+            add(
+                name,
+                Rule::RopeLineBreaks,
+                vec![format!("[features] {ROPE}")],
+            );
+        }
 
         if PRODUCT_CRATES.contains(&name)
             && let Some(bad) = root.dependencies.iter().find(|d| {
@@ -402,11 +422,19 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
             }
         }
     }
-    // ## m3a-t01b-seams (fix round 1): the unified features, whoever enables them.
+    // ## m3a-t01b-seams (fix round 1): the unified features, whoever enables them; round 2:
+    // of the ropey `hacivat-text` resolves to (any ropey when it is not in the graph).
+    let text_rope: Vec<&PackageId> = members
+        .iter()
+        .filter(|m| m.name.as_str() == TEXT_CORE)
+        .flat_map(|m| edges.get(&m.id).into_iter().flatten())
+        .filter(|(id, _)| pkgs.get(id).is_some_and(|p| p.name.as_str() == ROPE))
+        .map(|(id, _)| *id)
+        .collect();
     for node in md.resolve.iter().flat_map(|r| &r.nodes) {
-        if pkgs.get(&node.id).is_some_and(|p| p.name.as_str() == ROPE)
-            && node.features.iter().any(|f| f.as_str() == "unicode_lines")
-        {
+        let is_rope = pkgs.get(&node.id).is_some_and(|p| p.name.as_str() == ROPE);
+        let relevant = text_rope.is_empty() || text_rope.contains(&&node.id);
+        if is_rope && relevant && node.features.iter().any(|f| f.as_str() == "unicode_lines") {
             add(ROPE, Rule::RopeLineBreaks, vec!["unicode_lines".into()]);
         }
     }
@@ -895,6 +923,28 @@ mod tests {
             &["unicode_lines"],
         );
         assert_eq!(rule_of(&md, "hacivat-text"), Rule::RopeLineBreaks);
+    }
+
+    #[test]
+    fn a_member_feature_that_turns_on_unicode_lines_is_flagged() {
+        let mut md = metadata(vec![member(
+            "spike-editor",
+            "spikes",
+            vec![Dep {
+                default_features: false,
+                ..dep("ropey", DepKind::Normal, &["cr_lines"], None)
+            }],
+        )]);
+        assert!(violations(&md, &lints_ok).is_empty());
+        let spike = md
+            .packages
+            .iter_mut()
+            .find(|p| p.name.as_str() == "spike-editor")
+            .unwrap();
+        spike
+            .features
+            .insert("lines".into(), vec!["ropey/unicode_lines".into()]);
+        assert_eq!(rule_of(&md, "spike-editor"), Rule::RopeLineBreaks);
     }
 
     #[test]

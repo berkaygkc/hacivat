@@ -1057,9 +1057,7 @@ impl Workspace {
         }
         // ## m3a-t01b-seams (fix round 1): the client-drawn close asks the quit guard (D-014).
         bar = bar.on_close(|window, cx| {
-            if crate::commands::request_window_close(window, cx) == CloseDecision::Proceed {
-                window.remove_window();
-            }
+            crate::commands::close_window(window, cx);
         });
         bar
     }
