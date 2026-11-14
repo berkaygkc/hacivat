@@ -2519,6 +2519,8 @@ proptest! { #[test] fn preview_equals_execution_for_exact_items(doc in sql_docs(
 
 **Files:** Create `docs/benchmarks/m3a.md` and `docs/benchmarks/po-demo-m3a.md`; `design/baselines/m3a/macos/*.png` after the PO signs off.
 
+**Gate housekeeping (controller ruling, T1b review I6):** delete the `M3A_PENDING` list in `crates/app/hacivat-app/tests/commands.rs` (it must be empty: every M3a command registered and bound), and run the keymap tests; a non-empty list fails the gate.
+
 **M3a exit criteria.** Each is PASS or FAIL in `m3a.md`, with evidence:
 
 | # | Criterion | Evidence |
