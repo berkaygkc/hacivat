@@ -4,10 +4,10 @@
 //! The drivers build chunks with [`ChunkBuilder`] (one typed buffer per [`BufKind`]);
 //! [`Chunk::from_values`] (Task 1b) builds one of [`BufKind::Values`] buffers for fixtures.
 //!
-//! Bytes per cell, besides one validity bit: `Bool` 1/8; `I64`, `U64`, `F64`, `Temporal
-//! { Micros }` 8; `F64 { f32 }`, `Temporal { Days }` 4; `Temporal2` 12; `Fixed16` 16; `Dec64`
-//! and `Dec128` 24 (a whole `DecimalVal`, because `ValueRef::Decimal` borrows one); `Var` 4 plus
-//! the payload; `Values` 32 plus the payload; an exception 36 plus its payload.
+//! Bytes per cell, besides one validity bit: `Bool` 1/8; `I64`, `U64`, `F64`, `Dec64`,
+//! `Temporal { Micros }` 8; `F64 { f32 }`, `Temporal { Days }` 4; `Temporal2` 12; `Fixed16` 16;
+//! `Dec128` 18 (two words and a scale); `Var` 4 plus the payload; `Values` 32 plus the payload;
+//! an exception 36 plus its payload. `cell` builds a decimal's `DecimalRef` by value.
 
 mod bitmap;
 mod buf;

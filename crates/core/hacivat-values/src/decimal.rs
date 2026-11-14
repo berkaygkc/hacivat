@@ -25,6 +25,20 @@ pub enum Repr {
     Big(Arc<str>),
 }
 
+/// A [`DecimalVal`] by value, as `ValueRef::Decimal` carries it: `Copy`, no allocation, so a
+/// chunk's `Dec64` and `Dec128` buffers keep bare mantissas and build one on each read. The
+/// same value as its `DecimalVal`, exactly: [`DecimalRef::to_decimal`] gives it back, and
+/// equality, scale, sign and canonical text agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DecimalRef<'a>(Inner<'a>);
+
+/// [`Repr`] borrowed: the same layout for `Small`, the text for `Big`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Inner<'a> {
+    Small { mant: [u64; 2], scale: i16 },
+    Big(&'a str),
+}
+
 /// Why a decimal's text (or wire form) did not convert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DecimalError {
@@ -165,31 +179,32 @@ impl DecimalVal {
         })
     }
 
+    /// This value by value, without allocating (what `Value::view` hands out).
+    pub fn view(&self) -> DecimalRef<'_> {
+        DecimalRef(match &self.0 {
+            Repr::Small { mant, scale } => Inner::Small {
+                mant: *mant,
+                scale: *scale,
+            },
+            Repr::Big(text) => Inner::Big(text),
+        })
+    }
+
     /// Digits after the decimal point.
     pub fn scale(&self) -> i16 {
-        match &self.0 {
-            Repr::Small { scale, .. } => *scale,
-            // The canonical text has at most `MAX_SCALE` digits after its point.
-            Repr::Big(text) => text
-                .find('.')
-                .map_or(0, |dot| (text.len() - dot - 1) as i16),
-        }
+        self.view().scale()
     }
 
     /// Whether the sign is negative (`-0.00` included).
     pub fn is_negative(&self) -> bool {
-        match &self.0 {
-            Repr::Small { mant, .. } => mant[1] & SIGN != 0,
-            Repr::Big(text) => text.starts_with('-'),
-        }
+        self.view().is_negative()
     }
 
     /// Appends the canonical text, exactly: an optional `-`, the integer digits without
     /// leading zeros (`0` when there are none), then `.` and exactly `scale` digits when the
     /// scale is positive (`1.50`, `-0.00`, `0.000001`, `12345`).
     pub fn write_canonical(&self, out: &mut String) {
-        // Writing into a `String` cannot fail.
-        let _ = self.write_to(out);
+        self.view().write_canonical(out);
     }
 
     /// How the value is held.
@@ -238,11 +253,92 @@ impl DecimalVal {
         }
         Ok(DecimalVal(Repr::Big(text.into())))
     }
+}
 
-    fn write_to<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
-        let (mant, scale) = match &self.0 {
-            Repr::Big(text) => return out.write_str(text),
-            Repr::Small { mant, scale } => (*mant, *scale),
+impl<'a> DecimalRef<'a> {
+    /// `mant` × 10^−`scale` (a `Dec64` cell).
+    pub(crate) fn from_mantissa(mant: i64, scale: i16) -> Self {
+        let sign = if mant < 0 { SIGN } else { 0 };
+        DecimalRef(Inner::Small {
+            mant: [mant.unsigned_abs(), sign],
+            scale,
+        })
+    }
+
+    /// A `Small` value from words a `Dec128` buffer took out of one with [`DecimalRef::small`].
+    pub(crate) fn from_small(mant: [u64; 2], scale: i16) -> Self {
+        DecimalRef(Inner::Small { mant, scale })
+    }
+
+    /// The words and scale of a value of up to 38 digits.
+    pub(crate) fn small(self) -> Option<([u64; 2], i16)> {
+        match self.0 {
+            Inner::Small { mant, scale } => Some((mant, scale)),
+            Inner::Big(_) => None,
+        }
+    }
+
+    /// The mantissa as an `i64` and the scale, when an `i64` holds it exactly (`-0` does not:
+    /// an `i64` zero has no sign).
+    pub(crate) fn mantissa_i64(self) -> Option<(i64, i16)> {
+        let (mant, scale) = self.small()?;
+        let (mag, neg) = (mant[0], mant[1] & SIGN != 0);
+        if mant[1] & !SIGN != 0 {
+            return None;
+        }
+        let m = if neg {
+            if mag == 0 {
+                return None;
+            }
+            0i64.checked_sub_unsigned(mag)?
+        } else {
+            i64::try_from(mag).ok()?
+        };
+        Some((m, scale))
+    }
+
+    /// The owned value (allocates for a `Big` one).
+    pub fn to_decimal(self) -> DecimalVal {
+        DecimalVal(match self.0 {
+            Inner::Small { mant, scale } => Repr::Small { mant, scale },
+            Inner::Big(text) => Repr::Big(text.into()),
+        })
+    }
+
+    /// Digits after the decimal point.
+    pub fn scale(self) -> i16 {
+        match self.0 {
+            Inner::Small { scale, .. } => scale,
+            // The canonical text has at most `MAX_SCALE` digits after its point.
+            Inner::Big(text) => text
+                .find('.')
+                .map_or(0, |dot| (text.len() - dot - 1) as i16),
+        }
+    }
+
+    /// Whether the sign is negative (`-0.00` included).
+    pub fn is_negative(self) -> bool {
+        match self.0 {
+            Inner::Small { mant, .. } => mant[1] & SIGN != 0,
+            Inner::Big(text) => text.starts_with('-'),
+        }
+    }
+
+    /// Whether the value has more than 38 digits (held as text).
+    pub fn is_big(self) -> bool {
+        matches!(self.0, Inner::Big(_))
+    }
+
+    /// Appends the canonical text ([`DecimalVal::write_canonical`]).
+    pub fn write_canonical(self, out: &mut String) {
+        // Writing into a `String` cannot fail.
+        let _ = self.write_to(out);
+    }
+
+    fn write_to<W: fmt::Write>(self, out: &mut W) -> fmt::Result {
+        let (mant, scale) = match self.0 {
+            Inner::Big(text) => return out.write_str(text),
+            Inner::Small { mant, scale } => (mant, scale),
         };
         if mant[1] & SIGN != 0 {
             out.write_char('-')?;
@@ -293,7 +389,20 @@ impl DecimalVal {
 impl fmt::Display for DecimalVal {
     /// The canonical text ([`DecimalVal::write_canonical`]).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.view().write_to(f)
+    }
+}
+
+impl fmt::Display for DecimalRef<'_> {
+    /// The canonical text ([`DecimalVal::write_canonical`]).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.write_to(f)
+    }
+}
+
+impl<'a> From<&'a DecimalVal> for DecimalRef<'a> {
+    fn from(v: &'a DecimalVal) -> Self {
+        v.view()
     }
 }
 

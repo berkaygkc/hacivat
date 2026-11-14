@@ -118,7 +118,9 @@ impl ChunkBuilder {
         self.typed(col, "push_dec64", Cell::Dec64(mant));
     }
 
-    /// A `Dec64` or `Dec128` cell, any scale; a value of more than 38 digits is an exception.
+    /// A `Dec64` or `Dec128` cell. Kept exactly as an exception instead: in a `Dec64` column a
+    /// value of another scale, beyond an `i64` mantissa, or `-0`; in either, more than 38
+    /// digits.
     pub fn push_decimal(&mut self, col: u32, v: &DecimalVal) {
         self.typed(col, "push_decimal", Cell::Decimal(v));
     }

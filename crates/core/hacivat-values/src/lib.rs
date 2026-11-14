@@ -18,7 +18,7 @@ pub mod value;
 
 pub use bind::BindValue;
 pub use columnar::{BufKind, CellFlags, Chunk, ChunkBuilder, TempUnit, VarKind};
-pub use decimal::{DecimalError, DecimalVal, Repr};
+pub use decimal::{DecimalError, DecimalRef, DecimalVal, Repr};
 pub use logical::{ColumnMeta, LogicalType, NetKind, ResultSchema};
 pub use native::{NativeType, OriginHint, SqliteAffinity};
 pub use special::SpecialVal;

@@ -2,7 +2,7 @@
 //! out, no binary float and no 128-bit integer on the path.
 
 use hacivat_values::decimal::{MAX_INT_DIGITS, MAX_SCALE};
-use hacivat_values::{DecimalError, DecimalVal, Repr};
+use hacivat_values::{DecimalError, DecimalRef, DecimalVal, Repr};
 use proptest::prelude::*;
 
 fn canon(d: DecimalVal) -> String {
@@ -68,6 +68,93 @@ fn the_mantissa_words_keep_value_at_32_bytes_and_8_aligned() {
     assert_eq!(size_of::<DecimalVal>(), 24);
     assert_eq!(align_of::<hacivat_values::Value>(), 8);
     assert_eq!(size_of::<hacivat_values::Value>(), 32);
+}
+
+#[test]
+fn value_ref_carries_its_decimal_by_value_in_32_bytes() {
+    assert!(size_of::<DecimalRef<'_>>() <= 24);
+    assert!(size_of::<hacivat_values::ValueRef<'_>>() <= 32);
+}
+
+/// Every way a `DecimalRef` reads back must be the `DecimalVal` it came from.
+fn assert_ref_round_trips(d: &DecimalVal) {
+    let r = d.view();
+    assert_eq!(r.to_decimal(), *d);
+    assert_eq!(r.scale(), d.scale());
+    assert_eq!(r.is_negative(), d.is_negative());
+    assert_eq!(r.is_big(), d.is_big());
+    assert_eq!(r.to_string(), d.to_string());
+    let mut text = String::new();
+    r.write_canonical(&mut text);
+    assert_eq!(text, canon(d.clone()));
+    assert_eq!(DecimalRef::from(d), r);
+    // Through `Value`: view, then back to an owned value.
+    let v = hacivat_values::Value::Decimal(d.clone());
+    assert_eq!(v.view().to_value(), v);
+    assert_eq!(v.view(), hacivat_values::ValueRef::Decimal(r));
+}
+
+#[test]
+fn decimal_ref_round_trips_scale_sign_and_text() {
+    for s in [
+        "1.50", "-1.50", "1.5", "-0.00", "0", "-0", "0.000001", "007.50",
+    ] {
+        assert_ref_round_trips(&DecimalVal::parse(s).unwrap());
+    }
+    let r = DecimalVal::parse("-0.00").unwrap();
+    assert!(r.view().is_negative());
+    assert_eq!(r.view().scale(), 2);
+    assert_ne!(r.view(), DecimalVal::parse("0.00").unwrap().view());
+    assert_ne!(
+        DecimalVal::parse("1.50").unwrap().view(),
+        DecimalVal::parse("1.5").unwrap().view()
+    );
+}
+
+#[test]
+fn decimal_ref_keeps_the_38_digit_maximum_and_big_text() {
+    for s in [
+        "9".repeat(38),
+        format!("-{}", "9".repeat(38)),
+        format!("0.{}", "9".repeat(38)),
+    ] {
+        let d = DecimalVal::parse(&s).unwrap();
+        assert!(!d.view().is_big(), "{s}");
+        assert_eq!(d.view().to_string(), s);
+        assert_ref_round_trips(&d);
+    }
+    for s in [
+        "9".repeat(39),
+        format!("-{}.{}", "1".repeat(30), "2".repeat(30)),
+    ] {
+        let d = DecimalVal::parse(&s).unwrap();
+        assert!(d.view().is_big(), "{s}");
+        assert_eq!(d.view().to_string(), s);
+        assert_ref_round_trips(&d);
+    }
+}
+
+#[test]
+fn decimal_ref_round_trips_try_from_base10000() {
+    for (neg, weight, dscale, digits, text) in [
+        (false, 1, 2, &[1u16, 2345][..], "12345.00".to_string()),
+        (true, -1, 6, &[1200][..], "-0.120000".to_string()),
+        (false, 0, 3, &[][..], "0.000".to_string()),
+        (false, 9, 0, &[9_999; 10][..], "9".repeat(40)),
+        (
+            true,
+            8,
+            2,
+            &[9_999; 9][..],
+            format!("-{}.00", "9".repeat(36)),
+        ),
+    ] {
+        let d = DecimalVal::try_from_base10000(neg, weight, dscale, digits).unwrap();
+        assert_eq!(d.view().to_string(), text);
+        assert_eq!(d.view().scale(), dscale as i16);
+        assert_eq!(d.view().is_negative(), neg);
+        assert_ref_round_trips(&d);
+    }
 }
 
 #[test]
@@ -261,6 +348,11 @@ proptest! {
         let places = s.split_once('.').map_or(0, |(_, f)| f.len());
         prop_assert_eq!(d.scale() as usize, places);
         prop_assert_eq!(d.is_negative(), s.starts_with('-'));
+        // And through `DecimalRef`, by value.
+        prop_assert_eq!(d.view().to_decimal(), d.clone());
+        prop_assert_eq!(d.view().to_string(), s.clone());
+        prop_assert_eq!(d.view().scale(), d.scale());
+        prop_assert_eq!(d.view().is_negative(), d.is_negative());
     }
 
     #[test]

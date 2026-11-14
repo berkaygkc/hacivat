@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::columnar::bitmap::Bitmap;
 use crate::columnar::{BufKind, CellFlags, TempUnit, VarKind};
-use crate::decimal::{DecimalVal, Repr};
+use crate::decimal::{DecimalRef, DecimalVal, Repr};
 use crate::logical::LogicalType;
 use crate::special::SpecialVal;
 use crate::temporal::{DateVal, MICROS_PER_DAY, TimeVal, TsVal};
@@ -88,11 +88,17 @@ enum Data {
     F64(Vec<f64>),
     /// `F64 { f32: true }`: kept as `f32`, so its shortest form is the server's.
     F32(Vec<f32>),
-    /// `Dec64` (with its scale) and `Dec128` (`None`): `Repr::Small` values only, a `Big` one
-    /// is an exception. `ValueRef::Decimal` borrows, so each cell is a whole `DecimalVal`.
-    Dec {
-        values: Vec<DecimalVal>,
-        scale: Option<i16>,
+    /// `Dec64`: `i64` mantissas at the column's scale. A decimal of another scale, beyond an
+    /// `i64`, or `-0` is an exception.
+    Dec64 {
+        values: Vec<i64>,
+        scale: i16,
+    },
+    /// `Dec128`: up to 38 digits, the words of `Repr::Small` and each value's scale; a `Big`
+    /// value is an exception.
+    Dec128 {
+        mants: Vec<[u64; 2]>,
+        scales: Vec<i16>,
     },
     /// `Temporal { unit: Days }`: days since 1970-01-01.
     Days(Vec<i32>),
@@ -178,13 +184,13 @@ impl ColumnBuf {
             BufKind::U64 => Data::U64(Vec::with_capacity(rows)),
             BufKind::F64 { f32: false } => Data::F64(Vec::with_capacity(rows)),
             BufKind::F64 { f32: true } => Data::F32(Vec::with_capacity(rows)),
-            BufKind::Dec64 { scale } => Data::Dec {
+            BufKind::Dec64 { scale } => Data::Dec64 {
                 values: Vec::with_capacity(rows),
-                scale: Some(scale),
+                scale,
             },
-            BufKind::Dec128 => Data::Dec {
-                values: Vec::with_capacity(rows),
-                scale: None,
+            BufKind::Dec128 => Data::Dec128 {
+                mants: Vec::with_capacity(rows),
+                scales: Vec::with_capacity(rows),
             },
             BufKind::Temporal {
                 unit: TempUnit::Days,
@@ -336,7 +342,12 @@ impl Typed {
             Data::U64(v) => ValueRef::UInt(v[row]),
             Data::F64(v) => ValueRef::F64(v[row]),
             Data::F32(v) => ValueRef::F32(v[row]),
-            Data::Dec { values, .. } => ValueRef::Decimal(&values[row]),
+            Data::Dec64 { values, scale } => {
+                ValueRef::Decimal(DecimalRef::from_mantissa(values[row], *scale))
+            }
+            Data::Dec128 { mants, scales } => {
+                ValueRef::Decimal(DecimalRef::from_small(mants[row], scales[row]))
+            }
             Data::Days(v) => ValueRef::Date(DateVal(v[row])),
             Data::Micros { values, kind } => {
                 let us = values[row];
@@ -421,7 +432,11 @@ impl Data {
             Data::U64(v) => v.push(0),
             Data::F64(v) => v.push(0.0),
             Data::F32(v) => v.push(0.0),
-            Data::Dec { values, .. } => values.push(DecimalVal::from_mantissa(0, 0)),
+            Data::Dec64 { values, .. } => values.push(0),
+            Data::Dec128 { mants, scales } => {
+                mants.push([0; 2]);
+                scales.push(0);
+            }
             Data::Days(v) => v.push(0),
             Data::Pair {
                 micros, offsets, ..
@@ -449,19 +464,12 @@ impl Data {
                 }
                 v.push(narrow);
             }
-            (Data::Dec { values, .. }, Cell::Decimal(d)) => {
-                if d.is_big() {
+            (data @ (Data::Dec64 { .. } | Data::Dec128 { .. }), Cell::Decimal(d)) => {
+                if !data.push_decimal(d.view()) {
                     return Outcome::Exception(Value::Decimal(d.clone()));
                 }
-                values.push(d.clone());
             }
-            (
-                Data::Dec {
-                    values,
-                    scale: Some(scale),
-                },
-                Cell::Dec64(mant),
-            ) => values.push(DecimalVal::from_mantissa(mant, *scale)),
+            (Data::Dec64 { values, .. }, Cell::Dec64(mant)) => values.push(mant),
             (Data::Days(v), Cell::Temporal(days)) => match i32::try_from(days) {
                 Ok(days) => v.push(days),
                 Err(_) => return Outcome::Exception(range_error("date")),
@@ -518,7 +526,11 @@ impl Data {
             (Data::U64(v), Value::UInt(x)) => v.push(*x),
             (Data::F64(v), Value::F64(x)) => v.push(*x),
             (Data::F32(v), Value::F32(x)) => v.push(*x),
-            (Data::Dec { values, .. }, Value::Decimal(d)) if !d.is_big() => values.push(d.clone()),
+            (data @ (Data::Dec64 { .. } | Data::Dec128 { .. }), Value::Decimal(d)) => {
+                if !data.push_decimal(d.view()) {
+                    return Outcome::Exception(value);
+                }
+            }
             (Data::Days(v), Value::Date(d)) => v.push(d.0),
             (
                 Data::Micros {
@@ -624,6 +636,30 @@ impl Data {
         Outcome::Inline
     }
 
+    /// Stores a decimal inline when the buffer holds it exactly: a `Dec64` one at the
+    /// column's scale whose mantissa is an `i64` (not `-0`), any `Dec128` one of up to 38
+    /// digits. `false`: the caller keeps it as an exception.
+    fn push_decimal(&mut self, d: DecimalRef<'_>) -> bool {
+        match self {
+            Data::Dec64 { values, scale } => match d.mantissa_i64() {
+                Some((mant, s)) if s == *scale => {
+                    values.push(mant);
+                    true
+                }
+                _ => false,
+            },
+            Data::Dec128 { mants, scales } => match d.small() {
+                Some((mant, s)) => {
+                    mants.push(mant);
+                    scales.push(s);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
     fn bytes(&self) -> u64 {
         fn elems<T>(v: &[T]) -> u64 {
             size_of_val(v) as u64
@@ -634,7 +670,8 @@ impl Data {
             Data::U64(v) => elems(v),
             Data::F64(v) => elems(v),
             Data::F32(v) => elems(v),
-            Data::Dec { values, .. } => elems(values),
+            Data::Dec64 { values, .. } => elems(values),
+            Data::Dec128 { mants, scales } => elems(mants) + elems(scales),
             Data::Days(v) => elems(v),
             Data::Pair {
                 micros, offsets, ..
@@ -652,7 +689,11 @@ impl Data {
             Data::U64(v) => v.shrink_to_fit(),
             Data::F64(v) => v.shrink_to_fit(),
             Data::F32(v) => v.shrink_to_fit(),
-            Data::Dec { values, .. } => values.shrink_to_fit(),
+            Data::Dec64 { values, .. } => values.shrink_to_fit(),
+            Data::Dec128 { mants, scales } => {
+                mants.shrink_to_fit();
+                scales.shrink_to_fit();
+            }
             Data::Days(v) => v.shrink_to_fit(),
             Data::Pair {
                 micros, offsets, ..

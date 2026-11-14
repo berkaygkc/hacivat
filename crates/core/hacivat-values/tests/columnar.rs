@@ -457,14 +457,22 @@ fn bytes_accounting_is_exact_for_every_layout() {
         }
     });
     assert_eq!(pairs, word + 2 * 12);
-    // Dec64: a whole DecimalVal a cell.
+    // Dec64: a bare i64 mantissa a cell.
     let decs = build(BufKind::Dec64 { scale: 2 }, &|b| {
         for _ in 0..2 {
             b.push_dec64(0, 1);
             b.end_row();
         }
     });
-    assert_eq!(decs, word + 2 * size_of::<DecimalVal>() as u64);
+    assert_eq!(decs, word + 2 * 8);
+    // Dec128: two words and a scale a cell.
+    let wide = build(BufKind::Dec128, &|b| {
+        for _ in 0..3 {
+            b.push_decimal(0, &dec("12345678901234567890.123456789"));
+            b.end_row();
+        }
+    });
+    assert_eq!(wide, word + 3 * (16 + 2));
     // An exception: its row, its value and its payload.
     let exc = build(BufKind::I64, &|b| {
         b.push_i64(0, 1);
@@ -632,9 +640,97 @@ fn big_decimals_are_exceptions_and_stay_exact() {
     b.push_decimal(0, &dec("12.345"));
     b.end_row();
     let c = b.seal();
-    assert_eq!(c.cell(0, 0), ValueRef::Decimal(&big));
+    assert_eq!(c.cell(0, 0), ValueRef::Decimal(big.view()));
     // Another scale than the column's is still exact.
     assert_eq!(c.cell(1, 0).to_value(), Value::Decimal(dec("12.345")));
+}
+
+#[test]
+fn dec64_keeps_bare_mantissas_and_whatever_they_cannot_hold_as_exceptions() {
+    let inline = [
+        "1.50",
+        "-1.50",
+        "0.00",
+        "92233720368547758.07",  // i64::MAX
+        "-92233720368547758.08", // i64::MIN
+    ];
+    // -0 has no i64 sign; 2^63 is past i64::MAX; another scale; 39 digits.
+    let excepted = [
+        "-0.00".to_string(),
+        "92233720368547758.08".to_string(),
+        "1.5".to_string(),
+        format!("{}.00", "9".repeat(37)),
+    ];
+    let mut b = ChunkBuilder::new(&[BufKind::Dec64 { scale: 2 }], 16);
+    for s in inline
+        .iter()
+        .copied()
+        .chain(excepted.iter().map(String::as_str))
+    {
+        b.push_decimal(0, &dec(s));
+        b.end_row();
+    }
+    let c = b.seal();
+    let all: Vec<&str> = inline
+        .iter()
+        .copied()
+        .chain(excepted.iter().map(String::as_str))
+        .collect();
+    for (row, s) in all.iter().enumerate() {
+        let ValueRef::Decimal(d) = c.cell(row as u32, 0) else {
+            panic!("{s}: a decimal cell")
+        };
+        assert_eq!(d.to_decimal(), dec(s), "{s}");
+        assert_eq!(d.to_string(), *s);
+    }
+    // Five bare mantissas, four exceptions (each one's row, its `Value`, a big one's text).
+    let big_text = excepted[3].len() as u64;
+    let expected = 8 + 9 * 8 + 4 * (4 + size_of::<Value>() as u64) + big_text;
+    assert_eq!(c.bytes(), expected);
+}
+
+#[test]
+fn b1_mix_costs_about_ten_bytes_a_cell() {
+    // 4,096 rows of int8, 12-character text, numeric(14,2) and timestamp.
+    let s = schema(&[
+        LogicalType::Int {
+            bits: 64,
+            signed: true,
+        },
+        LogicalType::Text {
+            max_chars: None,
+            fixed: false,
+        },
+        LogicalType::Decimal {
+            precision: Some(14),
+            scale: Some(2),
+        },
+        LogicalType::Timestamp {
+            precision: 6,
+            tz: false,
+        },
+    ]);
+    let plan = [
+        BufKind::I64,
+        TEXT,
+        BufKind::Dec64 { scale: 2 },
+        BufKind::Temporal {
+            unit: TempUnit::Micros,
+        },
+    ];
+    let mut b = ChunkBuilder::with_schema(&plan, &s, 4_096);
+    for r in 0..4_096i64 {
+        b.push_i64(0, r);
+        b.push_bytes(1, format!("customer{r:04}").as_bytes(), 1 << 20);
+        b.push_dec64(2, r * 100 + 25);
+        b.push_temporal(3, 1_700_000_000_000_000 + r);
+        b.end_row();
+    }
+    let c = b.seal();
+    // Three 8-byte buffers, 4,097 offsets and 12 bytes of text a row, four validity bitmaps.
+    let expected = 3 * 4_096 * 8 + 4_097 * 4 + 4_096 * 12 + 4 * 512;
+    assert_eq!(c.bytes(), expected);
+    assert_eq!(expected, 165_892); // 10.13 bytes a cell (14.13 with 24-byte decimals)
 }
 
 #[test]
@@ -672,7 +768,51 @@ fn builder_values_columns_match_from_values() {
     assert_eq!(b.seal(), Chunk::from_values(&s, rows));
 }
 
+/// Canonical decimal text: up to 45 integer digits (so some are `Big`), up to 6 places.
+fn decimal_text() -> impl Strategy<Value = String> {
+    (
+        any::<bool>(),
+        prop_oneof![Just(String::from("0")), "[1-9][0-9]{0,44}"],
+        prop::option::of("[0-9]{1,6}"),
+    )
+        .prop_map(|(neg, int, frac)| {
+            let sign = if neg { "-" } else { "" };
+            match frac {
+                Some(f) => format!("{sign}{int}.{f}"),
+                None => format!("{sign}{int}"),
+            }
+        })
+}
+
 proptest! {
+    #[test]
+    fn decimals_round_trip_exactly_through_dec_buffers(
+        texts in prop::collection::vec(decimal_text(), 1..24)
+    ) {
+        let mut b = ChunkBuilder::new(&[BufKind::Dec128, BufKind::Dec64 { scale: 3 }], 24);
+        for t in &texts {
+            let d = dec(t);
+            b.push_decimal(0, &d);
+            b.push_value(1, Value::Decimal(d));
+            b.end_row();
+        }
+        let c = b.seal();
+        for (row, t) in texts.iter().enumerate() {
+            let want = dec(t);
+            for col in 0..2 {
+                let ValueRef::Decimal(got) = c.cell(row as u32, col) else {
+                    return Err(TestCaseError::fail(format!("{t}: not a decimal cell")));
+                };
+                prop_assert_eq!(got, want.view());
+                prop_assert_eq!(got.to_decimal(), want.clone());
+                prop_assert_eq!(got.scale(), want.scale());
+                prop_assert_eq!(got.is_negative(), want.is_negative());
+                prop_assert_eq!(got.is_big(), want.is_big());
+                prop_assert_eq!(got.to_string(), t.clone());
+            }
+        }
+    }
+
     #[test]
     fn typed_chunks_read_back_what_from_values_holds(
         rows in prop::collection::vec(
