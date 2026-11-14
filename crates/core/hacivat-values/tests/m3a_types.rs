@@ -68,9 +68,12 @@ fn chunk_cells_borrow_text_and_carry_flags() {
     assert_eq!(c.cell(1, 1).to_value(), error);
     assert_eq!(c.flags(1, 1), CellFlags::ERROR);
     assert_eq!(c.flags(0, 1), CellFlags::empty());
-    // Two rows of two `Value`s plus the text's 9 bytes and the error's 6 + 10.
+    // Two rows of two `Value`s plus the text's 9 bytes and the error's 6 + 10, and (m3a-t06
+    // review ruling M8, a named exception to this Task 1b test) the 32-byte `ErrorVal` body
+    // behind the error's `Arc`.
     let cells = 4 * std::mem::size_of::<Value>() as u64;
-    assert_eq!(c.bytes(), cells + 9 + 16);
+    let error_body = std::mem::size_of::<ErrorVal>() as u64;
+    assert_eq!(c.bytes(), cells + 9 + error_body + 16);
 }
 
 #[test]

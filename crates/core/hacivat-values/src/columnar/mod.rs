@@ -1,9 +1,13 @@
 //! Columnar chunks (HV-RES-02 buffers; Task 6): one buffer per column, a validity bitmap,
 //! exceptions in a sparse map, and `cell` returning a [`ValueRef`] without allocating.
 //!
-//! Working since Task 1b: [`Chunk::from_values`] builds a chunk whose every column is a
-//! [`BufKind::Values`] buffer, and the accessors read it. Task 6 adds the typed buffers and the
-//! builder.
+//! The drivers build chunks with [`ChunkBuilder`] (one typed buffer per [`BufKind`]);
+//! [`Chunk::from_values`] (Task 1b) builds one of [`BufKind::Values`] buffers for fixtures.
+//!
+//! Bytes per cell, besides one validity bit: `Bool` 1/8; `I64`, `U64`, `F64`, `Dec64`,
+//! `Temporal { Micros }` 8; `F64 { f32 }`, `Temporal { Days }` 4; `Temporal2` 12; `Fixed16` 16;
+//! `Dec128` 18 (two words and a scale); `Var` 4 plus the payload; `Values` 32 plus the payload;
+//! an exception 36 plus its payload. `cell` builds a decimal's `DecimalRef` by value.
 
 mod bitmap;
 mod buf;
@@ -84,10 +88,11 @@ impl Chunk {
         self.bytes
     }
 
-    /// The cell at (`row`, `col`).
+    /// The cell at (`row`, `col`), borrowed from the chunk (never allocates).
     ///
     /// # Panics
     /// When `row` or `col` is outside the chunk.
+    #[inline]
     pub fn cell(&self, row: u32, col: u32) -> ValueRef<'_> {
         self.column(row, col).cell(row as usize)
     }
@@ -121,7 +126,7 @@ impl Chunk {
                 columns[c].push(value);
             }
         }
-        let columns: Vec<ColumnBuf> = columns.into_iter().map(ColumnBuf::Values).collect();
+        let columns: Vec<ColumnBuf> = columns.into_iter().map(ColumnBuf::from_values).collect();
         let bytes = columns.iter().map(ColumnBuf::bytes).sum();
         Chunk {
             rows: count,
@@ -130,6 +135,7 @@ impl Chunk {
         }
     }
 
+    #[inline]
     fn column(&self, row: u32, col: u32) -> &ColumnBuf {
         assert!(
             row < self.rows,

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::decimal::DecimalVal;
+use crate::decimal::{DecimalRef, DecimalVal};
 use crate::special::SpecialVal;
 use crate::temporal::{DateVal, TimeVal, TsVal};
 
@@ -97,7 +97,9 @@ pub enum ValueRef<'a> {
     UInt(u64),
     F32(f32),
     F64(f64),
-    Decimal(&'a DecimalVal),
+    /// By value (M3a Task 6, controller ruling on Task 1b's `&'a DecimalVal`), so a `Dec64`
+    /// buffer keeps bare `i64` mantissas.
+    Decimal(DecimalRef<'a>),
     Text(&'a str),
     Bytes(&'a [u8]),
     Uuid([u8; 16]),
@@ -105,8 +107,15 @@ pub enum ValueRef<'a> {
     Time(TimeVal),
     TimeTz(TimeVal, i32),
     Timestamp(TsVal),
-    TimestampTz { utc: TsVal, offset: Option<i32> },
-    Interval { months: i32, days: i32, micros: i64 },
+    TimestampTz {
+        utc: TsVal,
+        offset: Option<i32>,
+    },
+    Interval {
+        months: i32,
+        days: i32,
+        micros: i64,
+    },
     Json(&'a str),
     Xml(&'a str),
     Special(&'a SpecialVal),
@@ -128,7 +137,7 @@ impl Value {
             Value::UInt(v) => ValueRef::UInt(*v),
             Value::F32(v) => ValueRef::F32(*v),
             Value::F64(v) => ValueRef::F64(*v),
-            Value::Decimal(v) => ValueRef::Decimal(v),
+            Value::Decimal(v) => ValueRef::Decimal(v.view()),
             Value::Text(v) => ValueRef::Text(v),
             Value::Bytes(v) => ValueRef::Bytes(v),
             Value::Uuid(v) => ValueRef::Uuid(*v),
@@ -172,7 +181,7 @@ impl ValueRef<'_> {
             ValueRef::UInt(v) => Value::UInt(v),
             ValueRef::F32(v) => Value::F32(v),
             ValueRef::F64(v) => Value::F64(v),
-            ValueRef::Decimal(v) => Value::Decimal(v.clone()),
+            ValueRef::Decimal(v) => Value::Decimal(v.to_decimal()),
             ValueRef::Text(v) => Value::Text(v.into()),
             ValueRef::Bytes(v) => Value::Bytes(v.into()),
             ValueRef::Uuid(v) => Value::Uuid(v),
