@@ -743,7 +743,9 @@ fn paint_header(
         let col = layout.visible()[ix];
         let left = hx + (layout.x_of(ix) - left_x) as f32;
         let width = layout.width_at(ix);
-        if selection.col_selected(col) {
+        // A column selection tints its headers; select-all tints the corner instead (the mock's
+        // `colsel` and `allon`).
+        if !selection.is_all() && selection.col_selected(col) {
             window.paint_quad(fill(rect(left, hy, width, hh), palette.blue_tint));
         }
         let Some(spec) = columns

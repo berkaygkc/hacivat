@@ -392,3 +392,76 @@ fn eleven_px_floor_no_cp_fill_and_snapped_hairlines(cx: &mut TestAppContext) {
         });
     }
 }
+
+/// Select-all tints the corner (`blue-tint-strong`), a column selection its header
+/// (`blue-tint`); select-all never tints every header (the mock's `allon` and `colsel`).
+#[cfg(feature = "scene-check")]
+#[gpui::test]
+fn select_all_tints_the_corner_and_a_column_its_header(cx: &mut TestAppContext) {
+    use gpui::{Bounds, Hsla, Pixels, Window};
+    use hacivat_ui_core::theme::DARK;
+    use hacivat_ui_grid::GridCommand;
+    let source = FixtureSource::texts(&[&["a", "b"], &["c", "d"]], 120.0);
+    let (view, vcx) = open(cx, Rc::new(source), 500.0, 200.0);
+    let fills_in = |window: &Window, color: Hsla, region: Bounds<Pixels>| -> usize {
+        let scale = window.scale_factor();
+        let want = gpui::Rgba::from(color);
+        window
+            .rendered_scene()
+            .quads
+            .iter()
+            .filter(|q| {
+                q.background.as_solid().is_some_and(|f| {
+                    let c = gpui::Rgba::from(f);
+                    [(c.r, want.r), (c.g, want.g), (c.b, want.b), (c.a, want.a)]
+                        .iter()
+                        .all(|(x, y)| (x - y).abs() <= 1.0 / 255.0)
+                })
+            })
+            .filter(|q| {
+                let (x, y) = (q.bounds.origin.x.0 / scale, q.bounds.origin.y.0 / scale);
+                x >= f32::from(region.left()) - 0.5
+                    && x < f32::from(region.right())
+                    && y >= f32::from(region.top()) - 0.5
+                    && y < f32::from(region.bottom())
+            })
+            .count()
+    };
+    let (header, corner) = view.read_with(vcx, |v, _| {
+        let g = v.geometry().unwrap();
+        (g.header, g.corner)
+    });
+    let tint = DARK.colors.blue_tint.to_hsla();
+    let strong = DARK.colors.blue_tint_strong.to_hsla();
+    vcx.update(|window, cx| {
+        view.update(cx, |v, cx| v.dispatch(GridCommand::SelectAll, window, cx))
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, _| {
+        assert_eq!(
+            fills_in(window, tint, header),
+            0,
+            "select-all leaves the headers alone"
+        );
+        assert_eq!(
+            fills_in(window, strong, corner),
+            1,
+            "select-all tints the corner"
+        );
+    });
+    vcx.update(|window, cx| {
+        view.update(cx, |v, cx| {
+            v.dispatch(GridCommand::Escape, window, cx);
+            v.dispatch(GridCommand::SelectColumn, window, cx);
+        })
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, _| {
+        assert_eq!(
+            fills_in(window, tint, header),
+            1,
+            "the selected column's header"
+        );
+        assert_eq!(fills_in(window, strong, corner), 0);
+    });
+}
