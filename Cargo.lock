@@ -3252,6 +3252,7 @@ dependencies = [
  "hacivat-l10n",
  "hacivat-settings",
  "hacivat-ui-core",
+ "sql-oracle-pg",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

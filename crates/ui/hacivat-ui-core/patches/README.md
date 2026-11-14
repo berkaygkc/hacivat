@@ -7,12 +7,14 @@ the Hacivat zed fork (ruling R1).
 ## How they are applied
 
 - **Fork:** `https://github.com/berkaygkc/zed`, branch `hacivat/912159c`.
-- **Pinned commit:** `a1eaa20480d5bfe62e21ab1248e3900232dab92b`. It is `912159c` plus two
-  commits, each carrying one patch below:
+- **Pinned commit:** `6607045170abc9654afad74be2e868a829744737` (M3a Task 1a). It is
+  `912159c` plus three commits, each carrying one patch below:
   1. `4858c09` "gpui_macos: discard marked text on FocusLost (Hacivat carry)". It also adds
      `HACIVAT-PATCHES.md` at the fork root.
   2. `a1eaa20` "gpui: report FocusLost then FocusGained on a text input to text input move
      (Hacivat carry)".
+  3. `6607045` "scheduler: take state before rng in block_until (Hacivat carry)". It also
+     widens the fork notice's scope sentence to "`crates/gpui*` and `crates/scheduler`".
 - The workspace `Cargo.toml` pins `gpui` and `gpui_platform` to that commit. `deny.toml`
   allows the fork as a git source, and `cargo xtask check-deps` treats it as zed-sourced
   (`ZED_SOURCES`).
@@ -90,6 +92,42 @@ the Hacivat zed fork (ruling R1).
   source files (`HACIVAT-PATCHES.md` is left out). It applies on top of the first patch.
 - **Status:** applied via the fork at `a1eaa20`. The manual IME re-check (settings search
   to palette with `HACIVAT_DEBUG_FOCUS_MOVE_MS`) is for the PO.
+
+## `scheduler-block-until-lock-order.patch`
+
+- **Target:** `crates/scheduler/src/test_scheduler.rs`, in `TestScheduler::block_until`. The
+  `scheduler` crate is Apache-2.0 (`license = "Apache-2.0"`, `LICENSE-APACHE` links to the
+  root licence; checked at the fork head before the patch, R-M3-13). It is GPUI's executor
+  crate; `gpui` depends on it, and only its test scheduler changes.
+- **The deadlock it fixes** (M2b Task 22 round 1, again in Task 24; the shots harness comment
+  in `crates/app/hacivat-app/tests/shots.rs`, `stop_core_runtime`): for a timed block,
+  `block_until` computed its tick budget with
+  `self.rng.lock().random_range(self.state.lock().timeout_ticks.clone())`. The `rng` guard is
+  live while `state` is locked. `schedule_local` and `schedule_background_with_priority` lock
+  `state` and then `rng`. `App::shutdown` blocks on the quit futures with a timeout; a core
+  worker that wakes a GPUI task from its own thread at that moment schedules it there, and
+  the two threads deadlock. Tests with parking allowed hit it intermittently when they quit
+  while core workers still run. Shipped code is not affected: production runs GPUI's platform
+  scheduler.
+- **What it does:** it reads `timeout_ticks` under `state`, drops that guard, then locks `rng`.
+  Every path in the file now takes `state` before `rng` (line numbers at `a1eaa20`: `:132`
+  holds a temporary `rng` guard only in the `while` condition, `:252` takes `rng` alone,
+  `:388`/`:391` take `rng` under `state`), and no `rng` guard is held while `state` is locked. The draw is the same single
+  `random_range` call over the same range, so every seed's schedule is unchanged.
+- **Tests:** in the fork, `cargo +1.98.1 test -p scheduler` (31 passed), `clippy -p scheduler
+  --tests` (no warnings). In Hacivat, `crates/app/hacivat-app/tests/teardown_stress.rs`, under
+  a 10 s watchdog per cycle:
+  - `timed_blocks_while_another_thread_schedules_never_hang` runs timed blocks while another
+    thread spawns tasks without pause. It hung in 5 of 5 local runs at `a1eaa20` and passes
+    at `6607045`.
+  - `fifty_core_boot_and_quit_cycles_never_hang` boots the app with the core runtime 50 times,
+    connects through `FakeDriver` and quits for real. It guards the whole teardown path,
+    though it rarely hits the one-expression window.
+- **Format:** the diff of fork commit `6607045` against `a1eaa20`, limited to
+  `test_scheduler.rs` (`HACIVAT-PATCHES.md` is left out).
+- **Status:** applied via the fork at `6607045`, which the workspace `Cargo.toml` pins. The
+  harness's own `stop_core_runtime` stays: it stops the runtime outside the quit block, which
+  is still the cheaper teardown for the shots.
 
 ## Apache-2.0 obligations when carrying a patch
 

@@ -89,6 +89,9 @@ jobs:
           $issues | Format-Table -AutoSize
           if ($issues) { exit 1 }
 
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
@@ -96,6 +99,19 @@ jobs:
 
       - name: Build
         run: cargo build --workspace --release --locked
+
+      # ## m3a-t01a-proofs
+      - name: Release binary size
+        run: ls -l target/release/hacivat*
+      - name: The build leaves third_party/pg_query unchanged
+        run: |
+          git diff --exit-code -- third_party/pg_query
+          changed="$(git status --porcelain -- third_party/pg_query)"
+          if [ -n "$changed" ]; then
+            echo "$changed"
+            echo "::error::the build wrote into third_party/pg_query (PATCHES.md §1)"
+            exit 1
+          fi
 
       # Full test set, lines 1-4 (F2). Line 5 is the nightly release-tests job.
       - name: Test (1/4) workspace
@@ -169,6 +185,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends locales
           sudo locale-gen tr_TR.UTF-8
           locale -a | grep -i '^tr_TR'
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Test (1/4) workspace
         run: cargo test --workspace --locked
@@ -210,6 +229,9 @@ jobs:
             fi
           fi
           xcrun -sdk macosx metal --version
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Detect the shell tests
         id: guard
@@ -280,6 +302,10 @@ jobs:
             fi
           fi
           xcrun -sdk macosx metal --version
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        if: steps.guard.outputs.present == 'true'
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
         if: steps.guard.outputs.present == 'true'
       - name: Build the release binary
@@ -297,6 +323,12 @@ jobs:
           fi
           grep -Eq '^first-frame-ms=[0-9]+' smoke.log || { echo "::error::no first-frame-ms= line"; exit 1; }
           grep -Eq '^idle-rss-mib=[0-9]+' smoke.log || { echo "::error::no idle-rss-mib= line"; exit 1; }
+      # ## m3a-t01a-proofs
+      - name: The shipped binary links libpg_query
+        if: steps.guard.outputs.present == 'true'
+        run: |
+          grep -Eq '^libpg-query=pg_query 18\.1\.0 \(PostgreSQL 18\.[0-9]+\) statements=1$' smoke.log \
+            || { echo "::error::no libpg-query= line with one statement"; exit 1; }
 
   deny:
     name: cargo-deny
@@ -339,6 +371,9 @@ jobs:
 
       - uses: ./.github/actions/linux-deps
 
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
 
       - name: Build spikes
@@ -404,6 +439,9 @@ jobs:
           fi
           xcrun -sdk macosx metal --version
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-packager
         shell: bash
@@ -482,6 +520,10 @@ jobs:
             fi
           fi
           xcrun -sdk macosx metal --version
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        if: steps.guard.outputs.present == 'true'
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
         if: steps.guard.outputs.present == 'true'
       - name: Render the pseudo-locale screens
@@ -519,6 +561,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Test (5) driver, fake
         run: cargo test --locked -p hacivat-driver --features fake
@@ -548,6 +593,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Check image digest pins
         run: cargo run --locked -p xtask -- docker check-pins

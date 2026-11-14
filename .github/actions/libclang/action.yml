@@ -1,0 +1,46 @@
+name: libclang
+description: >
+  libclang for bindgen, which the vendored pg_query build script runs on every OS (R-M3-1), and
+  the protoc guard. Use it in every job that builds a crate reaching pg_query, after the system
+  dependencies and the Xcode selection.
+
+runs:
+  using: composite
+  steps:
+    - name: libclang and protoc guard (pg_query)
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "$RUNNER_OS" in
+          Linux)
+            if ! dpkg -s libclang-dev >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends libclang-dev
+            fi
+            ;;
+          Windows)
+            # bindgen (clang-sys) loads libclang.dll; the runner's LLVM ships one here.
+            llvm_bin='C:\Program Files\LLVM\bin'
+            if [ -f "/c/Program Files/LLVM/bin/libclang.dll" ]; then
+              echo "LIBCLANG_PATH=$llvm_bin" >> "$GITHUB_ENV"
+              echo "LIBCLANG_PATH=$llvm_bin"
+            else
+              echo "::warning::no libclang.dll in $llvm_bin; bindgen falls back to its own search"
+            fi
+            ;;
+        esac
+        # Printed for the proof record; a missing libclang fails the bindgen step itself, loudly.
+        if command -v clang >/dev/null 2>&1; then
+          clang --version
+        elif [ -x "/c/Program Files/LLVM/bin/clang.exe" ]; then
+          "/c/Program Files/LLVM/bin/clang.exe" --version
+        else
+          echo "::warning::no clang on PATH"
+        fi
+        # The vendored build.rs never runs protoc (third_party/pg_query/PATCHES.md §1), so a protoc
+        # on PATH changes nothing; it is printed only to make that visible in the log.
+        if command -v protoc >/dev/null 2>&1; then
+          echo "protoc on PATH (unused by the pg_query build): $(protoc --version)"
+        else
+          echo "protoc not on PATH (unused by the pg_query build)"
+        fi
