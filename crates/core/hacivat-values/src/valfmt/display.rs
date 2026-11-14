@@ -29,13 +29,17 @@ use crate::valfmt::{
     BinaryDisplay, ChipKind, ColumnFacts, Display, DisplayKind, DisplayMode, DisplaySettings,
     Purpose,
 };
-use crate::value::ValueRef;
+use crate::value::{LenUnit, ValueRef};
 
 /// The display text of `v` in column `col` under `s`, for `p` (HV-GRID-10, L3).
 ///
 /// - Numbers (`Number`, aligned to the end): exact, grouped by the format locale unless the
 ///   column is ID-like or the mode is Raw; floats in their shortest round-trip form, with
-///   `NaN` and the infinities as the engine spells them.
+///   `NaN` and the infinities as the engine spells them. Latin digits always, with the
+///   locale's CLDR punctuation (U+2212 minus in `sv`, U+202F groups in `fr`, minimum grouping
+///   2 in `es`): display text is never parsed back, and copy uses the ASCII raw text. A
+///   number longer than the cap is cut and marked `TRUNCATED` with
+///   [`ChipKind::Truncated`] (its full length in characters).
 /// - `true`/`false` (`Bool`), never translated; UUIDs canonical lower-case (`Text`).
 /// - Dates, times, timestamps and intervals (`Temporal`): the ISO raw text at the server's
 ///   precision; `timestamptz` in the display zone with its offset (`+03`), or in the offset
@@ -98,6 +102,16 @@ fn cell(v: ValueRef<'_>, col: &ColumnFacts<'_>, s: &DisplaySettings) -> Display 
             push_number(&mut d.text, v, col, s);
             d.kind = DisplayKind::Number;
             d.align_end = true;
+            // A number cut at the cap (a decimal of more than about 1,000 digits) would read as
+            // a different number: mark it like any truncated cell (T16 review M4), with the
+            // full display length in characters.
+            if grapheme_cut(&d.text, cap) < d.text.len() {
+                d.flags |= CellFlags::TRUNCATED.bits();
+                d.chip = Some(ChipKind::Truncated {
+                    total: d.text.chars().count() as u64,
+                    unit: LenUnit::Chars,
+                });
+            }
         }
         ValueRef::Text(t) => {
             if t.is_empty() {

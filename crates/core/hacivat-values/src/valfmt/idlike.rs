@@ -3,10 +3,14 @@
 //! M3a has no column origins (PK and FK membership is M6), so the name and the type decide.
 //! Every comparison is ASCII (INV-3): `İD` or `ıd` are not `id`, and no locale casing runs.
 
+use hacivat_proto::DbmsKind;
+
 use crate::logical::LogicalType;
 
 /// PostgreSQL's object-identifier types: `oid`, the `reg*` aliases, and the transaction and
-/// command ids that share their representation.
+/// command ids that share their representation. They mean that only on the PostgreSQL wire
+/// family: SQLite takes any declared type name, so a SQLite column declared `oid` is a plain
+/// integer.
 const PG_ID_TYPES: &[&str] = &[
     "oid",
     "xid",
@@ -28,11 +32,22 @@ const PG_ID_TYPES: &[&str] = &[
 /// Whether a column is ID-like: an integer column (an integer-valued `numeric(p, 0)`
 /// included) named `id`, ending in `_id`, or ending in a camel-case `Id`/`ID` after a
 /// lower-case letter (`customerId`, `CustomerID`), all ASCII, case-insensitive for `id` and
-/// `_id`; or a PostgreSQL `oid`/`reg*` column, whatever its name.
-pub fn id_like(name: &str, logical: &LogicalType, native_name: &str) -> bool {
-    if PG_ID_TYPES
-        .iter()
-        .any(|t| native_name.eq_ignore_ascii_case(t))
+/// `_id`, on every engine; or, on the PostgreSQL wire family (`engine`: PostgreSQL, Redshift,
+/// CockroachDB, YugabyteDB, TimescaleDB), an `oid`/`reg*`/`xid`/`cid` column whatever its name
+/// (T16 review M1: the engine argument is a named addition to Task 1b's signature).
+pub fn id_like(name: &str, logical: &LogicalType, native_name: &str, engine: DbmsKind) -> bool {
+    let pg_wire = matches!(
+        engine,
+        DbmsKind::Postgres
+            | DbmsKind::Redshift
+            | DbmsKind::Cockroach
+            | DbmsKind::Yugabyte
+            | DbmsKind::Timescale
+    );
+    if pg_wire
+        && PG_ID_TYPES
+            .iter()
+            .any(|t| native_name.eq_ignore_ascii_case(t))
     {
         return true;
     }

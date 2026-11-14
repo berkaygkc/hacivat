@@ -128,7 +128,7 @@ fn fmt_in(v: &Value, col: &Col) -> String {
 
 fn fmt_col(v: &Value, name: &str, locale: &str) -> String {
     let mut col = Col::of(v);
-    col.id_like = id_like(name, &col.logical, col.native);
+    col.id_like = id_like(name, &col.logical, col.native, col.engine);
     show(v, &col, &settings(locale)).text
 }
 
@@ -324,6 +324,71 @@ fn a_decimal_wider_than_the_formatter_falls_back_to_its_exact_text() {
     let d = show(&dec(&wide), &Col::of(&dec("1")), &settings("tr-TR"));
     assert_eq!(d.kind, DisplayKind::Number);
     assert_eq!(d.text, wide[..1_024]);
+    // Cut at the cap, so marked like any truncated cell: never read as a shorter number.
+    assert_eq!(d.flags, CellFlags::TRUNCATED.bits());
+    assert_eq!(
+        d.chip,
+        Some(ChipKind::Truncated {
+            total: 40_000,
+            unit: LenUnit::Chars
+        })
+    );
+}
+
+#[test]
+fn a_number_past_the_display_cap_is_marked_truncated() {
+    // 1,500 digits: within the formatter's range, grouped to 1,999 characters in en-US.
+    let long = dec(&"9".repeat(1_500));
+    let d = show(&long, &Col::of(&long), &settings("en-US"));
+    assert_eq!(d.text.chars().count(), 1_024);
+    assert!(d.text.starts_with("999,999,"), "{}", &d.text[..16]);
+    assert_eq!(d.flags, CellFlags::TRUNCATED.bits());
+    assert_eq!(
+        d.chip,
+        Some(ChipKind::Truncated {
+            total: 1_999,
+            unit: LenUnit::Chars
+        })
+    );
+    // At the cap exactly, nothing is cut and nothing is marked; one past it is marked.
+    let int8 = Col::of(&Value::Int(0));
+    let mut s = settings("en-US");
+    s.max_display_chars = 9;
+    let d = show(&Value::Int(1_234_567), &int8, &s);
+    assert_eq!((d.text.as_str(), d.flags, d.chip), ("1,234,567", 0, None));
+    s.max_display_chars = 8;
+    let d = show(&Value::Int(1_234_567), &int8, &s);
+    assert_eq!(d.text, "1,234,56");
+    assert_eq!(
+        (d.flags, d.chip),
+        (
+            CellFlags::TRUNCATED.bits(),
+            Some(ChipKind::Truncated {
+                total: 9,
+                unit: LenUnit::Chars
+            })
+        )
+    );
+}
+
+#[test]
+fn display_follows_cldr_punctuation_and_raw_stays_ascii() {
+    // Display is the format locale's CLDR punctuation, not plain ASCII: Swedish negatives use
+    // U+2212 and group with a no-break space, French groups with a narrow no-break space, and
+    // Spanish groups only from five integer digits (minimum grouping 2). Copy and SQL use the
+    // raw text, which stays ASCII.
+    let sv = fmt(&dec("-1234567.5"), "sv-SE");
+    assert_eq!(sv, "\u{2212}1\u{a0}234\u{a0}567,5");
+    let fr = fmt(&dec("1234567.5"), "fr-FR");
+    assert_eq!(fr, "1\u{202f}234\u{202f}567,5");
+    assert_eq!(fmt(&Value::Int(1_234), "es-ES"), "1234");
+    assert_eq!(fmt(&Value::Int(12_345), "es-ES"), "12.345");
+    assert_eq!(fmt(&Value::Int(-12_345), "es-ES"), "-12.345");
+    for v in [dec("-1234567.5"), Value::Int(-12_345), Value::F64(-1.5e-7)] {
+        let r = raw(&v);
+        assert!(r.is_ascii(), "{r}");
+    }
+    assert_eq!(raw(&dec("-1234567.5")), "-1234567.5");
 }
 
 #[test]
@@ -445,22 +510,26 @@ fn id_like_columns_are_integers_named_id_or_ending_in_id() {
         "customerId",
         "CustomerID",
     ] {
-        assert!(id_like(name, &i, "int8"), "{name} is ID-like");
+        for engine in [DbmsKind::Postgres, DbmsKind::MySql, DbmsKind::Sqlite] {
+            assert!(id_like(name, &i, "int8", engine), "{name} is ID-like");
+        }
     }
+    let pg = DbmsKind::Postgres;
     for name in [
         "paid", "valid", "VOID", "idx", "id_card", "uuid", "İD", "ıd", "amount",
     ] {
-        assert!(!id_like(name, &i, "int8"), "{name} is not ID-like");
+        assert!(!id_like(name, &i, "int8", pg), "{name} is not ID-like");
     }
     // Not an integer: never ID-like by name.
-    assert!(!id_like("id", &text(), "text"));
+    assert!(!id_like("id", &text(), "text", pg));
     assert!(!id_like(
         "price_id",
         &LogicalType::Decimal {
             precision: Some(10),
             scale: Some(2)
         },
-        "numeric"
+        "numeric",
+        pg
     ));
     // An integer-valued decimal (`numeric(20,0)`) is.
     assert!(id_like(
@@ -469,31 +538,61 @@ fn id_like_columns_are_integers_named_id_or_ending_in_id() {
             precision: Some(20),
             scale: Some(0)
         },
-        "numeric"
+        "numeric",
+        pg
     ));
-    assert!(id_like("id", &int(64, false), "bigint unsigned"));
+    assert!(id_like(
+        "id",
+        &int(64, false),
+        "bigint unsigned",
+        DbmsKind::MySql
+    ));
 }
 
 #[test]
 fn postgres_object_identifier_columns_are_id_like_whatever_their_name() {
-    assert!(id_like("relfilenode", &int(32, false), "oid"));
-    assert!(id_like("xmin", &int(32, false), "xid"));
+    let pg = DbmsKind::Postgres;
+    assert!(id_like("relfilenode", &int(32, false), "oid", pg));
+    assert!(id_like("xmin", &int(32, false), "xid", pg));
+    // The PostgreSQL wire family reports the same type names.
+    assert!(id_like("c", &int(32, false), "oid", DbmsKind::Cockroach));
     let opaque = |t: &str| LogicalType::Opaque {
         type_name: t.into(),
     };
     for t in ["regclass", "regtype", "regproc", "regnamespace", "regrole"] {
-        assert!(id_like("c", &opaque(t), t), "{t} is ID-like");
+        assert!(id_like("c", &opaque(t), t, pg), "{t} is ID-like");
     }
-    assert!(!id_like("c", &opaque("region"), "region"));
+    assert!(!id_like("c", &opaque("region"), "region", pg));
     // The adapter computes the flag once per column; formatting reads it.
     let mut col = Col::of(&Value::UInt(4_294_967_295));
     col.native = "oid";
     col.logical = int(32, false);
-    col.id_like = id_like("relid", &col.logical, col.native);
+    col.id_like = id_like("relid", &col.logical, col.native, pg);
     assert_eq!(
         show(&Value::UInt(4_294_967_295), &col, &settings("tr-TR")).text,
         "4294967295"
     );
+}
+
+#[test]
+fn oid_family_type_names_are_ids_only_on_postgres() {
+    // SQLite takes any declared type name, and MySQL has none of these: a column declared
+    // `cid`, `oid` or `xid` there is a plain integer and stays grouped.
+    let i = int(64, true);
+    for engine in [DbmsKind::Sqlite, DbmsKind::MySql, DbmsKind::MariaDb] {
+        for t in ["cid", "oid", "xid", "xid8", "regclass"] {
+            assert!(!id_like("amount", &i, t, engine), "{t} on {engine:?}");
+        }
+    }
+    let mut col = Col::with(i.clone(), DbmsKind::Sqlite);
+    col.native = "cid";
+    col.id_like = id_like("amount", &col.logical, col.native, col.engine);
+    assert_eq!(
+        show(&Value::Int(1_234_567), &col, &settings("tr-TR")).text,
+        "1.234.567"
+    );
+    // The name rule still holds on every engine.
+    assert!(id_like("cid_id", &i, "cid", DbmsKind::Sqlite));
 }
 
 // ---- formatter memoisation ---------------------------------------------------------------
