@@ -195,9 +195,10 @@ fn marks_and_commands_delegate_to_their_modules(cx: &mut TestAppContext) {
         )
     });
     assert_eq!(ran, (true, false));
-    // Nothing is laid out before Task 19's element.
-    assert!(vcx.read(|cx| e.read(cx).caret_bounds().is_none()));
-    assert!(vcx.read(|cx| e.read(cx).last_layout().is_none()));
+    // ## m3a-t19-editor-view (named exception: Task 1b's "nothing is laid out before Task 19's
+    // element" flips with Task 19): the drawn frame is kept, and the caret has bounds.
+    assert!(vcx.read(|cx| e.read(cx).caret_bounds().is_some()));
+    assert!(vcx.read(|cx| e.read(cx).last_layout().is_some()));
     let _ = TextBuffer::from_str("");
 }
 

@@ -7,9 +7,10 @@
 //! module (`marks::MarkStore`, `preview::BandState`, `a11y::A11yState`,
 //! `large_file::TierState`, `clipboard::PasteState`); its public methods delegate to the
 //! module functions in one line. Task 19 owns the view, the element and every call site (all
-//! wired since Task 1b's fix round 1); Tasks 25, 27, 28 and 29 own only their modules' bodies. Task 1b stubs paint nothing; the
-//! input handler inserts plain text through the model; [`FailClosedService`] never previews a
-//! range.
+//! wired since Task 1b's fix round 1); Tasks 25, 27, 28 and 29 own only their modules' bodies.
+//! Since Task 19 the element paints the text (a content-keyed shape cache, long-line windows,
+//! row-anchored scrolling, mouse selection, the caret blink); the input handler inserts plain
+//! text through the model; [`FailClosedService`] never previews a range.
 
 pub mod a11y;
 pub mod clipboard;
@@ -40,6 +41,8 @@ pub use config::{CaretBlink, DocContext, DocId, EDITOR_CONTEXT, EditorConfig, Ti
 pub use decor::{HighlightClass, STYLES as HIGHLIGHT_STYLES};
 pub use element::{FrameLayout, VisibleRows};
 pub use gutter::GutterCtx;
+// ## m3a-t19-editor-view
+pub use layout_cache::LayoutStats;
 pub use marks::{ExecMarkState, MarkKey, RowsOutcome};
 pub use preview::BandState;
 pub use probe::FrameProbe;
