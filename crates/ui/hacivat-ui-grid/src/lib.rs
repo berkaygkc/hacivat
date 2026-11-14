@@ -4,7 +4,9 @@
 //! through `hacivat_ui_core::gpui_surface`.
 //!
 //! Types complete since M3a Task 1b. Bodies: Task 17 (`model`), Task 20 (`element`, `view`,
-//! `list`, `testing`). Task 1b's view and list paint nothing.
+//! `list`, `testing`, the synthetic B1 example). The paint path's per-frame statistics
+//! ([`element::FrameStats`], [`element::FrameLog`]) are public, for the benches and the app's
+//! tests.
 
 pub mod commands;
 pub mod element;

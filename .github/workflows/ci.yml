@@ -423,14 +423,16 @@ jobs:
         uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
 
+      # ## m3a-t20-bench: the synthetic B1 runs the real grid (`hacivat-ui-grid`'s `b1_synthetic`
+      # example) in place of `spike-grid`, which stays in the tree as the frozen M0 record.
       - name: Build spikes
-        run: cargo build --release --locked -p spike-grid -p spike-editor
+        run: cargo build --release --locked -p spike-editor
 
       - name: Generate B3 fixture
         run: cargo xtask gen-sql --lines 50000 --long-line 100000 --out target/fixtures/b3-50k.sql
 
-      - name: Bench spike-grid fling (software rendering under a virtual display)
-        run: xvfb-run -a cargo run --locked -p spike-grid --release -- --bench fling
+      - name: Bench b1_synthetic fling (software rendering under a virtual display)
+        run: xvfb-run -a cargo run --locked --release -p hacivat-ui-grid --features bench,test-support --example b1_synthetic -- --bench fling
 
       - name: Bench spike-editor typing
         run: xvfb-run -a cargo run --locked -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench typing

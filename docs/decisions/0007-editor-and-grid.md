@@ -98,3 +98,51 @@ root takes the content area as the M2 home does), its decoration (title, environ
 and quitting ask `tab_close_guard` and `quit_guard`, which may defer (the guard later calls
 `Workspace::force_close_tab` or quits). Every empty or stub hook keeps today's rendering, so the
 M1 and M2 shots do not move.
+
+## m3a-t20 — fast-scroll thresholds and the grid's text cache
+
+**Fast-scroll (R-M3-12).** The grid paints in fast-scroll mode while the scroll moves more than
+**40 rows per frame** (`element::FAST_SCROLL_ROWS_PER_FRAME`; a thumb jump or drag step counts as
+infinite for one frame). The velocity is `ScrollState::velocity_rows_per_frame`: the rows the user
+moved the view between two frames, from the frame's coalesced deltas, with follow-tail snaps,
+shrink clamps, resizes and re-runs left out, so a stream never trips it on a still view. In a
+fast-scroll frame, cached shapes paint as usual; an uncached cell paints its **ASCII-safe prefix
+of at most 24 characters** (stopping before the first character that is not printable ASCII, so it
+shapes in the primary font with no fallback and never shows a wrong character) as one run; chips
+are skipped; and the frame shapes at most **150 layouts** (`FAST_SHAPES_PER_FRAME`). A cell past the
+budget paints nothing for that frame. **Recovery:** a frame that painted anything below full
+quality asks for the next frame (`Window::on_next_frame`); that frame is full quality as soon as
+the velocity is back under the threshold, so the full-quality frame follows one frame (≈ 8 ms at
+120 Hz) after the scroll slows, inside the plan's 100 ms. No timer and no hysteresis.
+Rejected: a 100 ms quality timer (a still view would show prefixes for up to 100 ms); hysteresis
+on the threshold (no measured flicker to cure). The B1 fling peaks near 5 rows per frame at
+120 Hz, so B1 itself never enters fast-scroll; thumb drags and very fast flings do. Tests:
+`fast_scroll_caps_shapes_per_frame`, `a_thumb_jump_is_fast_for_one_frame`,
+`quality_frame_within_100ms_of_slowing`, `slow_scrolling_is_full_quality`.
+
+**The text cache.** The M0 spike's frame-LRU, keyed `(content hash, font id, size bits, colour
+class, width bucket)`, 50,000 entries, eviction by frame generation down to 7/8 of the capacity,
+never evicting the current frame. It holds bare `LineLayout`s with a colour class per piece and
+paints them through `LineLayout::paint` with a one-run decoration built on the stack: a cached
+`ShapedLine` would carry a 32-run inline decoration buffer (about 3 KB each, 150 MB at capacity),
+and the colour applied at paint time means a theme switch recolours every cached shape and
+reshapes none (this needed `DecorationRun` and `LineLayout` in `gpui_surface`, a two-name
+re-export). The content hash is a word-at-a-time multiplicative hash; each entry keeps its source
+text and a hit compares it, so a collision is a miss, never the wrong string. Width buckets are
+4 px: an untruncated shape is cached once for every width it fits (`FULL_WIDTH`), a truncated one
+is cut for its bucket's narrowest width, so it fits every column width in the bucket. The lookup
+order is untruncated, this bucket, then (fast-scroll) the prefix. A scale change clears the cache.
+Before shaping, a cell's text is capped at `ceil(col_px / min_advance_px) + 2` grapheme clusters
+(the narrowest advance of ten narrow characters in the role's font); a shape wider than its cell
+is ellipsized at the last cluster boundary that fits with `…` (binary search). Row numbers paint
+digit by digit from ten cached digit layouts at the tabular advance, so scrolling shapes no row
+number. **Allocations:** a cache hit allocates nothing; the paint path counts its own allocation
+sites (`FrameStats::cell_allocs`: one per shaped layout, one per new entry, one per debug record),
+and a frame of hits counts 0 (`cache_hits_allocate_nothing`). A counting global allocator would
+also see GPUI's internals, but it needs `unsafe`, which the workspace denies outside
+`hacivat-ui-core/src/platform`.
+
+**Visible controls.** `\n` → `↵`, `\t` → `→`, other C0 controls and DEL → their control pictures,
+C1 controls → `⟨U+0085⟩`, the bidi controls → named chips (`⟨RLO⟩`, the Trojan Source defence),
+each painted as a chip (Fragment Mono 11 `text-2` on a `seam-soft` well, radius 3); the cell's text
+is unchanged, so a copy keeps the real characters.
