@@ -380,7 +380,11 @@ mod tests {
 
     #[test]
     fn exec_and_cursor_prefixes_are_valid_ids() {
-        for id in ["exec-dur-ms", "cursor-closed-memory-limit", "error-exec-sqlite-busy-hint"] {
+        for id in [
+            "exec-dur-ms",
+            "cursor-closed-memory-limit",
+            "error-exec-sqlite-busy-hint",
+        ] {
             assert!(is_valid_id(id), "{id}");
         }
         for id in ["execs-x", "cursors-x", "exec", "exec-", "exec-Upper"] {
