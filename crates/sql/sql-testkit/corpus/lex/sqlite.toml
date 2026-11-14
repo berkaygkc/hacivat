@@ -1,0 +1,185 @@
+# The SQLite lexer corpus (M3a Task 4).
+#
+# Expectations come from `alg/10` SQL-LEX-01 and -02 and from SQLite's tokenizer
+# (`tokenize.c`, public domain, in the SQLite that rusqlite bundles). Fields are documented in
+# `sql-testkit/src/lex.rs`. A carriage return is always spelled `\r`, never a raw CR (P15).
+
+[[case]]
+id = "LEX02-10"
+source = "alg/10 SQL-LEX-02 test 10: an unterminated comment is no error"
+dialect = "sqlite"
+input = "/* open"
+kinds = ["BlockComment"]
+flags = ["UNTERMINATED"]
+errors = []
+
+[[case]]
+id = "SQ-slash-star-at-end"
+source = "tokenize.c CC_SLASH: /* with nothing after is / and *"
+dialect = "sqlite"
+input = "/*"
+kinds = ["Op", "Op"]
+texts = ["/", "*"]
+
+[[case]]
+id = "SQ-slash-star-slash"
+source = "alg/10 SQL-LEX-02 edge cases: /*/"
+dialect = "sqlite"
+input = "/*/"
+kinds = ["BlockComment"]
+flags = ["UNTERMINATED"]
+errors = []
+
+[[case]]
+id = "SQ-comments-do-not-nest"
+source = "alg/10 SQL-LEX-01 matrix"
+dialect = "sqlite"
+input = "/* /* */ x"
+kinds = ["BlockComment", "Whitespace", "Word"]
+
+[[case]]
+id = "SQ-line-comment-ends-at-lf"
+source = "ADR 0004 step 1a; tokenize.c: -- runs to a line feed"
+dialect = "sqlite"
+input = "-- x\ry\nz"
+kinds = ["LineComment", "Newline", "Word"]
+texts = ["-- x\ry", "\n", "z"]
+
+[[case]]
+id = "SQ-quotes"
+source = "alg/10 SQL-LEX-01 matrix: '…' strings; \"…\", `…`, […] identifiers"
+dialect = "sqlite"
+input = "'a''b' \"c\"\"d\" `e``f` [g]]"
+kinds = ["String", "Whitespace", "QuotedIdent", "Whitespace", "QuotedIdent", "Whitespace", "QuotedIdent", "Unknown"]
+texts = ["'a''b'", " ", "\"c\"\"d\"", " ", "`e``f`", " ", "[g]", "]"]
+
+[[case]]
+id = "SQ-backslash-is-text"
+source = "alg/10 SQL-LEX-01 matrix: no backslash escapes"
+dialect = "sqlite"
+input = "'a\\' x"
+kinds = ["String", "Whitespace", "Word"]
+texts = ["'a\\'", " ", "x"]
+
+[[case]]
+id = "SQ-unterminated-string"
+source = "alg/10 SQL-LEX-02 rule 5"
+dialect = "sqlite"
+input = "'ab"
+kinds = ["String"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedString"]
+
+[[case]]
+id = "SQ-unterminated-bracket"
+source = "alg/10 SQL-LEX-02 rule 5"
+dialect = "sqlite"
+input = "[ab"
+kinds = ["QuotedIdent"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedQuotedIdent"]
+
+[[case]]
+id = "SQ-blobs"
+source = "tokenize.c CC_X: X'…' holds an even number of hex digits"
+dialect = "sqlite"
+input = "X'1F' x'ab' X'1' X'zz'"
+kinds = ["HexString", "Whitespace", "HexString", "Whitespace", "HexString", "Whitespace", "HexString"]
+flags = ["", "", "", "", "ERROR", "", "ERROR"]
+
+[[case]]
+id = "SQ-numbers"
+source = "tokenize.c CC_DIGIT: 0x, _ separators (3.46), fractions, exponents"
+dialect = "sqlite"
+input = "0x1F 0X1f 1_000 1.5e3 .5 0x1_0"
+kinds = ["Number", "Whitespace", "Number", "Whitespace", "Number", "Whitespace", "Number", "Whitespace", "Number", "Whitespace", "Number"]
+flags = ["", "", "", "", "HAS_SEPARATORS", "", "", "", "", "", "HAS_SEPARATORS"]
+
+[[case]]
+id = "SQ-junk"
+source = "tokenize.c CC_DIGIT: an identifier character after a number is illegal"
+dialect = "sqlite"
+input = "123abc 1$"
+kinds = ["Number", "Word", "Whitespace", "Number", "Unknown"]
+flags = ["JUNK", "", "", "JUNK", "ERROR"]
+
+[[case]]
+id = "SQ-parameters"
+source = "alg/10 SQL-LEX-01 matrix: ? ?N :a @a $a (and #a)"
+dialect = "sqlite"
+input = "? ?12 :a @b $c #d"
+kinds = ["QuestionParam", "Whitespace", "QuestionParam", "Whitespace", "NamedParam", "Whitespace", "NamedParam", "Whitespace", "NamedParam", "Whitespace", "NamedParam"]
+
+[[case]]
+id = "SQ-tcl-variables"
+source = "tokenize.c CC_VARALPHA: :: segments and a (…) suffix"
+dialect = "sqlite"
+input = "$a::b(x) $c(d e"
+kinds = ["NamedParam", "Whitespace", "NamedParam", "Whitespace", "Word"]
+texts = ["$a::b(x)", " ", "$c(d", " ", "e"]
+flags = ["", "", "ERROR", "", ""]
+
+[[case]]
+id = "SQ-lone-sigils"
+source = "tokenize.c CC_VARALPHA: a sigil without a name is illegal"
+dialect = "sqlite"
+input = ": @ # $ ::"
+kinds = ["Unknown", "Whitespace", "Unknown", "Whitespace", "Unknown", "Whitespace", "Unknown", "Whitespace", "Unknown", "Unknown"]
+
+[[case]]
+id = "SQ-operators"
+source = "tokenize.c: SQLite's operators"
+dialect = "sqlite"
+input = "a==b||c->>d<>e!=f<<g"
+kinds = ["Word", "Op", "Word", "Op", "Word", "Op", "Word", "Op", "Word", "Op", "Word", "Op", "Word"]
+texts = ["a", "==", "b", "||", "c", "->>", "d", "<>", "e", "!=", "f", "<<", "g"]
+
+[[case]]
+id = "SQ-illegal-characters"
+source = "tokenize.c aiClass: ! alone, ^, {, }, ] and \\ are illegal"
+dialect = "sqlite"
+input = "!^{}]\\"
+kinds = ["Unknown", "Unknown", "Unknown", "Unknown", "Unknown", "Unknown"]
+
+[[case]]
+id = "SQ-bom-anywhere"
+source = "tokenize.c CC_BOM: a BOM that starts a token is a space, anywhere in the text"
+dialect = "sqlite"
+input = "a ﻿b"
+kinds = ["Word", "Whitespace", "Whitespace", "Word"]
+flags = ["", "", "BOM", ""]
+
+[[case]]
+id = "SQ-bom-inside-a-word"
+source = "tokenize.c IdChar: inside an identifier the BOM's bytes are identifier characters"
+dialect = "sqlite"
+input = "a﻿b"
+kinds = ["Word"]
+
+[[case]]
+id = "SQ-vertical-tab"
+source = "tokenize.c aiClass: a vertical tab is illegal"
+dialect = "sqlite"
+input = "a\u000Bb"
+kinds = ["Word", "Unknown", "Word"]
+
+[[case]]
+id = "SQ-dollar-in-word"
+source = "alg/10 SQL-LEX-01 matrix: $ continues an identifier"
+dialect = "sqlite"
+input = "a$b"
+kinds = ["Word"]
+
+[[case]]
+id = "SQ-no-executable-comments"
+source = "alg/10 SQL-LEX-05 matrix"
+dialect = "sqlite"
+input = "/*!50000 x */"
+kinds = ["BlockComment"]
+
+[[case]]
+id = "SQ-turkish"
+source = "alg/10 SQL-LEX-01 i18n notes"
+dialect = "sqlite"
+input = "SELECT ad FROM müşteri WHERE şehir = 'İzmir'"
+kinds = ["Word", "Whitespace", "Word", "Whitespace", "Word", "Whitespace", "Word", "Whitespace", "Word", "Whitespace", "Word", "Whitespace", "Op", "Whitespace", "String"]

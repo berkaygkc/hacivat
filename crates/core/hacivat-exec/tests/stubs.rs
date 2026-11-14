@@ -39,14 +39,18 @@ fn resolve_stub_runs_nothing() {
 #[test]
 fn the_text_stubs_beneath_fail_closed() {
     let d = doc("SELECT 1; DELETE FROM t");
-    // One `Unknown` token over the whole input: lossless, and no keyword is recognised.
-    assert_eq!(d.lexed().len(), 1);
-    assert_eq!(d.lexed().kind(0), TokenKind::Unknown);
+    // The lexer works since Task 4 (lossless: its tokens tile the 23 bytes); the stubs above
+    // it still fail closed.
+    let l = d.lexed();
+    assert_eq!(l.len(), 10);
+    assert_eq!(l.kind(3), TokenKind::Semicolon);
+    assert_eq!(l.range(l.len() - 1).end(), TextSize::from(23));
+    let delete = l.token_at(TextSize::from(12)).unwrap();
+    assert_eq!(l.kind(delete), TokenKind::Word);
     assert_eq!(
-        d.lexed().range(0),
-        TextRange::new(TextSize::from(0), TextSize::from(23))
+        l.range(delete),
+        TextRange::new(TextSize::from(10), TextSize::from(16))
     );
-    assert_eq!(d.lexed().token_at(TextSize::from(12)), Some(0));
     // One heuristic item in both modes: execution never runs a heuristic boundary.
     for split in [d.editor_split(), d.execution_split()] {
         assert!(matches!(

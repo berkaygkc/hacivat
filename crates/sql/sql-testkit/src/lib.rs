@@ -4,3 +4,7 @@
 //! expectations come from Hacivat's specs, never from DataGrip (ALG-TEST-01).
 
 pub mod golden;
+
+// ## m3a-t04-lexer
+/// The lexer corpus and the helpers lexer tests share (Task 4).
+pub mod lex;

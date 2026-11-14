@@ -54,13 +54,20 @@ bitflags::bitflags! {
     /// What a token carries besides its kind.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct TokenFlags: u8 {
-        /// A string, comment, dollar string or quoted identifier that never closed.
+        /// A string, comment, dollar string, quoted identifier or `COPY` data block that never
+        /// closed: it runs to the end of the text.
         const UNTERMINATED = 1;
-        /// PostgreSQL ≤ 15: junk after a number.
+        /// A number or `$n` parameter directly followed by an identifier, which the server
+        /// rejects ("trailing junk": PostgreSQL 15 and later, SQLite); the identifier is the
+        /// next token.
         const JUNK = 2;
-        /// PostgreSQL 16: `_` separators in a number.
+        /// `_` digit separators in a number (PostgreSQL 16, SQLite 3.46).
         const HAS_SEPARATORS = 4;
+        /// A UTF-8 byte-order mark read as whitespace.
         const BOM = 8;
+        /// A token the server rejects: an unknown character, an operator of 64 bytes or more,
+        /// a `U&''` string without `standard_conforming_strings`, a malformed SQLite blob or
+        /// variable.
         const ERROR = 16;
     }
 }
@@ -149,20 +156,32 @@ impl Lexed {
 
     /// The token containing `at` (the last token for the text's end); O(log n).
     pub fn token_at(&self, at: TextSize) -> Option<usize> {
+        self.token_at_probed(at).0
+    }
+
+    /// [`Lexed::token_at`] and the number of offsets its binary search compared (the
+    /// complexity tests read it).
+    #[doc(hidden)]
+    pub fn token_at_probed(&self, at: TextSize) -> (Option<usize>, u32) {
         if self.kinds.is_empty() || at > self.len {
-            return None;
+            return (None, 0);
         }
-        Some(self.starts.partition_point(|s| *s <= at).saturating_sub(1))
+        let (after, probes) = partition(&self.starts, |s| s <= at);
+        (Some(after.saturating_sub(1)), probes)
     }
 
     /// The tokens overlapping `r`; O(log n).
     pub fn tokens_in(&self, r: TextRange) -> Range<usize> {
-        let first = self
-            .starts
-            .partition_point(|s| *s <= r.start())
-            .saturating_sub(1);
-        let last = self.starts.partition_point(|s| *s < r.end());
-        first.min(last)..last
+        self.tokens_in_probed(r).0
+    }
+
+    /// [`Lexed::tokens_in`] and the number of offsets its binary searches compared.
+    #[doc(hidden)]
+    pub fn tokens_in_probed(&self, r: TextRange) -> (Range<usize>, u32) {
+        let (after_start, first_probes) = partition(&self.starts, |s| s <= r.start());
+        let (last, last_probes) = partition(&self.starts, |s| s < r.end());
+        let first = after_start.saturating_sub(1);
+        (first.min(last)..last, first_probes + last_probes)
     }
 
     /// The deepest parenthesis nesting inside `tokens` (R-M3-35).
@@ -181,29 +200,57 @@ impl Lexed {
         max
     }
 
-    /// One `Unknown` token over `len` bytes (none for an empty text): the Task 1b stub.
-    pub(crate) fn unknown(len: TextSize) -> Lexed {
-        let one = len > TextSize::from(0);
+    /// An empty lexing of a `len`-byte text, with room for `tokens` tokens.
+    pub(crate) fn with_capacity(tokens: usize, len: TextSize) -> Lexed {
         Lexed {
-            kinds: if one {
-                vec![TokenKind::Unknown]
-            } else {
-                Vec::new()
-            },
-            starts: if one {
-                vec![TextSize::from(0)]
-            } else {
-                Vec::new()
-            },
-            flags: if one {
-                vec![TokenFlags::empty()]
-            } else {
-                Vec::new()
-            },
-            keywords: if one { vec![None] } else { Vec::new() },
+            kinds: Vec::with_capacity(tokens),
+            starts: Vec::with_capacity(tokens),
+            flags: Vec::with_capacity(tokens),
+            keywords: Vec::with_capacity(tokens),
             errors: Vec::new(),
             end_state: LexState::Initial,
             len,
         }
     }
+
+    /// Appends a token starting at `start` (after every token pushed so far).
+    pub(crate) fn push(
+        &mut self,
+        start: TextSize,
+        kind: TokenKind,
+        flags: TokenFlags,
+        keyword: Option<KwEntry>,
+    ) {
+        debug_assert!(self.starts.last().is_none_or(|s| *s < start));
+        self.kinds.push(kind);
+        self.starts.push(start);
+        self.flags.push(flags);
+        self.keywords.push(keyword);
+    }
+
+    /// Records an error over `range`.
+    pub(crate) fn push_error(&mut self, range: TextRange, code: LexErrorCode) {
+        self.errors.push(LexError { range, code });
+    }
+
+    /// Sets the state lexing ended in.
+    pub(crate) fn set_end_state(&mut self, state: LexState) {
+        self.end_state = state;
+    }
+}
+
+/// The number of leading `starts` for which `below` holds (they are sorted, so `below` holds
+/// for a prefix), and how many it compared: a binary search, O(log n).
+fn partition(starts: &[TextSize], below: impl Fn(TextSize) -> bool) -> (usize, u32) {
+    let (mut lo, mut hi, mut probes) = (0, starts.len(), 0);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        probes += 1;
+        if below(starts[mid]) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo, probes)
 }
