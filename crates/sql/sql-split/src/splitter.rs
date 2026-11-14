@@ -1046,12 +1046,15 @@ impl<'a> Walker<'a, '_> {
 
     /// The MySQL/MariaDB backstop: no statement starts with `END` there, so one that does means
     /// a block's opener went unseen and its `END` closed an outer block early. Every statement
-    /// back to the last block-tracked one, and this one, is uncertain.
+    /// back to the last block-tracked one, and this one, is uncertain; with no block-tracked
+    /// statement before it, every statement back to the text's start (an opener the splitter
+    /// does not track, such as a MariaDB `sql_mode=ORACLE` anonymous `BEGIN` or `DECLARE`
+    /// block, can stand anywhere before it).
     fn stray_end(&mut self, t: &Tok) {
         if self.sp.family != BlockFamily::MySql || !self.eq(t, "END") {
             return;
         }
-        let from = self.last_block_item.unwrap_or(self.out.items.len());
+        let from = self.last_block_item.unwrap_or(0);
         let mut marked = Vec::new();
         for item in &mut self.out.items[from..] {
             if let RawItem::Stmt(s) = item {
@@ -1254,6 +1257,21 @@ impl<'a> Walker<'a, '_> {
         })
     }
 
+    /// Opens or closes a block at a block word, by position (`alg/10` erratum (e)).
+    ///
+    /// Known refusals (T8 round-1 re-review R1-3; corpus `R2-known-refusal-*`): where the
+    /// position rules cannot tell a name from a block word, the unit is refused, never cut
+    /// wrongly. These can become certain later (T13 or after):
+    /// - a MySQL handler whose action is a compound statement other than `BEGIN`
+    ///   (`DECLARE … HANDLER FOR NOT FOUND IF … END IF;`): its `END IF` closes the body early,
+    ///   and the stray-`END` backstop refuses back to the routine;
+    /// - `end` as a name where no name position precedes it: `UNTIL end > 1`,
+    ///   `SELECT DISTINCT end`, an alias without `AS` (`SELECT a end`), a `CASE` operand
+    ///   (`CASE end WHEN …`, MySQL and SQLite);
+    /// - `DO REPEAT('a', 3)` in a body: the function is read as a `REPEAT` loop, so the body
+    ///   stays open to the end of the text;
+    /// - a trigger named `begin` (`CREATE TRIGGER begin …`): its name is read as the body's
+    ///   `BEGIN`, so the rest of the script is one refused unit.
     fn block_word(&mut self, t: &Tok, family: BlockFamily) {
         let Some(cur) = &self.cur else {
             return;
@@ -1277,7 +1295,11 @@ impl<'a> Walker<'a, '_> {
             BlockFamily::Plain => {}
             BlockFamily::Postgres => {
                 if is("BEGIN") {
-                    if routine && !in_block && !top_is_paren && !names {
+                    // No name test: `ATOMIC` must come next (`pending_begin`), and no routine
+                    // header holds a name `begin` before `atomic` outside parentheses, while
+                    // an option's value can be a name position's word (`SET x = on BEGIN
+                    // ATOMIC`, T8 round-1 re-review R1-1).
+                    if routine && !in_block && !top_is_paren {
                         self.set_pending_begin(t.range);
                     }
                 } else if is("CASE") {
@@ -1786,6 +1808,15 @@ impl<'a> Walker<'a, '_> {
 /// How far past a token the lexer may look before it settles that token: `-- ` and `/*M!`, an
 /// `x'`/`b'` prefix, a version number. A token that ends this far before a prefix's cut reads as
 /// it does in the whole text.
+///
+/// This margin, and `Stream::load`'s final-word rule, rest on an assumption about `sql_lexer`:
+/// its lookahead past a token is bounded (a few bytes), except a dollar tag's scan, which the
+/// final-word rule covers. Strings, comments and SQLite's Tcl `(…)` suffix that a cut leaves
+/// open run to the cut, so the margin holds them back. A future lexer rule with unbounded
+/// lookahead (PostgreSQL `UESCAPE` across whitespace, a MySQL introducer before a string) would
+/// break chunked lexing silently, beyond the fragment alphabet of
+/// `any_chunking_gives_the_same_split`; such a rule needs this margin and that property
+/// revisited (T8 round-1 re-review R1-4).
 const CUT_MARGIN: usize = 16;
 
 /// Where a MySQL/MariaDB server that runs (or reads) the comment token `t` ends it, and the

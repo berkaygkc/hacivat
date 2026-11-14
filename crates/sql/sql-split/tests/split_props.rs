@@ -268,10 +268,31 @@ fn pg_script() -> impl Strategy<Value = String> {
         Just("UPDATE t SET a = CASE WHEN a THEN 1 END".to_string()),
         Just("INSERT INTO t (a) VALUES (1)".to_string()),
     ];
-    let function = prop::collection::vec(body_stmt.clone(), 0..4).prop_map(|b| {
-        let body: String = b.iter().map(|x| format!("{x}; ")).collect();
-        format!("CREATE FUNCTION f() RETURNS SETOF int LANGUAGE sql BEGIN ATOMIC {body}END")
-    });
+    // Routine options between the header and the body (T8 round-1 re-review R1-1: a value
+    // `on` is a name position's word, yet the `BEGIN ATOMIC` after it opens the body).
+    let option = prop::sample::select(vec![
+        "SET enable_seqscan = on",
+        "SET jit TO on",
+        "SET x = off",
+        "SET search_path = a, b",
+        "SET work_mem FROM CURRENT",
+        "STRICT",
+        "SECURITY DEFINER",
+        "PARALLEL SAFE",
+        "COST 5",
+        "IMMUTABLE",
+    ]);
+    let function = (
+        prop::collection::vec(option, 0..3),
+        prop::collection::vec(body_stmt.clone(), 0..4),
+    )
+        .prop_map(|(o, b)| {
+            let opts: String = o.iter().map(|x| format!("{x} ")).collect();
+            let body: String = b.iter().map(|x| format!("{x}; ")).collect();
+            format!(
+                "CREATE FUNCTION f() RETURNS SETOF int LANGUAGE sql {opts}BEGIN ATOMIC {body}END"
+            )
+        });
     let stmt = prop_oneof![
         body_stmt,
         function,

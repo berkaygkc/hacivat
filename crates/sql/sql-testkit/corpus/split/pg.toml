@@ -457,3 +457,21 @@ editor = ["DROP TABLE t", "SELECT 1"]
 ambiguous = ["ClientCommand"]
 confidence = ["H", "E"]
 client = ["\\if false", "\\endif"]
+
+[[case]]
+id = "pg-set-on-multi"
+source = "T8 round-1 re-review R1-1 (pg_query: one statement): a routine option ending in `on` before BEGIN ATOMIC"
+input = "CREATE FUNCTION f() RETURNS SETOF int LANGUAGE sql SET enable_seqscan = on BEGIN ATOMIC SELECT 1; DELETE FROM t; END;\nSELECT 3;"
+editor = ["CREATE FUNCTION f() RETURNS SETOF int LANGUAGE sql SET enable_seqscan = on BEGIN ATOMIC SELECT 1; DELETE FROM t; END", "SELECT 3"]
+
+[[case]]
+id = "pg-set-to-on-atomic"
+source = "T8 round-1 re-review R1-1 (pg_query: one statement)"
+input = "CREATE PROCEDURE p() LANGUAGE sql SET jit TO on BEGIN ATOMIC DELETE FROM t; UPDATE u SET a = 1; END;\nSELECT 3;"
+editor = ["CREATE PROCEDURE p() LANGUAGE sql SET jit TO on BEGIN ATOMIC DELETE FROM t; UPDATE u SET a = 1; END", "SELECT 3"]
+
+[[case]]
+id = "pg-options-before-atomic"
+source = "T8 round-1 re-review R1-1: STRICT, SECURITY DEFINER, PARALLEL SAFE, COST before BEGIN ATOMIC"
+input = "CREATE FUNCTION f(a int) RETURNS int LANGUAGE sql STRICT SECURITY DEFINER PARALLEL SAFE COST 5 SET search_path = a, b BEGIN ATOMIC SELECT a; END;\nSELECT 3;"
+editor = ["CREATE FUNCTION f(a int) RETURNS int LANGUAGE sql STRICT SECURITY DEFINER PARALLEL SAFE COST 5 SET search_path = a, b BEGIN ATOMIC SELECT a; END", "SELECT 3"]

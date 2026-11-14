@@ -779,6 +779,30 @@ fn an_end_that_follows_an_operator_or_a_branch_is_a_name() {
 }
 
 #[test]
+fn a_stray_end_with_no_block_before_it_refuses_back_to_the_start() {
+    // MariaDB `sql_mode=ORACLE` anonymous blocks are not tracked (digest R3); their `END`
+    // starts a statement, which the backstop takes for an opener gone unseen. With no
+    // block-tracked statement before it, everything back to the text's start is uncertain
+    // (T8 round-1 re-review R1-2).
+    for text in [
+        "BEGIN SELECT 1; DELETE FROM t; END;",
+        "DECLARE x INT; BEGIN DELETE FROM t; END;",
+    ] {
+        for oracle in [false, true] {
+            let mut c = ctx(DialectId::MariaDb);
+            c.modes.mariadb_oracle_mode = oracle;
+            let s = run(text, &c, ClientFlavor::None, SplitMode::Execution);
+            assert_eq!(
+                s.runnable().count(),
+                0,
+                "{text:?} oracle={oracle}: {:?}",
+                s.ambiguous
+            );
+        }
+    }
+}
+
+#[test]
 fn client_command_splitting_lexes_linearly() {
     // The structural pass's own lexing (`lexed_bytes`, the complexity counter) stays within a
     // small multiple of the text whatever the number of commands, COPY blocks or delimiters:

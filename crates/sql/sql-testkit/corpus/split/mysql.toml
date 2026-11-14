@@ -418,3 +418,81 @@ id = "R1-maria-not-atomic-end-col"
 source = "T8 review I1 / erratum (e)"
 input = "BEGIN NOT ATOMIC UPDATE t SET end = 1; DELETE FROM t2; END;\nSELECT 3;"
 editor = ["BEGIN NOT ATOMIC UPDATE t SET end = 1; DELETE FROM t2; END", "SELECT 3"]
+
+# --- Known refusals (T8 round-1 re-review R1-3): a name or compound the position rules do not
+# read, so the splitter refuses the unit (fail closed, never a wrong certain cut). They can
+# become certain later (T13 or after); until then these cases pin the refusal. ---
+
+[[case]]
+id = "R2-known-refusal-handler-if"
+source = "T8 round-1 re-review R1-3: a handler whose action is an IF (only a BEGIN action is tracked); END IF closes the body early and the backstop refuses back to the routine"
+input = "CREATE PROCEDURE p() BEGIN DECLARE CONTINUE HANDLER FOR NOT FOUND IF 1 THEN SET @x = 1; END IF; SELECT 1; END;\nSELECT 2;"
+editor = ["CREATE PROCEDURE p() BEGIN DECLARE CONTINUE HANDLER FOR NOT FOUND IF 1 THEN SET @x = 1; END IF", "SELECT 1", "END", "SELECT 2"]
+ambiguous = ["UnknownBlock", "UnknownBlock", "UnknownBlock", "UnknownBlock"]
+confidence = ["H", "H", "H", "E"]
+
+[[case]]
+id = "R2-known-refusal-until-end"
+source = "T8 round-1 re-review R1-3: `UNTIL end > 1` (a name after UNTIL)"
+input = "CREATE PROCEDURE p() BEGIN REPEAT SET @x = 1; UNTIL end > 1 END REPEAT; END;\nSELECT 2;"
+editor = ["CREATE PROCEDURE p() BEGIN REPEAT SET @x = 1; UNTIL end > 1 END REPEAT; END", "SELECT 2"]
+ambiguous = ["UnknownBlock", "UnknownBlock"]
+confidence = ["H", "E"]
+diag = ["split.end-without-block"]
+
+[[case]]
+id = "R2-known-refusal-distinct-end"
+source = "T8 round-1 re-review R1-3: `SELECT DISTINCT end` (a name after DISTINCT)"
+input = "CREATE PROCEDURE p() BEGIN SELECT DISTINCT end FROM t; END;\nSELECT 2;"
+editor = ["CREATE PROCEDURE p() BEGIN SELECT DISTINCT end FROM t; END", "SELECT 2"]
+ambiguous = ["UnknownBlock"]
+confidence = ["H", "E"]
+diag = ["split.end-without-block"]
+
+[[case]]
+id = "R2-known-refusal-alias-end"
+source = "T8 round-1 re-review R1-3: `SELECT a end` (an alias without AS)"
+input = "CREATE PROCEDURE p() BEGIN SELECT a end FROM t; END;\nSELECT 2;"
+editor = ["CREATE PROCEDURE p() BEGIN SELECT a end FROM t; END", "SELECT 2"]
+ambiguous = ["UnknownBlock"]
+confidence = ["H", "E"]
+diag = ["split.end-without-block"]
+
+[[case]]
+id = "R2-known-refusal-case-end-when"
+source = "T8 round-1 re-review R1-3: `CASE end WHEN` (a name as the CASE operand)"
+input = "CREATE PROCEDURE p() BEGIN SELECT CASE end WHEN 1 THEN 2 END FROM t; END;\nSELECT 2;"
+editor = ["CREATE PROCEDURE p() BEGIN SELECT CASE end WHEN 1 THEN 2 END FROM t; END", "SELECT 2"]
+ambiguous = ["UnknownBlock"]
+confidence = ["H", "E"]
+diag = ["split.end-without-block"]
+
+[[case]]
+id = "R2-known-refusal-do-repeat"
+source = "T8 round-1 re-review R1-3: `DO REPEAT('a', 3)` (the function, read as a loop after DO) leaves the body open to the end"
+input = "CREATE PROCEDURE p() BEGIN DO REPEAT('a', 3); END;\nSELECT 2;"
+editor = ["CREATE PROCEDURE p() BEGIN DO REPEAT('a', 3); END;", "SELECT 2"]
+exec = ["CREATE PROCEDURE p() BEGIN DO REPEAT('a', 3); END;\nSELECT 2;"]
+ambiguous = ["UnterminatedConstruct", "UnknownBlock"]
+confidence = ["H", "H"]
+diag = ["split.unterminated-block"]
+
+[[case]]
+id = "R2-known-refusal-trigger-named-begin"
+source = "T8 round-1 re-review R1-3: a trigger named `begin` is read as the body's BEGIN and swallows the rest of the script into one refused unit"
+input = "CREATE TRIGGER begin BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1;\nSELECT 2;\nSELECT 3;"
+editor = ["CREATE TRIGGER begin BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1;", "SELECT 2", "SELECT 3"]
+exec = ["CREATE TRIGGER begin BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1;\nSELECT 2;\nSELECT 3;"]
+ambiguous = ["UnterminatedConstruct"]
+confidence = ["H", "H", "H"]
+diag = ["split.unterminated-block"]
+
+# --- T8 round-1 re-review R1-2: a stray END with no block-tracked statement before it ---
+
+[[case]]
+id = "R2-stray-end-refuses-to-start"
+source = "T8 round-1 re-review R1-2: an untracked opener (MariaDB sql_mode=ORACLE `BEGIN … END`) before a stray END: every statement back to the text's start is refused"
+input = "BEGIN SELECT 1; DELETE FROM t; END;\nSELECT 2;"
+editor = ["BEGIN SELECT 1", "DELETE FROM t", "END", "SELECT 2"]
+ambiguous = ["UnknownBlock", "UnknownBlock", "UnknownBlock"]
+confidence = ["H", "H", "H", "E"]

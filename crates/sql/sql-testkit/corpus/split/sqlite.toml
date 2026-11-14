@@ -104,3 +104,12 @@ id = "R1-sq-when-end-alias"
 source = "T8 review I1 / erratum (e) (rusqlite: three statements)"
 input = "CREATE TABLE s(a);\nCREATE TRIGGER trg4 AFTER INSERT ON s WHEN (SELECT 1 AS end) BEGIN DELETE FROM s; END;\nSELECT 1;"
 editor = ["CREATE TABLE s(a)", "CREATE TRIGGER trg4 AFTER INSERT ON s WHEN (SELECT 1 AS end) BEGIN DELETE FROM s; END", "SELECT 1"]
+
+[[case]]
+id = "R2-known-refusal-case-end-when"
+source = "T8 round-1 re-review R1-3 (known refusal): `CASE end WHEN` in a trigger body (a name as the CASE operand) is refused, never cut"
+input = "CREATE TRIGGER g AFTER INSERT ON u BEGIN SELECT CASE end WHEN 1 THEN 2 END FROM t; END;\nSELECT 2;"
+editor = ["CREATE TRIGGER g AFTER INSERT ON u BEGIN SELECT CASE end WHEN 1 THEN 2 END FROM t; END", "SELECT 2"]
+ambiguous = ["UnknownBlock"]
+confidence = ["H", "E"]
+diag = ["split.end-without-block"]
