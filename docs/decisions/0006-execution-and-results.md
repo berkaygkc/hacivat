@@ -62,8 +62,11 @@ It enforces these rules, each with a test in `hacivat-session/tests/m3a_interfac
   (`one_open_query_per_connection_except_a_suspended_pg_portal`);
 - a suspendable PostgreSQL query outside a transaction is refused
   (`fake_pg_refuses_a_suspendable_query_outside_a_transaction`);
-- `COMMIT`/`END`/`ROLLBACK` destroy a suspended PostgreSQL portal (later `fetch_more` or
-  `next_event` answer 34000); `ROLLBACK TO SAVEPOINT s` destroys a portal opened inside `s` (or
+- `COMMIT`/`END`/`ROLLBACK` destroy a suspended PostgreSQL portal. As on a real pg17 server
+  (pinned by a Task 12 Docker test): `next_event` answers `Unsupported`; `fetch_more` answers
+  34000 once, sets the status to `Failed` inside a transaction block, and leaves nothing open;
+  `close_query` answers `Closed { rows: sent }`; a new `query` answers `Unsupported` until the
+  dead run is closed (Task 12 review round 1); `ROLLBACK TO SAVEPOINT s` destroys a portal opened inside `s` (or
   a later savepoint) and keeps one opened before `s`; `RELEASE SAVEPOINT` keeps it (round 2;
   `a_suspended_pg_portal_does_not_survive_commit`,
   `rollback_destroys_a_suspended_pg_portal_and_rollback_to_keeps_it`,
