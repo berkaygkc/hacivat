@@ -1,0 +1,75 @@
+# The SQLite splitter corpus (M3a Task 8): `alg/10` SQL-SPLIT-01 and -02 test cases, the R-M3-5
+# errata (a) and (d), and the `datagrip/13` §3.3 FX-SPLIT-SQLITE fixture with Hacivat's own
+# expectations. Fields: `sql-testkit/src/split.rs`. `tests/sqlite_differential.rs` also runs
+# SQLite itself over scripts like these.
+
+dialects = ["sqlite"]
+
+[[case]]
+id = "SPLIT02-7"
+source = "alg/10 SQL-SPLIT-02 test 7 (a trigger with CASE … END inside)"
+input = "CREATE TRIGGER t AFTER INSERT ON a BEGIN UPDATE b SET c = CASE WHEN 1 THEN 2 END; END; SELECT 1;"
+editor = ["CREATE TRIGGER t AFTER INSERT ON a BEGIN UPDATE b SET c = CASE WHEN 1 THEN 2 END; END", "SELECT 1"]
+
+[[case]]
+id = "TRIGGER-temp"
+source = "alg/10 SQL-SPLIT-02: CREATE TEMP TRIGGER IF NOT EXISTS … WHEN CASE … END BEGIN … END"
+input = "CREATE TEMP TRIGGER IF NOT EXISTS t BEFORE DELETE ON a WHEN CASE WHEN old.x THEN 1 END BEGIN SELECT RAISE(ABORT, 'no;'); DELETE FROM b; END; SELECT 2;"
+editor = [
+    "CREATE TEMP TRIGGER IF NOT EXISTS t BEFORE DELETE ON a WHEN CASE WHEN old.x THEN 1 END BEGIN SELECT RAISE(ABORT, 'no;'); DELETE FROM b; END",
+    "SELECT 2",
+]
+
+[[case]]
+id = "ERRATUM-a-sqlite"
+source = "R-M3-5 erratum (a): END [TRANSACTION] at statement start is COMMIT"
+input = "BEGIN; SELECT 1; END TRANSACTION; SELECT 2; END;"
+editor = ["BEGIN", "SELECT 1", "END TRANSACTION", "SELECT 2", "END"]
+
+[[case]]
+id = "ERRATUM-d"
+source = "R-M3-5 erratum (d): BEGIN DEFERRED|IMMEDIATE|EXCLUSIVE is a transaction"
+input = "BEGIN IMMEDIATE; SELECT 1; COMMIT; BEGIN DEFERRED TRANSACTION; SELECT 2; END; BEGIN EXCLUSIVE; ROLLBACK;"
+editor = [
+    "BEGIN IMMEDIATE", "SELECT 1", "COMMIT", "BEGIN DEFERRED TRANSACTION", "SELECT 2", "END",
+    "BEGIN EXCLUSIVE", "ROLLBACK",
+]
+
+[[case]]
+id = "SQLITE-quotes"
+source = "alg/10 SQL-SPLIT-02: SQLite quotes ([…], `…`, \"…\", '…') carry ;"
+input = "SELECT [a;b], `c;d`, \"e;f\", 'g;h' FROM t; SELECT 2"
+editor = ["SELECT [a;b], `c;d`, \"e;f\", 'g;h' FROM t", "SELECT 2"]
+
+[[case]]
+id = "SQLITE-unterminated-comment"
+source = "alg/10 SQL-SPLIT-02: an unterminated /* is a comment to the end in SQLite (no error), and the stability rule keeps the lines below"
+input = "SELECT 1; /* note\nSELECT 2;\n"
+editor = ["SELECT 1", "SELECT 2"]
+exec = ["SELECT 1"]
+confidence = ["E", "H"]
+
+[[case]]
+id = "SQLITE-dot"
+source = "alg/10 SQL-SPLIT-01 step 6: sqlite3 .commands at statement start"
+flavor = "sqlite3"
+input = ".mode csv\n.import 'a b.csv' t\nSELECT 1;\n  .not_a_command;"
+editor = ["SELECT 1", ".not_a_command"]
+client = [".mode csv", ".import 'a b.csv' t"]
+
+[[case]]
+id = "SQLITE-dot-mid-statement"
+source = "alg/10 SQL-SPLIT-01 step 6: a . line inside a statement is SQL"
+flavor = "sqlite3"
+input = "SELECT 1\n.5;"
+editor = ["SELECT 1\n.5"]
+
+[[case]]
+id = "FX-SPLIT-SQLITE-01"
+source = "datagrip/13 FX-SPLIT-SQLITE-01; alg/10 SQL-SPLIT-02 test 7 (2 statements)"
+fixture = "FX-SPLIT-SQLITE-01"
+editor = [
+    "CREATE TRIGGER hv_tr AFTER INSERT ON orders\nBEGIN\n  INSERT INTO audit_log(actor, message) VALUES ('trg', 'order;added');\nEND",
+    "SELECT 1",
+]
+crlf = true

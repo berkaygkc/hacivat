@@ -1,0 +1,641 @@
+# Splitter-table fixtures for the `mysql` profile (`sql-dialect/src/split_profile/mysql.rs`; M3a
+# Task 8): every table row has at least one case that covers it (`covers`), and the meta-test in
+# `sql-split/tests/split.rs` fails when a row has none. Expectations come from `alg/10`
+# SQL-SPLIT-01..03. Cases marked "synthetic" isolate a row from the head rules with a `SELECT`
+# head; they test the splitter, not SQL validity. Fields: `sql-testkit/src/split.rs`.
+# Every case also runs under MariaDB, whose profile adds only FOR loops (mariadb.toml).
+
+dialects = ["mysql", "mariadb"]
+flavor = "mysql"
+
+[[case]]
+id = "start-SELECT"
+covers = ["start:SELECT"]
+input = "SELECT 1\nSELECT 2"
+editor = ["SELECT 1", "SELECT 2"]
+exec = ["SELECT 1\nSELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-INSERT"
+covers = ["start:INSERT"]
+input = "SELECT 1\nINSERT INTO t VALUES (1)"
+editor = ["SELECT 1", "INSERT INTO t VALUES (1)"]
+exec = ["SELECT 1\nINSERT INTO t VALUES (1)"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-UPDATE"
+covers = ["start:UPDATE"]
+input = "SELECT 1\nUPDATE t SET a = 1"
+editor = ["SELECT 1", "UPDATE t SET a = 1"]
+exec = ["SELECT 1\nUPDATE t SET a = 1"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-DELETE"
+covers = ["start:DELETE"]
+input = "SELECT 1\nDELETE FROM t"
+editor = ["SELECT 1", "DELETE FROM t"]
+exec = ["SELECT 1\nDELETE FROM t"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-REPLACE"
+covers = ["start:REPLACE"]
+input = "SELECT 1\nREPLACE INTO t VALUES (1)"
+editor = ["SELECT 1", "REPLACE INTO t VALUES (1)"]
+exec = ["SELECT 1\nREPLACE INTO t VALUES (1)"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-WITH"
+covers = ["start:WITH"]
+input = "SELECT 1\nWITH x AS (SELECT 2) SELECT * FROM x"
+editor = ["SELECT 1", "WITH x AS (SELECT 2) SELECT * FROM x"]
+exec = ["SELECT 1\nWITH x AS (SELECT 2) SELECT * FROM x"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-CREATE"
+covers = ["start:CREATE"]
+input = "SELECT 1\nCREATE TABLE t (a int)"
+editor = ["SELECT 1", "CREATE TABLE t (a int)"]
+exec = ["SELECT 1\nCREATE TABLE t (a int)"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-DROP"
+covers = ["start:DROP"]
+input = "SELECT 1\nDROP TABLE t"
+editor = ["SELECT 1", "DROP TABLE t"]
+exec = ["SELECT 1\nDROP TABLE t"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-ALTER"
+covers = ["start:ALTER"]
+input = "SELECT 1\nALTER TABLE t ADD b int"
+editor = ["SELECT 1", "ALTER TABLE t ADD b int"]
+exec = ["SELECT 1\nALTER TABLE t ADD b int"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-TRUNCATE"
+covers = ["start:TRUNCATE"]
+input = "SELECT 1\nTRUNCATE TABLE t"
+editor = ["SELECT 1", "TRUNCATE TABLE t"]
+exec = ["SELECT 1\nTRUNCATE TABLE t"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-GRANT"
+covers = ["start:GRANT"]
+input = "SELECT 1\nGRANT SELECT ON t TO r"
+editor = ["SELECT 1", "GRANT SELECT ON t TO r"]
+exec = ["SELECT 1\nGRANT SELECT ON t TO r"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-REVOKE"
+covers = ["start:REVOKE"]
+input = "SELECT 1\nREVOKE SELECT ON t FROM r"
+editor = ["SELECT 1", "REVOKE SELECT ON t FROM r"]
+exec = ["SELECT 1\nREVOKE SELECT ON t FROM r"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-EXPLAIN"
+covers = ["start:EXPLAIN"]
+input = "SELECT 1\nEXPLAIN SELECT 2"
+editor = ["SELECT 1", "EXPLAIN SELECT 2"]
+exec = ["SELECT 1\nEXPLAIN SELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-DESCRIBE"
+covers = ["start:DESCRIBE"]
+input = "SELECT 1\nDESCRIBE t"
+editor = ["SELECT 1", "DESCRIBE t"]
+exec = ["SELECT 1\nDESCRIBE t"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-SHOW"
+covers = ["start:SHOW"]
+input = "SELECT 1\nSHOW TABLES"
+editor = ["SELECT 1", "SHOW TABLES"]
+exec = ["SELECT 1\nSHOW TABLES"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-USE"
+covers = ["start:USE"]
+input = "SELECT 1\nUSE db"
+editor = ["SELECT 1", "USE db"]
+exec = ["SELECT 1\nUSE db"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-CALL"
+covers = ["start:CALL"]
+input = "SELECT 1\nCALL p()"
+editor = ["SELECT 1", "CALL p()"]
+exec = ["SELECT 1\nCALL p()"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-COMMIT"
+covers = ["start:COMMIT"]
+input = "SELECT 1\nCOMMIT"
+editor = ["SELECT 1", "COMMIT"]
+exec = ["SELECT 1\nCOMMIT"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-ROLLBACK"
+covers = ["start:ROLLBACK"]
+input = "SELECT 1\nROLLBACK"
+editor = ["SELECT 1", "ROLLBACK"]
+exec = ["SELECT 1\nROLLBACK"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-OPTIMIZE"
+covers = ["start:OPTIMIZE"]
+input = "SELECT 1\nOPTIMIZE TABLE t"
+editor = ["SELECT 1", "OPTIMIZE TABLE t"]
+exec = ["SELECT 1\nOPTIMIZE TABLE t"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-FLUSH"
+covers = ["start:FLUSH"]
+input = "SELECT 1\nFLUSH TABLES"
+editor = ["SELECT 1", "FLUSH TABLES"]
+exec = ["SELECT 1\nFLUSH TABLES"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-,"
+covers = ["prev:,"]
+input = "SELECT a,\nSELECT b"
+editor = ["SELECT a,\nSELECT b"]
+
+[[case]]
+id = "prev-."
+covers = ["prev:."]
+input = "SELECT t.\nshow FROM t"
+editor = ["SELECT t.\nshow FROM t"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-AS"
+covers = ["prev:AS"]
+input = "SELECT 1 AS\nSELECT 2"
+editor = ["SELECT 1 AS\nSELECT 2"]
+
+[[case]]
+id = "prev-UNION"
+covers = ["prev:UNION"]
+input = "SELECT 1 UNION\nSELECT 2"
+editor = ["SELECT 1 UNION\nSELECT 2"]
+
+[[case]]
+id = "prev-INTERSECT"
+covers = ["prev:INTERSECT"]
+input = "SELECT 1 INTERSECT\nSELECT 2"
+editor = ["SELECT 1 INTERSECT\nSELECT 2"]
+
+[[case]]
+id = "prev-EXCEPT"
+covers = ["prev:EXCEPT"]
+input = "SELECT 1 EXCEPT\nSELECT 2"
+editor = ["SELECT 1 EXCEPT\nSELECT 2"]
+
+[[case]]
+id = "prev-ALL"
+covers = ["prev:ALL"]
+input = "SELECT 1 UNION ALL\nSELECT 2"
+editor = ["SELECT 1 UNION ALL\nSELECT 2"]
+
+[[case]]
+id = "prev-DISTINCT"
+covers = ["prev:DISTINCT"]
+input = "SELECT 1 UNION DISTINCT\nSELECT 2"
+editor = ["SELECT 1 UNION DISTINCT\nSELECT 2"]
+
+[[case]]
+id = "prev-FOR"
+covers = ["prev:FOR"]
+input = "SELECT * FROM t FOR\nUPDATE"
+editor = ["SELECT * FROM t FOR\nUPDATE"]
+
+[[case]]
+id = "prev-DO"
+covers = ["prev:DO"]
+input = "ALTER EVENT e ON SCHEDULE EVERY 1 DAY DO\nDELETE FROM t"
+editor = ["ALTER EVENT e ON SCHEDULE EVERY 1 DAY DO\nDELETE FROM t"]
+
+[[case]]
+id = "prev-ON"
+covers = ["prev:ON"]
+input = "ALTER TABLE t ADD FOREIGN KEY (a) REFERENCES u (b) ON\nDELETE CASCADE"
+editor = ["ALTER TABLE t ADD FOREIGN KEY (a) REFERENCES u (b) ON\nDELETE CASCADE"]
+
+[[case]]
+id = "prev-KEY"
+covers = ["prev:KEY"]
+input = "INSERT INTO t SELECT 1 ON DUPLICATE KEY\nUPDATE a = 1"
+editor = ["INSERT INTO t SELECT 1 ON DUPLICATE KEY\nUPDATE a = 1"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-BEFORE"
+covers = ["prev:BEFORE"]
+input = "SELECT 1 BEFORE\nDELETE"
+editor = ["SELECT 1 BEFORE\nDELETE"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-AFTER"
+covers = ["prev:AFTER"]
+input = "SELECT 1 AFTER\nDELETE"
+editor = ["SELECT 1 AFTER\nDELETE"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-OF"
+covers = ["prev:OF"]
+input = "SELECT 1 OF\nDELETE"
+editor = ["SELECT 1 OF\nDELETE"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-OR"
+covers = ["prev:OR"]
+input = "SELECT 1 OR\nDELETE"
+editor = ["SELECT 1 OR\nDELETE"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-THEN"
+covers = ["prev:THEN"]
+input = "SELECT 1 THEN\nDELETE"
+editor = ["SELECT 1 THEN\nDELETE"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-ELSE"
+covers = ["prev:ELSE"]
+input = "SELECT 1 ELSE\nDELETE"
+editor = ["SELECT 1 ELSE\nDELETE"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-GRANT"
+covers = ["prev:GRANT"]
+input = "SELECT 1 GRANT\nDELETE"
+editor = ["SELECT 1 GRANT\nDELETE"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-REVOKE"
+covers = ["prev:REVOKE"]
+input = "SELECT 1 REVOKE\nDELETE"
+editor = ["SELECT 1 REVOKE\nDELETE"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-EXPLAIN"
+covers = ["prev:EXPLAIN"]
+input = "SELECT 1 EXPLAIN\nDELETE"
+editor = ["SELECT 1 EXPLAIN\nDELETE"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-ANALYZE"
+covers = ["prev:ANALYZE"]
+input = "SELECT 1 ANALYZE\nDELETE"
+editor = ["SELECT 1 ANALYZE\nDELETE"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-WITH"
+covers = ["prev:WITH"]
+input = "SELECT 1 WITH\nDELETE"
+editor = ["SELECT 1 WITH\nDELETE"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-RETURN"
+covers = ["prev:RETURN"]
+input = "SELECT 1 RETURN\nDELETE"
+editor = ["SELECT 1 RETURN\nDELETE"]
+
+[[case]]
+id = "prev-ROW"
+covers = ["prev:ROW"]
+input = "CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW\nINSERT INTO log VALUES (1)"
+editor = ["CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW\nINSERT INTO log VALUES (1)"]
+
+[[case]]
+id = "head-INSERT"
+covers = ["head:INSERT"]
+input = "INSERT INTO t\nSELECT 1\nSELECT 2"
+editor = ["INSERT INTO t\nSELECT 1", "SELECT 2"]
+exec = ["INSERT INTO t\nSELECT 1\nSELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "head-REPLACE"
+covers = ["head:REPLACE"]
+input = "REPLACE INTO t\nSELECT 1\nSELECT 2"
+editor = ["REPLACE INTO t\nSELECT 1", "SELECT 2"]
+exec = ["REPLACE INTO t\nSELECT 1\nSELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "head-CREATE"
+covers = ["head:CREATE"]
+input = "CREATE TABLE t2\nSELECT 1\nSELECT 2"
+editor = ["CREATE TABLE t2\nSELECT 1", "SELECT 2"]
+exec = ["CREATE TABLE t2\nSELECT 1\nSELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "head-WITH"
+covers = ["head:WITH"]
+input = "WITH x AS (SELECT 1)\nSELECT * FROM x\nSELECT 2"
+editor = ["WITH x AS (SELECT 1)\nSELECT * FROM x", "SELECT 2"]
+exec = ["WITH x AS (SELECT 1)\nSELECT * FROM x\nSELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "head-EXPLAIN"
+covers = ["head:EXPLAIN"]
+input = "EXPLAIN FORMAT=JSON\nSELECT 1\nSELECT 2"
+editor = ["EXPLAIN FORMAT=JSON\nSELECT 1", "SELECT 2"]
+exec = ["EXPLAIN FORMAT=JSON\nSELECT 1\nSELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "head-DESCRIBE"
+covers = ["head:DESCRIBE"]
+input = "DESCRIBE\nSELECT 1\nSELECT 2"
+editor = ["DESCRIBE\nSELECT 1", "SELECT 2"]
+exec = ["DESCRIBE\nSELECT 1\nSELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "head-ALTER"
+covers = ["head:ALTER"]
+input = "ALTER TABLE t\nDROP COLUMN a\nALTER COLUMN b SET DEFAULT 1"
+editor = ["ALTER TABLE t\nDROP COLUMN a\nALTER COLUMN b SET DEFAULT 1"]
+
+[[case]]
+id = "head-GRANT"
+covers = ["head:GRANT"]
+input = "GRANT INSERT ON t TO r\nGRANT SELECT ON u TO r"
+editor = ["GRANT INSERT ON t TO r\nGRANT SELECT ON u TO r"]
+
+[[case]]
+id = "head-REVOKE"
+covers = ["head:REVOKE"]
+input = "REVOKE INSERT ON t FROM r\nREVOKE SELECT ON u FROM r"
+editor = ["REVOKE INSERT ON t FROM r\nREVOKE SELECT ON u FROM r"]
+
+[[case]]
+id = "skip-OR-REPLACE"
+covers = ["skip:OR", "skip:REPLACE", "routine:PROCEDURE"]
+input = "CREATE OR REPLACE PROCEDURE p() BEGIN SELECT 1; END; SELECT 2"
+editor = ["CREATE OR REPLACE PROCEDURE p() BEGIN SELECT 1; END", "SELECT 2"]
+
+[[case]]
+id = "skip-DEFINER"
+covers = ["skip:DEFINER"]
+input = "CREATE DEFINER = `admin`@`%` PROCEDURE p() BEGIN SELECT 1; END; SELECT 2"
+editor = ["CREATE DEFINER = `admin`@`%` PROCEDURE p() BEGIN SELECT 1; END", "SELECT 2"]
+
+[[case]]
+id = "skip-DEFINER-function"
+covers = ["skip:DEFINER", "routine:FUNCTION"]
+input = "CREATE DEFINER = CURRENT_USER() FUNCTION f() RETURNS INT BEGIN RETURN 1; END; SELECT 2"
+editor = ["CREATE DEFINER = CURRENT_USER() FUNCTION f() RETURNS INT BEGIN RETURN 1; END", "SELECT 2"]
+
+[[case]]
+id = "skip-AGGREGATE"
+covers = ["skip:AGGREGATE"]
+input = "CREATE AGGREGATE FUNCTION f(x INT) RETURNS INT BEGIN DECLARE CONTINUE HANDLER FOR NOT FOUND RETURN 1; LOOP FETCH GROUP NEXT ROW; END LOOP; END; SELECT 2"
+editor = ["CREATE AGGREGATE FUNCTION f(x INT) RETURNS INT BEGIN DECLARE CONTINUE HANDLER FOR NOT FOUND RETURN 1; LOOP FETCH GROUP NEXT ROW; END LOOP; END", "SELECT 2"]
+
+[[case]]
+id = "routine-TRIGGER"
+covers = ["routine:TRIGGER"]
+input = "CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN SET NEW.a = 1; SET NEW.b = 2; END; SELECT 2"
+editor = ["CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN SET NEW.a = 1; SET NEW.b = 2; END", "SELECT 2"]
+
+[[case]]
+id = "routine-EVENT"
+covers = ["routine:EVENT", "pos:DO"]
+input = "CREATE EVENT e ON SCHEDULE EVERY 1 HOUR DO BEGIN DELETE FROM t; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE EVENT e ON SCHEDULE EVERY 1 HOUR DO BEGIN DELETE FROM t; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "routine-EVENT-if"
+covers = ["pos:DO", "opener:IF", "end:IF"]
+input = "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO IF a THEN SELECT 1; END IF; SELECT 2"
+editor = ["CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO IF a THEN SELECT 1; END IF", "SELECT 2"]
+
+[[case]]
+id = "topblock-NOT"
+covers = ["topblock:NOT"]
+input = "BEGIN NOT ATOMIC SELECT 1; SELECT 2; END; SELECT 3"
+editor = ["BEGIN NOT ATOMIC SELECT 1; SELECT 2; END", "SELECT 3"]
+
+[[case]]
+id = "pos-semicolon"
+covers = ["pos:;"]
+input = "CREATE PROCEDURE p() BEGIN SELECT 0; IF a THEN SELECT 1; END IF; END; SELECT 2"
+editor = ["CREATE PROCEDURE p() BEGIN SELECT 0; IF a THEN SELECT 1; END IF; END", "SELECT 2"]
+
+[[case]]
+id = "pos-BEGIN"
+covers = ["pos:BEGIN", "opener:IF", "end:IF"]
+input = "CREATE PROCEDURE p() BEGIN IF a THEN SELECT 1; END IF; END; SELECT 2"
+editor = ["CREATE PROCEDURE p() BEGIN IF a THEN SELECT 1; END IF; END", "SELECT 2"]
+
+[[case]]
+id = "pos-ATOMIC"
+covers = ["pos:ATOMIC"]
+input = "BEGIN NOT ATOMIC IF a THEN SELECT 1; END IF; END; SELECT 2"
+editor = ["BEGIN NOT ATOMIC IF a THEN SELECT 1; END IF; END", "SELECT 2"]
+
+[[case]]
+id = "pos-THEN"
+covers = ["pos:THEN"]
+input = "CREATE PROCEDURE p() BEGIN IF a THEN IF b THEN SELECT 1; END IF; END IF; END; SELECT 2"
+editor = ["CREATE PROCEDURE p() BEGIN IF a THEN IF b THEN SELECT 1; END IF; END IF; END", "SELECT 2"]
+
+[[case]]
+id = "pos-ELSE"
+covers = ["pos:ELSE"]
+input = "CREATE PROCEDURE p() BEGIN IF a THEN SELECT 0; ELSE IF b THEN SELECT 1; END IF; END IF; END; SELECT 2"
+editor = ["CREATE PROCEDURE p() BEGIN IF a THEN SELECT 0; ELSE IF b THEN SELECT 1; END IF; END IF; END", "SELECT 2"]
+
+[[case]]
+id = "pos-LOOP"
+covers = ["pos:LOOP"]
+input = "CREATE PROCEDURE p() BEGIN l: LOOP IF a THEN LEAVE l; END IF; END LOOP; END; SELECT 2"
+editor = ["CREATE PROCEDURE p() BEGIN l: LOOP IF a THEN LEAVE l; END IF; END LOOP; END", "SELECT 2"]
+
+[[case]]
+id = "pos-REPEAT"
+covers = ["pos:REPEAT"]
+input = "CREATE PROCEDURE p() BEGIN REPEAT IF a THEN SET b = 1; END IF; UNTIL c END REPEAT; END; SELECT 2"
+editor = ["CREATE PROCEDURE p() BEGIN REPEAT IF a THEN SET b = 1; END IF; UNTIL c END REPEAT; END", "SELECT 2"]
+
+[[case]]
+id = "pos-colon"
+covers = ["pos::", "opener:LOOP", "end:LOOP"]
+input = "CREATE PROCEDURE p() BEGIN l: LOOP LEAVE l; END LOOP; END; SELECT 2"
+editor = ["CREATE PROCEDURE p() BEGIN l: LOOP LEAVE l; END LOOP; END", "SELECT 2"]
+
+[[case]]
+id = "body-paren"
+covers = ["body:)"]
+input = "CREATE PROCEDURE p() IF a THEN SELECT 1; END IF; SELECT 2"
+editor = ["CREATE PROCEDURE p() IF a THEN SELECT 1; END IF", "SELECT 2"]
+
+[[case]]
+id = "body-ROW"
+covers = ["body:ROW"]
+input = "CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW IF NEW.a IS NULL THEN SET NEW.a = 1; END IF; SELECT 2"
+editor = ["CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW IF NEW.a IS NULL THEN SET NEW.a = 1; END IF", "SELECT 2"]
+
+[[case]]
+id = "body-DETERMINISTIC"
+covers = ["body:DETERMINISTIC"]
+input = "CREATE FUNCTION f() RETURNS INT DETERMINISTIC IF 1 THEN RETURN 1; END IF; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS INT DETERMINISTIC IF 1 THEN RETURN 1; END IF", "SELECT 2"]
+
+[[case]]
+id = "body-SQL"
+covers = ["body:SQL"]
+input = "CREATE PROCEDURE p() CONTAINS SQL IF a THEN SELECT 1; END IF; SELECT 2"
+editor = ["CREATE PROCEDURE p() CONTAINS SQL IF a THEN SELECT 1; END IF", "SELECT 2"]
+
+[[case]]
+id = "body-DATA"
+covers = ["body:DATA"]
+input = "CREATE PROCEDURE p() READS SQL DATA IF a THEN SELECT 1; END IF; SELECT 2"
+editor = ["CREATE PROCEDURE p() READS SQL DATA IF a THEN SELECT 1; END IF", "SELECT 2"]
+
+[[case]]
+id = "body-DEFINER"
+covers = ["body:DEFINER"]
+input = "CREATE PROCEDURE p() SQL SECURITY DEFINER IF a THEN SELECT 1; END IF; SELECT 2"
+editor = ["CREATE PROCEDURE p() SQL SECURITY DEFINER IF a THEN SELECT 1; END IF", "SELECT 2"]
+
+[[case]]
+id = "body-INVOKER"
+covers = ["body:INVOKER"]
+input = "CREATE PROCEDURE p() SQL SECURITY INVOKER IF a THEN SELECT 1; END IF; SELECT 2"
+editor = ["CREATE PROCEDURE p() SQL SECURITY INVOKER IF a THEN SELECT 1; END IF", "SELECT 2"]
+
+[[case]]
+id = "opener-CASE"
+covers = ["opener:CASE", "end:CASE"]
+input = "CREATE PROCEDURE p(x INT) BEGIN CASE x WHEN 1 THEN SELECT 1; ELSE SELECT 2; END CASE; END; SELECT 3"
+editor = ["CREATE PROCEDURE p(x INT) BEGIN CASE x WHEN 1 THEN SELECT 1; ELSE SELECT 2; END CASE; END", "SELECT 3"]
+
+[[case]]
+id = "opener-WHILE"
+covers = ["opener:WHILE", "end:WHILE"]
+input = "CREATE PROCEDURE p() BEGIN WHILE a DO SET a = a - 1; END WHILE; END; SELECT 2"
+editor = ["CREATE PROCEDURE p() BEGIN WHILE a DO SET a = a - 1; END WHILE; END", "SELECT 2"]
+
+[[case]]
+id = "opener-REPEAT"
+covers = ["opener:REPEAT", "end:REPEAT"]
+input = "CREATE PROCEDURE p() BEGIN REPEAT SET a = a - 1; UNTIL a = 0 END REPEAT; END; SELECT 2"
+editor = ["CREATE PROCEDURE p() BEGIN REPEAT SET a = a - 1; UNTIL a = 0 END REPEAT; END", "SELECT 2"]
+
+[[case]]
+id = "mysql-backslash"
+covers = ["client:backslash", "client:backslash-to-eol"]
+input = "SELECT 1;\n\\u db\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+client = ["\\u db"]
+
+[[case]]
+id = "mysql-g"
+covers = ["client:\\g"]
+input = "SELECT 1 \\g\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+client = ["\\g"]
+
+[[case]]
+id = "mysql-G"
+covers = ["client:\\G"]
+input = "SELECT 1\\G\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+client = ["\\G"]
+
+[[case]]
+id = "mysql-c"
+covers = ["client:\\c"]
+input = "SELECT 1 \\c\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+ambiguous = ["ClientCommand"]
+client = ["\\c"]
+
+[[case]]
+id = "mysql-d"
+covers = ["client:\\d"]
+input = "\\d //\nSELECT 1//\n\\d ;\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+client = ["\\d //", "\\d ;"]
+
+[[case]]
+id = "mysql-DELIMITER"
+covers = ["client:DELIMITER"]
+input = "DELIMITER //\nSELECT 1; SELECT 2//\ndelimiter ;\nSELECT 3;"
+editor = ["SELECT 1; SELECT 2", "SELECT 3"]
+ambiguous = ["DelimiterChange"]
+client = ["DELIMITER //", "delimiter ;"]
+
+[[case]]
+id = "mysql-source"
+covers = ["client:source"]
+input = "source a.sql\nSELECT 1;"
+editor = ["SELECT 1"]
+client = ["source a.sql"]

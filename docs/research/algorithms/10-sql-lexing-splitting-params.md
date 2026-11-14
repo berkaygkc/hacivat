@@ -322,8 +322,8 @@ pub struct Diag { pub code: DiagCode, pub range: TextRange, pub args: SmallVec<[
   3. PG `/* a /* b */ c */ SELECT` → `BlockComment · Word`.
   4. MySQL `/* a /* b */ c */` → `BlockComment("/* a /* b */") · Word(c) · Op(*) Op(/)`.
   5. MySQL `SELECT 1--1` → `Word · Number Op(-) Op(-) Number`; MySQL `SELECT 1 -- c` → `… Number · LineComment`.
-  6. MySQL `'a\'b'` → one terminated `String`; with `no_backslash_escapes` → `String('a\')` `Word(b)` `String(unterminated)`.
-  7. PG (scs=on) `'a\'b'` → `String('a\')` `Word(b)` `String(unterminated)`; PG `E'a\'b'` → `String{E}`.
+  6. MySQL `'a\'b'` → one terminated `String`; with `no_backslash_escapes` → `String('a\')` `BitString(b', unterminated)` (rule 4: `b'` is a bit-string prefix; erratum below). `'a\'c'` → `String('a\')` `Word(c)` `String(unterminated)`.
+  7. PG (scs=on) `'a\'b'` → `String('a\')` `BitString(b', unterminated)` (PostgreSQL's `xbstart`; erratum below); `'a\'c'` → `String('a\')` `Word(c)` `String(unterminated)`; PG `E'a\'b'` → `String{E}`.
   8. PG `=-1` → `Op(=) Op(-) Number`; `@-1` → `Op(@-) Number`; `+/*c*/1` → `Op(+) BlockComment Number`.
   9. T-SQL `[a]]b]` → `QuotedIdent{Bracket}`; T-SQL (QUOTED_IDENTIFIER OFF) `"x"` → `String`.
   10. SQLite `/* open` → `BlockComment{terminated:false}`, **no** error.
@@ -335,6 +335,7 @@ pub struct Diag { pub code: DiagCode, pub range: TextRange, pub args: SmallVec<[
   16. PG `x ?| array['a']` → `Op(?|)` (DataGrip ALG-SQL-02); T-SQL `#tmp` → `Word`; MySQL `"a"` → `String`; PG `"a"` → `QuotedIdent`.
   17. FX-SPLIT-PG-04 (`datagrip/13`): `/* outer /* inner ; */ still comment ; */` is one `BlockComment`; `E'it\'s; fine'` is one `String{E}`.
   18. Property: for 10⁶ random byte-strings (valid UTF-8) × every profile, `concat == input`, no panic, ≤ 1 token per byte.
+- **Errata (M3a; found by Task 4, recorded by Task 8):** tests 6 and 7 used to expect `String('a\')` `Word(b)` `String(unterminated)` for `'a\'b'` with standard strings. By rule 4 of this algorithm, `b` directly before `'` is a bit-string prefix, and both servers read it so (PostgreSQL `xbstart`, MySQL `b'…'` literals): the tail is `BitString(unterminated)`. The `Word` reading holds for a letter that is no prefix (`'a\'c'`). The lexer corpus pins both (`sql-testkit/corpus/lex`: LEX02-06b, -06c, -07a, -07c).
 - **Used by:** Hacivat | Karagöz.
 
 ### SQL-LEX-03: Incremental relexing
@@ -464,8 +465,8 @@ pub struct Diag { pub code: DiagCode, pub range: TextRange, pub args: SmallVec<[
      - Oracle: `DECLARE`, `BEGIN`, `CREATE [OR REPLACE] [EDITIONABLE|NONEDITIONABLE] PROCEDURE|FUNCTION|PACKAGE [BODY]|TRIGGER|TYPE [BODY]|LIBRARY|JAVA` → PL/SQL-unit mode: terminator is `/` alone on a line (from SQL-SPLIT-01) or EOF; `;` never ends the unit.
   2. Walk tokens maintaining a block stack (`Paren | BeginAtomic | BeginEnd | IfEnd | CaseEnd | LoopEnd | WhileEnd | RepeatEnd | TryCatch | RuleParens | PlSqlUnit`):
      - `(`/`[` push `Paren`; `)`/`]` pop only if the top is `Paren` (else `UnbalancedClose`, no pop).
-     - Mode-gated openers: `BEGIN` opens `BeginEnd` unless followed by `TRANSACTION|TRAN|WORK|ISOLATION|READ|DEFERRABLE|NOT|DISTRIBUTED|DIALOG|CONVERSATION|;`/EOF (then it is a transaction statement); MySQL statement-position `IF` (previous significant token ∈ {`;`, `BEGIN`, `THEN`, `ELSE`, `DO`, `LOOP`, `REPEAT`, label `:`, body start}) pushes `IfEnd`, while `IF(` in expression position, `IF EXISTS`, `IF NOT EXISTS` never push; `CASE` pushes `CaseEnd` (expression and statement alike); `LOOP`/`WHILE`/`REPEAT` push (but `END LOOP` etc. are closers); T-SQL `BEGIN TRY`/`BEGIN CATCH` push `TryCatch`.
-     - `END` pops the top non-`Paren` block and consumes an optional following `IF|CASE|LOOP|WHILE|REPEAT|TRY|CATCH|label` (one pop only); `END` with an empty stack → diagnostic, no pop.
+     - Mode-gated openers: `BEGIN` opens `BeginEnd` unless followed by `TRANSACTION|TRAN|WORK|ISOLATION|READ|DEFERRABLE|DISTRIBUTED|DIALOG|CONVERSATION|;`/EOF (then it is a transaction statement); a top-level MySQL/MariaDB `BEGIN NOT ATOMIC` opens a block (erratum (c)); a top-level SQLite `BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE] [TRANSACTION]` is always a transaction (erratum (d)); MySQL statement-position `IF` (previous significant token ∈ {`;`, `BEGIN`, `THEN`, `ELSE`, `DO`, `LOOP`, `REPEAT`, label `:`, body start}) pushes `IfEnd`, while `IF(` in expression position, `IF EXISTS`, `IF NOT EXISTS` never push; `CASE` pushes `CaseEnd` (expression and statement alike); `LOOP`/`WHILE`/`REPEAT` push **only in statement position, like `IF`** (erratum (b): `REPEAT('a', 3)` is a function; `END LOOP` etc. are closers); T-SQL `BEGIN TRY`/`BEGIN CATCH` push `TryCatch`.
+     - `END` pops the top non-`Paren` block and consumes an optional following `IF|CASE|LOOP|WHILE|REPEAT|TRY|CATCH|label` (one pop only); `END [TRANSACTION|WORK]` at **statement start** with an empty stack is the PostgreSQL/SQLite `COMMIT` synonym, a statement of its own (erratum (a)); any other `END` with an empty stack → no pop, and a diagnostic only inside a block-tracked statement (a stored program or trigger), since outside one it closes a `CASE` expression.
   3. Termination when the block stack is empty: the active delimiter token (`;` or the client delimiter) → close (terminator = that token); Oracle PL/SQL unit → the `/` line from SQL-SPLIT-01; EOF → close without terminator. **Editor mode only:** a statement-start keyword at a position allowed by the dialect `StatementStartTable` → close the previous statement heuristically (`confidence = Heuristic`, `MissingSemicolonSuspected`) — rules in SQL-SPLIT-03. **T-SQL:** for execution, the unit is the `GO` batch (no splitting inside); for editor features, statement-start keywords at depth 0 split heuristically.
   4. Close: `strict`, `smart` ranges as defined above. Empty statements (`;` directly) → `Empty` items (skipped by execution, kept for ranges).
   5. Non-empty stack at EOF → `UnterminatedBlock`; close at EOF.
@@ -502,6 +503,12 @@ pub struct Diag { pub code: DiagCode, pub range: TextRange, pub args: SmallVec<[
   10. DBeaver `parsePostgresDoubleDollar`: two `CREATE FUNCTION … AS $$ …; …; $$ LANGUAGE plpgsql;` separated by a blank line → 2. DBeaver `parseBeginTransaction`: `begin transaction;\nselect 1 from dual;` → 2. DBeaver `parseOracleProcedureFunctionAs` (Issue 37925) → 1 ending `END;`. `DROP TABLE\r\nIF\nEXISTS dim_appt;` → 1 (DBeaver Snowflake test generalised).
   11. Execution mode: PG `select * from t\n\nselect 1` → `Ambiguous` (editor: 2 Heuristic).
   12. Unterminated `select 'abc` typed above 50 statements → later boundaries retained provisionally (stability rule).
+  13. Errata rows (R-M3-5): PG `BEGIN; SELECT 1; END; SELECT 2` → 4 (`END` is `COMMIT`); SQLite `BEGIN; SELECT 1; END TRANSACTION; SELECT 2;` → 4; MySQL `SELECT REPEAT('a', 3); SELECT 2` → 2; MariaDB `BEGIN NOT ATOMIC SELECT 1; SELECT 2; END; SELECT 3` → 2; SQLite `BEGIN IMMEDIATE; SELECT 1` → 2, and `BEGIN DEFERRED TRANSACTION; …; END;`, `BEGIN EXCLUSIVE; …; ROLLBACK;` likewise.
+- **Errata (M3a, R-M3-5):** four corrections to this section, made in the text above and pinned by `sql-testkit/corpus/split` (`ERRATUM-a-*`, `-b*`, `-c`, `-d`) and `sql-split/tests/split.rs`:
+  - (a) `END [TRANSACTION|WORK]` at statement start with an empty stack is the PostgreSQL/SQLite `COMMIT` synonym, a statement of its own. Step 2 used to give every `END` with an empty stack an "END without block" diagnostic.
+  - (b) MySQL/MariaDB `REPEAT`, `WHILE` and `LOOP` open blocks only in statement position, like `IF`: `REPEAT('a', 3)` and `SELECT REPEAT(…)` are function calls. Step 2 used to push them wherever they stood.
+  - (c) MariaDB `BEGIN NOT ATOMIC` at top level opens a block (MySQL rejects it, so tracking it there only keeps a broken script in one piece). Step 2's list of transaction followers used to include `NOT`.
+  - (d) SQLite's top-level `BEGIN DEFERRED|IMMEDIATE|EXCLUSIVE [TRANSACTION]` is a transaction, never a trigger body; the section had no test rows for it (row 13 above).
 - **Used by:** Hacivat (editor, execution, MCP `execute_script`) | Karagöz (execution mode; exactly one `Exact` item per request).
 
 ### SQL-SPLIT-03: Missing-semicolon / blank-line recovery and PG parser oracle

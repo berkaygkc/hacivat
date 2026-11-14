@@ -5,10 +5,16 @@
 //! Execution mode never uses a heuristic boundary (D-06): an uncertain boundary is an
 //! `AmbiguousBoundary`, which execution never runs (R-M3-24).
 //!
-//! Types complete since M3a Task 1b. Task 1b stubs (fail closed): the splitter returns one
-//! `Heuristic` item over the input, `head::cursor_eligible` answers `false`,
-//! `exec_range::resolve` answers `NothingToRun`. `SqlDocument` works over them (a full rebuild
-//! per change, as M3a's body will be).
+//! - [`split`] / [`split_from`]: one forward loop over the lexer's tokens that recognises
+//!   client commands (psql, mysql, sqlite3), tracks blocks per dialect
+//!   (`sql_dialect::SplitProfile`), and returns the editor or the execution view ([`Split`]).
+//! - [`SqlDocument`]: a text, its lexing and its split, rebuilt on every change in M3a;
+//!   [`DocSnapshot`] shares one revision's analysis and computes the execution split once.
+//! - [`StmtKey`]: XXH3-128 of a statement's dialect, modes, delimiter and text.
+//! - [`head::cursor_eligible`]: whether a unit may stay suspended as a console cursor.
+//!
+//! Task 1b stub (fail closed) still here: `exec_range::resolve` answers `NothingToRun`
+//! (Task 13).
 
 pub mod client;
 pub mod document;
@@ -21,8 +27,8 @@ pub mod splitter;
 
 pub use document::{DocDelta, DocSnapshot, SqlDocument};
 pub use item::{
-    AmbiguityReason, AmbiguousBoundary, ClientSegment, Confidence, Item, Split, SplitMode, Stmt,
-    StmtHead,
+    AmbiguityReason, AmbiguousBoundary, ClientKind, ClientSegment, Confidence, CopyData, DiagCode,
+    Diagnostic, Item, Split, SplitMode, Stmt, StmtHead,
 };
 pub use key::StmtKey;
-pub use splitter::split;
+pub use splitter::{SplitStart, split, split_from};

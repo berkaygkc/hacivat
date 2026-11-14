@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6c908a33357c915d0fe21d845ebe0f8e9052ecc53c17868937aef1f15fd2ef9f # shrinks to s = " ", (id, flavor) = (Postgres, None)
+cc c325ee6f8cb6c0d7bca02577ff039bf89b4041cf854904e3ab590146b51d6391 # shrinks to s = " ", (id, flavor) = (Postgres, None)
+cc efa51b6d0adcfa4a99c0c3f5eb0b0bfb4d3abed12b59151287ca956d475906f0 # shrinks to s = "SELECT /* \nDELIMITER $$\n", (id, flavor) = (Postgres, None)

@@ -1,0 +1,313 @@
+# The MySQL and MariaDB splitter corpus (M3a Task 8): `alg/10` SQL-SPLIT-01, -02 and -03 test
+# cases, the R-M3-5 errata, and the `datagrip/13` §3.3 FX-SPLIT-MY fixtures with Hacivat's own
+# expectations. Fields: `sql-testkit/src/split.rs`. Every case runs under both dialects unless
+# it names one.
+
+dialects = ["mysql", "mariadb"]
+
+# --- alg/10 SQL-SPLIT-02 test 6 ---
+
+[[case]]
+id = "SPLIT02-6a"
+source = "alg/10 SQL-SPLIT-02 test 6 (stored program without DELIMITER)"
+input = "CREATE PROCEDURE p() BEGIN IF x THEN SELECT 1; END IF; SELECT 2; END; CALL p();"
+editor = ["CREATE PROCEDURE p() BEGIN IF x THEN SELECT 1; END IF; SELECT 2; END", "CALL p()"]
+
+[[case]]
+id = "SPLIT02-6b"
+source = "alg/10 SQL-SPLIT-02 test 6 (SPLIT-MY-06: # comment hides the ;)"
+input = "SELECT 1 #;\n;"
+editor = ["SELECT 1"]
+crlf = true
+
+[[case]]
+id = "SPLIT02-6c"
+source = "alg/10 SQL-SPLIT-02 test 6 (SPLIT-MY-07: backslash escape)"
+input = "SELECT 'it\\'s;'; SELECT 2;"
+editor = ["SELECT 'it\\'s;'", "SELECT 2"]
+
+[[case]]
+id = "SPLIT02-6d"
+source = "alg/10 SQL-SPLIT-02 test 6 (SPLIT-MY-10: double-quoted string)"
+input = 'SELECT "a;b";'
+editor = ['SELECT "a;b"']
+
+[[case]]
+id = "SPLIT-MY-08"
+source = "datagrip/13 SPLIT-MY-08: the splitter follows NO_BACKSLASH_ESCAPES (R-M3-39)"
+input = "SELECT 'a\\';\nSELECT 1;"
+modes = { no_backslash_escapes = true }
+editor = ["SELECT 'a\\'", "SELECT 1"]
+
+[[case]]
+id = "SPLIT02-labels"
+source = "alg/10 SQL-SPLIT-02 edge: labels outer: LOOP … END LOOP outer"
+input = "CREATE PROCEDURE p() BEGIN outer: LOOP LEAVE outer; END LOOP outer; END; SELECT 1"
+editor = ["CREATE PROCEDURE p() BEGIN outer: LOOP LEAVE outer; END LOOP outer; END", "SELECT 1"]
+
+[[case]]
+id = "SPLIT02-if-paren"
+source = "alg/10 SQL-SPLIT-02 edge: IF (cond) THEN is a statement IF; IF(a,b,c) a function"
+input = "CREATE PROCEDURE p() BEGIN IF (a > 0) THEN SELECT IF(a, 1, 2); END IF; END; SELECT 2"
+editor = ["CREATE PROCEDURE p() BEGIN IF (a > 0) THEN SELECT IF(a, 1, 2); END IF; END", "SELECT 2"]
+
+[[case]]
+id = "SPLIT02-if-exists"
+source = "alg/10 SQL-SPLIT-02 edge: CREATE TABLE IF NOT EXISTS and IF EXISTS (…) THEN"
+input = "CREATE PROCEDURE p() BEGIN CREATE TABLE IF NOT EXISTS t (a int); IF EXISTS (SELECT 1) THEN DROP TABLE IF EXISTS u; END IF; END; SELECT 3"
+editor = [
+    "CREATE PROCEDURE p() BEGIN CREATE TABLE IF NOT EXISTS t (a int); IF EXISTS (SELECT 1) THEN DROP TABLE IF EXISTS u; END IF; END",
+    "SELECT 3",
+]
+
+[[case]]
+id = "SPLIT02-case-statement"
+source = "alg/10 SQL-SPLIT-02: CASE statement (END CASE) and CASE expression (END) in a body"
+input = "CREATE PROCEDURE p(x int) BEGIN CASE x WHEN 1 THEN SET @a = CASE WHEN x > 0 THEN 1 ELSE 2 END; ELSE BEGIN END; END CASE; END; SELECT 1"
+editor = [
+    "CREATE PROCEDURE p(x int) BEGIN CASE x WHEN 1 THEN SET @a = CASE WHEN x > 0 THEN 1 ELSE 2 END; ELSE BEGIN END; END CASE; END",
+    "SELECT 1",
+]
+
+[[case]]
+id = "SPLIT02-trigger-if-body"
+source = "alg/10 SQL-SPLIT-02: a trigger whose body is one IF statement"
+input = "CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW IF NEW.a IS NULL THEN SET NEW.a = 1; END IF; SELECT 2"
+editor = ["CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW IF NEW.a IS NULL THEN SET NEW.a = 1; END IF", "SELECT 2"]
+
+[[case]]
+id = "SPLIT02-definer"
+source = "alg/10 SQL-SPLIT-02: CREATE DEFINER = user PROCEDURE"
+input = "CREATE DEFINER=`admin`@`localhost` PROCEDURE p() BEGIN SELECT 1; END; SELECT 2"
+editor = ["CREATE DEFINER=`admin`@`localhost` PROCEDURE p() BEGIN SELECT 1; END", "SELECT 2"]
+
+[[case]]
+id = "SPLIT02-mismatch"
+source = "alg/10 SQL-SPLIT-02: an END IF that closes a LOOP makes the statement ambiguous"
+input = "CREATE PROCEDURE p() BEGIN LOOP SELECT 1; END IF; END; SELECT 2"
+editor = ["CREATE PROCEDURE p() BEGIN LOOP SELECT 1; END IF; END", "SELECT 2"]
+ambiguous = ["UnknownBlock"]
+
+# --- R-M3-5 errata ---
+
+[[case]]
+id = "ERRATUM-b"
+source = "R-M3-5 erratum (b): REPEAT/WHILE/LOOP open blocks only in statement position"
+input = "SELECT REPEAT('a', 3); SELECT 2"
+editor = ["SELECT REPEAT('a', 3)", "SELECT 2"]
+
+[[case]]
+id = "ERRATUM-b-body"
+source = "R-M3-5 erratum (b), inside a stored program"
+input = "CREATE PROCEDURE p() BEGIN SELECT REPEAT('a', 3); SET @w = 1; WHILE @w < 3 DO SET @w = @w + 1; END WHILE; REPEAT SET @w = @w - 1; UNTIL @w = 0 END REPEAT; END; SELECT 3"
+editor = [
+    "CREATE PROCEDURE p() BEGIN SELECT REPEAT('a', 3); SET @w = 1; WHILE @w < 3 DO SET @w = @w + 1; END WHILE; REPEAT SET @w = @w - 1; UNTIL @w = 0 END REPEAT; END",
+    "SELECT 3",
+]
+
+[[case]]
+id = "ERRATUM-c"
+source = "R-M3-5 erratum (c): BEGIN NOT ATOMIC opens a block at top level"
+input = "BEGIN NOT ATOMIC SELECT 1; SELECT 2; END; SELECT 3"
+editor = ["BEGIN NOT ATOMIC SELECT 1; SELECT 2; END", "SELECT 3"]
+
+[[case]]
+id = "BEGIN-transaction"
+source = "alg/10 SQL-SPLIT-02: a top-level BEGIN [WORK] is a transaction"
+input = "BEGIN; INSERT INTO t VALUES (1); BEGIN WORK; COMMIT;"
+editor = ["BEGIN", "INSERT INTO t VALUES (1)", "BEGIN WORK", "COMMIT"]
+
+# --- executable comments (alg/10 SQL-LEX-05) ---
+
+[[case]]
+id = "EXEC-semicolon"
+source = "alg/10 SQL-LEX-05 step 3: a ; inside /*! */ makes execution refuse"
+input = "SELECT 1 /*! ; DROP TABLE t */"
+editor = ["SELECT 1 /*! ; DROP TABLE t */"]
+ambiguous = ["SemicolonInExecutableComment"]
+heuristic = true
+diag = ["split.semicolon-in-executable-comment"]
+
+[[case]]
+id = "EXEC-quoted-semicolon"
+source = "alg/10 SQL-LEX-05 step 3 and its FX-SPLIT-MY-04 case: even a quoted ; inside /*! */ makes execution refuse; the editor still shows the statements"
+input = "/*!80000 SELECT 'a;b' */; SELECT 2"
+editor = ["/*!80000 SELECT 'a;b' */", "SELECT 2"]
+ambiguous = ["SemicolonInExecutableComment"]
+confidence = ["H", "E"]
+
+[[case]]
+id = "EXEC-ambiguous-end"
+source = "Task 4 review I1 / ledger: an executable comment whose end is ambiguous makes its statement Ambiguous"
+input = "SELECT 1 /*!50000 , '*/' */ ; DROP TABLE t; -- '"
+# The lexer reads one statement (a string from the second quote to the last); MySQL runs the
+# comment, ends it after `'*/' */`, and runs DROP TABLE t as a second statement.
+editor = ["SELECT 1 /*!50000 , '*/' */ ; DROP TABLE t; -- '"]
+ambiguous = ["AmbiguousCommentEnd"]
+heuristic = true
+
+[[case]]
+id = "HINT-ambiguous-end"
+source = "Task 4 review I1 / ledger: so does an optimizer hint; every statement up to the server's end of it is ambiguous"
+input = "SELECT /*+ BKA('*/ 1; DELETE FROM t; -- ') */ 3"
+# The lexer reads two statements; MySQL reads the hint to `') */` and runs one, SELECT … 3.
+editor = ["SELECT /*+ BKA('*/ 1", "DELETE FROM t"]
+ambiguous = ["AmbiguousCommentEnd"]
+heuristic = true
+
+[[case]]
+id = "HINT-ambiguous-end-leading"
+source = "Task 4 review I1 / ledger: an ambiguous hint before a statement belongs to it"
+input = "/*+ x('*/ SELECT 1; SELECT 2; -- ') */ SELECT 3"
+editor = ["/*+ x('*/ SELECT 1", "SELECT 2"]
+ambiguous = ["AmbiguousCommentEnd"]
+heuristic = true
+
+# --- the mysql client (alg/10 SQL-SPLIT-01) ---
+
+[[case]]
+id = "SPLIT01-delimiter"
+source = "alg/10 SQL-SPLIT-01 test case (DELIMITER //)"
+flavor = "mysql"
+input = "DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; END//\nDELIMITER ;\nCALL p();"
+editor = ["CREATE PROCEDURE p() BEGIN SELECT 1; END", "CALL p()"]
+client = ["DELIMITER //", "DELIMITER ;"]
+crlf = true
+
+[[case]]
+id = "DELIMITER-inside-end"
+source = "alg/10 SQL-SPLIT-01 step 1: the delimiter matches as raw text inside a word (END$$)"
+flavor = "mysql"
+input = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\nSELECT 2;"
+editor = ["CREATE PROCEDURE p() BEGIN SELECT 1; END", "SELECT 2"]
+client = ["DELIMITER $$", "DELIMITER ;"]
+
+[[case]]
+id = "DELIMITER-quoted"
+source = "alg/10 SQL-SPLIT-01: the delimiter inside quotes and comments is text"
+flavor = "mysql"
+input = "DELIMITER $$\nSELECT '$$', `a$$b` -- $$\n, 1 /* $$ */ $$\nDELIMITER ;"
+editor = ["SELECT '$$', `a$$b` -- $$\n, 1"]
+client = ["DELIMITER $$", "DELIMITER ;"]
+
+[[case]]
+id = "DELIMITER-semicolon-run"
+source = "alg/10 SQL-SPLIT-01 step 3: DELIMITER $$; takes the whole run"
+flavor = "mysql"
+input = "DELIMITER $$;\nSELECT 1$$;\nDELIMITER ;\n"
+editor = ["SELECT 1"]
+client = ["DELIMITER $$;", "DELIMITER ;"]
+diag = ["split.delimiter-ends-with-semicolon"]
+
+[[case]]
+id = "DELIMITER-no-argument"
+source = "datagrip/13 SPLIT-MY-09 with alg/10 SQL-SPLIT-01's rule (DELIMITER without argument)"
+flavor = "mysql"
+input = "DELIMITER\nSELECT 1;"
+editor = ["SELECT 1"]
+client = ["DELIMITER"]
+diag = ["split.delimiter-without-argument"]
+
+[[case]]
+id = "DELIMITER-top-level-semicolon"
+source = "Task 8: under a client delimiter a top-level ; inside one statement is ambiguous"
+flavor = "mysql"
+input = "DELIMITER $$\nSELECT 1; SELECT 2$$\n"
+editor = ["SELECT 1; SELECT 2"]
+client = ["DELIMITER $$"]
+ambiguous = ["DelimiterChange"]
+heuristic = true
+
+[[case]]
+id = "DELIMITER-in-exec-comment"
+source = "Task 8: the client delimiter inside /*! */ is ambiguous"
+flavor = "mysql"
+input = "DELIMITER $$\nSELECT 1 /*! $$ */ $$\n"
+editor = ["SELECT 1 /*! $$ */"]
+client = ["DELIMITER $$"]
+ambiguous = ["SemicolonInExecutableComment"]
+heuristic = true
+
+[[case]]
+id = "MYSQL-G"
+source = "alg/10 SQL-SPLIT-01 step 3: \\G and \\g end statements"
+flavor = "mysql"
+input = "SELECT 1\\G\nSELECT 2 \\g\n"
+editor = ["SELECT 1", "SELECT 2"]
+client = ["\\G", "\\g"]
+
+[[case]]
+id = "MYSQL-c"
+source = "alg/10 SQL-SPLIT-01 step 3: \\c clears the buffer"
+flavor = "mysql"
+input = "SELECT 1 \\c\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+client = ["\\c"]
+ambiguous = ["ClientCommand"]
+
+[[case]]
+id = "MYSQL-source"
+source = "alg/10 SQL-SPLIT-01 step 3: source file is a client command"
+flavor = "mysql"
+input = "source dump.sql\nSELECT 1;"
+editor = ["SELECT 1"]
+client = ["source dump.sql"]
+
+[[case]]
+id = "MYSQL-no-client"
+source = "alg/10 SQL-SPLIT-01: without the mysql client flavor, DELIMITER is SQL"
+input = "DELIMITER $$\nSELECT 1;"
+editor = ["DELIMITER $$", "SELECT 1"]
+exec = ["DELIMITER $$\nSELECT 1"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+# --- FX-SPLIT-MY fixtures (datagrip/13 §3.3, verbatim) ---
+
+[[case]]
+id = "FX-SPLIT-MY-01"
+source = "datagrip/13 FX-SPLIT-MY-01; alg/10 SQL-SPLIT-01 (END$$ = END + delimiter)"
+fixture = "FX-SPLIT-MY-01"
+flavor = "mysql"
+editor = ["CREATE PROCEDURE hv_p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND", "CALL hv_p()"]
+client = ["DELIMITER $$", "DELIMITER ;"]
+crlf = true
+
+[[case]]
+id = "FX-SPLIT-MY-02"
+source = "datagrip/13 FX-SPLIT-MY-02 (DELIMITER // and a trigger)"
+fixture = "FX-SPLIT-MY-02"
+flavor = "mysql"
+editor = [
+    "CREATE TRIGGER hv_t BEFORE INSERT ON orders FOR EACH ROW\nBEGIN\n  IF NEW.note IS NULL THEN SET NEW.note = 'x;y'; END IF;\nEND",
+    "SELECT 1",
+]
+client = ["DELIMITER //", "DELIMITER ;"]
+crlf = true
+
+[[case]]
+id = "FX-SPLIT-MY-03"
+source = "datagrip/13 FX-SPLIT-MY-03; alg/10 SQL-SPLIT-02 (block tracking without DELIMITER)"
+fixture = "FX-SPLIT-MY-03"
+editor = ["CREATE PROCEDURE hv_q()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND", "SELECT 3"]
+crlf = true
+
+[[case]]
+id = "FX-SPLIT-MY-04"
+source = "datagrip/13 FX-SPLIT-MY-04; alg/10 SQL-LEX-05 test case (3 statements; the versioned one is Ambiguous in execution mode)"
+fixture = "FX-SPLIT-MY-04"
+editor = ["SELECT `a;b` FROM (SELECT 1 AS `a;b`) t", "/*!80000 SELECT 'versioned;' */", "SELECT 2"]
+ambiguous = ["SemicolonInExecutableComment"]
+confidence = ["E", "H", "E"]
+crlf = true
+
+[[case]]
+id = "FX-SPLIT-MY-05"
+source = "datagrip/13 FX-SPLIT-MY-05 (an event with BEGIN…END and labels: 1 statement + client commands)"
+fixture = "FX-SPLIT-MY-05"
+flavor = "mysql"
+editor = [
+    "CREATE EVENT hv_e ON SCHEDULE EVERY 1 DAY DO\nlbl: BEGIN\n  DELETE FROM audit_log WHERE happened_at < NOW() - INTERVAL 30 DAY;\n  LEAVE lbl;\nEND",
+]
+client = ["DELIMITER $$", "DELIMITER ;"]
+crlf = true
