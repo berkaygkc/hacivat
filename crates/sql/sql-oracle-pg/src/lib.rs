@@ -5,8 +5,9 @@
 //! [`split_with_parser`], the byte error cursors of [`PgError`] and the parser thread
 //! ([`on_parser_stack`]). Every libpg_query call runs on that one 16 MiB-stack thread, after a
 //! check that refuses brackets nested deeper than [`MAX_ORACLE_NESTING`] (R-M3-3, R-M3-35).
-//! No `pg_query` type appears in this crate's public API. Messages are the server's English
-//! text, never translated.
+//! Every function here blocks its caller until that thread has run the call: never call one on
+//! the UI thread. No `pg_query` type appears in this crate's public API. Messages are the
+//! server's English text, never translated.
 
 // ## m3a-t01b-seams: the oracle's modules (Task 9 fills them; it may move `PgError`,
 // `version` and `statement_count` into `error.rs` and `split.rs`, unchanged).

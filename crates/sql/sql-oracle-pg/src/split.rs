@@ -6,6 +6,9 @@
 //! ([`on_parser_stack`]), scans the text with PostgreSQL's own scanner, refuses brackets
 //! nested deeper than [`MAX_ORACLE_NESTING`], and only then calls the parser. The scanner is
 //! flex-generated and iterative, so no input can exhaust its stack.
+//!
+//! Every public function here blocks its caller until the parser thread has run the call, and
+//! every call queued before it ([`on_parser_stack`]): never call one on the UI thread.
 
 use std::borrow::Cow;
 use std::sync::OnceLock;
@@ -133,9 +136,15 @@ fn toks_of(tokens: &[ScanToken]) -> Option<Vec<Tok>> {
 /// The crate version Hacivat pins, kept equal to the `pg_query = "=18.1.0"` workspace line.
 const PG_QUERY_VERSION: &str = "18.1.0";
 
-/// The longest text sent to the parser. Hacivat's editor holds at most 20 MB (R-M3-49); the
-/// cap keeps the scanner's token list and the parser's memory bounded for any caller.
-const MAX_TEXT_BYTES: usize = 64 << 20;
+/// The longest text sent to the parser; a longer one is refused with an `Err` before any scan,
+/// so the caller keeps its boundary uncertain (fail closed).
+///
+/// The oracle's input is one ambiguous statement region, not a document (Hacivat's editor holds
+/// up to 20 MB, R-M3-49). Its peak memory is about 135 bytes per token (libpg_query's token
+/// array and its copy, this crate's two token lists, then the raw parse tree): measured, an
+/// 8 MiB flat `SELECT 1,1,…` peaked at +1.1 GiB, so the cap bounds one call near that, and a
+/// call's time on the one parser thread to seconds.
+const MAX_TEXT_BYTES: usize = 8 << 20;
 
 const NUL_MESSAGE: &str = "the statement text contains a NUL character";
 const TOO_LONG: &str = "the statement text is too long for the parser";
@@ -147,27 +156,53 @@ const MISMATCH: &str = "the parser's statement ranges do not match its tokens";
 /// library reports (`PG_VERSION_NUM` in its parse result), read once, on the parser thread.
 ///
 /// It comes from a full parse of `SELECT 1` through the shipped, pre-generated protobuf code
-/// (R-M3-1, P1), so a decode that does not match the C library shows as `unknown`.
+/// (R-M3-1, P1), so a decode that does not match the C library shows as `unknown`. Only a
+/// successful read is kept: after a failure (the parser thread could not start, say) the next
+/// call reads again, so one transient failure never sticks.
 pub fn version() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
-    VERSION.get_or_init(|| {
-        let server = guarded("SELECT 1", |text, _| {
-            let parsed = pg_query::parse(text, 0).map_err(|e| error::from_pg(text, e))?;
-            let stmts = &parsed.protobuf.stmts;
-            let select = stmts.len() == 1
-                && stmts[0]
-                    .stmt
-                    .as_ref()
-                    .is_some_and(|n| matches!(n.node, Some(pg_query::NodeEnum::SelectStmt(_))));
-            if select {
-                Ok(parsed.protobuf.version)
-            } else {
-                Err(PgError::own(MISMATCH, None))
-            }
-        })
-        .map_or_else(|_| "unknown".to_string(), pg_version_text);
-        format!("pg_query {PG_QUERY_VERSION} (PostgreSQL {server})")
+    cached_version(&VERSION, read_server_version)
+}
+
+/// [`version`]'s text when the server version cannot be read.
+const VERSION_UNKNOWN: &str = "pg_query 18.1.0 (PostgreSQL unknown)";
+
+/// `cell`'s version, read with `read` until one read succeeds.
+fn cached_version(
+    cell: &'static OnceLock<String>,
+    read: impl FnOnce() -> Option<i32>,
+) -> &'static str {
+    if let Some(known) = cell.get() {
+        return known;
+    }
+    match read() {
+        Some(num) => cell.get_or_init(|| {
+            format!(
+                "pg_query {PG_QUERY_VERSION} (PostgreSQL {})",
+                pg_version_text(num)
+            )
+        }),
+        None => VERSION_UNKNOWN,
+    }
+}
+
+/// `PG_VERSION_NUM` from a full parse of `SELECT 1`, if it decodes as one `SelectStmt`.
+fn read_server_version() -> Option<i32> {
+    guarded("SELECT 1", |text, _| {
+        let parsed = pg_query::parse(text, 0).map_err(|e| error::from_pg(text, e))?;
+        let stmts = &parsed.protobuf.stmts;
+        let select = stmts.len() == 1
+            && stmts[0]
+                .stmt
+                .as_ref()
+                .is_some_and(|n| matches!(n.node, Some(pg_query::NodeEnum::SelectStmt(_))));
+        if select {
+            Ok(parsed.protobuf.version)
+        } else {
+            Err(PgError::own(MISMATCH, None))
+        }
     })
+    .ok()
 }
 
 /// `180006` → `"18.6"` (the PostgreSQL 10+ numbering).
@@ -181,6 +216,9 @@ fn pg_version_text(num: i32) -> String {
 /// It counts the raw parser's statement list and builds no output tree: the protobuf decode
 /// of a full parse stops at 100 nested messages (prost's limit), which ordinary SQL reaches
 /// (`UNION` of 100 `SELECT`s, 50 nested `ARRAY[…]`).
+///
+/// Unlike [`split_with_parser`] it does not normalise placeholders: `SELECT :a` is an `Err`
+/// here and one statement there. Only the build proof and `--smoke` use it.
 pub fn statement_count(sql: &str) -> Result<usize, PgError> {
     guarded(sql, |text, _| {
         pg_query::split_with_parser(text)
@@ -195,28 +233,48 @@ pub fn statement_count(sql: &str) -> Result<usize, PgError> {
 ///   and trailing whitespace and comments, and the `;`, are outside it. A `;` inside a
 ///   statement (a `BEGIN ATOMIC` body, a rule's action list) stays inside.
 /// - Empty statements (`;;`) and a text of only comments give no range.
-/// - Named placeholders are normalised first, so the parser accepts them: a `:name`, psql's
-///   `:'name'` and `:"name"` become `$1` padded with spaces to the same length, so every
-///   offset stays the caller's. Only a `:` token directly followed by the name token counts,
-///   and not after a word character or `$` (`a[1:n]`, `x$:y` stay as written), so the
-///   replacement never joins a neighbouring token; `::` casts and `:=` are other tokens.
+/// - The text is parsed as written first. Only when that fails are named placeholders
+///   normalised and the text parsed again: a `:name`, psql's `:'name'` and `:"name"` become
+///   `$1` padded with spaces to the same length, so every offset stays the caller's. Only a
+///   `:` token directly followed by the name token counts, and not after a word character or
+///   `$` (`x$:y` stays as written), so the replacement never joins a neighbouring token; `::`
+///   casts and `:=` are other tokens. Array slices (`a[1 :n]`, `a[(1):n]`, `a[:n]`) parse as
+///   written, so they never reach the normalisation; a text with both a slice like those and
+///   a placeholder is an `Err`.
 /// - The ranges are checked against the scanner's tokens: every token outside them must be a
 ///   `;`, and consecutive statements must be separated by one. Anything else is an `Err`
 ///   (fail closed: the caller then keeps the boundary uncertain).
-/// - A syntax error is an `Err` whose message names the text the parser saw (a normalised
-///   placeholder reads `$1`) and whose cursor is a byte offset into `sql`.
+/// - A syntax error is an `Err` whose message names the text the parser saw last (a
+///   normalised placeholder reads `$1`) and whose cursor is a byte offset into `sql`.
+/// - A text over 8 MiB is an `Err` before any scan (the oracle's memory cap).
 pub fn split_with_parser(sql: &str) -> Result<Vec<TextRange>, PgError> {
     guarded(sql, |text, scanned| {
+        let first = match pg_query::split_with_parser(text) {
+            Ok(stmts) => return checked_ranges(text, &stmts, scanned),
+            Err(e) => e,
+        };
         let normalised = normalise_placeholders(text, &scanned.toks);
+        if matches!(normalised, Cow::Borrowed(_)) {
+            // No placeholder: the first parse's error is the answer.
+            return Err(error::from_pg(text, first));
+        }
         let stmts =
             pg_query::split_with_parser(&normalised).map_err(|e| error::from_pg(&normalised, e))?;
-        if !scanned.covers_parse || scanned.lex_error.is_some() {
-            // The parser accepted a text its own scanner rejects: trust neither.
-            return Err(PgError::own(MISMATCH, None));
-        }
-        statement_ranges(&normalised, &stmts, &scanned.toks)
-            .ok_or_else(|| PgError::own(MISMATCH, None))
+        checked_ranges(&normalised, &stmts, scanned)
     })
+}
+
+/// libpg_query's statements of `text` as checked ranges (see [`split_with_parser`]).
+fn checked_ranges(
+    text: &str,
+    stmts: &[&str],
+    scanned: &Scanned,
+) -> Result<Vec<TextRange>, PgError> {
+    if !scanned.covers_parse || scanned.lex_error.is_some() {
+        // The parser accepted a text its own scanner rejects: trust neither.
+        return Err(PgError::own(MISMATCH, None));
+    }
+    statement_ranges(text, stmts, &scanned.toks).ok_or_else(|| PgError::own(MISMATCH, None))
 }
 
 /// Runs `run` on the parser thread, after the input checks and the nesting check (module
@@ -411,5 +469,20 @@ mod tests {
         // `$t:x` → `$t$1` would open a dollar quote; `a:b` → `a$1` would extend the word.
         assert_eq!(normalised("SELECT $t:x; SELECT 1"), "SELECT $t:x; SELECT 1");
         assert_eq!(normalised("SELECT a:b, (:c)"), "SELECT a:b, ($1)");
+    }
+
+    #[test]
+    fn a_failed_version_read_is_not_cached() {
+        static CELL: OnceLock<String> = OnceLock::new();
+        assert_eq!(cached_version(&CELL, || None), VERSION_UNKNOWN);
+        assert_eq!(CELL.get(), None);
+        let known = "pg_query 18.1.0 (PostgreSQL 18.6)";
+        assert_eq!(cached_version(&CELL, || Some(180_006)), known);
+        // Once read, the version is never read again.
+        assert_eq!(
+            cached_version(&CELL, || panic!("read after success")),
+            known
+        );
+        assert!(VERSION_UNKNOWN.starts_with(&format!("pg_query {PG_QUERY_VERSION} ")));
     }
 }

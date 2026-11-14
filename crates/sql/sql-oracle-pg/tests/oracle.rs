@@ -74,6 +74,42 @@ fn casts_and_slices_are_not_placeholders() {
 }
 
 #[test]
+fn slices_after_a_space_paren_or_quote_parse_as_written() {
+    // Valid PostgreSQL, and a `:` the normalisation would take for a placeholder (`a[1 $1]`):
+    // the text is parsed as written first, so they resolve (review T9 M2).
+    for slice in ["a[1 :n]", "a[(1):n]", "a[\"i\":n]", "a[:n]", "a[1 : n]"] {
+        let sql = format!("SELECT {slice} FROM t; SELECT 2");
+        assert_eq!(
+            split_texts(&sql),
+            [format!("SELECT {slice} FROM t").as_str(), "SELECT 2"],
+            "{slice}"
+        );
+    }
+    // With a placeholder as well, the normalised text has both: still fail closed.
+    let e = split_err("SELECT a[1 :n], :p FROM t; SELECT 2");
+    assert_eq!(e.message, r#"syntax error at or near "$1""#);
+    // A slice written without the space next to a placeholder resolves.
+    assert_eq!(
+        split_texts("SELECT a[1:n], :p FROM t; SELECT 2"),
+        ["SELECT a[1:n], :p FROM t", "SELECT 2"]
+    );
+}
+
+#[test]
+fn texts_over_the_memory_cap_fail_closed_before_any_scan() {
+    // At the cap a text is read (here 8 MiB of whitespace: no statement); one byte over, both
+    // calls refuse it without scanning, so the caller keeps its boundary uncertain.
+    let at_cap = " ".repeat(8 << 20);
+    assert_eq!(split_with_parser(&at_cap), Ok(Vec::new()));
+    assert_eq!(statement_count(&at_cap), Ok(0));
+    let over = " ".repeat((8 << 20) + 1);
+    for e in [split_err(&over), count_err(&over)] {
+        assert_eq!(e.message, "the statement text is too long for the parser");
+        assert_eq!(e.cursor, None);
+    }
+}
+
+#[test]
 fn a_replacement_never_opens_a_dollar_quote() {
     // `$t:x` → `$t$1` would open a dollar quote reaching `$t$` and swallow the `DROP`. The
     // `:` follows a `$`, so it stays, and the text fails where libpg_query fails on it.

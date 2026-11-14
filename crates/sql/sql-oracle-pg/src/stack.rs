@@ -2,10 +2,13 @@
 //! Task 9).
 //!
 //! One long-lived thread runs every job, one at a time, rather than a fresh thread per call:
-//! - libpg_query points the process's stderr (fd 2) at a pipe for the length of each parse or
-//!   scan and then points it back (`pg_query_raw_parse`, `pg_query_scan`). Two such calls on
-//!   two threads at once can restore each other's pipe and leave fd 2 on a closed pipe for
-//!   the rest of the process. One thread never overlaps two calls.
+//! - libpg_query points the process's stderr (fd 2) at a pipe for the length of each parse
+//!   and then points it back: `pg_query_raw_parse`, behind both C calls this crate parses with
+//!   (`pg_query_parse_protobuf_opts` for `pg_query::parse`, `pg_query_split_with_parser` for
+//!   `pg_query::split_with_parser`). Two parses on two threads at once can restore each
+//!   other's pipe and leave fd 2 on a closed pipe for the rest of the process. One thread
+//!   never overlaps two calls. (The scans, `pg_query_scan_tokens`, do not redirect; they run
+//!   on the same thread anyway.)
 //! - libpg_query keeps state per thread (a top memory context, and a `pthread_key_create`
 //!   per thread that is never deleted). Measured on macOS while writing this: a fresh thread
 //!   per call loses about 8 KiB of resident memory per thread (5,000 threads: +40 MiB; the
@@ -39,6 +42,10 @@ thread_local! {
 /// Runs `f` on the parser thread, whose stack is 16 MiB, and waits for its result; `None` if
 /// `f` panicked or the thread could not be started.
 ///
+/// - **It blocks the calling thread** until `f`, and every job queued before it, has run;
+///   there is no timeout and a C call cannot be cancelled. Never call it (or anything in this
+///   crate that parses) on the UI thread: call it from a background executor, and coalesce
+///   requests so only the latest waits.
 /// - Jobs from all threads run one at a time, in the order they arrive (module docs say why).
 ///   A job that blocks delays every later one, and one that waits for a job submitted from
 ///   another thread never finishes.
