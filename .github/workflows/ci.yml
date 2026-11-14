@@ -166,6 +166,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Dependency guard
         run: cargo run --locked -p xtask -- check-deps
+      # ## m3a-t03-sql-tables: the generated keyword tables match data/keywords/*.toml. CI only
+      # checks; `--from-docker` and `--from-pg-query` are run by hand when the data changes.
+      - name: Keyword tables are fresh
+        run: cargo run --locked -p xtask -- gen-sql-tables --check
 
   l10n-check:
     name: l10n-check

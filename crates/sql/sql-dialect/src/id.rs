@@ -49,3 +49,15 @@ pub struct DialectCtx {
     pub version: Option<ServerVersion>,
     pub modes: LexModes,
 }
+
+impl DialectCtx {
+    /// The context of `id` at `version` with the dialect's default modes
+    /// ([`LexModes::default_for`]), before the session reads the server's settings.
+    pub fn new(id: DialectId, version: Option<ServerVersion>) -> Self {
+        DialectCtx {
+            id,
+            version,
+            modes: LexModes::default_for(id),
+        }
+    }
+}
