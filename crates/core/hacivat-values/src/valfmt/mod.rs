@@ -5,16 +5,34 @@
 //! numbers go through ICU4X directly. A number joined to a unit is never built here: a
 //! truncated value carries a [`ChipKind`] that the app renders through Fluent.
 //!
-//! Types and [`DisplaySettings::new`] (minimal) are complete since Task 1b; the bodies of
-//! [`format_cell`], [`raw_text`] and [`id_like`] arrive in Task 16.
+//! Types and [`DisplaySettings::new`] (minimal) are complete since Task 1b; Task 16 fills
+//! [`format_cell`] (the display channel), [`raw_text`] (the raw channel) and [`id_like`] (R11).
+//!
+//! - **Grouping** goes through ICU4X's `DecimalFormatter` with compiled CLDR data, memoised per
+//!   `(format_locale, version)` on each thread: a change of either rebuilds it, and nothing reads
+//!   the process locale (`tr-TR` is `1.234.567,50` under any `LANG`). Digits are always Latin,
+//!   whatever the locale's numbering system (`ar-EG` is `1,234,567.50`). The punctuation is the
+//!   locale's CLDR punctuation, not plain ASCII: `sv` negatives use U+2212 and group with a
+//!   no-break space, `fr` groups with a narrow no-break space (U+202F), and `es` groups only
+//!   from five integer digits (`1234`, `12.345`). Display text is for reading and is never
+//!   parsed back; copy, sort keys and SQL take the raw channel, which is ASCII.
+//! - **Decimals are exact:** their canonical text goes to the formatter digit for digit; no
+//!   decimal ever passes through a float, and `1.50`, `1.5` and `-0.00` stay distinct.
+//! - **The two channels share one spelling** for everything but grouped numbers: dates stay ISO
+//!   in every mode, specials verbatim. The display channel adds grouping, the display zone, the
+//!   [`BinaryDisplay`] choice and the grapheme cap; the raw one is what copy uses.
+//!   [`raw_text_in`] is the raw channel with a `timestamptz` in the display zone, so a copied
+//!   instant reads as the cell shows it.
 
 mod display;
 mod idlike;
 mod raw;
 
 pub use display::format_cell;
+#[doc(hidden)]
+pub use display::formatter_builds;
 pub use idlike::id_like;
-pub use raw::{RawText, raw_text};
+pub use raw::{RawText, raw_text, raw_text_in};
 
 use hacivat_proto::DbmsKind;
 
