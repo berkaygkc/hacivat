@@ -759,6 +759,12 @@ pub fn parse_keywords_output(out: &str) -> Result<Snapshot> {
         );
         let word = cell(w)?.to_ascii_uppercase();
         if !valid_word(&word) {
+            // MariaDB lists its operators (`&&`, `<=>`, …) too: ASCII punctuation only. Anything
+            // else is a keyword this importer cannot name; fail rather than lose it.
+            ensure!(
+                !word.is_empty() && word.bytes().all(|b| b.is_ascii_punctuation()),
+                "`{word}` is neither an operator nor a keyword name `valid_word` accepts"
+            );
             skipped.push(word);
             continue;
         }
@@ -1059,6 +1065,53 @@ text = "server b"
         assert!(fresh.is_ok(), "{fresh:?}");
     }
 
+    /// A copy of the data and generated directories under a temporary root.
+    fn copy_of_the_tables() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        for dir in [DATA_DIR, GEN_DIR] {
+            std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+            for entry in std::fs::read_dir(workspace_root().join(dir)).unwrap() {
+                let path = entry.unwrap().path();
+                std::fs::copy(&path, tmp.path().join(dir).join(path.file_name().unwrap())).unwrap();
+            }
+        }
+        tmp
+    }
+
+    #[test]
+    fn check_reports_exactly_the_stale_files() {
+        let tmp = copy_of_the_tables();
+        // The untouched copy is fresh: the copy itself is sound.
+        assert!(check_fresh(tmp.path()).is_ok());
+
+        // One row changes category: only the SQLite table is stale (the word set, so the ids,
+        // stay the same).
+        let sqlite = tmp.path().join(DATA_DIR).join("sqlite.toml");
+        let text = std::fs::read_to_string(&sqlite).unwrap();
+        let row = r#"{ word = "ABORT", category = "reserved""#;
+        assert!(text.contains(row));
+        let changed = text.replace(row, r#"{ word = "ABORT", category = "unreserved""#);
+        std::fs::write(&sqlite, changed).unwrap();
+        let err = format!("{:#}", check_fresh(tmp.path()).unwrap_err());
+        assert!(err.contains("keywords_sqlite.rs"), "{err}");
+        for fresh in [
+            "keywords_pg.rs",
+            "keywords_mysql.rs",
+            "keywords_mariadb.rs",
+            IDS_OUT,
+        ] {
+            assert!(!err.contains(fresh), "{fresh} reported: {err}");
+        }
+
+        // A missing generated file is stale too.
+        std::fs::remove_file(tmp.path().join(GEN_DIR).join("keywords_pg.rs")).unwrap();
+        let err = format!("{:#}", check_fresh(tmp.path()).unwrap_err());
+        assert!(
+            err.contains("keywords_pg.rs") && err.contains("keywords_sqlite.rs"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn every_row_names_its_source() {
         let tables = all_tables(&workspace_root()).unwrap();
@@ -1244,6 +1297,18 @@ text = "server b"
         assert_eq!(numeric_version(&s.version), "11.4.8");
         assert!(parse_keywords_output("V\tWORD\tRESERVED\n8.0.1\tX\t2\n").is_err());
         assert!(parse_keywords_output("V\tWORD\n8.0.1\tX\n8.0.2\tY\n").is_err());
+    }
+
+    #[test]
+    fn only_operators_are_left_out_of_a_snapshot() {
+        let s = parse_keywords_output("V\tWORD\n1.0\t<=>\n1.0\t||\n1.0\tSELECT\n").unwrap();
+        assert_eq!(s.skipped, ["<=>", "||"]);
+        // A keyword `valid_word` cannot name fails the import instead of vanishing.
+        for odd in ["1ST", "$X", "A-B", "İF"] {
+            let out = format!("V\tWORD\n1.0\tSELECT\n1.0\t{odd}\n");
+            let err = parse_keywords_output(&out).unwrap_err().to_string();
+            assert!(err.contains("neither an operator"), "{odd}: {err}");
+        }
     }
 
     #[test]

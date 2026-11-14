@@ -84,8 +84,18 @@ fn line_for<K: Copy + PartialOrd>(lines: &[(K, &'static str)], version: Option<K
 /// The version of the lexer profile `ctx` selects, e.g. `"lex:pg-18@2026.11.1"`: caches of
 /// lexed text and audit records key on it. It names the dialect, the server line Hacivat's
 /// tables tell apart, and the profile data release. PG-wire flavours lex as PostgreSQL of the
-/// version they report (alg/10 LEX-01), so they share its strings. Lexing modes are a separate
-/// input ([`crate::LexModes`]) and are not part of the string.
+/// version they report (alg/10 LEX-01), so they share its strings.
+///
+/// What a cache keyed on it must add:
+/// - **The lexing modes.** They are a separate input ([`crate::LexModes`]) and are not part of
+///   the string, so a cache of lexed text keys on (this string, `LexModes`).
+/// - **The full server version, for executable-comment gates.** The string names a server line,
+///   not a patch release. A gate result (`/*!80031 … */` active or not) depends on the exact
+///   version, so nothing may cache gate results under this string alone. The full
+///   [`ServerVersion`] must be part of that key.
+///
+/// Equal strings always select the same [`crate::lex_profile`]; the test
+/// `equal_profile_versions_select_the_same_lexer_profile` holds the lexer's buckets to this.
 pub fn profile_version(ctx: &DialectCtx) -> &'static str {
     let line = ctx.version.map(|v| (v.major, v.minor));
     match ctx.id {
@@ -128,6 +138,89 @@ mod tests {
             RELEASE_DATA, recorded,
             "keyword data changed: bump release!()"
         );
+    }
+
+    /// Every dialect over a grid of versions (and no version), with its default modes.
+    fn version_grid() -> Vec<DialectCtx> {
+        use crate::id::PgWireFlavor;
+        let mut pg = vec![None];
+        for major in 7..=21 {
+            for (minor, patch) in [(0, 0), (4, 3)] {
+                pg.push(Some(ServerVersion::new(major, minor, patch)));
+            }
+        }
+        let mut mysql = vec![None, Some(ServerVersion::new(5, 7, 44))];
+        for (major, minors) in [(8, 0..=4), (9, 0..=3)] {
+            for minor in minors {
+                for patch in [0, 30, 46] {
+                    mysql.push(Some(ServerVersion::new(major, minor, patch)));
+                }
+            }
+        }
+        let mut mariadb = vec![None];
+        for (major, minors) in [(10, 0..=11), (11, 0..=8), (12, 0..=1)] {
+            for minor in minors {
+                for patch in [0, 5] {
+                    mariadb.push(Some(ServerVersion::new(major, minor, patch)));
+                }
+            }
+        }
+        let sqlite: Vec<_> = std::iter::once(None)
+            .chain((30..=50).map(|minor| Some(ServerVersion::new(3, minor, 0))))
+            .collect();
+        let mut grid = Vec::new();
+        let mut add = |id, versions: &[Option<ServerVersion>]| {
+            grid.extend(versions.iter().map(|&v| DialectCtx::new(id, v)));
+        };
+        add(DialectId::Postgres, &pg);
+        for f in [
+            PgWireFlavor::Redshift,
+            PgWireFlavor::Cockroach,
+            PgWireFlavor::Yugabyte,
+            PgWireFlavor::Timescale,
+            PgWireFlavor::Other,
+        ] {
+            add(DialectId::PgWire(f), &pg);
+        }
+        add(DialectId::MySql, &mysql);
+        add(DialectId::MariaDb, &mariadb);
+        add(DialectId::Sqlite, &sqlite);
+        add(DialectId::Generic, &sqlite);
+        for id in [
+            DialectId::SqlServer,
+            DialectId::ClickHouse,
+            DialectId::Oracle,
+        ] {
+            add(id, &[None, Some(ServerVersion::new(16, 0, 0))]);
+        }
+        grid
+    }
+
+    #[test]
+    fn equal_profile_versions_select_the_same_lexer_profile() {
+        // Caches and audit records treat one string as one lexer: the lexer's version buckets
+        // (Task 4's `lex_profile`) must never be finer than these strings.
+        let mut first: std::collections::BTreeMap<&str, DialectCtx> = Default::default();
+        for ctx in version_grid() {
+            let pv = profile_version(&ctx);
+            let seen = *first.entry(pv).or_insert(ctx);
+            let same = match (crate::lex_profile(&seen), crate::lex_profile(&ctx)) {
+                (Ok(a), Ok(b)) => std::ptr::eq(a, b),
+                (Err(_), Err(_)) => true,
+                _ => false,
+            };
+            assert!(same, "{pv}: {seen:?} and {ctx:?} lex differently");
+        }
+        // The grid reaches every string.
+        let all: Vec<&str> = PG_LINES
+            .iter()
+            .map(|l| l.1)
+            .chain(MYSQL_LINES.iter().map(|l| l.1))
+            .chain(MARIADB_LINES.iter().map(|l| l.1))
+            .chain([SQLITE, GENERIC, UNSUPPORTED])
+            .collect();
+        assert_eq!(first.len(), all.len());
+        assert!(all.iter().all(|s| first.contains_key(s)));
     }
 
     #[test]

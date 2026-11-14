@@ -37,8 +37,10 @@ fn main() -> ExitCode {
         Some("gen-sql-tables") => gen_sql_tables::run(),
         other => {
             eprintln!(
-                "unknown xtask command: {other:?}\navailable: bench-report, check-deps, check-update-key, docker, gen-sql, gen-sql-tables, l10n, shot-diff, tokens, vf"
+                "unknown xtask command: {other:?}\navailable: bench-report, check-deps, check-update-key, docker, gen-sql, l10n, shot-diff, tokens, vf"
             );
+            // ## m3a-t03-sql-tables
+            eprintln!("also available: gen-sql-tables");
             ExitCode::from(2)
         }
     }
