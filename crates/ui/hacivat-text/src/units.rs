@@ -63,9 +63,10 @@ pub enum Dir {
 /// Words from the language service.
 pub trait TokenOracle {
     /// The words on `line` (the line's bytes without its break): one range per token, or per
-    /// UAX #29 word inside a comment; whitespace need not be listed. Ranges may run past the
-    /// line (a block comment); they are clipped to it. `None` when the service has no analysis
-    /// at the current version: the character classes apply.
+    /// UAX #29 word inside a comment. Ranges that start with whitespace or a line break (the
+    /// lexer's `Whitespace` and `Newline` tokens) are ignored, so they may be listed or not.
+    /// Ranges may run past the line (a block comment); they are clipped to it. `None` when the
+    /// service has no analysis at the current version: the character classes apply.
     fn words_on_line(&self, line: Range<usize>) -> Option<SmallVec<[Range<usize>; 16]>>;
 }
 
@@ -267,7 +268,8 @@ fn class_at(buf: &TextBuffer, at: usize) -> CharClass {
     class_of(&buf.slice(at..end))
 }
 
-/// The words the oracle knows on `body`, clipped to it, empty ones dropped.
+/// The words the oracle knows on `body`, clipped to it; empty ones, and whitespace or line-break
+/// tokens (a move skips spaces by class, then takes one word), dropped.
 fn words_on(
     buf: &TextBuffer,
     body: &Range<usize>,
@@ -283,6 +285,14 @@ fn words_on(
             let end = w.end.min(body.end);
             (start < end && buf.is_char_boundary(start) && buf.is_char_boundary(end))
                 .then_some(start..end)
+        })
+        .filter(|w| {
+            // A cluster's class is its first character's: no segmentation per token.
+            let first = buf.char_before(buf.snap_to_char(w.start + 1, Bias::After));
+            !matches!(
+                first.map(char_class),
+                Some(CharClass::Space | CharClass::LineBreak)
+            )
         })
         .collect()
 }

@@ -34,6 +34,12 @@ fn ann(user_event: UserEvent, time: Instant) -> Annotations {
     }
 }
 
+/// The time an IME call is stamped with where the test does not care (the view passes its
+/// executor's clock).
+fn now() -> Instant {
+    Instant::now()
+}
+
 fn select(len: usize, sel: SelectionSet) -> Transaction {
     Transaction {
         changes: ChangeSet::identity(len),
@@ -238,11 +244,11 @@ fn run_trace(t: &Trace) {
         let at = format!("{} step {i} ({step:?})", t.name);
         match step.clone() {
             Mark(r, s, sel) => {
-                ime.mark(&mut m, r, s, sel).expect(&at);
+                ime.mark(&mut m, r, s, sel, now()).expect(&at);
                 last_mark = (!s.is_empty()).then_some(s);
             }
             Commit(r, s) => {
-                ime.commit(&mut m, r, s).expect(&at);
+                ime.commit(&mut m, r, s, now()).expect(&at);
                 last_mark = None;
             }
             Unmark => {
@@ -257,7 +263,7 @@ fn run_trace(t: &Trace) {
             }
             Text(s) => assert_eq!(text(&m), s, "{at}"),
             Marked(r) => assert_eq!(ime.marked(&m), r, "{at}"),
-            Marked16(r) => assert_eq!(ime.marked_utf16(m.buffer()), r, "{at}"),
+            Marked16(r) => assert_eq!(ime.marked_utf16(&m), r, "{at}"),
             Sel(r) => assert_eq!(m.selection().main().range(), r, "{at}"),
             Sel16(r) => assert_eq!(sel16(&m), r, "{at}"),
             TextFor(r, s, adjusted) => {
@@ -295,7 +301,7 @@ fn spike_ime_traces_on_byte_offsets() {
 fn composing(marked: &str) -> (ImeCore, EditorModel) {
     let mut m = model("");
     let mut ime = ImeCore::default();
-    ime.mark(&mut m, None, marked, None).unwrap();
+    ime.mark(&mut m, None, marked, None, now()).unwrap();
     (ime, m)
 }
 
@@ -352,10 +358,10 @@ fn utf16_ranges_never_split_a_surrogate_pair_or_a_crlf() {
 fn an_empty_mark_cancels_the_composition() {
     let mut m = model("SELECT ");
     let mut ime = ImeCore::default();
-    ime.mark(&mut m, None, "k", None).unwrap();
-    ime.mark(&mut m, None, "ky", None).unwrap();
+    ime.mark(&mut m, None, "k", None, now()).unwrap();
+    ime.mark(&mut m, None, "ky", None, now()).unwrap();
     assert!(ime.is_composing());
-    ime.mark(&mut m, None, "", None).unwrap();
+    ime.mark(&mut m, None, "", None, now()).unwrap();
     assert!(!ime.is_composing());
     assert_eq!(ime.marked(&m), None);
     assert_eq!(text(&m), "SELECT ");
@@ -376,15 +382,15 @@ fn a_mark_replacing_a_selection_deletes_it_once() {
     ))
     .unwrap();
     let mut ime = ImeCore::default();
-    ime.mark(&mut m, None, "x", None).unwrap();
+    ime.mark(&mut m, None, "x", None, now()).unwrap();
     assert_eq!(text(&m), "axc");
-    ime.mark(&mut m, None, "xy", None).unwrap();
+    ime.mark(&mut m, None, "xy", None, now()).unwrap();
     assert_eq!(
         text(&m),
         "axyc",
         "the second mark replaces the marked text only"
     );
-    ime.commit(&mut m, None, "XY").unwrap();
+    ime.commit(&mut m, None, "XY", now()).unwrap();
     assert_eq!(text(&m), "aXYc");
     assert_eq!(m.selection().main().range(), 3..3);
     // One undo group restores the selected text and the selection.
@@ -398,7 +404,7 @@ fn a_mark_replacing_a_selection_deletes_it_once() {
 fn programmatic_edit_during_composition_commits_first() {
     let mut m = model("SELECT ");
     let mut ime = ImeCore::default();
-    ime.mark(&mut m, None, "感じ", Some(2..2)).unwrap();
+    ime.mark(&mut m, None, "感じ", Some(2..2), now()).unwrap();
     let tr = Transaction {
         ann: Annotations {
             origin: Origin::Program,
@@ -417,11 +423,11 @@ fn programmatic_edit_during_composition_commits_first() {
     assert_eq!(text(&m), "SELECT ");
     // A new composition starts at the selection, never over the old marked text.
     let mut m = model("SELECT ");
-    ime.mark(&mut m, None, "感", None).unwrap();
+    ime.mark(&mut m, None, "感", None, now()).unwrap();
     let len = m.buffer().len_bytes();
     ime.dispatch(&mut m, select(len, SelectionSet::cursor(0)))
         .unwrap();
-    ime.mark(&mut m, None, "x", None).unwrap();
+    ime.mark(&mut m, None, "x", None, now()).unwrap();
     assert_eq!(text(&m), "xSELECT 感");
 }
 
@@ -429,7 +435,7 @@ fn programmatic_edit_during_composition_commits_first() {
 fn blur(window_active: bool) -> bool {
     let mut m = model("x");
     let mut ime = ImeCore::default();
-    ime.mark(&mut m, None, "ş", None).unwrap();
+    ime.mark(&mut m, None, "ş", None, now()).unwrap();
     let committed = ime.blur(&mut m, window_active);
     assert_eq!(text(&m), "xş", "a blur never changes the text");
     assert_eq!(ime.is_composing(), !committed);
@@ -451,10 +457,10 @@ fn one_composition_is_one_undo_group_that_joins_no_typing() {
     let t0 = Instant::now();
     m.dispatch(insert(&m, 0, "a", t0)).unwrap();
     let mut ime = ImeCore::default();
-    ime.mark(&mut m, None, "か", None).unwrap();
-    ime.mark(&mut m, None, "かな", None).unwrap();
-    ime.mark(&mut m, None, "仮名", None).unwrap();
-    ime.commit(&mut m, None, "仮名").unwrap();
+    ime.mark(&mut m, None, "か", None, now()).unwrap();
+    ime.mark(&mut m, None, "かな", None, now()).unwrap();
+    ime.mark(&mut m, None, "仮名", None, now()).unwrap();
+    ime.commit(&mut m, None, "仮名", now()).unwrap();
     m.dispatch(insert(&m, 7, "b", t0 + Duration::from_millis(1)))
         .unwrap();
     assert_eq!(text(&m), "a仮名b");
@@ -472,10 +478,10 @@ fn reconversion_over_existing_text_is_one_undo_group() {
     let mut m = model("SELECT 感");
     let mut ime = ImeCore::default();
     // The IME marks the committed `感` (UTF-16 7..8) again, then commits another candidate.
-    ime.mark(&mut m, Some(7..8), "かん", None).unwrap();
+    ime.mark(&mut m, Some(7..8), "かん", None, now()).unwrap();
     assert_eq!(text(&m), "SELECT かん");
     assert_eq!(ime.marked(&m), Some(7..13));
-    ime.commit(&mut m, None, "漢").unwrap();
+    ime.commit(&mut m, None, "漢", now()).unwrap();
     assert_eq!(text(&m), "SELECT 漢");
     m.undo();
     assert_eq!(text(&m), "SELECT 感");
@@ -487,19 +493,49 @@ fn a_dotless_i_commit_takes_the_plain_typing_path() {
     // the typing group.
     let mut m = model("");
     let mut ime = ImeCore::default();
-    ime.commit(&mut m, None, "ı").unwrap();
+    ime.commit(&mut m, None, "ı", now()).unwrap();
     assert!(!ime.is_composing());
-    ime.commit(&mut m, None, "s").unwrap();
+    ime.commit(&mut m, None, "s", now()).unwrap();
     assert_eq!(text(&m), "ıs");
     assert_eq!(m.selection().main().range(), 3..3);
     assert_eq!(m.undo_depth(), 1);
 }
 
 #[test]
+fn plain_commits_join_by_the_callers_clock() {
+    // The 500 ms typing window runs on the `now` the caller passes (the view's executor
+    // clock), never the wall clock: these three commits run within microseconds.
+    let mut m = model("");
+    let mut ime = ImeCore::default();
+    let t0 = Instant::now();
+    ime.commit(&mut m, None, "a", t0).unwrap();
+    ime.commit(&mut m, None, "b", t0 + Duration::from_millis(100))
+        .unwrap();
+    assert_eq!(m.undo_depth(), 1, "inside the window: one group");
+    ime.commit(&mut m, None, "c", t0 + Duration::from_millis(700))
+        .unwrap();
+    assert_eq!(
+        m.undo_depth(),
+        2,
+        "600 ms later by the caller's clock: a new group"
+    );
+    // A composition's transactions carry the caller's time too: typing 100 ms after its
+    // commit would be inside the window, but nothing joins a composition's group.
+    ime.mark(&mut m, None, "ş", None, t0 + Duration::from_millis(800))
+        .unwrap();
+    ime.commit(&mut m, None, "ş", t0 + Duration::from_millis(810))
+        .unwrap();
+    ime.commit(&mut m, None, "d", t0 + Duration::from_millis(900))
+        .unwrap();
+    assert_eq!(m.undo_depth(), 4);
+    assert_eq!(text(&m), "abcşd");
+}
+
+#[test]
 fn a_commit_with_an_explicit_range_outside_a_composition_replaces_it() {
     let mut m = model("SELECT x");
     let mut ime = ImeCore::default();
-    ime.commit(&mut m, Some(7..8), "y").unwrap();
+    ime.commit(&mut m, Some(7..8), "y", now()).unwrap();
     assert_eq!(text(&m), "SELECT y");
     assert_eq!(m.selection().main().range(), 8..8);
 }
@@ -510,18 +546,22 @@ fn an_edit_that_bypassed_the_core_is_mapped_over() {
     // next commit replaces it rather than landing beside it.
     let mut m = model("ab");
     let mut ime = ImeCore::default();
-    ime.mark(&mut m, None, "ş", None).unwrap();
+    ime.mark(&mut m, None, "ş", None, now()).unwrap();
     m.dispatch(Transaction {
         selection: None,
         ..insert(&m, 0, "X", Instant::now())
     })
     .unwrap();
     assert_eq!(ime.marked(&m), Some(3..5));
-    ime.commit(&mut m, None, "ş").unwrap();
+    // What the platform polls (`marked_text_range`) follows it as well, before any IME call.
+    assert_eq!(ime.marked_utf16(&m), Some(3..4));
+    let mut adj = None;
+    assert_eq!(ime.text_for_range(m.buffer(), 3..4, &mut adj), "ş");
+    ime.commit(&mut m, None, "ş", now()).unwrap();
     assert_eq!(text(&m), "Xabş");
     // An edit that deleted the marked text ends the composition.
     let mut m = model("ab");
-    ime.mark(&mut m, None, "ş", None).unwrap();
+    ime.mark(&mut m, None, "ş", None, now()).unwrap();
     let len = m.buffer().len_bytes();
     m.dispatch(Transaction {
         changes: ChangeSet::from_edits(len, [(1..len, Arc::from(""))]).unwrap(),
@@ -530,7 +570,8 @@ fn an_edit_that_bypassed_the_core_is_mapped_over() {
     })
     .unwrap();
     assert_eq!(ime.marked(&m), None);
-    ime.commit(&mut m, None, "z").unwrap();
+    assert_eq!(ime.marked_utf16(&m), None);
+    ime.commit(&mut m, None, "z", now()).unwrap();
     assert_eq!(text(&m), "az");
     assert!(!ime.is_composing());
 }
@@ -554,7 +595,10 @@ fn a_vetoed_first_mark_opens_no_composition() {
     let mut m = model("");
     m.add_filter(Box::new(VetoText("k")));
     let mut ime = ImeCore::default();
-    assert_eq!(ime.mark(&mut m, None, "k", None), Err(Veto("test-veto")));
+    assert_eq!(
+        ime.mark(&mut m, None, "k", None, now()),
+        Err(Veto("test-veto"))
+    );
     assert!(!ime.is_composing());
     // No history bracket was left open: typing 2 s apart makes two groups, not one.
     let t0 = Instant::now();
@@ -569,15 +613,15 @@ fn a_vetoed_mark_keeps_the_composition_and_a_vetoed_commit_ends_it() {
     let mut m = model("");
     m.add_filter(Box::new(VetoText("k")));
     let mut ime = ImeCore::default();
-    ime.mark(&mut m, None, "a", None).unwrap();
-    assert!(ime.mark(&mut m, None, "k", None).is_err());
+    ime.mark(&mut m, None, "a", None, now()).unwrap();
+    assert!(ime.mark(&mut m, None, "k", None, now()).is_err());
     assert_eq!(
         ime.marked(&m),
         Some(0..1),
         "the composition stays as it was"
     );
     // The platform has ended its composition: so does the core, keeping the text.
-    assert!(ime.commit(&mut m, None, "k").is_err());
+    assert!(ime.commit(&mut m, None, "k", now()).is_err());
     assert!(!ime.is_composing());
     assert_eq!(text(&m), "a");
 }
@@ -594,6 +638,9 @@ enum Op {
     Unmark,
     Blur(bool),
     Select(usize, usize),
+    /// An edit that bypasses the core (`m.dispatch` directly): the UTF-16 range, snapped out
+    /// as an IME range would be, replaced by the text, with the selection mapped.
+    Foreign(Range<usize>, &'static str),
 }
 
 fn arb_range16() -> impl Strategy<Value = Option<Range<usize>>> {
@@ -608,6 +655,8 @@ fn arb_op() -> impl Strategy<Value = Op> {
         1 => Just(Op::Unmark),
         1 => any::<bool>().prop_map(Op::Blur),
         1 => (0usize..24, 0usize..24).prop_map(|(a, h)| Op::Select(a, h)),
+        2 => ((0usize..24, 0usize..4).prop_map(|(s, n)| s..s + n), arb_piece())
+            .prop_map(|(r, t)| Op::Foreign(r, t)),
     ]
 }
 
@@ -629,28 +678,62 @@ proptest! {
     ) {
         let mut m = model(&start);
         let mut ime = ImeCore::default();
+        // The text of the open composition's last mark.
+        let mut last_mark: Option<&str> = None;
         for op in ops {
             match op {
-                Op::Mark(r, t, s) => { ime.mark(&mut m, r, t, s).unwrap(); }
-                Op::Commit(r, t) => { ime.commit(&mut m, r, t).unwrap(); }
-                Op::Unmark => ime.unmark(&mut m),
-                Op::Blur(active) => { ime.blur(&mut m, active); }
+                Op::Mark(r, t, s) => {
+                    ime.mark(&mut m, r, t, s, now()).unwrap();
+                    last_mark = ime.is_composing().then_some(t);
+                }
+                Op::Commit(r, t) => {
+                    ime.commit(&mut m, r, t, now()).unwrap();
+                    last_mark = None;
+                }
+                Op::Unmark => {
+                    ime.unmark(&mut m);
+                    last_mark = None;
+                }
+                Op::Blur(active) => {
+                    ime.blur(&mut m, active);
+                    last_mark = last_mark.filter(|_| ime.is_composing());
+                }
                 Op::Select(a, h) => {
                     let b = m.buffer();
                     let (a, h) = (utf16_to_bytes(b, a..a).start, utf16_to_bytes(b, h..h).start);
                     let len = b.len_bytes();
                     ime.dispatch(&mut m, select(len, SelectionSet::single(
                         hacivat_text::SelectionRange::new(a, h)))).unwrap();
+                    last_mark = None;
+                }
+                Op::Foreign(r16, t) => {
+                    let r = utf16_to_bytes(m.buffer(), r16);
+                    let tr = Transaction {
+                        changes: ChangeSet::from_edits(m.buffer().len_bytes(), [(r, Arc::from(t))])
+                            .unwrap(),
+                        selection: None,
+                        ann: ann(UserEvent::Command("foreign"), now()),
+                    };
+                    m.dispatch(tr).unwrap();
                 }
             }
             let t = text(&m);
             // No CRLF was ever split: every CR is followed by a LF and every LF follows a CR.
             prop_assert_eq!(t.matches('\r').count(), t.matches("\r\n").count(), "{:?}", t);
             prop_assert_eq!(t.matches('\n').count(), t.matches("\r\n").count(), "{:?}", t);
-            if let Some(r) = ime.marked(&m) {
+            let marked = ime.marked(&m);
+            if let Some(r) = marked.clone() {
                 prop_assert!(m.buffer().is_char_boundary(r.start) && m.buffer().is_char_boundary(r.end));
                 prop_assert!(!r.is_empty());
+                // Followed over foreign edits, it still holds exactly the marked text.
+                if let Some(s) = last_mark {
+                    prop_assert_eq!(m.buffer().slice(r), s);
+                }
             }
+            prop_assert_eq!(
+                ime.marked_utf16(&m),
+                marked.map(|r| bytes_to_utf16(m.buffer(), r))
+            );
         }
         ime.unmark(&mut m);
         while m.undo().is_some() {}

@@ -249,6 +249,86 @@ fn the_model_maps_its_selection_through_an_edit_without_one() {
     assert_eq!(ends(m.selection()), [(3, 5)]);
 }
 
+/// `text` with `sel`, then the bytes `del` deleted with no selection given (so it is mapped).
+fn mapped_after_delete(text: &str, sel: SelectionRange, del: Range<usize>) -> SelectionSet {
+    let mut m = EditorModel::new(text, ModelConfig::default());
+    let ann = |user_event| Annotations {
+        user_event,
+        add_to_history: true,
+        time: Instant::now(),
+        origin: Origin::User,
+    };
+    let len = text.len();
+    m.dispatch(Transaction {
+        changes: ChangeSet::identity(len),
+        selection: Some(SelectionSet::single(sel)),
+        ann: ann(UserEvent::Select),
+    })
+    .unwrap();
+    m.dispatch(Transaction {
+        changes: edit(len, &[(del, "")]),
+        selection: None,
+        ann: ann(UserEvent::DeleteForward),
+    })
+    .unwrap();
+    m.selection().clone()
+}
+
+#[test]
+fn mapped_carets_land_on_grapheme_cluster_boundaries() {
+    // Deleting the `x` of `Ix◌̇` joins `I` and U+0307 into one cluster around the mapped caret
+    // (1): it moves to its `assoc` side of `İ`.
+    let s = mapped_after_delete("Ix\u{307}", SelectionRange::caret(2), 1..2);
+    assert_eq!(ends(&s), [(3, 3)]);
+    let before = SelectionRange {
+        assoc: Bias::Before,
+        ..SelectionRange::caret(2)
+    };
+    let s = mapped_after_delete("Ix\u{307}", before, 1..2);
+    assert_eq!(ends(&s), [(0, 0)]);
+    // Deleting the `x` of `👩x‍💻` makes one ZWJ sequence (0..11) around the caret (4).
+    let s = mapped_after_delete("👩x\u{200d}💻", SelectionRange::caret(5), 4..5);
+    assert_eq!(ends(&s), [(11, 11)]);
+    // A selection that ends up partly inside the sequence widens to all of it.
+    let s = mapped_after_delete("👩x\u{200d}💻", sel(5, 12), 4..5);
+    assert_eq!(ends(&s), [(0, 11)]);
+    // A given selection is the caller's (an IME's caret inside its marked text): kept.
+    let mut m = EditorModel::new("I\u{307}", ModelConfig::default());
+    m.dispatch(Transaction {
+        changes: ChangeSet::identity(3),
+        selection: Some(SelectionSet::cursor(1)),
+        ann: Annotations {
+            user_event: UserEvent::Select,
+            add_to_history: true,
+            time: Instant::now(),
+            origin: Origin::Ime,
+        },
+    })
+    .unwrap();
+    assert_eq!(ends(m.selection()), [(1, 1)]);
+}
+
+#[test]
+fn snapping_to_graphemes_keeps_boundaries_and_direction() {
+    let b = TextBuffer::from_str("ae\u{301}b\r\nc");
+    // Already on boundaries: unchanged.
+    let s = SelectionSet::normalized([sel(0, 1), SelectionRange::caret(4)], 1);
+    assert_eq!(s.snapped_to_graphemes(&b), s);
+    // A reversed selection with both ends inside clusters widens and stays reversed; a caret
+    // inside the CRLF goes to its `assoc` side.
+    let s = SelectionSet::normalized([sel(6, 2), SelectionRange::caret(6)], 0);
+    let snapped = SelectionSet::normalized([sel(7, 1)], 0).snapped_to_graphemes(&b);
+    assert_eq!(ends(&snapped), [(7, 1)]);
+    let s = s.snapped_to_graphemes(&b);
+    assert_eq!(
+        ends(&s),
+        [(7, 1)],
+        "the caret at the selection's edge merged into it"
+    );
+    let caret = SelectionSet::cursor(6).snapped_to_graphemes(&b);
+    assert_eq!(ends(&caret), [(7, 7)]);
+}
+
 fn arb_range() -> impl Strategy<Value = SelectionRange> {
     (0usize..40, 0usize..40, any::<bool>()).prop_map(|(a, h, before)| SelectionRange {
         assoc: if before { Bias::Before } else { Bias::After },

@@ -301,6 +301,43 @@ fn sub_words_split_at_ascii_case_transitions_only() {
 }
 
 #[test]
+fn a_sub_word_stop_inside_a_cluster_is_snapped_out_of_it() {
+    // `_` + U+0301 is one cluster: the sub-word after the `_` starts inside it, so the stop
+    // backward is the cluster's start (1), never the accent (2).
+    let b = buf("a_\u{301}b");
+    assert_eq!(move_offset(&b, 5, Dir::Back, Unit::SubWord, &NoTokens), 1);
+    assert_eq!(stops(&b, 5, Dir::Back, Unit::SubWord, &NoTokens), [1, 0]);
+    assert_eq!(stops(&b, 0, Dir::Forward, Unit::SubWord, &NoTokens), [1, 5]);
+    // U+0D4E (a Prepend letter) + `_` is one cluster: the `_` stop forward (4) is inside it,
+    // so it lands after the cluster (5).
+    let b = buf("a\u{d4e}_b");
+    assert_eq!(
+        move_offset(&b, 0, Dir::Forward, Unit::SubWord, &NoTokens),
+        5
+    );
+    assert_eq!(stops(&b, 6, Dir::Back, Unit::SubWord, &NoTokens), [5, 0]);
+}
+
+#[test]
+fn whitespace_tokens_from_the_oracle_are_not_words() {
+    // The SQL lexer emits `Whitespace` tokens: a move from inside the spaces still skips them
+    // and takes the next word.
+    let text = "SELECT \t a";
+    let b = buf(text);
+    let toks = Given(vec![0..6, 6..9, 9..10]);
+    assert_eq!(move_offset(&b, 7, Dir::Forward, Unit::Word, &toks), 10);
+    assert_eq!(stops(&b, 0, Dir::Forward, Unit::Word, &toks), [6, 10]);
+    assert_eq!(move_offset(&b, 8, Dir::Back, Unit::Word, &toks), 0);
+    assert_eq!(stops(&b, 10, Dir::Back, Unit::Word, &toks), [9, 0]);
+    // A double-click inside them still selects the whole space run.
+    assert_eq!(units::word_at(&b, 7, &toks), 6..9);
+    // A newline token (past the line's text) never counts either.
+    let b = buf("ab\r\ncd");
+    let toks = Given(vec![0..2, 2..4, 4..6]);
+    assert_eq!(stops(&b, 0, Dir::Forward, Unit::Word, &toks), [2, 4, 6]);
+}
+
+#[test]
 fn line_end_document_and_vertical_moves() {
     let b = buf("  çay\r\nab\r\nxyz");
     assert_eq!(move_offset(&b, 0, Dir::Forward, Unit::Line, &NoTokens), 6);

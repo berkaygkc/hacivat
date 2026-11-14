@@ -14,7 +14,8 @@
 //! `After` and its end `Before`, so text inserted at its edges stays outside it (a selection
 //! never grows by mapping), all `MapMode::Simple`, in one pass over the change (O(k + s)). A
 //! mapped set is normalised again (an edit may bring ranges together), and an edit resets every
-//! goal column.
+//! goal column. Mapping knows only lengths, so the model then puts a mapped set on grapheme
+//! cluster boundaries of the new text ([`SelectionSet::snapped_to_graphemes`]).
 //!
 //! **Goal column** (step 10): a vertical move sets `goal_x` from the head's x on the first
 //! move and keeps it across moves ([`SelectionRange::moved_vertically`]); a horizontal move
@@ -235,6 +236,33 @@ impl SelectionSet {
             .map(|r| r.mapped(&mut m, reset_goal))
             .collect();
         Self::normalized(mapped, self.main)
+    }
+
+    /// Every end on a grapheme cluster boundary of `buf` (UI-EDIT-05's edge list): a caret moves
+    /// to its `assoc` side, a selection widens to whole clusters; ends already on one stay. The
+    /// model applies it to a mapped selection, since an edit beside a combining mark or inside a
+    /// ZWJ sequence can leave a caret inside the cluster it makes. O(k) cluster lookups.
+    pub fn snapped_to_graphemes(&self, buf: &TextBuffer) -> Self {
+        let snap = |at: usize, bias: Bias| crate::units::snap_to_grapheme(buf, at, bias);
+        let ranges = self.ranges.iter().map(|r| {
+            let (anchor, head) = if r.is_empty() {
+                let at = snap(r.head, r.assoc);
+                (at, at)
+            } else {
+                let range = r.range();
+                let (from, to) = (
+                    snap(range.start, Bias::Before),
+                    snap(range.end, Bias::After),
+                );
+                if r.is_reversed() {
+                    (to, from)
+                } else {
+                    (from, to)
+                }
+            };
+            SelectionRange { anchor, head, ..*r }
+        });
+        Self::normalized(ranges, self.main)
     }
 
     pub fn main(&self) -> &SelectionRange {

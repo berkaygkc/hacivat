@@ -20,7 +20,11 @@
 //!   that is not the IME's own goes through [`ImeCore::dispatch`] (undo and redo call
 //!   [`ImeCore::unmark`] first), so it never joins the composition's undo group. An edit that
 //!   bypassed the core anyway is mapped over at the next call: the marked range follows its
-//!   text, and the composition ends when that edit touched it.
+//!   text, and the composition ends when that edit touched it ([`ImeCore::marked`] and
+//!   [`ImeCore::marked_utf16`] report the followed range even before that call).
+//! - **The caller's clock:** `mark` and `commit` take `now`, the time the transaction is
+//!   stamped with (the view passes its executor's clock, so a test on the fake clock drives
+//!   the 500 ms typing window). The core never reads the wall clock.
 //!
 //! Single cursor in M3a: the marked text replaces the main range only; mirroring a
 //! composition to every cursor (D-072) is M3b's.
@@ -56,13 +60,15 @@ impl ImeCore {
     /// `replace_and_mark_text_in_range`: replaces the target (`r16`, else the marked text, else
     /// the main selection) with the marked `text` and selects `sel16` inside it (relative to
     /// its start; `None`: a caret after it). The first mark opens the composition; an empty
-    /// `text` cancels it. A veto changes nothing: a first mark then opens no composition.
+    /// `text` cancels it. A veto changes nothing: a first mark then opens no composition. The
+    /// transaction is stamped `now`.
     pub fn mark(
         &mut self,
         m: &mut EditorModel,
         r16: Option<Range<usize>>,
         text: &str,
         sel16: Option<Range<usize>>,
+        now: Instant,
     ) -> Result<Committed, Veto> {
         self.sync(m);
         let target = self.target(m, r16);
@@ -85,14 +91,7 @@ impl ImeCore {
             None => (m.begin_bracket(UserEvent::InputTypeCompose), true),
         };
         let version = m.version();
-        match replace(
-            m,
-            target,
-            text,
-            selection,
-            UserEvent::InputTypeCompose,
-            Origin::Ime,
-        ) {
+        match replace(m, target, text, selection, compose(now)) {
             Ok(c) => {
                 match landed(m, version, start..end, text) {
                     Some(marked) => {
@@ -123,29 +122,29 @@ impl ImeCore {
     /// `replace_text_in_range`: commits `text` over the target (`r16`, else the marked text,
     /// else the main selection) with a caret after it. Inside a composition this ends it (its
     /// undo group closes); outside one it is plain typing (`InputType`), which joins the
-    /// typing group. A veto inside a composition still ends it, keeping the marked text: the
-    /// platform has ended its side.
+    /// typing group within the 500 ms window from `now`. A veto inside a composition still ends
+    /// it, keeping the marked text: the platform has ended its side.
     pub fn commit(
         &mut self,
         m: &mut EditorModel,
         r16: Option<Range<usize>>,
         text: &str,
+        now: Instant,
     ) -> Result<Committed, Veto> {
         self.sync(m);
         let target = self.target(m, r16);
         let caret = SelectionRange::caret(target.start + text.len());
-        let result = if self.composition.is_some() {
-            replace(
-                m,
-                target,
-                text,
-                caret,
-                UserEvent::InputTypeCompose,
-                Origin::Ime,
-            )
+        let ann = if self.composition.is_some() {
+            compose(now)
         } else {
-            replace(m, target, text, caret, UserEvent::InputType, Origin::User)
+            Annotations {
+                user_event: UserEvent::InputType,
+                add_to_history: true,
+                time: now,
+                origin: Origin::User,
+            }
         };
+        let result = replace(m, target, text, caret, ann);
         self.end(m);
         result
     }
@@ -195,14 +194,10 @@ impl ImeCore {
         b.slice(r).into_owned()
     }
 
-    /// The marked text as UTF-16, while composing (as of the last call into the core, clamped
-    /// to `b`).
-    pub fn marked_utf16(&self, b: &TextBuffer) -> Option<Range<usize>> {
-        let c = self.composition.as_ref()?;
-        let len = b.len_bytes();
-        let start = b.snap(c.marked.start.min(len), Bias::Before);
-        let end = b.snap(c.marked.end.min(len), Bias::After).max(start);
-        Some(bytes_to_utf16(b, start..end))
+    /// The marked text as UTF-16 in `m`'s current text (`marked_text_range`, which the platform
+    /// polls): [`ImeCore::marked`] converted, so it follows an edit that bypassed the core too.
+    pub fn marked_utf16(&self, m: &EditorModel) -> Option<Range<usize>> {
+        self.marked(m).map(|r| bytes_to_utf16(m.buffer(), r))
     }
 
     /// The marked text's bytes in `m`'s current text (for the underline): mapped over any edit
@@ -216,8 +211,8 @@ impl ImeCore {
             .changelog()
             .rebase(c.version, c.marked.clone(), RangeKind::Content)
         {
-            Rebased::Mapped(r) => Some(r),
-            Rebased::Deleted | Rebased::TooOld => None,
+            Rebased::Mapped(r) if !r.is_empty() => Some(r),
+            Rebased::Mapped(_) | Rebased::Deleted | Rebased::TooOld => None,
         }
     }
 
@@ -262,26 +257,30 @@ impl ImeCore {
     }
 }
 
+/// The annotations of a composition's transactions, stamped `now`.
+fn compose(now: Instant) -> Annotations {
+    Annotations {
+        user_event: UserEvent::InputTypeCompose,
+        add_to_history: true,
+        time: now,
+        origin: Origin::Ime,
+    }
+}
+
 /// Replaces `target` with `text` in one history transaction, with `sel` after it.
 fn replace(
     m: &mut EditorModel,
     target: Range<usize>,
     text: &str,
     sel: SelectionRange,
-    user_event: UserEvent,
-    origin: Origin,
+    ann: Annotations,
 ) -> Result<Committed, Veto> {
     let changes = ChangeSet::from_edits(m.buffer().len_bytes(), [(target, Arc::from(text))])
         .map_err(|_| Veto("editor-veto-stale-change"))?;
     m.dispatch(Transaction {
         changes,
         selection: Some(SelectionSet::single(sel)),
-        ann: Annotations {
-            user_event,
-            add_to_history: true,
-            time: Instant::now(),
-            origin,
-        },
+        ann,
     })
 }
 
