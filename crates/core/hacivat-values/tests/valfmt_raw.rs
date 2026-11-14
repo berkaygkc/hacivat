@@ -8,7 +8,7 @@ use std::sync::Arc;
 use hacivat_proto::DbmsKind;
 use hacivat_values::valfmt::{
     BinaryDisplay, ColumnFacts, DisplaySettings, DisplayZone, Purpose, RawText, format_cell,
-    raw_text,
+    raw_text, raw_text_in,
 };
 use hacivat_values::{
     DateVal, DecimalVal, ErrorVal, LenUnit, LogicalType, OpaqueVal, SpecialVal, TimeVal,
@@ -305,6 +305,77 @@ fn raw_of_truncated_error_and_lossy_values() {
         raw_in(&lossy, &text, DbmsKind::Postgres).as_deref(),
         Some("\\xff\\xfeok\\xc3")
     );
+}
+
+fn raw_in_zone(v: &Value, zone: &DisplayZone) -> String {
+    let logical = logical_of(v);
+    match raw_text_in(v.view(), &facts_for(&logical, DbmsKind::Postgres), zone) {
+        RawText::Text(t) => t.into_owned(),
+        RawText::Null => "<null>".into(),
+    }
+}
+
+#[test]
+fn raw_text_in_renders_timestamptz_in_the_display_zone() {
+    let istanbul = DisplayZone::load(Some("Europe/Istanbul"));
+    let utc = DisplayZone::utc();
+    let v = Value::TimestampTz {
+        utc: ts("2026-11-11T07:00:00.25Z"),
+        offset: None,
+    };
+    assert_eq!(raw_in_zone(&v, &utc), "2026-11-11 07:00:00.25+00");
+    assert_eq!(raw_in_zone(&v, &istanbul), "2026-11-11 10:00:00.25+03");
+    // In UTC it is exactly `raw_text`, which has no zone.
+    assert_eq!(raw_in_zone(&v, &utc), raw(&v));
+    // In the display zone it is the instant the grid shows.
+    let s = DisplaySettings::with_zone("tr-TR", istanbul.clone());
+    let logical = logical_of(&v);
+    let facts = facts_for(&logical, DbmsKind::Postgres);
+    let shown = format_cell(v.view(), &facts, &s, Purpose::Cell);
+    assert_eq!(raw_in_zone(&v, &istanbul), shown.text);
+    // An offset the server sent is kept, whatever the zone.
+    let sent = Value::TimestampTz {
+        utc: ts("2026-11-11T07:00:00Z"),
+        offset: Some(19_800),
+    };
+    assert_eq!(raw_in_zone(&sent, &istanbul), "2026-11-11 12:30:00+05:30");
+    assert_eq!(raw_in_zone(&sent, &utc), "2026-11-11 12:30:00+05:30");
+    // Past the zone database's years the instant is written in UTC.
+    let far = Value::TimestampTz {
+        utc: TsVal {
+            secs: i64::from(DateVal::from_civil(200_000, 1, 1).expect("a date").0) * 86_400,
+            nanos: 0,
+        },
+        offset: None,
+    };
+    assert_eq!(raw_in_zone(&far, &istanbul), "200000-01-01 00:00:00+00");
+    // A truncated value is its prefix's text in the zone.
+    let t = Value::Truncated(Box::new(TruncatedVal {
+        prefix: v.clone(),
+        total_len: Some(99),
+        unit: LenUnit::Bytes,
+    }));
+    let RawText::Text(prefix) = raw_text_in(t.view(), &facts, &istanbul) else {
+        panic!("not NULL");
+    };
+    assert_eq!(prefix, "2026-11-11 10:00:00.25+03");
+    // Every other value is exactly `raw_text`, borrowed alike.
+    for (v, _) in canonical_cases() {
+        if matches!(v, Value::TimestampTz { offset: None, .. }) {
+            continue;
+        }
+        assert_eq!(raw_in_zone(&v, &istanbul), raw(&v), "{v:?}");
+    }
+    let text = logical_of(&Value::Text("".into()));
+    let text_facts = facts_for(&text, DbmsKind::Postgres);
+    assert!(matches!(
+        raw_text_in(Value::Text("abc".into()).view(), &text_facts, &istanbul),
+        RawText::Text(Cow::Borrowed("abc"))
+    ));
+    assert!(matches!(
+        raw_text_in(Value::Null.view(), &text_facts, &istanbul),
+        RawText::Null
+    ));
 }
 
 /// The raw texts of `canonical_cases` and the `tr-TR` display of a few values: neither depends

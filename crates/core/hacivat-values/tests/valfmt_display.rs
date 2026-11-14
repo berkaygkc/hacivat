@@ -398,6 +398,39 @@ fn float_specials_are_spelled_as_the_server_spells_them() {
     assert_eq!(fmt(&Value::F32(f32::INFINITY), "tr-TR"), "Infinity");
 }
 
+#[test]
+fn default_mode_uses_latin_digits_in_every_locale() {
+    // Numbers in a database client stay copyable and comparable: Latin digits even where the
+    // locale's own numbering system is not (`ar-EG` defaults to Arabic-Indic digits).
+    assert_eq!(fmt(&dec("1234567.50"), "ar-EG"), "1,234,567.50");
+    assert_eq!(fmt(&dec("1234567.50"), "en-u-nu-arab"), "1,234,567.50");
+    for locale in [
+        "ar-EG",
+        "ar-SA",
+        "fa-IR",
+        "bn-BD",
+        "mr-IN",
+        "th-TH-u-nu-thai",
+        "tr-TR-u-nu-arab",
+    ] {
+        for v in [
+            dec("-1234567.50"),
+            Value::Int(-123_456_750),
+            Value::F64(-1_234_567.5),
+        ] {
+            let text = fmt(&v, locale);
+            assert!(
+                text.chars().all(|c| !c.is_numeric() || c.is_ascii_digit()),
+                "{locale}: {text}"
+            );
+            let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+            assert_eq!(digits.trim_end_matches('0'), "12345675", "{locale}: {text}");
+        }
+    }
+    // The locale's own grouping and separators stay.
+    assert_eq!(fmt(&dec("1234567.50"), "tr-TR-u-nu-arab"), "1.234.567,50");
+}
+
 // ---- the ID heuristic --------------------------------------------------------------------
 
 #[test]

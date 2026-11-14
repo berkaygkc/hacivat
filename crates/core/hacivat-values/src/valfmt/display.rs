@@ -15,11 +15,12 @@ use fixed_decimal::Decimal;
 use icu_decimal::DecimalFormatter;
 use icu_decimal::options::DecimalFormatterOptions;
 use icu_locale::Locale;
+use icu_locale::extensions::unicode::{key, value};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::raw::{
     Buf, ascii, bool_text, float_canonical, float_special, is_numeric, push_escaped, push_hex,
-    push_uuid, single_column, special_text, write_scalar,
+    push_uuid, single_column, special_text, write_scalar, zone_offset,
 };
 use crate::columnar::CellFlags;
 use crate::decimal::DecimalRef;
@@ -135,7 +136,7 @@ fn cell(v: ValueRef<'_>, col: &ColumnFacts<'_>, s: &DisplaySettings) -> Display 
         | ValueRef::Timestamp(_)
         | ValueRef::TimestampTz { .. }
         | ValueRef::Interval { .. } => {
-            let zone = |utc: TsVal| zone_offset(s, utc);
+            let zone = |utc: TsVal| zone_offset(&s.tz, utc);
             d.text.reserve(40);
             let ok = write_scalar(v, col, Some(&zone), &mut d.text);
             d.kind = if ok {
@@ -170,11 +171,6 @@ fn flags_of(v: ValueRef<'_>) -> CellFlags {
         ValueRef::Special(_) => CellFlags::SPECIAL,
         _ => CellFlags::empty(),
     }
-}
-
-/// The display zone's offset at `utc`; UTC beyond the zone database's years (±9999).
-fn zone_offset(s: &DisplaySettings, utc: TsVal) -> i32 {
-    jiff::Timestamp::new(utc.secs, utc.nanos as i32).map_or(0, |t| s.tz.to_offset(t).seconds())
 }
 
 // ---- numbers -----------------------------------------------------------------------------
@@ -260,9 +256,19 @@ thread_local! {
     static BUILDS: Cell<u64> = const { Cell::new(0) };
 }
 
+/// The formatter for `locale` with Latin digits, whatever the locale's own numbering system
+/// (controller ruling on Task 16: numbers in a database client stay copyable and comparable,
+/// so `ar-EG` and `-u-nu-arab` show `1,234,567.50`). The locale's Latin-script symbols are
+/// kept: `tr-TR-u-nu-arab` still groups with `.`.
 fn build(locale: &Locale) -> Option<DecimalFormatter> {
     let _ = BUILDS.try_with(|b| b.set(b.get() + 1));
-    DecimalFormatter::try_new(locale.into(), DecimalFormatterOptions::default()).ok()
+    let mut latin = locale.clone();
+    latin
+        .extensions
+        .unicode
+        .keywords
+        .set(key!("nu"), value!("latn"));
+    DecimalFormatter::try_new((&latin).into(), DecimalFormatterOptions::default()).ok()
 }
 
 /// Runs `f` with the memoised formatter for `(s.format_locale, s.version)`; `false` (and `f`

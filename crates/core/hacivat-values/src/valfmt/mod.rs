@@ -10,12 +10,16 @@
 //!
 //! - **Grouping** goes through ICU4X's `DecimalFormatter` with compiled CLDR data, memoised per
 //!   `(format_locale, version)` on each thread: a change of either rebuilds it, and nothing reads
-//!   the process locale (`tr-TR` is `1.234.567,50` under any `LANG`).
+//!   the process locale (`tr-TR` is `1.234.567,50` under any `LANG`). Digits are always Latin,
+//!   whatever the locale's numbering system (`ar-EG` is `1,234,567.50`), so numbers stay
+//!   copyable and comparable.
 //! - **Decimals are exact:** their canonical text goes to the formatter digit for digit; no
 //!   decimal ever passes through a float, and `1.50`, `1.5` and `-0.00` stay distinct.
 //! - **The two channels share one spelling** for everything but grouped numbers: dates stay ISO
 //!   in every mode, specials verbatim. The display channel adds grouping, the display zone, the
 //!   [`BinaryDisplay`] choice and the grapheme cap; the raw one is what copy uses.
+//!   [`raw_text_in`] is the raw channel with a `timestamptz` in the display zone, so a copied
+//!   instant reads as the cell shows it.
 
 mod display;
 mod idlike;
@@ -25,7 +29,7 @@ pub use display::format_cell;
 #[doc(hidden)]
 pub use display::formatter_builds;
 pub use idlike::id_like;
-pub use raw::{RawText, raw_text};
+pub use raw::{RawText, raw_text, raw_text_in};
 
 use hacivat_proto::DbmsKind;
 

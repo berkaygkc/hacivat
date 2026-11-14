@@ -8,7 +8,8 @@
 //! a ` BC` suffix after the offset; fractions without trailing zeros (MySQL pads them to the
 //! column's precision); offsets `+03`, `+05:30`, `+01:56:56`; intervals in the `postgres`
 //! `IntervalStyle` (`1 year 2 mons -1 days +01:00:00`); bytes as `\x` and lower-case hex. No
-//! function here reads the process locale, the OS region or the display zone.
+//! function here reads the process locale or the OS region; only [`raw_text_in`] takes a zone,
+//! and only as its argument.
 
 use std::borrow::Cow;
 use std::fmt::{self, Write as _};
@@ -18,7 +19,7 @@ use hacivat_proto::DbmsKind;
 use crate::logical::LogicalType;
 use crate::special::SpecialVal;
 use crate::temporal::{DateVal, TimeVal, TsVal};
-use crate::valfmt::ColumnFacts;
+use crate::valfmt::{ColumnFacts, DisplayZone};
 use crate::value::ValueRef;
 
 /// A value's raw text, or SQL NULL.
@@ -58,6 +59,29 @@ pub fn raw_text<'a>(v: ValueRef<'a>, col: &ColumnFacts<'_>) -> RawText<'a> {
         }
     };
     RawText::Text(text)
+}
+
+/// [`raw_text`] with a `timestamptz` that has no server offset written in `zone`, with that
+/// zone's offset (`2026-11-11 10:00:00+03` in Europe/Istanbul): the instant the grid shows,
+/// so copy matches the cell (controller ruling on Task 16; Task 26 copies through it with the
+/// console's display zone). An offset the server sent is kept; past the zone database's years
+/// the instant is written in UTC. Every other value is exactly [`raw_text`].
+pub fn raw_text_in<'a>(v: ValueRef<'a>, col: &ColumnFacts<'_>, zone: &DisplayZone) -> RawText<'a> {
+    match v {
+        ValueRef::TimestampTz { offset: None, .. } => {
+            let in_zone = |utc: TsVal| zone_offset(&zone.0, utc);
+            let mut out = String::with_capacity(40);
+            write_scalar(v, col, Some(&in_zone), &mut out);
+            RawText::Text(Cow::Owned(out))
+        }
+        ValueRef::Truncated(t) => raw_text_in(t.prefix.view(), col, zone),
+        _ => raw_text(v, col),
+    }
+}
+
+/// `tz`'s offset at `utc`, seconds east; UTC beyond the zone database's years (±9999).
+pub(super) fn zone_offset(tz: &jiff::tz::TimeZone, utc: TsVal) -> i32 {
+    jiff::Timestamp::new(utc.secs, utc.nanos as i32).map_or(0, |t| tz.to_offset(t).seconds())
 }
 
 pub(super) fn bool_text(b: bool) -> &'static str {
