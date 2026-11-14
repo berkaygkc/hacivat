@@ -29,13 +29,15 @@ use crate::view::{GridConfig, GridLabels};
 /// The spike source's display cache: the app adapter's 64k entries.
 pub const SYNTHETIC_DISPLAY_CACHE: usize = 65_536;
 
-/// A grid configuration for tests and benches: 21 px rows, no zebra, fixed labels, and the
-/// accessibility label `a11y_label` (the app passes Fluent text instead).
+/// A grid configuration for tests and benches: 21 px rows, no zebra, no column auto-size (the
+/// columns keep the widths their source gives, so a test places cells by them), fixed labels,
+/// and the accessibility label `a11y_label` (the app passes Fluent text instead).
 pub fn grid_config(a11y_label: &'static str) -> GridConfig {
     let fixed = |s: &'static str| -> TextFn { Rc::new(move |_: &App| SharedString::new_static(s)) };
     GridConfig {
         row_height: crate::model::DEFAULT_ROW_HEIGHT,
         zebra: false,
+        auto_size: false,
         labels: GridLabels {
             loading: fixed("Loading"),
             too_many_columns: fixed("Too many columns"),

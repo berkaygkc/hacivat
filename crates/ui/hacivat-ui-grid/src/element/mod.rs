@@ -27,6 +27,7 @@
 //! quality as soon as the velocity is back under the threshold: one frame after the scroll
 //! slows.
 
+mod autosize;
 mod grid;
 pub mod layers;
 mod pointer;
@@ -34,14 +35,13 @@ pub mod scrollbar;
 pub mod text_cache;
 pub mod truncate;
 
-#[cfg(feature = "test-support")]
-use hacivat_ui_core::gpui_surface::SharedString;
-use hacivat_ui_core::gpui_surface::{Bounds, Pixels};
+use hacivat_ui_core::gpui_surface::{Bounds, Pixels, SharedString};
 
-#[cfg(feature = "test-support")]
 use crate::source::ColId;
 use text_cache::{FrameLru, Shaped, TEXT_CACHE_CAPACITY, TextKey};
 
+pub use autosize::AUTOSIZE_MEASURES_PER_FRAME;
+pub(crate) use autosize::AutosizeState;
 pub(crate) use grid::GridElement;
 pub(crate) use pointer::PointerState;
 
@@ -91,6 +91,9 @@ pub struct FrameStats {
     /// counts 0. (Allocations inside GPUI, and the frame's few listeners, are not counted: the
     /// workspace denies the `unsafe` a counting allocator needs.)
     pub cell_allocs: u32,
+    /// Cells measured for the column auto-size in this frame (at most
+    /// [`AUTOSIZE_MEASURES_PER_FRAME`] plus one column's samples; 0 once the widths are set).
+    pub autosize_measures: u32,
 }
 
 /// Statistics over the frames since the log was reset.
@@ -106,6 +109,9 @@ pub struct FrameLog {
     pub ensure_rows: u64,
     /// The cell paint path's debug allocation counter, summed.
     pub cell_allocs: u64,
+    /// Cells measured for the column auto-size, summed, and the most in one frame.
+    pub autosize_measures: u64,
+    pub max_autosize_measures: u32,
     pub last: FrameStats,
 }
 
@@ -120,6 +126,8 @@ impl FrameLog {
         }
         self.ensure_rows += u64::from(s.ensure_rows);
         self.cell_allocs += u64::from(s.cell_allocs);
+        self.autosize_measures += u64::from(s.autosize_measures);
+        self.max_autosize_measures = self.max_autosize_measures.max(s.autosize_measures);
         self.last = s;
     }
 }
@@ -204,6 +212,16 @@ pub struct PaintedHeader {
     pub degraded: bool,
 }
 
+/// A header whose name the last frame ellipsized: the grid shows the whole name in a tooltip
+/// over `bounds` (window coordinates).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeaderTip {
+    pub col: ColId,
+    /// The column's whole name (catalog text).
+    pub name: SharedString,
+    pub bounds: Bounds<Pixels>,
+}
+
 /// A visible column's paint geometry for one frame (reused buffer).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ColPaint {
@@ -237,6 +255,10 @@ pub(crate) struct PaintState {
     /// The visible columns' geometry, rebuilt each frame in a kept buffer.
     pub col_scratch: Vec<ColPaint>,
     pub log: FrameLog,
+    /// The headers whose names the last painted frame ellipsized, and those of the frame
+    /// before it (two kept buffers, swapped each frame).
+    pub header_tips: Vec<HeaderTip>,
+    pub header_tips_before: Vec<HeaderTip>,
     #[cfg(feature = "bench")]
     pub bench: BenchStats,
     #[cfg(feature = "bench")]
@@ -256,6 +278,8 @@ impl PaintState {
             scratch: text_cache::Scratch::default(),
             col_scratch: Vec::new(),
             log: FrameLog::default(),
+            header_tips: Vec::new(),
+            header_tips_before: Vec::new(),
             #[cfg(feature = "bench")]
             bench: BenchStats::default(),
             #[cfg(feature = "bench")]

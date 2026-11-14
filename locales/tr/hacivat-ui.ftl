@@ -1445,3 +1445,36 @@ hv-editor-describe-pending = Düzenleyici bu metni hâlâ okuyor. Birazdan yenid
 hv-editor-tab-moves-focus-on = Sekme tuşu odağı taşır
 # Review: PO
 hv-editor-tab-moves-focus-off = Sekme tuşu girinti ekler
+
+## m3a-t26-results-model
+
+# Review: PO
+hv-results-result-n = Sonuç { $n }
+# Review: PO
+hv-grid-truncated = … { $size }
+# Review: PO
+hv-grid-size-bytes = { $n } B
+# Review: PO
+hv-grid-size-kb = { $n } KB
+# Review: PO
+hv-grid-size-mb = { $n } MB
+# Review: PO
+hv-grid-size-gb = { $n } GB
+# Review: PO
+hv-grid-size-chars = { $n } karakter
+# Review: PO
+hv-grid-decode-error = Çözümlenemedi
+# Review: PO
+hv-copy-done = { $rows } × { $cols } hücre kopyalandı
+# Review: PO
+hv-copy-done-line = Sekmeyle ayrılmış, ham değerler
+# Review: PO
+hv-copy-done-incomplete = Kopyalanan değerlerden { $n } tanesi eksik: kısaltılmış ya da çözümlenememiş.
+# Review: PO
+hv-copy-working = { $cells } hücre kopyalanıyor…
+# Review: PO
+hv-copy-refused-title = Kopyalanamayacak kadar büyük
+# Review: PO
+hv-copy-refused-body = Seçimde { $cells } hücre var. Kopyalama en çok { $max } hücre ya da { $size } alır; daha az satır ya da sütun seçin.
+# Review: PO
+hv-copy-refused-multiple = Bu seçimler birlikte kopyalanamaz. Tek bir blok ya da aynı satırları veya sütunları paylaşan bloklar seçin.

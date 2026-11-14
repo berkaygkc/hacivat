@@ -260,6 +260,12 @@ pub(crate) fn prepaint_frame(
     let (x0, y0) = (f32::from(bounds.left()), f32::from(bounds.top()));
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     let body_w = (w - gutter_w - SCROLLBAR_PX).max(0.0);
+    // The column auto-size takes its share of the frame before the columns are laid out.
+    let autosize_measures = super::autosize::step(v, &*frame, body_w, window, cx);
+    if v.autosize.pending() && autosize_measures > 0 {
+        let view = cx.entity();
+        window.on_next_frame(move |_, cx| view.update(cx, |_, cx| cx.notify()));
+    }
     let content_w = v.layout.total_width();
     let htrack_h = if content_w > f64::from(body_w) {
         SCROLLBAR_PX
@@ -328,6 +334,7 @@ pub(crate) fn prepaint_frame(
             fast,
             velocity: velocity.min(f64::from(f32::MAX)) as f32,
             ensure_rows,
+            autosize_measures,
             ..FrameStats::default()
         },
     }
@@ -363,6 +370,10 @@ pub(crate) fn paint_frame(
     if let Some(headers) = v.paint.recorded_headers.as_mut() {
         headers.clear();
     }
+    // Keep the tips of the frame before (in the other kept buffer), to tell whether the
+    // view's tooltip areas have to be rebuilt.
+    std::mem::swap(&mut v.paint.header_tips, &mut v.paint.header_tips_before);
+    v.paint.header_tips.clear();
 
     let g = &f.geom;
     // Layer 1 under every region: the panel.
@@ -414,6 +425,11 @@ pub(crate) fn paint_frame(
         });
     }
 
+    if v.paint.header_tips != v.paint.header_tips_before {
+        // The view's tooltip areas were built from the frame before: render again.
+        let view = cx.entity();
+        window.on_next_frame(move |_, cx| view.update(cx, |_, cx| cx.notify()));
+    }
     stats.shapes = budget.shapes;
     stats.header_shapes = header_budget.shapes;
     stats.cell_allocs = budget.allocs + header_budget.allocs;
@@ -816,13 +832,14 @@ fn paint_header(
         let end_aligned = spec.align == Align::End;
         let mask = rect(left, hy, (width - 1.0).max(0.0), hh);
         masked(mask, window, |window| {
-            for (text, role, y, lh, path) in [
+            for (text, role, y, lh, path, is_name) in [
                 (
                     &spec.name,
                     &roles.header_name,
                     name_y,
                     name_lh,
                     layers::paths::HEADER,
+                    true,
                 ),
                 (
                     &spec.type_label,
@@ -830,6 +847,7 @@ fn paint_header(
                     type_y,
                     type_lh,
                     layers::paths::HEADER,
+                    false,
                 ),
             ] {
                 if text.is_empty() {
@@ -869,15 +887,23 @@ fn paint_header(
                         (recording, s.truncated, s.degraded)
                     },
                 );
-                if let Some((recorded, _truncated, _degraded)) = recorded {
+                if let Some((recorded, truncated, _degraded)) = recorded {
                     budget.allocs += u32::from(recorded);
+                    if truncated && is_name {
+                        // An ellipsized name: the whole name is its tooltip (NOTES rule 7).
+                        paint.header_tips.push(super::HeaderTip {
+                            col,
+                            name: text.clone(),
+                            bounds: mask.intersect(&header),
+                        });
+                    }
                     #[cfg(feature = "test-support")]
                     if let Some(headers) = paint.recorded_headers.as_mut() {
                         budget.allocs += 1;
                         headers.push(super::PaintedHeader {
                             col,
                             text: text.clone(),
-                            truncated: _truncated,
+                            truncated,
                             degraded: _degraded,
                         });
                     }

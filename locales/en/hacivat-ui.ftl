@@ -1482,3 +1482,68 @@ hv-editor-describe-pending = The editor is still reading this text. Try again in
 hv-editor-tab-moves-focus-on = Tab moves focus
 # The same after turning it off.
 hv-editor-tab-moves-focus-off = Tab indents
+
+## m3a-t26-results-model
+
+# A result tab's title (NOTES surface 9).
+# Variables:
+#   $n (Number) - the result's number in its console, from 1.
+hv-results-result-n = Result { $n }
+# The chip after a cell whose value was cut (NOTES surface 10, "… 5.2 MB").
+# Variables:
+#   $size (String) - the value's whole size (an hv-grid-size-* message), e.g. "5.2 MB".
+hv-grid-truncated = … { $size }
+# A value's size in bytes, inside the truncation chip.
+# Variables:
+#   $n (Number) - the bytes, e.g. 512.
+hv-grid-size-bytes = { $n } B
+# A value's size in kilobytes, inside the truncation chip and the copy limit.
+# Variables:
+#   $n (Decimal) - the kilobytes, e.g. 12.5.
+hv-grid-size-kb = { $n } KB
+# A value's size in megabytes.
+# Variables:
+#   $n (Decimal) - the megabytes, e.g. 5.2.
+hv-grid-size-mb = { $n } MB
+# A value's size in gigabytes.
+# Variables:
+#   $n (Decimal) - the gigabytes, e.g. 1.5.
+hv-grid-size-gb = { $n } GB
+# A value's length in characters, inside the truncation chip.
+# Variables:
+#   $n (Number) - the characters, e.g. 1999.
+hv-grid-size-chars = { $n ->
+        [one] { $n } character
+       *[other] { $n } characters
+    }
+# A cell whose value could not be decoded (NOTES surface 10).
+hv-grid-decode-error = Can't decode
+# Toast after a copy from the grid (NOTES surface 14).
+# Variables:
+#   $rows (Number) - the rows copied, e.g. 3.
+#   $cols (Number) - the columns copied, e.g. 8.
+hv-copy-done = Copied { $rows } × { $cols } cells
+# The second line of the copy toast.
+hv-copy-done-line = Tab-separated, raw values
+# The second line of the copy toast when some copied values are not whole: values the result
+# cut short (their kept beginning was copied) or could not decode (copied as empty cells).
+# Variables:
+#   $n (Number) - how many of the copied values are incomplete, e.g. 3.
+hv-copy-done-incomplete = { $n ->
+        [one] { $n } of the copied values is incomplete: cut short or not decodable.
+       *[other] { $n } of the copied values are incomplete: cut short or not decodable.
+    }
+# Toast while a large copy is prepared in the background.
+# Variables:
+#   $cells (Number) - the cells being copied, e.g. 48000.
+hv-copy-working = Copying { $cells } cells…
+# Toast title when a selection is too large to copy.
+hv-copy-refused-title = Too much to copy
+# Toast body when a selection is too large to copy.
+# Variables:
+#   $cells (Number) - the cells selected, e.g. 8000000.
+#   $max (Number) - the most cells a copy takes, 1000000.
+#   $size (String) - the most text a copy takes (an hv-grid-size-* message), e.g. "100 MB".
+hv-copy-refused-body = The selection has { $cells } cells. Copy takes at most { $max } cells or { $size }; select fewer rows or columns.
+# Toast when separate selections neither stack nor sit side by side, so they have no table shape.
+hv-copy-refused-multiple = These selections can't be copied together. Select one block, or blocks that share their rows or their columns.

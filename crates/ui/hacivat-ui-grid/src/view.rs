@@ -20,11 +20,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hacivat_ui::text::TextFn;
+use hacivat_ui::text::{Label, TextFn, TextSource};
 use hacivat_ui_core::gpui_surface::{
-    App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, Role, ScrollEvent, SharedString, Styled, Task, Window, div, px,
+    AnyView, App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, ParentElement, Render, Role, ScrollEvent, SharedString,
+    StatefulInteractiveElement, Styled, Task, Window, div, px,
 };
+use hacivat_ui_core::theme::{Theme, popover_surface};
 
 use crate::element::{self, FrameLog, FrameStats, Geometry, PaintState};
 use crate::model::{self, ColumnLayout, KeyCtx, KeyOutcome, ScrollState, ViewMap};
@@ -52,6 +54,9 @@ pub struct GridConfig {
     pub row_height: f32,
     /// Off in M3a.
     pub zebra: bool,
+    /// Sizes the columns from sampled rows once the first rows are loaded (HV-GRID-04; module
+    /// docs of `element::autosize`). Off: columns keep their source's default widths.
+    pub auto_size: bool,
     pub labels: GridLabels,
     /// Role `Grid` with this label (R-M3-32).
     pub a11y_label: TextFn,
@@ -62,6 +67,7 @@ impl std::fmt::Debug for GridConfig {
         f.debug_struct("GridConfig")
             .field("row_height", &self.row_height)
             .field("zebra", &self.zebra)
+            .field("auto_size", &self.auto_size)
             .finish_non_exhaustive()
     }
 }
@@ -96,6 +102,10 @@ pub enum GridEvent {
     CopyRequested {
         region: model::CopyRegion,
         headers: bool,
+        /// The source generation the region was cut from (the frame the grid last painted).
+        /// The host copies only while its source is still at this generation: a re-run that
+        /// arrived since has other rows under the same positions.
+        generation: u64,
     },
     CopyRefused(model::CopyRefusal),
     ColumnResized {
@@ -159,6 +169,8 @@ pub struct GridView {
     pub(crate) pointer: element::PointerState,
     /// A selection change waiting for the next frame's event.
     pub(crate) selection_dirty: bool,
+    /// The sampled column auto-size of the current column set.
+    pub(crate) autosize: element::AutosizeState,
     visible: VisibleState,
     /// The label was read this many times (only while assistive technology is active).
     a11y_reads: u64,
@@ -178,6 +190,8 @@ impl GridView {
     pub fn new(source: Rc<dyn GridDataSource>, config: GridConfig, cx: &mut Context<Self>) -> Self {
         let columns = source.columns();
         let layout = ColumnLayout::from_specs(&columns);
+        let mut autosize = element::AutosizeState::default();
+        autosize.restart();
         GridView {
             scroll: ScrollState::new(config.row_height),
             source,
@@ -191,6 +205,7 @@ impl GridView {
             geometry: None,
             pointer: element::PointerState::default(),
             selection_dirty: false,
+            autosize,
             visible: VisibleState::default(),
             a11y_reads: 0,
         }
@@ -212,7 +227,8 @@ impl GridView {
         cx.notify();
     }
 
-    /// Takes `columns`, keeping the widths when asked and the names match.
+    /// Takes `columns`, keeping the widths when asked and the names match. A column set whose
+    /// widths are not kept is auto-sized anew.
     pub(crate) fn adopt_columns(&mut self, columns: Arc<[ColumnSpec]>, keep_widths: bool) {
         let same_names = columns.len() == self.columns.len()
             && columns
@@ -229,6 +245,8 @@ impl GridView {
                     layout.set_width(*id, w);
                 }
             }
+        } else {
+            self.autosize.restart();
         }
         self.columns = columns;
         self.layout = layout;
@@ -267,7 +285,11 @@ impl GridView {
                 }
             }
             KeyOutcome::Copy { region, headers } => match region {
-                Ok(region) => cx.emit(GridEvent::CopyRequested { region, headers }),
+                Ok(region) => cx.emit(GridEvent::CopyRequested {
+                    region,
+                    headers,
+                    generation: self.data.generation.unwrap_or(0),
+                }),
                 Err(refusal) => cx.emit(GridEvent::CopyRefused(refusal)),
             },
         }
@@ -297,12 +319,14 @@ impl GridView {
     }
 
     /// Sets the width of `col` (the host restoring a result tab's widths), clamped to the user
-    /// bounds; `false` for an unknown column.
+    /// bounds; `false` for an unknown column. Like a width the user dragged to, it is kept: the
+    /// auto-size never changes it.
     pub fn set_column_width(&mut self, col: ColId, width: f32, cx: &mut Context<Self>) -> bool {
         let set = self
             .layout
             .set_width(col, model::autosize::clamp_user_width(width));
         if set {
+            self.autosize.mark_user_sized(col);
             self.scroll.set_content_width(self.layout.total_width());
             cx.notify();
         }
@@ -369,6 +393,17 @@ impl GridView {
         self.a11y_reads
     }
 
+    /// The headers whose names the last frame ellipsized, each with its tooltip's area: the
+    /// whole name shows in a tooltip there.
+    pub fn header_tips(&self) -> &[element::HeaderTip] {
+        &self.paint.header_tips
+    }
+
+    /// Whether the column auto-size still has columns to measure.
+    pub fn auto_size_pending(&self) -> bool {
+        self.config.auto_size && self.autosize.pending()
+    }
+
     /// The selection changed: one event in the next frame.
     pub(crate) fn mark_selection_changed(&mut self) {
         self.selection_dirty = true;
@@ -429,13 +464,66 @@ impl EventEmitter<GridEvent> for GridView {}
 impl Render for GridView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let grid = element::GridElement::new(cx.entity());
+        // An ellipsized header name keeps its whole text in a tooltip (NOTES rule 7): one hover
+        // area per such header of the last frame (a frame whose headers differ asks for this
+        // render again). The areas take no click: the element's own hitbox handles the pointer.
+        let origin = self.geometry.as_ref().map(|g| g.bounds.origin);
+        let tips: Vec<_> = self
+            .paint
+            .header_tips
+            .iter()
+            .filter_map(|tip| {
+                let origin = origin?;
+                let name = tip.name.clone();
+                Some(
+                    div()
+                        .id(("hv-grid-header-tip", tip.col.0 as usize))
+                        .absolute()
+                        .left(tip.bounds.left() - origin.x)
+                        .top(tip.bounds.top() - origin.y)
+                        .w(tip.bounds.size.width)
+                        .h(tip.bounds.size.height)
+                        .tooltip(move |_, cx| HeaderNameTip::view(name.clone(), cx)),
+                )
+            })
+            .collect();
         div()
             .id(("hv-grid-view", cx.entity_id()))
             .key_context(GRID_CONTEXT)
             .track_focus(&self.focus)
             .size_full()
+            .relative()
             .overflow_hidden()
             .on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| this.on_scroll(e, cx)))
             .child(grid)
+            .children(tips)
+    }
+}
+
+/// The tooltip of an ellipsized header: the column's whole name on a popover surface. The
+/// name is catalog text, never translated.
+struct HeaderNameTip {
+    name: SharedString,
+}
+
+impl HeaderNameTip {
+    fn view(name: SharedString, cx: &mut App) -> AnyView {
+        cx.new(|_| HeaderNameTip { name }).into()
+    }
+}
+
+impl Render for HeaderNameTip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *Theme::get(cx);
+        let t = theme.tokens;
+        popover_surface(&theme)
+            .px(px(8.0))
+            .py(px(4.0))
+            .child(Label::new(
+                self.name.clone(),
+                TextSource::Catalog,
+                t.type_ramp.body_sm,
+                t.colors.text.to_hsla(),
+            ))
     }
 }

@@ -342,6 +342,7 @@ impl GridView {
             } => {
                 let width = clamp_user_width(start_w + (f32::from(e.position.x) - start_x));
                 if self.layout.set_width(col, width) {
+                    self.autosize.mark_user_sized(col);
                     self.scroll.set_content_width(self.layout.total_width());
                     self.pointer.drag = Some(Drag::Resize {
                         col,
