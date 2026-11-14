@@ -7,8 +7,9 @@
 //!    rewrite the transaction or veto it; a rewrite is checked and snapped again). An undo or
 //!    redo a filter rewrites is vetoed instead, and its group stays;
 //! 3. the buffer apply;
-//! 4. the selection: the given one or the old one mapped, clamped to the text, on character
-//!    boundaries, and never between the CR and LF of a CRLF (a caret there moves past the LF);
+//! 4. the selection: the given one or the old one mapped (a mapped one also onto grapheme
+//!    cluster boundaries), clamped to the text, on character boundaries, and never between the
+//!    CR and LF of a CRLF (a caret there moves past the LF);
 //! 5. the fields in order: history first (record, rebase, or the undo/redo bookkeeping), then
 //!    each added [`Field`], told the version the commit makes;
 //! 6. version += 1 and a change-log entry, when the text changed (a selection-only commit keeps
@@ -340,7 +341,8 @@ impl EditorModel {
         let after = fit_selection(
             match &tr.selection {
                 Some(s) => s.clone(),
-                None => self.selection.map(&desc),
+                // A mapped one also lands on grapheme cluster boundaries (Task 10, UI-EDIT-05).
+                None => self.selection.map(&desc).snapped_to_graphemes(&self.buffer),
             },
             &self.buffer,
         );

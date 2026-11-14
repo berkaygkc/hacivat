@@ -94,7 +94,7 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
-        self.ime.marked_utf16(&self.model.snapshot().buffer)
+        self.ime.marked_utf16(&self.model)
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
