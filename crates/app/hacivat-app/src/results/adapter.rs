@@ -220,6 +220,11 @@ impl GridAdapter {
     }
 
     /// The result's source (the cursor strip's commands and state).
+    ///
+    /// Its `raise_cap()` raises the cap without the tab knowing: "Fetch more anyway" goes
+    /// through `ConsoleResults::raise_cap`, which records the raise for the memory banner. A
+    /// raise made here leaves the banner offering the button after a global-budget pause (each
+    /// click pauses again; nothing is fetched past the budget).
     pub fn source(&self) -> Arc<dyn ResultSource> {
         self.target.borrow().source.clone()
     }
@@ -307,14 +312,16 @@ impl GridFrame for AdapterFrame {
 
     fn row_count(&self) -> RowCount {
         let loaded = self.snapshot.row_count();
-        let more = matches!(
-            self.snapshot.completeness(),
-            Completeness::Streaming | Completeness::Suspended(_)
-        );
+        let completeness = self.snapshot.completeness();
         RowCount {
             loaded,
-            more,
-            exact_total: (!more).then_some(loaded),
+            more: matches!(
+                completeness,
+                Completeness::Streaming | Completeness::Suspended(_)
+            ),
+            // Only a complete result knows its total: a closed, cancelled or truncated one
+            // stopped while the server had more rows.
+            exact_total: matches!(completeness, Completeness::Complete).then_some(loaded),
         }
     }
 

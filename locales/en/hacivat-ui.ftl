@@ -1436,6 +1436,14 @@ hv-grid-decode-error = Can't decode
 hv-copy-done = Copied { $rows } × { $cols } cells
 # The second line of the copy toast.
 hv-copy-done-line = Tab-separated, raw values
+# The second line of the copy toast when some copied values are not whole: values the result
+# cut short (their kept beginning was copied) or could not decode (copied as empty cells).
+# Variables:
+#   $n (Number) - how many of the copied values are incomplete, e.g. 3.
+hv-copy-done-incomplete = { $n ->
+        [one] { $n } of the copied values is incomplete: cut short or not decodable.
+       *[other] { $n } of the copied values are incomplete: cut short or not decodable.
+    }
 # Toast while a large copy is prepared in the background.
 # Variables:
 #   $cells (Number) - the cells being copied, e.g. 48000.

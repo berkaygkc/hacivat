@@ -1354,6 +1354,8 @@ hv-copy-done = { $rows } × { $cols } hücre kopyalandı
 # Review: PO
 hv-copy-done-line = Sekmeyle ayrılmış, ham değerler
 # Review: PO
+hv-copy-done-incomplete = Kopyalanan değerlerden { $n } tanesi eksik: kısaltılmış ya da çözümlenememiş.
+# Review: PO
 hv-copy-working = { $cells } hücre kopyalanıyor…
 # Review: PO
 hv-copy-refused-title = Kopyalanamayacak kadar büyük

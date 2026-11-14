@@ -21,14 +21,15 @@
 //!
 //! Every method that changes what the tile shows notifies the entity.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_exec::{ResultTab, SessionLog, TabKey};
 use hacivat_l10n::{Count, ids};
-use hacivat_proto::DbmsKind;
+use hacivat_proto::{AccessLabel, DbmsKind};
 use hacivat_results::{Completeness, PauseReason, ResultSource};
-use hacivat_session::session::UnitId;
+use hacivat_session::session::{RunId, UnitId};
 use hacivat_ui_core::gpui_surface::{App, Context, SharedString};
 use hacivat_ui_grid::{ColId, GridDataSource};
 use hacivat_values::valfmt::DisplayZone;
@@ -71,6 +72,9 @@ pub struct ResultEntry {
     fetch_ms: Option<u64>,
     /// "Fetch more anyway" was taken for the result the tab shows now.
     cap_raised: bool,
+    /// The access label of the connection when it was last seen connected for this result
+    /// (the status bar shows it while the connection is away).
+    access: Cell<Option<AccessLabel>>,
 }
 
 impl std::fmt::Debug for ResultEntry {
@@ -99,8 +103,23 @@ impl ResultEntry {
     }
 
     /// The result's source: snapshots, the cursor's commands.
+    ///
+    /// Do not call its `raise_cap()` directly: [`ConsoleResults::raise_cap`] is the one path
+    /// that records the raise for [`memory_banner`](Self::memory_banner). A raise made on the
+    /// source leaves the banner offering "Fetch more anyway" after a global-budget pause.
     pub fn source(&self) -> Arc<dyn ResultSource> {
         self.adapter.source()
+    }
+
+    /// The connection's access label when it was last seen connected for this result;
+    /// `None` when it never was.
+    pub fn last_access(&self) -> Option<AccessLabel> {
+        self.access.get()
+    }
+
+    /// Records the access label of the live connection.
+    pub(crate) fn note_access(&self, access: AccessLabel) {
+        self.access.set(Some(access));
     }
 
     /// N of `Result N`.
@@ -145,6 +164,9 @@ pub struct ConsoleResults {
     display: ResultDisplay,
     /// The next tab's N.
     next_number: u32,
+    /// The run whose first result was shown: its later results do not take the tab strip
+    /// again.
+    shown_run: Option<RunId>,
 }
 
 impl ConsoleResults {
@@ -159,6 +181,7 @@ impl ConsoleResults {
             unread_output: false,
             display: ResultDisplay::new("und", DisplayZone::utc(), DbmsKind::Postgres),
             next_number: 1,
+            shown_run: None,
         }
     }
 
@@ -218,9 +241,13 @@ impl ConsoleResults {
 
     /// Takes the result tabs of a run (the run service republishes the list as results
     /// arrive, so the same tab may come again). A key the console already shows reuses its tab
-    /// (module docs); a new key gets a new tab at the end. The first tab that is new or was
-    /// re-run becomes active. Answers the indices of the tabs that are new or were re-run.
+    /// (module docs); a new key gets a new tab at the end. The first new or re-run tab of a
+    /// run (by its `RunId`) becomes active; the run's later results change nothing about the
+    /// active tab, so a tab the user chose during the run stays. Answers the indices of the
+    /// tabs that are new or were re-run.
     pub fn apply(&mut self, run: &[ResultTab], cx: &mut Context<Self>) -> Vec<usize> {
+        // The access of the connection the results came over, while it is connected.
+        let access = crate::results::context::live_access_of(&cx.entity(), cx);
         let mut changed = Vec::new();
         for tab in run {
             match self.tab_by_key(tab.key) {
@@ -238,6 +265,8 @@ impl ConsoleResults {
                     entry.exec_ms = None;
                     entry.fetch_ms = None;
                     entry.cap_raised = false;
+                    // A new result: what was known of the old one's connection is not kept.
+                    entry.access.set(access);
                     let names = column_names(&entry.adapter);
                     if names != entry.names {
                         entry.widths.clear();
@@ -259,13 +288,21 @@ impl ConsoleResults {
                         exec_ms: None,
                         fetch_ms: None,
                         cap_raised: false,
+                        access: Cell::new(access),
                     });
                     changed.push(self.tabs.len() - 1);
                 }
             }
         }
         if let Some(first) = changed.first() {
-            self.active = ActiveResult::Tab(*first);
+            // Once per run: the run service republishes its list as results arrive, and a
+            // later result must not take the strip from the first one, or from a tab the user
+            // chose meanwhile.
+            let run = self.tabs[*first].unit.run;
+            if self.shown_run != Some(run) {
+                self.shown_run = Some(run);
+                self.active = ActiveResult::Tab(*first);
+            }
             cx.notify();
         }
         changed

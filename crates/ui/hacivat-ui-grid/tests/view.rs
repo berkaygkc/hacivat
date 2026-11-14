@@ -181,10 +181,15 @@ fn copy_requests_the_region_or_says_why_not(cx: &mut TestAppContext) {
     run(&view, vcx, mv(Dir::Down, true));
     run(&view, vcx, GridCommand::Copy { headers: true });
     let copied = events.borrow().iter().find_map(|e| match e {
-        GridEvent::CopyRequested { region, headers } => Some((region.cell_count(), *headers)),
+        GridEvent::CopyRequested {
+            region,
+            headers,
+            generation,
+        } => Some((region.cell_count(), *headers, *generation)),
         _ => None,
     });
-    assert_eq!(copied, Some((2, true)));
+    // The request names the generation the region was cut from.
+    assert_eq!(copied, Some((2, true, 1)));
 }
 
 #[gpui::test]

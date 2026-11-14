@@ -23,21 +23,25 @@ use hacivat_app::results::context::result_context_of;
 use hacivat_app::results::copy::{self, CopyOutcome, MAX_COPY_BYTES, TooLarge};
 use hacivat_app::results::tabs::MemoryBanner;
 use hacivat_app::results::{ActiveResult, CompletenessView, ConsoleResults};
+use hacivat_driver::{SemVerLoose, ServerInfo, Support};
 use hacivat_exec::{ResultTab, SessionLog, TabKey};
 use hacivat_l10n::Catalogs;
+use hacivat_net::{AddressClass, TlsSummary, TlsVerified};
 use hacivat_proto::{AccessLabel, DbmsKind, EnvTag};
 use hacivat_results::{
     CloseReason, Completeness, CursorInfo, FetchControl, FetchPolicy, MemoryBudget, PauseReason,
     ResultId, ResultSource, ResultStore, ResultWriter, StoreSource,
 };
+use hacivat_secrets::AuthProviderId;
 use hacivat_session::session::{RunId, UnitId};
+use hacivat_session::{LiveInfo, LiveState, PathKind};
 use hacivat_ui::toast::ToastQueue;
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 use hacivat_ui_grid::model::{CopyRefusal, CopyRegion, Dir};
 use hacivat_ui_grid::testing::grid_config;
 use hacivat_ui_grid::{
     Align, CellContent, CellKind, ColId, ColumnKind, GridCellFlags, GridCommand, GridDataSource,
-    GridView, ModelRow,
+    GridEvent, GridView, ModelRow,
 };
 use hacivat_values::valfmt::DisplayZone;
 use hacivat_values::{
@@ -157,7 +161,9 @@ fn whole(adapter: &GridAdapter) -> CopyRegion {
 }
 
 fn tsv(adapter: &GridAdapter) -> String {
-    copy::tsv(adapter, &whole(adapter), false, MAX_COPY_BYTES).expect("within the limits")
+    copy::tsv(adapter, &whole(adapter), false, MAX_COPY_BYTES)
+        .expect("within the limits")
+        .text
 }
 
 fn names(adapter: &GridAdapter) -> Vec<String> {
@@ -221,6 +227,11 @@ fn plain(text: &str) -> String {
 }
 
 fn result_tab(unit_ordinal: u32, source: Arc<dyn ResultSource>) -> ResultTab {
+    result_tab_of_run(1, unit_ordinal, source)
+}
+
+/// The tab of unit `unit_ordinal` of run `run`.
+fn result_tab_of_run(run: u64, unit_ordinal: u32, source: Arc<dyn ResultSource>) -> ResultTab {
     ResultTab {
         key: TabKey {
             console: 1,
@@ -230,7 +241,7 @@ fn result_tab(unit_ordinal: u32, source: Arc<dyn ResultSource>) -> ResultTab {
         // The run service's own title; the tab strip shows the console's `Result N`.
         title: "".into(),
         unit: UnitId {
-            run: RunId(1),
+            run: RunId(run),
             ordinal: unit_ordinal,
         },
         source,
@@ -270,7 +281,9 @@ fn copy_with_headers_puts_the_column_names_first() {
         schema(vec![pg("id", int8(), "int8"), pg("a\tb", text(), "text")]),
         vec![vec![Value::Int(7), t("x")]],
     );
-    let text = copy::tsv(&adapter, &whole(&adapter), true, MAX_COPY_BYTES).unwrap();
+    let text = copy::tsv(&adapter, &whole(&adapter), true, MAX_COPY_BYTES)
+        .unwrap()
+        .text;
     assert_eq!(text, "id\t\"a\tb\"\n7\tx\n");
 }
 
@@ -284,7 +297,9 @@ fn copy_takes_the_region_only_and_skips_what_the_result_lacks() {
         cols: vec![ColId(2), ColId(0), ColId(9)],
     };
     assert_eq!(
-        copy::tsv(&adapter, &region, false, MAX_COPY_BYTES).unwrap(),
+        copy::tsv(&adapter, &region, false, MAX_COPY_BYTES)
+            .unwrap()
+            .text,
         "x\t2\n\" \"\t3\n"
     );
 }
@@ -428,8 +443,72 @@ fn truncated_and_undecodable_cells(cx: &mut TestAppContext) {
     assert_eq!(bad.kind, CellKind::Error);
     assert_eq!(bad.text.as_ref(), "Can't decode");
     assert_eq!(bad.align, Align::Start);
-    // Copy: the kept prefix without a marker, and the error's message.
-    assert_eq!(tsv(&adapter), "the kept prefix\tinvalid byte sequence\n");
+    // Copy: the kept prefix, and an empty cell for the value that could not be decoded. The
+    // decoder's message is not a value the server sent: it never reaches the clipboard.
+    let copied = copy::tsv(&adapter, &whole(&adapter), false, MAX_COPY_BYTES).unwrap();
+    assert_eq!(copied.text, "the kept prefix\t\n");
+    assert!(!copied.text.contains("invalid byte sequence"));
+    assert_eq!(copied.incomplete, 2, "both cells are incomplete");
+    // A complete result has none.
+    let whole_3x3 = fixture_3x3();
+    assert_eq!(
+        copy::tsv(&whole_3x3, &whole(&whole_3x3), false, MAX_COPY_BYTES)
+            .unwrap()
+            .incomplete,
+        0
+    );
+    let region = whole(&adapter);
+    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
+    assert_eq!(
+        task.now_or_never(),
+        Some(CopyOutcome::Copied {
+            rows: 1,
+            cols: 2,
+            incomplete: 2
+        })
+    );
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|i| i.text()).as_deref(),
+        Some("the kept prefix\t\n")
+    );
+}
+
+fn incomplete_fixture() -> Rc<GridAdapter> {
+    let truncated = Value::Truncated(Box::new(TruncatedVal {
+        prefix: t("the kept prefix"),
+        total_len: Some(5_452_595),
+        unit: LenUnit::Bytes,
+    }));
+    let error = Value::Error(Arc::new(ErrorVal {
+        code: "decode".into(),
+        message: "invalid byte sequence".into(),
+    }));
+    adapter_over(
+        schema(vec![pg("a", text(), "text"), pg("b", text(), "text")]),
+        vec![vec![truncated, error.clone()], vec![t("whole"), error]],
+    )
+}
+
+#[gpui::test]
+fn a_copy_with_incomplete_cells_warns_instead_of_plainly_succeeding(cx: &mut TestAppContext) {
+    use support::*;
+    let vcx = shell(cx, "en");
+    let adapter = incomplete_fixture();
+    let region = whole(&adapter);
+    vcx.cx
+        .update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx))
+        .detach();
+    vcx.run_until_parked();
+    assert_eq!(toast_ids(vcx), ["hv-copy-done", "hv-copy-done-incomplete"]);
+    assert_eq!(
+        toast_texts(vcx),
+        [
+            "Copied 2 × 2 cells",
+            "3 of the copied values are incomplete: cut short or not decodable."
+        ]
+    );
+    let text = vcx.cx.read_from_clipboard().and_then(|i| i.text()).unwrap();
+    assert_eq!(text, "the kept prefix\t\nwhole\t\n");
 }
 
 #[gpui::test]
@@ -1006,7 +1085,7 @@ fn output_leads_and_the_first_new_result_becomes_active(cx: &mut TestAppContext)
         assert!(!r.unread_output(), "showing Output reads its lines");
     });
     // A re-run of the second unit shows that tab.
-    let rerun = result_tab(1, finished(three_columns(), vec![]));
+    let rerun = result_tab_of_run(2, 1, finished(three_columns(), vec![]));
     results.update(cx, |r, cx| r.apply(&[rerun], cx));
     assert_eq!(
         results.read_with(cx, |r, _| (
@@ -1083,6 +1162,230 @@ fn the_memory_banner_offers_a_raise_until_the_global_budget_is_what_stops_it(
 }
 
 #[gpui::test]
+fn the_arriving_result_is_shown_once_per_run_and_never_over_the_users_choice(
+    cx: &mut TestAppContext,
+) {
+    let results = console_results(cx);
+    let active = |cx: &mut TestAppContext| results.read_with(cx, |r, _| r.active());
+    let first = result_tab_of_run(7, 0, finished(three_columns(), numbered_rows(0..3)));
+    let second = result_tab_of_run(7, 1, finished(three_columns(), numbered_rows(0..3)));
+    let third = result_tab_of_run(7, 2, finished(three_columns(), numbered_rows(0..3)));
+    // The run service republishes its list as results arrive.
+    results.update(cx, |r, cx| r.apply(std::slice::from_ref(&first), cx));
+    assert_eq!(
+        active(cx),
+        ActiveResult::Tab(0),
+        "the run's first result is shown"
+    );
+    results.update(cx, |r, cx| r.apply(&[first.clone(), second.clone()], cx));
+    assert_eq!(
+        active(cx),
+        ActiveResult::Tab(0),
+        "a later result does not take over"
+    );
+    // The user looks at Output during the run: the run's next result leaves it alone.
+    results.update(cx, |r, cx| r.set_active(ActiveResult::Output, cx));
+    results.update(cx, |r, cx| r.apply(&[first, second, third], cx));
+    assert_eq!(active(cx), ActiveResult::Output);
+    assert_eq!(results.read_with(cx, |r, _| r.tabs().len()), 3);
+    // The next run shows its first result again: here a re-run of the second unit.
+    let rerun = result_tab_of_run(8, 1, finished(three_columns(), numbered_rows(0..1)));
+    results.update(cx, |r, cx| r.apply(&[rerun], cx));
+    assert_eq!(active(cx), ActiveResult::Tab(1));
+}
+
+#[gpui::test]
+fn only_a_complete_result_has_an_exact_total(cx: &mut TestAppContext) {
+    let count = |cx: &mut TestAppContext, state: Completeness| {
+        let store = ResultStore::from_rows(three_columns(), numbered_rows(0..7), state);
+        let adapter = GridAdapter::new(source_of(store), en());
+        cx.update(|cx| adapter.begin_frame(cx).row_count())
+    };
+    let complete = count(cx, Completeness::Complete);
+    assert_eq!((complete.loaded, complete.more), (7, false));
+    assert_eq!(complete.exact_total, Some(7));
+    // The server had more rows than these results kept: no total is claimed.
+    for state in [
+        Completeness::Closed {
+            reason: CloseReason::UserClosed,
+        },
+        Completeness::Cancelled,
+        Completeness::Truncated(hacivat_results::TruncReason::ResultCap),
+    ] {
+        let stopped = count(cx, state);
+        assert_eq!((stopped.loaded, stopped.more), (7, false), "{state:?}");
+        assert_eq!(stopped.exact_total, None, "{state:?}");
+    }
+}
+
+#[gpui::test]
+fn the_consoles_display_reaches_its_tabs_old_and_new(cx: &mut TestAppContext) {
+    let results = console_results(cx);
+    let amount = |cx: &mut TestAppContext, ix: usize| {
+        let adapter = results.read_with(cx, |r, _| r.tabs()[ix].adapter().clone());
+        paint_rows(cx, &adapter, 0..1)[0][1].text.to_string()
+    };
+    let tab = |unit: u32| {
+        let (schema, rows) = mixed();
+        result_tab(unit, finished(schema, rows))
+    };
+    results.update(cx, |r, cx| r.apply(&[tab(0)], cx));
+    // Before the host sets it: no region, so no locale's grouping is claimed.
+    assert_eq!(
+        results.read_with(cx, |r, _| r.display().engine()),
+        DbmsKind::Postgres
+    );
+    let before = amount(cx, 0);
+    results.update(cx, |r, cx| r.set_display(tr_istanbul(), cx));
+    assert_eq!(amount(cx, 0), "1.234.567,50", "was {before:?}");
+    // A tab that arrives later is shown the same way.
+    results.update(cx, |r, cx| r.apply(&[tab(1)], cx));
+    assert_eq!(amount(cx, 1), "1.234.567,50");
+    assert_eq!(
+        results.read_with(cx, |r, _| r.display().clone()),
+        tr_istanbul()
+    );
+}
+
+/// A live PostgreSQL connection whose access is `access`.
+fn connected(access: AccessLabel) -> LiveState {
+    LiveState::Connected(Arc::new(LiveInfo {
+        server: ServerInfo {
+            kind: DbmsKind::Postgres,
+            product: "PostgreSQL".to_string(),
+            version: SemVerLoose::parse("17.2"),
+            raw_version: "17.2".to_string(),
+            is_replica: Some(false),
+        },
+        support: Support::Supported,
+        tls: TlsSummary {
+            encrypted: true,
+            version: Some("TLSv1.3".to_string()),
+            cipher: None,
+            verified: TlsVerified::Full,
+        },
+        address: AddressClass::Private,
+        latency: Duration::from_millis(12),
+        access,
+        path: PathKind::Direct,
+        user: Some("qa".to_string()),
+        auth: AuthProviderId::Password,
+        via: None,
+        hops: 0,
+        access_warnings: Vec::new(),
+    }))
+}
+
+/// A shell with a saved dev profile (not read-only) and a console bound to it.
+fn dev_console(
+    cx: &mut TestAppContext,
+) -> (
+    &'static mut gpui::VisualTestContext,
+    hacivat_proto::ProfileId,
+    hacivat_app::console::ConsoleId,
+    gpui::Entity<ConsoleResults>,
+) {
+    use support::*;
+    let vcx = shell_with_connections(cx, "en");
+    let profile = test_profile("orders-dev", Some(EnvTag::Dev), "127.0.0.1");
+    assert!(!profile.read_only);
+    let id = add_profile(vcx, profile.clone());
+    let (session, _fake) = test_session(vcx, profile);
+    let console = register_test_console(vcx, id, session);
+    let results = vcx.cx.read(|cx| {
+        hacivat_app::console::Consoles::get(cx, console)
+            .and_then(|s| s.results.clone())
+            .expect("the console has results")
+    });
+    (vcx, id, console, results)
+}
+
+fn set_live(vcx: &gpui::VisualTestContext, id: hacivat_proto::ProfileId, state: LiveState) {
+    vcx.cx.update(|cx| {
+        cx.global_mut::<hacivat_app::connections::ConnectionsModel>()
+            .set_live(id, state)
+    });
+}
+
+fn show_a_result(vcx: &gpui::VisualTestContext, results: &gpui::Entity<ConsoleResults>) {
+    vcx.cx.update(|cx| {
+        results.update(cx, |r, cx| {
+            let tab = result_tab(0, finished(three_columns(), numbered_rows(0..3)));
+            r.apply(&[tab], cx);
+        })
+    });
+}
+
+fn access_of(
+    vcx: &gpui::VisualTestContext,
+    console: hacivat_app::console::ConsoleId,
+) -> AccessLabel {
+    vcx.cx
+        .read(|cx| result_context_of(console, cx))
+        .expect("a result tab is active")
+        .access
+}
+
+#[gpui::test]
+fn a_read_only_access_recorded_at_the_run_survives_reconnecting(cx: &mut TestAppContext) {
+    let (vcx, id, console, results) = dev_console(cx);
+    // The connection is read-only (a read-only login) on a profile that is not marked so. The
+    // result arrives while connected; nothing reads the context until the connection drops.
+    set_live(vcx, id, connected(AccessLabel::ReadOnlyEnforced));
+    show_a_result(vcx, &results);
+    set_live(
+        vcx,
+        id,
+        LiveState::Reconnecting {
+            attempt: 1,
+            next_in: Some(Duration::from_secs(1)),
+        },
+    );
+    assert_eq!(
+        access_of(vcx, console),
+        AccessLabel::ReadOnlyEnforced,
+        "a drop must not upgrade the label to read-write"
+    );
+    set_live(vcx, id, LiveState::Disconnected);
+    assert_eq!(access_of(vcx, console), AccessLabel::ReadOnlyEnforced);
+    support::stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn the_live_access_is_shown_and_stays_while_disconnected(cx: &mut TestAppContext) {
+    let (vcx, id, console, results) = dev_console(cx);
+    show_a_result(vcx, &results);
+    // Connected: the live connection's label, whatever it is.
+    set_live(vcx, id, connected(AccessLabel::ReadOnlyGuarded));
+    assert_eq!(access_of(vcx, console), AccessLabel::ReadOnlyGuarded);
+    set_live(vcx, id, connected(AccessLabel::ReadWrite));
+    assert_eq!(access_of(vcx, console), AccessLabel::ReadWrite);
+    // Disconnected: the last label the connection had.
+    set_live(vcx, id, LiveState::Disconnected);
+    assert_eq!(access_of(vcx, console), AccessLabel::ReadWrite);
+    support::stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn without_a_recorded_access_a_result_reads_read_only(cx: &mut TestAppContext) {
+    let (vcx, id, console, results) = dev_console(cx);
+    // A dev profile, never seen connected: nothing is known, so nothing more than read-only
+    // is claimed.
+    show_a_result(vcx, &results);
+    assert_eq!(access_of(vcx, console), AccessLabel::ReadOnlyGuarded);
+    set_live(
+        vcx,
+        id,
+        LiveState::Reconnecting {
+            attempt: 2,
+            next_in: None,
+        },
+    );
+    assert_eq!(access_of(vcx, console), AccessLabel::ReadOnlyGuarded);
+    support::stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
 fn the_status_bar_context_follows_the_active_result_tab(cx: &mut TestAppContext) {
     use support::*;
     let vcx = shell_with_connections(cx, "en");
@@ -1146,9 +1449,16 @@ fn toasts(cx: &mut TestAppContext) -> usize {
 fn copy_puts_one_string_on_the_clipboard_and_says_so(cx: &mut TestAppContext) {
     let adapter = fixture_3x3();
     let region = whole(&adapter);
-    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, cx));
+    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
     let outcome = task.now_or_never().expect("a small copy ends at once");
-    assert_eq!(outcome, CopyOutcome::Copied { rows: 3, cols: 3 });
+    assert_eq!(
+        outcome,
+        CopyOutcome::Copied {
+            rows: 3,
+            cols: 3,
+            incomplete: 0
+        }
+    );
     let item = cx.read_from_clipboard().expect("something was copied");
     assert_eq!(item.entries().len(), 1, "one clipboard item, one entry");
     assert_eq!(item.text().as_deref(), Some(tsv(&adapter).as_str()));
@@ -1161,7 +1471,8 @@ fn a_large_copy_is_built_in_the_background(cx: &mut TestAppContext) {
     let adapter = adapter_over(three_columns(), numbered_rows(0..5_001));
     let region = whole(&adapter);
     assert!(region.cell_count() > copy::BACKGROUND_COPY_CELLS);
-    let mut task = cx.update(|cx| copy::copy_region(&adapter, region, true, cx));
+    let mut task =
+        cx.update(|cx| copy::copy_region(&adapter, region, true, adapter.generation(), cx));
     assert!(
         (&mut task).now_or_never().is_none(),
         "the text is not built on the UI thread"
@@ -1174,7 +1485,8 @@ fn a_large_copy_is_built_in_the_background(cx: &mut TestAppContext) {
         outcome,
         CopyOutcome::Copied {
             rows: 5_001,
-            cols: 3
+            cols: 3,
+            incomplete: 0
         }
     );
     let text = cx.read_from_clipboard().and_then(|i| i.text()).unwrap();
@@ -1199,7 +1511,7 @@ fn copy_over_a_million_cells_is_refused(cx: &mut TestAppContext) {
     };
     let cells = region.cell_count();
     assert_eq!(cells, 1_000_002);
-    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, cx));
+    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
     assert_eq!(
         task.now_or_never(),
         Some(CopyOutcome::TooManyCells { cells })
@@ -1216,12 +1528,149 @@ fn copy_over_a_million_cells_is_refused(cx: &mut TestAppContext) {
         cols: vec![ColId(0), ColId(1)],
     };
     assert_eq!(region.cell_count(), copy::MAX_COPY_CELLS);
-    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, cx));
+    let task = cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
     cx.run_until_parked();
     assert!(matches!(
         task.now_or_never(),
         Some(CopyOutcome::Copied { .. })
     ));
+}
+
+#[gpui::test]
+fn a_copy_requested_before_a_rerun_was_painted_copies_nothing(cx: &mut TestAppContext) {
+    let first = ResultStore::from_rows(
+        three_columns(),
+        numbered_rows(0..50),
+        Completeness::Complete,
+    );
+    let adapter = GridAdapter::new(source_of(first), en());
+    let (view, vcx) = open_grid(cx, &adapter);
+    let requests: Rc<std::cell::RefCell<Vec<(CopyRegion, u64)>>> = Rc::default();
+    let sink = requests.clone();
+    vcx.update(|_, cx| {
+        cx.subscribe(&view, move |_, e: &GridEvent, _| {
+            if let GridEvent::CopyRequested {
+                region, generation, ..
+            } = e
+            {
+                sink.borrow_mut().push((region.clone(), *generation));
+            }
+        })
+        .detach()
+    });
+    for cmd in [
+        GridCommand::Move {
+            dir: Dir::Down,
+            extend: false,
+        },
+        GridCommand::Move {
+            dir: Dir::Down,
+            extend: true,
+        },
+    ] {
+        vcx.update(|window, cx| view.update(cx, |v, cx| v.dispatch(cmd, window, cx)));
+    }
+    vcx.run_until_parked();
+    vcx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+
+    // The re-run arrives and, before the grid has painted it, the user presses Copy: the grid
+    // still shows the first result and its selection.
+    let second = ResultStore::from_rows(
+        three_columns(),
+        numbered_rows(100..130),
+        Completeness::Complete,
+    );
+    vcx.update(|window, cx| {
+        adapter.retarget(source_of(second), cx);
+        view.update(cx, |v, cx| {
+            v.dispatch(GridCommand::Copy { headers: false }, window, cx)
+        });
+    });
+    vcx.run_until_parked();
+    let (region, generation) = requests.borrow_mut().pop().expect("a copy was requested");
+    assert_eq!(region.cell_count(), 2, "the first result's selection");
+    assert_eq!(generation, 1, "cut from the first result");
+    assert_eq!(adapter.generation(), 2);
+    let task = vcx.update(|_, cx| copy::copy_region(&adapter, region, false, generation, cx));
+    assert_eq!(task.now_or_never(), Some(CopyOutcome::Stale));
+    assert_eq!(
+        vcx.read_from_clipboard().and_then(|i| i.text()).as_deref(),
+        Some("before"),
+        "the second result's rows were neither seen nor selected"
+    );
+    assert_eq!(vcx.update(|_, cx| ToastQueue::visible_ids(cx).len()), 0);
+
+    // Once the grid shows the re-run, a copy names its generation and takes its rows.
+    vcx.update(|window, cx| {
+        view.update(cx, |v, cx| {
+            v.dispatch(GridCommand::Copy { headers: false }, window, cx)
+        })
+    });
+    vcx.run_until_parked();
+    let (region, generation) = requests.borrow_mut().pop().expect("a copy was requested");
+    assert_eq!(generation, 2);
+    let task = vcx.update(|_, cx| copy::copy_region(&adapter, region, false, generation, cx));
+    assert_eq!(
+        task.now_or_never(),
+        Some(CopyOutcome::Copied {
+            rows: 1,
+            cols: 1,
+            incomplete: 0
+        })
+    );
+    let text = vcx.read_from_clipboard().and_then(|i| i.text()).unwrap();
+    assert!(
+        text.starts_with("10"),
+        "a row of the second result: {text:?}"
+    );
+}
+
+#[test]
+fn a_cell_past_the_byte_limit_is_refused_from_its_known_length() {
+    // One 2 MiB bytea: its hex is `\x` and two digits per byte, known before it is built.
+    let bytes = vec![0xabu8; 2 << 20];
+    let adapter = adapter_over(
+        schema(vec![pg("raw", LogicalType::Bytes { max: None }, "bytea")]),
+        vec![vec![Value::Bytes(bytes.into())]],
+    );
+    let region = whole(&adapter);
+    let exact = 2 + 2 * (2 << 20) + 1;
+    assert_eq!(copy::tsv(&adapter, &region, false, 1 << 20), Err(TooLarge));
+    assert_eq!(
+        copy::tsv(&adapter, &region, false, exact - 1),
+        Err(TooLarge)
+    );
+    // The bound is the text's real size: exactly at the limit it fits.
+    let copied = copy::tsv(&adapter, &region, false, exact).unwrap();
+    assert_eq!(copied.text.len(), exact);
+    // The estimate the background decision uses is that same size, without building the text.
+    assert_eq!(copy::estimated_bytes(&adapter, &region), exact);
+}
+
+#[gpui::test]
+fn a_few_large_cells_are_built_in_the_background(cx: &mut TestAppContext) {
+    // One cell, far below the 10,000-cell threshold, but 1.5 MB of text.
+    let big = "x".repeat(3 << 19);
+    let adapter = one_cell(&big);
+    let region = whole(&adapter);
+    assert_eq!(region.cell_count(), 1);
+    let mut task =
+        cx.update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx));
+    assert!(
+        (&mut task).now_or_never().is_none(),
+        "a megabyte of text is not built on the UI thread"
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        task.now_or_never(),
+        Some(CopyOutcome::Copied {
+            rows: 1,
+            cols: 1,
+            incomplete: 0
+        })
+    );
+    let text = cx.read_from_clipboard().and_then(|i| i.text()).unwrap();
+    assert_eq!(text.len(), big.len() + 1);
 }
 
 #[gpui::test]
@@ -1231,7 +1680,7 @@ fn copy_toasts_are_the_mocks_messages(cx: &mut TestAppContext) {
     let adapter = fixture_3x3();
     let region = whole(&adapter);
     vcx.cx
-        .update(|cx| copy::copy_region(&adapter, region, false, cx))
+        .update(|cx| copy::copy_region(&adapter, region, false, adapter.generation(), cx))
         .detach();
     vcx.run_until_parked();
     assert_eq!(

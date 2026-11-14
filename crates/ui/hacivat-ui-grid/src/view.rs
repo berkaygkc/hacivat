@@ -102,6 +102,10 @@ pub enum GridEvent {
     CopyRequested {
         region: model::CopyRegion,
         headers: bool,
+        /// The source generation the region was cut from (the frame the grid last painted).
+        /// The host copies only while its source is still at this generation: a re-run that
+        /// arrived since has other rows under the same positions.
+        generation: u64,
     },
     CopyRefused(model::CopyRefusal),
     ColumnResized {
@@ -281,7 +285,11 @@ impl GridView {
                 }
             }
             KeyOutcome::Copy { region, headers } => match region {
-                Ok(region) => cx.emit(GridEvent::CopyRequested { region, headers }),
+                Ok(region) => cx.emit(GridEvent::CopyRequested {
+                    region,
+                    headers,
+                    generation: self.data.generation.unwrap_or(0),
+                }),
                 Err(refusal) => cx.emit(GridEvent::CopyRefused(refusal)),
             },
         }

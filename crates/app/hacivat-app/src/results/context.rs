@@ -9,10 +9,11 @@
 use hacivat_proto::{AccessLabel, EnvTag, ProfileId};
 use hacivat_results::Completeness;
 use hacivat_session::LiveState;
-use hacivat_ui_core::gpui_surface::{App, Window};
+use hacivat_ui_core::gpui_surface::{App, Entity, Window};
 
 use crate::connections::{ConnectionsModel, session_toasts};
 use crate::console::{ConsoleId, Consoles, focused_console};
+use crate::results::tabs::ConsoleResults;
 
 /// How far a result got, as the status bar and the cursor strip show it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,9 +62,12 @@ pub fn active_result_context(window: &Window, cx: &App) -> Option<ResultContext>
 /// The context of `console`'s active result tab: `None` while its Output tab is active, while
 /// it has no results, or when it is not bound to a known connection.
 ///
-/// The access is the live connection's honest label (`session_toasts::effective_access`);
-/// once the connection is gone, a result still on screen reads read-only when its profile is
-/// read-only or production (R-M3-6: production consoles are read-only), read-write otherwise.
+/// **Access fails closed.** While the profile is connected, the access is the live
+/// connection's honest label (`session_toasts::effective_access`), and the tab records it.
+/// In every other state (reconnecting, disconnected, lost, failed, connecting) the tab's
+/// recorded label is shown: a drop never upgrades the label. A tab with no recorded label
+/// reads `ReadOnlyGuarded`, whatever its profile: nothing more than read-only is claimed
+/// about a connection that was never seen, and a result without a connection cannot write.
 pub fn result_context_of(console: ConsoleId, cx: &App) -> Option<ResultContext> {
     let state = Consoles::get(cx, console)?;
     let profile = state.profile?;
@@ -72,11 +76,12 @@ pub fn result_context_of(console: ConsoleId, cx: &App) -> Option<ResultContext> 
     let model = cx.try_global::<ConnectionsModel>()?;
     let p = model.get(profile)?;
     let access = match model.live(profile) {
-        LiveState::Connected(info) => session_toasts::effective_access(cx, profile, info.access),
-        _ if p.read_only || p.environment == Some(EnvTag::Production) => {
-            AccessLabel::ReadOnlyGuarded
+        LiveState::Connected(info) => {
+            let access = session_toasts::effective_access(cx, profile, info.access);
+            tab.note_access(access);
+            access
         }
-        _ => AccessLabel::ReadWrite,
+        _ => tab.last_access().unwrap_or(AccessLabel::ReadOnlyGuarded),
     };
     let snapshot = tab.adapter().snapshot();
     let loaded = snapshot.row_count();
@@ -92,4 +97,21 @@ pub fn result_context_of(console: ConsoleId, cx: &App) -> Option<ResultContext> 
         fetch_ms,
         completeness,
     })
+}
+
+/// The access label of the live connection of the console that owns `results`; `None` when no
+/// console owns them, it is unbound, or its profile is not connected.
+pub(crate) fn live_access_of(results: &Entity<ConsoleResults>, cx: &App) -> Option<AccessLabel> {
+    let profile = Consoles::ids(cx).into_iter().find_map(|id| {
+        let state = Consoles::get(cx, id)?;
+        (state.results.as_ref() == Some(results))
+            .then_some(state.profile)
+            .flatten()
+    })?;
+    match cx.try_global::<ConnectionsModel>()?.live(profile) {
+        LiveState::Connected(info) => {
+            Some(session_toasts::effective_access(cx, profile, info.access))
+        }
+        _ => None,
+    }
 }
