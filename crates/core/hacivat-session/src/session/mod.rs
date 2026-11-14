@@ -158,7 +158,7 @@ pub enum Request {
     SwitchSchema(String),
     Ping,
     Reset,
-    // ## m3a-t01b-seams (the actor answers these `Internal` until Task 18)
+    // ## m3a-t01b-seams (served since Task 18: `run.rs`, `cursor.rs`)
     /// Runs typed units in order; the reply comes after `RunEvent::RunEnded`.
     Run(RunSpec),
     /// Resumes a suspended result for `rows` more rows.
@@ -382,8 +382,9 @@ impl SessionHandle {
 
 // ## m3a-t01b-seams
 // Runs (HV-EXEC-05, HV-RES-05; Task 18): typed units streamed into result stores, observed
-// through a `RunObserver`, with console cursors. Types complete since M3a Task 1b; the actor
-// answers `Run`, `FetchMore`, `FetchAll` and `CloseCursor` with `Internal` until Task 18.
+// through a `RunObserver`, with console cursors. Types complete since M3a Task 1b; bodies
+// since Task 18 (`run.rs`, `cursor.rs`). A read-only session's typed path fails closed until
+// Task 22.
 
 /// A run's ID, unique in the process (the run service counts them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

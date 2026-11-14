@@ -2219,3 +2219,201 @@ pub mod conformance {
         }
     }
 }
+
+// ## m3a-t18-session-run
+// Run and cursor fixtures (Task 18): an observer that keeps every event and opens real result
+// stores, run specs, and scripted typed queries.
+pub mod runs {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use hacivat_driver::Protocol;
+    use hacivat_driver::fake::{FakeQuery, FakeResultSet, FakeRows};
+    use hacivat_results::{
+        CloseReason, Completeness, FetchPolicy, MemoryBudget, ResultId, ResultStore, ResultWriter,
+        StoreSnapshot,
+    };
+    use hacivat_session::session::{
+        ErrorPolicy, ObserverRef, Reply, Request, RunEvent, RunId, RunObserver, RunSpec,
+        RunSummary, RunUnit, SessionHandle, UnitEnd, UnitId,
+    };
+    use hacivat_values::{LogicalType, ResultSchema, Value};
+
+    /// Keeps every event of a run and opens a real store for each result.
+    pub struct Recorder {
+        budget: Arc<MemoryBudget>,
+        events: Mutex<Vec<RunEvent>>,
+        stores: Mutex<Vec<Arc<ResultStore>>>,
+        next: AtomicU64,
+    }
+
+    impl Recorder {
+        pub fn new() -> Arc<Recorder> {
+            Self::with_budget(1 << 30, 256 << 20)
+        }
+
+        /// An observer whose stores share a budget of `global` bytes, `per_result` each.
+        pub fn with_budget(global: u64, per_result: u64) -> Arc<Recorder> {
+            Arc::new(Recorder {
+                budget: MemoryBudget::new(global, per_result),
+                events: Mutex::new(Vec::new()),
+                stores: Mutex::new(Vec::new()),
+                next: AtomicU64::new(1),
+            })
+        }
+
+        pub fn events(&self) -> Vec<RunEvent> {
+            self.events.lock().unwrap().clone()
+        }
+
+        pub fn stores(&self) -> usize {
+            self.stores.lock().unwrap().len()
+        }
+
+        /// The `i`-th result the run opened.
+        pub fn store(&self, i: usize) -> Arc<ResultStore> {
+            self.stores.lock().unwrap()[i].clone()
+        }
+
+        pub fn snap(&self, i: usize) -> Arc<StoreSnapshot> {
+            self.store(i).snapshot()
+        }
+
+        /// The rows of the first result so far (0 before it opens).
+        pub fn rows(&self) -> u64 {
+            let stores = self.stores.lock().unwrap();
+            stores.first().map_or(0, |s| s.snapshot().row_count())
+        }
+
+        /// How each unit ended, in the order reported.
+        pub fn unit_ends(&self) -> Vec<UnitEnd> {
+            self.events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    RunEvent::UnitEnded { outcome, .. } => Some(outcome),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        pub fn summaries(&self) -> Vec<RunSummary> {
+            self.events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    RunEvent::RunEnded(s) => Some(s),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Every `CursorReleased`: its reason and whether Hacivat's transaction rolled back.
+        pub fn releases(&self) -> Vec<(CloseReason, bool)> {
+            self.events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    RunEvent::CursorReleased {
+                        reason,
+                        rolled_back,
+                        ..
+                    } => Some((reason, rolled_back)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The final states reported by `ResultEnded`, in order.
+        pub fn result_ends(&self) -> Vec<Completeness> {
+            self.events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    RunEvent::ResultEnded { completeness, .. } => Some(completeness),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    impl RunObserver for Recorder {
+        fn open_result(&self, _: UnitId, _: u32, schema: Arc<ResultSchema>) -> ResultWriter {
+            let id = ResultId(self.next.fetch_add(1, Ordering::SeqCst));
+            let (store, writer) = ResultStore::new(id, schema, self.budget.clone(), 0);
+            self.stores.lock().unwrap().push(store);
+            writer
+        }
+
+        fn event(&self, ev: &RunEvent) {
+            self.events.lock().unwrap().push(ev.clone());
+        }
+    }
+
+    /// A run of `units` (text, suspendable) with the fetch policy `fetch`.
+    pub fn spec_with(o: &Arc<Recorder>, units: &[(&str, bool)], fetch: FetchPolicy) -> RunSpec {
+        let run = RunId(1);
+        let units: Vec<RunUnit> = units
+            .iter()
+            .enumerate()
+            .map(|(i, (sql, suspendable))| RunUnit {
+                id: UnitId {
+                    run,
+                    ordinal: i as u32,
+                },
+                sql: (*sql).into(),
+                protocol: Protocol::Extended,
+                suspendable: *suspendable,
+            })
+            .collect();
+        RunSpec {
+            run,
+            units: units.into(),
+            policy: ErrorPolicy::StopOnError,
+            fetch,
+            observer: ObserverRef(o.clone()),
+        }
+    }
+
+    /// A run of suspendable units with the default fetch policy.
+    pub fn spec_of(o: &Arc<Recorder>, sqls: &[&str]) -> RunSpec {
+        let units: Vec<(&str, bool)> = sqls.iter().map(|s| (*s, true)).collect();
+        spec_with(o, &units, FetchPolicy::default())
+    }
+
+    fn id_cell(row: u64, _: usize) -> Value {
+        Value::Int(row as i64)
+    }
+
+    /// `count` generated rows of one `id int8` column (`u64::MAX`: without end).
+    pub fn generated(count: u64) -> FakeResultSet {
+        FakeResultSet {
+            columns: vec![(
+                "id",
+                LogicalType::Int {
+                    bits: 64,
+                    signed: true,
+                },
+            )],
+            rows: FakeRows::Generated {
+                count,
+                cell: id_cell,
+            },
+        }
+    }
+
+    /// A scripted query answering `count` rows to the first text that starts with `prefix`.
+    pub fn select(prefix: &'static str, count: u64) -> FakeQuery {
+        FakeQuery {
+            prefix,
+            sets: vec![generated(count)],
+            ..Default::default()
+        }
+    }
+
+    /// Runs `spec` and waits for its reply.
+    pub async fn run_spec(h: &SessionHandle, spec: RunSpec) -> Reply {
+        h.run(spec).reply.await.expect("the actor replies")
+    }
+
+    /// Submits a request and waits for its reply.
+    pub async fn ask(h: &SessionHandle, request: Request) -> Reply {
+        h.submit(request).reply.await.expect("the actor replies")
+    }
+}

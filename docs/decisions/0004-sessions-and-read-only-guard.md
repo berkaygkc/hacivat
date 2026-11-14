@@ -1555,3 +1555,171 @@ value). Session over Docker, in `docker_m2b_cancel_reconnect.rs` (F3 moved there
   `require_target`; like every full-set target it needs the controller's `cargo xtask docker up
   --set full` before a `--set full` run (the `pr` set leaves it out). The generic MySQL loops of
   the full set run on it too: it is mysql84 with the same fixtures.
+
+## m3a-t18 — runs and cursors
+
+`Request::Run`, `FetchMore`, `FetchAll` and `CloseCursor` (HV-EXEC-05, HV-RES-05; R-M3-16, -20,
+-23, -29): `session/run.rs`, `session/cursor.rs` and the named lines of `session/actor.rs`
+(`// ## m3a-t18-session-run`). The fail-closed stubs of ADR 0006 `m3a-t01b` are gone for
+read-write sessions; a read-only session still runs nothing typed until Task 22 fills
+`readonly::guarded_query` (`a_read_only_run_fails_closed_until_the_typed_guard_lands`).
+
+**The four rules** (each is a review probe).
+
+1. **Nothing runs on a connection a cursor holds.** `Core::handle` releases the open cursor
+   before every request that is not that cursor's own `FetchMore`/`FetchAll`/`CloseCursor`:
+   `Exec`, `Tx`, `SwitchSchema`, `Ping`, `Reset` (so a pooled session's give-back too) and a new
+   `Run`; a session close and the idle bound release it as well. Single-session mode needs no
+   case of its own: every client shares the one actor. A cursor request that names another
+   result (a late one) is a no-op and releases nothing
+   (`another_statement_releases_the_cursor_first`, `every_request_kind_releases_the_cursor`,
+   `a_late_fetch_is_a_no_op`). Rejected: releasing in the actor loop before `run_one`, which
+   would run driver calls outside the request's panic guard and cancel ladder.
+2. **A release closes the query first, then ends what Hacivat opened**, and that end is never
+   skipped: `close_query(Drain(250 ms))`, then `COMMIT` when the driver answered `Completed`,
+   else `ROLLBACK` (inside a user transaction `RELEASE SAVEPOINT hv_cursor`, else `ROLLBACK TO
+   SAVEPOINT hv_cursor; RELEASE SAVEPOINT hv_cursor`, one batch). When that statement fails, or
+   the status is not idle after Hacivat's own `COMMIT`/`ROLLBACK`, the connection is discarded
+   (`Broken`): Hacivat's transaction is never left open under the user's next statement
+   (`incomplete_cursor_rolls_back_hacivats_own_transaction`, `completed_cursor_commits`,
+   `cursor_inside_a_user_transaction_uses_a_savepoint`; Docker
+   `pg_injected_idle_bound_rolls_back_hacivats_transaction` counts the rows a read head's
+   function wrote: 0 after the idle release, 12,000 after a completed fetch).
+3. **No driver future is dropped.** Every `query`, `next_event`, `fetch_more` and
+   `close_query` runs under `Watch::guard`, which polls the call to its end whatever happens
+   beside it. Only `Escalation::Deactivate` (and a panic) drops a request, and both discard the
+   connection. A run dropped that way still ends for its observer (`Tally`'s drop reports the
+   unit in flight, the units never reached and `RunEnded`), and its result's writer closes it
+   (`a_deactivated_run_still_ends_for_its_observer`).
+4. **Every result ends in a final state**, and every `FetchMore`/`FetchAll` on the open cursor
+   publishes: the result is `Streaming` while the fetch is served, then `Suspended` again (with
+   the pause reason when a budget stopped it), `Complete`, `Cancelled` or `Closed`
+   (`the_result_streams_while_a_fetch_is_served_and_suspends_again`,
+   `fetch_all_pauses_at_the_memory_limit_and_resumes_after_the_raise`).
+
+**Chunk steps (R-M3-16, ER8).** After every chunk the request yields once, so the actor's
+`select!` (request first, then commands) reads its command channel; the command branch then
+takes every command already sent (`try_recv`). A stop is therefore seen within one chunk even
+when the driver is always ready (`never_pending_stream_is_cancelled_within_one_chunk`: at most
+one chunk after the cancel). Rejected: giving `Core` the command receiver (two readers of one
+queue). Batches: a suspendable query is asked for at most `chunk_rows` rows at a time
+(`fetch_more(min(what is missing, chunk_rows))`), each batch admitted (`ResultWriter::admit`)
+before it is asked for, so nothing in flight exceeds a chunk and `close_query(Now)` never reads
+more than one; never `MAX_FETCH_ROWS`. Read-ahead: `first_rows` (500), then batches up to
+`read_ahead_rows` (10,000) or `read_ahead_bytes` (checked between batches, so at most one chunk
+over).
+
+**Stop fetching (the cancel ladder's rung for typed requests).** A cancel of a `Run`,
+`FetchMore` or `FetchAll` climbs the ladder as before (the queue is dropped, `Cancelling`, the
+2 s answer, `SlowCancel` at 10 s, `Terminate`/`Deactivate` unchanged) but sends nothing: it sets
+the request's `StopSignal`. The request reads it between chunks and closes the query the
+engine's way; a call that is waiting on the server gets the server cancel once it is
+`FetchPolicy::overdue` (1 s) late, counted from the call's start, so also for a slow `query`
+(`overdue_chunk_sends_the_server_cancel`: exactly 1 s on the paused clock;
+`a_stop_between_prompt_chunks_sends_no_server_cancel`). The cancel is sent by the request
+itself (`cursor::Canceller`: PostgreSQL's protocol cancel and SQLite's interrupt through the
+`CancelHandle`, MySQL's `KILL QUERY` on a side connection), at most once per request, and is
+awaited before the guarded call returns (2 s, else the connection is discarded), so it cannot
+reach a later statement. Per engine:
+- PostgreSQL named portal: `close_query(Now)`; the cancel only if the close itself is overdue.
+- PostgreSQL `Execute(0)` (a unit that cannot suspend): it cannot be closed on the wire, so the
+  protocol cancel goes out **alongside** `close_query(Now)`, at once. This is the one case
+  where a stop between prompt chunks reaches the server; inside a user transaction it leaves
+  the transaction `Failed` (below). `Completed` from that close means the statement ran to its
+  end before the cancel landed: the unit is reported `Succeeded` (it applied; in autocommit it
+  committed), the result `Cancelled` when rows were left unread.
+- MySQL/MariaDB: `close_query(Now)` answers `NeedsServerKill` unless nothing is unread; the
+  session kills the connection's own thread on a side connection, then
+  `close_query(AfterKill(2 s))`. A kill that cannot be sent, or an `AfterKill` that runs out
+  (`kill_ignored`), discards the connection (`a_mysql_kill_that_is_ignored_…`). After an
+  `AfterKill` that answers `Completed` (the kill raced the statement's end) one `DO 0` is sent
+  and its outcome ignored, so a server that keeps the kill for the thread's next statement
+  spends it there, not on the user's.
+- SQLite: the interrupt first, then `close_query(Now)` (a close is seen only between rows).
+
+**psql semantics inside a user transaction (R-M3-16 amended, P16).** A suspendable unit runs
+under `SAVEPOINT hv_cursor`, so stopping it (or a failure in it) is undone by the rollback to
+that savepoint and the user's transaction stays `InTx`
+(`a_failing_cursor_inside_a_user_transaction_leaves_it_usable`; Docker
+`pg_stop_fetching_keeps_a_users_transaction_and_a_server_cancel_fails_it`). A unit that cannot
+suspend gets no savepoint: a server cancel in it leaves the transaction `Failed`, owner `User`,
+with `RunEvent::TxChanged { to: Failed }`, and only a rollback is accepted afterwards
+(`cancel_in_a_user_transaction_marks_it_failed`). The session never offers anything else: a
+`COMMIT` there is refused before it is sent (`TxError::FailedNeedsRollback`), in a run as in
+`Exec`, and since this task as `TxCommand::Commit` too (M2b sent it; PostgreSQL answers a
+`COMMIT` in a failed transaction with a rollback, which a caller would take for a commit).
+
+**The savepoint name.** PostgreSQL keeps savepoints of one name as a stack; `ROLLBACK TO` and
+`RELEASE` act on the newest. A user's own `SAVEPOINT hv_cursor` is shadowed while the cursor is
+open and intact afterwards, because nothing of the user's runs between Hacivat's `SAVEPOINT`
+and its release (rule 1). Docker `pg_a_users_savepoint_named_hv_cursor_survives_a_cursor`: the
+user's rollback to it still undoes exactly the user's rows. MySQL (where a second savepoint of
+a name replaces the first) and SQLite get no savepoint: their cursor holds no transaction.
+
+**Whose transaction (`TxState.owner`).** `Core::observe` sets it on every round trip: `None`
+when idle, else `Cursor` while Hacivat's own `BEGIN` is open, `Guard` inside the typed guard,
+else `User` (also for a transaction M2b opened: `BEGIN` text, `TxCommand::Begin`, Manual mode).
+Consequences: `RunEvent::TxChanged` reports only the user's status; `SessionEvent::TxChanged`
+and the snapshot carry the owner, and a consumer that shows a transaction must show `User`
+only (Tasks 33, 34); a session close under `RefuseIfOpenTx` is refused only for a `User`
+transaction (a refused close leaves the cursor as it is); the liveness supervisor is told
+`Idle` for Hacivat's own, so it neither warns about an idle transaction nor keeps the session
+from its idle disconnect. A connection lost under Hacivat's own transaction leaves the
+session with no transaction to report lost.
+
+**Release outcomes.** `Completed { rows }` from the drain commits, as the statement ran to its
+end; the result is `Complete` only when the drain read no row the store does not have
+(`rows == rows seen`), else `Closed { reason }` with `rolled_back: false`
+(`a_release_whose_drain_reads_the_rest_commits_but_claims_no_rows_it_dropped`). Rejected:
+`Complete` whenever the drain completes (the plan's wording), which would show a row count the
+server exceeded. Reasons: `SessionNeeded`; `TxEnded` when the request ends the user
+transaction the cursor sits in (`Tx(Commit|Rollback)`, or text whose first keyword is
+`COMMIT`/`END`/`ROLLBACK`/`ABORT` without `TO`); the reason a `CloseCursor` carries;
+`IdleTimeout`; `ConnectionLost` (found by the next fetch, the next release or the idle bound;
+the rows stay); `ServerTerminated` when the server failed the query; `Cancelled` for a stop;
+`EnforcementGap` from the guard. A session that is closed with a cursor open releases it as
+`TabClosed` (controller: no `CloseReason` names a session close; the app sends its own
+`CloseCursor` first). On MySQL a closing session does not kill: closing the connection
+abandons the result.
+
+**Idle bounds (R-M3-20)**, `cursor::idle_bound`: PostgreSQL read-write `policy.idle_timeout`
+(10 min), read-only 20 s; every engine at most the driver's `caps.idle_bound` (MySQL
+`net_write_timeout` − 15 s, SQLite 30 s in a rollback-journal mode), read after `query`;
+production at most 120 s; `policy.idle_cap` over all (`every_idle_bound_of_the_table`). The
+deadline is a third branch of the actor's idle `select!`, counted from the last fetch
+(`a_fetch_starts_the_idle_bound_over`). Keep-alive pings are skipped while a cursor is open
+(`liveness_skips_pings_while_suspended`): MySQL and SQLite take no command beside an open
+query, and the bound ends the cursor before a dead connection could go unnoticed for long.
+
+**Coalescing and the stale-cancel guard.** When a `FetchMore`/`FetchAll` is taken from the
+queue, the fetches for the same result queued directly behind it are merged into it (rows
+summed with `saturating_add`; a `FetchAll` wins); each merged request gets the same reply.
+Requests already sent but not yet queued count: the actor reads ahead up to the first command
+that is not a request and holds that one for its turn, so a cancel sent right after its
+request still finds it running (`a_cancel_sent_right_after_submit_still_cancels`, M2b). A
+cancel acts only on the running request's number or on one merged into it; the number of a run
+that ended (its cursor still open) or of an earlier fetch is `AlreadyFinished` and stops
+nothing (`a_stale_cancel_never_stops_a_later_run_or_fetch`).
+
+**What a run reports.** `ResultEnded` exactly once per result, when it reaches a final state
+(not while it stays `Suspended`); `CursorReleased` just before it when a suspendable query was
+closed before its end (`rolled_back`: Hacivat's transaction or savepoint was rolled back,
+P26); `UpdateCount` when `ResultEnd.rows_affected` is `Some` or the result has no columns
+(never for a read: no engine reports affected rows for a result with rows). **A statement
+without columns opens no result** (`RunObserver::open_result` is not called; controller: the
+plan does not say). `RunEnded` once the run started; a reply without one means it never
+started. The reply is `Ok` when every unit ran, else the error of the unit that stopped the
+run. A unit refused or failed after a suspension (a later fetch) reaches the observer as
+`CursorReleased { ServerTerminated | ConnectionLost }` and `ResultEnded`; its error is in the
+fetch's reply only (the `FetchControl` path drops it: a gap for Task 23's log).
+
+**Production read-only (R-M3-29).** Task 1b's seven sites hold; `grep -nE '\.read_only\b'
+crates/core/hacivat-session/src` finds no site beyond them that decides a session's flag
+(the others are the pipeline's request, the profile's own fields and the actor reading its
+own). `tests/prod_read_only.rs` pins every session kind, the reconnect, a tag applied while a
+session is open (it applies to the next session; the open one keeps the mode it was opened
+with), pooled reuse (one connection for six borrows) and the single-session borrow.
+
+**Not done here.** The queue cap of the digest (C9, `QueueFull`): not in the plan's Task 18.
+A reconnect after a loss during a run or a fetch: `may_open_tx` stays true for them (Task 1b,
+fail closed), so the session reports `Lost` and breaks.
