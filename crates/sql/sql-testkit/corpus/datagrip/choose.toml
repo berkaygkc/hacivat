@@ -1,0 +1,59 @@
+# The CHOOSE family (statement chooser) of `docs/research/datagrip/13-behavioral-test-corpus.md`
+# §3.8, as Hacivat goldens (M3a Task 13). Fields: `sql-testkit/src/golden/mod.rs`. Clean room:
+# see `caret.toml`. Labels are Hacivat's own rule (`alg/20` HV-EXEC-02 step 3): the range text
+# with its leading comments, whitespace collapsed; the popup truncates them (Task 33).
+
+[[case]]
+id = "CHOOSE-01"
+fixture = "FX-CARET-01"
+caret = { after = "SELECT id FROM recent r", occurrence = 1 }
+policy = { inside = "ask" }
+expect.candidates = [{ kind = "statement", stmts = [0] }, { kind = "whole_script", stmts = [0, 1] }]
+expect.preselect = "statement"
+expect.label_starts = "-- FX-CARET-01 nested subquery and CTE (PostgreSQL) WITH recent AS ( SELECT id,"
+sources = ["alg/10 SQL-SPLIT-04 test cases (chooser → [statement, whole script] after dedupe)", "alg/20 HV-EXEC-02 steps 1–4", "divergences.toml CHOOSE-01"]
+
+[[case]]
+id = "CHOOSE-02"
+input = "SELECT c.id, c.full_name, c.city, o.id AS order_id, o.status, o.ordered_at, oi.sku, oi.qty, oi.unit_price FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE c.is_active AND o.status IN ('paid', 'shipped') ORDER BY o.ordered_at DESC,   ┃c.full_name;\nSELECT 2;"
+policy = { inside = "ask" }
+expect.candidates = [{ kind = "statement", stmts = [0] }, { kind = "whole_script", stmts = [0, 1] }]
+expect.labels = [
+    "SELECT c.id, c.full_name, c.city, o.id AS order_id, o.status, o.ordered_at, oi.sku, oi.qty, oi.unit_price FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE c.is_active AND o.status IN ('paid', 'shipped') ORDER BY o.ordered_at DESC, c.full_name",
+    "SELECT c.id, c.full_name, c.city, o.id AS order_id, o.status, o.ordered_at, oi.sku, oi.qty, oi.unit_price FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE c.is_active AND o.status IN ('paid', 'shipped') ORDER BY o.ordered_at DESC, c.full_name; SELECT 2",
+]
+sources = ["alg/20 HV-EXEC-02 step 3 (whitespace collapsed; the popup truncates at its width)", "plan M3a Task 13 (the UI truncates)"]
+
+[[case]]
+id = "CHOOSE-03"
+input = "-- top customers\nSELECT ┃1;\nSELECT 2;"
+policy = { inside = "ask" }
+expect.candidates = [{ kind = "statement", stmts = [0] }, { kind = "whole_script", stmts = [0, 1] }]
+expect.labels = ["-- top customers SELECT 1", "-- top customers SELECT 1; SELECT 2"]
+sources = ["alg/20 HV-EXEC-02 step 3 (leading comments are kept in the label)", "alg/10 SQL-SPLIT-04 step 6"]
+
+[[case]]
+id = "CHOOSE-04"
+dialect = "mssql"
+fixture = "FX-CARET-02"
+requires = ["dialect:mssql"]
+skip = "dialect:mssql"
+sources = ["alg/20 HV-EXEC-02 test cases (the T-SQL batch candidate: v1.x)"]
+
+[[case]]
+id = "CHOOSE-05"
+requires = ["app-ui"]
+skip = "app-ui"
+sources = ["R-M3-36 (hover sets the preview override: Task 33's GPUI tests)"]
+
+[[case]]
+id = "CHOOSE-06"
+requires = ["app-ui"]
+skip = "app-ui"
+sources = ["R-M3-36 (Customize… is M3b)"]
+
+[[case]]
+id = "CHOOSE-07"
+requires = ["app-ui"]
+skip = "app-ui"
+sources = ["R-M3-36 (the kind is remembered per console: Task 33; `resolve`'s `remembered` input is tested in sql-split/tests/exec_range.rs)"]

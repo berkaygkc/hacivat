@@ -293,3 +293,110 @@ ranges. `tests/oracle.rs` keeps representative cases, each with libpg_query's va
 
 Tests: `crates/sql/sql-oracle-pg/tests/{oracle,threads,depth,perf}.rs`, plus unit tests in
 `error.rs` and `split.rs`.
+
+## m3a-t13 — caret and selection to execution units
+
+`sql_split::exec_range::resolve` decides what Run sends for a caret or a selection, for the
+preview (`SplitMode::Editor`) and for execution (`SplitMode::Execution`). SQL-SPLIT-04 is
+aligned to D-011 here: the default policy is Ask with the one-candidate shortcut, nothing
+outside a statement, and a selection as separate statements.
+
+**One agreed split (R-M3-8).** Both modes read the same statements, the editor's split, which
+is what the preview draws. They differ in one thing: execution refuses a unit that is not
+certain, where the preview returns it to be drawn as uncertain. A unit is certain when its
+statement is `Exact` in the editor's split with no uncertain boundary inside, and the execution
+split holds a certain statement with the same strict range. So what Run sends is always a range
+the preview showed as exact, and an uncertain preview never runs (R-M3-24).
+- Rejected: resolving execution mode on the execution split. The two splits differ where the
+  editor guesses: after an unterminated comment the execution split has one certain statement
+  whose smart range runs to the end of the text, and the editor has provisional statements
+  there. A caret in that tail then ran a statement the preview did not show. The properties
+  found this.
+
+**What is sent.** A unit's range is the statement's strict range: no terminator (MySQL rejects
+it over the protocol) and no leading comments, which are the unit's `title_comment`. A `COPY …
+FROM STDIN` statement is `UnitKind::CopyIn` with its data range; the rows are never in a sent
+range.
+
+**The statement at a caret** (`alg/10` SQL-SPLIT-04 step 2), in order:
+1. The statement whose smart range holds the caret, ends included. The smart range is the split
+   layer's (SQL-SPLIT-02): attached leading comments, the terminator, and a comment after the
+   terminator on the same line. Where two statements touch (`SELECT 1;┃SELECT 2;`) the earlier
+   one is meant.
+2. An unsupported client command at the caret is `UnsupportedClientCommand`.
+3. A caret after a statement on its line, with only spaces or tabs between and only white
+   space after it on the line, means that statement.
+4. Otherwise the caret is outside every statement, and the outside policy decides.
+
+**Comment ownership.** A comment after `;` on the same line belongs to the statement before
+it, as the split layer has it. The CARET, SEL and CHOOSE families hold no case that says
+otherwise, so `exec_range` adapts nothing. `alg/10` SQL-SPLIT-04's DBeaver-26416 note
+(`-- Comments\nselect 10`) reads that comment as the next statement's title; it is not taken.
+Either way the sent text is the same strict range.
+
+**The chooser (HV-EXEC-02, R-M3-36).** Candidates are tried in the order subquery, statement,
+largest-or-batch, from-caret, whole script. A candidate that runs the same ranges as an earlier
+one is dropped, except that a from-caret equal to the whole script is dropped in favour of the
+whole script, so from-caret only appears as a strict subset. One candidate runs directly. The
+remembered kind is preselected when offered, else the statement.
+- In execution mode a candidate that would be refused is left out. If the candidate the
+  chooser would open on (the remembered kind) is the refused one, the answer is that refusal:
+  Run never runs a smaller range in its place.
+- The subquery candidate needs a `SubqueryOracle` (M5). A range it names outside the statement
+  at the caret is ignored.
+- A label is the candidate's text from its first leading comment, with runs of white space and
+  control characters as one space. A bidirectional formatting character is shown as
+  `<U+XXXX>`, so a label reads in the order the server reads the SQL. A label holds at most
+  1,024 characters; the popup truncates further.
+
+**Refusals (fail closed).**
+- A run of several statements (whole script, from the caret, below the caret, several carets,
+  an expanded selection) that spans an unsupported client command is
+  `UnsupportedClientCommand`, in both modes. A whole-script run spans the whole text. psql
+  `\if` branches are uncertain in the split and so refused as `Ambiguous`.
+- A selection has one answer for both modes and never holds a heuristic statement. It is split
+  on its own, from the lexer state and client delimiter at its start. Any uncertain boundary or
+  unsupported client command in it refuses the whole selection.
+- A selection that starts inside a token is refused. The server reads the sent text from a
+  clean state, so the rest of a string, a quoted name, a dollar-quoted body or `COPY` data
+  would run as code: `SELECT 'a; DROP TABLE t; '` selected from inside the literal gave the
+  certain statement ` DROP TABLE t; '` from `DocSnapshot::split_selection`. The rest of a
+  plain comment is trivia and never sent. Inside an executable comment or an optimizer hint
+  the server reads code, so that is refused too. A selection that starts inside a client
+  command's line is `UnsupportedClientCommand`.
+- Cost: statements selected inside a function body (a dollar-quoted string) do not run in
+  M3a. Listed for the PO.
+- `AsOne` (and `SmartExpand` with no boundary inside) returns one `Verbatim` unit only when
+  the text, read alone from a clean state, is certain and holds no client command and no
+  `COPY` data. No M3a Run action chooses it, and running a `Verbatim` unit is M3b. The
+  catalogue sends such a selection as written even when it ends inside a string; M3a answers
+  `Ambiguous` (register entry SEL-07).
+- Several carets each resolve as a statement: under Ask there is no chooser per caret.
+
+**Goldens (clean room, ALG-TEST-01).** `sql-testkit/corpus/datagrip/{caret,sel,choose}.toml`
+hold the CARET, SEL and CHOOSE families of `datagrip/13` §3.6–§3.8. The scenarios and the
+fixture SQL are that Hacivat-authored document's. Every expectation names its source in
+Hacivat's own specs (`alg/10` SQL-SPLIT-04, `alg/20` HV-EXEC-01/-02, the M3a rulings); the
+document's "Expected hint" column is not used and `datagrip_observed` is empty.
+
+| Family | IDs | Run | Run without a CST | Skipped |
+|---|---|---|---|---|
+| CARET | 30 | 18 | 9 (03, 05, 06, 25–30) | 3: CARET-19, -20 (`dialect:mssql`), CARET-22 (`dialect:oracle`) |
+| SEL | 8 | 7 | 0 | 1: SEL-06 (`dialect:mssql`) |
+| CHOOSE | 7 | 3 | 0 | 4: CHOOSE-04 (`dialect:mssql`), CHOOSE-05, -06, -07 (`app-ui`) |
+
+A case that needs a parse tree (`requires = ["cst"]`) keeps M5's answer in `expect` and runs
+`expect_without_cst`, where "smallest subquery or statement" falls back to the statement. The
+meta-test pins the ID lists to the document's numbering, requires every ID exactly once, and
+asserts the skip list and the counts above exactly; a requirement the runner lacks is an error
+unless the case is skipped with that reason. `divergences.toml` records CHOOSE-01 (no subquery
+candidate: correlated) and SEL-07.
+
+**Tests.** `crates/sql/sql-split/tests/{d011_goldens,exec_range,exec_range_props,pg_differential}.rs`:
+- the properties run over generated text in every dialect and client flavor, at a caret, a
+  selection and two carets, under every policy: execution returns only certain statements,
+  each of which read alone is exactly itself; what execution runs is what the preview shows,
+  and what the preview shows as exact, execution runs; every answer is well formed;
+- the PostgreSQL differential: the ranges a whole-script Run sends equal libpg_query's
+  statement ranges on six fixtures and six scripts, and the two fixtures the grammar cannot
+  read (psql commands, `COPY` data) are pinned to their answers.
