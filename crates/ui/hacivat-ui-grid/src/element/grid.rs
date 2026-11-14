@@ -23,7 +23,7 @@ use hacivat_ui_core::gpui_surface::{
 use hacivat_ui_core::theme::{Theme, ThemeMode, ThemeTokens};
 
 use super::layers::{
-    self, CELL_PAD_PX, CellPaint, Palette, Roles, Snap, cell_text, masked, outline,
+    self, CELL_PAD_PX, CellBox, CellPaint, Palette, Roles, Snap, cell_text, masked, outline,
     paint_cell_content, paint_row_number, paint_skeleton, rect,
 };
 use super::pointer;
@@ -62,6 +62,25 @@ impl GridElement {
             a11y: None,
         }
     }
+
+    /// Builds the frame's accessibility declaration when assistive technology is `active`
+    /// (`request_layout` passes `window.is_a11y_active()`), and drops it otherwise: no label is
+    /// read without assistive technology. GPUI reads it through `a11y_role` and
+    /// `write_a11y_info`.
+    fn refresh_a11y(&mut self, active: bool, cx: &mut App) {
+        self.a11y = active.then(|| {
+            self.view.update(cx, |v, cx| {
+                let (role, label) = v.a11y_declaration(cx);
+                let rows = v.data.known_total().unwrap_or(v.data.count.loaded);
+                A11y {
+                    role,
+                    label,
+                    rows: usize::try_from(rows).unwrap_or(usize::MAX),
+                    cols: v.layout.len(),
+                }
+            })
+        });
+    }
 }
 
 /// One frame's state from prepaint to paint.
@@ -94,20 +113,7 @@ impl Element for GridElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        self.a11y = if window.is_a11y_active() {
-            Some(self.view.update(cx, |v, cx| {
-                let (role, label) = v.a11y_declaration(cx);
-                let rows = v.data.known_total().unwrap_or(v.data.count.loaded);
-                A11y {
-                    role,
-                    label,
-                    rows: usize::try_from(rows).unwrap_or(usize::MAX),
-                    cols: v.layout.len(),
-                }
-            }))
-        } else {
-            None
-        };
+        self.refresh_a11y(window.is_a11y_active(), cx);
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
         style.size.height = relative(1.0).into();
@@ -299,6 +305,14 @@ pub(crate) fn prepaint_frame(
         ensure_rows = 1;
     }
 
+    // The hover follows the pointer, not the row it was on: a wheel scroll moves the rows under
+    // a still pointer.
+    if v.pointer.drag.is_none()
+        && let Some(p) = v.pointer.position
+    {
+        (v.pointer.hover, v.pointer.border) = v.hover_at(&geom, p);
+    }
+
     let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
     v.note_visible_region(rows, cols, cx);
     v.flush_frame_events(cx);
@@ -332,15 +346,22 @@ pub(crate) fn paint_frame(
     let snap = Snap(f.geom.scale);
     let recording = cx.try_global::<TextRegistry>().is_some_and(|r| r.enabled);
     let mut stats = f.stats;
+    // The body's shaping budget (fast-scroll: capped). The header is never in fast-scroll and
+    // is not charged to it (review round 1).
     let mut budget = Budget::new(if f.fast {
         FAST_SHAPES_PER_FRAME
     } else {
         u32::MAX
     });
+    let mut header_budget = Budget::new(u32::MAX);
     v.paint.cache.begin_frame();
     #[cfg(feature = "test-support")]
     if let Some(cells) = v.paint.recorded.as_mut() {
         cells.clear();
+    }
+    #[cfg(feature = "test-support")]
+    if let Some(headers) = v.paint.recorded_headers.as_mut() {
+        headers.clear();
     }
 
     let g = &f.geom;
@@ -360,7 +381,16 @@ pub(crate) fn paint_frame(
         )
     });
     masked(g.header, window, |window| {
-        paint_header(v, &f, &palette, snap, recording, &mut budget, window, cx)
+        paint_header(
+            v,
+            &f,
+            &palette,
+            snap,
+            recording,
+            &mut header_budget,
+            window,
+            cx,
+        )
     });
     masked(g.gutter, window, |window| {
         paint_gutter(v, &f, &palette, snap, recording, window, cx)
@@ -385,8 +415,8 @@ pub(crate) fn paint_frame(
     }
 
     stats.shapes = budget.shapes;
-    stats.cell_allocs = budget.allocs;
-    stats.degraded += budget.skipped;
+    stats.header_shapes = header_budget.shapes;
+    stats.cell_allocs = budget.allocs + header_budget.allocs;
     let degraded = stats.degraded > 0;
     v.paint.log.push(stats);
     #[cfg(feature = "bench")]
@@ -480,7 +510,8 @@ fn paint_body(
         }
     }
 
-    // Layer 7: content, clipped per column.
+    // Layer 7: content, row by row (a fast-scroll frame spends its shaping budget on whole rows
+    // from the top), each cell clipped to its column.
     let GridView {
         paint,
         layout,
@@ -488,6 +519,24 @@ fn paint_body(
         columns,
         ..
     } = &mut *v;
+    let mut col_info = std::mem::take(&mut paint.col_scratch);
+    col_info.clear();
+    for ix in g.cols.clone() {
+        let col = layout.visible()[ix];
+        let kind = columns
+            .get(col.0 as usize)
+            .filter(|s| s.id == col)
+            .or_else(|| columns.iter().find(|s| s.id == col))
+            .map_or(ColumnKind::Other, |s| s.kind);
+        let left = body_x + (layout.x_of(ix) - left_x) as f32;
+        col_info.push(super::ColPaint {
+            ix,
+            col,
+            kind,
+            left,
+            width: layout.width_at(ix),
+        });
+    }
     let roles = paint.roles.as_ref().expect("roles are built in prepaint");
     let cell_paint = CellPaint {
         roles,
@@ -496,102 +545,99 @@ fn paint_body(
         recording,
         row_h,
     };
-    for ix in g.cols.clone() {
-        let col = layout.visible()[ix];
-        let spec_kind = columns
-            .get(col.0 as usize)
-            .filter(|s| s.id == col)
-            .or_else(|| columns.iter().find(|s| s.id == col))
-            .map_or(ColumnKind::Other, |s| s.kind);
-        let left = body_x + (layout.x_of(ix) - left_x) as f32;
-        let width = layout.width_at(ix);
-        let mask = rect(
-            left,
-            body_y,
-            (width - 1.0).max(0.0),
-            f32::from(g.body.size.height),
-        );
-        masked(mask, window, |window| {
-            for r in g.rows.clone() {
-                let y = body_y + scroll.row_top(r) as f32;
-                stats.cells += 1;
-                let cell = (r < loaded).then(|| f.frame.cell(ModelRow(r), col));
-                let kind = cell.as_ref().map_or(CellKind::Placeholder, |c| c.kind);
-                let Some(cell) = cell.filter(|_| kind != CellKind::Placeholder) else {
-                    paint_skeleton(left, width, y, row_h, r, ix, palette, window);
-                    continue;
-                };
-                let text = cell_text(kind, &cell.text);
-                let align = cell.align;
-                let source = if kind == CellKind::Error {
-                    TextSource::Fluent
-                } else {
-                    TextSource::Data
-                };
-                let size_px = roles.for_cell(kind, spec_kind).nominal;
-                let mut records = 0u32;
-                let outcome = paint_cell_content(
+    let body_h = f32::from(g.body.size.height);
+    for r in g.rows.clone() {
+        let y = body_y + scroll.row_top(r) as f32;
+        for c in &col_info {
+            let (col, ix, left, width) = (c.col, c.ix, c.left, c.width);
+            let mask = rect(left, body_y, (width - 1.0).max(0.0), body_h);
+            stats.cells += 1;
+            let cell = (r < loaded).then(|| f.frame.cell(ModelRow(r), col));
+            let kind = cell.as_ref().map_or(CellKind::Placeholder, |c| c.kind);
+            let Some(cell) = cell.filter(|_| kind != CellKind::Placeholder) else {
+                masked(mask, window, |window| {
+                    paint_skeleton(left, width, y, row_h, r, ix, palette, window)
+                });
+                #[cfg(feature = "test-support")]
+                if let Some(cells) = paint.recorded.as_mut() {
+                    cells.push(super::PaintedCell::skeleton(r, col));
+                }
+                continue;
+            };
+            let text = cell_text(kind, &cell.text);
+            let source = if kind == CellKind::Error {
+                TextSource::Fluent
+            } else {
+                TextSource::Data
+            };
+            let size_px = roles.for_cell(kind, c.kind).nominal;
+            let at = CellBox {
+                left,
+                width,
+                y,
+                row: r,
+                col: ix,
+            };
+            let mut records = 0u32;
+            let outcome = masked(mask, window, |window| {
+                paint_cell_content(
                     &cell_paint,
                     &mut paint.cache,
                     budget,
                     &mut paint.scratch,
                     &text,
                     kind,
-                    spec_kind,
-                    align,
+                    c.kind,
+                    cell.align,
                     cell.chip.as_ref(),
-                    left,
-                    width,
-                    y,
+                    at,
                     window,
                     cx,
-                    |s, painted, cx| {
+                    |s, cx| {
                         #[cfg(feature = "test-support")]
                         if let Some(cells) = paint.recorded.as_mut() {
                             records += 1;
-                            cells.push(super::PaintedCell {
-                                row: r,
-                                col,
-                                text: s.display.clone(),
-                                chips: s
-                                    .chips()
-                                    .map(|c| SharedString::from(c.to_string()))
-                                    .collect(),
-                                truncated: s.truncated,
-                                degraded: s.degraded,
+                            cells.push(match s {
+                                Some(s) => super::PaintedCell::of(r, col, s),
+                                None => super::PaintedCell::skeleton(r, col),
                             });
                         }
-                        if recording {
+                        if recording && let Some(s) = s {
                             records += 1;
                             layers::record_text(
                                 cx,
                                 s.display.clone(),
                                 source,
                                 size_px,
-                                painted,
+                                s.width,
                                 s.truncated,
                                 layers::paths::CELL,
                             );
                         }
                     },
+                )
+            });
+            budget.allocs += records;
+            stats.degraded += u32::from(outcome.degraded);
+            stats.skeletons += u32::from(outcome.skeleton);
+            if recording
+                && !outcome.skeleton
+                && let Some(trail) = cell.chip.as_ref().filter(|_| !f.fast)
+            {
+                budget.allocs += 1;
+                layers::record_text(
+                    cx,
+                    trail.clone(),
+                    TextSource::Fluent,
+                    roles.chip.nominal,
+                    0.0,
+                    false,
+                    layers::paths::CELL,
                 );
-                budget.allocs += records;
-                stats.degraded += u32::from(outcome.degraded && outcome.painted);
-                if recording && let Some(trail) = cell.chip.as_ref().filter(|_| !f.fast) {
-                    budget.allocs += 1;
-                    layers::record_text(
-                        cx,
-                        trail.clone(),
-                        TextSource::Fluent,
-                        roles.chip.nominal,
-                        0.0,
-                        false,
-                        layers::paths::CELL,
-                    );
-                }
             }
-        });
+        }
     }
+    paint.col_scratch = col_info;
 
     // Layer 8: hairlines under each row and at each column's right edge.
     let x_end = col_left(&v.layout, g.cols.end).min(body_right);
@@ -627,6 +673,12 @@ fn paint_body(
         let gx = body_x + (x - left_x) as f32;
         window.paint_quad(fill(snap.vline(gx, top, bottom), palette.text2));
     }
+}
+
+/// The rows of a selection box `rows` to draw: within the `visible` rows ± 1, so every drawn
+/// edge is near the view (precise in `f32`) and a clamped edge falls outside the body.
+fn box_rows(rows: std::ops::Range<u64>, visible: &std::ops::Range<u64>) -> std::ops::Range<u64> {
+    rows.start.max(visible.start.saturating_sub(1))..rows.end.min(visible.end.saturating_add(1))
 }
 
 /// The 1 px `blue` boxes of the selection's pieces, the 5 px handle (in a 1 px `panel` ring) at
@@ -684,8 +736,12 @@ fn paint_selection_boxes(
         }
         let x = snap.v(body_x + (v.layout.x_of(c0) - left_x) as f32);
         let x1 = snap.v(body_x + (v.layout.x_of(c1) - left_x) as f32);
-        let y = snap.v(body_y + v.scroll.row_top(r0) as f32);
-        let y1 = snap.v(body_y + v.scroll.row_top(r1) as f32);
+        // Rows far off screen would put an edge ~10⁸ px away, where an `f32` step is several
+        // px and the visible edge drifts: draw the box's rows within the visible ones ± 1 (the
+        // clamped edges stay outside the body's mask).
+        let drawn = box_rows(r0..r1, &g.rows);
+        let y = snap.v(body_y + v.scroll.row_top(drawn.start) as f32);
+        let y1 = snap.v(body_y + v.scroll.row_top(drawn.end) as f32);
         outline(rect(x, y, x1 - x, y1 - y), palette.blue, window);
         let holds_focus = focus.is_some_and(|f| {
             let ix = v.layout.index_of(f.col);
@@ -779,13 +835,15 @@ fn paint_header(
                 if text.is_empty() {
                     continue;
                 }
+                // Never fast-scroll: a header always paints its full-quality shape (review
+                // round 1), on its own budget.
                 let recorded = with_shape(
                     &mut paint.cache,
                     text,
                     role,
                     &roles.chip,
                     avail,
-                    f.fast,
+                    false,
                     budget,
                     &mut paint.scratch,
                     window,
@@ -808,10 +866,22 @@ fn paint_header(
                                 path,
                             );
                         }
-                        recording
+                        (recording, s.truncated, s.degraded)
                     },
                 );
-                budget.allocs += u32::from(recorded == Some(true));
+                if let Some((recorded, _truncated, _degraded)) = recorded {
+                    budget.allocs += u32::from(recorded);
+                    #[cfg(feature = "test-support")]
+                    if let Some(headers) = paint.recorded_headers.as_mut() {
+                        budget.allocs += 1;
+                        headers.push(super::PaintedHeader {
+                            col,
+                            text: text.clone(),
+                            truncated: _truncated,
+                            degraded: _degraded,
+                        });
+                    }
+                }
             }
         });
         // The seam between columns.
@@ -927,6 +997,48 @@ mod tests {
         assert_eq!(scroll_rows(&c(0, true, None)), SKELETON_ROWS);
         assert_eq!(scroll_rows(&c(0, false, Some(0))), 0);
         assert_eq!(scroll_rows(&c(12, false, None)), 12);
+    }
+
+    /// GPUI's test window never activates accessibility (its `a11y_init` is a no-op), so this
+    /// drives the element's hooks through the same declaration `request_layout` builds, with
+    /// the active branch taken: role `Grid`, the label, the row and column counts (R-M3-32).
+    #[cfg(feature = "test-support")]
+    #[gpui::test]
+    fn the_element_declares_role_grid_while_assistive_technology_is_active(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::testing::{FixtureSource, grid_config};
+        use hacivat_ui_core::theme::Theme;
+        cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+        let source = FixtureSource::texts(&[&["a", "b", "c"], &["d", "e", "f"]], 100.0);
+        let (view, vcx) = cx.add_window_view(|_, cx| {
+            GridView::new(std::rc::Rc::new(source), grid_config("Result 1"), cx)
+        });
+        vcx.run_until_parked();
+        let mut element = GridElement::new(view.clone());
+        vcx.update(|_, cx| element.refresh_a11y(false, cx));
+        assert_eq!(element.a11y_role(), None);
+        assert_eq!(view.read_with(vcx, |v, _| v.a11y_label_reads()), 0);
+        vcx.update(|_, cx| element.refresh_a11y(true, cx));
+        assert_eq!(element.a11y_role(), Some(Role::Grid));
+        let mut node = accesskit::Node::new(Role::Grid);
+        element.write_a11y_info(&mut node);
+        assert_eq!(node.label(), Some("Result 1"));
+        assert_eq!(node.row_count(), Some(2));
+        assert_eq!(node.column_count(), Some(3));
+        assert_eq!(view.read_with(vcx, |v, _| v.a11y_label_reads()), 1);
+    }
+
+    #[test]
+    fn selection_boxes_draw_only_rows_near_the_view() {
+        let visible = 5_000_000..5_000_030;
+        assert_eq!(box_rows(0..10_000_000, &visible), 4_999_999..5_000_031);
+        assert_eq!(
+            box_rows(5_000_002..5_000_004, &visible),
+            5_000_002..5_000_004
+        );
+        assert_eq!(box_rows(0..5_000_010, &visible), 4_999_999..5_000_010);
+        assert_eq!(box_rows(0..3, &(0..30)), 0..3);
     }
 
     #[test]

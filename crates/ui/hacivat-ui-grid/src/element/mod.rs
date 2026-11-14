@@ -12,12 +12,20 @@
 //! - [`pointer`]: hit testing, clicks, drags, column resizing.
 //!
 //! **Fast-scroll (R-M3-12).** While the scroll moves more than [`FAST_SCROLL_ROWS_PER_FRAME`]
-//! rows in a frame (a thumb jump counts as infinite for one frame), cached shapes paint as
-//! usual, an uncached cell paints its ASCII-safe prefix of at most 24 characters as one run,
-//! chips are skipped, and the frame shapes at most [`FAST_SHAPES_PER_FRAME`] layouts. A frame
-//! that painted anything below full quality asks for the next frame, which is full quality as
-//! soon as the velocity is back under the threshold: one frame after the scroll slows (≈ 8 ms at
-//! 120 Hz), well inside the 100 ms the plan allows.
+//! rows in a frame (a thumb jump counts as infinite for one frame):
+//! - cached shapes paint as usual;
+//! - an uncached cell whose text is printable ASCII within 24 characters is shaped at full
+//!   quality; any other uncached cell paints its ASCII-safe prefix followed by `…`, or the
+//!   skeleton bar when it has no such prefix or the prefix would end at a number's group
+//!   separator ([`truncate::fast_cut`]): a prefix never reads as a different value;
+//! - chips are skipped;
+//! - the body shapes at most [`FAST_SHAPES_PER_FRAME`] layouts, spent **row by row from the
+//!   top**, and a cell past the budget paints the **skeleton bar**: no cell is ever blank;
+//! - the header is never in fast-scroll and is not charged to the body's budget.
+//!
+//! A frame that painted anything below full quality asks for the next frame, which is full
+//! quality as soon as the velocity is back under the threshold: one frame after the scroll
+//! slows.
 
 mod grid;
 pub mod layers;
@@ -59,13 +67,19 @@ pub const RESIZE_GRAB_PX: f32 = 4.0;
 /// What one frame painted.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct FrameStats {
-    /// Layouts shaped (cache misses, a truncation's second shape included).
+    /// Body layouts shaped (cache misses, a truncation's second shape included): what the
+    /// fast-scroll budget caps.
     pub shapes: u32,
-    /// Body cells painted (text, a marker or a placeholder bar).
+    /// Header layouts shaped (never fast-scroll, never charged to the body's budget).
+    pub header_shapes: u32,
+    /// Body cells painted (text, a marker or a skeleton bar).
     pub cells: u32,
-    /// Cells painted below full quality: a fast-scroll prefix, or nothing because the frame's
-    /// shaping budget was spent.
+    /// Cells painted below full quality: a fast-scroll prefix (ending in `…`) or the skeleton
+    /// bar.
     pub degraded: u32,
+    /// Loaded cells painted as the skeleton bar (the shaping budget was spent, or the text had
+    /// no safe fast-scroll prefix).
+    pub skeletons: u32,
     /// The frame was in fast-scroll mode.
     pub fast: bool,
     /// Rows the user moved the view since the last frame (`f32::MAX` for a thumb jump).
@@ -133,12 +147,71 @@ pub struct Geometry {
 pub struct PaintedCell {
     pub row: u64,
     pub col: ColId,
-    /// The painted text, controls shown as their chips, before any ellipsis.
+    /// The painted text, controls shown as their chips, before any ellipsis (empty for a
+    /// skeleton bar).
     pub text: SharedString,
     /// The control chips' texts, in order.
     pub chips: Vec<SharedString>,
+    /// Ends in `…` (a cut text or a fast-scroll prefix).
     pub truncated: bool,
     pub degraded: bool,
+    /// Painted as the skeleton bar.
+    pub skeleton: bool,
+    /// The bytes the painted runs cover (an ellipsis counts three).
+    pub painted_bytes: usize,
+}
+
+#[cfg(feature = "test-support")]
+impl PaintedCell {
+    pub(crate) fn of(row: u64, col: ColId, s: &Shaped) -> Self {
+        PaintedCell {
+            row,
+            col,
+            text: s.display.clone(),
+            chips: s
+                .chips()
+                .map(|c| SharedString::from(c.to_string()))
+                .collect(),
+            truncated: s.truncated,
+            degraded: s.degraded,
+            skeleton: false,
+            painted_bytes: s.painted_bytes(),
+        }
+    }
+
+    pub(crate) fn skeleton(row: u64, col: ColId) -> Self {
+        PaintedCell {
+            row,
+            col,
+            text: SharedString::default(),
+            chips: Vec::new(),
+            truncated: false,
+            degraded: true,
+            skeleton: true,
+            painted_bytes: 0,
+        }
+    }
+}
+
+/// One header line a recorded frame painted (`test-support`).
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaintedHeader {
+    pub col: ColId,
+    /// The column's name or type label.
+    pub text: SharedString,
+    pub truncated: bool,
+    pub degraded: bool,
+}
+
+/// A visible column's paint geometry for one frame (reused buffer).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ColPaint {
+    pub ix: usize,
+    pub col: crate::source::ColId,
+    pub kind: crate::source::ColumnKind,
+    pub left: f32,
+    pub width: f32,
 }
 
 /// The bench's per-frame CPU samples (feature `bench`; the spike's `PaintStats`).
@@ -161,6 +234,8 @@ pub(crate) struct PaintState {
     /// The scale the cache was shaped at; a change clears it.
     pub scale: f32,
     pub scratch: text_cache::Scratch,
+    /// The visible columns' geometry, rebuilt each frame in a kept buffer.
+    pub col_scratch: Vec<ColPaint>,
     pub log: FrameLog,
     #[cfg(feature = "bench")]
     pub bench: BenchStats,
@@ -168,6 +243,8 @@ pub(crate) struct PaintState {
     pub prepaint_started: Option<std::time::Instant>,
     #[cfg(feature = "test-support")]
     pub recorded: Option<Vec<PaintedCell>>,
+    #[cfg(feature = "test-support")]
+    pub recorded_headers: Option<Vec<PaintedHeader>>,
 }
 
 impl PaintState {
@@ -177,6 +254,7 @@ impl PaintState {
             roles: None,
             scale: 0.0,
             scratch: text_cache::Scratch::default(),
+            col_scratch: Vec::new(),
             log: FrameLog::default(),
             #[cfg(feature = "bench")]
             bench: BenchStats::default(),
@@ -184,6 +262,8 @@ impl PaintState {
             prepaint_started: None,
             #[cfg(feature = "test-support")]
             recorded: None,
+            #[cfg(feature = "test-support")]
+            recorded_headers: None,
         }
     }
 
@@ -198,12 +278,26 @@ impl crate::view::GridView {
     #[cfg(feature = "test-support")]
     pub fn set_paint_recording(&mut self, on: bool) {
         self.paint.recorded = on.then(Vec::new);
+        self.paint.recorded_headers = on.then(Vec::new);
     }
 
-    /// The cells the last recorded frame painted (`test-support`).
+    /// The cells the last recorded frame painted, skeleton bars included (`test-support`).
     #[cfg(feature = "test-support")]
     pub fn painted_cells(&self) -> &[PaintedCell] {
         self.paint.recorded.as_deref().unwrap_or(&[])
+    }
+
+    /// The header lines the last recorded frame painted (`test-support`).
+    #[cfg(feature = "test-support")]
+    pub fn painted_headers(&self) -> &[PaintedHeader] {
+        self.paint.recorded_headers.as_deref().unwrap_or(&[])
+    }
+
+    /// The hovered body cell (view row, visible column index) and whether a pointer drag is in
+    /// progress (`test-support`).
+    #[cfg(feature = "test-support")]
+    pub fn pointer_state(&self) -> (Option<(u64, usize)>, bool) {
+        (self.pointer.hover, self.pointer.drag.is_some())
     }
 
     /// The bench's per-frame samples (feature `bench`).

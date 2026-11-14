@@ -9,6 +9,7 @@ use std::time::Duration;
 use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
 use hacivat_ui::text::{TextRegistry, TextSource};
 use hacivat_ui_core::theme::{Theme, ThemeMode};
+use hacivat_ui_grid::element::truncate::FAST_PREFIX_CHARS;
 use hacivat_ui_grid::element::{FAST_SCROLL_ROWS_PER_FRAME, FAST_SHAPES_PER_FRAME};
 use hacivat_ui_grid::testing::{FixtureSource, SyntheticSource, cell, grid_config};
 use hacivat_ui_grid::{Align, CellKind, ColId, GridDataSource, GridView};
@@ -107,8 +108,278 @@ fn placeholders_trigger_one_ensure_rows_per_frame(cx: &mut TestAppContext) {
     vcx.update(|_, cx| view.update(cx, |v, _| v.set_paint_recording(true)));
     frame(vcx);
     assert_eq!(source.ensure_calls_this_frame(), 1);
-    let texts = vcx.read(|cx| view.read(cx).painted_cells().len());
-    assert_eq!(texts, 0);
+    let cells = vcx.read(|cx| view.read(cx).painted_cells().to_vec());
+    assert!(!cells.is_empty());
+    assert!(
+        cells.iter().all(|c| c.skeleton && c.text.is_empty()),
+        "{cells:?}"
+    );
+}
+
+/// Every visible body cell of the last recorded frame was painted: text or a skeleton bar.
+fn assert_no_blank_cell(view: &Entity<GridView>, vcx: &mut VisualTestContext) -> usize {
+    let (cells, geom) = vcx.read(|cx| {
+        let v = view.read(cx);
+        (v.painted_cells().to_vec(), v.geometry().cloned().unwrap())
+    });
+    let want = (geom.rows.end - geom.rows.start) as usize * (geom.cols.end - geom.cols.start);
+    assert_eq!(cells.len(), want, "a body cell painted nothing");
+    for c in &cells {
+        assert!(
+            c.skeleton || c.painted_bytes > 0,
+            "row {} col {:?} is blank: {c:?}",
+            c.row,
+            c.col
+        );
+    }
+    cells.iter().filter(|c| c.skeleton).count()
+}
+
+/// Review round 1: a thumb drag is a run of infinite-velocity frames, each meeting a screen of
+/// new cells. No body cell is ever blank (the budget-skipped ones paint the skeleton bar), and
+/// the header, also scrolled sideways here, is never degraded.
+#[gpui::test]
+fn a_sustained_drag_leaves_no_blank_cell_and_no_degraded_header(cx: &mut TestAppContext) {
+    let (view, vcx) = open(
+        cx,
+        Rc::new(SyntheticSource::spike(10_000_000, 50)),
+        1440.0,
+        900.0,
+    );
+    vcx.update(|_, cx| view.update(cx, |v, _| v.set_paint_recording(true)));
+    let mut skeleton_frames = 0;
+    for k in 1..=30u64 {
+        vcx.update(|_, cx| {
+            view.update(cx, |v, cx| {
+                v.scroll_to_row(k * 313_131, cx);
+                v.scroll_px(0.0, 97.0, cx);
+            })
+        });
+        vcx.executor().advance_clock(FRAME);
+        vcx.run_until_parked();
+        let s = view.read_with(vcx, |v, _| v.frame_stats());
+        assert!(s.fast, "frame {k}: {s:?}");
+        assert!(s.shapes <= FAST_SHAPES_PER_FRAME, "frame {k}: {s:?}");
+        skeleton_frames += usize::from(assert_no_blank_cell(&view, vcx) > 0);
+        let (headers, cols) = vcx.read(|cx| {
+            let v = view.read(cx);
+            let g = v.geometry().unwrap();
+            (v.painted_headers().to_vec(), g.cols.end - g.cols.start)
+        });
+        assert_eq!(
+            headers.len(),
+            2 * cols,
+            "frame {k}: name and type of every column"
+        );
+        assert!(
+            headers.iter().all(|h| !h.degraded),
+            "frame {k}: {headers:?}"
+        );
+    }
+    // The budget did run out (so the skeleton path was taken), every frame of the drag.
+    assert_eq!(skeleton_frames, 30);
+    assert!(view.read_with(vcx, |v, _| v.frame_log().max_fast_shapes) <= FAST_SHAPES_PER_FRAME);
+}
+
+/// Review round 1: the header is never in fast-scroll. Columns named in Turkish (no ASCII-safe
+/// prefix) come into view during infinite-velocity frames and still paint their full names.
+#[gpui::test]
+fn the_header_is_never_fast_scroll(cx: &mut TestAppContext) {
+    let columns = (0..60u32)
+        .map(|c| {
+            let mut spec =
+                hacivat_ui_grid::testing::text_column(c, &format!("müşteri adı {c}"), 140.0);
+            spec.type_label = "character varying(255)".into();
+            spec
+        })
+        .collect();
+    let source = FixtureSource::generated(60, 1_000_000, Some(1_000_000), false, |r, c| {
+        cell(format!("r{r}c{}", c.0), CellKind::Text, Align::Start)
+    })
+    .with_columns(columns);
+    let (view, vcx) = open(cx, Rc::new(source), 1000.0, 400.0);
+    vcx.update(|_, cx| view.update(cx, |v, _| v.set_paint_recording(true)));
+    for k in 1..=12u64 {
+        vcx.update(|_, cx| {
+            view.update(cx, |v, cx| {
+                v.scroll_to_row(k * 70_001, cx);
+                v.scroll_px(0.0, 300.0, cx);
+            })
+        });
+        vcx.executor().advance_clock(FRAME);
+        vcx.run_until_parked();
+        assert!(view.read_with(vcx, |v, _| v.frame_stats()).fast);
+        let headers = vcx.read(|cx| view.read(cx).painted_headers().to_vec());
+        assert!(!headers.is_empty());
+        for h in &headers {
+            assert!(!h.degraded, "frame {k}: {h:?}");
+        }
+        assert_no_blank_cell(&view, vcx);
+    }
+}
+
+/// Review round 1: the fast-scroll budget is spent row by row from the top, so whole rows read;
+/// once a cell falls back to the skeleton bar, no later cell is shaped.
+#[gpui::test]
+fn the_fast_budget_is_spent_row_major(cx: &mut TestAppContext) {
+    // Short ASCII cells, unique per row: each is a full-quality shape costing one layout.
+    let (view, vcx) = open(
+        cx,
+        Rc::new(SyntheticSource::new(10_000_000, 12)),
+        1440.0,
+        900.0,
+    );
+    vcx.update(|_, cx| view.update(cx, |v, _| v.set_paint_recording(true)));
+    vcx.update(|_, cx| view.update(cx, |v, cx| v.scroll_to_row(6_000_000, cx)));
+    vcx.run_until_parked();
+    assert!(view.read_with(vcx, |v, _| v.frame_stats()).fast);
+    assert_no_blank_cell(&view, vcx);
+    let cells = vcx.read(|cx| view.read(cx).painted_cells().to_vec());
+    let shaped: Vec<_> = cells.iter().filter(|c| !c.skeleton).collect();
+    let skeletons: Vec<_> = cells.iter().filter(|c| c.skeleton).collect();
+    assert!(!skeletons.is_empty(), "the budget ran out");
+    // Every shaped cell sits above (or in the same row as) every skeleton: whole rows from the
+    // top read, at full quality.
+    let last_shaped_row = shaped.iter().map(|c| c.row).max().unwrap();
+    let first_skeleton_row = skeletons.iter().map(|c| c.row).min().unwrap();
+    assert!(
+        last_shaped_row <= first_skeleton_row,
+        "row-major: {cells:?}"
+    );
+    let top = cells.iter().map(|c| c.row).min().unwrap();
+    assert!(
+        last_shaped_row >= top + 9,
+        "ten whole rows from the top: {last_shaped_row}"
+    );
+    assert!(shaped.iter().all(|c| !c.degraded && !c.truncated));
+}
+
+/// Review round 1: a selection box whose rows reach millions of rows off screen keeps its
+/// visible edge exact (the drawn rows are clamped near the view before the `f32` pixels).
+#[cfg(feature = "scene-check")]
+#[gpui::test]
+fn a_selection_box_over_millions_of_rows_keeps_its_visible_edge(cx: &mut TestAppContext) {
+    use hacivat_ui_core::theme::DARK;
+    use hacivat_ui_grid::GridCommand;
+    use hacivat_ui_grid::model::Dir;
+    let source = FixtureSource::generated(2, 10_000_000, Some(10_000_000), false, |r, c| {
+        cell(format!("r{r}c{}", c.0), CellKind::Text, Align::Start)
+    });
+    let (view, vcx) = open(cx, Rc::new(source), 600.0, 400.0);
+    // Focus row 0, jump to row 5,000,000, extend the selection to a visible row there.
+    vcx.update(|window, cx| {
+        view.update(cx, |v, cx| {
+            v.dispatch(
+                GridCommand::Move {
+                    dir: Dir::Down,
+                    extend: false,
+                },
+                window,
+                cx,
+            )
+        })
+    });
+    vcx.run_until_parked();
+    vcx.update(|_, cx| view.update(cx, |v, cx| v.scroll_to_row(5_000_000, cx)));
+    vcx.run_until_parked();
+    let target = 5_000_007;
+    let (at, expected_bottom) = view.read_with(vcx, |v, _| {
+        let g = v.geometry().unwrap();
+        let s = v.scroll_state();
+        let y = f32::from(g.body.top()) + s.row_top(target) as f32 + 10.0;
+        let x = f32::from(g.body.left()) + 20.0;
+        let bottom = f64::from(f32::from(g.body.top())) + s.row_top(target + 1);
+        (gpui::point(px(x), px(y)), bottom * f64::from(g.scale))
+    });
+    vcx.simulate_click(at, gpui::Modifiers::shift());
+    vcx.run_until_parked();
+    let rects = view.read_with(vcx, |v, _| v.selection().rects().to_vec());
+    assert_eq!(rects[0].rows, 0..target + 1);
+    let blue = gpui::Rgba::from(DARK.colors.blue.to_hsla());
+    let near = |a: f32, b: f32| (a - b).abs() <= 1.0 / 255.0;
+    let bottoms: Vec<f32> = vcx.update(|window, _| {
+        window
+            .rendered_scene()
+            .quads
+            .iter()
+            .filter(|q| {
+                let c = gpui::Rgba::from(q.border_color);
+                q.background.as_solid().is_none_or(|f| f.a == 0.0)
+                    && near(c.r, blue.r)
+                    && near(c.g, blue.g)
+                    && near(c.b, blue.b)
+                    && c.a > 0.5
+            })
+            .map(|q| q.bounds.origin.y.0 + q.bounds.size.height.0)
+            .collect()
+    });
+    assert!(!bottoms.is_empty(), "the box was painted");
+    for b in bottoms {
+        assert!(
+            (f64::from(b) - expected_bottom.round()).abs() <= 0.5,
+            "the box's bottom edge at {b} device px, expected {expected_bottom}"
+        );
+    }
+}
+
+/// Review round 1: a fast-scroll prefix never reads as a different value. A number grouped
+/// with NNBSP (`fr`) or NBSP (`sv`) shows the skeleton bar, never `12…`; long ASCII ends in `…`;
+/// short ASCII is the full value.
+#[gpui::test]
+fn fast_prefixes_end_in_an_ellipsis_and_grouped_numbers_are_skeletons(cx: &mut TestAppContext) {
+    let source = FixtureSource::generated(5, 10_000, Some(10_000), false, |r, c| {
+        let text = match c.0 {
+            0 => format!("{}\u{202f}{:03},67", r % 900 + 100, r % 1000),
+            1 => format!("{}\u{a0}{:03},50", r % 900 + 100, r % 1000),
+            2 | 4 => format!("2026-11-14 10:00:00.{r:06}+03:00"),
+            _ => format!("id{r}"),
+        };
+        cell(text, CellKind::Text, Align::Start)
+    })
+    // Column 2 is wide enough for the whole 24-character prefix and its `…`; column 4 cuts it
+    // further to the cell.
+    .with_columns(
+        [120.0, 120.0, 300.0, 120.0, 120.0]
+            .iter()
+            .enumerate()
+            .map(|(c, w)| hacivat_ui_grid::testing::text_column(c as u32, &format!("c{c}"), *w))
+            .collect(),
+    );
+    let (view, vcx) = open(cx, Rc::new(source), 1000.0, 300.0);
+    vcx.update(|_, cx| view.update(cx, |v, _| v.set_paint_recording(true)));
+    vcx.update(|_, cx| view.update(cx, |v, cx| v.scroll_to_row(5_000, cx)));
+    vcx.run_until_parked();
+    assert!(view.read_with(vcx, |v, _| v.frame_stats()).fast);
+    assert_no_blank_cell(&view, vcx);
+    let cells = vcx.read(|cx| view.read(cx).painted_cells().to_vec());
+    let column = |c: u32| cells.iter().filter(move |p| p.col == ColId(c));
+    // fr and sv numbers: the skeleton bar, never a prefix.
+    for c in [0, 1] {
+        assert!(column(c).all(|p| p.skeleton), "col {c}: {cells:?}");
+    }
+    // Long ASCII: a prefix of the value, painted with `…` (three more bytes than the prefix):
+    // the whole 24-character prefix in the wide column, a shorter one cut to the narrow one.
+    for (c, wide) in [(2, true), (4, false)] {
+        let long: Vec<_> = column(c).filter(|p| !p.skeleton).collect();
+        assert!(!long.is_empty(), "col {c}: {cells:?}");
+        for p in long {
+            assert!(p.degraded && p.truncated, "{p:?}");
+            assert!(p.text.starts_with("2026-11-14") || "2026-11-14".starts_with(p.text.as_ref()));
+            if wide {
+                assert_eq!(p.text.len(), FAST_PREFIX_CHARS, "{p:?}");
+            } else {
+                assert!(p.text.len() < FAST_PREFIX_CHARS, "{p:?}");
+            }
+            assert_eq!(p.painted_bytes, p.text.len() + "…".len(), "{p:?}");
+        }
+    }
+    // Short ASCII: the whole value at full quality (when the budget reached it).
+    for p in column(3).filter(|p| !p.skeleton) {
+        assert!(
+            !p.degraded && !p.truncated && p.text.starts_with("id"),
+            "{p:?}"
+        );
+    }
 }
 
 #[gpui::test]

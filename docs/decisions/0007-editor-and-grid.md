@@ -106,11 +106,27 @@ M1 and M2 shots do not move.
 infinite for one frame). The velocity is `ScrollState::velocity_rows_per_frame`: the rows the user
 moved the view between two frames, from the frame's coalesced deltas, with follow-tail snaps,
 shrink clamps, resizes and re-runs left out, so a stream never trips it on a still view. In a
-fast-scroll frame, cached shapes paint as usual; an uncached cell paints its **ASCII-safe prefix
-of at most 24 characters** (stopping before the first character that is not printable ASCII, so it
-shapes in the primary font with no fallback and never shows a wrong character) as one run; chips
-are skipped; and the frame shapes at most **150 layouts** (`FAST_SHAPES_PER_FRAME`). A cell past the
-budget paints nothing for that frame. **Recovery:** a frame that painted anything below full
+fast-scroll frame:
+- cached shapes paint as usual;
+- an uncached cell whose text is all printable ASCII within 24 characters is shaped at full
+  quality;
+- any other uncached cell paints its **ASCII-safe prefix of at most 24 characters followed by
+  `…`** (the prefix stops before the first character that is not printable ASCII, so it shapes in
+  the primary font with no fallback, and the ellipsis says the value goes on); the prefix and its
+  ellipsis are cut further to the cell when needed;
+- a text with no such prefix, or whose prefix would end at a number's group separator (a digit
+  before NBSP, NNBSP or `’`: `12 345` in `fr` or `sv` would read `12…`), paints the **skeleton
+  bar** instead;
+- chips are skipped;
+- the body shapes at most **150 layouts** (`FAST_SHAPES_PER_FRAME`; a miss needs room for two),
+  spent **row by row from the top** so whole rows read, and a cell past the budget paints the
+  **skeleton bar**: no body cell is ever blank;
+- the header is never in fast-scroll: it paints its full-quality shape (cached, or shaped on its
+  own budget), so a column that scrolls into view during a drag shows its real name.
+
+(Fix round 1 of the review: the first cut spent the budget column by column and left skipped
+cells blank, so a thumb drag blanked most of the grid for its whole length; a prefix without an
+ellipsis could read as a different value, `12 345` as `12`.) **Recovery:** a frame that painted anything below full
 quality asks for the next frame (`Window::on_next_frame`); that frame is full quality as soon as
 the velocity is back under the threshold, so the full-quality frame follows one frame (≈ 8 ms at
 120 Hz) after the scroll slows, inside the plan's 100 ms. No timer and no hysteresis.
@@ -118,7 +134,9 @@ Rejected: a 100 ms quality timer (a still view would show prefixes for up to 100
 on the threshold (no measured flicker to cure). The B1 fling peaks near 5 rows per frame at
 120 Hz, so B1 itself never enters fast-scroll; thumb drags and very fast flings do. Tests:
 `fast_scroll_caps_shapes_per_frame`, `a_thumb_jump_is_fast_for_one_frame`,
-`quality_frame_within_100ms_of_slowing`, `slow_scrolling_is_full_quality`.
+`quality_frame_within_100ms_of_slowing`, `slow_scrolling_is_full_quality`,
+`a_sustained_drag_leaves_no_blank_cell_and_no_degraded_header`, `the_fast_budget_is_spent_row_major`,
+`the_header_is_never_fast_scroll`, `fast_prefixes_end_in_an_ellipsis_and_grouped_numbers_are_skeletons`.
 
 **The text cache.** The M0 spike's frame-LRU, keyed `(content hash, font id, size bits, colour
 class, width bucket)`, 50,000 entries, eviction by frame generation down to 7/8 of the capacity,
@@ -128,8 +146,9 @@ paints them through `LineLayout::paint` with a one-run decoration built on the s
 and the colour applied at paint time means a theme switch recolours every cached shape and
 reshapes none (this needed `DecorationRun` and `LineLayout` in `gpui_surface`, a two-name
 re-export). The content hash is a word-at-a-time multiplicative hash; each entry keeps its source
-text and a hit compares it, so a collision is a miss, never the wrong string. Width buckets are
-4 px: an untruncated shape is cached once for every width it fits (`FULL_WIDTH`), a truncated one
+text and a hit compares it, so a collision is a miss, never the wrong string
+(`a_content_hash_collision_is_a_miss_never_the_wrong_text` forces one under each of the three
+keys). Width buckets are 4 px: an untruncated shape is cached once for every width it fits (`FULL_WIDTH`), a truncated one
 is cut for its bucket's narrowest width, so it fits every column width in the bucket. The lookup
 order is untruncated, this bucket, then (fast-scroll) the prefix. A scale change clears the cache.
 Before shaping, a cell's text is capped at `ceil(col_px / min_advance_px) + 2` grapheme clusters

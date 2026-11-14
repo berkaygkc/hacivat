@@ -476,3 +476,62 @@ fn set_source_starts_over_and_keeps_widths_when_asked(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert_eq!(width(vcx), 120.0);
 }
+
+/// Review round 1: after a wheel scroll the hover is the cell under the still pointer, not the
+/// row it was on.
+#[gpui::test]
+fn the_hover_follows_the_pointer_through_a_wheel_scroll(cx: &mut TestAppContext) {
+    let (view, vcx, _) = open(
+        cx,
+        Rc::new(numbered(2, 1_000, Some(1_000), false)),
+        500.0,
+        300.0,
+    );
+    let at = cell_center(&view, vcx, 2, 0);
+    vcx.simulate_mouse_move(at, None, Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(
+        view.read_with(vcx, |v, _| v.pointer_state().0),
+        Some((2, 0))
+    );
+    vcx.simulate_event(gpui::ScrollEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-63.0))),
+        ..Default::default()
+    });
+    vcx.run_until_parked();
+    assert_eq!(view.read_with(vcx, |v, _| v.scroll_state().top_row), 3);
+    assert_eq!(
+        view.read_with(vcx, |v, _| v.pointer_state().0),
+        Some((5, 0))
+    );
+}
+
+/// Review round 1: a mouse-up the grid never heard (released outside the window) ends the
+/// drag at the next move without a button, and the hover tracks the pointer again.
+#[gpui::test]
+fn a_missed_mouse_up_ends_the_drag(cx: &mut TestAppContext) {
+    let (view, vcx, _) = open(
+        cx,
+        Rc::new(numbered(3, 100, Some(100), false)),
+        600.0,
+        300.0,
+    );
+    let a = cell_center(&view, vcx, 1, 0);
+    let b = cell_center(&view, vcx, 3, 0);
+    let c = cell_center(&view, vcx, 4, 1);
+    vcx.simulate_mouse_down(a, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(b, Some(MouseButton::Left), Modifiers::none());
+    vcx.run_until_parked();
+    assert!(view.read_with(vcx, |v, _| v.pointer_state().1), "dragging");
+    assert_eq!(focus(&view, vcx), Some((3, 0)));
+    // No mouse-up: the next move arrives with no button pressed.
+    vcx.simulate_mouse_move(c, None, Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(
+        view.read_with(vcx, |v, _| v.pointer_state()),
+        (Some((4, 1)), false)
+    );
+    // The selection stayed where the drag left it.
+    assert_eq!(focus(&view, vcx), Some((3, 0)));
+}

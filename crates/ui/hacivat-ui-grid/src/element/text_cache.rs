@@ -29,7 +29,7 @@ use hacivat_ui_core::theme::{Caps, TypeStyle};
 use smallvec::{SmallVec, smallvec};
 
 use super::truncate::{
-    self, ELLIPSIS, FAST_PREFIX_CHARS, Seg, cap_graphemes, cluster_boundaries, fast_prefix,
+    self, ELLIPSIS, FAST_PREFIX_CHARS, FastCut, Seg, cap_graphemes, cluster_boundaries,
     fitting_boundary, grapheme_cap,
 };
 
@@ -109,13 +109,20 @@ pub struct Shaped {
     pub pieces: SmallVec<[Piece; 2]>,
     /// From the start of the first piece to the end of the last, in logical px.
     pub width: f32,
-    /// Ellipsized to fit its width bucket.
+    /// Ellipsized to fit its width bucket (a fast-scroll prefix: ends in `…`).
     pub truncated: bool,
-    /// A fast-scroll prefix, not the full-quality shape.
+    /// A fast-scroll stand-in, not the full-quality shape.
     pub degraded: bool,
+    /// A fast-scroll frame paints the skeleton bar for this text (no shapes).
+    pub skeleton: bool,
 }
 
 impl Shaped {
+    /// The bytes the painted pieces cover (an ellipsis counts its three bytes).
+    pub fn painted_bytes(&self) -> usize {
+        self.pieces.iter().map(|p| p.layout.len).sum()
+    }
+
     /// The control chips' texts, in order.
     pub fn chips(&self) -> impl Iterator<Item = &str> + '_ {
         let display = self.display.as_ref();
@@ -276,10 +283,11 @@ fn piece_end(p: &Piece) -> f32 {
     }
 }
 
-fn empty_shape(text: &SharedString, degraded: bool) -> Shaped {
+/// No pieces: an empty text, or (`skeleton`) a fast-scroll frame's skeleton bar.
+fn empty_shape(text: &SharedString, skeleton: bool) -> Shaped {
     Shaped {
         source: text.clone(),
-        display: if degraded {
+        display: if skeleton {
             SharedString::default()
         } else {
             text.clone()
@@ -287,7 +295,8 @@ fn empty_shape(text: &SharedString, degraded: bool) -> Shaped {
         pieces: SmallVec::new(),
         width: 0.0,
         truncated: false,
-        degraded,
+        degraded: skeleton,
+        skeleton,
     }
 }
 
@@ -340,6 +349,7 @@ fn shape_plain(
             width,
             truncated: false,
             degraded: false,
+            skeleton: false,
         };
         return (shaped, FULL_WIDTH);
     }
@@ -364,6 +374,7 @@ fn shape_plain(
         width,
         truncated: true,
         degraded: false,
+        skeleton: false,
     };
     (shaped, bucket)
 }
@@ -429,6 +440,7 @@ fn shape_with_chips(
             width: x,
             truncated: false,
             degraded: false,
+            skeleton: false,
         };
         return (shaped, FULL_WIDTH);
     }
@@ -479,51 +491,78 @@ fn shape_with_chips(
         width: end,
         truncated: true,
         degraded: false,
+        skeleton: false,
     };
     (shaped, bucket)
 }
 
-/// The fast-scroll shape of `text`: its ASCII-safe prefix of at most [`FAST_PREFIX_CHARS`]
-/// characters (and no more than the cell can show) as one run.
+/// The most layouts one fast-scroll miss shapes (a prefix, then its cut to the cell's width).
+pub const FAST_MISS_SHAPES: u32 = 2;
+
+/// The fast-scroll shape of `text` for a cell `avail` px wide ([`truncate::fast_cut`]), and
+/// the width bucket it is cached under:
+/// - printable ASCII within the cap: the full-quality shape (`shape_plain`), cached as such;
+/// - otherwise its ASCII-safe prefix of at most [`FAST_PREFIX_CHARS`] characters **followed
+///   by `…`**, cut further to the cell's width when needed ([`FAST_PREFIX`]);
+/// - no such prefix, or one ending at a number's group separator: the skeleton bar
+///   ([`FAST_PREFIX`], no shapes).
 pub fn shape_fast(
     text: &SharedString,
     role: &Role,
     avail: f32,
     window: &Window,
+    scratch: &mut Scratch,
     shapes: &mut u32,
-) -> Shaped {
+) -> (Shaped, u32) {
     let cap = grapheme_cap(avail, role.min_advance).min(FAST_PREFIX_CHARS);
-    let prefix = fast_prefix(text, cap);
-    if prefix.is_empty() {
-        return empty_shape(text, true);
-    }
-    let layout = role.layout(prefix, window);
+    let n = match truncate::fast_cut(text, cap) {
+        FastCut::Whole => return shape_plain(text, role, avail, window, scratch, shapes),
+        FastCut::Skeleton => return (empty_shape(text, true), FAST_PREFIX),
+        FastCut::Prefix(n) => n,
+    };
+    let prefix = &text[..n];
+    scratch.buf.clear();
+    scratch.buf.push_str(prefix);
+    scratch.buf.push_str(ELLIPSIS);
+    let mut layout = role.layout(&scratch.buf, window);
     *shapes += 1;
-    let width = f32::from(layout.width);
-    Shaped {
-        source: text.clone(),
-        display: SharedString::from(prefix.to_string()),
-        pieces: smallvec![piece(
-            0.0,
-            layout,
-            role.color,
-            PieceKind::Text,
-            0,
-            prefix.len()
-        )],
-        width,
-        truncated: false,
-        degraded: true,
+    let mut keep = n;
+    if f32::from(layout.width) > avail + FIT_SLACK {
+        // ASCII: every byte is a boundary.
+        cluster_boundaries(prefix, &mut scratch.bounds);
+        keep = fitting_boundary(&scratch.bounds, avail, role.ellipsis_w, |i| {
+            f32::from(layout.x_for_index(i))
+        });
+        if keep == 0 {
+            return (empty_shape(text, true), FAST_PREFIX);
+        }
+        scratch.buf.clear();
+        scratch.buf.push_str(&prefix[..keep]);
+        scratch.buf.push_str(ELLIPSIS);
+        layout = role.layout(&scratch.buf, window);
+        *shapes += 1;
     }
+    let width = f32::from(layout.width);
+    let shaped = Shaped {
+        source: text.clone(),
+        display: SharedString::from(prefix[..keep].to_string()),
+        pieces: smallvec![piece(0.0, layout, role.color, PieceKind::Text, 0, keep)],
+        width,
+        truncated: true,
+        degraded: true,
+        skeleton: false,
+    };
+    (shaped, FAST_PREFIX)
 }
 
 /// Finds the shape of `text` in `role` for a cell `avail` px wide, shaping it on a miss, and
-/// hands it to `f`. In fast-scroll mode a miss shapes the fast prefix, and once the frame's
-/// budget is spent a miss paints nothing (`None`, counted in [`Budget::skipped`]).
+/// hands it to `f`. In fast-scroll mode a miss takes [`shape_fast`], and once the frame's
+/// budget cannot pay for another miss ([`FAST_MISS_SHAPES`]) it shapes nothing (`None`,
+/// counted in [`Budget::skipped`]); the caller paints the skeleton bar.
 ///
 /// The lookup order: the untruncated shape (when it fits), the truncated shape of this width
-/// bucket, then (fast-scroll) the prefix. Each hit compares the cached source text, so a hash
-/// collision is a miss. A hit allocates nothing.
+/// bucket, then (fast-scroll) the fast shape (when it fits). Each hit compares the cached source
+/// text, so a hash collision is a miss. A hit allocates nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn with_shape<R>(
     cache: &mut FrameLru<TextKey, Shaped>,
@@ -556,17 +595,18 @@ pub fn with_shape<R>(
         let key = role.key(hash, FAST_PREFIX);
         if let Some(s) = cache.get(&key)
             && s.source == *text
+            && s.width <= avail + FIT_SLACK
         {
             return Some(f(s, window, cx));
         }
-        if budget.spent() {
+        if budget.shapes + FAST_MISS_SHAPES > budget.limit {
             budget.skipped += 1;
             return None;
         }
         let before = budget.shapes;
-        let shaped = shape_fast(text, role, avail, window, &mut budget.shapes);
+        let (shaped, bucket) = shape_fast(text, role, avail, window, scratch, &mut budget.shapes);
         budget.allocs += budget.shapes - before + 1;
-        return Some(f(cache.insert(key, shaped), window, cx));
+        return Some(f(cache.insert(role.key(hash, bucket), shaped), window, cx));
     }
     let before = budget.shapes;
     let (shaped, bucket) = shape_full(text, role, chip, avail, window, scratch, &mut budget.shapes);
@@ -826,6 +866,64 @@ mod tests {
         for i in 0..10 {
             assert!(!lru.get_or_insert_with(i, || 99).1, "{i}");
         }
+    }
+
+    /// A cache entry under `text`'s own key but shaped from another text (a forced content-hash
+    /// collision).
+    fn impostor(width: f32) -> Shaped {
+        Shaped {
+            source: SharedString::new_static("a different value"),
+            display: SharedString::new_static("a different value"),
+            pieces: SmallVec::new(),
+            width,
+            truncated: false,
+            degraded: false,
+            skeleton: false,
+        }
+    }
+
+    /// Forces a collision under each of the three lookup keys (untruncated, this width bucket,
+    /// fast-scroll) and checks the lookup paints `text`'s own shape, never the impostor's:
+    /// removing a `s.source == *text` guard fails the matching case.
+    #[gpui::test]
+    fn a_content_hash_collision_is_a_miss_never_the_wrong_text(cx: &mut gpui::TestAppContext) {
+        let vcx = cx.add_empty_window();
+        vcx.update(|window, cx| {
+            let role = Role::new(
+                &hacivat_ui_core::theme::DARK.type_ramp.body,
+                ColorClass::Text,
+                window,
+            );
+            let text = SharedString::new_static("the real value");
+            let hash = content_hash(&text);
+            for (name, bucket, avail, fast) in [
+                ("untruncated", FULL_WIDTH, 500.0, false),
+                ("width bucket", width_bucket(500.0), 500.0, false),
+                ("fast-scroll", FAST_PREFIX, 500.0, true),
+            ] {
+                let mut cache = FrameLru::new(16);
+                cache.insert(role.key(hash, bucket), impostor(0.0));
+                let mut budget = Budget::new(u32::MAX);
+                let painted = with_shape(
+                    &mut cache,
+                    &text,
+                    &role,
+                    &role,
+                    avail,
+                    fast,
+                    &mut budget,
+                    &mut Scratch::default(),
+                    window,
+                    cx,
+                    |s, _, _| s.source.clone(),
+                );
+                assert_eq!(painted.as_deref(), Some("the real value"), "{name}");
+                assert!(
+                    budget.shapes > 0,
+                    "{name}: shaped, not served from the impostor"
+                );
+            }
+        });
     }
 
     #[test]

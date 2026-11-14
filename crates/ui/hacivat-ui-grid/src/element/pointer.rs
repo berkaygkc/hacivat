@@ -47,6 +47,9 @@ pub(crate) struct PointerState {
     /// The header edge under the pointer (visible column index).
     pub border: Option<usize>,
     pub drag: Option<Drag>,
+    /// Where the pointer last moved over the grid: each frame re-derives the hover from it, so
+    /// after a wheel scroll the hover follows the pointer, not the row it was on.
+    pub position: Option<Point<Pixels>>,
 }
 
 impl PointerState {
@@ -270,17 +273,37 @@ impl GridView {
         cx.notify();
     }
 
+    /// The hovered body cell and header edge at `p` in the frame `g`.
+    pub(crate) fn hover_at(
+        &self,
+        g: &Geometry,
+        p: Point<Pixels>,
+    ) -> (Option<(u64, usize)>, Option<usize>) {
+        match self.hit_test(g, p) {
+            Hit::Cell(r, c) => (Some((r, c)), None),
+            Hit::Border(ix) => (None, Some(ix)),
+            _ => (None, None),
+        }
+    }
+
     pub(crate) fn mouse_move(&mut self, e: &MouseMoveEvent, hovered: bool, cx: &mut Context<Self>) {
         let Some(g) = self.geometry.clone() else {
             return;
         };
+        if let Some(stale) = self.pointer.drag
+            && !e.dragging()
+        {
+            // The button went up where we never heard it (outside the window): the drag ended.
+            self.pointer.drag = None;
+            if let Drag::Resize { col, width, .. } = stale {
+                cx.emit(GridEvent::ColumnResized { col, width });
+            }
+            cx.notify();
+        }
         let Some(drag) = self.pointer.drag else {
+            self.pointer.position = hovered.then_some(e.position);
             let (hover, border) = if hovered {
-                match self.hit_test(&g, e.position) {
-                    Hit::Cell(r, c) => (Some((r, c)), None),
-                    Hit::Border(ix) => (None, Some(ix)),
-                    _ => (None, None),
-                }
+                self.hover_at(&g, e.position)
             } else {
                 (None, None)
             };
@@ -291,9 +314,6 @@ impl GridView {
             }
             return;
         };
-        if !e.dragging() {
-            return;
-        }
         let map = ViewMap::identity(self.data.count.loaded);
         let before = self.selection.clone();
         match drag {

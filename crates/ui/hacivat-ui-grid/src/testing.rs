@@ -460,6 +460,12 @@ impl FixtureSource {
         source
     }
 
+    /// The same cells under `columns` (names, types, widths).
+    pub fn with_columns(mut self, columns: Vec<ColumnSpec>) -> Self {
+        self.columns = columns.into();
+        self
+    }
+
     /// Sets the loaded rows, whether more come, and the exact total (an append or a stream).
     pub fn set_count(&self, loaded: u64, more: bool, exact_total: Option<u64>) {
         let mut s = self.state.borrow_mut();

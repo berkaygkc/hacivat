@@ -319,12 +319,28 @@ pub struct CellPaint<'a> {
 /// The result of painting one cell.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CellOutcome {
+    /// Painted below full quality: a fast-scroll prefix or the skeleton bar.
     pub degraded: bool,
-    pub painted: bool,
+    /// Painted as the skeleton bar (the frame's shaping budget was spent, or the text has no
+    /// safe fast-scroll prefix).
+    pub skeleton: bool,
 }
 
-/// One cell's content (layer 7): `text` in its role inside `[left, left + width)`, aligned,
-/// with its decode-error glyph or trailing chip.
+/// Where a body cell sits: its column's left edge and width, its row's top, and the row and
+/// visible column index (the skeleton bar's width hash).
+#[derive(Debug, Clone, Copy)]
+pub struct CellBox {
+    pub left: f32,
+    pub width: f32,
+    pub y: f32,
+    pub row: u64,
+    pub col: usize,
+}
+
+/// One cell's content (layer 7): `text` in its role inside the cell, aligned, with its
+/// decode-error glyph or trailing chip. In a fast-scroll frame a cell the budget cannot shape,
+/// or whose text has no safe prefix, paints the static skeleton bar: never a blank cell.
+/// `record` hears of every cell: `Some(shape)` painted text, `None` the skeleton bar.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_cell_content(
     p: &CellPaint<'_>,
@@ -336,35 +352,27 @@ pub fn paint_cell_content(
     column: ColumnKind,
     align: Align,
     chip: Option<&SharedString>,
-    left: f32,
-    width: f32,
-    y: f32,
+    at: CellBox,
     window: &mut Window,
     cx: &mut App,
-    mut record: impl FnMut(&Shaped, f32, &mut App),
+    mut record: impl FnMut(Option<&Shaped>, &mut App),
 ) -> CellOutcome {
     let roles = p.roles;
     let role = roles.for_cell(kind, column);
+    let (left, width, y) = (at.left, at.width, at.y);
     let mut avail = width - 2.0 * CELL_PAD_PX;
     let mut x0 = left + CELL_PAD_PX;
-    if kind == CellKind::Error {
+    let error_icon = (kind == CellKind::Error).then(|| {
         let icon = rect(
             x0,
             y + (p.row_h - ERROR_ICON_PX) / 2.0,
             ERROR_ICON_PX,
             ERROR_ICON_PX,
         );
-        let _ = window.paint_svg(
-            icon,
-            IconName::TriangleAlert.path().into(),
-            None,
-            Default::default(),
-            p.palette.text,
-            cx,
-        );
         x0 += ERROR_ICON_PX + ERROR_GAP_PX;
         avail -= ERROR_ICON_PX + ERROR_GAP_PX;
-    }
+        icon
+    });
     // The trailing chip's box width, measured first (the text gives way to it).
     let trail = match chip {
         Some(chip) if !p.fast => with_shape(
@@ -401,20 +409,32 @@ pub fn paint_cell_content(
         window,
         cx,
         |s, window, cx| {
+            if s.skeleton {
+                return None;
+            }
             let x = match align {
                 Align::Start => x0,
                 Align::End => x0 + avail - s.width,
                 Align::Center => x0 + (avail - s.width) / 2.0,
             };
             paint_shaped(s, x, y, row_h, palette, chips, window, cx);
-            record(s, s.width, cx);
-            (s.degraded, x + s.width)
+            record(Some(s), cx);
+            Some((s.degraded, x + s.width))
         },
     );
-    match painted {
+    match painted.flatten() {
         Some((degraded, end)) => {
-            outcome.painted = true;
             outcome.degraded = degraded;
+            if let Some(icon) = error_icon {
+                let _ = window.paint_svg(
+                    icon,
+                    IconName::TriangleAlert.path().into(),
+                    None,
+                    Default::default(),
+                    palette.text,
+                    cx,
+                );
+            }
             if trail.is_some()
                 && let Some(chip) = chip
             {
@@ -444,7 +464,12 @@ pub fn paint_cell_content(
                 );
             }
         }
-        None => outcome.degraded = true,
+        None => {
+            paint_skeleton(left, width, y, row_h, at.row, at.col, palette, window);
+            record(None, cx);
+            outcome.degraded = true;
+            outcome.skeleton = true;
+        }
     }
     outcome
 }

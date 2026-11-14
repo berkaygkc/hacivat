@@ -12,10 +12,13 @@
 //!   controls (U+202A–E, U+2066–9, U+200E/F, U+061C) → a named chip such as `⟨RLO⟩` (the Trojan
 //!   Source defence). Each is painted as a chip; the cell's text itself is unchanged, so a copy
 //!   keeps the real characters.
-//! - **Fast-scroll** paints an ASCII-safe prefix ([`fast_prefix`]): at most
+//! - **Fast-scroll** ([`fast_cut`]) paints a text that is all printable ASCII and within
+//!   [`FAST_PREFIX_CHARS`] characters at full quality; otherwise its ASCII-safe prefix (at most
 //!   [`FAST_PREFIX_CHARS`] characters, stopping before the first one that is not printable
-//!   ASCII, so the run shapes in the primary font with no fallback and never shows a wrong
-//!   character.
+//!   ASCII, so the run shapes in the primary font with no fallback) **followed by `…`**, so a
+//!   prefix never reads as the whole value. A text with no such prefix, or whose prefix would
+//!   end at a number's group separator (`12 345` in `fr` or `sv` would read `12…`), paints the
+//!   skeleton bar instead.
 
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -74,15 +77,45 @@ pub fn fitting_boundary(
     }
 }
 
-/// The fast-scroll prefix of `text`: at most `max_chars` characters, stopping before the first
-/// that is not printable ASCII (or a space).
-pub fn fast_prefix(text: &str, max_chars: usize) -> &str {
-    let end = text
-        .bytes()
+/// Printable ASCII or a space: shapes in the primary font with no fallback.
+fn ascii_safe(b: u8) -> bool {
+    b == b' ' || b.is_ascii_graphic()
+}
+
+/// What a fast-scroll frame may paint for a text it has no shape for (review round 1: a fast
+/// prefix must never read as a different value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FastCut {
+    /// The whole text is printable ASCII within the cap: shape it at full quality.
+    Whole,
+    /// Paint the first `n` bytes followed by `…`.
+    Prefix(usize),
+    /// Paint the skeleton bar: no ASCII-safe prefix, or the prefix would end at a number's
+    /// group separator (`12 345` in `fr`, `12 345` in `sv` would read as `12`).
+    Skeleton,
+}
+
+/// How a fast-scroll frame shows `text` within `max_chars` characters (module docs).
+pub fn fast_cut(text: &str, max_chars: usize) -> FastCut {
+    let bytes = text.as_bytes();
+    let run = bytes
+        .iter()
         .take(max_chars)
-        .position(|b| !(b == b' ' || b.is_ascii_graphic()))
-        .unwrap_or_else(|| text.len().min(max_chars));
-    &text[..end]
+        .take_while(|b| ascii_safe(**b))
+        .count();
+    if run == bytes.len() {
+        return FastCut::Whole;
+    }
+    if run == 0 {
+        return FastCut::Skeleton;
+    }
+    // The run stopped at a character that is not printable ASCII (rather than at the cap): a
+    // digit before it is a number cut at a separator the font may draw (NBSP, NNBSP, `’`).
+    let stopped_at_symbol = !ascii_safe(bytes[run]);
+    if stopped_at_symbol && bytes[run - 1].is_ascii_digit() {
+        return FastCut::Skeleton;
+    }
+    FastCut::Prefix(run)
 }
 
 /// A control made visible.
@@ -260,12 +293,32 @@ mod tests {
     }
 
     #[test]
-    fn fast_prefix_is_ascii_safe_and_short() {
-        assert_eq!(fast_prefix("hello world", 24), "hello world");
-        assert_eq!(fast_prefix("abcdefghijklmnopqrstuvwxyz", 24).len(), 24);
-        assert_eq!(fast_prefix("Kadıköy", 24), "Kad");
-        assert_eq!(fast_prefix("İstanbul", 24), "");
-        assert_eq!(fast_prefix("a\tb", 24), "a");
-        assert_eq!(fast_prefix("abc", 2), "ab");
+    fn fast_cut_never_reads_as_a_different_value() {
+        // Short printable ASCII: the whole value, at full quality.
+        assert_eq!(fast_cut("12345.67", 24), FastCut::Whole);
+        assert_eq!(fast_cut("2026-11-14", 24), FastCut::Whole);
+        // Long ASCII: a prefix, painted with `…`.
+        let ts = "2026-11-14 10:00:00.123456+03:00";
+        assert_eq!(fast_cut(ts, 24), FastCut::Prefix(24));
+        assert_eq!(fast_cut("abcdef", 4), FastCut::Prefix(4));
+        // `fr` groups with U+202F, `sv` with U+00A0: never `12…`.
+        assert_eq!(fast_cut("12\u{202f}345,67", 24), FastCut::Skeleton);
+        assert_eq!(fast_cut("−12\u{a0}345,67", 24), FastCut::Skeleton);
+        assert_eq!(fast_cut("12\u{a0}345\u{a0}678,90", 24), FastCut::Skeleton);
+        assert_eq!(fast_cut("1\u{2019}234", 24), FastCut::Skeleton);
+        // Cut by the cap just before a separator: still a skeleton.
+        assert_eq!(fast_cut("123\u{a0}456", 3), FastCut::Skeleton);
+        // No ASCII-safe start: the skeleton.
+        assert_eq!(fast_cut("İstanbul", 24), FastCut::Skeleton);
+        // A word cut at a non-ASCII letter is a prefix with `…`.
+        assert_eq!(fast_cut("Kadıköy", 24), FastCut::Prefix(3));
+    }
+
+    #[test]
+    fn fast_cut_stops_at_controls_and_the_cap() {
+        assert_eq!(fast_cut("a\tb", 24), FastCut::Prefix(1));
+        assert_eq!(fast_cut("abc", 2), FastCut::Prefix(2));
+        assert_eq!(fast_cut("hello world", 24), FastCut::Whole);
+        assert_eq!(fast_cut("", 24), FastCut::Whole);
     }
 }
