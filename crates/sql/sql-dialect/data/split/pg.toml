@@ -1,0 +1,661 @@
+# Splitter-table fixtures for the `pg` profile (`sql-dialect/src/split_profile/pg.rs`; M3a
+# Task 8): every table row has at least one case that covers it (`covers`), and the meta-test in
+# `sql-split/tests/split.rs` fails when a row has none. Expectations come from `alg/10`
+# SQL-SPLIT-01..03. Cases marked "synthetic" isolate a row from the head rules with a `SELECT`
+# head; they test the splitter, not SQL validity. Fields: `sql-testkit/src/split.rs`.
+
+dialects = ["postgres"]
+flavor = "psql"
+
+[[case]]
+id = "start-SELECT"
+covers = ["start:SELECT"]
+input = "SELECT 1\nSELECT 2"
+editor = ["SELECT 1", "SELECT 2"]
+exec = ["SELECT 1\nSELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-INSERT"
+covers = ["start:INSERT"]
+input = "SELECT 1\nINSERT INTO t VALUES (1)"
+editor = ["SELECT 1", "INSERT INTO t VALUES (1)"]
+exec = ["SELECT 1\nINSERT INTO t VALUES (1)"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-UPDATE"
+covers = ["start:UPDATE"]
+input = "SELECT 1\nUPDATE t SET a = 1"
+editor = ["SELECT 1", "UPDATE t SET a = 1"]
+exec = ["SELECT 1\nUPDATE t SET a = 1"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-DELETE"
+covers = ["start:DELETE"]
+input = "SELECT 1\nDELETE FROM t"
+editor = ["SELECT 1", "DELETE FROM t"]
+exec = ["SELECT 1\nDELETE FROM t"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-MERGE"
+covers = ["start:MERGE"]
+input = "SELECT 1\nMERGE INTO t USING s ON t.a = s.a WHEN MATCHED THEN DELETE"
+editor = ["SELECT 1", "MERGE INTO t USING s ON t.a = s.a WHEN MATCHED THEN DELETE"]
+exec = ["SELECT 1\nMERGE INTO t USING s ON t.a = s.a WHEN MATCHED THEN DELETE"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-WITH"
+covers = ["start:WITH"]
+input = "SELECT 1\nWITH x AS (SELECT 2) SELECT * FROM x"
+editor = ["SELECT 1", "WITH x AS (SELECT 2) SELECT * FROM x"]
+exec = ["SELECT 1\nWITH x AS (SELECT 2) SELECT * FROM x"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-CREATE"
+covers = ["start:CREATE"]
+input = "SELECT 1\nCREATE TABLE t (a int)"
+editor = ["SELECT 1", "CREATE TABLE t (a int)"]
+exec = ["SELECT 1\nCREATE TABLE t (a int)"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-DROP"
+covers = ["start:DROP"]
+input = "SELECT 1\nDROP TABLE t"
+editor = ["SELECT 1", "DROP TABLE t"]
+exec = ["SELECT 1\nDROP TABLE t"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-ALTER"
+covers = ["start:ALTER"]
+input = "SELECT 1\nALTER TABLE t ADD b int"
+editor = ["SELECT 1", "ALTER TABLE t ADD b int"]
+exec = ["SELECT 1\nALTER TABLE t ADD b int"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-TRUNCATE"
+covers = ["start:TRUNCATE"]
+input = "SELECT 1\nTRUNCATE t"
+editor = ["SELECT 1", "TRUNCATE t"]
+exec = ["SELECT 1\nTRUNCATE t"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-GRANT"
+covers = ["start:GRANT"]
+input = "SELECT 1\nGRANT SELECT ON t TO r"
+editor = ["SELECT 1", "GRANT SELECT ON t TO r"]
+exec = ["SELECT 1\nGRANT SELECT ON t TO r"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-REVOKE"
+covers = ["start:REVOKE"]
+input = "SELECT 1\nREVOKE SELECT ON t FROM r"
+editor = ["SELECT 1", "REVOKE SELECT ON t FROM r"]
+exec = ["SELECT 1\nREVOKE SELECT ON t FROM r"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-EXPLAIN"
+covers = ["start:EXPLAIN"]
+input = "SELECT 1\nEXPLAIN SELECT 2"
+editor = ["SELECT 1", "EXPLAIN SELECT 2"]
+exec = ["SELECT 1\nEXPLAIN SELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-SHOW"
+covers = ["start:SHOW"]
+input = "SELECT 1\nSHOW search_path"
+editor = ["SELECT 1", "SHOW search_path"]
+exec = ["SELECT 1\nSHOW search_path"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-COPY"
+covers = ["start:COPY"]
+input = "SELECT 1\nCOPY t TO STDOUT"
+editor = ["SELECT 1", "COPY t TO STDOUT"]
+exec = ["SELECT 1\nCOPY t TO STDOUT"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-CALL"
+covers = ["start:CALL"]
+input = "SELECT 1\nCALL p()"
+editor = ["SELECT 1", "CALL p()"]
+exec = ["SELECT 1\nCALL p()"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-COMMIT"
+covers = ["start:COMMIT"]
+input = "SELECT 1\nCOMMIT"
+editor = ["SELECT 1", "COMMIT"]
+exec = ["SELECT 1\nCOMMIT"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-ROLLBACK"
+covers = ["start:ROLLBACK"]
+input = "SELECT 1\nROLLBACK"
+editor = ["SELECT 1", "ROLLBACK"]
+exec = ["SELECT 1\nROLLBACK"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-VACUUM"
+covers = ["start:VACUUM"]
+input = "SELECT 1\nVACUUM t"
+editor = ["SELECT 1", "VACUUM t"]
+exec = ["SELECT 1\nVACUUM t"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-ANALYZE"
+covers = ["start:ANALYZE"]
+input = "SELECT 1\nANALYZE t"
+editor = ["SELECT 1", "ANALYZE t"]
+exec = ["SELECT 1\nANALYZE t"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "start-COMMENT"
+covers = ["start:COMMENT"]
+input = "SELECT 1\nCOMMENT ON TABLE t IS 'x'"
+editor = ["SELECT 1", "COMMENT ON TABLE t IS 'x'"]
+exec = ["SELECT 1\nCOMMENT ON TABLE t IS 'x'"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-,"
+covers = ["prev:,"]
+input = "SELECT a,\nSELECT b"
+editor = ["SELECT a,\nSELECT b"]
+
+[[case]]
+id = "prev-."
+covers = ["prev:."]
+input = "SELECT t.\ncomment FROM t"
+editor = ["SELECT t.\ncomment FROM t"]
+
+[[case]]
+id = "prev-AS"
+covers = ["prev:AS"]
+input = "PREPARE q AS\nSELECT 1"
+editor = ["PREPARE q AS\nSELECT 1"]
+
+[[case]]
+id = "prev-UNION"
+covers = ["prev:UNION"]
+input = "SELECT 1 UNION\nSELECT 2"
+editor = ["SELECT 1 UNION\nSELECT 2"]
+
+[[case]]
+id = "prev-INTERSECT"
+covers = ["prev:INTERSECT"]
+input = "SELECT 1 INTERSECT\nSELECT 2"
+editor = ["SELECT 1 INTERSECT\nSELECT 2"]
+
+[[case]]
+id = "prev-EXCEPT"
+covers = ["prev:EXCEPT"]
+input = "SELECT 1 EXCEPT\nSELECT 2"
+editor = ["SELECT 1 EXCEPT\nSELECT 2"]
+
+[[case]]
+id = "prev-ALL"
+covers = ["prev:ALL"]
+input = "SELECT 1 UNION ALL\nSELECT 2"
+editor = ["SELECT 1 UNION ALL\nSELECT 2"]
+
+[[case]]
+id = "prev-DISTINCT"
+covers = ["prev:DISTINCT"]
+input = "SELECT 1 UNION DISTINCT\nSELECT 2"
+editor = ["SELECT 1 UNION DISTINCT\nSELECT 2"]
+
+[[case]]
+id = "prev-FOR"
+covers = ["prev:FOR"]
+input = "SELECT * FROM t FOR\nUPDATE"
+editor = ["SELECT * FROM t FOR\nUPDATE"]
+
+[[case]]
+id = "prev-DO"
+covers = ["prev:DO"]
+input = "CREATE RULE r AS ON UPDATE TO t DO\nDELETE FROM u"
+editor = ["CREATE RULE r AS ON UPDATE TO t DO\nDELETE FROM u"]
+
+[[case]]
+id = "prev-ON"
+covers = ["prev:ON"]
+input = "ALTER TABLE t ADD FOREIGN KEY (a) REFERENCES u (b) ON\nDELETE CASCADE"
+editor = ["ALTER TABLE t ADD FOREIGN KEY (a) REFERENCES u (b) ON\nDELETE CASCADE"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-BEFORE"
+covers = ["prev:BEFORE"]
+input = "SELECT 1 BEFORE\nINSERT"
+editor = ["SELECT 1 BEFORE\nINSERT"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-AFTER"
+covers = ["prev:AFTER"]
+input = "SELECT 1 AFTER\nINSERT"
+editor = ["SELECT 1 AFTER\nINSERT"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-OF"
+covers = ["prev:OF"]
+input = "SELECT 1 OF\nDELETE"
+editor = ["SELECT 1 OF\nDELETE"]
+
+[[case]]
+id = "prev-OR"
+covers = ["prev:OR"]
+input = "CREATE TRIGGER tr AFTER UPDATE OR\nDELETE ON t FOR EACH ROW EXECUTE FUNCTION f()"
+editor = ["CREATE TRIGGER tr AFTER UPDATE OR\nDELETE ON t FOR EACH ROW EXECUTE FUNCTION f()"]
+
+[[case]]
+id = "prev-THEN"
+covers = ["prev:THEN"]
+input = "MERGE INTO t USING s ON t.a = s.a WHEN MATCHED THEN\nUPDATE SET b = 1"
+editor = ["MERGE INTO t USING s ON t.a = s.a WHEN MATCHED THEN\nUPDATE SET b = 1"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-ELSE"
+covers = ["prev:ELSE"]
+input = "SELECT 1 ELSE\nSELECT 2"
+editor = ["SELECT 1 ELSE\nSELECT 2"]
+
+[[case]]
+id = "prev-INSTEAD"
+covers = ["prev:INSTEAD"]
+input = "CREATE RULE r AS ON INSERT TO t DO INSTEAD\nSELECT 1"
+editor = ["CREATE RULE r AS ON INSERT TO t DO INSTEAD\nSELECT 1"]
+
+[[case]]
+id = "prev-ALSO"
+covers = ["prev:ALSO"]
+input = "CREATE RULE r AS ON INSERT TO t DO ALSO\nSELECT 1"
+editor = ["CREATE RULE r AS ON INSERT TO t DO ALSO\nSELECT 1"]
+
+[[case]]
+id = "prev-GRANT"
+covers = ["prev:GRANT"]
+input = "ALTER DEFAULT PRIVILEGES IN SCHEMA s GRANT\nSELECT ON TABLES TO r"
+editor = ["ALTER DEFAULT PRIVILEGES IN SCHEMA s GRANT\nSELECT ON TABLES TO r"]
+
+[[case]]
+id = "prev-REVOKE"
+covers = ["prev:REVOKE"]
+input = "ALTER DEFAULT PRIVILEGES REVOKE\nSELECT ON TABLES FROM r"
+editor = ["ALTER DEFAULT PRIVILEGES REVOKE\nSELECT ON TABLES FROM r"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-EXPLAIN"
+covers = ["prev:EXPLAIN"]
+input = "SELECT 1 EXPLAIN\nSELECT 2"
+editor = ["SELECT 1 EXPLAIN\nSELECT 2"]
+
+[[case]]
+id = "prev-ANALYZE"
+covers = ["prev:ANALYZE"]
+input = "EXPLAIN ANALYZE\nSELECT 1"
+editor = ["EXPLAIN ANALYZE\nSELECT 1"]
+
+[[case]]
+id = "prev-VERBOSE"
+covers = ["prev:VERBOSE"]
+input = "VACUUM VERBOSE\nANALYZE t"
+editor = ["VACUUM VERBOSE\nANALYZE t"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-WITH"
+covers = ["prev:WITH"]
+input = "SELECT 1 WITH\nGRANT OPTION"
+editor = ["SELECT 1 WITH\nGRANT OPTION"]
+
+# synthetic: isolates the row
+[[case]]
+id = "prev-RETURN"
+covers = ["prev:RETURN"]
+input = "SELECT 1 RETURN\nSELECT 2"
+editor = ["SELECT 1 RETURN\nSELECT 2"]
+
+[[case]]
+id = "head-INSERT"
+covers = ["head:INSERT"]
+input = "INSERT INTO t\nSELECT 1\nSELECT 2"
+editor = ["INSERT INTO t\nSELECT 1", "SELECT 2"]
+exec = ["INSERT INTO t\nSELECT 1\nSELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "head-CREATE"
+covers = ["head:CREATE"]
+input = "CREATE TABLE t2\nSELECT 1\nSELECT 2"
+editor = ["CREATE TABLE t2\nSELECT 1", "SELECT 2"]
+exec = ["CREATE TABLE t2\nSELECT 1\nSELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "head-WITH"
+covers = ["head:WITH"]
+input = "WITH x AS (SELECT 1)\nSELECT * FROM x\nSELECT 2"
+editor = ["WITH x AS (SELECT 1)\nSELECT * FROM x", "SELECT 2"]
+exec = ["WITH x AS (SELECT 1)\nSELECT * FROM x\nSELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "head-EXPLAIN"
+covers = ["head:EXPLAIN"]
+input = "EXPLAIN (ANALYZE)\nSELECT 1\nSELECT 2"
+editor = ["EXPLAIN (ANALYZE)\nSELECT 1", "SELECT 2"]
+exec = ["EXPLAIN (ANALYZE)\nSELECT 1\nSELECT 2"]
+heuristic = true
+ambiguous = ["MissingSemicolon"]
+
+[[case]]
+id = "head-ALTER"
+covers = ["head:ALTER"]
+input = "ALTER TABLE t\nDROP COLUMN a\nALTER COLUMN b SET DEFAULT 1"
+editor = ["ALTER TABLE t\nDROP COLUMN a\nALTER COLUMN b SET DEFAULT 1"]
+
+# every start word continues a GRANT (a missed split sends what the server rejects)
+[[case]]
+id = "head-GRANT"
+covers = ["head:GRANT"]
+input = "GRANT INSERT ON t TO r\nGRANT SELECT ON u TO r"
+editor = ["GRANT INSERT ON t TO r\nGRANT SELECT ON u TO r"]
+
+[[case]]
+id = "head-REVOKE"
+covers = ["head:REVOKE"]
+input = "REVOKE INSERT ON t FROM r\nREVOKE SELECT ON u FROM r"
+editor = ["REVOKE INSERT ON t FROM r\nREVOKE SELECT ON u FROM r"]
+
+[[case]]
+id = "routine-FUNCTION"
+covers = ["skip:OR", "skip:REPLACE", "routine:FUNCTION"]
+input = "CREATE OR REPLACE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT 2; END; SELECT 3"
+editor = ["CREATE OR REPLACE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT 2; END", "SELECT 3"]
+
+[[case]]
+id = "routine-PROCEDURE"
+covers = ["routine:PROCEDURE"]
+input = "CREATE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC INSERT INTO t VALUES (1); END; SELECT 2"
+editor = ["CREATE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC INSERT INTO t VALUES (1); END", "SELECT 2"]
+
+# BEGIN ATOMIC only opens a block in a routine; elsewhere BEGIN is a transaction
+[[case]]
+id = "routine-not-atomic-elsewhere"
+covers = ["routine:FUNCTION"]
+input = "CREATE TABLE f (a int); BEGIN; SELECT 1; END;"
+editor = ["CREATE TABLE f (a int)", "BEGIN", "SELECT 1", "END"]
+
+[[case]]
+id = "psql-command"
+covers = ["client:backslash", "client:backslash-line", "client:backslash-to-eol"]
+input = "\\echo a b c\nSELECT 1;\n\\x \\\\ SELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+client = ["\\echo a b c", "\\x \\\\"]
+
+[[case]]
+id = "psql-inline-semicolon"
+covers = ["client:inline-semicolon"]
+input = "SELECT 1 \\; SELECT 2;"
+editor = ["SELECT 1 \\; SELECT 2"]
+ambiguous = ["ClientCommand"]
+client = ["\\;"]
+
+[[case]]
+id = "psql-copy"
+covers = ["client:copy"]
+input = "COPY t FROM STDIN;\n1\t'x\n\\.\nSELECT 1;"
+editor = ["COPY t FROM STDIN", "SELECT 1"]
+copy = "1\t'x\n"
+copy_end = true
+
+[[case]]
+id = "psql-g"
+covers = ["client:\\g"]
+input = "SELECT 1 \\g\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+client = ["\\g"]
+
+[[case]]
+id = "psql-gx"
+covers = ["client:\\gx"]
+input = "SELECT 1 \\gx\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+client = ["\\gx"]
+
+[[case]]
+id = "psql-gset"
+covers = ["client:\\gset"]
+input = "SELECT 1 \\gset\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+ambiguous = ["ClientCommand"]
+client = ["\\gset"]
+
+[[case]]
+id = "psql-gexec"
+covers = ["client:\\gexec"]
+input = "SELECT 1 \\gexec\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+ambiguous = ["ClientCommand"]
+client = ["\\gexec"]
+
+[[case]]
+id = "psql-gdesc"
+covers = ["client:\\gdesc"]
+input = "SELECT 1 \\gdesc\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+ambiguous = ["ClientCommand"]
+client = ["\\gdesc"]
+
+[[case]]
+id = "psql-r"
+covers = ["client:\\r"]
+input = "SELECT 1\n\\r\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+ambiguous = ["ClientCommand"]
+client = ["\\r"]
+
+[[case]]
+id = "psql-reset"
+covers = ["client:\\reset"]
+input = "SELECT 1\n\\reset\nSELECT 2;"
+editor = ["SELECT 1", "SELECT 2"]
+ambiguous = ["ClientCommand"]
+client = ["\\reset"]
+
+
+# --- fix round 1 (T8 review): block words by position, compounds, handlers ---
+
+# erratum (e): `end` after the row's word is a name; the body goes on (synthetic where the SQL is not valid)
+[[case]]
+id = "name-."
+covers = ["name:."]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT t.end FROM t; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT t.end FROM t; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-,"
+covers = ["name:,"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1, end FROM t; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1, end FROM t; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-AS"
+covers = ["name:AS"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 AS end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 AS end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-SET"
+covers = ["name:SET"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC UPDATE t SET end = 1; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC UPDATE t SET end = 1; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-SELECT"
+covers = ["name:SELECT"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT end FROM t; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT end FROM t; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-RETURN"
+covers = ["name:RETURN"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC RETURN end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC RETURN end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-WHERE"
+covers = ["name:WHERE"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-AND"
+covers = ["name:AND"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE a AND end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE a AND end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-OR"
+covers = ["name:OR"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE a OR end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE a OR end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-NOT"
+covers = ["name:NOT"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE NOT end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE NOT end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-ON"
+covers = ["name:ON"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t JOIN u ON end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t JOIN u ON end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-BY"
+covers = ["name:BY"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t ORDER BY end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t ORDER BY end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-FROM"
+covers = ["name:FROM"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-JOIN"
+covers = ["name:JOIN"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t JOIN end ON true; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t JOIN end ON true; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-INTO"
+covers = ["name:INTO"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC INSERT INTO end VALUES (1); DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC INSERT INTO end VALUES (1); DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-IN"
+covers = ["name:IN"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE a IN end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE a IN end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-IS"
+covers = ["name:IS"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE a IS end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE a IS end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-LIKE"
+covers = ["name:LIKE"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE a LIKE end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 FROM t WHERE a LIKE end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-WHEN"
+covers = ["name:WHEN"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN end THEN 1 END; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN end THEN 1 END; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "endpos-semicolon"
+covers = ["endpos:;"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END", "SELECT 2"]
+
+[[case]]
+id = "endpos-ATOMIC"
+covers = ["endpos:ATOMIC"]
+input = "CREATE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC END; SELECT 2"
+editor = ["CREATE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC END", "SELECT 2"]
+
+# an END in no statement position and after no name position: a mismatch, never an early end
+[[case]]
+id = "endpos-none"
+covers = ["endpos:;"]
+input = "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 end2 END; SELECT 2"
+editor = ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 end2 END; SELECT 2"]
+ambiguous = ["UnterminatedConstruct", "UnknownBlock"]
+heuristic = true
+
+# statements in a psql \if branch run only if psql takes it: Run refuses them
+[[case]]
+id = "psql-if"
+covers = ["client:\\if", "client:\\elif", "client:\\else", "client:\\endif"]
+input = "\\if :x\nSELECT 1;\n\\elif :y\nSELECT 2;\n\\else\nSELECT 3;\n\\endif\nSELECT 4;"
+editor = ["SELECT 1", "SELECT 2", "SELECT 3", "SELECT 4"]
+ambiguous = ["ClientCommand", "ClientCommand", "ClientCommand"]
+client = ["\\if :x", "\\elif :y", "\\else", "\\endif"]
+confidence = ["H", "H", "H", "E"]

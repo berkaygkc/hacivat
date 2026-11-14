@@ -1,0 +1,7 @@
+-- FX-SPLIT-MY-03  procedure WITHOUT DELIMITER (block tracking needed)
+CREATE PROCEDURE hv_q()
+BEGIN
+  SELECT 1;
+  SELECT 2;
+END;
+SELECT 3;

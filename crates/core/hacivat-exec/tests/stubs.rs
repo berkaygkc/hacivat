@@ -51,14 +51,26 @@ fn the_text_stubs_beneath_fail_closed() {
         l.range(delete),
         TextRange::new(TextSize::from(10), TextSize::from(16))
     );
-    // One heuristic item in both modes: execution never runs a heuristic boundary.
+    // The splitter works since Task 8: two exact statements in both modes, no uncertain
+    // boundary; cursor eligibility reads each unit's head.
     for split in [d.editor_split(), d.execution_split()] {
         assert!(matches!(
             split.items.as_slice(),
-            [Item::Statement(s)] if s.confidence == Confidence::Heuristic
+            [Item::Statement(a), Item::Statement(b)]
+                if a.confidence == Confidence::Exact && b.confidence == Confidence::Exact
         ));
+        assert!(split.ambiguous.is_empty());
     }
-    assert!(!head::cursor_eligible(&d, d.lexed().range(0)));
+    let units: Vec<TextRange> = d.execution_split().statements().map(|s| s.strict).collect();
+    assert_eq!(
+        units,
+        [
+            TextRange::new(TextSize::from(0), TextSize::from(8)),
+            TextRange::new(TextSize::from(10), TextSize::from(23))
+        ]
+    );
+    assert!(head::cursor_eligible(&d, units[0]));
+    assert!(!head::cursor_eligible(&d, units[1]));
     assert!(doc("").lexed().is_empty());
 }
 
