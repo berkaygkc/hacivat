@@ -7,9 +7,11 @@ mod height;
 mod rangeset;
 mod scroll;
 
-pub use compose::{Fragment, VisualLine, compose_line};
+pub use compose::{
+    Fragment, VisualLine, compose_line, control_glyph, control_name, is_visible_control,
+};
 pub use height::HeightMap;
-pub use rangeset::RangeSet;
+pub use rangeset::{QueryStats, RangeSet};
 pub use scroll::ScrollAnchor;
 
 /// A text style of a decoration source (the adapter's highlight classes).
