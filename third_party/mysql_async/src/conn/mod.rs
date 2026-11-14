@@ -447,6 +447,15 @@ impl Conn {
         self.inner.stream.take().unwrap()
     }
 
+    // HACIVAT PATCH §7: give a connection up without reading what is pending on it.
+    /// Drops this connection at once: no pending result is read and no `COM_QUIT` is sent; the
+    /// socket is closed. For a caller that knows the connection is unusable (the server broke
+    /// the protocol) or must not wait for the rest of a result. `Drop` then has nothing to do.
+    pub fn abandon(mut self) {
+        self.inner.disconnected = true;
+        drop(self.inner.stream.take());
+    }
+
     /// Disconnects this connection from server.
     pub async fn disconnect(mut self) -> Result<()> {
         if !self.inner.disconnected {

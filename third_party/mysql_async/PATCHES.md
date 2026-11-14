@@ -106,3 +106,70 @@ Every patch is fenced in the source by a `// HACIVAT PATCH §N` comment. Tests:
 - Test: `custom_client_config_is_used` (counting verifier called once, SNI `db`).
 - Upstream PR text: "Allow supplying a prebuilt `rustls::ClientConfig` via
   `SslOpts::with_rustls_client_config` for callers that need custom verifiers or key providers."
+
+## §6 Out-of-shape result packets are errors, never a panic or a silent row (Task 14)
+
+A hostile or broken server (or anything between it and the client) could crash the client, or
+have a malformed row accepted, with one result packet. Each hunk turns that packet into an
+`InvalidData` I/O error (an empty packet into a short-row parse error), which Hacivat's typed
+path reports as `RawErrorKind::Protocol` and answers by dropping the connection. Valid server
+output is unchanged (the M2b Docker suites and the Task 14 matrix pass on MySQL 8.0/8.4 and
+MariaDB 10.6/10.11/11.4).
+
+- `src/queryable/mod.rs` `Protocol::is_last_result_set_packet` (l.45-52): `packet[0] == 0xFE`
+  becomes `packet.first() == Some(&0xFE)`. Why: a zero-length packet among the rows panicked
+  (index out of bounds); now it is not a terminator and fails to parse as a row.
+- `src/queryable/mod.rs` `whole_row` (l.56-67, new) and both `read_result_set_row`s
+  (`TextProtocol` l.82-88, `BinaryProtocol` l.100-106): after the row's values, the packet must
+  be used up. Why: `mysql_common`'s row deserializers read exactly one value per column and
+  ignore what follows, so a row with more values than the result set has columns was accepted
+  with the extra values dropped (a row with fewer values already failed).
+- `src/conn/routines/helpers.rs` `handle_result_set` (l.134-143): a column count of 0 or above
+  65,535 is an error. Why: `read_column_defs` reserves one slot per announced column before
+  reading any (`Vec::with_capacity(n)`), so a count of 2^40 aborted the process on the failed
+  allocation; a count of 0 in a long length-encoded form (`FC 00 00`; the one-byte 0 is an OK
+  packet) hit `debug_assert!(num > 0)`. A real result set has at least one column, and a
+  prepared statement's column count is a `u16`.
+- Not patched (not `mysql_async`'s code): `mysql_common`'s binary-protocol value parser panics
+  (`unimplemented!`) on the column types only replication streams use (`TIMESTAMP2`,
+  `DATETIME2`, `TIME2`, `TYPED_ARRAY`, 243). Hacivat's typed path checks every binary result
+  set's column types before it reads a row (`hacivat_driver_mysql::decode::binary_decodable`).
+- Tests (`crates/core/hacivat-driver-mysql/tests/typed_wire.rs`, a scripted in-process server):
+  `an_empty_packet_among_the_rows_is_protocol_not_a_panic`,
+  `a_text_row_with_a_value_too_many_is_protocol`,
+  `a_column_count_of_zero_is_protocol_not_a_panic`,
+  `a_column_count_past_65535_is_protocol_not_an_allocation`; before the patch the first and
+  third panic, the second is accepted, and the fourth aborts the test process.
+- Upstream PR text: "Reject malformed result packets instead of panicking: treat an empty packet
+  as a non-terminator, require a row to consume its whole packet, and refuse a result set header
+  whose column count is 0 or above 65535 before reserving memory for it."
+
+## §7 `Conn::abandon`: give a connection up without reading what is pending (Task 14 round 1)
+
+- `src/conn/mod.rs` (l.450-457, new, fenced): `pub fn abandon(mut self)` marks the connection
+  disconnected and drops its stream (the socket closes). `Drop` then spawns nothing: no pending
+  result is read and no `COM_QUIT` is sent (Hacivat uses no pool, so nothing is returned to one).
+- Why: dropping a `Conn` with a pending result (`Drop` → `disconnect` → `cleanup_for_pool` →
+  `drop_result`) reads the whole rest in a background task, and its final `disconnect` is a no-op
+  because the helper marked the connection disconnected first, so no `COM_QUIT` is sent either.
+  For Hacivat that was wrong three ways (Task 14 review, Important 1):
+  - after a protocol violation, the client kept reading the hostile stream;
+  - after the driver refused a binary result set with a column type `mysql_common` cannot read
+    (`TIME2` …), the background read parsed that row and panicked (`unimplemented!`) in a tokio
+    worker;
+  - `close` with a suspended cursor read its whole rest (gigabytes), while the server statement
+    kept its metadata lock and read view.
+  With `abandon` the server's next write meets a closed socket and the statement is aborted at
+  once. The cost: the server counts an aborted connection instead of a clean quit, so Hacivat
+  abandons only a broken connection or one with a query open; a plain `close` keeps
+  `disconnect()`.
+- Test: `crates/core/hacivat-driver-mysql/tests/patches.rs`
+  `abandon_closes_the_socket_without_reading_the_rest_or_quitting` (the scripted server's writes
+  of a 16 MB rest fail, no `COM_QUIT`). The driver's uses: `tests/typed_wire.rs`
+  `a_protocol_violation_abandons_the_connection_without_reading_on`,
+  `a_refused_column_type_is_never_parsed_in_the_background`,
+  `close_with_a_suspended_query_abandons_the_connection`,
+  `an_after_kill_that_runs_out_abandons_the_drains_connection`.
+- Upstream PR text: "Add `Conn::abandon`: drop a connection without reading a pending result or
+  sending `COM_QUIT`, for callers that know the connection is unusable or must not wait for the
+  rest of a result."

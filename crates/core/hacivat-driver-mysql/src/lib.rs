@@ -1,5 +1,5 @@
 //! The MySQL and MariaDB driver over the vendored `mysql_async` (`third_party/mysql_async`,
-//! patches §1–§5): the loopback-forwarder path (R18), TLS through Hacivat's own rustls
+//! patches §1–§7): the loopback-forwarder path (R18), TLS through Hacivat's own rustls
 //! configuration (Q2), the outcome-based password guard (Q20), execution with the transaction
 //! status from the server status flags, `COM_RESET_CONNECTION` and family detection
 //! (HV-DRV-01, HV-EXEC-05).

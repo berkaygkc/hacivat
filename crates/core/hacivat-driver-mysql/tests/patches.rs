@@ -303,3 +303,47 @@ async fn skip_domain_validation_matches_the_name_error_by_variant() {
     let _ = Conn::new(opts).await;
     assert_eq!(srv.sni.await.unwrap(), Some("other".to_string()));
 }
+
+// ## m3a-t14-mysql-typed: patch §7 (`Conn::abandon`), against the scripted server shared with
+// `typed_wire.rs`.
+mod support;
+
+#[tokio::test]
+async fn abandon_closes_the_socket_without_reading_the_rest_or_quitting() {
+    use mysql_async::prelude::Queryable;
+    use std::time::Duration;
+
+    let release = Arc::new(tokio::sync::Notify::new());
+    let held = release.clone();
+    let server = support::serve(Arc::new(move |cmd: &support::Cmd| {
+        (cmd.code == support::COM_QUERY && cmd.text() == "SELECT s FROM t").then(|| {
+            let mut steps = support::header(&[support::text_col("s")]);
+            steps.extend(support::wide_text_rows(1));
+            steps.push(support::Step::Wait(held.clone()));
+            steps.extend(support::wide_text_rows(support::WIDE_ROWS));
+            steps.push(support::Step::Packet(support::terminator(
+                support::AUTOCOMMIT,
+                0,
+            )));
+            steps
+        })
+    }))
+    .await;
+    let mut conn = Conn::new(
+        OptsBuilder::default()
+            .ip_or_hostname("127.0.0.1")
+            .tcp_port(server.addr.port())
+            .prefer_socket(false),
+    )
+    .await
+    .unwrap();
+    // The result stays pending in the connection, as a suspended cursor leaves it. Dropped,
+    // the `Conn` would read all of it in the background; abandoned, it reads nothing.
+    let pending = conn.query_iter("SELECT s FROM t").await.unwrap();
+    drop(pending);
+    conn.abandon();
+    release.notify_one();
+    assert!(support::wait_until(Duration::from_secs(10), || server.ended()).await);
+    assert!(server.write_failed(), "the rest was read");
+    assert!(!server.quit_seen(), "no COM_QUIT");
+}

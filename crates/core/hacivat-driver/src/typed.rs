@@ -26,8 +26,11 @@
 //! it) and the query is gone; `close_query` closes it without an error.
 //!
 //! **The session's rules.**
-//! - It never drops a `next_event`/`fetch_more`/`close_query` future before it completes,
-//!   except when it discards the connection.
+//! - It never drops a `query`/`next_event`/`fetch_more`/`close_query` future before it
+//!   completes, except when it discards the connection. (m3a-t14 review round 1: `query` added.
+//!   A MySQL `query` dropped mid-prepare leaves its reply in the socket for the next command to
+//!   take as its own; the MySQL driver then abandons the connection and answers
+//!   `Io(NotConnected)`.)
 //! - One open query per connection, **except on PostgreSQL**: while the query is `Suspended`,
 //!   `execute`/`batch` may run in the same transaction and the named portal survives (the
 //!   R-M3-17 canary). MySQL and SQLite answer `Unsupported` to a statement while a query is
