@@ -1,9 +1,14 @@
-//! `TextBuffer`: a rope with exact line endings and the BOM in its metadata (UI-EDIT-02;
-//! working since Task 1b, Task 5 extends it).
+//! `TextBuffer`: a rope with exact line endings and the BOM in its metadata (UI-EDIT-02).
 //!
 //! Byte offsets are canonical. CR, LF and CRLF each end a line and round-trip byte for byte;
-//! U+2028 and U+0085 are not line breaks (ropey without `unicode_lines`). A leading U+FEFF
-//! moves into [`BufferMeta::bom`].
+//! nothing is normalised. U+2028 and U+0085 are not line breaks (ropey without
+//! `unicode_lines`; `cargo xtask check-deps` `RopeLineBreaks`). A leading U+FEFF moves into
+//! [`BufferMeta::bom`] and comes back with [`TextBuffer::to_string_with_bom`].
+//!
+//! The text changes only through [`ChangeSet::apply`](crate::ChangeSet::apply) (the model's
+//! dispatch), on character boundaries; the line-ending counts follow every edit in time
+//! proportional to the edit, never to the document. No casing or normalisation is ever applied
+//! to the text.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -17,6 +22,7 @@ use ropey::Rope;
 pub struct BufferMeta {
     /// The text began with U+FEFF (not part of the buffer's text).
     pub bom: bool,
+    /// The line endings the text has now.
     pub line_endings: LineEndingStats,
 }
 
@@ -28,7 +34,18 @@ pub enum LineEnding {
     Cr,
 }
 
-/// How many line endings of each kind the text had when the buffer was made.
+impl LineEnding {
+    /// The ending's bytes: what a typed newline inserts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LineEnding::Lf => "\n",
+            LineEnding::CrLf => "\r\n",
+            LineEnding::Cr => "\r",
+        }
+    }
+}
+
+/// How many line endings of each kind the text has (a CRLF counts once, as `crlf`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct LineEndingStats {
     pub lf: u32,
@@ -76,23 +93,75 @@ impl From<&str> for TextBuffer {
     }
 }
 
-fn stats_of(text: &str) -> LineEndingStats {
-    let mut stats = LineEndingStats::default();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\r' if bytes.get(i + 1) == Some(&b'\n') => {
-                stats.crlf += 1;
-                i += 1;
+/// Counts line endings over byte slices fed in order (a CRLF may straddle two slices).
+#[derive(Default)]
+struct EndingCounter {
+    stats: LineEndingStats,
+    pending_cr: bool,
+}
+
+impl EndingCounter {
+    fn feed(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            if self.pending_cr {
+                self.pending_cr = false;
+                if b == b'\n' {
+                    self.stats.crlf += 1;
+                    continue;
+                }
+                self.stats.cr += 1;
             }
-            b'\r' => stats.cr += 1,
-            b'\n' => stats.lf += 1,
-            _ => {}
+            match b {
+                b'\r' => self.pending_cr = true,
+                b'\n' => self.stats.lf += 1,
+                _ => {}
+            }
         }
-        i += 1;
     }
-    stats
+
+    fn finish(mut self) -> LineEndingStats {
+        if self.pending_cr {
+            self.stats.cr += 1;
+        }
+        self.stats
+    }
+}
+
+fn stats_of(text: &str) -> LineEndingStats {
+    let mut c = EndingCounter::default();
+    c.feed(text.as_bytes());
+    c.finish()
+}
+
+/// The line endings inside the bytes `a..b` of `rope` (any byte offsets).
+fn endings_in(rope: &Rope, a: usize, b: usize) -> LineEndingStats {
+    let mut c = EndingCounter::default();
+    if a < b {
+        let (chunks, mut at, _, _) = rope.chunks_at_byte(a);
+        for chunk in chunks {
+            let bytes = chunk.as_bytes();
+            let lo = a.saturating_sub(at);
+            let hi = (b - at).min(bytes.len());
+            if lo < hi {
+                c.feed(&bytes[lo..hi]);
+            }
+            at += bytes.len();
+            if at >= b {
+                break;
+            }
+        }
+    }
+    c.finish()
+}
+
+/// `stats` with `gone` taken out and `came` put in.
+fn adjust(stats: LineEndingStats, gone: LineEndingStats, came: LineEndingStats) -> LineEndingStats {
+    let f = |s: u32, g: u32, c: u32| s.saturating_add(c).saturating_sub(g);
+    LineEndingStats {
+        lf: f(stats.lf, gone.lf, came.lf),
+        crlf: f(stats.crlf, gone.crlf, came.crlf),
+        cr: f(stats.cr, gone.cr, came.cr),
+    }
 }
 
 impl TextBuffer {
@@ -132,6 +201,27 @@ impl TextBuffer {
     /// Lines: one more than the line breaks (an empty buffer has one line).
     pub fn len_lines(&self) -> usize {
         self.rope.len_lines()
+    }
+
+    /// The text with its BOM, when it had one: what saving writes back.
+    pub fn to_string_with_bom(&self) -> String {
+        let mut out = String::with_capacity(self.len_bytes() + 3);
+        if self.meta.bom {
+            out.push('\u{FEFF}');
+        }
+        for chunk in self.rope.chunks() {
+            out.push_str(chunk);
+        }
+        out
+    }
+
+    /// `b` falls on a character boundary of the text (the end of the text is one).
+    pub fn is_char_boundary(&self, b: usize) -> bool {
+        if b > self.rope.len_bytes() {
+            return false;
+        }
+        let (chunk, start, _, _) = self.rope.chunk_at_byte(b);
+        chunk.is_char_boundary(b - start)
     }
 
     /// The text of the byte range `r` (borrowed when it lies in one chunk).
@@ -228,8 +318,47 @@ impl TextBuffer {
         h.finish_128()
     }
 
-    /// The rope (for the model's edits).
-    pub(crate) fn rope_mut(&mut self) -> &mut Rope {
-        &mut self.rope
+    /// `b` moved to a char boundary on `bias`'s side. Unlike [`TextBuffer::snap`] it may stop
+    /// between the CR and LF of a CRLF: explicit byte edits may split one.
+    pub(crate) fn snap_to_char(&self, b: usize, bias: Bias) -> usize {
+        let b = b.min(self.rope.len_bytes());
+        let char_idx = self.rope.byte_to_char(b);
+        let at = self.rope.char_to_byte(char_idx);
+        if at != b && bias == Bias::After {
+            self.rope.char_to_byte(char_idx + 1)
+        } else {
+            at
+        }
+    }
+
+    /// The character that ends just before byte `b` (a char boundary).
+    pub(crate) fn char_before(&self, b: usize) -> Option<char> {
+        let char_idx = self.rope.byte_to_char(b.min(self.rope.len_bytes()));
+        char_idx.checked_sub(1).map(|i| self.rope.char(i))
+    }
+
+    /// Replaces the bytes `r` (on char boundaries) with `text`, keeping the line-ending counts
+    /// exact in O(log n + |r| + |text|): only the edit and one byte on either side are counted
+    /// (a CR before the edit may pair with a LF after it, or stop pairing).
+    pub(crate) fn replace(&mut self, r: Range<usize>, text: &str) {
+        let len = self.rope.len_bytes();
+        let window_start = r.start.saturating_sub(1);
+        let gone = endings_in(&self.rope, window_start, (r.end + 1).min(len));
+        let start_char = self.rope.byte_to_char(r.start);
+        let end_char = self.rope.byte_to_char(r.end);
+        if end_char > start_char {
+            self.rope.remove(start_char..end_char);
+        }
+        if !text.is_empty() {
+            self.rope.insert(start_char, text);
+        }
+        let new_len = self.rope.len_bytes();
+        let came = endings_in(
+            &self.rope,
+            window_start,
+            (r.start + text.len() + 1).min(new_len),
+        );
+        let meta = Arc::make_mut(&mut self.meta);
+        meta.line_endings = adjust(meta.line_endings, gone, came);
     }
 }
