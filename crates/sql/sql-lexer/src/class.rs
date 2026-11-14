@@ -17,16 +17,56 @@ pub enum TokenClass {
     Operator,
     Punctuation,
     Parameter,
+    /// The `$tag$` delimiters of a dollar-quoted string (the adapter splits them off a
+    /// `DollarString`, whose class is `String`).
     DollarTag,
     ExecutableComment,
     OptimizerHint,
     ClientCommand,
     Error,
+    /// Spaces and line breaks: nothing to paint (Task 4).
+    Whitespace,
 }
 
-/// The class of a token (Task 4). Task 1b stub: every token is `Error` (the stub lexer only
-/// makes `Unknown` tokens).
+/// The class of a token. A word is a keyword when the dialect's table has it (`kw`); a token
+/// the server rejects (`Unknown`, an `ERROR` or `JUNK` flag) is `Error`; an unterminated
+/// string or comment keeps its own class, so its colour shows how far it runs (the error is in
+/// `Lexed::errors`).
 pub fn token_class(kind: TokenKind, flags: TokenFlags, kw: Option<KwEntry>) -> TokenClass {
-    let _ = (kind, flags, kw);
-    TokenClass::Error
+    if flags.intersects(TokenFlags::ERROR | TokenFlags::JUNK) {
+        return TokenClass::Error;
+    }
+    match kind {
+        TokenKind::Whitespace | TokenKind::Newline => TokenClass::Whitespace,
+        TokenKind::LineComment | TokenKind::BlockComment => TokenClass::Comment,
+        TokenKind::HintComment => TokenClass::OptimizerHint,
+        TokenKind::ExecutableComment => TokenClass::ExecutableComment,
+        TokenKind::Word if kw.is_some() => TokenClass::Keyword,
+        TokenKind::Word => TokenClass::Identifier,
+        TokenKind::QuotedIdent | TokenKind::UnicodeQuotedIdent => TokenClass::QuotedIdentifier,
+        TokenKind::String
+        | TokenKind::DollarString
+        | TokenKind::BitString
+        | TokenKind::HexString
+        | TokenKind::InlineData => TokenClass::String,
+        TokenKind::Number => TokenClass::Number,
+        TokenKind::PositionalParam
+        | TokenKind::QuestionParam
+        | TokenKind::NamedParam
+        | TokenKind::UserVar
+        | TokenKind::SystemVar
+        | TokenKind::ClientVar => TokenClass::Parameter,
+        TokenKind::Op => TokenClass::Operator,
+        TokenKind::LParen
+        | TokenKind::RParen
+        | TokenKind::LBracket
+        | TokenKind::RBracket
+        | TokenKind::LBrace
+        | TokenKind::RBrace
+        | TokenKind::Comma
+        | TokenKind::Semicolon
+        | TokenKind::Dot => TokenClass::Punctuation,
+        TokenKind::ClientCommand => TokenClass::ClientCommand,
+        TokenKind::Unknown => TokenClass::Error,
+    }
 }

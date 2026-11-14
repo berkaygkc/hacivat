@@ -1,0 +1,917 @@
+# The PostgreSQL lexer corpus (M3a Task 4).
+#
+# Expectations come from `alg/10` SQL-LEX-01 and SQL-LEX-02 (the numbered tests and the
+# edge-case list) and from PostgreSQL's scanner rules (`scan.l`, PostgreSQL License, read in
+# the vendored libpg_query). Fields are documented in `sql-testkit/src/lex.rs`. `version`
+# absent means an unknown server version, which lexes with the newest profile (PostgreSQL
+# 16 rules). A carriage return is always spelled `\r`, never a raw CR (P15).
+#
+# Ruling (Task 4): every non-ASCII character is an identifier character, as in the server
+# (any byte >= 0x80). `alg/10` rule 12 lists U+00A0 and full-width punctuation as `Unknown`;
+# reading them so would split `x $$` and open a dollar quote the server never sees (case
+# EDGE-nbsp-dollar), so a statement boundary could move.
+
+# --- alg/10 SQL-LEX-02 tests 1-17 (9, 11 and 12 are T-SQL, ClickHouse and Oracle: no
+#     profile in M3a; 18 is the property test in sql-lexer/tests/props.rs) ---
+
+[[case]]
+id = "LEX02-01"
+source = "alg/10 SQL-LEX-02 test 1"
+dialect = "postgres"
+input = "SELECT $$a;b$$;"
+kinds = ["Word", "Whitespace", "DollarString", "Semicolon"]
+texts = ["SELECT", " ", "$$a;b$$", ";"]
+
+[[case]]
+id = "LEX02-02"
+source = "alg/10 SQL-LEX-02 test 2"
+dialect = "postgres"
+input = "x$$y$$"
+kinds = ["Word"]
+
+[[case]]
+id = "LEX02-03"
+source = "alg/10 SQL-LEX-02 test 3"
+dialect = "postgres"
+input = "/* a /* b */ c */ SELECT"
+kinds = ["BlockComment", "Whitespace", "Word"]
+texts = ["/* a /* b */ c */", " ", "SELECT"]
+
+# Erratum (Task 4): `alg/10` test 7 lists `String('a\') Word(b) String(unterminated)`, but its
+# own rule 4 (and the server's xbstart) makes `b'` a bit-string prefix: the tail is one
+# unterminated bit string. LEX02-07c keeps the word/string split with a letter that is no
+# prefix.
+[[case]]
+id = "LEX02-07a"
+source = "alg/10 SQL-LEX-02 test 7 (standard_conforming_strings on), with the rule-4 erratum"
+dialect = "postgres"
+input = "'a\\'b'"
+kinds = ["String", "BitString"]
+texts = ["'a\\'", "b'"]
+flags = ["", "UNTERMINATED"]
+errors = ["UnterminatedString"]
+
+[[case]]
+id = "LEX02-07c"
+source = "alg/10 SQL-LEX-02 test 7 (standard_conforming_strings on)"
+dialect = "postgres"
+input = "'a\\'c'"
+kinds = ["String", "Word", "String"]
+texts = ["'a\\'", "c", "'"]
+flags = ["", "", "UNTERMINATED"]
+errors = ["UnterminatedString"]
+
+[[case]]
+id = "LEX02-07b"
+source = "alg/10 SQL-LEX-02 test 7"
+dialect = "postgres"
+input = "E'a\\'b'"
+kinds = ["String"]
+
+[[case]]
+id = "LEX02-08a"
+source = "alg/10 SQL-LEX-02 test 8"
+dialect = "postgres"
+input = "=-1"
+kinds = ["Op", "Op", "Number"]
+texts = ["=", "-", "1"]
+
+[[case]]
+id = "LEX02-08b"
+source = "alg/10 SQL-LEX-02 test 8"
+dialect = "postgres"
+input = "@-1"
+kinds = ["Op", "Number"]
+texts = ["@-", "1"]
+
+[[case]]
+id = "LEX02-08c"
+source = "alg/10 SQL-LEX-02 test 8"
+dialect = "postgres"
+input = "+/*c*/1"
+kinds = ["Op", "BlockComment", "Number"]
+texts = ["+", "/*c*/", "1"]
+
+[[case]]
+id = "LEX02-14a"
+source = "alg/10 SQL-LEX-02 test 14 (PostgreSQL 16)"
+dialect = "postgres"
+version = "16.0.0"
+input = "1_000"
+kinds = ["Number"]
+flags = ["HAS_SEPARATORS"]
+
+[[case]]
+id = "LEX02-14b"
+source = "alg/10 SQL-LEX-02 test 14 (PostgreSQL 15)"
+dialect = "postgres"
+version = "15.4.0"
+input = "1_000"
+kinds = ["Number", "Word"]
+texts = ["1", "_000"]
+flags = ["JUNK", ""]
+
+[[case]]
+id = "LEX02-15a"
+source = "alg/10 SQL-LEX-02 test 15"
+dialect = "postgres"
+input = "$a$ x $b$ y $a$"
+kinds = ["DollarString"]
+
+[[case]]
+id = "LEX02-15b"
+source = "alg/10 SQL-LEX-02 test 15 (tags are case-sensitive)"
+dialect = "postgres"
+input = "$A$ x $a$"
+kinds = ["DollarString"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedDollar"]
+
+[[case]]
+id = "LEX02-16a"
+source = "alg/10 SQL-LEX-02 test 16"
+dialect = "postgres"
+input = "x ?| array['a']"
+kinds = ["Word", "Whitespace", "Op", "Whitespace", "Word", "LBracket", "String", "RBracket"]
+texts = ["x", " ", "?|", " ", "array", "[", "'a'", "]"]
+
+[[case]]
+id = "LEX02-16b"
+source = "alg/10 SQL-LEX-02 test 16"
+dialect = "postgres"
+input = "\"a\""
+kinds = ["QuotedIdent"]
+
+[[case]]
+id = "LEX02-17a"
+source = "alg/10 SQL-LEX-02 test 17 (FX-SPLIT-PG-04)"
+dialect = "postgres"
+input = "/* outer /* inner ; */ still comment ; */"
+kinds = ["BlockComment"]
+
+[[case]]
+id = "LEX02-17b"
+source = "alg/10 SQL-LEX-02 test 17 (FX-SPLIT-PG-04)"
+dialect = "postgres"
+input = "E'it\\'s; fine'"
+kinds = ["String"]
+
+# --- alg/10 SQL-LEX-01: version gates ---
+
+[[case]]
+id = "LEX01-pg16-hex"
+source = "alg/10 SQL-LEX-01 step 2 (PostgreSQL 16 radix integers)"
+dialect = "postgres"
+version = "16.2.0"
+input = "0x10"
+kinds = ["Number"]
+
+[[case]]
+id = "LEX01-pg15-hex"
+source = "alg/10 SQL-LEX-01 step 2 (PostgreSQL 15: 0x10 is 0 with trailing junk)"
+dialect = "postgres"
+version = "15.0.0"
+input = "0x10"
+kinds = ["Number", "Word"]
+texts = ["0", "x10"]
+flags = ["JUNK", ""]
+
+[[case]]
+id = "LEX01-pg14-hex"
+source = "alg/10 SQL-LEX-01 step 2 (PostgreSQL 14: 0x10 is 0 AS x10)"
+dialect = "postgres"
+version = "14.9.0"
+input = "0x10"
+kinds = ["Number", "Word"]
+texts = ["0", "x10"]
+flags = ["", ""]
+
+[[case]]
+id = "LEX01-pg14-junk"
+source = "alg/10 SQL-LEX-01 step 2 (PostgreSQL 14 reads 123abc as 123 AS abc)"
+dialect = "postgres"
+version = "14.0.0"
+input = "123abc"
+kinds = ["Number", "Word"]
+flags = ["", ""]
+
+[[case]]
+id = "LEX01-pg14-separators"
+source = "alg/10 SQL-LEX-01 step 2"
+dialect = "postgres"
+version = "14.0.0"
+input = "1_000"
+kinds = ["Number", "Word"]
+texts = ["1", "_000"]
+flags = ["", ""]
+
+[[case]]
+id = "LEX01-pg18"
+source = "alg/10 SQL-LEX-01 step 2 (PostgreSQL 18 keeps the 16 rules)"
+dialect = "postgres"
+version = "18.1.0"
+input = "0o17 0b101 0X_1f"
+kinds = ["Number", "Whitespace", "Number", "Whitespace", "Number"]
+flags = ["", "", "", "", "HAS_SEPARATORS"]
+
+# --- alg/10 SQL-LEX-02 edge cases ---
+
+[[case]]
+id = "EDGE-empty"
+source = "alg/10 SQL-LEX-02 edge cases: empty input"
+dialect = "postgres"
+input = ""
+kinds = []
+
+[[case]]
+id = "EDGE-bom"
+source = "alg/10 SQL-LEX-02 rule 2 and edge cases: BOM only"
+dialect = "postgres"
+input = "﻿"
+kinds = ["Whitespace"]
+flags = ["BOM"]
+
+[[case]]
+id = "EDGE-bom-then-word"
+source = "alg/10 SQL-LEX-02 rule 2"
+dialect = "postgres"
+input = "﻿SELECT"
+kinds = ["Whitespace", "Word"]
+texts = ["﻿", "SELECT"]
+
+[[case]]
+id = "EDGE-nul"
+source = "alg/10 SQL-LEX-02 rule 12 and edge cases: NUL"
+dialect = "postgres"
+input = "a\u0000b"
+kinds = ["Word", "Unknown", "Word"]
+flags = ["", "ERROR", ""]
+errors = ["Nul"]
+
+[[case]]
+id = "EDGE-errors-name-every-rejected-token"
+source = "T4 review minor 4; alg/10 SQL-LEX-02 rule 12 (Unknown + error) and the junk rule"
+dialect = "postgres"
+input = "\\ 123abc $1x"
+kinds = ["Unknown", "Whitespace", "Number", "Word", "Whitespace", "PositionalParam", "Word"]
+flags = ["ERROR", "", "JUNK", "", "", "JUNK", ""]
+errors = ["UnknownCharacter", "TrailingJunk", "TrailingJunk"]
+
+[[case]]
+id = "EDGE-lone-cr"
+source = "alg/10 SQL-LEX-02 rule 2 and edge cases: lone CR"
+dialect = "postgres"
+input = "\r"
+kinds = ["Newline"]
+
+[[case]]
+id = "EDGE-newline-run"
+source = "alg/10 SQL-LEX-02 rule 2: a run of line breaks is one token"
+dialect = "postgres"
+input = "a\r\n\nb"
+kinds = ["Word", "Newline", "Word"]
+texts = ["a", "\r\n\n", "b"]
+
+[[case]]
+id = "EDGE-vertical-tab"
+source = "alg/10 SQL-LEX-02 rule 2"
+dialect = "postgres"
+input = "a\u000B\tb"
+kinds = ["Word", "Whitespace", "Word"]
+
+[[case]]
+id = "EDGE-dashes-at-eof"
+source = "alg/10 SQL-LEX-02 edge cases: -- at EOF"
+dialect = "postgres"
+input = "SELECT 1 --"
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "LineComment"]
+
+[[case]]
+id = "EDGE-line-comment-ends-at-cr"
+source = "ADR 0004 step 1a: PostgreSQL's non_newline is [^\\n\\r]"
+dialect = "postgres"
+input = "-- x\rSELECT"
+kinds = ["LineComment", "Newline", "Word"]
+texts = ["-- x", "\r", "SELECT"]
+
+[[case]]
+id = "EDGE-slash-star-slash"
+source = "alg/10 SQL-LEX-02 edge cases: /*/"
+dialect = "postgres"
+input = "/*/"
+kinds = ["BlockComment"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedComment"]
+
+[[case]]
+id = "EDGE-empty-comment"
+source = "alg/10 SQL-LEX-02 edge cases: /**/"
+dialect = "postgres"
+input = "/**/x"
+kinds = ["BlockComment", "Word"]
+texts = ["/**/", "x"]
+
+[[case]]
+id = "EDGE-nested-unterminated"
+source = "alg/10 SQL-LEX-02 edge cases: /* /* */ (PostgreSQL unterminated)"
+dialect = "postgres"
+input = "/* /* */"
+kinds = ["BlockComment"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedComment"]
+
+[[case]]
+id = "EDGE-nested-three"
+source = "alg/10 SQL-LEX-02 rule 3 (depth counter)"
+dialect = "postgres"
+input = "/* a /* b /* c */ */ */ x"
+kinds = ["BlockComment", "Whitespace", "Word"]
+
+[[case]]
+id = "EDGE-close-without-opener"
+source = "alg/10 SQL-LEX-02 edge cases: */ without opener (one PostgreSQL operator)"
+dialect = "postgres"
+input = "*/"
+kinds = ["Op"]
+texts = ["*/"]
+
+[[case]]
+id = "EDGE-doubled-quote"
+source = "alg/10 SQL-LEX-02 edge cases: 'it''s'"
+dialect = "postgres"
+input = "'it''s'"
+kinds = ["String"]
+
+[[case]]
+id = "EDGE-empty-string"
+source = "alg/10 SQL-LEX-02 edge cases: ''"
+dialect = "postgres"
+input = "''"
+kinds = ["String"]
+
+[[case]]
+id = "EDGE-e-escaped-quote"
+source = "alg/10 SQL-LEX-02 edge cases: E'\\''"
+dialect = "postgres"
+input = "E'\\''"
+kinds = ["String"]
+
+[[case]]
+id = "EDGE-e-escaped-backslash"
+source = "alg/10 SQL-LEX-02 edge cases: E'\\\\'"
+dialect = "postgres"
+input = "E'\\\\' x"
+kinds = ["String", "Whitespace", "Word"]
+
+[[case]]
+id = "EDGE-backslash-scs-on"
+source = "alg/10 SQL-LEX-02 edge cases: '\\' with standard_conforming_strings on is complete"
+dialect = "postgres"
+input = "'\\'"
+kinds = ["String"]
+
+[[case]]
+id = "EDGE-backslash-scs-off"
+source = "alg/10 SQL-LEX-02 edge cases: '\\' with standard_conforming_strings off is unterminated"
+dialect = "postgres"
+modes = { standard_conforming_strings = false }
+input = "'\\'"
+kinds = ["String"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedString"]
+
+[[case]]
+id = "EDGE-uescape"
+source = "alg/10 SQL-LEX-02 edge cases: U&'\\0041' UESCAPE '!'"
+dialect = "postgres"
+input = "U&'\\0041' UESCAPE '!'"
+kinds = ["String", "Whitespace", "Word", "Whitespace", "String"]
+texts = ["U&'\\0041'", " ", "UESCAPE", " ", "'!'"]
+
+[[case]]
+id = "EDGE-unicode-string-scs-off"
+source = "alg/10 SQL-LEX-02 per-dialect notes: U& strings are an error with standard_conforming_strings off"
+dialect = "postgres"
+modes = { standard_conforming_strings = false }
+input = "U&'x'"
+kinds = ["String"]
+flags = ["ERROR"]
+errors = ["InvalidEscape"]
+
+[[case]]
+id = "EDGE-unicode-ident"
+source = "alg/10 SQL-LEX-01 matrix: U&\"…\""
+dialect = "postgres"
+input = "U&\"a b\""
+kinds = ["UnicodeQuotedIdent"]
+
+[[case]]
+id = "EDGE-u-amp-without-quote"
+source = "scan.l xufailed: U& without a quote is the identifier u"
+dialect = "postgres"
+input = "U&x"
+kinds = ["Word", "Op", "Word"]
+texts = ["U", "&", "x"]
+
+[[case]]
+id = "EDGE-dollar-open-only"
+source = "alg/10 SQL-LEX-02 edge cases: $$"
+dialect = "postgres"
+input = "$$"
+kinds = ["DollarString"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedDollar"]
+
+[[case]]
+id = "EDGE-dollar-four"
+source = "alg/10 SQL-LEX-02 edge cases: $$$$"
+dialect = "postgres"
+input = "$$$$"
+kinds = ["DollarString"]
+
+[[case]]
+id = "EDGE-dollar-inner-tag"
+source = "alg/10 SQL-LEX-02 edge cases: $a$ $b$ $a$"
+dialect = "postgres"
+input = "$a$ $b$ $a$"
+kinds = ["DollarString"]
+
+[[case]]
+id = "EDGE-dollar-case"
+source = "alg/10 SQL-LEX-02 edge cases: $A$…$a$"
+dialect = "postgres"
+input = "$A$ x; $a$"
+kinds = ["DollarString"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedDollar"]
+
+[[case]]
+id = "EDGE-dollar-hides-semicolons"
+source = "alg/10 SQL-LEX-02 rule 6"
+dialect = "postgres"
+input = "$fn$ BEGIN; END; $fn$;"
+kinds = ["DollarString", "Semicolon"]
+
+[[case]]
+id = "EDGE-dollar-non-ascii-tag"
+source = "scan.l dolq_start: bytes >= 0x80 are tag characters"
+dialect = "postgres"
+input = "$ç$;$ç$"
+kinds = ["DollarString"]
+
+[[case]]
+id = "EDGE-x-dollar-y"
+source = "alg/10 SQL-LEX-02 edge cases: x$$y"
+dialect = "postgres"
+input = "x$$y"
+kinds = ["Word"]
+
+[[case]]
+id = "EDGE-param"
+source = "alg/10 SQL-LEX-02 edge cases: $1"
+dialect = "postgres"
+input = "$1"
+kinds = ["PositionalParam"]
+
+[[case]]
+id = "EDGE-param-junk"
+source = "alg/10 SQL-LEX-02 edge cases: $12a (PostgreSQL 15+ param_junk)"
+dialect = "postgres"
+input = "$12a"
+kinds = ["PositionalParam", "Word"]
+texts = ["$12", "a"]
+flags = ["JUNK", ""]
+
+[[case]]
+id = "EDGE-param-junk-pg14"
+source = "alg/10 SQL-LEX-02 rule 6 (junk is an error only from PostgreSQL 15)"
+dialect = "postgres"
+version = "14.0.0"
+input = "$12a"
+kinds = ["PositionalParam", "Word"]
+flags = ["", ""]
+
+[[case]]
+id = "EDGE-param-not-a-tag"
+source = "alg/10 SQL-LEX-02 rule 6: $1 is not a tag"
+dialect = "postgres"
+input = "$1a$"
+kinds = ["PositionalParam", "Word"]
+texts = ["$1", "a$"]
+flags = ["JUNK", ""]
+
+[[case]]
+id = "EDGE-dollar-alone"
+source = "alg/10 SQL-LEX-02 edge cases: $"
+dialect = "postgres"
+input = "$"
+kinds = ["Unknown"]
+flags = ["ERROR"]
+
+[[case]]
+id = "EDGE-dollar-space-one"
+source = "alg/10 SQL-LEX-02 edge cases: $ 1"
+dialect = "postgres"
+input = "$ 1"
+kinds = ["Unknown", "Whitespace", "Number"]
+
+[[case]]
+id = "EDGE-number-dollar"
+source = "scan.l: $ is no identifier start, so 1$ has no junk"
+dialect = "postgres"
+input = "1$"
+kinds = ["Number", "Unknown"]
+flags = ["", "ERROR"]
+
+[[case]]
+id = "EDGE-one-dot"
+source = "alg/10 SQL-LEX-02 edge cases: 1."
+dialect = "postgres"
+input = "1."
+kinds = ["Number"]
+
+[[case]]
+id = "EDGE-dot-one"
+source = "alg/10 SQL-LEX-02 edge cases: .1"
+dialect = "postgres"
+input = ".1"
+kinds = ["Number"]
+
+[[case]]
+id = "EDGE-dot-dot"
+source = "alg/10 SQL-LEX-02 rule 7 and edge cases: 1..2"
+dialect = "postgres"
+input = "1..2"
+kinds = ["Number", "Op", "Number"]
+texts = ["1", "..", "2"]
+
+[[case]]
+id = "EDGE-floats"
+source = "alg/10 SQL-LEX-02 rule 7"
+dialect = "postgres"
+input = "1.5e-3 .5E+2 1.e5"
+kinds = ["Number", "Whitespace", "Number", "Whitespace", "Number"]
+
+[[case]]
+id = "EDGE-1e"
+source = "alg/10 SQL-LEX-02 edge cases: 1e"
+dialect = "postgres"
+input = "1e"
+kinds = ["Number", "Word"]
+texts = ["1", "e"]
+flags = ["JUNK", ""]
+
+[[case]]
+id = "EDGE-1e-plus"
+source = "alg/10 SQL-LEX-02 edge cases: 1e+ (realfail)"
+dialect = "postgres"
+input = "1e+"
+kinds = ["Number", "Word", "Op"]
+texts = ["1", "e", "+"]
+flags = ["JUNK", "", ""]
+
+[[case]]
+id = "EDGE-0x"
+source = "alg/10 SQL-LEX-02 edge cases: 0x (hexfail)"
+dialect = "postgres"
+input = "0x"
+kinds = ["Number", "Word"]
+texts = ["0", "x"]
+flags = ["JUNK", ""]
+
+[[case]]
+id = "EDGE-0xG"
+source = "alg/10 SQL-LEX-02 edge cases: 0xG"
+dialect = "postgres"
+input = "0xG"
+kinds = ["Number", "Word"]
+texts = ["0", "xG"]
+flags = ["JUNK", ""]
+
+[[case]]
+id = "EDGE-1-underscore"
+source = "alg/10 SQL-LEX-02 edge cases: 1_"
+dialect = "postgres"
+input = "1_"
+kinds = ["Number", "Word"]
+texts = ["1", "_"]
+flags = ["JUNK", ""]
+
+[[case]]
+id = "EDGE-1-double-underscore"
+source = "alg/10 SQL-LEX-02 edge cases: 1__0"
+dialect = "postgres"
+input = "1__0"
+kinds = ["Number", "Word"]
+texts = ["1", "__0"]
+flags = ["JUNK", ""]
+
+[[case]]
+id = "EDGE-0b2"
+source = "alg/10 SQL-LEX-02 edge cases: 0b2"
+dialect = "postgres"
+input = "0b2"
+kinds = ["Number", "Word"]
+texts = ["0", "b2"]
+flags = ["JUNK", ""]
+
+[[case]]
+id = "EDGE-123abc"
+source = "alg/10 SQL-LEX-02 edge cases: 123abc (PostgreSQL 15+ integer_junk)"
+dialect = "postgres"
+input = "123abc"
+kinds = ["Number", "Word"]
+texts = ["123", "abc"]
+flags = ["JUNK", ""]
+
+[[case]]
+id = "EDGE-hex-underscore-junk"
+source = "scan.l: 0x1_ is hexinteger 0x1 then junk"
+dialect = "postgres"
+input = "0x1_"
+kinds = ["Number", "Word"]
+texts = ["0x1", "_"]
+flags = ["JUNK", ""]
+
+[[case]]
+id = "EDGE-separators-fraction"
+source = "scan.l: decinteger with _ in every part"
+dialect = "postgres"
+input = "1_000.000_1e1_0"
+kinds = ["Number"]
+flags = ["HAS_SEPARATORS"]
+
+[[case]]
+id = "EDGE-at-signs"
+source = "alg/10 SQL-LEX-02 edge cases: @@, @, @1 (PostgreSQL operators)"
+dialect = "postgres"
+input = "@@ @ @1"
+kinds = ["Op", "Whitespace", "Op", "Whitespace", "Op", "Number"]
+texts = ["@@", " ", "@", " ", "@", "1"]
+
+[[case]]
+id = "EDGE-hash-operator"
+source = "alg/10 SQL-LEX-02 edge cases: # is a PostgreSQL operator"
+dialect = "postgres"
+input = "#temp"
+kinds = ["Op", "Word"]
+
+[[case]]
+id = "EDGE-arrow-arrow"
+source = "alg/10 SQL-LEX-02 edge cases: ->>"
+dialect = "postgres"
+input = "j->>'k'"
+kinds = ["Word", "Op", "String"]
+texts = ["j", "->>", "'k'"]
+
+[[case]]
+id = "EDGE-close-inside-operator"
+source = "alg/10 SQL-LEX-02 edge cases: */ inside an operator"
+dialect = "postgres"
+input = "+*/"
+kinds = ["Op"]
+texts = ["+*/"]
+
+[[case]]
+id = "EDGE-dashes-cut-operator"
+source = "alg/10 SQL-LEX-02 rule 10: an embedded -- ends the operator"
+dialect = "postgres"
+input = "+--x"
+kinds = ["Op", "LineComment"]
+texts = ["+", "--x"]
+
+[[case]]
+id = "EDGE-closed-comment-cuts-operator"
+source = "T4 review I2/minor 5; scan.l operator rule: an embedded /* ends the operator"
+dialect = "postgres"
+input = "+/**/=/**/1"
+kinds = ["Op", "BlockComment", "Op", "BlockComment", "Number"]
+texts = ["+", "/**/", "=", "/**/", "1"]
+
+[[case]]
+id = "EDGE-trailing-signs-split"
+source = "scan.l operator rule: trailing + and - without a sign keeper are separate operators"
+dialect = "postgres"
+input = "*+-"
+kinds = ["Op", "Op", "Op"]
+texts = ["*", "+", "-"]
+
+[[case]]
+id = "EDGE-sign-keeper"
+source = "scan.l operator rule: ?- keeps its sign"
+dialect = "postgres"
+input = "?-1"
+kinds = ["Op", "Number"]
+texts = ["?-", "1"]
+
+[[case]]
+id = "EDGE-operator-63"
+source = "alg/10 SQL-LEX-02 rule 10: 63 bytes is a valid operator"
+dialect = "postgres"
+input = "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
+kinds = ["Op"]
+flags = [""]
+
+[[case]]
+id = "EDGE-operator-64"
+source = "alg/10 SQL-LEX-02 edge cases: operator > 63 chars is an error"
+dialect = "postgres"
+input = "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
+kinds = ["Op"]
+flags = ["ERROR"]
+errors = ["OperatorTooLong"]
+
+[[case]]
+id = "EDGE-casts-and-params"
+source = "alg/10 SQL-LEX-02 edge cases: ::text vs :text"
+dialect = "postgres"
+input = "a::text :text"
+kinds = ["Word", "Op", "Word", "Whitespace", "NamedParam"]
+texts = ["a", "::", "text", " ", ":text"]
+
+[[case]]
+id = "EDGE-colon-equals"
+source = "scan.l colon_equals"
+dialect = "postgres"
+input = "x := 1"
+kinds = ["Word", "Whitespace", "Op", "Whitespace", "Number"]
+texts = ["x", " ", ":=", " ", "1"]
+
+[[case]]
+id = "EDGE-array-slice"
+source = "scan.l: : is a single-character token"
+dialect = "postgres"
+input = "a[1:2]"
+kinds = ["Word", "LBracket", "Number", "Op", "Number", "RBracket"]
+
+[[case]]
+id = "EDGE-psql-variables"
+source = "alg/10 SQL-LEX-02 rule 8: psql :'v', :\"v\", :{?v}"
+dialect = "postgres"
+input = ":'x' :\"y\" :{?z}"
+kinds = ["ClientVar", "Whitespace", "ClientVar", "Whitespace", "ClientVar"]
+
+[[case]]
+id = "EDGE-psql-variable-in-string"
+source = "alg/10 SQL-LEX-02 edge cases: psql :'x' inside a string is not a variable"
+dialect = "postgres"
+input = "'a :''x'' b'"
+kinds = ["String"]
+
+[[case]]
+id = "EDGE-turkish-identifiers"
+source = "alg/10 SQL-LEX-01 i18n notes: Turkish letters are identifier characters"
+dialect = "postgres"
+input = "SELECT çğış, İstanbul FROM müşteri"
+kinds = ["Word", "Whitespace", "Word", "Comma", "Whitespace", "Word", "Whitespace", "Word", "Whitespace", "Word"]
+
+[[case]]
+id = "EDGE-fullwidth-semicolon"
+source = "Task 4 ruling (header): a full-width semicolon is an identifier character, never a statement end"
+dialect = "postgres"
+input = "SELECT 1；"
+kinds = ["Word", "Whitespace", "Number", "Word"]
+texts = ["SELECT", " ", "1", "；"]
+flags = ["", "", "JUNK", ""]
+
+[[case]]
+id = "EDGE-nbsp"
+source = "Task 4 ruling (header): U+00A0 is an identifier character, as in the server"
+dialect = "postgres"
+input = "a b c"
+kinds = ["Word", "Whitespace", "Word"]
+texts = ["a b", " ", "c"]
+
+[[case]]
+id = "EDGE-nbsp-dollar"
+source = "Task 4 ruling (header): x $$ is one identifier, so the ; ends the statement"
+dialect = "postgres"
+input = "x $$;$$"
+kinds = ["Word", "Semicolon", "DollarString"]
+texts = ["x $$", ";", "$$"]
+flags = ["", "", "UNTERMINATED"]
+errors = ["UnterminatedDollar"]
+
+[[case]]
+id = "EDGE-backslash"
+source = "scan.l {other}: a lone backslash"
+dialect = "postgres"
+input = "\\x"
+kinds = ["Unknown", "Word"]
+
+[[case]]
+id = "EDGE-braces"
+source = "alg/10 SQL-LEX-02 rule 11"
+dialect = "postgres"
+input = "{a}"
+kinds = ["LBrace", "Word", "RBrace"]
+
+[[case]]
+id = "EDGE-quoted-ident-unterminated"
+source = "alg/10 SQL-LEX-02 rule 5: EOF in a quoted identifier"
+dialect = "postgres"
+input = "\"abc"
+kinds = ["QuotedIdent"]
+flags = ["UNTERMINATED"]
+errors = ["UnterminatedQuotedIdent"]
+
+[[case]]
+id = "EDGE-quoted-ident-doubled"
+source = "alg/10 SQL-LEX-01 matrix: \"\" in an identifier"
+dialect = "postgres"
+input = "\"a\"\"b\""
+kinds = ["QuotedIdent"]
+
+[[case]]
+id = "EDGE-prefixed-literals"
+source = "alg/10 SQL-LEX-02 rule 4: B, X, N prefixes"
+dialect = "postgres"
+input = "B'0101' x'1F' N'x' n'y'"
+kinds = ["BitString", "Whitespace", "HexString", "Whitespace", "String", "Whitespace", "String"]
+
+[[case]]
+id = "EDGE-bit-string-has-no-doubling"
+source = "scan.l xb: a quote ends a bit string (no '' escape)"
+dialect = "postgres"
+input = "B'01''10'"
+kinds = ["BitString", "String"]
+texts = ["B'01'", "'10'"]
+
+[[case]]
+id = "EDGE-adjacent-strings"
+source = "alg/10 SQL-LEX-02 rule 5: adjacent literals are not merged"
+dialect = "postgres"
+input = "'a'\n'b'"
+kinds = ["String", "Newline", "String"]
+
+[[case]]
+id = "EDGE-prefix-only-at-word-start"
+source = "alg/10 SQL-LEX-02 rule 4"
+dialect = "postgres"
+input = "xE'a'"
+kinds = ["Word", "String"]
+texts = ["xE", "'a'"]
+
+[[case]]
+id = "EDGE-lower-case-prefix"
+source = "alg/10 SQL-LEX-02 rule 4: prefixes are ASCII case-insensitive"
+dialect = "postgres"
+input = "e'\\n'"
+kinds = ["String"]
+
+[[case]]
+id = "EDGE-question-operator"
+source = "alg/10 SQL-LEX-02 rule 8: ? is a PostgreSQL operator character"
+dialect = "postgres"
+input = "a ? b"
+kinds = ["Word", "Whitespace", "Op", "Whitespace", "Word"]
+
+[[case]]
+id = "EDGE-regex-operator"
+source = "alg/10 SQL-LEX-02 rule 10"
+dialect = "postgres"
+input = "a !~* b"
+kinds = ["Word", "Whitespace", "Op", "Whitespace", "Word"]
+texts = ["a", " ", "!~*", " ", "b"]
+
+[[case]]
+id = "EDGE-no-executable-comments"
+source = "alg/10 SQL-LEX-05 matrix: /*! is an ordinary PostgreSQL comment"
+dialect = "postgres"
+input = "/*!50000 x */"
+kinds = ["BlockComment"]
+
+[[case]]
+id = "EDGE-no-hints"
+source = "alg/10 SQL-LEX-05 matrix: /*+ is an ordinary PostgreSQL comment"
+dialect = "postgres"
+input = "/*+ x */"
+kinds = ["BlockComment"]
+
+[[case]]
+id = "EDGE-copy-data"
+source = "alg/10 SQL-LEX-02 rule 1: COPY data to the \\. line"
+dialect = "postgres"
+start = "copy"
+input = "1\tx\n2\ty\n\\.\nSELECT 1"
+kinds = ["InlineData", "Newline", "Word", "Whitespace", "Number"]
+texts = ["1\tx\n2\ty\n\\.", "\n", "SELECT", " ", "1"]
+
+[[case]]
+id = "EDGE-copy-data-crlf"
+source = "alg/10 SQL-LEX-02 rule 1"
+dialect = "postgres"
+start = "copy"
+input = "a\r\n\\.\r\nx"
+kinds = ["InlineData", "Newline", "Word"]
+texts = ["a\r\n\\.", "\r\n", "x"]
+
+[[case]]
+id = "EDGE-copy-data-unterminated"
+source = "alg/10 SQL-LEX-02 rule 1"
+dialect = "postgres"
+start = "copy"
+input = "1\n2\n"
+kinds = ["InlineData"]
+flags = ["UNTERMINATED"]
+errors = []
