@@ -22,8 +22,8 @@ runs:
             # bindgen (clang-sys) loads libclang.dll; the runner's LLVM ships one here.
             llvm_bin='C:\Program Files\LLVM\bin'
             if [ -f "/c/Program Files/LLVM/bin/libclang.dll" ]; then
-              echo "LIBCLANG_PATH=$llvm_bin" >> "$GITHUB_ENV"
-              echo "LIBCLANG_PATH=$llvm_bin"
+              printf 'LIBCLANG_PATH=%s\n' "$llvm_bin" >> "$GITHUB_ENV"
+              printf 'LIBCLANG_PATH=%s\n' "$llvm_bin"
             else
               echo "::warning::no libclang.dll in $llvm_bin; bindgen falls back to its own search"
             fi

@@ -112,11 +112,12 @@ the Hacivat zed fork (ruling R1).
 - **What it does:** it reads `timeout_ticks` under `state`, drops that guard, then locks `rng`.
   Every path in the file now takes `state` before `rng` (line numbers at `a1eaa20`: `:132`
   holds a temporary `rng` guard only in the `while` condition, `:252` takes `rng` alone,
-  `:388`/`:391` take `rng` under `state`), and no `rng` guard is held while `state` is locked. The draw is the same single
-  `random_range` call over the same range, so every seed's schedule is unchanged.
+  `:388`/`:391` take `rng` under `state`), and no `rng` guard is held while `state` is
+  locked. The draw is the same single `random_range` call over the same range, so every
+  seed's schedule is unchanged.
 - **Tests:** in the fork, `cargo +1.98.1 test -p scheduler` (31 passed), `clippy -p scheduler
   --tests` (no warnings). In Hacivat, `crates/app/hacivat-app/tests/teardown_stress.rs`, under
-  a 10 s watchdog per cycle:
+  a 60 s watchdog per cycle:
   - `timed_blocks_while_another_thread_schedules_never_hang` runs timed blocks while another
     thread spawns tasks without pause. It hung in 5 of 5 local runs at `a1eaa20` and passes
     at `6607045`.

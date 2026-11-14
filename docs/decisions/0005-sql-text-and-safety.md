@@ -48,8 +48,9 @@ copied to `third_party/pg_query` and used through `[patch.crates-io]`, as `mysql
 
 **Licences.** The package declares only `MIT`, but the binary also compiles:
 - libpg_query (BSD-3-Clause);
-- the PostgreSQL parser sources (PostgreSQL License), which include OpenBSD's `strlcpy` (ISC)
-  and Hideaki Ohno's HyperLogLog header (MIT);
+- the PostgreSQL parser sources (PostgreSQL License), which include three files under other
+  licences: `snprintf.c` (BSD-3-Clause; Eric P. Allman and the UC Regents), the NetBSD qsort in
+  `sort_template.h` (BSD-3-Clause; UC Regents) and OpenBSD's `strlcpy` (ISC);
 - upb (BSD-3-Clause) with utf8_range (MIT);
 - xxHash (BSD-2-Clause).
 
@@ -61,16 +62,43 @@ copied to `third_party/pg_query` and used through `[patch.crates-io]`, as `mysql
 - A crate-scoped `[[licenses.exceptions]]` allows `PostgreSQL` for `pg_query` alone. Without it
   `cargo deny check licenses` rejects the crate (checked).
 
-The plan named four licences; ISC and the two MIT notices (utf8_range, HyperLogLog) were found
-by reading every copyright line in the tree.
+The plan named four licences; the rest came from a licence pass over the vendored copy.
+- Task 1a's first pass was a `grep` of copyright lines, its output cut to the 40 most frequent
+  and read by hand. The two BSD notices of `snprintf.c` and `sort_template.h` fell below that
+  cut, and review round 1 found them.
+- The pass of fix round 1 is mechanical and has three steps:
+  1. It scans every file of `third_party/pg_query` for licence wording (grant, condition and
+     disclaimer phrases, "public domain", SPDX tags) and lists every copyright line that is not
+     the standard PostgreSQL header pair.
+  2. It runs `clang -MM -MG` over all 96 C files `build.rs` compiles, with its include paths, for
+     `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`. Together
+     they compile or include 659 files of the tree.
+  3. For each flagged file that is compiled or included, it checks whether code under that
+     licence reaches the binary: callers in the compiled sources, and symbols in the built
+     `libpg_query.a`.
 
-`THIRD_PARTY_NOTICES.md` quotes all eight notices verbatim. It ships through a new `resources`
-key in `packaging/Packager.toml`. cargo-packager resolves that key from the rendered config's
-directory, so the path is `../THIRD_PARTY_NOTICES.md`. A local `cargo packager --formats app`
-put it in `Hacivat.app/Contents/Resources`, byte-identical. cargo-packager places resources
-next to the NSIS executable and in the AppImage and deb trees; the `nightly-package` run
-checks those bundles.
-Bison's parser skeleton exception and the public-domain `wcwidth` need no notice.
+A notice is quoted when code under it is compiled into the binary.
+`THIRD_PARTY_NOTICES.md` quotes nine notices verbatim (checked mechanically against their
+sources), plus the extra Google copyright lines of the compiled upb and utf8_range headers.
+
+The file ships through a new `resources` key in `packaging/Packager.toml`. cargo-packager
+resolves that key from the rendered config's directory, so the path is
+`../THIRD_PARTY_NOTICES.md`. A local `cargo packager --formats app` put it in
+`Hacivat.app/Contents/Resources`, byte-identical. cargo-packager places resources next to the
+NSIS executable and in the AppImage and deb trees; the `nightly-package` run checks those
+bundles.
+
+Several flagged files need no notice, each for a recorded reason:
+- Bison's parser skeleton exception covers the generated parsers.
+- `wcwidth` is in the public domain.
+- Henry Spencer's `regex.h` is declarations only, and its licence binds source form only.
+- `pg_getopt.h` and Hideaki Ohno's HyperLogLog header are declarations only; their
+  implementations are not compiled. Task 1a first quoted the HyperLogLog notice; it moved to
+  this list in fix round 1.
+- Zilong Tan's fasthash (MIT, `hashfn_unstable.h`) is `static inline` code that nothing
+  compiled calls. The built library has no fasthash symbol.
+
+The vendored files keep all these notices for the source redistribution.
 
 **The build proof.** `sql-oracle-pg` (Task 1a's minimal crate) works with three items:
 - `version()` reads `PG_VERSION_NUM` from the linked C library at run time:

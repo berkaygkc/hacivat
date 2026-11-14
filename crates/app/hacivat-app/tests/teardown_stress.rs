@@ -31,9 +31,12 @@ use support::{add_profile, connect, fake, live, shell_with_fake, test_profile, w
 
 /// Boot-and-quit cycles per run.
 const CYCLES: usize = 50;
-/// How long one cycle may take before the watchdog calls it hung (a healthy boot-and-quit
-/// cycle, or a batch of timed blocks, takes well under a second).
-const CYCLE_LIMIT: Duration = Duration::from_secs(10);
+/// How long one cycle may take before the watchdog calls it hung. A healthy boot-and-quit cycle,
+/// or a batch of timed blocks, takes well under a second, and a deadlock never resolves, so the
+/// limit only delays a real failure. It stays well above `support::WAIT`, so that a slow but
+/// live connect fails through `wait_until`'s own message rather than as a "hang".
+const CYCLE_LIMIT: Duration = Duration::from_secs(60);
+const _: () = assert!(CYCLE_LIMIT.as_secs() >= 3 * support::WAIT.as_secs());
 /// Timed blocks run against the spawning thread, in watched batches.
 const TIMED_BATCHES: usize = 5;
 const BLOCKS_PER_BATCH: usize = 100;

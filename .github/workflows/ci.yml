@@ -100,19 +100,6 @@ jobs:
       - name: Build
         run: cargo build --workspace --release --locked
 
-      # ## m3a-t01a-proofs
-      - name: Release binary size
-        run: ls -l target/release/hacivat*
-      - name: The build leaves third_party/pg_query unchanged
-        run: |
-          git diff --exit-code -- third_party/pg_query
-          changed="$(git status --porcelain -- third_party/pg_query)"
-          if [ -n "$changed" ]; then
-            echo "$changed"
-            echo "::error::the build wrote into third_party/pg_query (PATCHES.md §1)"
-            exit 1
-          fi
-
       # Full test set, lines 1-4 (F2). Line 5 is the nightly release-tests job.
       - name: Test (1/4) workspace
         run: cargo test --workspace --locked
@@ -125,6 +112,24 @@ jobs:
 
       - name: Test (4/4) app, scene-check + pseudo
         run: cargo test --locked -p hacivat-app --features scene-check,pseudo
+
+      # ## m3a-t01a-proofs
+      # After every build of this job (clippy, release, the test builds): nothing under the
+      # vendored pg_query was written or added, ignored paths included. Runners have no protoc,
+      # so the static guard is what catches PATCHES.md §1 being undone.
+      - name: The builds leave third_party/pg_query unchanged
+        run: |
+          changed="$(git status --porcelain --ignored -- third_party/pg_query)"
+          if [ -n "$changed" ]; then
+            printf '%s\n' "$changed"
+            echo "::error::a build wrote into third_party/pg_query (PATCHES.md §1)"
+            exit 1
+          fi
+          if grep -nE '^[^#]*prost-build' third_party/pg_query/Cargo.toml \
+            || grep -nE '^[^/]*(Command::new|REGENERATE_PROTOBUF|prost_build)' third_party/pg_query/build.rs; then
+            echo "::error::PATCHES.md §1 is undone: the vendored build.rs can regenerate src/protobuf.rs"
+            exit 1
+          fi
 
   tokens:
     name: tokens
@@ -311,6 +316,27 @@ jobs:
       - name: Build the release binary
         if: steps.guard.outputs.present == 'true'
         run: cargo build --release --locked -p hacivat
+      # ## m3a-t01a-proofs
+      # The shipped binary (`-p hacivat`, not the feature-unified workspace build). Task 1a's budget
+      # (R-M3-1, plan Task 1a Step 5): libpg_query may add at most 10 MiB over the M2b gate's macOS
+      # arm64 binary, 37,138,656 bytes; only that architecture has a recorded baseline. Over the
+      # budget is a warning, not a failure: later M3a tasks grow the binary on purpose, and the
+      # budget asks for a ruling, not a red build.
+      - name: Shipped binary size
+        if: steps.guard.outputs.present == 'true'
+        run: |
+          bin=target/release/hacivat
+          [ -f "$bin" ] || bin=target/release/hacivat.exe
+          size="$(wc -c < "$bin" | tr -d ' ')"
+          echo "shipped binary $bin: $size bytes ($RUNNER_OS $(uname -m))"
+          if [ "$RUNNER_OS" = macOS ] && [ "$(uname -m)" = arm64 ]; then
+            budget=$((37138656 + 10 * 1024 * 1024))
+            if [ "$size" -gt "$budget" ]; then
+              echo "::warning::the shipped binary is $size bytes, over Task 1a's budget of $budget (M2b + 10 MiB): a size ruling is due"
+            else
+              echo "within Task 1a's budget: $size <= $budget bytes (M2b + 10 MiB)"
+            fi
+          fi
       - name: Launch smoke
         if: steps.guard.outputs.present == 'true'
         shell: bash
@@ -455,6 +481,14 @@ jobs:
         env:
           NIGHTLY_VERSION: ${{ steps.version.outputs.value }}
         run: packaging/package-macos.sh "$NIGHTLY_VERSION"
+      # ## m3a-t01a-proofs
+      - name: Universal binary size (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          for bin in target/packager/*/hacivat; do
+            lipo -info "$bin"
+            echo "universal binary $bin: $(wc -c < "$bin" | tr -d ' ') bytes"
+          done
       - name: Package (Linux, unsigned AppImage and deb)
         if: runner.os == 'Linux'
         env:
