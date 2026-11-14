@@ -17,6 +17,14 @@
 //!    ping, returns `Ping`.
 //!
 //! Keep-alive pings never count as activity.
+//!
+//! ## m3a-t18-session-run
+//! While a console cursor is suspended the actor skips the `Ping` a tick asks for (MySQL and
+//! SQLite take no command beside an open query; the cursor's idle bound, at most ten minutes,
+//! ends it), and the supervisor asks again on its next tick. The actor ticks with the user's
+//! transaction status: Hacivat's own transaction around a cursor counts as idle, so it draws
+//! no `IdleTransaction` and does not hold up an idle disconnect (the close releases the cursor
+//! first).
 
 use std::time::{Duration, Instant, SystemTime};
 

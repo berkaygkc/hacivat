@@ -34,7 +34,7 @@ use hacivat_values::{LogicalType, ResultSchema, Value};
 // ---------------------------------------------------------------------------------------------
 // Fixtures
 
-/// Records every event; a run that opens a result is a failure of the stub.
+/// Records every event; a run that opens a result fails its test.
 #[derive(Default)]
 struct Recorder {
     events: Mutex<Vec<RunEvent>>,
@@ -42,7 +42,7 @@ struct Recorder {
 
 impl RunObserver for Recorder {
     fn open_result(&self, unit: UnitId, _: u32, _: Arc<ResultSchema>) -> ResultWriter {
-        panic!("the stub opened a result for {unit:?}")
+        panic!("a result was opened for {unit:?}")
     }
 
     fn event(&self, ev: &RunEvent) {
@@ -217,8 +217,15 @@ fn profile_env(env: EnvTag) -> Profile {
 // ---------------------------------------------------------------------------------------------
 // Fail-closed stubs
 
+// ## m3a-t18-session-run: Task 18 filled the run and cursor bodies, so the two stub tests of
+// this place now pin what still fails closed on the same inputs (the runs themselves are in
+// `tests/run.rs` and `tests/cursor.rs`).
+
 #[tokio::test]
-async fn run_fails_closed_until_task_18() {
+async fn a_portal_the_driver_refuses_fails_the_unit_and_opens_nothing() {
+    // This fake does not follow `BEGIN` (no `tracks_transactions`), so its status stays idle
+    // after Hacivat's own `BEGIN` and the driver refuses the suspendable query (P5). The
+    // session reports the unit failed, opens no result, and ends its own transaction.
     let (h, f) = session(fake_pg().queries(vec![select(1)])).await;
     let observer = Arc::new(Recorder::default());
     let t = h.run(spec_of(&["SELECT 1"], observer.clone()));
@@ -226,13 +233,29 @@ async fn run_fails_closed_until_task_18() {
         t.reply.await.unwrap().unwrap_err().kind,
         ExecErrorKind::Internal
     );
-    // Nothing reached the server, and nothing was reported as run.
-    assert!(f.typed_log().is_empty(), "{:?}", f.typed_log());
-    assert!(observer.events.lock().unwrap().is_empty());
+    assert_eq!(&f.executed()[..], ["BEGIN", "ROLLBACK"]);
+    // The refused query delivered nothing (`open_result` would have panicked), and the run
+    // ended for its observer.
+    assert_eq!(f.chunks_sent(), 0);
+    let events = observer.events.lock().unwrap().clone();
+    assert!(
+        matches!(
+            &events[..],
+            [
+                RunEvent::UnitStarted { .. },
+                RunEvent::UnitEnded {
+                    outcome: hacivat_session::session::UnitEnd::Failed(e),
+                    ..
+                },
+                RunEvent::RunEnded(summary),
+            ] if e.kind == ExecErrorKind::Internal && summary.failed == 1 && summary.aborted
+        ),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]
-async fn cursor_requests_fail_closed_until_task_18() {
+async fn cursor_requests_without_a_cursor_send_nothing() {
     use hacivat_results::{CloseReason, FetchControl};
     use hacivat_session::session::Request;
     let (h, f) = session(fake_pg()).await;
@@ -245,8 +268,9 @@ async fn cursor_requests_fail_closed_until_task_18() {
             reason: CloseReason::UserClosed,
         },
     ] {
+        // A late request (its result completed or was released) is a no-op, not an error.
         let reply = h.submit(req.clone()).reply.await.unwrap();
-        assert_eq!(reply.unwrap_err().kind, ExecErrorKind::Internal, "{req:?}");
+        assert!(reply.is_ok(), "{req:?}: {reply:?}");
     }
     // `FetchControl` submits the same requests and drops their tickets.
     h.fetch_more(result, 10);

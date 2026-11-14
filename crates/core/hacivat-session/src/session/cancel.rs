@@ -10,6 +10,23 @@
 //!   `escalate(seq, Deactivate)` drops the connection and breaks the session.
 //! - A cancel still in flight when its request ends is awaited (bounded) before the next
 //!   request starts, so it can never reach that request.
+//!
+//! ## m3a-t18-session-run: the stop-fetching rung (R-M3-16, P16)
+//!
+//! For a typed request (`Run`, `FetchMore`, `FetchAll`, `CloseCursor`) the first rung sends
+//! nothing: `cancel(seq)` drops the queue and sets the request's stop signal
+//! (`cursor::StopSignal`). The request reads it between chunks, stops asking for rows and
+//! closes its query the engine's way; the rows it has stay, and the result is `Cancelled`.
+//! The server cancel (PostgreSQL's protocol cancel, MySQL's `KILL QUERY`, SQLite's interrupt)
+//! goes out only for a call that is `FetchPolicy::overdue` (1 s) late, and beside the close of
+//! a stream that cannot be closed early (PostgreSQL's `Execute(0)`, in autocommit only); the
+//! request sends it itself and awaits it before its next statement (`cursor::Watch`), at most
+//! one per statement (a MySQL kill that raced the statement's end is absorbed by one `DO 0`,
+//! never left for the user's next statement). Inside a user transaction
+//! that server cancel leaves the transaction `Failed`, as in psql. The caller's 2 s answer,
+//! the slow cancel at [`SLOW_CANCEL`] and both escalations are as above. A cancel names the
+//! running request, or a fetch merged into it; a run that ended (its cursor still open) and an
+//! earlier fetch are `AlreadyFinished`.
 
 use std::time::{Duration, Instant};
 

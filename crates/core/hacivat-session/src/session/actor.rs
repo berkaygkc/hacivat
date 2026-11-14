@@ -52,6 +52,21 @@
 //!     reconnect breaks the session with its class.
 //! - The supervisor's idle disconnect emits `SessionEvent::IdleDisconnected` before the session
 //!   publishes `Disconnected`.
+//!
+//! M3a Task 18 (`// ## m3a-t18-session-run` blocks; ADR 0004 `m3a-t18`):
+//! - **Runs and cursors.** `handle` serves `Run` (`run.rs`) and the cursor requests
+//!   (`cursor.rs`). The session holds at most one cursor (`Core::cursor`: a suspended typed
+//!   query), and **releases it before any other request runs**, before it closes, and when
+//!   its idle bound runs out (the third branch of the idle `select!`). A lost connection
+//!   closes the cursor's result with its rows kept.
+//! - **Chunk steps.** A streaming request yields after every chunk; the command branch then
+//!   reads every command already sent, so a cancel is seen within one chunk.
+//! - **Stop fetching.** A cancel of a typed request sets its stop signal instead of sending
+//!   the server cancel (the `cancel` module docs).
+//! - **Coalescing.** Fetches of one result queued one behind the other run as one
+//!   (`Ctl::coalesce`); a command read ahead for that is held for its turn (`Ctl::held`).
+//! - **Whose transaction.** `Core::observe` sets `TxState::owner`; Hacivat's own transaction
+//!   around a cursor never refuses a close and is no idle transaction of the user's.
 
 use std::any::Any;
 use std::collections::VecDeque;
@@ -80,6 +95,10 @@ use crate::profile::Profile;
 use crate::session::cancel::{
     CANCEL_WAIT, SIDE_PREWARM, SLOW_CANCEL, kill_query_sql, terminate_sql,
 };
+// ## m3a-t18-session-run
+use crate::session::cursor::{OpenCursor, StopSignal};
+use crate::session::{RunSpec, TxOwner};
+use hacivat_results::{CloseReason, ResultId};
 // ## m2b-t17-liveness
 use crate::session::liveness::{LivenessAction, LivenessPolicy, Supervisor};
 use crate::session::readonly::guarded;
@@ -146,7 +165,7 @@ const EVENT_CAPACITY: usize = 64;
 
 /// First keywords of transaction control: Manual mode begins nothing before them, and they are
 /// not counted as statements of the open transaction.
-const TX_CONTROL: [&str; 6] = ["BEGIN", "START", "COMMIT", "END", "ROLLBACK", "ABORT"];
+pub(crate) const TX_CONTROL: [&str; 6] = ["BEGIN", "START", "COMMIT", "END", "ROLLBACK", "ABORT"];
 
 /// Starts the actor of `live` on `rt` (the module docs). The session is read-only when `spec`
 /// or `profile` says so.
@@ -237,6 +256,12 @@ pub(crate) fn spawn_supervised(
         lost: None,
         autocommit_off: false,
         server_autocommit,
+        // ## m3a-t18-session-run
+        cursor: None,
+        holder: TxOwner::User,
+        side: hooks.side.clone(),
+        stop: Arc::new(StopSignal::default()),
+        stray_kill: false,
     };
     let ctl = Ctl {
         id,
@@ -246,6 +271,7 @@ pub(crate) fn spawn_supervised(
         queue: VecDeque::new(),
         hooks,
         liveness: None,
+        held: None,
     };
     rt.spawn(async move {
         let mut ctl = ctl;
@@ -274,9 +300,9 @@ pub(crate) fn spawn_supervised(
 /// The connection and what the session knows about it; borrowed by the running request.
 pub(crate) struct Core {
     pub(crate) kind: DbmsKind,
-    profile: Arc<Profile>,
-    read_only: bool,
-    live: Option<LiveConnection>,
+    pub(crate) profile: Arc<Profile>,
+    pub(crate) read_only: bool,
+    pub(crate) live: Option<LiveConnection>,
     pub(crate) tx: TxState,
     schema: Option<SchemaCtx>,
     pub(crate) initial_mode: TxMode,
@@ -287,17 +313,31 @@ pub(crate) struct Core {
     pub(crate) last_class: Option<ErrClass>,
     // ## m2b-t17-liveness
     /// What the user's statements did since the connection was made (B19).
-    tracked: Tracked,
+    pub(crate) tracked: Tracked,
     /// What the last loss took, until the reconnect reports it.
     lost: Option<LostState>,
     /// MySQL: the user's own `SET autocommit = 0` was seen (fix round 3, I8), the fallback when
     /// the driver does not report the server's flag. An "off" is kept whatever the statement's
     /// outcome (a batch's `SET` applies even when a later statement fails; fix round 4, I9).
-    autocommit_off: bool,
+    pub(crate) autocommit_off: bool,
     /// MySQL: the server's `SERVER_STATUS_AUTOCOMMIT` as of the last round trip, when the
     /// driver reports it (fix round 4, R5): procedures, prepared statements, variables,
     /// `init_connect` and global defaults are all seen.
     server_autocommit: Option<bool>,
+    // ## m3a-t18-session-run
+    /// The suspended query the session holds (a console cursor). No other request runs while
+    /// it is open: `handle` releases it first.
+    pub(crate) cursor: Option<OpenCursor>,
+    /// Who an open transaction belongs to: the user, unless Hacivat opened it itself (around a
+    /// cursor, or the read-only guard's).
+    pub(crate) holder: TxOwner,
+    /// Side connections for the kill a MySQL result needs to close early.
+    pub(crate) side: Arc<dyn SideConnector>,
+    /// "Stop fetching" for the request that runs (the cancel ladder sets it).
+    pub(crate) stop: Arc<StopSignal>,
+    /// MySQL: a `KILL QUERY` went out for the open (or just ended) statement and no 1317
+    /// answered it yet (`cursor::absorb_kill`).
+    pub(crate) stray_kill: bool,
 }
 
 fn not_connected() -> ExecError {
@@ -327,6 +367,12 @@ impl Core {
             let status = live.raw().tx_status();
             let autocommit = live.raw().autocommit();
             self.tx.observe(status, statement);
+            // ## m3a-t18-session-run: whose transaction it is.
+            self.tx.owner = if status == TxStatus::Idle {
+                TxOwner::None
+            } else {
+                self.holder
+            };
             if autocommit.is_some() {
                 self.server_autocommit = autocommit;
             }
@@ -414,6 +460,39 @@ impl Core {
         if self.live.is_none() {
             return Err(not_connected());
         }
+        // ## m3a-t18-session-run: nothing runs on a connection a cursor holds. Every request
+        // but the cursor's own releases it first (also in single-session mode, where every
+        // client shares this session); a stop that came meanwhile ends the request here.
+        if self.cursor.is_none() && !is_typed(&request) {
+            return self.handle_plain(request).await;
+        }
+        let mut watch = self.watch(Some(self.stop.clone()));
+        let w = &mut watch;
+        let mut released = Ok(());
+        if self.cursor.is_some() && !is_cursor_request(&request) {
+            released = self.release_cursor(self.release_reason(&request), w).await;
+            if released.is_ok() && self.stop.is_requested() {
+                released = Err(ExecError::of(ExecErrorKind::Cancelled));
+            }
+            // A cancel the release needed is settled; the request has its own.
+            w.fired = false;
+        }
+        match request {
+            // A run reports to its observer even when it cannot start.
+            Request::Run(spec) => self.run(spec, released, w).await,
+            Request::FetchMore { result, rows } => self.fetch_more(result, rows, w).await,
+            Request::FetchAll { result } => self.fetch_all(result, w).await,
+            Request::CloseCursor { result, reason } => self.close_cursor(result, reason, w).await,
+            other => {
+                released?;
+                self.handle_plain(other).await
+            }
+        }
+    }
+
+    /// A request that is not a run or a cursor's, on a connection no cursor holds (M2b's
+    /// requests, unchanged).
+    async fn handle_plain(&mut self, request: Request) -> Reply {
         match request {
             Request::Exec { sql, opts, origin } => self.exec(&sql, opts, origin).await,
             Request::Tx(cmd) => self.tx_command(cmd).await,
@@ -435,12 +514,35 @@ impl Core {
                 }
                 reset
             }
-            // ## m3a-t01b-seams: Task 18 fills these bodies (`run.rs`, `cursor.rs`); until
-            // then each answers `Internal` and runs nothing.
-            Request::Run(spec) => self.run(spec).await,
-            Request::FetchMore { result, rows } => self.fetch_more(result, rows).await,
-            Request::FetchAll { result } => self.fetch_all(result).await,
-            Request::CloseCursor { result, reason } => self.close_cursor(result, reason).await,
+            // ## m3a-t01b-seams, m3a-t18-session-run: `handle` serves these (`run.rs`,
+            // `cursor.rs`); reaching here is a defect, and fails closed.
+            Request::Run(_)
+            | Request::FetchMore { .. }
+            | Request::FetchAll { .. }
+            | Request::CloseCursor { .. } => Err(ExecError::of(ExecErrorKind::Internal)),
+        }
+    }
+
+    // ## m3a-t18-session-run
+    /// Why `request` releases the open cursor: the end of the user transaction the cursor sits
+    /// in (`TxEnded`), else the session being needed.
+    fn release_reason(&self, request: &Request) -> CloseReason {
+        let ends_tx = match request {
+            Request::Tx(TxCommand::Commit | TxCommand::Rollback) => true,
+            Request::Exec { sql, .. } => ends_transaction(sql),
+            Request::Run(RunSpec { units, .. }) => {
+                units.first().is_some_and(|u| ends_transaction(&u.sql))
+            }
+            _ => false,
+        };
+        let in_user_tx = self
+            .cursor
+            .as_ref()
+            .is_some_and(|c| c.in_user_tx(self.tx.status, self.tx.owner));
+        if ends_tx && in_user_tx {
+            CloseReason::TxEnded
+        } else {
+            CloseReason::SessionNeeded
         }
     }
 
@@ -507,7 +609,7 @@ impl Core {
     /// What Manual mode sends before a statement while no transaction is open. MySQL needs
     /// nothing (`autocommit = 0` opens one); SQLite takes the write lock at once (`BEGIN
     /// IMMEDIATE`) unless the statement reads, by its first keyword.
-    fn manual_begin(&self, keyword: &str) -> Vec<String> {
+    pub(crate) fn manual_begin(&self, keyword: &str) -> Vec<String> {
         match family(self.kind) {
             Family::MySql => Vec::new(),
             Family::Sqlite if !matches!(keyword, "SELECT" | "WITH") => {
@@ -518,7 +620,7 @@ impl Core {
     }
 
     /// Probes the schema context again (Q27); a failed probe keeps the last one.
-    async fn reprobe(&mut self) {
+    pub(crate) async fn reprobe(&mut self) {
         let sql = schema_probe_sql(self.kind);
         if sql.is_empty() {
             return;
@@ -597,6 +699,12 @@ impl Core {
             TxCommand::Commit | TxCommand::Rollback if self.read_only => {
                 return Err(tx_error(TxError::Unsupported));
             }
+            // ## m3a-t18-session-run (P16): a failed transaction takes only a rollback.
+            // PostgreSQL answers a `COMMIT` there with a rollback, which the caller would
+            // take for a commit.
+            TxCommand::Commit if self.tx.status == TxStatus::Failed => {
+                return Err(tx_error(TxError::FailedNeedsRollback));
+            }
             TxCommand::Commit => {
                 self.control("COMMIT").await?;
                 self.reprobe().await;
@@ -625,6 +733,8 @@ impl Core {
 
     /// Closes the connection (its cleanup guards run); nothing when already closed.
     async fn close(&mut self) {
+        // ## m3a-t18-session-run: a cursor does not outlive its connection; its rows stay.
+        self.cursor_lost(CloseReason::ConnectionLost);
         if let Some(live) = self.live.take()
             && AssertUnwindSafe(live.close()).catch_unwind().await.is_err()
         {
@@ -661,6 +771,10 @@ impl Core {
         let status = live.raw().tx_status();
         self.server_autocommit = live.raw().autocommit();
         self.autocommit_off = false;
+        // ## m3a-t18-session-run: a new connection has no transaction of Hacivat's, and no
+        // kill is on its way to it.
+        self.holder = TxOwner::User;
+        self.stray_kill = false;
         self.live = Some(live);
         self.broken = None;
         self.last_class = None;
@@ -691,6 +805,22 @@ struct Queued {
     // ## m2b-t17-liveness
     /// Already re-queued once after a lost connection (B19: internal idempotent reads only).
     retried: bool,
+    // ## m3a-t18-session-run
+    /// The queued fetches this one took in (their rows are in `request`): each gets the same
+    /// reply, and a cancel that names one of them stops the fetch.
+    merged: Vec<(u64, oneshot::Sender<Reply>)>,
+}
+
+impl Queued {
+    fn new(seq: u64, request: Request, reply: oneshot::Sender<Reply>) -> Queued {
+        Queued {
+            seq,
+            request,
+            reply,
+            retried: false,
+            merged: Vec::new(),
+        }
+    }
 }
 
 type CloseReply = oneshot::Sender<Result<(), CloseRefused>>;
@@ -711,6 +841,57 @@ struct Ctl {
     hooks: SessionHooks,
     // ## m2b-t17-liveness
     liveness: Option<Liveness>,
+    // ## m3a-t18-session-run
+    /// A command read ahead of its turn while queued fetches were gathered (`gather`): the
+    /// next read takes it first, so commands keep their order.
+    held: Option<Command>,
+}
+
+// ## m3a-t18-session-run
+/// The next command: the one read ahead, else the channel's. `None` when every handle is gone.
+async fn next_command(
+    held: &mut Option<Command>,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+) -> Option<Command> {
+    match held.take() {
+        Some(cmd) => Some(cmd),
+        None => commands.recv().await,
+    }
+}
+
+/// Whether `request` is a cursor's own (it never releases the open cursor: it acts on it, or
+/// is a no-op when it names another result).
+fn is_cursor_request(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::FetchMore { .. } | Request::FetchAll { .. } | Request::CloseCursor { .. }
+    )
+}
+
+/// Whether `request` runs on the typed path, where a cancel means "stop fetching" (R-M3-16).
+fn is_typed(request: &Request) -> bool {
+    matches!(request, Request::Run(_)) || is_cursor_request(request)
+}
+
+/// Whether `sql`'s first keyword ends a transaction (not a `ROLLBACK TO SAVEPOINT`).
+fn ends_transaction(sql: &str) -> bool {
+    match first_keyword(sql).as_str() {
+        "COMMIT" | "END" => true,
+        "ROLLBACK" | "ABORT" => !sql
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .filter(|w| !w.is_empty())
+            .nth(1)
+            .is_some_and(|w| w.eq_ignore_ascii_case("TO")),
+        _ => false,
+    }
+}
+
+/// The result a fetch request names.
+fn fetch_target(request: &Request) -> Option<ResultId> {
+    match request {
+        Request::FetchMore { result, .. } | Request::FetchAll { result } => Some(*result),
+        _ => None,
+    }
 }
 
 // ## m2b-t17-liveness
@@ -851,12 +1032,9 @@ impl Ctl {
                 seq,
                 request,
                 reply,
-            } => self.queue.push_back(Job::Request(Queued {
-                seq,
-                request,
-                reply,
-                retried: false,
-            })),
+            } => self
+                .queue
+                .push_back(Job::Request(Queued::new(seq, request, reply))),
             // Q18: only a running request can be cancelled.
             Command::Cancel { reply, .. } | Command::Escalate { reply, .. } => {
                 let _ = reply.send(CancelOutcome::AlreadyFinished);
@@ -865,10 +1043,54 @@ impl Ctl {
         }
     }
 
+    // ## m3a-t18-session-run
+    /// Moves the requests already sent into the queue, in order, up to the first command that
+    /// is not a request (a cancel, a close): that one is held for the next read, so a cancel
+    /// still finds its request running (Q18).
+    fn gather(&mut self) {
+        while self.held.is_none() {
+            match self.commands.try_recv() {
+                Ok(cmd @ Command::Submit { .. }) => self.idle_command(cmd),
+                Ok(other) => self.held = Some(other),
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Merges the fetches queued right behind `job` for the same result into it: two
+    /// `FetchMore`s become one fetch of the sum (a `FetchAll` among them wins). Each merged
+    /// request keeps its reply. A fetch behind any other request is left alone: that request
+    /// releases the cursor first.
+    fn coalesce(&mut self, job: &mut Queued) {
+        let Some(result) = fetch_target(&job.request) else {
+            return;
+        };
+        self.gather();
+        while let Some(Job::Request(next)) = self.queue.front()
+            && fetch_target(&next.request) == Some(result)
+        {
+            let Some(Job::Request(next)) = self.queue.pop_front() else {
+                break;
+            };
+            job.request = match (&job.request, &next.request) {
+                (Request::FetchMore { rows: a, .. }, Request::FetchMore { rows: b, .. }) => {
+                    Request::FetchMore {
+                        result,
+                        rows: a.saturating_add(*b),
+                    }
+                }
+                _ => Request::FetchAll { result },
+            };
+            job.merged.push((next.seq, next.reply));
+            job.merged.extend(next.merged);
+        }
+    }
+
     /// Stops taking commands and answers everything still waiting: the session is closed.
     fn shut(&mut self) {
         self.commands.close();
-        while let Ok(cmd) = self.commands.try_recv() {
+        let mut held = self.held.take();
+        while let Some(cmd) = held.take().or_else(|| self.commands.try_recv().ok()) {
             match cmd {
                 Command::Submit { reply, .. } => {
                     let _ = reply.send(Err(not_connected()));
@@ -903,6 +1125,7 @@ async fn break_now(core: &mut Core, ctl: &mut Ctl, class: ErrClass) {
     ctl.publish(|s| {
         s.state = SessionState::Broken(class);
         s.cancel = CancelState::Idle;
+        s.cursor = None;
     });
 }
 
@@ -934,7 +1157,9 @@ async fn run(mut core: Core, mut ctl: Ctl) {
                 }
                 continue;
             }
-            Some(Job::Request(job)) => {
+            Some(Job::Request(mut job)) => {
+                // ## m3a-t18-session-run: queued fetches of one result run as one.
+                ctl.coalesce(&mut job);
                 // ## m2b-t17-liveness
                 let activity = is_activity(&job.request);
                 let flow = run_one(&mut core, &mut ctl, job).await;
@@ -947,9 +1172,11 @@ async fn run(mut core: Core, mut ctl: Ctl) {
             None => {}
         }
         // ## m2b-t17-liveness: commands first, so a request that comes with a tick runs.
+        // ## m3a-t18-session-run: the third branch is the open cursor's idle bound (R-M3-20).
+        let idle_at = core.cursor_deadline();
         tokio::select! {
             biased;
-            cmd = ctl.commands.recv() => match cmd {
+            cmd = next_command(&mut ctl.held, &mut ctl.commands) => match cmd {
                 Some(cmd) => ctl.idle_command(cmd),
                 // Every handle is gone.
                 None => {
@@ -957,6 +1184,13 @@ async fn run(mut core: Core, mut ctl: Ctl) {
                     return;
                 }
             },
+            () = sleep_opt(idle_at), if idle_at.is_some() => {
+                let flow = release_idle(&mut core, &mut ctl).await;
+                if !follow(&mut core, &mut ctl, flow).await {
+                    return;
+                }
+                ctl.after_work(false, core.tx.status);
+            }
             () = next_tick(&mut ctl.liveness), if ctl.liveness.is_some() => {
                 let flow = on_tick(&mut core, &mut ctl).await;
                 if !follow(&mut core, &mut ctl, flow).await {
@@ -989,14 +1223,21 @@ async fn on_tick(core: &mut Core, ctl: &mut Ctl) -> Flow {
         return Flow::Go;
     };
     let (now, wall) = clocks();
-    let mut action = l.sup.tick(now, wall, false, core.tx.status);
+    // ## m3a-t18-session-run: Hacivat's own transaction around a cursor is not an idle
+    // transaction of the user's (no warning for it, and it does not keep the session from
+    // its idle disconnect; the close releases the cursor first).
+    let user_tx = match core.tx.owner {
+        TxOwner::Cursor | TxOwner::Guard => TxStatus::Idle,
+        TxOwner::User | TxOwner::None => core.tx.status,
+    };
+    let mut action = l.sup.tick(now, wall, false, user_tx);
     if action == Some(LivenessAction::Suspect) {
         // Q31: one check at once, never one per missed tick.
         tracing::debug!(
             session = ctl.id.0,
             "the clocks jumped; checking the connection"
         );
-        action = l.sup.tick(now, wall, false, core.tx.status);
+        action = l.sup.tick(now, wall, false, user_tx);
     }
     let minutes = l.sup.policy().idle_minutes();
     let timeout = l.sup.policy().ping_timeout();
@@ -1015,7 +1256,72 @@ async fn on_tick(core: &mut Core, ctl: &mut Ctl) -> Flow {
             close(core, ctl, ClosePolicy::RollBack, reply).await;
             Flow::Stop
         }
+        // ## m3a-t18-session-run: no ping while a cursor is suspended (MySQL and SQLite take
+        // no command beside an open query; the cursor's idle bound ends it soon). The
+        // supervisor asks again on its next tick.
+        Some(LivenessAction::Ping) if core.cursor.is_some() => Flow::Go,
         Some(LivenessAction::Ping) => keepalive(core, ctl, timeout).await,
+    }
+}
+
+// ## m3a-t18-session-run
+/// The open cursor's idle bound ran out: releases it (`IdleTimeout`), as a request would, with
+/// the driver calls guarded against a panic and a lost connection.
+async fn release_idle(core: &mut Core, ctl: &mut Ctl) -> Flow {
+    let tx_before = core.tx.clone();
+    // The session is at work while it drains, kills and rolls back (on MySQL up to a few
+    // seconds), and commands queue meanwhile: `Busy` with request 0, a number no request has
+    // (they count from 1), so no cancel can name it.
+    let since = Instant::now();
+    ctl.publish(|s| s.state = SessionState::Busy { req: 0, since });
+    let released = AssertUnwindSafe(core.release_unasked(CloseReason::IdleTimeout))
+        .catch_unwind()
+        .await;
+    let flow = after_release(core, ctl, released).await;
+    if core.tx != tx_before {
+        ctl.emit(SessionEvent::TxChanged(core.tx.clone()));
+    }
+    flow
+}
+
+/// Acts on a release outside a request: a gap is reported, a connection that can no longer be
+/// used is closed (and recovered when the session may), else the snapshot follows.
+async fn after_release(
+    core: &mut Core,
+    ctl: &mut Ctl,
+    released: Result<Result<(), ExecError>, Box<dyn Any + Send>>,
+) -> Flow {
+    match released {
+        Err(panic) => {
+            tracing::error!(
+                session = ctl.id.0,
+                panic = %loggable(panic_text(panic.as_ref())),
+                "a driver call panicked while a cursor was released; the session is broken"
+            );
+            core.broken = Some(ErrClass::Internal);
+        }
+        Ok(Err(ExecError {
+            kind: ExecErrorKind::EnforcementGap(reason),
+            ..
+        })) => ctl.emit(SessionEvent::EnforcementGap(reason)),
+        Ok(_) => {}
+    }
+    let Some(class) = core.broken else {
+        let (tx, cursor) = (core.tx.clone(), core.cursor_badge());
+        ctl.publish(|s| {
+            s.state = SessionState::Idle;
+            s.tx = tx;
+            s.cursor = cursor;
+        });
+        return Flow::Go;
+    };
+    core.close().await;
+    match begin_recovery(core, ctl, class, false) {
+        Some(reconnect) => Flow::Recover(reconnect),
+        None => {
+            break_now(core, ctl, class).await;
+            Flow::Go
+        }
     }
 }
 
@@ -1039,7 +1345,7 @@ async fn keepalive(core: &mut Core, ctl: &mut Ctl, timeout: std::time::Duration)
             tokio::select! {
                 biased;
                 answered = &mut ping => break Pinged::Answered(answered),
-                cmd = ctl.commands.recv() => match cmd {
+                cmd = next_command(&mut ctl.held, &mut ctl.commands) => match cmd {
                     None => break Pinged::Abandoned,
                     Some(Command::Close { policy, reply }) => {
                         ctl.queue.push_back(Job::Close(policy, reply));
@@ -1142,6 +1448,7 @@ fn begin_recovery(
         s.state = SessionState::Connecting;
         s.cancel = CancelState::Idle;
         s.tx = tx;
+        s.cursor = None;
     });
     // Synchronously, before the caller answers the request that found the loss: whoever sees
     // that answer already sees the reconnect under way.
@@ -1185,12 +1492,8 @@ fn recovering_command(ctl: &mut Ctl, cmd: Option<Command>) -> Recovering {
             request,
             reply,
         }) if is_retryable(&request) => {
-            ctl.queue.push_back(Job::Request(Queued {
-                seq,
-                request,
-                reply,
-                retried: false,
-            }));
+            ctl.queue
+                .push_back(Job::Request(Queued::new(seq, request, reply)));
             Recovering::Go
         }
         Some(Command::Submit { reply, .. }) => {
@@ -1233,7 +1536,7 @@ async fn recover(
         let landed = loop {
             tokio::select! {
                 biased;
-                cmd = ctl.commands.recv() => match recovering_command(ctl, cmd) {
+                cmd = next_command(&mut ctl.held, &mut ctl.commands) => match recovering_command(ctl, cmd) {
                     Recovering::Go => {}
                     Recovering::Close(reply) => {
                         close_recovering(core, ctl, reply).await;
@@ -1263,7 +1566,7 @@ async fn recover(
             loop {
                 tokio::select! {
                     biased;
-                    cmd = ctl.commands.recv() => match recovering_command(ctl, cmd) {
+                    cmd = next_command(&mut ctl.held, &mut ctl.commands) => match recovering_command(ctl, cmd) {
                         Recovering::Go => {}
                         Recovering::Close(reply) => break Err(Some(reply)),
                         Recovering::Abandoned => break Err(None),
@@ -1328,7 +1631,32 @@ async fn recover(
 
 /// Closes the session by `policy`; false when it refused (an open transaction).
 async fn close(core: &mut Core, ctl: &mut Ctl, policy: ClosePolicy, reply: CloseReply) -> bool {
-    if core.live.is_some() && core.tx.status != TxStatus::Idle {
+    // ## m3a-t18-session-run: Hacivat's own transaction around a cursor (or the guard's) is
+    // not the user's, so it never refuses a close; a refused close leaves the cursor as it is.
+    let users = core.tx.status != TxStatus::Idle
+        && !matches!(core.tx.owner, TxOwner::Cursor | TxOwner::Guard);
+    if core.live.is_some() && users && policy == ClosePolicy::RefuseIfOpenTx {
+        let _ = reply.send(Err(CloseRefused::OpenTransaction));
+        return false;
+    }
+    if core.live.is_some() && core.cursor.is_some() {
+        // The cursor goes first (its query closed, Hacivat's transaction ended), its rows stay.
+        let released = AssertUnwindSafe(core.release_closing())
+            .catch_unwind()
+            .await;
+        match released {
+            Err(_) => {
+                tracing::error!(session = ctl.id.0, "releasing a cursor at close panicked");
+                core.broken = Some(ErrClass::Internal);
+            }
+            Ok(Err(ExecError {
+                kind: ExecErrorKind::EnforcementGap(reason),
+                ..
+            })) => ctl.emit(SessionEvent::EnforcementGap(reason)),
+            Ok(_) => {}
+        }
+    }
+    if core.live.is_some() && core.broken.is_none() && core.tx.status != TxStatus::Idle {
         match policy {
             ClosePolicy::RefuseIfOpenTx => {
                 let _ = reply.send(Err(CloseRefused::OpenTransaction));
@@ -1346,6 +1674,7 @@ async fn close(core: &mut Core, ctl: &mut Ctl, policy: ClosePolicy, reply: Close
     ctl.publish(|s| {
         s.state = SessionState::Disconnected;
         s.cancel = CancelState::Idle;
+        s.cursor = None;
     });
     let _ = reply.send(Ok(()));
     true
@@ -1368,8 +1697,16 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
         request,
         reply,
         retried,
+        merged,
     } = job;
+    // ## m3a-t18-session-run: the fetches merged into this one get its reply.
+    let answer = |merged: Vec<(u64, oneshot::Sender<Reply>)>, result: &Reply| {
+        for (_, reply) in merged {
+            let _ = reply.send(result.clone());
+        }
+    };
     let Some(live) = core.live.as_mut() else {
+        answer(merged, &Err(not_connected()));
         let _ = reply.send(Err(not_connected()));
         return Flow::Go;
     };
@@ -1385,10 +1722,20 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
     let Ok((backend, handle)) = probed else {
         tracing::error!(session = ctl.id.0, req = seq, "a driver call panicked");
         break_now(core, ctl, ErrClass::Internal).await;
+        answer(merged, &Err(ExecError::of(ExecErrorKind::Internal)));
         let _ = reply.send(Err(ExecError::of(ExecErrorKind::Internal)));
         return Flow::Go;
     };
     let mut ladder = Ladder::new(seq, core.kind, backend, handle, ctl.hooks.side.clone());
+    // ## m3a-t18-session-run: a cancel of a typed request means "stop fetching" (R-M3-16): the
+    // ladder sets the request's stop signal and the request closes its query the engine's
+    // way; the server cancel goes out only for a call that is overdue. Every other request
+    // keeps the M2b rung (the signal is set too, so a stop that lands while the request still
+    // releases an earlier cursor ends it before its own statement).
+    core.stop.reset();
+    ladder.stop = Some(core.stop.clone());
+    ladder.typed = is_typed(&request);
+    ladder.aliases = merged.iter().map(|(seq, _)| *seq).collect();
     let since = Instant::now();
     ctl.publish(|s| s.state = SessionState::Busy { req: seq, since });
     let (tx_before, schema_before) = (core.tx.clone(), core.schema.clone());
@@ -1406,10 +1753,21 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
                 // command is read, so a cancel always finds it running.
                 biased;
                 done = &mut work => break Ended::Done(done),
-                cmd = ctl.commands.recv() => match cmd {
+                cmd = next_command(&mut ctl.held, &mut ctl.commands) => match cmd {
                     None => break Ended::Abandoned,
                     Some(cmd) => {
-                        if let Some(reply) = ladder.command(ctl, cmd) {
+                        // ## m3a-t18-session-run: every command already sent is read in
+                        // this turn (a stream gives the actor one turn per chunk, R-M3-16).
+                        let mut next = Some(cmd);
+                        let mut deactivated = None;
+                        while let Some(cmd) = next {
+                            deactivated = ladder.command(ctl, cmd);
+                            if deactivated.is_some() {
+                                break;
+                            }
+                            next = ctl.commands.try_recv().ok();
+                        }
+                        if let Some(reply) = deactivated {
                             break Ended::Deactivated(reply);
                         }
                     }
@@ -1502,10 +1860,8 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
         {
             // Once, at the head, after the reconnect (B19).
             ctl.queue.push_front(Job::Request(Queued {
-                seq,
-                request,
-                reply,
                 retried: true,
+                ..Queued::new(seq, request, reply)
             }));
         }
     }
@@ -1518,13 +1874,17 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
             s.cancel = CancelState::Idle;
             s.tx = core.tx.clone();
             s.schema = core.schema.clone();
+            s.cursor = None;
         });
     } else {
+        // ## m3a-t18-session-run: the snapshot mirrors the open cursor.
+        let cursor = core.cursor_badge();
         ctl.publish(|s| {
             s.state = SessionState::Idle;
             s.cancel = CancelState::Idle;
             s.tx = core.tx.clone();
             s.schema = core.schema.clone();
+            s.cursor = cursor;
         });
     }
     if core.tx != tx_before {
@@ -1542,6 +1902,7 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
         Err(_) if ladder.requested() => CancelOutcome::Cancelled,
         _ => CancelOutcome::AlreadyFinished,
     };
+    answer(merged, &result);
     if let Some(reply) = reply {
         let _ = reply.send(result);
     }
@@ -1626,6 +1987,15 @@ struct Ladder {
     mechanism: Option<JoinHandle<Result<(), ErrClass>>>,
     /// MySQL's pre-opened side connection (Q37).
     prewarmed: Option<JoinHandle<Result<LiveConnection, ConnectError>>>,
+    // ## m3a-t18-session-run
+    /// The running request's stop signal: a cancel sets it.
+    stop: Option<Arc<StopSignal>>,
+    /// The request runs on the typed path: a cancel only asks it to stop fetching (the
+    /// request sends the server cancel itself, for a call that is overdue; R-M3-16).
+    typed: bool,
+    /// The sequence numbers of the fetches merged into the request: a cancel that names one
+    /// stops it too; any other number is stale (Q18).
+    aliases: Vec<u64>,
 }
 
 impl Ladder {
@@ -1650,7 +2020,16 @@ impl Ladder {
             failed: None,
             mechanism: None,
             prewarmed: None,
+            stop: None,
+            typed: false,
+            aliases: Vec::new(),
         }
+    }
+
+    // ## m3a-t18-session-run
+    /// Whether a cancel naming `seq` means the running request.
+    fn is_mine(&self, seq: u64) -> bool {
+        seq == self.seq || self.aliases.contains(&seq)
     }
 
     fn requested(&self) -> bool {
@@ -1660,16 +2039,22 @@ impl Ladder {
     /// A command while the request runs; `Some` (the reply) to deactivate.
     fn command(&mut self, ctl: &mut Ctl, cmd: Command) -> Option<oneshot::Sender<CancelOutcome>> {
         match cmd {
-            Command::Cancel { seq, reply } if seq == self.seq => {
+            Command::Cancel { seq, reply } if self.is_mine(seq) => {
                 self.climb(ctl, None);
-                self.send_cancel();
+                // ## m3a-t18-session-run: the stop-fetching rung (the `cancel` module docs).
+                if let Some(stop) = &self.stop {
+                    stop.request();
+                }
+                if !self.typed {
+                    self.send_cancel();
+                }
                 self.wait(reply);
             }
             Command::Escalate {
                 seq,
                 escalation: Escalation::Terminate,
                 reply,
-            } if seq == self.seq => {
+            } if self.is_mine(seq) => {
                 self.climb(ctl, Some(CancelState::Terminating));
                 self.send_terminate();
                 self.wait(reply);
@@ -1678,7 +2063,7 @@ impl Ladder {
                 seq,
                 escalation: Escalation::Deactivate,
                 reply,
-            } if seq == self.seq => {
+            } if self.is_mine(seq) => {
                 self.climb(ctl, Some(CancelState::Deactivating));
                 return Some(reply);
             }
@@ -1831,9 +2216,10 @@ impl Ladder {
         }
     }
 
-    /// Pre-opens MySQL's side connection (Q37), unless a cancel already went out.
+    /// Pre-opens MySQL's side connection (Q37), unless a cancel already went out. Not for a
+    /// typed request, whose kills are its own (`cursor::Canceller`).
     fn prewarm(&mut self) {
-        if self.cancel_sent || self.prewarmed.is_some() {
+        if self.typed || self.cancel_sent || self.prewarmed.is_some() {
             return;
         }
         self.prewarmed = Some(tokio::spawn(self.side.open_side()));
