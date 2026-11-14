@@ -98,3 +98,47 @@ root takes the content area as the M2 home does), its decoration (title, environ
 and quitting ask `tab_close_guard` and `quit_guard`, which may defer (the guard later calls
 `Workspace::force_close_tab` or quits). Every empty or stub hook keeps today's rendering, so the
 M1 and M2 shots do not move.
+
+## m3a-t19 — the shape-cache key
+
+**Choice.** The editor element shapes each visible row with `WindowTextSystem::shape_line` and
+keeps the result in its own LRU (`layout_cache.rs`, at most 4,096 shaped lines or 32 MB
+estimated), keyed `(text_hash, runs_hash, font_size_bits, column_window)`:
+
+- `text_hash` is XXH3-64 (`twox-hash`, R-M3-4) of the text that was shaped: the row's text with
+  tabs expanded to spaces at their stops, or a long line's window. The key is the **content**,
+  never a line index or a version, so an edit reshapes only the rows whose text changed (one per
+  typed character), a row moved by an edit above it is still a hit, and scrolling back finds the
+  rows shaped on the way down.
+- `runs_hash` covers every run's length, font (italic comments, ligatures off), colour,
+  background and underline. **Colours are in the key** because the pin's `ShapedLine` keeps its
+  decoration runs private: a cached shape cannot be repainted in another colour. A theme switch
+  therefore reshapes the visible rows only (about 35 at 600 px); GPUI's frame cache still holds
+  the font layout underneath.
+- `column_window` is the 512-column window a long line (more than 10,000 columns or 64 KB) is
+  shaped through, its start stepping by 128 columns (the M0 spike's `column_window`, ported with
+  its tests); columns are UTF-16 units from the line's start, so finding the window's bytes is
+  O(log n). x outside the window is the column × the monospace advance.
+- A control character is a chip of its own (its `control_name` label, shaped at 11 px under the
+  same cache), so a row is a short list of pieces; the ten gutter digits are shaped once per
+  font size and ink (`DigitCache`, an app global: shapes belong to the text system).
+
+**Rejected.** The spike's cache keyed by line index with a per-line version table (the table is
+spliced in O(n) on every edit, and a row moved by an edit misses); GPUI's two-frame
+`LineLayoutCache` alone (scrolling back past two frames reshapes everything); a colour-free key
+with recolouring at paint (not possible through the pin's public API).
+
+**Held by.** `one_line_reshaped_per_typed_character` (50k lines: exactly one shape per typed
+character), `scrolling_back_hits_the_cache_95_percent`, `theme_switch_reshapes_only_visible_lines`
+(shapes = painted rows), `long_line_shapes_a_window` (100k characters: never more than 640
+characters shaped, and the window follows the caret), `the_key_changes_with_text_colour_size_and_window_only`,
+`digits_are_shaped_once_per_size_and_ink`, `column_window_*` (`tests/element.rs`,
+`src/layout_cache.rs`).
+
+**Also decided here.** Rows are painted relative to a `ScrollAnchor` (line and offset into it;
+the 6 px top padding is a negative offset at the top), so a million rows stay pixel-exact, and
+an edit above the view re-pins the anchor; the view reveals the main caret only after a commit
+that changed the selection or edited at the caret. The code area and the gutter share one `panel`
+ground (NOTES surface 1 and the approved mock; the plan's `ground` plus a `gutter` fill and a
+1 px seam predate the mocks). The caret blinks at 530 ms (GPUI exposes no platform rate at the
+pin), restarts on every input, and stops solid after 10 s idle and under reduced motion.
