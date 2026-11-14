@@ -306,21 +306,37 @@ impl DocSnapshot {
 
     /// The selection `range` split on its own in `mode`, from the state at its start, with
     /// document offsets (a selection run as separate statements).
+    ///
+    /// A unit is sent alone, and the server reads it from a clean state. So a selection that
+    /// starts inside a token never yields that token's tail as a certain statement: the
+    /// statement holding the rest of a string, a quoted identifier, a dollar-quoted body or
+    /// `COPY` data is uncertain (`UnterminatedConstruct`), and after the rest of an executable
+    /// comment or a hint every statement is (`AmbiguousCommentEnd`). The rest of a plain
+    /// comment is trivia. A selection that starts inside a client command's line yields the
+    /// rest of that line as an unsupported client segment, never as SQL.
     pub fn split_selection(&self, range: TextRange, mode: SplitMode) -> Split {
         let range = TextRange::new(
             range.start().min(size(self.text.len())),
             range.end().min(size(self.text.len())),
         );
-        let start = self.split_start_at(range.start());
-        let Some(piece) = self
+        if self
             .text
             .get(usize::from(range.start())..usize::from(range.end()))
-        else {
+            .is_none()
+        {
             return Split::default();
-        };
+        }
+        // Inside a client command: the rest of the command is its argument.
+        let command = self.client_at(range.start()).map(|c| ClientSegment {
+            range: TextRange::new(range.start(), c.range.end().min(range.end())),
+            kind: c.kind,
+            supported: false,
+        });
+        let by = command.map_or(range.start(), |c| c.range.end());
+        let start = self.split_start_at(by);
+        let piece = &self.text[usize::from(by)..usize::from(range.end())];
         let s = split_from(piece, &self.ctx, self.flavor, mode, &start);
-        let by = range.start();
-        Split {
+        let mut out = Split {
             items: s
                 .items
                 .into_iter()
@@ -350,7 +366,11 @@ impl DocSnapshot {
                     ..d
                 })
                 .collect(),
+        };
+        if let Some(c) = command {
+            out.client.insert(0, c);
         }
+        out
     }
 
     fn client_at(&self, at: TextSize) -> Option<&ClientSegment> {

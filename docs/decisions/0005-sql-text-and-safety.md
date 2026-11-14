@@ -359,11 +359,18 @@ remembered kind is preselected when offered, else the statement.
   unsupported client command in it refuses the whole selection.
 - A selection that starts inside a token is refused. The server reads the sent text from a
   clean state, so the rest of a string, a quoted name, a dollar-quoted body or `COPY` data
-  would run as code: `SELECT 'a; DROP TABLE t; '` selected from inside the literal gave the
-  certain statement ` DROP TABLE t; '` from `DocSnapshot::split_selection`. The rest of a
-  plain comment is trivia and never sent. Inside an executable comment or an optimizer hint
-  the server reads code, so that is refused too. A selection that starts inside a client
-  command's line is `UnsupportedClientCommand`.
+  would run as code. The rest of a plain comment is trivia and never sent. Inside an
+  executable comment or an optimizer hint the server reads code, so that is refused too. A
+  selection that starts inside a client command's line is `UnsupportedClientCommand`.
+- This is refused twice, at the source and in `exec_range`. Task 13's properties found that
+  `DocSnapshot::split_selection` returned such a tail as a certain statement (`SELECT 'a;
+  DROP TABLE t; '` selected from inside the literal gave ` DROP TABLE t; '` as `Exact`) and
+  panicked on an executable comment's tail whose third byte is inside a character. The
+  splitter now marks the statement that holds a carried tail uncertain
+  (`UnterminatedConstruct`), marks everything after an executable comment's or hint's tail
+  uncertain (`AmbiguousCommentEnd`), reads such a tail without assuming an opener, and
+  `split_selection` returns the rest of a client command's line as an unsupported client
+  segment. `exec_range` keeps its own refusal before it calls `split_selection`.
 - Cost: statements selected inside a function body (a dollar-quoted string) do not run in
   M3a. Listed for the PO.
 - `AsOne` (and `SmartExpand` with no boundary inside) returns one `Verbatim` unit only when

@@ -527,7 +527,8 @@ fn separate(doc: &DocSnapshot, r: TextRange) -> RangeResolution {
     // The server reads what is sent from a clean state. A selection that starts inside a
     // token would send that token's tail as code: a string's or a quoted name's rest, a
     // dollar-quoted body, `COPY` data. In a plain comment the tail is trivia and never sent;
-    // in an executable comment or a hint the server reads code.
+    // in an executable comment or a hint the server reads code. `split_selection` marks
+    // such a tail uncertain itself; this refusal does not depend on it.
     let start = doc.split_start_at(r.start());
     let reason = match start.lex {
         LexState::Initial | LexState::InBlockComment { .. } => None,

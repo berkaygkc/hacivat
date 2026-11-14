@@ -214,6 +214,216 @@ fn split_start_reads_the_state_inside_a_construct() {
     );
     let got: Vec<&str> = s.statements().map(|st| &text[st.strict]).collect();
     assert_eq!(got, ["a; b $$", "SELECT 'x;y'"]);
+    // The body's tail is no statement the server would read the same way: never certain.
+    let certain: Vec<&str> = s.runnable().map(|st| &text[st.strict]).collect();
+    assert_eq!(certain, ["SELECT 'x;y'"]);
+}
+
+fn doc_in(text: &str, id: DialectId, flavor: ClientFlavor) -> sql_split::DocSnapshot {
+    SqlDocument::new(text.into(), DialectCtx::new(id, None), flavor).snapshot()
+}
+
+/// The selection from right after the first `from` to the text's end, in both modes: every
+/// statement's text, and the certain ones.
+fn selected(
+    snap: &sql_split::DocSnapshot,
+    from: &str,
+) -> [(Vec<String>, Vec<String>, sql_split::Split); 2] {
+    let text = snap.text();
+    let start = text.find(from).unwrap() + from.len();
+    let r = TextRange::new(
+        at(u32::try_from(start).unwrap()),
+        at(u32::try_from(text.len()).unwrap()),
+    );
+    [SplitMode::Execution, SplitMode::Editor].map(|mode| {
+        let s = snap.split_selection(r, mode);
+        let all = s
+            .statements()
+            .map(|st| text[st.strict].to_string())
+            .collect();
+        let certain = s.runnable().map(|st| text[st.strict].to_string()).collect();
+        (all, certain, s)
+    })
+}
+
+// Found by Task 13: a selection that starts inside a token returned the token's tail as a
+// certain statement, which a server reading it from a clean state runs as code.
+#[test]
+fn a_selection_inside_a_token_never_returns_a_certain_tail() {
+    use sql_split::AmbiguityReason::UnterminatedConstruct;
+    let (my, pg) = (DialectId::MySql, DialectId::Postgres);
+    let (cli, psql) = (ClientFlavor::MySqlCli, ClientFlavor::Psql);
+    // (text, the selection starts after this, dialect, flavor, the tail's statement)
+    let cases = [
+        (
+            "SELECT 'a; DROP TABLE t; '; SELECT 2;",
+            "'a;",
+            my,
+            cli,
+            " DROP TABLE t; '",
+        ),
+        (
+            "SELECT 'a; DROP TABLE t; '; SELECT 2;",
+            "'a;",
+            pg,
+            psql,
+            " DROP TABLE t; '",
+        ),
+        (
+            "SELECT 'a; DROP TABLE t; --'; SELECT 2;",
+            "'a;",
+            pg,
+            psql,
+            " DROP TABLE t; --'",
+        ),
+        (
+            "SELECT `a; DROP TABLE t; `; SELECT 2;",
+            "`a;",
+            my,
+            cli,
+            " DROP TABLE t; `",
+        ),
+        (
+            "SELECT \"a; DROP TABLE t; \"; SELECT 2;",
+            "\"a;",
+            pg,
+            psql,
+            " DROP TABLE t; \"",
+        ),
+        (
+            "SELECT $q$ a; DROP TABLE t; $q$; SELECT 2;",
+            "$q$ a;",
+            pg,
+            psql,
+            " DROP TABLE t; $q$",
+        ),
+        (
+            "SELECT E'a\\'; DROP TABLE t; '; SELECT 2;",
+            "E'a",
+            pg,
+            psql,
+            "\\'; DROP TABLE t; '",
+        ),
+    ];
+    for (text, from, id, flavor, tail) in cases {
+        let snap = doc_in(text, id, flavor);
+        for (all, certain, s) in selected(&snap, from) {
+            assert_eq!(all, [tail, "SELECT 2"], "{text}");
+            assert_eq!(certain, ["SELECT 2"], "{text}");
+            assert!(
+                s.ambiguous
+                    .iter()
+                    .any(|a| a.reason == UnterminatedConstruct && text[a.at].trim() == tail.trim()),
+                "{text}: {:?}",
+                s.ambiguous
+            );
+        }
+    }
+}
+
+#[test]
+fn a_selection_inside_copy_data_never_returns_a_row_as_certain() {
+    for text in [
+        "COPY t FROM STDIN;\nDROP TABLE x;\n",
+        "COPY t FROM STDIN;\nDROP TABLE x;\n\\.\nSELECT 2;",
+        "COPY t FROM STDIN;\nDROP TABLE x;\nDROP TABLE y;\n\\.\nSELECT 2;",
+    ] {
+        let snap = doc_in(text, DialectId::Postgres, ClientFlavor::Psql);
+        for from in ["STDIN;\n", "STDIN;\nDROP"] {
+            for (all, certain, s) in selected(&snap, from) {
+                assert!(
+                    !certain.iter().any(|c| c.contains("TABLE")),
+                    "{text:?} from {from:?}: {all:?} / {certain:?}"
+                );
+                assert!(!s.ambiguous.is_empty(), "{text:?} from {from:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_selection_inside_an_executable_comment_or_hint_is_uncertain_to_the_end() {
+    use sql_split::AmbiguityReason::AmbiguousCommentEnd;
+    let cases = [
+        // The tail starts with `/`, a space and a three-byte character: no `/*!` opener to
+        // skip (this panicked inside a character).
+        (
+            "SELECT 1 /*! ; */ \u{202E} /*!50000 x */ ; SELECT 2;",
+            "/*! ; *",
+        ),
+        ("SELECT 1 /*! x; DROP TABLE t; */; SELECT 2;", "/*! x;"),
+        ("SELECT 1 /*!50000 x */ FROM t; SELECT 2;", "/*!5"),
+        ("SELECT 1 /*M! ; é */; SELECT 2;", "/*M! ;"),
+        ("SELECT /*+ x */ 1; SELECT 2;", "/*+"),
+    ];
+    for (text, from) in cases {
+        let snap = doc_in(text, DialectId::MariaDb, ClientFlavor::MySqlCli);
+        for (all, certain, s) in selected(&snap, from) {
+            // What follows is read, and none of it is certain.
+            assert!(
+                all.iter().any(|a| a.contains("SELECT 2")),
+                "{text}: {all:?}"
+            );
+            assert!(certain.is_empty(), "{text}: {certain:?}");
+            assert!(
+                s.ambiguous.iter().any(|a| a.reason == AmbiguousCommentEnd),
+                "{text}: {:?}",
+                s.ambiguous
+            );
+        }
+    }
+}
+
+#[test]
+fn a_selection_inside_a_plain_comment_or_at_a_clean_place_stays_certain() {
+    // The rest of a plain comment is trivia in both readings: what follows is certain.
+    let text = "SELECT 1 /* x; DROP TABLE t; */; SELECT 2;";
+    let snap = doc_in(text, DialectId::MySql, ClientFlavor::MySqlCli);
+    for (all, certain, s) in selected(&snap, "/* x;") {
+        assert_eq!(all, ["SELECT 2"]);
+        assert_eq!(certain, ["SELECT 2"]);
+        assert!(s.ambiguous.is_empty());
+    }
+    // Between two tokens nothing is carried: a string literal that starts the selection is a
+    // whole token, and the server reads it as one.
+    let text = "SELECT 'x' 'y; DROP TABLE t; '; SELECT 2;";
+    let snap = doc_in(text, DialectId::MySql, ClientFlavor::MySqlCli);
+    for (all, certain, _) in selected(&snap, "'x' ") {
+        assert_eq!(all, ["'y; DROP TABLE t; '", "SELECT 2"]);
+        assert_eq!(certain, all);
+    }
+}
+
+#[test]
+fn a_selection_inside_a_client_command_line_is_the_command_not_sql() {
+    let text = "\\echo hi; DROP TABLE x;\nSELECT 2;";
+    let snap = doc_in(text, DialectId::Postgres, ClientFlavor::Psql);
+    for (all, certain, s) in selected(&snap, "hi;") {
+        assert_eq!(all, ["SELECT 2"]);
+        assert_eq!(certain, ["SELECT 2"]);
+        let [c] = s.client.as_slice() else {
+            panic!("one client segment, got {:?}", s.client)
+        };
+        assert_eq!(&text[c.range], " DROP TABLE x;");
+        assert!(!c.supported);
+    }
+    // A selection that ends inside the same line holds only the command's rest.
+    let r = TextRange::new(at(9), at(15));
+    let s = snap.split_selection(r, SplitMode::Execution);
+    assert_eq!(s.statements().count(), 0);
+    assert_eq!(s.client.len(), 1);
+    assert_eq!(s.client[0].range, r);
+
+    // mysql `DELIMITER`: the rest of its line is the delimiter's text, and the delimiter it
+    // sets is in force after it.
+    let text = "DELIMITER //\nSELECT 1; SELECT 2//\nSELECT 3//\n";
+    let snap = doc_in(text, DialectId::MySql, ClientFlavor::MySqlCli);
+    for (all, certain, s) in selected(&snap, "DELIM") {
+        assert_eq!(all, ["SELECT 1; SELECT 2", "SELECT 3"]);
+        assert_eq!(certain, ["SELECT 3"]);
+        assert_eq!(&text[s.client[0].range], "ITER //");
+        assert!(!s.client[0].supported);
+    }
 }
 
 #[test]

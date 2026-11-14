@@ -368,8 +368,78 @@ fn config() -> ProptestConfig {
     }
 }
 
+/// A selection of the text, split on its own from the state at its start (found by Task 13):
+/// it never panics, and every certain statement it returns, split again alone from a *clean*
+/// lexer state as the server reads a sent unit, is exactly itself. So a selection that
+/// starts inside a string, a quoted name, a dollar-quoted body, `COPY` data or an executable
+/// comment never returns that token's tail as a certain statement. (A selection is its own
+/// script and may cut a `DELIMITER` line away: the delimiter a unit is read under is the
+/// document's at the unit, the one at the selection's start, or none.)
+fn selection_units_read_alone(
+    s: &str,
+    id: DialectId,
+    flavor: ClientFlavor,
+    a: usize,
+    b: usize,
+) -> Result<(), String> {
+    let at = |seed: usize| {
+        let mut i = seed % (s.len() + 1);
+        while !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        TextSize::from(u32::try_from(i).unwrap())
+    };
+    let (a, b) = (at(a), at(b));
+    let r = TextRange::new(a.min(b), a.max(b));
+    let ctx = DialectCtx::new(id, None);
+    let snap = SqlDocument::new(s.to_string(), ctx, flavor).snapshot();
+    let carried = snap.split_start_at(r.start());
+    for mode in [SplitMode::Execution, SplitMode::Editor] {
+        let split = snap.split_selection(r, mode);
+        for st in split.runnable() {
+            if !r.contains_range(st.strict) {
+                return Err(format!("{:?} is outside the selection {r:?}", st.strict));
+            }
+            let piece = &s[st.strict];
+            let whole = TextRange::up_to(TextSize::from(u32::try_from(piece.len()).unwrap()));
+            let delimiters = [
+                snap.split_start_at(st.strict.start()).delimiter,
+                carried.delimiter.clone(),
+                None,
+            ];
+            let itself = delimiters.into_iter().any(|delimiter| {
+                let clean = SplitStart {
+                    lex: LexState::Initial,
+                    delimiter,
+                };
+                let alone = split_from(piece, &ctx, flavor, SplitMode::Execution, &clean);
+                let items: Vec<TextRange> = alone.statements().map(|x| x.strict).collect();
+                items == [whole] && alone.runnable().count() == 1
+            });
+            if !itself {
+                return Err(format!(
+                    "{mode:?}: certain {piece:?} of the selection {r:?} (start {:?}) is not itself alone",
+                    carried.lex
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(config())]
+
+    #[test]
+    fn a_selection_never_returns_a_certain_unit_the_server_reads_otherwise(
+        s in any_sql(),
+        (id, flavor) in dialects(),
+        a in 0usize..100_000,
+        b in 0usize..100_000,
+    ) {
+        let r = selection_units_read_alone(&s, id, flavor, a, b);
+        prop_assert!(r.is_ok(), "{:?} in {:?} {:?}: {}", s, id, flavor, r.unwrap_err());
+    }
 
     #[test]
     fn items_never_overlap_and_cover_every_significant_token(s in any_sql(), (id, flavor) in dialects()) {
