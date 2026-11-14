@@ -249,6 +249,15 @@ flags = ["", "ERROR", ""]
 errors = ["Nul"]
 
 [[case]]
+id = "EDGE-errors-name-every-rejected-token"
+source = "T4 review minor 4; alg/10 SQL-LEX-02 rule 12 (Unknown + error) and the junk rule"
+dialect = "postgres"
+input = "\\ 123abc $1x"
+kinds = ["Unknown", "Whitespace", "Number", "Word", "Whitespace", "PositionalParam", "Word"]
+flags = ["ERROR", "", "JUNK", "", "", "JUNK", ""]
+errors = ["UnknownCharacter", "TrailingJunk", "TrailingJunk"]
+
+[[case]]
 id = "EDGE-lone-cr"
 source = "alg/10 SQL-LEX-02 rule 2 and edge cases: lone CR"
 dialect = "postgres"
@@ -672,6 +681,14 @@ kinds = ["Op", "LineComment"]
 texts = ["+", "--x"]
 
 [[case]]
+id = "EDGE-closed-comment-cuts-operator"
+source = "T4 review I2/minor 5; scan.l operator rule: an embedded /* ends the operator"
+dialect = "postgres"
+input = "+/**/=/**/1"
+kinds = ["Op", "BlockComment", "Op", "BlockComment", "Number"]
+texts = ["+", "/**/", "=", "/**/", "1"]
+
+[[case]]
 id = "EDGE-trailing-signs-split"
 source = "scan.l operator rule: trailing + and - without a sign keeper are separate operators"
 dialect = "postgres"
@@ -702,6 +719,7 @@ dialect = "postgres"
 input = "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
 kinds = ["Op"]
 flags = ["ERROR"]
+errors = ["OperatorTooLong"]
 
 [[case]]
 id = "EDGE-casts-and-params"

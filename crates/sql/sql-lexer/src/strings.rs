@@ -12,7 +12,7 @@ use sql_dialect::lex_profiles::Backslash;
 
 use crate::cursor::{Cursor, Scan};
 use crate::state::{LexState, StringRule};
-use crate::token::{LexErrorCode, TokenFlags, TokenKind};
+use crate::token::{LexErrorCode, TokenKind};
 
 /// The rule of a plain string under the profile and the session's modes.
 pub(crate) fn plain_rule(c: &Cursor) -> StringRule {
@@ -152,11 +152,7 @@ pub(crate) fn prefixed(c: &mut Cursor, pos: usize) -> Option<Scan> {
                     scan
                 } else {
                     // "unsafe use of string constant with Unicode escapes"
-                    let code = scan.error.unwrap_or(LexErrorCode::InvalidEscape);
-                    Scan {
-                        error: Some(code),
-                        ..scan.flagged(TokenFlags::ERROR)
-                    }
+                    scan.rejected(LexErrorCode::InvalidEscape)
                 })
             }
             b'"' => Some(ident_from(c, pos + 3, b'"', TokenKind::UnicodeQuotedIdent)),
@@ -176,6 +172,6 @@ fn check_blob(c: &mut Cursor, pos: usize, scan: Scan) -> Scan {
     if body.len().is_multiple_of(2) && body.iter().all(u8::is_ascii_hexdigit) {
         scan
     } else {
-        scan.flagged(TokenFlags::ERROR)
+        scan.rejected(LexErrorCode::InvalidLiteral)
     }
 }

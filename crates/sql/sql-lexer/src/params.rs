@@ -6,7 +6,7 @@
 use sql_dialect::lex_profiles::Colon;
 
 use crate::cursor::{Cursor, Scan};
-use crate::token::{TokenFlags, TokenKind};
+use crate::token::{LexErrorCode, TokenKind};
 
 /// A psql variable or `:name` character (no `$`).
 fn name_char(b: u8) -> bool {
@@ -82,7 +82,7 @@ pub(crate) fn tcl(c: &mut Cursor, pos: usize) -> Scan {
                 return if c.at(stop) == Some(b')') {
                     Scan::new(TokenKind::NamedParam, stop + 1)
                 } else {
-                    Scan::new(TokenKind::NamedParam, stop).flagged(TokenFlags::ERROR)
+                    Scan::new(TokenKind::NamedParam, stop).rejected(LexErrorCode::InvalidLiteral)
                 };
             }
             Some(b':') if c.at(i + 1) == Some(b':') => i += 2,
@@ -90,7 +90,7 @@ pub(crate) fn tcl(c: &mut Cursor, pos: usize) -> Scan {
         }
     }
     if chars == 0 {
-        Scan::new(TokenKind::Unknown, i).flagged(TokenFlags::ERROR)
+        Scan::new(TokenKind::Unknown, i).rejected(LexErrorCode::UnknownCharacter)
     } else {
         Scan::new(TokenKind::NamedParam, i)
     }

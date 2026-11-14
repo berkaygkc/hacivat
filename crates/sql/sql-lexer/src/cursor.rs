@@ -13,9 +13,16 @@ use crate::state::LexState;
 use crate::token::{LexErrorCode, Lexed, TokenFlags, TokenKind};
 use crate::{comments, dollar, numbers, ops, params, strings, words};
 
-/// Lexes `text` with `profile` and `modes`, starting in `start`. Total and lossless: the
-/// tokens tile the text, every token is at least one byte, and every boundary is a char
-/// boundary.
+/// Lexes `text` with `profile` and `modes`, starting in `start`. Total and lossless over any
+/// text below 4 GiB: the tokens tile the text, every token is at least one byte, every boundary
+/// is a char boundary, and malformed input becomes flagged tokens and errors.
+///
+/// Offset 0 of `text` is taken as the start of a document (a byte-order mark there is
+/// whitespace; see `LexState` for resuming inside one).
+///
+/// # Panics
+/// When `text` is 4 GiB or longer (offsets are `u32`); no editor document reaches that
+/// (R-M3-49 caps one at 20 MB).
 pub fn lex(text: &str, profile: &LexDialect, modes: LexModes, start: &LexState) -> Lexed {
     Cursor::new(text, profile, modes).run(start)
 }
@@ -35,6 +42,9 @@ pub fn lex_counting_steps(
 
 /// [`lex`] over chunked text. M3a materialises the chunks into one string (a single chunk is
 /// read in place) and lexes it.
+///
+/// # Panics
+/// When the text is 4 GiB or longer, as [`lex`].
 pub fn lex_chunks(
     text: &dyn TextChunks,
     profile: &LexDialect,
@@ -70,7 +80,9 @@ pub(crate) struct Scan {
     /// Where the token ends (exclusive).
     pub(crate) end: usize,
     pub(crate) flags: TokenFlags,
-    pub(crate) error: Option<LexErrorCode>,
+    /// Its errors, in order (at most two: an unterminated construct can also be ambiguous or
+    /// rejected).
+    pub(crate) errors: [Option<LexErrorCode>; 2],
     /// The state the text ends in when this token runs unterminated to its end.
     pub(crate) open: Option<LexState>,
 }
@@ -81,7 +93,7 @@ impl Scan {
             kind,
             end,
             flags: TokenFlags::empty(),
-            error: None,
+            errors: [None, None],
             open: None,
         }
     }
@@ -92,8 +104,20 @@ impl Scan {
     }
 
     pub(crate) fn with_error(mut self, code: LexErrorCode) -> Scan {
-        self.error = Some(code);
+        let slot = self.errors.iter_mut().find(|e| e.is_none());
+        *slot.expect("a token has at most two errors") = Some(code);
         self
+    }
+
+    /// The server rejects the token, or its reading is uncertain: `ERROR` and `code`.
+    pub(crate) fn rejected(self, code: LexErrorCode) -> Scan {
+        self.flagged(TokenFlags::ERROR).with_error(code)
+    }
+
+    /// An identifier follows directly: `JUNK` and `TrailingJunk`.
+    pub(crate) fn junk(self) -> Scan {
+        self.flagged(TokenFlags::JUNK)
+            .with_error(LexErrorCode::TrailingJunk)
     }
 
     /// The token runs to the end of the text, unterminated, leaving lexing in `state`.
@@ -107,7 +131,7 @@ impl Scan {
             kind,
             end,
             flags: TokenFlags::UNTERMINATED,
-            error,
+            errors: [error, None],
             open: Some(state),
         }
     }
@@ -239,7 +263,7 @@ impl<'a> Cursor<'a> {
             None
         };
         out.push(range.start(), scan.kind, scan.flags, keyword);
-        if let Some(code) = scan.error {
+        for code in scan.errors.into_iter().flatten() {
             out.push_error(range, code);
         }
         if let Some(state) = scan.open {
@@ -253,8 +277,10 @@ impl<'a> Cursor<'a> {
         match state {
             LexState::Initial => self.scan(0),
             LexState::InBlockComment { depth } => comments::block_from(self, 0, *depth),
-            LexState::InHintComment => comments::hint_from(self, 0),
-            LexState::InExecutableComment { depth } => comments::executable_from(self, 0, *depth),
+            LexState::InHintComment { body } => comments::hint_from(self, 0, *body),
+            LexState::InExecutableComment { depth, body } => {
+                comments::executable_from(self, 0, *depth, *body)
+            }
             LexState::InString { rule, quote, kind } => {
                 strings::string_from(self, 0, *quote, *rule, *kind)
             }
@@ -337,7 +363,7 @@ impl<'a> Cursor<'a> {
             b'}' => Scan::new(TokenKind::RBrace, pos + 1),
             b',' => Scan::new(TokenKind::Comma, pos + 1),
             b';' => Scan::new(TokenKind::Semicolon, pos + 1),
-            0 => unknown(pos).with_error(LexErrorCode::Nul),
+            0 => Scan::new(TokenKind::Unknown, pos + 1).rejected(LexErrorCode::Nul),
             c if c.is_ascii_alphabetic() || c == b'_' => words::scan(self, pos),
             _ => ops::scan(self, pos),
         }
@@ -351,8 +377,13 @@ impl<'a> Cursor<'a> {
         Scan::new(TokenKind::Whitespace, end)
     }
 
-    /// A UTF-8 byte-order mark at `pos` that is whitespace here: at offset 0, or anywhere in
-    /// SQLite.
+    /// A UTF-8 byte-order mark at `pos` that is whitespace here: at offset 0, or at any token
+    /// start in SQLite.
+    ///
+    /// Offset 0 is the start of the text *handed to `lex`*: the rule depends on the absolute
+    /// offset. A caller that lexes a slice of a document from `Initial` (an incremental relex,
+    /// a selection, a `COPY` segment) must not start the slice at a BOM that is not the
+    /// document's start, or it reads as whitespace where the document's lexing reads a word.
     fn bom_at(&self, pos: usize) -> bool {
         (pos == 0 || self.p.space.bom_anywhere) && self.b[pos..].starts_with(b"\xEF\xBB\xBF")
     }
@@ -382,5 +413,5 @@ impl<'a> Cursor<'a> {
 /// One `Unknown` byte at `pos` (only ASCII bytes are ever unknown: non-ASCII characters are
 /// identifier characters).
 pub(crate) fn unknown(pos: usize) -> Scan {
-    Scan::new(TokenKind::Unknown, pos + 1).flagged(TokenFlags::ERROR)
+    Scan::new(TokenKind::Unknown, pos + 1).rejected(LexErrorCode::UnknownCharacter)
 }

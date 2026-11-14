@@ -13,7 +13,7 @@
 use sql_dialect::lex_profiles::OperatorRule;
 
 use crate::cursor::{Cursor, Scan, unknown};
-use crate::token::{TokenFlags, TokenKind};
+use crate::token::{LexErrorCode, TokenKind};
 
 /// One PostgreSQL operator run read so far: `[start, end)` holds operator characters (cut
 /// before a comment start), `keeper` is the last sign keeper before `end - 1`, `plain` the last
@@ -67,26 +67,28 @@ fn postgres(c: &mut Cursor, pos: usize, chars: &[u8], keepers: &[u8], max_len: u
         // Strip the trailing signs, keeping at least one byte.
         run.plain.filter(|p| *p >= pos).map_or(1, |p| p - pos + 1)
     };
-    let flags = if len >= max_len {
-        TokenFlags::ERROR
+    let op = Scan::new(TokenKind::Op, pos + len);
+    if len >= max_len {
+        op.rejected(LexErrorCode::OperatorTooLong)
     } else {
-        TokenFlags::empty()
-    };
-    Scan::new(TokenKind::Op, pos + len).flagged(flags)
+        op
+    }
 }
 
-/// Reads the operator run at `pos` once and caches it.
+/// Reads the operator run at `pos` once and caches it. The run stops before the first
+/// embedded `--` or `/*` (not at `pos`: a comment there was taken first), so its bytes are read
+/// once, never past the cut: a run of comments between operators (`+/**/+/**/…`) stays linear.
 fn read_run(c: &mut Cursor, pos: usize, chars: &[u8], keepers: &[u8]) -> RunCache {
-    let mut end = c.skip_while(pos, |b| chars.contains(&b));
-    // Cut before an embedded comment start (not at `pos`: a comment there was taken first).
-    if let Some(cut) = c.b[pos + 1..end]
-        .windows(2)
-        .position(|w| w == b"--" || w == b"/*")
+    let b = c.b;
+    let mut end = pos + 1;
+    while end < b.len()
+        && chars.contains(&b[end])
+        && !matches!(b.get(end..end + 2), Some(b"--" | b"/*"))
     {
-        end = pos + 1 + cut;
+        end += 1;
     }
-    let run = &c.b[pos..end];
-    c.steps += run.len() as u64;
+    let run = &b[pos..end];
+    c.steps += run.len() as u64 + 1;
     let keeper = run[..run.len() - 1]
         .iter()
         .rposition(|b| keepers.contains(b))

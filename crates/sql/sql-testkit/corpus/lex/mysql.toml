@@ -204,10 +204,12 @@ kinds = ["ExecutableComment", "Semicolon"]
 
 [[case]]
 id = "LEX05-semicolon-in-body"
-source = "alg/10 SQL-LEX-05 test (FX-SPLIT-MY-04)"
+source = "alg/10 SQL-LEX-05 test (FX-SPLIT-MY-04); both readings end at the same */"
 dialect = "mysql"
 input = "/*!80000 SELECT 'versioned;' */;"
 kinds = ["ExecutableComment", "Semicolon"]
+flags = ["", ""]
+errors = []
 
 [[case]]
 id = "LEX05-unversioned-semicolon"
@@ -250,11 +252,13 @@ texts = ["/*!99999 a /* b */ c */", " ", "SELECT", " ", "1"]
 
 [[case]]
 id = "LEX05-nested-bang-is-the-one-level"
-source = "ADR 0004 step 1a: inside a skipped comment /*! is a plain nested comment"
+source = "ADR 0004 step 1a: inside a skipped comment /*! is a plain nested comment; a running reading would run the inner executable comment, which the lexer does not follow (review I1: fail closed)"
 dialect = "mysql"
 input = "/*!99999 /*!40000 x */ SELECT 1 */ ROLLBACK"
 kinds = ["ExecutableComment", "Whitespace", "Word"]
 texts = ["/*!99999 /*!40000 x */ SELECT 1 */", " ", "ROLLBACK"]
+flags = ["ERROR", "", ""]
+errors = ["AmbiguousCommentEnd"]
 
 [[case]]
 id = "LEX05-only-one-level"
@@ -307,6 +311,156 @@ source = "alg/10 SQL-LEX-05 test: SELECT /*+ MAX_EXECUTION_TIME(0) */ 1"
 dialect = "mysql"
 input = "SELECT /*+ MAX_EXECUTION_TIME(0) */ 1"
 kinds = ["Word", "Whitespace", "HintComment", "Whitespace", "Number"]
+errors = []
+
+# --- review I1: a body whose */ sits inside quotes or a line comment (two readings) ---
+# A server that runs the comment reads its body as code and ends it elsewhere than the
+# skipped reading (the token's extent). The token is flagged ERROR with AmbiguousCommentEnd;
+# Task 8 makes its statement Ambiguous. Hints fail closed the same way (controller ruling).
+
+[[case]]
+id = "I1-quoted-close-versioned"
+source = "T4 review I1 probe: MySQL 8.4 runs the comment and then DROP TABLE t"
+dialect = "mysql"
+version = "8.4.0"
+input = "SELECT 1 /*!50000 , '*/' */ ; DROP TABLE t; -- '"
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "ExecutableComment", "String"]
+texts = ["SELECT", " ", "1", " ", "/*!50000 , '*/", "' */ ; DROP TABLE t; -- '"]
+flags = ["", "", "", "", "ERROR", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-quoted-close-unversioned"
+source = "T4 review I1 probe: an unversioned comment always runs"
+dialect = "mysql"
+input = "SELECT 1 /*! , '*/' */ ; DROP TABLE t; -- '"
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "ExecutableComment", "String"]
+flags = ["", "", "", "", "ERROR", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-double-quoted-close"
+source = "T4 review I1 probe: \"…\" is a string without ANSI_QUOTES"
+dialect = "mysql"
+input = "SELECT 1 /*!50000 , \"*/\" */ ; DROP TABLE t; # \""
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "ExecutableComment", "String"]
+texts = ["SELECT", " ", "1", " ", "/*!50000 , \"*/", "\" */ ; DROP TABLE t; # \""]
+flags = ["", "", "", "", "ERROR", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-hash-comment-close"
+source = "T4 review I1: a */ inside a running body's # comment does not close it"
+dialect = "mysql"
+input = "SELECT 1 /*! # */\n */ ; DROP TABLE t"
+kinds = ["Word", "Whitespace", "Number", "Whitespace", "ExecutableComment", "Newline", "Whitespace", "Op", "Op", "Whitespace", "Semicolon", "Whitespace", "Word", "Whitespace", "Word", "Whitespace", "Word"]
+flags = ["", "", "", "", "ERROR", "", "", "", "", "", "", "", "", "", "", "", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-dash-comment-close"
+source = "T4 review I1: nor inside a -- comment"
+dialect = "mysql"
+input = "/*!50000 -- */\n */"
+kinds = ["ExecutableComment", "Newline", "Whitespace", "Op", "Op"]
+flags = ["ERROR", "", "", "", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-backtick-close"
+source = "T4 review I1: nor inside a backtick identifier"
+dialect = "mysql"
+input = "SELECT /*! `*/` */ 1"
+kinds = ["Word", "Whitespace", "ExecutableComment", "QuotedIdent"]
+flags = ["", "", "ERROR", "UNTERMINATED"]
+errors = ["AmbiguousCommentEnd", "UnterminatedQuotedIdent"]
+
+[[case]]
+id = "I1-ansi-quotes-close"
+source = "T4 review I1: under ANSI_QUOTES \"…\" is an identifier, which hides */ too"
+dialect = "mysql"
+modes = { ansi_quotes = true }
+input = "/*! \"*/\" */ x\""
+kinds = ["ExecutableComment", "QuotedIdent"]
+texts = ["/*! \"*/", "\" */ x\""]
+flags = ["ERROR", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-backslash-quote-close"
+source = "T4 review I1: with backslash escapes '\\' */ ' is one string, so the body runs on"
+dialect = "mysql"
+input = "/*! '\\' */ ' */"
+kinds = ["ExecutableComment", "Whitespace", "String"]
+texts = ["/*! '\\' */", " ", "' */"]
+flags = ["ERROR", "", "UNTERMINATED"]
+errors = ["AmbiguousCommentEnd", "UnterminatedString"]
+
+[[case]]
+id = "I1-no-backslash-escapes-agrees"
+source = "T4 review I1: with NO_BACKSLASH_ESCAPES '\\' closes, and both readings end at the first */"
+dialect = "mysql"
+modes = { no_backslash_escapes = true }
+input = "/*! '\\' */ ' */"
+kinds = ["ExecutableComment", "Whitespace", "String"]
+flags = ["", "", "UNTERMINATED"]
+errors = ["UnterminatedString"]
+
+[[case]]
+id = "I1-running-closes-first"
+source = "T4 review I1: a /* inside quotes nests only in the skipped reading, so the running one closes first"
+dialect = "mysql"
+input = "/*! '/*' */ ; DROP t; */ x"
+kinds = ["ExecutableComment", "Whitespace", "Word"]
+texts = ["/*! '/*' */ ; DROP t; */", " ", "x"]
+flags = ["ERROR", "", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-unterminated-and-ambiguous"
+source = "T4 review I1: the skipped reading never closes, the running one does"
+dialect = "mysql"
+input = "/*! '/*' */"
+kinds = ["ExecutableComment"]
+flags = ["UNTERMINATED|ERROR"]
+errors = ["UnterminatedComment", "AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-mariadb-marker"
+source = "T4 review I1: MariaDB's /*M! runs the same way"
+dialect = "mariadb"
+input = "/*M! '*/' */ ; DROP TABLE t; -- '"
+kinds = ["ExecutableComment", "String"]
+flags = ["ERROR", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-hint-quoted-close"
+source = "T4 review I1 probe and controller ruling: a hint with a quoted */ fails closed"
+dialect = "mysql"
+input = "SELECT /*+ SET_VAR(sql_mode='*/') */ 1; DROP TABLE t; -- '"
+kinds = ["Word", "Whitespace", "HintComment", "String"]
+texts = ["SELECT", " ", "/*+ SET_VAR(sql_mode='*/", "') */ 1; DROP TABLE t; -- '"]
+flags = ["", "", "ERROR", ""]
+errors = ["AmbiguousCommentEnd"]
+
+[[case]]
+id = "I1-hint-quoted-value-agrees"
+source = "T4 review I1: a quoted hint value without */ is read the same both ways"
+dialect = "mysql"
+input = "SELECT /*+ SET_VAR(sql_mode='ANSI_QUOTES') */ 1"
+kinds = ["Word", "Whitespace", "HintComment", "Whitespace", "Number"]
+flags = ["", "", "", "", ""]
+errors = []
+
+[[case]]
+id = "I1-mysqldump-agrees"
+source = "mysqldump lines: backticks, quotes and nested readings that agree are not flagged"
+dialect = "mysql"
+input = "/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`localhost`*/ /*!50003 TRIGGER t BEFORE INSERT ON x FOR EACH ROW SET NEW.a = 'b' */;;"
+kinds = ["ExecutableComment", "Whitespace", "ExecutableComment", "Whitespace", "ExecutableComment", "Semicolon", "Semicolon"]
+flags = ["", "", "", "", "", "", ""]
+errors = []
 
 [[case]]
 id = "LEX05-hint-unterminated"

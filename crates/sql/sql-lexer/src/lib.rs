@@ -11,6 +11,9 @@
 //!   M3a (incremental relex is M3b).
 //! - [`exec_comment_gate`] reads an executable comment's version gate; [`token_class`] is the
 //!   highlight class.
+//! - An executable comment or optimizer hint whose end depends on how the server reads its body
+//!   (a `*/` inside quotes or a line comment) is flagged `ERROR` with
+//!   [`LexErrorCode::AmbiguousCommentEnd`]; the splitter makes its statement `Ambiguous`.
 
 pub mod class;
 pub mod comments;
@@ -32,5 +35,5 @@ pub use cursor::lex_counting_steps;
 pub use cursor::{lex, lex_chunks};
 pub use exec_comment::{ExecComment, ExecMarker, GateStatus, exec_comment, exec_comment_gate};
 pub use relex::{RelexDelta, relex};
-pub use state::{LexState, StringRule};
+pub use state::{BodyReading, LexState, StringRule};
 pub use token::{LexError, LexErrorCode, Lexed, TokenFlags, TokenKind};

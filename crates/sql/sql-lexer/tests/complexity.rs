@@ -74,8 +74,13 @@ fn lexing_is_linear() {
 fn adversarial_inputs_stay_linear() {
     let mysql = dialect_ctx("mysql", None);
     let sqlite = dialect_ctx("sqlite", None);
-    let cases: [(&DialectCtx, &str); 16] = [
-        (&pg(), "+-"),     // operator run split one sign at a time
+    let cases: [(&DialectCtx, &str); 21] = [
+        (&pg(), "+-"),    // operator run split one sign at a time
+        (&pg(), "+/**/"), // operator runs that hold closed comments (review I2)
+        (&pg(), "=/**/"),
+        (&mysql, "/*!'*/"), // the running reading of a body (review I1), bounded by its token
+        (&mysql, "/*!#*/"),
+        (&mysql, "/*+\"*/"),
         (&pg(), "*+-+-"),  // a run with a non-sign, split repeatedly
         (&pg(), "?-+"),    // a sign keeper
         (&pg(), "$a "),    // failed dollar tags, re-read as words

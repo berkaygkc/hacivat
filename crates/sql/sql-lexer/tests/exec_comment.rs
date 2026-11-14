@@ -1,8 +1,11 @@
 //! Executable comments and their version gates (SQL-LEX-05; Task 4).
 
 use sql_dialect::DialectCtx;
-use sql_lexer::{ExecMarker, GateStatus, Lexed, TokenKind, exec_comment, exec_comment_gate};
-use sql_testkit::lex::{dialect_ctx, lex_in};
+use sql_lexer::{
+    ExecMarker, GateStatus, LexErrorCode, LexState, Lexed, TokenFlags, TokenKind, exec_comment,
+    exec_comment_gate, lex,
+};
+use sql_testkit::lex::{dialect_ctx, lex_in, profile};
 use sql_text::{TextRange, TextSize};
 
 fn mysql84() -> DialectCtx {
@@ -153,6 +156,127 @@ fn a_body_semicolon_stays_inside_the_comment() {
     assert_eq!(l.len(), 5);
     assert_eq!(l.kind(4), TokenKind::ExecutableComment);
     assert!(!(0..l.len()).any(|i| l.kind(i) == TokenKind::Semicolon));
+}
+
+/// The first comment token of `l` (executable or hint) and whether it is flagged as having
+/// an ambiguous end.
+fn ambiguous_comment(l: &Lexed) -> (usize, bool) {
+    let i = (0..l.len())
+        .find(|i| {
+            matches!(
+                l.kind(*i),
+                TokenKind::ExecutableComment | TokenKind::HintComment
+            )
+        })
+        .expect("a comment token");
+    let flagged = l.flags(i).contains(TokenFlags::ERROR);
+    let coded = l
+        .errors()
+        .iter()
+        .any(|e| e.range == l.range(i) && e.code == LexErrorCode::AmbiguousCommentEnd);
+    assert_eq!(flagged, coded, "the flag and the error go together");
+    (i, flagged)
+}
+
+/// Review I1: a body that quotes `*/` (or hides it in a line comment) ends elsewhere for a
+/// server that runs it. The lexer cannot tell which reading the server takes, so the token is
+/// flagged and no `;` the running reading sees is a boundary the lexer trusts.
+#[test]
+fn a_hidden_close_makes_the_comment_end_ambiguous() {
+    let mariadb = dialect_ctx("mariadb", Some("11.4.0"));
+    for (ctx, text) in [
+        // The review's probe: MySQL 8.4 runs `DROP TABLE t` as a second statement.
+        (
+            mysql84(),
+            "SELECT 1 /*!50000 , '*/' */ ; DROP TABLE t; -- '",
+        ),
+        // An unversioned comment always runs.
+        (mysql84(), "SELECT 1 /*! , '*/' */ ; DROP TABLE t; -- '"),
+        // `"…"` is a string without ANSI_QUOTES.
+        (
+            mysql84(),
+            "SELECT 1 /*!50000 , \"*/\" */ ; DROP TABLE t; # \"",
+        ),
+        // A `#` and a `-- ` comment hide `*/` to the line feed.
+        (mysql84(), "SELECT 1 /*! # */\n */ ; DROP TABLE t"),
+        (mysql84(), "SELECT 1 /*! -- */\n */ ; DROP TABLE t"),
+        // A backtick identifier.
+        (mysql84(), "SELECT /*! `*/` */ 1"),
+        // MariaDB's marker.
+        (mariadb, "/*M! '*/' */ ; DROP TABLE t; -- '"),
+        // An optimizer hint fails closed the same way (controller ruling).
+        (
+            mysql84(),
+            "SELECT /*+ SET_VAR(sql_mode='*/') */ 1; DROP TABLE t; -- '",
+        ),
+        // The running reading closes first: a `/*` inside quotes nests only when skipped.
+        (mysql84(), "/*! '/*' */ ; DROP t; */ x"),
+    ] {
+        let l = lex_in(&ctx, text);
+        let (_, ambiguous) = ambiguous_comment(&l);
+        assert!(ambiguous, "{text:?}");
+    }
+}
+
+#[test]
+fn bodies_both_readings_agree_on_are_not_flagged() {
+    for text in [
+        "/*!80000 SELECT 'versioned;' */;",
+        "/*!50000 a /* b */ c */",
+        "/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;",
+        "/*!50017 DEFINER=`root`@`localhost`*/",
+        "SELECT /*+ SET_VAR(sql_mode='ANSI_QUOTES') */ 1",
+        "SELECT /*+ MAX_EXECUTION_TIME(1000) BKA(t1) */ 1",
+        "/*! # a line comment\n x */",
+        "/*!99999 /* a /* b */ SELECT 1 */ BEGIN",
+    ] {
+        let l = lex_mysql84(text);
+        let (_, ambiguous) = ambiguous_comment(&l);
+        assert!(!ambiguous, "{text:?}");
+        assert!(l.errors().is_empty(), "{text:?}");
+    }
+}
+
+#[test]
+fn modes_change_the_running_reading() {
+    // With backslash escapes `'\' */ '` is one string, so the body runs past the first `*/`;
+    // with NO_BACKSLASH_ESCAPES the quote closes and both readings agree.
+    let text = "/*! '\\' */ ' */";
+    assert!(ambiguous_comment(&lex_mysql84(text)).1);
+    let mut nbe = mysql84();
+    nbe.modes.no_backslash_escapes = true;
+    assert!(!ambiguous_comment(&lex_in(&nbe, text)).1);
+    // Under ANSI_QUOTES `"…"` is an identifier, which hides `*/` just as well.
+    let mut ansi = mysql84();
+    ansi.modes.ansi_quotes = true;
+    assert!(ambiguous_comment(&lex_in(&ansi, "/*! \"*/\" */ x\"")).1);
+}
+
+#[test]
+fn resuming_inside_a_comment_keeps_its_reading() {
+    // Lex up to a line start inside the comment, resume from the end state: the resumed piece
+    // carries the same flag as the full lex's token.
+    let ctx = mysql84();
+    let p = profile(&ctx);
+    for (head, tail) in [
+        ("SELECT /*!50000 'a\n", "*/' */ ; DROP TABLE t; -- '"),
+        ("SELECT /*! # x\n", "*/ y"),
+        ("SELECT /*! 'a'\n", "*/ ; SELECT 2"),
+        ("SELECT /*+ x\n", "'*/' */"),
+        ("/*! '/*' */\n", "; DROP t; */"),
+    ] {
+        let full = lex(&format!("{head}{tail}"), p, ctx.modes, &LexState::Initial);
+        let left = lex(head, p, ctx.modes, &LexState::Initial);
+        let right = lex(tail, p, ctx.modes, left.end_state());
+        let (i, full_flag) = ambiguous_comment(&full);
+        let resumed_flag = right.flags(0).contains(TokenFlags::ERROR);
+        assert_eq!(resumed_flag, full_flag, "{head:?} + {tail:?}");
+        assert_eq!(
+            usize::from(full.range(i).end()) - head.len(),
+            usize::from(right.range(0).end()),
+            "{head:?} + {tail:?}"
+        );
+    }
 }
 
 #[test]

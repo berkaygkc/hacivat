@@ -1,14 +1,21 @@
 //! Properties (`alg/10` SQL-LEX-02 test 18 in PR form; the 10⁶-input fuzz target is M3b's):
-//! the lexer is total and lossless for every profile and mode, its tokens are well formed,
-//! resuming from an end state at a line start equals a full lex, and the chunked and relex
-//! entry points equal `lex`.
+//! the lexer is total and lossless for every profile and mode, its tokens are well formed and
+//! its errors name every rejected token, resuming from an end state at a line start equals a
+//! full lex, and the chunked and relex entry points equal `lex`.
+//!
+//! **The resume property is narrower than the plan's** (`a` and `b` arbitrary): it cuts only at
+//! a line start (`a` ends with `\n`), because an end state is exact only there. A cut between
+//! the quotes of `''`, after the backslash of `\'`, or between `*` and `/`, resumes into a
+//! different reading; that is what a checkpoint (UI-EDIT-11, M3b) avoids. It also trims a
+//! leading byte-order mark from `b`: the BOM rule depends on the absolute offset (a BOM at a
+//! text's offset 0 is whitespace, `lex` docs), so a resumed slice never starts at one.
 
 use std::borrow::Cow;
 use std::ops::Range;
 
 use proptest::prelude::*;
 use sql_dialect::{DialectCtx, DialectId, LexDialect, LexModes, PgWireFlavor, keyword_lookup};
-use sql_lexer::{LexState, Lexed, TokenFlags, TokenKind, lex, lex_chunks, relex};
+use sql_lexer::{LexErrorCode, LexState, Lexed, TokenFlags, TokenKind, lex, lex_chunks, relex};
 use sql_testkit::lex::{concat_tokens, dialect_ctx, kinds_of, profile, texts_of};
 use sql_text::{TextChunks, TextEdit, TextRange, TextSize};
 
@@ -17,10 +24,10 @@ const FRAGMENTS: &[&str] = &[
     "SELECT", "select", "lımıt", "İ", "x", "_a1", "$", "$$", "$a$", "$A$", "$1", "1", "0x1F",
     "0b1", "1_000", "1e5", "1e", ".5", "1.", "..", "::", ":=", ":a", ":'v'", ":{?v}", "?", "?1",
     "@", "@@x", "@u", "#", "#c\n", "--", "-- c", "-", "+", "*", "/", "/*", "*/", "/*!", "/*!50000",
-    "/*M!", "/*+", "'", "''", "\"", "`", "[", "]", "(", ")", "{", "}", ",", ";", ".", "E'", "e'",
-    "U&'", "U&\"", "B'", "X'", "N'", "\\", "\\.", " ", "\t", "\n", "\r", "\r\n", "\u{b}", "\u{c}",
-    "\0", "\u{feff}", "\u{a0}", "；", "😀", "ç", "|", "&", "~", "!", "<", ">", "=", "%", "^", "e",
-    "E", "(x)", "$a::b(", "_utf8'",
+    "'*/'", "\"*/\"", "`*/`", "# */", "/*+ '", "/**/", "/*M!", "/*+", "'", "''", "\"", "`", "[",
+    "]", "(", ")", "{", "}", ",", ";", ".", "E'", "e'", "U&'", "U&\"", "B'", "X'", "N'", "\\",
+    "\\.", " ", "\t", "\n", "\r", "\r\n", "\u{b}", "\u{c}", "\0", "\u{feff}", "\u{a0}", "；", "😀",
+    "ç", "|", "&", "~", "!", "<", ">", "=", "%", "^", "e", "E", "(x)", "$a::b(", "_utf8'",
 ];
 
 fn any_sql() -> impl Strategy<Value = String> {
@@ -120,7 +127,83 @@ fn assert_well_formed(s: &str, p: &LexDialect, l: &Lexed) -> Result<(), TestCase
         let i = l.token_at(e.range.start()).unwrap();
         prop_assert_eq!(l.range(i), e.range, "an error covers one token");
     }
+    // Errors name every rejected token (review minor 4): `JUNK` ⟺ `TrailingJunk`, `ERROR` ⟺
+    // another non-unterminated code, `UNTERMINATED` ⟸ an unterminated code (except where the
+    // server accepts the open construct).
+    for i in 0..l.len() {
+        let codes: Vec<LexErrorCode> = l
+            .errors()
+            .iter()
+            .filter(|e| e.range == l.range(i))
+            .map(|e| e.code)
+            .collect();
+        let flags = l.flags(i);
+        prop_assert_eq!(
+            flags.contains(TokenFlags::JUNK),
+            codes.contains(&LexErrorCode::TrailingJunk),
+            "token {}: {:?} {:?}",
+            i,
+            flags,
+            codes
+        );
+        let rejected = codes
+            .iter()
+            .any(|c| !c.is_unterminated() && *c != LexErrorCode::TrailingJunk);
+        prop_assert_eq!(
+            flags.contains(TokenFlags::ERROR),
+            rejected,
+            "token {}: {:?}",
+            i,
+            codes
+        );
+        let open_ok = l.kind(i) == TokenKind::InlineData
+            || (l.kind(i) == TokenKind::BlockComment && p.comments.unterminated_ok);
+        if flags.contains(TokenFlags::UNTERMINATED) && !open_ok {
+            prop_assert!(
+                codes.iter().any(|c| c.is_unterminated()),
+                "token {}: {:?}",
+                i,
+                codes
+            );
+        }
+        if !flags.contains(TokenFlags::UNTERMINATED) {
+            prop_assert!(
+                !codes.iter().any(|c| c.is_unterminated()),
+                "token {}: {:?}",
+                i,
+                codes
+            );
+        }
+    }
     Ok(())
+}
+
+/// The flags of the tokens of `l` that end after byte `at`; the first one (a construct cut by
+/// `at`) keeps only what a resumed piece can know: whether it runs unterminated and whether
+/// its comment end is ambiguous (a prefix's own checks, `U&` or SQLite blobs, sit before `at`).
+fn tail_flags(l: &Lexed, at: usize) -> Vec<TokenFlags> {
+    let first = (0..l.len()).find(|i| usize::from(l.range(*i).end()) > at);
+    let Some(first) = first else {
+        return Vec::new();
+    };
+    (first..l.len())
+        .map(|i| {
+            let flags = l.flags(i);
+            if i > first {
+                return flags;
+            }
+            let ambiguous = l
+                .errors()
+                .iter()
+                .any(|e| e.range == l.range(i) && e.code == LexErrorCode::AmbiguousCommentEnd);
+            let kept = flags & TokenFlags::UNTERMINATED;
+            if ambiguous {
+                kept | TokenFlags::ERROR
+            } else {
+                kept
+            }
+        })
+        .collect()
 }
 
 proptest! {
@@ -144,8 +227,8 @@ proptest! {
         m in modes_strategy(),
         start in starts(),
     ) {
-        // A checkpoint is a line start; a byte-order mark is whitespace only at the text's
-        // start (SQLite: anywhere), so a resumed text never begins with one.
+        // The cut is a line start (a checkpoint), and `b` never starts with a byte-order mark,
+        // whose reading depends on the absolute offset (module docs).
         let b = b.trim_start_matches('\u{feff}');
         let a = a + "\n";
         let full = lex(&(a.clone() + b), p, m, &start);
@@ -154,6 +237,9 @@ proptest! {
         prop_assert_eq!(tail_kinds(&full, a.len()), kinds_of(&right));
         prop_assert_eq!(tail(&full, a.len()), tail(&right, 0));
         prop_assert_eq!(full.end_state(), right.end_state());
+        // The flags carry over too, an ambiguous executable-comment or hint end included.
+        let right_flags: Vec<TokenFlags> = tail_flags(&right, 0);
+        prop_assert_eq!(tail_flags(&full, a.len()), right_flags);
         assert_well_formed(b, p, &right)?;
     }
 

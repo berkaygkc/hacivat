@@ -28,21 +28,18 @@ pub(crate) fn scan(c: &mut Cursor, pos: usize) -> Scan {
             return Scan::new(TokenKind::Word, word);
         }
     }
-    Scan::new(TokenKind::Number, end).flagged(flags | junk_after(c, end))
+    junk_checked(c, Scan::new(TokenKind::Number, end).flagged(flags))
 }
 
-/// `JUNK` when what follows a number (or a `$n` parameter) ending at `end` is an error here.
-pub(crate) fn junk_after(c: &mut Cursor, end: usize) -> TokenFlags {
-    let junk = match (c.p.numbers.junk, c.at(end)) {
+/// `scan` (a number or `$n` parameter), flagged `JUNK` with a `TrailingJunk` error when what
+/// follows it is an error here.
+pub(crate) fn junk_checked(c: &mut Cursor, scan: Scan) -> Scan {
+    let junk = match (c.p.numbers.junk, c.at(scan.end)) {
         (Junk::IdentStart, Some(b)) => c.ident_start(b),
         (Junk::IdentChar, Some(b)) => c.ident_continue(b),
         _ => false,
     };
-    if junk {
-        TokenFlags::JUNK
-    } else {
-        TokenFlags::empty()
-    }
+    if junk { scan.junk() } else { scan }
 }
 
 /// The end of the longest valid number at `pos`, and its flags.

@@ -7,12 +7,12 @@ use std::ops::Range;
 
 use smallvec::SmallVec;
 use sql_dialect::{
-    DialectCtx, DialectId, KeywordId, KwCategory, KwEntry, LexDialect, LexModes, keyword_lookup,
+    DialectCtx, DialectId, KeywordId, KwCategory, KwEntry, LexDialect, LexModes, keyword_lookup, kw,
 };
 use sql_lexer::TokenKind::*;
 use sql_lexer::{
-    LexState, Lexed, StringRule, TokenClass, TokenFlags, TokenKind, lex, lex_chunks, relex,
-    token_class,
+    BodyReading, LexState, Lexed, StringRule, TokenClass, TokenFlags, TokenKind, lex, lex_chunks,
+    relex, token_class,
 };
 use sql_testkit::lex::{
     LexCase, concat_tokens, dialect_ctx, kinds_of, lex_in, load, profile, texts_of,
@@ -232,6 +232,18 @@ fn words_carry_their_keyword_lookup() {
             assert_eq!(l.keyword(i), want, "{dialect}: {word:?}");
         }
     }
+    // With Task 3's tables the lookups are real: the lexer stores the keyword's id, and an
+    // identifier (or a quoted `select`, or a digit-leading word) stores none.
+    let l = lex_pg("SELECT name FROM t LIMIT 1");
+    let ids: Vec<Option<KeywordId>> = (0..l.len()).map(|i| l.keyword(i).map(|k| k.id)).collect();
+    assert_eq!(ids[0], Some(kw::SELECT));
+    assert_eq!(ids[4], Some(kw::FROM));
+    assert_eq!(ids[8], Some(kw::LIMIT));
+    assert_eq!(ids[6], None, "t is an identifier");
+    let l = lex_in(&mysql(), "select `select`, 1e5x");
+    assert_eq!(l.keyword(0).map(|k| k.id), Some(kw::SELECT));
+    assert_eq!(l.keyword(2), None, "a quoted identifier");
+    assert_eq!(l.keyword(5), None, "a digit-leading word");
 }
 
 #[test]
@@ -249,11 +261,17 @@ fn turkish_letters_never_become_keywords() {
         assert_eq!(*kw, None, "{word}");
     }
     assert_eq!(words[0].1, keyword_lookup(DialectId::Postgres, "SELECT"));
+    // The ASCII spellings are keywords (Task 3's tables); the Turkish and Cyrillic ones are not.
+    assert_eq!(words[0].1.map(|k| k.id), Some(kw::SELECT));
+    assert_eq!(words[4].1.map(|k| k.id), Some(kw::FROM));
+    let l = lex_pg("SELECT 1 LIMIT 2 lImIt 3");
+    assert_eq!(l.keyword(4).map(|k| k.id), Some(kw::LIMIT));
+    assert_eq!(l.keyword(8).map(|k| k.id), Some(kw::LIMIT));
 }
 
 #[test]
 fn end_states_name_the_open_construct() {
-    let cases: [(DialectCtx, &str, LexState); 12] = [
+    let cases: [(DialectCtx, &str, LexState); 14] = [
         (pg(), "SELECT 1", LexState::Initial),
         (pg(), "'abc", in_string(StringRule::Standard, b'\'', String)),
         (pg(), "E'a\\'", in_string(StringRule::Escape, b'\'', String)),
@@ -283,9 +301,34 @@ fn end_states_name_the_open_construct() {
         (
             mysql(),
             "/*!99999 /* x",
-            LexState::InExecutableComment { depth: 2 },
+            LexState::InExecutableComment {
+                depth: 2,
+                body: BodyReading::Nested,
+            },
         ),
-        (mysql(), "/*+ x", LexState::InHintComment),
+        (
+            mysql(),
+            "/*! 'x",
+            LexState::InExecutableComment {
+                depth: 1,
+                body: BodyReading::Quoted { quote: b'\'' },
+            },
+        ),
+        (
+            mysql(),
+            "/*! # x",
+            LexState::InExecutableComment {
+                depth: 1,
+                body: BodyReading::LineComment,
+            },
+        ),
+        (
+            mysql(),
+            "/*+ x",
+            LexState::InHintComment {
+                body: BodyReading::Code,
+            },
+        ),
         (
             dialect_ctx("sqlite", None),
             "[x",

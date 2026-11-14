@@ -65,14 +65,17 @@ bitflags::bitflags! {
         const HAS_SEPARATORS = 4;
         /// A UTF-8 byte-order mark read as whitespace.
         const BOM = 8;
-        /// A token the server rejects: an unknown character, an operator of 64 bytes or more,
-        /// a `U&''` string without `standard_conforming_strings`, a malformed SQLite blob or
-        /// variable.
+        /// A token the server rejects or reads in a way the lexer cannot pin down: an unknown
+        /// character, an operator of 64 bytes or more, a `U&''` string without
+        /// `standard_conforming_strings`, a malformed SQLite blob or variable, an executable
+        /// comment or hint whose end depends on how the server reads it.
         const ERROR = 16;
     }
 }
 
-/// A lexing error, in a token's range.
+/// A lexing error over one token's range. Every token flagged `ERROR` or `JUNK` has one, and
+/// so does every `UNTERMINATED` token except an SQLite block comment (the server accepts it)
+/// and `COPY` data without its `\.` line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LexError {
     pub range: TextRange,
@@ -87,8 +90,38 @@ pub enum LexErrorCode {
     UnterminatedComment,
     UnterminatedDollar,
     UnterminatedQuotedIdent,
+    /// A PostgreSQL `U&''` string with `standard_conforming_strings` off.
     InvalidEscape,
+    /// A NUL byte.
     Nul,
+    /// A character that starts no token in this dialect (`Unknown`; NUL is `Nul`).
+    UnknownCharacter,
+    /// An identifier directly after a number or `$n` parameter (`JUNK`).
+    TrailingJunk,
+    /// A PostgreSQL operator of 64 bytes or more (`NAMEDATALEN`).
+    OperatorTooLong,
+    /// A malformed SQLite blob (`X'…'` with an odd or non-hex digit count) or variable (a
+    /// `(…)` suffix that does not close before whitespace).
+    InvalidLiteral,
+    /// A MySQL/MariaDB executable comment or optimizer hint whose end depends on how the
+    /// server reads its body: read as a skipped comment it ends at the token's `*/`, read as
+    /// running code (quotes, identifiers and line comments honoured) it ends elsewhere or
+    /// never. The token keeps the skipped reading's extent; a statement holding it has no
+    /// exact boundary (Task 8: `Ambiguous`, so Run asks and never sends it).
+    AmbiguousCommentEnd,
+}
+
+impl LexErrorCode {
+    /// The code names a construct that ran to the end of the text.
+    pub fn is_unterminated(self) -> bool {
+        matches!(
+            self,
+            LexErrorCode::UnterminatedString
+                | LexErrorCode::UnterminatedComment
+                | LexErrorCode::UnterminatedDollar
+                | LexErrorCode::UnterminatedQuotedIdent
+        )
+    }
 }
 
 /// A lexed text: token kinds, sorted start offsets, flags and keywords, one entry per token;
@@ -145,6 +178,9 @@ impl Lexed {
         )
     }
 
+    /// Every error, in token order (a token may have two: an unterminated executable comment
+    /// whose end is also ambiguous). Empty means every token lexed cleanly: no token is flagged
+    /// `ERROR` or `JUNK`, and none ran unterminated except where the server accepts it.
     pub fn errors(&self) -> &[LexError] {
         &self.errors
     }

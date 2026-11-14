@@ -6,16 +6,33 @@
 //!   linear scan, nothing recurses); the other dialects' close at the first `*/`. SQLite's may
 //!   run to the end without an error, and its `/*` with nothing after is two operators.
 //! - MySQL/MariaDB optimizer hints `/*+ … */` are `HintComment` wherever they stand (the
-//!   parser decides whether one follows its statement keyword); they do not nest.
+//!   parser decides whether one follows its statement keyword); the token ends at the first
+//!   `*/`.
 //! - Executable comments `/*! … */` (MariaDB also `/*M! … */`, an ordinary comment on MySQL)
-//!   are one `ExecutableComment` token that may hold **one** nested comment: a skipped
-//!   version-gated comment is consumed by the server's `consume_comment(lip, 1)` (ADR 0004
-//!   step 1a, fix round 2), and a running one reads its inner `/*…*/` as an ordinary,
-//!   non-nesting comment before its own `*/`, so both readings end at the same `*/`. A deeper
-//!   `/*` is text. `exec_comment_gate` reads the version gate.
+//!   are one `ExecutableComment` token that may hold **one** nested comment, ending where a
+//!   server that *skips* it ends it: `consume_comment(lip, 1)` (ADR 0004 step 1a, fix round 2).
+//!   A deeper `/*` is text. `exec_comment_gate` reads the version gate.
+//!
+//! **Two readings of one body (review I1).** A server that *runs* an executable comment (an
+//! unversioned one always, a versioned one from its version on) lexes the body as code: a `*/`
+//! inside a quoted string or identifier, or inside a `#`/`-- ` comment, does not close it,
+//! while a `/*` inside quotes opens no nested comment. In
+//! `SELECT 1 /*!50000 , '*/' */ ; DROP TABLE t; -- '` the skipped reading ends at the first
+//! `*/` and sees one statement; MySQL 8.4 runs the comment, ends it after `'*/' */`, and runs
+//! `DROP TABLE t` as a second statement. Hints may have the same question (a quoted `SET_VAR`
+//! value): the controller ruled that they fail closed the same way.
+//!
+//! So each executable comment and hint is also read the running way (`read_running`: quotes
+//! and identifiers by the session's modes, `#` and `-- ` to the line feed, one nested
+//! `/*…*/`), within the token, linearly. When that reading does not close at the token's own
+//! `*/` (it closes earlier, is still open there, or meets an inner executable comment), the
+//! token is flagged `ERROR` with `AmbiguousCommentEnd`. The token keeps the skipped extent, so
+//! the plan's pinned end and exact resumption hold; **Task 8 treats a statement holding such a
+//! token as `Ambiguous`** (execution mode never sends it; Run asks). The comment states carry
+//! the running reading's place (`BodyReading`), so a resumed lex reaches the same flag.
 
 use crate::cursor::{Cursor, Scan};
-use crate::state::LexState;
+use crate::state::{BodyReading, LexState};
 use crate::token::{LexErrorCode, TokenKind};
 use sql_dialect::lex_profiles::ExecVendor;
 
@@ -43,9 +60,9 @@ pub(crate) fn block(c: &mut Cursor, pos: usize) -> Option<Scan> {
         _ => false,
     };
     Some(if executable {
-        executable_from(c, pos + 2, 1)
+        executable_from(c, pos + 2, 1, BodyReading::Code)
     } else if comments.hints && third == Some(b'+') {
-        hint_from(c, pos + 2)
+        hint_from(c, pos + 2, BodyReading::Code)
     } else {
         block_from(c, pos + 2, 1)
     })
@@ -73,31 +90,178 @@ pub(crate) fn block_from(c: &mut Cursor, from: usize, depth: u32) -> Scan {
     }
 }
 
-/// The rest of an optimizer hint whose text continues at `from`.
-pub(crate) fn hint_from(c: &mut Cursor, from: usize) -> Scan {
-    match c.find_seq(from, b"*/") {
-        Some(f) => Scan::new(TokenKind::HintComment, f + 2),
+/// The rest of an optimizer hint whose text continues at `from`, where a running reading of
+/// its body stands at `body`.
+pub(crate) fn hint_from(c: &mut Cursor, from: usize, body: BodyReading) -> Scan {
+    let skipped = c.find_seq(from, b"*/").map(|f| f + 2);
+    let (running, ambiguous) = running_reading(c, from, skipped, body);
+    let scan = match skipped {
+        Some(end) => Scan::new(TokenKind::HintComment, end),
         None => Scan::unterminated(
             TokenKind::HintComment,
             c.len(),
-            LexState::InHintComment,
+            LexState::InHintComment { body: running },
             Some(LexErrorCode::UnterminatedComment),
         ),
-    }
+    };
+    flag_ambiguous(scan, ambiguous)
 }
 
 /// The rest of an executable comment `depth` levels deep (1, or 2 inside its one nested
-/// comment) whose text continues at `from`.
-pub(crate) fn executable_from(c: &mut Cursor, from: usize, depth: u32) -> Scan {
-    match nested_end(c, from, depth, 2) {
+/// comment) whose text continues at `from`, where a running reading of its body stands at
+/// `body`.
+pub(crate) fn executable_from(c: &mut Cursor, from: usize, depth: u32, body: BodyReading) -> Scan {
+    let skipped = nested_end(c, from, depth, 2);
+    let (running, ambiguous) = running_reading(c, from, skipped.ok(), body);
+    let scan = match skipped {
         Ok(end) => Scan::new(TokenKind::ExecutableComment, end),
         Err(depth) => Scan::unterminated(
             TokenKind::ExecutableComment,
             c.len(),
-            LexState::InExecutableComment { depth },
+            LexState::InExecutableComment {
+                depth,
+                body: running,
+            },
             Some(LexErrorCode::UnterminatedComment),
         ),
+    };
+    flag_ambiguous(scan, ambiguous)
+}
+
+fn flag_ambiguous(scan: Scan, ambiguous: bool) -> Scan {
+    if ambiguous {
+        scan.rejected(LexErrorCode::AmbiguousCommentEnd)
+    } else {
+        scan
     }
+}
+
+/// Reads a body the running way from `from` in `body`, within the token (to the skipped end
+/// `skipped`, or the text's end when the token is unterminated). Returns the running reading's
+/// state at the token's end (`Diverged` once it has closed) and whether the two readings
+/// disagree about where the comment ends.
+fn running_reading(
+    c: &mut Cursor,
+    from: usize,
+    skipped: Option<usize>,
+    body: BodyReading,
+) -> (BodyReading, bool) {
+    let limit = skipped.unwrap_or(c.len());
+    let running = if body == BodyReading::Diverged {
+        Err(BodyReading::Diverged)
+    } else {
+        read_running(c, from, limit, body)
+    };
+    match (skipped, running) {
+        // Both readings end at the token's `*/`.
+        (Some(end), Ok(r)) if r == end => (BodyReading::Code, false),
+        // The running reading closed first.
+        (_, Ok(_)) => (BodyReading::Diverged, true),
+        // Still open at the token's `*/`: a server that runs the body ends it later, or never.
+        (Some(_), Err(state)) => (state, true),
+        // Both still open at the text's end; ambiguous only once the readings have parted.
+        (None, Err(state)) => (state, state == BodyReading::Diverged),
+    }
+}
+
+/// Reads a MySQL/MariaDB comment body as a server that runs it does, from `i` in `state`, no
+/// further than `limit`: `Ok(end)` when its `*/` closes it at `end`, else the state at `limit`.
+///
+/// Code: `'…'` and `"…"` strings (backslash escapes unless `NO_BACKSLASH_ESCAPES`; `"…"` is an
+/// identifier under `ANSI_QUOTES`), `` `…` `` identifiers, doubled quotes, `#` and `-- ` to
+/// the line feed, one nested `/*…*/` (opaque to its first `*/`). An inner executable comment
+/// (`/*!`, MariaDB `/*M!`) is code of its own that this reading does not follow: `Diverged`.
+/// Linear: each byte is read once.
+fn read_running(
+    c: &mut Cursor,
+    mut i: usize,
+    limit: usize,
+    mut state: BodyReading,
+) -> Result<usize, BodyReading> {
+    let b = c.b;
+    let mariadb = c.p.comments.executable == Some(ExecVendor::MariaDb);
+    let modes = c.modes;
+    while i < limit {
+        match state {
+            BodyReading::Diverged => break,
+            BodyReading::Code => {
+                c.steps += 1;
+                match b[i] {
+                    b'*' if b.get(i + 1) == Some(&b'/') && i + 2 <= limit => return Ok(i + 2),
+                    b'/' if b.get(i + 1) == Some(&b'*') => {
+                        let inner = b.get(i + 2) == Some(&b'!')
+                            || (mariadb && b.get(i + 2..i + 4) == Some(b"M!"));
+                        if inner {
+                            return Err(BodyReading::Diverged);
+                        }
+                        state = BodyReading::Nested;
+                        i += 2;
+                    }
+                    quote @ (b'\'' | b'"' | b'`') => {
+                        state = BodyReading::Quoted { quote };
+                        i += 1;
+                    }
+                    b'#' => {
+                        state = BodyReading::LineComment;
+                        i += 1;
+                    }
+                    b'-' if b.get(i + 1) == Some(&b'-')
+                        && b.get(i + 2)
+                            .is_none_or(|n| n.is_ascii_whitespace() || n.is_ascii_control()) =>
+                    {
+                        state = BodyReading::LineComment;
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+            BodyReading::Quoted { quote } => {
+                let escapes = !modes.no_backslash_escapes
+                    && (quote == b'\'' || (quote == b'"' && !modes.ansi_quotes));
+                let window = &b[i..limit];
+                let found = if escapes {
+                    memchr::memchr2(quote, b'\\', window)
+                } else {
+                    memchr::memchr(quote, window)
+                };
+                c.steps += found.map_or(window.len(), |f| f + 1) as u64;
+                match found.map(|f| i + f) {
+                    None => i = limit,
+                    Some(f) if b[f] != quote => i = f + 2,
+                    Some(f) if f + 1 < limit && b[f + 1] == quote => i = f + 2,
+                    Some(f) => {
+                        state = BodyReading::Code;
+                        i = f + 1;
+                    }
+                }
+            }
+            BodyReading::LineComment => {
+                let window = &b[i..limit];
+                let found = memchr::memchr(b'\n', window);
+                c.steps += found.map_or(window.len(), |f| f + 1) as u64;
+                match found {
+                    None => i = limit,
+                    Some(f) => {
+                        state = BodyReading::Code;
+                        i += f + 1;
+                    }
+                }
+            }
+            BodyReading::Nested => {
+                let window = &b[i..limit];
+                let found = memchr::memmem::find(window, b"*/");
+                c.steps += found.map_or(window.len(), |f| f + 2) as u64;
+                match found {
+                    None => i = limit,
+                    Some(f) => {
+                        state = BodyReading::Code;
+                        i += f + 2;
+                    }
+                }
+            }
+        }
+    }
+    Err(state)
 }
 
 /// The index after the `*/` that closes a comment `depth` levels deep, scanning from `from`;

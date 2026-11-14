@@ -23,7 +23,7 @@ pub(crate) fn scan(c: &mut Cursor, pos: usize) -> Scan {
     }
     if c.at(pos + 1).is_some_and(|d| d.is_ascii_digit()) {
         let end = c.skip_while(pos + 1, |d| d.is_ascii_digit());
-        return Scan::new(TokenKind::PositionalParam, end).flagged(numbers::junk_after(c, end));
+        return numbers::junk_checked(c, Scan::new(TokenKind::PositionalParam, end));
     }
     unknown(pos)
 }
