@@ -6,7 +6,8 @@
 //! `Chunk::from_values`, fixtures, rare types).
 //!
 //! `bytes` counts what the buffers hold: their elements, the bitmap words, the `Var` offsets
-//! and data, and each boxed value's text or byte payload (allocator headers are not counted).
+//! and data, each value's text or byte payload, and a boxed value's body (`TruncatedVal`,
+//! `OpaqueVal`, `ErrorVal`). Allocator and `Arc` count headers are not counted.
 
 use std::sync::Arc;
 
@@ -16,7 +17,7 @@ use crate::decimal::{DecimalRef, DecimalVal, Repr};
 use crate::logical::LogicalType;
 use crate::special::SpecialVal;
 use crate::temporal::{DateVal, MICROS_PER_DAY, TimeVal, TsVal};
-use crate::value::{ErrorVal, LenUnit, TruncatedVal, Value, ValueRef};
+use crate::value::{ErrorVal, LenUnit, OpaqueVal, TruncatedVal, Value, ValueRef};
 
 /// One column of a chunk.
 #[derive(Debug, Clone, PartialEq)]
@@ -472,11 +473,11 @@ impl Data {
             (Data::Dec64 { values, .. }, Cell::Dec64(mant)) => values.push(mant),
             (Data::Days(v), Cell::Temporal(days)) => match i32::try_from(days) {
                 Ok(days) => v.push(days),
-                Err(_) => return Outcome::Exception(range_error("date")),
+                Err(_) => return Outcome::Exception(range_error("date", days)),
             },
             (Data::Micros { values, kind }, Cell::Temporal(us)) => {
                 if *kind == MicrosKind::Time && !(0..=MICROS_PER_DAY).contains(&us) {
-                    return Outcome::Exception(range_error("time of day"));
+                    return Outcome::Exception(range_error("time of day", us));
                 }
                 values.push(us);
             }
@@ -489,22 +490,27 @@ impl Data {
                 Cell::Temporal2(us, offset),
             ) => {
                 if *kind == PairKind::TimeTz && !(0..=MICROS_PER_DAY).contains(&us) {
-                    return Outcome::Exception(range_error("time of day"));
+                    return Outcome::Exception(range_error("time of day", us));
                 }
                 micros.push(us);
                 offsets.push(offset);
             }
             (Data::Str { offs, data, kind }, Cell::Bytes(bytes, cap)) => {
-                return push_text(offs, data, *kind, bytes, cap as usize, var_limit);
+                let s = match cut_text(*kind, bytes, cap as usize) {
+                    Ok(s) => s,
+                    Err(cut) => return Outcome::Exception(cut),
+                };
+                if !fits(data.len(), s.len(), var_limit) {
+                    return Outcome::Full(kind.whole(s));
+                }
+                data.push_str(s);
+                offs.push(data.len() as u32);
             }
             (Data::Bin { offs, data }, Cell::Bytes(bytes, cap)) => {
-                let cap = cap as usize;
-                if bytes.len() > cap {
-                    return Outcome::Exception(truncated(
-                        Value::Bytes(bytes[..cap].into()),
-                        bytes.len(),
-                    ));
-                }
+                let bytes = match cut_bytes(bytes, cap as usize) {
+                    Ok(b) => b,
+                    Err(cut) => return Outcome::Exception(cut),
+                };
                 if !fits(data.len(), bytes.len(), var_limit) {
                     return Outcome::Full(Value::Bytes(bytes.into()));
                 }
@@ -714,38 +720,55 @@ impl Data {
     }
 }
 
-/// A text, JSON or XML cell: valid UTF-8 inline (cut at a character boundary past `cap`),
-/// anything else `Lossy` (its bytes kept, never replaced).
-fn push_text(
-    offs: &mut Vec<u32>,
-    data: &mut String,
-    kind: StrKind,
-    bytes: &[u8],
-    cap: usize,
-    var_limit: u64,
-) -> Outcome {
-    let whole = |s: &str| -> Value {
-        match kind {
+impl StrKind {
+    /// The whole value of this kind.
+    fn whole(self, s: &str) -> Value {
+        match self {
             StrKind::Text => Value::Text(s.into()),
             StrKind::Json => Value::Json(s.into()),
             StrKind::Xml => Value::Xml(s.into()),
         }
-    };
+    }
+}
+
+/// A text, JSON or XML cell under `cap`: `Ok` valid UTF-8 that fits, to keep whole; else the
+/// value to keep instead: `Truncated` at a character boundary past `cap`, `Lossy` (its bytes
+/// kept, never replaced) when it is not UTF-8, both when it is neither.
+fn cut_text(kind: StrKind, bytes: &[u8], cap: usize) -> Result<&str, Value> {
     match std::str::from_utf8(bytes) {
-        Ok(s) if s.len() > cap => {
-            Outcome::Exception(truncated(whole(&s[..floor_char_boundary(s, cap)]), s.len()))
-        }
-        Ok(s) if !fits(data.len(), s.len(), var_limit) => Outcome::Full(whole(s)),
-        Ok(s) => {
-            data.push_str(s);
-            offs.push(data.len() as u32);
-            Outcome::Inline
-        }
-        Err(_) if bytes.len() > cap => Outcome::Exception(truncated(
+        Ok(s) if s.len() > cap => Err(truncated(
+            kind.whole(&s[..floor_char_boundary(s, cap)]),
+            s.len(),
+        )),
+        Ok(s) => Ok(s),
+        Err(_) if bytes.len() > cap => Err(truncated(
             Value::Lossy(bytes[..floor_utf8_lead(bytes, cap)].into()),
             bytes.len(),
         )),
-        Err(_) => Outcome::Exception(Value::Lossy(bytes.into())),
+        Err(_) => Err(Value::Lossy(bytes.into())),
+    }
+}
+
+/// A byte cell under `cap`: `Ok` when it fits, else `Truncated` at `cap`.
+fn cut_bytes(bytes: &[u8], cap: usize) -> Result<&[u8], Value> {
+    if bytes.len() > cap {
+        return Err(truncated(Value::Bytes(bytes[..cap].into()), bytes.len()));
+    }
+    Ok(bytes)
+}
+
+/// The value `push_bytes` keeps for `bytes` in a `Var(kind)` column under `cap`, whole (see
+/// `ChunkBuilder::capped_value`).
+pub(crate) fn capped_value(kind: VarKind, bytes: &[u8], cap: u32) -> Value {
+    let cap = cap as usize;
+    match kind {
+        VarKind::Bytes => cut_bytes(bytes, cap).map_or_else(|v| v, |b| Value::Bytes(b.into())),
+        VarKind::Text => {
+            cut_text(StrKind::Text, bytes, cap).map_or_else(|v| v, |s| StrKind::Text.whole(s))
+        }
+        VarKind::Json => {
+            cut_text(StrKind::Json, bytes, cap).map_or_else(|v| v, |s| StrKind::Json.whole(s))
+        }
     }
 }
 
@@ -782,11 +805,12 @@ fn truncated(prefix: Value, total: usize) -> Value {
     }))
 }
 
-/// A cell whose value lies outside what its buffer can represent.
-fn range_error(what: &str) -> Value {
+/// A cell whose value lies outside what its buffer can represent; the message keeps the raw
+/// value the driver pushed.
+fn range_error(what: &str, raw: i64) -> Value {
     Value::Error(Arc::new(ErrorVal {
         code: "out-of-range".into(),
-        message: format!("the {what} is outside the supported range").into(),
+        message: format!("the {what} is outside the supported range (raw value {raw})").into(),
     }))
 }
 
@@ -807,8 +831,8 @@ pub(crate) fn flags_of(v: &Value) -> CellFlags {
     }
 }
 
-/// The heap bytes a value points at: its text or bytes, a big decimal's text, a truncated
-/// value's box and prefix.
+/// The heap bytes a value points at: its text or bytes, a big decimal's text, and a boxed
+/// value's body (`TruncatedVal`, `OpaqueVal`, `ErrorVal`) with its own payload.
 fn payload(v: &Value) -> usize {
     match v {
         Value::Text(s) | Value::Json(s) | Value::Xml(s) => s.len(),
@@ -818,8 +842,8 @@ fn payload(v: &Value) -> usize {
             Repr::Small { .. } => 0,
         },
         Value::Special(SpecialVal::PartialZeroDate(s)) => s.len(),
-        Value::Opaque(o) => o.type_name.len() + o.text.len(),
-        Value::Error(e) => e.code.len() + e.message.len(),
+        Value::Opaque(o) => size_of::<OpaqueVal>() + o.type_name.len() + o.text.len(),
+        Value::Error(e) => size_of::<ErrorVal>() + e.code.len() + e.message.len(),
         Value::Truncated(t) => size_of::<TruncatedVal>() + payload(&t.prefix),
         _ => 0,
     }

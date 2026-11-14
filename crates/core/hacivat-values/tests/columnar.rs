@@ -570,10 +570,70 @@ fn out_of_range_temporal_data_is_an_error_cell_not_a_panic() {
     b.push_temporal2(2, MICROS_PER_DAY + 1, 0);
     b.end_row();
     let c = b.seal();
+    // The raw value the driver pushed stays in the message.
+    let raw = [
+        i64::MAX.to_string(),
+        "-1".to_string(),
+        (MICROS_PER_DAY + 1).to_string(),
+    ];
     for col in 0..3 {
-        assert!(matches!(c.cell(0, col), ValueRef::Error(e) if &*e.code == "out-of-range"));
+        let ValueRef::Error(e) = c.cell(0, col) else {
+            panic!("column {col}: an error cell")
+        };
+        assert_eq!(&*e.code, "out-of-range");
+        assert!(
+            e.message
+                .ends_with(&format!("(raw value {})", raw[col as usize])),
+            "column {col}: {}",
+            e.message
+        );
         assert_eq!(c.flags(0, col), CellFlags::ERROR);
     }
+}
+
+#[test]
+fn capped_value_cuts_exactly_like_push_bytes() {
+    let cut = |kind, bytes: &[u8], cap| ChunkBuilder::capped_value(kind, bytes, cap);
+    assert_eq!(cut(VarKind::Text, b"abc", 3), Value::Text("abc".into()));
+    assert_eq!(cut(VarKind::Json, b"[1]", 3), Value::Json("[1]".into()));
+    assert_eq!(
+        cut(VarKind::Bytes, &[1, 2, 3], 3),
+        Value::Bytes(Arc::from(&[1, 2, 3][..]))
+    );
+    let Value::Truncated(t) = cut(VarKind::Text, "€€€€".as_bytes(), 10) else {
+        panic!("truncated")
+    };
+    assert_eq!(t.prefix, Value::Text("€€€".into()));
+    assert_eq!((t.total_len, t.unit), (Some(12), LenUnit::Bytes));
+    assert_eq!(
+        cut(VarKind::Text, &[0x66, 0xff], 8),
+        Value::Lossy(Arc::from(&[0x66, 0xff][..]))
+    );
+    let Value::Truncated(t) = cut(VarKind::Bytes, &[9; 5], 2) else {
+        panic!("truncated")
+    };
+    assert_eq!(t.prefix, Value::Bytes(Arc::from(&[9, 9][..])));
+}
+
+#[test]
+fn boxed_values_count_their_bodies() {
+    // Ruling M8: an `Arc<OpaqueVal>` or `Arc<ErrorVal>` counts its 32-byte body, like a boxed
+    // `TruncatedVal` counts its own.
+    let opaque = Value::Opaque(Arc::new(hacivat_values::OpaqueVal {
+        type_name: "tsvector".into(),
+        text: "'a' 'b'".into(),
+    }));
+    let s = schema(&[LogicalType::Opaque {
+        type_name: "tsvector".into(),
+    }]);
+    let c = Chunk::from_values(&s, vec![vec![opaque], vec![error("decode")]]);
+    let opaque_body = size_of::<hacivat_values::OpaqueVal>() as u64;
+    let error_body = size_of::<ErrorVal>() as u64;
+    assert_eq!((opaque_body, error_body), (32, 32));
+    let cells = 2 * size_of::<Value>() as u64;
+    let opaque_payload = opaque_body + 8 + 7;
+    let error_payload = error_body + 6 + 9;
+    assert_eq!(c.bytes(), cells + opaque_payload + error_payload);
 }
 
 #[test]
@@ -785,6 +845,24 @@ fn decimal_text() -> impl Strategy<Value = String> {
 }
 
 proptest! {
+    #[test]
+    fn push_value_of_capped_value_builds_what_push_bytes_builds(
+        cells in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..24), 1..16),
+        cap in 0u32..20,
+    ) {
+        for kind in [VarKind::Text, VarKind::Json, VarKind::Bytes] {
+            let mut raw = ChunkBuilder::new(&[BufKind::Var(kind)], 16);
+            let mut whole = ChunkBuilder::new(&[BufKind::Var(kind)], 16);
+            for bytes in &cells {
+                raw.push_bytes(0, bytes, cap);
+                raw.end_row();
+                whole.push_value(0, ChunkBuilder::capped_value(kind, bytes, cap));
+                whole.end_row();
+            }
+            prop_assert_eq!(raw.seal(), whole.seal(), "{:?}", kind);
+        }
+    }
+
     #[test]
     fn decimals_round_trip_exactly_through_dec_buffers(
         texts in prop::collection::vec(decimal_text(), 1..24)

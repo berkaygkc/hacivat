@@ -17,17 +17,19 @@
 //! would is kept whole as an exception instead and [`ChunkBuilder::is_full`] turns true, so
 //! the driver seals the chunk after that row ("seals early").
 
-use crate::columnar::buf::{Cell, ColumnBuf, Push};
-use crate::columnar::{BufKind, Chunk};
+use crate::columnar::buf::{self, Cell, ColumnBuf, Push};
+use crate::columnar::{BufKind, Chunk, VarKind};
 use crate::decimal::DecimalVal;
 use crate::logical::ResultSchema;
 use crate::value::Value;
 
 /// Rows a builder reserves room for at most, whatever `capacity_rows` says.
 const MAX_RESERVED_ROWS: usize = 65_536;
-/// The bytes a builder reserves up front across its columns at most, counted at 8 a cell
-/// (twice the default 4 MiB chunk, which seals first): a 1,600-column result reserves about
-/// 650 rows, and the buffers grow past that only if rows arrive.
+/// The reservation budget across a builder's columns, counted at 8 bytes a cell (twice the
+/// default 4 MiB chunk, which seals first): a 1,600-column result reserves about 650 rows,
+/// and the buffers grow past that only if rows arrive. Wider cells reserve more than the
+/// budget, in proportion: `Values` (32 bytes a cell) up to about 4×, `Dec128` (18) and
+/// `Fixed16` (16) about 2×; still bounded, at most 32 MiB.
 const MAX_RESERVED_BYTES: usize = 8 << 20;
 
 /// Builds one [`Chunk`] from the driver's plan.
@@ -43,11 +45,12 @@ pub struct ChunkBuilder {
 }
 
 impl ChunkBuilder {
-    /// A builder for columns of `plan`, sized for `capacity_rows` (a hint: at most 65,536 rows,
-    /// and about 8 MiB across the columns, are reserved). Without a schema a `Temporal { unit: Micros }` column holds naive
-    /// timestamps (microseconds since 1970-01-01), a `Temporal2` column UTC timestamps with
-    /// the offset the server sent, and a `Var(Text)` column text; a time-of-day, `timestamptz`
-    /// or XML column needs [`ChunkBuilder::with_schema`].
+    /// A builder for columns of `plan`, sized for `capacity_rows` (a hint: at most 65,536 rows
+    /// are reserved, and about 8 MiB across the columns at 8 bytes a cell, up to 4× that for
+    /// wider cells such as `Values`). Without a schema a `Temporal { unit: Micros }` column
+    /// holds naive timestamps (microseconds since 1970-01-01), a `Temporal2` column UTC
+    /// timestamps with the offset the server sent, and a `Var(Text)` column text; a
+    /// time-of-day, `timestamptz` or XML column needs [`ChunkBuilder::with_schema`].
     pub fn new(plan: &[BufKind], capacity_rows: u32) -> Self {
         Self::build(plan, None, capacity_rows)
     }
@@ -113,7 +116,9 @@ impl ChunkBuilder {
         self.typed(col, "push_f64", Cell::F64(v));
     }
 
-    /// A `Dec64` cell: the mantissa at the column's scale.
+    /// A `Dec64` cell: the mantissa at the column's scale. An `i64` has no negative zero, so a
+    /// `-0` (`-0.00`) must go through [`ChunkBuilder::push_decimal`], and so should any
+    /// decimal the driver has as text: `DecimalVal::parse` it, then `push_decimal`.
     pub fn push_dec64(&mut self, col: u32, mant: i64) {
         self.typed(col, "push_dec64", Cell::Dec64(mant));
     }
@@ -150,12 +155,25 @@ impl ChunkBuilder {
 
     /// A whole value (a `Values` column, or an exception in a typed one). In a typed column a
     /// value the buffer holds exactly (`Value::Int` in an `I64` column, `Value::Text` in a
-    /// `Var(Text)` one) is stored inline; anything else is an exception. Never truncates.
+    /// `Var(Text)` one) is stored inline; anything else is an exception.
+    ///
+    /// **Never truncates**, so it applies no cell cap: a driver that pushes text or bytes this
+    /// way (a SQLite `TEXT` value in an `INTEGER` column, say) builds the value with
+    /// [`ChunkBuilder::capped_value`] first, which cuts it exactly as `push_bytes` would.
     pub fn push_value(&mut self, col: u32, v: Value) {
         let limit = self.var_limit;
         if self.column(col).push_value(v, limit) == Push::Full {
             self.full = true;
         }
+    }
+
+    /// The value [`ChunkBuilder::push_bytes`] keeps for `bytes` in a `Var(kind)` column under
+    /// `cap`, for [`ChunkBuilder::push_value`]: `Text`/`Json` (valid UTF-8) or `Bytes` when it
+    /// fits; else `Truncated` with the total length in bytes, text cut at a character
+    /// boundary; text that is not valid UTF-8 is `Lossy` (its bytes kept, never replaced),
+    /// cut before a sequence the cap would split.
+    pub fn capped_value(kind: VarKind, bytes: &[u8], cap: u32) -> Value {
+        buf::capped_value(kind, bytes, cap)
     }
 
     /// Ends the row.

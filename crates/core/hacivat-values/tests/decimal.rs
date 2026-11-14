@@ -63,11 +63,12 @@ fn no_128_bit_integers_on_the_decimal_path() {
 
 #[test]
 fn the_mantissa_words_keep_value_at_32_bytes_and_8_aligned() {
-    // A 16-byte-aligned mantissa would make `Value` 48 bytes (P8).
+    // A 16-byte-aligned mantissa would make `Value` 48 bytes (P8). The alignment is the
+    // invariant; the sizes are budgets (a later layout may shrink them).
     assert_eq!(align_of::<DecimalVal>(), 8);
-    assert_eq!(size_of::<DecimalVal>(), 24);
+    assert!(size_of::<DecimalVal>() <= 24);
     assert_eq!(align_of::<hacivat_values::Value>(), 8);
-    assert_eq!(size_of::<hacivat_values::Value>(), 32);
+    assert!(size_of::<hacivat_values::Value>() <= 32);
 }
 
 #[test]
@@ -378,13 +379,31 @@ proptest! {
         prop_assert_eq!(DecimalVal::from_mantissa(m, scale), DecimalVal::parse(&text).unwrap());
     }
 
+    /// Mostly valid digits and scales (so the layout code runs), with the extreme weights and
+    /// an occasional invalid digit or scale; an accepted value must be its own canonical text.
     #[test]
     fn hostile_base10000_never_panics(
         neg in any::<bool>(),
-        weight in any::<i16>(),
-        dscale in any::<u16>(),
-        digits in prop::collection::vec(any::<u16>(), 0..12),
+        weight in prop_oneof![
+            8 => -40i16..40,
+            1 => any::<i16>(),
+            1 => prop_oneof![Just(i16::MIN), Just(i16::MAX)],
+        ],
+        dscale in prop_oneof![9 => 0u16..=MAX_SCALE + 8, 1 => any::<u16>()],
+        digits in prop::collection::vec(
+            prop_oneof![20 => 0u16..10_000, 1 => any::<u16>()],
+            0..40,
+        ),
     ) {
-        let _ = DecimalVal::try_from_base10000(neg, weight, dscale, &digits);
+        let valid_input = dscale <= MAX_SCALE && digits.iter().all(|&g| g < 10_000);
+        match DecimalVal::try_from_base10000(neg, weight, dscale, &digits) {
+            Ok(d) => {
+                prop_assert!(valid_input);
+                prop_assert_eq!(d.scale(), dscale as i16);
+                prop_assert_eq!(DecimalVal::parse(&d.to_string()), Ok(d.clone()));
+                prop_assert_eq!(d.view().to_decimal(), d);
+            }
+            Err(e) => prop_assert_eq!(e, DecimalError::Invalid),
+        }
     }
 }
