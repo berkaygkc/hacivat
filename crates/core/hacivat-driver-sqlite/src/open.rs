@@ -178,7 +178,8 @@ pub(crate) struct SqliteConn {
     // ## m3a-t15-sqlite-typed
     /// The open typed query (streaming or suspended), if any.
     typed: Option<typed::Open>,
-    /// A cursor's idle bound, as of the open, the last probe or the last typed query.
+    /// A cursor's idle bound, cached: read at the open and on `probe`, re-read after a statement
+    /// that may change it (`typed::may_change_journal`).
     idle_bound: Option<Duration>,
 }
 
@@ -414,17 +415,22 @@ impl RawConn for SqliteConn {
         Box::pin(async move {
             self.idle()?;
             let ticket = cancel.begin();
-            let (result, tx) = self
+            let (result, tx, idle_bound) = self
                 .call(move |c| {
                     cancel.start(ticket);
                     let r = crate::exec::execute(c, &sql, opts.max_rows, guard.as_deref(), || {
                         cancel.cancelled(ticket)
                     });
+                    // ## T15 review round 1: the cached idle bound, re-read when it may change.
+                    let idle_bound = typed::may_change_journal(&sql).then(|| typed::idle_bound(c));
                     cancel.end(ticket);
-                    (r, tx_status(c))
+                    (r, tx_status(c), idle_bound)
                 })
                 .await?;
             self.tx = tx;
+            if let Some(bound) = idle_bound {
+                self.idle_bound = bound;
+            }
             result
         })
     }
@@ -437,7 +443,7 @@ impl RawConn for SqliteConn {
         Box::pin(async move {
             self.idle()?;
             let ticket = cancel.begin();
-            let (result, tx) = self
+            let (result, tx, idle_bound) = self
                 .call(move |c| {
                     cancel.start(ticket);
                     let r = if cancel.cancelled(ticket) {
@@ -445,11 +451,16 @@ impl RawConn for SqliteConn {
                     } else {
                         c.execute_batch(&sql).map_err(raw_error)
                     };
+                    // ## T15 review round 1: the cached idle bound, re-read when it may change.
+                    let idle_bound = typed::may_change_journal(&sql).then(|| typed::idle_bound(c));
                     cancel.end(ticket);
-                    (r, tx_status(c))
+                    (r, tx_status(c), idle_bound)
                 })
                 .await?;
             self.tx = tx;
+            if let Some(bound) = idle_bound {
+                self.idle_bound = bound;
+            }
             result
         })
     }
@@ -470,8 +481,8 @@ impl RawConn for SqliteConn {
 
     // ## m3a-t15-sqlite-typed (`typed.rs`)
 
-    /// Suspends; no binds (M3b); closes by finalizing; the idle bound of the journal mode, as
-    /// of the last typed query's start (or the open, or the last probe).
+    /// Suspends; no binds (M3b); closes by finalizing; the cached idle bound of the journal
+    /// modes (`typed.rs`).
     fn typed_caps(&self) -> TypedCaps {
         typed::caps(self.idle_bound)
     }
@@ -486,28 +497,34 @@ impl RawConn for SqliteConn {
             }
             let jobs = self.jobs.clone().ok_or_else(gone)?;
             let ticket = self.cancel.begin();
-            let (job, mut open) =
+            let (job, open) =
                 typed::start(&spec, self.guard.clone(), Arc::clone(&self.cancel), ticket);
+            // ## T15 review round 1 (finding 1): the query is the connection's open one before
+            // its job is sent, so a `query` future dropped at any later point still leaves it to
+            // `close_query` or to the connection's drop (which stops the job).
+            self.typed = Some(open);
             let job: Job = Box::new(move |conn| job.run(conn));
-            jobs.send(job).await.map_err(|_| gone())?;
-            match open.started().await {
-                Ok(idle_bound) => {
-                    self.idle_bound = idle_bound;
-                    self.typed = Some(open);
-                    Ok(())
-                }
-                Err((err, tx)) => {
-                    if let Some(tx) = tx {
-                        self.tx = tx;
-                    }
-                    Err(err)
-                }
+            if jobs.send(job).await.is_err() {
+                self.typed = None;
+                return Err(gone());
             }
+            let started = match self.typed.as_mut() {
+                Some(open) => open.started(&mut self.tx, &mut self.idle_bound).await,
+                None => Err(gone()),
+            };
+            if started.is_err() {
+                self.typed = None;
+            }
+            started
         })
     }
 
     fn next_event(&mut self) -> BoxFuture<'_, Result<QueryEvent, RawError>> {
-        Box::pin(typed::next_event(&mut self.typed, &mut self.tx))
+        Box::pin(typed::next_event(
+            &mut self.typed,
+            &mut self.tx,
+            &mut self.idle_bound,
+        ))
     }
 
     fn fetch_more(&mut self, rows: u32) -> BoxFuture<'_, Result<(), RawError>> {
@@ -516,7 +533,12 @@ impl RawConn for SqliteConn {
     }
 
     fn close_query(&mut self, how: CloseHow) -> BoxFuture<'_, Result<Closed, RawError>> {
-        Box::pin(typed::close_query(&mut self.typed, &mut self.tx, how))
+        Box::pin(typed::close_query(
+            &mut self.typed,
+            &mut self.tx,
+            &mut self.idle_bound,
+            how,
+        ))
     }
 }
 

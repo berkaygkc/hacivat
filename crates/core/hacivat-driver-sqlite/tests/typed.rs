@@ -602,11 +602,7 @@ async fn dropping_the_connection_stops_a_long_step() {
     // One step that reads the table forever: no row ever comes, so no closed channel is seen.
     let f = numbered(10);
     let mut c = open_rw(&f).await;
-    c.query(spec(
-        "SELECT count(*) FROM t, (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c)",
-    ))
-    .await
-    .unwrap();
+    c.query(spec(ENDLESS_STEP_OVER_T)).await.unwrap();
     // `query` returns before the first step: wait until the step holds the table's lock.
     unhung(async {
         while !writer_blocked(&f) {
@@ -615,6 +611,47 @@ async fn dropping_the_connection_stops_a_long_step() {
     })
     .await;
     // The session discards the connection without `close`: the step stops and the lock goes.
+    drop(c);
+    wait_for_writer(&f);
+}
+
+// ## T15 review round 1 (finding 1)
+#[tokio::test]
+async fn a_query_future_dropped_after_its_job_started_still_ends_it() {
+    use futures::FutureExt as _;
+    let f = numbered(10);
+    let mut c = open_rw(&f).await;
+    let cancel = c.cancel_handle().unwrap();
+    let holds_the_lock = async || {
+        unhung(async {
+            while !writer_blocked(&f) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+    };
+    // `query` is polled once and dropped once its job answered `Started` and is inside the
+    // first step: the query is still the connection's open one.
+    let mut pending = Box::pin(c.query(spec(ENDLESS_STEP_OVER_T)));
+    let _ = pending.as_mut().now_or_never();
+    holds_the_lock().await;
+    drop(pending);
+    // The connection is kept: the session cancels and closes, and the next job runs.
+    cancel.cancel().await.unwrap();
+    assert_eq!(
+        unhung(c.close_query(CloseHow::Now)).await.unwrap(),
+        Closed::Closed { rows: 0 }
+    );
+    assert_eq!(
+        scalar(&mut *c, "SELECT count(*) FROM t").await,
+        Value::Int(10)
+    );
+    // The connection is discarded instead: its drop stops the step, and another connection's
+    // job is not blocked by the lock.
+    let mut pending = Box::pin(c.query(spec(ENDLESS_STEP_OVER_T)));
+    let _ = pending.as_mut().now_or_never();
+    holds_the_lock().await;
+    drop(pending);
     drop(c);
     wait_for_writer(&f);
 }
@@ -712,6 +749,14 @@ async fn drain_completes_a_short_rest_and_closes_a_long_one() {
             .unwrap(),
         Closed::Completed { rows: 1_000 }
     );
+    // A deadline past what `Instant` can hold: no deadline (review round 1, finding 2).
+    suspend(&mut c, "SELECT a FROM t").await;
+    assert_eq!(
+        unhung(c.close_query(CloseHow::Drain(Duration::MAX)))
+            .await
+            .unwrap(),
+        Closed::Completed { rows: 1_000 }
+    );
     // Endless rows: the drain's time runs out between steps.
     suspend(&mut c, ENDLESS_ROWS).await;
     assert_eq!(
@@ -764,7 +809,8 @@ async fn idle_bound_follows_the_journal_mode() {
     run(&mut *c, spec("PRAGMA journal_mode = WAL"))
         .await
         .unwrap();
-    // Read at the start of each typed query.
+    // Refreshed after a statement that can change it.
+    assert_eq!(c.typed_caps().idle_bound, None);
     run(&mut *c, cursor("SELECT a FROM t")).await.unwrap();
     assert_eq!(c.typed_caps().idle_bound, None);
     drop(c);
@@ -779,7 +825,6 @@ async fn idle_bound_follows_the_journal_mode() {
         .unwrap();
     let attach = format!("ATTACH '{}' AS o", other.display());
     run(&mut *c, spec(&attach)).await.unwrap();
-    run(&mut *c, cursor("SELECT a FROM t")).await.unwrap();
     assert_eq!(c.typed_caps().idle_bound, ROLLBACK_IDLE_BOUND);
     // An in-memory database holds no file lock.
     let mut req = common::request(std::path::Path::new(":memory:"), false);
@@ -795,6 +840,37 @@ async fn idle_bound_follows_the_journal_mode() {
         .unwrap();
     run(&mut *c, cursor("SELECT 1")).await.unwrap();
     assert_eq!(c.typed_caps().idle_bound, None);
+}
+
+// ## T15 review round 1 (finding 4)
+#[tokio::test]
+async fn the_idle_bound_is_cached_and_refreshed_by_what_can_change_it() {
+    let f = numbered(10);
+    let mut c = open_rw(&f).await;
+    assert_eq!(c.typed_caps().idle_bound, ROLLBACK_IDLE_BOUND);
+    // Another process switches the file to WAL while this connection is idle. A read does not
+    // re-read the modes (none run on the first-chunk path), so the bound stays the cautious one.
+    let other: String = rusqlite::Connection::open(&f.path)
+        .unwrap()
+        .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(other, "wal");
+    run(&mut *c, cursor("SELECT a FROM t")).await.unwrap();
+    assert_eq!(c.typed_caps().idle_bound, ROLLBACK_IDLE_BOUND);
+    // The probe re-reads them.
+    c.probe().await;
+    assert_eq!(c.typed_caps().idle_bound, None);
+    // So does this connection's own statement that can change them, typed or not.
+    run(&mut *c, spec("PRAGMA journal_mode = DELETE"))
+        .await
+        .unwrap();
+    assert_eq!(c.typed_caps().idle_bound, ROLLBACK_IDLE_BOUND);
+    c.execute("PRAGMA journal_mode = WAL", simple())
+        .await
+        .unwrap();
+    assert_eq!(c.typed_caps().idle_bound, None);
+    c.batch("PRAGMA journal_mode = DELETE").await.unwrap();
+    assert_eq!(c.typed_caps().idle_bound, ROLLBACK_IDLE_BOUND);
 }
 
 #[tokio::test]

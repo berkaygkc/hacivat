@@ -253,6 +253,9 @@ pub async fn unhung<T>(fut: impl std::future::Future<Output = T>) -> T {
 pub const ENDLESS_STEP: &str =
     "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c";
 
+/// One step that reads table `t` forever (it holds the table's lock): no row ever comes.
+pub const ENDLESS_STEP_OVER_T: &str = "SELECT count(*) FROM t, (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c)";
+
 /// Endless rows.
 pub const ENDLESS_ROWS: &str =
     "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c";

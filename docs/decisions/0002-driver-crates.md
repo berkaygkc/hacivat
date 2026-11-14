@@ -889,7 +889,13 @@ memory of an unread result is the first chunk plus four (unit test
   rows }` counts what `next_event` handed out. A closed command channel (the connection dropped
   without `close`) ends the job and finalizes the statement; a closed event channel too. The job
   sees its channels only between rows, so dropping a connection with a query open also closes
-  the cancel latch (`Drop for SqliteConn`), which stops a step that never yields a row.
+  the cancel latch (`Drop for SqliteConn`), which stops a step that never yields a row. The
+  query is the connection's open one from before its job is sent (review round 1): a `query`
+  future dropped at any later point, even after the job answered `Started`, still leaves it to
+  `close_query` or to that drop; `next_event` skips the `Started` such a future left unread.
+  `close_query` keeps it open until the job answered. A `Drain` whose deadline is past what
+  `Instant` holds has no deadline. `close_query(Now)` during one long step waits for the step
+  (the job sees `Close` between rows): the session cancels first when it cannot wait (Task 18).
 - **Cancel.** The ticket covers the whole job, suspension included: the progress handler and
   `sqlite3_interrupt` stop a running step (the interrupt flag stays set while the suspended
   statement is active, so it also stops the next step), and the job reads the latch after
@@ -944,28 +950,38 @@ other process can commit: `idle_bound` is 30 s. It is `None` only when every dat
 file (`PRAGMA database_list`) is in WAL mode, where a cursor only keeps a checkpoint from
 completing; a database without a file (`:memory:`, `temp`) holds no lock another process sees.
 An attached rollback-journal file makes it 30 s again; modes that cannot be read make it 30 s
-(fail closed). Read when the connection opens, on `probe`, and by every typed query after
-prepare, so the bound read after `query` is the open cursor's.
+(fail closed). The bound is cached per connection (review round 1): read at the open and on
+`probe`, and re-read, after the statement is finalized, by any `query`, `execute` or `batch`
+whose text names `PRAGMA`, `ATTACH` or `DETACH` (`typed::may_change_journal`), the only
+statements that change a journal mode or the list of databases; nothing runs on the
+first-chunk path. Another process can switch a file into WAL while this connection is open,
+but not out of it (that needs the file to itself), so a stale bound is the cautious 30 s until
+the next `probe`.
 
-**Known limits.** The read-ahead step can be long (above). `typed_caps()` read between queries
-reflects the last query's start; a `PRAGMA journal_mode = …` takes effect at the next query.
-`OriginHint` needs a table column (expressions have none).
+**Known limits.** The read-ahead step can be long (above). A journal mode another process
+changes is seen at the next `probe`. A column whose kind follows its first value (BLOB affinity,
+no declared type, NUMERIC) and is NULL throughout the first chunk takes its fallback (`Bytes`,
+or `Int` for NUMERIC), so later values of another class are per-cell exceptions, exact but
+dearer (R-M3-31). `OriginHint` needs a table column (expressions have none).
 
-**Tests.** `tests/typed.rs` (19 + 1 perf): the million-row suspend/resume/finalize (first chunk
+**Tests.** `tests/typed.rs` (21 + 1 perf): the million-row suspend/resume/finalize (first chunk
 501, `fetch_more(10000)` → 4,096/4,096/1,808, `Closed { rows: 10501 }`, another connection can
 commit at once); whole results without suspension; sealing by rows and bytes; the read-ahead end;
 DML/DDL; storage-class exceptions; the affinity table; declared types, native types and origins;
 large and invalid text; the read-only authorizer refusing `ATTACH`, writes and `VACUUM` on the
 typed path; the interrupt during one long step, at a suspended cursor and while the consumer
 stalls; `SQLITE_BUSY` with the hint (`PRAGMA busy_timeout` = 5000); a closed command channel
-ending the job; a dropped connection stopping one endless step, also while a drain waits on it;
-one open query per connection; drains (complete, endless rows, one endless step); the idle bound
-per journal mode; `Simple`, binds and parameters refused. Calls that a regression would block
+ending the job; a dropped connection stopping one endless step, also while a drain waits on it
+and after a `query` future was dropped once its job started; one open query per connection;
+drains (complete, a deadline past `Instant`, endless rows, one endless step); the idle bound per
+journal mode, cached and refreshed only by what can change it; `Simple`, binds and parameters
+refused. Calls that a regression would block
 forever are wrapped in a two-minute guard (`unhung`), so they fail instead of hanging. The perf
 test (`HACIVAT_PERF=1`, release) asserts the first chunk of a million rows within 20 ms (median
 of 10). `tests/typed_hostile.rs` (7): a declared type and names that are not UTF-8, the M2b
 path, an origin through a view of a table whose name is not UTF-8, 300 generated cells kept
 exactly, and every decoder over every storage class. Unit tests: the memory bound
-(`open.rs`), the busy hint's codes (`lib.rs`), the limits and caps (`typed.rs`). Mutation
+(`open.rs`), the busy hint's codes (`lib.rs`), the limits, caps and journal-change detection
+(`typed.rs`). Mutation
 checks: each of the column-name guard, the declared-type guard, the parameter refusal, the
 channel depth, the busy timeout and the drain deadline, removed, fails its test.

@@ -9,8 +9,7 @@
 //!    `sqlite3_stmt_readonly` must hold (`readonly-required`, the journal-mode query exempt),
 //!    exactly as `execute` (`exec.rs`); a statement with a parameter is `Unsupported` (binds
 //!    are M3b; an unbound parameter would run as NULL); the cancel latch is read;
-//! 2. `Started`, with the cursor's idle bound (`idle_bound`): `query` returns here, so a
-//!    statement SQLite refuses fails `query` itself;
+//! 2. `Started`: `query` returns here, so a statement SQLite refuses fails `query` itself;
 //! 3. step rows into a `ChunkBuilder` (`with_schema`), sealing a chunk at `first_rows` rows (the
 //!    first one) or `chunk_rows` (later ones), at `chunk_bytes`, or when the builder is full, and
 //!    send each one on a channel of depth `EVENT_DEPTH`: a consumer that stops reading stops
@@ -38,12 +37,18 @@
 //! `Close(Drain(d))` steps on, counting, until the result ends (`Completed`) or `d` passes
 //! (`Closed`); the latch's deadline makes the progress handler stop a long step at `d` too. The
 //! job answers a `Close` after it finalized, so the lock is gone when `close_query` returns. A
-//! `Close` that arrives while rows stream is seen at the next row.
+//! `Close` that arrives while rows stream is seen at the next row, so a `Close(Now)` during one
+//! long step waits for it: the session cancels first when it cannot wait (the progress handler
+//! and the interrupt end the step). A deadline past what `Instant` holds is no deadline.
 //!
 //! **Idle bound** (ER6, R4). A live statement holds a SHARED lock in a rollback-journal mode,
 //! so no other process can commit: the cursor's bound is 30 s (`ROLLBACK_IDLE_BOUND`). In WAL
-//! it only keeps a checkpoint from completing: `None` (the session's own bound). Read when the
-//! connection opens, on `probe`, and by every typed query after prepare.
+//! it only keeps a checkpoint from completing: `None` (the session's own bound). The bound is
+//! cached per connection: read at the open and on `probe`, and re-read after a statement whose
+//! text names `PRAGMA`, `ATTACH` or `DETACH` (`may_change_journal`), the only statements that
+//! change a journal mode or the list of databases; never on the first-chunk path. Another
+//! process can only switch a file into WAL while this connection is open (out of WAL needs the
+//! file to itself), so a stale bound is the cautious 30 s until the next `probe`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -87,6 +92,18 @@ pub(crate) fn unsupported() -> RawError {
     }
 }
 
+// ## T15 review round 1 (finding 4)
+/// Whether `sql` may change a journal mode or the list of databases: it names `PRAGMA`,
+/// `ATTACH` or `DETACH` anywhere (ASCII case folding; a word inside a literal re-reads for
+/// nothing, which is cheap), so the cached idle bound is re-read after it.
+pub(crate) fn may_change_journal(sql: &str) -> bool {
+    ["PRAGMA", "ATTACH", "DETACH"].iter().any(|w| {
+        sql.as_bytes()
+            .windows(w.len())
+            .any(|b| b.eq_ignore_ascii_case(w.as_bytes()))
+    })
+}
+
 /// The idle bound of a cursor on `conn`: none when every database with a file is in WAL mode
 /// (a database without a file, `:memory:` or `temp`, holds no lock another process sees), else
 /// [`ROLLBACK_IDLE_BOUND`]; also when the modes cannot be read (fail closed: a bound).
@@ -119,27 +136,36 @@ fn every_file_in_wal(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(true)
 }
 
+/// What a job's last message carries, read after the statement is finalized: the transaction
+/// status, and the idle bound when the statement may have changed it.
+#[derive(Debug, Clone, Copy)]
+struct After {
+    tx: TxStatus,
+    idle_bound: Option<Option<Duration>>,
+}
+
+impl After {
+    fn apply(self, tx: &mut TxStatus, idle_bound: &mut Option<Duration>) {
+        *tx = self.tx;
+        if let Some(bound) = self.idle_bound {
+            *idle_bound = bound;
+        }
+    }
+}
+
 /// From the job to the async side.
 #[derive(Debug)]
 enum Msg {
-    /// Prepared and checked; the cursor's idle bound.
-    Started {
-        idle_bound: Option<Duration>,
-    },
+    /// Prepared and checked: the query runs.
+    Started,
     Event(QueryEvent),
     /// The result ended and the statement is finalized.
-    Done(QueryDone),
+    Done(QueryDone, After),
     /// The query failed; the statement is finalized.
-    Failed {
-        err: RawError,
-        tx: TxStatus,
-    },
+    Failed(RawError, After),
     /// The answer to `Close`, after the statement is finalized: `Some(rows)` when a drain
     /// completed the result.
-    Closed {
-        completed: Option<u64>,
-        tx: TxStatus,
-    },
+    Closed(Option<u64>, After),
 }
 
 /// From the async side to a job waiting at its read-ahead point (or streaming, for `Close`).
@@ -253,15 +279,22 @@ impl Job {
         // The statement is finalized by now; a later cancel is not for this job.
         self.cancel.set_deadline(None);
         let tx = tx_status(conn);
+        let after = After {
+            tx,
+            idle_bound: may_change_journal(&self.sql).then(|| idle_bound(conn)),
+        };
         self.cancel.end(self.ticket);
         let last = match outcome {
-            Outcome::Ended => Msg::Done(QueryDone {
-                tx,
-                warnings: 0,
-                skipped_result_sets: 0,
-            }),
-            Outcome::Failed(err) => Msg::Failed { err, tx },
-            Outcome::Closed(completed) => Msg::Closed { completed, tx },
+            Outcome::Ended => Msg::Done(
+                QueryDone {
+                    tx,
+                    warnings: 0,
+                    skipped_result_sets: 0,
+                },
+                after,
+            ),
+            Outcome::Failed(err) => Msg::Failed(err, after),
+            Outcome::Closed(completed) => Msg::Closed(completed, after),
             Outcome::Gone => return,
         };
         self.send(last);
@@ -308,9 +341,7 @@ impl Job {
         if self.cancel.cancelled(self.ticket) {
             return Outcome::Failed(interrupted());
         }
-        if !self.send(Msg::Started {
-            idle_bound: idle_bound(conn),
-        }) {
+        if !self.send(Msg::Started) {
             return Outcome::Gone;
         }
         if empty {
@@ -451,11 +482,12 @@ impl Job {
         let CloseHow::Drain(d) = how else {
             return Outcome::Closed(None);
         };
-        let at = Instant::now() + d;
-        self.cancel.set_deadline(Some(at));
+        // A deadline past what `Instant` holds is no deadline (review round 1, finding 2).
+        let at = Instant::now().checked_add(d);
+        self.cancel.set_deadline(at);
         let mut total = set.rows;
         let completed = loop {
-            if Instant::now() >= at {
+            if at.is_some_and(|at| Instant::now() >= at) {
                 break false;
             }
             match rows.next() {
@@ -711,16 +743,21 @@ pub(crate) struct Open {
 }
 
 impl Open {
-    /// `query`'s answer: the job's first message. `Ok(idle_bound)` when the query runs; else
-    /// the error and, when the job ran, the transaction status.
+    /// `query`'s answer: the job's first message, `Started` when the query runs; else its
+    /// error (with the transaction status and idle bound it left).
     pub(crate) async fn started(
         &mut self,
-    ) -> Result<Option<Duration>, (RawError, Option<TxStatus>)> {
+        tx: &mut TxStatus,
+        idle_bound: &mut Option<Duration>,
+    ) -> Result<(), RawError> {
         match self.events.recv().await {
-            Some(Msg::Started { idle_bound }) => Ok(idle_bound),
-            Some(Msg::Failed { err, tx }) => Err((err, Some(tx))),
+            Some(Msg::Started) => Ok(()),
+            Some(Msg::Failed(err, after)) => {
+                after.apply(tx, idle_bound);
+                Err(err)
+            }
             // The job sends nothing else first; without a message it is gone.
-            Some(_) | None => Err((gone(), None)),
+            Some(_) | None => Err(gone()),
         }
     }
 
@@ -735,6 +772,7 @@ impl Open {
 pub(crate) async fn next_event(
     open: &mut Option<Open>,
     tx: &mut TxStatus,
+    idle_bound: &mut Option<Duration>,
 ) -> Result<QueryEvent, RawError> {
     let Some(q) = open.as_mut() else {
         return Err(unsupported());
@@ -742,31 +780,35 @@ pub(crate) async fn next_event(
     if q.stage == Stage::Suspended {
         return Err(unsupported());
     }
-    match q.events.recv().await {
-        Some(Msg::Event(event)) => {
-            match &event {
-                QueryEvent::Rows(chunk) => q.delivered += u64::from(chunk.rows()),
-                QueryEvent::Suspended => q.stage = Stage::Suspended,
-                QueryEvent::ResultEnd(end) => q.completed = Some(end.rows),
-                QueryEvent::ResultStart(_) | QueryEvent::Done(_) => {}
+    loop {
+        return match q.events.recv().await {
+            Some(Msg::Event(event)) => {
+                match &event {
+                    QueryEvent::Rows(chunk) => q.delivered += u64::from(chunk.rows()),
+                    QueryEvent::Suspended => q.stage = Stage::Suspended,
+                    QueryEvent::ResultEnd(end) => q.completed = Some(end.rows),
+                    QueryEvent::ResultStart(_) | QueryEvent::Done(_) => {}
+                }
+                Ok(event)
             }
-            Ok(event)
-        }
-        Some(Msg::Done(done)) => {
-            *tx = done.tx;
-            *open = None;
-            Ok(QueryEvent::Done(done))
-        }
-        Some(Msg::Failed { err, tx: now }) => {
-            *tx = now;
-            *open = None;
-            Err(err)
-        }
-        // `Started` was read by `query`, `Closed` answers only `close_query`; the job is gone.
-        Some(Msg::Started { .. } | Msg::Closed { .. }) | None => {
-            *open = None;
-            Err(gone())
-        }
+            // Left by a `query` whose future was dropped before it read it.
+            Some(Msg::Started) => continue,
+            Some(Msg::Done(done, after)) => {
+                after.apply(tx, idle_bound);
+                *open = None;
+                Ok(QueryEvent::Done(done))
+            }
+            Some(Msg::Failed(err, after)) => {
+                after.apply(tx, idle_bound);
+                *open = None;
+                Err(err)
+            }
+            // `Closed` answers only `close_query`; the job is gone.
+            Some(Msg::Closed(..)) | None => {
+                *open = None;
+                Err(gone())
+            }
+        };
     }
 }
 
@@ -792,6 +834,7 @@ pub(crate) fn fetch_more(open: &mut Option<Open>, rows: u32) -> Result<(), RawEr
 pub(crate) async fn close_query(
     open: &mut Option<Open>,
     tx: &mut TxStatus,
+    idle_bound: &mut Option<Duration>,
     how: CloseHow,
 ) -> Result<Closed, RawError> {
     let Some(q) = open.as_mut() else {
@@ -803,22 +846,19 @@ pub(crate) async fn close_query(
     loop {
         match q.events.recv().await {
             Some(Msg::Event(QueryEvent::ResultEnd(end))) => completed = Some(end.rows),
-            Some(Msg::Event(_) | Msg::Started { .. }) => {}
-            Some(Msg::Done(done)) => {
-                *tx = done.tx;
+            Some(Msg::Event(_) | Msg::Started) => {}
+            Some(Msg::Done(_, after)) => {
+                after.apply(tx, idle_bound);
                 break;
             }
-            Some(Msg::Closed {
-                completed: drained,
-                tx: now,
-            }) => {
-                *tx = now;
+            Some(Msg::Closed(drained, after)) => {
+                after.apply(tx, idle_bound);
                 completed = completed.or(drained);
                 break;
             }
             // An error while closing (a cancel, the drain's interrupt): closed all the same.
-            Some(Msg::Failed { tx: now, .. }) => {
-                *tx = now;
+            Some(Msg::Failed(_, after)) => {
+                after.apply(tx, idle_bound);
                 break;
             }
             None => {
@@ -858,6 +898,27 @@ mod tests {
         assert_eq!((l.first_rows, l.chunk_rows), (50, 50));
         let l = Limits::of(&spec(501, 4_096));
         assert_eq!((l.first_rows, l.chunk_rows), (501, 4_096));
+    }
+
+    #[test]
+    fn only_statements_that_name_a_journal_or_database_change_re_read_the_bound() {
+        for sql in [
+            "PRAGMA journal_mode = WAL",
+            "pragma main.journal_mode",
+            "ATTACH 'x.db' AS x",
+            "  detach x",
+            "BEGIN; PRAGMA journal_mode = DELETE; COMMIT",
+        ] {
+            assert!(may_change_journal(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT 1",
+            "INSERT INTO t VALUES (1)",
+            "",
+            "CREATE TABLE prag(a)",
+        ] {
+            assert!(!may_change_journal(sql), "{sql}");
+        }
     }
 
     #[test]
