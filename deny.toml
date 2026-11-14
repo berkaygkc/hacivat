@@ -30,6 +30,25 @@ unused-allowed-license = "allow"
 crate = "webpki-roots"
 allow = ["CDLA-Permissive-2.0"]   # mysql_async rustls-tls; ruled PO-away 2026-11-12 (ledger)
 
+# M3a Task 1a (R-M3-1): `pg_query` declares only `MIT`, but it compiles libpg_query (BSD-3), the
+# PostgreSQL parser sources (PostgreSQL License; `snprintf` and `qsort` BSD-3; `strlcpy` ISC),
+# upb (BSD-3), utf8_range (MIT) and xxHash (BSD-2) into the binary. The licence files are the
+# upstream ones restored in the vendored copy (third_party/pg_query/PATCHES.md §0). Notices:
+# THIRD_PARTY_NOTICES.md, shipped in every bundle.
+[[licenses.clarify]]
+crate = "pg_query"
+expression = "MIT AND BSD-3-Clause AND BSD-2-Clause AND ISC AND PostgreSQL"
+license-files = [
+    { path = "LICENSE", hash = 0xfbb3f690 },
+    { path = "libpg_query/LICENSE", hash = 0xe339d158 },
+]
+
+# The PostgreSQL License is permissive (MIT-like) but not on the allow-list, so it is allowed for
+# `pg_query` alone (R-M3-1).
+[[licenses.exceptions]]
+crate = "pg_query"
+allow = ["PostgreSQL"]
+
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"
@@ -53,7 +72,8 @@ unknown-git = "deny"
 unused-allowed-source = "allow"
 allow-git = [
     "https://github.com/zed-industries/zed",
-    # The Hacivat zed fork (R1): zed @ 912159c plus the carried IME patch.
+    # The Hacivat zed fork (R1, R-M3-13): zed @ 912159c plus the carried IME patches and the
+    # TestScheduler lock-order patch (crates/ui/hacivat-ui-core/patches/README.md).
     "https://github.com/berkaygkc/zed",
     "https://github.com/zed-industries/font-kit",
     "https://github.com/zed-industries/async-process",

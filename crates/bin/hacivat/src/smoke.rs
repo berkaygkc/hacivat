@@ -1,6 +1,6 @@
-//! Command-line flags and the launch probes: `--smoke` (F18) prints the first-frame time and,
-//! 5 s later, the idle resident set, then exits; `--print-window-id` prints what
-//! `design/vf/capture.sh app` needs to capture the window.
+//! Command-line flags and the launch probes: `--smoke` (F18) prints the first-frame time and the
+//! linked libpg_query (M3a), 5 s later the idle resident set, then exits; `--print-window-id`
+//! prints what `design/vf/capture.sh app` needs to capture the window.
 
 use std::cell::Cell;
 use std::io::Write as _;
@@ -78,6 +78,16 @@ pub fn idle_rss_report(rss_mib: Option<u64>) -> (String, i32) {
     }
 }
 
+// ## m3a-t01a-proofs
+/// The `libpg-query` line: the libpg_query the binary links and how many statements it finds
+/// in `SELECT 1`, so the launch smoke proves the C library in the shipped binary (R-M3-1).
+pub fn pg_query_line() -> String {
+    match sql_oracle_pg::statement_count("SELECT 1") {
+        Ok(n) => format!("libpg-query={} statements={n}", sql_oracle_pg::version()),
+        Err(e) => format!("libpg-query={} error={e}", sql_oracle_pg::version()),
+    }
+}
+
 /// The log writer's guard, kept for the whole run and dropped (flushing the log) on every way
 /// out: quit, and the smoke probe's exit.
 pub struct LogGuard(pub Option<WorkerGuard>);
@@ -129,6 +139,7 @@ pub fn install(cx: &mut App, window: AnyWindowHandle, flags: &Flags, started: In
             }
             if smoke {
                 let _ = writeln!(out, "{}", first_frame_line(started.elapsed()));
+                let _ = writeln!(out, "{}", pg_query_line());
                 cx.spawn(async move |cx| {
                     cx.background_executor().timer(IDLE_WAIT).await;
                     let (line, code) = idle_rss_report(platform::resident_set_mib());
@@ -188,6 +199,15 @@ mod tests {
         assert!(parse(args(&["--theme"])).is_err());
         assert!(parse(args(&["--lang", "not a tag"])).is_err());
         assert!(parse(args(&["--lang"])).is_err());
+    }
+
+    // ## m3a-t01a-proofs
+    #[test]
+    fn pg_query_line_names_the_linked_library_and_one_statement() {
+        assert_eq!(
+            pg_query_line(),
+            "libpg-query=pg_query 18.1.0 (PostgreSQL 18.6) statements=1"
+        );
     }
 
     #[test]

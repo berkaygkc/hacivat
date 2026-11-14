@@ -89,6 +89,9 @@ jobs:
           $issues | Format-Table -AutoSize
           if ($issues) { exit 1 }
 
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
@@ -109,6 +112,24 @@ jobs:
 
       - name: Test (4/4) app, scene-check + pseudo
         run: cargo test --locked -p hacivat-app --features scene-check,pseudo
+
+      # ## m3a-t01a-proofs
+      # After every build of this job (clippy, release, the test builds): nothing under the
+      # vendored pg_query was written or added, ignored paths included. Runners have no protoc,
+      # so the static guard is what catches PATCHES.md §1 being undone.
+      - name: The builds leave third_party/pg_query unchanged
+        run: |
+          changed="$(git status --porcelain --ignored -- third_party/pg_query)"
+          if [ -n "$changed" ]; then
+            printf '%s\n' "$changed"
+            echo "::error::a build wrote into third_party/pg_query (PATCHES.md §1)"
+            exit 1
+          fi
+          if grep -nE '^[^#]*prost-build' third_party/pg_query/Cargo.toml \
+            || grep -nE '^[^/]*(Command::new|REGENERATE_PROTOBUF|prost_build)' third_party/pg_query/build.rs; then
+            echo "::error::PATCHES.md §1 is undone: the vendored build.rs can regenerate src/protobuf.rs"
+            exit 1
+          fi
 
   tokens:
     name: tokens
@@ -169,6 +190,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends locales
           sudo locale-gen tr_TR.UTF-8
           locale -a | grep -i '^tr_TR'
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Test (1/4) workspace
         run: cargo test --workspace --locked
@@ -210,6 +234,9 @@ jobs:
             fi
           fi
           xcrun -sdk macosx metal --version
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Detect the shell tests
         id: guard
@@ -280,11 +307,36 @@ jobs:
             fi
           fi
           xcrun -sdk macosx metal --version
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        if: steps.guard.outputs.present == 'true'
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
         if: steps.guard.outputs.present == 'true'
       - name: Build the release binary
         if: steps.guard.outputs.present == 'true'
         run: cargo build --release --locked -p hacivat
+      # ## m3a-t01a-proofs
+      # The shipped binary (`-p hacivat`, not the feature-unified workspace build). Task 1a's budget
+      # (R-M3-1, plan Task 1a Step 5): libpg_query may add at most 10 MiB over the M2b gate's macOS
+      # arm64 binary, 37,138,656 bytes; only that architecture has a recorded baseline. Over the
+      # budget is a warning, not a failure: later M3a tasks grow the binary on purpose, and the
+      # budget asks for a ruling, not a red build.
+      - name: Shipped binary size
+        if: steps.guard.outputs.present == 'true'
+        run: |
+          bin=target/release/hacivat
+          [ -f "$bin" ] || bin=target/release/hacivat.exe
+          size="$(wc -c < "$bin" | tr -d ' ')"
+          echo "shipped binary $bin: $size bytes ($RUNNER_OS $(uname -m))"
+          if [ "$RUNNER_OS" = macOS ] && [ "$(uname -m)" = arm64 ]; then
+            budget=$((37138656 + 10 * 1024 * 1024))
+            if [ "$size" -gt "$budget" ]; then
+              echo "::warning::the shipped binary is $size bytes, over Task 1a's budget of $budget (M2b + 10 MiB): a size ruling is due"
+            else
+              echo "within Task 1a's budget: $size <= $budget bytes (M2b + 10 MiB)"
+            fi
+          fi
       - name: Launch smoke
         if: steps.guard.outputs.present == 'true'
         shell: bash
@@ -297,6 +349,12 @@ jobs:
           fi
           grep -Eq '^first-frame-ms=[0-9]+' smoke.log || { echo "::error::no first-frame-ms= line"; exit 1; }
           grep -Eq '^idle-rss-mib=[0-9]+' smoke.log || { echo "::error::no idle-rss-mib= line"; exit 1; }
+      # ## m3a-t01a-proofs
+      - name: The shipped binary links libpg_query
+        if: steps.guard.outputs.present == 'true'
+        run: |
+          grep -Eq '^libpg-query=pg_query 18\.1\.0 \(PostgreSQL 18\.[0-9]+\) statements=1$' smoke.log \
+            || { echo "::error::no libpg-query= line with one statement"; exit 1; }
 
   deny:
     name: cargo-deny
@@ -339,6 +397,9 @@ jobs:
 
       - uses: ./.github/actions/linux-deps
 
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
 
       - name: Build spikes
@@ -404,6 +465,9 @@ jobs:
           fi
           xcrun -sdk macosx metal --version
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-packager
         shell: bash
@@ -417,6 +481,14 @@ jobs:
         env:
           NIGHTLY_VERSION: ${{ steps.version.outputs.value }}
         run: packaging/package-macos.sh "$NIGHTLY_VERSION"
+      # ## m3a-t01a-proofs
+      - name: Universal binary size (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          for bin in target/packager/*/hacivat; do
+            lipo -info "$bin"
+            echo "universal binary $bin: $(wc -c < "$bin" | tr -d ' ') bytes"
+          done
       - name: Package (Linux, unsigned AppImage and deb)
         if: runner.os == 'Linux'
         env:
@@ -482,6 +554,10 @@ jobs:
             fi
           fi
           xcrun -sdk macosx metal --version
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        if: steps.guard.outputs.present == 'true'
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
         if: steps.guard.outputs.present == 'true'
       - name: Render the pseudo-locale screens
@@ -519,6 +595,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Test (5) driver, fake
         run: cargo test --locked -p hacivat-driver --features fake
@@ -548,6 +627,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
+      # ## m3a-t01a-proofs
+      - name: libclang (pg_query bindgen)
+        uses: ./.github/actions/libclang
       - uses: Swatinem/rust-cache@v2
       - name: Check image digest pins
         run: cargo run --locked -p xtask -- docker check-pins
