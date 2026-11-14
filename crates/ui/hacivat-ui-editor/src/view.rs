@@ -11,8 +11,12 @@
 //! every `commit`) go through `ImeCore::dispatch`, which commits an open composition first, so
 //! they never join its undo group (UI-EDIT-12 step 9). Transactions are stamped with the GPUI
 //! executor's clock. The view is embeddable as `AnyView::cached(..)`: nothing outside it
-//! re-renders when it is notified, and its layout, hit targets and listeners survive frames
-//! where it is reused.
+//! re-renders when it is notified, and its layout, hit targets, cursor style, pointer
+//! listeners and input handler survive frames where it is reused (`embeds_as_a_cached_view`).
+//! **Its accessibility node may not:** the GPUI fork's `reuse_prepaint`/`reuse_paint` carry no
+//! accessibility state, so on a frame where the cached editor is not prepainted again its node
+//! may be missing from the tree. Task 29 (the node's bodies) and Task 32 (the console host's
+//! `cached()` embedding) own the test and the fix (review round 1).
 //!
 //! Call points every module seam already has (review rounds 1 and 2, P11), so Tasks 25 and
 //! 27–29 never edit this file: focus and blur (`ime::on_focus`/`on_blur`, `FocusedEditor`);
@@ -146,6 +150,11 @@ pub struct EditorView {
     longest_line: u64,
     /// The snapshot the fan-out last saw (the scroll rebase and the reveal rule read it).
     fanned: Snapshot,
+    /// `commit` marked the probe's input before its dispatch; the fan-out does not mark again.
+    input_marked: bool,
+    /// The pointer of the right click whose `editor.context_menu` is running (`None` for the
+    /// keyboard's Shift+F10 or the menu key): Task 25 opens the menu there, else at the caret.
+    context_point: Option<Point<Pixels>>,
 }
 
 impl std::fmt::Debug for EditorView {
@@ -238,6 +247,8 @@ impl EditorView {
             has_focus: false,
             longest_line: longest_line(text),
             fanned,
+            input_marked: false,
+            context_point: None,
         }
     }
 
@@ -521,13 +532,44 @@ impl EditorView {
     /// dispatch ended is reported (`composition_changed`) even when the edit is vetoed.
     pub(crate) fn commit(&mut self, tr: Transaction, cx: &mut Context<Self>) -> Option<Committed> {
         let event = tr.ann.user_event;
+        // The probe's input mark comes before the dispatch, so B3 counts it (a paste's apply
+        // is not small).
+        self.mark_input(cx);
+        self.input_marked = true;
         let was_composing = self.ime.is_composing();
         let result = self.ime.dispatch(&mut self.model, tr);
         if was_composing && !self.ime.is_composing() {
             self.composition_changed(false, cx);
         }
-        let committed = result.ok()?;
+        let Ok(committed) = result else {
+            self.input_marked = false;
+            return None;
+        };
         Some(self.apply_committed(committed, event, cx))
+    }
+
+    /// Runs `editor.context_menu` for a right click at `at` (window coordinates): the pointer
+    /// is readable through [`EditorView::context_menu_point`] while the command runs, so the
+    /// menu opens there even when the click fell inside the selection, far from the caret.
+    pub(crate) fn open_context_menu_at(
+        &mut self,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_point = Some(at);
+        self.run_command("editor.context_menu", window, cx);
+        self.context_point = None;
+    }
+
+    /// Where the running `editor.context_menu` should open: the right click's pointer, or
+    /// `None` when the keyboard asked (Task 25 then opens it at `caret_bounds()`).
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "Task 25's editor.context_menu reads it")
+    )]
+    pub(crate) fn context_menu_point(&self) -> Option<Point<Pixels>> {
+        self.context_point
     }
 
     /// Annotations for an edit made now (the GPUI executor's clock, so a test on the fake
@@ -613,7 +655,10 @@ impl EditorView {
         event: UserEvent,
         cx: &mut Context<Self>,
     ) -> Committed {
-        self.mark_input(cx);
+        // A commit that did not come through `commit` (undo, redo, an IME mark) marks here.
+        if !std::mem::take(&mut self.input_marked) {
+            self.mark_input(cx);
+        }
         let snap = self.model.snapshot();
         let text_changed = committed.buffer_changed && committed.version != self.fanned_version;
         self.fanned_version = committed.version;
@@ -895,6 +940,128 @@ mod t19_tests {
             let v = e.read(cx);
             assert!(!v.ime.is_composing());
             assert_eq!(v.model.undo_depth(), 3);
+        });
+    }
+
+    // ## m3a-t19-editor-view (review round 1)
+
+    /// Counts the probe's input marks.
+    #[derive(Default)]
+    struct Inputs(std::cell::Cell<u32>);
+
+    impl FrameProbe for Inputs {
+        fn input(&self, _: std::time::Instant) {
+            self.0.set(self.0.get() + 1);
+        }
+        fn painted(&self, _: &mut App) {}
+    }
+
+    /// The input mark comes before the dispatch: a vetoed edit still counts as an input, a
+    /// commit through `commit` counts once, and a `Committed` made elsewhere (undo, an IME
+    /// mark) is marked by the fan-out.
+    #[gpui::test]
+    fn the_probe_marks_input_before_the_dispatch(cx: &mut TestAppContext) {
+        let (e, vcx) = open(cx, "SELECT 1".to_string());
+        let probe = Rc::new(Inputs::default());
+        let p: Rc<dyn FrameProbe> = probe.clone();
+        e.update(vcx, |v, cx| {
+            v.set_probe(Some(p));
+            let ann = v.annotations(UserEvent::InputType, Origin::User, cx);
+            // A change built for another text length: vetoed by the model.
+            let stale = Transaction {
+                changes: ChangeSet::from_edits(3, [(0..0, Arc::from("x"))]).unwrap(),
+                selection: None,
+                ann,
+            };
+            assert!(v.commit(stale, cx).is_none());
+            assert_eq!(probe.0.get(), 1, "the attempt was an input");
+            let ok = Transaction {
+                changes: ChangeSet::from_edits(8, [(8..8, Arc::from(";"))]).unwrap(),
+                selection: None,
+                ann,
+            };
+            assert!(v.commit(ok, cx).is_some());
+            assert_eq!(probe.0.get(), 2, "once per commit");
+            let now = cx.background_executor().now();
+            let c = v
+                .ime
+                .mark(&mut v.model, None, "ş", None, now)
+                .expect("the mark applies");
+            v.apply_committed(c, UserEvent::InputTypeCompose, cx);
+            assert_eq!(probe.0.get(), 3, "a Committed made outside `commit`");
+        });
+    }
+
+    /// A composition is underlined 1 px in `text` ink under its whole range, and its active
+    /// clause (the selection inside it) 2 px, on one baseline.
+    #[gpui::test]
+    fn the_composition_is_underlined_and_its_clause_thicker(cx: &mut TestAppContext) {
+        let (e, vcx) = open(cx, "SELECT ".to_string());
+        e.update(vcx, |v, cx| {
+            let len = v.model.buffer().len_bytes();
+            v.select_range(len..len, cx);
+            let now = cx.background_executor().now();
+            let c = v
+                .ime
+                .mark(&mut v.model, None, "nihao", Some(0..2), now)
+                .expect("the mark applies");
+            v.apply_committed(c, UserEvent::InputTypeCompose, cx);
+        });
+        draw(vcx);
+        let ink = vcx.read(|cx| crate::theme::EditorTheme::get(cx).ime_underline);
+        let (x, quads) = vcx.update(|window, cx| {
+            let v = e.read(cx);
+            let l = v.last_layout().unwrap();
+            let x = |b: usize| f32::from(l.x_for_offset(b).unwrap());
+            let scale = window.scale_factor();
+            let quads: Vec<(f32, f32, f32, f32)> = window
+                .painted_quads()
+                .iter()
+                .filter(|q| q.background.as_solid() == Some(ink))
+                .map(|q| {
+                    let b = q.bounds;
+                    (
+                        b.origin.x.0 / scale,
+                        b.origin.y.0 / scale,
+                        b.size.width.0 / scale,
+                        b.size.height.0 / scale,
+                    )
+                })
+                .collect();
+            ((x(7), x(9), x(12)), quads)
+        });
+        let close = |a: f32, b: f32| (a - b).abs() < 0.05;
+        let whole = quads
+            .iter()
+            .find(|q| close(q.3, 1.0))
+            .expect("the 1 px underline");
+        let clause = quads
+            .iter()
+            .find(|q| close(q.3, 2.0))
+            .expect("the 2 px clause");
+        assert!(
+            close(whole.0, x.0) && close(whole.2, x.2 - x.0),
+            "{quads:?}"
+        );
+        assert!(
+            close(clause.0, x.0) && close(clause.2, x.1 - x.0),
+            "{quads:?}"
+        );
+        assert!(close(whole.1, clause.1), "one baseline");
+        // 3 px under GPUI's own baseline, so below the row's middle (the test text system's
+        // metrics put the baseline near the row's bottom).
+        assert!(whole.1 > 6.0 + 9.0, "under the text: {whole:?}");
+    }
+
+    /// The right click's pointer is readable only while its `editor.context_menu` runs, so a
+    /// later Shift+F10 opens at the caret, never at an old pointer.
+    #[gpui::test]
+    fn the_context_menu_pointer_is_scoped_to_the_right_click(cx: &mut TestAppContext) {
+        let (e, vcx) = open(cx, "SELECT 1".to_string());
+        e.update_in(vcx, |v, window, cx| {
+            assert_eq!(v.context_menu_point(), None);
+            v.open_context_menu_at(gpui::point(px(120.0), px(14.0)), window, cx);
+            assert_eq!(v.context_menu_point(), None);
         });
     }
 }

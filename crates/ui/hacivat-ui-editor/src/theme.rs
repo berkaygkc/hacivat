@@ -10,12 +10,19 @@
 //! `blue`; the selection is `blue_tint_strong` when focused and the neutral `seam_strong`
 //! otherwise (NOTES open question 10). A control character is a chip: Fragment Mono 11 `text_2`
 //! on `seam_soft`.
+//!
+//! The executable comment's inlay well is not a run background (GPUI paints those only through
+//! `ShapedLine::paint_background`, and a token's ink must not erase the well): a class with
+//! `well` marks its bytes, the element keeps those marks apart from the token classes, and the
+//! paint pass fills them before the selection (review round 1).
+//!
+//! [`EditorTheme::get`] allocates nothing: the two built-in themes are built once and shared.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use hacivat_ui_core::fonts::font_for;
 use hacivat_ui_core::gpui_surface::{App, Font, FontFeatures, FontStyle, Hsla, Pixels, px};
-use hacivat_ui_core::theme::{Theme, ThemeMode};
+use hacivat_ui_core::theme::{DARK, LIGHT, Theme, ThemeMode};
 
 use crate::decor::HighlightClass;
 
@@ -24,8 +31,9 @@ use crate::decor::HighlightClass;
 pub(crate) struct ClassInk {
     pub color: Hsla,
     pub italic: bool,
-    /// A fill behind the text (the executable comment's inlay well).
-    pub background: Option<Hsla>,
+    /// Its bytes sit on the inlay well ([`EditorTheme::well`]), whatever ink the tokens inside
+    /// them take (the executable comment).
+    pub well: bool,
     /// A 1 px underline (an error token's subtle mark).
     pub underline: Option<Hsla>,
 }
@@ -52,18 +60,29 @@ pub(crate) struct EditorTheme {
     pub chip_text: Hsla,
     /// The horizontal scroll thumb.
     pub thumb: Hsla,
+    /// The inlay well under an executable comment (`seam_soft`).
+    pub well: Hsla,
     /// One ink per [`HighlightClass`], indexed by `class as usize`.
     pub classes: [ClassInk; 16],
 }
 
 impl EditorTheme {
     /// The theme of `cx` (the `Theme` global; dark when none is installed, as in a bare test).
-    pub fn get(cx: &App) -> Self {
+    /// The built-in dark and light themes are built once and shared, so this allocates nothing
+    /// (it runs per frame and per painted line number); any other token set is built afresh.
+    pub fn get(cx: &App) -> Arc<EditorTheme> {
+        static DARK_THEME: OnceLock<Arc<EditorTheme>> = OnceLock::new();
+        static LIGHT_THEME: OnceLock<Arc<EditorTheme>> = OnceLock::new();
         let theme = cx
             .try_global::<Theme>()
             .copied()
             .unwrap_or_else(|| Theme::new(ThemeMode::Dark));
-        Self::of(&theme)
+        let shared = match theme.mode {
+            ThemeMode::Dark if *theme.tokens == DARK => &DARK_THEME,
+            ThemeMode::Light if *theme.tokens == LIGHT => &LIGHT_THEME,
+            _ => return Arc::new(Self::of(&theme)),
+        };
+        shared.get_or_init(|| Arc::new(Self::of(&theme))).clone()
     }
 
     /// The editor's inks for `theme`.
@@ -81,7 +100,7 @@ impl EditorTheme {
         let ink = |color: hacivat_ui_core::theme::Color| ClassInk {
             color: color.to_hsla(),
             italic: false,
-            background: None,
+            well: false,
             underline: None,
         };
         let classes = HighlightClass::ALL.map(|class| match class {
@@ -98,7 +117,7 @@ impl EditorTheme {
             },
             HighlightClass::Operator | HighlightClass::Punct => ink(c.syn_operator),
             HighlightClass::ExecComment => ClassInk {
-                background: Some(c.seam_soft.to_hsla()),
+                well: true,
                 ..ink(c.syn_comment)
             },
             HighlightClass::ErrorToken => ClassInk {
@@ -121,6 +140,7 @@ impl EditorTheme {
             chip_background: c.seam_soft.to_hsla(),
             chip_text: c.text_2.to_hsla(),
             thumb: c.seam_strong.to_hsla(),
+            well: c.seam_soft.to_hsla(),
             classes,
         }
     }
@@ -154,10 +174,8 @@ mod tests {
             assert_eq!(t.ink(HighlightClass::Punct).color, c.syn_operator.to_hsla());
             assert!(t.ink(HighlightClass::Comment).italic);
             assert!(!t.ink(HighlightClass::ExecComment).italic);
-            assert_eq!(
-                t.ink(HighlightClass::ExecComment).background,
-                Some(c.seam_soft.to_hsla())
-            );
+            assert!(t.ink(HighlightClass::ExecComment).well);
+            assert_eq!(t.well, c.seam_soft.to_hsla());
             assert_eq!(t.background, c.panel.to_hsla());
             assert_eq!(t.selection, c.blue_tint_strong.to_hsla());
             assert_eq!(t.selection_unfocused, c.seam_strong.to_hsla());
@@ -177,9 +195,24 @@ mod tests {
             let reds = [c.red, c.red_line, c.red_tint, c.cp_fill].map(|r| r.to_hsla());
             for ink in &t.classes {
                 assert!(!reds.contains(&ink.color), "{mode:?}");
-                assert!(ink.background.is_none_or(|b| !reds.contains(&b)));
                 assert!(ink.underline.is_none_or(|u| !reds.contains(&u)));
             }
+            assert!(!reds.contains(&t.well));
         }
+    }
+
+    /// The built-in themes are built once: `get` hands out the same one (no allocation per
+    /// call), and a switch hands out the other.
+    #[gpui::test]
+    fn get_shares_the_built_in_themes(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let a = EditorTheme::get(cx);
+            assert!(Arc::ptr_eq(&a, &EditorTheme::get(cx)));
+            Theme::install(cx, ThemeMode::Light);
+            let b = EditorTheme::get(cx);
+            assert!(!Arc::ptr_eq(&a, &b));
+            assert_eq!(b.background, LIGHT.colors.panel.to_hsla());
+            assert!(Arc::ptr_eq(&b, &EditorTheme::get(cx)));
+        });
     }
 }

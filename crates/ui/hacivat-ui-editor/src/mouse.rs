@@ -9,8 +9,10 @@
 //!   IME composition is committed first (`ImeCore::dispatch`).
 //! - **A drag past the text's top or bottom** scrolls by the overshoot on each move, so the
 //!   selection can grow beyond the view.
-//! - **A right click** places the caret at the pointer (unless it falls inside the selection)
-//!   and runs `editor.context_menu` (Task 25 opens the menu at the caret).
+//! - **A right click** places the caret at the pointer (unless it falls inside the selection,
+//!   which it keeps) and runs `editor.context_menu` with the pointer readable through
+//!   `EditorView::context_menu_point` while it runs: Task 25 opens the menu there (at the caret
+//!   when the keyboard asked).
 //! - **The wheel** scrolls by pixels (or lines × the row height); Shift turns a vertical wheel
 //!   sideways. The I-beam shows over the text (the cursor style on the text's hitbox).
 //!
@@ -172,7 +174,7 @@ pub(crate) fn down(
             if !(main.start <= at && at <= main.end && !main.is_empty()) {
                 select(v, at, at, cx);
             }
-            v.run_command("editor.context_menu", window, cx);
+            v.open_context_menu_at(ev.position, window, cx);
         }
         _ => {}
     }

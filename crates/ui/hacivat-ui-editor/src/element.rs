@@ -117,6 +117,9 @@ pub(crate) struct RowLayout {
     /// The line's width (estimated past a long line's window).
     pub width: f32,
     pub pieces: SmallVec<[Piece; 1]>,
+    /// The bytes on an inlay well (an executable comment), sorted and disjoint: painted before
+    /// the selection, under whatever ink the tokens inside take.
+    pub wells: SmallVec<[Range<usize>; 1]>,
 }
 
 /// The last painted frame: what IME bounds, hit testing and the chooser's anchor read.
@@ -401,6 +404,8 @@ struct RowBuild<'a> {
     tab_size: u8,
     /// Classes per byte of the line being built (scratch).
     classes: Vec<u8>,
+    /// The line's well ranges (scratch), kept apart from the classes.
+    wells: SmallVec<[Range<usize>; 1]>,
 }
 
 /// One line to lay out: its bytes and, for a long line, its window.
@@ -479,7 +484,8 @@ impl TextPiece {
             len,
             font: theme.font_for(ink).clone(),
             color: ink.color,
-            background_color: ink.background,
+            // The well is painted by the element (`paint::wells`), never as a run background.
+            background_color: None,
             underline: ink.underline.map(|c| UnderlineStyle {
                 thickness: px(1.0),
                 color: Some(c),
@@ -491,27 +497,66 @@ impl TextPiece {
     }
 }
 
-impl RowBuild<'_> {
-    /// The class of every byte of `range` from the decorations (higher priority wins).
-    fn fill_classes(&mut self, range: &Range<usize>, sets: &[(i16, Arc<RangeSet<Decoration>>)]) {
-        self.classes.clear();
-        self.classes
-            .resize(range.len(), HighlightClass::Plain as u8);
-        for (_, set) in sets {
-            for (r, d) in set.query(range.clone()) {
-                let Decoration::Mark { style } = d else {
-                    continue;
-                };
-                let Some(class) = HighlightClass::from_style(*style) else {
-                    continue;
-                };
-                let s = r.start.clamp(range.start, range.end) - range.start;
-                let e = r.end.clamp(range.start, range.end) - range.start;
-                if e > s {
-                    self.classes[s..e].fill(class as u8);
-                }
+/// The class of every byte of `range` from the decorations (sets in priority order: a later
+/// one wins), into `classes`, and the range's wells into `wells` (sorted, merged). A well class
+/// (the executable comment) is kept apart from the token classes: it opens a well over its
+/// bytes and inks only the bytes no token claims, so code inside keeps its colours on the well
+/// (NOTES surface 1), whatever order or priority the marks come in.
+pub(crate) fn resolve_classes(
+    classes: &mut Vec<u8>,
+    wells: &mut SmallVec<[Range<usize>; 1]>,
+    theme: &EditorTheme,
+    range: &Range<usize>,
+    sets: &[(i16, Arc<RangeSet<Decoration>>)],
+) {
+    classes.clear();
+    classes.resize(range.len(), HighlightClass::Plain as u8);
+    wells.clear();
+    let mut well_ink: SmallVec<[(Range<usize>, u8); 1]> = SmallVec::new();
+    for (_, set) in sets {
+        for (r, d) in set.query(range.clone()) {
+            let Decoration::Mark { style } = d else {
+                continue;
+            };
+            let Some(class) = HighlightClass::from_style(*style) else {
+                continue;
+            };
+            let s = r.start.clamp(range.start, range.end) - range.start;
+            let e = r.end.clamp(range.start, range.end) - range.start;
+            if e <= s {
+                continue;
+            }
+            if theme.ink(class).well {
+                wells.push(range.start + s..range.start + e);
+                well_ink.push((s..e, class as u8));
+            } else {
+                classes[s..e].fill(class as u8);
             }
         }
+    }
+    let plain = HighlightClass::Plain as u8;
+    for (r, class) in well_ink {
+        for c in &mut classes[r] {
+            if *c == plain {
+                *c = class;
+            }
+        }
+    }
+    wells.sort_by_key(|r| r.start);
+    let mut merged: SmallVec<[Range<usize>; 1]> = SmallVec::new();
+    for r in wells.drain(..) {
+        match merged.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => merged.push(r),
+        }
+    }
+    *wells = merged;
+}
+
+impl RowBuild<'_> {
+    /// The classes and wells of `range` ([`resolve_classes`]) into the scratch buffers.
+    fn fill_classes(&mut self, range: &Range<usize>, sets: &[(i16, Arc<RangeSet<Decoration>>)]) {
+        resolve_classes(&mut self.classes, &mut self.wells, self.theme, range, sets);
     }
 
     fn class_at(&self, range_start: usize, byte: usize) -> u8 {
@@ -723,6 +768,7 @@ impl RowBuild<'_> {
             shaped: shaped_range,
             width,
             pieces,
+            wells: std::mem::take(&mut self.wells),
         }
     }
 }
@@ -788,6 +834,7 @@ pub(crate) fn prepaint_frame(
         advance,
         tab_size: v.config.tab_size,
         classes: Vec::new(),
+        wells: SmallVec::new(),
     };
     let rows_for = |build: &mut RowBuild<'_>, scroll: &ScrollState| -> Vec<RowLayout> {
         let first = scroll.first_line(&map);
@@ -921,9 +968,10 @@ pub(crate) fn paint_frame(
     paint::background(bounds, &theme, window);
     let g = frame.gutter();
     gutter::paint(&g, window, cx);
+    let mut failed = 0;
     if let Some(layout) = v.layout.as_ref() {
         let marked = v.ime.marked(&v.model);
-        paint::text_area(
+        failed = paint::text_area(
             layout,
             &frame.snapshot,
             &v.band,
@@ -938,6 +986,7 @@ pub(crate) fn paint_frame(
             paint::carets(layout, &frame.snapshot, &theme, window);
         }
     }
+    v.cache.paint_failed(failed);
     scrollbar::paint(
         &ScrollbarCtx {
             track: frame.track,
@@ -1085,5 +1134,58 @@ impl Element for EditorElement {
         if let Some(f) = &self.a11y_frame {
             a11y::synthetic_children(&self.a11y, f, builder);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hacivat_ui_core::theme::{Theme, ThemeMode};
+
+    use super::*;
+
+    fn set(marks: &[(Range<usize>, HighlightClass)]) -> Arc<RangeSet<Decoration>> {
+        let mut v: Vec<_> = marks
+            .iter()
+            .map(|(r, c)| (r.clone(), Decoration::Mark { style: c.style() }))
+            .collect();
+        v.sort_by_key(|(r, _)| r.start);
+        Arc::new(RangeSet::from_sorted(v))
+    }
+
+    /// `/*!40101 SET x = 1 */`: the well covers the whole comment, the keyword inside keeps its
+    /// ink even when the well's source has the higher priority, and the bytes no token claims
+    /// take the comment's ink (review round 1).
+    #[test]
+    fn a_well_never_erases_the_ink_of_the_code_inside_it() {
+        let theme = EditorTheme::of(&Theme::new(ThemeMode::Dark));
+        let tokens = set(&[
+            (9..12, HighlightClass::Keyword),
+            (17..18, HighlightClass::Number),
+        ]);
+        let well = set(&[(0..21, HighlightClass::ExecComment)]);
+        for sets in [
+            vec![(0, tokens.clone()), (1, well.clone())],
+            vec![(0, well.clone()), (1, tokens.clone())],
+        ] {
+            let (mut classes, mut wells) = (Vec::new(), SmallVec::new());
+            resolve_classes(&mut classes, &mut wells, &theme, &(0..30), &sets);
+            assert_eq!((wells.len(), wells[0].clone()), (1, 0..21));
+            let at = |b: usize| HighlightClass::ALL[usize::from(classes[b])];
+            assert_eq!(at(10), HighlightClass::Keyword);
+            assert_eq!(at(17), HighlightClass::Number);
+            assert_eq!(at(0), HighlightClass::ExecComment, "the delimiter");
+            assert_eq!(at(20), HighlightClass::ExecComment);
+            assert_eq!(at(25), HighlightClass::Plain, "past the comment");
+        }
+        // Overlapping and touching wells merge; a well is clipped to the range.
+        let two = set(&[
+            (2..6, HighlightClass::ExecComment),
+            (4..9, HighlightClass::ExecComment),
+            (9..12, HighlightClass::ExecComment),
+            (20..40, HighlightClass::ExecComment),
+        ]);
+        let (mut classes, mut wells) = (Vec::new(), SmallVec::new());
+        resolve_classes(&mut classes, &mut wells, &theme, &(0..30), &[(0, two)]);
+        assert_eq!(wells.as_slice(), &[2..12, 20..30]);
     }
 }

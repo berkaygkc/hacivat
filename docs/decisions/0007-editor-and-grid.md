@@ -142,3 +142,33 @@ that changed the selection or edited at the caret. The code area and the gutter 
 ground (NOTES surface 1 and the approved mock; the plan's `ground` plus a `gutter` fill and a
 1 px seam predate the mocks). The caret blinks at 530 ms (GPUI exposes no platform rate at the
 pin), restarts on every input, and stops solid after 10 s idle and under reduced motion.
+
+**Review round 1.**
+
+- **A hit is verified, never trusted on the hash** (a safety choice). XXH3-64 is not
+  collision-resistant: a birthday search over a free comment suffix is about 2^32 work. Two
+  lines with one key would show the first line's glyphs for the second, and a pasted
+  `DROP TABLE users; -- …` could be drawn over `DROP TABLE trash; -- …`: the line shown would
+  not be the line that runs (the wrong-range anti-goal). A hit counts only when the stored text
+  *and* runs equal the ones asked for; anything else is a miss that replaces the entry
+  (`LayoutStats::collisions`). The cost is one comparison over bytes that were just hashed.
+  Held by `a_key_collision_is_a_miss_never_the_other_lines_glyphs`, which forces one key for
+  two lines.
+- **The executable comment's inlay well is the element's, not a run background.** At the pin,
+  run backgrounds paint only through `ShapedLine::paint_background`. A class with `well`
+  (`ExecComment`) now opens a well over its bytes, kept apart from the token classes: it inks
+  only the bytes no token claims, so code inside keeps its colours whatever the marks' order
+  or priority (`resolve_classes`). The well is painted before the band and the selection, the
+  row's full height, in `seam_soft`. Task 24 marks the whole `/*! … */` as `ExecComment` and
+  the tokens inside with their own classes. Held by
+  `an_executable_comment_sits_on_its_well_under_the_selection` (scene) and
+  `a_well_never_erases_the_ink_of_the_code_inside_it`.
+- **A long line's window always covers the viewport.** It is 512 columns, or the viewport
+  plus one 128-column step when the viewport is wider (`column_window_covers_a_viewport_wider_than_the_cap`).
+- **Accessibility in a cached embedding is unverified.** The fork's
+  `reuse_prepaint`/`reuse_paint` carry no accessibility state, so on a frame where the cached
+  editor is not prepainted again, its node may be missing. Task 29 (the node) and Task 32 (the
+  console host's `cached()` embedding) own the test.
+- **A right click's pointer** is readable through `EditorView::context_menu_point` only while
+  its `editor.context_menu` runs: Task 25 opens the menu there, and at the caret for the
+  keyboard.

@@ -1,6 +1,8 @@
 //! The paint order (Task 19), adapted from harman to `design/m3a-query/NOTES.md` surface 1:
 //! the `panel` ground (under the gutter too: the mock gives the gutter no fill of its own),
-//! the gutter (`gutter::paint`), the line backgrounds (the Run preview band, `preview::paint_band`),
+//! the gutter (`gutter::paint`), the inlay wells under executable comments (`seam_soft`; under
+//! the band, so the translucent Run preview still shows over them; review round 1), the line
+//! backgrounds (the Run preview band, `preview::paint_band`),
 //! the selection (`blue_tint_strong` focused, `seam_strong` unfocused), the text runs (control
 //! chips on `seam_soft`), the IME underline, the marks (`marks::paint`), the carets (2 × 16 px
 //! `blue`, 1 px below the row's top, only while focused), the scrollbar markers and the
@@ -49,7 +51,9 @@ fn wx(layout: &FrameLayout, x: f32) -> f32 {
     (layout.origin_x + f64::from(x)) as f32
 }
 
-/// The text area, clipped to itself: the band, the selection, the text, the IME underline.
+/// The text area, clipped to itself: the wells, the band, the selection, the text, the IME
+/// underline. Returns how many text paints GPUI reported as failed (the caller counts them;
+/// nothing is discarded silently).
 #[allow(
     clippy::too_many_arguments,
     reason = "one paint pass over the frame's parts"
@@ -63,16 +67,35 @@ pub(crate) fn text_area(
     marked: Option<Range<usize>>,
     window: &mut Window,
     cx: &mut App,
-) {
+) -> u64 {
     let area = layout.rows().bounds;
     window.with_content_mask(Some(ContentMask { bounds: area }), |window| {
+        wells(layout, theme, window);
         preview::paint_band(band, layout.rows(), snapshot, window, cx);
         selections(layout, snapshot, theme, focused, window);
-        text(layout, theme, window, cx);
+        let failed = text(layout, theme, window, cx);
         if let Some(m) = marked {
             ime_underline(layout, snapshot, m, theme, window);
         }
-    });
+        failed
+    })
+}
+
+/// The inlay wells: each well range of a row, the row's full height, in `well`.
+fn wells(layout: &FrameLayout, theme: &EditorTheme, window: &mut Window) {
+    let lh = layout.rows().line_height;
+    for row in &layout.lines {
+        for w in &row.wells {
+            let x0 = layout.row_x(row, w.start);
+            let x1 = layout.row_x(row, w.end);
+            if x1 > x0 {
+                window.paint_quad(fill(
+                    Bounds::new(point(px(wx(layout, x0)), row.top), size(px(x1 - x0), lh)),
+                    theme.well,
+                ));
+            }
+        }
+    }
 }
 
 /// The content x span of `r` on `row` (the selected line break counts half an advance).
@@ -127,9 +150,11 @@ fn selections(
     }
 }
 
-fn text(layout: &FrameLayout, theme: &EditorTheme, window: &mut Window, cx: &mut App) {
+/// The text pieces; returns how many paints GPUI reported as failed.
+fn text(layout: &FrameLayout, theme: &EditorTheme, window: &mut Window, cx: &mut App) -> u64 {
     let area = layout.rows().bounds;
     let lh = layout.rows().line_height;
+    let mut failed = 0;
     for row in &layout.lines {
         for piece in &row.pieces {
             let x = wx(layout, piece.x);
@@ -138,8 +163,9 @@ fn text(layout: &FrameLayout, theme: &EditorTheme, window: &mut Window, cx: &mut
             }
             match &piece.kind {
                 PieceKind::Text { shaped, .. } => {
-                    let _ =
+                    let painted =
                         shaped.paint(point(px(x), row.top), lh, TextAlign::Left, None, window, cx);
+                    failed += u64::from(painted.is_err());
                 }
                 PieceKind::Chip { label } => {
                     let chip = Bounds::new(
@@ -150,7 +176,7 @@ fn text(layout: &FrameLayout, theme: &EditorTheme, window: &mut Window, cx: &mut
                         fill(chip, theme.chip_background)
                             .corner_radii(Corners::all(px(CHIP_RADIUS))),
                     );
-                    let _ = label.paint(
+                    let painted = label.paint(
                         point(px(x + CHIP_MARGIN + CHIP_PAD), row.top),
                         lh,
                         TextAlign::Left,
@@ -158,10 +184,12 @@ fn text(layout: &FrameLayout, theme: &EditorTheme, window: &mut Window, cx: &mut
                         window,
                         cx,
                     );
+                    failed += u64::from(painted.is_err());
                 }
             }
         }
     }
+    failed
 }
 
 /// The baseline of `row`, from its first shaped piece (GPUI centres a line in its row).

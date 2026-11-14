@@ -538,3 +538,97 @@ fn embeds_as_a_cached_view(cx: &mut TestAppContext) {
     mouse_up(&mut o, p);
     assert_eq!(selection(&o), (7, 7));
 }
+
+// ## m3a-t19-editor-view (review round 1)
+
+fn right_click(o: &mut Opened<'_>, p: Point<Pixels>) {
+    o.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: p,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    o.vcx.simulate_event(MouseUpEvent {
+        button: MouseButton::Right,
+        position: p,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    draw(o.vcx);
+}
+
+#[gpui::test]
+fn right_click_keeps_a_selection_it_falls_in_and_moves_the_caret_otherwise(
+    cx: &mut TestAppContext,
+) {
+    let mut o = open(cx, "SELECT id, name FROM users;\n".to_string());
+    o.editor.update(o.vcx, |v, cx| v.select_range(7..15, cx));
+    draw(o.vcx);
+    // Inside the selection: it stays (the menu acts on it).
+    let inside = at_byte(&o, 10);
+    right_click(&mut o, inside);
+    assert_eq!(selection(&o), (7, 15));
+    let focused = o
+        .vcx
+        .update(|window, cx| o.editor.read(cx).focus_handle(cx).is_focused(window));
+    assert!(focused, "a right click focuses the editor");
+    // Outside it: the caret moves to the pointer.
+    let outside = at_byte(&o, 21);
+    right_click(&mut o, outside);
+    assert_eq!(selection(&o), (21, 21));
+}
+
+#[gpui::test]
+fn dragging_past_the_bottom_scrolls_and_extends(cx: &mut TestAppContext) {
+    let mut o = open(cx, lines(500));
+    let start = at_byte(&o, 3);
+    mouse_down(&mut o, start, 1, Modifiers::none());
+    let rows = *layout(&o).rows();
+    let below = point(rows.bounds.center().x, rows.bounds.bottom() + px(30.0));
+    for _ in 0..4 {
+        drag_to(&mut o, below);
+    }
+    mouse_up(&mut o, below);
+    let after = *layout(&o).rows();
+    assert!(after.first_line > rows.first_line, "{rows:?} → {after:?}");
+    let (anchor, head) = selection(&o);
+    assert_eq!(anchor, 3);
+    let head_line = o
+        .vcx
+        .read(|cx| o.editor.read(cx).snapshot().buffer.byte_to_line(head) as u32);
+    assert!(
+        head_line > rows.last_line,
+        "the selection grew past the first view"
+    );
+    // A drag past the top scrolls back.
+    let mut o2 = o;
+    let above = point(rows.bounds.center().x, rows.bounds.top() - px(30.0));
+    let mid = at_byte(&o2, head);
+    mouse_down(&mut o2, mid, 1, Modifiers::none());
+    for _ in 0..4 {
+        drag_to(&mut o2, above);
+    }
+    mouse_up(&mut o2, above);
+    assert!(layout(&o2).rows().first_line < after.first_line);
+}
+
+#[gpui::test]
+fn shift_wheel_scrolls_sideways(cx: &mut TestAppContext) {
+    let o = open(cx, format!("{}\nSELECT 1;\n", "x".repeat(300)));
+    let x0 = f32::from(layout(&o).x_for_offset(0).unwrap());
+    let c = layout(&o).rows().bounds.center();
+    o.vcx.simulate_event(ScrollEvent {
+        position: c,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+        modifiers: Modifiers::shift(),
+        ..Default::default()
+    });
+    draw(o.vcx);
+    let l = layout(&o);
+    assert!(
+        (f32::from(l.x_for_offset(0).unwrap()) - (x0 - 120.0)).abs() < 0.01,
+        "a vertical wheel with Shift scrolls 120 px sideways"
+    );
+    assert_eq!(l.rows().first_line, 0, "and not vertically");
+}

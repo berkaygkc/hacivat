@@ -10,10 +10,16 @@
 //!   theme switch therefore reshapes the visible lines (GPUI's own frame cache still holds the
 //!   font layout, so that is cheap). `runs_hash` covers each run's length, font, colour,
 //!   background and underline.
+//! - **A hit is verified, never trusted on the hash** (review round 1): XXH3-64 is not
+//!   collision-resistant, and two lines with one key would show the first line's glyphs for the
+//!   second (a pasted `DROP TABLE users; -- …` drawn over `DROP TABLE trash; -- …`: the line
+//!   shown is not the line that runs). A hit whose stored text or runs differ from the ones asked
+//!   for is a miss, and the entry is replaced.
 //! - **Long lines** (more than [`LONG_LINE_COLUMNS`] columns or [`LONG_LINE_BYTES`] bytes)
-//!   shape a [`MAX_SHAPED_COLUMNS`]-column window around the viewport whose start steps by
-//!   [`WINDOW_STEP`] ([`column_window`], ported from the M0 spike with its tests); the window is
-//!   part of the key.
+//!   shape a window around the viewport whose start steps by [`WINDOW_STEP`] ([`column_window`],
+//!   ported from the M0 spike with its tests): [`MAX_SHAPED_COLUMNS`] columns, or the viewport
+//!   plus one step when the viewport is wider, so no visible column is ever left unshaped. The
+//!   window is part of the key.
 //! - **Gutter digits** are shaped once per font size and ink ([`paint_line_number`], the digit
 //!   cache Task 28's gutter paints line numbers with).
 
@@ -43,21 +49,23 @@ pub(crate) const MAX_SHAPED_COLUMNS: usize = 512;
 /// sideways reuses the shaped window until the viewport leaves it.
 pub(crate) const WINDOW_STEP: usize = 128;
 
-/// The column range of a long line to shape: at most [`MAX_SHAPED_COLUMNS`] columns, covering
-/// `scroll_col..scroll_col + visible_cols` whenever that fits in the cap (the M0 spike's rule).
+/// The column range of a long line to shape: it always covers
+/// `scroll_col..scroll_col + visible_cols` (clamped to the line), and is
+/// [`MAX_SHAPED_COLUMNS`] long, or `visible_cols + WINDOW_STEP` when the viewport is wider than
+/// that allows; its start moves in steps of [`WINDOW_STEP`] (the M0 spike's rule, widened in
+/// review round 1 so a viewport wider than 512 columns never shows blank text).
 pub(crate) fn column_window(
     scroll_col: usize,
     visible_cols: usize,
     line_len: usize,
 ) -> Range<usize> {
-    let step = MAX_SHAPED_COLUMNS
-        .saturating_sub(visible_cols)
-        .min(WINDOW_STEP);
+    let len = MAX_SHAPED_COLUMNS.max(visible_cols + WINDOW_STEP);
+    let step = (len - visible_cols).min(WINDOW_STEP);
     let start = scroll_col
         .checked_div(step)
         .map_or(scroll_col, |q| q * step);
     let start = start.min(line_len);
-    start..(start + MAX_SHAPED_COLUMNS).min(line_len)
+    start..(start + len).min(line_len)
 }
 
 /// What a shaped line is cached under.
@@ -128,10 +136,17 @@ pub struct LayoutStats {
     pub longest_shaped: usize,
     /// Entries in the cache now.
     pub entries: usize,
+    /// Hits refused because the stored text or runs differed (a key collision).
+    pub collisions: u64,
+    /// Paints GPUI reported as failed (counted, never with their text; the crate has no
+    /// logger: `tracing` is not one of its dependencies).
+    pub paint_errors: u64,
 }
 
 struct Entry {
     shaped: ShapedLine,
+    /// The runs it was shaped with (the text is `shaped.text`): what a hit is checked against.
+    runs: Vec<TextRun>,
     bytes: usize,
 }
 
@@ -143,6 +158,11 @@ fn shaped_bytes(s: &ShapedLine) -> usize {
         .map(|r| std::mem::size_of_val(r.glyphs.as_slice()) + 32)
         .sum();
     s.text.len() + glyphs + 128
+}
+
+/// An estimate of what the stored runs hold in memory.
+fn runs_bytes(runs: &[TextRun]) -> usize {
+    std::mem::size_of_val(runs)
 }
 
 /// The editor's shape cache.
@@ -185,9 +205,25 @@ impl LayoutCache {
         column_window: (u32, u32),
     ) -> ShapedLine {
         let key = ShapeKey::of(text, runs, font_size, column_window);
+        self.shape_keyed(window, key, text, runs, font_size)
+    }
+
+    /// [`LayoutCache::shape`] under a given key: a hit counts only when the stored text and
+    /// runs are the ones asked for (a key collision is a miss that replaces the entry).
+    pub(crate) fn shape_keyed(
+        &mut self,
+        window: &Window,
+        key: ShapeKey,
+        text: &str,
+        runs: &[TextRun],
+        font_size: Pixels,
+    ) -> ShapedLine {
         if let Some(e) = self.lru.get(&key) {
-            self.stats.hits += 1;
-            return e.shaped.clone();
+            if e.shaped.text.as_ref() == text && e.runs == runs {
+                self.stats.hits += 1;
+                return e.shaped.clone();
+            }
+            self.stats.collisions += 1;
         }
         let shaped = window.text_system().shape_line(
             SharedString::from(text.to_string()),
@@ -197,12 +233,13 @@ impl LayoutCache {
         );
         self.stats.shapes += 1;
         self.stats.longest_shaped = self.stats.longest_shaped.max(text.chars().count());
-        let bytes = shaped_bytes(&shaped);
+        let bytes = shaped_bytes(&shaped) + runs_bytes(runs);
         self.bytes += bytes;
         if let Some((_, old)) = self.lru.push(
             key,
             Entry {
                 shaped: shaped.clone(),
+                runs: runs.to_vec(),
                 bytes,
             },
         ) {
@@ -243,6 +280,11 @@ impl LayoutCache {
         adv
     }
 
+    /// `n` paints GPUI reported as failed this frame.
+    pub fn paint_failed(&mut self, n: u64) {
+        self.stats.paint_errors += n;
+    }
+
     pub fn stats(&self) -> LayoutStats {
         LayoutStats {
             entries: self.lru.len(),
@@ -265,6 +307,8 @@ pub(crate) struct DigitCache {
     digits: HashMap<(u32, [u32; 4]), [ShapedLine; 10]>,
     /// `shape_line` calls made for digits.
     pub shapes: u64,
+    /// Digit paints GPUI reported as failed (counted, never with their text).
+    pub paint_errors: u64,
 }
 
 impl Global for DigitCache {}
@@ -321,14 +365,18 @@ pub(crate) fn paint_line_number(
     loop {
         let d = &digits[(rest % 10) as usize];
         x -= d.width();
-        let _ = d.paint(
+        if d.paint(
             point(x, top),
             theme.line_height,
             TextAlign::Left,
             None,
             window,
             cx,
-        );
+        )
+        .is_err()
+        {
+            cx.default_global::<DigitCache>().paint_errors += 1;
+        }
         rest /= 10;
         if rest == 0 {
             break;
@@ -356,8 +404,25 @@ mod tests {
             column_window(50_050, 200, 100_000),
             column_window(50_100, 200, 100_000)
         );
-        let wide = column_window(1_000, 700, 100_000);
-        assert_eq!(wide, 1_000..1_512);
+    }
+
+    /// A viewport wider than the 512-column cap is still covered (review round 1; the spike
+    /// shaped 512 and left the rest of a wide viewport blank).
+    #[test]
+    fn column_window_covers_a_viewport_wider_than_the_cap() {
+        for (scroll, visible) in [(1_000, 700), (50_017, 900), (0, 2_000), (99_000, 640)] {
+            let w = column_window(scroll, visible, 100_000);
+            assert!(w.start <= scroll, "{scroll} {visible}: {w:?}");
+            assert!(
+                w.end >= (scroll + visible).min(100_000),
+                "{scroll} {visible}: {w:?}"
+            );
+            assert!(w.len() <= MAX_SHAPED_COLUMNS.max(visible + WINDOW_STEP));
+        }
+        // Up to 384 visible columns the window stays at the cap.
+        for visible in [1, 98, 200, 384] {
+            assert!(column_window(70_000, visible, 100_000).len() <= MAX_SHAPED_COLUMNS);
+        }
     }
 
     #[test]
@@ -423,6 +488,49 @@ mod tests {
             (w[1] / w[0] - 4.0 / 3.0).abs() < 1e-3,
             "tabular digits: {w:?}"
         );
+    }
+
+    /// Two different lines under one key (a forced XXH3 collision): the second is shaped for
+    /// itself, never drawn with the first one's glyphs (review round 1).
+    #[gpui::test]
+    fn a_key_collision_is_a_miss_never_the_other_lines_glyphs(cx: &mut gpui::TestAppContext) {
+        let (_, vcx) = cx.add_window_view(|_, _| Blank);
+        let theme = EditorTheme::of(&hacivat_ui_core::theme::Theme::new(
+            hacivat_ui_core::theme::ThemeMode::Dark,
+        ));
+        let run = |len| TextRun {
+            len,
+            font: theme.font.clone(),
+            color: theme.chip_text,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let users = "DROP TABLE users; -- a";
+        let trash = "DROP TABLE trash; -- b";
+        let key = ShapeKey::of(users, &[run(users.len())], px(12.5), (0, 0));
+        let mut cache = LayoutCache::default();
+        let (a, b, again) = vcx.update(|window, _| {
+            let a = cache.shape_keyed(window, key, users, &[run(users.len())], px(12.5));
+            let b = cache.shape_keyed(window, key, trash, &[run(trash.len())], px(12.5));
+            let again = cache.shape_keyed(window, key, trash, &[run(trash.len())], px(12.5));
+            (a, b, again)
+        });
+        assert_eq!(a.text.as_ref(), users);
+        assert_eq!(
+            b.text.as_ref(),
+            trash,
+            "the colliding line is shaped for itself"
+        );
+        assert_eq!(again.text.as_ref(), trash);
+        let s = cache.stats();
+        assert_eq!((s.shapes, s.hits, s.collisions, s.entries), (2, 1, 1, 1));
+        // The same text with other runs under the same key is a miss too.
+        let mut red = run(trash.len());
+        red.color = gpui::hsla(0.0, 0.6, 0.5, 1.0);
+        let c = vcx.update(|window, _| cache.shape_keyed(window, key, trash, &[red], px(12.5)));
+        assert_eq!(c.text.as_ref(), trash);
+        assert_eq!(cache.stats().collisions, 2);
     }
 
     struct Blank;
