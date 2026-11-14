@@ -89,6 +89,15 @@ const ICONS: &[(&str, &[u8])] = lucide![
     "arrow-right",
     // ## m2b-t24-shots (fix round 1): Pin and Replace pin (NOTES M2b surface 5).
     "fingerprint",
+    // ## m3a-t01b-seams: the M3a query surfaces (`design/m3a-query/NOTES.md`, "Icons"): the
+    // Output tab, Skipped, Scroll to end, Clear, clipboard unavailable, Cancelled, Copied.
+    "scroll-text",
+    "skip-forward",
+    "arrow-down-to-line",
+    "eraser",
+    "clipboard-x",
+    "ban",
+    "copy-check",
 ];
 const HV_MARK: &[u8] = include_bytes!("../assets/icons/hacivat/hv-mark.svg");
 
@@ -131,6 +140,30 @@ mod tests {
                     .is_some(),
                 "{n}"
             );
+        }
+    }
+
+    // ## m3a-t01b-seams
+    #[test]
+    fn bundled_icons_include_the_m3a_set() {
+        for n in [
+            "scroll-text",
+            "skip-forward",
+            "arrow-down-to-line",
+            "eraser",
+            "clipboard-x",
+            "ban",
+            "copy-check",
+        ] {
+            let svg = BundledAssets
+                .load(&format!("icons/lucide/{n}.svg"))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{n} is bundled"));
+            let text = std::str::from_utf8(&svg).unwrap();
+            // The set's modifications (NOTICE.md): no licence comment or class, 1.6 strokes.
+            assert!(text.starts_with("<svg"), "{n}");
+            assert!(text.contains("stroke-width=\"1.6\""), "{n}");
+            assert!(!text.contains("class="), "{n}");
         }
     }
 }

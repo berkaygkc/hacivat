@@ -20,6 +20,9 @@ pub mod runtime;
 // ## m2b-t01-interfaces
 pub mod session;
 pub mod test_conn;
+// ## m3a-t01b-seams: sessions over a `FakeDriver` for other crates' tests (P6).
+#[cfg(feature = "test-support")]
+pub mod testing;
 
 pub use budget::{Budget, BudgetPermit, Priority, budget_for};
 pub use manager::{
@@ -31,3 +34,5 @@ pub use test_conn::{TestReport, TestWarning, test_connection, test_connection_co
 // ## m2b-t01-interfaces: the guard's names the app needs, so the app never depends on the
 // guard crate itself (Q5).
 pub use hacivat_guard::{GapReason, RoleWarning, remediation};
+// ## m3a-t01b-seams: production consoles are read-only (R-M3-6 REVISED, R-M3-29).
+pub use session::{SessionPolicy, effective_read_only};

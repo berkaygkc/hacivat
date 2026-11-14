@@ -168,7 +168,13 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         known_hosts: known_hosts.clone(),
     };
     // ## m2b-t22-live: B18 liveness presets and B19 reconnects (T17; `default()` keeps M2a's).
-    let manager = ConnectionManager::new(runtime.handle(), Arc::new(deps), ManagerConfig::m2b());
+    // ## m3a-t01b-seams: production-tagged profiles get read-only sessions until M3b's
+    // confirmations land (R-M3-6 REVISED, R-M3-29).
+    let config = ManagerConfig {
+        production_read_only: true,
+        ..ManagerConfig::m2b()
+    };
+    let manager = ConnectionManager::new(runtime.handle(), Arc::new(deps), config);
     let LoadedProfiles {
         profiles,
         diags,

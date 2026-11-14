@@ -174,7 +174,12 @@ fn capsule_and_status_follow_the_current_connection(cx: &mut TestAppContext) {
         vcx.update(|window, _| assert_one_filled_badge(window, cp_fill, true));
     }
     let status = status_bar_text(vcx);
-    assert!(status.contains("production · read-write"), "{status}");
+    // ## m3a-t01b-seams (P21): a production profile's session is read-only since M3a
+    // (`connections/boot.rs`, `production_read_only`); the fake enforces nothing, so the guard.
+    assert!(
+        status.contains("production · read-only (guarded)"),
+        "{status}"
+    );
     assert!(status.contains("unencrypted"), "{status}");
     assert!(!status.contains("No connection"), "{status}");
 }

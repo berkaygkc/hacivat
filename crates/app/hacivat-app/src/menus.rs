@@ -49,8 +49,9 @@ pub struct MenuGroup {
 }
 
 /// The menus' layout by action ID; actions nobody registered are left out, and so is a group
-/// left without items (the File group until Task 18 registers `connection.new`).
-fn layout() -> [(&'static str, Vec<MenuEntry>); 5] {
+/// left without items (the File group until Task 18 registers `connection.new`; the Edit group
+/// until the console registers the editor commands, M3a Task 32).
+fn layout() -> [(&'static str, Vec<MenuEntry>); 6] {
     use MenuEntry::{Action as A, Separator as S};
     [
         (
@@ -66,6 +67,20 @@ fn layout() -> [(&'static str, Vec<MenuEntry>); 5] {
         ),
         // M2a (Task 1, P18).
         (ids::hv::MENU_FILE.id, vec![A("connection.new")]),
+        // ## m3a-t01b-seams: the editor's Edit group.
+        (
+            ids::hv::MENU_EDIT.id,
+            vec![
+                A("editor.undo"),
+                A("editor.redo"),
+                S,
+                A("editor.cut"),
+                A("editor.copy"),
+                A("editor.paste"),
+                S,
+                A("editor.select_all"),
+            ],
+        ),
         (
             ids::hv::MENU_VIEW.id,
             vec![
@@ -97,7 +112,7 @@ fn layout() -> [(&'static str, Vec<MenuEntry>); 5] {
     ]
 }
 
-/// The menu model for `reg`: the groups (`hv-menu-app`, `-file`, `-view`, `-window`, `-help`)
+/// The menu model for `reg`: the groups (`hv-menu-app`, `-file`, `-edit`, `-view`, `-window`, `-help`)
 /// of the registered actions, without leading, trailing or doubled separators. A group with no
 /// registered action is left out.
 pub fn menu_model(reg: &ActionRegistry) -> Vec<MenuGroup> {
@@ -269,6 +284,16 @@ fn intern(chord: String) -> &'static str {
     leaked
 }
 
+// ## m3a-t01b-seams
+/// The Edit group's clipboard and select-all items get no key equivalent: Cmd/Ctrl-A/C/X/V
+/// stay with whatever has the focus (a text input or the editor, through the dispatcher).
+const NO_KEY_EQUIVALENT: [&str; 4] = [
+    "editor.cut",
+    "editor.copy",
+    "editor.paste",
+    "editor.select_all",
+];
+
 /// The GPUI bindings that label the menu items with their chords on the active keymap; an item
 /// held back under a modal layer is labelled through its `InertCommand`.
 fn menu_key_bindings(model: &[MenuGroup], cx: &App) -> Vec<KeyBinding> {
@@ -287,7 +312,7 @@ fn menu_key_bindings(model: &[MenuGroup], cx: &App) -> Vec<KeyBinding> {
         .filter(|id| {
             let fresh = !seen.contains(id);
             seen.push(*id);
-            fresh
+            fresh && !NO_KEY_EQUIVALENT.contains(id)
         })
         .filter_map(|id| {
             let binding = active

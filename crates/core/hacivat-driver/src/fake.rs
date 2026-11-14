@@ -26,6 +26,21 @@
 //! M2b (finding F3): `execute` with [`Protocol::Extended`] answers a scripted result without
 //! its row values (the row count stays), as the PostgreSQL and MySQL drivers do. A statement
 //! whose values the caller reads must run with `ExecOpts::values`, or its script is not seen.
+//!
+//! M3a (Task 1b): typed scripting ([`FakeDriver::queries`]). A typed `query` takes the first
+//! unconsumed [`FakeQuery`] whose prefix matches (once); an unmatched query answers one result
+//! with an empty schema and no rows. Its events follow the grammar of `crate::typed`: the first
+//! chunk holds `first_rows` rows, later chunks `chunk_rows`; a `suspendable` query with one
+//! result set suspends after its first chunk and after each `fetch_more(n)` batch while rows
+//! remain. Connections enforce the driver contract like the real drivers (P5): on the
+//! PostgreSQL wire family a suspendable query needs `tx_status() != Idle`, else `Unsupported`;
+//! a second query, and on MySQL and SQLite any statement, while a query is open answers
+//! `Unsupported`; PostgreSQL runs a statement while the query is suspended (the canary). A
+//! cancel (latched like M10) or a scripted `fail_after` error inside a PostgreSQL transaction
+//! leaves it `Failed`, as the server does. `typed_log` records every typed call; `call_log`
+//! every statement, typed call and reset in order. `tracks_transactions` makes connections set
+//! their status from the leading keywords of `execute`/`batch` text (`BEGIN`, `COMMIT`, ...)
+//! when no script entry says otherwise.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -48,6 +63,9 @@ use crate::driver::{
 };
 use crate::errors::{RawError, RawErrorKind};
 use crate::server::ServerInfo;
+// ## m3a-t01b-seams
+use crate::typed::{CloseHow, Closed, QueryDone, QueryEvent, QuerySpec, ResultEnd, TypedCaps};
+use hacivat_values::{Chunk, ColumnMeta, LogicalType, NativeType, ResultSchema, Value};
 
 // ## m2b-t01-interfaces
 /// One scripted statement (Q23): used once, by the first statement starting with `prefix`.
@@ -68,17 +86,284 @@ pub struct FakeExec {
 struct ExecState {
     script: Mutex<Vec<Option<FakeExec>>>,
     executed: Mutex<Vec<String>>,
+    // ## m3a-t01b-seams
+    queries: Mutex<Vec<Option<FakeQuery>>>,
+    typed: Mutex<Vec<FakeTypedCall>>,
+    calls: Mutex<Vec<FakeCall>>,
 }
 
 impl ExecState {
     /// Logs `sql` and takes the first unconsumed entry whose prefix matches it.
     fn take(&self, sql: &str) -> Option<FakeExec> {
-        lock(&self.executed).push(sql.to_string());
+        self.log_statement(sql);
         let text = sql.trim_start();
         lock(&self.script)
             .iter_mut()
             .find(|e| e.as_ref().is_some_and(|e| text.starts_with(e.prefix)))
             .and_then(Option::take)
+    }
+
+    // ## m3a-t01b-seams
+
+    /// Logs an `execute`/`batch` text (in `executed` and the call log).
+    fn log_statement(&self, sql: &str) {
+        lock(&self.executed).push(sql.to_string());
+        lock(&self.calls).push(FakeCall::Statement(sql.to_string()));
+    }
+
+    /// Logs a typed call (in `typed_log` and the call log).
+    fn log_typed(&self, call: FakeTypedCall) {
+        lock(&self.typed).push(call.clone());
+        lock(&self.calls).push(FakeCall::Typed(call));
+    }
+
+    /// The first unconsumed typed script entry whose prefix matches `sql`.
+    fn take_query(&self, sql: &str) -> Option<FakeQuery> {
+        let text = sql.trim_start();
+        lock(&self.queries)
+            .iter_mut()
+            .find(|e| e.as_ref().is_some_and(|e| text.starts_with(e.prefix)))
+            .and_then(Option::take)
+    }
+}
+
+// ## m3a-t01b-seams
+
+/// The rows of one scripted result set.
+#[derive(Debug, Clone)]
+pub enum FakeRows {
+    Literal(Vec<Vec<Value>>),
+    /// `count` rows whose cell at (row, column) is `cell(row, column)`, made chunk by chunk
+    /// (`u64::MAX` streams without end).
+    Generated {
+        count: u64,
+        cell: fn(u64, usize) -> Value,
+    },
+}
+
+impl Default for FakeRows {
+    fn default() -> Self {
+        FakeRows::Literal(Vec::new())
+    }
+}
+
+impl FakeRows {
+    fn len(&self) -> u64 {
+        match self {
+            FakeRows::Literal(rows) => rows.len() as u64,
+            FakeRows::Generated { count, .. } => *count,
+        }
+    }
+
+    /// Rows `from..to`, `width` cells each.
+    fn rows(&self, from: u64, to: u64, width: usize) -> Vec<Vec<Value>> {
+        match self {
+            FakeRows::Literal(rows) => rows[from as usize..to as usize].to_vec(),
+            FakeRows::Generated { cell, .. } => (from..to)
+                .map(|r| (0..width).map(|c| cell(r, c)).collect())
+                .collect(),
+        }
+    }
+}
+
+/// One scripted result set: its columns (name, logical type) and rows.
+#[derive(Debug, Clone, Default)]
+pub struct FakeResultSet {
+    pub columns: Vec<(&'static str, LogicalType)>,
+    pub rows: FakeRows,
+}
+
+impl FakeResultSet {
+    fn schema(&self) -> Arc<ResultSchema> {
+        Arc::new(ResultSchema {
+            columns: self
+                .columns
+                .iter()
+                .map(|(name, logical)| ColumnMeta {
+                    name: (*name).into(),
+                    logical: logical.clone(),
+                    native: NativeType::Unknown,
+                    origin: None,
+                })
+                .collect(),
+        })
+    }
+}
+
+/// One scripted typed query: used once, by the first `query` whose text starts with `prefix`.
+#[derive(Debug, Clone, Default)]
+pub struct FakeQuery {
+    pub prefix: &'static str,
+    /// The result sets; none is one result with an empty schema (DML, DDL).
+    pub sets: Vec<FakeResultSet>,
+    /// After this many rows (over every set) `next_event` fails with the error.
+    pub fail_after: Option<(u64, RawError)>,
+    /// Before the first event.
+    pub first_delay: Duration,
+    /// Before every chunk after the first.
+    pub chunk_delay: Duration,
+    /// Every event is ready at once: no delay and no yield to the scheduler.
+    pub never_pending: bool,
+    /// A cancel does not end this query.
+    pub ignores_cancel: bool,
+    /// The connection's transaction status after `Done`.
+    pub tx_after: Option<TxStatus>,
+    /// Every kept result's `ResultEnd::rows_affected`.
+    pub rows_affected: Option<u64>,
+    /// `close_query(Drain(..))` answers `NeedsServerKill` (MySQL); `AfterKill` then closes.
+    pub kill_needed: bool,
+}
+
+/// A typed call, as `typed_log` records it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FakeTypedCall {
+    Query(String),
+    FetchMore(u32),
+    Close(CloseHow),
+}
+
+/// Every call on a fake connection that touches the server, in order (`call_log`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FakeCall {
+    /// An `execute` or `batch` text.
+    Statement(String),
+    Typed(FakeTypedCall),
+    Reset,
+}
+
+/// Whether `kind` speaks the PostgreSQL wire protocol (the P5 contract applies).
+fn pg_wire(kind: DbmsKind) -> bool {
+    matches!(
+        kind,
+        DbmsKind::Postgres
+            | DbmsKind::Redshift
+            | DbmsKind::Cockroach
+            | DbmsKind::Yugabyte
+            | DbmsKind::Timescale
+    )
+}
+
+/// What a fake connection's typed path reports unless `with_typed_caps` says otherwise: the
+/// real drivers' shapes (MySQL: a kill to close early, `net_write_timeout` − 15 s at the
+/// server default).
+fn default_typed_caps(kind: DbmsKind) -> TypedCaps {
+    match kind {
+        DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb => TypedCaps {
+            suspend: true,
+            binds: false,
+            close_needs_kill: true,
+            idle_bound: Some(Duration::from_secs(45)),
+        },
+        _ => TypedCaps {
+            suspend: true,
+            binds: false,
+            close_needs_kill: false,
+            idle_bound: None,
+        },
+    }
+}
+
+/// The transaction status `sql` leaves behind when connections track transactions: each
+/// `;`-separated statement's leading keywords, in order (Hacivat's control text has no quoted
+/// `;`).
+fn tracked_tx(mut tx: TxStatus, sql: &str) -> TxStatus {
+    for statement in sql.split(';') {
+        let mut words = statement
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .filter(|w| !w.is_empty());
+        let first = words.next().unwrap_or_default();
+        let second = words.next().unwrap_or_default();
+        let is = |w: &str, k: &str| w.eq_ignore_ascii_case(k);
+        tx = if is(first, "BEGIN") || is(first, "START") {
+            if tx == TxStatus::Idle {
+                TxStatus::InTx
+            } else {
+                tx
+            }
+        } else if is(first, "COMMIT") || is(first, "END") {
+            TxStatus::Idle
+        } else if is(first, "ROLLBACK") || is(first, "ABORT") {
+            if is(second, "TO") {
+                // `ROLLBACK TO SAVEPOINT` keeps the transaction and recovers a failed one.
+                if tx == TxStatus::Idle {
+                    tx
+                } else {
+                    TxStatus::InTx
+                }
+            } else {
+                TxStatus::Idle
+            }
+        } else {
+            tx
+        };
+    }
+    tx
+}
+
+/// An open typed query of a [`FakeConn`].
+struct TypedRun {
+    sets: VecDeque<FakeResultSet>,
+    skipped: u32,
+    current: Option<OpenSet>,
+    first_rows: u64,
+    chunk_rows: u64,
+    /// `Some(n)`: rows left before the query suspends (suspendable queries only).
+    budget: Option<u64>,
+    suspended: bool,
+    started: bool,
+    /// Rows delivered over every set.
+    sent: u64,
+    chunks: u64,
+    script: FakeQuery,
+}
+
+/// The result set a typed query is delivering.
+struct OpenSet {
+    set: FakeResultSet,
+    width: usize,
+    total: u64,
+    pos: u64,
+}
+
+impl TypedRun {
+    fn new(spec: &QuerySpec<'_>, script: FakeQuery, can_suspend: bool) -> Self {
+        let mut sets: VecDeque<FakeResultSet> = script.sets.iter().cloned().collect();
+        if sets.is_empty() {
+            sets.push_back(FakeResultSet::default());
+        }
+        // A query with more than one result set never suspends (R-M3-25), however many are
+        // kept.
+        let single = sets.len() == 1;
+        let keep = spec.max_result_sets.max(1) as usize;
+        let skipped = sets.len().saturating_sub(keep) as u32;
+        sets.truncate(keep);
+        let chunk_rows = u64::from(spec.chunk_rows.max(1));
+        let first_rows = match spec.first_rows {
+            0 => chunk_rows,
+            n => u64::from(n),
+        };
+        let suspends = spec.suspendable && can_suspend && single;
+        TypedRun {
+            sets,
+            skipped,
+            current: None,
+            first_rows,
+            chunk_rows,
+            budget: suspends.then_some(first_rows),
+            suspended: false,
+            started: false,
+            sent: 0,
+            chunks: 0,
+            script,
+        }
+    }
+
+    /// Rows not yet delivered, in this set and the ones after it.
+    fn remaining(&self) -> u64 {
+        let here = self.current.as_ref().map_or(0, |s| s.total - s.pos);
+        self.sets
+            .iter()
+            .fold(here, |sum, s| sum.saturating_add(s.rows.len()))
     }
 }
 
@@ -204,6 +489,10 @@ struct Counters {
     reset: AtomicUsize,
     /// Bumped by `kill_connections`: a connection made before the bump is dead.
     killed: AtomicU64,
+    // ## m3a-t01b-seams
+    /// `Rows` events delivered by typed queries.
+    chunks: AtomicU64,
+    ping: AtomicUsize,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -240,6 +529,9 @@ pub struct FakeDriver {
     // ## m2b-t17-liveness
     /// `Some`: connections report `autocommit` (from `true`), and these statements set it.
     autocommit: Option<AutocommitEffects>,
+    // ## m3a-t01b-seams
+    tracks_tx: bool,
+    typed_caps: Option<TypedCaps>,
 }
 
 impl FakeDriver {
@@ -287,6 +579,8 @@ impl FakeDriver {
             reset_fails: false,
             consumes_factory: false,
             autocommit: None,
+            tracks_tx: false,
+            typed_caps: None,
         }
     }
 
@@ -448,6 +742,50 @@ impl FakeDriver {
     pub fn kill_connections(&self) {
         self.counters.killed.fetch_add(1, Ordering::SeqCst);
     }
+
+    // ## m3a-t01b-seams
+
+    /// The typed query script (see the module docs).
+    pub fn queries(self, q: Vec<FakeQuery>) -> Self {
+        *lock(&self.exec.queries) = q.into_iter().map(Some).collect();
+        self
+    }
+
+    /// Every typed call (`query`, `fetch_more`, `close_query`), in order, refused ones too.
+    pub fn typed_log(&self) -> Vec<FakeTypedCall> {
+        lock(&self.exec.typed).clone()
+    }
+
+    /// Every statement, typed call and reset, in order.
+    pub fn call_log(&self) -> Vec<FakeCall> {
+        lock(&self.exec.calls).clone()
+    }
+
+    /// Connections set their transaction status from the leading keywords of `execute` and
+    /// `batch` text (`BEGIN`/`START` → in a transaction; `COMMIT`/`END`/`ROLLBACK` → idle;
+    /// `ROLLBACK TO` keeps it and recovers a failed one), unless a script entry's `tx_after`
+    /// says otherwise; and on the PostgreSQL wire family a failed statement inside a
+    /// transaction leaves it `Failed`.
+    pub fn tracks_transactions(mut self) -> Self {
+        self.tracks_tx = true;
+        self
+    }
+
+    /// What every connection's `typed_caps` reports (else the engine's shape).
+    pub fn with_typed_caps(mut self, caps: TypedCaps) -> Self {
+        self.typed_caps = Some(caps);
+        self
+    }
+
+    /// `Rows` events delivered by typed queries, over every connection.
+    pub fn chunks_sent(&self) -> u64 {
+        self.counters.chunks.load(Ordering::SeqCst)
+    }
+
+    /// Pings sent, over every connection.
+    pub fn ping_calls(&self) -> usize {
+        self.counters.ping.load(Ordering::SeqCst)
+    }
 }
 
 impl Driver for FakeDriver {
@@ -489,6 +827,11 @@ impl Driver for FakeDriver {
                 .autocommit
                 .as_ref()
                 .map(|effects| (true, effects.clone())),
+            tracks_tx: self.tracks_tx,
+            caps: self
+                .typed_caps
+                .unwrap_or_else(|| default_typed_caps(self.descriptor.kind)),
+            typed: None,
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
@@ -578,6 +921,10 @@ struct FakeConn {
     // ## m2b-t17-liveness
     /// What `autocommit` reports, and the statements that change it (`autocommit_flag`).
     autocommit: Option<(bool, AutocommitEffects)>,
+    // ## m3a-t01b-seams
+    tracks_tx: bool,
+    caps: TypedCaps,
+    typed: Option<TypedRun>,
 }
 
 impl FakeConn {
@@ -620,6 +967,14 @@ impl FakeConn {
 
     /// Runs one statement from the script; it counts as running from this call (M10).
     fn run<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
+        // ## m3a-t01b-seams: one open query per connection, except a suspended PostgreSQL
+        // query, beside which a statement runs in the same transaction (P5).
+        if let Some(open) = &self.typed
+            && !(pg_wire(self.kind) && open.suspended)
+        {
+            self.exec.log_statement(sql);
+            return Box::pin(async { Err(unsupported()) });
+        }
         self.cancel.begin();
         // ## m2b-t17-liveness: the server applies the setting whatever the statement's (or
         // the batch's) outcome.
@@ -640,10 +995,27 @@ impl FakeConn {
         let entry = self.exec.take(sql);
         self.alive()?;
         let Some(entry) = entry else {
+            // ## m3a-t01b-seams
+            if self.tracks_tx {
+                self.tx = tracked_tx(self.tx, sql);
+            }
             return Ok(ExecSummary {
                 tx: self.tx,
                 ..ExecSummary::default()
             });
+        };
+        // ## m3a-t01b-seams: a tracked connection follows the statement when the entry sets
+        // no status; a failed statement inside a PostgreSQL transaction fails it.
+        let tracked = (self.tracks_tx && entry.tx_after.is_none()).then(|| {
+            if entry.result.is_err() && pg_wire(self.kind) && self.tx == TxStatus::InTx {
+                TxStatus::Failed
+            } else {
+                tracked_tx(self.tx, sql)
+            }
+        });
+        let entry = FakeExec {
+            tx_after: entry.tx_after.or(tracked),
+            ..entry
         };
         assert!(
             !entry.panics,
@@ -744,6 +1116,8 @@ impl RawConn for FakeConn {
     }
 
     fn ping(&mut self) -> BoxFuture<'_, Result<Duration, RawError>> {
+        // ## m3a-t01b-seams
+        self.counters.ping.fetch_add(1, Ordering::SeqCst);
         let next = self
             .alive()
             .and_then(|()| self.stream_alive())
@@ -810,6 +1184,8 @@ impl RawConn for FakeConn {
 
     fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>> {
         self.counters.reset.fetch_add(1, Ordering::SeqCst);
+        // ## m3a-t01b-seams
+        lock(&self.exec.calls).push(FakeCall::Reset);
         let result = match self.alive() {
             Ok(()) if self.reset_fails => Err(RawError {
                 kind: RawErrorKind::Other,
@@ -830,6 +1206,258 @@ impl RawConn for FakeConn {
     // ## m2b-t17-liveness
     fn autocommit(&self) -> Option<bool> {
         self.autocommit.as_ref().map(|(on, _)| *on)
+    }
+
+    // ## m3a-t01b-seams
+
+    fn typed_caps(&self) -> TypedCaps {
+        self.caps
+    }
+
+    fn query<'a>(&'a mut self, spec: QuerySpec<'a>) -> BoxFuture<'a, Result<(), RawError>> {
+        self.exec
+            .log_typed(FakeTypedCall::Query(spec.sql.to_string()));
+        let started = self.start_query(&spec);
+        Box::pin(async move { started })
+    }
+
+    fn next_event(&mut self) -> BoxFuture<'_, Result<QueryEvent, RawError>> {
+        Box::pin(self.next_typed_event())
+    }
+
+    fn fetch_more(&mut self, rows: u32) -> BoxFuture<'_, Result<(), RawError>> {
+        self.exec.log_typed(FakeTypedCall::FetchMore(rows));
+        let resumed = self.resume_typed(rows);
+        Box::pin(async move { resumed })
+    }
+
+    fn close_query(&mut self, how: CloseHow) -> BoxFuture<'_, Result<Closed, RawError>> {
+        self.exec.log_typed(FakeTypedCall::Close(how));
+        let closed = self.close_typed(how);
+        Box::pin(async move { closed })
+    }
+}
+
+// ## m3a-t01b-seams
+/// What the fake answers a call its contract refuses.
+fn unsupported() -> RawError {
+    RawError {
+        kind: RawErrorKind::Unsupported,
+        server: None,
+    }
+}
+
+/// The most rows a drain reads before it gives up and closes (one PostgreSQL `Execute`).
+const DRAIN_ROWS: u64 = 4_096;
+
+fn cancelled_error() -> RawError {
+    RawError {
+        kind: RawErrorKind::Cancelled,
+        server: None,
+    }
+}
+
+/// Waits `delay` unless a cancel that applies (latched before, or sent during the wait) ends
+/// the query first (`Err(Cancelled)`, M10).
+async fn wait_unless_cancelled(
+    latch: &CancelLatch,
+    delay: Duration,
+    ignores: bool,
+) -> Result<(), RawError> {
+    let cancelled = latch.notify.notified();
+    tokio::pin!(cancelled);
+    cancelled.as_mut().enable();
+    if !ignores && latch.latched.swap(false, Ordering::SeqCst) {
+        return Err(cancelled_error());
+    }
+    if delay.is_zero() {
+        return Ok(());
+    }
+    tokio::select! {
+        () = tokio::time::sleep(delay) => Ok(()),
+        () = &mut cancelled, if !ignores => Err(cancelled_error()),
+    }
+}
+
+impl FakeConn {
+    /// `query`'s checks, then the open run (the module docs).
+    fn start_query(&mut self, spec: &QuerySpec<'_>) -> Result<(), RawError> {
+        self.alive()?;
+        if self.typed.is_some() {
+            return Err(unsupported());
+        }
+        // P5: a portal outside a transaction block would end at its Sync.
+        if spec.suspendable && pg_wire(self.kind) && self.tx == TxStatus::Idle {
+            return Err(unsupported());
+        }
+        let script = self.exec.take_query(spec.sql).unwrap_or_default();
+        self.typed = Some(TypedRun::new(spec, script, self.caps.suspend));
+        self.cancel.begin();
+        Ok(())
+    }
+
+    /// Ends the open run: the query no longer runs on the server.
+    fn end_typed(&mut self) {
+        self.typed = None;
+        self.cancel.running.store(false, Ordering::SeqCst);
+    }
+
+    /// Ends the open run with `err`; inside a PostgreSQL transaction the server fails it.
+    fn fail_typed(&mut self, err: RawError) -> RawError {
+        self.end_typed();
+        if pg_wire(self.kind) && self.tx == TxStatus::InTx {
+            self.tx = TxStatus::Failed;
+        }
+        err
+    }
+
+    /// `fetch_more`'s effect: a suspended run resumes for `rows` more rows.
+    fn resume_typed(&mut self, rows: u32) -> Result<(), RawError> {
+        self.alive()?;
+        match self.typed.as_mut() {
+            Some(run) if run.suspended => {
+                run.suspended = false;
+                run.budget = Some(u64::from(rows));
+            }
+            _ => return Err(unsupported()),
+        }
+        self.cancel.begin();
+        Ok(())
+    }
+
+    async fn next_typed_event(&mut self) -> Result<QueryEvent, RawError> {
+        let (ignores, never_pending, delay) = match self.typed.as_ref() {
+            None => return Err(unsupported()),
+            Some(run) if run.suspended => return Err(unsupported()),
+            Some(run) => {
+                let delay = if !run.started {
+                    run.script.first_delay
+                } else if run.current.is_some() && run.chunks > 0 {
+                    run.script.chunk_delay
+                } else {
+                    Duration::ZERO
+                };
+                (
+                    self.ignores_cancel || run.script.ignores_cancel,
+                    run.script.never_pending,
+                    delay,
+                )
+            }
+        };
+        if let Err(e) = self.alive() {
+            return Err(self.fail_typed(e));
+        }
+        let cancel = self.cancel.clone();
+        if !never_pending {
+            tokio::task::yield_now().await;
+            if let Err(e) = wait_unless_cancelled(&cancel, delay, ignores).await {
+                return Err(self.fail_typed(e));
+            }
+            if let Err(e) = self.alive() {
+                return Err(self.fail_typed(e));
+            }
+        } else if !ignores && cancel.latched.swap(false, Ordering::SeqCst) {
+            return Err(self.fail_typed(cancelled_error()));
+        }
+        self.step_typed()
+    }
+
+    /// The open run's next event, without waiting.
+    fn step_typed(&mut self) -> Result<QueryEvent, RawError> {
+        let Some(run) = self.typed.as_mut() else {
+            return Err(unsupported());
+        };
+        run.started = true;
+        let Some(open) = run.current.as_mut() else {
+            if let Some(set) = run.sets.pop_front() {
+                let schema = set.schema();
+                let width = set.columns.len();
+                let total = set.rows.len();
+                run.current = Some(OpenSet {
+                    set,
+                    width,
+                    total,
+                    pos: 0,
+                });
+                return Ok(QueryEvent::ResultStart(schema));
+            }
+            let skipped = run.skipped;
+            if let Some(tx) = run.script.tx_after {
+                self.tx = tx;
+            }
+            self.end_typed();
+            return Ok(QueryEvent::Done(QueryDone {
+                tx: self.tx,
+                warnings: 0,
+                skipped_result_sets: skipped,
+            }));
+        };
+        if open.pos == open.total {
+            let end = ResultEnd {
+                rows: open.total,
+                kept: open.total,
+                rows_affected: run.script.rows_affected,
+                command_tag: None,
+            };
+            run.current = None;
+            return Ok(QueryEvent::ResultEnd(end));
+        }
+        if let Some((n, err)) = &run.script.fail_after
+            && run.sent >= *n
+        {
+            let err = err.clone();
+            return Err(self.fail_typed(err));
+        }
+        if run.budget == Some(0) {
+            run.suspended = true;
+            self.cancel.running.store(false, Ordering::SeqCst);
+            return Ok(QueryEvent::Suspended);
+        }
+        let mut size = if run.chunks == 0 {
+            run.first_rows
+        } else {
+            run.chunk_rows
+        };
+        size = size.min(open.total - open.pos);
+        if let Some(budget) = run.budget {
+            size = size.min(budget);
+        }
+        if let Some((n, _)) = &run.script.fail_after {
+            size = size.min(n - run.sent);
+        }
+        let schema = open.set.schema();
+        let rows = open.set.rows.rows(open.pos, open.pos + size, open.width);
+        open.pos += size;
+        run.sent += size;
+        run.chunks += 1;
+        if let Some(budget) = run.budget.as_mut() {
+            *budget -= size;
+        }
+        self.counters.chunks.fetch_add(1, Ordering::SeqCst);
+        Ok(QueryEvent::Rows(Chunk::from_values(&schema, rows)))
+    }
+
+    /// `close_query`'s effect (the module docs).
+    fn close_typed(&mut self, how: CloseHow) -> Result<Closed, RawError> {
+        self.alive()?;
+        let Some(run) = self.typed.as_ref() else {
+            return Ok(Closed::Closed { rows: 0 });
+        };
+        let sent = run.sent;
+        let closed = match how {
+            CloseHow::Drain(_) if run.script.kill_needed => {
+                return Ok(Closed::NeedsServerKill {
+                    thread_id: self.backend.unwrap_or(0),
+                });
+            }
+            CloseHow::Drain(_) => match run.remaining() {
+                left if left <= DRAIN_ROWS => Closed::Completed { rows: sent + left },
+                _ => Closed::Closed { rows: sent },
+            },
+            CloseHow::Now | CloseHow::AfterKill(_) => Closed::Closed { rows: sent },
+        };
+        self.end_typed();
+        Ok(closed)
     }
 }
 

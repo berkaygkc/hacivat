@@ -19,6 +19,9 @@ toml.workspace = true
 regex.workspace = true
 percent-encoding.workspace = true
 tokio = { workspace = true, features = ["time", "sync"] }
+# ## m3a-t01b-seams: typed streaming (chunks, schemas, bind values).
+hacivat-values.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 hacivat-l10n.workspace = true

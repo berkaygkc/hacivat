@@ -1,0 +1,21 @@
+[package]
+name = "sql-lexer"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "A total, lossless, table-driven SQL lexer with a chunked interface (SQL-LEX-02, -05)"
+
+[dependencies]
+sql-dialect.workspace = true
+sql-text.workspace = true
+memchr.workspace = true
+bitflags.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+sql-testkit.workspace = true
+
+[lints]
+workspace = true

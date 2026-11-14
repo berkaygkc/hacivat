@@ -61,6 +61,8 @@ use crate::session::{
     ClientId, ClosePolicy, Command, Escalation, Request, SessionEvent, SessionHandle, SessionId,
     SessionKind, SessionSnapshot, SessionSpec, SessionState,
 };
+// ## m3a-t01b-seams
+use crate::session::effective_read_only;
 
 /// How long a released pooled session stays idle before it closes (HV-SESS-01).
 pub const IDLE_CLOSE: Duration = Duration::from_secs(60);
@@ -310,6 +312,26 @@ struct State {
     /// `ConnectionManager` relays them as `ConnectionEvent::EnforcementGap`; its monitor
     /// already relays the default session's).
     gap_sink: Option<GapSink>,
+    // ## m3a-t01b-seams
+    /// The manager-wide session policy (`set_policy`).
+    policy: SessionPolicy,
+}
+
+impl State {
+    // ## m3a-t01b-seams
+    /// Whether a session of the current profile is read-only (R-M3-29, P4).
+    fn effective_read_only(&self) -> bool {
+        effective_read_only(&self.current(), self.policy.production_read_only)
+    }
+}
+
+// ## m3a-t01b-seams
+/// What every session of a profile follows besides the profile itself (R-M3-29, P4).
+/// `ConnectionManager` sets it right after `SessionManager::new`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SessionPolicy {
+    /// Production-tagged profiles get read-only sessions (R-M3-6 REVISED; M3b removes it).
+    pub production_read_only: bool,
 }
 
 // ## m2b-t22-live
@@ -493,6 +515,7 @@ impl SessionManager {
                 next_waiter: 0,
                 consent_gen: 0,
                 gap_sink: None,
+                policy: SessionPolicy::default(),
             }),
             default_lock: tokio::sync::Mutex::new(()),
             me: me.clone(),
@@ -501,6 +524,24 @@ impl SessionManager {
 
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    // ## m3a-t01b-seams
+
+    /// Sets the policy every session opened from now on follows (R-M3-29, P4).
+    /// `ConnectionManager` calls it right after `new`, before any session exists.
+    pub fn set_policy(&self, p: SessionPolicy) {
+        self.lock().policy = p;
+    }
+
+    /// The connection budget: `(in use, max)` (R-M3-43: "Waiting for a free connection").
+    pub fn budget_use(&self) -> (u8, u8) {
+        (self.budget.in_use(), self.budget.max())
+    }
+
+    /// Whether a session of `profile` is read-only under this manager's policy.
+    fn read_only_for(&self, profile: &Profile) -> bool {
+        effective_read_only(profile, self.lock().policy.production_read_only)
     }
 
     fn profile(&self) -> Arc<Profile> {
@@ -556,7 +597,9 @@ impl SessionManager {
         self: &Arc<Self>,
         kind: SessionKind,
     ) -> BoxFuture<'static, Result<PooledSession, ConnectError>> {
-        let read_only = self.lock().current().read_only;
+        // ## m3a-t01b-seams: the effective flag, so a production borrow finds its parked
+        // read-only session again (P4).
+        let read_only = self.lock().effective_read_only();
         if self.single() {
             let this = self.clone();
             let gate = self.gate();
@@ -772,8 +815,9 @@ impl SessionManager {
         if let Some(handle) = self.default_session() {
             return Ok(serves(handle));
         }
-        // A new default is read-only exactly when the profile is.
-        if read_only && !self.lock().current().read_only {
+        // A new default is read-only exactly when the profile is (## m3a-t01b-seams: under the
+        // manager's policy, P4).
+        if read_only && !self.lock().effective_read_only() {
             return Ok(None);
         }
         let permit = match self.budget.try_acquire(Priority::Console) {
@@ -816,7 +860,8 @@ impl SessionManager {
             .connect_live(spec.department, spec.read_only, ix, purpose(&spec.kind))
             .await?;
         let spec = SessionSpec {
-            read_only: spec.read_only || profile.read_only,
+            // ## m3a-t01b-seams (R-M3-29)
+            read_only: spec.read_only || self.read_only_for(&profile),
             ..spec
         };
         match self.register(
@@ -865,7 +910,8 @@ impl SessionManager {
             )
         };
         let req = ConnectRequest {
-            read_only: read_only || profile.read_only,
+            // ## m3a-t01b-seams (R-M3-29)
+            read_only: read_only || self.read_only_for(&profile),
             profile: profile.clone(),
             draft_password: None,
             purpose,
@@ -1208,7 +1254,8 @@ impl SessionManager {
         };
         let spec = SessionSpec {
             kind: SessionKind::Console(ClientId::DEFAULT),
-            read_only: profile.read_only,
+            // ## m3a-t01b-seams (R-M3-29)
+            read_only: self.read_only_for(&profile),
             department: Department::Console,
         };
         let hooked = Hooked {

@@ -11,9 +11,12 @@ hacivat-driver.workspace = true
 hacivat-net.workspace = true
 # M2b (Task 1): the read-only hardening and authorizer (Task 11).
 hacivat-guard.workspace = true
-rusqlite = { workspace = true, features = ["hooks", "limits", "modern_sqlite"] }
+# `column_decltype` (## m3a-t01b-seams): the declared column types of typed streaming (Task 15).
+rusqlite = { workspace = true, features = ["hooks", "limits", "modern_sqlite", "column_decltype"] }
 tokio = { workspace = true, features = ["rt", "sync"] }
 futures.workspace = true
+# ## m3a-t01b-seams: the value model of typed streaming (Task 15).
+hacivat-values.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

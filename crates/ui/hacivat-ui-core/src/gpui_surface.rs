@@ -20,6 +20,11 @@ pub use gpui::ScrollHandle;
 #[rustfmt::skip] pub use gpui::{AssetSource, DragMoveEvent, MouseMoveEvent, MouseUpEvent, Stateful, StatefulInteractiveElement, WeakEntity};
 // M2a (Task 1): anchored popovers and selects (`deferred(anchored())`), file pickers.
 pub use crate::actions::{InertCommand, RunCommand};
+// ## m3a-t01b-seams: the editor and grid elements (Tasks 19, 20, 27, 28): hitboxes and cursor
+// styles, view caching, the accessibility subtree, the text input configuration, the
+// clipboard's string with metadata, pointer and modifier events, quads and their edges and
+// corners, scroll deltas, strikethrough runs.
+#[rustfmt::skip] pub use gpui::{A11ySubtreeBuilder, Autocapitalize, BorderStyle, ClipboardString, Corners, CursorStyle, Edges, Hitbox, HitboxBehavior, ModifiersChangedEvent, MouseExitEvent, PaintQuad, ScrollDelta, StrikethroughStyle, StyleRefinement, TextInputConfiguration, TouchPhase, quad};
 /// `.when(..)`/`.map(..)` builders (`gpui::prelude::FluentBuilder` at the pin).
 pub use gpui::prelude::FluentBuilder;
 pub use gpui::{Anchor, AnchoredPositionMode, PathPromptOptions, anchored, deferred};

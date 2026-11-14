@@ -410,6 +410,8 @@ fn every_action_title_exists_in_en() {
 
 /// Every bound command is in the app's registry (`init`: the workspace actions and every
 /// `connections::install` registration). The M2a pending list was emptied at the gate (T22).
+/// M3a (Task 1b): the editor, grid and console rows are bound before their commands exist;
+/// [`m3a_pending`] names them and is emptied at the M3a gate.
 #[gpui::test]
 fn keymap_commands_are_registered(cx: &mut TestAppContext) {
     let reg = cx.update(|cx| {
@@ -419,10 +421,22 @@ fn keymap_commands_are_registered(cx: &mut TestAppContext) {
     for p in ALL_PLATFORMS {
         for preset in PRESETS {
             for b in load(p, preset, None).0.bindings() {
-                assert!(reg.get(&b.command).is_some(), "{}", b.command);
+                assert!(
+                    reg.get(&b.command).is_some() || m3a_pending(&b.command),
+                    "{}",
+                    b.command
+                );
             }
         }
     }
+}
+
+// ## m3a-t01b-seams
+/// The M3a commands bound by Task 1b's keymap rows whose registration lands later: every
+/// `editor.*` (Task 32), every `grid.*` (Task 20) and `exec.cancel` (Task 33). Emptied at the
+/// M3a gate.
+fn m3a_pending(command: &str) -> bool {
+    command.starts_with("editor.") || command.starts_with("grid.") || command == "exec.cancel"
 }
 
 #[gpui::test]

@@ -22,7 +22,8 @@ pub fn domain_prefixes(domain: &str) -> Option<&'static [&'static str]> {
         "common" => &["cm"],
         "hui" => &["hui"],
         "hacivat-ui" => &["hv"],
-        "hacivat-core" => &["hc", "db", "error"],
+        // ## m3a-t01b-seams: `exec-*` and `cursor-*`, the output log (Task 23, P24).
+        "hacivat-core" => &["hc", "db", "error", "exec", "cursor"],
         "karagoz-cli" => &["kg"],
         "perde-server" => &["ps", "db", "error"],
         "perde-web" => &["pw"],

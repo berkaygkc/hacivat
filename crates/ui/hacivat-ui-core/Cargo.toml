@@ -33,9 +33,13 @@ raw-window-handle = "0.6"
 core-foundation.workspace = true
 core-foundation-sys.workspace = true
 mach2.workspace = true
+# ## m3a-t01b-seams: `sysctlbyname("hw.memsize")` for `physical_memory_bytes` (Task 33, P6).
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+# ## m3a-t01b-seams: `Win32_System_SystemInformation` (`GlobalMemoryStatusEx`) for
+# `physical_memory_bytes` (Task 33, P6).
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

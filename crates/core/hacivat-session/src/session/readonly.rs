@@ -671,3 +671,85 @@ async fn probe(conn: &mut dyn RawConn, kind: DbmsKind) -> Option<Vec<Vec<Vec<Opt
 pub fn remediation_for_server(server: &ServerInfo) -> Option<&'static str> {
     remediation_for(server.kind, server.version.as_ref().map(|v| v.major))
 }
+
+// ## m3a-t01b-seams
+// The typed read-only path (HV-SESS-04 on typed execution, R-M3-17; Task 22 fills the bodies,
+// Task 18's run loop calls them). A console cursor outlives the request that opened it, so the
+// guard's steps are three calls around the cursor's life, with the guard's state between them:
+//
+// 1. `guarded_query`: steps 1–3. `check_input` (else `ReadOnlyDenied(Input)`), the transaction
+//    keywords (`ReadOnlyDenied(Transaction)`), PostgreSQL's function check
+//    (`ReadOnlyDenied(Function)`), `plan.before` through `batch` (`TxOwner::Guard`), then the
+//    typed `query`. User text never goes through `batch`.
+// 2. `GuardedCursor::after_first_chunk`: step 4, PostgreSQL's canary while the named portal
+//    stays open (the PostgreSQL exception to "one open query per connection", P5).
+// 3. `GuardedCursor::finish`: steps 5–8 at the cursor's end (complete, released, cancelled or
+//    idle-bounded), after the actor closed the query: the canary (PostgreSQL), `ROLLBACK`,
+//    `check_post`, `reset`, `replay`. No other statement joins the guard's transaction: the
+//    actor releases the cursor before any other request (D-019).
+//
+// A `GuardFailure` with `discard` set breaks the session (the actor discards the connection);
+// with `ExecErrorKind::EnforcementGap` the actor also emits `SessionEvent::EnforcementGap` and
+// closes the result `Closed { EnforcementGap }` with its rows kept (Task 18 acts on both).
+//
+// M3a Task 1b stub: every call fails closed with `Internal` (and `finish` discards), so a
+// read-only session runs nothing typed before Task 22.
+
+/// A failed step of the typed guard path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GuardFailure {
+    pub(crate) error: ExecError,
+    /// The class of the broken session when the connection must not be used again.
+    pub(crate) discard: Option<ErrClass>,
+}
+
+/// The guard's state while its typed query is open (Task 22 adds what the canary and the
+/// post-checks need).
+#[derive(Debug)]
+pub(crate) struct GuardedCursor {
+    pub(crate) kind: DbmsKind,
+}
+
+/// The internal failure every typed guard step answers until Task 22.
+fn guard_unavailable(discard: bool) -> GuardFailure {
+    GuardFailure {
+        error: ExecError::of(ExecErrorKind::Internal),
+        discard: discard.then_some(ErrClass::Internal),
+    }
+}
+
+/// Steps 1–3 for `spec` on a read-only session (Task 22). Task 1b stub: `Internal`, nothing
+/// sent.
+#[allow(dead_code, reason = "Task 18's run loop calls it; Task 22 fills it")]
+pub(crate) async fn guarded_query(
+    conn: &mut dyn RawConn,
+    kind: DbmsKind,
+    spec: hacivat_driver::QuerySpec<'_>,
+) -> Result<GuardedCursor, GuardFailure> {
+    let _ = (conn, kind, spec);
+    Err(guard_unavailable(false))
+}
+
+impl GuardedCursor {
+    /// Step 4, after the first chunk (Task 22). Task 1b stub: `Internal`.
+    #[allow(dead_code, reason = "Task 18's run loop calls it; Task 22 fills it")]
+    pub(crate) async fn after_first_chunk(
+        &mut self,
+        conn: &mut dyn RawConn,
+    ) -> Result<(), GuardFailure> {
+        let _ = (conn, self.kind);
+        Err(guard_unavailable(false))
+    }
+
+    /// Steps 5–8 at the cursor's end, with the session's environment `replay` (Task 22).
+    /// Task 1b stub: `Internal`, and the connection is discarded.
+    #[allow(dead_code, reason = "Task 18's run loop calls it; Task 22 fills it")]
+    pub(crate) async fn finish(
+        self,
+        conn: &mut dyn RawConn,
+        replay: &[String],
+    ) -> Result<(), GuardFailure> {
+        let _ = (conn, replay, self.kind);
+        Err(guard_unavailable(true))
+    }
+}

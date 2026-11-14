@@ -14,7 +14,7 @@ pub const CONSOLE_CONTEXT: &str = "Console";
 /// is gone shows its kind name.
 pub fn title_of(kind: TabKind, cx: &App) -> SharedString {
     match kind {
-        TabKind::Console { n } => tr(
+        TabKind::Console { n, .. } => tr(
             cx,
             ids::hv::TAB_CONSOLE_UNTITLED,
             ids::hv::HvTabConsoleUntitled {

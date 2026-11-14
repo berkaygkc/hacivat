@@ -17,7 +17,16 @@ const ADAPTER: &str = "hacivat-ui-core";
 const GUARDED: [&str; 2] = ["gpui", "gpui_platform"];
 /// Adapter features that must never be enabled by a product build (F33, R12).
 const ADAPTER_ONLY_FEATURES: [&str; 4] = ["spike-support", "bench", "scene-check", "test-support"];
-const PRODUCT_CRATES: [&str; 2] = ["hacivat", "hacivat-app"];
+const PRODUCT_CRATES: [&str; 7] = [
+    "hacivat",
+    "hacivat-app",
+    // ## m3a-t01b-seams (P22): the new Ui and App crates ship in the product too.
+    "hacivat-ui-editor",
+    "hacivat-ui-grid",
+    "hacivat-sql-editor",
+    "hacivat-text",
+    "hacivat-ui",
+];
 
 /// Sources of the zed workspace; any crate fetched from one counts as zed-sourced.
 pub const ZED_SOURCES: [&str; 2] = [
@@ -37,6 +46,17 @@ pub enum Rule {
     // ## m2b-t01-interfaces
     /// `hacivat-guard` reaches a runtime crate through its normal dependencies (§5.1 rule 3).
     GuardNotRuntimeFree,
+    // ## m3a-t01b-seams
+    /// A `crates/sql/*` crate (but the dev-only `sql-testkit`) reaches a runtime, `salsa`,
+    /// `sql-sema`, `hacivat-l10n` or GPUI through its normal dependencies.
+    SqlNotRuntimeFree,
+    /// A `crates/sql/*` crate depends on a `crates/core/*` crate (any edge, dev included).
+    SqlReachesCore,
+    /// A crate other than `sql-oracle-pg` depends on `pg_query` directly.
+    BackendOutsideOwner,
+    /// `hacivat-text` (the headless editor core) reaches `hacivat-ui-core`, GPUI or a zed
+    /// crate through its normal dependencies.
+    TextCoreNotHeadless,
 }
 
 // ## m2b-t01-interfaces
@@ -59,6 +79,19 @@ fn guard_violation(
     edges: &Edges<'_>,
     pkgs: &HashMap<&PackageId, &Package>,
 ) -> Option<Vec<String>> {
+    normal_path_to(root, edges, pkgs, |p| {
+        GUARD_FORBIDDEN.contains(&p.name.as_str())
+    })
+}
+
+/// A breadth-first walk from `root` over normal edges only: the path to the first package
+/// `bad` accepts (excluding `root`), if any.
+fn normal_path_to(
+    root: &PackageId,
+    edges: &Edges<'_>,
+    pkgs: &HashMap<&PackageId, &Package>,
+    bad: impl Fn(&Package) -> bool,
+) -> Option<Vec<String>> {
     let mut seen: BTreeSet<&PackageId> = BTreeSet::from([root]);
     let mut queue: VecDeque<(&PackageId, Vec<String>)> = VecDeque::from([(root, vec![])]);
     while let Some((id, path)) = queue.pop_front() {
@@ -71,7 +104,7 @@ fn guard_violation(
             };
             let mut via = path.clone();
             via.push(dep.name.to_string());
-            if GUARD_FORBIDDEN.contains(&dep.name.as_str()) {
+            if bad(dep) {
                 return Some(via);
             }
             if seen.insert(dep_id) {
@@ -80,6 +113,45 @@ fn guard_violation(
         }
     }
     None
+}
+
+// ## m3a-t01b-seams
+/// What a `crates/sql/*` crate's normal-dependency closure may not contain: the guard list
+/// plus the other async runtimes (§5.1; P22 keeps `salsa` and `sql-sema` for every M3a crate,
+/// ADR 0005 names M5's exemptions).
+const SQL_FORBIDDEN: [&str; 8] = [
+    "tokio",
+    "futures",
+    "salsa",
+    "hacivat-l10n",
+    "sql-sema",
+    "gpui",
+    "async-std",
+    "smol",
+];
+/// The dev-only SQL corpus crate: `SqlNotRuntimeFree` does not apply to it.
+const SQL_TESTKIT: &str = "sql-testkit";
+/// The one crate that may depend on `pg_query` (R-M3-1).
+const PG_BACKEND: (&str, &str) = ("pg_query", "sql-oracle-pg");
+/// The headless editor core (`TextCoreNotHeadless`).
+const TEXT_CORE: &str = "hacivat-text";
+
+/// The workspace-relative directory of `p`'s manifest, with `/` separators.
+fn rel_dir(md: &Metadata, p: &Package) -> String {
+    let abs = p.manifest_path.as_std_path();
+    let rel = abs
+        .strip_prefix(md.workspace_root.as_std_path())
+        .unwrap_or(abs);
+    rel.to_string_lossy().replace('\\', "/")
+}
+
+/// Whether `dep` is a Core crate for `SqlReachesCore`: a member under `crates/core/`, or (failing
+/// closed) any `hacivat-*` package that is not a Ui or App member.
+fn is_core_crate(md: &Metadata, dep: &Package, layers: &HashMap<&PackageId, Layer>) -> bool {
+    if rel_dir(md, dep).starts_with("crates/core/") {
+        return true;
+    }
+    dep.name.starts_with("hacivat-") && !matches!(layers.get(&dep.id), Some(Layer::Ui | Layer::App))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +285,43 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
             add(name, Rule::GuardNotRuntimeFree, via);
         }
 
+        // ## m3a-t01b-seams
+        let in_sql = rel_dir(md, root).starts_with("crates/sql/");
+        if in_sql
+            && name != SQL_TESTKIT
+            && let Some(via) = normal_path_to(&root.id, &edges, &pkgs, |p| {
+                SQL_FORBIDDEN.contains(&p.name.as_str())
+            })
+        {
+            add(name, Rule::SqlNotRuntimeFree, via);
+        }
+        if in_sql {
+            for (dep_id, _) in edges.get(&root.id).into_iter().flatten() {
+                if let Some(dep) = pkgs.get(dep_id)
+                    && is_core_crate(md, dep, &layers)
+                {
+                    add(name, Rule::SqlReachesCore, vec![dep.name.to_string()]);
+                }
+            }
+        }
+        if name != PG_BACKEND.1 {
+            for (dep_id, _) in edges.get(&root.id).into_iter().flatten() {
+                if pkgs
+                    .get(dep_id)
+                    .is_some_and(|d| d.name.as_str() == PG_BACKEND.0)
+                {
+                    add(name, Rule::BackendOutsideOwner, vec![PG_BACKEND.0.into()]);
+                }
+            }
+        }
+        if name == TEXT_CORE
+            && let Some(via) = normal_path_to(&root.id, &edges, &pkgs, |p| {
+                p.name.as_str() == ADAPTER || is_guarded(p)
+            })
+        {
+            add(name, Rule::TextCoreNotHeadless, via);
+        }
+
         if PRODUCT_CRATES.contains(&name)
             && let Some(bad) = root.dependencies.iter().find(|d| {
                 d.name == ADAPTER
@@ -341,6 +450,8 @@ mod tests {
             "hacivat-app" => "crates/app",
             "hacivat-ui" | "hacivat-ui-core" => "crates/ui",
             "hacivat-l10n" => "crates/core",
+            // ## m3a-t01b-seams
+            "hacivat-text" | "hacivat-ui-grid" => "crates/ui",
             _ => "spikes",
         }
     }
@@ -739,6 +850,118 @@ mod tests {
         assert!(violations(&clean, &lints_ok).is_empty());
     }
 
+    // ## m3a-t01b-seams
+
+    #[test]
+    fn sql_crate_with_tokio_is_flagged() {
+        let md = fx_at(&[("sql-lexer", "crates/sql", &["tokio"])]);
+        assert_eq!(rule_of(&md, "sql-lexer"), Rule::SqlNotRuntimeFree);
+    }
+
+    #[test]
+    fn sql_crate_reaching_a_runtime_transitively_is_flagged() {
+        for forbidden in ["futures", "salsa", "hacivat-l10n", "async-std", "smol"] {
+            let md = fx_at(&[
+                ("sql-split", "crates/sql", &["sql-lexer"]),
+                ("sql-lexer", "crates/sql", &[forbidden]),
+            ]);
+            let v: Vec<_> = violations(&md, &lints_ok)
+                .into_iter()
+                .filter(|v| v.krate == "sql-split" && v.rule == Rule::SqlNotRuntimeFree)
+                .collect();
+            assert_eq!(v.len(), 1, "{forbidden}: {v:?}");
+            assert_eq!(v[0].via, ["sql-lexer", forbidden]);
+        }
+    }
+
+    #[test]
+    fn sql_testkit_and_sql_dev_dependencies_may_use_a_runtime() {
+        let md = fx_at(&[("sql-testkit", "crates/sql", &["tokio"])]);
+        assert!(violations(&md, &lints_ok).is_empty());
+        let md = fx_kind_at(
+            "sql-split",
+            "crates/sql",
+            "tokio",
+            DepKind::Development,
+            &[],
+        );
+        assert!(violations(&md, &lints_ok).is_empty());
+    }
+
+    #[test]
+    fn sql_crate_depending_on_core_is_flagged() {
+        let md = fx_at(&[("sql-split", "crates/sql", &["hacivat-proto"])]);
+        assert_eq!(rule_of(&md, "sql-split"), Rule::SqlReachesCore);
+    }
+
+    #[test]
+    fn sql_crate_dev_depending_on_a_core_member_is_flagged() {
+        let md = metadata(vec![
+            member(
+                "sql-split",
+                "crates/sql",
+                vec![dep("hacivat-values", DepKind::Development, &[], None)],
+            ),
+            member("hacivat-values", "crates/core", vec![]),
+        ]);
+        assert_eq!(rule_of(&md, "sql-split"), Rule::SqlReachesCore);
+        // A core crate depending on a SQL crate is the allowed direction.
+        let md = fx_at(&[
+            ("hacivat-exec", "crates/core", &["sql-split"]),
+            ("sql-split", "crates/sql", &[]),
+        ]);
+        assert!(violations(&md, &lints_ok).is_empty());
+    }
+
+    #[test]
+    fn pg_query_outside_the_oracle_is_flagged() {
+        let md = fx_at(&[("sql-split", "crates/sql", &["pg_query"])]);
+        assert_eq!(rule_of(&md, "sql-split"), Rule::BackendOutsideOwner);
+        let md = fx_at(&[("sql-oracle-pg", "crates/sql", &["pg_query"])]);
+        assert!(violations(&md, &lints_ok).is_empty());
+        // Through the oracle is fine; a dev-dependency on pg_query is still direct.
+        let md = fx_kind_at(
+            "hacivat-exec",
+            "crates/core",
+            "pg_query",
+            DepKind::Development,
+            &[],
+        );
+        assert_eq!(rule_of(&md, "hacivat-exec"), Rule::BackendOutsideOwner);
+    }
+
+    #[test]
+    fn text_core_with_the_adapter_is_flagged() {
+        let md = fx_at(&[("hacivat-text", "crates/ui", &["hacivat-ui-core"])]);
+        assert_eq!(rule_of(&md, "hacivat-text"), Rule::TextCoreNotHeadless);
+        let md = fx_src(&[("hacivat-text", &[("gpui_util", ZED_SOURCES[1])])]);
+        let v = violations(&md, &lints_ok);
+        assert!(
+            v.iter().any(|v| v.rule == Rule::TextCoreNotHeadless),
+            "{v:?}"
+        );
+        let clean = fx_at(&[("hacivat-text", "crates/ui", &["ropey"])]);
+        assert!(violations(&clean, &lints_ok).is_empty());
+    }
+
+    #[test]
+    fn new_ui_and_app_crates_are_product_crates() {
+        for c in [
+            "hacivat-ui-editor",
+            "hacivat-ui-grid",
+            "hacivat-sql-editor",
+            "hacivat-text",
+            "hacivat-ui",
+        ] {
+            assert!(PRODUCT_CRATES.contains(&c), "{c}");
+        }
+        let md = fx_feat("hacivat-ui-grid", "hacivat-ui-core", &["test-support"]);
+        assert_eq!(
+            rule_of(&md, "hacivat-ui-grid"),
+            Rule::AdapterFeatureInProduct
+        );
+    }
+
     #[test]
     fn unknown_member_directory_fails_closed() {
         let md = fx_at(&[("mystery", "tools", &[])]);
@@ -774,6 +997,49 @@ mod tests {
             let member = member.unwrap_or_else(|| panic!("{c} is not a workspace member"));
             assert_eq!(layer_of(&md, member), Some(Layer::Core), "{c}");
             assert!(v.iter().all(|x| x.krate != c), "{c}: {v:?}");
+        }
+    }
+
+    // ## m3a-t01b-seams
+    /// The M3a crates are members in their layers, with no violation.
+    #[test]
+    fn m3a_crates_sit_in_their_layers_and_are_clean() {
+        let md = cargo_metadata::MetadataCommand::new()
+            .current_dir(crate::workspace_root())
+            .exec()
+            .unwrap();
+        let v = violations(&md, &|p| std::fs::read_to_string(p).unwrap_or_default());
+        for (c, layer) in [
+            ("sql-text", Layer::Core),
+            ("sql-dialect", Layer::Core),
+            ("sql-lexer", Layer::Core),
+            ("sql-split", Layer::Core),
+            ("sql-oracle-pg", Layer::Core),
+            ("sql-testkit", Layer::Core),
+            ("hacivat-values", Layer::Core),
+            ("hacivat-results", Layer::Core),
+            ("hacivat-exec", Layer::Core),
+            ("hacivat-text", Layer::Ui),
+            ("hacivat-ui-editor", Layer::Ui),
+            ("hacivat-ui-grid", Layer::Ui),
+            ("hacivat-sql-editor", Layer::App),
+        ] {
+            let member = md
+                .workspace_packages()
+                .into_iter()
+                .find(|p| p.name.as_str() == c)
+                .unwrap_or_else(|| panic!("{c} is not a workspace member"));
+            assert_eq!(layer_of(&md, member), Some(layer), "{c}");
+            assert!(v.iter().all(|x| x.krate != c), "{c}: {v:?}");
+        }
+        // The vendored copies are path patches, never members.
+        for vendored in ["pg_query", "tokio-postgres"] {
+            assert!(
+                md.workspace_packages()
+                    .iter()
+                    .all(|p| p.name.as_str() != vendored),
+                "{vendored}"
+            );
         }
     }
 

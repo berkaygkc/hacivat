@@ -1101,3 +1101,152 @@ pub fn temp_dir(vcx: &VisualTestContext) -> std::path::PathBuf {
         .update(|cx| cx.default_global::<TempRoots>().0.push(dir));
     path
 }
+
+// ## m3a-t01b-seams
+
+/// How long the core runtime may take to stop before a test's app is dropped (moved from
+/// `tests/shots.rs`, P20).
+pub const TEARDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The teardown deadlock (M2b T22 round 1, Task 24): the quit handler stops the core runtime
+/// with a 200 ms budget while GPUI's test scheduler blocks on the quit futures, and a worker
+/// that outlives the budget drops the event relay's sender, whose wake-up takes the scheduler's
+/// locks in the other order. Stopping the runtime first, outside that block and with room to
+/// finish, leaves no worker to race the teardown; the quit handler's own stop is then a no-op.
+/// One body for both entry points (P20).
+fn stop_core_runtime_in(cx: &mut App) {
+    if let Some(m) = cx.try_global::<hacivat_app::connections::ConnectionsModel>() {
+        m.core_runtime().shutdown(TEARDOWN_BUDGET);
+    }
+}
+
+/// Stops the core runtime of a headless app (the shots) before it is dropped (P20).
+pub fn stop_core_runtime(cx: &mut hacivat_ui_core::gpui_surface::HeadlessAppContext) {
+    cx.update(stop_core_runtime_in);
+    cx.run_until_parked();
+}
+
+/// Stops the core runtime of a `#[gpui::test]` app before it is dropped (P20): a test that
+/// runs a FakeDriver session on the shell's runtime calls it last.
+pub fn stop_core_runtime_test(cx: &mut TestAppContext) {
+    cx.update(stop_core_runtime_in);
+    cx.run_until_parked();
+}
+
+/// A console session of `profile` over a fresh `FakeDriver` of its engine, connected through
+/// the real pipeline on the shell's core runtime (`hacivat_session::testing::fake_session`).
+/// Returns the handle and the fake, whose logs the test reads.
+pub fn test_session(
+    vcx: &VisualTestContext,
+    profile: hacivat_session::profile::Profile,
+) -> (
+    hacivat_session::session::SessionHandle,
+    std::sync::Arc<hacivat_driver::fake::FakeDriver>,
+) {
+    let rt = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::connections::ConnectionsModel>()
+            .core_runtime()
+            .handle()
+    });
+    let fake = hacivat_driver::fake::FakeDriver::new(profile.engine);
+    futures::executor::block_on(hacivat_session::testing::fake_session(rt, fake, profile))
+}
+
+/// Opens a console tab bound to `profile` in the focused pane, active, and registers a console
+/// for it over `session`: a real `EditorView` with the `SqlLanguageService`, an empty
+/// `ConsoleResults` and the run UI attached (`exec_ui::attach`), so Tasks 33 and 34 test the run
+/// UI and the status bar without Task 32's console host (P12). Its ID.
+pub fn register_test_console(
+    vcx: &VisualTestContext,
+    profile: hacivat_proto::ProfileId,
+    session: hacivat_session::session::SessionHandle,
+) -> hacivat_app::console::ConsoleId {
+    use hacivat_app::console::{ConsoleId, ConsoleState, Consoles};
+    use hacivat_app::shell::TabKind;
+    let ws = workspace(vcx);
+    let id = in_window(vcx, |window, cx| {
+        let tab = ws
+            .update(cx, |ws, cx| ws.open_console_tab(Some(profile), window, cx))
+            .expect("a console tab opens");
+        let Some(TabKind::Console { n, .. }) = ws.read(cx).tab_kind(tab) else {
+            panic!("the new tab is a console");
+        };
+        let service: Rc<dyn hacivat_ui_editor::LanguageService> =
+            hacivat_sql_editor::SqlLanguageService::new();
+        // Test data, not a product label (the console host's label is Task 32's).
+        let label: hacivat_ui::text::TextFn = Rc::new(|_: &App| gpui::SharedString::from("SQL"));
+        let editor = cx.new(|cx| {
+            hacivat_ui_editor::EditorView::new(
+                hacivat_ui_editor::DocId(u64::from(tab.0)),
+                "",
+                hacivat_ui_editor::EditorConfig::default(),
+                service,
+                label,
+                window,
+                cx,
+            )
+        });
+        let log = hacivat_exec::SessionLog::new();
+        let results = cx.new(|_| hacivat_app::results::ConsoleResults::new(log.clone()));
+        let id = Consoles::register(
+            cx,
+            ConsoleState {
+                id: ConsoleId(0),
+                tab,
+                n,
+                profile: Some(profile),
+                client: hacivat_session::session::ClientId::DEFAULT,
+                session: Some(session),
+                editor: Some(editor.clone()),
+                results: Some(results),
+                sql: None,
+                log,
+            },
+        );
+        hacivat_app::exec_ui::attach(id, &editor, window, cx);
+        id
+    });
+    vcx.run_until_parked();
+    id
+}
+
+/// The text of console `console`'s editor.
+pub fn editor_text(vcx: &VisualTestContext, console: hacivat_app::console::ConsoleId) -> String {
+    vcx.cx.read(|cx| {
+        let state = hacivat_app::console::Consoles::get(cx, console).expect("a registered console");
+        let editor = state.editor.as_ref().expect("the console has an editor");
+        editor.read(cx).snapshot().buffer.to_string()
+    })
+}
+
+/// The drawn runs that spell `label` (P15): the one run with exactly that text, else the
+/// consecutive runs whose texts join into it. On Linux and Windows a `PopupMenu` draws an item
+/// as runs around its access-key letter; a test that finds a menu or button label by its drawn
+/// text uses this. `None` when nothing spells it.
+pub fn find_label_runs(frame: &[RenderedText], label: &str) -> Option<Vec<RenderedText>> {
+    if let Some(r) = frame.iter().find(|r| r.text.as_ref() == label) {
+        return Some(vec![r.clone()]);
+    }
+    for i in 0..frame.len() {
+        let mut spelled = String::new();
+        for (j, run) in frame.iter().enumerate().skip(i) {
+            spelled.push_str(run.text.as_ref());
+            if spelled == label {
+                return Some(frame[i..=j].to_vec());
+            }
+            if !label.starts_with(spelled.as_str()) {
+                break;
+            }
+        }
+    }
+    None
+}
+
+/// The element IDs of the labels the last frame drew (a label's registry path ends in
+/// `#<id>`), in paint order.
+pub fn rendered_markers(vcx: &VisualTestContext) -> Vec<String> {
+    registry_frame(vcx)
+        .into_iter()
+        .filter_map(|r| r.path.rsplit_once('#').map(|(_, id)| id.to_string()))
+        .collect()
+}

@@ -91,6 +91,17 @@ mod imp {
     }
 }
 
+// ## m3a-t01b-seams
+/// The machine's physical memory in bytes, or `None` when the OS does not say: the result
+/// store's global budget is a quarter of it, at most 4 GiB (R-M3-19).
+///
+/// Task 33 implements it (macOS `sysctlbyname("hw.memsize")` through `libc`, Windows
+/// `GlobalMemoryStatusEx`, Linux `MemTotal` of `/proc/meminfo`; the dependencies are Task 1b's
+/// rows). Task 1b stub: `None` (the budget then takes 1 GiB).
+pub fn physical_memory_bytes() -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::vm_rss_mib;

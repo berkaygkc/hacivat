@@ -25,13 +25,15 @@ use anyhow::{Context, Result, bail};
 /// How long `up` waits for every selected service to report healthy.
 const WAIT_TIMEOUT_SECS: u32 = 180;
 /// The crates whose `#[ignore = "docker"]` tests `test` runs when no `-p` is given.
-const DEFAULT_TEST_CRATES: [&str; 5] = [
+const DEFAULT_TEST_CRATES: [&str; 6] = [
     "hacivat-driver-pg",
     "hacivat-driver-mysql",
     "hacivat-driver-sqlite",
     "hacivat-session",
     // ## m2b-t16-docker-matrix
     "hacivat-testkit",
+    // ## m3a-t01b-seams: the typed-execution matrix (Task 31, P6).
+    "hacivat-exec",
 ];
 const COMPOSE_FILE: &str = "docker/m2a/compose.yml";
 /// The Dockerfiles whose `FROM` lines are pinned too.
@@ -47,7 +49,7 @@ const CA_ARTIFACT: &str = "mysql84-ca.pem";
 const USAGE: &str = "usage: xtask docker up --set pr|full\n       \
                      xtask docker down\n       \
                      xtask docker status [--set pr|full]\n       \
-                     xtask docker test --set pr|full [-p <crate>]...\n       \
+                     xtask docker test --set pr|full [-p <crate>]... [--test <name>]\n       \
                      xtask docker pin\n       \
                      xtask docker check-pins";
 
@@ -70,6 +72,9 @@ pub struct Cmd {
     pub set: Option<String>,
     /// `-p` crates for `test`; empty means [`DEFAULT_TEST_CRATES`].
     pub crates: Vec<String>,
+    // ## m3a-t01b-seams
+    /// `--test <name>` for `test`: only that test target (P9).
+    pub test: Option<String>,
 }
 
 /// Parses the arguments after `docker`.
@@ -86,6 +91,7 @@ pub fn parse_args(args: &[String]) -> Result<Cmd> {
     };
     let mut set = None;
     let mut crates = Vec::new();
+    let mut test = None;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--set" => {
@@ -99,8 +105,18 @@ pub fn parse_args(args: &[String]) -> Result<Cmd> {
                 let value = it.next().context("-p needs a crate name")?;
                 crates.push(value.clone());
             }
+            // ## m3a-t01b-seams
+            "--test" => {
+                let value = it.next().context("--test needs a test target name")?;
+                if test.replace(value.clone()).is_some() {
+                    bail!("--test is given once");
+                }
+            }
             other => bail!("unexpected argument {other:?}"),
         }
+    }
+    if test.is_some() && action != Action::Test {
+        bail!("--test is only for `docker test`");
     }
     match action {
         Action::Up | Action::Test if set.is_none() => bail!("--set pr|full is required"),
@@ -117,6 +133,7 @@ pub fn parse_args(args: &[String]) -> Result<Cmd> {
         action,
         set,
         crates,
+        test,
     })
 }
 
@@ -201,8 +218,9 @@ pub fn artifacts_dir(main_checkout: &Path) -> PathBuf {
     main_checkout.join("target").join("docker")
 }
 
-/// The `cargo` arguments of `docker test`.
-pub fn test_args(crates: &[String]) -> Vec<String> {
+/// The `cargo` arguments of `docker test`; `test` (`--test <name>`) goes before `--`, so cargo
+/// builds only that target (P9).
+pub fn test_args(crates: &[String], test: Option<&str>) -> Vec<String> {
     let mut args = vec!["test".to_string()];
     let chosen: Vec<String> = if crates.is_empty() {
         DEFAULT_TEST_CRATES.iter().map(|c| c.to_string()).collect()
@@ -212,6 +230,11 @@ pub fn test_args(crates: &[String]) -> Vec<String> {
     for c in chosen {
         args.push("-p".to_string());
         args.push(c);
+    }
+    // ## m3a-t01b-seams
+    if let Some(test) = test {
+        args.push("--test".to_string());
+        args.push(test.to_string());
     }
     args.push("--".to_string());
     args.push("--ignored".to_string());
@@ -400,7 +423,7 @@ fn run_down(root: &Path) -> Result<bool> {
 /// `-- --ignored` runs every `#[ignore]` test of those crates, not only the
 /// `#[ignore = "docker"]` ones, so a Docker test must also gate itself on
 /// `hacivat_testkit::docker_enabled()`.
-fn run_test(root: &Path, set: &str, crates: &[String]) -> Result<bool> {
+fn run_test(root: &Path, set: &str, crates: &[String], test: Option<&str>) -> Result<bool> {
     let services = selected_services(root, set)?;
     let now = statuses(&services);
     let bad = unhealthy(&now);
@@ -415,7 +438,7 @@ fn run_test(root: &Path, set: &str, crates: &[String]) -> Result<bool> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let artifacts = artifacts_dir(&main_checkout()?);
     let status = Command::new(cargo)
-        .args(test_args(crates))
+        .args(test_args(crates, test))
         .env("HACIVAT_DOCKER", "1")
         .env("HACIVAT_DOCKER_SET", set)
         .env("HACIVAT_DOCKER_ARTIFACTS", &artifacts)
@@ -615,7 +638,12 @@ fn run_inner(args: &[String]) -> Result<bool> {
             let services = selected_services(&root, cmd.set.as_deref().unwrap_or("full"))?;
             run_status(&statuses(&services))
         }
-        Action::Test => run_test(&root, cmd.set.as_deref().unwrap_or("full"), &cmd.crates),
+        Action::Test => run_test(
+            &root,
+            cmd.set.as_deref().unwrap_or("full"),
+            &cmd.crates,
+            cmd.test.as_deref(),
+        ),
     }
 }
 
@@ -646,7 +674,8 @@ mod tests {
             Cmd {
                 action: Action::Up,
                 set: Some("full".into()),
-                crates: vec![]
+                crates: vec![],
+                test: None,
             }
         );
         assert_eq!(parse_args(&args("down")).unwrap().action, Action::Down);
@@ -659,8 +688,19 @@ mod tests {
             Cmd {
                 action: Action::Test,
                 set: Some("pr".into()),
-                crates: vec!["hacivat-driver-pg".into(), "hacivat-session".into()]
+                crates: vec!["hacivat-driver-pg".into(), "hacivat-session".into()],
+                test: None,
             }
+        );
+        // ## m3a-t01b-seams
+        assert_eq!(
+            parse_args(&args(
+                "test --set full -p hacivat-exec --test docker_m3a_matrix"
+            ))
+            .unwrap()
+            .test
+            .as_deref(),
+            Some("docker_m3a_matrix")
         );
     }
 
@@ -679,6 +719,10 @@ mod tests {
             "status --verbose",
             "pin --set pr",
             "check-pins -p hacivat-session",
+            // ## m3a-t01b-seams
+            "test --set pr --test",
+            "test --set pr --test a --test b",
+            "up --set pr --test docker_m3a_matrix",
         ] {
             assert!(parse_args(&args(bad)).is_err(), "{bad:?} parsed");
         }
@@ -763,14 +807,33 @@ mod tests {
     #[test]
     fn test_runs_the_ignored_tests_of_the_chosen_crates() {
         assert_eq!(
-            test_args(&[]).join(" "),
+            test_args(&[], None).join(" "),
             "test -p hacivat-driver-pg -p hacivat-driver-mysql -p hacivat-driver-sqlite \
-             -p hacivat-session -p hacivat-testkit -- --ignored"
+             -p hacivat-session -p hacivat-testkit -p hacivat-exec -- --ignored"
         );
         assert_eq!(
-            test_args(&["hacivat-session".to_string()]).join(" "),
+            test_args(&["hacivat-session".to_string()], None).join(" "),
             "test -p hacivat-session -- --ignored"
         );
+    }
+
+    // ## m3a-t01b-seams
+
+    #[test]
+    fn test_target_passes_through_before_the_double_dash() {
+        let a = test_args(&["hacivat-exec".into()], Some("docker_m3a_matrix"));
+        let t = a.iter().position(|s| s == "--test").unwrap();
+        assert_eq!(a[t + 1], "docker_m3a_matrix");
+        assert!(t < a.iter().position(|s| s == "--").unwrap());
+        assert_eq!(
+            a.join(" "),
+            "test -p hacivat-exec --test docker_m3a_matrix -- --ignored"
+        );
+    }
+
+    #[test]
+    fn exec_is_a_default_docker_crate() {
+        assert!(DEFAULT_TEST_CRATES.contains(&"hacivat-exec"));
     }
 
     #[test]

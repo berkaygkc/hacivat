@@ -29,3 +29,5 @@ pub mod step_trail;
 pub mod text;
 pub mod titlebar;
 pub mod toast;
+// ## m3a-t01b-seams: the Overflow Rule toolbar (Task 21).
+pub mod toolbar;

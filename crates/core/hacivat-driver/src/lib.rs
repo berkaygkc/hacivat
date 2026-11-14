@@ -18,6 +18,8 @@ pub mod fake;
 pub mod registry;
 pub mod sanitize;
 pub mod server;
+// ## m3a-t01b-seams: typed streaming (HV-RES-04).
+pub mod typed;
 pub mod url;
 
 pub use catalog::{CatalogError, ConnTypeSpec, DefaultOption, EngineCatalog, EngineSpec};
@@ -34,3 +36,7 @@ pub use registry::DriverRegistry;
 pub use sanitize::{SanitizeInput, Violation, ViolationReason, sanitize};
 pub use server::{SemVerLoose, ServerInfo, Support, detect_mysql_family, support_status};
 pub use url::carries_secret; // ## m2b-t01-interfaces: the secret-scan invariant (M2a T7)
+// ## m3a-t01b-seams
+pub use typed::{
+    CloseHow, Closed, NoticeSeverity, QueryDone, QueryEvent, QuerySpec, ResultEnd, TypedCaps,
+};

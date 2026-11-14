@@ -20,6 +20,8 @@ fluent-syntax.workspace = true
 icu_plurals.workspace = true
 icu_locale.workspace = true
 icu_normalizer.workspace = true
+# ## m3a-t01b-seams: `gen-sql-tables` writes the keyword tables as `phf` maps (Task 3, P6).
+phf_codegen.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

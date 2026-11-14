@@ -45,3 +45,12 @@ produces = "ß"
 chord = "ctrl-alt-s"
 layout = "tr-f"
 produces = "µ"
+
+## m3a-t01b-seams
+# Cancel a run: DataGrip's Stop chord on Windows and Linux (R-M3-38); macOS keeps cmd-.
+
+[[binding]]
+chord = "ctrl-f2"
+command = "exec.cancel"
+context = "Console"
+platforms = ["windows", "linux"]

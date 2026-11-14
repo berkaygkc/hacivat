@@ -40,6 +40,8 @@ use serde::{Deserialize, Serialize};
 use crate::PendingChord;
 use crate::l10n_global::{L10nGlobal, WINDOW_TITLE, switch_locale, tr, ui_language};
 use crate::shell::hooks::{focused_contexts, hooks, key_capture};
+// ## m3a-t01b-seams
+use crate::shell::hooks::{CloseDecision, TabDecor, tab_close_decision};
 use crate::shell::keymap_state::shortcut_label;
 use crate::shell::layers::{DIALOG_CONTEXT, Layer, Layers, MENU_CONTEXT};
 use crate::shell::persist::LatestWriter;
@@ -49,6 +51,8 @@ use crate::shell::tiles::TileBounds;
 use crate::shell::tiles::{self, Seam, TileLayout};
 use crate::shell::{AppState, update_settings};
 use crate::theme_pref::{apply_theme, follow_appearance};
+use hacivat_proto::ProfileId;
+use hacivat_ui_core::gpui_surface::FluentBuilder as _;
 
 /// The `workspace.json` format version this build writes and reads.
 pub const WORKSPACE_STATE_VERSION: u32 = 1;
@@ -85,8 +89,16 @@ impl DemoCapsule {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum SavedKind {
-    Console { n: u32 },
-    Registered { name: String },
+    Console {
+        n: u32,
+        // ## m3a-t01b-seams: the console's connection (R-M3-37, P12). An M2b file has none;
+        // an unbound console writes none, so its JSON is unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+    },
+    Registered {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -118,6 +130,9 @@ pub struct Workspace {
     /// Views from the `explorer` and `connection_panel` hooks, built once (P17).
     explorer_view: Option<AnyView>,
     connection_panel_view: Option<AnyView>,
+    // ## m3a-t01b-seams
+    /// The `results_view` hook's tile, built once; `None` keeps the M1 tile.
+    results_view: Option<AnyView>,
     layers: Layers,
     focus: FocusHandle,
     drag: Option<Seam>,
@@ -173,16 +188,24 @@ impl Workspace {
         let slots = hooks(cx);
         let explorer_view = slots.explorer.map(|build| build(window, cx));
         let connection_panel_view = slots.connection_panel.map(|build| build(window, cx));
+        let results_view = slots.results_view.map(|build| build(window, cx));
         let mut ws = Self {
             tiles: TileLayout::default(),
             panes: PaneTree::new(TabId(0)),
-            tabs: BTreeMap::from([(TabId(0), TabKind::Console { n: 1 })]),
+            tabs: BTreeMap::from([(
+                TabId(0),
+                TabKind::Console {
+                    n: 1,
+                    profile: None,
+                },
+            )]),
             tab_views: HashMap::new(),
             kind_contexts: HashMap::new(),
             next_tab: 1,
             capsule: demo,
             explorer_view,
             connection_panel_view,
+            results_view,
             layers: Layers::default(),
             focus: cx.focus_handle(),
             drag: None,
@@ -252,7 +275,10 @@ impl Workspace {
                 .map(|(id, kind)| SavedTab {
                     id: *id,
                     kind: match kind {
-                        TabKind::Console { n } => SavedKind::Console { n: *n },
+                        TabKind::Console { n, profile } => SavedKind::Console {
+                            n: *n,
+                            profile: profile.map(|p| p.to_string()),
+                        },
                         TabKind::Registered(name) => SavedKind::Registered {
                             name: (*name).to_string(),
                         },
@@ -322,7 +348,7 @@ impl Workspace {
         self.tabs
             .values()
             .filter_map(|k| match k {
-                TabKind::Console { n } => Some(*n),
+                TabKind::Console { n, .. } => Some(*n),
                 TabKind::Registered(_) => None,
             })
             .max()
@@ -342,14 +368,75 @@ impl Workspace {
         }
     }
 
-    /// Opens `Console <n>` in the focused pane.
-    pub fn new_console_tab(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens `Console <n>` in the focused pane, bound to the `console_binding` hook's profile
+    /// (R-M3-37; unbound without the hook).
+    pub fn new_console_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let profile = hooks(cx).console_binding.and_then(|binding| binding(cx));
+        self.open_console_tab(profile, window, cx);
+    }
+
+    // ## m3a-t01b-seams
+
+    /// Opens `Console <n>` bound to `profile` in the focused pane, active; its tab.
+    pub fn open_console_tab(
+        &mut self,
+        profile: Option<ProfileId>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<TabId> {
         let n = self.next_console();
-        let Some(tab) = self.fresh_tab(TabKind::Console { n }) else {
-            return;
-        };
+        let tab = self.fresh_tab(TabKind::Console { n, profile })?;
         self.add_to_focused(tab);
         self.layout_changed(cx);
+        Some(tab)
+    }
+
+    /// Binds console `tab` to `profile` (the first connect binds the focused unbound console,
+    /// R-M3-37); saved with the layout. Nothing for a tab that is not a console.
+    pub fn set_console_profile(
+        &mut self,
+        tab: TabId,
+        profile: Option<ProfileId>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(TabKind::Console { profile: bound, .. }) = self.tabs.get_mut(&tab) {
+            *bound = profile;
+            self.layout_changed(cx);
+        }
+    }
+
+    /// The kind of `tab`, if it is open.
+    pub fn tab_kind(&self, tab: TabId) -> Option<TabKind> {
+        self.tabs.get(&tab).copied()
+    }
+
+    /// Closes `tab` without asking the close guard (the guard calls it after its prompt).
+    pub fn force_close_tab(&mut self, tab: TabId, cx: &mut Context<Self>) {
+        let pane = self
+            .panes
+            .panes
+            .iter()
+            .find(|(_, p)| p.tabs.contains(&tab))
+            .map(|(pane, _)| *pane);
+        match pane {
+            Some(pane) => self.close_tab(pane, tab, cx),
+            None => {
+                self.tabs.remove(&tab);
+                self.tab_views.remove(&tab);
+                self.layout_changed(cx);
+            }
+        }
+    }
+
+    /// `workspace.close_tab`: asks the tab close guard first, outside this view's update (the
+    /// guard may open a prompt on the workspace); `Defer` leaves the closing to the guard.
+    pub fn request_close_active_tab(ws: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
+        let Some(tab) = ws.read(cx).active_tab() else {
+            return;
+        };
+        if tab_close_decision(tab, window, cx) == CloseDecision::Proceed {
+            ws.update(cx, |ws, cx| ws.force_close_tab(tab, cx));
+        }
     }
 
     /// Closes the focused pane's active tab.
@@ -377,7 +464,9 @@ impl Workspace {
     /// focus.
     pub fn split_focused(&mut self, axis: Axis, _window: &mut Window, cx: &mut Context<Self>) {
         let n = self.next_console();
-        let Some(tab) = self.fresh_tab(TabKind::Console { n }) else {
+        // ## m3a-t01b-seams: bound like a new console tab (R-M3-37).
+        let profile = hooks(cx).console_binding.and_then(|binding| binding(cx));
+        let Some(tab) = self.fresh_tab(TabKind::Console { n, profile }) else {
             return;
         };
         if self.panes.panes.contains_key(&self.panes.focused) {
@@ -774,7 +863,11 @@ fn validate(
     let mut described: BTreeMap<TabId, Option<TabKind>> = BTreeMap::new();
     for tab in saved_tabs {
         let kind = match tab.kind {
-            SavedKind::Console { n } => Some(TabKind::Console { n }),
+            SavedKind::Console { n, profile } => Some(TabKind::Console {
+                n,
+                // An unreadable binding restores the console unbound.
+                profile: profile.and_then(|p| p.parse().ok()),
+            }),
             SavedKind::Registered { name } => registered(&name).map(TabKind::Registered),
         };
         if described.insert(tab.id, kind).is_some() {
@@ -1063,7 +1156,11 @@ impl Workspace {
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_hidden()
-                    .child(tiles::results(theme, cx)),
+                    // ## m3a-t01b-seams: the `results_view` hook's tile, else the M1 one.
+                    .child(match &self.results_view {
+                        Some(view) => view.clone().into_any_element(),
+                        None => tiles::results(theme, cx).into_any_element(),
+                    }),
             );
         let grabs: Vec<Div> = tiles::seam_grabs(&l)
             .into_iter()
@@ -1140,17 +1237,41 @@ impl Workspace {
         let Some(pane) = self.panes.panes.get(&id).cloned() else {
             return div().into_any_element();
         };
+        // ## m3a-t01b-seams: the `tab_decor` hook's title and mark (none: the kind's title).
+        let decor_of = hooks(cx).tab_decor;
+        let decor = |tab: TabId, cx: &App| {
+            decor_of
+                .as_ref()
+                .map(|decor| decor(tab, cx))
+                .unwrap_or_default()
+        };
         let specs: Vec<TabSpec> = pane
             .tabs
             .iter()
-            .map(|tab| TabSpec {
-                id: *tab,
-                title: self.tab_title(*tab, cx),
-                title_source: TextSource::Fluent,
-                dirty: false,
-                env: None,
+            .map(|tab| {
+                let TabDecor {
+                    title,
+                    title_source,
+                    env,
+                    ..
+                } = decor(*tab, cx);
+                let (title, title_source) = match title {
+                    Some(title) => (title, title_source),
+                    None => (self.tab_title(*tab, cx), TextSource::Fluent),
+                };
+                TabSpec {
+                    id: *tab,
+                    title,
+                    title_source,
+                    dirty: false,
+                    env,
+                }
             })
             .collect();
+        let hairline = pane
+            .tabs
+            .get(pane.active)
+            .is_some_and(|tab| decor(*tab, cx).hairline);
         let weak = cx.entity().downgrade();
         let on_close = weak.clone();
         let strip = TabStrip::new(id, specs)
@@ -1158,8 +1279,11 @@ impl Workspace {
             .on_activate(move |pane, tab, _, cx| {
                 let _ = weak.update(cx, |w, cx| w.activate_tab(pane, tab, cx));
             })
-            .on_close(move |pane, tab, _, cx| {
-                let _ = on_close.update(cx, |w, cx| w.close_tab(pane, tab, cx));
+            .on_close(move |pane, tab, window, cx| {
+                // ## m3a-t01b-seams: the close guard first, outside the workspace's update.
+                if tab_close_decision(tab, window, cx) == CloseDecision::Proceed {
+                    let _ = on_close.update(cx, |w, cx| w.close_tab(pane, tab, cx));
+                }
             });
         let content = match pane.tabs.get(pane.active) {
             Some(tab) => self.tab_content(*tab, theme, window, cx),
@@ -1197,6 +1321,18 @@ impl Workspace {
                     .min_h(px(0.0))
                     .child(content),
             )
+            // ## m3a-t01b-seams: the 1 px production hairline over the pane's top edge.
+            .when(hairline, |pane| {
+                pane.relative().child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(1.0))
+                        .bg(c.red.to_hsla()),
+                )
+            })
             .into_any_element()
     }
 
@@ -1207,13 +1343,40 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        match self.tabs.get(&tab) {
+        match self.tabs.get(&tab).copied() {
             Some(TabKind::Registered(_)) => match self.build_view(tab, window, cx) {
                 Some(view) => div().size_full().child(view).into_any_element(),
                 None => editor_empty(theme, cx),
             },
-            _ => editor_empty(theme, cx),
+            // ## m3a-t01b-seams: the `console_view` hook's view, built once per tab; its root
+            // takes the content area as the M2 home does (no wrapper).
+            Some(TabKind::Console { n, profile }) => {
+                match self.console_view(tab, n, profile, window, cx) {
+                    Some(view) => view.into_any_element(),
+                    None => editor_empty(theme, cx),
+                }
+            }
+            None => editor_empty(theme, cx),
         }
+    }
+
+    // ## m3a-t01b-seams
+    /// The view of console `tab` from the `console_view` hook, built once.
+    fn console_view(
+        &mut self,
+        tab: TabId,
+        n: u32,
+        profile: Option<ProfileId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyView> {
+        if let Some(view) = self.tab_views.get(&tab) {
+            return Some(view.clone());
+        }
+        let build = hooks(cx).console_view?;
+        let view = build(tab, n, profile, window, cx);
+        self.tab_views.insert(tab, view.clone());
+        Some(view)
     }
 }
 
@@ -1275,8 +1438,8 @@ impl Render for Workspace {
 }
 
 /// The editor area of a console with no connection: the `editor_empty` hook's element, else
-/// the M1 empty state.
-fn editor_empty(theme: &Theme, cx: &App) -> AnyElement {
+/// the M1 empty state. (## m3a-t01b-seams: `pub(crate)` for the console view stub.)
+pub(crate) fn editor_empty(theme: &Theme, cx: &App) -> AnyElement {
     if let Some(element) = hooks(cx).editor_empty {
         return element(theme, cx);
     }
@@ -1566,8 +1729,79 @@ mod validate_tests {
     fn console(id: u32, n: u32) -> SavedTab {
         SavedTab {
             id: TabId(id),
-            kind: SavedKind::Console { n },
+            kind: SavedKind::Console { n, profile: None },
         }
+    }
+
+    // ## m3a-t01b-seams
+
+    /// A `workspace.json` as M2b wrote it: consoles without a binding (P12, P18).
+    const M2B_WORKSPACE_JSON: &str = r#"{
+        "tiles": {"explorer_w": 260.0, "conn_panel_h": 180.0, "editor_h": 420.0,
+                  "inspector_w": 300.0, "explorer_visible": true},
+        "panes": {"root": {"Leaf": 0}, "panes": {"0": {"tabs": [0, 1], "active": 1}},
+                  "focused": 0},
+        "tabs": [{"id": 0, "kind": "console", "n": 1},
+                 {"id": 1, "kind": "registered", "name": "settings"}]
+    }"#;
+
+    fn first_console(s: &SavedState) -> &SavedKind {
+        s.tabs
+            .iter()
+            .map(|t| &t.kind)
+            .find(|k| matches!(k, SavedKind::Console { .. }))
+            .expect("a console tab")
+    }
+
+    #[test]
+    fn old_workspace_file_parses_with_the_new_console_field() {
+        let s: SavedState = serde_json::from_str(M2B_WORKSPACE_JSON).unwrap();
+        assert!(matches!(
+            first_console(&s),
+            SavedKind::Console {
+                n: 1,
+                profile: None
+            }
+        ));
+    }
+
+    #[test]
+    fn a_console_binding_round_trips_and_an_unbound_one_writes_no_field() {
+        let id: ProfileId = "6f1c2a4e-1d16-4a16-8a16-000000000016".parse().unwrap();
+        let bound = SavedKind::Console {
+            n: 2,
+            profile: Some(id.to_string()),
+        };
+        let json = serde_json::to_string(&bound).unwrap();
+        assert_eq!(serde_json::from_str::<SavedKind>(&json).unwrap(), bound);
+        let unbound = serde_json::to_string(&SavedKind::Console {
+            n: 1,
+            profile: None,
+        })
+        .unwrap();
+        assert!(!unbound.contains("profile"), "{unbound}");
+        // A restored binding becomes the tab's; a garbled one restores the console unbound.
+        let mut saved = two_panes();
+        saved.tabs[0].kind = bound;
+        saved.tabs[1].kind = SavedKind::Console {
+            n: 3,
+            profile: Some("not-a-uuid".into()),
+        };
+        let r = validate(saved, none, bounds()).unwrap();
+        assert_eq!(
+            r.tabs.get(&TabId(0)),
+            Some(&TabKind::Console {
+                n: 2,
+                profile: Some(id)
+            })
+        );
+        assert_eq!(
+            r.tabs.get(&TabId(1)),
+            Some(&TabKind::Console {
+                n: 3,
+                profile: None
+            })
+        );
     }
 
     fn two_panes() -> SavedState {

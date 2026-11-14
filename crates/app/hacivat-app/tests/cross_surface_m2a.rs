@@ -404,7 +404,12 @@ fn the_status_bar_and_the_sheet_use_the_shared_environment_words(cx: &mut TestAp
         matches!(live(vcx, "orders-prod"), LiveState::Connected(_))
     });
     let status = status_bar_text(vcx);
-    assert!(status.contains("üretim · okuma-yazma"), "{status}");
+    // ## m3a-t01b-seams (P21): a production profile's session is read-only since M3a
+    // (`connections/boot.rs`, `production_read_only`); the fake enforces nothing, so the guard.
+    assert!(
+        status.contains("üretim · salt okunur (korumalı)"),
+        "{status}"
+    );
 }
 
 /// A keyring whose deletes fail (a locked keychain).

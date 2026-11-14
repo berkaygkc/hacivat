@@ -113,6 +113,16 @@ jobs:
       - name: Test (4/4) app, scene-check + pseudo
         run: cargo test --locked -p hacivat-app --features scene-check,pseudo
 
+      # ## m3a-t01b-seams: full test set lines 6-8 (P10), which no job ran before.
+      - name: Test (6) testkit, ssh
+        run: cargo test --locked -p hacivat-testkit --features ssh
+
+      - name: Test (7) ui-editor, scene-check
+        run: cargo test --locked -p hacivat-ui-editor --features scene-check
+
+      - name: Test (8) ui-grid, test-support + scene-check
+        run: cargo test --locked -p hacivat-ui-grid --features test-support,scene-check
+
       # ## m3a-t01a-proofs
       # After every build of this job (clippy, release, the test builds): nothing under the
       # vendored pg_query was written or added, ignored paths included. Runners have no protoc,
@@ -202,6 +212,13 @@ jobs:
         run: cargo test --locked -p hacivat-l10n --features pseudo
       - name: Test (4/4) app, scene-check + pseudo
         run: cargo test --locked -p hacivat-app --features scene-check,pseudo
+      # ## m3a-t01b-seams: full test set lines 6-8 (P10).
+      - name: Test (6) testkit, ssh
+        run: cargo test --locked -p hacivat-testkit --features ssh
+      - name: Test (7) ui-editor, scene-check
+        run: cargo test --locked -p hacivat-ui-editor --features scene-check
+      - name: Test (8) ui-grid, test-support + scene-check
+        run: cargo test --locked -p hacivat-ui-grid --features test-support,scene-check
 
   # Spec 7.1 / F29: runtime language switching (tests of Tasks 13, 16 and 17).
   switch:

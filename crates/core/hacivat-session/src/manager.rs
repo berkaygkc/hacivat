@@ -51,7 +51,10 @@ use crate::session::{
     LivenessPolicy, LostState, Reconnector, RecoveryPolicy, Request, SessionEvent, SessionHandle,
     SessionManager, SessionSnapshot, SessionState, is_recovery_case,
 };
-use crate::test_conn::{TestReport, test_connection_continuing};
+use crate::test_conn::TestReport;
+// ## m3a-t01b-seams
+use crate::session::{SessionPolicy, effective_read_only};
+use crate::test_conn::test_connection_with_policy;
 
 /// How the bytes travel, as the capsule shows it (HV-CONN-01). Only `Direct` in M2a.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -146,6 +149,11 @@ pub struct ManagerConfig {
     /// B19: a lost default session reconnects with backoff; without it (M2a, R12) the profile
     /// is `Lost`.
     pub reconnect: bool,
+    // ## m3a-t01b-seams
+    /// R-M3-6 REVISED, R-M3-29: production-tagged profiles get read-only sessions and Test
+    /// connections (`effective_read_only`). Off in `default()` and `m2b()`; the app's boot
+    /// turns it on. M3b removes it when confirmations land.
+    pub production_read_only: bool,
 }
 
 impl Default for ManagerConfig {
@@ -157,6 +165,7 @@ impl Default for ManagerConfig {
             shutdown_budget: Duration::from_secs(2),
             presets: false,
             reconnect: false,
+            production_read_only: false,
         }
     }
 }
@@ -169,6 +178,8 @@ impl ManagerConfig {
         ManagerConfig {
             presets: true,
             reconnect: true,
+            // ## m3a-t01b-seams: unchanged for M2b callers; the app boot sets it.
+            production_read_only: false,
             ..ManagerConfig::default()
         }
     }
@@ -388,6 +399,10 @@ impl Shared {
             self.deps.clone(),
             budget.clone(),
         );
+        // ## m3a-t01b-seams: before any session exists (R-M3-29, P4).
+        sessions.set_policy(SessionPolicy {
+            production_read_only: self.config.production_read_only,
+        });
         // ## m2b-t22-live (T17 carry): the gaps of the profile's other sessions (pooled
         // read-only ones) are relayed as the default session's are (Q35).
         let weak = Arc::downgrade(self);
@@ -580,7 +595,8 @@ impl Shared {
         };
         let (progress_tx, mut progress_rx) = watch::channel(fresh_progress());
         let req = ConnectRequest {
-            read_only: profile.read_only,
+            // ## m3a-t01b-seams (R-M3-29)
+            read_only: effective_read_only(&profile, self.config.production_read_only),
             profile: profile.clone(),
             draft_password: draft,
             purpose: Purpose::Main,
@@ -1274,10 +1290,20 @@ impl ConnectionManager {
         let (result_tx, result) = oneshot::channel();
         let deps = self.shared.deps.clone();
         let cancel = token.clone();
+        // ## m3a-t01b-seams: a Test of a production profile runs read-only under the policy
+        // (R-M3-29), so it exercises the path its sessions take.
+        let production_read_only = self.shared.config.production_read_only;
         self.shared.rt.spawn(async move {
-            let report =
-                test_connection_continuing(&deps, draft, prior_rejections, ix, cancel, progress_tx)
-                    .await;
+            let report = test_connection_with_policy(
+                &deps,
+                draft,
+                prior_rejections,
+                production_read_only,
+                ix,
+                cancel,
+                progress_tx,
+            )
+            .await;
             let _ = result_tx.send(report);
         });
         TestHandle::new(progress, result, token)

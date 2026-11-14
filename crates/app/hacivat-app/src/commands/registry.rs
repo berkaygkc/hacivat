@@ -18,10 +18,43 @@ use crate::commands::palette;
 use crate::l10n_global::{L10nGlobal, switch_locale, text_fn, text_fn_id, tr, ui_language};
 use crate::menus;
 use crate::shell::{AppState, Workspace, flush_pending_writes, update_settings};
+// ## m3a-t01b-seams
+use crate::shell::CloseDecision;
 use crate::theme_pref::apply_theme;
 
 /// The key context every command here belongs to.
 const WORKSPACE: &str = "Workspace";
+
+// ## m3a-t01b-seams
+/// `app.quit`: asks the quit guard (`ShellHooks::quit_guard`) first and quits only on
+/// `Proceed`; on `Defer` the guard calls `cx.quit()` itself after its prompt.
+pub fn request_quit(cx: &mut App) -> CloseDecision {
+    let decision = crate::shell::hooks::quit_decision(cx);
+    if decision == CloseDecision::Proceed {
+        #[cfg(feature = "test-support")]
+        {
+            cx.default_global::<QuitRequests>().0 += 1;
+        }
+        cx.quit();
+    }
+    decision
+}
+
+/// How often the app asked the platform to quit (test seam, feature `test-support`: the test
+/// platform's quit does nothing observable).
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QuitRequests(pub u32);
+
+#[cfg(feature = "test-support")]
+impl hacivat_ui_core::gpui_surface::Global for QuitRequests {}
+
+/// How often the app asked the platform to quit (test seam, feature `test-support`).
+#[cfg(feature = "test-support")]
+pub fn quit_requests(cx: &App) -> u32 {
+    cx.try_global::<QuitRequests>().map_or(0, |q| q.0)
+}
+
 /// The tab kind Task 17 registers for the settings.
 const SETTINGS_TAB: &str = "settings";
 
@@ -74,7 +107,12 @@ pub fn register_workspace_actions(reg: &mut ActionRegistry) {
         (
             "workspace.close_tab",
             ids::hv::CMD_WORKSPACE_CLOSE_TAB.id,
-            on_workspace(Workspace::close_active_tab),
+            // ## m3a-t01b-seams: through the tab close guard (the open-transaction prompt).
+            Rc::new(|window, cx| {
+                if let Some(ws) = window.root::<Workspace>().flatten() {
+                    Workspace::request_close_active_tab(&ws, window, cx);
+                }
+            }),
             always,
         ),
         (
@@ -159,7 +197,10 @@ pub fn register_workspace_actions(reg: &mut ActionRegistry) {
         (
             "app.quit",
             ids::hv::CMD_APP_QUIT.id,
-            Rc::new(|_, cx| cx.quit()),
+            // ## m3a-t01b-seams: through the quit guard (the open-transaction prompt).
+            Rc::new(|_, cx| {
+                request_quit(cx);
+            }),
             always,
         ),
         (

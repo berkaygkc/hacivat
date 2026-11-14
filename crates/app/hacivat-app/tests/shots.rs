@@ -61,15 +61,18 @@
 //!
 //! Windows has no headless renderer at the pin: the test prints `shots: no headless renderer
 //! (R8)` and passes.
+// ## m3a-t01b-seams: the shared app test helpers (`stop_core_runtime`, P20).
+#[path = "support/mod.rs"]
+mod support;
+
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hacivat_app::connections::dialog::ssh::{self, SshImportEnv};
 use hacivat_app::connections::{
-    ConnectionsBoot, ConnectionsModel, capsule, cert_dialog, delete, dialog, error_view, explorer,
-    hostkey_prompt, import, kbd_prompt, plaintext_prompt, prod_prompt, secret_prompt, test_strip,
-    vault_dialog,
+    ConnectionsBoot, capsule, cert_dialog, delete, dialog, error_view, explorer, hostkey_prompt,
+    import, kbd_prompt, plaintext_prompt, prod_prompt, secret_prompt, test_strip, vault_dialog,
 };
 use hacivat_app::l10n_global::text_fn_id;
 use hacivat_app::menus;
@@ -1193,35 +1196,12 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     }
     image.save(dir.join(&name)).expect("write the PNG");
     println!("shot {name}: {} labels", frame.len());
-    stop_core_runtime(&mut cx);
+    support::stop_core_runtime(&mut cx);
     failures
 }
 
 // ## m2b-t24-shots
-/// How long the core runtime may take to stop before a shot's app is dropped.
-const TEARDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// The teardown deadlock (T22 round 1; it recurred in Task 24): the quit handler stops the core
-/// runtime with a 200 ms budget while GPUI's test scheduler blocks on the quit futures, and a
-/// worker that outlives the budget drops the event relay's sender, whose wake-up takes the
-/// scheduler's locks in the other order (a lock-order inversion in the GPUI fork's
-/// `TestScheduler`). Stopping the runtime here first, outside that block and with room to
-/// finish, leaves no worker to race the teardown; the quit handler's own stop is then a no-op.
-///
-/// Residual (fix round 1, M1): the inversion is in the fork's test scheduler, not in this
-/// harness, so a `TestAppContext` test that quits for real while core workers still run (the
-/// quit tests of `connections_live.rs`: `quit_closes_every_connection`,
-/// `quit_during_connect_cancels_within_budget`, `quit_drains_queued_profile_writes`) can hit
-/// the same deadlock intermittently. Shipped code is not affected: production runs GPUI's
-/// platform scheduler.
-fn stop_core_runtime(cx: &mut HeadlessAppContext) {
-    cx.update(|cx| {
-        if let Some(m) = cx.try_global::<ConnectionsModel>() {
-            m.core_runtime().shutdown(TEARDOWN_BUDGET);
-        }
-    });
-    cx.run_until_parked();
-}
+// ## m3a-t01b-seams: `stop_core_runtime` and `TEARDOWN_BUDGET` moved to `support/mod.rs` (P20).
 
 /// The main check: renders the shots named in `names` (file names), then fails with every
 /// violation found. Only a full run (`all`) removes the PNGs already in the directory.

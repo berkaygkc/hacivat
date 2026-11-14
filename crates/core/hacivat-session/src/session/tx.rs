@@ -73,6 +73,24 @@ pub struct TxState {
     pub since: Option<Instant>,
     /// Statements in the open transaction.
     pub statements: u32,
+    // ## m3a-t01b-seams
+    /// Whose transaction is open (Task 18 keeps it; the console UX shows only the user's).
+    pub owner: TxOwner,
+}
+
+// ## m3a-t01b-seams
+/// Who opened the session's transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TxOwner {
+    /// No transaction, or one nobody claimed.
+    #[default]
+    None,
+    /// The user (`BEGIN`, Manual mode).
+    User,
+    /// Hacivat, around a PostgreSQL console cursor (R-M3-23).
+    Cursor,
+    /// The read-only guard's plan.
+    Guard,
 }
 
 impl TxState {

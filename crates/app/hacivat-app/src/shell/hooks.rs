@@ -6,6 +6,11 @@ use hacivat_ui::capsule::{CapsuleModel, CapsuleSegment};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, FocusHandle, Global, KeyDownEvent, Pixels, Point, Window,
 };
+// ## m3a-t01b-seams
+use hacivat_proto::ProfileId;
+use hacivat_ui::panes::{EnvMark, TabId};
+use hacivat_ui::text::TextSource;
+use hacivat_ui_core::gpui_surface::SharedString;
 use hacivat_ui_core::keymap::ContextStack;
 use hacivat_ui_core::theme::Theme;
 
@@ -27,6 +32,57 @@ pub type StatusFn = Rc<dyn Fn(&Theme, &App) -> Vec<AnyElement>>;
 /// Escape with no layer open; returning `true` consumes it.
 pub type EscapeFn = Rc<dyn Fn(&mut Window, &mut App) -> bool>;
 
+// ## m3a-t01b-seams
+/// Builds a console tab's view, once per tab (like a registered tab's): the tab, its console
+/// number and its saved binding (P12). The view's root element takes the tab's content area
+/// as the M2 home does, so an unbound console looks exactly like today's.
+pub type ConsoleViewFn =
+    Rc<dyn Fn(TabId, u32, Option<ProfileId>, &mut Window, &mut App) -> AnyView>;
+
+/// How a tab is decorated: its title in place of the kind's (with its text source), its
+/// environment mark, and the 1 px production hairline at the pane's top edge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabDecor {
+    pub title: Option<SharedString>,
+    pub title_source: TextSource,
+    pub env: Option<EnvMark>,
+    pub hairline: bool,
+}
+
+impl Default for TabDecor {
+    /// No decoration: the kind's title (Fluent), no mark, no hairline.
+    fn default() -> Self {
+        TabDecor {
+            title: None,
+            title_source: TextSource::Fluent,
+            env: None,
+            hairline: false,
+        }
+    }
+}
+
+/// A tab's decoration, read on every render.
+pub type TabDecorFn = Rc<dyn Fn(TabId, &App) -> TabDecor>;
+
+/// Whether a close (of a tab, or of the app) goes ahead now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CloseDecision {
+    Proceed,
+    /// The guard asks first (the open-transaction prompt) and closes later itself.
+    Defer,
+}
+
+/// Asked before a tab closes; `Defer`: the guard closes it later with
+/// `Workspace::force_close_tab`.
+pub type TabCloseGuardFn = Rc<dyn Fn(TabId, &mut Window, &mut App) -> CloseDecision>;
+
+/// Asked before `app.quit`; `Defer`: the guard calls `cx.quit()` later.
+pub type QuitGuardFn = Rc<dyn Fn(&mut App) -> CloseDecision>;
+
+/// The profile a new console tab binds to (R-M3-37: the capsule's connected profile); `None`
+/// opens it unbound.
+pub type ConsoleBindingFn = Rc<dyn Fn(&App) -> Option<ProfileId>>;
+
 /// The shell's hook slots. With a slot empty, the shell draws its M1 element.
 ///
 /// Keys reach commands through the key-capture hook (Task 16's dispatcher) and the keymap data,
@@ -46,6 +102,16 @@ pub struct ShellHooks {
     pub capsule_segment: Option<SegmentFn>,
     pub status_left: Option<StatusFn>,
     pub escape: Option<EscapeFn>,
+    // ## m3a-t01b-seams (empty slots keep today's rendering)
+    /// A console tab's view (Task 32's host; Task 1b's stub shows the M2 home or a registered
+    /// test console's editor).
+    pub console_view: Option<ConsoleViewFn>,
+    /// The results tile (read once, in `Workspace::new`; Task 30).
+    pub results_view: Option<ViewBuilder>,
+    pub tab_decor: Option<TabDecorFn>,
+    pub tab_close_guard: Option<TabCloseGuardFn>,
+    pub quit_guard: Option<QuitGuardFn>,
+    pub console_binding: Option<ConsoleBindingFn>,
 }
 
 impl Global for ShellHooks {}
@@ -88,6 +154,55 @@ pub fn set_status_left(cx: &mut App, hook: StatusFn) {
 /// Fills the Escape slot.
 pub fn set_escape(cx: &mut App, hook: EscapeFn) {
     cx.default_global::<ShellHooks>().escape = Some(hook);
+}
+
+// ## m3a-t01b-seams
+
+/// Fills the console view's slot.
+pub fn set_console_view(cx: &mut App, hook: ConsoleViewFn) {
+    cx.default_global::<ShellHooks>().console_view = Some(hook);
+}
+
+/// Fills the results tile's slot (before the workspace opens).
+pub fn set_results_view(cx: &mut App, hook: ViewBuilder) {
+    cx.default_global::<ShellHooks>().results_view = Some(hook);
+}
+
+/// Fills the tab decoration's slot.
+pub fn set_tab_decor(cx: &mut App, hook: TabDecorFn) {
+    cx.default_global::<ShellHooks>().tab_decor = Some(hook);
+}
+
+/// Fills the tab close guard's slot.
+pub fn set_tab_close_guard(cx: &mut App, hook: TabCloseGuardFn) {
+    cx.default_global::<ShellHooks>().tab_close_guard = Some(hook);
+}
+
+/// Fills the quit guard's slot.
+pub fn set_quit_guard(cx: &mut App, hook: QuitGuardFn) {
+    cx.default_global::<ShellHooks>().quit_guard = Some(hook);
+}
+
+/// Fills the new console's binding slot.
+pub fn set_console_binding(cx: &mut App, hook: ConsoleBindingFn) {
+    cx.default_global::<ShellHooks>().console_binding = Some(hook);
+}
+
+/// The quit guard's decision (`Proceed` without a guard).
+pub(crate) fn quit_decision(cx: &mut App) -> CloseDecision {
+    match hooks(cx).quit_guard {
+        Some(guard) => guard(cx),
+        None => CloseDecision::Proceed,
+    }
+}
+
+/// The tab close guard's decision for `tab` (`Proceed` without a guard). Called outside any
+/// workspace update, so the guard may open a layer on the workspace.
+pub(crate) fn tab_close_decision(tab: TabId, window: &mut Window, cx: &mut App) -> CloseDecision {
+    match hooks(cx).tab_close_guard {
+        Some(guard) => guard(tab, window, cx),
+        None => CloseDecision::Proceed,
+    }
 }
 
 /// The installed hooks (a clone: the slots are `Rc`s), or none.

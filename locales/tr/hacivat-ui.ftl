@@ -1323,3 +1323,10 @@ hv-conn-diag-tls-nov-pinned = TLS · sabitlendi
 hv-conn-fix-ssh = SSH üzerinden bağlan…
 # Review: PO
 hv-conn-secret-vault = kasa · kalıcı
+
+## m3a-t01b-seams
+
+# Review: PO
+hv-menu-edit = Düzen
+# Review: PO
+hv-console-run-unavailable = Bu konsolda sorgu çalıştırma henüz kullanılamıyor.

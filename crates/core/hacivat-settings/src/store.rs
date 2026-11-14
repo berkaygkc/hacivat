@@ -9,8 +9,8 @@ use unic_langid::LanguageIdentifier;
 
 use crate::fsio;
 use crate::schema::{
-    KeymapPreset, LanguagePref, SETTINGS_VERSION, Settings, TextRenderingPref, ThemePref,
-    TimeZonePref,
+    CaretBlinkPref, EditorSettings, KeymapPreset, LanguagePref, SETTINGS_VERSION, Settings,
+    TabSize, TextRenderingPref, ThemePref, TimeZonePref,
 };
 
 /// A problem found while loading; Task 13 shows each code as a toast.
@@ -72,6 +72,20 @@ pub fn load(path: &Path) -> LoadOutcome {
     if let Some(km) = section(root, "keymap", d) {
         s.keymap.preset = read_key(km, "keymap", "preset", d);
     }
+    // ## m3a-t01b-seams
+    if let Some(ed) = section(root, "editor", d) {
+        let def = EditorSettings::default();
+        s.editor.tab_size = read_key_or(ed, "editor", "tab_size", def.tab_size, d);
+        s.editor.insert_spaces = read_key_or(ed, "editor", "insert_spaces", def.insert_spaces, d);
+        s.editor.copy_line_without_selection = read_key_or(
+            ed,
+            "editor",
+            "copy_line_without_selection",
+            def.copy_line_without_selection,
+            d,
+        );
+        s.editor.caret_blink = read_key_or(ed, "editor", "caret_blink", def.caret_blink, d);
+    }
     out
 }
 
@@ -95,6 +109,31 @@ pub fn save_changes(path: &Path, new: &Settings) -> io::Result<()> {
     write_key(&mut doc, "ui", "theme", &new.ui.theme);
     write_key(&mut doc, "ui", "text_rendering", &new.ui.text_rendering);
     write_key(&mut doc, "keymap", "preset", &new.keymap.preset);
+    // ## m3a-t01b-seams
+    let def = EditorSettings::default();
+    let ed = &new.editor;
+    write_key_or(&mut doc, "editor", "tab_size", &ed.tab_size, &def.tab_size);
+    write_key_or(
+        &mut doc,
+        "editor",
+        "insert_spaces",
+        &ed.insert_spaces,
+        &def.insert_spaces,
+    );
+    write_key_or(
+        &mut doc,
+        "editor",
+        "copy_line_without_selection",
+        &ed.copy_line_without_selection,
+        &def.copy_line_without_selection,
+    );
+    write_key_or(
+        &mut doc,
+        "editor",
+        "caret_blink",
+        &ed.caret_blink,
+        &def.caret_blink,
+    );
     fsio::atomic_write(path, doc.to_string().as_bytes())
 }
 
@@ -125,16 +164,33 @@ fn read_key<T: Pref>(
     key: &str,
     diags: &mut Vec<SettingsDiag>,
 ) -> T {
+    read_key_or(table, section, key, T::default(), diags)
+}
+
+/// [`read_key`] with the key's own default (## m3a-t01b-seams: a `bool` key that defaults to
+/// `true`).
+fn read_key_or<T: Pref>(
+    table: &dyn TableLike,
+    section: &str,
+    key: &str,
+    default: T,
+    diags: &mut Vec<SettingsDiag>,
+) -> T {
     match table.get(key) {
-        None => T::default(),
+        None => default,
         Some(item) => T::from_item(item).unwrap_or_else(|| {
             diags.push(diag("settings-invalid-value", &format!("{section}.{key}")));
-            T::default()
+            default
         }),
     }
 }
 
 fn write_key<T: Pref>(doc: &mut DocumentMut, section: &str, key: &str, new: &T) {
+    write_key_or(doc, section, key, new, &T::default());
+}
+
+/// [`write_key`] with the key's own default (## m3a-t01b-seams).
+fn write_key_or<T: Pref>(doc: &mut DocumentMut, section: &str, key: &str, new: &T, default: &T) {
     let existing = doc
         .get(section)
         .and_then(Item::as_table_like)
@@ -142,10 +198,10 @@ fn write_key<T: Pref>(doc: &mut DocumentMut, section: &str, key: &str, new: &T) 
     match existing {
         // Unchanged: the file already means this value (even if spelled differently).
         Some(item) if T::from_item(item).as_ref() == Some(new) => return,
-        None if *new == T::default() => return,
+        None if new == default => return,
         _ => {}
     }
-    let mut v = Value::from(new.as_text());
+    let mut v = new.to_value();
     if let Some(old) = existing.and_then(Item::as_value) {
         *v.decor_mut() = old.decor().clone();
     }
@@ -157,12 +213,16 @@ fn write_key<T: Pref>(doc: &mut DocumentMut, section: &str, key: &str, new: &T) 
     }
 }
 
-/// A setting that is stored as a TOML string.
+/// A setting that is stored as a TOML string (an integer or a boolean overrides `from_item` and
+/// `to_value`, ## m3a-t01b-seams).
 trait Pref: Sized + PartialEq + Default {
     fn parse(text: &str) -> Option<Self>;
     fn as_text(&self) -> String;
     fn from_item(item: &Item) -> Option<Self> {
         item.as_str().and_then(Self::parse)
+    }
+    fn to_value(&self) -> Value {
+        Value::from(self.as_text())
     }
 }
 
@@ -256,6 +316,63 @@ impl Pref for KeymapPreset {
         match self {
             Self::Hacivat => "hacivat",
             Self::Datagrip => "datagrip",
+        }
+        .to_owned()
+    }
+}
+
+// ## m3a-t01b-seams
+
+/// `editor.tab_size`: a TOML integer, 1 to 16.
+impl Pref for TabSize {
+    fn parse(text: &str) -> Option<Self> {
+        text.parse::<u8>().ok().and_then(TabSize::new)
+    }
+    fn as_text(&self) -> String {
+        self.get().to_string()
+    }
+    fn from_item(item: &Item) -> Option<Self> {
+        item.as_integer()
+            .and_then(|v| u8::try_from(v).ok())
+            .and_then(TabSize::new)
+    }
+    fn to_value(&self) -> Value {
+        Value::from(i64::from(self.get()))
+    }
+}
+
+/// A TOML boolean (`editor.insert_spaces`, `editor.copy_line_without_selection`).
+impl Pref for bool {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        }
+    }
+    fn as_text(&self) -> String {
+        self.to_string()
+    }
+    fn from_item(item: &Item) -> Option<Self> {
+        item.as_bool()
+    }
+    fn to_value(&self) -> Value {
+        Value::from(*self)
+    }
+}
+
+impl Pref for CaretBlinkPref {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "system" => Some(Self::System),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+    fn as_text(&self) -> String {
+        match self {
+            Self::System => "system",
+            Self::Off => "off",
         }
         .to_owned()
     }
@@ -452,5 +569,51 @@ mod tests {
         save_changes(&p, &s).unwrap();
         let t = std::fs::read_to_string(&p).unwrap();
         assert!(t.contains("them = \"light\"") && t.contains("theme = \"light\""));
+    }
+
+    // ## m3a-t01b-seams
+    #[test]
+    fn editor_keys_load_and_bad_ones_fall_back_alone() {
+        let p = write_tmp(
+            "[editor]\ntab_size = 2\ninsert_spaces = false\ncopy_line_without_selection = \"yes\"\ncaret_blink = \"off\"\n",
+        );
+        let o = load(&p);
+        let e = o.settings.editor;
+        assert_eq!(e.tab_size, TabSize::new(2).unwrap());
+        assert!(!e.insert_spaces);
+        assert!(
+            e.copy_line_without_selection,
+            "the bad value keeps the default"
+        );
+        assert_eq!(e.caret_blink, CaretBlinkPref::Off);
+        assert_eq!(
+            o.diags,
+            vec![SettingsDiag {
+                code: "settings-invalid-value",
+                key: "editor.copy_line_without_selection".into()
+            }]
+        );
+        let o = load(&write_tmp("[editor]\ntab_size = 40\n"));
+        assert_eq!(o.settings.editor.tab_size, TabSize::default());
+        assert_eq!(o.diags.len(), 1);
+    }
+
+    #[test]
+    fn editor_keys_round_trip_and_defaults_write_nothing() {
+        let p = write_tmp("[ui]\ntheme = \"light\"\n");
+        let mut s = load(&p).settings;
+        save_changes(&p, &s).unwrap();
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("[editor]"));
+        s.editor.tab_size = TabSize::new(8).unwrap();
+        s.editor.insert_spaces = false;
+        s.editor.caret_blink = CaretBlinkPref::Off;
+        save_changes(&p, &s).unwrap();
+        let t = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            t.contains("tab_size = 8") && t.contains("insert_spaces = false"),
+            "{t}"
+        );
+        assert!(!t.contains("copy_line_without_selection"), "{t}");
+        assert_eq!(load(&p).settings.editor, s.editor);
     }
 }

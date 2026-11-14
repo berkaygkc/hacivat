@@ -3267,18 +3267,29 @@ dependencies = [
  "gpui",
  "hacivat-app",
  "hacivat-driver",
+ "hacivat-exec",
  "hacivat-l10n",
  "hacivat-net",
  "hacivat-proto",
+ "hacivat-results",
  "hacivat-secrets",
  "hacivat-session",
  "hacivat-settings",
+ "hacivat-sql-editor",
  "hacivat-testkit",
+ "hacivat-text",
  "hacivat-ui",
  "hacivat-ui-core",
+ "hacivat-ui-editor",
+ "hacivat-ui-grid",
+ "hacivat-values",
  "secrecy",
  "serde",
  "serde_json",
+ "smallvec",
+ "sql-dialect",
+ "sql-split",
+ "sql-text",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -3293,10 +3304,12 @@ version = "0.0.0"
 name = "hacivat-driver"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "futures",
  "hacivat-l10n",
  "hacivat-net",
  "hacivat-proto",
+ "hacivat-values",
  "percent-encoding",
  "regex",
  "secrecy",
@@ -3314,6 +3327,7 @@ dependencies = [
  "hacivat-net",
  "hacivat-proto",
  "hacivat-testkit",
+ "hacivat-values",
  "mysql_async",
  "rcgen",
  "rustls",
@@ -3327,11 +3341,14 @@ dependencies = [
 name = "hacivat-driver-pg"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "futures",
  "hacivat-driver",
  "hacivat-net",
  "hacivat-proto",
  "hacivat-testkit",
+ "hacivat-values",
+ "postgres-types",
  "rustls",
  "secrecy",
  "tokio",
@@ -3348,9 +3365,34 @@ dependencies = [
  "hacivat-guard",
  "hacivat-net",
  "hacivat-proto",
+ "hacivat-values",
  "rusqlite",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "hacivat-exec"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "hacivat-driver",
+ "hacivat-net",
+ "hacivat-proto",
+ "hacivat-results",
+ "hacivat-secrets",
+ "hacivat-session",
+ "hacivat-testkit",
+ "hacivat-values",
+ "sql-dialect",
+ "sql-lexer",
+ "sql-oracle-pg",
+ "sql-split",
+ "sql-text",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3436,6 +3478,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hacivat-results"
+version = "0.0.0"
+dependencies = [
+ "arc-swap",
+ "futures",
+ "hacivat-values",
+ "tokio",
+]
+
+[[package]]
 name = "hacivat-secrets"
 version = "0.0.0"
 dependencies = [
@@ -3464,9 +3516,11 @@ dependencies = [
  "hacivat-guard",
  "hacivat-net",
  "hacivat-proto",
+ "hacivat-results",
  "hacivat-secrets",
  "hacivat-settings",
  "hacivat-testkit",
+ "hacivat-values",
  "secrecy",
  "tempfile",
  "tokio",
@@ -3491,6 +3545,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hacivat-sql-editor"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "gpui",
+ "hacivat-text",
+ "hacivat-ui-core",
+ "hacivat-ui-editor",
+ "proptest",
+ "ropey",
+ "smallvec",
+ "sql-dialect",
+ "sql-lexer",
+ "sql-split",
+ "sql-text",
+ "tokio",
+]
+
+[[package]]
 name = "hacivat-testkit"
 version = "0.0.0"
 dependencies = [
@@ -3501,6 +3574,19 @@ dependencies = [
  "tokio",
  "toml 1.2.1+spec-1.1.0",
  "yaml-rust2",
+]
+
+[[package]]
+name = "hacivat-text"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "ropey",
+ "smallvec",
+ "twox-hash",
+ "unicode-ident",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
@@ -3528,6 +3614,7 @@ dependencies = [
  "gpui_platform",
  "hacivat-bench",
  "icu_normalizer",
+ "libc",
  "mach2",
  "objc2 0.6.5",
  "raw-window-handle",
@@ -3535,6 +3622,48 @@ dependencies = [
  "serde",
  "toml 1.2.1+spec-1.1.0",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "hacivat-ui-editor"
+version = "0.0.0"
+dependencies = [
+ "gpui",
+ "hacivat-text",
+ "hacivat-ui",
+ "hacivat-ui-core",
+ "lru",
+ "smallvec",
+ "twox-hash",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "hacivat-ui-grid"
+version = "0.0.0"
+dependencies = [
+ "bitflags 2.13.2",
+ "gpui",
+ "hacivat-ui",
+ "hacivat-ui-core",
+ "smallvec",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "hacivat-values"
+version = "0.0.0"
+dependencies = [
+ "bitflags 2.13.2",
+ "bytes",
+ "fixed_decimal",
+ "hacivat-proto",
+ "icu_decimal",
+ "icu_locale",
+ "jiff",
+ "proptest",
+ "smallvec",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -6085,6 +6214,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "phf_codegen"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49aa7f9d80421bca176ca8dbfebe668cc7a2684708594ec9f3c0db0805d5d6e1"
+dependencies = [
+ "phf_generator",
+ "phf_shared",
+]
+
+[[package]]
 name = "phf_generator"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8165,10 +8304,67 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
 
 [[package]]
+name = "sql-dialect"
+version = "0.0.0"
+dependencies = [
+ "bitflags 2.13.2",
+ "phf",
+ "proptest",
+ "sql-text",
+]
+
+[[package]]
+name = "sql-lexer"
+version = "0.0.0"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "proptest",
+ "smallvec",
+ "sql-dialect",
+ "sql-testkit",
+ "sql-text",
+]
+
+[[package]]
 name = "sql-oracle-pg"
 version = "0.0.0"
 dependencies = [
  "pg_query",
+ "sql-text",
+ "text-size",
+]
+
+[[package]]
+name = "sql-split"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "rusqlite",
+ "smallvec",
+ "sql-dialect",
+ "sql-lexer",
+ "sql-oracle-pg",
+ "sql-testkit",
+ "sql-text",
+ "twox-hash",
+]
+
+[[package]]
+name = "sql-testkit"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "sql-dialect",
+ "sql-lexer",
+ "sql-split",
+ "toml 1.2.1+spec-1.1.0",
+]
+
+[[package]]
+name = "sql-text"
+version = "0.0.0"
+dependencies = [
  "text-size",
 ]
 
@@ -8691,8 +8887,6 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a528f7d280f6d5b9cd149635c8705b0dd049754bc67d81d31fa25169a93809d3"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -10582,6 +10776,7 @@ dependencies = [
  "icu_normalizer",
  "icu_plurals",
  "image",
+ "phf_codegen",
  "serde_json",
  "tempfile",
  "toml 1.2.1+spec-1.1.0",

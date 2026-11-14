@@ -160,3 +160,30 @@ that ends the test binary when a cycle hangs:
   expects exit 86 and a message naming the cycle.
 
 Production is not affected: it runs GPUI's platform scheduler.
+
+## m3a-t01b — seams
+
+**The SQL crates stay runtime-free and core-free.** `check-deps` gains four rules for M3a:
+
+- `SqlNotRuntimeFree`: a crate under `crates/sql` (except the test kit) may not depend, normally,
+  on `tokio`, `futures`, `async-std`, `smol`, `gpui`, `hacivat-l10n`, `salsa` or `sql-sema`
+  (`SQL_FORBIDDEN`: the guard's `GUARD_FORBIDDEN`, whole, plus the two other runtimes), so text
+  analysis stays synchronous and testable without a runtime.
+- `SqlReachesCore`: no SQL crate depends on a core `hacivat-*` crate (any `hacivat-*` package
+  outside the UI and app layers counts as core, so a new one fails closed); the SQL layer sits
+  below the core, and the app adapts between them.
+- `BackendOutsideOwner`: only `sql-oracle-pg` depends on `pg_query` (libpg_query stays behind one
+  crate and its stack guard).
+- `TextCoreNotHeadless`: `hacivat-text` never reaches `hacivat-ui-core` or `gpui`.
+
+**M5's exemptions, named now (P22).** Spec §5.1 rule 3 restricts only `sql-safety`,
+`sql-resolve`, `sql-parser` and `hacivat-guard`; M5's incremental analysis crates `sql-sema` and
+`sql-ide` will use `salsa`. M3a keeps `salsa` and `sql-sema` forbidden for every M3a SQL crate;
+when M5 adds `sql-sema` and `sql-ide`, they (and only they) are exempted from the `salsa` part of
+`SqlNotRuntimeFree`, by name, in that task's section of this ADR.
+
+**Fail-closed stubs.** Until their tasks land, the lexer returns one `Unknown` token for the whole
+text, the splitter one `Heuristic` statement, `exec_range::resolve` `NothingToRun`,
+`head::cursor_eligible` `false`, `split_with_parser` an error, and `lex_profile` an error for
+the engines M3a does not lex (SQL Server, ClickHouse, Oracle). `SqlDocument` and `DocSnapshot`
+work (they hold the text and its version; the execution split is computed once per snapshot).

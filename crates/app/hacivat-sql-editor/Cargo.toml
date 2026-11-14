@@ -1,0 +1,30 @@
+[package]
+name = "hacivat-sql-editor"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The SQL language service of the console editor: off-thread analysis, lexical highlighting, the Run preview, token words"
+
+# App layer: it joins the editor (Ui) and the SQL text crates (Core). The worker runs on the
+# GPUI background executor and hands results back over a `tokio::sync::watch` (P6).
+[dependencies]
+hacivat-ui-editor.workspace = true
+hacivat-ui-core.workspace = true
+hacivat-text.workspace = true
+sql-split.workspace = true
+sql-lexer.workspace = true
+sql-dialect.workspace = true
+sql-text.workspace = true
+smallvec.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+futures.workspace = true
+
+[dev-dependencies]
+# F1: `#[gpui::test]` expands to `gpui::` paths; production code uses `gpui_surface` only.
+gpui = { workspace = true, features = ["test-support"] }
+proptest.workspace = true
+ropey.workspace = true
+
+[lints]
+workspace = true

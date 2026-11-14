@@ -349,3 +349,32 @@ pub fn ssh_host_pub(id: &str) -> PathBuf {
 /// The passphrase of `mysql-x509-client-key-enc.pem`, the encrypted client key the
 /// `mysql-x509-certs` service writes for `mysql84-x509` (throwaway, like [`PASSWORD`]).
 pub const MYSQL_X509_KEY_PASSPHRASE: &str = "hv_test_pw";
+
+// ## m3a-t01b-seams
+
+/// Whether perf tests (and wall-time asserts outside the Docker tests) run: `HACIVAT_PERF=1`
+/// (P9). Every such test is `#[ignore = "perf"]` and begins with
+/// `if !perf_enabled() { return; }`, so `docker-pr`'s `-- --ignored` skips it in debug; the
+/// gate runs the perf lines in `--release`. Crates that may not reach `crates/core` inline the
+/// same check on `std::env::var_os("HACIVAT_PERF")`.
+pub fn perf_enabled() -> bool {
+    perf_enabled_from(std::env::var("HACIVAT_PERF").ok().as_deref())
+}
+
+/// [`perf_enabled`] for a given `HACIVAT_PERF` value: true only for exactly `"1"`.
+pub fn perf_enabled_from(v: Option<&str>) -> bool {
+    v == Some("1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn perf_needs_the_variable() {
+        assert!(!perf_enabled_from(None));
+        assert!(!perf_enabled_from(Some("0")));
+        assert!(!perf_enabled_from(Some("")));
+        assert!(perf_enabled_from(Some("1")));
+    }
+}

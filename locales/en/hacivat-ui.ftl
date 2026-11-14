@@ -1385,3 +1385,11 @@ hv-conn-diag-tls-nov-pinned = TLS · pinned
 hv-conn-fix-ssh = Connect through SSH…
 # The sheet's Password row when Forever passwords live in Hacivat's vault (NOTES M2b vault-secret).
 hv-conn-secret-vault = vault · forever
+
+## m3a-t01b-seams
+
+# The Edit menu title (the macOS menu bar and the Windows/Linux in-window menu); the group shows
+# only while the editor commands are registered.
+hv-menu-edit = Edit
+# A notice when Run is asked before running queries is wired up in the console.
+hv-console-run-unavailable = Running queries isn't available in this console yet.

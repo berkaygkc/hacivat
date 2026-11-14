@@ -1,0 +1,39 @@
+[package]
+name = "hacivat-exec"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The run service: execution units, runs, status, the output-log model and console UX state (HV-EXEC-01, -05, -11)"
+
+[dependencies]
+hacivat-proto.workspace = true
+hacivat-values.workspace = true
+hacivat-results.workspace = true
+hacivat-session.workspace = true
+hacivat-driver.workspace = true
+sql-split.workspace = true
+sql-lexer.workspace = true
+sql-dialect.workspace = true
+sql-text.workspace = true
+sql-oracle-pg.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+futures.workspace = true
+
+[dev-dependencies]
+hacivat-driver = { workspace = true, features = ["fake"] }
+# `testing::fake_session` (P6): the tests' `service_over` wraps it.
+hacivat-session = { workspace = true, features = ["test-support"] }
+hacivat-results = { workspace = true, features = ["test-support"] }
+# Task 31's `docker_m3a_matrix` builds real sessions here (P6): the session crate's Docker
+# test dependencies.
+hacivat-testkit = { workspace = true, features = ["ssh"] }
+hacivat-net.workspace = true
+hacivat-secrets.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio-util.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

@@ -9,10 +9,20 @@ publish.workspace = true
 scene-check = ["hacivat-ui-core/scene-check"]
 pseudo = ["hacivat-l10n/pseudo"]
 # The screenshot harness (Task 18); M2a shots drive connections through `FakeDriver`.
-shots = ["scene-check", "pseudo", "hacivat-ui-core/test-support", "hacivat-driver/fake"]
+shots = [
+    "scene-check",
+    "pseudo",
+    "hacivat-ui-core/test-support",
+    "hacivat-driver/fake",
+    # ## m3a-t01b-seams: the result fixtures and the synthetic grid source of the M3 shots.
+    "hacivat-results/test-support",
+    "hacivat-ui-grid/test-support",
+]
 # M2b (Task 1, fix round 1, M5): test seams (`events::handled_events`, the session crate's
 # `publish_event`), enabled only by this crate's own dev-dependency on itself below.
 test-support = ["hacivat-session/test-support"]
+# ## m3a-t01b-seams: the B3 and B1-real benches (Tasks 20 and 36).
+bench = ["hacivat-ui-core/bench", "hacivat-driver/fake"]
 
 [dependencies]
 hacivat-ui-core.workspace = true
@@ -34,6 +44,19 @@ tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
 secrecy.workspace = true
 futures.workspace = true
+# ## m3a-t01b-seams: the console, its editor, results and run UI (M3a).
+hacivat-ui-editor.workspace = true
+hacivat-ui-grid.workspace = true
+hacivat-text.workspace = true
+hacivat-sql-editor.workspace = true
+hacivat-values.workspace = true
+hacivat-results.workspace = true
+hacivat-exec.workspace = true
+sql-split.workspace = true
+sql-dialect.workspace = true
+sql-text.workspace = true
+# The app builds `ExecAt` and the preview override (P6).
+smallvec.workspace = true
 
 [dev-dependencies]
 hacivat-driver = { workspace = true, features = ["fake"] }
@@ -45,6 +68,9 @@ tempfile.workspace = true
 hacivat-testkit = { workspace = true, features = ["ssh"] }
 # M2b (Task 1, fix round 1, M5): the app's own test seams, for its tests only.
 hacivat-app = { workspace = true, features = ["test-support"] }
+# ## m3a-t01b-seams: result fixtures and the synthetic grid source.
+hacivat-results = { workspace = true, features = ["test-support"] }
+hacivat-ui-grid = { workspace = true, features = ["test-support"] }
 
 # The screenshot harness owns `main` (Task 18): on macOS the platform text system can only be
 # created on the main thread, and libtest runs every test on a spawned thread.
@@ -52,6 +78,15 @@ hacivat-app = { workspace = true, features = ["test-support"] }
 name = "shots"
 harness = false
 required-features = ["shots"]
+
+# ## m3a-t01b-seams: the benches (Tasks 20 and 36); fail-closed stubs until then (P7).
+[[example]]
+name = "b3"
+required-features = ["bench"]
+
+[[example]]
+name = "b1_real"
+required-features = ["bench"]
 
 [lints]
 workspace = true

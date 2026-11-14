@@ -12,8 +12,10 @@ use hacivat_net::{StreamFactory, Target, TlsParams, TlsSummary};
 use hacivat_proto::DbmsKind;
 use secrecy::SecretString;
 
-use crate::errors::RawError;
+use crate::errors::{RawError, RawErrorKind};
 use crate::server::ServerInfo;
+// ## m3a-t01b-seams
+use crate::typed::{CloseHow, Closed, QueryEvent, QuerySpec, TypedCaps};
 
 /// How a running statement is cancelled (HV-DRV-01).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -238,6 +240,41 @@ pub trait RawConn: Send + 'static {
     /// `None` when the engine has no such setting or the driver does not know (yet).
     fn autocommit(&self) -> Option<bool> {
         None
+    }
+    // ## m3a-t01b-seams
+    /// What this connection's typed path can do ([`crate::typed`]); none by default.
+    fn typed_caps(&self) -> TypedCaps {
+        TypedCaps::NONE
+    }
+    /// Sends a typed query; its events follow from [`RawConn::next_event`]. The default fails
+    /// closed (`Unsupported`), as does a second open query and, on PostgreSQL, a suspendable
+    /// query outside a transaction block (P5; the rules are in [`crate::typed`]).
+    fn query<'a>(&'a mut self, spec: QuerySpec<'a>) -> BoxFuture<'a, Result<(), RawError>> {
+        let _ = spec;
+        Box::pin(async { Err(unsupported()) })
+    }
+    /// The open query's next event. The default fails closed (`Unsupported`).
+    fn next_event(&mut self) -> BoxFuture<'_, Result<QueryEvent, RawError>> {
+        Box::pin(async { Err(unsupported()) })
+    }
+    /// Resumes a suspended query for `rows` more rows. The default fails closed.
+    fn fetch_more(&mut self, rows: u32) -> BoxFuture<'_, Result<(), RawError>> {
+        let _ = rows;
+        Box::pin(async { Err(unsupported()) })
+    }
+    /// Ends the open query by `how`. The default fails closed.
+    fn close_query(&mut self, how: CloseHow) -> BoxFuture<'_, Result<Closed, RawError>> {
+        let _ = how;
+        Box::pin(async { Err(unsupported()) })
+    }
+}
+
+// ## m3a-t01b-seams
+/// The typed defaults' error.
+fn unsupported() -> RawError {
+    RawError {
+        kind: RawErrorKind::Unsupported,
+        server: None,
     }
 }
 

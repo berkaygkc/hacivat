@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 pg_query.workspace = true
 text-size.workspace = true
+# ## m3a-t01b-seams: `LineIndex` for the byte error cursors (Task 9).
+sql-text.workspace = true
 
 [lints]
 workspace = true

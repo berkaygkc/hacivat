@@ -10,6 +10,15 @@ use std::sync::OnceLock;
 
 use text_size::TextSize;
 
+// ## m3a-t01b-seams: the oracle's modules (Task 9 fills them; it may move `PgError`,
+// `version` and `statement_count` into `error.rs` and `split.rs`, unchanged).
+pub mod error;
+pub mod split;
+pub mod stack;
+
+pub use split::split_with_parser;
+pub use stack::{MAX_ORACLE_NESTING, on_parser_stack};
+
 /// A libpg_query error: the server's English message and, when known, the byte offset it
 /// points at.
 #[derive(Debug, Clone, PartialEq, Eq)]

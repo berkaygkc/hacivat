@@ -121,3 +121,347 @@ context = "ConnectionDialog"
 chord = "f6"
 command = "workspace.focus_notification"
 context = "Workspace"
+
+## m3a-t01b-seams
+# M3a (Task 1b, R-M3-38): the console editor (context `Editor`), the result grid (context
+# `Grid`) and cancelling a run (context `Console`). Tasks 25, 30, 32 and 33 register the
+# commands; until then a binding does nothing. `editor.run_2`, `editor.run_3`,
+# `editor.describe_exec_range` and `grid.select_column` are palette-only in M3a: ctrl-space
+# never reaches the app on macOS or under a CJK IME (P25). Escape never cancels a run.
+# Cancel is ctrl-f2 (the DataGrip chord): GPUI reports no Break key, and most laptops have
+# none (P25); the toolbar's Stop remains.
+
+[[binding]]
+chord = "left"
+command = "editor.move_left"
+context = "Editor"
+
+[[binding]]
+chord = "right"
+command = "editor.move_right"
+context = "Editor"
+
+[[binding]]
+chord = "up"
+command = "editor.move_up"
+context = "Editor"
+
+[[binding]]
+chord = "down"
+command = "editor.move_down"
+context = "Editor"
+
+[[binding]]
+chord = "shift-left"
+command = "editor.select_left"
+context = "Editor"
+
+[[binding]]
+chord = "shift-right"
+command = "editor.select_right"
+context = "Editor"
+
+[[binding]]
+chord = "shift-up"
+command = "editor.select_up"
+context = "Editor"
+
+[[binding]]
+chord = "shift-down"
+command = "editor.select_down"
+context = "Editor"
+
+[[binding]]
+chord = "pageup"
+command = "editor.page_up"
+context = "Editor"
+
+[[binding]]
+chord = "pagedown"
+command = "editor.page_down"
+context = "Editor"
+
+[[binding]]
+chord = "shift-pageup"
+command = "editor.select_page_up"
+context = "Editor"
+
+[[binding]]
+chord = "shift-pagedown"
+command = "editor.select_page_down"
+context = "Editor"
+
+[[binding]]
+chord = "enter"
+command = "editor.newline"
+context = "Editor"
+
+[[binding]]
+chord = "tab"
+command = "editor.tab"
+context = "Editor"
+
+[[binding]]
+chord = "shift-tab"
+command = "editor.outdent"
+context = "Editor"
+
+[[binding]]
+chord = "backspace"
+command = "editor.delete_backward"
+context = "Editor"
+
+[[binding]]
+chord = "delete"
+command = "editor.delete_forward"
+context = "Editor"
+
+[[binding]]
+chord = "escape"
+command = "editor.escape"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-m"
+command = "editor.toggle_tab_moves_focus"
+context = "Editor"
+
+[[binding]]
+chord = "shift-f10"
+command = "editor.context_menu"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-left"
+command = "editor.move_word_left"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-right"
+command = "editor.move_word_right"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-shift-left"
+command = "editor.select_word_left"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-shift-right"
+command = "editor.select_word_right"
+context = "Editor"
+
+[[binding]]
+chord = "home"
+command = "editor.move_line_start"
+context = "Editor"
+
+[[binding]]
+chord = "end"
+command = "editor.move_line_end"
+context = "Editor"
+
+[[binding]]
+chord = "shift-home"
+command = "editor.select_line_start"
+context = "Editor"
+
+[[binding]]
+chord = "shift-end"
+command = "editor.select_line_end"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-home"
+command = "editor.move_document_start"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-end"
+command = "editor.move_document_end"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-shift-home"
+command = "editor.select_document_start"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-shift-end"
+command = "editor.select_document_end"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-backspace"
+command = "editor.delete_word_backward"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-delete"
+command = "editor.delete_word_forward"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-a"
+command = "editor.select_all"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-z"
+command = "editor.undo"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-shift-z"
+command = "editor.redo"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-c"
+command = "editor.copy"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-x"
+command = "editor.cut"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-v"
+command = "editor.paste"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-enter"
+command = "editor.run"
+context = "Editor"
+
+[[binding]]
+chord = "left"
+command = "grid.move_left"
+context = "Grid"
+
+[[binding]]
+chord = "right"
+command = "grid.move_right"
+context = "Grid"
+
+[[binding]]
+chord = "up"
+command = "grid.move_up"
+context = "Grid"
+
+[[binding]]
+chord = "down"
+command = "grid.move_down"
+context = "Grid"
+
+[[binding]]
+chord = "shift-left"
+command = "grid.select_left"
+context = "Grid"
+
+[[binding]]
+chord = "shift-right"
+command = "grid.select_right"
+context = "Grid"
+
+[[binding]]
+chord = "shift-up"
+command = "grid.select_up"
+context = "Grid"
+
+[[binding]]
+chord = "shift-down"
+command = "grid.select_down"
+context = "Grid"
+
+[[binding]]
+chord = "home"
+command = "grid.home"
+context = "Grid"
+
+[[binding]]
+chord = "end"
+command = "grid.end"
+context = "Grid"
+
+[[binding]]
+chord = "pageup"
+command = "grid.page_up"
+context = "Grid"
+
+[[binding]]
+chord = "pagedown"
+command = "grid.page_down"
+context = "Grid"
+
+[[binding]]
+chord = "tab"
+command = "grid.next_cell"
+context = "Grid"
+
+[[binding]]
+chord = "shift-tab"
+command = "grid.prev_cell"
+context = "Grid"
+
+[[binding]]
+chord = "shift-space"
+command = "grid.select_row"
+context = "Grid"
+
+[[binding]]
+chord = "escape"
+command = "grid.escape"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-left"
+command = "grid.jump_left"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-right"
+command = "grid.jump_right"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-up"
+command = "grid.jump_up"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-down"
+command = "grid.jump_down"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-home"
+command = "grid.first_row"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-end"
+command = "grid.last_row"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-a"
+command = "grid.select_all"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-c"
+command = "grid.copy"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-shift-c"
+command = "grid.copy_with_headers"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-f2"
+command = "exec.cancel"
+context = "Console"

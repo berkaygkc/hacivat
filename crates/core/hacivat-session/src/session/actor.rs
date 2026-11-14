@@ -207,6 +207,8 @@ pub(crate) fn spawn_supervised(
             live.access
         },
         generation: 0,
+        // ## m3a-t01b-seams
+        cursor: None,
     };
     let id = next_id();
     let (commands, receiver) = mpsc::unbounded_channel();
@@ -433,6 +435,12 @@ impl Core {
                 }
                 reset
             }
+            // ## m3a-t01b-seams: Task 18 fills these bodies (`run.rs`, `cursor.rs`); until
+            // then each answers `Internal` and runs nothing.
+            Request::Run(spec) => self.run(spec).await,
+            Request::FetchMore { result, rows } => self.fetch_more(result, rows).await,
+            Request::FetchAll { result } => self.fetch_all(result).await,
+            Request::CloseCursor { result, reason } => self.close_cursor(result, reason).await,
         }
     }
 
@@ -731,27 +739,29 @@ fn clocks() -> (Instant, SystemTime) {
 }
 
 /// Whether `request` is the user's activity (B18): pings, internal statements and resets are
-/// not.
+/// not. M3a: a run and fetching more are; closing a cursor is not (the idle bound sends it).
 fn is_activity(request: &Request) -> bool {
-    matches!(
-        request,
-        Request::Exec {
-            origin: ExecOrigin::User,
-            ..
-        } | Request::Tx(_)
-            | Request::SwitchSchema(_)
-    )
+    match request {
+        Request::Exec { origin, .. } => *origin == ExecOrigin::User,
+        Request::Tx(_) | Request::SwitchSchema(_) => true,
+        // ## m3a-t01b-seams
+        Request::Run(_) | Request::FetchMore { .. } | Request::FetchAll { .. } => true,
+        Request::Ping | Request::Reset | Request::CloseCursor { .. } => false,
+    }
 }
 
 /// Whether `request` may run again after a reconnect (B19): an internal idempotent statement.
+/// Never a run or a cursor command (fail closed: the cursor died with the connection).
 fn is_retryable(request: &Request) -> bool {
-    matches!(
-        request,
-        Request::Exec {
-            origin: ExecOrigin::Internal { idempotent: true },
-            ..
-        }
-    )
+    match request {
+        Request::Exec { origin, .. } => *origin == ExecOrigin::Internal { idempotent: true },
+        Request::Tx(_) | Request::SwitchSchema(_) | Request::Ping | Request::Reset => false,
+        // ## m3a-t01b-seams
+        Request::Run(_)
+        | Request::FetchMore { .. }
+        | Request::FetchAll { .. }
+        | Request::CloseCursor { .. } => false,
+    }
 }
 
 /// Waits for the next tick; never, without liveness.
@@ -1149,6 +1159,9 @@ fn may_open_tx(request: &Request, mode: TxMode) -> bool {
             origin: ExecOrigin::User,
             ..
         } => mode == TxMode::Manual || touches_tx(sql),
+        // ## m3a-t01b-seams (fail closed): a run may hold a user `BEGIN` unit, Hacivat's own
+        // cursor transaction or a Manual session's `BEGIN`; a resumed cursor runs inside one.
+        Request::Run(_) | Request::FetchMore { .. } | Request::FetchAll { .. } => true,
         _ => false,
     }
 }

@@ -8,6 +8,10 @@ pub mod registry;
 
 pub use dispatch::{DispatchOutcome, Dispatcher, PENDING_TIMEOUT};
 pub use registry::register_workspace_actions;
+// ## m3a-t01b-seams
+#[cfg(feature = "test-support")]
+pub use registry::quit_requests;
+pub use registry::request_quit;
 
 use std::cell::RefCell;
 use std::rc::Rc;

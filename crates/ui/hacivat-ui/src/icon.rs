@@ -55,6 +55,15 @@ pub enum IconName {
     KeyRound,
     ArrowRight,
     Fingerprint,
+    // ## m3a-t01b-seams: the M3a query icons (design/m3a-query/NOTES.md "Icons"; Tasks 27, 28,
+    // 30 draw them).
+    ScrollText,
+    SkipForward,
+    ArrowDownToLine,
+    Eraser,
+    ClipboardX,
+    Ban,
+    CopyCheck,
     /// The Hacivat mark (`icons/hacivat/hv-mark.svg`).
     HvMark,
 }
@@ -105,6 +114,14 @@ impl IconName {
             IconName::KeyRound => "icons/lucide/key-round.svg",
             IconName::ArrowRight => "icons/lucide/arrow-right.svg",
             IconName::Fingerprint => "icons/lucide/fingerprint.svg",
+            // ## m3a-t01b-seams
+            IconName::ScrollText => "icons/lucide/scroll-text.svg",
+            IconName::SkipForward => "icons/lucide/skip-forward.svg",
+            IconName::ArrowDownToLine => "icons/lucide/arrow-down-to-line.svg",
+            IconName::Eraser => "icons/lucide/eraser.svg",
+            IconName::ClipboardX => "icons/lucide/clipboard-x.svg",
+            IconName::Ban => "icons/lucide/ban.svg",
+            IconName::CopyCheck => "icons/lucide/copy-check.svg",
             IconName::HvMark => "icons/hacivat/hv-mark.svg",
         }
     }
@@ -220,7 +237,7 @@ mod tests {
     use hacivat_ui_core::assets::BundledAssets;
     use hacivat_ui_core::gpui_surface::AssetSource;
 
-    const ALL: [IconName; 43] = [
+    const ALL: [IconName; 50] = [
         IconName::ArrowLeftRight,
         IconName::Check,
         IconName::ChevronDown,
@@ -264,6 +281,14 @@ mod tests {
         IconName::KeyRound,
         IconName::ArrowRight,
         IconName::Fingerprint,
+        // ## m3a-t01b-seams
+        IconName::ScrollText,
+        IconName::SkipForward,
+        IconName::ArrowDownToLine,
+        IconName::Eraser,
+        IconName::ClipboardX,
+        IconName::Ban,
+        IconName::CopyCheck,
         IconName::HvMark,
     ];
 

@@ -1,10 +1,16 @@
 //! The workspace shell: joins the UI crates and the core crates (§5.1). Shell and globals in
 //! Task 13, commands and menus in Task 16, the settings UI in Task 17.
 
+#[cfg(feature = "bench")]
+pub mod bench;
 pub mod commands;
 pub mod connections;
+// ## m3a-t01b-seams
+pub mod console;
+pub mod exec_ui;
 pub mod l10n_global;
 pub mod menus;
+pub mod results;
 pub mod settings_ui;
 pub mod shell;
 pub mod theme_pref;
@@ -30,6 +36,10 @@ pub fn init(cx: &mut App) {
     settings_ui::install(cx);
     // ## m2a-t01-interfaces
     connections::install(cx);
+    // ## m3a-t01b-seams
+    console::install(cx);
+    results::install(cx);
+    exec_ui::install(cx);
 }
 
 #[cfg(test)]

@@ -378,25 +378,9 @@ fn popup_menu_title_row_and_mono_items(cx: &mut TestAppContext) {
     assert_eq!(title.source, TextSource::Fluent);
     assert_eq!(title.size_px, t.type_ramp.caption.size_px);
     // Where access keys show (Linux, Windows), the label is drawn as runs around its key
-    // letter ("b" + "astion"): find the consecutive runs that spell it.
-    let runs = |s: &str| {
-        if let Some(r) = frame.iter().find(|r| r.text.as_ref() == s) {
-            return vec![r.clone()];
-        }
-        for i in 0..frame.len() {
-            let mut spelled = String::new();
-            for j in i..frame.len() {
-                spelled.push_str(frame[j].text.as_ref());
-                if spelled == s {
-                    return frame[i..=j].to_vec();
-                }
-                if !s.starts_with(spelled.as_str()) {
-                    break;
-                }
-            }
-        }
-        panic!("{s} is drawn")
-    };
+    // letter ("b" + "astion"): find the consecutive runs that spell it (P15).
+    let runs =
+        |s: &str| support::find_label_runs(&frame, s).unwrap_or_else(|| panic!("{s} is drawn"));
     let alias = runs("bastion");
     assert!(
         alias.iter().all(|r| r.source == TextSource::Data),
