@@ -1330,3 +1330,34 @@ hv-conn-secret-vault = kasa · kalıcı
 hv-menu-edit = Düzen
 # Review: PO
 hv-console-run-unavailable = Bu konsolda sorgu çalıştırma henüz kullanılamıyor.
+
+## m3a-t26-results-model
+
+# Review: PO
+hv-results-result-n = Sonuç { $n }
+# Review: PO
+hv-grid-truncated = … { $size }
+# Review: PO
+hv-grid-size-bytes = { $n } B
+# Review: PO
+hv-grid-size-kb = { $n } KB
+# Review: PO
+hv-grid-size-mb = { $n } MB
+# Review: PO
+hv-grid-size-gb = { $n } GB
+# Review: PO
+hv-grid-size-chars = { $n } karakter
+# Review: PO
+hv-grid-decode-error = Çözümlenemedi
+# Review: PO
+hv-copy-done = { $rows } × { $cols } hücre kopyalandı
+# Review: PO
+hv-copy-done-line = Sekmeyle ayrılmış, ham değerler
+# Review: PO
+hv-copy-working = { $cells } hücre kopyalanıyor…
+# Review: PO
+hv-copy-refused-title = Kopyalanamayacak kadar büyük
+# Review: PO
+hv-copy-refused-body = Seçimde { $cells } hücre var. Kopyalama en çok { $max } hücre ya da { $size } alır; daha az satır ya da sütun seçin.
+# Review: PO
+hv-copy-refused-multiple = Bu seçimler birlikte kopyalanamaz. Tek bir blok ya da aynı satırları veya sütunları paylaşan bloklar seçin.

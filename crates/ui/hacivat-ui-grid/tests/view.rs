@@ -9,11 +9,14 @@ use std::time::Duration;
 use gpui::{
     Entity, Modifiers, MouseButton, Point, Role, TestAppContext, VisualTestContext, point, px, size,
 };
+use hacivat_ui::text::{TextRegistry, TextSource};
 use hacivat_ui_core::theme::{Theme, ThemeMode};
+use hacivat_ui_grid::element::AUTOSIZE_MEASURES_PER_FRAME;
 use hacivat_ui_grid::model::Dir;
-use hacivat_ui_grid::testing::{FixtureSource, cell, grid_config};
+use hacivat_ui_grid::testing::{FixtureSource, cell, grid_config, text_column};
 use hacivat_ui_grid::{
-    Align, CellKind, ColId, GridCommand, GridDataSource, GridEvent, GridView, ModelCell, ModelRow,
+    Align, CellKind, ColId, ColumnKind, ColumnSpec, GridCommand, GridDataSource, GridEvent,
+    GridView, ModelCell, ModelRow,
 };
 
 type Events = Rc<RefCell<Vec<GridEvent>>>;
@@ -534,4 +537,244 @@ fn a_missed_mouse_up_ends_the_drag(cx: &mut TestAppContext) {
     );
     // The selection stayed where the drag left it.
     assert_eq!(focus(&view, vcx), Some((3, 0)));
+}
+
+// ## m3a-t26-grid-adapter: the sampled column auto-size and the header tooltip.
+
+/// One frame at 120 Hz.
+const FRAME: Duration = Duration::from_micros(8_333);
+
+/// A grid whose columns are auto-sized.
+fn open_auto(
+    cx: &mut TestAppContext,
+    source: Rc<dyn GridDataSource>,
+    w: f32,
+    h: f32,
+) -> (Entity<GridView>, &mut VisualTestContext) {
+    cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
+    let (view, vcx) = cx.add_window_view(|_, cx| {
+        let mut config = grid_config("Result 1");
+        config.auto_size = true;
+        GridView::new(source, config, cx)
+    });
+    vcx.simulate_resize(size(px(w), px(h)));
+    vcx.run_until_parked();
+    (view, vcx)
+}
+
+fn widths(view: &Entity<GridView>, vcx: &mut VisualTestContext, cols: u32) -> Vec<f32> {
+    view.read_with(vcx, |v, _| {
+        (0..cols)
+            .map(|c| v.column_layout().width_of(ColId(c)).unwrap())
+            .collect()
+    })
+}
+
+fn number_column(id: u32, name: &str) -> ColumnSpec {
+    ColumnSpec {
+        kind: ColumnKind::Number,
+        align: Align::End,
+        ..text_column(id, name, 96.0)
+    }
+}
+
+/// Nine columns (so nothing fills): c0 short numbers, c1 a sentence, c2 `x` with one very long
+/// outlier in row 0, the rest short.
+fn nine_columns(loaded: u64, more: bool) -> FixtureSource {
+    let mut columns = vec![number_column(0, "n")];
+    columns.extend((1..9).map(|c| text_column(c, &format!("c{c}"), 160.0)));
+    FixtureSource::generated(9, loaded, (!more).then_some(loaded), more, |r, c| {
+        match c.0 {
+            0 => cell(format!("{r}"), CellKind::Number, Align::End),
+            1 => cell(
+                format!("a customer note that is rather long, row {r}"),
+                CellKind::Text,
+                Align::Start,
+            ),
+            2 if r == 0 => cell("outlier ".repeat(60), CellKind::Text, Align::Start),
+            _ => cell("x", CellKind::Text, Align::Start),
+        }
+    })
+    .with_columns(columns)
+}
+
+#[gpui::test]
+fn auto_size_measures_the_samples_over_several_frames_and_settles(cx: &mut TestAppContext) {
+    let source = nine_columns(200, false);
+    let (view, vcx) = open_auto(cx, Rc::new(source.clone()), 1200.0, 400.0);
+    // A frame that leaves columns unmeasured asks for the next one.
+    let mut frames = 0;
+    while view.read_with(vcx, |v, _| v.auto_size_pending()) {
+        frames += 1;
+        assert!(frames <= 4, "the auto-size settles within a few frames");
+        let delivered = vcx.update(|window, cx| window.simulate_next_frame(cx));
+        assert!(
+            delivered > 0,
+            "a pending auto-size asked for the next frame"
+        );
+        vcx.executor().advance_clock(FRAME);
+        vcx.run_until_parked();
+    }
+    let log = view.read_with(vcx, |v, _| *v.frame_log());
+    // 200 rows give 80 samples (50 first, 20 between, 10 last) per column.
+    assert_eq!(log.autosize_measures, 9 * 80);
+    // Whole columns per frame, never more than one column past the budget.
+    assert!(log.max_autosize_measures <= AUTOSIZE_MEASURES_PER_FRAME + 80);
+    assert!(log.frames >= 3, "720 cells do not fit one frame: {log:?}");
+    // Settled: nothing asks for more frames.
+    assert_eq!(vcx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+
+    let w = widths(&view, vcx, 9);
+    // The numbers shrink to the narrowest column; the sentence widens past its default so
+    // none of its cells is cut; the outlier is trimmed, so its column stays narrow.
+    assert_eq!(w[0], 48.0);
+    assert!(w[1] > 160.0 && w[1] <= 480.0, "{w:?}");
+    assert_eq!(
+        w[2], 48.0,
+        "one outlier among 80 samples does not widen the column"
+    );
+    assert!(w.iter().all(|x| x.fract() == 0.0), "whole pixels: {w:?}");
+    vcx.update(|_, cx| view.update(cx, |v, _| v.set_paint_recording(true)));
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    view.read_with(vcx, |v, _| {
+        let cut: Vec<_> = v
+            .painted_cells()
+            .iter()
+            .filter(|c| c.col == ColId(1) && c.truncated)
+            .collect();
+        assert!(cut.is_empty(), "{cut:?}");
+    });
+
+    // Nothing resizes after the layout settled: an append measures nothing.
+    vcx.update(|_, cx| view.update(cx, |v, _| v.reset_frame_log()));
+    source.set_count(400, false, Some(400));
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    assert_eq!(widths(&view, vcx, 9), w);
+    assert_eq!(
+        view.read_with(vcx, |v, _| v.frame_log().autosize_measures),
+        0
+    );
+    // A re-run with the same column names keeps the widths and is not measured again.
+    source.rerun(100, false, Some(100));
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    assert_eq!(widths(&view, vcx, 9), w);
+    assert_eq!(
+        view.read_with(vcx, |v, _| v.frame_log().autosize_measures),
+        0
+    );
+}
+
+#[gpui::test]
+fn auto_size_waits_for_the_first_rows_and_keeps_a_user_width(cx: &mut TestAppContext) {
+    let source = nine_columns(0, true);
+    let (view, vcx) = open_auto(cx, Rc::new(source.clone()), 1200.0, 400.0);
+    // No rows yet: the default widths stand and nothing is measured.
+    assert!(view.read_with(vcx, |v, _| v.auto_size_pending()));
+    assert_eq!(widths(&view, vcx, 9)[..3], [96.0, 160.0, 160.0]);
+    assert_eq!(
+        view.read_with(vcx, |v, _| v.frame_log().autosize_measures),
+        0
+    );
+    vcx.update(|_, cx| view.update(cx, |v, cx| v.set_column_width(ColId(1), 300.0, cx)));
+    source.set_count(30, true, None);
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    assert!(!view.read_with(vcx, |v, _| v.auto_size_pending()));
+    let w = widths(&view, vcx, 9);
+    assert_eq!(w[1], 300.0, "a width the user set is never auto-sized");
+    assert_eq!(w[0], 48.0);
+    // 30 rows are all sampled; the user's column is not measured.
+    assert_eq!(
+        view.read_with(vcx, |v, _| v.frame_log().autosize_measures),
+        8 * 30
+    );
+}
+
+#[gpui::test]
+fn few_columns_fill_the_viewport_with_their_text_columns(cx: &mut TestAppContext) {
+    let source = FixtureSource::generated(3, 40, Some(40), false, |r, c| match c.0 {
+        0 => cell(format!("{r}"), CellKind::Number, Align::End),
+        _ => cell(format!("name {r}"), CellKind::Text, Align::Start),
+    })
+    .with_columns(vec![
+        number_column(0, "n"),
+        text_column(1, "first", 160.0),
+        text_column(2, "second", 160.0),
+    ]);
+    // The rows arrive once the grid has its size (the fill is part of the one initial layout).
+    source.set_count(0, true, None);
+    let (view, vcx) = open_auto(cx, Rc::new(source.clone()), 900.0, 300.0);
+    source.set_count(40, false, Some(40));
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    let (w, body) = view.read_with(vcx, |v, _| {
+        (
+            (0..3)
+                .map(|c| v.column_layout().width_of(ColId(c)).unwrap())
+                .collect::<Vec<f32>>(),
+            f32::from(v.geometry().expect("painted").body.size.width),
+        )
+    });
+    assert_eq!(w[0], 48.0, "numbers never grow");
+    assert!(
+        (w[1] - w[2]).abs() <= 1.0,
+        "equal text columns share: {w:?}"
+    );
+    assert_eq!(w.iter().sum::<f32>(), body.floor(), "{w:?} in {body}");
+}
+
+#[gpui::test]
+fn an_ellipsized_header_name_shows_whole_in_a_tooltip(cx: &mut TestAppContext) {
+    let long = "customer_shipping_address_line_two";
+    let source = FixtureSource::texts(&[&["a", "b"], &["c", "d"]], 120.0)
+        .with_columns(vec![text_column(0, long, 90.0), text_column(1, "id", 90.0)]);
+    let (view, vcx, _) = open(cx, Rc::new(source), 600.0, 300.0);
+    vcx.update(|window, cx| {
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+        window.refresh();
+    });
+    vcx.run_until_parked();
+    let (tips, header) = view.read_with(vcx, |v, _| {
+        (v.header_tips().to_vec(), v.geometry().unwrap().header)
+    });
+    // Only the name that was cut; a name that fits has no tooltip.
+    assert_eq!(tips.len(), 1, "{tips:?}");
+    assert_eq!(tips[0].col, ColId(0));
+    assert_eq!(tips[0].name.as_ref(), long);
+    assert!(header.contains(&tips[0].bounds.center()));
+    let whole_name_drawn = |vcx: &mut VisualTestContext| {
+        vcx.read(|cx| cx.global::<TextRegistry>().frame.clone())
+            .into_iter()
+            .any(|r| {
+                r.text.as_ref() == long
+                    && !r.truncated
+                    && r.source == TextSource::Catalog
+                    && r.path.contains("hacivat-ui-grid/src/view.rs")
+            })
+    };
+    assert!(!whole_name_drawn(vcx), "no tooltip before the hover");
+    // The pointer rests on the header: the tooltip shows the whole name as catalog text.
+    vcx.simulate_mouse_move(tips[0].bounds.center(), None, Modifiers::none());
+    vcx.executor().advance_clock(Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(whole_name_drawn(vcx));
+
+    // Widened, the name fits: no tooltip area is left.
+    vcx.simulate_mouse_move(point(px(300.0), px(200.0)), None, Modifiers::none());
+    vcx.update(|_, cx| view.update(cx, |v, cx| v.set_column_width(ColId(0), 400.0, cx)));
+    vcx.run_until_parked();
+    assert!(view.read_with(vcx, |v, _| v.header_tips().is_empty()));
+    // The tooltip's area takes no click: the header still selects its column.
+    vcx.update(|_, cx| view.update(cx, |v, cx| v.set_column_width(ColId(0), 90.0, cx)));
+    vcx.run_until_parked();
+    let at = view.read_with(vcx, |v, _| v.header_tips()[0].bounds.center());
+    vcx.simulate_click(at, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(view.read_with(vcx, |v, _| v.selection().col_selected(ColId(0))));
 }
