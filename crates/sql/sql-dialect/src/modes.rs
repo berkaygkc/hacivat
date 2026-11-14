@@ -32,11 +32,38 @@ impl LexModes {
         }
     }
 
-    /// The modes of a MySQL/MariaDB `@@SESSION.sql_mode` value (`ANSI` implies `ANSI_QUOTES`
-    /// and `PIPES_AS_CONCAT`; Task 3). Task 1b stub: every mode off.
+    /// The modes of a MySQL/MariaDB `@@SESSION.sql_mode` value: comma-separated mode names,
+    /// matched whole, trimmed and ASCII case-insensitively (never a locale-aware casing).
+    ///
+    /// The server reports a combination mode together with its parts (`SET sql_mode = 'ANSI'`
+    /// reads back as `REAL_AS_FLOAT,PIPES_AS_CONCAT,ANSI_QUOTES,IGNORE_SPACE,…,ANSI`), but a
+    /// value taken from elsewhere may hold the bare name, so the combinations that change
+    /// lexing are expanded here too: `ANSI` and MariaDB's `DB2`, `MAXDB`, `MSSQL`, `ORACLE` and
+    /// `POSTGRESQL` all include `ANSI_QUOTES` and `PIPES_AS_CONCAT`; `ORACLE` also sets
+    /// [`LexModes::mariadb_oracle_mode`]. Every other name (`STRICT_TRANS_TABLES`,
+    /// `IGNORE_SPACE`, …) leaves the lexer unchanged.
     pub fn from_mysql_sql_mode(sql_mode: &str) -> Self {
-        let _ = sql_mode;
-        LexModes::default()
+        let mut m = LexModes::default();
+        for name in sql_mode.split(',').map(str::trim) {
+            let is = |mode: &str| name.eq_ignore_ascii_case(mode);
+            if is("ANSI_QUOTES") {
+                m.ansi_quotes = true;
+            } else if is("NO_BACKSLASH_ESCAPES") {
+                m.no_backslash_escapes = true;
+            } else if is("PIPES_AS_CONCAT") {
+                m.pipes_as_concat = true;
+            } else if is("HIGH_NOT_PRECEDENCE") {
+                m.high_not_precedence = true;
+            } else if ["ANSI", "DB2", "MAXDB", "MSSQL", "ORACLE", "POSTGRESQL"]
+                .into_iter()
+                .any(is)
+            {
+                m.ansi_quotes = true;
+                m.pipes_as_concat = true;
+                m.mariadb_oracle_mode |= is("ORACLE");
+            }
+        }
+        m
     }
 }
 

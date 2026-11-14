@@ -8,6 +8,8 @@ mod update_key;
 mod vf;
 // ## m2a-t11-docker
 mod docker;
+// ## m3a-t03-sql-tables
+mod gen_sql_tables;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -31,9 +33,11 @@ fn main() -> ExitCode {
         Some("shot-diff") => shot_diff::run(),
         // ## m2a-t11-docker
         Some("docker") => docker::run(),
+        // ## m3a-t03-sql-tables
+        Some("gen-sql-tables") => gen_sql_tables::run(),
         other => {
             eprintln!(
-                "unknown xtask command: {other:?}\navailable: bench-report, check-deps, check-update-key, docker, gen-sql, l10n, shot-diff, tokens, vf"
+                "unknown xtask command: {other:?}\navailable: bench-report, check-deps, check-update-key, docker, gen-sql, gen-sql-tables, l10n, shot-diff, tokens, vf"
             );
             ExitCode::from(2)
         }
