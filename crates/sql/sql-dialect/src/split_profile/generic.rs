@@ -51,4 +51,8 @@ pub(super) static GENERIC: SplitProfile = SplitProfile {
     body_start_after: &[],
     statement_openers: &[],
     end_followers: &[],
+    name_after: &[],
+    block_end_after: &[],
+    compound_at_top: false,
+    handler: None,
 };

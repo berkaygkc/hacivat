@@ -2,7 +2,7 @@
 //! `CASE … END` inside; a top-level `BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE] [TRANSACTION]` is a
 //! transaction and `END [TRANSACTION]` at statement start is `COMMIT`.
 
-use super::{BlockFamily, HeadContinuation, SplitProfile};
+use super::{BlockFamily, HeadContinuation, NAME_AFTER, SplitProfile};
 
 pub(super) static SQLITE: SplitProfile = SplitProfile {
     name: "sqlite",
@@ -73,4 +73,9 @@ pub(super) static SQLITE: SplitProfile = SplitProfile {
     body_start_after: &[],
     statement_openers: &[],
     end_followers: &[],
+    name_after: NAME_AFTER,
+    // A trigger body's statements each end with `;` (SQLite's `trigger-cmd`).
+    block_end_after: &[";", "BEGIN"],
+    compound_at_top: false,
+    handler: None,
 };

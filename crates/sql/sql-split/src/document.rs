@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 
 use sql_dialect::{ClientFlavor, DialectCtx};
 use sql_lexer::{LexState, Lexed, lex};
+use sql_text::edit::MisalignedEdit;
 use sql_text::{TextChunks, TextEdit, TextRange, TextSize};
 
 use crate::item::{AmbiguousBoundary, ClientSegment, Item, Split, SplitMode};
@@ -88,18 +89,23 @@ impl SqlDocument {
     }
 
     /// Applies `edits` in order (each against the text the previous one left) and rebuilds
-    /// the analysis (the M3a body: a full rebuild). An edit that does not fit the text it
-    /// meets (past the end, or splitting a character) is skipped.
-    pub fn apply(&mut self, edits: &[TextEdit]) -> DocDelta {
+    /// the analysis (the M3a body: a full rebuild).
+    ///
+    /// # Errors
+    /// `MisalignedEdit` when an edit does not fit the text it meets (past the end, or splitting
+    /// a character). The document is then unchanged, revision included: it no longer mirrors
+    /// the editor's buffer, and the caller must rebuild it from that buffer before analysing
+    /// again.
+    pub fn apply(&mut self, edits: &[TextEdit]) -> Result<DocDelta, MisalignedEdit> {
         let mut text = String::from(&*self.text);
         for edit in edits {
-            let _skipped_when_misaligned = edit.apply(&mut text);
+            edit.apply(&mut text)?;
         }
         let old = std::mem::replace(
             self,
             Self::build(Arc::from(text), self.ctx, self.flavor, self.revision + 1),
         );
-        delta(&old, self)
+        Ok(delta(&old, self))
     }
 
     /// Changes the dialect context (a `SET sql_mode`, a reconnect) and rebuilds.

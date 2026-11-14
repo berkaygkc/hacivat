@@ -8,6 +8,8 @@
 //! - [`split`] / [`split_from`]: one forward loop over the lexer's tokens that recognises
 //!   client commands (psql, mysql, sqlite3), tracks blocks per dialect
 //!   (`sql_dialect::SplitProfile`), and returns the editor or the execution view ([`Split`]).
+//!   [`Split::is_certain`] / [`Split::runnable`] say what execution may send: every uncertain
+//!   boundary lies inside the one statement it refuses, which is never `Exact`.
 //! - [`SqlDocument`]: a text, its lexing and its split, rebuilt on every change in M3a;
 //!   [`DocSnapshot`] shares one revision's analysis and computes the execution split once.
 //! - [`StmtKey`]: XXH3-128 of a statement's dialect, modes, delimiter and text.

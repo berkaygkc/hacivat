@@ -12,20 +12,16 @@ pub struct StmtKey(pub u128);
 impl StmtKey {
     /// The key of `text` split under `ctx` with the client `delimiter` (`None`: `;`).
     ///
-    /// The context (dialect, modes, delimiter; each part length-prefixed, so no two tuples
-    /// read alike) is folded into the hash's 64-bit seed (XXH3-64 of those bytes), and the text
-    /// is hashed once with it: no allocation, no copy of the statement.
+    /// The context is folded into the 64-bit seed of the text's hash by chained one-shot
+    /// hashes: the modes seed the dialect tag's XXH3-64, that seeds the delimiter's, and that
+    /// seeds the text's XXH3-128. Each part is hashed on its own, so no two tuples read alike;
+    /// nothing is allocated or copied.
     pub fn of(ctx: &DialectCtx, delimiter: Option<&str>, text: &str) -> StmtKey {
-        let mut context = Vec::with_capacity(48);
-        for part in [
+        let seed = XxHash3_64::oneshot_with_seed(
+            u64::from(modes_bits(ctx.modes)),
             dialect_tag(ctx.id).as_bytes(),
-            &[modes_bits(ctx.modes)],
-            delimiter.unwrap_or(";").as_bytes(),
-        ] {
-            context.extend_from_slice(&(part.len() as u64).to_le_bytes());
-            context.extend_from_slice(part);
-        }
-        let seed = XxHash3_64::oneshot(&context);
+        );
+        let seed = XxHash3_64::oneshot_with_seed(seed, delimiter.unwrap_or(";").as_bytes());
         StmtKey(XxHash3_128::oneshot_with_seed(seed, text.as_bytes()))
     }
 }

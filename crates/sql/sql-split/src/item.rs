@@ -5,16 +5,17 @@
 //!   `Heuristic` items where a `;` seems to be missing (SQL-SPLIT-03) and, after an
 //!   unterminated construct, keeps the later statements as provisional `Heuristic` items (the
 //!   stability rule).
-//! - **Execution mode** is exact or refuses: every item is `Exact`, and every place where a
-//!   boundary is uncertain is an [`AmbiguousBoundary`] in `ambiguous`, whose `at` overlaps the
-//!   strict range of each statement it makes uncertain. Execution never sends such a statement
-//!   (R-M3-24): Run asks.
+//! - **Execution mode** is exact or refuses: it splits only at certain boundaries, and every
+//!   place where a boundary is uncertain is an [`AmbiguousBoundary`] in `ambiguous`. Each one
+//!   lies inside the strict range of one execution statement (an uncertainty that spans several
+//!   is listed once per statement), and that statement is `Heuristic`: execution never sends it
+//!   (R-M3-24), Run asks. [`Split::is_certain`] and [`Split::runnable`] are the entry points.
 //!
-//! Both modes list the same `ambiguous` boundaries, so an editor item is `Exact` exactly when an
-//! execution item has the same strict range and no ambiguity overlaps it (R-M3-8).
+//! Both modes list the same `ambiguous` boundaries, so an editor statement is `Exact` exactly
+//! when an execution statement with the same strict range is (R-M3-8).
 
 use sql_dialect::KeywordId;
-use sql_text::TextRange;
+use sql_text::{TextRange, TextSize};
 
 use crate::key::StmtKey;
 
@@ -216,9 +217,36 @@ impl Split {
         self.items.iter().filter_map(Item::statement)
     }
 
-    /// The uncertain boundaries that overlap `range` (a statement's strict range).
+    /// The uncertain boundaries that overlap `range` (a statement's strict range, a
+    /// selection). `ambiguous` is sorted by start, so the scan stops at `range`'s end.
     pub fn ambiguities_in(&self, range: TextRange) -> impl Iterator<Item = &AmbiguousBoundary> {
-        self.ambiguous.iter().filter(move |a| overlaps(a.at, range))
+        let upto = self
+            .ambiguous
+            .partition_point(|a| a.at.start() < range.end().max(range.start() + TextSize::from(1)));
+        self.ambiguous[..upto]
+            .iter()
+            .filter(move |a| overlaps(a.at, range))
+    }
+
+    /// Whether `stmt` (one of this split's statements) is certain: `Exact`, and no uncertain
+    /// boundary inside it. O(log n): every boundary lies inside the one statement it makes
+    /// uncertain, and `ambiguous` is sorted by start.
+    pub fn is_certain(&self, stmt: &Stmt) -> bool {
+        if stmt.confidence != Confidence::Exact {
+            return false;
+        }
+        let i = self
+            .ambiguous
+            .partition_point(|a| a.at.start() < stmt.strict.start());
+        !self
+            .ambiguous
+            .get(i)
+            .is_some_and(|a| a.at.start() < stmt.strict.end())
+    }
+
+    /// The statements execution may send: the certain ones, in text order.
+    pub fn runnable(&self) -> impl Iterator<Item = &Stmt> {
+        self.statements().filter(|s| self.is_certain(s))
     }
 }
 

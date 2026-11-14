@@ -112,7 +112,7 @@ fn apply_rebuilds_and_reports_the_delta() {
         .map(|s| s.key)
         .collect();
     // Type "0" after "SELECT 2": the second statement changes, the third moves.
-    let delta = d.apply(&[edit(18, 18, "0")]);
+    let delta = d.apply(&[edit(18, 18, "0")]).unwrap();
     assert_eq!(d.revision(), 1);
     assert_eq!(texts(&d), ["SELECT 1", "SELECT 20", "SELECT 3"]);
     let after: Vec<_> = d
@@ -127,20 +127,31 @@ fn apply_rebuilds_and_reports_the_delta() {
     assert!(delta.dirty.contains_range(TextRange::new(at(10), at(19))));
     // Deleting a `;` (and the line break, so no heuristic keeps them apart) merges two
     // statements into one.
-    let delta = d.apply(&[edit(8, 10, " ")]);
+    let delta = d.apply(&[edit(8, 10, " ")]).unwrap();
     assert_eq!(texts(&d), ["SELECT 1 SELECT 20", "SELECT 3"]);
     assert_eq!(delta.removed.len(), 2);
     assert_eq!(delta.changed.len(), 1);
     assert_eq!(delta.moved.len(), 1);
     // Deleting only the `;` leaves a heuristic boundary where the line breaks.
     let mut e = SqlDocument::new("SELECT 1;\nSELECT 2;".into(), pg18(), ClientFlavor::None);
-    let _ = e.apply(&[edit(8, 9, "")]);
+    e.apply(&[edit(8, 9, "")]).unwrap();
     assert_eq!(texts(&e), ["SELECT 1", "SELECT 2"]);
     assert!(e.statements().iter().all(is_heuristic));
-    // An edit that does not fit is skipped, never a panic.
-    let text = d.text().to_string();
-    let _ = d.apply(&[edit(0, 9_999, "x")]);
-    assert_eq!(d.text(), text);
+    // An edit that does not fit is refused: the document, its revision and its analysis are
+    // unchanged, even when an earlier edit of the same batch fitted.
+    let (text, revision) = (d.text().to_string(), d.revision());
+    let before = d.statements().to_vec();
+    assert!(d.apply(&[edit(0, 9_999, "x")]).is_err());
+    assert!(
+        d.apply(&[edit(0, 0, "-- ok\n"), edit(500, 501, "x")])
+            .is_err()
+    );
+    assert_eq!((d.text(), d.revision()), (text.as_str(), revision));
+    assert_eq!(d.statements(), before.as_slice());
+    // A character is never split.
+    let mut c = SqlDocument::new("SELECT 'ç';".into(), pg18(), ClientFlavor::None);
+    assert!(c.apply(&[edit(9, 9, "x")]).is_err());
+    assert_eq!((c.text(), c.revision()), ("SELECT 'ç';", 0));
 }
 
 #[test]

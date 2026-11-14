@@ -21,6 +21,11 @@
 //!   (MariaDB `BEGIN NOT ATOMIC`, erratum c). `END` at statement start with an empty stack is
 //!   PostgreSQL's and SQLite's `COMMIT` (erratum a); SQLite's `BEGIN DEFERRED|IMMEDIATE|
 //!   EXCLUSIVE` stays a transaction (erratum d).
+//! - **Block words by position** (erratum (e)): `BEGIN`, `END` and `CASE` are names where the
+//!   grammar puts a name (`name_after`); `END` closes a non-`CASE` block only in statement
+//!   position (`block_end_after`), so `SELECT 1 AS end` or `UPDATE t SET end = 1` inside a body
+//!   never ends it early. MariaDB's compound statements also open blocks at top level
+//!   (`compound_at_top`, erratum (f)).
 //! - **Client commands** ([`ClientProfile`], SPLIT-01): psql `\cmd`, `\;`, `\g`, `COPY … FROM
 //!   STDIN` data; the mysql client's `DELIMITER`, `\G`, `\g`, `\c`, `\d`, `source`; sqlite3 `.cmd`.
 //!
@@ -33,6 +38,14 @@ mod pg;
 mod sqlite;
 
 use crate::id::{ClientFlavor, DialectCtx, DialectId};
+
+/// Where the PostgreSQL, MySQL/MariaDB and SQLite grammars put a name, never a block's
+/// `BEGIN` or `END`: after a qualifier dot, in a list, after `AS`, in a `SET` list, a select
+/// list, a `RETURN` expression, a condition, a join, an `ORDER`/`GROUP BY`.
+pub(crate) const NAME_AFTER: &[&str] = &[
+    ".", ",", "AS", "SET", "SELECT", "RETURN", "WHERE", "AND", "OR", "NOT", "ON", "BY", "FROM",
+    "JOIN", "INTO", "IN", "IS", "LIKE", "WHEN",
+];
 
 /// Which block rules a dialect's statements follow.
 #[non_exhaustive]
@@ -114,6 +127,22 @@ pub struct SplitProfile {
     pub statement_openers: &'static [(&'static str, BlockKind)],
     /// Words after `END` that name the block it closes (`END IF`, `END LOOP`).
     pub end_followers: &'static [(&'static str, BlockKind)],
+    /// After one of these (or any operator), `BEGIN` and `END` are names, never block words:
+    /// `t.end`, `AS end`, `SET end = 1`, `SELECT begin FROM t` (erratum (e)). `CASE` is a name
+    /// only after `.` and `AS` (a `SELECT CASE …` opens one).
+    pub name_after: &'static [&'static str],
+    /// `END` closes a block other than a `CASE` expression (or a `REPEAT` after its `UNTIL`)
+    /// only right after one of these: the end of the block's last statement, or its opener for
+    /// an empty body. Anywhere else it is a name or a mismatch (`UnknownBlock`), never an early
+    /// end (erratum (e)).
+    pub block_end_after: &'static [&'static str],
+    /// The statement openers also open blocks at the start of a top-level statement or after a
+    /// top-level label: MariaDB runs `IF`, `CASE`, `LOOP`, `REPEAT`, `WHILE`, `FOR` outside
+    /// stored programs (erratum (f)).
+    pub compound_at_top: bool,
+    /// `BEGIN` opens a block after a handler declaration's conditions (`DECLARE … HANDLER FOR
+    /// SQLEXCEPTION BEGIN`): the words that start such a declaration and mark it.
+    pub handler: Option<(&'static str, &'static str)>,
 }
 
 impl SplitProfile {
@@ -147,6 +176,14 @@ impl SplitProfile {
                 .map(|(w, _)| format!("opener:{w}")),
         );
         rows.extend(self.end_followers.iter().map(|(w, _)| format!("end:{w}")));
+        rows.extend(self.name_after.iter().map(|w| format!("name:{w}")));
+        rows.extend(self.block_end_after.iter().map(|w| format!("endpos:{w}")));
+        if self.compound_at_top {
+            rows.push("compound:top".into());
+        }
+        if let Some((declare, handler)) = self.handler {
+            rows.push(format!("handler:{declare} {handler}"));
+        }
         rows
     }
 }
@@ -184,6 +221,9 @@ pub struct ClientProfile {
     pub backslash_clear: &'static [&'static str],
     /// `\name` commands that change the delimiter (mysql `\d`).
     pub backslash_delimiter: &'static [&'static str],
+    /// `\name` conditionals and how they nest (psql `\if` +1, `\elif` and `\else` 0, `\endif`
+    /// -1): a statement in a branch runs only if the client takes it.
+    pub backslash_conditionals: &'static [(&'static str, i8)],
     /// psql `\;`: a `;` that does not end the statement.
     pub inline_semicolon: bool,
     /// The delimiter command at statement start (mysql `DELIMITER`).
@@ -226,6 +266,11 @@ impl ClientProfile {
                 .iter()
                 .map(|n| format!("client:\\{n}")),
         );
+        rows.extend(
+            self.backslash_conditionals
+                .iter()
+                .map(|(n, _)| format!("client:\\{n}")),
+        );
         rows.extend(self.delimiter_command.map(|c| format!("client:{c}")));
         rows.extend(self.line_commands.iter().map(|c| format!("client:{c}")));
         rows
@@ -240,6 +285,7 @@ static NO_CLIENT: ClientProfile = ClientProfile {
     backslash_terminators: &[],
     backslash_clear: &[],
     backslash_delimiter: &[],
+    backslash_conditionals: &[],
     inline_semicolon: false,
     delimiter_command: None,
     line_commands: &[],
@@ -264,6 +310,7 @@ static PSQL: ClientProfile = ClientProfile {
     ],
     backslash_clear: &["r", "reset"],
     backslash_delimiter: &[],
+    backslash_conditionals: &[("if", 1), ("elif", 0), ("else", 0), ("endif", -1)],
     inline_semicolon: true,
     delimiter_command: None,
     line_commands: &[],
@@ -280,6 +327,7 @@ static MYSQL_CLI: ClientProfile = ClientProfile {
     backslash_terminators: &[("g", true), ("G", true)],
     backslash_clear: &["c"],
     backslash_delimiter: &["d"],
+    backslash_conditionals: &[],
     inline_semicolon: false,
     delimiter_command: Some("DELIMITER"),
     line_commands: &["source"],
@@ -296,6 +344,7 @@ static SQLITE3: ClientProfile = ClientProfile {
     backslash_terminators: &[],
     backslash_clear: &[],
     backslash_delimiter: &[],
+    backslash_conditionals: &[],
     inline_semicolon: false,
     delimiter_command: None,
     line_commands: &[],

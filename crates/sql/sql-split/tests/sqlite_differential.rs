@@ -1,8 +1,11 @@
 //! The SQLite splitter against SQLite itself (Task 8): `rusqlite::Batch` prepares one statement
 //! at a time and continues with the tail, so the engine's own parser draws every boundary. Over
 //! scripts on a small seed schema, execution mode must find the same statements (as strict
-//! texts) and no uncertain boundary.
+//! texts) and no uncertain boundary. Generated scripts (triggers, `CASE`, columns named `begin`
+//! and `end` used unquoted, as SQLite allows) must never yield a certain unit SQLite does not
+//! see (T8 review I1, I3).
 
+use proptest::prelude::*;
 use rusqlite::fallible_iterator::FallibleIterator;
 use rusqlite::{Batch, Connection};
 use sql_dialect::{ClientFlavor, DialectCtx, DialectId, lex_profile};
@@ -12,7 +15,9 @@ use sql_split::{SplitMode, SplitStart, split_from};
 const SEED: &str = "CREATE TABLE orders (id INTEGER PRIMARY KEY, note TEXT, total REAL);
 CREATE TABLE audit_log (actor TEXT, message TEXT);
 CREATE TABLE müşteri (ad TEXT, şehir TEXT);
-CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT);";
+CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE t (a, [begin], [end]);
+CREATE TABLE u (a);";
 
 fn sqlite() -> DialectCtx {
     DialectCtx::new(DialectId::Sqlite, None)
@@ -84,6 +89,12 @@ fn sqlite_scripts() -> Vec<String> {
         "CREATE TRIGGER t4 AFTER UPDATE OF note ON orders FOR EACH ROW WHEN new.note IS NOT NULL\nBEGIN\n  INSERT INTO audit_log VALUES ('u', new.note);\n  UPDATE kv SET v = 'u' WHERE k = 'a';\nEND;\nUPDATE orders SET note = 'n';".into(),
         "PRAGMA foreign_keys = ON;\nSAVEPOINT s;\nRELEASE s;\nANALYZE;\nEXPLAIN QUERY PLAN SELECT * FROM orders;\nSELECT count(*) FROM orders".into(),
         "SELECT 1\n;\nSELECT /* ; */ 2;\nSELECT x'41' || 'b' -- c\n;".into(),
+        // T8 review I1: `begin` and `end` as names, inside and around trigger bodies.
+        "CREATE TRIGGER e1 AFTER INSERT ON u BEGIN UPDATE t SET end = 1; DELETE FROM t WHERE end > 9; END;\nSELECT 1;".into(),
+        "CREATE TRIGGER e2 AFTER INSERT ON u BEGIN UPDATE t SET begin = 1; END;\nSELECT 1;".into(),
+        "CREATE TRIGGER e3 AFTER INSERT ON u BEGIN SELECT begin FROM t; END;\nDELETE FROM t;\nSELECT end FROM t;\nSELECT 9;".into(),
+        "CREATE TRIGGER e4 AFTER INSERT ON u WHEN (SELECT 1 AS end) BEGIN DELETE FROM t; END;\nSELECT 1;".into(),
+        "SELECT a AS end, t.end, begin + end FROM t;\nINSERT INTO u VALUES (1);".into(),
     ]
     .into_iter()
     .collect();
@@ -101,5 +112,79 @@ fn sqlite_splitter_matches_rusqlite_batch() {
             rusqlite_batch_texts(&script),
             "{script:?}"
         );
+    }
+}
+
+/// One statement SQLite runs on the seed schema; `n` names a trigger uniquely.
+fn sqlite_stmt(n: usize) -> impl Strategy<Value = String> {
+    let col = prop::sample::select(vec![
+        "a",
+        "begin",
+        "end",
+        "t.end",
+        "t.begin",
+        "a AS end",
+        "begin + end",
+        "CASE WHEN a THEN 1 ELSE 2 END",
+        "CASE a WHEN 1 THEN end END AS begin",
+    ]);
+    let simple = prop_oneof![
+        col.clone().prop_map(|c| format!("SELECT {c} FROM t")),
+        prop::sample::select(vec!["a", "begin", "end"])
+            .prop_map(|c| format!("UPDATE t SET {c} = 1")),
+        Just("DELETE FROM t WHERE end > 9".to_string()),
+        Just("INSERT INTO t (a, begin, end) VALUES (1, 2, 3)".to_string()),
+        Just("SELECT ';', [x;y] FROM (SELECT 1 AS [x;y])".to_string()),
+    ];
+    let body_stmt = prop_oneof![
+        prop::sample::select(vec!["a", "begin", "end"])
+            .prop_map(|c| format!("UPDATE t SET {c} = 1")),
+        col.prop_map(|c| format!("SELECT {c} FROM t")),
+        Just("DELETE FROM t WHERE end > 9".to_string()),
+        Just("INSERT INTO t (a) VALUES (CASE WHEN 1 THEN 2 END)".to_string()),
+    ];
+    let when = prop::sample::select(vec!["", "WHEN (SELECT 1 AS end) ", "WHEN new.a > 0 "]);
+    let trigger = (when, prop::collection::vec(body_stmt, 1..4)).prop_map(move |(w, body)| {
+        let body: String = body.iter().map(|b| format!("{b}; ")).collect();
+        format!("CREATE TRIGGER g{n} AFTER INSERT ON u {w}BEGIN {body}END")
+    });
+    let transaction = prop::sample::select(vec![
+        "BEGIN; INSERT INTO u VALUES (1); COMMIT",
+        "BEGIN IMMEDIATE; UPDATE t SET end = 2; END TRANSACTION",
+        "BEGIN DEFERRED TRANSACTION; SELECT end FROM t; ROLLBACK",
+    ])
+    .prop_map(str::to_string);
+    prop_oneof![
+        simple,
+        trigger,
+        transaction,
+        Just("INSERT INTO u VALUES (1)".to_string())
+    ]
+}
+
+fn sqlite_script() -> impl Strategy<Value = String> {
+    (1usize..8)
+        .prop_flat_map(|len| (0..len).map(sqlite_stmt).collect::<Vec<_>>())
+        .prop_map(|v| v.iter().map(|x| format!("{x};\n")).collect())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: ProptestConfig::default().cases.max(512), ..ProptestConfig::default() })]
+
+    /// Every certain unit is, in order, a statement SQLite itself prepares; with no ambiguity
+    /// the two lists are equal.
+    #[test]
+    fn generated_scripts_match_rusqlite(script in sqlite_script()) {
+        let theirs = rusqlite_batch_texts(&script);
+        let split = split_from(&script, &sqlite(), ClientFlavor::Sqlite3, SplitMode::Execution, &SplitStart::default());
+        let mut next = theirs.iter();
+        for st in split.runnable() {
+            let unit = &script[st.strict];
+            prop_assert!(next.any(|t| t == unit), "certain {unit:?} is not SQLite's in {script:?} (SQLite: {theirs:?})");
+        }
+        if split.ambiguous.is_empty() {
+            let mine: Vec<String> = split.statements().map(|st| script[st.strict].to_string()).collect();
+            prop_assert_eq!(mine, theirs, "{:?}", script);
+        }
     }
 }

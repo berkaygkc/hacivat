@@ -425,3 +425,35 @@ flavor = "psql"
 input = "\\echo it's\nSELECT 1;\nSELECT 'x';"
 editor = ["SELECT 1", "SELECT 'x'"]
 client = ["\\echo it's"]
+
+
+# --- T8 review round 1: block words by position (erratum (e)), MariaDB compounds
+# (erratum (f)), psql \if; the review's probes, confirmed by pg_query and rusqlite ---
+
+[[case]]
+id = "R1-pg-atomic-as-end"
+source = "T8 review I1 / erratum (e) (pg_query: one statement)"
+input = "CREATE FUNCTION f() RETURNS SETOF int LANGUAGE sql BEGIN ATOMIC SELECT 1 AS end; DELETE FROM t; END;\nSELECT 3;"
+editor = ["CREATE FUNCTION f() RETURNS SETOF int LANGUAGE sql BEGIN ATOMIC SELECT 1 AS end; DELETE FROM t; END", "SELECT 3"]
+
+[[case]]
+id = "R1-pg-atomic-dot-end"
+source = "T8 review I1 / erratum (e) (pg_query: one statement)"
+input = "CREATE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC DELETE FROM t WHERE t.end < now(); UPDATE u SET a = 1; END;\nSELECT 3;"
+editor = ["CREATE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC DELETE FROM t WHERE t.end < now(); UPDATE u SET a = 1; END", "SELECT 3"]
+
+[[case]]
+id = "R1-pg-atomic-as-case"
+source = "T8 review I1 / erratum (e): CASE after AS is a label"
+input = "CREATE FUNCTION f() RETURNS SETOF int LANGUAGE sql BEGIN ATOMIC SELECT 1 AS case; END;\nSELECT 3;"
+editor = ["CREATE FUNCTION f() RETURNS SETOF int LANGUAGE sql BEGIN ATOMIC SELECT 1 AS case; END", "SELECT 3"]
+
+[[case]]
+id = "R1-pg-psql-if"
+source = "T8 review minor 5: a psql \\if branch is not certain"
+flavor = "psql"
+input = "\\if false\nDROP TABLE t;\n\\endif\nSELECT 1;"
+editor = ["DROP TABLE t", "SELECT 1"]
+ambiguous = ["ClientCommand"]
+confidence = ["H", "E"]
+client = ["\\if false", "\\endif"]

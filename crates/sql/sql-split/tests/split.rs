@@ -403,16 +403,20 @@ fn execution_never_sends_an_uncertain_boundary() {
     for (text, id, flavor, reason) in cases {
         let exec = run(text, &ctx(id), flavor, SplitMode::Execution);
         let editor = run(text, &ctx(id), flavor, SplitMode::Editor);
+        // A refused execution statement never reads as runnable: not `Exact`, not certain.
         assert!(
-            exec.statements().all(|s| s.confidence == Confidence::Exact),
+            exec.statements()
+                .all(|s| s.confidence == Confidence::Heuristic),
             "{text}"
         );
+        assert_eq!(exec.runnable().count(), 0, "{text}");
         assert!(
             exec.ambiguous.iter().any(|a| a.reason == reason),
             "{text}: {:?}",
             exec.ambiguous
         );
         for s in exec.statements() {
+            assert!(!exec.is_certain(s), "{text}");
             assert!(
                 exec.ambiguities_in(s.strict).next().is_some(),
                 "{text}: {:?} is not covered",
@@ -717,6 +721,148 @@ fn deep_nesting_is_linear_and_never_recurses() {
         SplitMode::Editor,
     );
     assert_eq!(s.statements().count(), 1);
+}
+
+#[test]
+fn certainty_is_a_lookup_and_every_boundary_sits_in_one_statement() {
+    // The hint's server-side end swallows `DELETE FROM t`: one ambiguity per statement it
+    // makes uncertain, each inside that statement; `SELECT 5`/`SELECT 6` miss a `;`.
+    let text = "SELECT /*+ BKA('*/ 1; DELETE FROM t; -- ') */ 3;\nSELECT 4;\nSELECT 5\nSELECT 6;";
+    let s = run(
+        text,
+        &ctx(DialectId::MySql),
+        ClientFlavor::None,
+        SplitMode::Execution,
+    );
+    let stmts: Vec<&Stmt> = s.statements().collect();
+    for a in &s.ambiguous {
+        assert_eq!(
+            stmts
+                .iter()
+                .filter(|st| st.strict.contains_range(a.at))
+                .count(),
+            1,
+            "{a:?}"
+        );
+    }
+    let runnable: Vec<&str> = s.runnable().map(|st| &text[st.strict]).collect();
+    assert_eq!(runnable, ["SELECT 4"]);
+    for st in &stmts {
+        assert_eq!(
+            s.is_certain(st),
+            st.confidence == Confidence::Exact,
+            "{:?}",
+            &text[st.strict]
+        );
+    }
+    assert_eq!(
+        s.ambiguous
+            .iter()
+            .filter(|a| a.reason == AmbiguityReason::AmbiguousCommentEnd)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn an_end_that_follows_an_operator_or_a_branch_is_a_name() {
+    // `x > end` and `CASE … THEN end END`: names, not block ends (erratum (e)).
+    let text = "CREATE TRIGGER g AFTER INSERT ON u BEGIN DELETE FROM t WHERE x > end; SELECT CASE a WHEN 1 THEN end END FROM t; END; SELECT 2";
+    let s = run(
+        text,
+        &ctx(DialectId::Sqlite),
+        ClientFlavor::None,
+        SplitMode::Execution,
+    );
+    assert_eq!(texts(text, &s).len(), 2);
+    assert_eq!(s.runnable().count(), 2, "{:?}", s.ambiguous);
+}
+
+#[test]
+fn client_command_splitting_lexes_linearly() {
+    // The structural pass's own lexing (`lexed_bytes`, the complexity counter) stays within a
+    // small multiple of the text whatever the number of commands, COPY blocks or delimiters:
+    // each restart lexes a short first chunk, and quotes in commands or data never send it to
+    // the end. A pass that re-lexed the rest after each command would lex O(n²).
+    use sql_split::splitter::lexed_bytes;
+    let mut psql = String::new();
+    let mut copy = String::new();
+    let mut delim = String::from("DELIMITER $$\n");
+    let mut dot = String::new();
+    for i in 0..4_000 {
+        psql.push_str(&format!("\\echo it's {i}\nSELECT {i};\n"));
+        copy.push_str(&format!("COPY t{i} FROM STDIN;\nO'Brien\t{i}\n\\.\n"));
+        delim.push_str(&format!("SELECT {i}$$\n"));
+        dot.push_str(&format!(".print it's {i}\nSELECT {i};\n"));
+    }
+    for (text, id, flavor) in [
+        (&psql, DialectId::Postgres, ClientFlavor::Psql),
+        (&copy, DialectId::Postgres, ClientFlavor::Psql),
+        (&delim, DialectId::MySql, ClientFlavor::MySqlCli),
+        (&dot, DialectId::Sqlite, ClientFlavor::Sqlite3),
+    ] {
+        let n = text.len() as u64;
+        let lexed = lexed_bytes(text, &ctx(id), flavor);
+        assert!(
+            lexed <= 4 * n + 4_096,
+            "{id:?}: {lexed} bytes lexed for {n}"
+        );
+        // Doubling the script at most doubles the work.
+        let twice = format!("{text}{text}");
+        let lexed2 = lexed_bytes(&twice, &ctx(id), flavor);
+        assert!(lexed2 <= 2 * lexed + 4_096, "{id:?}: {lexed2} vs {lexed}");
+    }
+}
+
+#[test]
+fn one_line_scripts_and_comment_ends_lex_linearly() {
+    // With no line start to cut at, chunks are cut inside the line; each executable comment's
+    // server-side end is read in prefixes, not to the end of the text. Before either, a
+    // one-line script cost O(n) per restart or per comment: O(n²) in all.
+    use sql_split::splitter::lexed_bytes;
+    for (unit, id, flavor) in [
+        (r"SELECT 1 \; ", DialectId::Postgres, ClientFlavor::Psql),
+        (r"SELECT 1 \g ", DialectId::MySql, ClientFlavor::MySqlCli),
+        (
+            "/*!40101 SET @a = 1 */; ",
+            DialectId::MySql,
+            ClientFlavor::MySqlCli,
+        ),
+        ("/*!*/1/*!'  */", DialectId::MySql, ClientFlavor::None),
+        (
+            r"/*!b'\'' */ SELECT 1; ",
+            DialectId::MariaDb,
+            ClientFlavor::None,
+        ),
+        (
+            r#"1'.print "*/"`$$\;\\g\;SELECT \echo "#,
+            DialectId::Postgres,
+            ClientFlavor::Psql,
+        ),
+        // A restart before a comment or a word that runs to the cut, again and again.
+        (
+            r"\echo '*/'\-- `;'*/''\",
+            DialectId::Postgres,
+            ClientFlavor::Psql,
+        ),
+        (r"/* */x\\;\/*M!", DialectId::Postgres, ClientFlavor::Psql),
+        (
+            r"\echo x $a_long_dollar_tag_name ",
+            DialectId::Postgres,
+            ClientFlavor::Psql,
+        ),
+    ] {
+        let text = unit.repeat(2_000);
+        let n = text.len() as u64;
+        let lexed = lexed_bytes(&text, &ctx(id), flavor);
+        assert!(
+            lexed <= 32 * n + 4_096,
+            "{unit:?}: {lexed} bytes lexed for {n}"
+        );
+        let twice = format!("{text}{text}");
+        let lexed2 = lexed_bytes(&twice, &ctx(id), flavor);
+        assert!(lexed2 <= 2 * lexed + 4_096, "{unit:?}: {lexed2} vs {lexed}");
+    }
 }
 
 #[test]

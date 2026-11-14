@@ -372,3 +372,134 @@ covers = ["client:dot"]
 input = ".mode csv\nSELECT 1;\n.headers on\nSELECT 2;"
 editor = ["SELECT 1", "SELECT 2"]
 client = [".mode csv", ".headers on"]
+
+
+# --- fix round 1 (T8 review): block words by position, compounds, handlers ---
+
+# erratum (e): `end` after the row's word is a name; the body goes on (synthetic where the SQL is not valid)
+[[case]]
+id = "name-."
+covers = ["name:."]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT t.end FROM t; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT t.end FROM t; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-,"
+covers = ["name:,"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1, end FROM t; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1, end FROM t; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-AS"
+covers = ["name:AS"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 AS end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 AS end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-SET"
+covers = ["name:SET"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN UPDATE t SET end = 1; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN UPDATE t SET end = 1; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-SELECT"
+covers = ["name:SELECT"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT end FROM t; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT end FROM t; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-RETURN"
+covers = ["name:RETURN"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN RETURN end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN RETURN end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-WHERE"
+covers = ["name:WHERE"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-AND"
+covers = ["name:AND"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE a AND end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE a AND end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-OR"
+covers = ["name:OR"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE a OR end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE a OR end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-NOT"
+covers = ["name:NOT"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE NOT end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE NOT end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-ON"
+covers = ["name:ON"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t JOIN u ON end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t JOIN u ON end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-BY"
+covers = ["name:BY"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t ORDER BY end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t ORDER BY end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-FROM"
+covers = ["name:FROM"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-JOIN"
+covers = ["name:JOIN"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t JOIN end ON true; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t JOIN end ON true; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-INTO"
+covers = ["name:INTO"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO end VALUES (1); DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO end VALUES (1); DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-IN"
+covers = ["name:IN"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE a IN end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE a IN end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-IS"
+covers = ["name:IS"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE a IS end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE a IS end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-LIKE"
+covers = ["name:LIKE"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE a LIKE end; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1 FROM t WHERE a LIKE end; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "name-WHEN"
+covers = ["name:WHEN"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT CASE WHEN end THEN 1 END; DELETE FROM u; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT CASE WHEN end THEN 1 END; DELETE FROM u; END", "SELECT 2"]
+
+[[case]]
+id = "endpos-semicolon"
+covers = ["endpos:;"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END", "SELECT 2"]
+
+# synthetic: SQLite rejects an empty body
+[[case]]
+id = "endpos-BEGIN"
+covers = ["endpos:BEGIN"]
+input = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN END; SELECT 2"
+editor = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN END", "SELECT 2"]

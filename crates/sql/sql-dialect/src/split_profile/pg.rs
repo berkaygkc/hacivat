@@ -2,7 +2,7 @@
 //! so `CREATE RULE … DO (…; …)` needs no table row; dollar quotes are single tokens; a
 //! top-level `BEGIN` is always a transaction and `END` at statement start is `COMMIT`.
 
-use super::{BlockFamily, HeadContinuation, SplitProfile};
+use super::{BlockFamily, HeadContinuation, NAME_AFTER, SplitProfile};
 
 pub(super) static PG: SplitProfile = SplitProfile {
     name: "pg",
@@ -84,4 +84,9 @@ pub(super) static PG: SplitProfile = SplitProfile {
     body_start_after: &[],
     statement_openers: &[],
     end_followers: &[],
+    name_after: NAME_AFTER,
+    // A `BEGIN ATOMIC` body's statements each end with `;` (PostgreSQL's grammar).
+    block_end_after: &[";", "ATOMIC"],
+    compound_at_top: false,
+    handler: None,
 };

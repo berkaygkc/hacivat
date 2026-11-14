@@ -8,10 +8,12 @@
 //! `Analysis::to_split` turns it into the editor or the execution view.
 //!
 //! **Tokens.** The loop reads the document's own lexing until a client command interrupts it;
-//! from there it lexes again in line-aligned chunks that double in size (`Stream`), so a script
-//! with many commands or `COPY` blocks costs O(n), not O(n × commands). A token that spans a
-//! chunk boundary (a string, comment, dollar quote or `COPY` data across lines) is resumed from
-//! the lexer's end state and joined, which is exact at line starts (`sql_lexer::LexState`).
+//! from there it lexes again in chunks that double in size (`Stream`), so a script with many
+//! commands or `COPY` blocks costs O(n), not O(n × commands). A chunk ends at a line start where
+//! one is near, and a token that spans that boundary (a string, comment, dollar quote or `COPY`
+//! data across lines) is resumed from the lexer's end state and joined, which is exact at line
+//! starts (`sql_lexer::LexState`); on a long line it ends inside the line, after the last token
+//! the cut cannot have changed.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -158,23 +160,34 @@ fn ambiguous_starts(lexed: &Lexed) -> Vec<TextSize> {
         .collect()
 }
 
-/// The tokens of `text[base..]`, lexed lazily in line-aligned chunks.
+/// The tokens of `text[base..]`, lexed lazily in chunks.
 struct Stream<'a> {
     text: &'a str,
     profile: &'static LexDialect,
     modes: LexModes,
     run: Cow<'a, Lexed>,
-    /// Where `run`'s text starts and ends.
+    /// How many of `run`'s tokens the stream hands out: all of them, or, after a cut inside a
+    /// line, those that end `CUT_MARGIN` before the cut.
+    usable: usize,
+    /// The lexer's state at `end`.
+    state: LexState,
+    /// Where `run`'s text starts, and where its usable tokens end.
     base: usize,
     end: usize,
     next: usize,
     amb: Vec<TextSize>,
     grow: usize,
+    /// The first chunk's length after a restart.
+    first: usize,
     /// `run` was lexed from `Initial`, so its first token is an `Initial`-state token too.
     initial: bool,
+    /// Bytes lexed so far (the complexity counter; the document's own lexing is not counted).
+    lexed: u64,
 }
 
-const FIRST_CHUNK: usize = 1 << 10;
+/// After a restart the first chunk is short (a command or delimiter usually comes back within a
+/// few lines); each further chunk doubles.
+const FIRST_CHUNK: usize = 64;
 const MAX_CHUNK: usize = 1 << 20;
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
@@ -185,22 +198,30 @@ impl<'a> Stream<'a> {
         profile: &'static LexDialect,
         modes: LexModes,
         start: &LexState,
+        first: usize,
     ) -> Stream<'a> {
+        let first = first.max(1);
         let mut s = Stream {
             text,
             profile,
             modes,
             run: Cow::Owned(lex("", profile, modes, &LexState::Initial)),
+            usable: 0,
+            state: LexState::Initial,
             base: 0,
             end: 0,
             next: 0,
             amb: Vec::new(),
-            grow: FIRST_CHUNK,
+            grow: first,
+            first,
             initial: true,
+            lexed: 0,
         };
         match lexed {
             Some(l) if usize::from(l.range_end()) == text.len() => {
                 s.amb = ambiguous_starts(l);
+                s.usable = l.len();
+                s.state = l.end_state().clone();
                 s.run = Cow::Borrowed(l);
                 s.end = text.len();
             }
@@ -210,17 +231,79 @@ impl<'a> Stream<'a> {
     }
 
     /// Lexes the chunk starting at `at` in `state`.
+    ///
+    /// The chunk ends at a line start when one comes within twice the chunk's length: the
+    /// lexer's state is exact there, and a token the cut splits is resumed and joined (`next`).
+    /// On a longer line (a one-line script) it is cut inside the line instead. A token the
+    /// lexer settles by looking a few bytes ahead reads as in the whole text once it ends
+    /// `CUT_MARGIN` before the cut, so those are kept, and the next chunk starts after them, in
+    /// `Initial`. One scan can settle a token early by meeting the cut: a dollar tag read to
+    /// the cut leaves a lone `$`, and the tag's bytes end the chunk as one word that reaches
+    /// the cut. So when a word ends the chunk, the token before it waits for a longer chunk too.
+    /// (`COPY` data, which the lexer reads line by line, is never cut so.) Either way a chunk
+    /// costs its length, and the chunks double, so a run of commands on one line still costs
+    /// O(n).
     fn load(&mut self, at: usize, state: LexState) {
         let n = self.text.len();
-        let end = cut_after(self.text, at.saturating_add(self.grow).min(n));
-        let lexed = lex(&self.text[at..end], self.profile, self.modes, &state);
-        self.amb = ambiguous_starts(&lexed);
-        self.run = Cow::Owned(lexed);
-        self.initial = state == LexState::Initial;
-        self.base = at;
-        self.end = end;
-        self.next = 0;
-        self.grow = (self.grow * 2).min(MAX_CHUNK);
+        loop {
+            let want = at.saturating_add(self.grow).min(n);
+            let line = cut_after(self.text, want);
+            let mid = line > at.saturating_add(self.grow.saturating_mul(2))
+                && state != LexState::InCopyData;
+            let end = if mid {
+                ceil_char(self.text, want)
+            } else {
+                line
+            };
+            let lexed = lex(&self.text[at..end], self.profile, self.modes, &state);
+            self.lexed += (end - at) as u64;
+            let (usable, stop, next) = if mid {
+                let cut = end - at;
+                let b = self.text.as_bytes();
+                let mut k = lexed.len();
+                while k > 0 {
+                    let e = usize::from(lexed.range(k - 1).end());
+                    if e + CUT_MARGIN <= cut
+                        && !lexed.flags(k - 1).contains(TokenFlags::UNTERMINATED)
+                        && !b[at + e..].starts_with(BOM)
+                    {
+                        break;
+                    }
+                    k -= 1;
+                }
+                let last = lexed.len().saturating_sub(1);
+                if k > 0
+                    && k == last
+                    && lexed.kind(last) == TokenKind::Word
+                    && usize::from(lexed.range(last).end()) == cut
+                {
+                    k -= 1;
+                    while k > 0 && b[at + usize::from(lexed.range(k - 1).end())..].starts_with(BOM)
+                    {
+                        k -= 1;
+                    }
+                }
+                if k == 0 {
+                    // The first token runs past the cut: lex a longer chunk.
+                    self.grow = self.grow.saturating_mul(2);
+                    continue;
+                }
+                let e = usize::from(lexed.range(k - 1).end());
+                (k, at + e, LexState::Initial)
+            } else {
+                (lexed.len(), end, lexed.end_state().clone())
+            };
+            self.amb = ambiguous_starts(&lexed);
+            self.run = Cow::Owned(lexed);
+            self.usable = usable;
+            self.state = next;
+            self.initial = state == LexState::Initial;
+            self.base = at;
+            self.end = stop;
+            self.next = 0;
+            self.grow = self.grow.saturating_mul(2).min(MAX_CHUNK.max(self.grow));
+            return;
+        }
     }
 
     /// Continues at `at` in `state`, dropping whatever was lexed past it.
@@ -234,22 +317,25 @@ impl<'a> Stream<'a> {
             if at < self.end {
                 let rel = size(at - self.base);
                 if let Some(i) = self.run.token_at(rel)
+                    && i < self.usable
                     && self.run.range(i).start() == rel
                 {
                     self.next = i;
                     return;
                 }
-            } else if at == self.end && *self.run.end_state() == LexState::Initial {
-                self.next = self.run.len();
+            } else if at == self.end && self.state == LexState::Initial {
+                self.next = self.usable;
                 return;
             }
         }
-        self.grow = FIRST_CHUNK;
+        self.grow = self.first;
         if at >= n {
             self.base = n;
             self.end = n;
             self.next = 0;
             self.run = Cow::Owned(lex("", self.profile, self.modes, &LexState::Initial));
+            self.usable = 0;
+            self.state = LexState::Initial;
             self.amb.clear();
             return;
         }
@@ -271,18 +357,18 @@ impl<'a> Stream<'a> {
     fn next(&mut self) -> Option<Tok> {
         let n = self.text.len();
         loop {
-            if self.next < self.run.len() {
+            if self.next < self.usable {
                 let mut i = self.next;
                 self.next += 1;
                 let mut tok = self.tok(i);
-                // A token the chunk boundary cut: resume it from the lexer's state and join.
-                while i + 1 == self.run.len()
+                // A token a line cut split: resume it from the lexer's state and join.
+                while i + 1 == self.usable
                     && self.end < n
                     && tok.flags.contains(TokenFlags::UNTERMINATED)
                 {
-                    let state = self.run.end_state().clone();
+                    let state = self.state.clone();
                     self.load(self.end, state);
-                    if self.run.is_empty() {
+                    if self.usable == 0 {
                         break;
                     }
                     let cont = self.tok(0);
@@ -300,10 +386,18 @@ impl<'a> Stream<'a> {
             if self.end >= n {
                 return None;
             }
-            let state = self.run.end_state().clone();
+            let state = self.state.clone();
             self.load(self.end, state);
         }
     }
+}
+
+/// The first char boundary at or after `at`.
+fn ceil_char(text: &str, mut at: usize) -> usize {
+    while at < text.len() && !text.is_char_boundary(at) {
+        at += 1;
+    }
+    at.min(text.len())
 }
 
 /// The first line start at or after `at` that does not begin with a byte-order mark (which a
@@ -382,6 +476,9 @@ pub(crate) struct Analysis {
     pub flavor: ClientFlavor,
     /// The delimiter in force at the text's start.
     pub start_delimiter: Option<Arc<str>>,
+    /// Bytes the pass lexed itself (chunks, re-lexed token prefixes, executable-comment bodies,
+    /// server-side comment reads): the complexity counter.
+    pub lexed: u64,
 }
 
 /// Runs the structural pass over `text` (its lexing from `start.lex` is `lexed`, or the pass
@@ -393,6 +490,18 @@ pub(crate) fn analyze(
     flavor: ClientFlavor,
     start: &SplitStart,
 ) -> Analysis {
+    analyze_chunked(text, lexed, ctx, flavor, start, FIRST_CHUNK)
+}
+
+/// [`analyze`], lexing in chunks that start at `first` bytes after a restart.
+pub(crate) fn analyze_chunked(
+    text: &str,
+    lexed: Option<&Lexed>,
+    ctx: &DialectCtx,
+    flavor: ClientFlavor,
+    start: &SplitStart,
+    first: usize,
+) -> Analysis {
     let lp = lexer_for(ctx);
     let lexed = lexed.filter(|_| start.lex == LexState::Initial);
     let mut w = Walker {
@@ -401,7 +510,7 @@ pub(crate) fn analyze(
         sp: split_profile(ctx),
         cp: client_profile(flavor),
         lp,
-        stream: Stream::new(text, lexed, lp, ctx.modes, &start.lex),
+        stream: Stream::new(text, lexed, lp, ctx.modes, &start.lex, first),
         delim: start.delimiter.clone(),
         out: Analysis {
             ctx: Some(*ctx),
@@ -414,8 +523,14 @@ pub(crate) fn analyze(
         after_item: false,
         open_trailing: None,
         copy: None,
+        last_block_item: None,
+        if_depth: 0,
+        server_to_eof: false,
+        server_read: None,
+        lexed: 0,
     };
     w.run();
+    w.out.lexed = w.lexed + w.stream.lexed;
     w.out
 }
 
@@ -426,6 +541,8 @@ struct Open {
     at: TextRange,
     /// A `CASE` in statement position (a CASE statement, closed by `END CASE`).
     statement: bool,
+    /// A `REPEAT` whose `UNTIL` has been read (its `END` follows the condition).
+    until: bool,
 }
 
 /// Whether a statement follows its family's block rules.
@@ -455,6 +572,9 @@ struct Cur {
     stack: Vec<Open>,
     after_end: Option<(Open, TextRange)>,
     pending_begin: Option<TextRange>,
+    /// A MariaDB `FOR` in statement position: a loop, unless `EACH` follows (a trigger's
+    /// `FOR EACH ROW`).
+    pending_for: Option<TextRange>,
     pending_with: Option<PendingWith>,
     cuts: Vec<Cut>,
     uncertain: bool,
@@ -464,6 +584,14 @@ struct Cur {
     prev: Option<Tok>,
     /// Client commands between the statement's tokens.
     inside: Vec<TextRange>,
+    /// Inside a block: the current inner statement is a `DECLARE`, and it is a handler
+    /// declaration (`DECLARE … HANDLER FOR …`), whose action may be a `BEGIN … END`.
+    inner_declare: bool,
+    handler: bool,
+    /// A block other than a parenthesis was opened in this statement.
+    had_block: bool,
+    /// The statement stands in (or across) a psql `\if` branch.
+    in_branch: bool,
 }
 
 struct Walker<'a, 's> {
@@ -484,6 +612,16 @@ struct Walker<'a, 's> {
     open_trailing: Option<usize>,
     /// psql `COPY … FROM STDIN` data due at this offset, for this item.
     copy: Option<(usize, usize)>,
+    /// The last item whose statement tracked a block (the MySQL stray-`END` backstop).
+    last_block_item: Option<usize>,
+    /// psql `\if` nesting: statements in a branch run only if psql takes it.
+    if_depth: u32,
+    /// A server-side comment read already ran to the text's end (every later one would too).
+    server_to_eof: bool,
+    /// The last comment read server-side: its start and where the server ends it.
+    server_read: Option<(usize, Option<usize>)>,
+    /// Bytes lexed outside the stream.
+    lexed: u64,
 }
 
 impl<'a> Walker<'a, '_> {
@@ -515,7 +653,8 @@ impl<'a> Walker<'a, '_> {
     }
 
     fn run(&mut self) {
-        while let Some(t) = self.stream.next() {
+        while let Some(mut t) = self.stream.next() {
+            self.reread_comment_end(&mut t);
             if let Some((ds, _)) = self.copy
                 && t.end() > ds
             {
@@ -541,9 +680,43 @@ impl<'a> Walker<'a, '_> {
         self.finish();
     }
 
+    /// The lexer's flag and the splitter's own server-side reading of a comment's end are
+    /// joined: a terminated executable comment or hint is ambiguous when either says so. They
+    /// differ where the lexer's reading is coarser than its own tokens (it reads `x'…'` and
+    /// `b'…'` as escaping strings, where the lexer, like the server, reads raw literals); taking
+    /// both only ever refuses more.
+    fn reread_comment_end(&mut self, t: &mut Tok) {
+        if t.ambiguous_end
+            || !matches!(
+                t.kind,
+                TokenKind::ExecutableComment | TokenKind::HintComment
+            )
+            || t.flags.contains(TokenFlags::UNTERMINATED)
+        {
+            return;
+        }
+        if self.server_end_of(t) != Some(t.end()) {
+            t.ambiguous_end = true;
+        }
+    }
+
+    /// [`server_end`] of the comment `t`, read once per token.
+    fn server_end_of(&mut self, t: &Tok) -> Option<usize> {
+        if let Some((at, end)) = self.server_read
+            && at == t.start()
+        {
+            return end;
+        }
+        let (end, lexed) = server_end(self.text, t, self.lp, self.ctx.modes);
+        self.lexed += lexed;
+        self.server_read = Some((t.start(), end));
+        end
+    }
+
     /// Feeds the tokens of `text[a..b]` lexed on their own (a token cut by a delimiter or by
     /// `COPY` data).
     fn sub_lex(&mut self, a: usize, b: usize) {
+        self.lexed += (b - a) as u64;
         let lexed = lex(
             &self.text[a..b],
             self.lp,
@@ -554,13 +727,15 @@ impl<'a> Walker<'a, '_> {
         let shift = size(a);
         for i in 0..lexed.len() {
             let r = lexed.range(i);
-            self.token(Tok {
+            let mut t = Tok {
                 kind: lexed.kind(i),
                 range: TextRange::new(r.start() + shift, r.end() + shift),
                 flags: lexed.flags(i),
                 keyword: lexed.keyword(i),
                 ambiguous_end: amb.binary_search(&r.start()).is_ok(),
-            });
+            };
+            self.reread_comment_end(&mut t);
+            self.token(t);
         }
     }
 
@@ -619,6 +794,13 @@ impl<'a> Walker<'a, '_> {
                     self.segment(at, end, ClientKind::Terminator, supported);
                 }
                 Backslash::Clear { end } => self.segment(at, end, ClientKind::ClearBuffer, false),
+                Backslash::Conditional { end, nesting } => {
+                    if let Some(cur) = &mut self.cur {
+                        cur.in_branch = true;
+                    }
+                    self.if_depth = self.if_depth.saturating_add_signed(nesting.into());
+                    self.segment(at, end, ClientKind::Command, false);
+                }
                 Backslash::Delimiter { arg, end }
                     if self.cur.is_none() && client::only_blanks_before(self.text, at) =>
                 {
@@ -836,6 +1018,7 @@ impl<'a> Walker<'a, '_> {
             stack: Vec::new(),
             after_end: None,
             pending_begin: None,
+            pending_for: None,
             pending_with: None,
             cuts: Vec::new(),
             uncertain: false,
@@ -843,7 +1026,46 @@ impl<'a> Walker<'a, '_> {
             sig: 0,
             prev: None,
             inside: Vec::new(),
+            inner_declare: false,
+            handler: false,
+            had_block: false,
+            in_branch: self.if_depth > 0,
         });
+        self.stray_end(t);
+        // A statement that starts with a client line command's word away from a line start
+        // (`SELECT 1; source f.sql`, sqlite3 `x; .mode csv`): the client may read it as the
+        // command; Hacivat cannot tell (fail closed).
+        let cp = self.cp;
+        let command_word = cp.delimiter_command.is_some_and(|c| self.eq(t, c))
+            || self.in_table(t, cp.line_commands)
+            || (cp.dot_commands && self.text.as_bytes()[t.start()] == b'.');
+        if command_word {
+            self.ambiguity(t.range, AmbiguityReason::ClientCommand);
+        }
+    }
+
+    /// The MySQL/MariaDB backstop: no statement starts with `END` there, so one that does means
+    /// a block's opener went unseen and its `END` closed an outer block early. Every statement
+    /// back to the last block-tracked one, and this one, is uncertain.
+    fn stray_end(&mut self, t: &Tok) {
+        if self.sp.family != BlockFamily::MySql || !self.eq(t, "END") {
+            return;
+        }
+        let from = self.last_block_item.unwrap_or(self.out.items.len());
+        let mut marked = Vec::new();
+        for item in &mut self.out.items[from..] {
+            if let RawItem::Stmt(s) = item {
+                s.uncertain = true;
+                marked.push(s.strict);
+            }
+        }
+        for at in marked {
+            self.out.ambiguous.push(AmbiguousBoundary {
+                at,
+                reason: AmbiguityReason::UnknownBlock,
+            });
+        }
+        self.anomaly(t.range);
     }
 
     fn empty_item(&mut self, r: TextRange) {
@@ -988,6 +1210,11 @@ impl<'a> Walker<'a, '_> {
                 }
             }
         }
+        if let Some(at) = self.cur.as_mut().and_then(|c| c.pending_for.take())
+            && !self.eq(t, "EACH")
+        {
+            self.push(BlockKind::For, at, true);
+        }
         if let Some(begin) = self.cur.as_mut().and_then(|c| c.pending_begin.take()) {
             let opens = match family {
                 BlockFamily::Postgres => self.eq(t, "ATOMIC").then_some(BlockKind::BeginAtomic),
@@ -1002,12 +1229,29 @@ impl<'a> Walker<'a, '_> {
         }
         self.head_scan(t);
         self.copy_scan(t);
+        if t.kind == TokenKind::Semicolon
+            && let Some(cur) = &mut self.cur
+        {
+            cur.inner_declare = false;
+            cur.handler = false;
+        }
         match t.kind {
             TokenKind::LParen | TokenKind::LBracket => self.push(BlockKind::Paren, t.range, false),
             TokenKind::RParen | TokenKind::RBracket => self.close_paren(t),
             TokenKind::Word if !consumed => self.block_word(t, family),
             _ => {}
         }
+    }
+
+    /// Whether `prev` puts a name next: `BEGIN` and `END` after it are names, not block words
+    /// (`t.end`, `AS end`, `SET end = 1`, `SELECT begin`, `x > end`). Any operator does, but not
+    /// a label's `:` (`lbl: BEGIN`).
+    fn names_next(&self, prev: Option<Tok>) -> bool {
+        prev.is_some_and(|p| {
+            let w = self.spelled(&p);
+            (p.kind == TokenKind::Op && w != ":")
+                || self.sp.name_after.iter().any(|x| x.eq_ignore_ascii_case(w))
+        })
     }
 
     fn block_word(&mut self, t: &Tok, family: BlockFamily) {
@@ -1018,43 +1262,87 @@ impl<'a> Walker<'a, '_> {
         let top = cur.stack.last().copied();
         let top_is_paren = top.is_some_and(|o| o.kind == BlockKind::Paren);
         let in_block = cur.stack.iter().any(|o| o.kind != BlockKind::Paren);
-        let at_start = cur.sig == 0;
+        let prev = cur.prev;
+        let handler = cur.handler;
+        // The start of a top-level statement, or right after its label (`lbl: LOOP`).
+        let top_start =
+            cur.sig == 0 || (cur.sig == 2 && prev.is_some_and(|p| &self.text[p.range] == ":"));
+        let names = self.names_next(prev);
+        let case_name = prev.is_some_and(|p| {
+            p.kind == TokenKind::Dot || self.text[p.range].eq_ignore_ascii_case("AS")
+        });
         let word = self.word(t).unwrap_or("");
         let is = |w: &str| word.eq_ignore_ascii_case(w);
         match family {
             BlockFamily::Plain => {}
             BlockFamily::Postgres => {
-                if routine && !top_is_paren && is("BEGIN") {
-                    self.set_pending_begin(t.range);
-                } else if in_block && is("CASE") {
-                    self.push(BlockKind::Case, t.range, false);
-                } else if is("END") && in_block {
-                    self.end(t);
+                if is("BEGIN") {
+                    if routine && !in_block && !top_is_paren && !names {
+                        self.set_pending_begin(t.range);
+                    }
+                } else if is("CASE") {
+                    if in_block && !case_name {
+                        self.push(BlockKind::Case, t.range, false);
+                    }
+                } else if is("END") {
+                    self.end(t, names);
                 }
             }
             BlockFamily::Sqlite => {
-                if routine && is("BEGIN") && !top_is_paren {
-                    self.push(BlockKind::BeginEnd, t.range, false);
-                } else if routine && is("CASE") {
-                    self.push(BlockKind::Case, t.range, false);
-                } else if routine && is("END") {
-                    self.end(t);
+                if is("BEGIN") {
+                    // The trigger body: the first `BEGIN` that is no name (no nesting in SQLite).
+                    if routine && !in_block && !top_is_paren && !names {
+                        self.push(BlockKind::BeginEnd, t.range, false);
+                    }
+                } else if is("CASE") {
+                    if routine && !case_name {
+                        self.push(BlockKind::Case, t.range, false);
+                    }
+                } else if is("END") && routine {
+                    self.end(t, names);
                 }
             }
             BlockFamily::MySql => {
                 let body = routine || in_block;
                 if is("BEGIN") {
-                    if (routine || in_block) && !top_is_paren {
+                    if names || top_is_paren {
+                        // A name (`SELECT begin FROM t`).
+                    } else if in_block {
+                        if self.statement_position() || handler {
+                            self.push(BlockKind::BeginEnd, t.range, false);
+                        }
+                    } else if routine {
+                        // The routine's body.
                         self.push(BlockKind::BeginEnd, t.range, false);
-                    } else if at_start {
+                    } else if top_start {
                         self.set_pending_begin(t.range);
                     }
                 } else if is("END") {
                     if body {
-                        self.end(t);
+                        self.end(t, names);
                     }
-                } else if body {
-                    let position = self.statement_position();
+                } else if is("UNTIL") {
+                    if let Some(cur) = &mut self.cur
+                        && let Some(open) = cur.stack.last_mut()
+                        && open.kind == BlockKind::Repeat
+                    {
+                        open.until = true;
+                    }
+                } else {
+                    let position = if body {
+                        self.statement_position()
+                    } else {
+                        self.sp.compound_at_top && top_start
+                    };
+                    if let Some((declare, marker)) = self.sp.handler
+                        && in_block
+                    {
+                        if position && is(declare) {
+                            self.set_inner(|c| c.inner_declare = true);
+                        } else if is(marker) && self.cur.as_ref().is_some_and(|c| c.inner_declare) {
+                            self.set_inner(|c| c.handler = true);
+                        }
+                    }
                     let opener = self
                         .sp
                         .statement_openers
@@ -1062,13 +1350,24 @@ impl<'a> Walker<'a, '_> {
                         .find(|(w, _)| is(w))
                         .map(|(_, k)| *k);
                     match opener {
-                        Some(BlockKind::Case) => self.push(BlockKind::Case, t.range, position),
-                        Some(kind) if position => self.push(kind, t.range, true),
+                        Some(BlockKind::Case) if body && !case_name => {
+                            self.push(BlockKind::Case, t.range, position);
+                        }
+                        Some(BlockKind::For) if position && !case_name => {
+                            self.set_inner(|c| c.pending_for = Some(t.range));
+                        }
+                        Some(kind) if position && !case_name => self.push(kind, t.range, true),
                         _ => {}
                     }
                 }
             }
             _ => {}
+        }
+    }
+
+    fn set_inner(&mut self, f: impl FnOnce(&mut Cur)) {
+        if let Some(cur) = &mut self.cur {
+            f(cur);
         }
     }
 
@@ -1113,28 +1412,68 @@ impl<'a> Walker<'a, '_> {
 
     fn push(&mut self, kind: BlockKind, at: TextRange, statement: bool) {
         if let Some(cur) = &mut self.cur {
+            if kind != BlockKind::Paren {
+                cur.had_block = true;
+                cur.handler = false;
+            }
             cur.stack.push(Open {
                 kind,
                 at,
                 statement,
+                until: false,
             });
         }
     }
 
-    /// `END`: pops the innermost block (not a parenthesis); its follower is checked next.
-    fn end(&mut self, t: &Tok) {
-        let Some(cur) = &mut self.cur else {
+    /// `END` (erratum (e)): after a name position (`names`) it is a name. Otherwise it closes
+    /// the innermost block when the grammar can end it here: a `CASE` expression anywhere, a
+    /// `REPEAT` after its `UNTIL`, any other block only in statement position
+    /// (`block_end_after`); its follower is checked next. An `END` that can close nothing here
+    /// is a mismatch (`UnknownBlock`), never an early end. With no block open it is a name.
+    fn end(&mut self, t: &Tok, names: bool) {
+        if names {
+            return;
+        }
+        let Some(cur) = &self.cur else {
             return;
         };
-        match cur.stack.last().copied() {
-            Some(open) if open.kind != BlockKind::Paren => {
+        let Some(open) = cur.stack.last().copied() else {
+            return;
+        };
+        if open.kind == BlockKind::Paren {
+            return;
+        }
+        let statement_end = cur.prev.is_some_and(|p| {
+            let w = self.spelled(&p);
+            self.sp
+                .block_end_after
+                .iter()
+                .any(|x| x.eq_ignore_ascii_case(w))
+        });
+        // A `CASE` expression's `END` follows an expression, never its `THEN` or `ELSE`: there
+        // `end` is a name (`CASE a WHEN 1 THEN end END`).
+        let after_branch = cur.prev.is_some_and(|p| {
+            let w = self.spelled(&p);
+            w.eq_ignore_ascii_case("THEN") || w.eq_ignore_ascii_case("ELSE")
+        });
+        let closes = match open.kind {
+            BlockKind::Case if !open.statement => {
+                if after_branch {
+                    return;
+                }
+                true
+            }
+            BlockKind::Repeat => open.until || statement_end,
+            _ => statement_end,
+        };
+        if closes {
+            if let Some(cur) = &mut self.cur {
                 cur.stack.pop();
                 cur.after_end = Some((open, t.range));
             }
-            _ => {
-                self.diag(t.range, DiagCode::EndWithoutBlock);
-                self.anomaly(t.range);
-            }
+        } else {
+            self.diag(t.range, DiagCode::EndWithoutBlock);
+            self.anomaly(t.range);
         }
     }
 
@@ -1241,8 +1580,17 @@ impl<'a> Walker<'a, '_> {
     fn checks(&mut self, t: &Tok) {
         if t.ambiguous_end {
             // Every statement up to where the server ends the comment is uncertain.
-            let end = server_end(self.text, t, self.ctx.modes).max(t.end());
-            self.ambiguity(range(t.start(), end), AmbiguityReason::AmbiguousCommentEnd);
+            let end = if self.server_to_eof {
+                self.text.len()
+            } else {
+                let end = refusal_end(self.text.len(), t, self.server_end_of(t));
+                self.server_to_eof = end == self.text.len();
+                end
+            };
+            self.ambiguity(
+                range(t.start(), end.max(t.end())),
+                AmbiguityReason::AmbiguousCommentEnd,
+            );
         }
         if t.kind == TokenKind::ExecutableComment {
             self.executable_body(t);
@@ -1275,6 +1623,7 @@ impl<'a> Walker<'a, '_> {
         let body_start = skip.min(body_end);
         let a = t.start() + body_start;
         let body_text = &tok[body_start..body_end];
+        self.lexed += body_text.len() as u64;
         let body = lex(body_text, self.lp, self.ctx.modes, &LexState::Initial);
         if let Some(i) = body_text.bytes().position(|b| b == b';') {
             let at = range(a + i, a + i + 1);
@@ -1340,6 +1689,14 @@ impl<'a> Walker<'a, '_> {
             cur.uncertain = true;
         }
         let strict = TextRange::new(cur.start, cur.last_end);
+        if cur.in_branch || self.if_depth > 0 {
+            // psql runs it only if it takes the branch.
+            self.out.ambiguous.push(AmbiguousBoundary {
+                at: strict,
+                reason: AmbiguityReason::ClientCommand,
+            });
+            cur.uncertain = true;
+        }
         for seg in cur.inside.iter().filter(|s| s.start() < strict.end()) {
             self.out.ambiguous.push(AmbiguousBoundary {
                 at: *seg,
@@ -1362,6 +1719,9 @@ impl<'a> Walker<'a, '_> {
             key: StmtKey::of(self.ctx, self.delim.as_deref(), &self.text[strict]),
         }));
         let idx = self.out.items.len() - 1;
+        if cur.had_block {
+            self.last_block_item = Some(idx);
+        }
         self.open_trailing = Some(idx);
         self.trivia = Trivia::default();
         self.after_item = true;
@@ -1385,66 +1745,183 @@ impl<'a> Walker<'a, '_> {
         } else {
             self.flush_trailing(false);
         }
-        self.out
-            .ambiguous
-            .sort_by_key(|a| (a.at.start(), a.at.end()));
+        self.clip_ambiguities();
         self.out.diagnostics.sort_by_key(|d| d.range.start());
+    }
+
+    /// Lists each uncertain boundary once per statement it overlaps, cut to that statement's
+    /// strict range, sorted and without repeats: every boundary then lies inside the one
+    /// execution statement it makes uncertain (`Split::is_certain` relies on it). One that
+    /// overlaps no statement refuses nothing and is dropped.
+    fn clip_ambiguities(&mut self) {
+        let strict: Vec<TextRange> = self
+            .out
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                RawItem::Stmt(s) => Some(s.strict),
+                RawItem::Empty(_) => None,
+            })
+            .collect();
+        let mut clipped = Vec::with_capacity(self.out.ambiguous.len());
+        for a in &self.out.ambiguous {
+            let mut i = strict.partition_point(|r| r.end() <= a.at.start());
+            while i < strict.len()
+                && strict[i].start() < a.at.end().max(a.at.start() + TextSize::from(1))
+            {
+                if crate::item::overlaps(a.at, strict[i])
+                    && let Some(at) = a.at.intersect(strict[i]).filter(|r| !r.is_empty())
+                {
+                    clipped.push(AmbiguousBoundary { at, ..*a });
+                }
+                i += 1;
+            }
+        }
+        clipped.sort_by_key(|a| (a.at.start(), a.at.end(), a.reason as u8));
+        clipped.dedup();
+        self.out.ambiguous = clipped;
     }
 }
 
-/// Where a MySQL/MariaDB server that runs (or reads) the comment token `t` ends it: after the
-/// first `*/` outside quotes, identifiers and `#`/`-- ` comments, past one nested `/* … */`
-/// (the reading `sql_lexer` flags `AmbiguousCommentEnd` against); the text's end when it never
-/// closes or meets an inner executable comment, which nothing here follows (fail closed).
-fn server_end(text: &str, t: &Tok, modes: LexModes) -> usize {
-    let b = text.as_bytes();
-    let n = b.len();
+/// How far past a token the lexer may look before it settles that token: `-- ` and `/*M!`, an
+/// `x'`/`b'` prefix, a version number. A token that ends this far before a prefix's cut reads as
+/// it does in the whole text.
+const CUT_MARGIN: usize = 16;
+
+/// Where a MySQL/MariaDB server that runs (or reads) the comment token `t` ends it, and the
+/// bytes lexed to find out: the comment's body is lexed as code with the session's profile and
+/// modes (quotes, identifiers, `#` and `-- ` comments, one nested `/* … */` all come from the
+/// lexer, the reading `sql_lexer` flags `AmbiguousCommentEnd` against), and the first `*/` in
+/// code ends it. `None` when nothing does, or when the body holds an inner executable comment,
+/// which the lexer does not follow: no end is certain (the caller fails closed to the text's
+/// end).
+///
+/// The body is lexed in doubling prefixes cut anywhere (not at line starts, which a one-line
+/// script would not have), each read only up to `CUT_MARGIN` before its cut: the cost is a
+/// small multiple of the distance to that end, never the rest of the text.
+pub(crate) fn server_end(
+    text: &str,
+    t: &Tok,
+    profile: &'static LexDialect,
+    modes: LexModes,
+) -> (Option<usize>, u64) {
+    server_end_from(text, t, profile, modes, None)
+}
+
+/// [`server_end`], its first prefix `first` bytes long (`None`: just past the token's end).
+fn server_end_from(
+    text: &str,
+    t: &Tok,
+    profile: &'static LexDialect,
+    modes: LexModes,
+    first: Option<usize>,
+) -> (Option<usize>, u64) {
     let open = if text[t.range].starts_with("/*M!") {
         4
     } else {
         3
     };
-    let mut i = t.start() + open;
-    while i < n {
-        match b[i] {
-            b'*' if b.get(i + 1) == Some(&b'/') => return i + 2,
-            b'/' if b.get(i + 1) == Some(&b'*') => {
-                if b.get(i + 2) == Some(&b'!') || b.get(i + 2..i + 4) == Some(b"M!") {
-                    return n;
-                }
-                match find(text, i + 2, n, "*/") {
-                    Some(e) => i = e + 2,
-                    None => return n,
-                }
-            }
-            q @ (b'\'' | b'"' | b'`') => {
-                let escapes = !modes.no_backslash_escapes
-                    && (q == b'\'' || (q == b'"' && !modes.ansi_quotes));
-                i += 1;
-                loop {
-                    match b.get(i) {
-                        None => return n,
-                        Some(b'\\') if escapes => i += 2,
-                        Some(c) if *c == q && b.get(i + 1) == Some(&q) => i += 2,
-                        Some(c) if *c == q => {
-                            i += 1;
-                            break;
-                        }
-                        Some(_) => i += 1,
-                    }
-                }
-            }
-            b'#' => i = client::next_line_start(text, i),
-            b'-' if b.get(i + 1) == Some(&b'-')
-                && b.get(i + 2)
-                    .is_none_or(|c| c.is_ascii_whitespace() || c.is_ascii_control()) =>
-            {
-                i = client::next_line_start(text, i);
-            }
-            _ => i += 1,
+    let from = (t.start() + open).min(text.len());
+    let body = &text[from..];
+    let b = body.as_bytes();
+    let mut lexed = 0u64;
+    // The server usually ends the comment where the lexer does: start just past that.
+    let mut want = first
+        .unwrap_or((t.end().saturating_sub(from) + 2 * CUT_MARGIN).max(FIRST_CHUNK / 2))
+        .max(1);
+    loop {
+        let mut cut = want.min(body.len());
+        while !body.is_char_boundary(cut) {
+            cut += 1;
         }
+        let whole = cut == body.len();
+        let run = lex(&body[..cut], profile, modes, &LexState::Initial);
+        lexed += cut as u64;
+        let settled = |at: usize| whole || at + CUT_MARGIN <= cut;
+        for i in 0..run.len() {
+            let r = run.range(i);
+            let (s, e) = (usize::from(r.start()), usize::from(r.end()));
+            match run.kind(i) {
+                TokenKind::ExecutableComment if settled(s) => return (None, lexed),
+                TokenKind::Op if settled(e) && b[s] == b'*' && b.get(s + 1) == Some(&b'/') => {
+                    return (Some(from + s + 2), lexed);
+                }
+                _ if !settled(e) => break,
+                _ => {}
+            }
+        }
+        if whole {
+            return (None, lexed);
+        }
+        want = want.saturating_mul(2);
     }
-    n
+}
+
+/// How far the refusal of an ambiguous comment `t` reaches: to where the server ends it, or to
+/// the text's end when no end is certain, or when that reading ends exactly at the token's own
+/// end although the lexer flagged it (the two readings disagree: fail closed).
+fn refusal_end(n: usize, t: &Tok, server: Option<usize>) -> usize {
+    match server {
+        Some(e) if e != t.end() => e.max(t.end()),
+        _ => n,
+    }
+}
+
+/// [`refusal_end`] of a flagged comment token at `at` (the agreement property's probe).
+#[doc(hidden)]
+pub fn comment_refusal_end_at(text: &str, ctx: &DialectCtx, at: usize, len: usize) -> usize {
+    let t = Tok {
+        kind: TokenKind::ExecutableComment,
+        range: range(at, at + len),
+        flags: TokenFlags::empty(),
+        keyword: None,
+        ambiguous_end: true,
+    };
+    refusal_end(
+        text.len(),
+        &t,
+        server_end(text, &t, lexer_for(ctx), ctx.modes).0,
+    )
+}
+
+/// [`server_end`] of the comment token starting at `at`, its first prefix `first` bytes long
+/// when given (the agreement property's probe).
+#[doc(hidden)]
+pub fn comment_server_end(
+    text: &str,
+    ctx: &DialectCtx,
+    at: usize,
+    len: usize,
+    first: Option<usize>,
+) -> Option<usize> {
+    let t = Tok {
+        kind: TokenKind::ExecutableComment,
+        range: range(at, at + len),
+        flags: TokenFlags::empty(),
+        keyword: None,
+        ambiguous_end: true,
+    };
+    server_end_from(text, &t, lexer_for(ctx), ctx.modes, first).0
+}
+
+/// [`split_from`] lexing in chunks of `first` bytes after each restart (the chunking
+/// property's probe: any chunking gives the same split).
+#[doc(hidden)]
+pub fn split_chunked(
+    text: &str,
+    ctx: &DialectCtx,
+    flavor: ClientFlavor,
+    mode: SplitMode,
+    start: &SplitStart,
+    first: usize,
+) -> Split {
+    analyze_chunked(text, None, ctx, flavor, start, first).to_split(text, mode)
+}
+
+/// The bytes the structural pass lexes for `text` on its own (the complexity counter).
+#[doc(hidden)]
+pub fn lexed_bytes(text: &str, ctx: &DialectCtx, flavor: ClientFlavor) -> u64 {
+    analyze(text, None, ctx, flavor, &SplitStart::default()).lexed
 }
 
 /// Whether a block needs `END <kind>` rather than a bare `END`.
@@ -1520,15 +1997,45 @@ impl Analysis {
     /// boundary is an `AmbiguousBoundary`.
     fn execution(&self, text: &str) -> Split {
         let mut split = self.base_split();
-        for item in &self.items {
+        let overlapped = self.overlapped_items(&split);
+        for (n, item) in self.items.iter().enumerate() {
             split.items.push(match item {
                 RawItem::Empty(r) => Item::Empty { range: *r },
                 RawItem::Stmt(raw) => {
-                    Item::Statement(self.stmt(text, raw, Part::whole(raw), Confidence::Exact))
+                    // `Exact` only when certain: a refused statement never reads as runnable.
+                    let confidence = if raw.uncertain || overlapped[n] {
+                        Confidence::Heuristic
+                    } else {
+                        Confidence::Exact
+                    };
+                    Item::Statement(self.stmt(text, raw, Part::whole(raw), confidence))
                 }
             });
         }
         split
+    }
+
+    /// Which items an ambiguity of `split` overlaps (a sweep: O((A + marks) log N)).
+    pub(crate) fn overlapped_items(&self, split: &Split) -> Vec<bool> {
+        let ranges: Vec<TextRange> = self
+            .items
+            .iter()
+            .map(|it| match it {
+                RawItem::Stmt(s) => s.strict,
+                RawItem::Empty(r) => *r,
+            })
+            .collect();
+        let mut marked = vec![false; ranges.len()];
+        for amb in &split.ambiguous {
+            let mut i = ranges.partition_point(|r| r.end() < amb.at.start());
+            while i < ranges.len() && ranges[i].start() <= amb.at.end() {
+                if crate::item::overlaps(amb.at, ranges[i]) {
+                    marked[i] = true;
+                }
+                i += 1;
+            }
+        }
+        marked
     }
 
     /// The ambiguities, client segments and diagnostics both views share: the structural ones
@@ -1550,7 +2057,8 @@ impl Analysis {
                 }
             }
         }
-        ambiguous.sort_by_key(|a| (a.at.start(), a.at.end()));
+        ambiguous.sort_by_key(|a| (a.at.start(), a.at.end(), a.reason as u8));
+        ambiguous.dedup();
         diagnostics.sort_by_key(|d| d.range.start());
         Split {
             items: Vec::new(),

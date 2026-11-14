@@ -224,8 +224,24 @@ impl SplitCase {
             &strict_texts(text, &exec),
             &want_exec,
         )?;
-        if exec.statements().any(|s| s.confidence != Confidence::Exact) {
-            return Err("an execution item is not Exact".into());
+        // An execution statement is `Exact` exactly when it is certain, and every ambiguity
+        // lies inside one execution statement.
+        for s in exec.statements() {
+            let overlapped = exec.ambiguities_in(s.strict).next().is_some();
+            if (s.confidence == Confidence::Exact) == overlapped || exec.is_certain(s) == overlapped
+            {
+                return Err(format!(
+                    "execution statement {:?} is {:?}; an ambiguity overlaps it: {overlapped}",
+                    &text[s.strict], s.confidence
+                ));
+            }
+        }
+        if let Some(a) = exec
+            .ambiguous
+            .iter()
+            .find(|a| !exec.statements().any(|s| s.strict.contains_range(a.at)))
+        {
+            return Err(format!("ambiguity {a:?} lies inside no statement"));
         }
         let reasons: Vec<String> = exec
             .ambiguous

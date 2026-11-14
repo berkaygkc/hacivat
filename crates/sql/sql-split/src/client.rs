@@ -68,6 +68,9 @@ pub(crate) enum Backslash {
     Clear { end: usize },
     /// mysql `\d x`: the delimiter argument (empty when absent) and the command's end.
     Delimiter { arg: (usize, usize), end: usize },
+    /// psql `\if` (`nesting` +1), `\elif` / `\else` (0), `\endif` (-1): what follows runs only
+    /// if psql takes the branch.
+    Conditional { end: usize, nesting: i8 },
     /// Any other command, to `end`.
     Command { end: usize },
 }
@@ -128,6 +131,12 @@ fn psql(text: &str, at: usize, eol: usize, cp: &ClientProfile) -> Backslash {
     }
     if cp.backslash_clear.contains(&name) {
         return Backslash::Clear { end };
+    }
+    if let Some((_, nesting)) = cp.backslash_conditionals.iter().find(|(n, _)| *n == name) {
+        return Backslash::Conditional {
+            end,
+            nesting: *nesting,
+        };
     }
     if name == "copy" && from_stdin(args) {
         // `\copy … from stdin` reads its rows from the script itself, up to `\.`: they are

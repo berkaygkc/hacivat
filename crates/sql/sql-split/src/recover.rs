@@ -129,7 +129,7 @@ pub(crate) fn cut_at(trivia: &Trivia, a_end: TextSize, t: &Tok) -> Cut {
 /// `Heuristic`, and the stability rule after an unterminated construct.
 pub(crate) fn editor(a: &Analysis, text: &str, depth: u32) -> Split {
     let mut split = a.base_split();
-    let overlapped = overlapped_items(a, &split);
+    let overlapped = a.overlapped_items(&split);
     for (n, item) in a.items.iter().enumerate() {
         match item {
             RawItem::Empty(r) => split.items.push(Item::Empty { range: *r }),
@@ -192,30 +192,6 @@ pub(crate) fn editor(a: &Analysis, text: &str, depth: u32) -> Split {
     split
 }
 
-/// Which of `a`'s items an ambiguity of `split` overlaps: per ambiguity, a binary search for
-/// the first item it can reach, then the items it covers (O((A + marks) log N), not A × N).
-fn overlapped_items(a: &Analysis, split: &Split) -> Vec<bool> {
-    let ranges: Vec<TextRange> = a
-        .items
-        .iter()
-        .map(|it| match it {
-            RawItem::Stmt(s) => s.strict,
-            RawItem::Empty(r) => *r,
-        })
-        .collect();
-    let mut marked = vec![false; ranges.len()];
-    for amb in &split.ambiguous {
-        let mut i = ranges.partition_point(|r| r.end() < amb.at.start());
-        while i < ranges.len() && ranges[i].start() <= amb.at.end() {
-            if crate::item::overlaps(amb.at, ranges[i]) {
-                marked[i] = true;
-            }
-            i += 1;
-        }
-    }
-    marked
-}
-
 /// The stability rule: the statement holding `anchor` ends on its line; the text after it is
 /// split again, provisionally.
 fn stability(a: &Analysis, text: &str, anchor: TextSize, depth: u32, split: &mut Split) {
@@ -226,6 +202,14 @@ fn stability(a: &Analysis, text: &str, anchor: TextSize, depth: u32, split: &mut
     let ctx = a
         .ctx
         .unwrap_or_else(|| sql_dialect::DialectCtx::new(DialectId::Generic, None));
+    // Everything from the next line on is split again below: drop what the first pass made of
+    // it (heuristic pieces of the open statement, client commands after it).
+    let next = size(l);
+    split.items.retain(|it| match it {
+        Item::Statement(s) => s.strict.start() < next,
+        Item::Empty { range } => range.start() < next,
+    });
+    split.client.retain(|c| c.range.start() < next);
     if let Some(Item::Statement(s)) = split.items.last_mut()
         && s.strict.start() <= anchor
         && anchor < s.strict.end()
