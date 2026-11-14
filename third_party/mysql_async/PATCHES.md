@@ -143,3 +143,33 @@ MariaDB 10.6/10.11/11.4).
 - Upstream PR text: "Reject malformed result packets instead of panicking: treat an empty packet
   as a non-terminator, require a row to consume its whole packet, and refuse a result set header
   whose column count is 0 or above 65535 before reserving memory for it."
+
+## §7 `Conn::abandon`: give a connection up without reading what is pending (Task 14 round 1)
+
+- `src/conn/mod.rs` (l.450-457, new, fenced): `pub fn abandon(mut self)` marks the connection
+  disconnected and drops its stream (the socket closes). `Drop` then spawns nothing: no pending
+  result is read and no `COM_QUIT` is sent (Hacivat uses no pool, so nothing is returned to one).
+- Why: dropping a `Conn` with a pending result (`Drop` → `disconnect` → `cleanup_for_pool` →
+  `drop_result`) reads the whole rest in a background task, and its final `disconnect` is a no-op
+  because the helper marked the connection disconnected first, so no `COM_QUIT` is sent either.
+  For Hacivat that was wrong three ways (Task 14 review, Important 1):
+  - after a protocol violation, the client kept reading the hostile stream;
+  - after the driver refused a binary result set with a column type `mysql_common` cannot read
+    (`TIME2` …), the background read parsed that row and panicked (`unimplemented!`) in a tokio
+    worker;
+  - `close` with a suspended cursor read its whole rest (gigabytes), while the server statement
+    kept its metadata lock and read view.
+  With `abandon` the server's next write meets a closed socket and the statement is aborted at
+  once. The cost: the server counts an aborted connection instead of a clean quit, so Hacivat
+  abandons only a broken connection or one with a query open; a plain `close` keeps
+  `disconnect()`.
+- Test: `crates/core/hacivat-driver-mysql/tests/patches.rs`
+  `abandon_closes_the_socket_without_reading_the_rest_or_quitting` (the scripted server's writes
+  of a 16 MB rest fail, no `COM_QUIT`). The driver's uses: `tests/typed_wire.rs`
+  `a_protocol_violation_abandons_the_connection_without_reading_on`,
+  `a_refused_column_type_is_never_parsed_in_the_background`,
+  `close_with_a_suspended_query_abandons_the_connection`,
+  `an_after_kill_that_runs_out_abandons_the_drains_connection`.
+- Upstream PR text: "Add `Conn::abandon`: drop a connection without reading a pending result or
+  sending `COM_QUIT`, for callers that know the connection is unusable or must not wait for the
+  rest of a result."

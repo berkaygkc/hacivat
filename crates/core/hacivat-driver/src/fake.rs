@@ -55,6 +55,22 @@
 //!   latched cancel), which ends it and fails a transaction block;
 //! - a scripted result reports `rows_affected` and `command_tag` as scripted (`None` by
 //!   default), which is what the PostgreSQL driver reports for a read (`rows_affected: None`).
+//!
+//! M3a (Task 14 fix round 1, named exception: the MySQL driver's behaviour, pinned by its wire
+//! and Docker tests). On the MySQL family (an engine that closes early by a kill: caps
+//! `close_needs_kill`, not the PostgreSQL wire), `close_query` follows the real driver:
+//! - `Now` answers `NeedsServerKill { thread_id }` and keeps the run open while anything is
+//!   unread; with nothing unread it finishes: `Completed { rows: total }`;
+//! - `Drain` reads a rest of at most 4,096 rows (the stand-in for "finishes within `d`") to its
+//!   end: `Completed { rows: total }`, or the scripted `fail_after` error it meets there (a 1317
+//!   is the kill's: `Closed { rows: sent }`); a longer rest, or `kill_needed`, answers
+//!   `NeedsServerKill` and keeps the run open;
+//! - `AfterKill` with anything unread is `Closed { rows: sent }` (the kill's 1317), with nothing
+//!   unread `Completed { rows: total }` (the kill came too late); with `kill_ignored` it runs
+//!   out: `Err(Io(TimedOut))` and the connection is lost;
+//! - `thread_id` is the connection's own `backend_id()`: every connection of a driver gets its
+//!   own (`backend(id)` gives the first `id`, the next `id + 1`, ...; MySQL-family connections
+//!   have one by default, never 0).
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -228,6 +244,11 @@ pub struct FakeQuery {
     /// then closes. Without it a drain past 4,096 rows still asks for a kill when the caps say
     /// `close_needs_kill` (MySQL's default caps do).
     pub kill_needed: bool,
+    // ## m3a-t14-mysql-typed (review round 1, named exception)
+    /// MySQL family: the kill never ends the query, so `close_query(AfterKill(..))` runs out:
+    /// `Err(Io(TimedOut))`, and the connection is lost (every later call answers
+    /// `Io(NotConnected)`), as the real driver abandons it.
+    pub kill_ignored: bool,
 }
 
 /// A typed call, as `typed_log` records it.
@@ -258,6 +279,15 @@ fn pg_wire(kind: DbmsKind) -> bool {
             | DbmsKind::Timescale
     )
 }
+
+// ## m3a-t14-mysql-typed (review round 1)
+/// Whether `kind` speaks the MySQL wire protocol (a kill closes a result early).
+fn mysql_family(kind: DbmsKind) -> bool {
+    matches!(kind, DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb)
+}
+
+/// The thread ID of a MySQL-family driver's first connection when no `backend(id)` is set.
+const FIRST_THREAD_ID: u64 = 1_000;
 
 /// What a fake connection's typed path reports unless `with_typed_caps` says otherwise: the
 /// real drivers' shapes (MySQL: a kill to close early, `net_write_timeout` − 15 s at the
@@ -691,7 +721,8 @@ impl FakeDriver {
         self
     }
 
-    /// What every connection's `backend_id` reports.
+    /// What the connections' `backend_id` reports: `id` for the first connection, `id + 1` for
+    /// the next, ... (m3a-t14 round 1: each connection its own, so a kill names one).
     pub fn backend(mut self, id: u64) -> Self {
         self.backend = Some(id);
         self
@@ -827,7 +858,13 @@ impl Driver for FakeDriver {
         let recorded = FakeRequest::of(&req);
         lock(&self.requests).push(recorded.clone());
         *lock(&self.last) = Some(recorded);
-        self.counters.connect.fetch_add(1, Ordering::SeqCst);
+        let index = self.counters.connect.fetch_add(1, Ordering::SeqCst) as u64;
+        // ## m3a-t14-mysql-typed (review round 1): each connection its own backend ID; the
+        // MySQL family always has one (the thread ID a kill names), never 0.
+        let backend = self
+            .backend
+            .map(|first| first.saturating_add(index))
+            .or_else(|| mysql_family(self.descriptor.kind).then(|| FIRST_THREAD_ID + index));
         let scripted = lock(&self.script).pop_front();
         let result = match scripted {
             Some(result) => result,
@@ -847,7 +884,7 @@ impl Driver for FakeDriver {
             cancel: Arc::default(),
             ignores_cancel: self.ignores_cancel,
             reset_fails: self.reset_fails,
-            backend: self.backend,
+            backend,
             stream: None,
             autocommit: self
                 .autocommit
@@ -859,6 +896,7 @@ impl Driver for FakeDriver {
                 .unwrap_or_else(|| default_typed_caps(self.descriptor.kind)),
             typed: None,
             savepoints: Vec::new(),
+            lost: false,
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
@@ -954,6 +992,10 @@ struct FakeConn {
     typed: Option<TypedRun>,
     /// The open savepoints, oldest first, when tracking transactions (round 2).
     savepoints: Vec<String>,
+    // ## m3a-t14-mysql-typed (review round 1)
+    /// An `AfterKill` ran out (`kill_ignored`): the connection is gone, as the real MySQL
+    /// driver abandons it; every later call answers `Io(NotConnected)`.
+    lost: bool,
 }
 
 impl FakeConn {
@@ -983,8 +1025,15 @@ impl FakeConn {
         }
     }
 
-    /// `Io(ConnectionReset)` once `kill_connections` ran after this connection was made.
+    /// `Io(ConnectionReset)` once `kill_connections` ran after this connection was made;
+    /// `Io(NotConnected)` once it was lost (m3a-t14 round 1).
     fn alive(&self) -> Result<(), RawError> {
+        if self.lost {
+            return Err(RawError {
+                kind: RawErrorKind::Io(std::io::ErrorKind::NotConnected),
+                server: None,
+            });
+        }
         if self.counters.killed.load(Ordering::SeqCst) > self.born {
             return Err(RawError {
                 kind: RawErrorKind::Io(std::io::ErrorKind::ConnectionReset),
@@ -1655,8 +1704,13 @@ impl FakeConn {
             self.end_typed();
             return Ok(Closed::Completed { rows: total });
         }
+        // ## m3a-t14-mysql-typed (review round 1, named exception): the MySQL family closes as
+        // the real driver does (the module docs).
+        if self.caps.close_needs_kill && !pg_wire(self.kind) {
+            return self.close_by_kill(how);
+        }
         let kill = Closed::NeedsServerKill {
-            thread_id: self.backend.unwrap_or(0),
+            thread_id: self.backend.unwrap_or(FIRST_THREAD_ID),
         };
         let closed = match how {
             CloseHow::Drain(_) if run.script.kill_needed => return Ok(kill),
@@ -1671,6 +1725,73 @@ impl FakeConn {
         self.end_typed();
         Ok(closed)
     }
+
+    // ## m3a-t14-mysql-typed (review round 1, named exception)
+    /// `close_query` on the MySQL family, as `hacivat-driver-mysql` answers it (the module
+    /// docs): a kill for anything unread, Task 12's outcome rule for a rest read to its end.
+    fn close_by_kill(&mut self, how: CloseHow) -> Result<Closed, RawError> {
+        let Some(run) = self.typed.as_ref() else {
+            return Ok(Closed::Closed { rows: 0 });
+        };
+        let sent = run.sent;
+        let left = run.remaining();
+        let total = sent.saturating_add(left);
+        let (kill_needed, kill_ignored, tx_after) = (
+            run.script.kill_needed,
+            run.script.kill_ignored,
+            run.script.tx_after,
+        );
+        // The scripted failure the rest meets, if it is read.
+        let failure = run
+            .script
+            .fail_after
+            .as_ref()
+            .filter(|(n, _)| *n < total)
+            .map(|(_, e)| e.clone());
+        let kill = Closed::NeedsServerKill {
+            thread_id: self.backend.unwrap_or(FIRST_THREAD_ID),
+        };
+        match how {
+            // Only a kill ends a MySQL result early; the query stays open for `AfterKill`.
+            CloseHow::Now if left > 0 => Ok(kill),
+            // The stand-in for a drain that runs out of time.
+            CloseHow::Drain(_) if kill_needed || left > DRAIN_ROWS => Ok(kill),
+            CloseHow::AfterKill(_) if kill_ignored => {
+                self.end_typed();
+                self.lost = true;
+                Err(RawError {
+                    kind: RawErrorKind::Io(std::io::ErrorKind::TimedOut),
+                    server: None,
+                })
+            }
+            // The kill's 1317 ended what was left.
+            CloseHow::AfterKill(_) if left > 0 => {
+                self.end_typed();
+                Ok(Closed::Closed { rows: sent })
+            }
+            // Read to the end: nothing unread (`Now`, `AfterKill`: the kill came too late), or
+            // a short rest drained.
+            _ => {
+                self.end_typed();
+                match failure {
+                    Some(err) if is_kill(&err) => Ok(Closed::Closed { rows: sent }),
+                    Some(err) => Err(err),
+                    None => {
+                        if let Some(tx) = tx_after {
+                            self.tx = tx;
+                        }
+                        Ok(Closed::Completed { rows: total })
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ## m3a-t14-mysql-typed (review round 1)
+/// Whether `e` is MySQL's `ER_QUERY_INTERRUPTED` (1317): a `KILL QUERY` ended the statement.
+fn is_kill(e: &RawError) -> bool {
+    e.server.as_ref().and_then(|s| s.vendor_code) == Some(1317)
 }
 
 #[cfg(test)]
@@ -2244,6 +2365,180 @@ mod pg_typed_tests {
         assert_eq!(
             c.close_query(CloseHow::Now).await.unwrap(),
             Closed::Completed { rows: 50_000 }
+        );
+    }
+
+    // ## m3a-t14-mysql-typed (review round 1, named exception): the MySQL family closes as
+    // `hacivat-driver-mysql` does (its `tests/typed_wire.rs` pins the real side).
+
+    async fn mysql(queries: Vec<FakeQuery>) -> Box<dyn RawConn> {
+        FakeDriver::new(DbmsKind::MySql)
+            .queries(queries)
+            .connect(request())
+            .await
+            .unwrap()
+    }
+
+    fn mysql_error(code: i64) -> RawError {
+        RawError {
+            kind: RawErrorKind::Db,
+            server: Some(crate::errors::ServerMessage {
+                sqlstate: Some("HY000".to_string()),
+                vendor_code: Some(code),
+                severity: None,
+                text: "an error".to_string(),
+                detail: None,
+                hint: None,
+                lang_hint: None,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mysql_now_asks_for_the_kill_and_keeps_the_query_open() {
+        let mut c = mysql(vec![select(50_000)]).await;
+        suspend(&mut c).await;
+        let thread_id = c.backend_id().unwrap();
+        assert_eq!(
+            c.close_query(CloseHow::Now).await.unwrap(),
+            Closed::NeedsServerKill { thread_id }
+        );
+        // Still open: no statement runs until the kill and `AfterKill`.
+        assert_eq!(
+            c.batch("SELECT 1").await.unwrap_err().kind,
+            RawErrorKind::Unsupported
+        );
+        assert_eq!(
+            c.close_query(CloseHow::AfterKill(Duration::from_secs(1)))
+                .await
+                .unwrap(),
+            Closed::Closed { rows: 501 }
+        );
+        c.batch("SELECT 1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_mysql_close_with_nothing_unread_is_completed() {
+        // A result read to its end: `Now` and `AfterKill` (the kill came too late) finish it.
+        for how in [CloseHow::Now, CloseHow::AfterKill(Duration::from_secs(1))] {
+            let mut c = mysql(vec![select(300)]).await;
+            c.query(spec("SELECT * FROM t", false)).await.unwrap();
+            c.next_event().await.unwrap();
+            assert_eq!(rows_of(&c.next_event().await.unwrap()), 300);
+            assert!(matches!(
+                c.next_event().await.unwrap(),
+                QueryEvent::ResultEnd(_)
+            ));
+            assert_eq!(
+                c.close_query(how).await.unwrap(),
+                Closed::Completed { rows: 300 },
+                "{how:?}"
+            );
+        }
+        // A statement without rows, closed at once.
+        let mut c = mysql(vec![]).await;
+        c.query(spec("DELETE FROM t", false)).await.unwrap();
+        assert_eq!(
+            c.close_query(CloseHow::Now).await.unwrap(),
+            Closed::Completed { rows: 0 }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mysql_drain_meets_the_failure_in_its_rest() {
+        // A lock wait timeout in the drained rest is the close's answer.
+        let mut c = mysql(vec![FakeQuery {
+            fail_after: Some((800, mysql_error(1205))),
+            ..select(1_000)
+        }])
+        .await;
+        suspend(&mut c).await;
+        assert_eq!(
+            c.close_query(CloseHow::Drain(Duration::from_millis(250)))
+                .await
+                .unwrap_err(),
+            mysql_error(1205)
+        );
+        c.query(spec("SELECT 1", false)).await.unwrap();
+        // The kill's 1317 is a close, not an error.
+        let mut c = mysql(vec![FakeQuery {
+            fail_after: Some((800, mysql_error(1317))),
+            ..select(1_000)
+        }])
+        .await;
+        suspend(&mut c).await;
+        assert_eq!(
+            c.close_query(CloseHow::Drain(Duration::from_millis(250)))
+                .await
+                .unwrap(),
+            Closed::Closed { rows: 501 }
+        );
+        // A short rest with no failure drains to its end.
+        let mut c = mysql(vec![select(1_000)]).await;
+        suspend(&mut c).await;
+        assert_eq!(
+            c.close_query(CloseHow::Drain(Duration::from_millis(250)))
+                .await
+                .unwrap(),
+            Closed::Completed { rows: 1_000 }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mysql_kill_that_is_ignored_loses_the_connection() {
+        let mut c = mysql(vec![FakeQuery {
+            kill_ignored: true,
+            ..select(50_000)
+        }])
+        .await;
+        suspend(&mut c).await;
+        assert!(matches!(
+            c.close_query(CloseHow::Drain(Duration::from_millis(250)))
+                .await
+                .unwrap(),
+            Closed::NeedsServerKill { .. }
+        ));
+        assert_eq!(
+            c.close_query(CloseHow::AfterKill(Duration::from_secs(1)))
+                .await
+                .unwrap_err()
+                .kind,
+            RawErrorKind::Io(std::io::ErrorKind::TimedOut)
+        );
+        let lost = RawErrorKind::Io(std::io::ErrorKind::NotConnected);
+        assert_eq!(c.ping().await.unwrap_err().kind, lost);
+        assert_eq!(c.batch("SELECT 1").await.unwrap_err().kind, lost);
+        assert_eq!(
+            c.query(spec("SELECT 1", false)).await.unwrap_err().kind,
+            lost
+        );
+    }
+
+    #[tokio::test]
+    async fn mysql_connections_have_their_own_thread_ids() {
+        async fn ids(driver: FakeDriver) -> (Option<u64>, Option<u64>) {
+            let a = driver.connect(request()).await.unwrap();
+            let b = driver.connect(request()).await.unwrap();
+            (a.backend_id(), b.backend_id())
+        }
+        assert_eq!(
+            ids(FakeDriver::new(DbmsKind::MySql).backend(42)).await,
+            (Some(42), Some(43))
+        );
+        let (a, b) = ids(FakeDriver::new(DbmsKind::MariaDb)).await;
+        assert!(a.is_some_and(|a| a != 0) && b.is_some_and(|b| b != 0) && a != b);
+        // Other engines report none unless told.
+        assert_eq!(ids(FakeDriver::new(DbmsKind::Postgres)).await, (None, None));
+        // The kill names the connection's own ID.
+        let driver = FakeDriver::new(DbmsKind::MySql)
+            .backend(7)
+            .queries(vec![select(50_000), select(50_000)]);
+        let _first = driver.connect(request()).await.unwrap();
+        let mut second = driver.connect(request()).await.unwrap();
+        suspend(&mut second).await;
+        assert_eq!(
+            second.close_query(CloseHow::Now).await.unwrap(),
+            Closed::NeedsServerKill { thread_id: 8 }
         );
     }
 }

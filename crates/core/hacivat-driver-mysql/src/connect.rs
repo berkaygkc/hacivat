@@ -332,8 +332,15 @@ async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn
         DbmsKind::MySql
     };
     // ## m3a-t14-mysql-typed: the server's `net_write_timeout` bounds how long a suspended
-    // cursor may idle (ER6, R19); read once here, never set.
-    let net_write_timeout = typed::read_net_write_timeout(&mut conn).await;
+    // cursor may idle (ER6, R19); read once here, never set. A connection that cannot answer
+    // it (an I/O or protocol failure) fails the connect.
+    let net_write_timeout = match typed::read_net_write_timeout(&mut conn).await {
+        Ok(v) => v,
+        Err(e) => {
+            conn.abandon();
+            return Err(e);
+        }
+    };
     let typed = typed::TypedState::new(u64::from(conn.id()), net_write_timeout);
     Ok(MySqlConn {
         conn: Some(conn),
@@ -431,13 +438,35 @@ pub struct MySqlConn {
 impl MySqlConn {
     fn conn(&mut self) -> Result<&mut Conn, RawError> {
         // ## m3a-t14-mysql-typed: every command would first drain the open query's rows
-        // (inside `mysql_async`), so none runs while one is open.
-        if self.typed.busy() {
-            return Err(err(RawErrorKind::Unsupported));
-        }
+        // (inside `mysql_async`), so none runs while one is open; a connection a dropped call
+        // left out of step is never used again.
+        self.usable()?;
         self.conn
             .as_mut()
             .ok_or_else(|| err(RawErrorKind::Io(io::ErrorKind::NotConnected)))
+    }
+
+    // ## m3a-t14-mysql-typed
+    /// `Err(NotConnected)` when a dropped call poisoned the connection (it is abandoned then),
+    /// `Err(Unsupported)` while a typed query is open.
+    fn usable(&mut self) -> Result<(), RawError> {
+        self.check_poison()?;
+        if self.typed.busy() {
+            return Err(err(RawErrorKind::Unsupported));
+        }
+        Ok(())
+    }
+
+    /// A call that was dropped before it completed (`typed.poisoned` still set) left a reply
+    /// in the socket that the next command would read as its own: the connection is abandoned
+    /// and answers `NotConnected` from then on.
+    fn check_poison(&mut self) -> Result<(), RawError> {
+        if self.typed.poisoned {
+            self.typed.discard();
+            typed::abandon(&mut self.conn);
+            return Err(typed::not_connected());
+        }
+        Ok(())
     }
 
     // ## m3a-t14-mysql-typed
@@ -532,15 +561,16 @@ impl RawConn for MySqlConn {
     fn close(mut self: Box<Self>) -> BoxFuture<'static, ()> {
         let conn = self.conn.take();
         let guard = self.guard.take();
-        // ## m3a-t14-mysql-typed: with a query open, `disconnect` would first read its whole
-        // rest; the connection is dropped instead (`mysql_async` finishes it in the
-        // background), and a drain in progress is dropped with its `Conn`.
-        let open = self.typed.busy();
+        // ## m3a-t14-mysql-typed: with a query open (or a poisoned connection), `disconnect`
+        // would first read the whole rest; the connection is abandoned instead (patch §7: the
+        // socket closed, nothing read, no `COM_QUIT`), and a drain in progress abandons the
+        // `Conn` it holds. With nothing open, `disconnect` quits cleanly as before.
+        let give_up = self.typed.busy() || self.typed.poisoned;
         self.typed.discard();
         Box::pin(async move {
             if let Some(conn) = conn {
-                if open {
-                    drop(conn);
+                if give_up {
+                    conn.abandon();
                 } else {
                     let _ = conn.disconnect().await;
                 }
@@ -567,10 +597,8 @@ impl RawConn for MySqlConn {
         opts: ExecOpts,
     ) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
         Box::pin(async move {
-            // ## m3a-t14-mysql-typed: not while a typed query is open.
-            if self.typed.busy() {
-                return Err(err(RawErrorKind::Unsupported));
-            }
+            // ## m3a-t14-mysql-typed: not while a typed query is open, never when poisoned.
+            self.usable()?;
             let Some(conn) = self.conn.as_mut() else {
                 return Err(err(RawErrorKind::Io(io::ErrorKind::NotConnected)));
             };
@@ -580,10 +608,8 @@ impl RawConn for MySqlConn {
 
     fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
         Box::pin(async move {
-            // ## m3a-t14-mysql-typed: not while a typed query is open.
-            if self.typed.busy() {
-                return Err(err(RawErrorKind::Unsupported));
-            }
+            // ## m3a-t14-mysql-typed: not while a typed query is open, never when poisoned.
+            self.usable()?;
             let Some(conn) = self.conn.as_mut() else {
                 return Err(err(RawErrorKind::Io(io::ErrorKind::NotConnected)));
             };
@@ -597,10 +623,8 @@ impl RawConn for MySqlConn {
 
     fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>> {
         Box::pin(async move {
-            // ## m3a-t14-mysql-typed: not while a typed query is open.
-            if self.typed.busy() {
-                return Err(err(RawErrorKind::Unsupported));
-            }
+            // ## m3a-t14-mysql-typed: not while a typed query is open, never when poisoned.
+            self.usable()?;
             let Some(conn) = self.conn.as_mut() else {
                 return Err(err(RawErrorKind::Io(io::ErrorKind::NotConnected)));
             };
@@ -631,19 +655,54 @@ impl RawConn for MySqlConn {
         self.typed.caps
     }
 
+    // Each call that talks to the server sets `typed.poisoned` while it runs: dropped before it
+    // completes, it leaves the flag set and the connection is abandoned by the next call.
     fn query<'a>(&'a mut self, spec: QuerySpec<'a>) -> BoxFuture<'a, Result<(), RawError>> {
-        Box::pin(async move { typed::query(self.typed_ctx(), spec).await })
+        Box::pin(async move {
+            self.check_poison()?;
+            self.typed.poisoned = true;
+            let r = typed::query(self.typed_ctx(), spec).await;
+            self.typed.poisoned = false;
+            r
+        })
     }
 
     fn next_event(&mut self) -> BoxFuture<'_, Result<QueryEvent, RawError>> {
-        Box::pin(async move { typed::next_event(self.typed_ctx()).await })
+        Box::pin(async move {
+            self.check_poison()?;
+            self.typed.poisoned = true;
+            let r = typed::next_event(self.typed_ctx()).await;
+            self.typed.poisoned = false;
+            r
+        })
     }
 
     fn fetch_more(&mut self, rows: u32) -> BoxFuture<'_, Result<(), RawError>> {
-        Box::pin(async move { typed::fetch_more(self.typed_ctx(), rows).await })
+        Box::pin(async move {
+            self.check_poison()?;
+            typed::fetch_more(self.typed_ctx(), rows).await
+        })
     }
 
     fn close_query(&mut self, how: CloseHow) -> BoxFuture<'_, Result<Closed, RawError>> {
-        Box::pin(async move { typed::close_query(self.typed_ctx(), how).await })
+        Box::pin(async move {
+            self.check_poison()?;
+            self.typed.poisoned = true;
+            let r = typed::close_query(self.typed_ctx(), how).await;
+            self.typed.poisoned = false;
+            r
+        })
+    }
+}
+
+// ## m3a-t14-mysql-typed
+impl Drop for MySqlConn {
+    /// A connection dropped with a query open or out of step is abandoned (patch §7), so
+    /// `mysql_async`'s own `Drop` never reads its rest in the background. A drain in progress
+    /// abandons the `Conn` it holds when `typed` drops.
+    fn drop(&mut self) {
+        if self.typed.busy() || self.typed.poisoned {
+            typed::abandon(&mut self.conn);
+        }
     }
 }

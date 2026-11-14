@@ -7,9 +7,10 @@
 //! `Unsupported` before anything is sent; everything else is prepared (`prep`, so a statement
 //! with a `?` placeholder is refused, `Unsupported`, before it runs: binds are M3b) and executed
 //! (`COM_STMT_EXECUTE`, binary protocol). A statement the server cannot prepare
-//! (`ER_UNSUPPORTED_PS`, 1295) is `Unsupported` on a read-only connection (the guard layer's
-//! refusal is never bypassed) and on a read-write one runs once more over `COM_QUERY`, decoded
-//! as text. `query` returns once the first result's header (or its OK packet) is read.
+//! (`ER_UNSUPPORTED_PS`, 1295, from the prepare only) is `Unsupported` on a read-only connection
+//! (the guard layer's refusal is never bypassed) and on a read-write one runs once more over
+//! `COM_QUERY`, decoded as text. `query` returns once the first result's header (or its OK
+//! packet) is read.
 //!
 //! **Suspension without a self-referential struct.** `mysql_async` keeps the pending result
 //! inside `Conn` and `QueryResult` has no `Drop` that drains, so every read builds a
@@ -26,31 +27,44 @@
 //! allows, and every other result set is read to its end, undecoded, and counted
 //! (`QueryDone::skipped_result_sets`). OK packets between them carry only counts. The last kept
 //! result's `ResultEnd` goes out after that drain, so its `rows_affected` is the unit's final OK
-//! packet's, as `execute` reports it (a `CALL`'s write count). A later statement's error is
-//! reported after that `ResultEnd`.
+//! packet's, as `execute` reports it (a `CALL`'s write count), except that a result with
+//! columns and no affected row reports `None` (a read, as on PostgreSQL and SQLite). A later
+//! statement's error is reported after that `ResultEnd`.
 //!
 //! **Closing early.** MySQL cannot close a result at once: the rest is read or the server's
 //! thread is killed. `close_query(Drain(d))` reads the rest (every remaining result set) for at
-//! most `d`: `Completed` when it ends, else `NeedsServerKill { thread_id }` (this connection's
-//! own thread ID from the handshake: the session sends `KILL QUERY <id>` on its side connection),
-//! `Now` asks for the kill without reading. `AfterKill(d)` reads on to the kill's error (1317)
-//! or the end, at most `d`, and leaves the connection usable. **No `mysql_async` future is ever
-//! dropped in flight:** the drain is a boxed future that owns the `Conn` and is kept in
-//! [`TypedState`] when its time runs out, so `AfterKill` resumes the very same read; it is
-//! dropped only with the connection (an `AfterKill` that runs out too, or `close`).
+//! most `d`; when it runs out the answer is `NeedsServerKill { thread_id }` (this connection's
+//! own thread ID from the handshake: the session sends `KILL QUERY <id>` on its side connection).
+//! `Now` asks for the kill without reading, unless nothing is left unread (then it finishes
+//! here). `AfterKill(d)` reads on to the kill's error (1317) or the end, at most `d`. The
+//! outcome follows Task 12's rule: a rest read to its end is `Completed { rows }` (whatever
+//! `how` was: the statement finished, the kill came too late), the kill's 1317 is
+//! `Closed { rows: delivered }`, any other server error is that error (after the status is read
+//! again). **No `mysql_async` future is ever dropped in flight:** the drain is a boxed future
+//! that owns the `Conn` and is kept in [`TypedState`] when its time runs out, so `AfterKill`
+//! resumes the very same read; it is dropped only with the connection (an `AfterKill` that runs
+//! out too, or `close`), and then its `Conn` is abandoned.
 //!
-//! **Errors.** A server error (an ERR packet, 1317 included) leaves the connection in step: the
-//! query ends and one `COM_PING` reads the transaction status again (an ERR packet has none,
-//! M2b's rule). Anything else breaks the connection, which is never used again: `Protocol` for a
-//! malformed or out-of-shape message (a row with too few or too many values, an empty packet, a
-//! column count of 0 or past 65,535 (patch §6), a binary result set with a column type
-//! `mysql_common` cannot read, a `LOCAL INFILE` request), else the I/O error.
+//! **Errors.** A server error (an ERR packet) leaves the connection in step: the query ends and
+//! one `COM_PING` reads the transaction status again (an ERR packet has none, M2b's rule).
+//! Anything else breaks the connection, which is never used again: `Protocol` for a malformed or
+//! out-of-shape message (a row with too few or too many values, an empty packet, a column count
+//! of 0 or past 65,535 (patch §6), a binary result set with a column type `mysql_common` cannot
+//! read, a `LOCAL INFILE` request), else the I/O error. **A broken or discarded connection is
+//! abandoned** (patch §7: the socket closed, nothing read, no `COM_QUIT`), never dropped:
+//! `mysql_async`'s `Drop` would read the pending result in the background, parsing hostile rows
+//! (and panicking on a refused column type) or a suspended cursor's whole rest.
 //!
 //! **Statements meanwhile.** Any other command first drains the pending result inside
 //! `mysql_async` (silently, possibly gigabytes), so while a query is open (streaming, suspended
 //! or draining) `execute`, `batch`, `ping`, `server_info`, `current_user`, `list_databases`,
 //! `reset` and a second `query` answer `Unsupported`; `tls_summary` and `probe` answer from
 //! what the connection already knows, without a round trip.
+//!
+//! **A dropped call poisons the connection.** `query`, `next_event` and `close_query` set
+//! [`TypedState::poisoned`] for as long as they run (`connect.rs`): a future dropped before it
+//! completed (mid-prepare, say) leaves a reply in the socket that the next command would take
+//! for its own, so the next call abandons the connection and answers `Io(NotConnected)`.
 
 use std::future::Future;
 use std::io;
@@ -71,6 +85,8 @@ use crate::exec::{ExtendedRoute, command_tag, extended_route, tx_from_status};
 
 /// `ER_UNSUPPORTED_PS`.
 const UNSUPPORTED_PS: u16 = 1295;
+/// `ER_QUERY_INTERRUPTED`: a `KILL QUERY` ended the statement.
+const QUERY_INTERRUPTED: u16 = 1317;
 /// How much below the server's `net_write_timeout` a suspended cursor may idle (ER6).
 const IDLE_MARGIN: Duration = Duration::from_secs(15);
 
@@ -83,6 +99,9 @@ pub(crate) struct TypedState {
     pub open: Option<Open>,
     /// A drain that ran out of time, holding the `Conn` until `AfterKill` resumes it.
     draining: Option<Drain>,
+    /// A call that talks to the server is running, or was dropped before it completed (then
+    /// the connection is out of step and is never used again).
+    pub poisoned: bool,
     /// Test seam: every query over `COM_QUERY` (text protocol).
     pub force_text: bool,
 }
@@ -96,6 +115,7 @@ impl TypedState {
             thread_id,
             open: None,
             draining: None,
+            poisoned: false,
             force_text: false,
         }
     }
@@ -106,10 +126,19 @@ impl TypedState {
         self.open.is_some() || self.draining.is_some()
     }
 
-    /// Drops the open query and any drain (the connection is being discarded).
+    /// Drops the open query and any drain, whose `Conn` is abandoned (the connection is being
+    /// discarded).
     pub fn discard(&mut self) {
         self.open = None;
         self.draining = None;
+    }
+}
+
+/// Gives a connection up without reading what is pending on it (patch §7): the socket closes,
+/// nothing is read in the background, no `COM_QUIT` is sent.
+pub(crate) fn abandon(conn: &mut Option<Conn>) {
+    if let Some(c) = conn.take() {
+        c.abandon();
     }
 }
 
@@ -127,17 +156,24 @@ pub(crate) fn caps_for(net_write_timeout: Option<Duration>) -> TypedCaps {
     }
 }
 
-/// `SELECT @@net_write_timeout` on a new connection (ER6, R19); `None` when it cannot be read.
-pub(crate) async fn read_net_write_timeout(conn: &mut Conn) -> Option<Duration> {
-    let row = conn
+/// `SELECT @@net_write_timeout` on a new connection (ER6, R19). A server that refuses it (an
+/// unknown variable) or a value that is not a positive number gives `None` (nothing suspends);
+/// an I/O or protocol failure fails the connect: a connection that cannot answer one query is
+/// not handed out as usable.
+pub(crate) async fn read_net_write_timeout(conn: &mut Conn) -> Result<Option<Duration>, RawError> {
+    let row = match conn
         .query_first::<Row, _>("SELECT @@net_write_timeout")
         .await
-        .ok()??;
-    let secs = crate::probe::int(row.as_ref(0))?;
-    u64::try_from(secs)
-        .ok()
+    {
+        Ok(row) => row,
+        Err(mysql_async::Error::Server(_)) => return Ok(None),
+        Err(e) => return Err(raw_error(&e)),
+    };
+    Ok(row
+        .and_then(|r| crate::probe::int(r.as_ref(0)))
+        .and_then(|secs| u64::try_from(secs).ok())
         .filter(|s| *s > 0)
-        .map(Duration::from_secs)
+        .map(Duration::from_secs))
 }
 
 /// What the typed path uses of a connection.
@@ -317,14 +353,14 @@ impl From<mysql_async::Error> for Fail {
     }
 }
 
-fn unsupported() -> RawError {
+pub(crate) fn unsupported() -> RawError {
     RawError {
         kind: RawErrorKind::Unsupported,
         server: None,
     }
 }
 
-fn not_connected() -> RawError {
+pub(crate) fn not_connected() -> RawError {
     RawError {
         kind: RawErrorKind::Io(io::ErrorKind::NotConnected),
         server: None,
@@ -385,23 +421,30 @@ async fn resync(conn: &mut Conn, tx: &mut TxStatus) -> bool {
     }
 }
 
+/// After a server error the connection is still in step: the status is read again; a ping
+/// that fails too abandons it (`false`).
+async fn resync_or_abandon(conn: &mut Option<Conn>, tx: &mut TxStatus) -> bool {
+    let in_step = match conn.as_mut() {
+        Some(c) => resync(c, tx).await,
+        None => false,
+    };
+    if !in_step {
+        abandon(conn);
+    }
+    in_step
+}
+
 /// Ends the open query with `e`: a server error keeps the connection (status read again), any
-/// other failure breaks it (the `Conn` is dropped and never used again).
+/// other failure breaks it (the `Conn` is abandoned and never used again).
 async fn fail(cx: Ctx<'_>, e: Fail) -> RawError {
     cx.state.open = None;
     if let Fail::My(mysql_async::Error::Server(s)) = &e {
         let raw = raw_error(&mysql_async::Error::Server(s.clone()));
-        let in_step = match cx.conn.as_mut() {
-            Some(conn) => resync(conn, cx.tx).await,
-            None => false,
-        };
-        if !in_step {
-            *cx.conn = None;
-        }
+        resync_or_abandon(cx.conn, cx.tx).await;
         return raw;
     }
     let raw = breaking_error(cx.conn.as_ref(), &e);
-    *cx.conn = None;
+    abandon(cx.conn);
     raw
 }
 
@@ -414,6 +457,15 @@ async fn next_row<P: WireProtocol>(conn: &mut Conn) -> Result<Option<Row>, mysql
 /// The pending result's columns (`None`: nothing pending, or a pending error).
 fn pending_columns<P: WireProtocol>(conn: &mut Conn) -> Option<std::sync::Arc<[Column]>> {
     QueryResult::<'_, 'static, P>::new(&mut *conn).columns()
+}
+
+/// Whether nothing of the unit is left on the wire: no rows pending and no further result
+/// (what is left, if anything, is an empty result or a pending error, both read without I/O).
+fn nothing_unread(conn: &mut Conn, wire: Wire) -> bool {
+    match wire {
+        Wire::Binary => QueryResult::<'_, 'static, BinaryProtocol>::new(&mut *conn).is_empty(),
+        Wire::Text => QueryResult::<'_, 'static, TextProtocol>::new(&mut *conn).is_empty(),
+    }
 }
 
 /// Whether a result set of `columns` can be read in `wire` without `mysql_common` panicking.
@@ -494,8 +546,13 @@ async fn fill<P: WireProtocol>(conn: &mut Conn, q: &mut Open) -> Result<Fill, Fa
     }
 }
 
-fn affected(conn: &Conn) -> Option<u64> {
-    conn.last_ok_packet().map(|ok| ok.affected_rows())
+/// The affected rows to report for a result: the last OK packet's count, except `None` for a
+/// result with columns and no affected row (a read; a positive count, a `CALL`'s writes, stays
+/// for the read-only post-check).
+fn affected(conn: &Conn, plan: &Plan) -> Option<u64> {
+    conn.last_ok_packet()
+        .map(|ok| ok.affected_rows())
+        .filter(|n| *n > 0 || plan.width() == 0)
 }
 
 /// After the current result ended: the next kept result, or the drain of every other one; the
@@ -504,7 +561,7 @@ async fn finish<P: WireProtocol>(conn: &mut Conn, q: &mut Open) -> Result<Result
     let end = |q: &Open, conn: &Conn| ResultEnd {
         rows: q.rows,
         kept: q.delivered,
-        rows_affected: affected(conn),
+        rows_affected: affected(conn, &q.plan),
         command_tag: q.command_tag.clone(),
     };
     if q.kept < q.limits.max_sets
@@ -530,8 +587,7 @@ async fn finish<P: WireProtocol>(conn: &mut Conn, q: &mut Open) -> Result<Result
     Ok(done)
 }
 
-/// The query's first result: its protocol and columns, after the statement was sent. A server
-/// error comes back as `Fail::My(Server)`; 1295 is decided by the caller.
+/// The query's first result: its protocol and columns, after the statement was sent.
 async fn start(
     conn: &mut Conn,
     sql: &str,
@@ -544,7 +600,7 @@ async fn start(
             Ok((Wire::Text, result.columns().unwrap_or_else(|| [].into())))
         }
         ExtendedRoute::Prepared => {
-            let statement = conn.prep(sql).await.map_err(StartFail::My)?;
+            let statement = conn.prep(sql).await.map_err(StartFail::Prepare)?;
             if statement.num_params() > 0 {
                 return Err(StartFail::Binds);
             }
@@ -562,6 +618,9 @@ enum StartFail {
     Refused,
     /// The statement has placeholders (binds are M3b); prepared, not executed.
     Binds,
+    /// The prepare failed: nothing ran (the only failure a 1295 retry follows).
+    Prepare(mysql_async::Error),
+    /// The statement was sent and failed.
     My(mysql_async::Error),
 }
 
@@ -585,7 +644,8 @@ pub(crate) async fn query(cx: Ctx<'_>, spec: QuerySpec<'_>) -> Result<(), RawErr
         extended_route(spec.sql, cx.read_only)
     };
     let started = match start(conn, spec.sql, route).await {
-        Err(StartFail::My(e)) if is_unsupported_ps(&e) => {
+        // Only a refused prepare is retried: nothing ran.
+        Err(StartFail::Prepare(e)) if is_unsupported_ps(&e) => {
             if cx.read_only {
                 // The refused prepare changed nothing; it is never re-sent as text.
                 return Err(unsupported());
@@ -597,9 +657,12 @@ pub(crate) async fn query(cx: Ctx<'_>, spec: QuerySpec<'_>) -> Result<(), RawErr
     let (wire, columns) = match started {
         Ok(started) => started,
         Err(StartFail::Refused | StartFail::Binds) => return Err(unsupported()),
-        Err(StartFail::My(e)) => return Err(fail(cx, Fail::My(e)).await),
+        Err(StartFail::My(e) | StartFail::Prepare(e)) => {
+            return Err(fail(cx, Fail::My(e)).await);
+        }
     };
     if !readable(wire, &columns) {
+        // Abandoned before any row is read: nothing parses the refused column type.
         return Err(fail(cx, Fail::Protocol).await);
     }
     let suspendable = spec.suspendable
@@ -638,9 +701,7 @@ pub(crate) async fn next_event(cx: Ctx<'_>) -> Result<QueryEvent, RawError> {
         Stage::Failed => {
             let e = q.error.take().unwrap_or_else(protocol);
             cx.state.open = None;
-            if !resync(conn, cx.tx).await {
-                *cx.conn = None;
-            }
+            resync_or_abandon(cx.conn, cx.tx).await;
             return Err(e);
         }
         Stage::Done => {
@@ -717,6 +778,19 @@ struct Drain {
     read: u64,
 }
 
+/// The `Conn` a drain future owns. If the future is dropped before it completes (an `AfterKill`
+/// that ran out, `close`, a dropped connection), the `Conn` is abandoned (patch §7), so nothing
+/// reads the rest of the result in the background.
+struct Held(Option<Conn>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(conn) = self.0.take() {
+            conn.abandon();
+        }
+    }
+}
+
 /// Reads the current result's rest (unless it already ended) and every result set after it.
 async fn drain_all<P: WireProtocol>(
     conn: &mut Conn,
@@ -735,16 +809,59 @@ async fn drain_all<P: WireProtocol>(
 }
 
 /// The drain of `q`'s rest, owning `conn`.
-fn drain_future(mut conn: Conn, q: &Open) -> DrainFuture {
+fn drain_future(conn: Conn, q: &Open) -> DrainFuture {
     let wire = q.wire;
     let ended = q.ended;
     Box::pin(async move {
-        let drained = match wire {
-            Wire::Binary => drain_all::<BinaryProtocol>(&mut conn, wire, ended).await,
-            Wire::Text => drain_all::<TextProtocol>(&mut conn, wire, ended).await,
+        let mut held = Held(Some(conn));
+        let drained = match held.0.as_mut() {
+            Some(conn) => match wire {
+                Wire::Binary => drain_all::<BinaryProtocol>(conn, wire, ended).await,
+                Wire::Text => drain_all::<TextProtocol>(conn, wire, ended).await,
+            },
+            None => Err(Fail::Protocol),
         };
+        let conn = held
+            .0
+            .take()
+            .expect("the drain holds its connection to the end");
         (conn, drained)
     })
+}
+
+/// How a closed query's rest ended, as `close_query` answers it (Task 12's rule): read to its
+/// end is `Completed { rows }`; the kill's 1317 is `Closed { rows: delivered }`; any other server
+/// error is that error, after the status is read again; anything else breaks the connection.
+async fn closed_by(
+    cx: Ctx<'_>,
+    ended: Result<u64, Fail>,
+    delivered: u64,
+) -> Result<Closed, RawError> {
+    match ended {
+        Ok(rows) => {
+            if let Some(status) = cx.conn.as_ref().and_then(last_status) {
+                *cx.tx = status;
+            }
+            Ok(Closed::Completed { rows })
+        }
+        Err(Fail::My(mysql_async::Error::Server(s))) => {
+            let killed = s.code == QUERY_INTERRUPTED;
+            let raw = raw_error(&mysql_async::Error::Server(s));
+            if !resync_or_abandon(cx.conn, cx.tx).await {
+                return Err(not_connected());
+            }
+            if killed {
+                Ok(Closed::Closed { rows: delivered })
+            } else {
+                Err(raw)
+            }
+        }
+        Err(e) => {
+            let raw = breaking_error(cx.conn.as_ref(), &e);
+            abandon(cx.conn);
+            Err(raw)
+        }
+    }
 }
 
 /// `RawConn::close_query`.
@@ -752,37 +869,52 @@ pub(crate) async fn close_query(cx: Ctx<'_>, how: CloseHow) -> Result<Closed, Ra
     let kill = Closed::NeedsServerKill {
         thread_id: cx.state.thread_id,
     };
+    if cx.state.draining.is_some() && how == CloseHow::Now {
+        // A drain that ran out is still reading: only the kill ends it now.
+        return Ok(kill);
+    }
     if cx.state.draining.is_none() {
-        let Some(q) = cx.state.open.as_ref() else {
+        let Some(q) = cx.state.open.as_mut() else {
             return Ok(Closed::Closed { rows: 0 });
         };
-        if matches!(q.stage, Stage::Failed | Stage::Done) {
+        match q.stage {
             // Nothing is left unread: the rest was drained when the last kept result ended.
-            let rows = q.rows;
-            let delivered = q.delivered;
-            let failed = q.stage == Stage::Failed;
-            cx.state.open = None;
-            if let Some(conn) = cx.conn.as_mut() {
-                if failed {
-                    // A later statement's error was the last thing read.
-                    if !resync(conn, cx.tx).await {
-                        *cx.conn = None;
-                    }
-                } else if let Some(status) = last_status(conn) {
-                    *cx.tx = status;
-                }
+            Stage::Done => {
+                let rows = q.rows;
+                cx.state.open = None;
+                return closed_by(cx, Ok(rows), 0).await;
             }
-            return Ok(match how {
-                CloseHow::Drain(_) => Closed::Completed { rows },
-                CloseHow::Now | CloseHow::AfterKill(_) => Closed::Closed { rows: delivered },
-            });
+            // A later statement's error was the last thing read.
+            Stage::Failed => {
+                let delivered = q.delivered;
+                let e = q.error.take().unwrap_or_else(protocol);
+                cx.state.open = None;
+                if !resync_or_abandon(cx.conn, cx.tx).await {
+                    return Err(not_connected());
+                }
+                let killed = e
+                    .server
+                    .as_ref()
+                    .and_then(|s| s.vendor_code)
+                    .is_some_and(|c| c == i64::from(QUERY_INTERRUPTED));
+                return if killed {
+                    Ok(Closed::Closed { rows: delivered })
+                } else {
+                    Err(e)
+                };
+            }
+            Stage::Start | Stage::Rows | Stage::Suspended => {}
         }
-        if how == CloseHow::Now {
-            // MySQL closes early only by a kill; the query stays open for `AfterKill`.
+        let Some(conn) = cx.conn.as_mut() else {
+            cx.state.open = None;
+            return Err(not_connected());
+        };
+        // `Now`: MySQL ends a result early only by a kill, unless nothing of it is left on the
+        // wire; then it finishes here (no kill that could reach the next statement).
+        if how == CloseHow::Now && (q.peeked.is_some() || !nothing_unread(conn, q.wire)) {
             return Ok(kill);
         }
         let Some(conn) = cx.conn.take() else {
-            cx.state.open = None;
             return Err(not_connected());
         };
         let Some(q) = cx.state.open.take() else {
@@ -799,55 +931,22 @@ pub(crate) async fn close_query(cx: Ctx<'_>, how: CloseHow) -> Result<Closed, Ra
         return Ok(Closed::Closed { rows: 0 });
     };
     let limit = match how {
-        CloseHow::Drain(d) | CloseHow::AfterKill(d) => d,
-        CloseHow::Now => return Ok(kill),
+        CloseHow::Drain(d) | CloseHow::AfterKill(d) => Some(d),
+        // Only a drain just started for a query with nothing left on the wire: it reads no
+        // packet (an empty result or a pending error), so it needs no bound.
+        CloseHow::Now => None,
     };
-    // The timeout borrows the boxed future: when it runs out, the future stays as it is, in
-    // the middle of its read, for the next call.
-    match tokio::time::timeout(limit, &mut drain.fut).await {
-        Ok((conn, drained)) => {
-            let Drain {
-                delivered, read, ..
-            } = cx.state.draining.take().expect("the drain just completed");
-            *cx.conn = Some(conn);
-            match drained {
-                Ok(d) => {
-                    if let Some(conn) = cx.conn.as_ref()
-                        && let Some(status) = last_status(conn)
-                    {
-                        *cx.tx = status;
-                    }
-                    // Read to the end without an error: the kill, if one was sent, came after
-                    // the result had ended.
-                    Ok(match how {
-                        CloseHow::Drain(_) => Closed::Completed {
-                            rows: read + d.rows,
-                        },
-                        _ => Closed::Closed { rows: delivered },
-                    })
-                }
-                // The kill's 1317, or a later statement's error: closed all the same.
-                Err(Fail::My(mysql_async::Error::Server(_))) => {
-                    let in_step = match cx.conn.as_mut() {
-                        Some(conn) => resync(conn, cx.tx).await,
-                        None => false,
-                    };
-                    if !in_step {
-                        *cx.conn = None;
-                    }
-                    Ok(Closed::Closed { rows: delivered })
-                }
-                Err(e) => {
-                    let raw = breaking_error(cx.conn.as_ref(), &e);
-                    *cx.conn = None;
-                    Err(raw)
-                }
-            }
-        }
-        Err(_elapsed) => match how {
+    let finished = match limit {
+        // The timeout borrows the boxed future: when it runs out, the future stays as it is,
+        // in the middle of its read, for the next call.
+        Some(d) => tokio::time::timeout(d, &mut drain.fut).await.ok(),
+        None => Some((&mut drain.fut).await),
+    };
+    let Some((conn, drained)) = finished else {
+        return match how {
             CloseHow::AfterKill(_) => {
-                // The kill did not end the result in time: the connection (inside the future)
-                // is discarded.
+                // The kill did not end the result in time: the drain (and its `Conn`) is
+                // dropped, the `Conn` abandoned.
                 cx.state.draining = None;
                 Err(RawError {
                     kind: RawErrorKind::Io(io::ErrorKind::TimedOut),
@@ -856,8 +955,13 @@ pub(crate) async fn close_query(cx: Ctx<'_>, how: CloseHow) -> Result<Closed, Ra
             }
             // The future stays in the middle of its read, for `AfterKill`.
             _ => Ok(kill),
-        },
-    }
+        };
+    };
+    let Drain {
+        delivered, read, ..
+    } = cx.state.draining.take().expect("the drain just completed");
+    *cx.conn = Some(conn);
+    closed_by(cx, drained.map(|d| read + d.rows), delivered).await
 }
 
 #[cfg(test)]

@@ -1,459 +1,33 @@
-//! The typed path (Task 14) and `mysql_async` patch §6 against a scripted in-process server
-//! that speaks just enough of the MySQL protocol: rows and headers out of shape (always
-//! `Protocol`, the connection broken, never a panic), `Unsupported` while a query is open (and
-//! nothing sent), suspension and resume in the binary protocol, the drain-then-kill close, the
-//! result-set rules and the 1295 route. No Docker.
+//! The typed path (Task 14) and `mysql_async` patches §6 and §7 against a scripted in-process
+//! server (`support`) that speaks just enough of the MySQL protocol: rows and headers out of
+//! shape (always `Protocol`, the connection abandoned, never a panic, never read on),
+//! `Unsupported` while a query is open (and nothing sent), suspension and resume in the binary
+//! protocol, the drain-then-kill close and its outcomes, the result-set rules, the 1295 route,
+//! a dropped call poisoning the connection. No Docker.
 
 #![allow(
     clippy::result_large_err,
     reason = "RawError is a fixed interface; one per failed call"
 )]
 
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+mod support;
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use hacivat_driver::{
-    CloseHow, Closed, DriverConnect, Endpoint, ExecOpts, InsecureAuth, Protocol, QueryDone,
-    QueryEvent, QuerySpec, RawConn, RawError, RawErrorKind, ResultEnd, TxStatus, TypedCaps,
+    CloseHow, Closed, ExecOpts, Protocol, QueryEvent, RawConn, RawErrorKind, ResultEnd, TxStatus,
+    TypedCaps,
 };
-use hacivat_driver_mysql::{MySqlConn, connect_conn};
-use hacivat_net::{Target, direct};
-use hacivat_values::{BindValue, Chunk, TsVal, ValueRef};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use hacivat_driver_mysql::connect_conn;
+use hacivat_values::{BindValue, TsVal, ValueRef};
+use support::*;
 use tokio::sync::Notify;
 
-// Protocol constants -----------------------------------------------------------------------
-
-const COM_QUIT: u8 = 0x01;
-const COM_QUERY: u8 = 0x03;
-const COM_PING: u8 = 0x0E;
-const COM_STMT_PREPARE: u8 = 0x16;
-const COM_STMT_EXECUTE: u8 = 0x17;
-const COM_STMT_CLOSE: u8 = 0x19;
-const COM_RESET_CONNECTION: u8 = 0x1F;
-
-const T_LONG: u8 = 3;
-const T_DOUBLE: u8 = 5;
-const T_LONGLONG: u8 = 8;
-const T_DATE: u8 = 10;
-const T_DATETIME: u8 = 12;
-const T_TIME2: u8 = 19;
-const T_VAR_STRING: u8 = 253;
-
-const AUTOCOMMIT: u16 = 0x0002;
-const IN_TRANS: u16 = 0x0001;
-const MORE_RESULTS: u16 = 0x0008;
-
-const BINARY: u16 = 63;
-const UTF8MB4: u16 = 255;
-/// The connection ID the greeting announces.
-const THREAD_ID: u32 = 7;
-
-// Packet builders --------------------------------------------------------------------------
-
-fn lenenc_int(n: u64) -> Vec<u8> {
-    match n {
-        0..=250 => vec![n as u8],
-        251..=0xFFFF => [&[0xFC][..], &(n as u16).to_le_bytes()].concat(),
-        0x1_0000..=0xFF_FFFF => [&[0xFD][..], &(n as u32).to_le_bytes()[..3]].concat(),
-        _ => [&[0xFE][..], &n.to_le_bytes()].concat(),
-    }
-}
-
-fn lenenc_str(b: &[u8]) -> Vec<u8> {
-    [lenenc_int(b.len() as u64), b.to_vec()].concat()
-}
-
-fn ok_packet(affected: u64, status: u16, warnings: u16) -> Vec<u8> {
-    [
-        vec![0x00],
-        lenenc_int(affected),
-        lenenc_int(0),
-        status.to_le_bytes().to_vec(),
-        warnings.to_le_bytes().to_vec(),
-    ]
-    .concat()
-}
-
-/// The end of a result set under `CLIENT_DEPRECATE_EOF`: an OK packet with the `0xFE` header.
-fn terminator(status: u16, warnings: u16) -> Vec<u8> {
-    let mut p = ok_packet(0, status, warnings);
-    p[0] = 0xFE;
-    p
-}
-
-fn err_packet(code: u16, state: &str, message: &str) -> Vec<u8> {
-    [
-        vec![0xFF],
-        code.to_le_bytes().to_vec(),
-        b"#".to_vec(),
-        state.as_bytes().to_vec(),
-        message.as_bytes().to_vec(),
-    ]
-    .concat()
-}
-
-fn column_def(name: &str, ty: u8, flags: u16, charset: u16, length: u32, decimals: u8) -> Vec<u8> {
-    [
-        lenenc_str(b"def"),
-        lenenc_str(b"hv"),
-        lenenc_str(b"t"),
-        lenenc_str(b"t"),
-        lenenc_str(name.as_bytes()),
-        lenenc_str(name.as_bytes()),
-        vec![0x0C],
-        charset.to_le_bytes().to_vec(),
-        length.to_le_bytes().to_vec(),
-        vec![ty],
-        flags.to_le_bytes().to_vec(),
-        vec![decimals, 0, 0],
-    ]
-    .concat()
-}
-
-fn long_col(name: &str) -> Vec<u8> {
-    column_def(name, T_LONG, 0, BINARY, 11, 0)
-}
-
-fn text_row(cells: &[Option<&[u8]>]) -> Vec<u8> {
-    cells
-        .iter()
-        .flat_map(|c| match c {
-            Some(b) => lenenc_str(b),
-            None => vec![0xFB],
-        })
-        .collect()
-}
-
-/// A binary row: the header, the NULL bitmap (offset 2) and the non-NULL values as encoded.
-fn bin_row(cells: &[Option<Vec<u8>>]) -> Vec<u8> {
-    let mut bitmap = vec![0_u8; (cells.len() + 7 + 2) / 8];
-    for (i, c) in cells.iter().enumerate() {
-        if c.is_none() {
-            bitmap[(i + 2) / 8] |= 1 << ((i + 2) % 8);
-        }
-    }
-    let values: Vec<u8> = cells.iter().flatten().flatten().copied().collect();
-    [vec![0x00], bitmap, values].concat()
-}
-
-fn long(v: i32) -> Option<Vec<u8>> {
-    Some(v.to_le_bytes().to_vec())
-}
-
-/// The prepare reply for a statement with `columns` and `params` placeholders.
-fn prepare_ok(columns: &[Vec<u8>], params: u16) -> Vec<Step> {
-    let mut first = vec![0x00];
-    first.extend_from_slice(&1_u32.to_le_bytes());
-    first.extend_from_slice(&(columns.len() as u16).to_le_bytes());
-    first.extend_from_slice(&params.to_le_bytes());
-    first.extend_from_slice(&[0, 0, 0]);
-    let mut steps = vec![Step::Packet(first)];
-    for _ in 0..params {
-        steps.push(Step::Packet(long_col("?")));
-    }
-    steps.extend(columns.iter().cloned().map(Step::Packet));
-    steps
-}
-
-/// A result set's header: the column count and the definitions.
-fn header(columns: &[Vec<u8>]) -> Vec<Step> {
-    let mut steps = vec![Step::Packet(lenenc_int(columns.len() as u64))];
-    steps.extend(columns.iter().cloned().map(Step::Packet));
-    steps
-}
-
-fn packets(ps: Vec<Vec<u8>>) -> Vec<Step> {
-    ps.into_iter().map(Step::Packet).collect()
-}
-
-// The scripted server ----------------------------------------------------------------------
-
-/// One step of a reply: a packet, or a wait until the test releases the rest.
-#[derive(Clone)]
-enum Step {
-    Packet(Vec<u8>),
-    Wait(Arc<Notify>),
-}
-
-#[derive(Debug, Clone)]
-struct Cmd {
-    code: u8,
-    body: Vec<u8>,
-}
-
-impl Cmd {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
-    }
-}
-
-/// The test's replies; `None` falls back to [`default_reply`].
-type Handler = Arc<dyn Fn(&Cmd) -> Option<Vec<Step>> + Send + Sync>;
-
-struct Server {
-    addr: SocketAddr,
-    log: Arc<Mutex<Vec<Cmd>>>,
-}
-
-impl Server {
-    /// The commands received after the connection's own setup, in order.
-    fn commands(&self) -> Vec<Cmd> {
-        self.log.lock().unwrap().clone()
-    }
-
-    fn count(&self) -> usize {
-        self.log.lock().unwrap().len()
-    }
-}
-
-fn greeting() -> Vec<u8> {
-    // LONG_PASSWORD | LONG_FLAG | PROTOCOL_41 | TRANSACTIONS | SECURE_CONNECTION
-    // | MULTI_STATEMENTS | MULTI_RESULTS | PS_MULTI_RESULTS | PLUGIN_AUTH | DEPRECATE_EOF
-    let caps: u32 = 0x0000_0001
-        | 0x0000_0004
-        | 0x0000_0200
-        | 0x0000_2000
-        | 0x0000_8000
-        | 0x0001_0000
-        | 0x0002_0000
-        | 0x0004_0000
-        | 0x0008_0000
-        | 0x0100_0000;
-    let mut p = vec![10_u8];
-    p.extend_from_slice(b"8.4.0-hv\0");
-    p.extend_from_slice(&THREAD_ID.to_le_bytes());
-    p.extend_from_slice(b"abcdefgh\0");
-    p.extend_from_slice(&(caps as u16).to_le_bytes());
-    p.push(45);
-    p.extend_from_slice(&AUTOCOMMIT.to_le_bytes());
-    p.extend_from_slice(&((caps >> 16) as u16).to_le_bytes());
-    p.push(21);
-    p.extend_from_slice(&[0_u8; 10]);
-    p.extend_from_slice(b"ijklmnopqrst\0");
-    p.extend_from_slice(b"mysql_native_password\0");
-    p
-}
-
-async fn write_packet(s: &mut TcpStream, seq: u8, body: &[u8]) -> bool {
-    let len = (body.len() as u32).to_le_bytes();
-    let mut out = vec![len[0], len[1], len[2], seq];
-    out.extend_from_slice(body);
-    s.write_all(&out).await.is_ok()
-}
-
-async fn read_packet(s: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
-    let mut hdr = [0_u8; 4];
-    s.read_exact(&mut hdr).await.ok()?;
-    let len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], 0]) as usize;
-    let mut body = vec![0_u8; len];
-    s.read_exact(&mut body).await.ok()?;
-    Some((hdr[3], body))
-}
-
-/// A text result set of one row of named `BIGINT` text values.
-fn variables(cells: &[(&str, &str)]) -> Vec<Step> {
-    let defs: Vec<Vec<u8>> = cells
-        .iter()
-        .map(|(name, _)| column_def(name, T_LONGLONG, 0, BINARY, 21, 0))
-        .collect();
-    let mut steps = header(&defs);
-    let row: Vec<Option<&[u8]>> = cells.iter().map(|(_, v)| Some(v.as_bytes())).collect();
-    steps.push(Step::Packet(text_row(&row)));
-    steps.push(Step::Packet(terminator(AUTOCOMMIT, 0)));
-    steps
-}
-
-/// What a server answers that the test does not script: the connection's own setup queries,
-/// `SET`s, pings, resets; anything else is an error.
-fn default_reply(cmd: &Cmd) -> Vec<Step> {
-    match cmd.code {
-        COM_QUERY if cmd.text().contains("@@max_allowed_packet") => variables(&[
-            ("@@max_allowed_packet", "67108864"),
-            ("@@wait_timeout", "28800"),
-        ]),
-        COM_QUERY if cmd.text().contains("@@net_write_timeout") => {
-            variables(&[("@@net_write_timeout", "60")])
-        }
-        COM_QUERY | COM_PING | COM_RESET_CONNECTION => packets(vec![ok_packet(0, AUTOCOMMIT, 0)]),
-        COM_STMT_CLOSE | COM_QUIT => Vec::new(),
-        _ => packets(vec![err_packet(1047, "08S01", "Unknown command")]),
-    }
-}
-
-/// Serves one connection: the greeting, an OK for any sign-in, then every command by
-/// `handler` (else [`default_reply`]), recording each.
-async fn serve(handler: Handler) -> Server {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let seen = log.clone();
-    tokio::spawn(async move {
-        let Ok((mut s, _)) = listener.accept().await else {
-            return;
-        };
-        if !write_packet(&mut s, 0, &greeting()).await {
-            return;
-        }
-        let Some((seq, _response)) = read_packet(&mut s).await else {
-            return;
-        };
-        if !write_packet(&mut s, seq.wrapping_add(1), &ok_packet(0, AUTOCOMMIT, 0)).await {
-            return;
-        }
-        while let Some((_, body)) = read_packet(&mut s).await {
-            let Some((&code, rest)) = body.split_first() else {
-                return;
-            };
-            let cmd = Cmd {
-                code,
-                body: rest.to_vec(),
-            };
-            seen.lock().unwrap().push(cmd.clone());
-            if code == COM_QUIT {
-                return;
-            }
-            let steps = handler(&cmd).unwrap_or_else(|| default_reply(&cmd));
-            let mut seq = 1_u8;
-            for step in steps {
-                match step {
-                    Step::Packet(p) => {
-                        if !write_packet(&mut s, seq, &p).await {
-                            return;
-                        }
-                        seq = seq.wrapping_add(1);
-                    }
-                    Step::Wait(n) => n.notified().await,
-                }
-            }
-        }
-    });
-    Server { addr, log }
-}
-
-fn request(addr: SocketAddr, read_only: bool) -> DriverConnect {
-    let target = Target::Tcp {
-        host: "127.0.0.1".into(),
-        port: addr.port(),
-    };
-    DriverConnect {
-        endpoint: Endpoint::Network {
-            factory: direct(target.clone(), vec![addr], Duration::from_secs(5)),
-            direct: Some(target),
-            resolved: vec![addr],
-            tls_host: "127.0.0.1".into(),
-        },
-        tls: None,
-        user: Some("hv".into()),
-        password: None,
-        database: None,
-        application_name: "Hacivat tests".into(),
-        read_only,
-        options: vec![],
-        connect_timeout: Duration::from_secs(5),
-        events: Arc::new(|_| {}),
-        insecure_auth: InsecureAuth::Allow,
-    }
-}
-
-/// A connection to a server scripted by `handler`, and how many commands its setup sent.
-async fn scripted(
-    read_only: bool,
-    handler: impl Fn(&Cmd) -> Option<Vec<Step>> + Send + Sync + 'static,
-) -> (MySqlConn, Server, usize) {
-    let server = serve(Arc::new(handler)).await;
-    let conn = match connect_conn(request(server.addr, read_only)).await {
-        Ok(c) => c,
-        Err(e) => panic!("connect: {:?}", e.kind),
-    };
-    let setup = server.count();
-    (conn, server, setup)
-}
-
-fn spec(sql: &str, suspendable: bool, first_rows: u32) -> QuerySpec<'_> {
-    QuerySpec {
-        sql,
-        binds: &[],
-        protocol: Protocol::Extended,
-        suspendable,
-        first_rows,
-        chunk_rows: 4_096,
-        chunk_bytes: 4 << 20,
-        cell_cap: 1 << 20,
-        max_result_sets: 1,
-    }
-}
-
-fn kind<T>(r: Result<T, RawError>) -> RawErrorKind {
-    match r {
-        Ok(_) => panic!("expected an error"),
-        Err(e) => e.kind,
-    }
-}
-
-fn vendor(e: &RawError) -> Option<i64> {
-    e.server.as_ref().and_then(|s| s.vendor_code)
-}
-
-async fn event(c: &mut MySqlConn) -> QueryEvent {
-    match c.next_event().await {
-        Ok(e) => e,
-        Err(e) => panic!("next_event: {:?}", e.kind),
-    }
-}
-
-fn rows_of(e: QueryEvent) -> Chunk {
-    match e {
-        QueryEvent::Rows(c) => c,
-        other => panic!("expected rows, got {other:?}"),
-    }
-}
-
-fn int_cells(c: &Chunk, col: u32) -> Vec<i64> {
-    (0..c.rows())
-        .map(|r| match c.cell(r, col) {
-            ValueRef::Int(v) => v,
-            other => panic!("{other:?}"),
-        })
-        .collect()
-}
-
-fn end_of(e: QueryEvent) -> ResultEnd {
-    match e {
-        QueryEvent::ResultEnd(end) => end,
-        other => panic!("expected the result's end, got {other:?}"),
-    }
-}
-
-fn done_of(e: QueryEvent) -> QueryDone {
-    match e {
-        QueryEvent::Done(done) => done,
-        other => panic!("expected done, got {other:?}"),
-    }
-}
-
-/// A prepared statement of one `INT` column `a` whose execution answers `rows`.
-fn one_int_column(rows: Vec<Step>) -> impl Fn(&Cmd) -> Option<Vec<Step>> + Send + Sync + 'static {
-    let rows = Arc::new(Mutex::new(Some(rows)));
-    move |cmd: &Cmd| match cmd.code {
-        COM_STMT_PREPARE => Some(prepare_ok(&[long_col("a")], 0)),
-        COM_STMT_EXECUTE => {
-            let mut steps = header(&[long_col("a")]);
-            steps.extend(rows.lock().unwrap().take().unwrap_or_default());
-            Some(steps)
-        }
-        _ => None,
-    }
-}
-
-fn int_rows(values: &[i32]) -> Vec<Step> {
-    values
-        .iter()
-        .map(|v| Step::Packet(bin_row(&[long(*v)])))
-        .collect()
-}
+const NOT_CONNECTED: RawErrorKind = RawErrorKind::Io(std::io::ErrorKind::NotConnected);
+/// How long a test waits for the server to see the connection end (a condition, polled).
+const SEE_END: Duration = Duration::from_secs(10);
 
 // Tests ------------------------------------------------------------------------------------
 
@@ -880,12 +454,13 @@ async fn now_asks_for_the_kill_without_reading() {
             thread_id: u64::from(THREAD_ID)
         }
     );
-    // The kill came too late (the result had ended): AfterKill reads to the end all the same.
+    // The kill came too late (the result had ended): AfterKill reads to the end, and the
+    // statement finished, so the result is complete (Task 12's rule).
     assert_eq!(
         c.close_query(CloseHow::AfterKill(Duration::from_secs(10)))
             .await
             .unwrap(),
-        Closed::Closed { rows: 1 }
+        Closed::Completed { rows: 3 }
     );
     let before = server.count();
     c.ping().await.unwrap();
@@ -1127,4 +702,384 @@ async fn text_columns_decode_lossless_over_com_query() {
     let chunk = rows_of(event(&mut c).await);
     assert_eq!(chunk.cell(0, 0), ValueRef::Lossy(&[0x66, 0xFC]));
     assert_eq!(chunk.cell(1, 0), ValueRef::Null);
+}
+
+// Review round 1 ---------------------------------------------------------------------------
+
+/// The server, stalled on `release`, then sends a rest far larger than every buffer. A client
+/// that abandoned the connection never reads it: the server's writes fail and it sees the end,
+/// with no `COM_QUIT`.
+async fn assert_abandoned(server: &Server, release: &Notify) {
+    release.notify_one();
+    assert!(
+        wait_until(SEE_END, || server.ended()).await,
+        "the server never saw the connection end"
+    );
+    assert!(server.write_failed(), "the client read the rest");
+    assert!(
+        !server.quit_seen(),
+        "an abandoned connection sends no COM_QUIT"
+    );
+}
+
+#[tokio::test]
+async fn a_protocol_violation_abandons_the_connection_without_reading_on() {
+    let release = Arc::new(Notify::new());
+    let rows = [
+        // A text row with a value too many (patch §6), then a valid multi-megabyte rest.
+        packets(vec![text_row(&[Some(b"x"), Some(b"y")])]),
+        vec![Step::Wait(release.clone())],
+        wide_text_rows(WIDE_ROWS),
+        packets(vec![terminator(AUTOCOMMIT, 0)]),
+    ]
+    .concat();
+    let rows = Arc::new(std::sync::Mutex::new(Some(rows)));
+    let (mut c, server, _) = scripted(false, move |cmd| match cmd.code {
+        COM_QUERY if cmd.text().starts_with("SET") => {
+            let mut steps = header(&[text_col("s")]);
+            steps.extend(rows.lock().unwrap().take().unwrap_or_default());
+            Some(steps)
+        }
+        _ => None,
+    })
+    .await;
+    c.query(spec("SET @s = 1", false, 501)).await.unwrap();
+    assert!(matches!(event(&mut c).await, QueryEvent::ResultStart(_)));
+    assert_eq!(kind(c.next_event().await), RawErrorKind::Protocol);
+    assert_abandoned(&server, &release).await;
+    assert_eq!(kind(c.ping().await), NOT_CONNECTED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_column_type_is_never_parsed_in_the_background() {
+    // Before patch §7 the dropped `Conn`'s cleanup read this row with `mysql_common`'s binary
+    // parser and panicked (`unimplemented!`) in a tokio worker.
+    let panics = record_panics();
+    let release = Arc::new(Notify::new());
+    let col = || column_def("t", T_TIME2, 0, BINARY, 10, 0);
+    let held = release.clone();
+    let (mut c, server, _) = scripted(false, move |cmd| match cmd.code {
+        COM_STMT_PREPARE => Some(prepare_ok(&[col()], 0)),
+        COM_STMT_EXECUTE => {
+            let mut steps = header(&[col()]);
+            steps.push(Step::Wait(held.clone()));
+            steps.extend((0..WIDE_ROWS).map(|_| Step::Packet(bin_row(&[Some(vec![0; 3])]))));
+            steps.push(Step::Packet(terminator(AUTOCOMMIT, 0)));
+            Some(steps)
+        }
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        kind(c.query(spec("SELECT t FROM t", false, 501)).await),
+        RawErrorKind::Protocol
+    );
+    release.notify_one();
+    assert!(wait_until(SEE_END, || server.ended()).await);
+    // The socket is closed, so nothing can read the rows any more.
+    let seen = panics.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|m| m.contains("Unsupported column type")),
+        "{seen:?}"
+    );
+    assert!(!server.quit_seen());
+}
+
+#[tokio::test]
+async fn close_with_a_suspended_query_abandons_the_connection() {
+    let release = Arc::new(Notify::new());
+    let rows = [
+        wide_bin_rows(3),
+        vec![Step::Wait(release.clone())],
+        wide_bin_rows(WIDE_ROWS),
+        packets(vec![terminator(AUTOCOMMIT, 0)]),
+    ]
+    .concat();
+    let (mut c, server, _) = scripted(false, one_column(text_col("s"), rows)).await;
+    c.query(spec("SELECT s FROM t", true, 1)).await.unwrap();
+    assert!(matches!(event(&mut c).await, QueryEvent::ResultStart(_)));
+    rows_of(event(&mut c).await);
+    assert_eq!(event(&mut c).await, QueryEvent::Suspended);
+    Box::new(c).close().await;
+    assert_abandoned(&server, &release).await;
+}
+
+#[tokio::test]
+async fn a_plain_close_still_quits_cleanly() {
+    let (c, server, _) = scripted(false, |_| None).await;
+    Box::new(c).close().await;
+    assert!(wait_until(SEE_END, || server.ended()).await);
+    assert!(server.quit_seen());
+}
+
+#[tokio::test]
+async fn an_after_kill_that_runs_out_abandons_the_drains_connection() {
+    let release = Arc::new(Notify::new());
+    let rows = [
+        wide_bin_rows(2),
+        vec![Step::Wait(release.clone())],
+        wide_bin_rows(WIDE_ROWS),
+        packets(vec![terminator(AUTOCOMMIT, 0)]),
+    ]
+    .concat();
+    let (mut c, server, _) = scripted(false, one_column(text_col("s"), rows)).await;
+    c.query(spec("SELECT s FROM t", true, 1)).await.unwrap();
+    assert!(matches!(event(&mut c).await, QueryEvent::ResultStart(_)));
+    rows_of(event(&mut c).await);
+    assert_eq!(event(&mut c).await, QueryEvent::Suspended);
+    assert!(matches!(
+        c.close_query(CloseHow::Drain(Duration::from_millis(20)))
+            .await
+            .unwrap(),
+        Closed::NeedsServerKill { .. }
+    ));
+    // The kill never lands: the AfterKill runs out and the drain's `Conn` is abandoned.
+    assert_eq!(
+        kind(
+            c.close_query(CloseHow::AfterKill(Duration::from_millis(20)))
+                .await
+        ),
+        RawErrorKind::Io(std::io::ErrorKind::TimedOut)
+    );
+    assert_abandoned(&server, &release).await;
+    assert_eq!(kind(c.ping().await), NOT_CONNECTED);
+}
+
+#[tokio::test]
+async fn a_server_error_while_draining_is_reported_not_swallowed() {
+    let rows = [
+        int_rows(&[1, 2, 3]),
+        packets(vec![err_packet(
+            1205,
+            "HY000",
+            "Lock wait timeout exceeded",
+        )]),
+    ]
+    .concat();
+    let (mut c, _server, _) = scripted(false, one_int_column(rows)).await;
+    c.query(spec("SELECT a FROM t", true, 1)).await.unwrap();
+    assert!(matches!(event(&mut c).await, QueryEvent::ResultStart(_)));
+    rows_of(event(&mut c).await);
+    assert_eq!(event(&mut c).await, QueryEvent::Suspended);
+    let e = c
+        .close_query(CloseHow::Drain(Duration::from_secs(10)))
+        .await
+        .unwrap_err();
+    assert_eq!(vendor(&e), Some(1205));
+    assert_eq!(e.kind, RawErrorKind::Db);
+    // In step: closed, the status read again, the connection usable.
+    c.ping().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_later_statements_error_is_reported_by_close_after_the_kept_end() {
+    let (mut c, _server, _) = scripted(false, |cmd| match cmd.code {
+        COM_STMT_PREPARE => Some(prepare_ok(&[], 0)),
+        COM_STMT_EXECUTE => {
+            let mut steps = header(&[long_col("n")]);
+            steps.push(Step::Packet(bin_row(&[long(1)])));
+            steps.push(Step::Packet(terminator(AUTOCOMMIT | MORE_RESULTS, 0)));
+            steps.push(Step::Packet(err_packet(
+                1062,
+                "23000",
+                "Duplicate entry '1' for key 'PRIMARY'",
+            )));
+            Some(steps)
+        }
+        _ => None,
+    })
+    .await;
+    c.query(spec("CALL hv.p()", false, 501)).await.unwrap();
+    assert!(matches!(event(&mut c).await, QueryEvent::ResultStart(_)));
+    rows_of(event(&mut c).await);
+    end_of(event(&mut c).await);
+    let e = c
+        .close_query(CloseHow::Drain(Duration::from_secs(10)))
+        .await
+        .unwrap_err();
+    assert_eq!(vendor(&e), Some(1062));
+    assert_eq!(e.kind, RawErrorKind::Db);
+    c.ping().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_after_kill_that_reads_to_the_end_is_completed() {
+    // The kill came too late: the statement finished, so the result is complete.
+    let release = Arc::new(Notify::new());
+    let rows = [
+        int_rows(&[1, 2]),
+        vec![Step::Wait(release.clone())],
+        int_rows(&[3]),
+        packets(vec![terminator(AUTOCOMMIT, 0)]),
+    ]
+    .concat();
+    let (mut c, _server, _) = scripted(false, one_int_column(rows)).await;
+    c.query(spec("SELECT a FROM t", true, 1)).await.unwrap();
+    assert!(matches!(event(&mut c).await, QueryEvent::ResultStart(_)));
+    rows_of(event(&mut c).await);
+    assert_eq!(event(&mut c).await, QueryEvent::Suspended);
+    assert!(matches!(
+        c.close_query(CloseHow::Drain(Duration::from_millis(50)))
+            .await
+            .unwrap(),
+        Closed::NeedsServerKill { .. }
+    ));
+    release.notify_one();
+    assert_eq!(
+        c.close_query(CloseHow::AfterKill(Duration::from_secs(10)))
+            .await
+            .unwrap(),
+        Closed::Completed { rows: 3 }
+    );
+    c.ping().await.unwrap();
+}
+
+#[tokio::test]
+async fn now_finishes_here_when_nothing_is_left_unread() {
+    // A DML statement (its OK packet read, nothing on the wire): no kill.
+    let (mut c, server, setup) = scripted(false, |cmd| match cmd.code {
+        COM_STMT_PREPARE => Some(prepare_ok(&[], 0)),
+        COM_STMT_EXECUTE => Some(packets(vec![ok_packet(2, AUTOCOMMIT, 0)])),
+        _ => None,
+    })
+    .await;
+    c.query(spec("DELETE FROM t", false, 501)).await.unwrap();
+    assert_eq!(
+        c.close_query(CloseHow::Now).await.unwrap(),
+        Closed::Completed { rows: 0 }
+    );
+    assert_eq!(server.count(), setup + 2, "nothing more was sent");
+    c.ping().await.unwrap();
+
+    // A result read to its end (the `ResultEnd` out, `Done` not yet asked for).
+    let (mut c, _server, _) = scripted(
+        false,
+        one_int_column([int_rows(&[1, 2]), packets(vec![terminator(AUTOCOMMIT, 0)])].concat()),
+    )
+    .await;
+    c.query(spec("SELECT a FROM t", false, 501)).await.unwrap();
+    assert!(matches!(event(&mut c).await, QueryEvent::ResultStart(_)));
+    rows_of(event(&mut c).await);
+    end_of(event(&mut c).await);
+    assert_eq!(
+        c.close_query(CloseHow::Now).await.unwrap(),
+        Closed::Completed { rows: 2 }
+    );
+    c.ping().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_select_reports_no_affected_rows() {
+    let (mut c, _server, _) = scripted(
+        false,
+        one_int_column([int_rows(&[1, 2]), packets(vec![terminator(AUTOCOMMIT, 0)])].concat()),
+    )
+    .await;
+    c.query(spec("SELECT a FROM t", false, 501)).await.unwrap();
+    assert!(matches!(event(&mut c).await, QueryEvent::ResultStart(_)));
+    rows_of(event(&mut c).await);
+    assert_eq!(end_of(event(&mut c).await).rows_affected, None);
+}
+
+#[tokio::test]
+async fn a_dropped_query_future_poisons_the_connection() {
+    // Dropped while the prepare reply is in flight: the reply stays in the socket, and the next
+    // prepare would read it as its own (a wrong schema with no error).
+    let release = Arc::new(Notify::new());
+    let first = Arc::new(AtomicBool::new(true));
+    let held = release.clone();
+    let (mut c, server, setup) = scripted(false, move |cmd| match cmd.code {
+        COM_STMT_PREPARE => {
+            let mut steps = Vec::new();
+            if first.swap(false, Ordering::SeqCst) {
+                steps.push(Step::Wait(held.clone()));
+            }
+            steps.extend(prepare_ok(&[long_col("a")], 0));
+            Some(steps)
+        }
+        COM_STMT_EXECUTE => {
+            let mut steps = header(&[long_col("a")]);
+            steps.push(Step::Packet(bin_row(&[long(1)])));
+            steps.push(Step::Packet(terminator(AUTOCOMMIT, 0)));
+            Some(steps)
+        }
+        _ => None,
+    })
+    .await;
+    // The server holds its reply until released, so this always drops the future mid-prepare.
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(100),
+        c.query(spec("SELECT a FROM t", false, 501)),
+    )
+    .await;
+    assert!(dropped.is_err());
+    release.notify_one();
+    assert_eq!(
+        kind(c.query(spec("SELECT a FROM t", false, 501)).await),
+        NOT_CONNECTED
+    );
+    assert_eq!(
+        kind(c.execute("SELECT 1", ExecOpts::default()).await),
+        NOT_CONNECTED
+    );
+    assert_eq!(kind(c.ping().await), NOT_CONNECTED);
+    assert!(wait_until(SEE_END, || server.ended()).await);
+    // Only the first prepare reached the server.
+    let codes: Vec<u8> = server.commands()[setup..].iter().map(|c| c.code).collect();
+    assert_eq!(codes, vec![COM_STMT_PREPARE]);
+}
+
+#[tokio::test]
+async fn a_1295_from_the_execute_is_not_retried_as_text() {
+    // Only a refused prepare (nothing ran) is retried; a statement that was sent never is.
+    let (mut c, server, setup) = scripted(false, |cmd| match cmd.code {
+        COM_STMT_PREPARE => Some(prepare_ok(&[long_col("a")], 0)),
+        COM_STMT_EXECUTE => Some(packets(vec![err_packet(1295, "HY000", "not supported")])),
+        _ => None,
+    })
+    .await;
+    let e = c
+        .query(spec("SELECT a FROM t", false, 501))
+        .await
+        .unwrap_err();
+    assert_eq!(vendor(&e), Some(1295));
+    let codes: Vec<u8> = server.commands()[setup..].iter().map(|c| c.code).collect();
+    assert_eq!(codes, vec![COM_STMT_PREPARE, COM_STMT_EXECUTE, COM_PING]);
+}
+
+#[tokio::test]
+async fn a_connection_that_cannot_answer_net_write_timeout_fails_the_connect() {
+    let server = serve(Arc::new(|cmd: &Cmd| {
+        (cmd.code == COM_QUERY && cmd.text().contains("@@net_write_timeout"))
+            .then(|| vec![Step::Hangup])
+    }))
+    .await;
+    let e = match connect_conn(request(server.addr, false)).await {
+        Ok(_) => panic!("connected without an answer to SELECT @@net_write_timeout"),
+        Err(e) => e,
+    };
+    assert!(matches!(e.kind, RawErrorKind::Io(_)), "{:?}", e.kind);
+}
+
+#[tokio::test]
+async fn a_server_without_net_write_timeout_connects_without_suspension() {
+    let (c, _server, _) = scripted(false, |cmd| {
+        (cmd.code == COM_QUERY && cmd.text().contains("@@net_write_timeout")).then(|| {
+            packets(vec![err_packet(
+                1193,
+                "HY000",
+                "Unknown system variable 'net_write_timeout'",
+            )])
+        })
+    })
+    .await;
+    assert_eq!(
+        c.typed_caps(),
+        TypedCaps {
+            suspend: false,
+            binds: false,
+            close_needs_kill: true,
+            idle_bound: None,
+        }
+    );
 }
