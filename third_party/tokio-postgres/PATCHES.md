@@ -86,8 +86,10 @@ Every existing caller passes `Some(1)`, the value both encoders hard-coded, so t
 are byte-identical: `existing_query_path_is_byte_identical` (`crates/core/hacivat-driver-pg/
 tests/tp_patches.rs`) compares the bytes `query_raw` and `query_typed_raw` write with the 0.7.18
 encoding built by hand from the protocol (it fails when `encode`'s codes change, checked by a
-mutation run), and the M2b suites (`tests/wire.rs`, `tests/docker_exec.rs`, `tests/docker_pg.rs`)
-pass unchanged.
+mutation run), and `existing_bind_and_execute_typed_paths_are_byte_identical` does the same for
+the other two callers, `bind::bind` (through `Transaction::bind_raw`) and `execute_typed` (Task 12
+fix round 1), so all four call sites are covered. The M2b suites (`tests/wire.rs`,
+`tests/docker_exec.rs`, `tests/docker_pg.rs`) pass unchanged.
 
 ### Tests
 

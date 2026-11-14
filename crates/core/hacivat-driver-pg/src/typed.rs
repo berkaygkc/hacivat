@@ -24,24 +24,31 @@
 //! **Chunks.** The first chunk holds at most `first_rows` rows, later ones `chunk_rows`, each at
 //! most about `chunk_bytes` of decoded data (sealed at the row that reaches it). A statement
 //! without rows (DML, DDL, `SET`) is one result with an empty schema. `ResultEnd.rows_affected`
-//! is the count of the command tag (`INSERT 0 3` → 3; `CREATE TABLE` → none); a resumed
-//! portal's tag counts only its last Execute (PostgreSQL's rule), so the driver reports the
-//! result's own count in both the tag and `rows_affected`.
+//! is the count of the command tag (`INSERT 0 3` → 3; `CREATE TABLE` → none), except for a
+//! read: a result with columns under a `SELECT n`/`FETCH n` tag affected nothing, so it is
+//! `None` (its count is `ResultEnd.rows`; fix round 1). DML with `RETURNING` keeps its count, and
+//! so does a column-less `SELECT n` (`CREATE TABLE AS`). A resumed portal's tag counts only its
+//! last Execute (PostgreSQL's rule), so the driver rewrites it with the result's own count.
 //!
-//! **Closing early.** `close_query(Now)` closes the portal (`Close` + `Sync`), after reading the
-//! rest of an Execute already in flight. `Drain(d)` also runs one `Execute(4096)` within `d`:
-//! a result that completes meanwhile is `Completed` (with its total rows), else `Closed`. An
-//! unnamed portal's `Execute(0)` cannot be closed on the wire: its rest is always read to the
-//! end, undecoded (the session's protocol cancel, its overdue rung, is what ends it sooner).
-//! A server error while closing (a cancel; a portal the transaction already destroyed) still
-//! closes: the status shows it.
+//! **Closing early.** A named portal: `close_query(Now)` closes it (`Close` + `Sync`), after
+//! reading the rest of an Execute already in flight; `Drain(d)` also runs one `Execute(4096)`
+//! within `d`: a result that completes meanwhile is `Completed` (with its total rows), else
+//! `Closed`; a server error while closing (a cancel; a portal its transaction already
+//! destroyed) still closes, and the status shows it (Hacivat's own `BEGIN` or savepoint is
+//! rolled back anyway, R-M3-23). The unnamed portal's `Execute(0)` cannot be closed on the wire:
+//! its rest is always read to the end, undecoded, whatever `how` says, and the answer is the
+//! server's outcome (fix round 1): `Completed { rows: total }` (in autocommit its `Sync`
+//! committed it), or the server's error (a cancel's 57014, a runtime error: it did not apply).
+//! The session's protocol cancel, run alongside, is what ends it sooner.
 //!
 //! **Errors.** A server error waits for its `ReadyForQuery`, as `execute` does (at most 1 s;
 //! after that the connection is broken), so the status is exact when the call returns. Anything
-//! else on a typed stream (a malformed message, a `DataRow` whose field count is not the
-//! statement's, an unexpected message, a lost connection) breaks the connection: never used
-//! again (`Protocol` for the malformed ones). `COPY` is refused before sending; a `COPY … FROM
-//! STDIN` that slips past the check is answered by the wire observer (`CopyFail`) and is
+//! else on a typed stream breaks the connection: never used again. A `DataRow` whose field count
+//! is not the statement's, a field longer than its message, an unknown message in the stream
+//! answer `Protocol`; corruption below the stream (a frame the wire observer refuses, a
+//! malformed notice the connection task cannot parse) ends the connection first, so it answers
+//! `Io(ConnectionReset)`: fail-closed either way. `COPY` is refused before sending; a `COPY …
+//! FROM STDIN` that slips past the check is answered by the wire observer (`CopyFail`) and is
 //! `Unsupported` too.
 //!
 //! **Statements meanwhile.** Only while the query is `Suspended` may `execute`, `batch`,
@@ -347,6 +354,10 @@ async fn failed(wire: &WireState, e: &tokio_postgres::Error) -> RawError {
         }
         // Not the server's own error: the stream cannot be trusted any more.
         wire.mark_broken();
+        // `tokio_postgres::Error` has no public kind; its `Display` names `Kind::Parse` and
+        // `Kind::UnexpectedMessage` with these fixed strings (`src/error/mod.rs` of the vendored
+        // 0.7.18, without a cause suffix). A re-vendor must keep them, or this falls back to
+        // `pg_error`'s kind, still broken (fail-closed).
         let what = e.to_string();
         if what == "error parsing response from server" || what == "unexpected message from server"
         {
@@ -465,6 +476,11 @@ fn tag_count(tag: &str) -> Option<u64> {
     tag.rsplit(' ').next()?.parse().ok()
 }
 
+/// Whether a tag is a read's (`SELECT n`, `FETCH n`): its count is rows returned, not affected.
+fn is_read_tag(tag: &str) -> bool {
+    matches!(tag.split(' ').next(), Some("SELECT" | "FETCH"))
+}
+
 /// A resumed portal's tag with the result's own count in place of the last Execute's.
 fn retag(tag: &str, rows: u64) -> String {
     match tag.rsplit_once(' ') {
@@ -515,10 +531,21 @@ pub(crate) async fn next_event(
             }
             q.stage = Stage::Ended;
             let tag = cx.wire.last_tag();
-            let (rows_affected, command_tag) = if q.resumed {
-                (Some(q.rows), tag.map(|t| retag(&t, q.rows)))
+            // Fix round 1 (review I3): a result with columns under a `SELECT n`/`FETCH n` tag
+            // affected nothing (its count is `rows`); DML with `RETURNING` and a column-less
+            // `SELECT n` (`CREATE TABLE AS`, `SELECT INTO`) keep the tag's count.
+            let read = !q.plan.cols.is_empty() && tag.as_deref().is_some_and(is_read_tag);
+            let rows_affected = if read {
+                None
+            } else if q.resumed {
+                Some(q.rows)
             } else {
-                (tag.as_deref().map_or(affected, tag_count), tag)
+                tag.as_deref().map_or(affected, tag_count)
+            };
+            let command_tag = if q.resumed {
+                tag.map(|t| retag(&t, q.rows))
+            } else {
+                tag
             };
             Ok(QueryEvent::ResultEnd(ResultEnd {
                 rows: q.rows,
@@ -652,6 +679,7 @@ pub(crate) async fn close_query(
     // Rows read but not handed out are dropped with the query.
     q.builder = None;
     let delivered = q.delivered;
+    let unnamed = q.portal.is_none();
     let outcome = close_rest(cx.client, &mut q, how).await;
     let total = q.rows;
     // The portal's Close + Sync, then the statement's.
@@ -661,19 +689,25 @@ pub(crate) async fn close_query(
         Ok(false) => Ok(Closed::Closed { rows: delivered }),
         Err(e) => {
             let raw = failed(cx.wire, &e).await;
-            if cx.wire.is_broken() {
+            if cx.wire.is_broken() || unnamed {
+                // Fix round 1 (review I1): an `Execute(0)` that failed while its rest was read
+                // (a cancel's 57014, a runtime error) did not apply: its implicit transaction
+                // rolled back, or the user's failed. The caller must know, so it is the error
+                // (the connection stays usable; the status is exact after `failed`).
                 Err(raw)
             } else {
-                // The server ended the query with an error (a cancel, a portal already gone):
-                // closed all the same; the status shows the failure.
+                // A named portal's server error while closing (a cancel; a portal its
+                // transaction already destroyed): closed all the same; Hacivat's own `BEGIN` or
+                // savepoint around it is rolled back anyway (R-M3-23), and the status says so.
                 Ok(Closed::Closed { rows: delivered })
             }
         }
     }
 }
 
-/// Reads what `how` needs of `q` before it closes; `true` when the result completed while
-/// draining.
+/// Reads what `how` needs of `q` before it closes; `true` when the result completed: always
+/// for the unnamed portal once its rest is read (fix round 1, review I1: in autocommit its
+/// `Sync` committed it), while draining for a named one.
 async fn close_rest(
     client: &Client,
     q: &mut Open,
@@ -683,11 +717,15 @@ async fn close_rest(
         CloseHow::Drain(d) => Some(Instant::now() + d),
         CloseHow::Now | CloseHow::AfterKill(_) => None,
     };
+    if q.portal.is_none() {
+        // `Execute(0)`: read to the end, whatever `how` says; it ran to its end on the server.
+        if q.stage != Stage::Ended {
+            read_rest(q, None).await?;
+        }
+        return Ok(true);
+    }
     let rest = if q.stage == Stage::Ended {
         Rest::Completed
-    } else if q.portal.is_none() {
-        // `Execute(0)`: read to the end, whatever `how` says.
-        read_rest(q, None).await?
     } else if q.stage == Stage::Suspended {
         Rest::Suspended
     } else {

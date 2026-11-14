@@ -216,6 +216,11 @@ impl PgConn {
     }
 
     async fn tls_summary_inner(&self) -> TlsSummary {
+        // ## m3a-t12-pg-typed (fix round 1): while a typed query streams the server's answer
+        // would wait behind rows nobody reads; the handshake's own facts answer instead.
+        if !typed::allows_statements(&self.typed) {
+            return self.tls_summary_from(Vec::new());
+        }
         let row = first_row(
             &self.client,
             "SELECT ssl, version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
@@ -224,6 +229,11 @@ impl PgConn {
         .ok()
         .flatten()
         .unwrap_or_default();
+        self.tls_summary_from(row)
+    }
+
+    /// The TLS summary from `pg_stat_ssl`'s row (empty: this connection's handshake only).
+    fn tls_summary_from(&self, row: Vec<Option<String>>) -> TlsSummary {
         let cell = |i: usize| row.get(i).cloned().flatten();
         let server_ssl = cell(0).is_some_and(|v| v == "t");
         let local = self.local_tls.as_ref();
@@ -289,6 +299,10 @@ impl RawConn for PgConn {
 
     fn probe(&mut self) -> BoxFuture<'_, Vec<ProbeWarning>> {
         Box::pin(async move {
+            // ## m3a-t12-pg-typed (fix round 1): no server query while a typed query streams.
+            if !typed::allows_statements(&self.typed) {
+                return vec![];
+            }
             match in_recovery(&self.client).await {
                 Ok(Some(true)) => vec![ProbeWarning::Replica],
                 _ => vec![],

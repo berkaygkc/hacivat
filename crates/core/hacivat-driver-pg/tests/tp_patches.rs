@@ -807,7 +807,8 @@ async fn autocommit_non_suspendable_unit_runs_in_one_batch() {
     let QueryEvent::ResultEnd(end) = next(&mut conn).await else {
         panic!("ResultEnd");
     };
-    assert_eq!((end.rows, end.kept, end.rows_affected), (2, 2, Some(2)));
+    // A read affects nothing: its count is `rows` (fix round 1, review I3).
+    assert_eq!((end.rows, end.kept, end.rows_affected), (2, 2, None));
     assert_eq!(end.command_tag.as_deref(), Some("SELECT 2"));
     let QueryEvent::Done(done) = next(&mut conn).await else {
         panic!("Done");
@@ -947,8 +948,9 @@ async fn a_suspendable_query_in_a_transaction_suspends_and_resumes() {
     let QueryEvent::ResultEnd(end) = next(&mut conn).await else {
         panic!("ResultEnd");
     };
-    // PostgreSQL counts only the last Execute in its tag; the driver reports the result's.
-    assert_eq!((end.rows, end.kept, end.rows_affected), (3, 3, Some(3)));
+    // PostgreSQL counts only the last Execute in its tag; the driver reports the result's. A
+    // read affects nothing.
+    assert_eq!((end.rows, end.kept, end.rows_affected), (3, 3, None));
     assert_eq!(end.command_tag.as_deref(), Some("SELECT 3"));
     let QueryEvent::Done(done) = next(&mut conn).await else {
         panic!("Done");
@@ -1159,6 +1161,10 @@ async fn statements_wait_while_a_query_streams() {
     ] {
         assert_eq!(r.map(|e| e.kind), Some(RawErrorKind::Unsupported));
     }
+    // No error type to refuse with: the handshake's facts and no warnings, nothing sent (fix
+    // round 1; the server's next message below is the statement's Close).
+    assert!(!conn.tls_summary().await.encrypted);
+    assert!(conn.probe().await.is_empty());
     // The stream completes; then the statement closes and the connection is free.
     srv.send(&[command_complete("SELECT 0"), ready(b'I')].concat())
         .await;
@@ -1415,4 +1421,282 @@ async fn a_hostile_cell_is_an_error_cell_and_the_row_is_kept() {
     assert!(matches!(chunk.cell(0, 0).to_value(), Value::Error(_)));
     assert!(matches!(chunk.cell(0, 1).to_value(), Value::Opaque(_)));
     server.await.unwrap();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 1 (the Task 12 review).
+
+fn int_row(i: i32) -> Vec<u8> {
+    data_row(&[Some(&i.to_be_bytes())])
+}
+
+/// A non-suspendable `UPDATE … RETURNING a` (one int4 column) with one row delivered; the
+/// server sends `rest` once `go` fires, then answers the statement's Close with `status`.
+async fn closing_unnamed(
+    in_tx: bool,
+    rest: Vec<u8>,
+    status: u8,
+) -> (
+    PgConn,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Server>,
+) {
+    let (mut conn, mut srv) = if in_tx {
+        session_in_tx().await
+    } else {
+        session().await
+    };
+    let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+    let fields = [field("a", INT4)];
+    let before = if in_tx { b'T' } else { b'I' };
+    let server = tokio::spawn(async move {
+        srv.prepare(&fields, before).await;
+        srv.unnamed().await;
+        srv.send(&[frame(b'2', &[]), int_row(1)].concat()).await;
+        go_rx.await.unwrap();
+        srv.send(&rest).await;
+        srv.close(b'S', status).await;
+        srv
+    });
+    conn.query(spec("UPDATE t SET a = a RETURNING a", false, 1))
+        .await
+        .unwrap();
+    assert!(matches!(next(&mut conn).await, QueryEvent::ResultStart(_)));
+    assert!(matches!(next(&mut conn).await, QueryEvent::Rows(_)));
+    (conn, go_tx, server)
+}
+
+#[tokio::test]
+async fn closing_an_unnamed_portal_that_ran_to_its_end_is_completed() {
+    // Review I1: the statement ran to its end on the server (in autocommit its Sync committed
+    // it): `Completed` with the total rows, whatever `how` says.
+    for how in [CloseHow::Now, CloseHow::Drain(Duration::from_secs(10))] {
+        let rest = [
+            int_row(2),
+            int_row(3),
+            command_complete("UPDATE 3"),
+            ready(b'I'),
+        ]
+        .concat();
+        let (mut conn, go, server) = closing_unnamed(false, rest, b'I').await;
+        go.send(()).unwrap();
+        assert_eq!(
+            conn.close_query(how).await.unwrap(),
+            Closed::Completed { rows: 3 },
+            "{how:?}"
+        );
+        let mut srv = server.await.unwrap();
+        assert_eq!(conn.tx_status(), TxStatus::Idle);
+        let (ping, _) = tokio::join!(conn.ping(), srv.query("", b'I'));
+        ping.unwrap();
+        assert!(conn.wire_state().synced());
+    }
+}
+
+#[tokio::test]
+async fn a_server_error_while_closing_an_unnamed_portal_is_the_error() {
+    // Review I1: the statement failed while its rest was read (a cancel's 57014): it did not
+    // apply, so the close answers the server's error; the connection stays usable and the
+    // status is exact (autocommit: Idle; inside the user's transaction: Failed).
+    for (in_tx, status, want) in [
+        (false, b'I', TxStatus::Idle),
+        (true, b'E', TxStatus::Failed),
+    ] {
+        let rest = [int_row(2), error("57014"), ready(status)].concat();
+        let (mut conn, go, server) = closing_unnamed(in_tx, rest, status).await;
+        go.send(()).unwrap();
+        let e = conn.close_query(CloseHow::Now).await.unwrap_err();
+        assert_eq!(e.kind, RawErrorKind::Db);
+        assert_eq!(e.server.unwrap().sqlstate.as_deref(), Some("57014"));
+        let mut srv = server.await.unwrap();
+        assert_eq!(conn.tx_status(), want);
+        let (ping, _) = tokio::join!(conn.ping(), srv.query("", status));
+        ping.unwrap();
+        assert!(conn.wire_state().synced());
+        // Nothing is open any more.
+        assert_eq!(
+            conn.close_query(CloseHow::Now).await.unwrap(),
+            Closed::Closed { rows: 0 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_drain_that_runs_out_of_time_closes_the_portal() {
+    // Review M4: the drain's Execute(4096) is slow; at its deadline the rest is left to the
+    // connection task and the portal closes: `Closed` with the rows delivered.
+    let (mut conn, srv) = session_in_tx().await;
+    let (_stmt, portal, mut srv) = suspended(&mut conn, srv).await;
+    let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let e = srv.execute().await;
+        srv.sync().await;
+        // Half of the rest, then nothing until the client has given up.
+        srv.send(&int_and_text_row(3, "'c'")).await;
+        go_rx.await.unwrap();
+        srv.send(
+            &[
+                int_and_text_row(4, "'d'"),
+                command_complete("SELECT 2"),
+                ready(b'T'),
+            ]
+            .concat(),
+        )
+        .await;
+        let closed = srv.close(b'P', b'T').await;
+        srv.close(b'S', b'T').await;
+        (e, closed, srv)
+    });
+    assert_eq!(
+        conn.close_query(CloseHow::Drain(Duration::from_millis(100)))
+            .await
+            .unwrap(),
+        Closed::Closed { rows: 2 }
+    );
+    go_tx.send(()).unwrap();
+    let (e, closed, mut srv) = server.await.unwrap();
+    assert_eq!(
+        e,
+        Execute {
+            portal: portal.clone(),
+            max_rows: 4_096
+        }
+    );
+    assert_eq!(closed, portal);
+    let (ping, _) = tokio::join!(conn.ping(), srv.query("", b'T'));
+    ping.unwrap();
+    assert!(conn.wire_state().synced());
+    assert_eq!(conn.tx_status(), TxStatus::InTx);
+}
+
+#[tokio::test]
+async fn corruption_below_the_stream_ends_the_connection() {
+    // Review M2: a frame the wire observer refuses (a length below 4) and a notice the
+    // connection task cannot parse end the connection before the stream sees a message:
+    // `Io(ConnectionReset)`, broken (fail-closed, never `Protocol` here).
+    for hostile in [vec![b'D', 0, 0, 0, 2], frame(b'N', b"Mno terminator")] {
+        let (mut conn, mut srv) = session().await;
+        let fields = [field("a", INT4)];
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            srv.prepare(&fields, b'I').await;
+            srv.unnamed().await;
+            srv.send(&[frame(b'2', &[]), int_row(1)].concat()).await;
+            // In the middle of the stream, after the client read its first row.
+            go_rx.await.unwrap();
+            let mut script = hostile;
+            script.extend(command_complete("SELECT 1"));
+            script.extend(ready(b'I'));
+            srv.send(&script).await;
+            srv
+        });
+        conn.query(spec("SELECT a FROM t", false, 1)).await.unwrap();
+        assert!(matches!(next(&mut conn).await, QueryEvent::ResultStart(_)));
+        assert!(matches!(next(&mut conn).await, QueryEvent::Rows(_)));
+        go_tx.send(()).unwrap();
+        let e = conn.next_event().await.unwrap_err();
+        assert_eq!(e.kind, RawErrorKind::Io(io::ErrorKind::ConnectionReset));
+        let _srv = server.await.unwrap();
+        assert_eq!(conn.tx_status(), TxStatus::Failed, "never a stale Idle");
+        let again = conn.query(spec("SELECT 1", false, 501)).await.unwrap_err();
+        assert_eq!(again.kind, RawErrorKind::Io(io::ErrorKind::NotConnected));
+    }
+}
+
+/// A plain `tokio-postgres` client over a scripted server, signed in (for `Transaction`, which
+/// needs `&mut Client`).
+async fn raw_client() -> (tokio_postgres::Client, Server) {
+    let (client_io, mut server_io) = tokio::io::duplex(1 << 20);
+    let server = tokio::spawn(async move {
+        let len = server_io.read_u32().await.unwrap() as usize;
+        let mut startup = vec![0; len - 4];
+        server_io.read_exact(&mut startup).await.unwrap();
+        let mut key = 32i32.to_be_bytes().to_vec();
+        key.extend_from_slice(&1i32.to_be_bytes());
+        server_io
+            .write_all(
+                &[
+                    frame(b'R', &0i32.to_be_bytes()),
+                    frame(b'K', &key),
+                    ready(b'I'),
+                ]
+                .concat(),
+            )
+            .await
+            .unwrap();
+        Server { s: server_io }
+    });
+    let (client, connection) = tokio_postgres::Config::new()
+        .user("hv_test")
+        .dbname("hv_test")
+        .ssl_mode(tokio_postgres::config::SslMode::Disable)
+        .connect_raw(client_io, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    (client, server.await.unwrap())
+}
+
+/// The bytes 0.7.18's `bind::bind` writes (`Transaction::bind_raw`, no parameters): Bind into
+/// `portal` with every result column binary, then `Sync`; built from the protocol.
+fn golden_0_7_18_bind(portal: &str, statement: &str) -> Vec<u8> {
+    let mut bind = portal.as_bytes().to_vec();
+    bind.push(0);
+    bind.extend_from_slice(statement.as_bytes());
+    bind.push(0);
+    bind.extend_from_slice(&0i16.to_be_bytes());
+    bind.extend_from_slice(&0i16.to_be_bytes());
+    bind.extend_from_slice(&1i16.to_be_bytes());
+    bind.extend_from_slice(&1i16.to_be_bytes());
+    [frame(b'B', &bind), frame(b'S', &[])].concat()
+}
+
+#[tokio::test]
+async fn existing_bind_and_execute_typed_paths_are_byte_identical() {
+    // Review M6: the two other callers patch §1 touched, `bind::bind` (through
+    // `Transaction::bind_raw`) and `execute_typed`, against the 0.7.18 bytes.
+    let (mut client, mut srv) = raw_client().await;
+    let server = tokio::spawn(async move {
+        let wire = raw_frames(&mut srv, 5).await;
+        srv.send(
+            &[
+                frame(b'1', &[]),
+                frame(b'2', &[]),
+                frame(b'n', &[]),
+                command_complete("SELECT 1"),
+                ready(b'I'),
+            ]
+            .concat(),
+        )
+        .await;
+        (wire, srv)
+    });
+    client.execute_typed("SELECT 1", &[]).await.unwrap();
+    let (wire, mut srv) = server.await.unwrap();
+    assert_eq!(wire, golden_0_7_18_query_typed_raw(), "execute_typed");
+    let fields = [field("a", INT4)];
+    let server = tokio::spawn(async move {
+        assert_eq!(
+            srv.query("START TRANSACTION", b'T').await,
+            "START TRANSACTION"
+        );
+        let (statement, _) = srv.prepare(&fields, b'T').await;
+        let wire = raw_frames(&mut srv, 2).await;
+        srv.send(&[frame(b'2', &[]), ready(b'T')].concat()).await;
+        (statement, wire, srv)
+    });
+    let tx = client.transaction().await.unwrap();
+    let stmt = tx.prepare("SELECT a FROM t").await.unwrap();
+    let portal = tx.bind_raw(&stmt, no_params()).await.unwrap();
+    let (statement, wire, _srv) = server.await.unwrap();
+    // The portal's name comes from the process-wide counter: read it, then compare the rest.
+    let Msg::Bind(b) = parse_msg(b'B', &wire[5..wire.len() - 5]) else {
+        panic!("Bind first: {wire:?}");
+    };
+    assert!(b.portal.starts_with('p'), "{b:?}");
+    assert_eq!(wire, golden_0_7_18_bind(&b.portal, &statement), "bind_raw");
+    drop(portal);
+    drop(tx);
 }

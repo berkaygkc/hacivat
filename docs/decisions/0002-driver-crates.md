@@ -903,26 +903,53 @@ P5): the `RawConn` methods `typed_caps`, `query`, `next_event`, `fetch_more` and
   nonzero digit beyond it, a special with digits, a `jsonb` version other than 1, a time of day
   outside `0 ..= 24:00:00` or a zone of `i32::MIN` is a `Value::Error` cell with a `pg-*` code, and
   the row is kept; `±infinity` and `NaN` are `Special`; a timestamp past `i64` microseconds since
-  1970 is an exact exception. A `DataRow` whose field count is not the statement's, a field longer
-  than its message, any malformed or unexpected message: `RawErrorKind::Protocol`, and the
-  connection is broken (status `Failed`, never used again).
+  1970 is an exact exception; PostgreSQL 17's `±infinity` intervals (every field at its maximum,
+  or at its minimum) are `Special` (fix round 1). The connection is broken (status `Failed`, never
+  used again) by anything that is not the server's own error. A `DataRow` whose field count is
+  not the statement's, a field longer than its message, an unknown message in the stream:
+  `RawErrorKind::Protocol` (mapped from `tokio-postgres`'s fixed `Display` strings of
+  `Kind::Parse`/`Kind::UnexpectedMessage`, a dependency named at the mapping). **Corrected in fix
+  round 1:** corruption below the stream (a frame the wire observer refuses, a notice the
+  connection task cannot parse) ends the connection before the stream sees a message, so it
+  answers `Io(ConnectionReset)`, not `Protocol`; fail-closed either way
+  (`corruption_below_the_stream_ends_the_connection`).
 - **Statements while a query is open.** Only while it is `Suspended` (PostgreSQL's exception to
   one open query per connection, P5). While it streams, `execute`, `batch`, `ping`,
   `server_info`, `current_user` and `list_databases` answer `Unsupported`: their answer would
   queue behind rows nobody reads, a deadlock. `reset` needs no open query (its `CLOSE ALL` would
-  end the portal). `tls_summary` and `probe` (connect-time calls without an error to return) are
-  not guarded; the session never calls them on a connection with an open query.
+  end the portal). `tls_summary` and `probe` have no error to return: while a query streams they
+  send nothing and answer from the handshake (TLS facts) and with no warnings (fix round 1).
 - **Counts and tags.** `rows_affected` is the command tag's count (`INSERT 0 3` → 3; `CREATE
-  TABLE` → `None`; `tokio-postgres` would say `Some(0)`). A resumed portal's tag counts only its
-  last Execute (PostgreSQL's rule), so the driver reports the result's own count in the tag and
-  `rows_affected` (`SELECT 1200`). `QueryDone.warnings` counts the notices of SQLSTATE class 01
-  the query raised.
-- **Closing early.** `Now` closes the portal (`Close` + `Sync`, then the statement's) after
-  reading the rest of an Execute in flight; `Drain(d)` also runs one `Execute(4096)` within `d`
-  (`Completed { rows: total }` when the result ends meanwhile). An `Execute(0)` cannot be closed on
-  the wire: its rest is read to the end, undecoded, whatever `how` says; the session's protocol
-  cancel ends it sooner. A server error while closing (a cancel; a portal already destroyed by
-  `COMMIT`) still closes, and the status says so.
+  TABLE` → `None`; `tokio-postgres` would say `Some(0)`), except for a read (fix round 1): a
+  result with columns under a `SELECT n`/`FETCH n` tag affected nothing, so `None` (its count is
+  `ResultEnd.rows`), which is what `FakeDriver` reports by default and what Task 18's
+  `UpdateCount` rule needs. DML with `RETURNING` and a column-less `SELECT n` (`CREATE TABLE AS`,
+  `SELECT INTO`) keep the count. A resumed portal's tag counts only its last Execute
+  (PostgreSQL's rule), so the driver rewrites the tag with the result's own count (`SELECT
+  1200`). `QueryDone.warnings` counts the notices of SQLSTATE class 01 the query raised (a
+  statement run between two Executes drains its own; known gap).
+- **Closing early.** A named portal: `Now` closes it (`Close` + `Sync`, then the statement's)
+  after reading the rest of an Execute in flight; `Drain(d)` also runs one `Execute(4096)` within
+  `d` (`Completed { rows: total }` when the result ends meanwhile, `Closed` when the deadline
+  passes: the rest is left to the connection task and the Close queues behind it); a server error
+  while closing (a cancel; a portal its transaction already destroyed) still closes, the status
+  says so, and Hacivat's own `BEGIN` or savepoint is rolled back anyway (R-M3-23). The unnamed
+  portal's `Execute(0)` cannot be closed on the wire: its rest is read to the end, undecoded,
+  whatever `how` says, and **since fix round 1** the answer is the server's outcome:
+  `Completed { rows: total }` (in autocommit its `Sync` committed it), or the server's error as
+  `Err(Db)` (a cancel's 57014, a runtime error: it did not apply), with the connection usable and
+  the status exact. Rejected: `Closed` for both (round 0), which let a session report a committed
+  `UPDATE … RETURNING` as stopped. The session's protocol cancel, run alongside the close, ends a
+  slow one sooner (`closing_a_non_suspendable_query_reports_the_servers_outcome`, Docker).
+- **A portal its transaction ended** (`COMMIT`, `ROLLBACK`, `ROLLBACK TO` its own or an older
+  savepoint) is still the open, suspended query: `next_event` answers `Unsupported` without I/O;
+  `fetch_more` meets the server's 34000 (inside a transaction block that error fails it: `Failed`,
+  recovered by a `ROLLBACK TO`) and the query is gone; `close_query` closes it without an error
+  (`Closed { rows: delivered }`). Pinned on pg17 (`a_portal_its_transaction_ended_is_gone_as_the_fake_says`);
+  `FakeDriver` follows it since this round.
+- **`"char"` `''`** is the byte 0 in binary (`charsend`) and is kept as a U+0000 character (the
+  grid shows controls; copy keeps them); `pg_attribute.attidentity` and `attgenerated` read so.
+  Controller's ruling on review M1: kept, asserted in the golden table.
 - **`COPY`** is refused before sending when the first keyword (after whitespace and comments,
   block comments nested) is `COPY`. One that slips past (an obfuscation the check misses) is
   answered by the wire observer's `CopyFail` for `FROM STDIN` (`Unsupported`, the connection in
@@ -946,3 +973,13 @@ P5): the `RawConn` methods `typed_caps`, `query`, `next_event`, `fetch_more` and
   with `pg_cursors` checked, a portal inside a user transaction, drain, `COPY` refused with no
   message sent, a protocol cancel during `Execute`, DML/DDL counts, 5 MiB values truncated, a
   `SQL_ASCII` database). `synced()` is checked after a round trip on every path.
+- **Fix round 1 (the Task 12 review: 4 Important, 5 Minor folded in).** The unnamed portal's close
+  outcome; `±infinity` intervals; `rows_affected: None` for reads; `FakeDriver` fidelity (a named
+  exception for `hacivat-driver/src/fake.rs` and the suspension sentence of `typed.rs`: a PostgreSQL
+  batch that hits its limit exactly suspends even with no row left; a portal its transaction ended
+  stays the open query as above; closing an `Execute(0)` reads it to the end, `Completed` or the
+  error its rest meets; `fetch_more(0)` is a chunk's worth), and one Task 1b session test's
+  `InTx`-after-34000 assertion corrected to `Failed` (the server's answer); `tls_summary`/`probe`
+  while streaming; the `Drain` deadline path tested; the byte-identity golden extended to
+  `bind::bind` (`Transaction::bind_raw`) and `execute_typed`; this section's `Protocol` claim
+  corrected.

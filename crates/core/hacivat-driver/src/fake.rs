@@ -41,6 +41,20 @@
 //! every statement, typed call and reset in order. `tracks_transactions` makes connections set
 //! their status from the leading keywords of `execute`/`batch` text (`BEGIN`, `COMMIT`, ...)
 //! when no script entry says otherwise.
+//!
+//! M3a (Task 12 fix round 1, the PostgreSQL driver's behaviour, pinned by its Docker tests):
+//! - a PostgreSQL batch that returns exactly its limit suspends even when no row is left; the
+//!   next `fetch_more` ends the result with no `Rows`; `fetch_more(0)` asks for `chunk_rows`;
+//! - a suspended PostgreSQL query whose transaction ended (`COMMIT`, `ROLLBACK`, `ROLLBACK TO`
+//!   the portal's own or an older savepoint) stays the open query: `next_event` answers
+//!   `Unsupported`, `fetch_more` answers 34000 once (failing a transaction block) and ends it,
+//!   `close_query` answers `Closed { rows: sent }` (a drain's Execute meets the 34000 and fails
+//!   a block), and a new `query` answers `Unsupported` until then;
+//! - closing a PostgreSQL query that cannot suspend (`Execute(0)`) reads it to the end:
+//!   `Completed { rows: total }`, or the error its rest meets (a `fail_after` inside it, a
+//!   latched cancel), which ends it and fails a transaction block;
+//! - a scripted result reports `rows_affected` and `command_tag` as scripted (`None` by
+//!   default), which is what the PostgreSQL driver reports for a read (`rows_affected: None`).
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -321,6 +335,10 @@ struct TypedRun {
     /// made later, destroys the portal (PostgreSQL closes portals created inside a rolled-back
     /// savepoint).
     savepoint_depth: usize,
+    // ## m3a-t12-pg-typed (fix round 1, review I4b)
+    /// PostgreSQL ended the transaction under this suspended portal: the run is kept (still the
+    /// connection's one open query, as the real driver keeps it) but the server has no portal.
+    gone: bool,
 }
 
 /// The result set a typed query is delivering.
@@ -362,6 +380,7 @@ impl TypedRun {
             sent: 0,
             chunks: 0,
             script,
+            gone: false,
         }
     }
 
@@ -839,7 +858,6 @@ impl Driver for FakeDriver {
                 .typed_caps
                 .unwrap_or_else(|| default_typed_caps(self.descriptor.kind)),
             typed: None,
-            portal_gone: false,
             savepoints: Vec::new(),
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
@@ -934,9 +952,6 @@ struct FakeConn {
     tracks_tx: bool,
     caps: TypedCaps,
     typed: Option<TypedRun>,
-    /// PostgreSQL ended the transaction under a suspended portal (fix round 1): the portal is
-    /// gone, so `fetch_more`/`next_event` answer 34000 until a `close_query` or a new `query`.
-    portal_gone: bool,
     /// The open savepoints, oldest first, when tracking transactions (round 2).
     savepoints: Vec<String>,
 }
@@ -1016,14 +1031,16 @@ impl FakeConn {
                 self.savepoints.clear();
             }
             // Fix round 1: a PostgreSQL portal does not outlive its transaction; round 2: nor a
-            // savepoint it was opened inside that is rolled back.
+            // savepoint it was opened inside that is rolled back. Task 12 fix round 1 (review
+            // I4b): the suspended run stays open, as the real driver keeps its query; only the
+            // server's portal is gone.
+            let tx = self.tx;
             if pg_wire(self.kind)
-                && let Some(run) = &self.typed
-                && (self.tx == TxStatus::Idle
+                && let Some(run) = self.typed.as_mut()
+                && (tx == TxStatus::Idle
                     || rolled_back_to.is_some_and(|depth| run.savepoint_depth > depth))
             {
-                self.end_typed();
-                self.portal_gone = true;
+                run.gone = true;
             }
             result
         })
@@ -1424,7 +1441,6 @@ impl FakeConn {
         if pg_wire(self.kind) && self.tx == TxStatus::Failed {
             return Err(in_failed_transaction());
         }
-        self.portal_gone = false;
         // P5: a portal outside a transaction block would end at its Sync.
         if spec.suspendable && pg_wire(self.kind) && self.tx == TxStatus::Idle {
             return Err(unsupported());
@@ -1455,12 +1471,21 @@ impl FakeConn {
     /// `fetch_more`'s effect: a suspended run resumes for `rows` more rows.
     fn resume_typed(&mut self, rows: u32) -> Result<(), RawError> {
         self.alive()?;
+        // ## m3a-t12-pg-typed (fix round 1, review I4b): the Execute on a portal its transaction
+        // destroyed is the server's 34000, once; inside a transaction block (a `ROLLBACK TO`
+        // case) that error fails the transaction; nothing is open afterwards.
+        if self.typed.as_ref().is_some_and(|run| run.gone) {
+            return Err(self.fail_typed(portal_does_not_exist()));
+        }
         match self.typed.as_mut() {
             Some(run) if run.suspended => {
                 run.suspended = false;
-                run.budget = Some(u64::from(rows));
+                // Review I4e: 0 asks for a chunk's worth, as the PostgreSQL driver does.
+                run.budget = Some(match rows {
+                    0 => run.chunk_rows,
+                    n => u64::from(n),
+                });
             }
-            None if self.portal_gone => return Err(portal_does_not_exist()),
             _ => return Err(unsupported()),
         }
         self.cancel.begin();
@@ -1469,8 +1494,8 @@ impl FakeConn {
 
     async fn next_typed_event(&mut self) -> Result<QueryEvent, RawError> {
         let (ignores, never_pending, delay) = match self.typed.as_ref() {
-            None if self.portal_gone => return Err(portal_does_not_exist()),
             None => return Err(unsupported()),
+            // Also a run whose portal is gone: no I/O until `fetch_more` or `close_query`.
             Some(run) if run.suspended => return Err(unsupported()),
             Some(run) => {
                 let delay = if !run.started {
@@ -1507,6 +1532,7 @@ impl FakeConn {
 
     /// The open run's next event, without waiting.
     fn step_typed(&mut self) -> Result<QueryEvent, RawError> {
+        let pg = pg_wire(self.kind);
         let Some(run) = self.typed.as_mut() else {
             return Err(unsupported());
         };
@@ -1535,6 +1561,14 @@ impl FakeConn {
                 skipped_result_sets: skipped,
             }));
         };
+        // ## m3a-t12-pg-typed (fix round 1, review I4a): a PostgreSQL Execute that returned
+        // exactly its limit ends in `PortalSuspended`, even when no row is left; the next
+        // `fetch_more` then ends the result with no `Rows`.
+        if pg && run.budget == Some(0) {
+            run.suspended = true;
+            self.cancel.running.store(false, Ordering::SeqCst);
+            return Ok(QueryEvent::Suspended);
+        }
         if open.pos == open.total {
             let end = ResultEnd {
                 rows: open.total,
@@ -1583,11 +1617,44 @@ impl FakeConn {
     /// `close_query`'s effect (the module docs).
     fn close_typed(&mut self, how: CloseHow) -> Result<Closed, RawError> {
         self.alive()?;
-        self.portal_gone = false;
         let Some(run) = self.typed.as_ref() else {
             return Ok(Closed::Closed { rows: 0 });
         };
         let sent = run.sent;
+        // ## m3a-t12-pg-typed (fix round 1, review I4b): closing a portal its transaction
+        // destroyed is no error (PostgreSQL's Close of a missing portal); a drain's Execute meets
+        // the server's 34000, which fails a transaction block.
+        if run.gone {
+            if matches!(how, CloseHow::Drain(_)) {
+                let _ = self.fail_typed(portal_does_not_exist());
+            } else {
+                self.end_typed();
+            }
+            return Ok(Closed::Closed { rows: sent });
+        }
+        // Review I4d: a PostgreSQL `Execute(0)` (a run that cannot suspend) cannot be cut on the
+        // wire: its rest is read to the end, and the answer is the server's outcome, the
+        // completed result or the error it meets (a scripted failure, a latched cancel), which
+        // fails a transaction block.
+        if pg_wire(self.kind) && run.budget.is_none() {
+            let total = sent.saturating_add(run.remaining());
+            let ignores = self.ignores_cancel || run.script.ignores_cancel;
+            let failure = match &run.script.fail_after {
+                Some((n, err)) if *n < total => Some(err.clone()),
+                _ if !ignores && self.cancel.latched.swap(false, Ordering::SeqCst) => {
+                    Some(cancelled_error())
+                }
+                _ => None,
+            };
+            if let Some(err) = failure {
+                return Err(self.fail_typed(err));
+            }
+            if let Some(tx) = run.script.tx_after {
+                self.tx = tx;
+            }
+            self.end_typed();
+            return Ok(Closed::Completed { rows: total });
+        }
         let kill = Closed::NeedsServerKill {
             thread_id: self.backend.unwrap_or(0),
         };
@@ -1920,5 +1987,263 @@ mod tests {
                 .unwrap();
             assert_eq!(read.rows, [vec![Some("t".to_string())]], "{kind:?}");
         }
+    }
+}
+
+// ## m3a-t12-pg-typed (fix round 1): the fake follows the PostgreSQL driver (review I4a-e).
+#[cfg(test)]
+mod pg_typed_tests {
+    use super::*;
+
+    fn request() -> DriverConnect {
+        DriverConnect {
+            endpoint: Endpoint::File {
+                path: PathBuf::from("t12.db"),
+                create_if_missing: false,
+                read_only: false,
+            },
+            tls: None,
+            user: Some("hv_t12".into()),
+            password: None,
+            database: None,
+            application_name: "Hacivat".into(),
+            read_only: false,
+            options: vec![],
+            connect_timeout: Duration::from_secs(15),
+            events: Arc::new(|_| {}),
+            insecure_auth: InsecureAuth::default(),
+        }
+    }
+
+    fn id_cell(row: u64, _: usize) -> Value {
+        Value::Int(row as i64)
+    }
+
+    fn select(count: u64) -> FakeQuery {
+        FakeQuery {
+            prefix: "SELECT",
+            sets: vec![FakeResultSet {
+                columns: vec![(
+                    "id",
+                    LogicalType::Int {
+                        bits: 64,
+                        signed: true,
+                    },
+                )],
+                rows: FakeRows::Generated {
+                    count,
+                    cell: id_cell,
+                },
+            }],
+            ..FakeQuery::default()
+        }
+    }
+
+    fn spec(sql: &str, suspendable: bool) -> QuerySpec<'_> {
+        QuerySpec {
+            sql,
+            binds: &[],
+            protocol: Protocol::Extended,
+            suspendable,
+            first_rows: 501,
+            chunk_rows: 100,
+            chunk_bytes: 4 << 20,
+            cell_cap: 1 << 20,
+            max_result_sets: 1,
+        }
+    }
+
+    async fn pg(queries: Vec<FakeQuery>) -> Box<dyn RawConn> {
+        FakeDriver::new(DbmsKind::Postgres)
+            .tracks_transactions()
+            .queries(queries)
+            .connect(request())
+            .await
+            .unwrap()
+    }
+
+    fn rows_of(e: &QueryEvent) -> u32 {
+        match e {
+            QueryEvent::Rows(c) => c.rows(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn sqlstate(e: &RawError) -> Option<&str> {
+        e.server.as_ref().and_then(|s| s.sqlstate.as_deref())
+    }
+
+    /// `ResultStart`, the first 501 rows, then `Suspended`.
+    async fn suspend(c: &mut Box<dyn RawConn>) {
+        c.query(spec("SELECT * FROM t", true)).await.unwrap();
+        assert!(matches!(
+            c.next_event().await.unwrap(),
+            QueryEvent::ResultStart(_)
+        ));
+        assert_eq!(rows_of(&c.next_event().await.unwrap()), 501);
+        assert_eq!(c.next_event().await.unwrap(), QueryEvent::Suspended);
+    }
+
+    #[tokio::test]
+    async fn a_batch_that_returns_exactly_its_limit_suspends() {
+        // Review I4a: 501 rows with `first_rows` 501, as PostgreSQL's Execute(501) answers.
+        let mut c = pg(vec![select(501)]).await;
+        c.batch("BEGIN").await.unwrap();
+        suspend(&mut c).await;
+        c.fetch_more(100).await.unwrap();
+        match c.next_event().await.unwrap() {
+            QueryEvent::ResultEnd(end) => assert_eq!((end.rows, end.kept), (501, 501)),
+            other => panic!("no Rows after an exact limit: {other:?}"),
+        }
+        assert!(matches!(c.next_event().await.unwrap(), QueryEvent::Done(_)));
+    }
+
+    #[tokio::test]
+    async fn fetch_more_of_zero_asks_for_a_chunk() {
+        // Review I4e: the PostgreSQL driver fetches `chunk_rows`; 0 never suspends at once.
+        let mut c = pg(vec![select(10_000)]).await;
+        c.batch("BEGIN").await.unwrap();
+        suspend(&mut c).await;
+        c.fetch_more(0).await.unwrap();
+        assert_eq!(rows_of(&c.next_event().await.unwrap()), 100);
+        assert_eq!(c.next_event().await.unwrap(), QueryEvent::Suspended);
+    }
+
+    #[tokio::test]
+    async fn a_portal_its_commit_destroyed_is_still_the_open_query() {
+        // Review I4b, as the PostgreSQL driver's Docker test pins it.
+        let mut c = pg(vec![select(10_000), select(10)]).await;
+        c.batch("BEGIN").await.unwrap();
+        suspend(&mut c).await;
+        c.batch("COMMIT").await.unwrap();
+        assert_eq!(c.tx_status(), TxStatus::Idle);
+        assert_eq!(
+            c.next_event().await.unwrap_err().kind,
+            RawErrorKind::Unsupported,
+            "no I/O on a suspended query"
+        );
+        assert_eq!(
+            c.query(spec("SELECT 1", false)).await.unwrap_err().kind,
+            RawErrorKind::Unsupported,
+            "still one open query"
+        );
+        let e = c.fetch_more(10).await.unwrap_err();
+        assert_eq!(sqlstate(&e), Some("34000"));
+        assert_eq!(c.tx_status(), TxStatus::Idle);
+        // Then nothing is open.
+        for e in [
+            c.next_event().await.unwrap_err(),
+            c.fetch_more(10).await.unwrap_err(),
+        ] {
+            assert_eq!(e.kind, RawErrorKind::Unsupported);
+        }
+        assert_eq!(
+            c.close_query(CloseHow::Now).await.unwrap(),
+            Closed::Closed { rows: 0 }
+        );
+        c.query(spec("SELECT 1", false)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_dead_portal_closes_without_an_error_with_its_rows() {
+        let mut c = pg(vec![select(10_000)]).await;
+        c.batch("BEGIN").await.unwrap();
+        suspend(&mut c).await;
+        c.batch("COMMIT").await.unwrap();
+        assert_eq!(
+            c.close_query(CloseHow::Now).await.unwrap(),
+            Closed::Closed { rows: 501 }
+        );
+        assert_eq!(c.tx_status(), TxStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn an_execute_on_a_portal_rolled_back_to_fails_the_block() {
+        // Review I4b: inside a transaction block the 34000 aborts the transaction (as on the
+        // server); a ROLLBACK TO recovers it.
+        let mut c = pg(vec![select(10_000), select(10_000)]).await;
+        c.batch("BEGIN").await.unwrap();
+        c.batch("SAVEPOINT hv_cursor").await.unwrap();
+        suspend(&mut c).await;
+        c.batch("ROLLBACK TO SAVEPOINT hv_cursor").await.unwrap();
+        assert_eq!(c.tx_status(), TxStatus::InTx);
+        let e = c.fetch_more(10).await.unwrap_err();
+        assert_eq!(sqlstate(&e), Some("34000"));
+        assert_eq!(c.tx_status(), TxStatus::Failed);
+        c.batch("ROLLBACK TO SAVEPOINT hv_cursor").await.unwrap();
+        assert_eq!(c.tx_status(), TxStatus::InTx);
+        // A drain's Execute meets the same 34000.
+        suspend(&mut c).await;
+        c.batch("ROLLBACK TO SAVEPOINT hv_cursor").await.unwrap();
+        assert_eq!(
+            c.close_query(CloseHow::Drain(Duration::from_millis(250)))
+                .await
+                .unwrap(),
+            Closed::Closed { rows: 501 }
+        );
+        assert_eq!(c.tx_status(), TxStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn closing_an_execute0_reads_it_to_the_end() {
+        // Review I4d: a non-suspendable PostgreSQL run is `Completed` with its total rows,
+        // however much is left and whatever `how` says.
+        for how in [
+            CloseHow::Now,
+            CloseHow::Drain(Duration::from_millis(250)),
+            CloseHow::AfterKill(Duration::from_secs(1)),
+        ] {
+            let mut c = pg(vec![select(50_000)]).await;
+            c.query(spec("SELECT * FROM t", false)).await.unwrap();
+            c.next_event().await.unwrap();
+            assert_eq!(rows_of(&c.next_event().await.unwrap()), 501);
+            assert_eq!(
+                c.close_query(how).await.unwrap(),
+                Closed::Completed { rows: 50_000 },
+                "{how:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn closing_an_execute0_meets_the_error_of_its_rest() {
+        // Review I4d: an error inside the rest (a runtime error, a cancel) is the close's
+        // answer, and it fails a transaction block.
+        let failure = pg_error("22012", "division by zero");
+        let mut c = pg(vec![FakeQuery {
+            fail_after: Some((10_000, failure.clone())),
+            ..select(50_000)
+        }])
+        .await;
+        c.batch("BEGIN").await.unwrap();
+        c.query(spec("SELECT * FROM t", false)).await.unwrap();
+        c.next_event().await.unwrap();
+        c.next_event().await.unwrap();
+        assert_eq!(c.close_query(CloseHow::Now).await.unwrap_err(), failure);
+        assert_eq!(c.tx_status(), TxStatus::Failed);
+        // A cancel sent while it streamed.
+        let mut c = pg(vec![select(50_000)]).await;
+        let cancel = c.cancel_handle().unwrap();
+        c.query(spec("SELECT * FROM t", false)).await.unwrap();
+        c.next_event().await.unwrap();
+        c.next_event().await.unwrap();
+        cancel.cancel().await.unwrap();
+        assert_eq!(
+            c.close_query(CloseHow::Now).await.unwrap_err().kind,
+            RawErrorKind::Cancelled
+        );
+        assert_eq!(c.tx_status(), TxStatus::Idle);
+        // The rest ends before the scripted failure: completed.
+        let mut c = pg(vec![FakeQuery {
+            fail_after: Some((50_000, failure)),
+            ..select(50_000)
+        }])
+        .await;
+        c.query(spec("SELECT * FROM t", false)).await.unwrap();
+        c.next_event().await.unwrap();
+        assert_eq!(
+            c.close_query(CloseHow::Now).await.unwrap(),
+            Closed::Completed { rows: 50_000 }
+        );
     }
 }

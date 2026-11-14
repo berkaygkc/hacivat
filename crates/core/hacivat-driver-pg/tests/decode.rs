@@ -820,6 +820,61 @@ fn logical_types_and_buffers_follow_the_type_modifier() {
     assert_eq!(buf_kind_for(&Type::INTERVAL, NO_MOD), BufKind::Values);
 }
 
+/// A binary `interval`: microseconds, days, months.
+fn interval_bytes(micros: i64, days: i32, months: i32) -> Vec<u8> {
+    let mut b = be64(micros);
+    b.extend(be32(days));
+    b.extend(be32(months));
+    b
+}
+
+#[test]
+fn infinite_intervals_are_special() {
+    // PostgreSQL 17+: `infinity` is every field at its maximum (INTERVAL_NOEND), `-infinity`
+    // every field at its minimum (fix round 1, review I2).
+    let cases = [
+        (
+            interval_bytes(i64::MAX, i32::MAX, i32::MAX),
+            Value::Special(SpecialVal::PosInfinity),
+        ),
+        (
+            interval_bytes(i64::MIN, i32::MIN, i32::MIN),
+            Value::Special(SpecialVal::NegInfinity),
+        ),
+        // Anything short of all three is a finite interval, however large.
+        (
+            interval_bytes(i64::MAX, i32::MAX, 0),
+            Value::Interval {
+                months: 0,
+                days: i32::MAX,
+                micros: i64::MAX,
+            },
+        ),
+        (
+            interval_bytes(i64::MIN, i32::MIN, i32::MAX),
+            Value::Interval {
+                months: i32::MAX,
+                days: i32::MIN,
+                micros: i64::MIN,
+            },
+        ),
+    ];
+    for (raw, want) in cases {
+        assert_eq!(decode_cell(&Type::INTERVAL, NO_MOD, Some(&raw), CAP), want);
+    }
+}
+
+#[test]
+fn an_empty_char_is_its_nul_byte() {
+    // `"char"` `''` (`pg_attribute.attidentity` on most columns) is the byte 0 in binary
+    // (`charsend`); it is kept as sent, a U+0000 character the grid shows as a control (review
+    // M1, kept by the controller's ruling; ADR 0002).
+    assert_eq!(
+        decode_cell(&Type::CHAR, NO_MOD, Some(&[0u8]), CAP),
+        Value::Text("\0".into())
+    );
+}
+
 #[test]
 fn values_outside_a_dec64_column_stay_exact() {
     // numeric(10,2) holds 2-scale mantissas inline; a special or a big value is an exact

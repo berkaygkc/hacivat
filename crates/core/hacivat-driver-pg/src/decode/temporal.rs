@@ -3,9 +3,10 @@
 //!
 //! PostgreSQL counts from 2000-01-01; the buffers from 1970-01-01, and the `try_*` constructors
 //! of `hacivat_values` shift exactly. The `±infinity` sentinels (`i32::MAX`/`i32::MIN` days,
-//! `i64::MAX`/`i64::MIN` microseconds) become `SpecialVal` first. A timestamp past `i64`
-//! microseconds since 1970 (about 292277 AD; PostgreSQL goes to 294276 AD) is kept exactly as a
-//! whole value, an exception of its column. A time of day outside `0 ..= 24:00:00` is an
+//! `i64::MAX`/`i64::MIN` microseconds) become `SpecialVal` first, and so do PostgreSQL 17's
+//! infinite `interval`s (every field at its maximum, or every field at its minimum). A
+//! timestamp past `i64` microseconds since 1970 (about 292277 AD; PostgreSQL goes to 294276 AD)
+//! is kept exactly as a whole value, an exception of its column. A time of day outside `0 ..= 24:00:00` is an
 //! `Error` cell (the chunk builder's range check, or here for `timetz`).
 
 use hacivat_values::{DateVal, SpecialVal, TsVal, Value, temporal::try_timetz_from_pg};
@@ -87,7 +88,10 @@ pub fn timestamp(raw: &[u8], tz: bool) -> Decoded<'_> {
     }
 }
 
-/// `interval`: microseconds (i64), days (i32), months (i32), kept as they are.
+/// `interval`: microseconds (i64), days (i32), months (i32), kept as they are. PostgreSQL 17's
+/// `±infinity` (all three fields at their maximum, or all at their minimum: `INTERVAL_NOEND`,
+/// `INTERVAL_NOBEGIN`) is a `SpecialVal` (fix round 1, review I2); any other combination is a
+/// finite interval, however large.
 pub fn interval(raw: &[u8]) -> Decoded<'_> {
     let Ok(b) = <[u8; 16]>::try_from(raw) else {
         return bad_length("interval", raw.len(), 16);
@@ -95,6 +99,11 @@ pub fn interval(raw: &[u8]) -> Decoded<'_> {
     let micros = i64::from_be_bytes(b[..8].try_into().unwrap_or_default());
     let days = i32::from_be_bytes(b[8..12].try_into().unwrap_or_default());
     let months = i32::from_be_bytes(b[12..].try_into().unwrap_or_default());
+    match (micros, days, months) {
+        (i64::MAX, i32::MAX, i32::MAX) => return special(true),
+        (i64::MIN, i32::MIN, i32::MIN) => return special(false),
+        _ => {}
+    }
     Decoded::Value(Value::Interval {
         months,
         days,

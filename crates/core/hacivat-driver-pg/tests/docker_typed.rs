@@ -295,7 +295,8 @@ async fn type_golden_table_hv_types() {
             other => panic!("{id}: {other:?}"),
         }
         assert_eq!(r.rows(), 3, "{id}");
-        assert_eq!(r.end.rows_affected, Some(3), "{id}");
+        // A read affects nothing; its count is the rows (fix round 1, review I3).
+        assert_eq!(r.end.rows_affected, None, "{id}");
         assert_eq!(r.end.command_tag.as_deref(), Some("SELECT 3"), "{id}");
         assert_eq!(r.done.tx, TxStatus::Idle, "{id}");
 
@@ -386,7 +387,9 @@ async fn type_golden_table_hv_types() {
             }
         }
 
-        // Row 1: the special values.
+        // Row 1: the special values. `"char"` `''` is its byte 0 in binary, kept as U+0000
+        // (review M1; ADR 0002).
+        assert_eq!(r.cell(1, at("ch")), Value::Text("\0".into()), "{id}");
         assert!(
             matches!(r.cell(1, at("f4")), Value::F32(v) if v.is_nan()),
             "{id}"
@@ -637,7 +640,7 @@ async fn portal_inside_a_user_transaction_keeps_in_tx() {
         }
     };
     assert_eq!(rows, 1_200);
-    assert_eq!((end.rows, end.rows_affected), (1_200, Some(1_200)));
+    assert_eq!((end.rows, end.rows_affected), (1_200, None));
     assert_eq!(end.command_tag.as_deref(), Some("SELECT 1200"));
     let QueryEvent::Done(done) = c.next_event().await.unwrap() else {
         panic!("Done");
@@ -805,6 +808,221 @@ async fn dml_and_ddl_report_one_empty_result() {
     .await;
     assert_eq!((r.rows(), r.end.rows_affected), (3, Some(3)));
     assert_eq!(r.end.command_tag.as_deref(), Some("UPDATE 3"));
+    // A column-less `SELECT n` (`CREATE TABLE AS`) keeps its count; a read does not.
+    let r = run(
+        &mut c,
+        spec(
+            "CREATE TEMP TABLE hv_t12_dml_copy AS SELECT * FROM hv_t12_dml",
+            false,
+            501,
+        ),
+    )
+    .await;
+    assert!(r.schema.columns.is_empty());
+    assert_eq!(r.end.rows_affected, Some(3));
+    assert_eq!(r.end.command_tag.as_deref(), Some("SELECT 3"));
+    let r = run(&mut c, spec("SELECT a FROM hv_t12_dml_copy", false, 501)).await;
+    assert_eq!((r.rows(), r.end.rows_affected), (3, None));
+    assert_synced(&mut c).await;
+    Box::new(c).close().await;
+}
+
+#[tokio::test]
+#[ignore = "docker"]
+async fn closing_a_non_suspendable_query_reports_the_servers_outcome() {
+    // Review I1: an `Execute(0)` cannot be cut on the wire. Run to its end, it is `Completed`
+    // (in autocommit its Sync committed it); cancelled while its rest is read (the session's
+    // cancel alongside the close), it is the server's 57014 and did not apply.
+    let Some(t) = require_target("pg17") else {
+        return;
+    };
+    let mut c = pg_on(&t).await;
+    c.batch(
+        "CREATE TEMP TABLE hv_t12_close(a int); \
+         INSERT INTO hv_t12_close SELECT generate_series(1, 3)",
+    )
+    .await
+    .unwrap();
+    c.query(spec(
+        "UPDATE hv_t12_close SET a = a + 10 RETURNING a",
+        false,
+        1,
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        c.next_event().await.unwrap(),
+        QueryEvent::ResultStart(_)
+    ));
+    assert!(matches!(c.next_event().await.unwrap(), QueryEvent::Rows(_)));
+    assert_eq!(
+        c.close_query(CloseHow::Now).await.unwrap(),
+        Closed::Completed { rows: 3 }
+    );
+    assert_eq!(c.tx_status(), TxStatus::Idle);
+    assert_eq!(
+        scalar(&mut c, "SELECT sum(a) FROM hv_t12_close")
+            .await
+            .as_deref(),
+        Some("36"),
+        "the UPDATE applied"
+    );
+    // A slow statement, cancelled while the close reads its rest.
+    let mut side = pg_on(&t).await;
+    let pid = c.backend_id().unwrap();
+    let cancel = c.cancel_handle().unwrap();
+    c.query(spec(
+        "UPDATE hv_t12_close SET a = a + 100 RETURNING a, pg_sleep(60)",
+        false,
+        1,
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        c.next_event().await.unwrap(),
+        QueryEvent::ResultStart(_)
+    ));
+    let (closed, cancelled) = tokio::join!(c.close_query(CloseHow::Now), async {
+        wait_until_sleeping(&mut side, pid).await;
+        cancel.cancel().await
+    });
+    assert!(cancelled.is_ok(), "{cancelled:?}");
+    let e = closed.unwrap_err();
+    assert_eq!(e.kind, RawErrorKind::Db);
+    assert_eq!(e.server.unwrap().sqlstate.as_deref(), Some("57014"));
+    assert_eq!(c.tx_status(), TxStatus::Idle);
+    assert_eq!(
+        scalar(&mut c, "SELECT sum(a) FROM hv_t12_close")
+            .await
+            .as_deref(),
+        Some("36"),
+        "the cancelled UPDATE did not apply"
+    );
+    assert_synced(&mut c).await;
+    Box::new(c).close().await;
+    Box::new(side).close().await;
+}
+
+#[tokio::test]
+#[ignore = "docker"]
+async fn infinite_intervals_are_special_on_pg17_and_later() {
+    // Review I2: PostgreSQL 17 added `±infinity` intervals.
+    let newer: Vec<DockerTarget> = version_targets()
+        .into_iter()
+        .filter(|t| t.major.parse::<u32>().is_ok_and(|m| m >= 17))
+        .collect();
+    assert!(
+        !newer.is_empty(),
+        "no PostgreSQL 17+ target in the active set"
+    );
+    for t in newer {
+        let mut c = pg_on(&t).await;
+        let r = run(
+            &mut c,
+            spec(
+                "SELECT 'infinity'::interval, '-infinity'::interval, '1 day'::interval",
+                false,
+                501,
+            ),
+        )
+        .await;
+        assert_eq!(
+            r.cell(0, 0),
+            Value::Special(SpecialVal::PosInfinity),
+            "{}",
+            t.id
+        );
+        assert_eq!(
+            r.cell(0, 1),
+            Value::Special(SpecialVal::NegInfinity),
+            "{}",
+            t.id
+        );
+        assert_eq!(
+            r.cell(0, 2),
+            Value::Interval {
+                months: 0,
+                days: 1,
+                micros: 0
+            },
+            "{}",
+            t.id
+        );
+        assert_synced(&mut c).await;
+        Box::new(c).close().await;
+    }
+}
+
+/// A suspended portal over `generate_series`, its 501 first rows read.
+async fn suspend_series(c: &mut PgConn) {
+    c.query(spec(
+        "SELECT g FROM generate_series(1, 100000) g",
+        true,
+        501,
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        c.next_event().await.unwrap(),
+        QueryEvent::ResultStart(_)
+    ));
+    assert!(matches!(c.next_event().await.unwrap(), QueryEvent::Rows(_)));
+    assert_eq!(c.next_event().await.unwrap(), QueryEvent::Suspended);
+}
+
+fn sqlstate(e: &hacivat_driver::RawError) -> Option<&str> {
+    e.server.as_ref().and_then(|s| s.sqlstate.as_deref())
+}
+
+#[tokio::test]
+#[ignore = "docker"]
+async fn a_portal_its_transaction_ended_is_gone_as_the_fake_says() {
+    // Review I4b: what `FakeDriver` now models, pinned on the real server.
+    let Some(t) = require_target("pg17") else {
+        return;
+    };
+    let mut c = pg_on(&t).await;
+    // COMMIT ends the portal's transaction: the query is still open and suspended (no I/O),
+    // the next Execute is the server's 34000, then nothing is open.
+    c.batch("BEGIN").await.unwrap();
+    suspend_series(&mut c).await;
+    c.batch("COMMIT").await.unwrap();
+    assert_eq!(
+        c.next_event().await.unwrap_err().kind,
+        RawErrorKind::Unsupported
+    );
+    let e = c.fetch_more(10).await.unwrap_err();
+    assert_eq!(sqlstate(&e), Some("34000"), "{e:?}");
+    assert_eq!(c.tx_status(), TxStatus::Idle);
+    assert_eq!(
+        c.next_event().await.unwrap_err().kind,
+        RawErrorKind::Unsupported
+    );
+    assert_eq!(
+        c.close_query(CloseHow::Now).await.unwrap(),
+        Closed::Closed { rows: 0 }
+    );
+    assert_eq!(scalar(&mut c, "SELECT 1").await.as_deref(), Some("1"));
+    // ROLLBACK TO the portal's own savepoint: the Execute's error, inside the block, fails the
+    // transaction; a ROLLBACK TO recovers it, as in psql.
+    c.batch("BEGIN; SAVEPOINT hv_cursor").await.unwrap();
+    suspend_series(&mut c).await;
+    c.batch("ROLLBACK TO SAVEPOINT hv_cursor").await.unwrap();
+    assert_eq!(c.tx_status(), TxStatus::InTx);
+    let e = c.fetch_more(10).await.unwrap_err();
+    assert_eq!(sqlstate(&e), Some("34000"), "{e:?}");
+    assert_eq!(c.tx_status(), TxStatus::Failed);
+    c.batch("ROLLBACK TO SAVEPOINT hv_cursor").await.unwrap();
+    assert_eq!(c.tx_status(), TxStatus::InTx);
+    c.batch("ROLLBACK").await.unwrap();
+    // A dead portal closed without a fetch: `Closed` with the rows delivered.
+    c.batch("BEGIN").await.unwrap();
+    suspend_series(&mut c).await;
+    c.batch("COMMIT").await.unwrap();
+    assert_eq!(
+        c.close_query(CloseHow::Now).await.unwrap(),
+        Closed::Closed { rows: 501 }
+    );
     assert_synced(&mut c).await;
     Box::new(c).close().await;
 }
