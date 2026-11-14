@@ -162,7 +162,14 @@ pub(crate) fn down(
                 select(v, anchor, at, cx);
                 return;
             }
-            let origin = unit_range(v, at, unit);
+            // ## m3a-t25-editor-commands (named exception, UI-EDIT-06 step 9): a double click
+            // inside a string selects its content first, a second one the string with its
+            // quotes (`commands::double_click`). A drag still extends by whole words.
+            let origin = if unit == ClickUnit::Word {
+                crate::commands::double_click(v, at)
+            } else {
+                unit_range(v, at, unit)
+            };
             v.drag = Some(DragState {
                 unit,
                 origin: origin.clone(),

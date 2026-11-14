@@ -666,3 +666,34 @@ proptest! {
         prop_assert_eq!(text(&e), end);
     }
 }
+
+// ## m3a-t25-editor-commands (review round 1)
+
+/// The kind of the group an undo or a redo would apply (the Edit menu's "Undo Typing").
+#[test]
+fn undo_and_redo_kinds_name_the_top_groups() {
+    let mut e = model("");
+    assert_eq!((e.m.undo_kind(), e.m.redo_kind()), (None, None));
+    type_text(&mut e, "ab");
+    assert_eq!(e.m.undo_kind(), Some(UserEvent::InputType));
+    paste(&mut e, "XY");
+    assert_eq!(
+        (e.m.undo_kind(), e.m.redo_kind()),
+        (Some(UserEvent::InputPaste), None)
+    );
+    e.m.undo().unwrap();
+    assert_eq!(
+        (e.m.undo_kind(), e.m.redo_kind()),
+        (Some(UserEvent::InputType), Some(UserEvent::InputPaste))
+    );
+    e.m.undo().unwrap();
+    assert_eq!(
+        (e.m.undo_kind(), e.m.redo_kind()),
+        (None, Some(UserEvent::InputType))
+    );
+    e.m.redo().unwrap();
+    assert_eq!(
+        (e.m.undo_kind(), e.m.redo_kind()),
+        (Some(UserEvent::InputType), Some(UserEvent::InputPaste))
+    );
+}

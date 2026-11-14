@@ -1393,3 +1393,92 @@ hv-conn-secret-vault = vault · forever
 hv-menu-edit = Edit
 # A notice when Run is asked before running queries is wired up in the console.
 hv-console-run-unavailable = Running queries isn't available in this console yet.
+
+## m3a-t25-editor-commands
+
+# Command titles of the editor's commands (palette rows, the Edit menu and the editor's context menu).
+hv-cmd-editor-move-left = Move left
+hv-cmd-editor-move-right = Move right
+hv-cmd-editor-move-up = Move up
+hv-cmd-editor-move-down = Move down
+hv-cmd-editor-select-left = Extend selection left
+hv-cmd-editor-select-right = Extend selection right
+hv-cmd-editor-select-up = Extend selection up
+hv-cmd-editor-select-down = Extend selection down
+hv-cmd-editor-move-word-left = Move to previous word
+hv-cmd-editor-move-word-right = Move to next word
+hv-cmd-editor-select-word-left = Extend selection to previous word
+hv-cmd-editor-select-word-right = Extend selection to next word
+hv-cmd-editor-move-line-start = Move to line start
+hv-cmd-editor-move-line-end = Move to line end
+hv-cmd-editor-select-line-start = Extend selection to line start
+hv-cmd-editor-select-line-end = Extend selection to line end
+hv-cmd-editor-move-document-start = Move to document start
+hv-cmd-editor-move-document-end = Move to document end
+hv-cmd-editor-select-document-start = Extend selection to document start
+hv-cmd-editor-select-document-end = Extend selection to document end
+hv-cmd-editor-page-up = Page up
+hv-cmd-editor-page-down = Page down
+hv-cmd-editor-select-page-up = Extend selection a page up
+hv-cmd-editor-select-page-down = Extend selection a page down
+hv-cmd-editor-newline = Insert line break
+hv-cmd-editor-tab = Indent
+hv-cmd-editor-outdent = Outdent
+hv-cmd-editor-delete-backward = Delete backward
+hv-cmd-editor-delete-forward = Delete forward
+hv-cmd-editor-delete-word-backward = Delete previous word
+hv-cmd-editor-delete-word-forward = Delete next word
+hv-cmd-editor-delete-to-line-start = Delete to line start
+hv-cmd-editor-select-all = Select all
+hv-cmd-editor-undo = Undo
+hv-cmd-editor-redo = Redo
+hv-cmd-editor-copy = Copy
+hv-cmd-editor-cut = Cut
+hv-cmd-editor-paste = Paste
+hv-cmd-editor-escape = Collapse selection
+# Turns a mode on or off in which the Tab key moves the keyboard focus out of the editor instead of indenting.
+hv-cmd-editor-toggle-tab-moves-focus = Toggle Tab moves focus
+hv-cmd-editor-context-menu = Show editor menu
+# Runs the statement at the caret, or the selection.
+hv-cmd-editor-run = Run
+# The second and third configurable variants of Run.
+hv-cmd-editor-run-2 = Run (2)
+hv-cmd-editor-run-3 = Run (3)
+# Says in one sentence which lines Run would execute (the status bar and screen readers).
+hv-cmd-editor-describe-exec-range = Describe execution range
+# The sentence of "Describe execution range" when Run would execute one statement that spans several lines.
+# Variables:
+#   $from (Number) - the statement's first line, e.g. 12.
+#   $to (Number) - the statement's last line, e.g. 14.
+#   $label (String) - the start of the statement's text, e.g. "SELECT o.id, c.full_name, …".
+hv-editor-describe-one = Run executes lines { $from }–{ $to }: { $label }
+# The same when the statement is on one line.
+# Variables:
+#   $line (Number) - the statement's line, e.g. 12.
+#   $label (String) - the start of the statement's text, e.g. "SELECT 1;".
+hv-editor-describe-one-line = Run executes line { $line }: { $label }
+# The sentence when Run would execute several statements (always two or more).
+# Variables:
+#   $n (Number) - how many statements, e.g. 3.
+#   $from (Number) - the first statement's first line, e.g. 2.
+#   $to (Number) - the last statement's last line, e.g. 4.
+hv-editor-describe-many = Run executes { $n } statements on lines { $from }–{ $to }
+# The same when the statements are all on one line.
+# Variables:
+#   $n (Number) - how many statements, e.g. 2.
+#   $line (Number) - their line, e.g. 7.
+hv-editor-describe-many-line = Run executes { $n } statements on line { $line }
+# The sentence when Run would first ask which of several statements to execute.
+hv-editor-describe-ask = Run asks which statement to execute
+# The sentence when there is no statement at the caret.
+hv-editor-describe-nothing = Nothing to run here
+# The sentence when the editor can't tell where the statement at the caret ends.
+hv-editor-describe-uncertain = Boundary uncertain: select the statement to run it
+# The sentence when the console has no open connection.
+hv-editor-describe-offline = Not connected: Run connects first and runs nothing
+# The sentence when the editor has not finished reading the text just typed.
+hv-editor-describe-pending = The editor is still reading this text. Try again in a moment.
+# Status bar message and screen reader announcement after turning "Tab moves focus" on.
+hv-editor-tab-moves-focus-on = Tab moves focus
+# The same after turning it off.
+hv-editor-tab-moves-focus-off = Tab indents

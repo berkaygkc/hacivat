@@ -465,6 +465,18 @@ impl EditorModel {
         self.run(tr, action).ok()
     }
 
+    // ## m3a-t25-editor-commands (review round 1, named exception): the Edit menu's labels
+    // ("Undo Typing", "Redo Paste") are keyed by these.
+    /// The kind of the group `undo` would apply (`None`: nothing to undo).
+    pub fn undo_kind(&self) -> Option<UserEvent> {
+        self.history.top_undo_kind()
+    }
+
+    /// The kind of the group `redo` would apply (`None`: nothing to redo).
+    pub fn redo_kind(&self) -> Option<UserEvent> {
+        self.history.top_redo_kind()
+    }
+
     /// Undo groups held.
     pub fn undo_depth(&self) -> usize {
         self.history.undo_depth()

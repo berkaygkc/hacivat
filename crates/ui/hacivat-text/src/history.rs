@@ -139,6 +139,17 @@ impl History {
         self.undone.last()
     }
 
+    // ## m3a-t25-editor-commands (review round 1, named exception): the Edit menu's labels.
+    /// The kind of the group an undo applies.
+    pub(crate) fn top_undo_kind(&self) -> Option<UserEvent> {
+        self.done.back().map(|g| g.kind)
+    }
+
+    /// The kind of the group a redo applies.
+    pub(crate) fn top_redo_kind(&self) -> Option<UserEvent> {
+        self.undone.last().map(|g| g.kind)
+    }
+
     /// Closes the open group (a bracket's too: its later transactions start a new one).
     pub(crate) fn seal(&mut self) {
         self.open = false;
