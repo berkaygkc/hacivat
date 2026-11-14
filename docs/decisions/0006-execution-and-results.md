@@ -80,6 +80,11 @@ It enforces these rules, each with a test in `hacivat-session/tests/m3a_interfac
 - a cancel or a failed statement inside a PostgreSQL transaction fails it (P16);
 - a MySQL drain of more than one read asks for a server-side kill whenever the caps say
   `close_needs_kill` (`a_mysql_drain_of_a_large_rest_asks_for_a_kill_by_its_caps`);
+  since Task 14 round 1 the MySQL-family fake also answers `close_query(Now)` with
+  `NeedsServerKill` and keeps the run open, gives `Completed` on `AfterKill` when nothing was
+  unread (or `Err(Io(TimedOut))` with the `kill_ignored` knob), returns a drained-rest error as
+  `Err(Db)` and a 1317 as `Closed`, and gives each connection its own non-zero thread id
+  (ADR 0002 `m3a-t14`);
 - `Protocol::Simple` is refused on every engine (`a_simple_protocol_query_is_refused`).
 
 It is still a model, not the engine. Its transaction status and savepoint names follow statement
