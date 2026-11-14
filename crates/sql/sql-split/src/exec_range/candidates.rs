@@ -62,8 +62,11 @@ pub enum CandidateKind {
     WholeScript,
 }
 
-/// One chooser entry: its units and its label (whitespace collapsed, controls as spaces; the
-/// UI truncates it).
+/// One chooser entry: its units and its label. The label is the candidate's text from its
+/// first leading comment, with runs of white space and control characters as one space and
+/// every invisible formatting character (bidirectional controls, zero-width and tag
+/// characters) shown as `<U+XXXX>`; it holds at most [`LABEL_MAX_CHARS`] characters, and the
+/// UI truncates it further.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Candidate {
     pub kind: CandidateKind,
@@ -101,18 +104,31 @@ pub trait SubqueryOracle: Send + Sync {
 /// ellipsis; the bound keeps a whole-script label from copying a large document.
 pub const LABEL_MAX_CHARS: usize = 1024;
 
-/// Unicode's bidirectional formatting characters (ALM, LRM, RLM, the embeddings, overrides
-/// and isolates): in a label they could reorder the SQL a person is about to run.
-fn is_bidi_format(c: char) -> bool {
+/// The formatting characters a label shows as text, because drawn as they are they would
+/// change or hide what a person reads of the SQL they are about to run:
+/// - the bidirectional controls (ALM, LRM, RLM, the embeddings, overrides and isolates),
+///   which reorder it;
+/// - the zero-width and invisible ones (soft hyphen, ZWSP, ZWNJ, ZWJ, word joiner and the
+///   invisible operators, the BOM / zero-width no-break space), which make two different
+///   texts look the same;
+/// - the tag characters, which hide text.
+fn is_invisible_format(c: char) -> bool {
     matches!(
         c,
-        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{E0000}'..='\u{E007F}'
     )
 }
 
 /// The label of `text`: runs of whitespace and control characters become one space (none at
-/// either end), and a bidirectional formatting character becomes the visible text `<U+XXXX>`,
-/// so the label reads in the order the server reads the SQL. At most [`LABEL_MAX_CHARS`]
+/// either end), and an invisible formatting character becomes the visible text `<U+XXXX>`,
+/// so the label reads in the order the server reads the SQL and shows every character of it. At most [`LABEL_MAX_CHARS`]
 /// characters.
 pub(crate) fn label_of(text: &str) -> String {
     let mut out = String::new();
@@ -122,7 +138,7 @@ pub(crate) fn label_of(text: &str) -> String {
             gap = !out.is_empty();
             continue;
         }
-        let shown = if is_bidi_format(c) {
+        let shown = if is_invisible_format(c) {
             format!("<U+{:04X}>", u32::from(c))
         } else {
             String::from(c)
@@ -217,6 +233,34 @@ mod tests {
         assert_eq!(
             label_of("SELECT '\u{202E}x\u{2066}' \u{200F}"),
             "SELECT '<U+202E>x<U+2066>' <U+200F>"
+        );
+    }
+
+    #[test]
+    fn labels_show_every_invisible_format_character_as_text() {
+        for (c, shown) in [
+            ('\u{00AD}', "<U+00AD>"),
+            ('\u{200B}', "<U+200B>"),
+            ('\u{200C}', "<U+200C>"),
+            ('\u{200D}', "<U+200D>"),
+            ('\u{200E}', "<U+200E>"),
+            ('\u{200F}', "<U+200F>"),
+            ('\u{2060}', "<U+2060>"),
+            ('\u{2064}', "<U+2064>"),
+            ('\u{FEFF}', "<U+FEFF>"),
+            ('\u{E0001}', "<U+E0001>"),
+            ('\u{E0041}', "<U+E0041>"),
+            ('\u{E007F}', "<U+E007F>"),
+        ] {
+            assert_eq!(
+                label_of(&format!("DROP TABLE a{c}b")),
+                format!("DROP TABLE a{shown}b")
+            );
+        }
+        // Visible characters next to the ranges are left alone.
+        assert_eq!(
+            label_of("a\u{2010}b\u{2065}c\u{00AE}"),
+            "a\u{2010}b\u{2065}c\u{00AE}"
         );
     }
 

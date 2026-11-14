@@ -10,14 +10,77 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use sql_dialect::{ClientFlavor, DialectCtx};
-use sql_lexer::{LexState, Lexed, lex};
+use sql_lexer::{LexState, Lexed, TokenKind, lex};
 use sql_text::edit::MisalignedEdit;
 use sql_text::{TextChunks, TextEdit, TextRange, TextSize};
 
-use crate::item::{AmbiguousBoundary, ClientSegment, Item, Split, SplitMode};
+use crate::item::{
+    AmbiguityReason, AmbiguousBoundary, ClientSegment, Confidence, Item, Split, SplitMode, Stmt,
+    StmtHead, overlaps,
+};
 use crate::key::StmtKey;
 use crate::recover::shift_stmt;
-use crate::splitter::{Analysis, SplitStart, analyze, lexer_for, size, split_from};
+use crate::splitter::{
+    Analysis, RawItem, SplitStart, analyze, carried_reason, lexer_for, size, split_from,
+};
+
+/// How far past an offset the splitter's second lexing is read to see whether the offset is
+/// inside a token: longer than any opener (`/*M!`) or string prefix (`U&'`).
+const RELEX_WINDOW: usize = 16;
+
+/// Whether a selection edge inside a token of `kind` cuts it: every token but white space and
+/// plain comments, whose text is trivia in every reading.
+fn cuts(kind: TokenKind) -> bool {
+    !matches!(
+        kind,
+        TokenKind::Whitespace
+            | TokenKind::Newline
+            | TokenKind::LineComment
+            | TokenKind::BlockComment
+    )
+}
+
+/// Why a cut token is uncertain: inside an executable comment or a hint the server reads
+/// code; anything else is a construct cut short.
+fn cut_reason(kind: TokenKind) -> AmbiguityReason {
+    match kind {
+        TokenKind::ExecutableComment | TokenKind::HintComment => {
+            AmbiguityReason::AmbiguousCommentEnd
+        }
+        _ => AmbiguityReason::UnterminatedConstruct,
+    }
+}
+
+fn is_comment(kind: TokenKind) -> bool {
+    matches!(kind, TokenKind::LineComment | TokenKind::BlockComment)
+}
+
+fn raw_start(it: &RawItem) -> TextSize {
+    match it {
+        RawItem::Stmt(s) => s.strict.start(),
+        RawItem::Empty(r) => r.start(),
+    }
+}
+
+/// Makes every statement of `split` that `cut` overlaps `Heuristic`, with the boundary cut
+/// to it.
+fn mark_uncertain(split: &mut Split, cut: AmbiguousBoundary) {
+    let mut marked = Vec::new();
+    for item in &mut split.items {
+        if let Item::Statement(st) = item
+            && overlaps(cut.at, st.strict)
+            && let Some(at) = cut.at.intersect(st.strict).filter(|r| !r.is_empty())
+        {
+            st.confidence = Confidence::Heuristic;
+            marked.push(AmbiguousBoundary { at, ..cut });
+        }
+    }
+    split.ambiguous.extend(marked);
+    split
+        .ambiguous
+        .sort_by_key(|a| (a.at.start(), a.at.end(), a.reason as u8));
+    split.ambiguous.dedup();
+}
 
 /// What a change did to a document's statements (editor mode), by content key: `changed`
 /// keys are new, `removed` keys are gone, `moved` keys stayed but start elsewhere; `dirty` is
@@ -304,16 +367,205 @@ impl DocSnapshot {
         SplitStart { lex, delimiter }
     }
 
-    /// The selection `range` split on its own in `mode`, from the state at its start, with
-    /// document offsets (a selection run as separate statements).
+    /// What the selection `range` cuts through, in text order: at most one boundary for its
+    /// start and one for its end. Empty when both ends are clean.
     ///
-    /// A unit is sent alone, and the server reads it from a clean state. So a selection that
-    /// starts inside a token never yields that token's tail as a certain statement: the
-    /// statement holding the rest of a string, a quoted identifier, a dollar-quoted body or
-    /// `COPY` data is uncertain (`UnterminatedConstruct`), and after the rest of an executable
-    /// comment or a hint every statement is (`AmbiguousCommentEnd`). The rest of a plain
-    /// comment is trivia. A selection that starts inside a client command's line yields the
-    /// rest of that line as an unsupported client segment, never as SQL.
+    /// A unit is sent alone and the server reads it from a clean state, so a selection is
+    /// only what it looks like when its ends fall between the document's tokens. The answer
+    /// comes from the document's own tokens and `COPY` ranges, never from lexing the selected
+    /// text by itself:
+    /// - **start inside a token** (after its first byte): the rest of the token is not what
+    ///   it reads as alone. The rest of a string, a quoted identifier, a dollar-quoted body
+    ///   (a string prefix such as `E` or `U&` and the opening quote are part of the token) or
+    ///   of a word, a number or an operator is `UnterminatedConstruct`, to the token's end.
+    ///   Inside an executable comment or a hint (their openers `/*!`, `/*M!`, `/*+`
+    ///   included) the server reads code where the document reads a comment, with no end both
+    ///   agree on: `AmbiguousCommentEnd`, to the selection's end;
+    /// - **start inside a `COPY … FROM STDIN` statement or its data** (after the statement's
+    ///   first byte) with rows selected: the rows are data, never SQL. `UnterminatedConstruct`,
+    ///   to the end of the data;
+    /// - **end inside a token**: the token is cut short. Same reasons, over the selected part
+    ///   of the token.
+    ///
+    /// White space and plain comments (`-- …`, `/* … */`) are not cut. The part of a comment
+    /// at either end of the selection is trivia and is left out (the rest of a block comment
+    /// the selection starts inside, the first part of a comment it ends inside), and text
+    /// selected wholly inside one `--` comment is read as it is selected (a statement kept
+    /// in a comment can be run). A selection that starts inside a `--` comment and runs past
+    /// its end is cut at the comment's end (`UnterminatedConstruct`): read alone, a quote in
+    /// the comment's text would pair with the quotes after it.
+    ///
+    /// After a client command, a client delimiter or `COPY` data the splitter lexes again, so
+    /// its tokens can differ from [`DocSnapshot::lexed`]; there both readings are asked, and
+    /// either one saying "inside" is enough.
+    pub fn selection_cuts(&self, range: TextRange) -> Vec<AmbiguousBoundary> {
+        let len = size(self.text.len());
+        let range = TextRange::new(range.start().min(len), range.end().min(len));
+        let mut out = Vec::new();
+        let range = self.without_comment_parts(range);
+        if range.is_empty() {
+            return out;
+        }
+        if let Some((reason, cut, _)) = self.start_cut(range) {
+            out.push(AmbiguousBoundary {
+                at: TextRange::new(range.start(), cut),
+                reason,
+            });
+        }
+        if let Some((kind, token)) = self.token_cut_by(range.end()) {
+            let at = TextRange::new(token.start().max(range.start()), range.end());
+            let b = AmbiguousBoundary {
+                at,
+                reason: cut_reason(kind),
+            };
+            if !out.contains(&b) {
+                out.push(b);
+            }
+        }
+        out
+    }
+
+    /// `range` without the part of a plain comment it holds at either end: the rest of a
+    /// block comment it starts inside (opener included), and the first part of a comment it
+    /// ends inside when that comment starts in it. Those parts are trivia in the document,
+    /// and nothing of them is ever sent; read alone, a comment's first byte (`/`, `-`) would
+    /// be an operator. A range wholly inside one `--` comment is kept: that is the selected
+    /// text. Not where the splitter lexed again: there a comment of the document's lexing
+    /// is not trusted, and the edge is a cut.
+    pub fn without_comment_parts(&self, range: TextRange) -> TextRange {
+        let len = size(self.text.len());
+        let (mut start, mut end) = (range.start().min(len), range.end().min(len));
+        let inside = |at: TextSize| {
+            self.lexed.token_at(at).and_then(|i| {
+                let (kind, r) = (self.lexed.kind(i), self.lexed.range(i));
+                (r.start() < at && at < r.end() && is_comment(kind) && !self.relexed_at(at))
+                    .then_some((kind, r))
+            })
+        };
+        if let Some((TokenKind::BlockComment, r)) = inside(start) {
+            start = r.end().min(end);
+        }
+        if let Some((_, r)) = inside(end)
+            && start <= r.start()
+        {
+            end = r.start();
+        }
+        TextRange::new(start, end.max(start))
+    }
+
+    /// Why the start of `range` is not a clean place to split from, where the cut-off
+    /// construct ends (at most `range.end()`), and whether the statement goes on after it (a
+    /// token's rest is part of the statement around it; `COPY` data ends its statement).
+    fn start_cut(&self, range: TextRange) -> Option<(AmbiguityReason, TextSize, bool)> {
+        let (at, end) = (range.start(), range.end());
+        // `COPY` rows: the statement before `at`, when the selection starts after its first
+        // byte and reaches its rows.
+        let items = &self.analysis.items;
+        let before = items.partition_point(|it| raw_start(it) < at);
+        if let Some(RawItem::Stmt(st)) = before.checked_sub(1).and_then(|i| items.get(i))
+            && let Some(data) = st.copy_data
+            && !data.rows.is_empty()
+            && data.rows.start() < end
+            && at < data.rows.end()
+        {
+            let data_end = data.end.map_or(data.rows.end(), |e| e.end());
+            return Some((
+                AmbiguityReason::UnterminatedConstruct,
+                data_end.min(end),
+                false,
+            ));
+        }
+        // Inside a `--` comment and running past its end: read alone, the comment's text is
+        // code, and a quote in it would pair with the quotes after the comment, out of step
+        // with the document. (Wholly inside the comment it is just the selected text.)
+        if let Some(i) = self.lexed.token_at(at)
+            && self.lexed.kind(i) == TokenKind::LineComment
+        {
+            let r = self.lexed.range(i);
+            if r.start() < at && at < r.end() && r.end() < end {
+                return Some((AmbiguityReason::UnterminatedConstruct, r.end(), false));
+            }
+        }
+        if let Some((kind, token)) = self.token_cut_by(at) {
+            let reason = cut_reason(kind);
+            // A comment's tail has no end both readings agree on; and a token of the
+            // splitter's second lexing has no known end here.
+            let whole = reason == AmbiguityReason::AmbiguousCommentEnd || self.relexed_at(at);
+            let cut = if whole { end } else { token.end().min(end) };
+            return Some((reason, cut, true));
+        }
+        // The splitter's own state there (inside `COPY` data, or a construct its second
+        // lexing sees).
+        carried_reason(&self.split_start_at(at).lex).map(|reason| (reason, end, false))
+    }
+
+    /// The significant token that `at` is strictly inside (after its first byte, before its
+    /// end), with its kind: in the document's lexing, or in the splitter's second lexing
+    /// where there is one. `None` between tokens, and inside white space or a plain comment.
+    fn token_cut_by(&self, at: TextSize) -> Option<(TokenKind, TextRange)> {
+        // Where the splitter lexed again, a comment of the document's one lexing may be code
+        // to the splitter (a quote in `COPY` data opens a "string" that swallows the opener):
+        // there every token cuts but white space.
+        let relexed = self.relexed_at(at);
+        let doc = self.lexed.token_at(at).and_then(|i| {
+            let (kind, r) = (self.lexed.kind(i), self.lexed.range(i));
+            let cut = cuts(kind) || (relexed && is_comment(kind));
+            (r.start() < at && at < r.end() && cut).then_some((kind, r))
+        });
+        if doc.is_some() {
+            return doc;
+        }
+        // The splitter's second lexing, from where it last restarted to a little past `at`
+        // (an opener or a string prefix is at most a few bytes).
+        let (from, state) = self.analysis.restarts.iter().rev().find(|(p, _)| *p < at)?;
+        if self.client_at(at).is_some() || self.in_copy_rows(at) {
+            return None;
+        }
+        let mut upto = (usize::from(at) + RELEX_WINDOW).min(self.text.len());
+        while !self.text.is_char_boundary(upto) {
+            upto += 1;
+        }
+        let piece = &self.text[usize::from(*from)..upto];
+        let again = lex(piece, lexer_for(&self.ctx), self.ctx.modes, state);
+        let rel = at - *from;
+        let i = again.token_at(rel)?;
+        let r = again.range(i);
+        (r.start() < rel && rel < r.end() && cuts(again.kind(i)))
+            .then(|| (again.kind(i), r + *from))
+    }
+
+    /// Whether the splitter lexed again before `at` (its tokens may differ from `lexed`).
+    fn relexed_at(&self, at: TextSize) -> bool {
+        self.analysis.restarts.iter().any(|(p, _)| *p < at)
+    }
+
+    /// The selection `range` split on its own in `mode`, with document offsets (a selection
+    /// run as separate statements).
+    ///
+    /// A unit is sent alone, and the server reads it from a clean state. So whatever the
+    /// selection cuts through ([`DocSnapshot::selection_cuts`]) is never part of a certain
+    /// statement:
+    /// - when it starts inside a token, the token's rest and what follows it up to the
+    ///   statement's end are one `Heuristic` statement, with a boundary over the token's rest
+    ///   (`UnterminatedConstruct`; inside an executable comment or a hint
+    ///   `AmbiguousCommentEnd`, and then the rest is the whole selection). Splitting goes on
+    ///   after the token, from the document's own state there, so the split never runs out
+    ///   of step with the document: the rest of a string is never read as code, nor code
+    ///   after it as a string;
+    /// - when it starts inside a `COPY` statement with rows selected, the selected part of
+    ///   the statement and its data is one `Heuristic` statement, and splitting goes on after
+    ///   the data;
+    /// - when it ends inside a token, every statement holding part of that token is
+    ///   `Heuristic`;
+    /// - a selection that starts inside a client command's line yields the rest of that line
+    ///   as an unsupported client segment, never as SQL;
+    /// - when the selection's own split reads a client command the document does not have at
+    ///   that place, or misses one it has (a selection that starts in the middle of a line
+    ///   can make the line's rest look like a command line), every statement of it is
+    ///   `Heuristic` (`ClientCommand`).
+    ///
+    /// Otherwise the selection is split from the lexer state and client delimiter at its
+    /// start (inside a plain comment, the comment's rest is trivia).
     pub fn split_selection(&self, range: TextRange, mode: SplitMode) -> Split {
         let range = TextRange::new(
             range.start().min(size(self.text.len())),
@@ -332,8 +584,29 @@ impl DocSnapshot {
             kind: c.kind,
             supported: false,
         });
-        let by = command.map_or(range.start(), |c| c.range.end());
-        let start = self.split_start_at(by);
+        let rest = self.without_comment_parts(TextRange::new(
+            command.map_or(range.start(), |c| c.range.end()),
+            range.end(),
+        ));
+        let range = TextRange::new(range.start(), rest.end());
+        let cuts = self.selection_cuts(rest);
+        // The cut-off rest of what the selection starts inside, and where splitting goes on.
+        let start_cut = self.start_cut(rest);
+        let mut tail = start_cut.map(|(reason, cut, _)| AmbiguousBoundary {
+            at: TextRange::new(rest.start(), cut),
+            reason,
+        });
+        let joins = start_cut.is_some_and(|(_, _, joins)| joins);
+        let mut by = tail.map_or(rest.start(), |t| t.at.end());
+        let mut start = self.split_start_at(by);
+        if tail.is_some() && by < rest.end() && carried_reason(&start.lex).is_some() {
+            // No clean state after the cut either: the whole selection is the rest.
+            by = rest.end();
+            start = self.split_start_at(by);
+        }
+        if let Some(t) = &mut tail {
+            t.at = TextRange::new(rest.start(), by);
+        }
         let piece = &self.text[usize::from(by)..usize::from(range.end())];
         let s = split_from(piece, &self.ctx, self.flavor, mode, &start);
         let mut out = Split {
@@ -367,10 +640,94 @@ impl DocSnapshot {
                 })
                 .collect(),
         };
+        // The selection's own split must find the client commands the document has there,
+        // and no other. A selection that starts in the middle of a line makes that line's
+        // rest look like a line of its own (`x .mode csv`, `a DELIMITER //`), and a command
+        // read there that the document does not have swallows text by another rule than the
+        // document's: from then on the split is out of step with it. Nothing after such a
+        // difference is certain.
+        let doc_commands = self
+            .analysis
+            .client
+            .iter()
+            .map(|c| c.range.start())
+            .filter(|s| by <= *s && *s < range.end());
+        // Likewise `COPY` data: a statement cut at its start can read as a `COPY … FROM STDIN`
+        // the document does not have (`TEMP «COPY t FROM STDIN;…»`), and its "data" would
+        // swallow lines the document reads as SQL or comments.
+        let copy_in_step = out
+            .statements()
+            .filter_map(|st| st.copy_data)
+            .all(|d| self.copy_rows_start_at(d.rows.start()));
+        if !copy_in_step || !doc_commands.eq(out.client.iter().map(|c| c.range.start())) {
+            mark_uncertain(
+                &mut out,
+                AmbiguousBoundary {
+                    at: TextRange::new(by, range.end()),
+                    reason: AmbiguityReason::ClientCommand,
+                },
+            );
+        }
+        if let Some(t) = tail {
+            self.prepend_tail(&mut out, t, joins, start.delimiter.as_deref());
+        }
+        // The end cut (the start's is the tail).
+        for cut in cuts.iter().skip(usize::from(tail.is_some())) {
+            mark_uncertain(&mut out, *cut);
+        }
         if let Some(c) = command {
             out.client.insert(0, c);
         }
         out
+    }
+
+    /// Puts the cut-off rest `tail` at the front of `out` as a `Heuristic` statement (its
+    /// text without outer white space) with its boundary. When the statement goes on after
+    /// the rest (`joins`) and `out` begins with a statement, that statement is the one: it
+    /// is made to start at the rest.
+    fn prepend_tail(
+        &self,
+        out: &mut Split,
+        tail: AmbiguousBoundary,
+        joins: bool,
+        delimiter: Option<&str>,
+    ) {
+        let text = &self.text[tail.at];
+        let lead = text.len() - text.trim_start().len();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let strict = TextRange::at(tail.at.start() + size(lead), size(trimmed.len()));
+        out.ambiguous.insert(
+            0,
+            AmbiguousBoundary {
+                at: strict,
+                reason: tail.reason,
+            },
+        );
+        if joins && let Some(Item::Statement(first)) = out.items.first_mut() {
+            first.strict = TextRange::new(strict.start(), first.strict.end());
+            first.smart = TextRange::new(strict.start(), first.smart.end().max(first.strict.end()));
+            first.leading_comments = None;
+            first.confidence = Confidence::Heuristic;
+            first.head = StmtHead::default();
+            first.key = StmtKey::of(&self.ctx, delimiter, &self.text[first.strict]);
+            return;
+        }
+        out.items.insert(
+            0,
+            Item::Statement(Stmt {
+                strict,
+                smart: strict,
+                terminator: None,
+                leading_comments: None,
+                confidence: Confidence::Heuristic,
+                head: StmtHead::default(),
+                key: StmtKey::of(&self.ctx, delimiter, trimmed),
+                copy_data: None,
+            }),
+        );
     }
 
     fn client_at(&self, at: TextSize) -> Option<&ClientSegment> {
@@ -380,12 +737,22 @@ impl DocSnapshot {
             .find(|c| c.range.start() < at && at < c.range.end())
     }
 
+    /// Whether a `COPY … FROM STDIN` statement of the document has its data start at `at`.
+    fn copy_rows_start_at(&self, at: TextSize) -> bool {
+        let items = &self.analysis.items;
+        let before = items.partition_point(|it| raw_start(it) < at);
+        matches!(
+            before.checked_sub(1).and_then(|i| items.get(i)),
+            Some(RawItem::Stmt(st)) if st.copy_data.is_some_and(|d| d.rows.start() == at)
+        )
+    }
+
     fn in_copy_rows(&self, at: TextSize) -> bool {
         self.analysis.items.iter().any(|it| match it {
-            crate::splitter::RawItem::Stmt(s) => s
+            RawItem::Stmt(s) => s
                 .copy_data
                 .is_some_and(|d| d.rows.start() <= at && at < d.rows.end()),
-            crate::splitter::RawItem::Empty(_) => false,
+            RawItem::Empty(_) => false,
         })
     }
 }

@@ -7,7 +7,7 @@
 
 use proptest::prelude::*;
 use sql_dialect::{ClientFlavor, DialectCtx, DialectId};
-use sql_lexer::LexState;
+use sql_lexer::{LexState, TokenKind};
 use sql_split::exec_range::{
     Candidate, CandidateKind, CaretOrSelection, ExecPolicy, InsidePolicy, LABEL_MAX_CHARS,
     OutsidePolicy, RangeResolution, SelectionPolicy, UnitKind, UnitSpan, resolve,
@@ -16,6 +16,18 @@ use sql_split::{Confidence, DocSnapshot, SplitMode, SplitStart, SqlDocument, spl
 use sql_text::{TextRange, TextSize};
 
 const FRAGMENTS: &[&str] = &[
+    // Review round 1: an escape cut in two, and a quoted `*/` inside each comment the server
+    // reads as code.
+    "E'a\\'",
+    "'a\\'",
+    "E'a\\'; x; --'",
+    "'a\\'; x; -- '",
+    "\"a\\\"; x; -- \"",
+    "/*! , \"*/ x; -- \" */",
+    "/*+ \"*/ x; -- \" */",
+    "/*M! , '*/' x; */",
+    "U&'a\\'",
+    "-- don't\n",
     " ",
     " ",
     "\n",
@@ -232,6 +244,97 @@ fn certain_alone(
     Ok(())
 }
 
+/// The document-level check (Task 13 review round 1): a certain unit of the selection `r` is
+/// what the *document* shows there, whatever the unit reads as alone.
+/// - It never overlaps the rows of a `COPY … FROM STDIN`: they are data.
+/// - It never overlaps a document token that an edge of the selection is strictly inside
+///   (a string or name entered after its first byte, openers and prefixes included; a word
+///   or number cut in two; an executable comment or hint). White space and plain comments
+///   are not tokens a selection cuts.
+/// - It starts and ends on a token boundary of the whole-document lexing, or lies wholly
+///   inside one `--` comment (a statement kept in a comment). A unit sent as written (`verbatim`) may also
+///   have an edge inside a plain comment.
+///
+/// The whole-document lexing is the document's truth up to its first client command or
+/// `COPY` data. After one the splitter lexes again, and the one lexing can read what follows
+/// differently (a quote in `COPY` data opens a "string" there); the token checks stop at that
+/// place, the `COPY` check never does.
+fn in_step(
+    snap: &DocSnapshot,
+    r: TextRange,
+    unit: TextRange,
+    verbatim: bool,
+) -> Result<(), String> {
+    let (text, lexed) = (snap.text(), snap.lexed());
+    let overlap = |a: TextRange, b: TextRange| a.start() < b.end() && b.start() < a.end();
+    // Where the splitter first lexes again.
+    let mut relexed = snap
+        .execution_split()
+        .client
+        .iter()
+        .map(|c| c.range.start())
+        .min()
+        .unwrap_or(TextSize::from(u32::MAX));
+    for st in snap.execution_split().statements() {
+        if let Some(d) = st.copy_data {
+            relexed = relexed.min(st.strict.start());
+            if overlap(d.rows, unit) {
+                return Err(format!(
+                    "unit {:?} overlaps COPY rows {:?}",
+                    &text[unit], d.rows
+                ));
+            }
+        }
+    }
+    let plain = |k: TokenKind| {
+        matches!(
+            k,
+            TokenKind::Whitespace
+                | TokenKind::Newline
+                | TokenKind::LineComment
+                | TokenKind::BlockComment
+        )
+    };
+    for edge in [r.start(), r.end()] {
+        if edge > relexed {
+            continue;
+        }
+        if let Some(i) = lexed.token_at(edge) {
+            let t = lexed.range(i);
+            if t.start() < edge && edge < t.end() && !plain(lexed.kind(i)) && overlap(t, unit) {
+                return Err(format!(
+                    "unit {:?} overlaps the {:?} token {:?} the selection cuts",
+                    &text[unit],
+                    lexed.kind(i),
+                    &text[t]
+                ));
+            }
+        }
+    }
+    let inside = |pos: TextSize| {
+        lexed.token_at(pos).filter(|i| {
+            let t = lexed.range(*i);
+            t.start() < pos && pos < t.end()
+        })
+    };
+    for pos in [unit.start(), unit.end()] {
+        if pos > relexed {
+            continue;
+        }
+        let Some(i) = inside(pos) else { continue };
+        let (kind, t) = (lexed.kind(i), lexed.range(i));
+        let kept_in_comment = kind == TokenKind::LineComment && t.contains_range(unit);
+        let written = verbatim && matches!(kind, TokenKind::LineComment | TokenKind::BlockComment);
+        if !kept_in_comment && !written {
+            return Err(format!(
+                "unit {:?} has an edge inside the {kind:?} token {:?}",
+                &text[unit], &text[t]
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A unit execution mode returned is a certain statement, alone and in its document.
 ///
 /// Alone, it is read under the client delimiter in force where it starts. A selection is its
@@ -295,6 +398,10 @@ fn no_unit_crosses_heuristic(
                     p.selection != SelectionPolicy::SmartExpand || u.kind == UnitKind::Verbatim
                 });
                 unit_is_certain(&d, &u, own_script).map_err(|e| format!("{at:?} {p:?}: {e}"))?;
+                if let Some(r) = own_script.filter(|_| at.len() == 1) {
+                    in_step(&d, r, u.range, u.kind == UnitKind::Verbatim)
+                        .map_err(|e| format!("{at:?} {p:?}: {e}"))?;
+                }
             }
         }
     }
@@ -309,6 +416,50 @@ fn all_exact(d: &DocSnapshot, units: &[UnitSpan]) -> bool {
             .statements()
             .any(|s| s.strict == u.range && s.confidence == Confidence::Exact)
     })
+}
+
+/// What an answer is, without its details: the ranges it runs, or how it refuses.
+#[derive(Debug, PartialEq, Eq)]
+enum Answer {
+    Runs(Vec<TextRange>),
+    Asks,
+    Nothing,
+    Refuses,
+}
+
+fn answer_kind(r: &RangeResolution) -> Answer {
+    match r {
+        RangeResolution::Units(u) => Answer::Runs(u.iter().map(|u| u.range).collect()),
+        RangeResolution::Ask { .. } => Answer::Asks,
+        RangeResolution::NothingToRun => Answer::Nothing,
+        RangeResolution::Ambiguous(_) | RangeResolution::UnsupportedClientCommand { .. } => {
+            Answer::Refuses
+        }
+    }
+}
+
+/// What "as separate statements" must answer for the selection `r`, from
+/// `DocSnapshot::split_selection` and `DocSnapshot::selection_cuts` alone.
+fn separate_by_hand(d: &DocSnapshot, r: TextRange) -> Answer {
+    if d.text()[r].trim().is_empty() {
+        return Answer::Nothing;
+    }
+    let split = d.split_selection(r, SplitMode::Execution);
+    // An edge inside a token refuses the selection even when the cut token is in no
+    // statement (a client command's first bytes, say).
+    if !d.selection_cuts(r).is_empty()
+        || split.client.iter().any(|c| !c.supported)
+        || !split.ambiguous.is_empty()
+        || split.statements().any(|s| !split.is_certain(s))
+    {
+        return Answer::Refuses;
+    }
+    let ranges: Vec<TextRange> = split.statements().map(|s| s.strict).collect();
+    if ranges.is_empty() {
+        Answer::Nothing
+    } else {
+        Answer::Runs(ranges)
+    }
 }
 
 fn chosen(r: &RangeResolution) -> Option<&[UnitSpan]> {
@@ -355,6 +506,24 @@ fn agree_on_exact(
                     if e != x {
                         return Err(ctx("a selection differs between the modes"));
                     }
+                    // And the answer is the selection's own split, read independently: as
+                    // separate statements, Run runs exactly its statements when every one
+                    // is certain and nothing in it is uncertain or unsupported, and refuses
+                    // otherwise.
+                    if p.selection == SelectionPolicy::AsSeparate
+                        && let CaretOrSelection::Selection(r) = at[0]
+                    {
+                        let (want, got) = (separate_by_hand(&d, r), answer_kind(&x));
+                        // One difference is allowed, and it is a refusal: `resolve` also
+                        // reads the client commands the editor's split finds (after an
+                        // unterminated construct, inside a statement with no `;`), and a
+                        // selection that starts inside one of those lines is unsupported.
+                        let stricter =
+                            matches!(x, RangeResolution::UnsupportedClientCommand { .. });
+                        if want != got && !stricter {
+                            return Err(ctx(&format!("the selection's split says {want:?}")));
+                        }
+                    }
                     continue;
                 }
                 if verbatim {
@@ -366,6 +535,11 @@ fn agree_on_exact(
                     && chosen(&e) != Some(xu)
                 {
                     return Err(ctx("execution runs what the preview does not show"));
+                }
+                // Where Run runs or asks, the preview is the same answer: never a chooser
+                // over an immediate run, never a candidate Run does not offer.
+                if chosen(&x).is_some() && e != x {
+                    return Err(ctx("the preview differs where Run runs or asks"));
                 }
                 // Every candidate execution offers, the preview's chooser offers too.
                 if let RangeResolution::Ask { candidates: xc, .. } = &x {

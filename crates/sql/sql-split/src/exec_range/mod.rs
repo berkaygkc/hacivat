@@ -30,11 +30,13 @@
 //!
 //! **Refusals** (fail closed; nothing is sent):
 //! - Execution mode answers `Ambiguous` when a unit it would return is not certain
-//!   ([`Split::is_certain`] in both splits). Under `Ask`, an uncertain statement at the caret is `Ambiguous`,
-//!   and so is a refused candidate the chooser would open on (the remembered kind): Run
-//!   never runs a smaller range in its place. Any other candidate it would refuse is left
-//!   out, so the chooser offers only what can run.
+//!   ([`Split::is_certain`] in both splits). Under `Ask`, an uncertain statement at the
+//!   caret is `Ambiguous`, and so is a refused candidate the chooser would open on (the
+//!   remembered kind): Run never runs a smaller range in its place. Any other candidate it
+//!   would refuse is left out, so the chooser offers only what can run.
 //! - Editor mode returns heuristic statements as units: the preview draws them as uncertain.
+//!   Under `Ask`, where Run will run or ask, the preview leaves out the same candidates, so
+//!   the two answers are equal: a chooser is never previewed over an immediate run.
 //! - A run of several statements (whole script, from the caret, below the caret, several
 //!   carets, an expanded selection) that spans an unsupported client command answers
 //!   `UnsupportedClientCommand` in both modes: Hacivat would not run the script as its client
@@ -42,18 +44,22 @@
 //! - A selection has one answer for both modes, and it never holds a heuristic statement.
 //!   `AsSeparate` splits it on its own from the lexer state and client delimiter at its
 //!   start. Any uncertain boundary or unsupported client command in it refuses the whole
-//!   selection. A selection that starts inside a token is refused: the server reads the sent
-//!   text from a clean state, so the rest of a string, a quoted name, a dollar-quoted body or
-//!   `COPY` data would run as code. (The rest of a plain comment is trivia and never sent;
-//!   inside an executable comment or an optimizer hint the server reads code, so that is
-//!   refused too.) A selection that starts inside a client command's line is
-//!   `UnsupportedClientCommand`.
+//!   selection. A selection whose start or end is inside a token of the document is refused
+//!   ([`DocSnapshot::selection_cuts`], decided from the document's own tokens): the server
+//!   reads the sent text from a clean state, so the rest of a string, a quoted name, a
+//!   dollar-quoted body, a word or a number is not what the document shows. Inside an
+//!   executable comment or an optimizer hint (openers included) the server reads code, so
+//!   that is refused too. So is a selection that reaches `COPY` rows from inside their
+//!   statement: the rows are data. White space and plain comments are not cut: text selected
+//!   inside a `--` comment runs as selected, and the rest of a `/* … */` comment is trivia. A
+//!   selection that starts inside a client command's line is `UnsupportedClientCommand`.
 //! - `AsOne` (and `SmartExpand` without a boundary inside) returns one `Verbatim` unit, the
 //!   selection without its outer white space, only when that text, read alone, is certain and
 //!   holds no client command and no `COPY` data. No M3a Run action chooses it.
 //!
 //! **Several carets** each resolve as a statement (`Ask` runs the statement: a chooser per
-//! caret has no meaning); the units are united by range, in text order.
+//! caret has no meaning); the units are united by range, in text order. Units that overlap
+//! without being the same range are refused (`OverlappingUnits`).
 
 mod candidates;
 mod policy;
@@ -140,6 +146,22 @@ fn resolve_many(
     }
     units.sort_by_key(|u: &UnitSpan| (u.range.start(), u.range.end()));
     units.dedup_by_key(|u| u.range);
+    // Two units that share text without being the same range (a selection inside the
+    // statement another caret is in) would run part of a statement twice: refused.
+    let mut reach = TextSize::from(0);
+    let mut shared = Vec::new();
+    for u in &units {
+        if u.range.start() < reach {
+            shared.push(AmbiguousBoundary {
+                at: TextRange::new(u.range.start(), reach.min(u.range.end())),
+                reason: AmbiguityReason::OverlappingUnits,
+            });
+        }
+        reach = reach.max(u.range.end());
+    }
+    if !shared.is_empty() {
+        return RangeResolution::Ambiguous(sorted(shared));
+    }
     let (Some(first), Some(last)) = (units.first(), units.last()) else {
         return RangeResolution::NothingToRun;
     };
@@ -356,7 +378,14 @@ impl<'a> View<'a> {
     ) -> RangeResolution {
         let text = self.doc.text();
         let stmt = stmts[i];
-        if let Some(refused) = self.refusal(&[stmt], None) {
+        // What execution refuses, whichever mode asks.
+        let run = View {
+            mode: SplitMode::Execution,
+            ..*self
+        };
+        let executing = self.mode == SplitMode::Execution;
+        let statement_refused = run.refusal(&[stmt], None);
+        if executing && let Some(refused) = statement_refused {
             return refused;
         }
         let units = |s: &[&Stmt]| -> Vec<UnitSpan> { s.iter().map(|s| UnitSpan::of(s)).collect() };
@@ -375,21 +404,37 @@ impl<'a> View<'a> {
         let kept = dedupe(tried);
         let kinds: Vec<CandidateKind> = kept.iter().map(|(k, _)| *k).collect();
         let chosen = kinds[preselect(&kinds, remembered)];
-        // Why each candidate would not run. Only a run of several statements can be refused
-        // here: the statement at the caret is not.
+        // Why execution would not run each candidate. Only a run of several statements can
+        // be refused here: the statement at the caret was asked above.
         let refusal = |kind: CandidateKind| match kind {
-            CandidateKind::FromCaret => self.refusal(&stmts[i..], Some(from_caret)),
-            CandidateKind::WholeScript => self.refusal(stmts, Some(whole(text))),
+            CandidateKind::FromCaret => run.refusal(&stmts[i..], Some(from_caret)),
+            CandidateKind::WholeScript => run.refusal(stmts, Some(whole(text))),
             _ => None,
         };
         // The candidate the chooser would open on does not run: Run says why, and never
-        // runs a smaller range in its place.
-        if let Some(refused) = refusal(chosen) {
-            return refused;
+        // runs a smaller range in its place. The preview says so too for a client command;
+        // an uncertain range it returns, to be drawn as uncertain.
+        let chosen_refused = refusal(chosen);
+        match &chosen_refused {
+            Some(refused) if executing => return refused.clone(),
+            Some(refused @ RangeResolution::UnsupportedClientCommand { .. }) => {
+                return refused.clone();
+            }
+            _ => {}
         }
+        // Where Run will run or ask, the preview offers exactly what Run offers: a candidate
+        // execution refuses is left out in both modes, so a chooser is never previewed over
+        // an immediate run. Where Run will refuse (an uncertain statement at the caret, an
+        // uncertain range to open on), the preview keeps the uncertain candidates to draw.
+        let runs = statement_refused.is_none() && chosen_refused.is_none();
+        let offered = |kind: CandidateKind| match refusal(kind) {
+            None => true,
+            Some(RangeResolution::UnsupportedClientCommand { .. }) => false,
+            Some(_) => !runs,
+        };
         let mut candidates: Vec<Candidate> = kept
             .into_iter()
-            .filter(|(kind, _)| refusal(*kind).is_none())
+            .filter(|(kind, _)| offered(*kind))
             .map(|(kind, units)| Candidate {
                 kind,
                 label: label_for(text, &units),
@@ -524,28 +569,12 @@ fn separate(doc: &DocSnapshot, r: TextRange) -> RangeResolution {
     if let Some(c) = doc.editor_split().client.iter().find(inside) {
         return RangeResolution::UnsupportedClientCommand { at: c.range };
     }
-    // The server reads what is sent from a clean state. A selection that starts inside a
-    // token would send that token's tail as code: a string's or a quoted name's rest, a
-    // dollar-quoted body, `COPY` data. In a plain comment the tail is trivia and never sent;
-    // in an executable comment or a hint the server reads code. `split_selection` marks
-    // such a tail uncertain itself; this refusal does not depend on it.
-    let start = doc.split_start_at(r.start());
-    let reason = match start.lex {
-        LexState::Initial | LexState::InBlockComment { .. } => None,
-        LexState::InExecutableComment { .. } | LexState::InHintComment { .. } => {
-            Some(AmbiguityReason::AmbiguousCommentEnd)
-        }
-        _ => Some(AmbiguityReason::UnterminatedConstruct),
-    };
-    if let Some(reason) = reason {
-        let lexed = doc.lexed();
-        let tail = lexed
-            .token_at(r.start())
-            .map_or(r.end(), |i| lexed.range(i).end().min(r.end()));
-        return RangeResolution::Ambiguous(vec![AmbiguousBoundary {
-            at: TextRange::new(r.start(), tail.max(r.start())),
-            reason,
-        }]);
+    // The server reads what is sent from a clean state, so the selection's ends must fall
+    // between the document's tokens, and it must not reach `COPY` rows from inside their
+    // statement. `split_selection` marks such cuts itself; this refusal does not depend on it.
+    let cuts = doc.selection_cuts(r);
+    if !cuts.is_empty() {
+        return RangeResolution::Ambiguous(cuts);
     }
     let split = doc.split_selection(r, SplitMode::Execution);
     if let Some(c) = split.client.iter().find(|c| !c.supported) {
@@ -567,11 +596,36 @@ fn separate(doc: &DocSnapshot, r: TextRange) -> RangeResolution {
 /// The selection `r` as one unit sent as written: its text without the outer white space,
 /// when that text read alone is certain and holds nothing a server cannot take.
 fn verbatim(doc: &DocSnapshot, r: TextRange) -> RangeResolution {
+    // The part of a comment at either end is trivia in the document and is not sent: read
+    // alone, the rest of a `/* … */` would be code, and its quotes would pair with the
+    // quotes after it.
+    let r = doc.without_comment_parts(r);
     let piece = &doc.text()[r];
     let lead = piece.len() - piece.trim_start().len();
     let trimmed = piece.trim();
     let by = r.start() + size(lead);
     let range = TextRange::at(by, size(trimmed.len()));
+    // Sent as written it must still be what the document shows: no token cut at either end,
+    // no `COPY` rows reached from inside their statement.
+    let cuts = doc.selection_cuts(range);
+    if !cuts.is_empty() {
+        return RangeResolution::Ambiguous(cuts);
+    }
+    // The document's `COPY` rows are data whatever the text reads as alone.
+    let exec = doc.execution_split();
+    let first = exec
+        .items
+        .partition_point(|it| it.smart().end() < range.start())
+        .saturating_sub(1);
+    let rows = exec.items[first..]
+        .iter()
+        .take_while(|it| it.smart().start() < range.end())
+        .filter_map(Item::statement)
+        .filter_map(|s| s.copy_data)
+        .find(|d| d.rows.start() < range.end() && range.start() < d.rows.end());
+    if let Some(d) = rows {
+        return RangeResolution::UnsupportedClientCommand { at: d.rows };
+    }
     let clean = SplitStart {
         lex: LexState::Initial,
         delimiter: doc.split_start_at(by).delimiter,
@@ -598,7 +652,7 @@ fn verbatim(doc: &DocSnapshot, r: TextRange) -> RangeResolution {
     if let Some(s) = alone.statements().find(|s| !alone.is_certain(s)) {
         return refused_at(s.strict + by);
     }
-    if alone.statements().next().is_none() {
+    if trimmed.is_empty() || alone.statements().next().is_none() {
         return RangeResolution::NothingToRun;
     }
     RangeResolution::Units(vec![UnitSpan {

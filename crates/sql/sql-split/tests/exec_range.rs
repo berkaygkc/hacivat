@@ -830,10 +830,13 @@ fn smart_expand_takes_the_statements_a_boundary_joins() {
     assert_eq!(texts(sql, &r), ["SELECT 1", "SELECT 22"]);
     assert!(units_of(&r).iter().all(|u| u.kind == UnitKind::Statement));
     // Inside one statement: the selection as written.
-    let r = exec(&d, &sel(span(sql, "SELECT 2")), &p);
-    assert_eq!(texts(sql, &r), ["SELECT 2"]);
+    let r = exec(&d, &sel(span(sql, "SELECT 22")), &p);
+    assert_eq!(texts(sql, &r), ["SELECT 22"]);
     assert_eq!(units_of(&r)[0].kind, UnitKind::Verbatim);
     assert_eq!(units_of(&r)[0].key, None);
+    // But never with a token cut: `SELECT 2` of `SELECT 22` is not what the document shows.
+    let r = exec(&d, &sel(span(sql, "SELECT 2")), &p);
+    assert_eq!(reasons(&r), [AmbiguityReason::UnterminatedConstruct]);
 }
 
 #[test]
@@ -857,7 +860,7 @@ fn a_verbatim_selection_is_trimmed_and_checked() {
     let copy = "COPY t FROM STDIN;\n1\t2\n\\.\nSELECT 1;";
     assert!(matches!(
         exec(&pg(copy), &sel(0..copy.len()), &p),
-        RangeResolution::UnsupportedClientCommand { at } if &copy[at] == "COPY t FROM STDIN;\n1\t2\n"
+        RangeResolution::UnsupportedClientCommand { at } if &copy[at] == "1\t2\n"
     ));
     // An uncertain boundary inside it: nothing is sent (R-M3-24).
     let amb = "SELECT 1 /*! ; */ ;";
@@ -955,14 +958,8 @@ fn ask_in_execution_mode_leaves_out_what_it_would_refuse() {
     // offered; one candidate is left and runs directly.
     let first = exec(&d, &caret(1), &ExecPolicy::default());
     assert_eq!(texts(sql, &first), ["SELECT 1"]);
-    // The preview offers the same statement first.
-    let preview = editor(&d, &caret(1), &ExecPolicy::default());
-    let (c, preselect) = candidates_of(&preview);
-    assert_eq!(c[preselect].units, units_of(&first));
-    assert_eq!(
-        kinds(&preview),
-        [CandidateKind::Statement, CandidateKind::WholeScript]
-    );
+    // The preview shows the same: one statement, no chooser over an immediate run.
+    assert_eq!(editor(&d, &caret(1), &ExecPolicy::default()), first);
     // No candidate of an execution-mode chooser ever holds the uncertain statement.
     let four = "SELECT 0;\nSELECT 1;\nSELECT 2;\nSELECT 3 /*! ; */;\nSELECT 4;";
     let d4 = mysql(four);
@@ -1316,6 +1313,332 @@ fn a_whole_script_label_is_bounded() {
     assert_eq!(c[1].units.len(), 2_000);
     assert!(c[1].label.chars().count() <= LABEL_MAX_CHARS);
     assert!(c[1].label.starts_with("SELECT 1; SELECT 1;"));
+}
+
+// --- review round 1 -----------------------------------------------------------------------
+
+/// `marked` without its `«…»`, and the selection they mark.
+fn marked_sel(marked: &str) -> (String, std::ops::Range<usize>) {
+    let a = marked.find('«').expect("a selection start");
+    let rest = marked.replacen('«', "", 1);
+    let b = rest.find('»').expect("a selection end");
+    (rest.replacen('»', "", 1), a..b)
+}
+
+/// The reasons Run refuses the selection of `marked` with, the same in both modes and under
+/// every selection policy that runs the selection itself.
+fn refused(marked: &str, id: DialectId, flavor: ClientFlavor) -> Vec<AmbiguityReason> {
+    let (sql, r) = marked_sel(marked);
+    let d = doc_in(&sql, id, flavor);
+    let x = exec(&d, &sel(r.clone()), &ExecPolicy::default());
+    assert_eq!(
+        editor(&d, &sel(r.clone()), &ExecPolicy::default()),
+        x,
+        "{marked:?}"
+    );
+    let as_one = exec(&d, &sel(r), &selecting(SelectionPolicy::AsOne));
+    assert!(
+        !matches!(as_one, RangeResolution::Units(_)),
+        "{marked:?} as one: {as_one:?}"
+    );
+    match x {
+        RangeResolution::Ambiguous(b) => {
+            assert!(!b.is_empty());
+            b.iter().map(|a| a.reason).collect()
+        }
+        other => panic!("{marked:?}: expected a refusal, got {other:?}"),
+    }
+}
+
+// I1: COPY rows are never in a sent range.
+#[test]
+fn a_selection_reaching_copy_rows_from_inside_their_statement_is_refused() {
+    for marked in [
+        "COPY t FROM STDIN;«\nDROP TABLE x;\nDELETE FROM y;\n»\\.\nSELECT 9;",
+        "COPY t FROM STDIN«;\nDROP TABLE x;\n»\\.\nSELECT 9;",
+        "COPY t FROM STD«IN;\nDROP TABLE x;\n»\\.\nSELECT 9;",
+        "COPY t FROM STDIN;\n«DROP TABLE x;\n»\\.\nSELECT 9;",
+        "COPY t FROM STDIN;\nDROP «TABLE x;\n»\\.\nSELECT 9;",
+    ] {
+        let r = refused(marked, DialectId::Postgres, ClientFlavor::Psql);
+        assert!(
+            r.contains(&AmbiguityReason::UnterminatedConstruct),
+            "{marked:?}: {r:?}"
+        );
+    }
+    // The statement after the data, selected alone, runs.
+    let (sql, r) = marked_sel("COPY t FROM STDIN;\nDROP TABLE x;\n\\.\n«SELECT 9;»");
+    assert_eq!(
+        texts(&sql, &exec(&pg(&sql), &sel(r), &ExecPolicy::default())),
+        ["SELECT 9"]
+    );
+}
+
+// I2: the selection path answers what the caret path answers at the same offset.
+#[test]
+fn a_selection_inside_an_opener_or_a_prefixed_string_answers_as_the_caret_does() {
+    use AmbiguityReason::{AmbiguousCommentEnd, UnterminatedConstruct};
+    let (my, maria) = (DialectId::MySql, DialectId::MariaDb);
+    let cli = ClientFlavor::MySqlCli;
+    for (marked, id) in [
+        (
+            "SELECT 1 /*«! , \"*/ DROP TABLE t;» -- \" */ ; SELECT 2;",
+            my,
+        ),
+        ("SELECT /*«+ \"*/ DROP TABLE u;» -- \" */ 2;", my),
+        (
+            "SELECT 1 /*M«! , \"*/ DROP TABLE t;» -- \" */ ; SELECT 2;",
+            maria,
+        ),
+        ("SELECT 1 /*«! SELECT 2; */ ; DROP TABLE t;»", my),
+    ] {
+        assert_eq!(
+            refused(marked, id, cli),
+            [AmbiguousCommentEnd],
+            "{marked:?}"
+        );
+        // The caret at the selection's start: the same refusal.
+        let (sql, r) = marked_sel(marked);
+        let at_caret = exec(
+            &doc_in(&sql, id, cli),
+            &caret(r.start),
+            &ExecPolicy::largest(),
+        );
+        assert!(
+            matches!(at_caret, RangeResolution::Ambiguous(_)),
+            "{marked:?}: {at_caret:?}"
+        );
+    }
+    for (marked, statement) in [
+        (
+            "SELECT E«'a\\'; DROP TABLE t; --'»;\nSELECT 2;",
+            "SELECT E'a\\'; DROP TABLE t; --'",
+        ),
+        // In a `U&''` string a backslash escapes no quote: the string ends at `\'`.
+        (
+            "SELECT U&«'a\\'; DROP TABLE t; --'»;\nSELECT 2;",
+            "SELECT U&'a\\'",
+        ),
+    ] {
+        assert_eq!(
+            refused(marked, DialectId::Postgres, ClientFlavor::Psql),
+            [UnterminatedConstruct],
+            "{marked:?}"
+        );
+        // The caret there is inside the string: it runs the whole statement, never a part.
+        let (sql, r) = marked_sel(marked);
+        let at_caret = exec(&pg(&sql), &caret(r.start), &ExecPolicy::largest());
+        assert_eq!(texts(&sql, &at_caret), [statement], "{marked:?}");
+    }
+}
+
+// I3: a start between a backslash and the quote it escapes.
+#[test]
+fn a_selection_that_cuts_a_backslash_escape_is_refused() {
+    for (marked, id, flavor) in [
+        (
+            "SELECT 'a\\«'; DROP TABLE t; -- ';»\nSELECT 2;",
+            DialectId::MySql,
+            ClientFlavor::MySqlCli,
+        ),
+        (
+            "SELECT E'a\\«'; DROP TABLE t; -- ';»\nSELECT 2;",
+            DialectId::Postgres,
+            ClientFlavor::Psql,
+        ),
+        (
+            "SELECT \"a\\«\"; DROP TABLE t; -- \";»\nSELECT 2;",
+            DialectId::MySql,
+            ClientFlavor::MySqlCli,
+        ),
+    ] {
+        assert_eq!(
+            refused(marked, id, flavor),
+            [AmbiguityReason::UnterminatedConstruct],
+            "{marked:?}"
+        );
+    }
+}
+
+#[test]
+fn a_selection_that_cuts_a_word_is_refused_and_a_comments_text_runs_as_selected() {
+    for marked in [
+        "«DROP TABLE cust»omers_backup;",
+        "DELETE FROM t WHERE id = 1«2; SELECT 2;»",
+        "SEL«ECT 1»;",
+    ] {
+        assert_eq!(
+            refused(marked, DialectId::Postgres, ClientFlavor::Psql),
+            [AmbiguityReason::UnterminatedConstruct],
+            "{marked:?}"
+        );
+    }
+    // A statement kept in a `--` comment, selected to be run: plain comments are not tokens
+    // a selection cuts.
+    let (sql, r) = marked_sel("-- old: «SELECT 1;» kept\nSELECT 2;");
+    assert_eq!(
+        texts(&sql, &exec(&pg(&sql), &sel(r), &ExecPolicy::default())),
+        ["SELECT 1"]
+    );
+}
+
+// Found by the properties at 1M cases: sent as written from inside a block comment, the
+// comment's quote paired with a quote in the COPY rows and the whole selection read as one
+// certain statement.
+#[test]
+fn a_verbatim_selection_never_holds_the_documents_copy_rows() {
+    let (sql, r) = marked_sel("/*«' */ SELECT 1;\nCOPY t FROM STDIN;\nit's»\n\\.\n");
+    let d = pg(&sql);
+    let x = exec(&d, &sel(r.clone()), &selecting(SelectionPolicy::AsOne));
+    assert!(
+        matches!(
+            x,
+            RangeResolution::Ambiguous(_) | RangeResolution::UnsupportedClientCommand { .. }
+        ),
+        "{x:?}"
+    );
+    // With no quote in the rows the refusal names them.
+    let (plain, pr) = marked_sel("/*«x */ SELECT 1;\nCOPY t FROM STDIN;\nrow\n»\\.\n");
+    let x = exec(&pg(&plain), &sel(pr), &selecting(SelectionPolicy::AsOne));
+    assert!(
+        matches!(x, RangeResolution::UnsupportedClientCommand { at } if &plain[at] == "row\n"),
+        "{x:?}"
+    );
+    // Expanded, it is the document's two statements, the COPY with its data apart.
+    let x = exec(&d, &sel(r), &selecting(SelectionPolicy::SmartExpand));
+    assert_eq!(texts(&sql, &x), ["SELECT 1", "COPY t FROM STDIN"]);
+    assert!(matches!(units_of(&x)[1].kind, UnitKind::CopyIn { data } if &sql[data] == "it's\n"));
+    // The part of a comment at the selection's start is not sent.
+    let (sql, r) = marked_sel("/* a «b */ SELECT 1 /* c» d */;");
+    let x = exec(&pg(&sql), &sel(r), &selecting(SelectionPolicy::AsOne));
+    assert_eq!(texts(&sql, &x), ["SELECT 1"]);
+}
+
+// M5: units that overlap without being the same range.
+#[test]
+fn a_selection_and_a_caret_in_the_same_statement_are_refused() {
+    let sql = "DELETE FROM t WHERE id = 1;\nSELECT 2;";
+    let d = pg(sql);
+    let both = [
+        CaretOrSelection::Selection(TextRange::new(at(0), at(13))),
+        CaretOrSelection::Caret(at(after(sql, "WHERE "))),
+    ];
+    for mode in [SplitMode::Execution, SplitMode::Editor] {
+        let r = resolve(&d, &both, &ExecPolicy::default(), mode, None, None);
+        let RangeResolution::Ambiguous(b) = &r else {
+            panic!("{mode:?}: {r:?}")
+        };
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].reason, AmbiguityReason::OverlappingUnits);
+        assert_eq!(&sql[b[0].at], "DELETE FROM t");
+    }
+    // The same range twice is one unit; disjoint ranges both run.
+    let twice = [
+        CaretOrSelection::Selection(TextRange::new(at(0), at(26))),
+        CaretOrSelection::Caret(at(3)),
+    ];
+    assert_eq!(
+        texts(sql, &exec(&d, &twice, &ExecPolicy::default())),
+        ["DELETE FROM t WHERE id = 1"]
+    );
+    let apart = [
+        CaretOrSelection::Selection(TextRange::new(at(0), at(13))),
+        CaretOrSelection::Caret(at(after(sql, "SELECT"))),
+    ];
+    assert_eq!(
+        texts(sql, &exec(&d, &apart, &ExecPolicy::default())),
+        ["DELETE FROM t", "SELECT 2"]
+    );
+}
+
+// M6: a selection is its own script. Inside a psql conditional branch the caret is refused
+// (psql may skip the branch); a selection of the same statement runs as selected.
+#[test]
+fn a_selection_inside_a_psql_conditional_branch_runs_as_selected() {
+    let (sql, r) = marked_sel("\\if false\n«DROP TABLE t;»\n\\endif\nSELECT 2;");
+    let d = pg(&sql);
+    let at_caret = exec(&d, &caret(r.start + 2), &ExecPolicy::largest());
+    assert_eq!(reasons(&at_caret), [AmbiguityReason::ClientCommand]);
+    for mode in [SplitMode::Execution, SplitMode::Editor] {
+        let r = resolve(
+            &d,
+            &sel(r.clone()),
+            &ExecPolicy::default(),
+            mode,
+            None,
+            None,
+        );
+        assert_eq!(texts(&sql, &r), ["DROP TABLE t"], "{mode:?}");
+    }
+}
+
+// M4: under Ask the preview and Run give the same answer wherever Run runs or asks.
+#[test]
+fn the_preview_never_shows_a_chooser_over_an_immediate_run() {
+    // "Whole script" would cross the uncertain statement: Run runs `SELECT 1` at once, and
+    // the preview shows that one statement, not a chooser.
+    let sql = "SELECT 1; SELECT 2 /*! ; */ ;";
+    let d = mysql(sql);
+    let run = exec(&d, &caret(7), &ExecPolicy::default());
+    assert_eq!(texts(sql, &run), ["SELECT 1"]);
+    assert_eq!(editor(&d, &caret(7), &ExecPolicy::default()), run);
+
+    // With more than one runnable candidate both show the same chooser, without the entry
+    // that cannot run.
+    let three = "SELECT 0 /*! ; */;\nSELECT 1;\nSELECT 2;";
+    let d3 = mysql(three);
+    let c = caret(after(three, "SELECT 1"));
+    let run = exec(&d3, &c, &ExecPolicy::default());
+    assert_eq!(
+        kinds(&run),
+        [CandidateKind::Statement, CandidateKind::FromCaret]
+    );
+    assert_eq!(editor(&d3, &c, &ExecPolicy::default()), run);
+
+    // Where Run refuses, the preview keeps the uncertain range to draw: in the uncertain
+    // statement itself, and when the remembered kind is the one that cannot run.
+    let c3 = caret(after(sql, "SELECT 2"));
+    assert!(matches!(
+        exec(&d, &c3, &ExecPolicy::default()),
+        RangeResolution::Ambiguous(_)
+    ));
+    assert!(matches!(
+        editor(&d, &c3, &ExecPolicy::default()),
+        RangeResolution::Ask { .. }
+    ));
+    let remembered = Some(CandidateKind::WholeScript);
+    let run = resolve(
+        &d,
+        &caret(7),
+        &ExecPolicy::default(),
+        SplitMode::Execution,
+        None,
+        remembered,
+    );
+    let preview = resolve(
+        &d,
+        &caret(7),
+        &ExecPolicy::default(),
+        SplitMode::Editor,
+        None,
+        remembered,
+    );
+    assert!(matches!(run, RangeResolution::Ambiguous(_)));
+    let (c, p) = candidates_of(&preview);
+    assert_eq!(c[p].kind, CandidateKind::WholeScript);
+    assert_eq!(c[p].units.len(), 2);
+}
+
+// M7: no invisible character in a label.
+#[test]
+fn labels_show_zero_width_and_tag_characters() {
+    let sql = "SELECT 'a\u{200B}b\u{FEFF}c\u{00AD}d\u{E0001}e\u{200D}f';\nSELECT 2;";
+    let r = resolve_at(sql, "SELECT");
+    let (c, _) = candidates_of(&r);
+    assert_eq!(
+        c[0].label,
+        "SELECT 'a<U+200B>b<U+FEFF>c<U+00AD>d<U+E0001>e<U+200D>f'"
+    );
 }
 
 // --- performance (HV-EXEC-01: ≤ 2 ms p95 on a 50k-line file, warm) --------------------------

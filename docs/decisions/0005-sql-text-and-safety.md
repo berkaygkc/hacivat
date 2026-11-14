@@ -316,7 +316,8 @@ the preview showed as exact, and an uncertain preview never runs (R-M3-24).
 **What is sent.** A unit's range is the statement's strict range: no terminator (MySQL rejects
 it over the protocol) and no leading comments, which are the unit's `title_comment`. A `COPY …
 FROM STDIN` statement is `UnitKind::CopyIn` with its data range; the rows are never in a sent
-range.
+range, by a caret or by a selection (a selection that reaches the rows from inside their
+statement is refused, below).
 
 **The statement at a caret** (`alg/10` SQL-SPLIT-04 step 2), in order:
 1. The statement whose smart range holds the caret, ends included. The smart range is the split
@@ -342,12 +343,20 @@ remembered kind is preselected when offered, else the statement.
 - In execution mode a candidate that would be refused is left out. If the candidate the
   chooser would open on (the remembered kind) is the refused one, the answer is that refusal:
   Run never runs a smaller range in its place.
+- Wherever Run runs or asks, the preview gives the same answer: it leaves out the candidates
+  execution refuses too. So when the filter leaves one candidate, the preview shows that one
+  statement and Run runs it; a chooser is never previewed over an immediate run (review M4).
+  The other way, keeping a chooser with one entry, was rejected: D-011 runs directly when
+  there is one candidate. Where Run refuses (an uncertain statement at the caret, an
+  uncertain range to open on), the preview keeps the uncertain candidates, to draw them.
 - The subquery candidate needs a `SubqueryOracle` (M5). A range it names outside the statement
   at the caret is ignored.
 - A label is the candidate's text from its first leading comment, with runs of white space and
-  control characters as one space. A bidirectional formatting character is shown as
-  `<U+XXXX>`, so a label reads in the order the server reads the SQL. A label holds at most
-  1,024 characters; the popup truncates further.
+  control characters as one space. Every invisible formatting character is shown as
+  `<U+XXXX>`: the bidirectional controls, which would reorder the SQL, and the zero-width,
+  soft-hyphen, word-joiner, BOM and tag characters (U+00AD, U+200B–U+200F, U+2060–U+2064,
+  U+FEFF, U+E0000–U+E007F), which would hide a difference. A label holds at most 1,024
+  characters; the popup truncates further.
 
 **Refusals (fail closed).**
 - A run of several statements (whole script, from the caret, below the caret, several carets,
@@ -357,28 +366,66 @@ remembered kind is preselected when offered, else the statement.
 - A selection has one answer for both modes and never holds a heuristic statement. It is split
   on its own, from the lexer state and client delimiter at its start. Any uncertain boundary or
   unsupported client command in it refuses the whole selection.
-- A selection that starts inside a token is refused. The server reads the sent text from a
-  clean state, so the rest of a string, a quoted name, a dollar-quoted body or `COPY` data
-  would run as code. The rest of a plain comment is trivia and never sent. Inside an
-  executable comment or an optimizer hint the server reads code, so that is refused too. A
-  selection that starts inside a client command's line is `UnsupportedClientCommand`.
-- This is refused twice, at the source and in `exec_range`. Task 13's properties found that
-  `DocSnapshot::split_selection` returned such a tail as a certain statement (`SELECT 'a;
-  DROP TABLE t; '` selected from inside the literal gave ` DROP TABLE t; '` as `Exact`) and
-  panicked on an executable comment's tail whose third byte is inside a character. The
-  splitter now marks the statement that holds a carried tail uncertain
-  (`UnterminatedConstruct`), marks everything after an executable comment's or hint's tail
-  uncertain (`AmbiguousCommentEnd`), reads such a tail without assuming an opener, and
-  `split_selection` returns the rest of a client command's line as an unsupported client
-  segment. `exec_range` keeps its own refusal before it calls `split_selection`.
+- **A selection is only what it looks like when its ends fall between the document's tokens.**
+  A unit is sent alone and the server reads it from a clean state, so
+  `DocSnapshot::selection_cuts` refuses, from the document's own tokens and `COPY` ranges and
+  never from lexing the selected text by itself:
+  - a start inside a token, after its first byte: the rest of a string, a quoted name or a
+    dollar-quoted body (a prefix such as `E` or `U&` and the opening quote are part of the
+    token), of a word, a number or an operator (`UnterminatedConstruct`), and the inside of an
+    executable comment or a hint, openers `/*!`, `/*M!` and `/*+` included
+    (`AmbiguousCommentEnd`, as the caret path answers there);
+  - an end inside a token (`«DROP TABLE cust»omers_backup`);
+  - a start inside a `COPY … FROM STDIN` statement, after its first byte, with rows selected:
+    the rows are data;
+  - a start inside a `--` comment that runs past the comment's end: read alone, a quote in
+    the comment's text would pair with the quotes after it.
+  White space and plain comments are not cut. The part of a comment at either end of a
+  selection is left out as trivia, and text selected wholly inside one `--` comment runs as
+  selected, so a statement kept in a comment can be run. A selection that starts inside a
+  client command's line is `UnsupportedClientCommand`.
+- After a client command, a client delimiter or `COPY` data the splitter lexes again, and its
+  tokens can differ from the document's one lexing (a quote in `COPY` data opens a "string"
+  there). Both readings are asked, and either one saying "inside a token" refuses. Cost: in a
+  dump whose `COPY` data holds an odd number of quotes, a selection after that data is
+  refused; the caret still runs each statement.
+- The same rule is applied twice: `exec_range` refuses on `selection_cuts` before it splits,
+  and `DocSnapshot::split_selection` marks the cuts itself for any other caller. There the
+  rest of a token the selection starts inside, with what follows it in its statement, is one
+  `Heuristic` statement, and splitting goes on from the document's own state after the token.
+  So the split never runs out of step with the document: the rest of a string is never read
+  as code, nor the code after it as a string. Where the selection's own split reads a client
+  command or `COPY` data that the document does not have at that place (a selection that
+  starts in the middle of a line can make the line's rest look like a command line), every
+  statement of it is `Heuristic`.
+- History of this rule. Task 13's properties first found that `split_selection` returned a
+  carried token's tail as a certain statement (`SELECT 'a; DROP TABLE t; '` selected from
+  inside the literal gave ` DROP TABLE t; '` as `Exact`) and panicked on an executable
+  comment's tail whose third byte is inside a character. The first fix judged "inside a token"
+  from the lexer state after re-lexing the token's first bytes. The review found three holes
+  in that: a start inside an opener or after a string prefix (that state is "plain comment"
+  or "clean"), a start between a backslash and the quote it escapes (the mark landed on a
+  one-byte token and the string's rest was split as code), and `COPY` rows reached from the
+  `COPY` line. Deciding from the document's tokens and `COPY` ranges closes all three. The
+  splitter's own mark on a carried state stays, for callers of `split_from`.
 - Cost: statements selected inside a function body (a dollar-quoted string) do not run in
   M3a. Listed for the PO.
+- **A selection is its own script.** A psql `\if` before it is not part of it: a statement
+  selected inside an `\if false` branch runs as selected, while a caret on that statement is
+  refused (`ClientCommand`), because psql may skip the branch. Selecting text is the explicit
+  request to run that text (review M6). Listed for the PO beside the dollar-body note.
 - `AsOne` (and `SmartExpand` with no boundary inside) returns one `Verbatim` unit only when
-  the text, read alone from a clean state, is certain and holds no client command and no
-  `COPY` data. No M3a Run action chooses it, and running a `Verbatim` unit is M3b. The
-  catalogue sends such a selection as written even when it ends inside a string; M3a answers
-  `Ambiguous` (register entry SEL-07).
-- Several carets each resolve as a statement: under Ask there is no chooser per caret.
+  no token is cut at either end and the text, read alone from a clean state, is certain and
+  holds no client command and no `COPY` data. The part of a comment at either end is left
+  out, and a text that overlaps the document's `COPY` rows is refused whatever it reads as
+  alone: sent from inside a block comment, the comment's quote paired with a quote in the
+  rows and the whole selection read as one certain statement (found by the properties). No M3a Run action chooses it, and running a
+  `Verbatim` unit is M3b. The catalogue sends such a selection as written even when it ends
+  inside a string; M3a answers `Ambiguous` (register entry SEL-07).
+- Several carets each resolve as a statement: under Ask there is no chooser per caret. Units
+  from several carets or selections that overlap without being the same range (a selection
+  inside the statement another caret is in) are refused (`AmbiguityReason::OverlappingUnits`):
+  running both would run part of a statement twice.
 
 **Goldens (clean room, ALG-TEST-01).** `sql-testkit/corpus/datagrip/{caret,sel,choose}.toml`
 hold the CARET, SEL and CHOOSE families of `datagrip/13` §3.6–§3.8. The scenarios and the
@@ -393,8 +440,9 @@ document's "Expected hint" column is not used and `datagrip_observed` is empty.
 | CHOOSE | 7 | 3 | 0 | 4: CHOOSE-04 (`dialect:mssql`), CHOOSE-05, -06, -07 (`app-ui`) |
 
 A case that needs a parse tree (`requires = ["cst"]`) keeps M5's answer in `expect` and runs
-`expect_without_cst`, where "smallest subquery or statement" falls back to the statement. The
-meta-test pins the ID lists to the document's numbering, requires every ID exactly once, and
+`expect_without_cst`, where "smallest subquery or statement" falls back to the statement.
+Every expected unit is written out as text, taken once from the fixture or the case's input:
+no case names a statement by its index in the split under test. The meta-test pins the ID lists to the document's numbering, requires every ID exactly once, and
 asserts the skip list and the counts above exactly; a requirement the runner lacks is an error
 unless the case is skipped with that reason. `divergences.toml` records CHOOSE-01 (no subquery
 candidate: correlated) and SEL-07.
@@ -402,8 +450,15 @@ candidate: correlated) and SEL-07.
 **Tests.** `crates/sql/sql-split/tests/{d011_goldens,exec_range,exec_range_props,pg_differential}.rs`:
 - the properties run over generated text in every dialect and client flavor, at a caret, a
   selection and two carets, under every policy: execution returns only certain statements,
-  each of which read alone is exactly itself; what execution runs is what the preview shows,
-  and what the preview shows as exact, execution runs; every answer is well formed;
+  each of which read alone is exactly itself; where Run runs or asks the preview is the same
+  answer, and what the preview shows as exact, execution runs; a single selection's answer
+  equals what `split_selection` and `selection_cuts` say by hand; every answer is well formed;
+- the document-level property (`in_step`, in `split_props` and `exec_range_props`): a
+  certain unit of a selection never overlaps `COPY` rows, never overlaps a document token an
+  edge of the selection is inside, and starts and ends on a token boundary of the
+  whole-document lexing (or lies wholly inside one `--` comment). Re-splitting a unit alone
+  cannot see these: `DROP TABLE t` alone is itself. The generators hold an escape cut in two
+  (`E'a\'`, `'a\'`) and a quoted `*/` inside `/*! … */`, `/*+ … */` and `/*M! … */`;
 - the PostgreSQL differential: the ranges a whole-script Run sends equal libpg_query's
   statement ranges on six fixtures and six scripts, and the two fixtures the grammar cannot
   read (psql commands, `COPY` data) are pinned to their answers.

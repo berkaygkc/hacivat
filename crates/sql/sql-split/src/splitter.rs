@@ -639,7 +639,7 @@ struct Walker<'a, 's> {
 /// never certain. The rest of an executable comment or a hint is code to the server and a
 /// comment here, with no end both agree on: everything from it on is uncertain. The rest of a
 /// plain comment is trivia in both readings and is in no statement.
-fn carried_reason(start: &LexState) -> Option<AmbiguityReason> {
+pub(crate) fn carried_reason(start: &LexState) -> Option<AmbiguityReason> {
     match start {
         LexState::Initial | LexState::InBlockComment { .. } => None,
         LexState::InExecutableComment { .. } | LexState::InHintComment { .. } => {

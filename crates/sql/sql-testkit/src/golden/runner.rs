@@ -9,7 +9,7 @@ use sql_split::exec_range::{
     Candidate, CandidateKind, CaretOrSelection, ExecPolicy, InsidePolicy, OutsidePolicy,
     RangeResolution, SelectionPolicy, TextRange, TextSize, UnitKind, UnitSpan, resolve,
 };
-use sql_split::{DocSnapshot, SplitMode, SqlDocument, Stmt};
+use sql_split::{DocSnapshot, SplitMode, SqlDocument};
 
 use super::markers::extract;
 use super::{Case, Expect};
@@ -248,31 +248,16 @@ fn describe(r: &RangeResolution, doc: &DocSnapshot) -> String {
     }
 }
 
-fn stmt_ranges(stmts: &[Stmt], refs: &[usize]) -> Result<Vec<TextRange>, String> {
-    refs.iter()
-        .map(|n| {
-            stmts
-                .get(*n)
-                .map(|s| s.strict)
-                .ok_or_else(|| format!("the document has no statement {n}"))
-        })
-        .collect()
-}
-
 fn compare(expect: &Expect, got: &RangeResolution, doc: &DocSnapshot) -> Result<(), String> {
     let forms = [
-        expect.units.is_some(),
         expect.units_text.is_some(),
         expect.candidates.is_some(),
         expect.resolution.is_some(),
     ];
     if forms.iter().filter(|f| **f).count() != 1 {
-        return Err(
-            "expects exactly one of `units`, `units_text`, `candidates`, `resolution`".into(),
-        );
+        return Err("expects exactly one of `units_text`, `candidates`, `resolution`".into());
     }
     let wrong = |what: &str| Err(format!("expected {what}, got {}", describe(got, doc)));
-    let stmts: Vec<Stmt> = doc.execution_split().statements().copied().collect();
 
     if let Some(name) = &expect.resolution {
         let ok = match name.as_str() {
@@ -299,11 +284,12 @@ fn compare(expect: &Expect, got: &RangeResolution, doc: &DocSnapshot) -> Result<
         };
         let mut want = Vec::new();
         for s in specs {
-            want.push((kind(&s.kind)?, stmt_ranges(&stmts, &s.stmts)?));
+            let texts: Vec<&str> = s.units_text.iter().map(String::as_str).collect();
+            want.push((kind(&s.kind)?, texts));
         }
-        let have: Vec<(CandidateKind, Vec<TextRange>)> = candidates
+        let have: Vec<(CandidateKind, Vec<&str>)> = candidates
             .iter()
-            .map(|c| (c.kind, c.units.iter().map(|u| u.range).collect()))
+            .map(|c| (c.kind, unit_texts(&c.units, doc)))
             .collect();
         if want != have {
             return wrong(&format!("the candidates {specs:?}"));
@@ -317,14 +303,6 @@ fn compare(expect: &Expect, got: &RangeResolution, doc: &DocSnapshot) -> Result<
     let RangeResolution::Units(units) = got else {
         return wrong("units");
     };
-    if let Some(refs) = &expect.units {
-        let refs: Vec<usize> = refs.iter().map(|r| r.stmt).collect();
-        let want = stmt_ranges(&stmts, &refs)?;
-        let have: Vec<TextRange> = units.iter().map(|u| u.range).collect();
-        if want != have {
-            return wrong(&format!("the statements {refs:?}"));
-        }
-    }
     if let Some(want) = &expect.units_text
         && unit_texts(units, doc) != *want
     {

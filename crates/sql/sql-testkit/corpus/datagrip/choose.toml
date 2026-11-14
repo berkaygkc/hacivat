@@ -8,7 +8,7 @@ id = "CHOOSE-01"
 fixture = "FX-CARET-01"
 caret = { after = "SELECT id FROM recent r", occurrence = 1 }
 policy = { inside = "ask" }
-expect.candidates = [{ kind = "statement", stmts = [0] }, { kind = "whole_script", stmts = [0, 1] }]
+expect.candidates = [{ kind = "statement", units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c"] }, { kind = "whole_script", units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c", "SELECT 2"] }]
 expect.preselect = "statement"
 expect.label_starts = "-- FX-CARET-01 nested subquery and CTE (PostgreSQL) WITH recent AS ( SELECT id,"
 sources = ["alg/10 SQL-SPLIT-04 test cases (chooser → [statement, whole script] after dedupe)", "alg/20 HV-EXEC-02 steps 1–4", "divergences.toml CHOOSE-01"]
@@ -17,7 +17,7 @@ sources = ["alg/10 SQL-SPLIT-04 test cases (chooser → [statement, whole script
 id = "CHOOSE-02"
 input = "SELECT c.id, c.full_name, c.city, o.id AS order_id, o.status, o.ordered_at, oi.sku, oi.qty, oi.unit_price FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE c.is_active AND o.status IN ('paid', 'shipped') ORDER BY o.ordered_at DESC,   ┃c.full_name;\nSELECT 2;"
 policy = { inside = "ask" }
-expect.candidates = [{ kind = "statement", stmts = [0] }, { kind = "whole_script", stmts = [0, 1] }]
+expect.candidates = [{ kind = "statement", units_text = ["SELECT c.id, c.full_name, c.city, o.id AS order_id, o.status, o.ordered_at, oi.sku, oi.qty, oi.unit_price FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE c.is_active AND o.status IN ('paid', 'shipped') ORDER BY o.ordered_at DESC,   c.full_name"] }, { kind = "whole_script", units_text = ["SELECT c.id, c.full_name, c.city, o.id AS order_id, o.status, o.ordered_at, oi.sku, oi.qty, oi.unit_price FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE c.is_active AND o.status IN ('paid', 'shipped') ORDER BY o.ordered_at DESC,   c.full_name", "SELECT 2"] }]
 expect.labels = [
     "SELECT c.id, c.full_name, c.city, o.id AS order_id, o.status, o.ordered_at, oi.sku, oi.qty, oi.unit_price FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE c.is_active AND o.status IN ('paid', 'shipped') ORDER BY o.ordered_at DESC, c.full_name",
     "SELECT c.id, c.full_name, c.city, o.id AS order_id, o.status, o.ordered_at, oi.sku, oi.qty, oi.unit_price FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE c.is_active AND o.status IN ('paid', 'shipped') ORDER BY o.ordered_at DESC, c.full_name; SELECT 2",
@@ -28,7 +28,7 @@ sources = ["alg/20 HV-EXEC-02 step 3 (whitespace collapsed; the popup truncates 
 id = "CHOOSE-03"
 input = "-- top customers\nSELECT ┃1;\nSELECT 2;"
 policy = { inside = "ask" }
-expect.candidates = [{ kind = "statement", stmts = [0] }, { kind = "whole_script", stmts = [0, 1] }]
+expect.candidates = [{ kind = "statement", units_text = ["SELECT 1"] }, { kind = "whole_script", units_text = ["SELECT 1", "SELECT 2"] }]
 expect.labels = ["-- top customers SELECT 1", "-- top customers SELECT 1; SELECT 2"]
 sources = ["alg/20 HV-EXEC-02 step 3 (leading comments are kept in the label)", "alg/10 SQL-SPLIT-04 step 6"]
 

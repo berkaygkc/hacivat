@@ -17,9 +17,9 @@
 //! - `policy = { inside, outside, selection }` (defaults: D-011) and `remembered` (a kind);
 //! - `requires`: `cst` (the case needs a parse tree: M3a runs `expect_without_cst`, M5 runs
 //!   `expect`), or a capability M3a's runner never has, which then needs `skip = "<the same>"`;
-//! - `expect` / `expect_without_cst`: one of `units = [{ stmt = n }]` (the strict range of the
-//!   document's n-th statement), `units_text` (exact bytes), `candidates = [{ kind, stmts }]`,
-//!   `resolution = "nothing" | "ambiguous" | "unsupported_client_command"`; plus `unit_kinds`,
+//! - `expect` / `expect_without_cst`: one of `units_text` (each unit's exact bytes),
+//!   `candidates = [{ kind, units_text }]`, `resolution = "nothing" | "ambiguous" |
+//!   "unsupported_client_command"`; plus `unit_kinds`,
 //!   `titles` (each unit's title comment, `""` for none), `preselect`, `labels`,
 //!   `label_starts` (the preselected candidate's label);
 //! - `sources`: where the expectation comes from.
@@ -46,27 +46,21 @@ pub struct PolicySpec {
     pub selection: Option<String>,
 }
 
-/// One expected unit: the document's `stmt`-th statement (0-based, text order).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StmtRef {
-    pub stmt: usize,
-}
-
-/// One expected chooser candidate: its kind and the statements it runs.
+/// One expected chooser candidate: its kind and the exact text of each unit it runs.
+///
+/// Expectations are texts, never indices into the split under test: a case says what runs
+/// in the corpus's own words, so a wrong split cannot agree with itself.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateSpec {
     pub kind: String,
-    pub stmts: Vec<usize>,
+    pub units_text: Vec<String>,
 }
 
 /// What a case expects.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expect {
-    #[serde(default)]
-    pub units: Option<Vec<StmtRef>>,
     #[serde(default)]
     pub units_text: Option<Vec<String>>,
     #[serde(default)]
