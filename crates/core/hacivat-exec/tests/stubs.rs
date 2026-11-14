@@ -59,8 +59,6 @@ fn the_text_stubs_beneath_fail_closed() {
         ));
     }
     assert!(!head::cursor_eligible(&d, d.lexed().range(0)));
-    assert!(sql_oracle_pg::split_with_parser("SELECT 1; SELECT 2").is_err());
-    assert_eq!(sql_oracle_pg::on_parser_stack(|| 1), None);
     assert!(doc("").lexed().is_empty());
 }
 

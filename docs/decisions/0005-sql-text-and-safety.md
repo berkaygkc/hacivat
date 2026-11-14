@@ -187,3 +187,109 @@ text, the splitter one `Heuristic` statement, `exec_range::resolve` `NothingToRu
 `head::cursor_eligible` `false`, `split_with_parser` an error, and `lex_profile` an error for
 the engines M3a does not lex (SQL Server, ClickHouse, Oracle). `SqlDocument` and `DocSnapshot`
 work (they hold the text and its version; the execution split is computed once per snapshot).
+
+## m3a-t09 — the PostgreSQL parser oracle
+
+**One parser thread, not a thread per call (R-M3-3, R-M3-35).** Every libpg_query call runs as
+a job on one long-lived thread with a 16 MiB stack, `hacivat-pg-parser`. That covers `version`,
+`statement_count` and `split_with_parser`, and the scans and prefix parses behind them.
+`on_parser_stack` queues the job and waits for it:
+- A job that calls `on_parser_stack` again runs inline.
+- A job that panics returns `None`, and the thread stays.
+- Jobs from all threads run one at a time.
+- It blocks the caller until its job, and every job queued before it, has run. There is no
+  timeout, and a C call cannot be cancelled. No caller may use the oracle on the UI thread:
+  callers run it on a background executor and coalesce requests so only the latest waits
+  (Tasks 23 and 24). A timeout variant, which would only let a caller give up early, is left
+  for M3b.
+
+The plan asked for a fresh thread per call. That was rejected for three reasons:
+- libpg_query points fd 2 at a pipe for each parse and then points it back. The redirect is in
+  `pg_query_raw_parse` (compiled without `DEBUG`), which is behind both C calls this crate
+  parses with: `pg_query_parse_protobuf_opts` (`pg_query::parse`) and
+  `pg_query_split_with_parser` (`pg_query::split_with_parser`). The scans
+  (`pg_query_scan_tokens`) do not redirect. Two parses at once can restore each other's pipe
+  and leave stderr on a closed pipe for the rest of the process. A thread pool would race in
+  the same way.
+- A fresh thread per call leaks memory. Measured on macOS: about 8 KiB of resident memory per
+  thread (5,000 threads: +40 MiB; the same 5,000 calls on one thread: +64 KiB).
+- libpg_query also creates a pthread key per thread and never deletes it, and on Windows it
+  frees nothing when a thread exits.
+
+The cost: calls are serialised. The oracle runs only for ambiguous PostgreSQL units (R-M3-24),
+and a 1 MiB statement takes about 9 ms (release, macOS arm64).
+
+**The guard before every parser call.** In order:
+1. A NUL is an `Err` with its cursor. libpg_query takes a C string, so a NUL would cut the
+   text and the parser would see a shorter, possibly valid, statement.
+2. A text over 8 MiB is an `Err`, before any scan, so the caller keeps its boundary uncertain.
+   The oracle's input is one ambiguous statement region. Its peak memory is about 135 bytes
+   per token: libpg_query's token array and its copy, this crate's two token lists, and then
+   the raw parse tree. An 8 MiB flat `SELECT 1,1,…` peaked at +1.1 GiB (review T9 M1), so the
+   cap bounds one call near that, and its time on the one thread to seconds. The cap was
+   64 MiB before the review.
+3. On the parser thread, PostgreSQL's own scanner reads the text. It is flex-generated and
+   iterative, so no input exhausts its stack.
+4. Brackets (`(` and `[` together) nested deeper than `MAX_ORACLE_NESTING` (256) are an `Err`.
+   Its cursor is on the first bracket past the limit, and nothing is parsed.
+
+If a lexical error hides the tokens and cannot be placed, the bound is the number of bracket
+bytes in the whole text. The bracket count cannot see some deep trees. For those,
+libpg_query's own stack-depth check (at most 2 MB, sized from the thread it runs on) and
+bison's 10,000-entry stack end the parse with an error. The tests cover 100,000 `NOT`s, 20,000
+nested `CASE`s and 30,000 unary minus signs. Left-deep trees parse: 2 MB of `+` and 50,000
+`UNION`s.
+
+**Statement ranges.** `split_with_parser` returns one range per statement:
+- A range runs from the statement's first token to the end of its last token. Whitespace,
+  comments and the `;` are outside it.
+- The text is parsed as written first. Only if that fails are named placeholders normalised
+  and the text parsed again. `:name`, `:'name'` and `:"name"` become `$1` plus spaces, so
+  every offset stays the caller's. The rewrite applies only to a `:` token directly followed
+  by the name token, and not after a word byte or `$`. Without that rule, `$t:x` would become
+  `$t$1`, which opens a dollar quote.
+- Parsing as written first keeps valid array slices out of the rewrite: `a[1 :n]`,
+  `a[(1):n]`, `a["i":n]` and `a[:n]`. Those are the only grammatical `:`-name in PostgreSQL
+  (review T9 M2). A text with both such a slice and a placeholder is still an `Err` (fail
+  closed).
+- The ranges are checked against the scanner's tokens. Every token outside them must be a `;`,
+  and consecutive statements must have one between them. Any mismatch is an `Err`, so the
+  caller keeps the boundary uncertain.
+
+`statement_count` counts the raw parser's statements and builds no output tree. prost's
+protobuf decode stops at 100 nested messages, and ordinary SQL reaches that: `unions(100)` and
+50 nested `ARRAY[…]` failed. Task 1a's decode proof stays in `version`, which reads
+`PG_VERSION_NUM` from a full parse of `SELECT 1` and requires one decoded `SelectStmt`.
+`version` keeps only a successful read, so a transient first failure (the thread cannot start)
+does not stick as `unknown`. `statement_count` does not normalise placeholders: `SELECT :a` is
+an `Err` there and one statement in `split_with_parser`. Only the build proof and `--smoke` use
+it.
+
+**Error cursors without `cursorpos`.** The `pg_query` crate drops libpg_query's cursor, and the
+workspace denies the `unsafe` that reading the C struct would need. So `error::locate`
+rebuilds the cursor from the message and the text. It gives an exact byte offset or `None`,
+never a guess:
+- For `at end of input`, the cursor is the end of the text.
+- For an unterminated construct, the cursor is the length of the text minus the rest the
+  scanner printed.
+- For text that occurs once, the cursor is that occurrence.
+- Otherwise, the cursor is the first candidate token whose prefix fails with the same message.
+  For a keyword the lookahead filter recodes, the prefix includes the next token.
+
+The cursor is `None` for grammar-action errors, for neighbouring recoded keywords (`NOT NOT`),
+for any `U&` token and for a repeated lexical-error text.
+
+A scratch C harness read `cursorpos` from the same static library to check this. Over 100,000
+generated mutations (75,362 errors), the result was 75,353 exact, 9 `None` and 0 wrong. The
+ranges of 25,919 splittable texts, 20,000 of them multi-statement, matched libpg_query's own
+ranges. `tests/oracle.rs` keeps representative cases, each with libpg_query's value.
+
+**Upstream defects found and contained:**
+- `pg_query::scan_tokens` builds a slice from a null pointer when a text has no tokens (a panic
+  in debug builds, undefined behaviour in release). Whitespace-only texts never reach it.
+- The fd 2 swap and the per-thread leak are contained by the single parser thread.
+- prost's decode limit is avoided by building no tree. M3b note (R-M3-2): a classifier that
+  decodes full parse trees fails on SQL nested more than about 50 levels.
+
+Tests: `crates/sql/sql-oracle-pg/tests/{oracle,threads,depth,perf}.rs`, plus unit tests in
+`error.rs` and `split.rs`.
