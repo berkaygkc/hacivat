@@ -129,7 +129,41 @@ fn psql(text: &str, at: usize, eol: usize, cp: &ClientProfile) -> Backslash {
     if cp.backslash_clear.contains(&name) {
         return Backslash::Clear { end };
     }
+    if name == "copy" && from_stdin(args) {
+        // `\copy … from stdin` reads its rows from the script itself, up to `\.`: they are
+        // the command's, never SQL.
+        return Backslash::Command {
+            end: copy_data_end(text, next_line_start(text, eol)),
+        };
+    }
     Backslash::Command { end }
+}
+
+/// Whether `\copy` arguments read `from stdin` (the script; `pstdin` is psql's own input).
+fn from_stdin(args: &str) -> bool {
+    let words: Vec<&str> = args
+        .split(|c: char| c.is_ascii_whitespace() || c == '(' || c == ')')
+        .filter(|w| !w.is_empty())
+        .collect();
+    words
+        .windows(2)
+        .any(|w| w[0].eq_ignore_ascii_case("from") && w[1].eq_ignore_ascii_case("stdin"))
+}
+
+/// The end of psql `COPY` data whose lines start at `from`: after the `\.` that ends it (a line
+/// that is `\.` alone), or the text's end.
+pub(crate) fn copy_data_end(text: &str, from: usize) -> usize {
+    let b = text.as_bytes();
+    let mut line = from;
+    while line < b.len() {
+        if b[line..].starts_with(b"\\.")
+            && b.get(line + 2).is_none_or(|c| *c == b'\n' || *c == b'\r')
+        {
+            return line + 2;
+        }
+        line = next_line_start(text, line);
+    }
+    b.len()
 }
 
 /// The mysql client: `\` and one letter; the terminators and `\c` take nothing more, `\d` takes
@@ -239,6 +273,21 @@ mod tests {
         assert_eq!(
             backslash("\\echo '\\\\' x", 0, cp),
             Backslash::Command { end: 12 }
+        );
+        // `\copy … from stdin` takes its data rows, up to `\.`.
+        let t = "\\copy t (a) FROM STDIN\nDELETE FROM t\n\\.\nSELECT 1;";
+        assert_eq!(backslash(t, 0, cp), Backslash::Command { end: 39 });
+        assert_eq!(&t[..39], "\\copy t (a) FROM STDIN\nDELETE FROM t\n\\.");
+        let t = "\\copy t from stdin\nrow";
+        assert_eq!(backslash(t, 0, cp), Backslash::Command { end: t.len() });
+        // `pstdin` (psql's own input) and `to stdout` read nothing from the script.
+        assert_eq!(
+            backslash("\\copy t from pstdin\nx", 0, cp),
+            Backslash::Command { end: 19 }
+        );
+        assert_eq!(
+            backslash("\\copy t to stdout\nx", 0, cp),
+            Backslash::Command { end: 17 }
         );
     }
 

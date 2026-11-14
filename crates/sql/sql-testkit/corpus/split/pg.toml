@@ -410,6 +410,15 @@ input = "DO $$ BEGIN RAISE NOTICE '\\x'; END $$;\nSELECT 1;"
 editor = ["DO $$ BEGIN RAISE NOTICE '\\x'; END $$", "SELECT 1"]
 
 [[case]]
+id = "PSQL-backslash-copy-from-stdin"
+source = "alg/10 SQL-SPLIT-01: psql \\copy … from stdin reads its rows from the script up to \\.; they are never SQL"
+flavor = "psql"
+input = "\\copy t FROM stdin\nDELETE FROM t\n\\.\nSELECT 1;"
+editor = ["SELECT 1"]
+client = ["\\copy t FROM stdin\nDELETE FROM t\n\\."]
+crlf = true
+
+[[case]]
 id = "PSQL-quote-in-command"
 source = "alg/10 SQL-SPLIT-01: a quote in a command's arguments never reaches the SQL after it"
 flavor = "psql"

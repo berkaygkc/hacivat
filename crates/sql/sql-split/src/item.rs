@@ -142,7 +142,8 @@ pub enum ClientKind {
 }
 
 /// A client command (psql `\cmd`, mysql `DELIMITER`, sqlite3 `.cmd`): its range (to the end of
-/// its line, line break excluded, for line commands), its kind, and whether Hacivat runs the
+/// its line, line break excluded, for line commands; psql `\copy … from stdin` with its data
+/// rows through `\.`), its kind, and whether Hacivat runs the
 /// script as the client would (`DELIMITER` and `\g` yes; `\set`, `source`, `.mode` no — Run on
 /// them is `UnsupportedClientCommand`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
