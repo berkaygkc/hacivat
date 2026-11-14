@@ -293,6 +293,29 @@ fn fetch_all_and_close_cursor_forward_to_the_session() {
     assert!(!f.store.cap_raised());
 }
 
+/// "Close cursor" on the memory banner closes with its reason, so the log says the memory
+/// limit was reached (`cursor-closed-memory-limit`); anywhere else it is the user's close.
+#[test]
+fn closing_from_the_memory_banner_says_memory_limit() {
+    let mut f = source_with(
+        0,
+        Completeness::Streaming,
+        MemoryBudget::new(1 << 30, 1 << 16),
+    );
+    let c = chunk(2_048);
+    f.writer.append(c);
+    assert_eq!(
+        f.writer.admit(4_096),
+        Admission::Pause(hacivat_results::PauseReason::ResultCap)
+    );
+    f.writer.set_state(suspended());
+    f.src.close_cursor();
+    assert_eq!(
+        f.ctl.calls(),
+        vec![Call::Close(ResultId(9), CloseReason::MemoryLimit)]
+    );
+}
+
 #[test]
 fn raise_cap_lifts_the_cap_before_it_fetches_all() {
     let mut f = source_with(0, suspended(), MemoryBudget::new(1 << 30, 1 << 16));

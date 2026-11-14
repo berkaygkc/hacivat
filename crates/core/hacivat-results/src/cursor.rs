@@ -174,8 +174,15 @@ impl ResultSource for StoreSource {
         self.control.fetch_all(self.store.id());
     }
 
+    /// `MemoryLimit` while paused at a memory limit (the banner's "Close cursor"), else
+    /// `UserClosed`.
     fn close_cursor(&self) {
-        self.control.close(self.store.id(), CloseReason::UserClosed);
+        let reason = if self.store.snapshot().paused().is_some() {
+            CloseReason::MemoryLimit
+        } else {
+            CloseReason::UserClosed
+        };
+        self.control.close(self.store.id(), reason);
     }
 
     /// The cap rises first, so the session's `fetch_all` is admitted past it.
