@@ -244,3 +244,48 @@ fn byte_to_line_at_the_end_of_20_mb_under_5_us() {
         "byte_to_line took {each:?}"
     );
 }
+
+#[test]
+fn line_range_strips_each_kind_of_break_and_only_one() {
+    let b = TextBuffer::from_str("ab\r\ncd\ref\n\ngh\n\r");
+    let lines: Vec<_> = (0..b.len_lines())
+        .map(|l| (b.line_range(l, false), b.line_range(l, true)))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            (0..2, 0..4),     // "ab\r\n"
+            (4..6, 4..7),     // "cd\r"
+            (7..9, 7..10),    // "ef\n"
+            (10..10, 10..11), // "\n"
+            (11..13, 11..14), // "gh\n"
+            (14..14, 14..15), // "\r"
+            (15..15, 15..15), // the empty last line
+        ]
+    );
+    // A line ending without a break, and a lone break.
+    assert_eq!(TextBuffer::from_str("x").line_range(0, false), 0..1);
+    assert_eq!(TextBuffer::from_str("\r\n").line_range(0, false), 0..0);
+    assert_eq!(TextBuffer::from_str("").line_range(0, false), 0..0);
+}
+
+#[test]
+#[ignore = "perf"]
+fn line_range_without_break_does_not_copy_the_line() {
+    if std::env::var_os("HACIVAT_PERF").is_none_or(|v| v != "1") {
+        return;
+    }
+    // Review T5 finding 11: a 10 MB minified line was copied on every call to strip its break.
+    let mut text = "SELECT 1, ".repeat(1 << 20);
+    text.push_str("\r\nSELECT 2;");
+    let b = TextBuffer::from_str(&text);
+    let start = Instant::now();
+    for _ in 0..1_000 {
+        assert_eq!(b.line_range(std::hint::black_box(0), false), 0..10 << 20);
+    }
+    let took = start.elapsed();
+    assert!(
+        took < Duration::from_millis(20),
+        "1,000 line_range calls took {took:?}"
+    );
+}

@@ -413,6 +413,166 @@ fn undo_and_redo_go_through_the_filters() {
     assert_eq!(text(&m), "a");
 }
 
+/// Queues, once, a change set built for a text of another length (a buggy observer).
+struct WrongLength {
+    done: bool,
+}
+
+impl TransactionObserver for WrongLength {
+    fn observe(&mut self, _: &Transaction, _: &Committed, b: &TextBuffer, q: &mut ObserverQueue) {
+        if !self.done {
+            self.done = true;
+            q.dispatch(insert_tr(
+                &TextBuffer::from_str(&"?".repeat(b.len_bytes() + 5)),
+                0,
+                "x",
+            ));
+        }
+    }
+}
+
+#[test]
+fn a_queued_transaction_for_another_length_is_dropped_even_after_another_commits() {
+    // Review T5 P1b: rebasing it over the first queued commit used to panic in `transform`.
+    let mut m = EditorModel::new("abc", ModelConfig::default());
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    m.add_observer(Box::new(AppendOnce {
+        text: "]",
+        done: false,
+        seen,
+    }));
+    m.add_observer(Box::new(WrongLength { done: false }));
+    let c = m.dispatch(insert_tr(m.buffer(), 3, "!")).unwrap();
+    assert_eq!(text(&m), "abc!]");
+    assert_eq!(c.version, 2);
+    // With nothing committed in between, the same transaction is vetoed by the length check.
+    let mut m = EditorModel::new("abc", ModelConfig::default());
+    m.add_observer(Box::new(WrongLength { done: false }));
+    m.dispatch(insert_tr(m.buffer(), 3, "!")).unwrap();
+    assert_eq!(text(&m), "abc!");
+}
+
+/// While `on`, rewrites every transaction into the identity (keeping its selection).
+struct Nullify(Rc<Cell<bool>>);
+
+impl TransactionFilter for Nullify {
+    fn filter(&self, m: &EditorModel, tr: Transaction) -> Result<Transaction, Veto> {
+        if self.0.get() {
+            Ok(Transaction {
+                changes: ChangeSet::identity(m.buffer().len_bytes()),
+                ..tr
+            })
+        } else {
+            Ok(tr)
+        }
+    }
+}
+
+#[test]
+fn a_filter_rewriting_an_undo_or_redo_is_a_veto_and_keeps_the_group() {
+    // Review T5 P5: the group used to be popped, and the edit could never be undone again.
+    let on = Rc::new(Cell::new(false));
+    let mut m = EditorModel::new("", ModelConfig::default());
+    m.add_filter(Box::new(Nullify(on.clone())));
+    m.dispatch(insert_tr(m.buffer(), 0, "ab")).unwrap();
+    on.set(true);
+    assert!(m.undo().is_none());
+    assert_eq!(text(&m), "ab");
+    assert_eq!((m.undo_depth(), m.redo_depth()), (1, 0));
+    on.set(false);
+    m.undo().unwrap();
+    assert_eq!(text(&m), "");
+    on.set(true);
+    assert!(m.redo().is_none());
+    assert_eq!((m.undo_depth(), m.redo_depth()), (0, 1));
+    on.set(false);
+    m.redo().unwrap();
+    assert_eq!(text(&m), "ab");
+    assert_eq!((m.undo_depth(), m.redo_depth()), (1, 0));
+}
+
+/// Refuses any replacement deleting more than `max` bytes, and records what it saw.
+struct SizeGuard {
+    max: usize,
+    seen: Rc<RefCell<Vec<Range<usize>>>>,
+}
+
+impl TransactionFilter for SizeGuard {
+    fn filter(&self, _m: &EditorModel, tr: Transaction) -> Result<Transaction, Veto> {
+        let mut at = 0;
+        for s in tr.changes.sections() {
+            match s {
+                hacivat_text::Section::Retain(n) => at += n,
+                hacivat_text::Section::Replace { del, .. } => {
+                    self.seen.borrow_mut().push(at..at + del);
+                    if *del > self.max {
+                        return Err(Veto("editor-too-big"));
+                    }
+                    at += del;
+                }
+            }
+        }
+        Ok(tr)
+    }
+}
+
+#[test]
+fn filters_see_the_change_as_it_will_apply() {
+    // Review T5 P3: a 1-byte deletion inside `😀` was approved, then widened to 4 bytes.
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let mut m = EditorModel::new("a😀b", ModelConfig::default());
+    m.add_filter(Box::new(SizeGuard {
+        max: 1,
+        seen: seen.clone(),
+    }));
+    assert_eq!(
+        m.dispatch(replace_tr(&m, 2..3, "")),
+        Err(Veto("editor-too-big"))
+    );
+    assert_eq!(text(&m), "a😀b");
+    assert_eq!(seen.borrow().as_slice(), &[Range { start: 1, end: 5 }]);
+    // A deletion the guard allows applies as it saw it.
+    m.dispatch(replace_tr(&m, 5..6, "")).unwrap();
+    assert_eq!(text(&m), "a😀");
+}
+
+#[test]
+fn a_caret_never_lands_inside_a_crlf() {
+    // Review T5 P4: a mapped caret after a CR inserted before a LF.
+    let mut m = EditorModel::new("a\nb", ModelConfig::default());
+    m.dispatch(select_tr(&m, SelectionSet::cursor(1))).unwrap();
+    let program = Transaction {
+        changes: ChangeSet::from_edits(3, [(1..1, Arc::from("\r"))]).unwrap(),
+        selection: None,
+        ann: Annotations {
+            add_to_history: false,
+            origin: Origin::Program,
+            ..ann(UserEvent::Command("program"))
+        },
+    };
+    m.dispatch(program).unwrap();
+    assert_eq!(text(&m), "a\r\nb");
+    assert_eq!(m.selection().main().head, 3);
+    // Enter typed as a CR just before a LF: the given caret after the CR moves past the LF.
+    let mut m = EditorModel::new("a\nb", ModelConfig::default());
+    let enter = Transaction {
+        changes: ChangeSet::from_edits(3, [(1..1, Arc::from("\r"))]).unwrap(),
+        selection: Some(SelectionSet::cursor(2)),
+        ann: ann(UserEvent::InputType),
+    };
+    m.dispatch(enter).unwrap();
+    assert_eq!(m.selection().main().head, 3);
+    // A given selection with an end inside a CRLF.
+    let sel = SelectionSet::single(SelectionRange {
+        anchor: 0,
+        head: 2,
+        goal_x: None,
+        assoc: Bias::After,
+    });
+    m.dispatch(select_tr(&m, sel)).unwrap();
+    assert_eq!(m.selection().main().range(), 0..3);
+}
+
 #[test]
 #[ignore = "perf"]
 fn typing_into_20_mb_is_not_o_document() {

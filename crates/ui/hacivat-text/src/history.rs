@@ -20,7 +20,9 @@
 //! transaction joins the bracket's group; brackets nest and the group seals when the outermost
 //! one ends. A group whose change composes to the identity is dropped. At most 1,000 groups and
 //! 64 MiB of edited bytes (deleted plus inserted) are kept, oldest evicted first; the newest
-//! group always stays.
+//! group always stays, and a group over 16 MiB evicts every older one (UI-EDIT-04 step 8). An
+//! undo or redo applies its group's change exactly (the model vetoes one a filter rewrites), so
+//! the group is never lost.
 //!
 //! A non-history transaction (`add_to_history: false`) rebases every stored group over its
 //! change ([`ChangeSet::transform`]), so undo still restores the right bytes; a group it
@@ -42,6 +44,10 @@ use crate::change::ChangeSet;
 use crate::model::ModelConfig;
 use crate::selection::SelectionSet;
 use crate::transaction::{Transaction, UserEvent};
+
+/// A group editing more bytes than this (a huge replace-all) is kept, but evicts every older
+/// group (UI-EDIT-04 step 8).
+pub(crate) const LARGE_GROUP_BYTES: u64 = 16 << 20;
 
 /// One undo (or redo) step.
 #[derive(Debug, Clone)]
@@ -295,29 +301,29 @@ impl History {
         }
     }
 
-    /// The top group was undone by `applied` (its change as the filters let it through) over
-    /// `old`: it moves to the redo stack as the change that redoes it.
-    pub(crate) fn finish_undo(&mut self, applied: &ChangeSet, old: &TextBuffer) {
+    /// The top group's change was applied (exactly) over `old`: it moves to the redo stack as
+    /// the change that redoes it.
+    pub(crate) fn finish_undo(&mut self, old: &TextBuffer) {
         if let Some(g) = self.done.pop_back() {
-            let redo = self.flipped(g, applied, old);
+            let redo = self.flipped(g, old);
             self.undone.push(redo);
         }
         self.seal();
     }
 
-    /// The top redo group was redone by `applied` over `old`: it moves back to the undo stack.
-    pub(crate) fn finish_redo(&mut self, applied: &ChangeSet, old: &TextBuffer) {
+    /// The top redo group's change was applied over `old`: it moves back to the undo stack.
+    pub(crate) fn finish_redo(&mut self, old: &TextBuffer) {
         if let Some(g) = self.undone.pop() {
-            let undo = self.flipped(g, applied, old);
+            let undo = self.flipped(g, old);
             self.done.push_back(undo);
         }
         self.seal();
         self.evict();
     }
 
-    /// `g`, applied as `applied` over `old`, as the step that takes it back.
-    fn flipped(&mut self, g: Group, applied: &ChangeSet, old: &TextBuffer) -> Group {
-        let changes = applied.invert(old);
+    /// `g`, its change applied over `old`, as the step that takes it back.
+    fn flipped(&mut self, g: Group, old: &TextBuffer) -> Group {
+        let changes = g.changes.invert(old);
         let weight = changes.weight();
         self.bytes = self.bytes - g.weight + weight;
         Group {
@@ -349,9 +355,19 @@ impl History {
         self.bytes = self.done.iter().chain(&self.undone).map(|g| g.weight).sum();
     }
 
-    /// Keeps the bounds: the group count, then the byte budget (never the newest group).
+    /// Keeps the bounds: the group count, a newest group over [`LARGE_GROUP_BYTES`] evicting
+    /// everything older, then the byte budget (never the newest group).
     fn evict(&mut self) {
         while self.done.len() > self.max_groups {
+            if let Some(g) = self.done.pop_front() {
+                self.bytes -= g.weight;
+            }
+        }
+        let large = self
+            .done
+            .back()
+            .is_some_and(|g| g.weight > LARGE_GROUP_BYTES);
+        while large && self.done.len() > 1 {
             if let Some(g) = self.done.pop_front() {
                 self.bytes -= g.weight;
             }

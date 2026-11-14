@@ -409,6 +409,26 @@ fn history_evicts_by_byte_budget() {
 }
 
 #[test]
+fn a_group_over_16_mib_evicts_everything_older() {
+    // UI-EDIT-04 step 8 (review T5 finding 6): kept, but everything older goes.
+    let mut e = model("");
+    for _ in 0..3 {
+        paste(&mut e, "x");
+    }
+    paste(&mut e, &"y".repeat((16 << 20) + 1));
+    assert_eq!(e.undo_depth(), 1);
+    // Newer groups stack on it as usual.
+    paste(&mut e, "z");
+    assert_eq!(e.undo_depth(), 2);
+    assert_eq!(undo_all(&mut e).last().map(String::as_str), Some("xxx"));
+    // A group of exactly 16 MiB is not over the limit.
+    let mut e = model("");
+    paste(&mut e, "x");
+    paste(&mut e, &"y".repeat(16 << 20));
+    assert_eq!(e.undo_depth(), 2);
+}
+
+#[test]
 fn programmatic_set_text_rebases_history() {
     let mut e = model("SELECT 1");
     type_text(&mut e, " + 2");
@@ -587,12 +607,16 @@ fn run_op(e: &mut Ed, op: &Op) {
     }
 }
 
+/// Every selection end is on a character boundary and never between the CR and LF of a CRLF.
 fn caret_is_valid(e: &Ed) -> bool {
     let t = text(e);
+    let ok = |b: usize| {
+        t.is_char_boundary(b) && !(b > 0 && t[..b].ends_with('\r') && t[b..].starts_with('\n'))
+    };
     e.selection()
         .ranges()
         .iter()
-        .all(|r| t.is_char_boundary(r.anchor) && t.is_char_boundary(r.head))
+        .all(|r| ok(r.anchor) && ok(r.head))
 }
 
 proptest! {

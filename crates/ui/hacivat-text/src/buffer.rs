@@ -270,13 +270,14 @@ impl TextBuffer {
         if with_break {
             return start..end;
         }
-        let line = self.slice(start..end);
-        let body = line
-            .strip_suffix("\r\n")
-            .or_else(|| line.strip_suffix('\n'))
-            .or_else(|| line.strip_suffix('\r'))
-            .unwrap_or(&line);
-        start..start + body.len()
+        // The break is the line's last one or two bytes: read them, never the line (O(log n)).
+        let byte_before = |at: usize| (at > start).then(|| self.rope.byte(at - 1));
+        let body_end = match byte_before(end) {
+            Some(b'\n') if end - 1 > start && self.rope.byte(end - 2) == b'\r' => end - 2,
+            Some(b'\n' | b'\r') => end - 1,
+            _ => end,
+        };
+        start..body_end
     }
 
     /// `b` moved to a char boundary on `bias`'s side, never between the CR and LF of a CRLF.

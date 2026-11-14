@@ -1,12 +1,14 @@
 //! The transactional model (UI-EDIT-01).
 //!
 //! [`EditorModel::dispatch`] runs, in this order:
-//! 1. the filters, in the order added (each may rewrite the transaction or veto it);
-//! 2. the checks: a change set for a text of another length is vetoed; edits are snapped
+//! 1. the checks: a change set for a text of another length is vetoed; edits are snapped
 //!    outward to character boundaries (an insertion point inside a character moves before it);
+//! 2. the filters, in the order added, each seeing the change as it will apply (each may
+//!    rewrite the transaction or veto it; a rewrite is checked and snapped again). An undo or
+//!    redo a filter rewrites is vetoed instead, and its group stays;
 //! 3. the buffer apply;
-//! 4. the selection: the given one (clamped to the text, on character boundaries) or the old
-//!    one mapped;
+//! 4. the selection: the given one or the old one mapped, clamped to the text, on character
+//!    boundaries, and never between the CR and LF of a CRLF (a caret there moves past the LF);
 //! 5. the fields in order: history first (record, rebase, or the undo/redo bookkeeping), then
 //!    each added [`Field`], told the version the commit makes;
 //! 6. version += 1 and a change-log entry, when the text changed (a selection-only commit keeps
@@ -199,18 +201,20 @@ fn snap_to_chars(buf: &TextBuffer, cs: ChangeSet) -> Result<ChangeSet, Veto> {
     ChangeSet::from_edits(cs.len_old(), edits).map_err(|_| Veto("editor-veto-overlapping-edits"))
 }
 
-/// `sel` clamped to `buf` and on its character boundaries.
-fn fit_selection(sel: &SelectionSet, buf: &TextBuffer) -> SelectionSet {
-    let ok = |b: usize| buf.is_char_boundary(b);
+/// `sel` clamped to `buf`, on its character boundaries, and out of every CRLF: an end between
+/// the CR and the LF moves past the LF, so the next character typed cannot split the break.
+fn fit_selection(sel: SelectionSet, buf: &TextBuffer) -> SelectionSet {
+    // `snap` with `After` keeps a char boundary unless it is inside a CRLF.
+    let ok = |b: usize| buf.is_char_boundary(b) && buf.snap(b, Bias::After) == b;
     if sel.ranges().iter().all(|r| ok(r.anchor) && ok(r.head)) {
-        return sel.clone();
+        return sel;
     }
     let main = sel
         .ranges()
         .iter()
         .position(|r| std::ptr::eq(r, sel.main()))
         .unwrap_or(0);
-    let fit = |b: usize| buf.snap_to_char(b, Bias::Before);
+    let fit = |b: usize| buf.snap(buf.snap_to_char(b, Bias::Before), Bias::After);
     SelectionSet::normalized(
         sel.ranges().iter().map(|r| SelectionRange {
             anchor: fit(r.anchor),
@@ -269,6 +273,12 @@ impl EditorModel {
             }
             let mut fits = true;
             for (_, cs) in applied.iter().filter(|(v, _)| *v > built_at) {
+                // Built for a text of another length (a buggy observer): dropped, as the
+                // length check would.
+                if tr.changes.len_old() != cs.len_old() {
+                    fits = false;
+                    break;
+                }
                 let Some((mine, theirs)) = tr.changes.transform(cs) else {
                     fits = false;
                     break;
@@ -305,26 +315,39 @@ impl EditorModel {
 
     /// One transaction through steps 1–7; the change set as applied.
     fn commit(&mut self, tr: Transaction, action: Action) -> Result<(Committed, ChangeSet), Veto> {
-        let mut tr = tr;
-        for f in &self.filters {
-            tr = f.filter(self, tr)?;
+        // Filters judge the change as it will apply, so it is checked and snapped first.
+        let mut tr = self.checked(tr)?;
+        if !self.filters.is_empty() {
+            for f in &self.filters {
+                tr = f.filter(self, tr)?;
+            }
+            tr = self.checked(tr)?;
         }
-        if tr.changes.len_old() != self.buffer.len_bytes() {
-            return Err(Veto("editor-veto-stale-change"));
+        // An undo or redo applies its group's change exactly, or not at all (fail closed: a
+        // rewritten one would lose the group).
+        let stored = match action {
+            Action::Undo => self.history.top_undo().map(|g| &g.changes),
+            Action::Redo => self.history.top_redo().map(|g| &g.changes),
+            Action::Edit => None,
+        };
+        if stored.is_some_and(|c| *c != tr.changes) {
+            return Err(Veto("editor-veto-history-rewritten"));
         }
-        tr.changes = snap_to_chars(&self.buffer, tr.changes)?;
         let old = self.buffer.clone();
         tr.changes.apply(&mut self.buffer);
         let desc = tr.changes.desc();
         let changed = !tr.changes.is_identity();
-        let after = match &tr.selection {
-            Some(s) => fit_selection(s, &self.buffer),
-            None => self.selection.map(&desc),
-        };
+        let after = fit_selection(
+            match &tr.selection {
+                Some(s) => s.clone(),
+                None => self.selection.map(&desc),
+            },
+            &self.buffer,
+        );
         let before = std::mem::replace(&mut self.selection, after);
         match action {
-            Action::Undo => self.history.finish_undo(&tr.changes, &old),
-            Action::Redo => self.history.finish_redo(&tr.changes, &old),
+            Action::Undo => self.history.finish_undo(&old),
+            Action::Redo => self.history.finish_redo(&old),
             Action::Edit if !changed => self.history.selection_moved(&self.selection),
             Action::Edit if tr.ann.add_to_history => {
                 self.history
@@ -355,6 +378,15 @@ impl EditorModel {
             o.observe(&tr, &committed, &self.buffer, &mut self.queue);
         }
         Ok((committed, tr.changes))
+    }
+
+    /// `tr` with a change set for the current text, its edits on character boundaries.
+    fn checked(&self, mut tr: Transaction) -> Result<Transaction, Veto> {
+        if tr.changes.len_old() != self.buffer.len_bytes() {
+            return Err(Veto("editor-veto-stale-change"));
+        }
+        tr.changes = snap_to_chars(&self.buffer, tr.changes)?;
+        Ok(tr)
     }
 
     /// The current version, O(1).
@@ -389,13 +421,14 @@ impl EditorModel {
     }
 
     /// Undoes the newest group, restoring its selection; `None` when there is none or a filter
-    /// refuses it (the group stays). Never joins what comes next.
+    /// refuses or rewrites it (the group stays). Never joins what comes next.
     pub fn undo(&mut self) -> Option<Committed> {
         let g = self.history.top_undo()?;
         self.apply_history(g.changes.clone(), g.restore_sel.clone(), Action::Undo)
     }
 
-    /// Redoes the newest undone group; `None` when there is none or a filter refuses it.
+    /// Redoes the newest undone group; `None` when there is none or a filter refuses or
+    /// rewrites it (the group stays).
     pub fn redo(&mut self) -> Option<Committed> {
         let g = self.history.top_redo()?;
         self.apply_history(g.changes.clone(), g.restore_sel.clone(), Action::Redo)
