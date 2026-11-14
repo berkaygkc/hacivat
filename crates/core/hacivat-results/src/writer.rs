@@ -1,12 +1,21 @@
 //! `ResultWriter` (Task 7): the single writer (the session actor) admits, appends and sets the
 //! state; every append and state change publishes a new snapshot (R-M3-48).
+//!
+//! Each publish clones the chunk list and the chunk starts into new `Arc` slices (O(chunks):
+//! about 250 `Arc` clones for 1M rows), so a published snapshot never changes and a held one
+//! keeps exactly the chunks it showed. Consumers coalesce changes through the store's `watch`.
 
 use std::fmt;
+use std::iter;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use hacivat_values::Chunk;
+use hacivat_values::{Chunk, ResultSchema};
 
+use crate::budget::MemoryBudget;
 use crate::cursor::Completeness;
-use crate::store::ResultId;
+use crate::snapshot::{StoreSnapshot, StoredChunk};
+use crate::store::{ResultId, ResultStore};
 
 /// Why a writer must pause before its next chunk (R-M3-33).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,39 +33,150 @@ pub enum Admission {
     Pause(PauseReason),
 }
 
+impl Admission {
+    fn encode(self) -> u8 {
+        match self {
+            Admission::Ok => 0,
+            Admission::Pause(PauseReason::ResultCap) => 1,
+            Admission::Pause(PauseReason::GlobalBudget) => 2,
+        }
+    }
+
+    fn pause_of(code: u8) -> Option<PauseReason> {
+        match code {
+            1 => Some(PauseReason::ResultCap),
+            2 => Some(PauseReason::GlobalBudget),
+            _ => None,
+        }
+    }
+}
+
 /// The one writer of a result.
 pub struct ResultWriter {
     id: ResultId,
+    store: Arc<ResultStore>,
+    budget: Arc<MemoryBudget>,
+    schema: Arc<ResultSchema>,
+    generation: u64,
+    version: u64,
+    chunks: Arc<[Arc<StoredChunk>]>,
+    starts: Arc<[u64]>,
+    rows: u64,
+    bytes: u64,
+    completeness: Completeness,
+    /// The last `admit`'s answer ([`Admission::encode`]); an atomic so `admit` takes `&self`
+    /// and the writer stays `Sync`.
+    last_admission: AtomicU8,
 }
 
 impl fmt::Debug for ResultWriter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ResultWriter")
             .field("id", &self.id)
+            .field("generation", &self.generation)
+            .field("version", &self.version)
+            .field("rows", &self.rows)
+            .field("bytes", &self.bytes)
+            .field("completeness", &self.completeness)
             .finish_non_exhaustive()
     }
 }
 
 impl ResultWriter {
+    /// The writer of `store`, which has just published `first`.
+    pub(crate) fn new(
+        store: Arc<ResultStore>,
+        budget: Arc<MemoryBudget>,
+        first: &StoreSnapshot,
+    ) -> ResultWriter {
+        ResultWriter {
+            id: store.id(),
+            store,
+            budget,
+            schema: first.schema().clone(),
+            generation: first.generation(),
+            version: first.version(),
+            chunks: first.chunks.clone(),
+            starts: first.starts.clone(),
+            rows: first.row_count(),
+            bytes: first.bytes(),
+            completeness: *first.completeness(),
+            last_admission: AtomicU8::new(Admission::Ok.encode()),
+        }
+    }
+
     pub fn id(&self) -> ResultId {
         self.id
     }
 
-    /// Whether a chunk of about `next_chunk_estimate` bytes fits the budgets.
+    /// Whether a chunk of about `next_chunk_estimate` bytes fits the budgets: past this
+    /// result's cap (256 MiB, or the global budget once raised) it answers
+    /// `Pause(ResultCap)`, past the global budget `Pause(GlobalBudget)`. A chunk that lands
+    /// exactly on a limit fits. The answer is kept for the next publish (`paused`).
     pub fn admit(&self, next_chunk_estimate: u64) -> Admission {
-        let _ = next_chunk_estimate;
-        unimplemented!("ResultWriter::admit ({:?}): Task 7", self.id)
+        let raised = self.store.cap_raised();
+        let answer = if !raised
+            && self.bytes.saturating_add(next_chunk_estimate) > self.budget.per_result()
+        {
+            Admission::Pause(PauseReason::ResultCap)
+        } else if self.budget.used().saturating_add(next_chunk_estimate) > self.budget.global() {
+            Admission::Pause(PauseReason::GlobalBudget)
+        } else {
+            Admission::Ok
+        };
+        self.last_admission
+            .store(answer.encode(), Ordering::Relaxed);
+        answer
     }
 
-    /// Appends `chunk` and publishes.
+    /// Appends `chunk` (charging its bytes to the budget) and publishes. A chunk of no rows
+    /// adds nothing, but the call still publishes.
     pub fn append(&mut self, chunk: Chunk) {
-        let _ = chunk;
-        unimplemented!("ResultWriter::append ({:?}): Task 7", self.id)
+        let rows = u64::from(chunk.rows());
+        if rows > 0 {
+            let stored = Arc::new(StoredChunk::charge(chunk, &self.budget));
+            self.bytes += stored.chunk.bytes();
+            self.chunks = self
+                .chunks
+                .iter()
+                .cloned()
+                .chain(iter::once(stored))
+                .collect();
+            self.starts = self
+                .starts
+                .iter()
+                .copied()
+                .chain(iter::once(self.rows))
+                .collect();
+            self.rows += rows;
+        }
+        self.publish();
     }
 
     /// Sets the completeness and publishes.
     pub fn set_state(&mut self, c: Completeness) {
-        let _ = c;
-        unimplemented!("ResultWriter::set_state ({:?}): Task 7", self.id)
+        self.completeness = c;
+        self.publish();
+    }
+
+    fn publish(&mut self) {
+        self.version += 1;
+        let paused = match self.completeness {
+            Completeness::Suspended(_) => {
+                Admission::pause_of(self.last_admission.load(Ordering::Relaxed))
+            }
+            _ => None,
+        };
+        self.store.publish(StoreSnapshot {
+            generation: self.generation,
+            version: self.version,
+            schema: self.schema.clone(),
+            chunks: self.chunks.clone(),
+            starts: self.starts.clone(),
+            row_count: self.rows,
+            bytes: self.bytes,
+            completeness: self.completeness,
+            paused,
+        });
     }
 }

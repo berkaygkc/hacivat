@@ -1,8 +1,11 @@
 //! `MemoryBudget` (Task 7): the global budget shared by every result and the per-result cap
 //! (R-M3-19, R-M3-33). No eviction in M3a.
 //!
-//! Working since Task 1b: the constructors and `used` (nothing charges the budget before
-//! Task 7's writer).
+//! Accounting is exact: a chunk charges its bytes when the writer appends it and gives them
+//! back when its last holder drops it (the writer, the store and every snapshot that still
+//! shows it), so `used` is always the bytes of the chunks some reader can still reach.
+//! Admission (`ResultWriter::admit`) reads `used` without reserving: two results admitted at
+//! the same moment may each append one chunk past the budget, never more.
 
 use std::fmt;
 use std::sync::Arc;
@@ -57,5 +60,19 @@ impl MemoryBudget {
     /// The cap of one result (before "Fetch more anyway").
     pub fn per_result(&self) -> u64 {
         self.per_result
+    }
+
+    /// A chunk of `bytes` joined a result.
+    pub(crate) fn charge(&self, bytes: u64) {
+        self.used.fetch_add(bytes, Ordering::SeqCst);
+    }
+
+    /// A chunk of `bytes` was dropped by its last holder.
+    pub(crate) fn release(&self, bytes: u64) {
+        let before = self.used.fetch_sub(bytes, Ordering::SeqCst);
+        debug_assert!(
+            before >= bytes,
+            "released {bytes} bytes with {before} charged"
+        );
     }
 }

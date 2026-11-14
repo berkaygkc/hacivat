@@ -2,8 +2,10 @@
 //! `ArcSwap` snapshot on every append (R-M3-48), one writer (the session actor), per-result and
 //! global memory budgets, console cursors and the `ResultSource` the grid adapter reads.
 //!
-//! Types are complete since M3a Task 1b; bodies arrive in Task 7 (they panic naming it until
-//! then). Working since Task 1b: `FetchPolicy::default` and the `MemoryBudget` constructors.
+//! Types since M3a Task 1b; bodies since Task 7. Nothing on the read path locks: a reader
+//! loads one snapshot and reads its cells; the writer builds each snapshot whole and swaps it
+//! in. `ResultStore::from_rows` (feature `test-support`) builds a finished store for shots and
+//! UI tests with no core runtime (R-M3-15).
 
 pub mod budget;
 pub mod cursor;

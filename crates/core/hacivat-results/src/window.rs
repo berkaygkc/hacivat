@@ -1,5 +1,6 @@
 //! The fetch window: how many rows come first, per chunk and ahead of the viewport, and the
-//! cursor timings (HV-RES-05, R-M3-16, R-M3-20; Task 7).
+//! cursor timings (HV-RES-05, R-M3-16, R-M3-20; Task 7). [`FetchPolicy::rows_to_fetch`] is the
+//! one decision `StoreSource::ensure_rows` takes from it.
 
 use std::time::Duration;
 
@@ -47,5 +48,15 @@ impl Default for FetchPolicy {
             overdue: Duration::from_secs(1),
             idle_cap: None,
         }
+    }
+}
+
+impl FetchPolicy {
+    /// How many rows to ask for when a reader needs row `upto` of `loaded` rows (HV-RES-03
+    /// step 3): nothing while `upto` plus the prefetch margin is loaded, else the read-ahead or
+    /// the shortfall, whichever is larger.
+    pub fn rows_to_fetch(&self, upto: u64, loaded: u64) -> Option<u64> {
+        let wanted = upto.saturating_add(u64::from(self.prefetch_margin_rows));
+        (wanted > loaded).then(|| (wanted - loaded).max(u64::from(self.read_ahead_rows)))
     }
 }
