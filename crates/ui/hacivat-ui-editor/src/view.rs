@@ -6,13 +6,16 @@
 //! `SelectionChanged`); the input handler (`ime.rs`) inserts plain text. The element paints
 //! nothing yet (Task 19), so `caret_bounds` and `last_layout` are `None`.
 //!
-//! Call points every module seam already has (fix round 1, P11), so Tasks 25 and 27–29 never
-//! edit this file: focus and blur (`ime::on_focus`/`on_blur`, `FocusedEditor`), every commit
-//! (`marks::on_commit`, `large_file::update`, `preview::on_update`, `ime::after_commit`), a
-//! fresh analysis (`LanguageService::on_update` → `preview::on_update`), a composition opening or
-//! closing ([`EditorView::composition_changed`] → `preview::on_composition`), the banner
-//! (`large_file::banner`), each frame (`element::paint_frame`), and the commands' state
-//! (`commands::CommandState`).
+//! Call points every module seam already has (review rounds 1 and 2, P11), so Tasks 25 and
+//! 27–29 never edit this file: focus and blur (`ime::on_focus`/`on_blur`, `FocusedEditor`);
+//! every `Committed`, whatever produced it ([`EditorView::apply_committed`]: a transaction, an
+//! undo or redo, an IME mark or commit) → `marks::on_commit`, `LanguageService::change`,
+//! `large_file::update`, `preview::on_update`, `ime::after_commit` and the events; a fresh
+//! analysis (`LanguageService::on_update` → `preview::on_update`); a composition opening or
+//! closing ([`EditorView::composition_changed`] → `preview::on_composition`); the banner
+//! (`large_file::banner`) and the commands' overlay (`commands::overlay`); each frame
+//! (`element::EditorElement`: the a11y hooks, `prepaint_frame`, `paint_frame`); the commands'
+//! state (`commands::CommandState`).
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -25,18 +28,18 @@ use hacivat_text::{
 };
 use hacivat_ui::text::TextFn;
 use hacivat_ui_core::gpui_surface::{
-    App, Bounds, Context, ElementInputHandler, EventEmitter, FocusHandle, Focusable, Global,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString, Styled,
-    Subscription, WeakEntity, Window, canvas, div,
+    App, Bounds, Context, EventEmitter, FocusHandle, Focusable, Global, InteractiveElement,
+    IntoElement, ParentElement, Pixels, Point, Render, SharedString, Styled, Subscription,
+    WeakEntity, Window, div,
 };
 use smallvec::SmallVec;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::a11y::A11yState;
+use crate::a11y::{self, A11yFrame, A11yState};
 use crate::clipboard::PasteState;
-use crate::commands::{CommandState, command_by_id};
+use crate::commands::{self, CommandState, command_by_id};
 use crate::config::{DocContext, DocId, EditorConfig, Tier};
-use crate::element::{self, FrameLayout};
+use crate::element::{EditorElement, FrameLayout};
 use crate::ime::{self, InputState};
 use crate::large_file::{self, TierState};
 use crate::marks::{self, ExecMarkState, MarkKey, MarkStore};
@@ -74,6 +77,12 @@ pub enum EditorEvent {
     PasteRefused {
         bytes: u64,
     },
+    /// The context menu opened (`editor.context_menu`, Shift+F10 at the caret, or a right click
+    /// at the pointer; Task 25 emits it and draws the menu in `commands::overlay`). The host
+    /// closes its own popovers (Task 32; nothing in Task 1b).
+    ContextMenuOpened {
+        at: Point<Pixels>,
+    },
 }
 
 /// The focused editor, for the app's commands (`enabled` = an editor is focused).
@@ -104,6 +113,12 @@ pub struct EditorView {
     pub(crate) input: InputState,
     pub(crate) commands: CommandState,
     _subscriptions: Vec<Subscription>,
+    // ## m3a-t01b-seams (round 2): the label as last evaluated, with the UI-text generation it
+    // was evaluated at (re-read only when the language changes).
+    a11y_label_cache: Option<(u64, SharedString)>,
+    /// The text version the fan-out last saw: a `Committed` at the same version changed the
+    /// selection only (Task 5's model does not bump the version for those).
+    fanned_version: u64,
 }
 
 impl std::fmt::Debug for EditorView {
@@ -156,6 +171,7 @@ impl EditorView {
             tier,
         };
         let model = EditorModel::new(text, ModelConfig::default());
+        let opened_version = model.snapshot().version;
         service.open(doc, &model.snapshot(), ctx, cx);
         // A fresh analysis lands: the preview may change, and the decorations repaint.
         let weak = cx.entity().downgrade();
@@ -192,6 +208,8 @@ impl EditorView {
             input: InputState::default(),
             commands: CommandState::default(),
             _subscriptions: subscriptions,
+            a11y_label_cache: None,
+            fanned_version: opened_version,
         }
     }
 
@@ -261,9 +279,39 @@ impl EditorView {
         cx.notify();
     }
 
-    /// The commands' state (Ctrl+M's tab-moves-focus mode, Task 25).
-    pub fn command_state(&self) -> CommandState {
-        self.commands
+    /// The commands' state (Ctrl+M's tab-moves-focus mode, the open context menu; Task 25).
+    pub fn command_state(&self) -> &CommandState {
+        &self.commands
+    }
+
+    /// A polite announcement for assistive technology ("Run would execute lines 3–7", an
+    /// execution status), read out by the next frame's live region (`a11y::announce`, Task 29).
+    pub fn announce(&self, text: SharedString) {
+        a11y::announce(&self.a11y, text);
+    }
+
+    /// What the element's accessibility hooks declare this frame (called from `request_layout`
+    /// only while assistive technology is active). The label is evaluated again only when the
+    /// UI-text generation changes (a language switch).
+    pub(crate) fn a11y_frame(&mut self, focused: bool, cx: &App) -> A11yFrame {
+        let generation = cx
+            .try_global::<hacivat_ui::l10n::UiText>()
+            .map_or(0, |t| t.0.generation());
+        let label = match &self.a11y_label_cache {
+            Some((at, label)) if *at == generation => label.clone(),
+            _ => {
+                let label = (self.a11y_label)(cx);
+                self.a11y_label_cache = Some((generation, label.clone()));
+                label
+            }
+        };
+        A11yFrame {
+            snapshot: self.model.snapshot(),
+            label,
+            config: self.config,
+            tier: self.tier.tier,
+            focused,
+        }
     }
 
     /// An IME composition opened or closed (Task 27 calls it on mark and unmark): the preview
@@ -411,13 +459,34 @@ impl EditorView {
         (self.a11y_label)(cx)
     }
 
-    /// Applies `tr` and lets everything that follows a commit know (Task 19 owns this path).
+    /// Applies `tr` through the model, then [`EditorView::apply_committed`] (Task 19 owns this
+    /// path).
     pub(crate) fn commit(&mut self, tr: Transaction, cx: &mut Context<Self>) -> Option<Committed> {
         let event = tr.ann.user_event;
         let committed = self.model.dispatch(tr).ok()?;
+        Some(self.apply_committed(committed, event, cx))
+    }
+
+    /// The one entry for every `Committed`, whatever produced it (review round 2): a
+    /// transaction (`commit`), `EditorModel::undo`/`redo` (Task 25: `UserEvent::Undo`/`Redo`),
+    /// `ImeCore::mark`/`commit` (Task 27: `UserEvent::InputTypeCompose`/`InputType`). It lets
+    /// the marks, the language service, the tier, the preview, the input handler and the host
+    /// know, in that order.
+    ///
+    /// It reads `version`, `buffer_changed` and `desc` only (never a literal or an exhaustive
+    /// destructure, so Task 5's extra fields compile here), and a `Committed` whose version did
+    /// not move is selection-only whatever its other fields say.
+    pub(crate) fn apply_committed(
+        &mut self,
+        committed: Committed,
+        event: UserEvent,
+        cx: &mut Context<Self>,
+    ) -> Committed {
         let snap = self.model.snapshot();
+        let text_changed = committed.buffer_changed && committed.version != self.fanned_version;
+        self.fanned_version = committed.version;
         marks::on_commit(&mut self.marks, &committed, self.model.changelog(), &snap);
-        if committed.buffer_changed {
+        if text_changed {
             self.service.change(self.doc, &snap, &committed.desc, cx);
             let text_len = snap.buffer.len_bytes() as u64;
             // Nothing per keystroke is O(document): Task 19 keeps the longest line as edits
@@ -434,7 +503,7 @@ impl EditorView {
                 version: committed.version,
             });
         }
-        let why = if committed.buffer_changed {
+        let why = if text_changed {
             Refresh::Changed
         } else {
             Refresh::SelectionMoved
@@ -443,7 +512,7 @@ impl EditorView {
         ime::after_commit(self, &committed, event, cx);
         cx.emit(EditorEvent::StatusChanged);
         cx.notify();
-        Some(committed)
+        committed
     }
 }
 
@@ -456,13 +525,18 @@ impl Focusable for EditorView {
 impl EventEmitter<EditorEvent> for EditorView {}
 
 impl Render for EditorView {
-    /// Task 1b: a focusable area that takes text input, the large-file banner's slot above it,
-    /// and the paint path that calls every module seam (`element::paint_frame`); Task 19 paints
-    /// the text.
+    /// Task 1b: a focusable column with the large-file banner's slot, the editor element (the
+    /// text area, its input handler and accessibility node, every module seam) and the
+    /// commands' overlay; Task 19 paints the text.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let entity = cx.entity();
-        let focus = self.focus.clone();
         let banner = large_file::banner(&self.tier, window, cx);
+        let overlay = commands::overlay(self, window, cx);
+        let text = EditorElement::new(
+            cx.entity(),
+            self.focus.clone(),
+            ("editor-text", self.doc.0).into(),
+            self.a11y.clone(),
+        );
         div()
             .id(("editor", self.doc.0))
             .track_focus(&self.focus)
@@ -470,23 +544,7 @@ impl Render for EditorView {
             .flex()
             .flex_col()
             .children(banner)
-            .child(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, (), window, cx| {
-                        let focused = focus.is_focused(window);
-                        window.handle_input(
-                            &focus,
-                            ElementInputHandler::new(bounds, entity.clone()),
-                            cx,
-                        );
-                        entity.update(cx, |v, cx| {
-                            element::paint_frame(v, bounds, focused, window, cx);
-                        });
-                    },
-                )
-                .flex_1()
-                .w_full(),
-            )
+            .child(text)
+            .children(overlay)
     }
 }

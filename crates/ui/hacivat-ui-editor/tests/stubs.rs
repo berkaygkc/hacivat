@@ -257,8 +257,5 @@ fn focus_makes_the_editor_the_focused_editor_and_a_frame_runs_every_seam(cx: &mu
     // A frame paints through `element::paint_frame` (every module seam is a no-op in Task 1b).
     vcx.update(|window, _| window.refresh());
     vcx.run_until_parked();
-    assert_eq!(
-        vcx.read(|cx| e.read(cx).command_state()),
-        hacivat_ui_editor::CommandState::default()
-    );
+    assert!(!vcx.read(|cx| e.read(cx).command_state().tab_moves_focus));
 }

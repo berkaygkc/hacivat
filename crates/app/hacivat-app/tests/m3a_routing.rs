@@ -337,3 +337,63 @@ fn register_test_console_binds_a_real_editor_over_a_fake_session(cx: &mut TestAp
     assert_eq!(fake.executed().len(), before, "nothing reached the session");
     stop_core_runtime_test(cx);
 }
+
+// ## m3a-t01b-seams (round 2): the two window-close wirings.
+
+/// A quit guard that counts its asks and answers `answer`.
+fn counting_quit_guard(vcx: &gpui::VisualTestContext, answer: CloseDecision) -> Rc<Cell<u32>> {
+    let asked = Rc::new(Cell::new(0u32));
+    let seen = asked.clone();
+    vcx.cx.update(|cx| {
+        set_quit_guard(
+            cx,
+            Rc::new(move |_| {
+                seen.set(seen.get() + 1);
+                answer
+            }),
+        );
+    });
+    asked
+}
+
+/// The platform's close (macOS's traffic light, Windows' caption close) reaches the quit guard
+/// through the should-close callback `Workspace::new` installs: once per close, never twice.
+#[gpui::test]
+fn the_platform_close_asks_the_quit_guard_once_per_close(cx: &mut TestAppContext) {
+    let vcx = shell(cx, "en");
+    let asked = counting_quit_guard(vcx, CloseDecision::Defer);
+    assert!(!vcx.simulate_close(), "a deferred close keeps the window");
+    assert_eq!(asked.get(), 1);
+    assert!(!vcx.simulate_close());
+    assert_eq!(asked.get(), 2, "one ask per close");
+    let proceed = counting_quit_guard(vcx, CloseDecision::Proceed);
+    assert!(
+        vcx.simulate_close(),
+        "the stub's Proceed lets the platform close"
+    );
+    assert_eq!(proceed.get(), 1);
+    assert_eq!(
+        vcx.cx.read(hacivat_app::commands::quit_requests),
+        0,
+        "closing is not app.quit"
+    );
+}
+
+/// The title bar's client-drawn close (Linux) asks the quit guard once and removes the window
+/// only on `Proceed`; removing it does not ask again.
+#[gpui::test]
+fn the_title_bar_close_asks_the_quit_guard_and_closes_on_proceed(cx: &mut TestAppContext) {
+    let vcx = shell(cx, "en");
+    let asked = counting_quit_guard(vcx, CloseDecision::Defer);
+    let windows = || vcx.cx.update(|cx| cx.windows().len());
+    let before = windows();
+    let d = in_window(vcx, hacivat_app::commands::close_window);
+    assert_eq!(d, CloseDecision::Defer);
+    assert_eq!((asked.get(), windows()), (1, before));
+    let proceed = counting_quit_guard(vcx, CloseDecision::Proceed);
+    let d = in_window(vcx, hacivat_app::commands::close_window);
+    vcx.cx.run_until_parked();
+    assert_eq!(d, CloseDecision::Proceed);
+    assert_eq!(proceed.get(), 1, "removing the window asks nothing more");
+    assert_eq!(windows(), before - 1);
+}

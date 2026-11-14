@@ -317,6 +317,10 @@ struct TypedRun {
     sent: u64,
     chunks: u64,
     script: FakeQuery,
+    /// Savepoints open when the query started (round 2): `ROLLBACK TO` one of them, or to one
+    /// made later, destroys the portal (PostgreSQL closes portals created inside a rolled-back
+    /// savepoint).
+    savepoint_depth: usize,
 }
 
 /// The result set a typed query is delivering.
@@ -346,6 +350,7 @@ impl TypedRun {
         };
         let suspends = spec.suspendable && can_suspend && single;
         TypedRun {
+            savepoint_depth: 0,
             sets,
             skipped,
             current: None,
@@ -835,6 +840,7 @@ impl Driver for FakeDriver {
                 .unwrap_or_else(|| default_typed_caps(self.descriptor.kind)),
             typed: None,
             portal_gone: false,
+            savepoints: Vec::new(),
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
@@ -931,6 +937,8 @@ struct FakeConn {
     /// PostgreSQL ended the transaction under a suspended portal (fix round 1): the portal is
     /// gone, so `fetch_more`/`next_event` answer 34000 until a `close_query` or a new `query`.
     portal_gone: bool,
+    /// The open savepoints, oldest first, when tracking transactions (round 2).
+    savepoints: Vec<String>,
 }
 
 impl FakeConn {
@@ -999,8 +1007,21 @@ impl FakeConn {
         Box::pin(async move {
             let result = self.run_entry(sql).await;
             self.cancel.running.store(false, Ordering::SeqCst);
-            // Fix round 1: a PostgreSQL portal does not outlive its transaction.
-            if pg_wire(self.kind) && self.typed.is_some() && self.tx == TxStatus::Idle {
+            // Round 2: savepoints, and the portal a `ROLLBACK TO` closes.
+            let mut rolled_back_to = None;
+            if self.tracks_tx && result.is_ok() {
+                rolled_back_to = track_savepoints(&mut self.savepoints, sql);
+            }
+            if self.tx == TxStatus::Idle {
+                self.savepoints.clear();
+            }
+            // Fix round 1: a PostgreSQL portal does not outlive its transaction; round 2: nor a
+            // savepoint it was opened inside that is rolled back.
+            if pg_wire(self.kind)
+                && let Some(run) = &self.typed
+                && (self.tx == TxStatus::Idle
+                    || rolled_back_to.is_some_and(|depth| run.savepoint_depth > depth))
+            {
                 self.end_typed();
                 self.portal_gone = true;
             }
@@ -1267,6 +1288,58 @@ fn unsupported() -> RawError {
 /// The most rows a drain reads before it gives up and closes (one PostgreSQL `Execute`).
 const DRAIN_ROWS: u64 = 4_096;
 
+/// Follows `sql`'s savepoint statements on `stack` (oldest first; names compared without case):
+/// `SAVEPOINT s` pushes, `RELEASE [SAVEPOINT] s` pops `s` and every later one, `ROLLBACK [WORK |
+/// TRANSACTION] TO [SAVEPOINT] s` pops every later one and keeps `s`, a transaction's start or
+/// end clears it. Returns the index of the savepoint the last `ROLLBACK TO` rolled back to:
+/// portals opened with more savepoints open than that index are gone.
+fn track_savepoints(stack: &mut Vec<String>, sql: &str) -> Option<usize> {
+    let mut rolled_back_to = None;
+    for statement in sql.split(';') {
+        let words: Vec<String> = statement
+            .split(|c: char| c.is_whitespace())
+            .filter(|w| !w.is_empty())
+            .map(|w| w.trim_matches('"').to_ascii_lowercase())
+            .collect();
+        let word = |i: usize| words.get(i).map(String::as_str).unwrap_or_default();
+        let find = |stack: &[String], name: &str| stack.iter().rposition(|n| n == name);
+        match word(0) {
+            "savepoint" if !word(1).is_empty() => stack.push(word(1).to_string()),
+            "release" => {
+                let name = if word(1) == "savepoint" {
+                    word(2)
+                } else {
+                    word(1)
+                };
+                if let Some(i) = find(stack, name) {
+                    stack.truncate(i);
+                }
+            }
+            "rollback" | "abort" => {
+                let mut i = 1;
+                if matches!(word(i), "work" | "transaction") {
+                    i += 1;
+                }
+                if word(i) == "to" {
+                    i += 1;
+                    if word(i) == "savepoint" {
+                        i += 1;
+                    }
+                    if let Some(at) = find(stack, word(i)) {
+                        stack.truncate(at + 1);
+                        rolled_back_to = Some(at);
+                    }
+                } else {
+                    stack.clear();
+                }
+            }
+            "begin" | "start" | "commit" | "end" => stack.clear(),
+            _ => {}
+        }
+    }
+    rolled_back_to
+}
+
 /// Whether `sql` ends the transaction or rolls back to a savepoint: what PostgreSQL still
 /// accepts in a failed transaction (`COMMIT` there rolls back).
 fn ends_or_recovers_tx(sql: &str) -> bool {
@@ -1357,7 +1430,9 @@ impl FakeConn {
             return Err(unsupported());
         }
         let script = self.exec.take_query(spec.sql).unwrap_or_default();
-        self.typed = Some(TypedRun::new(spec, script, self.caps.suspend));
+        let mut run = TypedRun::new(spec, script, self.caps.suspend);
+        run.savepoint_depth = self.savepoints.len();
+        self.typed = Some(run);
         self.cancel.begin();
         Ok(())
     }

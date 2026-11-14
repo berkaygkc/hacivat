@@ -10,7 +10,7 @@ mod movement;
 mod run;
 mod selection;
 
-use hacivat_ui_core::gpui_surface::{Context, Window};
+use hacivat_ui_core::gpui_surface::{AnyElement, App, Context, Window};
 
 use crate::view::EditorView;
 
@@ -37,12 +37,22 @@ impl std::fmt::Debug for EditorCommand {
 }
 
 /// The commands' module-owned state in `EditorView` (P11; Task 25 adds fields as it needs
-/// them; keep `Default`): `EditorView::command_state` reads it, the bodies write it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// them, an open context menu's entity among them; keep `Default`): `EditorView::command_state`
+/// reads it by reference, the bodies write it.
+#[derive(Debug, Default)]
 pub struct CommandState {
     /// `editor.toggle_tab_moves_focus` (Ctrl+M): Tab and Shift+Tab move the focus instead of
     /// indenting (UI-EDIT-13).
     pub tab_moves_focus: bool,
+}
+
+/// The commands' overlay, drawn by the view over the text (round 2 of Task 1b's review):
+/// `editor.context_menu`'s `PopupMenu` (Cut, Copy, Paste, Select all · Run, Describe execution
+/// range; embedded in `deferred(anchored(..))`, the `Select` pattern), kept in
+/// [`CommandState`]. Task 25 fills it. Task 1b: none.
+pub fn overlay(v: &EditorView, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+    let _ = (v, window, cx);
+    None
 }
 
 /// Task 1b's body of every command.

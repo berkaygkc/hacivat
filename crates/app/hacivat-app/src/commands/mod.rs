@@ -11,7 +11,7 @@ pub use registry::register_workspace_actions;
 // ## m3a-t01b-seams
 #[cfg(feature = "test-support")]
 pub use registry::quit_requests;
-pub use registry::{request_quit, request_window_close};
+pub use registry::{close_window, request_quit, request_window_close};
 
 use std::cell::RefCell;
 use std::rc::Rc;

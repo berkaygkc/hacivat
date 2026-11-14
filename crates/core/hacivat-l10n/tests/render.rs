@@ -154,9 +154,29 @@ fn reserved_generations_are_unique_and_increasing() {
     assert_eq!(l.generation(), b);
 }
 
+/// Runs in a child test process whose output is captured (## m3a-t01b-seams, review round 2):
+/// trybuild's dependency build inherits stderr, and its generated project copies the
+/// workspace's `[patch]` table, whose entries it never uses, so cargo printed one "patch … was
+/// not used in the crate graph" warning per patch into every `cargo test --workspace`. The
+/// child's output is shown only when it fails.
 #[test]
 fn typed_ids_reject_wrong_args() {
-    trybuild::TestCases::new().compile_fail("tests/ui/wrong_args.rs");
+    const CHILD: &str = "HACIVAT_TRYBUILD_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        trybuild::TestCases::new().compile_fail("tests/ui/wrong_args.rs");
+        return;
+    }
+    let out = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .args(["--exact", "typed_ids_reject_wrong_args", "--nocapture"])
+        .env(CHILD, "1")
+        .output()
+        .expect("the child test runs");
+    assert!(
+        out.status.success(),
+        "trybuild failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[cfg(not(debug_assertions))]

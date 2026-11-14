@@ -31,6 +31,9 @@ pub mod scrollbar;
 mod service;
 mod theme;
 mod view;
+// ## m3a-t01b-seams (round 2): tests of crate-private seams.
+#[cfg(test)]
+mod seam_tests;
 
 pub use commands::{CommandState, EditorCommand, commands};
 pub use config::{CaretBlink, DocContext, DocId, EDITOR_CONTEXT, EditorConfig, Tier, TierLimits};
