@@ -2,6 +2,7 @@
 //! and `Control` fragments for C0/C1, U+FEFF and every bidi control, always visible.
 
 use smallvec::SmallVec;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
 use crate::buffer::TextBuffer;
@@ -37,13 +38,17 @@ pub struct VisualLine {
 }
 
 impl VisualLine {
-    /// The width in cells of each fragment (wide characters 2, zero-width 0, a tab its
-    /// expansion, a control or placeholder 1).
+    /// The width in cells of each fragment (wide characters and emoji clusters 2, zero-width
+    /// 0, a tab its expansion, a control or placeholder 1).
     pub fn cell_widths(&self, buf: &TextBuffer) -> Vec<u32> {
         self.fragments
             .iter()
             .map(|f| match f {
-                Fragment::Text { bytes } => buf.slice(bytes.clone()).chars().map(char_cells).sum(),
+                Fragment::Text { bytes } => buf
+                    .slice(bytes.clone())
+                    .graphemes(true)
+                    .map(cluster_cells)
+                    .sum(),
                 Fragment::Tab { width } => u32::from(*width),
                 Fragment::Control { .. } | Fragment::Placeholder { .. } => 1,
             })
@@ -53,6 +58,22 @@ impl VisualLine {
 
 fn char_cells(c: char) -> u32 {
     UnicodeWidthChar::width(c).unwrap_or(0) as u32
+}
+
+/// The display width of one grapheme cluster: its widest character; a VS16 emoji sequence
+/// and a regional-indicator pair (a flag) are 2 (an emoji ZWJ sequence is one 2-cell glyph).
+fn cluster_cells(g: &str) -> u32 {
+    let widest = g.chars().map(char_cells).max().unwrap_or(0);
+    let flag = g
+        .chars()
+        .filter(|c| ('\u{1F1E6}'..='\u{1F1FF}').contains(c))
+        .count()
+        >= 2;
+    if widest > 0 && (g.contains('\u{FE0F}') || flag) {
+        widest.max(2)
+    } else {
+        widest
+    }
 }
 
 /// Whether `c` is drawn as a `Control` fragment: C0 (but the tab), DEL, C1, U+FEFF and every
@@ -107,16 +128,28 @@ pub fn compose_line(
 ) -> VisualLine {
     let tab = u32::from(tab_size.max(1));
     let range = buf.line_range(line as usize, false);
-    let mut replaces: Vec<(std::ops::Range<usize>, PlaceholderId)> = Vec::new();
+    // Replace ranges clamped to the line; empty ones dropped (they replace nothing), and
+    // overlapping ones merged so a partial overlap never emits a second placeholder.
+    let mut raw: Vec<(std::ops::Range<usize>, PlaceholderId)> = Vec::new();
     for set in decos {
         for (r, d) in set.query(range.clone()) {
             if let Decoration::Replace { placeholder } = d {
                 let s = r.start.max(range.start);
-                replaces.push((s..r.end.min(range.end).max(s), *placeholder));
+                let e = r.end.min(range.end);
+                if e > s {
+                    raw.push((s..e, *placeholder));
+                }
             }
         }
     }
-    replaces.sort_by_key(|(r, _)| r.start);
+    raw.sort_by_key(|(r, _)| r.start);
+    let mut replaces: Vec<(std::ops::Range<usize>, PlaceholderId)> = Vec::new();
+    for (r, id) in raw {
+        match replaces.last_mut() {
+            Some((last, _)) if r.start < last.end => last.end = last.end.max(r.end),
+            _ => replaces.push((r, id)),
+        }
+    }
     let mut next_replace = 0;
 
     let text = buf.slice(range.clone());
@@ -129,17 +162,11 @@ pub fn compose_line(
             frags.push(Fragment::Text { bytes: start..end });
         }
     };
-    for (i, c) in text.char_indices() {
+    for (i, g) in text.grapheme_indices(true) {
         let at = range.start + i;
         if at < skip_until {
             run_start = skip_until;
             continue;
-        }
-        while next_replace < replaces.len()
-            && replaces[next_replace].0.end <= at
-            && replaces[next_replace].0.start < at
-        {
-            next_replace += 1;
         }
         if let Some((r, id)) = replaces.get(next_replace)
             && r.start <= at
@@ -147,27 +174,34 @@ pub fn compose_line(
             flush(&mut fragments, run_start, at);
             fragments.push(Fragment::Placeholder { id: *id });
             col += 1;
-            skip_until = r.end.max(at + c.len_utf8());
+            skip_until = r.end;
             run_start = skip_until;
             next_replace += 1;
             continue;
         }
-        if c == '\t' {
-            flush(&mut fragments, run_start, at);
-            let width = tab - col % tab;
-            fragments.push(Fragment::Tab { width: width as u8 });
-            col += width;
-            run_start = at + 1;
-        } else if is_visible_control(c) {
-            flush(&mut fragments, run_start, at);
-            fragments.push(Fragment::Control {
-                byte: at,
-                glyph: control_glyph(c),
-            });
-            col += 1;
-            run_start = at + c.len_utf8();
-        } else {
-            col += char_cells(c);
+        if !g.chars().any(|c| c == '\t' || is_visible_control(c)) {
+            col += cluster_cells(g);
+            continue;
+        }
+        for (j, c) in g.char_indices() {
+            let cat = at + j;
+            if c == '\t' {
+                flush(&mut fragments, run_start, cat);
+                let width = tab - col % tab;
+                fragments.push(Fragment::Tab { width: width as u8 });
+                col += width;
+                run_start = cat + 1;
+            } else if is_visible_control(c) {
+                flush(&mut fragments, run_start, cat);
+                fragments.push(Fragment::Control {
+                    byte: cat,
+                    glyph: control_glyph(c),
+                });
+                col += 1;
+                run_start = cat + c.len_utf8();
+            } else {
+                col += char_cells(c);
+            }
         }
     }
     flush(&mut fragments, run_start, range.end);

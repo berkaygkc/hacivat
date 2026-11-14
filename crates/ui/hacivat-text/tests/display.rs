@@ -296,3 +296,84 @@ fn controls_have_names() {
     assert_eq!(control_name('\u{202E}'), "RLO");
     assert_eq!(control_name('\u{85}'), "U+0085");
 }
+
+#[test]
+fn rangeset_stays_logarithmic_with_one_document_wide_range() {
+    let mut v: Vec<_> = vec![(0..usize::MAX / 2, Decoration::Mark { style: StyleId(9) })];
+    v.extend(
+        (0..100_000usize).map(|i| (i * 10..i * 10 + 8, Decoration::Mark { style: StyleId(1) })),
+    );
+    let rs = RangeSet::from_sorted(v);
+    let (hits, stats) = rs.query_with_stats(500_000..500_100);
+    assert_eq!(hits.len(), 11); // the wide one plus ten small ones
+    assert_eq!(hits[0].0, 0..usize::MAX / 2);
+    assert!(stats.probes <= 80, "probes {}", stats.probes);
+    assert!(rs.query_with_stats(1_500_000..1_500_001).1.probes <= 80);
+}
+
+#[test]
+fn probes_count_the_real_walk() {
+    // Every entry overlaps: the walk must visit all of them.
+    let rs = RangeSet::from_sorted((0..64usize).map(|i| (i..1000, ())).collect());
+    let (hits, stats) = rs.query_with_stats(100..101);
+    assert_eq!(hits.len(), 64);
+    assert!(stats.probes >= 64);
+}
+
+#[test]
+fn an_empty_replace_swallows_nothing() {
+    let b = TextBuffer::from_str("abcdef");
+    let rs = RangeSet::from_sorted(vec![(
+        2..2,
+        Decoration::Replace {
+            placeholder: PlaceholderId(1),
+        },
+    )]);
+    assert_eq!(
+        compose_line(&b, 0, 4, &[&rs]).fragments.to_vec(),
+        vec![Fragment::Text { bytes: 0..6 }]
+    );
+}
+
+#[test]
+fn overlapping_replaces_emit_one_placeholder() {
+    let b = TextBuffer::from_str("0123456789");
+    let rs = RangeSet::from_sorted(vec![
+        (
+            2..6,
+            Decoration::Replace {
+                placeholder: PlaceholderId(1),
+            },
+        ),
+        (
+            4..8,
+            Decoration::Replace {
+                placeholder: PlaceholderId(2),
+            },
+        ),
+    ]);
+    assert_eq!(
+        compose_line(&b, 0, 4, &[&rs]).fragments.to_vec(),
+        vec![
+            Fragment::Text { bytes: 0..2 },
+            Fragment::Placeholder {
+                id: PlaceholderId(1)
+            },
+            Fragment::Text { bytes: 8..10 },
+        ]
+    );
+}
+
+#[test]
+fn emoji_clusters_count_their_display_width() {
+    // Family ZWJ sequence, VS16 heart, flag, skin tone: one 2-cell glyph each.
+    for g in [
+        "\u{1F468}\u{200D}\u{1F469}",
+        "\u{2764}\u{FE0F}",
+        "\u{1F1F9}\u{1F1F7}",
+        "\u{1F44D}\u{1F3FD}",
+    ] {
+        assert_eq!(columns(&format!("{g}\tx"), 4), [2, 2, 1], "{g:?}");
+    }
+    assert_eq!(columns("\u{2764}\u{FE0F}ab\tx", 4), [4, 4, 1]);
+}
