@@ -333,8 +333,9 @@ fn a_collapsed_segment_keeps_its_text_as_tooltip_and_accessible_name(cx: &mut Te
     press(vcx, "enter");
     let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
     for want in [phrase(CRUMB, XT), phrase(WHY, XT)] {
+        // On Linux and Windows a menu row is drawn as runs around its access-key letter (P15).
         assert!(
-            frame.iter().any(|r| r.text.as_ref() == want),
+            support::find_label_runs(&frame, &want).is_some(),
             "{want:?} is not in the menu"
         );
     }
