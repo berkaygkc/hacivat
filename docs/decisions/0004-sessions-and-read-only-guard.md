@@ -1622,20 +1622,48 @@ itself (`cursor::Canceller`: PostgreSQL's protocol cancel and SQLite's interrupt
 awaited before the guarded call returns (2 s, else the connection is discarded), so it cannot
 reach a later statement. Per engine:
 - PostgreSQL named portal: `close_query(Now)`; the cancel only if the close itself is overdue.
-- PostgreSQL `Execute(0)` (a unit that cannot suspend): it cannot be closed on the wire, so the
-  protocol cancel goes out **alongside** `close_query(Now)`, at once. This is the one case
-  where a stop between prompt chunks reaches the server; inside a user transaction it leaves
-  the transaction `Failed` (below). `Completed` from that close means the statement ran to its
-  end before the cancel landed: the unit is reported `Succeeded` (it applied; in autocommit it
-  committed), the result `Cancelled` when rows were left unread.
+- PostgreSQL `Execute(0)` (a unit that cannot suspend): it cannot be closed on the wire, and
+  `close_query` reads it to its end.
+  - **In autocommit** the protocol cancel goes out **alongside** `close_query(Now)`, at once
+    (`never_pending_stream_is_cancelled_within_one_chunk`). This is the one case where a stop
+    between prompt chunks reaches the server.
+  - **Inside a user transaction (fix round 1, review M3)** the cancel goes out only when that
+    close is `overdue` (1 s) late. A rest that drains within the second leaves the user's
+    transaction alive (`a_pg_stop_inside_a_user_transaction_waits_before_it_cancels`); one
+    that does not is cancelled, and the transaction is `Failed` (below). Rejected: the
+    immediate cancel there too (round 0), which failed the user's transaction on every stop of
+    such a unit.
+  - `Completed` from that close means the statement ran to its end: the unit is reported
+    `Succeeded` (it applied; in autocommit it committed) with `more: true` and the result
+    `Cancelled` when the close read rows the store does not have.
 - MySQL/MariaDB: `close_query(Now)` answers `NeedsServerKill` unless nothing is unread; the
   session kills the connection's own thread on a side connection, then
   `close_query(AfterKill(2 s))`. A kill that cannot be sent, or an `AfterKill` that runs out
-  (`kill_ignored`), discards the connection (`a_mysql_kill_that_is_ignored_…`). After an
-  `AfterKill` that answers `Completed` (the kill raced the statement's end) one `DO 0` is sent
-  and its outcome ignored, so a server that keeps the kill for the thread's next statement
-  spends it there, not on the user's.
-- SQLite: the interrupt first, then `close_query(Now)` (a close is seen only between rows).
+  (`kill_ignored`), discards the connection (`a_mysql_kill_that_is_ignored_…`).
+  **One kill per statement, and none left behind (fix round 1, review I2).** The session keeps
+  one flag, `Core::stray_kill`: a `KILL QUERY` went out for the open statement (the overdue
+  watchdog's, or the close's) and no 1317 answered it.
+  - While it is set, a `NeedsServerKill` sends no second kill: the session goes straight to
+    `AfterKill`, which reads the first one's 1317 (`a_mysql_overdue_kill_is_not_sent_twice`;
+    round 0 sent two, and the second stayed on an idle thread).
+  - A 1317 clears it: from the open query's own calls, or `AfterKill` answering `Closed`
+    (`a_mysql_kill_answered_by_its_1317_needs_no_absorbing`).
+  - If it is still set when the statement has ended (the kill raced the end: the stream ran
+    to `Done`, or a close answered `Completed`), exactly one `DO 0` is sent before anything
+    else (`end_hold` starts with it), so a server that keeps the kill for the thread's next
+    statement spends it there and not on the user's, which in Manual mode could be a `COMMIT`
+    (`a_mysql_kill_that_raced_the_statements_end_is_absorbed`). A 1317 from `DO 0` is the kill
+    arriving and is ignored; any other failure goes through `raw_error`, so a lost connection
+    breaks the session and is the request's error, not the next statement's surprise
+    (`a_lost_connection_found_by_the_absorbing_statement_surfaces`).
+  - Rejected: proving on Docker that servers drop a kill for an idle thread and removing
+    `DO 0` (the controller's ruling: ADR 0002 names it a per-server limit).
+- SQLite **(corrected in fix round 1, review I1)**: `close_query(Now)`, and the interrupt only
+  when that close is `overdue` (1 s) late, which is the case of one long step (a close is seen
+  only between rows). Never at once: `sqlite3_interrupt` during a write inside an explicit
+  transaction rolls the user's whole transaction back, and round 0 sent it on every stop
+  (`a_sqlite_stop_of_a_flowing_stream_never_interrupts`,
+  `a_sqlite_stop_of_an_overdue_chunk_interrupts_once_after_a_second`).
 
 **psql semantics inside a user transaction (R-M3-16 amended, P16).** A suspendable unit runs
 under `SAVEPOINT hv_cursor`, so stopping it (or a failure in it) is undone by the rollback to
@@ -1719,6 +1747,18 @@ crates/core/hacivat-session/src` finds no site beyond them that decides a sessio
 own). `tests/prod_read_only.rs` pins every session kind, the reconnect, a tag applied while a
 session is open (it applies to the next session; the open one keeps the mode it was opened
 with), pooled reuse (one connection for six borrows) and the single-session borrow.
+
+**The idle release shows as busy (fix round 1, review M4).** While the idle bound releases a
+cursor the snapshot is `Busy { req: 0, since }` and `Idle` again after it: on MySQL the release
+drains, kills and reads on for up to a few seconds, and commands queue meanwhile. Request
+numbers count from 1, so 0 names no request and a cancel of it is `AlreadyFinished`
+(`the_session_is_busy_while_the_idle_bound_releases_its_cursor`). No seam change: an existing
+state with a number nobody holds.
+
+**Tests' timing (fix round 1, review I3).** The Docker file keeps one wall-clock budget, the
+plan-named `…within_1s` of the MySQL release; every other check is on state, and the wait for
+a running `pg_sleep` is a condition on `pg_stat_activity`. The real-SQLite case has no server
+and is in `tests/cursor_sqlite.rs`, not in a `docker_*` file.
 
 **Not done here.** The queue cap of the digest (C9, `QueueFull`): not in the plan's Task 18.
 A reconnect after a loss during a run or a fetch: `may_open_tx` stays true for them (Task 1b,

@@ -12,6 +12,7 @@ use common::*;
 use hacivat_driver::fake::FakeDriver;
 use hacivat_net::TlsMode;
 use hacivat_proto::{AccessLabel, DbmsKind, Department, EnvTag, ProfileId};
+use hacivat_results::FetchPolicy;
 use hacivat_session::budget_for;
 use hacivat_session::pipeline::Interaction;
 use hacivat_session::profile::Profile;
@@ -99,6 +100,22 @@ async fn assert_read_only(h: &SessionHandle, f: &FakeDriver, what: &str) {
         !f.executed().iter().any(|s| s == "COMMIT"),
         "{what}: the statement was sent"
     );
+    // The typed path too (fix round 1, review M1): a run on this session reaches the driver
+    // with nothing, as a suspendable read and as a write. Until Task 22 the typed guard fails
+    // closed (`Internal`); then it is the guard's verdict.
+    for (sql, suspendable) in [("DELETE FROM t", false), ("SELECT * FROM t", true)] {
+        let sent = f.call_log().len();
+        let o = Recorder::new();
+        let e = run_spec(
+            h,
+            spec_with(&o, &[(sql, suspendable)], FetchPolicy::default()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.kind, ExecErrorKind::Internal, "{what}: {sql}");
+        assert_eq!(f.call_log().len(), sent, "{what}: {sql} reached the driver");
+        assert_eq!(o.stores(), 0, "{what}: {sql} opened a result");
+    }
 }
 
 #[tokio::test(start_paused = true)]

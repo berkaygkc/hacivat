@@ -8,7 +8,7 @@ use common::runs::*;
 use common::*;
 use hacivat_driver::fake::{FakeCall, FakeDriver, FakeQuery, FakeTypedCall};
 use hacivat_driver::{CloseHow, TxStatus};
-use hacivat_proto::ErrClass;
+use hacivat_proto::{DbmsKind, ErrClass};
 use hacivat_results::{CloseReason, Completeness, FetchPolicy, TruncReason};
 use hacivat_session::session::{
     CancelOutcome, CancelState, Escalation, ExecErrorKind, Request, RowsOutcome, RunEvent,
@@ -296,6 +296,111 @@ async fn a_stop_between_prompt_chunks_sends_no_server_cancel() {
     assert_eq!(o.releases(), vec![(CloseReason::Cancelled, true)]);
     assert_eq!(&f.executed()[..], ["BEGIN", "ROLLBACK"]);
     assert_eq!(snap(&h).cursor, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sqlite_stop_of_a_flowing_stream_never_interrupts() {
+    // Fix round 1 (review I1). An interrupt during a write inside an explicit SQLite
+    // transaction rolls the user's whole transaction back, so a stop between chunks sends only
+    // the close (R-M3-16).
+    let endless = FakeQuery {
+        never_pending: true,
+        ..select("UPDATE", u64::MAX)
+    };
+    let fake = FakeDriver::new(DbmsKind::Sqlite)
+        .tracks_transactions()
+        .queries(vec![endless]);
+    let (h, f) = session(fake).await;
+    run(&h, "BEGIN").await.unwrap();
+    let o = Recorder::new();
+    let t = h.run(spec_with(
+        &o,
+        &[("UPDATE t SET a = a + 1 RETURNING a", false)],
+        FetchPolicy::default(),
+    ));
+    settle_until("the first chunks", || o.rows() >= 4_096).await;
+    assert_eq!(h.cancel(t.seq).await.unwrap(), CancelOutcome::Cancelled);
+    assert_eq!(
+        t.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::Cancelled
+    );
+    assert_eq!(f.cancel_calls(), 0, "no interrupt for a stream that flows");
+    assert_eq!(typed(&f).last(), Some(&FakeTypedCall::Close(CloseHow::Now)));
+    assert_eq!(*o.snap(0).completeness(), Completeness::Cancelled);
+    let tx = snap(&h).tx;
+    assert_eq!((tx.status, tx.owner), (TxStatus::InTx, TxOwner::User));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sqlite_stop_of_an_overdue_chunk_interrupts_once_after_a_second() {
+    let slow = FakeQuery {
+        chunk_delay: secs(60),
+        ..select("UPDATE", 1_000_000)
+    };
+    let fake = FakeDriver::new(DbmsKind::Sqlite)
+        .tracks_transactions()
+        .queries(vec![slow]);
+    let (h, f) = session(fake).await;
+    run(&h, "BEGIN").await.unwrap();
+    let o = Recorder::new();
+    let t = h.run(spec_with(
+        &o,
+        &[("UPDATE t SET a = a + 1 RETURNING a", false)],
+        FetchPolicy::default(),
+    ));
+    settle_until("the first chunk", || o.rows() == 500).await;
+    let asked = tokio::time::Instant::now();
+    assert_eq!(h.cancel(t.seq).await.unwrap(), CancelOutcome::Cancelled);
+    assert_eq!(asked.elapsed(), secs(1));
+    assert_eq!(f.cancel_calls(), 1);
+    assert_eq!(
+        t.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::Cancelled
+    );
+    assert_eq!(f.cancel_calls(), 1, "exactly one interrupt");
+    assert_eq!(*o.snap(0).completeness(), Completeness::Cancelled);
+    assert_eq!(o.rows(), 500);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pg_stop_inside_a_user_transaction_waits_before_it_cancels() {
+    // Fix round 1 (review M3, taken): a unit that cannot suspend is read to its end by the
+    // close. In autocommit the protocol cancel goes out at once, beside the close
+    // (`never_pending_stream_is_cancelled_within_one_chunk`). Inside a user transaction it
+    // goes out only when the close is a second late, so a rest that drains meanwhile leaves
+    // the user's transaction alive.
+    let endless = FakeQuery {
+        never_pending: true,
+        ..select("UPDATE", u64::MAX)
+    };
+    let (h, f) = session(pg().queries(vec![endless])).await;
+    run(&h, "BEGIN").await.unwrap();
+    let o = Recorder::new();
+    let t = h.run(spec_with(
+        &o,
+        &[("UPDATE t SET a = a + 1 RETURNING a", false)],
+        FetchPolicy::default(),
+    ));
+    settle_until("the first chunks", || o.rows() >= 4_096).await;
+    let asked = tokio::time::Instant::now();
+    let _ = h.cancel(t.seq).await.unwrap();
+    // The rest was read at once (the fake's close reads it to the end), so the statement ran
+    // to its end: no cancel reached the server, and the transaction is as it was.
+    t.reply.await.unwrap().unwrap();
+    assert_eq!(asked.elapsed(), secs(0));
+    assert_eq!(f.cancel_calls(), 0);
+    assert_eq!(typed(&f).last(), Some(&FakeTypedCall::Close(CloseHow::Now)));
+    let tx = snap(&h).tx;
+    assert_eq!((tx.status, tx.owner), (TxStatus::InTx, TxOwner::User));
+    // The rows the close read past the store are not claimed.
+    assert_eq!(*o.snap(0).completeness(), Completeness::Cancelled);
+    assert!(matches!(
+        &o.unit_ends()[..],
+        [UnitEnd::Succeeded {
+            rows: Some(RowsOutcome::Fetched { more: true, .. })
+        }]
+    ));
+    run(&h, "COMMIT").await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]

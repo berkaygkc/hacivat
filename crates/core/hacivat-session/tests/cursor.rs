@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use common::runs::*;
 use common::*;
-use hacivat_driver::fake::{FakeCall, FakeDriver, FakeQuery, FakeTypedCall};
-use hacivat_driver::{CloseHow, TxStatus, TypedCaps};
+use hacivat_driver::fake::{FakeCall, FakeDriver, FakeExec, FakeQuery, FakeTypedCall};
+use hacivat_driver::{CloseHow, RawError, RawErrorKind, ServerMessage, TxStatus, TypedCaps};
 use hacivat_net::TlsMode;
 use hacivat_proto::DbmsKind;
 use hacivat_results::{
@@ -21,8 +21,8 @@ use hacivat_session::pipeline::Interaction;
 use hacivat_session::profile::Profile;
 use hacivat_session::session::cursor::{PRODUCTION_IDLE, READ_ONLY_PG_IDLE, idle_bound};
 use hacivat_session::session::{
-    CancelOutcome, ClosePolicy, ExecErrorKind, Request, SessionEvent, SessionHandle, SessionState,
-    TxCommand, TxOwner,
+    CancelOutcome, ClosePolicy, ExecErrorKind, Reply, Request, SessionEvent, SessionHandle,
+    SessionState, TxCommand, TxOwner,
 };
 
 /// A PostgreSQL fake that follows `BEGIN`/`COMMIT`/`ROLLBACK` (a suspendable PostgreSQL query
@@ -645,6 +645,161 @@ async fn a_mysql_stop_kills_at_once_and_the_connection_is_reused() {
     assert_eq!(f.connect_calls(), 1);
 }
 
+// Fix round 1 (review I2): one kill per statement, and a kill no 1317 answered is absorbed.
+
+/// MySQL's answer to a `KILL QUERY`: `ER_QUERY_INTERRUPTED`.
+fn interrupted() -> RawError {
+    RawError {
+        kind: RawErrorKind::Db,
+        server: Some(ServerMessage {
+            sqlstate: Some("70100".into()),
+            vendor_code: Some(1317),
+            severity: None,
+            text: "Query execution was interrupted".into(),
+            detail: None,
+            hint: None,
+            lang_hint: None,
+        }),
+    }
+}
+
+/// A MySQL session whose cursor on `query` is suspended, a `FetchAll` on it in flight (its
+/// next chunk 1.5 s away, so half a second overdue when the kill goes out), and the stop asked
+/// for. Returns once the stop was answered.
+async fn mysql_stop_of_an_overdue_fetch(
+    main: FakeDriver,
+    query: FakeQuery,
+) -> (
+    SessionHandle,
+    Arc<FakeDriver>,
+    Arc<FakeDriver>,
+    Arc<Recorder>,
+    Reply,
+) {
+    let side = Arc::new(fake_mysql());
+    let slow = FakeQuery {
+        chunk_delay: ms(1_500),
+        ..query
+    };
+    let (h, f) = session_with_side(main.queries(vec![slow]), &side).await;
+    let o = suspend_on(&h, FetchPolicy::default()).await;
+    let calls = f.typed_log().len();
+    let t = h.submit(fetch_all(&o));
+    settle_until("the fetch is in flight", || f.typed_log().len() > calls).await;
+    let asked = tokio::time::Instant::now();
+    let _ = h.cancel(t.seq).await.unwrap();
+    assert!(asked.elapsed() >= secs(1), "{:?}", asked.elapsed());
+    let reply = t.reply.await.unwrap();
+    (h, f, side, o, reply)
+}
+
+fn count(sent: &[String], sql: &str) -> usize {
+    sent.iter().filter(|s| *s == sql).count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_mysql_overdue_kill_is_not_sent_twice() {
+    // The watchdog kills at 1 s; the late chunk still arrives, so the close finds rows unread
+    // and the driver asks for a kill. The one that is out already is it.
+    let (h, f, side, o, reply) =
+        mysql_stop_of_an_overdue_fetch(fake_mysql(), select("SELECT * FROM big", 1_000_000)).await;
+    assert_eq!(reply.unwrap_err().kind, ExecErrorKind::Cancelled);
+    assert_eq!(&side.executed()[..], ["KILL QUERY 1000"]);
+    let typed = f.typed_log();
+    assert_eq!(
+        typed[typed.len() - 2..],
+        [
+            FakeTypedCall::Close(CloseHow::Now),
+            FakeTypedCall::Close(CloseHow::AfterKill(secs(2))),
+        ]
+    );
+    // The kill's 1317 was read by the close: nothing is left to absorb.
+    assert_eq!(count(&f.executed(), "DO 0"), 0);
+    assert_eq!(*o.snap(0).completeness(), Completeness::Cancelled);
+    run(&h, "SELECT 1").await.unwrap();
+    assert_eq!(&side.executed()[..], ["KILL QUERY 1000"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_mysql_kill_that_raced_the_statements_end_is_absorbed() {
+    // 100 rows are left: the late chunk is the last, so the close finds nothing unread and
+    // the statement completed. The kill is still on its way: one `DO 0` takes it, before
+    // anything of the user's runs.
+    let (h, f, side, o, reply) =
+        mysql_stop_of_an_overdue_fetch(fake_mysql(), select("SELECT * FROM big", 10_100)).await;
+    assert_eq!(reply.unwrap_err().kind, ExecErrorKind::Cancelled);
+    assert_eq!(&side.executed()[..], ["KILL QUERY 1000"]);
+    assert_eq!(&f.executed()[..], ["DO 0"]);
+    assert_eq!(o.rows(), 10_100);
+    assert_eq!(*o.snap(0).completeness(), Completeness::Complete);
+    run(&h, "SELECT 1").await.unwrap();
+    assert_eq!(&f.executed()[..], ["DO 0", "SELECT 1"]);
+    assert_eq!(side.executed().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_mysql_kill_answered_by_its_1317_needs_no_absorbing() {
+    // A stream whose second chunk is 1.5 s away and never comes: the kill at 1 s ends the
+    // statement, and its 1317 is what the pending read answers.
+    let side = Arc::new(fake_mysql());
+    let killed = FakeQuery {
+        chunk_delay: ms(1_500),
+        fail_after: Some((500, interrupted())),
+        ..select("SELECT * FROM big", 1_000_000)
+    };
+    let (h, f) = session_with_side(fake_mysql().queries(vec![killed]), &side).await;
+    let o = Recorder::new();
+    let t = h.run(spec_with(&o, &[(BIG, false)], FetchPolicy::default()));
+    settle_until("the first chunk", || o.rows() == 500).await;
+    let asked = tokio::time::Instant::now();
+    assert_eq!(h.cancel(t.seq).await.unwrap(), CancelOutcome::Cancelled);
+    assert_eq!(asked.elapsed(), ms(1_500));
+    assert_eq!(
+        t.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::Cancelled
+    );
+    assert_eq!(&side.executed()[..], ["KILL QUERY 1000"]);
+    // The kill is spent: nothing to absorb, and no kill for a query that is gone.
+    assert_eq!(count(&f.executed(), "DO 0"), 0);
+    assert!(
+        !f.typed_log()
+            .iter()
+            .any(|c| matches!(c, FakeTypedCall::Close(CloseHow::AfterKill(_))))
+    );
+    assert_eq!(*o.snap(0).completeness(), Completeness::Cancelled);
+    assert_eq!(o.rows(), 500);
+    run(&h, "SELECT 1").await.unwrap();
+    assert_eq!(&f.executed()[..], ["SELECT 1"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lost_connection_found_by_the_absorbing_statement_surfaces() {
+    let lost = FakeExec {
+        prefix: "DO 0",
+        result: Err(io_reset()),
+        delay: Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    };
+    let (h, f, _side, o, reply) = mysql_stop_of_an_overdue_fetch(
+        fake_mysql().exec(vec![lost]),
+        select("SELECT * FROM big", 10_100),
+    )
+    .await;
+    // Not swallowed: the request reports the loss, the result says so, the session is broken.
+    assert!(matches!(
+        reply.unwrap_err().kind,
+        ExecErrorKind::ConnectionLost { .. }
+    ));
+    assert_eq!(count(&f.executed(), "DO 0"), 1);
+    assert_eq!(
+        *o.snap(0).completeness(),
+        closed(CloseReason::ConnectionLost)
+    );
+    assert!(matches!(snap(&h).state, SessionState::Broken(_)));
+    assert_eq!(o.rows(), 10_100);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Idle bounds (R-M3-20)
 
@@ -724,6 +879,49 @@ async fn the_idle_bound_releases_the_cursor_and_rolls_back() {
     assert_eq!(snap(&h).state, SessionState::Idle);
     assert_eq!(snap(&h).tx.status, TxStatus::Idle);
     run(&h, "SELECT 1").await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_session_is_busy_while_the_idle_bound_releases_its_cursor() {
+    // Fix round 1 (review M4). A MySQL release drains, kills on a side connection and reads
+    // on: the snapshot says `Busy` meanwhile (request 0: no request has that number).
+    let side = Arc::new(fake_mysql());
+    let (h, _f) = session_with_side(
+        fake_mysql().queries(vec![select("SELECT * FROM big", 1_000_000)]),
+        &side,
+    )
+    .await;
+    let fetch = FetchPolicy {
+        idle_cap: Some(secs(2)),
+        ..FetchPolicy::default()
+    };
+    let o = suspend_on(&h, fetch).await;
+    let mut state = h.state();
+    let busy = tokio::time::timeout(
+        secs(60),
+        state.wait_for(|s| matches!(s.state, SessionState::Busy { req: 0, .. })),
+    )
+    .await
+    .expect("the release shows as busy")
+    .unwrap()
+    .clone();
+    // Still the cursor's: it is being released, not gone.
+    assert!(busy.cursor.is_some());
+    assert!(o.releases().is_empty());
+    let mut state = h.state();
+    let idle = tokio::time::timeout(
+        secs(60),
+        state.wait_for(|s| s.state == SessionState::Idle && s.cursor.is_none()),
+    )
+    .await
+    .expect("the release ends")
+    .unwrap()
+    .clone();
+    assert_eq!(idle.cursor, None);
+    assert_eq!(o.releases(), vec![(CloseReason::IdleTimeout, false)]);
+    assert_eq!(&side.executed()[..], ["KILL QUERY 1000"]);
+    // Request 0 is nobody's: a cancel that names it finds nothing.
+    assert_eq!(h.cancel(0).await.unwrap(), CancelOutcome::AlreadyFinished);
 }
 
 #[tokio::test(start_paused = true)]

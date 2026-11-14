@@ -11,8 +11,9 @@
 //!   are dropped at the end (Q7).
 //! - Real servers set the pace: waits are on conditions bounded by real time; the idle bound
 //!   is injected (2 s), never a real one.
-//! - `sqlite_rollback_journal_cursor_has_the_30s_bound` needs no server: it runs in plain
-//!   `cargo test`, over the real SQLite driver.
+//! - The only wall-clock budget is the plan's `…within_1s` of the MySQL release (the ledger
+//!   exempts it); everything else is proven by state. The SQLite case, which needs no server,
+//!   is in `tests/cursor_sqlite.rs`.
 
 mod common;
 
@@ -22,7 +23,6 @@ use std::time::Instant;
 use common::conformance::*;
 use common::runs::*;
 use hacivat_driver::TxStatus;
-use hacivat_proto::DbmsKind;
 use hacivat_results::{CloseReason, Completeness, FetchPolicy};
 use hacivat_session::session::{
     CancelOutcome, ExecErrorKind, Request, SessionHandle, SessionSnapshot, TxOwner, UnitEnd,
@@ -100,11 +100,8 @@ async fn pg_suspended_million_rows_released_by_select_1() {
     assert_eq!(s.cursor.map(|c| (c.rows, c.holds_tx)), Some((10_000, true)));
     assert_eq!(idle_in_tx(&t, &marker).await, 1);
 
-    // Another statement: the cursor goes first, and the statement runs at once.
-    let start = Instant::now();
+    // Another statement: the cursor goes first, then the statement runs.
     run(&on.s, "SELECT 1").await.expect("SELECT 1 runs");
-    let took = start.elapsed();
-    assert!(took < secs(1), "the release took {took:?}");
     assert_eq!(o.releases(), vec![(CloseReason::SessionNeeded, true)]);
     assert_eq!(
         *o.snap(0).completeness(),
@@ -315,10 +312,8 @@ async fn pg_stop_fetching_keeps_a_users_transaction_and_a_server_cancel_fails_it
     let result = o.store(0).id();
     let fetch = s.submit(Request::FetchAll { result });
     wait_until("more rows", secs(30), || o.rows() >= 50_000).await;
-    let start = Instant::now();
     let outcome = s.cancel(fetch.seq).await.expect("the cancel answers");
     assert_eq!(outcome, CancelOutcome::Cancelled);
-    assert!(start.elapsed() < secs(1), "{:?}", start.elapsed());
     assert_eq!(
         fetch.reply.await.unwrap().unwrap_err().kind,
         ExecErrorKind::Cancelled
@@ -335,17 +330,23 @@ async fn pg_stop_fetching_keeps_a_users_transaction_and_a_server_cancel_fails_it
     // rows are a second late, then cancels on the server, which fails the transaction, as in
     // psql (P16). Nothing hides it.
     let o = Recorder::new();
-    let slow = s.run(spec_with(
-        &o,
-        &[("SELECT pg_sleep(60), a FROM hv_t18_stop FOR UPDATE", false)],
-        FetchPolicy::default(),
-    ));
-    wait_until("the unit started", secs(30), || !o.events().is_empty()).await;
-    tokio::time::sleep(ms(300)).await;
-    let start = Instant::now();
+    let marker = unique("hv_t18_sleep");
+    let sql = format!("SELECT pg_sleep(60), a FROM hv_t18_stop FOR UPDATE /* {marker} */");
+    let slow = s.run(spec_with(&o, &[(&sql, false)], FetchPolicy::default()));
+    // The server is running it (a condition on `pg_stat_activity`, not a pause).
+    let mut admin = admin(&t).await;
+    let running = format!(
+        "SELECT count(*) FROM pg_stat_activity \
+         WHERE state = 'active' AND pid <> pg_backend_pid() AND query LIKE '%{marker}%'"
+    );
+    let deadline = Instant::now() + secs(30);
+    while count(&mut admin, &running).await != 1 {
+        assert!(Instant::now() < deadline, "the statement never ran");
+        tokio::time::sleep(ms(50)).await;
+    }
+    admin.close().await;
     let outcome = s.cancel(slow.seq).await.expect("the cancel answers");
     assert_eq!(outcome, CancelOutcome::Cancelled);
-    assert!(start.elapsed() < secs(2), "{:?}", start.elapsed());
     assert_eq!(
         slow.reply.await.unwrap().unwrap_err().kind,
         ExecErrorKind::Cancelled
@@ -432,86 +433,4 @@ async fn mysql_release_kills_on_the_side_connection_and_reuses_within_1s() {
         admin.close().await;
         on.shutdown().await;
     }
-}
-
-// ---------------------------------------------------------------------------------------------
-// SQLite (the real driver; no server)
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn sqlite_rollback_journal_cursor_has_the_30s_bound() {
-    let dir = tempfile::tempdir().expect("a temp directory");
-    let path = dir.path().join("hv_t18.sqlite");
-    let on = OnManager::connect(deps(), sqlite_profile(&path)).await;
-    assert_eq!(on.profile.engine, DbmsKind::Sqlite);
-    let s = &on.s;
-    for sql in [
-        "CREATE TABLE t(a INTEGER)",
-        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 50000) \
-         INSERT INTO t SELECT x FROM c",
-    ] {
-        run(s, sql)
-            .await
-            .unwrap_or_else(|e| panic!("{sql}: {:?}", e.kind));
-    }
-    // The default journal mode is a rollback journal: a live statement holds a SHARED lock, so
-    // the cursor may idle 30 s at most.
-    let o = suspend(
-        s,
-        "SELECT a FROM t ORDER BY a",
-        FetchPolicy::default(),
-        "sqlite",
-    )
-    .await;
-    let Completeness::Suspended(info) = *o.snap(0).completeness() else {
-        unreachable!()
-    };
-    assert_eq!(info.idle_bound, secs(30));
-    assert!(!info.holds_tx);
-    // A write on the same session releases the cursor first (single-session: every client
-    // shares it), then runs; the statement was finalized, so the write finds no lock.
-    let start = Instant::now();
-    run(s, "INSERT INTO t VALUES (0)")
-        .await
-        .expect("the insert runs");
-    assert!(start.elapsed() < secs(2), "{:?}", start.elapsed());
-    assert_eq!(o.releases(), vec![(CloseReason::SessionNeeded, false)]);
-    assert_eq!(o.rows(), 10_000);
-    assert_eq!((int_at(&o, 0), int_at(&o, 9_999)), (1, 10_000));
-
-    // The injected bound releases an idle cursor (`finalize`), and the session runs on.
-    let fetch = FetchPolicy {
-        idle_cap: Some(secs(1)),
-        ..FetchPolicy::default()
-    };
-    let o = suspend(s, "SELECT a FROM t ORDER BY a", fetch, "sqlite idle").await;
-    let mut state = s.state();
-    tokio::time::timeout(secs(15), state.wait_for(|s| s.cursor.is_none()))
-        .await
-        .expect("the idle bound released the cursor")
-        .expect("the session is alive");
-    assert_eq!(o.releases(), vec![(CloseReason::IdleTimeout, false)]);
-
-    // In WAL mode the engine sets no bound: the policy's 10 minutes.
-    run(s, "PRAGMA journal_mode = WAL")
-        .await
-        .expect("the pragma runs");
-    let o = suspend(
-        s,
-        "SELECT a FROM t ORDER BY a",
-        FetchPolicy::default(),
-        "sqlite wal",
-    )
-    .await;
-    let Completeness::Suspended(info) = *o.snap(0).completeness() else {
-        unreachable!()
-    };
-    assert_eq!(info.idle_bound, secs(600));
-    // Fetching to the end completes the result and finalizes the statement.
-    let result = o.store(0).id();
-    ask(s, Request::FetchAll { result })
-        .await
-        .expect("the fetch runs");
-    assert_eq!(*o.snap(0).completeness(), Completeness::Complete);
-    assert_eq!(o.rows(), 50_001);
-    on.shutdown().await;
 }

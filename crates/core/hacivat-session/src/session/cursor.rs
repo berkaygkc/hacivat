@@ -260,6 +260,9 @@ pub(crate) struct Watch {
     /// A cancel did not end within [`CANCEL_WAIT`]: it may still land, so the connection must
     /// not be used again.
     unsettled: bool,
+    /// The cancel that went out was MySQL's `KILL QUERY` (`Core::note_settle` takes it over
+    /// as the session's stray kill).
+    killed: bool,
 }
 
 impl Watch {
@@ -268,6 +271,7 @@ impl Watch {
     pub(crate) fn fire_now(&mut self) {
         if !self.fired {
             self.fired = true;
+            self.killed = family(self.canceller.kind) == Family::MySql;
             self.cancel = Some(self.canceller.fire());
         }
     }
@@ -662,11 +666,15 @@ impl Core {
             fired: false,
             cancel: None,
             unsettled: false,
+            killed: false,
         }
     }
 
     /// A cancel that did not settle may still reach the connection: it is never used again.
     pub(crate) fn note_settle(&mut self, w: &mut Watch) {
+        if std::mem::take(&mut w.killed) {
+            self.stray_kill = true;
+        }
         if std::mem::take(&mut w.unsettled) {
             tracing::warn!("a server cancel did not end in time; the session is broken");
             self.broken.get_or_insert(ErrClass::Cancelled);
@@ -768,7 +776,9 @@ impl Core {
     ) -> Result<Closed, RawError> {
         let lost = || raw(RawErrorKind::Io(std::io::ErrorKind::NotConnected));
         let kills = self.typed_caps().close_needs_kill;
-        let mut slot = (kills && prewarm).then(|| SideSlot::open(&self.side));
+        // A kill for this statement is already out (the overdue watchdog's): no second one,
+        // so no side connection either.
+        let mut slot = (kills && prewarm && !self.stray_kill).then(|| SideSlot::open(&self.side));
         // "Alongside" means the cancel is on its way when the close starts to read.
         if fire == Fire::After(Duration::ZERO) {
             w.fire_now();
@@ -781,11 +791,17 @@ impl Core {
         let Ok(Closed::NeedsServerKill { thread_id }) = closed else {
             return closed;
         };
-        let slot = slot.take().unwrap_or_else(|| SideSlot::open(&self.side));
-        if let Err(class) = slot.kill(self.kind, thread_id).await {
-            tracing::debug!(class = class.id(), "the kill before a close failed");
-            self.broken.get_or_insert(class);
-            return Err(lost());
+        // One kill per statement: when the overdue watchdog already sent it (its 1317 is
+        // still unread, which is why the driver asks), a second one would find the statement
+        // dead and stay behind for the thread's next statement.
+        if !self.stray_kill {
+            let slot = slot.take().unwrap_or_else(|| SideSlot::open(&self.side));
+            if let Err(class) = slot.kill(self.kind, thread_id).await {
+                tracing::debug!(class = class.id(), "the kill before a close failed");
+                self.broken.get_or_insert(class);
+                return Err(lost());
+            }
+            self.stray_kill = true;
         }
         let conn = self.live.as_mut().ok_or_else(lost)?.raw();
         let after = conn.close_query(CloseHow::AfterKill(KILL_WAIT)).await;
@@ -795,25 +811,67 @@ impl Core {
                 self.broken.get_or_insert(ErrClass::Internal);
                 Err(lost())
             }
-            Ok(Closed::Completed { rows }) => {
-                // The statement ended before the kill landed; a server that keeps the kill
-                // for the thread's next statement spends it on this one.
-                let _ = conn.batch("DO 0").await;
-                Ok(Closed::Completed { rows })
+            // The kill's 1317 was read: it ended this statement and is spent.
+            Ok(Closed::Closed { rows }) => {
+                self.stray_kill = false;
+                Ok(Closed::Closed { rows })
             }
+            // `Completed`: the statement ended before the kill landed (`absorb_kill`).
             other => other,
         }
     }
 
-    /// When a close's server cancel goes out. A stop: at once for a stream that cannot be
-    /// closed early on the wire (PostgreSQL's `Execute(0)` is read to its end, a SQLite step
-    /// is not interrupted by a close), else once it is `overdue` late. A release: only past
-    /// its own drain time. Never on MySQL, whose close asks for its kill itself.
+    /// The driver's error for the open query: a 1317 is the answer to the kill that went out,
+    /// which is thereby spent.
+    fn note_kill_answer(&mut self, e: &RawError) {
+        if e.server.as_ref().and_then(|s| s.vendor_code) == Some(1317) {
+            self.stray_kill = false;
+        }
+    }
+
+    /// A `KILL QUERY` went out for the statement that just ended and no 1317 answered it: the
+    /// kill raced the statement's end, and a server that keeps it for the thread's next
+    /// statement would fail that one (ADR 0002's known limit; in Manual mode it could be the
+    /// user's `COMMIT`). One harmless statement takes it instead. Its 1317 is the kill
+    /// arriving; any other failure is the session's (a lost connection breaks it).
+    async fn absorb_kill(&mut self) -> Result<(), ExecError> {
+        if !std::mem::take(&mut self.stray_kill) || self.broken.is_some() {
+            return Ok(());
+        }
+        let Some(live) = self.live.as_mut() else {
+            return Ok(());
+        };
+        match live.raw().batch("DO 0").await {
+            Ok(()) => Ok(()),
+            Err(e) if e.server.as_ref().and_then(|s| s.vendor_code) == Some(1317) => Ok(()),
+            Err(e) => {
+                let error = self.raw_error(&e, true);
+                if self.broken.is_some() {
+                    Err(error)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// When a close's server cancel goes out (R-M3-16: only for a call that is overdue).
+    /// - A stop: once the close itself is `overdue` late. That also covers a SQLite close
+    ///   waiting for one long step (a close is seen only between rows): the interrupt goes
+    ///   out after a second, never at once, because an interrupted write inside an explicit
+    ///   SQLite transaction rolls the user's whole transaction back.
+    /// - The one exception: PostgreSQL's `Execute(0)` in autocommit cannot be closed on the
+    ///   wire and is read to its end, so its cancel goes out at once, beside the close.
+    ///   Inside a user transaction it waits the second too: a rest that drains meanwhile
+    ///   leaves the user's transaction alive, where the cancel would fail it.
+    /// - A release: only past its own drain time.
+    /// - Never on MySQL, whose close asks for its kill itself.
     fn close_fire(&self, s: &Stream, stopping: bool, overdue: Duration) -> Fire {
         match family(self.kind) {
             Family::MySql => Fire::Never,
-            Family::Sqlite if stopping => Fire::After(Duration::ZERO),
-            Family::Postgres if stopping && !s.suspendable => Fire::After(Duration::ZERO),
+            Family::Postgres if stopping && !s.suspendable && self.tx.status == TxStatus::Idle => {
+                Fire::After(Duration::ZERO)
+            }
             _ if stopping => Fire::After(overdue),
             _ => Fire::After(s.fetch.release_drain.saturating_add(overdue)),
         }
@@ -828,9 +886,11 @@ impl Core {
         hold: Hold,
         completed: bool,
     ) -> (bool, Result<(), ExecError>) {
+        // Before anything else is sent: a kill that raced the statement's end.
+        let absorbed = self.absorb_kill().await;
         if self.broken.is_some() || self.live.is_none() {
             self.forget_hold(&hold);
-            return (false, Ok(()));
+            return (false, absorbed);
         }
         let (sql, rolled_back) = match hold {
             Hold::None => return (false, Ok(())),
@@ -927,6 +987,7 @@ impl Core {
             Ok(Closed::Completed { rows }) => (true, rows),
             Ok(_) => (false, 0),
             Err(e) => {
+                self.note_kill_answer(&e);
                 let _ = self.raw_error(&e, false);
                 (false, 0)
             }
@@ -1029,20 +1090,21 @@ impl Core {
 
     /// A stop was seen while `s`'s query is open: closes it the engine's way and ends the
     /// hold. Returns whether the statement ran to its end all the same (`Execute(0)` read to
-    /// its end before the cancel landed; a kill that came too late), and the failure that is
-    /// not the cancel's own.
+    /// its end before the cancel landed; a kill that came too late), whether the store then
+    /// holds every row of it, and the failure that is not the cancel's own.
     pub(crate) async fn stop_stream(
         &mut self,
         s: &mut Stream,
         hold: Hold,
         w: &mut Watch,
-    ) -> (bool, Option<ExecError>) {
+    ) -> (bool, bool, Option<ExecError>) {
         let fire = self.close_fire(s, true, w.overdue);
         let closed = self.close_open(CloseHow::Now, fire, true, w).await;
         let (completed, total, failure) = match closed {
             Ok(Closed::Completed { rows }) => (true, rows, None),
             Ok(_) => (false, 0, None),
             Err(e) => {
+                self.note_kill_answer(&e);
                 let e = self.raw_error(&e, true);
                 let cancelled = e.kind == ExecErrorKind::Cancelled || is_cancel_code(self.kind, &e);
                 (false, 0, (!cancelled).then_some(e))
@@ -1066,7 +1128,7 @@ impl Core {
             }
             s.finish(state);
         }
-        (completed, failure)
+        (completed, whole, failure)
     }
 
     /// The driver failed `s`'s query with `e`: makes sure nothing of it stays open, ends the
@@ -1079,6 +1141,7 @@ impl Core {
         e: &RawError,
         w: &mut Watch,
     ) -> ExecError {
+        self.note_kill_answer(e);
         let error = self.raw_error(e, true);
         s.on_first_response();
         if self.broken.is_none() {
@@ -1140,7 +1203,7 @@ impl Core {
                 ended.map(|()| self.summary())
             }
             Step::Stopped => {
-                let (_, failure) = self.stop_stream(&mut s, hold, w).await;
+                let (_, _, failure) = self.stop_stream(&mut s, hold, w).await;
                 Err(failure.unwrap_or_else(|| ExecError::of(ExecErrorKind::Cancelled)))
             }
             Step::Failed(e) => Err(self.fail_stream(&mut s, hold, &e, w).await),

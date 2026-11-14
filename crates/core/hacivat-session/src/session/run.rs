@@ -464,7 +464,7 @@ impl Core {
                 }
             }
             Step::Stopped => {
-                let (completed, failure) = self.stop_stream(&mut s, hold, w).await;
+                let (completed, whole, failure) = self.stop_stream(&mut s, hold, w).await;
                 self.observe(!control);
                 let outcome = match failure {
                     Some(e) => UnitEnd::Failed(e),
@@ -473,7 +473,7 @@ impl Core {
                     None if completed => UnitEnd::Succeeded {
                         rows: (s.columns > 0).then_some(RowsOutcome::Fetched {
                             rows: s.rows,
-                            more: s.seen > s.rows,
+                            more: !whole,
                         }),
                     },
                     None => UnitEnd::Cancelled,

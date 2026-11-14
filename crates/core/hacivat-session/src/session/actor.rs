@@ -261,6 +261,7 @@ pub(crate) fn spawn_supervised(
         holder: TxOwner::User,
         side: hooks.side.clone(),
         stop: Arc::new(StopSignal::default()),
+        stray_kill: false,
     };
     let ctl = Ctl {
         id,
@@ -334,6 +335,9 @@ pub(crate) struct Core {
     pub(crate) side: Arc<dyn SideConnector>,
     /// "Stop fetching" for the request that runs (the cancel ladder sets it).
     pub(crate) stop: Arc<StopSignal>,
+    /// MySQL: a `KILL QUERY` went out for the open (or just ended) statement and no 1317
+    /// answered it yet (`cursor::absorb_kill`).
+    pub(crate) stray_kill: bool,
 }
 
 fn not_connected() -> ExecError {
@@ -767,8 +771,10 @@ impl Core {
         let status = live.raw().tx_status();
         self.server_autocommit = live.raw().autocommit();
         self.autocommit_off = false;
-        // ## m3a-t18-session-run: a new connection has no transaction of Hacivat's.
+        // ## m3a-t18-session-run: a new connection has no transaction of Hacivat's, and no
+        // kill is on its way to it.
         self.holder = TxOwner::User;
+        self.stray_kill = false;
         self.live = Some(live);
         self.broken = None;
         self.last_class = None;
@@ -1263,6 +1269,11 @@ async fn on_tick(core: &mut Core, ctl: &mut Ctl) -> Flow {
 /// the driver calls guarded against a panic and a lost connection.
 async fn release_idle(core: &mut Core, ctl: &mut Ctl) -> Flow {
     let tx_before = core.tx.clone();
+    // The session is at work while it drains, kills and rolls back (on MySQL up to a few
+    // seconds), and commands queue meanwhile: `Busy` with request 0, a number no request has
+    // (they count from 1), so no cancel can name it.
+    let since = Instant::now();
+    ctl.publish(|s| s.state = SessionState::Busy { req: 0, since });
     let released = AssertUnwindSafe(core.release_unasked(CloseReason::IdleTimeout))
         .catch_unwind()
         .await;
@@ -1298,6 +1309,7 @@ async fn after_release(
     let Some(class) = core.broken else {
         let (tx, cursor) = (core.tx.clone(), core.cursor_badge());
         ctl.publish(|s| {
+            s.state = SessionState::Idle;
             s.tx = tx;
             s.cursor = cursor;
         });
