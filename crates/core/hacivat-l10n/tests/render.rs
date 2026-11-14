@@ -171,11 +171,18 @@ fn typed_ids_reject_wrong_args() {
         .env(CHILD, "1")
         .output()
         .expect("the child test runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
         "trybuild failed:\n{}\n{}",
-        String::from_utf8_lossy(&out.stdout),
+        stdout,
         String::from_utf8_lossy(&out.stderr)
+    );
+    // A renamed test would match nothing in the child and pass silently: the child must have
+    // run exactly this one test (T1b round-2 re-review, minor 3).
+    assert!(
+        stdout.contains("1 passed"),
+        "the trybuild child ran no test:\n{stdout}"
     );
 }
 
