@@ -15,7 +15,7 @@ use gpui::{
     MouseUpEvent, ParentElement as _, Pixels, Point, Render, SharedString, Styled as _,
     TestAppContext, VisualTestContext, Window, div, point, px,
 };
-use hacivat_text::{ChangeDesc, Snapshot, TextBuffer, TokenOracle};
+use hacivat_text::{ChangeDesc, Snapshot, TextBuffer, TokenOracle, UserEvent};
 use hacivat_ui::keymaps::{PRESETS, load};
 use hacivat_ui::l10n::{UiArg, UiText, UiTextProvider};
 use hacivat_ui_core::keymap::{
@@ -363,6 +363,10 @@ const CASES: &[(&str, &str, &str)] = &[
     ("editor.tab", "┃x", "    ┃x"),
     ("editor.tab", "ab┃", "ab  ┃"),
     ("editor.tab", "a«b┃c", "a   ┃c"),
+    // A wide cluster is two columns of the grid (the display model's cells).
+    ("editor.tab", "日┃", "日  ┃"),
+    ("editor.tab", "日本┃", "日本    ┃"),
+    ("editor.tab", "\t日┃", "\t日  ┃"),
     ("editor.tab", "«a\n\nb┃", "    «a\n\n    b┃"),
     ("editor.outdent", "      a┃", "  a┃"),
     ("editor.outdent", "\ta┃", "a┃"),
@@ -440,6 +444,19 @@ fn untested_commands() -> Vec<&'static str> {
 #[gpui::test]
 fn every_command_has_a_test(cx: &mut TestAppContext) {
     assert_eq!(untested_commands(), Vec::<&str>::new());
+    // Every test `SPECIAL` names is a test of this file, and names the command it runs.
+    let source = include_str!("commands.rs");
+    for (id, test) in SPECIAL {
+        let from = source
+            .find(&format!("\nfn {test}("))
+            .unwrap_or_else(|| panic!("{id}: no test named {test}"));
+        let body = &source[from..];
+        let body = &body[..body[1..].find("\n}\n").map_or(body.len(), |end| end + 1)];
+        assert!(
+            body.contains(&format!("\"{id}\"")),
+            "{test} does not run {id}"
+        );
+    }
     // Nothing is listed that is not a command, and every case holds.
     for id in CASES
         .iter()
@@ -594,7 +611,19 @@ fn undo_and_redo_restore_text_and_selection(cx: &mut TestAppContext) {
     run(&mut o, "editor.newline");
     run(&mut o, "editor.delete_word_forward");
     assert_eq!(state(&o), "SELECT \n┃");
+    // The Edit menu's labels: the kind of the group each would apply.
+    let kinds = |o: &Opened<'_>| {
+        o.vcx.read(|cx| {
+            let v = o.editor.read(cx);
+            (commands::undo_kind(v), commands::redo_kind(v))
+        })
+    };
+    assert_eq!(kinds(&o), (Some(UserEvent::DeleteForward), None));
     run(&mut o, "editor.undo");
+    assert_eq!(
+        kinds(&o),
+        (Some(UserEvent::InputType), Some(UserEvent::DeleteForward))
+    );
     assert_eq!(state(&o), "SELECT \n┃1");
     run(&mut o, "editor.undo");
     assert_eq!(state(&o), "SELECT ┃1");
@@ -631,9 +660,20 @@ fn undo_and_redo_restore_text_and_selection(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_read_only_editor_refuses_every_edit(cx: &mut TestAppContext) {
     let mut o = open(cx, "  ab ┃cd");
+    // Two undo groups (a caret move away and back seals the first), the second undone: there
+    // is something to undo and something to redo.
     type_text(&mut o, "x");
+    run(&mut o, "editor.move_left");
+    run(&mut o, "editor.move_right");
+    type_text(&mut o, "y");
     run(&mut o, "editor.undo");
-    assert_eq!(state(&o), "  ab ┃cd");
+    assert_eq!(state(&o), "  ab x┃cd");
+    o.vcx.read(|cx| {
+        let v = o.editor.read(cx);
+        assert!(commands::can_undo(v) && commands::can_redo(v));
+        assert_eq!(commands::undo_kind(v), Some(UserEvent::InputType));
+        assert_eq!(commands::redo_kind(v), Some(UserEvent::InputType));
+    });
     o.editor.update(o.vcx, |v, cx| {
         let cfg = EditorConfig {
             read_only: true,
@@ -642,6 +682,7 @@ fn a_read_only_editor_refuses_every_edit(cx: &mut TestAppContext) {
         v.set_config(cfg, cx);
     });
     for id in [
+        "editor.undo",
         "editor.redo",
         "editor.newline",
         "editor.tab",
@@ -655,14 +696,18 @@ fn a_read_only_editor_refuses_every_edit(cx: &mut TestAppContext) {
         "editor.paste",
     ] {
         run(&mut o, id);
-        assert_eq!(state(&o), "  ab ┃cd", "{id}");
+        assert_eq!(state(&o), "  ab x┃cd", "{id}");
     }
     o.vcx.read(|cx| {
         let v = o.editor.read(cx);
         assert!(!commands::can_undo(v) && !commands::can_redo(v));
+        assert_eq!(
+            (commands::undo_kind(v), commands::redo_kind(v)),
+            (None, None)
+        );
     });
     run(&mut o, "editor.select_word_right");
-    assert_eq!(state(&o), "  ab «cd┃");
+    assert_eq!(state(&o), "  ab x«cd┃");
     run(&mut o, "editor.run");
     assert_eq!(requests(&o).len(), 1);
     // Editable again: the redo is still there.
@@ -674,7 +719,10 @@ fn a_read_only_editor_refuses_every_edit(cx: &mut TestAppContext) {
         v.set_config(cfg, cx);
     });
     run(&mut o, "editor.redo");
-    assert_eq!(state(&o), "  ab x┃cd");
+    assert_eq!(state(&o), "  ab xy┃cd");
+    run(&mut o, "editor.undo");
+    run(&mut o, "editor.undo");
+    assert_eq!(state(&o), "  ab ┃cd");
 }
 
 /// Copy, cut and paste are Task 27's bodies (`clipboard::*`, no-ops until then): the commands
@@ -868,6 +916,7 @@ fn run_emits_selections_or_carets_and_seals_history(cx: &mut TestAppContext) {
     assert_eq!(e.at, ExecAt::Carets(smallvec![12]));
     // Run 2 and Run 3 ask for their own action, on the snapshot they were asked on.
     let mut o = open(cx, "SELECT 1┃");
+    run(&mut o, "editor.run");
     type_text(&mut o, "0");
     run(&mut o, "editor.run_2");
     type_text(&mut o, "0");
@@ -875,11 +924,16 @@ fn run_emits_selections_or_carets_and_seals_history(cx: &mut TestAppContext) {
     let all = requests(&o);
     assert_eq!(
         all.iter().map(|r| r.action).collect::<Vec<_>>(),
-        [ExecAction::Execute2, ExecAction::Execute3]
+        [
+            ExecAction::Execute1,
+            ExecAction::Execute2,
+            ExecAction::Execute3
+        ]
     );
-    assert_eq!(all[0].snapshot.buffer.to_string(), "SELECT 10");
-    assert_eq!(all[1].snapshot.buffer.to_string(), "SELECT 100");
-    assert_eq!(all[1].snapshot.version, all[0].snapshot.version + 1);
+    assert_eq!(all[0].snapshot.buffer.to_string(), "SELECT 1");
+    assert_eq!(all[1].snapshot.buffer.to_string(), "SELECT 10");
+    assert_eq!(all[2].snapshot.buffer.to_string(), "SELECT 100");
+    assert_eq!(all[2].snapshot.version, all[1].snapshot.version + 1);
     // Run sealed the typing: the two zeros are two undo groups.
     run(&mut o, "editor.undo");
     assert_eq!(state(&o), "SELECT 10┃");
@@ -1248,4 +1302,65 @@ fn a_double_click_without_tokens_selects_the_word() {
         commands::double_click_range(&buf, 9, &words, Some(8..11)),
         7..12
     );
+}
+
+/// The open menu takes every pointer event over it: a right press on a row neither moves the
+/// caret under it nor reopens the menu, and the wheel does not scroll the text beneath.
+#[gpui::test]
+fn the_open_menu_swallows_right_presses_and_the_wheel(cx: &mut TestAppContext) {
+    let text: String = (0..200).map(|i| format!("SELECT {i};\n")).collect();
+    let mut o = open(cx, &format!("«SELECT 0;{HEAD}{}", &text[9..]));
+    let p = o.vcx.read(|cx| {
+        let l = o.editor.read(cx).last_layout().unwrap();
+        let b = l.bounds_for_range(2..2).unwrap();
+        point(b.origin.x + px(1.0), b.origin.y + px(9.0))
+    });
+    let right_press = |o: &mut Opened<'_>, at: Point<Pixels>| {
+        o.vcx.simulate_event(gpui::MouseMoveEvent {
+            position: at,
+            modifiers: Modifiers::none(),
+            pressed_button: None,
+        });
+        o.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        o.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        draw(o.vcx);
+    };
+    right_press(&mut o, p);
+    assert!(menu_open(&o));
+    let before = state(&o);
+    // A right press on Copy, which lies over text outside the selection.
+    let row = o.vcx.debug_bounds("menu-item-1").expect("Copy is drawn");
+    right_press(&mut o, row.center());
+    assert!(menu_open(&o));
+    assert_eq!(opened_at(&o), [p]);
+    assert_eq!(state(&o), before);
+    // The wheel over the menu leaves the text where it is; beside the menu it scrolls.
+    let first_line = |o: &Opened<'_>| {
+        o.vcx
+            .read(|cx| o.editor.read(cx).last_layout().unwrap().rows().first_line)
+    };
+    let wheel = |o: &mut Opened<'_>, at: Point<Pixels>| {
+        o.vcx.simulate_event(gpui::ScrollEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-180.0))),
+            ..Default::default()
+        });
+        draw(o.vcx);
+    };
+    wheel(&mut o, row.center());
+    assert_eq!(first_line(&o), 0);
+    assert!(menu_open(&o));
+    wheel(&mut o, point(px(700.0), px(300.0)));
+    assert!(first_line(&o) > 0);
 }

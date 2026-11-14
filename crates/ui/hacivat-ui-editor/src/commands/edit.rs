@@ -18,12 +18,13 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use hacivat_text::display::{Fragment, VisualLine};
 use hacivat_text::units::{SCAN_LIMIT, grapheme_column};
 use hacivat_text::{
     Bias, Dir, SelectionSet, TextBuffer, TokenOracle, Unit, UserEvent, move_offset,
 };
 use hacivat_ui_core::gpui_surface::{Context, Window};
-use unicode_segmentation::UnicodeSegmentation as _;
+use smallvec::smallvec;
 
 use super::{change, selection, words};
 use crate::clipboard;
@@ -34,20 +35,37 @@ type Cx<'a> = Context<'a, EditorView>;
 /// How far Enter looks for the line's indentation, in bytes.
 const INDENT_SCAN: usize = 4096;
 
-/// The display column of `at` on its line, tabs expanded to `tab` columns (grapheme columns on
-/// a line longer than the scan limit).
+/// The cells the text `r` takes in the monospace grid, as the display model counts them
+/// (`VisualLine::cell_widths`, what `compose_line` places tab stops by): a wide character or an
+/// emoji cluster is 2, a zero-width one 0.
+fn cells(buf: &TextBuffer, r: Range<usize>) -> usize {
+    if r.is_empty() {
+        return 0;
+    }
+    let run = VisualLine {
+        first_line: 0,
+        last_line: 0,
+        fragments: smallvec![Fragment::Text { bytes: r }],
+    };
+    run.cell_widths(buf).first().map_or(0, |w| *w as usize)
+}
+
+/// The display column of `at` on its line, in cells, tabs expanded to `tab` columns (grapheme
+/// columns on a line longer than the scan limit). A control character counts no cell here,
+/// though the element draws it as a chip wider than one: a tab stop after one is approximate.
 fn display_column(buf: &TextBuffer, at: usize, tab: usize) -> usize {
     let start = buf.line_to_byte(buf.byte_to_line(at));
     if at - start > SCAN_LIMIT {
         return grapheme_column(buf, at);
     }
-    buf.slice(start..at).graphemes(true).fold(0, |col, g| {
-        if g == "\t" {
-            col + tab - col % tab
-        } else {
-            col + 1
-        }
-    })
+    let text = buf.slice(start..at);
+    let (mut col, mut run) = (0, start);
+    for (i, _) in text.match_indices('\t') {
+        col += cells(buf, run..start + i);
+        col += tab - col % tab;
+        run = start + i + 1;
+    }
+    col + cells(buf, run..at)
 }
 
 /// The lines the main selection touches: a selection that ends at a line's start does not
@@ -242,6 +260,17 @@ pub fn can_redo(v: &EditorView) -> bool {
     !v.config.read_only && v.model.redo_depth() > 0
 }
 
+/// What the Edit menu's Undo would take back (its label, "Undo Typing", is keyed by the
+/// kind); `None` when there is nothing to undo or the editor is read-only.
+pub fn undo_kind(v: &EditorView) -> Option<UserEvent> {
+    can_undo(v).then(|| v.model.undo_kind()).flatten()
+}
+
+/// What the Edit menu's Redo would apply again; `None` as for [`undo_kind`].
+pub fn redo_kind(v: &EditorView) -> Option<UserEvent> {
+    can_redo(v).then(|| v.model.redo_kind()).flatten()
+}
+
 /// Undo (`redo`: redo). A read-only editor refuses: the view's `read_only` is no model filter,
 /// so the model itself would apply it.
 fn history(v: &mut EditorView, redo: bool, cx: &mut Cx<'_>) {
@@ -273,6 +302,7 @@ pub(super) fn redo(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {
 }
 
 pub(super) fn copy(v: &mut EditorView, window: &mut Window, cx: &mut Cx<'_>) {
+    super::acted(v);
     clipboard::copy(v, window, cx);
 }
 

@@ -193,7 +193,10 @@ mod tests {
         });
     }
 
-    /// Run refuses while a composition is open: nothing is asked, and the composition goes on.
+    /// Run refuses while a composition is open, on the path every caller takes (`run_command`:
+    /// the keymap, the context menu, the host's toolbar and menu bar): nothing is asked, the
+    /// composition goes on, and its undo group stays whole, so one undo after it is committed
+    /// takes back all of the composed text.
     #[gpui::test]
     fn run_while_composing_does_nothing(cx: &mut TestAppContext) {
         let (e, vcx) = open(cx, "SELECT ");
@@ -207,20 +210,32 @@ mod tests {
             })
             .detach();
         });
+        e.update(vcx, |v, cx| v.select_range(7..7, cx));
         mark(&e, vcx, "ş");
         for id in ["editor.run", "editor.run_2", "editor.run_3"] {
             e.update_in(vcx, |v, window, cx| {
-                // The body, as every path but the keymap's reaches it.
-                (super::super::command_by_id(id).unwrap().run)(v, window, cx);
+                assert!(v.run_command(id, window, cx));
                 assert!(v.ime.is_composing(), "{id} left the composition open");
             });
         }
         vcx.run_until_parked();
         assert_eq!(*asked.borrow(), 0);
-        // Once the composition is committed, Run asks.
+        // The composition goes on and is committed: still one undo group.
+        mark(&e, vcx, "şu");
         e.update_in(vcx, |v, window, cx| {
-            v.ime.unmark(&mut v.model);
+            let now = cx.background_executor().now();
+            let c = v
+                .ime
+                .commit(&mut v.model, None, "şu", now)
+                .expect("the text is accepted");
+            v.apply_committed(c, UserEvent::InputType, cx);
+            assert!(!v.ime.is_composing());
+            assert_eq!(v.model.buffer().to_string(), "SELECT şu");
+            assert_eq!(v.model.undo_depth(), 1, "one composition, one group");
+            // Once it is committed, Run asks.
             assert!(v.run_command("editor.run", window, cx));
+            assert!(v.run_command("editor.undo", window, cx));
+            assert_eq!(v.model.buffer().to_string(), "SELECT ");
         });
         vcx.run_until_parked();
         assert_eq!(*asked.borrow(), 1);

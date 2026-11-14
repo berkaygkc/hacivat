@@ -583,6 +583,10 @@ fn right_click_keeps_a_selection_it_falls_in_and_moves_the_caret_otherwise(
         o.vcx
             .read(|cx| o.editor.read(cx).command_state().menu_open())
     );
+    // The open menu covers the rest of the line and takes the presses over it (review round
+    // 1), so it is dismissed before the next right click.
+    o.vcx.simulate_keystrokes("escape");
+    draw(o.vcx);
     // Outside it: the caret moves to the pointer.
     let outside = at_byte(&o, 21);
     right_click(&mut o, outside);

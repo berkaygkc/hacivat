@@ -41,7 +41,7 @@ use hacivat_ui_core::gpui_surface::{AnyElement, App, Context, SharedString, Wind
 
 use crate::view::{EditorEvent, EditorView};
 
-pub use edit::{can_redo, can_undo};
+pub use edit::{can_redo, can_undo, redo_kind, undo_kind};
 pub use menu::{ShortcutHints, context_menu_entries};
 pub use selection::{double_click_range, escape_released};
 

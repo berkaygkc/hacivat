@@ -19,9 +19,9 @@ use std::rc::Rc;
 use hacivat_ui::l10n::ui_text;
 use hacivat_ui::menu::{MenuItemSpec, PopupMenu, PopupMenuEvent};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, Context, Entity, EntityId, Focusable as _, Global, IntoElement as _,
-    ParentElement as _, Pixels, Point, SharedString, Subscription, Window, anchored, deferred,
-    point, px,
+    AnyElement, App, Context, Entity, EntityId, Focusable as _, Global, InteractiveElement as _,
+    IntoElement as _, MouseButton, ParentElement as _, Pixels, Point, SharedString, Subscription,
+    Window, anchored, deferred, div, point, px,
 };
 
 use hacivat_ui_core::theme::Theme;
@@ -179,9 +179,14 @@ fn on_menu_event(
 
 pub(super) fn overlay(v: &EditorView, _: &mut Window, _: &mut App) -> Option<AnyElement> {
     let open = v.commands.menu.as_ref()?;
-    let placed = anchored()
-        .position(open.at)
-        .snap_to_window()
+    // The menu takes every pointer event over it: without the occlusion the text beneath
+    // stays hovered (the wheel scrolls it, the I-beam shows), and `PopupMenu` stops only left
+    // presses, so a right press would move the caret under the menu and open a second one. A
+    // press beside the menu is outside this wrapper too, so it still dismisses.
+    let surface = div()
+        .occlude()
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         .child(open.menu.clone());
+    let placed = anchored().position(open.at).snap_to_window().child(surface);
     Some(deferred(placed).with_priority(1).into_any_element())
 }

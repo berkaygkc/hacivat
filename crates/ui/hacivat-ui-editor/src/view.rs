@@ -383,7 +383,10 @@ impl EditorView {
         let Some(command) = command_by_id(id) else {
             return false;
         };
-        if command.seals_history {
+        // ## m3a-t25-editor-commands (review round 1, named exception): never while composing.
+        // A seal would split the composition's undo group, and Run refuses then; every other
+        // sealing command ends the composition, whose bracket's end seals its group.
+        if command.seals_history && !self.ime.is_composing() {
             self.model.seal_history();
         }
         (command.run)(self, window, cx);
