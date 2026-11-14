@@ -186,8 +186,10 @@ pub fn extract_partial(ftl: &str, file: &str) -> (Vec<Signature>, Vec<SchemaErro
 /// Whether `id` follows the message ID grammar
 /// `^(cm|hui|hv|hc|kg|ps|pw|pe|db|error)-[a-z0-9]+(-[a-z0-9]+)*$`.
 pub fn is_valid_id(id: &str) -> bool {
-    const PREFIXES: [&str; 10] = [
-        "cm", "hui", "hv", "hc", "kg", "ps", "pw", "pe", "db", "error",
+    // `exec` and `cursor` (M3a): execution log and cursor messages in `hacivat-core.ftl`, which
+    // xtask's scan list already names (Task 1b); the grammar now agrees with it.
+    const PREFIXES: [&str; 12] = [
+        "cm", "hui", "hv", "hc", "kg", "ps", "pw", "pe", "db", "error", "exec", "cursor",
     ];
     let Some((prefix, rest)) = id.split_once('-') else {
         return false;
@@ -374,6 +376,16 @@ mod tests {
             .into_iter()
             .map(|e| (e.line, e.kind))
             .collect()
+    }
+
+    #[test]
+    fn exec_and_cursor_prefixes_are_valid_ids() {
+        for id in ["exec-dur-ms", "cursor-closed-memory-limit", "error-exec-sqlite-busy-hint"] {
+            assert!(is_valid_id(id), "{id}");
+        }
+        for id in ["execs-x", "cursors-x", "exec", "exec-", "exec-Upper"] {
+            assert!(!is_valid_id(id), "{id}");
+        }
     }
 
     #[test]
