@@ -163,6 +163,22 @@ fn gone() -> RawError {
     }
 }
 
+// ## m3a-t15-sqlite-typed
+/// The Fluent message (`hacivat-core.ftl`) of the hint under `SQLITE_BUSY`: another process
+/// holds a lock on the file (R4).
+pub const BUSY_HINT: &str = "error-exec-sqlite-busy-hint";
+
+/// Hacivat's hint for an SQLite error, as a Fluent message id, when it has one: `SQLITE_BUSY`
+/// (any extended code) after the 5 s execution busy timeout, which is never retried. The
+/// engine's text stays verbatim in `RawError::server`; the hint is Hacivat's own, so it is an id
+/// for the error view, never text, and `ServerMessage::hint` (the server's) stays empty.
+pub fn error_hint(err: &RawError) -> Option<&'static str> {
+    let code = i32::try_from(err.server.as_ref()?.vendor_code?).ok()?;
+    // The primary code of an extended one (`SQLITE_BUSY_RECOVERY`, `_SNAPSHOT`, `_TIMEOUT`).
+    let busy = rusqlite::ffi::Error::new(code).code == rusqlite::ErrorCode::DatabaseBusy;
+    (err.kind == RawErrorKind::Db && busy).then_some(BUSY_HINT)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -217,6 +233,38 @@ mod tests {
         for (create, ro) in [(false, false), (true, false), (false, true), (true, true)] {
             assert!(!open_flags(create, ro).contains(F::SQLITE_OPEN_URI));
         }
+    }
+
+    // ## m3a-t15-sqlite-typed
+    #[test]
+    fn the_busy_hint_covers_every_busy_code_and_nothing_else() {
+        let err = |kind: RawErrorKind, code: i64| RawError {
+            kind,
+            server: Some(ServerMessage {
+                sqlstate: None,
+                vendor_code: Some(code),
+                severity: None,
+                text: "database is locked".into(),
+                detail: None,
+                hint: None,
+                lang_hint: None,
+            }),
+        };
+        // SQLITE_BUSY and its extended codes: _RECOVERY, _SNAPSHOT, _TIMEOUT.
+        for code in [5, 261, 517, 773] {
+            assert_eq!(
+                error_hint(&err(RawErrorKind::Db, code)),
+                Some(BUSY_HINT),
+                "{code}"
+            );
+        }
+        // SQLITE_LOCKED (a conflict inside this connection), others, and a busy code on an
+        // error that is not the engine's.
+        for code in [6, 262, 1, 8, i64::MAX] {
+            assert_eq!(error_hint(&err(RawErrorKind::Db, code)), None, "{code}");
+        }
+        assert_eq!(error_hint(&err(RawErrorKind::Cancelled, 5)), None);
+        assert_eq!(error_hint(&gone()), None);
     }
 
     #[test]

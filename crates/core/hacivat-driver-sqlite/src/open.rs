@@ -5,6 +5,15 @@
 //! it (spec §5.4: one dedicated blocking thread per SQLite connection). [`SqliteConn`] sends it
 //! jobs over an `mpsc` channel and awaits each reply on a `oneshot`, so the async executor never
 //! blocks on SQLite.
+//!
+//! ## m3a-t15-sqlite-typed
+//! A typed query is one job too (`typed.rs`), which stays on the thread while the query is open
+//! (streaming or suspended). Every other job would queue behind it and wait for a command only
+//! this connection's owner can send, so while a query is open `execute`, `batch`, `ping` and
+//! `server_info` answer `Unsupported` and `probe` reports nothing: one open query per
+//! connection (`hacivat_driver::typed`). After the open, SQLite waits at most
+//! [`EXEC_BUSY_TIMEOUT`] for a file another process has locked, then answers `SQLITE_BUSY`
+//! (R4; no retry; [`crate::error_hint`] names its hint).
 
 use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
@@ -13,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
 use hacivat_driver::{
-    CancelHandle, ExecOpts, ExecSummary, ProbeWarning, RawConn, RawError, RawErrorKind,
-    SemVerLoose, ServerInfo, TxStatus,
+    CancelHandle, CloseHow, Closed, ExecOpts, ExecSummary, ProbeWarning, Protocol, QueryEvent,
+    QuerySpec, RawConn, RawError, RawErrorKind, SemVerLoose, ServerInfo, TxStatus, TypedCaps,
 };
 use hacivat_net::{TlsSummary, TlsVerified};
 use hacivat_proto::DbmsKind;
@@ -24,7 +33,15 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::exec::{PROGRESS_STEPS, SqliteCancel, interrupted, tx_status};
 use crate::harden::{AuthTrail, harden_read_only};
+use crate::typed::{self, unsupported};
 use crate::{gone, invalid_path, raw_error};
+
+// ## m3a-t15-sqlite-typed
+/// How long a statement waits for a file another process has locked, after the open (R4): then
+/// `SQLITE_BUSY`, with no retry. The open's header read waits the connect timeout instead. A
+/// cancel during the wait takes effect only when it ends (SQLite's busy handler sleeps without
+/// checking the interrupt).
+pub(crate) const EXEC_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The one name SQLite reads as an in-memory database rather than a file.
 pub(crate) const MEMORY: &str = ":memory:";
@@ -137,6 +154,8 @@ fn open_blocking(
     if let Some(trail) = guard {
         harden_read_only(&mut conn, trail)?;
     }
+    // ## m3a-t15-sqlite-typed: the execution busy timeout (R4).
+    conn.busy_timeout(EXEC_BUSY_TIMEOUT).map_err(raw_error)?;
     Ok(conn)
 }
 
@@ -156,6 +175,12 @@ pub(crate) struct SqliteConn {
     /// The transaction status after the last statement.
     tx: TxStatus,
     cancel: Arc<SqliteCancel>,
+    // ## m3a-t15-sqlite-typed
+    /// The open typed query (streaming or suspended), if any.
+    typed: Option<typed::Open>,
+    /// A cursor's idle bound, cached: read at the open and on `probe`, re-read after a statement
+    /// that may change it (`typed::may_change_journal`).
+    idle_bound: Option<Duration>,
 }
 
 /// Opens `path` on a dedicated thread of the blocking pool. Resolves once the file is open and
@@ -171,7 +196,8 @@ pub(crate) async fn open(
     guarded: bool,
     connect_timeout: Duration,
 ) -> Result<SqliteConn, RawError> {
-    let (opened_tx, opened_rx) = oneshot::channel::<Result<Arc<SqliteCancel>, RawError>>();
+    type Opened = (Arc<SqliteCancel>, Option<Duration>);
+    let (opened_tx, opened_rx) = oneshot::channel::<Result<Opened, RawError>>();
     let (jobs_tx, mut jobs_rx) = mpsc::channel::<Job>(1);
     let (closed_tx, closed_rx) = oneshot::channel::<()>();
     let guard = guarded.then(|| Arc::new(AuthTrail::default()));
@@ -192,8 +218,9 @@ pub(crate) async fn open(
                 return;
             }
         };
+        let idle_bound = typed::idle_bound(&conn);
         // The caller gave up on the open: close the file straight away.
-        if opened_tx.send(Ok(cancel)).is_err() {
+        if opened_tx.send(Ok((cancel, idle_bound))).is_err() {
             return;
         }
         while let Some(job) = jobs_rx.blocking_recv() {
@@ -202,7 +229,7 @@ pub(crate) async fn open(
         drop(conn);
         let _ = closed_tx.send(());
     });
-    let cancel = opened_rx.await.map_err(|_| gone())??;
+    let (cancel, idle_bound) = opened_rx.await.map_err(|_| gone())??;
     Ok(SqliteConn {
         jobs: Some(jobs_tx),
         closed: Some(closed_rx),
@@ -210,10 +237,32 @@ pub(crate) async fn open(
         guard,
         tx: TxStatus::Idle,
         cancel,
+        typed: None,
+        idle_bound,
     })
 }
 
+// ## m3a-t15-sqlite-typed
+impl Drop for SqliteConn {
+    /// Dropped with a typed query open (discarded without `close`): its job may be inside one
+    /// long step, where no closed channel reaches it (the job sees its channels between rows),
+    /// so the latch's close stops it, as `close` does. Nothing can send a job after this.
+    fn drop(&mut self) {
+        if self.typed.is_some() {
+            self.cancel.close();
+        }
+    }
+}
+
 impl SqliteConn {
+    /// `Unsupported` while a typed query is open: a job sent now would wait behind it.
+    fn idle(&self) -> Result<(), RawError> {
+        match self.typed {
+            Some(_) => Err(unsupported()),
+            None => Ok(()),
+        }
+    }
+
     /// Runs `f` on the connection's thread and returns its result.
     pub(crate) async fn call<R, F>(&self, f: F) -> Result<R, RawError>
     where
@@ -262,6 +311,7 @@ impl RawConn for SqliteConn {
 
     fn server_info(&mut self) -> BoxFuture<'_, Result<ServerInfo, RawError>> {
         Box::pin(async move {
+            self.idle()?;
             let raw = self
                 .call(|c| {
                     c.query_row("SELECT sqlite_version()", [], |r| r.get::<_, String>(0))
@@ -280,6 +330,7 @@ impl RawConn for SqliteConn {
 
     fn ping(&mut self) -> BoxFuture<'_, Result<Duration, RawError>> {
         Box::pin(async move {
+            self.idle()?;
             let start = Instant::now();
             self.call(|c| {
                 c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
@@ -301,12 +352,23 @@ impl RawConn for SqliteConn {
         })
     }
 
+    /// Nothing while a typed query is open. Refreshes the cursor's idle bound.
     fn probe(&mut self) -> BoxFuture<'_, Vec<ProbeWarning>> {
         let read_only = self.read_only;
         Box::pin(async move {
-            self.call(move |c| crate::probe::probe(c, read_only))
-                .await
-                .unwrap_or_default()
+            if self.idle().is_err() {
+                return Vec::new();
+            }
+            let probed = self
+                .call(move |c| (crate::probe::probe(c, read_only), typed::idle_bound(c)))
+                .await;
+            match probed {
+                Ok((warnings, idle_bound)) => {
+                    self.idle_bound = idle_bound;
+                    warnings
+                }
+                Err(_) => Vec::new(),
+            }
         })
     }
 
@@ -323,6 +385,8 @@ impl RawConn for SqliteConn {
         // future was dropped may still run one that never ends. Then dropping the sender ends
         // the thread's loop; it drops the connection, then signals.
         self.cancel.close();
+        // An open typed query's channels close with it, which ends its job.
+        self.typed = None;
         self.jobs = None;
         let closed = self.closed.take();
         Box::pin(async move {
@@ -349,18 +413,24 @@ impl RawConn for SqliteConn {
         let guard = self.guard.clone();
         let cancel = Arc::clone(&self.cancel);
         Box::pin(async move {
+            self.idle()?;
             let ticket = cancel.begin();
-            let (result, tx) = self
+            let (result, tx, idle_bound) = self
                 .call(move |c| {
                     cancel.start(ticket);
                     let r = crate::exec::execute(c, &sql, opts.max_rows, guard.as_deref(), || {
                         cancel.cancelled(ticket)
                     });
+                    // ## T15 review round 1: the cached idle bound, re-read when it may change.
+                    let idle_bound = typed::may_change_journal(&sql).then(|| typed::idle_bound(c));
                     cancel.end(ticket);
-                    (r, tx_status(c))
+                    (r, tx_status(c), idle_bound)
                 })
                 .await?;
             self.tx = tx;
+            if let Some(bound) = idle_bound {
+                self.idle_bound = bound;
+            }
             result
         })
     }
@@ -371,8 +441,9 @@ impl RawConn for SqliteConn {
         let sql = sql.to_string();
         let cancel = Arc::clone(&self.cancel);
         Box::pin(async move {
+            self.idle()?;
             let ticket = cancel.begin();
-            let (result, tx) = self
+            let (result, tx, idle_bound) = self
                 .call(move |c| {
                     cancel.start(ticket);
                     let r = if cancel.cancelled(ticket) {
@@ -380,11 +451,16 @@ impl RawConn for SqliteConn {
                     } else {
                         c.execute_batch(&sql).map_err(raw_error)
                     };
+                    // ## T15 review round 1: the cached idle bound, re-read when it may change.
+                    let idle_bound = typed::may_change_journal(&sql).then(|| typed::idle_bound(c));
                     cancel.end(ticket);
-                    (r, tx_status(c))
+                    (r, tx_status(c), idle_bound)
                 })
                 .await?;
             self.tx = tx;
+            if let Some(bound) = idle_bound {
+                self.idle_bound = bound;
+            }
             result
         })
     }
@@ -402,14 +478,136 @@ impl RawConn for SqliteConn {
     fn backend_id(&self) -> Option<u64> {
         None
     }
+
+    // ## m3a-t15-sqlite-typed (`typed.rs`)
+
+    /// Suspends; no binds (M3b); closes by finalizing; the cached idle bound of the journal
+    /// modes (`typed.rs`).
+    fn typed_caps(&self) -> TypedCaps {
+        typed::caps(self.idle_bound)
+    }
+
+    /// Returns once the statement is prepared and checked on the connection's thread, so
+    /// SQLite's refusals (syntax, the read-only authorizer, `readonly-required`, two statements,
+    /// a parameter) fail here; errors while stepping come from `next_event`.
+    fn query<'a>(&'a mut self, spec: QuerySpec<'a>) -> BoxFuture<'a, Result<(), RawError>> {
+        Box::pin(async move {
+            if self.typed.is_some() || spec.protocol == Protocol::Simple || !spec.binds.is_empty() {
+                return Err(unsupported());
+            }
+            let jobs = self.jobs.clone().ok_or_else(gone)?;
+            let ticket = self.cancel.begin();
+            let (job, open) =
+                typed::start(&spec, self.guard.clone(), Arc::clone(&self.cancel), ticket);
+            // ## T15 review round 1 (finding 1): the query is the connection's open one before
+            // its job is sent, so a `query` future dropped at any later point still leaves it to
+            // `close_query` or to the connection's drop (which stops the job).
+            self.typed = Some(open);
+            let job: Job = Box::new(move |conn| job.run(conn));
+            if jobs.send(job).await.is_err() {
+                self.typed = None;
+                return Err(gone());
+            }
+            let started = match self.typed.as_mut() {
+                Some(open) => open.started(&mut self.tx, &mut self.idle_bound).await,
+                None => Err(gone()),
+            };
+            if started.is_err() {
+                self.typed = None;
+            }
+            started
+        })
+    }
+
+    fn next_event(&mut self) -> BoxFuture<'_, Result<QueryEvent, RawError>> {
+        Box::pin(typed::next_event(
+            &mut self.typed,
+            &mut self.tx,
+            &mut self.idle_bound,
+        ))
+    }
+
+    fn fetch_more(&mut self, rows: u32) -> BoxFuture<'_, Result<(), RawError>> {
+        let resumed = typed::fetch_more(&mut self.typed, rows);
+        Box::pin(async move { resumed })
+    }
+
+    fn close_query(&mut self, how: CloseHow) -> BoxFuture<'_, Result<Closed, RawError>> {
+        Box::pin(typed::close_query(
+            &mut self.typed,
+            &mut self.tx,
+            &mut self.idle_bound,
+            how,
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
     use std::path::Prefix;
+    use std::sync::atomic::Ordering;
 
     use super::prefix_refused;
+
+    // ## m3a-t15-sqlite-typed
+    /// A consumer that stops reading stops the stepping: the job parks on its full event
+    /// channel after at most `EVENT_DEPTH` chunks, and resumes when they are read.
+    #[tokio::test]
+    async fn memory_is_bounded_by_the_channel_depth() {
+        use hacivat_driver::{Protocol, QueryEvent, QuerySpec, RawConn};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t15-pace.db");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE t(a INTEGER);
+                 WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 100000)
+                 INSERT INTO t SELECT x FROM c;",
+            )
+            .unwrap();
+        let mut c = super::open(path, false, false, false, super::Duration::from_secs(15))
+            .await
+            .unwrap();
+        let chunk_rows = 100;
+        c.query(QuerySpec {
+            sql: "SELECT a FROM t",
+            binds: &[],
+            protocol: Protocol::Extended,
+            suspendable: false,
+            first_rows: 501,
+            chunk_rows,
+            chunk_bytes: 4 << 20,
+            cell_cap: 1 << 20,
+            max_result_sets: 1,
+        })
+        .await
+        .unwrap();
+        let parked = async {
+            let pace = c.typed.as_ref().unwrap().pace();
+            while !pace.parked.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            pace.rows.load(Ordering::SeqCst)
+        };
+        let stepped = tokio::time::timeout(super::Duration::from_secs(120), parked)
+            .await
+            .expect("the job parks on its full channel");
+        // The plan's depth of 4: the first chunk and at most four more in flight.
+        let bound = 501 + 4 * u64::from(chunk_rows);
+        assert!(stepped <= bound, "{stepped} rows stepped, bound {bound}");
+        // Reading resumes it, to the end.
+        let mut rows = 0u64;
+        loop {
+            match c.next_event().await.unwrap() {
+                QueryEvent::Rows(chunk) => rows += u64::from(chunk.rows()),
+                QueryEvent::Done(_) => break,
+                _ => {}
+            }
+        }
+        assert_eq!(rows, 100_000);
+    }
 
     #[test]
     fn device_and_unc_prefixes_are_refused_disks_are_not() {
