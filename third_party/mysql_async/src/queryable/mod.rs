@@ -43,13 +43,27 @@ pub trait Protocol: fmt::Debug + Send + Sync + 'static {
     fn result_set_meta(columns: Arc<[Column]>) -> ResultSetMeta;
     fn read_result_set_row(packet: &[u8], columns: Arc<[Column]>) -> Result<Row>;
     fn is_last_result_set_packet(capabilities: CapabilityFlags, packet: &[u8]) -> bool {
+        // HACIVAT PATCH §6: an empty packet is not a terminator (it then fails as a row).
         if capabilities.contains(CapabilityFlags::CLIENT_DEPRECATE_EOF) {
-            packet[0] == 0xFE && packet.len() < MAX_PAYLOAD_LEN
+            packet.first() == Some(&0xFE) && packet.len() < MAX_PAYLOAD_LEN
         } else {
-            packet[0] == 0xFE && packet.len() < 8
+            packet.first() == Some(&0xFE) && packet.len() < 8
         }
     }
     fn metadata_skip_possible(conn: &Conn) -> bool;
+}
+
+// HACIVAT PATCH §6: a row packet with bytes left after its last value (more values than the
+// result set has columns) is malformed.
+fn whole_row(rest: &ParseBuf<'_>) -> std::io::Result<()> {
+    if rest.0.is_empty() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "a row packet has bytes after its last value",
+        ))
+    }
 }
 
 /// Phantom struct used to specify MySql text protocol.
@@ -66,10 +80,11 @@ impl Protocol for TextProtocol {
     }
 
     fn read_result_set_row(packet: &[u8], columns: Arc<[Column]>) -> Result<Row> {
-        ParseBuf(packet)
-            .parse::<RowDeserializer<ServerSide, Text>>(columns)
-            .map(Into::into)
-            .map_err(Into::into)
+        // HACIVAT PATCH §6: the row must use its whole packet.
+        let mut buf = ParseBuf(packet);
+        let row = buf.parse::<RowDeserializer<ServerSide, Text>>(columns)?;
+        whole_row(&buf)?;
+        Ok(row.into())
     }
 
     fn metadata_skip_possible(_conn: &Conn) -> bool {
@@ -83,10 +98,11 @@ impl Protocol for BinaryProtocol {
     }
 
     fn read_result_set_row(packet: &[u8], columns: Arc<[Column]>) -> Result<Row> {
-        ParseBuf(packet)
-            .parse::<RowDeserializer<ServerSide, Binary>>(columns)
-            .map(Into::into)
-            .map_err(Into::into)
+        // HACIVAT PATCH §6: the row must use its whole packet.
+        let mut buf = ParseBuf(packet);
+        let row = buf.parse::<RowDeserializer<ServerSide, Binary>>(columns)?;
+        whole_row(&buf)?;
+        Ok(row.into())
     }
 
     fn metadata_skip_possible(conn: &Conn) -> bool {

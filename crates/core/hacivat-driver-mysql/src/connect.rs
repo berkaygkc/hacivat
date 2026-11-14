@@ -41,6 +41,9 @@ use mysql_async::{Conn, Opts, OptsBuilder};
 use secrecy::ExposeSecret;
 
 use crate::{exec, probe, tls};
+// ## m3a-t14-mysql-typed
+use crate::typed;
+use hacivat_driver::{CloseHow, Closed, QueryEvent, QuerySpec, TypedCaps};
 
 /// Runs on the session at connect when the profile is read-only (HV-CONN-07).
 const READ_ONLY_SESSION: &str = "SET SESSION TRANSACTION READ ONLY";
@@ -301,7 +304,7 @@ async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn
     let first = attempt(req, req.tls.as_ref()).await;
     let tls_on = req.tls.is_some();
     report(tls_on, first.as_ref().map(|_| ()));
-    let (conn, guard, tls_used) = match first {
+    let (mut conn, guard, tls_used) = match first {
         Ok((conn, guard)) => (conn, guard, tls_on),
         // Auto: the server offered no TLS. Plaintext only toward loopback (see
         // `plaintext_fallback_allowed`); elsewhere `TlsNotOffered` (P9). `DriverEvent` has no
@@ -328,6 +331,10 @@ async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn
     } else {
         DbmsKind::MySql
     };
+    // ## m3a-t14-mysql-typed: the server's `net_write_timeout` bounds how long a suspended
+    // cursor may idle (ER6, R19); read once here, never set.
+    let net_write_timeout = typed::read_net_write_timeout(&mut conn).await;
+    let typed = typed::TypedState::new(u64::from(conn.id()), net_write_timeout);
     Ok(MySqlConn {
         conn: Some(conn),
         guard,
@@ -336,6 +343,7 @@ async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn
         verified,
         read_only: req.read_only,
         tx: TxStatus::Idle,
+        typed,
     })
 }
 
@@ -415,13 +423,38 @@ pub struct MySqlConn {
     read_only: bool,
     /// The transaction status from the last OK packet (HV-SESS-03).
     tx: TxStatus,
+    // ## m3a-t14-mysql-typed
+    /// The typed path: caps, the open query, a drain that holds the `Conn`.
+    typed: typed::TypedState,
 }
 
 impl MySqlConn {
     fn conn(&mut self) -> Result<&mut Conn, RawError> {
+        // ## m3a-t14-mysql-typed: every command would first drain the open query's rows
+        // (inside `mysql_async`), so none runs while one is open.
+        if self.typed.busy() {
+            return Err(err(RawErrorKind::Unsupported));
+        }
         self.conn
             .as_mut()
             .ok_or_else(|| err(RawErrorKind::Io(io::ErrorKind::NotConnected)))
+    }
+
+    // ## m3a-t14-mysql-typed
+    /// Test seam: run every typed query over `COM_QUERY` (the text protocol), so the Docker
+    /// golden test compares both protocols' decoding against one server.
+    #[doc(hidden)]
+    pub fn force_text_protocol(&mut self, on: bool) {
+        self.typed.force_text = on;
+    }
+
+    fn typed_ctx(&mut self) -> typed::Ctx<'_> {
+        typed::Ctx {
+            conn: &mut self.conn,
+            tx: &mut self.tx,
+            read_only: self.read_only,
+            state: &mut self.typed,
+        }
     }
 
     /// The first column of the first row of `sql` as an integer. A test seam: the Docker
@@ -499,9 +532,18 @@ impl RawConn for MySqlConn {
     fn close(mut self: Box<Self>) -> BoxFuture<'static, ()> {
         let conn = self.conn.take();
         let guard = self.guard.take();
+        // ## m3a-t14-mysql-typed: with a query open, `disconnect` would first read its whole
+        // rest; the connection is dropped instead (`mysql_async` finishes it in the
+        // background), and a drain in progress is dropped with its `Conn`.
+        let open = self.typed.busy();
+        self.typed.discard();
         Box::pin(async move {
             if let Some(conn) = conn {
-                let _ = conn.disconnect().await;
+                if open {
+                    drop(conn);
+                } else {
+                    let _ = conn.disconnect().await;
+                }
             }
             if let Some(guard) = guard {
                 guard.run().await;
@@ -525,6 +567,10 @@ impl RawConn for MySqlConn {
         opts: ExecOpts,
     ) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
         Box::pin(async move {
+            // ## m3a-t14-mysql-typed: not while a typed query is open.
+            if self.typed.busy() {
+                return Err(err(RawErrorKind::Unsupported));
+            }
             let Some(conn) = self.conn.as_mut() else {
                 return Err(err(RawErrorKind::Io(io::ErrorKind::NotConnected)));
             };
@@ -534,6 +580,10 @@ impl RawConn for MySqlConn {
 
     fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
         Box::pin(async move {
+            // ## m3a-t14-mysql-typed: not while a typed query is open.
+            if self.typed.busy() {
+                return Err(err(RawErrorKind::Unsupported));
+            }
             let Some(conn) = self.conn.as_mut() else {
                 return Err(err(RawErrorKind::Io(io::ErrorKind::NotConnected)));
             };
@@ -547,6 +597,10 @@ impl RawConn for MySqlConn {
 
     fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>> {
         Box::pin(async move {
+            // ## m3a-t14-mysql-typed: not while a typed query is open.
+            if self.typed.busy() {
+                return Err(err(RawErrorKind::Unsupported));
+            }
             let Some(conn) = self.conn.as_mut() else {
                 return Err(err(RawErrorKind::Io(io::ErrorKind::NotConnected)));
             };
@@ -556,7 +610,11 @@ impl RawConn for MySqlConn {
 
     /// The thread ID from the handshake (`CONNECTION_ID()`), which `KILL` takes.
     fn backend_id(&self) -> Option<u64> {
-        self.conn.as_ref().map(|c| u64::from(c.id()))
+        // ## m3a-t14-mysql-typed: a drain in progress holds the `Conn`.
+        self.conn
+            .as_ref()
+            .map(|c| u64::from(c.id()))
+            .or_else(|| self.typed.busy().then_some(self.typed.thread_id))
     }
 
     // ## m2b-t17-liveness (Task 17 fix round 4, I9/R5)
@@ -565,5 +623,27 @@ impl RawConn for MySqlConn {
     fn autocommit(&self) -> Option<bool> {
         let ok = self.conn.as_ref()?.last_ok_packet()?;
         Some(crate::exec::autocommit_from_status(ok.status_flags()))
+    }
+
+    // ## m3a-t14-mysql-typed (the bodies and their rules: `crate::typed`)
+
+    fn typed_caps(&self) -> TypedCaps {
+        self.typed.caps
+    }
+
+    fn query<'a>(&'a mut self, spec: QuerySpec<'a>) -> BoxFuture<'a, Result<(), RawError>> {
+        Box::pin(async move { typed::query(self.typed_ctx(), spec).await })
+    }
+
+    fn next_event(&mut self) -> BoxFuture<'_, Result<QueryEvent, RawError>> {
+        Box::pin(async move { typed::next_event(self.typed_ctx()).await })
+    }
+
+    fn fetch_more(&mut self, rows: u32) -> BoxFuture<'_, Result<(), RawError>> {
+        Box::pin(async move { typed::fetch_more(self.typed_ctx(), rows).await })
+    }
+
+    fn close_query(&mut self, how: CloseHow) -> BoxFuture<'_, Result<Closed, RawError>> {
+        Box::pin(async move { typed::close_query(self.typed_ctx(), how).await })
     }
 }

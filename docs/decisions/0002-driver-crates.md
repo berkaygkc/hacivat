@@ -1121,3 +1121,131 @@ exactly, and every decoder over every storage class. Unit tests: the memory boun
 (`typed.rs`). Mutation
 checks: each of the column-name guard, the declared-type guard, the parameter refusal, the
 channel depth, the busy timeout and the drain deadline, removed, fails its test.
+
+## m3a-t14 — MySQL typed
+
+Typed streaming on `hacivat-driver-mysql` (HV-RES-04 MySQL, HV-RES-01 MySQL mapping; R-M3-25,
+R-M3-31, ER6, R19): the `RawConn` methods `typed_caps`, `query`, `next_event`, `fetch_more` and
+`close_query` (`src/typed.rs`, wired in `src/connect.rs` under `// ## m3a-t14-mysql-typed`), the
+decoders (`src/decode.rs`), and the vendored `mysql_async` patch §6
+(`third_party/mysql_async/PATCHES.md`).
+
+- **Library.** `mysql_async` 0.37.1, vendored (patches §1–§6); `mysql_common` 0.37.3 from the
+  registry (not vendored, not patched). No manifest or `Cargo.lock` change.
+- **Caps.** `{ suspend: true, binds: false, close_needs_kill: true, idle_bound:
+  net_write_timeout − 15 s }`: 45 s at the servers' default 60 s. `connect` reads
+  `SELECT @@net_write_timeout` once (one round trip per connection) and never sets it. A value
+  that cannot be read, or one of 15 s or less, leaves no bound below the server's: then
+  `suspend` is false (nothing suspends) and `idle_bound` is `None`.
+- **Routes.** M2b's `extended_route` decides: a `SET` runs over `COM_QUERY` (text protocol, the
+  F2 rule); a text a read-only connection must not run either way is `Unsupported` before
+  anything is sent; everything else is prepared (`prep`, so a statement with a `?` placeholder is
+  refused, `Unsupported`, after the prepare and before it runs: binds are M3b) and executed
+  (binary protocol). `ER_UNSUPPORTED_PS` (1295) is `Unsupported` on a read-only connection (never
+  re-sent as text) and on a read-write one runs once more over `COM_QUERY`, decoded as text
+  (`PREPARE …`, `EXECUTE …`). `Protocol::Simple` and binds are `Unsupported`, nothing sent.
+- **Suspension without a self-referential struct.** The pending result lives in `Conn`
+  (`PendingResult`) and `QueryResult` has no draining `Drop`, so each read builds
+  `QueryResult::<P>::new(&mut conn)` with the query's own protocol type (`Wire`, kept in the open
+  query; a binary row read as text would not parse) and drops it again. Between calls the rows
+  wait in the socket. Only a binary-protocol unit that is not a `CALL` and has columns suspends:
+  only it is sure to have one result set (a multi-result unit never suspends). It stops after
+  its first chunk (`first_rows`) and after each `fetch_more(n)` batch, after reading one row
+  ahead, so a result that ends exactly at the limit ends there (`ResultEnd`, no `Suspended`).
+  `fetch_more` itself sends nothing.
+- **Chunks.** First chunk ≤ `first_rows` rows, later ones ≤ `chunk_rows`, sealed at
+  `chunk_bytes`, `is_full()` or the batch's end; built with `ChunkBuilder::with_schema`.
+- **Result sets (R-M3-25).** The first result is kept even with an empty schema (DML, DDL,
+  `SET`: one empty-schema result, `rows_affected` from the OK packet, the command tag the first
+  keyword); further results with columns are kept up to `max_result_sets` (1 in M3a); every other
+  result set is read to its end undecoded and counted in `skipped_result_sets`; OK packets
+  between them carry only counts. The last kept result's `ResultEnd` goes out after that drain,
+  so its `rows_affected` is the unit's final OK packet's, as `execute` reports it (a `CALL`'s
+  write count for the read-only post-check; 0 for a plain `SELECT`, as in M2b). A later
+  statement's error (which `mysql_async` holds as a pending error) is returned after that
+  `ResultEnd`. `QueryDone.warnings` is the final OK packet's warning count; `SHOW WARNINGS` is
+  not run (the session's choice).
+- **Closing early (drain or kill).** `Drain(d)` reads the rest (every remaining result set) for
+  at most `d`: `Completed { rows }` when it ends without an error, `Closed { rows: delivered }`
+  when a server error (a kill's 1317, a later statement's error) ends it, else
+  `NeedsServerKill { thread_id }`: the handshake's thread ID of this connection, which the driver
+  keeps beside the `Conn` (`backend_id` answers it during a drain). The driver never sends `KILL`
+  itself; the session does, on its own side connection. `Now` asks for the kill without
+  reading. `AfterKill(d)` reads on to the kill's error or the end, at most `d`, then the
+  connection is usable (`Closed { rows: delivered }`); if `d` runs out the connection is dropped
+  (`Io(TimedOut)`).
+  - **No `mysql_async` future is dropped in flight.** A drain is a boxed future that owns the
+    `Conn`; `tokio::time::timeout` only borrows it, so when `d` runs out the future stays where
+    it is, mid-read, in the connection's typed state, and `AfterKill` (or another `Drain`)
+    resumes that same read. Rejected: a timeout around `QueryResult::next()` (it can be cut
+    inside `NextSetRoutine`, between a column count and its definitions, which desynchronizes
+    the connection), and reading to the end with no bound (a slow server would block the
+    close). The future is dropped only with the connection: an `AfterKill` that runs out, or
+    `close`.
+- **Decoders (R-M3-31), both protocols.** Integers (± `UNSIGNED`; `TINYINT(1)` stays an integer,
+  D-065; `YEAR` unsigned 16-bit) `I64`, `BIGINT UNSIGNED` `U64`; `DECIMAL` from its text (both
+  protocols send text) through `DecimalVal::parse` + `push_decimal` (scale and `-0.00` exact;
+  `Dec64` up to precision 18, else `Dec128`, `Big` past 38 digits; precision read back from the
+  display length); `FLOAT`/`DOUBLE` `F64 { f32 }`; text (`CHAR`, `VARCHAR`, `TEXT`, `ENUM`, `SET`;
+  character set ≠ 63) `Var(Text)`, `Lossy` when not UTF-8; `BINARY`/`VARBINARY`/`BLOB`
+  (character set 63, not the `BINARY` flag, which binary collations of text also carry)
+  `Var(Bytes)`; `JSON` `Var(Json)` (MariaDB's `JSON` is `LONGTEXT`: text); `DATE`
+  `Temporal { Days }`; `DATETIME(n)`/`TIMESTAMP(n)` `Temporal { Micros }`, naive; `TIME(n)` a time
+  of day within `0 ..= 24:00:00`, else an exact `Interval` exception (negative, or past a day: up
+  to ±838:59:59); zero dates `Special(ZeroDate)`, a zero month or day (or a zero date with a
+  time) `Special(PartialZeroDate)` with the text the text protocol sends (rebuilt from the binary
+  protocol's parts with the column's fraction digits, so both protocols agree), never NULL; a
+  date outside the calendar that `ALLOW_INVALID_DATES` stores (`2024-02-30`) `Opaque` text;
+  `BIT(n)` its binary digits, `GEOMETRY` its internal value (SRID, WKB) as `HEX()` prints it,
+  `VECTOR` and unknown types the server's text, all `Value::Opaque` in a `Values` buffer (Task
+  12's storage). `OriginHint::MySql { schema, table: org_table, column: org_name }` when both
+  originals are known. `max_chars` stays `None`: M3a maps no collation to a character width
+  (`NativeType` keeps length and character set).
+- **Fail closed on server bytes.** A cell no server sends (digits that do not parse, month 13,
+  hour 24, seven fraction digits, a `BIT` past 8 bytes, a value of the wrong kind for its column)
+  is an `Error` cell (`mysql-int`, `mysql-float`, `mysql-decimal`, `mysql-date`, `mysql-time`,
+  `mysql-bit`, `mysql-value`; the message quotes at most 64 bytes of the value) and the row is
+  kept. Anything out of shape breaks the connection (`Protocol`, the `Conn` dropped, never used
+  again): a row with fewer values than columns (`mysql_common` fails it) or more (patch §6), an
+  empty packet among rows (patch §6; it panicked), a column count of 0 or past 65,535 (patch §6;
+  0 hit a debug assertion, 2^40 aborted on the allocation), a packet past `max_allowed_packet` or
+  out of sequence (the codec), an unknown column-type byte, a `LOCAL INFILE` request, and a
+  binary result set with a column type `mysql_common`'s binary parser panics on (`TIMESTAMP2`,
+  `DATETIME2`, `TIME2`, `TYPED_ARRAY`, 243: `decode::binary_decodable`, checked on every binary
+  result set, drained ones too, before a row is read). A server error keeps the connection: the
+  query ends and one `COM_PING` reads the status flags again (M2b's rule); a failed ping drops
+  it.
+- **Statements meanwhile.** Any command first drains the pending result inside `mysql_async`,
+  so while a query is open (streaming, suspended or draining) `execute`, `batch`, `ping`,
+  `server_info`, `current_user`, `list_databases`, `reset`, a second `query` and `select_i64`
+  answer `Unsupported`; `tls_summary` and `probe` answer from what the connection knows, without
+  a round trip. `close` with a query open drops the `Conn` instead of `disconnect` (which would
+  first read the whole rest); `mysql_async`'s `Drop` then finishes the cleanup in the
+  background.
+- **Known limits.**
+  - `TIMESTAMP` is the server's text in the session `time_zone`; the plan's "zone recorded in
+    `NativeType`" is not possible without a new field (`NativeType::MySql` has none; its
+    `column_type` 7 says the column is a `TIMESTAMP`). `@@session.time_zone` is not read.
+  - The idle bound is read at connect: a later `SET SESSION net_write_timeout` is not seen
+    (`an_unread_stream_past_net_write_timeout_ends_as_a_lost_connection` shows what then
+    happens: the server ends the connection; the driver reports the loss, never hangs).
+  - `query` returns once the first result's header (or OK packet) arrives: a slow DML holds it
+    for the whole statement, so the session's overdue timer must run alongside `query` too.
+  - A `KILL QUERY` that lands after the result has ended may, depending on the server, affect
+    the connection's next statement; the driver cannot see it (the session's side).
+  - `FakeDriver` answers `close_query(Now)` on MySQL with `Closed`; the real driver answers
+    `NeedsServerKill` (only a kill closes early on MySQL).
+- **Tests.** `tests/decode.rs` (20: the mapping over synthetic columns, both protocols read back
+  through a chunk, specials, intervals, `DECIMAL(65,30)` `Big`, opaque renderings, error cells,
+  4,000 rounds of random bytes per column kind with no panic); `tests/typed_wire.rs` (26, a
+  scripted in-process server: each out-of-shape case above → `Protocol` and a dropped
+  connection, `Unsupported` while open with nothing sent, a resume that keeps the binary
+  protocol, the drain that runs out and the `AfterKill` that resumes the same read, `CALL` sets,
+  a later statement's error after the kept `ResultEnd`, the 1295 routes, binds and placeholders
+  refused); `tests/docker_typed.rs` (12 on `mysql84`; with `--set full` also `mysql80`,
+  `mysql84-x509`, `mariadb106`, `mariadb1011`, `mariadb114`): the golden table (31 columns, 5
+  rows, binary and text protocols cell for cell), 100k rows suspended and resumed in 10,000-row
+  batches, an external `KILL QUERY` then drain, and drain → kill → `AfterKill` (both usable
+  within 1 s), a short rest drained to `Completed`, `CALL` with three sets (one kept, two
+  counted), the 1295 routes, a value past `max_allowed_packet` (NULL and a warning), DML/DDL
+  results, the idle bound, and the `net_write_timeout` loss.

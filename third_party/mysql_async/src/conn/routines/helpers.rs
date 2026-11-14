@@ -132,6 +132,15 @@ impl Conn {
         P: Protocol,
     {
         let column_count = packet.read_lenenc_int()?;
+        // HACIVAT PATCH §6: a result set has 1 to 65,535 columns (an OK packet answers for
+        // none); a count outside that is malformed, not a reason to reserve room for it.
+        if column_count == 0 || column_count > u64::from(u16::MAX) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "a result set header with a column count outside 1..=65535",
+            )
+            .into());
+        }
         // Reading 1st byte only if metadata skip is not possible, otherwise it can be a part of the first column definition.
         // Reading column metadata only if it is not skipped - if skip is not possible or if metadata is present.
         let meta = if !(P::metadata_skip_possible(self) && packet.first() == Some(&0x00)) {
