@@ -5,6 +5,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use hacivat_results::window::MAX_FETCH_ROWS;
 use hacivat_results::{
     Admission, CloseReason, Completeness, CursorInfo, FetchControl, FetchPolicy, MemoryBudget,
     ResultId, ResultSource, ResultStore, ResultWriter, StoreSource, TruncReason,
@@ -156,7 +157,6 @@ fn the_ask_is_the_read_ahead_or_the_deficit_whichever_is_larger() {
     let p = FetchPolicy::default();
     assert_eq!(p.rows_to_fetch(9_500, 10_000), Some(10_000));
     assert_eq!(p.rows_to_fetch(100_000, 10_000), Some(91_000));
-    assert_eq!(p.rows_to_fetch(u64::MAX, 0), Some(u64::MAX));
     let p = FetchPolicy {
         prefetch_margin_rows: 0,
         read_ahead_rows: 1,
@@ -165,6 +165,31 @@ fn the_ask_is_the_read_ahead_or_the_deficit_whichever_is_larger() {
     assert_eq!(p.rows_to_fetch(10, 10), None);
     assert_eq!(p.rows_to_fetch(10, 9), Some(1));
     assert_eq!(p.rows_to_fetch(20, 9), Some(11));
+}
+
+/// A sentinel or an estimated far row never asks for more than `MAX_FETCH_ROWS`, so the
+/// session can add up queued asks without overflowing (review M3).
+#[test]
+fn the_ask_is_clamped_so_queued_asks_can_be_summed() {
+    let p = FetchPolicy::default();
+    assert_eq!(p.rows_to_fetch(u64::MAX, 0), Some(MAX_FETCH_ROWS));
+    assert_eq!(p.rows_to_fetch(u64::MAX, u64::MAX - 1), Some(10_000));
+    assert_eq!(
+        p.rows_to_fetch(MAX_FETCH_ROWS + 5_000, 0),
+        Some(MAX_FETCH_ROWS)
+    );
+    assert_eq!(
+        p.rows_to_fetch(MAX_FETCH_ROWS - 2_000, 0),
+        Some(MAX_FETCH_ROWS - 1_000)
+    );
+    // The bound's promise: 2^32 clamped asks still sum without overflow.
+    assert!(MAX_FETCH_ROWS.checked_mul(1 << 32).is_some());
+    let f = suspended_source(10);
+    f.src.ensure_rows(u64::MAX);
+    assert_eq!(
+        f.ctl.calls(),
+        vec![Call::FetchMore(ResultId(9), MAX_FETCH_ROWS)]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

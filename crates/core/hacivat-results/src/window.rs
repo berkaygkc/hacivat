@@ -51,12 +51,27 @@ impl Default for FetchPolicy {
     }
 }
 
+/// The most rows one ask (`rows_to_fetch`, hence one `fetch_more` from a source) names:
+/// `u32::MAX`, about 4.3 billion. Why this bound:
+/// - it never limits a real reader: a viewport plus the margin is a few thousand rows, and
+///   even the largest jump a reader can ask for in M3b (go to row, a thumb drag) stays far
+///   below it; the memory budget, not the ask, decides how many rows are kept;
+/// - a sentinel such as `u64::MAX` can no longer reach the session as a row count;
+/// - the session may add up queued asks ("two queued `FetchMore`s coalesce into one fetch of
+///   the sum", Task 18): 2^32 asks of this size still fit in a `u64`, so the sum cannot
+///   overflow.
+pub const MAX_FETCH_ROWS: u64 = u32::MAX as u64;
+
 impl FetchPolicy {
     /// How many rows to ask for when a reader needs row `upto` of `loaded` rows (HV-RES-03
     /// step 3): nothing while `upto` plus the prefetch margin is loaded, else the read-ahead or
-    /// the shortfall, whichever is larger.
+    /// the shortfall, whichever is larger, and never more than [`MAX_FETCH_ROWS`].
     pub fn rows_to_fetch(&self, upto: u64, loaded: u64) -> Option<u64> {
         let wanted = upto.saturating_add(u64::from(self.prefetch_margin_rows));
-        (wanted > loaded).then(|| (wanted - loaded).max(u64::from(self.read_ahead_rows)))
+        (wanted > loaded).then(|| {
+            (wanted - loaded)
+                .max(u64::from(self.read_ahead_rows))
+                .min(MAX_FETCH_ROWS)
+        })
     }
 }

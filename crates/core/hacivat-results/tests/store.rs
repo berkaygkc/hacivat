@@ -7,9 +7,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use std::sync::Mutex;
+
 use hacivat_results::{
-    CloseReason, Completeness, CursorInfo, MemoryBudget, ResultId, ResultStore, ResultWriter,
-    StoreSnapshot,
+    CloseReason, Completeness, CursorInfo, FetchControl, FetchPolicy, MemoryBudget, PauseReason,
+    ResultId, ResultSource, ResultStore, ResultWriter, StoreSnapshot, StoreSource, TruncReason,
 };
 use hacivat_values::{
     CellFlags, Chunk, ColumnMeta, LogicalType, NativeType, ResultSchema, Value, ValueRef,
@@ -448,4 +450,159 @@ fn from_rows_fixtures_get_distinct_ids() {
     let a = ResultStore::from_rows(schema2(), rows2(1), Completeness::Complete);
     let b = ResultStore::from_rows(schema2(), rows2(1), Completeness::Complete);
     assert_ne!(a.id(), b.id());
+}
+
+/// The writer's drop guard is disarmed for fixtures: a `Streaming` or `Suspended` fixture
+/// keeps its state (shots of the "Fetching…" and "Cursor open" strips).
+#[test]
+fn from_rows_keeps_a_streaming_or_suspended_state() {
+    let s = ResultStore::from_rows(schema2(), rows2(3), Completeness::Streaming);
+    let snap = s.snapshot();
+    assert_eq!(*snap.completeness(), Completeness::Streaming);
+    assert_eq!(snap.row_count(), 3);
+    let s = ResultStore::from_rows(schema2(), rows2(3), suspended());
+    assert!(matches!(
+        s.snapshot().completeness(),
+        Completeness::Suspended(_)
+    ));
+}
+
+fn cursor_info() -> CursorInfo {
+    match suspended() {
+        Completeness::Suspended(info) => info,
+        _ => unreachable!(),
+    }
+}
+
+/// The "Memory limit" strip fixture (R-M3-33; review M5): suspended, paused for the given
+/// reason, with no core runtime.
+#[test]
+fn from_rows_paused_is_the_memory_banner_state() {
+    for reason in [PauseReason::ResultCap, PauseReason::GlobalBudget] {
+        let s = ResultStore::from_rows_paused(schema2(), rows2(600), cursor_info(), reason);
+        let snap = s.snapshot();
+        assert!(matches!(snap.completeness(), Completeness::Suspended(_)));
+        assert_eq!(snap.paused(), Some(reason), "{reason:?}");
+        assert_eq!(snap.row_count(), 600);
+        assert_eq!(snap.cell(599, 1), ValueRef::Text("row 599"));
+        assert!(!s.cap_raised());
+        // A source over it behaves as at the banner: no fetch on scroll, Close cursor says
+        // why.
+        let ctl = Arc::new(Recorder::default());
+        let src = StoreSource::new(s.clone(), ctl.clone(), FetchPolicy::default());
+        src.ensure_rows(599);
+        src.close_cursor();
+        assert_eq!(
+            *ctl.calls.lock().unwrap(),
+            vec![format!("close {:?} MemoryLimit", s.id())]
+        );
+    }
+}
+
+#[test]
+fn from_rows_paused_with_no_rows_is_still_paused() {
+    let s =
+        ResultStore::from_rows_paused(schema2(), Vec::new(), cursor_info(), PauseReason::ResultCap);
+    assert_eq!(s.snapshot().paused(), Some(PauseReason::ResultCap));
+    assert_eq!(s.snapshot().row_count(), 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The writer's drop guard (review I1)
+
+/// Records what a source sends, as text.
+#[derive(Default)]
+struct Recorder {
+    calls: Mutex<Vec<String>>,
+}
+
+impl FetchControl for Recorder {
+    fn fetch_more(&self, result: ResultId, rows: u64) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("more {result:?} {rows}"));
+    }
+
+    fn close(&self, result: ResultId, reason: CloseReason) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("close {result:?} {reason:?}"));
+    }
+
+    fn fetch_all(&self, result: ResultId) {
+        self.calls.lock().unwrap().push(format!("all {result:?}"));
+    }
+}
+
+const STOPPED: Completeness = Completeness::Closed {
+    reason: CloseReason::Cancelled,
+};
+
+#[test]
+fn a_writer_dropped_while_streaming_closes_the_result() {
+    let budget = MemoryBudget::new(1 << 30, 1 << 28);
+    let schema = int_schema(1);
+    let (s, mut w) = ResultStore::new(ResultId(4), schema.clone(), budget.clone(), 1);
+    w.append(chunk_from(&schema, 0, 700));
+    let before = s.snapshot();
+    let used = budget.used();
+    let mut changes = s.changes();
+    drop(w);
+    let after = s.snapshot();
+    assert_eq!(*after.completeness(), STOPPED);
+    assert_eq!(after.version(), before.version() + 1);
+    assert_eq!(after.generation(), before.generation());
+    assert!(changes.has_changed().unwrap());
+    assert_eq!(*changes.borrow_and_update(), (1, before.version() + 1));
+    // The rows stay browsable and stay charged.
+    assert_eq!((after.row_count(), int_at(&after, 699, 0)), (700, 699));
+    assert_eq!(budget.used(), used);
+    assert_eq!(after.paused(), None);
+}
+
+#[test]
+fn a_writer_dropped_while_suspended_closes_the_cursor() {
+    let (s, mut w) = store_with_chunks(&[500, 4_096]);
+    w.set_state(suspended());
+    let ctl = Arc::new(Recorder::default());
+    let src = StoreSource::new(s.clone(), ctl.clone(), FetchPolicy::default());
+    assert!(src.caps().has_cursor);
+    let version = s.snapshot().version();
+    drop(w);
+    let after = s.snapshot();
+    assert_eq!(*after.completeness(), STOPPED);
+    assert_eq!(after.version(), version + 1);
+    assert_eq!(after.row_count(), 4_596);
+    // No cursor any more: nothing to show as open, nothing to ask for.
+    assert!(!src.caps().has_cursor);
+    src.ensure_rows(4_595);
+    assert!(ctl.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_writer_dropped_after_a_final_state_publishes_nothing() {
+    for end in [
+        Completeness::Complete,
+        Completeness::Closed {
+            reason: CloseReason::ConnectionLost,
+        },
+        Completeness::Closed {
+            reason: CloseReason::SessionNeeded,
+        },
+        Completeness::Cancelled,
+        Completeness::Truncated(TruncReason::ResultCap),
+        Completeness::Released,
+    ] {
+        let (s, mut w) = store_with_chunks(&[10]);
+        w.set_state(end);
+        let before = s.snapshot();
+        let changes = s.changes();
+        drop(w);
+        // The reason the session set wins; the drop is a no-op.
+        assert!(!changes.has_changed().unwrap(), "{end:?}");
+        assert!(Arc::ptr_eq(&before, &s.snapshot()), "{end:?}");
+        assert_eq!(*s.snapshot().completeness(), end);
+    }
 }

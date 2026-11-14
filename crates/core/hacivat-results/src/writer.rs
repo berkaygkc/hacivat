@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use hacivat_values::{Chunk, ResultSchema};
 
 use crate::budget::MemoryBudget;
-use crate::cursor::Completeness;
+use crate::cursor::{CloseReason, Completeness};
 use crate::snapshot::{StoreSnapshot, StoredChunk};
 use crate::store::{ResultId, ResultStore};
 
@@ -67,6 +67,8 @@ pub struct ResultWriter {
     /// The last `admit`'s answer ([`Admission::encode`]); an atomic so `admit` takes `&self`
     /// and the writer stays `Sync`.
     last_admission: AtomicU8,
+    /// The drop guard closes a `Streaming` or `Suspended` result; fixtures disarm it.
+    armed: bool,
 }
 
 impl fmt::Debug for ResultWriter {
@@ -102,7 +104,15 @@ impl ResultWriter {
             bytes: first.bytes(),
             completeness: *first.completeness(),
             last_admission: AtomicU8::new(Admission::Ok.encode()),
+            armed: true,
         }
+    }
+
+    /// Drops the writer without the drop guard, leaving the last published state as it is
+    /// (`from_rows` fixtures that show a `Streaming` or `Suspended` result).
+    #[cfg(feature = "test-support")]
+    pub(crate) fn freeze(mut self) {
+        self.armed = false;
     }
 
     pub fn id(&self) -> ResultId {
@@ -178,5 +188,28 @@ impl ResultWriter {
             completeness: self.completeness,
             paused,
         });
+    }
+}
+
+/// The drop guard (review I1). A writer that goes away while its result is `Streaming` or
+/// `Suspended` (an early return in the actor, an actor that exits on a lost connection, a
+/// panic that unwinds it) publishes `Closed { reason: Cancelled }` ("fetching was stopped"),
+/// so no result claims a fetch or an open cursor that no longer exists. The rows stay
+/// browsable and charged. A terminal state the session set first (its own close reason)
+/// wins: the guard then publishes nothing. The guard adds no assertion, so a drop during an
+/// unwind cannot turn into an abort.
+impl Drop for ResultWriter {
+    fn drop(&mut self) {
+        if self.armed
+            && matches!(
+                self.completeness,
+                Completeness::Streaming | Completeness::Suspended(_)
+            )
+        {
+            self.completeness = Completeness::Closed {
+                reason: CloseReason::Cancelled,
+            };
+            self.publish();
+        }
     }
 }

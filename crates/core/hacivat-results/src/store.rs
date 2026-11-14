@@ -76,6 +76,11 @@ impl ResultStore {
     }
 
     /// `(generation, version)` after every publish.
+    ///
+    /// **Subscribe before the first [`snapshot`](Self::snapshot).** A new receiver counts the
+    /// current value as seen, so a consumer that loads a snapshot first and subscribes second
+    /// misses any publish in between, and then sleeps on a stale snapshot; for a result that
+    /// has finished, no later publish ever wakes it.
     pub fn changes(&self) -> watch::Receiver<(u64, u64)> {
         self.changes.subscribe()
     }
