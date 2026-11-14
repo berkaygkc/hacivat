@@ -1330,3 +1330,118 @@ hv-conn-secret-vault = kasa · kalıcı
 hv-menu-edit = Düzen
 # Review: PO
 hv-console-run-unavailable = Bu konsolda sorgu çalıştırma henüz kullanılamıyor.
+
+## m3a-t25-editor-commands
+
+# Review: PO
+hv-cmd-editor-move-left = Sola git
+# Review: PO
+hv-cmd-editor-move-right = Sağa git
+# Review: PO
+hv-cmd-editor-move-up = Yukarı git
+# Review: PO
+hv-cmd-editor-move-down = Aşağı git
+# Review: PO
+hv-cmd-editor-select-left = Seçimi sola genişlet
+# Review: PO
+hv-cmd-editor-select-right = Seçimi sağa genişlet
+# Review: PO
+hv-cmd-editor-select-up = Seçimi yukarı genişlet
+# Review: PO
+hv-cmd-editor-select-down = Seçimi aşağı genişlet
+# Review: PO
+hv-cmd-editor-move-word-left = Önceki sözcüğe git
+# Review: PO
+hv-cmd-editor-move-word-right = Sonraki sözcüğe git
+# Review: PO
+hv-cmd-editor-select-word-left = Seçimi önceki sözcüğe genişlet
+# Review: PO
+hv-cmd-editor-select-word-right = Seçimi sonraki sözcüğe genişlet
+# Review: PO
+hv-cmd-editor-move-line-start = Satır başına git
+# Review: PO
+hv-cmd-editor-move-line-end = Satır sonuna git
+# Review: PO
+hv-cmd-editor-select-line-start = Seçimi satır başına genişlet
+# Review: PO
+hv-cmd-editor-select-line-end = Seçimi satır sonuna genişlet
+# Review: PO
+hv-cmd-editor-move-document-start = Belge başına git
+# Review: PO
+hv-cmd-editor-move-document-end = Belge sonuna git
+# Review: PO
+hv-cmd-editor-select-document-start = Seçimi belge başına genişlet
+# Review: PO
+hv-cmd-editor-select-document-end = Seçimi belge sonuna genişlet
+# Review: PO
+hv-cmd-editor-page-up = Sayfa yukarı
+# Review: PO
+hv-cmd-editor-page-down = Sayfa aşağı
+# Review: PO
+hv-cmd-editor-select-page-up = Seçimi bir sayfa yukarı genişlet
+# Review: PO
+hv-cmd-editor-select-page-down = Seçimi bir sayfa aşağı genişlet
+# Review: PO
+hv-cmd-editor-newline = Satır sonu ekle
+# Review: PO
+hv-cmd-editor-tab = Girintile
+# Review: PO
+hv-cmd-editor-outdent = Girintiyi azalt
+# Review: PO
+hv-cmd-editor-delete-backward = Geriye doğru sil
+# Review: PO
+hv-cmd-editor-delete-forward = İleriye doğru sil
+# Review: PO
+hv-cmd-editor-delete-word-backward = Önceki sözcüğü sil
+# Review: PO
+hv-cmd-editor-delete-word-forward = Sonraki sözcüğü sil
+# Review: PO
+hv-cmd-editor-delete-to-line-start = Satır başına kadar sil
+# Review: PO
+hv-cmd-editor-select-all = Tümünü seç
+# Review: PO
+hv-cmd-editor-undo = Geri al
+# Review: PO
+hv-cmd-editor-redo = Yinele
+# Review: PO
+hv-cmd-editor-copy = Kopyala
+# Review: PO
+hv-cmd-editor-cut = Kes
+# Review: PO
+hv-cmd-editor-paste = Yapıştır
+# Review: PO
+hv-cmd-editor-escape = Seçimi daralt
+# Review: PO
+hv-cmd-editor-toggle-tab-moves-focus = Sekme tuşuyla odak taşımayı aç veya kapat
+# Review: PO
+hv-cmd-editor-context-menu = Düzenleyici menüsünü göster
+# Review: PO
+hv-cmd-editor-run = Çalıştır
+# Review: PO
+hv-cmd-editor-run-2 = Çalıştır (2)
+# Review: PO
+hv-cmd-editor-run-3 = Çalıştır (3)
+# Review: PO
+hv-cmd-editor-describe-exec-range = Çalıştırma aralığını açıkla
+# Review: PO
+hv-editor-describe-one = Çalıştır, { $from }–{ $to }. satırları çalıştırır: { $label }
+# Review: PO
+hv-editor-describe-one-line = Çalıştır, { $line }. satırı çalıştırır: { $label }
+# Review: PO
+hv-editor-describe-many = Çalıştır, { $from }–{ $to }. satırlardaki { $n } ifadeyi çalıştırır
+# Review: PO
+hv-editor-describe-many-line = Çalıştır, { $line }. satırdaki { $n } ifadeyi çalıştırır
+# Review: PO
+hv-editor-describe-ask = Çalıştır, hangi ifadenin çalıştırılacağını sorar
+# Review: PO
+hv-editor-describe-nothing = Burada çalıştırılacak bir şey yok
+# Review: PO
+hv-editor-describe-uncertain = Sınır belirsiz: çalıştırmak için ifadeyi seçin
+# Review: PO
+hv-editor-describe-offline = Bağlı değil: Çalıştır önce bağlanır ve hiçbir şey çalıştırmaz
+# Review: PO
+hv-editor-describe-pending = Düzenleyici bu metni hâlâ okuyor. Birazdan yeniden deneyin.
+# Review: PO
+hv-editor-tab-moves-focus-on = Sekme tuşu odağı taşır
+# Review: PO
+hv-editor-tab-moves-focus-off = Sekme tuşu girinti ekler

@@ -569,10 +569,20 @@ fn right_click_keeps_a_selection_it_falls_in_and_moves_the_caret_otherwise(
     let inside = at_byte(&o, 10);
     right_click(&mut o, inside);
     assert_eq!(selection(&o), (7, 15));
-    let focused = o
-        .vcx
-        .update(|window, cx| o.editor.read(cx).focus_handle(cx).is_focused(window));
-    assert!(focused, "a right click focuses the editor");
+    // ## m3a-t25-editor-commands (named exception: Task 19's "a right click focuses the
+    // editor" held while `editor.context_menu` was Task 1b's no-op): the click focuses the
+    // editor, and the menu it opens inside the editor then takes the focus.
+    let focused = o.vcx.update(|window, cx| {
+        o.editor
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx)
+    });
+    assert!(focused, "a right click focuses the editor (its menu)");
+    assert!(
+        o.vcx
+            .read(|cx| o.editor.read(cx).command_state().menu_open())
+    );
     // Outside it: the caret moves to the pointer.
     let outside = at_byte(&o, 21);
     right_click(&mut o, outside);
