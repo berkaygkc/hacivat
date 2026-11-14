@@ -23,6 +23,11 @@ mod connect;
 mod exec;
 mod probe;
 mod tls;
+// ## m3a-t01b-seams (fix round 1): typed streaming and the value decoders (Task 14).
+#[doc(hidden)]
+pub mod decode;
+#[doc(hidden)]
+pub mod typed;
 
 use futures::future::BoxFuture;
 use hacivat_driver::{

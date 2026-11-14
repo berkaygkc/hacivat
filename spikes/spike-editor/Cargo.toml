@@ -9,7 +9,9 @@ publish.workspace = true
 hacivat-ui-core = { path = "../../crates/ui/hacivat-ui-core", features = ["bench"] }
 anyhow.workspace = true
 # Spike-only rope (MIT). Never Zed's `rope`/`text` crates (GPL).
-ropey = "1.6"
+# ## m3a-t01b-seams (fix round 1): the workspace entry, so feature unification never turns on
+# `unicode_lines` for `hacivat-text` (check-deps rule `RopeLineBreaks`).
+ropey.workspace = true
 
 [lints]
 workspace = true

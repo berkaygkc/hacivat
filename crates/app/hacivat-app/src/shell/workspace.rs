@@ -184,6 +184,10 @@ impl Workspace {
         ];
         // ... and before the window's view goes (the window closed).
         cx.on_release(|this, _| this.saver.flush()).detach();
+        // ## m3a-t01b-seams (fix round 1): the platform's close asks the quit guard (D-014).
+        window.on_window_should_close(cx, |window, cx| {
+            crate::commands::request_window_close(window, cx) == CloseDecision::Proceed
+        });
         // The hook views are built once; hooks are set before the workspace opens (P17).
         let slots = hooks(cx);
         let explorer_view = slots.explorer.map(|build| build(window, cx));
@@ -437,17 +441,6 @@ impl Workspace {
         if tab_close_decision(tab, window, cx) == CloseDecision::Proceed {
             ws.update(cx, |ws, cx| ws.force_close_tab(tab, cx));
         }
-    }
-
-    /// Closes the focused pane's active tab.
-    pub fn close_active_tab(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.active_tab() else {
-            return;
-        };
-        self.panes.close_tab(self.panes.focused, tab);
-        self.tabs.remove(&tab);
-        self.tab_views.remove(&tab);
-        self.layout_changed(cx);
     }
 
     pub fn activate_next_tab(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1062,6 +1055,12 @@ impl Workspace {
                 ActionRegistry::run(APP_MENU_ACTION, window, cx);
             });
         }
+        // ## m3a-t01b-seams (fix round 1): the client-drawn close asks the quit guard (D-014).
+        bar = bar.on_close(|window, cx| {
+            if crate::commands::request_window_close(window, cx) == CloseDecision::Proceed {
+                window.remove_window();
+            }
+        });
         bar
     }
 

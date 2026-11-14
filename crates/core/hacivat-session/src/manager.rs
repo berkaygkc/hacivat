@@ -1089,6 +1089,16 @@ impl ConnectionManager {
         self.shared.events.receiver_count()
     }
 
+    // ## m3a-t01b-seams (fix round 1)
+    /// The session policy every profile's sessions follow (R-M3-29): the app reads it instead
+    /// of repeating its boot configuration (the console's `effective_read_only`, the console
+    /// UX's forced read-only).
+    pub fn policy(&self) -> crate::session::SessionPolicy {
+        crate::session::SessionPolicy {
+            production_read_only: self.shared.config.production_read_only,
+        }
+    }
+
     /// The sessions of a connected (or reconnecting) profile (B4): its default console session
     /// is `SessionManager::default_session`.
     pub fn sessions(&self, id: ProfileId) -> Option<Arc<SessionManager>> {

@@ -88,7 +88,12 @@ pub struct TitleBar {
     app_menu: Option<ClickHandler>,
     fit: Option<FitInputs>,
     inert: bool,
+    // ## m3a-t01b-seams (fix round 1)
+    on_close: Option<CloseHandler>,
 }
+
+/// What the client-side close button does (`TitleBar::on_close`).
+pub type CloseHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 impl TitleBar {
     pub fn new(chrome: ChromeKind) -> Self {
@@ -101,7 +106,17 @@ impl TitleBar {
             app_menu: None,
             fit: None,
             inert: false,
+            on_close: None,
         }
+    }
+
+    /// What the client-drawn close button does (Linux client decorations): the host's quit
+    /// request, so its quit guard is asked first (D-014). Without it the button removes the
+    /// window. Windows' caption close and macOS's traffic light go through the platform, whose
+    /// should-close callback the host sets.
+    pub fn on_close(mut self, on_close: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_close = Some(Rc::new(on_close));
+        self
     }
 
     /// Whether a modal layer is open (M2a): the palette field, the capsule, the trailing
@@ -499,7 +514,7 @@ impl TitleBar {
                     "app-menu",
                 ));
             }
-            trailing = trailing.child(caption_buttons(chrome, window, cx));
+            trailing = trailing.child(caption_buttons(chrome, self.on_close.clone(), window, cx));
         }
         let at = room;
         let right_padding = t.spacing.lg;
@@ -524,7 +539,12 @@ impl TitleBar {
 
 /// Minimize, maximize and close. On Windows the platform handles them through
 /// `WindowControlArea`; on Linux (client decorations) the click handlers act.
-fn caption_buttons(chrome: ChromeKind, window: &mut Window, cx: &mut App) -> AnyElement {
+fn caption_buttons(
+    chrome: ChromeKind,
+    on_close: Option<CloseHandler>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let theme = *Theme::get(cx);
     let t = theme.tokens;
     let c = &t.colors;
@@ -581,10 +601,14 @@ fn caption_buttons(chrome: ChromeKind, window: &mut Window, cx: &mut App) -> Any
             button = button.bg(fill.to_hsla());
         }
         if chrome == ChromeKind::LinuxClient {
-            button = button.on_click(move |_, window, _| match area {
+            let on_close = on_close.clone();
+            button = button.on_click(move |_, window, cx| match area {
                 WindowControlArea::Min => window.minimize_window(),
                 WindowControlArea::Max => window.zoom_window(),
-                _ => window.remove_window(),
+                _ => match &on_close {
+                    Some(close) => close(window, cx),
+                    None => window.remove_window(),
+                },
             });
         }
         row = row.child(button);

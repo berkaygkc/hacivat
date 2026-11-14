@@ -74,12 +74,15 @@ impl LogMsg {
     /// The message's Fluent ID in `hacivat-core.ftl`: a literal in every arm, which the
     /// `l10n check` code scan counts as used (P24; Task 23).
     pub fn fluent_id(&self) -> &'static str {
-        unimplemented!("LogMsg::fluent_id ({self:?}): Task 23")
+        // Never format `self`: an error line holds the server's text (fix round 1).
+        let _ = self;
+        unimplemented!("LogMsg::fluent_id: Task 23")
     }
 
     /// The message's arguments (Task 23).
     pub fn args(&self) -> Vec<(&'static str, LogArg)> {
-        unimplemented!("LogMsg::args ({self:?}): Task 23")
+        let _ = self;
+        unimplemented!("LogMsg::args: Task 23")
     }
 }
 

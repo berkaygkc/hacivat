@@ -40,6 +40,14 @@ pub fn request_quit(cx: &mut App) -> CloseDecision {
     decision
 }
 
+/// Closing the window (the title bar's client-drawn close, Windows' caption close, macOS's
+/// traffic light): the window is the app, so the quit guard is asked first (D-014; fix round
+/// 1). `Proceed` lets the window close as before; on `Defer` the guard quits after its prompt.
+pub fn request_window_close(window: &mut Window, cx: &mut App) -> CloseDecision {
+    let _ = window;
+    crate::shell::hooks::quit_decision(cx)
+}
+
 /// How often the app asked the platform to quit (test seam, feature `test-support`: the test
 /// platform's quit does nothing observable).
 #[cfg(feature = "test-support")]

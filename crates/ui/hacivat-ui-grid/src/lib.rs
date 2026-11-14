@@ -6,6 +6,7 @@
 //! Types complete since M3a Task 1b. Bodies: Task 17 (`model`), Task 20 (`element`, `view`,
 //! `list`, `testing`). Task 1b's view and list paint nothing.
 
+pub mod commands;
 pub mod element;
 pub mod list;
 pub mod model;
@@ -14,6 +15,7 @@ mod source;
 pub mod testing;
 mod view;
 
+pub use commands::{GRID_COMMANDS, grid_command};
 pub use list::{RowRenderer, VirtualList};
 pub use source::{
     Align, CellContent, CellKind, ColId, ColumnKind, ColumnSpec, GRID_CONTEXT, GridCellFlags,

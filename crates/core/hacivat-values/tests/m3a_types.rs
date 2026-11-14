@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use hacivat_values::valfmt::{DisplayMode, DisplaySettings};
+use hacivat_values::valfmt::{DisplayMode, DisplaySettings, DisplayZone};
 use hacivat_values::{
     CellFlags, Chunk, ColumnMeta, ErrorVal, LogicalType, NativeType, ResultSchema, Value, ValueRef,
 };
@@ -89,4 +89,19 @@ fn display_settings_fall_back_to_und_and_utc() {
     let tr = DisplaySettings::new("tr-TR", Some("Europe/Istanbul"));
     assert_eq!(tr.format_locale.to_string(), "tr-TR");
     assert_eq!(tr.tz.iana_name(), Some("Europe/Istanbul"));
+}
+
+// ## m3a-t01b-seams (fix round 1)
+#[test]
+fn display_settings_build_without_io_from_a_loaded_zone() {
+    // The zone is loaded where the caller chooses (off the UI thread); the settings take it.
+    let zone = DisplayZone::load(Some("Europe/Istanbul"));
+    let s = DisplaySettings::with_zone("tr-TR", zone.clone());
+    assert_eq!(s, DisplaySettings::new("tr-TR", Some("Europe/Istanbul")));
+    assert_eq!(s.tz.iana_name(), Some("Europe/Istanbul"));
+    assert_eq!(DisplayZone::load(None), DisplayZone::utc());
+    assert_eq!(
+        DisplaySettings::with_zone("en", DisplayZone::utc()).tz,
+        jiff::tz::TimeZone::UTC
+    );
 }

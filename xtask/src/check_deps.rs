@@ -57,6 +57,11 @@ pub enum Rule {
     /// `hacivat-text` (the headless editor core) reaches `hacivat-ui-core`, GPUI or a zed
     /// crate through its normal dependencies.
     TextCoreNotHeadless,
+    /// A member depends on `ropey` with its default features or `unicode_lines`, or the
+    /// workspace's resolved `ropey` has `unicode_lines`: feature unification would then make
+    /// U+2028, U+2029, NEL, VT and FF line breaks in `hacivat-text` whenever that member is
+    /// built too (fix round 1; CI run 43545681877). Every member uses `ropey.workspace = true`.
+    RopeLineBreaks,
 }
 
 // ## m2b-t01-interfaces
@@ -135,6 +140,9 @@ const SQL_TESTKIT: &str = "sql-testkit";
 const PG_BACKEND: (&str, &str) = ("pg_query", "sql-oracle-pg");
 /// The headless editor core (`TextCoreNotHeadless`).
 const TEXT_CORE: &str = "hacivat-text";
+/// The rope under `hacivat-text`, and the features that change its line breaks.
+const ROPE: &str = "ropey";
+const ROPE_LINE_FEATURES: [&str; 2] = ["unicode_lines", "default"];
 
 /// The workspace-relative directory of `p`'s manifest, with `/` separators.
 fn rel_dir(md: &Metadata, p: &Package) -> String {
@@ -322,6 +330,16 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
             add(name, Rule::TextCoreNotHeadless, via);
         }
 
+        if root.dependencies.iter().any(|d| {
+            d.name == ROPE
+                && (d.uses_default_features
+                    || d.features
+                        .iter()
+                        .any(|f| ROPE_LINE_FEATURES.contains(&f.as_str())))
+        }) {
+            add(name, Rule::RopeLineBreaks, vec![ROPE.into()]);
+        }
+
         if PRODUCT_CRATES.contains(&name)
             && let Some(bad) = root.dependencies.iter().find(|d| {
                 d.name == ADAPTER
@@ -384,6 +402,14 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
             }
         }
     }
+    // ## m3a-t01b-seams (fix round 1): the unified features, whoever enables them.
+    for node in md.resolve.iter().flat_map(|r| &r.nodes) {
+        if pkgs.get(&node.id).is_some_and(|p| p.name.as_str() == ROPE)
+            && node.features.iter().any(|f| f.as_str() == "unicode_lines")
+        {
+            add(ROPE, Rule::RopeLineBreaks, vec!["unicode_lines".into()]);
+        }
+    }
     out.into_iter()
         .map(|(krate, rule, via)| Violation { krate, rule, via })
         .collect()
@@ -433,6 +459,8 @@ mod tests {
         kind: DepKind,
         features: Vec<String>,
         source: Option<String>,
+        /// `default-features` (true unless a fixture turns it off, as the workspace's `ropey`).
+        default_features: bool,
     }
 
     fn dep(name: &str, kind: DepKind, features: &[&str], source: Option<&str>) -> Dep {
@@ -441,6 +469,7 @@ mod tests {
             kind,
             features: features.iter().map(|f| (*f).into()).collect(),
             source: source.map(|s| format!("git+{s}?rev=abc#abc")),
+            default_features: true,
         }
     }
 
@@ -471,7 +500,7 @@ mod tests {
         let dependency = |d: &Dep| {
             json!({
                 "name": d.name, "source": d.source, "req": "*", "kind": kind_json(&d.kind),
-                "rename": null, "optional": false, "uses_default_features": true,
+                "rename": null, "optional": false, "uses_default_features": d.default_features,
                 "features": d.features, "target": null, "registry": null
             })
         };
@@ -852,6 +881,36 @@ mod tests {
 
     // ## m3a-t01b-seams
 
+    // ## m3a-t01b-seams (fix round 1)
+    #[test]
+    fn ropey_with_default_features_is_flagged() {
+        // The fixture's dependencies keep their default features, as `ropey = "1.6"` does.
+        let md = fx_at(&[("spike-editor", "spikes", &["ropey"])]);
+        assert_eq!(rule_of(&md, "spike-editor"), Rule::RopeLineBreaks);
+        let md = fx_kind_at(
+            "hacivat-text",
+            "crates/ui",
+            "ropey",
+            DepKind::Normal,
+            &["unicode_lines"],
+        );
+        assert_eq!(rule_of(&md, "hacivat-text"), Rule::RopeLineBreaks);
+    }
+
+    #[test]
+    fn the_workspace_ropey_has_no_unicode_line_breaks() {
+        let md = cargo_metadata::MetadataCommand::new()
+            .current_dir(crate::workspace_root())
+            .exec()
+            .unwrap();
+        let v = violations(&md, &|p| std::fs::read_to_string(p).unwrap_or_default());
+        let rope: Vec<_> = v
+            .iter()
+            .filter(|v| v.rule == Rule::RopeLineBreaks)
+            .collect();
+        assert!(rope.is_empty(), "{rope:?}");
+    }
+
     #[test]
     fn sql_crate_with_tokio_is_flagged() {
         let md = fx_at(&[("sql-lexer", "crates/sql", &["tokio"])]);
@@ -940,7 +999,15 @@ mod tests {
             v.iter().any(|v| v.rule == Rule::TextCoreNotHeadless),
             "{v:?}"
         );
-        let clean = fx_at(&[("hacivat-text", "crates/ui", &["ropey"])]);
+        // The workspace's `ropey` (no default features, `cr_lines`) is clean (fix round 1).
+        let clean = metadata(vec![member(
+            "hacivat-text",
+            "crates/ui",
+            vec![Dep {
+                default_features: false,
+                ..dep("ropey", DepKind::Normal, &["cr_lines", "simd"], None)
+            }],
+        )]);
         assert!(violations(&clean, &lints_ok).is_empty());
     }
 

@@ -2,9 +2,17 @@
 //! module-owned state (P11), and the public API the console host and the execution glue use.
 //!
 //! Task 1b: a working minimal view. Every committed transaction notifies the service, the
-//! marks and the tier, and emits `EditorEvent::Changed` (or `SelectionChanged`); the input
-//! handler (`ime.rs`) inserts plain text. The element paints nothing yet (Task 19), so
-//! `caret_bounds` and `last_layout` are `None`.
+//! marks, the tier, the preview and the input handler, and emits `EditorEvent::Changed` (or
+//! `SelectionChanged`); the input handler (`ime.rs`) inserts plain text. The element paints
+//! nothing yet (Task 19), so `caret_bounds` and `last_layout` are `None`.
+//!
+//! Call points every module seam already has (fix round 1, P11), so Tasks 25 and 27–29 never
+//! edit this file: focus and blur (`ime::on_focus`/`on_blur`, `FocusedEditor`), every commit
+//! (`marks::on_commit`, `large_file::update`, `preview::on_update`, `ime::after_commit`), a
+//! fresh analysis (`LanguageService::on_update` → `preview::on_update`), a composition opening or
+//! closing ([`EditorView::composition_changed`] → `preview::on_composition`), the banner
+//! (`large_file::banner`), each frame (`element::paint_frame`), and the commands' state
+//! (`commands::CommandState`).
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -19,19 +27,20 @@ use hacivat_ui::text::TextFn;
 use hacivat_ui_core::gpui_surface::{
     App, Bounds, Context, ElementInputHandler, EventEmitter, FocusHandle, Focusable, Global,
     InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString, Styled,
-    WeakEntity, Window, canvas, div,
+    Subscription, WeakEntity, Window, canvas, div,
 };
 use smallvec::SmallVec;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::a11y::A11yState;
 use crate::clipboard::PasteState;
-use crate::commands::command_by_id;
+use crate::commands::{CommandState, command_by_id};
 use crate::config::{DocContext, DocId, EditorConfig, Tier};
-use crate::element::FrameLayout;
+use crate::element::{self, FrameLayout};
+use crate::ime::{self, InputState};
 use crate::large_file::{self, TierState};
 use crate::marks::{self, ExecMarkState, MarkKey, MarkStore};
-use crate::preview::{self, BandState};
+use crate::preview::{self, BandState, Refresh};
 use crate::probe::FrameProbe;
 use crate::service::LanguageService;
 
@@ -90,6 +99,11 @@ pub struct EditorView {
     pub(crate) paste: PasteState,
     pub(crate) probe: Option<Rc<dyn FrameProbe>>,
     pub(crate) layout: Option<FrameLayout>,
+    // ## m3a-t01b-seams (fix round 1): module-owned state of the input handler (Task 27) and
+    // the commands (Task 25), and the focus subscriptions.
+    pub(crate) input: InputState,
+    pub(crate) commands: CommandState,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl std::fmt::Debug for EditorView {
@@ -104,6 +118,8 @@ impl std::fmt::Debug for EditorView {
             .field("a11y", &self.a11y)
             .field("tier", &self.tier)
             .field("paste", &self.paste)
+            .field("input", &self.input)
+            .field("commands", &self.commands)
             .finish_non_exhaustive()
     }
 }
@@ -134,7 +150,6 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _ = window;
         let tier = large_file::tier_for(text.len() as u64, longest_line(text), &cfg.tiers);
         let ctx = DocContext {
             connected: false,
@@ -142,6 +157,22 @@ impl EditorView {
         };
         let model = EditorModel::new(text, ModelConfig::default());
         service.open(doc, &model.snapshot(), ctx, cx);
+        // A fresh analysis lands: the preview may change, and the decorations repaint.
+        let weak = cx.entity().downgrade();
+        service.on_update(
+            doc,
+            Rc::new(move |cx: &mut App| {
+                let _ = weak.update(cx, |v, cx| {
+                    preview::on_update(v, Refresh::AnalysisLanded, cx);
+                    cx.notify();
+                });
+            }),
+        );
+        let focus = cx.focus_handle();
+        let subscriptions = vec![
+            cx.on_focus(&focus, window, |v, window, cx| v.focused(window, cx)),
+            cx.on_blur(&focus, window, |v, window, cx| v.blurred(window, cx)),
+        ];
         EditorView {
             doc,
             model,
@@ -149,7 +180,7 @@ impl EditorView {
             config: cfg,
             service,
             a11y_label,
-            focus: cx.focus_handle(),
+            focus,
             ctx,
             marks: MarkStore::default(),
             band: BandState::default(),
@@ -158,7 +189,32 @@ impl EditorView {
             paste: PasteState::default(),
             probe: None,
             layout: None,
+            input: InputState::default(),
+            commands: CommandState::default(),
+            _subscriptions: subscriptions,
         }
+    }
+
+    /// The editor took the focus: it becomes the `FocusedEditor` the app's commands run on,
+    /// and the input handler hears of it (`ime::on_focus`).
+    fn focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let me = cx.entity().downgrade();
+        cx.set_global(FocusedEditor(Some(me)));
+        ime::on_focus(self, window, cx);
+    }
+
+    /// The editor lost the focus: it stops being the `FocusedEditor` (unless another editor
+    /// already took that), and the input handler hears of it (`ime::on_blur`).
+    fn blurred(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let me = cx.entity().downgrade();
+        if cx
+            .try_global::<FocusedEditor>()
+            .and_then(|f| f.0.as_ref())
+            .is_some_and(|f| *f == me)
+        {
+            cx.set_global(FocusedEditor(None));
+        }
+        ime::on_blur(self, window, cx);
     }
 
     /// The document's ID.
@@ -192,10 +248,34 @@ impl EditorView {
         cx.notify();
     }
 
+    /// The editor's configuration.
+    pub fn config(&self) -> &EditorConfig {
+        &self.config
+    }
+
     /// The connection and tier the language service sees.
     pub fn set_doc_context(&mut self, ctx: DocContext, cx: &mut Context<Self>) {
         self.ctx = ctx;
         self.service.set_context(self.doc, ctx, cx);
+        preview::on_update(self, Refresh::ContextChanged, cx);
+        cx.notify();
+    }
+
+    /// The commands' state (Ctrl+M's tab-moves-focus mode, Task 25).
+    pub fn command_state(&self) -> CommandState {
+        self.commands
+    }
+
+    /// An IME composition opened or closed (Task 27 calls it on mark and unmark): the preview
+    /// freezes while composing (`preview::on_composition`), and the host hears of it.
+    #[allow(dead_code, reason = "Task 27 calls it from ime.rs on mark and unmark")]
+    pub(crate) fn composition_changed(&mut self, composing: bool, cx: &mut Context<Self>) {
+        preview::on_composition(&mut self.band, composing);
+        if !composing {
+            preview::on_update(self, Refresh::SelectionMoved, cx);
+        }
+        cx.emit(EditorEvent::CompositionChanged(composing));
+        cx.emit(EditorEvent::StatusChanged);
         cx.notify();
     }
 
@@ -211,10 +291,18 @@ impl EditorView {
         true
     }
 
-    /// Selects the bytes `r` ("go to error").
+    /// Selects the bytes `r` ("go to error"), each end clamped to the text and snapped back to
+    /// a character boundary (a server's byte offset may fall inside a character).
     pub fn select_range(&mut self, r: Range<usize>, cx: &mut Context<Self>) {
-        let len = self.model.snapshot().buffer.len_bytes();
-        let (start, end) = (r.start.min(len), r.end.min(len));
+        let snap = self.model.snapshot();
+        let len = snap.buffer.len_bytes();
+        let start = snap
+            .buffer
+            .snap(r.start.min(len), hacivat_text::Bias::Before);
+        let end = snap
+            .buffer
+            .snap(r.end.min(len), hacivat_text::Bias::Before)
+            .max(start);
         let Ok(changes) = ChangeSet::from_edits(len, []) else {
             return;
         };
@@ -279,7 +367,14 @@ impl EditorView {
         marks: Vec<(MarkKey, Range<usize>)>,
         cx: &mut Context<Self>,
     ) {
-        marks::add(&mut self.marks, version, marks, self.model.changelog());
+        let snap = self.model.snapshot();
+        marks::add(
+            &mut self.marks,
+            version,
+            marks,
+            self.model.changelog(),
+            &snap,
+        );
         cx.notify();
     }
 
@@ -318,9 +413,10 @@ impl EditorView {
 
     /// Applies `tr` and lets everything that follows a commit know (Task 19 owns this path).
     pub(crate) fn commit(&mut self, tr: Transaction, cx: &mut Context<Self>) -> Option<Committed> {
+        let event = tr.ann.user_event;
         let committed = self.model.dispatch(tr).ok()?;
-        marks::on_commit(&mut self.marks, &committed, self.model.changelog());
         let snap = self.model.snapshot();
+        marks::on_commit(&mut self.marks, &committed, self.model.changelog(), &snap);
         if committed.buffer_changed {
             self.service.change(self.doc, &snap, &committed.desc, cx);
             let text_len = snap.buffer.len_bytes() as u64;
@@ -338,6 +434,13 @@ impl EditorView {
                 version: committed.version,
             });
         }
+        let why = if committed.buffer_changed {
+            Refresh::Changed
+        } else {
+            Refresh::SelectionMoved
+        };
+        preview::on_update(self, why, cx);
+        ime::after_commit(self, &committed, event, cx);
         cx.emit(EditorEvent::StatusChanged);
         cx.notify();
         Some(committed)
@@ -353,22 +456,37 @@ impl Focusable for EditorView {
 impl EventEmitter<EditorEvent> for EditorView {}
 
 impl Render for EditorView {
-    /// Task 1b: an empty, focusable area that takes text input; Task 19 paints the text.
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Task 1b: a focusable area that takes text input, the large-file banner's slot above it,
+    /// and the paint path that calls every module seam (`element::paint_frame`); Task 19 paints
+    /// the text.
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let focus = self.focus.clone();
+        let banner = large_file::banner(&self.tier, window, cx);
         div()
             .id(("editor", self.doc.0))
             .track_focus(&self.focus)
             .size_full()
+            .flex()
+            .flex_col()
+            .children(banner)
             .child(
                 canvas(
                     |_, _, _| {},
                     move |bounds, (), window, cx| {
-                        window.handle_input(&focus, ElementInputHandler::new(bounds, entity), cx);
+                        let focused = focus.is_focused(window);
+                        window.handle_input(
+                            &focus,
+                            ElementInputHandler::new(bounds, entity.clone()),
+                            cx,
+                        );
+                        entity.update(cx, |v, cx| {
+                            element::paint_frame(v, bounds, focused, window, cx);
+                        });
                     },
                 )
-                .size_full(),
+                .flex_1()
+                .w_full(),
             )
     }
 }

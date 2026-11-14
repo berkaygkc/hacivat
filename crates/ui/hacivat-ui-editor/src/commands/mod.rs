@@ -36,6 +36,15 @@ impl std::fmt::Debug for EditorCommand {
     }
 }
 
+/// The commands' module-owned state in `EditorView` (P11; Task 25 adds fields as it needs
+/// them; keep `Default`): `EditorView::command_state` reads it, the bodies write it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct CommandState {
+    /// `editor.toggle_tab_moves_focus` (Ctrl+M): Tab and Shift+Tab move the focus instead of
+    /// indenting (UI-EDIT-13).
+    pub tab_moves_focus: bool,
+}
+
 /// Task 1b's body of every command.
 fn pending(_: &mut EditorView, _: &mut Window, _: &mut Context<EditorView>) {}
 

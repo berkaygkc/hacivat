@@ -6,17 +6,60 @@
 //! selection) through `dispatch`; a read-only editor accepts no text; marked text is not
 //! supported yet (`replace_and_mark_text_in_range` does nothing, `marked_text_range` is
 //! `None`); no bounds are known.
+//!
+//! The view's focus, blur, commit and frame call points (fix round 1) reach `on_focus`,
+//! `on_blur`, `after_commit` and `on_frame` below; Task 27 fills them (`FocusedInput`, the blur
+//! rule, `notify_text_input_changed` only after non-IME edits) and keeps its state in
+//! [`InputState`].
 
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
-use hacivat_text::{Annotations, ChangeSet, Origin, SelectionSet, Transaction, UserEvent};
+use hacivat_text::{
+    Annotations, ChangeSet, Committed, Origin, SelectionSet, Transaction, UserEvent,
+};
 use hacivat_ui_core::gpui_surface::{
     Bounds, Context, EntityInputHandler, Pixels, Point, UTF16Selection, Window,
 };
 
 use crate::view::EditorView;
+
+/// The input handler's module-owned state (P11; Task 27 adds its fields: a text-input
+/// notification owed to the platform, the `FocusedInput` bookkeeping). Keep `Default`.
+#[derive(Debug, Clone, Default)]
+pub struct InputState {}
+
+/// The editor took the focus (Task 27: write `FocusedInput { entity, composing }`).
+/// Task 1b: nothing.
+pub(crate) fn on_focus(v: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) {
+    let _ = (v, window, cx);
+}
+
+/// The editor lost the focus (Task 27: the blur rule; an in-window focus move commits the
+/// composition, an app switch keeps it). Task 1b: nothing.
+pub(crate) fn on_blur(v: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) {
+    let _ = (v, window, cx);
+}
+
+/// After every committed transaction, with the `UserEvent` that made it (Task 27: owe the
+/// platform `notify_text_input_changed` unless the edit came from the IME). The view calls it
+/// from `commit`, which has no window; Task 27 records here and notifies in `on_frame`.
+/// Task 1b: nothing.
+pub(crate) fn after_commit(
+    v: &mut EditorView,
+    committed: &Committed,
+    event: UserEvent,
+    cx: &mut Context<EditorView>,
+) {
+    let _ = (v, committed, event, cx);
+}
+
+/// Once per painted frame, before the element's paint (Task 27: send what `after_commit`
+/// owes). Task 1b: nothing.
+pub(crate) fn on_frame(v: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) {
+    let _ = (v, window, cx);
+}
 
 impl EntityInputHandler for EditorView {
     fn text_for_range(

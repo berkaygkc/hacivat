@@ -14,6 +14,11 @@ mod exec;
 mod harden;
 mod open;
 mod probe;
+// ## m3a-t01b-seams (fix round 1): typed streaming and the value decoders (Task 15).
+#[doc(hidden)]
+pub mod decode;
+#[doc(hidden)]
+pub mod typed;
 
 use std::io;
 

@@ -27,7 +27,10 @@ pub use view::ResultsEvent;
 
 use crate::shell::set_results_view;
 
-/// Registers the results tile (`results::view::build`) as the `results_view` hook.
+/// Registers the results tile (`results::view::build`) as the `results_view` hook, and the
+/// results and grid commands (`view::register_commands`, Task 30's body).
 pub fn install(cx: &mut App) {
     set_results_view(cx, Rc::new(view::build));
+    // ## m3a-t01b-seams (fix round 1)
+    view::register_commands(cx);
 }

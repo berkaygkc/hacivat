@@ -411,7 +411,7 @@ fn every_action_title_exists_in_en() {
 /// Every bound command is in the app's registry (`init`: the workspace actions and every
 /// `connections::install` registration). The M2a pending list was emptied at the gate (T22).
 /// M3a (Task 1b): the editor, grid and console rows are bound before their commands exist;
-/// [`m3a_pending`] names them and is emptied at the M3a gate.
+/// [`M3A_PENDING`] names each of them exactly, and the M3a gate (Task 37) requires it empty.
 #[gpui::test]
 fn keymap_commands_are_registered(cx: &mut TestAppContext) {
     let reg = cx.update(|cx| {
@@ -422,7 +422,7 @@ fn keymap_commands_are_registered(cx: &mut TestAppContext) {
         for preset in PRESETS {
             for b in load(p, preset, None).0.bindings() {
                 assert!(
-                    reg.get(&b.command).is_some() || m3a_pending(&b.command),
+                    reg.get(&b.command).is_some() || M3A_PENDING.contains(&b.command.as_str()),
                     "{}",
                     b.command
                 );
@@ -431,13 +431,111 @@ fn keymap_commands_are_registered(cx: &mut TestAppContext) {
     }
 }
 
-// ## m3a-t01b-seams
-/// The M3a commands bound by Task 1b's keymap rows whose registration lands later: every
-/// `editor.*` (Task 32), every `grid.*` (Task 20) and `exec.cancel` (Task 33). Emptied at the
-/// M3a gate.
-fn m3a_pending(command: &str) -> bool {
-    command.starts_with("editor.") || command.starts_with("grid.") || command == "exec.cancel"
+/// Every [`M3A_PENDING`] id is still bound somewhere, so the list never names a command no
+/// keymap row needs (a stale entry, or a typo that would hide a missing registration).
+#[test]
+fn every_m3a_pending_id_is_bound() {
+    let bound: std::collections::HashSet<String> = ALL_PLATFORMS
+        .iter()
+        .flat_map(|p| PRESETS.iter().map(move |preset| (*p, *preset)))
+        .flat_map(|(p, preset)| {
+            load(p, preset, None)
+                .0
+                .bindings()
+                .iter()
+                .map(|b| b.command.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    for id in M3A_PENDING {
+        assert!(
+            bound.contains(*id),
+            "{id} is in M3A_PENDING but no keymap row binds it"
+        );
+    }
 }
+
+// ## m3a-t01b-seams
+/// The commands Task 1b's keymap rows bind whose registration lands later, each by its exact
+/// id: the `editor.*` ids (Task 32 registers the editor's command table), the `grid.*` ids
+/// (Task 30, from `hacivat_ui_grid::GRID_COMMANDS`) and `exec.cancel` (Task 33).
+///
+/// **Ruling (controller): the M3a gate (Task 37) requires this list to be empty** — Task 37
+/// deletes it and runs `keymap_commands_are_registered` unchanged; a registration still
+/// missing then fails the gate.
+const M3A_PENDING: &[&str] = &[
+    // Task 32: the editor's commands.
+    "editor.context_menu",
+    "editor.copy",
+    "editor.cut",
+    "editor.delete_backward",
+    "editor.delete_forward",
+    "editor.delete_to_line_start",
+    "editor.delete_word_backward",
+    "editor.delete_word_forward",
+    "editor.escape",
+    "editor.move_document_end",
+    "editor.move_document_start",
+    "editor.move_down",
+    "editor.move_left",
+    "editor.move_line_end",
+    "editor.move_line_start",
+    "editor.move_right",
+    "editor.move_up",
+    "editor.move_word_left",
+    "editor.move_word_right",
+    "editor.newline",
+    "editor.outdent",
+    "editor.page_down",
+    "editor.page_up",
+    "editor.paste",
+    "editor.redo",
+    "editor.run",
+    "editor.select_all",
+    "editor.select_document_end",
+    "editor.select_document_start",
+    "editor.select_down",
+    "editor.select_left",
+    "editor.select_line_end",
+    "editor.select_line_start",
+    "editor.select_page_down",
+    "editor.select_page_up",
+    "editor.select_right",
+    "editor.select_up",
+    "editor.select_word_left",
+    "editor.select_word_right",
+    "editor.tab",
+    "editor.toggle_tab_moves_focus",
+    "editor.undo",
+    // Task 30: the grid's commands.
+    "grid.copy",
+    "grid.copy_with_headers",
+    "grid.end",
+    "grid.escape",
+    "grid.first_row",
+    "grid.home",
+    "grid.jump_down",
+    "grid.jump_left",
+    "grid.jump_right",
+    "grid.jump_up",
+    "grid.last_row",
+    "grid.move_down",
+    "grid.move_left",
+    "grid.move_right",
+    "grid.move_up",
+    "grid.next_cell",
+    "grid.page_down",
+    "grid.page_up",
+    "grid.prev_cell",
+    "grid.select_all",
+    "grid.select_down",
+    "grid.select_left",
+    "grid.select_right",
+    "grid.select_row",
+    "grid.select_up",
+    // Task 33: cancel.
+    "exec.cancel",
+];
 
 #[gpui::test]
 fn menus_follow_language(cx: &mut TestAppContext) {

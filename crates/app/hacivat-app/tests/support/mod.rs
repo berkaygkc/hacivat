@@ -1153,9 +1153,12 @@ pub fn test_session(
 }
 
 /// Opens a console tab bound to `profile` in the focused pane, active, and registers a console
-/// for it over `session`: a real `EditorView` with the `SqlLanguageService`, an empty
-/// `ConsoleResults` and the run UI attached (`exec_ui::attach`), so Tasks 33 and 34 test the run
-/// UI and the status bar without Task 32's console host (P12). Its ID.
+/// for it over `session`: a real `EditorView` with the `SqlLanguageService` (whose handle the
+/// console keeps, `ConsoleState::service`), an empty `ConsoleResults` and the run UI attached
+/// (`exec_ui::attach`), so Tasks 33 and 34 test the run UI and the status bar without Task 32's
+/// console host (P12). Its ID. The session comes from `test_session`, which ignores the
+/// production policy (a production profile's session is read-write there, as the plan's
+/// `fake_session` is; the boot policy is tested by the session crate).
 pub fn register_test_console(
     vcx: &VisualTestContext,
     profile: hacivat_proto::ProfileId,
@@ -1171,8 +1174,10 @@ pub fn register_test_console(
         let Some(TabKind::Console { n, .. }) = ws.read(cx).tab_kind(tab) else {
             panic!("the new tab is a console");
         };
-        let service: Rc<dyn hacivat_ui_editor::LanguageService> =
-            hacivat_sql_editor::SqlLanguageService::new();
+        // The console keeps the service's concrete handle (Run's `doc_snapshot`, the console's
+        // `set_sql_context`; fix round 1); the editor gets it as its `LanguageService`.
+        let sql_service = hacivat_sql_editor::SqlLanguageService::new();
+        let service: Rc<dyn hacivat_ui_editor::LanguageService> = sql_service.clone();
         // Test data, not a product label (the console host's label is Task 32's).
         let label: hacivat_ui::text::TextFn = Rc::new(|_: &App| gpui::SharedString::from("SQL"));
         let editor = cx.new(|cx| {
@@ -1201,6 +1206,7 @@ pub fn register_test_console(
                 results: Some(results),
                 sql: None,
                 log,
+                service: Some(sql_service),
             },
         );
         hacivat_app::exec_ui::attach(id, &editor, window, cx);

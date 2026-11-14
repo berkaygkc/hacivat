@@ -200,3 +200,65 @@ fn marks_and_commands_delegate_to_their_modules(cx: &mut TestAppContext) {
     assert!(vcx.read(|cx| e.read(cx).last_layout().is_none()));
     let _ = TextBuffer::from_str("");
 }
+
+// ## m3a-t01b-seams (fix round 1)
+
+#[test]
+fn highlight_classes_and_styles_map_both_ways() {
+    use hacivat_ui_editor::HighlightClass;
+    for class in HighlightClass::ALL {
+        assert_eq!(HighlightClass::from_style(class.style()), Some(class));
+    }
+    assert_eq!(
+        HighlightClass::from_style(hacivat_text::display::StyleId(999)),
+        None
+    );
+}
+
+#[gpui::test]
+fn select_range_snaps_to_character_boundaries(cx: &mut TestAppContext) {
+    // "ş" is two bytes (1..3), "😀" four (4..8): a server's byte offset can fall inside either.
+    let (e, vcx) = editor(cx, "aş 😀b", EditorConfig::default());
+    e.update(vcx, |v, cx| v.select_range(2..6, cx));
+    let (range, status) = vcx.read(|cx| {
+        let v = e.read(cx);
+        (v.snapshot().selection.main().range(), v.status())
+    });
+    assert_eq!(range, 1..4);
+    assert_eq!(status.selected_chars, 2);
+    // Past the end clamps to the end.
+    e.update(vcx, |v, cx| v.select_range(5..100, cx));
+    let range = vcx.read(|cx| e.read(cx).snapshot().selection.main().range());
+    assert_eq!(range, 4..9);
+}
+
+#[gpui::test]
+fn focus_makes_the_editor_the_focused_editor_and_a_frame_runs_every_seam(cx: &mut TestAppContext) {
+    use hacivat_ui_editor::FocusedEditor;
+    let (e, vcx) = editor(cx, "SELECT 1;", EditorConfig::default());
+    // GPUI reports focus only for the active window.
+    vcx.update(|window, _| window.activate_window());
+    e.update_in(vcx, |v, window, cx| {
+        let focus = gpui::Focusable::focus_handle(v, cx);
+        window.focus(&focus, cx);
+    });
+    // Focus events go out when the next frame is drawn.
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    let is_focused =
+        vcx.update(|window, cx| gpui::Focusable::focus_handle(e.read(cx), cx).is_focused(window));
+    assert!(is_focused, "the editor's handle has the focus");
+    let focused = vcx.read(|cx| {
+        cx.try_global::<FocusedEditor>()
+            .and_then(|f| f.0.clone())
+            .and_then(|w| w.upgrade())
+    });
+    assert_eq!(focused, Some(e.clone()));
+    // A frame paints through `element::paint_frame` (every module seam is a no-op in Task 1b).
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read(|cx| e.read(cx).command_state()),
+        hacivat_ui_editor::CommandState::default()
+    );
+}

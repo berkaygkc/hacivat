@@ -2,11 +2,13 @@
 //! and the focused one.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use hacivat_exec::SessionLog;
 use hacivat_proto::ProfileId;
 use hacivat_session::session::{ClientId, SessionHandle};
+use hacivat_sql_editor::SqlLanguageService;
 use hacivat_ui::panes::TabId;
 use hacivat_ui_core::gpui_surface::{App, Entity, Global};
 use hacivat_ui_editor::EditorView;
@@ -19,7 +21,9 @@ use crate::results::ConsoleResults;
 pub struct ConsoleId(pub u64);
 
 /// One console: its tab and number, its binding and client, its session, editor and results,
-/// its SQL context and its own output log.
+/// its SQL context, its own output log, and the language service its editor was opened with
+/// (Run reuses its analysis through `doc_snapshot`, R-M3-22; the console's dialect reaches it
+/// through `set_sql_context`, R-M3-39).
 #[derive(Debug, Clone)]
 pub struct ConsoleState {
     pub id: ConsoleId,
@@ -32,6 +36,8 @@ pub struct ConsoleState {
     pub results: Option<Entity<ConsoleResults>>,
     pub sql: Option<DialectCtx>,
     pub log: Arc<SessionLog>,
+    // ## m3a-t01b-seams (fix round 1)
+    pub service: Option<Rc<SqlLanguageService>>,
 }
 
 /// Every console (a global).

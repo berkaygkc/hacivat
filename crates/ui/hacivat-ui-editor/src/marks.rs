@@ -8,10 +8,11 @@
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use hacivat_text::{ChangeLog, Committed};
+use hacivat_text::{ChangeLog, Committed, Snapshot};
 use hacivat_ui::text::TextFn;
 use hacivat_ui_core::gpui_surface::{App, SharedString, Window};
 
+use crate::element::FrameLayout;
 use crate::gutter::GutterCtx;
 
 /// One mark's key (the app's unit).
@@ -99,8 +100,16 @@ impl MarkStore {
 }
 
 /// Adds `marks` computed at `version`; a mark of the same key is replaced (re-execution).
-pub fn add(s: &mut MarkStore, version: u64, marks: Vec<(MarkKey, Range<usize>)>, log: &ChangeLog) {
-    let _ = log;
+/// `log` rebases them to `snap.version`; `snap` places each container anchor and its header
+/// (Task 28).
+pub fn add(
+    s: &mut MarkStore,
+    version: u64,
+    marks: Vec<(MarkKey, Range<usize>)>,
+    log: &ChangeLog,
+    snap: &Snapshot,
+) {
+    let _ = (log, snap);
     for (key, range) in marks {
         s.marks.retain(|m| m.key != key);
         s.marks.push(Mark {
@@ -134,12 +143,20 @@ pub fn clear(s: &mut MarkStore) {
     s.marks.clear();
 }
 
-/// Follows a committed transaction (Task 28: rebase, staleness, tombstones).
-pub fn on_commit(s: &mut MarkStore, c: &Committed, log: &ChangeLog) {
-    let _ = (s, c, log);
+/// Follows a committed transaction, `snap` being the version it produced (Task 28: rebase,
+/// staleness, tombstones).
+pub fn on_commit(s: &mut MarkStore, c: &Committed, log: &ChangeLog, snap: &Snapshot) {
+    let _ = (s, c, log, snap);
 }
 
-/// Paints the marks into the gutter (Task 28). Task 1b: nothing.
-pub fn paint(m: &MarkStore, g: &GutterCtx, window: &mut Window, cx: &mut App) {
-    let _ = (m, g, window, cx);
+/// Paints the marks into the gutter, and each end-of-line status where `layout` says it does
+/// not collide with the text (Task 28). Task 1b: nothing.
+pub fn paint(
+    m: &MarkStore,
+    g: &GutterCtx<'_>,
+    layout: &FrameLayout,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let _ = (m, g, layout, window, cx);
 }

@@ -593,6 +593,9 @@ async fn production_policy_reaches_a_connected_session() {
     };
     assert!(read_only(&m, prod.id));
     assert!(!read_only(&m, dev.id));
+    // The policy is readable where the app needs it (fix round 1).
+    assert!(m.policy().production_read_only);
+    assert!(m.sessions(prod.id).unwrap().policy().production_read_only);
     // Both connects went through the pipeline as the session runs: production read-only.
     let requests = fake.requests();
     assert_eq!(requests.iter().filter(|r| r.read_only).count(), 1);
@@ -601,6 +604,7 @@ async fn production_policy_reaches_a_connected_session() {
     m.connect(prod.clone(), None, Interaction::Headless);
     wait_connected(&m, prod.id).await;
     assert!(!read_only(&m, prod.id));
+    assert!(!m.policy().production_read_only);
 }
 
 #[tokio::test]
@@ -615,4 +619,191 @@ async fn budget_use_reports_in_use_and_max() {
     let (in_use, max) = sessions.budget_use();
     assert_eq!(in_use, 1, "the default session holds a permit");
     assert!(max >= in_use);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m3a-t01b-seams (fix round 1): FakeDriver matches PostgreSQL where the session relies on
+// it (I5; the first two are the review's hostile probes).
+
+/// The server's SQLSTATE of a failed call.
+fn sqlstate(e: &RawError) -> Option<&str> {
+    e.server.as_ref().and_then(|m| m.sqlstate.as_deref())
+}
+
+/// PostgreSQL destroys a non-holdable portal when its transaction ends: a session that ends
+/// Hacivat's transaction before closing the cursor cannot keep fetching.
+#[tokio::test]
+async fn a_suspended_pg_portal_does_not_survive_commit() {
+    let f = fake_pg()
+        .tracks_transactions()
+        .queries(vec![select(10_000)]);
+    let mut c = connect_fake(&f).await;
+    c.batch("BEGIN").await.unwrap();
+    c.query(spec("SELECT * FROM t", true)).await.unwrap();
+    c.next_event().await.unwrap();
+    c.next_event().await.unwrap();
+    assert_eq!(c.next_event().await.unwrap(), QueryEvent::Suspended);
+    c.batch("COMMIT").await.unwrap();
+    assert_eq!(c.tx_status(), TxStatus::Idle);
+    let resumed = c.fetch_more(10).await;
+    let next = if resumed.is_ok() {
+        Some(c.next_event().await)
+    } else {
+        None
+    };
+    assert!(
+        resumed.is_err() || next.as_ref().is_some_and(|n| n.is_err()),
+        "fetch_more after COMMIT: {resumed:?} then {next:?} (real PostgreSQL: portal does not exist)"
+    );
+    assert_eq!(resumed.as_ref().err().and_then(sqlstate), Some("34000"));
+    // Closing the destroyed portal is no error (PostgreSQL's Close of a missing portal), and
+    // the connection takes a new query.
+    assert_eq!(
+        c.close_query(CloseHow::Now).await.unwrap(),
+        Closed::Closed { rows: 0 }
+    );
+    c.query(spec("SELECT 1", false)).await.unwrap();
+}
+
+/// `ROLLBACK` destroys the portal too; `ROLLBACK TO SAVEPOINT` inside the transaction keeps it
+/// (the transaction goes on).
+#[tokio::test]
+async fn rollback_destroys_a_suspended_pg_portal_and_rollback_to_keeps_it() {
+    let f = fake_pg()
+        .tracks_transactions()
+        .queries(vec![select(10_000), select(10_000)]);
+    let mut c = connect_fake(&f).await;
+    c.batch("BEGIN").await.unwrap();
+    c.query(spec("SELECT a", true)).await.unwrap();
+    c.next_event().await.unwrap();
+    c.next_event().await.unwrap();
+    assert_eq!(c.next_event().await.unwrap(), QueryEvent::Suspended);
+    c.batch("SAVEPOINT s").await.unwrap();
+    c.batch("ROLLBACK TO SAVEPOINT s").await.unwrap();
+    c.fetch_more(10).await.unwrap();
+    assert_eq!(rows_of(&c.next_event().await.unwrap()), 10);
+    assert_eq!(c.next_event().await.unwrap(), QueryEvent::Suspended);
+    c.batch("ROLLBACK").await.unwrap();
+    let e = c.fetch_more(10).await.unwrap_err();
+    assert_eq!(sqlstate(&e), Some("34000"));
+}
+
+/// In a failed PostgreSQL transaction every command errors until ROLLBACK.
+#[tokio::test]
+async fn a_pg_query_in_a_failed_transaction_is_refused() {
+    let f = fake_pg().tracks_transactions().queries(vec![select(10)]);
+    let mut c = connect_fake(&f).await;
+    c.batch("BEGIN").await.unwrap();
+    // A cancel inside the transaction fails it (the fake models this, P16).
+    let cancel = c.cancel_handle().expect("cancel handle");
+    c.query(spec("SELECT * FROM t", false)).await.unwrap();
+    cancel.cancel().await.expect("the cancel is sent");
+    let _ = c.next_event().await;
+    assert_eq!(c.tx_status(), TxStatus::Failed);
+    let r = c.query(spec("SELECT * FROM u", true)).await;
+    let first = if r.is_ok() {
+        Some(c.next_event().await)
+    } else {
+        None
+    };
+    assert!(
+        r.is_err() || first.as_ref().is_some_and(|e| e.is_err()),
+        "query in a Failed tx: {r:?} then {first:?}"
+    );
+    assert_eq!(r.as_ref().err().and_then(sqlstate), Some("25P02"));
+}
+
+/// The same rule for plain statements: refused with 25P02, except the ones that end the
+/// transaction or roll back to a savepoint.
+#[tokio::test]
+async fn a_failed_pg_transaction_takes_only_its_end_or_a_rollback_to() {
+    let boom = || hacivat_driver::fake::FakeExec {
+        prefix: "SELECT boom",
+        result: Err(RawError {
+            kind: RawErrorKind::Db,
+            server: None,
+        }),
+        delay: Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    };
+    let f = fake_pg().tracks_transactions().exec(vec![boom(), boom()]);
+    let mut c = connect_fake(&f).await;
+    c.batch("BEGIN").await.unwrap();
+    assert!(c.execute("SELECT boom", ExecOpts::default()).await.is_err());
+    assert_eq!(c.tx_status(), TxStatus::Failed);
+    let e = c
+        .execute("SELECT 1", ExecOpts::default())
+        .await
+        .unwrap_err();
+    assert_eq!(sqlstate(&e), Some("25P02"));
+    assert_eq!(c.tx_status(), TxStatus::Failed);
+    c.batch("ROLLBACK").await.unwrap();
+    assert_eq!(c.tx_status(), TxStatus::Idle);
+    c.batch("SELECT 1").await.unwrap();
+    // `ROLLBACK TO SAVEPOINT` recovers a failed transaction, which goes on.
+    c.batch("BEGIN").await.unwrap();
+    c.batch("SAVEPOINT s").await.unwrap();
+    assert!(c.execute("SELECT boom", ExecOpts::default()).await.is_err());
+    assert_eq!(c.tx_status(), TxStatus::Failed);
+    c.batch("ROLLBACK TO SAVEPOINT s").await.unwrap();
+    assert_eq!(c.tx_status(), TxStatus::InTx);
+    c.batch("SELECT 1").await.unwrap();
+}
+
+/// MySQL closes a suspended query early by a kill: its caps say so, and a drain past what one
+/// read takes asks for it without a script flag.
+#[tokio::test]
+async fn a_mysql_drain_of_a_large_rest_asks_for_a_kill_by_its_caps() {
+    let f = fake_mysql()
+        .backend(7)
+        .queries(vec![select(50_000), select(600)]);
+    let mut c = connect_fake(&f).await;
+    assert!(c.typed_caps().close_needs_kill);
+    c.query(spec("SELECT a", true)).await.unwrap();
+    c.next_event().await.unwrap();
+    c.next_event().await.unwrap();
+    assert_eq!(
+        c.close_query(CloseHow::Drain(Duration::from_millis(250)))
+            .await
+            .unwrap(),
+        Closed::NeedsServerKill { thread_id: 7 }
+    );
+    assert_eq!(
+        c.close_query(CloseHow::AfterKill(Duration::from_secs(1)))
+            .await
+            .unwrap(),
+        Closed::Closed { rows: 501 }
+    );
+    // A small rest is drained, no kill.
+    c.query(spec("SELECT b", true)).await.unwrap();
+    c.next_event().await.unwrap();
+    c.next_event().await.unwrap();
+    assert_eq!(
+        c.close_query(CloseHow::Drain(Duration::from_millis(250)))
+            .await
+            .unwrap(),
+        Closed::Completed { rows: 600 }
+    );
+}
+
+/// M3a's typed path is the extended protocol only (`typed.rs`): `Simple` is refused before
+/// anything is sent, on every engine.
+#[tokio::test]
+async fn a_simple_protocol_query_is_refused() {
+    for f in [fake_pg().tracks_transactions(), fake_mysql()] {
+        let mut c = connect_fake(&f).await;
+        let e = c
+            .query(QuerySpec {
+                protocol: Protocol::Simple,
+                ..spec("SELECT 1", false)
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e.kind, RawErrorKind::Unsupported);
+        assert_eq!(
+            c.next_event().await.unwrap_err().kind,
+            RawErrorKind::Unsupported
+        );
+    }
 }

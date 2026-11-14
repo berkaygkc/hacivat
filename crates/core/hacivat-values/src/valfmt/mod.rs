@@ -57,20 +57,49 @@ impl DisplaySettings {
     /// zone `tz_iana`, so the app builds them without ICU or jiff (P6). A tag that does not
     /// parse is `und`; a zone that is unknown (or `None`) is UTC. Version 0, mode Default,
     /// 1,024 characters.
+    ///
+    /// **Does file I/O**: the zone is read from the system's time-zone database
+    /// ([`DisplayZone::load`]). Never call it on the UI thread; there, load the zone on the core
+    /// runtime (a blocking task) and build with [`DisplaySettings::with_zone`].
     pub fn new(region_bcp47: &str, tz_iana: Option<&str>) -> Self {
+        Self::with_zone(region_bcp47, DisplayZone::load(tz_iana))
+    }
+
+    /// [`DisplaySettings::new`] with a zone already loaded: no I/O, safe on the UI thread.
+    pub fn with_zone(region_bcp47: &str, zone: DisplayZone) -> Self {
         let format_locale = region_bcp47
             .parse::<icu_locale::Locale>()
             .unwrap_or(icu_locale::Locale::UNKNOWN);
-        let tz = tz_iana
-            .and_then(|z| jiff::tz::TimeZone::get(z).ok())
-            .unwrap_or(jiff::tz::TimeZone::UTC);
         DisplaySettings {
             mode: DisplayMode::Default,
             format_locale,
-            tz,
+            tz: zone.0,
             max_display_chars: 1_024,
             version: 0,
         }
+    }
+}
+
+/// A display time zone, loaded (fix round 1): what [`DisplaySettings::with_zone`] takes, so
+/// the I/O of reading the time-zone database happens where the caller chooses. `Send`, so a
+/// blocking task can load it and hand it to the UI thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayZone(jiff::tz::TimeZone);
+
+impl DisplayZone {
+    /// The zone `tz_iana` from the system's time-zone database; unknown (or `None`) is UTC.
+    /// **Does file I/O** on its first use of the database: call it off the UI thread.
+    pub fn load(tz_iana: Option<&str>) -> Self {
+        DisplayZone(
+            tz_iana
+                .and_then(|z| jiff::tz::TimeZone::get(z).ok())
+                .unwrap_or(jiff::tz::TimeZone::UTC),
+        )
+    }
+
+    /// UTC, without I/O.
+    pub fn utc() -> Self {
+        DisplayZone(jiff::tz::TimeZone::UTC)
     }
 }
 

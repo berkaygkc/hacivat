@@ -54,10 +54,34 @@ answers `Unsupported` before it sends anything: a Sync outside a transaction blo
 portal. The session opens `BEGIN` or a `SAVEPOINT` (Task 18), or the guard its read-only `BEGIN`
 (Task 22), first. A statement that returns no rows reports one result with an empty schema
 (`ResultStart` of zero columns, then `ResultEnd` with the affected rows), so every unit has a
-result to attach its status to. `FakeDriver` enforces the same rules (tests in
-`hacivat-session/tests/m3a_interfaces.rs`: `fake_pg_refuses_a_suspendable_query_outside_a_transaction`,
-`one_open_query_per_connection_except_a_suspended_pg_portal`), so a session task cannot pass against a fake that is
-more lenient than the engine.
+result to attach its status to.
+
+**What `FakeDriver` models, and what it does not** (fix round 1 corrected an overclaim here).
+It enforces these rules, each with a test in `hacivat-session/tests/m3a_interfaces.rs`:
+- one open query per connection, except a suspended PostgreSQL portal
+  (`one_open_query_per_connection_except_a_suspended_pg_portal`);
+- a suspendable PostgreSQL query outside a transaction is refused
+  (`fake_pg_refuses_a_suspendable_query_outside_a_transaction`);
+- `COMMIT`/`END`/`ROLLBACK` destroy a suspended PostgreSQL portal (later `fetch_more` or
+  `next_event` answer 34000); `ROLLBACK TO SAVEPOINT` keeps it
+  (`a_suspended_pg_portal_does_not_survive_commit`,
+  `rollback_destroys_a_suspended_pg_portal_and_rollback_to_keeps_it`);
+- a failed PostgreSQL transaction refuses `query` and every statement except
+  `ROLLBACK`/`ABORT`/`COMMIT`/`END` and `ROLLBACK TO SAVEPOINT`, with 25P02
+  (`a_pg_query_in_a_failed_transaction_is_refused`,
+  `a_failed_pg_transaction_takes_only_its_end_or_a_rollback_to`). PostgreSQL accepts `COMMIT` in a
+  failed transaction and answers `ROLLBACK`, so the fake accepts it too;
+- a cancel or a failed statement inside a PostgreSQL transaction fails it (P16);
+- a MySQL drain of more than one read asks for a server-side kill whenever the caps say
+  `close_needs_kill` (`a_mysql_drain_of_a_large_rest_asks_for_a_kill_by_its_caps`);
+- `Protocol::Simple` is refused on every engine (`a_simple_protocol_query_is_refused`).
+
+It is still a model, not the engine. Its transaction status follows statement keywords only
+with `.tracks_transactions()` (without it, a script sets the status and every suspendable
+PostgreSQL query is refused); it knows no locks, isolation, savepoint names or server-side
+time-outs; its cancel is a latch. The Docker legs (Tasks 18, 22 and 31) are the authority for
+engine behaviour; a session test that passes only against the fake proves the session's logic,
+not the engine's.
 
 **The guard around a typed query: a phase API.** `readonly::guarded_query` returns a
 `GuardedCursor` whose `after_first_chunk` and `finish` run the guard's later steps (the canary

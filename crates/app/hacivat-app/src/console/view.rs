@@ -62,6 +62,13 @@ pub fn focused_console(window: &Window, cx: &App) -> Option<ConsoleId> {
     by_editor.or_else(|| Consoles::focused(cx))
 }
 
+/// The `console_binding` hook: the profile a new console tab binds to (R-M3-37: the capsule's
+/// connected profile; Task 32 fills it). Task 1b stub: none, so a new console opens unbound.
+pub fn console_binding(cx: &App) -> Option<ProfileId> {
+    let _ = cx;
+    None
+}
+
 /// The status bar's editor segment of `console` ("Ln 14, Col 49"), its own entity (R-M3-11;
 /// Task 32 fills it, Task 34 places it). Task 1b stub: none.
 pub fn editor_segment(console: ConsoleId, cx: &App) -> Option<AnyView> {

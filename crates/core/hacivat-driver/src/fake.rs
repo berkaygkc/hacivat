@@ -210,7 +210,9 @@ pub struct FakeQuery {
     pub tx_after: Option<TxStatus>,
     /// Every kept result's `ResultEnd::rows_affected`.
     pub rows_affected: Option<u64>,
-    /// `close_query(Drain(..))` answers `NeedsServerKill` (MySQL); `AfterKill` then closes.
+    /// `close_query(Drain(..))` answers `NeedsServerKill` whatever is left (MySQL); `AfterKill`
+    /// then closes. Without it a drain past 4,096 rows still asks for a kill when the caps say
+    /// `close_needs_kill` (MySQL's default caps do).
     pub kill_needed: bool,
 }
 
@@ -832,6 +834,7 @@ impl Driver for FakeDriver {
                 .typed_caps
                 .unwrap_or_else(|| default_typed_caps(self.descriptor.kind)),
             typed: None,
+            portal_gone: false,
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
@@ -925,6 +928,9 @@ struct FakeConn {
     tracks_tx: bool,
     caps: TypedCaps,
     typed: Option<TypedRun>,
+    /// PostgreSQL ended the transaction under a suspended portal (fix round 1): the portal is
+    /// gone, so `fetch_more`/`next_event` answer 34000 until a `close_query` or a new `query`.
+    portal_gone: bool,
 }
 
 impl FakeConn {
@@ -975,6 +981,12 @@ impl FakeConn {
             self.exec.log_statement(sql);
             return Box::pin(async { Err(unsupported()) });
         }
+        // Fix round 1: PostgreSQL refuses every statement of a failed transaction but the ones
+        // that end it (25P02); the statement reaches the server, the script entry stays.
+        if pg_wire(self.kind) && self.tx == TxStatus::Failed && !ends_or_recovers_tx(sql) {
+            self.exec.log_statement(sql);
+            return Box::pin(async { Err(in_failed_transaction()) });
+        }
         self.cancel.begin();
         // ## m2b-t17-liveness: the server applies the setting whatever the statement's (or
         // the batch's) outcome.
@@ -987,6 +999,11 @@ impl FakeConn {
         Box::pin(async move {
             let result = self.run_entry(sql).await;
             self.cancel.running.store(false, Ordering::SeqCst);
+            // Fix round 1: a PostgreSQL portal does not outlive its transaction.
+            if pg_wire(self.kind) && self.typed.is_some() && self.tx == TxStatus::Idle {
+                self.end_typed();
+                self.portal_gone = true;
+            }
             result
         })
     }
@@ -1250,6 +1267,47 @@ fn unsupported() -> RawError {
 /// The most rows a drain reads before it gives up and closes (one PostgreSQL `Execute`).
 const DRAIN_ROWS: u64 = 4_096;
 
+/// Whether `sql` ends the transaction or rolls back to a savepoint: what PostgreSQL still
+/// accepts in a failed transaction (`COMMIT` there rolls back).
+fn ends_or_recovers_tx(sql: &str) -> bool {
+    let first = sql
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .find(|w| !w.is_empty())
+        .unwrap_or_default();
+    ["ROLLBACK", "ABORT", "COMMIT", "END"]
+        .iter()
+        .any(|k| first.eq_ignore_ascii_case(k))
+}
+
+/// A PostgreSQL server error with `sqlstate`.
+fn pg_error(sqlstate: &str, text: &str) -> RawError {
+    RawError {
+        kind: RawErrorKind::Db,
+        server: Some(crate::errors::ServerMessage {
+            sqlstate: Some(sqlstate.to_string()),
+            vendor_code: None,
+            severity: Some("ERROR".to_string()),
+            text: text.to_string(),
+            detail: None,
+            hint: None,
+            lang_hint: None,
+        }),
+    }
+}
+
+/// PostgreSQL's answer to a command in a failed transaction.
+fn in_failed_transaction() -> RawError {
+    pg_error(
+        "25P02",
+        "current transaction is aborted, commands ignored until end of transaction block",
+    )
+}
+
+/// PostgreSQL's answer to an Execute on a portal its transaction's end destroyed.
+fn portal_does_not_exist() -> RawError {
+    pg_error("34000", "portal \"\" does not exist")
+}
+
 fn cancelled_error() -> RawError {
     RawError {
         kind: RawErrorKind::Cancelled,
@@ -1286,6 +1344,14 @@ impl FakeConn {
         if self.typed.is_some() {
             return Err(unsupported());
         }
+        // Fix round 1: M3a's drivers speak the extended protocol only (`typed.rs`).
+        if spec.protocol == Protocol::Simple {
+            return Err(unsupported());
+        }
+        if pg_wire(self.kind) && self.tx == TxStatus::Failed {
+            return Err(in_failed_transaction());
+        }
+        self.portal_gone = false;
         // P5: a portal outside a transaction block would end at its Sync.
         if spec.suspendable && pg_wire(self.kind) && self.tx == TxStatus::Idle {
             return Err(unsupported());
@@ -1319,6 +1385,7 @@ impl FakeConn {
                 run.suspended = false;
                 run.budget = Some(u64::from(rows));
             }
+            None if self.portal_gone => return Err(portal_does_not_exist()),
             _ => return Err(unsupported()),
         }
         self.cancel.begin();
@@ -1327,6 +1394,7 @@ impl FakeConn {
 
     async fn next_typed_event(&mut self) -> Result<QueryEvent, RawError> {
         let (ignores, never_pending, delay) = match self.typed.as_ref() {
+            None if self.portal_gone => return Err(portal_does_not_exist()),
             None => return Err(unsupported()),
             Some(run) if run.suspended => return Err(unsupported()),
             Some(run) => {
@@ -1440,18 +1508,20 @@ impl FakeConn {
     /// `close_query`'s effect (the module docs).
     fn close_typed(&mut self, how: CloseHow) -> Result<Closed, RawError> {
         self.alive()?;
+        self.portal_gone = false;
         let Some(run) = self.typed.as_ref() else {
             return Ok(Closed::Closed { rows: 0 });
         };
         let sent = run.sent;
+        let kill = Closed::NeedsServerKill {
+            thread_id: self.backend.unwrap_or(0),
+        };
         let closed = match how {
-            CloseHow::Drain(_) if run.script.kill_needed => {
-                return Ok(Closed::NeedsServerKill {
-                    thread_id: self.backend.unwrap_or(0),
-                });
-            }
+            CloseHow::Drain(_) if run.script.kill_needed => return Ok(kill),
             CloseHow::Drain(_) => match run.remaining() {
                 left if left <= DRAIN_ROWS => Closed::Completed { rows: sent + left },
+                // Fix round 1: an engine that closes early by a kill (MySQL) asks for one.
+                _ if self.caps.close_needs_kill => return Ok(kill),
                 _ => Closed::Closed { rows: sent },
             },
             CloseHow::Now | CloseHow::AfterKill(_) => Closed::Closed { rows: sent },

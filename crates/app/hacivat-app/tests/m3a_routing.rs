@@ -83,6 +83,24 @@ fn console_view_is_built_once_per_tab(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_console_binding_hook_is_installed_and_opens_unbound(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    assert!(
+        hooks(vcx).console_binding.is_some(),
+        "console::install sets the hook"
+    );
+    assert!(run(vcx, "workspace.new_console_tab"));
+    let kind = with_ws(vcx, |ws, _, _| ws.active_tab_kind());
+    assert!(matches!(
+        kind,
+        Some(TabKind::Console {
+            n: 2,
+            profile: None
+        })
+    ));
+}
+
+#[gpui::test]
 fn empty_results_hook_keeps_the_m1_tile(cx: &mut TestAppContext) {
     let vcx = shell(cx, "en");
     assert!(
@@ -202,6 +220,27 @@ fn quit_guard_can_defer_quit(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn closing_the_window_asks_the_quit_guard(cx: &mut TestAppContext) {
+    let vcx = shell(cx, "en");
+    let asked = Rc::new(Cell::new(0u32));
+    let seen = asked.clone();
+    vcx.cx.update(|cx| {
+        set_quit_guard(
+            cx,
+            Rc::new(move |_| {
+                seen.set(seen.get() + 1);
+                CloseDecision::Defer
+            }),
+        );
+    });
+    // The title bar's close and the platform's should-close both ask this (fix round 1).
+    let decision = in_window(vcx, hacivat_app::commands::request_window_close);
+    assert_eq!(decision, CloseDecision::Defer);
+    assert_eq!(asked.get(), 1);
+    assert_eq!(vcx.cx.read(hacivat_app::commands::quit_requests), 0);
+}
+
+#[gpui::test]
 fn the_stub_quit_guard_lets_quit_proceed(cx: &mut TestAppContext) {
     let vcx = shell(cx, "en");
     assert!(
@@ -252,16 +291,25 @@ fn register_test_console_binds_a_real_editor_over_a_fake_session(cx: &mut TestAp
     let tab = with_ws(vcx, |ws, _, _| ws.active_tab()).expect("the console's tab is active");
     let kind = with_ws(vcx, |ws, _, _| ws.tab_kind(tab));
     assert!(matches!(kind, Some(TabKind::Console { profile: Some(p), .. }) if p == profile_id));
-    let (by_tab, has_editor, has_session) = vcx.cx.read(|cx| {
+    let (by_tab, has_editor, has_session, analysis) = vcx.cx.read(|cx| {
         let s = Consoles::get(cx, console).expect("registered");
+        let editor = s.editor.as_ref().expect("an editor").read(cx);
+        // The console keeps its language service: Run reuses its analysis (R-M3-22).
+        let service = s
+            .service
+            .as_ref()
+            .expect("the console keeps its language service");
+        let analysis = service.doc_snapshot(editor.doc(), editor.snapshot().version);
         (
             Consoles::by_tab(cx, tab),
             s.editor.is_some(),
             s.session.is_some(),
+            analysis.is_some(),
         )
     });
     assert_eq!(by_tab, Some(console));
     assert!(has_editor && has_session);
+    assert!(!analysis, "Task 1b's service has no analysis yet");
     assert_eq!(editor_text(vcx, console), "");
     // Run is fail closed until Task 33: `exec_ui::attach`'s stub says so and sends nothing.
     let before = fake.executed().len();

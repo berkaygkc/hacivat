@@ -104,7 +104,9 @@ impl SideConnector for FakeSide {
 }
 
 /// A console session (the default client) of `profile` over `fake`, connected and spawned on
-/// `rt`; read-only exactly when `profile.read_only`. Returns the handle and the fake, whose
+/// `rt`; read-only exactly when `profile.read_only`. It ignores the production policy on
+/// purpose (the plan's helper, P6): a production profile's session is read-write here, and the
+/// policy is tested through `ConnectionManager` (`production_policy_reaches_a_connected_session`). Returns the handle and the fake, whose
 /// counters and logs the test reads. Awaitable from any executor (the connect runs on `rt`).
 ///
 /// # Panics

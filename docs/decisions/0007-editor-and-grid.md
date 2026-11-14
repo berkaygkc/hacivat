@@ -34,15 +34,23 @@ preview rule).
 painting module through one function whose signature Task 1b fixed, and each module owns a state
 struct that `EditorView` holds:
 
-| Module | Seam | State | Fills it |
+| Module | Seam (called from) | State | Fills it |
 |---|---|---|---|
-| `gutter` | `paint(&GutterCtx, ..)` | — | Task 28 |
-| `marks` | `add`, `set_state`, `clear`, `on_commit`, `paint(&MarkStore, &GutterCtx, ..)` | `MarkStore` | Task 28 |
-| `preview` | `paint_band(&BandState, &VisibleRows, ..)`, `set_override` | `BandState` | Task 28 |
-| `scrollbar` | `paint(&ScrollbarCtx, &MarkStore, ..)` | — | Task 28 |
-| `a11y` | `declare(&mut A11yState, &Snapshot, ..)`, `announce` | `A11yState` | Task 29 |
-| `large_file` | `tier_for(..)`, `update` | `TierState` | Task 29 |
+| `gutter` | `paint(&GutterCtx, ..)` (`element::paint_frame`); `GutterCtx` carries the frame's `&Snapshot` and `current_statement: Option<Range<u32>>` | — | Task 28 |
+| `marks` | `add(.., &ChangeLog, &Snapshot)` (`add_exec_marks`), `set_state`, `clear`, `on_commit(.., &Committed, &ChangeLog, &Snapshot)` (every commit), `paint(&MarkStore, &GutterCtx, &FrameLayout, ..)` (`paint_frame`) | `MarkStore` | Task 28 |
+| `preview` | `on_update(&mut EditorView, Refresh, ..)` (every commit, a landed analysis through `LanguageService::on_update`, `set_doc_context`), `on_composition(&mut BandState, bool)` (`EditorView::composition_changed`), `current_statement(&BandState, &Snapshot)`, `paint_band(&BandState, &VisibleRows, &Snapshot, ..)` (`paint_frame`), `set_override` | `BandState` | Task 28 |
+| `scrollbar` | `paint(&ScrollbarCtx, &MarkStore, ..)` (`paint_frame`); `ScrollbarCtx` carries the `&Snapshot` and the current statement | — | Task 28 |
+| `a11y` | `declare(&mut A11yState, &A11yFrame, ..)` (`paint_frame`; `A11yFrame` = snapshot, label, config, tier, focus, bounds), `announce` | `A11yState` | Task 29 |
+| `large_file` | `tier_for(..)`, `update` (every commit), `banner(&TierState, ..) -> Option<AnyElement>` (`render`) | `TierState` | Task 29 |
+| `ime` | `on_focus`, `on_blur` (the view's focus subscriptions), `after_commit(.., &Committed, UserEvent, ..)` (every commit), `on_frame` (`paint_frame`); the view's `composition_changed` for mark/unmark | `InputState` | Task 27 |
 | `clipboard` | paste and copy entry points | `PasteState` | Task 27 |
+| `commands` | the 45-command table | `CommandState` (`tab_moves_focus`), read by `EditorView::command_state` | Task 25 |
+
+Fix round 1 of Task 1b added the snapshot, layout, label/config/tier and current-statement
+parameters, the refresh, banner, focus/blur/after-commit/frame seams and the two new state
+structs, and wired every call site in `view.rs` and `element.rs` (bodies are no-ops), because
+the first cut gave the modules no way to map a byte to a line and no call point for the preview
+query, the focus rule or the banner. The view also sets `FocusedEditor` on focus.
 
 `EditorView`'s public methods delegate in one line (`add_exec_marks` → `marks::add(&mut
 self.marks, ..)`). Task 19 owns every call site in `view.rs` and `element.rs`; Tasks 27 to 29
@@ -63,8 +71,10 @@ window and the editing model can be fuzzed.
 
 **Commands and keys.** The editor, grid and console key rows are bound in Task 1b's keymap
 blocks before their commands exist (a binding to an unregistered command does nothing); the
-app's `keymap_commands_are_registered` test lists them as M3a pending, and the list is emptied at
-the M3a gate. GPUI's key parser has no Break key, so `exec.cancel` is `cmd-.` on macOS (French
+app's `keymap_commands_are_registered` test accepts exactly the ids in its `M3A_PENDING` list (68
+ids; `every_m3a_pending_id_is_bound` keeps it honest), and the M3a gate (Task 37) requires that
+list empty (controller ruling). Every keymap `grid.*` id must be in `hacivat_ui_grid::GRID_COMMANDS`
+and every `editor.*` id in `hacivat_ui_editor::commands()`, so a typo in a row fails a test. GPUI's key parser has no Break key, so `exec.cancel` is `cmd-.` on macOS (French
 layout `cmd-shift-.`) and `ctrl-f2` on Windows and Linux (and in the DataGrip preset); the
 `ctrl-break` row of R-M3-38 is not bound. The Edit menu group shows only once `editor.*`
 commands are registered, and its clipboard items carry no key equivalent, so the menu never

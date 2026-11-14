@@ -534,6 +534,11 @@ impl SessionManager {
         self.lock().policy = p;
     }
 
+    /// The policy this manager's sessions follow (fix round 1).
+    pub fn policy(&self) -> SessionPolicy {
+        self.lock().policy
+    }
+
     /// The connection budget: `(in use, max)` (R-M3-43: "Waiting for a free connection").
     pub fn budget_use(&self) -> (u8, u8) {
         (self.budget.in_use(), self.budget.max())

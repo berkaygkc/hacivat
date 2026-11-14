@@ -38,6 +38,14 @@ impl Render for ResultsHost {
     }
 }
 
+/// Registers the results tile's commands as `ActionDef`s (Task 30: `results.copy`,
+/// `results.fetch_more`, `results.fetch_all`, `results.close_cursor`, `results.rerun`, and
+/// every `grid.*` id of `hacivat_ui_grid::GRID_COMMANDS`, dispatching to the focused
+/// `GridView`). Called once from `results::install`. Task 1b stub: registers nothing.
+pub fn register_commands(cx: &mut App) {
+    let _ = cx;
+}
+
 /// The `results_view` hook (a `ViewBuilder`): the results tile, built once per window.
 pub fn build(window: &mut Window, cx: &mut App) -> AnyView {
     let _ = window;
