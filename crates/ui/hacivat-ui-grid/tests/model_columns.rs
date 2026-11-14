@@ -18,6 +18,9 @@ fn visible_cols(widths: &[f32], left_x: f64, width: f32) -> std::ops::Range<usiz
     layout(widths).visible_range(left_x, width)
 }
 
+/// A zero-width body: `hide`/`show` then clamp only to the content.
+const NO_BODY: f32 = 0.0;
+
 fn edges(l: &ColumnLayout) -> Vec<f64> {
     (0..=l.len()).map(|i| l.x_of(i)).collect()
 }
@@ -104,7 +107,7 @@ fn hit_testing_through_the_inverse_prefix_sums() {
 fn hide_keeps_left_x_anchored_to_the_first_visible_column() {
     let mut l = layout(&[100.0, 200.0, 50.0, 300.0]);
     // left_x 320 sits 20 px into column 2.
-    let x = l.hide(ColId(1), 320.0);
+    let x = l.hide(ColId(1), 320.0, NO_BODY);
     assert_eq!(x, 120.0, "column 2 stays where it was on screen");
     assert_eq!(l.visible(), &[ColId(0), ColId(2), ColId(3)]);
     assert_eq!(l.hidden(), &[ColId(1)]);
@@ -119,14 +122,14 @@ fn hide_keeps_left_x_anchored_to_the_first_visible_column() {
     assert_eq!(l.total_width(), 450.0);
 
     // Showing it again puts the view back.
-    let x = l.show(ColId(1), x);
+    let x = l.show(ColId(1), x, NO_BODY);
     assert_eq!(x, 320.0);
     assert_eq!(l.visible(), &[ColId(0), ColId(1), ColId(2), ColId(3)]);
     assert!(l.hidden().is_empty());
 
     // Hiding a column after the anchor moves nothing.
-    assert_eq!(l.hide(ColId(3), 320.0), 320.0);
-    let x = l.show_all(320.0);
+    assert_eq!(l.hide(ColId(3), 320.0, NO_BODY), 320.0);
+    let x = l.show_all(320.0, NO_BODY);
     assert_eq!(x, 320.0);
 }
 
@@ -134,24 +137,41 @@ fn hide_keeps_left_x_anchored_to_the_first_visible_column() {
 fn hiding_the_anchor_column_anchors_to_the_next_one() {
     let mut l = layout(&[100.0, 200.0, 50.0, 300.0]);
     // left_x 320 is inside column 2; hiding it leaves column 3 at its old left edge.
-    assert_eq!(l.hide(ColId(2), 320.0), 300.0);
+    assert_eq!(l.hide(ColId(2), 320.0, NO_BODY), 300.0);
     assert_eq!(l.x_of(l.index_of(ColId(3)).unwrap()), 300.0);
     // Hiding the last visible column anchors to the one before it.
     let mut l = layout(&[100.0, 200.0]);
-    assert_eq!(l.hide(ColId(1), 150.0), 100.0);
+    assert_eq!(l.hide(ColId(1), 150.0, NO_BODY), 100.0);
 }
 
 #[test]
 fn at_the_left_edge_a_shown_column_stays_in_view() {
     let mut l = layout(&[100.0, 200.0, 50.0]);
-    l.hide(ColId(0), 0.0);
-    assert_eq!(l.show(ColId(0), 0.0), 0.0);
+    l.hide(ColId(0), 0.0, NO_BODY);
+    assert_eq!(l.show(ColId(0), 0.0, NO_BODY), 0.0);
+}
+
+#[test]
+fn hide_and_show_clamp_left_x_to_the_new_content() {
+    // Widths 100, 200, 50, 300 (650 px) in a 300 px body; left_x 340 is 40 px into column 2.
+    let mut l = layout(&[100.0, 200.0, 50.0, 300.0]);
+    // Hiding a column before the anchor: 140, inside the new range [0, 150].
+    assert_eq!(l.hide(ColId(1), 340.0, 300.0), 140.0);
+    l.show(ColId(1), 140.0, 300.0);
+    // Hiding the last column leaves 350 px of content: the anchored 340 clamps to 50.
+    assert_eq!(l.hide(ColId(3), 340.0, 300.0), 50.0);
+    // Content narrower than the body: 0.
+    assert_eq!(l.hide(ColId(2), 50.0, 300.0), 0.0);
+    assert_eq!(l.show_all(0.0, 300.0), 0.0);
+    assert_eq!(l.total_width(), 650.0);
+    // A body width that is not finite clamps only to the content.
+    assert_eq!(l.hide(ColId(1), 340.0, f32::NAN), 140.0);
 }
 
 #[test]
 fn hidden_columns_leave_the_prefix_sums() {
     let mut l = layout(&[100.0, 200.0, 50.0, 300.0]);
-    l.hide(ColId(1), 0.0);
+    l.hide(ColId(1), 0.0, NO_BODY);
     assert_eq!(edges(&l), vec![0.0, 100.0, 150.0, 450.0]);
     assert_eq!(l.visible_range(120.0, 100.0), 1..3);
     assert!(
@@ -159,7 +179,7 @@ fn hidden_columns_leave_the_prefix_sums() {
         "a hidden column's width can change"
     );
     assert_eq!(edges(&l), vec![0.0, 100.0, 150.0, 450.0]);
-    l.show(ColId(1), 0.0);
+    l.show(ColId(1), 0.0, NO_BODY);
     assert_eq!(edges(&l), vec![0.0, 100.0, 110.0, 160.0, 460.0]);
     assert!(!l.is_empty());
     let empty = layout(&[]);

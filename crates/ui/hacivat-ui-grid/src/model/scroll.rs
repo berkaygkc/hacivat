@@ -26,7 +26,9 @@ const THUMB_END_EPSILON: f64 = 1e-3;
 ///
 /// The position is the top row and the offset into it (`[0, row height)`), and the horizontal
 /// offset `left_x` over the column prefix sums. `follow_tail` is set while the user is at the
-/// bottom (or chose End): rows streaming in then keep the view at the bottom.
+/// bottom (or chose End): rows streaming in then keep the view at the bottom. It is cleared when
+/// the view leaves the bottom for any reason (the user scrolls up, a shrink or a resize leaves it
+/// off the bottom, a re-run starts over).
 ///
 /// The public fields are the position; every method re-establishes the invariants, so a field
 /// written from outside is clamped by the next call.
@@ -46,6 +48,9 @@ pub struct ScrollState {
     /// The position at the last `apply_pending` (the previous frame), for the velocity.
     frame_top: u64,
     frame_offset: f32,
+    /// Rows the view moved since the last frame that the user did not scroll (follow-tail
+    /// snaps, shrink clamps, a resize, a re-run): left out of the velocity.
+    frame_excluded: f64,
     /// A thumb drag or jump since the last frame: the next frame's velocity is infinite.
     jumped: bool,
     velocity: f64,
@@ -79,6 +84,7 @@ impl ScrollState {
             pending_dx: 0.0,
             frame_top: 0,
             frame_offset: 0.0,
+            frame_excluded: 0.0,
             jumped: false,
             velocity: 0.0,
         }
@@ -103,11 +109,17 @@ impl ScrollState {
         self.frame_offset = (frame_offset as f32).clamp(0.0, height);
     }
 
-    /// The body's size (the cells' area: no header, gutter or scrollbars).
+    /// The body's size (the cells' area: no header, gutter or scrollbars). A resize that leaves
+    /// the view off the bottom stops following the tail. Not a scroll for the velocity.
     pub fn set_viewport(&mut self, width: f32, height: f32) {
+        let before = self.position();
         self.viewport_w = if valid_len(width) { width } else { 0.0 };
         self.viewport_h = if valid_len(height) { height } else { 0.0 };
         self.clamp();
+        if self.top_row < self.max_top_row() {
+            self.follow_tail = false;
+        }
+        self.exclude_since(before);
     }
 
     /// `(width, height)` of the body.
@@ -121,15 +133,37 @@ impl ScrollState {
     }
 
     /// The row count changed. Growth while following the tail keeps the view at the bottom;
-    /// otherwise the top row stays. A shrink clamps the view to the new last page.
+    /// otherwise the top row stays. A shrink clamps the view to the new last page, and stops
+    /// following the tail unless the view is still at the bottom of a grid that scrolls. None of
+    /// this is a scroll for the velocity.
     pub fn on_row_count(&mut self, rows: u64) {
-        let grew = rows > self.rows;
+        let before = self.position();
+        let (grew, shrank) = (rows > self.rows, rows < self.rows);
         self.rows = rows;
         if grew && self.follow_tail {
             self.top_row = self.max_top_row();
             self.top_row_offset = 0.0;
         }
         self.clamp();
+        if shrank {
+            let max_top = self.max_top_row();
+            if max_top == 0 || self.top_row < max_top {
+                self.follow_tail = false;
+            }
+        }
+        self.exclude_since(before);
+    }
+
+    /// A new generation (a re-run): back to the first row, the tail no longer followed, queued
+    /// vertical deltas dropped. Not a scroll for the velocity. `left_x` stays (a re-run with the
+    /// same columns keeps its widths); `set_content_width` clamps it to the new columns.
+    pub fn on_generation_changed(&mut self) {
+        let before = self.position();
+        self.top_row = 0;
+        self.top_row_offset = 0.0;
+        self.follow_tail = false;
+        self.pending_dy = 0.0;
+        self.exclude_since(before);
     }
 
     /// The width of the scrollable columns (`ColumnLayout::total_width`).
@@ -245,19 +279,19 @@ impl ScrollState {
         self.velocity = if self.jumped {
             f64::INFINITY
         } else {
-            let rows = (i128::from(self.top_row) - i128::from(self.frame_top)) as f64
-                + f64::from(self.top_row_offset - self.frame_offset) / f64::from(self.row_h);
-            rows.abs()
+            (self.rows_from((self.frame_top, self.frame_offset)) - self.frame_excluded).abs()
         };
         self.jumped = false;
-        self.frame_top = self.top_row;
-        self.frame_offset = self.top_row_offset;
+        self.frame_excluded = 0.0;
+        (self.frame_top, self.frame_offset) = self.position();
         before != (self.top_row, self.top_row_offset, self.left_x)
     }
 
-    /// Rows moved between the last two frames (`apply_pending`), every kind of move included;
-    /// infinite for the one frame after a thumb jump. Fast-scroll (Task 20) compares it with its
-    /// threshold.
+    /// Rows the user moved the view between the last two frames (`apply_pending`): wheel,
+    /// trackpad, keys and direct scrolls; infinite for the one frame after a thumb jump. Moves the
+    /// user did not make (follow-tail snaps while rows stream in, shrink clamps, a resize, a
+    /// re-run) are left out, so a stream never trips fast-scroll on a still view. Fast-scroll
+    /// (Task 20) compares it with its threshold.
     pub fn velocity_rows_per_frame(&self) -> f64 {
         self.velocity
     }
@@ -402,6 +436,21 @@ impl ScrollState {
                 self.clamp_x(p * self.max_left_x())
             };
         }
+    }
+
+    fn position(&self) -> (u64, f32) {
+        (self.top_row, self.top_row_offset)
+    }
+
+    /// Rows from `from` to the current position (signed), relative in `f64`.
+    fn rows_from(&self, from: (u64, f32)) -> f64 {
+        (i128::from(self.top_row) - i128::from(from.0)) as f64
+            + f64::from(self.top_row_offset - from.1) / f64::from(self.row_h)
+    }
+
+    /// Leaves the move since `before` out of the velocity: the user did not make it.
+    fn exclude_since(&mut self, before: (u64, f32)) {
+        self.frame_excluded += self.rows_from(before);
     }
 
     /// The spike's `scroll_by`: moves by `delta` px relative to the anchor row, in `f64`, and

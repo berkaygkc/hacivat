@@ -55,8 +55,21 @@ pub enum KeyOutcome {
     },
 }
 
-/// Runs `cmd` on `sel`.
+/// Runs `cmd` on `sel`. A focus a re-run left pending is placed first, as soon as the grid has
+/// rows; a command that then changes nothing answers `Moved` to the placed focus.
 pub fn apply_command(cmd: GridCommand, sel: &mut Selection, ctx: &KeyCtx<'_>) -> KeyOutcome {
+    let placed = sel.on_rows_loaded(ctx.map, ctx.order);
+    let outcome = run(cmd, sel, ctx);
+    match sel.focus() {
+        Some(focus) if placed && outcome == KeyOutcome::Unchanged => KeyOutcome::Moved {
+            focus,
+            follow_tail: false,
+        },
+        _ => outcome,
+    }
+}
+
+fn run(cmd: GridCommand, sel: &mut Selection, ctx: &KeyCtx<'_>) -> KeyOutcome {
     match cmd {
         GridCommand::Copy { headers } => KeyOutcome::Copy {
             region: sel.normalize_for_copy(ctx.map, ctx.order),

@@ -166,24 +166,29 @@ impl ColumnLayout {
     }
 
     /// Hides `id` and answers the `left_x` that keeps the first visible column where it was on
-    /// screen.
-    pub fn hide(&mut self, id: ColId, left_x: f64) -> f64 {
-        self.set_hidden(&[id], true, left_x)
+    /// screen, clamped to the new content for a body `body_w` px wide.
+    ///
+    /// The caller then passes [`ColumnLayout::total_width`] to `ScrollState::set_content_width`
+    /// **before** `ScrollState::set_left_x(returned)`: `set_left_x` clamps to the content width
+    /// it knows, so the other order clips a view that showing a column moved right.
+    pub fn hide(&mut self, id: ColId, left_x: f64, body_w: f32) -> f64 {
+        self.set_hidden(&[id], true, left_x, body_w)
     }
 
     /// Shows `id` and answers the `left_x` that keeps the first visible column where it was on
-    /// screen (at the left edge the view stays at the left edge, so the column shows).
-    pub fn show(&mut self, id: ColId, left_x: f64) -> f64 {
-        self.set_hidden(&[id], false, left_x)
+    /// screen (at the left edge the view stays at the left edge, so the column shows), clamped
+    /// as [`ColumnLayout::hide`] is, with the same call order after it.
+    pub fn show(&mut self, id: ColId, left_x: f64, body_w: f32) -> f64 {
+        self.set_hidden(&[id], false, left_x, body_w)
     }
 
-    /// Shows every column; answers the anchored `left_x`.
-    pub fn show_all(&mut self, left_x: f64) -> f64 {
+    /// Shows every column; answers the anchored, clamped `left_x` (as [`ColumnLayout::show`]).
+    pub fn show_all(&mut self, left_x: f64, body_w: f32) -> f64 {
         let hidden = self.hidden.clone();
-        self.set_hidden(&hidden, false, left_x)
+        self.set_hidden(&hidden, false, left_x, body_w)
     }
 
-    fn set_hidden(&mut self, ids: &[ColId], hide: bool, left_x: f64) -> f64 {
+    fn set_hidden(&mut self, ids: &[ColId], hide: bool, left_x: f64, body_w: f32) -> f64 {
         let slots: Vec<usize> = ids
             .iter()
             .filter_map(|id| self.slot_of(*id))
@@ -197,7 +202,7 @@ impl ColumnLayout {
             self.hidden_flags[slot] = hide;
         }
         self.rebuild();
-        match anchor {
+        let anchored = match anchor {
             None => 0.0,
             Some(a) => match self.index_of(a.col) {
                 Some(ix) => self.prefix[ix] + a.offset,
@@ -205,7 +210,13 @@ impl ColumnLayout {
                 // its old left edge is where the next visible column now starts.
                 None => a.left_edge,
             },
-        }
+        };
+        let body = if valid_width(body_w) {
+            f64::from(body_w)
+        } else {
+            0.0
+        };
+        anchored.clamp(0.0, (self.total_width() - body).max(0.0))
     }
 
     /// The first visible column at `left_x`, how far into it the view starts, and its left

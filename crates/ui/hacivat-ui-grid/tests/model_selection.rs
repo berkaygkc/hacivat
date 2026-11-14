@@ -78,7 +78,7 @@ fn click_shift_click_and_ctrl_click() {
     // A plain click collapses everything to one cell.
     s.select_cell(c(1, 1), &m);
     assert_eq!(s.rects(), &[rect(1..2, 1..2)]);
-    assert_eq!(s.cell_count(100, 20), 1);
+    assert_eq!(s.cell_count(100, &cols(20)), 1);
 }
 
 #[test]
@@ -120,7 +120,7 @@ fn header_columns_by_click_shift_and_ctrl() {
     assert!(s.col_selected(ColId(3)));
     assert!(!s.col_selected(ColId(5)));
     assert_eq!(s.focus(), Some(c(5, 7)));
-    assert_eq!(s.cell_count(10, 10), 40);
+    assert_eq!(s.cell_count(10, &cols(10)), 40);
 }
 
 #[test]
@@ -139,10 +139,13 @@ fn a_shift_click_on_the_gutter_turns_the_active_rect_into_rows() {
 
 #[test]
 fn select_all_on_a_huge_grid_counts_in_u128() {
-    assert_eq!(all().cell_count(1_000_000_000, 10_000), 10_000_000_000_000);
     assert_eq!(
-        all().cell_count(u64::MAX, u32::MAX),
-        u128::from(u64::MAX) * u128::from(u32::MAX)
+        all().cell_count(1_000_000_000, &cols(10_000)),
+        10_000_000_000_000
+    );
+    assert_eq!(
+        all().cell_count(u64::MAX, &cols(10_000)),
+        u128::from(u64::MAX) * 10_000
     );
     assert!(all().is_all());
     assert!(all().contains(ViewRow(999_999_999), ColId(9_999), &ident()));
@@ -159,17 +162,17 @@ fn rows_columns_and_rects_count_by_inclusion_exclusion() {
     s.add_cell(c(5, 1), &m);
     s.extend_to(c(19, 4), &m);
     // 10 rows × 10 + 2 columns × 100 − 10 × 2, plus rows 10..20 × columns 2..5.
-    assert_eq!(s.cell_count(100, 10), 280 + 30);
+    assert_eq!(s.cell_count(100, &cols(10)), 280 + 30);
     // Overlapping rectangles count once.
     let mut s = Selection::default();
     s.select_cell(c(0, 0), &m);
     s.extend_to(c(9, 9), &m);
     s.add_cell(c(5, 5), &m);
     s.extend_to(c(14, 14), &m);
-    assert_eq!(s.cell_count(100, 100), 100 + 100 - 25);
+    assert_eq!(s.cell_count(100, &cols(100)), 100 + 100 - 25);
     // Everything is clipped to the grid.
-    assert_eq!(s.cell_count(10, 10), 100);
-    assert_eq!(s.cell_count(0, 10), 0);
+    assert_eq!(s.cell_count(10, &cols(10)), 100);
+    assert_eq!(s.cell_count(0, &cols(10)), 0);
 }
 
 /// SplitMix64, for seeded random selections (no `proptest` in this crate's manifest).
@@ -189,14 +192,22 @@ impl Rng {
     }
 }
 
-/// The count matches a brute-force walk over `contains`, for random mixes of every kind.
+/// The count matches a brute-force walk over `contains` on the visible columns, for random mixes
+/// of every kind with random hidden columns; and whenever a copy is allowed it takes exactly
+/// that many cells.
 #[test]
 fn cell_count_matches_membership_on_random_selections() {
     const R: u64 = 24;
     const C: u32 = 9;
     let m = ViewMap::identity(R);
     let mut rng = Rng(0x7_17_05);
+    let mut copies = 0;
     for case in 0..2_000 {
+        // Each column is hidden with probability 1/4 (every column visible in some cases).
+        let order: Vec<ColId> = (0..C)
+            .filter(|_| case % 3 == 0 || rng.below(4) != 0)
+            .map(ColId)
+            .collect();
         let mut s = Selection::default();
         for _ in 0..1 + rng.below(6) {
             // Some coordinates fall outside the grid, to exercise the clipping.
@@ -213,11 +224,47 @@ fn cell_count_matches_membership_on_random_selections() {
             }
         }
         let brute = (0..R)
-            .flat_map(|r| (0..C).map(move |k| (r, k)))
-            .filter(|&(r, k)| s.contains(ViewRow(r), ColId(k), &m))
+            .flat_map(|r| order.iter().map(move |k| (r, *k)))
+            .filter(|&(r, k)| s.contains(ViewRow(r), k, &m))
             .count() as u128;
-        assert_eq!(s.cell_count(R, C), brute, "case {case}: {s:?}");
+        assert_eq!(
+            s.cell_count(R, &order),
+            brute,
+            "case {case}: {s:?} {order:?}"
+        );
+        if let Ok(region) = s.normalize_for_copy(&m, &order) {
+            copies += 1;
+            assert_eq!(region.cell_count(), brute, "case {case}: {s:?} {order:?}");
+        }
     }
+    assert!(
+        copies > 500,
+        "the copy agreement ran on {copies} cases only"
+    );
+}
+
+#[test]
+fn a_hidden_column_inside_a_rect_is_not_counted() {
+    let m = ident();
+    let mut s = Selection::default();
+    s.select_cell(c(0, 1), &m);
+    s.extend_to(c(2, 3), &m);
+    s.add_column(ColId(2), ModelRow(0));
+    let visible = [ColId(0), ColId(1), ColId(3)];
+    // r[0,3) c[1,4) without column 2, and the column set holds only the hidden column.
+    assert_eq!(s.cell_count(3, &visible), 6);
+    // With column 2 shown: the rect's 9 cells, the column set inside it.
+    assert_eq!(s.cell_count(3, &cols(4)), 9);
+    // The visible order may come in any order; the count goes by the columns, not their places.
+    assert_eq!(s.cell_count(3, &[ColId(3), ColId(0), ColId(1)]), 6);
+    let mut t = Selection::default();
+    t.select_cell(c(0, 1), &m);
+    t.extend_to(c(2, 3), &m);
+    assert_eq!(
+        t.normalize_for_copy(&ViewMap::identity(3), &visible)
+            .map(|r| r.cell_count()),
+        Ok(t.cell_count(3, &visible))
+    );
 }
 
 #[test]
@@ -383,7 +430,7 @@ fn generation_change_clears_selection_and_clamps_focus() {
     assert_eq!(s.focus(), Some(c(9, 3)));
     assert_eq!(s.anchor(), Some(c(9, 3)));
     assert_eq!(s.rects(), &[rect(9..10, 3..4)]);
-    assert_eq!(s.cell_count(10, 4), 1);
+    assert_eq!(s.cell_count(10, &cols(4)), 1);
     assert_eq!(
         s.normalize_for_copy(&new, &cols(4)),
         Ok(region(vec![9..10], &[3]))
@@ -393,14 +440,102 @@ fn generation_change_clears_selection_and_clamps_focus() {
     s.on_generation_changed(&ViewMap::identity(500), &cols(9));
     assert_eq!(s.focus(), Some(c(9, 3)));
 
-    // No rows or no columns: no cell to focus.
+    // No rows or no columns yet: nothing selected or focused, the focus kept pending.
     s.on_generation_changed(&ViewMap::identity(0), &cols(4));
     assert_eq!(s.focus(), None);
     assert!(s.is_empty());
+    assert_eq!(s.pending_focus(), Some(c(9, 3)));
     let mut t = Selection::default();
     t.select_cell(c(1, 1), &m);
     t.on_generation_changed(&m, &[]);
     assert!(t.is_empty() && t.focus().is_none());
+    assert_eq!(t.pending_focus(), Some(c(1, 1)));
+}
+
+#[test]
+fn a_rerun_with_no_rows_yet_keeps_the_focus_pending_until_rows_arrive() {
+    let m = ViewMap::identity(1_000);
+    let mut s = Selection::default();
+    s.select_cell(c(900, 2), &m);
+    s.extend_to(c(950, 7), &m);
+
+    // The re-run's first frame has no rows: nothing of the old selection stays painted.
+    let empty = ViewMap::identity(0);
+    s.on_generation_changed(&empty, &cols(4));
+    assert!(s.is_empty());
+    assert_eq!(s.focus(), None);
+    assert!(s.rects().is_empty());
+    assert!(!s.contains(ViewRow(900), ColId(2), &m));
+    assert_eq!(s.cell_count(1_000, &cols(8)), 0);
+    assert_eq!(s.normalize_for_copy(&m, &cols(8)), Ok(region(vec![], &[])));
+    assert!(!s.on_rows_loaded(&empty, &cols(4)), "still no rows");
+
+    // A second re-run before any rows arrive keeps the same pending focus.
+    s.on_generation_changed(&empty, &cols(4));
+    assert_eq!(s.pending_focus(), Some(c(950, 7)));
+
+    // The first rows arrive: the focus is clamped into them and selected alone.
+    let five = ViewMap::identity(5);
+    assert!(s.on_rows_loaded(&five, &cols(4)));
+    assert_eq!(s.focus(), Some(c(4, 3)));
+    assert_eq!(s.rects(), &[rect(4..5, 3..4)]);
+    assert_eq!(s.pending_focus(), None);
+    // Later appends change nothing.
+    assert!(!s.on_rows_loaded(&ViewMap::identity(500), &cols(4)));
+    assert_eq!(s.focus(), Some(c(4, 3)));
+}
+
+#[test]
+fn a_user_choice_replaces_a_pending_focus() {
+    let m = ident();
+    let empty = ViewMap::identity(0);
+    let mut s = Selection::default();
+    s.select_cell(c(5, 1), &m);
+    s.on_generation_changed(&empty, &cols(4));
+    s.select_cell(c(2, 2), &m);
+    assert_eq!(s.pending_focus(), None);
+    assert!(!s.on_rows_loaded(&m, &cols(4)));
+    assert_eq!(s.focus(), Some(c(2, 2)));
+
+    // Escape keeps a pending focus; select-all drops it.
+    s.on_generation_changed(&empty, &cols(4));
+    assert!(!s.collapse(&empty));
+    assert_eq!(s.pending_focus(), Some(c(2, 2)));
+    s.select_all();
+    assert_eq!(s.pending_focus(), None);
+}
+
+#[test]
+fn a_key_places_a_pending_focus_first() {
+    let mut s = Selection::default();
+    s.select_cell(c(900, 2), &ViewMap::identity(1_000));
+    s.on_generation_changed(&ViewMap::identity(0), &cols(4));
+    let order = cols(4);
+    // Rows arrived but the view has not told the selection yet: the key places the focus, then
+    // moves from it.
+    let m = ViewMap::identity(5);
+    assert_eq!(
+        apply_command(mv(Dir::Up, false), &mut s, &ctx(&m, &order)),
+        moved(3, 2)
+    );
+    // A key that changes nothing still reports the placed focus.
+    let mut t = Selection::default();
+    t.select_cell(c(900, 3), &ViewMap::identity(1_000));
+    t.on_generation_changed(&ViewMap::identity(0), &cols(4));
+    assert_eq!(
+        apply_command(mv(Dir::Down, false), &mut t, &ctx(&m, &order)),
+        moved(4, 3)
+    );
+    // While the grid is still empty a key changes nothing and keeps the focus pending.
+    let mut u = Selection::default();
+    u.select_cell(c(1, 1), &ident());
+    u.on_generation_changed(&ViewMap::identity(0), &cols(4));
+    let empty = ViewMap::identity(0);
+    assert_eq!(
+        apply_command(mv(Dir::Up, false), &mut u, &ctx(&empty, &order)),
+        KeyOutcome::Unchanged
+    );
+    assert_eq!(u.pending_focus(), Some(c(1, 1)));
 }
 
 #[test]

@@ -2,7 +2,7 @@
 //! row and column sets, select-all; cell counts in `u128` by inclusion–exclusion; copy
 //! normalisation (a union that is neither stacked nor concatenable is refused; more than
 //! [`MAX_COPY_CELLS`] is refused); a generation change clears the selection and clamps the
-//! focus, an append keeps it.
+//! focus (kept pending until the new generation has rows), an append keeps it.
 //!
 //! Coordinates (digest 04 ruling R15):
 //! - the focus, the anchor and the row set are **model rows**, so they follow the data through
@@ -10,7 +10,7 @@
 //! - rectangles are **view rows**;
 //! - a column is counted by its position in the full view order (`ColumnLayout::order`, hidden
 //!   columns included). M3a never reorders columns, so that position is the `ColId` ordinal. A
-//!   hidden column inside a rectangle stays in it; copy skips it.
+//!   hidden column inside a rectangle stays in it; copy and the count skip it.
 //!
 //! M3a has no local sort: [`ViewMap`] is the identity, so view rows equal model rows, and
 //! [`Selection::cell_count`] relies on that.
@@ -101,6 +101,9 @@ pub struct Selection {
     focus: Option<ModelCell>,
     parts: Vec<Part>,
     all: bool,
+    /// A focus carried over a re-run whose new generation had no rows yet: nothing is selected
+    /// or painted, and [`Selection::on_rows_loaded`] places it once rows arrive.
+    pending: Option<ModelCell>,
     /// The rectangles of `parts`, in order.
     rects: Vec<CellRect>,
     /// The row pieces, sorted and merged.
@@ -140,9 +143,14 @@ impl Selection {
         self.all
     }
 
-    /// Nothing is selected.
+    /// Nothing is selected (a pending focus selects nothing).
     pub fn is_empty(&self) -> bool {
         !self.all && self.parts.is_empty()
+    }
+
+    /// The focus a re-run carried over, waiting for the new generation's first rows.
+    pub fn pending_focus(&self) -> Option<ModelCell> {
+        self.pending
     }
 
     /// A click: only `cell` is selected, and it is the anchor and the focus.
@@ -156,6 +164,7 @@ impl Selection {
     pub fn add_cell(&mut self, cell: ModelCell, map: &ViewMap) {
         self.anchor = Some(cell);
         self.focus = Some(cell);
+        self.pending = None;
         let at = corner(cell, map);
         self.parts.push(Part::Rect(CellRect::spanning(at, at)));
         self.refresh();
@@ -191,6 +200,7 @@ impl Selection {
         let cell = ModelCell { row, col };
         self.anchor = Some(cell);
         self.focus = Some(cell);
+        self.pending = None;
         self.parts.push(Part::Rows(span_u64(row.0, row.0)));
         self.refresh();
     }
@@ -226,6 +236,7 @@ impl Selection {
         let cell = ModelCell { row, col };
         self.anchor = Some(cell);
         self.focus = Some(cell);
+        self.pending = None;
         self.parts.push(Part::Cols(span_u32(col.0, col.0)));
         self.refresh();
     }
@@ -248,33 +259,52 @@ impl Selection {
         self.refresh();
     }
 
-    /// Ctrl/Cmd+A and the corner: everything, in O(1); the focus stays.
+    /// Ctrl/Cmd+A and the corner: everything, in O(1); the focus stays (a pending focus is
+    /// dropped: the user chose).
     pub fn select_all(&mut self) {
         self.parts.clear();
         self.all = true;
+        self.pending = None;
         self.refresh();
     }
 
-    /// Escape: only the focused cell stays selected. Answers whether anything changed.
+    /// Escape: only the focused cell stays selected. Answers whether anything changed. A
+    /// pending focus stays pending.
     pub fn collapse(&mut self, map: &ViewMap) -> bool {
         let before = self.clone();
         match self.focus {
             Some(focus) => self.select_cell(focus, map),
-            None => *self = Selection::default(),
+            None => {
+                let pending = self.pending;
+                *self = Selection::default();
+                self.pending = pending;
+            }
         }
         *self != before
     }
 
-    /// A new generation (a re-run): the selection clears and the focus is clamped into the new
-    /// grid (`map`'s loaded rows, the visible columns `order`) and selected alone. With no rows
-    /// or no columns there is no cell to focus. An append is not a new generation and keeps
-    /// the selection.
+    /// A new generation (a re-run): the selection clears at once, so nothing old is painted on
+    /// the new data, and the focus is clamped into the new grid (`map`'s loaded rows, the
+    /// visible columns `order`) and selected alone. When the new generation has no rows (or no
+    /// columns) yet, the focus is kept pending and [`Selection::on_rows_loaded`] places it once
+    /// rows arrive; a further re-run before then keeps the same pending focus. An append is not
+    /// a new generation and keeps the selection.
     pub fn on_generation_changed(&mut self, map: &ViewMap, order: &[ColId]) {
-        let focus = self.focus.and_then(|f| clamp_cell(f, map, order));
+        let focus = self.focus.or(self.pending);
         *self = Selection::default();
-        if let Some(focus) = focus {
-            self.select_cell(focus, map);
-        }
+        self.pending = focus;
+        self.on_rows_loaded(map, order);
+    }
+
+    /// Rows arrived (an append, or a re-run's first rows): a pending focus is clamped into the
+    /// grid now and selected alone. Answers whether it was placed. Does nothing without a
+    /// pending focus, so the view may call it on every append; `apply_command` calls it too.
+    pub fn on_rows_loaded(&mut self, map: &ViewMap, order: &[ColId]) -> bool {
+        let Some(focus) = self.pending.and_then(|f| clamp_cell(f, map, order)) else {
+            return false;
+        };
+        self.select_cell(focus, map);
+        true
     }
 
     /// Whether `(row, col)` is selected: `all`, or the row set holds its model row, or the
@@ -303,32 +333,47 @@ impl Selection {
         self.all || in_ranges(&self.cols, col.0)
     }
 
-    /// The selected cells of a `rows` × `cols` grid, each counted once, in `u128`:
-    /// `|R|·C + |K|·R − |R|·|K|` for the row set R and the column set K, plus the cells of the
-    /// rectangles outside both, by a sweep over the rectangles' row bands. Pieces outside the
-    /// grid are clipped. (M3a: view rows equal model rows.)
-    pub fn cell_count(&self, rows: u64, cols: u32) -> u128 {
-        let (grid_rows, grid_cols) = (u128::from(rows), u128::from(cols));
+    /// The selected cells of a grid of `rows` loaded rows and the visible columns `order`, each
+    /// counted once, in `u128`, exactly as many as a copy of the same selection takes: hidden
+    /// columns inside a piece are skipped. `|R|·C + |K|·R − |R|·|K|` for the row set R and the
+    /// column set K, plus the cells of the rectangles outside both, by a sweep over the
+    /// rectangles' row bands. Pieces outside the grid are clipped. O(C) to rank the visible
+    /// columns, then O(k²) for k rectangles. (M3a: view rows equal model rows.)
+    pub fn cell_count(&self, rows: u64, order: &[ColId]) -> u128 {
+        // A column counts by its rank among the visible ordinals: a range of ordinals is a range
+        // of ranks, and a hidden column has no rank.
+        let mut visible: Vec<u32> = order.iter().map(|c| c.0).collect();
+        if !visible.is_sorted() {
+            visible.sort_unstable();
+        }
+        visible.dedup();
+        let rank = |span: &Range<u32>| -> Range<u64> {
+            visible.partition_point(|c| *c < span.start) as u64
+                ..visible.partition_point(|c| *c < span.end) as u64
+        };
+        let (grid_rows, grid_cols) = (u128::from(rows), visible.len() as u128);
         if self.all {
             return grid_rows * grid_cols;
         }
         let row_set = clip(&self.rows, rows);
-        let col_set = clip(&self.cols, cols);
+        let col_set = merge(self.cols.iter().map(rank).collect());
         let (r, k) = (len_sum(&row_set), len_sum(&col_set));
         let mut total = r * grid_cols + k * grid_rows - r * k;
 
-        let rects: Vec<CellRect> = self
+        let rects: Vec<(Range<u64>, Range<u64>)> = self
             .rects
             .iter()
-            .map(|rect| CellRect {
-                rows: rect.rows.start.min(rows)..rect.rows.end.min(rows),
-                cols: rect.cols.start.min(cols)..rect.cols.end.min(cols),
+            .map(|rect| {
+                (
+                    rect.rows.start.min(rows)..rect.rows.end.min(rows),
+                    rank(&rect.cols),
+                )
             })
-            .filter(|rect| !rect.rows.is_empty() && !rect.cols.is_empty())
+            .filter(|(rows, cols)| !rows.is_empty() && !cols.is_empty())
             .collect();
         let mut bands: Vec<u64> = rects
             .iter()
-            .flat_map(|rect| [rect.rows.start, rect.rows.end])
+            .flat_map(|(rows, _)| [rows.start, rows.end])
             .collect();
         bands.sort_unstable();
         bands.dedup();
@@ -337,8 +382,8 @@ impl Selection {
             let spans = merge(
                 rects
                     .iter()
-                    .filter(|rect| rect.rows.start <= y0 && rect.rows.end >= y1)
-                    .map(|rect| rect.cols.clone())
+                    .filter(|(rows, _)| rows.start <= y0 && rows.end >= y1)
+                    .map(|(_, cols)| cols.clone())
                     .collect(),
             );
             if spans.is_empty() {

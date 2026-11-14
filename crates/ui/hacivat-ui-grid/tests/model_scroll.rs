@@ -239,6 +239,119 @@ fn follow_tail_sticks_only_when_at_the_bottom() {
 }
 
 #[test]
+fn follow_tail_resets_when_a_run_starts_over() {
+    // A result scrolled to the bottom shrinks to nothing (a re-run) and grows again: the new
+    // rows are shown from the top.
+    let mut s = view(100, 600.0, 24.0);
+    s.scroll_to_end();
+    assert!(s.follow_tail);
+    s.on_row_count(0);
+    assert!(!s.follow_tail);
+    s.on_row_count(50);
+    assert_eq!(pos(&s), (0, 0.0));
+
+    // The explicit reset: top, no tail, queued deltas dropped, left_x kept.
+    let mut s = view(1_000, 600.0, 24.0);
+    s.set_content_width(2_000.0);
+    s.set_left_x(500.0);
+    s.scroll_to_end();
+    s.queue(240.0, 0.0);
+    s.on_generation_changed();
+    assert_eq!(pos(&s), (0, 0.0));
+    assert!(!s.follow_tail);
+    s.apply_pending();
+    assert_eq!(pos(&s), (0, 0.0));
+    assert_eq!(s.left_x, 500.0);
+    s.on_row_count(0);
+    s.on_row_count(5_000);
+    assert_eq!(pos(&s), (0, 0.0));
+
+    // A shrink that leaves the view at the bottom of a grid that still scrolls keeps following.
+    let mut s = view(1_000, 600.0, 24.0);
+    s.scroll_to_end();
+    s.on_row_count(500);
+    assert!(s.follow_tail);
+    assert_eq!(s.top_row, 475);
+    s.on_row_count(600);
+    assert_eq!(s.top_row, 575);
+}
+
+#[test]
+fn a_resize_that_leaves_the_bottom_stops_following() {
+    let mut s = view(100, 600.0, 24.0);
+    s.scroll_to_end();
+    assert_eq!(s.top_row, 75);
+    // A shorter body: the last page starts later, the view is no longer at the bottom.
+    s.set_viewport(800.0, 300.0);
+    assert_eq!(s.max_top_row(), 88);
+    assert!(!s.follow_tail);
+    s.on_row_count(200);
+    assert_eq!(s.top_row, 75);
+
+    // A taller body clamps the view to the new last page: still the bottom, still following.
+    let mut s = view(100, 600.0, 24.0);
+    s.scroll_to_end();
+    s.set_viewport(800.0, 1_200.0);
+    assert_eq!(s.top_row, 50);
+    assert!(s.follow_tail);
+    s.on_row_count(200);
+    assert_eq!(s.top_row, 150);
+}
+
+#[test]
+fn the_f32_rounding_guard_moves_to_the_next_row() {
+    // 21 − 1e-7 px fits in row 0 in f64, but its f32 offset rounds up to exactly 21.0: the
+    // spike's guard moves to row 1 with offset 0 instead of storing an offset outside the row.
+    let mut s = view(100, 600.0, 21.0);
+    s.scroll_by(21.0 - 1e-7);
+    assert_eq!(pos(&s), (1, 0.0));
+    // From inside a row too.
+    let mut s = view(100, 600.0, 21.0);
+    s.scroll_by(20.0);
+    s.scroll_by(1.0 - 1e-7);
+    assert_eq!(pos(&s), (1, 0.0));
+    // A gap the f32 offset can still hold stays in row 0.
+    let mut s = view(100, 600.0, 21.0);
+    s.scroll_by(21.0 - 1e-5);
+    assert_eq!(s.top_row, 0);
+    assert!(s.top_row_offset > 20.9 && s.top_row_offset < 21.0, "{s:?}");
+}
+
+#[test]
+fn moves_the_user_did_not_make_are_not_velocity() {
+    let mut s = view(100, 600.0, 24.0);
+    s.scroll_to_end();
+    s.apply_pending();
+    assert_eq!(s.velocity_rows_per_frame(), 75.0, "End is the user's move");
+    s.apply_pending();
+
+    // Rows stream in while following: the view snaps 9,900 rows and stands still on screen.
+    s.on_row_count(10_000);
+    assert_eq!(s.top_row, 9_975);
+    s.apply_pending();
+    assert_eq!(s.velocity_rows_per_frame(), 0.0);
+
+    // A snap and a user scroll in one frame: only the user's 2 rows count.
+    s.on_row_count(20_000);
+    s.scroll_by(-48.0);
+    s.apply_pending();
+    assert_eq!(s.velocity_rows_per_frame(), 2.0);
+
+    // A shrink clamp, a resize and a re-run are not scrolls either.
+    s.on_row_count(1_000);
+    s.apply_pending();
+    assert_eq!(s.velocity_rows_per_frame(), 0.0);
+    s.scroll_to_end();
+    s.apply_pending();
+    s.set_viewport(800.0, 1_200.0);
+    s.apply_pending();
+    assert_eq!(s.velocity_rows_per_frame(), 0.0);
+    s.on_generation_changed();
+    s.apply_pending();
+    assert_eq!(s.velocity_rows_per_frame(), 0.0);
+}
+
+#[test]
 fn scroll_into_view_reveals_rows_above_and_below() {
     let mut s = view(1_000, 600.0, 24.0);
     s.scroll_by(100.0 * 24.0 + 5.0);
