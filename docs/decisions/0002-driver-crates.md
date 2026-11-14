@@ -847,3 +847,139 @@ answers `1227`.
   `mysql_client_certificate_sign_in` (`docker_m2b_tls_ssh.rs`) signs in with the client
   certificate and its PKCS #8 key, and with the encrypted key and its passphrase, under
   `VerifyCa` with the test CA (`CaOnly`); without a certificate the server answers `1045`.
+
+## m3a-t12 — PostgreSQL typed
+
+Typed streaming on `hacivat-driver-pg` (HV-RES-04 PG, HV-RES-01 PG mapping; R-M3-18, R-M3-31,
+P5): the `RawConn` methods `typed_caps`, `query`, `next_event`, `fetch_more` and `close_query`
+(`src/typed.rs`, `src/probe.rs`), the decoders (`src/decode/`), and the vendored
+`tokio-postgres` patch §1 (`third_party/tokio-postgres/PATCHES.md`).
+
+- **Library.** `tokio-postgres` 0.7.18, vendored (Task 1b), with patch §1: three new `Client`
+  entry points, `bind_with_formats` (a named portal outside `Transaction`, with result-format
+  codes per column), `query_portal_raw` and `query_with_formats` (the unnamed portal: Bind,
+  `Flush`, `Execute(0)`, `Sync` in one batch). Existing calls are byte-identical
+  (`existing_query_path_is_byte_identical`). Rejected: SQL `DECLARE`/`FETCH` (R-M3-18's fallback:
+  text-only results, and a cursor name in the user's namespace) and `Transaction` (it owns the
+  `BEGIN` and borrows the client mutably for the cursor's whole life).
+- **Caps.** `{ suspend: true, binds: false, close_needs_kill: false, idle_bound: None }`.
+- **Which unit takes which path.** Not suspendable: `query_with_formats`. Suspendable: only
+  inside a transaction block, else `Unsupported` before anything is sent (P5; the session or the
+  guard opens it). A suspendable statement without columns runs as a non-suspendable one. The
+  named portal: `Execute(first_rows)`, then `Execute(n)` per `fetch_more(n)`; every Bind, Execute
+  and Close carries its own `Sync`, which does not end the block, so a statement may run between
+  two Executes (the read-only guard's canary) and the portal survives
+  (`statement_between_portal_executes_keeps_the_portal`, Docker pg14–18). An Execute that
+  returned exactly its limit without `CommandComplete` is `Suspended` (`PortalSuspended` leaves
+  `rows_affected()` `None`).
+- **The `Flush` (found by the Docker cancel test).** PostgreSQL keeps `BindComplete` in its
+  output buffer until a `Flush` or `Sync`, so without one `query` would return only after the
+  statement's first buffer of rows or its end (`pg_sleep(60)` held it 60 s, and its cancel found
+  nothing running). With it, `query` returns once the statement is bound. `Flush` draws no
+  `ReadyForQuery`, so the wire observer's count is unchanged.
+- **Formats and decoders (R-M3-31).** Binary for `bool`, `int2/4/8`, `oid`/`xid`/`cid`,
+  `float4/8`, `numeric`, `text`/`varchar`/`bpchar`/`name`/`"char"`, `bytea`, `uuid`, `json`,
+  `jsonb`, `date`, `time`, `timetz`, `timestamp`, `timestamptz`, `interval` and every enum (by
+  `Kind::Enum`; the type info comes from `tokio-postgres`'s cached typeinfo statements, and
+  nothing runs `DEALLOCATE ALL`). Text for everything else, including `xml` and extension types
+  such as `citext` (unknown OIDs; R-M3-31 lists neither), stored as `Value::Opaque`. Buffers:
+  integers `I64`; `float4` `F64 { f32 }` (the shortest form is the server's); `numeric(p ≤ 18, s)`
+  `Dec64 { scale: max(s, 0) }`, other numerics `Dec128` (more than 38 digits are exact `Big`
+  exceptions); text, enums `Var(Text)`; `json`/`jsonb` `Var(Json)`; `bytea` `Var(Bytes)`; `uuid`
+  `Fixed16`; `date` `Temporal { Days }`; `time`, `timestamp`, `timestamptz` `Temporal { Micros }`;
+  `timetz` `Temporal2` (offset east-positive); `interval` and opaque columns `Values`. Chunks are
+  built with `ChunkBuilder::with_schema`.
+- **Opaque storage (the Task 6 choice left to this task).** A `Values` buffer of
+  `Value::Opaque(Arc<OpaqueVal>)`: one `OpaqueVal` per cell, the type name one `Arc<str>` shared
+  by the column, so `ValueRef::Opaque` reaches the grid as R-M3-31 says. Cost: 32 bytes of
+  `Value`, a 32-byte body and the text per cell (the budget counts the type name's bytes per cell
+  too). Text that is not UTF-8 stays `Lossy`; text past the cell cap is `Truncated` with a `Text`
+  prefix, exactly as a `Var(Text)` column. Rejected: a `Var(Text)` buffer under
+  `LogicalType::Opaque` (4 bytes a cell, but the cell would read back as `Text`, and consumers
+  would have to consult the column to tell).
+- **Hostile bytes (Review Focus 1).** A cell never panics and is never altered: a wrong length, a
+  bool other than 0/1, a numeric with more than 1,000 base-10,000 digits, a length that disagrees
+  with `ndigits`, a digit of 10,000 or more, an unknown sign word, a display scale above 16,383, a
+  nonzero digit beyond it, a special with digits, a `jsonb` version other than 1, a time of day
+  outside `0 ..= 24:00:00` or a zone of `i32::MIN` is a `Value::Error` cell with a `pg-*` code, and
+  the row is kept; `±infinity` and `NaN` are `Special`; a timestamp past `i64` microseconds since
+  1970 is an exact exception; PostgreSQL 17's `±infinity` intervals (every field at its maximum,
+  or at its minimum) are `Special` (fix round 1). The connection is broken (status `Failed`, never
+  used again) by anything that is not the server's own error. A `DataRow` whose field count is
+  not the statement's, a field longer than its message, an unknown message in the stream:
+  `RawErrorKind::Protocol` (mapped from `tokio-postgres`'s fixed `Display` strings of
+  `Kind::Parse`/`Kind::UnexpectedMessage`, a dependency named at the mapping). **Corrected in fix
+  round 1:** corruption below the stream (a frame the wire observer refuses, a notice the
+  connection task cannot parse) ends the connection before the stream sees a message, so it
+  answers `Io(ConnectionReset)`, not `Protocol`; fail-closed either way
+  (`corruption_below_the_stream_ends_the_connection`).
+- **Statements while a query is open.** Only while it is `Suspended` (PostgreSQL's exception to
+  one open query per connection, P5). While it streams, `execute`, `batch`, `ping`,
+  `server_info`, `current_user` and `list_databases` answer `Unsupported`: their answer would
+  queue behind rows nobody reads, a deadlock. `reset` needs no open query (its `CLOSE ALL` would
+  end the portal). `tls_summary` and `probe` have no error to return: while a query streams they
+  send nothing and answer from the handshake (TLS facts) and with no warnings (fix round 1).
+- **Counts and tags.** `rows_affected` is the command tag's count (`INSERT 0 3` → 3; `CREATE
+  TABLE` → `None`; `tokio-postgres` would say `Some(0)`), except for a read (fix round 1): a
+  result with columns under a `SELECT n`/`FETCH n` tag affected nothing, so `None` (its count is
+  `ResultEnd.rows`), which is what `FakeDriver` reports by default and what Task 18's
+  `UpdateCount` rule needs. DML with `RETURNING` and a column-less `SELECT n` (`CREATE TABLE AS`,
+  `SELECT INTO`) keep the count. A resumed portal's tag counts only its last Execute
+  (PostgreSQL's rule), so the driver rewrites the tag with the result's own count (`SELECT
+  1200`). `QueryDone.warnings` counts the notices of SQLSTATE class 01 the query raised (a
+  statement run between two Executes drains its own; known gap).
+- **Closing early.** A named portal: `Now` closes it (`Close` + `Sync`, then the statement's)
+  after reading the rest of an Execute in flight; `Drain(d)` also runs one `Execute(4096)` within
+  `d` (`Completed { rows: total }` when the result ends meanwhile, `Closed` when the deadline
+  passes: the rest is left to the connection task and the Close queues behind it); a server error
+  while closing (a cancel; a portal its transaction already destroyed) still closes, the status
+  says so, and Hacivat's own `BEGIN` or savepoint is rolled back anyway (R-M3-23). The unnamed
+  portal's `Execute(0)` cannot be closed on the wire: its rest is read to the end, undecoded,
+  whatever `how` says, and **since fix round 1** the answer is the server's outcome:
+  `Completed { rows: total }` (in autocommit its `Sync` committed it), or the server's error as
+  `Err(Db)` (a cancel's 57014, a runtime error: it did not apply), with the connection usable and
+  the status exact. Rejected: `Closed` for both (round 0), which let a session report a committed
+  `UPDATE … RETURNING` as stopped. The session's protocol cancel, run alongside the close, ends a
+  slow one sooner (`closing_a_non_suspendable_query_reports_the_servers_outcome`, Docker).
+- **A portal its transaction ended** (`COMMIT`, `ROLLBACK`, `ROLLBACK TO` its own or an older
+  savepoint) is still the open, suspended query: `next_event` answers `Unsupported` without I/O;
+  `fetch_more` meets the server's 34000 (inside a transaction block that error fails it: `Failed`,
+  recovered by a `ROLLBACK TO`) and the query is gone; `close_query` closes it without an error
+  (`Closed { rows: delivered }`). Pinned on pg17 (`a_portal_its_transaction_ended_is_gone_as_the_fake_says`);
+  `FakeDriver` follows it since this round.
+- **`"char"` `''`** is the byte 0 in binary (`charsend`) and is kept as a U+0000 character (the
+  grid shows controls; copy keeps them); `pg_attribute.attidentity` and `attgenerated` read so.
+  Controller's ruling on review M1: kept, asserted in the golden table.
+- **`COPY`** is refused before sending when the first keyword (after whitespace and comments,
+  block comments nested) is `COPY`. One that slips past (an obfuscation the check misses) is
+  answered by the wire observer's `CopyFail` for `FROM STDIN` (`Unsupported`, the connection in
+  step) and breaks the connection for `TO STDOUT` (an unexpected message): fail closed.
+- **Known limits.**
+  - `postgres-protocol` 0.6.12 reads every negative field length as NULL, not only -1; the length
+    is consumed and framing stays aligned
+    (`a_negative_field_length_reads_as_null_and_framing_stays_aligned`). Not patched: that crate
+    is not vendored.
+  - A `SQL_ASCII` database refuses to send bytes that are not UTF-8 to the driver's
+    `client_encoding = UTF8` session (22021, the statement fails); only after `SET
+    client_encoding = 'SQL_ASCII'` do they arrive, as `Lossy` cells
+    (`sql_ascii_text_that_is_not_utf8_is_lossy`).
+  - A statement with a parameter placeholder is prepared, then refused (`Unsupported`; binds are
+    M3b).
+- **Tests.** `tests/decode.rs` (byte fixtures for every decoder, hostile lengths, the 1 MiB cap at
+  a character boundary, invalid UTF-8, `ndigits` 1,001), `tests/tp_patches.rs` (patch §1 and the
+  typed path against a scripted server: message sequences, P5 refusals, suspension and resume,
+  `Close`/`Drain`, the canary, hostile `DataRow`s), `tests/docker_typed.rs` (the type golden
+  table and the canary on pg14–18; on pg17 a million-row portal suspended, resumed and closed
+  with `pg_cursors` checked, a portal inside a user transaction, drain, `COPY` refused with no
+  message sent, a protocol cancel during `Execute`, DML/DDL counts, 5 MiB values truncated, a
+  `SQL_ASCII` database). `synced()` is checked after a round trip on every path.
+- **Fix round 1 (the Task 12 review: 4 Important, 5 Minor folded in).** The unnamed portal's close
+  outcome; `±infinity` intervals; `rows_affected: None` for reads; `FakeDriver` fidelity (a named
+  exception for `hacivat-driver/src/fake.rs` and the suspension sentence of `typed.rs`: a PostgreSQL
+  batch that hits its limit exactly suspends even with no row left; a portal its transaction ended
+  stays the open query as above; closing an `Execute(0)` reads it to the end, `Completed` or the
+  error its rest meets; `fetch_more(0)` is a chunk's worth), and one Task 1b session test's
+  `InTx`-after-34000 assertion corrected to `Failed` (the server's answer); `tls_summary`/`probe`
+  while streaming; the `Drain` deadline path tested; the byte-identity golden extended to
+  `bind::bind` (`Transaction::bind_raw`) and `execute_typed`; this section's `Protocol` claim
+  corrected.

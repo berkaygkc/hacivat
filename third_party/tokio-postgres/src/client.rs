@@ -16,6 +16,8 @@ use crate::{
     CancelToken, CopyInSink, Error, Row, SimpleQueryMessage, Statement, ToStatement, Transaction,
     TransactionBuilder, copy_in, copy_out, prepare, query, simple_query, slice_iter,
 };
+// HACIVAT PATCH §1
+use crate::{Portal, bind};
 use bytes::{Buf, BytesMut};
 use fallible_iterator::FallibleIterator;
 use futures_channel::mpsc;
@@ -557,6 +559,72 @@ impl Client {
     {
         query::query_typed(&self.inner, query, params).await
     }
+
+    // HACIVAT PATCH §1 begin
+    /// Binds `statement` into a new named portal, asking for each result column in the format
+    /// `result_formats` gives (0 text, 1 binary: one code per column, one for every column, or
+    /// none for text everywhere), with one `Sync`.
+    ///
+    /// Unlike [`Transaction::bind_raw`], this does not need a `Transaction`: the caller makes sure
+    /// the connection is inside a transaction block (`BEGIN`, or a savepoint inside one), or the
+    /// `Sync` ends the implicit transaction and the portal with it. The portal is closed (with
+    /// its own `Sync`) when the last [`Portal`] clone is dropped.
+    pub async fn bind_with_formats<P, I>(
+        &self,
+        statement: &Statement,
+        params: I,
+        result_formats: &[i16],
+    ) -> Result<Portal, Error>
+    where
+        P: BorrowToSql,
+        I: IntoIterator<Item = P>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        bind::bind_with_formats(
+            &self.inner,
+            statement.clone(),
+            params,
+            result_formats.iter().copied(),
+        )
+        .await
+    }
+
+    /// Continues execution of a portal for at most `max_rows` rows (all of them when 0 or
+    /// negative), with one `Sync`: [`Transaction::query_portal_raw`] without a `Transaction`. The
+    /// stream ends after `PortalSuspended` with [`RowStream::rows_affected`] still `None`, after
+    /// `CommandComplete` with it set.
+    pub async fn query_portal_raw(
+        &self,
+        portal: &Portal,
+        max_rows: i32,
+    ) -> Result<RowStream, Error> {
+        query::query_portal(&self.inner, portal, max_rows).await
+    }
+
+    /// [`Client::query_raw`] of a prepared statement with the caller's result-column formats
+    /// (see [`Client::bind_with_formats`]): Bind into the unnamed portal, `Flush`, `Execute(0)`
+    /// and `Sync` in one batch. The `Flush` has the server send `BindComplete` at once, so this
+    /// returns when the statement is bound, not when its first rows (or its end) arrive.
+    pub async fn query_with_formats<P, I>(
+        &self,
+        statement: &Statement,
+        params: I,
+        result_formats: &[i16],
+    ) -> Result<RowStream, Error>
+    where
+        P: BorrowToSql,
+        I: IntoIterator<Item = P>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        query::query_with_formats(
+            &self.inner,
+            statement.clone(),
+            params,
+            result_formats.iter().copied(),
+        )
+        .await
+    }
+    // HACIVAT PATCH §1 end
 
     /// Executes a statement, returning the number of rows modified.
     ///

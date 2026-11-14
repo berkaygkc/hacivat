@@ -11,6 +11,8 @@ use hacivat_driver::{
     CancelHandle, ExecOpts, ExecSummary, ProbeWarning, RawConn, RawError, SemVerLoose, ServerInfo,
     TxStatus,
 };
+// ## m3a-t12-pg-typed
+use hacivat_driver::{CloseHow, Closed, QueryEvent, QuerySpec, RawErrorKind, TypedCaps};
 use hacivat_net::{TlsMode, TlsSummary, TlsVerified};
 use hacivat_proto::DbmsKind;
 use tokio::task::JoinHandle;
@@ -20,6 +22,7 @@ use crate::cancel::PgCancel;
 use crate::connect::pg_error;
 use crate::exec::{Exec, Notices};
 use crate::tls::LocalTls;
+use crate::typed;
 use crate::wire::WireState;
 
 /// How long `close` waits for the server to see the `Terminate` before dropping the socket.
@@ -103,6 +106,9 @@ pub struct PgConn {
     /// Notice codes collected by the connection task (Q12).
     notices: Notices,
     cancel: Arc<PgCancel>,
+    // ## m3a-t12-pg-typed
+    /// The open typed query (Task 12).
+    typed: Option<typed::Open>,
 }
 
 impl PgConn {
@@ -123,7 +129,47 @@ impl PgConn {
             wire,
             notices,
             cancel: Arc::new(cancel),
+            typed: None,
         }
+    }
+
+    // ## m3a-t12-pg-typed
+    /// The typed path's view of the connection, and its open query.
+    fn typed_parts(&mut self) -> (typed::Ctx<'_>, &mut Option<typed::Open>) {
+        let PgConn {
+            client,
+            wire,
+            notices,
+            typed,
+            ..
+        } = self;
+        (
+            typed::Ctx {
+                client,
+                wire,
+                notices,
+            },
+            typed,
+        )
+    }
+
+    /// `Unsupported` while a typed query streams: a statement's answer would wait behind rows
+    /// nobody reads (a suspended portal lets statements through, P5).
+    fn statements_allowed(&self) -> Result<(), RawError> {
+        if typed::allows_statements(&self.typed) {
+            Ok(())
+        } else {
+            Err(RawError {
+                kind: RawErrorKind::Unsupported,
+                server: None,
+            })
+        }
+    }
+
+    /// What the wire observer records, for the driver's own tests (`synced()`, the status).
+    #[doc(hidden)]
+    pub fn wire_state(&self) -> &WireState {
+        &self.wire
     }
 
     /// A connection whose status could not be resynchronized is cut at once (fix round 1,
@@ -170,6 +216,11 @@ impl PgConn {
     }
 
     async fn tls_summary_inner(&self) -> TlsSummary {
+        // ## m3a-t12-pg-typed (fix round 1): while a typed query streams the server's answer
+        // would wait behind rows nobody reads; the handshake's own facts answer instead.
+        if !typed::allows_statements(&self.typed) {
+            return self.tls_summary_from(Vec::new());
+        }
         let row = first_row(
             &self.client,
             "SELECT ssl, version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
@@ -178,6 +229,11 @@ impl PgConn {
         .ok()
         .flatten()
         .unwrap_or_default();
+        self.tls_summary_from(row)
+    }
+
+    /// The TLS summary from `pg_stat_ssl`'s row (empty: this connection's handshake only).
+    fn tls_summary_from(&self, row: Vec<Option<String>>) -> TlsSummary {
         let cell = |i: usize| row.get(i).cloned().flatten();
         let server_ssl = cell(0).is_some_and(|v| v == "t");
         let local = self.local_tls.as_ref();
@@ -216,11 +272,17 @@ impl RawConn for PgConn {
     }
 
     fn server_info(&mut self) -> BoxFuture<'_, Result<ServerInfo, RawError>> {
-        Box::pin(self.server_info_inner())
+        Box::pin(async move {
+            // ## m3a-t12-pg-typed
+            self.statements_allowed()?;
+            self.server_info_inner().await
+        })
     }
 
     fn ping(&mut self) -> BoxFuture<'_, Result<Duration, RawError>> {
         Box::pin(async move {
+            // ## m3a-t12-pg-typed
+            self.statements_allowed()?;
             let start = Instant::now();
             // The empty simple query: one round trip, no parse, no plan.
             self.client
@@ -237,6 +299,10 @@ impl RawConn for PgConn {
 
     fn probe(&mut self) -> BoxFuture<'_, Vec<ProbeWarning>> {
         Box::pin(async move {
+            // ## m3a-t12-pg-typed (fix round 1): no server query while a typed query streams.
+            if !typed::allows_statements(&self.typed) {
+                return vec![];
+            }
             match in_recovery(&self.client).await {
                 Ok(Some(true)) => vec![ProbeWarning::Replica],
                 _ => vec![],
@@ -245,11 +311,17 @@ impl RawConn for PgConn {
     }
 
     fn current_user(&mut self) -> BoxFuture<'_, Result<Option<String>, RawError>> {
-        Box::pin(scalar(&self.client, "SELECT current_user"))
+        Box::pin(async move {
+            // ## m3a-t12-pg-typed
+            self.statements_allowed()?;
+            scalar(&self.client, "SELECT current_user").await
+        })
     }
 
     fn list_databases(&mut self, limit: usize) -> BoxFuture<'_, Result<Vec<String>, RawError>> {
         Box::pin(async move {
+            // ## m3a-t12-pg-typed
+            self.statements_allowed()?;
             let limit = i64::try_from(limit).unwrap_or(i64::MAX);
             let rows = self
                 .client
@@ -294,6 +366,8 @@ impl RawConn for PgConn {
         opts: ExecOpts,
     ) -> BoxFuture<'a, Result<ExecSummary, RawError>> {
         Box::pin(async move {
+            // ## m3a-t12-pg-typed
+            self.statements_allowed()?;
             let r = self.exec().execute(sql, opts).await;
             self.drop_if_broken();
             r
@@ -302,6 +376,8 @@ impl RawConn for PgConn {
 
     fn batch<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<(), RawError>> {
         Box::pin(async move {
+            // ## m3a-t12-pg-typed
+            self.statements_allowed()?;
             let r = self.exec().batch(sql).await;
             self.drop_if_broken();
             r
@@ -314,6 +390,14 @@ impl RawConn for PgConn {
 
     fn reset(&mut self) -> BoxFuture<'_, Result<(), RawError>> {
         Box::pin(async move {
+            // ## m3a-t12-pg-typed: the reset's `CLOSE ALL` would end an open portal; the
+            // session releases a cursor first.
+            if self.typed.is_some() {
+                return Err(RawError {
+                    kind: RawErrorKind::Unsupported,
+                    server: None,
+                });
+            }
             let r = self.exec().reset().await;
             self.drop_if_broken();
             r
@@ -324,6 +408,48 @@ impl RawConn for PgConn {
         self.wire
             .backend_pid()
             .and_then(|pid| u64::try_from(pid).ok())
+    }
+
+    // ## m3a-t12-pg-typed (the typed path: `crate::typed`)
+
+    fn typed_caps(&self) -> TypedCaps {
+        typed::CAPS
+    }
+
+    fn query<'a>(&'a mut self, spec: QuerySpec<'a>) -> BoxFuture<'a, Result<(), RawError>> {
+        Box::pin(async move {
+            let (cx, open) = self.typed_parts();
+            let r = typed::query(cx, open, spec).await;
+            self.drop_if_broken();
+            r
+        })
+    }
+
+    fn next_event(&mut self) -> BoxFuture<'_, Result<QueryEvent, RawError>> {
+        Box::pin(async move {
+            let (cx, open) = self.typed_parts();
+            let r = typed::next_event(cx, open).await;
+            self.drop_if_broken();
+            r
+        })
+    }
+
+    fn fetch_more(&mut self, rows: u32) -> BoxFuture<'_, Result<(), RawError>> {
+        Box::pin(async move {
+            let (cx, open) = self.typed_parts();
+            let r = typed::fetch_more(cx, open, rows).await;
+            self.drop_if_broken();
+            r
+        })
+    }
+
+    fn close_query(&mut self, how: CloseHow) -> BoxFuture<'_, Result<Closed, RawError>> {
+        Box::pin(async move {
+            let (cx, open) = self.typed_parts();
+            let r = typed::close_query(cx, open, how).await;
+            self.drop_if_broken();
+            r
+        })
     }
 }
 

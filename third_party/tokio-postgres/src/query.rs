@@ -74,7 +74,8 @@ where
 
         client.with_buf(|buf| {
             frontend::parse("", query, param_oids, buf).map_err(Error::parse)?;
-            encode_bind_raw("", params, "", buf)?;
+            // HACIVAT PATCH §1: every result column binary, as before.
+            encode_bind_raw("", params, "", Some(1), buf)?;
             frontend::describe(b'S', "", buf).map_err(Error::encode)?;
             frontend::execute("", 0, buf).map_err(Error::encode)?;
             frontend::sync(buf);
@@ -135,7 +136,8 @@ where
 
         client.with_buf(|buf| {
             frontend::parse("", query, param_oids, buf).map_err(Error::parse)?;
-            encode_bind_raw("", params, "", buf)?;
+            // HACIVAT PATCH §1: every result column binary, as before.
+            encode_bind_raw("", params, "", Some(1), buf)?;
             frontend::describe(b'S', "", buf).map_err(Error::encode)?;
             frontend::execute("", 0, buf).map_err(Error::encode)?;
             frontend::sync(buf);
@@ -191,6 +193,39 @@ pub async fn query_portal(
         rows_affected: None,
     })
 }
+
+// HACIVAT PATCH §1 begin
+/// `query` with the caller's result-column format codes: Bind into the unnamed portal, `Flush`,
+/// `Execute(0)` and `Sync` in one batch. The server holds `BindComplete` in its output buffer
+/// until a `Flush` or `Sync`, so without the `Flush` this would wait for the statement's first
+/// buffer of rows (or its end); with it, it returns once the statement is bound.
+pub async fn query_with_formats<P, I, K>(
+    client: &InnerClient,
+    statement: Statement,
+    params: I,
+    result_formats: K,
+) -> Result<RowStream, Error>
+where
+    P: BorrowToSql,
+    I: IntoIterator<Item = P>,
+    I::IntoIter: ExactSizeIterator,
+    K: IntoIterator<Item = i16>,
+{
+    let buf = client.with_buf(|buf| {
+        encode_bind(&statement, params, "", result_formats, buf)?;
+        frontend::flush(buf);
+        frontend::execute("", 0, buf).map_err(Error::encode)?;
+        frontend::sync(buf);
+        Ok(buf.split().freeze())
+    })?;
+    let responses = start(client, buf).await?;
+    Ok(RowStream {
+        statement,
+        responses,
+        rows_affected: None,
+    })
+}
+// HACIVAT PATCH §1 end
 
 /// Extract the number of rows affected from [`CommandCompleteBody`].
 pub fn extract_row_affected(body: &CommandCompleteBody) -> Result<u64, Error> {
@@ -260,23 +295,30 @@ where
     I::IntoIter: ExactSizeIterator,
 {
     client.with_buf(|buf| {
-        encode_bind(statement, params, "", buf)?;
+        // HACIVAT PATCH §1: every result column binary, as before.
+        encode_bind(statement, params, "", Some(1), buf)?;
         frontend::execute("", 0, buf).map_err(Error::encode)?;
         frontend::sync(buf);
         Ok(buf.split().freeze())
     })
 }
 
-pub fn encode_bind<P, I>(
+// HACIVAT PATCH §1 begin: `result_formats` is a parameter of `encode_bind` and
+// `encode_bind_raw` (the Bind message's result-column format codes: none for all text, one for
+// all columns, or one per column; 0 text, 1 binary). Every existing caller passes `Some(1)`, the
+// value both functions hard-coded, so their bytes are unchanged.
+pub fn encode_bind<P, I, K>(
     statement: &Statement,
     params: I,
     portal: &str,
+    result_formats: K,
     buf: &mut BytesMut,
 ) -> Result<(), Error>
 where
     P: BorrowToSql,
     I: IntoIterator<Item = P>,
     I::IntoIter: ExactSizeIterator,
+    K: IntoIterator<Item = i16>,
 {
     let params = params.into_iter();
     if params.len() != statement.params().len() {
@@ -287,21 +329,25 @@ where
         statement.name(),
         params.zip(statement.params().iter().cloned()),
         portal,
+        result_formats,
         buf,
     )
 }
 
-fn encode_bind_raw<P, I>(
+fn encode_bind_raw<P, I, K>(
     statement_name: &str,
     params: I,
     portal: &str,
+    result_formats: K,
     buf: &mut BytesMut,
 ) -> Result<(), Error>
 where
     P: BorrowToSql,
     I: IntoIterator<Item = (P, Type)>,
     I::IntoIter: ExactSizeIterator,
+    K: IntoIterator<Item = i16>,
 {
+    // HACIVAT PATCH §1 end
     let (param_formats, params): (Vec<_>, Vec<_>) = params
         .into_iter()
         .map(|(p, ty)| (p.borrow_to_sql().encode_format(&ty) as i16, (p, ty)))
@@ -321,7 +367,8 @@ where
                 Err(e)
             }
         },
-        Some(1),
+        // HACIVAT PATCH §1: the caller's codes (was `Some(1)`).
+        result_formats,
         buf,
     );
     match r {

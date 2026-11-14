@@ -836,8 +836,13 @@ async fn a_portal_opened_inside_a_savepoint_does_not_survive_rollback_to_it() {
         "fetch_more after ROLLBACK TO the portal's own savepoint: {resumed:?} then {next:?}"
     );
     assert_eq!(resumed.as_ref().err().and_then(sqlstate), Some("34000"));
+    // m3a-t12 fix round 1 (review I4b, named exception): the Execute's 34000 inside the block
+    // fails the transaction, as on PostgreSQL (pinned by hacivat-driver-pg's Docker test
+    // `a_portal_its_transaction_ended_is_gone_as_the_fake_says`); a ROLLBACK TO recovers it.
     // The transaction goes on, and so does the savepoint: a portal opened inside a later
     // savepoint that is released (not rolled back) survives.
+    assert_eq!(c.tx_status(), TxStatus::Failed);
+    c.batch("ROLLBACK TO SAVEPOINT hv_cursor").await.unwrap();
     assert_eq!(c.tx_status(), TxStatus::InTx);
     assert_eq!(
         c.close_query(CloseHow::Now).await.unwrap(),

@@ -15,9 +15,15 @@
 //! (`QueryDone::skipped_result_sets`, R-M3-25); a query with more than one result set never
 //! suspends.
 //!
-//! **Suspension.** Only a query sent with `suspendable: true` suspends: after its first chunk,
-//! and after each `fetch_more(n)` batch of `n` rows while rows remain. `next_event` on a
-//! suspended query answers `Unsupported` (call `fetch_more` or `close_query`).
+//! **Suspension.** Only a query sent with `suspendable: true` suspends: after its first batch
+//! (`first_rows` rows), and after each `fetch_more(n)` batch of `n` rows (`fetch_more(0)`: a
+//! chunk's worth) while rows remain. On PostgreSQL a batch that returned exactly its limit
+//! suspends even when no row is left (`PortalSuspended`); the next `fetch_more` then ends the
+//! result with no `Rows` (Task 12 fix round 1). `next_event` on a suspended query answers
+//! `Unsupported` (call `fetch_more` or `close_query`). On PostgreSQL a suspended query whose
+//! transaction ended (`COMMIT`, `ROLLBACK`, a `ROLLBACK TO` an older savepoint) is still the open
+//! query: `fetch_more` answers the server's 34000 (inside a transaction block that error fails
+//! it) and the query is gone; `close_query` closes it without an error.
 //!
 //! **The session's rules.**
 //! - It never drops a `next_event`/`fetch_more`/`close_query` future before it completes,
