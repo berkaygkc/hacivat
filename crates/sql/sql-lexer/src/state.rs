@@ -17,6 +17,11 @@ use crate::token::TokenKind;
 ///
 /// Lexing from a state also takes its text's offset 0 as a document start for the
 /// byte-order-mark rule (`lex`); a resume inside a document never starts at a BOM.
+///
+/// The lexer's lookahead is bounded, except for dollar-quote tags. `sql-split` relies on
+/// this: its chunked lexing (`CUT_MARGIN` and the final-word rule) cuts inside long lines.
+/// A new unbounded rule (a `UESCAPE` across whitespace, a MySQL character-set introducer)
+/// needs both splitter rules and its `any_chunking_gives_the_same_split` property revisited.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum LexState {
     #[default]
