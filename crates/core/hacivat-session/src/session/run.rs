@@ -389,7 +389,7 @@ impl Core {
             }
         }
 
-        let mut first = self.pump(&mut s, w).await;
+        let first = self.pump(&mut s, w).await;
         // The guard's canary, once the first rows are in and the query waits (R-M3-17).
         if matches!(first, Pumped::Suspended)
             && let Hold::Guard(guard) = &mut hold
@@ -418,7 +418,6 @@ impl Core {
                 self.observe(false);
                 return Ended::of(&s, UnitEnd::Failed(failure.error));
             }
-            first = Pumped::Suspended;
         }
         let (target, bytes) = if s.suspendable {
             (
