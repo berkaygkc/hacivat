@@ -306,3 +306,299 @@ error-conn-auth-insecure-method-body = { error-conn-auth-insecure-method-body-pl
 # engine's own message is shown verbatim next to it.
 # Review: PO
 error-exec-sqlite-busy-hint = Another program has locked this database file. Run the statement again when that program is done with it.
+
+## m3a-t23-exec
+
+# Durations and sizes in the output log, the gutter and the result strip (NOTES rule 6): each is
+# one message with its unit inside. Every number arrives pre-formatted in the format locale.
+
+# A duration under one millisecond.
+exec-dur-lt-ms = <1 ms
+# A duration under one second.
+# Variables:
+#   $ms (String) - the milliseconds, e.g. "340".
+exec-dur-ms = { $ms } ms
+# A duration of whole seconds, under a minute.
+# Variables:
+#   $s (String) - the seconds, e.g. "2".
+exec-dur-s = { $s } s
+# A duration of seconds and milliseconds, under a minute.
+# Variables:
+#   $s (String) - the seconds, e.g. "2".
+#   $ms (String) - the milliseconds past them, e.g. "340".
+exec-dur-s-ms = { $s } s { $ms } ms
+# A duration of whole minutes.
+# Variables:
+#   $min (String) - the minutes, e.g. "3".
+exec-dur-min = { $min } min
+# A duration of minutes and seconds.
+# Variables:
+#   $min (String) - the minutes, e.g. "3".
+#   $s (String) - the seconds past them, e.g. "5".
+exec-dur-min-s = { $min } min { $s } s
+# A size in kilobytes (1,024 bytes).
+# Variables:
+#   $n (String) - the kilobytes with one decimal, e.g. "12.5".
+exec-size-kb = { $n } KB
+# A size in megabytes.
+# Variables:
+#   $n (String) - the megabytes with one decimal, e.g. "5.2".
+exec-size-mb = { $n } MB
+# A size in gigabytes.
+# Variables:
+#   $n (String) - the gigabytes with one decimal, e.g. "1.5".
+exec-size-gb = { $n } GB
+
+# Output log lines (HV-EXEC-11, NOTES surface 12). Server text is never inside these: it sits
+# verbatim on its own row.
+
+# A statement returned rows.
+# Variables:
+#   $rows (Number) - the rows retrieved, e.g. 1234.
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "340 ms".
+exec-rows-retrieved = { $rows ->
+        [one] { $rows } row retrieved in { $duration }
+       *[other] { $rows } rows retrieved in { $duration }
+    }
+# A statement returned rows and its cursor stays open for more.
+# Variables:
+#   $rows (Number) - the rows retrieved so far, e.g. 500.
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "340 ms".
+exec-rows-retrieved-more = { $rows ->
+        [one] { $rows } row retrieved in { $duration }; more are available
+       *[other] { $rows } rows retrieved in { $duration }; more are available
+    }
+# A statement changed rows.
+# Variables:
+#   $rows (Number) - the rows affected, e.g. 3.
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "12 ms".
+exec-rows-affected = { $rows ->
+        [one] { $rows } row affected in { $duration }
+       *[other] { $rows } rows affected in { $duration }
+    }
+# A statement without rows or a count (DDL, SET) finished.
+# Variables:
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "12 ms".
+exec-completed = Completed in { $duration }
+# The user's COMMIT ended their transaction.
+exec-tx-committed = Transaction committed
+# The user's ROLLBACK ended their transaction.
+exec-tx-rolled-back = Transaction rolled back
+# The end of a run of several statements.
+# Variables:
+#   $executed (Number) - the statements that ran, e.g. 2.
+#   $total (Number) - the statements in the run, e.g. 3.
+#   $failed (Number) - the statements that failed, e.g. 1.
+#   $duration (String) - how long the run took (an exec-dur-* message), e.g. "1 s 200 ms".
+exec-summary = { $total ->
+        [one] { $executed } of { $total } statement executed, { $failed } failed, in { $duration }
+       *[other] { $executed } of { $total } statements executed, { $failed } failed, in { $duration }
+    }
+# A statement failed; the server's text follows on its own row, with the SQLSTATE chip.
+# Variables:
+#   $n (String) - the statement's number in its run, from 1, in ASCII digits never grouped, e.g. "3".
+exec-error = Statement { $n } failed
+# The statement in flight was cancelled.
+# Variables:
+#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "2 s".
+exec-cancelled = Cancelled after { $duration }
+# A statement returned more than one result set (R-M3-25).
+# Variables:
+#   $skipped (Number) - the result sets read and not shown, e.g. 2.
+exec-more-result-sets = { $skipped ->
+        [one] { $skipped } more result set was read and not shown; only the first one is kept.
+       *[other] { $skipped } more result sets were read and not shown; only the first one is kept.
+    }
+# A read-only console refused a statement before sending it (input layer).
+exec-deny-read-only-input = Not sent: this console is read-only, and the statement can change data or schema.
+# A read-only console refused a transaction command.
+exec-deny-read-only-transaction = Not sent: a read-only console can't start or end transactions.
+# The server reported a write inside the read-only transaction.
+exec-deny-read-only-protocol = Stopped: the server reported a write inside the read-only transaction.
+# The server refused the statement inside the read-only transaction.
+exec-deny-read-only-engine = The server refused the statement because the transaction is read-only.
+# A read-only console refused a statement that calls a function a rollback can't undo.
+exec-deny-read-only-function = Not sent: the statement calls a function whose effects a rollback can't undo.
+# A burst of lines outran the log; this many were never shown.
+# Variables:
+#   $n (Number) - the lines not shown, e.g. 312.
+exec-events-dropped = { $n ->
+        [one] { $n } event not shown
+       *[other] { $n } events not shown
+    }
+# Run refused a COPY that streams data through the client.
+exec-copy-unsupported = Not sent: COPY … FROM STDIN and TO STDOUT need the client to stream data, which consoles don't do.
+# Run refused to send a selection as one statement.
+exec-run-as-one-unsupported = Not sent: Hacivat runs a selection statement by statement, and can't send it as one.
+
+# A released console cursor (R-M3-23): the reason, and, when Hacivat's own transaction around
+# it ended in a rollback, the sentence that says so (cursor-closed-rolled-back).
+
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-session-needed = { $rows ->
+        [one] Cursor closed after { $rows } row: another statement needed the session.
+       *[other] Cursor closed after { $rows } rows: another statement needed the session.
+    }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+#   $duration (String) - how long it sat idle (an exec-dur-* message), e.g. "10 min".
+cursor-closed-idle-timeout = { $rows ->
+        [one] Cursor closed after { $rows } row: idle for { $duration }.
+       *[other] Cursor closed after { $rows } rows: idle for { $duration }.
+    }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-tab-closed = { $rows ->
+        [one] Cursor closed after { $rows } row: its tab was closed.
+       *[other] Cursor closed after { $rows } rows: its tab was closed.
+    }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-tx-ended = { $rows ->
+        [one] Cursor closed after { $rows } row: its transaction ended.
+       *[other] Cursor closed after { $rows } rows: its transaction ended.
+    }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-user-closed = { $rows ->
+        [one] Cursor closed after { $rows } row.
+       *[other] Cursor closed after { $rows } rows.
+    }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-memory-limit = { $rows ->
+        [one] Cursor closed after { $rows } row: the memory limit was reached.
+       *[other] Cursor closed after { $rows } rows: the memory limit was reached.
+    }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-connection-lost = { $rows ->
+        [one] Cursor closed after { $rows } row: the connection was lost.
+       *[other] Cursor closed after { $rows } rows: the connection was lost.
+    }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-server-terminated = { $rows ->
+        [one] Cursor closed after { $rows } row: the server ended the session.
+       *[other] Cursor closed after { $rows } rows: the server ended the session.
+    }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-cancelled = { $rows ->
+        [one] Cursor closed after { $rows } row: fetching was stopped.
+       *[other] Cursor closed after { $rows } rows: fetching was stopped.
+    }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-enforcement-gap = { $rows ->
+        [one] Cursor closed after { $rows } row: the read-only guard closed the session.
+       *[other] Cursor closed after { $rows } rows: the read-only guard closed the session.
+    }
+# The sentence after a cursor-closed-* reason when Hacivat's transaction rolled back.
+cursor-closed-rolled-back = Hacivat's transaction was rolled back.
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-session-needed-rolled-back = { $rows ->
+        [one] Cursor closed after { $rows } row: another statement needed the session.
+       *[other] Cursor closed after { $rows } rows: another statement needed the session.
+    } { cursor-closed-rolled-back }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+#   $duration (String) - how long it sat idle (an exec-dur-* message), e.g. "10 min".
+cursor-closed-idle-timeout-rolled-back = { $rows ->
+        [one] Cursor closed after { $rows } row: idle for { $duration }.
+       *[other] Cursor closed after { $rows } rows: idle for { $duration }.
+    } { cursor-closed-rolled-back }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-tab-closed-rolled-back = { $rows ->
+        [one] Cursor closed after { $rows } row: its tab was closed.
+       *[other] Cursor closed after { $rows } rows: its tab was closed.
+    } { cursor-closed-rolled-back }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-tx-ended-rolled-back = { $rows ->
+        [one] Cursor closed after { $rows } row: its transaction ended.
+       *[other] Cursor closed after { $rows } rows: its transaction ended.
+    } { cursor-closed-rolled-back }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-user-closed-rolled-back = { $rows ->
+        [one] Cursor closed after { $rows } row.
+       *[other] Cursor closed after { $rows } rows.
+    } { cursor-closed-rolled-back }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-memory-limit-rolled-back = { $rows ->
+        [one] Cursor closed after { $rows } row: the memory limit was reached.
+       *[other] Cursor closed after { $rows } rows: the memory limit was reached.
+    } { cursor-closed-rolled-back }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-connection-lost-rolled-back = { $rows ->
+        [one] Cursor closed after { $rows } row: the connection was lost.
+       *[other] Cursor closed after { $rows } rows: the connection was lost.
+    } { cursor-closed-rolled-back }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-server-terminated-rolled-back = { $rows ->
+        [one] Cursor closed after { $rows } row: the server ended the session.
+       *[other] Cursor closed after { $rows } rows: the server ended the session.
+    } { cursor-closed-rolled-back }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-cancelled-rolled-back = { $rows ->
+        [one] Cursor closed after { $rows } row: fetching was stopped.
+       *[other] Cursor closed after { $rows } rows: fetching was stopped.
+    } { cursor-closed-rolled-back }
+# Variables:
+#   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
+cursor-closed-enforcement-gap-rolled-back = { $rows ->
+        [one] Cursor closed after { $rows } row: the read-only guard closed the session.
+       *[other] Cursor closed after { $rows } rows: the read-only guard closed the session.
+    } { cursor-closed-rolled-back }
+
+# What kind of failure a failed statement had: the gutter tooltip's and the log's second row
+# when the server sent no text of its own (NOTES ruling 17: no per-code titles in M3a).
+
+# The server refused the statement (its text follows verbatim).
+exec-error-server = The server refused the statement.
+# The connection dropped before the statement could run.
+exec-error-connection-lost = The connection was lost.
+# The connection dropped while the statement ran: it may or may not have taken effect.
+exec-error-connection-lost-unknown = The connection was lost while the statement ran. It may or may not have taken effect.
+# The statement was cancelled.
+exec-error-cancelled = The statement was cancelled.
+# Commit (or any statement but a rollback) on a failed transaction (R-M3-16 amended).
+exec-error-tx-failed = Not sent: the transaction failed, so the server accepts only a rollback.
+# BEGIN while a transaction is open.
+exec-error-tx-in-progress = Not sent: a transaction is already open.
+# A transaction command this connection can't run.
+exec-error-tx-unsupported = Not sent: this connection can't run that transaction command.
+# The read-only guard found a possible write and discarded the connection.
+exec-error-enforcement-gap = The read-only guard couldn't confirm that nothing was written, so it closed the session.
+# Run on a console whose session is closed or not connected.
+exec-error-not-connected = Not sent: the console isn't connected.
+# Hacivat failed on its own side.
+exec-error-internal = Hacivat couldn't run the statement because of an internal error.
+
+# Why a statement boundary is uncertain, so Run sends nothing (R-M3-24): one sentence per
+# reason, shown under "Boundary uncertain".
+
+# A ; inside an executable comment.
+exec-uncertain-exec-comment = A ; sits inside an executable comment (/*! … */).
+# A string, quoted name, dollar quote, comment or bracket is still open.
+exec-uncertain-unterminated = A quote, comment or bracket above isn't closed.
+# BEGIN/END or CASE/END blocks don't match.
+exec-uncertain-unknown-block = The statement's BEGIN … END blocks don't match up.
+# Under a client delimiter, a ; inside one statement.
+exec-uncertain-delimiter = A ; inside the statement would split it under the current DELIMITER.
+# A ; seems to be missing between two statements.
+exec-uncertain-missing-semicolon = A ; seems to be missing between two statements.
+# An executable comment or optimizer hint whose end depends on the server.
+exec-uncertain-comment-end = Where an executable comment or optimizer hint ends depends on the server.
+# A client command inside the statement.
+exec-uncertain-client-command = A client command inside the statement can't be run as written.
+# Several carets or selections share part of one statement.
+exec-uncertain-overlapping-units = Two of the carets or selections share part of a statement, which would run it twice.

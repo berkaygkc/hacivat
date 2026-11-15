@@ -215,3 +215,138 @@ error-conn-auth-insecure-method-body = { error-conn-auth-insecure-method-body-pl
 
 # Review: PO
 error-exec-sqlite-busy-hint = Bu veritabanı dosyası başka bir program tarafından kilitlenmiş. O program dosyayla işini bitirince deyimi yeniden çalıştırın.
+
+## m3a-t23-exec
+
+# Review: PO
+exec-dur-lt-ms = <1 ms
+# Review: PO
+exec-dur-ms = { $ms } ms
+# Review: PO
+exec-dur-s = { $s } sn
+# Review: PO
+exec-dur-s-ms = { $s } sn { $ms } ms
+# Review: PO
+exec-dur-min = { $min } dk
+# Review: PO
+exec-dur-min-s = { $min } dk { $s } sn
+# Review: PO
+exec-size-kb = { $n } KB
+# Review: PO
+exec-size-mb = { $n } MB
+# Review: PO
+exec-size-gb = { $n } GB
+# Review: PO
+exec-rows-retrieved = { $rows } satır alındı ({ $duration })
+# Review: PO
+exec-rows-retrieved-more = { $rows } satır alındı ({ $duration }); devamı var
+# Review: PO
+exec-rows-affected = { $rows } satır etkilendi ({ $duration })
+# Review: PO
+exec-completed = Tamamlandı ({ $duration })
+# Review: PO
+exec-tx-committed = İşlem commit edildi
+# Review: PO
+exec-tx-rolled-back = İşlem geri alındı
+# Review: PO
+exec-summary = { $total } ifadeden { $executed } tanesi çalıştı, { $failed } tanesi başarısız oldu ({ $duration })
+# Review: PO
+exec-error = { $n }. ifade başarısız oldu
+# Review: PO
+exec-cancelled = { $duration } sonra iptal edildi
+# Review: PO
+exec-more-result-sets = { $skipped } sonuç kümesi daha okundu ve gösterilmedi; yalnızca ilki tutulur.
+# Review: PO
+exec-deny-read-only-input = Gönderilmedi: bu konsol salt okunur ve ifade veriyi ya da şemayı değiştirebilir.
+# Review: PO
+exec-deny-read-only-transaction = Gönderilmedi: salt okunur bir konsol işlem başlatamaz ya da bitiremez.
+# Review: PO
+exec-deny-read-only-protocol = Durduruldu: sunucu, salt okunur işlemin içinde bir yazma bildirdi.
+# Review: PO
+exec-deny-read-only-engine = Sunucu, işlem salt okunur olduğu için ifadeyi reddetti.
+# Review: PO
+exec-deny-read-only-function = Gönderilmedi: ifade, etkileri geri alınamayan bir fonksiyon çağırıyor.
+# Review: PO
+exec-events-dropped = { $n } olay gösterilmedi
+# Review: PO
+exec-copy-unsupported = Gönderilmedi: COPY … FROM STDIN ve TO STDOUT, istemcinin veri aktarmasını gerektirir; konsollar bunu yapmaz.
+# Review: PO
+exec-run-as-one-unsupported = Gönderilmedi: Hacivat bir seçimi ifade ifade çalıştırır; tek bir ifade olarak gönderemez.
+# Review: PO
+cursor-closed-session-needed = { $rows } satırdan sonra imleç kapandı: oturum başka bir ifade için gerekiyordu.
+# Review: PO
+cursor-closed-idle-timeout = { $rows } satırdan sonra imleç kapandı: { $duration } boyunca boşta kaldı.
+# Review: PO
+cursor-closed-tab-closed = { $rows } satırdan sonra imleç kapandı: sekmesi kapatıldı.
+# Review: PO
+cursor-closed-tx-ended = { $rows } satırdan sonra imleç kapandı: ait olduğu işlem sona erdi.
+# Review: PO
+cursor-closed-user-closed = { $rows } satırdan sonra imleç kapatıldı.
+# Review: PO
+cursor-closed-memory-limit = { $rows } satırdan sonra imleç kapandı: bellek sınırına ulaşıldı.
+# Review: PO
+cursor-closed-connection-lost = { $rows } satırdan sonra imleç kapandı: bağlantı koptu.
+# Review: PO
+cursor-closed-server-terminated = { $rows } satırdan sonra imleç kapandı: sunucu oturumu sonlandırdı.
+# Review: PO
+cursor-closed-cancelled = { $rows } satırdan sonra imleç kapandı: getirme durduruldu.
+# Review: PO
+cursor-closed-enforcement-gap = { $rows } satırdan sonra imleç kapandı: salt okunur koruma oturumu kapattı.
+# Review: PO
+cursor-closed-rolled-back = Hacivat'ın işlemi geri alındı.
+# Review: PO
+cursor-closed-session-needed-rolled-back = { $rows } satırdan sonra imleç kapandı: oturum başka bir ifade için gerekiyordu. { cursor-closed-rolled-back }
+# Review: PO
+cursor-closed-idle-timeout-rolled-back = { $rows } satırdan sonra imleç kapandı: { $duration } boyunca boşta kaldı. { cursor-closed-rolled-back }
+# Review: PO
+cursor-closed-tab-closed-rolled-back = { $rows } satırdan sonra imleç kapandı: sekmesi kapatıldı. { cursor-closed-rolled-back }
+# Review: PO
+cursor-closed-tx-ended-rolled-back = { $rows } satırdan sonra imleç kapandı: ait olduğu işlem sona erdi. { cursor-closed-rolled-back }
+# Review: PO
+cursor-closed-user-closed-rolled-back = { $rows } satırdan sonra imleç kapatıldı. { cursor-closed-rolled-back }
+# Review: PO
+cursor-closed-memory-limit-rolled-back = { $rows } satırdan sonra imleç kapandı: bellek sınırına ulaşıldı. { cursor-closed-rolled-back }
+# Review: PO
+cursor-closed-connection-lost-rolled-back = { $rows } satırdan sonra imleç kapandı: bağlantı koptu. { cursor-closed-rolled-back }
+# Review: PO
+cursor-closed-server-terminated-rolled-back = { $rows } satırdan sonra imleç kapandı: sunucu oturumu sonlandırdı. { cursor-closed-rolled-back }
+# Review: PO
+cursor-closed-cancelled-rolled-back = { $rows } satırdan sonra imleç kapandı: getirme durduruldu. { cursor-closed-rolled-back }
+# Review: PO
+cursor-closed-enforcement-gap-rolled-back = { $rows } satırdan sonra imleç kapandı: salt okunur koruma oturumu kapattı. { cursor-closed-rolled-back }
+# Review: PO
+exec-error-server = Sunucu ifadeyi reddetti.
+# Review: PO
+exec-error-connection-lost = Bağlantı koptu.
+# Review: PO
+exec-error-connection-lost-unknown = İfade çalışırken bağlantı koptu. Etkili olmuş da olabilir, olmamış da.
+# Review: PO
+exec-error-cancelled = İfade iptal edildi.
+# Review: PO
+exec-error-tx-failed = Gönderilmedi: işlem başarısız oldu; sunucu artık yalnızca geri almayı kabul eder.
+# Review: PO
+exec-error-tx-in-progress = Gönderilmedi: zaten açık bir işlem var.
+# Review: PO
+exec-error-tx-unsupported = Gönderilmedi: bu bağlantı o işlem komutunu çalıştıramaz.
+# Review: PO
+exec-error-enforcement-gap = Salt okunur koruma hiçbir şeyin yazılmadığını doğrulayamadı; bu yüzden oturumu kapattı.
+# Review: PO
+exec-error-not-connected = Gönderilmedi: konsol bağlı değil.
+# Review: PO
+exec-error-internal = Hacivat ifadeyi bir iç hata yüzünden çalıştıramadı.
+# Review: PO
+exec-uncertain-exec-comment = Yürütülebilir bir yorumun (/*! … */) içinde ; var.
+# Review: PO
+exec-uncertain-unterminated = Yukarıdaki bir tırnak, yorum ya da parantez kapanmamış.
+# Review: PO
+exec-uncertain-unknown-block = İfadenin BEGIN … END blokları birbirini tutmuyor.
+# Review: PO
+exec-uncertain-delimiter = İfadenin içindeki bir ;, geçerli DELIMITER ile ifadeyi ikiye böler.
+# Review: PO
+exec-uncertain-missing-semicolon = İki ifade arasında bir ; eksik görünüyor.
+# Review: PO
+exec-uncertain-comment-end = Yürütülebilir bir yorumun ya da optimizer ipucunun nerede bittiği sunucuya bağlı.
+# Review: PO
+exec-uncertain-client-command = İfadenin içindeki bir istemci komutu yazıldığı gibi çalıştırılamaz.
+# Review: PO
+exec-uncertain-overlapping-units = İmleçlerden ya da seçimlerden ikisi bir ifadenin bir kısmını paylaşıyor; ifade iki kez çalışırdı.

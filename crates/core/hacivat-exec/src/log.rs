@@ -2,14 +2,17 @@
 //! a Fluent message (`fluent_id` and `args`) rendered by the app; server text stays in its own
 //! field (`ErrorView::server_text`).
 //!
-//! Working since Task 1b: `SessionLog` keeps the newest [`SessionLog::CAPACITY`] lines and
-//! bumps its `watch` on every change. `LogMsg::fluent_id` and `args`, the `Dropped` line for a
-//! burst that outruns the ring, and `copy_invariant` arrive in Task 23.
+//! `SessionLog` keeps the newest [`SessionLog::CAPACITY`] lines and bumps its `watch` on every
+//! change. Lines a burst pushes out of the ring before anyone read them are counted, and
+//! [`SessionLog::lines`] then starts with one `Dropped { n }` line (`exec-events-dropped`), so
+//! the view says that it is not showing everything. `copy_invariant` is the clipboard form:
+//! ISO timestamps, ASCII digits, `ms`, whatever the locale.
 
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use hacivat_results::CloseReason;
 use hacivat_session::session::{DenyLayer, RunSummary, UnitId};
@@ -26,9 +29,22 @@ pub enum Severity {
     Error,
 }
 
+impl Severity {
+    /// The severity's invariant name in a copied log.
+    fn invariant(self) -> &'static str {
+        match self {
+            Severity::Info => "info",
+            Severity::Notice => "notice",
+            Severity::Warning => "warning",
+            Severity::Error => "error",
+        }
+    }
+}
+
 /// What a line says.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LogMsg {
+    /// A unit's rows: `more` while its cursor stays open.
     RowsRetrieved {
         rows: u64,
         more: bool,
@@ -44,45 +60,229 @@ pub enum LogMsg {
     },
     TxCommitted,
     TxRolledBack,
-    /// `rolled_back`: Hacivat's own transaction ended in a rollback (R-M3-23, P26).
+    /// `rolled_back`: Hacivat's own transaction ended in a rollback (R-M3-23, P26). `idle_ms`:
+    /// the idle bound, for `IdleTimeout` (0 when unknown or another reason).
     CursorClosed {
         rows: u64,
         reason: CloseReason,
         rolled_back: bool,
+        idle_ms: u64,
     },
     MoreResultSets {
         skipped: u32,
     },
     Summary(RunSummary),
-    Error(ErrorView),
-    Cancelled,
+    /// Statement `n` (from 1, in its run) failed; the view holds the server's text verbatim.
+    Error {
+        n: u32,
+        view: ErrorView,
+    },
+    /// The unit in flight was cancelled after `ms`.
+    Cancelled {
+        ms: u64,
+    },
     ReadOnlyDenied(DenyLayer),
-    /// `n` lines a burst pushed out of the ring.
+    /// `n` lines a burst pushed out of the ring before anyone read them.
     Dropped {
         n: u64,
     },
+    /// Run refused a `COPY … FROM STDIN` / `TO STDOUT` unit: nothing was sent.
+    CopyUnsupported,
 }
 
-/// A message argument.
+/// A message argument. Counts are numbers the app formats in the format locale; a statement
+/// number is raw text (ASCII digits, never grouped); a duration is a [`duration_message`] the
+/// app renders first and passes in as text (`exec-dur-*`, NOTES rule 6).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LogArg {
     U64(u64),
     Str(Arc<str>),
+    /// A duration in milliseconds: render [`duration_message`] and pass its text.
+    DurationMs(u64),
 }
 
 impl LogMsg {
     /// The message's Fluent ID in `hacivat-core.ftl`: a literal in every arm, which the
-    /// `l10n check` code scan counts as used (P24; Task 23).
+    /// `l10n check` code scan counts as used (P24).
     pub fn fluent_id(&self) -> &'static str {
         // Never format `self`: an error line holds the server's text (fix round 1).
-        let _ = self;
-        unimplemented!("LogMsg::fluent_id: Task 23")
+        match self {
+            LogMsg::RowsRetrieved { more: true, .. } => "exec-rows-retrieved-more",
+            LogMsg::RowsRetrieved { more: false, .. } => "exec-rows-retrieved",
+            LogMsg::RowsAffected { .. } => "exec-rows-affected",
+            LogMsg::Completed { .. } => "exec-completed",
+            LogMsg::TxCommitted => "exec-tx-committed",
+            LogMsg::TxRolledBack => "exec-tx-rolled-back",
+            LogMsg::CursorClosed {
+                reason,
+                rolled_back,
+                ..
+            } => cursor_closed_id(*reason, *rolled_back),
+            LogMsg::MoreResultSets { .. } => "exec-more-result-sets",
+            LogMsg::Summary(_) => "exec-summary",
+            LogMsg::Error { .. } => "exec-error",
+            LogMsg::Cancelled { .. } => "exec-cancelled",
+            LogMsg::ReadOnlyDenied(layer) => deny_id(*layer),
+            LogMsg::Dropped { .. } => "exec-events-dropped",
+            LogMsg::CopyUnsupported => "exec-copy-unsupported",
+        }
     }
 
-    /// The message's arguments (Task 23).
+    /// The message's arguments, named as in `hacivat-core.ftl`.
     pub fn args(&self) -> Vec<(&'static str, LogArg)> {
-        let _ = self;
-        unimplemented!("LogMsg::args: Task 23")
+        match self {
+            LogMsg::RowsRetrieved {
+                rows,
+                exec_ms,
+                fetch_ms,
+                ..
+            } => vec![
+                ("rows", LogArg::U64(*rows)),
+                (
+                    "duration",
+                    LogArg::DurationMs(exec_ms.saturating_add(*fetch_ms)),
+                ),
+            ],
+            LogMsg::RowsAffected { rows, ms } => vec![
+                ("rows", LogArg::U64(*rows)),
+                ("duration", LogArg::DurationMs(*ms)),
+            ],
+            LogMsg::Completed { ms } | LogMsg::Cancelled { ms } => {
+                vec![("duration", LogArg::DurationMs(*ms))]
+            }
+            LogMsg::CursorClosed {
+                rows,
+                reason,
+                idle_ms,
+                ..
+            } => {
+                let mut args = vec![("rows", LogArg::U64(*rows))];
+                if *reason == CloseReason::IdleTimeout {
+                    args.push(("duration", LogArg::DurationMs(*idle_ms)));
+                }
+                args
+            }
+            LogMsg::MoreResultSets { skipped } => {
+                vec![("skipped", LogArg::U64(u64::from(*skipped)))]
+            }
+            LogMsg::Summary(s) => vec![
+                ("executed", LogArg::U64(u64::from(s.executed))),
+                ("total", LogArg::U64(u64::from(s.total))),
+                ("failed", LogArg::U64(u64::from(s.failed))),
+                ("duration", LogArg::DurationMs(s.duration_ms)),
+            ],
+            // A statement number stays raw (ASCII digits, never grouped).
+            LogMsg::Error { n, .. } => vec![("n", LogArg::Str(n.to_string().into()))],
+            LogMsg::Dropped { n } => vec![("n", LogArg::U64(*n))],
+            LogMsg::TxCommitted
+            | LogMsg::TxRolledBack
+            | LogMsg::ReadOnlyDenied(_)
+            | LogMsg::CopyUnsupported => Vec::new(),
+        }
+    }
+
+    /// The severity a line of this message has.
+    pub fn severity(&self) -> Severity {
+        match self {
+            LogMsg::Error { .. } | LogMsg::ReadOnlyDenied(_) | LogMsg::CopyUnsupported => {
+                Severity::Error
+            }
+            LogMsg::Cancelled { .. } | LogMsg::Dropped { .. } => Severity::Warning,
+            LogMsg::CursorClosed { .. } | LogMsg::MoreResultSets { .. } => Severity::Notice,
+            LogMsg::RowsRetrieved { .. }
+            | LogMsg::RowsAffected { .. }
+            | LogMsg::Completed { .. }
+            | LogMsg::TxCommitted
+            | LogMsg::TxRolledBack
+            | LogMsg::Summary(_) => Severity::Info,
+        }
+    }
+}
+
+/// One `cursor-closed-*` message per [`CloseReason`], each with its "Hacivat's transaction was
+/// rolled back" form (R-M3-23, P26).
+fn cursor_closed_id(reason: CloseReason, rolled_back: bool) -> &'static str {
+    match (reason, rolled_back) {
+        (CloseReason::SessionNeeded, false) => "cursor-closed-session-needed",
+        (CloseReason::SessionNeeded, true) => "cursor-closed-session-needed-rolled-back",
+        (CloseReason::IdleTimeout, false) => "cursor-closed-idle-timeout",
+        (CloseReason::IdleTimeout, true) => "cursor-closed-idle-timeout-rolled-back",
+        (CloseReason::TabClosed, false) => "cursor-closed-tab-closed",
+        (CloseReason::TabClosed, true) => "cursor-closed-tab-closed-rolled-back",
+        (CloseReason::TxEnded, false) => "cursor-closed-tx-ended",
+        (CloseReason::TxEnded, true) => "cursor-closed-tx-ended-rolled-back",
+        (CloseReason::UserClosed, false) => "cursor-closed-user-closed",
+        (CloseReason::UserClosed, true) => "cursor-closed-user-closed-rolled-back",
+        (CloseReason::MemoryLimit, false) => "cursor-closed-memory-limit",
+        (CloseReason::MemoryLimit, true) => "cursor-closed-memory-limit-rolled-back",
+        (CloseReason::ConnectionLost, false) => "cursor-closed-connection-lost",
+        (CloseReason::ConnectionLost, true) => "cursor-closed-connection-lost-rolled-back",
+        (CloseReason::ServerTerminated, false) => "cursor-closed-server-terminated",
+        (CloseReason::ServerTerminated, true) => "cursor-closed-server-terminated-rolled-back",
+        (CloseReason::Cancelled, false) => "cursor-closed-cancelled",
+        (CloseReason::Cancelled, true) => "cursor-closed-cancelled-rolled-back",
+        (CloseReason::EnforcementGap, false) => "cursor-closed-enforcement-gap",
+        (CloseReason::EnforcementGap, true) => "cursor-closed-enforcement-gap-rolled-back",
+    }
+}
+
+/// One `exec-deny-read-only-*` sentence per [`DenyLayer`].
+pub(crate) fn deny_id(layer: DenyLayer) -> &'static str {
+    match layer {
+        DenyLayer::Input => "exec-deny-read-only-input",
+        DenyLayer::Protocol => "exec-deny-read-only-protocol",
+        DenyLayer::Transaction => "exec-deny-read-only-transaction",
+        DenyLayer::Engine => "exec-deny-read-only-engine",
+        DenyLayer::Function => "exec-deny-read-only-function",
+    }
+}
+
+/// A Fluent message with numeric arguments, for durations and sizes (`exec-dur-*`,
+/// `exec-size-*`): the app formats each value in the format locale.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnitMsg {
+    pub id: &'static str,
+    /// The arguments: whole numbers, except a size's `n`, which is in tenths (12.5 MB is 125):
+    /// the app formats it with one fraction digit.
+    pub args: Vec<(&'static str, u64)>,
+}
+
+/// The `exec-dur-*` message of `ms` milliseconds: `<1 ms`, `340 ms`, `2 s 340 ms`, `3 min 5 s`
+/// (minutes keep counting past an hour). Whole seconds and minutes drop their zero part.
+pub fn duration_message(ms: u64) -> UnitMsg {
+    let (min, s, rest) = (ms / 60_000, (ms / 1_000) % 60, ms % 1_000);
+    let (id, args) = if ms == 0 {
+        ("exec-dur-lt-ms", Vec::new())
+    } else if ms < 1_000 {
+        ("exec-dur-ms", vec![("ms", ms)])
+    } else if ms < 60_000 && rest == 0 {
+        ("exec-dur-s", vec![("s", s)])
+    } else if ms < 60_000 {
+        ("exec-dur-s-ms", vec![("s", s), ("ms", rest)])
+    } else if s == 0 {
+        ("exec-dur-min", vec![("min", min)])
+    } else {
+        ("exec-dur-min-s", vec![("min", min), ("s", s)])
+    };
+    UnitMsg { id, args }
+}
+
+/// The `exec-size-*` message of `bytes` (1024-based, one fraction digit, rounded half up): KB
+/// below 1 MiB, MB below 1 GiB, else GB.
+pub fn size_message(bytes: u64) -> UnitMsg {
+    const KIB: u128 = 1 << 10;
+    let b = u128::from(bytes);
+    let (id, unit) = if b < KIB << 10 {
+        ("exec-size-kb", KIB)
+    } else if b < KIB << 20 {
+        ("exec-size-mb", KIB << 10)
+    } else {
+        ("exec-size-gb", KIB << 20)
+    };
+    let tenths = (b * 10 + unit / 2) / unit;
+    UnitMsg {
+        id,
+        args: vec![("n", u64::try_from(tenths).unwrap_or(u64::MAX))],
     }
 }
 
@@ -98,10 +298,21 @@ pub struct LogLine {
     pub unit: Option<UnitId>,
 }
 
+#[derive(Debug, Default)]
+struct Ring {
+    lines: VecDeque<LogLine>,
+    /// The next `seq` [`SessionLog::append`] gives.
+    next_seq: u64,
+    /// The newest `seq` a reader has been given (`None`: nothing read yet).
+    read_upto: Option<u64>,
+    /// Lines that left the ring before a reader saw them, since the last clear.
+    unseen_dropped: u64,
+}
+
 /// A console's output log: a ring of the newest lines.
 #[derive(Debug)]
 pub struct SessionLog {
-    lines: Mutex<VecDeque<LogLine>>,
+    ring: Mutex<Ring>,
     changes: watch::Sender<u64>,
 }
 
@@ -111,30 +322,76 @@ impl SessionLog {
 
     pub fn new() -> Arc<Self> {
         Arc::new(SessionLog {
-            lines: Mutex::new(VecDeque::new()),
+            ring: Mutex::new(Ring::default()),
             changes: watch::Sender::new(0),
         })
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, VecDeque<LogLine>> {
-        self.lines.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> std::sync::MutexGuard<'_, Ring> {
+        self.ring.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Appends `line` (dropping the oldest when the ring is full) and bumps `changes`.
+    /// Appends `line` (dropping the oldest when the ring is full) and bumps `changes`. A dropped
+    /// line no reader has seen is counted for the `Dropped` line.
     pub fn push(&self, line: LogLine) {
+        self.push_with(|_| line);
+    }
+
+    /// Appends a line saying `msg` now, with the next sequence number and `msg`'s severity
+    /// (numbered under the ring's lock: concurrent appends never share a number).
+    pub fn append(&self, msg: LogMsg, source: Option<Range<usize>>, unit: Option<UnitId>) {
+        self.push_with(|seq| LogLine {
+            seq,
+            at: SystemTime::now(),
+            severity: msg.severity(),
+            msg,
+            source,
+            unit,
+        });
+    }
+
+    /// Pushes the line `make` builds from the next sequence number, under one lock.
+    fn push_with(&self, make: impl FnOnce(u64) -> LogLine) {
         {
-            let mut lines = self.lock();
-            if lines.len() == Self::CAPACITY {
-                lines.pop_front();
+            let mut ring = self.lock();
+            let line = make(ring.next_seq);
+            ring.next_seq = ring.next_seq.max(line.seq.saturating_add(1));
+            if ring.lines.len() == Self::CAPACITY
+                && let Some(old) = ring.lines.pop_front()
+                && ring.read_upto.is_none_or(|seen| old.seq > seen)
+            {
+                ring.unseen_dropped += 1;
             }
-            lines.push_back(line);
+            ring.lines.push_back(line);
         }
         self.changes.send_modify(|n| *n += 1);
     }
 
-    /// The lines, oldest first.
+    /// The lines, oldest first; marks them read. When a burst pushed lines out before anyone
+    /// read them, the first line is `Dropped { n }` (with the `seq` and time of the oldest kept
+    /// line), counting every such line since the last clear.
     pub fn lines(&self) -> Arc<[LogLine]> {
-        self.lock().iter().cloned().collect()
+        let mut ring = self.lock();
+        let mut out = Vec::with_capacity(ring.lines.len() + 1);
+        if ring.unseen_dropped > 0
+            && let Some(first) = ring.lines.front()
+        {
+            out.push(LogLine {
+                seq: first.seq,
+                at: first.at,
+                severity: Severity::Warning,
+                msg: LogMsg::Dropped {
+                    n: ring.unseen_dropped,
+                },
+                source: None,
+                unit: None,
+            });
+        }
+        out.extend(ring.lines.iter().cloned());
+        if let Some(last) = ring.lines.back() {
+            ring.read_upto = Some(last.seq);
+        }
+        out.into()
     }
 
     /// Bumped on every push and clear.
@@ -144,14 +401,117 @@ impl SessionLog {
 
     /// Empties the log (the toolbar's Clear) and bumps `changes`.
     pub fn clear(&self) {
-        self.lock().clear();
+        {
+            let mut ring = self.lock();
+            ring.lines.clear();
+            ring.unseen_dropped = 0;
+        }
         self.changes.send_modify(|n| *n += 1);
     }
 }
 
-/// The log as locale-free text for the clipboard: ISO timestamps, ASCII digits, `ms`
-/// (Task 23).
+/// The log as locale-free text for the clipboard: one line per log line, tab-separated: the
+/// ISO 8601 UTC timestamp with milliseconds, the severity, the message ID, then each argument
+/// as `name=value` (ASCII digits; a duration as `<n>ms`). An error line adds its code chip and
+/// the server's text verbatim; a line break inside server text is kept as `\n` so one log line
+/// stays one copied line. Nothing is localized, case-mapped or grouped.
 pub fn copy_invariant(lines: &[LogLine]) -> String {
-    let _ = lines;
-    unimplemented!("copy_invariant: Task 23")
+    let mut out = String::new();
+    for line in lines {
+        let _ = write!(
+            out,
+            "{}\t{}\t{}",
+            iso_utc(line.at),
+            line.severity.invariant(),
+            line.msg.fluent_id()
+        );
+        for (name, arg) in line.msg.args() {
+            match arg {
+                LogArg::U64(n) => {
+                    let _ = write!(out, "\t{name}={n}");
+                }
+                LogArg::DurationMs(ms) => {
+                    let _ = write!(out, "\t{name}={ms}ms");
+                }
+                LogArg::Str(s) => {
+                    let _ = write!(out, "\t{name}={}", escaped(&s));
+                }
+            }
+        }
+        if let LogMsg::Error { view, .. } = &line.msg {
+            let _ = write!(out, "\t{}", view.title_id);
+            if let Some(code) = &view.code {
+                let _ = write!(out, "\tcode={}", escaped(code));
+            }
+            if let Some(text) = &view.server_text {
+                let _ = write!(out, "\t{}", escaped(text));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// `s` with `\`, tab, CR and LF written as escapes, so a value never splits a copied line.
+fn escaped(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// `at` as `YYYY-MM-DDTHH:MM:SS.mmmZ` (UTC; a time before 1970 prints as the epoch).
+fn iso_utc(at: SystemTime) -> String {
+    let since = at.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = since.as_secs();
+    let (days, day_secs) = (secs / 86_400, secs % 86_400);
+    let (y, m, d) = civil_from_days(i64::try_from(days).unwrap_or(i64::MAX));
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{:03}Z",
+        day_secs / 3_600,
+        (day_secs / 60) % 60,
+        day_secs % 60,
+        since.subsec_millis()
+    )
+}
+
+/// The proleptic Gregorian date of `z` days after 1970-01-01 (Howard Hinnant's
+/// `civil_from_days`).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (
+        y,
+        u32::try_from(m).unwrap_or(1),
+        u32::try_from(d).unwrap_or(1),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn civil_dates_round_the_calendar() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(59), (1970, 3, 1));
+        // 2000-02-29 (a leap day of a century divisible by 400) and the day after.
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
+        assert_eq!(civil_from_days(11_017), (2000, 3, 1));
+        assert_eq!(civil_from_days(20_772), (2026, 11, 15));
+    }
 }

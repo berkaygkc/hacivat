@@ -1,10 +1,25 @@
 //! Console UX state (Task 23): the pure table the toolbar, the status bar and the capsule read
 //! (production, forced read-only, the transaction badge, the cursor, cancel, waiting).
+//!
+//! The table, row by row:
+//! - `production`: the profile is tagged production; `read_only` is the session's;
+//!   `forced_read_only`: read-only because the production policy forces it (R-M3-6, R-M3-29);
+//! - `tx`: only the user's transaction is a badge (`TxOwner::User`, R-M3-27): open is
+//!   `UserOpen`, failed is `Failed` (R-M3-16 amended); Hacivat's own transaction around a
+//!   PostgreSQL cursor is `CursorSnapshot`; the read-only guard's, or one nobody claimed, is
+//!   `Auto`;
+//! - `cursor`: the session's open cursor; `cancel`: a cancel on its way (any rung);
+//! - `running`: a run that started and has not ended (a session that is `Busy` with request 0
+//!   is releasing an idle cursor, which no run holds, and is not running anything);
+//! - `waiting_for_connection`: the pool's (in use, max) while the console waits (R-M3-43).
 
 use std::time::Instant;
 
+use hacivat_driver::TxStatus;
 use hacivat_proto::{AccessLabel, EnvTag};
-use hacivat_session::session::{CursorBadge, RunId, SessionSnapshot};
+use hacivat_session::session::{
+    CancelState, CursorBadge, RunId, SessionSnapshot, SessionState, TxOwner,
+};
 
 use crate::status::RunStatus;
 
@@ -42,7 +57,8 @@ pub struct ConsoleUx {
     pub waiting_for_connection: Option<(u8, u8)>,
 }
 
-/// The console UX for a session (Task 23).
+/// The console UX for a session. `forced` is the production read-only policy
+/// (`ConnectionManager::policy()`); `run` is the console's latest run.
 pub fn console_ux(
     env: Option<EnvTag>,
     forced: bool,
@@ -50,6 +66,70 @@ pub fn console_ux(
     run: Option<&RunStatus>,
     waiting: Option<(u8, u8)>,
 ) -> ConsoleUx {
-    let _ = (env, forced, snap, run, waiting);
-    unimplemented!("console_ux: Task 23")
+    let production = env == Some(EnvTag::Production);
+    ConsoleUx {
+        env,
+        production,
+        read_only: snap.read_only,
+        forced_read_only: forced && production && snap.read_only,
+        access: snap.access,
+        tx: tx_badge(snap),
+        cursor: snap.cursor,
+        cancel: cancel_ux(snap),
+        running: run.and_then(running),
+        waiting_for_connection: waiting,
+    }
+}
+
+fn tx_badge(snap: &SessionSnapshot) -> TxBadge {
+    let tx = &snap.tx;
+    match (tx.owner, tx.status) {
+        // The session sets `since` whenever a transaction opens; were it missing, the badge
+        // still shows (never hidden), from the best clue there is.
+        (TxOwner::User, TxStatus::InTx) => TxBadge::UserOpen {
+            since: tx
+                .since
+                .or_else(|| busy_since(snap))
+                .unwrap_or_else(Instant::now),
+            statements: tx.statements,
+        },
+        (TxOwner::User, TxStatus::Failed) => TxBadge::Failed,
+        (TxOwner::Cursor, TxStatus::InTx) => match tx.since.or(snap.cursor.map(|c| c.since)) {
+            Some(since) => TxBadge::CursorSnapshot { since },
+            None => TxBadge::Auto,
+        },
+        _ => TxBadge::Auto,
+    }
+}
+
+fn busy_since(snap: &SessionSnapshot) -> Option<Instant> {
+    match snap.state {
+        SessionState::Busy { since, .. } | SessionState::Cancelling { since, .. } => Some(since),
+        _ => None,
+    }
+}
+
+fn cancel_ux(snap: &SessionSnapshot) -> CancelUx {
+    match snap.cancel {
+        CancelState::Cancelling { since } | CancelState::SlowCancel { since } => {
+            CancelUx::Cancelling { since }
+        }
+        CancelState::Terminating | CancelState::Deactivating => match snap.state {
+            SessionState::Cancelling { since, .. } | SessionState::Busy { since, .. } => {
+                CancelUx::Cancelling { since }
+            }
+            _ => CancelUx::Idle,
+        },
+        CancelState::Idle => match snap.state {
+            SessionState::Cancelling { since, .. } => CancelUx::Cancelling { since },
+            _ => CancelUx::Idle,
+        },
+    }
+}
+
+fn running(run: &RunStatus) -> Option<(RunId, Instant)> {
+    match (run.run, run.started, run.summary) {
+        (Some(id), Some(started), None) => Some((id, started)),
+        _ => None,
+    }
 }

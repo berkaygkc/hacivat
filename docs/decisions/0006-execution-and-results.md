@@ -112,3 +112,116 @@ ring), `MemoryBudget` (`min(RAM / 4, 4 GiB)`, else 1 GiB; 256 MiB per result), `
 defaults, `Chunk::from_values`, `effective_read_only(profile, production_read_only)` with
 `SessionPolicy` (production profiles are read-only in the app since this commit,
 `connections/boot.rs`).
+
+## m3a-t23 — run service
+
+**What is sent.** `resolve_units` calls `exec_range::resolve` in execution mode and sends each
+unit's strict range, byte for byte (`doc.text()[range]`: no terminator, no leading comments),
+with the extended protocol and `StopOnError` (R-M3-26). `suspendable` is
+`head::cursor_eligible` on that same strict range, so `(SELECT …)` is never eligible (fail
+closed). Tests: `units_carry_strict_text_and_eligibility`,
+`the_text_sent_is_the_strict_range_byte_for_byte`, `a_parenthesised_select_is_never_cursor_eligible`,
+`the_text_sent_is_the_units_text_byte_for_byte`.
+
+**Refusals before anything is sent.** `Ambiguous` → `Resolution::Uncertain`. A `COPY` that
+streams through the client (`UnitKind::CopyIn`, or a `COPY` naming `STDIN`/`STDOUT` in the
+document's own tokens) refuses the whole run (`Resolution::Refused { CopyStream }`,
+`exec-copy-unsupported`), also inside a multi-unit run: under `StopOnError` the units before it
+would run and the `COPY` then fail, so a script holding one runs nothing. Rejected: running the
+units before it (a half-run script the user did not ask for). `UnitKind::Verbatim` (a selection
+run as one) is `Refused { RunAsOne }` until M3b. The chooser drops every candidate Run would
+refuse; with none left, the first refusal answers. Tests: `a_copy_stream_refuses_the_whole_run`,
+`the_chooser_leaves_out_candidates_that_would_be_refused`, `a_verbatim_unit_is_refused_until_m3b`.
+
+**The PostgreSQL oracle (R-M3-24, R-M3-35).** Only for a single caret, only on PostgreSQL and
+Timescale (the same grammar; Cockroach, Yugabyte and Redshift parse differently), never for a
+`ClientCommand` or `OverlappingUnits` boundary, and never for a selection: a selection that
+starts inside a token or a `$$` body must not be rescued by a parser that reads the selected
+text from a clean state. The region of a boundary is the execution statement whose strict range
+holds it. A region deeper than `MAX_ORACLE_NESTING` parentheses (the lexer's count) or holding
+`COPY` data is never sent. The oracle's ranges are relative to the region's text and trimmed,
+so the region's start is added; they must cover the region exactly (first start and last end
+equal the region's, only white space and `;` between, every range non-empty on character
+boundaries). Run 1/2 then runs the oracle statement at the caret (a caret not in a region, or a
+remembered "from the caret"/"whole script", stays uncertain); Run 3 runs every statement with
+each region replaced by its oracle statements, every other statement certain in both splits,
+and no unsupported client command. Rejected: comments between oracle statements (refused: a
+separator check on raw text cannot tell `/* ; */` from code without re-lexing the region, and
+re-lexing with the lexer that called it uncertain decides nothing). The oracle blocks its
+caller; resolution runs off the UI thread (the app's background executor), and requests
+coalesce latest-wins per `OracleLane`: a request superseded before its parser job runs is
+skipped and answers `Uncertain`. Tests: `pg_ambiguity_resolved_by_the_oracle_when_it_covers_the_region`,
+`an_oracle_split_that_does_not_cover_the_region_stays_uncertain`,
+`deep_nesting_is_never_sent_to_the_oracle` (a counting oracle: 0 calls above the limit, 1 at
+it), `mysql_ambiguity_stays_uncertain`, `a_selection_or_several_carets_never_ask_the_oracle`,
+`a_superseded_oracle_request_is_skipped`.
+
+**The observer.** `ExecService::run` submits one `Request::Run` and answers a `RunTicket`
+(the request's `seq` for cancel). Its `RunObserver` creates a `ResultStore` per result on the
+shared budget (process-unique `ResultId`s), keyed `TabKey { console, unit_ordinal, 0 }`; a
+re-run into the same key gets the next generation. Tabs are titled `Result N` by their order in
+the run. The status lives in its `watch` and is edited in place (`Arc::make_mut` copies the
+unit list only while a reader holds a snapshot), so an event is O(1) unless the UI kept the
+previous status; phase changes publish at once, progress inside a unit (result opened, rows)
+at most every 50 ms. Rejected: rebuilding `Arc<[UnitStatusEntry]>` on every event (O(units) per
+event, O(n²) for a whole-script run of n units). A result that stays suspended after its unit
+shows `Suspended { rows }` and follows its result: `Succeeded` with `more: true` when it is
+released, with a second "rows retrieved" line when it completes.
+
+**What the log says, and what it does not.** One line per finished unit (rows retrieved, with
+"more are available" while the cursor stays open; rows affected; completed; "Statement N
+failed" with the error view; a read-only denial; "Cancelled" for the unit in flight only), a
+released cursor's reason with its "Hacivat's transaction was rolled back" form (one message per
+`CloseReason`, both forms: 20 IDs), more result sets, a user transaction ended by
+`COMMIT`/`END` or `ROLLBACK`/`ABORT` (an implicit end, a MySQL DDL or a loss, is not announced:
+better silent than wrong), and a summary for runs of more than one unit. A cursor released by a
+failure while its unit is in flight (`ServerTerminated`, `ConnectionLost`, `EnforcementGap`)
+says nothing of its own: the unit's error line does. The ring drops its oldest line when full;
+lines that leave before any `lines()` call read them are counted, and `lines()` then starts with
+one `Dropped { n }` line (`exec-events-dropped`) until the log is cleared.
+
+**Later fetches (plan amendment).** A result source's commands go through the service's own
+`FetchControl`, which submits `FetchMore`/`FetchAll`/`CloseCursor` and awaits the reply on the
+runtime the observer ran on (the core runtime): an error with server text (or any but a cancel
+or a silent loss) is logged as "Statement N failed" with the server's text, next to the
+session's `CursorReleased` line. Test: `a_later_fetch_failure_is_logged_with_the_server_text`.
+
+**A run that never started.** Its reply comes without `RunEnded` (queued behind a cancel, a
+closed or lost session). The service awaits the reply on its runtime (`ExecService::new` takes
+the current Tokio runtime when there is one; `with_runtime` sets it) and ends the run there:
+every unit `Skipped` (`Cancelled` after a cancel), an aborted summary on `done`, and the
+reply's error in the log. Without a runtime the observer's drop ends it the same way, without
+the error. Test: `a_run_that_never_started_ends_with_its_reason`.
+
+**Error views.** The title is by error kind (`exec-error-server`, `-connection-lost`,
+`-connection-lost-unknown`, `-cancelled`, `-tx-failed` for `Tx(FailedNeedsRollback)`,
+`-tx-in-progress`, `-tx-unsupported`, `-enforcement-gap`, `-not-connected`, `-internal`; a
+read-only denial is its `exec-deny-read-only-*` sentence); the code chip is the SQLSTATE, else
+the vendor code; the server's text is kept verbatim. The SQLite busy hint is the same rule and
+Fluent ID as `hacivat_driver_sqlite::error_hint` (`SQLITE_BUSY` in the code's low byte, kind
+`Db`, engine SQLite): `hacivat-exec` has no `hacivat-driver-sqlite` dependency and no task after
+Task 1b edits a manifest, so the rule is restated here and pinned by
+`sqlite_busy_gets_hacivats_hint`. `doc_offset` maps a 1-based server character cursor through
+`LineIndex::char_to_byte` into the unit and then the document (`doc_offset_of`); no driver
+reports a cursor yet (`ServerMessage` has no position field), so the service passes `None` and
+the mapping is tested on its own (`failed_unit_maps_server_position_to_the_document`).
+
+**Messages.** Every `LogMsg` ID is a literal in `fluent_id` (P24); durations and sizes are one
+message each with the unit inside (`exec-dur-*`, `exec-size-*`, 1,024-based with one decimal);
+a statement number is a raw string argument (never grouped). Each `AmbiguityReason` has an
+`exec-uncertain-*` sentence (`OverlappingUnits` included). `copy_invariant` writes ISO 8601 UTC
+timestamps with milliseconds, ASCII severities, message IDs, `name=value` arguments (a duration
+as `<n>ms`) and the server's text verbatim with `\`, tab, CR and LF escaped, so one line stays
+one line; nothing is localized or case-mapped.
+
+**Console UX.** `console_ux` is pure: `forced_read_only` = the production policy on, the profile
+tagged production and the session read-only; the transaction badge is the user's only
+(`UserOpen` for `TxOwner::User` in a transaction, `Failed` when it failed), Hacivat's own around
+a PostgreSQL cursor is `CursorSnapshot`, the guard's or an unclaimed one `Auto`; cancelling at
+every rung; `running` only for a run that started and has not ended (a session `Busy` with
+request 0, the idle release, is not a run). Test: `console_ux_table`.
+
+**SQL context (R-M3-39).** `dialect_id` maps every engine (TiDB → MySQL; engines without a SQL
+dialect → `Generic`); the probe is `SHOW standard_conforming_strings` on the PostgreSQL wire and
+`SELECT @@SESSION.sql_mode` on the MySQL family; a PostgreSQL answer other than `on`/`off` keeps
+the default; `needs_reprobe` is a unit whose first word is `SET`.
