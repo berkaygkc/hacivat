@@ -22,7 +22,8 @@ shots = [
 # `publish_event`), enabled only by this crate's own dev-dependency on itself below.
 test-support = ["hacivat-session/test-support"]
 # ## m3a-t01b-seams: the B3 and B1-real benches (Tasks 20 and 36).
-bench = ["hacivat-ui-core/bench", "hacivat-driver/fake"]
+# ## m3a-t36-bench: named exception (controller): the grid's own paint timer for B1-real.
+bench = ["hacivat-ui-core/bench", "hacivat-driver/fake", "hacivat-ui-grid/bench"]
 
 [dependencies]
 hacivat-ui-core.workspace = true

@@ -1800,3 +1800,101 @@ fn resolve_on_50k_lines_within_2_ms_release() {
         }
     }
 }
+
+// ## m3a-f1-followups
+// Follow-up F1-a: which unit is a streaming `COPY` is the splitter's answer
+// (`StmtHead::copy_stream`, `UnitKind::CopyStream`), the one the Run preview and Run both read.
+
+/// The kind of the one unit Run 2 (the statement at the caret) sends after `needle`.
+fn unit_kind_at(doc: &DocSnapshot, sql: &str, needle: &str) -> UnitKind {
+    let r = exec(
+        doc,
+        &caret(after(sql, needle)),
+        &inside(InsidePolicy::SmallestStatement),
+    );
+    let u = units_of(&r);
+    assert_eq!(u.len(), 1, "{r:?}");
+    u[0].kind
+}
+
+/// The splitter's head is the server's: `)COPY` is no `COPY` (PostgreSQL rejects it as a
+/// syntax error at `)`, so its "rows" are never read as data). They are SQL to the splitter,
+/// and no caret on them runs anything: the `\.` line is a client command.
+#[test]
+fn a_copy_is_recognised_by_the_statement_head() {
+    let sql = "SELECT 1;)COPY t FROM STDIN;\na\tb\n\\.\nSELECT 2;";
+    let doc = pg(sql);
+    assert_eq!(unit_kind_at(&doc, sql, ")CO"), UnitKind::Statement);
+    for i in span(sql, "a\tb").start..=after(sql, "\\.") {
+        let r = exec(&doc, &caret(i), &ExecPolicy::default());
+        assert!(
+            !matches!(r, RangeResolution::Units(_) | RangeResolution::Ask { .. }),
+            "{i}: {r:?}"
+        );
+    }
+    assert!(!matches!(
+        exec(&doc, &caret(0), &ExecPolicy::whole_script()),
+        RangeResolution::Units(_) | RangeResolution::Ask { .. }
+    ));
+
+    // A `COPY` that streams, whatever follows it, is the splitter's `CopyStream`.
+    for (sql, needle) in [
+        ("COPY (SELECT 1) TO STDOUT;", "COPY"),
+        ("COPY t TO stdout;\nSELECT 1;", "COPY"),
+        ("/* c */ COPY t FROM STDIN", "COPY"),
+        ("copy t (a) from stdin with (format csv)", "copy"),
+        ("SELECT 1;\n  COPY t FROM STDIN", "COPY"),
+    ] {
+        assert_eq!(
+            unit_kind_at(&pg(sql), sql, needle),
+            UnitKind::CopyStream,
+            "{sql}"
+        );
+    }
+    // Under a flavor without psql's inline rows, `COPY … FROM STDIN;` still streams.
+    let sql = "COPY t FROM STDIN;";
+    let doc = doc_in(sql, DialectId::Postgres, ClientFlavor::None);
+    assert_eq!(unit_kind_at(&doc, sql, "COPY"), UnitKind::CopyStream);
+    // With psql's rows it stays `CopyIn`.
+    let sql = "COPY t FROM STDIN;\n1\n\\.\n";
+    assert!(matches!(
+        unit_kind_at(&pg(sql), sql, "COPY"),
+        UnitKind::CopyIn { .. }
+    ));
+
+    // Not a streaming `COPY`: the head is another word, or `STDIN` is in a string or comment.
+    for (sql, needle) in [
+        ("SELECT copy, stdin FROM t;", "SEL"),
+        ("COPY t FROM '/srv/stdin';", "COPY"),
+        ("COPY t TO '/srv/t.csv' /* STDOUT */;", "COPY"),
+        ("(COPY t FROM STDIN);", "(CO"),
+        ("EXPLAIN COPY t TO STDOUT;", "EXP"),
+    ] {
+        assert_eq!(
+            unit_kind_at(&pg(sql), sql, needle),
+            UnitKind::Statement,
+            "{sql}"
+        );
+    }
+}
+
+/// A selection of a `COPY … FROM STDIN` without its rows never runs as a plain statement.
+#[test]
+fn a_copy_selected_without_its_rows_is_never_a_plain_statement() {
+    let sql = "SELECT 1;\nCOPY t FROM STDIN;\n1\n\\.\nSELECT 2;";
+    for r in [
+        span(sql, "COPY t FROM STDIN"),
+        span(sql, "COPY t FROM STDIN;"),
+        span(sql, "SELECT 1;\nCOPY t FROM STDIN;"),
+    ] {
+        match resolve_sel(sql, r.clone()) {
+            RangeResolution::Units(u) => assert!(
+                u.iter()
+                    .any(|u| matches!(u.kind, UnitKind::CopyStream | UnitKind::CopyIn { .. })),
+                "{r:?}: {u:?}"
+            ),
+            RangeResolution::Ask { .. } => panic!("{r:?}: a selection never asks"),
+            _ => {}
+        }
+    }
+}

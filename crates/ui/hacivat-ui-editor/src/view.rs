@@ -625,6 +625,20 @@ impl EditorView {
         }
     }
 
+    // ## m3a-t36-benches (fix round 1, named exception): the input handler marks at its entry.
+    /// The input handler's entry (typed text, a composition update): marks the probe before
+    /// the model edits, as `commit` does, so the fan-out does not mark again.
+    pub(crate) fn mark_input_at_entry(&mut self, cx: &App) {
+        self.mark_input(cx);
+        self.input_marked = true;
+    }
+
+    /// The input handler's edit ended, applied or vetoed: the fan-out owes no mark.
+    pub(crate) fn input_handled(&mut self) {
+        self.input_marked = false;
+    }
+    // ## end m3a-t36-benches
+
     /// Scrolls by `dy` pixels with the last frame's metrics (nothing before the first frame).
     pub(crate) fn scroll_by(&mut self, dy: f64) {
         let Some(layout) = self.layout.as_ref() else {
@@ -1041,6 +1055,61 @@ mod t19_tests {
                 .expect("the mark applies");
             v.apply_committed(c, UserEvent::InputTypeCompose, cx);
             assert_eq!(probe.0.get(), 3, "a Committed made outside `commit`");
+        });
+    }
+
+    // ## m3a-t36-benches (fix round 1, named exception): typed text marks at handler entry.
+
+    /// What happened, in order: the probe's input mark and the model's edit.
+    #[derive(Default)]
+    struct Order(RefCell<Vec<&'static str>>);
+
+    struct OrderProbe(Rc<Order>);
+
+    impl FrameProbe for OrderProbe {
+        fn input(&self, _: std::time::Instant) {
+            self.0.0.borrow_mut().push("input");
+        }
+        fn painted(&self, _: &mut App) {}
+    }
+
+    /// Logs each edit as the model applies it (a filter runs inside the dispatch).
+    struct OrderFilter(Rc<Order>);
+
+    impl hacivat_text::TransactionFilter for OrderFilter {
+        fn filter(
+            &self,
+            _: &hacivat_text::EditorModel,
+            tr: Transaction,
+        ) -> Result<Transaction, hacivat_text::Veto> {
+            self.0.0.borrow_mut().push("edit");
+            Ok(tr)
+        }
+    }
+
+    /// Typed text and composition updates come through the input handler, not `commit`: the
+    /// probe is marked at the handler's entry, before the model edits (B3's probe point, M0
+    /// addendum finding 6), and once per input.
+    #[gpui::test]
+    fn typed_text_marks_the_probe_before_the_edit(cx: &mut TestAppContext) {
+        use hacivat_ui_core::gpui_surface::EntityInputHandler as _;
+        let (e, vcx) = open(cx, "SELECT 1".to_string());
+        let order = Rc::new(Order::default());
+        e.update_in(vcx, |v, window, cx| {
+            v.set_probe(Some(Rc::new(OrderProbe(order.clone()))));
+            v.model.add_filter(Box::new(OrderFilter(order.clone())));
+            v.replace_text_in_range(None, "x", window, cx);
+            assert_eq!(*order.0.borrow(), ["input", "edit"], "a typed character");
+            order.0.borrow_mut().clear();
+            v.replace_and_mark_text_in_range(None, "ş", None, window, cx);
+            assert_eq!(*order.0.borrow(), ["input", "edit"], "a composition update");
+            order.0.borrow_mut().clear();
+            v.replace_text_in_range(None, "ş", window, cx);
+            assert_eq!(
+                *order.0.borrow(),
+                ["input", "edit"],
+                "the composition's commit"
+            );
         });
     }
 

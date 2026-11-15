@@ -346,6 +346,9 @@ impl<'a> View<'a> {
     }
 
     /// The runnable subquery at `caret` inside `stmt`, when an oracle names a valid one.
+    // ## m3a-f1-followups (fix round 1, M2): the range gets `UnitKind::Subquery`, never the
+    // splitter's `CopyStream`, so a future oracle (M3b) must refuse a range holding the word
+    // `COPY` (`hacivat_exec::units`'s `mentions_copy`) or split it again for its head.
     fn subquery(
         &self,
         stmt: &Stmt,

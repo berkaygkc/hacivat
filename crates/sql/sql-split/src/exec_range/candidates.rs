@@ -25,6 +25,12 @@ pub enum UnitKind {
     CopyIn {
         data: TextRange,
     },
+    // ## m3a-f1-followups (named exception, follow-up F1-a)
+    /// Any other `COPY` that streams rows to or from the client (`StmtHead::copy_stream`):
+    /// `COPY … TO STDOUT`, or `COPY … FROM STDIN` whose rows the text does not hold (no
+    /// terminator, a selection without them, a flavor without psql's inline data). The
+    /// server would wait for or send `COPY` data; M3a sends neither.
+    CopyStream,
 }
 
 /// One unit to run: its strict range (no terminator, no leading comments; the sent text), its
@@ -44,6 +50,8 @@ impl UnitSpan {
             range: stmt.strict,
             kind: match stmt.copy_data {
                 Some(data) => UnitKind::CopyIn { data: data.rows },
+                // ## m3a-f1-followups
+                None if stmt.head.copy_stream => UnitKind::CopyStream,
                 None => UnitKind::Statement,
             },
             key: Some(stmt.key),
