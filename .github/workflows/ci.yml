@@ -443,6 +443,23 @@ jobs:
       - name: Bench spike-editor completion
         run: xvfb-run -a cargo run --locked -p spike-editor --release -- --file target/fixtures/b3-50k.sql --bench completion
 
+      # ## m3a-t36-bench: the real-app benches (`hacivat-app` examples `b3` and `b1_real`,
+      # feature `bench`). Relative signal only (L2): software rendering under a virtual display
+      # with no window manager, so `--allow-inactive` lets a run go on when the window never
+      # becomes key (its verdict then fails by construction). B1-real proper (PostgreSQL, the
+      # PO's 120 Hz panel) is the gate's; here `--engine sqlite` builds the same 1M x 50 shape.
+      - name: Build the real-app benches
+        run: cargo build --locked --release -p hacivat-app --features bench --examples
+
+      - name: Real-app bench harness tests (headless)
+        run: cargo test --locked --release -p hacivat-app --features bench --lib bench
+
+      - name: Bench b3 typing (real app)
+        run: xvfb-run -a cargo run --locked --release -p hacivat-app --features bench --example b3 -- --file target/fixtures/b3-50k.sql --bench typing --allow-inactive
+
+      - name: Bench b1_real fling over SQLite (real app)
+        run: xvfb-run -a cargo run --locked --release -p hacivat-app --features bench --example b1_real -- --engine sqlite --allow-inactive
+
       - name: Upload bench JSON (regression signal only, not authoritative)
         uses: actions/upload-artifact@v4
         with:
