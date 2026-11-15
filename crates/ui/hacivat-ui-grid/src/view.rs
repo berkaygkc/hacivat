@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use hacivat_ui::text::{Label, TextFn, TextSource};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, AnyView, App, AppContext as _, Context, Div, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, ParentElement, Render, Role, ScrollEvent,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, Task, Window, div, px,
+    AnyElement, AnyView, App, AppContext as _, Context, Div, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, ParentElement, Render, Role, ScrollEvent, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, Task, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 

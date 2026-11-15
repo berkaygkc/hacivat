@@ -64,6 +64,10 @@ pub enum IconName {
     ClipboardX,
     Ban,
     CopyCheck,
+    // ## m3a-t30-results-view: a result tab (NOTES surface 9) and "more result sets" (surface 11);
+    // both SVGs were already bundled.
+    Table2,
+    Layers,
     /// The Hacivat mark (`icons/hacivat/hv-mark.svg`).
     HvMark,
 }
@@ -122,6 +126,9 @@ impl IconName {
             IconName::ClipboardX => "icons/lucide/clipboard-x.svg",
             IconName::Ban => "icons/lucide/ban.svg",
             IconName::CopyCheck => "icons/lucide/copy-check.svg",
+            // ## m3a-t30-results-view
+            IconName::Table2 => "icons/lucide/table-2.svg",
+            IconName::Layers => "icons/lucide/layers.svg",
             IconName::HvMark => "icons/hacivat/hv-mark.svg",
         }
     }
@@ -237,7 +244,7 @@ mod tests {
     use hacivat_ui_core::assets::BundledAssets;
     use hacivat_ui_core::gpui_surface::AssetSource;
 
-    const ALL: [IconName; 50] = [
+    const ALL: [IconName; 52] = [
         IconName::ArrowLeftRight,
         IconName::Check,
         IconName::ChevronDown,
@@ -290,6 +297,9 @@ mod tests {
         IconName::Ban,
         IconName::CopyCheck,
         IconName::HvMark,
+        // ## m3a-t30-results-view
+        IconName::Table2,
+        IconName::Layers,
     ];
 
     #[test]
