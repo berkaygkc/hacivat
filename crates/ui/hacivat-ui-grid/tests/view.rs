@@ -809,6 +809,10 @@ fn record_texts(vcx: &mut VisualTestContext) {
 /// The node is declared on the element that tracks the focus (the view's root), as Task 29
 /// did for the editor: GPUI gives the platform focus to that element's node, so a node on the
 /// inner grid element could never be the focused one.
+///
+/// Limit (## m3a-t30 fix round 1, M11): test windows never activate assistive technology, so
+/// this checks `a11y_node` on a root built here, not that `GridView::render` calls it; the
+/// render wiring is one line next to `track_focus`, and Task 35's a11y probe covers it.
 #[gpui::test]
 fn grid_node_is_the_focused_element(cx: &mut TestAppContext) {
     use gpui::{Element as _, Focusable as _, InteractiveElement as _, accesskit, div};

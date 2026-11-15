@@ -415,11 +415,13 @@ impl GridView {
             .aria_column_count(self.layout.len())
     }
 
-    /// Whether the last frame showed a result known to have no rows (its header stays).
+    /// Whether the last frame showed a result known to have no rows (its header stays): an exact
+    /// total of 0 (## m3a-t30 fix round 1, I4). A result that stopped before its first row
+    /// (cancelled, closed) has no exact total, and nobody knows it is empty.
     pub fn shows_no_rows(&self) -> bool {
         self.data.generation.is_some()
             && !self.columns.is_empty()
-            && self.data.known_total() == Some(0)
+            && self.data.count.exact_total == Some(0)
     }
 
     /// "No rows" over the body's first row, while [`shows_no_rows`](Self::shows_no_rows).

@@ -33,9 +33,10 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use hacivat_exec::{SessionLog, copy_invariant};
-use hacivat_l10n::{Count, Text, ids};
-use hacivat_results::Completeness;
+use hacivat_exec::{LogLine, LogMsg, SessionLog, TabKey, copy_invariant};
+use hacivat_l10n::{Count, ExactDecimal, Text, ids};
+use hacivat_results::{Completeness, PauseReason, StoreSnapshot};
+use hacivat_session::session::UnitId;
 use hacivat_ui::actions::{ActionDef, ActionRegistry};
 use hacivat_ui::popover::Declare as _;
 use hacivat_ui::text::TextFn;
@@ -56,9 +57,9 @@ use crate::console::{ConsoleId, Consoles};
 use crate::l10n_global::{text_fn, tr};
 use crate::results::adapter::GridAdapter;
 use crate::results::copy;
-use crate::results::output_view::{LOG_ROW_PX, LogRows, duration_text};
-use crate::results::strip::{self, StripActions, StripModel};
-use crate::results::tabs::{ActiveResult, ConsoleResults, ResultEntry, result_title};
+use crate::results::output_view::{LOG_ROW_PX, LogRows};
+use crate::results::strip::{self, StripActions, StripFacts, StripModel};
+use crate::results::tabs::{ActiveResult, ConsoleResults, MemoryBanner, ResultEntry, result_title};
 use crate::results::toolbar::{self, OnActivate, TabsModel, WIDE_RESULT_COLUMNS};
 use crate::shell::Workspace;
 
@@ -96,7 +97,13 @@ struct ConsoleTile {
     /// The log has had a line (or been cleared): the console ran.
     ran: bool,
     grids: Vec<GridSlot>,
+    // ## m3a-t30 fix round 1 (I2): the strip's facts per tab, kept when the log is cleared or
+    // its ring drops the lines they came from; reset when the tab shows another unit.
+    facts: HashMap<TabKey, (UnitId, StripFacts)>,
+    /// The newest log line seen (I5: a line of a run without a tab shows Output).
+    seen_seq: Option<u64>,
     _observe: Subscription,
+    _events: Subscription,
     _log: Task<()>,
 }
 
@@ -173,47 +180,75 @@ fn grid_config(number: u32, adapter: &Rc<GridAdapter>) -> GridConfig {
     }
 }
 
-/// The rows of `entry` and their time, as the toolbar shows them ("10,000+ rows · 131 ms"):
-/// "+" while more can come (as the status bar, Task 34), the time is execution plus fetching.
-fn rows_timing(entry: &ResultEntry, cx: &App) -> SharedString {
-    let snapshot = entry.adapter().snapshot();
+/// The rows of `entry` in `snapshot` and their time, as the toolbar shows them ("10,000+ rows ·
+/// 131 ms"). ## m3a-t30 fix round 1: Task 34's messages and rules, so the toolbar and the status
+/// bar say the same thing: "+" while more can come (streaming, suspended, truncated), the time
+/// is execution plus fetching, whole milliseconds under a second, else seconds with two
+/// decimals (`hv-status-duration-*`). The snapshot is the frame's one load of the tab (M10).
+fn rows_timing(entry: &ResultEntry, snapshot: &StoreSnapshot, cx: &App) -> SharedString {
     let rows = Count(snapshot.row_count());
     let more = matches!(
         snapshot.completeness(),
         Completeness::Streaming | Completeness::Suspended(_) | Completeness::Truncated(_)
     );
-    let ms = match entry.timing() {
+    let duration = match entry.timing() {
         (None, None) => None,
-        (e, f) => Some(e.unwrap_or(0).saturating_add(f.unwrap_or(0))),
+        (e, f) => Some(Text(
+            duration_label(e.unwrap_or(0).saturating_add(f.unwrap_or(0)), cx).to_string(),
+        )),
     };
-    match (ms, more) {
-        (Some(ms), false) => tr(
+    match (more, duration) {
+        (false, None) => tr(cx, ids::hv::RESULTS_ROWS, ids::hv::HvResultsRows { rows }),
+        (true, None) => tr(
             cx,
-            ids::hv::RESULTS_TILE_ROWS_TIMING,
-            ids::hv::HvResultsTileRowsTiming {
-                rows,
-                duration: Text(duration_text(ms, cx)),
-            },
+            ids::hv::RESULTS_ROWS_MORE,
+            ids::hv::HvResultsRowsMore { rows },
         ),
-        (Some(ms), true) => tr(
+        (false, Some(duration)) => tr(
             cx,
-            ids::hv::RESULTS_TILE_ROWS_MORE_TIMING,
-            ids::hv::HvResultsTileRowsMoreTiming {
-                rows,
-                duration: Text(duration_text(ms, cx)),
-            },
+            ids::hv::RESULTS_ROWS_TIMING,
+            ids::hv::HvResultsRowsTiming { rows, duration },
         ),
-        (None, false) => tr(
+        (true, Some(duration)) => tr(
             cx,
-            ids::hv::RESULTS_TILE_ROWS,
-            ids::hv::HvResultsTileRows { rows },
-        ),
-        (None, true) => tr(
-            cx,
-            ids::hv::RESULTS_TILE_ROWS_MORE,
-            ids::hv::HvResultsTileRowsMore { rows },
+            ids::hv::RESULTS_ROWS_MORE_TIMING,
+            ids::hv::HvResultsRowsMoreTiming { rows, duration },
         ),
     }
+}
+
+/// A duration as the status bar writes it (Task 34's `duration_label`, which is private to its
+/// file): whole milliseconds under a second, else seconds with two decimals.
+fn duration_label(ms: u64, cx: &App) -> SharedString {
+    if ms < 1000 {
+        return tr(
+            cx,
+            ids::hv::STATUS_DURATION_MS,
+            ids::hv::HvStatusDurationMs { ms: Count(ms) },
+        );
+    }
+    tr(
+        cx,
+        ids::hv::STATUS_DURATION_S,
+        ids::hv::HvStatusDurationS {
+            seconds: ExactDecimal(format!("{}.{:02}", ms / 1000, (ms % 1000) / 10)),
+        },
+    )
+}
+
+/// The memory banner of `entry` as `snapshot` shows it (M10: the strip, the banner and the
+/// toolbar read one snapshot). Whether "Fetch more anyway" is still offered comes from the tab,
+/// which alone knows the cap was raised.
+fn banner_of(entry: &ResultEntry, snapshot: &StoreSnapshot) -> Option<MemoryBanner> {
+    if !matches!(snapshot.completeness(), Completeness::Suspended(_)) {
+        return None;
+    }
+    let reason = snapshot.paused()?;
+    let raised = entry.memory_banner().is_some_and(|b| !b.can_raise);
+    Some(MemoryBanner {
+        reason,
+        can_raise: !(raised && reason == PauseReason::GlobalBudget),
+    })
 }
 
 /// The size (`rows × cols`) of `grid`'s selection over `loaded` rows, when it has one block.
@@ -257,6 +292,7 @@ impl ResultsHost {
         &mut self,
         console: ConsoleId,
         results: &Entity<ConsoleResults>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self
@@ -275,6 +311,11 @@ impl ResultsHost {
         let mut changes = log.changes();
         let ran = *changes.borrow() > 0;
         let observe = cx.observe(results, |_, _, cx| cx.notify());
+        // ## m3a-t30 fix round 1 (T33 merge obligation): what the tile asks of the run UI.
+        let events = cx.subscribe_in(results, window, |_, _, event: &ResultsEvent, window, cx| {
+            crate::exec_ui::handle_results_event(event, window, cx);
+        });
+        let seen_seq = log.lines().last().map(|l| l.seq);
         let task = cx.spawn(async move |this, cx| {
             while changes.changed().await.is_ok() {
                 if this
@@ -293,27 +334,123 @@ impl ResultsHost {
                 list,
                 ran,
                 grids: Vec::new(),
+                facts: HashMap::new(),
+                seen_seq,
                 _observe: observe,
+                _events: events,
                 _log: task,
             },
         );
     }
 
-    /// `console`'s log changed: the list takes its lines; a line while another tab is active
-    /// marks Output unread.
+    /// `console`'s log changed: the list takes its lines; the tabs' strip facts take what the
+    /// new lines say; a line while another tab is active marks Output unread; a line of a run
+    /// that opened no tab shows Output (I5).
     fn on_log(&mut self, console: ConsoleId, cx: &mut Context<Self>) {
         let Some(tile) = self.tiles.get_mut(&console) else {
             return;
         };
         tile.ran = true;
         let lines = tile.log.lines();
-        let added = !lines.is_empty();
+        let fresh: Vec<&LogLine> = lines
+            .iter()
+            .filter(|l| tile.seen_seq.is_none_or(|seen| l.seq > seen))
+            .filter(|l| !matches!(l.msg, LogMsg::Dropped { .. }))
+            .collect();
+        if let Some(last) = lines.last() {
+            tile.seen_seq = Some(tile.seen_seq.map_or(last.seq, |s| s.max(last.seq)));
+        }
+        let results = tile.results.read(cx);
+        for entry in results.tabs() {
+            let found = StripFacts::from_log(&lines, entry.unit());
+            match tile.facts.get_mut(&entry.key()) {
+                Some((unit, facts)) if *unit == entry.unit() => facts.merge(found),
+                _ => {
+                    tile.facts.insert(entry.key(), (entry.unit(), found));
+                }
+            }
+        }
+        // NOTES surface 9: a run that ends in an error or update counts only (no tab of its
+        // own) shows the Output tab, not an earlier run's result. A line of the run whose
+        // result is shown leaves it in view, and a later tab of the run takes the strip back
+        // (`ConsoleResults::apply` activates a run's first tab once).
+        let active_run = match results.active() {
+            ActiveResult::Tab(ix) => results.tab(ix).map(|t| t.unit().run),
+            ActiveResult::Output => None,
+        };
+        let show_output = active_run.is_some_and(|active| {
+            fresh.iter().any(|l| {
+                let run = match (&l.msg, l.unit) {
+                    (_, Some(unit)) => Some(unit.run),
+                    // A run that never started names no unit.
+                    (LogMsg::NotStarted(_), None) => None,
+                    _ => return false,
+                };
+                run.is_none_or(|run| {
+                    run != active && !results.tabs().iter().any(|t| t.unit().run == run)
+                })
+            })
+        });
+        let added = !fresh.is_empty();
         tile.list
             .update(cx, |l, cx| l.rows_mut(cx).set_lines(lines));
-        if added {
+        if show_output {
+            tile.results
+                .update(cx, |r, cx| r.set_active(ActiveResult::Output, cx));
+        } else if added {
             tile.results.update(cx, |r, cx| r.note_output(cx));
         }
         cx.notify();
+    }
+
+    /// The strip facts of tab `entry` (its memo, built from the log on first sight).
+    fn facts_of(
+        &mut self,
+        console: ConsoleId,
+        entry_key: TabKey,
+        unit: UnitId,
+        cx: &App,
+    ) -> StripFacts {
+        let Some(tile) = self.tiles.get_mut(&console) else {
+            return StripFacts::default();
+        };
+        match tile.facts.get(&entry_key) {
+            Some((u, facts)) if *u == unit => *facts,
+            _ => {
+                let facts = StripFacts::from_log(tile.list.read(cx).rows().lines(), unit);
+                tile.facts.insert(entry_key, (unit, facts));
+                facts
+            }
+        }
+    }
+
+    /// Keeps the keyboard focus on what the tile shows (C1): when a grid the tile no longer
+    /// shows (another result tab, another console's) holds the focus, the focus moves to the
+    /// shown grid, or leaves the hidden one when none is shown. GPUI keeps a focus on an
+    /// element that stopped rendering, and the palette restores the focus it found.
+    fn guard_focus(
+        &self,
+        shown: Option<&Entity<GridView>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let hidden_focused = self.tiles.values().any(|t| {
+            t.grids.iter().any(|s| {
+                shown.is_none_or(|g| g.entity_id() != s.view.entity_id())
+                    && s.view
+                        .read(cx)
+                        .focus_handle(cx)
+                        .contains_focused(window, cx)
+            })
+        });
+        if !hidden_focused {
+            return;
+        }
+        let target = shown.map(|g| g.read(cx).focus_handle(cx));
+        window.defer(cx, move |window, cx| match target {
+            Some(handle) => window.focus(&handle, cx),
+            None => window.blur(cx),
+        });
     }
 
     /// Forgets consoles that are gone and grids whose tab closed.
@@ -445,6 +582,8 @@ impl ResultsHost {
             .child(strip_tabs);
         match active {
             ActiveResult::Output => {
+                self.guard_focus(None, window, cx);
+                let tile = self.tiles.get(&console)?;
                 let list = tile.list.clone();
                 let log = tile.log.clone();
                 let lines_empty = list.read(cx).rows().lines().is_empty();
@@ -480,16 +619,21 @@ impl ResultsHost {
             }
             ActiveResult::Tab(ix) => {
                 let grid = self.ensure_grid(console, ix, cx)?;
-                let tile = self.tiles.get(&console)?;
+                self.guard_focus(Some(&grid), window, cx);
+                let (key, unit) = {
+                    let entry = results.read(cx).tab(ix)?;
+                    (entry.key(), entry.unit())
+                };
+                let facts = self.facts_of(console, key, unit, cx);
                 let r = results.read(cx);
                 let entry = r.tab(ix)?;
                 let adapter = entry.adapter().clone();
+                // M10: one snapshot of the tab for the strip, the banner and the toolbar.
                 let snapshot = adapter.snapshot();
                 let columns = adapter.columns().len();
-                let lines = tile.list.read(cx).rows().lines().clone();
-                let model = StripModel::of(&snapshot, entry.memory_banner(), &lines, entry.unit());
+                let model = StripModel::of(&snapshot, banner_of(entry, &snapshot), facts);
                 let selection = selection_dims(grid.read(cx), snapshot.row_count());
-                let rows = rows_timing(entry, cx);
+                let rows = rows_timing(entry, &snapshot, cx);
                 let unit_ordinal = entry.key().unit_ordinal;
                 let copy_grid = grid.downgrade();
                 column = column.child(toolbar::result_toolbar(
@@ -522,7 +666,6 @@ impl ResultsHost {
                 ));
             }
         }
-        let _ = window;
         Some(column.into_any_element())
     }
 }
@@ -568,14 +711,16 @@ impl Render for ResultsHost {
         self.prune(cx);
         let Some((console, results)) = console_in(window, cx) else {
             self.shown = None;
+            self.guard_focus(None, window, cx);
             return crate::shell::tiles::results(&theme, cx).into_any_element();
         };
         self.shown = Some(console);
-        self.ensure_tile(console, &results, cx);
+        self.ensure_tile(console, &results, window, cx);
         let ran =
             self.tiles.get(&console).is_some_and(|t| t.ran) || !results.read(cx).tabs().is_empty();
         if !ran {
             // A console that never ran keeps the M1 tile.
+            self.guard_focus(None, window, cx);
             return crate::shell::tiles::results(&theme, cx).into_any_element();
         }
         self.tile_element(console, window, cx)
@@ -640,42 +785,42 @@ fn shown_results(cx: &App) -> Option<(ConsoleId, Entity<ConsoleResults>)> {
     })
 }
 
-/// The grid that has the focus in `window`.
-fn focused_grid(window: &Window, cx: &App) -> Option<Entity<GridView>> {
-    hosts(cx).into_iter().find_map(|h| {
-        h.read(cx).tiles.values().find_map(|t| {
-            t.grids
-                .iter()
-                .find(|s| {
-                    s.view
-                        .read(cx)
-                        .focus_handle(cx)
-                        .contains_focused(window, cx)
-                })
-                .map(|s| s.view.clone())
-        })
-    })
-}
+// ## m3a-t30 fix round 1 (C1, M7): a command acts only on what `window` shows: the active
+// result tab of the focused pane's active console. A grid the tile keeps for another tab or
+// another console never answers, even when the focus was left on it (GPUI keeps a focus on an
+// element that stopped rendering, and the palette restores it).
 
-/// The grid of the active result tab of the console `window` shows (else the shown one).
-fn active_grid(window: &Window, cx: &App) -> Option<Entity<GridView>> {
-    let (console, results) = console_in(window, cx).or_else(|| shown_results(cx))?;
+/// The active result tab of the console `window` shows, with its index.
+fn active_entry_in(
+    window: &Window,
+    cx: &App,
+) -> Option<(ConsoleId, Entity<ConsoleResults>, usize)> {
+    let (console, results) = console_in(window, cx)?;
     let ActiveResult::Tab(ix) = results.read(cx).active() else {
         return None;
     };
+    results.read(cx).tab(ix)?;
+    Some((console, results, ix))
+}
+
+/// The grid of the active result tab of the console `window` shows.
+fn active_grid(window: &Window, cx: &App) -> Option<Entity<GridView>> {
+    let (console, _, ix) = active_entry_in(window, cx)?;
     hosts(cx)
         .into_iter()
         .find_map(|h| h.read(cx).grid_of(console, ix, cx))
 }
 
-/// Runs `cmd` on the focused grid, else on the shown one.
+/// Runs `cmd` on the grid `window` shows.
 fn dispatch_grid(cmd: GridCommand, window: &mut Window, cx: &mut App) {
-    if let Some(grid) = focused_grid(window, cx).or_else(|| active_grid(window, cx)) {
+    if let Some(grid) = active_grid(window, cx) {
         grid.update(cx, |g, cx| g.dispatch(cmd, window, cx));
     }
 }
 
-/// The active result of the shown console, with its index.
+/// The active result of the shown console, with its index (the `enabled` checks get no
+/// window: with several windows they read the first live tile; the run bodies use their own
+/// window's console).
 fn active_entry(cx: &App) -> Option<(ConsoleId, Entity<ConsoleResults>, usize)> {
     let (console, results) = shown_results(cx)?;
     let ActiveResult::Tab(ix) = results.read(cx).active() else {
@@ -683,6 +828,18 @@ fn active_entry(cx: &App) -> Option<(ConsoleId, Entity<ConsoleResults>, usize)> 
     };
     results.read(cx).tab(ix)?;
     Some((console, results, ix))
+}
+
+/// Whether the active result's cursor can fetch: open and not paused at a memory limit (M8:
+/// there only the banner's "Fetch more anyway" fetches on).
+fn active_can_fetch(cx: &App) -> bool {
+    active_entry(cx).is_some_and(|(_, results, ix)| {
+        results.read(cx).tab(ix).is_some_and(|t| {
+            let snapshot = t.adapter().snapshot();
+            matches!(snapshot.completeness(), Completeness::Suspended(_))
+                && snapshot.paused().is_none()
+        })
+    })
 }
 
 /// Whether the active result has an open cursor.
@@ -697,9 +854,13 @@ fn active_has_cursor(cx: &App) -> bool {
     })
 }
 
-/// Runs `f` on the active result's source.
-fn with_active_source(cx: &mut App, f: impl FnOnce(&dyn hacivat_results::ResultSource)) {
-    if let Some((_, results, ix)) = active_entry(cx)
+/// Runs `f` on the source of the active result `window` shows.
+fn with_active_source(
+    window: &Window,
+    cx: &mut App,
+    f: impl FnOnce(&dyn hacivat_results::ResultSource),
+) {
+    if let Some((_, results, ix)) = active_entry_in(window, cx)
         && let Some(tab) = results.read(cx).tab(ix)
     {
         f(&*tab.source());
@@ -733,31 +894,31 @@ pub fn register_commands(cx: &mut App) {
         id: "results.fetch_more",
         title_id: ids::hv::CMD_RESULTS_FETCH_MORE.id,
         context: "Workspace",
-        run: Rc::new(|_, cx| {
-            with_active_source(cx, |s| s.ensure_rows(s.snapshot().row_count()));
+        run: Rc::new(|window, cx| {
+            with_active_source(window, cx, |s| s.ensure_rows(s.snapshot().row_count()));
         }),
-        enabled: active_has_cursor,
+        enabled: active_can_fetch,
     });
     let _ = reg.register(ActionDef {
         id: "results.fetch_all",
         title_id: ids::hv::CMD_RESULTS_FETCH_ALL.id,
         context: "Workspace",
-        run: Rc::new(|_, cx| with_active_source(cx, |s| s.fetch_all())),
-        enabled: active_has_cursor,
+        run: Rc::new(|window, cx| with_active_source(window, cx, |s| s.fetch_all())),
+        enabled: active_can_fetch,
     });
     let _ = reg.register(ActionDef {
         id: "results.close_cursor",
         title_id: ids::hv::CMD_RESULTS_CLOSE_CURSOR.id,
         context: "Workspace",
-        run: Rc::new(|_, cx| with_active_source(cx, |s| s.close_cursor())),
+        run: Rc::new(|window, cx| with_active_source(window, cx, |s| s.close_cursor())),
         enabled: active_has_cursor,
     });
     let _ = reg.register(ActionDef {
         id: "results.rerun",
         title_id: ids::hv::CMD_RESULTS_RERUN.id,
         context: "Workspace",
-        run: Rc::new(|_, cx| {
-            let Some((console, results, ix)) = active_entry(cx) else {
+        run: Rc::new(|window, cx| {
+            let Some((console, results, ix)) = active_entry_in(window, cx) else {
                 return;
             };
             let Some(unit_ordinal) = results.read(cx).tab(ix).map(|t| t.key().unit_ordinal) else {

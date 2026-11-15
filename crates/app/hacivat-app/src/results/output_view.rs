@@ -24,11 +24,14 @@ use hacivat_exec::{LogArg, LogLine, LogMsg, Severity, duration_message};
 use hacivat_l10n::ArgValue;
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::text::{Label, TextSource};
+// ## m3a-t30 fix round 1 (I3): controls in server text (a line break, a bidi override) are
+// shown as their chips, as in a cell, never obeyed or passed to the shaper.
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, WeakEntity, Window, div, px,
 };
 use hacivat_ui_core::theme::Theme;
+use hacivat_ui_grid::element::truncate::display_text;
 
 use crate::console::ConsoleId;
 use crate::l10n_global::{L10nGlobal, tr_id};
@@ -223,7 +226,7 @@ impl LogRows {
                     .bg(c.seam_soft.to_hsla())
                     .child(
                         Label::new(
-                            SharedString::from(code.to_string()),
+                            SharedString::from(display_text(&code)),
                             TextSource::Data,
                             t.type_ramp.mono_micro,
                             c.text_2.to_hsla(),
@@ -245,7 +248,7 @@ impl LogRows {
         let label = match &view.server_text {
             // The server's words, verbatim and whole (the tooltip keeps what the row cuts).
             Some(text) => Label::new(
-                SharedString::from(text.to_string()),
+                SharedString::from(display_text(text)),
                 TextSource::Data,
                 t.type_ramp.mono_data,
                 ink,

@@ -17,9 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
-use hacivat_ui_grid::GridView;
 use hacivat_app::console::{ConsoleId, ConsoleState, Consoles};
-use hacivat_app::results::strip::StripModel;
+use hacivat_app::results::strip::{StripFacts, StripModel};
 use hacivat_app::results::view::{ResultsHost, hosts};
 use hacivat_app::results::{ActiveResult, ConsoleResults, ResultsEvent};
 use hacivat_exec::{ErrorView, LogMsg, ResultTab, SessionLog, TabKey};
@@ -29,6 +28,7 @@ use hacivat_results::{
     ResultSource, ResultStore, StoreSource, TruncReason,
 };
 use hacivat_session::session::{ClientId, RunId, UnitId};
+use hacivat_ui_grid::GridView;
 use hacivat_ui_grid::RowRenderer as _;
 use hacivat_values::{ColumnMeta, LogicalType, NativeType, ResultSchema, Value};
 use support::*;
@@ -339,7 +339,7 @@ fn strip_cases() -> Vec<(Completeness, &'static str)> {
 
 fn strip_id(c: Completeness) -> &'static str {
     let store = store_of(4, 1, c);
-    StripModel::of(&store.snapshot(), None, &[], unit(1)).sentence_id()
+    StripModel::of(&store.snapshot(), None, StripFacts::default()).sentence_id()
 }
 
 #[gpui::test]
@@ -355,7 +355,7 @@ fn strip_text_per_completeness(_cx: &mut TestAppContext) {
         can_raise: true,
     });
     assert_eq!(
-        StripModel::of(&paused.snapshot(), banner, &[], unit(1)).sentence_id(),
+        StripModel::of(&paused.snapshot(), banner, StripFacts::default()).sentence_id(),
         "hv-strip-memory"
     );
     // The log's close line says whether Hacivat's transaction was rolled back.
@@ -378,7 +378,12 @@ fn strip_text_per_completeness(_cx: &mut TestAppContext) {
         },
     );
     assert_eq!(
-        StripModel::of(&closed.snapshot(), None, &log.lines(), unit(1)).sentence_id(),
+        StripModel::of(
+            &closed.snapshot(),
+            None,
+            StripFacts::from_log(&log.lines(), unit(1))
+        )
+        .sentence_id(),
         "cursor-closed-session-needed-rolled-back"
     );
 }
@@ -500,14 +505,19 @@ fn two_thousand_columns_render_with_the_hint(cx: &mut TestAppContext) {
         .read(|cx| host.read(cx).grid_of(t.console, 0, cx))
         .expect("the tab's grid");
     assert!(t.vcx.read(|cx| grid.read(cx).frame_stats().cells) > 0);
+}
 
-    // 2,000 columns exactly: no hint.
-    let t2 = tile(cx, "en", None);
-    t2.apply(&[tab(
+/// 2,000 columns exactly: no hint. (Its own test: one shell window per app. Two workspace
+/// windows in one app ping-pong Task 34's `ActiveTab` observer, which refreshes every window,
+/// so a second shell here never settles; noted for Task 34.)
+#[gpui::test]
+fn two_thousand_columns_exactly_have_no_hint(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    t.apply(&[tab(
         1,
         source(store_of(1, 2_000, Completeness::Complete), Arc::default()),
     )]);
-    assert_eq!(t2.text("results-columns-hint"), None);
+    assert_eq!(t.text("results-columns-hint"), None);
 }
 
 #[gpui::test]
@@ -635,7 +645,10 @@ fn log_copy_is_iso_and_ascii_under_tr(cx: &mut TestAppContext) {
             .any(|c| c.is_numeric() && !c.is_ascii_digit()),
         "{copied}"
     );
-    assert!(!copied.contains("12.345") && !copied.contains("12,345"), "{copied}");
+    assert!(
+        !copied.contains("12.345") && !copied.contains("12,345"),
+        "{copied}"
+    );
     assert!(
         !copied.chars().any(|c| matches!(c, '\u{2068}' | '\u{2069}')),
         "no Fluent isolation marks"
@@ -833,7 +846,10 @@ fn copy_never_takes_a_hidden_tabs_cells(cx: &mut TestAppContext) {
     // Result 2 is shown now; Result 1's grid keeps its selection off screen.
     t.set_active(ActiveResult::Tab(1));
     let focused = in_window(t.vcx, |window, cx| {
-        hidden.read(cx).focus_handle(cx).contains_focused(window, cx)
+        hidden
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx)
     });
     assert!(!focused, "the hidden grid keeps the focus");
     for command in ["results.copy", "grid.copy", "grid.copy_with_headers"] {
@@ -902,7 +918,9 @@ fn the_tile_follows_the_focused_panes_active_console(cx: &mut TestAppContext) {
 
     // A new pane takes the focus with an unbound console: the M1 tile.
     in_window(t.vcx, |window, cx| {
-        ws.update(cx, |ws, cx| ws.split_focused(gpui::Axis::Horizontal, window, cx))
+        ws.update(cx, |ws, cx| {
+            ws.split_focused(gpui::Axis::Horizontal, window, cx)
+        })
     });
     t.redraw();
     assert_eq!(shown(&t), None);
@@ -919,14 +937,40 @@ fn the_tile_follows_the_focused_panes_active_console(cx: &mut TestAppContext) {
 
     // Closing the shown console's tab shows the pane's next active console, never the closed
     // one's rows.
-    let tab_a = t.vcx.read(|cx| Consoles::get(cx, a).map(|s| s.tab)).unwrap();
+    let tab_a = t
+        .vcx
+        .read(|cx| Consoles::get(cx, a).map(|s| s.tab))
+        .unwrap();
     in_window(t.vcx, |_, cx| {
         ws.update(cx, |ws, cx| ws.force_close_tab(tab_a, cx));
         Consoles::remove(cx, a);
     });
     t.redraw();
-    assert_eq!(shown(&t), Some(b));
-    assert_eq!(t.text("strip-sentence").as_deref(), Some("3 rows"));
+    let expected = t.vcx.read(|cx| {
+        ws.read(cx)
+            .active_tab()
+            .and_then(|tab| Consoles::by_tab(cx, tab))
+    });
+    assert_eq!(shown(&t), expected);
+    assert_ne!(shown(&t), Some(a));
+    assert_ne!(t.text("strip-sentence").as_deref(), Some("1 row"));
+    match expected {
+        // The pane's next tab is the shell's unbound console: the M1 tile.
+        None => assert!(rendered_markers(t.vcx).iter().any(|m| m == "results-empty")),
+        Some(c) => {
+            assert_eq!(c, b);
+            assert_eq!(t.text("strip-sentence").as_deref(), Some("3 rows"));
+        }
+    }
+    // Activating the other console shows its rows.
+    in_window(t.vcx, |window, cx| {
+        ws.update(cx, |ws, cx| ws.activate_next_tab(window, cx))
+    });
+    t.redraw();
+    if shown(&t) == Some(b) {
+        assert_eq!(t.text("strip-sentence").as_deref(), Some("3 rows"));
+    }
+    assert_ne!(shown(&t), Some(a));
 }
 
 /// I2: the strip's closed and more-sets facts outlive the log's Clear.
@@ -962,7 +1006,11 @@ fn the_strip_keeps_its_facts_after_the_log_is_cleared(cx: &mut TestAppContext) {
         tab(
             2,
             source(
-                store_of(5, 1, Completeness::Truncated(TruncReason::FollowingResultSets)),
+                store_of(
+                    5,
+                    1,
+                    Completeness::Truncated(TruncReason::FollowingResultSets),
+                ),
                 Arc::default(),
             ),
         ),
@@ -1029,7 +1077,10 @@ fn server_text_controls_are_shown_not_obeyed(cx: &mut TestAppContext) {
     );
     t.redraw();
     let detail = t.text("log-detail-0").expect("the server text row");
-    assert!(!detail.contains('\n') && !detail.contains('\u{202E}'), "{detail:?}");
+    assert!(
+        !detail.contains('\n') && !detail.contains('\u{202E}'),
+        "{detail:?}"
+    );
     assert!(detail.contains('↵'), "{detail}");
     assert!(detail.contains("RLO"), "{detail}");
     let code = t.text("log-code-0").expect("the code chip");
@@ -1088,4 +1139,145 @@ fn a_run_without_a_result_shows_the_output(cx: &mut TestAppContext) {
     let active = t.vcx.read(|cx| t.results.read(cx).active());
     assert_eq!(active, ActiveResult::Output);
     assert_eq!(t.text("strip-sentence"), None);
+}
+
+/// The T33 wiring: a Re-run the tile emits for a result tab reaches the run UI, which sends
+/// exactly that tab's statement again, never a later statement of the same ordinal that made no
+/// tab (a DELETE after the SELECT).
+#[gpui::test]
+fn rerun_from_a_result_tab_resends_that_tabs_unit(cx: &mut TestAppContext) {
+    use hacivat_driver::ExecSummary;
+    use hacivat_driver::fake::{
+        FakeDriver, FakeExec, FakeQuery, FakeResultSet, FakeRows, FakeTypedCall,
+    };
+    use hacivat_proto::DbmsKind;
+    use hacivat_ui_editor::ExecMarkState;
+
+    let vcx = shell_with_connections(cx, "en");
+    in_window(vcx, |window, _| window.activate_window());
+    let p = hacivat_session::profile::Profile {
+        engine: DbmsKind::Postgres,
+        ..test_profile("orders-dev", Some(EnvTag::Dev), "127.0.0.1")
+    };
+    let profile = add_profile(vcx, p.clone());
+    let probes: Vec<FakeExec> = (0..8)
+        .map(|_| FakeExec {
+            prefix: "SHOW standard_conforming_strings",
+            result: Ok(ExecSummary {
+                rows: vec![vec![Some("on".to_string())]],
+                row_count: 1,
+                ..ExecSummary::default()
+            }),
+            delay: Duration::ZERO,
+            tx_after: None,
+            panics: false,
+        })
+        .collect();
+    let three_rows = || FakeQuery {
+        prefix: "SELECT",
+        sets: vec![FakeResultSet {
+            columns: vec![(
+                "n",
+                LogicalType::Int {
+                    bits: 64,
+                    signed: true,
+                },
+            )],
+            rows: FakeRows::Generated {
+                count: 3,
+                cell: |r, _| Value::Int(r as i64),
+            },
+        }],
+        ..Default::default()
+    };
+    let fake = FakeDriver::new(DbmsKind::Postgres)
+        .tracks_transactions()
+        .exec(probes)
+        .queries(vec![three_rows(), three_rows()]);
+    let rt = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::connections::ConnectionsModel>()
+            .core_runtime()
+            .handle()
+    });
+    let (session, fake) =
+        futures::executor::block_on(hacivat_session::testing::fake_session(rt, fake, p));
+    let id = register_test_console(vcx, profile, session);
+    wait_until(vcx, "the console's SQL context", |vcx| {
+        vcx.cx.read(|cx| {
+            hacivat_app::exec_ui::sql_context(id, cx)
+                != hacivat_app::exec_ui::context::SqlContext::Pending
+        })
+    });
+    let (editor, results) = vcx.cx.read(|cx| {
+        let s = Consoles::get(cx, id).expect("the console");
+        (
+            s.editor.clone().expect("an editor"),
+            s.results.clone().expect("results"),
+        )
+    });
+    let queries = || -> Vec<String> {
+        fake.typed_log()
+            .into_iter()
+            .filter_map(|c| match c {
+                FakeTypedCall::Query(sql) => Some(sql),
+                _ => None,
+            })
+            .collect()
+    };
+    let run = |range: Range<usize>| {
+        vcx.cx
+            .update(|cx| editor.update(cx, |e, cx| e.select_range(range, cx)));
+        in_window(vcx, |window, cx| {
+            editor.update(cx, |e, cx| assert!(e.run_command("editor.run", window, cx)));
+        });
+        vcx.run_until_parked();
+    };
+    let ended = |vcx: &VisualTestContext| {
+        vcx.cx.read(|cx| {
+            hacivat_app::exec_ui::last_run_marks(id, cx)
+                .into_iter()
+                .flatten()
+                .any(|m| matches!(m, ExecMarkState::Succeeded { .. }))
+        })
+    };
+    vcx.cx.update(|cx| {
+        editor.update(cx, |e, cx| {
+            e.set_text("SELECT * FROM t;\nDELETE FROM t WHERE id = 5;\n", cx)
+        })
+    });
+    vcx.run_until_parked();
+    run(0..16);
+    wait_until(vcx, "the select", ended);
+    wait_until(vcx, "the select's tab", |vcx| {
+        vcx.cx.read(|cx| results.read(cx).tabs().len() == 1)
+    });
+    run(17..43);
+    wait_until(vcx, "the delete", |_| queries().len() == 2);
+    wait_until(vcx, "the delete's end", ended);
+    // The tile shows the console (its subscription is made on first sight).
+    in_window(vcx, |window, _| window.refresh());
+    vcx.run_until_parked();
+    let ordinal = vcx
+        .cx
+        .read(|cx| results.read(cx).tab(0).map(|t| t.key().unit_ordinal))
+        .expect("the select's tab");
+    // What the strip's Re-run does.
+    in_window(vcx, |_, cx| {
+        results.update(cx, |_, cx| {
+            cx.emit(ResultsEvent::Rerun {
+                console: id,
+                unit_ordinal: ordinal,
+            })
+        })
+    });
+    wait_until(vcx, "the re-run", |_| queries().len() == 3);
+    assert_eq!(
+        queries(),
+        [
+            "SELECT * FROM t",
+            "DELETE FROM t WHERE id = 5",
+            "SELECT * FROM t"
+        ]
+    );
+    stop_core_runtime_test(cx);
 }

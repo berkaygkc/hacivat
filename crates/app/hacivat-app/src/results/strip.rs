@@ -65,12 +65,58 @@ pub enum StripKind {
     Closed {
         rows: u64,
         reason: CloseReason,
-        rolled_back: bool,
-        idle_ms: u64,
+        /// Whether Hacivat's transaction was rolled back and the idle bound, from the log's
+        /// close line; `None` when no such line was seen.
+        known: Option<(bool, u64)>,
     },
     Cancelled {
         rows: u64,
     },
+}
+
+// ## m3a-t30 fix round 1 (I2): the facts the strip takes from the log, kept per tab by the tile
+// (`view.rs`), so the log's Clear and its ring's eviction cannot change what the strip says.
+
+/// What the log said about one unit's result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct StripFacts {
+    /// The cursor's close: its reason, whether Hacivat's transaction was rolled back, and the
+    /// idle bound.
+    pub closed: Option<(CloseReason, bool, u64)>,
+    /// Result sets read and not shown (R-M3-25).
+    pub more_sets: Option<u32>,
+}
+
+impl StripFacts {
+    /// What `log` says about `unit` (its newest lines win).
+    pub fn from_log(log: &[LogLine], unit: UnitId) -> StripFacts {
+        let mut facts = StripFacts::default();
+        for line in log.iter().filter(|l| l.unit == Some(unit)) {
+            match line.msg {
+                LogMsg::CursorClosed {
+                    reason,
+                    rolled_back,
+                    idle_ms,
+                    ..
+                } => facts.closed = Some((reason, rolled_back, idle_ms)),
+                LogMsg::MoreResultSets { skipped } if skipped > 0 => {
+                    facts.more_sets = Some(skipped);
+                }
+                _ => {}
+            }
+        }
+        facts
+    }
+
+    /// Takes what `newer` knows; what it does not know is kept.
+    pub fn merge(&mut self, newer: StripFacts) {
+        if newer.closed.is_some() {
+            self.closed = newer.closed;
+        }
+        if newer.more_sets.is_some() {
+            self.more_sets = newer.more_sets;
+        }
+    }
 }
 
 /// What the strip shows for one result tab.
@@ -82,35 +128,21 @@ pub struct StripModel {
 }
 
 impl StripModel {
-    /// The strip of a result in `snapshot`'s state, with the tab's memory `banner` and the
-    /// console's `log` lines of `unit`.
+    /// The strip of a result in `snapshot`'s state, with the tab's memory `banner` and what the
+    /// log said about its unit (`facts`).
     pub fn of(
         snapshot: &StoreSnapshot,
         banner: Option<MemoryBanner>,
-        log: &[LogLine],
-        unit: UnitId,
+        facts: StripFacts,
     ) -> StripModel {
         let rows = snapshot.row_count();
-        let of_unit = || log.iter().rev().filter(|l| l.unit == Some(unit));
-        let closed = |reason: CloseReason| {
-            // The log's line knows whether Hacivat's transaction was rolled back and the idle
-            // bound; without one the reason alone is said.
-            let line = of_unit().find_map(|l| match l.msg {
-                LogMsg::CursorClosed {
-                    rolled_back,
-                    idle_ms,
-                    reason: r,
-                    ..
-                } if r == reason => Some((rolled_back, idle_ms)),
-                _ => None,
-            });
-            let (rolled_back, idle_ms) = line.unwrap_or((false, 0));
-            StripKind::Closed {
-                rows,
-                reason,
-                rolled_back,
-                idle_ms,
-            }
+        let closed = |reason: CloseReason| StripKind::Closed {
+            rows,
+            reason,
+            known: facts
+                .closed
+                .filter(|(r, ..)| *r == reason)
+                .map(|(_, rolled_back, idle_ms)| (rolled_back, idle_ms)),
         };
         let kind = match snapshot.completeness() {
             Completeness::Streaming => StripKind::Fetching { rows },
@@ -131,11 +163,23 @@ impl StripModel {
             // The rows were given back with their tab: nothing on screen shows them.
             Completeness::Released => closed(CloseReason::TabClosed),
         };
-        let more_sets = of_unit().find_map(|l| match l.msg {
-            LogMsg::MoreResultSets { skipped } if skipped > 0 => Some(skipped),
+        StripModel {
+            kind,
+            more_sets: facts.more_sets,
+        }
+    }
+
+    /// An idle close the log never told about: its bound is unknown, so the sentence names no
+    /// duration (`hv-strip-closed-idle`), never "0 ms".
+    fn idle_unknown(&self) -> Option<u64> {
+        match self.kind {
+            StripKind::Closed {
+                rows,
+                reason: CloseReason::IdleTimeout,
+                known: None,
+            } => Some(rows),
             _ => None,
-        });
-        StripModel { kind, more_sets }
+        }
     }
 
     /// The Fluent ID of the strip's leading sentence.
@@ -147,6 +191,9 @@ impl StripModel {
             StripKind::Complete { .. } => ids::hv::STRIP_COMPLETE.id,
             StripKind::Truncated { .. } => ids::hv::STRIP_TRUNCATED.id,
             StripKind::Cancelled { .. } => ids::hv::STRIP_CANCELLED.id,
+            StripKind::Closed { .. } if self.idle_unknown().is_some() => {
+                ids::hv::STRIP_CLOSED_IDLE.id
+            }
             StripKind::Closed { .. } => self.closed_msg().map_or("", |m| m.fluent_id()),
         }
     }
@@ -157,14 +204,16 @@ impl StripModel {
             StripKind::Closed {
                 rows,
                 reason,
-                rolled_back,
-                idle_ms,
-            } => Some(LogMsg::CursorClosed {
-                rows,
-                reason,
-                rolled_back,
-                idle_ms,
-            }),
+                known,
+            } => {
+                let (rolled_back, idle_ms) = known.unwrap_or((false, 0));
+                Some(LogMsg::CursorClosed {
+                    rows,
+                    reason,
+                    rolled_back,
+                    idle_ms,
+                })
+            }
             _ => None,
         }
     }
@@ -205,10 +254,17 @@ impl StripModel {
                 ids::hv::STRIP_CANCELLED,
                 ids::hv::HvStripCancelled { rows: Count(rows) },
             ),
-            StripKind::Closed { .. } => self
-                .closed_msg()
-                .map(|m| core_text(&m, cx))
-                .unwrap_or_default(),
+            StripKind::Closed { .. } => match self.idle_unknown() {
+                Some(rows) => tr(
+                    cx,
+                    ids::hv::STRIP_CLOSED_IDLE,
+                    ids::hv::HvStripClosedIdle { rows: Count(rows) },
+                ),
+                None => self
+                    .closed_msg()
+                    .map(|m| core_text(&m, cx))
+                    .unwrap_or_default(),
+            },
         }
     }
 
