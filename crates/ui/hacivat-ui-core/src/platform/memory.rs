@@ -95,11 +95,78 @@ mod imp {
 /// The machine's physical memory in bytes, or `None` when the OS does not say: the result
 /// store's global budget is a quarter of it, at most 4 GiB (R-M3-19).
 ///
-/// Task 33 implements it (macOS `sysctlbyname("hw.memsize")` through `libc`, Windows
-/// `GlobalMemoryStatusEx`, Linux `MemTotal` of `/proc/meminfo`; the dependencies are Task 1b's
-/// rows). Task 1b stub: `None` (the budget then takes 1 GiB).
+/// - macOS: `sysctlbyname("hw.memsize")` through `libc`.
+/// - Windows: `GlobalMemoryStatusEx().ullTotalPhys` (`Win32_System_SystemInformation`).
+/// - Linux: `MemTotal` of `/proc/meminfo` (the kernel reports it in kB).
+///
+/// The dependencies are Task 1b's rows; the bodies are Task 33's.
 pub fn physical_memory_bytes() -> Option<u64> {
-    None
+    // ## m3a-t33-exec-ui
+    phys::physical_memory_bytes().filter(|b| *b > 0)
+}
+
+// ## m3a-t33-exec-ui
+/// `MemTotal` in bytes from the text of `/proc/meminfo` (the kernel reports it in kB).
+#[cfg(any(target_os = "linux", test))]
+fn mem_total_bytes(meminfo: &str) -> Option<u64> {
+    let rest = meminfo.lines().find_map(|l| l.strip_prefix("MemTotal:"))?;
+    let mut fields = rest.split_whitespace();
+    let kib: u64 = fields.next()?.parse().ok()?;
+    if fields.next()? != "kB" {
+        return None;
+    }
+    kib.checked_mul(1024)
+}
+
+#[cfg(target_os = "macos")]
+mod phys {
+    pub(super) fn physical_memory_bytes() -> Option<u64> {
+        let mut bytes: u64 = 0;
+        let mut len: libc::size_t = size_of::<u64>();
+        // SAFETY: the name is a NUL-terminated C string literal; `bytes` is a writable `u64`
+        // and `len` holds its size, which `sysctlbyname` reads as the output buffer's length
+        // and overwrites with the length it wrote; no new value is set (null pointer, 0).
+        let rc = unsafe {
+            libc::sysctlbyname(
+                c"hw.memsize".as_ptr(),
+                (&raw mut bytes).cast::<libc::c_void>(),
+                &raw mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (rc == 0 && len == size_of::<u64>()).then_some(bytes)
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod phys {
+    pub(super) fn physical_memory_bytes() -> Option<u64> {
+        super::mem_total_bytes(&std::fs::read_to_string("/proc/meminfo").ok()?)
+    }
+}
+
+#[cfg(windows)]
+mod phys {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    pub(super) fn physical_memory_bytes() -> Option<u64> {
+        let mut status = MEMORYSTATUSEX {
+            dwLength: u32::try_from(size_of::<MEMORYSTATUSEX>()).ok()?,
+            ..Default::default()
+        };
+        // SAFETY: `status` is a writable `MEMORYSTATUSEX` whose `dwLength` holds its size, as
+        // `GlobalMemoryStatusEx` requires.
+        let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+        (ok != 0).then_some(status.ullTotalPhys)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+mod phys {
+    pub(super) fn physical_memory_bytes() -> Option<u64> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +184,22 @@ mod tests {
             "64 MiB touched"
         );
         drop(big);
+    }
+
+    // ## m3a-t33-exec-ui
+    #[test]
+    fn physical_memory_is_known_on_this_platform() {
+        let bytes = platform::physical_memory_bytes().unwrap_or(0);
+        assert!(bytes > 1 << 30, "{bytes}");
+    }
+
+    #[test]
+    fn mem_total_is_parsed_from_proc_meminfo() {
+        let meminfo = "MemTotal:       16318976 kB\nMemFree:         1234 kB\n";
+        assert_eq!(super::mem_total_bytes(meminfo), Some(16_318_976 * 1024));
+        assert_eq!(super::mem_total_bytes("MemFree: 1 kB\n"), None);
+        assert_eq!(super::mem_total_bytes("MemTotal: x kB\n"), None);
+        assert_eq!(super::mem_total_bytes("MemTotal: 16 MB\n"), None);
     }
 
     #[test]

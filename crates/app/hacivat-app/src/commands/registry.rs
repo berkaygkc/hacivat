@@ -40,6 +40,39 @@ pub fn request_quit(cx: &mut App) -> CloseDecision {
     decision
 }
 
+// ## m3a-t33-exec-ui (named exception, T33 review C3): restart asks the quit guard too.
+/// `app.restart` and the settings' "Restart now": as [`request_quit`], the quit guard is asked
+/// first (an open user transaction prompts, D-014); on `Proceed` the pending writes are flushed
+/// and the platform restarts after this update; on `Defer` the guard restarts after its prompt.
+pub fn request_restart(cx: &mut App) -> CloseDecision {
+    cx.default_global::<RestartIntent>().0 = true;
+    let decision = crate::shell::hooks::quit_decision(cx);
+    // The guard took the intent (`take_restart_intent`); with no guard it is cleared here.
+    cx.default_global::<RestartIntent>().0 = false;
+    if decision == CloseDecision::Proceed {
+        // Deferred, so nothing is being updated when it runs; a restart inside an update runs
+        // no quit hooks.
+        cx.defer(|cx| {
+            flush_pending_writes(cx);
+            cx.restart();
+        });
+    }
+    decision
+}
+
+/// Set while [`request_restart`] asks the quit guard, so the guard knows a restart (not a
+/// quit) follows its prompt.
+#[derive(Debug, Clone, Copy, Default)]
+struct RestartIntent(bool);
+
+impl hacivat_ui_core::gpui_surface::Global for RestartIntent {}
+
+/// Whether the quit guard is being asked for a restart (and clears it): the guard's prompt
+/// then restarts instead of quitting.
+pub fn take_restart_intent(cx: &mut App) -> bool {
+    std::mem::take(&mut cx.default_global::<RestartIntent>().0)
+}
+
 /// Closing the window (the title bar's client-drawn close, Windows' caption close, macOS's
 /// traffic light): the window is the app, so the quit guard is asked first (D-014; fix round
 /// 1). `Proceed` lets the window close as before; on `Defer` the guard quits after its prompt.
@@ -204,13 +237,10 @@ pub fn register_workspace_actions(reg: &mut ActionRegistry) {
         (
             "app.restart",
             ids::hv::CMD_APP_RESTART.id,
-            // Deferred, so nothing is being updated when it runs. The pending settings and
-            // layout writes land first: a restart inside an update runs no quit hooks.
+            // ## m3a-t33-exec-ui (named exception, T33 review C3): through the quit guard
+            // (`request_restart` defers the restart and flushes the pending writes first).
             Rc::new(|_, cx| {
-                cx.defer(|cx| {
-                    flush_pending_writes(cx);
-                    cx.restart();
-                })
+                request_restart(cx);
             }),
             always,
         ),

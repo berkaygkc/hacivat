@@ -257,5 +257,7 @@ pub(crate) fn hint_text(h: PreviewHint) -> (&'static str, Option<(usize, usize)>
         PreviewHint::Unit { i, n } => ("hv-editor-preview-unit", Some((i, n))),
         PreviewHint::Uncertain => ("hv-editor-preview-uncertain", None),
         PreviewHint::Offline => ("hv-editor-preview-offline", None),
+        // ## m3a-t33-exec-ui (named exception): its `n` is passed by `marks::hint_message`.
+        PreviewHint::Choices { .. } => ("hv-editor-preview-choices", None),
     }
 }

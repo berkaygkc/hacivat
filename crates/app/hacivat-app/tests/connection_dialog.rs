@@ -1600,6 +1600,7 @@ fn rejected() -> hacivat_driver::RawError {
             detail: None,
             hint: None,
             lang_hint: None,
+            position: None,
         }),
     }
 }

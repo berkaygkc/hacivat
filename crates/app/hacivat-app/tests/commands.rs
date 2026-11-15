@@ -509,8 +509,7 @@ const M3A_PENDING: &[&str] = &[
     "editor.undo",
     // ## m3a-t30-results-view: the grid's commands are registered (`results::view`), so their
     // entries left this list.
-    // Task 33: cancel.
-    "exec.cancel",
+    // ## m3a-t33-exec-ui (named exception): `exec.cancel` is registered (exec_ui::cancel).
 ];
 
 #[gpui::test]

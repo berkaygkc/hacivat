@@ -659,3 +659,74 @@ fn the_tooltip_of_two_marks_lists_both(cx: &mut TestAppContext) {
         assert!(texts.contains(&t.to_string()), "{t}: {texts:?}");
     }
 }
+
+// ## m3a-t33-exec-ui (named exception): the short forms the app supplies (T28 ruling 3).
+
+/// On a long line, a status the app gave a short form keeps it on the pad: a success shows the
+/// green check and its duration, a running statement its amber clock; the full words are
+/// hidden. Without a short form only a failure's chip shows (T28's rule).
+#[gpui::test]
+fn short_forms_replace_the_status_on_a_long_line(cx: &mut TestAppContext) {
+    let (e, vcx) = open(cx, "SELECT 1;\n");
+    let (advance, width) = vcx.read(|cx| {
+        let l = e.read(cx).last_layout().unwrap();
+        let x = |b: usize| f32::from(l.x_for_offset(b).unwrap());
+        (x(1) - x(0), f32::from(l.rows().bounds.size.width))
+    });
+    let long = format!("SELECT '{}';", "x".repeat((width / advance) as usize));
+    let text = format!("{long}\n{long}\n");
+    e.update(vcx, |v, cx| v.set_text(&text, cx));
+    draw(vcx);
+    let v0 = version(&e, vcx);
+    let l2 = long.len() + 1;
+    let started = vcx.executor().now();
+    e.update(vcx, |v, cx| {
+        v.add_exec_marks(
+            v0,
+            vec![
+                (MarkKey(1), 0..long.len()),
+                (MarkKey(2), l2..l2 + long.len()),
+            ],
+            cx,
+        );
+        v.set_exec_state(
+            MarkKey(1),
+            ExecMarkState::Succeeded {
+                took: Duration::from_millis(42),
+                rows: None,
+            },
+            None,
+            text_fn("executed · 42 ms"),
+            cx,
+        );
+        v.set_exec_short(MarkKey(1), text_fn("42 ms"), cx);
+        v.set_exec_state(
+            MarkKey(2),
+            ExecMarkState::Running { started },
+            None,
+            text_fn("running · 3 s"),
+            cx,
+        );
+        v.set_exec_short(MarkKey(2), text_fn("3 s"), cx);
+    });
+    vcx.executor().advance_clock(RUNNING_GRACE);
+    icon_record();
+    draw(vcx);
+    let texts = drawn(vcx);
+    assert!(texts.contains(&"42 ms".to_string()), "{texts:?}");
+    assert!(texts.contains(&"3 s".to_string()), "{texts:?}");
+    assert!(
+        !texts.contains(&"executed · 42 ms".to_string()),
+        "{texts:?}"
+    );
+    assert!(!texts.contains(&"running · 3 s".to_string()), "{texts:?}");
+    let green = DARK.colors.green.to_hsla();
+    let checks = icon_take()
+        .iter()
+        .filter(|i| i.name == IconName::Check && i.color == green)
+        .count();
+    assert!(
+        checks >= 2,
+        "the glyph and the short form's check: {checks}"
+    );
+}

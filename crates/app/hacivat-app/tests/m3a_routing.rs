@@ -311,8 +311,9 @@ fn register_test_console_binds_a_real_editor_over_a_fake_session(cx: &mut TestAp
     assert!(has_editor && has_session);
     assert!(!analysis, "Task 1b's service has no analysis yet");
     assert_eq!(editor_text(vcx, console), "");
-    // Run is fail closed until Task 33: `exec_ui::attach`'s stub says so and sends nothing.
-    let before = fake.executed().len();
+    // ## m3a-t33-exec-ui (named exception): Run is Task 33's now (tests/exec_ui.rs); a console
+    // whose profile the connections model does not know runs nothing (fail closed).
+    let before = fake.typed_log().len();
     let editor = vcx.cx.read(|cx| {
         Consoles::get(cx, console)
             .and_then(|s| s.editor.clone())
@@ -331,10 +332,10 @@ fn register_test_console_binds_a_real_editor_over_a_fake_session(cx: &mut TestAp
     });
     vcx.run_until_parked();
     assert_eq!(
-        toast_texts(vcx),
-        ["Running queries isn't available in this console yet."]
+        fake.typed_log().len(),
+        before,
+        "nothing reached the session"
     );
-    assert_eq!(fake.executed().len(), before, "nothing reached the session");
     stop_core_runtime_test(cx);
 }
 

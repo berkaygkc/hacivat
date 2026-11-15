@@ -116,6 +116,7 @@ fn raw_error(e: rusqlite::Error) -> RawError {
                 detail: None,
                 hint: None,
                 lang_hint: None,
+                position: None,
             }),
         },
         rusqlite::Error::NulError(_) | rusqlite::Error::InvalidPath(_) => invalid_path(),
@@ -143,6 +144,7 @@ fn engine_error(failure: rusqlite::ffi::Error, message: Option<String>) -> RawEr
             hint: None,
             // SQLite's messages are English and never localized.
             lang_hint: Some("en".to_string()),
+            position: None,
         }),
     }
 }
@@ -248,6 +250,7 @@ mod tests {
                 detail: None,
                 hint: None,
                 lang_hint: None,
+                position: None,
             }),
         };
         // SQLITE_BUSY and its extended codes: _RECOVERY, _SNAPSHOT, _TIMEOUT.

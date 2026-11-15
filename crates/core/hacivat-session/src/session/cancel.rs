@@ -64,7 +64,9 @@ pub enum CancelState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CancelOutcome {
     Cancelled,
-    /// The request was not running (Q18).
+    // ## m3a-t31-docker-conformance (named exception, doc only)
+    /// The request ended without the server reporting a cancel: it was not running (Q18), or
+    /// the server ended normally a statement Hacivat's kill interrupted (MySQL `SLEEP()`).
     AlreadyFinished,
     StillRunning,
     Disconnected,

@@ -46,6 +46,9 @@ pub enum PreviewState {
 pub struct ExecPreview {
     pub ranges: SmallVec<[Range<usize>; 2]>,
     pub state: PreviewState,
+    // ## m3a-t33-exec-ui (named exception, T28 ruling 2): the "N choices" hint.
+    /// With `AskPreselected`, the candidates Run's chooser offers; 0 otherwise.
+    pub choices: u32,
 }
 
 /// Which Run (Run, Run 2, Run 3).
@@ -173,6 +176,7 @@ impl LanguageService for FailClosedService {
         Some(ExecPreview {
             ranges: smallvec![],
             state: PreviewState::Uncertain,
+            choices: 0,
         })
     }
 

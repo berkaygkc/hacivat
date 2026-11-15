@@ -1060,16 +1060,6 @@ hv-conn-ro-warn-role-grant-not-expanded = Ona başka roller verilmiş; { -brand-
 hv-conn-ro-warn-unparsed = { -brand-hacivat } yetkilerini okuyamadı.
 # Review: PO
 hv-cmd-connection-explain-access = Salt okunur erişimi açıkla
-# Review: PO
-hv-cmd-debug-run-pg-sleep = Hata ayıklama: geçerli bağlantıda SELECT pg_sleep(30) çalıştır
-# Review: PO
-hv-cmd-debug-cancel = Hata ayıklama: deneme ifadesini iptal et
-# Review: PO
-hv-debug-demo-result = { $outcome ->
-        [done] Deneme ifadesi tamamlandı.
-        [cancelled] Deneme ifadesi iptal edildi.
-       *[failed] Deneme ifadesi başarısız oldu.
-    }
 
 ## m2b-t21-prompts
 
@@ -1328,8 +1318,6 @@ hv-conn-secret-vault = kasa · kalıcı
 
 # Review: PO
 hv-menu-edit = Düzen
-# Review: PO
-hv-console-run-unavailable = Bu konsolda sorgu çalıştırma henüz kullanılamıyor.
 
 ## m3a-t25-editor-commands
 
@@ -1538,14 +1526,6 @@ hv-results-env-suffix = ({ $env })
 # Review: PO
 hv-results-copy = Kopyala
 # Review: PO
-hv-results-tile-rows-timing = { $rows } satır · { $duration }
-# Review: PO
-hv-results-tile-rows-more-timing = { $rows }+ satır · { $duration }
-# Review: PO
-hv-results-tile-rows = { $rows } satır
-# Review: PO
-hv-results-tile-rows-more = { $rows }+ satır
-# Review: PO
 hv-results-log-clear = Temizle
 # Review: PO
 hv-results-log-end = Sona kaydır
@@ -1585,6 +1565,8 @@ hv-strip-memory = Bu sonucun bellek sınırına ulaşıldı ({ $rows } satır, {
 hv-strip-fetch-anyway = Yine de getir
 # Review: PO
 hv-strip-truncated = { $rows } satır tutuldu: bu sonucun bellek sınırına ulaşıldı
+# Review: PO
+hv-strip-closed-idle = { $rows } satırdan sonra imleç kapandı: çok uzun süre boşta kaldı.
 # Review: PO
 hv-strip-more-sets = { $n } sonuç kümesi daha gösterilmedi
 # Review: PO
@@ -1653,3 +1635,106 @@ hv-cmd-grid-copy = Tablo: kopyala
 hv-cmd-grid-copy-with-headers = Tablo: başlıklarla kopyala
 # Review: PO
 hv-cmd-grid-escape = Tablo: seçimi temizle
+## m3a-t33-exec-ui
+
+# Review: PO
+hv-cmd-exec-cancel = Çalışan ifadeyi durdur
+# Review: PO
+hv-cmd-tx-commit = İşlemi commit et
+# Review: PO
+hv-cmd-tx-rollback = İşlemi geri al
+# Review: PO
+hv-console-connect-first = { $name } bağlantısı kuruluyor. Bağlandıktan sonra yeniden çalıştırın.
+# Review: PO
+hv-editor-mark-queued = sırada
+# Review: PO
+hv-editor-mark-running = çalışıyor · { $duration }
+# Review: PO
+hv-editor-mark-rows = çalıştı · { $duration } · { $rows } satır
+# Review: PO
+hv-editor-mark-rows-more = çalıştı · { $duration } · { $rows }+ satır
+# Review: PO
+hv-editor-mark-affected = { $rows } satır etkilendi · { $duration }
+# Review: PO
+hv-editor-mark-done = çalıştı · { $duration }
+# Review: PO
+hv-editor-mark-failed = başarısız
+# Review: PO
+hv-editor-mark-denied = gönderilmedi: salt okunur
+# Review: PO
+hv-editor-mark-cancelling = iptal ediliyor…
+# Review: PO
+hv-editor-mark-cancelled = { $duration } sonra iptal edildi
+# Review: PO
+hv-editor-mark-skipped = atlandı: önceki bir ifade başarısız oldu
+# Review: PO
+hv-editor-mark-short-done = { $duration }
+# Review: PO
+hv-editor-mark-short-running = { $duration }
+# Review: PO
+hv-editor-preview-choices = { $n } seçenek
+# Review: PO
+hv-chooser-title = Neyin çalışacağını seçin
+# Review: PO
+hv-chooser-statement = İfade
+# Review: PO
+hv-chooser-subquery = Alt sorgu
+# Review: PO
+hv-chooser-largest = En geniş ifade
+# Review: PO
+hv-chooser-from-caret = İmleçten sona
+# Review: PO
+hv-chooser-whole = Tüm betik
+# Review: PO
+hv-chooser-row = { $n ->
+        [one] { $kind }
+       *[other] { $kind } · { $n } ifade
+    }
+# Review: PO
+hv-chooser-uncertain-title = Sınır belirsiz
+# Review: PO
+hv-chooser-uncertain-body = Hacivat bu ifadenin tam olarak nerede bittiğini anlayamıyor; bu yüzden hiçbir şey göndermedi.
+# Review: PO
+hv-chooser-uncertain-fix = Çalıştırılacak metni tam olarak seçin, sonra { $key } tuşuna basın.
+# Review: PO
+hv-chooser-uncertain-fix-unbound = Çalıştırılacak metni tam olarak seçin, sonra çalıştırın.
+# Review: PO
+hv-tx-close-title = { $name } üzerinde { $n } ifadelik açık bir işlem var
+# Review: PO
+hv-tx-close-body = Bu konsolu kapatmak işlemini sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
+# Review: PO
+hv-tx-restart-body = Yeniden başlatmak oturumu sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
+# Review: PO
+hv-tx-commit-restart = Commit et ve yeniden başlat
+# Review: PO
+hv-tx-rollback-restart = Geri al ve yeniden başlat
+# Review: PO
+hv-tx-release-body = Konsolun bağlantısı değişmek üzere; bu, işlemi sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
+# Review: PO
+hv-tx-commit-continue = Commit et ve devam et
+# Review: PO
+hv-tx-rollback-continue = Geri al ve devam et
+# Review: PO
+hv-tx-quit-body = Çıkmak oturumu sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
+# Review: PO
+hv-tx-commit-close = Commit et ve kapat
+# Review: PO
+hv-tx-rollback-close = Geri al ve kapat
+# Review: PO
+hv-tx-commit-quit = Commit et ve çık
+# Review: PO
+hv-tx-rollback-quit = Geri al ve çık
+# Review: PO
+hv-tx-cancel = Vazgeç
+# Review: PO
+hv-tx-failed-title = { $name } üzerindeki işlem başarısız oldu
+# Review: PO
+hv-tx-failed-body = Bir hata ya da iptal onu durdurdu; artık yalnızca geri alınabilir. İçindeki { $n } ifade korunmayacak.
+# Review: PO
+hv-tx-end-failed = { $name } üzerindeki işlem sona ermedi; hiçbir şey kapatılmadı.
+# Review: PO
+hv-tx-failed-by-stop = İfadeyi durdurmak { $name } üzerindeki işlemi başarısız kıldı. Artık yalnızca geri alma onu sonlandırabilir.
+# Review: PO
+hv-exec-pending-read-only = Hiçbir şey gönderilmedi: bu konsol, açık işlemi sona erdiğinde salt okunur olur. Önce commit edin ya da geri alın.
+# Review: PO
+hv-exec-rerun-edited = İfade çalıştırıldıktan sonra düzenlendi. Düzenleyiciden çalıştırın.

@@ -408,6 +408,7 @@ mod tests {
                 detail: None,
                 hint: None,
                 lang_hint: None,
+                position: None,
             }),
         };
         let internal = ErrClass::Internal;
@@ -435,6 +436,7 @@ mod tests {
                 detail: None,
                 hint: None,
                 lang_hint: None,
+                position: None,
             }),
         };
         let shutdown = ErrClass::ServerShutdown;
