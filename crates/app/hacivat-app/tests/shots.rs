@@ -985,9 +985,12 @@ fn out_dir() -> PathBuf {
 }
 
 // ## m3a-t35-shots (fix round 1, I2)
-/// A label that is visible and drew something: what a marker or a trust check may count.
+/// A label that is visible and drew something: what a marker or a trust check may count. A
+/// truncating label that painted nothing drew nothing (it is also recorded not visible, M3);
+/// a label recorded before layout (the notice, `hacivat-ui/src/notice.rs`) carries no painted
+/// width, so painted 0 alone does not mean nothing was drawn.
 fn drawn(r: &RenderedText) -> bool {
-    r.visible && r.painted_px > 0.0
+    r.visible && (r.painted_px > 0.0 || !r.truncated)
 }
 
 /// Without isolation marks (U+2068/U+2069), which wrap placeables.
@@ -1986,13 +1989,14 @@ fn an_m3a_grid_state_without_its_grid_fails() {
 /// A marker or a trust signal counts only when visible and painted; each production,
 /// transaction and cursor state fails without its trust label.
 fn trust_signals_must_be_drawn() {
+    // Painted 0 models an ellipsized label that had no room for its ellipsis.
     let at = |id: &str, painted: f32, visible: bool| RenderedText {
         text: "x".into(),
         source: TextSource::Fluent,
         size_px: 12.0,
         painted_px: painted,
         clipped: false,
-        truncated: false,
+        truncated: painted == 0.0,
         path: format!("crates/x.rs:1:1#{id}").into(),
         visible,
         outside_card: false,
@@ -2052,6 +2056,12 @@ fn trust_signals_must_be_drawn() {
     }
     // An M1/M2 surface has none.
     assert!(Surface::Shell.trust_missing("s", &[]).is_empty());
+    // A label recorded before layout (painted 0, not truncating) counts: the M2a notice.
+    let notice = RenderedText {
+        truncated: false,
+        ..at("notice", 0.0, true)
+    };
+    assert!(drawn(&notice));
 }
 
 fn a_missing_surface_fails_its_frame() {
