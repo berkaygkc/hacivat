@@ -7,9 +7,10 @@
 //! that one fan-out ([`EditorView::apply_committed`]): the probe's input mark, the scroll
 //! anchor's rebase (an edit above the view keeps the content still), the caret reveal (only
 //! when the commit moved the main caret or edited at it), the longest line for the tier, and
-//! the blink's restart. Edits that are not the IME's own (`set_text`, `select_range`, a click,
-//! every `commit`) go through `ImeCore::dispatch`, which commits an open composition first, so
-//! they never join its undo group (UI-EDIT-12 step 9). Transactions are stamped with the GPUI
+//! the blink's restart. Edits that are not the IME's own (a click, every `commit`) go through
+//! `ImeCore::dispatch`, which commits an open composition first, so they never join its undo
+//! group (UI-EDIT-12 step 9); `set_text` and `select_range` wait for an open composition to
+//! end instead (Task 27, R-M3-7). Transactions are stamped with the GPUI
 //! executor's clock. The view is embeddable as `AnyView::cached(..)`: nothing outside it
 //! re-renders when it is notified, and its layout, hit targets, cursor style, pointer
 //! listeners and input handler survive frames where it is reused (`embeds_as_a_cached_view`).
@@ -289,9 +290,13 @@ impl EditorView {
         self.model.snapshot()
     }
 
-    /// Replaces the whole text (`Origin::Program`, one undo group): a restored console. An
-    /// open composition is committed first (`ImeCore::dispatch`).
+    /// Replaces the whole text (`Origin::Program`, one undo group): a restored console. While a
+    /// composition is open it waits until the composition ends (Task 27, R-M3-7).
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // ## m3a-t27-ime-clipboard (named exception, R-M3-7 corrected): held while composing.
+        if ime::defer_while_composing(self, ime::AppEdit::SetText(text.to_string())) {
+            return;
+        }
         let len = self.model.snapshot().buffer.len_bytes();
         let Ok(changes) = ChangeSet::from_edits(len, [(0..len, Arc::from(text))]) else {
             return;
@@ -370,6 +375,9 @@ impl EditorView {
     /// the host hears of it.
     pub(crate) fn composition_changed(&mut self, composing: bool, cx: &mut Context<Self>) {
         preview::on_composition(&mut self.band, composing);
+        // ## m3a-t27-ime-clipboard (named exception): `FocusedInput`, the platform's notify
+        // owed when an app path ends a composition, the held app edits.
+        ime::on_composition_changed(self, composing, cx);
         if !composing {
             preview::on_update(self, Refresh::SelectionMoved, cx);
         }
@@ -396,6 +404,10 @@ impl EditorView {
     /// Selects the bytes `r` ("go to error"), each end clamped to the text and snapped back to
     /// a character boundary (a server's byte offset may fall inside a character).
     pub fn select_range(&mut self, r: Range<usize>, cx: &mut Context<Self>) {
+        // ## m3a-t27-ime-clipboard (named exception, R-M3-7 corrected): held while composing.
+        if ime::defer_while_composing(self, ime::AppEdit::SelectRange(r.clone())) {
+            return;
+        }
         let snap = self.model.snapshot();
         let len = snap.buffer.len_bytes();
         let start = snap
@@ -892,11 +904,13 @@ mod t19_tests {
         );
     }
 
-    /// `set_text` and `select_range` are not the IME's edits: they commit an open composition
-    /// first, so neither joins its undo group (UI-EDIT-12 step 9), and the host hears that the
-    /// composition ended.
+    // ## m3a-t27-ime-clipboard (named exception: R-M3-7's corrected ruling replaces "commit
+    // the composition first" for these two; GPUI cannot discard the platform's composition).
+    /// `set_text` and `select_range` are not the IME's edits: while a composition is open they
+    /// wait, and apply once it ends, so neither joins its undo group (UI-EDIT-12 step 9) and
+    /// the platform's copy never lands beside them.
     #[gpui::test]
-    fn programmatic_edits_commit_the_composition_first(cx: &mut TestAppContext) {
+    fn programmatic_edits_wait_for_the_composition_to_end(cx: &mut TestAppContext) {
         let (e, vcx) = open(cx, "SELECT ".to_string());
         let events: Rc<RefCell<Vec<String>>> = Rc::default();
         let seen = events.clone();
@@ -917,8 +931,19 @@ mod t19_tests {
                 assert!(v.ime.is_composing());
             });
         };
+        let unmark = |e: &Entity<EditorView>, vcx: &mut VisualTestContext| {
+            e.update_in(vcx, |v, window, cx| {
+                hacivat_ui_core::gpui_surface::EntityInputHandler::unmark_text(v, window, cx);
+            });
+            vcx.run_until_parked();
+        };
         mark(&e, vcx);
         e.update(vcx, |v, cx| v.set_text("SELECT 2", cx));
+        assert_eq!(
+            vcx.read(|cx| e.read(cx).snapshot().buffer.to_string()),
+            "şSELECT "
+        );
+        unmark(&e, vcx);
         vcx.read(|cx| {
             let v = e.read(cx);
             assert!(!v.ime.is_composing());
@@ -939,9 +964,15 @@ mod t19_tests {
         );
         mark(&e, vcx);
         e.update(vcx, |v, cx| v.select_range(0..6, cx));
+        assert_ne!(
+            vcx.read(|cx| e.read(cx).snapshot().selection.main().range()),
+            0..6
+        );
+        unmark(&e, vcx);
         vcx.read(|cx| {
             let v = e.read(cx);
             assert!(!v.ime.is_composing());
+            assert_eq!(v.snapshot().selection.main().range(), 0..6);
             assert_eq!(v.model.undo_depth(), 3);
         });
     }
