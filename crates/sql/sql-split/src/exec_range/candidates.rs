@@ -64,8 +64,8 @@ pub enum CandidateKind {
 
 /// One chooser entry: its units and its label. The label is the candidate's text from its
 /// first leading comment, with runs of white space and control characters as one space and
-/// every invisible formatting character (bidirectional controls, zero-width and tag
-/// characters) shown as `<U+XXXX>`; it holds at most [`LABEL_MAX_CHARS`] characters, and the
+/// every invisible character (Unicode's default-ignorable code points: bidirectional
+/// controls, zero-width characters, fillers, variation selectors, tags) shown as `<U+XXXX>`; it holds at most [`LABEL_MAX_CHARS`] characters, and the
 /// UI truncates it further.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Candidate {
@@ -104,25 +104,38 @@ pub trait SubqueryOracle: Send + Sync {
 /// ellipsis; the bound keeps a whole-script label from copying a large document.
 pub const LABEL_MAX_CHARS: usize = 1024;
 
-/// The formatting characters a label shows as text, because drawn as they are they would
-/// change or hide what a person reads of the SQL they are about to run:
+/// The characters a label shows as text, because drawn as they are they would change or hide
+/// what a person reads of the SQL they are about to run: Unicode's
+/// `Default_Ignorable_Code_Point` set (its reserved ranges included), and the interlinear
+/// annotation controls. That covers
 /// - the bidirectional controls (ALM, LRM, RLM, the embeddings, overrides and isolates),
-///   which reorder it;
-/// - the zero-width and invisible ones (soft hyphen, ZWSP, ZWNJ, ZWJ, word joiner and the
-///   invisible operators, the BOM / zero-width no-break space), which make two different
-///   texts look the same;
-/// - the tag characters, which hide text.
+///   which reorder the text;
+/// - the zero-width and invisible characters (soft hyphen, combining grapheme joiner, ZWSP,
+///   ZWNJ, ZWJ, word joiner and the invisible operators, Mongolian vowel separator and free
+///   variation selectors, Khmer inherent vowels, the Hangul fillers, the BOM), which make
+///   two different texts look the same;
+/// - the variation selectors, the shorthand and musical format controls, and the tag
+///   characters, which hide text.
 fn is_invisible_format(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'
+            | '\u{034F}'
             | '\u{061C}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
             | '\u{200B}'..='\u{200F}'
             | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
             | '\u{FEFF}'
-            | '\u{E0000}'..='\u{E007F}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFFB}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
     )
 }
 
@@ -251,6 +264,29 @@ mod tests {
             ('\u{E0001}', "<U+E0001>"),
             ('\u{E0041}', "<U+E0041>"),
             ('\u{E007F}', "<U+E007F>"),
+            // The rest of Default_Ignorable_Code_Point, one of each range.
+            ('\u{034F}', "<U+034F>"),
+            ('\u{115F}', "<U+115F>"),
+            ('\u{1160}', "<U+1160>"),
+            ('\u{17B4}', "<U+17B4>"),
+            ('\u{180B}', "<U+180B>"),
+            ('\u{180E}', "<U+180E>"),
+            ('\u{2065}', "<U+2065>"),
+            ('\u{206F}', "<U+206F>"),
+            ('\u{3164}', "<U+3164>"),
+            ('\u{FE00}', "<U+FE00>"),
+            ('\u{FE0F}', "<U+FE0F>"),
+            ('\u{FFA0}', "<U+FFA0>"),
+            ('\u{FFF0}', "<U+FFF0>"),
+            ('\u{FFF9}', "<U+FFF9>"),
+            ('\u{FFFB}', "<U+FFFB>"),
+            ('\u{1BCA0}', "<U+1BCA0>"),
+            ('\u{1D173}', "<U+1D173>"),
+            ('\u{1D17A}', "<U+1D17A>"),
+            ('\u{E0100}', "<U+E0100>"),
+            ('\u{E01EF}', "<U+E01EF>"),
+            ('\u{E0FFF}', "<U+E0FFF>"),
+            ('\u{061C}', "<U+061C>"),
         ] {
             assert_eq!(
                 label_of(&format!("DROP TABLE a{c}b")),
@@ -258,10 +294,8 @@ mod tests {
             );
         }
         // Visible characters next to the ranges are left alone.
-        assert_eq!(
-            label_of("a\u{2010}b\u{2065}c\u{00AE}"),
-            "a\u{2010}b\u{2065}c\u{00AE}"
-        );
+        let visible = "a\u{2010}b\u{00AE}c\u{FFFC}d\u{FFFD}e\u{1D172}f\u{3163}g\u{FE10}";
+        assert_eq!(label_of(visible), visible);
     }
 
     #[test]

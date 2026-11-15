@@ -316,8 +316,11 @@ the preview showed as exact, and an uncertain preview never runs (R-M3-24).
 **What is sent.** A unit's range is the statement's strict range: no terminator (MySQL rejects
 it over the protocol) and no leading comments, which are the unit's `title_comment`. A `COPY …
 FROM STDIN` statement is `UnitKind::CopyIn` with its data range; the rows are never in a sent
-range, by a caret or by a selection (a selection that reaches the rows from inside their
-statement is refused, below).
+range, by a caret or by a selection. A selection that overlaps a `COPY`'s rows without
+starting at or before that `COPY` statement's first byte is refused, wherever the statement
+sits: another statement or an empty `;` may follow it on its line (`COPY t FROM STDIN; SELECT
+1;`), and the data still starts on the next line. The splitter keeps every `COPY` with its
+rows in a list of its own for this; the rule does not look for "the item before the rows".
 
 **The statement at a caret** (`alg/10` SQL-SPLIT-04 step 2), in order:
 1. The statement whose smart range holds the caret, ends included. The smart range is the split
@@ -355,7 +358,10 @@ remembered kind is preselected when offered, else the statement.
   control characters as one space. Every invisible formatting character is shown as
   `<U+XXXX>`: the bidirectional controls, which would reorder the SQL, and the zero-width,
   soft-hyphen, word-joiner, BOM and tag characters (U+00AD, U+200B–U+200F, U+2060–U+2064,
-  U+FEFF, U+E0000–U+E007F), which would hide a difference. A label holds at most 1,024
+  U+FEFF, U+E0000–U+E007F), which would hide a difference. The set is Unicode's
+  `Default_Ignorable_Code_Point` with its reserved ranges (so also U+034F, the Hangul fillers,
+  U+180B–U+180F, the variation selectors, U+1BCA0–U+1BCA3, U+1D173–U+1D17A, U+E0000–U+E0FFF)
+  plus the interlinear annotation controls U+FFF9–U+FFFB. A label holds at most 1,024
   characters; the popup truncates further.
 
 **Refusals (fail closed).**
@@ -379,16 +385,36 @@ remembered kind is preselected when offered, else the statement.
   - a start inside a `COPY … FROM STDIN` statement, after its first byte, with rows selected:
     the rows are data;
   - a start inside a `--` comment that runs past the comment's end: read alone, a quote in
-    the comment's text would pair with the quotes after it.
+    the comment's text would pair with the quotes after it;
+  - a start or an end strictly inside an `AmbiguousCommentEnd` boundary of the document: after
+    an executable comment's or hint's lexer end, but before the end the server may read
+    (`/*! , "*/« DROP TABLE t;» -- " */`), the server may still be inside the comment.
+  Offsets inside a character are moved back to its start first.
   White space and plain comments are not cut. The part of a comment at either end of a
   selection is left out as trivia, and text selected wholly inside one `--` comment runs as
   selected, so a statement kept in a comment can be run. A selection that starts inside a
   client command's line is `UnsupportedClientCommand`.
 - After a client command, a client delimiter or `COPY` data the splitter lexes again, and its
   tokens can differ from the document's one lexing (a quote in `COPY` data opens a "string"
-  there). Both readings are asked, and either one saying "inside a token" refuses. Cost: in a
-  dump whose `COPY` data holds an odd number of quotes, a selection after that data is
-  refused; the caret still runs each statement.
+  there). Both readings are asked, and either one saying "inside a token" refuses. The costs
+  of that, all fail-closed (the caret still runs each statement):
+  - in a dump whose `COPY` data holds an odd number of quotes, a selection after that data is
+    refused;
+  - the same after an odd quote in a client command's argument (`\echo don't`,
+    `source it's.sql`, `.print it's`): the document's one lexing reads the rest of the file
+    as a string, so every later selection is refused, a whole clean statement too;
+  - after any client command or `COPY` block, a comment of the document's one lexing is not
+    trusted, so text selected inside a `--` comment there is refused, and so is a selection
+    edge inside a `/* … */` comment. "A statement kept in a comment can be run" holds only
+    before the first such place.
+  Follow-up for the lexer (Task 4's crate, not done here): end a client command's argument at
+  its line end in the document's lexing. That removes the second and third costs for
+  commands. Listed for the PO.
+- Speed. A selection's edges are looked at once per call, and the splitter's second lexing is
+  picked up at a checkpoint: the structural pass records a token start about every 2 KiB,
+  where the lexer's state is `Initial`. Without them each look lexed again from the last
+  restart, which on a 50,000-line script with a psql command on line 1 is the whole text
+  (34 ms p95 for one selection, against HV-EXEC-01's 2 ms).
 - The same rule is applied twice: `exec_range` refuses on `selection_cuts` before it splits,
   and `DocSnapshot::split_selection` marks the cuts itself for any other caller. There the
   rest of a token the selection starts inside, with what follows it in its statement, is one
@@ -407,7 +433,11 @@ remembered kind is preselected when offered, else the statement.
   or "clean"), a start between a backslash and the quote it escapes (the mark landed on a
   one-byte token and the string's rest was split as code), and `COPY` rows reached from the
   `COPY` line. Deciding from the document's tokens and `COPY` ranges closes all three. The
-  splitter's own mark on a carried state stays, for callers of `split_from`.
+  splitter's own mark on a carried state stays, for callers of `split_from`. The re-review
+  then found that the `COPY` rule looked only at the item just before the selection; with
+  another item on the `COPY` line the rows were sent again. The rule now asks the list of
+  every `COPY`, `split_selection` checks both ways that its own `COPY` data and the
+  document's are the same, and the generators hold such a line.
 - Cost: statements selected inside a function body (a dollar-quoted string) do not run in
   M3a. Listed for the PO.
 - **A selection is its own script.** A psql `\if` before it is not part of it: a statement

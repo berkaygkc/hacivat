@@ -572,11 +572,10 @@ fn separate(doc: &DocSnapshot, r: TextRange) -> RangeResolution {
     // The server reads what is sent from a clean state, so the selection's ends must fall
     // between the document's tokens, and it must not reach `COPY` rows from inside their
     // statement. `split_selection` marks such cuts itself; this refusal does not depend on it.
-    let cuts = doc.selection_cuts(r);
-    if !cuts.is_empty() {
-        return RangeResolution::Ambiguous(cuts);
-    }
-    let split = doc.split_selection(r, SplitMode::Execution);
+    let split = match doc.split_selection_checked(r, SplitMode::Execution) {
+        Ok(split) => split,
+        Err(cuts) => return RangeResolution::Ambiguous(cuts),
+    };
     if let Some(c) = split.client.iter().find(|c| !c.supported) {
         return RangeResolution::UnsupportedClientCommand { at: c.range };
     }
@@ -611,19 +610,9 @@ fn verbatim(doc: &DocSnapshot, r: TextRange) -> RangeResolution {
     if !cuts.is_empty() {
         return RangeResolution::Ambiguous(cuts);
     }
-    // The document's `COPY` rows are data whatever the text reads as alone.
-    let exec = doc.execution_split();
-    let first = exec
-        .items
-        .partition_point(|it| it.smart().end() < range.start())
-        .saturating_sub(1);
-    let rows = exec.items[first..]
-        .iter()
-        .take_while(|it| it.smart().start() < range.end())
-        .filter_map(Item::statement)
-        .filter_map(|s| s.copy_data)
-        .find(|d| d.rows.start() < range.end() && range.start() < d.rows.end());
-    if let Some(d) = rows {
+    // The document's `COPY` rows are data whatever the text reads as alone, and wherever
+    // their `COPY` statement is.
+    if let Some((_, d)) = doc.copy_overlapping(range) {
         return RangeResolution::UnsupportedClientCommand { at: d.rows };
     }
     let clean = SplitStart {

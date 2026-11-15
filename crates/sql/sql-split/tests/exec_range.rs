@@ -1641,6 +1641,86 @@ fn labels_show_zero_width_and_tag_characters() {
     );
 }
 
+// --- review round 2 -----------------------------------------------------------------------
+
+/// What Run answers for the selection of `marked` under `policy`, the same in both modes.
+fn answer(
+    marked: &str,
+    id: DialectId,
+    flavor: ClientFlavor,
+    policy: SelectionPolicy,
+) -> RangeResolution {
+    let (sql, r) = marked_sel(marked);
+    let d = doc_in(&sql, id, flavor);
+    let x = exec(&d, &sel(r.clone()), &selecting(policy));
+    assert_eq!(
+        editor(&d, &sel(r), &selecting(policy)),
+        x,
+        "{marked:?} {policy:?}"
+    );
+    x
+}
+
+// Re-review I1: COPY rows are data wherever their COPY statement is on its line.
+#[test]
+fn copy_rows_are_never_sent_when_another_item_shares_the_copy_line() {
+    for marked in [
+        "COPY t FROM STDIN; SELECT 1;«\nDROP TABLE x;»\nDELETE FROM y;\n\\.\n",
+        "COPY t FROM STDIN; SELECT «1;\nDROP TABLE x;»\nDELETE FROM y;\n\\.\n",
+        "COPY t FROM STDIN; /* c */ ;«\nDROP TABLE x;»\nDELETE FROM y;\n\\.\n",
+        "COPY t FROM STDIN; SELECT 1 «-- c\nDROP TABLE x»;\n\\.\n",
+        "COPY t FROM STDIN; ;«\nDROP TABLE x;\n»",
+    ] {
+        for policy in [
+            SelectionPolicy::AsSeparate,
+            SelectionPolicy::AsOne,
+            SelectionPolicy::SmartExpand,
+        ] {
+            let x = answer(marked, DialectId::Postgres, ClientFlavor::Psql, policy);
+            let (sql, _) = marked_sel(marked);
+            let sent: Vec<&str> = match &x {
+                RangeResolution::Units(u) => u.iter().map(|u| &sql[u.range]).collect(),
+                RangeResolution::Ask { .. } => panic!("{marked:?} {policy:?}: {x:?}"),
+                _ => Vec::new(),
+            };
+            assert!(
+                !sent
+                    .iter()
+                    .any(|t| t.contains("DROP") || t.contains("DELETE")),
+                "{marked:?} {policy:?}: {sent:?}"
+            );
+            if policy == SelectionPolicy::AsSeparate {
+                assert!(
+                    matches!(x, RangeResolution::Ambiguous(_)),
+                    "{marked:?}: {x:?}"
+                );
+            }
+        }
+    }
+}
+
+// Re-review M3.
+#[test]
+fn a_selection_inside_an_ambiguous_comment_end_is_refused() {
+    for marked in [
+        "SELECT 1 /*! , \"*/« DROP TABLE t;» -- \" */ ;",
+        "SELECT /*+ \"*/« DROP TABLE u;» -- \" */ 2;",
+    ] {
+        for policy in [
+            SelectionPolicy::AsSeparate,
+            SelectionPolicy::AsOne,
+            SelectionPolicy::SmartExpand,
+        ] {
+            let x = answer(marked, DialectId::MySql, ClientFlavor::MySqlCli, policy);
+            assert_eq!(
+                reasons(&x),
+                [AmbiguityReason::AmbiguousCommentEnd],
+                "{marked:?} {policy:?}"
+            );
+        }
+    }
+}
+
 // --- performance (HV-EXEC-01: ≤ 2 ms p95 on a 50k-line file, warm) --------------------------
 
 #[test]
@@ -1649,41 +1729,74 @@ fn resolve_on_50k_lines_within_2_ms_release() {
     if !std::env::var_os("HACIVAT_PERF").is_some_and(|v| v == "1") {
         return;
     }
-    // 50,000 lines, 12,500 statements, each with a title comment.
-    let sql = "-- a note\nSELECT id, name\nFROM customers\nWHERE id = 1;\n".repeat(12_500);
-    let d = pg(&sql);
-    // Warm: both splits exist before Run asks.
-    assert_eq!(d.execution_split().statements().count(), 12_500);
-    let p95 = |policy: ExecPolicy, mode: SplitMode| {
-        let mut times: Vec<std::time::Duration> = (0..200)
-            .map(|n| {
-                let at = caret((sql.len() / 200) * n + 15);
-                let start = std::time::Instant::now();
-                let r = resolve(&d, &at, &policy, mode, None, None);
-                let took = start.elapsed();
-                assert!(matches!(
-                    r,
-                    RangeResolution::Units(_) | RangeResolution::Ask { .. }
-                ));
-                took
-            })
-            .collect();
+    // 50,000 lines, 12,500 statements, each with a title comment; and the same script after
+    // a psql command on line 1, after which the splitter lexes on its own.
+    let body = "-- a note\nSELECT id, name\nFROM customers\nWHERE id = 1;\n".repeat(12_500);
+    let with_command = format!("\\set x 1\n{body}");
+    let p95 = |mut times: Vec<std::time::Duration>| {
         times.sort();
-        times[189]
+        times[times.len() * 95 / 100 - 1]
     };
-    let statement = p95(ExecPolicy::largest(), SplitMode::Execution);
-    let ask = p95(ExecPolicy::default(), SplitMode::Execution);
-    let preview = p95(ExecPolicy::default(), SplitMode::Editor);
-    let whole = p95(ExecPolicy::whole_script(), SplitMode::Execution);
-    println!(
-        "resolve p95: statement {statement:?}, ask {ask:?}, preview {preview:?}, whole script {whole:?}"
-    );
-    for (name, t) in [
-        ("statement", statement),
-        ("ask", ask),
-        ("preview", preview),
-        ("whole script", whole),
-    ] {
-        assert!(t.as_micros() <= 2_000, "{name}: {t:?}");
+    for (name, sql) in [("plain", &body), ("after a client command", &with_command)] {
+        let d = pg(sql);
+        let shift = sql.len() - body.len();
+        // Warm: both splits exist before Run asks.
+        assert_eq!(d.execution_split().statements().count(), 12_500);
+        let carets = |policy: ExecPolicy, mode: SplitMode| {
+            p95((0..200)
+                .map(|n| {
+                    let at = caret(shift + (body.len() / 200) * n + 15);
+                    let start = std::time::Instant::now();
+                    let r = resolve(&d, &at, &policy, mode, None, None);
+                    let took = start.elapsed();
+                    assert!(
+                        matches!(r, RangeResolution::Units(_) | RangeResolution::Ask { .. }),
+                        "{name}: {r:?}"
+                    );
+                    took
+                })
+                .collect())
+        };
+        // One statement selected, and three with their comments, all over the script.
+        let selections = |lines: usize, mode: SplitMode, policy: ExecPolicy| {
+            p95((0..200)
+                .map(|n| {
+                    let from = shift + 55 * (n * 62 + 1) + 10;
+                    let r = from..from + 55 * lines - 10;
+                    let start = std::time::Instant::now();
+                    let x = resolve(&d, &sel(r), &policy, mode, None, None);
+                    let took = start.elapsed();
+                    assert_eq!(units_of(&x).len(), lines, "{name}");
+                    took
+                })
+                .collect())
+        };
+        let statement = carets(ExecPolicy::largest(), SplitMode::Execution);
+        let ask = carets(ExecPolicy::default(), SplitMode::Execution);
+        let preview = carets(ExecPolicy::default(), SplitMode::Editor);
+        let one = selections(1, SplitMode::Execution, ExecPolicy::default());
+        let one_preview = selections(1, SplitMode::Editor, ExecPolicy::default());
+        let three = selections(3, SplitMode::Execution, ExecPolicy::default());
+        let as_one = selections(1, SplitMode::Execution, selecting(SelectionPolicy::AsOne));
+        let mut all = vec![
+            ("statement", statement),
+            ("ask", ask),
+            ("preview", preview),
+            ("selection of one statement", one),
+            ("selection preview", one_preview),
+            ("selection of three statements", three),
+            ("selection as one", as_one),
+        ];
+        // A whole-script run spans the client command and is refused there.
+        if shift == 0 {
+            all.push((
+                "whole script",
+                carets(ExecPolicy::whole_script(), SplitMode::Execution),
+            ));
+        }
+        println!("resolve p95, {name}: {all:?}");
+        for (what, t) in all {
+            assert!(t.as_micros() <= 2_000, "{name}, {what}: {t:?}");
+        }
     }
 }

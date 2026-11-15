@@ -16,6 +16,9 @@ use sql_split::{Confidence, DocSnapshot, SplitMode, SplitStart, SqlDocument, spl
 use sql_text::{TextRange, TextSize};
 
 const FRAGMENTS: &[&str] = &[
+    // Review round 2: a `COPY` whose line holds another statement or an empty `;`.
+    "\nCOPY t FROM STDIN; SELECT 1;\n",
+    "COPY t FROM STDIN; ;\n",
     // Review round 1: an escape cut in two, and a quoted `*/` inside each comment the server
     // reads as code.
     "E'a\\'",

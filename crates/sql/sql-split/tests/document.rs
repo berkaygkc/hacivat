@@ -761,3 +761,166 @@ fn after_copy_data_both_lexings_are_asked() {
         assert!(runnable.is_empty(), "{runnable:?}");
     }
 }
+
+// --- Task 13 review round 2 ---------------------------------------------------------------
+
+// Re-review I1: the COPY statement is not always the item just before its rows.
+#[test]
+fn copy_rows_are_data_when_another_item_shares_the_copy_line() {
+    for text in [
+        "COPY t FROM STDIN; SELECT 1;«\nDROP TABLE x;»\nDELETE FROM y;\n\\.\n",
+        "COPY t FROM STDIN; SELECT «1;\nDROP TABLE x;»\nDELETE FROM y;\n\\.\n",
+        "COPY t FROM STDIN; /* c */ ;«\nDROP TABLE x;»\nDELETE FROM y;\n\\.\n",
+        "COPY t FROM STDIN; SELECT 1 «-- c\nDROP TABLE x»;\n\\.\n",
+        "COPY t FROM STDIN; ;«\nDROP TABLE x;\n»",
+        "COPY t FROM STDIN; SELECT 1;\n«DROP TABLE x;\n»\\.\n",
+        "COPY t FROM STDIN; «SELECT 1;\nDROP TABLE x;\n\\.\nSELECT 9;»",
+    ] {
+        let (sql, r) = marked(text);
+        let snap = doc_in(&sql, DialectId::Postgres, ClientFlavor::Psql);
+        assert!(!snap.selection_cuts(r).is_empty(), "{text:?}");
+        for (all, runnable, reasons) in cut(text, DialectId::Postgres, ClientFlavor::Psql) {
+            assert!(
+                !runnable
+                    .iter()
+                    .any(|u| u.contains("DROP") || u.contains("DELETE") || u == "1"),
+                "{text:?}: {runnable:?} of {all:?}"
+            );
+            assert!(!reasons.is_empty(), "{text:?}");
+        }
+    }
+    // After the data the split goes on from the document's state.
+    let (_, runnable, _) = &cut(
+        "COPY t FROM STDIN; «SELECT 1;\nDROP TABLE x;\n\\.\nSELECT 9;»",
+        DialectId::Postgres,
+        ClientFlavor::Psql,
+    )[0];
+    assert_eq!(runnable, &["SELECT 9"]);
+    // A selection that holds the COPY from its first byte reads the same data.
+    let whole = cut(
+        "«COPY t FROM STDIN; SELECT 1;\nDROP TABLE x;\n\\.\nSELECT 9;»",
+        DialectId::Postgres,
+        ClientFlavor::Psql,
+    );
+    assert!(
+        !whole[0].1.iter().any(|u| u.contains("DROP")),
+        "{:?}",
+        whole[0]
+    );
+    assert!(whole[0].1.contains(&"SELECT 9".to_string()));
+}
+
+// Re-review M3: between an executable comment's lexer end and the end the server may read.
+#[test]
+fn an_edge_inside_an_ambiguous_comment_end_is_a_cut() {
+    use sql_split::AmbiguityReason::AmbiguousCommentEnd;
+    for text in [
+        "SELECT 1 /*! , \"*/« DROP TABLE t;» -- \" */ ;",
+        "SELECT /*+ \"*/« DROP TABLE u;» -- \" */ 2;",
+        "«SELECT 1 /*! , \"*/ DROP» TABLE t; -- \" */ ;",
+    ] {
+        let (sql, r) = marked(text);
+        let snap = doc_in(&sql, DialectId::MySql, ClientFlavor::MySqlCli);
+        let cuts = snap.selection_cuts(r);
+        assert!(
+            cuts.iter().any(|c| c.reason == AmbiguousCommentEnd),
+            "{text:?}: {cuts:?}"
+        );
+        for (all, runnable, _) in cut(text, DialectId::MySql, ClientFlavor::MySqlCli) {
+            assert!(runnable.is_empty(), "{text:?}: {runnable:?} of {all:?}");
+        }
+    }
+}
+
+// Re-review M4: the public entry points take any offsets.
+#[test]
+fn selection_offsets_inside_a_character_are_moved_back_not_panicked_on() {
+    let sql = "SELECT 1; -- é x\nSELECT 'é'; /* é */ SELECT 2;";
+    let snap = doc_in(sql, DialectId::Postgres, ClientFlavor::Psql);
+    let len = u32::try_from(sql.len()).unwrap();
+    for a in 0..=len + 2 {
+        let state = snap.split_start_at(at(a));
+        if !sql.is_char_boundary(a.min(len) as usize) {
+            assert_eq!(state, snap.split_start_at(at(a - 1)), "{a}");
+        }
+        for b in a..=len + 2 {
+            let r = TextRange::new(at(a), at(b));
+            let cuts = snap.selection_cuts(r);
+            let trimmed = snap.without_comment_parts(r);
+            assert!(
+                sql.get(usize::from(trimmed.start())..usize::from(trimmed.end()))
+                    .is_some()
+            );
+            for c in cuts {
+                assert!(
+                    sql.get(usize::from(c.at.start())..usize::from(c.at.end()))
+                        .is_some()
+                );
+            }
+        }
+    }
+    // The reviewer's case: a start inside `é` in a `--` comment.
+    let mid = u32::try_from(sql.find('é').unwrap()).unwrap() + 1;
+    assert_eq!(
+        snap.selection_cuts(TextRange::new(at(mid), at(mid + 3))),
+        snap.selection_cuts(TextRange::new(at(mid - 1), at(mid + 3)))
+    );
+    // The same after a client command, where the second lexing is asked.
+    let sql = "\\set x 1\nSELECT 1; -- é x\nSELECT 'é';";
+    let snap = doc_in(sql, DialectId::Postgres, ClientFlavor::Psql);
+    let len = u32::try_from(sql.len()).unwrap();
+    for a in 0..=len {
+        let _ = snap.split_start_at(at(a));
+        let _ = snap.selection_cuts(TextRange::new(at(a), at(len)));
+        let _ = snap.selection_cuts(TextRange::new(at(0), at(a)));
+    }
+}
+
+// Re-review I2: after a restart the splitter's lexing is picked up at a checkpoint, and the
+// answer is the one a lex from the restart gives.
+#[test]
+fn a_split_start_far_after_a_client_command_reads_the_same_state() {
+    let body = "SELECT 'a;b', $q$ x; y $q$, 1 /* c */ FROM t -- d\n;\n".repeat(400);
+    let sql = format!("\\set x 1\n{body}");
+    let plain = doc_in(&body, DialectId::Postgres, ClientFlavor::Psql);
+    let snap = doc_in(&sql, DialectId::Postgres, ClientFlavor::Psql);
+    let shift = u32::try_from(sql.len() - body.len()).unwrap();
+    let len = u32::try_from(body.len()).unwrap();
+    // Every offset near the text's end, and a spread over the whole text.
+    let offsets = (len - 400..=len).chain((0..len).step_by(97));
+    for o in offsets {
+        if !body.is_char_boundary(o as usize) {
+            continue;
+        }
+        assert_eq!(
+            snap.split_start_at(at(o + shift)).lex,
+            plain.split_start_at(at(o)).lex,
+            "offset {o}"
+        );
+        let r = TextRange::new(at(o), at(len));
+        let moved = TextRange::new(at(o + shift), at(len + shift));
+        let cuts: Vec<_> = snap
+            .selection_cuts(moved)
+            .into_iter()
+            .map(|c| (c.at - at(shift), c.reason))
+            .collect();
+        let want: Vec<_> = plain
+            .selection_cuts(r)
+            .into_iter()
+            .map(|c| (c.at, c.reason))
+            .collect();
+        // What is cut without the command is cut after it; and between two tokens nothing
+        // is. (Inside a plain comment the two differ on purpose: after a restart a comment
+        // of the document's one lexing is not trusted, so its edge is a cut.)
+        if !want.is_empty() {
+            assert!(!cuts.is_empty(), "offset {o}: {want:?}");
+        }
+        let l = plain.lexed();
+        let between = l
+            .token_at(at(o))
+            .is_none_or(|i| l.range(i).start() == at(o));
+        if between {
+            assert!(cuts.is_empty(), "offset {o}: {cuts:?}");
+        }
+    }
+}

@@ -475,6 +475,14 @@ pub(crate) struct Analysis {
     pub delimiters: Vec<(TextSize, Option<Arc<str>>)>,
     /// Where lexing restarted after a command, a delimiter or data, and in which state.
     pub restarts: Vec<(TextSize, LexState)>,
+    /// Token starts of the pass's own token stream, about every [`CHECKPOINT_BYTES`]: the
+    /// lexer's state is `Initial` at each, so lexing can be picked up there instead of at the
+    /// last restart (a selection's edge is then looked at in bounded time).
+    pub checkpoints: Vec<TextSize>,
+    /// Every `COPY … FROM STDIN` with data, in text order: where its statement starts, and
+    /// its data. The statement is not always the item just before the rows (another
+    /// statement or an empty `;` can follow it on its line).
+    pub copies: Vec<(TextSize, CopyData)>,
     pub ctx: Option<DialectCtx>,
     pub flavor: ClientFlavor,
     /// The delimiter in force at the text's start.
@@ -483,6 +491,9 @@ pub(crate) struct Analysis {
     /// server-side comment reads): the complexity counter.
     pub lexed: u64,
 }
+
+/// How far apart the lexing checkpoints of an [`Analysis`] are.
+pub(crate) const CHECKPOINT_BYTES: usize = 2048;
 
 /// Runs the structural pass over `text` (its lexing from `start.lex` is `lexed`, or the pass
 /// lexes it).
@@ -531,6 +542,7 @@ pub(crate) fn analyze_chunked(
         server_to_eof: false,
         server_read: None,
         lexed: 0,
+        next_checkpoint: CHECKPOINT_BYTES,
         carried: carried_reason(&start.lex),
     };
     w.run();
@@ -626,6 +638,8 @@ struct Walker<'a, 's> {
     server_read: Option<(usize, Option<usize>)>,
     /// Bytes lexed outside the stream.
     lexed: u64,
+    /// Where the next lexing checkpoint is due.
+    next_checkpoint: usize,
     /// The split starts inside a token (`SplitStart::lex`): why its tail, the first token, is
     /// uncertain. Taken when that token is read.
     carried: Option<AmbiguityReason>,
@@ -682,6 +696,12 @@ impl<'a> Walker<'a, '_> {
 
     fn run(&mut self) {
         while let Some(mut t) = self.stream.next() {
+            // A token of the stream starts where the lexer's state is `Initial` (the first
+            // token of a carried state and `COPY` data lines aside): a place to lex on from.
+            if t.start() >= self.next_checkpoint && t.kind != TokenKind::InlineData {
+                self.out.checkpoints.push(t.range.start());
+                self.next_checkpoint = t.start() + CHECKPOINT_BYTES;
+            }
             // The first token of a split that starts inside a token is that token's tail.
             let tail = self.carried.take().map(|reason| (t.range, reason));
             self.reread_comment_end(&mut t);
@@ -983,6 +1003,11 @@ impl<'a> Walker<'a, '_> {
             None => (range(ds.min(n), ds.min(n)), None, ds.min(n)),
         };
         self.out.restarts.push((size(data_end), LexState::Initial));
+        let owner = match self.out.items.get(item) {
+            Some(RawItem::Stmt(s)) => s.strict.start(),
+            _ => rows.start(),
+        };
+        self.out.copies.push((owner, CopyData { rows, end }));
         if let Some(RawItem::Stmt(s)) = self.out.items.get_mut(item) {
             s.copy_data = Some(CopyData { rows, end });
             if end.is_none() {
