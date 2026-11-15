@@ -45,7 +45,15 @@ pub const POPOVER_LAYER: &str = "popover";
 
 /// The profile the capsule and the status bar follow (R19): the explorer's selection while it
 /// has a live state, else the most recent connect attempt.
+///
+/// M3a (Task 34): a bound console that has the focus comes first (DESIGN.md "Status Follows
+/// The Tab": the capsule describes the editor's connection), with its saved profile whatever
+/// its live state; `status::followed_console` says which console that is.
 pub fn current_profile(cx: &App) -> Option<Arc<Profile>> {
+    // ## m3a-t34-status-follows
+    if let Some((_, p)) = crate::connections::status::followed_bound_console(cx) {
+        return Some(p);
+    }
     let m = cx.try_global::<ConnectionsModel>()?;
     let selected = m
         .selected()

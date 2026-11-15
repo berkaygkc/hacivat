@@ -1547,3 +1547,56 @@ hv-copy-refused-title = Too much to copy
 hv-copy-refused-body = The selection has { $cells } cells. Copy takes at most { $max } cells or { $size }; select fewer rows or columns.
 # Toast when separate selections neither stack nor sit side by side, so they have no table shape.
 hv-copy-refused-multiple = These selections can't be copied together. Select one block, or blocks that share their rows or their columns.
+
+## m3a-t34-status-follows
+
+# The status bar's transaction segment: the user's open transaction (NOTES M3a surface 6).
+# Variables:
+#   $n (Number) - the statements run since BEGIN, e.g. 3.
+hv-tx-open = { $n ->
+        [one] Transaction open · { $n } statement
+       *[other] Transaction open · { $n } statements
+    }
+# The tooltip of the transaction segment.
+hv-tx-open-tip = The statements since BEGIN aren't committed yet. Commit or roll back from the command palette.
+# The transaction segment after an error or a cancel stopped the transaction.
+hv-tx-failed = Transaction failed · roll back to end it
+# The tooltip of the failed transaction segment.
+hv-tx-failed-tip = An error or a cancel stopped the transaction. The server now accepts only a rollback.
+# The active result's rows in the status bar, before its time is known.
+# Variables:
+#   $rows (Number) - the rows loaded, e.g. 100.
+hv-results-rows = { $rows ->
+        [one] { $rows } row
+       *[other] { $rows } rows
+    }
+# The active result's rows while more may come (a cursor is open, rows are still arriving, or a
+# limit cut it short).
+# Variables:
+#   $rows (Number) - the rows loaded so far, e.g. 10000.
+hv-results-rows-more = { $rows }+ rows
+# The active result's rows and time in the status bar.
+# Variables:
+#   $rows (Number) - the rows loaded, e.g. 100.
+#   $duration (String) - the time (an hv-status-duration-* message), e.g. "131 ms".
+hv-results-rows-timing = { $rows ->
+        [one] { $rows } row · { $duration }
+       *[other] { $rows } rows · { $duration }
+    }
+# The active result's rows and time while more may come.
+# Variables:
+#   $rows (Number) - the rows loaded so far, e.g. 10000.
+#   $duration (String) - the time (an hv-status-duration-* message), e.g. "131 ms".
+hv-results-rows-more-timing = { $rows }+ rows · { $duration }
+# A time under a second in the status bar.
+# Variables:
+#   $ms (Number) - whole milliseconds, e.g. 131.
+hv-status-duration-ms = { $ms } ms
+# A time of a second or more in the status bar.
+# Variables:
+#   $seconds (Decimal) - seconds with two decimals, e.g. 2.45.
+hv-status-duration-s = { NUMBER($seconds, minimumFractionDigits: 2) } s
+# The status bar's button that closes the open cursor.
+hv-results-status-cursor = Cursor open
+# The tooltip of the cursor button.
+hv-results-status-cursor-tip = Holding a database snapshot. Click to close the cursor.
