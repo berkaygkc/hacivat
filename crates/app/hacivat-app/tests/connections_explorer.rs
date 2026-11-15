@@ -45,7 +45,10 @@ fn with_profiles_lang<const N: usize>(
     let vcx = shell_with_fake(
         cx,
         lang,
-        hacivat_driver::fake::FakeDriver::new(hacivat_proto::DbmsKind::Postgres),
+        // ## m3a-t32-console (named exception): the guard canary (support::answers_probe).
+        answers_probe(hacivat_driver::fake::FakeDriver::new(
+            hacivat_proto::DbmsKind::Postgres,
+        )),
     );
     for (name, env) in profiles {
         add_profile(vcx, test_profile(name, env, "127.0.0.1"));
@@ -658,7 +661,8 @@ fn connected_row(cx: &mut TestAppContext, name: &str) -> &'static mut VisualTest
     use hacivat_driver::fake::FakeDriver;
     use hacivat_driver::{SemVerLoose, ServerInfo};
     use hacivat_proto::DbmsKind;
-    let fake = FakeDriver::new(DbmsKind::Postgres).server(ServerInfo {
+    // ## m3a-t32-console (named exception): the guard canary (support::answers_probe).
+    let fake = answers_probe(FakeDriver::new(DbmsKind::Postgres)).server(ServerInfo {
         kind: DbmsKind::Postgres,
         product: "PostgreSQL".to_string(),
         version: SemVerLoose::parse("16.4"),

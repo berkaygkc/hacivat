@@ -1256,3 +1256,52 @@ pub fn rendered_markers(vcx: &VisualTestContext) -> Vec<String> {
         .filter_map(|r| r.path.rsplit_once('#').map(|(_, id)| id.to_string()))
         .collect()
 }
+
+// ## m3a-t32-console
+
+/// `fake` answering the console's SQL-context probe as a PostgreSQL server does. Since M3a a
+/// connect binds the focused console (Task 32), whose run UI probes the context (Task 33): on a
+/// read-write session as a statement, on a read-only (production) one as a typed query inside
+/// the read-only guard, which tracks the transaction it opens and whose canary
+/// (`txid_current_if_assigned()`) finds no transaction ID.
+/// A fake that should connect a profile answers both, like a server.
+pub fn answers_probe(fake: hacivat_driver::fake::FakeDriver) -> hacivat_driver::fake::FakeDriver {
+    use hacivat_driver::fake::{FakeExec, FakeQuery, FakeResultSet, FakeRows};
+    let answer = |prefix: &'static str, value: Option<&str>| FakeExec {
+        prefix,
+        result: Ok(hacivat_driver::ExecSummary {
+            rows: vec![vec![value.map(str::to_string)]],
+            row_count: 1,
+            ..hacivat_driver::ExecSummary::default()
+        }),
+        delay: std::time::Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    };
+    let exec = (0..32)
+        .flat_map(|_| {
+            [
+                answer("SHOW standard_conforming_strings", Some("on")),
+                answer("SELECT pg_catalog.txid_current_if_assigned()", None),
+            ]
+        })
+        .collect();
+    let queries = (0..32)
+        .map(|_| FakeQuery {
+            prefix: "SHOW standard_conforming_strings",
+            sets: vec![FakeResultSet {
+                columns: vec![(
+                    "standard_conforming_strings",
+                    hacivat_values::LogicalType::Text {
+                        max_chars: None,
+                        fixed: false,
+                    },
+                )],
+                rows: FakeRows::Literal(vec![vec![hacivat_values::Value::Text("on".into())]]),
+            }],
+            ..Default::default()
+        })
+        .collect();
+    // The guard reads the transaction state it opened (`BEGIN … READ ONLY`).
+    fake.tracks_transactions().exec(exec).queries(queries)
+}

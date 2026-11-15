@@ -92,9 +92,10 @@ pub fn confirm(id: ProfileId, window: &mut Window, cx: &mut App) {
 /// Deletes `id` and toasts; a failure says why.
 pub fn delete_now(id: ProfileId, name: String, cx: &mut App) {
     // ## m3a-t32-console (fix round 1, C2; named exception): deleting forgets the connection,
-    // which rolls its sessions back; a console holding the user's open transaction refuses
-    // first. Task 33's prompt replaces this at the merge.
-    if crate::console::view::release_refused(cx, id) {
+    // which rolls its sessions back; a console holding the user's open transaction asks first
+    // (Task 33's prompt); the delete runs again after Commit or Roll back.
+    let again = name.clone();
+    if crate::console::view::release_refused(cx, id, move |cx| delete_now(id, again, cx)) {
         return;
     }
     let task = ConnectionsModel::delete(cx, id);

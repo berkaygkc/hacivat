@@ -121,7 +121,8 @@ fn listening_port(vcx: &mut VisualTestContext) -> u16 {
 }
 
 fn ok_fake() -> FakeDriver {
-    FakeDriver::new(DbmsKind::Postgres)
+    // ## m3a-t32-console (named exception): the guard canary (support::answers_probe).
+    answers_probe(FakeDriver::new(DbmsKind::Postgres))
 }
 
 /// A server that rejects every password (SQLSTATE 28P01).

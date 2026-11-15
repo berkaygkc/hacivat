@@ -1718,10 +1718,6 @@ hv-edit-redo-outdent = Redo Outdent
 hv-console-ro-pending = { $name } turns read-only once its open transaction is committed or rolled back.
 # The short form of the pending read-only chip in a narrow console toolbar.
 hv-console-ro-pending-short = Read-only after this transaction
-# A notice when Disconnect or Delete would roll back the user's open transaction in a console.
-# Variables:
-#   $name (String) - the console's tab title, e.g. "orders-dev (2)".
-hv-console-release-refused = Commit or roll back the open transaction in { $name } first.
 # A notice when a console's own session could not be opened.
 # Variables:
 #   $name (String) - the console's tab title, e.g. "orders-dev (2)".

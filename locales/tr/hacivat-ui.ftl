@@ -1592,8 +1592,6 @@ hv-console-ro-pending = { $name }, açık işlemi commit edildiğinde ya da geri
 # Review: PO
 hv-console-ro-pending-short = Bu işlemden sonra salt okunur
 # Review: PO
-hv-console-release-refused = Önce { $name } içindeki açık işlemi commit edin ya da geri alın.
-# Review: PO
 hv-console-session-failed = { $name } için bağlantı açılamadı. Çalıştır yeniden dener.
 ## m3a-t33-exec-ui
 

@@ -31,6 +31,13 @@ fn primary(key: &str) -> String {
     }
 }
 
+/// A PostgreSQL fake that tracks transactions and answers Task 33's SQL-context probe on
+/// read-write sessions (an exec) and read-only ones (a typed query), so consoles connect and
+/// read their context as against a server.
+fn pg_fake() -> FakeDriver {
+    answers_probe(FakeDriver::new(DbmsKind::Postgres).tracks_transactions())
+}
+
 /// A shell whose PostgreSQL connections go to a FakeDriver, with profile `name` (`env`).
 fn shell_with_profile(
     cx: &mut TestAppContext,
@@ -38,7 +45,7 @@ fn shell_with_profile(
     env: Option<EnvTag>,
     max_connections: u8,
 ) -> &'static mut VisualTestContext {
-    let vcx = shell_with_fake(cx, "en", FakeDriver::new(DbmsKind::Postgres));
+    let vcx = shell_with_fake(cx, "en", pg_fake());
     let mut p = test_profile(name, env, "10.0.0.7");
     p.max_connections = max_connections;
     add_profile(vcx, p);
@@ -48,7 +55,12 @@ fn shell_with_profile(
 fn connect_and_wait(vcx: &VisualTestContext, name: &str) {
     connect(vcx, name);
     wait_until(vcx, &format!("{name} to connect"), |vcx| {
-        matches!(live(vcx, name), LiveState::Connected(_))
+        let state = live(vcx, name);
+        assert!(
+            !matches!(state, LiveState::Failed(_)),
+            "{name} failed to connect: {state:?}"
+        );
+        matches!(state, LiveState::Connected(_))
     });
 }
 
@@ -374,16 +386,39 @@ fn user_tx_open(h: &SessionHandle) -> bool {
         && tx.status != hacivat_driver::TxStatus::Idle
 }
 
+/// The open-transaction prompt's dialog, once Task 33 shows it.
+fn prompt(vcx: &VisualTestContext) -> Option<Entity<hacivat_ui::dialog::Dialog>> {
+    vcx.cx
+        .read(hacivat_app::exec_ui::close_prompt::open_prompt_dialog)
+}
+
+/// Answers the prompt: `Some(i)` presses button `i`, `None` cancels.
+fn answer_prompt(vcx: &VisualTestContext, button: Option<usize>) {
+    wait_until(vcx, "the open-transaction prompt", |vcx| {
+        prompt(vcx).is_some()
+    });
+    let dialog = prompt(vcx).expect("the prompt");
+    vcx.cx.update(|cx| {
+        dialog.update(cx, |_, cx| {
+            cx.emit(match button {
+                Some(i) => hacivat_ui::dialog::DialogEvent::Pressed(i),
+                None => hacivat_ui::dialog::DialogEvent::Cancelled,
+            })
+        })
+    });
+    vcx.run_until_parked();
+}
+
+/// The open-transaction prompt's "Roll back and continue" (Commit, Roll back, Cancel).
+const ROLL_BACK: usize = 1;
+
 /// A console never lets go of a session holding the user's open transaction (no silent
-/// rollback): the read-only reconnect waits for it, says so, and happens once it ends; a
-/// console tab closed over one closes its session refusing the rollback.
+/// rollback). Tagging its profile production asks first (Task 33's prompt); on Cancel the
+/// console stays pending read-only (C1): nothing claims read-only, Run sends nothing; once the
+/// transaction ends the profile reconnects read-only and the notice is true again.
 #[gpui::test]
 fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext) {
-    let vcx = shell_with_fake(
-        cx,
-        "en",
-        FakeDriver::new(DbmsKind::Postgres).tracks_transactions(),
-    );
+    let vcx = shell_with_fake(cx, "en", pg_fake());
     add_profile(vcx, test_profile("orders", Some(EnvTag::Dev), "10.0.0.7"));
     connect_and_wait(vcx, "orders");
     let id = wait_active_console(vcx);
@@ -398,17 +433,20 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
         .read(|cx| (*cx.global::<ConnectionsModel>().get(pid).expect("saved")).clone());
     p.environment = Some(EnvTag::Production);
     save_draft(vcx, hacivat_session::profile::ProfileDraft::edit(p));
-    vcx.run_until_parked();
-    // Refused: the console keeps its session, the transaction stays open, nothing reconnects.
+    // The prompt asks; nothing is released before an answer.
+    wait_until(vcx, "the prompt", |vcx| prompt(vcx).is_some());
+    assert_eq!(session_of(vcx, id).map(|s| s.id()), Some(rw.id()));
+    assert!(user_tx_open(&rw));
+    // Cancel: nothing is released, nothing reconnects, the transaction stays.
+    answer_prompt(vcx, None);
     assert_eq!(session_of(vcx, id).map(|s| s.id()), Some(rw.id()));
     assert!(user_tx_open(&rw), "the transaction was not rolled back");
     assert!(matches!(live(vcx, "orders"), LiveState::Connected(_)));
-    let toasts = toast_texts(vcx).join(" ");
+    // C1: while pending, nothing claims read-only and Run sends nothing.
     assert!(
-        toasts.contains("orders turns read-only once its open transaction"),
-        "{toasts}"
+        vcx.cx
+            .read(|cx| hacivat_app::exec_ui::pending_read_only(id, cx))
     );
-    // Fix round 1, C1: while pending, nothing claims read-only and Run sends nothing.
     let frame = frame_text(vcx);
     assert!(
         !frame.contains("Production is read-only in this version"),
@@ -420,23 +458,27 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
         ),
         "the pending chip: {frame}"
     );
-    assert!(vcx.cx.read(|cx| Consoles::pending_read_only(cx, id)));
     activate(vcx);
     let editor = editor_of(vcx, id);
     focus_editor(vcx, &editor);
-    let runs = record_runs(vcx, &editor);
     vcx.simulate_input("DELETE FROM t;");
     vcx.simulate_keystrokes(&primary("enter"));
-    let _ = run(vcx, "editor.run_2");
     click(vcx, "button-console-run");
-    vcx.run_until_parked();
-    assert!(runs.borrow().is_empty(), "Run sent nothing while pending");
-    // The user ends it: now the profile reconnects read-only, and the notice is true again.
+    settle_until(vcx, Duration::from_secs(2), || true);
+    let sent = format!("{:?}", fake(vcx).call_log());
+    assert!(
+        !sent.contains("DELETE"),
+        "Run sent nothing while pending: {sent}"
+    );
+    // The user ends it: the profile reconnects read-only, and the notice is true again.
     user_exec(&rw, "ROLLBACK");
     wait_until(vcx, "a read-only session", |vcx| {
         session_of(vcx, id).is_some_and(|s| s.state().borrow().read_only)
     });
-    assert!(!vcx.cx.read(|cx| Consoles::pending_read_only(cx, id)));
+    wait_until(vcx, "the pending state to clear", |vcx| {
+        !vcx.cx
+            .read(|cx| hacivat_app::exec_ui::pending_read_only(id, cx))
+    });
     wait_until(vcx, "the production notice", |vcx| {
         frame_text(vcx).contains("Production is read-only in this version")
     });
@@ -444,14 +486,11 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
 }
 
 /// Fix round 1, C2: Disconnect and Delete would roll a user transaction back (the session
-/// manager closes with a rollback): they refuse while a console holds one, and say so.
+/// manager closes with a rollback): they ask first (Task 33's prompt). "Roll back and continue"
+/// ends the transaction and then disconnects; Cancel leaves everything as it was.
 #[gpui::test]
-fn disconnect_and_delete_refuse_while_a_user_transaction_is_open(cx: &mut TestAppContext) {
-    let vcx = shell_with_fake(
-        cx,
-        "en",
-        FakeDriver::new(DbmsKind::Postgres).tracks_transactions(),
-    );
+fn disconnect_and_delete_ask_while_a_user_transaction_is_open(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", pg_fake());
     add_profile(vcx, test_profile("orders", Some(EnvTag::Dev), "10.0.0.7"));
     connect_and_wait(vcx, "orders");
     let id = wait_active_console(vcx);
@@ -461,22 +500,10 @@ fn disconnect_and_delete_refuse_while_a_user_transaction_is_open(cx: &mut TestAp
     wait_until(vcx, "the user's transaction", |_| user_tx_open(&session));
     let pid = profile_id(vcx, "orders");
 
-    vcx.cx
-        .update(|cx| hacivat_app::connections::commands::toggle_connect(pid, cx));
-    vcx.run_until_parked();
-    assert!(matches!(live(vcx, "orders"), LiveState::Connected(_)));
-    assert!(user_tx_open(&session), "not rolled back by a disconnect");
-    assert!(
-        toast_texts(vcx)
-            .join(" ")
-            .contains("Commit or roll back the open transaction in orders first."),
-        "{:?}",
-        toast_texts(vcx)
-    );
-
+    // Delete, then Cancel: nothing happens.
     vcx.cx
         .update(|cx| hacivat_app::connections::delete::delete_now(pid, "orders".to_string(), cx));
-    vcx.run_until_parked();
+    answer_prompt(vcx, None);
     assert!(
         vcx.cx
             .read(|cx| cx.global::<ConnectionsModel>().get(pid).is_some()),
@@ -484,10 +511,17 @@ fn disconnect_and_delete_refuse_while_a_user_transaction_is_open(cx: &mut TestAp
     );
     assert!(user_tx_open(&session), "not rolled back by a delete");
 
-    // Once the user ends it, Disconnect goes ahead.
-    user_exec(&session, "COMMIT");
+    // Disconnect, then Cancel: still connected, the transaction open.
     vcx.cx
         .update(|cx| hacivat_app::connections::commands::toggle_connect(pid, cx));
+    answer_prompt(vcx, None);
+    assert!(matches!(live(vcx, "orders"), LiveState::Connected(_)));
+    assert!(user_tx_open(&session), "not rolled back by a disconnect");
+
+    // Disconnect, then "Roll back and continue": rolled back on purpose, then disconnected.
+    vcx.cx
+        .update(|cx| hacivat_app::connections::commands::toggle_connect(pid, cx));
+    answer_prompt(vcx, Some(ROLL_BACK));
     wait_until(vcx, "the disconnect", |vcx| {
         matches!(live(vcx, "orders"), LiveState::Disconnected)
     });
@@ -499,11 +533,7 @@ fn disconnect_and_delete_refuse_while_a_user_transaction_is_open(cx: &mut TestAp
 /// default session instead of keeping the dead one.
 #[gpui::test]
 fn after_a_reconnect_the_console_takes_the_new_session(cx: &mut TestAppContext) {
-    let vcx = shell_with_fake(
-        cx,
-        "en",
-        FakeDriver::new(DbmsKind::Postgres).tracks_transactions(),
-    );
+    let vcx = shell_with_fake(cx, "en", pg_fake());
     add_profile(vcx, test_profile("orders", Some(EnvTag::Dev), "10.0.0.7"));
     connect_and_wait(vcx, "orders");
     let id = wait_active_console(vcx);
@@ -566,7 +596,7 @@ fn a_session_that_ends_under_its_console_is_replaced(cx: &mut TestAppContext) {
 /// never closes it.
 #[gpui::test]
 fn a_shared_default_session_is_never_closed_by_a_console(cx: &mut TestAppContext) {
-    let vcx = shell_with_fake(cx, "en", FakeDriver::new(DbmsKind::Postgres));
+    let vcx = shell_with_fake(cx, "en", pg_fake());
     let mut p = test_profile("orders", Some(EnvTag::Dev), "10.0.0.7");
     p.single_session = true;
     add_profile(vcx, p);
@@ -680,7 +710,7 @@ fn toolbar_run_ends_a_composition_and_keeps_the_editor_focused(cx: &mut TestAppC
     let editor = editor_of(vcx, id);
     focus_editor(vcx, &editor);
     let runs = record_runs(vcx, &editor);
-    vcx.simulate_input("SELECT 'ı");
+    vcx.simulate_input("SELECT ı");
     in_window(vcx, |window, cx| {
         editor.update(cx, |v, cx| {
             gpui::EntityInputHandler::replace_and_mark_text_in_range(
@@ -693,7 +723,7 @@ fn toolbar_run_ends_a_composition_and_keeps_the_editor_focused(cx: &mut TestAppC
     click(vcx, "button-console-run");
     let runs = runs.borrow();
     assert_eq!(runs.len(), 1, "the click ran once");
-    assert_eq!(runs[0].snapshot.buffer.to_string(), "SELECT 'ış");
+    assert_eq!(runs[0].snapshot.buffer.to_string(), "SELECT ış");
     assert!(!vcx.cx.read(|cx| editor.read(cx).status().composing));
     assert!(editor_focused(vcx, &editor), "the editor keeps the focus");
     drop(runs);

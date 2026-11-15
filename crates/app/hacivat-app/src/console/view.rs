@@ -35,7 +35,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use hacivat_exec::sqlctx::dialect_ctx;
 use hacivat_l10n::{NoArgs, Text, ids};
 use hacivat_proto::{AccessLabel, Department, EnvTag, ProfileId};
 use hacivat_session::LiveState;
@@ -43,7 +42,7 @@ use hacivat_session::session::{
     ClientId, ClosePolicy, SessionHandle, SessionKind, SessionSnapshot, SessionSpec, SessionState,
     effective_read_only,
 };
-use hacivat_sql_editor::{SqlLanguageService, effective_flavor};
+use hacivat_sql_editor::SqlLanguageService;
 use hacivat_ui::panes::TabId;
 use hacivat_ui::text::{TextSource, paragraph};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
@@ -58,7 +57,6 @@ use hacivat_ui_editor::{
     CaretBlink, DocContext, DocId, EDITOR_CONTEXT, EditorConfig, EditorEvent, EditorView,
     LanguageService, Tier, a11y,
 };
-use sql_dialect::ClientFlavor;
 use std::time::Instant;
 
 use crate::connections::capsule::{access_label, current_profile, env_kind};
@@ -203,35 +201,26 @@ fn enforce_read_only(cx: &mut App) {
 
 /// Drops every console session of `profile`, then reconnects the profile.
 ///
-/// A console whose session holds the user's open transaction refuses to let go
-/// ([`confirm_release`]): then nothing reconnects yet, the user is told once, and the rule runs
-/// again when that transaction ends (the host's session watch).
+/// A console whose session holds the user's open transaction asks first, once per pending
+/// window (Task 33's prompt: "Commit and continue" / "Roll back and continue" / Cancel). The
+/// reconnect runs again after a Commit or Roll back; on Cancel nothing is released and the
+/// console stays pending read-only (C1: Run sends nothing on it); the rule also runs again when
+/// that transaction ends on its own (the host's session watch).
 fn reconnect_read_only(cx: &mut App, profile: ProfileId) {
-    let mut refused = false;
-    for host in hosts_of(cx, profile) {
-        refused |= !host.update(cx, |h, cx| h.release_session(cx));
-    }
-    if refused {
+    let holding = hosts_of(cx, profile).into_iter().find_map(|host| {
+        let console = host.read(cx).console()?;
+        let session = Consoles::get(cx, console)?.session.clone()?;
+        (!can_release_quietly(&session)).then_some(console)
+    });
+    if let Some(console) = holding {
         let first = cx.default_global::<Hosts>().pending.insert(profile);
-        if first && let Some(p) = profile_of(cx, profile) {
-            let name = p.name.clone();
-            ToastQueue::push(
-                cx,
-                Toast::new(
-                    ToastKind::Info,
-                    Rc::new(move |cx: &App| {
-                        tr(
-                            cx,
-                            ids::hv::CONSOLE_RO_PENDING,
-                            ids::hv::HvConsoleRoPending {
-                                name: Text(name.clone()),
-                            },
-                        )
-                    }),
-                ),
-            );
+        if first {
+            ask_release(console, cx, move |cx| reconnect_read_only(cx, profile));
         }
         return;
+    }
+    for host in hosts_of(cx, profile) {
+        host.update(cx, |h, cx| h.release_session(cx));
     }
     cx.default_global::<Hosts>().pending.remove(&profile);
     ConnectionsModel::disconnect(cx, profile);
@@ -239,77 +228,47 @@ fn reconnect_read_only(cx: &mut App, profile: ProfileId) {
 }
 
 // ## m3a-t32: release gate (T33 confirm_release)
-/// What [`confirm_release`] decided.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Release {
-    Proceed,
-    Refused,
+/// Asks before console `console` lets go of its session (a rebind, a swap, the read-only
+/// reconnect, a Disconnect or Delete of its profile): Task 33's
+/// `close_prompt::confirm_release`. With no user transaction `then` runs now and this answers
+/// `true`; with one, the prompt asks ("Commit and continue" / "Roll back and continue" / Cancel)
+/// and `then` runs only after the transaction ended (`false` now); Cancel runs nothing, so
+/// nothing is released. A session is never dropped with a silent rollback. (Tab close and quit
+/// ask through Task 33's own guards.)
+fn ask_release(console: ConsoleId, cx: &mut App, then: impl FnOnce(&mut App) + 'static) -> bool {
+    crate::exec_ui::close_prompt::confirm_release(console, cx, then)
+        == crate::shell::CloseDecision::Proceed
 }
 
-/// Asked before a console lets go of `session` (a release, a rebind, a swap, a close; a
-/// Disconnect or a Delete of its profile, [`release_refused`]): while the user's transaction is
-/// open (`TxOwner::User`, open or failed) it refuses, so the session is never closed or dropped
-/// with a silent rollback. A session that already ended has nothing to lose.
-///
-/// **At the merge with Task 33** this calls `exec_ui::close_prompt::confirm_release`, which is
-/// continuation-based: it answers `Proceed` at once when nothing is open, else opens the
-/// Commit / Roll back / Cancel prompt, answers `Defer` and calls its `then` after a Commit or
-/// Roll back succeeds. The mapping: `Proceed` → [`Release::Proceed`]; `Defer` →
-/// [`Release::Refused`] (the caller does nothing now), with a `then` that re-runs what was
-/// refused — `reconnect_read_only(profile)` for the read-only rule, `release_session` +
-/// `sync_session` for a rebind, the Disconnect or Delete for [`release_refused`]; Cancel runs
-/// nothing (the session stays, and the pending read-only state with it, C1).
-fn confirm_release(console: ConsoleId, session: &SessionHandle, cx: &mut App) -> Release {
-    let _ = (console, cx);
+/// Whether `session` can go without asking: it ended (nothing to lose), or it holds no user
+/// transaction. The paths that may not prompt (the profile already disconnected, a session
+/// ended under the console) release only then.
+fn can_release_quietly(session: &SessionHandle) -> bool {
     let snap = session.state().borrow().clone();
-    if matches!(
+    matches!(
         snap.state,
         SessionState::Disconnected | SessionState::Broken(_)
-    ) {
-        return Release::Proceed;
-    }
-    if user_tx_open(&snap) {
-        Release::Refused
-    } else {
-        Release::Proceed
-    }
+    ) || !user_tx_open(&snap)
 }
 
-/// A Disconnect or Delete of `profile` asks first (fix round 1, C2): `true` (and a toast)
-/// when a console of ours holds the user's open transaction on one of the profile's sessions;
-/// the caller then does nothing. The session manager's close would roll it back silently.
-pub fn release_refused(cx: &mut App, profile: ProfileId) -> bool {
-    for host in hosts_of(cx, profile) {
-        let (console, title) = {
-            let h = host.read(cx);
-            (h.console(), h.title(cx))
-        };
-        let Some(console) = console else {
-            continue;
-        };
-        let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone()) else {
-            continue;
-        };
-        if confirm_release(console, &session, cx) == Release::Refused {
-            ToastQueue::push(
-                cx,
-                Toast::new(
-                    ToastKind::Info,
-                    Rc::new(move |cx: &App| {
-                        tr(
-                            cx,
-                            ids::hv::CONSOLE_RELEASE_REFUSED,
-                            ids::hv::HvConsoleReleaseRefused {
-                                name: Text(title.to_string()),
-                            },
-                        )
-                    }),
-                ),
-            );
-            return true;
-        }
+/// A Disconnect or Delete of `profile` asks first (fix round 1, C2): when a console of ours
+/// holds the user's open transaction on one of the profile's sessions, Task 33's prompt asks and
+/// `then` (the Disconnect or Delete again) runs after Commit or Roll back; `true` means the
+/// caller does nothing now. The session manager's close would roll it back silently.
+pub fn release_refused(
+    cx: &mut App,
+    profile: ProfileId,
+    then: impl FnOnce(&mut App) + 'static,
+) -> bool {
+    let holding = hosts_of(cx, profile).into_iter().find_map(|host| {
+        let console = host.read(cx).console()?;
+        let session = Consoles::get(cx, console)?.session.clone()?;
+        (!can_release_quietly(&session)).then_some(console)
+    });
+    match holding {
+        Some(console) => !ask_release(console, cx, then),
+        None => false,
     }
-    false
 }
 
 /// The user's own transaction is open (or failed) on the session.
@@ -419,8 +378,6 @@ pub struct ConsoleHost {
     segment: Option<Entity<EditorSegment>>,
     autosave: Option<Autosave>,
     autosave_task: Option<Task<()>>,
-    /// The connected state the editor was last told.
-    told: Option<bool>,
     /// The console's session is its own (not the profile's default session): only such a
     /// session is ever closed by the console (fix round 1, I4).
     own_session: bool,
@@ -480,7 +437,6 @@ impl ConsoleHost {
             segment: None,
             autosave: None,
             autosave_task: None,
-            told: None,
             paint_errors: 0,
             own_session: false,
             pending_ro: false,
@@ -854,7 +810,7 @@ impl ConsoleHost {
         match event {
             EditorEvent::Changed { .. } => self.schedule_autosave(cx),
             EditorEvent::TierChanged(tier) => {
-                exec_doc_context(editor, self.told == Some(true), Some(*tier), cx);
+                exec_tier(editor, self.console(), *tier, cx);
             }
             _ => {}
         }
@@ -932,17 +888,7 @@ impl ConsoleHost {
             }
             _ => {
                 self.release_session(cx);
-                if self.told.is_none_or(|c| c) {
-                    self.tell_editor(false, cx);
-                }
             }
-        }
-    }
-
-    fn tell_editor(&mut self, connected: bool, cx: &mut Context<Self>) {
-        self.told = Some(connected);
-        if let Some(editor) = self.editor().cloned() {
-            exec_doc_context(&editor, connected, None, cx);
         }
     }
 
@@ -1051,9 +997,18 @@ impl ConsoleHost {
                 .default_session()
         });
         self.own_session = default.is_none_or(|d| d.id() != handle.id());
-        Consoles::update(cx, console, |s| s.session = Some(handle));
+        // The registry's client says whose session it is (Task 33 closes a closed console's
+        // session only when it is not the default one).
+        let client = if self.own_session {
+            ClientId(u64::from(self.n))
+        } else {
+            ClientId::DEFAULT
+        };
+        Consoles::update(cx, console, |s| {
+            s.session = Some(handle);
+            s.client = client;
+        });
         exec_rebind(console, window, cx);
-        self.tell_editor(true, cx);
         self.watch_session(window, cx);
     }
 
@@ -1069,8 +1024,10 @@ impl ConsoleHost {
         let Some(console) = self.console() else {
             return true;
         };
+        // No prompt here (the callers that may prompt ask first, `ask_release`): a session
+        // holding the user's transaction is kept.
         if let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone())
-            && confirm_release(console, &session, cx) == Release::Refused
+            && !can_release_quietly(&session)
         {
             return false;
         }
@@ -1105,7 +1062,7 @@ impl ConsoleHost {
         }
         self.pending_ro = pending;
         if let Some(console) = self.console() {
-            Consoles::set_pending_read_only(cx, console, pending);
+            crate::exec_ui::set_pending_read_only(console, pending, cx);
         }
         cx.notify();
     }
@@ -1189,11 +1146,6 @@ impl ConsoleHost {
     /// Run: ends a composition first (the platform commits it on the click; this covers a
     /// click it did not see), gives the editor the focus back and runs `editor.run` on it.
     fn run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(console) = self.console()
-            && run_refused(console, cx)
-        {
-            return;
-        }
         if matches!(self.acquire, Acquire::Cancelled) {
             self.acquire = Acquire::Idle;
             self.sync_session(window, cx);
@@ -1388,9 +1340,10 @@ impl ConsoleHost {
                 // The tab close guard (Task 33's prompt) asked before; should a user
                 // transaction still be open here, the session is closed refusing to roll it
                 // back (it stays open until its profile disconnects), never silently.
-                let policy = match confirm_release(console, &handle, cx) {
-                    Release::Proceed => ClosePolicy::RollBack,
-                    Release::Refused => ClosePolicy::RefuseIfOpenTx,
+                let policy = if can_release_quietly(&handle) {
+                    ClosePolicy::RollBack
+                } else {
+                    ClosePolicy::RefuseIfOpenTx
                 };
                 if let Some(m) = cx.try_global::<ConnectionsModel>() {
                     m.runtime().spawn(handle.close(policy));
@@ -1503,104 +1456,38 @@ fn editor_config(cx: &App) -> EditorConfig {
 }
 
 // ## m3a-t32: exec_ui attach/rebind (T33)
-// Task 33's `exec_ui::attach` (once per console) and `exec_ui::rebind` (after the console's
-// session changes) own the SQL context (`set_sql_context`, its probe), the remembered chooser
-// kind and the results display. Task 33 is not on this base, so the two functions below stand
-// in for them: at the merge `exec_attach` keeps only its `attach` line and `exec_rebind`
-// becomes `exec_ui::rebind`; everything else in them goes. The console host calls nothing else
-// of the SQL context.
+// Task 33's `exec_ui::attach` (once per console) and `exec_ui::rebind` (after each session
+// take) own the SQL context (its probe, `set_sql_context`), the remembered chooser kind, the
+// results display and the editor's `connected` (set after the probe). The console host calls
+// nothing else of them.
 
 /// Attaches the run UI to console `console` (once, when its editor is made).
 fn exec_attach(console: ConsoleId, editor: &Entity<EditorView>, window: &mut Window, cx: &mut App) {
     crate::exec_ui::attach(console, editor, window, cx);
-    // Stand-in until Task 33: the dialect's defaults, no remembered kind, the display.
-    let Some(state) = Consoles::get(cx, console).cloned() else {
-        return;
-    };
-    let Some(profile) = state.profile.and_then(|p| profile_of(cx, p)) else {
-        return;
-    };
-    let doc = editor.read(cx).doc();
-    let ctx = dialect_ctx(profile.engine, None, None);
-    if let Some(service) = &state.service {
-        service.set_sql_context(doc, ctx, effective_flavor(&ctx, ClientFlavor::None), cx);
-        service.set_remembered_kind(doc, None, cx);
-    }
-    Consoles::update(cx, console, |s| s.sql = Some(ctx));
-    if let Some(results) = &state.results {
-        set_result_display(results, profile.engine, cx);
-    }
 }
 
-/// The console's session changed (a new one taken).
+/// The console took a session.
 fn exec_rebind(console: ConsoleId, window: &mut Window, cx: &mut App) {
     let _ = window;
-    // Stand-in until Task 33: the connected server's version in the SQL context.
-    let Some(state) = Consoles::get(cx, console).cloned() else {
-        return;
-    };
-    let Some(profile) = state.profile.and_then(|p| profile_of(cx, p)) else {
-        return;
-    };
-    let version = cx
-        .try_global::<ConnectionsModel>()
-        .and_then(|m| match m.live(profile.id) {
-            LiveState::Connected(info) => info.server.version.clone(),
-            _ => None,
-        });
-    let ctx = dialect_ctx(profile.engine, version.as_ref(), None);
-    if let (Some(service), Some(editor)) = (&state.service, &state.editor) {
-        let doc = editor.read(cx).doc();
-        service.set_sql_context(doc, ctx, effective_flavor(&ctx, ClientFlavor::None), cx);
-    }
-    Consoles::update(cx, console, |s| s.sql = Some(ctx));
+    crate::exec_ui::rebind(console, cx);
 }
-/// The editor's document context: connected or not, and its tier. **Removed at the merge**:
-/// Task 33's attach/rebind own `set_doc_context(connected)` and set it after their SQL-context
-/// probe; the console host then calls nothing of it (the `TierChanged` handler and
-/// `tell_editor` go with it). `tier`: `None` keeps the editor's own.
-fn exec_doc_context(
-    editor: &Entity<EditorView>,
-    connected: bool,
-    tier: Option<Tier>,
-    cx: &mut App,
-) {
+
+/// The editor's tier changed (`TierChanged`, ledger T29/T32): the language service hears it,
+/// with `connected` as Task 33 set it (its SQL context read, the session live).
+fn exec_tier(editor: &Entity<EditorView>, console: Option<ConsoleId>, tier: Tier, cx: &mut App) {
+    let connected = console.is_some_and(|c| {
+        !matches!(
+            crate::exec_ui::sql_context(c, cx),
+            crate::exec_ui::context::SqlContext::Pending
+        ) && Consoles::get(cx, c)
+            .and_then(|s| s.session.as_ref())
+            .is_some_and(|s| hacivat_exec::session_live(&s.state().borrow().state))
+    });
     editor.update(cx, |v, cx| {
-        let tier = tier.unwrap_or(v.status().tier);
-        v.set_doc_context(DocContext { connected, tier }, cx);
+        v.set_doc_context(DocContext { connected, tier }, cx)
     });
 }
 // ## end m3a-t32: exec_ui attach/rebind (T33)
-
-/// Run on console `console` sends nothing while its read-only reconnect is pending (C1); the
-/// user is told why. Every Run entry point of the console host asks it (the toolbar, the
-/// `editor.run*` commands); Task 33's run must too (merge obligation).
-pub fn run_refused(console: ConsoleId, cx: &mut App) -> bool {
-    if !Consoles::pending_read_only(cx, console) {
-        return false;
-    }
-    let name = Consoles::get(cx, console)
-        .and_then(|s| s.profile)
-        .and_then(|p| profile_of(cx, p))
-        .map(|p| p.name.clone())
-        .unwrap_or_default();
-    ToastQueue::push(
-        cx,
-        Toast::new(
-            ToastKind::Info,
-            Rc::new(move |cx: &App| {
-                tr(
-                    cx,
-                    ids::hv::CONSOLE_RO_PENDING,
-                    ids::hv::HvConsoleRoPending {
-                        name: Text(name.clone()),
-                    },
-                )
-            }),
-        ),
-    );
-    true
-}
 
 /// The kept file's name as the restore notice shows it (machine text).
 fn kept_name(kept: Option<&std::path::Path>, path: &std::path::Path) -> String {
@@ -1624,38 +1511,6 @@ fn restore_toast(name: SharedString, body: hacivat_ui::text::TextFn, cx: &mut Ap
     }));
     toast.wide = true;
     ToastQueue::push(cx, toast);
-}
-
-/// The results display of a console on `engine`: the format locale and the zone of the
-/// localization, the zone loaded on the core runtime (ledger T26 note).
-fn set_result_display(
-    results: &Entity<ConsoleResults>,
-    engine: hacivat_proto::DbmsKind,
-    cx: &mut App,
-) {
-    let Some(format) = cx
-        .try_global::<crate::l10n_global::L10nGlobal>()
-        .map(|g| g.l10n.snapshot().format.clone())
-    else {
-        return;
-    };
-    let Some(rt) = cx.try_global::<ConnectionsModel>().map(|m| m.runtime()) else {
-        return;
-    };
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let tz = format.time_zone.clone();
-    rt.spawn_blocking(move || {
-        let _ = tx.send(hacivat_values::valfmt::DisplayZone::load(Some(&tz)));
-    });
-    let results = results.downgrade();
-    cx.spawn(async move |cx| {
-        if let Ok(zone) = rx.await {
-            let display =
-                crate::results::adapter::ResultDisplay::new(&format.format_locale, zone, engine);
-            let _ = results.update(cx, |r, cx| r.set_display(display, cx));
-        }
-    })
-    .detach();
 }
 
 /// The console whose editor has the focus, else the one last focused.

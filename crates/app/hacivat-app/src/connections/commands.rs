@@ -200,11 +200,11 @@ pub fn toggle_connect(id: ProfileId, cx: &mut App) {
     let state = cx.global::<ConnectionsModel>().manager().state(id);
     // ## m3a-t32-console (fix round 1, C2; named exception): a disconnect closes the
     // profile's sessions with a rollback, so a console holding the user's open transaction
-    // refuses first (a toast says which); Task 33's prompt replaces this at the merge.
+    // asks first (Task 33's prompt); the disconnect runs again after Commit or Roll back.
     if matches!(
         state,
         LiveState::Connected(_) | LiveState::Reconnecting { .. }
-    ) && crate::console::view::release_refused(cx, id)
+    ) && crate::console::view::release_refused(cx, id, move |cx| toggle_connect(id, cx))
     {
         return;
     }
