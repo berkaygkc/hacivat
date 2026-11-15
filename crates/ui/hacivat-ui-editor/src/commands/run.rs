@@ -16,11 +16,10 @@ use hacivat_text::Snapshot;
 use hacivat_text::units::SCAN_LIMIT;
 use hacivat_ui::l10n::UiArg;
 use hacivat_ui_core::gpui_surface::{App, Context, SharedString, Window};
-use smallvec::SmallVec;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::{message, say};
-use crate::service::{ExecAction, ExecAt, ExecPreview, ExecRequest, PreviewState};
+use crate::service::{ExecAction, ExecPreview, ExecRequest, PreviewState};
 use crate::view::{EditorEvent, EditorView};
 
 type Cx<'a> = Context<'a, EditorView>;
@@ -28,20 +27,8 @@ type Cx<'a> = Context<'a, EditorView>;
 /// The most characters of a statement's first line a sentence quotes.
 const LABEL_CHARS: usize = 60;
 
-/// Where Run is asked on `snap`: its non-empty selections, else its carets.
-fn exec_at(snap: &Snapshot) -> ExecAt {
-    let ranges = snap.selection.ranges();
-    let selected: SmallVec<[Range<usize>; 1]> = ranges
-        .iter()
-        .filter(|r| !r.is_empty())
-        .map(|r| r.range())
-        .collect();
-    if selected.is_empty() {
-        ExecAt::Carets(ranges.iter().map(|r| r.head).collect())
-    } else {
-        ExecAt::Selections(selected)
-    }
-}
+// ## m3a-t28-gutter (fix round 1, named exception): Run and the preview band share one `exec_at`.
+use crate::preview::exec_at;
 
 fn request(v: &mut EditorView, action: ExecAction, cx: &mut Cx<'_>) {
     super::acted(v);

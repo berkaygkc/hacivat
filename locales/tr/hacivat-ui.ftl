@@ -1478,3 +1478,22 @@ hv-copy-refused-title = Kopyalanamayacak kadar büyük
 hv-copy-refused-body = Seçimde { $cells } hücre var. Kopyalama en çok { $max } hücre ya da { $size } alır; daha az satır ya da sütun seçin.
 # Review: PO
 hv-copy-refused-multiple = Bu seçimler birlikte kopyalanamaz. Tek bir blok ya da aynı satırları veya sütunları paylaşan bloklar seçin.
+
+## m3a-t28-gutter
+
+# Review: PO
+hv-editor-nothing-to-run = Burada çalıştırılacak bir şey yok
+# Review: PO
+hv-editor-uncertain = Sınır belirsiz: çalıştırmak için ifadeyi seçin
+# Review: PO
+hv-editor-preview-unit = { $i }/{ $n }
+# Review: PO
+hv-editor-preview-offline = bağlı değil
+# Review: PO
+hv-editor-preview-uncertain = sınır belirsiz
+# Review: PO
+hv-editor-mark-stale = çalıştırıldıktan sonra düzenlendi
+# Review: PO
+hv-editor-tip-stale = Çalıştırıldıktan sonra düzenlendi. İşaretler son çalıştırmayı gösterir.
+# Review: PO
+hv-editor-tip-two = Bu satırda iki ifade var
