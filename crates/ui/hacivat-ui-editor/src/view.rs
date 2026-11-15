@@ -766,8 +766,9 @@ impl EventEmitter<EditorEvent> for EditorView {}
 
 impl Render for EditorView {
     /// A focusable column with the large-file banner's slot, the editor element (the text area
-    /// with its gutter, its input handler and accessibility node, every module seam) and the
-    /// commands' overlay.
+    /// with its gutter, its input handler, every module seam) and the commands' overlay.
+    /// ## m3a-t29-a11y-tiers: the column itself is the editor's accessibility node
+    /// (`a11y::declare`).
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let banner = large_file::banner(&self.tier, window, cx);
         let overlay = commands::overlay(self, window, cx);

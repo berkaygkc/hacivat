@@ -165,8 +165,18 @@ fn frame_of(text: &str, selection: SelectionRange, config: EditorConfig, tier: T
     }
 }
 
+/// A fixed moment for the pure declarations (only differences from it matter).
+fn t0() -> Instant {
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *T0.get_or_init(Instant::now)
+}
+
 fn declare(a: &A11yState, f: &A11yFrame) -> Declaration {
-    a11y::declaration(a, f, &ChangeLog::default(), None)
+    declare_at(a, f, t0())
+}
+
+fn declare_at(a: &A11yState, f: &A11yFrame, now: Instant) -> Declaration {
+    a11y::declaration(a, f, &ChangeLog::default(), None, now)
 }
 
 /// The keys of the window's run children, in order.
@@ -337,6 +347,7 @@ fn the_label_description_and_read_only_go_on_the_editor_node() {
         &f,
         &ChangeLog::default(),
         Some("Reduced mode".into()),
+        t0(),
     );
     let mut node = accesskit::Node::new(d.role);
     d.write_parent(&mut node);
@@ -471,6 +482,8 @@ fn announcements_are_polite_and_each_one_is_a_new_node() {
     assert_eq!(node.role(), Role::Status);
     assert_eq!(node.live(), Some(accesskit::Live::Polite));
     assert_eq!(node.value(), Some("Statement 1 executed"));
+    // ## m3a-t29 fix round 1 (I1): Windows and Linux announce a live region by its name.
+    assert_eq!(node.label(), Some("Statement 1 executed"));
     // The node stays, unchanged, on later frames (nothing is said twice).
     assert_eq!(live(&declare(&a, &f)).map(|(k, _)| k), Some(first));
     assert!(a.nodes().pending.is_empty());
@@ -737,4 +750,155 @@ fn the_node_survives_a_frame_where_only_a_sibling_changes(cx: &mut TestAppContex
             "assistive technology: {active}"
         );
     }
+}
+
+// ## m3a-t29 fix round 1 ------------------------------------------------------------------------
+
+/// I2: the live region leaves the tree once read, so the editor's subtree re-entering the tree
+/// later does not read an old status again.
+#[test]
+fn the_live_region_goes_after_its_hold() {
+    let a = A11yState::default();
+    let f = frame_of(
+        "SELECT 1",
+        SelectionRange::caret(0),
+        EditorConfig::default(),
+        Tier::Full,
+    );
+    a11y::announce(&a, "Statement 2 failed: 42P01".into());
+    let (first, _) = live(&declare_at(&a, &f, t0())).expect("declared");
+    let just_before = t0() + a11y::LIVE_HOLD - std::time::Duration::from_millis(1);
+    assert_eq!(
+        live(&declare_at(&a, &f, just_before)).map(|(k, _)| k),
+        Some(first)
+    );
+    assert!(live(&declare_at(&a, &f, t0() + a11y::LIVE_HOLD)).is_none());
+    assert!(live(&declare_at(&a, &f, t0() + a11y::LIVE_HOLD * 10)).is_none());
+    // A later announcement is held from its own first declaration.
+    let later = t0() + a11y::LIVE_HOLD * 20;
+    a11y::announce(&a, "Statement 3 executed".into());
+    let (second, node) = live(&declare_at(&a, &f, later)).expect("declared");
+    assert_ne!(first, second);
+    assert_eq!(node.value(), Some("Statement 3 executed"));
+    assert!(live(&declare_at(&a, &f, later + a11y::LIVE_HOLD / 2)).is_some());
+}
+
+/// I2: a console tab shown again after the hold declares no live region. End to end on the
+/// headless platform, where the frames between the two declarations run without assistive
+/// technology and clear the region too; the hold itself, on the clock `declaration_of` reads,
+/// is `the_live_region_goes_after_its_hold`.
+#[gpui::test]
+fn a_tab_shown_again_does_not_re_announce(cx: &mut TestAppContext) {
+    let o = open_with(cx, "SELECT 1;", EditorConfig::default(), false);
+    let d = o.editor.update(o.vcx, |v, cx| {
+        v.announce("Statement 1 executed".into(), cx);
+        a11y::declaration_of(v, true, cx)
+    });
+    assert!(live(&d).is_some());
+    o.vcx.executor().advance_clock(a11y::LIVE_HOLD);
+    let d = o
+        .editor
+        .update(o.vcx, |v, cx| a11y::declaration_of(v, true, cx));
+    assert!(live(&d).is_none(), "the old status is not read again");
+}
+
+/// I2: assistive technology detaching and re-attaching does not read the last status again: a
+/// frame without it clears the live region.
+#[gpui::test]
+fn assistive_technology_re_attaching_does_not_re_announce(cx: &mut TestAppContext) {
+    let o = open_with(cx, "SELECT 1;", EditorConfig::default(), false);
+    let d = o.editor.update(o.vcx, |v, cx| {
+        v.announce("Statement 1 executed".into(), cx);
+        a11y::declaration_of(v, true, cx)
+    });
+    assert!(live(&d).is_some());
+    // A frame without assistive technology (the test platform never attaches one).
+    draw(o.vcx);
+    let d = o
+        .editor
+        .update(o.vcx, |v, cx| a11y::declaration_of(v, true, cx));
+    assert!(live(&d).is_none());
+}
+
+/// I3: a caret at the very end of a long last line is on that line: the exposed 64 KB end at
+/// the caret, and the reader's caret is after the last character.
+#[test]
+fn a_long_last_line_with_the_caret_at_its_end() {
+    // Letters cycling a–z, so which 64 KB is exposed shows in the text.
+    let text: String = (0..200_000u32)
+        .map(|i| char::from(b'a' + u8::try_from(i % 26).unwrap()))
+        .collect();
+    let f = frame_of(
+        &text,
+        SelectionRange::caret(200_000),
+        EditorConfig::default(),
+        Tier::Reduced,
+    );
+    let d = declare(&A11yState::default(), &f);
+    let runs: Vec<(ChildKey, &accesskit::Node)> = d
+        .children
+        .iter()
+        .filter(|(k, _)| matches!(k, ChildKey::Run { .. }))
+        .map(|(k, n)| (*k, n))
+        .collect();
+    let exposed: String = runs.iter().map(|(_, n)| n.value().unwrap()).collect();
+    assert_eq!(exposed.len(), a11y::LINE_MAX_BYTES);
+    assert!(
+        exposed == text[200_000 - a11y::LINE_MAX_BYTES..],
+        "the exposed 64 KB end at the caret"
+    );
+    let (last_key, last) = runs.last().unwrap();
+    let (anchor, focus) = d.selection.unwrap();
+    assert_eq!(anchor, focus);
+    assert_eq!(
+        focus,
+        Pos {
+            key: *last_key,
+            index: last.character_lengths().len()
+        }
+    );
+}
+
+/// M2: the default window exposes at most 256 KB, the lines nearest the caret first.
+#[test]
+fn the_window_is_capped_in_bytes() {
+    let line = "x".repeat(50_000) + "\n";
+    let text = line.repeat(30);
+    let w = a11y::window(&TextBuffer::from_str(&text), 15, 100);
+    let lines: Vec<usize> = w.iter().map(|n| n.line).collect();
+    assert_eq!(lines, [13, 14, 15, 16, 17]);
+    let bytes: usize = w.iter().map(|n| n.bytes.len()).sum();
+    assert!(bytes <= a11y::WINDOW_MAX_BYTES);
+    // The caret's line always shows, even past the budget on its own.
+    let huge = "x".repeat(300_000) + "\nSELECT 1;";
+    let w = a11y::window(&TextBuffer::from_str(&huge), 0, 100);
+    assert_eq!(w[0].line, 0);
+}
+
+/// M2: the run nodes are built with the window, not per frame: frames at the same text and
+/// lines (a blink, a selection inside the window) build none.
+#[test]
+fn run_nodes_are_built_once_per_window() {
+    let a = A11yState::default();
+    let text = lines(50);
+    let f = frame_of(
+        &text,
+        SelectionRange::caret(0),
+        EditorConfig::default(),
+        Tier::Full,
+    );
+    let first = declare(&a, &f);
+    assert_eq!(a11y::stats(&a).nodes_built, 1);
+    let again = declare(&a, &f);
+    let moved_frame = frame_of(
+        &text,
+        SelectionRange::new(3, 7),
+        EditorConfig::default(),
+        Tier::Full,
+    );
+    let moved = declare(&a, &moved_frame);
+    assert_eq!(a11y::stats(&a).nodes_built, 1);
+    assert_eq!(run_keys(&first), run_keys(&again));
+    assert_eq!(run_keys(&first), run_keys(&moved));
+    assert_ne!(first.selection, moved.selection);
 }

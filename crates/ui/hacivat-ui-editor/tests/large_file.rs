@@ -105,6 +105,52 @@ fn the_long_line_rule_has_the_same_margin() {
     );
 }
 
+// ## m3a-t29 fix round 1 (M1): the 80 % margin applies to the limits that caused T1.
+
+/// A document that entered T1 by its size, with a line of 55 KB (legal in T0, above 80 % of
+/// 64 KB), returns to T0 once the size is below 80 %.
+#[test]
+fn a_size_entered_t1_with_a_long_legal_line_returns() {
+    let limits = TierLimits::default();
+    let mut s = large_file::open(5 * MB, 55_000, &limits);
+    assert_eq!((s.tier, s.by_size, s.by_line), (Tier::Reduced, true, false));
+    assert_eq!(
+        large_file::update(&mut s, 3 * MB, 55_000, &limits),
+        Some(Tier::Full)
+    );
+    assert_eq!(
+        (s.by_size, s.by_line),
+        (false, false),
+        "the cause clears in T0"
+    );
+}
+
+/// The causes accumulate while in T1, and each needs its margin; a limit that did not cause T1
+/// needs only to be within its plain limit.
+#[test]
+fn every_cause_needs_its_margin() {
+    let limits = TierLimits::default();
+    let long = 64 << 10;
+    let mut s = large_file::open(5 * MB, 100, &limits);
+    assert_eq!((s.by_size, s.by_line), (true, false));
+    assert_eq!(large_file::update(&mut s, 5 * MB, long + 1, &limits), None);
+    assert_eq!((s.by_size, s.by_line), (true, true));
+    // Size below 80 %, the line legal but not below 80 % of 64 KB: stays.
+    assert_eq!(large_file::update(&mut s, 3 * MB, 60_000, &limits), None);
+    assert_eq!(
+        large_file::update(&mut s, 3 * MB, 50_000, &limits),
+        Some(Tier::Full)
+    );
+    // A line-entered T1 at 3.5 MB (within the size limit, above its 80 %) returns when the line
+    // is below its margin, whatever the size.
+    let mut s = large_file::open(3 * MB + MB / 2, long + 1, &limits);
+    assert_eq!((s.tier, s.by_size, s.by_line), (Tier::Reduced, false, true));
+    assert_eq!(
+        large_file::update(&mut s, 3 * MB + MB / 2, 50_000, &limits),
+        Some(Tier::Full)
+    );
+}
+
 /// A window whose root holds one editor.
 struct Host {
     editor: Entity<EditorView>,
@@ -225,6 +271,23 @@ fn a_long_line_says_why_without_a_size(cx: &mut TestAppContext) {
     let (e, vcx) = open(cx, text);
     assert_eq!(state(&e, vcx).tier, Tier::Reduced);
     assert!(vcx.debug_bounds("editor-t1-banner").is_some());
+    assert_eq!(
+        description(&e, vcx).as_deref(),
+        Some(
+            "This document has a very long line, so the editor is in reduced mode. \
+             Reduced mode keeps typing fast."
+        )
+    );
+}
+
+/// M1: the copy follows the cause. A 3.5 MB document in T1 because of a long line says so (not
+/// "it ends below 3.2 MB", which shrinking would not make true).
+#[gpui::test]
+fn the_copy_follows_the_cause(cx: &mut TestAppContext) {
+    let mut text = sql_of(3 * MB + MB / 2);
+    text.push_str(&format!("SELECT '{}';\n", "x".repeat(70_000)));
+    let (e, vcx) = open(cx, text);
+    assert_eq!(state(&e, vcx).tier, Tier::Reduced);
     assert_eq!(
         description(&e, vcx).as_deref(),
         Some(

@@ -12,7 +12,8 @@
 //!
 //! **Nothing without assistive technology.** [`declare`] returns the column untouched unless
 //! `window.is_a11y_active()`: no label is evaluated, no window is built, no line is anchored,
-//! and an announcement made meanwhile is dropped at the next frame rather than read out later.
+//! and an announcement made meanwhile (or the last live region) is dropped at the next frame
+//! rather than read out later.
 //!
 //! **The window** ([`window`], pure): the lines within `a11y_window_lines` (D-073: 100) of the
 //! main caret's line, or the whole document up to [`OPTIMIZED_MAX_BYTES`] when the
@@ -20,18 +21,23 @@
 //! line is one or more runs of at most [`RUN_MAX_CHARS`] characters (AccessKit stores their
 //! lengths as `u8`); a character is a grapheme cluster (CRLF is one), cut at char boundaries
 //! if it is longer than 255 bytes; a line's break ends its last run; a line longer than
-//! [`LINE_MAX_BYTES`] exposes only that many bytes, around the caret when the caret is on it.
+//! [`LINE_MAX_BYTES`] exposes only that many bytes, around the caret when the caret is on it
+//! (the end of the text is on its last line); the default window exposes at most
+//! [`WINDOW_MAX_BYTES`] in all, the lines nearest the caret first.
 //!
 //! **Stable ids.** Each window line gets a key that follows the line: the start of every line
 //! of the last window is anchored (`Bias::After`, `MapMode::TrackDel`) and rebased through the
 //! change log; a line takes the key of the first anchor inside it, so a line keeps its key when
 //! lines are inserted above it, when text is typed at its start, or when the line below is
 //! joined to it. Keys are never reused. The runs' node ids are `synthetic_node_id((key, run))`.
-//! The window is rebuilt only when the text version or the window's lines change.
+//! The window and its AccessKit run nodes are rebuilt only when the text version or the
+//! window's lines change.
 //!
 //! **Announcements** ([`announce`], `EditorView::announce`): polite, in a `Status` leaf whose
-//! node is new for each batch (so the same sentence twice is read twice) and stays until the
-//! next one. [`exec_announcement`] words an execution status.
+//! node is new for each batch (so the same sentence twice is read twice), carries the text as
+//! its name and its value (Windows and Linux read the name, macOS the value), and leaves the
+//! tree after [`LIVE_HOLD`] so the subtree re-entering the tree later (a tab shown again) does
+//! not read it again. [`exec_announcement`] words an execution status.
 //!
 //! **Cached embedding.** GPUI's `reuse_prepaint` carries no accessibility state, so a cached
 //! editor reused on a frame would drop out of the tree; [`embed`] caches the editor only while
@@ -41,6 +47,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use hacivat_text::units::snap_to_grapheme;
 use hacivat_text::{AnchorSet, Bias, ChangeLog, MapMode, Snapshot, TextBuffer};
@@ -58,6 +65,10 @@ use crate::large_file;
 use crate::marks::{ExecMarkState, RowsOutcome};
 use crate::view::EditorView;
 
+/// How long a live region stays in the tree once declared: long enough for every screen
+/// reader to read it, short enough that the editor's subtree re-entering the tree later (a tab
+/// shown again) does not read it again.
+pub const LIVE_HOLD: Duration = Duration::from_secs(3);
 /// The most announcements kept for the next frame; older ones are dropped.
 pub const MAX_PENDING_ANNOUNCEMENTS: usize = 4;
 /// The most characters in one text run (AccessKit's lengths are `u8`; UI-EDIT-24 step 2).
@@ -69,6 +80,9 @@ pub const OPTIMIZED_MAX_BYTES: usize = 2 << 20;
 /// The most bytes of one line in the window: a longer line (a minified dump, a 15 MB single
 /// line in T1) exposes this many, around the caret when the caret is on it.
 pub const LINE_MAX_BYTES: usize = 64 << 10;
+/// The most bytes the default window exposes in all (±100 lines of long lines would be
+/// megabytes per frame); the lines nearest the caret come first.
+pub const WINDOW_MAX_BYTES: usize = 256 << 10;
 
 /// The module-owned state (P11): a shared handle, so the closure GPUI calls after the column's
 /// prepaint can reach it.
@@ -88,12 +102,23 @@ pub struct A11yNodes {
     anchored_at: u64,
     /// The last line key handed out (keys start at 1 and are never reused).
     last_key: u64,
-    /// The last window: its text version, its lines, the exposed start of a long caret line.
-    window: Option<(WindowKey, Rc<[RunNode]>)>,
-    /// The live region: its sequence number (a new node per batch) and its text.
-    live: Option<(u64, SharedString)>,
+    /// The last window (with its run nodes): its text version, its lines, the exposed start of
+    /// a long caret line.
+    window: Option<(WindowKey, Built)>,
+    /// The live region, until it has been held for [`LIVE_HOLD`].
+    live: Option<LiveRegion>,
     last_live: u64,
     windows_built: u64,
+    nodes_built: u64,
+}
+
+/// The live region: a new node per batch of announcements.
+#[derive(Debug, Clone)]
+struct LiveRegion {
+    seq: u64,
+    text: SharedString,
+    /// When it was first declared (the executor clock).
+    since: Instant,
 }
 
 /// What a built window is reused for.
@@ -118,6 +143,8 @@ pub struct A11yStats {
     pub windows_built: u64,
     /// Lines anchored for their keys.
     pub keyed_lines: usize,
+    /// Times the window's AccessKit run nodes were built.
+    pub nodes_built: u64,
 }
 
 /// The editor's accessibility work so far.
@@ -126,6 +153,7 @@ pub fn stats(a: &A11yState) -> A11yStats {
     A11yStats {
         windows_built: n.windows_built,
         keyed_lines: n.anchors.len(),
+        nodes_built: n.nodes_built,
     }
 }
 
@@ -182,9 +210,47 @@ fn lines_around(buf: &TextBuffer, caret_line: usize, lines: u32) -> Range<usize>
 /// The window of lines within `lines` of `caret_line` (D-073: `lines` = 100), each split into
 /// runs (pure; the keys are 0).
 pub fn window(buf: &TextBuffer, caret_line: usize, lines: u32) -> Vec<RunNode> {
-    let range = lines_around(buf, caret_line, lines);
+    let range = capped(
+        buf,
+        lines_around(buf, caret_line, lines),
+        caret_line,
+        WINDOW_MAX_BYTES,
+    );
     let caret = buf.line_to_byte(caret_line);
     build(buf, range, caret)
+}
+
+/// `lines` narrowed to at most `budget` exposed bytes, growing from `caret_line` one line
+/// below, then one above, while they fit; the caret's line always stays (`usize::MAX`: no cap,
+/// the optimised mode, itself bounded by its 2 MB document).
+fn capped(buf: &TextBuffer, lines: Range<usize>, caret_line: usize, budget: usize) -> Range<usize> {
+    if budget == usize::MAX {
+        return lines;
+    }
+    let cost = |l: usize| buf.line_range(l, true).len().min(LINE_MAX_BYTES);
+    let caret = caret_line.clamp(lines.start, lines.end.saturating_sub(1).max(lines.start));
+    let (mut lo, mut hi) = (caret, caret + 1);
+    let mut used = cost(caret);
+    let (mut down, mut up) = (true, true);
+    while down || up {
+        if down {
+            if hi < lines.end && used + cost(hi) <= budget {
+                used += cost(hi);
+                hi += 1;
+            } else {
+                down = false;
+            }
+        }
+        if up {
+            if lo > lines.start && used + cost(lo - 1) <= budget {
+                used += cost(lo - 1);
+                lo -= 1;
+            } else {
+                up = false;
+            }
+        }
+    }
+    lo..hi
 }
 
 fn build(buf: &TextBuffer, lines: Range<usize>, caret: usize) -> Vec<RunNode> {
@@ -197,7 +263,9 @@ fn exposed(buf: &TextBuffer, bytes: &Range<usize>, caret: usize) -> Range<usize>
     if bytes.len() <= LINE_MAX_BYTES {
         return bytes.clone();
     }
-    let start = if bytes.contains(&caret) {
+    // ## m3a-t29 fix round 1 (I3): the end of the text is a position on its last line.
+    let on_line = bytes.contains(&caret) || (caret == bytes.end && bytes.end == buf.len_bytes());
+    let start = if on_line {
         caret
             .saturating_sub(LINE_MAX_BYTES / 2)
             .clamp(bytes.start, bytes.end - LINE_MAX_BYTES)
@@ -305,8 +373,20 @@ pub fn keyed_window(
     caret_line: usize,
     lines: u32,
 ) -> Rc<[RunNode]> {
-    let range = lines_around(&snap.buffer, caret_line, lines);
-    keyed(a, snap, log, range, snap.buffer.line_to_byte(caret_line))
+    let range = capped(
+        &snap.buffer,
+        lines_around(&snap.buffer, caret_line, lines),
+        caret_line,
+        WINDOW_MAX_BYTES,
+    );
+    keyed(a, snap, log, range, snap.buffer.line_to_byte(caret_line)).lines
+}
+
+/// A built window and its AccessKit run nodes (built together, reused together).
+#[derive(Debug, Clone)]
+struct Built {
+    lines: Rc<[RunNode]>,
+    nodes: Rc<[(ChildKey, accesskit::Node)]>,
 }
 
 fn keyed(
@@ -315,7 +395,7 @@ fn keyed(
     log: &ChangeLog,
     lines: Range<usize>,
     caret: usize,
-) -> Rc<[RunNode]> {
+) -> Built {
     let buf = &snap.buffer;
     let caret_line = buf.line_range(buf.byte_to_line(caret), true);
     let long_from =
@@ -332,12 +412,27 @@ fn keyed(
         return w.clone();
     }
     n.rebase(log, snap.version);
-    let mut nodes = build(buf, key.lines.clone(), caret);
-    n.assign_keys(&mut nodes, buf.len_bytes());
-    let w: Rc<[RunNode]> = nodes.into();
-    n.window = Some((key, w.clone()));
+    let mut lines = build(buf, key.lines.clone(), caret);
+    n.assign_keys(&mut lines, buf.len_bytes());
+    // ## m3a-t29 fix round 1 (M2): the run nodes are built with the window, not per frame.
+    let mut nodes = Vec::with_capacity(lines.iter().map(|l| l.runs.len()).sum());
+    for l in &lines {
+        for (i, run) in l.runs.iter().enumerate() {
+            let key = ChildKey::Run {
+                line: l.key,
+                run: u32::try_from(i).unwrap_or(u32::MAX),
+            };
+            nodes.push((key, run_node(buf, run)));
+        }
+    }
+    let built = Built {
+        lines: lines.into(),
+        nodes: nodes.into(),
+    };
+    n.window = Some((key, built.clone()));
     n.windows_built += 1;
-    w
+    n.nodes_built += 1;
+    built
 }
 
 /// A child node's key, hashed into its id by `A11ySubtreeBuilder::synthetic_node_id`.
@@ -463,43 +558,56 @@ pub fn declaration(
     frame: &A11yFrame,
     log: &ChangeLog,
     description: Option<SharedString>,
+    now: Instant,
 ) -> Declaration {
     let snap = &frame.snapshot;
     let buf = &snap.buffer;
     let main = snap.selection.main();
     let caret_line = buf.byte_to_line(main.head);
-    let w = keyed(
-        a,
-        snap,
-        log,
-        lines_around(buf, caret_line, reach(frame)),
-        main.head,
+    let (around, budget) = match reach(frame) {
+        u32::MAX => (u32::MAX, usize::MAX),
+        lines => (lines, WINDOW_MAX_BYTES),
+    };
+    let lines = capped(
+        buf,
+        lines_around(buf, caret_line, around),
+        caret_line,
+        budget,
     );
-    let mut children: Vec<(ChildKey, accesskit::Node)> =
-        Vec::with_capacity(w.iter().map(|n| n.runs.len()).sum::<usize>() + 1);
-    for n in w.iter() {
-        for (i, run) in n.runs.iter().enumerate() {
-            let key = ChildKey::Run {
-                line: n.key,
-                run: u32::try_from(i).unwrap_or(u32::MAX),
-            };
-            children.push((key, run_node(buf, run)));
-        }
-    }
-    let selection = (!w.is_empty()).then(|| (position(&w, main.anchor), position(&w, main.head)));
+    let built = keyed(a, snap, log, lines, main.head);
+    let w = &built.lines;
+    let mut children: Vec<(ChildKey, accesskit::Node)> = Vec::with_capacity(built.nodes.len() + 1);
+    children.extend(built.nodes.iter().cloned());
+    let selection = (!w.is_empty()).then(|| (position(w, main.anchor), position(w, main.head)));
     let mut nodes = a.nodes();
+    // ## m3a-t29 fix round 1 (I2): a live region leaves the tree once held for `LIVE_HOLD`,
+    // so the subtree re-entering the tree (a tab shown again) does not read it again.
+    if nodes
+        .live
+        .as_ref()
+        .is_some_and(|l| now >= l.since + LIVE_HOLD)
+    {
+        nodes.live = None;
+    }
     if !nodes.pending.is_empty() {
         let text: Vec<&str> = nodes.pending.iter().map(SharedString::as_ref).collect();
         let text = SharedString::from(text.join("\n"));
         nodes.pending.clear();
         nodes.last_live += 1;
-        nodes.live = Some((nodes.last_live, text));
+        nodes.live = Some(LiveRegion {
+            seq: nodes.last_live,
+            text,
+            since: now,
+        });
     }
-    if let Some((n, text)) = &nodes.live {
+    if let Some(l) = &nodes.live {
         let mut node = accesskit::Node::new(Role::Status);
         node.set_live(accesskit::Live::Polite);
-        node.set_value(text.to_string());
-        children.push((ChildKey::Live(*n), node));
+        // ## m3a-t29 fix round 1 (I1): the Windows and Linux adapters announce a live region
+        // by its name, macOS by its value.
+        node.set_label(l.text.to_string());
+        node.set_value(l.text.to_string());
+        children.push((ChildKey::Live(l.seq), node));
     }
     Declaration {
         role: Role::MultilineTextInput,
@@ -515,7 +623,8 @@ pub fn declaration(
 pub fn declaration_of(v: &mut EditorView, focused: bool, cx: &App) -> Declaration {
     let frame = v.a11y_frame(focused, cx);
     let description = large_file::description(&v.tier, cx);
-    declaration(&v.a11y, &frame, v.model.changelog(), description)
+    let now = cx.background_executor().now();
+    declaration(&v.a11y, &frame, v.model.changelog(), description, now)
 }
 
 /// Makes `el`, the editor's focusable column, its accessibility node while assistive
@@ -527,6 +636,9 @@ pub fn declare(el: Stateful<Div>, v: &mut EditorView, window: &Window, cx: &App)
         if !nodes.pending.is_empty() {
             nodes.pending.clear();
         }
+        // ## m3a-t29 fix round 1 (I2): nor is the last one read again when assistive
+        // technology attaches later.
+        nodes.live = None;
         return el;
     }
     let focused = v.focus.is_focused(window);

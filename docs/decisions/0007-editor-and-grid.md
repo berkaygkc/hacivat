@@ -262,8 +262,15 @@ it. A fork carry that skips view reuse while accessibility is active would fix e
 rebased through the change log at build time only (nothing per keystroke); a line takes the
 first anchor inside it; keys are never reused; the log running out starts the keys over. A
 window is rebuilt only when the text version, its lines or a long caret line's exposed part
-change. A line longer than 64 KB exposes 64 KB (around the caret on the caret's line).
+change. A line longer than 64 KB exposes 64 KB (around the caret on the caret's line; the end
+of the text is a position on its last line). The default window exposes at most 256 KB in all,
+the lines nearest the caret first; its AccessKit run nodes are built with it and reused while it
+is. The live region is named and valued (Windows and Linux announce the name, macOS the value)
+and leaves the tree after a 3 s hold on the executor clock, or at the first frame without
+assistive technology, so a subtree re-entering the tree never reads an old status again.
 
-**Tiers.** T0 up to 4 MB and a 64 KB longest line; T1 above, never T2 in M3a; back to T0 only
-below 80 % of every limit that applies (exact integer comparison). Sizes in the banner come from
-the host's `large_file::SizeText` (format locale); the fallback is an unformatted decimal.
+**Tiers.** T0 up to 4 MB and a 64 KB longest line; T1 above, never T2 in M3a. The tier state
+records which limit caused T1 (accumulated while in T1); back to T0 once each caused limit is
+below 80 % of itself and the other is within itself (exact integer comparison), and the banner's
+copy follows the cause. Sizes in the banner come from the host's `large_file::SizeText` (format
+locale); the fallback is an unformatted decimal.

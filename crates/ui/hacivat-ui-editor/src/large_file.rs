@@ -7,8 +7,9 @@
 //!   banner's text ([`description`]), and the screen-reader window does not grow
 //!   (`a11y::declaration`). The host hears `EditorEvent::TierChanged` and passes the tier to
 //!   the language service in `DocContext` (viewport-only lexing).
-//! - **Back to T0** only below 80 % of each limit that put the document in T1 (no flapping
-//!   when typing at the limit).
+//! - **Back to T0** only below 80 % of each limit that put the document in T1, and within
+//!   the other limit (no flapping when typing at the limit). [`TierState`] records the causes
+//!   (`by_size`, `by_line`, accumulated while in T1); the banner's copy follows them.
 //! - **Nothing above 20 MB** enters the editor in M3a (R-M3-49: the paste guard and the console
 //!   restore refuse it); a document that got there anyway stays in T1, as there is no T2 before
 //!   M4b.
@@ -51,6 +52,10 @@ pub struct TierState {
     /// Its longest line, in bytes, as the view measures it.
     pub longest_line: u64,
     pub limits: TierLimits,
+    /// In T1 because of the size (accumulated while in T1).
+    pub by_size: bool,
+    /// In T1 because of a line longer than 64 KB (accumulated while in T1).
+    pub by_line: bool,
 }
 
 /// Formats a document size for the T1 banner in the format locale (L3; "18,4 MB" in Turkey).
@@ -85,11 +90,14 @@ pub fn open(bytes: u64, longest_line: u64, limits: &TierLimits) -> TierState {
         bytes,
         longest_line,
         limits: *limits,
+        by_size: bytes > limits.full_max_bytes,
+        by_line: longest_line > LONG_LINE_MAX_BYTES,
     }
 }
 
-/// The tier after a change; `Some` when it moved. Up to T1 as soon as a limit is passed; back
-/// to T0 only once the size and the longest line are both below 80 % of their limits.
+/// The tier after a change; `Some` when it moved. Up to T1 as soon as a limit is passed (the
+/// causes accumulate while in T1); back to T0 once every limit that caused T1 is below 80 % of
+/// itself and every other limit is within itself (## m3a-t29 fix round 1, M1).
 pub fn update(
     s: &mut TierState,
     bytes: u64,
@@ -99,16 +107,30 @@ pub fn update(
     s.bytes = bytes;
     s.longest_line = longest_line;
     s.limits = *limits;
-    let fresh = tier_for(bytes, longest_line, limits);
-    let tier = match (s.tier, fresh) {
-        (Tier::Full, t) => t,
-        (_, Tier::Full)
-            if below(bytes, limits.full_max_bytes, RETURN_BELOW_PERCENT)
-                && below(longest_line, LONG_LINE_MAX_BYTES, RETURN_BELOW_PERCENT) =>
-        {
+    let over_size = bytes > limits.full_max_bytes;
+    let over_line = longest_line > LONG_LINE_MAX_BYTES;
+    let tier = if s.tier == Tier::Full {
+        if over_size || over_line {
+            s.by_size = over_size;
+            s.by_line = over_line;
+            Tier::Reduced
+        } else {
             Tier::Full
         }
-        (current, _) => current,
+    } else {
+        s.by_size |= over_size;
+        s.by_line |= over_line;
+        let back = !over_size
+            && !over_line
+            && (!s.by_size || below(bytes, limits.full_max_bytes, RETURN_BELOW_PERCENT))
+            && (!s.by_line || below(longest_line, LONG_LINE_MAX_BYTES, RETURN_BELOW_PERCENT));
+        if back {
+            s.by_size = false;
+            s.by_line = false;
+            Tier::Full
+        } else {
+            s.tier
+        }
     };
     (tier != s.tier).then(|| {
         s.tier = tier;
@@ -128,6 +150,8 @@ fn size_text(bytes: u64, cx: &App) -> SharedString {
     }
     let tenths = (u128::from(bytes) * 10 + (1 << 19)) >> 20;
     let n = format!("{}.{}", tenths / 10, tenths % 10);
+    // The only use of the size message: Task 27's `hui-editor-size-mb` replaces it at merge
+    // (review M3).
     message(cx, "hui-editor-t1-size", &[("n", UiArg::Text(n.into()))])
 }
 
@@ -141,27 +165,29 @@ fn lines(s: &TierState, cx: &App) -> Option<(SharedString, SharedString)> {
     if s.tier == Tier::Full {
         return None;
     }
-    // In T1 by its size (or still above 80 % of the limit), else by a long line.
-    let by_size = !below(s.bytes, s.limits.full_max_bytes, RETURN_BELOW_PERCENT);
-    Some(if by_size {
-        (
-            message(
-                cx,
-                "hui-editor-t1-title",
-                &[("size", UiArg::Text(size_text(s.bytes, cx)))],
-            ),
-            message(
-                cx,
-                "hui-editor-t1-body",
-                &[("size", UiArg::Text(size_text(return_size(s), cx)))],
-            ),
+    // ## m3a-t29 fix round 1 (M1): the copy follows the cause. The size title when the size
+    // caused T1; the promise "it ends below 3.2 MB" only when the size alone did (a long line
+    // also needs the text replaced, so the line's copy promises nothing).
+    let by_size = s.by_size || !s.by_line;
+    let title = if by_size {
+        message(
+            cx,
+            "hui-editor-t1-title",
+            &[("size", UiArg::Text(size_text(s.bytes, cx)))],
         )
     } else {
-        (
-            message(cx, "hui-editor-t1-long-title", &[]),
-            message(cx, "hui-editor-t1-long-body", &[]),
+        message(cx, "hui-editor-t1-long-title", &[])
+    };
+    let body = if by_size && !s.by_line {
+        message(
+            cx,
+            "hui-editor-t1-body",
+            &[("size", UiArg::Text(size_text(return_size(s), cx)))],
         )
-    })
+    } else {
+        message(cx, "hui-editor-t1-long-body", &[])
+    };
+    Some((title, body))
 }
 
 /// The banner's text as the editor's accessible description (NOTES §7: the banner is not
