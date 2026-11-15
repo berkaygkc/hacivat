@@ -24,7 +24,7 @@ use crate::icon::{Icon, IconName, IconSize};
 use crate::l10n::ui_text;
 use crate::popover::A11yNode;
 use crate::popover::Declare;
-use crate::text::{KeyFn, Label, TextFn, TextSource};
+use crate::text::{KeyFn, TextFn, TextSource};
 
 /// Width of the dialog card.
 pub const DIALOG_WIDTH_PX: f32 = 420.0;
@@ -414,12 +414,15 @@ impl Render for Dialog {
                         .items_start()
                         .justify_between()
                         .gap(px(t.spacing.xl))
-                        .child(Label::new(
+                        // ## m3a-t35-shots (named exception): a title longer than the card
+                        // wraps (a long locale never clips: the open-transaction prompt names
+                        // a connection and a count); one that fits draws as before.
+                        .child(div().flex_1().min_w(px(0.0)).child(crate::text::paragraph(
                             title.clone(),
                             TextSource::Fluent,
                             t.type_ramp.body_strong,
                             c.text.to_hsla(),
-                        ))
+                        )))
                         .child(close),
                 )
                 // ## m2a-t21-shots: the body wraps to the card (a long locale never clips).
@@ -434,6 +437,9 @@ impl Render for Dialog {
                     div()
                         .flex()
                         .flex_row()
+                        // ## m3a-t35-shots (named exception): buttons that do not fit the card
+                        // in one row wrap to the next (right-aligned), never past its edge.
+                        .flex_wrap()
                         .justify_end()
                         .gap(px(t.spacing.md))
                         .children(buttons),

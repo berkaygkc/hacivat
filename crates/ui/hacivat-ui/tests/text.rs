@@ -101,6 +101,20 @@ fn clipped_label_is_recorded(cx: &mut TestAppContext) {
     assert!(reg.frame[0].truncated && !reg.frame[0].clipped);
 }
 
+// ## m3a-t35-shots: a truncating label given less room than its ellipsis (a status-bar cell
+// that gave way almost to nothing) draws nothing rather than a cut glyph.
+#[gpui::test]
+fn a_truncating_label_narrower_than_its_ellipsis_draws_nothing(cx: &mut TestAppContext) {
+    let reg = draw_label_in(cx, "PostgreSQL 16.4", 3.0, true);
+    let r = &reg.frame[0];
+    assert!(r.truncated && !r.clipped, "{r:?}");
+    assert_eq!(r.painted_px, 0.0, "{r:?}");
+    // With room for the ellipsis (and a glyph), it ellipsizes as before.
+    let reg = draw_label_in(cx, "PostgreSQL 16.4", 30.0, true);
+    let r = &reg.frame[0];
+    assert!(r.truncated && !r.clipped && r.painted_px > 0.0, "{r:?}");
+}
+
 #[gpui::test]
 fn registry_records_full_text_source_and_size_once_per_frame(cx: &mut TestAppContext) {
     let reg = draw_label_in(cx, "A very long label", 40.0, true);

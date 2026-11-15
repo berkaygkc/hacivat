@@ -357,7 +357,10 @@ fn notice(icon: IconName, title: TextFn, body: TextFn) -> Toast {
     toast
 }
 
-fn refused_toast(bytes: u64, limit: u64) -> Toast {
+// ## m3a-t35-shots (named exception): the three clipboard notices are public so the app's
+// shots render them (NOTES surface 7) without a paste through the machine's clipboard.
+/// "Couldn't paste": a paste of `bytes` would take the document past `limit` (R-M3-49).
+pub fn refused_toast(bytes: u64, limit: u64) -> Toast {
     notice(
         IconName::CircleAlert,
         Rc::new(|cx: &App| message(cx, "hui-editor-paste-refused-title", &[])),
@@ -374,7 +377,8 @@ fn refused_toast(bytes: u64, limit: u64) -> Toast {
     )
 }
 
-fn nul_toast(n: usize) -> Toast {
+/// The `n` NUL characters a paste inserted, shown as chips.
+pub fn nul_toast(n: usize) -> Toast {
     let n = n as u64;
     notice(
         IconName::TriangleAlert,
@@ -384,7 +388,7 @@ fn nul_toast(n: usize) -> Toast {
 }
 
 /// The read failed: a sticky toast (it carries an action) with Try again.
-fn unavailable_toast(retry: ActionFn) -> Toast {
+pub fn unavailable_toast(retry: ActionFn) -> Toast {
     let mut toast = notice(
         IconName::ClipboardX,
         Rc::new(|cx: &App| message(cx, "hui-editor-clipboard-title", &[])),

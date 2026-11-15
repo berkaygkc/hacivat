@@ -582,6 +582,11 @@ impl LabelElement {
             return Some(Painted::Line(Box::new(line)));
         }
         let ellipsis = self.shape(ELLIPSIS.into(), 0, window).width;
+        // ## m3a-t35-shots (named exception): not even the ellipsis fits (a status-bar cell
+        // that gave way almost to nothing): nothing is drawn, never a cut glyph.
+        if ellipsis > bounds.size.width + px(0.5) {
+            return None;
+        }
         let text = &self.label.text;
         let end = fitting_prefix(text, bounds.size.width, ellipsis, |b| line.x_for_index(b));
         let shown = format!("{}{ELLIPSIS}", &text[..end]);
