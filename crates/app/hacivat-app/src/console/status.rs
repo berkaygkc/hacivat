@@ -109,6 +109,9 @@ impl Render for EditorSegment {
                     style,
                     ink,
                 )
+                // ## m3a-t35-shots (named exception): ellipsized when the bar gives way, never
+                // cut mid-glyph (the 960 px Turkish shots).
+                .truncate(true)
                 .id("editor-segment-selected"),
             );
         }
@@ -126,6 +129,8 @@ impl Render for EditorSegment {
                 style,
                 ink,
             )
+            // ## m3a-t35-shots (named exception): as the selected count.
+            .truncate(true)
             .id("editor-segment-lncol"),
         )
     }
