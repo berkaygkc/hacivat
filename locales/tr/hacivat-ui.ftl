@@ -1593,6 +1593,8 @@ hv-console-ro-pending = { $name }, açık işlemi commit edildiğinde ya da geri
 hv-console-ro-pending-short = Bu işlemden sonra salt okunur
 # Review: PO
 hv-console-session-failed = { $name } için bağlantı açılamadı. Çalıştır yeniden dener.
+# Review: PO
+hv-console-release-busy = Önce açık soruyu yanıtlayın, sonra yeniden deneyin.
 ## m3a-t30-results-view
 
 # Review: PO

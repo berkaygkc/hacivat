@@ -528,6 +528,216 @@ fn disconnect_and_delete_ask_while_a_user_transaction_is_open(cx: &mut TestAppCo
     stop_core_runtime_test(cx);
 }
 
+/// A typed query answering one text row (`value`) to the statement starting `prefix`.
+fn one_row(prefix: &'static str, value: &'static str) -> hacivat_driver::fake::FakeQuery {
+    hacivat_driver::fake::FakeQuery {
+        prefix,
+        sets: vec![hacivat_driver::fake::FakeResultSet {
+            columns: vec![(
+                "a",
+                hacivat_values::LogicalType::Text {
+                    max_chars: None,
+                    fixed: false,
+                },
+            )],
+            rows: hacivat_driver::fake::FakeRows::Literal(vec![vec![hacivat_values::Value::Text(
+                value.into(),
+            )]]),
+        }],
+        ..Default::default()
+    }
+}
+
+/// Waits until every request submitted to console `id`'s session so far was served: a
+/// statement queued after them answers only then (the session serves in order).
+fn barrier(vcx: &VisualTestContext, id: ConsoleId) {
+    vcx.run_until_parked();
+    let session = session_of(vcx, id).expect("a session");
+    user_exec(&session, "SHOW standard_conforming_strings");
+    vcx.run_until_parked();
+}
+
+/// How often the session sent a typed statement starting `prefix`.
+fn sent(vcx: &VisualTestContext, prefix: &str) -> usize {
+    fake(vcx)
+        .typed_log()
+        .into_iter()
+        .filter(|c| format!("{c:?}").contains(prefix))
+        .count()
+}
+
+/// Fix round 2, N1: the pending read-only state stops every path to the session, not only a
+/// fresh Run: a chooser open when the console turns pending sends nothing on its confirm.
+#[gpui::test]
+fn pending_read_only_stops_the_choosers_confirm(cx: &mut TestAppContext) {
+    let extra = (0..8)
+        .flat_map(|_| [one_row("SELECT 1", "1"), one_row("SELECT 2", "2")])
+        .collect();
+    let vcx = shell_with_fake(
+        cx,
+        "en",
+        answers_probe_with(FakeDriver::new(DbmsKind::Postgres), extra),
+    );
+    add_profile(vcx, test_profile("orders", Some(EnvTag::Dev), "10.0.0.7"));
+    connect_and_wait(vcx, "orders");
+    let id = wait_active_console(vcx);
+    wait_session(vcx, id);
+    wait_until(vcx, "the console's context", |vcx| {
+        vcx.cx.read(|cx| hacivat_app::exec_ui::connected(id, cx))
+    });
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    vcx.cx.update(|cx| {
+        editor.update(cx, |v, cx| {
+            v.set_text("SELECT 1;\nSELECT 2;\n", cx);
+            v.select_range(0..0, cx);
+        })
+    });
+    let chooser_open = |vcx: &VisualTestContext| {
+        vcx.cx
+            .read(|cx| hacivat_app::exec_ui::chooser::is_open(id, cx))
+    };
+    let open_chooser = |vcx: &VisualTestContext| {
+        assert!(run(vcx, "editor.run"));
+        wait_until(vcx, "the chooser", |vcx| chooser_open(vcx));
+    };
+
+    // The chooser is open when the console turns pending; its confirm sends nothing.
+    open_chooser(vcx);
+    vcx.cx
+        .update(|cx| hacivat_app::exec_ui::set_pending_read_only(id, true, cx));
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(!chooser_open(vcx));
+    barrier(vcx, id);
+    assert_eq!(
+        sent(vcx, "SELECT 1"),
+        0,
+        "the chooser's confirm sent nothing"
+    );
+
+    stop_core_runtime_test(cx);
+}
+
+/// Fix round 2, N1: Re-run from a result tab (Task 30's strip) sends nothing while the console is
+/// pending read-only.
+#[gpui::test]
+fn pending_read_only_stops_rerun(cx: &mut TestAppContext) {
+    let extra = (0..8)
+        .flat_map(|_| [one_row("SELECT 1", "1"), one_row("SELECT 2", "2")])
+        .collect();
+    let vcx = shell_with_fake(
+        cx,
+        "en",
+        answers_probe_with(FakeDriver::new(DbmsKind::Postgres), extra),
+    );
+    add_profile(vcx, test_profile("orders", Some(EnvTag::Dev), "10.0.0.7"));
+    connect_and_wait(vcx, "orders");
+    let id = wait_active_console(vcx);
+    wait_session(vcx, id);
+    wait_until(vcx, "the console's context", |vcx| {
+        vcx.cx.read(|cx| hacivat_app::exec_ui::connected(id, cx))
+    });
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    vcx.cx.update(|cx| {
+        editor.update(cx, |v, cx| {
+            v.set_text("SELECT 1;\nSELECT 2;\n", cx);
+            v.select_range(0..0, cx);
+        })
+    });
+    let chooser_open = |vcx: &VisualTestContext| {
+        vcx.cx
+            .read(|cx| hacivat_app::exec_ui::chooser::is_open(id, cx))
+    };
+    let open_chooser = |vcx: &VisualTestContext| {
+        assert!(run(vcx, "editor.run"));
+        wait_until(vcx, "the chooser", |vcx| chooser_open(vcx));
+    };
+
+    // Not pending: the same confirm runs, and its result tab can be re-run.
+    vcx.cx
+        .update(|cx| hacivat_app::exec_ui::set_pending_read_only(id, false, cx));
+    open_chooser(vcx);
+    vcx.simulate_keystrokes("enter");
+    wait_until(vcx, "the run", |vcx| sent(vcx, "SELECT 1") == 1);
+    let ordinal = {
+        let mut found = None;
+        wait_until(vcx, "the result tab", |vcx| {
+            found = vcx.cx.read(|cx| {
+                Consoles::get(cx, id)
+                    .and_then(|s| s.results.clone())
+                    .and_then(|r| r.read(cx).tabs().first().map(|t| t.key().unit_ordinal))
+            });
+            found.is_some()
+        });
+        found.expect("a result tab")
+    };
+    wait_until(vcx, "the run to end", |vcx| {
+        session_of(vcx, id).is_some_and(|s| {
+            matches!(
+                s.state().borrow().state,
+                hacivat_session::session::SessionState::Idle
+            )
+        })
+    });
+    // Pending: Re-run of that tab sends nothing.
+    vcx.cx
+        .update(|cx| hacivat_app::exec_ui::set_pending_read_only(id, true, cx));
+    in_window(vcx, |window, cx| {
+        hacivat_app::exec_ui::handle_results_event(
+            &hacivat_app::results::ResultsEvent::Rerun {
+                console: id,
+                unit_ordinal: ordinal,
+            },
+            window,
+            cx,
+        )
+    });
+    barrier(vcx, id);
+    assert_eq!(
+        sent(vcx, "SELECT 1"),
+        1,
+        "Re-run sent nothing while pending"
+    );
+    stop_core_runtime_test(cx);
+}
+
+/// Fix round 2, M15: a Disconnect asked while another open-transaction question is open is
+/// never dropped silently: the user is told to answer it first.
+#[gpui::test]
+fn a_disconnect_while_another_question_is_open_says_so(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", pg_fake());
+    add_profile(vcx, test_profile("orders", Some(EnvTag::Dev), "10.0.0.7"));
+    connect_and_wait(vcx, "orders");
+    let id = wait_active_console(vcx);
+    let session = wait_session(vcx, id);
+    user_exec(&session, "BEGIN");
+    wait_until(vcx, "the user's transaction", |_| user_tx_open(&session));
+    let pid = profile_id(vcx, "orders");
+    // The first Disconnect asks.
+    vcx.cx
+        .update(|cx| hacivat_app::connections::commands::toggle_connect(pid, cx));
+    wait_until(vcx, "the prompt", |vcx| prompt(vcx).is_some());
+    // A second one while it is open: told, nothing else happens.
+    vcx.cx
+        .update(|cx| hacivat_app::connections::commands::toggle_connect(pid, cx));
+    vcx.run_until_parked();
+    assert!(
+        toast_texts(vcx)
+            .join(" ")
+            .contains("Answer the open question first, then try again."),
+        "{:?}",
+        toast_texts(vcx)
+    );
+    answer_prompt(vcx, None);
+    assert!(matches!(live(vcx, "orders"), LiveState::Connected(_)));
+    assert!(user_tx_open(&session));
+    stop_core_runtime_test(cx);
+}
+
 /// Fix round 1, I5: a disconnect closes the console's session under it (here the model's own
 /// disconnect, past the command's gate); after the reconnect the console takes the new
 /// default session instead of keeping the dead one.

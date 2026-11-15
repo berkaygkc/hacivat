@@ -1722,6 +1722,8 @@ hv-console-ro-pending-short = Read-only after this transaction
 # Variables:
 #   $name (String) - the console's tab title, e.g. "orders-dev (2)".
 hv-console-session-failed = Couldn't open a connection for { $name }. Run tries again.
+# A notice when Disconnect or Delete must ask about an open transaction while another such question is still open.
+hv-console-release-busy = Answer the open question first, then try again.
 ## m3a-t30-results-view
 
 # The results tile's first tab: the console's output log (NOTES surface 9).

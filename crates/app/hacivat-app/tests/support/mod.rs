@@ -1266,6 +1266,14 @@ pub fn rendered_markers(vcx: &VisualTestContext) -> Vec<String> {
 /// (`txid_current_if_assigned()`) finds no transaction ID.
 /// A fake that should connect a profile answers both, like a server.
 pub fn answers_probe(fake: hacivat_driver::fake::FakeDriver) -> hacivat_driver::fake::FakeDriver {
+    answers_probe_with(fake, Vec::new())
+}
+
+/// [`answers_probe`], with `extra` typed queries scripted after the probe's.
+pub fn answers_probe_with(
+    fake: hacivat_driver::fake::FakeDriver,
+    extra: Vec<hacivat_driver::fake::FakeQuery>,
+) -> hacivat_driver::fake::FakeDriver {
     use hacivat_driver::fake::{FakeExec, FakeQuery, FakeResultSet, FakeRows};
     let answer = |prefix: &'static str, value: Option<&str>| FakeExec {
         prefix,
@@ -1286,7 +1294,7 @@ pub fn answers_probe(fake: hacivat_driver::fake::FakeDriver) -> hacivat_driver::
             ]
         })
         .collect();
-    let queries = (0..32)
+    let queries: Vec<FakeQuery> = (0..32)
         .map(|_| FakeQuery {
             prefix: "SHOW standard_conforming_strings",
             sets: vec![FakeResultSet {
@@ -1303,5 +1311,7 @@ pub fn answers_probe(fake: hacivat_driver::fake::FakeDriver) -> hacivat_driver::
         })
         .collect();
     // The guard reads the transaction state it opened (`BEGIN … READ ONLY`).
-    fake.tracks_transactions().exec(exec).queries(queries)
+    fake.tracks_transactions()
+        .exec(exec)
+        .queries(queries.into_iter().chain(extra).collect())
 }

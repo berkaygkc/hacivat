@@ -20,8 +20,10 @@
 //!   (`<n>.sql.too-large-<secs>`, `.unreadable-<secs>`), the console says where, opens empty and
 //!   saves its new text as usual.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use hacivat_proto::ProfileId;
 use hacivat_settings::LocalPaths;
@@ -97,18 +99,36 @@ struct Written {
     claimed: bool,
 }
 
+/// Which autosave owns each console file: the newest one made for the path (fix round 2,
+/// M16). Held for the whole of a write, so writes to one file never interleave, and a closed
+/// console's late write never lands after a new console (a reused number) took the file over.
+fn owners() -> &'static Mutex<HashMap<PathBuf, u64>> {
+    static OWNERS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+    OWNERS.get_or_init(Mutex::default)
+}
+
+static NEXT_AUTOSAVE: AtomicU64 = AtomicU64::new(1);
+
 /// One console's autosave.
 #[derive(Debug, Clone)]
 pub struct Autosave {
     path: PathBuf,
     written: Arc<Mutex<Written>>,
+    /// This autosave's ID in [`owners`].
+    id: u64,
 }
 
 impl Autosave {
     /// The autosave of the file at `path`; `on_disk` is the hash of what the file holds (a
     /// restored console), so an unchanged text is never written again.
     pub fn new(path: PathBuf, on_disk: Option<u128>) -> Self {
+        let id = NEXT_AUTOSAVE.fetch_add(1, Ordering::Relaxed);
+        owners()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.clone(), id);
         Autosave {
+            id,
             path,
             written: Arc::new(Mutex::new(Written {
                 version: None,
@@ -136,6 +156,11 @@ impl Autosave {
     /// Writes `snap` on the calling thread (quit; tests), with the same rules. `Ok(true)` when
     /// it wrote.
     pub fn write_now(&self, snap: &Snapshot) -> std::io::Result<bool> {
+        let owners = owners().lock().unwrap_or_else(PoisonError::into_inner);
+        if owners.get(&self.path) != Some(&self.id) {
+            // A newer autosave took this file over (a reused console number).
+            return Ok(false);
+        }
         let mut written = self.written.lock().unwrap_or_else(PoisonError::into_inner);
         if written.version.is_some_and(|v| v >= snap.version) {
             return Ok(false);
@@ -240,6 +265,26 @@ mod tests {
             std::fs::read_dir(dir.path()).expect("dir").count(),
             2,
             "one kept file and the console's own"
+        );
+    }
+
+    /// M16: a closed console's late write never lands after a new console with the same
+    /// number took the file over.
+    #[test]
+    fn a_late_write_of_a_replaced_autosave_is_dropped() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("2.sql");
+        let old = Autosave::new(path.clone(), None);
+        assert!(old.write_now(&snap("SELECT 'old';", 1)).expect("write"));
+        let new = Autosave::new(path.clone(), None);
+        assert!(new.write_now(&snap("SELECT 'new';", 1)).expect("write"));
+        assert!(
+            !old.write_now(&snap("SELECT 'old, late';", 2))
+                .expect("write")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "SELECT 'new';"
         );
     }
 

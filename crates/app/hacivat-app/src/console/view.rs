@@ -260,15 +260,29 @@ pub fn release_refused(
     profile: ProfileId,
     then: impl FnOnce(&mut App) + 'static,
 ) -> bool {
+    // The holder as Task 33 sees it (its prompt asks about that transaction; fix round 2, M15).
     let holding = hosts_of(cx, profile).into_iter().find_map(|host| {
         let console = host.read(cx).console()?;
-        let session = Consoles::get(cx, console)?.session.clone()?;
-        (!can_release_quietly(&session)).then_some(console)
+        crate::exec_ui::tx::user_tx(console, cx).map(|_| console)
     });
-    match holding {
-        Some(console) => !ask_release(console, cx, then),
-        None => false,
+    let Some(console) = holding else {
+        return false;
+    };
+    if crate::exec_ui::close_prompt::prompt_open(cx) {
+        // Another question is open: Task 33 would drop `then` without asking. Never silently:
+        // the user is told to answer it first and try again.
+        ToastQueue::push(
+            cx,
+            Toast::new(
+                ToastKind::Info,
+                Rc::new(|cx: &App| tr(cx, ids::hv::CONSOLE_RELEASE_BUSY, NoArgs)),
+            ),
+        );
+        return true;
     }
+    // `then` runs now (Proceed) or after Commit or Roll back: either way the caller is done.
+    ask_release(console, cx, then);
+    true
 }
 
 /// The user's own transaction is open (or failed) on the session.
@@ -1325,13 +1339,13 @@ impl ConsoleHost {
             abort.abort();
         }
         if owned {
+            // The last edits are written now, on the closing thread (fix round 2, M16): a new
+            // console that reuses this number starts after it, and its autosave takes the file
+            // over, so no late write of this one lands on it.
             if let Some(save) = &self.autosave {
                 let snap = editor.read(cx).snapshot();
-                match cx.try_global::<ConnectionsModel>() {
-                    Some(m) => save.save_off_thread(snap, &m.runtime()),
-                    None => {
-                        let _ = save.write_now(&snap);
-                    }
+                if let Err(e) = save.write_now(&snap) {
+                    tracing::warn!(error = %e, "console autosave at close failed");
                 }
             }
             let own = self.own_session;
@@ -1475,14 +1489,8 @@ fn exec_rebind(console: ConsoleId, window: &mut Window, cx: &mut App) {
 /// The editor's tier changed (`TierChanged`, ledger T29/T32): the language service hears it,
 /// with `connected` as Task 33 set it (its SQL context read, the session live).
 fn exec_tier(editor: &Entity<EditorView>, console: Option<ConsoleId>, tier: Tier, cx: &mut App) {
-    let connected = console.is_some_and(|c| {
-        !matches!(
-            crate::exec_ui::sql_context(c, cx),
-            crate::exec_ui::context::SqlContext::Pending
-        ) && Consoles::get(cx, c)
-            .and_then(|s| s.session.as_ref())
-            .is_some_and(|s| hacivat_exec::session_live(&s.state().borrow().state))
-    });
+    // Task 33's own rule (fix round 2, M18).
+    let connected = console.is_some_and(|c| crate::exec_ui::connected(c, cx));
     editor.update(cx, |v, cx| {
         v.set_doc_context(DocContext { connected, tier }, cx)
     });
