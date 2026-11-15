@@ -1957,3 +1957,42 @@ Console 2 held in its own session, with no prompt (only "idle disconnected").
   keep-alive pings still sent, a disconnect exactly one threshold after the hold ends;
   `after_a_jump_only_a_current_hold_keeps_the_profile`). RED: the three manager tests fail on
   `m3a` 7864425 (the profile `Disconnected` at 1,800 s; no `SessionLost` event).
+
+**F1-c. The SQL-context probe on a read-only session runs outside the guard.** Since Task 32
+binds a console on every connect, Task 33's context probe runs at once. On a read-only
+(production) session it ran as a typed run *inside* the guard, so a server the guard cannot
+verify (an unanswered canary, e.g. a PostgreSQL-wire server without
+`txid_current_if_assigned()`) discarded the connection and took every connect of the profile to
+`Lost { Internal }`.
+
+- *Choice.* `hacivat_session::session::context_probe_sql(kind)` owns the probe's text
+  (`hacivat_exec::sqlctx::probe_sql` returns it). In the actor's `exec`, an
+  `ExecOrigin::Internal` request whose text is *exactly* that constant runs outside the guard,
+  as the schema probe always has (Q27, F3): a fixed read Hacivat wrote, through the values path.
+  The app probes read-only and read-write sessions the same way (`exec_ui::context`, one
+  internal `Exec`); a probe that answers no value leaves the console's context `Unknown`
+  (Task 33's fail-closed lexing state), and the session stays usable.
+- *Rejected.* (1) Keeping the guarded probe and not breaking the session on its failures: a
+  guard failure can also mean the connection's state is unclean (a failed `ROLLBACK`, a
+  transaction left open, a failed reset), which must never be reused. (2) A typed run of the
+  probe text outside the guard: a run carries no origin, so a user's run of the same text would
+  bypass the guard too.
+- *Fails closed.* Every user statement, and every other internal text (a second statement
+  appended, other case, trailing space), still runs guarded; on a server the guard cannot
+  verify the first user statement discards the session, as before.
+- *Tests.* FakeDriver `readonly_f1.rs`: `the_context_probe_never_breaks_a_session_the_guard_cannot_verify`
+  (canary 42883: the probe answers `on`, the session `Idle`),
+  `a_user_statement_the_guard_cannot_verify_still_breaks_the_session` (`SELECT 1` and the
+  probe's own text from the user: `Broken`), `other_internal_statements_stay_guarded`,
+  `a_read_only_mysql_session_answers_its_sql_mode` (MySQL, MariaDB; the guard's extended
+  protocol read no value before). App `exec_ui.rs`:
+  `a_read_only_console_the_guard_cannot_verify_keeps_its_session` (context `Known`, session
+  live; a user `SELECT 1` then fails and the session is discarded). RED by reverting the
+  bypass: the probe answers `ExecError { kind: Internal }` and the session breaks; the MySQL
+  probe reads no row; the app console's context is `Unknown`. Docker `hacivat-exec`
+  `docker_m3a_f1`: `a_production_profile_connects_with_a_bound_console_on_every_server_line`
+  (PostgreSQL 14–18, MySQL 8.0/8.4, MariaDB 10.6/10.11/11.4 on the full set: a production
+  profile under the app's policy connects, the bound console's probe reads the server's value
+  on the read-only session, the profile stays `Connected` and the session `Idle`, `SELECT 1`
+  runs and a `CREATE TABLE` is refused) and F1-a's
+  `a_parenthesis_before_copy_is_a_syntax_error_on_postgresql` (ADR 0005 `m3a-f1`).

@@ -706,3 +706,20 @@ fn an_oracle_region_holding_copy_stays_uncertain() {
     }
     assert_eq!(oracle.calls.get(), 0);
 }
+
+/// Follow-up F1-c: the session owns the probe's text (a read-only session runs exactly it
+/// outside the guard); every engine with a session-mode dialect has one, and only those.
+#[test]
+fn the_probe_text_is_the_sessions_for_every_engine() {
+    for kind in DbmsKind::ALL {
+        let modes = matches!(
+            dialect_id(kind),
+            DialectId::Postgres | DialectId::PgWire(_) | DialectId::MySql | DialectId::MariaDb
+        );
+        assert_eq!(probe_sql(kind).is_some(), modes, "{kind:?}");
+        assert_eq!(
+            probe_sql(kind),
+            hacivat_session::session::context_probe_sql(kind)
+        );
+    }
+}

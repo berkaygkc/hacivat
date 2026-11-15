@@ -60,6 +60,8 @@ pub use tx::{IsolationLevel, TxCommand, TxError, TxMode, TxState, begin_sql, def
 // ## m3a-t01b-seams
 pub use pool::SessionPolicy;
 pub use tx::TxOwner;
+// ## m3a-f1-followups
+pub use schema::context_probe_sql;
 
 /// A session's ID, unique in the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

@@ -116,6 +116,8 @@ use crate::session::recovery::{
     touches_tx, track_statement,
 };
 use crate::session::schema::{Family, SCHEMA_PROBE_MAX_ROWS, family, first_keyword};
+// ## m3a-f1-followups
+use crate::session::schema::context_probe_sql;
 use crate::session::{
     CancelOutcome, CancelState, ClosePolicy, CloseRefused, Command, EnvPlan, Escalation, ExecError,
     ExecErrorKind, ExecOrigin, IsolationLevel, Reply, Request, SchemaCtx, SessionEvent,
@@ -564,7 +566,14 @@ impl Core {
             return Err(tx_error(TxError::FailedNeedsRollback));
         }
         let control = TX_CONTROL.contains(&keyword.as_str());
-        let mut summary = if self.read_only {
+        // ## m3a-f1-followups (named exception, follow-up F1-c; ADR 0004 `m3a-f1`): Hacivat's
+        // own SQL-context probe, by its exact constant text and internal origin, runs outside
+        // the guard like the schema probe. A guard that cannot verify a server (an unanswered
+        // canary) then leaves the console's context unknown instead of breaking the session at
+        // every connect; user statements, and any other text, stay guarded.
+        let context_probe = matches!(origin, ExecOrigin::Internal { .. })
+            && context_probe_sql(self.kind) == Some(sql);
+        let mut summary = if self.read_only && !context_probe {
             let replay = self.env_plan().replay();
             let kind = self.kind;
             let ran = guarded(self.conn()?, kind, sql, opts, &replay).await;
