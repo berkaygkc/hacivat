@@ -45,15 +45,7 @@ pub const POPOVER_LAYER: &str = "popover";
 
 /// The profile the capsule and the status bar follow (R19): the explorer's selection while it
 /// has a live state, else the most recent connect attempt.
-///
-/// M3a (Task 34): a bound console that has the focus comes first (DESIGN.md "Status Follows
-/// The Tab": the capsule describes the editor's connection), with its saved profile whatever
-/// its live state; `status::followed_console` says which console that is.
 pub fn current_profile(cx: &App) -> Option<Arc<Profile>> {
-    // ## m3a-t34-status-follows
-    if let Some((_, p)) = crate::connections::status::followed_bound_console(cx) {
-        return Some(p);
-    }
     let m = cx.try_global::<ConnectionsModel>()?;
     let selected = m
         .selected()
@@ -304,14 +296,7 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
             clock: clock_label(cx, p.id),
         }),
         LiveState::Connected(info) => {
-            let mut read_only = is_read_only(&info);
-            let mut access = session_toasts::effective_access(cx, p.id, info.access);
-            // ## m3a-t34-status-follows (fix round 1, I2): a followed console's own session
-            // is authoritative; the capsule never claims more protection than it has.
-            if let Some(session) = crate::connections::status::followed_session_access(cx, p.id) {
-                access = crate::connections::status::less_protective(access, session);
-                read_only = read_only && access != AccessLabel::ReadWrite;
-            }
+            let read_only = is_read_only(&info);
             // ## m2b-t22-live: the honest access label (B21) and the SSH path.
             let (path, direct) = path_label(cx, &p, Some(&info));
             Some(CapsuleModel::Connection {
@@ -319,7 +304,7 @@ pub fn model(cx: &App) -> Option<CapsuleModel> {
                 env_label,
                 name,
                 engine: engine_label(&p, Some(&info)),
-                access: access_label(cx, access),
+                access: access_label(cx, session_toasts::effective_access(cx, p.id, info.access)),
                 read_only,
                 path,
                 direct,

@@ -140,10 +140,7 @@ pub fn facts_for(cx: &App, id: ProfileId) -> Option<AccessFacts> {
             // Fix round 1 (M8): a gap that changed data leaves "enforced" behind.
             facts.access =
                 crate::connections::session_toasts::effective_access(cx, id, facts.access);
-            // ## m3a-t34-status-follows (fix round 2, N1; named exception): never explain more
-            // protection than the followed console's own session has (read-write: nothing).
-            facts.access = crate::connections::status::capped_access(cx, id, facts.access);
-            (facts.access != AccessLabel::ReadWrite).then_some(facts)
+            Some(facts)
         }
         _ => None,
     }

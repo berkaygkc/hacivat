@@ -78,8 +78,6 @@ pub fn install(cx: &mut App) {
     shell::set_capsule(cx, Rc::new(capsule::model));
     shell::set_capsule_segment(cx, Rc::new(capsule::on_segment));
     shell::set_status_left(cx, Rc::new(status::segments));
-    // ## m3a-t34-status-follows (named exception): the bar and the capsule follow the console.
-    status::install(cx);
     shell::set_escape(cx, Rc::new(escape));
 
     // The capsule and the status bar are drawn by the workspace: repaint it on every change.
