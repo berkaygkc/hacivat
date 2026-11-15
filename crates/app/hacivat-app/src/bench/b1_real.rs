@@ -11,6 +11,11 @@
 //! - **Layout.** A `workspace.json` written before boot: explorer hidden, the editor tile at
 //!   `MIN_TILE_PX`; the window at `--size` (1440 × 900 by default; the gate's second run is
 //!   2560 × 1440 on a 1× display). No inspector exists in M3a.
+//! - **Display (review C1).** Before the load and again at the end, [`display_ok`]: 1440 × 900
+//!   needs the built-in panel (scale 2, ≥ 118 Hz), 2560 × 1440 a 1× display, and the viewport
+//!   at least 90 % of the requested area. A mismatch is INVALID: exit 3, no JSON. The label's
+//!   size is the measured viewport. `--any-display` runs anywhere under the ungraded
+//!   `b1-offpanel-real-…` label; a format other than `tr-TR` gets `b1-offlocale-real-…` (I3).
 //! - **Load.** Run, then **Fetch all** and **Fetch more anyway** (`ConsoleResults::raise_cap`)
 //!   until `Complete` (ledger T36 note; R-M3-19). Load time (Run → Complete), first rows, the
 //!   store's bytes and the process RSS are printed and kept in `target/bench/load/`.
@@ -20,9 +25,10 @@
 //!   over 100 ms, the grid painted on ≥ 95 % of frames, no step to an inactive window). The
 //!   label starts with `b1-fling` so that verdict applies (`hacivat-bench` keys its threshold on
 //!   that prefix).
-//! - **Paint.** The window's CPU per frame ([`super::FrameCpu`]) is reported against 6 ms and
-//!   3 ms, not gating: an upper bound on the grid's paint (the grid's own paint timer is behind
-//!   `hacivat-ui-grid/bench`, which the app's `bench` feature does not enable).
+//! - **Paint (review I6).** The grid's own paint timer (`GridView::bench_stats`, enabled by the
+//!   app's `bench` feature since the fix round) gives the gate's paint figure: p50/p95/p99/max
+//!   and the frames over 3 ms and 6 ms, not gating. The window's CPU per frame
+//!   ([`super::FrameCpu`]) is printed after it as an upper bound.
 //! - `--mode streaming`: a third, non-gating run that starts the fling once 10,000 rows are in
 //!   while the rest still streams (label `b1-streaming-real-*`, no threshold).
 
@@ -44,9 +50,10 @@ use hacivat_ui_grid::GridView;
 use secrecy::SecretString;
 
 use super::{
-    BenchRoot, EXIT_USAGE, FrameCpu, Launch, Sleep, activate, connect, connected, console_editor,
-    console_ready, flag, format_locale, open_console, percentiles, result_grid, save_layout,
-    save_profile, start_app, verdict_text, wait_until,
+    BenchRoot, EXIT_USAGE, FrameCpu, Launch, Outcome, Sleep, activate, connect, connected,
+    console_editor, console_ready, end_run, flag, format_locale, open_console, percentiles,
+    print_result, result_grid, save_layout, save_profile, start_app, verdict_text, wait_until,
+    wait_until_every,
 };
 use crate::console::ConsoleId;
 use crate::shell::TileLayout;
@@ -68,8 +75,10 @@ const WARMUP: Duration = Duration::from_millis(750);
 /// The streaming run starts its fling once this many rows are in.
 const STREAMING_START_ROWS: u64 = 10_000;
 const LOAD_TIMEOUT: Duration = Duration::from_secs(900);
-/// The paint budgets reported (not gating): 120 Hz half-frame and the 6 ms ALG budget.
+/// The paint budgets reported (not gating): the 6 ms ALG budget and the 120 Hz half-frame.
 const PAINT_BUDGETS_MS: [f64; 2] = [6.0, 3.0];
+/// How often the script looks for the fling's end while the fling is measured.
+const FLING_POLL: Duration = Duration::from_millis(100);
 /// The 16-word Turkish array the text columns mix in.
 const WORDS: [&str; 16] = [
     "çiçek",
@@ -114,7 +123,7 @@ pub enum Mode {
 }
 
 /// `b1_real [--engine pg|sqlite] [--size WxH] [--mode full|streaming] [--lang tr]
-/// [--format tr-TR]`.
+/// [--format tr-TR] [--any-display] [--allow-inactive]`.
 #[derive(Debug, Clone)]
 pub struct Args {
     pub engine: Engine,
@@ -122,11 +131,73 @@ pub struct Args {
     pub mode: Mode,
     pub lang: String,
     pub format: String,
+    /// Run on whatever display the window is on, under the ungraded `b1-offpanel-real-…` label.
+    pub any_display: bool,
     /// Go on when the window cannot become frontmost (a harness check; the verdict fails).
     pub allow_inactive: bool,
 }
 
-pub const USAGE: &str = "usage: HACIVAT_DOCKER_SET=pr b1_real [--engine pg|sqlite] [--size 1440x900] [--mode full|streaming] [--lang tr] [--format tr-TR] [--allow-inactive]";
+pub const USAGE: &str = "usage: HACIVAT_DOCKER_SET=pr b1_real [--engine pg|sqlite] [--size 1440x900|2560x1440] [--mode full|streaming] [--lang tr] [--format tr-TR] [--any-display] [--allow-inactive]\n\
+  1440x900 needs the built-in panel (2x, >= 118 Hz); 2560x1440 needs a 1x display; otherwise the run is INVALID (exit 3, no JSON) unless --any-display (ungraded label).\n\
+  The last line is `RESULT: PASS|FAIL|INVALID|n/a <label>`; exit 0 = PASS or ungraded, 1 = FAIL or aborted, 3 = INVALID (exit 0 is never a PASS by itself: read RESULT).";
+
+/// The format locale a graded run needs (gate E2).
+pub const GRADED_FORMAT: &str = "tr-TR";
+/// The smallest share of the requested window area the measured viewport may cover.
+const MIN_AREA_SHARE: f32 = 0.9;
+/// The built-in panel's refresh, less a margin for the reported interval.
+const PANEL_MIN_HZ: f64 = 118.0;
+
+/// Whether the window is where the gate measures B1-real (review C1): `1440x900` on the
+/// built-in panel (scale 2, at least 118 Hz), `2560x1440` on a 1× display, and in both the
+/// viewport covers at least 90 % of the requested area. Any other size is not a graded size.
+pub fn display_ok(
+    requested: (f32, f32),
+    viewport: (f32, f32),
+    hz: Option<f64>,
+    scale: Option<f32>,
+) -> Result<(), String> {
+    let scale_is = |want: f32| scale.is_some_and(|s| (s - want).abs() < 0.01);
+    match requested {
+        (1440.0, 900.0) => {
+            if !scale_is(2.0) {
+                return Err(format!(
+                    "1440x900 needs the 2x panel; the display scale is {scale:?}"
+                ));
+            }
+            if hz.is_none_or(|hz| hz < PANEL_MIN_HZ) {
+                return Err(format!(
+                    "1440x900 needs the 120 Hz panel (>= {PANEL_MIN_HZ} Hz); the display reports {hz:?}"
+                ));
+            }
+        }
+        (2560.0, 1440.0) => {
+            if !scale_is(1.0) {
+                return Err(format!(
+                    "2560x1440 needs a 1x display; the display scale is {scale:?}"
+                ));
+            }
+        }
+        (w, h) => {
+            return Err(format!(
+                "{w}x{h} is not a graded size (1440x900 on the panel, 2560x1440 at 1x); use --any-display"
+            ));
+        }
+    }
+    let share = (viewport.0 * viewport.1) / (requested.0 * requested.1);
+    if share < MIN_AREA_SHARE {
+        return Err(format!(
+            "the window is {}x{}, {:.0} % of the requested {}x{} (needs >= {:.0} %)",
+            viewport.0,
+            viewport.1,
+            share * 100.0,
+            requested.0,
+            requested.1,
+            MIN_AREA_SHARE * 100.0
+        ));
+    }
+    Ok(())
+}
 
 pub fn parse_args(args: &[String]) -> Result<Args, String> {
     let engine = match flag(args, "--engine").unwrap_or("pg") {
@@ -154,23 +225,36 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
         size,
         mode,
         lang: flag(args, "--lang").unwrap_or("tr").to_string(),
-        format: flag(args, "--format").unwrap_or("tr-TR").to_string(),
+        format: flag(args, "--format").unwrap_or(GRADED_FORMAT).to_string(),
+        any_display: args.iter().any(|a| a == "--any-display"),
         allow_inactive: args.iter().any(|a| a == "--allow-inactive"),
     })
 }
 
 impl Args {
-    /// The JSON label: `b1-fling-real-<engine>-<w>x<h>` (graded), or `b1-streaming-real-…`.
-    pub fn label(&self) -> String {
+    /// The JSON label, `<kind>-<engine>-<W>x<H>`, with the **measured** viewport in logical px.
+    /// Only `b1-fling-real` is graded (`hacivat-bench` keys B1's threshold on `b1-fling`): a
+    /// streaming run is `b1-streaming-real`, `--any-display` gives `b1-offpanel-real`, and a
+    /// format other than `tr-TR` gives `b1-offlocale-real` (review C1, I3).
+    pub fn label(&self, viewport: (f32, f32), format: &str) -> String {
         let engine = match self.engine {
             Engine::Pg => "pg",
             Engine::Sqlite => "sqlite",
         };
-        let kind = match self.mode {
-            Mode::Full => "b1-fling-real",
-            Mode::Streaming => "b1-streaming-real",
+        let kind = if self.mode == Mode::Streaming {
+            "b1-streaming-real"
+        } else if self.any_display {
+            "b1-offpanel-real"
+        } else if format != GRADED_FORMAT {
+            "b1-offlocale-real"
+        } else {
+            "b1-fling-real"
         };
-        format!("{kind}-{engine}-{}x{}", self.size.0, self.size.1)
+        format!(
+            "{kind}-{engine}-{}x{}",
+            viewport.0.round() as u32,
+            viewport.1.round() as u32
+        )
     }
 }
 
@@ -274,7 +358,8 @@ pub(crate) fn profile(engine: Engine, target: Option<&ServerTarget>, root: &Benc
     }
 }
 
-/// Runs the bench; the process exits with its code. `target` is required for `--engine pg`.
+/// Runs the bench; the process exits with its code (see [`USAGE`]). `target` is required for
+/// `--engine pg`.
 pub fn run(args: Args, target: Option<ServerTarget>) -> ExitCode {
     if args.engine == Engine::Pg && target.is_none() {
         eprintln!("b1_real: --engine pg needs the pg17 target; {USAGE}");
@@ -312,8 +397,7 @@ pub fn run(args: Args, target: Option<ServerTarget>) -> ExitCode {
             Ok(ws) => ws,
             Err(e) => {
                 eprintln!("b1_real: opening the workspace failed: {e:#}");
-                root.remove();
-                std::process::exit(1);
+                end_run(cx, &root, 1);
             }
         };
         let exec = cx.background_executor().clone();
@@ -321,21 +405,32 @@ pub fn run(args: Args, target: Option<ServerTarget>) -> ExitCode {
             let sleep = move |d: Duration| exec.timer(d);
             let code = match script(cx, ws, &sleep, &args, &root, profile_id, password, tiles).await
             {
-                Ok(code) => code,
+                Ok(outcome) => outcome.exit_code(args.allow_inactive),
                 Err(e) => {
                     eprintln!("b1_real aborted: {e:#}");
+                    print_result(Outcome::Fail, "b1_real (aborted)");
                     1
                 }
             };
-            root.remove();
-            if code != 0 {
-                std::process::exit(code);
-            }
-            cx.update(|cx| cx.quit());
+            cx.update(|cx| end_run(cx, &root, code));
         })
         .detach();
     });
     ExitCode::SUCCESS
+}
+
+/// The window's display and logical viewport, now.
+fn display_now<C: AppContext>(
+    cx: &mut C,
+    ws: WindowHandle<Workspace>,
+) -> anyhow::Result<(RunInfo, (f32, f32))> {
+    ws.update(cx, |_, window, cx| {
+        let v = window.viewport_size();
+        (
+            stamp_run(window, cx),
+            (f32::from(v.width), f32::from(v.height)),
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -348,7 +443,7 @@ async fn script<C: AppContext>(
     profile: ProfileId,
     password: Option<SecretString>,
     tiles: TileLayout,
-) -> anyhow::Result<i32> {
+) -> anyhow::Result<Outcome> {
     // The run's conditions: the layout restored, the format locale, the window's size.
     let (restored, locale) = ws.update(cx, |ws, window, cx| {
         window.resize(size(px(args.size.0), px(args.size.1)));
@@ -364,6 +459,34 @@ async fn script<C: AppContext>(
         bail!("the format locale is {format}, not {}", args.format);
     }
     activate(cx, ws, sleep, args.allow_inactive).await?;
+    // The resize lands through the platform: wait (briefly) for the viewport to take it.
+    let wanted = args.size.0 * args.size.1 * MIN_AREA_SHARE;
+    let _ = wait_until(
+        cx,
+        ws,
+        sleep,
+        "the window size",
+        Duration::from_secs(3),
+        |_, window, _| {
+            let v = window.viewport_size();
+            f32::from(v.width) * f32::from(v.height) >= wanted
+        },
+    )
+    .await;
+    // Review C1: the display and the size the label will claim, checked before the load.
+    let (stamp, viewport) = display_now(cx, ws)?;
+    let label = args.label(viewport, &format);
+    println!(
+        "{label}: requested {}x{}, viewport {}x{}, display_hz={:?} display_scale={:?} format={format}",
+        args.size.0, args.size.1, viewport.0, viewport.1, stamp.display_hz, stamp.display_scale
+    );
+    if !args.any_display
+        && let Err(why) = display_ok(args.size, viewport, stamp.display_hz, stamp.display_scale)
+    {
+        println!("INVALID display: {why}; no JSON written (--any-display runs ungraded)");
+        print_result(Outcome::Invalid, &label);
+        return Ok(Outcome::Invalid);
+    }
     let sql = match args.engine {
         Engine::Pg => pg_sql(ROWS, COLS),
         Engine::Sqlite => sqlite_sql(ROWS, COLS),
@@ -421,7 +544,7 @@ async fn script<C: AppContext>(
         )
         .await?;
         let grid = wait_grid(cx, ws, sleep, console).await?;
-        start_fling(cx, ws, grid, args.label(), streaming.clone())?;
+        start_fling(cx, ws, grid, label.clone(), streaming.clone())?;
     }
     wait_until(
         cx,
@@ -436,8 +559,7 @@ async fn script<C: AppContext>(
     let rss_after = super::rss_bytes();
     let complete = loaded.rows == ROWS;
     println!(
-        "{} load: rows={} (complete={complete}) columns={COLS} load={:.2}s first_rows={:.0}ms store={} rss_before={} rss_after={} fetch_all_asked={} cap_raised={} format={format} zone={zone}",
-        args.label(),
+        "{label} load: rows={} (complete={complete}) columns={COLS} load={:.2}s first_rows={:.0}ms store={} rss_before={} rss_after={} fetch_all_asked={} cap_raised={} format={format} zone={zone}",
         loaded.rows,
         loaded.complete.as_secs_f64(),
         loaded.first_rows.as_secs_f64() * 1000.0,
@@ -450,47 +572,33 @@ async fn script<C: AppContext>(
     if !complete {
         bail!("the result has {} rows, not {ROWS}", loaded.rows);
     }
-    let outcome = match args.mode {
-        Mode::Streaming => {
-            wait_until(
-                cx,
-                ws,
-                sleep,
-                "the fling",
-                Duration::from_secs(60),
-                |_, _, _| {
-                    // Peek without taking.
-                    let o = streaming.take();
-                    let done = o.is_some();
-                    streaming.set(o);
-                    done
-                },
-            )
-            .await?;
-            streaming.take().context("no fling outcome")?
-        }
+    let done = match args.mode {
+        Mode::Streaming => streaming,
         Mode::Full => {
             let grid = wait_grid(cx, ws, sleep, console).await?;
             let done = Rc::new(Cell::new(None::<FlingOutcome>));
-            start_fling(cx, ws, grid, args.label(), done.clone())?;
-            wait_until(
-                cx,
-                ws,
-                sleep,
-                "the fling",
-                Duration::from_secs(60),
-                |_, _, _| {
-                    let o = done.take();
-                    let ok = o.is_some();
-                    done.set(o);
-                    ok
-                },
-            )
-            .await?;
-            done.take().context("no fling outcome")?
+            start_fling(cx, ws, grid, label.clone(), done.clone())?;
+            done
         }
     };
-    report(cx, ws, args, &outcome, &loaded, rss_after, &format)
+    // Review minor 10: a slow poll while the measured fling runs.
+    wait_until_every(
+        cx,
+        ws,
+        sleep,
+        "the fling",
+        Duration::from_secs(60),
+        FLING_POLL,
+        |_, _, _| {
+            let o = done.take();
+            let finished = o.is_some();
+            done.set(o);
+            finished
+        },
+    )
+    .await?;
+    let outcome = done.take().context("no fling outcome")?;
+    report(cx, ws, args, &label, &outcome, &loaded, rss_after, &format)
 }
 
 async fn wait_grid<C: AppContext>(
@@ -519,7 +627,12 @@ struct FlingOutcome {
     painted: u64,
     fast_frames: u64,
     max_shapes: u32,
-    cpu: Vec<f64>,
+    /// The window's CPU per frame (an upper bound on the grid's paint).
+    window_cpu: Vec<f64>,
+    /// The grid's own paint per painted frame (`GridView::bench_stats().paint_ms`).
+    grid_paint: Vec<f64>,
+    /// The grid's prepaint start to paint end per painted frame.
+    grid_cpu: Vec<f64>,
     final_top: u64,
 }
 
@@ -558,6 +671,8 @@ fn warm_up(
         let recorder = Rc::new(RefCell::new(FrameRecorder::new(&label)));
         let painted_before = grid.update(cx, |g, _| {
             g.reset_frame_log();
+            // The grid's paint samples so far are the load's; the fling's start empty.
+            drop(std::mem::take(g.bench_stats()));
             g.frame_log().frames
         });
         record_frames(window, recorder.clone());
@@ -590,16 +705,22 @@ fn drive(f: Fling, window: &mut Window, travelled: f64) {
         let t = f.started.elapsed().as_secs_f64();
         if t >= DURATION_S {
             f.recorder.borrow_mut().stop();
-            let (log, top) = f
-                .grid
-                .read_with(cx, |g, _| (*g.frame_log(), g.scroll_state().top_row));
+            let (log, top, stats) = f.grid.update(cx, |g, _| {
+                (
+                    *g.frame_log(),
+                    g.scroll_state().top_row,
+                    std::mem::take(g.bench_stats()),
+                )
+            });
             f.done.set(Some(FlingOutcome {
                 recorder: f.recorder.clone(),
                 inactive: f.inactive.get(),
                 painted: log.frames.saturating_sub(f.painted_before),
                 fast_frames: log.fast_frames,
                 max_shapes: log.max_shapes,
-                cpu: f.cpu.samples(),
+                window_cpu: f.cpu.samples(),
+                grid_paint: stats.paint_ms,
+                grid_cpu: stats.frame_cpu_ms,
                 final_top: top,
             }));
             return;
@@ -614,42 +735,60 @@ fn drive(f: Fling, window: &mut Window, travelled: f64) {
     });
 }
 
+/// `n p50 p95 p99 max over-3ms over-6ms` of `samples`, for the log and the sidecar.
+fn paint_summary(samples: &[f64]) -> serde_json::Value {
+    let (n, p50, p95, p99, max) = percentiles(samples);
+    let over = |ms: f64| samples.iter().filter(|v| **v > ms).count();
+    serde_json::json!({
+        "n": n, "p50": p50, "p95": p95, "p99": p99, "max": max,
+        "over_3ms": over(PAINT_BUDGETS_MS[1]), "over_6ms": over(PAINT_BUDGETS_MS[0]),
+    })
+}
+
+fn print_paint(label: &str, what: &str, samples: &[f64]) {
+    let (n, p50, p95, p99, max) = percentiles(samples);
+    let over = |ms: f64| samples.iter().filter(|v| **v > ms).count();
+    println!(
+        "{label} {what}: n={n} p50={p50:.2}ms p95={p95:.2}ms p99={p99:.2}ms max={max:.2}ms over-3ms={} over-6ms={}",
+        over(PAINT_BUDGETS_MS[1]),
+        over(PAINT_BUDGETS_MS[0]),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn report<C: AppContext>(
     cx: &mut C,
     ws: WindowHandle<Workspace>,
     args: &Args,
+    label: &str,
     o: &FlingOutcome,
     loaded: &super::Loaded,
     rss: Option<u64>,
     format: &str,
-) -> anyhow::Result<i32> {
-    let label = args.label();
+) -> anyhow::Result<Outcome> {
     let os = std::env::consts::OS;
-    let (mut run, viewport) = ws.update(cx, |_, window, cx| {
-        (stamp_run(window, cx), window.viewport_size())
-    })?;
+    let (mut run, viewport) = display_now(cx, ws)?;
     run.expected_samples = b1_expected_frames(os, DURATION_S);
     run.inactive_keys = o.inactive;
     run.painted_frames = Some(usize::try_from(o.painted).unwrap_or(usize::MAX));
     let rec = o.recorder.borrow();
     let stats = rec.stats();
-    let v = verdict(&label, os, &stats, &run);
+    let v = verdict(label, os, &stats, &run);
     println!("{label} FrameStats: {stats:?}");
-    let (n, p50, p95, p99, max) = percentiles(&o.cpu);
-    let over = |ms: f64| o.cpu.iter().filter(|v| **v > ms).count();
-    println!(
-        "{label} window frame CPU (frame callback -> next main-thread turn; an upper bound on the grid's paint): n={n} p50={p50:.2}ms p95={p95:.2}ms p99={p99:.2}ms max={max:.2}ms over-{}ms={} over-{}ms={}",
-        PAINT_BUDGETS_MS[0],
-        over(PAINT_BUDGETS_MS[0]),
-        PAINT_BUDGETS_MS[1],
-        over(PAINT_BUDGETS_MS[1]),
+    // Review I6: the gate's paint figure is the grid's own; the window's is an upper bound.
+    print_paint(label, "GRID PAINT (the gate's paint figure)", &o.grid_paint);
+    print_paint(label, "grid prepaint start -> paint end", &o.grid_cpu);
+    print_paint(
+        label,
+        "window frame CPU (frame callback -> next main-thread turn; an upper bound, not the grid's paint)",
+        &o.window_cpu,
     );
     println!(
         "{label} grid frames painted={} fast-scroll frames={} max shapes/frame={} final top row={}",
         o.painted, o.fast_frames, o.max_shapes, o.final_top
     );
     println!(
-        "{label} verdict={} frames={}/{} inactive_steps={} build={} display_hz={:?} display_scale={:?} window={}x{} format={format} rows={} load={:.2}s store={} rss={}",
+        "{label} verdict={} frames={}/{} inactive_steps={} build={} display_hz={:?} display_scale={:?} viewport={}x{} format={format} rows={} load={:.2}s store={} rss={}",
         verdict_text(v),
         stats.frames,
         run.expected_samples,
@@ -657,8 +796,8 @@ fn report<C: AppContext>(
         run.build,
         run.display_hz,
         run.display_scale,
-        f32::from(viewport.width),
-        f32::from(viewport.height),
+        viewport.0,
+        viewport.1,
         loaded.rows,
         loaded.complete.as_secs_f64(),
         super::mib(loaded.bytes),
@@ -670,15 +809,26 @@ fn report<C: AppContext>(
             o.inactive
         );
     }
+    // Review C1: the window may have moved to another display during the run.
+    if !args.any_display
+        && let Err(why) = display_ok(args.size, viewport, run.display_hz, run.display_scale)
+    {
+        println!("INVALID display at the end of the run: {why}; no JSON written");
+        print_result(Outcome::Invalid, label);
+        return Ok(Outcome::Invalid);
+    }
+    let outcome = Outcome::of(v);
     match rec.dump_json(&bench_dir(), os, &run) {
         Ok(path) => {
             println!("{label} wrote {}", path.display());
-            write_sidecar(&path, args, o, loaded, rss, format, &run);
-            Ok(0)
+            write_sidecar(&path, args, label, viewport, o, loaded, rss, format, &run);
+            print_result(outcome, label);
+            Ok(outcome)
         }
         Err(e) => {
             eprintln!("{label}: failed to write JSON: {e}");
-            Ok(1)
+            print_result(Outcome::Fail, label);
+            Ok(Outcome::Fail)
         }
     }
 }
@@ -686,20 +836,23 @@ fn report<C: AppContext>(
 /// The load and paint figures of a run, for the gate's report: `target/bench/load/<the frames
 /// dump's name>`, outside `target/bench/*.json` because `bench-report` reads every file it is
 /// given as a frames or latency dump.
+#[allow(clippy::too_many_arguments)]
 fn write_sidecar(
     dump: &std::path::Path,
     args: &Args,
+    label: &str,
+    viewport: (f32, f32),
     o: &FlingOutcome,
     loaded: &super::Loaded,
     rss: Option<u64>,
     format: &str,
     run: &RunInfo,
 ) {
-    let (_, p50, p95, p99, max) = percentiles(&o.cpu);
     let body = serde_json::json!({
-        "label": args.label(),
+        "label": label,
         "format_locale": format,
-        "window": [args.size.0, args.size.1],
+        "requested": [args.size.0, args.size.1],
+        "viewport": [viewport.0, viewport.1],
         "display_hz": run.display_hz,
         "display_scale": run.display_scale,
         "build": run.build,
@@ -710,7 +863,9 @@ fn write_sidecar(
         "store_bytes": loaded.bytes,
         "rss_bytes": rss,
         "cap_raised": loaded.raised,
-        "frame_cpu_ms": {"p50": p50, "p95": p95, "p99": p99, "max": max},
+        "grid_paint_ms": paint_summary(&o.grid_paint),
+        "grid_prepaint_to_paint_end_ms": paint_summary(&o.grid_cpu),
+        "window_frame_cpu_upper_bound_ms": paint_summary(&o.window_cpu),
         "grid_painted_frames": o.painted,
         "fast_scroll_frames": o.fast_frames,
     });
@@ -720,7 +875,7 @@ fn write_sidecar(
         .map_err(std::io::Error::other)
         .and_then(|b| std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, b)))
     {
-        Ok(()) => println!("{} wrote {}", args.label(), path.display()),
+        Ok(()) => println!("{label} wrote {}", path.display()),
         Err(e) => eprintln!("could not write {}: {e}", path.display()),
     }
 }
@@ -753,17 +908,89 @@ mod tests {
         assert!(lite.contains("WHERE g < 1000000"));
     }
 
+    fn a(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
     #[test]
-    fn labels_keep_the_graded_prefix_only_for_the_full_run() {
-        let a = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    fn only_a_full_tr_tr_panel_run_keeps_the_graded_prefix() {
         let full = parse_args(&a(&[])).unwrap();
-        assert_eq!(full.label(), "b1-fling-real-pg-1440x900");
         assert_eq!((full.lang.as_str(), full.format.as_str()), ("tr", "tr-TR"));
-        let wide = parse_args(&a(&["--size", "2560x1440", "--engine", "sqlite"])).unwrap();
-        assert_eq!(wide.label(), "b1-fling-real-sqlite-2560x1440");
+        assert!(!full.any_display);
+        // The label's size is the measured viewport, never the request.
+        assert_eq!(
+            full.label((1439.6, 899.0), "tr-TR"),
+            "b1-fling-real-pg-1440x899"
+        );
+        assert_eq!(
+            full.label((1440.0, 900.0), "en-US"),
+            "b1-offlocale-real-pg-1440x900"
+        );
+        let anywhere = parse_args(&a(&["--any-display"])).unwrap();
+        assert_eq!(
+            anywhere.label((1440.0, 900.0), "tr-TR"),
+            "b1-offpanel-real-pg-1440x900"
+        );
         let streaming = parse_args(&a(&["--mode", "streaming"])).unwrap();
-        assert!(!streaming.label().starts_with("b1-fling"));
+        assert!(
+            !streaming
+                .label((1440.0, 900.0), "tr-TR")
+                .starts_with("b1-fling")
+        );
+        let wide = parse_args(&a(&["--size", "2560x1440", "--engine", "sqlite"])).unwrap();
+        assert_eq!(
+            wide.label((2560.0, 1415.0), "tr-TR"),
+            "b1-fling-real-sqlite-2560x1415"
+        );
+        for ungraded in [
+            anywhere.label((1.0, 1.0), "tr-TR"),
+            full.label((1.0, 1.0), "en-US"),
+        ] {
+            assert!(!ungraded.starts_with("b1-fling"), "{ungraded}");
+        }
         assert!(parse_args(&a(&["--engine", "oracle"])).is_err());
         assert!(parse_args(&a(&["--size", "big"])).is_err());
+    }
+
+    #[test]
+    fn the_default_size_needs_the_120_hz_2x_panel() {
+        let req = (1440.0, 900.0);
+        assert_eq!(display_ok(req, req, Some(120.0), Some(2.0)), Ok(()));
+        assert_eq!(display_ok(req, req, Some(119.88), Some(2.0)), Ok(()));
+        // A 60 Hz display, a 1× display, an unknown refresh: not the panel.
+        assert!(display_ok(req, req, Some(60.0), Some(2.0)).is_err());
+        assert!(display_ok(req, req, Some(120.0), Some(1.0)).is_err());
+        assert!(display_ok(req, req, None, Some(2.0)).is_err());
+        assert!(display_ok(req, req, Some(120.0), None).is_err());
+        // The 240 Hz / 1× display Task 20 measured on is refused.
+        assert!(display_ok(req, req, Some(240.0), Some(1.0)).is_err());
+    }
+
+    #[test]
+    fn the_wide_size_needs_a_1x_display_at_any_refresh() {
+        let req = (2560.0, 1440.0);
+        assert_eq!(display_ok(req, req, Some(60.0), Some(1.0)), Ok(()));
+        assert!(display_ok(req, req, Some(120.0), Some(2.0)).is_err());
+    }
+
+    #[test]
+    fn the_viewport_must_cover_ninety_percent_of_the_request() {
+        let req = (2560.0, 1440.0);
+        // macOS clamps a full-screen-sized window under the menu bar: still ≥ 90 %.
+        assert_eq!(
+            display_ok(req, (2560.0, 1385.0), Some(60.0), Some(1.0)),
+            Ok(())
+        );
+        // A window clamped to a small display is not the measured size.
+        let err = display_ok(req, (1728.0, 1080.0), Some(60.0), Some(1.0)).unwrap_err();
+        assert!(err.contains("of the requested"), "{err}");
+        let panel = (1440.0, 900.0);
+        assert!(display_ok(panel, (1200.0, 700.0), Some(120.0), Some(2.0)).is_err());
+    }
+
+    #[test]
+    fn other_sizes_are_not_graded() {
+        let err = display_ok((1280.0, 800.0), (1280.0, 800.0), Some(120.0), Some(2.0)).unwrap_err();
+        assert!(err.contains("--any-display"), "{err}");
     }
 }

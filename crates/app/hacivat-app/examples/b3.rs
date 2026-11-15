@@ -1,14 +1,17 @@
 //! B3 in the real app (Task 36; feature `bench`): typing, scrolling, opening and the IME's
-//! bounds question in a console's editor over the B3 fixture. See `hacivat_app::bench::b3`.
+//! bounds question in a console's editor over the B3 fixtures. See `hacivat_app::bench::b3`.
 //!
 //! ```text
-//! cargo xtask gen-sql --lines 50000 --long-line 100000 --out target/fixtures/b3-50k.sql
+//! cargo xtask gen-sql --lines 50000 --out target/fixtures/b3-50k-t0.sql                    # T0
+//! cargo xtask gen-sql --lines 50000 --long-line 100000 --out target/fixtures/b3-50k.sql    # T1
 //! cargo run --release -p hacivat-app --features bench --example b3 -- \
-//!     --file target/fixtures/b3-50k.sql --bench typing
+//!     --file target/fixtures/b3-50k-t0.sql --bench typing
 //! ```
 //!
-//! Modes: `typing`, `typing-long-line`, `typing-with-results`, `scroll`, `open`, `ime-bounds`.
-//! Keep the window frontmost and do not touch the mouse or keyboard while it runs.
+//! Modes on the T0 fixture: `typing`, `typing-with-results`, `open`, `scroll`; on the T1
+//! fixture: `typing-long-line`, `ime-bounds`. The last line is `RESULT: PASS|FAIL|INVALID|n/a`;
+//! exit 0 is PASS or ungraded, 1 FAIL or aborted, 3 INVALID. Keep the window frontmost and do
+//! not touch the mouse or keyboard while it runs.
 
 use std::process::ExitCode;
 

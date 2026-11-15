@@ -6,8 +6,13 @@
 //! HACIVAT_DOCKER_SET=pr cargo run --release -p hacivat-app --features bench --example b1_real
 //! HACIVAT_DOCKER_SET=pr cargo run --release -p hacivat-app --features bench --example b1_real -- --size 2560x1440
 //! HACIVAT_DOCKER_SET=pr cargo run --release -p hacivat-app --features bench --example b1_real -- --mode streaming
-//! cargo run --release -p hacivat-app --features bench --example b1_real -- --engine sqlite
+//! cargo run --release -p hacivat-app --features bench --example b1_real -- --engine sqlite --any-display
 //! ```
+//!
+//! 1440 × 900 is graded only on the built-in panel (scale 2, ≥ 118 Hz) and 2560 × 1440 only on a
+//! 1× display, each with the viewport at ≥ 90 % of the request and the `tr-TR` format; otherwise
+//! the run is INVALID (exit 3, no JSON), or ungraded with `--any-display`. The last line is
+//! `RESULT: PASS|FAIL|INVALID|n/a <label>`.
 //!
 //! The PostgreSQL server is the Docker matrix's `pg17` (`hacivat_testkit::require_target`, which
 //! answers only when `HACIVAT_DOCKER_SET` names a set holding it: `pr` or `full`). Without it

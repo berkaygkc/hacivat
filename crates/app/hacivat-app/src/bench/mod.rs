@@ -16,12 +16,17 @@
 //!   restore path (`<data>/consoles/<profile>/<n>.sql`, read on the core runtime), the one way
 //!   the M3a app opens a file.
 //! - [`PresentProbe`]: the editor's B3 probe. The input is marked at the editor's handler entry
-//!   (`EditorView::commit`, M0 addendum finding 6); the frame is recorded once the frame that
+//!   (M0 addendum finding 6): `EditorView::commit` for commands such as Backspace and PageDown,
+//!   and the input handler's `replace_text_in_range` / `replace_and_mark_text_in_range` for
+//!   typed text and compositions (fix round 1, I2); the frame is recorded once the frame that
 //!   shows it has been drawn and presented (a deferred effect after `draw` and `present`, the
 //!   spike's `record_after_present`).
 //! - [`FrameCpu`]: the whole window's CPU time per frame, from the frame callback to the next
 //!   main-thread turn (draw, present, and anything queued before that turn): an upper bound on
-//!   the grid's own paint, which only `hacivat-ui-grid/bench` can time (see the report).
+//!   the grid's own paint, which `b1_real` reports from the grid's `bench_stats` (the app's
+//!   `bench` feature enables `hacivat-ui-grid/bench`).
+//! - [`Outcome`] / [`print_result`] / [`end_run`]: every run ends with `RESULT: …`, an exit code
+//!   that follows it, and its root removed after the core runtime stopped.
 
 pub mod b1_real;
 pub mod b3;
@@ -278,6 +283,20 @@ pub async fn wait_until<C: AppContext>(
     sleep: &impl Sleep,
     what: &str,
     timeout: Duration,
+    cond: impl FnMut(&mut Workspace, &mut Window, &mut App) -> bool,
+) -> anyhow::Result<Duration> {
+    wait_until_every(cx, ws, sleep, what, timeout, POLL, cond).await
+}
+
+/// [`wait_until`], looking every `poll` (a measured fling waits with a slow poll, so the wait
+/// itself adds next to no work to the frames it measures).
+pub async fn wait_until_every<C: AppContext>(
+    cx: &mut C,
+    ws: WindowHandle<Workspace>,
+    sleep: &impl Sleep,
+    what: &str,
+    timeout: Duration,
+    poll: Duration,
     mut cond: impl FnMut(&mut Workspace, &mut Window, &mut App) -> bool,
 ) -> anyhow::Result<Duration> {
     let started = Instant::now();
@@ -291,7 +310,7 @@ pub async fn wait_until<C: AppContext>(
         if started.elapsed() > timeout {
             bail!("timed out after {timeout:?} waiting for {what}");
         }
-        sleep(POLL).await;
+        sleep(poll).await;
     }
 }
 
@@ -635,6 +654,68 @@ pub fn verdict_text(v: Verdict) -> &'static str {
     }
 }
 
+/// How a bench run ended, for its final `RESULT:` line and its exit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Pass,
+    Fail,
+    /// The run's conditions were not met (display, size, tier, file size, an inactive window):
+    /// nothing graded was written.
+    Invalid,
+    /// An ungraded label (streaming, off-panel, off-locale, no shared threshold).
+    NotGraded,
+}
+
+impl Outcome {
+    pub fn of(v: Verdict) -> Outcome {
+        match v {
+            Verdict::Pass => Outcome::Pass,
+            Verdict::Fail => Outcome::Fail,
+            Verdict::NoThreshold => Outcome::NotGraded,
+        }
+    }
+
+    pub fn text(self) -> &'static str {
+        match self {
+            Outcome::Pass => "PASS",
+            Outcome::Fail => "FAIL",
+            Outcome::Invalid => "INVALID",
+            Outcome::NotGraded => "n/a",
+        }
+    }
+
+    /// 0 for PASS or ungraded, 1 for FAIL, [`EXIT_INVALID`] for INVALID. Under
+    /// `--allow-inactive` (a harness check; CI under xvfb) a FAIL exits 0, because the verdict
+    /// fails there by construction.
+    pub fn exit_code(self, allow_inactive: bool) -> i32 {
+        match self {
+            Outcome::Pass | Outcome::NotGraded => 0,
+            Outcome::Fail if allow_inactive => 0,
+            Outcome::Fail => 1,
+            Outcome::Invalid => EXIT_INVALID,
+        }
+    }
+}
+
+/// Exit code of a run whose conditions were not met (no graded JSON written).
+pub const EXIT_INVALID: i32 = 3;
+
+/// The run's last line: `RESULT: PASS|FAIL|INVALID|n/a <label>`.
+pub fn print_result(outcome: Outcome, label: &str) {
+    println!("RESULT: {} {label}", outcome.text());
+}
+
+/// Ends the run: stops the core runtime (no autosave or other write is left in flight), removes
+/// the run's root, and exits with `code`. GPUI's quit hooks are skipped on purpose: they would
+/// write the dirty console and the layout back into the removed root (review minor 15).
+pub fn end_run(cx: &App, root: &BenchRoot, code: i32) -> ! {
+    if let Some(m) = cx.try_global::<ConnectionsModel>() {
+        m.core_runtime().shutdown(Duration::from_secs(10));
+    }
+    root.remove();
+    std::process::exit(code)
+}
+
 /// The process's resident set size, from `ps` (no `unsafe`); `None` where `ps` is missing.
 pub fn rss_bytes() -> Option<u64> {
     let out = std::process::Command::new("ps")
@@ -845,6 +926,15 @@ mod tests {
         settle(h.vcx, "the result's grid", Duration::from_secs(20), |vcx| {
             vcx.cx.read(|cx| result_grid(cx, console).is_some())
         });
+        // Review I6: the app's `bench` feature turns on the grid's own paint timer, which
+        // B1-real reports as the gate's paint figure.
+        let grid = h.vcx.cx.read(|cx| result_grid(cx, console)).unwrap();
+        settle(
+            h.vcx,
+            "the grid's paint samples",
+            Duration::from_secs(20),
+            |vcx| grid.update(vcx, |g, _| !g.bench_stats().paint_ms.is_empty()),
+        );
 
         // The probe: one sample per input, each paired with a frame drawn after it.
         let probe = PresentProbe::new("b3-typing-harness");
@@ -870,6 +960,41 @@ mod tests {
         }
         assert_eq!(probe.counts(), (3, 3));
         assert_eq!(probe.latency().stats().samples, 3);
+        h.stop();
+    }
+
+    /// Review I4 through the real console path: a ≈ 2 MB file of short lines opens in the full
+    /// tier (what `typing`, `typing-with-results` and `open` measure), and a line over 64 KB
+    /// opens the file in Reduced mode, which those modes refuse.
+    #[gpui::test]
+    fn the_console_tier_follows_the_fixture_shape(cx: &mut TestAppContext) {
+        use hacivat_ui_editor::Tier;
+        let h = boot(cx, b3::profile(), fake_registry(fake_pg(Vec::new())));
+        let short: String = "SELECT id, name FROM customers WHERE id = 42;\n".repeat(44_000);
+        assert!(b3::open_size_ok(short.len()).is_ok(), "{}", short.len());
+        let long = format!("SELECT 1;\nSELECT '{}';\n", "x".repeat(70_000));
+        let (ws, id, paths) = (h.ws, h.profile, h.root.paths().clone());
+        let mut tiers = Vec::new();
+        for text in [&short, &long] {
+            let (tab, _) = ws
+                .update(h.vcx, |ws, window, cx| {
+                    open_console(ws, id, text, window, cx, &paths)
+                })
+                .unwrap()
+                .unwrap();
+            settle(
+                h.vcx,
+                "the console's editor",
+                Duration::from_secs(20),
+                |vcx| vcx.cx.read(|cx| console_editor(cx, tab).is_some()),
+            );
+            let (_, editor) = h.vcx.cx.read(|cx| console_editor(cx, tab)).unwrap();
+            tiers.push(h.vcx.cx.read(|cx| editor.read(cx).status().tier));
+        }
+        assert_eq!(tiers, [Tier::Full, Tier::Reduced]);
+        assert!(b3::tier_ok(b3::Mode::Typing, tiers[0]).is_ok());
+        assert!(b3::tier_ok(b3::Mode::Typing, tiers[1]).is_err());
+        assert!(b3::tier_ok(b3::Mode::TypingLongLine, tiers[1]).is_ok());
         h.stop();
     }
 

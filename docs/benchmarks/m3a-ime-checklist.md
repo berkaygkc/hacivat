@@ -43,6 +43,33 @@ There is no completion popup in M3a, so the M0 check "the completion popup must 
 | Any IME | start a composition, click away, return | see check 4 | | |
 | Any IME | start a composition, press `⌘↵` | nothing runs; the composition stays (check 5) | | |
 
+### macOS: the T37 list from Task 27 (`task-27-report.md` items 1–7 and the fix round's (a), (b))
+
+| # | Input source / setup | Input | Expected result | Observed | Pass/Fail |
+|---|---|---|---|---|---|
+| 1a | Japanese, a console connected to a server; a statement that fails, run earlier | start a composition, then let the failed run's error arrive and use its "go to error" (T33's `select_range`) while still composing | no duplicated or lost text; the selection moves only after the composition commits (UI-EDIT-12 test 7) | | |
+| 1b | Japanese | while composing, choose **Edit ▸ Paste** from the macOS menu bar | nothing runs (F15); the composition stays intact; no duplicate | | |
+| 1c | Japanese | while composing, choose **Edit ▸ Undo** from the macOS menu bar | nothing runs (F15); the composition stays intact | | |
+| 2a | Japanese, Chinese Pinyin, Korean (2-Set) | compose after scrolling the editor | the candidate window sits at the composition start, within 2 px | | |
+| 2b | Japanese, Chinese Pinyin, Korean | compose at line 49,000 of the 50k-line fixture | same | | |
+| 2c | Japanese, Chinese Pinyin, Korean | compose on a line of CJK wide characters (for example `中文中文中文`) | same; any jump before the next frame is recorded (the estimate counts UTF-16 columns × the advance) | | |
+| 2d | Japanese | scroll the caret out of view, then start a composition | the editor reveals the caret; the candidate window sits at the composition | | |
+| 3a | Japanese | while composing, click in the results tile, or open the palette (in-window focus move) | the text commits once; no duplicate | | |
+| 3b | Japanese | while composing, ⌘Tab away and back | the composition is kept, then commits once | | |
+| 3c (fix (a)) | Japanese | while composing, switch apps, move the focus with the mouse, then come back | the marked text is as it was; the next keystroke starts fresh | | |
+| 4a | U.S. | `Option+e` then `e` | `é`, one undo group, no binding fired | | |
+| 4b | Turkish Q | type `ı` and `İ` among plain text, then undo | they type plainly; the undo groups match the typing (IME commits use the executor clock) | | |
+| 5a | Japanese | while composing, click inside the marked text | AppKit commits first; no duplicate | | |
+| 5b | Japanese | while composing, click outside the marked text | commits once; the caret goes to the click | | |
+| 5c (fix (b)) | any | click the left half of a line's last character | the caret goes **before** that character | | |
+| 6a | Japanese | reconversion: select committed text and press the Kana key twice | the reconversion candidates show for that text; the result replaces it once | | |
+| 6b | Emoji & Symbols (`⌃⌘Space`) | insert astral characters (for example `😀🇹🇷`) | inserted whole; the caret steps over each as one character | | |
+| 6c | Dictation | dictate a long sentence | the text lands once, at the caret | | |
+| 7a | clipboard (another app → Hacivat) | paste CRLF text from a Windows-made file, text with a leading BOM, and text with NUL characters | every CRLF/CR/LF becomes the document's dominant ending; one leading BOM is stripped; each NUL is kept and drawn as a `NUL` chip, with the warning toast | | |
+| 7b | clipboard | paste more than 20 MB | refused, with the toast; the text is unchanged | | |
+| 7c | clipboard (Hacivat → Hacivat through the pasteboard) | copy a whole line with no selection, then paste on another line | it pastes as a line above the caret's line, the caret's column kept (the metadata survives the pasteboard) | | |
+| 7d | clipboard | paste through the platform's own paste path (for example the Edit menu while a text input handles it) | the same normalisation and guards as the Paste command | | |
+
 ## Windows 11 (x86_64) — open until a host exists
 
 | Input source | Input | Expected result | Observed | Pass/Fail |
@@ -78,4 +105,5 @@ The manual rows above sit on top of the scripted IME traces, which run on every 
 ## Known gaps
 
 - **Focus move while the window is inactive** (M0, still open → M5): GPUI delivers no blur for an inactive window, so a composition can stay on the old editor. Task 27's `blur_rule_active_and_inactive_window` and `a_composition_dropped_while_the_window_was_inactive_ends` pin what the editor does today.
-- **Windows and Linux rows** are open until those hosts exist (R-M3-7).
+- **Windows and Linux rows** are open until those hosts exist (R-M3-7), and so is whether the clipboard's line-wise metadata survives on those platforms.
+- **Fallback if 1a–1c duplicate text** (Task 27): a fork carry that discards the marked text on `ContentChanged` while composing.
