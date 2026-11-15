@@ -337,9 +337,8 @@ fn character_index_for_point_round_trips_bounds(cx: &mut TestAppContext) {
     let half = o
         .vcx
         .read(|cx| o.editor.read(cx).last_layout().unwrap().rows().line_height / 2.0);
-    // Not the line's last character: GPUI's `closest_index_for_x` answers the line's end for
-    // any x inside its last glyph (T19's element; listed in the Task 27 report).
-    for (i, _) in src.char_indices().filter(|&(i, _)| i + 1 < src.len()) {
+    // Every character, the line's last included (review M7: its left half lands before it).
+    for (i, _) in src.char_indices() {
         let p = o.vcx.read(|cx| {
             let l = o.editor.read(cx).last_layout().unwrap().clone();
             let b = l.bounds_for_range(i..i).unwrap();
@@ -662,4 +661,198 @@ fn app_edits_wait_for_the_composition_to_end(cx: &mut TestAppContext) {
     // composition, paste, set_text: three groups.
     assert_eq!(undo_all(&mut o), 3);
     assert_eq!(text(&o), "SELECT ");
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m3a-t27-ime-clipboard (fix round 1)
+
+fn selection(o: &Opened<'_>) -> std::ops::Range<usize> {
+    o.vcx
+        .read(|cx| o.editor.read(cx).snapshot().selection.main().range())
+}
+
+/// Review I1: a "go to error" held during a composition before its target is rebased over
+/// what the composition committed: kana that becomes longer kanji, and a cancelled one.
+#[gpui::test]
+fn a_held_selection_follows_a_composition_of_another_length(cx: &mut TestAppContext) {
+    let mut o = open(cx, "x FROM t", 0);
+    mark(&mut o, "か");
+    // `t` is at 10..11 in "かx FROM t".
+    o.editor.update(o.vcx, |v, cx| v.select_range(10..11, cx));
+    commit(&mut o, "漢字");
+    o.vcx.run_until_parked();
+    assert_eq!(text(&o), "漢字x FROM t");
+    assert_eq!(selection(&o), 13..14, "still `t`");
+    // A cancelled composition (an empty mark) takes its text away.
+    o.editor.update(o.vcx, |v, cx| v.select_range(0..0, cx));
+    mark(&mut o, "か");
+    o.editor.update(o.vcx, |v, cx| v.select_range(16..17, cx));
+    mark(&mut o, "");
+    o.vcx.run_until_parked();
+    assert_eq!(text(&o), "漢字x FROM t");
+    assert_eq!(selection(&o), 13..14, "still `t`");
+}
+
+/// Review M3: held edits coalesce (a later `set_text` replaces earlier held texts and
+/// selections; a selection replaces a trailing selection), and a direct edit made after a
+/// composition ends but before the held ones apply waits behind them, so an older held edit
+/// never overwrites a newer one.
+#[gpui::test]
+fn held_app_edits_coalesce_and_keep_their_order(cx: &mut TestAppContext) {
+    let mut o = open(cx, "SELECT ", 7);
+    mark(&mut o, "ş");
+    o.editor.update(o.vcx, |v, cx| {
+        v.set_text("A", cx);
+        v.select_range(0..1, cx);
+        v.set_text("SELECT 22", cx);
+        v.select_range(0..1, cx);
+        v.select_range(0..6, cx);
+    });
+    commit(&mut o, "ş");
+    o.vcx.run_until_parked();
+    assert_eq!(text(&o), "SELECT 22");
+    assert_eq!(selection(&o), 0..6);
+    // The composition and one set_text: two groups.
+    assert_eq!(undo_all(&mut o), 2);
+    // The composition ends and, in the same update, the host selects directly: its selection
+    // is the newer one and wins.
+    o.editor
+        .update(o.vcx, |v, cx| v.set_text("SELECT 1, 2", cx));
+    o.vcx.run_until_parked();
+    mark(&mut o, "x");
+    o.editor.update(o.vcx, |v, cx| v.select_range(0..1, cx));
+    o.editor.update_in(o.vcx, |v, window, cx| {
+        v.unmark_text(window, cx);
+        v.select_range(7..8, cx);
+    });
+    o.vcx.run_until_parked();
+    assert_eq!(selection(&o), 7..8);
+}
+
+/// Review M4, case A: the focus moves while the window is inactive; GPUI sends the platform
+/// `FocusLost` (it drops its composition) but no blur listener runs. Back in the app the
+/// editor ends the composition locally, so bindings are not blocked and the next keystroke
+/// does not replace the stranded text.
+#[gpui::test]
+fn a_composition_dropped_while_the_window_was_inactive_ends(cx: &mut TestAppContext) {
+    let mut o = open(cx, "SELECT ", 7);
+    mark(&mut o, "ş");
+    o.vcx.deactivate_window();
+    let other = o.other.clone();
+    o.vcx.update(|window, cx| window.focus(&other, cx));
+    o.vcx.update(|window, _| window.activate_window());
+    draw(o.vcx);
+    assert!(!composing(&o));
+    assert_eq!(text(&o), "SELECT ş");
+    assert!(!o.vcx.read(|cx| cx.global::<FocusedInput>().composing));
+}
+
+/// Review M4, case B: the editor turns read-only mid-composition; it accepts no text from then
+/// on (the platform drops the composition), so it ends the composition itself.
+#[gpui::test]
+fn a_composition_ends_when_the_editor_turns_read_only(cx: &mut TestAppContext) {
+    let mut o = open(cx, "SELECT ", 7);
+    mark(&mut o, "ş");
+    o.editor.update(o.vcx, |v, cx| {
+        let cfg = EditorConfig {
+            read_only: true,
+            ..*v.config()
+        };
+        v.set_config(cfg, cx);
+    });
+    draw(o.vcx);
+    assert!(!composing(&o));
+    assert_eq!(text(&o), "SELECT ş");
+    assert_eq!(composition_events(&o), [true, false]);
+}
+
+/// Review M5: a range on a row the current frame did not paint, with no composition, asks for
+/// no frame (the next one could not answer it better).
+#[gpui::test]
+fn bounds_for_range_on_a_current_frame_requests_no_frame(cx: &mut TestAppContext) {
+    let src: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    let o = open(cx, &src, 0);
+    let notified = Rc::new(std::cell::Cell::new(0u32));
+    let n = notified.clone();
+    o.vcx.update(|_, cx| {
+        cx.observe(&o.editor, move |_, _| n.set(n.get() + 1))
+            .detach();
+    });
+    let at16 = o.vcx.read(|cx| {
+        let b = o.editor.read(cx).snapshot().buffer;
+        b.byte_to_utf16(b.line_to_byte(150))
+    });
+    let b = o.editor.update_in(o.vcx, |v, window, cx| {
+        let eb = v.last_layout().unwrap().rows().bounds;
+        v.bounds_for_range(at16..at16, eb, window, cx)
+    });
+    o.vcx.run_until_parked();
+    assert!(b.is_some(), "estimated");
+    assert_eq!(notified.get(), 0);
+}
+
+/// Review M6: a range starting between the CR and the LF of a CRLF does not panic.
+#[gpui::test]
+fn frame_bounds_inside_a_crlf_do_not_panic(cx: &mut TestAppContext) {
+    let o = open(cx, "a\r\nb", 0);
+    let b = o.vcx.read(|cx| {
+        let l = o.editor.read(cx).last_layout().unwrap().clone();
+        l.bounds_for_range(2..3)
+    });
+    assert!(b.is_some());
+}
+
+/// Review M7: a point on the left half of a line's last character lands before it, on the
+/// right half after it (ASCII, a two-byte letter, and a base with a combining mark).
+#[gpui::test]
+fn the_last_characters_halves_hit_before_and_after(cx: &mut TestAppContext) {
+    for (src, start) in [("SELECT x", 7), ("SELECT ş", 7), ("SELECT e\u{301}", 7)] {
+        let o = open(cx, src, 0);
+        let (l, r) = o.vcx.read(|cx| {
+            let l = o.editor.read(cx).last_layout().unwrap().clone();
+            let x0 = l.x_for_offset(start).unwrap();
+            let x1 = l.x_for_offset(src.len()).unwrap();
+            let b = l.bounds_for_range(start..start).unwrap();
+            let y = b.origin.y + b.size.height / 2.0;
+            (
+                l.offset_for_point(point(x0 + (x1 - x0) * 0.25, y)),
+                l.offset_for_point(point(x0 + (x1 - x0) * 0.75, y)),
+            )
+        });
+        assert_eq!(l, Some(start), "{src:?}: left half");
+        assert_eq!(r, Some(src.len()), "{src:?}: right half");
+    }
+}
+
+/// Review M8: the handler's UTF-16 answers after a CRLF and after a combining mark.
+#[gpui::test]
+fn crlf_and_combining_marks_at_the_handler(cx: &mut TestAppContext) {
+    for (src, caret, sel16, marked16) in [("a\r\nb", 3, 3..3, 3..4), ("e\u{301}", 3, 2..2, 2..3)] {
+        let mut o = open(cx, src, caret);
+        let sel = o
+            .editor
+            .update_in(o.vcx, |v, window, cx| {
+                v.selected_text_range(false, window, cx)
+            })
+            .unwrap();
+        assert_eq!(sel.range, sel16, "{src:?}");
+        mark(&mut o, "ş");
+        let marked = o
+            .editor
+            .update_in(o.vcx, |v, window, cx| v.marked_text_range(window, cx));
+        assert_eq!(marked, Some(marked16), "{src:?}");
+    }
+}
+
+/// Review M8: two app edits in one frame are one notification.
+#[gpui::test]
+fn two_app_edits_in_one_frame_notify_once(cx: &mut TestAppContext) {
+    let o = open(cx, "SELECT ", 7);
+    let base = notifications(&o);
+    o.editor.update(o.vcx, |v, cx| {
+        v.set_text("SELECT 1", cx);
+        v.set_text("SELECT 2", cx);
+    });
+    draw(o.vcx);
+    assert_eq!(notifications(&o) - base, 1);
 }

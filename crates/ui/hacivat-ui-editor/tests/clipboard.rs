@@ -382,9 +382,10 @@ fn foreign_metadata_is_not_line_wise(cx: &mut TestAppContext) {
 }
 
 /// Paste and cut are refused while composing (no binding runs then, F15; this is the editor's
-/// own guard); copy still copies. A read-only editor copies but neither cuts nor pastes.
+/// own guard), and so is the platform's own paste (review M9: dropped, not held); copy still
+/// copies (the caret's line, marked text included).
 #[gpui::test]
-fn paste_and_cut_wait_for_no_composition_and_read_only(cx: &mut TestAppContext) {
+fn paste_and_cut_are_refused_while_composing_and_copy_runs(cx: &mut TestAppContext) {
     let mut o = open(cx, "SELECT «1┃");
     put(&mut o, "2");
     o.editor.update_in(o.vcx, |v, window, cx| {
@@ -392,12 +393,26 @@ fn paste_and_cut_wait_for_no_composition_and_read_only(cx: &mut TestAppContext) 
     });
     run(&mut o, "editor.paste");
     run(&mut o, "editor.cut");
+    assert_eq!(
+        clipboard_text(&o).as_deref(),
+        Some("2"),
+        "cut copied nothing"
+    );
+    o.editor.update_in(o.vcx, |v, window, cx| {
+        v.paste(ClipboardItem::new_string("3".into()), window, cx);
+    });
+    o.vcx.run_until_parked();
+    run(&mut o, "editor.copy");
+    assert_eq!(clipboard_text(&o).as_deref(), Some("SELECT ş\n"));
     o.editor.update_in(o.vcx, |v, window, cx| {
         v.replace_text_in_range(None, "ş", window, cx);
     });
     o.vcx.run_until_parked();
-    assert_eq!(text(&o), "SELECT ş");
-    assert_eq!(clipboard_text(&o).as_deref(), Some("2"));
+    assert_eq!(
+        text(&o),
+        "SELECT ş",
+        "nothing pasted after the composition either"
+    );
 }
 
 #[gpui::test]

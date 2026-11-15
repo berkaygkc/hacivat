@@ -16,7 +16,9 @@
 //!   element draws each as a visible `NUL` chip, and counted for a warning toast. Only string
 //!   entries are text: file paths and images are not inserted. A paste that would take the
 //!   document past T1's 20 MB is refused with `EditorEvent::PasteRefused { bytes }` and a toast
-//!   (R-M3-49); a failed read shows the clipboard-unavailable toast with Try again.
+//!   (R-M3-49); a paste whose normalised length alone is past it is refused on the background
+//!   executor before anything that size is built, and the UI thread never copies the text. A
+//!   failed read shows the clipboard-unavailable toast with Try again.
 //! - **Never inside a composition:** paste and cut are refused while composing (no binding
 //!   runs then either, F15), and a read that lands while composing waits until the composition
 //!   ends (`ime::defer_while_composing`, the corrected R-M3-7 ruling). Copy changes no text and
@@ -156,7 +158,7 @@ fn landed(
     cx: &mut Context<EditorView>,
 ) {
     match result {
-        Ok(Some(item)) => paste_item(v, &item, cx),
+        Ok(Some(item)) => paste_item(v, item, cx),
         Ok(None) => {}
         Err(()) => {
             let weak = cx.entity().downgrade();
@@ -168,52 +170,102 @@ fn landed(
     }
 }
 
-/// Pastes `item` (a landed read, or the platform's own paste): its string entries normalised
-/// on the background executor, then applied.
-pub(crate) fn paste_item(v: &mut EditorView, item: &ClipboardItem, cx: &mut Context<EditorView>) {
+/// What a paste's background work hands back.
+#[derive(Debug)]
+pub(crate) enum Landing {
+    Text(Pasted),
+    /// The normalised text alone would be this many bytes, past the limit: nothing was built.
+    TooBig(u64),
+}
+
+/// Pastes `item` (a landed read, or the platform's own paste). Nothing the size of the text
+/// is touched on the UI thread (review I2): the item moves to the background executor, which
+/// takes its text, measures the normalised length without allocating, refuses a paste that is
+/// alone past the limit, and only then normalises.
+pub(crate) fn paste_item(v: &mut EditorView, item: ClipboardItem, cx: &mut Context<EditorView>) {
     if v.config.read_only {
         return;
     }
-    let Some((text, line_wise)) = text_of(item) else {
-        return;
-    };
     let ending = v.model.buffer().dominant_line_ending();
+    let limit = v.config.tiers.reduced_max_bytes;
     v.paste.reads += 1;
-    let work = cx
-        .background_executor()
-        .spawn(async move { normalize(&text, ending, line_wise) });
+    let work = cx.background_executor().spawn(async move {
+        let (text, line_wise) = text_of(item)?;
+        Some(prepare(text, ending, line_wise, limit))
+    });
     cx.spawn(async move |this, cx| {
-        let pasted = work.await;
+        let landing = work.await;
         let _ = this.update(cx, |v, cx| {
             v.paste.reads = v.paste.reads.saturating_sub(1);
-            apply(v, pasted, cx);
+            match landing {
+                Some(Landing::Text(p)) => apply(v, p, cx),
+                Some(Landing::TooBig(bytes)) => refuse(v, bytes, cx),
+                None => {}
+            }
         });
     })
     .detach();
 }
 
-/// The text of `item`'s string entries, and whether its metadata says line-wise for exactly
-/// that text; `None` when it holds no text.
-fn text_of(item: &ClipboardItem) -> Option<(String, bool)> {
-    let mut text = String::new();
-    let mut meta = None;
-    let mut strings = 0;
-    for entry in item.entries() {
-        if let ClipboardEntry::String(s) = entry {
-            text.push_str(s.text());
-            meta = s.metadata.clone();
-            strings += 1;
-        }
+/// The text of `item`'s string entries (moved out when there is one, joined when there are
+/// several), and whether its metadata says line-wise for exactly that text; `None` when it
+/// holds no text.
+fn text_of(item: ClipboardItem) -> Option<(String, bool)> {
+    let mut strings: Vec<_> = item
+        .into_entries()
+        .filter_map(|e| match e {
+            ClipboardEntry::String(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let (text, line_wise) = if strings.len() == 1 {
+        let s = strings.pop()?;
+        let line_wise = s.metadata.as_deref() == Some(&*metadata(s.text.len(), true));
+        (s.text, line_wise)
+    } else {
+        (
+            strings.into_iter().map(|s| s.text).collect::<String>(),
+            false,
+        )
+    };
+    (!text.is_empty()).then_some((text, line_wise))
+}
+
+/// The length [`normalize`] gives `text`, counted without building anything.
+fn normalized_len(text: &str, ending: LineEnding) -> usize {
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    let nl = ending.as_str().len();
+    let mut len = 0;
+    let mut rest = text;
+    while let Some(i) = rest.find(['\r', '\n']) {
+        len += i + nl;
+        let skip = if rest[i..].starts_with("\r\n") { 2 } else { 1 };
+        rest = &rest[i + skip..];
     }
-    if text.is_empty() {
-        return None;
+    len + rest.len()
+}
+
+/// The background half of a paste: refused by its normalised length before anything is built
+/// when it alone is past `limit` (the document after it is at least that long), else
+/// normalised.
+fn prepare(text: String, ending: LineEnding, line_wise: bool, limit: u64) -> Landing {
+    let len = normalized_len(&text, ending) as u64;
+    if len > limit {
+        return Landing::TooBig(len);
     }
-    let line_wise = strings == 1 && meta.as_deref() == Some(&*metadata(text.len(), true));
-    Some((text, line_wise))
+    Landing::Text(normalize(&text, ending, line_wise))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`normalize`] ran on this thread (the early-refusal test).
+    static NORMALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// UI-EDIT-14 step 3: one leading BOM stripped, endings converted to `ending`, NULs counted.
 fn normalize(text: &str, ending: LineEnding, line_wise: bool) -> Pasted {
+    #[cfg(test)]
+    NORMALIZED.with(|n| n.set(n.get() + 1));
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     let nl = ending.as_str();
     let mut out = String::with_capacity(text.len());
@@ -233,15 +285,23 @@ fn normalize(text: &str, ending: LineEnding, line_wise: bool) -> Pasted {
     }
 }
 
+/// A paste past the limit: refused with `PasteRefused { bytes }` and the toast (R-M3-49).
+fn refuse(v: &mut EditorView, bytes: u64, cx: &mut Context<EditorView>) {
+    let limit = v.config.tiers.reduced_max_bytes;
+    cx.emit(EditorEvent::PasteRefused { bytes });
+    ToastQueue::push(cx, refused_toast(bytes, limit));
+}
+
 /// Applies normalised pasted text to the selection current now: above the caret's line when
 /// it is line-wise and nothing is selected, else over the main selection. Held while a
-/// composition is open; refused past the size limit (R-M3-49).
+/// composition is open (or held edits wait before it); refused past the size limit, with the
+/// selection it replaces counted out (R-M3-49).
 pub(crate) fn apply(v: &mut EditorView, p: Pasted, cx: &mut Context<EditorView>) {
     if v.config.read_only {
         return;
     }
-    if v.ime.is_composing() {
-        ime::defer_while_composing(v, AppEdit::Paste(p));
+    if ime::must_hold(v) {
+        ime::hold(v, AppEdit::Paste(p));
         return;
     }
     let buf = v.model.buffer();
@@ -254,11 +314,8 @@ pub(crate) fn apply(v: &mut EditorView, p: Pasted, cx: &mut Context<EditorView>)
         (main.clone(), main.start + p.text.len())
     };
     let after = (len - at.len() + p.text.len()) as u64;
-    let limit = v.config.tiers.reduced_max_bytes;
-    if after > limit {
-        let bytes = p.text.len() as u64;
-        cx.emit(EditorEvent::PasteRefused { bytes });
-        ToastQueue::push(cx, refused_toast(bytes, limit));
+    if after > v.config.tiers.reduced_max_bytes {
+        refuse(v, p.text.len() as u64, cx);
         return;
     }
     let Ok(changes) = ChangeSet::from_edits(len, [(at, p.text.clone())]) else {
@@ -369,24 +426,71 @@ mod t27_tests {
         assert_eq!(&*normalize("\r\r\n\n", lf, false).text, "\n\n\n");
     }
 
+    /// Review I2: the length scan allocates nothing and agrees with what `normalize` builds.
+    #[test]
+    fn the_length_scan_agrees_with_normalize() {
+        let samples = [
+            "",
+            "\u{FEFF}",
+            "\u{FEFF}\u{FEFF}x",
+            "a\nb",
+            "a\r\nb",
+            "a\rb",
+            "\r\r\n\n\r",
+            "x\u{2028}y\0z",
+            "trailing\r",
+            "ş\r\n😀\n",
+        ];
+        let endings = [
+            TextBuffer::from_str("").dominant_line_ending(),
+            TextBuffer::from_str("a\r\nb").dominant_line_ending(),
+            TextBuffer::from_str("a\rb\rc").dominant_line_ending(),
+        ];
+        for s in samples {
+            for e in endings {
+                assert_eq!(
+                    normalized_len(s, e),
+                    normalize(s, e, false).text.len(),
+                    "{s:?} {e:?}"
+                );
+            }
+        }
+    }
+
+    /// Review I2: a paste whose normalised length alone is past the limit is refused before
+    /// anything the size of the paste is built; one within it is normalised.
+    #[test]
+    fn an_oversized_paste_is_refused_before_normalizing() {
+        let lf = TextBuffer::from_str("").dominant_line_ending();
+        let crlf = TextBuffer::from_str("a\r\nb").dominant_line_ending();
+        let before = NORMALIZED.with(|n| n.get());
+        // 8 bytes, but 12 with CRLF endings: past a 10-byte limit.
+        let landing = prepare("a\nb\nc\nd\n".into(), crlf, false, 10);
+        assert!(matches!(landing, Landing::TooBig(12)), "{landing:?}");
+        assert_eq!(NORMALIZED.with(|n| n.get()), before, "normalize never ran");
+        let landing = prepare("a\nb".into(), lf, false, 10);
+        assert!(matches!(landing, Landing::Text(ref p) if &*p.text == "a\nb"));
+        assert_eq!(NORMALIZED.with(|n| n.get()), before + 1);
+    }
+
     #[test]
     fn metadata_marks_line_wise_only_for_its_own_text() {
         let item = |text: &str, meta: String| {
             ClipboardItem::new_string_with_metadata(text.to_string(), meta)
         };
         assert_eq!(
-            text_of(&item("ab\n", metadata(3, true))),
+            text_of(item("ab\n", metadata(3, true))),
             Some(("ab\n".into(), true))
         );
         assert_eq!(
-            text_of(&item("ab\n", metadata(4, true))),
+            text_of(item("ab\n", metadata(4, true))),
             Some(("ab\n".into(), false))
         );
         assert_eq!(
-            text_of(&item("ab", metadata(2, false))),
+            text_of(item("ab", metadata(2, false))),
             Some(("ab".into(), false))
         );
-        assert_eq!(text_of(&ClipboardItem::new_string(String::new())), None);
+        assert_eq!(text_of(ClipboardItem::new_string(String::new())), None);
     }
 
     /// The toasts' texts come from `hui.ftl` (block `m3a-t27-clipboard`) with their sizes and

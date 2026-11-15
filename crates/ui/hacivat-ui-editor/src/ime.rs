@@ -17,7 +17,9 @@
 //!   call that discards the platform's composition except a real focus loss, so an app edit
 //!   made while composing would leave the platform's copy to land beside it. `set_text`, a
 //!   "go to error" selection and a paste whose read lands while composing are held
-//!   ([`defer_while_composing`]) and applied, in order, once the composition ends. Commands
+//!   ([`defer_while_composing`]) and applied, in order, once the composition ends; a held
+//!   selection is rebased over what the composition committed. While held edits wait, newer
+//!   ones queue behind them (never overtaking), and the queue coalesces. Commands
 //!   cannot run then: the key dispatcher and the menus run no binding while
 //!   `FocusedInput.composing` (F15), and the palette takes the focus first (a focus move,
 //!   which commits).
@@ -26,7 +28,9 @@
 //!   clears it.
 //! - **The blur rule:** a focus move inside the active window commits the composition locally
 //!   (the platform drops its copy on the focus loss); an app switch leaves it with the
-//!   platform, which resumes it on return (`ImeCore::blur`).
+//!   platform, which resumes it on return (`ImeCore::blur`). A composition the platform
+//!   dropped without a blur (the focus moved while the window was inactive, or the editor
+//!   turned read-only) is ended locally by the next frame.
 //! - **Geometry:** `bounds_for_range` and `character_index_for_point` read the last painted
 //!   frame. Between an edit and the next frame that frame is older than the text: a position
 //!   before every change since maps through it exactly (the start of a composition being
@@ -61,17 +65,35 @@ pub struct InputState {
     selection_owed: bool,
     /// Notifications sent to the platform (text, selection).
     sent: (u64, u64),
-    /// App edits made while composing, applied in order when it ends.
-    deferred: Vec<AppEdit>,
+    /// App edits made while composing (or while earlier ones still wait), applied in order.
+    deferred: Vec<Held>,
     /// A flush of `deferred` is scheduled.
     flush_scheduled: bool,
+    /// `deferred` is being applied: its own edits go through.
+    flushing: bool,
+    /// Ending a composition the platform already dropped is scheduled (review M4).
+    end_scheduled: bool,
 }
 
-/// An app edit held while a composition is open.
+/// An app edit that must wait for a composition to end.
 #[derive(Debug)]
 pub(crate) enum AppEdit {
     SetText(String),
+    /// Bytes of the text as it is when the edit is made.
     SelectRange(Range<usize>),
+    Paste(Pasted),
+}
+
+/// A held app edit.
+#[derive(Debug)]
+enum Held {
+    SetText(String),
+    /// `version`: the model version `range` is for, rebased at the flush (review I1); `None`
+    /// when a held `set_text` comes first, whose text the range is for.
+    Select {
+        range: Range<usize>,
+        version: Option<u64>,
+    },
     Paste(Pasted),
 }
 
@@ -90,14 +112,45 @@ impl EditorView {
     }
 }
 
-/// Holds `edit` while a composition is open (`true`: the caller must not apply it now); it is
-/// applied when the composition ends. `false` when nothing is composing.
+/// App edits must wait now: a composition is open, or held edits have not been applied yet
+/// (so an older held edit never lands after a newer direct one, review M3).
+pub(crate) fn must_hold(v: &EditorView) -> bool {
+    !v.input.flushing && (v.ime.is_composing() || !v.input.deferred.is_empty())
+}
+
+/// Holds `edit` when [`must_hold`] (`true`: the caller must not apply it now); it is applied,
+/// in order, once the composition has ended. `false` when it can be applied now.
 pub(crate) fn defer_while_composing(v: &mut EditorView, edit: AppEdit) -> bool {
-    if !v.ime.is_composing() {
+    if !must_hold(v) {
         return false;
     }
-    v.input.deferred.push(edit);
+    hold(v, edit);
     true
+}
+
+/// Queues `edit`, coalescing: a `set_text` drops the held texts and selections before it (its
+/// text replaces theirs), a selection replaces a trailing selection; pastes are bounded by the
+/// reads in flight.
+pub(crate) fn hold(v: &mut EditorView, edit: AppEdit) {
+    let queue = &mut v.input.deferred;
+    let held = match edit {
+        AppEdit::SetText(text) => {
+            queue.retain(|h| matches!(h, Held::Paste(_)));
+            Held::SetText(text)
+        }
+        AppEdit::SelectRange(range) => {
+            if matches!(queue.last(), Some(Held::Select { .. })) {
+                queue.pop();
+            }
+            let after_text = queue.iter().any(|h| matches!(h, Held::SetText(_)));
+            Held::Select {
+                range,
+                version: (!after_text).then(|| v.model.version()),
+            }
+        }
+        AppEdit::Paste(p) => Held::Paste(p),
+    };
+    v.input.deferred.push(held);
 }
 
 /// The editor took the focus: it is the focused input, composing or not.
@@ -193,6 +246,9 @@ pub(crate) fn on_frame(v: &mut EditorView, window: &mut Window, cx: &mut Context
     if !v.input.deferred.is_empty() && !v.ime.is_composing() {
         schedule_flush(v, cx);
     }
+    if v.ime.is_composing() && (v.config.read_only || (!focused && window.is_window_active())) {
+        schedule_end_dropped(v, cx);
+    }
 }
 
 /// Runs `f` as the IME's own call.
@@ -229,15 +285,54 @@ fn schedule_flush(v: &mut EditorView, cx: &mut Context<EditorView>) {
     });
 }
 
-/// Applies the held app edits in order, unless a new composition opened meanwhile.
+/// Applies the held app edits in order, unless a new composition opened meanwhile. A held
+/// selection is rebased over everything since it was made (the composition's commit above
+/// all), and dropped when its text is gone or the log no longer reaches back (review I1).
 fn flush(v: &mut EditorView, cx: &mut Context<EditorView>) {
     while !v.ime.is_composing() && !v.input.deferred.is_empty() {
-        match v.input.deferred.remove(0) {
-            AppEdit::SetText(text) => v.set_text(&text, cx),
-            AppEdit::SelectRange(r) => v.select_range(r, cx),
-            AppEdit::Paste(p) => clipboard::apply(v, p, cx),
+        let held = v.input.deferred.remove(0);
+        v.input.flushing = true;
+        match held {
+            Held::SetText(text) => v.set_text(&text, cx),
+            Held::Select { range, version } => {
+                let range = match version {
+                    None => Some(range),
+                    Some(at) => match v.model.changelog().rebase(at, range, RangeKind::Content) {
+                        Rebased::Mapped(r) => Some(r),
+                        Rebased::Deleted | Rebased::TooOld => None,
+                    },
+                };
+                if let Some(r) = range {
+                    v.select_range(r, cx);
+                }
+            }
+            Held::Paste(p) => clipboard::apply(v, p, cx),
         }
+        v.input.flushing = false;
     }
+}
+
+/// Ends, as the platform's own, a composition the platform has already dropped (review M4):
+/// the editor turned read-only (it accepts no text, so the platform lost its input), or the
+/// focus moved elsewhere while the window was inactive (GPUI sent `FocusLost`, but no blur
+/// listener ran). Nothing is owed: the platform's copy is gone.
+fn schedule_end_dropped(v: &mut EditorView, cx: &mut Context<EditorView>) {
+    if v.input.end_scheduled {
+        return;
+    }
+    v.input.end_scheduled = true;
+    let weak = cx.entity().downgrade();
+    cx.defer(move |cx| {
+        let _ = weak.update(cx, |v, cx| {
+            v.input.end_scheduled = false;
+            if v.ime.is_composing() {
+                ime_call(v, |v| {
+                    v.ime.unmark(&mut v.model);
+                    v.composition_changed(false, cx);
+                });
+            }
+        });
+    });
 }
 
 /// The current text's byte range of the platform's UTF-16 range.
@@ -328,7 +423,11 @@ impl EntityInputHandler for EditorView {
     /// The platform's paste (where it pastes itself rather than through the Paste command):
     /// the same normalisation and guards.
     fn paste(&mut self, item: ClipboardItem, _window: &mut Window, cx: &mut Context<Self>) {
-        clipboard::paste_item(self, &item, cx);
+        // A paste asked for while composing is dropped, as the command's is (review M9).
+        if self.ime.is_composing() {
+            return;
+        }
+        clipboard::paste_item(self, item, cx);
     }
 
     /// A commit (plain typing, or the end of a composition) through `ImeCore::commit`.
@@ -405,10 +504,13 @@ impl EntityInputHandler for EditorView {
             layout.bounds_for_range(start..end)
         });
         let painted = exact.is_some();
+        let stale = layout.version() != self.model.version();
         let b = exact.unwrap_or_else(|| estimate(layout, self.model.buffer(), bytes.start));
-        if !painted {
-            // A composition stays in view; either way the next frame answers exactly.
-            if self.ime.is_composing() {
+        let composing = self.ime.is_composing();
+        // A composition is revealed; a stale frame is redrawn. Otherwise the next frame could
+        // not answer better, so none is asked for (review M5).
+        if !painted && (stale || composing) {
+            if composing {
                 self.scroll.reveal = true;
             }
             cx.notify();
