@@ -365,6 +365,9 @@ pub struct FramePrepaint {
     pub current_statement: Option<std::ops::Range<u32>>,
     /// `marks::prepaint`'s hit targets.
     pub mark_hits: MarkHitboxes,
+    // ## m3a-t28-gutter (named exception): the frame's rows, text ends and the band's bars and
+    // hints for the gutter and the marks (`gutter::prepaint`).
+    pub overlay: gutter::Overlay,
     /// The whole element (wheel scrolling).
     pub(crate) hitbox: Hitbox,
     /// The text area (the I-beam, clicks and drags).
@@ -390,6 +393,8 @@ impl FramePrepaint {
             scroll: self.scroll,
             snapshot: &self.snapshot,
             current_statement: self.current_statement.clone(),
+            // ## m3a-t28-gutter (named exception)
+            overlay: &self.overlay,
         }
     }
 }
@@ -931,6 +936,15 @@ pub(crate) fn prepaint_frame(
 
     let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
     let text_hitbox = window.insert_hitbox(text_area, HitboxBehavior::Normal);
+    // ## m3a-t28-gutter (named exception): the scrollbar track's own hit target over the text
+    // area's right edge, and the frame's overlay (the band's rectangles, bars and hints).
+    scrollbar::prepaint(track, window);
+    let overlay = v
+        .layout
+        .as_ref()
+        .map_or_else(gutter::Overlay::default, |layout| {
+            gutter::prepaint(&mut v.band, &v.marks, layout, &snapshot)
+        });
     let current_statement = preview::current_statement(&v.band, &snapshot);
     let visible_lines = (view_h / f64::from(lh)).ceil().max(1.0) as u32;
     let mut frame = FramePrepaint {
@@ -944,6 +958,8 @@ pub(crate) fn prepaint_frame(
         digits: digits as u8,
         current_statement,
         mark_hits: MarkHitboxes::default(),
+        // ## m3a-t28-gutter (named exception)
+        overlay,
         hitbox,
         text_hitbox,
         focused,

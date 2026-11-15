@@ -239,3 +239,50 @@ also see GPUI's internals, but it needs `unsafe`, which the workspace denies out
 C1 controls → `⟨U+0085⟩`, the bidi controls → named chips (`⟨RLO⟩`, the Trojan Source defence),
 each painted as a chip (Fragment Mono 11 `text-2` on a `seam-soft` well, radius 3); the cell's text
 is unchanged, so a copy keeps the real characters.
+
+## m3a-t28 — the preview rule
+
+**The rule.** The Run preview band draws only what the language service said Run would execute,
+for the exact text on screen (R-M3-8, UI-EDIT-21). `preview::plan` returns a band only when the
+service's last answer was asked at the frame's text version; an answer of another version, a
+`None` (no analysis of this version), a `Nothing`, a range past the text's end or off a
+character boundary all draw no band. The band asks `exec_preview(Execute1)` 50 ms after the last
+change or selection move (the selections when there are any, else the carets, as Run asks),
+and at once when an analysis lands or the document context changes (unless the timer is
+pending). Between an edit and the next answer there is no band: a band rebased through the edit
+would be a range the service never vouched for. The two exceptions: the chooser's hover override
+(`set_preview_override`, D-011) wins over the service, and while an IME composition is open the
+band is frozen at its last answer, mapped through the composition's edits as a container range
+(it asks again after the commit; a mapping that fails draws nothing).
+
+**Rejected:** rebasing the last answer through every edit until the next one arrives (fewer
+frames without a band, but a range nobody resolved: the §2.3 anti-goal); drawing from the
+service's statement spans instead of its preview (the editor's split is not what runs, D-06);
+drawing a choices count for `AskPreselected` from a guess (`ExecPreview` has no count; the hint
+is left out until the seam carries it).
+
+**Geometry and hues** (design/m3a-query/NOTES.md surfaces 3 and 5, binding over the plan): a
+line a unit owns (only blanks and its terminator outside it) gets the full-row band, `blue_tint`
+at .55 (dark) or .8 (light) of its alpha, from the gutter's edge to the right edge; a shared line
+gets the exact tint over the unit's characters, without the terminator. Uncertain and
+no-connection previews take the neutral `hover` fill. Gutter bars are 1 px at x = 4 (`blue`;
+dashed `text_2` uncertain; `text_3` no connection; x = 2 beside an executed bar; a 2 px gap
+between the units of a separate-statements selection). Marks: Failed is the ink alert glyph,
+Cancelling a hollow amber square, Running the amber run marker after 50 ms (no spinner, no
+ambient motion); no state is red.
+
+**Marks.** Container ranges rebased from the submitting version through the `ChangeLog`
+(`TooOld` and `Deleted` drop the mark); a mark is stale when an edit landed inside it or at its
+edges, also between submission and `add_exec_marks`. A mark one edit deleted is a tombstone for
+64 text transactions, keyed by where its text was and the text's XXH3 hash; an edit that puts
+the same text back at that place (undo) restores it with its state. The 1 Hz repaint is
+scheduled from paint, so a window that is not painted schedules nothing, and it stops when no
+mark is running or cancelling.
+
+**Held by:** `tests/preview.rs` (`every_preview_state_renders`,
+`stale_service_answer_draws_no_band`, `the_chooser_override_replaces_the_band`),
+`preview::tests::chooser_override_wins_and_composition_freezes`, `tests/marks.rs` (cases 1–5,
+staleness, rebasing, tombstones, the timer, the end-of-line collision) and `tests/gutter_scene.rs`
+(bars, band alphas, the exact tint, glyph geometry, no red, the scrollbar track); seven
+mutations (the version check, staleness, tombstones, the timer stop, the collision rule, the
+track's hit target, the 50 ms grace) each fail their test.
