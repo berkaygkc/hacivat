@@ -221,13 +221,13 @@ pub fn paint(g: &GutterCtx<'_>, window: &mut Window, cx: &mut App) {
 }
 
 /// One of the band's bars: over its lines, inset 1 px at each end of a unit of several (the
-/// 2 px gap between neighbours).
+/// 2 px gap between neighbours), at x = 2 or 4 alike (review round 1, Minor 4).
 fn paint_bar(g: &GutterCtx<'_>, bar: &GutterBar, inks: &Inks, window: &mut Window) {
     let lh = g.line_height;
     let top = g.top_of(bar.lines.start);
     let rows = bar.lines.end.saturating_sub(bar.lines.start) as f32;
-    let (top, height) = if bar.gap && !bar.shifted {
-        (top + px(1.0), lh * rows - px(3.0))
+    let (top, height) = if bar.gap {
+        (top + px(1.0), lh * rows - px(2.0))
     } else {
         (top, lh * rows)
     };

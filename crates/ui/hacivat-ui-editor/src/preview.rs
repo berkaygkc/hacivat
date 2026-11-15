@@ -5,10 +5,13 @@
 //!   selection move; when it fires, the band asks `LanguageService::exec_preview` at the
 //!   editor's version (Run, `Execute1`, at the selections or else the carets, as Run asks). A
 //!   fresh analysis or a new document context asks at once (unless the timer is pending).
-//! - **Truth.** The answer is kept with the version it was asked at; a frame whose text is of
-//!   another version draws no band ([`plan`]). `None` from the service (no analysis of this
-//!   version) draws no band. A range outside the text or off a character boundary draws no band
-//!   (fail closed).
+//! - **Truth.** The answer is kept with the version and the place (`exec_at`: the carets and
+//!   selections) it was asked at; a frame whose text is of another version, or whose carets or
+//!   selections moved, draws no band, no gutter bar, no scrollbar marker and no status sentence
+//!   until the new answer ([`plan`], review round 1). `None` from the service (no analysis of
+//!   this version) draws no band. A range outside the text or off a character boundary draws no
+//!   band (fail closed). A new document context drops the answer; a text change clears the
+//!   chooser's override.
 //! - **States** (design/m3a-query/NOTES.md surface 3, binding): `Units` and `AskPreselected`
 //!   draw the `blue_tint` band (alpha × .55 dark, × .8 light) and a 1 px `blue` gutter bar;
 //!   `Uncertain` the neutral `hover` fill, a dashed 1 px `text_2` bar and "boundary uncertain"
@@ -22,7 +25,9 @@
 //!   `panel` separator line between their bands and "1 of 3" at the end of each unit's first line.
 //! - **The chooser's override** (hover in the D-011 chooser) wins over the service's answer.
 //! - **Composing.** While an IME composition is open the band is frozen at its last resolved
-//!   range, mapped through the edits as a container range; it asks again after the commit.
+//!   range, mapped through the edits as a container range; it asks again after the commit. Only
+//!   an answer that was current when the composition began is kept (none while a query was
+//!   pending), and a mapped answer is drawn only while frozen: it goes when the composition ends.
 
 use std::ops::Range;
 use std::time::Duration;
@@ -54,6 +59,13 @@ pub struct BandState {
     // ## m3a-t28-gutter
     /// The text version `last` was asked at (or, while frozen, mapped to).
     pub last_version: u64,
+    // ## m3a-t28-gutter (fix round 1)
+    /// Where `last` was asked (`exec_at` of the snapshot it was asked on): an answer is drawn
+    /// only while the carets and selections are still there (review round 1, Critical 1).
+    pub asked_at: Option<ExecAt>,
+    /// `last` was mapped through a composition's edits, not resolved: drawn only while frozen
+    /// and dropped when the composition ends (review round 1, Critical 2).
+    pub mapped: bool,
     /// The 50 ms timer (dropping it cancels it).
     pending: Option<Task<()>>,
     /// This frame's band rectangles (built in prepaint from the frame's layout, painted by
@@ -68,6 +80,8 @@ impl std::fmt::Debug for BandState {
         f.debug_struct("BandState")
             .field("last", &self.last)
             .field("last_version", &self.last_version)
+            .field("asked_at", &self.asked_at)
+            .field("mapped", &self.mapped)
             .field("override_ranges", &self.override_ranges)
             .field("frozen", &self.frozen)
             .field("pending", &self.pending.is_some())
@@ -119,7 +133,22 @@ pub struct BandPlan {
 /// Called by the view after every commit, analysis and context change: restarts the 50 ms
 /// timer (a change or a move), or asks at once (an analysis or a context change, unless the
 /// timer is pending). While composing it only maps the frozen band through the edit.
+///
+/// A text change clears the chooser's override (its ranges are of the text it was hovered on);
+/// a context change drops the answer asked under the old context (review round 1, I3 and C1).
 pub fn on_update(v: &mut EditorView, why: Refresh, cx: &mut Context<EditorView>) {
+    match why {
+        Refresh::Changed => v.band.override_ranges = None,
+        Refresh::ContextChanged => {
+            v.band.last = None;
+            v.band.mapped = false;
+        }
+        Refresh::SelectionMoved | Refresh::AnalysisLanded => {}
+    }
+    // A composition that ended on a path that did not say so (an unmark) ends the freeze too.
+    if v.band.frozen && !v.ime.is_composing() {
+        on_composition(&mut v.band, false);
+    }
     if v.band.frozen || v.ime.is_composing() {
         follow_frozen(v);
         return;
@@ -153,10 +182,14 @@ fn ask(v: &mut EditorView) {
         .exec_preview(v.doc, snap.version, &at, ExecAction::Execute1);
     v.band.last = answer;
     v.band.last_version = snap.version;
+    v.band.asked_at = Some(at);
+    v.band.mapped = false;
 }
 
-/// Where Run is asked on `snap`: its non-empty selections, else its carets (as `editor.run`).
-fn exec_at(snap: &Snapshot) -> ExecAt {
+/// Where Run is asked on `snap`: its non-empty selections, else its carets. `editor.run`
+/// (`commands/run.rs`) builds its request with this same function, so the band and Run never
+/// ask about different places (review round 1, Minor 9).
+pub(crate) fn exec_at(snap: &Snapshot) -> ExecAt {
     let ranges = snap.selection.ranges();
     let selected: SmallVec<[Range<usize>; 1]> = ranges
         .iter()
@@ -170,10 +203,27 @@ fn exec_at(snap: &Snapshot) -> ExecAt {
     }
 }
 
+/// Enters the freeze (once per composition, whichever comes first: the view's
+/// `composition_changed(true)` or the first marked text). Only an answer that was true when the
+/// composition began is kept: outside a freeze an answer is current exactly when no query is
+/// pending (every change or move since the last answer starts the timer), and a mapped answer
+/// never outlives its freeze. Otherwise there is no band while composing (review round 1,
+/// Critical 2).
+fn enter_freeze(s: &mut BandState) {
+    if s.frozen {
+        return;
+    }
+    s.frozen = true;
+    if s.pending.take().is_some() || s.asked_at.is_none() || s.mapped {
+        s.last = None;
+        s.mapped = false;
+    }
+}
+
 /// The frozen band follows the composition's edits as container ranges; a range the edit
 /// deleted (or a change log too short to map) leaves no band.
 fn follow_frozen(v: &mut EditorView) {
-    v.band.pending = None;
+    enter_freeze(&mut v.band);
     let version = v.model.snapshot().version;
     if v.band.last_version == version {
         return;
@@ -193,17 +243,24 @@ fn follow_frozen(v: &mut EditorView) {
         }
         if let Some(p) = v.band.last.as_mut() {
             p.ranges = mapped;
+            v.band.mapped = true;
         }
     }
     v.band.last_version = version;
 }
 
 /// Called by the view when an IME composition opens or closes: the band freezes while composing
-/// (the pending query is dropped) and asks again once the view refreshes after the commit.
+/// (a pending query, and the answer it would have replaced, are dropped), and when it closes
+/// a mapped band goes at once; the view's refresh after the commit asks again.
 pub fn on_composition(s: &mut BandState, composing: bool) {
-    s.frozen = composing;
     if composing {
-        s.pending = None;
+        enter_freeze(s);
+        return;
+    }
+    s.frozen = false;
+    if s.mapped {
+        s.last = None;
+        s.mapped = false;
     }
 }
 
@@ -223,8 +280,22 @@ fn fits(buf: &TextBuffer, units: &[Range<usize>]) -> bool {
     })
 }
 
+/// The service's last answer when it is about `snap`: asked at `snap`'s version and at its
+/// carets and selections (`exec_at`), or, while a composition is open, mapped through its edits
+/// to `snap`'s version. Everything the band draws or says goes through here.
+fn answer<'a>(s: &'a BandState, snap: &Snapshot) -> Option<&'a ExecPreview> {
+    let p = s.last.as_ref()?;
+    if s.last_version != snap.version {
+        return None;
+    }
+    if s.mapped {
+        return s.frozen.then_some(p);
+    }
+    (s.asked_at.as_ref() == Some(&exec_at(snap))).then_some(p)
+}
+
 /// What the band shows over `snap` (`None`: no band). The chooser's override wins; otherwise
-/// the service's last answer, only when it was asked at `snap`'s version and is not `Nothing`.
+/// the service's last answer, only when it is about `snap` ([`answer`]) and is not `Nothing`.
 pub fn plan(s: &BandState, snap: &Snapshot) -> Option<BandPlan> {
     if let Some(units) = &s.override_ranges {
         let units: SmallVec<[Range<usize>; 2]> =
@@ -235,10 +306,7 @@ pub fn plan(s: &BandState, snap: &Snapshot) -> Option<BandPlan> {
             from_override: true,
         });
     }
-    let p = s.last.as_ref()?;
-    if s.last_version != snap.version {
-        return None;
-    }
+    let p = answer(s, snap)?;
     let style = match p.state {
         PreviewState::Units | PreviewState::AskPreselected => BandStyle::Run,
         PreviewState::Uncertain => BandStyle::Uncertain,
@@ -266,10 +334,10 @@ pub fn current(v: &EditorView) -> Option<BandPlan> {
 /// `EditorEvent::StatusChanged` and every repaint).
 pub fn status_message(v: &EditorView, cx: &App) -> Option<SharedString> {
     let s = &v.band;
-    if s.override_ranges.is_some() || s.last_version != v.model.snapshot().version {
+    if s.override_ranges.is_some() {
         return None;
     }
-    let id = match s.last.as_ref()?.state {
+    let id = match answer(s, &v.model.snapshot())?.state {
         PreviewState::Nothing => "hv-editor-nothing-to-run",
         PreviewState::Uncertain => "hv-editor-uncertain",
         _ => return None,
@@ -667,13 +735,50 @@ mod tests {
         assert!(!frozen, "no query while composing");
         // The band grew with the marked text (a container range): 0..11, never re-asked.
         assert_eq!(band(&e, vcx).map(|p| p.units.to_vec()), Some(vec![0..11]));
-        // The composition ends: the band asks again (the service answers 0..8 here).
+        // The composition ends: the mapped band goes at once (nobody resolved it), and the band
+        // asks again (the service answers 0..8 here). Review round 1, Critical 2.
         e.update(vcx, |v, cx| {
             v.ime.unmark(&mut v.model);
             v.composition_changed(false, cx);
         });
+        assert_eq!(band(&e, vcx), None, "the mapped band after the composition");
         assert!(vcx.read(|cx| e.read(cx).band.is_pending()));
         settle(vcx);
         assert_eq!(band(&e, vcx).map(|p| p.units.to_vec()), Some(vec![0..8]));
+    }
+
+    /// Typing, then composing within 50 ms: the answer was not of the text the composition began
+    /// on, so it is never mapped into a band, whichever comes first, the freeze or the first
+    /// marked text. Review round 1, Critical 2.
+    #[gpui::test]
+    fn a_composition_begun_while_a_query_is_pending_shows_no_band(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        for freeze_first in [true, false] {
+            let (e, vcx) = open(cx, "SELECT 1; SELECT 2;");
+            e.update(vcx, |v, cx| v.select_range(3..3, cx));
+            settle(vcx);
+            assert!(band(&e, vcx).is_some());
+            e.update_in(vcx, |v, window, cx| {
+                v.replace_text_in_range(None, "q", window, cx);
+            });
+            assert!(vcx.read(|cx| e.read(cx).band.is_pending()));
+            e.update(vcx, |v, cx| {
+                if freeze_first {
+                    v.composition_changed(true, cx);
+                }
+                let now = cx.background_executor().now();
+                let c = v
+                    .ime
+                    .mark(&mut v.model, None, "xyz", None, now)
+                    .expect("the mark applies");
+                v.apply_committed(c, hacivat_text::UserEvent::InputTypeCompose, cx);
+                if !freeze_first {
+                    v.composition_changed(true, cx);
+                }
+            });
+            assert_eq!(band(&e, vcx), None, "freeze first: {freeze_first}");
+            settle(vcx);
+            assert_eq!(band(&e, vcx), None, "freeze first: {freeze_first}, settled");
+        }
     }
 }

@@ -42,11 +42,12 @@ use hacivat_ui::l10n::UiArg;
 use hacivat_ui::popover::Tip;
 use hacivat_ui::text::{Label, TextFn, TextSource};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, AvailableSpace, Bounds, ContentMask, Hitbox, HitboxBehavior, Hsla,
-    InteractiveElement as _, IntoElement as _, ParentElement as _, Pixels, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Task, Window, div, fill, point, px, size,
+    AnyElement, AnyView, App, AppContext as _, AvailableSpace, Bounds, ContentMask, Context,
+    Hitbox, HitboxBehavior, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div, fill,
+    point, px, size,
 };
-use hacivat_ui_core::theme::{Theme, ThemeMode, TypeStyle};
+use hacivat_ui_core::theme::{Theme, ThemeMode, TypeStyle, popover_surface};
 use twox_hash::XxHash3_64;
 
 use crate::element::FrameLayout;
@@ -123,7 +124,8 @@ struct Tombstone {
     mark: Mark,
     /// Where the deleted text was, in the current text (mapped through later edits).
     at: usize,
-    /// The mark's start from `at`, its length and its text's hash.
+    /// The mark's start from the deleted text's start (old coordinates), its length and its
+    /// text's hash.
     rel: usize,
     len: usize,
     hash: u64,
@@ -206,11 +208,25 @@ impl MarkStore {
 
     /// Each mark with a state: the state, its range, whether it is stale (the scrollbar's
     /// markers).
-    pub(crate) fn markers(&self) -> impl Iterator<Item = (&ExecMarkState, Range<usize>, bool)> {
+    /// Only marks with a glyph at `now`: a running mark shows nothing for its first 50 ms, here
+    /// as in the gutter (review round 1, Minor 5). The `u8` is the glyph's severity (the worse
+    /// one wins a shared marker).
+    pub(crate) fn markers(
+        &self,
+        now: Instant,
+    ) -> impl Iterator<Item = (&ExecMarkState, Range<usize>, bool, u8)> {
         self.marks
             .iter()
             .filter(|m| !m.range.is_empty())
-            .filter_map(|m| Some((m.state.as_ref()?, m.range.clone(), m.stale)))
+            .filter_map(move |m| {
+                let glyph = glyph_of(m, now)?;
+                Some((
+                    m.state.as_ref()?,
+                    m.range.clone(),
+                    m.stale,
+                    glyph.severity(),
+                ))
+            })
     }
 
     fn mark(&self, key: MarkKey) -> Option<&Mark> {
@@ -312,6 +328,9 @@ pub fn add(
             || !buf.is_char_boundary(now.start)
             || !buf.is_char_boundary(now.end)
         {
+            // ## m3a-t28-gutter (fix round 1, Minor 8): the re-run replaces the old outcome even
+            // when its own range cannot be placed.
+            s.marks.retain(|m| m.key != key);
             continue;
         }
         // The same rule as `on_commit`: an edit inside it, or text added at its edges.
@@ -429,8 +448,21 @@ pub fn on_commit(s: &mut MarkStore, c: &Committed, log: &ChangeLog, snap: &Snaps
         let Some(at) = desc.map_pos(old.start, Bias::Before, MapMode::Simple) else {
             continue;
         };
+        // ## m3a-t28-gutter (fix round 1, Minor 6): the mark's offset in the deleted text, in old
+        // coordinates. Every old position from the deletion's start to the mark's start maps
+        // (`Before`) to `at`, every one before it maps lower, so the deletion's start is the
+        // least position that maps to `at` (a binary search, O(log n · sections)).
+        let (mut lo, mut hi) = (0, old.start);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if desc.map_pos(mid, Bias::Before, MapMode::Simple) == Some(at) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
         s.tombstones.push(Tombstone {
-            rel: old.start.saturating_sub(at),
+            rel: old.start - lo,
             len: old.len(),
             hash: hash_of(prev, old),
             at,
@@ -692,6 +724,38 @@ fn hint_message(cx: &App, hint: PreviewHint) -> SharedString {
     }
 }
 
+/// The tooltip of a row with several marks: "Two statements on this line", then each mark's
+/// own tooltip, one per line, on the popover surface (as `Tip`).
+struct MarksTip {
+    lines: Vec<SharedString>,
+}
+
+impl MarksTip {
+    fn view(lines: Vec<SharedString>, cx: &mut App) -> AnyView {
+        cx.new(|_| MarksTip { lines }).into()
+    }
+}
+
+impl Render for MarksTip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *Theme::get(cx);
+        let t = theme.tokens;
+        popover_surface(&theme)
+            .px(px(8.0))
+            .py(px(4.0))
+            .flex()
+            .flex_col()
+            .children(self.lines.iter().map(|line| {
+                Label::new(
+                    line.clone(),
+                    TextSource::Fluent,
+                    t.type_ramp.body_sm,
+                    t.colors.text.to_hsla(),
+                )
+            }))
+    }
+}
+
 /// Lays out the marks of the painted rows (prepaint): each row's glyph (with its tooltip and
 /// hit target) and end-of-line status, and the band's hints on rows without a status.
 pub fn prepaint(
@@ -747,12 +811,22 @@ pub fn prepaint(
             point(g.bounds.left() + px(GLYPH_X), g.top_of(*line)),
             size(px(GLYPH_W), g.line_height),
         );
-        let stale = worst.stale && !glyph.live();
-        let tip: Option<SharedString> = if stale {
-            Some(crate::commands::message(cx, "hv-editor-tip-stale", &[]))
-        } else {
-            worst.label.as_ref().map(|f| f(cx))
+        // ## m3a-t28-gutter (fix round 1, Minor 7): two marks on a row list both statements
+        // under "Two statements on this line" (NOTES surface 5).
+        let tip_of = |mk: &Mark, gl: Glyph| -> Option<SharedString> {
+            if mk.stale && !gl.live() {
+                Some(crate::commands::message(cx, "hv-editor-tip-stale", &[]))
+            } else {
+                mk.label.as_ref().map(|f| f(cx))
+            }
         };
+        let mut tip_lines: Vec<SharedString> = marks
+            .iter()
+            .filter_map(|&(mk, gl)| tip_of(mk, gl))
+            .collect();
+        if marks.len() > 1 {
+            tip_lines.insert(0, crate::commands::message(cx, "hv-editor-tip-two", &[]));
+        }
         let mut el = div()
             .id(("hv-exec-mark", worst.key.0))
             .relative()
@@ -772,8 +846,13 @@ pub fn prepaint(
                     .bg(inks.text_2),
             );
         }
-        if let Some(tip) = tip {
-            el = el.tooltip(move |_, cx| Tip::view(tip.clone(), cx));
+        match tip_lines.len() {
+            0 => {}
+            1 => {
+                let tip = tip_lines.remove(0);
+                el = el.tooltip(move |_, cx| Tip::view(tip.clone(), cx));
+            }
+            _ => el = el.tooltip(move |_, cx| MarksTip::view(tip_lines.clone(), cx)),
         }
         let mut el = el.into_any_element();
         el.prepaint_as_root(
@@ -923,4 +1002,74 @@ fn schedule(m: &MarkStore, window: &mut Window, cx: &mut App) {
         cx.update(|cx| cx.notify(view));
     });
     *timer = Some(Ticker { due, _task: task });
+}
+
+// ## m3a-t28-gutter (fix round 1): the tombstone's offset in the deleted text.
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use hacivat_text::{ChangeSet, SelectionRange, SelectionSet};
+
+    use super::*;
+
+    fn snap(buffer: &TextBuffer, version: u64) -> Snapshot {
+        Snapshot {
+            buffer: buffer.clone(),
+            selection: SelectionSet::single(SelectionRange {
+                anchor: 0,
+                head: 0,
+                goal_x: None,
+                assoc: Bias::After,
+            }),
+            version,
+        }
+    }
+
+    fn commit(s: &mut MarkStore, cs: &ChangeSet, after: &TextBuffer, version: u64) {
+        let desc = cs.desc();
+        let c = Committed {
+            version,
+            dirty: desc.changed_range(),
+            desc,
+            buffer_changed: true,
+        };
+        on_commit(s, &c, &ChangeLog::default(), &snap(after, version));
+    }
+
+    /// One transaction inserts a comment above and deletes the mark with the line break before
+    /// it (a multi-range edit: the deletion starts one byte before the mark, and its new start is
+    /// shifted by the insertion). Undo puts both back: the mark is restored at its old place.
+    /// Review round 1, Minor 6.
+    #[test]
+    fn a_multi_range_edit_then_undo_restores_the_mark() {
+        let b0 = TextBuffer::from_str("SELECT 1;\nSELECT 2;\n");
+        let mut s = MarkStore::default();
+        add(
+            &mut s,
+            0,
+            vec![(MarkKey(1), 10..19)],
+            &ChangeLog::default(),
+            &snap(&b0, 0),
+        );
+        set_state(&mut s, MarkKey(1), ExecMarkState::Cancelled, None, None);
+        let edit = ChangeSet::from_edits(
+            b0.len_bytes(),
+            [(0..0, Arc::from("-- a\n")), (9..19, Arc::from(""))],
+        )
+        .unwrap();
+        let mut b1 = b0.clone();
+        edit.apply(&mut b1);
+        assert_eq!(b1.slice(0..b1.len_bytes()), "-- a\nSELECT 1;\n");
+        commit(&mut s, &edit, &b1, 1);
+        assert_eq!((s.len(), s.tombstones()), (0, 1));
+        let undo = edit.invert(&b0);
+        let mut b2 = b1.clone();
+        undo.apply(&mut b2);
+        commit(&mut s, &undo, &b2, 2);
+        assert_eq!(s.range(MarkKey(1)), Some(10..19), "{s:?}");
+        assert_eq!(s.header(MarkKey(1)), Some(10));
+        assert_eq!(s.state(MarkKey(1)), Some(&ExecMarkState::Cancelled));
+        assert_eq!(s.tombstones(), 0);
+    }
 }

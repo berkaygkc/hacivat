@@ -1495,3 +1495,5 @@ hv-editor-preview-uncertain = sınır belirsiz
 hv-editor-mark-stale = çalıştırıldıktan sonra düzenlendi
 # Review: PO
 hv-editor-tip-stale = Çalıştırıldıktan sonra düzenlendi. İşaretler son çalıştırmayı gösterir.
+# Review: PO
+hv-editor-tip-two = Bu satırda iki ifade var

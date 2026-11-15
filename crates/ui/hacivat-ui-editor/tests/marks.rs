@@ -591,3 +591,71 @@ fn end_of_line_status_hides_on_collision(cx: &mut TestAppContext) {
         "the chip on the pad: {texts:?}"
     );
 }
+
+// ## m3a-t28-gutter (fix round 1)
+
+/// A re-run whose range cannot be placed (off a character boundary) removes the previous mark
+/// of its key: the old outcome never stays up for a statement that ran again. Review round 1,
+/// Minor 8.
+#[gpui::test]
+fn a_rerun_that_cannot_be_placed_removes_the_old_mark(cx: &mut TestAppContext) {
+    let (e, vcx) = open(cx, "SELECT 'ş';\n");
+    let v0 = version(&e, vcx);
+    e.update(vcx, |v, cx| {
+        v.add_exec_marks(v0, vec![(MarkKey(1), 0..11)], cx);
+        v.set_exec_state(MarkKey(1), ExecMarkState::Skipped, None, None, cx);
+    });
+    assert_eq!(vcx.read(|cx| e.read(cx).marks().len()), 1);
+    // 0..9 ends inside 'ş' (bytes 8..10).
+    e.update(vcx, |v, cx| {
+        v.add_exec_marks(v0, vec![(MarkKey(1), 0..9)], cx)
+    });
+    let m = vcx.read(|cx| {
+        (
+            e.read(cx).marks().len(),
+            e.read(cx).marks().range(MarkKey(1)),
+        )
+    });
+    assert_eq!(m, (0, None));
+}
+
+/// Two marks on one row: hovering the glyph shows "Two statements on this line" and both
+/// statements' outcomes (NOTES surface 5). Review round 1, Minor 7.
+#[gpui::test]
+fn the_tooltip_of_two_marks_lists_both(cx: &mut TestAppContext) {
+    let (e, vcx) = open(cx, "SELECT 1; SELECT x;\n");
+    let v0 = version(&e, vcx);
+    e.update(vcx, |v, cx| {
+        v.add_exec_marks(v0, vec![(MarkKey(1), 0..9), (MarkKey(2), 10..19)], cx);
+        v.set_exec_state(
+            MarkKey(1),
+            ExecMarkState::Succeeded {
+                took: Duration::from_millis(2),
+                rows: None,
+            },
+            text_fn("Statement 1 ran"),
+            None,
+            cx,
+        );
+        v.set_exec_state(
+            MarkKey(2),
+            ExecMarkState::Failed { sqlstate: None },
+            text_fn("Statement 2 failed"),
+            None,
+            cx,
+        );
+    });
+    draw(vcx);
+    // Hover the glyph slot (12 × 18 at x = 8, first row at y = 6), then wait out the delay.
+    vcx.simulate_mouse_move(
+        gpui::point(px(14.0), px(15.0)),
+        None,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor().advance_clock(Duration::from_secs(2));
+    vcx.run_until_parked();
+    let texts = drawn(vcx);
+    for t in ["hv-editor-tip-two", "Statement 1 ran", "Statement 2 failed"] {
+        assert!(texts.contains(&t.to_string()), "{t}: {texts:?}");
+    }
+}

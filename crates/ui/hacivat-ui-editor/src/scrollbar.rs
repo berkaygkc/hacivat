@@ -8,7 +8,9 @@
 //!   otherwise): the current statement as a 2 px `blue` strip on the track's left, each mark as
 //!   a 3 px strip on its right, in its gutter hue (`green` succeeded, `text_3` stale or
 //!   cancelled, `amber` running or cancelling, `seam_strong` queued, `text` failed, `text_2`
-//!   skipped); at least 2 px tall. No red.
+//!   skipped); at least 2 px tall. No red. A running mark shows nothing for its first 50 ms, as
+//!   in the gutter; marks that land on the same track pixels merge into one marker in the worse
+//!   hue (review round 1).
 
 use std::ops::Range;
 
@@ -86,16 +88,44 @@ pub fn paint(s: &ScrollbarCtx<'_>, m: &MarkStore, window: &mut Window, cx: &mut 
             inks.blue,
         ));
     }
+    // ## m3a-t28-gutter (fix round 1, Minor 5): marks that land on the same track pixels merge
+    // into one marker in the worse hue, so 10,000 marks never paint 10,000 quads.
     let buf = &s.snapshot.buffer;
-    for (state, range, stale) in m.markers() {
-        let (a, b) = crate::preview::unit_lines(buf, range);
-        let r = span(track, s.total_lines, a..b + 1);
+    let now = cx.background_executor().now();
+    let mut spans: Vec<(f32, f32, u8, Hsla)> = m
+        .markers(now)
+        .map(|(state, range, stale, severity)| {
+            let (a, b) = crate::preview::unit_lines(buf, range);
+            let r = span(track, s.total_lines, a..b + 1);
+            let y0 = f32::from(r.top());
+            (
+                y0,
+                y0 + f32::from(r.size.height),
+                severity,
+                hue(state, stale, &inks),
+            )
+        })
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged: Vec<(f32, f32, u8, Hsla)> = Vec::with_capacity(spans.len());
+    for sp in spans {
+        match merged.last_mut() {
+            Some(last) if sp.0 <= last.1 => {
+                last.1 = last.1.max(sp.1);
+                if sp.2 > last.2 {
+                    (last.2, last.3) = (sp.2, sp.3);
+                }
+            }
+            _ => merged.push(sp),
+        }
+    }
+    for (y0, y1, _, color) in merged {
         window.paint_quad(fill(
             Bounds::new(
-                point(track.left() + px(4.0), r.top()),
-                size(px(3.0), r.size.height),
+                point(track.left() + px(4.0), px(y0)),
+                size(px(3.0), px(y1 - y0)),
             ),
-            hue(state, stale, &inks),
+            color,
         ));
     }
 }

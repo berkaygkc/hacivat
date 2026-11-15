@@ -90,6 +90,14 @@ fn open<'a>(
     text: &str,
     service: Rc<Scripted>,
 ) -> (Entity<EditorView>, &'a mut VisualTestContext) {
+    open_with(cx, text, Rc::new(Shared(service)))
+}
+
+fn open_with<'a>(
+    cx: &'a mut TestAppContext,
+    text: &str,
+    service: Rc<dyn LanguageService>,
+) -> (Entity<EditorView>, &'a mut VisualTestContext) {
     cx.update(|cx| {
         Theme::install(cx, ThemeMode::Dark);
         cx.set_global(TextRegistry {
@@ -106,7 +114,7 @@ fn open<'a>(
                 DocId(28),
                 &text,
                 EditorConfig::default(),
-                Rc::new(Shared(service)),
+                service,
                 Rc::new(|_: &gpui::App| "Console 1".into()),
                 window,
                 cx,
@@ -298,4 +306,170 @@ fn the_chooser_override_replaces_the_band(cx: &mut TestAppContext) {
     assert_eq!(band(&e, vcx).unwrap().units.to_vec(), vec![10..18]);
     e.update(vcx, |v, cx| v.set_preview_override(None, cx));
     assert_eq!(band(&e, vcx), None);
+}
+
+// ## m3a-t28-gutter (fix round 1): a service that reads where it is asked.
+
+/// The statement around the first caret (split on `;`), as a fresh analysis answers: `Units`
+/// when connected, `NoConnection` otherwise, `Nothing` between statements; a selection is
+/// answered as itself.
+#[derive(Default)]
+struct Around {
+    text: RefCell<String>,
+    connected: Cell<bool>,
+}
+
+impl Around {
+    fn statement(&self, caret: usize) -> Option<Range<usize>> {
+        let text = self.text.borrow();
+        let caret = caret.min(text.len());
+        let start = text[..caret].rfind(';').map_or(0, |i| i + 1);
+        let end = text[caret..].find(';').map_or(text.len(), |i| caret + i);
+        let lead = text[start..end].len() - text[start..end].trim_start().len();
+        let r = start + lead..start + text[start..end].trim_end().len();
+        (r.start < r.end).then_some(r)
+    }
+}
+
+struct AroundService(Rc<Around>);
+
+impl LanguageService for AroundService {
+    fn open(&self, _: DocId, snap: &Snapshot, ctx: DocContext, _: &mut gpui::App) {
+        *self.0.text.borrow_mut() = snap.buffer.slice(0..snap.buffer.len_bytes()).into_owned();
+        self.0.connected.set(ctx.connected);
+    }
+    fn set_context(&self, _: DocId, ctx: DocContext, _: &mut gpui::App) {
+        self.0.connected.set(ctx.connected);
+    }
+    fn change(&self, _: DocId, snap: &Snapshot, _: &ChangeDesc, _: &mut gpui::App) {
+        *self.0.text.borrow_mut() = snap.buffer.slice(0..snap.buffer.len_bytes()).into_owned();
+    }
+    fn close(&self, _: DocId) {}
+    fn on_update(&self, _: DocId, _: InvalidateFn) {}
+    fn statements(&self, _: DocId, _: u64, _: Range<usize>) -> Arc<[StatementSpan]> {
+        Arc::from(Vec::new())
+    }
+    fn exec_preview(&self, _: DocId, _: u64, at: &ExecAt, _: ExecAction) -> Option<ExecPreview> {
+        let state = if self.0.connected.get() {
+            PreviewState::Units
+        } else {
+            PreviewState::NoConnection
+        };
+        let ranges: SmallVec<[Range<usize>; 2]> = match at {
+            ExecAt::Carets(c) => c
+                .first()
+                .and_then(|&c| self.0.statement(c))
+                .into_iter()
+                .collect(),
+            ExecAt::Selections(s) => s.iter().cloned().collect(),
+        };
+        Some(if ranges.is_empty() {
+            ExecPreview {
+                ranges,
+                state: PreviewState::Nothing,
+            }
+        } else {
+            ExecPreview { ranges, state }
+        })
+    }
+    fn token_oracle(&self, _: DocId) -> Rc<dyn TokenOracle> {
+        Rc::new(NoTokens)
+    }
+    fn decoration_sources(&self, _: DocId) -> SmallVec<[Rc<dyn DecorationSource>; 2]> {
+        SmallVec::new()
+    }
+}
+
+const THREE: &str = "SELECT 1;\nSELECT 2;\nSELECT 3;\n\n";
+
+fn status(e: &Entity<EditorView>, vcx: &VisualTestContext) -> Option<String> {
+    vcx.read(|cx| preview::status_message(e.read(cx), cx).map(|s| s.to_string()))
+}
+
+/// The band follows the caret (NOTES surface 3, Keyboard): right after a move, before the
+/// 50 ms answer, nothing from the old position is drawn (no band, no gutter bar, no scrollbar
+/// marker, no status sentence), also through a key repeat faster than the timer; then the new
+/// position's statement. (Review round 1, Critical 1.)
+#[gpui::test]
+fn a_caret_move_hides_the_old_band_until_the_new_answer(cx: &mut TestAppContext) {
+    let (e, vcx) = open_with(cx, THREE, Rc::new(AroundService(Rc::default())));
+    caret_at(&e, vcx, 3);
+    assert_eq!(band(&e, vcx).unwrap().units.to_vec(), vec![0..8]);
+    e.update(vcx, |v, cx| v.select_range(13..13, cx));
+    draw(vcx);
+    assert_eq!(
+        band(&e, vcx),
+        None,
+        "the first statement's band at the second's caret"
+    );
+    // Key repeat: three moves 30 ms apart, the timer never fires.
+    for at in [23, 14, 24] {
+        e.update(vcx, |v, cx| v.select_range(at..at, cx));
+        vcx.executor().advance_clock(PREVIEW_DELAY * 3 / 5);
+        vcx.run_until_parked();
+        assert_eq!(band(&e, vcx), None, "at {at}");
+    }
+    vcx.executor().advance_clock(PREVIEW_DELAY);
+    vcx.run_until_parked();
+    assert_eq!(band(&e, vcx).unwrap().units.to_vec(), vec![20..28]);
+    // The status sentence follows the caret too.
+    caret_at(&e, vcx, THREE.len());
+    assert_eq!(status(&e, vcx).as_deref(), Some("hv-editor-nothing-to-run"));
+    e.update(vcx, |v, cx| v.select_range(3..3, cx));
+    assert_eq!(
+        status(&e, vcx),
+        None,
+        "the blank line's sentence at a statement"
+    );
+    assert_eq!(band(&e, vcx), None);
+}
+
+/// A new document context drops the answer asked under the old one, even when the caret went
+/// back to where it was asked and a timer is pending: "not connected" never survives a connect.
+#[gpui::test]
+fn a_context_change_drops_the_old_answer(cx: &mut TestAppContext) {
+    let (e, vcx) = open_with(cx, THREE, Rc::new(AroundService(Rc::default())));
+    caret_at(&e, vcx, 3);
+    assert_eq!(band(&e, vcx).unwrap().style, BandStyle::Offline);
+    e.update(vcx, |v, cx| {
+        v.select_range(4..4, cx);
+        v.select_range(3..3, cx);
+        v.set_doc_context(
+            DocContext {
+                connected: true,
+                tier: hacivat_ui_editor::Tier::Full,
+            },
+            cx,
+        );
+    });
+    assert_eq!(
+        band(&e, vcx),
+        None,
+        "the not-connected answer after a connect"
+    );
+    vcx.executor().advance_clock(PREVIEW_DELAY);
+    vcx.run_until_parked();
+    assert_eq!(band(&e, vcx).unwrap().style, BandStyle::Run);
+}
+
+/// The chooser's override is of the text it was hovered on: a text change clears it.
+/// (Review round 1, Important 3.)
+#[gpui::test]
+fn a_text_change_clears_the_chooser_override(cx: &mut TestAppContext) {
+    let service = Rc::new(Scripted::default());
+    let (e, vcx) = open(cx, SQL, service.clone());
+    service.answer(PreviewState::Units, &[0..8]);
+    caret_at(&e, vcx, 3);
+    e.update(vcx, |v, cx| {
+        v.set_preview_override(Some(smallvec![10..18]), cx)
+    });
+    assert!(band(&e, vcx).unwrap().from_override);
+    e.update_in(vcx, |v, window, cx| {
+        gpui::EntityInputHandler::replace_text_in_range(v, None, "x", window, cx);
+    });
+    assert_eq!(band(&e, vcx), None, "the override at old offsets");
+    vcx.executor().advance_clock(PREVIEW_DELAY);
+    vcx.run_until_parked();
+    let p = band(&e, vcx).unwrap();
+    assert_eq!((p.units.to_vec(), p.from_override), (vec![0..8], false));
 }

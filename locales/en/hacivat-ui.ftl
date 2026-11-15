@@ -1567,3 +1567,5 @@ hv-editor-preview-uncertain = boundary uncertain
 hv-editor-mark-stale = edited since execution
 # Tooltip of an executed statement's gutter mark once the statement was edited.
 hv-editor-tip-stale = Edited since execution. The marks show the last run.
+# Tooltip title of a gutter mark when two executed statements share its line; each statement's own outcome follows.
+hv-editor-tip-two = Two statements on this line

@@ -448,3 +448,165 @@ fn the_track_takes_its_own_clicks_and_shows_markers(cx: &mut TestAppContext) {
     assert_ne!(moved, before);
     let _ = MouseButton::Left;
 }
+
+// ## m3a-t28-gutter (fix round 1)
+
+/// Separate units: one blue bar per unit, each inset 1 px at both ends (a 2 px gap between
+/// neighbours, also beside an executed bar at x = 2), a 1 px `panel` separator on the top edge of
+/// each later unit's band; no connection: a solid 1 px `text_3` bar; an uncertain exact tint: a
+/// dashed `text_3` lower edge. Review round 1, Minor 4.
+#[cfg(feature = "scene-check")]
+#[gpui::test]
+fn separate_units_and_neutral_states_draw_their_bars(cx: &mut TestAppContext) {
+    let text = "SELECT 1;\nSELECT 2;\nSELECT 3;\nSELECT 4; SELECT 5;\n";
+    let (e, svc, vcx) = open(cx, text, ThemeMode::Dark);
+    let c = &DARK.colors;
+    let v0 = vcx.read(|cx| e.read(cx).snapshot().version);
+    e.update(vcx, |v, cx| {
+        v.add_exec_marks(v0, vec![(MarkKey(1), 10..19)], cx);
+        v.set_exec_state(
+            MarkKey(1),
+            ExecMarkState::Succeeded {
+                took: Duration::from_millis(1),
+                rows: None,
+            },
+            None,
+            None,
+            cx,
+        );
+    });
+    preview(
+        &e,
+        &svc,
+        vcx,
+        PreviewState::Units,
+        &[0..8, 10..18, 20..28],
+        3,
+    );
+    let qs = scene(vcx);
+    let blue = filled(&qs, c.blue.to_hsla());
+    for (line, x) in [(0, 4.0), (1, 2.0), (2, 4.0)] {
+        assert!(
+            blue.iter().any(|q| close(q.x, x)
+                && close(q.w, 1.0)
+                && close(q.y, row_top(line) + 1.0)
+                && close(q.h, 16.0)),
+            "unit on line {line} at x = {x}: {blue:?}"
+        );
+    }
+    let separators: Vec<Q> = filled(&qs, c.panel.to_hsla())
+        .into_iter()
+        .filter(|q| close(q.h, 1.0) && close(q.x, 58.0))
+        .collect();
+    for line in [1, 2] {
+        assert!(
+            separators.iter().any(|q| close(q.y, row_top(line))),
+            "separator on line {line}: {separators:?}"
+        );
+    }
+    assert!(!separators.iter().any(|q| close(q.y, row_top(0))));
+
+    preview(&e, &svc, vcx, PreviewState::NoConnection, &[20..28], 22);
+    let qs = scene(vcx);
+    assert!(
+        filled(&qs, c.text_3.to_hsla())
+            .iter()
+            .any(|q| close(q.x, 4.0)
+                && close(q.w, 1.0)
+                && close(q.y, row_top(2))
+                && close(q.h, 18.0)),
+        "the solid text_3 bar"
+    );
+    assert!(
+        filled(&qs, c.hover.to_hsla())
+            .iter()
+            .any(|q| close(q.x, 58.0) && close(q.y, row_top(2))),
+        "the neutral band"
+    );
+
+    // "SELECT 5" shares line 3 with "SELECT 4;": the exact tint, its lower edge dashed.
+    preview(&e, &svc, vcx, PreviewState::Uncertain, &[40..48], 42);
+    let qs = scene(vcx);
+    assert!(
+        qs.iter().any(|q| q.dashed
+            && same(q.border, c.text_3.to_hsla())
+            && close(q.h, 1.0)
+            && close(q.y, row_top(3) + 17.0)),
+        "the dashed lower edge"
+    );
+}
+
+/// The scrollbar keeps the gutter's 50 ms grace (no amber flash for a fast statement), and
+/// marks that land on the same pixel rows merge into one marker in the worse hue. Review
+/// round 1, Minor 5.
+#[cfg(feature = "scene-check")]
+#[gpui::test]
+fn scrollbar_markers_keep_the_grace_and_merge(cx: &mut TestAppContext) {
+    let text: String = (0..400).map(|i| format!("SELECT {i};\n")).collect();
+    let (e, _svc, vcx) = open(cx, &text, ThemeMode::Dark);
+    let c = &DARK.colors;
+    let v0 = vcx.read(|cx| e.read(cx).snapshot().version);
+    let at = |n: usize| {
+        let s = text.find(&format!("SELECT {n};")).unwrap();
+        s..s + format!("SELECT {n};").len()
+    };
+    let now = vcx.executor().now();
+    e.update(vcx, |v, cx| {
+        v.add_exec_marks(
+            v0,
+            vec![
+                (MarkKey(1), at(200)),
+                (MarkKey(2), at(201)),
+                (MarkKey(3), at(300)),
+            ],
+            cx,
+        );
+        v.set_exec_state(
+            MarkKey(1),
+            ExecMarkState::Succeeded {
+                took: Duration::from_millis(1),
+                rows: None,
+            },
+            None,
+            None,
+            cx,
+        );
+        v.set_exec_state(
+            MarkKey(2),
+            ExecMarkState::Failed { sqlstate: None },
+            None,
+            None,
+            cx,
+        );
+        v.set_exec_state(
+            MarkKey(3),
+            ExecMarkState::Running { started: now },
+            None,
+            None,
+            cx,
+        );
+    });
+    draw(vcx);
+    let in_track = |qs: &[Q], color: Hsla| -> Vec<Q> {
+        filled(qs, color)
+            .into_iter()
+            .filter(|q| q.x >= 792.0)
+            .collect()
+    };
+    let qs = scene(vcx);
+    assert!(
+        in_track(&qs, c.green.to_hsla()).is_empty(),
+        "the success under the failure"
+    );
+    let ink = in_track(&qs, c.text.to_hsla());
+    assert_eq!(ink.len(), 1, "one merged marker: {ink:?}");
+    assert!((ink[0].y - 300.0).abs() < 3.0, "{ink:?}");
+    assert!(
+        in_track(&qs, c.amber.to_hsla()).is_empty(),
+        "running for under 50 ms"
+    );
+    vcx.executor().advance_clock(Duration::from_millis(60));
+    vcx.run_until_parked();
+    draw(vcx);
+    assert_eq!(in_track(&scene(vcx), c.amber.to_hsla()).len(), 1);
+}

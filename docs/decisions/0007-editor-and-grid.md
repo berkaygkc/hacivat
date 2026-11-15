@@ -255,6 +255,24 @@ would be a range the service never vouched for. The two exceptions: the chooser'
 band is frozen at its last answer, mapped through the composition's edits as a container range
 (it asks again after the commit; a mapping that fails draws nothing).
 
+**Fix round 1 (review: Critical 1 and 2, Important 3).** An answer is keyed to where it was asked
+as well as to the version: `plan`, `status_message` and `current_statement` use it only while
+`asked_at == exec_at(snap)` (the carets and selections, built by the one `exec_at` that
+`editor.run` also uses). A selection-only commit keeps the version, so without this a caret move,
+or a key repeat faster than 50 ms, kept the old statement's band while ⌘↵ would send the new
+one; now nothing is drawn until the new position's answer. A context change drops the answer. A
+mapped (composition) answer is drawn only while frozen and is dropped when the composition
+ends; the freeze keeps an answer only when it was current when the composition began (no query
+pending), whichever comes first, `composition_changed(true)` or the first marked text. A text
+change clears the chooser's override. **Rejected:** keeping the old band until the new answer
+(it is about another place) and asking synchronously on every move (the 50 ms debounce stays).
+**Held by:** `a_caret_move_hides_the_old_band_until_the_new_answer` (looks before the timer, also
+through three moves 30 ms apart), `a_context_change_drops_the_old_answer`,
+`a_text_change_clears_the_chooser_override`, `chooser_override_wins_and_composition_freezes`
+(no band right after the composition ends) and
+`a_composition_begun_while_a_query_is_pending_shows_no_band`; the mutation "ignore `asked_at`"
+fails the first.
+
 **Rejected:** rebasing the last answer through every edit until the next one arrives (fewer
 frames without a band, but a range nobody resolved: the §2.3 anti-goal); drawing from the
 service's statement spans instead of its preview (the editor's split is not what runs, D-06);
