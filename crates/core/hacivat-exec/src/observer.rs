@@ -271,17 +271,10 @@ impl ExecObserver {
             s.summary = Some(summary);
         });
         let first = self.units.first();
-        match error {
-            Some(e) if cancelled => {
-                let _ = e;
-                self.line(LogMsg::Cancelled { ms: 0 }, first);
-            }
-            Some(e) => {
-                if let Some(u) = first {
-                    self.line(self.failure(e, u), Some(u));
-                }
-            }
-            None => {}
+        match (error, first) {
+            (Some(_), _) if cancelled => self.line(LogMsg::Cancelled { ms: 0 }, first),
+            (Some(e), Some(u)) => self.line(self.failure(e, u), Some(u)),
+            _ => {}
         }
         if let Some(done) = done {
             let _ = done.send(summary);

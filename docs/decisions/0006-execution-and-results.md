@@ -131,7 +131,7 @@ would run and the `COPY` then fail, so a script holding one runs nothing. Reject
 units before it (a half-run script the user did not ask for). `UnitKind::Verbatim` (a selection
 run as one) is `Refused { RunAsOne }` until M3b. The chooser drops every candidate Run would
 refuse; with none left, the first refusal answers. Tests: `a_copy_stream_refuses_the_whole_run`,
-`the_chooser_leaves_out_candidates_that_would_be_refused`, `a_verbatim_unit_is_refused_until_m3b`.
+`the_chooser_leaves_out_candidates_that_would_be_refused`, `a_verbatim_unit_is_refused_until_m3b`, `a_run_holding_copy_in_or_verbatim_is_refused_whole` (the controller's ruling from Task 24: Task 24's preview marks these units uncertain, so Run never sends the units around them; a `CopyIn` unit alone is refused too, M3b).
 
 **The PostgreSQL oracle (R-M3-24, R-M3-35).** Only for a single caret, only on PostgreSQL and
 Timescale (the same grammar; Cockroach, Yugabyte and Redshift parse differently), never for a

@@ -453,3 +453,126 @@ fn the_sql_context_follows_the_engine_the_version_and_the_probe() {
     assert!(!needs_reprobe("SELECT 1"));
     assert!(!needs_reprobe("SETTINGS"));
 }
+
+/// Controller ruling (from Task 24): a run holding any `CopyIn` or `Verbatim` unit is refused as
+/// a whole — nothing is sent, the units before it included — and a `CopyIn` unit alone is refused
+/// too (M3b). Task 24's preview marks these units uncertain; Run never sends around them.
+#[test]
+fn a_run_holding_copy_in_or_verbatim_is_refused_whole() {
+    let doc = pg_doc(COPY_SCRIPT);
+    // The COPY alone, at its own caret.
+    for action in [RunAction::Execute1, RunAction::Execute2] {
+        assert_eq!(
+            resolve_units(&doc, &[caret(12)], action, None),
+            Resolution::Refused {
+                at: 10..27,
+                reason: RefuseReason::CopyStream
+            },
+            "{action:?}"
+        );
+    }
+    // A selection of all three statements: the SELECT before the COPY is not sent either.
+    let all = u32::try_from(COPY_SCRIPT.len()).unwrap();
+    assert_eq!(
+        resolve_units(&doc, &[sel(0..all)], RunAction::Execute1, None),
+        Resolution::Refused {
+            at: 10..27,
+            reason: RefuseReason::CopyStream
+        }
+    );
+    // A candidate of several units, one of them verbatim, runs nothing.
+    let plain = pg_doc("SELECT 1; SELECT 2;");
+    let mixed = Candidate {
+        kind: CandidateKind::WholeScript,
+        units: vec![
+            UnitSpan {
+                range: TextRange::new(TextSize::from(0), TextSize::from(8)),
+                kind: UnitKind::Statement,
+                key: None,
+                title_comment: None,
+            },
+            UnitSpan {
+                range: TextRange::new(TextSize::from(10), TextSize::from(18)),
+                kind: UnitKind::Verbatim,
+                key: None,
+                title_comment: None,
+            },
+        ],
+        label: String::new(),
+    };
+    assert!(units_for_candidate(&plain, &mixed).is_empty());
+    // And a candidate whose first unit is the COPY's data-bearing statement.
+    let copy = Candidate {
+        kind: CandidateKind::WholeScript,
+        units: vec![
+            UnitSpan {
+                range: TextRange::new(TextSize::from(0), TextSize::from(8)),
+                kind: UnitKind::Statement,
+                key: None,
+                title_comment: None,
+            },
+            UnitSpan {
+                range: TextRange::new(TextSize::from(10), TextSize::from(27)),
+                kind: UnitKind::CopyIn {
+                    data: TextRange::new(TextSize::from(29), TextSize::from(31)),
+                },
+                key: None,
+                title_comment: None,
+            },
+        ],
+        label: String::new(),
+    };
+    assert!(units_for_candidate(&doc, &copy).is_empty());
+}
+
+/// Every unit Run would send from any caret of these PostgreSQL scripts, by any action, is its
+/// strict text and one whole statement to PostgreSQL's own grammar: the oracle never widens or
+/// narrows a unit past a statement, and nothing crosses an uncertain boundary unresolved.
+#[test]
+fn every_unit_at_every_caret_is_one_statement_to_the_parser() {
+    let scripts = [
+        VIEW,
+        "SELECT 1;\nCREATE VIEW w AS\nSELECT 2\nUNION ALL\nSELECT 3;\n",
+        "CREATE VIEW v AS\nWITH a AS (SELECT 1), b AS (SELECT 2)\nSELECT * FROM a, b;\n-- tail\nSELECT 'x;y';",
+        "SELECT 1\nSELECT 2;\nSELECT 3;",
+        "SELECT 'open;\nSELECT 2;",
+        "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END;\nSELECT f();",
+    ];
+    let mut oracle_units = 0;
+    for text in scripts {
+        let doc = pg_doc(text);
+        for at in 0..=text.len() {
+            if !text.is_char_boundary(at) {
+                continue;
+            }
+            let at = u32::try_from(at).unwrap();
+            for action in [
+                RunAction::Execute1,
+                RunAction::Execute2,
+                RunAction::Execute3,
+            ] {
+                let r = resolve_units(&doc, &[caret(at)], action, None);
+                let Resolution::Units(us) = &r else {
+                    continue;
+                };
+                for u in us {
+                    assert_eq!(&text[u.doc_range.clone()], &*u.text, "{text:?} @{at}");
+                    let whole =
+                        TextRange::up_to(TextSize::from(u32::try_from(u.text.len()).unwrap()));
+                    match sql_oracle_pg::split_with_parser(&u.text) {
+                        Ok(pieces) => assert_eq!(pieces, [whole], "{text:?} @{at}: {:?}", u.text),
+                        Err(e) => panic!("{text:?} @{at}: {:?} does not parse: {e:?}", u.text),
+                    }
+                    let exact = doc.execution_split().runnable().any(|s| {
+                        usize::from(s.strict.start()) == u.doc_range.start
+                            && usize::from(s.strict.end()) == u.doc_range.end
+                    });
+                    if !exact {
+                        oracle_units += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(oracle_units > 0, "the sweep reached the oracle path");
+}
