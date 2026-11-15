@@ -152,7 +152,7 @@ fn doc_snapshot_is_exact_and_under_the_consoles_context(cx: &mut TestAppContext)
         "no SQL context yet: Run analyses its own snapshot"
     );
     let (my, my_flavor) = mysql();
-    d.svc.set_sql_context(DOC, my, my_flavor);
+    cx.update(|cx| d.svc.set_sql_context(DOC, my, my_flavor, cx));
     assert!(d.svc.doc_snapshot(DOC, d.version()).is_none());
     cx.run_until_parked();
     let s = d.svc.doc_snapshot(DOC, d.version()).expect("analysed");
@@ -171,7 +171,7 @@ fn doc_snapshot_is_exact_and_under_the_consoles_context(cx: &mut TestAppContext)
 
     // A new context: the analysis under the old one is never served again.
     let (p, f) = pg();
-    d.svc.set_sql_context(DOC, p, f);
+    cx.update(|cx| d.svc.set_sql_context(DOC, p, f, cx));
     assert!(d.svc.doc_snapshot(DOC, d.version()).is_none());
     cx.run_until_parked();
     assert_eq!(
@@ -203,6 +203,34 @@ fn postgres_never_analyses_without_its_client_flavor(cx: &mut TestAppContext) {
         effective_flavor(&pg_ctx, ClientFlavor::Psql),
         ClientFlavor::Psql
     );
+    // A client that is not the dialect's own never applies (review M3): PostgreSQL with the
+    // mysql or sqlite3 rules would read pg_dump `COPY` rows as statements.
+    for wrong in [ClientFlavor::MySqlCli, ClientFlavor::Sqlite3] {
+        assert_eq!(effective_flavor(&pg_ctx, wrong), ClientFlavor::Psql);
+    }
+    let pgwire = DialectCtx::new(
+        DialectId::PgWire(sql_dialect::PgWireFlavor::Cockroach),
+        None,
+    );
+    assert_eq!(
+        effective_flavor(&pgwire, ClientFlavor::Sqlite3),
+        ClientFlavor::Psql
+    );
+    for wrong in [
+        ClientFlavor::Psql,
+        ClientFlavor::Sqlite3,
+        ClientFlavor::None,
+    ] {
+        assert_eq!(effective_flavor(&my, wrong), ClientFlavor::MySqlCli);
+    }
+    let maria = DialectCtx::new(DialectId::MariaDb, None);
+    assert_eq!(
+        effective_flavor(&maria, ClientFlavor::Psql),
+        ClientFlavor::MySqlCli
+    );
+    for wrong in [ClientFlavor::Psql, ClientFlavor::MySqlCli] {
+        assert_eq!(effective_flavor(&lite, wrong), ClientFlavor::Sqlite3);
+    }
 
     let text = "COPY users FROM STDIN;\nDROP TABLE users\n\\.\n";
     let d = Doc::open(cx, text, Some((pg_ctx, ClientFlavor::None)));
@@ -232,6 +260,60 @@ fn close_stops_the_worker(cx: &mut TestAppContext) {
     assert!(d.svc.decoration_sources(DOC).is_empty());
 }
 
+/// A closed document leaves nothing behind: the setters and `on_update` that arrive after
+/// `close` re-create no entry (review M6).
+#[gpui::test]
+fn closed_documents_leave_no_entry(cx: &mut TestAppContext) {
+    let d = Doc::analysed(cx, "SELECT 1;", pg());
+    assert_eq!(d.svc.open_documents(), 1);
+    d.svc.close(DOC);
+    assert_eq!(d.svc.open_documents(), 0);
+    let (ctx, flavor) = mysql();
+    cx.update(|cx| {
+        d.svc.set_sql_context(DOC, ctx, flavor, cx);
+        d.svc.set_remembered_kind(DOC, None, cx);
+    });
+    d.svc.on_update(DOC, Rc::new(|_: &mut gpui::App| {}));
+    assert_eq!(d.svc.open_documents(), 0);
+    assert!(d.svc.decoration_sources(DOC).is_empty());
+    // Opening it again works as a first open.
+    let snap = d.snap();
+    cx.update(|cx| d.svc.open(DOC, &snap, support::connected(), cx));
+    cx.run_until_parked();
+    assert_eq!(d.svc.open_documents(), 1);
+    assert!(
+        d.svc.doc_snapshot(DOC, d.version()).is_none(),
+        "the context set after close was ignored"
+    );
+    cx.update(|cx| d.svc.set_sql_context(DOC, ctx, flavor, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        d.svc.doc_snapshot(DOC, d.version()).unwrap().ctx().id,
+        DialectId::MySql
+    );
+}
+
+/// A panic inside an analysis is contained (review M1): nothing is published for that
+/// version (no preview, no `doc_snapshot`), the worker lives on, and the next edit is analysed.
+#[gpui::test]
+fn a_worker_panic_publishes_nothing_and_the_worker_lives_on(cx: &mut TestAppContext) {
+    let mut d = Doc::analysed(cx, "SELECT 1;", pg());
+    d.svc.inject_worker_panic();
+    d.edit(cx, 0..0, " ");
+    cx.run_until_parked();
+    assert_eq!(d.svc.worker_panics(), 1);
+    assert!(d.svc.doc_snapshot(DOC, d.version()).is_none());
+    assert!(d.preview(&caret(3), ExecAction::Execute1).is_none());
+    // Highlighting keeps the previous analysis, rebased.
+    assert!(!d.all_marks().is_empty());
+    d.edit(cx, 0..0, " ");
+    cx.run_until_parked();
+    assert_eq!(
+        d.svc.doc_snapshot(DOC, d.version()).unwrap().text(),
+        "  SELECT 1;"
+    );
+}
+
 /// Two documents have their own workers and answers.
 #[gpui::test]
 fn documents_are_analysed_apart(cx: &mut TestAppContext) {
@@ -239,7 +321,7 @@ fn documents_are_analysed_apart(cx: &mut TestAppContext) {
     let other = DocId(8);
     let buf = hacivat_text::EditorModel::new("SELECT 2;", Default::default());
     let (ctx, flavor) = mysql();
-    d.svc.set_sql_context(other, ctx, flavor);
+    cx.update(|cx| d.svc.set_sql_context(other, ctx, flavor, cx));
     cx.update(|cx| d.svc.open(other, &buf.snapshot(), support::connected(), cx));
     cx.run_until_parked();
     assert_eq!(
@@ -279,7 +361,7 @@ fn rope_chunks_read_the_buffer() {
 fn an_editor_view_gets_its_analysis_off_thread(cx: &mut TestAppContext) {
     let svc = SqlLanguageService::new();
     let (p, f) = pg();
-    svc.set_sql_context(DocId(3), p, f);
+    cx.update(|cx| svc.set_sql_context(DocId(3), p, f, cx));
     let service: Rc<dyn LanguageService> = svc.clone();
     let (editor, vcx) = cx.add_window_view(move |window, cx| {
         EditorView::new(

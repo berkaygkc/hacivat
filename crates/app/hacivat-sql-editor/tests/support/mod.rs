@@ -86,7 +86,7 @@ impl Doc {
     ) -> Doc {
         let svc = SqlLanguageService::new();
         if let Some((ctx, flavor)) = sql {
-            svc.set_sql_context(DOC, ctx, flavor);
+            cx.update(|cx| svc.set_sql_context(DOC, ctx, flavor, cx));
         }
         let model = EditorModel::new(text, ModelConfig::default());
         let snap = model.snapshot();

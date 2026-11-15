@@ -20,7 +20,7 @@ mod words;
 mod worker;
 
 pub use chunks::RopeChunks;
-pub use preview::preview_of;
+pub use preview::{SYNC_SELECTION_LIMIT, points as exec_points, preview_of};
 pub use service::{SqlLanguageService, effective_flavor};
 /// The statement spans of an analysis (the property tests read them without the executor).
 #[doc(hidden)]

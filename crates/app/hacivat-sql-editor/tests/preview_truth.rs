@@ -4,8 +4,11 @@
 
 mod support;
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::TestAppContext;
-use hacivat_sql_editor::{preview_of, statement_spans};
+use hacivat_sql_editor::{exec_points, preview_of, statement_spans};
 use hacivat_ui_editor::{
     Confidence, DocContext, ExecAction, ExecAt, LanguageService, PreviewState, Tier,
 };
@@ -63,11 +66,138 @@ fn ask_previews_the_preselected_candidate(cx: &mut TestAppContext) {
     assert_eq!(p.state, PreviewState::AskPreselected);
     assert_eq!(d.texts(&p), ["SELECT 2"]);
     // The console's remembered kind is where the chooser opens, so the preview follows it.
-    d.svc
-        .set_remembered_kind(DOC, Some(CandidateKind::WholeScript));
+    cx.update(|cx| {
+        d.svc
+            .set_remembered_kind(DOC, Some(CandidateKind::WholeScript), cx)
+    });
     let p = d.preview(&caret(13), ExecAction::Execute1).unwrap();
     assert_eq!(p.state, PreviewState::AskPreselected);
     assert_eq!(d.texts(&p), ["SELECT 1", "SELECT 2"]);
+}
+
+/// Counts the notifier's calls (the editor's repaint and band refresh).
+fn counting(d: &Doc) -> Rc<Cell<u32>> {
+    let n = Rc::new(Cell::new(0));
+    let seen = n.clone();
+    d.svc.on_update(
+        DOC,
+        Rc::new(move |_: &mut gpui::App| seen.set(seen.get() + 1)),
+    );
+    n
+}
+
+/// A new SQL context tells the editor at once (deferred, never re-entrant), and the answer
+/// drawn under the old context is gone: no preview until the new analysis lands.
+#[gpui::test]
+fn a_context_change_notifies_and_no_old_answer_survives(cx: &mut TestAppContext) {
+    let d = Doc::analysed(cx, "SELECT 1;", pg());
+    let calls = counting(&d);
+    assert_eq!(
+        d.preview(&caret(2), ExecAction::Execute1).unwrap().state,
+        PreviewState::Units
+    );
+    let (ctx, flavor) = mysql();
+    cx.update(|cx| {
+        d.svc.set_sql_context(DOC, ctx, flavor, cx);
+        assert_eq!(calls.get(), 0, "never notified inside the call");
+    });
+    assert_eq!(calls.get(), 1, "notified once the update ends");
+    assert!(d.preview(&caret(2), ExecAction::Execute1).is_none());
+    cx.run_until_parked();
+    assert_eq!(calls.get(), 2, "and again when the new analysis lands");
+    assert_eq!(
+        d.preview(&caret(2), ExecAction::Execute1).unwrap().state,
+        PreviewState::Units
+    );
+    // The same context again changes nothing and tells nobody.
+    cx.update(|cx| d.svc.set_sql_context(DOC, ctx, flavor, cx));
+    cx.run_until_parked();
+    assert_eq!(calls.get(), 2);
+    assert!(d.preview(&caret(2), ExecAction::Execute1).is_some());
+}
+
+/// The chooser's remembered kind moves the preselected candidate, and the editor is told.
+#[gpui::test]
+fn a_remembered_kind_change_notifies_and_moves_the_preselection(cx: &mut TestAppContext) {
+    let d = Doc::analysed(cx, "SELECT 1;\nSELECT 2;", pg());
+    let calls = counting(&d);
+    let p = d.preview(&caret(13), ExecAction::Execute1).unwrap();
+    assert_eq!(d.texts(&p), ["SELECT 2"]);
+    cx.update(|cx| {
+        d.svc
+            .set_remembered_kind(DOC, Some(CandidateKind::WholeScript), cx)
+    });
+    assert_eq!(calls.get(), 1);
+    let p = d.preview(&caret(13), ExecAction::Execute1).unwrap();
+    assert_eq!(d.texts(&p), ["SELECT 1", "SELECT 2"]);
+    cx.update(|cx| {
+        d.svc
+            .set_remembered_kind(DOC, Some(CandidateKind::WholeScript), cx)
+    });
+    assert_eq!(calls.get(), 1, "unchanged: no notification");
+}
+
+/// A long text for the selection tests: `n` statements of about 50 bytes.
+fn long_text(n: usize) -> String {
+    (0..n)
+        .map(|i| format!("SELECT {i}, 'müşteri' FROM orders WHERE id = {i};\n"))
+        .collect()
+}
+
+/// I1 (R-M3-22): a selection longer than the synchronous limit is never lexed on the UI thread.
+/// Its preview is `None` at first, computed by the document's worker, then served from the
+/// cache for exactly that version, context, place, action and remembered kind.
+#[gpui::test]
+fn a_large_selection_is_previewed_off_the_ui_thread(cx: &mut TestAppContext) {
+    let text = long_text(3_000);
+    assert!(text.len() > hacivat_sql_editor::SYNC_SELECTION_LIMIT);
+    let mut d = Doc::analysed(cx, &text, pg());
+    let calls = counting(&d);
+    let all = selection(0..text.len());
+    let analyses = d.svc.analyses();
+    assert!(
+        d.preview(&all, ExecAction::Execute1).is_none(),
+        "not on the UI thread"
+    );
+    assert_eq!(calls.get(), 0);
+    cx.run_until_parked();
+    assert_eq!(calls.get(), 1, "the editor is told when it lands");
+    assert_eq!(d.svc.analyses(), analyses, "no re-analysis for a preview");
+    let p = d
+        .preview(&all, ExecAction::Execute1)
+        .expect("computed by the worker");
+    let doc = d.svc.doc_snapshot(DOC, d.version()).unwrap();
+    assert_eq!(p, preview_of(&doc, &all, ExecAction::Execute1, true, None));
+    assert_eq!((p.state, p.ranges.len()), (PreviewState::Units, 3_000));
+
+    // Another action or remembered kind is another question.
+    assert!(d.preview(&all, ExecAction::Execute3).is_none());
+    cx.run_until_parked();
+    assert!(d.preview(&all, ExecAction::Execute3).is_some());
+
+    // Offline, the cached answer is drawn neutral.
+    let offline = DocContext {
+        connected: false,
+        tier: Tier::Full,
+    };
+    cx.update(|cx| d.svc.set_context(DOC, offline, cx));
+    let p = d.preview(&all, ExecAction::Execute3).unwrap();
+    assert_eq!(p.state, PreviewState::NoConnection);
+    cx.update(|cx| d.svc.set_context(DOC, support::connected(), cx));
+
+    // An edit makes it stale.
+    d.edit(cx, 0..0, " ");
+    let all = selection(0..text.len() + 1);
+    assert!(d.preview(&all, ExecAction::Execute1).is_none());
+    cx.run_until_parked();
+    // The new analysis landed; the question goes to the worker again.
+    assert!(d.preview(&all, ExecAction::Execute1).is_none());
+    cx.run_until_parked();
+    assert!(d.preview(&all, ExecAction::Execute1).is_some());
+
+    // A small selection still answers at once.
+    let small = selection(1..60);
+    assert!(d.preview(&small, ExecAction::Execute1).is_some());
 }
 
 #[gpui::test]
@@ -221,8 +351,8 @@ fn statements_are_exact_only_where_run_sends_them(cx: &mut TestAppContext) {
     assert_eq!(all.last().unwrap(), &("SELECT 2".into(), Confidence::Exact));
 }
 
-/// When the editor is ahead, statements are mapped through the changes as containers, and one
-/// an edit touched is `Heuristic` until the next analysis.
+/// When the editor is ahead, statements are mapped through the changes as containers, and every
+/// one from the earliest change on is `Heuristic` until the next analysis.
 #[gpui::test]
 fn statements_are_rebased_and_touched_ones_turn_heuristic(cx: &mut TestAppContext) {
     let mut d = Doc::analysed(cx, "SELECT 1;\n\nSELECT 2;", pg());
@@ -232,9 +362,9 @@ fn statements_are_rebased_and_touched_ones_turn_heuristic(cx: &mut TestAppContex
         all,
         [
             ("  SELECT 1".into(), Confidence::Heuristic),
-            ("SELECT 2".into(), Confidence::Exact)
+            ("SELECT 2".into(), Confidence::Heuristic)
         ],
-        "an insertion at the edge grows the first statement and marks it"
+        "an insertion at the edge grows the first statement; it and every later one are marked"
     );
     d.edit(cx, 16..16, "X");
     assert_eq!(d.text(), "  SELECT 1;\n\nSELXECT 2;");
@@ -252,7 +382,7 @@ fn statements_are_rebased_and_touched_ones_turn_heuristic(cx: &mut TestAppContex
 
     // A new SQL context: nothing is certain until it is analysed.
     let (ctx, flavor) = mysql();
-    d.svc.set_sql_context(DOC, ctx, flavor);
+    cx.update(|cx| d.svc.set_sql_context(DOC, ctx, flavor, cx));
     let all = statements(&d, 0..d.text().len());
     assert!(
         all.iter().all(|(_, c)| *c == Confidence::Heuristic),
@@ -267,6 +397,25 @@ fn statements_are_rebased_and_touched_ones_turn_heuristic(cx: &mut TestAppContex
         d.edit(cx, 0..0, " ");
     }
     assert!(statements(&d, 0..d.text().len()).is_empty());
+}
+
+/// Lexer state flows forward: a quote typed above untouched statements may turn them into
+/// string text, so none of them stays `Exact` until the next analysis (review M2).
+#[gpui::test]
+fn an_edit_above_demotes_every_later_statement(cx: &mut TestAppContext) {
+    let mut d = Doc::analysed(cx, "SELECT 1;\n\nSELECT 2;\n\nSELECT 3;", pg());
+    d.edit(cx, 10..10, "'");
+    let all = statements(&d, 0..d.text().len());
+    assert_eq!(
+        all[0],
+        ("SELECT 1".into(), Confidence::Exact),
+        "before the edit"
+    );
+    assert!(
+        all[1..].iter().all(|(_, c)| *c == Confidence::Heuristic),
+        "{all:?}"
+    );
+    assert_eq!(all.len(), 3);
 }
 
 // -------------------------------------------------------------------------------------------
@@ -442,6 +591,8 @@ fn preview_matches_resolve(
 ) -> Result<(), TestCaseError> {
     let doc = SqlDocument::new(text.clone(), DialectCtx::new(*id, None), *flavor).snapshot();
     let (exec_at, points) = place(text, at);
+    // Run converts the editor's place with the same function (review M5).
+    prop_assert_eq!(exec_points(&exec_at), points.clone());
     for action in [
         ExecAction::Execute1,
         ExecAction::Execute2,
@@ -478,6 +629,21 @@ fn preview_matches_resolve(
         // Exact items: the editor-mode answer is the same (Task 13's agreement, through the
         // adapter's mapping).
         if matches!(p.state, PreviewState::Units | PreviewState::AskPreselected) {
+            let editor = resolve(
+                &doc,
+                &points,
+                &policy(action),
+                SplitMode::Editor,
+                None,
+                remembered,
+            );
+            prop_assert_eq!(&editor, &run);
+        }
+        // Non-empty selections have one answer in both modes, so the preview draws a refused
+        // selection from execution's answer without lexing it again.
+        if let ExecAt::Selections(s) = &exec_at
+            && s.iter().all(|r| !r.is_empty())
+        {
             let editor = resolve(
                 &doc,
                 &points,

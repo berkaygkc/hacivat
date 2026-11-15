@@ -9,16 +9,18 @@
 //! analysis (latest wins).
 
 use std::ops::Range;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use hacivat_text::TextBuffer;
-use hacivat_ui_editor::{HighlightClass, StatementSpan};
+use hacivat_ui_editor::{ExecPreview, HighlightClass, StatementSpan};
 use sql_dialect::{ClientFlavor, DialectCtx};
 use sql_split::{DocSnapshot, SqlDocument};
 use tokio::sync::watch;
 
 use crate::chunks::RopeChunks;
+use crate::preview::{PreviewKey, preview_of};
 use crate::{highlight, statements};
 
 /// What to analyse: one editor version under one SQL context.
@@ -66,19 +68,80 @@ pub(crate) fn analyse(job: &Job) -> Analysis {
     }
 }
 
+/// Panics the workers contained, and a test hook that makes the next worker step panic.
+#[derive(Debug, Default)]
+pub(crate) struct Faults {
+    pub panics: AtomicUsize,
+    pub inject: AtomicBool,
+}
+
+/// Runs `f`, containing a panic (review M1): the GPUI background executor catches none, and an
+/// unwinding lexer or splitter bug would take the app, and the console's unsaved text, down
+/// with it. `None` after a panic, which is counted (never logged with text).
+fn contained<R>(faults: &Faults, f: impl FnOnce() -> R) -> Option<R> {
+    let out = catch_unwind(AssertUnwindSafe(|| {
+        if faults.inject.swap(false, Ordering::Relaxed) {
+            panic!("injected worker panic (test hook)");
+        }
+        f()
+    }));
+    if out.is_err() {
+        faults.panics.fetch_add(1, Ordering::Relaxed);
+    }
+    out.ok()
+}
+
 /// The worker loop: analyses the newest job whenever one arrives, until either channel closes
-/// (the document was closed). `count` counts analyses (tests).
+/// (the document was closed). `count` counts analyses (tests). A job whose analysis panics
+/// publishes nothing: that version has no preview and no `doc_snapshot` (fail closed), and
+/// highlighting keeps the previous analysis, rebased.
 pub(crate) async fn run(
     mut jobs: watch::Receiver<Option<Job>>,
     out: watch::Sender<Option<Arc<Analysis>>>,
     count: Arc<AtomicUsize>,
+    faults: Arc<Faults>,
+) {
+    loop {
+        let job = jobs.borrow_and_update().clone();
+        if let Some(job) = job
+            && let Some(analysis) = contained(&faults, || analyse(&job))
+        {
+            count.fetch_add(1, Ordering::Relaxed);
+            if out.send(Some(Arc::new(analysis))).is_err() {
+                return;
+            }
+        }
+        if jobs.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// A selection preview too long to resolve on the UI thread (review I1): the question, and the
+/// analysis it is asked of.
+#[derive(Debug, Clone)]
+pub(crate) struct PreviewJob {
+    pub key: PreviewKey,
+    pub doc: DocSnapshot,
+}
+
+/// The preview loop: answers the newest preview job (latest wins) until either channel closes.
+/// The answer is the connected one; the service draws it neutral when offline.
+pub(crate) async fn previews(
+    mut jobs: watch::Receiver<Option<PreviewJob>>,
+    out: watch::Sender<Option<(PreviewKey, ExecPreview)>>,
+    faults: Arc<Faults>,
 ) {
     loop {
         let job = jobs.borrow_and_update().clone();
         if let Some(job) = job {
-            let analysis = analyse(&job);
-            count.fetch_add(1, Ordering::Relaxed);
-            if out.send(Some(Arc::new(analysis))).is_err() {
+            let k = &job.key;
+            let answer = contained(&faults, || {
+                preview_of(&job.doc, &k.at, k.action, true, k.remembered)
+            });
+            if let Some(answer) = answer
+                && out.send(Some((job.key.clone(), answer))).is_err()
+            {
                 return;
             }
         }

@@ -16,6 +16,13 @@
 //! runs or asks (`preview_truth.rs` checks it through this adapter).
 //! - Disconnected → `NoConnection` with the same ranges (drawn neutral; Run connects first).
 //!
+//! **Where it runs.** A caret's preview resolves on the UI thread (no lexing: p95 0.45 ms on
+//! 50,000 lines). A selection's lexes and splits the selected text, so selections longer than
+//! [`SYNC_SELECTION_LIMIT`] in total are answered by the document's preview worker: the service
+//! answers `None` (no band) until the worker's answer for exactly that version, context
+//! generation, place, action and remembered kind lands, then serves it from a cache and
+//! notifies the editor (review I1).
+//!
 //! What this cannot know: the PostgreSQL parser oracle (R-M3-24), which Task 23 may use to run
 //! an `Ambiguous` region. The preview never calls it (a blocking parse is not UI-thread work),
 //! so such a region previews `Uncertain` even when Run would resolve it.
@@ -32,6 +39,37 @@ use sql_split::{DocSnapshot, SplitMode};
 
 type Ranges = SmallVec<[Range<usize>; 2]>;
 
+/// The longest total selection the preview resolves on the UI thread (review I1). Resolving a
+/// selection lexes and splits the selected text (about 20 ms per MB in release: 64 KiB took
+/// 1.3 ms), so a longer one is answered by the document's worker. 32 KiB keeps the UI-thread
+/// work under the 1 ms rule (§5.4), not only under the 2 ms resolve budget.
+pub const SYNC_SELECTION_LIMIT: usize = 32 * 1024;
+
+/// Whether the preview at `at` is resolved off the UI thread.
+pub(crate) fn off_thread(at: &ExecAt) -> bool {
+    match at {
+        ExecAt::Carets(_) => false,
+        ExecAt::Selections(s) => {
+            s.iter()
+                .map(|r| r.end.abs_diff(r.start))
+                .fold(0usize, usize::saturating_add)
+                > SYNC_SELECTION_LIMIT
+        }
+    }
+}
+
+/// What a worker-computed preview answers: the analysis (version and context generation) and
+/// the question (place, action, remembered chooser kind). An answer is served only for an
+/// equal key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PreviewKey {
+    pub version: u64,
+    pub generation: u64,
+    pub at: ExecAt,
+    pub action: ExecAction,
+    pub remembered: Option<CandidateKind>,
+}
+
 /// Run's policy for `action` (the same table as `hacivat_exec::policy_for`): Run is D-011's
 /// default (ask), Run 2 the largest statement, Run 3 the whole script.
 pub(crate) fn policy_for(action: ExecAction) -> ExecPolicy {
@@ -46,8 +84,8 @@ fn size(n: usize) -> TextSize {
     TextSize::from(u32::try_from(n).unwrap_or(u32::MAX))
 }
 
-/// The editor's carets or selections as `exec_range`'s points.
-pub(crate) fn points(at: &ExecAt) -> Vec<CaretOrSelection> {
+/// The editor's carets or selections as `exec_range`'s points (Run converts with this too).
+pub fn points(at: &ExecAt) -> Vec<CaretOrSelection> {
     match at {
         ExecAt::Carets(c) => c
             .iter()
@@ -101,6 +139,13 @@ fn drawn(r: &RangeResolution) -> Ranges {
     }
 }
 
+/// Every point is a non-empty selection (an empty one resolves as a caret).
+fn only_selections(points: &[CaretOrSelection]) -> bool {
+    points
+        .iter()
+        .all(|p| matches!(p, CaretOrSelection::Selection(r) if !r.is_empty()))
+}
+
 /// The preview of Run `action` at `at` over `doc` (module docs). Pure; the caller passes an
 /// analysis at exactly the editor's version.
 pub fn preview_of(
@@ -132,6 +177,13 @@ pub fn preview_of(
         RangeResolution::NothingToRun => (PreviewState::Nothing, Ranges::new()),
         // Run would hand over a unit M3a does not send: drawn as the units, neutral.
         RangeResolution::Units(_) | RangeResolution::Ask { .. } => {
+            (PreviewState::Uncertain, drawn(&run))
+        }
+        // Non-empty selections resolve the same in both modes (`exec_range`: "a selection has
+        // one answer for both modes"), so they are not lexed a second time.
+        RangeResolution::Ambiguous(_) | RangeResolution::UnsupportedClientCommand { .. }
+            if only_selections(&points) =>
+        {
             (PreviewState::Uncertain, drawn(&run))
         }
         RangeResolution::Ambiguous(_) | RangeResolution::UnsupportedClientCommand { .. } => {

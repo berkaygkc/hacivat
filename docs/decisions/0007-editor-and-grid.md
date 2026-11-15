@@ -333,3 +333,29 @@ holds the same certain statement.
 
 `tests/budget.rs` (perf): `change()` p95 ≤ 0.5 ms, the preview p95 ≤ 2 ms, and one viewport's
 decorations p95 ≤ 1 ms on 50,000 lines.
+
+**Fix round 1 (review of m3a-t24).**
+- **Selections off the UI thread (I1).** Resolving a selection lexes and splits the selected
+  text, about 23 ms for 1.2 MB in release; 64 KiB took 1.3 ms. A selection whose total length
+  exceeds 32 KiB (`SYNC_SELECTION_LIMIT`, chosen so the UI-thread work stays under the 1 ms rule
+  of §5.4) is therefore not resolved on the UI thread:
+  - `exec_preview` answers `None`, so no band is drawn, and posts the question to the
+    document's preview worker, which is latest-wins like the analysis worker;
+  - the answer is cached under the key (version, context generation, `ExecAt`, action,
+    remembered kind), served only for an equal key, and the editor is notified when it lands;
+  - shorter selections and every caret still resolve synchronously, within 2 ms;
+  - a refused selection is drawn from execution's own answer (both modes answer a selection
+    alike), so it is never lexed twice.
+- **Setters notify (I2).** `set_sql_context` and `set_remembered_kind` take `cx`. When the value
+  changes they call `cx.defer` with the editor's notifier, so a band drawn under the old context
+  or preselection is asked again. They never call it synchronously.
+- **A worker panic is contained (M1).** `catch_unwind` wraps each analysis and each preview. A
+  panic publishes nothing for that version, so there is no preview and no `doc_snapshot`
+  (fail closed), and the worker keeps running.
+- **Gutter statements (M2).** Every statement from the earliest change onwards is `Heuristic`
+  until the next analysis, because lexer state flows forward.
+- **Client flavor (M3).** `effective_flavor` always applies the dialect's own client. An explicit
+  mismatched flavor, such as PostgreSQL with mysql's rules, is replaced.
+- **Closed documents (M6).** A closed document ignores the setters and `on_update` until it is
+  opened again.
+- **Perf fixture.** The perf fixture is now 2.8 MB: 50,000 lines, 12,500 statements.

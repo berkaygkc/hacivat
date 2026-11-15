@@ -4,9 +4,10 @@
 //! `Exact` only when execution would send it as it is: `Exact` in the editor split with no
 //! uncertain boundary inside, and the same certain statement in the execution split (the
 //! agreement `exec_range` uses, R-M3-8). When the editor is ahead of the analysis, the spans
-//! are mapped through the changes since as containers (typing at an edge grows them), and a
-//! statement an edit touched is `Heuristic` until the next analysis: its boundaries may have
-//! moved.
+//! are mapped through the changes since as containers (typing at an edge grows them), and
+//! every statement from the earliest change on is `Heuristic` until the next analysis: lexer
+//! state flows forward, so a quote or `/*` typed above a statement may have turned it into
+//! string or comment text (review M2).
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -24,7 +25,10 @@ fn range(r: TextRange) -> Range<usize> {
 }
 
 /// Whether the execution split holds a certain statement with exactly the strict range
-/// `strict` (`exec_range`'s `View::certain`, second half).
+/// `strict` (`exec_range`'s `View::certain`, second half). Under Task 13's agreement
+/// (`editor_and_execution_agree_on_exact_items`) an editor-certain statement always has one, so
+/// this check is likely redundant (dropping it is an equivalent mutant: T24 M8); it is kept as
+/// defence in depth.
 fn certain_in_execution(exec: &Split, strict: TextRange) -> bool {
     let i = exec
         .items
@@ -111,9 +115,9 @@ pub(crate) fn at(sh: &DocShared, version: u64, r: Range<usize>) -> Arc<[Statemen
                         s.header = d
                             .map_pos(s.header, Bias::After, MapMode::Simple)?
                             .clamp(s.strict.start, s.strict.end);
+                        // Touched, or after the change: the lexer state there may differ.
                         if let Some(ch) = d.changed_range()
                             && ch.start <= s.smart.end
-                            && s.smart.start <= ch.end
                         {
                             s.confidence = Confidence::Heuristic;
                         }

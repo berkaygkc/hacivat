@@ -15,7 +15,7 @@
 //!   preview and Run analyses its own snapshot).
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::ops::Range;
 use std::rc::{Rc, Weak};
@@ -27,7 +27,7 @@ use hacivat_text::{ChangeDesc, Snapshot, TokenOracle};
 use hacivat_ui_core::gpui_surface::{App, Task};
 use hacivat_ui_editor::{
     DecorationSource, DocContext, DocId, ExecAction, ExecAt, ExecPreview, InvalidateFn,
-    LanguageService, NoTokens, StatementSpan,
+    LanguageService, NoTokens, PreviewState, StatementSpan,
 };
 use smallvec::SmallVec;
 use sql_dialect::{ClientFlavor, DialectCtx, DialectId};
@@ -36,25 +36,23 @@ use sql_split::exec_range::CandidateKind;
 use tokio::sync::watch;
 
 use crate::highlight::HighlightSource;
-use crate::preview::preview_of;
+use crate::preview::{PreviewKey, off_thread, preview_of};
 use crate::statements;
 use crate::words::TokenWords;
-use crate::worker::{self, Analysis, Job};
+use crate::worker::{self, Analysis, Faults, Job, PreviewJob};
 
-/// The client flavor a document is analysed with: `flavor`, or, when it is
-/// `ClientFlavor::None`, the dialect's own client (`alg/10` SPLIT-01: PostgreSQL → psql,
-/// MySQL/MariaDB → mysql, SQLite → sqlite3). A PostgreSQL console never splits without psql's
-/// rules: with them a pg_dump `COPY` row such as `DROP TABLE users` is data; without them it
-/// would be a certain statement. Run must use the same flavor (Task 33).
+/// The client flavor a document is analysed with: the dialect's own client whenever it has one
+/// (`alg/10` SPLIT-01: PostgreSQL and its wire-compatible servers → psql, MySQL/MariaDB →
+/// mysql, SQLite → sqlite3), whatever `flavor` says (review M3: another client's rules are
+/// never applied); `flavor` for the other dialects. A PostgreSQL console never splits without
+/// psql's rules: with them a pg_dump `COPY` row such as `DROP TABLE users` is data; without them
+/// it would be a certain statement. Run must use the same flavor (Task 33).
 pub fn effective_flavor(ctx: &DialectCtx, flavor: ClientFlavor) -> ClientFlavor {
-    match flavor {
-        ClientFlavor::None => match ctx.id {
-            DialectId::Postgres | DialectId::PgWire(_) => ClientFlavor::Psql,
-            DialectId::MySql | DialectId::MariaDb => ClientFlavor::MySqlCli,
-            DialectId::Sqlite => ClientFlavor::Sqlite3,
-            _ => ClientFlavor::None,
-        },
-        other => other,
+    match ctx.id {
+        DialectId::Postgres | DialectId::PgWire(_) => ClientFlavor::Psql,
+        DialectId::MySql | DialectId::MariaDb => ClientFlavor::MySqlCli,
+        DialectId::Sqlite => ClientFlavor::Sqlite3,
+        _ => flavor,
     }
 }
 
@@ -75,6 +73,10 @@ pub(crate) struct DocShared {
     remembered: Cell<Option<CandidateKind>>,
     notify: RefCell<Option<InvalidateFn>>,
     statements: RefCell<Option<StatementsCache>>,
+    /// The last worker-computed selection preview (review I1), for exactly its key.
+    selection: RefCell<Option<(PreviewKey, ExecPreview)>>,
+    /// The key last handed to the preview worker (asked once, not per frame).
+    asked: RefCell<Option<PreviewKey>>,
 }
 
 struct StatementsCache {
@@ -96,7 +98,26 @@ impl DocShared {
             remembered: Cell::new(None),
             notify: RefCell::new(None),
             statements: RefCell::new(None),
+            selection: RefCell::new(None),
+            asked: RefCell::new(None),
         }
+    }
+
+    fn notifier(&self) -> Option<InvalidateFn> {
+        self.notify.borrow().clone()
+    }
+
+    /// Stores a worker-computed preview when it still answers the editor's version under the
+    /// current context; returns the notifier to call then.
+    fn land_preview(&self, key: PreviewKey, p: ExecPreview) -> Option<InvalidateFn> {
+        if self.asked.borrow().as_ref() == Some(&key) {
+            *self.asked.borrow_mut() = None;
+        }
+        if key.version != self.editor_version.get() || key.generation != self.generation.get() {
+            return None;
+        }
+        *self.selection.borrow_mut() = Some((key, p));
+        self.notifier()
     }
 
     pub(crate) fn latest(&self) -> Option<Arc<Analysis>> {
@@ -198,9 +219,11 @@ impl DocShared {
 /// The running worker of an open document.
 struct Worker {
     jobs: watch::Sender<Option<Job>>,
-    /// The background worker and the foreground task that lands its results; dropping them
-    /// stops both.
-    _tasks: [Task<()>; 2],
+    /// Selection previews too long for the UI thread (review I1).
+    previews: watch::Sender<Option<PreviewJob>>,
+    /// The analysis worker, the preview worker, and the two foreground tasks that land their
+    /// results; dropping them stops all four.
+    _tasks: [Task<()>; 4],
 }
 
 /// One document: its shared state, its sources, its SQL context and its worker once opened.
@@ -242,7 +265,10 @@ impl DocEntry {
 #[derive(Default)]
 pub struct SqlLanguageService {
     docs: RefCell<HashMap<DocId, DocEntry>>,
+    /// Documents closed and not opened again: calls for them are ignored (review M6).
+    closed: RefCell<HashSet<DocId>>,
     analyses: Arc<AtomicUsize>,
+    faults: Arc<Faults>,
 }
 
 impl fmt::Debug for SqlLanguageService {
@@ -263,12 +289,23 @@ impl SqlLanguageService {
     /// (R-M3-39). `ClientFlavor::None` takes the dialect's own client ([`effective_flavor`]).
     /// A new context re-analyses the document; until that analysis lands, no preview, token
     /// words or `doc_snapshot` come from the old one. May be called before `open`.
-    pub fn set_sql_context(&self, doc: DocId, ctx: DialectCtx, flavor: ClientFlavor) {
+    ///
+    /// A change tells the editor (its `on_update` notifier, deferred to the end of the current
+    /// update, never called inside this one; review I2), so a band drawn under the old context
+    /// is asked again and finds no preview until the new analysis lands. Ignored for a closed
+    /// document.
+    pub fn set_sql_context(&self, doc: DocId, ctx: DialectCtx, flavor: ClientFlavor, cx: &mut App) {
+        if self.closed.borrow().contains(&doc) {
+            return;
+        }
         let flavor = effective_flavor(&ctx, flavor);
         let mut docs = self.docs.borrow_mut();
         let e = docs.entry(doc).or_insert_with(DocEntry::new);
         if e.shared.sql_set.get() && e.ctx == ctx && e.flavor == flavor {
             return;
+        }
+        if let Some(notify) = e.shared.notifier() {
+            cx.defer(move |cx| notify(cx));
         }
         e.ctx = ctx;
         e.flavor = flavor;
@@ -288,11 +325,19 @@ impl SqlLanguageService {
     }
 
     /// The chooser kind the console remembers (R-M3-36): Run's chooser opens on it, so the
-    /// preview shows that candidate. May be called before `open`.
-    pub fn set_remembered_kind(&self, doc: DocId, kind: Option<CandidateKind>) {
+    /// preview shows that candidate. May be called before `open`; ignored for a closed
+    /// document. A change tells the editor, deferred like [`Self::set_sql_context`]'s.
+    pub fn set_remembered_kind(&self, doc: DocId, kind: Option<CandidateKind>, cx: &mut App) {
+        if self.closed.borrow().contains(&doc) {
+            return;
+        }
         let mut docs = self.docs.borrow_mut();
         let e = docs.entry(doc).or_insert_with(DocEntry::new);
-        e.shared.remembered.set(kind);
+        if e.shared.remembered.replace(kind) != kind
+            && let Some(notify) = e.shared.notifier()
+        {
+            cx.defer(move |cx| notify(cx));
+        }
     }
 
     /// How many analyses the workers have run (tests: `open` and `change` analyse nothing on
@@ -300,6 +345,24 @@ impl SqlLanguageService {
     #[doc(hidden)]
     pub fn analyses(&self) -> usize {
         self.analyses.load(Ordering::Relaxed)
+    }
+
+    /// Test hook: the next worker step (an analysis or a preview) panics (review M1).
+    #[doc(hidden)]
+    pub fn inject_worker_panic(&self) {
+        self.faults.inject.store(true, Ordering::Relaxed);
+    }
+
+    /// How many worker panics were contained.
+    #[doc(hidden)]
+    pub fn worker_panics(&self) -> usize {
+        self.faults.panics.load(Ordering::Relaxed)
+    }
+
+    /// How many documents the service holds state for (tests: none after `close`).
+    #[doc(hidden)]
+    pub fn open_documents(&self) -> usize {
+        self.docs.borrow().len()
     }
 
     /// The analysis of `doc` at exactly `version` under the console's current SQL context, if
@@ -325,8 +388,21 @@ async fn next_landed(
     Some(a.and_then(|a| sh.land(a)))
 }
 
+/// The next selection preview the preview worker publishes, stored when it is still current;
+/// the notifier to call for it. `None` when the worker or the document is gone.
+async fn next_preview(
+    results: &mut watch::Receiver<Option<(PreviewKey, ExecPreview)>>,
+    shared: &Weak<DocShared>,
+) -> Option<Option<InvalidateFn>> {
+    results.changed().await.ok()?;
+    let answer = results.borrow_and_update().clone();
+    let sh = shared.upgrade()?;
+    Some(answer.and_then(|(key, p)| sh.land_preview(key, p)))
+}
+
 impl LanguageService for SqlLanguageService {
     fn open(&self, doc: DocId, snap: &Snapshot, ctx: DocContext, cx: &mut App) {
+        self.closed.borrow_mut().remove(&doc);
         let mut docs = self.docs.borrow_mut();
         let e = docs.entry(doc).or_insert_with(DocEntry::new);
         let sh = &e.shared;
@@ -335,17 +411,38 @@ impl LanguageService for SqlLanguageService {
         sh.pending.borrow_mut().clear();
         *sh.latest.borrow_mut() = None;
         *sh.statements.borrow_mut() = None;
+        *sh.selection.borrow_mut() = None;
+        *sh.asked.borrow_mut() = None;
         let (jobs, job_rx) = watch::channel(Some(e.job(snap)));
         let (out, results) = watch::channel(None);
-        let background =
-            cx.background_executor()
-                .spawn(worker::run(job_rx, out, self.analyses.clone()));
-        // The foreground half: lands each analysis and calls the notifier from this task,
+        let analysis = cx.background_executor().spawn(worker::run(
+            job_rx,
+            out,
+            self.analyses.clone(),
+            self.faults.clone(),
+        ));
+        let (previews, preview_rx) = watch::channel(None);
+        let (preview_out, preview_results) = watch::channel(None);
+        let preview = cx.background_executor().spawn(worker::previews(
+            preview_rx,
+            preview_out,
+            self.faults.clone(),
+        ));
+        // The foreground halves: land each result and call the notifier from their own task,
         // outside every borrow and outside any other call of the trait.
         let weak = Rc::downgrade(sh);
         let mut results = results;
-        let foreground = cx.spawn(async move |cx| {
+        let landing = cx.spawn(async move |cx| {
             while let Some(notify) = next_landed(&mut results, &weak).await {
+                if let Some(notify) = notify {
+                    cx.update(|cx| notify(cx));
+                }
+            }
+        });
+        let weak = Rc::downgrade(sh);
+        let mut preview_results = preview_results;
+        let preview_landing = cx.spawn(async move |cx| {
+            while let Some(notify) = next_preview(&mut preview_results, &weak).await {
                 if let Some(notify) = notify {
                     cx.update(|cx| notify(cx));
                 }
@@ -353,7 +450,8 @@ impl LanguageService for SqlLanguageService {
         });
         e.worker = Some(Worker {
             jobs,
-            _tasks: [background, foreground],
+            previews,
+            _tasks: [analysis, preview, landing, preview_landing],
         });
     }
 
@@ -379,16 +477,21 @@ impl LanguageService for SqlLanguageService {
     }
 
     fn close(&self, doc: DocId) {
+        self.closed.borrow_mut().insert(doc);
         let entry = self.docs.borrow_mut().remove(&doc);
         if let Some(e) = entry {
             // Sources the editor still holds paint nothing from here on.
             *e.shared.latest.borrow_mut() = None;
             e.shared.pending.borrow_mut().clear();
+            *e.shared.selection.borrow_mut() = None;
             drop(e);
         }
     }
 
     fn on_update(&self, doc: DocId, notify: InvalidateFn) {
+        if self.closed.borrow().contains(&doc) {
+            return;
+        }
         let mut docs = self.docs.borrow_mut();
         let e = docs.entry(doc).or_insert_with(DocEntry::new);
         *e.shared.notify.borrow_mut() = Some(notify);
@@ -409,7 +512,9 @@ impl LanguageService for SqlLanguageService {
         at: &ExecAt,
         action: ExecAction,
     ) -> Option<ExecPreview> {
-        let sh = self.docs.borrow().get(&doc)?.shared.clone();
+        let docs = self.docs.borrow();
+        let e = docs.get(&doc)?;
+        let sh = &e.shared;
         if version != sh.editor_version.get() {
             return None;
         }
@@ -419,13 +524,43 @@ impl LanguageService for SqlLanguageService {
         if connected && !(sh.sql_set.get() && a.generation == sh.generation.get()) {
             return None;
         }
-        Some(preview_of(
-            &a.doc,
-            at,
+        if !off_thread(at) {
+            return Some(preview_of(
+                &a.doc,
+                at,
+                action,
+                connected,
+                sh.remembered.get(),
+            ));
+        }
+        // A long selection is lexed and split by the preview worker, never here (review I1):
+        // `None` (no band) until its answer for exactly this question lands.
+        let key = PreviewKey {
+            version: a.version,
+            generation: a.generation,
+            at: at.clone(),
             action,
-            connected,
-            sh.remembered.get(),
-        ))
+            remembered: sh.remembered.get(),
+        };
+        if let Some((k, p)) = sh.selection.borrow().as_ref()
+            && *k == key
+        {
+            let mut p = p.clone();
+            if !connected {
+                p.state = PreviewState::NoConnection;
+            }
+            return Some(p);
+        }
+        if sh.asked.borrow().as_ref() != Some(&key)
+            && let Some(w) = &e.worker
+        {
+            *sh.asked.borrow_mut() = Some(key.clone());
+            w.previews.send_replace(Some(PreviewJob {
+                key,
+                doc: a.doc.clone(),
+            }));
+        }
+        None
     }
 
     fn token_oracle(&self, doc: DocId) -> Rc<dyn TokenOracle> {
