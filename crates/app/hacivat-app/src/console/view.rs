@@ -56,7 +56,7 @@ use hacivat_ui_core::theme::{Theme, popover_surface};
 use hacivat_ui_editor::large_file::SizeText;
 use hacivat_ui_editor::{
     CaretBlink, DocContext, DocId, EDITOR_CONTEXT, EditorConfig, EditorEvent, EditorView,
-    LanguageService, a11y,
+    LanguageService, Tier, a11y,
 };
 use sql_dialect::ClientFlavor;
 use std::time::Instant;
@@ -175,6 +175,12 @@ fn must_be_read_only(cx: &App, profile: ProfileId) -> bool {
 /// the profile now says read-only does not survive. Every console of that profile drops its
 /// session at once, and the profile reconnects (its new sessions open read-only).
 fn enforce_read_only(cx: &mut App) {
+    // A pending reconnect ends with its connection (fix round 1, M14): the next pending
+    // window of that profile says so again.
+    let connected = live_kinds(cx);
+    cx.default_global::<Hosts>()
+        .pending
+        .retain(|p| connected.get(p) == Some(&LiveKind::Connected));
     let stale: Vec<ProfileId> = Consoles::ids(cx)
         .into_iter()
         .filter_map(|id| {
@@ -240,12 +246,19 @@ enum Release {
     Refused,
 }
 
-/// Asked before a console lets go of `session` (a release, a rebind, a swap, a close): while
-/// the user's transaction is open (`TxOwner::User`, open or failed) it refuses, so the
-/// session is never closed or dropped with a silent rollback. A session that already ended
-/// has nothing to lose. At the merge with Task 33 this is where
-/// `exec_ui::close_prompt::confirm_release` is called (Commit / Roll back / Cancel); until
-/// then it only refuses.
+/// Asked before a console lets go of `session` (a release, a rebind, a swap, a close; a
+/// Disconnect or a Delete of its profile, [`release_refused`]): while the user's transaction is
+/// open (`TxOwner::User`, open or failed) it refuses, so the session is never closed or dropped
+/// with a silent rollback. A session that already ended has nothing to lose.
+///
+/// **At the merge with Task 33** this calls `exec_ui::close_prompt::confirm_release`, which is
+/// continuation-based: it answers `Proceed` at once when nothing is open, else opens the
+/// Commit / Roll back / Cancel prompt, answers `Defer` and calls its `then` after a Commit or
+/// Roll back succeeds. The mapping: `Proceed` → [`Release::Proceed`]; `Defer` →
+/// [`Release::Refused`] (the caller does nothing now), with a `then` that re-runs what was
+/// refused — `reconnect_read_only(profile)` for the read-only rule, `release_session` +
+/// `sync_session` for a rebind, the Disconnect or Delete for [`release_refused`]; Cancel runs
+/// nothing (the session stays, and the pending read-only state with it, C1).
 fn confirm_release(console: ConsoleId, session: &SessionHandle, cx: &mut App) -> Release {
     let _ = (console, cx);
     let snap = session.state().borrow().clone();
@@ -260,6 +273,43 @@ fn confirm_release(console: ConsoleId, session: &SessionHandle, cx: &mut App) ->
     } else {
         Release::Proceed
     }
+}
+
+/// A Disconnect or Delete of `profile` asks first (fix round 1, C2): `true` (and a toast)
+/// when a console of ours holds the user's open transaction on one of the profile's sessions;
+/// the caller then does nothing. The session manager's close would roll it back silently.
+pub fn release_refused(cx: &mut App, profile: ProfileId) -> bool {
+    for host in hosts_of(cx, profile) {
+        let (console, title) = {
+            let h = host.read(cx);
+            (h.console(), h.title(cx))
+        };
+        let Some(console) = console else {
+            continue;
+        };
+        let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone()) else {
+            continue;
+        };
+        if confirm_release(console, &session, cx) == Release::Refused {
+            ToastQueue::push(
+                cx,
+                Toast::new(
+                    ToastKind::Info,
+                    Rc::new(move |cx: &App| {
+                        tr(
+                            cx,
+                            ids::hv::CONSOLE_RELEASE_REFUSED,
+                            ids::hv::HvConsoleReleaseRefused {
+                                name: Text(title.to_string()),
+                            },
+                        )
+                    }),
+                ),
+            );
+            return true;
+        }
+    }
+    false
 }
 
 /// The user's own transaction is open (or failed) on the session.
@@ -311,6 +361,8 @@ struct SessionUx {
     cancelling: bool,
     /// The user's own transaction is open (or failed).
     user_tx: bool,
+    /// The session ended (disconnected or broken).
+    ended: bool,
 }
 
 impl SessionUx {
@@ -326,6 +378,10 @@ impl SessionUx {
             busy,
             cancelling,
             user_tx: user_tx_open(snap),
+            ended: matches!(
+                snap.state,
+                SessionState::Disconnected | SessionState::Broken(_)
+            ),
         }
     }
 }
@@ -365,6 +421,11 @@ pub struct ConsoleHost {
     autosave_task: Option<Task<()>>,
     /// The connected state the editor was last told.
     told: Option<bool>,
+    /// The console's session is its own (not the profile's default session): only such a
+    /// session is ever closed by the console (fix round 1, I4).
+    own_session: bool,
+    /// The profile must be read-only but the session is still read-write (C1).
+    pending_ro: bool,
     /// The editor's failed paints already logged.
     paint_errors: u64,
     /// The toolbar's state forced by a shots fixture (feature `shots`).
@@ -421,10 +482,19 @@ impl ConsoleHost {
             autosave_task: None,
             told: None,
             paint_errors: 0,
+            own_session: false,
+            pending_ro: false,
             fixture: None,
             pane: None,
             _subscriptions: subscriptions,
         };
+        // A binding the hook handed out is for the tab built in this frame; whatever no host
+        // took by the end of it is stale (fix round 1, M10).
+        cx.defer(|cx| {
+            if let Some(h) = cx.try_global::<Hosts>() {
+                h.fresh.borrow_mut().clear();
+            }
+        });
         let me = cx.weak_entity();
         let registered = Consoles::by_tab(cx, tab);
         cx.default_global::<Hosts>().by_tab.insert(
@@ -538,7 +608,10 @@ impl ConsoleHost {
                     self.bind_fresh(profile, window, cx);
                 }
             }
-            Mode::Ready { owned: true, .. } => self.sync_session(window, cx),
+            Mode::Ready { owned: true, .. } => {
+                self.sync_session(window, cx);
+                self.update_pending(cx);
+            }
             _ => {}
         }
         self.seen = now;
@@ -605,7 +678,9 @@ impl ConsoleHost {
                 m.runtime().spawn_blocking(move || {
                     let _ = tx.send(autosave::read(&read));
                 });
-                cx.background_spawn(async move { rx.await.unwrap_or(Restored::Unreadable) })
+                cx.background_spawn(async move {
+                    rx.await.unwrap_or(Restored::Unreadable { kept: None })
+                })
             }
             None => cx.background_spawn(async move { autosave::read(&read) }),
         };
@@ -630,41 +705,45 @@ impl ConsoleHost {
             Restored::Text { text, hash } => {
                 self.open_editor(text, Some(Some(hash)), false, window, cx);
             }
-            Restored::TooLarge { bytes } => {
-                // R-M3-49: not opened, left on disk; the console's autosave stays off so the
-                // file is never written over.
+            Restored::TooLarge { bytes, kept } => {
+                // R-M3-49: not opened. The file was moved aside unchanged (fix round 1, I6),
+                // so the console saves its new text as usual; were it still in place, autosave
+                // stays off rather than write over it.
                 let name = self.title(cx);
                 let (size, limit) = (size_text(cx, bytes), size_text(cx, RESTORE_MAX_BYTES));
-                let mut toast = Toast::new(
-                    ToastKind::Info,
-                    Rc::new(move |cx: &App| {
-                        tr(
-                            cx,
-                            ids::hv::CONSOLE_RESTORE_REFUSED_BODY,
-                            ids::hv::HvConsoleRestoreRefusedBody {
-                                size: Text(size.to_string()),
-                                limit: Text(limit.to_string()),
-                            },
-                        )
-                    }),
-                );
-                toast.title = Some(Rc::new(move |cx: &App| {
+                let file = kept_name(kept.as_deref(), &path);
+                let body: hacivat_ui::text::TextFn = Rc::new(move |cx: &App| {
                     tr(
                         cx,
-                        ids::hv::CONSOLE_RESTORE_REFUSED_TITLE,
-                        ids::hv::HvConsoleRestoreRefusedTitle {
-                            name: Text(name.to_string()),
+                        ids::hv::CONSOLE_RESTORE_REFUSED_BODY,
+                        ids::hv::HvConsoleRestoreRefusedBody {
+                            size: Text(size.to_string()),
+                            limit: Text(limit.to_string()),
+                            file: Text(file.clone()),
                         },
                     )
-                }));
-                toast.wide = true;
-                ToastQueue::push(cx, toast);
+                });
+                restore_toast(name, body, cx);
                 tracing::info!(path = %path.display(), bytes, "console not restored: too large");
-                self.open_editor(String::new(), None, false, window, cx);
+                let save = kept.is_some().then_some(None);
+                self.open_editor(String::new(), save, false, window, cx);
             }
-            Restored::Unreadable => {
+            Restored::Unreadable { kept } => {
+                let name = self.title(cx);
+                let file = kept_name(kept.as_deref(), &path);
+                let body: hacivat_ui::text::TextFn = Rc::new(move |cx: &App| {
+                    tr(
+                        cx,
+                        ids::hv::CONSOLE_RESTORE_UNREADABLE_BODY,
+                        ids::hv::HvConsoleRestoreUnreadableBody {
+                            file: Text(file.clone()),
+                        },
+                    )
+                });
+                restore_toast(name, body, cx);
                 tracing::warn!(path = %path.display(), "console not restored: unreadable");
-                self.open_editor(String::new(), None, false, window, cx);
+                let save = kept.is_some().then_some(None);
+                self.open_editor(String::new(), save, false, window, cx);
             }
         }
     }
@@ -775,11 +854,7 @@ impl ConsoleHost {
         match event {
             EditorEvent::Changed { .. } => self.schedule_autosave(cx),
             EditorEvent::TierChanged(tier) => {
-                let connected = self.told == Some(true);
-                let tier = *tier;
-                editor.update(cx, |v, cx| {
-                    v.set_doc_context(DocContext { connected, tier }, cx);
-                });
+                exec_doc_context(editor, self.told == Some(true), Some(*tier), cx);
             }
             _ => {}
         }
@@ -832,6 +907,24 @@ impl ConsoleHost {
             .unwrap_or_default();
         match live {
             LiveState::Connected(_) => {
+                // A held session that ended, or a first console's that is no longer the
+                // profile's default (a reconnect replaced it), is let go (the gate passes an
+                // ended session) and a new one taken (fix round 1, I5).
+                if let Some(held) = Consoles::get(cx, console).and_then(|s| s.session.clone()) {
+                    let ended = matches!(
+                        held.state().borrow().state,
+                        SessionState::Disconnected | SessionState::Broken(_)
+                    );
+                    let replaced = !self.own_session
+                        && cx
+                            .try_global::<ConnectionsModel>()
+                            .and_then(|m| m.manager().sessions(profile))
+                            .and_then(|s| s.default_session())
+                            .is_some_and(|d| d.id() != held.id());
+                    if ended || replaced {
+                        self.release_session(cx);
+                    }
+                }
                 let has = Consoles::get(cx, console).is_some_and(|s| s.session.is_some());
                 if !has && matches!(self.acquire, Acquire::Idle) {
                     self.acquire(profile, window, cx);
@@ -849,10 +942,7 @@ impl ConsoleHost {
     fn tell_editor(&mut self, connected: bool, cx: &mut Context<Self>) {
         self.told = Some(connected);
         if let Some(editor) = self.editor().cloned() {
-            editor.update(cx, |v, cx| {
-                let tier = v.status().tier;
-                v.set_doc_context(DocContext { connected, tier }, cx);
-            });
+            exec_doc_context(&editor, connected, None, cx);
         }
     }
 
@@ -913,7 +1003,25 @@ impl ConsoleHost {
                         }
                     }
                     Ok(Err(_)) => {
+                        // Said once, then no retry until Run (fix round 1, M13).
                         tracing::info!("console session not opened");
+                        this.acquire = Acquire::Cancelled;
+                        let name = this.title(cx);
+                        ToastQueue::push(
+                            cx,
+                            Toast::new(
+                                ToastKind::Info,
+                                Rc::new(move |cx: &App| {
+                                    tr(
+                                        cx,
+                                        ids::hv::CONSOLE_SESSION_FAILED,
+                                        ids::hv::HvConsoleSessionFailed {
+                                            name: Text(name.to_string()),
+                                        },
+                                    )
+                                }),
+                            ),
+                        );
                     }
                     Err(_) => {}
                 }
@@ -934,10 +1042,19 @@ impl ConsoleHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Own = not the profile's default session (in single-session mode `open` hands a later
+        // console the default one; fix round 1, I4).
+        let default = self.binding.and_then(|(p, _)| {
+            cx.try_global::<ConnectionsModel>()?
+                .manager()
+                .sessions(p)?
+                .default_session()
+        });
+        self.own_session = default.is_none_or(|d| d.id() != handle.id());
         Consoles::update(cx, console, |s| s.session = Some(handle));
         exec_rebind(console, window, cx);
         self.tell_editor(true, cx);
-        self.watch_session(cx);
+        self.watch_session(window, cx);
     }
 
     /// Takes the session away from the console; a session of its own closes.
@@ -959,7 +1076,7 @@ impl ConsoleHost {
         }
         let mut released = None;
         Consoles::update(cx, console, |s| released = s.session.take());
-        let own = self.binding.is_some_and(|(_, slot)| slot > 1);
+        let own = std::mem::take(&mut self.own_session);
         if let (Some(handle), true) = (released, own)
             && let Some(m) = cx.try_global::<ConnectionsModel>()
         {
@@ -971,13 +1088,31 @@ impl ConsoleHost {
         self.ux = None;
         self.clock = None;
         self.clock_task = None;
+        self.update_pending(cx);
         cx.notify();
         true
     }
 
+    /// C1: the profile must be read-only while this console still holds a read-write session
+    /// (the user's open transaction holds the reconnect back). Published on the registry, where
+    /// every Run entry point reads it; the toolbar says what is true.
+    fn update_pending(&mut self, cx: &mut Context<Self>) {
+        let pending = self.owned()
+            && self.ux.is_some_and(|u| !u.read_only && !u.ended)
+            && self.binding.is_some_and(|(p, _)| must_be_read_only(cx, p));
+        if pending == self.pending_ro {
+            return;
+        }
+        self.pending_ro = pending;
+        if let Some(console) = self.console() {
+            Consoles::set_pending_read_only(cx, console, pending);
+        }
+        cx.notify();
+    }
+
     /// Watches the console's session for the toolbar (a `tokio::sync::watch` awaited on the
     /// foreground, Q4).
-    fn watch_session(&mut self, cx: &mut Context<Self>) {
+    fn watch_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let session = self
             .console()
             .and_then(|c| Consoles::get(cx, c))
@@ -994,10 +1129,13 @@ impl ConsoleHost {
             return;
         }
         let mut rx = session.state();
-        let task = cx.spawn(async move |this, cx| {
+        let task = cx.spawn_in(window, async move |this, cx| {
             loop {
                 let ux = SessionUx::of(&rx.borrow_and_update());
-                if this.update(cx, |this, cx| this.on_session(ux, cx)).is_err() {
+                if this
+                    .update_in(cx, |this, window, cx| this.on_session(ux, window, cx))
+                    .is_err()
+                {
                     break;
                 }
                 if rx.changed().await.is_err() {
@@ -1008,7 +1146,7 @@ impl ConsoleHost {
         self.watched = Some((session.id(), task));
     }
 
-    fn on_session(&mut self, ux: SessionUx, cx: &mut Context<Self>) {
+    fn on_session(&mut self, ux: SessionUx, window: &mut Window, cx: &mut Context<Self>) {
         if self.ux == Some(ux) {
             return;
         }
@@ -1037,6 +1175,12 @@ impl ConsoleHost {
                 self.clock_task = None;
             }
         }
+        self.update_pending(cx);
+        if ux.ended && self.owned() {
+            // The session ended under the console: let it go and take a new one if the
+            // profile is still connected (I5).
+            self.sync_session(window, cx);
+        }
         cx.notify();
     }
 
@@ -1045,6 +1189,11 @@ impl ConsoleHost {
     /// Run: ends a composition first (the platform commits it on the click; this covers a
     /// click it did not see), gives the editor the focus back and runs `editor.run` on it.
     fn run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(console) = self.console()
+            && run_refused(console, cx)
+        {
+            return;
+        }
         if matches!(self.acquire, Acquire::Cancelled) {
             self.acquire = Acquire::Idle;
             self.sync_session(window, cx);
@@ -1127,7 +1276,11 @@ impl ConsoleHost {
 
     fn live_toolbar_model(&self, cx: &App) -> ToolbarModel {
         let profile = self.binding.and_then(|(p, _)| profile_of(cx, p));
+        // The notice claims read-only only over a read-only session (or none yet): during a
+        // pending reconnect the console says what is true instead (C1).
         let production = production_read_only(cx)
+            && !self.pending_ro
+            && self.ux.is_none_or(|u| u.read_only)
             && profile
                 .as_ref()
                 .is_some_and(|p| p.environment == Some(EnvTag::Production));
@@ -1157,8 +1310,14 @@ impl ConsoleHost {
         };
         let read_only = self
             .ux
-            .filter(|ux| ux.read_only && !production)
+            .filter(|ux| ux.read_only && !production && !self.pending_ro)
             .map(|ux| access_label(cx, ux.access));
+        let pending_read_only = self.pending_ro.then(|| {
+            profile
+                .as_ref()
+                .map(|p| SharedString::from(p.name.clone()))
+                .unwrap_or_default()
+        });
         ToolbarModel {
             run,
             run_enabled: !matches!(self.acquire, Acquire::Waiting { .. }),
@@ -1170,6 +1329,7 @@ impl ConsoleHost {
             waiting,
             read_only,
             production,
+            pending_read_only,
         }
     }
 
@@ -1222,7 +1382,7 @@ impl ConsoleHost {
                     }
                 }
             }
-            let own = self.binding.is_some_and(|(_, slot)| slot > 1);
+            let own = self.own_session;
             let session = Consoles::get(cx, console).and_then(|s| s.session.clone());
             if let (true, Some(handle)) = (own, session) {
                 // The tab close guard (Task 33's prompt) asked before; should a user
@@ -1255,7 +1415,7 @@ impl Render for ConsoleHost {
             Mode::Ready { editor, .. } => editor.clone(),
         };
         // A registrant may swap the console's session (Task 34's tests do).
-        self.watch_session(cx);
+        self.watch_session(window, cx);
         let model = self.toolbar_model(cx);
         let actions = self.actions(cx);
         let bar = toolbar::build(&model, &actions, cx);
@@ -1395,7 +1555,76 @@ fn exec_rebind(console: ConsoleId, window: &mut Window, cx: &mut App) {
     }
     Consoles::update(cx, console, |s| s.sql = Some(ctx));
 }
+/// The editor's document context: connected or not, and its tier. **Removed at the merge**:
+/// Task 33's attach/rebind own `set_doc_context(connected)` and set it after their SQL-context
+/// probe; the console host then calls nothing of it (the `TierChanged` handler and
+/// `tell_editor` go with it). `tier`: `None` keeps the editor's own.
+fn exec_doc_context(
+    editor: &Entity<EditorView>,
+    connected: bool,
+    tier: Option<Tier>,
+    cx: &mut App,
+) {
+    editor.update(cx, |v, cx| {
+        let tier = tier.unwrap_or(v.status().tier);
+        v.set_doc_context(DocContext { connected, tier }, cx);
+    });
+}
 // ## end m3a-t32: exec_ui attach/rebind (T33)
+
+/// Run on console `console` sends nothing while its read-only reconnect is pending (C1); the
+/// user is told why. Every Run entry point of the console host asks it (the toolbar, the
+/// `editor.run*` commands); Task 33's run must too (merge obligation).
+pub fn run_refused(console: ConsoleId, cx: &mut App) -> bool {
+    if !Consoles::pending_read_only(cx, console) {
+        return false;
+    }
+    let name = Consoles::get(cx, console)
+        .and_then(|s| s.profile)
+        .and_then(|p| profile_of(cx, p))
+        .map(|p| p.name.clone())
+        .unwrap_or_default();
+    ToastQueue::push(
+        cx,
+        Toast::new(
+            ToastKind::Info,
+            Rc::new(move |cx: &App| {
+                tr(
+                    cx,
+                    ids::hv::CONSOLE_RO_PENDING,
+                    ids::hv::HvConsoleRoPending {
+                        name: Text(name.clone()),
+                    },
+                )
+            }),
+        ),
+    );
+    true
+}
+
+/// The kept file's name as the restore notice shows it (machine text).
+fn kept_name(kept: Option<&std::path::Path>, path: &std::path::Path) -> String {
+    kept.unwrap_or(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// The wide notice of a console that was not reopened.
+fn restore_toast(name: SharedString, body: hacivat_ui::text::TextFn, cx: &mut App) {
+    let mut toast = Toast::new(ToastKind::Info, body);
+    toast.title = Some(Rc::new(move |cx: &App| {
+        tr(
+            cx,
+            ids::hv::CONSOLE_RESTORE_REFUSED_TITLE,
+            ids::hv::HvConsoleRestoreRefusedTitle {
+                name: Text(name.to_string()),
+            },
+        )
+    }));
+    toast.wide = true;
+    ToastQueue::push(cx, toast);
+}
 
 /// The results display of a console on `engine`: the format locale and the zone of the
 /// localization, the zone loaded on the core runtime (ledger T26 note).

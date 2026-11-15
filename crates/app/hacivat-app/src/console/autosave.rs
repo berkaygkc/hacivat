@@ -6,12 +6,19 @@
 //!   the write happen there, and nothing on the UI thread awaits them.
 //! - **In order.** Each write carries the snapshot's version; a write older than the last one
 //!   written is dropped, so two writes in flight never leave the older text on disk.
-//! - **Atomic.** The text goes to `<n>.sql.tmp`, then is renamed over `<n>.sql`.
+//! - **Atomic, durable, private.** Through `hacivat_settings::fsio::atomic_write` (0600, synced
+//!   before the rename, the folder synced after) in a folder made by `create_dir_all_private`
+//!   (0700): console SQL can hold secrets (`CREATE USER … PASSWORD`).
+//! - **Never over a file it did not read.** Console numbers are reused (the next is one more
+//!   than the highest open one), so a fresh console's `<n>.sql` may hold an earlier console's
+//!   text: the first write of an autosave that neither restored nor wrote that file moves it
+//!   aside first (`fsio::quarantine`, `<n>.sql.replaced-<secs>`).
 //! - **At quit** the consoles with unsaved edits are written on the calling thread, like the
 //!   settings and the profile store (`flush_writes`): the core runtime is stopping then.
-//! - **Restore** reads the file's size first: a file over 20 MB is not read at all, the console
-//!   says so and stays empty, and its autosave is off, so the file is left on disk untouched
-//!   (R-M3-49, P26).
+//! - **Restore** reads the file's size first: a file over 20 MB is not read at all (R-M3-49,
+//!   P26), and neither is one that cannot be read: it is moved aside unchanged
+//!   (`<n>.sql.too-large-<secs>`, `.unreadable-<secs>`), the console says where, opens empty and
+//!   saves its new text as usual.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -40,21 +47,34 @@ pub enum Restored {
     Missing,
     /// The text and its content hash.
     Text { text: String, hash: u128 },
-    /// Over [`RESTORE_MAX_BYTES`]: not read.
-    TooLarge { bytes: u64 },
-    /// Unreadable (not UTF-8, a permission problem): left alone, autosave off.
-    Unreadable,
+    /// Over [`RESTORE_MAX_BYTES`]: not read; `kept` is where it was moved aside.
+    TooLarge { bytes: u64, kept: Option<PathBuf> },
+    /// Unreadable (not UTF-8, a permission problem); `kept` is where it was moved aside.
+    Unreadable { kept: Option<PathBuf> },
 }
 
-/// Reads the saved console at `path` (blocking: call it off the UI thread).
+/// Reads the saved console at `path` (blocking: call it off the UI thread). A file it does not
+/// open is moved aside unchanged, so the console's own file is free for its new text.
 pub fn read(path: &Path) -> Restored {
+    let set_aside = |tag: &str| {
+        hacivat_settings::fsio::quarantine(path, tag, std::time::SystemTime::now())
+            .map_err(|e| tracing::warn!(error = %e, "console file not moved aside"))
+            .ok()
+    };
     let bytes = match std::fs::metadata(path) {
         Ok(meta) => meta.len(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Restored::Missing,
-        Err(_) => return Restored::Unreadable,
+        Err(_) => {
+            return Restored::Unreadable {
+                kept: set_aside("unreadable"),
+            };
+        }
     };
     if bytes > RESTORE_MAX_BYTES {
-        return Restored::TooLarge { bytes };
+        return Restored::TooLarge {
+            bytes,
+            kept: set_aside("too-large"),
+        };
     }
     match std::fs::read_to_string(path) {
         Ok(text) => {
@@ -62,7 +82,9 @@ pub fn read(path: &Path) -> Restored {
             Restored::Text { text, hash }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Restored::Missing,
-        Err(_) => Restored::Unreadable,
+        Err(_) => Restored::Unreadable {
+            kept: set_aside("unreadable"),
+        },
     }
 }
 
@@ -71,6 +93,8 @@ pub fn read(path: &Path) -> Restored {
 struct Written {
     version: Option<u64>,
     hash: Option<u128>,
+    /// The file at the path is this console's (restored from it, or written by it).
+    claimed: bool,
 }
 
 /// One console's autosave.
@@ -89,6 +113,7 @@ impl Autosave {
             written: Arc::new(Mutex::new(Written {
                 version: None,
                 hash: on_disk,
+                claimed: on_disk.is_some(),
             })),
         }
     }
@@ -121,14 +146,21 @@ impl Autosave {
             return Ok(false);
         }
         if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
+            hacivat_settings::fsio::create_dir_all_private(dir)?;
         }
-        let tmp = self.path.with_extension("sql.tmp");
-        std::fs::write(&tmp, snap.buffer.to_string())?;
-        std::fs::rename(&tmp, &self.path)?;
+        if !written.claimed && self.path.exists() {
+            // Another console's text (a reused number): kept, never overwritten.
+            hacivat_settings::fsio::quarantine(
+                &self.path,
+                "replaced",
+                std::time::SystemTime::now(),
+            )?;
+        }
+        hacivat_settings::fsio::atomic_write(&self.path, snap.buffer.to_string().as_bytes())?;
         *written = Written {
             version: Some(snap.version),
             hash: Some(hash),
+            claimed: true,
         };
         Ok(true)
     }
@@ -168,6 +200,47 @@ mod tests {
         assert!(a.write_now(&snap("SELECT 2;", 5)).expect("write"));
         assert_eq!(std::fs::read_to_string(&path).expect("read"), "SELECT 2;");
         assert!(!path.with_extension("sql.tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "console SQL is private");
+            let dir = std::fs::metadata(path.parent().expect("dir")).expect("meta");
+            assert_eq!(dir.permissions().mode() & 0o777, 0o700);
+        }
+    }
+
+    /// C3: a console number is reused; the earlier console's file is moved aside, never
+    /// overwritten.
+    #[test]
+    fn a_fresh_autosave_moves_a_file_it_did_not_read_aside() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("2.sql");
+        std::fs::write(&path, "SELECT 'earlier console';").expect("write");
+        let a = Autosave::new(path.clone(), None);
+        assert!(a.write_now(&snap("SELECT 'new';", 1)).expect("write"));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "SELECT 'new';"
+        );
+        let kept: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("2.sql.replaced-"))
+            .collect();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&kept[0])).expect("read"),
+            "SELECT 'earlier console';"
+        );
+        // Its own file afterwards: overwritten in place, nothing more moved aside.
+        assert!(a.write_now(&snap("SELECT 'newer';", 2)).expect("write"));
+        assert_eq!(
+            std::fs::read_dir(dir.path()).expect("dir").count(),
+            2,
+            "one kept file and the console's own"
+        );
     }
 
     #[test]
@@ -189,11 +262,15 @@ mod tests {
         let path = dir.path().join("1.sql");
         let f = std::fs::File::create(&path).expect("create");
         f.set_len(RESTORE_MAX_BYTES + 1).expect("sparse file");
+        let Restored::TooLarge { bytes, kept } = read(&path) else {
+            panic!("refused");
+        };
+        assert_eq!(bytes, RESTORE_MAX_BYTES + 1);
+        let kept = kept.expect("moved aside");
+        assert!(!path.exists());
         assert_eq!(
-            read(&path),
-            Restored::TooLarge {
-                bytes: RESTORE_MAX_BYTES + 1
-            }
+            std::fs::metadata(&kept).expect("kept").len(),
+            RESTORE_MAX_BYTES + 1
         );
         assert_eq!(read(&dir.path().join("none.sql")), Restored::Missing);
     }

@@ -74,6 +74,12 @@ fn shell_two(cx: &mut TestAppContext) -> &'static mut VisualTestContext {
         vcx,
         test_profile(STAGING, Some(EnvTag::Staging), "10.0.4.13"),
     );
+    // ## m3a-t32-console (named exception): a connect binds the focused unbound console since
+    // Task 32 (R-M3-37); these tests bring their own consoles, so the connects happen with a
+    // non-console tab in front and Console 1 stays unbound.
+    with_ws(vcx, |ws, window, cx| {
+        ws.open_registered_tab("settings", window, cx)
+    });
     connect_and_wait(vcx, PROD);
     connect_and_wait(vcx, STAGING);
     vcx

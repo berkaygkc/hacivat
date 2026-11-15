@@ -408,11 +408,225 @@ fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext)
         toasts.contains("orders turns read-only once its open transaction"),
         "{toasts}"
     );
-    // The user ends it: now the profile reconnects read-only.
+    // Fix round 1, C1: while pending, nothing claims read-only and Run sends nothing.
+    let frame = frame_text(vcx);
+    assert!(
+        !frame.contains("Production is read-only in this version"),
+        "no false read-only notice: {frame}"
+    );
+    assert!(
+        frame.contains(
+            "orders turns read-only once its open transaction is committed or rolled back."
+        ),
+        "the pending chip: {frame}"
+    );
+    assert!(vcx.cx.read(|cx| Consoles::pending_read_only(cx, id)));
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    let runs = record_runs(vcx, &editor);
+    vcx.simulate_input("DELETE FROM t;");
+    vcx.simulate_keystrokes(&primary("enter"));
+    let _ = run(vcx, "editor.run_2");
+    click(vcx, "button-console-run");
+    vcx.run_until_parked();
+    assert!(runs.borrow().is_empty(), "Run sent nothing while pending");
+    // The user ends it: now the profile reconnects read-only, and the notice is true again.
     user_exec(&rw, "ROLLBACK");
     wait_until(vcx, "a read-only session", |vcx| {
         session_of(vcx, id).is_some_and(|s| s.state().borrow().read_only)
     });
+    assert!(!vcx.cx.read(|cx| Consoles::pending_read_only(cx, id)));
+    wait_until(vcx, "the production notice", |vcx| {
+        frame_text(vcx).contains("Production is read-only in this version")
+    });
+    stop_core_runtime_test(cx);
+}
+
+/// Fix round 1, C2: Disconnect and Delete would roll a user transaction back (the session
+/// manager closes with a rollback): they refuse while a console holds one, and say so.
+#[gpui::test]
+fn disconnect_and_delete_refuse_while_a_user_transaction_is_open(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(
+        cx,
+        "en",
+        FakeDriver::new(DbmsKind::Postgres).tracks_transactions(),
+    );
+    add_profile(vcx, test_profile("orders", Some(EnvTag::Dev), "10.0.0.7"));
+    connect_and_wait(vcx, "orders");
+    let id = wait_active_console(vcx);
+    let session = wait_session(vcx, id);
+    user_exec(&session, "BEGIN");
+    user_exec(&session, "UPDATE t SET a = 1");
+    wait_until(vcx, "the user's transaction", |_| user_tx_open(&session));
+    let pid = profile_id(vcx, "orders");
+
+    vcx.cx
+        .update(|cx| hacivat_app::connections::commands::toggle_connect(pid, cx));
+    vcx.run_until_parked();
+    assert!(matches!(live(vcx, "orders"), LiveState::Connected(_)));
+    assert!(user_tx_open(&session), "not rolled back by a disconnect");
+    assert!(
+        toast_texts(vcx)
+            .join(" ")
+            .contains("Commit or roll back the open transaction in orders first."),
+        "{:?}",
+        toast_texts(vcx)
+    );
+
+    vcx.cx
+        .update(|cx| hacivat_app::connections::delete::delete_now(pid, "orders".to_string(), cx));
+    vcx.run_until_parked();
+    assert!(
+        vcx.cx
+            .read(|cx| cx.global::<ConnectionsModel>().get(pid).is_some()),
+        "not deleted"
+    );
+    assert!(user_tx_open(&session), "not rolled back by a delete");
+
+    // Once the user ends it, Disconnect goes ahead.
+    user_exec(&session, "COMMIT");
+    vcx.cx
+        .update(|cx| hacivat_app::connections::commands::toggle_connect(pid, cx));
+    wait_until(vcx, "the disconnect", |vcx| {
+        matches!(live(vcx, "orders"), LiveState::Disconnected)
+    });
+    stop_core_runtime_test(cx);
+}
+
+/// Fix round 1, I5: a disconnect closes the console's session under it (here the model's own
+/// disconnect, past the command's gate); after the reconnect the console takes the new
+/// default session instead of keeping the dead one.
+#[gpui::test]
+fn after_a_reconnect_the_console_takes_the_new_session(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(
+        cx,
+        "en",
+        FakeDriver::new(DbmsKind::Postgres).tracks_transactions(),
+    );
+    add_profile(vcx, test_profile("orders", Some(EnvTag::Dev), "10.0.0.7"));
+    connect_and_wait(vcx, "orders");
+    let id = wait_active_console(vcx);
+    let old = wait_session(vcx, id);
+    user_exec(&old, "BEGIN");
+    wait_until(vcx, "the user's transaction", |_| user_tx_open(&old));
+    let pid = profile_id(vcx, "orders");
+    vcx.cx.update(|cx| ConnectionsModel::disconnect(cx, pid));
+    wait_until(vcx, "the old session to end", |_| {
+        matches!(
+            old.state().borrow().state,
+            hacivat_session::session::SessionState::Disconnected
+                | hacivat_session::session::SessionState::Broken(_)
+        )
+    });
+    connect_and_wait(vcx, "orders");
+    wait_until(vcx, "the new default session", |vcx| {
+        let default = vcx.cx.read(|cx| {
+            cx.global::<ConnectionsModel>()
+                .manager()
+                .sessions(pid)
+                .and_then(|s| s.default_session())
+                .map(|d| d.id())
+        });
+        session_of(vcx, id).map(|s| s.id()) == default && default.is_some()
+    });
+    let now = session_of(vcx, id).expect("a session");
+    assert_ne!(now.id(), old.id());
+    assert!(!user_tx_open(&now));
+    stop_core_runtime_test(cx);
+}
+
+/// Fix round 1, I5: a console's own session that ends under it (closed elsewhere, broken) is
+/// let go, and the console opens a new one while the profile is connected.
+#[gpui::test]
+fn a_session_that_ends_under_its_console_is_replaced(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    connect_and_wait(vcx, "orders-dev");
+    wait_active_console(vcx);
+    activate(vcx);
+    vcx.simulate_keystrokes(&primary("t"));
+    let second = wait_active_console(vcx);
+    let own = wait_session(vcx, second);
+    futures::executor::block_on(own.close(hacivat_session::session::ClosePolicy::RollBack))
+        .expect("the session closes");
+    wait_until(vcx, "a new session for the console", |vcx| {
+        session_of(vcx, second).is_some_and(|s| {
+            s.id() != own.id()
+                && !matches!(
+                    s.state().borrow().state,
+                    hacivat_session::session::SessionState::Disconnected
+                        | hacivat_session::session::SessionState::Broken(_)
+                )
+        })
+    });
+    stop_core_runtime_test(cx);
+}
+
+/// Fix round 1, I4: in single-session mode a second console shares the default session; it
+/// never closes it.
+#[gpui::test]
+fn a_shared_default_session_is_never_closed_by_a_console(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", FakeDriver::new(DbmsKind::Postgres));
+    let mut p = test_profile("orders", Some(EnvTag::Dev), "10.0.0.7");
+    p.single_session = true;
+    add_profile(vcx, p);
+    connect_and_wait(vcx, "orders");
+    let first = wait_active_console(vcx);
+    let default = wait_session(vcx, first);
+    activate(vcx);
+    vcx.simulate_keystrokes(&primary("t"));
+    let second = wait_active_console(vcx);
+    assert_ne!(second, first);
+    let shared = wait_session(vcx, second);
+    assert_eq!(
+        shared.id(),
+        default.id(),
+        "single-session mode shares the default"
+    );
+    assert!(run(vcx, "workspace.close_tab"));
+    wait_until(vcx, "the second console to go", |vcx| {
+        vcx.cx.read(|cx| Consoles::get(cx, second).is_none())
+    });
+    // The first console's (default) session still serves.
+    user_exec(&default, "SELECT 1");
+    assert!(!matches!(
+        default.state().borrow().state,
+        hacivat_session::session::SessionState::Disconnected
+    ));
+    assert_eq!(session_of(vcx, first).map(|s| s.id()), Some(default.id()));
+    stop_core_runtime_test(cx);
+}
+
+/// Fix round 1, C3: console numbers are reused, so a fresh console's `<n>.sql` may hold an
+/// earlier console's text: it is moved aside, never overwritten.
+#[gpui::test]
+fn a_fresh_console_never_overwrites_an_earlier_consoles_file(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    connect_and_wait(vcx, "orders-dev");
+    wait_active_console(vcx);
+    let pid = profile_id(vcx, "orders-dev");
+    let earlier = console_file(vcx, pid, 2);
+    std::fs::create_dir_all(earlier.parent().expect("dir")).expect("dir");
+    std::fs::write(&earlier, "SELECT 'earlier console 2';").expect("write");
+    activate(vcx);
+    vcx.simulate_keystrokes(&primary("t"));
+    let id = wait_active_console(vcx);
+    let editor = editor_of(vcx, id);
+    wait_until(vcx, "the new console's editor to take the focus", |vcx| {
+        editor_focused(vcx, &editor)
+    });
+    assert_eq!(text(vcx, &editor), "", "a new console starts empty");
+    vcx.simulate_input("SELECT 'new';");
+    vcx.executor().advance_clock(Duration::from_millis(1100));
+    wait_until(vcx, "the new text saved", |_| {
+        std::fs::read_to_string(&earlier).is_ok_and(|t| t == "SELECT 'new';")
+    });
+    let kept = siblings(&earlier, "2.sql.replaced-");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(
+        std::fs::read_to_string(&kept[0]).expect("kept"),
+        "SELECT 'earlier console 2';"
+    );
     stop_core_runtime_test(cx);
 }
 
@@ -727,6 +941,18 @@ fn a_connected_console_previews_with_its_sql_context(cx: &mut TestAppContext) {
 // ---- autosave --------------------------------------------------------------------------------
 
 /// The autosave file of console `n` of profile `id`.
+/// The files next to `path` whose names start with `prefix`.
+fn siblings(path: &std::path::Path, prefix: &str) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(path.parent().expect("a folder"))
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
+                .map(|e| e.path())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn console_file(vcx: &VisualTestContext, id: ProfileId, n: u32) -> std::path::PathBuf {
     paths(vcx)
         .consoles_dir(&id.to_string())
@@ -799,19 +1025,46 @@ fn restored_console_over_20_mb_is_refused_and_kept_on_disk(cx: &mut TestAppConte
         .read(|cx| Consoles::by_tab(cx, tab))
         .expect("console");
     assert_eq!(editor_text(vcx, id), "");
+    // The refused file was moved aside unchanged, and the notice names where (fix round 1, I6).
+    let kept = siblings(&big, "2.sql.too-large-");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(std::fs::metadata(&kept[0]).expect("kept").len(), len);
+    assert!(!big.exists());
+    let kept_name = kept[0]
+        .file_name()
+        .expect("name")
+        .to_string_lossy()
+        .to_string();
     let toasts = toast_texts(vcx).join(" ");
     assert!(
-        toasts.contains("orders-dev (2)") && toasts.contains("20.0 MB"),
+        toasts.contains("orders-dev (2)")
+            && toasts.contains("20.0 MB")
+            && toasts.contains(&kept_name),
         "{toasts}"
     );
-    // Typing in it never writes over the file.
+    // The console saves its new text to its own file as usual (I6); the kept file is never
+    // touched. Waits on the write itself (I9: the write runs on the blocking pool).
+    let host = vcx
+        .cx
+        .read(|cx| hacivat_app::console::view::host_of(cx, tab).expect("host"));
+    assert_eq!(
+        vcx.cx.read(|cx| host.read(cx).autosave_path()).as_deref(),
+        Some(big.as_path())
+    );
     activate(vcx);
     let editor = editor_of(vcx, id);
     focus_editor(vcx, &editor);
     vcx.simulate_input("SELECT 1;");
     vcx.executor().advance_clock(Duration::from_millis(1100));
-    vcx.run_until_parked();
-    assert_eq!(std::fs::metadata(&big).expect("kept").len(), len);
+    wait_until(vcx, "the new text saved", |_| {
+        std::fs::read_to_string(&big).is_ok_and(|t| t == "SELECT 1;")
+    });
+    assert_eq!(std::fs::metadata(&kept[0]).expect("kept").len(), len);
+    assert_eq!(
+        siblings(&big, "2.sql.").len(),
+        1,
+        "nothing else moved aside"
+    );
     stop_core_runtime_test(cx);
 }
 

@@ -1568,7 +1568,9 @@ hv-console-size-mb = { NUMBER($mb, minimumFractionDigits: 1, maximumFractionDigi
 # Review: PO
 hv-console-restore-refused-title = { $name } yeniden açılamadı
 # Review: PO
-hv-console-restore-refused-body = Kayıtlı metni { $size }; bu sürüm en çok { $limit } açabiliyor. Dosya diskte olduğu gibi duruyor.
+hv-console-restore-refused-body = Kayıtlı metni { $size }; bu sürüm en çok { $limit } açabiliyor. Dosya değiştirilmeden { $file } adıyla saklandı.
+# Review: PO
+hv-console-restore-unreadable-body = Kayıtlı metni okunamadı. Dosya değiştirilmeden { $file } adıyla saklandı.
 # Review: PO
 hv-edit-undo-typing = Yazmayı Geri Al
 # Review: PO
@@ -1599,3 +1601,9 @@ hv-edit-redo-indent = Girintiyi Yinele
 hv-edit-redo-outdent = Girinti Azaltmayı Yinele
 # Review: PO
 hv-console-ro-pending = { $name }, açık işlemi commit edildiğinde ya da geri alındığında salt okunur olur.
+# Review: PO
+hv-console-ro-pending-short = Bu işlemden sonra salt okunur
+# Review: PO
+hv-console-release-refused = Önce { $name } içindeki açık işlemi commit edin ya da geri alın.
+# Review: PO
+hv-console-session-failed = { $name } için bağlantı açılamadı. Çalıştır yeniden dener.

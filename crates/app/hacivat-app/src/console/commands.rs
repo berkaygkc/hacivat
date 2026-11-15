@@ -61,6 +61,20 @@ pub fn register(cx: &mut App) {
 /// Runs editor command `id` on the focused editor (nothing without one).
 fn run_on_focused(id: &'static str, window: &mut Window, cx: &mut App) {
     if let Some(editor) = focused_editor(cx) {
+        // Run sends nothing on a console whose read-only reconnect is pending (fix round 1,
+        // C1): the keys and the menus reach Run here.
+        if matches!(id, "editor.run" | "editor.run_2" | "editor.run_3")
+            && let Some(console) = crate::console::registry::Consoles::ids(cx)
+                .into_iter()
+                .find(|c| {
+                    crate::console::registry::Consoles::get(cx, *c)
+                        .and_then(|s| s.editor.as_ref())
+                        .is_some_and(|e| e.entity_id() == editor.entity_id())
+                })
+            && crate::console::view::run_refused(console, cx)
+        {
+            return;
+        }
         editor.update(cx, |v, cx| {
             v.run_command(id, window, cx);
         });

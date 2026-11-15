@@ -74,15 +74,16 @@ impl Render for EditorSegment {
         let ink = t.colors.text_2.to_hsla();
         let style = t.type_ramp.caption;
         let s = self.status;
+        // The status bar's cell gives it its padding and seam and lets it give way (Task 34's
+        // row): the segment itself shrinks, clipping, and adds neither.
         let mut row = div()
             .id("editor-segment")
             .flex()
             .flex_row()
             .items_center()
-            .flex_none()
-            .gap(px(t.spacing.md))
-            .px(px(t.spacing.md))
-            .h_full();
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .gap(px(t.spacing.md));
         if s.tier == Tier::Reduced {
             row = row.child(
                 Label::new(

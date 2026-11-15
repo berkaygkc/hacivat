@@ -55,8 +55,11 @@ pub struct ToolbarModel {
     pub waiting: Option<(SharedString, u8, u8)>,
     /// The access label of a read-only connection that is not production (the lock chip).
     pub read_only: Option<SharedString>,
-    /// The production notice (R-M3-6).
+    /// The production notice (R-M3-6): shown only over a read-only session (or none yet).
     pub production: bool,
+    /// The connection must be read-only but this console's session is still read-write: its
+    /// name. The pending chip says so in place of the notice (fix round 1, C1).
+    pub pending_read_only: Option<SharedString>,
 }
 
 /// A toolbar button's action.
@@ -138,8 +141,17 @@ pub fn build(model: &ToolbarModel, actions: &ToolbarActions, cx: &App) -> Toolba
         );
     }
 
-    // Right: the lock chip, or the production notice.
-    if model.production {
+    // Right: what is true about writing. A pending read-only reconnect first (C1), then the
+    // production notice, then the lock chip.
+    if let Some(name) = model.pending_read_only.clone() {
+        let (long, short) = (name.clone(), name);
+        let label: TextFn = Rc::new(move |cx| pending_text(cx, &long));
+        bar = bar.trailing(
+            ToolbarItem::pinned(item(move |_, cx| pending_chip(&short, false, cx)), label)
+                .priority(15)
+                .compact(item(move |_, cx| pending_chip("", true, cx))),
+        );
+    } else if model.production {
         let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::default();
         let (a, b) = (actions.clone(), bounds.clone());
         let (a2, b2) = (actions.clone(), bounds.clone());
@@ -345,6 +357,52 @@ fn waiting(
             .kind(ButtonKind::Ghost)
             .on_raised(true)
             .on_click(move |_, window, cx| cancel(window, cx)),
+        )
+        .into_any_element()
+}
+
+fn pending_text(cx: &App, name: &str) -> SharedString {
+    tr(
+        cx,
+        ids::hv::CONSOLE_RO_PENDING,
+        ids::hv::HvConsoleRoPending {
+            name: Text(name.to_string()),
+        },
+    )
+}
+
+/// The pending read-only chip (C1): the hollow amber marker (pending) and the sentence, or its
+/// short form.
+fn pending_chip(name: &str, short: bool, cx: &App) -> AnyElement {
+    let theme = *Theme::get(cx);
+    let t = theme.tokens;
+    let c = &t.colors;
+    let text = if short {
+        tr(cx, ids::hv::CONSOLE_RO_PENDING_SHORT, NoArgs)
+    } else {
+        pending_text(cx, name)
+    };
+    div()
+        .id("console-ro-pending")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(t.spacing.sm))
+        .child(
+            div()
+                .size(px(7.0))
+                .flex_none()
+                .border_1()
+                .border_color(c.amber.to_hsla()),
+        )
+        .child(
+            Label::new(
+                text,
+                TextSource::Fluent,
+                t.type_ramp.caption,
+                c.text.to_hsla(),
+            )
+            .id("console-ro-pending-text"),
         )
         .into_any_element()
 }

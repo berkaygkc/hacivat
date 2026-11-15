@@ -47,6 +47,10 @@ pub struct Consoles {
     states: HashMap<ConsoleId, ConsoleState>,
     focused: Option<ConsoleId>,
     next: u64,
+    // ## m3a-t32-console (fix round 1, C1)
+    /// Consoles whose profile must be read-only while they still hold a read-write session
+    /// (the user's open transaction holds the reconnect back): Run sends nothing on them.
+    pending_read_only: std::collections::HashSet<ConsoleId>,
 }
 
 impl Global for Consoles {}
@@ -90,6 +94,27 @@ impl Consoles {
         }
         if c.focused == Some(id) {
             c.focused = None;
+        }
+        c.pending_read_only.remove(&id);
+    }
+
+    // ## m3a-t32-console (fix round 1, C1)
+    /// Console `id` must be read-only but still holds a read-write session (the user's open
+    /// transaction holds its read-only reconnect back). **Run sends nothing while it is set**
+    /// (the console host's Run entry points, and Task 33's run: a merge obligation);
+    /// `tx.commit` and `tx.rollback` stay available, so the user can end the transaction.
+    pub fn pending_read_only(cx: &App, id: ConsoleId) -> bool {
+        cx.try_global::<Consoles>()
+            .is_some_and(|c| c.pending_read_only.contains(&id))
+    }
+
+    /// Sets or clears [`Consoles::pending_read_only`] (the console host).
+    pub fn set_pending_read_only(cx: &mut App, id: ConsoleId, pending: bool) {
+        let c = cx.default_global::<Consoles>();
+        if pending {
+            c.pending_read_only.insert(id);
+        } else {
+            c.pending_read_only.remove(&id);
         }
     }
 

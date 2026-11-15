@@ -1690,7 +1690,12 @@ hv-console-restore-refused-title = Couldn't reopen { $name }
 # Variables:
 #   $size (String) - the saved text's size (an hv-console-size-mb message), e.g. "31.4 MB".
 #   $limit (String) - the largest size the editor opens (an hv-console-size-mb message), e.g. "20.0 MB".
-hv-console-restore-refused-body = Its saved text is { $size }, more than the { $limit } this version opens. The file stays on disk unchanged.
+#   $file (String) - the name the unchanged file was kept under, next to the console's own, e.g. "2.sql.too-large-1794755669".
+hv-console-restore-refused-body = Its saved text is { $size }, more than the { $limit } this version opens. The file was kept unchanged as { $file }.
+# The notice's text when the console's saved text could not be read.
+# Variables:
+#   $file (String) - the name the unchanged file was kept under, e.g. "2.sql.unreadable-1794755669".
+hv-console-restore-unreadable-body = Its saved text couldn't be read. The file was kept unchanged as { $file }.
 # The Edit menu's Undo when it would take back typing.
 hv-edit-undo-typing = Undo Typing
 # The Edit menu's Undo when it would take back a paste.
@@ -1723,3 +1728,13 @@ hv-edit-redo-outdent = Redo Outdent
 # Variables:
 #   $name (String) - the connection's name, e.g. "orders".
 hv-console-ro-pending = { $name } turns read-only once its open transaction is committed or rolled back.
+# The short form of the pending read-only chip in a narrow console toolbar.
+hv-console-ro-pending-short = Read-only after this transaction
+# A notice when Disconnect or Delete would roll back the user's open transaction in a console.
+# Variables:
+#   $name (String) - the console's tab title, e.g. "orders-dev (2)".
+hv-console-release-refused = Commit or roll back the open transaction in { $name } first.
+# A notice when a console's own session could not be opened.
+# Variables:
+#   $name (String) - the console's tab title, e.g. "orders-dev (2)".
+hv-console-session-failed = Couldn't open a connection for { $name }. Run tries again.

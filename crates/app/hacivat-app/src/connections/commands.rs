@@ -198,6 +198,16 @@ fn paste_url(window: &mut Window, cx: &mut App) {
 pub fn toggle_connect(id: ProfileId, cx: &mut App) {
     // The manager's state, not the mirror (which may lag by one change).
     let state = cx.global::<ConnectionsModel>().manager().state(id);
+    // ## m3a-t32-console (fix round 1, C2; named exception): a disconnect closes the
+    // profile's sessions with a rollback, so a console holding the user's open transaction
+    // refuses first (a toast says which); Task 33's prompt replaces this at the merge.
+    if matches!(
+        state,
+        LiveState::Connected(_) | LiveState::Reconnecting { .. }
+    ) && crate::console::view::release_refused(cx, id)
+    {
+        return;
+    }
     match state {
         LiveState::Connected(_) => ConnectionsModel::disconnect(cx, id),
         LiveState::Connecting(_) => ConnectionsModel::cancel_connect(cx, id),
