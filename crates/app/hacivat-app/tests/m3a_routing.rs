@@ -170,29 +170,49 @@ fn hairline_is_one_red_quad_at_the_pane_top(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn edit_menu_appears_only_with_editor_commands(cx: &mut TestAppContext) {
+    // ## m3a-t32-console (named exception): the console registers the editor's commands since
+    // Task 32, so the Edit group shows from the start; it lists exactly the registered ones.
     let vcx = shell(cx, "en");
     let edit = hacivat_l10n::ids::hv::MENU_EDIT.id;
-    let titles = |vcx: &gpui::VisualTestContext| {
-        vcx.cx.read(|cx| {
-            hacivat_app::menus::menu_model(cx.global::<ActionRegistry>())
-                .into_iter()
-                .map(|g| g.title_id)
-                .collect::<Vec<_>>()
-        })
-    };
-    assert!(!titles(vcx).contains(&edit), "no editor command yet");
-    vcx.cx.update(|cx| {
-        cx.global_mut::<ActionRegistry>()
-            .register(ActionDef {
-                id: "editor.undo",
-                title_id: "hv-cmd-editor-undo",
-                context: "Editor",
-                run: Rc::new(|_, _| {}),
-                enabled: |_| true,
-            })
-            .expect("editor.undo is not registered yet");
+    let group = vcx.cx.read(|cx| {
+        hacivat_app::menus::menu_model(cx.global::<ActionRegistry>())
+            .into_iter()
+            .find(|g| g.title_id == edit)
     });
-    assert!(titles(vcx).contains(&edit), "the Edit group shows");
+    let group = group.expect("the Edit group shows");
+    let actions: Vec<&str> = group
+        .items
+        .iter()
+        .filter_map(|e| match e {
+            hacivat_app::menus::MenuEntry::Action(id) => Some(*id),
+            hacivat_app::menus::MenuEntry::Separator => None,
+        })
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            "editor.undo",
+            "editor.redo",
+            "editor.cut",
+            "editor.copy",
+            "editor.paste",
+            "editor.select_all"
+        ]
+    );
+    vcx.cx.update(|cx| {
+        assert!(
+            cx.global_mut::<ActionRegistry>()
+                .register(ActionDef {
+                    id: "editor.undo",
+                    title_id: "hv-cmd-editor-undo",
+                    context: "Editor",
+                    run: Rc::new(|_, _| {}),
+                    enabled: |_| true,
+                })
+                .is_err(),
+            "editor.undo is registered already"
+        );
+    });
 }
 
 #[gpui::test]

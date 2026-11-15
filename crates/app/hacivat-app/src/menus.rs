@@ -142,7 +142,27 @@ pub fn menu_model(reg: &ActionRegistry) -> Vec<MenuGroup> {
 /// The registered action `id`: its title message and whether it is enabled now.
 fn action(id: &str, cx: &App) -> Option<(&'static str, bool)> {
     let def = cx.try_global::<ActionRegistry>()?.get(id)?;
-    Some((def.title_id, (def.enabled)(cx)))
+    // ## m3a-t32-console (named exception): a title that follows the app's state.
+    let title = cx
+        .try_global::<MenuTitle>()
+        .and_then(|hook| (hook.0)(id, cx))
+        .unwrap_or(def.title_id);
+    Some((title, (def.enabled)(cx)))
+}
+
+// ## m3a-t32-console (named exception)
+/// A menu item's title message in place of its command's (`None`: the command's own): the Edit
+/// menu's "Undo Typing" (Task 32). The macOS menu reads it when the menus are rebuilt, the
+/// in-window menu as it renders.
+pub type MenuTitleFn = Rc<dyn Fn(&str, &App) -> Option<&'static str>>;
+
+struct MenuTitle(MenuTitleFn);
+
+impl hacivat_ui_core::gpui_surface::Global for MenuTitle {}
+
+/// Installs the menu title hook (replacing an earlier one).
+pub fn set_menu_title(cx: &mut App, hook: MenuTitleFn) {
+    cx.set_global(MenuTitle(hook));
 }
 
 /// Whether the menu item of `id` is held back now: a modal layer is open and `id` is not

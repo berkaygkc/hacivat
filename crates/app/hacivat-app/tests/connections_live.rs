@@ -26,7 +26,8 @@ fn ms(n: u64) -> Duration {
 }
 
 fn ok_pg() -> FakeDriver {
-    FakeDriver::new(DbmsKind::Postgres)
+    // ## m3a-t32-console (named exception): the guard canary (support::answers_probe).
+    answers_probe(FakeDriver::new(DbmsKind::Postgres))
 }
 
 /// A PostgreSQL fake whose connects stay in flight until `fake(vcx).release()`: tests that

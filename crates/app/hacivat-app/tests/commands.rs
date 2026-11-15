@@ -464,49 +464,8 @@ fn every_m3a_pending_id_is_bound() {
 /// deletes it and runs `keymap_commands_are_registered` unchanged; a registration still
 /// missing then fails the gate.
 const M3A_PENDING: &[&str] = &[
-    // Task 32: the editor's commands.
-    "editor.context_menu",
-    "editor.copy",
-    "editor.cut",
-    "editor.delete_backward",
-    "editor.delete_forward",
-    "editor.delete_to_line_start",
-    "editor.delete_word_backward",
-    "editor.delete_word_forward",
-    "editor.escape",
-    "editor.move_document_end",
-    "editor.move_document_start",
-    "editor.move_down",
-    "editor.move_left",
-    "editor.move_line_end",
-    "editor.move_line_start",
-    "editor.move_right",
-    "editor.move_up",
-    "editor.move_word_left",
-    "editor.move_word_right",
-    "editor.newline",
-    "editor.outdent",
-    "editor.page_down",
-    "editor.page_up",
-    "editor.paste",
-    "editor.redo",
-    "editor.run",
-    "editor.select_all",
-    "editor.select_document_end",
-    "editor.select_document_start",
-    "editor.select_down",
-    "editor.select_left",
-    "editor.select_line_end",
-    "editor.select_line_start",
-    "editor.select_page_down",
-    "editor.select_page_up",
-    "editor.select_right",
-    "editor.select_up",
-    "editor.select_word_left",
-    "editor.select_word_right",
-    "editor.tab",
-    "editor.toggle_tab_moves_focus",
-    "editor.undo",
+    // ## m3a-t32-console (named exception): Task 32 registers the editor's commands; their
+    // 42 ids left this list.
     // ## m3a-t30-results-view: the grid's commands are registered (`results::view`), so their
     // entries left this list.
     // ## m3a-t33-exec-ui (named exception): `exec.cancel` is registered (exec_ui::cancel).
@@ -524,12 +483,17 @@ fn menus_follow_language(cx: &mut TestAppContext) {
         })
     };
     // The File group holds `connection.new`, registered since M2a Task 18 (P18).
-    assert_eq!(names(vcx), ["Hacivat", "File", "View", "Window", "Help"]);
+    // ## m3a-t32-console (named exception): the Edit group holds the editor's commands, which
+    // the console registers since M3a Task 32.
+    assert_eq!(
+        names(vcx),
+        ["Hacivat", "File", "Edit", "View", "Window", "Help"]
+    );
     switch_to(vcx, "tr");
     vcx.run_until_parked();
     assert_eq!(
         names(vcx),
-        ["Hacivat", "Dosya", "Görünüm", "Pencere", "Yardım"]
+        ["Hacivat", "Dosya", "Düzen", "Görünüm", "Pencere", "Yardım"]
     );
 }
 

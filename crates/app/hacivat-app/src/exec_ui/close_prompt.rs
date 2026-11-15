@@ -95,7 +95,9 @@ enum Answer {
     Cancel,
 }
 
-fn prompt_open(cx: &App) -> bool {
+// ## m3a-t32-console (fix round 2, M15; named exception): crate-visible, so Task 32's
+// release gate tells "asked" from "another prompt is open".
+pub(crate) fn prompt_open(cx: &App) -> bool {
     cx.try_global::<ExecUi>()
         .is_some_and(|e| e.prompt.is_some())
 }
