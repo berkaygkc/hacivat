@@ -626,7 +626,8 @@ async fn mysql_read_only_runs_reset_after_release() {
 #[tokio::test(start_paused = true)]
 async fn mysql_write_succeeded_is_read_from_the_final_ok_packet() {
     // A read whose function wrote: the final OK packet counts affected rows (the driver keeps
-    // a positive count for a result with columns), and the post-check reads it.
+    // a positive count for a result with columns), and the post-check reads it. (The server's
+    // read-only transaction refuses such a write first; this is the tripwire behind it.)
     let wrote = FakeQuery {
         rows_affected: Some(1),
         ..select("SELECT f()", 1)
@@ -651,7 +652,9 @@ async fn mysql_write_succeeded_is_read_from_the_final_ok_packet() {
 #[tokio::test(start_paused = true)]
 async fn a_schema_write_behind_a_version_gated_comment_is_a_gap() {
     // T14 review m14: MySQL's command tag is read from the text, so a version-gated comment
-    // can name another verb than the one a current server runs. Every reading counts.
+    // can name another verb than the one a current server runs. Every reading counts. (A real
+    // server refuses the `CREATE` first, 1792; the fake has no server, so this proves the
+    // tripwire behind it, never that the write is stopped.)
     let (h, _f, _) = ro(mysql(), ro_mysql()).await;
     let (_, reply) = run_one(&h, "/*!99999 SELECT 1 */ CREATE TABLE x (a int)", false).await;
     assert_eq!(
