@@ -40,6 +40,7 @@ impl Scripted {
         *self.answer.borrow_mut() = Some(ExecPreview {
             ranges: ranges.iter().cloned().collect(),
             state,
+            choices: 0,
         });
     }
 }
@@ -367,9 +368,14 @@ impl LanguageService for AroundService {
             ExecPreview {
                 ranges,
                 state: PreviewState::Nothing,
+                choices: 0,
             }
         } else {
-            ExecPreview { ranges, state }
+            ExecPreview {
+                ranges,
+                state,
+                choices: 0,
+            }
         })
     }
     fn token_oracle(&self, _: DocId) -> Rc<dyn TokenOracle> {
@@ -472,4 +478,56 @@ fn a_text_change_clears_the_chooser_override(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     let p = band(&e, vcx).unwrap();
     assert_eq!((p.units.to_vec(), p.from_override), (vec![0..8], false));
+}
+
+// ## m3a-t33-exec-ui (named exception): the "N choices" hint (T28 ruling 2).
+
+/// Run would open the chooser: the band shows the preselected candidate and "N choices" at the
+/// end of its first line, N being the candidates the chooser offers (`ExecPreview::choices`).
+/// Runnable units say nothing of choices, and the chooser's hover override shows none.
+#[gpui::test]
+fn ask_preselected_shows_the_number_of_choices(cx: &mut TestAppContext) {
+    let service = Rc::new(Scripted::default());
+    let (e, vcx) = open(cx, SQL, service.clone());
+    *service.answer.borrow_mut() = Some(ExecPreview {
+        ranges: smallvec![0..8],
+        state: PreviewState::AskPreselected,
+        choices: 3,
+    });
+    e.update(vcx, |v, cx| v.select_range(3..3, cx));
+    vcx.executor().advance_clock(PREVIEW_DELAY);
+    vcx.run_until_parked();
+    draw(vcx);
+    let p = band(&e, vcx).expect("a band");
+    assert_eq!((p.style, p.choices), (BandStyle::Run, 3));
+    let count = |vcx: &VisualTestContext| {
+        drawn(vcx)
+            .iter()
+            .filter(|t| t.as_str() == "hv-editor-preview-choices")
+            .count()
+    };
+    assert_eq!(count(vcx), 1, "{:?}", drawn(vcx));
+    // Plain units: no choices.
+    service.answer(PreviewState::Units, &[0..8]);
+    e.update(vcx, |v, cx| v.select_range(4..4, cx));
+    vcx.executor().advance_clock(PREVIEW_DELAY);
+    vcx.run_until_parked();
+    draw(vcx);
+    assert_eq!(band(&e, vcx).expect("a band").choices, 0);
+    assert_eq!(count(vcx), 0);
+    // The chooser's hover: the highlighted row, no hint.
+    *service.answer.borrow_mut() = Some(ExecPreview {
+        ranges: smallvec![0..8],
+        state: PreviewState::AskPreselected,
+        choices: 2,
+    });
+    e.update(vcx, |v, cx| v.select_range(3..3, cx));
+    vcx.executor().advance_clock(PREVIEW_DELAY);
+    vcx.run_until_parked();
+    e.update(vcx, |v, cx| {
+        v.set_preview_override(Some(smallvec![0..8, 10..18]), cx)
+    });
+    draw(vcx);
+    assert_eq!(band(&e, vcx).expect("a band").choices, 0);
+    assert_eq!(count(vcx), 0);
 }

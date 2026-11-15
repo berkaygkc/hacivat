@@ -58,7 +58,7 @@ pub(super) fn run_3(v: &mut EditorView, _: &mut Window, cx: &mut Cx<'_>) {
 }
 
 /// The first line of the statement at `r`, at most [`LABEL_CHARS`] characters of it (then an
-/// ellipsis): data, quoted in the sentence, its invisible characters shown as code points.
+/// ellipsis): data, quoted in the sentence.
 fn label(snap: &Snapshot, r: &Range<usize>) -> SharedString {
     let buf = &snap.buffer;
     let line_end = buf.line_range(buf.byte_to_line(r.start), false).end;
@@ -69,67 +69,10 @@ fn label(snap: &Snapshot, r: &Range<usize>) -> SharedString {
     let text = buf.slice(r.start..end.max(r.start));
     let text = text.trim();
     let mut clusters = text.grapheme_indices(true);
-    // ## m3a-t34-status-follows (named exception): every invisible character of the kept
-    // text is shown as its code point (`shown_as_code_point`).
     match clusters.nth(LABEL_CHARS) {
-        Some((cut, _)) => format!("{}…", visible(&text[..cut])).into(),
-        None => SharedString::from(visible(text)),
+        Some((cut, _)) => format!("{}…", &text[..cut]).into(),
+        None => SharedString::from(text.to_string()),
     }
-}
-
-// ## m3a-t34-status-follows (named exception; fix round 1, M4)
-/// `text` as the chooser's labels show it (`sql_split`'s `label_of`): each run of white space
-/// and control characters is one space (none at either end), and each character
-/// [`shown_as_code_point`] is written as `<U+XXXX>`.
-fn visible(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut gap = false;
-    for c in text.chars() {
-        if c.is_whitespace() || c.is_control() {
-            gap = !out.is_empty();
-            continue;
-        }
-        if gap {
-            out.push(' ');
-            gap = false;
-        }
-        if shown_as_code_point(c) {
-            out.push_str(&format!("<U+{:04X}>", u32::from(c)));
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-// ## m3a-t34-status-follows (named exception; ledger T34 note)
-/// Whether `c` is drawn as its code point (`<U+XXXX>`) in a quoted label, as Task 13's chooser
-/// labels do (`sql_split`'s `is_invisible_format`, which a UI crate cannot reach): Unicode's
-/// `Default_Ignorable_Code_Point` set, its reserved ranges included, U+061C (the Arabic letter
-/// mark) and the interlinear annotation controls (U+FFF9–U+FFFB): the chooser's set. Drawn as
-/// they are, the bidirectional controls would reorder the SQL the sentence quotes, and the
-/// zero-width and other invisible characters would hide or fake it.
-fn shown_as_code_point(c: char) -> bool {
-    matches!(
-        c,
-        '\u{00AD}'
-            | '\u{034F}'
-            | '\u{061C}'
-            | '\u{115F}'..='\u{1160}'
-            | '\u{17B4}'..='\u{17B5}'
-            | '\u{180B}'..='\u{180F}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{206F}'
-            | '\u{3164}'
-            | '\u{FE00}'..='\u{FE0F}'
-            | '\u{FEFF}'
-            | '\u{FFA0}'
-            | '\u{FFF0}'..='\u{FFFB}'
-            | '\u{1BCA0}'..='\u{1BCA3}'
-            | '\u{1D173}'..='\u{1D17A}'
-            | '\u{E0000}'..='\u{E0FFF}'
-    )
 }
 
 /// The sentence for `preview` (`None`: the service has no analysis of this version yet).
@@ -342,93 +285,5 @@ mod tests {
                 Some("hv-editor-describe-uncertain")
             );
         });
-    }
-
-    // ## m3a-t34-status-follows (named exception): the quoted SQL shows every invisible
-    // character, as Task 13's chooser labels do (`<U+XXXX>`).
-    #[gpui::test]
-    fn the_quoted_sql_shows_its_invisible_characters(cx: &mut TestAppContext) {
-        let text = "SELECT '\u{202E}x\u{2066}' \u{200F}\u{061C}\u{00AD}\u{200B}\u{FEFF}\u{E0041}\u{2068}\u{2069};";
-        let (e, vcx) = open(cx, text);
-        let snap = vcx.read(|cx| e.read(cx).snapshot());
-        assert_eq!(
-            label(&snap, &(0..text.len())).as_ref(),
-            "SELECT '<U+202E>x<U+2066>' <U+200F><U+061C><U+00AD><U+200B><U+FEFF><U+E0041>\
-             <U+2068><U+2069>;"
-        );
-        // Visible text is quoted as it is.
-        let (e, vcx) = open(cx, "SELECT 'ä', \"ß\" FROM t;");
-        let snap = vcx.read(|cx| e.read(cx).snapshot());
-        assert_eq!(label(&snap, &(0..25)).as_ref(), "SELECT 'ä', \"ß\" FROM t;");
-    }
-
-    // ## m3a-t34-status-follows (fix round 1, M4): runs of white space and control characters
-    // are one space, as in the chooser's labels (`label_of`): a paragraph separator (which ends
-    // every bidi isolate), a line separator, C0 and C1 controls and tabs never reach the
-    // sentence raw.
-    #[test]
-    fn white_space_and_control_runs_are_one_space() {
-        assert_eq!(
-            visible("SELECT\u{2029}'a'\t\t\u{0085} x\u{1b}[31m\u{2028}\u{202E}y\u{7f}"),
-            "SELECT 'a' x [31m <U+202E>y"
-        );
-        assert_eq!(visible("\t SELECT 1 \u{2029}"), "SELECT 1");
-        assert_eq!(visible("a\u{00A0}\u{3000}b"), "a b");
-    }
-
-    #[test]
-    fn the_invisible_set_is_the_chooser_labels_set() {
-        for c in [
-            '\u{00AD}',
-            '\u{034F}',
-            '\u{061C}',
-            '\u{115F}',
-            '\u{1160}',
-            '\u{17B4}',
-            '\u{17B5}',
-            '\u{180B}',
-            '\u{180E}',
-            '\u{180F}',
-            '\u{200B}',
-            '\u{200F}',
-            '\u{202A}',
-            '\u{202E}',
-            '\u{2060}',
-            '\u{2064}',
-            '\u{2065}',
-            '\u{206F}',
-            '\u{3164}',
-            '\u{FE00}',
-            '\u{FE0F}',
-            '\u{FEFF}',
-            '\u{FFA0}',
-            '\u{FFF0}',
-            '\u{FFF8}',
-            '\u{FFF9}',
-            '\u{FFFB}',
-            '\u{1BCA0}',
-            '\u{1BCA3}',
-            '\u{1D173}',
-            '\u{1D17A}',
-            '\u{E0000}',
-            '\u{E0001}',
-            '\u{E007F}',
-            '\u{E0100}',
-            '\u{E0FFF}',
-        ] {
-            assert!(shown_as_code_point(c), "{:04X}", u32::from(c));
-        }
-        for c in [
-            'a',
-            ' ',
-            'ı',
-            'İ',
-            '\u{0600}',
-            '\u{2028}',
-            '\u{FFFC}',
-            '\u{1F600}',
-        ] {
-            assert!(!shown_as_code_point(c), "{:04X}", u32::from(c));
-        }
     }
 }

@@ -116,6 +116,8 @@ struct Mark {
     state: Option<ExecMarkState>,
     label: Option<TextFn>,
     eol: Option<TextFn>,
+    // ## m3a-t33-exec-ui (named exception): the app's short form on a long line.
+    short: Option<TextFn>,
     stale: bool,
 }
 
@@ -348,6 +350,7 @@ pub fn add(
             state: None,
             label: None,
             eol: None,
+            short: None,
             stale,
         };
         let at = s
@@ -374,6 +377,19 @@ pub fn set_state(
         t.mark.state = Some(state);
         t.mark.label = label;
         t.mark.eol = eol;
+    }
+}
+
+// ## m3a-t33-exec-ui (named exception)
+/// Sets a mark's short form: what its end-of-line status shows on a long line, on the pad
+/// (a success: the green check and this text; a running or cancelling statement: this text in
+/// amber). Without one only a failure's SQLSTATE chip shows there. A new state keeps it until
+/// the app sets another.
+pub fn set_short(s: &mut MarkStore, key: MarkKey, short: Option<TextFn>) {
+    if let Some(m) = s.marks.iter_mut().find(|m| m.key == key) {
+        m.short = short;
+    } else if let Some(t) = s.tombstones.iter_mut().find(|t| t.mark.key == key) {
+        t.mark.short = short;
     }
 }
 
@@ -648,6 +664,20 @@ fn status_parts(m: &Mark, glyph: Glyph, short: bool, inks: &Inks, cx: &App) -> V
         {
             parts.push(Part::Chip(code.clone()));
         }
+        // ## m3a-t33-exec-ui (named exception): the app's short form (NOTES surface 5: check
+        // + duration, the amber clock); queued, skipped and stale drop their words.
+        if let (Some(text), false) = (m.short.as_ref(), terminal_stale) {
+            match glyph {
+                Glyph::Succeeded => {
+                    parts.push(Part::Icon(IconName::Check, inks.green));
+                    parts.push(Part::Text(text(cx), inks.text_3));
+                }
+                Glyph::Running | Glyph::Cancelling => {
+                    parts.push(Part::Text(text(cx), inks.amber));
+                }
+                _ => {}
+            }
+        }
         return parts;
     }
     if terminal_stale {
@@ -714,6 +744,10 @@ fn glyph_element(glyph: Glyph, stale: bool, inks: &Inks) -> AnyElement {
 /// The message `id` with a unit's position (`i` of `n`) when given.
 fn hint_message(cx: &App, hint: PreviewHint) -> SharedString {
     let (id, args) = hint_text(hint);
+    // ## m3a-t33-exec-ui (named exception)
+    if let PreviewHint::Choices { n } = hint {
+        return crate::commands::message(cx, id, &[("n", UiArg::Count(u64::from(n)))]);
+    }
     match args {
         Some((i, n)) => crate::commands::message(
             cx,
@@ -896,6 +930,10 @@ pub fn prepaint(
             PreviewHint::Uncertain => parts.push(Part::Icon(IconName::CircleAlert, inks.text)),
             PreviewHint::Offline => parts.push(Part::Icon(IconName::Unplug, inks.text_3)),
             PreviewHint::Unit { .. } => {}
+            // ## m3a-t33-exec-ui (named exception)
+            PreviewHint::Choices { .. } => {
+                parts.push(Part::Icon(IconName::ChevronsUpDown, inks.text_3));
+            }
         }
         parts.push(Part::Text(hint_message(cx, hint), inks.text_3));
         eols.push((line, parts, Vec::new()));
