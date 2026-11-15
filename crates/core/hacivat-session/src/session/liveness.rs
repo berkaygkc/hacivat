@@ -25,13 +25,27 @@
 //! transaction status: Hacivat's own transaction around a cursor counts as idle, so it draws
 //! no `IdleTransaction` and does not hold up an idle disconnect (the close releases the cursor
 //! first).
+//!
+//! ## m3a-f1-followups (named exception, follow-up F1-b)
+//! The default session's idle disconnect ends the whole profile (`end_live` closes every
+//! session with a rollback), so it waits for the profile, not only for itself: while another
+//! session of the profile holds a user transaction or runs a user request
+//! ([`ProfileActivity`]), or for the idle threshold after the profile's last user activity on
+//! any session, a tick that would disconnect does not. Keep-alive pings and the idle
+//! transaction warning still follow the default session's own activity (its connection needs
+//! its own keep-alive). After a clock jump only a profile held *now* keeps it connected: the
+//! profile's last activity is on the monotonic clock, which may not count the sleep.
 
+use std::collections::HashSet;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use hacivat_driver::TxStatus;
 use hacivat_proto::EnvTag;
 
 use crate::profile::{Profile, TransportSpec};
+// ## m3a-f1-followups
+use crate::session::SessionId;
 
 /// How far the clocks may drift apart between two ticks before the session is suspect.
 const JUMP: Duration = Duration::from_secs(5);
@@ -122,6 +136,11 @@ pub struct Supervisor {
     suspect: bool,
     /// `IdleTransaction` was returned in this idle period.
     warned: bool,
+    // ## m3a-f1-followups
+    /// Another session of the profile holds a user transaction or runs a user request.
+    profile_held: bool,
+    /// The profile's last user activity on any session.
+    profile_last: Option<Instant>,
 }
 
 impl Supervisor {
@@ -135,6 +154,8 @@ impl Supervisor {
             idle_wall: Duration::ZERO,
             suspect: false,
             warned: false,
+            profile_held: false,
+            profile_last: None,
         }
     }
 
@@ -173,7 +194,9 @@ impl Supervisor {
             let idle = self
                 .idle_wall
                 .max(now.saturating_duration_since(self.last_activity));
+            // ## m3a-f1-followups: nor while the profile is held now.
             if !open_tx
+                && !self.profile_held
                 && self
                     .policy
                     .idle_disconnect
@@ -186,10 +209,11 @@ impl Supervisor {
         if let Some(limit) = self.policy.idle_disconnect
             && now.saturating_duration_since(self.last_activity) >= limit
         {
-            if !open_tx {
+            // ## m3a-f1-followups: the profile's other sessions hold the disconnect off.
+            if !open_tx && !self.profile_holds(now, limit) {
                 return Some(LivenessAction::Disconnect);
             }
-            if !self.warned {
+            if open_tx && !self.warned {
                 self.warned = true;
                 return Some(LivenessAction::IdleTransaction);
             }
@@ -214,6 +238,25 @@ impl Supervisor {
         self.last_ping = now;
     }
 
+    // ## m3a-f1-followups
+    /// What the profile's other sessions do now (the module docs, F1-b): `held` while one holds
+    /// a user transaction or runs a user request, `last` their latest user activity. The actor
+    /// passes it before every tick; it never counts as this session's activity.
+    pub fn note_profile(&mut self, held: bool, last: Option<Instant>) {
+        self.profile_held = held;
+        self.profile_last = self.profile_last.max(last);
+    }
+
+    // ## m3a-f1-followups
+    /// Whether the profile keeps an idle disconnect at `now` off: it is held, or had user
+    /// activity within `limit`.
+    fn profile_holds(&self, now: Instant, limit: Duration) -> bool {
+        self.profile_held
+            || self
+                .profile_last
+                .is_some_and(|at| now.saturating_duration_since(at) < limit)
+    }
+
     /// The session was away from its ticks (a ping, a reconnect): the next tick measures both
     /// clocks from here, so the time spent is not taken for a jump. Not activity.
     pub fn resync(&mut self, now: Instant, wall: SystemTime) {
@@ -221,6 +264,50 @@ impl Supervisor {
         self.idle_wall = self.idle_wall.saturating_add(wall_delta);
         self.tick_mono = now;
         self.tick_wall = wall;
+    }
+}
+
+// ## m3a-f1-followups (named exception, follow-up F1-b)
+/// What the sessions of one profile tell the default session's supervisor (the module docs):
+/// which of them hold a user transaction or run a user request now, and when the profile last
+/// had user activity. Every session the profile's `SessionManager` starts reports to it; a
+/// session that ends leaves it.
+#[derive(Debug, Default)]
+pub(crate) struct ProfileActivity {
+    inner: Mutex<ProfileInner>,
+}
+
+#[derive(Debug, Default)]
+struct ProfileInner {
+    last: Option<Instant>,
+    held: HashSet<SessionId>,
+}
+
+impl ProfileActivity {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ProfileInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Session `id` had user activity at `at` (if any), and holds the profile (`held`) or not.
+    pub(crate) fn report(&self, id: SessionId, at: Option<Instant>, held: bool) {
+        let mut inner = self.lock();
+        inner.last = inner.last.max(at);
+        if held {
+            inner.held.insert(id);
+        } else {
+            inner.held.remove(&id);
+        }
+    }
+
+    /// Session `id` ended.
+    pub(crate) fn leave(&self, id: SessionId) {
+        self.lock().held.remove(&id);
+    }
+
+    /// Whether a session other than `me` holds the profile, and the profile's last activity.
+    pub(crate) fn others(&self, me: SessionId) -> (bool, Option<Instant>) {
+        let inner = self.lock();
+        (inner.held.iter().any(|id| *id != me), inner.last)
     }
 }
 
@@ -265,5 +352,101 @@ mod tests {
         // Ten seconds away in a ping, then resynced: no jump.
         s.resync(at(11), wall(11));
         assert_eq!(s.tick(at(12), wall(12), false, TxStatus::Idle), None);
+    }
+
+    // ## m3a-f1-followups
+    fn idle_policy() -> LivenessPolicy {
+        LivenessPolicy {
+            keepalive: Some(Duration::from_secs(60)),
+            idle_disconnect: Some(Duration::from_secs(300)),
+            tick: Duration::from_secs(1),
+        }
+    }
+
+    /// F1-b: a profile held by another session never lets the default disconnect, its own
+    /// keep-alive still runs, and once the hold ends the threshold counts from the profile's
+    /// last activity.
+    #[test]
+    fn a_held_profile_holds_the_idle_disconnect_off() {
+        let t0 = Instant::now();
+        let w0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut s = Supervisor::new(idle_policy(), t0, w0);
+        let mut actions = Vec::new();
+        s.note_profile(true, None);
+        for n in 1..=900 {
+            let at = t0 + Duration::from_secs(n);
+            let action = s.tick(at, w0 + Duration::from_secs(n), false, TxStatus::Idle);
+            if action == Some(LivenessAction::Ping) {
+                s.note_ping(at);
+            }
+            actions.extend(action);
+        }
+        assert!(
+            !actions.contains(&LivenessAction::Disconnect),
+            "{actions:?}"
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| **a == LivenessAction::Ping)
+                .count(),
+            15,
+            "the default's own keep-alive"
+        );
+        // The hold ends with activity at 900 s: no disconnect before 1200 s, one at 1200 s.
+        s.note_profile(false, Some(t0 + Duration::from_secs(900)));
+        let tick = |s: &mut Supervisor, n: u64| {
+            s.tick(
+                t0 + Duration::from_secs(n),
+                w0 + Duration::from_secs(n),
+                false,
+                TxStatus::Idle,
+            )
+        };
+        for n in 901..1200 {
+            assert_ne!(tick(&mut s, n), Some(LivenessAction::Disconnect), "{n}");
+        }
+        assert_eq!(tick(&mut s, 1200), Some(LivenessAction::Disconnect));
+    }
+
+    /// After a clock jump only a hold *now* keeps the profile: recent activity on the monotonic
+    /// clock does not (it may not count the sleep).
+    #[test]
+    fn after_a_jump_only_a_current_hold_keeps_the_profile() {
+        let t0 = Instant::now();
+        let w0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        for (held, expect) in [
+            (true, LivenessAction::Ping),
+            (false, LivenessAction::Disconnect),
+        ] {
+            let mut s = Supervisor::new(idle_policy(), t0, w0);
+            s.note_profile(held, Some(t0));
+            // One second of monotonic time, an hour of wall time.
+            let (at, wall) = (t0 + Duration::from_secs(1), w0 + Duration::from_secs(3600));
+            assert_eq!(
+                s.tick(at, wall, false, TxStatus::Idle),
+                Some(LivenessAction::Suspect)
+            );
+            assert_eq!(
+                s.tick(at, wall, false, TxStatus::Idle),
+                Some(expect),
+                "{held}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_activity_tracks_holders_but_not_oneself() {
+        let p = ProfileActivity::default();
+        let (a, b) = (SessionId(1), SessionId(2));
+        let t = Instant::now();
+        p.report(b, Some(t), true);
+        assert_eq!(p.others(a), (true, Some(t)));
+        assert_eq!(p.others(b), (false, Some(t)));
+        p.report(b, None, false);
+        assert_eq!(p.others(a), (false, Some(t)), "the last activity stays");
+        p.report(b, None, true);
+        p.leave(b);
+        assert!(!p.others(a).0);
     }
 }

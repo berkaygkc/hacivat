@@ -1904,3 +1904,102 @@ is covered (below).
   production `DELETE` through `Run` runs after `BEGIN … READ ONLY` and before `ROLLBACK`.
 - Not changed (review M7): `CursorReleased.rolled_back` stays `false` for guard holds; routed
   to T23/T34 (the output log reports "rolled back" for a guard hold only if its `ROLLBACK` ran).
+
+## m3a-f1 — the default session and the profile; the context probe (follow-up F1)
+
+Two cross-task safety items the reviews of Tasks 32 and 33 routed here (ledger: Task 32 fix
+round 1, N2; the T31/T33 probe notes). Both are named exceptions fenced `// ## m3a-f1-followups`.
+
+**F1-b. The default session's end ends the profile, so it waits for the profile.** M3a's
+consoles hold their own sessions next to the default one (Task 32), and when the default
+session ends, `end_live` closes every session of the profile (`pool.close_all`, with a
+rollback). M2b's liveness protected an open transaction only on the idle session itself, so an
+idle default (Console 1) idle-disconnected after its threshold and rolled back a transaction
+Console 2 held in its own session, with no prompt (only "idle disconnected").
+
+- *Choice, idle.* Every session a profile's `SessionManager` starts reports to the profile's
+  `ProfileActivity` (`liveness.rs`): when a user request starts (the profile is held while it
+  runs) and when work ends (activity, and whether it still holds a user transaction:
+  `InTx`/`Failed`, not Hacivat's own around a cursor or the guard's, on a usable connection).
+  A session leaves it when its actor ends, however it ends (a drop guard). Before every tick
+  the default session's supervisor reads it (`Supervisor::note_profile`) and never
+  idle-disconnects while another session holds the profile, nor within the idle threshold of
+  the profile's last user activity on any session. Its own keep-alive pings and its own idle
+  transaction warning still follow its own activity (its connection needs its own keep-alive).
+  After a clock jump (sleep) only a hold *now* keeps it: the profile's last activity is on the
+  monotonic clock, which may not count the sleep, and the B18 rule is that a slept machine
+  disconnects an idle profile.
+- *Choice, loss.* When the default session is genuinely lost (a failed keep-alive without
+  recovery, a recovery that gives up, a loss inside its own transaction) or ends otherwise
+  without the user closing it, `end_live_with` still closes the other sessions, but never
+  silently: if one of them holds or may be opening a user transaction, the manager emits one
+  `ConnectionEvent::SessionLost` with `open_tx` (merged with what the default itself lost, C1).
+  "May be opening" (F1 fix round 1, C1): a session whose snapshot says `InTx`/`Failed`, or one
+  that holds the profile in `ProfileActivity` (a user request still running). The snapshot's
+  `tx` moves only when a request ends, while a running `BEGIN; UPDATE …` or a Manual-mode
+  statement has already opened a transaction on the server; this is C1's `may_open_tx` rule.
+  The app already shows the event as "The session on … was lost … Your open transaction ended, and
+  the server rolled back its uncommitted changes." A deliberate disconnect (`close`) is not
+  this path: the app asks first (Task 33's `confirm_release`).
+- *Rejected: keep the healthy sessions when the default is lost.* The profile is `Lost` and the
+  app shows it disconnected; a kept session would be an orphan the console UI cannot reach, so
+  an open transaction (holding locks on a production server) would stay open with no way to
+  commit or roll it back, and a later Retry would build a new `SessionManager` beside the
+  orphans (two budgets, two overlays). Ending them with a surfaced rollback is the safer
+  option; the user learns at once that the transaction is gone.
+- *Fails closed.* Nothing new keeps a connection the profile ended; `ProfileActivity` only
+  delays an idle disconnect. A session that cannot report (an actor that panicked) leaves the
+  activity through its drop guard, so a dead session never holds a profile open.
+- *Tests.* FakeDriver `manager_f1.rs`:
+  `the_default_never_idle_disconnects_while_another_session_holds_a_user_transaction` (idle
+  300 s, Console 2 `BEGIN` + `UPDATE`, 1,800 s: connected, `InTx`, no `ROLLBACK`; after
+  `COMMIT` the threshold counts from the commit), `activity_on_another_session_keeps_the_profile_connected`,
+  `losing_the_default_never_rolls_back_another_sessions_transaction_silently` (one
+  `SessionLost { open_tx }`, Console 2 closed with one `ROLLBACK`),
+  `losing_an_idle_default_without_a_transaction_elsewhere_emits_no_session_lost`,
+  `losing_the_default_while_another_session_may_be_opening_a_transaction_is_told` (fix round
+  1: a Manual-mode `UPDATE` still running on Console 2, its snapshot still `Idle`; RED without
+  the `ProfileActivity` check: no `SessionLost`); unit tests in
+  `liveness.rs` (`a_held_profile_holds_the_idle_disconnect_off`: no disconnect in 900 s, the 15
+  keep-alive pings still sent, a disconnect exactly one threshold after the hold ends;
+  `after_a_jump_only_a_current_hold_keeps_the_profile`). RED: the three manager tests fail on
+  `m3a` 7864425 (the profile `Disconnected` at 1,800 s; no `SessionLost` event).
+
+**F1-c. The SQL-context probe on a read-only session runs outside the guard.** Since Task 32
+binds a console on every connect, Task 33's context probe runs at once. On a read-only
+(production) session it ran as a typed run *inside* the guard, so a server the guard cannot
+verify (an unanswered canary, e.g. a PostgreSQL-wire server without
+`txid_current_if_assigned()`) discarded the connection and took every connect of the profile to
+`Lost { Internal }`.
+
+- *Choice.* `hacivat_session::session::context_probe_sql(kind)` owns the probe's text
+  (`hacivat_exec::sqlctx::probe_sql` returns it). In the actor's `exec`, an
+  `ExecOrigin::Internal` request whose text is *exactly* that constant runs outside the guard,
+  as the schema probe always has (Q27, F3): a fixed read Hacivat wrote, through the values path.
+  The app probes read-only and read-write sessions the same way (`exec_ui::context`, one
+  internal `Exec`); a probe that answers no value leaves the console's context `Unknown`
+  (Task 33's fail-closed lexing state), and the session stays usable.
+- *Rejected.* (1) Keeping the guarded probe and not breaking the session on its failures: a
+  guard failure can also mean the connection's state is unclean (a failed `ROLLBACK`, a
+  transaction left open, a failed reset), which must never be reused. (2) A typed run of the
+  probe text outside the guard: a run carries no origin, so a user's run of the same text would
+  bypass the guard too.
+- *Fails closed.* Every user statement, and every other internal text (a second statement
+  appended, other case, trailing space), still runs guarded; on a server the guard cannot
+  verify the first user statement discards the session, as before.
+- *Tests.* FakeDriver `readonly_f1.rs`: `the_context_probe_never_breaks_a_session_the_guard_cannot_verify`
+  (canary 42883: the probe answers `on`, the session `Idle`),
+  `a_user_statement_the_guard_cannot_verify_still_breaks_the_session` (`SELECT 1` and the
+  probe's own text from the user: `Broken`), `other_internal_statements_stay_guarded`,
+  `a_read_only_mysql_session_answers_its_sql_mode` (MySQL, MariaDB; the guard's extended
+  protocol read no value before). App `exec_ui.rs`:
+  `a_read_only_console_the_guard_cannot_verify_keeps_its_session` (context `Known`, session
+  live; a user `SELECT 1` then fails and the session is discarded). RED by reverting the
+  bypass: the probe answers `ExecError { kind: Internal }` and the session breaks; the MySQL
+  probe reads no row; the app console's context is `Unknown`. Docker `hacivat-exec`
+  `docker_m3a_f1`: `a_production_profile_connects_with_a_bound_console_on_every_server_line`
+  (PostgreSQL 14–18, MySQL 8.0/8.4, MariaDB 10.6/10.11/11.4 on the full set: a production
+  profile under the app's policy connects, the bound console's probe reads the server's value
+  on the read-only session, the profile stays `Connected` and the session `Idle`, `SELECT 1`
+  runs and a `CREATE TABLE` is refused) and F1-a's
+  `a_parenthesis_before_copy_is_a_syntax_error_on_postgresql` (ADR 0005 `m3a-f1`).

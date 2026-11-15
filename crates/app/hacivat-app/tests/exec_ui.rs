@@ -461,36 +461,19 @@ fn ambiguous_resolution_sends_nothing(cx: &mut TestAppContext) {
 fn read_only_denial_marks_the_gutter_failed_with_its_reason(cx: &mut TestAppContext) {
     let mut p = profile("orders-ro", DbmsKind::Postgres);
     p.read_only = true;
-    // The SQL context's probe runs inside the read-only guard: its canary finds no
-    // transaction ID.
-    let canary = FakeExec {
-        prefix: "SELECT pg_catalog.txid_current_if_assigned()",
-        result: Ok(ExecSummary {
-            rows: vec![vec![None]],
-            row_count: 1,
-            ..ExecSummary::default()
-        }),
-        delay: std::time::Duration::ZERO,
-        tx_after: None,
-        panics: false,
-    };
-    // The probe is a typed run on a read-only session (fix round 1): its row.
-    let probe = FakeQuery {
-        prefix: "SHOW standard_conforming_strings",
-        sets: vec![text_row("standard_conforming_strings", "on")],
-        ..Default::default()
-    };
-    let c = console_with(cx, p, pg().exec(vec![canary]).queries(vec![probe]));
+    // ## m3a-f1-followups: the SQL-context probe is an internal statement on a read-only
+    // session too, outside the guard (F1-c); `pg()` answers it.
+    let c = console_with(cx, p, pg());
     c.set_text("BEGIN");
     c.run_at(0);
     c.wait_marks("the denial", |m| {
         matches!(m, [ExecMarkState::Failed { sqlstate: None }])
     });
-    // Only the SQL-context probe ran typed; the denied BEGIN was never sent.
-    assert_eq!(
-        c.queries(),
-        ["SHOW standard_conforming_strings"],
-        "nothing was sent"
+    // The denied BEGIN was never sent.
+    assert!(
+        c.queries().is_empty(),
+        "nothing was sent: {:?}",
+        c.queries()
     );
     enable_registry(c.vcx);
     in_window(c.vcx, |window, _| window.refresh());
@@ -1487,42 +1470,15 @@ fn preview_and_run_agree_on_generated_scripts() {
 
 // ---- fix round 1: the SQL context on read-only sessions, and an unknown one ------------------
 
-/// One text row under column `name`.
-fn text_row(name: &'static str, value: &'static str) -> FakeResultSet {
-    FakeResultSet {
-        columns: vec![(
-            name,
-            LogicalType::Text {
-                max_chars: None,
-                fixed: false,
-            },
-        )],
-        rows: FakeRows::Literal(vec![vec![Value::Text(value.into())]]),
-    }
-}
-
 /// T31 finding: on a read-only session the guard forces the extended protocol, whose internal
-/// statements carry no values; the probe runs typed instead, so a read-only MySQL console
-/// under `ANSI_QUOTES` lexes `"…"` as a name.
+/// statements carry no values; the probe runs outside the guard instead (follow-up F1-c; it
+/// was a typed run), so a read-only MySQL console under `ANSI_QUOTES` lexes `"…"` as a name.
 #[gpui::test]
 fn a_read_only_mysql_console_reads_its_sql_mode(cx: &mut TestAppContext) {
     let mut p = profile("shop-ro", DbmsKind::MySql);
     p.read_only = true;
-    let probe = FakeQuery {
-        prefix: "SELECT @@SESSION.sql_mode",
-        sets: vec![text_row(
-            "@@SESSION.sql_mode",
-            "ANSI_QUOTES,STRICT_TRANS_TABLES",
-        )],
-        ..Default::default()
-    };
-    let c = console_with(
-        cx,
-        p,
-        FakeDriver::new(DbmsKind::MySql)
-            .tracks_transactions()
-            .queries(vec![probe]),
-    );
+    // ## m3a-f1-followups: the probe's value by the values path.
+    let c = console_with(cx, p, mysql("ANSI_QUOTES,STRICT_TRANS_TABLES"));
     let ctx = c
         .vcx
         .cx
@@ -1537,11 +1493,16 @@ fn a_read_only_mysql_console_reads_its_sql_mode(cx: &mut TestAppContext) {
             .read(|cx| Consoles::get(cx, c.id).and_then(|s| s.sql)),
         Some(ctx)
     );
+    // ## m3a-f1-followups: an internal statement, never a typed (guarded) run.
     assert!(
-        c.queries().iter().any(|q| q == "SELECT @@SESSION.sql_mode"),
-        "the probe went through the typed path: {:?}",
-        c.fake.typed_log()
+        c.fake
+            .executed()
+            .iter()
+            .any(|q| q == "SELECT @@SESSION.sql_mode"),
+        "{:?}",
+        c.fake.executed()
     );
+    assert!(c.queries().is_empty(), "{:?}", c.fake.typed_log());
     stop_core_runtime_test(cx);
 }
 
@@ -1662,6 +1623,42 @@ fn confirm_release_lets_a_disconnect_continue_after_the_rollback(cx: &mut TestAp
         c.fake.executed()
     );
     wait_until(c.vcx, "the session to close", |_| {
+        !hacivat_exec::session_live(&c.session.state().borrow().state)
+    });
+    stop_core_runtime_test(cx);
+}
+
+// ## m3a-f1-followups
+/// Follow-up F1-c: a read-only (production) console on a server the read-only guard cannot
+/// verify (its canary answers nothing). Binding the console probes its SQL context at once;
+/// the probe keeps the session (it was guarded and broke it, so every connect of such a
+/// server ended `Lost { Internal }`). The guard stays fail-closed for the user's statements.
+#[gpui::test]
+fn a_read_only_console_the_guard_cannot_verify_keeps_its_session(cx: &mut TestAppContext) {
+    let mut p = profile("orders-prod", DbmsKind::Postgres);
+    p.read_only = true;
+    let c = console_with(cx, p, pg());
+    let ctx = c
+        .vcx
+        .cx
+        .read(|cx| hacivat_app::exec_ui::sql_context(c.id, cx));
+    assert!(
+        matches!(ctx, SqlContext::Known(ctx) if ctx.modes.standard_conforming_strings),
+        "{ctx:?}"
+    );
+    assert!(
+        hacivat_exec::session_live(&c.session.state().borrow().state),
+        "the probe kept the session: {:?}",
+        c.session.state().borrow().state
+    );
+    // A user statement goes through the guard, which cannot read its canary here: the
+    // session is discarded and the statement reported failed.
+    c.set_text("SELECT 1");
+    c.run_at(0);
+    c.wait_marks("the failure", |m| {
+        matches!(m, [ExecMarkState::Failed { .. }])
+    });
+    wait_until(c.vcx, "the guard to discard the session", |_| {
         !hacivat_exec::session_live(&c.session.state().borrow().state)
     });
     stop_core_runtime_test(cx);

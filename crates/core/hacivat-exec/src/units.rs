@@ -11,7 +11,11 @@
 //!   splits every region holding an uncertain boundary exactly (below);
 //! - any unit that is `COPY … FROM STDIN` (with data rows, or a `COPY` naming `STDIN` or
 //!   `STDOUT`) refuses the whole run (`exec-copy-unsupported`): with `StopOnError` the units
-//!   before it would run and the `COPY` then fail, so a script holding one runs nothing;
+//!   before it would run and the `COPY` then fail, so a script holding one runs nothing.
+//!   Which unit is such a `COPY` is the splitter's answer (`UnitKind::CopyIn` and
+//!   `UnitKind::CopyStream`, follow-up F1-a), the same one the Run preview reads, so the two
+//!   never disagree on a `COPY` (`)COPY t FROM STDIN` is no `COPY` to the splitter or the
+//!   server, which rejects it as a syntax error);
 //! - a `Verbatim` unit (a selection run as one) is refused until M3b;
 //! - a chooser candidate that would be refused is left out of `Ask`.
 //!
@@ -23,7 +27,9 @@
 //! one literal to the server and the editor), and never for a boundary from a client command
 //! or overlapping units. The region of a boundary is the execution statement whose strict
 //! range holds it. Every region must have a lexer parenthesis depth of at most
-//! [`MAX_ORACLE_NESTING`] (deeper texts never reach the parser), must hold no `COPY` data, and
+//! [`MAX_ORACLE_NESTING`] (deeper texts never reach the parser), must hold no `COPY` data nor
+//! the word `COPY` (F1-a: the oracle's pieces carry no splitter kind, so a region that may
+//! hold a `COPY` stays uncertain), and
 //! the oracle's statements must cover it exactly: the first starts at the region's start, the
 //! last ends at its end, and only white space and `;` lie between them. Its ranges are
 //! relative to the region's text and trimmed, so the region's start is added. Then:
@@ -247,28 +253,29 @@ fn span(r: TextRange) -> Range<usize> {
 }
 
 /// Why `s` is not sent, if it is not.
-fn refusal(doc: &DocSnapshot, s: &UnitSpan) -> Option<RefuseReason> {
+// ## m3a-f1-followups (named exception, follow-up F1-a): the splitter's kind decides a `COPY`
+// (it was a second, text-based reading of the unit's words that took `)COPY` for one).
+fn refusal(s: &UnitSpan) -> Option<RefuseReason> {
     match s.kind {
         UnitKind::Verbatim => Some(RefuseReason::RunAsOne),
-        UnitKind::CopyIn { .. } => Some(RefuseReason::CopyStream),
-        UnitKind::Statement | UnitKind::Subquery | UnitKind::Batch => {
-            copy_stream(doc, s.range).then_some(RefuseReason::CopyStream)
-        }
+        UnitKind::CopyIn { .. } | UnitKind::CopyStream => Some(RefuseReason::CopyStream),
+        // ## m3a-f1-followups (fix round 1, M2): no production `SubqueryOracle` exists and nothing
+        // builds `Batch` today. A future oracle's range carries no splitter head, so (M3b) it
+        // must pass `mentions_copy`, or be split again for its head, before it becomes a unit.
+        UnitKind::Statement | UnitKind::Subquery | UnitKind::Batch => None,
     }
 }
 
-/// Whether the statement at `range` is a `COPY` that names `STDIN` or `STDOUT` (read from the
-/// document's own tokens: a word in a string or a comment does not count).
-fn copy_stream(doc: &DocSnapshot, range: TextRange) -> bool {
+// ## m3a-f1-followups (named exception, follow-up F1-a)
+/// Whether `range` holds the word `COPY` (a word in a string or a comment does not count):
+/// such an oracle region stays uncertain, since the oracle's pieces carry no splitter kind.
+fn mentions_copy(doc: &DocSnapshot, range: TextRange) -> bool {
     let (lexed, text) = (doc.lexed(), doc.text());
-    let mut words = lexed
+    lexed
         .tokens_in(range)
-        .filter(|&i| !lexed.is_trivia(i) && lexed.kind(i) == TokenKind::Word)
-        .filter_map(|i| text.get(span(lexed.range(i))));
-    if !words.next().is_some_and(|w| w.eq_ignore_ascii_case("COPY")) {
-        return false;
-    }
-    words.any(|w| w.eq_ignore_ascii_case("STDIN") || w.eq_ignore_ascii_case("STDOUT"))
+        .filter(|&i| lexed.kind(i) == TokenKind::Word)
+        .filter_map(|i| text.get(span(lexed.range(i))))
+        .any(|w| w.eq_ignore_ascii_case("COPY"))
 }
 
 /// One unit: its strict text and, for a statement, its cursor eligibility (strict range).
@@ -287,7 +294,7 @@ fn units_of(doc: &DocSnapshot, spans: &[UnitSpan]) -> Resolution {
     }
     if let Some((s, reason)) = spans
         .iter()
-        .find_map(|s| refusal(doc, s).map(|reason| (s, reason)))
+        .find_map(|s| refusal(s).map(|reason| (s, reason)))
     {
         return Resolution::Refused {
             at: span(s.range),
@@ -353,7 +360,8 @@ fn oracle_pieces(
     region: &Stmt,
     oracle: &dyn SplitOracle,
 ) -> Option<Vec<TextRange>> {
-    if region.copy_data.is_some() {
+    // ## m3a-f1-followups: nor any region that may hold a `COPY` (F1-a).
+    if region.copy_data.is_some() || mentions_copy(doc, region.strict) {
         return None;
     }
     let lexed = doc.lexed();

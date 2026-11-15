@@ -111,31 +111,18 @@ fn ranges(units: &[UnitSpan]) -> Ranges {
 
 /// Units M3a sends as they are: not `COPY … FROM STDIN` (its data is not sent; Task 23 logs
 /// `exec-copy-unsupported`), not a verbatim selection (M3b).
-// ## m3a-t33-exec-ui (named exception): nor a statement that is a `COPY` naming `STDIN` or
-// `STDOUT` (a selection of `COPY t FROM STDIN;` without its rows is a plain statement), which
-// Run refuses too (`hacivat_exec`'s `copy_stream`, the same rule on the document's tokens).
-fn sent(doc: &DocSnapshot, units: &[UnitSpan]) -> bool {
+// ## m3a-f1-followups (named exception, follow-up F1-a; it replaces T33's text-based
+// `copy_stream`): nor any other `COPY` that streams (`COPY … TO STDOUT`, a selection of
+// `COPY t FROM STDIN;` without its rows). Which unit is such a `COPY` is the splitter's
+// answer (`UnitKind::CopyStream`), the one Run refuses by (`hacivat_exec::units`), so the
+// preview and Run read one analysis and never disagree on a `COPY`.
+fn sent(units: &[UnitSpan]) -> bool {
     units.iter().all(|u| {
-        !matches!(u.kind, UnitKind::CopyIn { .. } | UnitKind::Verbatim)
-            && !copy_stream(doc, u.range)
+        !matches!(
+            u.kind,
+            UnitKind::CopyIn { .. } | UnitKind::CopyStream | UnitKind::Verbatim
+        )
     })
-}
-
-// ## m3a-t33-exec-ui (named exception)
-/// Whether the statement at `range` is a `COPY` that names `STDIN` or `STDOUT`, read from
-/// the document's own tokens (a word in a string or a comment does not count): the rule Run
-/// refuses by (`hacivat_exec::units`), restated here because this crate cannot depend on
-/// `hacivat-exec`; Task 33's property test holds the two together.
-fn copy_stream(doc: &DocSnapshot, range: TextRange) -> bool {
-    let (lexed, text) = (doc.lexed(), doc.text());
-    let mut words = lexed
-        .tokens_in(range)
-        .filter(|&i| !lexed.is_trivia(i) && lexed.kind(i) == sql_lexer::TokenKind::Word)
-        .filter_map(|i| text.get(to_range(lexed.range(i))));
-    if !words.next().is_some_and(|w| w.eq_ignore_ascii_case("COPY")) {
-        return false;
-    }
-    words.any(|w| w.eq_ignore_ascii_case("STDIN") || w.eq_ignore_ascii_case("STDOUT"))
 }
 
 /// What to draw for a resolution Run refuses.
@@ -187,19 +174,14 @@ pub fn preview_of(
         remembered,
     );
     let (state, ranges) = match &run {
-        RangeResolution::Units(u) if sent(doc, u) => (PreviewState::Units, ranges(u)),
+        RangeResolution::Units(u) if sent(u) => (PreviewState::Units, ranges(u)),
         RangeResolution::Ask {
             candidates,
             preselect,
-        } if candidates
-            .get(*preselect)
-            .is_some_and(|c| sent(doc, &c.units)) =>
-        {
-            (
-                PreviewState::AskPreselected,
-                ranges(&candidates[*preselect].units),
-            )
-        }
+        } if candidates.get(*preselect).is_some_and(|c| sent(&c.units)) => (
+            PreviewState::AskPreselected,
+            ranges(&candidates[*preselect].units),
+        ),
         RangeResolution::NothingToRun => (PreviewState::Nothing, Ranges::new()),
         // Run would hand over a unit M3a does not send: drawn as the units, neutral.
         RangeResolution::Units(_) | RangeResolution::Ask { .. } => {
@@ -221,7 +203,7 @@ pub fn preview_of(
     // ones it would not leave out (the same `sent` rule as `hacivat_exec`'s chooser).
     let choices = match (&run, state) {
         (RangeResolution::Ask { candidates, .. }, PreviewState::AskPreselected) if connected => {
-            let n = candidates.iter().filter(|c| sent(doc, &c.units)).count();
+            let n = candidates.iter().filter(|c| sent(&c.units)).count();
             u32::try_from(n).unwrap_or(u32::MAX)
         }
         _ => 0,

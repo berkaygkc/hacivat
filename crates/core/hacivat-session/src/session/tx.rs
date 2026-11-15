@@ -94,6 +94,14 @@ pub enum TxOwner {
 }
 
 impl TxState {
+    // ## m3a-f1-followups
+    /// Whether a transaction of the user's is open (`InTx` or `Failed`, not Hacivat's own
+    /// around a cursor or the guard's).
+    pub(crate) fn user_open(&self) -> bool {
+        !matches!(self.owner, TxOwner::Cursor | TxOwner::Guard)
+            && matches!(self.status, TxStatus::InTx | TxStatus::Failed)
+    }
+
     /// Takes the protocol's `status` after a round trip; `statement` counts a user statement
     /// that ran in the open transaction.
     pub(crate) fn observe(&mut self, status: TxStatus, statement: bool) {

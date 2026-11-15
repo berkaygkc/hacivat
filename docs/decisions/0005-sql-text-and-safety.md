@@ -492,3 +492,37 @@ candidate: correlated) and SEL-07.
 - the PostgreSQL differential: the ranges a whole-script Run sends equal libpg_query's
   statement ranges on six fixtures and six scripts, and the two fixtures the grammar cannot
   read (psql commands, `COPY` data) are pinned to their answers.
+
+## m3a-f1 — a COPY is the splitter's answer (follow-up F1-a)
+
+**Choice.** Whether a unit is a `COPY` that streams rows to or from the client is decided once,
+by the splitter, on the tokens it splits by. `StmtHead::copy_stream` is set when the
+statement's first significant token is the word `COPY` and a later word is `STDIN` or
+`STDOUT` (any depth, any client flavor). A unit of such a statement is `UnitKind::CopyIn`
+when psql's inline rows follow it, else the new `UnitKind::CopyStream` (`COPY … TO STDOUT`,
+`COPY … FROM STDIN` without a terminator, a selection without its rows, a flavor without
+inline rows). The Run preview (`hacivat-sql-editor`'s `sent`) and Run
+(`hacivat_exec::units::refusal`) both refuse by kind only, so they cannot disagree on a
+`COPY`.
+
+**Rejected.** The two text-based copies of one rule (Task 33 restated `hacivat-exec`'s
+`copy_stream` in the preview, reading "the first *word* is `COPY`"). They skipped a leading
+non-word token, so `)COPY t FROM STDIN` read as a `COPY` to them and as a plain statement to
+the splitter, and the preview disagreed with `resolve` (the proptest seed `cc 53f69ccc…`).
+
+**`)COPY` and its "rows".** PostgreSQL parses a statement from its first token: `)COPY t FROM
+STDIN` is a syntax error at `)` (SQLSTATE 42601; pinned on every PostgreSQL target by
+`hacivat-exec`'s `docker_m3a_f1` test, which also shows the session takes the next statement
+normally, so it never entered `COPY` mode). The lines after it are therefore never read as
+`COPY` data by the server: they are SQL, as the splitter lexes them. In the seed they also
+never run at a caret or in a whole script, because the `\.` line is a client command.
+
+**Fails closed.** The PostgreSQL oracle's pieces carry no splitter kind, so an ambiguous region
+that holds the word `COPY` anywhere is never settled by the oracle (it stays uncertain, as
+before Task 23's oracle).
+
+**Tests.** `sql-split/tests/exec_range.rs` (`a_copy_is_recognised_by_the_statement_head`,
+`a_copy_selected_without_its_rows_is_never_a_plain_statement`), `hacivat-exec/tests/units.rs`
+(`run_reads_a_copy_from_the_splitters_kind`, `an_oracle_region_holding_copy_stays_uncertain`),
+`hacivat-sql-editor/tests/preview_truth.rs` (`the_preview_reads_copy_from_the_splitter` and
+the committed seed).

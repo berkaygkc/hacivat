@@ -1084,6 +1084,7 @@ impl<'a> Walker<'a, '_> {
             head: StmtHead {
                 first_keyword: t.keyword.map(|k| k.id),
                 first_token: Some(t.range),
+                copy_stream: false,
             },
             sub_head: t.range,
             sub_once_used: false,
@@ -1657,6 +1658,7 @@ impl<'a> Walker<'a, '_> {
 
     /// psql `COPY … FROM STDIN` at depth 0.
     fn copy_scan(&mut self, t: &Tok) {
+        self.copy_stream_scan(t);
         if !self.cp.copy_from_stdin || t.kind != TokenKind::Word {
             return;
         }
@@ -1672,6 +1674,30 @@ impl<'a> Walker<'a, '_> {
             2 => 1,
             c => c,
         };
+    }
+
+    // ## m3a-f1-followups (named exception, follow-up F1-a)
+    /// A `COPY` that streams (`StmtHead::copy_stream`): the statement's first significant
+    /// token is the word `COPY` (the head the server parses: `)COPY` is no `COPY`) and a later
+    /// word is `STDIN` or `STDOUT`, at any depth. Any client flavor: whether the rows follow
+    /// in the script is psql's business, whether the server streams is not.
+    fn copy_stream_scan(&mut self, t: &Tok) {
+        let text = self.text;
+        let Some(cur) = &mut self.cur else {
+            return;
+        };
+        if t.kind != TokenKind::Word || cur.sig == 0 || cur.head.copy_stream {
+            return;
+        }
+        let is = |w: &str| text[t.range].eq_ignore_ascii_case(w);
+        let copy_head = cur
+            .head
+            .first_token
+            .and_then(|r| text.get(usize::from(r.start())..usize::from(r.end())))
+            .is_some_and(|w| w.eq_ignore_ascii_case("COPY"));
+        if copy_head && (is("STDIN") || is("STDOUT")) {
+            cur.head.copy_stream = true;
+        }
     }
 
     /// Per-token uncertainty: executable-comment bodies, ambiguous ends, unterminated tokens.
