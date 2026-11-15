@@ -1904,3 +1904,56 @@ is covered (below).
   production `DELETE` through `Run` runs after `BEGIN … READ ONLY` and before `ROLLBACK`.
 - Not changed (review M7): `CursorReleased.rolled_back` stays `false` for guard holds; routed
   to T23/T34 (the output log reports "rolled back" for a guard hold only if its `ROLLBACK` ran).
+
+## m3a-f1 — the default session and the profile; the context probe (follow-up F1)
+
+Two cross-task safety items the reviews of Tasks 32 and 33 routed here (ledger: Task 32 fix
+round 1, N2; the T31/T33 probe notes). Both are named exceptions fenced `// ## m3a-f1-followups`.
+
+**F1-b. The default session's end ends the profile, so it waits for the profile.** M3a's
+consoles hold their own sessions next to the default one (Task 32), and when the default
+session ends, `end_live` closes every session of the profile (`pool.close_all`, with a
+rollback). M2b's liveness protected an open transaction only on the idle session itself, so an
+idle default (Console 1) idle-disconnected after its threshold and rolled back a transaction
+Console 2 held in its own session, with no prompt (only "idle disconnected").
+
+- *Choice, idle.* Every session a profile's `SessionManager` starts reports to the profile's
+  `ProfileActivity` (`liveness.rs`): when a user request starts (the profile is held while it
+  runs) and when work ends (activity, and whether it still holds a user transaction:
+  `InTx`/`Failed`, not Hacivat's own around a cursor or the guard's, on a usable connection).
+  A session leaves it when its actor ends, however it ends (a drop guard). Before every tick
+  the default session's supervisor reads it (`Supervisor::note_profile`) and never
+  idle-disconnects while another session holds the profile, nor within the idle threshold of
+  the profile's last user activity on any session. Its own keep-alive pings and its own idle
+  transaction warning still follow its own activity (its connection needs its own keep-alive).
+  After a clock jump (sleep) only a hold *now* keeps it: the profile's last activity is on the
+  monotonic clock, which may not count the sleep, and the B18 rule is that a slept machine
+  disconnects an idle profile.
+- *Choice, loss.* When the default session is genuinely lost (a failed keep-alive without
+  recovery, a recovery that gives up, a loss inside its own transaction) or ends otherwise
+  without the user closing it, `end_live_with` still closes the other sessions, but never
+  silently: if one of them holds a user transaction, the manager emits one
+  `ConnectionEvent::SessionLost` with `open_tx` (merged with what the default itself lost, C1),
+  which the app already shows as "The session on … was lost … Your open transaction ended, and
+  the server rolled back its uncommitted changes." A deliberate disconnect (`close`) is not
+  this path: the app asks first (Task 33's `confirm_release`).
+- *Rejected: keep the healthy sessions when the default is lost.* The profile is `Lost` and the
+  app shows it disconnected; a kept session would be an orphan the console UI cannot reach, so
+  an open transaction (holding locks on a production server) would stay open with no way to
+  commit or roll it back, and a later Retry would build a new `SessionManager` beside the
+  orphans (two budgets, two overlays). Ending them with a surfaced rollback is the safer
+  option; the user learns at once that the transaction is gone.
+- *Fails closed.* Nothing new keeps a connection the profile ended; `ProfileActivity` only
+  delays an idle disconnect. A session that cannot report (an actor that panicked) leaves the
+  activity through its drop guard, so a dead session never holds a profile open.
+- *Tests.* FakeDriver `manager_f1.rs`:
+  `the_default_never_idle_disconnects_while_another_session_holds_a_user_transaction` (idle
+  300 s, Console 2 `BEGIN` + `UPDATE`, 1,800 s: connected, `InTx`, no `ROLLBACK`; after
+  `COMMIT` the threshold counts from the commit), `activity_on_another_session_keeps_the_profile_connected`,
+  `losing_the_default_never_rolls_back_another_sessions_transaction_silently` (one
+  `SessionLost { open_tx }`, Console 2 closed with one `ROLLBACK`),
+  `losing_an_idle_default_without_a_transaction_elsewhere_emits_no_session_lost`; unit tests in
+  `liveness.rs` (`a_held_profile_holds_the_idle_disconnect_off`: no disconnect in 900 s, the 15
+  keep-alive pings still sent, a disconnect exactly one threshold after the hold ends;
+  `after_a_jump_only_a_current_hold_keeps_the_profile`). RED: the three manager tests fail on
+  `m3a` 7864425 (the profile `Disconnected` at 1,800 s; no `SessionLost` event).

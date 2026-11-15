@@ -57,6 +57,8 @@ use crate::pipeline::{
 use crate::profile::Profile;
 use crate::session::actor::{Reconnector, SessionHooks, SideConnector, spawn_supervised};
 use crate::session::liveness::LivenessPolicy;
+// ## m3a-f1-followups
+use crate::session::liveness::ProfileActivity;
 use crate::session::{
     ClientId, ClosePolicy, Command, Escalation, Request, SessionEvent, SessionHandle, SessionId,
     SessionKind, SessionSnapshot, SessionSpec, SessionState,
@@ -474,6 +476,9 @@ pub struct SessionManager {
     /// Serialises the opening of the default session (one connection, however many ask).
     default_lock: tokio::sync::Mutex<()>,
     me: Weak<SessionManager>,
+    // ## m3a-f1-followups
+    /// What every session of the profile reports, for the default's idle disconnect (F1-b).
+    activity: Arc<ProfileActivity>,
 }
 
 impl fmt::Debug for SessionManager {
@@ -519,6 +524,7 @@ impl SessionManager {
             }),
             default_lock: tokio::sync::Mutex::new(()),
             me: me.clone(),
+            activity: Arc::default(),
         })
     }
 
@@ -720,6 +726,17 @@ impl SessionManager {
     /// instead of guessing when a release's reset has parked its session.
     pub fn parked_count(&self) -> usize {
         self.lock().idle.values().map(Vec::len).sum()
+    }
+
+    // ## m3a-f1-followups (named exception, follow-up F1-b)
+    /// Whether a session other than `default` holds a user transaction now (its snapshot:
+    /// `InTx` or `Failed`, not Hacivat's own) on a usable connection: what closing them all
+    /// would roll back.
+    pub(crate) fn others_hold_user_tx(&self, default: SessionId) -> bool {
+        self.lock().sessions.iter().any(|(id, t)| {
+            let s = t.state.borrow();
+            *id != default && usable(&s.state) && s.tx.user_open()
+        })
     }
 
     /// Closes every session and drops the overlay (disconnect, `forget`, quit). A running
@@ -988,7 +1005,16 @@ impl SessionManager {
             }),
             reconnect: hooked.reconnect,
         };
-        let handle = spawn_supervised(&self.rt, spec, profile, live, hooks, hooked.liveness);
+        // ## m3a-f1-followups: every session reports to the profile's activity (F1-b).
+        let handle = spawn_supervised(
+            &self.rt,
+            spec,
+            profile,
+            live,
+            hooks,
+            hooked.liveness,
+            Some(self.activity.clone()),
+        );
         st.sessions.insert(
             handle.id,
             Tracked {

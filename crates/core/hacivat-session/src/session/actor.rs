@@ -67,6 +67,12 @@
 //!   (`Ctl::coalesce`); a command read ahead for that is held for its turn (`Ctl::held`).
 //! - **Whose transaction.** `Core::observe` sets `TxState::owner`; Hacivat's own transaction
 //!   around a cursor never refuses a close and is no idle transaction of the user's.
+//!
+//! Follow-up F1-b (`// ## m3a-f1-followups` blocks; ADR 0004 `m3a-f1`): a session started by a
+//! profile's `SessionManager` reports to the profile's [`ProfileActivity`] whenever a user
+//! request starts or work ends (activity, and whether it holds a user transaction or runs a
+//! user request), and leaves it when its actor ends. The default session's tick reads it, so
+//! its idle disconnect waits for the profile (`liveness` module docs).
 
 use std::any::Any;
 use std::collections::VecDeque;
@@ -101,6 +107,8 @@ use crate::session::{RunSpec, TxOwner};
 use hacivat_results::{CloseReason, ResultId};
 // ## m2b-t17-liveness
 use crate::session::liveness::{LivenessAction, LivenessPolicy, Supervisor};
+// ## m3a-f1-followups
+use crate::session::liveness::ProfileActivity;
 use crate::session::readonly::guarded;
 // ## m2b-t17-liveness
 use crate::session::recovery::{
@@ -176,12 +184,12 @@ pub fn spawn_session(
     live: LiveConnection,
     hooks: SessionHooks,
 ) -> SessionHandle {
-    spawn_supervised(rt, spec, profile, live, hooks, None)
+    spawn_supervised(rt, spec, profile, live, hooks, None, None)
 }
 
 // ## m2b-t17-liveness
 /// [`spawn_session`] with `liveness` ticking a [`Supervisor`] (the module docs); `None` never
-/// ticks.
+/// ticks. `activity` (follow-up F1-b): the profile's shared activity the session reports to.
 pub(crate) fn spawn_supervised(
     rt: &Handle,
     spec: SessionSpec,
@@ -189,6 +197,7 @@ pub(crate) fn spawn_supervised(
     mut live: LiveConnection,
     hooks: SessionHooks,
     liveness: Option<LivenessPolicy>,
+    activity: Option<Arc<ProfileActivity>>,
 ) -> SessionHandle {
     let read_only = spec.read_only || profile.read_only;
     let kind = live.raw().kind();
@@ -272,6 +281,8 @@ pub(crate) fn spawn_supervised(
         hooks,
         liveness: None,
         held: None,
+        // ## m3a-f1-followups
+        profile: activity.map(|activity| ProfileSlot { activity, id }),
     };
     rt.spawn(async move {
         let mut ctl = ctl;
@@ -845,6 +856,43 @@ struct Ctl {
     /// A command read ahead of its turn while queued fetches were gathered (`gather`): the
     /// next read takes it first, so commands keep their order.
     held: Option<Command>,
+    // ## m3a-f1-followups
+    /// The profile's shared activity, for a session its `SessionManager` started.
+    profile: Option<ProfileSlot>,
+}
+
+// ## m3a-f1-followups
+/// A session's place in its profile's [`ProfileActivity`]; it leaves when the actor ends,
+/// however it ends.
+struct ProfileSlot {
+    activity: Arc<ProfileActivity>,
+    id: SessionId,
+}
+
+impl Drop for ProfileSlot {
+    fn drop(&mut self) {
+        self.activity.leave(self.id);
+    }
+}
+
+impl Ctl {
+    // ## m3a-f1-followups
+    /// A user request starts: activity, and the profile is held while it runs.
+    fn profile_busy(&self) {
+        if let Some(p) = &self.profile {
+            p.activity.report(p.id, Some(clocks().0), true);
+        }
+    }
+
+    // ## m3a-f1-followups
+    /// Work ended: activity when it was a user request, and the profile is held while a user
+    /// transaction stays open on a usable connection.
+    fn profile_after(&self, core: &Core, activity: bool) {
+        if let Some(p) = &self.profile {
+            let held = core.live.is_some() && core.broken.is_none() && core.tx.user_open();
+            p.activity.report(p.id, activity.then(|| clocks().0), held);
+        }
+    }
 }
 
 // ## m3a-t18-session-run
@@ -1162,11 +1210,17 @@ async fn run(mut core: Core, mut ctl: Ctl) {
                 ctl.coalesce(&mut job);
                 // ## m2b-t17-liveness
                 let activity = is_activity(&job.request);
+                // ## m3a-f1-followups
+                if activity {
+                    ctl.profile_busy();
+                }
                 let flow = run_one(&mut core, &mut ctl, job).await;
                 if !follow(&mut core, &mut ctl, flow).await {
                     return;
                 }
                 ctl.after_work(activity, core.tx.status);
+                // ## m3a-f1-followups
+                ctl.profile_after(&core, activity);
                 continue;
             }
             None => {}
@@ -1190,6 +1244,8 @@ async fn run(mut core: Core, mut ctl: Ctl) {
                     return;
                 }
                 ctl.after_work(false, core.tx.status);
+                // ## m3a-f1-followups
+                ctl.profile_after(&core, false);
             }
             () = next_tick(&mut ctl.liveness), if ctl.liveness.is_some() => {
                 let flow = on_tick(&mut core, &mut ctl).await;
@@ -1197,6 +1253,8 @@ async fn run(mut core: Core, mut ctl: Ctl) {
                     return;
                 }
                 ctl.after_work(false, core.tx.status);
+                // ## m3a-f1-followups
+                ctl.profile_after(&core, false);
             }
         }
     }
@@ -1230,6 +1288,11 @@ async fn on_tick(core: &mut Core, ctl: &mut Ctl) -> Flow {
         TxOwner::Cursor | TxOwner::Guard => TxStatus::Idle,
         TxOwner::User | TxOwner::None => core.tx.status,
     };
+    // ## m3a-f1-followups: the profile's other sessions hold the idle disconnect off (F1-b).
+    if let Some(p) = &ctl.profile {
+        let (held, last) = p.activity.others(ctl.id);
+        l.sup.note_profile(held, last);
+    }
     let mut action = l.sup.tick(now, wall, false, user_tx);
     if action == Some(LivenessAction::Suspect) {
         // Q31: one check at once, never one per missed tick.
