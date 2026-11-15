@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext};
+use gpui::{Entity, Focusable as _, TestAppContext, VisualContext as _, VisualTestContext};
 use hacivat_app::connections::ConnectionsModel;
 use hacivat_app::console::{ConsoleId, Consoles};
 use hacivat_app::shell::{ShellHooks, TabKind};
@@ -206,6 +206,61 @@ fn unbound_console_shows_the_m2_home_and_binds_on_first_connect(cx: &mut TestApp
     stop_core_runtime_test(cx);
 }
 
+/// Only a connect binds: a profile that shows up already connected (or comes back from a
+/// loss) leaves the unbound console on the M2 home.
+#[gpui::test]
+fn a_profile_that_appears_connected_binds_nothing(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    connect_and_wait(vcx, "orders-dev");
+    wait_active_console(vcx);
+    let LiveState::Connected(info) = live(vcx, "orders-dev") else {
+        panic!("connected");
+    };
+    // An unbound console in focus (not through the binding hook).
+    let tab = with_ws(vcx, |ws, window, cx| ws.open_console_tab(None, window, cx)).expect("tab");
+    vcx.run_until_parked();
+    assert_eq!(active_console(vcx), None);
+    // A new profile that is connected the first time the console sees it.
+    let other = test_profile("orders-stg", Some(EnvTag::Staging), "10.0.0.8");
+    let other_id = other.id;
+    vcx.cx.update(|cx| {
+        ConnectionsModel::save(
+            cx,
+            hacivat_session::profile::ProfileDraft {
+                is_new: true,
+                ..hacivat_session::profile::ProfileDraft::edit(other)
+            },
+        )
+        .detach();
+        cx.global_mut::<ConnectionsModel>()
+            .set_live(other_id, LiveState::Connected(info.clone()));
+    });
+    vcx.run_until_parked();
+    // A recovery of the first profile.
+    let first = profile_id(vcx, "orders-dev");
+    vcx.cx.update(|cx| {
+        cx.global_mut::<ConnectionsModel>().set_live(
+            first,
+            LiveState::Reconnecting {
+                attempt: 1,
+                next_in: None,
+            },
+        );
+    });
+    vcx.run_until_parked();
+    vcx.cx.update(|cx| {
+        cx.global_mut::<ConnectionsModel>()
+            .set_live(first, LiveState::Connected(info.clone()));
+    });
+    vcx.run_until_parked();
+    assert_eq!(vcx.cx.read(|cx| Consoles::by_tab(cx, tab)), None);
+    assert!(matches!(
+        with_ws(vcx, |ws, _, _| ws.tab_kind(tab)),
+        Some(TabKind::Console { profile: None, .. })
+    ));
+    stop_core_runtime_test(cx);
+}
+
 #[gpui::test]
 fn second_console_opens_its_own_session_and_waits_when_the_budget_is_full(cx: &mut TestAppContext) {
     let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 2);
@@ -367,6 +422,86 @@ fn toolbar_run_ends_a_composition_and_keeps_the_editor_focused(cx: &mut TestAppC
     assert!(!vcx.cx.read(|cx| editor.read(cx).status().composing));
     assert!(editor_focused(vcx, &editor), "the editor keeps the focus");
     drop(runs);
+    stop_core_runtime_test(cx);
+}
+
+/// Moving the pane focus moves the typing: the focused pane's console editor takes the keyboard
+/// focus (ledger N2).
+#[gpui::test]
+fn focus_next_pane_focuses_that_panes_editor(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    connect_and_wait(vcx, "orders-dev");
+    let left = wait_active_console(vcx);
+    activate(vcx);
+    let left_editor = editor_of(vcx, left);
+    focus_editor(vcx, &left_editor);
+    assert!(run(vcx, "workspace.split_right"));
+    wait_until(vcx, "the right pane's console", |vcx| {
+        active_console(vcx).is_some_and(|c| c != left)
+    });
+    let right = active_console(vcx).expect("console");
+    let right_editor = editor_of(vcx, right);
+    wait_until(vcx, "the new console's editor to take the focus", |vcx| {
+        editor_focused(vcx, &right_editor)
+    });
+    assert!(run(vcx, "workspace.focus_next_pane"));
+    vcx.run_until_parked();
+    assert_eq!(active_console(vcx), Some(left));
+    assert!(
+        editor_focused(vcx, &left_editor),
+        "the left editor has the keyboard"
+    );
+    vcx.simulate_input("x");
+    assert_eq!(text(vcx, &left_editor), "x");
+    assert_eq!(text(vcx, &right_editor), "");
+    stop_core_runtime_test(cx);
+}
+
+/// The menu bar never acts inside a composition (F15): its Edit items wait until the IME has
+/// committed (macOS commits on the mouse-down that opens the menu).
+#[gpui::test]
+fn the_menu_bar_waits_for_the_composition(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    connect_and_wait(vcx, "orders-dev");
+    let id = wait_active_console(vcx);
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    vcx.simulate_input("SELECT ");
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |v, cx| {
+            gpui::EntityInputHandler::replace_and_mark_text_in_range(
+                v, None, "ş", None, window, cx,
+            );
+        });
+    });
+    vcx.run_until_parked();
+    let window = vcx.window_handle();
+    let menu = |vcx: &mut VisualTestContext, id: &str| {
+        vcx.cx.dispatch_action(
+            window,
+            hacivat_ui_core::gpui_surface::RunCommand {
+                id: id.to_string().into(),
+            },
+        );
+        vcx.run_until_parked();
+    };
+    menu(vcx, "editor.select_all");
+    menu(vcx, "editor.undo");
+    assert_eq!(text(vcx, &editor), "SELECT ş");
+    assert!(vcx.cx.read(|cx| editor.read(cx).status().composing));
+    // Committed: the same item acts.
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |v, cx| {
+            gpui::EntityInputHandler::unmark_text(v, window, cx)
+        });
+    });
+    menu(vcx, "editor.select_all");
+    assert_eq!(
+        vcx.cx
+            .read(|cx| editor.read(cx).snapshot().selection.main().range()),
+        0.."SELECT ş".len()
+    );
     stop_core_runtime_test(cx);
 }
 

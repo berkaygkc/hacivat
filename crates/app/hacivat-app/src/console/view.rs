@@ -281,8 +281,8 @@ pub struct ConsoleHost {
     n: u32,
     binding: Option<(ProfileId, u32)>,
     mode: Mode,
-    /// Profiles connected when the host last looked (the first connect binds).
-    seen: HashSet<ProfileId>,
+    /// Every profile's state when the host last looked (a connect binds).
+    seen: HashMap<ProfileId, LiveKind>,
     acquire: Acquire,
     /// The session the host watches, and what it shows.
     watched: Option<(hacivat_session::session::SessionId, Task<()>)>,
@@ -293,12 +293,14 @@ pub struct ConsoleHost {
     segment: Option<Entity<EditorSegment>>,
     autosave: Option<Autosave>,
     autosave_task: Option<Task<()>>,
-    /// The connected state the editor was last told (and the server version it was set for).
-    told: Option<(bool, Option<String>)>,
+    /// The connected state the editor was last told.
+    told: Option<bool>,
     /// The editor's failed paints already logged.
     paint_errors: u64,
     /// The toolbar's state forced by a shots fixture (feature `shots`).
     fixture: Option<FixtureUx>,
+    /// The workspace's focused pane when the host last looked.
+    pane: Option<hacivat_ui::panes::PaneId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -323,16 +325,22 @@ impl ConsoleHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.observe_global_in::<ConnectionsModel>(window, Self::on_connections),
             cx.on_release(Self::released),
         ];
+        // The workspace is the window's root; it is rendering this tab now, so only its handle
+        // is taken here.
+        let workspace = window.root::<Workspace>().flatten();
+        if let Some(ws) = &workspace {
+            subscriptions.push(cx.observe_in(ws, window, Self::on_workspace));
+        }
         let mut this = ConsoleHost {
             tab,
             n,
             binding: None,
             mode: Mode::Unbound,
-            seen: connected_profiles(cx),
+            seen: live_kinds(cx),
             acquire: Acquire::Idle,
             watched: None,
             ux: None,
@@ -344,6 +352,7 @@ impl ConsoleHost {
             told: None,
             paint_errors: 0,
             fixture: None,
+            pane: None,
             _subscriptions: subscriptions,
         };
         let me = cx.weak_entity();
@@ -380,6 +389,9 @@ impl ConsoleHost {
         if let Some(profile) = state.profile {
             self.binding = Some((profile, 1));
         }
+        // Its keys reach the editor's commands like a console of ours.
+        let focus = editor.focus_handle(cx);
+        register_focus_context(cx, focus, EDITOR_CONTEXT);
         self.segment = Some(cx.new(|cx| EditorSegment::new(&editor, cx)));
         self.mode = Mode::Ready {
             console,
@@ -427,13 +439,23 @@ impl ConsoleHost {
 
     // ---- binding ----------------------------------------------------------------------------
 
-    /// The connections changed: an unbound console in focus binds to a profile that just
-    /// connected; a bound one follows its profile's state.
+    /// The connections changed: an unbound console in focus binds to a profile that a connect
+    /// just connected; a bound one follows its profile's state.
+    ///
+    /// "A connect" is a profile this host saw disconnected, connecting or failed that is now
+    /// connected: a recovery (lost, reconnecting) binds nothing, and neither does a profile
+    /// that appears already connected (the host never saw it otherwise).
     fn on_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let now = connected_profiles(cx);
+        let now = live_kinds(cx);
         match self.mode {
             Mode::Unbound => {
-                let newly: Vec<ProfileId> = now.difference(&self.seen).copied().collect();
+                let newly: Vec<ProfileId> = now
+                    .iter()
+                    .filter(|(id, kind)| {
+                        **kind == LiveKind::Connected && self.seen.get(id) == Some(&LiveKind::Idle)
+                    })
+                    .map(|(id, _)| *id)
+                    .collect();
                 let current = cx
                     .try_global::<ConnectionsModel>()
                     .and_then(|m| m.current());
@@ -450,6 +472,30 @@ impl ConsoleHost {
             _ => {}
         }
         self.seen = now;
+    }
+
+    /// The workspace changed. When the focus moved to another pane (`workspace.focus_next_pane`,
+    /// a click in the pane) and this console is that pane's active tab, its editor takes the
+    /// keyboard focus, so moving between panes moves the typing too (ledger N2).
+    fn on_workspace(&mut self, ws: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) {
+        let (pane, active, layers) = {
+            let ws = ws.read(cx);
+            (
+                ws.layout().0.focused,
+                ws.active_tab() == Some(self.tab),
+                !ws.layer_ids().is_empty(),
+            )
+        };
+        let moved = self.pane.replace(pane).is_some_and(|before| before != pane);
+        if !(moved && active) || layers {
+            return;
+        }
+        if let Some(editor) = self.editor() {
+            let focus = editor.focus_handle(cx);
+            if !focus.contains_focused(window, cx) {
+                window.focus(&focus, cx);
+            }
+        }
     }
 
     /// This console is the focused pane's active tab.
@@ -581,13 +627,6 @@ impl ConsoleHost {
         let profile = profile_of(cx, profile_id);
         let doc = DocId(u64::from(self.tab.0));
         let service = SqlLanguageService::new();
-        // The dialect's defaults before the first analysis; the server version and the probe
-        // follow on connect (`sync_session`, Task 33).
-        let ctx = profile.as_ref().map(|p| dialect_ctx(p.engine, None, None));
-        if let Some(ctx) = ctx {
-            service.set_sql_context(doc, ctx, effective_flavor(&ctx, ClientFlavor::None), cx);
-        }
-        service.set_remembered_kind(doc, None, cx);
         let language: Rc<dyn LanguageService> = service.clone();
         let label = a11y::label(self.title(cx));
         let cfg = editor_config(cx);
@@ -610,12 +649,12 @@ impl ConsoleHost {
                 session: None,
                 editor: Some(editor.clone()),
                 results: Some(results.clone()),
-                sql: ctx,
+                sql: None,
                 log,
                 service: Some(service),
             },
         );
-        crate::exec_ui::attach(console, &editor, window, cx);
+        exec_attach(console, &editor, window, cx);
         let focus_handle = editor.focus_handle(cx);
         register_focus_context(cx, focus_handle.clone(), EDITOR_CONTEXT);
         let subscriptions = [
@@ -638,9 +677,7 @@ impl ConsoleHost {
             editor: editor.clone(),
             owned: true,
         };
-        if let Some(p) = &profile {
-            set_result_display(&results, p.engine, cx);
-        }
+        let _ = (profile, results);
         self.sync_session(window, cx);
         if focus && window.is_window_active() {
             window.defer(cx, move |window, cx| window.focus(&focus_handle, cx));
@@ -668,7 +705,7 @@ impl ConsoleHost {
         match event {
             EditorEvent::Changed { .. } => self.schedule_autosave(cx),
             EditorEvent::TierChanged(tier) => {
-                let connected = self.told.as_ref().is_some_and(|(c, _)| *c);
+                let connected = self.told == Some(true);
                 let tier = *tier;
                 editor.update(cx, |v, cx| {
                     v.set_doc_context(DocContext { connected, tier }, cx);
@@ -724,26 +761,7 @@ impl ConsoleHost {
             .map(|m| m.live(profile))
             .unwrap_or_default();
         match live {
-            LiveState::Connected(info) => {
-                let version = Some(info.server.raw_version.clone());
-                if self.told.as_ref() != Some(&(true, version.clone())) {
-                    // The SQL context first, then the connected context (ledger T24/T32).
-                    if let (Some(p), Some(state)) =
-                        (profile_of(cx, profile), Consoles::get(cx, console).cloned())
-                    {
-                        let ctx = dialect_ctx(p.engine, info.server.version.as_ref(), None);
-                        if let Some(service) = &state.service {
-                            service.set_sql_context(
-                                DocId(u64::from(self.tab.0)),
-                                ctx,
-                                effective_flavor(&ctx, ClientFlavor::None),
-                                cx,
-                            );
-                        }
-                        Consoles::update(cx, console, |s| s.sql = Some(ctx));
-                    }
-                    self.tell_editor(true, version, cx);
-                }
+            LiveState::Connected(_) => {
                 let has = Consoles::get(cx, console).is_some_and(|s| s.session.is_some());
                 if !has && matches!(self.acquire, Acquire::Idle) {
                     self.acquire(profile, window, cx);
@@ -751,15 +769,15 @@ impl ConsoleHost {
             }
             _ => {
                 self.release_session(cx);
-                if self.told.as_ref().is_none_or(|(c, _)| *c) {
-                    self.tell_editor(false, None, cx);
+                if self.told.is_none_or(|c| c) {
+                    self.tell_editor(false, cx);
                 }
             }
         }
     }
 
-    fn tell_editor(&mut self, connected: bool, version: Option<String>, cx: &mut Context<Self>) {
-        self.told = Some((connected, version));
+    fn tell_editor(&mut self, connected: bool, cx: &mut Context<Self>) {
+        self.told = Some(connected);
         if let Some(editor) = self.editor().cloned() {
             editor.update(cx, |v, cx| {
                 let tier = v.status().tier;
@@ -791,7 +809,7 @@ impl ConsoleHost {
                 cx.defer(move |cx| reconnect_read_only(cx, profile));
                 return;
             }
-            self.take_session(console, handle, cx);
+            self.take_session(console, handle, window, cx);
             return;
         }
         let spec = SessionSpec {
@@ -816,7 +834,7 @@ impl ConsoleHost {
                 match opened {
                     Ok(Ok(handle)) => {
                         if handle.state().borrow().read_only || !read_only {
-                            this.take_session(console, handle, cx);
+                            this.take_session(console, handle, window, cx);
                         } else {
                             let close = handle.close(ClosePolicy::RollBack);
                             if let Some(m) = cx.try_global::<ConnectionsModel>() {
@@ -830,7 +848,6 @@ impl ConsoleHost {
                     Err(_) => {}
                 }
                 cx.notify();
-                let _ = window;
             });
         });
         self.acquire = Acquire::Waiting {
@@ -840,8 +857,16 @@ impl ConsoleHost {
         cx.notify();
     }
 
-    fn take_session(&mut self, console: ConsoleId, handle: SessionHandle, cx: &mut Context<Self>) {
+    fn take_session(
+        &mut self,
+        console: ConsoleId,
+        handle: SessionHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         Consoles::update(cx, console, |s| s.session = Some(handle));
+        exec_rebind(console, window, cx);
+        self.tell_editor(true, cx);
         self.watch_session(cx);
     }
 
@@ -1167,14 +1192,32 @@ impl Render for ConsoleHost {
 
 // ---- helpers --------------------------------------------------------------------------------
 
-/// The profiles connected now.
-fn connected_profiles(cx: &App) -> HashSet<ProfileId> {
+/// What binding reads of a profile's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveKind {
+    Connected,
+    /// Lost or reconnecting: a recovery, not a connect.
+    Recovering,
+    /// Disconnected, connecting or failed: a connect may follow.
+    Idle,
+}
+
+/// Every profile's state now.
+fn live_kinds(cx: &App) -> HashMap<ProfileId, LiveKind> {
     cx.try_global::<ConnectionsModel>()
         .map(|m| {
             m.profiles()
                 .iter()
-                .map(|p| p.id)
-                .filter(|id| matches!(m.live(*id), LiveState::Connected(_)))
+                .map(|p| {
+                    let kind = match m.live(p.id) {
+                        LiveState::Connected(_) => LiveKind::Connected,
+                        LiveState::Lost { .. } | LiveState::Reconnecting { .. } => {
+                            LiveKind::Recovering
+                        }
+                        _ => LiveKind::Idle,
+                    };
+                    (p.id, kind)
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -1207,12 +1250,67 @@ fn editor_config(cx: &App) -> EditorConfig {
     }
 }
 
+// ## m3a-t32: exec_ui attach/rebind (T33)
+// Task 33's `exec_ui::attach` (once per console) and `exec_ui::rebind` (after the console's
+// session changes) own the SQL context (`set_sql_context`, its probe), the remembered chooser
+// kind and the results display. Task 33 is not on this base, so the two functions below stand
+// in for them: at the merge `exec_attach` keeps only its `attach` line and `exec_rebind`
+// becomes `exec_ui::rebind`; everything else in them goes. The console host calls nothing else
+// of the SQL context.
+
+/// Attaches the run UI to console `console` (once, when its editor is made).
+fn exec_attach(console: ConsoleId, editor: &Entity<EditorView>, window: &mut Window, cx: &mut App) {
+    crate::exec_ui::attach(console, editor, window, cx);
+    // Stand-in until Task 33: the dialect's defaults, no remembered kind, the display.
+    let Some(state) = Consoles::get(cx, console).cloned() else {
+        return;
+    };
+    let Some(profile) = state.profile.and_then(|p| profile_of(cx, p)) else {
+        return;
+    };
+    let doc = editor.read(cx).doc();
+    let ctx = dialect_ctx(profile.engine, None, None);
+    if let Some(service) = &state.service {
+        service.set_sql_context(doc, ctx, effective_flavor(&ctx, ClientFlavor::None), cx);
+        service.set_remembered_kind(doc, None, cx);
+    }
+    Consoles::update(cx, console, |s| s.sql = Some(ctx));
+    if let Some(results) = &state.results {
+        set_result_display(results, profile.engine, cx);
+    }
+}
+
+/// The console's session changed (a new one taken).
+fn exec_rebind(console: ConsoleId, window: &mut Window, cx: &mut App) {
+    let _ = window;
+    // Stand-in until Task 33: the connected server's version in the SQL context.
+    let Some(state) = Consoles::get(cx, console).cloned() else {
+        return;
+    };
+    let Some(profile) = state.profile.and_then(|p| profile_of(cx, p)) else {
+        return;
+    };
+    let version = cx
+        .try_global::<ConnectionsModel>()
+        .and_then(|m| match m.live(profile.id) {
+            LiveState::Connected(info) => info.server.version.clone(),
+            _ => None,
+        });
+    let ctx = dialect_ctx(profile.engine, version.as_ref(), None);
+    if let (Some(service), Some(editor)) = (&state.service, &state.editor) {
+        let doc = editor.read(cx).doc();
+        service.set_sql_context(doc, ctx, effective_flavor(&ctx, ClientFlavor::None), cx);
+    }
+    Consoles::update(cx, console, |s| s.sql = Some(ctx));
+}
+// ## end m3a-t32: exec_ui attach/rebind (T33)
+
 /// The results display of a console on `engine`: the format locale and the zone of the
 /// localization, the zone loaded on the core runtime (ledger T26 note).
 fn set_result_display(
     results: &Entity<ConsoleResults>,
     engine: hacivat_proto::DbmsKind,
-    cx: &mut Context<ConsoleHost>,
+    cx: &mut App,
 ) {
     let Some(format) = cx
         .try_global::<crate::l10n_global::L10nGlobal>()
@@ -1229,7 +1327,7 @@ fn set_result_display(
         let _ = tx.send(hacivat_values::valfmt::DisplayZone::load(Some(&tz)));
     });
     let results = results.downgrade();
-    cx.spawn(async move |_, cx| {
+    cx.spawn(async move |cx| {
         if let Ok(zone) = rx.await {
             let display =
                 crate::results::adapter::ResultDisplay::new(&format.format_locale, zone, engine);
