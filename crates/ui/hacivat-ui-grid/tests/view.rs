@@ -853,3 +853,12 @@ fn rows_say_nothing_about_no_rows(cx: &mut TestAppContext) {
     record_texts(vcx);
     assert!(!drawn(vcx).iter().any(|t| t == "No rows"));
 }
+
+// ## m3a-t30 fix round 1 (I4): a result that stopped before its first row (cancelled, closed)
+// has no exact total: nobody knows it is empty, so it is not called empty.
+#[gpui::test]
+fn a_stopped_result_without_rows_is_not_called_empty(cx: &mut TestAppContext) {
+    let (_view, vcx, _) = open(cx, Rc::new(numbered(3, 0, None, false)), 400.0, 200.0);
+    record_texts(vcx);
+    assert!(!drawn(vcx).iter().any(|t| t == "No rows"));
+}

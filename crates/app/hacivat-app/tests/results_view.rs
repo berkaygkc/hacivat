@@ -16,7 +16,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
+use hacivat_ui_grid::GridView;
 use hacivat_app::console::{ConsoleId, ConsoleState, Consoles};
 use hacivat_app::results::strip::StripModel;
 use hacivat_app::results::view::{ResultsHost, hosts};
@@ -136,8 +137,25 @@ struct Tile {
 fn tile(cx: &mut TestAppContext, lang: &str, env: Option<EnvTag>) -> Tile {
     let vcx = shell_with_connections(cx, lang);
     let profile = add_profile(vcx, test_profile("orders-dev", env, "10.0.0.5"));
+    let (console, results, log) = add_console(vcx, profile);
+    enable_registry(vcx);
+    vcx.run_until_parked();
+    Tile {
+        vcx,
+        console,
+        results,
+        log,
+    }
+}
+
+/// Opens a console tab bound to `profile` in the focused pane (it becomes the active tab) and
+/// registers a console with empty results and log for it.
+fn add_console(
+    vcx: &VisualTestContext,
+    profile: hacivat_proto::ProfileId,
+) -> (ConsoleId, Entity<ConsoleResults>, Arc<SessionLog>) {
     let ws = workspace(vcx);
-    let (console, results, log) = in_window(vcx, |window, cx| {
+    let out = in_window(vcx, |window, cx| {
         let tab = ws
             .update(cx, |ws, cx| ws.open_console_tab(Some(profile), window, cx))
             .expect("a console tab opens");
@@ -161,14 +179,28 @@ fn tile(cx: &mut TestAppContext, lang: &str, env: Option<EnvTag>) -> Tile {
         );
         (console, results, log)
     });
-    enable_registry(vcx);
     vcx.run_until_parked();
-    Tile {
-        vcx,
-        console,
-        results,
-        log,
-    }
+    out
+}
+
+/// A finished one-column result holding `values`.
+fn store_values(values: &[i64]) -> Arc<ResultStore> {
+    ResultStore::from_rows(
+        schema(1),
+        values.iter().map(|v| vec![Value::Int(*v)]).collect(),
+        Completeness::Complete,
+    )
+}
+
+/// Applies `tabs` to `results` and redraws.
+fn apply_to(vcx: &VisualTestContext, results: &Entity<ConsoleResults>, tabs: &[ResultTab]) {
+    in_window(vcx, |_, cx| {
+        results.update(cx, |r, cx| {
+            r.apply(tabs, cx);
+        })
+    });
+    in_window(vcx, |window, _| window.refresh());
+    vcx.run_until_parked();
 }
 
 impl Tile {
@@ -596,12 +628,14 @@ fn log_copy_is_iso_and_ascii_under_tr(cx: &mut TestAppContext) {
     assert!(first.contains("\trows=12345\t"), "{first}");
     assert!(first.contains("duration=1500ms"), "{first}");
     assert!(copied.contains("\tcode=42P01\t"), "{copied}");
+    // ## m3a-t30 fix round 1 (M9): no digit outside ASCII (no locale digits, no grouping).
     assert!(
-        copied
+        !copied
             .chars()
-            .filter(char::is_ascii_digit)
-            .all(|c| c.is_ascii()),
+            .any(|c| c.is_numeric() && !c.is_ascii_digit()),
+        "{copied}"
     );
+    assert!(!copied.contains("12.345") && !copied.contains("12,345"), "{copied}");
     assert!(
         !copied.chars().any(|c| matches!(c, '\u{2068}' | '\u{2069}')),
         "no Fluent isolation marks"
@@ -736,4 +770,322 @@ fn raised_ink_on_the_strip_and_toolbar(cx: &mut TestAppContext) {
             "{area:?} is raised"
         );
     }
+}
+
+// ## m3a-t30 fix round 1 ------------------------------------------------------------------------
+
+/// Runs command `id` in the shell's window.
+fn run_command(vcx: &VisualTestContext, id: &str) -> bool {
+    let ran = in_window(vcx, |window, cx| {
+        hacivat_ui::actions::ActionRegistry::run(id, window, cx)
+    });
+    in_window(vcx, |window, _| window.refresh());
+    vcx.run_until_parked();
+    ran
+}
+
+/// The grid of `console`'s result tab `ix` (the tile has shown it).
+fn grid_of(vcx: &VisualTestContext, console: ConsoleId, ix: usize) -> Entity<GridView> {
+    vcx.cx
+        .read(|cx| {
+            hosts(cx)
+                .into_iter()
+                .find_map(|h| h.read(cx).grid_of(console, ix, cx))
+        })
+        .expect("the tab's grid was shown")
+}
+
+/// Focuses `grid` and selects all its cells through the palette command.
+fn focus_and_select_all(vcx: &VisualTestContext, grid: &Entity<GridView>) {
+    in_window(vcx, |window, cx| {
+        let handle = grid.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+    });
+    vcx.run_until_parked();
+    assert!(run_command(vcx, "grid.select_all"));
+    assert!(vcx.cx.read(|cx| grid.read(cx).selection().is_all()));
+}
+
+fn put_sentinel(vcx: &VisualTestContext) {
+    in_window(vcx, |_, cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".to_string()))
+    });
+}
+
+fn clipboard(vcx: &VisualTestContext) -> String {
+    vcx.cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .unwrap_or_default()
+}
+
+/// C1: a grid the tile no longer shows never answers a command, and loses the focus.
+#[gpui::test]
+fn copy_never_takes_a_hidden_tabs_cells(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    t.apply(&[
+        tab(1, source(store_values(&[4242, 4243]), Arc::default())),
+        tab(2, source(store_values(&[9191]), Arc::default())),
+    ]);
+    let hidden = grid_of(t.vcx, t.console, 0);
+    focus_and_select_all(t.vcx, &hidden);
+
+    // Result 2 is shown now; Result 1's grid keeps its selection off screen.
+    t.set_active(ActiveResult::Tab(1));
+    let focused = in_window(t.vcx, |window, cx| {
+        hidden.read(cx).focus_handle(cx).contains_focused(window, cx)
+    });
+    assert!(!focused, "the hidden grid keeps the focus");
+    for command in ["results.copy", "grid.copy", "grid.copy_with_headers"] {
+        put_sentinel(t.vcx);
+        run_command(t.vcx, command);
+        let copied = clipboard(t.vcx);
+        assert!(!copied.contains("4242"), "{command} copied {copied:?}");
+    }
+    // Navigation moves the shown grid, never the hidden one.
+    run_command(t.vcx, "grid.move_down");
+    assert!(t.vcx.cx.read(|cx| hidden.read(cx).selection().is_all()));
+}
+
+/// C1 across consoles: another console's grid is never copied from.
+#[gpui::test]
+fn copy_never_takes_another_consoles_cells(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    t.apply(&[tab(1, source(store_values(&[4242]), Arc::default()))]);
+    let hidden = grid_of(t.vcx, t.console, 0);
+    focus_and_select_all(t.vcx, &hidden);
+
+    let profile = profile_id(t.vcx, "orders-dev");
+    let (other, results, _) = add_console(t.vcx, profile);
+    apply_to(
+        t.vcx,
+        &results,
+        &[tab(1, source(store_values(&[9191]), Arc::default()))],
+    );
+    let shown = t.vcx.read(|cx| t.host().read(cx).shown());
+    assert_eq!(shown, Some(other));
+    for command in ["results.copy", "grid.copy"] {
+        put_sentinel(t.vcx);
+        run_command(t.vcx, command);
+        let copied = clipboard(t.vcx);
+        assert!(!copied.contains("4242"), "{command} copied {copied:?}");
+    }
+}
+
+/// I6 (R-M3-41): the tile follows the focused pane's active console through a tab switch, a
+/// pane focus change and a close.
+#[gpui::test]
+fn the_tile_follows_the_focused_panes_active_console(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    t.apply(&[tab(1, source(store_values(&[1]), Arc::default()))]);
+    let a = t.console;
+    let profile = profile_id(t.vcx, "orders-dev");
+    let (b, results_b, _) = add_console(t.vcx, profile);
+    apply_to(
+        t.vcx,
+        &results_b,
+        &[tab(1, source(store_values(&[1, 2, 3]), Arc::default()))],
+    );
+    let shown = |t: &Tile| t.vcx.read(|cx| t.host().read(cx).shown());
+    assert_eq!(shown(&t), Some(b));
+    assert_eq!(t.text("strip-sentence").as_deref(), Some("3 rows"));
+
+    // The other tab of the same pane.
+    let ws = workspace(t.vcx);
+    in_window(t.vcx, |window, cx| {
+        ws.update(cx, |ws, cx| ws.activate_prev_tab(window, cx))
+    });
+    t.redraw();
+    assert_eq!(shown(&t), Some(a));
+    assert_eq!(t.text("strip-sentence").as_deref(), Some("1 row"));
+    assert_eq!(t.text("results-rows-timing").as_deref(), Some("1 row"));
+
+    // A new pane takes the focus with an unbound console: the M1 tile.
+    in_window(t.vcx, |window, cx| {
+        ws.update(cx, |ws, cx| ws.split_focused(gpui::Axis::Horizontal, window, cx))
+    });
+    t.redraw();
+    assert_eq!(shown(&t), None);
+    assert!(rendered_markers(t.vcx).iter().any(|m| m == "results-empty"));
+    assert_eq!(t.text("strip-sentence"), None);
+
+    // Back to the first pane: its active console again.
+    in_window(t.vcx, |window, cx| {
+        ws.update(cx, |ws, cx| ws.focus_next_pane(window, cx))
+    });
+    t.redraw();
+    assert_eq!(shown(&t), Some(a));
+    assert_eq!(t.text("strip-sentence").as_deref(), Some("1 row"));
+
+    // Closing the shown console's tab shows the pane's next active console, never the closed
+    // one's rows.
+    let tab_a = t.vcx.read(|cx| Consoles::get(cx, a).map(|s| s.tab)).unwrap();
+    in_window(t.vcx, |_, cx| {
+        ws.update(cx, |ws, cx| ws.force_close_tab(tab_a, cx));
+        Consoles::remove(cx, a);
+    });
+    t.redraw();
+    assert_eq!(shown(&t), Some(b));
+    assert_eq!(t.text("strip-sentence").as_deref(), Some("3 rows"));
+}
+
+/// I2: the strip's closed and more-sets facts outlive the log's Clear.
+#[gpui::test]
+fn the_strip_keeps_its_facts_after_the_log_is_cleared(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    t.log.append(
+        LogMsg::CursorClosed {
+            rows: 4,
+            reason: CloseReason::IdleTimeout,
+            rolled_back: true,
+            idle_ms: 600_000,
+        },
+        None,
+        Some(unit(1)),
+    );
+    t.log
+        .append(LogMsg::MoreResultSets { skipped: 2 }, None, Some(unit(2)));
+    t.apply(&[
+        tab(
+            1,
+            source(
+                store_of(
+                    4,
+                    1,
+                    Completeness::Closed {
+                        reason: CloseReason::IdleTimeout,
+                    },
+                ),
+                Arc::default(),
+            ),
+        ),
+        tab(
+            2,
+            source(
+                store_of(5, 1, Completeness::Truncated(TruncReason::FollowingResultSets)),
+                Arc::default(),
+            ),
+        ),
+    ]);
+    let closed = t.text("strip-sentence").expect("the closed sentence");
+    assert!(closed.contains("10 min"), "{closed}");
+    assert!(closed.contains("rolled back"), "{closed}");
+    t.set_active(ActiveResult::Tab(1));
+    assert_eq!(
+        t.text("strip-more-sets").as_deref(),
+        Some("2 more result sets not shown")
+    );
+
+    t.log.clear();
+    t.redraw();
+    assert_eq!(
+        t.text("strip-more-sets").as_deref(),
+        Some("2 more result sets not shown")
+    );
+    t.set_active(ActiveResult::Tab(0));
+    assert_eq!(t.text("strip-sentence"), Some(closed));
+}
+
+/// I2: an idle close the log never told about says so without inventing a duration.
+#[gpui::test]
+fn an_idle_close_without_its_log_line_names_no_duration(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    t.apply(&[tab(
+        1,
+        source(
+            store_of(
+                4,
+                1,
+                Completeness::Closed {
+                    reason: CloseReason::IdleTimeout,
+                },
+            ),
+            Arc::default(),
+        ),
+    )]);
+    assert_eq!(
+        t.text("strip-sentence").as_deref(),
+        Some("Cursor closed after 4 rows: it was idle too long.")
+    );
+}
+
+/// I3: server text and its code are shown with their controls visible, on one line.
+#[gpui::test]
+fn server_text_controls_are_shown_not_obeyed(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    t.log.append(
+        LogMsg::Error {
+            n: 1,
+            view: ErrorView {
+                title_id: "exec-error-server",
+                code: Some("42\u{202E}P01".into()),
+                server_text: Some("near 'a\nb\u{202E}cd' at line 1".into()),
+                hint_id: None,
+                doc_offset: None,
+            },
+        },
+        Some(0..4),
+        Some(unit(1)),
+    );
+    t.redraw();
+    let detail = t.text("log-detail-0").expect("the server text row");
+    assert!(!detail.contains('\n') && !detail.contains('\u{202E}'), "{detail:?}");
+    assert!(detail.contains('↵'), "{detail}");
+    assert!(detail.contains("RLO"), "{detail}");
+    let code = t.text("log-code-0").expect("the code chip");
+    assert!(!code.contains('\u{202E}'), "{code:?}");
+    assert!(code.contains("RLO"), "{code}");
+}
+
+/// I4: a result that stopped before its first row is not called empty.
+#[gpui::test]
+fn a_cancelled_result_without_rows_is_not_called_empty(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    t.apply(&[tab(
+        1,
+        source(store_of(0, 3, Completeness::Cancelled), Arc::default()),
+    )]);
+    assert_eq!(
+        t.text("strip-sentence").as_deref(),
+        Some("Cancelled after 0 rows")
+    );
+    let drawn = texts_drawn_by(t.vcx, "hacivat-ui-grid/src/view.rs");
+    assert!(!drawn.iter().any(|s| s == "No rows"), "{drawn:?}");
+}
+
+/// I5 (NOTES surface 9): a run that ends in an error or update counts only shows Output; a
+/// line of the run whose result is shown leaves the result in view.
+#[gpui::test]
+fn a_run_without_a_result_shows_the_output(cx: &mut TestAppContext) {
+    let t = tile(cx, "en", None);
+    t.apply(&[tab(1, source(store_values(&[1, 2]), Arc::default()))]);
+    // The same run's later error (a SELECT-then-error script) keeps the result.
+    error_line(&t.log, 1, 0..4);
+    t.redraw();
+    let active = t.vcx.read(|cx| t.results.read(cx).active());
+    assert_eq!(active, ActiveResult::Tab(0));
+    assert!(t.text("strip-sentence").is_some());
+
+    // A later run that fails without a result: Output, and no strip.
+    t.log.append(
+        LogMsg::Error {
+            n: 1,
+            view: ErrorView {
+                title_id: "exec-error-server",
+                code: Some("42P01".into()),
+                server_text: Some("relation \"nope\" does not exist".into()),
+                hint_id: None,
+                doc_offset: None,
+            },
+        },
+        Some(0..4),
+        Some(UnitId {
+            run: RunId(2),
+            ordinal: 1,
+        }),
+    );
+    t.redraw();
+    let active = t.vcx.read(|cx| t.results.read(cx).active());
+    assert_eq!(active, ActiveResult::Output);
+    assert_eq!(t.text("strip-sentence"), None);
 }
