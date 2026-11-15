@@ -1083,3 +1083,45 @@ async fn a_server_without_net_write_timeout_connects_without_suspension() {
         }
     );
 }
+
+// ## m3a-t22-typed-readonly
+
+/// The M2b path (`execute(Extended)`, the read-only guard's step 3 before M3a) reads a binary
+/// result too: a column type `mysql_common` cannot parse there is refused before any row, the
+/// connection abandoned (no panic, never read on), as on the typed path (ledger T22 note).
+#[tokio::test]
+async fn an_extended_execute_refuses_an_internal_column_type_before_its_rows() {
+    let col = || column_def("t", T_TIME2, 0, BINARY, 10, 0);
+    let (mut c, server, setup) = scripted(true, move |cmd| match cmd.code {
+        COM_STMT_PREPARE => Some(prepare_ok(&[col()], 0)),
+        COM_STMT_EXECUTE => {
+            let mut steps = header(&[col()]);
+            steps.push(Step::Packet(bin_row(&[Some(vec![0; 3])])));
+            steps.push(Step::Packet(terminator(AUTOCOMMIT, 0)));
+            Some(steps)
+        }
+        _ => None,
+    })
+    .await;
+    let extended = ExecOpts {
+        protocol: Protocol::Extended,
+        ..ExecOpts::default()
+    };
+    assert_eq!(
+        kind(c.execute("SELECT t FROM t", extended).await),
+        RawErrorKind::Protocol
+    );
+    assert_eq!(server.commands().len(), setup + 2);
+    assert_eq!(kind(c.ping().await), NOT_CONNECTED);
+}
+
+/// The text-protocol test seam is a no-op on a read-only connection (T14 review m8): its
+/// statements stay prepared, so the read-only routing and the 1295 rule hold.
+#[tokio::test]
+async fn forcing_the_text_protocol_does_nothing_on_a_read_only_connection() {
+    let (mut c, server, setup) = scripted(true, one_int_column(Vec::new())).await;
+    c.force_text_protocol(true);
+    c.query(spec("SELECT a FROM t", false, 501)).await.unwrap();
+    let codes: Vec<u8> = server.commands()[setup..].iter().map(|c| c.code).collect();
+    assert_eq!(codes, vec![COM_STMT_PREPARE, COM_STMT_EXECUTE]);
+}

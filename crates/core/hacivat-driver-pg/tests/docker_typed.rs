@@ -1117,3 +1117,58 @@ async fn sql_ascii_text_that_is_not_utf8_is_lossy() {
     assert_synced(&mut c).await;
     Box::new(c).close().await;
 }
+
+// ## m3a-t22-typed-readonly
+/// The read-only guard's canary runs beside a suspended portal (R-M3-17). Before Task 22 the
+/// canary's `execute` dropped the warnings the query had raised so far (ledger T22 note):
+/// they reach the query's own `QueryDone::warnings`, and none of them is the canary's.
+#[tokio::test]
+#[ignore = "docker"]
+async fn a_statement_beside_a_portal_keeps_the_querys_warnings() {
+    for t in version_targets() {
+        let mut c = pg_on(&t).await;
+        c.batch(
+            "CREATE FUNCTION pg_temp.hv_t22_warn(n int) RETURNS int LANGUAGE plpgsql \
+             AS $$ BEGIN RAISE WARNING 'hv_t22 %', n; RETURN n; END $$",
+        )
+        .await
+        .unwrap();
+        c.batch("BEGIN").await.unwrap();
+        c.query(spec(
+            "SELECT pg_temp.hv_t22_warn(g) FROM generate_series(1, 10) g",
+            true,
+            4,
+        ))
+        .await
+        .unwrap();
+        assert!(matches!(
+            c.next_event().await.unwrap(),
+            QueryEvent::ResultStart(_)
+        ));
+        assert!(matches!(c.next_event().await.unwrap(), QueryEvent::Rows(_)));
+        assert_eq!(c.next_event().await.unwrap(), QueryEvent::Suspended);
+        let canary = c
+            .execute(
+                "SELECT pg_catalog.txid_current_if_assigned()",
+                ExecOpts {
+                    max_rows: 1,
+                    protocol: Protocol::Simple,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(canary.notice_codes.is_empty(), "{}: {canary:?}", t.id);
+        c.fetch_more(100).await.unwrap();
+        let done = loop {
+            match c.next_event().await.unwrap() {
+                QueryEvent::Done(done) => break done,
+                QueryEvent::Rows(_) | QueryEvent::ResultEnd(_) => {}
+                other => panic!("{}: {other:?}", t.id),
+            }
+        };
+        assert_eq!(done.warnings, 10, "{}", t.id);
+        c.batch("ROLLBACK").await.unwrap();
+        assert_synced(&mut c).await;
+        Box::new(c).close().await;
+    }
+}
