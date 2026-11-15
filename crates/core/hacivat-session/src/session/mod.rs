@@ -383,8 +383,8 @@ impl SessionHandle {
 // ## m3a-t01b-seams
 // Runs (HV-EXEC-05, HV-RES-05; Task 18): typed units streamed into result stores, observed
 // through a `RunObserver`, with console cursors. Types complete since M3a Task 1b; bodies
-// since Task 18 (`run.rs`, `cursor.rs`). A read-only session's typed path fails closed until
-// Task 22.
+// since Task 18 (`run.rs`, `cursor.rs`). A read-only session's typed units run inside the
+// read-only guard (`readonly::guarded_query`, Task 22).
 
 /// A run's ID, unique in the process (the run service counts them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

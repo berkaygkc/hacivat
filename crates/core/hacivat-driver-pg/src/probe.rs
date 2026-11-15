@@ -21,6 +21,8 @@ use tokio_postgres::{Client, SimpleQueryMessage};
 use crate::cancel::PgCancel;
 use crate::connect::pg_error;
 use crate::exec::{Exec, Notices};
+// ## m3a-t22-typed-readonly
+use crate::exec::{drain_notices, restore_notices};
 use crate::tls::LocalTls;
 use crate::typed;
 use crate::wire::WireState;
@@ -163,6 +165,17 @@ impl PgConn {
                 kind: RawErrorKind::Unsupported,
                 server: None,
             })
+        }
+    }
+
+    // ## m3a-t22-typed-readonly
+    /// The notice codes a suspended typed query raised so far, taken aside while a statement
+    /// runs beside it (`restore_notices` puts them back); nothing without an open query.
+    fn hold_query_notices(&self) -> Vec<String> {
+        if self.typed.is_some() {
+            drain_notices(&self.notices)
+        } else {
+            Vec::new()
         }
     }
 
@@ -368,7 +381,10 @@ impl RawConn for PgConn {
         Box::pin(async move {
             // ## m3a-t12-pg-typed
             self.statements_allowed()?;
+            // ## m3a-t22-typed-readonly: beside a suspended query, its notices stay its own.
+            let held = self.hold_query_notices();
             let r = self.exec().execute(sql, opts).await;
+            restore_notices(&self.notices, held);
             self.drop_if_broken();
             r
         })
@@ -378,7 +394,10 @@ impl RawConn for PgConn {
         Box::pin(async move {
             // ## m3a-t12-pg-typed
             self.statements_allowed()?;
+            // ## m3a-t22-typed-readonly
+            let held = self.hold_query_notices();
             let r = self.exec().batch(sql).await;
+            restore_notices(&self.notices, held);
             self.drop_if_broken();
             r
         })

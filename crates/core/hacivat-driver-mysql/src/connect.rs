@@ -472,9 +472,13 @@ impl MySqlConn {
     // ## m3a-t14-mysql-typed
     /// Test seam: run every typed query over `COM_QUERY` (the text protocol), so the Docker
     /// golden test compares both protocols' decoding against one server.
+    ///
+    /// ## m3a-t22-typed-readonly: a no-op on a read-only connection (T14 review m8). The
+    /// text route there would bypass `extended_route`'s refusal and the 1295 rule, which keep
+    /// every read-only statement prepared.
     #[doc(hidden)]
     pub fn force_text_protocol(&mut self, on: bool) {
-        self.typed.force_text = on;
+        self.typed.force_text = on && !self.read_only;
     }
 
     fn typed_ctx(&mut self) -> typed::Ctx<'_> {
@@ -602,7 +606,15 @@ impl RawConn for MySqlConn {
             let Some(conn) = self.conn.as_mut() else {
                 return Err(err(RawErrorKind::Io(io::ErrorKind::NotConnected)));
             };
-            exec::execute(conn, self.read_only, &mut self.tx, sql, opts).await
+            let r = exec::execute(conn, self.read_only, &mut self.tx, sql, opts).await;
+            // ## m3a-t22-typed-readonly: a result out of shape (a binary column type
+            // `mysql_common` cannot parse among them) leaves its rows unread on the wire: the
+            // connection is abandoned (patch §7), so nothing ever parses them, and answers
+            // `NotConnected` from then on.
+            if matches!(&r, Err(e) if e.kind == RawErrorKind::Protocol) {
+                typed::abandon(&mut self.conn);
+            }
+            r
         })
     }
 

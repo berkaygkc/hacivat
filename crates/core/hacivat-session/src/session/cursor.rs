@@ -881,10 +881,14 @@ impl Core {
     /// release when the statement ran to its end, else the rollback; the guard's steps on a
     /// read-only session. Returns whether a rollback undid the statement, and the failure. A
     /// failure discards the connection: Hacivat's transaction is never left open.
+    ///
+    /// ## m3a-t22-typed-readonly: `end` is the result's end as the stream saw it (the
+    /// command tag and affected rows the guard's post-check reads; MySQL's final OK packet).
     pub(crate) async fn end_hold(
         &mut self,
         hold: Hold,
         completed: bool,
+        end: Option<&ResultEnd>,
     ) -> (bool, Result<(), ExecError>) {
         // Before anything else is sent: a kill that raced the statement's end.
         let absorbed = self.absorb_kill().await;
@@ -901,7 +905,7 @@ impl Core {
             Hold::Guard(guard) => {
                 let replay = self.env_plan().replay();
                 let finished = match self.live.as_mut() {
-                    Some(live) => guard.finish(live.raw(), &replay).await,
+                    Some(live) => guard.finish(live.raw(), &replay, completed, end).await,
                     None => Ok(()),
                 };
                 self.holder = TxOwner::User;
@@ -992,7 +996,7 @@ impl Core {
                 (false, 0)
             }
         };
-        let (rolled_back, ended) = self.end_hold(hold, completed).await;
+        let (rolled_back, ended) = self.end_hold(hold, completed, s.end.as_ref()).await;
         let gap = matches!(
             &ended,
             Err(e) if matches!(e.kind, ExecErrorKind::EnforcementGap(_))
@@ -1110,7 +1114,7 @@ impl Core {
                 (false, 0, (!cancelled).then_some(e))
             }
         };
-        let (rolled_back, ended) = self.end_hold(hold, completed).await;
+        let (rolled_back, ended) = self.end_hold(hold, completed, s.end.as_ref()).await;
         let whole = completed && total == s.seen && !s.capped;
         let failure = failure.or(ended.err());
         if whole && self.broken.is_none() {
@@ -1149,7 +1153,7 @@ impl Core {
             // nothing.
             let _ = self.close_open(CloseHow::Now, Fire::Never, false, w).await;
         }
-        let (rolled_back, _) = self.end_hold(hold, false).await;
+        let (rolled_back, _) = self.end_hold(hold, false, s.end.as_ref()).await;
         let cancelled = w.stop.is_requested()
             && (error.kind == ExecErrorKind::Cancelled || is_cancel_code(self.kind, &error));
         let (reason, state) = if self.broken.is_some() {
@@ -1197,7 +1201,7 @@ impl Core {
                 Ok(self.summary())
             }
             Step::Complete => {
-                let (_, ended) = self.end_hold(hold, true).await;
+                let (_, ended) = self.end_hold(hold, true, s.end.as_ref()).await;
                 let state = s.state_after(&ended);
                 s.finish(state);
                 ended.map(|()| self.summary())

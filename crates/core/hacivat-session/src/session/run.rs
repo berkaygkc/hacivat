@@ -2,7 +2,8 @@
 //! chunk steps (the actor reads its commands between chunks, R-M3-16), `StopOnError`
 //! (R-M3-26), one result set kept per unit (R-M3-25), and the last suspendable unit kept as a
 //! console cursor (R-M3-23). Read-only sessions route each unit through the typed guard path
-//! (`readonly::guarded_query`, Task 22; it fails closed until then).
+//! (`readonly::guarded_query`, Task 22: the guard's read-only transaction around the query, its
+//! canary after the first chunk, its post steps when the hold ends).
 //!
 //! What a run tells its observer (ADR 0004 `m3a-t18`):
 //! - per unit `UnitStarted`, then for a result with columns `ResultOpened` (the observer's
@@ -320,9 +321,12 @@ impl Core {
             s = Stream::new(unit.id, spec.observer.clone(), spec.fetch, suspendable);
             let q = Self::query_spec(spec, unit, suspendable);
             let kind = self.kind;
+            // ## m3a-t22-typed-readonly: the guard ends itself when the query is refused at
+            // once, so it needs the session's environment then.
+            let replay = self.env_plan().replay();
             let opened = match self.live.as_mut() {
                 Some(live) => {
-                    w.guard(guarded_query(live.raw(), kind, q), Fire::OnStop)
+                    w.guard(guarded_query(live.raw(), kind, q, &replay), Fire::OnStop)
                         .await
                 }
                 None => Err(GuardFailure {
@@ -407,7 +411,7 @@ impl Core {
                         .close_open(hacivat_driver::CloseHow::Now, Fire::Never, false, w)
                         .await;
                 }
-                let (_, _) = self.end_hold(hold, false).await;
+                let (_, _) = self.end_hold(hold, false, None).await;
                 let reason = match failure.error.kind {
                     ExecErrorKind::EnforcementGap(_) => CloseReason::EnforcementGap,
                     _ if self.broken.is_some() => CloseReason::ConnectionLost,
@@ -488,7 +492,7 @@ impl Core {
     async fn completed(&mut self, mut s: Stream, hold: Hold, control: bool) -> Ended {
         // First what Hacivat opened (the commit, the guard's checks): a result is complete
         // only once that held.
-        let (_, ended) = self.end_hold(hold, true).await;
+        let (_, ended) = self.end_hold(hold, true, s.end.as_ref()).await;
         self.observe(!control);
         let state = s.state_after(&ended);
         s.finish(state);
