@@ -1505,3 +1505,22 @@ hv-status-duration-s = { NUMBER($seconds, minimumFractionDigits: 2) } sn
 hv-results-status-cursor = İmleç açık
 # Review: PO
 hv-results-status-cursor-tip = Veritabanı anlık görüntüsü tutuluyor. İmleci kapatmak için tıklayın.
+
+## m3a-t28-gutter
+
+# Review: PO
+hv-editor-nothing-to-run = Burada çalıştırılacak bir şey yok
+# Review: PO
+hv-editor-uncertain = Sınır belirsiz: çalıştırmak için ifadeyi seçin
+# Review: PO
+hv-editor-preview-unit = { $i }/{ $n }
+# Review: PO
+hv-editor-preview-offline = bağlı değil
+# Review: PO
+hv-editor-preview-uncertain = sınır belirsiz
+# Review: PO
+hv-editor-mark-stale = çalıştırıldıktan sonra düzenlendi
+# Review: PO
+hv-editor-tip-stale = Çalıştırıldıktan sonra düzenlendi. İşaretler son çalıştırmayı gösterir.
+# Review: PO
+hv-editor-tip-two = Bu satırda iki ifade var

@@ -775,21 +775,44 @@ async fn a_failed_user_transaction_refuses_units_before_they_are_sent() {
     assert_eq!(o.summaries()[0].failed, 1);
 }
 
+// ## m3a-t22-typed-readonly: the stub's fail-closed test became the guard's (Task 22;
+// `tests/readonly_typed.rs` holds the rest).
 #[tokio::test(start_paused = true)]
-async fn a_read_only_run_fails_closed_until_the_typed_guard_lands() {
-    // Task 22 fills `readonly::guarded_query`; until then a read-only session runs nothing
-    // typed, and says so to the observer.
-    let (h, f) = ro_session(pg().queries(vec![select("SELECT", 1)]), ro_profile()).await;
+async fn a_read_only_run_goes_through_the_typed_guard() {
+    let canary = hacivat_driver::fake::FakeExec {
+        prefix: "SELECT pg_catalog.txid_current_if_assigned()",
+        result: Ok(hacivat_driver::ExecSummary {
+            rows: vec![vec![None]],
+            row_count: 1,
+            ..hacivat_driver::ExecSummary::default()
+        }),
+        delay: std::time::Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    };
+    let (h, f) = ro_session(
+        pg().exec(vec![canary]).queries(vec![select("SELECT", 1)]),
+        ro_profile(),
+    )
+    .await;
     // The connect's own role probe is behind us.
     let sent = f.call_log().len();
     let o = Recorder::new();
-    let e = run_spec(&h, spec_of(&o, &["SELECT 1"])).await.unwrap_err();
-    assert_eq!(e.kind, ExecErrorKind::Internal);
-    assert_eq!(f.call_log().len(), sent, "{:?}", f.call_log());
-    assert!(
-        matches!(&o.unit_ends()[..], [UnitEnd::Failed(e)] if e.kind == ExecErrorKind::Internal)
-    );
-    assert_eq!(o.summaries().len(), 1);
+    run_spec(&h, spec_of(&o, &["SELECT 1"]))
+        .await
+        .expect("the guarded run succeeds");
+    assert_eq!(o.unit_ends(), vec![fetched(1, false)]);
+    // The guard's read-only transaction first, the query inside it, its rollback after it.
+    let log = &f.call_log()[sent..];
+    let at = |call: &FakeCall| log.iter().position(|c| c == call);
+    let begin = at(&FakeCall::Statement(
+        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY".into(),
+    ));
+    let query = at(&FakeCall::Typed(FakeTypedCall::Query("SELECT 1".into())));
+    let rollback = at(&FakeCall::Statement("ROLLBACK".into()));
+    assert_eq!(begin, Some(0), "{log:?}");
+    assert!(begin < query && query < rollback, "{log:?}");
+    assert!(!f.executed().iter().any(|s| s.contains("COMMIT")));
     assert_eq!(snap(&h).state, SessionState::Idle);
 }
 

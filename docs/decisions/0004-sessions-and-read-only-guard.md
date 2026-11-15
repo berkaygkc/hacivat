@@ -1763,3 +1763,144 @@ and is in `tests/cursor_sqlite.rs`, not in a `docker_*` file.
 **Not done here.** The queue cap of the digest (C9, `QueueFull`): not in the plan's Task 18.
 A reconnect after a loss during a run or a fetch: `may_open_tx` stays true for them (Task 1b,
 fail closed), so the session reports `Lost` and breaks.
+
+## m3a-t22 — typed read-only path
+
+HV-SESS-04 on `Request::Run` (R-M3-17): `session/readonly.rs` fills ADR 0006's phase API
+(`guarded_query` → `GuardedCursor` → `after_first_chunk` / `finish`). Since this task a
+read-only (or production, R-M3-6) console runs typed units through the M2b guard instead of
+failing closed with `Internal`.
+
+**The steps, around a cursor's life.**
+
+1. `guarded_query`, when the unit is sent: `check_input` (`ReadOnlyDenied(Input)`), the
+   transaction keywords in every reading of the first keyword, executable comments both ways
+   (`ReadOnlyDenied(Transaction)`), PostgreSQL's function check (`ReadOnlyDenied(Function)`);
+   nothing is sent for any of them. Then `plan.before` through `batch` (trusted text only), the
+   guard's transaction must be open (else `TransactionEndedByStatement`, nothing more sent),
+   then the typed `query`, always `Protocol::Extended`. User text never goes through `batch`.
+2. `after_first_chunk`, PostgreSQL only, at the first `Suspended`: the connection must still
+   be in the guard's transaction, and the canary runs beside the open named portal (P5). A
+   transaction ID is `CanaryAssigned`; an unreadable or failed canary is `Internal`. Every
+   failure here discards the connection at once (no rollback is sent on it), and the result is
+   `Closed { EnforcementGap }` (a gap) or `Closed { ConnectionLost }` with its rows. MySQL and
+   SQLite take no statement beside an open query, so their checks wait for the end.
+3. `finish`, when the hold ends (complete, released, stopped, failed, idle-bounded): the M2b
+   steps 4–8 (`post_steps`, now shared by both paths): the status, the canary (PostgreSQL),
+   `ROLLBACK`, `check_post`, the reset and the replay. The post steps wait for the cursor
+   (R-M3-17): a suspended cursor keeps the guard's transaction open, owner `Guard`, until a
+   fetch reaches the end, a release, the idle bound or a session close. D-019 holds because the
+   actor releases the cursor before any other request (ADR 0004 `m3a-t18` rule 1); the test
+   `nothing_else_runs_inside_the_guard_transaction` checks that every guard transaction in a
+   mixed sequence holds exactly one user statement.
+
+**How the end is judged.** A statement that ran to its end is judged by its `ResultEnd`: the
+command tag and affected rows (MySQL: the final OK packet's affected rows, meaningful for `CALL`
+and statements without columns; after a `SELECT` it most likely carries 0, so the test with a
+positive count on a read is a tripwire on a fake-only shape). One that failed or was closed
+early is judged by its transaction state, as M2b judges a failed statement (MySQL's
+implicit-commit DDL and SQLite excepted, unchanged), and (fix round 1, review M3) by the tag
+and count of a result end it did see, through the plain `check_post` without the readings
+rule. When a
+release's drain reads a result to its end, the session has no `ResultEnd` (the close returns
+only a row count): the statement is judged as completed without a tag. That is a known limit
+on MySQL, where the final OK packet of a drained release is not seen; the server's read-only
+transaction and the rollback still stand. Recorded for M3b (a `Closed::Completed` that carries
+the end would need a seam change).
+
+**Every reading of the first keyword counts at step 7 (both paths).** A statement that
+succeeded is judged once with its command tag and once more with each reading of its first
+keyword as the tag; the first gap wins. A MySQL tag is the text's first keyword read as code
+(the driver's `command_tag`), so `/*!99999 SELECT 1 */ CREATE TABLE …` was tagged `SELECT`
+where a current server runs `CREATE` (T14 review m14, routed here). A failed statement is
+never judged this way: a refused `CREATE` would read as a schema write. This only adds gaps
+where readings diverge; run B's rows are unaffected.
+
+**When `query` itself fails** (a refused prepare such as PostgreSQL's 42601 for two statements,
+MySQL's 1295 on a read-only connection, SQLite's prepare error): `guarded_query` runs the post
+steps itself before it answers, because the run loop then has no hold to end. It therefore
+takes the session's `replay` (deviation from Task 1b's stub signature).
+
+**Fails closed.** A gap discards the connection unreset (after the `ROLLBACK` when the gap is
+found at the end, as on M2b; before anything else when it is found after the first chunk), the
+actor emits `SessionEvent::EnforcementGap`, and the result keeps its rows as `Closed {
+EnforcementGap }`. A lost connection, a failed guard statement after the guard's transaction
+began, an unreadable canary, a failed reset or replay, and a transaction still open at the end
+discard it too. An engine without a guard plan runs nothing.
+
+**The idle bound.** A read-only PostgreSQL cursor idles at most 20 s (`READ_ONLY_PG_IDLE`,
+Task 18); the server ends a transaction idle for 30 s (`idle_in_transaction_session_timeout`),
+so the release and its post steps run before the server would end the connection. Docker
+`ro_cursor_is_released_before_the_server_idle_kill` waits the real bound on pg17: the cursor
+ends `IdleTimeout`, the same backend survives and runs the next unit.
+
+**Docker finding, fixed (`hacivat-driver-pg` `connect.rs`).** The guard plan's session setup
+sets the 30 s timeout, but only the replay after a guarded request's reset ever ran it: the
+role probe's reset at connect comes first, so a session's first request (a cursor among them)
+ran with the server's default (`0`, no bound). A read-only PostgreSQL connect now sends
+`-c idle_in_transaction_session_timeout=30s` as a startup option after
+`default_transaction_read_only=on` (after any user `options`, so it wins). As a startup value it
+holds from the first statement and survives every `RESET ALL`. The test reads it through `Run`
+on the session's first request.
+
+**Pinned difference from run B.** Docker `server_blocked_bypass_rows_are_blocked_through_run`
+sends run B's server-blocked rows through `Run`. Every row ends as it does there except P14
+(`COPY … FROM` a file): the typed PostgreSQL driver refuses `COPY` before anything is sent
+(Task 12), so it ends `protocol` (run B: the server's `25006`/`42501`). The test pins exactly
+`protocol`. Each outcome is in the Docker artifact `t22-run-bypass.tsv`.
+
+**Call sites (named exceptions in Task 18's files).** `run.rs` passes the replay to
+`guarded_query`; `cursor.rs` `end_hold` takes the stream's `ResultEnd` (`end`) and hands it,
+with `completed`, to `finish`. Every `end_hold` caller already held the stream, so the compiler
+enforces that no end is judged without its facts.
+
+**Ledger notes (T22) and what became of them.**
+- The canary drained the open query's notices (PostgreSQL), so they were missing from
+  `QueryDone::warnings`: fixed in `hacivat-driver-pg` (`probe.rs`, `exec.rs`): a statement run
+  beside a suspended query holds the query's notice codes aside and restores them after
+  (`held_notices_go_back_before_newer_ones_within_the_cap`; Docker
+  `a_statement_beside_a_portal_keeps_the_querys_warnings`).
+- M2b's MySQL `execute(Extended)` read binary rows with no `binary_decodable` check (a hostile
+  `TIME2` panicked the session task): fixed: every binary result set's column types are checked
+  before a row is read, the answer is `Protocol`, and the connection is abandoned (patch §7) so
+  nothing parses the rows (`an_extended_execute_refuses_an_internal_column_type_before_its_rows`,
+  RED: `not implemented: Unsupported column type MYSQL_TYPE_TIME2`).
+- `force_text_protocol` bypassed the read-only routing on the concrete type: now a no-op on a
+  read-only connection (`forcing_the_text_protocol_does_nothing_on_a_read_only_connection`).
+- `command_tag` reads version-gated executable comments as code: closed for the guard by the
+  readings rule above. The MySQL driver's own `CALL` check for `suspendable` still uses the tag
+  (defence in depth only: the session's R-M3-23 read-head rule decides `suspendable`, Task 23);
+  stays M3b.
+
+**Not done here.** MySQL's `SHOW WARNINGS` before the guard's `ROLLBACK` (digest E8): the
+session runs no `SHOW WARNINGS` on any path in M3a (Task 23's output log / M3b). `CALL` with the
+classifier off: PostgreSQL refuses a committing procedure inside the guard's transaction
+(`2D000`); on MySQL only the least-privilege principal stops a writing procedure, the M2b
+residual (ER15: M3b's classifier denies `CALL` on read-only sessions). MariaDB's bypass rows
+are not run through `Run` in the Docker leg: run B records them unjudged because its label stays
+guarded (C19), so there is no verdict to match; owed to M3b. MariaDB's read-only cursor release
+is covered (below).
+
+**Fix round 1 (review I1, I2, M3–M6).**
+- Docker `neutralised_and_privilege_only_rows_through_run`: run B's neutralised rows (PG P5,
+  P6, P10, P15 `pg_advisory_lock`/`LOCK TABLE`, P17 `search_path`, P23, P25, P26 `LISTEN`/`DECLARE
+  … WITH HOLD`; MySQL M1 `GET_LOCK` in an executable comment, M3, M5, M9, M14 `SET @var`) through
+  `Run` as `hv_ro`, each followed by run B's "nothing lingers" checks (also through `Run`) and a
+  write or DDL that must still be refused; and run B's privilege-only rows as `hv_ro`. Every
+  outcome matches run B, M4 (`1227`) and M7 (`1370`, the `CALL` residual) included, except the
+  two privilege-only `COPY` rows (P13 `TO PROGRAM`, P14 `TO` a file), pinned to `protocol` for
+  the reason P14's server-blocked row is. Outcomes: Docker artifact `t22-run-neutralised.tsv`.
+- Docker `pg_a_lock_held_by_a_read_only_cursor_goes_with_its_release` and
+  `mysql_a_read_only_cursor_release_keeps_the_connection_and_drops_its_lock` (mysql84, and
+  mariadb114 on the full set): a lock taken by a suspended read-only cursor's rows is held while
+  it is open and gone after another request released it; on MySQL the release keeps the same
+  connection (drain, `KILL QUERY`, the guard's `ROLLBACK`, `COM_RESET_CONNECTION`).
+- FakeDriver `a_gap_found_at_a_release_discards_the_connection` (`CloseCursor`, another
+  request, the idle bound: the end canary's ID after a release that did not complete gives
+  `[Close, Canary, Rollback]`, no reset, `Broken`, no `COMMIT`; RED by mutation: a
+  not-completed arm that skipped PostgreSQL passed every earlier test and fails this one), and
+  `a_stopped_read_only_{pg,mysql}_cursor_rolls_back_and_never_commits`.
+- `prod_read_only` `a_production_write_runs_inside_the_guards_read_only_transaction`: a
+  production `DELETE` through `Run` runs after `BEGIN … READ ONLY` and before `ROLLBACK`.
+- Not changed (review M7): `CursorReleased.rolled_back` stays `false` for guard holds; routed
+  to T23/T34 (the output log reports "rolled back" for a guard hold only if its `ROLLBACK` ran).

@@ -80,6 +80,11 @@ fn without_dangling_escape(s: &str) -> &str {
 /// identity and the guard's reset return to another. The session's validation refuses it
 /// first, as a visible issue; this is the driver's own belt, checked on the text it sends. A
 /// read-write connect keeps any value.
+// ## m3a-t22-typed-readonly
+/// The read-only startup setting that ends a transaction idle for 30 s with its connection
+/// (R-M3-17: the session releases a read-only cursor after 20 s, before this).
+const READ_ONLY_IDLE_IN_TX: &str = "idle_in_transaction_session_timeout=30s";
+
 fn startup_options(
     read_only: bool,
     extras: &[(String, String)],
@@ -106,6 +111,12 @@ fn startup_options(
     }
     if read_only {
         parts.push("-c default_transaction_read_only=on".into());
+        // ## m3a-t22-typed-readonly: the guard's server-side bound on an idle read-only
+        // transaction (R-M3-17; `hacivat_guard::plan_for`'s session setup) from the first
+        // statement on. As a startup value it survives the guard's `RESET ALL` and the role
+        // probe's reset, which ran before any replay could set it (Docker found the first
+        // guarded request without it).
+        parts.push(format!("-c {READ_ONLY_IDLE_IN_TX}"));
     }
     Ok((!parts.is_empty()).then(|| parts.join(" ")))
 }
@@ -343,7 +354,7 @@ mod tests {
             startup_options(true, &[("unknown_key".into(), "1".into())])
                 .unwrap()
                 .as_deref(),
-            Some("-c default_transaction_read_only=on")
+            Some("-c default_transaction_read_only=on -c idle_in_transaction_session_timeout=30s")
         );
     }
 

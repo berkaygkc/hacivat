@@ -73,6 +73,25 @@ pub(crate) fn drain_notices(notices: &Notices) -> Vec<String> {
         .collect()
 }
 
+// ## m3a-t22-typed-readonly
+/// Puts `held` back in front of what the buffer holds now, as the older codes, within
+/// [`NOTICE_CAP`] (the oldest go first). A statement run beside a suspended typed query (the
+/// read-only guard's canary, R-M3-17) takes `execute`'s usual fresh start, so the codes the
+/// open query raised before it are held aside and restored: they still reach the query's
+/// `QueryDone::warnings` (ledger T22 note).
+pub(crate) fn restore_notices(notices: &Notices, held: Vec<String>) {
+    if held.is_empty() {
+        return;
+    }
+    let mut q = notices.lock().unwrap_or_else(PoisonError::into_inner);
+    let newer: Vec<String> = q.drain(..).collect();
+    q.extend(held);
+    q.extend(newer);
+    while q.len() > NOTICE_CAP {
+        q.pop_front();
+    }
+}
+
 /// Drives the connection, keeping notice codes (never their text) and dropping notifications,
 /// until it ends; then wakes anyone waiting on the wire state.
 pub(crate) async fn drive<S, T>(
@@ -318,6 +337,30 @@ mod tests {
         assert_eq!(codes.len(), NOTICE_CAP);
         assert_eq!(codes.first().map(String::as_str), Some("00050"));
         assert_eq!(codes.last().map(String::as_str), Some("00149"));
+        assert!(drain_notices(&notices).is_empty());
+    }
+
+    // ## m3a-t22-typed-readonly
+    #[test]
+    fn held_notices_go_back_before_newer_ones_within_the_cap() {
+        let notices: Notices = Arc::default();
+        push_notice(&notices, "01000");
+        push_notice(&notices, "01001");
+        let held = drain_notices(&notices);
+        push_notice(&notices, "00000");
+        restore_notices(&notices, held);
+        assert_eq!(drain_notices(&notices), ["01000", "01001", "00000"]);
+        // Past the cap the oldest (the held ones first) go.
+        let held: Vec<String> = (0..10).map(|i| format!("h{i}")).collect();
+        for i in 0..95 {
+            push_notice(&notices, &format!("n{i}"));
+        }
+        restore_notices(&notices, held);
+        let codes = drain_notices(&notices);
+        assert_eq!(codes.len(), NOTICE_CAP);
+        assert_eq!(codes.first().map(String::as_str), Some("h5"));
+        assert_eq!(codes.last().map(String::as_str), Some("n94"));
+        restore_notices(&notices, Vec::new());
         assert!(drain_notices(&notices).is_empty());
     }
 }

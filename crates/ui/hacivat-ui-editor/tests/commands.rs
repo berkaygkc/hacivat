@@ -725,13 +725,21 @@ fn a_read_only_editor_refuses_every_edit(cx: &mut TestAppContext) {
     assert_eq!(state(&o), "  ab ┃cd");
 }
 
-/// Copy, cut and paste are Task 27's bodies (`clipboard::*`, no-ops until then): the commands
-/// delegate, and cut and paste close the open undo group.
+/// Copy, cut and paste are Task 27's bodies (`clipboard::*`): the commands delegate, and cut
+/// and paste close the open undo group.
 #[gpui::test]
 fn clipboard_commands_delegate_and_seal(cx: &mut TestAppContext) {
     let seals = |id: &str| commands::command_by_id(id).unwrap().seals_history;
     assert!(!seals("editor.copy") && seals("editor.cut") && seals("editor.paste"));
-    let mut o = open(cx, "a┃b");
+    // ## m3a-t27-ime-clipboard (named exception): with Task 27's bodies a copy or cut without a
+    // selection takes the whole line; this test keeps its subject (the seals) by turning that
+    // off, so copy, cut and an empty clipboard's paste change no text (`tests/clipboard.rs`
+    // covers the bodies).
+    let cfg = EditorConfig {
+        copy_line_without_selection: false,
+        ..EditorConfig::default()
+    };
+    let mut o = open_with(cx, "a┃b", cfg);
     type_text(&mut o, "x");
     run(&mut o, "editor.copy");
     type_text(&mut o, "y");

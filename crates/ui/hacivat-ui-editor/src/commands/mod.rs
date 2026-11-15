@@ -127,7 +127,7 @@ pub fn status_message(v: &EditorView) -> Option<SharedString> {
 
 /// Says `text`: a polite announcement, and the status bar's transient message.
 pub(crate) fn say(v: &mut EditorView, text: SharedString, cx: &mut Context<EditorView>) {
-    v.announce(text.clone());
+    v.announce(text.clone(), cx); // ## m3a-t29-a11y-tiers: `announce` takes `cx`.
     v.commands.said = Some((Moment::of(v), text));
     cx.emit(EditorEvent::StatusChanged);
     cx.notify();

@@ -3,9 +3,7 @@
 //! one session request per run, run status, result tabs, the output-log model and the console
 //! UX state.
 //!
-//! Types complete since M3a Task 1b. Task 1b stubs (fail closed): `resolve_units` answers
-//! `NothingToRun`; `ExecService::run` sends nothing and answers its ticket with an aborted
-//! summary. `SessionLog` works (a bounded ring). The other bodies panic naming Task 23.
+//! Types since M3a Task 1b; bodies since Task 23 (ADR 0006 `m3a-t23`).
 
 pub mod log;
 mod observer;
@@ -16,8 +14,17 @@ mod titles;
 pub mod units;
 pub mod ux;
 
-pub use log::{LogArg, LogLine, LogMsg, SessionLog, Severity, copy_invariant};
+pub use log::{
+    LogArg, LogLine, LogMsg, SessionLog, Severity, UnitMsg, copy_invariant, duration_message,
+    size_message,
+};
 pub use service::{ExecService, ResultTab, RunRequest, RunTicket, TabKey};
-pub use status::{ErrorView, RunStatus, UnitStatus, UnitStatusEntry, UnitSummary};
-pub use units::{ExecUnit, Resolution, RunAction, policy_for, resolve_units, units_for_candidate};
+pub use status::{
+    ErrorView, RunStatus, UnitStatus, UnitStatusEntry, UnitSummary, doc_offset_of, error_hint_id,
+    error_title_id, error_view,
+};
+pub use units::{
+    ExecUnit, LaneOracle, OracleLane, RefuseReason, Resolution, RunAction, SplitOracle, policy_for,
+    resolve_units, resolve_units_with, uncertain_message_id, units_for_candidate,
+};
 pub use ux::{CancelUx, ConsoleUx, TxBadge, console_ux};

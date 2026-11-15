@@ -239,3 +239,223 @@ also see GPUI's internals, but it needs `unsafe`, which the workspace denies out
 C1 controls → `⟨U+0085⟩`, the bidi controls → named chips (`⟨RLO⟩`, the Trojan Source defence),
 each painted as a chip (Fragment Mono 11 `text-2` on a `seam-soft` well, radius 3); the cell's text
 is unchanged, so a copy keeps the real characters.
+
+## m3a-t28 — the preview rule
+
+**The rule.** The Run preview band draws only what the language service said Run would execute,
+for the exact text on screen (R-M3-8, UI-EDIT-21). `preview::plan` returns a band only when the
+service's last answer was asked at the frame's text version; an answer of another version, a
+`None` (no analysis of this version), a `Nothing`, a range past the text's end or off a
+character boundary all draw no band. The band asks `exec_preview(Execute1)` 50 ms after the last
+change or selection move (the selections when there are any, else the carets, as Run asks),
+and at once when an analysis lands or the document context changes (unless the timer is
+pending). Between an edit and the next answer there is no band: a band rebased through the edit
+would be a range the service never vouched for. The two exceptions: the chooser's hover override
+(`set_preview_override`, D-011) wins over the service, and while an IME composition is open the
+band is frozen at its last answer, mapped through the composition's edits as a container range
+(it asks again after the commit; a mapping that fails draws nothing).
+
+**Fix round 1 (review: Critical 1 and 2, Important 3).** An answer is keyed to where it was asked
+as well as to the version: `plan`, `status_message` and `current_statement` use it only while
+`asked_at == exec_at(snap)` (the carets and selections, built by the one `exec_at` that
+`editor.run` also uses). A selection-only commit keeps the version, so without this a caret move,
+or a key repeat faster than 50 ms, kept the old statement's band while ⌘↵ would send the new
+one; now nothing is drawn until the new position's answer. A context change drops the answer. A
+mapped (composition) answer is drawn only while frozen and is dropped when the composition
+ends; the freeze keeps an answer only when it was current when the composition began (no query
+pending), whichever comes first, `composition_changed(true)` or the first marked text. A text
+change clears the chooser's override. **Rejected:** keeping the old band until the new answer
+(it is about another place) and asking synchronously on every move (the 50 ms debounce stays).
+**Held by:** `a_caret_move_hides_the_old_band_until_the_new_answer` (looks before the timer, also
+through three moves 30 ms apart), `a_context_change_drops_the_old_answer`,
+`a_text_change_clears_the_chooser_override`, `chooser_override_wins_and_composition_freezes`
+(no band right after the composition ends) and
+`a_composition_begun_while_a_query_is_pending_shows_no_band`; the mutation "ignore `asked_at`"
+fails the first.
+
+**Rejected:** rebasing the last answer through every edit until the next one arrives (fewer
+frames without a band, but a range nobody resolved: the §2.3 anti-goal); drawing from the
+service's statement spans instead of its preview (the editor's split is not what runs, D-06);
+drawing a choices count for `AskPreselected` from a guess (`ExecPreview` has no count; the hint
+is left out until the seam carries it).
+
+**Geometry and hues** (design/m3a-query/NOTES.md surfaces 3 and 5, binding over the plan): a
+line a unit owns (only blanks and its terminator outside it) gets the full-row band, `blue_tint`
+at .55 (dark) or .8 (light) of its alpha, from the gutter's edge to the right edge; a shared line
+gets the exact tint over the unit's characters, without the terminator. Uncertain and
+no-connection previews take the neutral `hover` fill. Gutter bars are 1 px at x = 4 (`blue`;
+dashed `text_2` uncertain; `text_3` no connection; x = 2 beside an executed bar; a 2 px gap
+between the units of a separate-statements selection). Marks: Failed is the ink alert glyph,
+Cancelling a hollow amber square, Running the amber run marker after 50 ms (no spinner, no
+ambient motion); no state is red.
+
+**Marks.** Container ranges rebased from the submitting version through the `ChangeLog`
+(`TooOld` and `Deleted` drop the mark); a mark is stale when an edit landed inside it or at its
+edges, also between submission and `add_exec_marks`. A mark one edit deleted is a tombstone for
+64 text transactions, keyed by where its text was and the text's XXH3 hash; an edit that puts
+the same text back at that place (undo) restores it with its state. The 1 Hz repaint is
+scheduled from paint, so a window that is not painted schedules nothing, and it stops when no
+mark is running or cancelling.
+
+**Held by:** `tests/preview.rs` (`every_preview_state_renders`,
+`stale_service_answer_draws_no_band`, `the_chooser_override_replaces_the_band`),
+`preview::tests::chooser_override_wins_and_composition_freezes`, `tests/marks.rs` (cases 1–5,
+staleness, rebasing, tombstones, the timer, the end-of-line collision) and `tests/gutter_scene.rs`
+(bars, band alphas, the exact tint, glyph geometry, no red, the scrollbar track); seven
+mutations (the version check, staleness, tombstones, the timer stop, the collision rule, the
+track's hit target, the 50 ms grace) each fail their test.
+
+## m3a-t24 — off-thread analysis and the preview rule
+
+**Choice (R-M3-22).** `hacivat-sql-editor`'s `SqlLanguageService` never lexes on the UI thread.
+For each open document, `open` starts two tasks:
+
+- **The worker** runs on the GPUI background executor. It is fed by a `tokio::sync::watch` that
+  holds only the latest job: the version, an O(1) clone of the snapshot's rope, and the console's
+  SQL context.
+  - It builds `SqlDocument::from_chunks(&RopeChunks(buffer), ctx, flavor)`. That is the one copy
+    of the text, and it is made here.
+  - It computes the execution split, the client and `COPY` regions, the tokens inside running
+    executable comments, and the statement spans.
+  - It publishes the result on a second `watch`.
+  - One analysis runs at a time. Jobs that arrive meanwhile collapse into the newest
+    (latest wins).
+- **A foreground task** stores each published analysis and calls the editor's `on_update`
+  notifier from its own task, so the notifier never re-enters a call of the trait.
+
+`change` does two things: it records the `ChangeDesc` (at most 256 are kept) and replaces the
+job. It lexes nothing and copies no text.
+
+**Which analysis answers what.**
+
+| Reader | Uses | When the analysis is older |
+|---|---|---|
+| Highlighting | the latest analysis | Rebased through the editor's `ChangeLog` as `RangeKind::Content`. The visible range is mapped back conservatively, then each mark is mapped forward. A token an edit touched paints plain until the next analysis. An analysis older than the log paints nothing. |
+| Statement spans | the latest analysis | Mapped through the recorded changes as containers. A statement an edit touched is `Heuristic` until the next analysis. An unknown chain gives no spans. |
+| Token oracle, Run preview, `doc_snapshot` | only an analysis of exactly the editor's version, made under the current SQL context | — |
+
+A new `set_sql_context` bumps a generation and re-analyses. Until the new analysis lands, no
+preview, token words or `doc_snapshot` come from the old dialect. A connected console whose SQL
+context was never set has no preview, and Run analyses its own snapshot. `ClientFlavor::None`
+takes the dialect's own client (`effective_flavor`): psql for PostgreSQL, mysql for MySQL and
+MariaDB, sqlite3 for SQLite. So a PostgreSQL console never splits without psql's rules.
+
+**The preview rule (R-M3-8, R-M3-24).** `exec_preview` asks `exec_range::resolve` the same
+question Run asks, **in execution mode**, with Run's policy for the action and the console's
+remembered chooser kind (`set_remembered_kind`).
+
+| Execution's answer | Preview |
+|---|---|
+| Runs units M3a sends | `Units`, with exactly those ranges |
+| Asks | `AskPreselected`, with the ranges of the candidate the chooser opens on |
+| Nothing at the caret | `Nothing` |
+| `Ambiguous` | `Uncertain` |
+| An unsupported client command | `Uncertain` |
+| A `COPY … FROM STDIN` or verbatim unit | `Uncertain` |
+
+For an `Uncertain` preview, editor mode is asked only to find the ranges to draw in neutral. A
+disconnected console gets `NoConnection` with the same ranges.
+
+So the preview draws a range as runnable only when it is the range Run sends, by construction.
+In the common case this costs one resolve on the UI thread.
+
+A statement span is `Exact` only when the editor split is certain there and the execution split
+holds the same certain statement.
+
+**Rejected.**
+- **Mapping editor mode's answer, with a certainty check per unit** (the plan's wording). It is
+  correct only through Task 13's agreement of the two modes, and it costs a lookup per unit of a
+  whole-script candidate. The rule above is true without that agreement. The tests still check
+  the agreement for every runnable preview.
+- **Lexing on the keystroke frame.** It breaks B3 at 2 MB (R-M3-22).
+- **Highlight spans precomputed for the whole document.** That is O(document) memory per
+  analysis; marks are built per visible range from `Lexed::tokens_in`.
+
+**Costs.**
+- The preview never calls the PostgreSQL parser oracle, because a blocking parse is not UI work.
+  A region Task 23 resolves through the oracle therefore previews `Uncertain`.
+- Colours come from the whole-text lexing. Past a client command, `COPY` rows or a client
+  delimiter they can differ from the split, for example when a quote in `COPY` rows colours the
+  SQL after them. This is cosmetic: Run uses the split.
+
+**Held by.** `tests/preview_truth.rs`:
+- `preview_equals_execution_for_exact_items` and `preview_follows_the_remembered_kind` (512
+  cases by default, 1,000,000 each in the task's run): every runnable preview equals execution's
+  answer and editor mode's answer, and offline previews keep the geometry.
+- `exact_statement_spans_are_what_execution_runs`.
+- `heuristic_boundary_previews_uncertain`, `unsupported_commands_and_copy_never_preview_as_runnable`
+  and `stale_snapshot_never_yields_a_preview`.
+
+`tests/worker.rs`:
+- `worker_result_equals_a_fresh_document_after_random_edits` (10⁴ edits on PostgreSQL, 2,000 each
+  on MySQL and SQLite).
+- `change_never_lexes_on_the_calling_thread`.
+- `doc_snapshot_is_exact_and_under_the_consoles_context` and
+  `postgres_never_analyses_without_its_client_flavor`.
+
+`tests/highlight.rs`: `touched_range_paints_plain_until_the_next_analysis` and
+`an_analysis_older_than_the_log_paints_nothing`.
+
+`tests/budget.rs` (perf): `change()` p95 ≤ 0.5 ms, the preview p95 ≤ 2 ms, and one viewport's
+decorations p95 ≤ 1 ms on 50,000 lines.
+
+**Fix round 1 (review of m3a-t24).**
+- **Selections off the UI thread (I1).** Resolving a selection lexes and splits the selected
+  text, about 23 ms for 1.2 MB in release; 64 KiB took 1.3 ms. A selection whose total length
+  exceeds 32 KiB (`SYNC_SELECTION_LIMIT`, chosen so the UI-thread work stays under the 1 ms rule
+  of §5.4) is therefore not resolved on the UI thread:
+  - `exec_preview` answers `None`, so no band is drawn, and posts the question to the
+    document's preview worker, which is latest-wins like the analysis worker;
+  - the answer is cached under the key (version, context generation, `ExecAt`, action,
+    remembered kind), served only for an equal key, and the editor is notified when it lands;
+  - shorter selections and every caret still resolve synchronously, within 2 ms;
+  - a refused selection is drawn from execution's own answer (both modes answer a selection
+    alike), so it is never lexed twice.
+- **Setters notify (I2).** `set_sql_context` and `set_remembered_kind` take `cx`. When the value
+  changes they call `cx.defer` with the editor's notifier, so a band drawn under the old context
+  or preselection is asked again. They never call it synchronously.
+- **A worker panic is contained (M1).** `catch_unwind` wraps each analysis and each preview. A
+  panic publishes nothing for that version, so there is no preview and no `doc_snapshot`
+  (fail closed), and the worker keeps running.
+- **Gutter statements (M2).** Every statement from the earliest change onwards is `Heuristic`
+  until the next analysis, because lexer state flows forward.
+- **Client flavor (M3).** `effective_flavor` always applies the dialect's own client. An explicit
+  mismatched flavor, such as PostgreSQL with mysql's rules, is replaced.
+- **Closed documents (M6).** A closed document ignores the setters and `on_update` until it is
+  opened again.
+- **Perf fixture.** The perf fixture is now 2.8 MB: 50,000 lines, 12,500 statements.
+
+## m3a-t29 — editor accessibility node and large-file tiers
+
+**The node is the focusable column, not the text element.** GPUI gives the platform focus to the
+node of the element that tracks the focus (`div.rs`: `set_focusable`/`set_focus`), and the
+editor's focus is tracked by the view's root column. A node on the inner `EditorElement` (the
+round-2 seam above) would never be focused, so assistive technology would announce the whole
+window instead of the text. Task 29 moves the declaration to the column: `render` calls
+`a11y::declare`, which (only while `window.is_a11y_active()`) gives it role
+`MultilineTextInput` and an `a11y_synthetic_children` closure that writes the label, the T1
+description, read-only, the text selection, the window's `TextRun`s and the polite live region.
+`EditorElement` no longer has accessibility hooks.
+
+**Cached embedding.** The fork's `reuse_prepaint`/`reuse_paint` carry no accessibility state, so
+a reused cached view drops out of the tree. `a11y::embed(editor, style, window)` caches the
+editor only while no assistive technology is attached; the console host (Task 32) embeds with
+it. A fork carry that skips view reuse while accessibility is active would fix every cached view
+(the grid included); it is a controller decision.
+
+**Keys and the window.** Line keys follow line-start anchors (`Bias::After`, `MapMode::TrackDel`)
+rebased through the change log at build time only (nothing per keystroke); a line takes the
+first anchor inside it; keys are never reused; the log running out starts the keys over. A
+window is rebuilt only when the text version, its lines or a long caret line's exposed part
+change. A line longer than 64 KB exposes 64 KB (around the caret on the caret's line; the end
+of the text is a position on its last line). The default window exposes at most 256 KB in all,
+the lines nearest the caret first; its AccessKit run nodes are built with it and reused while it
+is. The live region is named and valued (Windows and Linux announce the name, macOS the value)
+and leaves the tree after a 3 s hold on the executor clock, or at the first frame without
+assistive technology, so a subtree re-entering the tree never reads an old status again.
+
+**Tiers.** T0 up to 4 MB and a 64 KB longest line; T1 above, never T2 in M3a. The tier state
+records which limit caused T1 (accumulated while in T1); back to T0 once each caused limit is
+below 80 % of itself and the other is within itself (exact integer comparison), and the banner's
+copy follows the cause. Sizes in the banner come from the host's `large_file::SizeText` (format
+locale); the fallback is an unformatted decimal.

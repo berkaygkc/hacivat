@@ -1600,3 +1600,25 @@ hv-status-duration-s = { NUMBER($seconds, minimumFractionDigits: 2) } s
 hv-results-status-cursor = Cursor open
 # The tooltip of the cursor button.
 hv-results-status-cursor-tip = Holding a database snapshot. Click to close the cursor.
+
+## m3a-t28-gutter
+
+# The status bar's sentence when the caret is where Run would run nothing (a blank line, a comment).
+hv-editor-nothing-to-run = Nothing to run here
+# The status bar's sentence when the statement at the caret has an uncertain boundary, so Run sends nothing.
+hv-editor-uncertain = Boundary uncertain: select the statement to run it
+# At the end of a statement's first line when a selection runs as separate statements.
+# Variables:
+#   $i (Number) - the statement's position, e.g. 2.
+#   $n (Number) - the statements the selection runs, e.g. 3.
+hv-editor-preview-unit = { $i } of { $n }
+# At the end of the statement's first line when the console is not connected (Run connects first and runs nothing).
+hv-editor-preview-offline = not connected
+# At the end of the statement's first line when its boundary is uncertain.
+hv-editor-preview-uncertain = boundary uncertain
+# At the end of an executed statement's first line once it was edited.
+hv-editor-mark-stale = edited since execution
+# Tooltip of an executed statement's gutter mark once the statement was edited.
+hv-editor-tip-stale = Edited since execution. The marks show the last run.
+# Tooltip title of a gutter mark when two executed statements share its line; each statement's own outcome follows.
+hv-editor-tip-two = Two statements on this line

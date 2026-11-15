@@ -28,6 +28,8 @@ use mysql_async::prelude::{Protocol as WireProtocol, Queryable};
 use mysql_async::{Conn, QueryResult, Row, Value};
 
 use crate::connect::raw_error;
+// ## m3a-t22-typed-readonly
+use crate::decode::binary_decodable;
 
 /// `ER_UNSUPPORTED_PS`: "This command is not supported in the prepared statement protocol yet".
 const UNSUPPORTED_PS: u16 = 1295;
@@ -262,13 +264,35 @@ fn cells(row: &Row) -> Vec<Option<String>> {
     (0..row.len()).map(|i| cell(row.as_ref(i))).collect()
 }
 
+// ## m3a-t22-typed-readonly
+/// The error [`drain`] answers for a binary result set whose column types `mysql_common`'s
+/// binary row parser cannot read (it panics on them: `decode::binary_decodable`, Task 14).
+/// [`raw_error`] reads it as `Protocol`, and the connection's `execute` abandons the
+/// connection then, so no row of it is ever parsed (ledger: the M2b binary path had no guard).
+fn undecodable() -> mysql_async::Error {
+    mysql_async::Error::Driver(mysql_async::DriverError::UnexpectedPacket {
+        payload: Vec::new(),
+    })
+}
+
 /// Reads every result set of `result`: the last set with columns gives `columns` and `rows`.
+/// `binary`: the rows come in the binary protocol, so each set's column types are checked
+/// before any row of it is read.
 async fn drain<P: WireProtocol>(
     mut result: QueryResult<'_, 'static, P>,
     keep: Keep,
+    binary: bool,
 ) -> Result<ExecSummary, mysql_async::Error> {
     let mut s = ExecSummary::default();
     loop {
+        // ## m3a-t22-typed-readonly
+        if binary
+            && result
+                .columns()
+                .is_some_and(|c| !c.iter().all(|c| binary_decodable(c.column_type())))
+        {
+            return Err(undecodable());
+        }
         if let Some(columns) = result.columns().filter(|c| !c.is_empty()) {
             s.columns = columns.iter().map(|c| c.name_str().into_owned()).collect();
             s.rows.clear();
@@ -293,12 +317,12 @@ async fn drain<P: WireProtocol>(
 
 async fn text(conn: &mut Conn, sql: &str, keep: Keep) -> Result<ExecSummary, mysql_async::Error> {
     let result = conn.query_iter(sql).await?;
-    drain(result, keep).await
+    drain(result, keep, false).await
 }
 
 async fn prepared(conn: &mut Conn, sql: &str) -> Result<ExecSummary, mysql_async::Error> {
     let result = conn.exec_iter(sql, ()).await?;
-    drain(result, Keep::Count).await
+    drain(result, Keep::Count, true).await
 }
 
 fn is_unsupported_ps(e: &mysql_async::Error) -> bool {

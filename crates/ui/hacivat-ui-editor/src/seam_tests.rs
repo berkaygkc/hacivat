@@ -190,8 +190,9 @@ fn a_commit_at_the_same_version_is_selection_only(cx: &mut TestAppContext) {
     assert_eq!(*f.service.changes.borrow(), [1]);
 }
 
-/// Without assistive technology the element builds no accessibility frame, so the label is
-/// never evaluated by a frame (R1-M3); `announce` queues at most four texts.
+/// Without assistive technology no accessibility frame is built (## m3a-t29-a11y-tiers: the
+/// column's `a11y::declare` returns it untouched), so the label is never evaluated by a frame
+/// (R1-M3); `announce` queues at most four texts.
 #[gpui::test]
 fn no_a11y_work_without_assistive_technology(cx: &mut TestAppContext) {
     let f = fixture(cx, "SELECT 1");
@@ -200,9 +201,10 @@ fn no_a11y_work_without_assistive_technology(cx: &mut TestAppContext) {
         f.vcx.run_until_parked();
     }
     assert_eq!(f.label_reads.get(), 0);
-    f.editor.update(f.vcx, |v, _| {
+    // ## m3a-t29-a11y-tiers: `announce` takes `cx`.
+    f.editor.update(f.vcx, |v, cx| {
         for i in 0..6 {
-            v.announce(format!("{i}").into());
+            v.announce(format!("{i}").into(), cx);
         }
         let nodes = v.a11y.nodes();
         assert_eq!(

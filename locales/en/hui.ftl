@@ -22,3 +22,98 @@ hui-window-minimize = Minimize
 hui-window-maximize = Maximize
 hui-window-close = Close window
 hui-menu-app = Application menu
+
+## m3a-t27-clipboard
+
+# A size in whole megabytes, rounded up (the paste refusal; the T1 banner may reuse it).
+# Variables:
+#   $n (Number) - megabytes, e.g. 31.
+hui-editor-size-mb = { $n } MB
+# Toast title: a paste would take the document past the editor's size limit.
+hui-editor-paste-refused-title = Couldn't paste
+# Variables:
+#   $size (String) - the pasted text's size, e.g. "31 MB".
+#   $limit (String) - the largest document the editor takes, e.g. "20 MB".
+hui-editor-paste-refused-body = The pasted text is { $size }, which would take this document past { $limit }. Paste a smaller part.
+# Toast title: the pasted text had NUL characters, which the editor shows as chips.
+hui-editor-nul-title = The pasted text contains NUL characters
+# Variables:
+#   $n (Number) - how many NUL characters were pasted, e.g. 2.
+hui-editor-nul-body = { $n ->
+        [one] { $n } NUL character is marked in the text so you can find it. Most servers reject it.
+       *[other] { $n } NUL characters are marked in the text so you can find them. Most servers reject them.
+    }
+# Toast title: the clipboard could not be read for a paste.
+hui-editor-clipboard-title = Couldn't read the clipboard
+hui-editor-clipboard-body = Another app may be holding it, or the system didn't allow access.
+# Toast button: read the clipboard again and paste.
+hui-editor-try-again = Try again
+
+## m3a-t29-a11y-tiers
+
+# The SQL editor's accessible name, read when it takes the focus.
+# Variables:
+#   $name (String) - the console's name, e.g. "Console 1".
+hui-editor-label = SQL editor, { $name }
+# A document size in the editor's reduced-mode notice.
+# Variables:
+#   $n (Decimal) - the megabytes, e.g. 18.4.
+hui-editor-t1-size = { $n } MB
+# The first line of the notice above a large document's text (reduced mode, 4–20 MB).
+# Variables:
+#   $size (String) - the document's size (an hui-editor-t1-size message), e.g. "18.4 MB".
+hui-editor-t1-title = This document is large ({ $size }), so the editor is in reduced mode.
+# The notice's second line.
+# Variables:
+#   $size (String) - the size reduced mode ends below (an hui-editor-t1-size message), e.g. "3.2 MB".
+hui-editor-t1-body = Reduced mode keeps typing fast. It ends when the document is smaller than { $size }.
+# The first line of the notice when a line longer than 64 KB put the editor in reduced mode.
+hui-editor-t1-long-title = This document has a very long line, so the editor is in reduced mode.
+# The notice's second line in that case.
+hui-editor-t1-long-body = Reduced mode keeps typing fast.
+# Announced to screen readers when a statement starts running.
+# Variables:
+#   $n (Number) - the statement's position in the run, e.g. 2.
+hui-editor-exec-running = Statement { $n } is running
+# Announced when a statement finished without rows or a row count.
+# Variables:
+#   $n (Number) - the statement's position in the run, e.g. 2.
+hui-editor-exec-done = Statement { $n } executed
+# Announced when a statement returned rows.
+# Variables:
+#   $n (Number) - the statement's position in the run, e.g. 2.
+#   $rows (Number) - the rows it returned, e.g. 40.
+hui-editor-exec-rows = { $rows ->
+        [one] Statement { $n } executed: { $rows } row
+       *[other] Statement { $n } executed: { $rows } rows
+    }
+# Announced when a statement returned rows and more are left to fetch.
+# Variables:
+#   $n (Number) - the statement's position in the run, e.g. 2.
+#   $rows (Number) - the rows fetched so far, e.g. 1000.
+hui-editor-exec-rows-more = Statement { $n } executed: { $rows }+ rows
+# Announced when a statement changed rows.
+# Variables:
+#   $n (Number) - the statement's position in the run, e.g. 2.
+#   $rows (Number) - the rows it changed, e.g. 7.
+hui-editor-exec-affected = { $rows ->
+        [one] Statement { $n } executed: { $rows } row affected
+       *[other] Statement { $n } executed: { $rows } rows affected
+    }
+# Announced when a statement failed and the server gave no SQLSTATE.
+# Variables:
+#   $n (Number) - the statement's position in the run, e.g. 2.
+hui-editor-exec-failed = Statement { $n } failed
+# Announced when a statement failed.
+# Variables:
+#   $n (Number) - the statement's position in the run, e.g. 2.
+#   $sqlstate (String) - the server's SQLSTATE code, verbatim, e.g. "42P01".
+hui-editor-exec-failed-code = Statement { $n } failed: { $sqlstate }
+# Announced when a statement was cancelled.
+# Variables:
+#   $n (Number) - the statement's position in the run, e.g. 2.
+hui-editor-exec-cancelled = Statement { $n } cancelled
+# Announced when a statement was not run because an earlier one failed.
+# Variables:
+#   $n (Number) - the statement's position in the run, e.g. 2.
+hui-editor-exec-skipped = Statement { $n } skipped: an earlier statement failed

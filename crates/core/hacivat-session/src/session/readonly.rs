@@ -16,12 +16,20 @@
 //! - 5: PostgreSQL's canary (`execute(Simple)`), while the guard's transaction can answer;
 //! - 6: the plan's `after` statements (`ROLLBACK`, `execute(Simple)`), with their notices;
 //! - 7: `check_post`, after a failed statement too (except a MySQL implicit-commit DDL): a gap
-//!   is `EnforcementGap(reason)`, and the connection is discarded unreset;
+//!   is `EnforcementGap(reason)`, and the connection is discarded unreset. A statement that
+//!   succeeded is also judged with every reading of its first keyword as the command tag
+//!   (M3a Task 22: a MySQL tag is read from the text, which a version-gated comment can
+//!   mislead);
 //! - 8: the connection's reset and the session's environment again (`replay`, Q15).
 //!
 //! If step 3 fails, steps 4 to 8 still run. SQLite runs steps 1, 1a and 1b (which passes every
 //! engine but PostgreSQL), then the statement and the post-check (a tripwire): its layers are
 //! connection-level (Task 11), its plan has no statements and no reset.
+//!
+//! The typed path (M3a Task 22, R-M3-17: `guarded_query`, `GuardedCursor`) runs the same
+//! steps around a typed query that may outlive its request as a console cursor: steps 1–3 when
+//! the query is sent, PostgreSQL's canary once more after the first chunk, and steps 4–8 when
+//! the cursor ends (the section at the end of this file).
 //!
 //! Everything fails closed. The connection is discarded (`Guarded::discard`, which the actor
 //! turns into a broken session) after a gap, a lost connection, a guard statement that failed
@@ -34,11 +42,11 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use hacivat_driver::{
-    ExecOpts, ExecSummary, Phase, Protocol, RawConn, RawError, RawErrorKind, ServerInfo, TxStatus,
-    classify,
+    ExecOpts, ExecSummary, Phase, Protocol, QuerySpec, RawConn, RawError, RawErrorKind, ResultEnd,
+    ServerInfo, TxStatus, classify,
 };
 use hacivat_guard::{
-    GapReason, PostCheck, PostFacts, ResetKind, RoleFindings, RoleWarning, TxStatusLite,
+    GapReason, GuardPlan, PostCheck, PostFacts, ResetKind, RoleFindings, RoleWarning, TxStatusLite,
     access_label, check_functions, check_input, check_post, interpret_probe, plan_for,
     remediation_for, role_probe_sql,
 };
@@ -114,60 +122,19 @@ pub(crate) async fn guarded(
     opts: ExecOpts,
     replay: &[String],
 ) -> Guarded {
-    // 1.
-    if check_input(sql).is_err() {
-        return Guarded::keep(Err(ExecError::of(ExecErrorKind::ReadOnlyDenied(
-            DenyLayer::Input,
-        ))));
-    }
-    // 1a.
-    let keywords = guard_keywords(kind, sql);
-    if keywords.controls_transaction() {
-        return Guarded::keep(Err(ExecError::of(ExecErrorKind::ReadOnlyDenied(
-            DenyLayer::Transaction,
-        ))));
-    }
-    // ## m2b-t23-f1: 1b. A call no rollback undoes (PostgreSQL; a tripwire, the probe's row 6
-    // keeps the label honest).
-    if let Err(violation) = check_functions(kind, sql) {
-        tracing::debug!(
-            ?violation,
-            "a read-only statement calls a non-transactional function"
-        );
-        return Guarded::keep(Err(ExecError::of(ExecErrorKind::ReadOnlyDenied(
-            DenyLayer::Function,
-        ))));
-    }
+    // 1, 1a, 1b.
+    let keywords = match precheck(kind, sql) {
+        Ok(keywords) => keywords,
+        Err(denied) => return Guarded::keep(Err(denied)),
+    };
     // An engine without a guard plan has no read-only guard: nothing runs.
     let Some(plan) = plan_for(kind) else {
         return Guarded::discard(ExecError::of(ExecErrorKind::Internal), ErrClass::Internal);
     };
 
     // 2.
-    for statement in &plan.before {
-        if let Err(e) = conn.batch(statement).await {
-            let error = statement_error(kind, &e, false);
-            // Kept only when nothing of the guard is left open on a live connection. A lost
-            // connection's status is never read (T23, T17 carry P1: a driver's status after a
-            // loss says nothing about the guard's transaction).
-            let discard = lost_class(kind, &e)
-                .or_else(|| (conn.tx_status() != TxStatus::Idle).then_some(ErrClass::Internal));
-            return Guarded {
-                reply: Err(error),
-                discard,
-            };
-        }
-    }
-    // Fix round 1 (m-1): the user statement runs only inside the guard's read-only
-    // transaction. A `before` that did not open one is a gap; nothing more is sent.
-    if !plan.before.is_empty() && conn.tx_status() != TxStatus::InTx {
-        tracing::warn!("the guard's read-only transaction did not open");
-        return Guarded::discard(
-            ExecError::of(ExecErrorKind::EnforcementGap(
-                GapReason::TransactionEndedByStatement,
-            )),
-            ErrClass::Internal,
-        );
+    if let Err(failure) = open_guard(conn, kind, &plan).await {
+        return failure.into_guarded();
     }
 
     // 3.
@@ -186,22 +153,124 @@ pub(crate) async fn guarded(
         return Guarded::discard(statement_error(kind, e, true), class);
     }
 
+    // 4–8.
+    let outcome = match &ran {
+        Ok(summary) => Ran {
+            ok: true,
+            command_tag: summary.command_tag.clone(),
+            rows_affected: summary.rows_affected,
+        },
+        Err(_) => Ran::default(),
+    };
+    if let Err(failure) = post_steps(conn, kind, &plan, &keywords, outcome, replay).await {
+        return failure.into_guarded();
+    }
+    Guarded::keep(ran.map_err(|e| statement_error(kind, &e, true)))
+}
+
+/// Steps 1, 1a and 1b, on the text alone (nothing is sent): `check_input`, the transaction
+/// keywords in every reading of the first keyword, and PostgreSQL's function check. `Ok` holds
+/// those readings (step 7 judges them).
+fn precheck(kind: DbmsKind, sql: &str) -> Result<Keywords, ExecError> {
+    let denied = |layer| Err(ExecError::of(ExecErrorKind::ReadOnlyDenied(layer)));
+    // 1.
+    if check_input(sql).is_err() {
+        return denied(DenyLayer::Input);
+    }
+    // 1a.
+    let keywords = guard_keywords(kind, sql);
+    if keywords.controls_transaction() {
+        return denied(DenyLayer::Transaction);
+    }
+    // ## m2b-t23-f1: 1b. A call no rollback undoes (PostgreSQL; a tripwire, the probe's row 6
+    // keeps the label honest).
+    if let Err(violation) = check_functions(kind, sql) {
+        tracing::debug!(
+            ?violation,
+            "a read-only statement calls a non-transactional function"
+        );
+        return denied(DenyLayer::Function);
+    }
+    Ok(keywords)
+}
+
+/// Step 2: the plan's `before` statements (`batch`, trusted text only): if one fails, nothing
+/// else runs; then the guard's transaction must be open, else a gap and the statement is never
+/// sent.
+async fn open_guard(
+    conn: &mut dyn RawConn,
+    kind: DbmsKind,
+    plan: &GuardPlan,
+) -> Result<(), GuardFailure> {
+    for statement in &plan.before {
+        if let Err(e) = conn.batch(statement).await {
+            let error = statement_error(kind, &e, false);
+            // Kept only when nothing of the guard is left open on a live connection. A lost
+            // connection's status is never read (T23, T17 carry P1: a driver's status after a
+            // loss says nothing about the guard's transaction).
+            let discard = lost_class(kind, &e)
+                .or_else(|| (conn.tx_status() != TxStatus::Idle).then_some(ErrClass::Internal));
+            return Err(GuardFailure { error, discard });
+        }
+    }
+    // Fix round 1 (m-1): the user statement runs only inside the guard's read-only
+    // transaction. A `before` that did not open one is a gap; nothing more is sent.
+    if !plan.before.is_empty() && conn.tx_status() != TxStatus::InTx {
+        tracing::warn!("the guard's read-only transaction did not open");
+        return Err(GuardFailure::gap(GapReason::TransactionEndedByStatement));
+    }
+    Ok(())
+}
+
+/// What the user statement did, as steps 5 to 7 judge it. The default is a statement that
+/// failed or (a typed query) was closed before its end: no tag, no count.
+#[derive(Debug, Clone, Default)]
+struct Ran {
+    /// It ran to its end without an error.
+    ok: bool,
+    command_tag: Option<String>,
+    rows_affected: Option<u64>,
+}
+
+/// Steps 4 to 8, once the user statement is over (M2b: `execute` returned; the typed path: the
+/// query is closed). Every `GuardFailure` from here discards the connection.
+///
+/// - 4: the transaction status after the statement;
+/// - 5: PostgreSQL's canary (`execute(Simple)`), while the guard's transaction can answer;
+/// - 6: the plan's `after` statements (`ROLLBACK`, `execute(Simple)`), with their notices;
+/// - 7: `check_post`, after a failed statement too (except a MySQL implicit-commit DDL and
+///   SQLite): a gap is `EnforcementGap(reason)`. A statement that ran to its end is also judged
+///   under every reading of its first keyword ([`verdict_of_readings`]);
+/// - 8: the connection's reset and the session's environment again (`replay`, Q15); the
+///   connection must then report no transaction.
+async fn post_steps(
+    conn: &mut dyn RawConn,
+    kind: DbmsKind,
+    plan: &GuardPlan,
+    keywords: &Keywords,
+    ran: Ran,
+    replay: &[String],
+) -> Result<(), GuardFailure> {
+    let discard = |error: ExecError, class: ErrClass| {
+        Err(GuardFailure {
+            error,
+            discard: Some(class),
+        })
+    };
     // 4.
     let tx_after = lite(conn.tx_status());
     let mut facts = PostFacts {
         tx_after_statement: Some(tx_after),
+        command_tag: ran.command_tag,
+        rows_affected: ran.rows_affected,
         ..PostFacts::default()
     };
-    if let Ok(summary) = &ran {
-        facts.command_tag = summary.command_tag.clone();
-        facts.rows_affected = summary.rows_affected;
-    }
 
     // 5. Only where the guard's transaction can still answer: after a failed statement
     // PostgreSQL's transaction is aborted, and nothing in it can be committed.
     let mut canary_unread = false;
     if let Some(canary) = plan.canary
-        && (ran.is_ok() || tx_after == TxStatusLite::InTx)
+        && (ran.ok || tx_after == TxStatusLite::InTx)
     {
         match conn.execute(canary, simple(1)).await {
             Ok(answer) => match answer.rows.as_slice() {
@@ -212,7 +281,7 @@ pub(crate) async fn guarded(
             },
             Err(e) => {
                 if let Some(class) = lost_class(kind, &e) {
-                    return Guarded::discard(statement_error(kind, &e, true), class);
+                    return discard(statement_error(kind, &e, true), class);
                 }
                 canary_unread = true;
             }
@@ -226,7 +295,7 @@ pub(crate) async fn guarded(
             Err(e) => {
                 tracing::warn!(kind = ?e.kind, "the guard's rollback failed");
                 let class = lost_class(kind, &e).unwrap_or(ErrClass::Internal);
-                return Guarded::discard(statement_error(kind, &e, true), class);
+                return discard(statement_error(kind, &e, true), class);
             }
         }
     }
@@ -239,21 +308,20 @@ pub(crate) async fn guarded(
     // nothing, so a failed statement every reading of whose first keyword is in
     // `IMPLICIT_COMMIT_KEYWORDS` is not judged. SQLite runs in autocommit.
     let ddl_committed = family(kind) == Family::MySql && keywords.all_in(&IMPLICIT_COMMIT_KEYWORDS);
-    let verdict = match &ran {
-        Ok(_) => check_post(kind, &facts),
-        Err(_) if ddl_committed || family(kind) == Family::Sqlite => PostCheck::Clean,
-        Err(_) => check_post(kind, &facts),
+    let verdict = if ran.ok {
+        verdict_of_readings(kind, &facts, keywords)
+    } else if ddl_committed || family(kind) == Family::Sqlite {
+        PostCheck::Clean
+    } else {
+        check_post(kind, &facts)
     };
     if let PostCheck::Gap(reason) = verdict {
         tracing::warn!(?reason, "a read-only statement escaped the guard");
-        return Guarded::discard(
-            ExecError::of(ExecErrorKind::EnforcementGap(reason)),
-            ErrClass::Internal,
-        );
+        return Err(GuardFailure::gap(reason));
     }
     if canary_unread {
         tracing::warn!("the guard's canary could not be read");
-        return Guarded::discard(ExecError::of(ExecErrorKind::Internal), ErrClass::Internal);
+        return discard(ExecError::of(ExecErrorKind::Internal), ErrClass::Internal);
     }
 
     // 8.
@@ -261,22 +329,45 @@ pub(crate) async fn guarded(
         if let Err(e) = conn.reset().await {
             tracing::warn!(kind = ?e.kind, "the guard's reset failed");
             let class = lost_class(kind, &e).unwrap_or(ErrClass::Internal);
-            return Guarded::discard(ExecError::of(ExecErrorKind::Internal), class);
+            return discard(ExecError::of(ExecErrorKind::Internal), class);
         }
         for statement in replay {
             if let Err(e) = conn.batch(statement).await {
                 tracing::warn!(kind = ?e.kind, "the guard's environment replay failed");
                 let class = lost_class(kind, &e).unwrap_or(ErrClass::Internal);
-                return Guarded::discard(ExecError::of(ExecErrorKind::Internal), class);
+                return discard(ExecError::of(ExecErrorKind::Internal), class);
             }
         }
     }
     if conn.tx_status() != TxStatus::Idle {
         tracing::warn!("a guarded request left a transaction open");
-        return Guarded::discard(ExecError::of(ExecErrorKind::Internal), ErrClass::Internal);
+        return discard(ExecError::of(ExecErrorKind::Internal), ErrClass::Internal);
     }
+    Ok(())
+}
 
-    Guarded::keep(ran.map_err(|e| statement_error(kind, &e, true)))
+// ## m3a-t22-typed-readonly
+/// Step 7 for a statement that ran to its end: `check_post` on the facts as they are, then once
+/// more with every reading of the first keyword as the command tag; the first gap wins. A
+/// MySQL or MariaDB command tag is the text's first keyword read as code (the driver's
+/// `command_tag`), so `/*!99999 SELECT 1 */ CREATE TABLE …` is tagged `SELECT` where a current
+/// server runs `CREATE` (T14 review m14, routed to Task 22): every way the server may read the
+/// text counts. A failed statement is never judged this way (a refused `CREATE` would be read
+/// as a schema write).
+fn verdict_of_readings(kind: DbmsKind, facts: &PostFacts, keywords: &Keywords) -> PostCheck {
+    if let PostCheck::Gap(reason) = check_post(kind, facts) {
+        return PostCheck::Gap(reason);
+    }
+    for word in keywords.words().filter(|w| !w.is_empty()) {
+        let read = PostFacts {
+            command_tag: Some(word.to_string()),
+            ..facts.clone()
+        };
+        if let PostCheck::Gap(reason) = check_post(kind, &read) {
+            return PostCheck::Gap(reason);
+        }
+    }
+    PostCheck::Clean
 }
 
 /// `ExecOpts` for the guard's own statements: the simple protocol (several results, notices),
@@ -672,28 +763,38 @@ pub fn remediation_for_server(server: &ServerInfo) -> Option<&'static str> {
     remediation_for(server.kind, server.version.as_ref().map(|v| v.major))
 }
 
-// ## m3a-t01b-seams
-// The typed read-only path (HV-SESS-04 on typed execution, R-M3-17; Task 22 fills the bodies,
-// Task 18's run loop calls them). A console cursor outlives the request that opened it, so the
-// guard's steps are three calls around the cursor's life, with the guard's state between them:
+// ## m3a-t01b-seams, m3a-t22-typed-readonly
+// The typed read-only path (HV-SESS-04 on typed execution, R-M3-17; Task 22). A console cursor
+// outlives the request that opened it, so the guard's steps are three calls around the
+// cursor's life, with the guard's state ([`GuardedCursor`]) between them:
 //
-// 1. `guarded_query`: steps 1–3. `check_input` (else `ReadOnlyDenied(Input)`), the transaction
-//    keywords (`ReadOnlyDenied(Transaction)`), PostgreSQL's function check
-//    (`ReadOnlyDenied(Function)`), `plan.before` through `batch` (`TxOwner::Guard`), then the
-//    typed `query`. User text never goes through `batch`.
-// 2. `GuardedCursor::after_first_chunk`: step 4, PostgreSQL's canary while the named portal
-//    stays open (the PostgreSQL exception to "one open query per connection", P5).
-// 3. `GuardedCursor::finish`: steps 5–8 at the cursor's end (complete, released, cancelled or
-//    idle-bounded), after the actor closed the query: the canary (PostgreSQL), `ROLLBACK`,
-//    `check_post`, `reset`, `replay`. No other statement joins the guard's transaction: the
-//    actor releases the cursor before any other request (D-019).
+// 1. [`guarded_query`]: steps 1–3. `check_input` (else `ReadOnlyDenied(Input)`), the
+//    transaction keywords in every reading (`ReadOnlyDenied(Transaction)`), PostgreSQL's
+//    function check (`ReadOnlyDenied(Function)`), `plan.before` through `batch` (the run sets
+//    `TxOwner::Guard`), then the typed `query`, always `Protocol::Extended`. User text never
+//    goes through `batch`. When the `query` call itself fails (a refused prepare, a statement
+//    the read-only connection will not prepare) the post steps run here, before the failure is
+//    returned: the run loop then has no hold to end.
+// 2. [`GuardedCursor::after_first_chunk`]: PostgreSQL only, at the first `Suspended`: the
+//    guard's transaction must still be open, and the canary runs while the named portal stays
+//    open (the PostgreSQL exception to "one open query per connection", P5). A transaction ID
+//    already assigned is `CanaryAssigned`: the connection is discarded at once and the result
+//    is `Closed { EnforcementGap }` with its rows. MySQL and SQLite take no statement beside an
+//    open query, so their checks wait for the end.
+// 3. [`GuardedCursor::finish`]: steps 4–8 ([`post_steps`]) at the cursor's end (complete,
+//    released, cancelled, failed or idle-bounded), after the actor closed the query: the
+//    canary (PostgreSQL), `ROLLBACK`, `check_post`, `reset`, `replay`. The post steps wait for
+//    the cursor (R-M3-17), and no other statement joins the guard's transaction: the actor
+//    releases the cursor before any other request (D-019). A statement that ran to its end is
+//    judged by its `ResultEnd` (MySQL: the final OK packet's affected rows, `WriteSucceeded`);
+//    one closed early or failed by its transaction state only (as M2b judges a failed one).
 //
 // A `GuardFailure` with `discard` set breaks the session (the actor discards the connection);
 // with `ExecErrorKind::EnforcementGap` the actor also emits `SessionEvent::EnforcementGap` and
 // closes the result `Closed { EnforcementGap }` with its rows kept (Task 18 acts on both).
 //
-// M3a Task 1b stub: every call fails closed with `Internal` (and `finish` discards), so a
-// read-only session runs nothing typed before Task 22.
+// SQLite: steps 1, 1a, 1b, the query, then the post-check of a completed statement (a
+// tripwire); its layers are the connection's (the authorizer and `stmt_readonly`, Task 15).
 
 /// A failed step of the typed guard path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -703,53 +804,175 @@ pub(crate) struct GuardFailure {
     pub(crate) discard: Option<ErrClass>,
 }
 
-/// The guard's state while its typed query is open (Task 22 adds what the canary and the
-/// post-checks need).
-#[derive(Debug)]
-pub(crate) struct GuardedCursor {
-    pub(crate) kind: DbmsKind,
-}
+impl GuardFailure {
+    /// The guard found an escape: the connection is discarded unreset.
+    fn gap(reason: GapReason) -> GuardFailure {
+        GuardFailure {
+            error: ExecError::of(ExecErrorKind::EnforcementGap(reason)),
+            discard: Some(ErrClass::Internal),
+        }
+    }
 
-/// The internal failure every typed guard step answers until Task 22.
-fn guard_unavailable(discard: bool) -> GuardFailure {
-    GuardFailure {
-        error: ExecError::of(ExecErrorKind::Internal),
-        discard: discard.then_some(ErrClass::Internal),
+    /// The guard could not tell: the connection is discarded.
+    fn internal() -> GuardFailure {
+        GuardFailure {
+            error: ExecError::of(ExecErrorKind::Internal),
+            discard: Some(ErrClass::Internal),
+        }
+    }
+
+    /// The same failure as the M2b path reports it.
+    fn into_guarded(self) -> Guarded {
+        Guarded {
+            reply: Err(self.error),
+            discard: self.discard,
+        }
     }
 }
 
-/// Steps 1–3 for `spec` on a read-only session (Task 22). Task 1b stub: `Internal`, nothing
-/// sent.
-#[allow(dead_code, reason = "Task 18's run loop calls it; Task 22 fills it")]
+/// The guard's state while its typed query is open: what the canary and the post steps need.
+#[derive(Debug)]
+pub(crate) struct GuardedCursor {
+    pub(crate) kind: DbmsKind,
+    plan: GuardPlan,
+    /// The readings of the statement's first keyword (step 7).
+    keywords: Keywords,
+}
+
+/// Steps 1–3 for `spec` on a read-only session, with the session's environment `replay` (run
+/// after the reset when the query fails at once). `Ok`: the query is open inside the guard's
+/// read-only transaction.
 pub(crate) async fn guarded_query(
     conn: &mut dyn RawConn,
     kind: DbmsKind,
-    spec: hacivat_driver::QuerySpec<'_>,
+    spec: QuerySpec<'_>,
+    replay: &[String],
 ) -> Result<GuardedCursor, GuardFailure> {
-    let _ = (conn, kind, spec);
-    Err(guard_unavailable(false))
+    // 1, 1a, 1b: nothing is sent.
+    let keywords = precheck(kind, spec.sql).map_err(|error| GuardFailure {
+        error,
+        discard: None,
+    })?;
+    // An engine without a guard plan has no read-only guard: nothing runs.
+    let Some(plan) = plan_for(kind) else {
+        return Err(GuardFailure::internal());
+    };
+    // 2.
+    open_guard(conn, kind, &plan).await?;
+    // 3. The extended (prepared) protocol only, inside the guard's transaction.
+    let queried = conn
+        .query(QuerySpec {
+            protocol: Protocol::Extended,
+            ..spec
+        })
+        .await;
+    let guard = GuardedCursor {
+        kind,
+        plan,
+        keywords,
+    };
+    let Err(e) = queried else {
+        return Ok(guard);
+    };
+    if let Some(class) = lost_class(kind, &e) {
+        return Err(GuardFailure {
+            error: statement_error(kind, &e, true),
+            discard: Some(class),
+        });
+    }
+    // The statement was refused before a result: the guard ends here, as M2b's does after a
+    // failed statement (MySQL's prepare left the read-only transaction open; PostgreSQL's
+    // failed it).
+    post_steps(
+        conn,
+        kind,
+        &guard.plan,
+        &guard.keywords,
+        Ran::default(),
+        replay,
+    )
+    .await?;
+    Err(GuardFailure {
+        error: statement_error(kind, &e, true),
+        discard: None,
+    })
 }
 
 impl GuardedCursor {
-    /// Step 4, after the first chunk (Task 22). Task 1b stub: `Internal`.
-    #[allow(dead_code, reason = "Task 18's run loop calls it; Task 22 fills it")]
+    /// After the first chunk, while the query is suspended: on PostgreSQL the guard's
+    /// transaction must still be open and the canary must answer SQL NULL. A gap discards the
+    /// connection; so does a canary that cannot be read (it may have failed the transaction the
+    /// portal lives in). Other engines: nothing (no statement runs beside their open query).
     pub(crate) async fn after_first_chunk(
         &mut self,
         conn: &mut dyn RawConn,
     ) -> Result<(), GuardFailure> {
-        let _ = (conn, self.kind);
-        Err(guard_unavailable(false))
+        let Some(canary) = self.plan.canary else {
+            return Ok(());
+        };
+        if conn.tx_status() != TxStatus::InTx {
+            tracing::warn!("a read-only query left the guard's transaction partway");
+            return Err(GuardFailure::gap(GapReason::TransactionEndedByStatement));
+        }
+        match conn.execute(canary, simple(1)).await {
+            Ok(answer) => match answer.rows.as_slice() {
+                [row] if row.len() == 1 && !answer.truncated => match &row[0] {
+                    None => Ok(()),
+                    Some(_) => {
+                        tracing::warn!("a read-only query was assigned a transaction ID");
+                        Err(GuardFailure::gap(GapReason::CanaryAssigned))
+                    }
+                },
+                _ => {
+                    tracing::warn!("the guard's canary could not be read");
+                    Err(GuardFailure::internal())
+                }
+            },
+            Err(e) => {
+                tracing::warn!(kind = ?e.kind, "the guard's canary failed");
+                let class = lost_class(self.kind, &e).unwrap_or(ErrClass::Internal);
+                Err(GuardFailure {
+                    error: statement_error(self.kind, &e, true),
+                    discard: Some(class),
+                })
+            }
+        }
     }
 
-    /// Steps 5–8 at the cursor's end, with the session's environment `replay` (Task 22).
-    /// Task 1b stub: `Internal`, and the connection is discarded.
-    #[allow(dead_code, reason = "Task 18's run loop calls it; Task 22 fills it")]
+    /// Steps 4–8 at the cursor's end, once the actor closed the query: `completed` when the
+    /// statement ran to its end (its `end` then holds the command tag and affected rows the
+    /// post-check reads), else it failed or was closed early and is judged by its transaction
+    /// state, and by the tag and count of a result end it did see. `replay` is the session's
+    /// environment, run after the reset.
     pub(crate) async fn finish(
         self,
         conn: &mut dyn RawConn,
         replay: &[String],
+        completed: bool,
+        end: Option<&ResultEnd>,
     ) -> Result<(), GuardFailure> {
-        let _ = (conn, replay, self.kind);
-        Err(guard_unavailable(true))
+        let ran = match end {
+            Some(end) if completed => Ran {
+                ok: true,
+                command_tag: end.command_tag.clone(),
+                rows_affected: end.rows_affected,
+            },
+            // A statement that completed without a result end (a drain read it to its end):
+            // judged as completed, without a tag.
+            None if completed => Ran {
+                ok: true,
+                ..Ran::default()
+            },
+            // ## fix round 1 (review M3): a result end was seen, but the statement did not run
+            // to its end (a later result set failed, a stop): its tag and count are still the
+            // server's facts, judged by the plain check (no readings: it did not succeed).
+            Some(end) => Ran {
+                ok: false,
+                command_tag: end.command_tag.clone(),
+                rows_affected: end.rows_affected,
+            },
+            None => Ran::default(),
+        };
+        post_steps(conn, self.kind, &self.plan, &self.keywords, ran, replay).await
     }
 }

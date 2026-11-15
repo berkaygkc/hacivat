@@ -7,16 +7,17 @@
 //! that one fan-out ([`EditorView::apply_committed`]): the probe's input mark, the scroll
 //! anchor's rebase (an edit above the view keeps the content still), the caret reveal (only
 //! when the commit moved the main caret or edited at it), the longest line for the tier, and
-//! the blink's restart. Edits that are not the IME's own (`set_text`, `select_range`, a click,
-//! every `commit`) go through `ImeCore::dispatch`, which commits an open composition first, so
-//! they never join its undo group (UI-EDIT-12 step 9). Transactions are stamped with the GPUI
+//! the blink's restart. Edits that are not the IME's own (a click, every `commit`) go through
+//! `ImeCore::dispatch`, which commits an open composition first, so they never join its undo
+//! group (UI-EDIT-12 step 9); `set_text` and `select_range` wait for an open composition to
+//! end instead (Task 27, R-M3-7). Transactions are stamped with the GPUI
 //! executor's clock. The view is embeddable as `AnyView::cached(..)`: nothing outside it
 //! re-renders when it is notified, and its layout, hit targets, cursor style, pointer
 //! listeners and input handler survive frames where it is reused (`embeds_as_a_cached_view`).
-//! **Its accessibility node may not:** the GPUI fork's `reuse_prepaint`/`reuse_paint` carry no
+//! **Its accessibility node does not:** the GPUI fork's `reuse_prepaint`/`reuse_paint` carry no
 //! accessibility state, so on a frame where the cached editor is not prepainted again its node
-//! may be missing from the tree. Task 29 (the node's bodies) and Task 32 (the console host's
-//! `cached()` embedding) own the test and the fix (review round 1).
+//! would be missing from the tree. `a11y::embed` caches the editor only while no assistive
+//! technology is attached (Task 29; Task 32 embeds the console's editor with it).
 //!
 //! Call points every module seam already has (review rounds 1 and 2, P11), so Tasks 25 and
 //! 27–29 never edit this file: focus and blur (`ime::on_focus`/`on_blur`, `FocusedEditor`);
@@ -25,9 +26,10 @@
 //! `large_file::update`, `preview::on_update`, `ime::after_commit` and the events; a fresh
 //! analysis (`LanguageService::on_update` → `preview::on_update`); a composition opening or
 //! closing ([`EditorView::composition_changed`] → `preview::on_composition`); the banner
-//! (`large_file::banner`) and the commands' overlay (`commands::overlay`); each frame
-//! (`element::EditorElement`: the a11y hooks, `prepaint_frame`, `paint_frame`); the commands'
-//! state (`commands::CommandState`).
+//! (`large_file::banner`) and the commands' overlay (`commands::overlay`); the accessibility
+//! node, on the focusable column (`a11y::declare`, Task 29); each frame
+//! (`element::EditorElement`: `prepaint_frame`, `paint_frame`); the commands' state
+//! (`commands::CommandState`).
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -192,7 +194,10 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let tier = large_file::tier_for(text.len() as u64, longest_line(text), &cfg.tiers);
+        // ## m3a-t29-a11y-tiers: the tier state keeps the size and the longest line for the T1
+        // banner.
+        let tier_state = large_file::open(text.len() as u64, longest_line(text), &cfg.tiers);
+        let tier = tier_state.tier;
         let ctx = DocContext {
             connected: false,
             tier,
@@ -230,7 +235,7 @@ impl EditorView {
             marks: MarkStore::default(),
             band: BandState::default(),
             a11y: A11yState::default(),
-            tier: TierState { tier },
+            tier: tier_state,
             paste: PasteState::default(),
             probe: None,
             layout: None,
@@ -289,9 +294,13 @@ impl EditorView {
         self.model.snapshot()
     }
 
-    /// Replaces the whole text (`Origin::Program`, one undo group): a restored console. An
-    /// open composition is committed first (`ImeCore::dispatch`).
+    /// Replaces the whole text (`Origin::Program`, one undo group): a restored console. While a
+    /// composition is open it waits until the composition ends (Task 27, R-M3-7).
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // ## m3a-t27-ime-clipboard (named exception, R-M3-7 corrected): held while composing.
+        if ime::defer_while_composing(self, ime::AppEdit::SetText(text.to_string())) {
+            return;
+        }
         let len = self.model.snapshot().buffer.len_bytes();
         let Ok(changes) = ChangeSet::from_edits(len, [(0..len, Arc::from(text))]) else {
             return;
@@ -337,13 +346,16 @@ impl EditorView {
 
     /// A polite announcement for assistive technology ("Run would execute lines 3–7", an
     /// execution status), read out by the next frame's live region (`a11y::announce`, Task 29).
-    pub fn announce(&self, text: SharedString) {
+    // ## m3a-t29-a11y-tiers: takes `cx` and asks for that frame, so the announcement is not
+    // held back until an unrelated repaint (Task 1b re-review note).
+    pub fn announce(&self, text: SharedString, cx: &mut Context<Self>) {
         a11y::announce(&self.a11y, text);
+        cx.notify();
     }
 
-    /// What the element's accessibility hooks declare this frame (called from `request_layout`
-    /// only while assistive technology is active). The label is evaluated again only when the
-    /// UI-text generation changes (a language switch).
+    /// What the editor's node declares this frame (## m3a-t29-a11y-tiers: called from
+    /// `a11y::declare` in `render`, only while assistive technology is active). The label is
+    /// evaluated again only when the UI-text generation changes (a language switch).
     pub(crate) fn a11y_frame(&mut self, focused: bool, cx: &App) -> A11yFrame {
         let generation = cx
             .try_global::<hacivat_ui::l10n::UiText>()
@@ -370,6 +382,9 @@ impl EditorView {
     /// the host hears of it.
     pub(crate) fn composition_changed(&mut self, composing: bool, cx: &mut Context<Self>) {
         preview::on_composition(&mut self.band, composing);
+        // ## m3a-t27-ime-clipboard (named exception): `FocusedInput`, the platform's notify
+        // owed when an app path ends a composition, the held app edits.
+        ime::on_composition_changed(self, composing, cx);
         if !composing {
             preview::on_update(self, Refresh::SelectionMoved, cx);
         }
@@ -396,6 +411,10 @@ impl EditorView {
     /// Selects the bytes `r` ("go to error"), each end clamped to the text and snapped back to
     /// a character boundary (a server's byte offset may fall inside a character).
     pub fn select_range(&mut self, r: Range<usize>, cx: &mut Context<Self>) {
+        // ## m3a-t27-ime-clipboard (named exception, R-M3-7 corrected): held while composing.
+        if ime::defer_while_composing(self, ime::AppEdit::SelectRange(r.clone())) {
+            return;
+        }
         let snap = self.model.snapshot();
         let len = snap.buffer.len_bytes();
         let start = snap
@@ -759,8 +778,9 @@ impl EventEmitter<EditorEvent> for EditorView {}
 
 impl Render for EditorView {
     /// A focusable column with the large-file banner's slot, the editor element (the text area
-    /// with its gutter, its input handler and accessibility node, every module seam) and the
-    /// commands' overlay.
+    /// with its gutter, its input handler, every module seam) and the commands' overlay.
+    /// ## m3a-t29-a11y-tiers: the column itself is the editor's accessibility node
+    /// (`a11y::declare`).
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let banner = large_file::banner(&self.tier, window, cx);
         let overlay = commands::overlay(self, window, cx);
@@ -768,14 +788,16 @@ impl Render for EditorView {
             cx.entity(),
             self.focus.clone(),
             ("editor-text", self.doc.0).into(),
-            self.a11y.clone(),
         );
-        div()
+        let column = div()
             .id(("editor", self.doc.0))
             .track_focus(&self.focus)
             .size_full()
             .flex()
-            .flex_col()
+            .flex_col();
+        // ## m3a-t29-a11y-tiers: the focusable column is the editor's accessibility node (built
+        // only while assistive technology is active).
+        a11y::declare(column, self, window, cx)
             .children(banner)
             .child(text)
             .children(overlay)
@@ -892,11 +914,13 @@ mod t19_tests {
         );
     }
 
-    /// `set_text` and `select_range` are not the IME's edits: they commit an open composition
-    /// first, so neither joins its undo group (UI-EDIT-12 step 9), and the host hears that the
-    /// composition ended.
+    // ## m3a-t27-ime-clipboard (named exception: R-M3-7's corrected ruling replaces "commit
+    // the composition first" for these two; GPUI cannot discard the platform's composition).
+    /// `set_text` and `select_range` are not the IME's edits: while a composition is open they
+    /// wait, and apply once it ends, so neither joins its undo group (UI-EDIT-12 step 9) and
+    /// the platform's copy never lands beside them.
     #[gpui::test]
-    fn programmatic_edits_commit_the_composition_first(cx: &mut TestAppContext) {
+    fn programmatic_edits_wait_for_the_composition_to_end(cx: &mut TestAppContext) {
         let (e, vcx) = open(cx, "SELECT ".to_string());
         let events: Rc<RefCell<Vec<String>>> = Rc::default();
         let seen = events.clone();
@@ -917,8 +941,19 @@ mod t19_tests {
                 assert!(v.ime.is_composing());
             });
         };
+        let unmark = |e: &Entity<EditorView>, vcx: &mut VisualTestContext| {
+            e.update_in(vcx, |v, window, cx| {
+                hacivat_ui_core::gpui_surface::EntityInputHandler::unmark_text(v, window, cx);
+            });
+            vcx.run_until_parked();
+        };
         mark(&e, vcx);
         e.update(vcx, |v, cx| v.set_text("SELECT 2", cx));
+        assert_eq!(
+            vcx.read(|cx| e.read(cx).snapshot().buffer.to_string()),
+            "şSELECT "
+        );
+        unmark(&e, vcx);
         vcx.read(|cx| {
             let v = e.read(cx);
             assert!(!v.ime.is_composing());
@@ -939,9 +974,15 @@ mod t19_tests {
         );
         mark(&e, vcx);
         e.update(vcx, |v, cx| v.select_range(0..6, cx));
+        assert_ne!(
+            vcx.read(|cx| e.read(cx).snapshot().selection.main().range()),
+            0..6
+        );
+        unmark(&e, vcx);
         vcx.read(|cx| {
             let v = e.read(cx);
             assert!(!v.ime.is_composing());
+            assert_eq!(v.snapshot().selection.main().range(), 0..6);
             assert_eq!(v.model.undo_depth(), 3);
         });
     }
