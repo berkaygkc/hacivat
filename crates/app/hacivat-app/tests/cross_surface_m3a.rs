@@ -217,6 +217,13 @@ fn run_rows_then_copy_puts_raw_tsv_on_the_clipboard(cx: &mut TestAppContext) {
         toasts.iter().any(|t| t.contains("Copied 3 × 2 cells")),
         "{toasts:?}"
     );
+    // Fix round 1 (M8): the status bar and the tile's toolbar agree on the rows.
+    let status_rows = text_of(vcx, "status-rows").unwrap_or_default();
+    let tile_rows = text_of(vcx, "results-rows-timing").unwrap_or_default();
+    assert!(
+        status_rows.starts_with("3 rows") && tile_rows.starts_with("3 rows"),
+        "status {status_rows:?}, tile {tile_rows:?}"
+    );
     stop_core_runtime_test(cx);
 }
 
@@ -284,6 +291,24 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
         )),
         "{lines:?}"
     );
+    // Fix round 1 (M8): the session's read-only wrapper reached the server before the
+    // INSERT did (the 25006 is the fake's script; what the product sent is not).
+    let calls = fake(vcx).call_log();
+    let insert = calls
+        .iter()
+        .position(|c| {
+            matches!(c, hacivat_driver::fake::FakeCall::Typed(FakeTypedCall::Query(q))
+                if q.starts_with("INSERT INTO audit"))
+        })
+        .expect("the INSERT reached the fake");
+    assert!(
+        calls[..insert].iter().any(|c| matches!(
+            c,
+            hacivat_driver::fake::FakeCall::Statement(sql)
+                if sql.contains("READ ONLY") || sql.contains("default_transaction_read_only = on")
+        )),
+        "{calls:?}"
+    );
     // Nothing is left open or committed: the guard's read-only transaction ended.
     let tx = session.state().borrow().tx.clone();
     assert_eq!(tx.status, TxStatus::Idle, "{tx:?}");
@@ -296,6 +321,12 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
     });
     enable_registry(vcx);
     refresh(vcx);
+    // Fix round 1 (M8): the status bar says production and read-only.
+    let env = text_of(vcx, "status-env-label").unwrap_or_default();
+    assert!(
+        env.contains("production") && env.contains("read-only"),
+        "{env:?}"
+    );
     let out: Vec<String> = registry_frame(vcx)
         .into_iter()
         .filter(|r| r.path.contains("hacivat-app/src/results/output_view.rs"))
@@ -400,6 +431,17 @@ fn stopping_a_streaming_result_keeps_its_rows_and_says_cancelled(cx: &mut TestAp
     assert_eq!(rows(vcx), kept, "the rows so far stay");
     refresh(vcx);
     let strip = text_of(vcx, "strip-sentence").unwrap_or_default();
+    // Fix round 1 (M8): the strip names the rows it kept.
+    let want = vcx.cx.read(|cx| {
+        cx.global::<hacivat_app::l10n_global::L10nGlobal>()
+            .l10n
+            .t_dynamic(
+                "hv-strip-cancelled",
+                vec![("rows", hacivat_l10n::ArgValue::Count(kept))],
+            )
+    });
+    let plain = |t: &str| t.replace(['\u{2068}', '\u{2069}'], "");
+    assert_eq!(plain(&strip), plain(&want));
     assert!(strip.starts_with("Cancelled after"), "{strip:?}");
     stop_core_runtime_test(cx);
 }

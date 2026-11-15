@@ -235,31 +235,43 @@ fn run_state(run: RunUx, cx: &App) -> AnyElement {
                     .border_1()
                     .border_color(c.amber.to_hsla()),
             )
-            .child(Label::new(
-                tr(cx, ids::hv::CONSOLE_CANCELLING, NoArgs),
-                TextSource::Fluent,
-                t.type_ramp.caption,
-                c.text.to_hsla(),
-            ))
+            .child(
+                Label::new(
+                    tr(cx, ids::hv::CONSOLE_CANCELLING, NoArgs),
+                    TextSource::Fluent,
+                    t.type_ramp.caption,
+                    c.text.to_hsla(),
+                )
+                // ## m3a-t35-shots (fix round 1, I1; named exception): ids the shots' markers name.
+                .id("console-cancelling"),
+            )
             .into_any_element(),
         RunUx::Running(seconds) => row
             .child(run_marker(&theme))
-            .child(Label::new(
-                tr(cx, ids::hv::CONSOLE_RUNNING, NoArgs),
-                TextSource::Fluent,
-                t.type_ramp.caption,
-                c.text.to_hsla(),
-            ))
-            .child(Label::new(
-                tr(
-                    cx,
-                    ids::hv::CONSOLE_CLOCK,
-                    ids::hv::HvConsoleClock { s: Count(seconds) },
-                ),
-                TextSource::Fluent,
-                t.type_ramp.mono_data,
-                c.text_2.to_hsla(),
-            ))
+            .child(
+                Label::new(
+                    tr(cx, ids::hv::CONSOLE_RUNNING, NoArgs),
+                    TextSource::Fluent,
+                    t.type_ramp.caption,
+                    c.text.to_hsla(),
+                )
+                // ## m3a-t35-shots (fix round 1, I1; named exception)
+                .id("console-running"),
+            )
+            .child(
+                Label::new(
+                    tr(
+                        cx,
+                        ids::hv::CONSOLE_CLOCK,
+                        ids::hv::HvConsoleClock { s: Count(seconds) },
+                    ),
+                    TextSource::Fluent,
+                    t.type_ramp.mono_data,
+                    c.text_2.to_hsla(),
+                )
+                // ## m3a-t35-shots (fix round 1, I1; named exception)
+                .id("console-clock"),
+            )
             .into_any_element(),
         RunUx::Idle => row.into_any_element(),
     }
@@ -427,12 +439,16 @@ fn lock_chip(access: SharedString, cx: &App) -> AnyElement {
                 .size(IconSize::Chrome)
                 .color(c.text_2.to_hsla()),
         )
-        .child(Label::new(
-            access,
-            TextSource::Fluent,
-            t.type_ramp.caption,
-            c.text_2.to_hsla(),
-        ))
+        .child(
+            Label::new(
+                access,
+                TextSource::Fluent,
+                t.type_ramp.caption,
+                c.text_2.to_hsla(),
+            )
+            // ## m3a-t35-shots (fix round 1, I1; named exception)
+            .id("console-lock-label"),
+        )
         .into_any_element()
 }
 

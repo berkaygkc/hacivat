@@ -77,3 +77,9 @@ pub fn show_marks(
     }
     editor.read(cx).marks().len()
 }
+
+// ## m3a-t35-shots (fix round 1, M9)
+/// The key of the fixture mark of unit `i` (the shots check a mark's staleness by it).
+pub fn fixture_key(i: usize) -> hacivat_ui_editor::MarkKey {
+    mark_key(FIXTURE_RUN, i)
+}

@@ -1611,6 +1611,27 @@ pub mod fixtures {
         with_fixture(tab, cx, |f| f.read_only = Some(label.clone()));
     }
 
+    // ## m3a-t35-shots (fix round 1, I1; named exception): what the fixtures set, read back
+    // so a shot fails when a fixture did nothing.
+    /// The toolbar states the fixtures set on console `tab` (`None`: none set).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Shown {
+        pub run: Option<RunUx>,
+        pub waiting: Option<(u8, u8)>,
+        pub read_only: Option<SharedString>,
+    }
+
+    /// What the fixtures set on console `tab`'s toolbar.
+    pub fn shown(tab: TabId, cx: &App) -> Option<Shown> {
+        let host = host_of(cx, tab)?;
+        let f = host.read(cx).fixture.clone()?;
+        Some(Shown {
+            run: f.run,
+            waiting: f.waiting,
+            read_only: f.read_only,
+        })
+    }
+
     fn with_fixture(tab: TabId, cx: &mut App, f: impl FnOnce(&mut FixtureUx)) {
         if let Some(host) = host_of(cx, tab) {
             host.update(cx, |h, cx| {

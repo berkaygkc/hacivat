@@ -624,9 +624,10 @@ impl Surface {
     /// show one of [`Surface::also_shown`].
     fn missing_from(self, name: &str, frame: &[RenderedText]) -> Option<String> {
         let (file, text) = self.marker();
-        let shown = frame.iter().any(|r| {
-            r.visible && r.path.contains(file) && text.is_none_or(|t| strip(&r.text) == t)
-        });
+        // ## m3a-t35-shots (fix round 1, I2): a label counts only when it drew something.
+        let shown = frame
+            .iter()
+            .any(|r| drawn(r) && r.path.contains(file) && text.is_none_or(|t| strip(&r.text) == t));
         if !shown {
             return Some(format!(
                 "{name}: the surface is missing: no visible label from {file} {text:?}"
@@ -635,11 +636,31 @@ impl Surface {
         let hidden: Vec<&str> = self
             .also_shown()
             .iter()
-            .filter(|id| !frame.iter().any(|r| r.visible && r.path.ends_with(**id)))
+            .filter(|id| !frame.iter().any(|r| drawn(r) && r.path.ends_with(**id)))
             .copied()
             .collect();
         (!hidden.is_empty())
             .then(|| format!("{name}: the surface is missing: {hidden:?} not visible"))
+    }
+
+    // ## m3a-t35-shots (fix round 1, I2)
+    /// A violation for each trust-signal group ([`m3a::M3a::required`]) of which no label is
+    /// visible and painted: production, read-only, the transaction and the cursor never
+    /// collapse (NOTES cross-cutting #7).
+    fn trust_missing(self, name: &str, frame: &[RenderedText]) -> Vec<String> {
+        let Surface::M3a(state) = self else {
+            return Vec::new();
+        };
+        state
+            .required()
+            .iter()
+            .filter(|group| {
+                !frame
+                    .iter()
+                    .any(|r| drawn(r) && group.iter().any(|id| r.path.ends_with(*id)))
+            })
+            .map(|group| format!("{name}: (t) a trust signal is not shown: {group:?}"))
+            .collect()
     }
 
     // ## m2b-t24-shots (follow-up)
@@ -963,6 +984,12 @@ fn out_dir() -> PathBuf {
         })
 }
 
+// ## m3a-t35-shots (fix round 1, I2)
+/// A label that is visible and drew something: what a marker or a trust check may count.
+fn drawn(r: &RenderedText) -> bool {
+    r.visible && r.painted_px > 0.0
+}
+
 /// Without isolation marks (U+2068/U+2069), which wrap placeables.
 fn strip(s: &str) -> String {
     s.chars()
@@ -1276,12 +1303,13 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
     // and the grid's own checks (headers are data; no grid text clipped).
     if let Some(state) = m3a_state {
         failures.extend(
-            cx.update_window(handle, |_, window, cx| state.check(window, cx))
+            cx.update_window(handle, |_, window, cx| state.check(window, cx, &frame))
                 .expect("the window is open")
                 .map(|v| format!("{name}: {v}")),
         );
     }
     failures.extend(check_grid(&name, shot.locale, &frame));
+    failures.extend(shot.surface.trust_missing(&name, &frame));
     if std::env::var_os("SHOTS_DUMP").is_some() {
         for r in &frame {
             println!(
@@ -1571,6 +1599,9 @@ struct Cli {
     /// `--shard k/n`: the k-th of n interleaved slices of the selected shots (1-based), so n
     /// processes render the matrix side by side.
     shard: Option<(usize, usize)>,
+    /// Fix round 1 (M6): a `--shard` value that is not `k/n` (`1 <= k <= n`): the binary
+    /// exits 2 instead of rendering everything.
+    bad_shard: Option<String>,
 }
 
 impl Cli {
@@ -1581,8 +1612,8 @@ impl Cli {
             match a.as_str() {
                 "--exact" => cli.exact = true,
                 // ## m3a-t35-shots
-                "--shard" => cli.shard = it.next().as_deref().and_then(parse_shard),
-                s if s.starts_with("--shard=") => cli.shard = parse_shard(&s["--shard=".len()..]),
+                "--shard" => cli.set_shard(it.next().unwrap_or_default()),
+                s if s.starts_with("--shard=") => cli.set_shard(s["--shard=".len()..].to_string()),
                 "--list" => cli.list = true,
                 "--ignored" => cli.ignored_only = true,
                 "--include-ignored" => cli.include_ignored = true,
@@ -1646,6 +1677,14 @@ impl Cli {
         (!picked.is_empty()).then_some(picked)
     }
 
+    // ## m3a-t35-shots (fix round 1, M6)
+    fn set_shard(&mut self, value: String) {
+        match parse_shard(&value) {
+            Some(shard) => self.shard = Some(shard),
+            None => self.bad_shard = Some(value),
+        }
+    }
+
     fn runs_ignored(&self) -> bool {
         self.ignored_only || self.include_ignored
     }
@@ -1666,7 +1705,14 @@ fn parse_shard(v: &str) -> Option<(usize, usize)> {
 /// one test), the binary fails instead of passing without rendering.
 fn main() {
     let cli = Cli::parse(std::env::args().skip(1));
-    let checks: [(&str, fn()); 7] = [
+    // ## m3a-t35-shots (fix round 1, M6)
+    if let Some(bad) = &cli.bad_shard {
+        eprintln!("--shard {bad:?}: expected k/n with 1 <= k <= n");
+        std::process::exit(2);
+    }
+    let checks: [(&str, fn()); 8] = [
+        // ## m3a-t35-shots (fix round 1, I2)
+        ("trust_signals_must_be_drawn", trust_signals_must_be_drawn),
         // ## m3a-t35-shots
         (
             "grid_text_is_data_and_never_clipped",
@@ -1901,9 +1947,111 @@ fn an_m3a_grid_state_without_its_grid_fails() {
             name,
         )]
     };
+    // Fix round 1 (I1): a toolbar state needs its own state label; the connection name alone
+    // (what a frame shows when the fixture did nothing) fails.
     let running = Surface::M3a(m3a::M3a::ToolbarRunning);
-    assert!(running.missing_from("s", &toolbar("orders-dev")).is_none());
-    assert!(running.missing_from("s", &toolbar("orders-prod")).is_some());
+    assert!(running.missing_from("s", &toolbar("orders-dev")).is_some());
+    let state_label = |id: &str| {
+        at(
+            &format!("crates/app/hacivat-app/src/console/toolbar.rs:250:17#{id}"),
+            "x",
+        )
+    };
+    for (state, id) in [
+        (m3a::M3a::ToolbarRunning, "console-running"),
+        (m3a::M3a::ToolbarCancelling, "console-cancelling"),
+        (m3a::M3a::ToolbarReadOnly, "console-lock-label"),
+        (m3a::M3a::ToolbarWaiting, "console-waiting-text"),
+    ] {
+        let surface = Surface::M3a(state);
+        assert!(
+            surface.missing_from("s", &toolbar("orders-dev")).is_some(),
+            "{state:?}"
+        );
+        assert!(
+            surface.missing_from("s", &[state_label(id)]).is_none(),
+            "{state:?}"
+        );
+    }
+    // Describe and "Nothing to run" need the status message, not the editor segment.
+    let segment = [at(
+        "crates/app/hacivat-app/src/console/status.rs:116:13#editor-segment-lncol",
+        "Ln 2, Col 38",
+    )];
+    let describe = Surface::M3a(m3a::M3a::ContextDescribe);
+    assert!(describe.missing_from("s", &segment).is_some());
+}
+
+// ## m3a-t35-shots (fix round 1, I2)
+/// A marker or a trust signal counts only when visible and painted; each production,
+/// transaction and cursor state fails without its trust label.
+fn trust_signals_must_be_drawn() {
+    let at = |id: &str, painted: f32, visible: bool| RenderedText {
+        text: "x".into(),
+        source: TextSource::Fluent,
+        size_px: 12.0,
+        painted_px: painted,
+        clipped: false,
+        truncated: false,
+        path: format!("crates/x.rs:1:1#{id}").into(),
+        visible,
+        outside_card: false,
+    };
+    // A marker that drew nothing, or is hidden, does not count.
+    let cursor = Surface::M3a(m3a::M3a::StatusCursorOpen);
+    assert!(
+        cursor
+            .missing_from("s", &[at("button-label-status-cursor", 40.0, true)])
+            .is_none()
+    );
+    assert!(
+        cursor
+            .missing_from("s", &[at("button-label-status-cursor", 0.0, true)])
+            .is_some()
+    );
+    assert!(
+        cursor
+            .missing_from("s", &[at("button-label-status-cursor", 40.0, false)])
+            .is_some()
+    );
+    // Production: the notice (either form) and the status bar's environment.
+    let prod = Surface::M3a(m3a::M3a::ConsoleProduction);
+    let full = [
+        at("button-label-console-prod-notice", 90.0, true),
+        at("status-env-label", 90.0, true),
+    ];
+    assert!(prod.trust_missing("s", &full).is_empty());
+    let short = [
+        at("button-label-console-prod-short", 50.0, true),
+        at("status-env-label", 90.0, true),
+    ];
+    assert!(prod.trust_missing("s", &short).is_empty());
+    let found = prod.trust_missing("s", &[at("status-env-label", 90.0, true)]);
+    assert!(found.len() == 1 && found[0].contains("(t)"), "{found:?}");
+    let squeezed = [
+        at("button-label-console-prod-notice", 0.0, true),
+        at("status-env-label", 90.0, false),
+    ];
+    assert_eq!(prod.trust_missing("s", &squeezed).len(), 2);
+    // Transaction and cursor.
+    let everything = Surface::M3a(m3a::M3a::StatusEverything);
+    let all = [
+        at("status-tx-open", 90.0, true),
+        at("button-label-status-cursor", 60.0, true),
+        at("status-rows", 60.0, true),
+    ];
+    assert!(everything.trust_missing("s", &all).is_empty());
+    assert_eq!(everything.trust_missing("s", &all[..1]).len(), 2);
+    let failed = Surface::M3a(m3a::M3a::PromptFailed);
+    assert_eq!(failed.trust_missing("s", &all).len(), 1);
+    // Every production state requires the production signals.
+    for state in m3a::M3A {
+        if state.shows_production() {
+            assert_eq!(state.required().len(), 2, "{state:?}");
+        }
+    }
+    // An M1/M2 surface has none.
+    assert!(Surface::Shell.trust_missing("s", &[]).is_empty());
 }
 
 fn a_missing_surface_fails_its_frame() {
@@ -2169,6 +2317,11 @@ fn the_command_line_reads_like_libtest() {
     );
     assert_eq!(parse("--shard 0/2").shard, None);
     assert_eq!(parse("--shard 3/2").shard, None);
+    // Fix round 1 (M6): an invalid value is kept, and `main` exits 2 on it.
+    assert_eq!(parse("--shard 3/2").bad_shard.as_deref(), Some("3/2"));
+    assert_eq!(parse("--shard=x").bad_shard.as_deref(), Some("x"));
+    assert_eq!(parse("--shard").bad_shard.as_deref(), Some(""));
+    assert_eq!(parse("--shard 2/3").bad_shard, None);
     // A dialog surface renders at both sizes.
     assert_eq!(
         parse("--ignored conn-dialog-new-dark")

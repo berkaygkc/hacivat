@@ -53,6 +53,7 @@ use hacivat_session::session::{
 };
 use hacivat_settings::LocalPaths;
 use hacivat_ui::actions::ActionRegistry;
+use hacivat_ui::text::RenderedText;
 use hacivat_ui::toast::ToastQueue;
 use hacivat_ui_core::gpui_surface::{
     App, Entity, EntityInputHandler as _, Focusable as _, Keystroke, Window,
@@ -289,7 +290,6 @@ const DIALOG: &str = "hacivat-ui/src/dialog.rs:";
 const TOAST: &str = "hacivat-ui/src/toast.rs:";
 const STRIP: &str = "hacivat-app/src/results/strip.rs:";
 const OUTPUT: &str = "hacivat-app/src/results/output_view.rs:";
-const STATUS: &str = "hacivat-app/src/connections/status.rs:";
 /// A grid header's record path (data, the same in every locale).
 pub(super) const GRID_HEADER: &str = "hacivat-ui-grid/src/element/layers.rs#header";
 
@@ -351,7 +351,9 @@ impl M3a {
     }
 
     /// The label that proves the state is on screen: its creation site and, where that site
-    /// draws more than this state, its (data) text.
+    /// draws more than this state, its (data) text. Fix round 1 (I1): a label only this state
+    /// draws, wherever one exists; the console states whose label is the toolbar's connection
+    /// name are told apart by their state check ([`M3a::check`]).
     pub(super) fn marker(self) -> (&'static str, Option<&'static str>) {
         match self {
             M3a::ConsoleEditor
@@ -360,15 +362,17 @@ impl M3a {
             | M3a::ConsoleLongLine
             | M3a::ConsoleManyLines
             | M3a::ConsoleEmpty
-            | M3a::ToolbarRunning
-            | M3a::ToolbarCancelling
-            | M3a::ToolbarReadOnly
-            | M3a::ToolbarWaiting
             | M3a::PreviewStatement
-            | M3a::PreviewNothing
             | M3a::NoticeNul => (TOOLBAR, Some(DEV)),
-            M3a::ConsoleProduction | M3a::ToolbarProductionWaiting => (TOOLBAR, Some(PROD)),
+            M3a::ConsoleProduction => (TOOLBAR, Some(PROD)),
             M3a::ConsoleMysql => (TOOLBAR, Some(SHOP)),
+            // The toolbar's own state labels (fix round 1: ids in `console/toolbar.rs`).
+            M3a::ToolbarRunning => ("#console-running", None),
+            M3a::ToolbarCancelling => ("#console-cancelling", None),
+            M3a::ToolbarReadOnly => ("#console-lock-label", None),
+            M3a::ToolbarWaiting | M3a::ToolbarProductionWaiting => ("#console-waiting-text", None),
+            // The status bar's transient sentence: "Nothing to run here", Describe.
+            M3a::PreviewNothing | M3a::ContextDescribe => ("#status-message", None),
             // The band's hint at the end of the unit's line ("1 of 3", "2 choices", "boundary
             // uncertain", "not connected") and every end-of-line status: `marks.rs`.
             M3a::PreviewTwoOnLine
@@ -388,19 +392,48 @@ impl M3a {
             | M3a::ChooserHover
             | M3a::ChooserUncertain
             | M3a::ContextMenu => (MENU, None),
-            M3a::StatusTxOpen | M3a::StatusTxFailed | M3a::StatusEverything => (STATUS, None),
+            M3a::StatusTxOpen | M3a::StatusEverything => ("#status-tx-open", None),
+            M3a::StatusTxFailed => ("#status-tx-failed", None),
             // The active result's rows in the status bar (Status Follows The Tab).
             M3a::StatusProductionResult => ("#status-rows", None),
             M3a::StatusCursorOpen => ("#button-label-status-cursor", None),
             M3a::NoticeReducedMode => ("#editor-t1-title", None),
             M3a::NoticePasteRefused | M3a::NoticeClipboard => (TOAST, None),
-            M3a::ContextDescribe => ("hacivat-app/src/console/status.rs:", None),
             M3a::Results(r) => results_marker(r),
             M3a::GridRange => (GRID_HEADER, Some("customer")),
             M3a::PromptClose | M3a::PromptQuit | M3a::PromptFailed | M3a::PromptFailedQuit => {
                 (DIALOG, None)
             }
             M3a::CopyCopied | M3a::CopyCopying | M3a::CopyTooMuch => (TOAST, None),
+        }
+    }
+
+    // ## m3a-t35-shots (fix round 1, I2)
+    /// The trust signals the state must show (NOTES cross-cutting #7: environment, read-only,
+    /// transaction and cursor never collapse): each group lists the label ids (`#id`) of which
+    /// one must be visible and painted.
+    pub(super) fn required(self) -> &'static [&'static [&'static str]] {
+        const PROD_NOTICE: &[&str] = &[
+            "#button-label-console-prod-notice",
+            "#button-label-console-prod-short",
+        ];
+        const ENV: &[&str] = &["#status-env-label"];
+        const TX: &[&str] = &["#status-tx-open"];
+        const TX_FAILED: &[&str] = &["#status-tx-failed"];
+        const CURSOR: &[&str] = &["#button-label-status-cursor"];
+        const CLOCK: &[&str] = &["#console-clock"];
+        const ROWS: &[&str] = &["#status-rows"];
+        match self {
+            M3a::ConsoleProduction | M3a::ToolbarProductionWaiting | M3a::MarksDenied => {
+                &[PROD_NOTICE, ENV]
+            }
+            M3a::StatusProductionResult => &[ENV],
+            M3a::ToolbarRunning => &[CLOCK],
+            M3a::StatusTxOpen | M3a::PromptClose | M3a::PromptQuit => &[TX],
+            M3a::StatusTxFailed | M3a::PromptFailed | M3a::PromptFailedQuit => &[TX_FAILED],
+            M3a::StatusCursorOpen => &[CURSOR],
+            M3a::StatusEverything => &[TX, CURSOR, ROWS],
+            _ => &[],
         }
     }
 
@@ -644,11 +677,8 @@ impl M3a {
                     after(MARKS, "o.total"),
                     ", o.status",
                     |window, cx| {
-                        editor_in(window, cx).is_some_and(|e| {
-                            let marks = e.read(cx).marks();
-                            (0..marks.len()).count() > 0
-                                && e.read(cx).snapshot().buffer.len_bytes() > MARKS.len()
-                        })
+                        // Fix round 1 (M9): the edit landed and made the first mark stale.
+                        stale_first(editor_in(window, cx).as_ref(), cx)
                     },
                 ));
                 s
@@ -881,18 +911,73 @@ impl M3a {
         }
     }
 
-    /// What the app's models must say once the frame is drawn (a violation otherwise): the
-    /// state check that keeps a marker from passing on an unrelated label.
-    pub(super) fn check(self, window: &mut Window, cx: &App) -> Option<String> {
+    /// What the app's models (and, for the toasts and menus, the frame) must say once the frame
+    /// is drawn (a violation otherwise): the state check that keeps a marker from passing on an
+    /// unrelated label. Fix round 1 (I1): every state has one.
+    pub(super) fn check(
+        self,
+        window: &mut Window,
+        cx: &App,
+        frame: &[RenderedText],
+    ) -> Option<String> {
         use M3a::*;
         let editor = editor_in(window, cx);
         let band = || editor.as_ref().and_then(|e| preview::current(e.read(cx)));
         let console = active_console(window, cx);
         let marks = || editor.as_ref().map_or(0, |e| e.read(cx).marks().len());
+        let text = || {
+            editor
+                .as_ref()
+                .map(|e| e.read(cx).snapshot().buffer.to_string())
+                .unwrap_or_default()
+        };
+        let focused = editor
+            .as_ref()
+            .is_some_and(|e| e.read(cx).focus_handle(cx).is_focused(window));
+        let selected = editor
+            .as_ref()
+            .is_some_and(|e| e.read(cx).status().selected_chars > 0);
+        let viewport = window.viewport_size();
+        let caret_on_screen = editor.as_ref().is_some_and(|e| {
+            e.read(cx)
+                .caret_bounds()
+                .is_some_and(|b| b.right() <= viewport.width && b.bottom() <= viewport.height)
+        });
+        let toolbar = || {
+            console
+                .and_then(|c| Consoles::get(cx, c))
+                .and_then(|s| console_fixtures::shown(s.tab, cx))
+        };
+        let tx = || console.and_then(|c| exec_ui::tx::user_tx(c, cx));
+        let session = session_in(window, cx);
+        let cursor = || {
+            session
+                .as_ref()
+                .is_some_and(|s| s.state().borrow().cursor.is_some())
+        };
+        let toast = |id: &str| shows_toast(frame, &message(cx, id, Vec::new()));
         let ok = match self {
-            ConsoleEditor | ConsoleProduction | PreviewStatement | PreviewTwoOnLine
-            | ContextDescribe => {
-                band().is_some_and(|b| b.style == BandStyle::Run && !b.from_override)
+            ConsoleEditor | PreviewStatement | PreviewTwoOnLine | ContextDescribe => {
+                focused && band().is_some_and(|b| b.style == BandStyle::Run && !b.from_override)
+            }
+            ConsoleSelection => focused && selected,
+            ConsoleUnfocused => !focused && selected,
+            ConsoleLongLine | ConsoleManyLines => focused && caret_on_screen,
+            ConsoleEmpty => text().is_empty(),
+            ConsoleProduction => {
+                session
+                    .as_ref()
+                    .is_some_and(|s| s.state().borrow().read_only)
+                    && band().is_some_and(|b| b.style == BandStyle::Run)
+            }
+            ConsoleMysql => text().contains("/*!40101"),
+            ToolbarRunning => toolbar().is_some_and(|t| matches!(t.run, Some(RunUx::Running(3)))),
+            ToolbarCancelling => {
+                toolbar().is_some_and(|t| matches!(t.run, Some(RunUx::Cancelling)))
+            }
+            ToolbarReadOnly => toolbar().is_some_and(|t| t.read_only.is_some()),
+            ToolbarWaiting | ToolbarProductionWaiting => {
+                toolbar().is_some_and(|t| t.waiting == Some((4, 4)))
             }
             PreviewSelection => {
                 band().is_some_and(|b| b.style == BandStyle::Run && b.units.len() == 3)
@@ -901,32 +986,99 @@ impl M3a {
             PreviewNothing => band().is_none(),
             PreviewUncertain => band().is_some_and(|b| b.style == BandStyle::Uncertain),
             PreviewOffline => band().is_some_and(|b| b.style == BandStyle::Offline),
-            ChooserCandidates | ChooserHover | ChooserUncertain => {
+            ChooserCandidates | ChooserUncertain => {
                 console.is_some_and(|c| exec_ui::chooser::is_open(c, cx))
             }
-            MarksRun => marks() == 4,
-            MarksStopped => marks() == 4,
+            ChooserHover => {
+                console.is_some_and(|c| exec_ui::chooser::is_open(c, cx))
+                    && band().is_some_and(|b| b.from_override && b.units.len() == 2)
+            }
+            MarksRun | MarksStopped => marks() == 4,
             MarksCancelling | MarksCancelled => marks() == 3,
-            MarksStale => marks() == 2,
+            MarksStale => stale_first(editor.as_ref(), cx),
             MarksTwoOnRow | MarksLongLine => marks() == 2,
             MarksDenied => console.is_some_and(|c| {
                 exec_ui::last_run_marks(c, cx)
                     .iter()
                     .any(|m| matches!(m, Some(ExecMarkState::Failed { .. })))
             }),
-            StatusTxOpen => console
-                .and_then(|c| exec_ui::tx::user_tx(c, cx))
-                .is_some_and(|t| !t.failed && t.statements == 3),
-            StatusTxFailed => console
-                .and_then(|c| exec_ui::tx::user_tx(c, cx))
-                .is_some_and(|t| t.failed),
+            StatusTxOpen => tx().is_some_and(|t| !t.failed && t.statements == 3),
+            StatusTxFailed => tx().is_some_and(|t| t.failed),
+            StatusCursorOpen => cursor(),
+            StatusEverything => {
+                tx().is_some_and(|t| !t.failed && t.statements >= 1)
+                    && cursor()
+                    && console
+                        .and_then(|c| hacivat_app::results::context::result_context_of(c, cx))
+                        .is_some_and(|rc| {
+                            matches!(
+                                rc.completeness,
+                                hacivat_app::results::CompletenessView::Suspended
+                            )
+                        })
+            }
+            StatusProductionResult | Results(_) | GridRange | NoticeReducedMode => true,
+            NoticePasteRefused => toast("hui-editor-paste-refused-title"),
+            NoticeNul => text().contains('\0') && toast("hui-editor-nul-title"),
+            NoticeClipboard => toast("hui-editor-clipboard-title"),
+            // The menu's own row "Describe execution range" (its rows are drawn as button
+            // labels, in runs around an access key on Linux and Windows: P15's finder).
+            ContextMenu => {
+                let drawn: Vec<RenderedText> = frame
+                    .iter()
+                    .filter(|r| r.visible && r.painted_px > 0.0)
+                    .cloned()
+                    .collect();
+                let row = message(cx, "hv-cmd-editor-describe-exec-range", Vec::new());
+                super::support::find_label_runs(&drawn, &row).is_some()
+            }
             PromptClose | PromptQuit | PromptFailed | PromptFailedQuit => {
                 exec_ui::close_prompt::open_prompt_dialog(cx).is_some()
             }
-            _ => true,
+            CopyCopied => toast("hv-copy-done-line"),
+            CopyCopying => shows_toast(
+                frame,
+                &message(
+                    cx,
+                    "hv-copy-working",
+                    vec![("cells", hacivat_l10n::ArgValue::Count(48_000))],
+                ),
+            ),
+            CopyTooMuch => toast("hv-copy-refused-title"),
         };
         (!ok).then(|| format!("{}: the state check failed", self.name()))
     }
+}
+
+/// The message `id` with `args`, as the app renders it in the shot's locale.
+fn message(cx: &App, id: &str, args: Vec<(&'static str, hacivat_l10n::ArgValue)>) -> String {
+    let text = cx
+        .global::<hacivat_app::l10n_global::L10nGlobal>()
+        .l10n
+        .t_dynamic(id, args);
+    super::strip(&text)
+}
+
+/// Whether the frame shows (visible and painted) a label of `file` reading exactly `text`.
+fn shows_label(frame: &[RenderedText], file: &str, text: &str) -> bool {
+    frame.iter().any(|r| {
+        r.visible && r.painted_px > 0.0 && r.path.contains(file) && super::strip(&r.text) == text
+    })
+}
+
+/// Whether a toast shows `text` (its title or body).
+fn shows_toast(frame: &[RenderedText], text: &str) -> bool {
+    shows_label(frame, TOAST, text)
+}
+
+/// Whether the first fixture mark is stale and the second is not (`marks-stale`, M9).
+fn stale_first(editor: Option<&Entity<EditorView>>, cx: &App) -> bool {
+    editor.is_some_and(|e| {
+        let marks = e.read(cx).marks();
+        marks.len() == 2
+            && marks.is_stale(exec_ui::fixtures::fixture_key(0))
+            && !marks.is_stale(exec_ui::fixtures::fixture_key(1))
+    })
 }
 
 fn results_name(r: ResultsShot) -> &'static str {
