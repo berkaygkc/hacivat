@@ -1569,3 +1569,100 @@ hv-editor-mark-stale = edited since execution
 hv-editor-tip-stale = Edited since execution. The marks show the last run.
 # Tooltip title of a gutter mark when two executed statements share its line; each statement's own outcome follows.
 hv-editor-tip-two = Two statements on this line
+
+## m3a-t32-console
+
+# A bound console's tab title from the second console of a connection on; the first shows the connection's name alone.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+#   $n (Number) - the console's number among that connection's consoles, e.g. 2.
+hv-console-tab-title = { $name } ({ $n })
+# The console toolbar's Run button.
+hv-console-run = Run
+# The console toolbar's Stop button, in place of Run while a statement runs.
+hv-console-stop = Stop
+# The console toolbar's run state while a statement runs; the elapsed time follows it.
+hv-console-running = Running
+# The elapsed time of the running statement in the console toolbar, repainted once a second.
+# Variables:
+#   $s (Number) - whole seconds since the run started, e.g. 3.
+hv-console-clock = { $s } s
+# The console toolbar's run state after Stop, until the server answers.
+hv-console-cancelling = Cancelling…
+# The console toolbar while the console waits for a session of its connection (every connection the profile allows is in use).
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+#   $inUse (Number) - connections in use, e.g. 4.
+#   $max (Number) - connections the profile allows, e.g. 4.
+hv-console-waiting = Waiting for a free connection to { $name } ({ $inUse } of { $max } in use)
+# The short form of the waiting sentence when the toolbar is narrow (the connection's name is already in the toolbar).
+# Variables:
+#   $inUse (Number) - connections in use, e.g. 4.
+#   $max (Number) - connections the profile allows, e.g. 4.
+hv-console-waiting-short = Waiting for a connection ({ $inUse } of { $max } in use)
+# Stops waiting for a free connection.
+hv-console-waiting-cancel = Cancel
+# The console toolbar's notice on a production connection (a button that opens the explanation).
+hv-console-prod-notice = Production is read-only in this version
+# The notice's short form when the toolbar is narrow.
+hv-console-prod-short = read-only
+# The overflow menu row that opens the explanation when the notice is short.
+hv-console-prod-why = Why this console is read-only…
+# The explanation popover's title.
+hv-console-prod-pop-title = Why this console is read-only
+# The explanation popover's first paragraph.
+hv-console-prod-pop-body = Writing to production needs statement confirmations, and this version of { -brand-hacivat } doesn't have them yet. Until it does, every production console runs read-only, whatever the connection allows.
+# The explanation popover's second paragraph.
+hv-console-prod-pop-reads = Reads run as usual. A statement that would change data or schema isn't sent, and the Output tab says why.
+# The status bar's caret position in the console's editor (raw numbers, like the line numbers).
+# Variables:
+#   $line (Number) - the caret's line, from 1, e.g. 14.
+#   $col (Number) - the caret's column, from 1, e.g. 49.
+hv-editor-lncol = Ln { NUMBER($line, useGrouping: "false") }, Col { NUMBER($col, useGrouping: "false") }
+# The status bar's count of selected characters in the console's editor.
+# Variables:
+#   $n (Number) - selected characters, e.g. 186.
+hv-editor-selected = { $n } selected
+# The status bar's mark while the console's editor is in reduced mode (a large document).
+hv-editor-reduced = Reduced mode
+# A document size in megabytes, in the regional format (the reduced-mode banner, the restore notice).
+# Variables:
+#   $mb (Decimal) - the size in megabytes, e.g. 18.4.
+hv-console-size-mb = { NUMBER($mb, minimumFractionDigits: 1, maximumFractionDigits: 1) } MB
+# A notice when a console's saved text is too large to open at launch.
+# Variables:
+#   $name (String) - the console's tab title, e.g. "orders-dev (2)".
+hv-console-restore-refused-title = Couldn't reopen { $name }
+# The notice's text.
+# Variables:
+#   $size (String) - the saved text's size (an hv-console-size-mb message), e.g. "31.4 MB".
+#   $limit (String) - the largest size the editor opens (an hv-console-size-mb message), e.g. "20.0 MB".
+hv-console-restore-refused-body = Its saved text is { $size }, more than the { $limit } this version opens. The file stays on disk unchanged.
+# The Edit menu's Undo when it would take back typing.
+hv-edit-undo-typing = Undo Typing
+# The Edit menu's Undo when it would take back a paste.
+hv-edit-undo-paste = Undo Paste
+# The Edit menu's Undo when it would take back a drop.
+hv-edit-undo-drop = Undo Drop
+# The Edit menu's Undo when it would take back a deletion.
+hv-edit-undo-delete = Undo Delete
+# The Edit menu's Undo when it would take back a cut.
+hv-edit-undo-cut = Undo Cut
+# The Edit menu's Undo when it would take back an indent.
+hv-edit-undo-indent = Undo Indent
+# The Edit menu's Undo when it would take back an outdent.
+hv-edit-undo-outdent = Undo Outdent
+# The Edit menu's Redo when it would apply typing again.
+hv-edit-redo-typing = Redo Typing
+# The Edit menu's Redo when it would apply a paste again.
+hv-edit-redo-paste = Redo Paste
+# The Edit menu's Redo when it would apply a drop again.
+hv-edit-redo-drop = Redo Drop
+# The Edit menu's Redo when it would apply a deletion again.
+hv-edit-redo-delete = Redo Delete
+# The Edit menu's Redo when it would apply a cut again.
+hv-edit-redo-cut = Redo Cut
+# The Edit menu's Redo when it would apply an indent again.
+hv-edit-redo-indent = Redo Indent
+# The Edit menu's Redo when it would apply an outdent again.
+hv-edit-redo-outdent = Redo Outdent

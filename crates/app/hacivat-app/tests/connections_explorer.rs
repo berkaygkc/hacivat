@@ -614,11 +614,17 @@ fn home_entry_points_are_buttons(cx: &mut TestAppContext) {
     ] {
         assert!(vcx.debug_bounds(id).is_some(), "{id}");
     }
+    // ## m3a-t32-console (named exception): a successful connect binds the focused console,
+    // which then shows its editor in place of the home (R-M3-37), so the palette entry is
+    // pressed first.
+    click(vcx, "button-home-palette");
+    assert_eq!(layer_ids(vcx), ["palette"]);
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(layer_ids(vcx).is_empty());
     focus_list(vcx); // selects a
     click(vcx, "button-home-connect");
     assert_eq!(connect_calls(vcx), ["a"]);
-    click(vcx, "button-home-palette");
-    assert_eq!(layer_ids(vcx), ["palette"]);
 }
 
 // ## m2a-t21-shots

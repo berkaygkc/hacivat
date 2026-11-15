@@ -1497,3 +1497,76 @@ hv-editor-mark-stale = çalıştırıldıktan sonra düzenlendi
 hv-editor-tip-stale = Çalıştırıldıktan sonra düzenlendi. İşaretler son çalıştırmayı gösterir.
 # Review: PO
 hv-editor-tip-two = Bu satırda iki ifade var
+
+## m3a-t32-console
+
+# Review: PO
+hv-console-tab-title = { $name } ({ $n })
+# Review: PO
+hv-console-run = Çalıştır
+# Review: PO
+hv-console-stop = Durdur
+# Review: PO
+hv-console-running = Çalışıyor
+# Review: PO
+hv-console-clock = { $s } sn
+# Review: PO
+hv-console-cancelling = İptal ediliyor…
+# Review: PO
+hv-console-waiting = { $name } için boş bağlantı bekleniyor (kullanımda: { $inUse }/{ $max })
+# Review: PO
+hv-console-waiting-short = Bağlantı bekleniyor (kullanımda: { $inUse }/{ $max })
+# Review: PO
+hv-console-waiting-cancel = Vazgeç
+# Review: PO
+hv-console-prod-notice = Üretim bu sürümde salt okunur
+# Review: PO
+hv-console-prod-short = salt okunur
+# Review: PO
+hv-console-prod-why = Bu konsol neden salt okunur…
+# Review: PO
+hv-console-prod-pop-title = Bu konsol neden salt okunur
+# Review: PO
+hv-console-prod-pop-body = Üretimde yazmak ifade onayları gerektirir ve { -brand-hacivat } bu sürümünde bu onaylara henüz sahip değil. O zamana kadar her üretim konsolu, bağlantı neye izin verirse versin salt okunur çalışır.
+# Review: PO
+hv-console-prod-pop-reads = Okuma ifadeleri her zamanki gibi çalışır. Veriyi ya da şemayı değiştirecek bir ifade gönderilmez; nedenini Çıktı sekmesi söyler.
+# Review: PO
+hv-editor-lncol = Sat { NUMBER($line, useGrouping: "false") }, Süt { NUMBER($col, useGrouping: "false") }
+# Review: PO
+hv-editor-selected = { $n } seçili
+# Review: PO
+hv-editor-reduced = Kısıtlı mod
+# Review: PO
+hv-console-size-mb = { NUMBER($mb, minimumFractionDigits: 1, maximumFractionDigits: 1) } MB
+# Review: PO
+hv-console-restore-refused-title = { $name } yeniden açılamadı
+# Review: PO
+hv-console-restore-refused-body = Kayıtlı metni { $size }; bu sürüm en çok { $limit } açabiliyor. Dosya diskte olduğu gibi duruyor.
+# Review: PO
+hv-edit-undo-typing = Yazmayı Geri Al
+# Review: PO
+hv-edit-undo-paste = Yapıştırmayı Geri Al
+# Review: PO
+hv-edit-undo-drop = Bırakmayı Geri Al
+# Review: PO
+hv-edit-undo-delete = Silmeyi Geri Al
+# Review: PO
+hv-edit-undo-cut = Kesmeyi Geri Al
+# Review: PO
+hv-edit-undo-indent = Girintiyi Geri Al
+# Review: PO
+hv-edit-undo-outdent = Girinti Azaltmayı Geri Al
+# Review: PO
+hv-edit-redo-typing = Yazmayı Yinele
+# Review: PO
+hv-edit-redo-paste = Yapıştırmayı Yinele
+# Review: PO
+hv-edit-redo-drop = Bırakmayı Yinele
+# Review: PO
+hv-edit-redo-delete = Silmeyi Yinele
+# Review: PO
+hv-edit-redo-cut = Kesmeyi Yinele
+# Review: PO
+hv-edit-redo-indent = Girintiyi Yinele
+# Review: PO
+hv-edit-redo-outdent = Girinti Azaltmayı Yinele
