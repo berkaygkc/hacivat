@@ -1,0 +1,264 @@
+# The CARET family (caret → execution range) of `docs/research/datagrip/13-behavioral-test-corpus.md`
+# §3.6, as Hacivat goldens (M3a Task 13). Fields: `sql-testkit/src/golden/mod.rs`.
+#
+# Clean room (ALG-TEST-01): the scenarios (input, caret, policy) are that Hacivat-authored
+# document's; the fixtures are its §3.3 SQL, verbatim, in `corpus/fixtures/`. Every expectation
+# comes from Hacivat's own specs, named in `sources` (`alg/10` SQL-SPLIT-04 aligned to D-011,
+# `alg/20` HV-EXEC-01), never from the document's "Expected hint" column.
+#
+# Expected units are written out as text (`units_text`), taken once from the fixture or the
+# case's own input, so a case never depends on how the splitter under test numbers its
+# statements.
+#
+# `requires = ["cst"]`: the case needs a parse tree (M5). M3a runs `expect_without_cst`, where
+# "smallest subquery or statement" falls back to the statement; `expect` is M5's answer.
+
+[[case]]
+id = "CARET-01"
+fixture = "FX-CARET-01"
+caret = { after = "SELECT c.full_name" }
+policy = { inside = "smallest_statement" }
+expect.units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c"]
+sources = ["alg/10 SQL-SPLIT-04 step 4 (SmallestStatement: the top-level item)", "alg/10 SQL-SPLIT-04 test cases (FX-CARET-01)"]
+
+[[case]]
+id = "CARET-02"
+fixture = "FX-CARET-01"
+caret = { after = "SELECT id FROM recent r" }
+policy = { inside = "smallest_statement" }
+expect.units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c"]
+sources = ["alg/10 SQL-SPLIT-04 test cases (FX-CARET-01: SmallestStatement → the whole WITH statement)"]
+
+[[case]]
+id = "CARET-03"
+fixture = "FX-CARET-01"
+caret = { after = "SELECT id FROM recent r" }
+policy = { inside = "smallest_subquery_or_statement" }
+requires = ["cst"]
+expect.units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c"]
+expect_without_cst.units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c"]
+sources = ["alg/10 SQL-SPLIT-04 test cases (the subquery references outer c.id and the CTE: not self-contained, falls back)"]
+
+[[case]]
+id = "CARET-04"
+fixture = "FX-CARET-01"
+caret = { after = "SELECT id FROM recent r" }
+policy = { inside = "largest_statement" }
+expect.units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c"]
+sources = ["alg/10 SQL-SPLIT-04 step 4 (LargestStatement: the top-level item)"]
+
+[[case]]
+id = "CARET-05"
+fixture = "FX-CARET-01"
+caret = { after = "SELECT id, customer_id" }
+policy = { inside = "smallest_subquery_or_statement" }
+requires = ["cst"]
+expect.units_text = ["SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'"]
+expect_without_cst.units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c"]
+sources = ["alg/10 SQL-SPLIT-04 test cases (CTE body alone, self-contained)", "plan M3a Task 13 (falls back to the statement without a CST)"]
+
+[[case]]
+id = "CARET-06"
+fixture = "FX-CARET-01"
+caret = { after = "SELECT count(*)" }
+policy = { inside = "smallest_subquery_or_statement" }
+requires = ["cst"]
+expect.units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c"]
+expect_without_cst.units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c"]
+sources = ["alg/20 HV-EXEC-01 test 2 (a correlated subquery is not runnable alone: the whole statement)"]
+
+[[case]]
+id = "CARET-07"
+fixture = "FX-CARET-01"
+caret = { after = "FROM customers c;\n" }
+policy = { inside = "smallest_statement", outside = "nothing" }
+expect.resolution = "nothing"
+sources = ["D-011 (outside a statement: nothing)", "alg/20 HV-EXEC-01 test 4"]
+
+[[case]]
+id = "CARET-08"
+fixture = "FX-CARET-01"
+caret = { after = "FROM customers c;\n" }
+policy = { inside = "smallest_statement", outside = "whole_script" }
+expect.units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c", "SELECT 2"]
+sources = ["alg/20 HV-EXEC-01 step 4 (WholeScript: all)"]
+
+[[case]]
+id = "CARET-09"
+fixture = "FX-CARET-01"
+caret = { after = "FROM customers c;\n" }
+policy = { inside = "smallest_statement", outside = "everything_below" }
+expect.units_text = ["SELECT 2"]
+sources = ["alg/20 HV-EXEC-01 step 4 (EverythingBelow: statements whose start is after the caret)"]
+
+[[case]]
+id = "CARET-10"
+fixture = "FX-CARET-01"
+caret = { after = "FROM customers c;" }
+policy = { inside = "smallest_statement" }
+expect.units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c"]
+sources = ["alg/10 SQL-SPLIT-04 step 2 (right after `;` with only spaces after on the line: the statement before)"]
+
+[[case]]
+id = "CARET-11"
+fixture = "FX-CARET-01"
+caret = { before = "SELECT 2;" }
+policy = { inside = "smallest_statement" }
+expect.units_text = ["SELECT 2"]
+sources = ["alg/10 SQL-SPLIT-04 step 2 (the item whose smart range contains the caret)"]
+
+[[case]]
+id = "CARET-12"
+input = "SELECT 1;\n-- the ┃second one\nSELECT 2;"
+policy = { inside = "smallest_statement" }
+expect.units_text = ["SELECT 2"]
+expect.titles = ["-- the second one"]
+sources = ["alg/10 SQL-SPLIT-04 edge cases (caret in an attached leading comment: inside)", "plan M3a Task 13 (sent text = the strict range; the comment is the title)"]
+
+[[case]]
+id = "CARET-13"
+input = "SELECT 1;\n\n-- a ┃note of its own\n\nSELECT 2;"
+policy = { inside = "smallest_statement", outside = "nothing" }
+expect.resolution = "nothing"
+sources = ["alg/10 SQL-SPLIT-04 edge cases (a comment separated by a blank line: outside)"]
+
+[[case]]
+id = "CARET-14"
+fixture = "FX-SPLIT-PG-01"
+caret = { after = "RAISE NOTICE" }
+policy = { inside = "smallest_statement" }
+expect.units_text = ["DO $$\nBEGIN\n  RAISE NOTICE 'a;b';\n  PERFORM 1;\nEND\n$$"]
+sources = ["alg/10 SQL-SPLIT-04 step 4 (PL/pgSQL inside `$$` is never run alone)", "alg/10 SQL-SPLIT-04 per-dialect matrix (PG `$$` bodies atomic)"]
+
+[[case]]
+id = "CARET-15"
+fixture = "FX-SPLIT-PG-02"
+caret = { after = "RETURN s" }
+policy = { inside = "largest_statement" }
+expect.units_text = ["CREATE OR REPLACE FUNCTION hv_f() RETURNS text LANGUAGE plpgsql AS $body$\nDECLARE s text := $$x;y$$;\nBEGIN\n  RETURN s || ';';\nEND\n$body$"]
+sources = ["alg/10 SQL-SPLIT-04 edge cases (caret in a dollar body: the statement is the CREATE FUNCTION)"]
+
+[[case]]
+id = "CARET-16"
+fixture = "FX-CARET-01"
+caret = { after = "SELECT c.full_name" }
+policy = { inside = "everything_from_caret" }
+expect.units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c", "SELECT 2"]
+sources = ["alg/10 SQL-SPLIT-04 test cases (EverythingFromCaret → statements 1 and 2)", "alg/20 HV-EXEC-01 step 5"]
+
+[[case]]
+id = "CARET-17"
+fixture = "FX-CARET-01"
+caret = { after = "SELECT 2" }
+policy = { inside = "whole_script" }
+expect.units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c", "SELECT 2"]
+sources = ["alg/20 HV-EXEC-01 step 5 (WholeScript: all units)"]
+
+[[case]]
+id = "CARET-18"
+fixture = "FX-CARET-01"
+caret = { after = "SELECT c.full_name" }
+policy = { inside = "ask" }
+expect.candidates = [{ kind = "statement", units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c"] }, { kind = "whole_script", units_text = ["WITH recent AS (\n  SELECT id, customer_id FROM orders WHERE ordered_at > now() - interval '30 days'\n)\nSELECT c.full_name,\n       (SELECT count(*) FROM order_items oi WHERE oi.order_id IN (SELECT id FROM recent r WHERE r.customer_id = c.id)) AS n\nFROM customers c", "SELECT 2"] }]
+expect.preselect = "statement"
+sources = ["alg/10 SQL-SPLIT-04 test cases (chooser → [statement, whole script] after dedupe)", "plan M3a Task 13 (a FromCaret equal to WholeScript is WholeScript)"]
+
+[[case]]
+id = "CARET-19"
+dialect = "mssql"
+fixture = "FX-CARET-02"
+requires = ["dialect:mssql"]
+skip = "dialect:mssql"
+sources = ["alg/20 HV-EXEC-01 test 3 (v1.x: SQL Server is not an M3a dialect)"]
+
+[[case]]
+id = "CARET-20"
+dialect = "mssql"
+fixture = "FX-CARET-02"
+requires = ["dialect:mssql"]
+skip = "dialect:mssql"
+sources = ["alg/20 HV-EXEC-01 test 3 (v1.x: SQL Server is not an M3a dialect)"]
+
+[[case]]
+id = "CARET-21"
+dialect = "mysql"
+fixture = "FX-SPLIT-MY-01"
+caret = { after = "SELECT 2" }
+policy = { inside = "smallest_statement" }
+expect.units_text = ["CREATE PROCEDURE hv_p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND"]
+sources = ["alg/10 SQL-SPLIT-04 per-dialect matrix (MySQL stored-program bodies atomic)", "alg/20 HV-EXEC-01 test 7"]
+
+[[case]]
+id = "CARET-22"
+dialect = "oracle"
+requires = ["dialect:oracle"]
+skip = "dialect:oracle"
+sources = ["alg/10 SQL-SPLIT-04 per-dialect matrix (v1.x: Oracle is not an M3a dialect)"]
+
+[[case]]
+id = "CARET-23"
+input = "SELECT ┃1;\nSELECT 2;\nSELECT ┃3;"
+policy = { inside = "smallest_statement" }
+expect.units_text = ["SELECT 1", "SELECT 3"]
+sources = ["alg/10 SQL-SPLIT-04 step 7 (per caret, union by range, document order)", "alg/20 HV-EXEC-01 test 10"]
+
+[[case]]
+id = "CARET-24"
+input = "SELECT 1;\nSELECT ┃2"
+policy = { inside = "smallest_statement" }
+expect.units_text = ["SELECT 2"]
+sources = ["alg/10 SQL-SPLIT-04 edge cases (unterminated last statement: runs it)"]
+
+[[case]]
+id = "CARET-25"
+input = "SELECT 1 UNION SELECT ┃2;"
+policy = { inside = "smallest_subquery_or_statement" }
+requires = ["cst"]
+expect.units_text = ["SELECT 1 UNION SELECT 2"]
+expect_without_cst.units_text = ["SELECT 1 UNION SELECT 2"]
+sources = ["alg/10 SQL-SPLIT-04 edge cases (a UNION branch without parentheses: the statement)"]
+
+[[case]]
+id = "CARET-26"
+input = "INSERT INTO audit_log(actor, message) VALUES ('hv', (SELECT ┃max(sku) FROM order_items));"
+policy = { inside = "smallest_subquery_or_statement" }
+requires = ["cst"]
+expect.units_text = ["SELECT max(sku) FROM order_items"]
+expect_without_cst.units_text = ["INSERT INTO audit_log(actor, message) VALUES ('hv', (SELECT max(sku) FROM order_items))"]
+sources = ["alg/10 SQL-SPLIT-04 step 4 (a self-contained scalar subquery, without its parentheses)", "alg/20 HV-EXEC-01 edge cases (subquery in a VALUES row)"]
+
+[[case]]
+id = "CARET-27"
+input = "SELECT x.id FROM (SELECT id FROM ┃orders) x;"
+policy = { inside = "smallest_subquery_or_statement" }
+requires = ["cst"]
+expect.units_text = ["SELECT id FROM orders"]
+expect_without_cst.units_text = ["SELECT x.id FROM (SELECT id FROM orders) x"]
+sources = ["alg/10 SQL-SPLIT-04 step 4 (derived table, self-contained)"]
+
+[[case]]
+id = "CARET-28"
+input = "SELECT 1 WHERE EXISTS (SELECT ┃1 FROM orders);"
+policy = { inside = "smallest_subquery_or_statement" }
+requires = ["cst"]
+expect.units_text = ["SELECT 1 FROM orders"]
+expect_without_cst.units_text = ["SELECT 1 WHERE EXISTS (SELECT 1 FROM orders)"]
+sources = ["alg/10 SQL-SPLIT-04 step 4 (EXISTS subquery with no outer reference)"]
+
+[[case]]
+id = "CARET-29"
+input = "EXPLAIN SELECT ┃1;"
+policy = { inside = "smallest_subquery_or_statement" }
+requires = ["cst"]
+expect.units_text = ["EXPLAIN SELECT 1"]
+expect_without_cst.units_text = ["EXPLAIN SELECT 1"]
+sources = ["alg/10 SQL-SPLIT-04 edge cases (EXPLAIN SELECT: the whole EXPLAIN)"]
+
+[[case]]
+id = "CARET-30"
+input = "CREATE VIEW v AS SELECT ┃1;"
+policy = { inside = "smallest_subquery_or_statement" }
+requires = ["cst"]
+expect.units_text = ["CREATE VIEW v AS SELECT 1"]
+expect_without_cst.units_text = ["CREATE VIEW v AS SELECT 1"]
+sources = ["alg/10 SQL-SPLIT-04 edge cases (CREATE VIEW … AS SELECT: the whole CREATE)"]

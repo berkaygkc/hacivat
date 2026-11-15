@@ -36,6 +36,9 @@ use crate::recover::{self, Cut, PendingWith, Trivia};
 
 /// Where a split starts: the lexer's state and the client delimiter in force there (a
 /// selection that starts inside a dollar quote, or after `DELIMITER //`).
+///
+/// A split that starts inside a token never returns that token's tail as a certain statement
+/// (`carried_reason`): a unit is sent alone, and the server reads it from a clean state.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct SplitStart {
     pub lex: LexState,
@@ -472,6 +475,14 @@ pub(crate) struct Analysis {
     pub delimiters: Vec<(TextSize, Option<Arc<str>>)>,
     /// Where lexing restarted after a command, a delimiter or data, and in which state.
     pub restarts: Vec<(TextSize, LexState)>,
+    /// Token starts of the pass's own token stream, about every [`CHECKPOINT_BYTES`]: the
+    /// lexer's state is `Initial` at each, so lexing can be picked up there instead of at the
+    /// last restart (a selection's edge is then looked at in bounded time).
+    pub checkpoints: Vec<TextSize>,
+    /// Every `COPY … FROM STDIN` with data, in text order: where its statement starts, and
+    /// its data. The statement is not always the item just before the rows (another
+    /// statement or an empty `;` can follow it on its line).
+    pub copies: Vec<(TextSize, CopyData)>,
     pub ctx: Option<DialectCtx>,
     pub flavor: ClientFlavor,
     /// The delimiter in force at the text's start.
@@ -480,6 +491,9 @@ pub(crate) struct Analysis {
     /// server-side comment reads): the complexity counter.
     pub lexed: u64,
 }
+
+/// How far apart the lexing checkpoints of an [`Analysis`] are.
+pub(crate) const CHECKPOINT_BYTES: usize = 2048;
 
 /// Runs the structural pass over `text` (its lexing from `start.lex` is `lexed`, or the pass
 /// lexes it).
@@ -528,6 +542,8 @@ pub(crate) fn analyze_chunked(
         server_to_eof: false,
         server_read: None,
         lexed: 0,
+        next_checkpoint: CHECKPOINT_BYTES,
+        carried: carried_reason(&start.lex),
     };
     w.run();
     w.out.lexed = w.lexed + w.stream.lexed;
@@ -622,6 +638,32 @@ struct Walker<'a, 's> {
     server_read: Option<(usize, Option<usize>)>,
     /// Bytes lexed outside the stream.
     lexed: u64,
+    /// Where the next lexing checkpoint is due.
+    next_checkpoint: usize,
+    /// The split starts inside a token (`SplitStart::lex`): why its tail, the first token, is
+    /// uncertain. Taken when that token is read.
+    carried: Option<AmbiguityReason>,
+}
+
+/// Why the tail of the token a split starts inside is uncertain, if it is.
+///
+/// A unit is sent alone and the server reads it from a clean state. The rest of a string, a
+/// quoted identifier, a dollar-quoted body or `COPY` data is then code (`'a; DROP TABLE t; '`
+/// from inside the literal is ` DROP TABLE t; '`), so the statement that holds the tail is
+/// never certain. The rest of an executable comment or a hint is code to the server and a
+/// comment here, with no end both agree on: everything from it on is uncertain. The rest of a
+/// plain comment is trivia in both readings and is in no statement.
+pub(crate) fn carried_reason(start: &LexState) -> Option<AmbiguityReason> {
+    match start {
+        LexState::Initial | LexState::InBlockComment { .. } => None,
+        LexState::InExecutableComment { .. } | LexState::InHintComment { .. } => {
+            Some(AmbiguityReason::AmbiguousCommentEnd)
+        }
+        LexState::InString { .. }
+        | LexState::InQuotedIdent { .. }
+        | LexState::InDollar { .. }
+        | LexState::InCopyData => Some(AmbiguityReason::UnterminatedConstruct),
+    }
 }
 
 impl<'a> Walker<'a, '_> {
@@ -654,30 +696,53 @@ impl<'a> Walker<'a, '_> {
 
     fn run(&mut self) {
         while let Some(mut t) = self.stream.next() {
+            // A token of the stream starts where the lexer's state is `Initial` (the first
+            // token of a carried state and `COPY` data lines aside): a place to lex on from.
+            if t.start() >= self.next_checkpoint && t.kind != TokenKind::InlineData {
+                self.out.checkpoints.push(t.range.start());
+                self.next_checkpoint = t.start() + CHECKPOINT_BYTES;
+            }
+            // The first token of a split that starts inside a token is that token's tail.
+            let tail = self.carried.take().map(|reason| (t.range, reason));
             self.reread_comment_end(&mut t);
-            if let Some((ds, _)) = self.copy
-                && t.end() > ds
-            {
-                if t.start() < ds {
-                    self.sub_lex(t.start(), ds);
-                }
-                self.copy_data();
-                continue;
+            self.step(t);
+            if let Some((at, reason)) = tail {
+                // After the token is placed, so the statement it opened is marked too. A
+                // comment's tail is in no statement: it makes the rest of the text uncertain.
+                let at = if reason == AmbiguityReason::AmbiguousCommentEnd {
+                    range(usize::from(at.start()), self.text.len())
+                } else {
+                    at
+                };
+                self.ambiguity(at, reason);
             }
-            if let Some(d) = self.delim.clone()
-                && self.client_delimiter(&t, &d)
-            {
-                continue;
-            }
-            if !t.is_trivia() && self.client_command(&t) {
-                continue;
-            }
-            self.token(t);
         }
         if self.copy.is_some() {
             self.copy_data();
         }
         self.finish();
+    }
+
+    /// Places one token: `COPY` data, the client delimiter, a client command, or SQL.
+    fn step(&mut self, t: Tok) {
+        if let Some((ds, _)) = self.copy
+            && t.end() > ds
+        {
+            if t.start() < ds {
+                self.sub_lex(t.start(), ds);
+            }
+            self.copy_data();
+            return;
+        }
+        if let Some(d) = self.delim.clone()
+            && self.client_delimiter(&t, &d)
+        {
+            return;
+        }
+        if !t.is_trivia() && self.client_command(&t) {
+            return;
+        }
+        self.token(t);
     }
 
     /// The lexer's flag and the splitter's own server-side reading of a comment's end are
@@ -938,6 +1003,11 @@ impl<'a> Walker<'a, '_> {
             None => (range(ds.min(n), ds.min(n)), None, ds.min(n)),
         };
         self.out.restarts.push((size(data_end), LexState::Initial));
+        let owner = match self.out.items.get(item) {
+            Some(RawItem::Stmt(s)) => s.strict.start(),
+            _ => rows.start(),
+        };
+        self.out.copies.push((owner, CopyData { rows, end }));
         if let Some(RawItem::Stmt(s)) = self.out.items.get_mut(item) {
             s.copy_data = Some(CopyData { rows, end });
             if end.is_none() {
@@ -1631,13 +1701,21 @@ impl<'a> Walker<'a, '_> {
     /// doubt, so the splitter does not rely on it.
     fn executable_body(&mut self, t: &Tok) {
         let tok = &self.text[t.range];
-        let open = if tok.starts_with("/*M!") { 4 } else { 3 };
+        // A split that starts inside the comment meets its tail, which has no opener: the
+        // whole token is body (and `carried` refuses it).
+        let open = if tok.starts_with("/*M!") {
+            4
+        } else if tok.starts_with("/*!") {
+            3
+        } else {
+            0
+        };
         let digits = tok.as_bytes()[open.min(tok.len())..]
             .iter()
             .take(6)
             .take_while(|b| b.is_ascii_digit())
             .count();
-        let skip = open + if digits >= 5 { digits } else { 0 };
+        let skip = open + if open > 0 && digits >= 5 { digits } else { 0 };
         let closed = !t.flags.contains(TokenFlags::UNTERMINATED)
             && tok.len() >= skip + 2
             && tok.ends_with("*/");
@@ -1847,10 +1925,16 @@ fn server_end_from(
     modes: LexModes,
     first: Option<usize>,
 ) -> (Option<usize>, u64) {
-    let open = if text[t.range].starts_with("/*M!") {
+    // A split that starts inside the comment meets its tail, which has no opener. Its reading
+    // from here is not the server's (that began before the split), and the walker refuses
+    // everything after such a tail anyway; this only has to stay inside the text.
+    let tok = &text[t.range];
+    let open = if tok.starts_with("/*M!") {
         4
-    } else {
+    } else if tok.starts_with("/*!") || tok.starts_with("/*+") {
         3
+    } else {
+        0
     };
     let from = (t.start() + open).min(text.len());
     let body = &text[from..];

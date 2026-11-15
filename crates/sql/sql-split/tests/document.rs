@@ -214,6 +214,216 @@ fn split_start_reads_the_state_inside_a_construct() {
     );
     let got: Vec<&str> = s.statements().map(|st| &text[st.strict]).collect();
     assert_eq!(got, ["a; b $$", "SELECT 'x;y'"]);
+    // The body's tail is no statement the server would read the same way: never certain.
+    let certain: Vec<&str> = s.runnable().map(|st| &text[st.strict]).collect();
+    assert_eq!(certain, ["SELECT 'x;y'"]);
+}
+
+fn doc_in(text: &str, id: DialectId, flavor: ClientFlavor) -> sql_split::DocSnapshot {
+    SqlDocument::new(text.into(), DialectCtx::new(id, None), flavor).snapshot()
+}
+
+/// The selection from right after the first `from` to the text's end, in both modes: every
+/// statement's text, and the certain ones.
+fn selected(
+    snap: &sql_split::DocSnapshot,
+    from: &str,
+) -> [(Vec<String>, Vec<String>, sql_split::Split); 2] {
+    let text = snap.text();
+    let start = text.find(from).unwrap() + from.len();
+    let r = TextRange::new(
+        at(u32::try_from(start).unwrap()),
+        at(u32::try_from(text.len()).unwrap()),
+    );
+    [SplitMode::Execution, SplitMode::Editor].map(|mode| {
+        let s = snap.split_selection(r, mode);
+        let all = s
+            .statements()
+            .map(|st| text[st.strict].to_string())
+            .collect();
+        let certain = s.runnable().map(|st| text[st.strict].to_string()).collect();
+        (all, certain, s)
+    })
+}
+
+// Found by Task 13: a selection that starts inside a token returned the token's tail as a
+// certain statement, which a server reading it from a clean state runs as code.
+#[test]
+fn a_selection_inside_a_token_never_returns_a_certain_tail() {
+    use sql_split::AmbiguityReason::UnterminatedConstruct;
+    let (my, pg) = (DialectId::MySql, DialectId::Postgres);
+    let (cli, psql) = (ClientFlavor::MySqlCli, ClientFlavor::Psql);
+    // (text, the selection starts after this, dialect, flavor, the tail's statement)
+    let cases = [
+        (
+            "SELECT 'a; DROP TABLE t; '; SELECT 2;",
+            "'a;",
+            my,
+            cli,
+            " DROP TABLE t; '",
+        ),
+        (
+            "SELECT 'a; DROP TABLE t; '; SELECT 2;",
+            "'a;",
+            pg,
+            psql,
+            " DROP TABLE t; '",
+        ),
+        (
+            "SELECT 'a; DROP TABLE t; --'; SELECT 2;",
+            "'a;",
+            pg,
+            psql,
+            " DROP TABLE t; --'",
+        ),
+        (
+            "SELECT `a; DROP TABLE t; `; SELECT 2;",
+            "`a;",
+            my,
+            cli,
+            " DROP TABLE t; `",
+        ),
+        (
+            "SELECT \"a; DROP TABLE t; \"; SELECT 2;",
+            "\"a;",
+            pg,
+            psql,
+            " DROP TABLE t; \"",
+        ),
+        (
+            "SELECT $q$ a; DROP TABLE t; $q$; SELECT 2;",
+            "$q$ a;",
+            pg,
+            psql,
+            " DROP TABLE t; $q$",
+        ),
+        (
+            "SELECT E'a\\'; DROP TABLE t; '; SELECT 2;",
+            "E'a",
+            pg,
+            psql,
+            "\\'; DROP TABLE t; '",
+        ),
+    ];
+    for (text, from, id, flavor, tail) in cases {
+        let snap = doc_in(text, id, flavor);
+        for (all, certain, s) in selected(&snap, from) {
+            assert_eq!(all, [tail.trim(), "SELECT 2"], "{text}");
+            assert_eq!(certain, ["SELECT 2"], "{text}");
+            assert!(
+                s.ambiguous
+                    .iter()
+                    .any(|a| a.reason == UnterminatedConstruct && text[a.at].trim() == tail.trim()),
+                "{text}: {:?}",
+                s.ambiguous
+            );
+        }
+    }
+}
+
+#[test]
+fn a_selection_inside_copy_data_never_returns_a_row_as_certain() {
+    for text in [
+        "COPY t FROM STDIN;\nDROP TABLE x;\n",
+        "COPY t FROM STDIN;\nDROP TABLE x;\n\\.\nSELECT 2;",
+        "COPY t FROM STDIN;\nDROP TABLE x;\nDROP TABLE y;\n\\.\nSELECT 2;",
+    ] {
+        let snap = doc_in(text, DialectId::Postgres, ClientFlavor::Psql);
+        for from in ["STDIN;\n", "STDIN;\nDROP"] {
+            for (all, certain, s) in selected(&snap, from) {
+                assert!(
+                    !certain.iter().any(|c| c.contains("TABLE")),
+                    "{text:?} from {from:?}: {all:?} / {certain:?}"
+                );
+                assert!(!s.ambiguous.is_empty(), "{text:?} from {from:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_selection_inside_an_executable_comment_or_hint_is_uncertain_to_the_end() {
+    use sql_split::AmbiguityReason::AmbiguousCommentEnd;
+    let cases = [
+        // The tail starts with `/`, a space and a three-byte character: no `/*!` opener to
+        // skip (this panicked inside a character).
+        (
+            "SELECT 1 /*! ; */ \u{202E} /*!50000 x */ ; SELECT 2;",
+            "/*! ; *",
+        ),
+        ("SELECT 1 /*! x; DROP TABLE t; */; SELECT 2;", "/*! x;"),
+        ("SELECT 1 /*!50000 x */ FROM t; SELECT 2;", "/*!5"),
+        ("SELECT 1 /*M! ; é */; SELECT 2;", "/*M! ;"),
+        ("SELECT /*+ x */ 1; SELECT 2;", "/*+"),
+    ];
+    for (text, from) in cases {
+        let snap = doc_in(text, DialectId::MariaDb, ClientFlavor::MySqlCli);
+        for (all, certain, s) in selected(&snap, from) {
+            // What follows is read, and none of it is certain.
+            assert!(
+                all.iter().any(|a| a.contains("SELECT 2")),
+                "{text}: {all:?}"
+            );
+            assert!(certain.is_empty(), "{text}: {certain:?}");
+            assert!(
+                s.ambiguous.iter().any(|a| a.reason == AmbiguousCommentEnd),
+                "{text}: {:?}",
+                s.ambiguous
+            );
+        }
+    }
+}
+
+#[test]
+fn a_selection_inside_a_plain_comment_or_at_a_clean_place_stays_certain() {
+    // The rest of a plain comment is trivia in both readings: what follows is certain.
+    let text = "SELECT 1 /* x; DROP TABLE t; */; SELECT 2;";
+    let snap = doc_in(text, DialectId::MySql, ClientFlavor::MySqlCli);
+    for (all, certain, s) in selected(&snap, "/* x;") {
+        assert_eq!(all, ["SELECT 2"]);
+        assert_eq!(certain, ["SELECT 2"]);
+        assert!(s.ambiguous.is_empty());
+    }
+    // Between two tokens nothing is carried: a string literal that starts the selection is a
+    // whole token, and the server reads it as one.
+    let text = "SELECT 'x' 'y; DROP TABLE t; '; SELECT 2;";
+    let snap = doc_in(text, DialectId::MySql, ClientFlavor::MySqlCli);
+    for (all, certain, _) in selected(&snap, "'x' ") {
+        assert_eq!(all, ["'y; DROP TABLE t; '", "SELECT 2"]);
+        assert_eq!(certain, all);
+    }
+}
+
+#[test]
+fn a_selection_inside_a_client_command_line_is_the_command_not_sql() {
+    let text = "\\echo hi; DROP TABLE x;\nSELECT 2;";
+    let snap = doc_in(text, DialectId::Postgres, ClientFlavor::Psql);
+    for (all, certain, s) in selected(&snap, "hi;") {
+        assert_eq!(all, ["SELECT 2"]);
+        assert_eq!(certain, ["SELECT 2"]);
+        let [c] = s.client.as_slice() else {
+            panic!("one client segment, got {:?}", s.client)
+        };
+        assert_eq!(&text[c.range], " DROP TABLE x;");
+        assert!(!c.supported);
+    }
+    // A selection that ends inside the same line holds only the command's rest.
+    let r = TextRange::new(at(9), at(15));
+    let s = snap.split_selection(r, SplitMode::Execution);
+    assert_eq!(s.statements().count(), 0);
+    assert_eq!(s.client.len(), 1);
+    assert_eq!(s.client[0].range, r);
+
+    // mysql `DELIMITER`: the rest of its line is the delimiter's text, and the delimiter it
+    // sets is in force after it.
+    let text = "DELIMITER //\nSELECT 1; SELECT 2//\nSELECT 3//\n";
+    let snap = doc_in(text, DialectId::MySql, ClientFlavor::MySqlCli);
+    for (all, certain, s) in selected(&snap, "DELIM") {
+        assert_eq!(all, ["SELECT 1; SELECT 2", "SELECT 3"]);
+        assert_eq!(certain, ["SELECT 3"]);
+        assert_eq!(&text[s.client[0].range], "ITER //");
+        assert!(!s.client[0].supported);
+    }
 }
 
 #[test]
@@ -273,4 +483,444 @@ fn from_chunks_equals_new() {
     let b = SqlDocument::new("SELECT 1; SELECT 2".into(), pg18(), ClientFlavor::None);
     assert_eq!(a.statements(), b.statements());
     assert_eq!(a.lexed(), b.lexed());
+}
+
+// --- Task 13 review round 1: the cut is decided from the document's tokens and COPY ranges ---
+
+/// `marked` without its `«…»`, and the selection they mark.
+fn marked(marked: &str) -> (String, TextRange) {
+    let a = marked.find('«').expect("a selection start");
+    let rest = marked.replacen('«', "", 1);
+    let b = rest.find('»').expect("a selection end");
+    let sql = rest.replacen('»', "", 1);
+    (
+        sql,
+        TextRange::new(at(u32::try_from(a).unwrap()), at(u32::try_from(b).unwrap())),
+    )
+}
+
+/// Every statement and every runnable statement `split_selection` gives for `marked`, in both
+/// modes, with the reasons of its boundaries.
+fn cut(
+    text: &str,
+    id: DialectId,
+    flavor: ClientFlavor,
+) -> Vec<(Vec<String>, Vec<String>, Vec<sql_split::AmbiguityReason>)> {
+    let (sql, r) = marked(text);
+    let snap = doc_in(&sql, id, flavor);
+    [SplitMode::Execution, SplitMode::Editor]
+        .into_iter()
+        .map(|mode| {
+            let s = snap.split_selection(r, mode);
+            (
+                s.statements()
+                    .map(|st| sql[st.strict].to_string())
+                    .collect(),
+                s.runnable().map(|st| sql[st.strict].to_string()).collect(),
+                s.ambiguous.iter().map(|a| a.reason).collect(),
+            )
+        })
+        .collect()
+}
+
+// Review I1: the rows of `COPY … FROM STDIN` are data. A selection that starts inside the
+// COPY statement (after its first byte) and reaches the rows never returns a row as certain.
+#[test]
+fn a_selection_from_inside_a_copy_statement_never_returns_its_rows_as_certain() {
+    use sql_split::AmbiguityReason::UnterminatedConstruct;
+    for text in [
+        "COPY t FROM STDIN;«\nDROP TABLE x;\nDELETE FROM y;\n»\\.\nSELECT 9;",
+        "COPY t FROM STDIN«;\nDROP TABLE x;\n»\\.\nSELECT 9;",
+        "COPY t FROM STD«IN;\nDROP TABLE x;\n»\\.\nSELECT 9;",
+        "COPY t FROM STDIN;\n«DROP TABLE x;\n»\\.\nSELECT 9;",
+        "COPY t FROM STDIN«;\nDROP TABLE x;\n\\.\nSELECT 9;»",
+        "C«OPY t FROM STDIN;\nDROP TABLE x;\n\\.\n»SELECT 9;",
+        "COPY t FROM STDIN;\nDROP «TABLE x;\nDELETE FROM y;\n\\.\nSELECT 9;»",
+    ] {
+        for (all, runnable, reasons) in cut(text, DialectId::Postgres, ClientFlavor::Psql) {
+            assert!(
+                !runnable
+                    .iter()
+                    .any(|u| u.contains("TABLE") || u.contains("DELETE") || u == "IN"),
+                "{text:?}: {runnable:?} of {all:?}"
+            );
+            assert!(
+                reasons.contains(&UnterminatedConstruct),
+                "{text:?}: {reasons:?}"
+            );
+        }
+    }
+    // The statement after the data is read from the document's state there.
+    let (_, runnable, _) = &cut(
+        "COPY t FROM STDIN«;\nDROP TABLE x;\n\\.\nSELECT 9;»",
+        DialectId::Postgres,
+        ClientFlavor::Psql,
+    )[0];
+    assert_eq!(runnable, &["SELECT 9"]);
+    // A selection that holds the COPY statement from its first byte is the COPY with its data.
+    let whole = cut(
+        "«COPY t FROM STDIN;\nDROP TABLE x;\n\\.\nSELECT 9;»",
+        DialectId::Postgres,
+        ClientFlavor::Psql,
+    );
+    assert_eq!(whole[0].1, ["COPY t FROM STDIN", "SELECT 9"]);
+    assert!(whole[0].2.is_empty());
+}
+
+// Review I2: "inside a token" is the document's token at the selection's start, openers and
+// string prefixes included, not what lexing the token's first bytes alone leaves open.
+#[test]
+fn a_selection_from_inside_an_opener_or_after_a_string_prefix_is_inside_the_token() {
+    use sql_split::AmbiguityReason::{AmbiguousCommentEnd, UnterminatedConstruct};
+    let (my, maria, pg) = (DialectId::MySql, DialectId::MariaDb, DialectId::Postgres);
+    let (cli, psql) = (ClientFlavor::MySqlCli, ClientFlavor::Psql);
+    let cases = [
+        (
+            "SELECT 1 /*«! , \"*/ DROP TABLE t;» -- \" */ ; SELECT 2;",
+            my,
+            cli,
+            AmbiguousCommentEnd,
+        ),
+        (
+            "SELECT 1 /«*! , \"*/ DROP TABLE t;» -- \" */ ; SELECT 2;",
+            my,
+            cli,
+            AmbiguousCommentEnd,
+        ),
+        (
+            "SELECT /*«+ \"*/ DROP TABLE u;» -- \" */ 2;",
+            my,
+            cli,
+            AmbiguousCommentEnd,
+        ),
+        (
+            "SELECT 1 /*M«! , \"*/ DROP TABLE t;» -- \" */ ; SELECT 2;",
+            maria,
+            cli,
+            AmbiguousCommentEnd,
+        ),
+        (
+            "SELECT 1 /*«M! , \"*/ DROP TABLE t;» -- \" */ ; SELECT 2;",
+            maria,
+            cli,
+            AmbiguousCommentEnd,
+        ),
+        (
+            "SELECT 1 /*«! SELECT 2; */ ; DROP TABLE t;»",
+            my,
+            cli,
+            AmbiguousCommentEnd,
+        ),
+        (
+            "SELECT E«'a\\'; DROP TABLE t; --'»;\nSELECT 2;",
+            pg,
+            psql,
+            UnterminatedConstruct,
+        ),
+        (
+            "SELECT E«'a\\'; DROP TABLE t; --' FROM u; SELECT 3»;\nSELECT 2;",
+            pg,
+            psql,
+            UnterminatedConstruct,
+        ),
+        (
+            "SELECT $ta«g$ a; DROP TABLE t; $tag$; SELECT 2;»",
+            pg,
+            psql,
+            UnterminatedConstruct,
+        ),
+    ];
+    for (text, id, flavor, reason) in cases {
+        for (all, runnable, reasons) in cut(text, id, flavor) {
+            assert!(
+                !runnable.iter().any(|u| u.contains("DROP")),
+                "{text:?}: {runnable:?} of {all:?}"
+            );
+            assert!(reasons.contains(&reason), "{text:?}: {reasons:?}");
+        }
+    }
+}
+
+// Review I3: the whole rest of the document's token is marked, and splitting goes on from the
+// document's state after it, so the split never runs out of step with the document.
+#[test]
+fn a_selection_that_cuts_a_backslash_escape_never_reads_the_strings_rest_as_code() {
+    let (my, pg) = (DialectId::MySql, DialectId::Postgres);
+    let (cli, psql) = (ClientFlavor::MySqlCli, ClientFlavor::Psql);
+    for (text, id, flavor, tail) in [
+        (
+            "SELECT 'a\\«'; DROP TABLE t; -- ';»\nSELECT 2;",
+            my,
+            cli,
+            "'; DROP TABLE t; -- '",
+        ),
+        (
+            "SELECT E'a\\«'; DROP TABLE t; -- ';»\nSELECT 2;",
+            pg,
+            psql,
+            "'; DROP TABLE t; -- '",
+        ),
+        (
+            "SELECT \"a\\«\"; DROP TABLE t; -- \";»\nSELECT 2;",
+            my,
+            cli,
+            "\"; DROP TABLE t; -- \"",
+        ),
+    ] {
+        for (all, runnable, _) in cut(text, id, flavor) {
+            assert_eq!(all, [tail], "{text:?}");
+            assert!(runnable.is_empty(), "{text:?}: {runnable:?}");
+        }
+    }
+    // What follows the token in its statement is part of the same uncertain statement.
+    let text = "SELECT 'a\\«'b' FROM t; SELECT 3;»";
+    for (all, runnable, _) in cut(text, my, cli) {
+        assert_eq!(all, ["'b' FROM t", "SELECT 3"]);
+        assert_eq!(runnable, ["SELECT 3"]);
+    }
+    // In a `U&''` string a backslash escapes no quote: the document's string ends at the
+    // second quote and `DROP TABLE t` is code there. The token's rest is still not certain.
+    let text = "SELECT U&«'a\\'; DROP TABLE t; --'»;\nSELECT 2;";
+    for (all, runnable, _) in cut(text, pg, psql) {
+        assert_eq!(all, ["'a\\'", "DROP TABLE t"]);
+        assert_eq!(runnable, ["DROP TABLE t"]);
+    }
+    // Out of step: read alone from inside the first string, the quotes pair up the other way
+    // and the second string's content reads as code. The document's tokens decide instead.
+    let text = "SELECT 'a\\«'b'; SELECT 'c; DROP TABLE t; d'; SELECT 3;»";
+    for (all, runnable, _) in cut(text, my, cli) {
+        assert_eq!(all, ["'b'", "SELECT 'c; DROP TABLE t; d'", "SELECT 3"]);
+        assert_eq!(runnable, ["SELECT 'c; DROP TABLE t; d'", "SELECT 3"]);
+    }
+}
+
+#[test]
+fn a_selection_edge_inside_a_word_or_a_number_cuts_it() {
+    use sql_split::AmbiguityReason::UnterminatedConstruct;
+    let pg = DialectId::Postgres;
+    for text in [
+        "«DROP TABLE cust»omers_backup; SELECT 2;",
+        "DELETE FROM t WHERE id = 1«2; SELECT 2;»",
+        "SEL«ECT 1»; SELECT 2;",
+        "SEL«ECT 1 FROM t; SELECT 2;»",
+        "SELECT a «>»= 1;",
+        "SELECT 1«0»0;",
+    ] {
+        for (all, runnable, reasons) in cut(text, pg, ClientFlavor::Psql) {
+            assert!(
+                !runnable.iter().any(|u| u != "SELECT 2"),
+                "{text:?}: {runnable:?} of {all:?}"
+            );
+            assert!(
+                reasons.contains(&UnterminatedConstruct),
+                "{text:?}: {reasons:?}"
+            );
+        }
+    }
+    let (sql, r) = marked("«DROP TABLE cust»omers_backup; SELECT 2;");
+    let cuts = doc_in(&sql, pg, ClientFlavor::Psql).selection_cuts(r);
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(&sql[cuts[0].at], "cust");
+    // Between tokens, in white space and inside plain comments nothing is cut.
+    for text in [
+        "«SELECT 1»; SELECT 2;",
+        "SELECT «1; SELECT 2»;",
+        "SELECT 1; « SELECT 2; »",
+        "-- old: «SELECT 1;» kept\nSELECT 2;",
+        "/* «x» */ SELECT 2;",
+    ] {
+        let (sql, r) = marked(text);
+        assert!(
+            doc_in(&sql, pg, ClientFlavor::Psql)
+                .selection_cuts(r)
+                .is_empty(),
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn after_copy_data_both_lexings_are_asked() {
+    // The document's one lexing reads the quote in the data as a string's start, so to it
+    // `SELECT 'after'` starts inside a string; the splitter lexes again after the data and
+    // reads a statement. Either one saying "inside" refuses (fail closed).
+    let text = "COPY t FROM stdin;\nO'Brien\t1\n\\.\n«SELECT 'after';»\n";
+    for (_, runnable, reasons) in cut(text, DialectId::Postgres, ClientFlavor::Psql) {
+        assert!(runnable.is_empty(), "{runnable:?}");
+        assert!(!reasons.is_empty());
+    }
+    // Without such a quote the two agree, and the statement after the data is certain.
+    let text = "COPY t FROM stdin;\nBrien\t1\n\\.\n«SELECT 'after';»\n";
+    for (_, runnable, reasons) in cut(text, DialectId::Postgres, ClientFlavor::Psql) {
+        assert_eq!(runnable, ["SELECT 'after'"]);
+        assert!(reasons.is_empty());
+    }
+    // Where only the second lexing sees the token: inside a word after the data.
+    let text = "COPY t FROM stdin;\nBrien\t1\n\\.\nSEL«ECT 'after';»\n";
+    for (_, runnable, _) in cut(text, DialectId::Postgres, ClientFlavor::Psql) {
+        assert!(runnable.is_empty(), "{runnable:?}");
+    }
+}
+
+// --- Task 13 review round 2 ---------------------------------------------------------------
+
+// Re-review I1: the COPY statement is not always the item just before its rows.
+#[test]
+fn copy_rows_are_data_when_another_item_shares_the_copy_line() {
+    for text in [
+        "COPY t FROM STDIN; SELECT 1;«\nDROP TABLE x;»\nDELETE FROM y;\n\\.\n",
+        "COPY t FROM STDIN; SELECT «1;\nDROP TABLE x;»\nDELETE FROM y;\n\\.\n",
+        "COPY t FROM STDIN; /* c */ ;«\nDROP TABLE x;»\nDELETE FROM y;\n\\.\n",
+        "COPY t FROM STDIN; SELECT 1 «-- c\nDROP TABLE x»;\n\\.\n",
+        "COPY t FROM STDIN; ;«\nDROP TABLE x;\n»",
+        "COPY t FROM STDIN; SELECT 1;\n«DROP TABLE x;\n»\\.\n",
+        "COPY t FROM STDIN; «SELECT 1;\nDROP TABLE x;\n\\.\nSELECT 9;»",
+    ] {
+        let (sql, r) = marked(text);
+        let snap = doc_in(&sql, DialectId::Postgres, ClientFlavor::Psql);
+        assert!(!snap.selection_cuts(r).is_empty(), "{text:?}");
+        for (all, runnable, reasons) in cut(text, DialectId::Postgres, ClientFlavor::Psql) {
+            assert!(
+                !runnable
+                    .iter()
+                    .any(|u| u.contains("DROP") || u.contains("DELETE") || u == "1"),
+                "{text:?}: {runnable:?} of {all:?}"
+            );
+            assert!(!reasons.is_empty(), "{text:?}");
+        }
+    }
+    // After the data the split goes on from the document's state.
+    let (_, runnable, _) = &cut(
+        "COPY t FROM STDIN; «SELECT 1;\nDROP TABLE x;\n\\.\nSELECT 9;»",
+        DialectId::Postgres,
+        ClientFlavor::Psql,
+    )[0];
+    assert_eq!(runnable, &["SELECT 9"]);
+    // A selection that holds the COPY from its first byte reads the same data.
+    let whole = cut(
+        "«COPY t FROM STDIN; SELECT 1;\nDROP TABLE x;\n\\.\nSELECT 9;»",
+        DialectId::Postgres,
+        ClientFlavor::Psql,
+    );
+    assert!(
+        !whole[0].1.iter().any(|u| u.contains("DROP")),
+        "{:?}",
+        whole[0]
+    );
+    assert!(whole[0].1.contains(&"SELECT 9".to_string()));
+}
+
+// Re-review M3: between an executable comment's lexer end and the end the server may read.
+#[test]
+fn an_edge_inside_an_ambiguous_comment_end_is_a_cut() {
+    use sql_split::AmbiguityReason::AmbiguousCommentEnd;
+    for text in [
+        "SELECT 1 /*! , \"*/« DROP TABLE t;» -- \" */ ;",
+        "SELECT /*+ \"*/« DROP TABLE u;» -- \" */ 2;",
+        "«SELECT 1 /*! , \"*/ DROP» TABLE t; -- \" */ ;",
+    ] {
+        let (sql, r) = marked(text);
+        let snap = doc_in(&sql, DialectId::MySql, ClientFlavor::MySqlCli);
+        let cuts = snap.selection_cuts(r);
+        assert!(
+            cuts.iter().any(|c| c.reason == AmbiguousCommentEnd),
+            "{text:?}: {cuts:?}"
+        );
+        for (all, runnable, _) in cut(text, DialectId::MySql, ClientFlavor::MySqlCli) {
+            assert!(runnable.is_empty(), "{text:?}: {runnable:?} of {all:?}");
+        }
+    }
+}
+
+// Re-review M4: the public entry points take any offsets.
+#[test]
+fn selection_offsets_inside_a_character_are_moved_back_not_panicked_on() {
+    let sql = "SELECT 1; -- é x\nSELECT 'é'; /* é */ SELECT 2;";
+    let snap = doc_in(sql, DialectId::Postgres, ClientFlavor::Psql);
+    let len = u32::try_from(sql.len()).unwrap();
+    for a in 0..=len + 2 {
+        let state = snap.split_start_at(at(a));
+        if !sql.is_char_boundary(a.min(len) as usize) {
+            assert_eq!(state, snap.split_start_at(at(a - 1)), "{a}");
+        }
+        for b in a..=len + 2 {
+            let r = TextRange::new(at(a), at(b));
+            let cuts = snap.selection_cuts(r);
+            let trimmed = snap.without_comment_parts(r);
+            assert!(
+                sql.get(usize::from(trimmed.start())..usize::from(trimmed.end()))
+                    .is_some()
+            );
+            for c in cuts {
+                assert!(
+                    sql.get(usize::from(c.at.start())..usize::from(c.at.end()))
+                        .is_some()
+                );
+            }
+        }
+    }
+    // The reviewer's case: a start inside `é` in a `--` comment.
+    let mid = u32::try_from(sql.find('é').unwrap()).unwrap() + 1;
+    assert_eq!(
+        snap.selection_cuts(TextRange::new(at(mid), at(mid + 3))),
+        snap.selection_cuts(TextRange::new(at(mid - 1), at(mid + 3)))
+    );
+    // The same after a client command, where the second lexing is asked.
+    let sql = "\\set x 1\nSELECT 1; -- é x\nSELECT 'é';";
+    let snap = doc_in(sql, DialectId::Postgres, ClientFlavor::Psql);
+    let len = u32::try_from(sql.len()).unwrap();
+    for a in 0..=len {
+        let _ = snap.split_start_at(at(a));
+        let _ = snap.selection_cuts(TextRange::new(at(a), at(len)));
+        let _ = snap.selection_cuts(TextRange::new(at(0), at(a)));
+    }
+}
+
+// Re-review I2: after a restart the splitter's lexing is picked up at a checkpoint, and the
+// answer is the one a lex from the restart gives.
+#[test]
+fn a_split_start_far_after_a_client_command_reads_the_same_state() {
+    let body = "SELECT 'a;b', $q$ x; y $q$, 1 /* c */ FROM t -- d\n;\n".repeat(400);
+    let sql = format!("\\set x 1\n{body}");
+    let plain = doc_in(&body, DialectId::Postgres, ClientFlavor::Psql);
+    let snap = doc_in(&sql, DialectId::Postgres, ClientFlavor::Psql);
+    let shift = u32::try_from(sql.len() - body.len()).unwrap();
+    let len = u32::try_from(body.len()).unwrap();
+    // Every offset near the text's end, and a spread over the whole text.
+    let offsets = (len - 400..=len).chain((0..len).step_by(97));
+    for o in offsets {
+        if !body.is_char_boundary(o as usize) {
+            continue;
+        }
+        assert_eq!(
+            snap.split_start_at(at(o + shift)).lex,
+            plain.split_start_at(at(o)).lex,
+            "offset {o}"
+        );
+        let r = TextRange::new(at(o), at(len));
+        let moved = TextRange::new(at(o + shift), at(len + shift));
+        let cuts: Vec<_> = snap
+            .selection_cuts(moved)
+            .into_iter()
+            .map(|c| (c.at - at(shift), c.reason))
+            .collect();
+        let want: Vec<_> = plain
+            .selection_cuts(r)
+            .into_iter()
+            .map(|c| (c.at, c.reason))
+            .collect();
+        // What is cut without the command is cut after it; and between two tokens nothing
+        // is. (Inside a plain comment the two differ on purpose: after a restart a comment
+        // of the document's one lexing is not trusted, so its edge is a cut.)
+        if !want.is_empty() {
+            assert!(!cuts.is_empty(), "offset {o}: {want:?}");
+        }
+        let l = plain.lexed();
+        let between = l
+            .token_at(at(o))
+            .is_none_or(|i| l.range(i).start() == at(o));
+        if between {
+            assert!(cuts.is_empty(), "offset {o}: {cuts:?}");
+        }
+    }
 }

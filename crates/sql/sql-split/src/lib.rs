@@ -15,8 +15,8 @@
 //! - [`StmtKey`]: XXH3-128 of a statement's dialect, modes, delimiter and text.
 //! - [`head::cursor_eligible`]: whether a unit may stay suspended as a console cursor.
 //!
-//! Task 1b stub (fail closed) still here: `exec_range::resolve` answers `NothingToRun`
-//! (Task 13).
+//! - [`exec_range::resolve`]: what Run at a caret or selection runs, for the preview and for
+//!   execution, with the D-011 policies and the chooser's candidates.
 
 pub mod client;
 pub mod document;

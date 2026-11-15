@@ -117,6 +117,10 @@ pub enum AmbiguityReason {
     /// A client command inside the statement or ending it that Hacivat cannot run as written
     /// (psql `\echo` between its lines, `\;`, `\gset`, mysql `\c`).
     ClientCommand,
+    /// Several carets or selections resolve to units that overlap without being the same
+    /// range (a selection inside the statement another caret is in): running both would run
+    /// part of a statement twice. `at` is the shared range.
+    OverlappingUnits,
 }
 
 /// A boundary execution mode will not cross: `at` overlaps the strict range of every statement

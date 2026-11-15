@@ -9,11 +9,27 @@
 use proptest::prelude::*;
 use sql_dialect::{ClientFlavor, DialectCtx, DialectId, lex_profile};
 use sql_lexer::{LexState, TokenFlags, TokenKind, lex};
+use sql_split::DocSnapshot;
 use sql_split::splitter::{comment_refusal_end_at, comment_server_end, split_chunked};
 use sql_split::{Confidence, Item, Split, SplitMode, SplitStart, SqlDocument, split_from};
 use sql_text::{TextRange, TextSize};
 
 const FRAGMENTS: &[&str] = &[
+    // Review round 2: a `COPY` whose line holds another statement or an empty `;`.
+    "\nCOPY t FROM STDIN; SELECT 1;\n",
+    "COPY t FROM STDIN; ;\n",
+    // Review round 1: an escape cut in two, and a quoted `*/` inside each comment the server
+    // reads as code.
+    "E'a\\'",
+    "'a\\'",
+    "E'a\\'; x; --'",
+    "'a\\'; x; -- '",
+    "\"a\\\"; x; -- \"",
+    "/*! , \"*/ x; -- \" */",
+    "/*+ \"*/ x; -- \" */",
+    "/*M! , '*/' x; */",
+    "U&'a\\'",
+    "-- don't\n",
     " ",
     " ",
     "\n",
@@ -368,8 +384,170 @@ fn config() -> ProptestConfig {
     }
 }
 
+/// The document-level check (Task 13 review round 1): a certain unit of the selection `r` is
+/// what the *document* shows there, whatever the unit reads as alone.
+/// - It never overlaps the rows of a `COPY … FROM STDIN`: they are data.
+/// - It never overlaps a document token that an edge of the selection is strictly inside
+///   (a string or name entered after its first byte, openers and prefixes included; a word
+///   or number cut in two; an executable comment or hint). White space and plain comments
+///   are not tokens a selection cuts.
+/// - It starts and ends on a token boundary of the whole-document lexing, or lies wholly
+///   inside one `--` comment (a statement kept in a comment). A unit sent as written (`verbatim`) may also
+///   have an edge inside a plain comment.
+///
+/// The whole-document lexing is the document's truth up to its first client command or
+/// `COPY` data. After one the splitter lexes again, and the one lexing can read what follows
+/// differently (a quote in `COPY` data opens a "string" there); the token checks stop at that
+/// place, the `COPY` check never does.
+fn in_step(
+    snap: &DocSnapshot,
+    r: TextRange,
+    unit: TextRange,
+    verbatim: bool,
+) -> Result<(), String> {
+    let (text, lexed) = (snap.text(), snap.lexed());
+    let overlap = |a: TextRange, b: TextRange| a.start() < b.end() && b.start() < a.end();
+    // Where the splitter first lexes again.
+    let mut relexed = snap
+        .execution_split()
+        .client
+        .iter()
+        .map(|c| c.range.start())
+        .min()
+        .unwrap_or(TextSize::from(u32::MAX));
+    for st in snap.execution_split().statements() {
+        if let Some(d) = st.copy_data {
+            relexed = relexed.min(st.strict.start());
+            if overlap(d.rows, unit) {
+                return Err(format!(
+                    "unit {:?} overlaps COPY rows {:?}",
+                    &text[unit], d.rows
+                ));
+            }
+        }
+    }
+    let plain = |k: TokenKind| {
+        matches!(
+            k,
+            TokenKind::Whitespace
+                | TokenKind::Newline
+                | TokenKind::LineComment
+                | TokenKind::BlockComment
+        )
+    };
+    for edge in [r.start(), r.end()] {
+        if edge > relexed {
+            continue;
+        }
+        if let Some(i) = lexed.token_at(edge) {
+            let t = lexed.range(i);
+            if t.start() < edge && edge < t.end() && !plain(lexed.kind(i)) && overlap(t, unit) {
+                return Err(format!(
+                    "unit {:?} overlaps the {:?} token {:?} the selection cuts",
+                    &text[unit],
+                    lexed.kind(i),
+                    &text[t]
+                ));
+            }
+        }
+    }
+    let inside = |pos: TextSize| {
+        lexed.token_at(pos).filter(|i| {
+            let t = lexed.range(*i);
+            t.start() < pos && pos < t.end()
+        })
+    };
+    for pos in [unit.start(), unit.end()] {
+        if pos > relexed {
+            continue;
+        }
+        let Some(i) = inside(pos) else { continue };
+        let (kind, t) = (lexed.kind(i), lexed.range(i));
+        let kept_in_comment = kind == TokenKind::LineComment && t.contains_range(unit);
+        let written = verbatim && matches!(kind, TokenKind::LineComment | TokenKind::BlockComment);
+        if !kept_in_comment && !written {
+            return Err(format!(
+                "unit {:?} has an edge inside the {kind:?} token {:?}",
+                &text[unit], &text[t]
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A selection of the text, split on its own from the state at its start (found by Task 13):
+/// it never panics, and every certain statement it returns, split again alone from a *clean*
+/// lexer state as the server reads a sent unit, is exactly itself. So a selection that
+/// starts inside a string, a quoted name, a dollar-quoted body, `COPY` data or an executable
+/// comment never returns that token's tail as a certain statement. (A selection is its own
+/// script and may cut a `DELIMITER` line away: the delimiter a unit is read under is the
+/// document's at the unit, the one at the selection's start, or none.)
+fn selection_units_read_alone(
+    s: &str,
+    id: DialectId,
+    flavor: ClientFlavor,
+    a: usize,
+    b: usize,
+) -> Result<(), String> {
+    let at = |seed: usize| {
+        let mut i = seed % (s.len() + 1);
+        while !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        TextSize::from(u32::try_from(i).unwrap())
+    };
+    let (a, b) = (at(a), at(b));
+    let r = TextRange::new(a.min(b), a.max(b));
+    let ctx = DialectCtx::new(id, None);
+    let snap = SqlDocument::new(s.to_string(), ctx, flavor).snapshot();
+    let carried = snap.split_start_at(r.start());
+    for mode in [SplitMode::Execution, SplitMode::Editor] {
+        let split = snap.split_selection(r, mode);
+        for st in split.runnable() {
+            if !r.contains_range(st.strict) {
+                return Err(format!("{:?} is outside the selection {r:?}", st.strict));
+            }
+            in_step(&snap, r, st.strict, false).map_err(|e| format!("{mode:?} {r:?}: {e}"))?;
+            let piece = &s[st.strict];
+            let whole = TextRange::up_to(TextSize::from(u32::try_from(piece.len()).unwrap()));
+            let delimiters = [
+                snap.split_start_at(st.strict.start()).delimiter,
+                carried.delimiter.clone(),
+                None,
+            ];
+            let itself = delimiters.into_iter().any(|delimiter| {
+                let clean = SplitStart {
+                    lex: LexState::Initial,
+                    delimiter,
+                };
+                let alone = split_from(piece, &ctx, flavor, SplitMode::Execution, &clean);
+                let items: Vec<TextRange> = alone.statements().map(|x| x.strict).collect();
+                items == [whole] && alone.runnable().count() == 1
+            });
+            if !itself {
+                return Err(format!(
+                    "{mode:?}: certain {piece:?} of the selection {r:?} (start {:?}) is not itself alone",
+                    carried.lex
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(config())]
+
+    #[test]
+    fn a_selection_never_returns_a_certain_unit_the_server_reads_otherwise(
+        s in any_sql(),
+        (id, flavor) in dialects(),
+        a in 0usize..100_000,
+        b in 0usize..100_000,
+    ) {
+        let r = selection_units_read_alone(&s, id, flavor, a, b);
+        prop_assert!(r.is_ok(), "{:?} in {:?} {:?}: {}", s, id, flavor, r.unwrap_err());
+    }
 
     #[test]
     fn items_never_overlap_and_cover_every_significant_token(s in any_sql(), (id, flavor) in dialects()) {
