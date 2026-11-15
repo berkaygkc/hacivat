@@ -13,14 +13,15 @@ mod common;
 use std::sync::Arc;
 
 use common::*;
-use hacivat_driver::fake::FakeDriver;
-use hacivat_driver::{ExecOpts, TxStatus};
+use hacivat_driver::fake::{FakeDriver, FakeExec};
+use hacivat_driver::{ExecOpts, ExecSummary, TxStatus};
 use hacivat_net::TlsMode;
 use hacivat_proto::{Department, ErrClass};
 use hacivat_session::pipeline::Interaction;
 use hacivat_session::profile::Profile;
 use hacivat_session::session::{
     ClientId, ExecOrigin, Request, SessionHandle, SessionKind, SessionSpec, SessionState,
+    TxCommand, TxMode,
 };
 use hacivat_session::{ConnectionEvent, ConnectionManager, LiveState, ManagerConfig};
 use tokio::sync::broadcast::Receiver;
@@ -256,7 +257,14 @@ async fn losing_an_idle_default_without_a_transaction_elsewhere_emits_no_session
         matches!(m.state(profile.id), LiveState::Lost { .. })
     })
     .await;
-    tokio::time::sleep(secs(1)).await;
+    // Fix round 1 (M5): a condition, not a settle sleep, before the negative assertion.
+    until("console 2's close", || {
+        !matches!(
+            console2.state().borrow().state,
+            SessionState::Idle | SessionState::Busy { .. }
+        )
+    })
+    .await;
     let events = drain(&mut ev);
     assert!(
         !events
@@ -264,4 +272,65 @@ async fn losing_an_idle_default_without_a_transaction_elsewhere_emits_no_session
             .any(|e| matches!(e, ConnectionEvent::SessionLost { .. })),
         "{events:?}"
     );
+}
+
+/// Fix round 1, C1: the snapshot's transaction moves only when a request ends. Console 2 runs
+/// a Manual-mode `UPDATE` (the session sends `BEGIN` first, so a transaction is open on the
+/// server) that is still running when the default session is lost: closing it rolls that
+/// transaction back, and the manager says so.
+#[tokio::test(start_paused = true)]
+async fn losing_the_default_while_another_session_may_be_opening_a_transaction_is_told() {
+    let slow_update = FakeExec {
+        prefix: "UPDATE",
+        result: Ok(ExecSummary::default()),
+        delay: secs(600),
+        tx_after: None,
+        panics: false,
+    };
+    let (m, f) = manager_with(
+        server()
+            .exec(vec![slow_update])
+            .pings(vec![Err(io_reset())]),
+        ManagerConfig::default(),
+    );
+    let profile = Arc::new(pg_profile(TlsMode::Disable));
+    let mut ev = m.events();
+    connect(&m, &profile).await;
+    let console2 = own_session(&m, &profile, 2).await;
+    let manual = console2
+        .submit(Request::Tx(TxCommand::SetMode(TxMode::Manual)))
+        .reply
+        .await
+        .unwrap();
+    assert!(manual.is_ok(), "{manual:?}");
+    let update = console2.submit(user_exec("UPDATE t SET a = 1"));
+    until("the UPDATE to start inside its BEGIN", || {
+        f.executed().iter().any(|s| s.starts_with("UPDATE"))
+    })
+    .await;
+    assert!(
+        matches!(console2.state().borrow().state, SessionState::Busy { .. }),
+        "{:?}",
+        console2.state().borrow().state
+    );
+    assert_eq!(
+        tx_of(&console2),
+        TxStatus::Idle,
+        "the snapshot does not know the transaction yet"
+    );
+    until("the loss", || {
+        matches!(m.state(profile.id), LiveState::Lost { .. })
+    })
+    .await;
+    until("the SessionLost event", || {
+        drain(&mut ev).into_iter().any(|e| {
+            matches!(
+                e,
+                ConnectionEvent::SessionLost { profile: p, lost } if p == profile.id && lost.open_tx
+            )
+        })
+    })
+    .await;
+    let reply = update.reply.await.unwrap();
+    assert!(reply.is_err(), "the UPDATE never completed: {reply:?}");
 }

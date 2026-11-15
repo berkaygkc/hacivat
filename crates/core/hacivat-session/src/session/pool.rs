@@ -728,11 +728,17 @@ impl SessionManager {
         self.lock().idle.values().map(Vec::len).sum()
     }
 
-    // ## m3a-f1-followups (named exception, follow-up F1-b)
-    /// Whether a session other than `default` holds a user transaction now (its snapshot:
-    /// `InTx` or `Failed`, not Hacivat's own) on a usable connection: what closing them all
-    /// would roll back.
+    // ## m3a-f1-followups (named exception, follow-up F1-b; fix round 1, C1)
+    /// Whether a session other than `default` holds, or may be opening, a user transaction:
+    /// what closing them all may roll back. Its snapshot says `InTx` or `Failed` (not
+    /// Hacivat's own) on a usable connection, or it holds the profile in `ProfileActivity`,
+    /// which covers a user request still running: the snapshot's `tx` moves only when a
+    /// request ends, while a running `BEGIN; UPDATE …` or a Manual-mode statement has already
+    /// opened one on the server (C1's `may_open_tx` rule).
     pub(crate) fn others_hold_user_tx(&self, default: SessionId) -> bool {
+        if self.activity.others(default).0 {
+            return true;
+        }
         self.lock().sessions.iter().any(|(id, t)| {
             let s = t.state.borrow();
             *id != default && usable(&s.state) && s.tx.user_open()

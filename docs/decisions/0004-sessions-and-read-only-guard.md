@@ -1932,9 +1932,13 @@ Console 2 held in its own session, with no prompt (only "idle disconnected").
 - *Choice, loss.* When the default session is genuinely lost (a failed keep-alive without
   recovery, a recovery that gives up, a loss inside its own transaction) or ends otherwise
   without the user closing it, `end_live_with` still closes the other sessions, but never
-  silently: if one of them holds a user transaction, the manager emits one
-  `ConnectionEvent::SessionLost` with `open_tx` (merged with what the default itself lost, C1),
-  which the app already shows as "The session on … was lost … Your open transaction ended, and
+  silently: if one of them holds or may be opening a user transaction, the manager emits one
+  `ConnectionEvent::SessionLost` with `open_tx` (merged with what the default itself lost, C1).
+  "May be opening" (F1 fix round 1, C1): a session whose snapshot says `InTx`/`Failed`, or one
+  that holds the profile in `ProfileActivity` (a user request still running). The snapshot's
+  `tx` moves only when a request ends, while a running `BEGIN; UPDATE …` or a Manual-mode
+  statement has already opened a transaction on the server; this is C1's `may_open_tx` rule.
+  The app already shows the event as "The session on … was lost … Your open transaction ended, and
   the server rolled back its uncommitted changes." A deliberate disconnect (`close`) is not
   this path: the app asks first (Task 33's `confirm_release`).
 - *Rejected: keep the healthy sessions when the default is lost.* The profile is `Lost` and the
@@ -1952,7 +1956,10 @@ Console 2 held in its own session, with no prompt (only "idle disconnected").
   `COMMIT` the threshold counts from the commit), `activity_on_another_session_keeps_the_profile_connected`,
   `losing_the_default_never_rolls_back_another_sessions_transaction_silently` (one
   `SessionLost { open_tx }`, Console 2 closed with one `ROLLBACK`),
-  `losing_an_idle_default_without_a_transaction_elsewhere_emits_no_session_lost`; unit tests in
+  `losing_an_idle_default_without_a_transaction_elsewhere_emits_no_session_lost`,
+  `losing_the_default_while_another_session_may_be_opening_a_transaction_is_told` (fix round
+  1: a Manual-mode `UPDATE` still running on Console 2, its snapshot still `Idle`; RED without
+  the `ProfileActivity` check: no `SessionLost`); unit tests in
   `liveness.rs` (`a_held_profile_holds_the_idle_disconnect_off`: no disconnect in 900 s, the 15
   keep-alive pings still sent, a disconnect exactly one threshold after the hold ends;
   `after_a_jump_only_a_current_hold_keeps_the_profile`). RED: the three manager tests fail on

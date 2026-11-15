@@ -531,7 +531,8 @@ impl Shared {
     // ## m3a-f1-followups (named exception, follow-up F1-b; ADR 0004 `m3a-f1`)
     /// [`end_live`](Self::end_live) for a connection the user did not close (a loss, a failed
     /// recovery, an idle disconnect): closing the profile's other sessions rolls back any user
-    /// transaction one of them holds, so that is never silent. `lost` (what the default session
+    /// transaction one of them holds or may be opening (a user request still running; fix
+    /// round 1, C1), so that is never silent. `lost` (what the default session
     /// itself lost, C1) gains `open_tx` when another session holds one, and is emitted as one
     /// `SessionLost`, which the app shows as the "transaction rolled back" toast.
     fn end_live_with(

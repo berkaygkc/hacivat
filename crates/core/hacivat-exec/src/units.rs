@@ -259,6 +259,9 @@ fn refusal(s: &UnitSpan) -> Option<RefuseReason> {
     match s.kind {
         UnitKind::Verbatim => Some(RefuseReason::RunAsOne),
         UnitKind::CopyIn { .. } | UnitKind::CopyStream => Some(RefuseReason::CopyStream),
+        // ## m3a-f1-followups (fix round 1, M2): no production `SubqueryOracle` exists and nothing
+        // builds `Batch` today. A future oracle's range carries no splitter head, so (M3b) it
+        // must pass `mentions_copy`, or be split again for its head, before it becomes a unit.
         UnitKind::Statement | UnitKind::Subquery | UnitKind::Batch => None,
     }
 }
