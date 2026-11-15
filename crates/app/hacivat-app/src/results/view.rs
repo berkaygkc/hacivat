@@ -386,8 +386,11 @@ impl ResultsHost {
                     (LogMsg::NotStarted(_), None) => None,
                     _ => return false,
                 };
+                // ## m3a-t30 fix round 2 (R1-1): only a newer run (`RunId` grows): a late line
+                // of an older run (the old cursor's close, read after a re-run took the tab)
+                // never hides the new run's result.
                 run.is_none_or(|run| {
-                    run != active && !results.tabs().iter().any(|t| t.unit().run == run)
+                    run > active && !results.tabs().iter().any(|t| t.unit().run == run)
                 })
             })
         });

@@ -1104,6 +1104,37 @@ fn a_cancelled_result_without_rows_is_not_called_empty(cx: &mut TestAppContext) 
     assert!(!drawn.iter().any(|s| s == "No rows"), "{drawn:?}");
 }
 
+/// R1-1: a late line of an older run (the old cursor's close, read after the re-run took the
+/// tab) never hides the new run's result.
+#[gpui::test]
+fn a_late_line_of_an_older_run_keeps_the_new_result(cx: &mut TestAppContext) {
+    // ## m3a-t30 fix round 2 (R1-1): re-running a SELECT closes its old cursor first; that
+    // close line names the older run and may be read after the tab moved to the new run.
+    let t = tile(cx, "en", None);
+    let run2 = |ordinal: u32, source: Arc<dyn ResultSource>| ResultTab {
+        unit: UnitId {
+            run: RunId(2),
+            ordinal,
+        },
+        ..tab(ordinal, source)
+    };
+    t.apply(&[run2(1, source(store_values(&[1, 2]), Arc::default()))]);
+    t.log.append(
+        LogMsg::CursorClosed {
+            rows: 2,
+            reason: CloseReason::SessionNeeded,
+            rolled_back: true,
+            idle_ms: 0,
+        },
+        None,
+        Some(unit(1)),
+    );
+    t.redraw();
+    let active = t.vcx.read(|cx| t.results.read(cx).active());
+    assert_eq!(active, ActiveResult::Tab(0));
+    assert!(t.text("strip-sentence").is_some());
+}
+
 /// I5 (NOTES surface 9): a run that ends in an error or update counts only shows Output; a
 /// line of the run whose result is shown leaves the result in view.
 #[gpui::test]
