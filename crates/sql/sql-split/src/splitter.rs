@@ -1005,7 +1005,13 @@ impl<'a> Walker<'a, '_> {
         self.out.restarts.push((size(data_end), LexState::Initial));
         let owner = match self.out.items.get(item) {
             Some(RawItem::Stmt(s)) => s.strict.start(),
-            _ => rows.start(),
+            // Unreachable (the item is the finished COPY statement). Were it reached, the
+            // owner is the text's start, so only a selection from there reads these rows
+            // as data: every other overlap is refused (fail closed).
+            _ => {
+                debug_assert!(false, "a COPY's data without its statement");
+                TextSize::from(0)
+            }
         };
         self.out.copies.push((owner, CopyData { rows, end }));
         if let Some(RawItem::Stmt(s)) = self.out.items.get_mut(item) {
