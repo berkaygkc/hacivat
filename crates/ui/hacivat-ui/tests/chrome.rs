@@ -352,7 +352,8 @@ fn a_menu_at_its_max_width_ellipsizes_the_hint_not_the_label(cx: &mut TestAppCon
         });
     });
     let label = |s: &'static str| -> hacivat_ui::text::TextFn { Rc::new(move |_| s.into()) };
-    let long = "SELECT o.id, o.total, o.status FROM orders o JOIN customers c ON c.id = o.customer_id";
+    let long =
+        "SELECT o.id, o.total, o.status FROM orders o JOIN customers c ON c.id = o.customer_id";
     let (_host, vcx) = cx.add_window_view(|window, cx| {
         let menu = PopupMenu::new(
             point(px(10.), px(10.)),
@@ -373,7 +374,10 @@ fn a_menu_at_its_max_width_ellipsizes_the_hint_not_the_label(cx: &mut TestAppCon
     vcx.update(|window, _| window.refresh());
     vcx.run_until_parked();
     let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
-    let hint = frame.iter().find(|r| r.text.as_ref() == long).expect("the hint");
+    let hint = frame
+        .iter()
+        .find(|r| r.text.as_ref() == long)
+        .expect("the hint");
     assert!(hint.truncated && !hint.clipped, "{hint:?}");
     let row = frame
         .iter()
