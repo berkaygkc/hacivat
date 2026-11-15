@@ -12,8 +12,10 @@
 //!   dropped at the end (Q7).
 //! - Waits are on conditions bounded by real time. The cursor test waits the real 20 s bound
 //!   (the subject of the test); nothing asserts a wall-clock budget.
-//! - One difference from run B, by design: `COPY` is refused by the typed PostgreSQL driver
-//!   before anything is sent (Task 12), so P14 may also end as `protocol`.
+//! - One difference from run B, by design and pinned: `COPY` is refused by the typed
+//!   PostgreSQL driver before anything is sent (Task 12), so P14 ends as `protocol` (run B:
+//!   `25006`/`42501` from the server).
+//! - Every row's outcome is written to the Docker artifact `t22-run-bypass.tsv`.
 
 #![allow(
     clippy::result_large_err,
@@ -74,11 +76,9 @@ const PG_SERVER_BLOCKED: &[Row] = &[
         "DO $$ BEGIN INSERT INTO hv_t22 VALUES (9); END $$",
         &[PG_RO],
     ),
-    (
-        "P14",
-        "COPY hv_t22 FROM '/etc/hostname'",
-        &[PG_RO, PG_PRIV, PROTOCOL],
-    ),
+    // Pinned difference from run B (`[PG_RO, PG_PRIV]` there): the typed PostgreSQL driver
+    // refuses `COPY` before anything is sent (Task 12), so `Run` never reaches the server.
+    ("P14", "COPY hv_t22 FROM '/etc/hostname'", &[PROTOCOL]),
     (
         "P26",
         "CREATE TEMP TABLE hv_t22_tmp (a int)",
@@ -287,6 +287,7 @@ async fn judge_rows<F, Fut>(
     rows: &[Row],
     mut snapshot: F,
     failures: &mut Vec<String>,
+    record: &mut String,
 ) where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = String>,
@@ -296,7 +297,7 @@ async fn judge_rows<F, Fut>(
         let reply = ro.try_row(sql).await;
         let got = outcome(&reply);
         let after = snapshot().await;
-        eprintln!("{} {who} {id} {got}\t{sql}", t.id);
+        record.push_str(&format!("{}\t{who}\t{id}\t{got}\t{sql}\n", t.id));
         if after != baseline {
             failures.push(format!(
                 "{} {who} {id} `{sql}`: {got}, and the side channel changed: {baseline} → \
@@ -390,6 +391,7 @@ async fn server_blocked_bypass_rows_are_blocked_through_run() {
         return;
     }
     let mut failures = Vec::new();
+    let mut record = String::new();
     for t in lines_of(DbmsKind::Postgres) {
         pg_fixture(&t).await;
         let a = tokio::sync::Mutex::new(admin_on(&t, PG_DB).await);
@@ -402,6 +404,7 @@ async fn server_blocked_bypass_rows_are_blocked_through_run() {
                 PG_SERVER_BLOCKED,
                 || async { pg_snapshot(&mut *a.lock().await).await },
                 &mut failures,
+                &mut record,
             )
             .await;
             ro.close().await;
@@ -421,6 +424,7 @@ async fn server_blocked_bypass_rows_are_blocked_through_run() {
                 MYSQL_SERVER_BLOCKED,
                 || async { mysql_snapshot(&mut *a.lock().await, &t).await },
                 &mut failures,
+                &mut record,
             )
             .await;
             ro.close().await;
@@ -428,6 +432,13 @@ async fn server_blocked_bypass_rows_are_blocked_through_run() {
         a.into_inner().close().await;
         mysql_drop_fixture(&t).await;
     }
+    // Every row's outcome, as run B records its own (`t23-bypass-<target>.tsv`).
+    let path = hacivat_testkit::artifact("t22-run-bypass.tsv");
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).expect("the artifact directory");
+    }
+    std::fs::write(&path, &record).expect("the record is written");
+    assert!(!record.is_empty(), "no line of the active set ran a row");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

@@ -133,7 +133,11 @@ fn sslmode_and_startup_options() {
     assert_eq!(ssl_mode(TlsMode::Disable, true), SslMode::Disable);
     let c = config_for(&req_ro("hv")).unwrap();
     assert_eq!(c.get_application_name(), Some("hv"));
-    assert_eq!(c.get_options(), Some("-c default_transaction_read_only=on"));
+    // ## m3a-t22-typed-readonly: the guard's idle-transaction bound rides along (R-M3-17).
+    assert_eq!(
+        c.get_options(),
+        Some("-c default_transaction_read_only=on -c idle_in_transaction_session_timeout=30s")
+    );
 }
 
 #[test]
@@ -162,7 +166,9 @@ fn extras_join_the_options_and_read_only_comes_last() {
     r.options = vec![
         (
             "options".into(),
-            "-c search_path=app -c default_transaction_read_only=off".into(),
+            "-c search_path=app -c default_transaction_read_only=off \
+             -c idle_in_transaction_session_timeout=0"
+                .into(),
         ),
         ("extra_float_digits".into(), "3".into()),
         // libpq client-side keys are the pipeline's, never startup options.
@@ -174,8 +180,9 @@ fn extras_join_the_options_and_read_only_comes_last() {
     assert_eq!(
         c.get_options(),
         Some(
-            "-c search_path=app -c default_transaction_read_only=off -c extra_float_digits=3 \
-             -c default_transaction_read_only=on"
+            "-c search_path=app -c default_transaction_read_only=off \
+             -c idle_in_transaction_session_timeout=0 -c extra_float_digits=3 \
+             -c default_transaction_read_only=on -c idle_in_transaction_session_timeout=30s"
         )
     );
     assert_eq!(c.get_application_name(), Some("hv"));
@@ -187,13 +194,19 @@ fn a_dangling_backslash_cannot_swallow_the_read_only_option() {
     r.options = vec![("options".into(), "-c search_path=app\\".into())];
     assert_eq!(
         config_for(&r).unwrap().get_options(),
-        Some("-c search_path=app -c default_transaction_read_only=on")
+        Some(
+            "-c search_path=app -c default_transaction_read_only=on \
+             -c idle_in_transaction_session_timeout=30s"
+        )
     );
     let mut r = req_ro("hv");
     r.options = vec![("options".into(), "-c search_path=a\\\\".into())];
     assert_eq!(
         config_for(&r).unwrap().get_options(),
-        Some("-c search_path=a\\\\ -c default_transaction_read_only=on")
+        Some(
+            "-c search_path=a\\\\ -c default_transaction_read_only=on \
+             -c idle_in_transaction_session_timeout=30s"
+        )
     );
 }
 
@@ -369,7 +382,7 @@ async fn auto_on_a_private_host_continues_in_plaintext_and_keeps_server_errors()
     assert_eq!(get("application_name").as_deref(), Some("hv-app"));
     assert_eq!(
         get("options").as_deref(),
-        Some("-c default_transaction_read_only=on")
+        Some("-c default_transaction_read_only=on -c idle_in_transaction_session_timeout=30s")
     );
     assert_eq!(get("user").as_deref(), Some("hv_test"));
     assert_eq!(get("database").as_deref(), Some("hv_test"));

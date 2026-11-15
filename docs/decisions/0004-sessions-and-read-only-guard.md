@@ -1825,10 +1825,25 @@ began, an unreadable canary, a failed reset or replay, and a transaction still o
 discard it too. An engine without a guard plan runs nothing.
 
 **The idle bound.** A read-only PostgreSQL cursor idles at most 20 s (`READ_ONLY_PG_IDLE`,
-Task 18); the guard's session setup sets `idle_in_transaction_session_timeout = '30s'`, so the
-release and its post steps run before the server would end the connection. Docker
+Task 18); the server ends a transaction idle for 30 s (`idle_in_transaction_session_timeout`),
+so the release and its post steps run before the server would end the connection. Docker
 `ro_cursor_is_released_before_the_server_idle_kill` waits the real bound on pg17: the cursor
 ends `IdleTimeout`, the same backend survives and runs the next unit.
+
+**Docker finding, fixed (`hacivat-driver-pg` `connect.rs`).** The guard plan's session setup
+sets the 30 s timeout, but only the replay after a guarded request's reset ever ran it: the
+role probe's reset at connect comes first, so a session's first request (a cursor among them)
+ran with the server's default (`0`, no bound). A read-only PostgreSQL connect now sends
+`-c idle_in_transaction_session_timeout=30s` as a startup option after
+`default_transaction_read_only=on` (after any user `options`, so it wins). As a startup value it
+holds from the first statement and survives every `RESET ALL`. The test reads it through `Run`
+on the session's first request.
+
+**Pinned difference from run B.** Docker `server_blocked_bypass_rows_are_blocked_through_run`
+sends run B's server-blocked rows through `Run`. Every row ends as it does there except P14
+(`COPY … FROM` a file): the typed PostgreSQL driver refuses `COPY` before anything is sent
+(Task 12), so it ends `protocol` (run B: the server's `25006`/`42501`). The test pins exactly
+`protocol`. Each outcome is in the Docker artifact `t22-run-bypass.tsv`.
 
 **Call sites (named exceptions in Task 18's files).** `run.rs` passes the replay to
 `guarded_query`; `cursor.rs` `end_hold` takes the stream's `ResultEnd` (`end`) and hands it,
