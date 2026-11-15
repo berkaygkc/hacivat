@@ -366,6 +366,7 @@ async fn sqlite_cantopen_offers_no_database() {
                 detail: None,
                 hint: None,
                 lang_hint: None,
+                position: None,
             }),
         },
     )));

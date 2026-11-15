@@ -520,3 +520,25 @@ async fn a_cursor_command_after_the_session_closed_logs_nothing() {
     assert_eq!(svc.log_ids(), before);
     assert!(!svc.log_ids().contains(&"exec-error"));
 }
+
+// ## m3a-t33-exec-ui (named exception)
+/// "Go to error": the driver's server position (PostgreSQL's `P` field) reaches the error view
+/// when the caller passes none, mapped into the document; a caller's own position wins.
+#[test]
+fn the_server_messages_position_reaches_the_error_view() {
+    use hacivat_exec::error_view;
+    use hacivat_session::session::{ExecError, ExecErrorKind};
+    let unit = "SELECT çx FROM t";
+    let mut server = pg_error("42703", "column \"x\" does not exist")
+        .server
+        .expect("a server message");
+    server.position = Some(9);
+    let e = ExecError {
+        kind: ExecErrorKind::Db,
+        server: Some(server),
+    };
+    let view = error_view(hacivat_proto::DbmsKind::Postgres, &e, unit, 20, None);
+    assert_eq!(view.doc_offset, Some(29));
+    let view = error_view(hacivat_proto::DbmsKind::Postgres, &e, unit, 20, Some(1));
+    assert_eq!(view.doc_offset, Some(20));
+}

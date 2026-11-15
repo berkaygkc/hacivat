@@ -192,6 +192,7 @@ pub(crate) fn readonly_required() -> RawError {
             detail: None,
             hint: None,
             lang_hint: None,
+            position: None,
         }),
     }
 }

@@ -419,6 +419,7 @@ fn the_trail_follows_what_the_handshake_reached() {
             detail: None,
             hint: None,
             lang_hint: None,
+            position: None,
         }),
     };
     let kind = |k| RawError {

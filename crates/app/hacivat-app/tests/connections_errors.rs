@@ -136,6 +136,7 @@ fn fake_always_28p01() -> FakeDriver {
             detail: None,
             hint: None,
             lang_hint: None,
+            position: None,
         }),
     }))
 }
@@ -251,6 +252,7 @@ fn server_message(code: &str, text: &str) -> ServerMessage {
         detail: None,
         hint: None,
         lang_hint: None,
+        position: None,
     }
 }
 
