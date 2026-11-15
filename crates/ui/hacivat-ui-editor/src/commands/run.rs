@@ -77,11 +77,22 @@ fn label(snap: &Snapshot, r: &Range<usize>) -> SharedString {
     }
 }
 
-// ## m3a-t34-status-follows (named exception)
-/// `text` with each character [`shown_as_code_point`] written as `<U+XXXX>`.
+// ## m3a-t34-status-follows (named exception; fix round 1, M4)
+/// `text` as the chooser's labels show it (`sql_split`'s `label_of`): each run of white space
+/// and control characters is one space (none at either end), and each character
+/// [`shown_as_code_point`] is written as `<U+XXXX>`.
 fn visible(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
+    let mut gap = false;
     for c in text.chars() {
+        if c.is_whitespace() || c.is_control() {
+            gap = !out.is_empty();
+            continue;
+        }
+        if gap {
+            out.push(' ');
+            gap = false;
+        }
         if shown_as_code_point(c) {
             out.push_str(&format!("<U+{:04X}>", u32::from(c)));
         } else {
@@ -349,6 +360,20 @@ mod tests {
         let (e, vcx) = open(cx, "SELECT 'ä', \"ß\" FROM t;");
         let snap = vcx.read(|cx| e.read(cx).snapshot());
         assert_eq!(label(&snap, &(0..25)).as_ref(), "SELECT 'ä', \"ß\" FROM t;");
+    }
+
+    // ## m3a-t34-status-follows (fix round 1, M4): runs of white space and control characters
+    // are one space, as in the chooser's labels (`label_of`): a paragraph separator (which ends
+    // every bidi isolate), a line separator, C0 and C1 controls and tabs never reach the
+    // sentence raw.
+    #[test]
+    fn white_space_and_control_runs_are_one_space() {
+        assert_eq!(
+            visible("SELECT\u{2029}'a'\t\t\u{0085} x\u{1b}[31m\u{2028}\u{202E}y\u{7f}"),
+            "SELECT 'a' x [31m <U+202E>y"
+        );
+        assert_eq!(visible("\t SELECT 1 \u{2029}"), "SELECT 1");
+        assert_eq!(visible("a\u{00A0}\u{3000}b"), "a b");
     }
 
     #[test]

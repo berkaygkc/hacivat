@@ -33,15 +33,14 @@ use crate::l10n_global::tr;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use hacivat_driver::TxStatus;
+use hacivat_exec::{TxBadge, console_ux};
 use hacivat_l10n::{Count, ExactDecimal};
-use hacivat_proto::{AccessLabel, ProfileId};
+use hacivat_proto::{AccessLabel, EnvTag, ProfileId};
 use hacivat_results::{CloseReason, ResultId};
-use hacivat_session::session::{
-    Request, SessionHandle, SessionId, SessionSnapshot, SessionState, TxOwner,
-};
+use hacivat_session::session::{Request, SessionHandle, SessionId, SessionSnapshot, SessionState};
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
+use hacivat_ui::panes::TabId;
 use hacivat_ui::popover::Tip;
 use hacivat_ui::statusbar::status_label_in;
 use hacivat_ui::step_trail::run_marker;
@@ -55,6 +54,7 @@ use hacivat_ui_editor::{EditorView, FocusedEditor};
 use crate::console::{ConsoleId, ConsoleState, Consoles};
 use crate::results::context::result_context_of;
 use crate::results::{CompletenessView, ResultContext};
+use crate::shell::workspace::ActiveTab;
 
 /// The access word of a profile without a live connection (`hv-capsule-access-*`).
 fn profile_access(cx: &App, read_only: bool) -> SharedString {
@@ -252,11 +252,13 @@ fn connection_parts(
 // The status bar and the capsule follow the console (DESIGN.md "Status Follows The Tab";
 // design/m3a-query/NOTES.md surface 6).
 //
-// - **Which console.** The console whose editor has the focus (`FocusedEditor`). When the
-//   focus leaves the editor for something that is not another connection (the results, the
-//   status bar), the console the user was last in stays followed, until the explorer's
-//   selection changes: picking a connection there hands the capsule and the bar back to the
-//   M2 rule ([`followed_console`]). Only a bound console is followed.
+// - **Which console** (fix round 1, C1). The focused pane's active tab decides
+//   (`shell::workspace::ActiveTab`, mirrored by the workspace): the console whose editor has
+//   the focus when its tab is the active one, else the active tab's console. A tab switch
+//   moves no focus, so the active tab, not the focus, says which console the user sees.
+//   Picking a connection in the explorer hands the capsule and the bar back to the M2 rule
+//   until that console's tab is shown again or its editor takes the focus
+//   ([`followed_console`]). Only a bound console is followed.
 // - **The bar of a followed console**, left to right: the environment and access of its active
 //   result tab (`ResultContext`, whose access fails closed), else the console's own; the
 //   state, path, latency, encryption and "unsupported" segments; the user's transaction
@@ -270,7 +272,13 @@ fn connection_parts(
 //   with its whole text in the tooltip (the M2b rule for the bar).
 // - **Session state** is mirrored, never read on the paint path: one foreground task per
 //   console session awaits its `watch` (a `tokio::sync` receiver) and repaints only when the
-//   projection the bar shows ([`SessionView`]) changes.
+//   projection the bar shows ([`SessionView`]) changes. The projection is Task 23's
+//   `console_ux` table (fix round 1), with one rule more: a session that ended shows no
+//   transaction and no cursor (I3).
+// - **Access** (fix round 1, I2): the console's own session is authoritative. The bar and the
+//   capsule show the less protective of the session's label and the label they would show
+//   otherwise (the live connection's, or a result tab's recorded one): they never claim
+//   protection the console's session does not enforce.
 
 /// The transaction the status bar shows: only the user's (`TxOwner::User`, R-M3-27). A
 /// transaction Hacivat holds around a PostgreSQL cursor (`TxOwner::Cursor`) or the read-only
@@ -299,27 +307,59 @@ pub struct CursorSegment {
 }
 
 /// What the status bar shows of a console's session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionView {
     pub tx: TxSegment,
     pub cursor: Option<CursorSegment>,
+    /// The session's own access label (fix round 1, I2).
+    pub access: AccessLabel,
 }
 
 /// The status bar's projection of a session snapshot (see [`TxSegment`], [`CursorSegment`]).
+///
+/// The transaction, the cursor and the access are Task 23's `console_ux` table (the profile's
+/// environment, the policy, the run and the pool do not reach those fields, so they are not
+/// passed). One rule more, the safer one where the two differ: a session that is
+/// `Disconnected` or `Broken` shows no transaction and no cursor (fix round 1, I3). Its close
+/// and its break roll the transaction back but leave the last `tx` in the snapshot, so the
+/// table alone would keep showing a transaction that is gone (session side: T18/M3b; the
+/// table's `tx_badge`: T33).
 pub fn session_view(snap: &SessionSnapshot) -> SessionView {
-    let tx = match (snap.tx.owner, snap.tx.status) {
-        (TxOwner::User, TxStatus::InTx) => TxSegment::Open {
-            statements: snap.tx.statements,
-        },
-        (TxOwner::User, TxStatus::Failed) => TxSegment::Failed,
-        _ => TxSegment::None,
+    let ux = console_ux(None, false, snap, None, None);
+    let ended = matches!(
+        snap.state,
+        SessionState::Disconnected | SessionState::Broken(_)
+    );
+    let tx = match ux.tx {
+        _ if ended => TxSegment::None,
+        TxBadge::UserOpen { statements, .. } => TxSegment::Open { statements },
+        TxBadge::Failed => TxSegment::Failed,
+        TxBadge::Auto | TxBadge::CursorSnapshot { .. } => TxSegment::None,
     };
     let releasing = matches!(snap.state, SessionState::Busy { req: 0, .. });
-    let cursor = snap.cursor.map(|c| CursorSegment {
+    let cursor = ux.cursor.filter(|_| !ended).map(|c| CursorSegment {
         result: c.result,
         closable: !releasing,
     });
-    SessionView { tx, cursor }
+    SessionView {
+        tx,
+        cursor,
+        access: ux.access,
+    }
+}
+
+/// How much an access label protects: read-write, then guarded, then enforced.
+fn protection(access: AccessLabel) -> u8 {
+    match access {
+        AccessLabel::ReadWrite => 0,
+        AccessLabel::ReadOnlyGuarded => 1,
+        AccessLabel::ReadOnlyEnforced => 2,
+    }
+}
+
+/// The less protective of `a` and `b`: what the bar may claim when both describe the console.
+pub fn less_protective(a: AccessLabel, b: AccessLabel) -> AccessLabel {
+    if protection(a) <= protection(b) { a } else { b }
 }
 
 /// One console session the bar watches.
@@ -329,8 +369,8 @@ struct Watched {
     _task: Task<()>,
 }
 
-/// The follow state (a global): the console the user was last in, with the explorer's
-/// selection at that moment, and the mirrored session views.
+/// The follow state (a global): the console the user last showed or focused, with the
+/// explorer's selection at that moment, and the mirrored session views.
 #[derive(Default)]
 struct StatusFollow {
     last: Option<(ConsoleId, Option<ProfileId>)>,
@@ -348,8 +388,35 @@ pub fn install(cx: &mut App) {
         cx.refresh_windows();
     })
     .detach();
+    // ## fix round 1 (C1): a tab switch moves no focus; the active tab is what the user sees.
+    cx.observe_global::<ActiveTab>(|cx| {
+        note_active(cx);
+        cx.refresh_windows();
+    })
+    .detach();
     cx.observe_global::<Consoles>(watch_sessions).detach();
     watch_sessions(cx);
+}
+
+/// The active tab changed: its console (if bound) is the one the user now sees; remember it
+/// with the explorer's selection.
+fn note_active(cx: &mut App) {
+    let Some(id) = active_tab(cx)
+        .flatten()
+        .and_then(|tab| Consoles::by_tab(cx, tab))
+    else {
+        return;
+    };
+    let selected = cx
+        .try_global::<ConnectionsModel>()
+        .and_then(|m| m.selected());
+    cx.default_global::<StatusFollow>().last = Some((id, selected));
+}
+
+/// The focused pane's active tab as the workspace mirrors it; `None` before any workspace
+/// rendered.
+fn active_tab(cx: &App) -> Option<Option<TabId>> {
+    cx.try_global::<ActiveTab>().map(|a| a.0)
 }
 
 /// The console whose editor has the focus.
@@ -377,19 +444,33 @@ fn note_focus(cx: &mut App) {
     }
 }
 
-/// The console the capsule and the status bar follow (see the block comment above): the one
-/// whose editor has the focus, else the one the user was last in while the explorer's
-/// selection is still what it was then.
+/// The console the capsule and the status bar follow (see the block comment above):
+/// 1. the console whose editor has the focus, when its tab is the active one;
+/// 2. else the active tab's console, unless a connection was picked in the explorer since
+///    that console was last shown or focused;
+/// 3. else none (the M2 rule).
+///
+/// Before any workspace rendered (no active tab is known), the focused editor's console.
 pub fn followed_console(cx: &App) -> Option<ConsoleId> {
-    if let Some(id) = editor_console(cx) {
+    let Some(active) = active_tab(cx) else {
+        return editor_console(cx);
+    };
+    let active = active?;
+    if let Some(id) =
+        editor_console(cx).filter(|id| Consoles::get(cx, *id).is_some_and(|s| s.tab == active))
+    {
         return Some(id);
     }
-    let (id, selected) = cx.try_global::<StatusFollow>()?.last?;
-    Consoles::get(cx, id)?;
-    let now = cx
-        .try_global::<ConnectionsModel>()
-        .and_then(|m| m.selected());
-    (now == selected).then_some(id)
+    let id = Consoles::by_tab(cx, active)?;
+    if let Some((last, selected)) = cx.try_global::<StatusFollow>().and_then(|f| f.last) {
+        let now = cx
+            .try_global::<ConnectionsModel>()
+            .and_then(|m| m.selected());
+        if last == id && now != selected {
+            return None;
+        }
+    }
+    Some(id)
 }
 
 /// The followed console when it is bound to a saved profile, with that profile.
@@ -397,6 +478,21 @@ pub(crate) fn followed_bound_console(cx: &App) -> Option<(ConsoleId, Arc<Profile
     let id = followed_console(cx)?;
     let profile = Consoles::get(cx, id)?.profile?;
     Some((id, cx.try_global::<ConnectionsModel>()?.get(profile)?))
+}
+
+/// The access of the followed console's own session (after a changed-data gap's downgrade),
+/// when that console is bound to `profile` and its session is watched (fix round 1, I2): the
+/// capsule shows no more protection than this.
+pub(crate) fn followed_session_access(cx: &App, profile: ProfileId) -> Option<AccessLabel> {
+    let (id, p) = followed_bound_console(cx)?;
+    (p.id == profile).then_some(())?;
+    session_access(cx, id, profile)
+}
+
+/// The access of console `id`'s session (bound to `profile`), with the gap downgrade.
+fn session_access(cx: &App, id: ConsoleId, profile: ProfileId) -> Option<AccessLabel> {
+    let view = view_of(cx, id)?;
+    Some(session_toasts::effective_access(cx, profile, view.access))
 }
 
 /// Keeps one watcher per console session: a new console (or a console's new session) gets
@@ -407,16 +503,21 @@ fn watch_sessions(cx: &mut App) {
         .filter_map(|id| Some((id, Consoles::get(cx, id)?.session.clone()?)))
         .collect();
     let follow = cx.default_global::<StatusFollow>();
+    let before = follow.watched.len();
     follow.watched.retain(|id, w| {
         wanted
             .iter()
             .any(|(want, h)| want == id && h.id() == w.session)
     });
+    let dropped = follow.watched.len() != before;
     let new: Vec<(ConsoleId, SessionHandle)> = wanted
         .into_iter()
         .filter(|(id, _)| !follow.watched.contains_key(id))
         .collect();
     if new.is_empty() {
+        if dropped {
+            cx.refresh_windows();
+        }
         return;
     }
     for (id, session) in new {
@@ -452,12 +553,18 @@ fn note_view(cx: &mut App, id: ConsoleId, view: SessionView) {
     }
 }
 
-/// The mirrored view of console `id`'s session.
-fn view_of(cx: &App, id: ConsoleId) -> SessionView {
+/// How many console sessions the bar watches (a test seam: a closed console's watcher goes).
+#[cfg(feature = "test-support")]
+pub fn watched_sessions(cx: &App) -> usize {
+    cx.try_global::<StatusFollow>()
+        .map_or(0, |f| f.watched.len())
+}
+
+/// The mirrored view of console `id`'s session; `None` when it has no session.
+fn view_of(cx: &App, id: ConsoleId) -> Option<SessionView> {
     cx.try_global::<StatusFollow>()
         .and_then(|f| f.watched.get(&id))
         .map(|w| w.view)
-        .unwrap_or_default()
 }
 
 /// How a cell of a followed console's bar gives way when the bar is too narrow.
@@ -501,10 +608,23 @@ fn console_segments(
 ) -> Vec<AnyElement> {
     let state = Consoles::get(cx, console);
     let rc = result_context_of(console, cx);
+    let session = session_access(cx, console, p.id);
     let mut parts = connection_parts(theme, cx, m, p);
-    if let Some(rc) = &rc {
-        // The active result tab's environment and access (Status Follows The Tab).
-        let env = result_env(theme, cx, rc);
+    // The env cell: the active result tab's environment and access (Status Follows The Tab),
+    // else the console's own; never more protection than the console's session has (I2).
+    let env = match &rc {
+        Some(rc) => Some(result_env(
+            theme,
+            cx,
+            rc.env,
+            session.map_or(rc.access, |s| less_protective(rc.access, s)),
+        )),
+        None => session.and_then(|s| {
+            let shown = shown_access(cx, m, p);
+            (less_protective(shown, s) != shown).then(|| result_env(theme, cx, p.environment, s))
+        }),
+    };
+    if let Some(env) = env {
         match parts.iter().position(|(part, _)| *part == Part::Env) {
             Some(ix) => parts[ix] = (Part::Env, env),
             None => parts.insert(0, (Part::Env, env)),
@@ -538,7 +658,7 @@ fn console_segments(
         cells.push((Give::of(part), segment));
     }
     let view = view_of(cx, console);
-    match view.tx {
+    match view.map_or(TxSegment::None, |v| v.tx) {
         TxSegment::None => {}
         TxSegment::Open { statements } => {
             cells.push((Give::Never, tx_open(theme, cx, statements)));
@@ -559,7 +679,10 @@ fn console_segments(
             .into_any_element(),
         ));
     }
-    if let (Some(cursor), Some(session)) = (view.cursor, state.and_then(|s| s.session.clone())) {
+    if let (Some(cursor), Some(session)) = (
+        view.and_then(|v| v.cursor),
+        state.and_then(|s| s.session.clone()),
+    ) {
         cells.push((Give::Never, cursor_button(cx, cursor, session)));
     }
     if let Some(text) = state.and_then(|s| console_message(s, cx)) {
@@ -655,22 +778,28 @@ fn give_way_row(theme: &Theme, cells: Vec<(Give, AnyElement)>) -> AnyElement {
         .into_any_element()
 }
 
-/// The environment segment of a result tab: its environment and its (fail-closed) access.
-fn result_env(theme: &Theme, cx: &App, rc: &ResultContext) -> AnyElement {
+/// The environment segment for environment `env` and access `access` (a result tab's, or the
+/// console session's).
+fn result_env(theme: &Theme, cx: &App, env: Option<EnvTag>, access: AccessLabel) -> AnyElement {
     let text = tr(
         cx,
         ids::hv::STATUS_ENV,
         ids::hv::HvStatusEnv {
-            env: Text(env_word(cx, rc.env).to_string()),
-            access: Text(access_label(cx, rc.access).to_string()),
+            env: Text(env_word(cx, env).to_string()),
+            access: Text(access_label(cx, access).to_string()),
         },
     );
-    env_segment(
-        theme,
-        env_kind(rc.env),
-        text,
-        rc.access != AccessLabel::ReadWrite,
-    )
+    env_segment(theme, env_kind(env), text, access != AccessLabel::ReadWrite)
+}
+
+/// The access the M2 env cell of `p` claims: the live connection's (after the gap downgrade)
+/// while connected, else the profile's read-only flag.
+fn shown_access(cx: &App, m: &ConnectionsModel, p: &Profile) -> AccessLabel {
+    match m.live(p.id) {
+        LiveState::Connected(info) => session_toasts::effective_access(cx, p.id, info.access),
+        _ if p.read_only => AccessLabel::ReadOnlyGuarded,
+        _ => AccessLabel::ReadWrite,
+    }
 }
 
 /// "Transaction open · 3 statements" with the amber marker (pending work); the tooltip says
@@ -825,23 +954,18 @@ fn console_message(state: &ConsoleState, cx: &App) -> Option<SharedString> {
     hacivat_ui_editor::commands::status_message(editor).or_else(|| preview_message(editor, cx))
 }
 
-// ---- WIRING POINT (Task 28) -----------------------------------------------------------------
-// Task 28's `hacivat_ui_editor::preview::status_message(&EditorView, &App) ->
-// Option<SharedString>` ("Nothing to run here", "Boundary uncertain: …") is not on `m3a` yet.
-// When it merges, this body becomes `hacivat_ui_editor::preview::status_message(editor, cx)`;
-// nothing else changes.
-/// The Run preview's status sentence (Task 28; `None` until it merges).
+/// The Run preview's status sentence (Task 28; fix round 1, M7).
 fn preview_message(editor: &EditorView, cx: &App) -> Option<SharedString> {
-    let _ = (editor, cx);
-    None
+    hacivat_ui_editor::preview::status_message(editor, cx)
 }
-// ---- end of the wiring point ----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
 
-    use hacivat_session::session::{CursorBadge, TxState};
+    use hacivat_driver::TxStatus;
+    use hacivat_proto::ErrClass;
+    use hacivat_session::session::{CursorBadge, TxOwner, TxState};
 
     use super::*;
 
@@ -882,6 +1006,48 @@ mod tests {
             session_view(&snap(TxOwner::User, TxStatus::Idle, 0)).tx,
             TxSegment::None
         );
+    }
+
+    // ## fix round 1 (I3)
+    #[test]
+    fn a_session_that_ended_shows_no_transaction_and_no_cursor() {
+        for state in [
+            SessionState::Disconnected,
+            SessionState::Broken(ErrClass::ALL[0]),
+        ] {
+            for status in [TxStatus::InTx, TxStatus::Failed] {
+                let mut s = snap(TxOwner::User, status, 3);
+                s.state = state.clone();
+                s.cursor = Some(CursorBadge {
+                    result: ResultId(1),
+                    rows: 10,
+                    since: Instant::now(),
+                    holds_tx: true,
+                });
+                let view = session_view(&s);
+                assert_eq!(view.tx, TxSegment::None, "{state:?} {status:?}");
+                assert_eq!(view.cursor, None, "{state:?} {status:?}");
+            }
+        }
+    }
+
+    // ## fix round 1 (I2)
+    #[test]
+    fn the_session_access_is_mirrored_and_the_less_protective_label_wins() {
+        let mut s = snap(TxOwner::None, TxStatus::Idle, 0);
+        s.access = AccessLabel::ReadOnlyEnforced;
+        assert_eq!(session_view(&s).access, AccessLabel::ReadOnlyEnforced);
+        use AccessLabel::{ReadOnlyEnforced as E, ReadOnlyGuarded as G, ReadWrite as W};
+        for (a, b, want) in [
+            (W, G, W),
+            (G, W, W),
+            (W, E, W),
+            (E, G, G),
+            (G, E, G),
+            (E, E, E),
+        ] {
+            assert_eq!(less_protective(a, b), want, "{a:?} {b:?}");
+        }
     }
 
     #[test]

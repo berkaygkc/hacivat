@@ -31,10 +31,11 @@ use hacivat_results::{
 };
 use hacivat_session::LiveState;
 use hacivat_session::session::{
-    ErrorPolicy, ExecOrigin, ObserverRef, Request, RunEvent, RunId, RunObserver, RunSpec, RunUnit,
-    SessionHandle, SessionSnapshot, TxOwner, UnitId,
+    ClosePolicy, ErrorPolicy, ExecOrigin, ObserverRef, Request, RunEvent, RunId, RunObserver,
+    RunSpec, RunUnit, SessionHandle, SessionSnapshot, TxOwner, UnitId,
 };
 use hacivat_ui::capsule::{CapsuleModel, EnvKind};
+use hacivat_ui::panes::TabId;
 use hacivat_values::{ColumnMeta, LogicalType, NativeType, ResultSchema, Value};
 use support::*;
 
@@ -79,17 +80,31 @@ fn shell_two(cx: &mut TestAppContext) -> &'static mut VisualTestContext {
 }
 
 /// A console session of profile `id` over `fake` (as `test_session`, with a fake the test
-/// scripts).
+/// scripts). A production profile's session is read-only, as the product opens it
+/// (`effective_read_only` under the boot's production policy; fix round 1, I2).
 fn session_over(
     vcx: &VisualTestContext,
     id: ProfileId,
     fake: FakeDriver,
 ) -> (SessionHandle, Arc<FakeDriver>) {
-    let (rt, profile) = vcx.cx.read(|cx| {
+    session_with(vcx, id, fake, None)
+}
+
+/// [`session_over`] whose read-only flag is `read_only` whatever the profile says (`None`:
+/// as the product decides it).
+fn session_with(
+    vcx: &VisualTestContext,
+    id: ProfileId,
+    fake: FakeDriver,
+    read_only: Option<bool>,
+) -> (SessionHandle, Arc<FakeDriver>) {
+    let (rt, mut profile) = vcx.cx.read(|cx| {
         let m = cx.global::<ConnectionsModel>();
         let profile = m.get(id).expect("a saved profile");
         (m.core_runtime().handle(), (*profile).clone())
     });
+    profile.read_only =
+        read_only.unwrap_or(profile.read_only || profile.environment == Some(EnvTag::Production));
     futures::executor::block_on(hacivat_session::testing::fake_session(rt, fake, profile))
 }
 
@@ -102,19 +117,7 @@ fn console_of(vcx: &VisualTestContext, name: &str) -> ConsoleId {
 
 /// Shows console `id`'s tab and gives its editor the focus.
 fn focus_console(vcx: &VisualTestContext, id: ConsoleId) {
-    let tab = vcx
-        .cx
-        .read(|cx| Consoles::get(cx, id).map(|s| s.tab))
-        .expect("a registered console");
-    let tabs = tab_count(vcx);
-    for _ in 0..tabs {
-        if with_ws(vcx, |ws, _, _| ws.active_tab()) == Some(tab) {
-            break;
-        }
-        with_ws(vcx, |ws, window, cx| ws.activate_next_tab(window, cx));
-        vcx.run_until_parked();
-    }
-    assert_eq!(with_ws(vcx, |ws, _, _| ws.active_tab()), Some(tab));
+    activate_tab(vcx, tab_of(vcx, id));
     in_window(vcx, |window, cx| {
         // GPUI reports focus only for the active window.
         window.activate_window();
@@ -128,6 +131,29 @@ fn focus_console(vcx: &VisualTestContext, id: ConsoleId) {
     });
     vcx.run_until_parked();
 }
+
+/// Activates `tab` in the focused pane as Ctrl+Tab does: the focus does not move.
+fn activate_tab(vcx: &VisualTestContext, tab: TabId) {
+    let tabs = tab_count(vcx);
+    for _ in 0..tabs {
+        if with_ws(vcx, |ws, _, _| ws.active_tab()) == Some(tab) {
+            break;
+        }
+        with_ws(vcx, |ws, window, cx| ws.activate_next_tab(window, cx));
+        vcx.run_until_parked();
+    }
+    assert_eq!(with_ws(vcx, |ws, _, _| ws.active_tab()), Some(tab));
+}
+
+/// The tab of console `id`.
+fn tab_of(vcx: &VisualTestContext, id: ConsoleId) -> TabId {
+    vcx.cx
+        .read(|cx| Consoles::get(cx, id).map(|s| s.tab))
+        .expect("a registered console")
+}
+
+/// The workspace's first tab: `Console 1`, unbound.
+const UNBOUND_TAB: TabId = TabId(0);
 
 /// Takes the focus away from every editor.
 fn blur(vcx: &VisualTestContext) {
@@ -329,7 +355,7 @@ fn focusing_a_production_or_staging_console_swaps_the_capsule(cx: &mut TestAppCo
     let vcx = shell_two(cx);
     let prod = console_of(vcx, PROD);
     let staging = console_of(vcx, STAGING);
-    // No editor has the focus yet: the M2 rule (the last connect, staging).
+    // No editor has the focus yet; the staging console's tab, opened last, is the active one.
     assert_eq!(capsule_name(vcx), (STAGING.to_string(), EnvKind::Staging));
 
     focus_console(vcx, prod);
@@ -423,14 +449,13 @@ fn transaction_segment_only_for_user_transactions(cx: &mut TestAppContext) {
     user_exec(&user, "UPDATE t SET a = 1");
     let tx = snapshot(&user).tx;
     assert_eq!((tx.status, tx.owner), (TxStatus::InTx, TxOwner::User));
-    let n = tx.statements;
-    let want = if n == 1 {
-        "Transaction open · 1 statement".to_string()
-    } else {
-        format!("Transaction open · {n} statements")
-    };
+    // BEGIN is transaction control, not a statement of the transaction (M10).
     wait_until(vcx, "the transaction segment", |vcx| {
-        status(vcx).contains(&want)
+        status(vcx).contains("Transaction open · 1 statement")
+    });
+    user_exec(&user, "UPDATE t SET b = 2");
+    wait_until(vcx, "the second statement", |vcx| {
+        status(vcx).contains("Transaction open · 2 statements")
     });
     user_exec(&user, "COMMIT");
     wait_until(vcx, "the segment to go", |vcx| {
@@ -499,14 +524,14 @@ fn failed_transaction_segment_says_so(cx: &mut TestAppContext) {
 #[gpui::test]
 fn cursor_open_segment_closes_the_cursor(cx: &mut TestAppContext) {
     let vcx = shell_two(cx);
-    let prod_id = profile_id(vcx, PROD);
+    let staging_id = profile_id(vcx, STAGING);
     let (h, fake) = session_over(
         vcx,
-        prod_id,
+        staging_id,
         pg().tracks_transactions()
             .queries(vec![select("SELECT", 1_000_000)]),
     );
-    let console = register_test_console(vcx, prod_id, h.clone());
+    let console = register_test_console(vcx, staging_id, h.clone());
     focus_console(vcx, console);
     assert!(!status(vcx).contains("Cursor open"), "{}", status(vcx));
     let _ticket = run_one(&h, "SELECT * FROM big", true);
@@ -542,18 +567,19 @@ fn at_960_in_turkish_the_trust_segments_keep_their_place(cx: &mut TestAppContext
     let vcx = shell_with_fake(cx, "tr", pg());
     add_profile(
         vcx,
-        test_profile(PROD, Some(EnvTag::Production), "10.0.4.12"),
+        test_profile(STAGING, Some(EnvTag::Staging), "10.0.4.13"),
     );
-    connect_and_wait(vcx, PROD);
-    let prod_id = profile_id(vcx, PROD);
-    // A production profile starts in Manual mode: the cursor's transaction is the user's.
+    connect_and_wait(vcx, STAGING);
+    let staging_id = profile_id(vcx, STAGING);
+    // The user's transaction, and a cursor inside it (a savepoint of Hacivat's).
     let (h, _) = session_over(
         vcx,
-        prod_id,
+        staging_id,
         pg().tracks_transactions()
             .queries(vec![select("SELECT", 1_000_000)]),
     );
-    let console = register_test_console(vcx, prod_id, h.clone());
+    let console = register_test_console(vcx, staging_id, h.clone());
+    user_exec(&h, "BEGIN");
     let now = std::time::Instant::now();
     show_result_in(
         vcx,
@@ -584,7 +610,7 @@ fn at_960_in_turkish_the_trust_segments_keep_their_place(cx: &mut TestAppContext
     assert!(tx.right() <= cursor.left(), "{tx:?} {cursor:?}");
     assert!(cursor.right() <= bar.right(), "{cursor:?} in {bar:?}");
     let s = status(vcx);
-    assert!(s.contains("üretim"), "{s}");
+    assert!(s.contains("hazırlık · okuma-yazma"), "{s}");
     // More rows may come: "10,000+".
     assert!(s.contains("+ satır · 131 ms"), "{s}");
     // The cells that gave way leave no trace: never two seams side by side, at 960 and at
@@ -689,6 +715,187 @@ fn the_editors_sentence_shows_until_the_text_changes(cx: &mut TestAppContext) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Fix round 1: the active tab (C1), the session's own access (I2), a session that ended (I3),
+// session swaps and closed consoles (M8), the preview sentence (M7)
+
+#[gpui::test]
+fn a_tab_switch_without_focus_follows_the_active_console(cx: &mut TestAppContext) {
+    // C1: Ctrl+Tab (or a click on the tab) moves no focus. From a focused staging console to
+    // the production console's tab, the bar and the capsule must say production.
+    let vcx = shell_two(cx);
+    let prod = console_of(vcx, PROD);
+    let staging = console_of(vcx, STAGING);
+    focus_console(vcx, staging);
+    assert_eq!(capsule_name(vcx), (STAGING.to_string(), EnvKind::Staging));
+
+    activate_tab(vcx, tab_of(vcx, prod));
+    assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
+    let s = status(vcx);
+    assert!(s.contains("production · read-only (guarded)"), "{s}");
+    assert!(!s.contains("staging"), "{s}");
+
+    // And back, still without moving the focus.
+    activate_tab(vcx, tab_of(vcx, staging));
+    assert_eq!(capsule_name(vcx), (STAGING.to_string(), EnvKind::Staging));
+
+    // A tab that is not a bound console: the M2 rule. Production is picked in the explorer
+    // first, so the M2 answer differs from the console that was shown.
+    let prod_id = profile_id(vcx, PROD);
+    vcx.cx
+        .update(|cx| ConnectionsModel::select(cx, Some(prod_id)));
+    vcx.run_until_parked();
+    activate_tab(vcx, UNBOUND_TAB);
+    assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn the_console_session_access_wins_when_it_protects_less(cx: &mut TestAppContext) {
+    // I2: the profile's default connection reads read-only (the production policy), but this
+    // console's own session is read-write (opened before the profile changed, say). The bar
+    // and the capsule must never claim the protection the session does not enforce.
+    let vcx = shell_two(cx);
+    let prod_id = profile_id(vcx, PROD);
+    let (h, _) = session_with(vcx, prod_id, pg(), Some(false));
+    assert!(!snapshot(&h).read_only);
+    let console = register_test_console(vcx, prod_id, h);
+    focus_console(vcx, console);
+    let s = status(vcx);
+    assert!(s.contains("production · read-write"), "{s}");
+    assert!(!s.contains("read-only"), "{s}");
+    match capsule_model(vcx) {
+        CapsuleModel::Connection {
+            access, read_only, ..
+        } => {
+            assert_eq!(access.as_ref(), "read-write");
+            assert!(!read_only);
+        }
+        other => panic!("not a connection: {other:?}"),
+    }
+    // A result tab's recorded label does not outrank the session either.
+    show_result(vcx, console, 3);
+    let s = status(vcx);
+    assert!(s.contains("production · read-write"), "{s}");
+    assert!(s.contains("3 rows"), "{s}");
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn a_closed_session_shows_no_transaction(cx: &mut TestAppContext) {
+    // I3: closing rolls the user's transaction back; the session publishes Disconnected but
+    // keeps the last transaction state. The bar must not show a transaction that is gone.
+    let vcx = shell_two(cx);
+    let staging_id = profile_id(vcx, STAGING);
+    let (h, _) = session_over(vcx, staging_id, pg().tracks_transactions());
+    let console = register_test_console(vcx, staging_id, h.clone());
+    focus_console(vcx, console);
+    user_exec(&h, "BEGIN");
+    user_exec(&h, "UPDATE t SET a = 1");
+    wait_until(vcx, "the transaction segment", |vcx| {
+        status(vcx).contains("Transaction open")
+    });
+    futures::executor::block_on(h.close(ClosePolicy::RollBack)).expect("the session closes");
+    wait_until(vcx, "the segment to go", |vcx| {
+        !status(vcx).contains("Transaction")
+    });
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn a_new_session_for_the_console_is_followed_and_a_closed_console_is_not_watched(
+    cx: &mut TestAppContext,
+) {
+    // M8: rebinding a console to another session watches the new one; closing a console
+    // drops its watcher.
+    let vcx = shell_two(cx);
+    let staging_id = profile_id(vcx, STAGING);
+    let (old, _) = session_over(vcx, staging_id, pg().tracks_transactions());
+    let console = register_test_console(vcx, staging_id, old.clone());
+    focus_console(vcx, console);
+    assert_eq!(
+        vcx.cx
+            .read(hacivat_app::connections::status::watched_sessions),
+        1
+    );
+    user_exec(&old, "BEGIN");
+    wait_until(vcx, "the old session's transaction", |vcx| {
+        status(vcx).contains("Transaction open · 0 statements")
+    });
+
+    let (new, _) = session_over(vcx, staging_id, pg().tracks_transactions());
+    vcx.cx.update(|cx| {
+        Consoles::update(cx, console, |s| s.session = Some(new.clone()));
+    });
+    wait_until(vcx, "the old transaction to leave the bar", |vcx| {
+        !status(vcx).contains("Transaction")
+    });
+    user_exec(&new, "BEGIN");
+    user_exec(&new, "UPDATE t SET a = 1");
+    wait_until(vcx, "the new session's transaction", |vcx| {
+        status(vcx).contains("Transaction open · 1 statement")
+    });
+    // The old session changes no more than the bar's mirror of it: it is not watched.
+    user_exec(&old, "UPDATE t SET a = 1");
+    user_exec(&old, "UPDATE t SET a = 2");
+    vcx.run_until_parked();
+    assert!(
+        status(vcx).contains("Transaction open · 1 statement"),
+        "{}",
+        status(vcx)
+    );
+    assert_eq!(
+        vcx.cx
+            .read(hacivat_app::connections::status::watched_sessions),
+        1
+    );
+
+    vcx.cx.update(|cx| Consoles::remove(cx, console));
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.cx
+            .read(hacivat_app::connections::status::watched_sessions),
+        0
+    );
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn the_preview_sentence_shows_when_there_is_nothing_to_run(cx: &mut TestAppContext) {
+    // M7: Task 28's `preview::status_message` reaches the bar ("Nothing to run here").
+    let vcx = shell_two(cx);
+    let staging = console_of(vcx, STAGING);
+    // What the console host does once the console is connected (Tasks 32 and 33): the editor
+    // knows it is connected, the language service has the console's dialect.
+    in_window(vcx, |_, cx| {
+        let state = Consoles::get(cx, staging).expect("the console").clone();
+        let editor = state.editor.expect("an editor");
+        let service = state.service.expect("its language service");
+        let doc = editor.read(cx).doc();
+        editor.update(cx, |v, cx| {
+            v.set_doc_context(
+                hacivat_ui_editor::DocContext {
+                    connected: true,
+                    tier: v.status().tier,
+                },
+                cx,
+            );
+        });
+        service.set_sql_context(
+            doc,
+            sql_dialect::DialectCtx::new(sql_dialect::DialectId::Postgres, None),
+            sql_dialect::ClientFlavor::Psql,
+            cx,
+        );
+    });
+    focus_console(vcx, staging);
+    vcx.simulate_keystrokes("- - space x enter enter");
+    settle_until(vcx, Duration::from_secs(10), || {
+        text_of(vcx, "status-message").as_deref() == Some("Nothing to run here")
+    });
+    stop_core_runtime_test(cx);
+}
+
+// ---------------------------------------------------------------------------------------------
 // M2 behaviour without a console
 
 #[gpui::test]
@@ -711,8 +918,15 @@ fn without_a_console_the_m2_behaviour_is_unchanged(cx: &mut TestAppContext) {
         "{}",
         status(vcx)
     );
-    // A console that never had the focus changes nothing.
+    // A console whose tab is not the active one changes nothing; the unbound console is not
+    // followed either.
     let _staging = console_of(vcx, STAGING);
+    activate_tab(vcx, UNBOUND_TAB);
     assert_eq!(capsule_name(vcx), (PROD.to_string(), EnvKind::Production));
+    assert!(
+        status(vcx).contains("production · read-only (guarded)"),
+        "{}",
+        status(vcx)
+    );
     stop_core_runtime_test(cx);
 }
