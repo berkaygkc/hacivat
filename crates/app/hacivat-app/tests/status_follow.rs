@@ -18,13 +18,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{Focusable as _, TestAppContext, VisualTestContext};
-use hacivat_app::connections::ConnectionsModel;
+use hacivat_app::connections::{ConnectionsModel, access_popover, capsule};
 use hacivat_app::console::{ConsoleId, Consoles};
 use hacivat_app::results::ActiveResult;
 use hacivat_driver::fake::{FakeDriver, FakeQuery, FakeResultSet, FakeRows, FakeTypedCall};
 use hacivat_driver::{ExecOpts, Protocol, TxStatus};
 use hacivat_exec::{ResultTab, TabKey};
-use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
+use hacivat_proto::{AccessLabel, DbmsKind, EnvTag, ProfileId};
 use hacivat_results::{
     CloseReason, Completeness, CursorInfo, FetchControl, FetchPolicy, MemoryBudget, ResultId,
     ResultStore, ResultWriter, StoreSource,
@@ -772,11 +772,65 @@ fn the_console_session_access_wins_when_it_protects_less(cx: &mut TestAppContext
         }
         other => panic!("not a connection: {other:?}"),
     }
+    // Round 2 (N1): nothing explains a read-only access the session does not have: the
+    // palette's "Explain read-only access" is off and runs nothing.
+    assert!(!vcx.cx.read(capsule::has_access_explanation));
+    assert!(
+        vcx.cx
+            .read(|cx| access_popover::facts_for(cx, prod_id))
+            .is_none()
+    );
+    assert!(!run(vcx, "connection.explain_access"));
+    assert!(!layer_ids(vcx).iter().any(|l| l.contains("popover")));
     // A result tab's recorded label does not outrank the session either.
     show_result(vcx, console, 3);
     let s = status(vcx);
     assert!(s.contains("production · read-write"), "{s}");
     assert!(s.contains("3 rows"), "{s}");
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn a_guarded_session_is_never_explained_as_enforced(cx: &mut TestAppContext) {
+    // Round 2 (N1): the default connection reads "enforced by the server's role"; this
+    // console's session is only guarded. The bar, the capsule and the explanation say guarded.
+    let vcx = shell_two(cx);
+    let prod_id = profile_id(vcx, PROD);
+    vcx.cx.update(|cx| {
+        let m = cx.global_mut::<ConnectionsModel>();
+        let LiveState::Connected(mut info) = m.live(prod_id) else {
+            panic!("production is connected");
+        };
+        std::sync::Arc::make_mut(&mut info).access = AccessLabel::ReadOnlyEnforced;
+        m.set_live(prod_id, LiveState::Connected(info));
+    });
+    vcx.run_until_parked();
+    let (h, _) = session_over(vcx, prod_id, pg());
+    assert_eq!(snapshot(&h).access, AccessLabel::ReadOnlyGuarded);
+    let console = register_test_console(vcx, prod_id, h);
+    focus_console(vcx, console);
+    let s = status(vcx);
+    assert!(s.contains("production · read-only (guarded)"), "{s}");
+    assert!(!s.contains("enforced"), "{s}");
+    match capsule_model(vcx) {
+        CapsuleModel::Connection { access, .. } => {
+            assert_eq!(access.as_ref(), "read-only (guarded)");
+        }
+        other => panic!("not a connection: {other:?}"),
+    }
+    assert!(vcx.cx.read(capsule::has_access_explanation));
+    let facts = vcx
+        .cx
+        .read(|cx| access_popover::facts_for(cx, prod_id))
+        .expect("a read-only connection is explained");
+    assert_eq!(facts.access, AccessLabel::ReadOnlyGuarded);
+    // Without a console the default connection is described again, as it is: enforced.
+    activate_tab(vcx, UNBOUND_TAB);
+    let facts = vcx
+        .cx
+        .read(|cx| access_popover::facts_for(cx, prod_id))
+        .expect("a read-only connection is explained");
+    assert_eq!(facts.access, AccessLabel::ReadOnlyEnforced);
     stop_core_runtime_test(cx);
 }
 

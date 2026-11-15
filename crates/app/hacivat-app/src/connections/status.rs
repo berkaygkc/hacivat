@@ -489,6 +489,12 @@ pub(crate) fn followed_session_access(cx: &App, profile: ProfileId) -> Option<Ac
     session_access(cx, id, profile)
 }
 
+/// `access` capped at the followed console's session access when that console is bound to
+/// `profile` (fix round 2, N1): what the capsule's explanation may claim.
+pub(crate) fn capped_access(cx: &App, profile: ProfileId, access: AccessLabel) -> AccessLabel {
+    followed_session_access(cx, profile).map_or(access, |s| less_protective(access, s))
+}
+
 /// The access of console `id`'s session (bound to `profile`), with the gap downgrade.
 fn session_access(cx: &App, id: ConsoleId, profile: ProfileId) -> Option<AccessLabel> {
     let view = view_of(cx, id)?;
