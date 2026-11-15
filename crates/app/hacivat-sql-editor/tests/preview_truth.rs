@@ -772,3 +772,20 @@ fn a_leading_paren_copy_previews_what_execution_sends() {
     assert_eq!(p.state, PreviewState::Units);
     assert_eq!(p.ranges.to_vec(), [0..18]);
 }
+
+// ## m3a-f1-followups
+/// Follow-up F1-a, the third failing input the coordinator routed (its `cc` line was not
+/// handed over either): `)COPY` after a comment that holds a `;`, two carets. Same mismatch:
+/// T33's text-based reading took `)COPY t FROM STDIN` for a `COPY`, the splitter does not.
+#[test]
+fn a_paren_copy_after_a_comment_previews_what_execution_sends() {
+    let doc = (
+        DialectId::Postgres,
+        ClientFlavor::Psql,
+        "BEGIN;/* x; */)COPY t FROM STDIN;\na\tb\n\\.\n".to_string(),
+    );
+    for remembered in [Some(CandidateKind::Statement), None] {
+        preview_matches_resolve(&doc, &At::Carets(11189, 0), remembered)
+            .unwrap_or_else(|e| panic!("{remembered:?}: {e}"));
+    }
+}
