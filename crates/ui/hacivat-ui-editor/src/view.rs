@@ -14,10 +14,10 @@
 //! executor's clock. The view is embeddable as `AnyView::cached(..)`: nothing outside it
 //! re-renders when it is notified, and its layout, hit targets, cursor style, pointer
 //! listeners and input handler survive frames where it is reused (`embeds_as_a_cached_view`).
-//! **Its accessibility node may not:** the GPUI fork's `reuse_prepaint`/`reuse_paint` carry no
+//! **Its accessibility node does not:** the GPUI fork's `reuse_prepaint`/`reuse_paint` carry no
 //! accessibility state, so on a frame where the cached editor is not prepainted again its node
-//! may be missing from the tree. Task 29 (the node's bodies) and Task 32 (the console host's
-//! `cached()` embedding) own the test and the fix (review round 1).
+//! would be missing from the tree. `a11y::embed` caches the editor only while no assistive
+//! technology is attached (Task 29; Task 32 embeds the console's editor with it).
 //!
 //! Call points every module seam already has (review rounds 1 and 2, P11), so Tasks 25 and
 //! 27–29 never edit this file: focus and blur (`ime::on_focus`/`on_blur`, `FocusedEditor`);
@@ -26,9 +26,10 @@
 //! `large_file::update`, `preview::on_update`, `ime::after_commit` and the events; a fresh
 //! analysis (`LanguageService::on_update` → `preview::on_update`); a composition opening or
 //! closing ([`EditorView::composition_changed`] → `preview::on_composition`); the banner
-//! (`large_file::banner`) and the commands' overlay (`commands::overlay`); each frame
-//! (`element::EditorElement`: the a11y hooks, `prepaint_frame`, `paint_frame`); the commands'
-//! state (`commands::CommandState`).
+//! (`large_file::banner`) and the commands' overlay (`commands::overlay`); the accessibility
+//! node, on the focusable column (`a11y::declare`, Task 29); each frame
+//! (`element::EditorElement`: `prepaint_frame`, `paint_frame`); the commands' state
+//! (`commands::CommandState`).
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -193,7 +194,10 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let tier = large_file::tier_for(text.len() as u64, longest_line(text), &cfg.tiers);
+        // ## m3a-t29-a11y-tiers: the tier state keeps the size and the longest line for the T1
+        // banner.
+        let tier_state = large_file::open(text.len() as u64, longest_line(text), &cfg.tiers);
+        let tier = tier_state.tier;
         let ctx = DocContext {
             connected: false,
             tier,
@@ -231,7 +235,7 @@ impl EditorView {
             marks: MarkStore::default(),
             band: BandState::default(),
             a11y: A11yState::default(),
-            tier: TierState { tier },
+            tier: tier_state,
             paste: PasteState::default(),
             probe: None,
             layout: None,
@@ -342,13 +346,16 @@ impl EditorView {
 
     /// A polite announcement for assistive technology ("Run would execute lines 3–7", an
     /// execution status), read out by the next frame's live region (`a11y::announce`, Task 29).
-    pub fn announce(&self, text: SharedString) {
+    // ## m3a-t29-a11y-tiers: takes `cx` and asks for that frame, so the announcement is not
+    // held back until an unrelated repaint (Task 1b re-review note).
+    pub fn announce(&self, text: SharedString, cx: &mut Context<Self>) {
         a11y::announce(&self.a11y, text);
+        cx.notify();
     }
 
-    /// What the element's accessibility hooks declare this frame (called from `request_layout`
-    /// only while assistive technology is active). The label is evaluated again only when the
-    /// UI-text generation changes (a language switch).
+    /// What the editor's node declares this frame (## m3a-t29-a11y-tiers: called from
+    /// `a11y::declare` in `render`, only while assistive technology is active). The label is
+    /// evaluated again only when the UI-text generation changes (a language switch).
     pub(crate) fn a11y_frame(&mut self, focused: bool, cx: &App) -> A11yFrame {
         let generation = cx
             .try_global::<hacivat_ui::l10n::UiText>()
@@ -771,8 +778,9 @@ impl EventEmitter<EditorEvent> for EditorView {}
 
 impl Render for EditorView {
     /// A focusable column with the large-file banner's slot, the editor element (the text area
-    /// with its gutter, its input handler and accessibility node, every module seam) and the
-    /// commands' overlay.
+    /// with its gutter, its input handler, every module seam) and the commands' overlay.
+    /// ## m3a-t29-a11y-tiers: the column itself is the editor's accessibility node
+    /// (`a11y::declare`).
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let banner = large_file::banner(&self.tier, window, cx);
         let overlay = commands::overlay(self, window, cx);
@@ -780,14 +788,16 @@ impl Render for EditorView {
             cx.entity(),
             self.focus.clone(),
             ("editor-text", self.doc.0).into(),
-            self.a11y.clone(),
         );
-        div()
+        let column = div()
             .id(("editor", self.doc.0))
             .track_focus(&self.focus)
             .size_full()
             .flex()
-            .flex_col()
+            .flex_col();
+        // ## m3a-t29-a11y-tiers: the focusable column is the editor's accessibility node (built
+        // only while assistive technology is active).
+        a11y::declare(column, self, window, cx)
             .children(banner)
             .child(text)
             .children(overlay)

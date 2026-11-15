@@ -424,3 +424,38 @@ decorations p95 ≤ 1 ms on 50,000 lines.
 - **Closed documents (M6).** A closed document ignores the setters and `on_update` until it is
   opened again.
 - **Perf fixture.** The perf fixture is now 2.8 MB: 50,000 lines, 12,500 statements.
+
+## m3a-t29 — editor accessibility node and large-file tiers
+
+**The node is the focusable column, not the text element.** GPUI gives the platform focus to the
+node of the element that tracks the focus (`div.rs`: `set_focusable`/`set_focus`), and the
+editor's focus is tracked by the view's root column. A node on the inner `EditorElement` (the
+round-2 seam above) would never be focused, so assistive technology would announce the whole
+window instead of the text. Task 29 moves the declaration to the column: `render` calls
+`a11y::declare`, which (only while `window.is_a11y_active()`) gives it role
+`MultilineTextInput` and an `a11y_synthetic_children` closure that writes the label, the T1
+description, read-only, the text selection, the window's `TextRun`s and the polite live region.
+`EditorElement` no longer has accessibility hooks.
+
+**Cached embedding.** The fork's `reuse_prepaint`/`reuse_paint` carry no accessibility state, so
+a reused cached view drops out of the tree. `a11y::embed(editor, style, window)` caches the
+editor only while no assistive technology is attached; the console host (Task 32) embeds with
+it. A fork carry that skips view reuse while accessibility is active would fix every cached view
+(the grid included); it is a controller decision.
+
+**Keys and the window.** Line keys follow line-start anchors (`Bias::After`, `MapMode::TrackDel`)
+rebased through the change log at build time only (nothing per keystroke); a line takes the
+first anchor inside it; keys are never reused; the log running out starts the keys over. A
+window is rebuilt only when the text version, its lines or a long caret line's exposed part
+change. A line longer than 64 KB exposes 64 KB (around the caret on the caret's line; the end
+of the text is a position on its last line). The default window exposes at most 256 KB in all,
+the lines nearest the caret first; its AccessKit run nodes are built with it and reused while it
+is. The live region is named and valued (Windows and Linux announce the name, macOS the value)
+and leaves the tree after a 3 s hold on the executor clock, or at the first frame without
+assistive technology, so a subtree re-entering the tree never reads an old status again.
+
+**Tiers.** T0 up to 4 MB and a 64 KB longest line; T1 above, never T2 in M3a. The tier state
+records which limit caused T1 (accumulated while in T1); back to T0 once each caused limit is
+below 80 % of itself and the other is within itself (exact integer comparison), and the banner's
+copy follows the cause. Sizes in the banner come from the host's `large_file::SizeText` (format
+locale); the fallback is an unformatted decimal.
