@@ -1467,6 +1467,33 @@ hv-copy-refused-body = Seçimde { $cells } hücre var. Kopyalama en çok { $max 
 # Review: PO
 hv-copy-refused-multiple = Bu seçimler birlikte kopyalanamaz. Tek bir blok ya da aynı satırları veya sütunları paylaşan bloklar seçin.
 
+## m3a-t34-status-follows
+
+# Review: PO
+hv-tx-open = İşlem açık · { $n } ifade
+# Review: PO
+hv-tx-open-tip = BEGIN'den bu yana çalışan ifadeler henüz commit edilmedi. Komut paletinden commit edin ya da geri alın.
+# Review: PO
+hv-tx-failed = İşlem başarısız · bitirmek için geri alın
+# Review: PO
+hv-tx-failed-tip = Bir hata ya da iptal işlemi durdurdu. Sunucu artık yalnızca geri almayı kabul eder.
+# Review: PO
+hv-results-rows = { $rows } satır
+# Review: PO
+hv-results-rows-more = { $rows }+ satır
+# Review: PO
+hv-results-rows-timing = { $rows } satır · { $duration }
+# Review: PO
+hv-results-rows-more-timing = { $rows }+ satır · { $duration }
+# Review: PO
+hv-status-duration-ms = { $ms } ms
+# Review: PO
+hv-status-duration-s = { NUMBER($seconds, minimumFractionDigits: 2) } sn
+# Review: PO
+hv-results-status-cursor = İmleç açık
+# Review: PO
+hv-results-status-cursor-tip = Veritabanı anlık görüntüsü tutuluyor. İmleci kapatmak için tıklayın.
+
 ## m3a-t28-gutter
 
 # Review: PO

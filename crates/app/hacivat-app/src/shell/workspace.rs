@@ -36,6 +36,8 @@ use hacivat_ui_core::window::{
     ChromeKind, WorkspaceWindowSpec, chrome_kind, open_workspace_window,
 };
 use serde::{Deserialize, Serialize};
+// ## m3a-t34-status-follows (fix round 1)
+use hacivat_ui_core::gpui_surface::Global;
 
 use crate::PendingChord;
 use crate::l10n_global::{L10nGlobal, WINDOW_TITLE, switch_locale, tr, ui_language};
@@ -292,8 +294,19 @@ impl Workspace {
         }
     }
 
+    // ## m3a-t34-status-follows (fix round 1, C1; named exception)
+    /// Mirrors the focused pane's active tab into [`ActiveTab`] when it changed.
+    fn mirror_active_tab(&self, cx: &mut App) {
+        let now = ActiveTab(self.active_tab());
+        if cx.try_global::<ActiveTab>() != Some(&now) {
+            cx.set_global(now);
+        }
+    }
+
     /// Repaints and saves the layout after `SAVE_DEBOUNCE`; a later change restarts the wait.
     fn layout_changed(&mut self, cx: &mut Context<Self>) {
+        // ## m3a-t34-status-follows (fix round 1, C1)
+        self.mirror_active_tab(cx);
         cx.notify();
         let Some(path) = self.state_path.clone() else {
             return;
@@ -787,6 +800,15 @@ impl Workspace {
 
 /// Emitted by an [`AnchoredHost`] when a press lands outside its view.
 struct AnchorDismissed;
+
+// ## m3a-t34-status-follows (fix round 1, C1; named exception)
+/// The focused pane's active tab, mirrored for code that cannot read the workspace: the
+/// status bar and the capsule are built while the workspace renders (Task 34 follows the
+/// console of this tab). Set by `layout_changed` and at the start of every render.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActiveTab(pub Option<TabId>);
+
+impl Global for ActiveTab {}
 
 /// Places a popover view at its anchor and reports a press outside it (`open_anchored`).
 struct AnchoredHost {
@@ -1379,6 +1401,9 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // ## m3a-t34-status-follows (fix round 1, C1): every path to a new active tab (a
+        // restored layout included) is mirrored before the status bar and capsule are built.
+        self.mirror_active_tab(cx);
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = &t.colors;
