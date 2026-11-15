@@ -507,32 +507,8 @@ const M3A_PENDING: &[&str] = &[
     "editor.tab",
     "editor.toggle_tab_moves_focus",
     "editor.undo",
-    // Task 30: the grid's commands.
-    "grid.copy",
-    "grid.copy_with_headers",
-    "grid.end",
-    "grid.escape",
-    "grid.first_row",
-    "grid.home",
-    "grid.jump_down",
-    "grid.jump_left",
-    "grid.jump_right",
-    "grid.jump_up",
-    "grid.last_row",
-    "grid.move_down",
-    "grid.move_left",
-    "grid.move_right",
-    "grid.move_up",
-    "grid.next_cell",
-    "grid.page_down",
-    "grid.page_up",
-    "grid.prev_cell",
-    "grid.select_all",
-    "grid.select_down",
-    "grid.select_left",
-    "grid.select_right",
-    "grid.select_row",
-    "grid.select_up",
+    // ## m3a-t30-results-view: the grid's commands are registered (`results::view`), so their
+    // entries left this list.
     // ## m3a-t33-exec-ui (named exception): `exec.cancel` is registered (exec_ui::cancel).
 ];
 

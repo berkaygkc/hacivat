@@ -1,9 +1,9 @@
 //! The grid element (HV-GRID-01, -02, -03; Task 20).
 //!
 //! **Frame lifecycle (HV-GRID-01).**
-//! 1. `request_layout`: the grid takes its parent's size; the accessibility declaration is built
-//!    only while assistive technology is active (R-M3-32: role `Grid`, the label, the row and
-//!    column counts; no synthetic children in M3a).
+//! 1. `request_layout`: the grid takes its parent's size. The accessibility declaration (R-M3-32:
+//!    role `Grid`, the label, the row and column counts; no synthetic children in M3a) belongs to
+//!    the view's root, the element that tracks the focus (`GridView::a11y_node`, Task 30).
 //! 2. `prepaint` ([`prepaint_frame`]): one `begin_frame` (one snapshot load); generation and
 //!    row-count changes; the geometry (header 36 px, the row-number gutter ≥ 46 px, 9 px
 //!    tracks); the frame's coalesced scroll deltas and the velocity (fast-scroll); the visible
@@ -17,8 +17,7 @@ use std::rc::Rc;
 use hacivat_ui::text::{TextRegistry, TextSource};
 use hacivat_ui_core::gpui_surface::{
     App, Bounds, Context, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior,
-    Hsla, InspectorElementId, LayoutId, Pixels, Role, SharedString, Style, Window, accesskit, fill,
-    relative,
+    Hsla, InspectorElementId, LayoutId, Pixels, SharedString, Style, Window, fill, relative,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode, ThemeTokens};
 
@@ -37,49 +36,17 @@ use crate::model::ViewMap;
 use crate::source::{Align, CellKind, ColumnKind, GridFrame, ModelRow, ViewRow};
 use crate::view::{GridEvent, GridView, SKELETON_ROWS};
 
-/// The grid's accessibility declaration, built only while assistive technology is active.
-#[derive(Debug, Clone)]
-struct A11y {
-    role: Role,
-    label: SharedString,
-    rows: usize,
-    cols: usize,
-}
-
-/// The grid's element.
+/// The grid's element. Its accessibility node is not here: the view's root, the element that
+/// tracks the focus, declares it (`GridView::a11y_node`; ## m3a-t30-results-view).
 pub(crate) struct GridElement {
     view: Entity<GridView>,
     id: ElementId,
-    a11y: Option<A11y>,
 }
 
 impl GridElement {
     pub(crate) fn new(view: Entity<GridView>) -> Self {
         let id = ElementId::from(("hv-grid", view.entity_id()));
-        GridElement {
-            view,
-            id,
-            a11y: None,
-        }
-    }
-
-    /// Builds the frame's accessibility declaration when assistive technology is `active`
-    /// (`request_layout` passes `window.is_a11y_active()`), and drops it otherwise: no label is
-    /// read without assistive technology. GPUI reads it through `a11y_role` and
-    /// `write_a11y_info`.
-    fn refresh_a11y(&mut self, active: bool, cx: &mut App) {
-        self.a11y = active.then(|| {
-            self.view.update(cx, |v, cx| {
-                let (role, label) = v.a11y_declaration(cx);
-                let rows = v.data.known_total().unwrap_or(v.data.count.loaded);
-                A11y {
-                    role,
-                    label,
-                    rows: usize::try_from(rows).unwrap_or(usize::MAX),
-                    cols: v.layout.len(),
-                }
-            })
-        });
+        GridElement { view, id }
     }
 }
 
@@ -113,7 +80,6 @@ impl Element for GridElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        self.refresh_a11y(window.is_a11y_active(), cx);
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
         style.size.height = relative(1.0).into();
@@ -160,18 +126,6 @@ impl Element for GridElement {
             window.on_next_frame(move |_, cx| view.update(cx, |_, cx| cx.notify()));
         }
     }
-
-    fn a11y_role(&self) -> Option<Role> {
-        self.a11y.as_ref().map(|a| a.role)
-    }
-
-    fn write_a11y_info(&self, node: &mut accesskit::Node) {
-        if let Some(a) = &self.a11y {
-            node.set_label(a.label.to_string());
-            node.set_row_count(a.rows);
-            node.set_column_count(a.cols);
-        }
-    }
 }
 
 /// The rows the grid scrolls over for `count`: the exact total when known, the skeleton rows
@@ -213,8 +167,14 @@ fn sync_data(v: &mut GridView, frame: &dyn GridFrame, cx: &mut Context<GridView>
             cx.emit(GridEvent::FocusChanged(v.selection.focus()));
         }
     }
+    // ## m3a-t30-results-view: the view draws "No rows" from the frame's state; a flip asks
+    // for a render, so the label follows the frame it belongs to.
+    let showed_no_rows = v.shows_no_rows();
     v.data.count = count;
     v.data.rows = scroll_rows(&count);
+    if v.shows_no_rows() != showed_no_rows {
+        cx.notify();
+    }
 }
 
 /// The row-number gutter's width for `digits` digits: 46 px up to five, one digit advance more
@@ -1025,14 +985,11 @@ mod tests {
         assert_eq!(scroll_rows(&c(12, false, None)), 12);
     }
 
-    /// GPUI's test window never activates accessibility (its `a11y_init` is a no-op), so this
-    /// drives the element's hooks through the same declaration `request_layout` builds, with
-    /// the active branch taken: role `Grid`, the label, the row and column counts (R-M3-32).
+    // ## m3a-t30-results-view: the node moved to the view's root (`GridView::a11y_node`,
+    // tested in `tests/view.rs`); the inner element must not declare a second one.
     #[cfg(feature = "test-support")]
     #[gpui::test]
-    fn the_element_declares_role_grid_while_assistive_technology_is_active(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn the_element_declares_no_node_of_its_own(cx: &mut gpui::TestAppContext) {
         use crate::testing::{FixtureSource, grid_config};
         use hacivat_ui_core::theme::Theme;
         cx.update(|cx| Theme::install(cx, ThemeMode::Dark));
@@ -1041,18 +998,9 @@ mod tests {
             GridView::new(std::rc::Rc::new(source), grid_config("Result 1"), cx)
         });
         vcx.run_until_parked();
-        let mut element = GridElement::new(view.clone());
-        vcx.update(|_, cx| element.refresh_a11y(false, cx));
+        let element = GridElement::new(view.clone());
         assert_eq!(element.a11y_role(), None);
         assert_eq!(view.read_with(vcx, |v, _| v.a11y_label_reads()), 0);
-        vcx.update(|_, cx| element.refresh_a11y(true, cx));
-        assert_eq!(element.a11y_role(), Some(Role::Grid));
-        let mut node = accesskit::Node::new(Role::Grid);
-        element.write_a11y_info(&mut node);
-        assert_eq!(node.label(), Some("Result 1"));
-        assert_eq!(node.row_count(), Some(2));
-        assert_eq!(node.column_count(), Some(3));
-        assert_eq!(view.read_with(vcx, |v, _| v.a11y_label_reads()), 1);
     }
 
     #[test]
