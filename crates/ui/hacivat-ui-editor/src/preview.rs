@@ -747,6 +747,39 @@ mod tests {
         assert_eq!(band(&e, vcx).map(|p| p.units.to_vec()), Some(vec![0..8]));
     }
 
+    /// Each of the two guards on a mapped answer holds on its own: `plan` never draws one outside
+    /// a freeze, and the end of a composition drops it. Review round 1, Critical 2.
+    #[test]
+    fn a_mapped_answer_is_drawn_only_while_frozen() {
+        let snap = Snapshot {
+            buffer: TextBuffer::from_str("SELECT 1; SELECT 2;"),
+            selection: hacivat_text::SelectionSet::single(hacivat_text::SelectionRange {
+                anchor: 3,
+                head: 3,
+                goal_x: None,
+                assoc: Bias::After,
+            }),
+            version: 4,
+        };
+        let mut s = BandState {
+            last: Some(ExecPreview {
+                ranges: smallvec![0..11],
+                state: PreviewState::Units,
+            }),
+            last_version: 4,
+            asked_at: Some(ExecAt::Carets(smallvec![1])),
+            mapped: true,
+            frozen: true,
+            ..BandState::default()
+        };
+        assert!(plan(&s, &snap).is_some(), "frozen: the mapped band");
+        s.frozen = false;
+        assert_eq!(plan(&s, &snap), None, "a mapped answer outside a freeze");
+        s.frozen = true;
+        on_composition(&mut s, false);
+        assert!(s.last.is_none() && !s.mapped && !s.frozen);
+    }
+
     /// Typing, then composing within 50 ms: the answer was not of the text the composition began
     /// on, so it is never mapped into a band, whichever comes first, the freeze or the first
     /// marked text. Review round 1, Critical 2.
