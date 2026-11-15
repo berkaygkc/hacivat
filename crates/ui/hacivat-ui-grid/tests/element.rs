@@ -565,6 +565,35 @@ fn painted_runs_are_recorded_as_data_and_catalog(cx: &mut TestAppContext) {
     );
 }
 
+// ## m3a-t35-shots: a run wider than the room its cell or header leaves is recorded clipped,
+// so the shots harness fails it (a fitting run, ellipsized or not, is not).
+#[gpui::test]
+fn a_run_wider_than_its_cell_is_recorded_clipped(cx: &mut TestAppContext) {
+    // 22 px leaves 2 px inside the cell padding: not even the ellipsis fits.
+    let source = FixtureSource::texts(&[&["alice"], &["carol"]], 22.0);
+    let (_view, vcx) = open(cx, Rc::new(source), 600.0, 300.0);
+    vcx.update(|window, cx| {
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+        window.refresh();
+    });
+    vcx.run_until_parked();
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let cells: Vec<_> = frame
+        .iter()
+        .filter(|r| r.path.ends_with("#cell") && r.painted_px > 0.0)
+        .collect();
+    assert!(!cells.is_empty(), "{frame:?}");
+    assert!(cells.iter().all(|r| r.clipped), "{cells:?}");
+    let headers: Vec<_> = frame
+        .iter()
+        .filter(|r| r.path.ends_with("#header") && r.painted_px > 2.5)
+        .collect();
+    assert!(headers.iter().all(|r| r.clipped), "{headers:?}");
+}
+
 #[gpui::test]
 fn markers_paint_for_null_and_empty(cx: &mut TestAppContext) {
     let columns = vec![hacivat_ui_grid::testing::text_column(0, "v", 160.0)];
