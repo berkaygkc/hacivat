@@ -1,6 +1,11 @@
 # M3a gate record
 
-Task 37 writes this record. Task 36 started the file with the notes the gate needs about the real-app benches (`hacivat-app` examples `b3` and `b1_real`, feature `bench`).
+Task 37 writes this record. Task 36 started the file with the notes the gate needs about the real-app benches (`hacivat-app` examples `b3` and `b1_real`, feature `bench`). It also added the empty table that `cargo xtask bench-report --milestone m3a <dumps>` fills: `bench-report` puts new rows after the last table row anywhere in the file, so this table must stay the file's last table, or the rows must be moved by hand.
+
+## Bench rows
+
+| label | OS | host | build | display | frames | mean fps | p95 ms | p99 ms | max gap ms | gaps > 100 ms | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
 
 ## Bench notes (Task 36)
 
