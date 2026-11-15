@@ -770,7 +770,8 @@ fn a_leading_paren_copy_previews_what_execution_sends() {
         Some(CandidateKind::Statement),
     );
     assert_eq!(p.state, PreviewState::Units);
-    assert_eq!(p.ranges.to_vec(), [0..18]);
+    assert_eq!(p.ranges.len(), 1);
+    assert_eq!(p.ranges[0], 0..18);
 }
 
 // ## m3a-f1-followups
