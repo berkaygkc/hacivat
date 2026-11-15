@@ -17,8 +17,8 @@ use hacivat_ui_editor::FocusedEditor;
 use crate::console::{ConsoleId, Consoles};
 use crate::exec_ui::{console_exec, marks};
 
-/// The key context of the console commands.
-pub(crate) const CONSOLE: &str = "Console";
+/// The key context of the console commands: the console tab's (one constant, Fix round 1).
+pub(crate) const CONSOLE: &str = crate::shell::tabs::CONSOLE_CONTEXT;
 
 /// The console whose editor has the focus, else the one last focused, else the only one.
 pub(crate) fn focused_console(cx: &App) -> Option<ConsoleId> {
@@ -44,8 +44,10 @@ pub(crate) fn focused_console(cx: &App) -> Option<ConsoleId> {
 /// idle release, which no one holds.
 fn running_request(console: ConsoleId, cx: &App) -> Option<u64> {
     let session = Consoles::get(cx, console)?.session.clone()?;
+    let probe = console_exec(cx, console).and_then(|e| e.probe);
     let busy = match session.state().borrow().state {
-        SessionState::Busy { req, .. } if req != 0 => Some(req),
+        // Request 0 is an idle release; the SQL-context probe is Hacivat's own.
+        SessionState::Busy { req, .. } if req != 0 && Some(req) != probe => Some(req),
         _ => None,
     };
     busy.or_else(|| {

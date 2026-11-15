@@ -18,6 +18,8 @@
 pub mod cancel;
 pub mod chooser;
 pub mod close_prompt;
+// ## m3a-t33-exec-ui (fix round 1): the SQL context, known or unknown.
+pub mod context;
 pub mod marks;
 pub mod orchestrator;
 pub mod tx;
@@ -28,7 +30,7 @@ use std::sync::Arc;
 
 use hacivat_exec::{ExecService, ExecUnit, SplitOracle};
 use hacivat_results::MemoryBudget;
-use hacivat_session::session::{RunId, SessionHandle};
+use hacivat_session::session::{RunId, SessionHandle, UnitId};
 use hacivat_ui::menu::PopupMenu;
 use hacivat_ui_core::gpui_surface::{
     AnyView, AnyWindowHandle, App, Entity, Global, Subscription, Task, WeakEntity, Window,
@@ -83,6 +85,10 @@ pub(crate) struct ConsoleExec {
     pub(crate) remembered: Option<CandidateKind>,
     /// The latest Run request; a resolution that lands after a newer one is dropped.
     pub(crate) request: u64,
+    /// The SQL-context probe in flight (its request number): `exec.cancel` leaves it alone.
+    pub(crate) probe: Option<u64>,
+    /// What the console knows of its SQL context.
+    pub(crate) context: context::SqlContext,
     pub(crate) run: Option<ActiveRun>,
     /// The open chooser, and its subscriptions (kept until it closes).
     pub(crate) chooser: Option<Entity<PopupMenu>>,
@@ -90,7 +96,7 @@ pub(crate) struct ConsoleExec {
     /// The chooser's layer view (the menu under its key filter).
     pub(crate) chooser_host: Option<AnyView>,
     /// The unit behind each result tab (`TabKey::unit_ordinal`) and its mark, for Re-run.
-    pub(crate) tab_units: HashMap<u32, (ExecUnit, MarkKey)>,
+    pub(crate) tab_units: HashMap<UnitId, (ExecUnit, MarkKey)>,
     /// The session watcher (SQL context, connected state) and the display setup.
     pub(crate) _tasks: Vec<Task<()>>,
 }
@@ -101,6 +107,8 @@ impl ConsoleExec {
             editor,
             remembered: None,
             request: 0,
+            probe: None,
+            context: context::SqlContext::Pending,
             run: None,
             chooser: None,
             chooser_subscriptions: Vec::new(),
@@ -201,4 +209,9 @@ pub(crate) fn in_workspace_window(
             }
         });
     });
+}
+
+/// What console `console` knows of its SQL context (fix round 1; tests and the toolbar).
+pub fn sql_context(console: ConsoleId, cx: &App) -> context::SqlContext {
+    console_exec(cx, console).map_or(context::SqlContext::Pending, |e| e.context)
 }

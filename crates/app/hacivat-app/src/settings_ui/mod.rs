@@ -482,10 +482,11 @@ fn open_restart_dialog(window: &mut Window, cx: &mut App) {
     cx.subscribe(&dialog, move |_, event: &DialogEvent, cx| {
         keep_alive.take();
         if matches!(event, DialogEvent::Pressed(0)) {
-            // After this update: the platform may quit synchronously.
+            // ## m3a-t33-exec-ui (named exception, T33 review C3): through the quit guard (an
+            // open user transaction prompts first); the restart itself is deferred to after
+            // this update and flushes the pending writes.
             cx.defer(|cx| {
-                crate::shell::flush_pending_writes(cx);
-                cx.restart();
+                crate::commands::request_restart(cx);
             });
         }
     })

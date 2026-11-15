@@ -93,12 +93,19 @@ pub(crate) fn follow_status(
         ended: false,
     };
     cx.spawn(async move |cx| {
+        let mut run = None;
         loop {
             let st = status.borrow_and_update().clone();
+            run = st.run.or(run);
             cx.update(|cx| apply(&mut t, &st, cx));
             if status.changed().await.is_err() {
                 break;
             }
+        }
+        // Fix round 1 (Minor 11): the status went away without a summary (the service dropped
+        // the run): the run is over all the same, so Run is free again.
+        if !t.ended {
+            cx.update(|cx| run_ended(t.console, run, false, cx));
         }
     })
 }

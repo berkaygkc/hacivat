@@ -85,40 +85,32 @@ pub(crate) fn open(
     };
     let remembered = exec.remembered;
     let preselect = preselect.min(candidates.len().saturating_sub(1));
-    // The check marks the remembered kind (mock); the highlight starts on the first checked
-    // row, which must be the preselected one: when the remembered kind is not what Run
-    // preselects, the preselected row carries the check.
-    let checked = |i: usize, c: &Candidate| {
-        let remembered_row = candidates.iter().position(|c| Some(c.kind) == remembered);
-        match remembered_row {
-            Some(r) if r == preselect => Some(c.kind) == remembered,
-            _ => i == preselect && i != 0,
-        }
-    };
+    // The check marks the remembered kind only (mock); the highlight is set to Run's
+    // preselected row after the menu is built (Fix round 1, Minor 13).
     let items: Vec<MenuItemSpec> = candidates
         .iter()
         .enumerate()
         .map(|(i, c)| {
             let kind = kind_id(c.kind);
             let count = c.units.len();
+            // One Fluent message per row (Fix round 1, Minor 13): the kind, and its count of
+            // statements when it has several.
             let label: TextFn = Rc::new(move |cx: &App| {
-                let kind = message(cx, kind, vec![]);
-                if count > 1 {
-                    let n = message(
-                        cx,
-                        "hv-chooser-count",
-                        vec![("n", ArgValue::Count(count as u64))],
-                    );
-                    SharedString::from(format!("{kind} · {n}"))
-                } else {
-                    kind
-                }
+                let kind = message(cx, kind, vec![]).to_string();
+                message(
+                    cx,
+                    "hv-chooser-row",
+                    vec![
+                        ("kind", ArgValue::Text(kind)),
+                        ("n", ArgValue::Count(count as u64)),
+                    ],
+                )
             });
             let sql = SharedString::from(c.label.clone());
             MenuItemSpec::new(label, format!("{ACTION_PREFIX}{i}"))
                 .hint(Rc::new(move |_: &App| sql.clone()))
                 .hint_source(TextSource::Data)
-                .checked(checked(i, c))
+                .checked(remembered.is_some() && Some(c.kind) == remembered)
         })
         .collect();
     let caret = editor.read(cx).caret_bounds();
@@ -130,11 +122,15 @@ pub(crate) fn open(
         let Some(ws) = window.root::<Workspace>().flatten() else {
             return;
         };
+        // Taken before the menu takes the focus, so closing it gives the focus back to the
+        // editor (Fix round 1, I4).
+        let restore = window.focused(cx);
         let menu = PopupMenu::new(anchor_of(caret), items, window, cx);
         menu.update(cx, |m, _| {
             m.set_access_keys(false);
             m.set_min_width(px(CHOOSER_WIDTH_PX));
             m.title(crate::l10n_global::text_fn_id("hv-chooser-title"));
+            m.select(preselect);
         });
         // The band follows the highlighted row.
         let follow = {
@@ -180,7 +176,15 @@ pub(crate) fn open(
             let ranges = ranges_of(c);
             editor.update(cx, |e, cx| e.set_preview_override(Some(ranges), cx));
         }
-        push(console, &ws, menu, vec![follow, chosen], window, cx);
+        push(
+            console,
+            &ws,
+            menu,
+            vec![follow, chosen],
+            restore,
+            window,
+            cx,
+        );
     });
 }
 
@@ -200,12 +204,15 @@ pub(crate) fn open_uncertain(console: ConsoleId, reasons: Vec<&'static str>, cx:
         items.push(row(crate::l10n_global::text_fn_id(reason)));
     }
     items.push(row(Rc::new(|cx: &App| {
-        let key = crate::shell::keymap_state::shortcut_label(cx, "editor.run").unwrap_or_default();
-        message(
-            cx,
-            "hv-chooser-uncertain-fix",
-            vec![("key", ArgValue::Text(key))],
-        )
+        // Without a Run shortcut the sentence names none (Fix round 1, Minor 13).
+        match crate::shell::keymap_state::shortcut_label(cx, "editor.run") {
+            Some(key) => message(
+                cx,
+                "hv-chooser-uncertain-fix",
+                vec![("key", ArgValue::Text(key))],
+            ),
+            None => message(cx, "hv-chooser-uncertain-fix-unbound", vec![]),
+        }
     })));
     let Some(window) = workspace_window(cx) else {
         return;
@@ -214,6 +221,7 @@ pub(crate) fn open_uncertain(console: ConsoleId, reasons: Vec<&'static str>, cx:
         let Some(ws) = window.root::<Workspace>().flatten() else {
             return;
         };
+        let restore = window.focused(cx);
         let menu = PopupMenu::new(anchor_of(caret), items, window, cx);
         menu.update(cx, |m, _| {
             m.set_access_keys(false);
@@ -223,7 +231,7 @@ pub(crate) fn open_uncertain(console: ConsoleId, reasons: Vec<&'static str>, cx:
         let closed = cx.subscribe(&menu, move |_menu, _: &PopupMenuEvent, cx| {
             close(console, cx)
         });
-        push(console, &ws, menu, vec![closed], window, cx);
+        push(console, &ws, menu, vec![closed], restore, window, cx);
     });
 }
 
@@ -234,6 +242,7 @@ fn push(
     ws: &Entity<Workspace>,
     menu: Entity<PopupMenu>,
     subscriptions: Vec<hacivat_ui_core::gpui_surface::Subscription>,
+    restore: Option<hacivat_ui_core::gpui_surface::FocusHandle>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -242,7 +251,7 @@ fn push(
         id: CHOOSER_LAYER,
         context: MENU_CONTEXT,
         view: host.clone().into(),
-        restore_focus: None,
+        restore_focus: restore,
         modal: false,
     };
     ws.update(cx, |ws, cx| ws.push_layer(layer, window, cx));

@@ -1690,10 +1690,14 @@ hv-chooser-largest = Largest statement
 hv-chooser-from-caret = From caret
 # Chooser kind: every statement of the script.
 hv-chooser-whole = Whole script
-# A chooser row's count of statements, after its kind.
+# A chooser row: the candidate's kind, and its count of statements when it runs several.
 # Variables:
+#   $kind (String) - the kind (an hv-chooser-statement, -largest, -from-caret, -whole or -subquery message), e.g. "Whole script".
 #   $n (Number) - the statements the candidate runs, e.g. 5.
-hv-chooser-count = { $n } statements
+hv-chooser-row = { $n ->
+        [one] { $kind }
+       *[other] { $kind } · { $n } statements
+    }
 # The chooser's state when Run sent nothing because a statement boundary is uncertain.
 hv-chooser-uncertain-title = Boundary uncertain
 # The first line under "Boundary uncertain"; the reason follows on its own line.
@@ -1702,6 +1706,8 @@ hv-chooser-uncertain-body = Hacivat can't tell exactly where this statement ends
 # Variables:
 #   $key (String) - the Run shortcut, e.g. "⌘↵".
 hv-chooser-uncertain-fix = Select exactly the text to run, then press { $key }.
+# The last line under "Boundary uncertain" when no key runs the statement.
+hv-chooser-uncertain-fix-unbound = Select exactly the text to run, then run it.
 # The open-transaction prompt's title when a console or the app closes.
 # Variables:
 #   $name (String) - the console's title (the connection's name), e.g. "orders-dev".
@@ -1710,8 +1716,20 @@ hv-tx-close-title = { $n ->
         [one] { $name } has an open transaction with { $n } statement
        *[other] { $name } has an open transaction with { $n } statements
     }
-# The open-transaction prompt's body when a console closes.
-hv-tx-close-body = Closing this console ends its session. Commit keeps the changes; Roll back discards them.
+# The open-transaction prompt's body when a console closes (its transaction ends with it, on whichever session it runs).
+hv-tx-close-body = Closing this console ends its transaction. Commit keeps the changes; Roll back discards them.
+# The open-transaction prompt's body when the app restarts.
+hv-tx-restart-body = Restarting ends the session. Commit keeps the changes; Roll back discards them.
+# Button: commit the transaction, then restart.
+hv-tx-commit-restart = Commit and restart
+# Button: roll back the transaction, then restart.
+hv-tx-rollback-restart = Roll back and restart
+# The open-transaction prompt's body when the console's connection is about to change (released or replaced).
+hv-tx-release-body = The console's connection is about to change, which ends this transaction. Commit keeps the changes; Roll back discards them.
+# Button: commit the transaction, then go on (the connection changes).
+hv-tx-commit-continue = Commit and continue
+# Button: roll back the transaction, then go on (the connection changes).
+hv-tx-rollback-continue = Roll back and continue
 # The open-transaction prompt's body when the app quits.
 hv-tx-quit-body = Quitting ends the session. Commit keeps the changes; Roll back discards them.
 # Button: commit the transaction, then close the console.

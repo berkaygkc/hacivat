@@ -4,9 +4,10 @@
 //!
 //! - **Attach.** [`attach`] subscribes to the editor and follows the console's session: when it
 //!   holds a connection (at attach, and again after a reconnect) the SQL context is probed
-//!   (`sqlctx::probe_sql` as an internal `Request::Exec` with `ExecOpts::values`, R-M3-39) and
-//!   set on the language service (`set_sql_context`, then `set_doc_context(connected)`, in that
-//!   order); while it holds none the editor is told it is not connected. The console's results
+//!   (`exec_ui::context`: a value-returning path on read-write and read-only sessions alike;
+//!   no value is an unknown context, never the defaults; R-M3-39) and set on the language
+//!   service (`set_sql_context`, then `set_doc_context(connected)`, in that order); while it
+//!   holds none the editor is told it is not connected. The console's results
 //!   get its format locale, display zone and engine (`ConsoleResults::set_display`).
 //! - **Run.** The analysis Run reuses is the language service's `doc_snapshot` at exactly the
 //!   request's version, else the request's own snapshot analysed on the background executor
@@ -14,15 +15,15 @@
 //!   [`NoOracle`] (module docs of `exec_ui`). Then, on the UI thread: units run; `Ask` opens
 //!   the chooser; nothing to run, an uncertain boundary, an unsupported client command and a
 //!   refused unit send nothing and say why. A console whose session holds no connection starts
-//!   its profile's connect and runs nothing (R-M3-45). Until its SQL context is known a console
-//!   runs nothing ("still reading").
+//!   its profile's connect and runs nothing (R-M3-45). Until its SQL context is read a console
+//!   runs nothing ("still reading"); with an unknown context it sends only what every lexing
+//!   mode combination resolves alike.
 //! - **After a run** whose units hold `SET`, `RESET`, `DISCARD`, `ROLLBACK` or `ABORT`, the SQL
 //!   context is probed again (`sqlctx::needs_reprobe`).
 
 use std::sync::Arc;
 
-use hacivat_driver::ExecOpts;
-use hacivat_exec::sqlctx::{dialect_ctx, needs_reprobe, probe_sql};
+use hacivat_exec::sqlctx::needs_reprobe;
 use hacivat_exec::{
     ErrorView, ExecUnit, LogMsg, RefuseReason, Resolution, RunAction, RunRequest, session_live,
     uncertain_message_id,
@@ -31,7 +32,7 @@ use hacivat_proto::DbmsKind;
 use hacivat_results::FetchPolicy;
 use hacivat_session::LiveState;
 use hacivat_session::profile::Profile;
-use hacivat_session::session::{ExecOrigin, Request, SessionEvent, SessionHandle};
+use hacivat_session::session::{SessionEvent, SessionHandle, UnitId};
 use hacivat_sql_editor::{RopeChunks, effective_flavor, exec_points};
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{App, Entity, Window};
@@ -41,6 +42,7 @@ use sql_dialect::{ClientFlavor, DialectCtx};
 use sql_split::SqlDocument;
 
 use crate::console::{ConsoleId, Consoles};
+use crate::exec_ui::context::{self, SqlContext};
 use crate::exec_ui::{
     ActiveRun, ConsoleExec, ExecUi, NoOracle, chooser, console_exec, exec_service, marks,
     update_console_exec,
@@ -72,8 +74,15 @@ pub fn attach(console: ConsoleId, editor: &Entity<EditorView>, window: &mut Wind
 /// Console `console` has a new session (Task 32's rebind, a new connection of its profile): its
 /// SQL context is read again from it, and Run waits for that (no split under the old one).
 pub fn rebind(console: ConsoleId, cx: &mut App) {
+    // Fix round 1 (Minor 11): a chooser or a resolution of the old session's context goes.
+    chooser::close(console, cx);
     Consoles::update(cx, console, |s| s.sql = None);
-    let had = update_console_exec(cx, console, |e| e._tasks.clear()).is_some();
+    let had = update_console_exec(cx, console, |e| {
+        e.request += 1;
+        e.context = SqlContext::Pending;
+        e._tasks.clear();
+    })
+    .is_some();
     if had {
         follow_session(console, cx);
         set_display(console, cx);
@@ -156,53 +165,24 @@ fn set_connected(console: ConsoleId, connected: bool, cx: &mut App) {
 /// Probes the console's SQL context (R-M3-39) and sets it; a session that answers nothing
 /// (closed, lost) leaves the context as it was, to be probed at the next connection.
 pub(crate) fn probe_context(console: ConsoleId, cx: &mut App) {
-    let Some(profile) = profile_of(cx, console) else {
-        return;
-    };
-    let Some(session) = live_session(cx, console) else {
-        return;
-    };
-    let kind = profile.engine;
-    let version = cx
-        .try_global::<crate::connections::ConnectionsModel>()
-        .and_then(|m| match m.live(profile.id) {
-            LiveState::Connected(info) => info.server.version.clone(),
-            _ => None,
-        });
-    let Some(sql) = probe_sql(kind) else {
-        set_context(console, dialect_ctx(kind, version.as_ref(), None), cx);
-        return;
-    };
-    let ticket = session.submit(Request::Exec {
-        sql: sql.to_string(),
-        opts: ExecOpts::values(1),
-        origin: ExecOrigin::Internal { idempotent: true },
-    });
-    cx.spawn(async move |cx| {
-        let row = match ticket.reply.await {
-            Ok(Ok(summary)) => Some(
-                summary
-                    .rows
-                    .first()
-                    .and_then(|r| r.first())
-                    .cloned()
-                    .flatten(),
-            ),
-            // The server answered with an error: its modes are its defaults.
-            Ok(Err(e)) if e.kind == hacivat_session::session::ExecErrorKind::Db => Some(None),
-            _ => None,
-        };
-        if let Some(row) = row {
-            cx.update(|cx| {
-                set_context(
-                    console,
-                    dialect_ctx(kind, version.as_ref(), row.as_deref()),
-                    cx,
-                );
-            });
+    // Fix round 1 (T31 finding): read through a path that returns values on a read-only
+    // session, and an unanswered probe is Unknown, never the defaults (`context`).
+    context::probe(console, cx, apply_context);
+}
+
+/// Takes a probe's outcome: a known context is set; an unknown one keeps Run fail-closed
+/// (`SqlContext::Unknown`: only what every mode combination resolves alike is sent), while the
+/// language service draws under the dialect's defaults.
+fn apply_context(console: ConsoleId, ctx: SqlContext, cx: &mut App) {
+    update_console_exec(cx, console, |e| e.context = ctx);
+    match ctx {
+        SqlContext::Known(ctx) => set_context(console, ctx, cx),
+        SqlContext::Unknown(base) => {
+            set_context(console, base, cx);
+            Consoles::update(cx, console, |s| s.sql = None);
         }
-    })
-    .detach();
+        SqlContext::Pending => {}
+    }
 }
 
 /// Sets the console's SQL context: the registry, the language service (before the connected
@@ -284,6 +264,43 @@ pub fn resolve_for_run(
     }
 }
 
+/// Whether two resolutions of the same place send (or offer) exactly the same text: the same
+/// units, or the same chooser over the same ranges with the same preselected row, or both
+/// nothing to run. Anything that sends nothing never matches a runnable answer.
+fn same_runnable(a: &Resolution, b: &Resolution) -> bool {
+    let units = |u: &[ExecUnit]| -> Vec<(std::ops::Range<usize>, std::sync::Arc<str>)> {
+        u.iter()
+            .map(|u| (u.doc_range.clone(), u.text.clone()))
+            .collect()
+    };
+    let asked =
+        |c: &[sql_split::exec_range::Candidate]| -> Vec<Vec<sql_split::exec_range::TextRange>> {
+            c.iter()
+                .map(|c| c.units.iter().map(|u| u.range).collect())
+                .collect()
+        };
+    match (a, b) {
+        (Resolution::Units(x), Resolution::Units(y)) => units(x) == units(y),
+        (
+            Resolution::Ask {
+                candidates: x,
+                preselect: px,
+            },
+            Resolution::Ask {
+                candidates: y,
+                preselect: py,
+            },
+        ) => px == py && asked(x) == asked(y),
+        (Resolution::NothingToRun, Resolution::NothingToRun) => true,
+        (Resolution::Units(_) | Resolution::Ask { .. } | Resolution::NothingToRun, _) => false,
+        // Neither sends anything.
+        _ => !matches!(
+            b,
+            Resolution::Units(_) | Resolution::Ask { .. } | Resolution::NothingToRun
+        ),
+    }
+}
+
 /// Whether the band `p` shows exactly what `run` does.
 pub fn agrees(p: &hacivat_ui_editor::ExecPreview, run: &Resolution) -> bool {
     use hacivat_ui_editor::PreviewState;
@@ -332,6 +349,7 @@ fn on_execute(console: ConsoleId, req: ExecRequest, cx: &mut App) {
         return;
     }
     let remembered = exec.remembered;
+    let context = exec.context;
     let Some(profile) = profile_of(cx, console) else {
         return;
     };
@@ -339,10 +357,16 @@ fn on_execute(console: ConsoleId, req: ExecRequest, cx: &mut App) {
         connect_first(&profile, cx);
         return;
     }
-    let Some(ctx) = state.sql else {
-        // The SQL context is still being read: nothing is split under a guessed dialect.
-        say(console, "hv-editor-describe-pending", cx);
-        return;
+    let (ctx, unknown) = match context {
+        SqlContext::Known(ctx) => (ctx, false),
+        // Fix round 1 (T31 finding): the modes are unknown; Run sends only what every mode
+        // combination resolves alike.
+        SqlContext::Unknown(base) => (base, true),
+        SqlContext::Pending => {
+            // The SQL context is still being read: nothing is split under a guessed dialect.
+            say(console, "hv-editor-describe-pending", cx);
+            return;
+        }
     };
     let request = update_console_exec(cx, console, |e| {
         e.request += 1;
@@ -356,11 +380,25 @@ fn on_execute(console: ConsoleId, req: ExecRequest, cx: &mut App) {
     let buffer = req.snapshot.buffer.clone();
     let (at, action) = (req.at.clone(), req.action);
     let resolve = cx.background_executor().spawn(async move {
-        let doc = reused.unwrap_or_else(|| {
+        let analyse = |ctx: DialectCtx| {
             let flavor = effective_flavor(&ctx, ClientFlavor::None);
-            SqlDocument::from_chunks(&RopeChunks(buffer), ctx, flavor).snapshot()
-        });
+            SqlDocument::from_chunks(&RopeChunks(buffer.clone()), ctx, flavor).snapshot()
+        };
+        let doc = reused.unwrap_or_else(|| analyse(ctx));
         let r = resolve_for_run(&doc, &at, action, remembered);
+        if !unknown {
+            return (doc, r);
+        }
+        // Unknown modes: every combination must resolve alike, else nothing is sent.
+        let alike = context::variants(&ctx).into_iter().all(|v| {
+            let other = analyse(v);
+            same_runnable(&r, &resolve_for_run(&other, &at, action, remembered))
+        });
+        let r = if alike {
+            r
+        } else {
+            Resolution::Uncertain(Vec::new())
+        };
         (doc, r)
     });
     let version = req.snapshot.version;
@@ -384,6 +422,17 @@ fn dispatch(
     resolution: Resolution,
     cx: &mut App,
 ) {
+    // Fix round 1 (C1): the chooser and the uncertain state show ranges of the text Run was
+    // asked on; after an edit they would sit over other text, and Enter would send what the
+    // band no longer shows. They are dropped (nothing is sent; the user asks again). Units
+    // still run: they are exactly what the band showed when Run was pressed, and their marks
+    // are rebased through the edit.
+    let current = console_exec(cx, console)
+        .and_then(|e| e.editor.upgrade())
+        .map(|e| e.read(cx).snapshot().version);
+    if current != Some(version) && !matches!(resolution, Resolution::Units(_)) {
+        return;
+    }
     match resolution {
         Resolution::Units(units) => start_run(console, version, units, cx),
         Resolution::Ask {
@@ -521,14 +570,26 @@ pub(crate) fn start_run(console: ConsoleId, version: u64, units: Vec<ExecUnit>, 
             cx,
         );
     });
+    // The units the console's result tabs show now (Re-run looks them up; Fix round 1, C2).
+    let shown: Vec<UnitId> = state
+        .results
+        .as_ref()
+        .map(|r| r.read(cx).tabs().iter().map(|t| t.unit()).collect())
+        .unwrap_or_default();
     let status_rx = ticket.status.clone();
     let status = marks::follow_status(console, ticket.status, keys.clone(), cx);
     let results = marks::follow_results(console, ticket.results, cx);
     update_console_exec(cx, console, |e| {
+        // Fix round 1 (C2): by the unit's own ID, so a result tab's Re-run finds its unit.
         for (i, u) in units.iter().enumerate() {
-            let ordinal = u32::try_from(i).unwrap_or(u32::MAX);
-            e.tab_units.insert(ordinal, (u.clone(), keys[i]));
+            let id = UnitId {
+                run: ticket.run,
+                ordinal: u32::try_from(i).unwrap_or(u32::MAX),
+            };
+            e.tab_units.insert(id, (u.clone(), keys[i]));
         }
+        e.tab_units
+            .retain(|id, _| id.run == ticket.run || shown.contains(id));
         e.run = Some(ActiveRun {
             run: ticket.run,
             seq: ticket.seq,
@@ -584,7 +645,20 @@ fn rerun(console: ConsoleId, ordinal: u32, cx: &mut App) {
     if exec.run.as_ref().is_some_and(|r| !r.ended) {
         return;
     }
-    let Some((unit, key)) = exec.tab_units.get(&ordinal).cloned() else {
+    // Fix round 1 (C2): the unit behind *this* tab (its own `ResultEntry::unit`), never the
+    // last run's unit at the same ordinal (which may have made no tab: a DELETE after the
+    // SELECT whose rows the tab shows).
+    let tab_unit = Consoles::get(cx, console)
+        .and_then(|s| s.results.clone())
+        .and_then(|r| {
+            let r = r.read(cx);
+            r.tabs()
+                .iter()
+                .find(|t| t.key().unit_ordinal == ordinal && t.key().result_ordinal == 0)
+                .map(|t| t.unit())
+        });
+    let Some((unit, key)) = tab_unit.and_then(|id| exec.tab_units.get(&id).cloned()) else {
+        say(console, "hv-exec-rerun-edited", cx);
         return;
     };
     let Some(editor) = exec.editor.upgrade() else {

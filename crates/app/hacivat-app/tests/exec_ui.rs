@@ -9,6 +9,7 @@ use std::sync::Arc;
 use gpui::{Entity, TestAppContext, VisualTestContext};
 use hacivat_app::console::{ConsoleId, Consoles};
 use hacivat_app::exec_ui::chooser;
+use hacivat_app::exec_ui::context::SqlContext;
 use hacivat_driver::fake::{
     FakeDriver, FakeExec, FakeQuery, FakeResultSet, FakeRows, FakeTypedCall,
 };
@@ -61,7 +62,7 @@ fn console_with(
     let id = register_test_console(vcx, profile, session.clone());
     wait_until(vcx, "the console's SQL context", |vcx| {
         vcx.cx
-            .read(|cx| Consoles::get(cx, id).is_some_and(|s| s.sql.is_some()))
+            .read(|cx| hacivat_app::exec_ui::sql_context(id, cx) != SqlContext::Pending)
     });
     let editor = vcx.cx.read(|cx| {
         Consoles::get(cx, id)
@@ -81,7 +82,34 @@ fn console_with(
 /// A PostgreSQL fake whose connections track transactions (Hacivat's `BEGIN` around a read
 /// head's cursor needs it: a suspendable portal outside a transaction is refused, P5).
 fn pg() -> FakeDriver {
-    FakeDriver::new(DbmsKind::Postgres).tracks_transactions()
+    FakeDriver::new(DbmsKind::Postgres)
+        .tracks_transactions()
+        .exec(probes("SHOW standard_conforming_strings", "on"))
+}
+
+/// The SQL-context probe's answers on a read-write session (`ExecOpts::values`), enough for
+/// the attach and a few reprobes.
+fn probes(prefix: &'static str, value: &str) -> Vec<FakeExec> {
+    (0..8)
+        .map(|_| FakeExec {
+            prefix,
+            result: Ok(ExecSummary {
+                rows: vec![vec![Some(value.to_string())]],
+                row_count: 1,
+                ..ExecSummary::default()
+            }),
+            delay: std::time::Duration::ZERO,
+            tx_after: None,
+            panics: false,
+        })
+        .collect()
+}
+
+/// A MySQL fake whose `sql_mode` is `sql_mode` (read-write sessions).
+fn mysql(sql_mode: &str) -> FakeDriver {
+    FakeDriver::new(DbmsKind::MySql)
+        .tracks_transactions()
+        .exec(probes("SELECT @@SESSION.sql_mode", sql_mode))
 }
 
 fn pg_console(cx: &mut TestAppContext, fake: FakeDriver) -> Console {
@@ -135,6 +163,22 @@ impl Console {
         wait_until(self.vcx, "the queries to be sent", |_| {
             self.queries().len() >= n
         });
+    }
+
+    /// Everything Run had sent has reached the session: a sentinel internal statement, sent
+    /// now, is answered only after every request queued before it (Fix round 1, I6: a barrier,
+    /// not a sleep).
+    fn barrier(&self) {
+        self.vcx.run_until_parked();
+        let ticket = self
+            .session
+            .submit(hacivat_session::session::Request::Exec {
+                sql: "SELECT 'barrier'".to_string(),
+                opts: hacivat_driver::ExecOpts::default(),
+                origin: hacivat_session::session::ExecOrigin::Internal { idempotent: true },
+            });
+        let _ = futures::executor::block_on(ticket.reply);
+        self.vcx.run_until_parked();
     }
 
     fn chooser_open(&self) -> bool {
@@ -285,7 +329,7 @@ fn escape_closes_the_chooser_and_sends_nothing(cx: &mut TestAppContext) {
     assert!(c.chooser_open());
     c.keys("escape");
     assert!(!c.chooser_open());
-    settle(c.vcx, std::time::Duration::from_millis(50));
+    c.barrier();
     assert!(c.queries().is_empty());
     assert!(c.band().is_none_or(|b| !b.from_override));
     stop_core_runtime_test(cx);
@@ -302,7 +346,7 @@ fn a_modified_enter_never_chooses(cx: &mut TestAppContext) {
     c.keys("cmd-enter");
     c.keys("shift-enter");
     c.keys("ctrl-enter");
-    settle(c.vcx, std::time::Duration::from_millis(50));
+    c.barrier();
     assert!(c.queries().is_empty(), "{:?}", c.queries());
     assert!(c.chooser_open());
     c.keys("enter");
@@ -373,7 +417,7 @@ fn chooser_assigns_no_access_keys(cx: &mut TestAppContext) {
     // "Whole script" and "Statement" start with these letters; on Windows and Linux a menu
     // would choose by them. The labels are SQL text: typing never runs a statement (P15).
     c.keys("w s 1");
-    settle(c.vcx, std::time::Duration::from_millis(50));
+    c.barrier();
     assert!(c.chooser_open(), "letters choose nothing");
     assert!(c.queries().is_empty());
     stop_core_runtime_test(cx);
@@ -384,11 +428,11 @@ fn ambiguous_resolution_sends_nothing(cx: &mut TestAppContext) {
     let mut c = console_with(
         cx,
         profile("shop-dev", DbmsKind::MySql),
-        FakeDriver::new(DbmsKind::MySql),
+        mysql("STRICT_TRANS_TABLES"),
     );
     c.set_text("SELECT 1 /*! ; */ ;");
     c.run_at(0);
-    settle(c.vcx, std::time::Duration::from_millis(50));
+    c.barrier();
     assert!(c.fake.typed_log().is_empty(), "nothing reached the session");
     assert!(c.chooser_open(), "the chooser shows its uncertain state");
     assert_eq!(c.chooser_selected(), None, "with no run item at all");
@@ -408,7 +452,7 @@ fn ambiguous_resolution_sends_nothing(cx: &mut TestAppContext) {
     );
     // Enter has nothing to run.
     c.keys("enter");
-    settle(c.vcx, std::time::Duration::from_millis(50));
+    c.barrier();
     assert!(c.fake.typed_log().is_empty());
     stop_core_runtime_test(cx);
 }
@@ -430,13 +474,24 @@ fn read_only_denial_marks_the_gutter_failed_with_its_reason(cx: &mut TestAppCont
         tx_after: None,
         panics: false,
     };
-    let c = console_with(cx, p, pg().exec(vec![canary]));
+    // The probe is a typed run on a read-only session (fix round 1): its row.
+    let probe = FakeQuery {
+        prefix: "SHOW standard_conforming_strings",
+        sets: vec![text_row("standard_conforming_strings", "on")],
+        ..Default::default()
+    };
+    let c = console_with(cx, p, pg().exec(vec![canary]).queries(vec![probe]));
     c.set_text("BEGIN");
     c.run_at(0);
     c.wait_marks("the denial", |m| {
         matches!(m, [ExecMarkState::Failed { sqlstate: None }])
     });
-    assert!(c.queries().is_empty(), "nothing was sent");
+    // Only the SQL-context probe ran typed; the denied BEGIN was never sent.
+    assert_eq!(
+        c.queries(),
+        ["SHOW standard_conforming_strings"],
+        "nothing was sent"
+    );
     enable_registry(c.vcx);
     in_window(c.vcx, |window, _| window.refresh());
     c.vcx.run_until_parked();
@@ -493,10 +548,8 @@ fn cancel_reaches_the_session_and_stop_fetching_keeps_rows(cx: &mut TestAppConte
         c.mark_states().as_slice(),
         [ExecMarkState::Running { .. }]
     ));
-    assert!(
-        run(c.vcx, "exec.cancel"),
-        "exec.cancel runs while a run streams"
-    );
+    // The chord, through the keymap and the Console context (Fix round 1, Minor 15).
+    c.keys(CANCEL_CHORD);
     wait_until(c.vcx, "the run to end", |_| {
         let m = c.mark_states();
         m.len() == 1
@@ -515,32 +568,34 @@ fn cancel_reaches_the_session_and_stop_fetching_keeps_rows(cx: &mut TestAppConte
 
 #[gpui::test]
 fn the_ui_thread_awaits_only_tokio_sync_receivers(cx: &mut TestAppContext) {
-    let gated = FakeQuery {
+    // The statement's first answer is a minute away: only a cancel ends it.
+    let held = FakeQuery {
         prefix: "SELECT 42",
-        first_delay: std::time::Duration::from_millis(300),
+        first_delay: std::time::Duration::from_secs(60),
         ..Default::default()
     };
-    let c = pg_console(cx, pg().queries(vec![gated]));
+    let c = pg_console(cx, pg().queries(vec![held]));
     c.set_text("SELECT 42");
     c.run_at(0);
     c.wait_queries(1);
-    // The statement is still running on the core runtime: the UI thread is free (it parked
-    // without waiting for the reply), it takes edits, and the mark says Running.
-    let started = std::time::Instant::now();
+    c.wait_marks("the statement to run", |m| {
+        matches!(m, [ExecMarkState::Running { .. }])
+    });
+    // The reply is far off on the core runtime, and the UI thread is free (Fix round 1, I6:
+    // observed, not timed): an edit commits, and the mark still says Running.
+    let before = c.vcx.cx.read(|cx| c.editor.read(cx).snapshot().version);
+    c.select(9..9);
+    c.focus_editor();
+    c.vcx.simulate_input(" -- still running");
     c.vcx.run_until_parked();
-    assert!(started.elapsed() < std::time::Duration::from_millis(250));
+    let after = c.vcx.cx.read(|cx| c.editor.read(cx).snapshot().version);
+    assert!(after > before, "the edit committed while the statement ran");
     assert!(matches!(
         c.mark_states().as_slice(),
-        [ExecMarkState::Running { .. } | ExecMarkState::Queued]
+        [ExecMarkState::Running { .. }]
     ));
-    c.vcx.cx.update(|cx| {
-        c.editor.update(cx, |e, cx| {
-            e.select_range(9..9, cx);
-        });
-    });
-    c.wait_marks("the statement to finish", |m| {
-        m.len() == 1 && succeeded(&m[0])
-    });
+    assert!(run(c.vcx, "exec.cancel"));
+    c.wait_marks("the cancel", |m| matches!(m, [ExecMarkState::Cancelled]));
     stop_core_runtime_test(cx);
 }
 
@@ -751,7 +806,7 @@ fn quit_with_an_open_transaction_asks_and_cancel_keeps_the_app(cx: &mut TestAppC
 
 #[gpui::test]
 fn close_prompt_on_a_failed_transaction_offers_roll_back_only(cx: &mut TestAppContext) {
-    let c = console_in_transaction(cx, true);
+    let mut c = console_in_transaction(cx, true);
     enable_registry(c.vcx);
     close_console_tab(&c);
     assert!(layer_ids(c.vcx).contains(&"dialog"));
@@ -765,8 +820,33 @@ fn close_prompt_on_a_failed_transaction_offers_roll_back_only(cx: &mut TestAppCo
         buttons.iter().any(|b| b == "Roll back and close"),
         "{buttons:?}"
     );
-    // The commit command is not offered either.
-    assert!(!run(c.vcx, "tx.commit") || c.tx().status == TxStatus::Failed);
+    assert_eq!(
+        c.vcx.cx.read(
+            |cx| hacivat_app::exec_ui::close_prompt::open_prompt_dialog(cx)
+                .map(|d| d.read(cx).role())
+        ),
+        Some(gpui::Role::AlertDialog)
+    );
+    // Escape keeps the console; the commit command is not offered on a failed transaction.
+    c.keys("escape");
+    assert!(!layer_ids(c.vcx).contains(&"dialog"));
+    assert!(
+        !run(c.vcx, "tx.commit"),
+        "no Commit on a failed transaction"
+    );
+    // Roll back and close: ROLLBACK, then the tab goes.
+    let tabs = tab_count(c.vcx);
+    close_console_tab(&c);
+    c.keys("shift-tab");
+    c.keys("enter");
+    wait_until(c.vcx, "the console to close", |vcx| {
+        tab_count(vcx) == tabs - 1
+    });
+    assert!(
+        c.fake.executed().iter().any(|s| s.trim() == "ROLLBACK"),
+        "{:?}",
+        c.fake.executed()
+    );
     stop_core_runtime_test(cx);
 }
 
@@ -901,12 +981,308 @@ fn physical_memory_is_known_on_this_platform() {
     assert!(hacivat_ui_core::platform::physical_memory_bytes().unwrap_or(0) > 1 << 30);
 }
 
+// ---- fix round 1 ----------------------------------------------------------------------------
+
+/// `exec.cancel`'s chord (R-M3-38): `cmd-.` on macOS, `ctrl-f2` on Windows and Linux.
+#[cfg(target_os = "macos")]
+const CANCEL_CHORD: &str = "cmd-.";
+#[cfg(not(target_os = "macos"))]
+const CANCEL_CHORD: &str = "ctrl-f2";
+
+/// C1: Run asked on one text and answered after an edit never opens the chooser (or its
+/// uncertain state) over the new text: the band would show other text than Enter sends.
+#[gpui::test]
+fn a_chooser_asked_before_an_edit_never_opens(cx: &mut TestAppContext) {
+    let c = pg_console(cx, pg());
+    c.set_text(TWO);
+    c.select(0..0);
+    let editor = c.editor.clone();
+    // Run, then an edit in the same turn, before the resolution lands.
+    in_window(c.vcx, |window, cx| {
+        editor.update(cx, |e, cx| {
+            assert!(e.run_command("editor.run", window, cx));
+            e.set_text("SELECT 7;\nSELECT 8;\nSELECT 9;\n", cx);
+        });
+    });
+    c.vcx.run_until_parked();
+    assert!(!c.chooser_open(), "a stale Ask opens no chooser");
+    assert!(c.band().is_none_or(|b| !b.from_override));
+    c.barrier();
+    assert!(c.queries().is_empty(), "{:?}", c.queries());
+    // Asked again on the text as it is now, it opens over that text.
+    c.run_at(0);
+    assert!(c.chooser_open());
+    assert_eq!(c.band().expect("a band").units.to_vec(), vec![0..8_usize]);
+    stop_core_runtime_test(cx);
+}
+
+/// A result set of three numbered rows, for a statement whose tab Re-run reads.
+fn three_rows(prefix: &'static str) -> FakeQuery {
+    FakeQuery {
+        prefix,
+        sets: vec![rows(3)],
+        ..Default::default()
+    }
+}
+
+/// C2: Re-run on a result tab sends the statement behind that tab, never a later statement
+/// that ran at the same ordinal without a tab of its own (a DELETE after the SELECT).
+#[gpui::test]
+fn rerun_sends_the_tabs_own_statement_never_a_later_one(cx: &mut TestAppContext) {
+    let c = pg_console(
+        cx,
+        pg().queries(vec![three_rows("SELECT"), three_rows("SELECT")]),
+    );
+    let text = "SELECT * FROM t;\nDELETE FROM t WHERE id = 5;\n";
+    c.set_text(text);
+    c.select(0..16);
+    c.command("editor.run");
+    c.wait_marks("the select", |m| matches!(m, [s] if succeeded(s)));
+    let tabs = |c: &Console| {
+        c.vcx.cx.read(|cx| {
+            Consoles::get(cx, c.id)
+                .and_then(|s| s.results.clone())
+                .map_or(0, |r| r.read(cx).tabs().len())
+        })
+    };
+    wait_until(c.vcx, "the select's result tab", |_| tabs(&c) == 1);
+    c.select(17..43);
+    c.command("editor.run");
+    c.wait_marks("the delete", |m| matches!(m, [s] if succeeded(s)));
+    assert_eq!(tabs(&c), 1, "the delete made no tab");
+    in_window(c.vcx, |window, cx| {
+        hacivat_app::exec_ui::handle_results_event(
+            &hacivat_app::results::ResultsEvent::Rerun {
+                console: c.id,
+                unit_ordinal: 0,
+            },
+            window,
+            cx,
+        );
+    });
+    c.wait_queries(3);
+    assert_eq!(
+        c.queries(),
+        [
+            "SELECT * FROM t",
+            "DELETE FROM t WHERE id = 5",
+            "SELECT * FROM t"
+        ]
+    );
+    stop_core_runtime_test(cx);
+}
+
+/// C2: Re-run of a statement edited since it ran sends nothing and says so.
+#[gpui::test]
+fn rerun_of_an_edited_statement_sends_nothing(cx: &mut TestAppContext) {
+    let c = pg_console(cx, pg().queries(vec![three_rows("SELECT")]));
+    c.set_text("SELECT * FROM t;\n");
+    c.select(0..16);
+    c.command("editor.run");
+    c.wait_marks("the select", |m| matches!(m, [s] if succeeded(s)));
+    c.vcx.cx.update(|cx| {
+        c.editor.update(cx, |e, cx| {
+            e.select_range(7..7, cx);
+        });
+    });
+    // Type inside the statement: its mark goes stale.
+    let editor = c.editor.clone();
+    in_window(c.vcx, |window, cx| {
+        let handle = gpui::Focusable::focus_handle(editor.read(cx), cx);
+        window.focus(&handle, cx);
+    });
+    c.vcx.simulate_input("x");
+    c.vcx.run_until_parked();
+    assert_eq!(editor_text(c.vcx, c.id), "SELECT x* FROM t;\n");
+    in_window(c.vcx, |window, cx| {
+        hacivat_app::exec_ui::handle_results_event(
+            &hacivat_app::results::ResultsEvent::Rerun {
+                console: c.id,
+                unit_ordinal: 0,
+            },
+            window,
+            cx,
+        );
+    });
+    c.barrier();
+    assert_eq!(c.queries(), ["SELECT * FROM t"], "nothing more was sent");
+    stop_core_runtime_test(cx);
+}
+
+/// C3: `app.restart` with an open user transaction asks first; Cancel keeps the app; Roll back
+/// and restart ends the transaction, then restarts.
+#[gpui::test]
+fn restart_with_an_open_transaction_asks_and_cancel_keeps_the_app(cx: &mut TestAppContext) {
+    let mut c = console_in_transaction(cx, false);
+    enable_registry(c.vcx);
+    let mut restarted = c.vcx.cx.expect_restart();
+    assert!(run(c.vcx, "app.restart"));
+    wait_until(c.vcx, "the restart prompt", |vcx| {
+        layer_ids(vcx).contains(&"dialog")
+    });
+    let buttons = dialog_buttons(c.vcx);
+    assert!(
+        buttons.iter().any(|b| b == "Roll back and restart"),
+        "{buttons:?}"
+    );
+    assert!(
+        restarted.try_recv().unwrap().is_none(),
+        "asked, not restarted"
+    );
+    c.keys("enter");
+    assert!(!layer_ids(c.vcx).contains(&"dialog"));
+    assert!(
+        restarted.try_recv().unwrap().is_none(),
+        "Cancel keeps the app"
+    );
+    assert_eq!(c.tx().status, TxStatus::InTx);
+    // Again: Roll back and restart.
+    assert!(run(c.vcx, "app.restart"));
+    wait_until(c.vcx, "the restart prompt", |vcx| {
+        layer_ids(vcx).contains(&"dialog")
+    });
+    c.keys("shift-tab");
+    c.keys("enter");
+    wait_until(c.vcx, "the restart", |_| {
+        matches!(restarted.try_recv(), Ok(Some(_)))
+    });
+    assert!(
+        c.fake.executed().iter().any(|s| s.trim() == "ROLLBACK"),
+        "{:?}",
+        c.fake.executed()
+    );
+    stop_core_runtime_test(cx);
+}
+
+/// I4: closing the chooser (Escape, or Enter that runs) gives the focus back to the editor,
+/// and typing reaches it.
+#[gpui::test]
+fn closing_the_chooser_gives_the_focus_back_to_the_editor(cx: &mut TestAppContext) {
+    let mut c = pg_console(cx, pg());
+    c.set_text(TWO);
+    c.select(0..0);
+    c.focus_editor();
+    c.command("editor.run");
+    assert!(c.chooser_open());
+    let editor_focused = |c: &Console| {
+        let editor = c.editor.clone();
+        in_window(c.vcx, |window, cx| {
+            gpui::Focusable::focus_handle(editor.read(cx), cx).is_focused(window)
+        })
+    };
+    assert!(!editor_focused(&c), "the chooser has the focus");
+    c.keys("escape");
+    assert!(!c.chooser_open());
+    assert!(editor_focused(&c), "Escape gives the focus back");
+    c.vcx.simulate_input(" ");
+    c.vcx.run_until_parked();
+    assert_eq!(editor_text(c.vcx, c.id), format!(" {TWO}"));
+    // Enter that runs gives it back too.
+    c.select(1..1);
+    c.command("editor.run");
+    assert!(c.chooser_open());
+    c.keys("enter");
+    assert!(!c.chooser_open());
+    assert!(editor_focused(&c), "Enter gives the focus back");
+    stop_core_runtime_test(cx);
+}
+
+/// I5: `confirm_release` runs a release at once without a user transaction; with one it asks,
+/// and runs it only once the transaction ended.
+#[gpui::test]
+fn confirm_release_asks_before_a_session_is_released(cx: &mut TestAppContext) {
+    let mut c = console_in_transaction(cx, false);
+    enable_registry(c.vcx);
+    let released = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let count = released.clone();
+    let id = c.id;
+    let d = c.vcx.cx.update(|cx| {
+        hacivat_app::exec_ui::close_prompt::confirm_release(id, cx, move |_| {
+            count.set(count.get() + 1)
+        })
+    });
+    assert_eq!(d, hacivat_app::shell::CloseDecision::Defer);
+    wait_until(c.vcx, "the release prompt", |vcx| {
+        layer_ids(vcx).contains(&"dialog")
+    });
+    let buttons = dialog_buttons(c.vcx);
+    assert!(
+        buttons.iter().any(|b| b == "Commit and continue"),
+        "{buttons:?}"
+    );
+    c.keys("escape");
+    assert_eq!(released.get(), 0, "Cancel: nothing released");
+    assert_eq!(c.tx().status, TxStatus::InTx);
+    // Again; Commit and continue.
+    let count = released.clone();
+    c.vcx.cx.update(|cx| {
+        hacivat_app::exec_ui::close_prompt::confirm_release(id, cx, move |_| {
+            count.set(count.get() + 1)
+        })
+    });
+    wait_until(c.vcx, "the release prompt", |vcx| {
+        layer_ids(vcx).contains(&"dialog")
+    });
+    c.keys("shift-tab shift-tab");
+    c.keys("enter");
+    wait_until(c.vcx, "the release", |_| released.get() == 1);
+    assert_eq!(c.tx().status, TxStatus::Idle);
+    // No transaction: at once.
+    let count = released.clone();
+    let d = c.vcx.cx.update(|cx| {
+        hacivat_app::exec_ui::close_prompt::confirm_release(id, cx, move |_| {
+            count.set(count.get() + 1)
+        })
+    });
+    assert_eq!(d, hacivat_app::shell::CloseDecision::Proceed);
+    assert_eq!(released.get(), 2);
+    stop_core_runtime_test(cx);
+}
+
+/// Minor 11: `exec.cancel` never stops Hacivat's own SQL-context probe.
+#[gpui::test]
+fn cancel_never_stops_the_context_probe(cx: &mut TestAppContext) {
+    let slow_probe = FakeExec {
+        prefix: "SHOW standard_conforming_strings",
+        result: Ok(ExecSummary {
+            rows: vec![vec![Some("on".to_string())]],
+            row_count: 1,
+            ..Default::default()
+        }),
+        delay: std::time::Duration::from_secs(60),
+        tx_after: None,
+        panics: false,
+    };
+    let vcx = shell_with_connections(cx, "en");
+    in_window(vcx, |window, _| window.activate_window());
+    let p = profile("orders-dev", DbmsKind::Postgres);
+    let profile_id = add_profile(vcx, p.clone());
+    let (session, _fake) = session_over(vcx, p, pg().exec(vec![slow_probe]));
+    let id = register_test_console(vcx, profile_id, session.clone());
+    wait_until(vcx, "the probe to run", |_| {
+        matches!(
+            session.state().borrow().state,
+            hacivat_session::session::SessionState::Busy { .. }
+        )
+    });
+    assert!(!run(vcx, "exec.cancel"), "nothing of the user's runs");
+    assert!(
+        vcx.cx
+            .read(|cx| Consoles::get(cx, id).is_some_and(|s| s.sql.is_none()))
+    );
+    stop_core_runtime_test(cx);
+}
+
 // ---- preview and Run agree (R-M3-8) -------------------------------------------------------
 
 /// Fragments of scripts that stress the boundaries: comments, strings, dollar bodies, psql
 /// commands, `COPY` data, unknown blocks, unterminated constructs, MySQL executable comments
 /// and delimiters.
 const FRAGMENTS: &[&str] = &[
+    // Fix round 1 (Minor 12): non-ASCII text, a backslash quote, a double-quoted name.
+    "SELECT 'ğüş;' AS \"müşteri adı\"",
+    "'a\\'",
+    "\"İzmir;\"",
     "SELECT 1",
     "SELECT 2 FROM t",
     ";",
@@ -951,8 +1327,7 @@ impl Gen {
     }
 }
 
-fn doc_of(text: &str, id: sql_dialect::DialectId) -> sql_split::DocSnapshot {
-    let ctx = sql_dialect::DialectCtx::new(id, None);
+fn doc_of(text: &str, ctx: sql_dialect::DialectCtx) -> sql_split::DocSnapshot {
     let flavor = hacivat_sql_editor::effective_flavor(&ctx, sql_dialect::ClientFlavor::None);
     sql_split::SqlDocument::new(text.to_string(), ctx, flavor).snapshot()
 }
@@ -1040,21 +1415,49 @@ fn preview_and_run_agree_on_generated_scripts() {
     let mut g = Gen(0x5eed_7a5c_0033_0001);
     let mut divergences = 0usize;
     let mut places = 0usize;
-    for round in 0..160 {
-        let id = if round % 4 == 3 {
-            sql_dialect::DialectId::MySql
-        } else {
-            sql_dialect::DialectId::Postgres
+    for round in 0..200 {
+        // Fix round 1 (Minor 12): non-default contexts too: PostgreSQL with
+        // `standard_conforming_strings = off`, MySQL under `ANSI_QUOTES`.
+        let ctx = match round % 5 {
+            3 => sql_dialect::DialectCtx::new(sql_dialect::DialectId::MySql, None),
+            4 => {
+                let mut c = sql_dialect::DialectCtx::new(sql_dialect::DialectId::MySql, None);
+                c.modes = sql_dialect::LexModes::from_mysql_sql_mode("ANSI_QUOTES");
+                c
+            }
+            2 => {
+                let mut c = sql_dialect::DialectCtx::new(sql_dialect::DialectId::Postgres, None);
+                c.modes.standard_conforming_strings = false;
+                c
+            }
+            _ => sql_dialect::DialectCtx::new(sql_dialect::DialectId::Postgres, None),
         };
         let n = 1 + g.below(6);
         let text: String = (0..n)
             .map(|_| FRAGMENTS[g.below(FRAGMENTS.len())])
             .collect();
-        let doc = doc_of(&text, id);
+        let doc = doc_of(&text, ctx);
         for at in (0..=text.len()).filter(|i| text.is_char_boundary(*i)) {
             check_place(
                 &doc,
                 &ExecAt::Carets(smallvec::smallvec![at]),
+                &mut divergences,
+            );
+            places += 1;
+        }
+        // Two carets (Fix round 1, Minor 12).
+        for _ in 0..6 {
+            let mut a = g.below(text.len() + 1);
+            let mut b = g.below(text.len() + 1);
+            while !text.is_char_boundary(a) {
+                a -= 1;
+            }
+            while !text.is_char_boundary(b) {
+                b -= 1;
+            }
+            check_place(
+                &doc,
+                &ExecAt::Carets(smallvec::smallvec![a.min(b), a.max(b)]),
                 &mut divergences,
             );
             places += 1;
@@ -1080,4 +1483,108 @@ fn preview_and_run_agree_on_generated_scripts() {
     assert!(places > 5_000, "{places} places");
     // The raw answers disagree only where Run refuses (the gate above); report how often.
     eprintln!("preview_and_run_agree: {places} places, {divergences} raw divergences refused");
+}
+
+// ---- fix round 1: the SQL context on read-only sessions, and an unknown one ------------------
+
+/// One text row under column `name`.
+fn text_row(name: &'static str, value: &'static str) -> FakeResultSet {
+    FakeResultSet {
+        columns: vec![(
+            name,
+            LogicalType::Text {
+                max_chars: None,
+                fixed: false,
+            },
+        )],
+        rows: FakeRows::Literal(vec![vec![Value::Text(value.into())]]),
+    }
+}
+
+/// T31 finding: on a read-only session the guard forces the extended protocol, whose internal
+/// statements carry no values; the probe runs typed instead, so a read-only MySQL console
+/// under `ANSI_QUOTES` lexes `"…"` as a name.
+#[gpui::test]
+fn a_read_only_mysql_console_reads_its_sql_mode(cx: &mut TestAppContext) {
+    let mut p = profile("shop-ro", DbmsKind::MySql);
+    p.read_only = true;
+    let probe = FakeQuery {
+        prefix: "SELECT @@SESSION.sql_mode",
+        sets: vec![text_row(
+            "@@SESSION.sql_mode",
+            "ANSI_QUOTES,STRICT_TRANS_TABLES",
+        )],
+        ..Default::default()
+    };
+    let c = console_with(
+        cx,
+        p,
+        FakeDriver::new(DbmsKind::MySql)
+            .tracks_transactions()
+            .queries(vec![probe]),
+    );
+    let ctx = c
+        .vcx
+        .cx
+        .read(|cx| hacivat_app::exec_ui::sql_context(c.id, cx));
+    let SqlContext::Known(ctx) = ctx else {
+        panic!("the probe's value was read: {ctx:?}");
+    };
+    assert!(ctx.modes.ansi_quotes, "{ctx:?}");
+    assert_eq!(
+        c.vcx
+            .cx
+            .read(|cx| Consoles::get(cx, c.id).and_then(|s| s.sql)),
+        Some(ctx)
+    );
+    assert!(
+        c.queries().iter().any(|q| q == "SELECT @@SESSION.sql_mode"),
+        "the probe went through the typed path: {:?}",
+        c.fake.typed_log()
+    );
+    stop_core_runtime_test(cx);
+}
+
+/// A probe that answers no value leaves the context unknown (never the defaults as if known):
+/// Run sends only what every mode combination resolves alike; a mode-dependent boundary is
+/// uncertain and sends nothing.
+#[gpui::test]
+fn a_probe_without_a_value_leaves_the_context_unknown(cx: &mut TestAppContext) {
+    let refused = FakeExec {
+        prefix: "SHOW standard_conforming_strings",
+        result: Err(hacivat_driver::RawError {
+            kind: hacivat_driver::RawErrorKind::Db,
+            server: None,
+        }),
+        delay: std::time::Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    };
+    let c = pg_console(cx, pg().exec(vec![refused]));
+    let ctx = c
+        .vcx
+        .cx
+        .read(|cx| hacivat_app::exec_ui::sql_context(c.id, cx));
+    assert!(matches!(ctx, SqlContext::Unknown(_)), "{ctx:?}");
+    assert_eq!(
+        c.vcx
+            .cx
+            .read(|cx| Consoles::get(cx, c.id).and_then(|s| s.sql)),
+        None,
+        "nothing claims a known context"
+    );
+    // `'a\'` ends at its second quote with standard_conforming_strings on, and runs on with it
+    // off: mode-dependent, so nothing is sent.
+    c.set_text("SELECT 'a\\'; SELECT 2;");
+    c.run_at(0);
+    c.barrier();
+    assert!(c.queries().is_empty(), "{:?}", c.queries());
+    assert!(c.chooser_open(), "the uncertain state");
+    assert_eq!(c.chooser_selected(), None);
+    c.set_text("SELECT 1");
+    // The same in every mode: it runs.
+    c.run_at(0);
+    c.wait_queries(1);
+    assert_eq!(c.queries(), ["SELECT 1"]);
+    stop_core_runtime_test(cx);
 }

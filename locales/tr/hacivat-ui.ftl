@@ -1564,7 +1564,10 @@ hv-chooser-from-caret = İmleçten sona
 # Review: PO
 hv-chooser-whole = Tüm betik
 # Review: PO
-hv-chooser-count = { $n } ifade
+hv-chooser-row = { $n ->
+        [one] { $kind }
+       *[other] { $kind } · { $n } ifade
+    }
 # Review: PO
 hv-chooser-uncertain-title = Sınır belirsiz
 # Review: PO
@@ -1572,9 +1575,23 @@ hv-chooser-uncertain-body = Hacivat bu ifadenin tam olarak nerede bittiğini anl
 # Review: PO
 hv-chooser-uncertain-fix = Çalıştırılacak metni tam olarak seçin, sonra { $key } tuşuna basın.
 # Review: PO
+hv-chooser-uncertain-fix-unbound = Çalıştırılacak metni tam olarak seçin, sonra çalıştırın.
+# Review: PO
 hv-tx-close-title = { $name } üzerinde { $n } ifadelik açık bir işlem var
 # Review: PO
-hv-tx-close-body = Bu konsolu kapatmak oturumunu sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
+hv-tx-close-body = Bu konsolu kapatmak işlemini sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
+# Review: PO
+hv-tx-restart-body = Yeniden başlatmak oturumu sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
+# Review: PO
+hv-tx-commit-restart = Commit et ve yeniden başlat
+# Review: PO
+hv-tx-rollback-restart = Geri al ve yeniden başlat
+# Review: PO
+hv-tx-release-body = Konsolun bağlantısı değişmek üzere; bu, işlemi sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
+# Review: PO
+hv-tx-commit-continue = Commit et ve devam et
+# Review: PO
+hv-tx-rollback-continue = Geri al ve devam et
 # Review: PO
 hv-tx-quit-body = Çıkmak oturumu sonlandırır. Commit değişiklikleri korur, geri alma onları atar.
 # Review: PO
