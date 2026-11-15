@@ -525,6 +525,23 @@ impl Shared {
     /// Ends live connection `seq` of `id` with `state`: its sessions close and its overlay
     /// goes. False when it already ended (or another one replaced it).
     fn end_live(&self, id: ProfileId, seq: u64, state: LiveState) -> bool {
+        self.end_live_with(id, seq, state, None)
+    }
+
+    // ## m3a-f1-followups (named exception, follow-up F1-b; ADR 0004 `m3a-f1`)
+    /// [`end_live`](Self::end_live) for a connection the user did not close (a loss, a failed
+    /// recovery, an idle disconnect): closing the profile's other sessions rolls back any user
+    /// transaction one of them holds or may be opening (a user request still running; fix
+    /// round 1, C1), so that is never silent. `lost` (what the default session
+    /// itself lost, C1) gains `open_tx` when another session holds one, and is emitted as one
+    /// `SessionLost`, which the app shows as the "transaction rolled back" toast.
+    fn end_live_with(
+        &self,
+        id: ProfileId,
+        seq: u64,
+        state: LiveState,
+        lost: Option<LostState>,
+    ) -> bool {
         let live = {
             let mut inner = self.lock();
             if !Self::mine(&inner, id, seq) {
@@ -534,8 +551,25 @@ impl Shared {
             self.set(&mut inner, id, state);
             live
         };
+        let others = live
+            .as_ref()
+            .is_some_and(|l| l.sessions.others_hold_user_tx(l.default.id()));
+        let lost = match (lost, others) {
+            (Some(mut lost), true) => {
+                lost.open_tx = true;
+                Some(lost)
+            }
+            (None, true) => Some(LostState {
+                open_tx: true,
+                ..LostState::default()
+            }),
+            (lost, false) => lost,
+        };
         if let Some(live) = live {
             self.rt.spawn(live.close());
+        }
+        if let Some(lost) = lost {
+            self.emit(ConnectionEvent::SessionLost { profile: id, lost });
         }
         true
     }
@@ -755,12 +789,10 @@ async fn monitor(
                         return;
                     }
                     SessionState::Broken(class) => {
-                        if shared.end_live(id, seq, LiveState::Lost { class }) {
+                        // C1: lost inside a transaction, nothing was replayed (`seen.lost`);
+                        // ## m3a-f1-followups: one `SessionLost` with the other sessions' too.
+                        if shared.end_live_with(id, seq, LiveState::Lost { class }, seen.lost.take()) {
                             tracing::debug!(profile = %id, class = class.id(), "the session is lost");
-                            if let Some(lost) = seen.lost.take() {
-                                // C1: lost inside a transaction; nothing was replayed.
-                                shared.emit(ConnectionEvent::SessionLost { profile: id, lost });
-                            }
                         }
                         return;
                     }

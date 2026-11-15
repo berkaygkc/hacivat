@@ -34,12 +34,10 @@ pub fn dialect_id(kind: DbmsKind) -> DialectId {
 
 /// The probe that reads the session's lexing modes, if `kind` has one (Task 23): PostgreSQL
 /// wire servers report `standard_conforming_strings`, the MySQL family its `sql_mode`.
+// ## m3a-f1-followups (follow-up F1-c): the session owns the text, since a read-only session
+// runs exactly this internal statement outside the guard.
 pub fn probe_sql(kind: DbmsKind) -> Option<&'static str> {
-    match dialect_id(kind) {
-        DialectId::Postgres | DialectId::PgWire(_) => Some("SHOW standard_conforming_strings"),
-        DialectId::MySql | DialectId::MariaDb => Some("SELECT @@SESSION.sql_mode"),
-        _ => None,
-    }
+    hacivat_session::session::context_probe_sql(kind)
 }
 
 /// The context of a console on `kind` at `version`, with the probe's answer (Task 23).

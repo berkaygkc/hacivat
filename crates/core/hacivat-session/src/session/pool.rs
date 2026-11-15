@@ -57,6 +57,8 @@ use crate::pipeline::{
 use crate::profile::Profile;
 use crate::session::actor::{Reconnector, SessionHooks, SideConnector, spawn_supervised};
 use crate::session::liveness::LivenessPolicy;
+// ## m3a-f1-followups
+use crate::session::liveness::ProfileActivity;
 use crate::session::{
     ClientId, ClosePolicy, Command, Escalation, Request, SessionEvent, SessionHandle, SessionId,
     SessionKind, SessionSnapshot, SessionSpec, SessionState,
@@ -474,6 +476,9 @@ pub struct SessionManager {
     /// Serialises the opening of the default session (one connection, however many ask).
     default_lock: tokio::sync::Mutex<()>,
     me: Weak<SessionManager>,
+    // ## m3a-f1-followups
+    /// What every session of the profile reports, for the default's idle disconnect (F1-b).
+    activity: Arc<ProfileActivity>,
 }
 
 impl fmt::Debug for SessionManager {
@@ -519,6 +524,7 @@ impl SessionManager {
             }),
             default_lock: tokio::sync::Mutex::new(()),
             me: me.clone(),
+            activity: Arc::default(),
         })
     }
 
@@ -720,6 +726,23 @@ impl SessionManager {
     /// instead of guessing when a release's reset has parked its session.
     pub fn parked_count(&self) -> usize {
         self.lock().idle.values().map(Vec::len).sum()
+    }
+
+    // ## m3a-f1-followups (named exception, follow-up F1-b; fix round 1, C1)
+    /// Whether a session other than `default` holds, or may be opening, a user transaction:
+    /// what closing them all may roll back. Its snapshot says `InTx` or `Failed` (not
+    /// Hacivat's own) on a usable connection, or it holds the profile in `ProfileActivity`,
+    /// which covers a user request still running: the snapshot's `tx` moves only when a
+    /// request ends, while a running `BEGIN; UPDATE …` or a Manual-mode statement has already
+    /// opened one on the server (C1's `may_open_tx` rule).
+    pub(crate) fn others_hold_user_tx(&self, default: SessionId) -> bool {
+        if self.activity.others(default).0 {
+            return true;
+        }
+        self.lock().sessions.iter().any(|(id, t)| {
+            let s = t.state.borrow();
+            *id != default && usable(&s.state) && s.tx.user_open()
+        })
     }
 
     /// Closes every session and drops the overlay (disconnect, `forget`, quit). A running
@@ -988,7 +1011,16 @@ impl SessionManager {
             }),
             reconnect: hooked.reconnect,
         };
-        let handle = spawn_supervised(&self.rt, spec, profile, live, hooks, hooked.liveness);
+        // ## m3a-f1-followups: every session reports to the profile's activity (F1-b).
+        let handle = spawn_supervised(
+            &self.rt,
+            spec,
+            profile,
+            live,
+            hooks,
+            hooked.liveness,
+            Some(self.activity.clone()),
+        );
         st.sessions.insert(
             handle.id,
             Tracked {

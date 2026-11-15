@@ -61,6 +61,27 @@ pub fn schema_probe_sql(kind: DbmsKind) -> &'static str {
     }
 }
 
+// ## m3a-f1-followups (named exception, follow-up F1-c)
+/// The statement that reads a session's lexing modes (R-M3-39; Task 23's
+/// `hacivat_exec::sqlctx::probe_sql` returns it): PostgreSQL-wire servers report
+/// `standard_conforming_strings`, the MySQL family its `sql_mode`; `None` without one.
+///
+/// Like the schema probe, it is Hacivat's own constant read, so on a read-only session an
+/// internal request of exactly this text runs outside the read-only guard (the actor's
+/// `exec`): a server the guard cannot verify then leaves the console's SQL context unknown
+/// instead of breaking the session at connect. Every user statement still runs guarded.
+pub fn context_probe_sql(kind: DbmsKind) -> Option<&'static str> {
+    match kind {
+        DbmsKind::Postgres
+        | DbmsKind::Redshift
+        | DbmsKind::Cockroach
+        | DbmsKind::Yugabyte
+        | DbmsKind::Timescale => Some("SHOW standard_conforming_strings"),
+        DbmsKind::MySql | DbmsKind::TiDb | DbmsKind::MariaDb => Some("SELECT @@SESSION.sql_mode"),
+        _ => None,
+    }
+}
+
 /// Reads the probe's answer; nothing known (the default) when it has no row.
 pub fn parse_schema_probe(kind: DbmsKind, s: &ExecSummary) -> SchemaCtx {
     fn cell(row: &[Option<String>], i: usize) -> Option<String> {

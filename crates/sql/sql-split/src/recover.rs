@@ -120,6 +120,9 @@ pub(crate) fn cut_at(trivia: &Trivia, a_end: TextSize, t: &Tok) -> Cut {
         b_head: StmtHead {
             first_keyword: t.keyword.map(|k| k.id),
             first_token: Some(t.range),
+            // ## m3a-f1-followups: a heuristic part after a cut is never run (its boundary is
+            // ambiguous), so its `COPY` is not tracked.
+            copy_stream: false,
         },
         at: t.range,
     }
@@ -272,8 +275,8 @@ pub(crate) fn shift_stmt(s: Stmt, by: TextSize) -> Stmt {
         terminator: s.terminator.map(|r| r + by),
         leading_comments: s.leading_comments.map(|r| r + by),
         head: StmtHead {
-            first_keyword: s.head.first_keyword,
             first_token: s.head.first_token.map(|r| r + by),
+            ..s.head
         },
         copy_data: s.copy_data.map(|d| crate::item::CopyData {
             rows: d.rows + by,

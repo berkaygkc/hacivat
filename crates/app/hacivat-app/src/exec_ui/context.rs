@@ -3,11 +3,13 @@
 //!
 //! - **Reading it.** The probe (`sqlctx::probe_sql`: PostgreSQL `SHOW
 //!   standard_conforming_strings`, MySQL/MariaDB `SELECT @@SESSION.sql_mode`) needs the
-//!   server's value. On a read-write session an internal `Request::Exec` with
-//!   `ExecOpts::values` returns it (the simple protocol). On a **read-only** session the guard
-//!   forces the extended protocol, whose path carries no values (MySQL and PostgreSQL drivers
-//!   count rows only), so the probe runs as a typed one-unit `Request::Run` instead: its row
-//!   lands in a private result store, read once the run ends (T31 finding).
+//!   server's value: an internal `Request::Exec` with `ExecOpts::values` returns it (the
+//!   simple protocol).
+//! - `## m3a-f1-followups` (follow-up F1-c): on a **read-only** session too. The session runs
+//!   this exact internal text outside the read-only guard, as it runs its schema probe, so a
+//!   server the guard cannot verify (an unanswered canary) leaves the context unknown instead
+//!   of breaking the session at every connect (Task 33 ran it as a guarded typed run, which
+//!   did). The guard still runs every user statement.
 //! - **Unknown, never guessed.** A probe that answers no value (an error, no row, a value that
 //!   is not text, a cancel) leaves the context [`SqlContext::Unknown`]: the dialect's defaults
 //!   are *not* taken as known. Run then resolves under every mode combination that changes how
@@ -18,19 +20,11 @@
 //! - A session that answers nothing at all (closed, lost) leaves the context as it was; the
 //!   next connection probes again.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-
-use hacivat_driver::{ExecOpts, Protocol};
+use hacivat_driver::ExecOpts;
 use hacivat_exec::sqlctx::{dialect_ctx, probe_sql};
-use hacivat_results::{FetchPolicy, MemoryBudget, ResultId, ResultStore, ResultWriter};
 use hacivat_session::LiveState;
-use hacivat_session::session::{
-    ErrorPolicy, ExecErrorKind, ExecOrigin, ObserverRef, Request, RunEvent, RunId, RunObserver,
-    RunSpec, RunUnit, SessionHandle, UnitId,
-};
+use hacivat_session::session::{ExecErrorKind, ExecOrigin, Request, SessionHandle};
 use hacivat_ui_core::gpui_surface::App;
-use hacivat_values::{ResultSchema, ValueRef};
 use sql_dialect::{DialectCtx, DialectId, LexModes};
 
 use crate::console::ConsoleId;
@@ -122,12 +116,8 @@ pub(crate) fn probe(
         set(console, SqlContext::Known(base), cx);
         return;
     };
-    let read_only = session.state().borrow().read_only;
-    let (seq, answer) = if read_only {
-        probe_by_run(&session, sql)
-    } else {
-        probe_by_exec(&session, sql)
-    };
+    // ## m3a-f1-followups: one path for read-write and read-only sessions (F1-c).
+    let (seq, answer) = probe_by_exec(&session, sql);
     update_console_exec(cx, console, |e| e.probe = Some(seq));
     cx.spawn(async move |cx| {
         let answer = answer.await;
@@ -160,7 +150,8 @@ fn gone(kind: &ExecErrorKind) -> bool {
 
 type AnswerFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Answer>>>;
 
-/// A read-write session: an internal statement whose values come back (the simple protocol).
+/// An internal statement whose values come back (the simple protocol); on a read-only session
+/// the session runs it outside the guard (F1-c).
 fn probe_by_exec(session: &SessionHandle, sql: &str) -> (u64, AnswerFuture) {
     let ticket = session.submit(Request::Exec {
         sql: sql.to_string(),
@@ -177,77 +168,6 @@ fn probe_by_exec(session: &SessionHandle, sql: &str) -> (u64, AnswerFuture) {
             Ok(Err(e)) if gone(&e.kind) => Answer::Gone,
             Ok(Err(_)) => Answer::NoValue,
             Err(_) => Answer::Gone,
-        }
-    };
-    (seq, Box::pin(fut))
-}
-
-/// The probe runs of the app, numbered from the top of the ID space (never a user run's).
-static NEXT_PROBE: AtomicU64 = AtomicU64::new(u64::MAX);
-
-/// Keeps the probe's one result store.
-struct ProbeObserver {
-    store: Mutex<Option<Arc<ResultStore>>>,
-    budget: Arc<MemoryBudget>,
-}
-
-impl RunObserver for ProbeObserver {
-    fn open_result(&self, unit: UnitId, ordinal: u32, schema: Arc<ResultSchema>) -> ResultWriter {
-        let _ = (unit, ordinal);
-        let id = ResultId(NEXT_PROBE.fetch_sub(1, Ordering::Relaxed));
-        let (store, writer) = ResultStore::new(id, schema, self.budget.clone(), 1);
-        *self.store.lock().unwrap_or_else(PoisonError::into_inner) = Some(store);
-        writer
-    }
-
-    fn event(&self, ev: &RunEvent) {
-        let _ = ev;
-    }
-}
-
-/// A read-only session: a typed one-unit run (the guard forces the extended protocol, which
-/// returns values only on the typed path).
-fn probe_by_run(session: &SessionHandle, sql: &str) -> (u64, AnswerFuture) {
-    let observer = Arc::new(ProbeObserver {
-        store: Mutex::new(None),
-        // One small row.
-        budget: MemoryBudget::new(1 << 20, 1 << 20),
-    });
-    let run = RunId(NEXT_PROBE.fetch_sub(1, Ordering::Relaxed));
-    let ticket = session.run(RunSpec {
-        run,
-        units: Arc::from(vec![RunUnit {
-            id: UnitId { run, ordinal: 0 },
-            sql: Arc::from(sql),
-            protocol: Protocol::Extended,
-            suspendable: false,
-        }]),
-        policy: ErrorPolicy::StopOnError,
-        fetch: FetchPolicy::default(),
-        observer: ObserverRef(observer.clone()),
-    });
-    let seq = ticket.seq;
-    let fut = async move {
-        match ticket.reply.await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) if gone(&e.kind) => return Answer::Gone,
-            Ok(Err(_)) => return Answer::NoValue,
-            Err(_) => return Answer::Gone,
-        }
-        let store = observer
-            .store
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let Some(snap) = store.map(|s| s.snapshot()) else {
-            return Answer::NoValue;
-        };
-        if snap.row_count() == 0 || snap.schema().columns.is_empty() {
-            return Answer::NoValue;
-        }
-        match snap.cell(0, 0) {
-            ValueRef::Text(t) => Answer::Value(Some(t.to_string())),
-            _ => Answer::NoValue,
         }
     };
     (seq, Box::pin(fut))
