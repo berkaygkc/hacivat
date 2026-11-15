@@ -253,3 +253,140 @@ the default; `needs_reprobe` is a unit whose first word is `SET`.
   context after `SET`, `RESET`, `DISCARD`, `ROLLBACK` and `ABORT`; a size picks its unit after
   rounding (never "1024.0 KB"). `cursor-closed-server-terminated` says the server stopped the
   query with an error (the session stays connected).
+
+## m3a-t31 — conformance
+
+**What the matrix is.** `crates/core/hacivat-exec/tests/docker_m3a_matrix.rs` has nine Docker
+tests, with their helpers in `tests/common/mod.rs` (`// ## m3a-t31-matrix`). Every case goes
+the app's way:
+
+1. a console document in the context the console read at bind (R-M3-39: the server version and
+   the probe row);
+2. `resolve_units` in execution mode (Execute3, the whole script);
+3. `ExecService::run`;
+4. a real session from a `ConnectionManager` with M2b's configuration and the app's production
+   policy;
+5. the typed driver.
+
+An admin connection (the side channel) checks what reached the server. Nothing in these tests
+calls a driver or a session directly, with one exception: the command-tag pass of
+`dml_and_ddl_report_update_counts_on_a_dev_console` sends the same resolved units through
+`SessionHandle::run` with its own observer, because the run service does not keep the tag
+(ruling 5).
+
+**Lines (the M2b ruling: no line is skipped silently).**
+
+- The server lines are `targets(None)` filtered to `FULL_LINES`: pg14–pg18, mysql80, mysql84,
+  mariadb106, mariadb1011 and mariadb114. pg13 is below the floor. The `-tls`, `-auth` and
+  `-x509` twins test other things. `pg17-tr` is the Turkish test's own line.
+- Every test also runs on a SQLite file of its own.
+- Under `full` every named line must be in the set. In any set, PostgreSQL and the MySQL family
+  must each have a line. The `pr` set has pg17 and mysql84 and no MariaDB line, so the rule is
+  per family.
+- Each test records one row per line and case, asserts that every line of the active set ran,
+  and writes the rows to the Docker artifact `t31-<test>.tsv`. The table below is built from
+  those rows.
+
+**Rulings.**
+
+1. *The cancel budget.* The plan names `cancel_within_one_second_on_every_engine`, and the
+   Docker rule keeps its wall-clock assert (with margin).
+   - What is measured: from Stop (`SessionHandle::cancel` of the run's request, or of the fetch
+     in flight) to the end of the run, or to the cancel's answer.
+   - When: only after the statement has passed the overdue mark. Before it, R-M3-16 waits for the
+     mark by design. The test reads the mark from the server where it can:
+     - PostgreSQL: `pg_stat_activity.query_start`, 1.1 s ago;
+     - MySQL family: `processlist.time ≥ 2`;
+     - SQLite: the run status `Running { since }`, 1.1 s ago;
+     - a fetch: no chunk for 1.1 s.
+   - On what: a quiet matrix. The test holds `QUIET` for writing; every other test holds it for
+     reading.
+   - Measured over the three flake runs:
+
+     | Engine | Time |
+     |---|---|
+     | PostgreSQL | 1–6 ms |
+     | MariaDB | 4–37 ms |
+     | SQLite | 0–3 ms |
+     | MySQL | 6–65 ms |
+
+     MySQL's kill goes over a new side connection with TLS.
+2. *Engine semantics, pinned, not hidden.* MySQL's `KILL QUERY` ends a bare `SELECT SLEEP(60)`
+   normally: `SLEEP()` returns 1 without an error, as the MySQL manual says. MariaDB's `DO`
+   swallows the interruption (`DO SLEEP(60)`, `DO (SELECT COUNT(*) …)`). In these cases:
+   - the unit succeeds and the cancel answers `AlreadyFinished`;
+   - the stop still lands within the budget, the server is free and the connection is reused;
+   - the console shows what the server said.
+
+   MySQL 8.0 ends a killed `DO (SELECT COUNT(*) …)` or `SET @v = (…)` normally in some runs and
+   with 1317 in others (one run in three cancelled, across the flake runs). Those statements are
+   therefore not cases. The MySQL family's "not a read head" case is
+   `INSERT INTO t … SELECT COUNT(*) FROM <10⁹-row cross join>`: the kill ends it with 1317, and
+   the side channel finds no row.
+   - MySQL takes the CTE form (`INSERT INTO t WITH d(x) AS (…) SELECT …`). The same count over
+     derived tables took 77 ms to 1.2 s to honour the kill on mysql80 and mysql84, which is the
+     server's plan, not the session.
+   - MariaDB runs the derived-table form (5–14 ms).
+3. *The error view's code on MySQL is the SQLSTATE* (Task 23's rule: the SQLSTATE when there is
+   one). Read-only refusals therefore read `25006` (vendor 1792), and MariaDB's `XA START`
+   reads `XAE09` (vendor 1400).
+4. *Bypass rows through Run differ from run B where the run service splits.*
+   - `SELECT 1; DROP TABLE t` is two units, and the server refuses the `DROP` with `25006`.
+     Run B gets `42601`/`1064` from one multi-statement prepare.
+   - `/*!50000 … */` is code to the MySQL lexer and is sent as written.
+   - MariaDB's `LOCK TABLES` ends in a gap (the connection is discarded and reconnected), as in
+     run B.
+   - The rows run as the test account, which may write, so only the read-only enforcement stops
+     them.
+   - After every row, the side channel must be unchanged, and a control `SELECT count(*)` must
+     run on the same console. A console that runs nothing fails the control.
+5. *DDL counts.* PostgreSQL's command tag has no count, so DDL logs "Completed". MySQL's OK
+   packet and SQLite's change counter say 0, so DDL logs "0 rows affected", as the `mysql` and
+   `sqlite3` clients do. Command tags are PostgreSQL's own (`INSERT 0 3`, `UPDATE 2`) and the
+   first keyword on MySQL, MariaDB and SQLite.
+6. *FakeDriver fidelity.* The real outcomes were compared with what the FakeDriver tests of
+   Tasks 18 and 23 assume, and no case was found where the fake is more lenient than a server.
+   The compared cases:
+   - stop between chunks: no server cancel;
+   - overdue chunk: one cancel or kill;
+   - a kill that races the statement's end: absorbed;
+   - Hacivat's transaction rolled back on release;
+   - production refusals;
+   - the update counts.
+
+   No fake was changed.
+7. *The read-only startup option (Task 22).* `SHOW idle_in_transaction_session_timeout` answers
+   `30s` through Run on a read-only console on pg14–pg18. A pooler that refuses startup options
+   (pgbouncer without `ignore_startup_parameters`) is not in the matrix, so that case is not
+   verified (M3b).
+
+**The table** (`full`, three consecutive runs green; versions as the servers report them):
+
+| Line | Version | Golden table | Cursor: suspend 10,000, fetch more, close, fetch all | Stop fetching (rows kept) | Cancel (read head / not / fetch in a long step) | Read-only bypass rows | Production writes | DML/DDL counts and tags | No transaction left |
+|---|---|---|---|---|---|---|---|---|---|
+| pg14 | 14.25 | 3 × 18 ✓ | ✓, rolled back | ✓ | ✓ / ✓ / ✓ | 22/22 stopped (gap: `txid_current`) | 25006 ×3 | ✓ | 5 paths + read-only ✓ |
+| pg15 | 15.20 | 3 × 18 ✓ | ✓, rolled back | ✓ | ✓ / ✓ / ✓ | 22/22 | 25006 ×3 | ✓ | ✓ |
+| pg16 | 16.16 | 3 × 18 ✓ | ✓, rolled back | ✓ | ✓ / ✓ / ✓ | 22/22 | 25006 ×3 | ✓ | ✓ |
+| pg17 | 17.12 | 3 × 18 ✓ | ✓, rolled back | ✓ | ✓ / ✓ / ✓ | 22/22 | 25006 ×3 | ✓ | ✓ |
+| pg18 | 18.7 | 3 × 18 ✓ | ✓, rolled back | ✓ | ✓ / ✓ / ✓ | 22/22 | 25006 ×3 | ✓ | ✓ |
+| mysql80 | 8.0.46 | 3 × 14 ✓ | ✓ | ✓ | ✓ / ✓ (`INSERT … SELECT`, no row) / ✓; `SLEEP` completes | 14/14 | 25006 ×3 | ✓ | — |
+| mysql84 | 8.4.13 | 3 × 14 ✓ | ✓ | ✓ | ✓ / ✓ (`INSERT … SELECT`, no row) / ✓; `SLEEP` completes | 14/14 | 25006 ×3 | ✓ | — |
+| mariadb106 | 10.6.28 | 3 × 14 ✓ (JSON as text) | ✓ | ✓ | ✓ / ✓ (`INSERT … SELECT`, no row) / —; `DO` completes | 14/14 (gap: `LOCK TABLES`) | 25006 ×3 | ✓ | — |
+| mariadb1011 | 10.11.19 | 3 × 14 ✓ (JSON as text) | ✓ | ✓ | ✓ / ✓ (`INSERT … SELECT`, no row) / —; `DO` completes | 14/14 (gap: `LOCK TABLES`) | 25006 ×3 | ✓ | — |
+| mariadb114 | 11.4.13 | 3 × 14 ✓ (JSON as text) | ✓ | ✓ | ✓ / ✓ (`INSERT … SELECT`, no row) / —; `DO` completes | 14/14 (gap: `LOCK TABLES`) | 25006 ×3 | ✓ | — |
+| sqlite | 3.54.1 | 3 × 8 ✓ | ✓ | ✓ | ✓ / ✓ (`CREATE TABLE AS` leaves nothing) / ✓ | 10/10 (`23`, the authorizer) | 23 ×3 | ✓ | — |
+| pg17-tr | 17.11 | Turkish text both ways, `tr_TR` order and case mapping, the server's Turkish message (`… nesnesi mevcut değil`) verbatim | | | | | | | |
+
+`pr` runs the same tests on pg17, mysql84 and SQLite. The Turkish test skips there, because
+pg17-tr is a `full` line.
+
+**Tests:**
+- `typed_golden_tables_per_engine_and_version`
+- `select_streams_suspends_fetches_more_and_closes`
+- `stop_fetching_keeps_rows_and_frees_the_session`
+- `cancel_within_one_second_on_every_engine`
+- `read_only_bypass_rows_blocked_through_run_without_classifier`
+- `production_console_rejects_insert_on_every_engine`
+- `turkish_collation_text_round_trips_on_pg17_tr`
+- `incomplete_cursor_leaves_no_transaction_in_pg_stat_activity`
+- `dml_and_ddl_report_update_counts_on_a_dev_console`
