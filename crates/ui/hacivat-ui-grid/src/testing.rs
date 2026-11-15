@@ -41,6 +41,8 @@ pub fn grid_config(a11y_label: &'static str) -> GridConfig {
         labels: GridLabels {
             loading: fixed("Loading"),
             too_many_columns: fixed("Too many columns"),
+            // ## m3a-t30-results-view
+            no_rows: fixed("No rows"),
         },
         a11y_label: fixed(a11y_label),
     }

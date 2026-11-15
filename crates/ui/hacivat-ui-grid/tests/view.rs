@@ -783,3 +783,73 @@ fn an_ellipsized_header_name_shows_whole_in_a_tooltip(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert!(view.read_with(vcx, |v, _| v.selection().col_selected(ColId(0))));
 }
+
+// ## m3a-t30-results-view: the grid's accessibility node sits on the focused element, and a
+// result with no rows says so.
+
+/// The texts the last frame drew.
+fn drawn(vcx: &mut VisualTestContext) -> Vec<String> {
+    vcx.read(|cx| cx.global::<TextRegistry>().frame.clone())
+        .into_iter()
+        .map(|r| r.text.to_string())
+        .collect()
+}
+
+fn record_texts(vcx: &mut VisualTestContext) {
+    vcx.update(|window, cx| {
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+        window.refresh();
+    });
+    vcx.run_until_parked();
+}
+
+/// The node is declared on the element that tracks the focus (the view's root), as Task 29
+/// did for the editor: GPUI gives the platform focus to that element's node, so a node on the
+/// inner grid element could never be the focused one.
+#[gpui::test]
+fn grid_node_is_the_focused_element(cx: &mut TestAppContext) {
+    use gpui::{Element as _, Focusable as _, InteractiveElement as _, accesskit, div};
+    let (view, vcx, _) = open(cx, Rc::new(numbered(4, 7, Some(7), false)), 400.0, 200.0);
+    let (role, node) = vcx.update(|_, cx| {
+        view.update(cx, |v, cx| {
+            let root = div().id("grid-root").track_focus(&v.focus_handle(cx));
+            let el = v.a11y_node(root, true, cx);
+            let mut node = accesskit::Node::new(accesskit::Role::Unknown);
+            el.write_a11y_info(&mut node);
+            (el.a11y_role(), node)
+        })
+    });
+    assert_eq!(role, Some(Role::Grid));
+    assert_eq!(node.label(), Some("Result 1"));
+    assert_eq!(node.row_count(), Some(7));
+    assert_eq!(node.column_count(), Some(4));
+    // Without assistive technology nothing is declared and the label is never read.
+    let reads = view.read_with(vcx, |v, _| v.a11y_label_reads());
+    let role = vcx.update(|_, cx| {
+        view.update(cx, |v, cx| {
+            v.a11y_node(div().id("grid-root"), false, cx).a11y_role()
+        })
+    });
+    assert_eq!(role, None);
+    assert_eq!(view.read_with(vcx, |v, _| v.a11y_label_reads()), reads);
+}
+
+/// A finished result with no rows keeps its header and says "No rows" in the body; rows make
+/// it go away.
+#[gpui::test]
+fn zero_rows_say_no_rows(cx: &mut TestAppContext) {
+    let (_view, vcx, _) = open(cx, Rc::new(numbered(3, 0, Some(0), false)), 400.0, 200.0);
+    record_texts(vcx);
+    let texts = drawn(vcx);
+    assert!(texts.iter().any(|t| t == "No rows"), "{texts:?}");
+}
+
+#[gpui::test]
+fn rows_say_nothing_about_no_rows(cx: &mut TestAppContext) {
+    let (_view, vcx, _) = open(cx, Rc::new(numbered(3, 2, Some(2), false)), 400.0, 200.0);
+    record_texts(vcx);
+    assert!(!drawn(vcx).iter().any(|t| t == "No rows"));
+}
