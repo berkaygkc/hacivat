@@ -42,6 +42,70 @@ use hacivat_values::{
 /// other test for reading.
 static QUIET: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
+/// The lines come from the targets' properties (review I2): no Docker needed, so this runs in
+/// every `cargo test`.
+#[test]
+fn lines_are_classified_from_the_targets_never_from_a_list() {
+    let catalog = hacivat_driver::EngineCatalog::embedded();
+    let all = hacivat_testkit::all_targets_unfiltered();
+    let ids = |v: &[hacivat_testkit::DockerTarget]| -> Vec<String> {
+        let mut ids: Vec<String> = v.iter().map(|t| t.id.clone()).collect();
+        ids.sort();
+        ids
+    };
+    let c = classify(&all, catalog).expect("the committed targets classify");
+    assert_eq!(
+        ids(&c.lines),
+        [
+            "mariadb1011",
+            "mariadb106",
+            "mariadb114",
+            "mysql80",
+            "mysql84",
+            "pg14",
+            "pg15",
+            "pg16",
+            "pg17",
+            "pg18"
+        ]
+    );
+    assert_eq!(
+        ids(&c.twins),
+        ["mysql84-x509", "pg17-auth", "pg17-tls", "pg17-tr"]
+    );
+    assert_eq!(ids(&c.below_floor), ["pg13"]);
+    assert!(missing_tested(&c.lines, catalog).is_empty());
+
+    let like = |id: &str, engine: DbmsKind, major: &str| {
+        let mut t = all[0].clone();
+        t.id = id.into();
+        t.engine = engine;
+        t.major = major.into();
+        t
+    };
+    // A line added later joins the matrix by itself.
+    let mut more = all.clone();
+    more.push(like("pg19", DbmsKind::Postgres, "19"));
+    let c = classify(&more, catalog).unwrap();
+    assert!(c.lines.iter().any(|t| t.id == "pg19"));
+    // A second target of a major that is no twin of its line, or one of an engine the
+    // matrix does not know, is an error, never a silent skip.
+    let mut odd = all.clone();
+    odd.push(like("pg17b", DbmsKind::Postgres, "17"));
+    assert!(classify(&odd, catalog).unwrap_err().contains("pg17b"));
+    let mut other = all.clone();
+    other.push(like("mssql22", DbmsKind::MsSql, "16"));
+    assert!(classify(&other, catalog).unwrap_err().contains("mssql22"));
+    // Under `full`, a tested major without a line is named.
+    let lines: Vec<_> = classify(&all, catalog)
+        .unwrap()
+        .lines
+        .into_iter()
+        .filter(|t| t.id != "mysql84")
+        .collect();
+    assert_eq!(missing_tested(&lines, catalog), ["MySql 8.4"]);
+}
+
 fn fetched(rows: u64, more: bool) -> Option<RowsOutcome> {
     Some(RowsOutcome::Fetched { rows, more })
 }
@@ -95,6 +159,28 @@ fn counting(line: &Line, n: u64) -> String {
              AS n FROM d a, d b, d c, d e, d f) s WHERE n <= {n} ORDER BY n"
         ),
     }
+}
+
+/// PostgreSQL: table `t` and `t_f(int)`, a `VOLATILE` function that inserts its argument into
+/// `t` and returns it (review I1). A read head that calls it writes one row per row read, so
+/// the side channel sees whether Hacivat's transaction was committed or rolled back.
+async fn pg_writer(a: &mut Side, t: &str) {
+    a.batch(&format!("CREATE TABLE {t} (a int)")).await;
+    a.batch(&format!(
+        "CREATE FUNCTION {t}_f(int) RETURNS int LANGUAGE sql VOLATILE \
+         AS $$ INSERT INTO {t} VALUES ($1) RETURNING a $$"
+    ))
+    .await;
+}
+
+async fn pg_writer_drop(a: &mut Side, t: &str) {
+    a.batch(&format!("DROP FUNCTION {t}_f(int)")).await;
+    a.batch(&format!("DROP TABLE {t}")).await;
+}
+
+/// [`counting`]'s rows, through [`pg_writer`]'s function: the same values, each one written.
+fn writing(t: &str, n: u64) -> String {
+    format!("SELECT {t}_f(g::int) AS g FROM generate_series(1, {n}) g")
 }
 
 /// A read head of 100 million rows that streams as it is read (no sort): far more than any
@@ -206,6 +292,16 @@ async fn mysql_backend(c: &Console) -> Option<String> {
     } else {
         None
     }
+}
+
+/// [`mysql_backend`] on a read-only console: through Run, because the guard sends an internal
+/// `Exec` with the extended protocol, which brings no values back on MySQL.
+async fn ro_mysql_backend(c: &Console) -> Option<String> {
+    if !c.line.is_mysql_family() {
+        return None;
+    }
+    let ran = c.ok("SELECT CONNECTION_ID()").await;
+    Some(int(&cell(ran.tab(0), 0, 0)).to_string())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -574,9 +670,10 @@ async fn typed_golden_tables_per_engine_and_version() {
             .map(|r| (0..width).map(|c| snap.cell(r, c).to_value()).collect())
             .collect();
         check_golden(line, snap.schema(), &got);
-        // Nothing of Hacivat's is left open after a cursor that completed.
-        assert_eq!(c.snap().tx.status, TxStatus::Idle, "{}", line.id);
-        assert_eq!(c.snap().cursor, None, "{}", line.id);
+        // Nothing of Hacivat's is left open after a cursor that completed, as the server sees
+        // it (review M5).
+        let backend = mysql_backend(&c).await;
+        assert_freed(&c, &mut a, backend.as_deref(), "golden").await;
         record.add(
             line,
             c.version.as_ref(),
@@ -610,9 +707,23 @@ async fn select_streams_suspends_fetches_more_and_closes() {
         let mut a = admin(line).await;
         let c = Console::dev(line).await;
         let backend = mysql_backend(&c).await;
+        // On PostgreSQL the read head writes each row it reads (review I1), so the server
+        // shows whether Hacivat's transaction rolled back (Close) or committed (Fetch all).
+        let t = unique("hv_t31_cw");
+        if line.is_pg() {
+            pg_writer(&mut a, &t).await;
+        }
+        let read_head = |n| {
+            if line.is_pg() {
+                writing(&t, n)
+            } else {
+                counting(line, n)
+            }
+        };
+        let written = format!("SELECT count(*) FROM {t}");
 
         // A read head suspends at its read-ahead, with the first rows in order.
-        let ran = c.ok(&counting(line, 100_000)).await;
+        let ran = c.ok(&read_head(100_000)).await;
         assert_eq!(ran.names(), ["Suspended"], "{id}");
         assert!(
             matches!(ran.unit(0), UnitStatus::Suspended { rows: 10_000 }),
@@ -684,6 +795,13 @@ async fn select_streams_suspends_fetches_more_and_closes() {
             "cursor-closed-user-closed"
         };
         assert!(c.log_ids().contains(&closed), "{id}: {:?}", c.log_ids());
+        if line.is_pg() {
+            assert_eq!(
+                a.count(&written).await,
+                0,
+                "{id}: rolled back on the server"
+            );
+        }
         record.add(
             line,
             c.version.as_ref(),
@@ -693,7 +811,7 @@ async fn select_streams_suspends_fetches_more_and_closes() {
 
         // Fetch all: a result a little past the read-ahead completes, and says so.
         c.log.clear();
-        let ran = c.ok(&counting(line, 30_000)).await;
+        let ran = c.ok(&read_head(30_000)).await;
         let src = ran.tab(0).source.clone();
         src.fetch_all();
         wait_until(&format!("{id}: fetch all"), secs(30), || {
@@ -712,6 +830,13 @@ async fn select_streams_suspends_fetches_more_and_closes() {
             "{id}"
         );
         assert_freed(&c, &mut a, backend.as_deref(), "after Fetch all").await;
+        if line.is_pg() {
+            assert_eq!(
+                a.count(&written).await,
+                30_000,
+                "{id}: committed on the server"
+            );
+        }
         record.add(
             line,
             c.version.as_ref(),
@@ -719,6 +844,9 @@ async fn select_streams_suspends_fetches_more_and_closes() {
             "30000 rows, complete",
         );
         c.shutdown().await;
+        if line.is_pg() {
+            pg_writer_drop(&mut a, &t).await;
+        }
         a.close().await;
     }
     assert_every_line_ran(&record, &lines);
@@ -900,8 +1028,8 @@ fn mysql_billion_derived() -> String {
 /// A read head whose first rows come at once and whose next row takes minutes: the cursor
 /// suspends among the fast rows, and Fetch all then sits in one long step (a chunk that is
 /// overdue on the server: PostgreSQL's cancel, MySQL's `KILL QUERY` on its side connection,
-/// SQLite's interrupt; the ledger's Task 18 note). `None` on MariaDB, whose `UNION ALL`
-/// materialises before its first row (its overdue first chunk is the `read head` case).
+/// SQLite's interrupt; the ledger's Task 18 note). MariaDB materialises a `UNION ALL` before
+/// its first row, so its shape is a sequence-engine scan whose last row sleeps (review M6).
 /// Returns the statement and its fast rows.
 fn slow_tail(line: &Line) -> Option<(String, u64)> {
     match line.engine {
@@ -924,6 +1052,10 @@ fn slow_tail(line: &Line) -> Option<(String, u64)> {
              UNION ALL SELECT COUNT(*) FROM d a, d b, d c, d e, d f, d g, d h, d i, d j"
                 .into(),
             100_000,
+        )),
+        DbmsKind::MariaDb => Some((
+            "SELECT IF(seq <= 20000, seq, SLEEP(60)) AS n FROM seq_1_to_20001".into(),
+            20_000,
         )),
         _ => None,
     }
@@ -1253,6 +1385,37 @@ fn ro_drop(line: &Line, t: &str) -> Vec<String> {
     v
 }
 
+/// Whether table `t` can be locked for writing at once from the side channel: nothing the
+/// console ran holds a lock or a transaction on it. PostgreSQL `LOCK … ACCESS EXCLUSIVE
+/// NOWAIT`, the MySQL family `SELECT … FOR UPDATE NOWAIT`, SQLite `BEGIN EXCLUSIVE`.
+async fn lock_probe(a: &mut Side, line: &Line, t: &str) -> Result<(), String> {
+    match line.engine {
+        DbmsKind::Postgres => {
+            let probed = a
+                .try_batch(&format!(
+                    "BEGIN; LOCK TABLE {t} IN ACCESS EXCLUSIVE MODE NOWAIT; ROLLBACK"
+                ))
+                .await;
+            if probed.is_err() {
+                // The failed probe left the side channel's transaction aborted.
+                a.batch("ROLLBACK").await;
+            }
+            probed
+        }
+        DbmsKind::Sqlite => {
+            let probed = a.try_batch("BEGIN EXCLUSIVE; ROLLBACK").await;
+            if probed.is_err() {
+                let _ = a.try_batch("ROLLBACK").await;
+            }
+            probed
+        }
+        _ => {
+            a.try_batch(&format!("SELECT a FROM {t} FOR UPDATE NOWAIT"))
+                .await
+        }
+    }
+}
+
 /// What the side channel sees of the fixture: the table's rows, the schema's relations with
 /// the fixture's prefix, and (per engine) the sequence, prepared transactions, temporary
 /// relations, the file's bytes.
@@ -1356,6 +1519,18 @@ async fn read_only_bypass_rows_blocked_through_run_without_classifier() {
                 ));
             } else if !allowed.contains(&got.as_str()) {
                 failures.push(format!("{id} {row} `{sql}`: {got}, not one of {allowed:?}"));
+            }
+            // Nothing is held after the row (review M3): the console's backend is idle out of
+            // any transaction, and the fixture can be locked at once from the side channel.
+            let backend = ro_mysql_backend(&c).await;
+            let view = server_view(&mut a, &c, backend.as_deref()).await;
+            if view.idle_in_tx != 0 || view.running != 0 {
+                failures.push(format!(
+                    "{id} {row} `{sql}`: the server still holds {view:?}"
+                ));
+            }
+            if let Err(code) = lock_probe(&mut a, line, &t).await {
+                failures.push(format!("{id} {row} `{sql}`: the lock probe failed: {code}"));
             }
             // The console still runs statements: a refusal is the server's or the guard's,
             // never a console that runs nothing.
@@ -1562,6 +1737,14 @@ async fn turkish_collation_text_round_trips_on_pg17_tr() {
     };
     assert_eq!(view.code.as_deref(), Some("42P01"));
     let server_text = view.server_text.as_deref().unwrap_or_default();
+    // Verbatim (review M4): exactly what the server says to the side channel for the same
+    // statement, and Turkish.
+    let direct = a.error_of(&format!("SELECT * FROM {missing}")).await;
+    assert_eq!(direct.sqlstate.as_deref(), Some("42P01"));
+    assert_eq!(
+        server_text, direct.text,
+        "the error view is the server's text"
+    );
     assert!(server_text.contains(&missing), "{server_text}");
     assert!(
         !server_text.contains("does not exist") && !server_text.is_ascii(),
@@ -1595,7 +1778,12 @@ async fn incomplete_cursor_leaves_no_transaction_in_pg_stat_activity() {
     for line in &lines {
         let id = &line.id;
         let mut a = admin(line).await;
-        let big = counting(line, 1_000_000);
+        // A read head whose function writes a row per row read (review I1): a cursor that
+        // does not complete must leave none of them (R-M3-23), one that completes all of them.
+        let t = unique("hv_t31_w");
+        pg_writer(&mut a, &t).await;
+        let big = writing(&t, 1_000_000);
+        let written = format!("SELECT count(*) FROM {t}");
         let idle_cap = FetchPolicy {
             idle_cap: Some(secs(2)),
             ..FetchPolicy::default()
@@ -1643,14 +1831,38 @@ async fn incomplete_cursor_leaves_no_transaction_in_pg_stat_activity() {
             // `assert_freed` waits for the session to be idle without a cursor, then asks
             // the server: no transaction, nothing running.
             assert_freed(&c, &mut a, None, path).await;
+            // The server's own account: what the read head wrote was rolled back.
+            assert_eq!(
+                a.count(&written).await,
+                0,
+                "{id} {path}: Hacivat's transaction was rolled back on the server"
+            );
             let ids = c.log_ids();
             let rolled_back = ids.iter().any(|i| i.ends_with("-rolled-back"));
             assert!(
                 rolled_back || path == "stop",
-                "{id} {path}: Hacivat's transaction was rolled back: {ids:?}"
+                "{id} {path}: the log says it was rolled back: {ids:?}"
             );
-            record.add(line, c.version.as_ref(), path, &format!("{ids:?}"));
+            record.add(
+                line,
+                c.version.as_ref(),
+                path,
+                &format!("0 rows written; {ids:?}"),
+            );
         }
+
+        // The same read head run to its end commits, like an autocommit statement.
+        let ran = c.run(&writing(&t, 12_000)).await;
+        let src = ran.tab(0).source.clone();
+        src.fetch_all();
+        wait_until(&format!("{id}: the run completes"), secs(30), || {
+            *src.snapshot().completeness() == Completeness::Complete
+        })
+        .await;
+        assert_freed(&c, &mut a, None, "completed").await;
+        assert_eq!(a.count(&written).await, 12_000, "{id}: committed");
+        record.add(line, c.version.as_ref(), "completed", "12000 rows written");
+        a.batch(&format!("TRUNCATE {t}")).await;
 
         // Closing the console with a cursor open: the connection goes, and its transaction
         // with it.
@@ -1671,7 +1883,17 @@ async fn incomplete_cursor_leaves_no_transaction_in_pg_stat_activity() {
             0,
         )
         .await;
-        record.add(line, None, "console closed", "no backend left");
+        assert_eq!(
+            a.count(&written).await,
+            0,
+            "{id} console closed: rolled back"
+        );
+        record.add(
+            line,
+            None,
+            "console closed",
+            "no backend left; 0 rows written",
+        );
 
         // A read-only console: the guard's transaction ends with its cursor, and the server's
         // own bound is the guard's startup option (Task 22).
@@ -1685,7 +1907,7 @@ async fn incomplete_cursor_leaves_no_transaction_in_pg_stat_activity() {
         .await;
         let shown = ro.ok("SHOW idle_in_transaction_session_timeout").await;
         assert_eq!(cell(shown.tab(0), 0, 0), text("30s"), "{id}");
-        let ran = ro.run(&big).await;
+        let ran = ro.run(&counting(line, 1_000_000)).await;
         assert_eq!(ran.names(), ["Suspended"], "{id} read-only");
         assert_eq!(server_view(&mut a, &ro, None).await.idle_in_tx, 1, "{id}");
         ran.tab(0).source.close_cursor();
@@ -1697,6 +1919,7 @@ async fn incomplete_cursor_leaves_no_transaction_in_pg_stat_activity() {
             "idle_in_transaction_session_timeout 30s; no transaction",
         );
         ro.shutdown().await;
+        pg_writer_drop(&mut a, &t).await;
         a.close().await;
     }
     assert_every_line_ran(&record, &lines);

@@ -277,8 +277,9 @@ pub async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
 pub mod matrix {
     //! - Lines come only from `hacivat_testkit::targets` (Q6): the server lines of the active
     //!   set plus one SQLite file per test. Every test needs a line of each engine family
-    //!   (PostgreSQL, MySQL/MariaDB, SQLite) in any set; under `full` every line of
-    //!   [`FULL_LINES`] must be there (the M2b ruling: a target is never skipped silently).
+    //!   (PostgreSQL, MySQL/MariaDB, SQLite) in any set; under `full` every major the engine
+    //!   catalog tests must be there, and a target nobody classified fails ([`classify`]; the
+    //!   M2b ruling: a target is never skipped silently).
     //! - Fixtures carry `hv_t31` names unique to the run and are dropped at the end (Q7).
     //! - Waits are on conditions, bounded by real time; failure messages carry line ids and
     //!   codes, never a password.
@@ -328,21 +329,96 @@ pub mod matrix {
     // -----------------------------------------------------------------------------------------
     // Lines
 
-    /// The server lines of the full set: PostgreSQL 14–18 (pg13 is below the floor; the
-    /// `-tls`, `-auth` and `-tr` twins are lines of their own tests), MySQL 8.0 and 8.4,
-    /// MariaDB 10.6, 10.11 and 11.4.
-    pub const FULL_LINES: [&str; 10] = [
-        "pg14",
-        "pg15",
-        "pg16",
-        "pg17",
-        "pg18",
-        "mysql80",
-        "mysql84",
-        "mariadb106",
-        "mariadb1011",
-        "mariadb114",
-    ];
+    /// The server engines of the matrix. A Docker target of any other engine is unclassified,
+    /// and fails every test until someone classifies it.
+    pub const SERVER_ENGINES: [DbmsKind; 3] =
+        [DbmsKind::Postgres, DbmsKind::MySql, DbmsKind::MariaDb];
+
+    /// How the Docker targets of a set split, by their properties (fix round 1, review I2).
+    #[derive(Debug, Default)]
+    pub struct Classified {
+        /// One target per engine and major at or above the engine's floor: the matrix.
+        pub lines: Vec<DockerTarget>,
+        /// A second target of the same engine and major (`-tls`, `-auth`, `-tr`, `-x509`):
+        /// its id extends its line's id. Twins are lines of their own tests.
+        pub twins: Vec<DockerTarget>,
+        /// Majors below the catalog's floor (pg13): not supported, so not a line.
+        pub below_floor: Vec<DockerTarget>,
+    }
+
+    /// `"10.11"` as `(10, 11)`.
+    fn major_key(major: &str) -> (u32, u32) {
+        let mut parts = major.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+        (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+    }
+
+    /// Splits `all` (the active set's targets) into lines, twins and below-floor targets.
+    /// Every target must land in one of them: one of another engine, or a second target of an
+    /// engine and major whose id does not extend the line's, is an error naming it.
+    pub fn classify(all: &[DockerTarget], catalog: &EngineCatalog) -> Result<Classified, String> {
+        let mut out = Classified::default();
+        for t in all {
+            if !SERVER_ENGINES.contains(&t.engine) {
+                return Err(format!("{}: engine {:?} is not classified", t.id, t.engine));
+            }
+        }
+        for engine in SERVER_ENGINES {
+            let floor = catalog
+                .get(engine)
+                .and_then(|s| s.floor.as_deref())
+                .map(major_key)
+                .ok_or_else(|| format!("{engine:?}: the catalog has no floor"))?;
+            let mut of_engine: Vec<&DockerTarget> =
+                all.iter().filter(|t| t.engine == engine).collect();
+            // The base of a major is its shortest id; the others must extend it.
+            of_engine.sort_by_key(|t| (major_key(&t.major), t.id.len()));
+            let mut base: Option<&DockerTarget> = None;
+            for t in of_engine {
+                if major_key(&t.major) < floor {
+                    out.below_floor.push(t.clone());
+                    continue;
+                }
+                match base {
+                    Some(b) if b.major == t.major => {
+                        // A twin's id is its line's id and a `-variant` suffix.
+                        let extends =
+                            t.id.strip_prefix(b.id.as_str())
+                                .is_some_and(|rest| rest.len() > 1 && rest.starts_with('-'));
+                        if !extends {
+                            return Err(format!(
+                                "{}: a second {engine:?} {} target that is no twin of {}",
+                                t.id, t.major, b.id
+                            ));
+                        }
+                        out.twins.push(t.clone());
+                    }
+                    _ => {
+                        out.lines.push(t.clone());
+                        base = Some(t);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether the lines hold every tested major of each server engine (the catalog's
+    /// floor-to-latest list); the missing ones otherwise.
+    pub fn missing_tested(lines: &[DockerTarget], catalog: &EngineCatalog) -> Vec<String> {
+        let mut missing = Vec::new();
+        for engine in SERVER_ENGINES {
+            for major in catalog
+                .get(engine)
+                .map(|s| s.tested.clone())
+                .unwrap_or_default()
+            {
+                if !lines.iter().any(|t| t.engine == engine && t.major == major) {
+                    missing.push(format!("{engine:?} {major}"));
+                }
+            }
+        }
+        missing
+    }
 
     fn active_set() -> Option<String> {
         std::env::var("HACIVAT_DOCKER_SET").ok()
@@ -389,20 +465,31 @@ pub mod matrix {
         }
     }
 
-    /// The server lines of the active set (see [`FULL_LINES`]), checked: PostgreSQL and the
-    /// MySQL family each have one in any set; under `full` every named line is there.
+    /// The server lines of the active set, from `targets(Some(engine))` per server engine
+    /// ([`classify`]), checked: PostgreSQL and the MySQL family each have one in any set; under
+    /// `full` every major the catalog tests is there; an unclassified target fails.
     pub fn server_lines() -> Vec<Line> {
-        let found: Vec<DockerTarget> = targets(None)
-            .into_iter()
-            .filter(|t| FULL_LINES.contains(&t.id.as_str()))
+        let all: Vec<DockerTarget> = SERVER_ENGINES
+            .iter()
+            .flat_map(|e| targets(Some(*e)))
             .collect();
+        // The reverse check: no target of the set is left out unseen.
+        let others: Vec<String> = targets(None)
+            .into_iter()
+            .filter(|t| !all.contains(t))
+            .map(|t| t.id)
+            .collect();
+        assert!(others.is_empty(), "unclassified Docker targets: {others:?}");
+        let catalog = EngineCatalog::embedded();
+        let found = classify(&all, catalog)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .lines;
         if must_exist() {
-            for id in FULL_LINES {
-                assert!(
-                    found.iter().any(|t| t.id == id),
-                    "Docker target {id} is missing from the full set"
-                );
-            }
+            let missing = missing_tested(&found, catalog);
+            assert!(
+                missing.is_empty(),
+                "the full set has no line for {missing:?}"
+            );
         }
         assert!(
             found.iter().any(|t| t.engine == DbmsKind::Postgres),
@@ -557,9 +644,12 @@ pub mod matrix {
     // The admin side channel
 
     /// The test account, read-write and direct, on `line`'s own database: the fixtures' admin
-    /// and the side channel that checks what a console did.
+    /// and the side channel that checks what a console did. It first sweeps the `hv_t31_*`
+    /// objects another process left behind (a red run's fixtures; Q7 across runs, review M9).
     pub async fn admin(line: &Line) -> Side {
-        Side::open(line, None).await
+        let mut a = Side::open(line, None).await;
+        a.sweep(line).await;
+        a
     }
 
     /// A direct connection that is not a console.
@@ -623,6 +713,115 @@ pub mod matrix {
                 .and_then(|r| r.first())
                 .cloned()
                 .flatten()
+        }
+
+        /// The first column of every row of `sql` (NULL as `""`).
+        pub async fn column(&mut self, sql: &str) -> Vec<String> {
+            let id = self.id.clone();
+            let answer = self
+                .live()
+                .raw()
+                .execute(
+                    sql,
+                    ExecOpts {
+                        max_rows: 10_000,
+                        protocol: Protocol::Simple,
+                    },
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{id}: `{sql}`: {:?} {:?}",
+                        e.kind,
+                        code_of(e.server.as_ref())
+                    )
+                });
+            answer
+                .rows
+                .into_iter()
+                .map(|r| r.into_iter().next().flatten().unwrap_or_default())
+                .collect()
+        }
+
+        /// Runs `sql` as a batch; the failure's code (or kind) when it fails.
+        pub async fn try_batch(&mut self, sql: &str) -> Result<(), String> {
+            self.live()
+                .raw()
+                .batch(sql)
+                .await
+                .map_err(|e| code_of(e.server.as_ref()).unwrap_or_else(|| format!("{:?}", e.kind)))
+        }
+
+        /// The server's message for `sql`, which must fail.
+        pub async fn error_of(&mut self, sql: &str) -> ServerMessage {
+            let id = self.id.clone();
+            let answer = self
+                .live()
+                .raw()
+                .execute(
+                    sql,
+                    ExecOpts {
+                        max_rows: 10,
+                        protocol: Protocol::Simple,
+                    },
+                )
+                .await;
+            match answer {
+                Ok(_) => panic!("{id}: `{sql}` ran; an error was expected"),
+                Err(e) => e
+                    .server
+                    .unwrap_or_else(|| panic!("{id}: `{sql}`: {:?} without a message", e.kind)),
+            }
+        }
+
+        /// Drops the `hv_t31_*` objects of `line` that another process made: their names carry
+        /// that process's id ([`unique`]), so this run's own fixtures are never touched.
+        pub async fn sweep(&mut self, line: &Line) {
+            let mine = format!("\\_{}\\_", std::process::id());
+            let drops: Vec<String> = match line.engine {
+                DbmsKind::Postgres => {
+                    let found = self
+                        .column(&format!(
+                            "SELECT kind || ' ' || name FROM ( \
+                             SELECT 1 AS o, 'ROUTINE' AS kind, proname::text AS name \
+                               FROM pg_proc WHERE pronamespace = 'public'::regnamespace \
+                             UNION ALL SELECT 2, 'TABLE', relname::text FROM pg_class \
+                               WHERE relkind = 'r' AND relnamespace = 'public'::regnamespace \
+                             UNION ALL SELECT 3, 'SEQUENCE', relname::text FROM pg_class \
+                               WHERE relkind = 'S' AND relnamespace = 'public'::regnamespace \
+                             UNION ALL SELECT 4, 'TYPE', typname::text FROM pg_type \
+                               WHERE typtype = 'e' AND typnamespace = 'public'::regnamespace \
+                             UNION ALL SELECT 5, 'COLLATION', collname::text FROM pg_collation \
+                               WHERE collnamespace = 'public'::regnamespace) x \
+                             WHERE name LIKE 'hv\\_t31\\_%' AND name NOT LIKE '%{mine}%' \
+                             ORDER BY o, name"
+                        ))
+                        .await;
+                    found
+                        .into_iter()
+                        .map(|f| {
+                            let (kind, name) = f.split_once(' ').unwrap_or_default();
+                            let cascade = if kind == "COLLATION" { "" } else { " CASCADE" };
+                            format!("DROP {kind} IF EXISTS {name}{cascade}")
+                        })
+                        .collect()
+                }
+                DbmsKind::MySql | DbmsKind::MariaDb => self
+                    .column(&format!(
+                        "SELECT table_name FROM information_schema.tables \
+                         WHERE table_schema = DATABASE() AND table_name LIKE 'hv\\_t31\\_%' \
+                         AND table_name NOT LIKE '%{mine}%'"
+                    ))
+                    .await
+                    .into_iter()
+                    .map(|name| format!("DROP TABLE IF EXISTS {name}"))
+                    .collect(),
+                // A SQLite line is a fresh file per test.
+                _ => Vec::new(),
+            };
+            for sql in drops {
+                self.batch(&sql).await;
+            }
         }
 
         /// The first value of the first row of `sql`, `""` for NULL or no row.
