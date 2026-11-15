@@ -1593,6 +1593,128 @@ hv-console-ro-pending = { $name }, açık işlemi commit edildiğinde ya da geri
 hv-console-ro-pending-short = Bu işlemden sonra salt okunur
 # Review: PO
 hv-console-session-failed = { $name } için bağlantı açılamadı. Çalıştır yeniden dener.
+## m3a-t30-results-view
+
+# Review: PO
+hv-results-output = Çıktı
+# Review: PO
+hv-results-unread = Yeni çıktı
+# Review: PO
+hv-results-tabs = Sonuç sekmeleri
+# Review: PO
+hv-results-env-suffix = ({ $env })
+# Review: PO
+hv-results-copy = Kopyala
+# Review: PO
+hv-results-log-clear = Temizle
+# Review: PO
+hv-results-log-end = Sona kaydır
+# Review: PO
+hv-results-log-empty = Henüz çıktı yok. Çalıştırdığınız ifadelerin iletileri burada görünür.
+# Review: PO
+hv-results-log-label = Çıktı günlüğü
+# Review: PO
+hv-grid-no-rows = Satır yok
+# Review: PO
+hv-grid-too-many-columns = { $n } sütun. Geniş sonuçlar yana kayar; daha rahat okumak için daha az sütun seçin.
+# Review: PO
+hv-grid-loading = Yükleniyor
+# Review: PO
+hv-strip-fetching = Getiriliyor… { $rows } satır
+# Review: PO
+hv-strip-rows-more = { $rows }+ satır
+# Review: PO
+hv-strip-cursor-open = İmleç açık — veritabanı anlık görüntüsü tutuluyor
+# Review: PO
+hv-strip-cursor-open-short = İmleç açık
+# Review: PO
+hv-strip-close-cursor = İmleci kapat
+# Review: PO
+hv-strip-fetch-more = Daha fazla getir
+# Review: PO
+hv-strip-fetch-all = Tümünü getir
+# Review: PO
+hv-strip-complete = { $rows } satır
+# Review: PO
+hv-strip-rerun = Yeniden çalıştır
+# Review: PO
+hv-strip-cancelled = { $rows } satırdan sonra iptal edildi
+# Review: PO
+hv-strip-memory = Bu sonucun bellek sınırına ulaşıldı ({ $rows } satır, { $size })
+# Review: PO
+hv-strip-fetch-anyway = Yine de getir
+# Review: PO
+hv-strip-truncated = { $rows } satır tutuldu: bu sonucun bellek sınırına ulaşıldı
+# Review: PO
+hv-strip-closed-idle = { $rows } satırdan sonra imleç kapandı: çok uzun süre boşta kaldı.
+# Review: PO
+hv-strip-more-sets = { $n } sonuç kümesi daha gösterilmedi
+# Review: PO
+hv-strip-selection = Seçim
+# Review: PO
+hv-strip-dims = { $rows } × { $cols }
+# Review: PO
+hv-cmd-results-copy = Seçili sonuç hücrelerini kopyala
+# Review: PO
+hv-cmd-results-fetch-more = Sonucun daha fazla satırını getir
+# Review: PO
+hv-cmd-results-fetch-all = Sonucun tüm satırlarını getir
+# Review: PO
+hv-cmd-results-close-cursor = Sonucun imlecini kapat
+# Review: PO
+hv-cmd-results-rerun = Sonucun ifadesini yeniden çalıştır
+# Review: PO
+hv-cmd-grid-move-left = Tablo: sola git
+# Review: PO
+hv-cmd-grid-move-right = Tablo: sağa git
+# Review: PO
+hv-cmd-grid-move-up = Tablo: yukarı git
+# Review: PO
+hv-cmd-grid-move-down = Tablo: aşağı git
+# Review: PO
+hv-cmd-grid-select-left = Tablo: seçimi sola genişlet
+# Review: PO
+hv-cmd-grid-select-right = Tablo: seçimi sağa genişlet
+# Review: PO
+hv-cmd-grid-select-up = Tablo: seçimi yukarı genişlet
+# Review: PO
+hv-cmd-grid-select-down = Tablo: seçimi aşağı genişlet
+# Review: PO
+hv-cmd-grid-jump-left = Tablo: ilk sütuna atla
+# Review: PO
+hv-cmd-grid-jump-right = Tablo: son sütuna atla
+# Review: PO
+hv-cmd-grid-jump-up = Tablo: ilk satıra atla
+# Review: PO
+hv-cmd-grid-jump-down = Tablo: yüklenen son satıra atla
+# Review: PO
+hv-cmd-grid-home = Tablo: satırın ilk hücresine git
+# Review: PO
+hv-cmd-grid-end = Tablo: satırın son hücresine git
+# Review: PO
+hv-cmd-grid-first-row = Tablo: ilk satıra git
+# Review: PO
+hv-cmd-grid-last-row = Tablo: son satıra git
+# Review: PO
+hv-cmd-grid-page-up = Tablo: sayfa yukarı
+# Review: PO
+hv-cmd-grid-page-down = Tablo: sayfa aşağı
+# Review: PO
+hv-cmd-grid-next-cell = Tablo: sonraki hücre
+# Review: PO
+hv-cmd-grid-prev-cell = Tablo: önceki hücre
+# Review: PO
+hv-cmd-grid-select-all = Tablo: tümünü seç
+# Review: PO
+hv-cmd-grid-select-row = Tablo: satırı seç
+# Review: PO
+hv-cmd-grid-select-column = Tablo: sütunu seç
+# Review: PO
+hv-cmd-grid-copy = Tablo: kopyala
+# Review: PO
+hv-cmd-grid-copy-with-headers = Tablo: başlıklarla kopyala
+# Review: PO
+hv-cmd-grid-escape = Tablo: seçimi temizle
 ## m3a-t33-exec-ui
 
 # Review: PO

@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use hacivat_ui::text::{Label, TextFn, TextSource};
 use hacivat_ui_core::gpui_surface::{
-    AnyView, App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable,
+    AnyElement, AnyView, App, AppContext as _, Context, Div, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, IntoElement, ParentElement, Render, Role, ScrollEvent, SharedString,
-    StatefulInteractiveElement, Styled, Task, Window, div, px,
+    Stateful, StatefulInteractiveElement, Styled, Task, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
@@ -39,6 +39,9 @@ pub struct GridLabels {
     pub loading: TextFn,
     /// More than 2,000 columns.
     pub too_many_columns: TextFn,
+    // ## m3a-t30-results-view (ledger: the "No rows" text is built in Task 30)
+    /// A finished result without rows: "No rows" (12.5 `text-3`) in the body, under the header.
+    pub no_rows: TextFn,
 }
 
 impl std::fmt::Debug for GridLabels {
@@ -393,6 +396,63 @@ impl GridView {
         self.a11y_reads
     }
 
+    // ## m3a-t30-results-view: the node moves to the focused element (ledger T30 note).
+    /// Makes `el`, the element that tracks the grid's focus (the view's root), the grid's
+    /// accessibility node while assistive technology is `active`: role `Grid`, the label, and
+    /// the row and column counts of the last frame (R-M3-32). GPUI gives the platform focus to
+    /// the node of the element that tracks the focus, so the node must sit there, not on the
+    /// inner grid element (Task 29 moved the editor's the same way). Inactive: `el` unchanged,
+    /// and the label is not read.
+    pub fn a11y_node(&mut self, el: Stateful<Div>, active: bool, cx: &App) -> Stateful<Div> {
+        if !active {
+            return el;
+        }
+        let (role, label) = self.a11y_declaration(cx);
+        let rows = self.data.known_total().unwrap_or(self.data.count.loaded);
+        el.role(role)
+            .aria_label(label)
+            .aria_row_count(usize::try_from(rows).unwrap_or(usize::MAX))
+            .aria_column_count(self.layout.len())
+    }
+
+    /// Whether the last frame showed a result known to have no rows (its header stays): an exact
+    /// total of 0 (## m3a-t30 fix round 1, I4). A result that stopped before its first row
+    /// (cancelled, closed) has no exact total, and nobody knows it is empty.
+    pub fn shows_no_rows(&self) -> bool {
+        self.data.generation.is_some()
+            && !self.columns.is_empty()
+            && self.data.count.exact_total == Some(0)
+    }
+
+    /// "No rows" over the body's first row, while [`shows_no_rows`](Self::shows_no_rows).
+    /// The element notifies the view when that changes (`sync_data`), so the label follows
+    /// the frame it belongs to.
+    fn no_rows_label(&self, cx: &App) -> Option<AnyElement> {
+        if !self.shows_no_rows() {
+            return None;
+        }
+        let g = self.geometry.as_ref()?;
+        let t = Theme::get(cx).tokens;
+        let left = g.body.left() - g.bounds.left();
+        let top = g.body.top() - g.bounds.top();
+        Some(
+            div()
+                .absolute()
+                .left(left + px(element::layers::CELL_PAD_PX))
+                .top(top)
+                .h(px(self.scroll.row_height()))
+                .flex()
+                .items_center()
+                .child(Label::new(
+                    (self.config.labels.no_rows)(cx),
+                    TextSource::Fluent,
+                    t.type_ramp.body_sm,
+                    t.colors.text_3.to_hsla(),
+                ))
+                .into_any_element(),
+        )
+    }
+
     /// The headers whose names the last frame ellipsized, each with its tooltip's area: the
     /// whole name shows in a tooltip there.
     pub fn header_tips(&self) -> &[element::HeaderTip] {
@@ -462,7 +522,7 @@ impl Focusable for GridView {
 impl EventEmitter<GridEvent> for GridView {}
 
 impl Render for GridView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let grid = element::GridElement::new(cx.entity());
         // An ellipsized header name keeps its whole text in a tooltip (NOTES rule 7): one hover
         // area per such header of the last frame (a frame whose headers differ asks for this
@@ -487,16 +547,20 @@ impl Render for GridView {
                 )
             })
             .collect();
-        div()
+        let root = div()
             .id(("hv-grid-view", cx.entity_id()))
             .key_context(GRID_CONTEXT)
-            .track_focus(&self.focus)
-            .size_full()
+            .track_focus(&self.focus);
+        // ## m3a-t30-results-view: the accessibility node is the element that tracks the focus.
+        let root = self.a11y_node(root, window.is_a11y_active(), cx);
+        let no_rows = self.no_rows_label(cx);
+        root.size_full()
             .relative()
             .overflow_hidden()
             .on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| this.on_scroll(e, cx)))
             .child(grid)
             .children(tips)
+            .children(no_rows)
     }
 }
 

@@ -1722,6 +1722,142 @@ hv-console-ro-pending-short = Read-only after this transaction
 # Variables:
 #   $name (String) - the console's tab title, e.g. "orders-dev (2)".
 hv-console-session-failed = Couldn't open a connection for { $name }. Run tries again.
+## m3a-t30-results-view
+
+# The results tile's first tab: the console's output log (NOTES surface 9).
+hv-results-output = Output
+# The accessible name of the dot on the Output tab: a line arrived while another tab was active.
+hv-results-unread = New output
+# The accessible name of the results tile's tab list.
+hv-results-tabs = Result tabs
+# After a result tab's title when its connection is not production (production has the red swatch).
+# Variables:
+#   $env (String) - the environment word (an hv-conn-env-* message), e.g. "staging".
+hv-results-env-suffix = ({ $env })
+# The result toolbar's copy button, and the Output toolbar's.
+hv-results-copy = Copy
+# The Output toolbar: empty the log.
+hv-results-log-clear = Clear
+# The Output toolbar: show the newest line and follow new ones.
+hv-results-log-end = Scroll to end
+# The Output tab before anything ran in this console.
+hv-results-log-empty = No output yet. Messages from the statements you run appear here.
+# The accessible name of the output log.
+hv-results-log-label = Output log
+# The body of a finished result that has no rows; its header stays.
+hv-grid-no-rows = No rows
+# The info row under the result toolbar when a result has more than 2,000 columns.
+# Variables:
+#   $n (Number) - the result's columns, e.g. 2412.
+hv-grid-too-many-columns = { $n } columns. Wide results scroll sideways; select fewer columns to read them more easily.
+# A grid row that is not loaded yet.
+hv-grid-loading = Loading
+# The cursor strip while rows arrive.
+# Variables:
+#   $rows (Number) - the rows so far, e.g. 3500.
+hv-strip-fetching = { $rows ->
+        [one] Fetching… { $rows } row
+       *[other] Fetching… { $rows } rows
+    }
+# The cursor strip's count while a cursor holds more rows.
+# Variables:
+#   $rows (Number) - the rows loaded, e.g. 10000.
+hv-strip-rows-more = { $rows }+ rows
+# The cursor strip while a cursor is open.
+hv-strip-cursor-open = Cursor open — holding a database snapshot
+# hv-strip-cursor-open when the strip is short; the whole sentence stays in its tooltip.
+hv-strip-cursor-open-short = Cursor open
+# Cursor strip button: close the open cursor.
+hv-strip-close-cursor = Close cursor
+# Cursor strip button: fetch the next rows.
+hv-strip-fetch-more = Fetch more
+# Cursor strip button: fetch every row, up to the memory limit.
+hv-strip-fetch-all = Fetch all
+# The cursor strip of a complete result.
+# Variables:
+#   $rows (Number) - the result's rows, e.g. 1000000.
+hv-strip-complete = { $rows ->
+        [one] { $rows } row
+       *[other] { $rows } rows
+    }
+# Cursor strip button: run the statement behind a closed or cancelled result again.
+hv-strip-rerun = Re-run
+# The cursor strip of a cancelled result.
+# Variables:
+#   $rows (Number) - the rows it had, e.g. 3500.
+hv-strip-cancelled = { $rows ->
+        [one] Cancelled after { $rows } row
+       *[other] Cancelled after { $rows } rows
+    }
+# The memory banner in the cursor strip (R-M3-33).
+# Variables:
+#   $rows (Number) - the rows kept, e.g. 412880.
+#   $size (String) - the memory they take (an hv-grid-size-* message), e.g. "256 MB".
+hv-strip-memory = Memory limit for this result reached ({ $rows } rows, { $size })
+# Memory banner button: raise the limit to the shared budget and fetch on.
+hv-strip-fetch-anyway = Fetch more anyway
+# The cursor strip of a result whose rows past the memory limit were counted, not kept.
+# Variables:
+#   $rows (Number) - the rows kept, e.g. 412880.
+hv-strip-truncated = { $rows ->
+        [one] { $rows } row kept: the memory limit for this result was reached
+       *[other] { $rows } rows kept: the memory limit for this result was reached
+    }
+# The cursor strip of a cursor closed for being idle when its idle bound is not known (the log
+# line that said it is gone); never says a duration.
+# Variables:
+#   $rows (Number) - the rows the result has, e.g. 100.
+hv-strip-closed-idle = { $rows ->
+        [one] Cursor closed after { $rows } row: it was idle too long.
+       *[other] Cursor closed after { $rows } rows: it was idle too long.
+    }
+# The cursor strip after a statement returned more than one result set (R-M3-25).
+# Variables:
+#   $n (Number) - the result sets read and not shown, e.g. 2.
+hv-strip-more-sets = { $n ->
+        [one] { $n } more result set not shown
+       *[other] { $n } more result sets not shown
+    }
+# The word before the selection's size on the right of the cursor strip.
+hv-strip-selection = Selection
+# The selection's size.
+# Variables:
+#   $rows (Number) - the selected rows, e.g. 3.
+#   $cols (Number) - the selected columns, e.g. 2.
+hv-strip-dims = { $rows } × { $cols }
+# Command palette titles of the results tile's commands.
+hv-cmd-results-copy = Copy the selected result cells
+hv-cmd-results-fetch-more = Fetch more rows of the result
+hv-cmd-results-fetch-all = Fetch all rows of the result
+hv-cmd-results-close-cursor = Close the result's cursor
+hv-cmd-results-rerun = Re-run the result's statement
+# Command palette titles of the grid's commands.
+hv-cmd-grid-move-left = Grid: move left
+hv-cmd-grid-move-right = Grid: move right
+hv-cmd-grid-move-up = Grid: move up
+hv-cmd-grid-move-down = Grid: move down
+hv-cmd-grid-select-left = Grid: extend the selection left
+hv-cmd-grid-select-right = Grid: extend the selection right
+hv-cmd-grid-select-up = Grid: extend the selection up
+hv-cmd-grid-select-down = Grid: extend the selection down
+hv-cmd-grid-jump-left = Grid: jump to the first column
+hv-cmd-grid-jump-right = Grid: jump to the last column
+hv-cmd-grid-jump-up = Grid: jump to the first row
+hv-cmd-grid-jump-down = Grid: jump to the last loaded row
+hv-cmd-grid-home = Grid: go to the row's first cell
+hv-cmd-grid-end = Grid: go to the row's last cell
+hv-cmd-grid-first-row = Grid: go to the first row
+hv-cmd-grid-last-row = Grid: go to the last row
+hv-cmd-grid-page-up = Grid: page up
+hv-cmd-grid-page-down = Grid: page down
+hv-cmd-grid-next-cell = Grid: next cell
+hv-cmd-grid-prev-cell = Grid: previous cell
+hv-cmd-grid-select-all = Grid: select all
+hv-cmd-grid-select-row = Grid: select the row
+hv-cmd-grid-select-column = Grid: select the column
+hv-cmd-grid-copy = Grid: copy
+hv-cmd-grid-copy-with-headers = Grid: copy with headers
+hv-cmd-grid-escape = Grid: clear the selection
 ## m3a-t33-exec-ui
 
 # Command: stop the running statement of the focused console (or stop fetching its rows).
