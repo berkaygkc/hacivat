@@ -338,7 +338,8 @@ async fn canary_after_the_first_chunk_catches_a_writing_function() {
 #[tokio::test(start_paused = true)]
 async fn gap_discards_the_connection_and_flags_the_rows() {
     // The canary at the end finds what the one after the first chunk did not: a function that
-    // wrote on a later row (caught at the release).
+    // wrote on a later row, caught at the end of a cursor fetched to its end (`FetchAll`; a
+    // release's gap is `a_gap_found_at_a_release_discards_the_connection`).
     let (h, f, base) = ro(
         pg(vec![canary(None), canary(Some("732"))]).queries(vec![select(BIG, 30_000)]),
         ro_pg(),
@@ -580,6 +581,184 @@ async fn transaction_control_and_bad_input_are_refused_before_anything_is_sent()
 }
 
 // ---------------------------------------------------------------------------------------------
+// ## fix round 1 (review I2): a gap found at a release, and stops
+
+#[tokio::test(start_paused = true)]
+async fn a_gap_found_at_a_release_discards_the_connection() {
+    // A function that wrote after the first chunk, on a cursor that is not fetched to its
+    // end: the release (`CloseCursor`, another request, the idle bound) closes the query
+    // before its end, so the statement is judged as not completed; the end canary still runs
+    // (the guard's transaction is open) and finds the transaction ID.
+    for how in ["CloseCursor", "another request", "the idle bound"] {
+        let (h, f, base) = ro(
+            pg(vec![canary(None), canary(Some("733"))]).queries(vec![select(BIG, 30_000)]),
+            ro_pg(),
+        )
+        .await;
+        let mut events = h.events();
+        let (o, reply) = run_one(&h, BIG, true).await;
+        reply.expect("the first canary is clean");
+        assert!(matches!(
+            o.snap(0).completeness(),
+            Completeness::Suspended(_)
+        ));
+        match how {
+            "CloseCursor" => {
+                let e = ask(
+                    &h,
+                    Request::CloseCursor {
+                        result: o.store(0).id(),
+                        reason: CloseReason::UserClosed,
+                    },
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(
+                    e.kind,
+                    ExecErrorKind::EnforcementGap(GapReason::CanaryAssigned),
+                    "{how}"
+                );
+            }
+            "another request" => {
+                let e = run(&h, "SELECT 2").await.unwrap_err();
+                assert_eq!(
+                    e.kind,
+                    ExecErrorKind::EnforcementGap(GapReason::CanaryAssigned),
+                    "{how}"
+                );
+                assert!(
+                    !f.executed().iter().any(|s| s == "SELECT 2"),
+                    "{how}: the request ran on a discarded connection"
+                );
+            }
+            _ => {
+                let mut state = h.state();
+                tokio::time::timeout(secs(60), state.wait_for(|s| s.cursor.is_none()))
+                    .await
+                    .expect("released within the wait")
+                    .unwrap();
+            }
+        }
+        // The rows read stay, flagged; the release says why.
+        assert_eq!(o.rows(), 10_000, "{how}");
+        assert_eq!(
+            *o.snap(0).completeness(),
+            closed(CloseReason::EnforcementGap),
+            "{how}"
+        );
+        assert_eq!(
+            o.releases(),
+            vec![(CloseReason::EnforcementGap, false)],
+            "{how}"
+        );
+        // The close, the end canary, the rollback, then nothing: discarded unreset.
+        let all = steps(&f, base);
+        let close = all
+            .iter()
+            .position(|s| matches!(s, Step::Close(_)))
+            .unwrap_or_else(|| panic!("{how}: no close in {all:?}"));
+        assert_eq!(
+            all[close..],
+            [
+                Step::Close(CloseHow::Drain(ms(250))),
+                Step::Canary,
+                Step::Rollback
+            ],
+            "{how}"
+        );
+        loop {
+            if next(&mut events).await == SessionEvent::EnforcementGap(GapReason::CanaryAssigned) {
+                break;
+            }
+        }
+        let mut state = h.state();
+        tokio::time::timeout(
+            secs(60),
+            state.wait_for(|s| matches!(s.state, SessionState::Broken(_))),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{how}: the session did not break"))
+        .unwrap();
+        assert!(!f.executed().iter().any(|s| s.contains("COMMIT")), "{how}");
+    }
+}
+
+/// A suspended endless read-only cursor on `fake`, then a `FetchAll` on it, stopped once it
+/// streams: returns the session, its fake, where its log stood, and the recorder.
+async fn stopped_fetch(
+    fake: FakeDriver,
+    profile: Profile,
+) -> (SessionHandle, Arc<FakeDriver>, usize, Arc<Recorder>) {
+    let endless = FakeQuery {
+        never_pending: true,
+        ..select(BIG, u64::MAX)
+    };
+    let (h, f, base) = ro(fake.queries(vec![endless]), profile).await;
+    let (o, reply) = run_one(&h, BIG, true).await;
+    reply.expect("the guarded run succeeds");
+    let t = h.submit(fetch_all(&o));
+    settle_until("the fetch streams", || o.rows() > 20_000).await;
+    assert_eq!(
+        h.cancel(t.seq).await.unwrap(),
+        hacivat_session::session::CancelOutcome::Cancelled
+    );
+    assert_eq!(
+        t.reply.await.unwrap().unwrap_err().kind,
+        ExecErrorKind::Cancelled
+    );
+    assert_eq!(*o.snap(0).completeness(), Completeness::Cancelled);
+    (h, f, base, o)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stopped_read_only_pg_cursor_rolls_back_and_never_commits() {
+    let (h, f, base, _o) = stopped_fetch(pg(clean(2)), ro_pg()).await;
+    let all = steps(&f, base);
+    let close = all
+        .iter()
+        .rposition(|s| matches!(s, Step::Close(_)))
+        .expect("the stop closed the query");
+    assert_eq!(
+        all[close..],
+        [
+            Step::Close(CloseHow::Now),
+            Step::Canary,
+            Step::Rollback,
+            Step::Reset,
+            Step::Replay,
+        ]
+    );
+    assert_nothing_else_inside(&f, base);
+    assert!(!f.executed().iter().any(|s| s.contains("COMMIT")));
+    let s = snap(&h);
+    assert_eq!((s.state, s.tx.status), (SessionState::Idle, TxStatus::Idle));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stopped_read_only_mysql_cursor_rolls_back_and_never_commits() {
+    // MySQL closes early by a kill on the side connection; then the guard's end.
+    let (h, f, base, _o) = stopped_fetch(mysql(), ro_mysql()).await;
+    let all = steps(&f, base);
+    let close = all
+        .iter()
+        .position(|s| *s == Step::Close(CloseHow::Now))
+        .expect("the stop closed the query");
+    assert_eq!(
+        all[close..],
+        [
+            Step::Close(CloseHow::Now),
+            Step::Close(CloseHow::AfterKill(secs(2))),
+            Step::Rollback,
+            Step::Reset,
+            Step::Replay,
+        ]
+    );
+    assert_nothing_else_inside(&f, base);
+    assert!(!f.executed().iter().any(|s| s.contains("COMMIT")));
+    let s = snap(&h);
+    assert_eq!((s.state, s.tx.status), (SessionState::Idle, TxStatus::Idle));
+}
+
 // MySQL
 
 #[tokio::test(start_paused = true)]
@@ -625,9 +804,10 @@ async fn mysql_read_only_runs_reset_after_release() {
 
 #[tokio::test(start_paused = true)]
 async fn mysql_write_succeeded_is_read_from_the_final_ok_packet() {
-    // A read whose function wrote: the final OK packet counts affected rows (the driver keeps
-    // a positive count for a result with columns), and the post-check reads it. (The server's
-    // read-only transaction refuses such a write first; this is the tripwire behind it.)
+    // A positive affected-row count on a result with columns is `WriteSucceeded`. Review M5:
+    // this is a fake-only shape, a tripwire. After a `SELECT` a real MySQL final OK packet
+    // most likely carries 0 affected rows; the count is meaningful for `CALL` and statements
+    // without columns. The server's read-only transaction refuses such a write first.
     let wrote = FakeQuery {
         rows_affected: Some(1),
         ..select("SELECT f()", 1)

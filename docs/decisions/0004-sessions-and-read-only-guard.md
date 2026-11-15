@@ -1795,9 +1795,13 @@ failing closed with `Internal`.
    mixed sequence holds exactly one user statement.
 
 **How the end is judged.** A statement that ran to its end is judged by its `ResultEnd`: the
-command tag and affected rows (MySQL: the final OK packet, so a read whose function wrote is
-`WriteSucceeded`); one that failed or was closed early by its transaction state only, as M2b
-judges a failed statement (MySQL's implicit-commit DDL and SQLite excepted, unchanged). When a
+command tag and affected rows (MySQL: the final OK packet's affected rows, meaningful for `CALL`
+and statements without columns; after a `SELECT` it most likely carries 0, so the test with a
+positive count on a read is a tripwire on a fake-only shape). One that failed or was closed
+early is judged by its transaction state, as M2b judges a failed statement (MySQL's
+implicit-commit DDL and SQLite excepted, unchanged), and (fix round 1, review M3) by the tag
+and count of a result end it did see, through the plain `check_post` without the readings
+rule. When a
 release's drain reads a result to its end, the session has no `ResultEnd` (the close returns
 only a row count): the statement is judged as completed without a tag. That is a known limit
 on MySQL, where the final OK packet of a drained release is not seen; the server's read-only
@@ -1872,5 +1876,31 @@ enforces that no end is judged without its facts.
 session runs no `SHOW WARNINGS` on any path in M3a (Task 23's output log / M3b). `CALL` with the
 classifier off: PostgreSQL refuses a committing procedure inside the guard's transaction
 (`2D000`); on MySQL only the least-privilege principal stops a writing procedure, the M2b
-residual (ER15: M3b's classifier denies `CALL` on read-only sessions). MariaDB's rows are not
-run through `Run` in the Docker leg (its label stays guarded, C19; run B records them).
+residual (ER15: M3b's classifier denies `CALL` on read-only sessions). MariaDB's bypass rows
+are not run through `Run` in the Docker leg: run B records them unjudged because its label stays
+guarded (C19), so there is no verdict to match; owed to M3b. MariaDB's read-only cursor release
+is covered (below).
+
+**Fix round 1 (review I1, I2, M3–M6).**
+- Docker `neutralised_and_privilege_only_rows_through_run`: run B's neutralised rows (PG P5,
+  P6, P10, P15 `pg_advisory_lock`/`LOCK TABLE`, P17 `search_path`, P23, P25, P26 `LISTEN`/`DECLARE
+  … WITH HOLD`; MySQL M1 `GET_LOCK` in an executable comment, M3, M5, M9, M14 `SET @var`) through
+  `Run` as `hv_ro`, each followed by run B's "nothing lingers" checks (also through `Run`) and a
+  write or DDL that must still be refused; and run B's privilege-only rows as `hv_ro`. Every
+  outcome matches run B, M4 (`1227`) and M7 (`1370`, the `CALL` residual) included, except the
+  two privilege-only `COPY` rows (P13 `TO PROGRAM`, P14 `TO` a file), pinned to `protocol` for
+  the reason P14's server-blocked row is. Outcomes: Docker artifact `t22-run-neutralised.tsv`.
+- Docker `pg_a_lock_held_by_a_read_only_cursor_goes_with_its_release` and
+  `mysql_a_read_only_cursor_release_keeps_the_connection_and_drops_its_lock` (mysql84, and
+  mariadb114 on the full set): a lock taken by a suspended read-only cursor's rows is held while
+  it is open and gone after another request released it; on MySQL the release keeps the same
+  connection (drain, `KILL QUERY`, the guard's `ROLLBACK`, `COM_RESET_CONNECTION`).
+- FakeDriver `a_gap_found_at_a_release_discards_the_connection` (`CloseCursor`, another
+  request, the idle bound: the end canary's ID after a release that did not complete gives
+  `[Close, Canary, Rollback]`, no reset, `Broken`, no `COMMIT`; RED by mutation: a
+  not-completed arm that skipped PostgreSQL passed every earlier test and fails this one), and
+  `a_stopped_read_only_{pg,mysql}_cursor_rolls_back_and_never_commits`.
+- `prod_read_only` `a_production_write_runs_inside_the_guards_read_only_transaction`: a
+  production `DELETE` through `Run` runs after `BEGIN … READ ONLY` and before `ROLLBACK`.
+- Not changed (review M7): `CursorReleased.rolled_back` stays `false` for guard holds; routed
+  to T23/T34 (the output log reports "rolled back" for a guard hold only if its `ROLLBACK` ran).

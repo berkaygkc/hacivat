@@ -16,6 +16,9 @@
 //!   PostgreSQL driver before anything is sent (Task 12), so P14 ends as `protocol` (run B:
 //!   `25006`/`42501` from the server).
 //! - Every row's outcome is written to the Docker artifact `t22-run-bypass.tsv`.
+//! - Fix round 1 (review I1, M6): run B's neutralised and privilege-only rows through `Run`
+//!   (`t22-run-neutralised.tsv`), and locks taken by a read-only cursor's rows released with it
+//!   (PostgreSQL; MySQL and MariaDB, which also prove the real release keeps the connection).
 
 #![allow(
     clippy::result_large_err,
@@ -23,6 +26,8 @@
 )]
 
 mod common;
+
+use std::sync::Arc;
 
 use common::conformance::*;
 use common::runs::*;
@@ -230,10 +235,31 @@ impl Ro {
     /// After a gap or a lost connection the profile is connected again, so the next row
     /// starts on a live session.
     async fn try_row(&self, sql: &str) -> Reply {
+        self.try_row_with(sql, read_head(sql)).await.0
+    }
+
+    // ## fix round 1 (I1)
+    /// The checks (each a statement that answers one row when all is well), run through `Run`
+    /// as units that do not suspend (a named portal would count among `pg_cursors`), that do
+    /// not: they show what a row left behind in the session.
+    async fn lingering(&self, checks: &[String]) -> Vec<String> {
+        let mut found = Vec::new();
+        for check in checks {
+            match self.try_row_with(check, false).await {
+                (Ok(_), o) if o.rows() == 1 => {}
+                (Ok(_), o) => found.push(format!("{check} → {} rows", o.rows())),
+                (reply, _) => found.push(format!("{check} → {}", outcome(&reply))),
+            }
+        }
+        found
+    }
+
+    /// [`Ro::try_row`] with the unit's `suspendable` flag given, and its recorder.
+    async fn try_row_with(&self, sql: &str, suspendable: bool) -> (Reply, Arc<Recorder>) {
         let o = Recorder::new();
         let reply = run_spec(
             &self.session(),
-            spec_with(&o, &[(sql, read_head(sql))], FetchPolicy::default()),
+            spec_with(&o, &[(sql, suspendable)], FetchPolicy::default()),
         )
         .await;
         let ended = matches!(
@@ -256,7 +282,7 @@ impl Ro {
                 connect_on(m, &self.on.profile).await;
             }
         }
-        reply
+        (reply, o)
     }
 
     async fn close(self) {
@@ -317,6 +343,10 @@ async fn judge_rows<F, Fut>(
 // PostgreSQL fixtures
 
 const PG_DB: &str = "hv_t22";
+
+/// The tests of this binary run in parallel; the ones that make and drop the fixtures
+/// (`hv_t22` and the MySQL `hv_t22_*` objects) take turns.
+static FIXTURES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn pg_fixture(t: &DockerTarget) {
     let mut a = admin(t).await;
@@ -390,6 +420,7 @@ async fn server_blocked_bypass_rows_are_blocked_through_run() {
     if !docker_enabled() {
         return;
     }
+    let _fixtures = FIXTURES.lock().await;
     let mut failures = Vec::new();
     let mut record = String::new();
     for t in lines_of(DbmsKind::Postgres) {
@@ -448,9 +479,13 @@ async fn server_blocked_bypass_rows_are_blocked_through_run() {
 async fn mysql_fixture(t: &DockerTarget) {
     let mut a = admin(t).await;
     for sql in [
-        "DROP TABLE IF EXISTS hv_t22_bypass, hv_t22_m8",
+        "DROP PROCEDURE IF EXISTS hv_t22_escape",
+        "DROP TABLE IF EXISTS hv_t22_bypass, hv_t22_m8, hv_t22_m9",
         "CREATE TABLE hv_t22_bypass (a int)",
         "INSERT INTO hv_t22_bypass VALUES (1), (2), (3)",
+        // ## fix round 1 (I1): M7's procedure (`hv_ro` has no `EXECUTE` on it).
+        "CREATE PROCEDURE hv_t22_escape() BEGIN COMMIT; START TRANSACTION READ WRITE; \
+         INSERT INTO hv_t22_bypass VALUES (100); COMMIT; END",
     ] {
         batch(&mut a, &t.id, sql).await;
     }
@@ -459,16 +494,18 @@ async fn mysql_fixture(t: &DockerTarget) {
 
 async fn mysql_drop_fixture(t: &DockerTarget) {
     let mut a = admin(t).await;
-    batch(
-        &mut a,
-        &t.id,
-        "DROP TABLE IF EXISTS hv_t22_bypass, hv_t22_m8",
-    )
-    .await;
+    for sql in [
+        "DROP PROCEDURE IF EXISTS hv_t22_escape",
+        "DROP TABLE IF EXISTS hv_t22_bypass, hv_t22_m8, hv_t22_m9",
+    ] {
+        batch(&mut a, &t.id, sql).await;
+    }
     a.close().await;
 }
 
-/// What the admin side channel sees: the table's rows and the test database's tables.
+/// What the admin side channel sees: the table's rows, the test database's tables and
+/// routines, the neutralised rows' user locks, and the global variables the privilege-only
+/// rows try to change (fix round 1, I1: run B's side channel).
 async fn mysql_snapshot(admin: &mut LiveConnection, t: &DockerTarget) -> String {
     scalar(
         admin,
@@ -476,7 +513,10 @@ async fn mysql_snapshot(admin: &mut LiveConnection, t: &DockerTarget) -> String 
             "SELECT CONCAT_WS('|', \
              (SELECT CONCAT(COUNT(*), ':', COALESCE(SUM(a), 0)) FROM hv_t22_bypass), \
              (SELECT GROUP_CONCAT(table_name ORDER BY table_name) FROM information_schema.tables \
-              WHERE table_schema = '{db}'))",
+              WHERE table_schema = '{db}'), \
+             (SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema = '{db}'), \
+             IS_FREE_LOCK('hv_t22_m1'), IS_FREE_LOCK('hv_t22_m5'), \
+             @@global.max_connections, @@global.read_only)",
             db = t.database
         ),
     )
@@ -579,4 +619,537 @@ async fn ro_cursor_is_released_before_the_server_idle_kill() {
     assert_eq!(scalar(&mut a, &backend("idle")).await, pid);
     a.close().await;
     ro.close().await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## fix round 1 (review I1): run B's neutralised and privilege-only groups through `Run`
+
+/// Run B's PostgreSQL rows that the server accepts inside the read-only transaction and the
+/// guard's end neutralises (`ROLLBACK`, `DISCARD ALL` without `DEALLOCATE ALL`, the replay).
+/// On the typed path the end waits for the unit (or its cursor): nothing may linger after it.
+const PG_NEUTRALISED: &[(&str, &str)] = &[
+    ("P5", "RESET transaction_read_only"),
+    (
+        "P6",
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+    ),
+    ("P6", "SET default_transaction_read_only = off"),
+    ("P6", "RESET ALL"),
+    ("P10", "PREPARE hv_t22_s AS SELECT 1"),
+    ("P15", "SELECT pg_advisory_lock(220023)"),
+    ("P15", "LOCK TABLE hv_t22 IN ACCESS EXCLUSIVE MODE"),
+    ("P17", "SET search_path = pg_catalog"),
+    ("P23", "SET standard_conforming_strings = off"),
+    ("P25", "NOTIFY hv_t22, 'x'"),
+    ("P25", "SELECT pg_notify('hv_t22', 'x')"),
+    ("P26", "LISTEN hv_t22"),
+    ("P26", "DECLARE hv_t22_c CURSOR WITH HOLD FOR SELECT 1"),
+];
+
+/// Run B's PostgreSQL rows that only `hv_ro`'s missing privileges stop (L5), as `hv_ro` only.
+/// Pinned differences from run B (`42501` there): the typed driver refuses `COPY` before
+/// anything is sent, so the two `COPY` rows end `protocol`.
+const PG_PRIVILEGE_ONLY: &[Row] = &[
+    ("P11", "SELECT pg_terminate_backend({victim})", &[PG_PRIV]),
+    ("P13", "COPY (SELECT 1) TO PROGRAM 'true'", &[PROTOCOL]),
+    ("P14", "SELECT pg_read_file('/etc/hostname')", &[PG_PRIV]),
+    ("P14", "COPY hv_t22 TO '/tmp/hv_t22_copy'", &[PROTOCOL]),
+    ("P16", "SET ROLE hv_test", &[PG_PRIV]),
+    ("P16", "SET SESSION AUTHORIZATION hv_test", &[PG_PRIV]),
+    (
+        "P31",
+        "SELECT pg_create_physical_replication_slot('hv_t22_slot')",
+        &["function"],
+    ),
+    (
+        "P31",
+        "DO $$ BEGIN EXECUTE 'SELECT pg_create_physical_' || 'replication_slot(''hv_t22_slot'')'; END $$",
+        &[PG_PRIV],
+    ),
+    ("P32", "SELECT pg_switch_wal()", &["function"]),
+    (
+        "P32",
+        "DO $$ BEGIN EXECUTE 'SELECT pg_switch' || '_wal()'; END $$",
+        &[PG_PRIV],
+    ),
+    (
+        "P32",
+        "SELECT pg_logical_emit_message(true, 'hv_t22', 'x')",
+        &["function"],
+    ),
+    (
+        "P32",
+        "DO $$ BEGIN EXECUTE 'SELECT pg_logical_' || 'emit_message(true, ''hv_t22'', ''x'')'; END $$",
+        &[PG_PRIV],
+    ),
+    (
+        "P32",
+        "DO $$ BEGIN EXECUTE 'SELECT pg_logical_' || 'emit_message(false, ''hv_t22'', ''x'')'; END $$",
+        &[PG_PRIV],
+    ),
+    (
+        "P33",
+        "SELECT lo_export(220022, '/tmp/hv_t22_lo')",
+        &[PG_PRIV],
+    ),
+    ("P34", "CHECKPOINT", &[PG_PRIV]),
+    ("P34", "SELECT pg_stat_reset()", &[PG_PRIV]),
+];
+
+/// The server files the privilege-only rows would write.
+const PG_SERVER_FILES: [&str; 2] = ["/tmp/hv_t22_copy", "/tmp/hv_t22_lo"];
+
+/// Run B's MySQL neutralised rows (`{tro}`: the transaction read-only variable): M1 (a lock in
+/// an executable comment) M3 M5 (`GET_LOCK`) M9 M14.
+const MYSQL_NEUTRALISED: &[(&str, &str)] = &[
+    (
+        "M1",
+        "SELECT 1 /*!50000 , (SELECT GET_LOCK('hv_t22_m1', 0)) */",
+    ),
+    ("M3", "SET sql_mode = 'NO_BACKSLASH_ESCAPES'"),
+    ("M5", "SELECT GET_LOCK('hv_t22_m5', 0)"),
+    ("M9", "SET SESSION TRANSACTION READ WRITE"),
+    ("M9", "SET @@session.{tro} = 0"),
+    ("M14", "SET @hv_t22 = 1"),
+];
+
+const MY_PRIV: &str = "1227";
+
+/// Run B's MySQL privilege-only rows, as `hv_ro` only. M4 (`INTO OUTFILE`) and M7 (the
+/// documented `CALL` residual: only least privilege stops a writing procedure) end exactly as
+/// in run B.
+const MYSQL_PRIVILEGE_ONLY: &[Row] = &[
+    (
+        "M4",
+        "SELECT a FROM hv_t22_bypass INTO OUTFILE '/tmp/hv_t22_out'",
+        &[MY_PRIV],
+    ),
+    ("M10", "SET GLOBAL max_connections = 999", &[MY_PRIV]),
+    (
+        "M10",
+        "SET PERSIST max_connections = 999",
+        &[MY_PRIV, "1064"],
+    ),
+    ("M10", "RESET PERSIST max_connections", &["3615"]),
+    ("M10", "FLUSH TABLES", &[MY_PRIV]),
+    ("M10", "KILL {victim}", &["1095"]),
+    (
+        "M11",
+        "CREATE FUNCTION hv_t22_udf RETURNS STRING SONAME 'hv_t22.so'",
+        &[PROTOCOL],
+    ),
+    ("M7", "CALL hv_t22_escape()", &["1370"]),
+];
+
+/// MySQL's transaction read-only variable: `transaction_read_only` on MySQL 8.
+const MY_TRO: &str = "transaction_read_only";
+
+/// After a PostgreSQL neutralised row nothing of it may be left in the session (run B's
+/// checks; each answers one row when all is well).
+fn pg_linger_checks(search_path: &str) -> Vec<String> {
+    vec![
+        "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM pg_listening_channels())".into(),
+        "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM pg_cursors WHERE name <> '')".into(),
+        "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM pg_prepared_statements WHERE from_sql)".into(),
+        "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' \
+         AND pid = pg_backend_pid())"
+            .into(),
+        "SELECT 1 WHERE current_setting('default_transaction_read_only') = 'on'".into(),
+        "SELECT 1 WHERE current_setting('standard_conforming_strings') = 'on'".into(),
+        format!(
+            "SELECT 1 WHERE current_setting('search_path') = '{}'",
+            search_path.replace('\'', "''")
+        ),
+    ]
+}
+
+/// After a MySQL neutralised row: the read-only setting, no user variable, no user lock, the
+/// pinned `sql_mode`.
+fn mysql_linger_checks() -> Vec<String> {
+    vec![
+        format!("SELECT 1 FROM DUAL WHERE @@session.{MY_TRO} = 1"),
+        "SELECT 1 FROM DUAL WHERE @hv_t22 IS NULL".into(),
+        "SELECT 1 FROM DUAL WHERE IS_USED_LOCK('hv_t22_m1') IS NULL \
+         AND IS_USED_LOCK('hv_t22_m5') IS NULL"
+            .into(),
+        "SELECT 1 FROM DUAL WHERE @@session.sql_mode NOT LIKE '%NO_BACKSLASH_ESCAPES%'".into(),
+    ]
+}
+
+/// What a PostgreSQL row may leave outside the fixture database: a replication slot, a server
+/// file. Each found is undone and returned (an escape).
+async fn pg_escapes(t: &DockerTarget) -> Vec<String> {
+    let mut a = admin(t).await;
+    let mut found = Vec::new();
+    let slot = "SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'hv_t22_slot'";
+    if count(&mut a, slot).await > 0 {
+        batch(
+            &mut a,
+            &t.id,
+            "SELECT pg_drop_replication_slot('hv_t22_slot')",
+        )
+        .await;
+        found.push(format!("{}: the replication slot hv_t22_slot", t.id));
+    }
+    for file in PG_SERVER_FILES {
+        let exists = scalar(
+            &mut a,
+            &format!("SELECT pg_stat_file('{file}', true) IS NOT NULL"),
+        )
+        .await;
+        if exists == "t" {
+            batch(
+                &mut a,
+                &t.id,
+                &format!("COPY (SELECT 1) TO PROGRAM 'rm -f {file}'"),
+            )
+            .await;
+            found.push(format!("{}: the server file {file}", t.id));
+        }
+    }
+    a.close().await;
+    found
+}
+
+/// Judges one neutralised row: it ran (or the server refused it, any code), the side channel
+/// is unchanged and nothing lingers; a gap or a lost connection fails it.
+#[allow(clippy::too_many_arguments)]
+fn judge_neutralised(
+    t: &DockerTarget,
+    id: &str,
+    sql: &str,
+    got: &str,
+    before: &str,
+    after: &str,
+    lingering: &[String],
+    failures: &mut Vec<String>,
+) {
+    let stopped =
+        !["ran", GAP, "lost"].contains(&got) && got.chars().all(|c| c.is_ascii_alphanumeric());
+    if before != after {
+        failures.push(format!(
+            "{} hv_ro {id} `{sql}`: {got}, and the side channel changed: {before} → {after}",
+            t.id
+        ));
+    } else if !lingering.is_empty() {
+        failures.push(format!(
+            "{} hv_ro {id} `{sql}`: {got}, lingering: {}",
+            t.id,
+            lingering.join("; ")
+        ));
+    } else if got != "ran" && !stopped {
+        failures.push(format!("{} hv_ro {id} `{sql}`: {got}", t.id));
+    }
+}
+
+/// [`pg_snapshot`] and the advisory locks held by session `app`.
+async fn pg_side(a: &mut LiveConnection, app: &str) -> String {
+    let locks = format!(
+        "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity s ON s.pid = l.pid \
+         WHERE l.locktype = 'advisory' AND s.application_name = '{app}'"
+    );
+    let slots = "SELECT count(*) FROM pg_replication_slots";
+    format!(
+        "{}|{}|{}",
+        pg_snapshot(a).await,
+        scalar(a, &locks).await,
+        scalar(a, slots).await
+    )
+}
+
+/// The PostgreSQL neutralised and privilege-only rows on `t`, as `hv_ro`, through `Run`.
+async fn pg_neutralised_rows(t: &DockerTarget, failures: &mut Vec<String>, record: &mut String) {
+    pg_fixture(t).await;
+    let mut a = admin_on(t, PG_DB).await;
+    // As run B: the remediation's `REVOKE` of `pg_logical_emit_message` (F1), so the
+    // run-time-built calls meet `hv_ro`'s missing privilege.
+    batch(&mut a, &t.id, &revoke_emit_message(t)).await;
+    let search_path = scalar(&mut a, "SHOW search_path").await;
+    let checks = pg_linger_checks(&search_path);
+    let ro = Ro::open(t, "hv_ro", PG_DB).await;
+    let app = ro.app().to_string();
+    let baseline = pg_side(&mut a, &app).await;
+    for (id, sql) in PG_NEUTRALISED {
+        let got = outcome(&ro.try_row(sql).await);
+        let mut lingering = ro.lingering(&checks).await;
+        // A write is still refused by the read-only transaction.
+        let write = outcome(
+            &ro.try_row_with("INSERT INTO hv_t22 VALUES (7)", false)
+                .await
+                .0,
+        );
+        if write != PG_RO {
+            lingering.push(format!("a write after it → {write}"));
+        }
+        let after = pg_side(&mut a, &app).await;
+        record.push_str(&format!("{}\thv_ro\t{id}\t{got}\t{sql}\n", t.id));
+        judge_neutralised(t, id, sql, &got, &baseline, &after, &lingering, failures);
+    }
+    let victim = scalar(&mut a, "SELECT pg_backend_pid()").await;
+    for (id, sql, allowed) in PG_PRIVILEGE_ONLY {
+        let run_sql = sql.replace("{victim}", &victim);
+        let got = outcome(&ro.try_row(&run_sql).await);
+        let after = pg_side(&mut a, &app).await;
+        record.push_str(&format!("{}\thv_ro\t{id}\t{got}\t{sql}\n", t.id));
+        if after != baseline || !allowed.contains(&got.as_str()) {
+            failures.push(format!(
+                "{} hv_ro {id} `{sql}`: {got} (allowed {allowed:?}), side channel {baseline} → \
+                 {after}",
+                t.id
+            ));
+        }
+    }
+    // P11's victim is alive (the side channel itself).
+    assert_eq!(scalar(&mut a, "SELECT 1").await, "1", "{} P11", t.id);
+    ro.close().await;
+    a.close().await;
+    for escaped in pg_escapes(t).await {
+        failures.push(format!("escaped: {escaped}"));
+    }
+    pg_drop_fixture(t).await;
+}
+
+/// The MySQL neutralised and privilege-only rows on `t`, as `hv_ro`, through `Run`.
+async fn mysql_neutralised_rows(t: &DockerTarget, failures: &mut Vec<String>, record: &mut String) {
+    mysql_fixture(t).await;
+    let mut a = admin(t).await;
+    let max_connections = scalar(&mut a, "SELECT @@global.max_connections").await;
+    let checks = mysql_linger_checks();
+    let ro = Ro::open(t, "hv_ro", &t.database).await;
+    let baseline = mysql_snapshot(&mut a, t).await;
+    for (id, sql) in MYSQL_NEUTRALISED {
+        let run_sql = sql.replace("{tro}", MY_TRO);
+        let got = outcome(&ro.try_row(&run_sql).await);
+        let mut lingering = ro.lingering(&checks).await;
+        // DDL is still refused by the read-only setting.
+        let ddl = outcome(
+            &ro.try_row_with("CREATE TABLE hv_t22_m9 (a int)", false)
+                .await
+                .0,
+        );
+        if ![MY_RO, MY_TABLE_PRIV].contains(&ddl.as_str()) {
+            lingering.push(format!("DDL after it → {ddl}"));
+        }
+        let after = mysql_snapshot(&mut a, t).await;
+        record.push_str(&format!("{}\thv_ro\t{id}\t{got}\t{sql}\n", t.id));
+        judge_neutralised(t, id, sql, &got, &baseline, &after, &lingering, failures);
+    }
+    let victim = scalar(&mut a, "SELECT CONNECTION_ID()").await;
+    for (id, sql, allowed) in MYSQL_PRIVILEGE_ONLY {
+        let run_sql = sql.replace("{victim}", &victim);
+        let got = outcome(&ro.try_row(&run_sql).await);
+        let after = mysql_snapshot(&mut a, t).await;
+        record.push_str(&format!("{}\thv_ro\t{id}\t{got}\t{sql}\n", t.id));
+        if after != baseline || !allowed.contains(&got.as_str()) {
+            failures.push(format!(
+                "{} hv_ro {id} `{sql}`: {got} (allowed {allowed:?}), side channel {baseline} → \
+                 {after}",
+                t.id
+            ));
+        }
+    }
+    // M10's victim is alive.
+    assert_eq!(scalar(&mut a, "SELECT 1").await, "1", "{} M10 KILL", t.id);
+    ro.close().await;
+    let now = scalar(&mut a, "SELECT @@global.max_connections").await;
+    if now != max_connections {
+        batch(
+            &mut a,
+            &t.id,
+            &format!("SET GLOBAL max_connections = {max_connections}"),
+        )
+        .await;
+        failures.push(format!(
+            "{}: max_connections escaped ({max_connections} → {now}; restored)",
+            t.id
+        ));
+    }
+    a.close().await;
+    mysql_drop_fixture(t).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn neutralised_and_privilege_only_rows_through_run() {
+    if !docker_enabled() {
+        return;
+    }
+    let _fixtures = FIXTURES.lock().await;
+    let mut failures = Vec::new();
+    let mut record = String::new();
+    for t in lines_of(DbmsKind::Postgres) {
+        pg_neutralised_rows(&t, &mut failures, &mut record).await;
+    }
+    for t in lines_of(DbmsKind::MySql) {
+        mysql_neutralised_rows(&t, &mut failures, &mut record).await;
+    }
+    let path = hacivat_testkit::artifact("t22-run-neutralised.tsv");
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).expect("the artifact directory");
+    }
+    std::fs::write(&path, &record).expect("the record is written");
+    assert!(!record.is_empty(), "no line of the active set ran a row");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## fix round 1 (review I1, M6): a lock taken by a cursor's rows is released with the cursor
+
+/// The single value of a one-row, one-column result, as text.
+fn single(o: &Recorder) -> String {
+    match o.snap(0).cell(0, 0).to_value() {
+        hacivat_values::Value::Int(v) => v.to_string(),
+        hacivat_values::Value::UInt(v) => v.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn pg_a_lock_held_by_a_read_only_cursor_goes_with_its_release() {
+    if !docker_enabled() {
+        return;
+    }
+    let Some(t) = require_target("pg17") else {
+        return;
+    };
+    let ro = Ro::open(&t, t.user.as_str(), &t.database).await;
+    let app = ro.app().to_string();
+    let s = ro.session();
+    let o = Recorder::new();
+    run_spec(
+        &s,
+        spec_with(
+            &o,
+            &[(
+                "SELECT g, pg_advisory_lock(220024) FROM generate_series(1, 100000) g",
+                true,
+            )],
+            FetchPolicy::default(),
+        ),
+    )
+    .await
+    .expect("the guarded run succeeds");
+    assert!(matches!(
+        o.snap(0).completeness(),
+        Completeness::Suspended(_)
+    ));
+    let mut a = admin(&t).await;
+    let held = format!(
+        "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity s ON s.pid = l.pid \
+         WHERE l.locktype = 'advisory' AND s.application_name = '{app}'"
+    );
+    assert!(
+        count(&mut a, &held).await > 0,
+        "the cursor's rows took the lock"
+    );
+    // Another request: the cursor is released, the guard's end (ROLLBACK, the reset with its
+    // `pg_advisory_unlock_all()`) runs, then the request.
+    let o2 = Recorder::new();
+    run_spec(
+        &s,
+        spec_with(&o2, &[("SELECT 1", false)], FetchPolicy::default()),
+    )
+    .await
+    .expect("the next unit runs");
+    assert_eq!(o.releases(), vec![(CloseReason::SessionNeeded, false)]);
+    assert_eq!(
+        *o.snap(0).completeness(),
+        Completeness::Closed {
+            reason: CloseReason::SessionNeeded
+        }
+    );
+    assert_eq!(
+        count(&mut a, &held).await,
+        0,
+        "the lock went with the cursor"
+    );
+    a.close().await;
+    ro.close().await;
+}
+
+/// A MySQL-family cross join large enough to stay a cursor; each row takes the same user lock
+/// again (re-entrant).
+const MY_LOCKING_BIG: &str = "WITH d AS (SELECT 0 AS x UNION ALL SELECT 1 UNION ALL SELECT 2 \
+    UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 \
+    UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) \
+    SELECT a.x + b.x * 10 + c.x * 100 + e.x * 1000 + f.x * 10000 AS n, \
+    GET_LOCK('hv_t22_cur', 0) AS l FROM d a, d b, d c, d e, d f";
+
+/// Review M6: a real read-only MySQL cursor's release (drain, `KILL QUERY` on the side
+/// connection, the guard's `ROLLBACK`, `COM_RESET_CONNECTION`, the replay) on the same
+/// connection. MariaDB is included here (its cursor release is the same path); its bypass rows
+/// stay out of `Run`'s judged groups, as run B records them unjudged (C19, M3b).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "docker"]
+async fn mysql_a_read_only_cursor_release_keeps_the_connection_and_drops_its_lock() {
+    if !docker_enabled() {
+        return;
+    }
+    for id in ["mysql84", "mariadb114"] {
+        let Some(t) = require_target(id) else {
+            continue;
+        };
+        let ro = Ro::open(&t, t.user.as_str(), &t.database).await;
+        let s = ro.session();
+        let thread = |o: &Recorder| single(o);
+        let (reply, before) = ro.try_row_with("SELECT CONNECTION_ID()", false).await;
+        reply.unwrap_or_else(|e| panic!("{id}: CONNECTION_ID: {:?}", e.kind));
+        let before = thread(&before);
+        let o = Recorder::new();
+        run_spec(
+            &s,
+            spec_with(&o, &[(MY_LOCKING_BIG, true)], FetchPolicy::default()),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{id}: the guarded run: {:?}", e.kind));
+        assert!(
+            matches!(o.snap(0).completeness(), Completeness::Suspended(_)),
+            "{id}: {:?}",
+            o.snap(0).completeness()
+        );
+        assert_eq!(s.state().borrow().tx.owner, TxOwner::Guard, "{id}");
+        let mut a = admin(&t).await;
+        assert_eq!(
+            scalar(&mut a, "SELECT IS_USED_LOCK('hv_t22_cur')").await,
+            before,
+            "{id}: the cursor's rows took the lock"
+        );
+        // Another request releases the cursor first, on the same connection.
+        let (reply, after) = ro.try_row_with("SELECT CONNECTION_ID()", false).await;
+        reply.unwrap_or_else(|e| panic!("{id}: after the release: {:?}", e.kind));
+        assert_eq!(thread(&after), before, "{id}: the same connection");
+        assert_eq!(
+            o.releases(),
+            vec![(CloseReason::SessionNeeded, false)],
+            "{id}"
+        );
+        assert_eq!(o.rows(), 10_000, "{id}");
+        // `COM_RESET_CONNECTION` released the lock; no transaction is left on the thread.
+        assert_eq!(
+            scalar(&mut a, "SELECT IS_USED_LOCK('hv_t22_cur')").await,
+            "",
+            "{id}: the lock went with the cursor"
+        );
+        assert_eq!(
+            count(
+                &mut a,
+                &format!(
+                    "SELECT COUNT(*) FROM information_schema.processlist \
+                     WHERE id = {before} AND command <> 'Sleep'"
+                )
+            )
+            .await,
+            0,
+            "{id}"
+        );
+        let snap = s.state().borrow().clone();
+        assert_eq!(
+            (snap.tx.status, snap.cursor),
+            (TxStatus::Idle, None),
+            "{id}"
+        );
+        a.close().await;
+        ro.close().await;
+    }
 }

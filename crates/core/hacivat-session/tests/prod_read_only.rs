@@ -101,9 +101,10 @@ async fn assert_read_only(h: &SessionHandle, f: &FakeDriver, what: &str) {
         "{what}: the statement was sent"
     );
     // The typed path too (fix round 1, review M1): a run on this session goes through the
-    // typed guard (Task 22), whose transaction-keyword layer refuses before anything reaches
-    // the driver, as a write and as a suspendable unit (`tests/readonly_typed.rs` runs the
-    // guard's whole path).
+    // typed guard (Task 22), whose transaction-keyword layer refuses transaction control
+    // before anything reaches the driver, as a plain and as a suspendable unit. A write runs
+    // inside the guard's read-only transaction instead
+    // (`a_production_write_runs_inside_the_guards_read_only_transaction`).
     for (sql, suspendable) in [("COMMIT", false), ("/* x */ END", true)] {
         let sent = f.call_log().len();
         let o = Recorder::new();
@@ -121,6 +122,61 @@ async fn assert_read_only(h: &SessionHandle, f: &FakeDriver, what: &str) {
         assert_eq!(f.call_log().len(), sent, "{what}: {sql} reached the driver");
         assert_eq!(o.stores(), 0, "{what}: {sql} opened a result");
     }
+}
+
+// ## m3a-t22-typed-readonly (fix round 1, review M4)
+#[tokio::test(start_paused = true)]
+async fn a_production_write_runs_inside_the_guards_read_only_transaction() {
+    // A production console's `DELETE` through `Run`: the guard's `BEGIN … READ ONLY` comes
+    // first, the statement runs inside it (the server refuses the write there; the fake has no
+    // server, so the routing is what this proves), and a `ROLLBACK` ends it. Never a `COMMIT`.
+    let canary = hacivat_driver::fake::FakeExec {
+        prefix: "SELECT pg_catalog.txid_current_if_assigned()",
+        result: Ok(hacivat_driver::ExecSummary {
+            rows: vec![vec![None]],
+            row_count: 1,
+            ..hacivat_driver::ExecSummary::default()
+        }),
+        delay: std::time::Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    };
+    let mut script: Vec<_> = (0..8)
+        .map(|_| rows("SELECT current_user = session_user", &[&["t"]]))
+        .collect();
+    script.push(canary);
+    let fake = fake_pg().tracks_transactions().exec(script);
+    let profile = Arc::new(tagged(EnvTag::Production));
+    let (m, f) = manager_with(fake, app_config());
+    m.connect(profile.clone(), None, Interaction::Headless);
+    wait_connected(&m, profile.id).await;
+    let h = default_of(&m, profile.id);
+    assert!(snap(&h).read_only);
+    let sent = f.call_log().len();
+    let o = Recorder::new();
+    run_spec(
+        &h,
+        spec_with(&o, &[("DELETE FROM t", false)], FetchPolicy::default()),
+    )
+    .await
+    .expect("the guarded unit runs (the fake accepts it)");
+    let log = &f.call_log()[sent..];
+    let at = |call: &hacivat_driver::fake::FakeCall| log.iter().position(|c| c == call);
+    let statement = |s: &str| hacivat_driver::fake::FakeCall::Statement(s.into());
+    let begin = at(&statement(
+        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+    ));
+    let query = at(&hacivat_driver::fake::FakeCall::Typed(
+        hacivat_driver::fake::FakeTypedCall::Query("DELETE FROM t".into()),
+    ));
+    let rollback = at(&statement("ROLLBACK"));
+    assert_eq!(begin, Some(0), "{log:?}");
+    assert!(begin < query && query < rollback, "{log:?}");
+    assert!(
+        !f.executed().iter().any(|s| s.contains("COMMIT")),
+        "{:?}",
+        f.executed()
+    );
 }
 
 #[tokio::test(start_paused = true)]

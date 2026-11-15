@@ -942,7 +942,8 @@ impl GuardedCursor {
     /// Steps 4–8 at the cursor's end, once the actor closed the query: `completed` when the
     /// statement ran to its end (its `end` then holds the command tag and affected rows the
     /// post-check reads), else it failed or was closed early and is judged by its transaction
-    /// state. `replay` is the session's environment, run after the reset.
+    /// state, and by the tag and count of a result end it did see. `replay` is the session's
+    /// environment, run after the reset.
     pub(crate) async fn finish(
         self,
         conn: &mut dyn RawConn,
@@ -962,7 +963,15 @@ impl GuardedCursor {
                 ok: true,
                 ..Ran::default()
             },
-            _ => Ran::default(),
+            // ## fix round 1 (review M3): a result end was seen, but the statement did not run
+            // to its end (a later result set failed, a stop): its tag and count are still the
+            // server's facts, judged by the plain check (no readings: it did not succeed).
+            Some(end) => Ran {
+                ok: false,
+                command_tag: end.command_tag.clone(),
+                rows_affected: end.rows_affected,
+            },
+            None => Ran::default(),
         };
         post_steps(conn, self.kind, &self.plan, &self.keywords, ran, replay).await
     }
