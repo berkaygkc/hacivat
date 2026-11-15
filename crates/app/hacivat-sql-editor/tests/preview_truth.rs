@@ -744,3 +744,31 @@ fn the_preview_reads_copy_from_the_splitter(cx: &mut TestAppContext) {
         assert_eq!(p.state, PreviewState::Uncertain, "{text}");
     }
 }
+
+// ## m3a-f1-followups
+/// Follow-up F1-a, the second failing input Task 32's run found (its proptest `cc` line was not
+/// handed over, so the input is pinned here as it shrank): `)COPY t FROM STDIN;` at the text's
+/// start, caret 0, remembered kind Statement. The preview said Uncertain where execution sends
+/// the one statement `0..18`.
+#[test]
+fn a_leading_paren_copy_previews_what_execution_sends() {
+    let doc = (
+        DialectId::Postgres,
+        ClientFlavor::Psql,
+        ")COPY t FROM STDIN;\na\tb\n\\.\n".to_string(),
+    );
+    for remembered in [Some(CandidateKind::Statement), None] {
+        preview_matches_resolve(&doc, &At::Caret(0), remembered)
+            .unwrap_or_else(|e| panic!("{remembered:?}: {e}"));
+    }
+    let snap = SqlDocument::new(doc.2.clone(), DialectCtx::new(doc.0, None), doc.1).snapshot();
+    let p = preview_of(
+        &snap,
+        &ExecAt::Carets(smallvec![0]),
+        ExecAction::Execute1,
+        true,
+        Some(CandidateKind::Statement),
+    );
+    assert_eq!(p.state, PreviewState::Units);
+    assert_eq!(p.ranges.to_vec(), [0..18]);
+}
