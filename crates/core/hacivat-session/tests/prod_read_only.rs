@@ -100,10 +100,11 @@ async fn assert_read_only(h: &SessionHandle, f: &FakeDriver, what: &str) {
         !f.executed().iter().any(|s| s == "COMMIT"),
         "{what}: the statement was sent"
     );
-    // The typed path too (fix round 1, review M1): a run on this session reaches the driver
-    // with nothing, as a suspendable read and as a write. Until Task 22 the typed guard fails
-    // closed (`Internal`); then it is the guard's verdict.
-    for (sql, suspendable) in [("DELETE FROM t", false), ("SELECT * FROM t", true)] {
+    // The typed path too (fix round 1, review M1): a run on this session goes through the
+    // typed guard (Task 22), whose transaction-keyword layer refuses before anything reaches
+    // the driver, as a write and as a suspendable unit (`tests/readonly_typed.rs` runs the
+    // guard's whole path).
+    for (sql, suspendable) in [("COMMIT", false), ("/* x */ END", true)] {
         let sent = f.call_log().len();
         let o = Recorder::new();
         let e = run_spec(
@@ -112,7 +113,11 @@ async fn assert_read_only(h: &SessionHandle, f: &FakeDriver, what: &str) {
         )
         .await
         .unwrap_err();
-        assert_eq!(e.kind, ExecErrorKind::Internal, "{what}: {sql}");
+        assert_eq!(
+            e.kind,
+            ExecErrorKind::ReadOnlyDenied(DenyLayer::Transaction),
+            "{what}: {sql}"
+        );
         assert_eq!(f.call_log().len(), sent, "{what}: {sql} reached the driver");
         assert_eq!(o.stores(), 0, "{what}: {sql} opened a result");
     }
@@ -146,12 +151,15 @@ async fn production_session_is_read_only_after_reconnect() {
         f.requests()
     );
     assert_read_only(&h, &f, "after the reconnect").await;
-    // A typed run on it sends nothing either (the typed guard fails closed until Task 22).
+    // A typed run on it goes through the typed guard too: transaction control is refused
+    // before anything is sent (Task 22).
     let sent = f.call_log().len();
     let o = Recorder::new();
-    run_spec(&h, spec_of(&o, &["DELETE FROM t"]))
-        .await
-        .unwrap_err();
+    let e = run_spec(&h, spec_of(&o, &["COMMIT"])).await.unwrap_err();
+    assert_eq!(
+        e.kind,
+        ExecErrorKind::ReadOnlyDenied(DenyLayer::Transaction)
+    );
     assert_eq!(f.call_log().len(), sent);
 }
 
