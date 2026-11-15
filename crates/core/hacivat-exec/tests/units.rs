@@ -576,3 +576,76 @@ fn every_unit_at_every_caret_is_one_statement_to_the_parser() {
     }
     assert!(oracle_units > 0, "the sweep reached the oracle path");
 }
+
+/// Review C1: libpg_query lexes with `standard_conforming_strings = on`. Under `off` (the
+/// session's probed mode, which the split and the server follow) `'a\'; …` is one string
+/// literal, while the oracle would read `INSERT … --'` as a statement and send it. The oracle
+/// is never asked unless the mode is on.
+#[test]
+fn the_oracle_is_never_asked_without_standard_conforming_strings() {
+    let scripts = [
+        "SELECT 'a\\'; INSERT INTO audit --'\nSELECT * FROM t;",
+        "SELECT 'a\\'; CREATE TABLE z AS --'\nSELECT 1;",
+    ];
+    let off = dialect_ctx(DbmsKind::Postgres, None, Some("off"));
+    for text in scripts {
+        let doc = doc_in(text, off.clone());
+        assert!(!doc.ctx().modes.standard_conforming_strings);
+        let oracle = Counting::real();
+        for at in 0..=u32::try_from(text.len()).unwrap() {
+            for action in [
+                RunAction::Execute1,
+                RunAction::Execute2,
+                RunAction::Execute3,
+            ] {
+                let r = resolve_units_with(&doc, &[caret(at)], action, None, &oracle);
+                assert!(
+                    matches!(r, Resolution::Uncertain(_)),
+                    "{text:?} @{at} {action:?}: {r:?}"
+                );
+            }
+        }
+        assert_eq!(oracle.calls.get(), 0, "{text:?}");
+        // The same text with the mode on is no oracle case: it splits on its own, and the
+        // statement at the caret is what PostgreSQL reads too.
+        let on = pg_doc(text);
+        let control = Counting::real();
+        let at = u32::try_from(text.rfind("SELECT").unwrap()).unwrap();
+        let r = resolve_units_with(&on, &[caret(at)], RunAction::Execute2, None, &control);
+        assert_eq!(control.calls.get(), 0);
+        assert_eq!(texts(&r), [&text[13..text.len() - 1]]);
+    }
+    // An unknown mode is not "on": a context built without the probe on a dialect whose
+    // default is off never reaches the oracle either (the MySQL family's default).
+    let mut unknown = pg18();
+    unknown.modes.standard_conforming_strings = false;
+    let oracle = Counting::real();
+    let r = resolve_units_with(
+        &doc_in(VIEW, unknown),
+        &[caret(0)],
+        RunAction::Execute1,
+        None,
+        &oracle,
+    );
+    assert!(matches!(r, Resolution::Uncertain(_)), "{r:?}");
+    assert_eq!(oracle.calls.get(), 0);
+}
+
+/// Review I3 (1): a boundary a client command makes is never sent to the oracle, even when its
+/// answer would cover the region (`SELECT 1 \gset`: the oracle would send `SELECT 1`).
+#[test]
+fn a_client_command_boundary_never_asks_the_oracle() {
+    let doc = pg_doc("SELECT 1 \\gset\nSELECT 3;");
+    let oracle = Counting::answering(&[(0, 8)]);
+    for action in [RunAction::Execute1, RunAction::Execute2] {
+        let r = resolve_units_with(&doc, &[caret(0)], action, None, &oracle);
+        assert!(
+            matches!(&r, Resolution::Uncertain(b) if b.iter().all(|b| b.reason == AmbiguityReason::ClientCommand)),
+            "{action:?}: {r:?}"
+        );
+    }
+    let between = pg_doc("SELECT 1 \\; SELECT 2;\nSELECT 3;");
+    let r = resolve_units_with(&between, &[caret(0)], RunAction::Execute1, None, &oracle);
+    assert!(matches!(r, Resolution::Uncertain(_)), "{r:?}");
+    assert_eq!(oracle.calls.get(), 0);
+}

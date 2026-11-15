@@ -266,8 +266,8 @@ async fn user_transactions_are_logged_when_they_end() {
         [
             "exec-completed",
             "exec-completed",
-            "exec-tx-committed",
             "exec-completed",
+            "exec-tx-committed",
             "exec-summary"
         ]
     );
@@ -383,7 +383,7 @@ async fn a_later_fetch_failure_is_logged_with_the_server_text() {
     let t = svc
         .svc
         .run(&h, svc.req_with(&["SELECT * FROM big"], small_fetch()));
-    let results = t.results.clone();
+    let (results, status) = (t.results.clone(), t.status.clone());
     t.done.await.unwrap();
     assert_eq!(svc.log_ids(), ["exec-rows-retrieved-more"]);
     let source = results.borrow()[0].source.clone();
@@ -411,6 +411,15 @@ async fn a_later_fetch_failure_is_logged_with_the_server_text() {
     assert!(matches!(
         source.snapshot().completeness(),
         Completeness::Closed { .. }
+    ));
+    // The statement failed after all: its status says so (review I3), not "succeeded".
+    eventually("the unit fails", || {
+        status.borrow().units[0].status.name() == "Failed"
+    })
+    .await;
+    assert!(matches!(
+        &status.borrow().units[0].status,
+        UnitStatus::Failed(v) if v.title_id == "exec-error-server"
     ));
 }
 

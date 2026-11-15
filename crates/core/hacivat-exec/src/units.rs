@@ -18,7 +18,9 @@
 //! **The PostgreSQL oracle (R-M3-24, R-M3-35).** Only for a single caret (a selection, or
 //! several carets, stays uncertain: a selection's start inside a token or a `$$` body must
 //! never be rescued by a parser that reads the selected text from a clean state), only on
-//! PostgreSQL and Timescale (the same grammar), and never for a boundary from a client command
+//! PostgreSQL and Timescale (the same grammar), only while the session's
+//! `standard_conforming_strings` is on (libpg_query lexes with it on; under off, `'a\'; …` is
+//! one literal to the server and the editor), and never for a boundary from a client command
 //! or overlapping units. The region of a boundary is the execution statement whose strict
 //! range holds it. Every region must have a lexer parenthesis depth of at most
 //! [`MAX_ORACLE_NESTING`] (deeper texts never reach the parser), must hold no `COPY` data, and
@@ -394,7 +396,12 @@ fn by_oracle(
     boundaries: &[AmbiguousBoundary],
     oracle: &dyn SplitOracle,
 ) -> Option<Resolution> {
-    if !oracle_dialect(doc.ctx().id) || boundaries.is_empty() {
+    // libpg_query lexes with `standard_conforming_strings = on`; a session with it off (or not
+    // known to be on) reads `'a\'; …` as one literal where the oracle would see a statement.
+    if !oracle_dialect(doc.ctx().id)
+        || !doc.ctx().modes.standard_conforming_strings
+        || boundaries.is_empty()
+    {
         return None;
     }
     let caret = match at {
@@ -463,22 +470,92 @@ fn by_oracle(
             if exec.client.iter().any(|c| !c.supported) {
                 return None;
             }
-            let mut ranges = Vec::new();
-            for s in exec.statements() {
-                match settled.iter().find(|(strict, _)| *strict == s.strict) {
-                    Some((_, pieces)) => ranges.extend_from_slice(pieces),
-                    None if certain_in(exec, s.strict)
-                        && certain_in(doc.editor_split(), s.strict) =>
-                    {
-                        ranges.push(s.strict);
-                    }
-                    None => return None,
-                }
-            }
-            if ranges.is_empty() {
-                return None;
-            }
+            let ranges = whole_script(exec, doc.editor_split(), &settled)?;
             Some(to_units(&ranges))
         }
+    }
+}
+
+/// Run 3 with the oracle: every execution statement in order, each settled region replaced by
+/// its oracle statements; any other statement must be certain in both splits (R-M3-8: Run never
+/// sends a range the preview drew as uncertain).
+fn whole_script(
+    exec: &sql_split::Split,
+    editor: &sql_split::Split,
+    settled: &[(TextRange, Vec<TextRange>)],
+) -> Option<Vec<TextRange>> {
+    let mut ranges = Vec::new();
+    for s in exec.statements() {
+        match settled.iter().find(|(strict, _)| *strict == s.strict) {
+            Some((_, pieces)) => ranges.extend_from_slice(pieces),
+            None if certain_in(exec, s.strict) && certain_in(editor, s.strict) => {
+                ranges.push(s.strict);
+            }
+            None => return None,
+        }
+    }
+    (!ranges.is_empty()).then_some(ranges)
+}
+
+#[cfg(test)]
+mod tests {
+    use sql_split::{Confidence, Item, Split, Stmt, StmtHead, StmtKey};
+    use sql_text::{TextRange, TextSize};
+
+    use super::whole_script;
+
+    fn r(a: u32, b: u32) -> TextRange {
+        TextRange::new(TextSize::from(a), TextSize::from(b))
+    }
+
+    fn stmt(range: TextRange, confidence: Confidence) -> Item {
+        Item::Statement(Stmt {
+            strict: range,
+            smart: range,
+            terminator: None,
+            leading_comments: None,
+            confidence,
+            head: StmtHead::default(),
+            key: StmtKey(0),
+            copy_data: None,
+        })
+    }
+
+    fn split(items: Vec<Item>) -> Split {
+        Split {
+            items,
+            ..Split::default()
+        }
+    }
+
+    /// Review I3 (2): a statement certain in the execution split but heuristic in the editor's
+    /// (what the preview draws) is never part of a whole-script run the oracle settles. Real
+    /// texts cannot build it today (both splits list the same boundaries, sql-split's R-M3-8
+    /// rule), so the splits are built here.
+    #[test]
+    fn whole_script_refuses_a_statement_the_editor_split_finds_uncertain() {
+        let settled = vec![(r(0, 20), vec![r(0, 8), r(10, 20)])];
+        let exec = split(vec![
+            stmt(r(0, 20), Confidence::Heuristic),
+            stmt(r(22, 30), Confidence::Exact),
+        ]);
+        let editor_certain = split(vec![
+            stmt(r(0, 8), Confidence::Heuristic),
+            stmt(r(10, 20), Confidence::Heuristic),
+            stmt(r(22, 30), Confidence::Exact),
+        ]);
+        assert_eq!(
+            whole_script(&exec, &editor_certain, &settled),
+            Some(vec![r(0, 8), r(10, 20), r(22, 30)])
+        );
+        let editor_uncertain = split(vec![
+            stmt(r(0, 8), Confidence::Heuristic),
+            stmt(r(10, 20), Confidence::Heuristic),
+            stmt(r(22, 30), Confidence::Heuristic),
+        ]);
+        assert_eq!(whole_script(&exec, &editor_uncertain, &settled), None);
+        // And one the editor split does not hold at all.
+        let editor_missing = split(vec![stmt(r(0, 20), Confidence::Heuristic)]);
+        assert_eq!(whole_script(&exec, &editor_missing, &settled), None);
     }
 }

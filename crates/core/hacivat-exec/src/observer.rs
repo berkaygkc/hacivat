@@ -47,7 +47,7 @@ use tokio::sync::{oneshot, watch};
 use crate::log::{LogMsg, SessionLog};
 use crate::service::{ResultTab, TabKey};
 use crate::sqlctx::first_word;
-use crate::status::{RunStatus, UnitStatus, UnitStatusEntry, UnitSummary, error_view};
+use crate::status::{ErrorView, RunStatus, UnitStatus, UnitStatusEntry, UnitSummary, error_view};
 use crate::titles::result_title;
 use crate::units::ExecUnit;
 
@@ -84,6 +84,8 @@ struct ResultInfo {
     ordinal: u32,
     store: Arc<ResultStore>,
     ended: bool,
+    /// The release that ended it was a failure (its unit then fails).
+    failed: Option<CloseReason>,
 }
 
 #[derive(Default)]
@@ -93,6 +95,9 @@ struct State {
     results: HashMap<ResultId, ResultInfo>,
     /// The unit in flight.
     current: Option<u32>,
+    /// The unit in flight moved the user's transaction to idle: (from, the unit's ordinal).
+    /// What that means is decided when the unit ends (review C2).
+    tx_ended: Option<(TxStatus, u32)>,
     last_publish: Option<tokio::time::Instant>,
     /// `RunEnded` was seen, or the run was ended as never started.
     ended: bool,
@@ -355,9 +360,17 @@ impl ExecObserver {
             }
             UnitEnd::Skipped => self.set_unit(unit.ordinal, true, UnitStatus::Skipped),
         }
-        let mut st = lock(&self.state);
-        if st.current == Some(unit.ordinal) {
-            st.current = None;
+        let tx_ended = {
+            let mut st = lock(&self.state);
+            if st.current == Some(unit.ordinal) {
+                st.current = None;
+            }
+            st.tx_ended.take_if(|(_, o)| *o == unit.ordinal)
+        };
+        if let Some((from, _)) = tx_ended
+            && let Some(msg) = tx_line(&u.text, from, outcome)
+        {
+            self.line(msg, Some(&u));
         }
     }
 
@@ -369,9 +382,9 @@ impl ExecObserver {
         exec_ms: u64,
         fetch_ms: u64,
     ) {
-        let Some(ordinal) = self.result_info(result, |r| {
+        let Some((ordinal, failed)) = self.result_info(result, |r| {
             r.ended = true;
-            r.ordinal
+            (r.ordinal, r.failed)
         }) else {
             return;
         };
@@ -380,6 +393,23 @@ impl ExecObserver {
             self.unit_status(ordinal),
             Some(UnitStatus::Suspended { .. })
         ) {
+            return;
+        }
+        // Released by a failure: the statement failed after all (review I3); the server's
+        // text is on the log line the fetch's reply wrote.
+        if let Some(reason) = failed {
+            let view = ErrorView {
+                title_id: match reason {
+                    CloseReason::ConnectionLost => "exec-error-connection-lost",
+                    CloseReason::EnforcementGap => "exec-error-enforcement-gap",
+                    _ => "exec-error-server",
+                },
+                code: None,
+                server_text: None,
+                hint_id: None,
+                doc_offset: None,
+            };
+            self.set_unit(ordinal, true, UnitStatus::Failed(view));
             return;
         }
         let complete = completeness == Completeness::Complete;
@@ -435,8 +465,11 @@ impl ExecObserver {
                 | CloseReason::ConnectionLost
                 | CloseReason::EnforcementGap
         );
-        if failure && lock(&self.state).current == Some(ordinal) {
-            return;
+        if failure {
+            self.result_info(result, |r| r.failed = Some(reason));
+            if lock(&self.state).current == Some(ordinal) {
+                return;
+            }
         }
         let idle_ms = match (reason, store.snapshot().completeness()) {
             (CloseReason::IdleTimeout, Completeness::Suspended(info)) => {
@@ -456,25 +489,16 @@ impl ExecObserver {
         );
     }
 
+    /// The user's transaction moved: its end is announced when the unit in flight ends, by
+    /// [`tx_line`] (a COMMIT can fail at commit time and still leave the session idle).
     fn on_tx_changed(&self, from: TxStatus, to: TxStatus) {
         if to != TxStatus::Idle || from == TxStatus::Idle {
             return;
         }
-        let current = lock(&self.state).current;
-        let Some(u) = current.and_then(|c| self.unit(c)).cloned() else {
-            return;
-        };
-        let word = first_word(&u.text);
-        let is = |w: &str| word.eq_ignore_ascii_case(w);
-        let msg = if is("ROLLBACK") || is("ABORT") || (from == TxStatus::Failed && is("COMMIT")) {
-            LogMsg::TxRolledBack
-        } else if is("COMMIT") || is("END") {
-            LogMsg::TxCommitted
-        } else {
-            // An implicit end (a MySQL DDL, a loss) is not announced: better silent than wrong.
-            return;
-        };
-        self.line(msg, Some(&u));
+        let mut st = lock(&self.state);
+        if let Some(current) = st.current {
+            st.tx_ended = Some((from, current));
+        }
     }
 
     fn on_run_ended(&self, summary: RunSummary) {
@@ -490,6 +514,29 @@ impl ExecObserver {
         if let Some(done) = done {
             let _ = done.send(summary);
         }
+    }
+}
+
+/// What a unit whose statement `sql` moved the user's transaction from `from` to idle says
+/// about it, once the unit ended as `outcome`:
+/// - `COMMIT`/`END` that succeeded: committed (unless the transaction had failed, which
+///   PostgreSQL ends with a rollback);
+/// - `ROLLBACK`/`ABORT`, or any of these four that failed: rolled back (the server ended the
+///   transaction without committing it: a failed COMMIT, as a deferred constraint or a
+///   serialization failure, rolls it back);
+/// - anything else (an implicit end, a loss, a cancel): nothing. Better silent than wrong.
+fn tx_line(sql: &str, from: TxStatus, outcome: &UnitEnd) -> Option<LogMsg> {
+    let word = first_word(sql);
+    let is = |w: &str| word.eq_ignore_ascii_case(w);
+    let commit = is("COMMIT") || is("END");
+    let rollback = is("ROLLBACK") || is("ABORT");
+    match outcome {
+        UnitEnd::Succeeded { .. } if commit && from != TxStatus::Failed => {
+            Some(LogMsg::TxCommitted)
+        }
+        UnitEnd::Succeeded { .. } if commit || rollback => Some(LogMsg::TxRolledBack),
+        UnitEnd::Failed(_) if commit || rollback => Some(LogMsg::TxRolledBack),
+        _ => None,
     }
 }
 
@@ -533,6 +580,7 @@ impl RunObserver for ExecObserver {
                     ordinal: unit.ordinal,
                     store,
                     ended: false,
+                    failed: None,
                 },
             );
             st.tabs.iter().cloned().collect()
@@ -652,5 +700,267 @@ impl FetchControl for ExecControl {
 
     fn fetch_all(&self, result: ResultId) {
         self.follow(self.session.submit(Request::FetchAll { result }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The observer fed synthetic run events: outcomes the FakeDriver cannot produce (a COMMIT
+    //! that fails and leaves the connection idle, as PostgreSQL's deferred-constraint and
+    //! serialization failures do).
+
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use hacivat_driver::fake::FakeDriver;
+    use hacivat_driver::{ServerMessage, TxStatus};
+    use hacivat_proto::DbmsKind;
+    use hacivat_results::{CloseReason, Completeness, FetchPolicy, MemoryBudget, ResultId};
+    use hacivat_secrets::{AuthProviderId, Retention};
+    use hacivat_session::profile::{Profile, ProfileEndpoint};
+    use hacivat_session::session::{
+        ExecError, ExecErrorKind, RowsOutcome, RunEvent, RunId, RunObserver, RunSummary, UnitEnd,
+        UnitId,
+    };
+    use hacivat_session::testing::fake_session;
+    use hacivat_values::{ColumnMeta, LogicalType, NativeType, ResultSchema};
+    use sql_split::exec_range::UnitKind;
+
+    use super::{ExecObserver, RunParts};
+    use crate::log::SessionLog;
+    use crate::status::UnitStatus;
+    use crate::units::ExecUnit;
+
+    const RUN: RunId = RunId(1);
+
+    fn unit(ordinal: u32) -> UnitId {
+        UnitId { run: RUN, ordinal }
+    }
+
+    async fn observer_of(sqls: &[&str]) -> (Arc<ExecObserver>, Arc<SessionLog>) {
+        let profile = Profile {
+            name: "orders".into(),
+            engine: DbmsKind::Postgres,
+            endpoint: ProfileEndpoint::Server {
+                host: "127.0.0.1".into(),
+                port: None,
+            },
+            user: Some("deploy".into()),
+            auth: AuthProviderId::None,
+            retention: Retention::Never,
+            ..Profile::default()
+        };
+        let fake = FakeDriver::new(DbmsKind::Postgres);
+        let (session, _f) = fake_session(tokio::runtime::Handle::current(), fake, profile).await;
+        let log = SessionLog::new();
+        let mut at = 0;
+        let units = sqls
+            .iter()
+            .map(|s| {
+                let u = ExecUnit {
+                    text: (*s).into(),
+                    doc_range: at..at + s.len(),
+                    kind: UnitKind::Statement,
+                    suspendable: s.starts_with("SELECT"),
+                };
+                at += s.len() + 2;
+                u
+            })
+            .collect();
+        let (observer, _rx) = ExecObserver::new(RunParts {
+            console: 1,
+            run: RUN,
+            engine: DbmsKind::Postgres,
+            units,
+            budget: MemoryBudget::new(1 << 30, 256 << 20),
+            generations: Arc::default(),
+            log: log.clone(),
+            session,
+            fetch: FetchPolicy::default(),
+        });
+        (observer, log)
+    }
+
+    fn db_error(code: &str, text: &str) -> ExecError {
+        ExecError {
+            kind: ExecErrorKind::Db,
+            server: Some(ServerMessage {
+                sqlstate: Some(code.into()),
+                vendor_code: None,
+                severity: Some("ERROR".into()),
+                text: text.into(),
+                detail: None,
+                hint: None,
+                lang_hint: None,
+            }),
+        }
+    }
+
+    fn ids(log: &SessionLog) -> Vec<&'static str> {
+        log.lines().iter().map(|l| l.msg.fluent_id()).collect()
+    }
+
+    /// Runs one unit whose statement moved the transaction from `from` to `to`, ending `end`.
+    fn tx_unit(o: &ExecObserver, from: TxStatus, to: TxStatus, end: UnitEnd) {
+        o.event(&RunEvent::UnitStarted {
+            unit: unit(0),
+            at: Instant::now(),
+        });
+        o.event(&RunEvent::TxChanged { from, to });
+        o.event(&RunEvent::UnitEnded {
+            unit: unit(0),
+            outcome: end,
+            exec_ms: 3,
+            fetch_ms: 0,
+        });
+    }
+
+    /// Review C2: a COMMIT that fails at commit time (SERIALIZABLE 40001, a deferred
+    /// constraint) leaves PostgreSQL idle with the transaction rolled back: never "committed".
+    #[tokio::test]
+    async fn a_failed_commit_is_never_announced_as_committed() {
+        for (code, text) in [
+            (
+                "40001",
+                "could not serialize access due to read/write dependencies",
+            ),
+            (
+                "23505",
+                "duplicate key value violates unique constraint \"t_pkey\"",
+            ),
+        ] {
+            let (o, log) = observer_of(&["COMMIT"]).await;
+            tx_unit(
+                &o,
+                TxStatus::InTx,
+                TxStatus::Idle,
+                UnitEnd::Failed(db_error(code, text)),
+            );
+            let got = ids(&log);
+            assert!(!got.contains(&"exec-tx-committed"), "{code}: {got:?}");
+            assert_eq!(got, ["exec-error", "exec-tx-rolled-back"], "{code}");
+        }
+        // A COMMIT that succeeded is announced, after its own line.
+        let (o, log) = observer_of(&["COMMIT"]).await;
+        tx_unit(
+            &o,
+            TxStatus::InTx,
+            TxStatus::Idle,
+            UnitEnd::Succeeded { rows: None },
+        );
+        assert_eq!(ids(&log), ["exec-completed", "exec-tx-committed"]);
+        // A failed ROLLBACK that ended the transaction committed nothing either.
+        let (o, log) = observer_of(&["ROLLBACK"]).await;
+        tx_unit(
+            &o,
+            TxStatus::InTx,
+            TxStatus::Idle,
+            UnitEnd::Failed(db_error("XX000", "internal error")),
+        );
+        assert_eq!(ids(&log), ["exec-error", "exec-tx-rolled-back"]);
+        // A COMMIT that failed and left the transaction open says nothing about it.
+        let (o, log) = observer_of(&["COMMIT"]).await;
+        tx_unit(
+            &o,
+            TxStatus::InTx,
+            TxStatus::InTx,
+            UnitEnd::Failed(db_error("57014", "canceling statement")),
+        );
+        assert_eq!(ids(&log), ["exec-error"]);
+    }
+
+    fn schema() -> Arc<ResultSchema> {
+        Arc::new(ResultSchema {
+            columns: Arc::from(vec![ColumnMeta {
+                name: "id".into(),
+                logical: LogicalType::Int {
+                    bits: 64,
+                    signed: true,
+                },
+                native: NativeType::Unknown,
+                origin: None,
+            }]),
+        })
+    }
+
+    /// A suspended unit's result, released for `reason` after its run ended.
+    async fn released(reason: CloseReason) -> UnitStatus {
+        let (o, _log) = observer_of(&["SELECT * FROM big"]).await;
+        o.event(&RunEvent::UnitStarted {
+            unit: unit(0),
+            at: Instant::now(),
+        });
+        let writer = o.open_result(unit(0), 0, schema());
+        let result: ResultId = writer.id();
+        o.event(&RunEvent::ResultOpened {
+            unit: unit(0),
+            ordinal: 0,
+            result,
+        });
+        o.event(&RunEvent::UnitEnded {
+            unit: unit(0),
+            outcome: UnitEnd::Succeeded {
+                rows: Some(RowsOutcome::Fetched {
+                    rows: 20,
+                    more: true,
+                }),
+            },
+            exec_ms: 1,
+            fetch_ms: 1,
+        });
+        o.event(&RunEvent::RunEnded(RunSummary {
+            executed: 1,
+            total: 1,
+            ..RunSummary::default()
+        }));
+        assert_eq!(o.status.borrow().units[0].status.name(), "Suspended");
+        o.event(&RunEvent::CursorReleased {
+            result,
+            rows: 30,
+            reason,
+            rolled_back: true,
+        });
+        o.event(&RunEvent::ResultEnded {
+            result,
+            rows: 30,
+            completeness: Completeness::Closed { reason },
+            exec_ms: 1,
+            fetch_ms: 2,
+        });
+        drop(writer);
+        o.status.borrow().units[0].status.clone()
+    }
+
+    /// Review I3: a release by a failure (a later fetch's server error, a loss, the guard's
+    /// gap) fails the unit; a release the user or Hacivat chose keeps it succeeded.
+    #[tokio::test]
+    async fn a_release_by_a_failure_fails_the_unit() {
+        for (reason, title) in [
+            (CloseReason::ServerTerminated, "exec-error-server"),
+            (CloseReason::ConnectionLost, "exec-error-connection-lost"),
+            (CloseReason::EnforcementGap, "exec-error-enforcement-gap"),
+        ] {
+            match released(reason).await {
+                UnitStatus::Failed(view) => assert_eq!(view.title_id, title, "{reason:?}"),
+                other => panic!("{reason:?}: {other:?}"),
+            }
+        }
+        for reason in [
+            CloseReason::UserClosed,
+            CloseReason::SessionNeeded,
+            CloseReason::IdleTimeout,
+            CloseReason::TabClosed,
+            CloseReason::MemoryLimit,
+            CloseReason::Cancelled,
+        ] {
+            assert!(
+                matches!(
+                    released(reason).await,
+                    UnitStatus::Succeeded(u)
+                        if u.rows == Some(RowsOutcome::Fetched { rows: 30, more: true })
+                ),
+                "{reason:?}"
+            );
+        }
     }
 }
