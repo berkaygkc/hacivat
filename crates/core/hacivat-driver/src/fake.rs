@@ -1430,6 +1430,7 @@ fn pg_error(sqlstate: &str, text: &str) -> RawError {
             detail: None,
             hint: None,
             lang_hint: None,
+            position: None,
         }),
     }
 }
@@ -2390,6 +2391,7 @@ mod pg_typed_tests {
                 detail: None,
                 hint: None,
                 lang_hint: None,
+                position: None,
             }),
         }
     }

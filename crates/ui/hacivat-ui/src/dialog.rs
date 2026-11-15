@@ -185,6 +185,8 @@ pub struct Dialog {
     root: FocusHandle,
     access_keys: bool,
     content: Option<AnyView>,
+    // ## m3a-t33-exec-ui (named exception): an alertdialog (the open-transaction prompt).
+    role: Role,
 }
 
 impl EventEmitter<DialogEvent> for Dialog {}
@@ -229,6 +231,7 @@ impl Dialog {
                 root: cx.focus_handle(),
                 access_keys: !cfg!(target_os = "macos"),
                 content: None,
+                role: Role::Dialog,
             }
         })
     }
@@ -236,6 +239,18 @@ impl Dialog {
     /// Whether access keys are shown and accepted (default: Windows and Linux).
     pub fn set_access_keys(&mut self, on: bool) {
         self.access_keys = on;
+    }
+
+    // ## m3a-t33-exec-ui (named exception)
+    /// The role the dialog declares: `Dialog` (default), or `AlertDialog` for a prompt that
+    /// interrupts to ask about something that would be lost.
+    pub fn set_role(&mut self, role: Role) {
+        self.role = role;
+    }
+
+    /// The role the dialog declares.
+    pub fn role(&self) -> Role {
+        self.role
     }
 
     /// A view drawn between the body text and the buttons (a control the answer needs).
@@ -423,6 +438,6 @@ impl Render for Dialog {
                         .gap(px(t.spacing.md))
                         .children(buttons),
                 );
-        A11yNode::new("dialog-node", Role::Dialog, title, true, card).description(body_text)
+        A11yNode::new("dialog-node", self.role, title, true, card).description(body_text)
     }
 }

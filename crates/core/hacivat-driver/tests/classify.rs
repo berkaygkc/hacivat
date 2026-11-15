@@ -39,6 +39,7 @@ fn db_err_lang(k: DbmsKind, code: &str, text: &str, lang: &str) -> RawError {
             detail: None,
             hint: None,
             lang_hint: Some(lang.to_string()),
+            position: None,
         }),
     }
 }
@@ -55,6 +56,7 @@ fn text_err(text: &str, lang: Option<&str>) -> RawError {
             detail: None,
             hint: None,
             lang_hint: lang.map(str::to_string),
+            position: None,
         }),
     }
 }

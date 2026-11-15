@@ -158,7 +158,11 @@ pub fn error_view(
         code,
         server_text: server.map(|m| Arc::from(m.text.as_str())),
         hint_id: error_hint_id(engine, e),
-        doc_offset: position.and_then(|p| doc_offset_of(unit_text, unit_start, p)),
+        // ## m3a-t33-exec-ui (named exception): without a caller's position, the server
+        // message's own (the driver reports it since Task 33).
+        doc_offset: position
+            .or_else(|| server.and_then(|m| m.position))
+            .and_then(|p| doc_offset_of(unit_text, unit_start, p)),
     }
 }
 

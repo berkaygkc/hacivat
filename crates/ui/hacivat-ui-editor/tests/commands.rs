@@ -1004,6 +1004,7 @@ fn describe_says_what_run_would_execute(cx: &mut TestAppContext) {
         Some(ExecPreview {
             ranges: ranges.iter().map(|&(a, b)| a..b).collect(),
             state,
+            choices: 0,
         })
     };
     // One statement on one line, with its text.

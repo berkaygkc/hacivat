@@ -546,6 +546,7 @@ pub fn db(sqlstate: &str) -> RawError {
             detail: None,
             hint: None,
             lang_hint: None,
+            position: None,
         }),
     }
 }

@@ -1208,6 +1208,7 @@ mod shots {
                 detail: None,
                 hint: None,
                 lang_hint: None,
+                position: None,
             }),
             fixes: hacivat_driver::fixes_for(class),
             suggestions: Vec::new(),

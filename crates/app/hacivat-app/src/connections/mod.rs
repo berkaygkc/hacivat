@@ -51,8 +51,7 @@ pub fn install(cx: &mut App) {
     interaction::install(cx); // ## m2a-t20-errors: the UI port (password prompts, R14)
     dialog::install(cx); // ## m2a-t17-dialog
     capsule::register(cx); // ## m2b-t22-live: "Explain read-only access"
-    #[cfg(debug_assertions)]
-    crate::commands::debug::register_cancel_demo(cx); // ## m2b-t22-live (Q39)
+    // ## m3a-t33-exec-ui (R-M3-47, named exception): the M2b cancel demo's two lines are gone.
 }
 
 /// Boots the connections: the `ConnectionsModel` Global and its store diagnostics (Task 12),

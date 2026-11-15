@@ -131,6 +131,7 @@ pub fn pg_error(code: &str, text: &str) -> RawError {
             detail: None,
             hint: None,
             lang_hint: None,
+            position: None,
         }),
     }
 }

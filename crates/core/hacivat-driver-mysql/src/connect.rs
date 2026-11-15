@@ -179,6 +179,7 @@ pub fn raw_error(e: &mysql_async::Error) -> RawError {
                     detail: None,
                     hint: None,
                     lang_hint: None,
+                    position: None,
                 }),
             };
         }

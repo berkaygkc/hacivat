@@ -289,3 +289,33 @@ fn console_ux_table() {
         assert_eq!(console_ux_of(inputs), want, "case {n}");
     }
 }
+
+// ## m3a-t33-exec-ui (named exception, T34 review I3)
+/// A transaction lives on its connection: while the session is disconnected, reconnecting or
+/// broken, the last published `tx` (the user's open or failed transaction) shows no badge.
+#[test]
+fn no_transaction_badge_without_a_connection() {
+    for status in [TxStatus::InTx, TxStatus::Failed] {
+        for state in [
+            SessionState::Disconnected,
+            SessionState::Connecting,
+            SessionState::Broken(hacivat_proto::ErrClass::ALL[0]),
+        ] {
+            let mut i = base();
+            i.snap.tx = tx(TxOwner::User, status, Some(at(1)), 3);
+            i.snap.state = state.clone();
+            assert_eq!(
+                console_ux_of(i).tx,
+                TxBadge::Auto,
+                "{status:?} while {state:?}"
+            );
+        }
+        let mut live = base();
+        live.snap.tx = tx(TxOwner::User, status, Some(at(1)), 3);
+        assert_ne!(
+            console_ux_of(live).tx,
+            TxBadge::Auto,
+            "{status:?} while idle"
+        );
+    }
+}

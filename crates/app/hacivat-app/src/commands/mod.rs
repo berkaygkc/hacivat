@@ -12,6 +12,8 @@ pub use registry::register_workspace_actions;
 #[cfg(feature = "test-support")]
 pub use registry::quit_requests;
 pub use registry::{close_window, request_quit, request_window_close};
+// ## m3a-t33-exec-ui (named exception)
+pub use registry::{request_restart, take_restart_intent};
 
 use std::cell::RefCell;
 use std::rc::Rc;

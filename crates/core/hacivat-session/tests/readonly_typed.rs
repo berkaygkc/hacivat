@@ -159,6 +159,7 @@ fn pg_error(sqlstate: &str) -> RawError {
             detail: None,
             hint: None,
             lang_hint: None,
+            position: None,
         }),
     }
 }

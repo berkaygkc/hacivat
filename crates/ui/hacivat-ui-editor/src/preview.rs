@@ -128,6 +128,10 @@ pub struct BandPlan {
     pub units: SmallVec<[Range<usize>; 2]>,
     /// From the chooser's hover, not the service.
     pub from_override: bool,
+    // ## m3a-t33-exec-ui (named exception)
+    /// Run would open the chooser on these units, offering this many candidates (0: it would
+    /// not, or this is the chooser's own hover).
+    pub choices: u32,
 }
 
 /// Called by the view after every commit, analysis and context change: restarts the 50 ms
@@ -304,6 +308,7 @@ pub fn plan(s: &BandState, snap: &Snapshot) -> Option<BandPlan> {
             style: BandStyle::Run,
             units,
             from_override: true,
+            choices: 0,
         });
     }
     let p = answer(s, snap)?;
@@ -319,6 +324,11 @@ pub fn plan(s: &BandState, snap: &Snapshot) -> Option<BandPlan> {
         style,
         units,
         from_override: false,
+        choices: if p.state == PreviewState::AskPreselected {
+            p.choices
+        } else {
+            0
+        },
     })
 }
 
@@ -385,6 +395,9 @@ pub enum PreviewHint {
     Uncertain,
     /// "not connected", with the unplug glyph.
     Offline,
+    // ## m3a-t33-exec-ui (named exception)
+    /// "2 choices", with the chevrons-up-down glyph: Run would open the chooser.
+    Choices { n: u32 },
 }
 
 /// One rectangle of the band, in window coordinates.
@@ -485,6 +498,10 @@ pub(crate) fn layout(
         let hint = match plan.style {
             BandStyle::Uncertain => Some(PreviewHint::Uncertain),
             BandStyle::Offline => Some(PreviewHint::Offline),
+            // ## m3a-t33-exec-ui (named exception): the chooser's count on the first unit.
+            BandStyle::Run if ui == 0 && plan.choices > 1 => {
+                Some(PreviewHint::Choices { n: plan.choices })
+            }
             BandStyle::Run if multi => Some(PreviewHint::Unit { i: ui + 1, n }),
             BandStyle::Run => None,
         };
@@ -644,6 +661,7 @@ mod tests {
             Some(ExecPreview {
                 ranges: smallvec![0..8],
                 state: PreviewState::Units,
+                choices: 0,
             })
         }
         fn token_oracle(&self, _: DocId) -> Rc<dyn TokenOracle> {
@@ -765,6 +783,7 @@ mod tests {
             last: Some(ExecPreview {
                 ranges: smallvec![0..11],
                 state: PreviewState::Units,
+                choices: 0,
             }),
             last_version: 4,
             asked_at: Some(ExecAt::Carets(smallvec![1])),

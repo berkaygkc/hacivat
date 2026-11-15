@@ -492,8 +492,7 @@ const M3A_PENDING: &[&str] = &[
     "grid.select_right",
     "grid.select_row",
     "grid.select_up",
-    // Task 33: cancel.
-    "exec.cancel",
+    // ## m3a-t33-exec-ui (named exception): `exec.cancel` is registered (exec_ui::cancel).
 ];
 
 #[gpui::test]

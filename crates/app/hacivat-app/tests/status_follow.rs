@@ -684,7 +684,11 @@ fn visible_seams(vcx: &mut VisualTestContext, bar: gpui::Bounds<gpui::Pixels>) -
             );
         }
         xs.sort_by(f32::total_cmp);
-        xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+        // ## m3a-t33-exec-ui (named exception): two 1 px seams less than a pixel apart overlap
+        // and draw as one line (the last cell's seam on the bar's own, when that cell gave way
+        // to a fractional width: since Task 33 an empty console shows the preview's sentence,
+        // a weighted cell, last in the row).
+        xs.dedup_by(|a, b| (*a - *b).abs() < 1.0);
         xs
     })
 }
@@ -696,12 +700,21 @@ fn visible_seams(vcx: &mut VisualTestContext, bar: gpui::Bounds<gpui::Pixels>) -
 fn the_editors_sentence_shows_until_the_text_changes(cx: &mut TestAppContext) {
     let vcx = shell_two(cx);
     let staging = console_of(vcx, STAGING);
-    focus_console(vcx, staging);
-    assert_eq!(text_of(vcx, "status-message"), None);
     let editor = vcx
         .cx
         .read(|cx| Consoles::get(cx, staging).and_then(|s| s.editor.clone()))
         .expect("an editor");
+    // ## m3a-t33-exec-ui (named exception): since Task 33 a console has its SQL context and the
+    // Run preview speaks; an empty console's preview says "Nothing to run here" (M7's
+    // sentence). A statement under the caret keeps the bar quiet before the describe.
+    vcx.cx.update(|cx| {
+        editor.update(cx, |v, cx| {
+            v.set_text("SELECT 1", cx);
+            v.select_range(8..8, cx);
+        })
+    });
+    focus_console(vcx, staging);
+    assert_eq!(text_of(vcx, "status-message"), None);
     in_window(vcx, |window, cx| {
         editor.update(cx, |v, cx| {
             assert!(v.run_command("editor.describe_exec_range", window, cx));
