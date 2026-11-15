@@ -10,3 +10,4 @@ cc 15eb4b97024c3f04f47f322cb4c4e003ea8011d9ce8725201e9bc3d31838cf5e # shrinks to
 cc 46890b8d9a297b24d169182da8c1475b10304bce253bde14f94e9dcb42f15866 # shrinks to doc = (Postgres, Psql, "'"), c = Caret(0)
 cc 6dc905d24efe0d1a38160cdd731ac08f83b7b7fb2fcf2bd3c44a0c93ab163ec9 # shrinks to doc = (Postgres, Psql, "COPY t FROM STDIN;\na\tb\n\\.\n"), c = Carets(0, 0)
 cc 55460a9eaf1aaf4030f43713954f4b69d86439d0234c5be0d7cc78d58795f278 # shrinks to doc = (Postgres, Psql, "SELECT 1;COPY t FROM STDIN;\na\tb\n\\.\n-- c ;\n-- c ;\nSELECT 1;SELECT 1;"), c = Caret(0), kind = Statement
+cc 53f69ccc68deb8f654cf177549a7784e7c6dff73e14abdb369c6806efe40231f # shrinks to doc = (Postgres, Psql, "SELECT 1;SELECT 1;)COPY t FROM STDIN;\na\tb\n\\.\nSELECT 1;"), c = Caret(23059), kind = Statement

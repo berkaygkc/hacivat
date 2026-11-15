@@ -39,6 +39,12 @@ pub enum Confidence {
 pub struct StmtHead {
     pub first_keyword: Option<KeywordId>,
     pub first_token: Option<TextRange>,
+    // ## m3a-f1-followups (named exception, follow-up F1-a)
+    /// The statement is a `COPY` that streams rows to or from the client: its first
+    /// significant token is the word `COPY` and one of its words is `STDIN` or `STDOUT`. The
+    /// splitter decides it on the tokens it splits by, whatever the client flavor, so the
+    /// preview and Run read it from the same analysis (`UnitKind::CopyStream`).
+    pub copy_stream: bool,
 }
 
 /// psql `COPY … FROM STDIN` data: the data lines, and the `\.` line that ends them (`None`

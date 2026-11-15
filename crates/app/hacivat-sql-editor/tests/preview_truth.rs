@@ -570,10 +570,14 @@ fn policy(action: ExecAction) -> ExecPolicy {
 }
 
 /// Units M3a sends as they are (not `COPY … FROM STDIN`, not a verbatim selection).
+// ## m3a-f1-followups: nor another streaming `COPY` (the splitter's `CopyStream`, F1-a).
 fn sent(units: &[UnitSpan]) -> bool {
-    units
-        .iter()
-        .all(|u| !matches!(u.kind, UnitKind::CopyIn { .. } | UnitKind::Verbatim))
+    units.iter().all(|u| {
+        !matches!(
+            u.kind,
+            UnitKind::CopyIn { .. } | UnitKind::CopyStream | UnitKind::Verbatim
+        )
+    })
 }
 
 fn ranges(units: &[UnitSpan]) -> Vec<std::ops::Range<usize>> {
@@ -716,5 +720,27 @@ proptest! {
         ],
     ) {
         preview_matches_resolve(&doc, &c, Some(kind))?;
+    }
+}
+
+// ## m3a-f1-followups
+/// Follow-up F1-a: the preview reads a `COPY` from the splitter's kinds, as Run does. `)COPY`
+/// is no `COPY` (the server rejects it as a syntax error), so it is drawn as the statement Run
+/// sends; a streaming `COPY` the splitter names is uncertain, whatever its rows.
+#[gpui::test]
+fn the_preview_reads_copy_from_the_splitter(cx: &mut TestAppContext) {
+    let text = "SELECT 1;)COPY t FROM STDIN;\na\tb\n\\.\nSELECT 1;";
+    let d = Doc::analysed(cx, text, pg());
+    let p = d.preview(&caret(10), ExecAction::Execute2).unwrap();
+    assert_eq!(p.state, PreviewState::Units);
+    assert_eq!(d.texts(&p), [")COPY t FROM STDIN"]);
+    // Its "rows" are never drawn as runnable (the `\.` line is a client command).
+    let p = d.preview(&caret(30), ExecAction::Execute2).unwrap();
+    assert_eq!(p.state, PreviewState::Uncertain);
+
+    for text in ["COPY t TO STDOUT;", "/* c */ COPY t FROM STDIN"] {
+        let d = Doc::analysed(cx, text, pg());
+        let p = d.preview(&caret(10), ExecAction::Execute1).unwrap();
+        assert_eq!(p.state, PreviewState::Uncertain, "{text}");
     }
 }

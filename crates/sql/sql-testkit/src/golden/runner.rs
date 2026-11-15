@@ -92,6 +92,8 @@ fn unit_kind_name(k: UnitKind) -> &'static str {
         UnitKind::Batch => "batch",
         UnitKind::Verbatim => "verbatim",
         UnitKind::CopyIn { .. } => "copy_in",
+        // ## m3a-f1-followups
+        UnitKind::CopyStream => "copy_stream",
     }
 }
 

@@ -662,3 +662,47 @@ fn a_client_command_boundary_never_asks_the_oracle() {
     assert!(matches!(r, Resolution::Uncertain(_)), "{r:?}");
     assert_eq!(oracle.calls.get(), 0);
 }
+
+// ## m3a-f1-followups
+// Follow-up F1-a: Run reads a `COPY` from the splitter's kinds, as the preview does.
+
+/// `)COPY t FROM STDIN` is no `COPY` to the splitter, nor to PostgreSQL (a syntax error at
+/// `)`): Run sends it as the statement it is, where the preview draws it runnable too. A
+/// streaming `COPY` the splitter names is refused whatever its rows.
+#[test]
+fn run_reads_a_copy_from_the_splitters_kind() {
+    let sql = "SELECT 1;)COPY t FROM STDIN;\na\tb\n\\.\nSELECT 1;";
+    let r = resolve_units(&pg_doc(sql), &[caret(10)], RunAction::Execute2, None);
+    assert_eq!(texts(&r), [")COPY t FROM STDIN"]);
+    for sql in [
+        "COPY t TO STDOUT;",
+        "/* c */ COPY t FROM STDIN",
+        "COPY t FROM STDIN;\n1\n\\.\n",
+    ] {
+        assert!(
+            matches!(
+                resolve_doc(sql, caret(10), RunAction::Execute1),
+                Resolution::Refused {
+                    reason: RefuseReason::CopyStream,
+                    ..
+                }
+            ),
+            "{sql}"
+        );
+    }
+}
+
+/// The oracle's pieces carry no splitter kind, so an ambiguous region that holds the word
+/// `COPY` is never settled by it: a `COPY … TO STDOUT` piece could not be told from a
+/// statement.
+#[test]
+fn an_oracle_region_holding_copy_stays_uncertain() {
+    let sql = "SELECT 1\nCOPY t TO STDOUT;\nSELECT 9;";
+    let doc = pg_doc(sql);
+    let oracle = Counting::answering(&[(0, 8), (9, 25)]);
+    for action in [RunAction::Execute1, RunAction::Execute3] {
+        let r = resolve_units_with(&doc, &[caret(2)], action, None, &oracle);
+        assert!(matches!(r, Resolution::Uncertain(_)), "{action:?}: {r:?}");
+    }
+    assert_eq!(oracle.calls.get(), 0);
+}
