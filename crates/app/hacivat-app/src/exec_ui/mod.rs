@@ -233,6 +233,14 @@ pub fn pending_read_only(console: ConsoleId, cx: &App) -> bool {
         .is_some_and(|p| p.0.contains(&console))
 }
 
+// ## m3a-t32-console (fix round 2, M18; named exception)
+/// Whether console `console` counts as connected for its editor: its SQL context was read (or
+/// found unknown) and its session is live; the rule `set_connected` follows.
+pub fn connected(console: ConsoleId, cx: &App) -> bool {
+    !matches!(sql_context(console, cx), context::SqlContext::Pending)
+        && orchestrator::live_session(cx, console).is_some()
+}
+
 /// Sets or clears console `console`'s pending read-only flag (Task 32's seam).
 pub fn set_pending_read_only(console: ConsoleId, pending: bool, cx: &mut App) {
     let set = &mut cx.default_global::<PendingReadOnly>().0;

@@ -537,6 +537,14 @@ fn connect_first(profile: &Profile, cx: &mut App) {
 /// Submits `units` as one run of console `console`, marks them at `version` and follows the
 /// run's status and result tabs.
 pub(crate) fn start_run(console: ConsoleId, version: u64, units: Vec<ExecUnit>, cx: &mut App) {
+    // ## m3a-t32-console (fix round 2, N1; named exception): the single submit point refuses a
+    // console whose read-only reconnect is pending, whatever reached it (the chooser's confirm,
+    // the dispatch after the background resolve, Re-run from a result tab). `on_execute`
+    // keeps its early check, so a pending console never opens a chooser.
+    if crate::exec_ui::pending_read_only(console, cx) {
+        say(console, "hv-exec-pending-read-only", cx);
+        return;
+    }
     if units.is_empty() {
         return;
     }
