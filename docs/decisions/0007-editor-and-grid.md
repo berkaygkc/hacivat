@@ -239,3 +239,31 @@ also see GPUI's internals, but it needs `unsafe`, which the workspace denies out
 C1 controls → `⟨U+0085⟩`, the bidi controls → named chips (`⟨RLO⟩`, the Trojan Source defence),
 each painted as a chip (Fragment Mono 11 `text-2` on a `seam-soft` well, radius 3); the cell's text
 is unchanged, so a copy keeps the real characters.
+
+## m3a-t29 — editor accessibility node and large-file tiers
+
+**The node is the focusable column, not the text element.** GPUI gives the platform focus to the
+node of the element that tracks the focus (`div.rs`: `set_focusable`/`set_focus`), and the
+editor's focus is tracked by the view's root column. A node on the inner `EditorElement` (the
+round-2 seam above) would never be focused, so assistive technology would announce the whole
+window instead of the text. Task 29 moves the declaration to the column: `render` calls
+`a11y::declare`, which (only while `window.is_a11y_active()`) gives it role
+`MultilineTextInput` and an `a11y_synthetic_children` closure that writes the label, the T1
+description, read-only, the text selection, the window's `TextRun`s and the polite live region.
+`EditorElement` no longer has accessibility hooks.
+
+**Cached embedding.** The fork's `reuse_prepaint`/`reuse_paint` carry no accessibility state, so
+a reused cached view drops out of the tree. `a11y::embed(editor, style, window)` caches the
+editor only while no assistive technology is attached; the console host (Task 32) embeds with
+it. A fork carry that skips view reuse while accessibility is active would fix every cached view
+(the grid included); it is a controller decision.
+
+**Keys and the window.** Line keys follow line-start anchors (`Bias::After`, `MapMode::TrackDel`)
+rebased through the change log at build time only (nothing per keystroke); a line takes the
+first anchor inside it; keys are never reused; the log running out starts the keys over. A
+window is rebuilt only when the text version, its lines or a long caret line's exposed part
+change. A line longer than 64 KB exposes 64 KB (around the caret on the caret's line).
+
+**Tiers.** T0 up to 4 MB and a 64 KB longest line; T1 above, never T2 in M3a; back to T0 only
+below 80 % of every limit that applies (exact integer comparison). Sizes in the banner come from
+the host's `large_file::SizeText` (format locale); the fallback is an unformatted decimal.

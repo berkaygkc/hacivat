@@ -200,9 +200,10 @@ fn no_a11y_work_without_assistive_technology(cx: &mut TestAppContext) {
         f.vcx.run_until_parked();
     }
     assert_eq!(f.label_reads.get(), 0);
-    f.editor.update(f.vcx, |v, _| {
+    // ## m3a-t29-a11y-tiers: `announce` takes `cx`.
+    f.editor.update(f.vcx, |v, cx| {
         for i in 0..6 {
-            v.announce(format!("{i}").into());
+            v.announce(format!("{i}").into(), cx);
         }
         let nodes = v.a11y.nodes();
         assert_eq!(

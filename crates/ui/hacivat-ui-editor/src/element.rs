@@ -3,8 +3,8 @@
 //! the content-keyed cache (`layout_cache`), and keeps each frame's layout for
 //! `EditorView::last_layout` (IME bounds, hit testing, the chooser's anchor).
 //!
-//! - `request_layout`: the [`A11yFrame`] (only while assistive technology is active);
-//! - the accessibility hooks: `a11y::{role, write_info, synthetic_children}`;
+//! - `request_layout`: the text area's size (its accessibility node is the view's focusable
+//!   column, declared by `a11y::declare` from `render`; Task 29);
 //! - `prepaint` ([`prepaint_frame`]): `ime::on_frame`, the geometry (the gutter grows with the
 //!   document's last line number: 58 px for three digits plus one advance per extra digit, NOTES
 //!   open question 4), the scroll clamp and the caret reveal, the visible rows (decorations
@@ -33,15 +33,13 @@ use hacivat_text::display::{
 use hacivat_text::units::snap_to_grapheme;
 use hacivat_text::{Bias, Snapshot, TextBuffer};
 use hacivat_ui_core::gpui_surface::{
-    A11ySubtreeBuilder, App, Bounds, Context, Element, ElementId, ElementInputHandler, Entity,
-    FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, LayoutId, Pixels,
-    Point, Role, ShapedLine, Style, TextRun, UnderlineStyle, Window, accesskit, point, px,
-    relative, size,
+    App, Bounds, Context, Element, ElementId, ElementInputHandler, Entity, FocusHandle,
+    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, LayoutId, Pixels, Point,
+    ShapedLine, Style, TextRun, UnderlineStyle, Window, point, px, relative, size,
 };
 use smallvec::SmallVec;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::a11y::{self, A11yFrame, A11yState};
 use crate::decor::HighlightClass;
 use crate::gutter::{self, GutterCtx};
 use crate::layout_cache::{LONG_LINE_BYTES, LONG_LINE_COLUMNS, LayoutCache, column_window};
@@ -1013,30 +1011,18 @@ pub(crate) fn paint_frame(
     }
 }
 
-/// The editor's element: the text area, its input handler and its accessibility node.
+// ## m3a-t29-a11y-tiers: the element's accessibility hooks moved to the view's focusable
+// column (`a11y::declare`), the element GPUI gives the platform focus.
+/// The editor's element: the text area and its input handler.
 pub(crate) struct EditorElement {
     view: Entity<EditorView>,
     focus: FocusHandle,
     id: ElementId,
-    a11y: A11yState,
-    /// Built in `request_layout` only while assistive technology is active.
-    a11y_frame: Option<A11yFrame>,
 }
 
 impl EditorElement {
-    pub(crate) fn new(
-        view: Entity<EditorView>,
-        focus: FocusHandle,
-        id: ElementId,
-        a11y: A11yState,
-    ) -> Self {
-        EditorElement {
-            view,
-            focus,
-            id,
-            a11y,
-            a11y_frame: None,
-        }
+    pub(crate) fn new(view: Entity<EditorView>, focus: FocusHandle, id: ElementId) -> Self {
+        EditorElement { view, focus, id }
     }
 }
 
@@ -1059,12 +1045,6 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        self.a11y_frame = if window.is_a11y_active() {
-            let focused = self.focus.is_focused(window);
-            Some(self.view.update(cx, |v, cx| v.a11y_frame(focused, cx)))
-        } else {
-            None
-        };
         // The rest of the editor's column (the banner sits above it), as `flex_1().w_full()`.
         let mut style = Style {
             flex_grow: 1.0,
@@ -1111,28 +1091,6 @@ impl Element for EditorElement {
             let view = self.view.clone();
             self.view
                 .update(cx, |v, cx| paint_frame(v, &view, bounds, frame, window, cx));
-        }
-    }
-
-    fn a11y_role(&self) -> Option<Role> {
-        self.a11y_frame
-            .as_ref()
-            .and_then(|f| a11y::role(&self.a11y, f))
-    }
-
-    fn write_a11y_info(&self, node: &mut accesskit::Node) {
-        if let Some(f) = &self.a11y_frame {
-            a11y::write_info(&self.a11y, f, node);
-        }
-    }
-
-    fn a11y_synthetic_children(
-        &mut self,
-        _prepaint: &mut Option<FramePrepaint>,
-        builder: &mut A11ySubtreeBuilder,
-    ) {
-        if let Some(f) = &self.a11y_frame {
-            a11y::synthetic_children(&self.a11y, f, builder);
         }
     }
 }
