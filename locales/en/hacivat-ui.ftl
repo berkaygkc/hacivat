@@ -1761,5 +1761,7 @@ hv-tx-end-failed = The transaction on { $name } didn't end, so nothing was close
 # Variables:
 #   $name (String) - the console's title (the connection's name), e.g. "orders-dev".
 hv-tx-failed-by-stop = Stopping the statement failed the transaction on { $name }. Only a rollback can end it now.
+# Run on a production console whose open transaction must end before it reconnects read-only: nothing is sent.
+hv-exec-pending-read-only = Nothing was sent: this console becomes read-only once its open transaction ends. Commit or roll back first.
 # Toast when Re-run is refused because the statement was edited since it ran.
 hv-exec-rerun-edited = The statement was edited since it ran. Run it from the editor.

@@ -215,3 +215,30 @@ pub(crate) fn in_workspace_window(
 pub fn sql_context(console: ConsoleId, cx: &App) -> context::SqlContext {
     console_exec(cx, console).map_or(context::SqlContext::Pending, |e| e.context)
 }
+
+// ## m3a-t33-exec-ui (fix round 1, Task 32 contract): pending read-only.
+/// The consoles Task 32 marked `pending_read_only`: a production-tagged console waiting for the
+/// user's open transaction to end before it reconnects read-only.
+#[derive(Default)]
+struct PendingReadOnly(std::collections::HashSet<ConsoleId>);
+
+impl Global for PendingReadOnly {}
+
+/// Whether console `console` waits to become read-only: Run then sends nothing (Commit and
+/// Roll back stay available). **Merge point (Task 32):** Task 32 publishes the flag per
+/// console; it either calls [`set_pending_read_only`] or replaces this body with a read of its
+/// own flag. Until then nothing sets it, so this answers `false`.
+pub fn pending_read_only(console: ConsoleId, cx: &App) -> bool {
+    cx.try_global::<PendingReadOnly>()
+        .is_some_and(|p| p.0.contains(&console))
+}
+
+/// Sets or clears console `console`'s pending read-only flag (Task 32's seam).
+pub fn set_pending_read_only(console: ConsoleId, pending: bool, cx: &mut App) {
+    let set = &mut cx.default_global::<PendingReadOnly>().0;
+    if pending {
+        set.insert(console);
+    } else {
+        set.remove(&console);
+    }
+}

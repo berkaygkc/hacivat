@@ -1588,3 +1588,81 @@ fn a_probe_without_a_value_leaves_the_context_unknown(cx: &mut TestAppContext) {
     assert_eq!(c.queries(), ["SELECT 1"]);
     stop_core_runtime_test(cx);
 }
+
+/// Task 32 contract: while a production-tagged console waits for its open transaction to end
+/// before reconnecting read-only (`pending_read_only`), Run sends nothing and says why; Commit
+/// and Roll back stay available; once the flag clears, Run runs again.
+#[gpui::test]
+fn run_refuses_while_the_console_waits_to_become_read_only(cx: &mut TestAppContext) {
+    let c = console_in_transaction(cx, false);
+    let sent = c.queries().len();
+    let id = c.id;
+    c.vcx
+        .cx
+        .update(|cx| hacivat_app::exec_ui::set_pending_read_only(id, true, cx));
+    c.set_text("UPDATE t SET a = 1");
+    c.run_at(0);
+    c.barrier();
+    assert_eq!(
+        c.queries().len(),
+        sent,
+        "nothing was sent: {:?}",
+        c.queries()
+    );
+    assert!(!c.chooser_open());
+    enable_registry(c.vcx);
+    in_window(c.vcx, |window, _| window.refresh());
+    c.vcx.run_until_parked();
+    assert!(
+        toast_texts(c.vcx).iter().any(|t| t
+            == "Nothing was sent: this console becomes read-only once its open transaction ends. Commit or roll back first."),
+        "{:?}",
+        toast_texts(c.vcx)
+    );
+    // Commit stays available, and ends the transaction.
+    assert!(run(c.vcx, "tx.commit"));
+    wait_until(c.vcx, "the commit", |_| c.tx().status == TxStatus::Idle);
+    // Task 32 clears the flag once the console is read-only; Run runs again.
+    c.vcx
+        .cx
+        .update(|cx| hacivat_app::exec_ui::set_pending_read_only(id, false, cx));
+    c.set_text("SELECT 1");
+    c.run_at(0);
+    c.wait_queries(sent + 1);
+    stop_core_runtime_test(cx);
+}
+
+/// Task 32 C2: a disconnect (or a profile delete) goes through `confirm_release` too: its
+/// continuation closes the session, after Roll back and continue ended the transaction, with
+/// `RefuseIfOpenTx` (which then has nothing to refuse).
+#[gpui::test]
+fn confirm_release_lets_a_disconnect_continue_after_the_rollback(cx: &mut TestAppContext) {
+    let mut c = console_in_transaction(cx, false);
+    enable_registry(c.vcx);
+    let id = c.id;
+    let session = c.session.clone();
+    let closed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let done = closed.clone();
+    c.vcx.cx.update(|cx| {
+        hacivat_app::exec_ui::close_prompt::confirm_release(id, cx, move |_| {
+            let close = session.close(hacivat_session::session::ClosePolicy::RefuseIfOpenTx);
+            done.set(futures::executor::block_on(close).is_ok());
+        })
+    });
+    wait_until(c.vcx, "the release prompt", |vcx| {
+        layer_ids(vcx).contains(&"dialog")
+    });
+    // Roll back and continue.
+    c.keys("shift-tab");
+    c.keys("enter");
+    wait_until(c.vcx, "the disconnect", |_| closed.get());
+    assert!(
+        c.fake.executed().iter().any(|s| s.trim() == "ROLLBACK"),
+        "{:?}",
+        c.fake.executed()
+    );
+    wait_until(c.vcx, "the session to close", |_| {
+        !hacivat_exec::session_live(&c.session.state().borrow().state)
+    });
+    stop_core_runtime_test(cx);
+}

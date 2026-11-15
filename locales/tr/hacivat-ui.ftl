@@ -1613,4 +1613,6 @@ hv-tx-end-failed = { $name } üzerindeki işlem sona ermedi; hiçbir şey kapat�
 # Review: PO
 hv-tx-failed-by-stop = İfadeyi durdurmak { $name } üzerindeki işlemi başarısız kıldı. Artık yalnızca geri alma onu sonlandırabilir.
 # Review: PO
+hv-exec-pending-read-only = Hiçbir şey gönderilmedi: bu konsol, açık işlemi sona erdiğinde salt okunur olur. Önce commit edin ya da geri alın.
+# Review: PO
 hv-exec-rerun-edited = İfade çalıştırıldıktan sonra düzenlendi. Düzenleyiciden çalıştırın.

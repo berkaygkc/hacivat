@@ -357,6 +357,13 @@ fn on_execute(console: ConsoleId, req: ExecRequest, cx: &mut App) {
         connect_first(&profile, cx);
         return;
     }
+    // Fix round 1 (Task 32 contract): a production-tagged console waiting for the user's open
+    // transaction to end before it reconnects read-only sends nothing meanwhile; Commit and
+    // Roll back stay available (tx.commit / tx.rollback do not ask this).
+    if crate::exec_ui::pending_read_only(console, cx) {
+        say(console, "hv-exec-pending-read-only", cx);
+        return;
+    }
     let (ctx, unknown) = match context {
         SqlContext::Known(ctx) => (ctx, false),
         // Fix round 1 (T31 finding): the modes are unknown; Run sends only what every mode
