@@ -239,3 +239,97 @@ also see GPUI's internals, but it needs `unsafe`, which the workspace denies out
 C1 controls → `⟨U+0085⟩`, the bidi controls → named chips (`⟨RLO⟩`, the Trojan Source defence),
 each painted as a chip (Fragment Mono 11 `text-2` on a `seam-soft` well, radius 3); the cell's text
 is unchanged, so a copy keeps the real characters.
+
+## m3a-t24 — off-thread analysis and the preview rule
+
+**Choice (R-M3-22).** `hacivat-sql-editor`'s `SqlLanguageService` never lexes on the UI thread.
+For each open document, `open` starts two tasks:
+
+- **The worker** runs on the GPUI background executor. It is fed by a `tokio::sync::watch` that
+  holds only the latest job: the version, an O(1) clone of the snapshot's rope, and the console's
+  SQL context.
+  - It builds `SqlDocument::from_chunks(&RopeChunks(buffer), ctx, flavor)`. That is the one copy
+    of the text, and it is made here.
+  - It computes the execution split, the client and `COPY` regions, the tokens inside running
+    executable comments, and the statement spans.
+  - It publishes the result on a second `watch`.
+  - One analysis runs at a time. Jobs that arrive meanwhile collapse into the newest
+    (latest wins).
+- **A foreground task** stores each published analysis and calls the editor's `on_update`
+  notifier from its own task, so the notifier never re-enters a call of the trait.
+
+`change` does two things: it records the `ChangeDesc` (at most 256 are kept) and replaces the
+job. It lexes nothing and copies no text.
+
+**Which analysis answers what.**
+
+| Reader | Uses | When the analysis is older |
+|---|---|---|
+| Highlighting | the latest analysis | Rebased through the editor's `ChangeLog` as `RangeKind::Content`. The visible range is mapped back conservatively, then each mark is mapped forward. A token an edit touched paints plain until the next analysis. An analysis older than the log paints nothing. |
+| Statement spans | the latest analysis | Mapped through the recorded changes as containers. A statement an edit touched is `Heuristic` until the next analysis. An unknown chain gives no spans. |
+| Token oracle, Run preview, `doc_snapshot` | only an analysis of exactly the editor's version, made under the current SQL context | — |
+
+A new `set_sql_context` bumps a generation and re-analyses. Until the new analysis lands, no
+preview, token words or `doc_snapshot` come from the old dialect. A connected console whose SQL
+context was never set has no preview, and Run analyses its own snapshot. `ClientFlavor::None`
+takes the dialect's own client (`effective_flavor`): psql for PostgreSQL, mysql for MySQL and
+MariaDB, sqlite3 for SQLite. So a PostgreSQL console never splits without psql's rules.
+
+**The preview rule (R-M3-8, R-M3-24).** `exec_preview` asks `exec_range::resolve` the same
+question Run asks, **in execution mode**, with Run's policy for the action and the console's
+remembered chooser kind (`set_remembered_kind`).
+
+| Execution's answer | Preview |
+|---|---|
+| Runs units M3a sends | `Units`, with exactly those ranges |
+| Asks | `AskPreselected`, with the ranges of the candidate the chooser opens on |
+| Nothing at the caret | `Nothing` |
+| `Ambiguous` | `Uncertain` |
+| An unsupported client command | `Uncertain` |
+| A `COPY … FROM STDIN` or verbatim unit | `Uncertain` |
+
+For an `Uncertain` preview, editor mode is asked only to find the ranges to draw in neutral. A
+disconnected console gets `NoConnection` with the same ranges.
+
+So the preview draws a range as runnable only when it is the range Run sends, by construction.
+In the common case this costs one resolve on the UI thread.
+
+A statement span is `Exact` only when the editor split is certain there and the execution split
+holds the same certain statement.
+
+**Rejected.**
+- **Mapping editor mode's answer, with a certainty check per unit** (the plan's wording). It is
+  correct only through Task 13's agreement of the two modes, and it costs a lookup per unit of a
+  whole-script candidate. The rule above is true without that agreement. The tests still check
+  the agreement for every runnable preview.
+- **Lexing on the keystroke frame.** It breaks B3 at 2 MB (R-M3-22).
+- **Highlight spans precomputed for the whole document.** That is O(document) memory per
+  analysis; marks are built per visible range from `Lexed::tokens_in`.
+
+**Costs.**
+- The preview never calls the PostgreSQL parser oracle, because a blocking parse is not UI work.
+  A region Task 23 resolves through the oracle therefore previews `Uncertain`.
+- Colours come from the whole-text lexing. Past a client command, `COPY` rows or a client
+  delimiter they can differ from the split, for example when a quote in `COPY` rows colours the
+  SQL after them. This is cosmetic: Run uses the split.
+
+**Held by.** `tests/preview_truth.rs`:
+- `preview_equals_execution_for_exact_items` and `preview_follows_the_remembered_kind` (512
+  cases by default, 1,000,000 each in the task's run): every runnable preview equals execution's
+  answer and editor mode's answer, and offline previews keep the geometry.
+- `exact_statement_spans_are_what_execution_runs`.
+- `heuristic_boundary_previews_uncertain`, `unsupported_commands_and_copy_never_preview_as_runnable`
+  and `stale_snapshot_never_yields_a_preview`.
+
+`tests/worker.rs`:
+- `worker_result_equals_a_fresh_document_after_random_edits` (10⁴ edits on PostgreSQL, 2,000 each
+  on MySQL and SQLite).
+- `change_never_lexes_on_the_calling_thread`.
+- `doc_snapshot_is_exact_and_under_the_consoles_context` and
+  `postgres_never_analyses_without_its_client_flavor`.
+
+`tests/highlight.rs`: `touched_range_paints_plain_until_the_next_analysis` and
+`an_analysis_older_than_the_log_paints_nothing`.
+
+`tests/budget.rs` (perf): `change()` p95 ≤ 0.5 ms, the preview p95 ≤ 2 ms, and one viewport's
+decorations p95 ≤ 1 ms on 50,000 lines.
