@@ -174,7 +174,9 @@ impl FrameLayout {
         let line = u32::try_from(self.buffer.byte_to_line(start)).ok()?;
         let row = self.row(line)?;
         let x0 = self.row_x(row, start);
-        let end = r.end.clamp(start, row.line_bytes.end);
+        // ## m3a-t27-ime-clipboard (named exception, review M6): `start` may sit between the
+        // CR and the LF of a CRLF, past the line's content; no `clamp` panic then.
+        let end = r.end.max(start).min(row.line_bytes.end.max(start));
         let x1 = self.row_x(row, end).max(x0);
         Some(Bounds::new(
             point(px((self.origin_x + f64::from(x0)) as f32), row.top),
@@ -325,6 +327,20 @@ impl FrameLayout {
             }
             PieceKind::Text { shaped, segs } => {
                 let idx = shaped.closest_index_for_x(px(x - piece.x));
+                // ## m3a-t27-ime-clipboard (named exception: T19 last-glyph midpoint, review
+                // M7). GPUI answers the piece's end for any x past its last glyph's start; the
+                // nearer edge of the last grapheme is the right answer.
+                if idx >= shaped.len() && piece.bytes.end > piece.bytes.start {
+                    let end = piece.bytes.end;
+                    let last = snap_to_grapheme(&self.buffer, end - 1, Bias::Before)
+                        .max(piece.bytes.start);
+                    let (xl, xe) = (self.row_x(row, last), self.row_x(row, end));
+                    return if (x - xl).abs() <= (xe - x).abs() {
+                        last
+                    } else {
+                        end
+                    };
+                }
                 let seg = segs
                     .iter()
                     .find(|s| idx < s.disp + s.disp_len)

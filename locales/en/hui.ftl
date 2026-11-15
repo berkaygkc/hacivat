@@ -22,3 +22,29 @@ hui-window-minimize = Minimize
 hui-window-maximize = Maximize
 hui-window-close = Close window
 hui-menu-app = Application menu
+
+## m3a-t27-clipboard
+
+# A size in whole megabytes, rounded up (the paste refusal; the T1 banner may reuse it).
+# Variables:
+#   $n (Number) - megabytes, e.g. 31.
+hui-editor-size-mb = { $n } MB
+# Toast title: a paste would take the document past the editor's size limit.
+hui-editor-paste-refused-title = Couldn't paste
+# Variables:
+#   $size (String) - the pasted text's size, e.g. "31 MB".
+#   $limit (String) - the largest document the editor takes, e.g. "20 MB".
+hui-editor-paste-refused-body = The pasted text is { $size }, which would take this document past { $limit }. Paste a smaller part.
+# Toast title: the pasted text had NUL characters, which the editor shows as chips.
+hui-editor-nul-title = The pasted text contains NUL characters
+# Variables:
+#   $n (Number) - how many NUL characters were pasted, e.g. 2.
+hui-editor-nul-body = { $n ->
+        [one] { $n } NUL character is marked in the text so you can find it. Most servers reject it.
+       *[other] { $n } NUL characters are marked in the text so you can find them. Most servers reject them.
+    }
+# Toast title: the clipboard could not be read for a paste.
+hui-editor-clipboard-title = Couldn't read the clipboard
+hui-editor-clipboard-body = Another app may be holding it, or the system didn't allow access.
+# Toast button: read the clipboard again and paste.
+hui-editor-try-again = Try again
