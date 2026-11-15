@@ -37,6 +37,10 @@ pub struct ServerMessage {
     pub hint: Option<String>,
     /// The server's message language, when known.
     pub lang_hint: Option<String>,
+    // ## m3a-t33-exec-ui (named exception): "go to error" (HV-EXEC-11).
+    /// Where in the sent text the error is: the server's 1-based character cursor into the
+    /// statement as sent (PostgreSQL's `P` field), when it reports one.
+    pub position: Option<u32>,
 }
 
 /// What kind of failure a driver saw (HV-CONN-03).

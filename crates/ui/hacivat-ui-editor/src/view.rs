@@ -528,6 +528,14 @@ impl EditorView {
         cx.notify();
     }
 
+    // ## m3a-t33-exec-ui (named exception)
+    /// Sets a mark's short form, shown on a long line instead of its end-of-line status
+    /// (`marks::set_short`).
+    pub fn set_exec_short(&mut self, key: MarkKey, short: Option<TextFn>, cx: &mut Context<Self>) {
+        marks::set_short(&mut self.marks, key, short);
+        cx.notify();
+    }
+
     pub fn clear_exec_marks(&mut self, cx: &mut Context<Self>) {
         marks::clear(&mut self.marks);
         cx.notify();

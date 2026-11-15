@@ -659,6 +659,7 @@ fn interrupted() -> RawError {
             detail: None,
             hint: None,
             lang_hint: None,
+            position: None,
         }),
     }
 }

@@ -258,6 +258,12 @@ pub(crate) fn pg_error(e: &tokio_postgres::Error) -> RawError {
                 detail: db.detail().map(str::to_string),
                 hint: db.hint().map(str::to_string),
                 lang_hint,
+                // ## m3a-t33-exec-ui (named exception): the error's place in the sent text
+                // (an internally generated query's position is not the user's text).
+                position: match db.position() {
+                    Some(tokio_postgres::error::ErrorPosition::Original(p)) => Some(*p),
+                    _ => None,
+                },
             }),
         };
     }

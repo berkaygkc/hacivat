@@ -58,6 +58,7 @@ fn unknown_db_fake<const N: usize>(names: [&str; N]) -> FakeDriver {
                 detail: None,
                 hint: None,
                 lang_hint: None,
+                position: None,
             }),
         })])
         .databases(names.iter().map(|n| n.to_string()).collect())

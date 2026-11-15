@@ -18,8 +18,6 @@ use gpui::{TestAppContext, VisualTestContext};
 use hacivat_app::connections::{ConnectionsModel, events, session_toasts};
 use hacivat_app::l10n_global::tr;
 use hacivat_driver::fake::FakeDriver;
-#[cfg(debug_assertions)]
-use hacivat_driver::{ExecSummary, fake::FakeExec};
 use hacivat_driver::{RawError, RawErrorKind, SemVerLoose, ServerInfo, Support};
 use hacivat_l10n::{Count, NoArgs, ids};
 use hacivat_net::ssh::{HopSpec, SshAuth, SshSpec};
@@ -1601,44 +1599,11 @@ fn a_damaged_vault_shows_the_notice_once_then_asks_the_password(cx: &mut TestApp
 }
 
 // ---- the debug cancel demo (Q39) --------------------------------------------------------------
+// ## m3a-t33-exec-ui (R-M3-47, named exception): the demo is gone in every build; Stop is
+// `exec.cancel` (tests/exec_ui.rs).
 
-#[cfg(debug_assertions)]
 #[gpui::test]
-fn debug_cancel_command_cancels_the_demo_sleep(cx: &mut TestAppContext) {
-    let driver = FakeDriver::new(DbmsKind::Postgres).exec(vec![FakeExec {
-        prefix: "SELECT pg_sleep(30)",
-        result: Ok(ExecSummary::default()),
-        delay: secs(30),
-        tx_after: None,
-        panics: false,
-    }]);
-    let (vcx, _) = shell_with(cx, "en", driver, pg("orders-dev", EnvTag::Dev));
-    connect(vcx, "orders-dev");
-    wait_until(vcx, "the connect", |vcx| {
-        matches!(live(vcx, "orders-dev"), LiveState::Connected(_))
-    });
-    assert!(!run(vcx, "debug.cancel"), "nothing runs yet");
-    assert!(run(vcx, "debug.run_pg_sleep"));
-    wait_until(vcx, "the demo statement to run", |vcx| {
-        fake(vcx)
-            .executed()
-            .iter()
-            .any(|s| s == "SELECT pg_sleep(30)")
-    });
-    assert!(run(vcx, "debug.cancel"));
-    settle_until(vcx, secs(5), || fake(vcx).cancel_calls() == 1);
-    wait_until(vcx, "the result toast", |vcx| {
-        toast_texts(vcx)
-            .iter()
-            .any(|s| s == "The demo statement was cancelled.")
-    });
-    assert_eq!(fake(vcx).cancel_calls(), 1);
-}
-
-/// Q39: the demo commands exist only in debug builds.
-#[cfg(not(debug_assertions))]
-#[gpui::test]
-fn release_builds_have_no_cancel_demo(cx: &mut TestAppContext) {
+fn the_m2b_cancel_demo_is_gone(cx: &mut TestAppContext) {
     let (vcx, _) = shell_with(
         cx,
         "en",
@@ -1649,5 +1614,6 @@ fn release_builds_have_no_cancel_demo(cx: &mut TestAppContext) {
         let reg = cx.global::<hacivat_ui::actions::ActionRegistry>();
         assert!(reg.get("debug.run_pg_sleep").is_none());
         assert!(reg.get("debug.cancel").is_none());
+        assert!(reg.get("exec.cancel").is_some());
     });
 }

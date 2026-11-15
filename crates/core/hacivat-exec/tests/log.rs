@@ -79,6 +79,7 @@ fn server_error(text: &str) -> ExecError {
             detail: None,
             hint: None,
             lang_hint: None,
+            position: None,
         }),
     }
 }
@@ -205,6 +206,7 @@ fn sqlite_busy_gets_hacivats_hint() {
             detail: None,
             hint: None,
             lang_hint: None,
+            position: None,
         }),
     };
     let view = |engine, code| error_view(engine, &busy(code), "SELECT 1", 0, None);

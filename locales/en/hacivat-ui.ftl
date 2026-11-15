@@ -1048,16 +1048,6 @@ hv-conn-ro-warn-role-grant-not-expanded = Other roles are granted to it, and { -
 hv-conn-ro-warn-unparsed = { -brand-hacivat } couldn't read its privileges.
 # The palette command that opens the read-only explanation of the current connection.
 hv-cmd-connection-explain-access = Explain read-only access
-# Debug builds only (Q39): the cancel demo's palette commands and its result.
-hv-cmd-debug-run-pg-sleep = Debug: run SELECT pg_sleep(30) on the current connection
-hv-cmd-debug-cancel = Debug: cancel the demo statement
-# Variables:
-#   $outcome (Enum(done, cancelled, failed)) - how the demo statement ended.
-hv-debug-demo-result = { $outcome ->
-        [done] The demo statement finished.
-        [cancelled] The demo statement was cancelled.
-       *[failed] The demo statement failed.
-    }
 
 ## m2b-t21-prompts
 
@@ -1391,8 +1381,6 @@ hv-conn-secret-vault = vault · forever
 # The Edit menu title (the macOS menu bar and the Windows/Linux in-window menu); the group shows
 # only while the editor commands are registered.
 hv-menu-edit = Edit
-# A notice when Run is asked before running queries is wired up in the console.
-hv-console-run-unavailable = Running queries isn't available in this console yet.
 
 ## m3a-t25-editor-commands
 
@@ -1622,3 +1610,158 @@ hv-editor-mark-stale = edited since execution
 hv-editor-tip-stale = Edited since execution. The marks show the last run.
 # Tooltip title of a gutter mark when two executed statements share its line; each statement's own outcome follows.
 hv-editor-tip-two = Two statements on this line
+
+## m3a-t33-exec-ui
+
+# Command: stop the running statement of the focused console (or stop fetching its rows).
+hv-cmd-exec-cancel = Stop the running statement
+# Command: commit the user's open transaction on the focused console.
+hv-cmd-tx-commit = Commit transaction
+# Command: roll back the user's open (or failed) transaction on the focused console.
+hv-cmd-tx-rollback = Roll back transaction
+# Run on a console whose connection is not connected: Hacivat connects and runs nothing.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+hv-console-connect-first = Connecting to { $name }. Run again once it's connected.
+# At the end of a statement's first line while it waits to run.
+hv-editor-mark-queued = queued
+# At the end of a statement's first line while it runs; the clock repaints once a second.
+# Variables:
+#   $duration (String) - how long it has run (an exec-dur-* message), e.g. "3 s".
+hv-editor-mark-running = running · { $duration }
+# At the end of a statement's first line when it returned rows.
+# Variables:
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "42 ms".
+#   $rows (Number) - the rows it returned, e.g. 100.
+hv-editor-mark-rows = { $rows ->
+        [one] executed · { $duration } · { $rows } row
+       *[other] executed · { $duration } · { $rows } rows
+    }
+# At the end of a statement's first line when it returned rows and more are available (its cursor is open).
+# Variables:
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "42 ms".
+#   $rows (Number) - the rows fetched so far, e.g. 10000.
+hv-editor-mark-rows-more = executed · { $duration } · { $rows }+ rows
+# At the end of a statement's first line when it changed rows.
+# Variables:
+#   $rows (Number) - the rows affected, e.g. 12.
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "38 ms".
+hv-editor-mark-affected = { $rows ->
+        [one] { $rows } row affected · { $duration }
+       *[other] { $rows } rows affected · { $duration }
+    }
+# At the end of a statement's first line when it finished without rows or a count (DDL, SET).
+# Variables:
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "12 ms".
+hv-editor-mark-done = executed · { $duration }
+# At the end of a statement's first line when it failed (the SQLSTATE chip follows).
+hv-editor-mark-failed = failed
+# At the end of a statement's first line when a read-only console did not send it.
+hv-editor-mark-denied = not sent: read-only
+# At the end of a statement's first line while its cancel is on its way.
+hv-editor-mark-cancelling = cancelling…
+# At the end of a statement's first line when it was cancelled.
+# Variables:
+#   $duration (String) - how long it ran (an exec-dur-* message), e.g. "12 s 408 ms".
+hv-editor-mark-cancelled = cancelled after { $duration }
+# At the end of a statement's first line when an earlier statement of its run failed.
+hv-editor-mark-skipped = skipped: an earlier statement failed
+# The short form of a status on a long line, after the green check: how long the statement took.
+# Variables:
+#   $duration (String) - how long it took (an exec-dur-* message), e.g. "42 ms".
+hv-editor-mark-short-done = { $duration }
+# The short form of a running status on a long line: the clock, in amber.
+# Variables:
+#   $duration (String) - how long it has run (an exec-dur-* message), e.g. "3 s".
+hv-editor-mark-short-running = { $duration }
+# At the end of the first line of the statement Run would open the chooser on, with the chevrons-up-down glyph.
+# Variables:
+#   $n (Number) - the candidates the chooser offers, e.g. 2.
+hv-editor-preview-choices = { $n } choices
+# The statement chooser's title (D-011): Run has more than one candidate.
+hv-chooser-title = Choose what to run
+# Chooser kind: the statement at the caret.
+hv-chooser-statement = Statement
+# Chooser kind: the subquery at the caret.
+hv-chooser-subquery = Subquery
+# Chooser kind: the largest statement (or batch) at the caret.
+hv-chooser-largest = Largest statement
+# Chooser kind: from the statement at the caret to the end of the script.
+hv-chooser-from-caret = From caret
+# Chooser kind: every statement of the script.
+hv-chooser-whole = Whole script
+# A chooser row: the candidate's kind, and its count of statements when it runs several.
+# Variables:
+#   $kind (String) - the kind (an hv-chooser-statement, -largest, -from-caret, -whole or -subquery message), e.g. "Whole script".
+#   $n (Number) - the statements the candidate runs, e.g. 5.
+hv-chooser-row = { $n ->
+        [one] { $kind }
+       *[other] { $kind } · { $n } statements
+    }
+# The chooser's state when Run sent nothing because a statement boundary is uncertain.
+hv-chooser-uncertain-title = Boundary uncertain
+# The first line under "Boundary uncertain"; the reason follows on its own line.
+hv-chooser-uncertain-body = Hacivat can't tell exactly where this statement ends, so it sent nothing.
+# The last line under "Boundary uncertain": what to do instead.
+# Variables:
+#   $key (String) - the Run shortcut, e.g. "⌘↵".
+hv-chooser-uncertain-fix = Select exactly the text to run, then press { $key }.
+# The last line under "Boundary uncertain" when no key runs the statement.
+hv-chooser-uncertain-fix-unbound = Select exactly the text to run, then run it.
+# The open-transaction prompt's title when a console or the app closes.
+# Variables:
+#   $name (String) - the console's title (the connection's name), e.g. "orders-dev".
+#   $n (Number) - the statements in the open transaction, e.g. 3.
+hv-tx-close-title = { $n ->
+        [one] { $name } has an open transaction with { $n } statement
+       *[other] { $name } has an open transaction with { $n } statements
+    }
+# The open-transaction prompt's body when a console closes (its transaction ends with it, on whichever session it runs).
+hv-tx-close-body = Closing this console ends its transaction. Commit keeps the changes; Roll back discards them.
+# The open-transaction prompt's body when the app restarts.
+hv-tx-restart-body = Restarting ends the session. Commit keeps the changes; Roll back discards them.
+# Button: commit the transaction, then restart.
+hv-tx-commit-restart = Commit and restart
+# Button: roll back the transaction, then restart.
+hv-tx-rollback-restart = Roll back and restart
+# The open-transaction prompt's body when the console's connection is about to change (released or replaced).
+hv-tx-release-body = The console's connection is about to change, which ends this transaction. Commit keeps the changes; Roll back discards them.
+# Button: commit the transaction, then go on (the connection changes).
+hv-tx-commit-continue = Commit and continue
+# Button: roll back the transaction, then go on (the connection changes).
+hv-tx-rollback-continue = Roll back and continue
+# The open-transaction prompt's body when the app quits.
+hv-tx-quit-body = Quitting ends the session. Commit keeps the changes; Roll back discards them.
+# Button: commit the transaction, then close the console.
+hv-tx-commit-close = Commit and close
+# Button: roll back the transaction, then close the console.
+hv-tx-rollback-close = Roll back and close
+# Button: commit the transaction, then quit.
+hv-tx-commit-quit = Commit and quit
+# Button: roll back the transaction, then quit.
+hv-tx-rollback-quit = Roll back and quit
+# Button: keep the console (or the app) open; the safe default.
+hv-tx-cancel = Cancel
+# The prompt's title when the console's transaction failed (only a rollback ends it).
+# Variables:
+#   $name (String) - the console's title (the connection's name), e.g. "orders-dev".
+hv-tx-failed-title = The transaction on { $name } failed
+# The prompt's body when the console's transaction failed.
+# Variables:
+#   $n (Number) - the statements in the failed transaction, e.g. 3.
+hv-tx-failed-body = { $n ->
+        [one] An error or a cancel stopped it, so it can only be rolled back. Its { $n } statement won't be kept.
+       *[other] An error or a cancel stopped it, so it can only be rolled back. Its { $n } statements won't be kept.
+    }
+# Toast when Commit or Roll back did not end the transaction (the console or the app stays open).
+# Variables:
+#   $name (String) - the console's title (the connection's name), e.g. "orders-dev".
+hv-tx-end-failed = The transaction on { $name } didn't end, so nothing was closed.
+# Toast when stopping a statement inside the user's transaction failed that transaction (R-M3-16 amended).
+# Variables:
+#   $name (String) - the console's title (the connection's name), e.g. "orders-dev".
+hv-tx-failed-by-stop = Stopping the statement failed the transaction on { $name }. Only a rollback can end it now.
+# Run on a production console whose open transaction must end before it reconnects read-only: nothing is sent.
+hv-exec-pending-read-only = Nothing was sent: this console becomes read-only once its open transaction ends. Commit or roll back first.
+# Toast when Re-run is refused because the statement was edited since it ran.
+hv-exec-rerun-edited = The statement was edited since it ran. Run it from the editor.

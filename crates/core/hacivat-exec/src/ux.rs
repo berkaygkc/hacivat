@@ -82,6 +82,12 @@ pub fn console_ux(
 }
 
 fn tx_badge(snap: &SessionSnapshot) -> TxBadge {
+    // ## m3a-t33-exec-ui (named exception, T34 review I3): a transaction lives on its
+    // connection; with none (disconnected, connecting again, broken) there is nothing to show,
+    // whatever the last published `tx` says.
+    if !session_live(&snap.state) {
+        return TxBadge::Auto;
+    }
     let tx = &snap.tx;
     match (tx.owner, tx.status) {
         // The session sets `since` whenever a transaction opens; were it missing, the badge
@@ -100,6 +106,15 @@ fn tx_badge(snap: &SessionSnapshot) -> TxBadge {
         },
         _ => TxBadge::Auto,
     }
+}
+
+// ## m3a-t33-exec-ui (named exception)
+/// Whether the session holds a connection (idle, or running something).
+pub fn session_live(state: &SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::Idle | SessionState::Busy { .. } | SessionState::Cancelling { .. }
+    )
 }
 
 fn busy_since(snap: &SessionSnapshot) -> Option<Instant> {

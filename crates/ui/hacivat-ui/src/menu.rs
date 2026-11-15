@@ -263,6 +263,15 @@ impl PopupMenu {
         self.selected
     }
 
+    // ## m3a-t33-exec-ui (named exception): the statement chooser opens on Run's preselected
+    // candidate, which is not always the checked (remembered) row.
+    /// Highlights row `index` when it can be chosen (else nothing changes).
+    pub fn select(&mut self, index: usize) {
+        if self.items.get(index).is_some_and(MenuItemSpec::selectable) {
+            self.selected = Some(index);
+        }
+    }
+
     fn step(&mut self, forward: bool) {
         let n = self.items.len();
         if n == 0 {

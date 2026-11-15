@@ -112,6 +112,7 @@ fn preview(
     *svc.0.borrow_mut() = Some(ExecPreview {
         ranges: ranges.iter().cloned().collect(),
         state,
+        choices: 0,
     });
     e.update(vcx, |v, cx| v.select_range(caret..caret, cx));
     vcx.executor().advance_clock(PREVIEW_DELAY);
