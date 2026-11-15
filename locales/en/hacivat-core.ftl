@@ -428,11 +428,16 @@ exec-events-dropped = { $n ->
     }
 # Run refused a COPY that streams data through the client.
 exec-copy-unsupported = Not sent: COPY … FROM STDIN and TO STDOUT need the client to stream data, which consoles don't do.
+# A run that never started: its session was closed or lost before anything ran. The reason
+# (an exec-error-* sentence) follows on its own row.
+exec-not-started = Nothing ran.
 # Run refused to send a selection as one statement.
 exec-run-as-one-unsupported = Not sent: Hacivat runs a selection statement by statement, and can't send it as one.
 
 # A released console cursor (R-M3-23): the reason, and, when Hacivat's own transaction around
 # it ended in a rollback, the sentence that says so (cursor-closed-rolled-back).
+# server-terminated: the server answered a fetch with an error; the session stays connected
+# (a lost session is connection-lost).
 
 # Variables:
 #   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
@@ -480,8 +485,8 @@ cursor-closed-connection-lost = { $rows ->
 # Variables:
 #   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
 cursor-closed-server-terminated = { $rows ->
-        [one] Cursor closed after { $rows } row: the server ended the session.
-       *[other] Cursor closed after { $rows } rows: the server ended the session.
+        [one] Cursor closed after { $rows } row: the server stopped the query with an error.
+       *[other] Cursor closed after { $rows } rows: the server stopped the query with an error.
     }
 # Variables:
 #   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
@@ -543,8 +548,8 @@ cursor-closed-connection-lost-rolled-back = { $rows ->
 # Variables:
 #   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.
 cursor-closed-server-terminated-rolled-back = { $rows ->
-        [one] Cursor closed after { $rows } row: the server ended the session.
-       *[other] Cursor closed after { $rows } rows: the server ended the session.
+        [one] Cursor closed after { $rows } row: the server stopped the query with an error.
+       *[other] Cursor closed after { $rows } rows: the server stopped the query with an error.
     } { cursor-closed-rolled-back }
 # Variables:
 #   $rows (Number) - the rows fetched before the cursor closed, e.g. 10000.

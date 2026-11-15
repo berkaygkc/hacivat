@@ -77,10 +77,15 @@ pub fn dialect_ctx(
 }
 
 /// Whether the unit `sql` (a strict range: it starts at its first keyword) may have changed the
-/// session's lexing modes, so the console probes again (R-M3-39: any unit whose first keyword
-/// is `SET`).
+/// session's lexing modes, so the console probes again: `SET` (R-M3-39), `RESET` and `DISCARD`
+/// (which put settings back), and `ROLLBACK`/`ABORT` (which undo a `SET` made inside the
+/// transaction; always reprobed, as tracking which transactions set something costs more than
+/// one probe row).
 pub fn needs_reprobe(sql: &str) -> bool {
-    first_word(sql).eq_ignore_ascii_case("SET")
+    let word = first_word(sql);
+    ["SET", "RESET", "DISCARD", "ROLLBACK", "ABORT"]
+        .iter()
+        .any(|w| word.eq_ignore_ascii_case(w))
 }
 
 /// The leading ASCII word of `sql` (empty when it starts with anything else).

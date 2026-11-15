@@ -471,9 +471,13 @@ async fn a_run_that_never_started_ends_with_its_reason() {
     assert!(s.summary.is_some() && s.started.is_none());
     let msgs = svc.log_msgs();
     assert!(
-        matches!(&msgs[..], [LogMsg::Error { n: 1, view }] if view.title_id == "exec-error-not-connected"),
+        matches!(&msgs[..], [LogMsg::NotStarted(view)] if view.title_id == "exec-error-not-connected"),
         "{msgs:?}"
     );
+    assert_eq!(svc.log_ids(), ["exec-not-started"]);
+    // No statement failed: the line names none and selects nothing.
+    let lines = svc.log.lines();
+    assert_eq!((&lines[0].source, lines[0].unit), (&None, None));
     assert!(f.typed_log().is_empty());
 }
 
@@ -494,4 +498,25 @@ async fn the_text_sent_is_the_units_text_byte_for_byte() {
     let t = svc.svc.run(&h, svc.req(&[text]));
     t.done.await.unwrap();
     assert_eq!(queries(&f), [text]);
+}
+
+/// Review minor 2: a command to a closed session (a Close cursor after the console
+/// disconnected) is no statement's failure: the log stays quiet.
+#[tokio::test(start_paused = true)]
+async fn a_cursor_command_after_the_session_closed_logs_nothing() {
+    let (svc, h, _f) =
+        service_over(fake_pg().queries(vec![rows_of("SELECT * FROM big", 1_000_000)])).await;
+    let t = svc
+        .svc
+        .run(&h, svc.req_with(&["SELECT * FROM big"], small_fetch()));
+    let results = t.results.clone();
+    t.done.await.unwrap();
+    h.close(ClosePolicy::RollBack).await.unwrap();
+    let source = results.borrow()[0].source.clone();
+    let before = svc.log_ids();
+    source.close_cursor();
+    source.fetch_all();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(svc.log_ids(), before);
+    assert!(!svc.log_ids().contains(&"exec-error"));
 }

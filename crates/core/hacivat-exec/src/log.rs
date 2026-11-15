@@ -88,6 +88,9 @@ pub enum LogMsg {
     },
     /// Run refused a `COPY … FROM STDIN` / `TO STDOUT` unit: nothing was sent.
     CopyUnsupported,
+    /// The run never started (its session answered before running anything: closed, lost);
+    /// the view says why. It names no statement.
+    NotStarted(ErrorView),
 }
 
 /// A message argument. Counts are numbers the app formats in the format locale; a statement
@@ -125,6 +128,7 @@ impl LogMsg {
             LogMsg::ReadOnlyDenied(layer) => deny_id(*layer),
             LogMsg::Dropped { .. } => "exec-events-dropped",
             LogMsg::CopyUnsupported => "exec-copy-unsupported",
+            LogMsg::NotStarted(_) => "exec-not-started",
         }
     }
 
@@ -177,16 +181,18 @@ impl LogMsg {
             LogMsg::TxCommitted
             | LogMsg::TxRolledBack
             | LogMsg::ReadOnlyDenied(_)
-            | LogMsg::CopyUnsupported => Vec::new(),
+            | LogMsg::CopyUnsupported
+            | LogMsg::NotStarted(_) => Vec::new(),
         }
     }
 
     /// The severity a line of this message has.
     pub fn severity(&self) -> Severity {
         match self {
-            LogMsg::Error { .. } | LogMsg::ReadOnlyDenied(_) | LogMsg::CopyUnsupported => {
-                Severity::Error
-            }
+            LogMsg::Error { .. }
+            | LogMsg::ReadOnlyDenied(_)
+            | LogMsg::CopyUnsupported
+            | LogMsg::NotStarted(_) => Severity::Error,
             LogMsg::Cancelled { .. } | LogMsg::Dropped { .. } => Severity::Warning,
             LogMsg::CursorClosed { .. } | LogMsg::MoreResultSets { .. } => Severity::Notice,
             LogMsg::RowsRetrieved { .. }
@@ -267,19 +273,17 @@ pub fn duration_message(ms: u64) -> UnitMsg {
     UnitMsg { id, args }
 }
 
-/// The `exec-size-*` message of `bytes` (1024-based, one fraction digit, rounded half up): KB
-/// below 1 MiB, MB below 1 GiB, else GB.
+/// The `exec-size-*` message of `bytes` (1024-based, one fraction digit, rounded half up): KB,
+/// MB or GB, the smallest unit whose rounded value stays below 1,024 (never "1024.0 KB").
 pub fn size_message(bytes: u64) -> UnitMsg {
     const KIB: u128 = 1 << 10;
     let b = u128::from(bytes);
-    let (id, unit) = if b < KIB << 10 {
-        ("exec-size-kb", KIB)
-    } else if b < KIB << 20 {
-        ("exec-size-mb", KIB << 10)
-    } else {
-        ("exec-size-gb", KIB << 20)
-    };
-    let tenths = (b * 10 + unit / 2) / unit;
+    let tenths_in = |unit: u128| (b * 10 + unit / 2) / unit;
+    let (id, unit) = [("exec-size-kb", KIB), ("exec-size-mb", KIB << 10)]
+        .into_iter()
+        .find(|(_, unit)| tenths_in(*unit) < 10 * 1_024)
+        .unwrap_or(("exec-size-gb", KIB << 20));
+    let tenths = tenths_in(unit);
     UnitMsg {
         id,
         args: vec![("n", u64::try_from(tenths).unwrap_or(u64::MAX))],
@@ -438,7 +442,7 @@ pub fn copy_invariant(lines: &[LogLine]) -> String {
                 }
             }
         }
-        if let LogMsg::Error { view, .. } = &line.msg {
+        if let LogMsg::Error { view, .. } | LogMsg::NotStarted(view) = &line.msg {
             let _ = write!(out, "\t{}", view.title_id);
             if let Some(code) = &view.code {
                 let _ = write!(out, "\tcode={}", escaped(code));

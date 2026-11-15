@@ -449,6 +449,19 @@ fn the_sql_context_follows_the_engine_the_version_and_the_probe() {
             .standard_conforming_strings
     );
     assert!(needs_reprobe("SET sql_mode = 'ANSI'"));
+    // Other ways the session's modes change back: RESET, DISCARD, and a rollback that undoes a
+    // SET made inside the transaction (always reprobed after; cheap and fail-safe).
+    for sql in [
+        "RESET ALL",
+        "reset standard_conforming_strings",
+        "DISCARD ALL",
+        "ROLLBACK",
+        "ROLLBACK TO SAVEPOINT a",
+        "ABORT",
+    ] {
+        assert!(needs_reprobe(sql), "{sql}");
+    }
+    assert!(!needs_reprobe("COMMIT"));
     assert!(needs_reprobe("set standard_conforming_strings = off"));
     assert!(!needs_reprobe("SELECT 1"));
     assert!(!needs_reprobe("SETTINGS"));
@@ -589,7 +602,7 @@ fn the_oracle_is_never_asked_without_standard_conforming_strings() {
     ];
     let off = dialect_ctx(DbmsKind::Postgres, None, Some("off"));
     for text in scripts {
-        let doc = doc_in(text, off.clone());
+        let doc = doc_in(text, off);
         assert!(!doc.ctx().modes.standard_conforming_strings);
         let oracle = Counting::real();
         for at in 0..=u32::try_from(text.len()).unwrap() {

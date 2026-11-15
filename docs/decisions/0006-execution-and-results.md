@@ -225,3 +225,31 @@ request 0, the idle release, is not a run). Test: `console_ux_table`.
 dialect → `Generic`); the probe is `SHOW standard_conforming_strings` on the PostgreSQL wire and
 `SELECT @@SESSION.sql_mode` on the MySQL family; a PostgreSQL answer other than `on`/`off` keeps
 the default; `needs_reprobe` is a unit whose first word is `SET`.
+
+**Fix round 1 (review of Task 23).**
+- *The oracle needs `standard_conforming_strings = on`.* libpg_query lexes as a server with
+  the mode on; a session with it off (or not known to be on) never uses the oracle, because
+  `'a\'; INSERT … --'` is one literal to that session's server and editor while the oracle
+  would read an `INSERT` statement out of it. Test:
+  `the_oracle_is_never_asked_without_standard_conforming_strings` (every caret, every action,
+  0 oracle calls). No other PostgreSQL lexing mode moves a statement boundary.
+- *Transaction lines wait for the unit's outcome.* A `TxChanged` to idle is remembered and
+  announced when its unit ends: `COMMIT`/`END` that succeeded says committed; a failed
+  `COMMIT`/`END`/`ROLLBACK`/`ABORT` that left the session idle says rolled back (PostgreSQL
+  rolls back a COMMIT that fails at commit time: a deferred constraint, `40001`); anything
+  else says nothing. Test: `observer::tests::a_failed_commit_is_never_announced_as_committed`
+  (synthetic events: the FakeDriver cannot fail into idle).
+- *A release by a failure fails the unit.* `CursorReleased` with `ServerTerminated`,
+  `ConnectionLost` or `EnforcementGap` after the unit ended turns its `Suspended` status into
+  `Failed` (title by reason; the server's text is on the fetch's log line). Releases the user
+  or Hacivat chose keep `Succeeded { more: true }`. Test:
+  `observer::tests::a_release_by_a_failure_fails_the_unit`.
+- *Run 3's editor-split check* cannot be reached from real text (both splits list the same
+  boundaries, R-M3-8), so `whole_script` is tested on hand-built splits
+  (`units::tests::whole_script_refuses_a_statement_the_editor_split_finds_uncertain`); the
+  client-command guard by `a_client_command_boundary_never_asks_the_oracle`.
+- *Smaller rules.* A run that never started logs `exec-not-started` with the reason and no
+  statement; a `NotConnected` reply to a cursor command is quiet; the console reprobes its SQL
+  context after `SET`, `RESET`, `DISCARD`, `ROLLBACK` and `ABORT`; a size picks its unit after
+  rounding (never "1024.0 KB"). `cursor-closed-server-terminated` says the server stopped the
+  query with an error (the session stays connected).

@@ -275,11 +275,14 @@ impl ExecObserver {
             }
             s.summary = Some(summary);
         });
-        let first = self.units.first();
-        match (error, first) {
-            (Some(_), _) if cancelled => self.line(LogMsg::Cancelled { ms: 0 }, first),
-            (Some(e), Some(u)) => self.line(self.failure(e, u), Some(u)),
-            _ => {}
+        // Nothing ran, so the line names no statement and selects nothing.
+        match error {
+            Some(_) if cancelled => self.line(LogMsg::Cancelled { ms: 0 }, None),
+            Some(e) => {
+                let view = error_view(self.engine, e, "", 0, None);
+                self.line(LogMsg::NotStarted(view), None);
+            }
+            None => {}
         }
         if let Some(done) = done {
             let _ = done.send(summary);
@@ -668,9 +671,13 @@ impl ExecControl {
                 return;
             };
             // A stop says so through the cursor line; a lost connection too, unless the
-            // server said something.
-            let quiet = e.kind == ExecErrorKind::Cancelled
-                || (matches!(e.kind, ExecErrorKind::ConnectionLost { .. }) && e.server.is_none());
+            // server said something; a command to a closed session (a close after a
+            // disconnect) is no statement's failure.
+            let quiet = matches!(
+                e.kind,
+                ExecErrorKind::Cancelled | ExecErrorKind::NotConnected
+            ) || (matches!(e.kind, ExecErrorKind::ConnectionLost { .. })
+                && e.server.is_none());
             if quiet {
                 return;
             }

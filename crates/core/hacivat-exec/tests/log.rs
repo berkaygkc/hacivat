@@ -165,6 +165,11 @@ fn durations_and_sizes_are_one_message_with_the_unit_inside() {
     assert_eq!(size(5_452_595), ("exec-size-mb", vec![("n", 52)]));
     assert_eq!(size(256 << 20), ("exec-size-mb", vec![("n", 2_560)]));
     assert_eq!(size(3 << 30), ("exec-size-gb", vec![("n", 30)]));
+    // Never "1024.0 KB" or "1024.0 MB": a value that rounds to the next unit is shown in it.
+    assert_eq!(size((1 << 20) - 1), ("exec-size-mb", vec![("n", 10)]));
+    assert_eq!(size((1 << 20) - 51), ("exec-size-mb", vec![("n", 10)]));
+    assert_eq!(size((1 << 20) - 52), ("exec-size-kb", vec![("n", 10_239)]));
+    assert_eq!(size((1 << 30) - 1), ("exec-size-gb", vec![("n", 10)]));
     // Durations reach messages as a duration argument, never as text joined to a unit.
     assert_eq!(
         LogMsg::Completed { ms: 7 }.args(),
@@ -270,6 +275,13 @@ fn all_log_msgs() -> Vec<LogMsg> {
         LogMsg::Cancelled { ms: 1 },
         LogMsg::Dropped { n: 1 },
         LogMsg::CopyUnsupported,
+        LogMsg::NotStarted(ErrorView {
+            title_id: "exec-error-not-connected",
+            code: None,
+            server_text: None,
+            hint_id: None,
+            doc_offset: None,
+        }),
     ];
     for reason in every_close_reason() {
         for rolled_back in [false, true] {

@@ -271,6 +271,8 @@ exec-events-dropped = { $n } olay gösterilmedi
 # Review: PO
 exec-copy-unsupported = Gönderilmedi: COPY … FROM STDIN ve TO STDOUT, istemcinin veri aktarmasını gerektirir; konsollar bunu yapmaz.
 # Review: PO
+exec-not-started = Hiçbir şey çalışmadı.
+# Review: PO
 exec-run-as-one-unsupported = Gönderilmedi: Hacivat bir seçimi ifade ifade çalıştırır; tek bir ifade olarak gönderemez.
 # Review: PO
 cursor-closed-session-needed = { $rows } satırdan sonra imleç kapandı: oturum başka bir ifade için gerekiyordu.
@@ -287,7 +289,7 @@ cursor-closed-memory-limit = { $rows } satırdan sonra imleç kapandı: bellek s
 # Review: PO
 cursor-closed-connection-lost = { $rows } satırdan sonra imleç kapandı: bağlantı koptu.
 # Review: PO
-cursor-closed-server-terminated = { $rows } satırdan sonra imleç kapandı: sunucu oturumu sonlandırdı.
+cursor-closed-server-terminated = { $rows } satırdan sonra imleç kapandı: sunucu sorguyu bir hatayla durdurdu.
 # Review: PO
 cursor-closed-cancelled = { $rows } satırdan sonra imleç kapandı: getirme durduruldu.
 # Review: PO
@@ -309,7 +311,7 @@ cursor-closed-memory-limit-rolled-back = { $rows } satırdan sonra imleç kapand
 # Review: PO
 cursor-closed-connection-lost-rolled-back = { $rows } satırdan sonra imleç kapandı: bağlantı koptu. { cursor-closed-rolled-back }
 # Review: PO
-cursor-closed-server-terminated-rolled-back = { $rows } satırdan sonra imleç kapandı: sunucu oturumu sonlandırdı. { cursor-closed-rolled-back }
+cursor-closed-server-terminated-rolled-back = { $rows } satırdan sonra imleç kapandı: sunucu sorguyu bir hatayla durdurdu. { cursor-closed-rolled-back }
 # Review: PO
 cursor-closed-cancelled-rolled-back = { $rows } satırdan sonra imleç kapandı: getirme durduruldu. { cursor-closed-rolled-back }
 # Review: PO
