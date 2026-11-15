@@ -441,6 +441,8 @@ impl EntityInputHandler for EditorView {
         if self.config.read_only {
             return;
         }
+        // ## m3a-t36-benches (fix round 1, named exception): B3's probe at handler entry.
+        self.mark_input_at_entry(cx);
         let was = self.ime.is_composing();
         let now = cx.background_executor().now();
         ime_call(self, |v| {
@@ -457,6 +459,8 @@ impl EntityInputHandler for EditorView {
                 v.composition_changed(false, cx);
             }
         });
+        // ## m3a-t36-benches: a vetoed edit owes the fan-out no mark.
+        self.input_handled();
     }
 
     /// A composition update through `ImeCore::mark`; the first opens the composition, an empty
@@ -472,6 +476,8 @@ impl EntityInputHandler for EditorView {
         if self.config.read_only {
             return;
         }
+        // ## m3a-t36-benches (fix round 1, named exception): B3's probe at handler entry.
+        self.mark_input_at_entry(cx);
         let was = self.ime.is_composing();
         let now = cx.background_executor().now();
         ime_call(self, |v| {
@@ -486,6 +492,8 @@ impl EntityInputHandler for EditorView {
                 v.composition_changed(is, cx);
             }
         });
+        // ## m3a-t36-benches: a vetoed edit owes the fan-out no mark.
+        self.input_handled();
     }
 
     /// The candidate window's anchor: the range on the row of its start, from the last painted
