@@ -87,6 +87,8 @@ struct HostEntry {
 #[derive(Default)]
 struct Hosts {
     by_tab: HashMap<TabId, HostEntry>,
+    /// Profiles whose read-only reconnect waits for a user transaction to end.
+    pending: HashSet<ProfileId>,
     /// Profiles `console_binding` handed to a new console tab whose view is not built yet: that
     /// console starts empty, where a restored one reopens its text. With a text: a shots
     /// fixture's console, over that text, autosave off.
@@ -194,13 +196,78 @@ fn enforce_read_only(cx: &mut App) {
 }
 
 /// Drops every console session of `profile`, then reconnects the profile.
+///
+/// A console whose session holds the user's open transaction refuses to let go
+/// ([`confirm_release`]): then nothing reconnects yet, the user is told once, and the rule runs
+/// again when that transaction ends (the host's session watch).
 fn reconnect_read_only(cx: &mut App, profile: ProfileId) {
+    let mut refused = false;
     for host in hosts_of(cx, profile) {
-        host.update(cx, |h, cx| h.release_session(cx));
+        refused |= !host.update(cx, |h, cx| h.release_session(cx));
     }
+    if refused {
+        let first = cx.default_global::<Hosts>().pending.insert(profile);
+        if first && let Some(p) = profile_of(cx, profile) {
+            let name = p.name.clone();
+            ToastQueue::push(
+                cx,
+                Toast::new(
+                    ToastKind::Info,
+                    Rc::new(move |cx: &App| {
+                        tr(
+                            cx,
+                            ids::hv::CONSOLE_RO_PENDING,
+                            ids::hv::HvConsoleRoPending {
+                                name: Text(name.clone()),
+                            },
+                        )
+                    }),
+                ),
+            );
+        }
+        return;
+    }
+    cx.default_global::<Hosts>().pending.remove(&profile);
     ConnectionsModel::disconnect(cx, profile);
     ConnectionsModel::connect(cx, profile, None);
 }
+
+// ## m3a-t32: release gate (T33 confirm_release)
+/// What [`confirm_release`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Release {
+    Proceed,
+    Refused,
+}
+
+/// Asked before a console lets go of `session` (a release, a rebind, a swap, a close): while
+/// the user's transaction is open (`TxOwner::User`, open or failed) it refuses, so the
+/// session is never closed or dropped with a silent rollback. A session that already ended
+/// has nothing to lose. At the merge with Task 33 this is where
+/// `exec_ui::close_prompt::confirm_release` is called (Commit / Roll back / Cancel); until
+/// then it only refuses.
+fn confirm_release(console: ConsoleId, session: &SessionHandle, cx: &mut App) -> Release {
+    let _ = (console, cx);
+    let snap = session.state().borrow().clone();
+    if matches!(
+        snap.state,
+        SessionState::Disconnected | SessionState::Broken(_)
+    ) {
+        return Release::Proceed;
+    }
+    if user_tx_open(&snap) {
+        Release::Refused
+    } else {
+        Release::Proceed
+    }
+}
+
+/// The user's own transaction is open (or failed) on the session.
+fn user_tx_open(snap: &SessionSnapshot) -> bool {
+    snap.tx.owner == hacivat_session::session::TxOwner::User
+        && snap.tx.status != hacivat_driver::TxStatus::Idle
+}
+// ## end m3a-t32: release gate
 
 /// Writes every console with unsaved edits now (quit).
 fn save_all_now(cx: &mut App) {
@@ -242,6 +309,8 @@ struct SessionUx {
     /// The request running now (0: the idle cursor release, which runs nothing).
     busy: Option<u64>,
     cancelling: bool,
+    /// The user's own transaction is open (or failed).
+    user_tx: bool,
 }
 
 impl SessionUx {
@@ -256,6 +325,7 @@ impl SessionUx {
             access: snap.access,
             busy,
             cancelling,
+            user_tx: user_tx_open(snap),
         }
     }
 }
@@ -871,20 +941,30 @@ impl ConsoleHost {
     }
 
     /// Takes the session away from the console; a session of its own closes.
-    fn release_session(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// Every release goes through [`confirm_release`] first: while the user's transaction is
+    /// open the console keeps its session (`false`), so nothing is ever rolled back silently.
+    fn release_session(&mut self, cx: &mut Context<Self>) -> bool {
         if let Acquire::Waiting { abort, .. } = std::mem::replace(&mut self.acquire, Acquire::Idle)
         {
             abort.abort();
         }
         let Some(console) = self.console() else {
-            return;
+            return true;
         };
+        if let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone())
+            && confirm_release(console, &session, cx) == Release::Refused
+        {
+            return false;
+        }
         let mut released = None;
         Consoles::update(cx, console, |s| released = s.session.take());
         let own = self.binding.is_some_and(|(_, slot)| slot > 1);
         if let (Some(handle), true) = (released, own)
             && let Some(m) = cx.try_global::<ConnectionsModel>()
         {
+            // No user transaction is open (the gate said so): this ends only Hacivat's own
+            // (a cursor's).
             m.runtime().spawn(handle.close(ClosePolicy::RollBack));
         }
         self.watched = None;
@@ -892,6 +972,7 @@ impl ConsoleHost {
         self.clock = None;
         self.clock_task = None;
         cx.notify();
+        true
     }
 
     /// Watches the console's session for the toolbar (a `tokio::sync::watch` awaited on the
@@ -930,6 +1011,10 @@ impl ConsoleHost {
     fn on_session(&mut self, ux: SessionUx, cx: &mut Context<Self>) {
         if self.ux == Some(ux) {
             return;
+        }
+        if self.ux.is_some_and(|before| before.user_tx) && !ux.user_tx {
+            // A read-only reconnect may have waited for this transaction to end.
+            cx.defer(enforce_read_only);
         }
         let busy = ux.busy;
         self.ux = Some(ux);
@@ -1139,10 +1224,17 @@ impl ConsoleHost {
             }
             let own = self.binding.is_some_and(|(_, slot)| slot > 1);
             let session = Consoles::get(cx, console).and_then(|s| s.session.clone());
-            if let (true, Some(handle), Some(m)) =
-                (own, session, cx.try_global::<ConnectionsModel>())
-            {
-                m.runtime().spawn(handle.close(ClosePolicy::RollBack));
+            if let (true, Some(handle)) = (own, session) {
+                // The tab close guard (Task 33's prompt) asked before; should a user
+                // transaction still be open here, the session is closed refusing to roll it
+                // back (it stays open until its profile disconnects), never silently.
+                let policy = match confirm_release(console, &handle, cx) {
+                    Release::Proceed => ClosePolicy::RollBack,
+                    Release::Refused => ClosePolicy::RefuseIfOpenTx,
+                };
+                if let Some(m) = cx.try_global::<ConnectionsModel>() {
+                    m.runtime().spawn(handle.close(policy));
+                }
             }
         }
         Consoles::remove(cx, console);

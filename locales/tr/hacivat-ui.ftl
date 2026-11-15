@@ -1570,3 +1570,5 @@ hv-edit-redo-cut = Kesmeyi Yinele
 hv-edit-redo-indent = Girintiyi Yinele
 # Review: PO
 hv-edit-redo-outdent = Girinti Azaltmayı Yinele
+# Review: PO
+hv-console-ro-pending = { $name }, açık işlemi commit edildiğinde ya da geri alındığında salt okunur olur.

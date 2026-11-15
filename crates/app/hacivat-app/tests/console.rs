@@ -355,6 +355,67 @@ fn a_profile_tagged_production_while_its_console_is_open_reconnects_read_only(
     stop_core_runtime_test(cx);
 }
 
+/// Runs `sql` as the user on `h` and waits for its reply.
+fn user_exec(h: &SessionHandle, sql: &str) {
+    use hacivat_driver::ExecOpts;
+    use hacivat_session::session::{ExecOrigin, Request};
+    let ticket = h.submit(Request::Exec {
+        sql: sql.to_string(),
+        opts: ExecOpts::default(),
+        origin: ExecOrigin::User,
+    });
+    let reply = futures::executor::block_on(ticket.reply).expect("the actor replies");
+    assert!(reply.is_ok(), "{sql}: {reply:?}");
+}
+
+fn user_tx_open(h: &SessionHandle) -> bool {
+    let tx = h.state().borrow().tx.clone();
+    tx.owner == hacivat_session::session::TxOwner::User
+        && tx.status != hacivat_driver::TxStatus::Idle
+}
+
+/// A console never lets go of a session holding the user's open transaction (no silent
+/// rollback): the read-only reconnect waits for it, says so, and happens once it ends; a
+/// console tab closed over one closes its session refusing the rollback.
+#[gpui::test]
+fn a_user_transaction_is_never_rolled_back_by_a_release(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(
+        cx,
+        "en",
+        FakeDriver::new(DbmsKind::Postgres).tracks_transactions(),
+    );
+    add_profile(vcx, test_profile("orders", Some(EnvTag::Dev), "10.0.0.7"));
+    connect_and_wait(vcx, "orders");
+    let id = wait_active_console(vcx);
+    let rw = wait_session(vcx, id);
+    user_exec(&rw, "BEGIN");
+    user_exec(&rw, "UPDATE t SET a = 1");
+    wait_until(vcx, "the user's transaction", |_| user_tx_open(&rw));
+
+    let pid = profile_id(vcx, "orders");
+    let mut p = vcx
+        .cx
+        .read(|cx| (*cx.global::<ConnectionsModel>().get(pid).expect("saved")).clone());
+    p.environment = Some(EnvTag::Production);
+    save_draft(vcx, hacivat_session::profile::ProfileDraft::edit(p));
+    vcx.run_until_parked();
+    // Refused: the console keeps its session, the transaction stays open, nothing reconnects.
+    assert_eq!(session_of(vcx, id).map(|s| s.id()), Some(rw.id()));
+    assert!(user_tx_open(&rw), "the transaction was not rolled back");
+    assert!(matches!(live(vcx, "orders"), LiveState::Connected(_)));
+    let toasts = toast_texts(vcx).join(" ");
+    assert!(
+        toasts.contains("orders turns read-only once its open transaction"),
+        "{toasts}"
+    );
+    // The user ends it: now the profile reconnects read-only.
+    user_exec(&rw, "ROLLBACK");
+    wait_until(vcx, "a read-only session", |vcx| {
+        session_of(vcx, id).is_some_and(|s| s.state().borrow().read_only)
+    });
+    stop_core_runtime_test(cx);
+}
+
 // ---- the keyboard ----------------------------------------------------------------------------
 
 #[gpui::test]

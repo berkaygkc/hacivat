@@ -1666,3 +1666,7 @@ hv-edit-redo-cut = Redo Cut
 hv-edit-redo-indent = Redo Indent
 # The Edit menu's Redo when it would apply an outdent again.
 hv-edit-redo-outdent = Redo Outdent
+# A notice when a connection was made read-only (tagged production) while a console holds its open transaction: the console turns read-only once that transaction ends.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders".
+hv-console-ro-pending = { $name } turns read-only once its open transaction is committed or rolled back.
