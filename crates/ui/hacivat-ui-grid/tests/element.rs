@@ -591,6 +591,8 @@ fn a_run_wider_than_its_cell_is_recorded_clipped(cx: &mut TestAppContext) {
         .iter()
         .filter(|r| r.path.ends_with("#header") && r.painted_px > 2.5)
         .collect();
+    // Fix round 1 (M10): the header half is not vacuous.
+    assert!(!headers.is_empty(), "{frame:?}");
     assert!(headers.iter().all(|r| r.clipped), "{headers:?}");
 }
 

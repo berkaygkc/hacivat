@@ -265,6 +265,10 @@ impl Label {
     ///
     /// A truncating label must be drawn inside a view (any `Render` entity): GPUI's tooltip
     /// machinery reads the current view and panics without one.
+    ///
+    /// Narrower than its ellipsis, a truncating label draws nothing (and is recorded as not
+    /// visible). So a trust signal (the environment, read-only, transaction or cursor label,
+    /// DESIGN.md / NOTES cross-cutting #7: they never collapse) must never be truncating.
     pub fn truncate(mut self, truncate: bool) -> Self {
         self.truncate = truncate;
         self
@@ -583,7 +587,9 @@ impl LabelElement {
         }
         let ellipsis = self.shape(ELLIPSIS.into(), 0, window).width;
         // ## m3a-t35-shots (named exception): not even the ellipsis fits (a status-bar cell
-        // that gave way almost to nothing): nothing is drawn, never a cut glyph.
+        // that gave way almost to nothing): nothing is drawn, never a cut glyph, and the
+        // label is recorded as not visible (fix round 1, M3). The synthesized small-caps path
+        // above keeps its old behaviour (it never truncates in the product).
         if ellipsis > bounds.size.width + px(0.5) {
             return None;
         }
@@ -691,6 +697,9 @@ impl Element for LabelElement {
             flag.set(ellipsize);
         }
         let painted = self.plan(bounds, measured, ellipsize, window);
+        // ## m3a-t35-shots (fix round 1, M3): a truncating label that drew nothing (narrower
+        // than its ellipsis, `plan`) is recorded as not visible, so no check counts it shown.
+        let drew_nothing = ellipsize && painted.is_none();
         // What is recorded as clipped is what the painted run really overflows by, not what
         // was measured: the two are the same widths by construction, and this keeps it so.
         let painted_width = match &painted {
@@ -706,10 +715,10 @@ impl Element for LabelElement {
             source: self.label.source,
             size_px: self.label.style.size_px,
             painted_px: f32::from(painted_width),
-            clipped: painted_width > bounds.size.width + px(0.5) || cut,
+            clipped: !drew_nothing && (painted_width > bounds.size.width + px(0.5) || cut),
             truncated: ellipsize,
             path: self.label.path(),
-            visible: shows_in(bounds, mask),
+            visible: !drew_nothing && shows_in(bounds, mask),
             outside_card: outside,
         });
         painted

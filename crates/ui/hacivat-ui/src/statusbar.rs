@@ -53,12 +53,17 @@ pub fn env_segment(
         .child(env_swatch(kind, theme));
     if kind != EnvKind::Production {
         return segment
-            .child(Label::new(
-                label,
-                TextSource::Fluent,
-                t.type_ramp.caption,
-                c.text.to_hsla(),
-            ))
+            .child(
+                Label::new(
+                    label,
+                    TextSource::Fluent,
+                    t.type_ramp.caption,
+                    c.text.to_hsla(),
+                )
+                // ## m3a-t35-shots (fix round 1, I2; named exception): the shots require
+                // this trust label by its id.
+                .id("status-env-label"),
+            )
             .into_any_element();
     }
     // The tint covers the whole cell: the negative margins cancel the bar's cell padding, and
@@ -77,15 +82,19 @@ pub fn env_segment(
         );
     }
     segment
-        .child(Label::new(
-            label,
-            TextSource::Fluent,
-            TypeStyle {
-                weight: 600,
-                ..t.type_ramp.caption
-            },
-            c.red.to_hsla(),
-        ))
+        .child(
+            Label::new(
+                label,
+                TextSource::Fluent,
+                TypeStyle {
+                    weight: 600,
+                    ..t.type_ramp.caption
+                },
+                c.red.to_hsla(),
+            )
+            // ## m3a-t35-shots (fix round 1, I2; named exception)
+            .id("status-env-label"),
+        )
         .into_any_element()
 }
 

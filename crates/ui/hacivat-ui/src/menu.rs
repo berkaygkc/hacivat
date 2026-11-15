@@ -246,10 +246,11 @@ impl PopupMenu {
     }
 
     // ## m3a-t35-shots (named exception)
-    /// Keeps the menu at most `width` wide (and never wider than its window); a row's hint
-    /// ellipsizes to fit, its label never.
+    /// Keeps the menu at most `width` wide (never under its minimum width, whichever is set
+    /// last: the two are resolved when the menu draws); a row's hint ellipsizes to fit, its
+    /// label never. Fix round 1 (M7).
     pub fn set_max_width(&mut self, width: Pixels) {
-        self.max_width = Some(width.max(self.min_width));
+        self.max_width = Some(width);
     }
 
     /// Names the menu for assistive technology.
@@ -586,7 +587,7 @@ impl Render for PopupMenu {
         let mut menu = menu.min_w(self.min_width);
         // ## m3a-t35-shots (named exception)
         if let Some(max) = self.max_width {
-            menu = menu.max_w(max);
+            menu = menu.max_w(max.max(self.min_width));
         }
         let menu = menu
             .py(px(t.spacing.xs))

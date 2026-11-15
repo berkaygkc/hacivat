@@ -109,10 +109,15 @@ fn a_truncating_label_narrower_than_its_ellipsis_draws_nothing(cx: &mut TestAppC
     let r = &reg.frame[0];
     assert!(r.truncated && !r.clipped, "{r:?}");
     assert_eq!(r.painted_px, 0.0, "{r:?}");
+    // Fix round 1 (M3): what drew nothing is not visible to any check.
+    assert!(!r.visible, "{r:?}");
     // With room for the ellipsis (and a glyph), it ellipsizes as before.
     let reg = draw_label_in(cx, "PostgreSQL 16.4", 30.0, true);
     let r = &reg.frame[0];
-    assert!(r.truncated && !r.clipped && r.painted_px > 0.0, "{r:?}");
+    assert!(
+        r.truncated && !r.clipped && r.painted_px > 0.0 && r.visible,
+        "{r:?}"
+    );
 }
 
 #[gpui::test]

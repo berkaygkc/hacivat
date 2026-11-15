@@ -70,6 +70,11 @@ impl DialogSize {
     }
 }
 
+// ## m3a-t35-shots (fix round 1, M5)
+/// The card's border width (`popover_surface`'s `border_1`): part of the card's width, not of
+/// its content's.
+const CARD_BORDER_PX: f32 = 1.0;
+
 /// The card of a dialog of `size` (NOTES "NEW primitives": dialog sizes): the popover surface
 /// (raised, 1 px `seam-strong`, radius 6, popover shadow), 16 px padding and a 12 px gap between
 /// its parts, stacked in a column no taller than its host.
@@ -353,6 +358,8 @@ impl Render for Dialog {
         // count); one that fits is the single-line label it always was.
         let style = t.type_ramp.body_strong;
         let room = self.spec.size.width_px()
+            // ## m3a-t35-shots (fix round 1, M5): the card's 1 px border on each side.
+            - 2.0 * CARD_BORDER_PX
             - 2.0 * t.spacing.s_3xl
             - t.spacing.xl
             - (IconSize::Chrome.px() + 2.0 * t.spacing.xs);
