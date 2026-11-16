@@ -620,3 +620,13 @@ exec-confirm-cancelled = Hiçbir şey gönderilmedi: { $n }. ifadede vazgeçtini
 exec-confirm-skipped = { $n }. ifade atlandı: Atla'yı seçtiniz.
 # Review: PO
 exec-confirm-suppressed = Sorulmadan çalıştı: { $console } içinde bunun gibi ifadeler için bir daha sorulmamasını seçtiniz.
+# Review: PO
+exec-gate-run-refused = Gönderilmedi: bu çalıştırmanın { $n }. ifadesi reddedildi; bu yüzden çalıştırmanın hiçbir parçası gönderilmedi.
+# Review: PO
+exec-run-context-changed = Gönderilmedi: Çalıştır okuduğundan beri bu bağlantının ayarları değişti. Yeniden çalıştırın.
+# Review: PO
+exec-run-connection-changed = Gönderilmedi: çalıştırma hazırlanırken bağlantı değişti. Yeniden çalıştırın.
+# Review: PO
+exec-param-run-as-one = Gönderilmedi: tek parça çalıştırma parametre değeri alamaz. İfadeleri tek tek çalıştırın.
+# Review: PO
+exec-gate-run-as-one-read-only = Gönderilmedi: tek parça çalıştırma salt okunur bağlantıda kullanılamaz; koruma her seferinde tek bir ifadeyi denetler.

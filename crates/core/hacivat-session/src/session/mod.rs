@@ -25,6 +25,8 @@ pub mod tx;
 // and Smart (Task 19), out-of-band answers (P-M3b-3).
 pub(crate) mod confirm;
 pub(crate) mod run_gate;
+// ## m3b-t24-exec-ui (named exception: the T24 I1 ruling)
+pub(crate) mod run_context;
 pub(crate) mod smart;
 pub mod verdict;
 
@@ -71,8 +73,6 @@ pub use pool::SessionPolicy;
 pub use tx::TxOwner;
 // ## m3a-f1-followups
 pub use schema::context_probe_sql;
-// ## m3b-t24-exec-ui (named exception: re-export only)
-pub use schema::context_path_sql;
 // ## m3b-t01c-core-seams
 pub use verdict::{RoCheck, SafetyDenial, SessionEffects, StatementClassifier, UnitVerdict};
 // ## m3b-t18-safe06
@@ -192,6 +192,11 @@ pub enum Request {
         result: ResultId,
         reason: CloseReason,
     },
+    // ## m3b-t24-exec-ui (named exception: the T24 I1 ruling)
+    /// The session's classification context now (Run's gate, Count rows): answered in the
+    /// queue's order, so after every earlier request; read again first when a request may have
+    /// changed it. [`SessionHandle::classifier_context`] sends it and reads the answer.
+    ReadContext,
 }
 
 /// Which read-only layer refused a statement (SQL-SAFE-05).
@@ -447,6 +452,27 @@ impl SessionHandle {
             let _ = reply.send(false);
         }
         rx
+    }
+
+    // ## m3b-t24-exec-ui (named exception: the T24 I1 ruling)
+    /// The context Run classifies this session's statements in (plan amendment C2(b)/I1): its
+    /// lexing-mode setting, its search path (MySQL/MariaDB: the current database) and the
+    /// server version, the way the read-only guard's classifier reads them (`ClassifierContext`).
+    /// Queued like any request, so it answers after every request sent before it, and a request
+    /// that may have changed the context makes the session read it again first: every console
+    /// sharing the session sees the same one. A read the session cannot make (a failed
+    /// transaction, a suspended cursor on the connection, a lost connection) answers an
+    /// unknown context, never a stale one.
+    pub fn classifier_context(
+        &self,
+    ) -> impl std::future::Future<Output = ClassifierContext> + Send + 'static + use<> {
+        let ticket = self.submit(Request::ReadContext);
+        async move {
+            match ticket.reply.await {
+                Ok(Ok(summary)) => run_context::decode(&summary),
+                _ => ClassifierContext::default(),
+            }
+        }
     }
 
     pub fn state(&self) -> watch::Receiver<SessionSnapshot> {

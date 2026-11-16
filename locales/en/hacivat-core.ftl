@@ -969,3 +969,17 @@ exec-confirm-skipped = Statement { $n } skipped: you chose Skip.
 # Variables:
 #   $console (String) - the console's title, e.g. "orders-dev (2)".
 exec-confirm-suppressed = Ran without asking: you chose not to be asked again for statements like this in { $console }.
+# Fix round 1 (I4): this statement was not sent because another statement of the same run was
+# refused (nothing of a run is sent then).
+# Variables:
+#   $n (String) - the refused statement's position in the run, from 1.
+exec-gate-run-refused = Not sent: statement { $n } of this run was refused, so nothing of the run was sent.
+# Fix round 1 (I1): the connection now reads statements with other settings than the console
+# split them with.
+exec-run-context-changed = Not sent: this connection's settings changed since Run read them. Run it again.
+# Fix round 1 (M4): the console reconnected while the run was being prepared.
+exec-run-connection-changed = Not sent: the connection changed while this run was being prepared. Run it again.
+# Fix round 1 (M1): Run as one sends one request, which carries no parameter values.
+exec-param-run-as-one = Not sent: Run as one can't take parameter values. Run the statements one at a time.
+# Fix round 1 (M2): Run as one on a read-only connection.
+exec-gate-run-as-one-read-only = Not sent: Run as one doesn't work on a read-only connection, whose guard checks one statement at a time.

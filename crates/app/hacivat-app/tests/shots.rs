@@ -1590,7 +1590,10 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     // ## m3b-t21-confirm (named exception): plus 19 dialog states x 16, after Task 22's.
     // ## m3b-t25-results (named exception): plus Task 25's 11 states x 16, before Task 21's.
     // ## m3b-t24-exec-ui (named exception): plus 12 states x 16, after Task 21's.
-    assert_eq!(all.len(), 1020 + 68 * 16 + 7 * 16 + 11 * 16 + 19 * 16 + 12 * 16);
+    assert_eq!(
+        all.len(),
+        1020 + 68 * 16 + 7 * 16 + 11 * 16 + 19 * 16 + 12 * 16
+    );
     assert!(
         all[1020 + 68 * 16 + 7 * 16 + 11 * 16..1020 + 68 * 16 + 7 * 16 + 11 * 16 + 19 * 16]
             .iter()

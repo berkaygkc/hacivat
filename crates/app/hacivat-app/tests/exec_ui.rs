@@ -1797,7 +1797,7 @@ fn a_read_only_console_the_guard_cannot_verify_keeps_its_session(cx: &mut TestAp
 // 100 result sets, each in its own tab (R-M3-66, Task 16): the three sets are three tabs and
 // nothing is "not shown". (Task 25 owns how the tabs look.)
 #[gpui::test]
-fn a_call_with_three_result_sets_shows_the_first_and_notes_the_rest(cx: &mut TestAppContext) {
+fn a_call_with_three_result_sets_keeps_each_in_its_own_tab(cx: &mut TestAppContext) {
     let set = |n: i64| FakeResultSet {
         columns: vec![(
             "n",

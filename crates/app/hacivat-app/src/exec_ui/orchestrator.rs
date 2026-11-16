@@ -191,11 +191,6 @@ pub(crate) fn probe_context(console: ConsoleId, cx: &mut App) {
 /// language service draws under the dialect's defaults.
 fn apply_context(console: ConsoleId, ctx: SqlContext, cx: &mut App) {
     update_console_exec(cx, console, |e| e.context = ctx);
-    // ## m3b-t24-exec-ui: Run's classification context reads the session's search path (its
-    // current database on MySQL) whenever the modes are read.
-    if !matches!(ctx, SqlContext::Pending) {
-        read_path(console, cx);
-    }
     match ctx {
         SqlContext::Known(ctx) => set_context(console, ctx, cx),
         SqlContext::Unknown(base) => {
@@ -443,7 +438,8 @@ fn on_execute(console: ConsoleId, req: ExecRequest, cx: &mut App) {
         // ## m3b-t24-exec-ui: under the console's run policy (CHOOSE-06).
         let r = resolve_for_run_with(&doc, &at, action, remembered, &custom);
         // ## m3b-t24-exec-ui: an uncertain boundary offers "Run as one" over its region
-        // (R-M3-60), never preselected; the same bytes in every mode.
+        // (R-M3-60), never preselected. Its region is read from this reading; with unknown modes
+        // its classification still reads every mode (fail-closed).
         let as_one = match &r {
             Resolution::Uncertain(b) => run_as_one_unit(&doc, &at, action, b),
             _ => None,
@@ -695,7 +691,7 @@ fn submit(
             console,
             version,
             ranges,
-            ("exec-gate-stale-classification", Vec::new()),
+            (CONNECTION_CHANGED, Vec::new()),
             NOT_SENT,
             cx,
         );
@@ -946,13 +942,27 @@ const AS_ONE_REFUSED: &str = "exec-gate-run-as-one-refused";
 const CONFIRM_CANCELLED: &str = "exec-confirm-cancelled";
 const CONFIRM_SKIPPED: &str = "exec-confirm-skipped";
 const CONFIRM_SUPPRESSED: &str = "exec-confirm-suppressed";
+// ## fix round 1
+/// I4: a unit not sent because another unit of the run was refused.
+const RUN_REFUSED: &str = "exec-gate-run-refused";
+/// I1: the session reads text in other modes than the console split it in.
+const CONTEXT_CHANGED: &str = "exec-run-context-changed";
+/// M4: the console's session changed between the gate and the send.
+const CONNECTION_CHANGED: &str = "exec-run-connection-changed";
+/// M1: a unit run as one carries no bind values.
+const PARAMS_AS_ONE: &str = "exec-param-run-as-one";
+/// M2: a unit run as one on a read-only session.
+const AS_ONE_READ_ONLY: &str = "exec-gate-run-as-one-read-only";
 /// The end-of-line words of a unit not sent (`hacivat-ui.ftl`): M3a's read-only denial, and
 /// any other refusal.
 const DENIED_RO: &str = "hv-editor-mark-denied";
 const NOT_SENT: &str = "hv-editor-mark-not-sent";
-/// How long Run waits for the session's search path before it classifies without it
-/// (fail-closed: an unqualified builtin is then `Unknown`).
-const PATH_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long Run waits for the session's context before it classifies without it (fail-closed:
+/// unknown modes, and an unqualified builtin is then `Unknown`).
+const CONTEXT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long after a run that had a confirm-in-transaction question its loss listener still
+/// waits for the session's report of a lost connection (fix round 1, I3).
+const LOSS_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One Run on its way through the pipeline.
 struct Job {
@@ -976,8 +986,6 @@ struct RunPrep {
     suppressed: SuppressSet,
     /// Each console's run policy (CHOOSE-06), until it closes.
     policies: HashMap<ConsoleId, RunPolicy>,
-    /// Each console's search path as last read (Run's classification context).
-    paths: HashMap<ConsoleId, watch::Sender<PathRead>>,
     /// The gutter marks of each console's last refusal (units not sent).
     refused: HashMap<ConsoleId, Vec<MarkKey>>,
     /// Consoles whose last run may have changed the session's context (read it again).
@@ -989,14 +997,6 @@ struct RunPrep {
 }
 
 impl Global for RunPrep {}
-
-/// The session's search path as Run last read it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PathRead {
-    Pending,
-    /// `None`: unknown (unread, refused, or none).
-    Read(Option<Arc<[Arc<str>]>>),
-}
 
 fn preparing(console: ConsoleId, cx: &App) -> bool {
     cx.try_global::<RunPrep>()
@@ -1117,11 +1117,20 @@ pub fn open_history(cx: &mut App) {
         let dir_ok = path
             .parent()
             .is_some_and(|dir| hacivat_settings::fsio::create_dir_all_private(dir).is_ok());
+        // Fix round 1 (M9): a history that can't open says so in the app's log (the run goes
+        // on; nothing is recorded).
         let opened = if dir_ok {
-            hacivat_exec::HistoryStore::open(path, hacivat_exec::HistoryConfig::default())
+            match hacivat_exec::HistoryStore::open(path, hacivat_exec::HistoryConfig::default())
                 .await
-                .ok()
+            {
+                Ok(store) => Some(store),
+                Err(e) => {
+                    tracing::warn!(error = ?e, "the query history could not be opened");
+                    None
+                }
+            }
         } else {
+            tracing::warn!("the query history's data directory could not be created");
             None
         };
         let _ = tx.send(opened);
@@ -1203,191 +1212,22 @@ pub fn set_policy(console: ConsoleId, policy: RunPolicy, cx: &mut App) {
 
 // ---- the session's search path (Run's classification context) ---------------------------
 
-fn path_slot(console: ConsoleId, cx: &mut App) -> watch::Sender<PathRead> {
-    cx.default_global::<RunPrep>()
-        .paths
-        .entry(console)
-        .or_insert_with(|| watch::channel(PathRead::Pending).0)
-        .clone()
-}
-
-/// Reads the session's search path (PostgreSQL: `current_schemas(true)` in order; MySQL and
-/// MariaDB: the current database), Hacivat's own constant read (`context_path_sql`), which a
-/// read-only session runs outside its guard like the modes probe.
-fn read_path(console: ConsoleId, cx: &mut App) {
-    let slot = path_slot(console, cx);
-    slot.send_replace(PathRead::Pending);
-    let (Some(profile), Some(session)) = (profile_of(cx, console), live_session(cx, console))
-    else {
-        slot.send_replace(PathRead::Read(None));
-        return;
-    };
-    let Some(sql) = hacivat_session::session::context_path_sql(profile.engine) else {
-        slot.send_replace(PathRead::Read(None));
-        return;
-    };
-    let ticket = session.submit(hacivat_session::session::Request::Exec {
-        sql: sql.to_string(),
-        opts: hacivat_driver::ExecOpts::values(64),
-        origin: hacivat_session::session::ExecOrigin::Internal { idempotent: true },
-    });
-    cx.spawn(async move |_| {
-        let path = match ticket.reply.await {
-            Ok(Ok(s)) if !s.truncated => {
-                let names: Vec<Arc<str>> = s
-                    .rows
-                    .iter()
-                    .filter_map(|r| r.first().cloned().flatten())
-                    .map(Arc::from)
-                    .collect();
-                (!names.is_empty()).then(|| Arc::from(names))
-            }
-            _ => None,
-        };
-        slot.send_replace(PathRead::Read(path));
-    })
-    .detach();
-}
-
-/// The search path Run classifies console `console`'s units with: MySQL/MariaDB the session's
-/// current database when the session has read it since a `USE` (its schema snapshot), else
-/// the last read; waits up to [`PATH_WAIT`] for a read in flight, then goes on without one
-/// (unknown: fail-closed). The returned future only awaits channels and a timer.
-fn search_path(
-    console: ConsoleId,
-    engine: DbmsKind,
-    session: &SessionHandle,
-    cx: &mut App,
-) -> impl std::future::Future<Output = Option<Arc<[Arc<str>]>>> + use<> {
-    let db = matches!(engine, DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb)
-        .then(|| {
-            session
-                .state()
-                .borrow()
-                .schema
-                .as_ref()
-                .and_then(|s| s.database.clone())
-        })
-        .flatten();
-    let mut rx = path_slot(console, cx).subscribe();
-    let timer = cx.background_executor().timer(PATH_WAIT);
-    async move {
-        if let Some(db) = db {
-            return Some(Arc::from(vec![Arc::<str>::from(db)]));
-        }
-        let read = async move {
-            rx.wait_for(|p| *p != PathRead::Pending)
-                .await
-                .ok()
-                .map(|p| p.clone())
-        };
-        futures::pin_mut!(read);
-        match futures::future::select(read, timer).await {
-            futures::future::Either::Left((Some(PathRead::Read(p)), _)) => p,
-            _ => None,
-        }
-    }
-}
-
-/// Console `console`'s session context as Run classifies with it, for a check made elsewhere
-/// (Task 25's Count rows: `ExecService::count_in`, T18 m12): PostgreSQL's lexing mode when its
-/// probe answered, the search path last read (its current database on MySQL/MariaDB), the
-/// server version. MySQL's `sql_mode` text is not kept here, so its modes stay unknown there
-/// (the check then reads every mode: fail-closed).
-pub fn classifier_context(
-    console: ConsoleId,
-    cx: &App,
-) -> hacivat_session::session::ClassifierContext {
-    let lex_modes = match console_exec(cx, console).map(|e| e.context) {
-        Some(SqlContext::Known(ctx))
-            if matches!(
-                ctx.id,
-                sql_dialect::DialectId::Postgres | sql_dialect::DialectId::PgWire(_)
-            ) =>
-        {
-            Some(Arc::from(if ctx.modes.standard_conforming_strings {
-                "on"
-            } else {
-                "off"
-            }))
-        }
-        _ => None,
-    };
-    let search_path = current_path(console, cx);
-    let server_version = profile_of(cx, console).and_then(|p| {
-        cx.try_global::<crate::connections::ConnectionsModel>()
-            .and_then(|m| match m.live(p.id) {
-                LiveState::Connected(info) => info.server.version.clone(),
-                _ => None,
-            })
-    });
-    hacivat_session::session::ClassifierContext {
-        lex_modes,
-        search_path,
-        server_version,
-    }
-}
-
-/// The search path console `console`'s session has now, as Run classifies with it: on
-/// MySQL/MariaDB the session's own current database when it has read one (its schema snapshot,
-/// kept after a `USE`), else the last `context_path_sql` read; `None` while unread or unknown.
-fn current_path(console: ConsoleId, cx: &App) -> Option<Arc<[Arc<str>]>> {
-    let mysql = profile_of(cx, console).is_some_and(|p| {
-        matches!(
-            p.engine,
-            DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb
-        )
-    });
-    if mysql
-        && let Some(db) = live_session(cx, console).and_then(|s| {
-            s.state()
-                .borrow()
-                .schema
-                .as_ref()
-                .and_then(|c| c.database.clone())
-        })
-    {
-        return Some(Arc::from(vec![Arc::<str>::from(db)]));
-    }
-    cx.try_global::<RunPrep>()
-        .and_then(|p| p.paths.get(&console))
-        .and_then(|tx| match &*tx.borrow() {
-            PathRead::Read(p) => p.clone(),
-            PathRead::Pending => None,
-        })
-}
-
-/// **The one classification context of console `console`** (T18 amendment C2(b)/I1, T28 M6):
-/// what Run classifies its units with (`expect`: `units::expect_for`), built from the session's
-/// reads: the console's SQL context (its modes known when the probe answered,
-/// `with_known_modes`; the server version), the profile's `read_only_fn_allowlist`, and the
-/// session's search path ([`current_path`]). `None` while the SQL context is still being read.
-/// Tests build the same context through it.
-pub fn classify_ctx_for(
-    console: ConsoleId,
+/// **The one classification context of a run** (T18 amendment C2(b)/I1; the T24 I1 ruling, the
+/// T28 M6 carry): the session's own context `sctx` (`SessionHandle::classifier_context`: its
+/// modes, search path and version as it reads and refreshes them), read by T18's rules
+/// (`hacivat_exec::run_ctx_in`), with `profile`'s function allowlist and the unit's `expect`.
+/// Run uses it; tests build the same context through it.
+pub fn classify_ctx_in(
+    profile: &Profile,
+    sctx: &hacivat_session::session::ClassifierContext,
     expect: hacivat_exec::Expect,
-    cx: &App,
-) -> Option<hacivat_exec::ClassifyCtx> {
-    let (dialect, known) = match console_exec(cx, console).map(|e| e.context)? {
-        SqlContext::Known(c) => (c, true),
-        SqlContext::Unknown(c) => (c, false),
-        SqlContext::Pending => return None,
-    };
-    let allow: Arc<[Arc<str>]> = profile_of(cx, console)
-        .map(|p| {
-            p.read_only_fn_allowlist
-                .iter()
-                .map(|s| Arc::from(s.as_str()))
-                .collect()
-        })
-        .unwrap_or_else(|| Arc::from(Vec::new()));
-    Some(hacivat_exec::run_ctx(
-        dialect,
-        known,
-        allow,
-        current_path(console, cx),
-        expect,
-    ))
+) -> hacivat_exec::ClassifyCtx {
+    let allow: Arc<[Arc<str>]> = profile
+        .read_only_fn_allowlist
+        .iter()
+        .map(|s| Arc::from(s.as_str()))
+        .collect();
+    hacivat_exec::run_ctx_in(profile.engine, allow, sctx, expect)
 }
 
 /// The gate's view of console `console`'s connection now. **Production stays read-only until
@@ -1634,11 +1474,42 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
         units.iter().map(|u| u.doc_range.clone()).collect()
     };
 
+    // 0. The session's own context (the T24 I1 ruling): asked of the session, so it is read
+    //    after every earlier request on that session (another console's too, when they share
+    //    it), and read again there when a request may have changed it. A context the session
+    //    can't give in time is unknown (fail-closed), never a stale one. One context per run:
+    //    the parameters are scanned and the units classified in it.
+    let sctx = context_within(&job.session, cx.background_executor().timer(CONTEXT_WAIT)).await;
+    let (session_dialect, session_known) =
+        hacivat_exec::classify_pool::modes_of(job.profile.engine, &sctx);
+    // The units were split in the console's context: when the session now reads text in other
+    // modes they may not be what it would split, so nothing is sent and the console reads its
+    // context again.
+    if job.modes_known && session_known && session_dialect.modes != job.dialect.modes {
+        cx.update(|cx: &mut App| {
+            refuse(
+                console,
+                job.version,
+                ranges(&job.units),
+                (CONTEXT_CHANGED, Vec::new()),
+                NOT_SENT,
+                cx,
+            );
+            probe_context(console, cx);
+        });
+        return;
+    }
+    let (dialect, modes_known) = if session_known {
+        (session_dialect, true)
+    } else {
+        (job.dialect, false)
+    };
+
     // 1. Parameters: values asked for once per name, fresh answers each run (T15).
     // Everything that lexes runs here, off the UI thread: the preparation, PostgreSQL's `?`
     // scan and the prompt's masked text.
     let (prepared, qmarks, shown_sql) = {
-        let (units, base, known, store) = (job.units.clone(), job.dialect, job.modes_known, store.clone());
+        let (units, base, known, store) = (job.units.clone(), dialect, modes_known, store.clone());
         cx.background_executor()
             .spawn(async move {
                 let prep =
@@ -1660,6 +1531,22 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
             return;
         }
         Prep::Same(Prepared::Ready(p)) => p,
+        // Fix round 1 (M1): a unit run as one is sent in one simple-query message, which
+        // carries no bind values: refused before any prompt, saying so.
+        Prep::Same(
+            Prepared::NeedsValues(_)
+            | Prepared::Refused {
+                diag: sql_split::ParamDiag::Unbindable,
+                ..
+            },
+        ) if job.units.len() == 1
+                && job.units[0].kind == sql_split::exec_range::UnitKind::Verbatim =>
+        {
+            cx.update(|cx: &mut App| {
+                refuse(console, job.version, ranges(&job.units), (PARAMS_AS_ONE, Vec::new()), NOT_SENT, cx)
+            });
+            return;
+        }
         Prep::Same(Prepared::Refused { unit, at, diag }) => {
             let id = hacivat_exec::param_diag_message_id(diag);
             cx.update(|cx| refuse(console, job.version, vec![at.clone()], (id, Vec::new()), NOT_SENT, cx));
@@ -1710,7 +1597,7 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
                 }
             }
             let again = {
-                let (units, base, known, store) = (job.units.clone(), job.dialect, job.modes_known, store.clone());
+                let (units, base, known, store) = (job.units.clone(), dialect, modes_known, store.clone());
                 cx.background_executor()
                     .spawn(async move { prepare_alike(&units, base, known, &store, &profile_id, &answers) })
                     .await
@@ -1742,22 +1629,7 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
         .map_or(hacivat_exec::Expect::SingleStatement, |p| {
             hacivat_exec::expect_for(&p.unit)
         });
-    // Waits (at most `PATH_WAIT`) for a search-path read in flight; then the one context
-    // function reads it with the rest of the session's context.
-    let path = cx
-        .update(|cx: &mut App| search_path(console, job.profile.engine, &job.session, cx))
-        .await;
-    let ctx = cx
-        .update(|cx: &mut App| classify_ctx_for(console, expect, cx))
-        .unwrap_or_else(|| {
-            let allow: Arc<[Arc<str>]> = job
-                .profile
-                .read_only_fn_allowlist
-                .iter()
-                .map(|s| Arc::from(s.as_str()))
-                .collect();
-            hacivat_exec::run_ctx(job.dialect, job.modes_known, allow, path, expect)
-        });
+    let ctx = classify_ctx_in(&job.profile, &sctx, expect);
     let texts: Vec<Arc<str>> = prepared.iter().map(|p| p.final_text.clone()).collect();
     let pool = cx.update(classifier);
     let reports: Vec<hacivat_exec::SafetyReport> = match pool.classify_units(texts, ctx).await { Ok(r) => r, Err(never) => match never {} };
@@ -1765,7 +1637,12 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
     // 3. The gate, with the connection as it is now.
     let (conn, suppressed) = cx.update(|cx: &mut App| {
         (
-            conn_safety(&job.profile, &job.session, cx),
+            // Fix round 1 (M5): the profile as it is now.
+            conn_safety(
+                &profile_of(cx, console).unwrap_or_else(|| job.profile.clone()),
+                &job.session,
+                cx,
+            ),
             cx.default_global::<RunPrep>().suppressed.clone(),
         )
     });
@@ -1783,6 +1660,13 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
                     .any(|(p, r)| hacivat_exec::changes_context(&p.final_text, r));
                 // T19: the session refuses a unit run as one that would need its own
                 // transaction or the D-062 wrap; the gate never sends one.
+                // Fix round 1 (M2): a unit run as one never goes to a read-only session (its
+                // guard checks one statement at a time), the chooser's reason.
+                if run_as_one && conn.read_only {
+                    for item in &mut plan.items {
+                        item.decision = GateDecision::Deny(GateReason::of(AS_ONE_READ_ONLY));
+                    }
+                }
                 if run_as_one {
                     for item in &mut plan.items {
                         if matches!(
@@ -1819,6 +1703,25 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
                         cx,
                     );
                 }
+            }
+            // Fix round 1 (I4): every other unit of the run was not sent either, and says
+            // which statement refused the run.
+            let first = plan.first_denied().map_or(0, |i| i.unit);
+            let others: Vec<std::ops::Range<usize>> = plan
+                .items
+                .iter()
+                .filter(|i| !matches!(i.decision, GateDecision::Deny(_)))
+                .filter_map(|i| prepared.get(i.unit as usize).map(|p| p.unit.doc_range.clone()))
+                .collect();
+            for at in others {
+                refuse(
+                    console,
+                    job.version,
+                    vec![at],
+                    (RUN_REFUSED, vec![("n", number(first))]),
+                    NOT_SENT,
+                    cx,
+                );
             }
         });
         return;
@@ -1901,6 +1804,25 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
         return;
     };
 
+    // The context again, after the prompt and the confirmations (another console sharing the
+    // session may have changed it meanwhile): a run is sent only in the context it was
+    // prepared and classified in.
+    let now = context_within(&job.session, cx.background_executor().timer(CONTEXT_WAIT)).await;
+    if now != sctx {
+        cx.update(|cx: &mut App| {
+            refuse(
+                console,
+                job.version,
+                ranges(&job.units),
+                (CONTEXT_CHANGED, Vec::new()),
+                NOT_SENT,
+                cx,
+            );
+            probe_context(console, cx);
+        });
+        return;
+    }
+
     // 5. One run.
     cx.update(|cx: &mut App| {
         submit(
@@ -1919,11 +1841,65 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
 
 // ---- the run's questions ------------------------------------------------------------------
 
+/// The session's classification context (`SessionHandle::classifier_context`), or an unknown
+/// one when `timer` ends first (fail-closed; fix round 1, I1).
+async fn context_within(
+    session: &SessionHandle,
+    timer: impl std::future::Future<Output = ()>,
+) -> hacivat_session::session::ClassifierContext {
+    let ask = session.classifier_context();
+    futures::pin_mut!(ask);
+    futures::pin_mut!(timer);
+    match futures::future::select(ask, timer).await {
+        futures::future::Either::Left((c, _)) => c,
+        futures::future::Either::Right(_) => hacivat_session::session::ClassifierContext::default(),
+    }
+}
+
+/// What run `run`'s port is told of a lost connection (fix round 1, I3): every loss of a run
+/// that had a confirm-in-transaction question reaches the port (`connection_lost`), whichever
+/// of the loss and the question this side sees first (T21's port orders them), with the
+/// statements before the confirmed one in the savepoint form (M10).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LossLink {
+    /// A question was seen: `Some(statements before)`, the count when the form is the
+    /// savepoint's.
+    question: Option<Option<u32>>,
+    lost: bool,
+    told: bool,
+}
+
+impl LossLink {
+    /// A confirm-in-transaction question; `statements`: the user's transaction's statements
+    /// (the confirmed one included) in the savepoint form. `Some(n)` when the port must now
+    /// be told of a loss seen earlier.
+    pub(crate) fn question(&mut self, savepoint: bool, statements: u32) -> Option<Option<u32>> {
+        let before = savepoint.then(|| statements.saturating_sub(1));
+        self.question.get_or_insert(before);
+        self.tell()
+    }
+
+    /// The session's connection was lost. `Some(n)` when the port must now be told.
+    pub(crate) fn lost(&mut self) -> Option<Option<u32>> {
+        self.lost = true;
+        self.tell()
+    }
+
+    fn tell(&mut self) -> Option<Option<u32>> {
+        let before = self.question?;
+        if !self.lost || self.told {
+            return None;
+        }
+        self.told = true;
+        Some(before)
+    }
+}
+
 /// Follows run `run`'s questions: an error-policy question goes to the error bar
 /// (`error_bar::on_choice`, Task 23); while a confirm-in-transaction question waits, the
 /// transaction badge waits too (`set_choice_pending`) and the unit's gutter mark says what is
-/// awaited; a connection lost meanwhile is told to the port (its prompt then shows the server
-/// rolled the changes back).
+/// awaited; a loss of a run that had such a question reaches the port in any order
+/// ([`LossLink`]; its prompt then shows the server rolled the changes back).
 fn follow_questions(
     console: ConsoleId,
     run: RunId,
@@ -1934,21 +1910,51 @@ fn follow_questions(
 ) -> hacivat_ui_core::gpui_surface::Task<()> {
     use hacivat_session::session::RunEvent;
     let waiting = std::rc::Rc::new(std::cell::Cell::new(false));
-    let lost = {
-        let waiting = waiting.clone();
+    let link = std::rc::Rc::new(std::cell::Cell::new(LossLink::default()));
+    // The loss listener outlives the run's questions: a loss the session reports after the run
+    // ended (or after its question cleared) still reaches the port, for `LOSS_GRACE` after the
+    // end of a run that had a question; a run without one stops listening at its end.
+    let (ended, ended_rx) = futures::channel::oneshot::channel::<()>();
+    {
+        let (link, port) = (link.clone(), port.clone());
         let mut events = session.events();
+        let timer = cx.background_executor().clone();
         cx.spawn(async move |_| {
+            let linger = {
+                let link = link.clone();
+                async move {
+                    let _ = ended_rx.await;
+                    if link.get().question.is_some() {
+                        timer.timer(LOSS_GRACE).await;
+                    }
+                }
+            };
+            futures::pin_mut!(linger);
             loop {
-                match events.recv().await {
-                    Ok(SessionEvent::Lost(_)) if waiting.get() => port.connection_lost(run, None),
+                let next = Box::pin(events.recv());
+                let ev = match futures::future::select(next, linger.as_mut()).await {
+                    futures::future::Either::Left((ev, _)) => ev,
+                    futures::future::Either::Right(_) => break,
+                };
+                match ev {
+                    Ok(SessionEvent::Lost(_)) => {
+                        let mut l = link.get();
+                        let tell = l.lost();
+                        link.set(l);
+                        if let Some(before) = tell {
+                            port.connection_lost(run, before);
+                            break;
+                        }
+                    }
                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         })
-    };
+        .detach();
+    }
     cx.spawn(async move |cx| {
-        let _lost = lost;
+        let _ended = ended;
         loop {
             let now = choices.borrow_and_update().clone();
             cx.update(|cx| match &now {
@@ -1962,6 +1968,13 @@ fn follow_questions(
                     },
                 )) => {
                     waiting.set(true);
+                    let statements = session.state().borrow().tx.statements;
+                    let mut l = link.get();
+                    let tell = l.question(*savepoint, statements);
+                    link.set(l);
+                    if let Some(before) = tell {
+                        port.connection_lost(run, before);
+                    }
                     crate::console::tx_badge::set_choice_pending(console, true, cx);
                     mark_awaiting(console, *unit, *savepoint, cx);
                 }
@@ -2088,8 +2101,11 @@ fn run_as_one_unit(
         )),
     );
     let piece = text.get(region.clone())?;
-    let lead = piece.len() - piece.trim_start().len();
-    let trimmed = piece.trim();
+    // Fix round 1 (M3): only SQL white space is trimmed (a no-break space is part of a name
+    // to PostgreSQL, not white space).
+    let sql_space = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c');
+    let lead = piece.len() - piece.trim_start_matches(sql_space).len();
+    let trimmed = piece.trim_matches(sql_space);
     if trimmed.is_empty() {
         return None;
     }
@@ -2119,4 +2135,35 @@ fn statements_in(doc: &sql_split::DocSnapshot, range: &std::ops::Range<usize>) -
         .filter(|s| overlaps(span(s.strict), range))
         .count()
         .max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LossLink;
+
+    /// Fix round 1 (I3): a loss of a run that had a question reaches the port once, whichever
+    /// comes first; a run without a question never tells it.
+    #[test]
+    fn a_loss_reaches_the_port_in_either_order() {
+        let mut first = LossLink::default();
+        assert_eq!(first.question(true, 3), None, "no loss yet");
+        assert_eq!(
+            first.lost(),
+            Some(Some(2)),
+            "the two statements before the confirmed one"
+        );
+        assert_eq!(first.lost(), None, "told once");
+
+        let mut later = LossLink::default();
+        assert_eq!(later.lost(), None, "no question yet");
+        assert_eq!(later.question(false, 0), Some(None), "own form: no count");
+        assert_eq!(later.question(false, 0), None, "told once");
+
+        let mut none = LossLink::default();
+        assert_eq!(
+            none.lost(),
+            None,
+            "a run without a question never tells the port"
+        );
+    }
 }

@@ -353,17 +353,9 @@ fn guard_ctx(kind: DbmsKind, allow: Arc<[Arc<str>]>) -> ClassifyCtx {
 ///   assumed to reach `pg_catalog` first. MySQL/MariaDB: the current database as
 ///   `search_path[0]` (the T20 carry); unknown, empty (as before).
 pub fn guard_ctx_in(kind: DbmsKind, allow: Arc<[Arc<str>]>, c: &ClassifierContext) -> ClassifyCtx {
-    let dialect = dialect_ctx(kind, c.server_version.as_ref(), c.lex_modes.as_deref());
-    let known = match dialect.id {
-        DialectId::Postgres | DialectId::PgWire(_) => c
-            .lex_modes
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|v| v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("off")),
-        DialectId::MySql | DialectId::MariaDb => c.lex_modes.is_some(),
-        DialectId::Sqlite => true,
-        _ => false,
-    };
+    // ## m3b-t24-exec-ui (named exception): the dialect and whether its modes are known come
+    // from one function, which Run's preparation reads too.
+    let (dialect, known) = modes_of(kind, c);
     let modes = dialect.modes;
     let mut ctx = ClassifyCtx::new(dialect, ClientFlavor::None, Expect::SingleStatement);
     if known {
@@ -388,39 +380,42 @@ pub fn guard_ctx_in(kind: DbmsKind, allow: Arc<[Arc<str>]>, c: &ClassifierContex
     ctx
 }
 
-// ## m3b-t24-exec-ui (named exception: the plan amendment C2(b)/I1 on the Run path)
-/// The classification context of a run's units on a console (Task 24), the Run path's twin of
-/// [`guard_ctx_in`]: `dialect` is the console's SQL context (the dialect, the server's version
-/// and the lexing modes it read; R-M3-39); with `modes_known` the text is read once with
-/// exactly those modes (`with_known_modes`), else under every mode its bytes can tell apart
-/// (fail-closed). `allow` is the profile's function allowlist (P-M3b-10); `search_path` the
-/// session's, as [`guard_ctx_in`] reads it: PostgreSQL unknown is one unreadable element (an
-/// unqualified builtin is then `Unknown`), MySQL/MariaDB the current database alone (empty
-/// when unknown). `expect` is the unit's (`units::expect_for`: `Script` for a unit run as one).
-pub fn run_ctx(
-    dialect: sql_dialect::DialectCtx,
-    modes_known: bool,
+// ## m3b-t24-exec-ui (named exception)
+/// The dialect of a session of `kind` in its context `c` (its version and lexing modes, read
+/// as the console's SQL context reads them), and whether those modes are known: PostgreSQL
+/// `on`/`off`, any MySQL/MariaDB `sql_mode`, always on SQLite ([`guard_ctx_in`]'s rule; Run's
+/// preparation uses it too, so it scans in the context it classifies in).
+pub fn modes_of(kind: DbmsKind, c: &ClassifierContext) -> (sql_dialect::DialectCtx, bool) {
+    let dialect = dialect_ctx(kind, c.server_version.as_ref(), c.lex_modes.as_deref());
+    let known = match dialect.id {
+        DialectId::Postgres | DialectId::PgWire(_) => c
+            .lex_modes
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|v| v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("off")),
+        DialectId::MySql | DialectId::MariaDb => c.lex_modes.is_some(),
+        DialectId::Sqlite => true,
+        _ => false,
+    };
+    (dialect, known)
+}
+
+// ## m3b-t24-exec-ui (named exception: the plan amendment C2(b)/I1 on the Run path, the T24
+// I1/I2 rulings)
+/// The classification context of a run's units on a session of `kind` in that session's own
+/// context `c` (`SessionHandle::classifier_context`): exactly [`guard_ctx_in`]'s rules (one
+/// source, one parser: the modes known only when the session read them, the search path as
+/// T18 splits it, PostgreSQL unknown as one unreadable element, MySQL/MariaDB the current
+/// database), with the profile's allowlist `allow` and the unit's `expect`
+/// (`units::expect_for`: `Script` for a unit run as one).
+pub fn run_ctx_in(
+    kind: DbmsKind,
     allow: Arc<[Arc<str>]>,
-    search_path: Option<Arc<[Arc<str>]>>,
+    c: &ClassifierContext,
     expect: Expect,
 ) -> ClassifyCtx {
-    let modes = dialect.modes;
-    let mut ctx = ClassifyCtx::new(dialect, ClientFlavor::None, expect);
-    if modes_known || dialect.id == DialectId::Sqlite {
-        ctx = ctx.with_known_modes(modes);
-    }
-    ctx.fn_allowlist = allow;
-    match ctx.dialect.id {
-        DialectId::Postgres | DialectId::PgWire(_) => {
-            ctx.search_path = search_path.unwrap_or_else(|| Arc::from(vec![Arc::<str>::from("")]));
-        }
-        DialectId::MySql | DialectId::MariaDb => {
-            if let Some(path) = search_path {
-                ctx.search_path = path;
-            }
-        }
-        _ => {}
-    }
+    let mut ctx = guard_ctx_in(kind, allow, c);
+    ctx.expect = expect;
     ctx
 }
 

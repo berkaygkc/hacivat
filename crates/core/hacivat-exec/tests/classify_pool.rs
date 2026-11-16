@@ -482,3 +482,38 @@ async fn effects_map_to_session_effects_and_unknown_is_none() {
     );
     assert_eq!(read_only_check(&r), RoCheck::Allow);
 }
+
+// ## m3b-t24-exec-ui (fix round 1, I1): Run classifies in the session's own modes.
+
+/// The review's example: with `standard_conforming_strings` off on the server, the backslash
+/// escapes the quote, so the text holds a `DELETE`; read with the modes on, it is one
+/// statement. Classified in the session's context (`run_ctx_in`), the `DELETE` is seen; with
+/// the modes unknown, every mode is read (fail-closed).
+#[test]
+fn the_standard_conforming_strings_example_is_read_in_the_sessions_modes() {
+    use hacivat_session::session::ClassifierContext;
+    let sql: Arc<str> = Arc::from("SELECT '\\'\\n' ; DELETE FROM t; --'");
+    let pool = ClassifyPool::new(1);
+    let check = |modes: Option<&str>| {
+        let ctx = hacivat_exec::run_ctx_in(
+            DbmsKind::Postgres,
+            Arc::from(Vec::new()),
+            &ClassifierContext {
+                lex_modes: modes.map(Arc::from),
+                ..ClassifierContext::default()
+            },
+            Expect::SingleStatement,
+        );
+        let reports = futures::executor::block_on(pool.classify_units(vec![sql.clone()], ctx))
+            .unwrap_or_else(|never| match never {});
+        read_only_check(&reports[0])
+    };
+    assert!(
+        matches!(check(Some("off")), RoCheck::Deny(_)),
+        "the server reads a DELETE"
+    );
+    assert!(
+        matches!(check(None), RoCheck::Deny(_)),
+        "unknown modes: every mode is read"
+    );
+}

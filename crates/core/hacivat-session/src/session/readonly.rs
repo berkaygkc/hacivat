@@ -258,7 +258,8 @@ impl crate::session::actor::Core {
     /// `standard_conforming_strings` and `search_path`, MySQL/MariaDB `sql_mode` and the current
     /// database. `None` when the read fails or answers no row (fix round 1, m2: the caller
     /// reads again at its next check).
-    async fn read_context_again(&mut self) -> Option<SessionSettings> {
+    // ## m3b-t24-exec-ui (named exception): crate-visible, Run's context reads it too.
+    pub(crate) async fn read_context_again(&mut self) -> Option<SessionSettings> {
         let sql = match family(self.kind) {
             Family::Postgres => PG_CONTEXT_SQL,
             Family::MySql => MYSQL_CONTEXT_SQL,

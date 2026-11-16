@@ -56,10 +56,33 @@ fn probes(prefix: &'static str, value: &str) -> Vec<FakeExec> {
         .collect()
 }
 
+/// The session's own context read (T18's constant text; fix round 1, I1), answering `lex`
+/// and the search path `path`, for `n` reads.
+fn context_reads(lex: &str, path: &str) -> Vec<FakeExec> {
+    (0..8)
+        .map(|_| FakeExec {
+            prefix: "SELECT pg_catalog.current_setting('standard_conforming_strings')",
+            result: Ok(ExecSummary {
+                rows: vec![vec![Some(lex.to_string()), Some(path.to_string())]],
+                row_count: 1,
+                ..ExecSummary::default()
+            }),
+            delay: Duration::ZERO,
+            tx_after: None,
+            panics: false,
+        })
+        .collect()
+}
+
 fn pg() -> FakeDriver {
     FakeDriver::new(DbmsKind::Postgres)
         .tracks_transactions()
-        .exec(probes("SHOW standard_conforming_strings", "on"))
+        .exec(
+            probes("SHOW standard_conforming_strings", "on")
+                .into_iter()
+                .chain(context_reads("on", "\"$user\", public"))
+                .collect(),
+        )
 }
 
 fn mysql() -> FakeDriver {
@@ -210,9 +233,12 @@ impl Console {
         })
     }
 
+    /// The open parameter prompt (a closed one a test still holds is not it: Run reads the
+    /// session's context first, off the UI thread, so the next prompt opens a moment later).
     fn prompt(&self) -> Entity<params_prompt::ParamsPrompt> {
         wait_until(self.vcx, "the parameter prompt", |vcx| {
             vcx.cx.read(|cx| params_prompt::open_prompt(cx).is_some())
+                && layer_ids(vcx).contains(&params_prompt::PARAMS_LAYER_ID)
         });
         self.vcx.cx.read(params_prompt::open_prompt).expect("open")
     }
@@ -778,11 +804,13 @@ fn mysql_explain_analyze_execute_keeps_the_rollback_wrap(cx: &mut TestAppContext
         other => panic!("{other:?}"),
     };
     let pool = ClassifyPool::new(1);
-    let ctx = hacivat_exec::run_ctx(
-        dialect,
-        true,
+    let ctx = hacivat_exec::run_ctx_in(
+        DbmsKind::MySql,
         Arc::from(Vec::new()),
-        None,
+        &hacivat_session::session::ClassifierContext {
+            lex_modes: Some(Arc::from("ONLY_FULL_GROUP_BY")),
+            ..Default::default()
+        },
         hacivat_exec::Expect::SingleStatement,
     );
     let reports =
@@ -866,32 +894,56 @@ fn mysql_explain_analyze_execute_keeps_the_rollback_wrap(cx: &mut TestAppContext
     stop_core_runtime_test(cx);
 }
 
-/// T28 carry (M6): the one classification context (`orchestrator::classify_ctx_for`) comes from
-/// the session's own reads: the modes probe (known) and the search-path read, in order; and
-/// the check Count rows makes (`orchestrator::classifier_context`) reads the same.
+/// T28 carry (M6), the T24 I1 ruling: the one classification context
+/// (`orchestrator::classify_ctx_in`) is the session's own: its modes and its search path as
+/// the session reads them (`SessionHandle::classifier_context`).
 #[gpui::test]
-fn the_classify_context_comes_from_the_sessions_reads(cx: &mut TestAppContext) {
-    let path = FakeExec {
-        prefix: "SELECT s FROM pg_catalog.unnest",
-        result: Ok(ExecSummary {
-            rows: vec![
-                vec![Some("pg_catalog".to_string())],
-                vec![Some("app".to_string())],
-                vec![Some("public".to_string())],
-            ],
-            row_count: 3,
-            ..ExecSummary::default()
-        }),
-        delay: Duration::ZERO,
-        tx_after: None,
-        panics: false,
-    };
+fn the_classify_context_comes_from_the_session(cx: &mut TestAppContext) {
     let fake = FakeDriver::new(DbmsKind::Postgres)
         .tracks_transactions()
         .exec(
             probes("SHOW standard_conforming_strings", "on")
                 .into_iter()
-                .chain(std::iter::repeat_n(path, 8))
+                .chain(context_reads("on", "pg_catalog, App, public"))
+                .collect(),
+        );
+    let p = profile("orders-dev", DbmsKind::Postgres, EnvTag::Dev);
+    let c = console(cx, p.clone(), fake);
+    let sctx = futures::executor::block_on(c.session.classifier_context());
+    let ctx = orchestrator::classify_ctx_in(&p, &sctx, hacivat_exec::Expect::SingleStatement);
+    assert!(ctx.modes_known, "the session read `on`");
+    let path: Vec<&str> = ctx.search_path.iter().map(|s| &**s).collect();
+    assert_eq!(path, ["pg_catalog", "app", "public"], "T18's parser");
+    stop_core_runtime_test(cx);
+}
+
+// ## fix round 1 (I1, I4, I6, M1, M2)
+
+fn as_one(c: &Console) {
+    c.vcx.cx.update(|cx| {
+        let policy = orchestrator::policy_of(c.id, cx);
+        orchestrator::set_policy(
+            c.id,
+            hacivat_sql_editor::RunPolicy {
+                selection_as_one: true,
+                ..policy
+            },
+            cx,
+        );
+    });
+}
+
+/// I1, the review's example: the console split the text with `standard_conforming_strings`
+/// on, but the session now reads it off (a `SET` the console has not probed yet). Run takes the
+/// session's context: the units are not what the server would read, so nothing is sent.
+#[gpui::test]
+fn a_session_reading_in_other_modes_sends_nothing(cx: &mut TestAppContext) {
+    let fake = FakeDriver::new(DbmsKind::Postgres)
+        .tracks_transactions()
+        .exec(
+            probes("SHOW standard_conforming_strings", "on")
+                .into_iter()
+                .chain(context_reads("off", "public"))
                 .collect(),
         );
     let c = console(
@@ -899,25 +951,182 @@ fn the_classify_context_comes_from_the_sessions_reads(cx: &mut TestAppContext) {
         profile("orders-dev", DbmsKind::Postgres, EnvTag::Dev),
         fake,
     );
-    let ctx = || {
-        c.vcx.cx.read(|cx| {
-            orchestrator::classify_ctx_for(c.id, hacivat_exec::Expect::SingleStatement, cx)
-        })
-    };
-    wait_until(c.vcx, "the search path read", |_| {
-        ctx().is_some_and(|x| x.search_path.len() == 3)
+    c.set_text("SELECT '\\'\\n' ; DELETE FROM t; --'");
+    c.run_at(0);
+    c.wait_log("exec-run-context-changed");
+    c.barrier();
+    assert!(c.queries().is_empty(), "{:?}", c.queries());
+    assert!(
+        !c.fake.executed().iter().any(|s| s.contains("DELETE")),
+        "{:?}",
+        c.fake.executed()
+    );
+    stop_core_runtime_test(cx);
+}
+
+/// I1, a shared session: another console's `SET` while this run's confirmation is open
+/// changes the session's context; the run is sent only in the context it was classified in, so
+/// nothing is sent.
+#[gpui::test]
+fn a_context_changed_while_confirming_sends_nothing(cx: &mut TestAppContext) {
+    let mut reads = context_reads("on", "public");
+    reads.truncate(1);
+    reads.extend(context_reads("off", "public"));
+    let fake = FakeDriver::new(DbmsKind::Postgres)
+        .tracks_transactions()
+        .exec(
+            probes("SHOW standard_conforming_strings", "on")
+                .into_iter()
+                .chain(reads)
+                .collect(),
+        );
+    let c = console(
+        cx,
+        profile("orders-dev", DbmsKind::Postgres, EnvTag::Dev),
+        fake,
+    );
+    c.set_text("DELETE FROM a");
+    c.run_at(0);
+    c.wait_confirm();
+    // Another console on the same session.
+    let other = c.session.submit(hacivat_session::session::Request::Exec {
+        sql: "SET standard_conforming_strings = off".to_string(),
+        opts: hacivat_driver::ExecOpts::default(),
+        origin: hacivat_session::session::ExecOrigin::User,
     });
-    let ctx = ctx().expect("a context");
-    assert!(ctx.modes_known, "the probe answered `on`");
-    let path: Vec<&str> = ctx.search_path.iter().map(|s| &**s).collect();
-    assert_eq!(path, ["pg_catalog", "app", "public"]);
-    // Count rows' check reads the same path.
-    let checked = c
-        .vcx
-        .cx
-        .read(|cx| orchestrator::classifier_context(c.id, cx));
-    assert_eq!(checked.search_path.as_deref().map(<[_]>::len), Some(3));
-    assert_eq!(checked.lex_modes.as_deref(), Some("on"));
+    let _ = futures::executor::block_on(other.reply);
+    click_button(c.vcx, "confirm-execute");
+    c.wait_log("exec-run-context-changed");
+    c.barrier();
+    assert!(c.queries().is_empty(), "{:?}", c.queries());
+    stop_core_runtime_test(cx);
+}
+
+/// I6.1, the plan's review probe: a confirmation cancelled, or closed, sends nothing of the run.
+#[gpui::test]
+fn a_cancelled_or_closed_confirmation_sends_nothing(cx: &mut TestAppContext) {
+    let mut c = dev(cx);
+    c.set_text("SELECT 1;\nDELETE FROM a;\nDELETE FROM b;");
+    c.command("editor.run_3");
+    c.wait_confirm();
+    click_button(c.vcx, "confirm-cancel");
+    c.wait_log("exec-confirm-cancelled");
+    c.barrier();
+    assert!(c.queries().is_empty(), "{:?}", c.queries());
+    assert!(!c.confirm_open());
+    c.command("editor.run_3");
+    c.wait_confirm();
+    c.keys("escape");
+    wait_until(c.vcx, "the dialog to close", |vcx| {
+        !vcx.cx.read(confirm::confirm_open)
+    });
+    c.barrier();
+    assert!(c.queries().is_empty(), "{:?}", c.queries());
+    let cancelled = c
+        .log_ids()
+        .iter()
+        .filter(|id| **id == "exec-confirm-cancelled")
+        .count();
+    assert_eq!(cancelled, 2, "{:?}", c.log_ids());
+    stop_core_runtime_test(cx);
+}
+
+/// I6.2: Run as one never sends a unit that needs its own transaction or the D-062 wrap.
+#[gpui::test]
+fn run_as_one_refuses_a_wrapped_explain_analyze(cx: &mut TestAppContext) {
+    let c = dev(cx);
+    as_one(&c);
+    let text = "EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1;";
+    c.set_text(text);
+    c.select(0..text.len());
+    c.command("editor.run");
+    c.wait_log("exec-gate-run-as-one-refused");
+    c.barrier();
+    assert!(c.queries().is_empty(), "{:?}", c.queries());
+    stop_core_runtime_test(cx);
+}
+
+/// I4: a refused run sends nothing, and every unit says so: the refused one why, the others
+/// which statement refused the run.
+#[gpui::test]
+fn every_unit_of_a_refused_run_says_it_was_not_sent(cx: &mut TestAppContext) {
+    let mut p = profile("orders-ro", DbmsKind::Postgres, EnvTag::Dev);
+    p.read_only = true;
+    let c = console(cx, p, pg());
+    // The statement that may change the context comes last: the units after one would be
+    // classified in an unknown context (sql-safety's `classify_units`), refused too.
+    c.set_text("SELECT 1;\nSELECT 2;\nDELETE FROM t WHERE id = 1;");
+    c.command("editor.run_3");
+    c.wait_log("exec-gate-run-refused");
+    c.barrier();
+    assert!(c.queries().is_empty(), "{:?}", c.queries());
+    let ids = c.log_ids();
+    assert!(ids.contains(&"exec-gate-read-only"), "{ids:?}");
+    assert_eq!(
+        ids.iter()
+            .filter(|id| **id == "exec-gate-run-refused")
+            .count(),
+        2,
+        "{ids:?}"
+    );
+    let named: Vec<String> = c.vcx.cx.read(|cx| {
+        Consoles::get(cx, c.id)
+            .map(|s| {
+                s.log
+                    .lines()
+                    .iter()
+                    .filter(|l| l.msg.fluent_id() == "exec-gate-run-refused")
+                    .map(|l| format!("{:?}", l.msg))
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    assert!(
+        named.iter().all(|m| m.contains("Str(\"3\")")),
+        "each names statement 3: {named:?}"
+    );
+    let marks = c.marks();
+    assert_eq!(marks.len(), 3, "{marks:?}");
+    assert!(
+        marks
+            .iter()
+            .all(|m| matches!(m, ExecMarkState::Failed { sqlstate: None })),
+        "{marks:?}"
+    );
+    stop_core_runtime_test(cx);
+}
+
+/// M1: a unit run as one carries no bind values: refused before any prompt.
+#[gpui::test]
+fn run_as_one_with_parameters_is_refused_before_the_prompt(cx: &mut TestAppContext) {
+    let c = dev(cx);
+    as_one(&c);
+    c.set_text("SELECT :a;\nSELECT 2;");
+    c.select(0..19);
+    c.command("editor.run");
+    c.wait_log("exec-param-run-as-one");
+    c.barrier();
+    assert!(
+        c.vcx.cx.read(params_prompt::open_prompt).is_none(),
+        "no prompt"
+    );
+    assert!(c.queries().is_empty(), "{:?}", c.queries());
+    stop_core_runtime_test(cx);
+}
+
+/// M2: the console's "As one" policy never sends a selection to a read-only session.
+#[gpui::test]
+fn run_as_one_on_a_read_only_session_is_refused(cx: &mut TestAppContext) {
+    let mut p = profile("orders-ro", DbmsKind::Postgres, EnvTag::Dev);
+    p.read_only = true;
+    let c = console(cx, p, pg());
+    as_one(&c);
+    c.set_text("SELECT 1;\nSELECT 2;");
+    c.select(0..19);
+    c.command("editor.run");
+    c.wait_log("exec-gate-run-as-one-read-only");
+    c.barrier();
+    assert!(c.queries().is_empty(), "{:?}", c.queries());
     stop_core_runtime_test(cx);
 }
 
