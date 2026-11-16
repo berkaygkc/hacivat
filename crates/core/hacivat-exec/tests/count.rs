@@ -524,3 +524,74 @@ async fn an_allowed_count_is_checked_in_its_sessions_context() {
         .collect();
     assert_eq!(path, ["app", "public"]);
 }
+
+// ## m3b-t26-prod-unlock (T26 carry MUST 2): Count rows carries the context generation it was
+// checked under, so the session refuses it when the context moved between the check and the
+// send (here: the user's `SET` reaches the session while the check runs), sending nothing.
+
+/// A check that, while it runs, has the user change the session's context (a `SET` the
+/// session runs before the count's request), then allows.
+#[derive(Debug)]
+struct MovesTheContext(SessionHandle);
+
+impl StatementClassifier for MovesTheContext {
+    fn check_read_only(
+        &self,
+        _kind: DbmsKind,
+        _sql: Arc<str>,
+        _allow: Arc<[Arc<str>]>,
+    ) -> BoxFuture<'static, RoCheck> {
+        Box::pin(async { RoCheck::Allow })
+    }
+    fn effects(&self, _: DbmsKind, _: Arc<str>) -> BoxFuture<'static, Option<SessionEffects>> {
+        Box::pin(async { None })
+    }
+    fn check_read_only_in(
+        &self,
+        _kind: DbmsKind,
+        _sql: Arc<str>,
+        _allow: Arc<[Arc<str>]>,
+        _ctx: ClassifierContext,
+    ) -> BoxFuture<'static, RoAnswer> {
+        let ticket = self.0.submit(Request::Exec {
+            sql: "SET search_path = elsewhere".to_string(),
+            opts: hacivat_driver::ExecOpts::default(),
+            origin: hacivat_session::session::ExecOrigin::User,
+        });
+        Box::pin(async move {
+            let _ = ticket.reply.await;
+            RoAnswer {
+                check: RoCheck::Allow,
+                changes_context: false,
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_count_is_refused_when_the_context_moved_after_its_check() {
+    let (_b, s, f) = common::service_over(fake_pg().queries(vec![
+        count_query(Duration::ZERO),
+        count_query(Duration::ZERO),
+    ]))
+    .await;
+    let svc = ExecService::new(MemoryBudget::new(1 << 30, 256 << 20))
+        .with_count_check(Arc::new(MovesTheContext(s.clone())));
+    let e = svc
+        .count(console_request(&s))
+        .done
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        matches!(&e, CountError::Failed(e) if e.kind == hacivat_session::session::ExecErrorKind::ContextChanged),
+        "{e:?}"
+    );
+    assert_eq!(counted(&f), 0, "nothing was sent");
+    // The control: with nothing moving it, the same count runs (its generation holds).
+    let svc =
+        ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)).with_count_check(Arc::new(Allow));
+    let ok = svc.count(console_request(&s)).done.await.unwrap();
+    assert_eq!(ok, Ok(42));
+    assert_eq!(counted(&f), 1);
+}

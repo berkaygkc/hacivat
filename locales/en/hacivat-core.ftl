@@ -1010,3 +1010,10 @@ exec-run-connection-changed = Not sent: the connection changed while this run wa
 exec-param-run-as-one = Not sent: Run as one can't take parameter values. Run the statements one at a time.
 # Fix round 1 (M2): Run as one on a read-only connection.
 exec-gate-run-as-one-read-only = Not sent: Run as one doesn't work on a read-only connection, whose guard checks one statement at a time.
+
+## m3b-t26-prod-unlock
+
+# Task 26 (carry MUST 2): on a production or read-only connection, Run could not read the
+# connection's settings in time before sending (the read timed out), so it can't prove they
+# are the ones it checked the statement under: nothing was sent.
+exec-run-context-unconfirmed = Not sent: Hacivat couldn't confirm this connection's settings in time. Run it again.

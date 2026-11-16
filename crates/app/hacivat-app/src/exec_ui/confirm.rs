@@ -51,7 +51,8 @@
 //! the port's book keyed by `RunId`; [`AppConfirmPort::connection_lost`] records a run's loss
 //! there. A confirm-in-transaction prompt attaches its own run's entries whenever they arrive
 //! (fix round 1, I2). An asker that goes away closes its prompt (m6). Nothing here runs a
-//! statement or unlocks production (R-M3-52).
+//! statement; it answers the questions that production writes wait for (R-M3-52; production
+//! writes since Task 26).
 //!
 //! **Fix round 1.** Run buttons (Execute, Execute all, "don't ask again") answer only
 //! [`ARM_DELAY`] after the dialog shows (executor clock), by click or by Enter, and never on the

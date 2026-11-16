@@ -647,3 +647,8 @@ exec-run-connection-changed = Gönderilmedi: çalıştırma hazırlanırken bağ
 exec-param-run-as-one = Gönderilmedi: tek parça çalıştırma parametre değeri alamaz. İfadeleri tek tek çalıştırın.
 # Review: PO
 exec-gate-run-as-one-read-only = Gönderilmedi: tek parça çalıştırma salt okunur bağlantıda kullanılamaz; koruma her seferinde tek bir ifadeyi denetler.
+
+## m3b-t26-prod-unlock
+
+# Review: PO
+exec-run-context-unconfirmed = Gönderilmedi: Hacivat bu bağlantının ayarlarını zamanında doğrulayamadı. Yeniden çalıştırın.

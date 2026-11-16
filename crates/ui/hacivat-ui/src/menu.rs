@@ -62,6 +62,10 @@ pub struct MenuItemSpec {
     pub mono: bool,
     /// Where the hint's text comes from: Fluent (default) or data (a resolved address).
     pub hint_source: TextSource,
+    // ## m3b-t26-prod-unlock (named exception: the T22 review m12 carry)
+    /// An informational note (the mock's `.mnote`: 12 px `text-2`), never selectable: not a
+    /// disabled command, so the Raised Ink Rule's `text-2` applies, never disabled `text-3`.
+    pub note: bool,
 }
 
 impl MenuItemSpec {
@@ -78,6 +82,8 @@ impl MenuItemSpec {
             danger: false,
             mono: false,
             hint_source: TextSource::Fluent,
+            // ## m3b-t26-prod-unlock
+            note: false,
         }
     }
 
@@ -94,6 +100,8 @@ impl MenuItemSpec {
             danger: false,
             mono: false,
             hint_source: TextSource::Fluent,
+            // ## m3b-t26-prod-unlock
+            note: false,
         }
     }
 
@@ -135,6 +143,16 @@ impl MenuItemSpec {
         self
     }
 
+    // ## m3b-t26-prod-unlock (named exception: the T22 review m12 carry)
+    /// Makes the row an informational note: 12 px `text-2` (the Raised Ink Rule), never
+    /// selectable, never chosen.
+    pub fn note(mut self, note: bool) -> Self {
+        self.note = note;
+        // Never actionable: every path that skips a disabled row skips a note.
+        self.disabled |= note;
+        self
+    }
+
     // ## m2a-t21-shots
     /// Marks a destructive item (its label is `red` while enabled).
     pub fn danger(mut self, danger: bool) -> Self {
@@ -148,7 +166,10 @@ impl MenuItemSpec {
         &self,
         c: &hacivat_ui_core::theme::Colors,
     ) -> hacivat_ui_core::gpui_surface::Hsla {
-        if self.disabled {
+        // ## m3b-t26-prod-unlock (named exception): a note is text, not a disabled command.
+        if self.note {
+            c.text_2
+        } else if self.disabled {
             c.text_3
         } else if self.danger {
             c.red
@@ -159,7 +180,8 @@ impl MenuItemSpec {
     }
 
     fn selectable(&self) -> bool {
-        !self.separator && !self.disabled
+        // ## m3b-t26-prod-unlock (named exception): a note is never selectable.
+        !self.separator && !self.disabled && !self.note
     }
 }
 
@@ -666,6 +688,9 @@ impl Render for PopupMenu {
                 // ## m2b-t24-shots: a mono label is data (a host alias, a path).
                 let (style, source) = if item.mono {
                     (t.type_ramp.mono_data, TextSource::Data)
+                } else if item.note {
+                    // ## m3b-t26-prod-unlock (named exception): the note's 12 px caption.
+                    (t.type_ramp.caption, TextSource::Fluent)
                 } else {
                     (t.type_ramp.body, TextSource::Fluent)
                 };
@@ -925,6 +950,23 @@ mod tests {
                 item().danger(true).disabled(true).label_ink(c),
                 c.text_3.to_hsla()
             );
+        }
+    }
+
+    // ## m3b-t26-prod-unlock (named exception: the T22 review m12 carry)
+    /// A note is `text-2` on the raised menu (the Raised Ink Rule), never disabled `text-3`,
+    /// and never selectable or chosen.
+    #[test]
+    fn a_note_is_text_2_and_never_selectable() {
+        for c in [&DARK.colors, &LIGHT.colors] {
+            let note = item().note(true);
+            assert_eq!(note.label_ink(c), c.text_2.to_hsla());
+            assert!(!note.selectable());
+            assert!(
+                note.disabled,
+                "every path that skips a disabled row skips it"
+            );
+            assert!(item().selectable() && !item().note);
         }
     }
 }

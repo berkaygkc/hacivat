@@ -168,12 +168,10 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         known_hosts: known_hosts.clone(),
     };
     // ## m2b-t22-live: B18 liveness presets and B19 reconnects (T17; `default()` keeps M2a's).
-    // ## m3a-t01b-seams: production-tagged profiles get read-only sessions until M3b's
-    // confirmations land (R-M3-6 REVISED, R-M3-29).
-    let config = ManagerConfig {
-        production_read_only: true,
-        ..ManagerConfig::m2b()
-    };
+    // ## m3b-t26-prod-unlock: production-tagged profiles get read-write sessions (Manual mode,
+    // D-036); every unit that is not a read passes the exec gate and its confirmations
+    // (R-M3-55) before it is sent (R-M3-6 REVISED ends).
+    let config = ManagerConfig::m2b();
     // ## m3b-t18-safe06 (named exception): the read-only guard's classifier (R-M3-83).
     // ## m3b-t24-exec-ui (named exception): one pool for the guard and for Run (R-M3-53).
     let pool = hacivat_exec::classify_pool::ClassifyPool::new(2);

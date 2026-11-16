@@ -274,8 +274,9 @@ pub fn sql_context(console: ConsoleId, cx: &App) -> context::SqlContext {
 }
 
 // ## m3a-t33-exec-ui (fix round 1, Task 32 contract): pending read-only.
-/// The consoles Task 32 marked `pending_read_only`: a production-tagged console waiting for the
-/// user's open transaction to end before it reconnects read-only.
+/// The consoles Task 32 marked `pending_read_only`: a console whose profile was marked
+/// read-only, waiting for the user's open transaction to end before it reconnects read-only
+/// (## m3b-t26-prod-unlock: a production tag no longer does this, R-M3-78).
 #[derive(Default)]
 struct PendingReadOnly(std::collections::HashSet<ConsoleId>);
 

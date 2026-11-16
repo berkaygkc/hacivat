@@ -1,5 +1,8 @@
-//! M3a Task 23: the console UX table (production, forced read-only, access, the user's
+//! M3a Task 23: the console UX table (production, read-only, access, the user's
 //! transaction only, its Failed form, the cursor badge, cancelling, running, waiting).
+//! ## m3b-t26-prod-unlock: the production read-only policy is gone (`forced` and
+//! `forced_read_only` with it); its two rows now pin a writable production console in Manual
+//! mode and a production profile that is read-only by its own flag.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,14 +22,13 @@ use hacivat_session::session::{
 #[derive(Clone)]
 struct Inputs {
     env: Option<EnvTag>,
-    forced: bool,
     snap: SessionSnapshot,
     run: Option<RunStatus>,
     waiting: Option<(u8, u8)>,
 }
 
 fn console_ux_of(i: Inputs) -> ConsoleUx {
-    console_ux(i.env, i.forced, &i.snap, i.run.as_ref(), i.waiting)
+    console_ux(i.env, &i.snap, i.run.as_ref(), i.waiting)
 }
 
 fn t0() -> Instant {
@@ -55,7 +57,6 @@ fn snap() -> SessionSnapshot {
 fn base() -> Inputs {
     Inputs {
         env: Some(EnvTag::Dev),
-        forced: true,
         snap: snap(),
         run: None,
         waiting: None,
@@ -67,7 +68,6 @@ fn idle_ux(env: Option<EnvTag>) -> ConsoleUx {
         env,
         production: false,
         read_only: false,
-        forced_read_only: false,
         access: AccessLabel::ReadWrite,
         tx: TxBadge::Auto,
         cursor: None,
@@ -121,35 +121,35 @@ fn ux_cases() -> Vec<(Inputs, ConsoleUx)> {
     let mut cases = Vec::new();
     // Idle dev console.
     cases.push((base(), idle_ux(Some(EnvTag::Dev))));
-    // A production console forced read-only by the policy (R-M3-6).
+    // ## m3b-t26-prod-unlock: a production console is read-write (Manual mode, D-036; the gate
+    // confirms its writes): production, never read-only, the read-write label.
     let mut i = base();
     i.env = Some(EnvTag::Production);
-    i.snap.read_only = true;
-    i.snap.access = AccessLabel::ReadOnlyGuarded;
+    i.snap.tx.mode = hacivat_session::session::TxMode::Manual;
     cases.push((
         i.clone(),
         ConsoleUx {
             production: true,
-            read_only: true,
-            forced_read_only: true,
-            access: AccessLabel::ReadOnlyGuarded,
+            read_only: false,
+            access: AccessLabel::ReadWrite,
             ..idle_ux(Some(EnvTag::Production))
         },
     ));
-    // The same without the policy: read-only by the profile itself, not forced.
+    // A production profile that is read-only by its own flag: read-only, still production.
     let mut j = i.clone();
-    j.forced = false;
+    j.snap.tx.mode = hacivat_session::session::TxMode::Auto;
+    j.snap.read_only = true;
+    j.snap.access = AccessLabel::ReadOnlyGuarded;
     cases.push((
         j,
         ConsoleUx {
             production: true,
             read_only: true,
-            forced_read_only: false,
             access: AccessLabel::ReadOnlyGuarded,
             ..idle_ux(Some(EnvTag::Production))
         },
     ));
-    // A read-only dev profile is never "forced".
+    // A read-only dev profile.
     let mut k = base();
     k.snap.read_only = true;
     k.snap.access = AccessLabel::ReadOnlyEnforced;

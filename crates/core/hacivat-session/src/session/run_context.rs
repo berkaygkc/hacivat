@@ -100,6 +100,24 @@ impl Core {
         Ok(encode(&ctx, self.context_generation))
     }
 
+    // ## m3b-t26-prod-unlock (named exception: the T26 carry MUST 3)
+    /// A read-write session's context read now, in the classifier's form ([`Core::context_of`]):
+    /// what a production startup script is checked in (`startup_check`). Unknown (every mode,
+    /// no search path) when the read fails.
+    pub(crate) async fn read_write_context(&mut self) -> ClassifierContext {
+        let server_version = self
+            .live
+            .as_ref()
+            .and_then(|live| live.server.version.clone());
+        match self.read_context_again().await {
+            Some(read) => self.context_of(&read, server_version),
+            None => ClassifierContext {
+                server_version,
+                ..ClassifierContext::default()
+            },
+        }
+    }
+
     /// Marks the context stale (fix round 2): the next answer reads it again, and the
     /// generation moves, so a run classified under the old one is refused
     /// ([`run_moved`]).

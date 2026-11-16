@@ -2521,3 +2521,73 @@ boot installs `hacivat_exec::classify_pool::ClassifyPool::new(2)` (`boot.rs`, on
     never read it. *m10.* `read_context_again`'s arms merged. *m11.* MySQL's connect read
     steps down from four values to T7's pair (keeping the zone), then to `net_write_timeout`.
   - *m12* (Count rows keeps the context-free check) is carried to T24.
+
+## m3b-t26 — production unlock
+
+**Decision (R-M3-6 REVISED ends; R-M3-29, R-M3-52, R-M3-78, R-M3-81; D-036).** A production tag
+no longer makes a session read-only. `effective_read_only(profile)` is the profile's own
+`read_only` flag; `ManagerConfig.production_read_only`, `SessionPolicy` (with
+`SessionManager::set_policy`/`policy` and `ConnectionManager::policy`), the Test connection's
+policy parameter (`test_connection_with_policy`, folded into `test_connection_continuing`), the
+console UX's `forced_read_only`, the app boot's `true`, the console toolbar's production
+read-only notice and its explanation popover (with their six Fluent ids) are deleted. A
+production console opens a read-write session in Manual mode (`default_mode`, D-036) and every
+unit that is not a read meets the exec gate's production rows (R-M3-55): `Confirm` (with the
+typed name for the destructive kinds) before anything is sent, `RunInTxThenConfirm` for a DML
+(the savepoint form in Manual, kept only on Keep), `Warn` for a lock, `Deny` for what has no
+single name to type or was not analysed. What used to keep production safe at the session (the
+read-only guard) is replaced by the gate before the send and the session's confirm-in-
+transaction after it (Task 19); the session itself runs no production policy.
+
+- **Retag (R-M3-78).** A profile tagged production while its console is open reconnects
+  nothing: the app's gate reads the live profile's environment on every Run
+  (`orchestrator::conn_safety`), so confirmations apply from the next Run; the open session
+  keeps its transaction mode (Manual applies to sessions opened after the tag). Count rows is
+  tag-independent: it is sent only when the read-only check allows it, on every session.
+  Marking a profile read-only keeps M3a's `pending_read_only` reconnect.
+- **No ungated send.** The app sends a user statement only through `ExecService::run` with a
+  checked plan (the orchestrator) or as Count rows (the read-only check); it has no
+  `Request::Exec` of the user's and builds no `RunSpec` of its own; the run service's plan-less
+  (M3a) path is reached only from the error bar's `test-support` seam. `prod_unlock`'s
+  `no_ungated_send_path_in_the_app` pins this over the app's sources.
+- **The context generation (carry MUST 2).** When Run's context read times out (no
+  generation), a production (live tag) or read-only session sends nothing
+  (`exec-run-context-unconfirmed`); Count rows carries the generation of the context it was
+  checked in (`SessionHandle::run_context`), so the session refuses it when the context moved
+  between the check and the send, and a session that gave no generation counts nothing.
+- **Startup scripts on production (carry MUST 3, the T12 ruling).** A production profile's
+  startup script runs only statements the classifier's read-only check allows (a read, a
+  harmless `SET`), checked statement by statement through the session's classifier
+  (`ManagerConfig::classifier`, the app's pool) in the context the session reads now; a
+  statement that may change the context leaves the later ones checked in an unknown context.
+  One refused statement (or no classifier at all) refuses the whole script and the session
+  (`config.invalid`), on connect, reset and reconnect; the warning names the statement's
+  number, never its text (`session/startup_check.rs`). Known limit: a session reads the tag it
+  was opened with, so a session opened before a retag replays the script it already ran,
+  unchecked, on its own reset or reconnect; every session opened after the tag is checked.
+- **Run's context read on read-write sessions (carry MUST 4).** T24's rule stands: the read
+  is made inside an open transaction on PostgreSQL, Timescale, Yugabyte and the MySQL family
+  (the constant `current_setting`/`@@SESSION.sql_mode, DATABASE()` text cannot fail or abort a
+  transaction there), never on Redshift and CockroachDB (not in the Docker matrix; unknown
+  context instead). Proved on Docker (`docker_prod_unlock`): PostgreSQL 14–18 read-write, MySQL
+  and MariaDB with `DATABASE()` NULL (no search path, never a stale one), and a read inside the
+  user's open transaction that never aborts it.
+- **MySQL/MariaDB `UPDATE` targets (carry MUST 1; named exceptions in `sql-safety`'s
+  `interim.rs` and `hacivat-exec`'s `gate.rs`).** A joined or comma `UPDATE`'s targets are the
+  tables its `SET` names (by alias or name; an unqualified column, or a qualifier that names no
+  listed table, makes every listed table a target); two are several targets (denied on
+  production, as a multi-table `DELETE`). The comma form is read as `CROSS JOIN`s (its commas are
+  no missing `ON`). The `UPDATE`/`DELETE` modifiers (`LOW_PRIORITY`, `QUICK`, `IGNORE`) are read
+  as white space: `sqlparser` read a lone modifier as the table, so a production confirmation
+  asked to type "LOW_PRIORITY" (or "QUICK") while the real table changed. A destructive pattern
+  without a target of its own names every object its statement writes, never only the first.
+  Two `t10all` seeds moved from `admin = deny` (unparsed) to `allow` (named exception in
+  `classifier_seeds.toml`).
+- **The run service's deadline** is injectable (`ExecService::with_confirm_deadline`), so the
+  production deadline leg runs through the service.
+- **The transaction menu's production note** is a menu note (`MenuItemSpec::note`: 12 px
+  `text-2`, never selectable; named exception in `hacivat-ui`), not a disabled row in `text-3`
+  on the raised menu (T22 review m12).
+- **Shots (R-M3-81).** The M3a production states change on purpose (no notice; the Manual chip;
+  `marks-denied` now shows the gate's refusal of a `DROP SCHEMA` of two names); a new
+  `tx-chip-production` state shows the production menu. The task report lists every PNG.

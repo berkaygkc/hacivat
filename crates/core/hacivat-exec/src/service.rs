@@ -27,8 +27,9 @@
 //!   rows sends, never implicitly; classified again and refused unless the read-only check
 //!   allows it; on a pooled `Service` session when the console holds no transaction of the
 //!   user's, else on the console (after its cursor is released, as for any run); 30 s, then
-//!   cancelled; cancellable. A read-only (or production) session's guard applies to it as to
-//!   any statement: nothing here unlocks production (R-M3-52).
+//!   cancelled; cancellable. A read-only session's guard applies to it as to any statement;
+//!   on every session (production included, ## m3b-t26-prod-unlock) only what the read-only
+//!   check allows is sent, so a count never writes (R-M3-52).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -274,6 +275,11 @@ pub struct ExecService {
     /// What decides whether a count statement may run (the pool's read-only check).
     count_check: Option<Arc<dyn StatementClassifier>>,
     evictions: Arc<Evictions>,
+    // ## m3b-t26-prod-unlock (named exception, the T28 deviation carry)
+    /// The confirm-in-transaction deadline its runs carry: D-014's 5 minutes
+    /// ([`RunSpec::CONFIRM_DEADLINE`]); a test injects a shorter one
+    /// ([`with_confirm_deadline`](Self::with_confirm_deadline)).
+    confirm_deadline: Duration,
 }
 
 impl fmt::Debug for ExecService {
@@ -309,7 +315,18 @@ impl ExecService {
             history_sink: None,
             count_check: None,
             evictions,
+            // ## m3b-t26-prod-unlock
+            confirm_deadline: RunSpec::CONFIRM_DEADLINE,
         }
+    }
+
+    // ## m3b-t26-prod-unlock (named exception, the T28 deviation carry)
+    /// The confirm-in-transaction deadline of this service's runs, in place of D-014's 5
+    /// minutes (tests: the Docker deadline legs go through the service).
+    #[must_use]
+    pub fn with_confirm_deadline(mut self, deadline: Duration) -> Self {
+        self.confirm_deadline = deadline;
+        self
     }
 
     // ## m3b-t01c-core-seams
@@ -515,7 +532,8 @@ impl ExecService {
             policy,
             fetch: req.fetch,
             observer: ObserverRef(observer.clone()),
-            confirm_deadline: RunSpec::CONFIRM_DEADLINE,
+            // ## m3b-t26-prod-unlock: the service's own (D-014's unless a test injected one).
+            confirm_deadline: self.confirm_deadline,
             context_generation: req.context_generation,
         });
         let seq = sent.seq;
@@ -679,7 +697,15 @@ async fn count_on(
     // ## m3b-t24-exec-ui (named exception, T18 m12, the T24 I1 ruling): checked in the context
     // of the session the count runs on, as that session reads it now (never another
     // session's, never a stale one).
-    let ctx = session.classifier_context().await;
+    // ## m3b-t26-prod-unlock (T26 carry MUST 2): with that context's generation, which the
+    // count's run carries, so the session refuses it when the context moved between the check
+    // and the send; a session that gave no generation (it could not answer) counts nothing.
+    let (ctx, generation) = session.run_context().await;
+    let Some(generation) = generation else {
+        return Err(CountError::Failed(Box::new(ExecError::of(
+            ExecErrorKind::ContextChanged,
+        ))));
+    };
     match check
         .check_read_only_in(req.engine, sql.clone(), Arc::from(Vec::new()), ctx)
         .await
@@ -701,7 +727,7 @@ async fn count_on(
         fetch: FetchPolicy::default(),
         observer: ObserverRef(observer.clone()),
         confirm_deadline: RunSpec::CONFIRM_DEADLINE,
-        context_generation: None,
+        context_generation: Some(generation),
     });
     *lock_sent(&sent) = Some((session, pooled, ticket.seq));
     let reply = ticket.reply.await;

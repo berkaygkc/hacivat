@@ -1,6 +1,7 @@
 //! M3b Task 24: the run pipeline in the app, end to end over FakeDriver sessions: parameters,
 //! classification on the pool with the exact bytes sent, the gate, the confirmations before the
-//! run, Run as one, the console's run policy (CHOOSE-06), and production read-only until Task 26.
+//! run, Run as one, the console's run policy (CHOOSE-06), and production read-only until Task 26
+//! (## m3b-t26-prod-unlock: since then production writes behind its confirmations).
 
 mod support;
 
@@ -643,10 +644,13 @@ fn customize_sets_the_console_policy(cx: &mut TestAppContext) {
     stop_core_runtime_test(cx);
 }
 
+// ## m3b-t26-prod-unlock: was `production_stays_read_only_until_the_unlock` (the gate denied
+// the UPDATE as read-only, nothing sent). Since Task 26 the same UPDATE is confirmed before
+// anything is kept: it runs in the user's transaction under the savepoint, the Keep/Undo
+// prompt opens, and nothing is committed or released without an answer. A read still runs
+// without a dialog.
 #[gpui::test]
-fn production_stays_read_only_until_the_unlock(cx: &mut TestAppContext) {
-    // `fake_session` opens the production profile's session read-write underneath: the gate
-    // still treats production as read-only (R-M3-52), as M3a's guard does in the product.
+fn production_writes_only_behind_its_confirmation(cx: &mut TestAppContext) {
     let c = console(
         cx,
         profile("orders-prod", DbmsKind::Postgres, EnvTag::Production),
@@ -658,17 +662,44 @@ fn production_stays_read_only_until_the_unlock(cx: &mut TestAppContext) {
     );
     c.set_text("UPDATE t SET a = 1 WHERE id = 1");
     c.run_at(0);
-    wait_until(c.vcx, "the denial", |_| {
-        matches!(c.marks().as_slice(), [ExecMarkState::Failed { .. }])
+    wait_until(c.vcx, "the Keep/Undo prompt", |vcx| {
+        layer_ids(vcx).contains(&hacivat_app::exec_ui::commit_prompt::COMMIT_LAYER_ID)
     });
-    c.barrier();
-    assert!(c.queries().is_empty(), "{:?}", c.queries());
-    assert!(c.log_ids().contains(&"exec-gate-read-only"));
-    assert!(!c.confirm_open(), "no confirmation: a denial");
+    assert!(
+        !c.confirm_open(),
+        "a DML asks after it runs, in its savepoint"
+    );
+    assert_eq!(c.queries(), ["UPDATE t SET a = 1 WHERE id = 1"]);
+    let calls = c.fake.call_log();
+    assert!(
+        calls.contains(&FakeCall::Statement("SAVEPOINT hv_confirm".into())),
+        "{calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| matches!(call, FakeCall::Statement(s)
+            if s.contains("COMMIT") || s.starts_with("RELEASE"))),
+        "nothing kept before the answer: {calls:?}"
+    );
+    assert!(!c.log_ids().contains(&"exec-gate-read-only"));
+    stop_core_runtime_test(cx);
+}
+
+// ## m3b-t26-prod-unlock: the read half of the old test, on its own console.
+#[gpui::test]
+fn a_production_read_runs_without_a_dialog(cx: &mut TestAppContext) {
+    let c = console(
+        cx,
+        profile("orders-prod", DbmsKind::Postgres, EnvTag::Production),
+        pg(),
+    );
     c.set_text("SELECT 1");
     c.run_at(0);
     c.wait_queries(1);
     assert_eq!(c.queries(), ["SELECT 1"]);
+    assert!(!c.confirm_open());
+    assert!(!layer_ids(c.vcx).contains(&hacivat_app::exec_ui::commit_prompt::COMMIT_LAYER_ID));
     stop_core_runtime_test(cx);
 }
 

@@ -6,8 +6,9 @@
 //! (D-062), or deny it. Pure and synchronous: it never talks to a session.
 //!
 //! Since Task 15 ([`gate`] lists the rules). The app calls the gate only from Task 24 on
-//! (R-M3-52), and production stays read-only until Task 26: the gate unlocks nothing by
-//! itself (a read-only connection is gated as read-only whatever its environment).
+//! (R-M3-52). ## m3b-t26-prod-unlock: production sessions are read-write since Task 26, so the
+//! gate's production rows (rule 4 on) are what stands between a production console and its
+//! data; a read-only connection is still gated as read-only whatever its environment.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -633,18 +634,28 @@ fn typed_name(
             if !dr.kind.is_unsafe_dml() && !schema_or_db {
                 continue;
             }
-            let Some(target) = dr.target.as_ref().or_else(|| s.touched.writes.first()) else {
+            // ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1): a pattern without a
+            // target of its own names every object its statement writes, never only the first
+            // (`UPDATE a JOIN b … SET b.y = 2` writes `b`): typing one name must never approve
+            // another, so two are several targets.
+            let targets: Vec<&ObjectRef> = match dr.target.as_ref() {
+                Some(t) => vec![t],
+                None => s.touched.writes.iter().collect(),
+            };
+            if targets.is_empty() {
                 if schema_or_db && let Some(Some(n)) = &dropped_db {
                     push_name(&mut names, n.clone());
                     named = true;
                     continue;
                 }
                 return Err(GateReason::of(NO_TARGET));
-            };
-            push_name(
-                &mut names,
-                written_name(target, dr.range, s.range, text, report.dialect),
-            );
+            }
+            for target in targets {
+                push_name(
+                    &mut names,
+                    written_name(target, dr.range, s.range, text, report.dialect),
+                );
+            }
             named |= schema_or_db;
         }
         match dropped_db {

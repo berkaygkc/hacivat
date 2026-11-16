@@ -40,7 +40,7 @@ use std::sync::{Arc, OnceLock};
 use serde::Deserialize;
 use smallvec::{SmallVec, smallvec};
 use sql_dialect::{DialectCtx, DialectId, lex_profile};
-use sql_ident::{Ident, QualifiedName};
+use sql_ident::{Ident, QualifiedName, ident_eq};
 use sql_lexer::{LexErrorCode, LexState, Lexed, TokenKind, exec_comment, lex};
 use sql_split::SplitMode;
 use sql_text::{LineCol, LineIndex, TextRange};
@@ -638,8 +638,22 @@ fn analyse_view(view: &str, ctx: &ClassifyCtx, depth: u8, pre: Option<&Lexed>) -
         prescan::set_statement(&t, &mut acc);
     }
     let ours = count_statements(&t);
+    // ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1): MySQL/MariaDB's multi-table
+    // `UPDATE a, b SET …` is read as `UPDATE a CROSS JOIN b SET …` (the same table reference to
+    // the server), so it gets real targets instead of an unparsed `Unknown`; the `UPDATE` and
+    // `DELETE` modifiers are never read as a table (`mysql_dml_as_parsed`).
+    let mut comma_update = false;
     let parsed = match tokens {
-        Ok(tokens) => parse(tokens, dialect),
+        Ok(tokens) => {
+            let tokens = if d == DialectId::Sqlite {
+                tokens
+            } else {
+                let (tokens, rewrote) = mysql_dml_as_parsed(tokens);
+                comma_update = rewrote;
+                tokens
+            };
+            parse(tokens, dialect)
+        }
         Err(e) => Err(ParserError::TokenizerError(e.to_string())),
     };
     match parsed {
@@ -651,6 +665,7 @@ fn analyse_view(view: &str, ctx: &ClassifyCtx, depth: u8, pre: Option<&Lexed>) -
                 acc.doubt(ReasonCode::MultiStatement, whole);
             }
             let mut walk = Walk::new(ctx, whole, &mut acc);
+            walk.comma_update = comma_update;
             for s in &stmts {
                 let _ = s.visit(&mut walk);
             }
@@ -760,6 +775,92 @@ fn parse(tokens: Vec<TokenWithSpan>, dialect: &dyn Dialect) -> Result<Vec<Statem
         .with_options(options)
         .with_tokens_with_locations(tokens)
         .parse_statements()
+}
+
+// ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1)
+/// The MySQL/MariaDB `UPDATE`/`DELETE` forms `sqlparser` reads wrongly or not at all, as forms it
+/// reads right with the same targets (spans stay the original tokens'):
+/// - **Modifiers.** `UPDATE [LOW_PRIORITY] [IGNORE]` and `DELETE [LOW_PRIORITY] [QUICK]
+///   [IGNORE]`: `sqlparser` reads a lone modifier as the *table* (`UPDATE LOW_PRIORITY orders`
+///   writes "LOW_PRIORITY", alias `orders`), so a production confirmation would ask to type the
+///   modifier while `orders` changes. They change locking and error handling, never which
+///   tables are written: they are read as white space.
+/// - **The comma form of a multi-table `UPDATE`** (`UPDATE a, b SET …`), which it does not
+///   parse: every top-level comma between the `UPDATE` and its first top-level `SET` becomes
+///   `CROSS JOIN` (the comma is an inner join without a condition to the server; MySQL's
+///   `table_references`).
+///
+/// Whether a comma was rewritten (the walk then does not call those joins a missing `ON`); any
+/// other statement is returned as it was.
+fn mysql_dml_as_parsed(mut tokens: Vec<TokenWithSpan>) -> (Vec<TokenWithSpan>, bool) {
+    use sqlparser::keywords::Keyword;
+    use sqlparser::tokenizer::Whitespace;
+    let code = |t: &Token| !matches!(t, Token::Whitespace(_));
+    let is_kw = |t: &Token, k: Keyword| matches!(t, Token::Word(w) if w.keyword == k && w.quote_style.is_none());
+    let is_word = |t: &Token, word: &str| matches!(t, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(word));
+    let Some(start) = tokens.iter().position(|t| code(&t.token)) else {
+        return (tokens, false);
+    };
+    let update = is_kw(&tokens[start].token, Keyword::UPDATE);
+    let modifiers: &[&str] = if update {
+        &["LOW_PRIORITY", "IGNORE"]
+    } else if is_kw(&tokens[start].token, Keyword::DELETE) {
+        &["LOW_PRIORITY", "QUICK", "IGNORE"]
+    } else {
+        return (tokens, false);
+    };
+    // The modifiers right after the keyword, in any order MySQL accepts them, each once.
+    let mut i = start + 1;
+    loop {
+        while i < tokens.len() && !code(&tokens[i].token) {
+            i += 1;
+        }
+        if i < tokens.len() && modifiers.iter().any(|m| is_word(&tokens[i].token, m)) {
+            tokens[i].token = Token::Whitespace(Whitespace::Space);
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if !update {
+        return (tokens, false);
+    }
+    let mut depth = 0usize;
+    let mut commas = Vec::new();
+    let mut set = false;
+    for (i, t) in tokens.iter().enumerate().skip(start + 1) {
+        match &t.token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            Token::SemiColon if depth == 0 => break,
+            Token::Comma if depth == 0 => commas.push(i),
+            tok if depth == 0 && is_kw(tok, Keyword::SET) => {
+                set = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    if !set || commas.is_empty() {
+        return (tokens, false);
+    }
+    let mut out = Vec::with_capacity(tokens.len() + 3 * commas.len());
+    for (i, t) in tokens.into_iter().enumerate() {
+        if commas.contains(&i) {
+            let span = t.span;
+            for token in [
+                Token::Whitespace(Whitespace::Space),
+                Token::make_keyword("CROSS"),
+                Token::Whitespace(Whitespace::Space),
+                Token::make_keyword("JOIN"),
+            ] {
+                out.push(TokenWithSpan { token, span });
+            }
+        } else {
+            out.push(t);
+        }
+    }
+    (out, true)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1117,6 +1218,11 @@ struct Walk<'c, 'a> {
     top: Option<StmtKind>,
     /// Inside a plain `EXPLAIN` (its inner statement does not run: no destructive pattern).
     plain_explain: u32,
+    // ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1)
+    /// The view was the comma form of a multi-table `UPDATE`, read with `CROSS JOIN`s
+    /// ([`mysql_dml_as_parsed`]): those joins are the user's commas, not a join that forgot
+    /// its `ON` (the comma form of a multi-table `DELETE` is not one either).
+    comma_update: bool,
 }
 
 impl<'c, 'a> Walk<'c, 'a> {
@@ -1127,6 +1233,7 @@ impl<'c, 'a> Walk<'c, 'a> {
             acc,
             top: None,
             plain_explain: 0,
+            comma_update: false,
         }
     }
 
@@ -1200,10 +1307,22 @@ impl<'c, 'a> Walk<'c, 'a> {
                 }
             }
             Statement::Update(u) => {
-                self.unbounded(u.selection.as_ref(), &u.limit, u.order_by.is_empty(), None);
+                // ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1): every table a
+                // `SET` target names is a target of the unbounded patterns and a write, so a
+                // joined `UPDATE a JOIN b … SET b.y = 2` asks for `b` (the table that changes),
+                // never the first table; more than one is several targets (the gate denies them
+                // on production, as a multi-table `DELETE`).
+                let targets = update_targets(u, self.ctx.dialect.id);
+                let no_order = u.order_by.is_empty();
+                if targets.is_empty() {
+                    self.unbounded(u.selection.as_ref(), &u.limit, no_order, None);
+                }
+                for t in &targets {
+                    self.unbounded(u.selection.as_ref(), &u.limit, no_order, Some(t));
+                }
                 self.joins_without_on(std::slice::from_ref(&u.table));
-                if let TableFactor::Table { name, .. } = &u.table.relation {
-                    self.write_target(name);
+                for t in &targets {
+                    self.write_target(t);
                 }
             }
             Statement::Delete(d) => {
@@ -1403,6 +1522,10 @@ impl<'c, 'a> Walk<'c, 'a> {
         for t in tables {
             for j in &t.joins {
                 let op = format!("{:?}", j.join_operator);
+                // ## m3b-t26-prod-unlock (named exception): a comma of the comma form.
+                if self.comma_update && op.starts_with("CrossJoin") {
+                    continue;
+                }
                 if op.starts_with("CrossJoin") || op.ends_with("(None)") {
                     self.destructive(DestructiveKind::JoinWithoutOn, None);
                 }
@@ -1513,6 +1636,80 @@ fn qualified(n: &ObjectName) -> Option<QualifiedName> {
         }
     }
     (!parts.is_empty()).then_some(QualifiedName { parts })
+}
+
+// ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1)
+/// The tables an `UPDATE` changes: the table of a single-table `UPDATE` (whatever its `SET`
+/// says); in a joined (or comma) one, every table a `SET` target's qualifier names, by its alias
+/// or by its name's last parts (`ident_eq`, so a qualifier that may name two tables names
+/// both). Fail closed: an unqualified `SET` column, or a qualifier that names no listed table,
+/// makes every listed table a target. Each name once, as the statement lists it.
+fn update_targets(u: &sqlparser::ast::Update, d: DialectId) -> Vec<ObjectName> {
+    let listed: Vec<(&ObjectName, Option<&sqlparser::ast::Ident>)> =
+        std::iter::once(&u.table.relation)
+            .chain(u.table.joins.iter().map(|j| &j.relation))
+            .filter_map(|t| match t {
+                TableFactor::Table { name, alias, .. } => {
+                    Some((name, alias.as_ref().map(|a| &a.name)))
+                }
+                _ => None,
+            })
+            .collect();
+    let all = || -> Vec<ObjectName> {
+        let mut out: Vec<ObjectName> = Vec::new();
+        for (n, _) in &listed {
+            if !out.contains(n) {
+                out.push((*n).clone());
+            }
+        }
+        out
+    };
+    let single = u.table.joins.is_empty() && listed.len() == 1;
+    if single {
+        return all();
+    }
+    let ident = |i: &sqlparser::ast::Ident| Ident {
+        text: Arc::from(i.value.as_str()),
+        quoted: i.quote_style.is_some(),
+    };
+    let mut out: Vec<ObjectName> = Vec::new();
+    let columns = u.assignments.iter().flat_map(|a| match &a.target {
+        sqlparser::ast::AssignmentTarget::ColumnName(n) => vec![n],
+        sqlparser::ast::AssignmentTarget::Tuple(ns) => ns.iter().collect(),
+    });
+    for column in columns {
+        let Some(q) = qualified(column) else {
+            return all();
+        };
+        if q.parts.len() < 2 {
+            return all();
+        }
+        let qualifier = &q.parts[..q.parts.len() - 1];
+        let mut hit = false;
+        for (name, alias) in &listed {
+            let by_alias = alias
+                .is_some_and(|a| qualifier.len() == 1 && ident_eq(d, &qualifier[0], &ident(a)));
+            let by_name = alias.is_none()
+                && qualified(name).is_some_and(|n| {
+                    let k = qualifier.len().min(n.parts.len());
+                    k > 0
+                        && qualifier[qualifier.len() - k..]
+                            .iter()
+                            .zip(&n.parts[n.parts.len() - k..])
+                            .all(|(a, b)| ident_eq(d, a, b))
+                });
+            if by_alias || by_name {
+                hit = true;
+                if !out.contains(name) {
+                    out.push((*name).clone());
+                }
+            }
+        }
+        if !hit {
+            return all();
+        }
+    }
+    if out.is_empty() { all() } else { out }
 }
 
 /// A `WHERE` that keeps every row (SAFE-07 `AlwaysTrue`, UNSAFE-06), by the shared rule
@@ -1832,6 +2029,86 @@ mod tests {
                 1,
                 "{d:?}"
             );
+        }
+    }
+
+    // ## m3b-t26-prod-unlock (named exception, T26 carry MUST 1)
+    /// The tables an `UPDATE` changes are its targets: a joined or comma `UPDATE` names the
+    /// `SET` tables (an unqualified column, every listed table); the MySQL modifiers are never a
+    /// table; the comma form parses (not `Unknown`) and its commas are no missing `ON`.
+    #[test]
+    fn update_targets_are_the_tables_that_change() {
+        for d in [DialectId::MySql, DialectId::MariaDb] {
+            let ctx = ClassifyCtx::new(
+                DialectCtx::new(d, None),
+                sql_dialect::ClientFlavor::None,
+                crate::Expect::SingleStatement,
+            );
+            let names = |sql: &str| -> (Vec<String>, Vec<String>, Vec<DestructiveKind>) {
+                let r = classify_interim(sql, &ctx);
+                assert_ne!(r.request_class, CoarseClass::Unknown, "{d:?} {sql}: {r:?}");
+                let text = |n: &QualifiedName| {
+                    n.parts
+                        .iter()
+                        .map(|p| p.text.to_string())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                };
+                let s = &r.items[0];
+                (
+                    s.destructive
+                        .iter()
+                        .filter(|x| x.kind == DestructiveKind::NoWhere)
+                        .filter_map(|x| x.target.as_ref().map(|t| text(&t.name)))
+                        .collect(),
+                    s.touched.writes.iter().map(|w| text(&w.name)).collect(),
+                    s.destructive.iter().map(|x| x.kind).collect(),
+                )
+            };
+            for (sql, want) in [
+                ("UPDATE a JOIN b ON a.id = b.id SET b.y = 2", &["b"][..]),
+                (
+                    "UPDATE a AS x JOIN b AS z ON x.id = z.id SET z.y = 2",
+                    &["b"],
+                ),
+                (
+                    "UPDATE a JOIN b ON a.id = b.id SET a.x = 1, b.y = 2",
+                    &["a", "b"],
+                ),
+                ("UPDATE a JOIN b ON a.id = b.id SET y = 2", &["a", "b"]),
+                ("UPDATE a, b SET b.y = 2", &["b"]),
+                ("UPDATE a, b SET y = 2", &["a", "b"]),
+                ("UPDATE a, b SET q.y = 2", &["a", "b"]),
+                ("UPDATE a x, b z SET (z.y) = 2", &["b"]),
+                ("UPDATE LOW_PRIORITY orders SET a = 1", &["orders"]),
+                ("UPDATE IGNORE orders SET a = 1", &["orders"]),
+                (
+                    "UPDATE LOW_PRIORITY IGNORE orders o SET o.a = 1",
+                    &["orders"],
+                ),
+                ("UPDATE LOW_PRIORITY a, b SET a.y = b.y", &["a"]),
+                ("DELETE LOW_PRIORITY FROM orders", &["orders"]),
+                ("DELETE QUICK FROM orders", &["orders"]),
+                ("DELETE IGNORE FROM orders", &["orders"]),
+                ("DELETE LOW_PRIORITY QUICK IGNORE FROM orders", &["orders"]),
+            ] {
+                let (unbounded, writes, kinds) = names(sql);
+                assert_eq!(unbounded, want, "{d:?} {sql}: the unbounded targets");
+                assert_eq!(writes, want, "{d:?} {sql}: the writes");
+                assert!(
+                    !kinds.contains(&DestructiveKind::JoinWithoutOn),
+                    "{d:?} {sql}: {kinds:?}"
+                );
+            }
+            // A real join without `ON` is still one.
+            let (_, _, kinds) = names("UPDATE a JOIN b SET b.y = 2 WHERE a.id = b.id");
+            assert!(
+                kinds.contains(&DestructiveKind::JoinWithoutOn),
+                "{d:?}: {kinds:?}"
+            );
+            // A quoted modifier word is a table.
+            let (unbounded, _, _) = names("UPDATE `LOW_PRIORITY` SET a = 1");
+            assert_eq!(unbounded, ["LOW_PRIORITY"], "{d:?}");
         }
     }
 

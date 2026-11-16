@@ -911,18 +911,16 @@ pub mod matrix {
     pub struct Opts {
         pub read_only: bool,
         pub env: Option<EnvTag>,
-        /// The app's boot policy (R-M3-29): production profiles get read-only sessions.
-        pub production_policy: bool,
         pub user: Option<String>,
         pub database: Option<String>,
     }
 
     impl Opts {
-        /// A development console under the app's production policy (the app's boot value).
+        /// A development console under the app's boot configuration (## m3b-t26-prod-unlock:
+        /// `ManagerConfig::m2b()`, the production policy is gone).
         pub fn dev() -> Opts {
             Opts {
                 env: Some(EnvTag::Dev),
-                production_policy: true,
                 ..Opts::default()
             }
         }
@@ -969,10 +967,7 @@ pub mod matrix {
             if let Some(db) = opts.database {
                 p.database = Some(db);
             }
-            let config = ManagerConfig {
-                production_read_only: opts.production_policy,
-                ..ManagerConfig::m2b()
-            };
+            let config = ManagerConfig::m2b();
             let m =
                 ConnectionManager::new(tokio::runtime::Handle::current(), Arc::new(deps()), config);
             let profile = Arc::new(p);
@@ -2859,5 +2854,60 @@ pub mod t28 {
             }
             std::fs::write(&path, out).expect("the record is written");
         }
+    }
+}
+
+// ## m3b-t26-prod-unlock
+/// Task 26's Docker helpers (`docker_prod_unlock`).
+#[allow(dead_code)]
+pub mod t26 {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use hacivat_secrets::SecretString;
+    use hacivat_session::pipeline::Interaction;
+    use hacivat_session::session::SessionHandle;
+    use hacivat_session::{ConnectionManager, LiveState, ManagerConfig};
+
+    use super::matrix::{Line, deps, profile_of, secs};
+
+    /// A read-write development session of `line` connected without a database (MySQL's
+    /// `DATABASE()` is then NULL), on its own manager (the app's configuration).
+    pub async fn without_database(line: &Line) -> (Arc<ConnectionManager>, SessionHandle) {
+        let mut p = profile_of(line);
+        p.database = None;
+        p.environment = Some(hacivat_proto::EnvTag::Dev);
+        let m = ConnectionManager::new(
+            tokio::runtime::Handle::current(),
+            Arc::new(deps()),
+            ManagerConfig::m2b(),
+        );
+        let profile = Arc::new(p);
+        let password = line
+            .target
+            .as_ref()
+            .map(|t| SecretString::from(t.password.clone()));
+        m.connect(profile.clone(), password, Interaction::Headless);
+        let mut changes = m.changes();
+        let deadline = Instant::now() + secs(60);
+        loop {
+            match m.state(profile.id) {
+                LiveState::Connected(_) => break,
+                LiveState::Failed(e) => panic!("{}: the connect failed: {:?}", line.id, e.class),
+                LiveState::Lost { class } => panic!("{}: lost: {class:?}", line.id),
+                _ => {}
+            }
+            assert!(Instant::now() < deadline, "{}: never connected", line.id);
+            tokio::select! {
+                _ = changes.changed() => {}
+                () = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
+        let s = m
+            .sessions(profile.id)
+            .expect("connected")
+            .default_session()
+            .expect("a default session");
+        (m, s)
     }
 }

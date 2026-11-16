@@ -2007,3 +2007,93 @@ fn a_listed_drop_schema_from_the_words_is_denied() {
         GateDecision::Confirm { type_to_confirm: Some(t), .. } if &**t == "a"
     ));
 }
+
+// ## m3b-t26-prod-unlock (T26 carry MUST 1, the T28 re-check): MySQL/MariaDB multi-table and
+// joined `UPDATE`s over the real interim backend. The typed name is the table that changes
+// (the `SET` target), never the first table listed; two changed tables are several targets,
+// denied on production as a multi-table `DELETE` is; the comma form `UPDATE a, b SET …` gets
+// real targets (it was unparsed: `Unknown`, a plain confirmation).
+#[test]
+fn joined_and_comma_updates_ask_for_the_table_that_changes() {
+    for engine in [DbmsKind::MySql, DbmsKind::MariaDb] {
+        let real = |text: &str| {
+            let ctx = sql_safety::ClassifyCtx::new(
+                common::gate_fx::ctx_of(engine),
+                sql_dialect::ClientFlavor::None,
+                sql_safety::Expect::SingleStatement,
+            );
+            sql_safety::classify_interim(text, &ctx)
+        };
+        let run = |text: &str| {
+            let unit = prepared_on(engine, text, &[]);
+            let report = real(&unit.final_text);
+            one(unit, report, &conn(engine, Some(EnvTag::Production)))
+        };
+        // The table that changes is the one to type.
+        for (text, name) in [
+            ("UPDATE a JOIN b ON a.id = b.id SET b.y = 2", "b"),
+            ("UPDATE a JOIN b ON a.id = b.id SET a.y = 2", "a"),
+            ("UPDATE a AS x JOIN b AS z ON x.id = z.id SET z.y = 2", "b"),
+            (
+                "UPDATE shop.a JOIN shop.b ON a.id = b.id SET shop.b.y = 2",
+                "shop.b",
+            ),
+            ("UPDATE a, b SET b.y = 2", "b"),
+            ("UPDATE a x, b z SET z.y = 2, z.w = 3", "b"),
+            ("UPDATE LOW_PRIORITY a, b SET a.y = b.y", "a"),
+            // A join without `ON` names no target of its own: the table it writes.
+            ("UPDATE a JOIN b SET b.y = 2 WHERE a.id = b.id", "b"),
+            // A MySQL modifier is never the table (it was read as one before Task 26).
+            ("UPDATE LOW_PRIORITY orders SET a = 1", "orders"),
+            ("DELETE QUICK FROM orders", "orders"),
+        ] {
+            let item = run(text);
+            match &item.decision {
+                GateDecision::Confirm {
+                    type_to_confirm: Some(t),
+                    suppressible: false,
+                    ..
+                } => assert_eq!(&**t, name, "{engine:?} {text}"),
+                other => panic!("{engine:?} {text}: {other:?}"),
+            }
+            assert_ne!(item.class, GateClass::Unknown, "{engine:?} {text}: parsed");
+        }
+        // Two tables change, or a column whose table is unknown: several targets, denied.
+        for text in [
+            "UPDATE a JOIN b ON a.id = b.id SET a.x = 1, b.y = 2",
+            "UPDATE a JOIN b ON a.id = b.id SET y = 2",
+            "UPDATE a, b SET a.x = 1, b.y = 2",
+            "UPDATE a, b SET y = 2",
+            "UPDATE a, b SET c.y = 2",
+            "UPDATE a JOIN b SET a.x = 1, b.y = 2 WHERE a.id = b.id",
+        ] {
+            let item = run(text);
+            assert_eq!(
+                deny_id(&item.decision),
+                "exec-unsafe-several-targets",
+                "{engine:?} {text}"
+            );
+        }
+        // Bounded by a WHERE: no unsafe pattern, so no typed name; the DML runs in a
+        // transaction and asks (production's DML row), never `Unknown`.
+        for text in [
+            "UPDATE a JOIN b ON a.id = b.id SET b.y = 2 WHERE a.id = 3",
+            "UPDATE a, b SET b.y = a.y WHERE a.id = b.id",
+        ] {
+            let item = run(text);
+            assert!(
+                matches!(item.decision, GateDecision::RunInTxThenConfirm { .. }),
+                "{engine:?} {text}: {:?}",
+                item.decision
+            );
+            assert_eq!(item.class, GateClass::Dml, "{engine:?} {text}");
+        }
+        // A single-table UPDATE is unchanged.
+        let item = run("UPDATE a SET y = 2");
+        assert!(
+            matches!(&item.decision, GateDecision::Confirm { type_to_confirm: Some(t), .. } if &**t == "a"),
+            "{engine:?}: {:?}",
+            item.decision
+        );
+    }
+}

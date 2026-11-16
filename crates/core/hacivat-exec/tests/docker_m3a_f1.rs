@@ -4,10 +4,12 @@
 //!
 //! - F1-c: a production profile connects with a bound console on every server line
 //!   (PostgreSQL, MySQL, MariaDB of the active set). The console binds as the app's does
-//!   (`Console::open`: connect under the app's production policy, then the SQL-context probe as
+//!   (`Console::open`: connect under the app's configuration, then the SQL-context probe as
 //!   an internal statement, `exec_ui::context`); the probe reads the server's value on the
-//!   read-only session, and the profile and the session stay up for the user's statements,
-//!   which the guard still runs.
+//!   session, and the profile and the session stay up for the user's statements.
+//!   ## m3b-t26-prod-unlock: the session is read-write in Manual mode (D-036), and a write goes
+//!   through the gate (`common::t28`): it is confirmed before it is sent, and a confirmation
+//!   nobody answered sends nothing (before Task 26 the read-only guard refused it).
 //! - F1-a: PostgreSQL rejects `)COPY t FROM STDIN` as a syntax error (42601) and takes the next
 //!   statement normally, so it never entered `COPY` mode: the lines after it are never read
 //!   as `COPY` data.
@@ -18,10 +20,14 @@
 mod common;
 
 use common::matrix::*;
-use hacivat_exec::{console_ux, sqlctx};
+// ## m3b-t26-prod-unlock
+use common::t28::{Con, Spec};
+use hacivat_exec::classify_pool::ClassifyPool;
+use hacivat_exec::{ErrorPolicy, console_ux, sqlctx};
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_session::LiveState;
 use hacivat_session::session::SessionState;
+use hacivat_session::session::TxMode;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "docker"]
@@ -37,20 +43,18 @@ async fn a_production_profile_connects_with_a_bound_console_on_every_server_line
             line,
             Opts {
                 env: Some(EnvTag::Production),
-                production_policy: true,
                 ..Opts::default()
             },
         )
         .await;
-        let ux = console_ux(Some(EnvTag::Production), true, &prod.snap(), None, None);
-        assert!(
-            ux.production && ux.read_only && ux.forced_read_only,
-            "{id}: {ux:?}"
-        );
-        assert!(prod.snap().read_only, "{id}: a read-only session");
+        let ux = console_ux(Some(EnvTag::Production), &prod.snap(), None, None);
+        // ## m3b-t26-prod-unlock: a read-write session in Manual mode (D-036).
+        assert!(ux.production && !ux.read_only, "{id}: {ux:?}");
+        assert!(!prod.snap().read_only, "{id}: a read-write session");
+        assert_eq!(prod.snap().tx.mode, TxMode::Manual, "{id}");
 
         // The bound console's probe read the server's value (not the defaults), on the
-        // read-only session.
+        // session.
         let probe = sqlctx::probe_sql(line.engine).expect("a server line has a probe");
         let value = prod
             .internal(probe)
@@ -65,7 +69,7 @@ async fn a_production_profile_connects_with_a_bound_console_on_every_server_line
             "{id}: the console's context is the probe's"
         );
 
-        // The profile and its session are up, and the user's statements run (guarded).
+        // The profile and its session are up, and the user's statements run.
         assert!(
             matches!(prod.m.state(prod.profile.id), LiveState::Connected(_)),
             "{id}: {:?}",
@@ -73,10 +77,21 @@ async fn a_production_profile_connects_with_a_bound_console_on_every_server_line
         );
         assert_eq!(prod.snap().state, SessionState::Idle, "{id}");
         prod.ok("SELECT 1").await;
-        let refused = prod.run("CREATE TABLE hv_f1_never (a int)").await;
-        assert_eq!(refused.names(), ["Failed"], "{id}: the guard still refuses");
-        // ## m3a-f5-demo (DEMO-7): refused by the console, before anything is sent.
-        assert_eq!(refused.outcome(), "input", "{id}");
+        // ## m3b-t26-prod-unlock: a write meets the gate's confirmation; unanswered, the run
+        // service sends nothing, and the server never sees it.
+        let pool = ClassifyPool::new(2);
+        let con = Con::open(line, Spec::production(), &pool).await;
+        let planned = con.plan("CREATE TABLE hv_f1_never (a int)", &[]).await;
+        assert_eq!(planned.shapes(), ["confirm"], "{id}: asked first");
+        let refused = ended(con.send(&planned, ErrorPolicy::StopOnError, None)).await;
+        assert_eq!(refused.names(), ["Skipped"], "{id}: not sent unanswered");
+        let mut side = admin(line).await;
+        assert!(
+            side.try_batch("SELECT 1 FROM hv_f1_never").await.is_err(),
+            "{id}: the table was never created"
+        );
+        side.close().await;
+        con.shutdown().await;
         assert!(
             matches!(prod.m.state(prod.profile.id), LiveState::Connected(_)),
             "{id}: {:?}",
@@ -86,7 +101,7 @@ async fn a_production_profile_connects_with_a_bound_console_on_every_server_line
             line,
             prod.version.as_ref(),
             "production connect, bound console probe",
-            &format!("{value:?}, write {}", refused.outcome()),
+            &format!("{value:?}, write {} unanswered", planned.shapes()[0]),
         );
         prod.shutdown().await;
     }

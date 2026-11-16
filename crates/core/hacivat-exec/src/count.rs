@@ -13,7 +13,8 @@
 //! - The statement is a separate query that never runs by itself: only the user's Count rows
 //!   asks for it ([`crate::ExecService::count`]). It is classified again there and refused
 //!   unless the read-only check allows it, and it runs through the session like any statement,
-//!   so a read-only (or production) session's guard applies to it unchanged (R-M3-52).
+//!   so a read-only session's guard applies to it unchanged (R-M3-52); since Task 26 the same
+//!   check is what keeps a production count a read.
 
 use std::sync::{Arc, Mutex, PoisonError};
 

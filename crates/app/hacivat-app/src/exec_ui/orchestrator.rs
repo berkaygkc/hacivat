@@ -400,9 +400,10 @@ fn on_execute(console: ConsoleId, req: ExecRequest, cx: &mut App) {
         connect_first(&profile, cx);
         return;
     }
-    // Fix round 1 (Task 32 contract): a production-tagged console waiting for the user's open
-    // transaction to end before it reconnects read-only sends nothing meanwhile; Commit and
-    // Roll back stay available (tx.commit / tx.rollback do not ask this).
+    // Fix round 1 (Task 32 contract): a console waiting for the user's open transaction to end
+    // before it reconnects read-only (its profile was marked read-only; ## m3b-t26-prod-unlock:
+    // a production tag no longer does this) sends nothing meanwhile; Commit and Roll back stay
+    // available (tx.commit / tx.rollback do not ask this).
     if crate::exec_ui::pending_read_only(console, cx) {
         say(console, "hv-exec-pending-read-only", cx);
         return;
@@ -932,7 +933,8 @@ fn rerun(console: ConsoleId, ordinal: u32, cx: &mut App) {
 // nothing) → `classify_units(final_text)` on the classifier pool, off the UI thread, in the
 // session's real context (`run_ctx`: known modes, search path, version, the profile's allowlist)
 // → `gate` with `ConnSafety` from the live profile and session (production read-only until Task
-// 26) → a denial logs, marks the gutter and says why, nothing sent → the confirmations in unit
+// 26; since then its production rows) → a denial logs, marks the gutter and says why, nothing
+// sent → the confirmations in unit
 // order (R-M3-84) → one `ExecService::run` with the answered plan. Classification sees exactly
 // the bytes sent (the gate denies a stale report), and Run sends exactly the previewed ranges
 // (with parameters, their rewrite).
@@ -950,6 +952,9 @@ const CONFIRM_SUPPRESSED: &str = "exec-confirm-suppressed";
 const RUN_REFUSED: &str = "exec-gate-run-refused";
 /// I1: the session reads text in other modes than the console split it in.
 const CONTEXT_CHANGED: &str = "exec-run-context-changed";
+// ## m3b-t26-prod-unlock (`hacivat-core.ftl`, block `m3b-t26-prod-unlock`)
+/// Carry MUST 2: the context read timed out on a production or read-only session.
+const CONTEXT_UNCONFIRMED: &str = "exec-run-context-unconfirmed";
 /// M4: the console's session changed between the gate and the send.
 const CONNECTION_CHANGED: &str = "exec-run-connection-changed";
 /// M1: a unit run as one carries no bind values.
@@ -1235,16 +1240,17 @@ pub fn classify_ctx_in(
     hacivat_exec::run_ctx_in(profile.engine, allow, sctx, expect)
 }
 
-/// The gate's view of console `console`'s connection now. **Production stays read-only until
-/// Task 26** (R-M3-52): a production profile is gated as read-only whatever its session says,
-/// as M3a's guard keeps it (Task 26 deletes this one rule).
+/// The gate's view of console `console`'s connection now: the **live** profile's environment
+/// (a profile retagged to production gets its confirmations from the next Run, R-M3-78) and the
+/// session's read-only flag, transaction state and mode.
+/// ## m3b-t26-prod-unlock: production is no longer gated as read-only (R-M3-6 REVISED ends):
+/// every unit that is not a read meets the gate's production rows (R-M3-55).
 fn conn_safety(profile: &Profile, session: &SessionHandle, cx: &App) -> ConnSafety {
     let snap = session.state().borrow().clone();
-    let production = profile.environment == Some(EnvTag::Production);
     ConnSafety {
         engine: profile.engine,
         env: profile.environment,
-        read_only: snap.read_only || production,
+        read_only: snap.read_only,
         tx_status: snap.tx.status,
         tx_owner: snap.tx.owner,
         tx_mode: snap.tx.mode,
@@ -1848,6 +1854,28 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
                 cx,
             );
             probe_context(console, cx);
+        });
+        return;
+    }
+    // ## m3b-t26-prod-unlock (T26 carry MUST 2, the T24 round-2 re-check): a read that timed
+    // out (both reads did, or `now` would differ from `sctx`) gives no context generation, and
+    // the session checks none. On a production (the live tag) or read-only session nothing is
+    // sent then: the run could not be proved to run in the context it was classified in.
+    let unconfirmed = generation.is_none()
+        && cx.update(|cx: &mut App| {
+            let live = profile_of(cx, console).unwrap_or_else(|| job.profile.clone());
+            live.environment == Some(EnvTag::Production) || job.session.state().borrow().read_only
+        });
+    if unconfirmed {
+        cx.update(|cx: &mut App| {
+            refuse(
+                console,
+                job.version,
+                ranges(&job.units),
+                (CONTEXT_UNCONFIRMED, Vec::new()),
+                NOT_SENT,
+                cx,
+            );
         });
         return;
     }

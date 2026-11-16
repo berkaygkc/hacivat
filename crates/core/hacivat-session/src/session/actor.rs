@@ -1132,6 +1132,23 @@ impl Core {
     ) -> Result<(), ExecError> {
         let mut script_ran = false;
         for step in plan.steps.iter().filter(|step| want(step)) {
+            // ## m3b-t26-prod-unlock (named exception, the T26 carry MUST 3): on a production
+            // profile the script runs only harmless statements (`startup_check`); otherwise
+            // none of it is sent and the session is refused (`config.invalid`), on connect,
+            // reset and reconnect alike. The warning names the statement's number, never its
+            // text.
+            if let EnvStep::StartupScript(statements) = step
+                && let Some(n) = self.refused_startup_statement(statements).await
+            {
+                tracing::warn!(
+                    statement = n,
+                    "statement {n} of the profile's startup script is not a harmless read or \
+                     session setting, which a production connection requires; none of the \
+                     script was sent and the session is closed"
+                );
+                self.last_class = Some(ErrClass::ConfigInvalid);
+                return Err(ExecError::of(ExecErrorKind::Internal));
+            }
             let config = matches!(step, EnvStep::TimeZone(_) | EnvStep::StartupScript(_));
             for statement in plan.step_statements(step) {
                 if let Err(e) = self.control(&statement).await {

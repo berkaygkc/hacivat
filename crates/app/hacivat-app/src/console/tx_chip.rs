@@ -339,7 +339,9 @@ pub fn menu_items(console: ConsoleId, cx: &App) -> Vec<MenuItemSpec> {
     );
     if is_production(console, cx) {
         items.push(MenuItemSpec::separator());
-        items.push(MenuItemSpec::new(text_fn(ids::hv::TX_MENU_PROD_NOTE), NOTE).disabled(true));
+        // ## m3b-t26-prod-unlock (named exception, the T22 review m12 carry): an informational
+        // note (12 px `text-2`), not a disabled command in `text-3` on the raised menu.
+        items.push(MenuItemSpec::new(text_fn(ids::hv::TX_MENU_PROD_NOTE), NOTE).note(true));
     }
     items
 }

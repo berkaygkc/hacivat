@@ -8108,11 +8108,15 @@ ro = "deny"
 admin = "allow"
 sql = "UPDATE customers SET city='x' WHERE 'a' = 'a'"
 
+# m3b-t26-prod-unlock (named exception, T26 carry MUST 1): read since Task 26 (the MySQL
+# modifiers as white space, the comma form as `CROSS JOIN`): a bounded UPDATE, which the
+# admin profile allows like any other (the gate then asks on production: tx-confirm);
+# it was `deny` only because the statement did not parse.
 [[row]]
 set = "t10all"
 tag = "my"
 ro = "deny"
-admin = "deny"
+admin = "allow"
 sql = "UPDATE LOW_PRIORITY IGNORE t SET a = 1 WHERE b = 1"
 
 [[row]]
@@ -8164,11 +8168,15 @@ ro = "deny"
 admin = "allow"
 sql = "UPDATE t SET a = 1 WHERE TRUE"
 
+# m3b-t26-prod-unlock (named exception, T26 carry MUST 1): read since Task 26 (the MySQL
+# modifiers as white space, the comma form as `CROSS JOIN`): a bounded UPDATE, which the
+# admin profile allows like any other (the gate then asks on production: tx-confirm);
+# it was `deny` only because the statement did not parse.
 [[row]]
 set = "t10all"
 tag = "my"
 ro = "deny"
-admin = "deny"
+admin = "allow"
 sql = "UPDATE t, u SET t.a = u.a WHERE t.id = u.id"
 
 [[row]]
