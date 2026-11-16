@@ -33,6 +33,12 @@ fn editor_focused(cx: &App) -> bool {
     focused_editor(cx).is_some()
 }
 
+// ## m3b-t01b-seams (fix round 2, I3)
+/// A stub command is never enabled.
+fn disabled(_: &App) -> bool {
+    false
+}
+
 /// Registers the editor commands, the key hints, the Edit menu's labels and the console host's
 /// observers.
 pub fn register(cx: &mut App) {
@@ -47,7 +53,12 @@ pub fn register(cx: &mut App) {
             run: Rc::new(move |window: &mut Window, cx: &mut App| {
                 run_on_focused(id, window, cx);
             }),
-            enabled: editor_focused,
+            // ## m3b-t01b-seams (fix round 2, I3; named exception): a stub row stays disabled.
+            enabled: if command.stub {
+                disabled
+            } else {
+                editor_focused
+            },
         });
     }
     cx.set_global(ShortcutHints(Rc::new(|cx: &App, id: &str| {

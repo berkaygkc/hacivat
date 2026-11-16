@@ -97,6 +97,13 @@ fn m3b_editor_commands_are_in_the_table() {
         assert_eq!(c.title_id, title);
         // A stub never seals the history: it changes nothing at all.
         assert!(!c.seals_history, "{id}");
+        // Fix round 2 (I3): it is a stub, so the app keeps it disabled.
+        assert!(c.stub, "{id}");
+    }
+    assert_eq!(commands().iter().filter(|c| c.stub).count(), 23);
+    // M3a's commands are not stubs.
+    for c in commands().iter().take(45) {
+        assert!(!c.stub, "{}", c.id);
     }
 }
 

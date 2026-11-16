@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use hacivat_ui_grid::model::{
-    ColumnLayout, GotoError, SortKey, SortSpec, ViewMap, apply_command, parse_goto,
+    ColumnLayout, GotoError, SortSpec, ViewMap, apply_command, parse_goto,
 };
 use hacivat_ui_grid::{ColId, GridCommand, ModelRow, ViewRow, grid_command};
 
@@ -67,15 +67,8 @@ fn goto_and_frozen_stubs_fail_closed() {
     let mut layout = ColumnLayout::new([(ColId(0), 80.0), (ColId(1), 80.0)]);
     layout.set_frozen(1);
     assert_eq!(layout.frozen(), 0);
-    let spec = SortSpec {
-        keys: [SortKey {
-            col: ColId(1),
-            desc: true,
-        }]
-        .into_iter()
-        .collect(),
-    };
-    assert_eq!(spec.keys.len(), 1);
+    // An empty sort is the source order.
+    assert!(SortSpec::default().keys.is_empty());
 }
 
 #[test]
@@ -92,6 +85,13 @@ fn m3b_grid_commands_are_in_the_table() {
         ("grid.unfreeze", GridCommand::Unfreeze),
     ] {
         assert_eq!(grid_command(id), Some(cmd), "{id}");
+        // Fix round 2 (I3): every new grid command is a stub until its task fills it.
+        assert!(hacivat_ui_grid::commands::is_stub(id), "{id}");
+    }
+    assert_eq!(hacivat_ui_grid::commands::STUB_COMMANDS.len(), 9);
+    // M3a's commands are not.
+    for (id, _) in hacivat_ui_grid::GRID_COMMANDS.iter().take(26) {
+        assert!(!hacivat_ui_grid::commands::is_stub(id), "{id}");
     }
 }
 
@@ -248,9 +248,17 @@ mod view {
         view.update(vcx, |v, cx| v.set_transposed(true, cx));
         vcx.run_until_parked();
         assert!(view.read_with(vcx, |v, _| v.transposed()));
+        assert!(view.read_with(vcx, |v, _| v.highlights().is_none()));
         view.update(vcx, |v, cx| {
             v.set_highlights(Some(Rc::new(|row: ModelRow, _| row.0 == 1)), cx)
         });
         vcx.run_until_parked();
+        let marked = view.read_with(vcx, |v, _| {
+            let h = v.highlights().expect("stored");
+            (h(ModelRow(1), ColId(0)), h(ModelRow(2), ColId(0)))
+        });
+        assert_eq!(marked, (true, false));
+        view.update(vcx, |v, cx| v.set_highlights(None, cx));
+        assert!(view.read_with(vcx, |v, _| v.highlights().is_none()));
     }
 }

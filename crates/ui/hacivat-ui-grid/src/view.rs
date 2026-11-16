@@ -445,6 +445,11 @@ impl GridView {
         cx.notify();
     }
 
+    /// The cells a find marks, as last set.
+    pub fn highlights(&self) -> Option<&Rc<dyn Fn(ModelRow, ColId) -> bool>> {
+        self.highlights.as_ref()
+    }
+
     /// Scrolls `cell` into view, both ways.
     pub(crate) fn reveal(&mut self, cell: ModelCell) {
         self.scroll.scroll_into_view(cell.row.0);

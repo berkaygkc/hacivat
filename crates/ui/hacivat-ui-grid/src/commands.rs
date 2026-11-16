@@ -65,6 +65,27 @@ pub static GRID_COMMANDS: [(&str, GridCommand); 35] = [
     ("grid.unfreeze", GridCommand::Unfreeze),
 ];
 
+// ## m3b-t01b-seams (fix round 2, I3)
+/// The grid commands that do nothing until their task fills them (Tasks 35, 37, 38, 39): the
+/// app registers them disabled, so the palette does not list them and their keys pass through.
+/// The filling task removes its ids (a named exception).
+pub static STUB_COMMANDS: [&str; 9] = [
+    "grid.grow_selection",
+    "grid.shrink_selection",
+    "grid.find",
+    "grid.goto_row",
+    "grid.open_value",
+    "grid.context_menu",
+    "grid.auto_fit",
+    "grid.freeze",
+    "grid.unfreeze",
+];
+
+/// Whether grid command `id` is a stub ([`STUB_COMMANDS`]).
+pub fn is_stub(id: &str) -> bool {
+    STUB_COMMANDS.contains(&id)
+}
+
 const fn mv(dir: Dir, extend: bool) -> GridCommand {
     GridCommand::Move { dir, extend }
 }

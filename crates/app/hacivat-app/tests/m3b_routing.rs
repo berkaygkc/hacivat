@@ -199,12 +199,6 @@ const BOUND: &[(&str, &str, Option<&str>, Option<&str>)] = &[
 /// The datagrip preset's own rows: (id, context, platform, chord).
 const DATAGRIP: &[(&str, &str, KeymapPlatform, &str)] = &[
     (
-        "editor.delete_line",
-        "Editor",
-        KeymapPlatform::MacOs,
-        "cmd-backspace",
-    ),
-    (
         "editor.select_all_occurrences",
         "Editor",
         KeymapPlatform::Windows,
@@ -215,30 +209,6 @@ const DATAGRIP: &[(&str, &str, KeymapPlatform, &str)] = &[
         "Editor",
         KeymapPlatform::Linux,
         "ctrl-alt-shift-j",
-    ),
-    (
-        "grid.grow_selection",
-        "Grid",
-        KeymapPlatform::Windows,
-        "ctrl-w",
-    ),
-    (
-        "grid.grow_selection",
-        "Grid",
-        KeymapPlatform::Linux,
-        "ctrl-w",
-    ),
-    (
-        "grid.shrink_selection",
-        "Grid",
-        KeymapPlatform::Windows,
-        "ctrl-shift-w",
-    ),
-    (
-        "grid.shrink_selection",
-        "Grid",
-        KeymapPlatform::Linux,
-        "ctrl-shift-w",
     ),
 ];
 
@@ -297,16 +267,25 @@ fn every_m3b_command_id_is_registered_and_bound_as_listed(cx: &mut TestAppContex
             "{id} {platform:?}"
         );
     }
-    // The default `delete_to_line_start` chord on macOS goes to Delete line under datagrip.
-    assert!(
-        chords(
+    // Fix round 2 (I1, I2): datagrip binds neither Delete line nor grid grow/shrink before
+    // Tasks 34 and 35.
+    for (id, context) in [
+        ("editor.delete_line", "Editor"),
+        ("grid.grow_selection", "Grid"),
+        ("grid.shrink_selection", "Grid"),
+    ] {
+        for platform in [
             KeymapPlatform::MacOs,
-            "datagrip",
-            "editor.delete_to_line_start",
-            "Editor"
-        )
-        .is_empty()
-    );
+            KeymapPlatform::Windows,
+            KeymapPlatform::Linux,
+        ] {
+            assert_eq!(
+                chords(platform, "datagrip", id, context),
+                chords(platform, "hacivat", id, context),
+                "{id} {platform:?}"
+            );
+        }
+    }
 }
 
 // ---- the stubs answer the safe value --------------------------------------------------------
@@ -580,6 +559,73 @@ fn primary_f_in_the_editor_still_reaches_the_explorer_filter(cx: &mut TestAppCon
     );
 }
 
+/// Fix round 2 (I3): every stub command that does nothing until its task lands is disabled, so
+/// no palette entry resolves to one; with an editor focused, M3a's editor commands are enabled
+/// and none of the 32 editor and grid stubs (nor the app-registered ones) is.
+#[cfg(unix)]
+#[gpui::test]
+fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
+    let vcx = shell_with_connections(cx, "en");
+    in_window(vcx, |window, _| window.activate_window());
+    let p = test_profile("orders-dev", None, "10.0.0.5");
+    let profile = add_profile(vcx, p.clone());
+    let (session, _fake) = test_session(vcx, p);
+    let id = register_test_console(vcx, profile, session);
+    let editor = vcx.cx.read(|cx| {
+        Consoles::get(cx, id)
+            .and_then(|s| s.editor.clone())
+            .expect("the console has an editor")
+    });
+    in_window(vcx, |window, cx| {
+        let handle = editor.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+    });
+    vcx.run_until_parked();
+    let mut stubs: Vec<&str> = hacivat_ui_editor::commands()
+        .iter()
+        .filter(|c| c.stub)
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(stubs.len(), 23);
+    stubs.extend(hacivat_ui_grid::commands::STUB_COMMANDS);
+    assert_eq!(stubs.len(), 32);
+    // The app-registered stubs (disabled since Task 1b).
+    stubs.extend([
+        "history.open",
+        "results.next_tab",
+        "results.prev_tab",
+        "grid.sort_asc",
+        "grid.sort_desc",
+        "grid.clear_sort",
+        "grid.view_table",
+        "grid.view_transposed",
+        "grid.view_text",
+        "grid.toggle_record",
+    ]);
+    let (enabled, listed) = vcx.cx.read(|cx| {
+        let reg = cx.global::<ActionRegistry>();
+        let enabled: Vec<&'static str> = reg
+            .all()
+            .iter()
+            .filter(|d| (d.enabled)(cx))
+            .map(|d| d.id)
+            .collect();
+        let listed: Vec<&'static str> = hacivat_app::commands::palette::command_entries(cx)
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        (enabled, listed)
+    });
+    for id in &stubs {
+        assert!(!enabled.contains(id), "{id} is enabled");
+        assert!(!listed.contains(id), "{id} is in the palette");
+    }
+    // The editor's real commands are enabled with the editor focused (the check above is not
+    // vacuous).
+    assert!(enabled.contains(&"editor.select_all"));
+    assert!(listed.contains(&"editor.select_all"));
+}
+
 /// Ruling R5 at the keymap level: with the editor or a grid focused, the primary-F chord resolves
 /// to `explorer.focus_filter` until Tasks 33 and 37 bind their find commands (the app test above
 /// covers the editor end to end; the grid's key context reaches the stack with m3a's F5).
@@ -598,6 +644,70 @@ fn primary_f_resolves_to_the_explorer_filter_in_the_editor_and_the_grid() {
             assert!(
                 matches!(&got, Resolution::Command(c) if c == "explorer.focus_filter"),
                 "{platform:?} {inner}: {got:?}"
+            );
+        }
+    }
+}
+
+/// What `chord` resolves to under `preset` on `platform` with `stack` (innermost last).
+fn resolve(
+    platform: KeymapPlatform,
+    preset: &str,
+    stack: Vec<&'static str>,
+    chord: &'static str,
+) -> Resolution {
+    let km = load(platform, preset, None).0;
+    let press = normalize(&gpui::Keystroke::parse(chord).unwrap()).unwrap();
+    km.resolve(
+        &ContextStack(stack),
+        &[],
+        &press,
+        &KeyboardLayoutId("us".into()),
+        false,
+    )
+}
+
+/// Fix round 2 (I1): under datagrip on macOS, cmd-backspace in the editor still deletes to the
+/// line start (M3a), not the Delete line stub.
+#[test]
+fn datagrip_cmd_backspace_still_deletes_to_line_start() {
+    let got = resolve(
+        KeymapPlatform::MacOs,
+        "datagrip",
+        vec!["Workspace", "Console", "Editor"],
+        "cmd-backspace",
+    );
+    assert!(
+        matches!(&got, Resolution::Command(c) if c == "editor.delete_to_line_start"),
+        "{got:?}"
+    );
+}
+
+/// Fix round 2 (I2): under datagrip on Windows and Linux, ctrl-w with a grid innermost still
+/// closes the tab (M3a; the grid's context reaches the stack with m3a's F5).
+#[test]
+fn datagrip_ctrl_w_in_a_grid_still_closes_the_tab() {
+    for platform in [KeymapPlatform::Windows, KeymapPlatform::Linux] {
+        for preset in ["hacivat", "datagrip"] {
+            let got = resolve(
+                platform,
+                preset,
+                vec!["Workspace", "Console", "Grid"],
+                "ctrl-w",
+            );
+            assert!(
+                matches!(&got, Resolution::Command(c) if c == "workspace.close_tab"),
+                "{platform:?} {preset}: {got:?}"
+            );
+            let got = resolve(
+                platform,
+                preset,
+                vec!["Workspace", "Console", "Grid"],
+                "ctrl-shift-w",
+            );
+            assert!(
+                matches!(got, Resolution::PassThrough),
+                "{platform:?} {preset}: {got:?}"
             );
         }
     }

@@ -8,232 +8,106 @@ use hacivat_ui_core::theme::Theme;
 
 use crate::popover::lazy;
 
-/// The icons the chrome widgets draw.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum IconName {
-    ArrowLeftRight,
-    Check,
-    ChevronDown,
-    ChevronRight,
-    ChevronsUpDown,
-    CircleCheck,
-    Ellipsis,
-    FileCode,
-    GitCommit,
-    Info,
-    Languages,
-    LayoutPanelLeft,
-    Lock,
-    Menu,
-    Minus,
-    Moon,
-    Plus,
-    Search,
-    Square,
-    Sun,
-    TriangleAlert,
-    X,
-    // M2a connections (Task 1).
-    Database,
-    LockOpen,
-    RotateCw,
-    Copy,
-    ClipboardPaste,
-    Plug,
-    Unplug,
-    Pencil,
-    Trash2,
-    ExternalLink,
-    Route,
-    CircleAlert,
-    CircleX,
-    FolderOpen,
-    Undo2,
-    FileKey,
-    // ## m2b-t24-shots: the M2b connection icons (T19 M6, T20 M1c).
-    FileUp,
-    KeyRound,
-    ArrowRight,
-    Fingerprint,
-    // ## m3a-t01b-seams: the M3a query icons (design/m3a-query/NOTES.md "Icons"; Tasks 27, 28,
-    // 30 draw them).
-    ScrollText,
-    SkipForward,
-    ArrowDownToLine,
-    Eraser,
-    ClipboardX,
-    Ban,
-    CopyCheck,
-    // ## m3a-t30-results-view: a result tab (NOTES surface 9) and "more result sets" (surface 11);
-    // both SVGs were already bundled.
-    Table2,
-    Layers,
-    // ## m3b-t01b-seams (P-M3b-37): Run (Task 41), pinned tabs and history rows, Count rows,
-    // filter rows, sort and frozen columns. `Search` and `ChevronsUpDown` are above.
-    Play,
-    Pin,
-    Sigma,
-    Filter,
-    ArrowUpDown,
-    Snowflake,
-    // ## m3b-t01b-seams (controller ruling RC-4): the M3b mocks' icons.
-    History,
-    Timer,
-    Hourglass,
-    Users,
-    EyeOff,
-    OctagonX,
-    Clock,
-    /// The Hacivat mark (`icons/hacivat/hv-mark.svg`). Keep it the last variant: [`IconName::ALL`]
-    /// is checked against it.
-    HvMark,
+/// Declares [`IconName`], its bundled paths and [`IconName::ALL`] from one list, so an icon
+/// cannot be added to one of them and missed by another (## m3b-t01b-seams fix round 2, M1).
+macro_rules! icon_names {
+    ($($(#[$meta:meta])* $name:ident => $path:literal,)*) => {
+        /// The icons the chrome widgets draw.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum IconName {
+            $($(#[$meta])* $name,)*
+        }
+
+        impl IconName {
+            /// Every icon, in declaration order (the app's test loads each one's asset).
+            pub const ALL: &'static [IconName] = &[$(IconName::$name,)*];
+
+            /// The bundled asset path.
+            pub fn path(self) -> &'static str {
+                match self {
+                    $(IconName::$name => $path,)*
+                }
+            }
+        }
+    };
 }
 
-impl IconName {
-    // ## m3b-t01b-seams (controller ruling RC-4)
-    /// Every icon, in declaration order (a test checks that every one resolves to a bundled
-    /// asset, and that this list is complete).
-    pub const ALL: [IconName; 65] = [
-        IconName::ArrowLeftRight,
-        IconName::Check,
-        IconName::ChevronDown,
-        IconName::ChevronRight,
-        IconName::ChevronsUpDown,
-        IconName::CircleCheck,
-        IconName::Ellipsis,
-        IconName::FileCode,
-        IconName::GitCommit,
-        IconName::Info,
-        IconName::Languages,
-        IconName::LayoutPanelLeft,
-        IconName::Lock,
-        IconName::Menu,
-        IconName::Minus,
-        IconName::Moon,
-        IconName::Plus,
-        IconName::Search,
-        IconName::Square,
-        IconName::Sun,
-        IconName::TriangleAlert,
-        IconName::X,
-        IconName::Database,
-        IconName::LockOpen,
-        IconName::RotateCw,
-        IconName::Copy,
-        IconName::ClipboardPaste,
-        IconName::Plug,
-        IconName::Unplug,
-        IconName::Pencil,
-        IconName::Trash2,
-        IconName::ExternalLink,
-        IconName::Route,
-        IconName::CircleAlert,
-        IconName::CircleX,
-        IconName::FolderOpen,
-        IconName::Undo2,
-        IconName::FileKey,
-        IconName::FileUp,
-        IconName::KeyRound,
-        IconName::ArrowRight,
-        IconName::Fingerprint,
-        IconName::ScrollText,
-        IconName::SkipForward,
-        IconName::ArrowDownToLine,
-        IconName::Eraser,
-        IconName::ClipboardX,
-        IconName::Ban,
-        IconName::CopyCheck,
-        IconName::Table2,
-        IconName::Layers,
-        IconName::Play,
-        IconName::Pin,
-        IconName::Sigma,
-        IconName::Filter,
-        IconName::ArrowUpDown,
-        IconName::Snowflake,
-        IconName::History,
-        IconName::Timer,
-        IconName::Hourglass,
-        IconName::Users,
-        IconName::EyeOff,
-        IconName::OctagonX,
-        IconName::Clock,
-        IconName::HvMark,
-    ];
-
-    /// The bundled asset path.
-    pub fn path(self) -> &'static str {
-        match self {
-            IconName::ArrowLeftRight => "icons/lucide/arrow-left-right.svg",
-            IconName::Check => "icons/lucide/check.svg",
-            IconName::ChevronDown => "icons/lucide/chevron-down.svg",
-            IconName::ChevronRight => "icons/lucide/chevron-right.svg",
-            IconName::ChevronsUpDown => "icons/lucide/chevrons-up-down.svg",
-            IconName::CircleCheck => "icons/lucide/circle-check.svg",
-            IconName::Ellipsis => "icons/lucide/ellipsis.svg",
-            IconName::FileCode => "icons/lucide/file-code-2.svg",
-            IconName::GitCommit => "icons/lucide/git-commit-horizontal.svg",
-            IconName::Info => "icons/lucide/info.svg",
-            IconName::Languages => "icons/lucide/languages.svg",
-            IconName::LayoutPanelLeft => "icons/lucide/layout-panel-left.svg",
-            IconName::Lock => "icons/lucide/lock.svg",
-            IconName::Menu => "icons/lucide/menu.svg",
-            IconName::Minus => "icons/lucide/minus.svg",
-            IconName::Moon => "icons/lucide/moon.svg",
-            IconName::Plus => "icons/lucide/plus.svg",
-            IconName::Search => "icons/lucide/search.svg",
-            IconName::Square => "icons/lucide/square.svg",
-            IconName::Sun => "icons/lucide/sun.svg",
-            IconName::TriangleAlert => "icons/lucide/triangle-alert.svg",
-            IconName::X => "icons/lucide/x.svg",
-            IconName::Database => "icons/lucide/database.svg",
-            IconName::LockOpen => "icons/lucide/lock-open.svg",
-            IconName::RotateCw => "icons/lucide/rotate-cw.svg",
-            IconName::Copy => "icons/lucide/copy.svg",
-            IconName::ClipboardPaste => "icons/lucide/clipboard-paste.svg",
-            IconName::Plug => "icons/lucide/plug.svg",
-            IconName::Unplug => "icons/lucide/unplug.svg",
-            IconName::Pencil => "icons/lucide/pencil.svg",
-            IconName::Trash2 => "icons/lucide/trash-2.svg",
-            IconName::ExternalLink => "icons/lucide/external-link.svg",
-            IconName::Route => "icons/lucide/route.svg",
-            IconName::CircleAlert => "icons/lucide/circle-alert.svg",
-            IconName::CircleX => "icons/lucide/circle-x.svg",
-            IconName::FolderOpen => "icons/lucide/folder-open.svg",
-            IconName::Undo2 => "icons/lucide/undo-2.svg",
-            IconName::FileKey => "icons/lucide/file-key.svg",
-            IconName::FileUp => "icons/lucide/file-up.svg",
-            IconName::KeyRound => "icons/lucide/key-round.svg",
-            IconName::ArrowRight => "icons/lucide/arrow-right.svg",
-            IconName::Fingerprint => "icons/lucide/fingerprint.svg",
-            // ## m3a-t01b-seams
-            IconName::ScrollText => "icons/lucide/scroll-text.svg",
-            IconName::SkipForward => "icons/lucide/skip-forward.svg",
-            IconName::ArrowDownToLine => "icons/lucide/arrow-down-to-line.svg",
-            IconName::Eraser => "icons/lucide/eraser.svg",
-            IconName::ClipboardX => "icons/lucide/clipboard-x.svg",
-            IconName::Ban => "icons/lucide/ban.svg",
-            IconName::CopyCheck => "icons/lucide/copy-check.svg",
-            // ## m3a-t30-results-view
-            IconName::Table2 => "icons/lucide/table-2.svg",
-            IconName::Layers => "icons/lucide/layers.svg",
-            // ## m3b-t01b-seams
-            IconName::Play => "icons/lucide/play.svg",
-            IconName::Pin => "icons/lucide/pin.svg",
-            IconName::Sigma => "icons/lucide/sigma.svg",
-            IconName::Filter => "icons/lucide/filter.svg",
-            IconName::ArrowUpDown => "icons/lucide/arrow-up-down.svg",
-            IconName::Snowflake => "icons/lucide/snowflake.svg",
-            IconName::History => "icons/lucide/history.svg",
-            IconName::Timer => "icons/lucide/timer.svg",
-            IconName::Hourglass => "icons/lucide/hourglass.svg",
-            IconName::Users => "icons/lucide/users.svg",
-            IconName::EyeOff => "icons/lucide/eye-off.svg",
-            IconName::OctagonX => "icons/lucide/octagon-x.svg",
-            IconName::Clock => "icons/lucide/clock.svg",
-            IconName::HvMark => "icons/hacivat/hv-mark.svg",
-        }
-    }
+icon_names! {
+    ArrowLeftRight => "icons/lucide/arrow-left-right.svg",
+    Check => "icons/lucide/check.svg",
+    ChevronDown => "icons/lucide/chevron-down.svg",
+    ChevronRight => "icons/lucide/chevron-right.svg",
+    ChevronsUpDown => "icons/lucide/chevrons-up-down.svg",
+    CircleCheck => "icons/lucide/circle-check.svg",
+    Ellipsis => "icons/lucide/ellipsis.svg",
+    FileCode => "icons/lucide/file-code-2.svg",
+    GitCommit => "icons/lucide/git-commit-horizontal.svg",
+    Info => "icons/lucide/info.svg",
+    Languages => "icons/lucide/languages.svg",
+    LayoutPanelLeft => "icons/lucide/layout-panel-left.svg",
+    Lock => "icons/lucide/lock.svg",
+    Menu => "icons/lucide/menu.svg",
+    Minus => "icons/lucide/minus.svg",
+    Moon => "icons/lucide/moon.svg",
+    Plus => "icons/lucide/plus.svg",
+    Search => "icons/lucide/search.svg",
+    Square => "icons/lucide/square.svg",
+    Sun => "icons/lucide/sun.svg",
+    TriangleAlert => "icons/lucide/triangle-alert.svg",
+    X => "icons/lucide/x.svg",
+    // M2a connections (Task 1).
+    Database => "icons/lucide/database.svg",
+    LockOpen => "icons/lucide/lock-open.svg",
+    RotateCw => "icons/lucide/rotate-cw.svg",
+    Copy => "icons/lucide/copy.svg",
+    ClipboardPaste => "icons/lucide/clipboard-paste.svg",
+    Plug => "icons/lucide/plug.svg",
+    Unplug => "icons/lucide/unplug.svg",
+    Pencil => "icons/lucide/pencil.svg",
+    Trash2 => "icons/lucide/trash-2.svg",
+    ExternalLink => "icons/lucide/external-link.svg",
+    Route => "icons/lucide/route.svg",
+    CircleAlert => "icons/lucide/circle-alert.svg",
+    CircleX => "icons/lucide/circle-x.svg",
+    FolderOpen => "icons/lucide/folder-open.svg",
+    Undo2 => "icons/lucide/undo-2.svg",
+    FileKey => "icons/lucide/file-key.svg",
+    // ## m2b-t24-shots: the M2b connection icons (T19 M6, T20 M1c).
+    FileUp => "icons/lucide/file-up.svg",
+    KeyRound => "icons/lucide/key-round.svg",
+    ArrowRight => "icons/lucide/arrow-right.svg",
+    Fingerprint => "icons/lucide/fingerprint.svg",
+    // ## m3a-t01b-seams: the M3a query icons (design/m3a-query/NOTES.md "Icons"; Tasks 27, 28,
+    // 30 draw them).
+    ScrollText => "icons/lucide/scroll-text.svg",
+    SkipForward => "icons/lucide/skip-forward.svg",
+    ArrowDownToLine => "icons/lucide/arrow-down-to-line.svg",
+    Eraser => "icons/lucide/eraser.svg",
+    ClipboardX => "icons/lucide/clipboard-x.svg",
+    Ban => "icons/lucide/ban.svg",
+    CopyCheck => "icons/lucide/copy-check.svg",
+    // ## m3a-t30-results-view: a result tab (NOTES surface 9) and "more result sets" (surface 11);
+    // both SVGs were already bundled.
+    Table2 => "icons/lucide/table-2.svg",
+    Layers => "icons/lucide/layers.svg",
+    // ## m3b-t01b-seams (P-M3b-37): Run (Task 41), pinned tabs and history rows, Count rows,
+    // filter rows, sort and frozen columns. `Search` and `ChevronsUpDown` are above.
+    Play => "icons/lucide/play.svg",
+    Pin => "icons/lucide/pin.svg",
+    Sigma => "icons/lucide/sigma.svg",
+    Filter => "icons/lucide/filter.svg",
+    ArrowUpDown => "icons/lucide/arrow-up-down.svg",
+    Snowflake => "icons/lucide/snowflake.svg",
+    // ## m3b-t01b-seams (controller ruling RC-4): the M3b mocks' icons.
+    History => "icons/lucide/history.svg",
+    Timer => "icons/lucide/timer.svg",
+    Hourglass => "icons/lucide/hourglass.svg",
+    Users => "icons/lucide/users.svg",
+    EyeOff => "icons/lucide/eye-off.svg",
+    OctagonX => "icons/lucide/octagon-x.svg",
+    Clock => "icons/lucide/clock.svg",
+    /// The Hacivat mark (`icons/hacivat/hv-mark.svg`).
+    HvMark => "icons/hacivat/hv-mark.svg",
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -422,13 +296,13 @@ mod tests {
     }
 
     // ## m3b-t01b-seams (controller ruling RC-4)
-    /// `IconName::ALL` holds every variant once, in declaration order (`HvMark` stays last), so
-    /// the app's asset test covers every icon.
+    /// `IconName::ALL` comes from the same list as the enum (`icon_names!`): every variant once,
+    /// in declaration order, so the app's asset test covers every icon.
     #[test]
     fn all_lists_every_icon_in_declaration_order() {
-        assert_eq!(IconName::ALL.len(), IconName::HvMark as usize + 1);
         for (i, n) in IconName::ALL.iter().enumerate() {
             assert_eq!(*n as usize, i, "{n:?}");
         }
+        assert_eq!(IconName::ALL.len(), 65);
     }
 }

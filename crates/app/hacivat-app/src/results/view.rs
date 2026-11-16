@@ -922,7 +922,12 @@ pub fn register_commands(cx: &mut App) {
             title_id: grid_title(id).unwrap_or(id),
             context: GRID_CONTEXT,
             run: Rc::new(move |window, cx| dispatch_grid(cmd, window, cx)),
-            enabled: |_| true,
+            // ## m3b-t01b-seams (fix round 2, I3): a stub grid command stays disabled.
+            enabled: if hacivat_ui_grid::commands::is_stub(id) {
+                |_| false
+            } else {
+                |_| true
+            },
         });
     }
     let _ = reg.register(ActionDef {

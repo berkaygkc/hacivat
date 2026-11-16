@@ -56,29 +56,11 @@ context = "Console"
 platforms = ["windows", "linux"]
 
 ## m3b-t01b-seams
-# DataGrip's chords where M3b's defaults differ (Task 1b): Delete line is cmd-backspace on macOS
-# (it takes the chord from `editor.delete_to_line_start`, which stays in the palette), and
-# Extend/Shrink selection in a grid are ctrl-w/ctrl-shift-w on Windows and Linux; there ctrl-w
-# hides `workspace.close_tab` while a grid has the focus (P-M3b-21, PO Q10; ctrl-f4 still closes
-# the tab on Windows). Every other M3b chord is the default's.
-
-[[binding]]
-chord = "cmd-backspace"
-command = "editor.delete_line"
-context = "Editor"
-platforms = ["macos"]
-
-[[binding]]
-chord = "ctrl-w"
-command = "grid.grow_selection"
-context = "Grid"
-platforms = ["windows", "linux"]
-
-[[binding]]
-chord = "ctrl-shift-w"
-command = "grid.shrink_selection"
-context = "Grid"
-platforms = ["windows", "linux"]
+# DataGrip's chords where M3b's defaults differ (Task 1b). Fix round 2 (I1, I2): a chord that
+# works in M3a is never given to a stub. DataGrip's Delete line (cmd-backspace on macOS, today
+# `editor.delete_to_line_start`) is bound by Task 34, and Extend/Shrink selection in a grid
+# (ctrl-w/ctrl-shift-w on Windows and Linux, today `workspace.close_tab` through the Grid) by
+# Task 35, each as a named exception. Every other M3b chord is the default's.
 
 [[binding]]
 chord = "ctrl-alt-shift-j"

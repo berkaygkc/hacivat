@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use tokio::sync::oneshot;
 
 use hacivat_exec::RunChoice;
-use hacivat_session::session::{ExecError, RunEvent, UnitId};
+use hacivat_session::session::{ExecError, RunEvent, RunId, UnitId};
 use hacivat_ui_core::gpui_surface::{App, Global};
 
 use super::{answered, console_exec};
@@ -59,22 +59,30 @@ pub(crate) fn first_answer(cx: &mut App, console: ConsoleId, run_seq: u64, quest
 /// (STUB until Task 23's bar asks the user). Any other event, or a question of another run,
 /// changes nothing.
 pub fn on_choice(console: ConsoleId, ev: &RunEvent, cx: &mut App) {
-    let RunEvent::NeedsChoice { unit, question, .. } = ev else {
-        return;
-    };
     let Some(run) = console_exec(cx, console).and_then(|e| e.run.as_ref()) else {
         return;
     };
-    if run.run != unit.run {
+    let Some((run_seq, question)) = choice_target(ev, Some((run.run, run.seq))) else {
         return;
-    }
-    let (session, run_seq) = (run.session.clone(), run.seq);
-    if !first_answer(cx, console, run_seq, *question) {
+    };
+    let session = run.session.clone();
+    if !first_answer(cx, console, run_seq, question) {
         return;
     }
     // The session says whether a run waited on this question; a refusal changes nothing, and
     // nothing else is to be done with it here.
-    drop(session.choose(run_seq, *question, RunChoice::Stop));
+    drop(session.choose(run_seq, question, RunChoice::Stop));
+}
+
+/// The question `ev` asks of the console's current run `current` (`(run, run_seq)`), as
+/// `(run_seq, question)`: only a `NeedsChoice` whose unit belongs to that run; `None` for any
+/// other event, a question of an older run, or a console without a run.
+fn choice_target(ev: &RunEvent, current: Option<(RunId, u64)>) -> Option<(u64, u64)> {
+    let RunEvent::NeedsChoice { unit, question, .. } = ev else {
+        return None;
+    };
+    let (run, run_seq) = current?;
+    (unit.run == run).then_some((run_seq, *question))
 }
 
 #[cfg(test)]
@@ -94,6 +102,52 @@ mod tests {
             // A new run forgets the questions of the console's earlier runs.
             assert!(first_answer(cx, c, 8, 1));
             assert!(!first_answer(cx, c, 8, 1));
+        });
+    }
+
+    // ## m3b-t01b-seams (fix round 2, M3)
+
+    fn needs_choice(run: u64, question: u64) -> RunEvent {
+        RunEvent::NeedsChoice {
+            unit: UnitId {
+                run: RunId(run),
+                ordinal: 0,
+            },
+            question,
+            error: ExecError::of(hacivat_session::session::ExecErrorKind::Internal),
+            rollback_and_continue: false,
+        }
+    }
+
+    #[test]
+    fn only_a_question_of_the_current_run_is_answered() {
+        // The console's current run is run 5, sent as request 9.
+        let current = Some((RunId(5), 9));
+        assert_eq!(choice_target(&needs_choice(5, 3), current), Some((9, 3)));
+        // A question of an older run of the console.
+        assert_eq!(choice_target(&needs_choice(4, 3), current), None);
+        // A console without a run (another console's event reaches nothing).
+        assert_eq!(choice_target(&needs_choice(5, 3), None), None);
+        // Any other event.
+        let other = RunEvent::CommitDecided {
+            unit: UnitId {
+                run: RunId(5),
+                ordinal: 0,
+            },
+            answer: hacivat_exec::CommitAnswer::RollBack,
+            by_deadline: false,
+        };
+        assert_eq!(choice_target(&other, current), None);
+    }
+
+    #[gpui::test]
+    fn an_unattached_console_answers_nothing(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let c = ConsoleId(3);
+            on_choice(c, &needs_choice(5, 1), cx);
+            // Nothing was noted: the question is still unanswered for any run of the console.
+            assert!(cx.try_global::<Answered>().is_none_or(|a| a.0.is_empty()));
+            assert!(first_answer(cx, c, 9, 1));
         });
     }
 }
