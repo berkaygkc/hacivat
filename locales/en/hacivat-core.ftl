@@ -945,3 +945,27 @@ exec-startup-script-skipped-read-only = The connection's startup script was not 
 # confirm that it only reads (or found that it doesn't). One sentence for every classifier
 # denial (T1c review M2).
 exec-deny-classifier = Not sent: this console is read-only, and Hacivat couldn't confirm that the statement only reads.
+
+## m3b-t24-exec-ui
+
+# The run UI's lines before a run is sent (Task 24): what the user answered, or why nothing
+# was sent. A statement number is raw digits.
+# The user cancelled the parameter prompt: nothing was sent.
+exec-params-cancelled = Nothing was sent: you cancelled the parameter values.
+# The connection's lexing settings couldn't be read, and the statement's parameters read
+# differently under them: nothing was sent.
+exec-param-modes-unknown = Not sent: Hacivat couldn't read this connection's settings, and the statement's parameters read differently under them.
+# "Run as one" can't send a statement that needs its own transaction or its rollback wrap.
+exec-gate-run-as-one-refused = Not sent: this statement can't run as part of one request here. Run its statements one at a time.
+# The user cancelled at a confirmation: nothing of the run was sent.
+# Variables:
+#   $n (String) - the statement's position in the run, from 1.
+exec-confirm-cancelled = Nothing was sent: you cancelled at statement { $n }.
+# The user chose Skip for a statement at the confirmation.
+# Variables:
+#   $n (String) - the statement's position in the run, from 1.
+exec-confirm-skipped = Statement { $n } skipped: you chose Skip.
+# A statement ran without the confirmation the user turned off for statements like it.
+# Variables:
+#   $console (String) - the console's title, e.g. "orders-dev (2)".
+exec-confirm-suppressed = Ran without asking: you chose not to be asked again for statements like this in { $console }.

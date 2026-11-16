@@ -727,8 +727,11 @@ impl Core {
         // the guard like the schema probe. A guard that cannot verify a server (an unanswered
         // canary) then leaves the console's context unknown instead of breaking the session at
         // every connect; user statements, and any other text, stay guarded.
+        // ## m3b-t24-exec-ui (named exception): the context's search path read too (Run's
+        // classification context), by its exact constant text.
         let context_probe = matches!(origin, ExecOrigin::Internal { .. })
-            && context_probe_sql(self.kind) == Some(sql);
+            && (context_probe_sql(self.kind) == Some(sql)
+                || crate::session::schema::context_path_sql(self.kind) == Some(sql));
         let mut summary = if self.read_only && !context_probe {
             // ## m3b-t01c-core-seams (P-M3b-11): step 0b, the injected classifier, before the
             // guard; user statements only (internal ones are exempt, as today). A stub until

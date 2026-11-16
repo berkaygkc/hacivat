@@ -82,6 +82,31 @@ pub fn context_probe_sql(kind: DbmsKind) -> Option<&'static str> {
     }
 }
 
+// ## m3b-t24-exec-ui (named exception: the plan amendment C2(b)/I1 on the Run path)
+/// The internal read of where a console's names resolve, for Run's classification (Task 24):
+/// PostgreSQL-wire servers answer one row per schema of `current_schemas(true)`, in search
+/// order (the implicit `pg_catalog` and temporary schema included, names as stored); the MySQL
+/// family its current database. `None` without one.
+///
+/// Hacivat's own constant read, like [`context_probe_sql`]: on a read-only session an internal
+/// request of exactly this text runs outside the read-only guard (the actor's `exec`), so a
+/// server the guard cannot verify leaves the path unknown (classification then fails closed)
+/// instead of breaking the session. Every user statement still runs guarded.
+pub fn context_path_sql(kind: DbmsKind) -> Option<&'static str> {
+    match kind {
+        DbmsKind::Postgres
+        | DbmsKind::Redshift
+        | DbmsKind::Cockroach
+        | DbmsKind::Yugabyte
+        | DbmsKind::Timescale => Some(
+            "SELECT s FROM pg_catalog.unnest(pg_catalog.current_schemas(true)) \
+             WITH ORDINALITY AS t(s, n) ORDER BY n",
+        ),
+        DbmsKind::MySql | DbmsKind::TiDb | DbmsKind::MariaDb => Some("SELECT DATABASE()"),
+        _ => None,
+    }
+}
+
 /// Reads the probe's answer; nothing known (the default) when it has no row.
 pub fn parse_schema_probe(kind: DbmsKind, s: &ExecSummary) -> SchemaCtx {
     fn cell(row: &[Option<String>], i: usize) -> Option<String> {

@@ -605,3 +605,18 @@ exec-startup-script-skipped-read-only = Bağlantının başlangıç betiği çal
 
 # Review: PO
 exec-deny-classifier = Gönderilmedi: bu konsol salt okunur ve Hacivat ifadenin yalnızca okuduğunu doğrulayamadı.
+
+## m3b-t24-exec-ui
+
+# Review: PO
+exec-params-cancelled = Hiçbir şey gönderilmedi: parametre değerlerinden vazgeçtiniz.
+# Review: PO
+exec-param-modes-unknown = Gönderilmedi: Hacivat bu bağlantının ayarlarını okuyamadı ve ifadenin parametreleri bu ayarlara göre farklı okunuyor.
+# Review: PO
+exec-gate-run-as-one-refused = Gönderilmedi: bu ifade burada tek bir isteğin parçası olarak çalıştırılamaz. İfadelerini tek tek çalıştırın.
+# Review: PO
+exec-confirm-cancelled = Hiçbir şey gönderilmedi: { $n }. ifadede vazgeçtiniz.
+# Review: PO
+exec-confirm-skipped = { $n }. ifade atlandı: Atla'yı seçtiniz.
+# Review: PO
+exec-confirm-suppressed = Sorulmadan çalıştı: { $console } içinde bunun gibi ifadeler için bir daha sorulmamasını seçtiniz.

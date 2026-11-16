@@ -99,6 +99,9 @@ use hacivat_app::connections::{
 use hacivat_app::l10n_global::text_fn_id;
 // ## m3b-t21-confirm: the confirmation and confirm-in-transaction dialogs' fixtures.
 use hacivat_app::exec_ui::{commit_prompt, confirm};
+// ## m3b-t24-exec-ui (named exception): the parameter prompt's and the chooser additions'
+// fixtures (surfaces 8 and 9).
+use hacivat_app::exec_ui::{params_prompt, policy_popover};
 use hacivat_app::menus;
 use hacivat_app::shell::DemoCapsule;
 use hacivat_app::shell::Workspace;
@@ -217,6 +220,9 @@ enum Surface {
     // and 960x600.
     Confirm(confirm::fixtures::State),
     Commit(commit_prompt::fixtures::State),
+    // ## m3b-t24-exec-ui (named exception): surfaces 8 and 9, at 1280x800 and 960x600.
+    Params(params_prompt::fixtures::State),
+    Chooser(policy_popover::fixtures::State),
 }
 
 const SURFACES: [Surface; 78] = [
@@ -397,6 +403,9 @@ impl Surface {
             // ## m3b-t21-confirm
             Surface::Confirm(s) => s.name(),
             Surface::Commit(s) => s.name(),
+            // ## m3b-t24-exec-ui (named exception)
+            Surface::Params(s) => s.name(),
+            Surface::Chooser(s) => s.name(),
         }
     }
 
@@ -424,7 +433,13 @@ impl Surface {
     fn sizes(self) -> &'static [(f32, f32)] {
         // ## m2b-t24-shots: every M2b surface, at the default window and the minimum one.
         // ## m3a-t35-shots: and every M3a state.
-        if self.is_live() || self.is_m2b() || matches!(self, Surface::M3a(_)) || self.is_t21() {
+        // ## m3b-t24-exec-ui (named exception): Task 24's states too.
+        if self.is_live()
+            || self.is_m2b()
+            || matches!(self, Surface::M3a(_))
+            || self.is_t21()
+            || self.is_t24()
+        {
             // ## m2b-t22-live: the default window and the minimum one (ruling I1).
             return &[(1280.0, 800.0), (960.0, 600.0)];
         }
@@ -450,6 +465,12 @@ impl Surface {
     /// Whether the surface is one of Task 21's dialog states.
     fn is_t21(self) -> bool {
         matches!(self, Surface::Confirm(_) | Surface::Commit(_))
+    }
+
+    // ## m3b-t24-exec-ui (named exception)
+    /// Whether the surface is one of Task 24's states.
+    fn is_t24(self) -> bool {
+        matches!(self, Surface::Params(_) | Surface::Chooser(_))
     }
 
     // ## m2b-t24-shots
@@ -608,6 +629,9 @@ impl Surface {
             // ## m3b-t21-confirm
             Surface::Confirm(_) => ("hacivat-app/src/exec_ui/confirm.rs:", None),
             Surface::Commit(_) => ("hacivat-app/src/exec_ui/commit_prompt.rs:", None),
+            // ## m3b-t24-exec-ui (named exception)
+            Surface::Params(_) => ("hacivat-app/src/exec_ui/params_prompt.rs:", None),
+            Surface::Chooser(_) => ("hacivat-ui/src/menu.rs:", None),
         }
     }
 
@@ -715,6 +739,9 @@ impl Surface {
         match self {
             Surface::Confirm(state) => return confirm::fixtures::open(state, window, cx),
             Surface::Commit(state) => return commit_prompt::fixtures::open(state, window, cx),
+            // ## m3b-t24-exec-ui (named exception)
+            Surface::Params(state) => return params_prompt::fixtures::open(state, window, cx),
+            Surface::Chooser(state) => return policy_popover::fixtures::open(state, window, cx),
             _ => {}
         }
         if self.needs_connections() {
@@ -1016,7 +1043,36 @@ fn shots() -> Vec<Shot> {
             }
         }
     }
+    // ## m3b-t24-exec-ui (named exception): Task 24's states, after Task 21's.
+    for surface in t24_surfaces() {
+        for &size in surface.sizes() {
+            for theme in THEMES {
+                for locale in LOCALES {
+                    out.push(Shot {
+                        surface,
+                        theme,
+                        locale,
+                        size,
+                    });
+                }
+            }
+        }
+    }
     out
+}
+
+// ## m3b-t24-exec-ui (named exception)
+/// Task 24's surfaces: every parameter-prompt state, then every chooser-addition state.
+fn t24_surfaces() -> Vec<Surface> {
+    params_prompt::fixtures::STATES
+        .into_iter()
+        .map(Surface::Params)
+        .chain(
+            policy_popover::fixtures::STATES
+                .into_iter()
+                .map(Surface::Chooser),
+        )
+        .collect()
 }
 
 // ## m3b-t21-confirm
@@ -1522,16 +1578,24 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
             + m3a::M3B_T22.len() * 8 * 2
             // ## m3b-t21-confirm (named exception): plus Task 21's dialog states.
             + t21_surfaces().len() * 8 * 2
+            // ## m3b-t24-exec-ui (named exception): plus Task 24's states.
+            + t24_surfaces().len() * 8 * 2
     );
     // ## m3a-t35-shots: the 1,012 M1/M2 shots first, unchanged; then 68 M3a states x 16.
     // ## m3a-f5-demo (review m-5): plus the app menu at 960x600 (8).
     // ## m3b-t22-tx-ui (named exception): plus Task 22's 7 states x 16.
     // ## m3b-t21-confirm (named exception): plus 19 dialog states x 16, after Task 22's.
-    assert_eq!(all.len(), 1020 + 68 * 16 + 7 * 16 + 19 * 16);
+    // ## m3b-t24-exec-ui (named exception): plus 12 states x 16, after Task 21's.
+    assert_eq!(all.len(), 1020 + 68 * 16 + 7 * 16 + 19 * 16 + 12 * 16);
     assert!(
-        all[1020 + 68 * 16 + 7 * 16..]
+        all[1020 + 68 * 16 + 7 * 16..1020 + 68 * 16 + 7 * 16 + 19 * 16]
             .iter()
             .all(|s| s.surface.is_t21())
+    );
+    assert!(
+        all[1020 + 68 * 16 + 7 * 16 + 19 * 16..]
+            .iter()
+            .all(|s| s.surface.is_t24())
     );
     assert!(
         all[..1020]

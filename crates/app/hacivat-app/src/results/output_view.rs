@@ -128,6 +128,10 @@ fn glyph(msg: &LogMsg) -> (IconName, bool) {
         }
         // ## m3b-t22-tx-ui (named exception): the read-only skip of a startup script.
         LogMsg::StartupScriptSkipped => (IconName::Lock, false),
+        // ## m3b-t24-exec-ui (named exception): the run UI's lines before a run is sent: a
+        // refusal in ink (as `NotStarted`), an answer as a note.
+        LogMsg::RunUi { warn: true, .. } => (IconName::TriangleAlert, true),
+        LogMsg::RunUi { warn: false, .. } => (IconName::Info, false),
     }
 }
 

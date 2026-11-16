@@ -71,6 +71,8 @@ pub use pool::SessionPolicy;
 pub use tx::TxOwner;
 // ## m3a-f1-followups
 pub use schema::context_probe_sql;
+// ## m3b-t24-exec-ui (named exception: re-export only)
+pub use schema::context_path_sql;
 // ## m3b-t01c-core-seams
 pub use verdict::{RoCheck, SafetyDenial, SessionEffects, StatementClassifier, UnitVerdict};
 // ## m3b-t18-safe06

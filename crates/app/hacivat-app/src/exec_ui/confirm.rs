@@ -403,6 +403,22 @@ pub fn ask_plan(
     base: ConfirmContext,
     cx: &mut App,
 ) -> Task<Option<PlanAnswers>> {
+    let asked = ask_plan_at(run, plan, sql, production, connection, base, cx);
+    cx.spawn(async move |_| asked.await.ok())
+}
+
+// ## m3b-t24-exec-ui (named exception): the orchestrator logs where the user cancelled
+// (`exec-confirm-cancelled` names the statement).
+/// [`ask_plan`], answering `Err(unit)` with the unit whose dialog the user cancelled.
+pub fn ask_plan_at(
+    run: RunId,
+    plan: GatePlan,
+    sql: Vec<Arc<str>>,
+    production: bool,
+    connection: Arc<str>,
+    base: ConfirmContext,
+    cx: &mut App,
+) -> Task<Result<PlanAnswers, u32>> {
     cx.spawn(async move |cx| {
         let mut plan = plan;
         let mut suppress = Vec::new();
@@ -421,11 +437,11 @@ pub fn ask_plan(
             let rx = cx.update(|cx| open_in(q, ctx, cx));
             let answer = rx.await.unwrap_or(ConfirmAnswer::Cancel);
             match answer_plan(&mut plan, item.unit, answer, offered) {
-                PlanFlow::Cancelled => return None,
+                PlanFlow::Cancelled => return Err(item.unit),
                 PlanFlow::Go(key) => suppress.extend(key),
             }
         }
-        Some(PlanAnswers { plan, suppress })
+        Ok(PlanAnswers { plan, suppress })
     })
 }
 

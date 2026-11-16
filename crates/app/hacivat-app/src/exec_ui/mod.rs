@@ -180,9 +180,22 @@ pub(crate) fn exec_service(cx: &mut App) -> Arc<ExecService> {
     if let Some(m) = cx.try_global::<crate::connections::ConnectionsModel>() {
         service = service.with_runtime(m.runtime());
     }
+    // ## m3b-t24-exec-ui (named exception): Run classifies on the app's one classifier pool
+    // (R-M3-53; the read-only guard's too), and the runs' history records go to the store once
+    // it has opened (`orchestrator::open_history`).
+    service = service
+        .with_classifier(orchestrator::classifier(cx))
+        .with_history_sink(orchestrator::history_sink(cx));
     let service = Arc::new(service);
     cx.default_global::<ExecUi>().service = Some(service.clone());
     service
+}
+
+// ## m3b-t24-exec-ui (named exception)
+/// Drops the app's run service, so the next run builds it again (with the classifier pool
+/// installed since: `orchestrator::install_classifier`).
+pub(crate) fn reset_service(cx: &mut App) {
+    cx.default_global::<ExecUi>().service = None;
 }
 
 /// The marks of console `console`'s latest run, in unit order (`None` for a mark that is gone):
@@ -191,6 +204,11 @@ pub fn last_run_marks(
     console: ConsoleId,
     cx: &App,
 ) -> Vec<Option<hacivat_ui_editor::ExecMarkState>> {
+    // ## m3b-t24-exec-ui (named exception): a Run still being prepared shows nothing yet, and a
+    // refused one its refused units' marks.
+    if let Some(marks) = orchestrator::latest_marks_override(console, cx) {
+        return marks;
+    }
     let Some(exec) = console_exec(cx, console) else {
         return Vec::new();
     };

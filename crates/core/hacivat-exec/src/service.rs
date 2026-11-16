@@ -66,6 +66,8 @@ use hacivat_session::session::{
     StatementClassifier, UnitVerdict,
 };
 use hacivat_values::BindValue;
+// ## m3b-t24-exec-ui (named exception)
+use hacivat_session::session::ClassifierContext;
 
 /// Which result tab a result belongs to: a re-run of the same unit reuses its tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -224,6 +226,8 @@ impl RunRequest {
                     // ## m3b-t19-confirm-tx (named exception, fix round 2, R1-I1)
                     commits_first: item.effects.contains(SessionEffects::COMMITS_FIRST),
                     skipped,
+                    // ## m3b-t24-exec-ui (named exception): the log derives its lines from it.
+                    verdict: item.verdict,
                 },
                 item.verdict,
                 item.effects,
@@ -344,6 +348,19 @@ impl ExecService {
     /// again and run on a pooled `Service` session or on the console. Nothing is sent when
     /// the check refuses it, or without a check (fail closed).
     pub fn count(&self, req: CountRequest) -> CountTicket {
+        self.count_with(req, None)
+    }
+
+    // ## m3b-t24-exec-ui (named exception, T18 m12)
+    /// [`count`](Self::count) checked in the console's session context `ctx` (its lexing
+    /// modes, search path and server version, as Run classifies with them;
+    /// `StatementClassifier::check_read_only_in`), so the count statement is read exactly as
+    /// the server will read it. The app's Count rows calls this one (Task 25).
+    pub fn count_in(&self, req: CountRequest, ctx: ClassifierContext) -> CountTicket {
+        self.count_with(req, Some(ctx))
+    }
+
+    fn count_with(&self, req: CountRequest, ctx: Option<ClassifierContext>) -> CountTicket {
         let (tx, done) = oneshot::channel();
         let (cancel, cancelled) = watch::channel(false);
         let ticket = CountTicket { done, cancel };
@@ -370,7 +387,7 @@ impl ExecService {
             let answer = tokio::select! {
                 biased;
                 () = cancel => Err(CountError::Cancelled),
-                r = tokio::time::timeout(COUNT_TIMEOUT, count_on(req, check, budget, run, sent.clone())) => {
+                r = tokio::time::timeout(COUNT_TIMEOUT, count_on(req, check, ctx, budget, run, sent.clone())) => {
                     r.unwrap_or(Err(CountError::TimedOut))
                 }
             };
@@ -635,6 +652,7 @@ fn lock_sent(
 async fn count_on(
     req: CountRequest,
     check: Option<Arc<dyn StatementClassifier>>,
+    ctx: Option<ClassifierContext>,
     budget: Arc<MemoryBudget>,
     run: RunId,
     sent: SentCount,
@@ -646,10 +664,21 @@ async fn count_on(
             reasons: vec![sql_safety::ReasonCode::NotImplemented.fluent_id()],
         }));
     };
-    match check
-        .check_read_only(req.engine, sql.clone(), Arc::from(Vec::new()))
-        .await
-    {
+    // ## m3b-t24-exec-ui (named exception, T18 m12): in the console's context when given.
+    let verdict = match ctx {
+        Some(ctx) => {
+            check
+                .check_read_only_in(req.engine, sql.clone(), Arc::from(Vec::new()), ctx)
+                .await
+                .check
+        }
+        None => {
+            check
+                .check_read_only(req.engine, sql.clone(), Arc::from(Vec::new()))
+                .await
+        }
+    };
+    match verdict {
         RoCheck::Allow => {}
         RoCheck::Deny(d) => return Err(CountError::Refused(d)),
     }

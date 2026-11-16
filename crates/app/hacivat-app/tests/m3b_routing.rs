@@ -366,7 +366,17 @@ fn error_bar_and_params_stubs_answer_stop_and_cancel(cx: &mut TestAppContext) {
         // ## m3b-t15-gate (named exception, fix round 1): a named parameter's prompt.
         unit: None,
     }];
-    let mut rx = cx.update(|cx| params_prompt::open(prompts, cx));
+    // ## m3b-t24-exec-ui (named exception): the prompt takes its context; without a workspace
+    // window it still answers `None` (cancelled: nothing is sent).
+    let ctx = params_prompt::PromptContext {
+        connection: Arc::from("x"),
+        env: None,
+        engine: hacivat_proto::DbmsKind::Postgres,
+        sql: Arc::from("SELECT :id"),
+        notices: Vec::new(),
+        grouping_dot: false,
+    };
+    let mut rx = cx.update(|cx| params_prompt::open(prompts, ctx, cx));
     assert!(matches!(rx.try_recv(), Ok(None)));
     // The run's fetch policy is M3a's until Task 25.
     let policy = cx.update(|cx| fetch_policy_for(ConsoleId(1), cx));
