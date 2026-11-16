@@ -521,3 +521,16 @@ wired into Run before Task 24 (R-M3-52).
   `FetchPolicy::with_cell_cap` takes `results.max_value_bytes` (Task 25 passes it) clamped to
   `MIN_CELL_CAP` 64 KiB ..= `MAX_CELL_CAP` 64 MiB, the cap of the value viewer's "Re-run with a
   64 MiB value limit" (R-M3-82).
+- **Review fix round 1.**
+  - *Only what is needed (M1).* `admit` evicts until its chunk fits, and the room is re-checked
+    under the registry lock before each result. The check counts bytes already cut but not yet
+    freed (`releasing`) as free. Two runs over the budget at once cut one result, not two.
+  - *Frees outside the lock (M3).* Under the lock the pass only cuts and collects. It drops
+    the cut chunks, and the stores it upgraded, after releasing the lock, so `set_visible` on
+    the UI thread never waits for a large free.
+  - *Previous outcome (M4).* `StoreSnapshot::before_eviction()` keeps the state an evicted
+    result had ended in, so the strip can still name it beside "Closed to free memory".
+  - *Notification seam (M6).* `MemoryBudget::on_evicted(listener)` is called once per
+    eviction with `evict::Eviction { result, kept_rows, previous }`. The call comes after the
+    lock is released and the chunks are freed, on the evicting thread. Listeners must not
+    block. The run service turns it into `LogMsg::Evicted` (Task 16).

@@ -7,7 +7,7 @@
 //! The registry holds every store weakly with the last time it was visible, so a closed tab
 //! never stays alive for it.
 //!
-//! ## m3b-t08-store
+//! Since Task 8:
 //! - **Who joins.** Every `ResultStore` joins its budget's registry when it is made
 //!   (`ResultStore::new`), **visible**: a result is a candidate only once the app has said its
 //!   tab is in the background (`StoreSource::set_visible(false)`). A console that never
@@ -20,15 +20,44 @@
 //! - **In what order.** Longest out of sight first: by the moment it was last hidden (or
 //!   registered, if it never was shown), a logical clock so the order never ties.
 //! - **What it does.** Cuts the result to its first chunk and publishes
-//!   `Closed { reason: Evicted }` (Re-run brings the rest back); a snapshot taken before keeps
-//!   every row it showed, so a copy or a frame in progress never changes under it.
+//!   `Closed { reason: Evicted }` (Re-run brings the rest back), keeping the state it had
+//!   ended in (`StoreSnapshot::before_eviction`); a snapshot taken before keeps every row it
+//!   showed, so a copy or a frame in progress never changes under it.
 //! - **Atomic with visibility.** The pass holds the registry's lock, so a tab shown during it
 //!   is either shown first (and spared) or shown after (and finds the result evicted, which
-//!   it says).
+//!   it says). The cut chunks are freed, and the budget's listeners told ([`Eviction`]),
+//!   only after the lock is released.
+//! - **Only as much as is needed.** The room is re-checked under the lock before each
+//!   result, counting bytes already cut but not yet freed as free, so two runs over the
+//!   budget at once do not both evict for the same shortfall.
 
+// ## m3b-t08-store (module docs above, the clock, `Eviction`, `evict_while`)
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
+use crate::cursor::Completeness;
+use crate::snapshot::StoredChunk;
 use crate::store::{ResultId, ResultStore};
+
+/// One eviction, as the budget's listeners hear of it (`MemoryBudget::on_evicted`): the run
+/// service logs it (`LogMsg::Evicted { rows: kept_rows }`, Task 16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Eviction {
+    pub result: ResultId,
+    /// The rows the result kept (its first chunk).
+    pub kept_rows: u64,
+    /// The state it had ended in before (also `StoreSnapshot::before_eviction`).
+    pub previous: Completeness,
+}
+
+/// What one eviction pass cut, to be freed after the registry lock is released.
+pub(crate) struct Pass {
+    /// Each eviction and the cut chunks nobody else holds.
+    pub(crate) evictions: Vec<(Eviction, Vec<StoredChunk>)>,
+    /// The stores the pass upgraded: a closed tab's last reference may be among them, and it
+    /// drops outside the lock too.
+    pub(crate) stores: Vec<Arc<ResultStore>>,
+}
 
 /// One registered store.
 #[derive(Debug)]
@@ -109,24 +138,38 @@ impl EvictionRegistry {
     }
 
     // ## m3b-t08-store
-    /// Evicts hidden, finished results, longest out of sight first, until `need` bytes have
-    /// left the budget (the module docs); answers those bytes.
-    pub(crate) fn evict_for(&self, need: u64) -> u64 {
-        if need == 0 {
-            return 0;
-        }
+    /// Cuts hidden, finished results, longest out of sight first, while `more(bytes cut so
+    /// far)` holds; `more` runs under the lock before each result, so it sees every cut made
+    /// before it (the module docs). Each cut chunk nobody else holds is added to `releasing`
+    /// and handed back for the caller to free once the lock is released.
+    pub(crate) fn evict_while(
+        &self,
+        mut more: impl FnMut(u64) -> bool,
+        releasing: &AtomicU64,
+    ) -> Pass {
+        let mut pass = Pass {
+            evictions: Vec::new(),
+            stores: Vec::new(),
+        };
         let entries = self.lock();
         let mut order: Vec<&Entry> = entries.list.iter().filter(|e| !e.visible).collect();
         order.sort_by_key(|e| e.last_visible);
-        let mut released = 0u64;
+        let mut cut = 0u64;
         for entry in order {
-            if released >= need {
+            if !more(cut) {
                 break;
             }
-            if let Some(store) = entry.store.upgrade() {
-                released = released.saturating_add(store.evict());
+            let Some(store) = entry.store.upgrade() else {
+                continue;
+            };
+            if let Some((eviction, chunks)) = store.evict() {
+                let bytes: u64 = chunks.iter().map(|c| c.chunk.bytes()).sum();
+                releasing.fetch_add(bytes, Ordering::SeqCst);
+                cut = cut.saturating_add(bytes);
+                pass.evictions.push((eviction, chunks));
             }
+            pass.stores.push(store);
         }
-        released
+        pass
     }
 }

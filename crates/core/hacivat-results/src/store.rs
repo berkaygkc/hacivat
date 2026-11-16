@@ -6,7 +6,7 @@
 //! `watch`, so a reader woken by a change always loads a snapshot at least that new. Readers
 //! never lock: `snapshot` is one `ArcSwap` load.
 //!
-//! ## m3b-t08-store
+//! Since M3b Task 8:
 //! - **The tail.** The rows and state the writer builds snapshots from live here, behind a
 //!   mutex the writer takes for each append or state change, so eviction (the one other
 //!   publisher, `MemoryBudget::evict_for`) can cut a background result to its first chunk and
@@ -20,6 +20,7 @@
 //!   [`EvictionRegistry`] when it is made; [`ResultStore::set_visible`] tells it whether the
 //!   result's tab is on screen.
 
+// ## m3b-t08-store (module docs above, the tail, the ask ledger, eviction)
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -30,7 +31,7 @@ use tokio::sync::watch;
 
 use crate::budget::MemoryBudget;
 use crate::cursor::{CloseReason, Completeness};
-use crate::evict::EvictionRegistry;
+use crate::evict::{Eviction, EvictionRegistry};
 use crate::snapshot::{StoreSnapshot, StoredChunk};
 use crate::window::FetchPolicy;
 use crate::writer::{PauseReason, ResultWriter};
@@ -52,12 +53,18 @@ pub(crate) struct Tail {
     pub(crate) rows: u64,
     pub(crate) bytes: u64,
     pub(crate) completeness: Completeness,
-    /// Eviction cut the result to its first chunk: the writer's later appends and states are
-    /// dropped, so an evicted result never reads as anything else.
-    pub(crate) evicted: bool,
+    /// `Some(the state it had ended in)` once eviction cut the result to its first chunk: the
+    /// writer's later appends and states are dropped, so an evicted result never reads as
+    /// anything else.
+    pub(crate) before_eviction: Option<Completeness>,
 }
 
 impl Tail {
+    /// Whether eviction has cut this result.
+    pub(crate) fn evicted(&self) -> bool {
+        self.before_eviction.is_some()
+    }
+
     /// The next snapshot: one version on, the tail's chunks, `paused` as given.
     pub(crate) fn next_snapshot(&mut self, paused: Option<PauseReason>) -> StoreSnapshot {
         self.version += 1;
@@ -71,6 +78,7 @@ impl Tail {
             bytes: self.bytes,
             completeness: self.completeness,
             paused,
+            before_eviction: self.before_eviction,
         }
     }
 }
@@ -144,7 +152,7 @@ impl ResultStore {
             rows: 0,
             bytes: 0,
             completeness: first.completeness,
-            evicted: false,
+            before_eviction: None,
         };
         let registry = budget.registry().clone();
         let store = Arc::new(ResultStore {
@@ -214,18 +222,21 @@ impl ResultStore {
     }
 
     /// Cuts a finished result to its first chunk and publishes `Closed { reason: Evicted }`
-    /// (R-M3-68). Answers the bytes released from the budget now: a chunk a held snapshot
-    /// still shows is released when that snapshot drops (P-M3b-29). A result still being
-    /// written, one with a cursor open, one already evicted or given back, and one with
-    /// nothing past its first chunk are left as they are (0).
-    pub(crate) fn evict(&self) -> u64 {
-        let dropped: Vec<Arc<StoredChunk>> = {
+    /// (R-M3-68), keeping the state it had ended in (`before_eviction`). Answers what
+    /// happened and the cut chunks nobody else holds: the caller drops those (releasing their
+    /// bytes) once it has let go of the registry lock. A chunk a held snapshot still shows is
+    /// released when that snapshot drops (P-M3b-29). A result still being written, one with a
+    /// cursor open, one already evicted or given back, and one with nothing past its first
+    /// chunk are left as they are (`None`).
+    pub(crate) fn evict(&self) -> Option<(Eviction, Vec<StoredChunk>)> {
+        let (eviction, cut) = {
             let mut tail = self.tail();
-            if tail.evicted || !evictable(&tail.completeness) || tail.chunks.len() < 2 {
-                return 0;
+            if tail.evicted() || !evictable(&tail.completeness) || tail.chunks.len() < 2 {
+                return None;
             }
             let first = tail.chunks[0].clone();
-            let dropped = tail.chunks[1..].to_vec();
+            let cut = tail.chunks[1..].to_vec();
+            let previous = tail.completeness;
             tail.rows = tail.starts[1];
             tail.bytes = first.chunk.bytes();
             tail.chunks = Arc::from(vec![first]);
@@ -233,16 +244,20 @@ impl ResultStore {
             tail.completeness = Completeness::Closed {
                 reason: CloseReason::Evicted,
             };
-            tail.evicted = true;
+            tail.before_eviction = Some(previous);
             self.publish(&mut tail, None);
-            dropped
+            let eviction = Eviction {
+                result: self.id,
+                kept_rows: tail.rows,
+                previous,
+            };
+            (eviction, cut)
         };
-        // Whoever drops a chunk last releases its bytes: here unless a snapshot holds it.
-        dropped
-            .into_iter()
-            .filter_map(Arc::into_inner)
-            .map(|chunk| chunk.chunk.bytes())
-            .sum()
+        // Whoever drops a chunk last releases its bytes: the caller, unless a snapshot holds it.
+        Some((
+            eviction,
+            cut.into_iter().filter_map(Arc::into_inner).collect(),
+        ))
     }
 
     /// How many rows to ask the session for so a reader of `snap` sees row `upto` (ledger 109

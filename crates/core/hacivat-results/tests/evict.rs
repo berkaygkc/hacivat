@@ -442,3 +442,226 @@ fn eviction_races_writers_safely() {
     drop((stores, backgrounds, shown));
     assert_eq!(b.used(), 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Review fix round 1 (M1, M3, M4, M6, M9)
+
+/// A finished, hidden result of at least `bytes` that ended in `end`.
+fn finished(budget: &Arc<MemoryBudget>, bytes: u64, end: Completeness) -> Arc<ResultStore> {
+    let (store, mut w) = ResultStore::new(next_id(), schema(), budget.clone(), 1);
+    fill(&mut w, bytes);
+    w.set_state(end);
+    drop(w);
+    store.set_visible(false);
+    store
+}
+
+const EVICTED: Completeness = Completeness::Closed {
+    reason: CloseReason::Evicted,
+};
+
+fn evicted_count(stores: &[Arc<ResultStore>]) -> usize {
+    stores
+        .iter()
+        .filter(|s| *s.snapshot().completeness() == EVICTED)
+        .count()
+}
+
+/// M1: eight runs pass the global budget at the same moment; one eviction makes room for all
+/// of them, so exactly one background result is cut (the room is re-checked under the
+/// eviction lock, counting bytes being freed as free).
+#[test]
+fn concurrent_admits_evict_only_what_they_need() {
+    const RUNS: usize = 8;
+    let est = chunk_from(0, 256).bytes();
+    let bytes = 1 << 20;
+    // One background result frees far more than all the runs need together.
+    assert!(est * RUNS as u64 * 4 < bytes);
+    let one = finished(
+        &MemoryBudget::new(u64::MAX, u64::MAX),
+        bytes,
+        Completeness::Complete,
+    )
+    .snapshot()
+    .bytes();
+    for _ in 0..20 {
+        let b = MemoryBudget::new(8 * one + est - 1, u64::MAX);
+        let hidden: Vec<_> = (0..8)
+            .map(|_| finished(&b, bytes, Completeness::Complete))
+            .collect();
+        assert_eq!(b.used(), 8 * one);
+        let barrier = Arc::new(std::sync::Barrier::new(RUNS));
+        let runs: Vec<_> = (0..RUNS)
+            .map(|_| {
+                let (b, barrier) = (b.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let (s, mut w) = ResultStore::new(next_id(), schema(), b, 1);
+                    barrier.wait();
+                    let answer = w.admit(est);
+                    if answer == Admission::Ok {
+                        w.append(chunk_from(0, 256));
+                    }
+                    w.set_state(Completeness::Complete);
+                    (s, answer)
+                })
+            })
+            .collect();
+        let done: Vec<_> = runs.into_iter().map(|t| t.join().unwrap()).collect();
+        assert!(done.iter().all(|(_, a)| *a == Admission::Ok), "all fit");
+        assert_eq!(
+            evicted_count(&hidden),
+            1,
+            "one cut was enough for every run"
+        );
+    }
+}
+
+/// M3: the listeners run after the eviction lock is released and the cut chunks are freed:
+/// a listener can call `set_visible` (the registry lock) and already reads the lower `used`.
+#[test]
+fn listeners_run_after_the_eviction_lock_is_released() {
+    let b = MemoryBudget::new(64 << 20, 64 << 20);
+    let x = finished(&b, 1 << 20, Completeness::Complete);
+    let first = chunk_from(0, CHUNK_ROWS).bytes();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = {
+        let (x, weak, seen) = (x.clone(), Arc::downgrade(&b), seen.clone());
+        move |_: &hacivat_results::evict::Eviction| {
+            // Re-entering the registry from here would deadlock if the lock were still held.
+            x.set_visible(true);
+            x.set_visible(false);
+            seen.lock().unwrap().push(weak.upgrade().unwrap().used());
+        }
+    };
+    b.on_evicted(listener);
+    assert!(b.evict_for(1) > 0);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![first],
+        "freed before the listener ran"
+    );
+}
+
+/// M4: an evicted result keeps the state it had ended in, for the strip.
+#[test]
+fn eviction_keeps_the_previous_outcome() {
+    let b = MemoryBudget::new(64 << 20, 64 << 20);
+    let ends = [
+        Completeness::Complete,
+        Completeness::Cancelled,
+        Completeness::Truncated(TruncReason::ResultCap),
+        Completeness::Truncated(TruncReason::FollowingResultSets),
+        Completeness::Closed {
+            reason: CloseReason::EnforcementGap,
+        },
+        Completeness::Closed {
+            reason: CloseReason::ConnectionLost,
+        },
+    ];
+    let stores: Vec<_> = ends.iter().map(|e| finished(&b, 64 << 10, *e)).collect();
+    for s in &stores {
+        assert_eq!(s.snapshot().before_eviction(), None, "not evicted yet");
+    }
+    b.evict_for(u64::MAX);
+    for (s, end) in stores.iter().zip(ends) {
+        let snap = s.snapshot();
+        assert_eq!(*snap.completeness(), EVICTED);
+        assert_eq!(snap.before_eviction(), Some(end));
+    }
+}
+
+/// M6: every eviction is announced once, with the result's ID, the rows it kept and the
+/// state it had ended in, in eviction order; a result already evicted is not announced again,
+/// and a cut whose bytes wait for a held snapshot is announced all the same.
+#[test]
+fn eviction_is_announced_once_per_result() {
+    use hacivat_results::evict::Eviction;
+    let b = MemoryBudget::new(64 << 20, 64 << 20);
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    {
+        let events = events.clone();
+        b.on_evicted(move |e| events.lock().unwrap().push(*e));
+    }
+    let x = finished(&b, 1 << 20, Completeness::Complete);
+    let y = finished(
+        &b,
+        1 << 20,
+        Completeness::Truncated(TruncReason::FollowingResultSets),
+    );
+    let held = y.snapshot();
+    let shown = finished(&b, 1 << 20, Completeness::Complete);
+    shown.set_visible(true);
+    b.evict_for(u64::MAX);
+    b.evict_for(u64::MAX);
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            Eviction {
+                result: x.id(),
+                kept_rows: CHUNK_ROWS,
+                previous: Completeness::Complete,
+            },
+            Eviction {
+                result: y.id(),
+                kept_rows: CHUNK_ROWS,
+                previous: Completeness::Truncated(TruncReason::FollowingResultSets),
+            },
+        ]
+    );
+    assert_eq!(*shown.snapshot().completeness(), Completeness::Complete);
+    drop(held);
+}
+
+/// M9: readers loading snapshots and reading cells while eviction cuts results always see a
+/// whole snapshot: every row below `row_count` reads its own number, and an evicted snapshot
+/// holds exactly the first chunk.
+#[test]
+fn readers_see_whole_snapshots_during_eviction() {
+    let b = MemoryBudget::new(u64::MAX, u64::MAX);
+    let stores: Vec<_> = (0..16)
+        .map(|_| finished(&b, 256 << 10, Completeness::Complete))
+        .collect();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let readers: Vec<_> = (0..4)
+        .map(|_| {
+            let (stores, stop) = (stores.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut reads = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) || reads == 0 {
+                    for s in &stores {
+                        let snap = s.snapshot();
+                        let rows = snap.row_count();
+                        if *snap.completeness() == EVICTED {
+                            assert_eq!(rows, CHUNK_ROWS);
+                        }
+                        for row in (0..rows).step_by(97).chain(rows.checked_sub(1)) {
+                            assert_eq!(
+                                snap.cell(row, 0),
+                                hacivat_values::ValueRef::Int(row as i64)
+                            );
+                        }
+                        reads += 1;
+                    }
+                }
+                reads
+            })
+        })
+        .collect();
+    // Small passes, one result each unless a reader holds the cut chunks (then the bytes wait
+    // for that snapshot and the pass moves on): every pass cuts at least one result.
+    let mut passes = 0;
+    while evicted_count(&stores) < stores.len() {
+        b.evict_for(1);
+        passes += 1;
+        assert!(passes <= stores.len(), "a pass cut nothing");
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for r in readers {
+        assert!(r.join().expect("a reader saw a torn snapshot") > 0);
+    }
+    assert_eq!(evicted_count(&stores), stores.len());
+    assert_eq!(
+        b.used(),
+        stores.iter().map(|s| s.snapshot().bytes()).sum::<u64>()
+    );
+}

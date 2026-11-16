@@ -104,6 +104,7 @@ pub trait ResultSource: Send + Sync + 'static {
     fn set_visible(&self, _visible: bool) {}
 }
 
+// ## m3b-t08-store (the type's docs: the shared ask ledger)
 /// The [`ResultSource`] over a store and its session (Task 7).
 ///
 /// `ensure_rows` coalesces without a timer: while the result is `Suspended` and the reader
@@ -111,8 +112,7 @@ pub trait ResultSource: Send + Sync + 'static {
 /// then nothing more for that need until a later version (the session's reply moves the
 /// version: rows, a state change, or both).
 ///
-/// ## m3b-t08-store
-/// The asks go through the store's ledger (ledger 109 M4), so every source over one store
+/// Since M3b Task 8, the asks go through the store's ledger (ledger 109 M4), so every source over one store
 /// shares them: per snapshot version the asks add up to what the farthest reader needs, a
 /// need already asked asks nothing, and a farther need asks only for the rows past those
 /// already asked. The session merges the queued `FetchMore`s of one result into one fetch of

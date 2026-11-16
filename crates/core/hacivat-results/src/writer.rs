@@ -5,13 +5,13 @@
 //! about 250 `Arc` clones for 1M rows), so a published snapshot never changes and a held one
 //! keeps exactly the chunks it showed. Consumers coalesce changes through the store's `watch`.
 //!
-//! ## m3b-t08-store
-//! The rows the writer builds from live in the store's tail (`store.rs`), shared with
+//! Since M3b Task 8, the rows the writer builds from live in the store's tail (`store.rs`), shared with
 //! eviction: `admit` evicts background results before it answers `Pause(GlobalBudget)`
 //! (R-M3-68, P-M3b-29), and once eviction has cut this writer's result, its later appends and
 //! states are dropped (an evicted result never reads as anything else). Eviction takes only
 //! results whose run has ended, so a live run never meets this.
 
+// ## m3b-t08-store (module docs above, the tail, eviction in `admit`)
 use std::fmt;
 use std::iter;
 use std::sync::Arc;
@@ -112,23 +112,20 @@ impl ResultWriter {
     /// `Pause(ResultCap)`, past the global budget `Pause(GlobalBudget)`. A chunk that lands
     /// exactly on a limit fits. The answer is kept for the next publish (`paused`).
     ///
-    /// Past the global budget it first asks the budget to evict background results for the
-    /// shortfall (R-M3-68), and pauses only when that did not make room.
+    /// Past the global budget it first asks the budget to evict background results until
+    /// the chunk fits (R-M3-68), and pauses only when that did not make room. The budget
+    /// re-checks the room under its eviction lock, so two runs over the budget at once evict
+    /// only what both need together (review M1).
     pub fn admit(&self, next_chunk_estimate: u64) -> Admission {
         let raised = self.store.cap_raised();
         let bytes = self.store.tail().bytes;
         let answer =
             if !raised && bytes.saturating_add(next_chunk_estimate) > self.budget.per_result() {
                 Admission::Pause(PauseReason::ResultCap)
-            } else if self.over_global(next_chunk_estimate) {
+            } else if self.budget.over_global(next_chunk_estimate) {
                 // ## m3b-t08-store
-                let need = self
-                    .budget
-                    .used()
-                    .saturating_add(next_chunk_estimate)
-                    .saturating_sub(self.budget.global());
-                self.budget.evict_for(need);
-                if self.over_global(next_chunk_estimate) {
+                self.budget.evict_to_fit(next_chunk_estimate);
+                if self.budget.over_global(next_chunk_estimate) {
                     Admission::Pause(PauseReason::GlobalBudget)
                 } else {
                     Admission::Ok
@@ -141,17 +138,12 @@ impl ResultWriter {
         answer
     }
 
-    /// Whether a chunk of `bytes` would pass the global budget now.
-    fn over_global(&self, bytes: u64) -> bool {
-        self.budget.used().saturating_add(bytes) > self.budget.global()
-    }
-
     /// Appends `chunk` (charging its bytes to the budget) and publishes. A chunk of no rows
     /// adds nothing, but the call still publishes. After an eviction the chunk is dropped
     /// uncharged and nothing is published.
     pub fn append(&mut self, chunk: Chunk) {
         let mut tail = self.store.tail();
-        if tail.evicted {
+        if tail.evicted() {
             return;
         }
         let rows = u64::from(chunk.rows());
@@ -180,7 +172,7 @@ impl ResultWriter {
     /// Sets the completeness and publishes (nothing after an eviction).
     pub fn set_state(&mut self, c: Completeness) {
         let mut tail = self.store.tail();
-        if tail.evicted {
+        if tail.evicted() {
             return;
         }
         tail.completeness = c;
@@ -212,7 +204,7 @@ impl Drop for ResultWriter {
             return;
         }
         let mut tail = self.store.tail();
-        if !tail.evicted
+        if !tail.evicted()
             && matches!(
                 tail.completeness,
                 Completeness::Streaming | Completeness::Suspended(_)

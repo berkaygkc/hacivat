@@ -16,8 +16,10 @@ fn store(id: u64, budget: &Arc<MemoryBudget>) -> Arc<ResultStore> {
     ResultStore::new(ResultId(id), schema, budget.clone(), 1).0
 }
 
+// ## m3b-t08-store (review M10, named exception): renamed; eviction is real since Task 8.
+/// A budget with no results has nothing to evict.
 #[test]
-fn evict_stub_frees_nothing() {
+fn evict_on_an_empty_budget_frees_nothing() {
     assert_eq!(MemoryBudget::new(1 << 20, 1 << 20).evict_for(1 << 19), 0);
 }
 
