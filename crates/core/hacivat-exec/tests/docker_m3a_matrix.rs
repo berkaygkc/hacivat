@@ -745,7 +745,7 @@ async fn select_streams_suspends_fetches_more_and_closes() {
             "{id}"
         );
         assert_eq!(c.log_ids(), ["exec-rows-retrieved-more"], "{id}");
-        let snap = c.snap();
+        let snap = c.settled().await;
         assert_eq!(snap.cursor.map(|b| b.rows), Some(10_000), "{id}");
         if line.is_pg() {
             // Hacivat's own transaction holds the portal; it is never the user's.

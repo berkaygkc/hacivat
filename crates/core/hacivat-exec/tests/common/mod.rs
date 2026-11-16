@@ -1103,6 +1103,31 @@ pub mod matrix {
             self.s.state().borrow().clone()
         }
 
+        /// The session's snapshot once it has left its request (CI run 43779216264). A run's
+        /// `done` follows its `RunEnded`, which the session sends while still `Busy` with the
+        /// run's request; it publishes `Idle` with its transaction and cursor just before it
+        /// replies (`hacivat-session` test `run_ended_comes_while_busy_and_the_reply_after_idle`).
+        /// So a test that checks the state a run left waits here on the snapshot watch (no
+        /// polling) instead of reading [`snap`](Self::snap) at once. Panics after 10 s.
+        pub async fn settled(&self) -> SessionSnapshot {
+            let mut state = self.s.state();
+            let left = |s: &SessionSnapshot| {
+                !matches!(
+                    s.state,
+                    SessionState::Busy { .. } | SessionState::Cancelling { .. }
+                )
+            };
+            match tokio::time::timeout(secs(10), state.wait_for(left)).await {
+                Ok(Ok(snap)) => snap.clone(),
+                Ok(Err(_)) => panic!("{}: the session ended", self.line.id),
+                Err(_) => panic!(
+                    "{}: the session stayed busy: {:?}",
+                    self.line.id,
+                    self.snap()
+                ),
+            }
+        }
+
         /// The Fluent IDs of the console's log lines, oldest first.
         pub fn log_ids(&self) -> Vec<&'static str> {
             self.log.lines().iter().map(|l| l.msg.fluent_id()).collect()

@@ -108,7 +108,8 @@ async fn a_parenthesis_before_copy_is_a_syntax_error_on_postgresql() {
         assert_eq!(ran.names(), ["Failed"], "{id}");
         assert_eq!(ran.outcome(), "42601", "{id}: a syntax error at `)`");
         // Not in COPY mode: the next statement, and a "row" sent as SQL, are statements.
-        assert_eq!(dev.snap().state, SessionState::Idle, "{id}");
+        // The run's end can reach the test before the session publishes `Idle`: wait for it.
+        assert_eq!(dev.settled().await.state, SessionState::Idle, "{id}");
         dev.ok("SELECT 1").await;
         let row = dev.run("a\tb").await;
         assert_eq!(row.outcome(), "42601", "{id}: a row is SQL to the server");
