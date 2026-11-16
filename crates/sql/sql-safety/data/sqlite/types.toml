@@ -1,1 +1,27 @@
-# owner: Task 3 (SAFE-03 data; sqlite). Empty until Task 3 fills it.
+# SAFE-03 builtin cast targets (sqlite). Hand rows (`source = "manual"`) and the catalog read's
+# candidates (`hacivat-exec/tests/gen_fn_catalog.rs`), each reviewed by hand: only
+# `reviewed = true` rows count. Owner: M3b Task 3.
+rows = [
+  { name = "integer", source = "manual", reviewed = true },
+  { name = "int", source = "manual", reviewed = true },
+  { name = "text", source = "manual", reviewed = true },
+  { name = "real", source = "manual", reviewed = true },
+  { name = "numeric", source = "manual", reviewed = true },
+  { name = "blob", source = "manual", reviewed = true },
+  { name = "varchar", source = "manual", reviewed = true },
+  { name = "char", source = "manual", reviewed = true },
+  { name = "character", source = "manual", reviewed = true },
+  { name = "double", source = "manual", reviewed = true },
+  { name = "double precision", source = "manual", reviewed = true },
+  { name = "float", source = "manual", reviewed = true },
+  { name = "boolean", source = "manual", reviewed = true },
+  { name = "date", source = "manual", reviewed = true },
+  { name = "datetime", source = "manual", reviewed = true },
+  { name = "decimal", source = "manual", reviewed = true },
+  { name = "bigint", source = "manual", reviewed = true },
+  { name = "smallint", source = "manual", reviewed = true },
+  { name = "tinyint", source = "manual", reviewed = true },
+  { name = "clob", source = "manual", reviewed = true },
+  { name = "nvarchar", source = "manual", reviewed = true },
+  { name = "nchar", source = "manual", reviewed = true },
+]

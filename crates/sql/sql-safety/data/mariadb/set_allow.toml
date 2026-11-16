@@ -1,1 +1,7 @@
-# owner: Task 3 (SAFE-03 data; mariadb). Empty until Task 3 fills it.
+# Harmless `SET` variables a read-only session may run (mariadb; P-M3b-6, the PO list).
+# Exact names, ASCII-case-insensitive. Owner: M3b Task 3.
+rows = [
+  { name = "time_zone", source = "manual", reviewed = true },
+  { name = "max_execution_time", source = "manual", reviewed = true },
+  { name = "div_precision_increment", source = "manual", reviewed = true },
+]

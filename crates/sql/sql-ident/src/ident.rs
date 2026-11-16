@@ -1,4 +1,4 @@
-//! An identifier as written and a qualified name (Task 3 fills the parsing).
+//! An identifier as written and a qualified name ([`crate::parse_qualified`] reads one).
 
 use std::sync::Arc;
 
