@@ -183,7 +183,10 @@ impl Col {
             _ => {}
         }
         match ty.kind() {
-            Kind::Array(elem) => {
+            // tokio-postgres marks any type with an element type (`typelem ≠ 0`) as an array,
+            // a user's fixed-length `ELEMENT = …` type too; only PostgreSQL's array types
+            // (named `_elem`) send `array_send`'s format (fix round 1, review m-2).
+            Kind::Array(elem) if ty.name().starts_with('_') => {
                 let decoder = Col::for_type(elem);
                 return match decoder {
                     Col::Array(_) | Col::TypedText | Col::Opaque(_) => Col::TypedText,
@@ -397,7 +400,7 @@ impl Col {
             Col::Cidr => network::inet(raw, true),
             Col::MacAddr => network::macaddr(raw, 6),
             Col::MacAddr8 => network::macaddr(raw, 8),
-            Col::Bits => network::bits(raw),
+            Col::Bits => network::bits(raw, cell_cap),
             Col::Array(a) => array::decode(raw, a, cell_cap),
             Col::TypedText => Decoded::Var(raw),
         }

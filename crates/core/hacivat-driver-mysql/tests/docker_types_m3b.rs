@@ -25,7 +25,9 @@ use hacivat_net::{
 };
 use hacivat_proto::DbmsKind;
 use hacivat_testkit::{DockerTarget, TlsDefault, targets};
-use hacivat_values::valfmt::{BinaryDisplay, ColumnFacts, RawText, raw_text, type_label};
+use hacivat_values::valfmt::{
+    BinaryDisplay, ColumnFacts, RawText, mysql_charset_width, raw_text, type_label,
+};
 use hacivat_values::{ColumnMeta, LogicalType, NativeType, Value};
 use secrecy::SecretString;
 
@@ -104,6 +106,8 @@ struct Case {
     label: String,
     kind: String,
     raw: String,
+    /// An expression whose server text must equal `raw` too (`BIN()`, `HEX()`).
+    server: Option<String>,
 }
 
 fn setup() -> Vec<&'static str> {
@@ -121,8 +125,10 @@ fn cases() -> Vec<Case> {
         .filter_map(|(i, l)| Some((i, l.strip_prefix("= ")?)))
         .map(|(i, l)| {
             let parts: Vec<&str> = l.split(" | ").collect();
-            let [column, label, kind, raw] = parts[..] else {
-                panic!("line {}: four fields", i + 1);
+            let (column, label, kind, raw, server) = match parts[..] {
+                [column, label, kind, raw] => (column, label, kind, raw, None),
+                [column, label, kind, raw, server] => (column, label, kind, raw, Some(server)),
+                _ => panic!("line {}: four or five fields", i + 1),
             };
             Case {
                 line: i + 1,
@@ -130,6 +136,7 @@ fn cases() -> Vec<Case> {
                 label: label.to_string(),
                 kind: kind.to_string(),
                 raw: raw.to_string(),
+                server: server.map(str::to_string),
             }
         })
         .collect()
@@ -235,6 +242,16 @@ async fn mysql_type_goldens_80_84_and_mariadb() {
                 assert_eq!(type_label(&col.native), case.label, "{at}");
                 assert_eq!(kind_of(&col.logical), case.kind, "{at}: {:?}", col.logical);
                 assert_eq!(raw_of(&col, &value, t.engine), case.raw, "{at}: {value:?}");
+                // The server's own text of the value (`BIN()`, `HEX()`) agrees (review m-6).
+                if let Some(expr) = &case.server {
+                    let sql = format!("SELECT {expr} FROM hv_t07_types WHERE id = 1");
+                    let (scol, svalue) = typed_cell(&mut c, &sql).await;
+                    assert_eq!(
+                        raw_of(&scol, &svalue, t.engine),
+                        case.raw,
+                        "{at}: server {expr}"
+                    );
+                }
             }
             // A TIMESTAMP column names the session zone; a DATETIME one names none.
             let sql = "SELECT ts3, dt6 FROM hv_t07_types WHERE id = 1";
@@ -256,6 +273,69 @@ async fn mysql_type_goldens_80_84_and_mariadb() {
             assert_eq!(time_zone_of(&schema.columns[1].native), None, "{id}");
         }
         c.force_text_protocol(false);
+        Box::new(c).close().await;
+    }
+}
+
+/// `(collation ID, widest character in bytes)` from `sql`, or nothing when the server refuses
+/// it (MariaDB 10.6 has no `ID` in `COLLATION_CHARACTER_SET_APPLICABILITY`).
+async fn widths(c: &mut MySqlConn, sql: &str) -> Vec<(u16, u32)> {
+    let Ok(s) = c.execute(sql, ExecOpts::values(100_000)).await else {
+        return Vec::new();
+    };
+    s.rows
+        .into_iter()
+        .filter_map(|r| {
+            let id = r.first()?.as_deref()?.parse().ok()?;
+            let max = r.get(1)?.as_deref()?.parse().ok()?;
+            Some((id, max))
+        })
+        .collect()
+}
+
+/// ## m3b-t07 fix round 1 (review m-11): the collation table `type_label` uses
+/// (`valfmt::mysql_charset_width`) agrees with every server's own `information_schema`: each ID
+/// the table names that a server knows has exactly that character width. So no MariaDB ID in
+/// the MySQL-derived ranges belongs to another character set.
+#[tokio::test]
+#[ignore = "docker"]
+async fn the_collation_table_matches_every_servers_information_schema() {
+    for t in mysql_family() {
+        let id = &t.id;
+        let mut c = connect_conn(request(&t))
+            .await
+            .unwrap_or_else(|e| panic!("{id}: {:?}", e.kind));
+        let mut known = widths(
+            &mut c,
+            "SELECT c.ID, s.MAXLEN FROM information_schema.COLLATIONS c \
+             JOIN information_schema.CHARACTER_SETS s \
+             ON s.CHARACTER_SET_NAME = c.CHARACTER_SET_NAME WHERE c.ID IS NOT NULL",
+        )
+        .await;
+        assert!(known.len() > 50, "{id}: {} collations", known.len());
+        if t.engine == DbmsKind::MariaDb {
+            // MariaDB 10.10+ lists more IDs (the uca1400 collations of each character set) here.
+            known.extend(
+                widths(
+                    &mut c,
+                    "SELECT a.ID, s.MAXLEN \
+                     FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY a \
+                     JOIN information_schema.CHARACTER_SETS s \
+                     ON s.CHARACTER_SET_NAME = a.CHARACTER_SET_NAME WHERE a.ID IS NOT NULL",
+                )
+                .await,
+            );
+        }
+        let mut checked = 0;
+        for (collation, max) in &known {
+            if let Some(width) = mysql_charset_width(*collation) {
+                assert_eq!(width, *max, "{id}: collation {collation}");
+                checked += 1;
+            }
+        }
+        // utf8mb4_bin (46), utf8mb4_general_ci (45), latin1_swedish_ci (8) and binary (63) at
+        // least exist on every line.
+        assert!(checked >= 4, "{id}: {checked} collations checked");
         Box::new(c).close().await;
     }
 }

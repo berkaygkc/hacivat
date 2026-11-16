@@ -791,6 +791,82 @@ fn bit_strings_print_every_bit() {
     );
 }
 
+// ## m3b-t07 fix round 1 (review m-2): only `_name` array types are requested as arrays.
+#[test]
+fn a_type_with_an_element_but_no_array_name_stays_text() {
+    // A user or extension type declared with `ELEMENT = float8`: tokio-postgres gives it
+    // `Kind::Array`, but it is not an array and does not send `array_send`'s format.
+    let ty = Type::new(
+        "vec3".into(),
+        93_000,
+        Kind::Array(Type::FLOAT8),
+        "public".into(),
+    );
+    assert_eq!(format_for(&ty), TEXT_FORMAT);
+    assert!(matches!(
+        decode_pg(&ty, b"(1,2,3)"),
+        Value::Opaque(o) if &*o.text == "(1,2,3)" && &*o.type_name == "vec3"
+    ));
+    // An array type of the same element, named as PostgreSQL names arrays, is binary.
+    let arr = Type::new(
+        "_vec3".into(),
+        93_001,
+        Kind::Array(Type::FLOAT8),
+        "public".into(),
+    );
+    assert_eq!(format_for(&arr), BINARY_FORMAT);
+}
+
+// ## m3b-t07 fix round 1 (review m-3): `"char"` elements with the high bit set.
+#[test]
+fn a_char_element_with_the_high_bit_is_octal_escaped() {
+    // 0xE9 is \351; the backslash is then quoted and escaped by array_out's rules.
+    assert_eq!(
+        text_of(decode_pg_array(&array(
+            18,
+            &[(2, 1)],
+            &[Some(vec![0xe9]), Some(vec![0x80])]
+        ))),
+        r#"{"\\351","\\200"}"#
+    );
+}
+
+// ## m3b-t07 fix round 1 (review I-1): a bit string honours the cell cap.
+#[test]
+fn a_bit_string_past_the_cap_is_truncated_with_its_bit_count() {
+    // 1,000 bits of 1010…, cap 100: the first 100 digits, total 1,000.
+    let bytes = bits(1_000, &[0b1010_1010; 125]);
+    match decode_cell(&Type::VARBIT, NO_MOD, Some(&bytes), 100) {
+        Value::Truncated(t) => {
+            assert_eq!(t.total_len, Some(1_000));
+            assert_eq!(t.prefix, Value::Text("10".repeat(50).into()));
+        }
+        other => panic!("{other:?}"),
+    }
+    // Exactly at the cap: whole.
+    assert_eq!(
+        decode_cell(&Type::VARBIT, NO_MOD, Some(&bits(16, &[0xff, 0])), 16),
+        Value::Text("1111111100000000".into())
+    );
+    // A 1 MiB varbit (8,388,608 bits) under the default 1 MiB cap: 1 MiB of digits kept, the
+    // exact bit count as its length; never the 8 MiB text.
+    let n = 8 << 20;
+    let bytes = bits(n, &vec![0xff; 1 << 20]);
+    match decode_cell(&Type::VARBIT, NO_MOD, Some(&bytes), CAP) {
+        Value::Truncated(t) => {
+            assert_eq!(t.total_len, Some(n as u64));
+            match &t.prefix {
+                Value::Text(p) => {
+                    assert_eq!(p.len(), CAP as usize);
+                    assert!(p.bytes().all(|b| b == b'1'));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn hostile_bit_strings_are_error_cells() {
     for bytes in [

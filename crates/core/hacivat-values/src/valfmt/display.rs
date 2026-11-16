@@ -249,7 +249,9 @@ mod my {
 ///   `timestamp(3)`, `bit(5)`, `enum`, `set`, `json`, `geometry`. A text column's length in
 ///   characters needs its character set's widest character: it is shown only for the character
 ///   sets this table knows (`latin1`, `ascii`, `utf8mb3`, `utf8mb4` and `binary`), so an unknown
-///   collation gives a bare `varchar`, never a wrong length.
+///   collation gives a bare `varchar`, never a wrong length. A column type code with no SQL
+///   name (the replication-only codes) gives an **empty** label: the app names it through
+///   Fluent (`hv-results-type-mysql-code`; fix round 1, review m-9), never English from here.
 /// - **PostgreSQL**: the bare type name (`numeric`), which the app decorates with the logical
 ///   type's length or precision. **SQLite**: the declared type, else the affinity's name.
 pub fn type_label(native: &NativeType) -> String {
@@ -279,6 +281,14 @@ pub fn type_label(native: &NativeType) -> String {
         .to_string(),
         NativeType::Unknown => String::new(),
     }
+}
+
+/// The widest character, in bytes, of a MySQL/MariaDB collation's character set, as
+/// [`type_label`] uses it (`None`: unknown). Test seam: the Docker golden checks every ID this
+/// table names against each server's `information_schema` (fix round 1, review m-11).
+#[doc(hidden)]
+pub fn mysql_charset_width(collation: u16) -> Option<u32> {
+    mysql_mbmaxlen(collation)
 }
 
 /// The widest character, in bytes, of a MySQL/MariaDB collation's character set; `None` for a
@@ -376,7 +386,8 @@ fn mysql_label(t: u8, flags: u16, charset: u16, length: u32, decimals: u8) -> St
             };
             format!("{prefix}{base}")
         }
-        other => format!("mysql type {other}"),
+        // No SQL name: the app labels it through Fluent with the code.
+        _ => String::new(),
     }
 }
 

@@ -1368,6 +1368,29 @@ get their own logical type, and the ones with a stable binary format decode in b
   `bigint unsigned`, `varchar(40)` — a text length only for the character sets it knows, never
   a wrong one), and the app's header uses it for MySQL/MariaDB (ledger 246; named exception in
   `results/adapter.rs`). Raw text stays locale-free.
-- **Goldens.** `tests/data/types_pg.sql` (65 cases) and `tests/data/types_mysql.sql` (31 cases,
+- **Goldens.** `tests/data/types_pg.sql` (72 cases after fix round 1) and `tests/data/types_mysql.sql` (31 cases,
   both protocols) run through the wrapper on pg14–18 and mysql80/84 + mariadb106/1011/114; the
   PostgreSQL cases also compare with the server's own output text.
+- **Fix round 1 (review).**
+  - I-1: a scalar `bit`/`varbit` cell honours the cell cap: at most `cap` digits are written and
+    a longer value is `Truncated` with its exact bit count (a 1 MiB `varbit` is 1 MiB of digits,
+    never 8 MiB).
+  - m-2: only types named like PostgreSQL arrays (`_elem`) are requested as binary arrays; a
+    user or extension type with `ELEMENT = …` (tokio-postgres's `Kind::Array`) stays opaque text.
+  - m-3: a `"char"` array element with the high bit set is `charout`'s PostgreSQL 15+ `\ooo` on
+    every line (PostgreSQL 14 printed the raw byte, which is not text in a UTF-8 literal).
+  - m-4 (**copy**): a `timestamptz[]` cell copies with `+00` offsets, while a scalar
+    `timestamptz` copies in the console's display zone; psql in a non-UTC session prints the
+    array in its own zone. Same instants, different spelling — a decision, recorded here.
+  - m-8: `LogicalType::Geometry` documents MySQL's 4-byte SRID prefix before the WKB.
+  - m-9: a MySQL type code without an SQL name gets an empty `type_label`; the app names it
+    through Fluent (`hv-results-type-mysql-code`, TR for PO review) and rebuilds that label when
+    the language changes.
+  - m-11: the collation-width table was checked against every MySQL/MariaDB line's
+    `information_schema` (`COLLATIONS`, plus MariaDB 10.10+'s
+    `COLLATION_CHARACTER_SET_APPLICABILITY`) by a Docker test: every ID it names that a server
+    knows has that width, MariaDB included.
+  - Carries: T13 (simple protocol: binary-decoded columns must take the server's text, review
+    m-10); T18 (fold the `sql_mode` read into the same setup query) and the settings model
+    (`EnvStep::TimeZone` must refresh `TypedState.time_zone`); session-state tracking for
+    `time_zone` needs a vendored mysql_async patch (`CLIENT_SESSION_TRACK`) first.

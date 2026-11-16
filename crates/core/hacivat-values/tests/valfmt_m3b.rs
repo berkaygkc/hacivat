@@ -329,6 +329,18 @@ fn mysql_type_labels_name_the_declared_type() {
     }
 }
 
+// ## m3b-t07 fix round 1 (review m-9): no English fallback; the app names the code via Fluent.
+#[test]
+fn a_mysql_type_code_without_a_name_has_an_empty_label() {
+    for code in [17u8, 18, 19, 20, 243, 244] {
+        assert_eq!(
+            type_label(&mysql_native(code, 0, BINARY, 0, 0)),
+            "",
+            "{code}"
+        );
+    }
+}
+
 #[test]
 fn postgresql_and_sqlite_labels_are_their_names() {
     let pg = NativeType::Pg {

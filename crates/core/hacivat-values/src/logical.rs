@@ -51,6 +51,12 @@ pub enum LogicalType {
     BitString {
         len: Option<u32>,
     },
+    // ## m3b-t07-types (fix round 1, review m-8): what a `Geometry` cell holds per engine.
+    // PostgreSQL's geometric types (`point`, `box`, …) are the server's text. MySQL/MariaDB
+    // `GEOMETRY` is the hex of the internal value as `HEX()` prints it: a 4-byte little-endian
+    // SRID **prefix**, then the WKB (`E6100000` + WKB for SRID 4326); a WKT or map renderer
+    // strips those 4 bytes first. `srid` is a column-level SRID when the engine states one
+    // (`None` so far: MySQL's SRID is per value, inside the prefix).
     Geometry {
         srid: Option<i32>,
     },

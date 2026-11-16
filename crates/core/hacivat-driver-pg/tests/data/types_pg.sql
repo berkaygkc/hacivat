@@ -16,6 +16,8 @@
 '{{{1,2}},{{3,4}}}'::int4[] -- array => {{{1,2}},{{3,4}}}
 '{}'::int4[] -- array => {}
 ARRAY['a b', '"', '', 'NULL', 'x\y', 'şİı', 'tab	in']::text[] -- array => {"a b","\"","","NULL","x\\y",şİı,"tab	in"}
+ARRAY['a,b', '{x}', 'x}', 'null']::text[] -- array => {"a,b","{x}","x}","null"}
+'[0:1][2:3]={{"a b",NULL},{"\\\\",""}}'::text[] -- array => [0:1][2:3]={{"a b",NULL},{"\\\\",""}}
 ARRAY[true, false, NULL] -- array => {t,f,NULL}
 ARRAY[-2]::int2[] -- array => {-2}
 ARRAY[9223372036854775807]::int8[] -- array => {9223372036854775807}
@@ -27,6 +29,7 @@ ARRAY['ab']::char(3)[] -- array => {"ab "}
 ARRAY['abc']::varchar(10)[] -- array => {abc}
 ARRAY['pg_class']::name[] -- array => {pg_class}
 ARRAY['r']::"char"[] -- array => {r}
+ARRAY[''::"char"] -- array => {""}
 ARRAY['\x00ff0a', '\x']::bytea[] -- array => {"\\x00ff0a","\\x"}
 ARRAY['6f1e9a0c-0000-4000-8000-000000000001']::uuid[] -- array => {6f1e9a0c-0000-4000-8000-000000000001}
 ARRAY['{"a":1}', 'null']::json[] -- array => {"{\"a\":1}","null"}
@@ -54,6 +57,10 @@ ARRAY[B'101', B'']::varbit[] -- array => {101,""}
 '1:0:0:1:0:0:1:1'::inet -- network => 1::1:0:0:1:1
 '1:0:1:1:1:1:1:1'::inet -- network => 1:0:1:1:1:1:1:1
 '::ffff:1.2.3.4'::inet -- network => ::ffff:1.2.3.4
+'::1.2.3.4'::inet -- network => ::1.2.3.4
+'1::'::inet -- network => 1::
+'::ffff:0:0'::inet -- network => ::ffff:0.0.0.0
+'2001:db8::1/128'::cidr -- network => 2001:db8::1/128
 'fe80::abcd:0:0:10/10'::inet -- network => fe80::abcd:0:0:10/10
 '08:00:2b:01:02:03'::macaddr -- network => 08:00:2b:01:02:03
 '08:00:2b:01:02:03:04:05'::macaddr8 -- network => 08:00:2b:01:02:03:04:05

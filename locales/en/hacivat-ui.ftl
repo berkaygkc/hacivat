@@ -2061,3 +2061,11 @@ hv-cmd-grid-toggle-record = Grid: show or hide the record view
 hv-cmd-results-next-tab = Next result tab
 hv-cmd-results-prev-tab = Previous result tab
 hv-cmd-history-open = Open query history
+
+## m3b-t07-types
+
+# A result column's type line for a MySQL/MariaDB column type code the app has no name for
+# (rare: replication-only codes). The code is the protocol's number, e.g. 19.
+# Variables:
+#   $code (Number) - the column type code, from 0 to 255.
+hv-results-type-mysql-code = MySQL type { $code }

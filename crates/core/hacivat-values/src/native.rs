@@ -26,9 +26,11 @@ pub enum NativeType {
         charset: u16,
         length: u32,
         decimals: u8,
-        // ## m3b-t07-types (ledger 194): the session `time_zone` a `TIMESTAMP` column's text is
-        // in, as the server reported it at connect (`SYSTEM`, `+03:00`, `Europe/Istanbul`);
-        // `None` for every other column type, or when it was not read.
+        // ## m3b-t07-types (ledger 194): on a `TIMESTAMP` column, the session `time_zone` as
+        // the server reported it **at connect** (`SYSTEM`, `+03:00`, `Europe/Istanbul`); it
+        // may be stale after a `SET time_zone` in the session (read at connect only; fix
+        // round 1, review m-1). Metadata for display only: a consumer never converts values
+        // with it. `None` for every other column type, or when it was not read.
         time_zone: Option<Arc<str>>,
     },
     Sqlite {

@@ -16,7 +16,11 @@
 //! and numerics with PostgreSQL's spelling, ISO dates, the `postgres` interval style, bytes as
 //! `\x` hex, text and JSON as the server's bytes. One deliberate difference: a `timestamptz`
 //! element is written in UTC (`+00`), because an array literal has no display zone; the
-//! instant is the same, so the literal round-trips.
+//! instant is the same, so the literal round-trips. **Copy:** a `timestamptz[]` cell therefore
+//! copies with `+00` offsets, while a scalar `timestamptz` copies in the console's display zone
+//! (`raw_text_in`); psql in a non-UTC session would print the array in its own zone (fix round
+//! 1, review m-4). A `"char"` element is `charout`'s spelling: its empty value is `""` and a
+//! byte with the high bit set is `\ooo` (PostgreSQL 15+'s form, on every server line).
 //!
 //! **Never silently wrong:** a header no server sends (more than 6 dimensions, a negative or zero
 //! dimension, flags other than 0 or 1, another element OID than the column's, more elements
@@ -255,6 +259,18 @@ fn write_element(out: &mut Vec<u8>, col: &ArrayCol, raw: &[u8]) -> Result<(), St
             Col::Bytea => ValueRef::Bytes(bytes),
             // `"char"`'s empty value.
             Col::Text if col.elem_oid == CHAR_OID && bytes == [0] => return Ok(()),
+            // A `"char"` byte with the high bit set: `charout`'s `\ooo` (PostgreSQL 15+; 14
+            // printed the raw byte, which is not text in a UTF-8 literal). Fix round 1, m-3.
+            Col::Text if col.elem_oid == CHAR_OID && bytes.len() == 1 && bytes[0] >= 0x80 => {
+                let b = bytes[0];
+                out.extend_from_slice(&[
+                    b'\\',
+                    b'0' + (b >> 6),
+                    b'0' + ((b >> 3) & 7),
+                    b'0' + (b & 7),
+                ]);
+                return Ok(());
+            }
             // Text, enum labels and JSON: the server's bytes as they are.
             _ => {
                 out.extend_from_slice(bytes);

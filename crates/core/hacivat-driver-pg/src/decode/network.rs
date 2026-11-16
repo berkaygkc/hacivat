@@ -17,7 +17,7 @@
 
 use std::fmt::Write as _;
 
-use hacivat_values::Value;
+use hacivat_values::{LenUnit, TruncatedVal, Value};
 
 use super::{Decoded, bad_length, error};
 
@@ -149,8 +149,10 @@ pub fn macaddr(raw: &[u8], len: usize) -> Decoded<'_> {
     text(s)
 }
 
-/// `bit` and `varbit`.
-pub fn bits(raw: &[u8]) -> Decoded<'_> {
+/// `bit` and `varbit`, under the cell cap `cap` (fix round 1, review I-1): one digit per bit,
+/// so a value of more than `cap` bits keeps its first `cap` digits and is `Truncated` with its
+/// exact bit count as the total (the digits past the cap are never written).
+pub fn bits(raw: &[u8], cap: u32) -> Decoded<'_> {
     let Some((len, data)) = raw.split_first_chunk::<4>() else {
         return bad_length("bit", raw.len(), 4);
     };
@@ -164,7 +166,8 @@ pub fn bits(raw: &[u8]) -> Decoded<'_> {
             format!("a bit string of {n} bits in {} bytes", data.len()),
         );
     }
-    let s = (0..n)
+    let kept = n.min(cap as usize);
+    let s: String = (0..kept)
         .map(|i| {
             if data[i / 8] & (0x80 >> (i % 8)) != 0 {
                 '1'
@@ -173,5 +176,13 @@ pub fn bits(raw: &[u8]) -> Decoded<'_> {
             }
         })
         .collect();
-    text(s)
+    if kept == n {
+        return text(s);
+    }
+    Decoded::Value(Value::Truncated(Box::new(TruncatedVal {
+        prefix: Value::Text(s.into()),
+        total_len: Some(n as u64),
+        // One ASCII digit per bit: bytes and characters agree.
+        unit: LenUnit::Bytes,
+    })))
 }

@@ -114,23 +114,40 @@ struct Target {
     changes: watch::Receiver<(u64, u64)>,
     columns: Arc<[ColumnSpec]>,
     facts: Arc<[ColFacts]>,
+    /// ## m3b-t07-types: a header label came from Fluent.
+    localized: bool,
     /// The adapter's generation: 1 for its first result, one more per retarget.
     generation: u64,
 }
 
 impl Target {
-    fn over(source: Arc<dyn ResultSource>, engine: DbmsKind, generation: u64) -> Target {
+    fn over(
+        source: Arc<dyn ResultSource>,
+        engine: DbmsKind,
+        generation: u64,
+        texts: &Texts,
+    ) -> Target {
         // The order matters (module docs): subscribe, then load.
         let changes = source.changes();
         let snapshot = source.snapshot();
-        let (columns, facts) = columns_of(snapshot.schema(), engine);
+        let cols = columns_of(snapshot.schema(), engine, texts);
         Target {
             source,
             changes,
-            columns,
-            facts,
+            columns: cols.specs,
+            facts: cols.facts,
+            localized: cols.localized,
             generation,
         }
+    }
+
+    /// Rebuilds the columns (a new engine, or a new language for Fluent labels).
+    fn rebuild_columns(&mut self, engine: DbmsKind, texts: &Texts) {
+        let snapshot = self.source.snapshot();
+        let cols = columns_of(snapshot.schema(), engine, texts);
+        self.columns = cols.specs;
+        self.facts = cols.facts;
+        self.localized = cols.localized;
     }
 }
 
@@ -172,7 +189,8 @@ impl std::fmt::Debug for GridAdapter {
 impl GridAdapter {
     /// An adapter over `source`, shown as `display` says.
     pub fn new(source: Arc<dyn ResultSource>, display: ResultDisplay) -> Rc<Self> {
-        let target = Target::over(source, display.engine, 1);
+        // No `App` here: a Fluent header label is rendered at the first frame (`begin_frame`).
+        let target = Target::over(source, display.engine, 1, &Texts(None));
         Rc::new(GridAdapter {
             target: RefCell::new(target),
             display: RefCell::new(Arc::new(display)),
@@ -197,7 +215,7 @@ impl GridAdapter {
     pub fn retarget(&self, source: Arc<dyn ResultSource>, cx: &mut App) {
         let engine = self.display.borrow().engine;
         let generation = self.target.borrow().generation + 1;
-        *self.target.borrow_mut() = Target::over(source, engine, generation);
+        *self.target.borrow_mut() = Target::over(source, engine, generation, &Texts::of(cx));
         self.start_watch(cx);
         self.tell(cx);
     }
@@ -211,10 +229,10 @@ impl GridAdapter {
         *self.display.borrow_mut() = Arc::new(display);
         if engine_changed {
             // The ID heuristic depends on the engine.
-            let mut target = self.target.borrow_mut();
-            let snapshot = target.source.snapshot();
             let engine = self.display.borrow().engine;
-            (target.columns, target.facts) = columns_of(snapshot.schema(), engine);
+            self.target
+                .borrow_mut()
+                .rebuild_columns(engine, &Texts::of(cx));
         }
         self.tell(cx);
     }
@@ -363,6 +381,12 @@ impl GridDataSource for GridAdapter {
         if self.l10n_generation.replace(generation) != generation {
             // The chips and decode-error texts in the cache are in the old language.
             cache.clear();
+            // ## m3b-t07-types: so are Fluent header labels (only rebuilt when there is one).
+            let mut target = self.target.borrow_mut();
+            if target.localized {
+                let engine = self.display.borrow().engine;
+                target.rebuild_columns(engine, &Texts(l10n.clone()));
+            }
         }
         cache.begin_frame();
         let target = self.target.borrow();
@@ -542,17 +566,34 @@ fn cell_content(shown: Display, facts: &ColFacts, texts: &Texts) -> CellContent 
 
 /// The grid's columns and the formatting facts of `schema`, in server order: a column's ID is
 /// its ordinal, so duplicate names keep their places.
-fn columns_of(schema: &ResultSchema, engine: DbmsKind) -> (Arc<[ColumnSpec]>, Arc<[ColFacts]>) {
+///
+/// ## m3b-t07-types (fix round 1, review m-9): a MySQL column type code without an SQL name is
+/// labelled through Fluent (`texts`); [`Columns::localized`] says a label came from Fluent, so
+/// the adapter rebuilds the columns when the language changes.
+fn columns_of(schema: &ResultSchema, engine: DbmsKind, texts: &Texts) -> Columns {
     let mut specs = Vec::with_capacity(schema.columns.len());
     let mut facts = Vec::with_capacity(schema.columns.len());
+    let mut localized = false;
     for (ordinal, meta) in schema.columns.iter().enumerate() {
         let (kind, align, class) = column_class(&meta.logical);
         let native_name = native_name(meta);
+        let mut label = type_label(meta, &native_name);
+        if let NativeType::MySql { column_type, .. } = meta.native
+            && label.is_empty()
+        {
+            localized = true;
+            label = texts.tr(
+                ids::hv::RESULTS_TYPE_MYSQL_CODE,
+                ids::hv::HvResultsTypeMysqlCode {
+                    code: Count(u64::from(column_type)),
+                },
+            );
+        }
         specs.push(ColumnSpec {
             id: ColId(u32::try_from(ordinal).unwrap_or(u32::MAX)),
             // Catalog text: shown as is, never translated or case-mapped.
             name: SharedString::from(meta.name.clone()),
-            type_label: type_label(meta, &native_name).into(),
+            type_label: label.into(),
             kind,
             align,
             default_width: class.default_width(),
@@ -566,7 +607,19 @@ fn columns_of(schema: &ResultSchema, engine: DbmsKind) -> (Arc<[ColumnSpec]>, Ar
             align,
         });
     }
-    (specs.into(), facts.into())
+    Columns {
+        specs: specs.into(),
+        facts: facts.into(),
+        localized,
+    }
+}
+
+/// What [`columns_of`] builds.
+struct Columns {
+    specs: Arc<[ColumnSpec]>,
+    facts: Arc<[ColFacts]>,
+    /// A header label came from Fluent (rebuilt when the language changes).
+    localized: bool,
 }
 
 /// A column's kind, alignment and starting width class by its logical type.

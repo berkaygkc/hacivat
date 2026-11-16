@@ -1907,3 +1907,8 @@ hv-cmd-results-next-tab = Sonraki sonuç sekmesi
 hv-cmd-results-prev-tab = Önceki sonuç sekmesi
 # Review: PO
 hv-cmd-history-open = Sorgu geçmişini aç
+
+## m3b-t07-types
+
+# Review: PO
+hv-results-type-mysql-code = MySQL türü { $code }
