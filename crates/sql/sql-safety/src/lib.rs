@@ -6,9 +6,11 @@
 //! runs it on `hacivat-exec::classify_pool` (16 MiB stacks, R-M3-53). [`decide`] maps a report
 //! to a verdict under a [`Profile`]; [`gate_class`] is the exec gate's view of one statement.
 //!
-//! Fail closed: until Task 14 merges, `classify` answers `Unknown` with the pre-decision
-//! `[NotImplemented]`, which `decide` denies in every profile (F31). `decide`, `gate_class`
-//! and `opens_write` are Task 4's: an empty or unnamed effect set is `Unknown`, never a read.
+//! Fail closed: every failure of [`classify`] (Task 14) is `Unknown` with a reason, and a
+//! pre-decided report denies in every profile. `decide`, `gate_class` and `opens_write` are
+//! Task 4's: an empty or unnamed effect set is `Unknown`, never a read. [`classify_units`]
+//! classifies a run's units one at a time, and [`changes_context`] says when a unit may have
+//! changed what later ones mean (ADR 0005 `m3b-t14`).
 //!
 //! Backends: libpg_query through `sql-oracle-pg` for PostgreSQL (Task 9) and the interim
 //! `sqlparser` path with a lexer pre-scan for MySQL, MariaDB and SQLite (Task 10). No
@@ -28,7 +30,10 @@ pub mod reason;
 pub mod report;
 mod visit;
 
-pub use classify::{ClassifyCtx, Expect, classify};
+pub use classify::{
+    CLASSIFIER_STACK_BYTES, ClassifyCtx, Expect, MAX_CLONING_WORK, MAX_OPERATOR_CHAIN,
+    changes_context, classify, classify_units, spawn_classifier_thread, unknown_report,
+};
 pub use destructive::{DestructiveKind, DestructiveReason};
 pub use effects::{CoarseClass, EffectSet, RiskFlags};
 pub use fingerprint::classified_hash;
@@ -51,6 +56,9 @@ pub use pragmas::sqlite_read_pragmas;
 // ## m3b-t10-interim (named exception in T1a's file): the interim backend's harness entry, for
 // Task 10's tests and read corpus until Task 14's `classify` runs the backend. It takes and
 // gives this crate's types only (R-M3-54).
+// ## m3b-t14-orchestrator: kept, hidden, as a backend-only harness (no L0 limits, no pre-pass,
+// no context rule): Task 10's tests and corpus pin the backend through it, and `tests/classify`
+// proves `classify` is never more permissive. Production code calls `classify` only.
 #[doc(hidden)]
 pub use backend::interim::classify_interim;
 // Fix round 1 (I2): the SAFE-07 constant-predicate rule every backend shares.
@@ -58,5 +66,8 @@ pub use destructive::{CmpOp, Predicate, always_true};
 // ## m3b-t09-pg-backend (named exception, Task 1a's file): the PG backend's test hooks for
 // `tests/pg_backend.rs` and `tests/pg_coverage.rs`. Hidden: not an API, and no `pg_query`
 // type crosses them.
+// ## m3b-t14-orchestrator: kept, hidden: the coverage hooks (visit counts, node variants, the
+// statement table) have no other way in, and `classify_pg` is the backend-only harness
+// `tests/classify` compares `classify` with.
 #[doc(hidden)]
 pub use backend::pg::hooks as pg_backend_hooks;
