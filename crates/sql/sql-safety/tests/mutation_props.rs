@@ -31,14 +31,15 @@ mod mutate;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
 use edits::{Rng, cases};
 use mutate::Family;
 use sql_dialect::{ClientFlavor, DialectCtx, DialectId, LexModes, PgWireFlavor, ServerVersion};
+use sql_oracle_pg::tree::pb;
+use sql_oracle_pg::tree::pb::node::Node as N;
 use sql_safety::{
-    Actor, ClassifyCtx, CoarseClass, Expect, Profile, ReasonCode, SafetyReport, Verdict, classify,
-    decide, pg_backend_hooks,
+    Actor, ClassifyCtx, CoarseClass, EffectSet, Expect, Profile, ReasonCode, SafetyReport, Verdict,
+    classify, decide, pg_backend_hooks, set_allowed,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -400,15 +401,100 @@ fn pg_writes(sql: &str) -> Result<Vec<&'static str>, String> {
     let blanked = sql
         .strip_prefix('\u{feff}')
         .map(|rest| format!("   {rest}"));
-    let counts = pg_backend_hooks::visit_counts(blanked.as_deref().unwrap_or(sql))?;
-    Ok(counts
+    let text = blanked.as_deref().unwrap_or(sql);
+    let counts = pg_backend_hooks::visit_counts(text)?;
+    let mut out: Vec<&'static str> = counts
         .keys()
         .copied()
         .filter(|v| {
             (v.ends_with("Stmt") && !READ_STATEMENTS.contains(v))
                 || matches!(*v, "IntoClause" | "LockingClause")
         })
-        .collect())
+        .collect();
+    // Round 1, m2: the two "read" statements that are not always reads. Two-phase commit is a
+    // write (it outlives the session); a `SET` is a read only for the variables and values the
+    // classifier's harmless list allows.
+    let tree = sql_oracle_pg::tree::parse_tree(text).map_err(|e| e.message)?;
+    // `SELECT … INTO` keeps its `IntoClause` in a message field, not a `Node`, so the visit
+    // counts never see it: look for it anywhere in the tree (round 1).
+    if format!("{tree:?}").contains("into_clause: Some(") {
+        out.push("IntoClause");
+    }
+    for raw in &tree.stmts {
+        match raw.stmt.as_ref().and_then(|n| n.node.as_ref()) {
+            Some(N::TransactionStmt(t)) => {
+                if matches!(
+                    pb::TransactionStmtKind::try_from(t.kind),
+                    Ok(pb::TransactionStmtKind::TransStmtPrepare
+                        | pb::TransactionStmtKind::TransStmtCommitPrepared
+                        | pb::TransactionStmtKind::TransStmtRollbackPrepared)
+                ) {
+                    out.push("TransactionStmt(two-phase)");
+                }
+            }
+            Some(N::VariableSetStmt(v)) => {
+                let value = set_value(&v.args);
+                if !set_allowed(DialectId::Postgres, &v.name, value.as_deref()) {
+                    out.push("VariableSetStmt(not harmless)");
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// A `SET`'s value as PostgreSQL list text: every string constant a double-quoted name (its
+/// exact text: the strictest reading), numbers as written; `None` for anything else.
+fn set_value(args: &[pb::Node]) -> Option<String> {
+    use sql_oracle_pg::tree::pb::a_const::Val;
+    let mut parts = Vec::new();
+    for a in args {
+        let Some(N::AConst(c)) = a.node.as_ref() else {
+            return None;
+        };
+        parts.push(match c.val.as_ref()? {
+            Val::Sval(s) => format!("\"{}\"", s.sval.replace('"', "\"\"")),
+            Val::Ival(i) => i.ival.to_string(),
+            Val::Fval(f) => f.fval.clone(),
+            Val::Boolval(b) => b.boolval.to_string(),
+            Val::Bsval(b) => b.bsval.clone(),
+        });
+    }
+    Some(parts.join(", "))
+}
+
+/// The oracle itself (round 1, m2): it sees writes, two-phase commit and non-harmless `SET`s,
+/// and passes reads and harmless `SET`s.
+#[test]
+fn the_pg_oracle_sees_writes_two_phase_commit_and_unsafe_sets() {
+    for sql in [
+        "DELETE FROM t",
+        "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+        "SELECT * INTO n FROM t",
+        "SELECT * FROM t FOR UPDATE",
+        "PREPARE TRANSACTION 'hv'",
+        "COMMIT PREPARED 'hv'",
+        "ROLLBACK PREPARED 'hv'",
+        "SET search_path = evil, pg_catalog",
+        "SET transaction_read_only = off",
+        "SET SESSION AUTHORIZATION hv_ro",
+        "SET ROLE hv_ro",
+        "COPY t TO STDOUT",
+    ] {
+        assert!(!pg_writes(sql).unwrap().is_empty(), "{sql}");
+    }
+    for sql in [
+        "SELECT 1",
+        "EXPLAIN SELECT * FROM t",
+        "SHOW search_path",
+        "SET search_path = public",
+        "SET SCHEMA 'evil'",
+        "BEGIN",
+        "COMMIT",
+    ] {
+        assert_eq!(pg_writes(sql).unwrap(), Vec::<&str>::new(), "{sql}");
+    }
 }
 
 #[test]
@@ -627,12 +713,23 @@ fn readings_times_length_is_bounded() {
         assert!(!has(&r, ReasonCode::TooComplex), "{:?}", codes(&r));
         // 16 readings of 20 KB (320 KB) do not, and the answer comes before any reading.
         let over = gated_select(20_000, 15);
-        let start = Instant::now();
         let r = classify(&over, &c);
-        let took = start.elapsed();
         assert!(has(&r, ReasonCode::TooComplex), "{:?}", codes(&r));
         assert_ne!(ro(&r), Verdict::Allow);
-        assert!(took.as_secs() < 2, "{took:?}");
+        // Round 1, m5: decided before any reading was read (no wall clock in a default test):
+        // no reading's evidence (a read, a parse error) reached the item.
+        assert!(
+            r.items.iter().all(|i| !i.effects.contains(EffectSet::READ)
+                && !i.reasons.iter().any(|x| x.code == ReasonCode::ParseError)),
+            "{r:?}"
+        );
+        // A statement that fits the budget does carry its reading's evidence.
+        assert!(
+            classify(&fits, &c)
+                .items
+                .iter()
+                .all(|i| i.effects.contains(EffectSet::READ))
+        );
         // Two readings of 200 KB do not either.
         let r = classify(&gated_select(200_000, 1), &c);
         assert!(has(&r, ReasonCode::TooComplex), "{:?}", codes(&r));

@@ -55,6 +55,9 @@ pub(crate) enum ParsedFingerprint {
     /// fingerprint on its own.
     NotParsed,
     /// libpg_query parsed exactly `sql`: its fingerprint, or `None` where
-    /// `sql_oracle_pg::tree::fingerprint(sql)` is an `Err`.
+    /// `sql_oracle_pg::tree::fingerprint(sql)` is an `Err`, and also where libpg_query cannot
+    /// encode the tree (nested too deeply to serialize) though `fingerprint` would answer: the
+    /// backend then reports `ParseError`, so the request keeps `HvNorm1`, as it did before
+    /// the one-parse call (fix round 1, m1).
     Parsed(Option<u64>),
 }

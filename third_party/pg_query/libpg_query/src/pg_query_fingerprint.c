@@ -601,14 +601,19 @@ PgQueryProtobufParseFingerprintResult pg_query_parse_protobuf_fingerprint_opts(c
 
 	if (result.error == NULL)
 	{
+		/* The walk's top-level hash state, kept where a longjmp leaves it defined. */
+		XXH3_state_t * volatile top_state = NULL;
+
 		PG_TRY();
 		{
 			FingerprintContext fctx;
 
 			_fingerprintInitContext(&fctx, NULL, fingerprint_options, false);
+			top_state = fctx.xxh_state;
 			if (parsetree_and_error.tree != NULL)
 				_fingerprintNode(&fctx, parsetree_and_error.tree, NULL, NULL, 0);
 			fingerprint = XXH3_64bits_digest(fctx.xxh_state);
+			top_state = NULL;
 			_fingerprintFreeContext(&fctx);
 			fingerprint_ok = 1;
 		}
@@ -616,6 +621,10 @@ PgQueryProtobufParseFingerprintResult pg_query_parse_protobuf_fingerprint_opts(c
 		{
 			MemoryContextSwitchTo(ctx);
 			FlushErrorState();
+			/* The top-level state is freed; nested list-sort states of the walk are not (only
+			 * reachable on out-of-memory or the stack-depth limit; PATCHES §3). */
+			if (top_state != NULL)
+				XXH3_freeState(top_state);
 			fingerprint_ok = 0;
 		}
 		PG_END_TRY();

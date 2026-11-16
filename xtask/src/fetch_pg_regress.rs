@@ -4,8 +4,11 @@
 //! `cargo xtask fetch-pg-regress [--tag REL_17_2]` downloads the tag's source archive from the
 //! PostgreSQL repository's GitHub mirror with `curl`, extracts only `src/test/regress/sql/` into
 //! `target-pg-regress/<tag>/sql/` with `tar`, deletes the archive, and checks the files against
-//! the digest pinned here for the tag (XXH3-64 over the sorted names and bytes: the same files
-//! on every machine, whatever the archive's compression). A tag without a pinned digest is
+//! the digests pinned here for the tag: XXH3-64 and SHA-256 over the sorted names and bytes
+//! (the same files on every machine, whatever the archive's compression). XXH3 is an integrity
+//! and reproducibility check only; SHA-256 (computed by the system's `sha256sum`/`shasum`)
+//! makes the pin a cryptographic one over the files fetched through HTTPS (fix round 1, m7).
+//! The files are data and are never run. A tag without a pinned digest is
 //! refused. When the directory already holds the pinned files nothing is downloaded, so the
 //! command is safe offline once it has run; files that do not match are deleted and fetched
 //! again.
@@ -21,7 +24,10 @@ use anyhow::{Context, Result, bail};
 use twox_hash::XxHash3_64;
 
 /// The tags this command fetches, with the digest of their `sql/` files.
-const PINNED: &[(&str, &str)] = &[("REL_17_2", "xxh3-64:375fea2d98b2baf6")];
+const PINNED: &[(&str, &str)] = &[(
+    "REL_17_2",
+    "xxh3-64:375fea2d98b2baf6;sha256:9d1283267ecb4ba6d164d12d6c8bc06e050c94b8a905b7a90ca9cf33d6851a91",
+)];
 
 /// The tag the differential reads by default (`alg/10` :171, P0 exit).
 pub const DEFAULT_TAG: &str = "REL_17_2";
@@ -152,7 +158,46 @@ pub(crate) fn digest(dir: &Path) -> Result<String> {
         stream.extend_from_slice(&std::fs::read(dir.join(n))?);
         stream.push(0);
     }
-    Ok(format!("xxh3-64:{:016x}", XxHash3_64::oneshot(&stream)))
+    Ok(format!(
+        "xxh3-64:{:016x};sha256:{}",
+        XxHash3_64::oneshot(&stream),
+        sha256(&stream)?
+    ))
+}
+
+/// SHA-256 of `bytes`, hex, through the system's `sha256sum` or `shasum -a 256` (xtask takes
+/// no hashing crate for this; fix round 1, m7). Neither tool found is an error: the pin is
+/// never skipped.
+fn sha256(bytes: &[u8]) -> Result<String> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let tools: [(&str, &[&str]); 2] = [("sha256sum", &[]), ("shasum", &["-a", "256"])];
+    for (tool, args) in tools {
+        let Ok(mut child) = Command::new(tool)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        child
+            .stdin
+            .take()
+            .context("the hash tool's stdin")?
+            .write_all(bytes)?;
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let hex = text.split_whitespace().next().unwrap_or_default();
+        if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(hex.to_ascii_lowercase());
+        }
+    }
+    bail!("no `sha256sum` or `shasum` to check the corpus's SHA-256 pin")
 }
 
 #[cfg(test)]

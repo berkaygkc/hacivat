@@ -92,8 +92,9 @@ pub struct Analysed {
     pub tree: Result<pb::ParseResult, PgError>,
     /// [`scan_tokens`]'s answer.
     pub tokens: Result<Vec<(TextRange, ScanKind)>, PgError>,
-    /// [`fingerprint`]'s value; `None` exactly where [`fingerprint`] is an `Err` (a syntax
-    /// error), and also when the tree's encoding failed.
+    /// [`fingerprint`]'s value; `None` where [`fingerprint`] is an `Err` (a syntax error), and
+    /// also where libpg_query cannot encode the tree (nested too deeply to serialize: `tree`
+    /// is then that `Err`) though [`fingerprint`], which encodes nothing, answers.
     pub fingerprint: Option<u64>,
 }
 
@@ -220,6 +221,16 @@ mod tests {
                 }
             }
         }
+        // Fix round 1 (m1): the one designed divergence. libpg_query cannot encode a tree this
+        // deep, so the tree is the same `Err` and `analyse` gives no fingerprint, where the
+        // separate `fingerprint` call (no encoding) still gives one.
+        let chain = format!("SELECT 1{}", "+1".repeat(5_000));
+        let a = analyse(&chain).unwrap();
+        assert!(a.tree.is_err());
+        assert_eq!(a.tree, parse_tree(&chain));
+        assert_eq!(a.tokens, scan_tokens(&chain));
+        assert_eq!(a.fingerprint, None);
+        assert!(fingerprint(&chain).is_ok());
     }
 
     #[test]

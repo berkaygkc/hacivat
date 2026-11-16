@@ -449,10 +449,14 @@ fn reading_count(thresholds: usize, comments: &[ExecComment], limit: usize) -> O
 // ## m3b-t20-differential (named exception, T10 review: the readings × length perf cap)
 /// The bytes a request's statements with more than one threshold reading may hand `sqlparser`
 /// together: the sum, over those statements, of their readings × their length. Past it the
-/// statement is `TooComplex` before any reading is built, so the extra work executable
-/// comments cause is bounded by the work of one 256 KiB statement (≈ 40 ms in release), not
-/// by 16 readings × 1 MiB. 16 readings of a 16 KiB statement fit; a statement of more than
-/// 128 KiB with any executable comment does not.
+/// statement is `TooComplex` before any reading is built. The budget is per call of this
+/// backend: the extra work executable comments cause is bounded by that of one 256 KiB
+/// statement (≈ 35 ms in release) per lexing-mode reading, and `classify` makes up to four of
+/// those when the modes are unknown (fix round 1, m4): up to 1 MiB of readings, not 16
+/// readings × 1 MiB. 16 readings of a 16 KiB statement fit; a statement of more than 128 KiB
+/// with any executable comment does not; and because the budget is the request's, a long
+/// script run as one unit (a schema dump of some 450 tables with `/*!…*/` lines) runs out, and
+/// its later commented statements are `TooComplex` (fail-closed; PO list).
 pub(crate) const MAX_READING_BYTES: usize = 256 << 10;
 
 /// Every threshold reading of `text` (deduplicated), or `None` past the limit

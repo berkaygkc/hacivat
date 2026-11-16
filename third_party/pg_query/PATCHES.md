@@ -89,7 +89,19 @@ node, whose tables/functions/filter columns Hacivat drops unread), `pg_query::sc
   raw tree: the tree is serialised first (the same `PG_TRY` and error copy), then fingerprinted
   (the walk only reads the tree; its list-sort cache sorts copies of hashes). Unlike the
   original fingerprint call, the walk runs inside `PG_TRY`: an error there leaves
-  `fingerprint_ok = 0` and the tree is still returned. No existing function changed.
+  `fingerprint_ok = 0` and the tree is still returned, and the walk's top-level XXH3 state
+  (kept in a `volatile` pointer) is freed; the states of nested list-sort contexts are not
+  (as in upstream, an error there is only out-of-memory or the stack-depth limit; T20 fix
+  round 1, m1). When the protobuf encode fails ("nested too deeply to serialize"), no
+  fingerprint is taken, though upstream's separate fingerprint call, which encodes nothing,
+  would answer: the tree is the same `Err`, the PG backend reports `ParseError` and the
+  request keeps `HvNorm1`, as before this patch (pinned by
+  `analyse_answers_what_the_three_calls_answer`). No existing function changed.
+- Corpus proof (T20 fix round 1): `sql-safety`'s `tests/oracle_corpus.rs`,
+  `the_one_parse_oracle_equals_upstreams_separate_calls_on_the_corpus` (`#[ignore =
+  "network"]`, nightly `sql-differential`), compares the tree, tokens, errors and fingerprint of `analyse` with the three
+  separate calls on every REL_17_2 regression statement (strict and with its terminator) and
+  every whole file: 89,342 texts, 88,166 fingerprinted alike, 0 differences.
 - `src/query.rs`: `ProtobufWithFingerprint` and `parse_protobuf_with_fingerprint(statement,
   parser_options, fingerprint_options)`: the decoded protobuf (`Result`, as `parse` decodes it)
   and the fingerprint, without `ParseResult::new` (no summary walk, stderr not kept). A syntax

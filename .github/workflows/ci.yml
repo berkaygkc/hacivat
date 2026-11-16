@@ -755,35 +755,52 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      # A dated nightly, so a crash reproduces with the same compiler (fix round 1, m8).
+      FUZZ_NIGHTLY: nightly-2026-11-01
     steps:
       - uses: actions/checkout@v4
-      - name: Install nightly and cargo-fuzz
+      - name: Install the pinned nightly and cargo-fuzz
         run: |
-          rustup toolchain install nightly --profile minimal
-          cargo +nightly install cargo-fuzz --locked
+          rustup toolchain install "$FUZZ_NIGHTLY" --profile minimal
+          cargo +"$FUZZ_NIGHTLY" install cargo-fuzz --locked
       - name: libclang (pg_query bindgen)
         uses: ./.github/actions/libclang
       - name: Build the fuzz targets (locked)
         working-directory: fuzz
         run: |
-          cargo +nightly metadata --locked --format-version 1 > /dev/null
-          cargo +nightly fuzz build --release
+          cargo +"$FUZZ_NIGHTLY" metadata --locked --format-version 1 > /dev/null
+          cargo +"$FUZZ_NIGHTLY" fuzz build --release
       - name: The build left third_party and the lockfile untouched
         run: |
           test -z "$(git status --porcelain third_party)"
           git diff --exit-code -- fuzz/Cargo.lock
-      - name: Seed corpora (the SQL corpora of sql-testkit)
+      - name: Seed corpora (the SQL corpora of sql-testkit and the review seeds)
         run: |
           for t in lex_lossless relex_equivalence split_items params_rewrite classify_no_panic; do
             mkdir -p fuzz/corpus/$t
             cp crates/sql/sql-testkit/corpus/read/*.sql crates/sql/sql-testkit/corpus/fixtures/*.sql fuzz/corpus/$t/
           done
-      - name: Run each target for 10 minutes
+          # One file per `sql` value of classifier_seeds.toml (the T9/T10/T14 review inputs).
+          python3 - <<'EOF'
+          import hashlib, pathlib, tomllib
+          rows = tomllib.loads(pathlib.Path("crates/sql/sql-testkit/corpus/fuzz/classifier_seeds.toml").read_text())["row"]
+          for t in ["lex_lossless", "split_items", "params_rewrite", "classify_no_panic"]:
+              for r in rows:
+                  b = r["sql"].encode()
+                  (pathlib.Path("fuzz/corpus") / t / ("seed-" + hashlib.sha1(b).hexdigest())).write_bytes(b)
+          print(len(rows), "review seeds")
+          EOF
+      - name: Run each target for 10 minutes (every target runs; the step fails after all)
         working-directory: fuzz
         run: |
+          failed=""
           for t in lex_lossless relex_equivalence split_items params_rewrite classify_no_panic; do
-            cargo +nightly fuzz run --release $t corpus/$t -- -max_total_time=600 -max_len=4096 -rss_limit_mb=4096
+            if ! cargo +"$FUZZ_NIGHTLY" fuzz run --release $t corpus/$t -- -max_total_time=600 -max_len=4096 -rss_limit_mb=4096; then
+              failed="$failed $t"
+            fi
           done
+          if [ -n "$failed" ]; then echo "fuzz targets that found a failure:$failed"; exit 1; fi
       - name: Upload crashes
         if: failure()
         uses: actions/upload-artifact@v4
@@ -813,6 +830,8 @@ jobs:
         run: cargo xtask fetch-pg-regress --tag REL_17_2
       - name: PG regression differential
         run: cargo test --locked -p sql-testkit --features differential --test pg_regress_differential -- --ignored --nocapture
+      - name: The one-parse oracle equals upstream's separate calls on the corpus
+        run: cargo test --locked -p sql-safety --test oracle_corpus -- --ignored --nocapture
       - name: Classifier mutation properties (nightly cases)
         run: cargo test --locked --release -p sql-safety --test mutation_props
         env:

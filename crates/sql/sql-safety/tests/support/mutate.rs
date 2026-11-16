@@ -82,6 +82,24 @@ fn fragments(f: Family) -> &'static [&'static str] {
             " /* ; DELETE FROM hv_t20_t; */ ",
             " -- ; DELETE\n",
             " TABLESAMPLE SYSTEM (50) ",
+            // Round 1 (review I1): effects that outlive a rolled-back read-only transaction,
+            // which the Docker leg's side channel watches.
+            "; COPY (SELECT 1) TO '/tmp/hv_t20_copy'",
+            " , lo_export(lo_from_bytea(0, 'hv'), '/tmp/hv_t20_lo') ",
+            " , pg_create_physical_replication_slot('hv_t20_slot') ",
+            " , pg_create_logical_replication_slot('hv_t20_lslot', 'test_decoding') ",
+            " , (SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE application_name = 'hv_t20_sentinel') ",
+            " , (SELECT count(pg_cancel_backend(pid)) FROM pg_stat_activity WHERE application_name = 'hv_t20_sentinel') ",
+            " , pg_stat_reset() ",
+            " , pg_stat_reset_shared('bgwriter') ",
+            " , pg_stat_reset_shared('wal') ",
+            " , pg_reload_conf() ",
+            " , pg_switch_wal() ",
+            " , pg_file_write('/tmp/hv_t20_fw', 'x', false) ",
+            "; PREPARE TRANSACTION 'hv_t20'",
+            "; COMMIT PREPARED 'hv_t20'",
+            "; SET search_path = hv_t20_evil, pg_catalog",
+            "; SET SESSION AUTHORIZATION DEFAULT",
         ],
         Family::MySql => &[
             " INTO OUTFILE '/tmp/hv_t20' ",
@@ -165,6 +183,7 @@ fn suffixes(f: Family) -> &'static [&'static str] {
     match f {
         Family::Pg => &[
             ") TO STDOUT",
+            ") TO '/tmp/hv_t20_copy'",
             ") s",
             ";",
             "; COMMIT",

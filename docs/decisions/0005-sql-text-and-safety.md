@@ -1831,7 +1831,11 @@ scales every loop (nightly 100,000).
 - meaning-preserving mutants (ASCII letter case, whitespace of the same kind, a comment for a
   space) never get a weaker verdict than their original, on the read-only and Admin profiles;
 - **the libpg_query oracle**: PG mutants the read-only profile allows parse to no write
-  statement, no `INTO`, no row lock (functions with effects are the server's to show);
+  statement, no `INTO`, no row lock, no two-phase commit (`PREPARE TRANSACTION`, `COMMIT` /
+  `ROLLBACK PREPARED`) and no `SET` outside the classifier's harmless list (`set_allowed`, the
+  value read strictly) (fix round 1, m2; `SELECT … INTO` is found in the tree's message fields,
+  which the node counts do not visit); functions with effects are the server's to show. A
+  self-test proves the oracle sees each of these;
 - T14's escaped literals and their meaning-preserving mutants: no false denial with the modes
   known or unknown.
 
@@ -1839,21 +1843,40 @@ scales every loop (nightly 100,000).
 :399): the PG read corpus, the escaped literals, the seeds and 10,000 mutants are classified by
 the real `ClassifyPool` with pg17's modes known; each one the read-only profile allows runs on
 a read-only console as the superuser test account in a database of its own. A read-only
-violation (`25006`), a guard gap, or any change the admin side channel sees (rows, the
-sequence, relations, temporary tables, large objects, prepared transactions, advisory locks) is
-a finding.
+violation (`25006`) or a guard gap is a finding, and so is any change the **side channel**
+sees. Every read-only request ends with the guard's `ROLLBACK` and `DISCARD ALL` before Run
+returns, so the side channel watches what outlives both (fix round 1, I1), from connections
+outside the guarded session, before and after every statement: replication slots, server files
+(`/tmp/hv_t20*`, the paths the `COPY … TO` / `lo_export` mutants write), a sentinel backend and
+the side channel's own (`pg_terminate_backend`), statistics reset times, `pg_conf_load_time()`
+(`pg_reload_conf`) and prepared transactions. The fixture rows, sequence, relations, temporary
+tables, large objects and advisory locks are probed as a belt-and-braces check of the rollback.
+A self-check proves each probe fires before the run. After a finding, slots are dropped, the
+sentinel reopened and the next statement takes its own baseline. Every outcome is explained (a
+SQLSTATE; a guard refusal before I/O; `protocol`, a `$n` unit M3a's Run cannot bind; a Run
+refusal) or the test fails, and the console must still run `SELECT 1` at the end.
 
 **The PG regression differential** (`sql-testkit::differential`, feature `differential`,
 `tests/pg_regress_differential.rs`; the P0 exit, `alg/10` :171). `cargo xtask
 fetch-pg-regress --tag REL_17_2` fetches `src/test/regress/sql/` from the PostgreSQL mirror with
-`curl` and `tar` into the git-ignored `target-pg-regress/`, and checks it against a digest
-pinned in xtask (XXH3-64 over the sorted names and bytes; any other tag is refused until pinned);
-with the pinned files present it does nothing (offline-safe). The files are psql scripts, so
+`curl` and `tar` into the git-ignored `target-pg-regress/`, and checks it against digests
+pinned in xtask over the sorted names and bytes: XXH3-64 (integrity and reproducibility only)
+and SHA-256 (through the system's `sha256sum`/`shasum`: the cryptographic pin; fix round 1, m7).
+Any other tag is refused until pinned; with the pinned files present it does nothing
+(offline-safe). The differential re-checks the files it reads against a pinned FNV-1a 64, so a
+locally edited corpus fails. The files are data, never run. They are psql scripts, so
 the comparison runs per segment (a run of our execution statements with no client command or
 `COPY` data between them): libpg_query splits the segment, or, when it holds an intentional
 syntax error, each statement alone; a statement that does not parse alone is "not comparable",
-one our split leaves uncertain (Run refuses it) is "uncertain". The rate is agreed / (agreed +
-disagreed); the test asserts ≥ 999 per mille and lists every disagreement. Not a number CI
+one our split leaves uncertain (Run refuses it) is "uncertain". The rate is reported both ways:
+agreed / (agreed + disagreed), asserted ≥ 999 per mille (REL_17_2: 1000), and agreed / all
+(988.2). Every disagreement is listed, and both buckets the first rate leaves out are pinned in
+checked-in listings (`sql-testkit/corpus/differential/REL_17_2-{uncertain,not-comparable}.tsv`:
+file, byte range, FNV-1a of the text; no corpus text) with a ±1 % count tolerance: a statement
+that moves into either bucket fails, named (fix round 1, I2). `sql-safety`'s
+`tests/oracle_corpus.rs` checks the one-parse oracle against upstream's separate calls on all
+89,342 corpus texts (there, not behind `sql-testkit`'s feature: only the oracle and
+`sql-safety` may name `sql_oracle_pg::tree`, check-deps). Not a number CI
 treats as a budget elsewhere.
 
 **Perf (T14 carry).**
@@ -1869,8 +1892,11 @@ treats as a budget elsewhere.
   (`MAX_READING_BYTES`) for the readings of statements with executable comments (readings ×
   statement length, summed over the request's statements with more than one reading). Past it
   the statement is `TooComplex` before any reading is built. 16 readings of 10 KB (about 20 ms
-  in release) fit; 16 of 20 KB, or two readings of 200 KB, do not. The lexing-mode readings of
-  `classify` (at most 4, only those that cut other tokens) multiply this bound.
+  in release) fit; 16 of 20 KB, or two readings of 200 KB, do not. The budget is per backend
+  call: the lexing-mode readings of `classify` (at most 4, only those that cut other tokens)
+  multiply it, up to 1 MiB of readings. Being the request's, it also runs out on a long script
+  run as one unit with many `/*!…*/` statements (a schema dump of some 450 tables): the later
+  ones are `TooComplex` (fail-closed; PO list, with the 128 KiB statement rule).
 - *Figures*: `cargo xtask bench-sql` (the `sql-safety` `bench_sql` test as a subprocess; JSON;
   relative signal only, L2). PostgreSQL `classify` per 10 KB fell from 1.81 to 1.55–1.65 ms
   best; libpg_query's protobuf encode and prost decode remain most of the rest (the oracle's one
@@ -1883,3 +1909,7 @@ session's current database (`DATABASE()`), one element, empty when unknown. With
 schemas' tables and `Unknown` (denied on read-only). With another current database, or none
 known, they stay user tables (the T10 choice: common names); filling the current database is
 Task 18's (connect, and after `USE`, which already changes the context) and Task 24's.
+Accepted false positive (fix round 1, m3): the match takes any standalone word, so with `sys`
+current, `SESSION` as a keyword (`SET SESSION sql_mode = …`, `SET SESSION TRANSACTION …`,
+`SHOW SESSION STATUS`) also makes the statement `Unknown`. It fails closed and needs `sys` as
+the current database.
