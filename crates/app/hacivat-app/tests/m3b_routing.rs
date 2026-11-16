@@ -387,6 +387,7 @@ fn new_slots_render_nothing_so_m3a_shots_hold(cx: &mut TestAppContext) {
     });
     // The history dialog: `history.open` is disabled (its chord passes through) and opens
     // nothing.
+    // ## m3b-t27-history (named exception): without a history store (none in this shell).
     assert!(!run(vcx, "history.open"));
     vcx.cx.update(hacivat_app::history::open);
     vcx.run_until_parked();
@@ -596,8 +597,9 @@ fn stub_commands_are_disabled_and_not_in_the_palette(cx: &mut TestAppContext) {
     stubs.extend(hacivat_ui_grid::commands::STUB_COMMANDS);
     assert_eq!(stubs.len(), 32);
     // The app-registered stubs (disabled since Task 1b).
+    // ## m3b-t27-history (named exception): `history.open` is no longer a stub; it is enabled
+    // once the history store is open (`history_ui.rs` covers it).
     stubs.extend([
-        "history.open",
         "results.next_tab",
         "results.prev_tab",
         "grid.sort_asc",

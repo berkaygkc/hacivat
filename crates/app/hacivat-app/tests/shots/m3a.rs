@@ -153,7 +153,28 @@ pub(super) enum M3a {
     ErrBar,
     ErrBarFailedTx,
     ErrBarFocused,
+    // ## m3b-t27-history (named exception): design/m3b-safe surface 11, rendered by the M3a
+    // machinery until Task 29 moves it to `shots/m3b.rs` ([`M3B_T27`]).
+    HistList,
+    HistSearch,
+    HistAllFailed,
+    HistRedacted,
+    HistOther,
+    HistEmpty,
+    HistNoMatch,
 }
+
+// ## m3b-t27-history (named exception)
+/// The Task 27 states (after every Task 23 state).
+pub(super) const M3B_T27: [M3a; 7] = [
+    M3a::HistList,
+    M3a::HistSearch,
+    M3a::HistAllFailed,
+    M3a::HistRedacted,
+    M3a::HistOther,
+    M3a::HistEmpty,
+    M3a::HistNoMatch,
+];
 
 // ## m3b-t25-results (named exception)
 /// The Task 25 states (after Task 22's).
@@ -437,6 +458,14 @@ impl M3a {
             M3a::ErrBar => "errbar",
             M3a::ErrBarFailedTx => "errbar-failed-tx",
             M3a::ErrBarFocused => "errbar-focused",
+            // ## m3b-t27-history
+            M3a::HistList => "history-list",
+            M3a::HistSearch => "history-search",
+            M3a::HistAllFailed => "history-all-failed",
+            M3a::HistRedacted => "history-redacted",
+            M3a::HistOther => "history-other",
+            M3a::HistEmpty => "history-empty",
+            M3a::HistNoMatch => "history-nomatch",
         }
     }
 
@@ -514,6 +543,13 @@ impl M3a {
             M3a::EscDialogFailed => ("#escalation-server-text", None),
             M3a::EscKeptWaiting => (MARKS_RS, None),
             M3a::ErrBar | M3a::ErrBarFailedTx | M3a::ErrBarFocused => ("#errbar-title", None),
+            // ## m3b-t27-history: the dialog's title; the empty states their sentence.
+            M3a::HistList
+            | M3a::HistSearch
+            | M3a::HistAllFailed
+            | M3a::HistRedacted
+            | M3a::HistOther => ("#history-title", None),
+            M3a::HistEmpty | M3a::HistNoMatch => ("#history-empty", None),
         }
     }
 
@@ -1248,6 +1284,37 @@ impl M3a {
                 }
                 s
             }
+            // ## m3b-t27-history: the dialog over a live console, from its fixture (the mock's
+            // entries at a fixed "now"; no store).
+            HistList | HistSearch | HistAllFailed | HistRedacted | HistOther | HistEmpty
+            | HistNoMatch => {
+                use hacivat_app::history::dialog::fixtures::{self, Scenario};
+                let scenario = match self {
+                    HistList => Scenario::List,
+                    HistSearch => Scenario::Search,
+                    HistAllFailed => Scenario::AllFailed,
+                    HistRedacted => Scenario::Redacted,
+                    HistOther => Scenario::Other,
+                    HistEmpty => Scenario::Empty,
+                    _ => Scenario::NoMatch,
+                };
+                let mut s = live(DEV, "", 0..0, Expect::Any);
+                s.push(step(
+                    move |window, cx| {
+                        let c = active_console(window, cx).expect("a console");
+                        let f = fixtures::scenario(scenario, c, cx);
+                        fixtures::open(c, f, window, cx);
+                    },
+                    |window, cx| {
+                        window.root::<Workspace>().flatten().is_some_and(|ws| {
+                            ws.read(cx)
+                                .layer_ids()
+                                .contains(&hacivat_app::history::dialog::HISTORY_LAYER_ID)
+                        })
+                    },
+                ));
+                s
+            }
         }
     }
 
@@ -1460,6 +1527,20 @@ impl M3a {
                         ErrBarFocused => offered == 4 && in_bar,
                         _ => offered == 4 && !in_bar,
                     }
+            }),
+            // ## m3b-t27-history: what the dialog holds, and the part only this state draws.
+            HistList | HistSearch | HistAllFailed | HistRedacted | HistOther | HistEmpty
+            | HistNoMatch => hacivat_app::history::dialog::shown(cx).is_some_and(|d| {
+                let n = d.statements.len();
+                match self {
+                    HistList => n == 5 && !d.all && drawn(frame, "history-row-sql"),
+                    HistSearch => n == 2 && d.query == "musteri",
+                    HistAllFailed => n == 1 && drawn(frame, "history-server-text"),
+                    HistRedacted => d.selected == Some(2) && drawn(frame, "history-redacted-line"),
+                    HistOther => n == 8 && drawn(frame, "history-target"),
+                    HistEmpty => n == 0 && d.query.is_empty(),
+                    _ => n == 0 && d.query == "faturalar",
+                }
             }),
         };
         (!ok).then(|| format!("{}: the state check failed", self.name()))

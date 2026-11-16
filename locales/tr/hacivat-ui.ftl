@@ -2229,3 +2229,66 @@ hv-errbar-rollback-continue = Geri al ve devam et
 hv-errbar-rollback-continue-tip = Açık işleminizi ({ $n } ifade) geri alır, sonra { $next }. ifadeden yeni bir işlemde devam eder.
 # Review: PO
 hv-errbar-rollback-continue-tip-auto = Açık işleminizi ({ $n } ifade) geri alır, sonra { $next }. ifadeden devam eder; her ifade çalışınca commit edilir.
+
+## m3b-t27-history
+
+# Review: PO
+hv-history-title = Sorgu geçmişi
+# Review: PO
+hv-history-search = Geçmişte ara
+# Review: PO
+hv-history-search-tip = Arama büyük-küçük harfi ve aksanları yok sayar: musteri, müşteri'yi bulur.
+# Review: PO
+hv-history-filter-this = Bu bağlantı
+# Review: PO
+hv-history-filter-all = Tüm bağlantılar
+# Review: PO
+hv-history-outcome-any = Tüm sonuçlar
+# Review: PO
+hv-history-outcome-ok = Başarılı
+# Review: PO
+hv-history-outcome-failed = Başarısız
+# Review: PO
+hv-history-outcome-cancelled = İptal edildi
+# Review: PO
+hv-history-outcome-denied = Çalıştırılmadı
+# Review: PO
+hv-history-today = Bugün
+# Review: PO
+hv-history-yesterday = Dün
+# Review: PO
+hv-history-count = { $n } kayıt
+# Review: PO
+hv-history-rows = { $rows } satır
+# Review: PO
+hv-history-redacted = gizlendi
+# Review: PO
+hv-history-redacted-line = Kaydedilmeden önce bir parola ya da gizli değer çıkarıldı.
+# Review: PO
+hv-history-pin = Sabitle
+# Review: PO
+hv-history-unpin = Sabitlemeyi kaldır
+# Review: PO
+hv-history-pinned = Sabitlendi: saklama süresi dolsa da silinmez
+# Review: PO
+hv-history-insert = Ekle
+# Review: PO
+hv-history-insert-run = Ekle ve çalıştır
+# Review: PO
+hv-history-copy = SQL'i kopyala
+# Review: PO
+hv-history-open-new = Yeni konsolda aç
+# Review: PO
+hv-history-empty = Henüz geçmiş yok. Çalıştırdığınız ifadeler burada 90 gün tutulur.
+# Review: PO
+hv-history-nomatch = “{ $q }” ile eşleşen bir şey yok.
+# Review: PO
+hv-history-ran = { $n } kez çalıştı
+# Review: PO
+hv-history-target = Odaktaki konsola, { $name } bağlantısına eklenir; Çalıştır denetimi orada yapılır.
+hv-history-time = { DATETIME($t, timeStyle: "medium") }
+hv-history-day = { DATETIME($t, dateStyle: "medium") }
+# Review: PO
+hv-history-conn-gone = Silinmiş bağlantı
+# Review: PO
+hv-history-failed = Geçmiş şu anda okunamıyor.
