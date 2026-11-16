@@ -292,6 +292,109 @@ fn operators_and_casts() {
 }
 
 #[test]
+fn word_operators_match_in_any_ascii_case() {
+    for (d, op) in [
+        (DialectId::MySql, "like"),
+        (DialectId::MySql, "Div"),
+        (DialectId::MySql, "between"),
+        (DialectId::MariaDb, "rlike"),
+        (sqlite(), "glob"),
+        (sqlite(), "Is"),
+    ] {
+        assert!(operator_known(d, op), "{d:?} {op}");
+    }
+    // Never a locale fold.
+    assert!(!operator_known(DialectId::MySql, "lİke"));
+    assert!(!operator_known(DialectId::MySql, "lıke"));
+}
+
+#[test]
+fn more_builtin_cast_spellings() {
+    for t in [
+        "interval day to second",
+        "INTERVAL YEAR TO MONTH",
+        "interval second(3)",
+        "\"char\"",
+    ] {
+        assert!(cast_known(pg(), t), "{t}");
+    }
+    assert!(!cast_known(pg(), "interval fortnight"));
+    assert!(!cast_known(pg(), "\"CHAR\""));
+    assert!(cast_known(
+        DialectId::MySql,
+        "CHAR(10) CHARACTER SET utf8mb4"
+    ));
+    assert!(cast_known(DialectId::MariaDb, "char charset latin1"));
+    // Multi-valued index casts stay unknown (callers treat the cast as unknown).
+    assert!(!cast_known(DialectId::MySql, "UNSIGNED ARRAY"));
+}
+
+#[test]
+fn nothing_is_proven_below_the_probe_floor() {
+    let at = |d, n, a, b, c| lookup_at(d, n, Some(ServerVersion::new(a, b, c)));
+    // MySQL 8.0 adds builtins in patch releases: hand `since` gates from the change history.
+    let my = DialectId::MySql;
+    assert!(matches!(at(my, "FORMAT_BYTES", 8, 0, 12), FnClass::Unknown));
+    assert!(matches!(at(my, "FORMAT_BYTES", 8, 0, 16), FnClass::Allowed));
+    assert!(matches!(at(my, "JSON_VALUE", 8, 0, 20), FnClass::Unknown));
+    assert!(matches!(at(my, "JSON_VALUE", 8, 0, 21), FnClass::Allowed));
+    assert!(matches!(at(my, "ST_COLLECT", 8, 0, 23), FnClass::Unknown));
+    assert!(matches!(at(my, "ABS", 8, 0, 12), FnClass::Allowed));
+    assert!(matches!(at(my, "ABS", 5, 7, 44), FnClass::Unknown));
+    // PostgreSQL below its floor (14): nothing.
+    assert!(matches!(at(pg(), "date_bin", 13, 22, 0), FnClass::Unknown));
+    assert!(matches!(at(pg(), "lower", 13, 22, 0), FnClass::Unknown));
+    assert!(matches!(at(pg(), "date_bin", 14, 0, 0), FnClass::Allowed));
+    // MariaDB 10.6.0 predates SYS_GUID, TO_CHAR and ADD_MONTHS (10.6.1).
+    let maria = DialectId::MariaDb;
+    for n in ["SYS_GUID", "TO_CHAR", "ADD_MONTHS"] {
+        assert!(matches!(at(maria, n, 10, 6, 0), FnClass::Unknown), "{n}");
+        assert!(matches!(at(maria, n, 10, 6, 1), FnClass::Allowed), "{n}");
+    }
+    assert!(matches!(at(maria, "ABS", 10, 6, 0), FnClass::Allowed));
+    assert!(matches!(at(maria, "ABS", 10, 5, 9), FnClass::Unknown));
+    // An unknown version reads rows that hold from the floor on.
+    assert!(matches!(lookup(my, "ABS"), FnClass::Allowed));
+    assert!(matches!(lookup(my, "FORMAT_BYTES"), FnClass::Allowed));
+    assert!(matches!(lookup(maria, "CRC32C"), FnClass::Unknown));
+}
+
+#[test]
+fn json_to_record_coercions_are_unknown() {
+    // They coerce into a record's column types, so a domain's CHECK can run a user function
+    // (fix round 1, I3; the same reason as `record_in`).
+    for n in [
+        "json_populate_record",
+        "json_populate_recordset",
+        "jsonb_populate_record",
+        "jsonb_populate_recordset",
+        "jsonb_populate_record_valid",
+        "json_to_record",
+        "json_to_recordset",
+        "jsonb_to_record",
+        "jsonb_to_recordset",
+        "record_in",
+        "domain_in",
+    ] {
+        assert!(
+            matches!(
+                lookup_at(pg(), n, Some(ServerVersion::new(17, 2, 0))),
+                FnClass::Unknown
+            ),
+            "{n}"
+        );
+    }
+}
+
+#[test]
+fn a_unicode_space_never_reaches_pg_catalog() {
+    // The server reads `\u{a0}pg_catalog` as another schema (fix round 1, I4).
+    for n in ["\u{a0}pg_catalog.lower", "pg_catalog.\u{2003}lower"] {
+        assert!(matches!(lookup(pg(), n), FnClass::Unknown), "{n:?}");
+    }
+}
+
+#[test]
 fn no_name_is_both_allowed_and_denied() {
     for d in [pg(), DialectId::MySql, DialectId::MariaDb, sqlite()] {
         for n in denied_function_names(d) {
@@ -324,7 +427,17 @@ fn rows(dir: &Path, file: &str) -> Vec<toml::Table> {
     let text = std::fs::read_to_string(dir.join(file)).unwrap();
     let doc: toml::Table = toml::from_str(&text).unwrap_or_else(|e| panic!("{file}: {e}"));
     let keys: Vec<&String> = doc.keys().collect();
-    assert_eq!(keys, ["rows"], "{}: only `rows`", dir.join(file).display());
+    if file == "allow.toml" {
+        // `probe_floor`: the oldest server the catalog read saw (fix round 1, I2).
+        assert_eq!(
+            keys,
+            ["probe_floor", "rows"],
+            "{}: `probe_floor` and `rows`",
+            dir.join(file).display()
+        );
+    } else {
+        assert_eq!(keys, ["rows"], "{}: only `rows`", dir.join(file).display());
+    }
     doc["rows"]
         .as_array()
         .unwrap()

@@ -597,10 +597,21 @@ bytes at a character boundary, as `downcase_truncate_identifier` does; MySQL, Ma
 keep the text and `ident_eq` compares it ASCII-case-insensitively. No locale casing anywhere:
 `PG_READ_FİLE` folds to `pg_read_fİle`, never to `pg_read_file`. `parse_qualified` splits on
 dots outside quotes (`"…"` on PostgreSQL, backticks on MySQL/MariaDB, `"…"`/backticks/`[…]` on
-SQLite; doubled quotes undone; whitespace around a dot allowed). Anything else (an empty part,
+SQLite; doubled quotes undone; SQL whitespace (ASCII space, tab, newline, carriage return, form
+feed) around a dot allowed). A Unicode space (U+00A0, U+2000–U+200A, U+3000, …) is an identifier
+character to the servers' lexers, so it stays part of the name it touches:
+`"\u{a0}pg_catalog.lower"` names schema `"\u{a0}pg_catalog"`, never `pg_catalog`. Vertical tab
+is whitespace only on PostgreSQL 16+, so it is refused. Anything else (an empty part,
 an unterminated quote, an operator character, PostgreSQL's `U&"…"`) is `None`, which callers
 treat as unknown. Rejected: Unicode case folding (the Turkish-i lookalike would match a denied or
 allowed builtin).
+
+**`ident_eq` is not a server-equivalence test for MySQL tables or non-ASCII columns.** It is
+ASCII-case-insensitive for every MySQL/MariaDB/SQLite identifier. It does not model MySQL's
+`lower_case_table_names` (table names may compare by bytes) or its Unicode (`general_ci`)
+column-name comparison (`É` and `é` are one column to MySQL, two here). Callers that must match
+a table exactly (the type-to-confirm name, destructive-target matching: Task 15) compare bytes
+themselves.
 
 **`lookup_fn`: deny by bare name first, allow only exact builtins.**
 - A call whose last name part, ASCII-lowercased, is on the dialect's `deny.toml` is
@@ -610,17 +621,57 @@ allowed builtin).
 - A call is `Allowed` only when it names a builtin the way the server would resolve it:
   unqualified, or `pg_catalog.`-qualified on PostgreSQL, folded; on MySQL, MariaDB and SQLite
   unqualified and unquoted, ASCII-case-insensitively. The row must be `reviewed = true` and its
-  version gate (`since` inclusive, `until` exclusive) must hold. **An unknown server version
-  allows only ungated rows**: a builtin missing from that server could be a user function of the
-  same name. Everything else is `Unknown`, including every call on a dialect without reviewed
-  data. Arity is not read (every overload of a name shares its row).
-- `operator_known` and `cast_known` count only reviewed rows with no version gate. Casts drop
-  type modifiers and (PostgreSQL) array brackets, collapse whitespace, lower ASCII letters and
-  strip a `pg_catalog.` qualifier; another qualifier is unknown.
-- `set_allowed` is P-M3b-6's list exactly (`data/<engine>/set_allow.toml`), whole names ASCII
-  case-insensitive; SQLite and every other dialect allow no `SET`. MariaDB has no
-  `max_execution_time` (it calls it `max_statement_time`); the PO list keeps the MySQL name, so
-  that `SET` is simply refused there (the safe side).
+  version gate (`since` inclusive, `until` exclusive) must hold. Everything else is `Unknown`,
+  including every call on a dialect without reviewed data. Arity is not read (every overload of
+  a name shares its row).
+- **Nothing is proven below the probe floor (fix round 1, I2).** Each engine's `allow.toml`
+  records `probe_floor`, the oldest server the catalog read saw: PostgreSQL `14` (builtins change
+  only in major releases), MySQL and MariaDB the exact `VERSION()` of their oldest line (they add
+  builtins in patch releases), SQLite the bundled library's version (the app always runs it). A
+  row without `since` holds only from the floor on. A known older server, or no floor at all,
+  answers `Unknown`, because a builtin missing there could be a user function of the same name:
+  MySQL resolves an unqualified non-builtin to a stored function of the default database, and
+  PostgreSQL resolves it through `search_path`. An unknown version holds a row only when it holds
+  on every server from the floor on (its `since` is at or below the floor, and it has no
+  `until`). Hand `since` gates below the floor come from the engines' change histories:
+  - MySQL: every row `8.0.11` (8.0 GA), except
+    - `FORMAT_BYTES`, `FORMAT_PICO_TIME`, `PS_CURRENT_THREAD_ID`, `PS_THREAD_ID`: `8.0.16`;
+    - `JSON_OVERLAPS`, `JSON_SCHEMA_VALID`, `JSON_SCHEMA_VALIDATION_REPORT`: `8.0.17`;
+    - `JSON_VALUE`: `8.0.21`;
+    - `ST_FRECHETDISTANCE`, `ST_HAUSDORFFDISTANCE`: `8.0.23`;
+    - `ST_COLLECT`, `ST_LINEINTERPOLATEPOINT`, `ST_LINEINTERPOLATEPOINTS`, `ST_POINTATDISTANCE`:
+      `8.0.24`;
+    - `ST_LATITUDE`, `ST_LONGITUDE`: `8.0.12`;
+    - `ST_TRANSFORM`: `8.0.13`.
+
+    Rows whose first release is uncertain keep no hand gate and hold only from the floor:
+    `STATEMENT_DIGEST`, `STATEMENT_DIGEST_TEXT`, `GEOMCOLLECTION`.
+  - MariaDB: every row `10.6.0`, except `ADD_MONTHS`, `ROWNUM`, `SYS_GUID` and `TO_CHAR`
+    (`10.6.1`). Rows the probe gated on a later line (`10.11`, `11.4`) keep that gate.
+  - PostgreSQL: none (below 14 is below the support floor; such a server, accepted with
+    `allow_unsupported_server`, gets `Unknown` for every builtin).
+- `operator_known` and `cast_known` count only reviewed rows with no version gate. Word operators
+  (`LIKE`, `DIV`, `BETWEEN`, `IS`, …) match ASCII-case-insensitively; symbols match exactly.
+  Casts drop type modifiers and (PostgreSQL) array brackets, collapse whitespace, lower ASCII
+  letters and strip a `pg_catalog.` qualifier; another qualifier is unknown. PostgreSQL's interval
+  field qualifiers (`interval day to second`) read as `interval`, the quoted `"char"` as `char`;
+  MySQL's `CHAR(n) CHARACTER SET x` reads as `char`. Not covered, so unknown: MySQL's `… ARRAY`
+  (multi-valued index casts) and every other quoted or qualified type name.
+- **`set_allowed(d, name, value)`** is P-M3b-6's list exactly (`data/<engine>/set_allow.toml`),
+  whole names ASCII case-insensitive; SQLite and every other dialect allow no `SET`. MariaDB has
+  no `max_execution_time` (it calls it `max_statement_time`); the PO list keeps the MySQL name, so
+  that `SET` is simply refused there (the safe side). **PostgreSQL `search_path` is harmless only
+  while `pg_catalog` resolves first (P-M3b-T3-1):** `set_allowed` is true only when `value` is
+  given and `pg_catalog` is absent from the list (the server then searches it first) or is its
+  first schema. `None` and a value that does not parse are refused. The value is the text after
+  `TO`/`=`, read as PostgreSQL reads a `search_path` list:
+  - an unquoted name folds to ASCII lower case (`PG_CATALOG` is `pg_catalog`);
+  - a `"quoted"` name keeps its exact text (`"PG_CATALOG"` is another schema);
+  - a `'string'` is one schema with that exact text, as `GUC_LIST_QUOTE` makes it, so
+    `'public, pg_catalog'` is one schema named `public, pg_catalog`.
+
+  The other variables ignore `value`. The classifier passes the value of every
+  `SET search_path` (Tasks 9 and 14).
 
 **Where the rows come from (P-M3b-13).** `hacivat-exec/tests/gen_fn_catalog.rs`
 (`#[ignore = "docker"]`, `HACIVAT_GEN_FN_CATALOG=1`, through the wrapper on `--set full`) reads
@@ -637,23 +688,61 @@ is a base, domain, enum, range or multirange type outside the array category wit
 input function. A name on a non-contiguous run of lines, or a candidate on one line and not on
 another, is left out.
 
-**The review.** Every candidate row was read by name and flipped by hand. Counts at this
-commit: PostgreSQL 2,462 function candidates (2,423 reviewed, 39 left unreviewed) plus 21 hand
-rows, 74 operators, 80 types plus 20 SQL-standard spellings; MySQL 367 names (361 reviewed);
-MariaDB 387 (382 reviewed); SQLite 110 (107 reviewed). Operators and cast targets of MySQL,
-MariaDB and SQLite are hand rows. Left unreviewed (so `Unknown`, which the read-only profiles
-deny):
-- information disclosure (`alg/13` INFO_DISCLOSURE has no deny group): `current_setting`,
-  `version`, `inet_server_addr`/`_port`, `pg_show_all_settings`, `pg_config`,
-  `pg_tablespace_location`, `pg_tablespace_databases`, `pg_stat_get_activity`,
-  `pg_stat_get_backend_*`, `pg_stat_get_progress_info`, `pg_stat_get_wal_senders`,
-  `pg_stat_get_wal_receiver`, `pg_stat_get_subscription`; MySQL/MariaDB `VERSION`,
-  `ROLES_GRAPHML`;
+**Row sources.** `source` names where a row came from:
+- `pg_proc@pgNN`, `pg_operator@pgNN` and `pg_type@pgNN`: the PostgreSQL catalog read, on line
+  `pg17`, or the newest line the row was read on when it is absent from 17;
+- `manual-index`: `data/mysql/manual-index.txt`, probed per line;
+- `pragma_function_list`: the bundled SQLite;
+- `manual`: a hand row.
+
+The test `every_row_names_its_source_and_review_state` holds this vocabulary per engine.
+
+**The review.** Every candidate row was read by name and flipped by hand. Counts after fix
+round 1:
+- PostgreSQL: 2,462 function candidates (2,411 reviewed, 51 left unreviewed) plus 21 hand rows;
+  74 operators; 80 types plus 20 SQL-standard spellings.
+- MySQL: 367 names (360 reviewed).
+- MariaDB: 387 names (382 reviewed).
+- SQLite: 110 names (107 reviewed).
+
+Operators and cast targets of MySQL, MariaDB and SQLite are hand rows. Left unreviewed (so
+`Unknown`, which the read-only profiles deny):
+- **Information disclosure.** `alg/13` INFO_DISCLOSURE has no deny group, so the line is drawn
+  here (fix round 1, M6). A function is withheld when it reveals one of these about the server
+  or about other sessions:
+  1. other sessions' activity or connection details;
+  2. server settings values, or the server's build or version strings;
+  3. the server's network addresses;
+  4. server file-system paths or directory contents;
+  5. replication peers, slots and subscriptions.
+
+  On that basis the following are withheld:
+  - `current_setting`, `pg_show_all_settings`, `pg_config`, `version`;
+  - `inet_server_addr`/`_port`;
+  - `pg_tablespace_location`, `pg_tablespace_databases`, `pg_relation_filepath`;
+  - `pg_stat_get_activity`, `pg_stat_get_backend_*`, `pg_stat_get_progress_info`;
+  - `pg_stat_get_wal_senders`, `pg_stat_get_wal_receiver`, `pg_stat_get_subscription`,
+    `pg_get_replication_slots`, `pg_stat_get_replication_slot`;
+  - MySQL/MariaDB `VERSION`, MySQL `ROLES_GRAPHML` and `ICU_VERSION`.
+
+  Information about the caller's own session, about catalog objects, or aggregate statistics
+  stays allowed:
+  - `inet_client_addr`, `pg_backend_pid`, `CONNECTION_ID`;
+  - `pg_relation_filenode` (a number, not a path), `pg_available_extensions`;
+  - `pg_postmaster_start_time`, `pg_conf_load_time`;
+  - the per-table and per-database `pg_stat_get_*` counters.
+
+  SQLite's library information (`sqlite_version`, `sqlite_compileoption_*`) describes the
+  bundled library on the user's machine, not a server, so it is outside the line.
 - hidden reads of a relation named by a value: `table_to_xml`, `table_to_xmlschema`,
   `table_to_xml_and_xmlschema`;
 - a type's input run for a type named by value (a domain's CHECK can call a user function):
   `pg_input_is_valid`, `pg_input_error_info`, `domain_in`, `record_in`, `array_in`, `range_in`,
-  `multirange_in`;
+  `multirange_in`, and (fix round 1, I3) the JSON-to-record coercions `json_populate_record`,
+  `json_populate_recordset`, `jsonb_populate_record`, `jsonb_populate_recordset`,
+  `jsonb_populate_record_valid`, `json_to_record`, `json_to_recordset`, `jsonb_to_record`,
+  `jsonb_to_recordset` (they coerce into the record's column types; `populate_domain` runs the
+  domain's CHECK);
 - the language validators (`fmgr_c_validator` loads a shared library) and their two siblings;
 - session state or server files: MySQL/MariaDB `LAST_INSERT_ID` (with an argument it sets the
   session value), MariaDB `BINLOG_GTID_POS`, `DES_ENCRYPT`, `DES_DECRYPT`;
@@ -677,14 +766,23 @@ P-M3b-8); SQLite `load_extension`, `readfile`, `writefile`, `edit`, `fts3_tokeni
 guard's authorizer list).
 
 **Residual risks, covered by the server (L3–L6) and the catalog (M4).**
-- An unqualified PostgreSQL call is assumed to reach `pg_catalog` first. A `search_path` that
-  names a writable schema before `pg_catalog` can shadow an allowed builtin with a user function
-  of the same signature; `search_path` is on P-M3b-6's harmless list. Task 9/14 should pin
-  `pg_catalog` first or treat such a `SET` as changing resolution.
+- An unqualified PostgreSQL call is assumed to reach `pg_catalog` first. Ruling P-M3b-T3-1: a
+  read-only session's `SET search_path` is harmless only when `pg_catalog` is absent from the new
+  list or first in it, and `set_allowed` checks the value (above). A role's or database's default
+  `search_path`, or a connection option, can still list `pg_catalog` after a writable schema. The
+  controller has routed a connect-time check of that to Tasks 14 and 18 (review M4).
 - A builtin operator symbol is known for all its overloads: a user operator of the same symbol
   over user types is not seen without the catalog.
 - Implicit calls (domain CHECKs, column defaults, views) are not assessed without the catalog
   (`alg/13` SAFE-03 step 6).
+- Two cast paths bypass `cast_known` (fix round 1, M3):
+  - **A user-defined cast from a user type.** `x::text`, where `x`'s type has
+    `CREATE CAST … WITH FUNCTION`, calls that function, though the target `text` is a builtin.
+  - **A temporary type that shadows a builtin type name.** `pg_temp` is searched before
+    `pg_catalog` for types, so a session-created temporary table named `int4` shadows the cast
+    target `int4`. Creating one needs a transaction that is not read-only.
+
+  Both are seen only with the catalog (M4); the read-only transaction (L3) still blocks writes.
 - MariaDB answered "no such function" for the zero-argument probe of `POINT`, `LINESTRING`,
   `POLYGON` and the `MULTI…` constructors, so those calls are `Unknown` there (too strict, not
   too lax).

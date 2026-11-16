@@ -1,8 +1,9 @@
 //! Qualified names from text (Task 3).
 //!
 //! `parse_qualified` reads `name`, `schema.name` or `db.schema.name` the way the dialect's
-//! lexer delimits identifiers: dots split parts only outside quotes, whitespace may surround a
-//! dot, and a quoted part keeps its text exactly (doubled quotes undone). Anything else (an
+//! lexer delimits identifiers: dots split parts only outside quotes, SQL (ASCII) whitespace may
+//! surround a dot, a Unicode space is part of the identifier it touches, and a quoted part keeps
+//! its text exactly (doubled quotes undone). Anything else (an
 //! empty part, an unterminated quote, an operator character, PostgreSQL's `U&"…"` form) is not
 //! a name: `None`, which callers treat as unknown.
 
@@ -30,6 +31,14 @@ fn is_bare(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '$' || !c.is_ascii()
 }
 
+/// SQL whitespace: ASCII space, tab, newline, carriage return and form feed. A Unicode space
+/// (U+00A0, U+2000–U+200A, U+3000, …) is an identifier character to the servers' lexers, so it
+/// is never skipped (fix round 1, I4). Vertical tab is whitespace only on PostgreSQL 16+, so it
+/// is refused rather than guessed at.
+fn is_sql_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')
+}
+
 /// `text` read as a (possibly quoted, possibly qualified) name in `d`; `None` when it is not
 /// one. The parts keep their text as written: [`crate::fold`] resolves case.
 pub fn parse_qualified(d: DialectId, text: &str) -> Option<QualifiedName> {
@@ -37,7 +46,7 @@ pub fn parse_qualified(d: DialectId, text: &str) -> Option<QualifiedName> {
     let mut parts: SmallVec<[Ident; 3]> = SmallVec::new();
     let mut chars = text.chars().peekable();
     loop {
-        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        while chars.next_if(|c| is_sql_space(*c)).is_some() {}
         let first = *chars.peek()?;
         let part = if let Some(&(_, close)) = quotes.iter().find(|(open, _)| *open == first) {
             chars.next();
@@ -79,7 +88,7 @@ pub fn parse_qualified(d: DialectId, text: &str) -> Option<QualifiedName> {
             }
         };
         parts.push(part);
-        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        while chars.next_if(|c| is_sql_space(*c)).is_some() {}
         match chars.next() {
             None => return Some(QualifiedName { parts }),
             Some('.') => {}

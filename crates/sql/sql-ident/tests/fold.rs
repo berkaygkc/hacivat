@@ -72,6 +72,54 @@ fn malformed_names_are_not_recognised() {
 }
 
 #[test]
+fn unicode_spaces_belong_to_the_identifier() {
+    // The servers' lexers read bytes >= 0x80 as identifier characters: a no-break or ideographic
+    // space is part of the name, never a separator (fix round 1, I4).
+    for (d, text, want) in [
+        (
+            DialectId::Postgres,
+            "\u{a0}pg_catalog.lower",
+            ["\u{a0}pg_catalog", "lower"],
+        ),
+        (
+            DialectId::Postgres,
+            "pg_catalog.\u{2003}lower",
+            ["pg_catalog", "\u{2003}lower"],
+        ),
+        (
+            DialectId::Postgres,
+            "pg_catalog\u{3000}.lower",
+            ["pg_catalog\u{3000}", "lower"],
+        ),
+        (DialectId::MySql, "db.\u{202f}abs", ["db", "\u{202f}abs"]),
+    ] {
+        let q = parse_qualified(d, text).unwrap_or_else(|| panic!("{text:?}"));
+        let got: Vec<&str> = q.parts.iter().map(|p| &*p.text).collect();
+        assert_eq!(got, want, "{text:?}");
+    }
+    // A Unicode space between two names does not split them into qualified parts either.
+    assert_eq!(
+        parse_qualified(DialectId::Postgres, "a\u{a0}b")
+            .unwrap()
+            .parts
+            .len(),
+        1
+    );
+    // SQL whitespace still surrounds a dot; vertical tab is refused (PG < 16 does not skip it).
+    assert_eq!(
+        parse_qualified(DialectId::Postgres, "\t pg_catalog\r\n.\x0clower")
+            .unwrap()
+            .parts
+            .len(),
+        2
+    );
+    assert_eq!(
+        parse_qualified(DialectId::Postgres, "\x0bpg_catalog.lower"),
+        None
+    );
+}
+
+#[test]
 fn mysql_quotes_with_backticks_and_keeps_case() {
     let q = parse_qualified(DialectId::MySql, "`my``db`.SLEEP").unwrap();
     assert_eq!(q.parts.len(), 2);

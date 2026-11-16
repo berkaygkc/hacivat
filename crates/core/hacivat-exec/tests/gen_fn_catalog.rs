@@ -16,6 +16,11 @@
 //!   1305/1630 (no such function).
 //! - SQLite: `pragma_function_list` of the bundled SQLite (`rusqlite`, safe API).
 //!
+//! Each `allow` candidate file records `probe_floor`: PostgreSQL's oldest major read (builtins
+//! change only in majors), MySQL's and MariaDB's oldest exact `VERSION()` (they add builtins in
+//! patch releases), the bundled SQLite's version. A row without `since` holds only from the
+//! floor on (fix round 1, I2).
+//!
 //! Every candidate is written `reviewed = false` to the Docker artifacts
 //! (`t03-<engine>-<file>.toml`, plus `t03-<engine>-excluded.tsv` with the reason for each name
 //! left out); the implementer reviews each row and flips it in the data by hand.
@@ -147,8 +152,13 @@ fn merge(
     (out, excluded)
 }
 
-fn toml_rows(header: &str, rows: &[(Candidate, String)]) -> String {
+/// The candidate file: `header`, the probe floor (`allow.toml` only: the oldest server the read
+/// saw; rows without `since` hold only from there on) and the rows.
+fn toml_rows(header: &str, floor: Option<&str>, rows: &[(Candidate, String)]) -> String {
     let mut s = String::from(header);
+    if let Some(floor) = floor {
+        let _ = writeln!(s, "probe_floor = \"{floor}\"");
+    }
     s.push_str("rows = [\n");
     for (c, source) in rows {
         let _ = write!(
@@ -168,6 +178,22 @@ fn toml_rows(header: &str, rows: &[(Candidate, String)]) -> String {
     s
 }
 
+/// `major.minor.patch` from a server's version string (`8.0.44`, `10.6.24-MariaDB-ubu2204`).
+fn exact_version(text: &str) -> Option<String> {
+    let lead: String = text
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let parts: Vec<&str> = lead.split('.').collect();
+    (parts.len() == 3 && parts.iter().all(|p| p.parse::<u16>().is_ok())).then_some(lead)
+}
+
+/// The oldest of `versions` (`x.y.z`), compared numerically.
+fn oldest(versions: &[String]) -> Option<String> {
+    let key = |v: &String| -> Vec<u32> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
+    versions.iter().min_by_key(|v| key(v)).cloned()
+}
+
 fn write_artifact(name: &str, text: &str) {
     let path = hacivat_testkit::artifact(name);
     std::fs::write(&path, text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -182,6 +208,21 @@ fn denied(d: DialectId) -> BTreeSet<String> {
     sql_safety::denied_function_names(d)
         .map(str::to_string)
         .collect()
+}
+
+#[test]
+fn the_probe_floor_is_the_oldest_exact_version() {
+    assert_eq!(exact_version("8.0.44").as_deref(), Some("8.0.44"));
+    assert_eq!(
+        exact_version("10.6.24-MariaDB-ubu2204").as_deref(),
+        Some("10.6.24")
+    );
+    assert_eq!(exact_version("8.4"), None);
+    assert_eq!(exact_version("x"), None);
+    let v: Vec<String> = ["10.11.9", "10.6.24", "11.4.3"].map(String::from).to_vec();
+    assert_eq!(oldest(&v).as_deref(), Some("10.6.24"));
+    let floor = toml_rows("# h\n", Some("8.0.44"), &[]);
+    assert_eq!(floor, "# h\nprobe_floor = \"8.0.44\"\nrows = [\n]\n");
 }
 
 #[test]
@@ -364,7 +405,11 @@ async fn read_pg(lines: &[Line]) {
             (c, s)
         })
         .collect();
-    write_artifact("t03-pg-allow.toml", &toml_rows(&header("pg_proc"), &rows));
+    // PostgreSQL adds builtins only in major releases: the floor is the oldest major read.
+    write_artifact(
+        "t03-pg-allow.toml",
+        &toml_rows(&header("pg_proc"), Some(&majors[0]), &rows),
+    );
     let (c, ex_ops) = merge(&ops, &majors, reference);
     let rows: Vec<(Candidate, String)> = c
         .into_iter()
@@ -375,7 +420,7 @@ async fn read_pg(lines: &[Line]) {
         .collect();
     write_artifact(
         "t03-pg-operators.toml",
-        &toml_rows(&header("pg_operator"), &rows),
+        &toml_rows(&header("pg_operator"), None, &rows),
     );
     let (c, ex_types) = merge(&types, &majors, reference);
     let rows: Vec<(Candidate, String)> = c
@@ -385,7 +430,10 @@ async fn read_pg(lines: &[Line]) {
             (c, s)
         })
         .collect();
-    write_artifact("t03-pg-types.toml", &toml_rows(&header("pg_type"), &rows));
+    write_artifact(
+        "t03-pg-types.toml",
+        &toml_rows(&header("pg_type"), None, &rows),
+    );
     ex.extend(
         ex_ops
             .into_iter()
@@ -463,8 +511,14 @@ async fn read_mysql_family(engine: DbmsKind, file_engine: &str, lines: &[Line]) 
     let mut per = PerLine::new();
     let mut codes: Vec<(String, String)> = Vec::new();
     let mut probes: Vec<(String, String)> = Vec::new();
+    let mut versions: Vec<String> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let mut side = Side::open(line, None).await;
+        // MySQL and MariaDB add builtins in patch releases: the floor is an exact version.
+        let version = side.scalar("SELECT VERSION()").await;
+        versions.push(
+            exact_version(&version).unwrap_or_else(|| panic!("{}: version {version:?}", line.id)),
+        );
         // The probe must tell a missing function from a present one.
         let missing = probe(&mut side, "hv_t03_no_such_fn").await;
         assert!(
@@ -502,9 +556,10 @@ async fn read_mysql_family(engine: DbmsKind, file_engine: &str, lines: &[Line]) 
          hacivat-exec/tests/gen_fn_catalog.rs, every row unreviewed.\n",
         majors.join(", ")
     );
+    let floor = oldest(&versions).expect("a line");
     write_artifact(
         &format!("t03-{file_engine}-allow.toml"),
-        &toml_rows(&header, &rows),
+        &toml_rows(&header, Some(&floor), &rows),
     );
     ex.extend(codes);
     write_artifact(&format!("t03-{file_engine}-excluded.tsv"), &tsv(&ex));
@@ -556,7 +611,11 @@ fn read_sqlite() {
         "# Candidates from pragma_function_list of the bundled SQLite {version}; generated by \
          hacivat-exec/tests/gen_fn_catalog.rs, every row unreviewed.\n"
     );
-    write_artifact("t03-sqlite-allow.toml", &toml_rows(&header, &rows));
+    // The app always runs this bundled library: its version is the floor.
+    write_artifact(
+        "t03-sqlite-allow.toml",
+        &toml_rows(&header, Some(version), &rows),
+    );
     ex.sort();
     ex.dedup();
     write_artifact("t03-sqlite-excluded.tsv", &tsv(&ex));

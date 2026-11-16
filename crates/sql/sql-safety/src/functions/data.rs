@@ -3,7 +3,9 @@
 //!
 //! Every file is `rows = [ { name = …, source = …, reviewed = true|false, since = "16",
 //! until = "18", group = "Sleep" }, … ]`: `since` is inclusive, `until` exclusive, both
-//! optional; `group` only in `deny.toml`. Only `reviewed = true` rows count as allowed, known
+//! optional; `group` only in `deny.toml`. `allow.toml` also records `probe_floor`, the oldest
+//! server the catalog read saw: a row without `since` holds only from there on (`Gate::holds`).
+//! Only `reviewed = true` rows count as allowed, known
 //! operators, known cast targets or harmless `SET`s; a deny row denies whatever its review
 //! state (fail closed). A file that does not parse loads as empty, which also fails closed:
 //! every lookup answers `Unknown`/`false` (`compiled_tables_parse` keeps that from shipping).
@@ -107,6 +109,8 @@ fn text(path: &str) -> &'static str {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFile {
+    /// `allow.toml` only: the oldest server version the catalog read saw (the probe floor).
+    probe_floor: Option<String>,
     rows: Vec<RawRow>,
 }
 
@@ -129,12 +133,24 @@ pub(crate) struct Gate {
 }
 
 impl Gate {
-    /// Whether the row holds at `version`. An unknown version holds only for an ungated row: a
-    /// builtin missing from the server could be a user function of the same name.
-    pub(crate) fn holds(&self, version: Option<ServerVersion>) -> bool {
+    /// Whether the row holds at `version` on an engine whose catalog read saw nothing older
+    /// than `floor`. A row without `since` is proven only from the floor on; a hand `since`
+    /// below the floor comes from the engine's change history. An unknown version holds only
+    /// for a row that holds on every server from the floor on. A builtin missing from the
+    /// server could be a user function of the same name, so anything unproven is refused. No
+    /// floor (a data file without one): nothing holds.
+    pub(crate) fn holds(
+        &self,
+        version: Option<ServerVersion>,
+        floor: Option<ServerVersion>,
+    ) -> bool {
+        let Some(floor) = floor else {
+            return false;
+        };
+        let since = self.since.unwrap_or(floor);
         match version {
-            None => self.since.is_none() && self.until.is_none(),
-            Some(v) => self.since.is_none_or(|s| s <= v) && self.until.is_none_or(|u| v < u),
+            None => since <= floor && self.until.is_none(),
+            Some(v) => since <= v && self.until.is_none_or(|u| v < u),
         }
     }
 
@@ -146,12 +162,14 @@ impl Gate {
 /// One engine's lists.
 #[derive(Debug, Default)]
 pub(crate) struct Engine {
+    /// The oldest server version the catalog read saw (`allow.toml`'s `probe_floor`).
+    pub(crate) floor: Option<ServerVersion>,
     /// Reviewed builtin functions, by the name the server resolves (PostgreSQL: folded; the
     /// others: ASCII lower case).
     pub(crate) allow: HashMap<String, Gate>,
     /// Denied names, ASCII lower case.
     pub(crate) deny: HashMap<String, DenyGroup>,
-    /// Reviewed, ungated builtin operators.
+    /// Reviewed, ungated builtin operators (word operators ASCII lower case).
     pub(crate) operators: HashSet<String>,
     /// Reviewed, ungated builtin cast targets, ASCII lower case.
     pub(crate) types: HashSet<String>,
@@ -194,9 +212,22 @@ fn version(s: &str) -> Result<ServerVersion, String> {
     }
 }
 
-fn rows(path: &str) -> Result<Vec<(RawRow, Gate)>, String> {
+/// A file's rows with their gates.
+type Rows = Vec<(RawRow, Gate)>;
+
+/// The rows of `path`; `allow.toml` must carry its probe floor and no other file may.
+fn rows(path: &str) -> Result<Rows, String> {
+    rows_and_floor(path).and_then(|(rows, floor)| match floor {
+        None => Ok(rows),
+        Some(_) => Err(format!("{path}: a probe_floor outside allow.toml")),
+    })
+}
+
+fn rows_and_floor(path: &str) -> Result<(Rows, Option<ServerVersion>), String> {
     let file: RawFile = toml::from_str(text(path)).map_err(|e| format!("{path}: {e}"))?;
-    file.rows
+    let floor = file.probe_floor.as_deref().map(version).transpose()?;
+    let rows = file
+        .rows
         .into_iter()
         .map(|r| {
             let gate = Gate {
@@ -208,14 +239,17 @@ fn rows(path: &str) -> Result<Vec<(RawRow, Gate)>, String> {
             }
             Ok((r, gate))
         })
-        .collect()
+        .collect::<Result<_, String>>()?;
+    Ok((rows, floor))
 }
 
 /// The lists of `engine` (`pg`, `mysql`, `mariadb`, `sqlite`).
 fn engine(engine: &str) -> Result<Engine, String> {
     let at = |file: &str| format!("{engine}/{file}");
     let mut e = Engine::default();
-    for (r, gate) in rows(&at("allow.toml"))? {
+    let (allow, floor) = rows_and_floor(&at("allow.toml"))?;
+    e.floor = Some(floor.ok_or_else(|| format!("{engine}/allow.toml: no probe_floor"))?);
+    for (r, gate) in allow {
         if r.group.is_some() {
             return Err(format!("{engine}/allow.toml: {}: a group", r.name));
         }
@@ -238,7 +272,7 @@ fn engine(engine: &str) -> Result<Engine, String> {
     }
     for (r, gate) in rows(&at("operators.toml"))? {
         if r.reviewed && gate.is_open() {
-            e.operators.insert(r.name);
+            e.operators.insert(r.name.to_ascii_lowercase());
         }
     }
     for (r, gate) in rows(&at("types.toml"))? {
@@ -280,16 +314,44 @@ mod tests {
         for bad in ["", "x", "1.2.3.4", "16."] {
             assert!(version(bad).is_err(), "{bad:?}");
         }
+        let v = |a, b, c| Some(ServerVersion::new(a, b, c));
+        let pg14 = v(14, 0, 0);
         let g = Gate {
-            since: Some(ServerVersion::new(16, 0, 0)),
-            until: Some(ServerVersion::new(18, 0, 0)),
+            since: v(16, 0, 0),
+            until: v(18, 0, 0),
         };
-        assert!(!g.holds(None));
-        assert!(!g.holds(Some(ServerVersion::new(15, 9, 0))));
-        assert!(g.holds(Some(ServerVersion::new(16, 0, 0))));
-        assert!(g.holds(Some(ServerVersion::new(17, 6, 0))));
-        assert!(!g.holds(Some(ServerVersion::new(18, 0, 0))));
-        assert!(Gate::default().holds(None));
+        assert!(!g.holds(None, pg14));
+        assert!(!g.holds(v(15, 9, 0), pg14));
+        assert!(g.holds(v(16, 0, 0), pg14));
+        assert!(g.holds(v(17, 6, 0), pg14));
+        assert!(!g.holds(v(18, 0, 0), pg14));
+        // No `since`: proven only from the floor on.
+        let open = Gate::default();
+        assert!(open.holds(None, pg14));
+        assert!(open.holds(v(14, 0, 0), pg14));
+        assert!(!open.holds(v(13, 22, 0), pg14));
+        // A hand `since` below the floor.
+        let my_floor = v(8, 0, 44);
+        let hand = Gate {
+            since: v(8, 0, 11),
+            until: None,
+        };
+        assert!(hand.holds(None, my_floor));
+        assert!(hand.holds(v(8, 0, 12), my_floor));
+        assert!(!hand.holds(v(5, 7, 44), my_floor));
+        assert!(!open.holds(v(8, 0, 12), my_floor));
+        // No floor: nothing holds.
+        assert!(!open.holds(v(17, 0, 0), None));
+        assert!(!hand.holds(None, None));
+    }
+
+    #[test]
+    fn every_engine_records_its_probe_floor() {
+        let t = tables();
+        for e in [&t.pg, &t.mysql, &t.mariadb, &t.sqlite] {
+            assert!(e.floor.is_some());
+        }
+        assert_eq!(t.pg.floor, Some(ServerVersion::new(14, 0, 0)));
     }
 
     #[test]

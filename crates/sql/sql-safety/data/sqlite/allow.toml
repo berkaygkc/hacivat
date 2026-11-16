@@ -1,6 +1,7 @@
 # SAFE-03 builtin function allowlist (sqlite). Hand rows (`source = "manual"`) and the catalog read's
 # candidates (`hacivat-exec/tests/gen_fn_catalog.rs`), each reviewed by hand: only
 # `reviewed = true` rows count. Owner: M3b Task 3.
+probe_floor = "3.54.1"
 rows = [
   { name = "->", source = "pragma_function_list", reviewed = true },
   { name = "->>", source = "pragma_function_list", reviewed = true },
