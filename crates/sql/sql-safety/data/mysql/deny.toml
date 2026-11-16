@@ -1,1 +1,19 @@
-# owner: Task 3 (SAFE-03 data; mysql). Empty until Task 3 fills it.
+# SAFE-03 deny list (mysql; `alg/13` SAFE-03 deny catalogue). Hand rows, reviewed.
+# A call whose last name part, ASCII-lowercased, is listed here is denied in any schema,
+# quoting or server version. Owner: M3b Task 3.
+rows = [
+  { name = "SLEEP", source = "manual", reviewed = true, group = "Sleep" },
+  { name = "BENCHMARK", source = "manual", reviewed = true, group = "Sleep" },
+  { name = "LOAD_FILE", source = "manual", reviewed = true, group = "FileIo" },
+  { name = "sys_exec", source = "manual", reviewed = true, group = "ProcessExec" },
+  { name = "sys_eval", source = "manual", reviewed = true, group = "ProcessExec" },
+  { name = "MASTER_POS_WAIT", source = "manual", reviewed = true, group = "Replication" },
+  { name = "SOURCE_POS_WAIT", source = "manual", reviewed = true, group = "Replication" },
+  { name = "WAIT_FOR_EXECUTED_GTID_SET", source = "manual", reviewed = true, group = "Replication" },
+  { name = "WAIT_UNTIL_SQL_THREAD_AFTER_GTIDS", source = "manual", reviewed = true, group = "Replication" },
+  { name = "GET_LOCK", source = "manual", reviewed = true, group = "Advisory" },
+  { name = "RELEASE_LOCK", source = "manual", reviewed = true, group = "Advisory" },
+  { name = "RELEASE_ALL_LOCKS", source = "manual", reviewed = true, group = "Advisory" },
+  { name = "IS_USED_LOCK", source = "manual", reviewed = true, group = "Advisory" },
+  { name = "IS_FREE_LOCK", source = "manual", reviewed = true, group = "Advisory" },
+]

@@ -1,0 +1,321 @@
+# The PARAM family (bind parameters and template variables) of
+# `docs/research/datagrip/13-behavioral-test-corpus.md` §3 (rows 01–06, 12–15, 18–20), as
+# Hacivat goldens for PostgreSQL and MySQL (M3b Task 6, SQL-PARAM-01/-02). Clean room: the
+# inputs are the corpus's Hacivat-authored SQL; every expectation comes from Hacivat's specs
+# (alg/10 SQL-PARAM-01/-02, alg/20 HV-EXEC-03, D-053, D-08), never from DataGrip. Where the
+# corpus presumes DataGrip's behaviour and Hacivat differs on purpose, `divergence` says how
+# and why.
+#
+# Read by `sql-split/tests/params.rs` with a small line reader (no TOML crate there), so the
+# file keeps to one subset: `[[case]]` headers, `key = value` on one line, basic strings with
+# `\\`, `\"` and `\n` escapes, one-line arrays of basic strings, `true`/`false`.
+#
+# Fields:
+# - `id`, `dialect` (`postgres` | `mysql`), `input` (the unit);
+# - `pg_question_marks` (optional, default false): the D-08 setting;
+# - `bindable`: the source text of every bindable placeholder, in text order;
+# - `unbindable`: the source text of every placeholder that is not bindable (refused);
+# - `final`: the rewritten text the driver receives; absent when nothing is rewritten
+#   (`rewritten` is `None`: no placeholder, or the unit is refused);
+# - `templates`: the names of the template variables detected (never substituted, D-053);
+# - `diags`: the `ParamDiag` names reported, in text order;
+# - `divergence`: how and why Hacivat's answer differs from the corpus's DataGrip column;
+# - `sources`.
+
+[[case]]
+id = "PARAM-01"
+dialect = "postgres"
+input = "SELECT * FROM customers WHERE id = ?"
+bindable = []
+unbindable = []
+templates = []
+diags = ["QuestionMarkOff"]
+divergence = "DataGrip binds `?` on PostgreSQL. Hacivat reads it as an operator by default (it is also the jsonb key operator), sends nothing as a parameter, and hints that the setting is off."
+sources = ["D-08", "alg/10 SQL-PARAM-01 step 3 (PG `?` only with pg_question_marks)"]
+
+[[case]]
+id = "PARAM-01"
+dialect = "postgres"
+pg_question_marks = true
+input = "SELECT * FROM customers WHERE id = ?"
+bindable = ["?"]
+unbindable = []
+final = "SELECT * FROM customers WHERE id = $1"
+templates = []
+diags = []
+sources = ["D-08 (opt-in)", "alg/10 SQL-PARAM-01 step 4 (PG rewrite to $1..$n)"]
+
+[[case]]
+id = "PARAM-01"
+dialect = "mysql"
+input = "SELECT * FROM customers WHERE id = ?"
+bindable = ["?"]
+unbindable = []
+final = "SELECT * FROM customers WHERE id = ?"
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-01 step 3 (MySQL `?` is a placeholder)"]
+
+[[case]]
+id = "PARAM-02"
+dialect = "postgres"
+input = "SELECT * FROM customers WHERE id = :id"
+bindable = [":id"]
+unbindable = []
+final = "SELECT * FROM customers WHERE id = $1"
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-01 steps 3-4", "alg/20 HV-EXEC-03 matrix"]
+
+[[case]]
+id = "PARAM-02"
+dialect = "mysql"
+input = "SELECT * FROM customers WHERE id = :id"
+bindable = [":id"]
+unbindable = []
+final = "SELECT * FROM customers WHERE id = ?"
+templates = []
+diags = []
+sources = ["alg/20 HV-EXEC-03 matrix (MySQL `:name` rewritten as `?`)"]
+
+[[case]]
+id = "PARAM-03"
+dialect = "postgres"
+input = "SELECT * FROM customers WHERE id = $1"
+bindable = ["$1"]
+unbindable = []
+final = "SELECT * FROM customers WHERE id = $1"
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-01 test cases (PARAM-03 `$1` → prompt)"]
+
+[[case]]
+id = "PARAM-03"
+dialect = "mysql"
+input = "SELECT * FROM customers WHERE id = $1"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["MySQL reads `$` as an identifier character: `$1` is a name, not a parameter"]
+
+[[case]]
+id = "PARAM-04"
+dialect = "postgres"
+input = "SELECT ${col} FROM customers"
+bindable = []
+unbindable = []
+templates = ["col"]
+diags = ["TemplateVariable"]
+divergence = "DataGrip substitutes `${col}` as text. Hacivat detects the template variable and refuses the unit (text templates are v1.x and off by default)."
+sources = ["D-053", "alg/10 SQL-PARAM-02"]
+
+[[case]]
+id = "PARAM-04"
+dialect = "mysql"
+input = "SELECT ${col} FROM customers"
+bindable = []
+unbindable = []
+templates = ["col"]
+diags = ["TemplateVariable"]
+divergence = "As on PostgreSQL: detected and refused, never substituted."
+sources = ["D-053", "alg/10 SQL-PARAM-02"]
+
+[[case]]
+id = "PARAM-05"
+dialect = "postgres"
+input = "SELECT * FROM customers WHERE city = '${c}'"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-02 test cases (strings switch off)", "fail closed: a marker inside a string is never a parameter"]
+
+[[case]]
+id = "PARAM-05"
+dialect = "mysql"
+input = "SELECT * FROM customers WHERE city = '${c}'"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-02 test cases (strings switch off)"]
+
+[[case]]
+id = "PARAM-06"
+dialect = "postgres"
+input = "SELECT * FROM customers WHERE city = '${c}'"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+divergence = "DataGrip's \"substitute inside SQL strings\" switch has no Hacivat counterpart: the text inside a string is data, never a parameter or a template."
+sources = ["D-053", "alg/10 SQL-PARAM-02 decision (no substitution in v1)"]
+
+[[case]]
+id = "PARAM-06"
+dialect = "mysql"
+input = "SELECT * FROM customers WHERE city = '${c}'"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+divergence = "As on PostgreSQL: no in-string substitution switch."
+sources = ["D-053"]
+
+[[case]]
+id = "PARAM-12"
+dialect = "postgres"
+input = "DECLARE @x int = 1; SELECT @x;"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+divergence = "The corpus row is SQL Server, which has no lexer profile in M3b; run here on PostgreSQL, where `@` is an operator and nothing is a parameter."
+sources = ["alg/10 SQL-PARAM-01 per-dialect matrix"]
+
+[[case]]
+id = "PARAM-12"
+dialect = "mysql"
+input = "DECLARE @x int = 1; SELECT @x;"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+divergence = "SQL Server row run on MySQL: `@x` is a user variable, never a placeholder."
+sources = ["alg/10 SQL-PARAM-01 step 3 (MySQL `@name` is a session variable)"]
+
+[[case]]
+id = "PARAM-13"
+dialect = "mysql"
+input = "SET @a := 5; SELECT @a;"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-01 step 3", "alg/20 HV-EXEC-03 matrix (`@var`, `:=` are not placeholders)"]
+
+[[case]]
+id = "PARAM-13"
+dialect = "postgres"
+input = "SET @a := 5; SELECT @a;"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["`:=` is an operator, `@` is an operator on PostgreSQL"]
+
+[[case]]
+id = "PARAM-14"
+dialect = "postgres"
+input = "SELECT '{\"a\":1}'::jsonb ? 'a'"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["D-08", "alg/10 SQL-PARAM-01 test cases (`c ? 'k'` is the jsonb operator)"]
+
+[[case]]
+id = "PARAM-14"
+dialect = "postgres"
+pg_question_marks = true
+input = "SELECT '{\"a\":1}'::jsonb ? 'a'"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-01 step 3 (`?` between two operands is never a parameter)"]
+
+[[case]]
+id = "PARAM-14"
+dialect = "mysql"
+input = "SELECT '{\"a\":1}'::jsonb ? 'a'"
+bindable = ["?"]
+unbindable = []
+final = "SELECT '{\"a\":1}'::jsonb ? 'a'"
+templates = []
+diags = []
+divergence = "A PostgreSQL row: on MySQL `?` is always a placeholder (the server reads it so when the statement is prepared), so Hacivat asks for its value."
+sources = ["alg/10 SQL-PARAM-01 step 3 (MySQL `?`)"]
+
+[[case]]
+id = "PARAM-15"
+dialect = "postgres"
+input = "SELECT 1 -- ?"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-01 step 1 (comments excluded)"]
+
+[[case]]
+id = "PARAM-15"
+dialect = "mysql"
+input = "SELECT 1 -- ?"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-01 step 1 (comments excluded)"]
+
+[[case]]
+id = "PARAM-18"
+dialect = "postgres"
+input = "SELECT :müşteri"
+bindable = [":müşteri"]
+unbindable = []
+final = "SELECT $1"
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-01 i18n notes (Unicode names, compared exactly)"]
+
+[[case]]
+id = "PARAM-18"
+dialect = "mysql"
+input = "SELECT :müşteri"
+bindable = [":müşteri"]
+unbindable = []
+final = "SELECT ?"
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-01 i18n notes"]
+
+[[case]]
+id = "PARAM-19"
+dialect = "postgres"
+input = "SELECT x::int FROM (SELECT '1' x) t"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-01 test cases (`::int` is a cast)"]
+
+[[case]]
+id = "PARAM-19"
+dialect = "mysql"
+input = "SELECT x::int FROM (SELECT '1' x) t"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["prefix guard: a `:` right after `:` never starts a parameter"]
+
+[[case]]
+id = "PARAM-20"
+dialect = "postgres"
+input = "SELECT arr[1:2] FROM (SELECT ARRAY[1,2,3] arr) t"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["alg/10 SQL-PARAM-01 test cases (`arr[1:2]` → none)", "alg/20 HV-EXEC-03 case 8"]
+
+[[case]]
+id = "PARAM-20"
+dialect = "mysql"
+input = "SELECT arr[1:2] FROM (SELECT ARRAY[1,2,3] arr) t"
+bindable = []
+unbindable = []
+templates = []
+diags = []
+sources = ["`:2` is not a name"]
