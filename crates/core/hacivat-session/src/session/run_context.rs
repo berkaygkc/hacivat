@@ -25,6 +25,7 @@
 use std::sync::Arc;
 
 use hacivat_driver::{ExecSummary, SemVerLoose, SessionSettings, TxStatus};
+use hacivat_proto::DbmsKind;
 
 use crate::session::actor::Core;
 use crate::session::readonly::RoContextRead;
@@ -43,6 +44,10 @@ pub(crate) enum RunContext {
 
 /// Whether `request` may change the context Run classifies in: anything but Hacivat's own
 /// reads, pings, cursor fetches and a run whose every unit is a proved read.
+///
+/// A function on the profile's `read_only_fn_allowlist` is a proved read (the classifier's
+/// `Read` verdict), so a run of it never marks the context stale: the list is the user's
+/// declaration that those functions only read (fix round 2, R1-m2).
 pub(crate) fn changes_run_context(request: &Request) -> bool {
     match request {
         Request::Exec { origin, .. } => *origin == crate::session::ExecOrigin::User,
@@ -68,6 +73,11 @@ impl Core {
             ..ClassifierContext::default()
         };
         let busy = self.cursor.is_some() || self.tx.status == TxStatus::Failed;
+        // Fix round 2 (R1-m3): on engines where the read inside an open transaction is not
+        // proven to succeed (Redshift, Cockroach), nothing is read while one is open: the
+        // answer is then unknown (fail-closed). PostgreSQL, Timescale and Yugabyte read.
+        let unproven = matches!(self.kind, DbmsKind::Redshift | DbmsKind::Cockroach)
+            && self.tx.status != TxStatus::Idle;
         let ctx = if self.read_only {
             if busy && self.ro_context == RoContextRead::Stale {
                 unknown
@@ -77,6 +87,7 @@ impl Core {
         } else {
             if self.run_context == RunContext::Stale
                 && !busy
+                && !unproven
                 && let Some(read) = self.read_context_again().await
             {
                 self.run_context = RunContext::Known(read);
@@ -86,7 +97,15 @@ impl Core {
                 RunContext::Stale => unknown,
             }
         };
-        Ok(encode(&ctx))
+        Ok(encode(&ctx, self.context_generation))
+    }
+
+    /// Marks the context stale (fix round 2): the next answer reads it again, and the
+    /// generation moves, so a run classified under the old one is refused
+    /// ([`run_moved`]).
+    pub(crate) fn mark_context_stale(&mut self) {
+        self.run_context = RunContext::Stale;
+        self.context_generation = self.context_generation.wrapping_add(1);
     }
 
     /// A read-write session's context from what it read, in the classifier's form (the
@@ -119,9 +138,16 @@ impl Core {
     }
 }
 
-/// `ctx` as a reply: row 0 holds the mode setting, whether a search path is known, and the
-/// version (major, minor, patch, raw); each later row one element of the path.
-fn encode(ctx: &ClassifierContext) -> ExecSummary {
+/// Whether `request` is a run classified under another context generation than the
+/// session's now (fix round 2): the session refuses it, sending nothing.
+pub(crate) fn run_moved(request: &Request, generation: u64) -> bool {
+    matches!(request, Request::Run(spec) if spec.context_generation.is_some_and(|g| g != generation))
+}
+
+/// `ctx` as a reply: row 0 holds the mode setting, whether a search path is known, the
+/// version (major, minor, patch, raw) and the context's generation; each later row one element
+/// of the path.
+fn encode(ctx: &ClassifierContext, generation: u64) -> ExecSummary {
     let v = ctx.server_version.as_ref();
     let mut rows = vec![vec![
         ctx.lex_modes.as_deref().map(str::to_string),
@@ -130,6 +156,7 @@ fn encode(ctx: &ClassifierContext) -> ExecSummary {
         v.map(|v| v.minor.to_string()),
         v.map(|v| v.patch.to_string()),
         v.map(|v| v.raw.clone()),
+        Some(generation.to_string()),
     ]];
     for element in ctx.search_path.iter().flat_map(|p| p.iter()) {
         rows.push(vec![Some(element.to_string())]);
@@ -139,6 +166,11 @@ fn encode(ctx: &ClassifierContext) -> ExecSummary {
         rows,
         ..ExecSummary::default()
     }
+}
+
+/// The generation an [`encode`]d reply holds (`None` when unreadable).
+pub(crate) fn decode_generation(s: &ExecSummary) -> Option<u64> {
+    s.rows.first()?.get(6).cloned().flatten()?.parse().ok()
 }
 
 /// The context an [`encode`]d reply holds; an unreadable one is unknown.
@@ -186,23 +218,25 @@ mod tests {
                 raw: "16.4".into(),
             }),
         };
-        assert_eq!(decode(&encode(&ctx)), ctx);
+        assert_eq!(decode(&encode(&ctx, 7)), ctx);
+        assert_eq!(decode_generation(&encode(&ctx, 7)), Some(7));
         let empty = ClassifierContext {
             search_path: Some(Arc::from(Vec::<Arc<str>>::new())),
             ..ClassifierContext::default()
         };
         assert_eq!(
-            decode(&encode(&empty)),
+            decode(&encode(&empty, 0)),
             empty,
             "an empty path stays known and empty"
         );
         assert_eq!(
-            decode(&encode(&ClassifierContext::default())),
+            decode(&encode(&ClassifierContext::default(), 0)),
             ClassifierContext::default()
         );
         assert_eq!(
             decode(&ExecSummary::default()),
             ClassifierContext::default()
         );
+        assert_eq!(decode_generation(&ExecSummary::default()), None);
     }
 }

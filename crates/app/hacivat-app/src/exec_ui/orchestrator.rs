@@ -673,9 +673,10 @@ fn submit(
     profile: &Profile,
     prepared: Vec<PreparedUnit>,
     plan: GatePlan,
-    run_as_one: bool,
+    terms: RunTerms,
     cx: &mut App,
 ) {
+    let run_as_one = terms.run_as_one;
     if crate::exec_ui::pending_read_only(console, cx) {
         say(console, "hv-exec-pending-read-only", cx);
         return;
@@ -705,7 +706,7 @@ fn submit(
         .try_global::<crate::AppState>()
         .is_none_or(|s| s.settings.exec.error_policy_ask);
     // R-M3-61: a multi-unit run asks after a failure (a unit run as one is one unit).
-    let policy = if units.len() > 1 && !run_as_one && ask_policy {
+    let policy = if units.len() > 1 && !run_as_one && ask_policy && !terms.stop_on_error {
         hacivat_session::session::ErrorPolicy::Ask
     } else {
         hacivat_session::session::ErrorPolicy::StopOnError
@@ -731,6 +732,7 @@ fn submit(
             run_as_one,
             history,
             confirm: Some(port.clone() as Arc<dyn hacivat_exec::ConfirmPort>),
+            context_generation: terms.context_generation,
         },
     );
     // T21: the port follows this run's questions and its losses, whatever order they come in.
@@ -791,6 +793,7 @@ fn submit(
             ended: false,
             cancel_asked: false,
             status: status_rx,
+            policy,
             _tasks: vec![status, results, questions],
         });
     });
@@ -1479,7 +1482,8 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
     //    it), and read again there when a request may have changed it. A context the session
     //    can't give in time is unknown (fail-closed), never a stale one. One context per run:
     //    the parameters are scanned and the units classified in it.
-    let sctx = context_within(&job.session, cx.background_executor().timer(CONTEXT_WAIT)).await;
+    let (sctx, _) =
+        context_within(&job.session, cx.background_executor().timer(CONTEXT_WAIT)).await;
     let (session_dialect, session_known) =
         hacivat_exec::classify_pool::modes_of(job.profile.engine, &sctx);
     // The units were split in the console's context: when the session now reads text in other
@@ -1646,7 +1650,7 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
             cx.default_global::<RunPrep>().suppressed.clone(),
         )
     });
-    let (prepared, mut plan, changes) = {
+    let (prepared, mut plan, changes, switches) = {
         let c = console.0;
         cx.background_executor()
             .spawn(async move {
@@ -1658,6 +1662,14 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
                     .iter()
                     .zip(&reports)
                     .any(|(p, r)| hacivat_exec::changes_context(&p.final_text, r));
+                // Fix round 2 (R1-C1): the units whose literal context switch the later units
+                // were classified under; only those before the last unit matter.
+                let texts: Vec<&str> = prepared.iter().map(|p| &*p.final_text).collect();
+                let switches: Vec<u32> = hacivat_exec::carried_switches(&texts, &reports)
+                    .into_iter()
+                    .filter(|&i| i + 1 < prepared.len())
+                    .filter_map(|i| u32::try_from(i).ok())
+                    .collect();
                 // T19: the session refuses a unit run as one that would need its own
                 // transaction or the D-062 wrap; the gate never sends one.
                 // Fix round 1 (M2): a unit run as one never goes to a read-only session (its
@@ -1678,7 +1690,7 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
                         }
                     }
                 }
-                (prepared, plan, changes)
+                (prepared, plan, changes, switches)
             })
             .await
     };
@@ -1795,6 +1807,20 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
             }
         }
     }
+    // Fix round 2 (R1-C1): the later units were classified as if a carried context switch took
+    // effect, so skipping one cancels the run: nothing is sent.
+    if let Some(item) = plan.items.iter().find(|i| {
+        switches.contains(&i.unit)
+            && matches!(&i.decision, GateDecision::Deny(r) if r.fluent_id == hacivat_exec::SKIPPED_BY_USER)
+    }) {
+        let unit = item.unit;
+        cx.update(|cx: &mut App| {
+            let at = prepared.get(unit as usize).map(|p| p.unit.doc_range.clone());
+            log_line(console, CONFIRM_CANCELLED, vec![("n", number(unit))], false, at, cx);
+            say(console, CONFIRM_CANCELLED, cx);
+        });
+        return;
+    }
     // Every unit skipped: nothing to send (the log said each).
     let Some(_) = plan
         .items
@@ -1807,7 +1833,8 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
     // The context again, after the prompt and the confirmations (another console sharing the
     // session may have changed it meanwhile): a run is sent only in the context it was
     // prepared and classified in.
-    let now = context_within(&job.session, cx.background_executor().timer(CONTEXT_WAIT)).await;
+    let (now, generation) =
+        context_within(&job.session, cx.background_executor().timer(CONTEXT_WAIT)).await;
     if now != sctx {
         cx.update(|cx: &mut App| {
             refuse(
@@ -1832,27 +1859,49 @@ fn pipeline(job: Job, cx: &mut App) -> hacivat_ui_core::gpui_surface::Task<()> {
             &job.profile,
             prepared,
             plan,
-            run_as_one,
+            RunTerms {
+                run_as_one,
+                // A failed switch must stop the run (fix round 2, R1-C1).
+                stop_on_error: !switches.is_empty(),
+                // The session refuses the run if its context moved since (fix round 2).
+                context_generation: generation,
+            },
             cx,
         );
     });
     })
 }
 
+/// How [`submit`] sends a run (fix round 2).
+#[derive(Debug, Clone, Copy)]
+struct RunTerms {
+    /// One `Verbatim` unit sent as one (R-M3-60).
+    run_as_one: bool,
+    /// `ErrorPolicy::StopOnError` whatever the setting says: a unit before the last carries a
+    /// context switch the later units were classified under (R1-C1), so the error bar's
+    /// Ignore/Skip must not run them after it failed.
+    stop_on_error: bool,
+    /// The session's context generation the run was classified under.
+    context_generation: Option<u64>,
+}
+
 // ---- the run's questions ------------------------------------------------------------------
 
 /// The session's classification context (`SessionHandle::classifier_context`), or an unknown
 /// one when `timer` ends first (fail-closed; fix round 1, I1).
+/// With the context's generation (fix round 2; `None` when unknown).
 async fn context_within(
     session: &SessionHandle,
     timer: impl std::future::Future<Output = ()>,
-) -> hacivat_session::session::ClassifierContext {
-    let ask = session.classifier_context();
+) -> (hacivat_session::session::ClassifierContext, Option<u64>) {
+    let ask = session.run_context();
     futures::pin_mut!(ask);
     futures::pin_mut!(timer);
     match futures::future::select(ask, timer).await {
-        futures::future::Either::Left((c, _)) => c,
-        futures::future::Either::Right(_) => hacivat_session::session::ClassifierContext::default(),
+        futures::future::Either::Left((answer, _)) => answer,
+        futures::future::Either::Right(_) => {
+            (hacivat_session::session::ClassifierContext::default(), None)
+        }
     }
 }
 

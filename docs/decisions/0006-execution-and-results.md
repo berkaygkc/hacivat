@@ -1139,7 +1139,17 @@ case.
   t; --'`), nothing is sent (`exec-run-context-changed`) and the console reads its context
   again. The context is asked again after the prompt and the confirmations, just before the
   send: if another console on the same session changed it meanwhile, nothing is sent (same
-  line). **One context per run (M12):** the parameter scan and the classification both use it
+  line). **The context's generation (fix round 2):** the session's answer carries a
+  generation that moves with every stale-marking (marked before the request runs, so a request
+  that never finishes still moves it); the run carries the generation of the last answer
+  (`RunSpec::context_generation`), and the session refuses a run whose generation has moved,
+  sending nothing (`ExecErrorKind::ContextChanged`, `exec-run-context-changed`): another
+  console's request queued between that answer and the run cannot change the context the run
+  was classified in. **Unproven engines (fix round 2):** on Redshift and Cockroach the read is
+  not sent while a user transaction is open (not proven to succeed there); the answer is then
+  unknown. PostgreSQL, Timescale and Yugabyte read. A function on the profile's
+  `read_only_fn_allowlist` is a proved read and never marks the context stale: the list is the
+  user's declaration that it only reads. **One context per run (M12):** the parameter scan and the classification both use it
   (`orchestrator::classify_ctx_in` → `classify_pool::run_ctx_in`, exactly `guard_ctx_in`'s
   rules). Count rows checks in the context of the session it runs on, read from that session.
   Within one run, a later unit is classified in the context a literal `USE db` (MySQL/MariaDB)
@@ -1205,3 +1215,10 @@ case.
   between the gate and the send says so (`exec-run-connection-changed`, M4). Run as one trims
   only SQL white space (M3). The gate reads the profile as it is at gate time (M5). A history
   store that cannot open is logged (M9).
+- **A carried context switch must take effect (fix round 2, R1-C1).** When a unit before the
+  last is a literal `USE` / `SET search_path` whose new context the later units were classified
+  in (`sql_safety::carried_switches`), the run is sent with `ErrorPolicy::StopOnError` whatever
+  the error-policy setting says (no Ignore, Skip or Retry past its failure), and skipping it at
+  a confirmation cancels the run (nothing sent): otherwise a failed `USE app` would run
+  `SELECT * FROM session` against the old database although it was classified as a read of
+  `app.session`.

@@ -149,6 +149,9 @@ pub(crate) struct ActiveRun {
     pub(crate) cancel_asked: bool,
     /// The run's status (`exec.cancel` reads which unit is in flight).
     pub(crate) status: tokio::sync::watch::Receiver<hacivat_exec::RunStatus>,
+    // ## m3b-t24-exec-ui (fix round 2)
+    /// The error policy the run was sent with (`last_run_policy`).
+    pub(crate) policy: hacivat_session::session::ErrorPolicy,
     pub(crate) _tasks: Vec<Task<()>>,
 }
 
@@ -225,6 +228,18 @@ pub fn last_run_ended(console: ConsoleId, cx: &App) -> bool {
     console_exec(cx, console)
         .and_then(|e| e.run.as_ref())
         .is_some_and(|r| r.ended)
+}
+
+// ## m3b-t24-exec-ui (fix round 2)
+/// The error policy console `console`'s last run was sent with: `Ask` offers the error bar
+/// after a failure (Ignore, Skip, Retry), `StopOnError` never does.
+pub fn last_run_policy(
+    console: ConsoleId,
+    cx: &App,
+) -> Option<hacivat_session::session::ErrorPolicy> {
+    console_exec(cx, console)
+        .and_then(|e| e.run.as_ref())
+        .map(|r| r.policy)
 }
 
 /// The workspace window (the active one first).

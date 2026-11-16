@@ -235,6 +235,10 @@ pub enum ExecErrorKind {
     SafetyDenied(SafetyDenial),
     /// The session's queue is full (Task 11): nothing queued.
     QueueFull,
+    // ## m3b-t24-exec-ui (fix round 2, named exception)
+    /// The run was classified under a context the session no longer has (another request
+    /// changed it in between): nothing sent.
+    ContextChanged,
 }
 
 /// A failed request.
@@ -466,11 +470,26 @@ impl SessionHandle {
     pub fn classifier_context(
         &self,
     ) -> impl std::future::Future<Output = ClassifierContext> + Send + 'static + use<> {
+        let answer = self.run_context();
+        async move { answer.await.0 }
+    }
+
+    // ## m3b-t24-exec-ui (fix round 2, named exception)
+    /// [`SessionHandle::classifier_context`] with the context's generation, which a run
+    /// classified in it carries (`RunSpec::context_generation`): the session refuses the run
+    /// when the generation has moved since. `None` when the session could not answer.
+    pub fn run_context(
+        &self,
+    ) -> impl std::future::Future<Output = (ClassifierContext, Option<u64>)> + Send + 'static + use<>
+    {
         let ticket = self.submit(Request::ReadContext);
         async move {
             match ticket.reply.await {
-                Ok(Ok(summary)) => run_context::decode(&summary),
-                _ => ClassifierContext::default(),
+                Ok(Ok(summary)) => (
+                    run_context::decode(&summary),
+                    run_context::decode_generation(&summary),
+                ),
+                _ => (ClassifierContext::default(), None),
             }
         }
     }
@@ -602,6 +621,12 @@ pub struct RunSpec {
     /// How long a confirm-in-transaction question waits before the statement is rolled back
     /// (D-014: [`RunSpec::CONFIRM_DEADLINE`]; tests inject a shorter one; Task 19).
     pub confirm_deadline: Duration,
+    // ## m3b-t24-exec-ui (fix round 2, named exception)
+    /// The session's context generation the units were classified under
+    /// ([`SessionHandle::run_context`]): when it has moved by the time the run is taken, the
+    /// session refuses it (`ExecErrorKind::ContextChanged`), sending nothing. `None`: not
+    /// checked (a count, M3a's runs, tests).
+    pub context_generation: Option<u64>,
 }
 
 impl RunSpec {

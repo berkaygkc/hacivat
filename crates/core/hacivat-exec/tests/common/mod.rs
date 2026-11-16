@@ -219,6 +219,7 @@ impl Bench {
             run_as_one: false,
             history: None,
             confirm: None,
+            context_generation: None,
         }
     }
 
@@ -1092,6 +1093,7 @@ pub mod matrix {
                     run_as_one: false,
                     history: None,
                     confirm: None,
+                    context_generation: None,
                 },
             )
         }
@@ -1114,6 +1116,7 @@ pub mod matrix {
                     run_as_one: false,
                     history: None,
                     confirm: None,
+                    context_generation: None,
                 },
             )
         }
@@ -2582,6 +2585,7 @@ pub mod t28 {
                     run_as_one: p.run_as_one,
                     history: None,
                     confirm,
+                    context_generation: None,
                 },
             )
         }
@@ -2666,6 +2670,7 @@ pub mod t28 {
                 fetch: FetchPolicy::default(),
                 observer: ObserverRef(events.clone()),
                 confirm_deadline: deadline,
+                context_generation: None,
             };
             // The reply of a run whose deadline rolled back is `Tx(ConfirmTimedOut)`; the
             // events say what happened.

@@ -645,6 +645,26 @@ fn classify_with(
     }
 }
 
+// ## m3b-t24-exec-ui (named exception: the T24 fix round 2, R1-C1)
+/// The units whose context switch [`classify_units`] carried into the later units (a literal
+/// `USE` / `SET search_path`, before any change that made the rest `Unknown`), by index, from
+/// the units' texts and their reports. The later units were classified as if the switch took
+/// effect, so a run must not go on past one that failed or was skipped: Task 24 runs such a
+/// run with `StopOnError` and treats a skip of one as a cancel.
+pub fn carried_switches<S: AsRef<str>>(units: &[S], reports: &[SafetyReport]) -> Vec<usize> {
+    let mut carried = Vec::new();
+    for (i, (u, r)) in units.iter().zip(reports).enumerate() {
+        if !changes_context(u.as_ref(), r) {
+            continue;
+        }
+        if literal_switch(u.as_ref(), r).is_none() {
+            break;
+        }
+        carried.push(i);
+    }
+    carried
+}
+
 /// Classifies a run's units in order, each with `ctx` (the module docs): once a unit may change
 /// the context ([`changes_context`]), every later unit is `Unknown` (`EffectsUnknown` on every
 /// item; a pre-decided report stays as it is). One report per unit, in order.

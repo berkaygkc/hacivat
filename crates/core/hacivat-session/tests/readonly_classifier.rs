@@ -823,3 +823,68 @@ async fn run_context_read_is_hacivats_own_and_the_same_text_from_the_user_is_gua
     assert_eq!(c.asked().last().map(|(s, _)| s.clone()), Some(text.clone()));
     assert!(!sent(&f, mark, &text), "{:?}", since(&f, mark));
 }
+
+// ## m3b-t24-exec-ui (fix round 2): the context generation; Redshift/Cockroach in a transaction.
+
+/// Another console queues a context change between Run's last context read and its `Run`:
+/// the generation has moved, so the session refuses the run and sends nothing.
+#[tokio::test]
+async fn a_run_classified_under_a_moved_context_is_refused() {
+    let fake = fake_pg().tracks_transactions().exec(vec![
+        rows(RUN_CTX_READ, &[&["on", "public"]]),
+        rows(RUN_CTX_READ, &[&["on", "public"]]),
+    ]);
+    let (h, f) = session(fake).await;
+    let (_, generation) = h.run_context().await;
+    let generation = generation.expect("a generation");
+    // Another console on the same session, in between.
+    run(&h, "SET search_path = app").await.unwrap();
+    let o = Recorder::new();
+    let mut spec = spec_of(&o, &["SELECT * FROM t"]);
+    spec.context_generation = Some(generation);
+    let mark = f.call_log().len();
+    let reply = h.run(spec).reply.await.unwrap();
+    assert!(
+        matches!(&reply, Err(e) if e.kind == ExecErrorKind::ContextChanged),
+        "{reply:?}"
+    );
+    assert!(since(&f, mark).is_empty(), "{:?}", since(&f, mark));
+    // Classified under the generation the session has now, the run goes.
+    let (_, now) = h.run_context().await;
+    assert_ne!(now, Some(generation));
+    let o = Recorder::new();
+    let mut spec = spec_of(&o, &["SELECT * FROM t"]);
+    spec.context_generation = now;
+    assert!(h.run(spec).reply.await.unwrap().is_ok());
+}
+
+/// Redshift and Cockroach: the context read inside an open user transaction is not proven,
+/// so it is not sent there; the answer is unknown (fail-closed). PostgreSQL still reads.
+#[tokio::test]
+async fn unproven_engines_never_read_the_context_in_an_open_transaction() {
+    for (kind, reads) in [
+        (DbmsKind::Redshift, 0),
+        (DbmsKind::Cockroach, 0),
+        (DbmsKind::Postgres, 1),
+    ] {
+        let fake = FakeDriver::new(kind)
+            .tracks_transactions()
+            .exec(vec![rows(RUN_CTX_READ, &[&["on", "public"]])]);
+        let profile = Profile {
+            engine: kind,
+            ..pg_profile(TlsMode::Disable)
+        };
+        let (h, f) = spawn_over(fake, profile, false, Arc::new(FakeDriver::new(kind))).await;
+        tx_cmd(&h, hacivat_session::session::TxCommand::Begin)
+            .await
+            .unwrap();
+        let ctx = h.classifier_context().await;
+        assert_eq!(ctx_reads(&f), reads, "{kind:?}");
+        if reads == 0 {
+            assert_eq!(ctx.lex_modes, None, "{kind:?}");
+            assert_eq!(ctx.search_path, None, "{kind:?}");
+        } else {
+            assert_eq!(ctx.lex_modes.as_deref(), Some("on"));
+        }
+    }
+}

@@ -1910,3 +1910,27 @@ fn measure(text: &str, ctx: &ClassifyCtx, runs: usize, bound: f64) -> (f64, f64,
     }
     (best, p50, p95, 3)
 }
+
+// ## m3b-t24-exec-ui (fix round 2, R1-C1): which units' switches were carried.
+#[test]
+fn carried_switches_names_the_units_the_later_ones_depend_on() {
+    let units = ["USE app", "SELECT * FROM session", "USE shop", "SELECT 1"];
+    let reports = classify_units(&units, &single(DialectId::MySql));
+    assert_eq!(sql_safety::carried_switches(&units, &reports), [0, 2]);
+    // After a change that is not read exactly, nothing later is carried (the rest is
+    // `Unknown`).
+    let units = ["SET @@session.sql_mode = 'ANSI'", "USE app", "SELECT 1"];
+    let reports = classify_units(&units, &single(DialectId::MySql));
+    assert!(sql_safety::carried_switches(&units, &reports).is_empty());
+    // PostgreSQL: a path without `pg_catalog` first is carried; one with it first is the
+    // harmless `SET` (no context change, nothing carried).
+    let units = [
+        "SET search_path TO app, pg_catalog",
+        "SELECT lower('a') FROM t",
+    ];
+    let reports = classify_units(&units, &pg_single());
+    assert_eq!(sql_safety::carried_switches(&units, &reports), [0]);
+    let units = ["SET search_path TO app", "SELECT lower('a') FROM t"];
+    let reports = classify_units(&units, &pg_single());
+    assert!(sql_safety::carried_switches(&units, &reports).is_empty());
+}

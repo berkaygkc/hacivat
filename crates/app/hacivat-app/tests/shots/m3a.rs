@@ -1755,6 +1755,7 @@ fn open_cursor() -> Step {
                 observer: ObserverRef(Arc::new(Stores::default())),
                 // ## m3b-t01c-core-seams
                 confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
+                context_generation: None,
             });
         },
         |window, cx| session_in(window, cx).is_some_and(|s| s.state().borrow().cursor.is_some()),

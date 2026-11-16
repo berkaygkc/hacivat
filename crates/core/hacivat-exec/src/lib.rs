@@ -84,4 +84,6 @@ pub use titles::{TITLE_GRAPHEMES, TITLE_MAX_GRAPHEMES, comment_title, short_titl
 // ## m3b-t24-exec-ui (named exception: re-exports only)
 pub use classify_pool::{ClassifyHook, run_ctx_in};
 pub use sql_safety::changes_context;
+// ## m3b-t24-exec-ui (fix round 2)
+pub use sql_safety::carried_switches;
 pub use units::resolve_units_in;

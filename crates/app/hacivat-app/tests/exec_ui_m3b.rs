@@ -858,6 +858,7 @@ fn mysql_explain_analyze_execute_keeps_the_rollback_wrap(cx: &mut TestAppContext
             run_as_one: false,
             history: None,
             confirm: None,
+            context_generation: None,
         },
     );
     let _ = futures::executor::block_on(ticket.done);
@@ -1127,6 +1128,108 @@ fn run_as_one_on_a_read_only_session_is_refused(cx: &mut TestAppContext) {
     c.wait_log("exec-gate-run-as-one-read-only");
     c.barrier();
     assert!(c.queries().is_empty(), "{:?}", c.queries());
+    stop_core_runtime_test(cx);
+}
+
+// ## fix round 2 (R1-C1)
+
+/// A typed query that fails at once with a server error.
+fn failing(prefix: &'static str) -> hacivat_driver::fake::FakeQuery {
+    hacivat_driver::fake::FakeQuery {
+        prefix,
+        sets: vec![hacivat_driver::fake::FakeResultSet {
+            columns: vec![(
+                "x",
+                LogicalType::Text {
+                    max_chars: None,
+                    fixed: false,
+                },
+            )],
+            rows: hacivat_driver::fake::FakeRows::Literal(vec![vec![hacivat_values::Value::Text(
+                "x".into(),
+            )]]),
+        }],
+        fail_after: Some((
+            0,
+            hacivat_driver::RawError {
+                kind: hacivat_driver::RawErrorKind::Db,
+                server: Some(hacivat_driver::ServerMessage {
+                    sqlstate: Some("42000".into()),
+                    vendor_code: Some(1049),
+                    severity: Some("ERROR".into()),
+                    text: "Unknown database 'app'".into(),
+                    detail: None,
+                    hint: None,
+                    lang_hint: None,
+                    position: None,
+                }),
+            },
+        )),
+        ..Default::default()
+    }
+}
+
+/// R1-C1: `USE app` fails (the database stays `sys`), so `SELECT * FROM session`, classified
+/// as a read of `app.session`, must never run: it would read `sys.session`. The run is sent
+/// with `StopOnError` whatever the error-policy setting says, so the error bar never offers
+/// Ignore or Skip for it; a run without a carried switch still asks.
+#[gpui::test]
+fn a_failed_use_never_runs_what_was_classified_under_it(cx: &mut TestAppContext) {
+    let fake = mysql().queries(vec![failing("USE")]);
+    let c = console(cx, profile("shop-dev", DbmsKind::MySql, EnvTag::Dev), fake);
+    c.set_text("USE app;\nSELECT * FROM session;");
+    c.command("editor.run_3");
+    wait_until(c.vcx, "the run to end", |vcx| {
+        vcx.cx
+            .read(|cx| hacivat_app::exec_ui::last_run_ended(c.id, cx))
+    });
+    c.barrier();
+    assert_eq!(c.queries(), ["USE app"], "nothing after the failed switch");
+    assert_eq!(
+        c.vcx
+            .cx
+            .read(|cx| hacivat_app::exec_ui::last_run_policy(c.id, cx)),
+        Some(hacivat_session::session::ErrorPolicy::StopOnError),
+        "no Ignore or Skip on the error bar"
+    );
+    // The control: two reads without a switch ask after a failure (the setting's default).
+    c.set_text("SELECT 1;\nSELECT 2;");
+    c.command("editor.run_3");
+    wait_until(c.vcx, "the second run", |vcx| {
+        vcx.cx.read(|cx| {
+            hacivat_app::exec_ui::last_run_policy(c.id, cx)
+                == Some(hacivat_session::session::ErrorPolicy::Ask)
+        })
+    });
+    stop_core_runtime_test(cx);
+}
+
+/// R1-C1, PostgreSQL: a literal `SET search_path` is carried too (always the strictest reading,
+/// so a failed one is harmless), and the run still stops at its failure.
+#[gpui::test]
+fn a_failed_set_search_path_stops_the_run(cx: &mut TestAppContext) {
+    let fake = pg().queries(vec![failing("SET search_path")]);
+    let c = console(
+        cx,
+        profile("orders-dev", DbmsKind::Postgres, EnvTag::Dev),
+        fake,
+    );
+    // `pg_catalog` no longer first: a context change (with it first, the T18 harmless-`SET`
+    // list keeps the old reading, which is the same for every builtin).
+    c.set_text("SET search_path TO app, pg_catalog;\nSELECT lower('a') FROM t;");
+    c.command("editor.run_3");
+    wait_until(c.vcx, "the run to end", |vcx| {
+        vcx.cx
+            .read(|cx| hacivat_app::exec_ui::last_run_ended(c.id, cx))
+    });
+    c.barrier();
+    assert_eq!(c.queries(), ["SET search_path TO app, pg_catalog"]);
+    assert_eq!(
+        c.vcx
+            .cx
+            .read(|cx| hacivat_app::exec_ui::last_run_policy(c.id, cx)),
+        Some(hacivat_session::session::ErrorPolicy::StopOnError)
+    );
     stop_core_runtime_test(cx);
 }
 

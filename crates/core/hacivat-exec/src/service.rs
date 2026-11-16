@@ -138,6 +138,11 @@ pub struct RunRequest {
     pub history: Option<HistoryMeta>,
     /// Where confirm-in-transaction questions go (Task 21's port); `None` rolls back.
     pub confirm: Option<Arc<dyn ConfirmPort>>,
+    // ## m3b-t24-exec-ui (fix round 2, named exception)
+    /// The session's context generation the units were classified under
+    /// (`SessionHandle::run_context`): the session refuses the run, sending nothing, when it
+    /// has moved since (`RunSpec::context_generation`). `None`: not checked.
+    pub context_generation: Option<u64>,
 }
 
 // ## m3b-t16-run-service
@@ -511,6 +516,7 @@ impl ExecService {
             fetch: req.fetch,
             observer: ObserverRef(observer.clone()),
             confirm_deadline: RunSpec::CONFIRM_DEADLINE,
+            context_generation: req.context_generation,
         });
         let seq = sent.seq;
         observer.set_seq(seq);
@@ -693,6 +699,7 @@ async fn count_on(
         fetch: FetchPolicy::default(),
         observer: ObserverRef(observer.clone()),
         confirm_deadline: RunSpec::CONFIRM_DEADLINE,
+        context_generation: None,
     });
     *lock_sent(&sent) = Some((session, pooled, ticket.seq));
     let reply = ticket.reply.await;
