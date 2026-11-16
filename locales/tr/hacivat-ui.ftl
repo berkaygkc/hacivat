@@ -1907,3 +1907,7 @@ hv-cmd-results-next-tab = Sonraki sonuç sekmesi
 hv-cmd-results-prev-tab = Önceki sonuç sekmesi
 # Review: PO
 hv-cmd-history-open = Sorgu geçmişini aç
+
+## m3a-f4-ime
+# Review: PO
+hv-cmd-app-character-palette = Emoji ve Semboller

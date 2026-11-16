@@ -69,8 +69,10 @@ hui-editor-t1-title = This document is large ({ $size }), so the editor is in re
 hui-editor-t1-body = Reduced mode keeps typing fast. It ends when the document is smaller than { $size }.
 # The first line of the notice when a line longer than 64 KB put the editor in reduced mode.
 hui-editor-t1-long-title = This document has a very long line, so the editor is in reduced mode.
-# The notice's second line in that case.
-hui-editor-t1-long-body = Reduced mode keeps typing fast.
+# The notice's second line in that case (m3a-f4: it says when reduced mode ends).
+# Variables:
+#   $size (String) - the line length reduced mode ends below (an hui-editor-t1-line-size message), e.g. "51 KB".
+hui-editor-t1-long-body = Reduced mode keeps typing fast. It ends when every line is shorter than { $size }.
 # Announced to screen readers when a statement starts running.
 # Variables:
 #   $n (Number) - the statement's position in the run, e.g. 2.
@@ -117,3 +119,14 @@ hui-editor-exec-cancelled = Statement { $n } cancelled
 # Variables:
 #   $n (Number) - the statement's position in the run, e.g. 2.
 hui-editor-exec-skipped = Statement { $n } skipped: an earlier statement failed
+
+## m3a-f4-ime
+# A line length in whole kilobytes (the reduced-mode notice).
+# Variables:
+#   $n (Number) - kilobytes, e.g. 51.
+hui-editor-t1-line-size = { $n } KB
+# The reduced-mode notice's second line when both the size and a very long line put the editor in reduced mode.
+# Variables:
+#   $size (String) - the size reduced mode ends below (an hui-editor-t1-size message), e.g. "3.2 MB".
+#   $line (String) - the line length it ends below (an hui-editor-t1-line-size message), e.g. "51 KB".
+hui-editor-t1-both-body = Reduced mode keeps typing fast. It ends when the document is smaller than { $size } and every line is shorter than { $line }.

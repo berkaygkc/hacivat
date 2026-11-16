@@ -69,6 +69,11 @@
 //!   grid run wider than its cell or header is clipped; a grid state must show a header;
 //! - (b) applies to visible labels: a label its container cut away whole draws no cut text.
 //!
+//! (m) (F5 follow-up) Every frame with an open menu: each row the menu shows is whole inside
+//! its rows' column (a menu taller than its room scrolls whole rows), and none lies over the
+//! status bar or past the window's bottom (`hacivat_ui::menu::MenuLayout`, recorded as the
+//! menu prepaints). (b) cannot see a row drawn over the status bar: nothing clips it there.
+//!
 //! `--shard k/n` renders the k-th of n interleaved slices (run n processes side by side);
 //! each shot prints its time, and the run its total. `SHOTS_DUMP=1` prints every label of
 //! every frame.
@@ -417,6 +422,9 @@ impl Surface {
         match self {
             Surface::ShellNarrow => &[(1024.0, 700.0)],
             Surface::ShellMinimum => &[(960.0, 600.0)],
+            // ## m3a-f5-demo (review m-5): the in-window app menu is taller than the minimum
+            // window's room, so check (m) sees a menu that shows a window of its rows.
+            Surface::MenuApp => &[(1280.0, 800.0), (960.0, 600.0)],
             Surface::ConnDialogNew
             | Surface::ConnDialogPasted
             | Surface::ConnDialogEngineSwitch
@@ -1302,6 +1310,13 @@ fn render(shot: Shot, dir: &Path) -> Vec<String> {
         failures.push(format!("{name}: the frame drew no label"));
     }
     failures.extend(shot.surface.missing_from(&name, &frame));
+    // ## m3a-f5-demo (follow-up): (m) an open menu shows whole rows only, none over the status
+    // bar or past the window's bottom.
+    failures.extend(
+        cx.update(|cx| hacivat_ui::menu::MenuLayout::violations(cx))
+            .into_iter()
+            .map(|v| format!("{name}: (m) {v}")),
+    );
     // ## m3a-t35-shots: the state check (the app's models agree with what the shot claims),
     // and the grid's own checks (headers are data; no grid text clipped).
     if let Some(state) = m3a_state {
@@ -1441,12 +1456,13 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     // M2b T22: 10 surfaces x 8 at 1280x800 and again at 960x600; M2b T24: 34 surfaces likewise.
     assert_eq!(
         all.len(),
-        8 * 4 * 2 + 4 + 26 * 8 + 4 * 8 + 10 * 8 * 2 + 34 * 8 * 2 + m3a::M3A.len() * 8 * 2
+        8 * 4 * 2 + 4 + 8 + 26 * 8 + 4 * 8 + 10 * 8 * 2 + 34 * 8 * 2 + m3a::M3A.len() * 8 * 2
     );
     // ## m3a-t35-shots: the 1,012 M1/M2 shots first, unchanged; then 68 M3a states x 16.
-    assert_eq!(all.len(), 1012 + 68 * 16);
+    // ## m3a-f5-demo (review m-5): plus the app menu at 960x600 (8).
+    assert_eq!(all.len(), 1020 + 68 * 16);
     assert!(
-        all[..1012]
+        all[..1020]
             .iter()
             .all(|s| !matches!(s.surface, Surface::M3a(_)))
     );
@@ -1476,6 +1492,7 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     assert!(names.contains(&"shell-narrow-light-tr-XT-1024x700@2x.png".to_string()));
     assert!(names.contains(&"shell-demo-production-light-tr-1440x900@2x.png".to_string()));
     assert!(names.contains(&"menu-app-dark-en-XA-1280x800@2x.png".to_string()));
+    assert!(names.contains(&"menu-app-light-tr-XT-960x600@2x.png".to_string()));
     assert!(names.contains(&"conn-dialog-new-light-tr-XT-1024x700@2x.png".to_string()));
     assert!(names.contains(&"capsule-production-ro-dark-tr-1280x800@2x.png".to_string()));
     assert!(names.contains(&"shell-minimum-dark-en-960x600@2x.png".to_string()));

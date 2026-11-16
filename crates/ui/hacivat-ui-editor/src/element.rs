@@ -33,9 +33,9 @@ use hacivat_text::display::{
 use hacivat_text::units::snap_to_grapheme;
 use hacivat_text::{Bias, Snapshot, TextBuffer};
 use hacivat_ui_core::gpui_surface::{
-    App, Bounds, Context, Element, ElementId, ElementInputHandler, Entity, FocusHandle,
-    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, LayoutId, Pixels, Point,
-    ShapedLine, Style, TextRun, UnderlineStyle, Window, point, px, relative, size,
+    App, Bounds, ContentMask, Context, Element, ElementId, ElementInputHandler, Entity,
+    FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, LayoutId, Pixels,
+    Point, ShapedLine, Style, TextRun, UnderlineStyle, Window, point, px, relative, size,
 };
 use smallvec::SmallVec;
 use unicode_segmentation::UnicodeSegmentation;
@@ -1121,8 +1121,13 @@ impl Element for EditorElement {
         );
         if let Some(frame) = prepaint.as_ref() {
             let view = self.view.clone();
-            self.view
-                .update(cx, |v, cx| paint_frame(v, &view, bounds, frame, window, cx));
+            // ## m3a-f4-ime (PO finding EDIT-3): the element paints only inside its bounds. A
+            // row scrolled part-way out of the top starts above them, and its line number (the
+            // gutter draws its numbers unclipped) landed on the T1 notice above the code.
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                self.view
+                    .update(cx, |v, cx| paint_frame(v, &view, bounds, frame, window, cx));
+            });
         }
     }
 }

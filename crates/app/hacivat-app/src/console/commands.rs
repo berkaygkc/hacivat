@@ -23,6 +23,10 @@ use hacivat_ui_editor::{EDITOR_CONTEXT, EditorEvent, EditorView, FocusedEditor};
 
 use crate::shell::keymap_state::shortcut_label;
 
+// ## m3a-f4-ime
+/// The command behind Edit > Emoji & Symbols (macOS).
+pub const CHARACTER_PALETTE: &str = "app.character_palette";
+
 /// The focused editor, while it is alive.
 pub fn focused_editor(cx: &App) -> Option<Entity<EditorView>> {
     cx.try_global::<FocusedEditor>()?.0.as_ref()?.upgrade()
@@ -59,6 +63,18 @@ pub fn register(cx: &mut App) {
             } else {
                 editor_focused
             },
+        });
+    }
+    // ## m3a-f4-ime (E7 row 6b): Edit > Emoji & Symbols opens the system character palette
+    // (macOS; AppKit adds no such item to a GPUI menu bar). Its text reaches whichever input
+    // has the focus, through the platform input handler.
+    if cfg!(target_os = "macos") {
+        let _ = reg.register(ActionDef {
+            id: CHARACTER_PALETTE,
+            title_id: ids::hv::CMD_APP_CHARACTER_PALETTE.id,
+            context: "Workspace",
+            run: Rc::new(|window: &mut Window, _: &mut App| window.show_character_palette()),
+            enabled: |_| true,
         });
     }
     cx.set_global(ShortcutHints(Rc::new(|cx: &App, id: &str| {

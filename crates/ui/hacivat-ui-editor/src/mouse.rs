@@ -6,7 +6,8 @@
 //!   that started it, the anchor at the far edge of the first unit. Pointer hits snap to grapheme
 //!   clusters (`FrameLayout::offset_for_point`), never inside a CRLF.
 //! - Every selection goes through `EditorView::commit` (`UserEvent::SelectPointer`), so an open
-//!   IME composition is committed first (`ImeCore::dispatch`).
+//!   IME composition is committed first (`ImeCore::dispatch`), and the click tells the platform
+//!   to drop its copy (`ime::send_owed_discard`, F4).
 //! - **A drag past the text's top or bottom** scrolls by the overshoot on each move, so the
 //!   selection can grow beyond the view.
 //! - **A right click** places the caret at the pointer (unless it falls inside the selection,
@@ -160,6 +161,8 @@ pub(crate) fn down(
                     origin: anchor..anchor,
                 });
                 select(v, anchor, at, cx);
+                // ## m3a-f4-ime: a composition the click committed is dropped on the platform.
+                crate::ime::send_owed_discard(v, window);
                 return;
             }
             // ## m3a-t25-editor-commands (named exception, UI-EDIT-06 step 9): a double click
@@ -175,12 +178,16 @@ pub(crate) fn down(
                 origin: origin.clone(),
             });
             select(v, origin.start, origin.end, cx);
+            // ## m3a-f4-ime: a composition the click committed is dropped on the platform at
+            // once (the IME's next key must not find it), as AppKit text views do.
+            crate::ime::send_owed_discard(v, window);
         }
         MouseButton::Right => {
             let main = v.model.selection().main().range();
             if !(main.start <= at && at <= main.end && !main.is_empty()) {
                 select(v, at, at, cx);
             }
+            crate::ime::send_owed_discard(v, window);
             v.open_context_menu_at(ev.position, window, cx);
         }
         _ => {}

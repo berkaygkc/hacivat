@@ -428,16 +428,22 @@ async fn a_refused_write_is_rolled_back_and_the_session_goes_on() {
     // The server refuses the write inside the read-only transaction (25006); the guard ends
     // its transaction the usual way and the connection is kept.
     // (The fake fails a query when it would send a row: `DELETE … RETURNING` here.)
+    // (m3a-f5-demo: a plain `DELETE` never gets this far; a writable CTE does.)
     let refused = FakeQuery {
         fail_after: Some((0, pg_error("25006"))),
-        ..select("DELETE", 5)
+        ..select("WITH d AS (DELETE", 5)
     };
     let (h, f, base) = ro(
         pg(clean(1)).queries(vec![refused, select("SELECT * FROM t", 2)]),
         ro_pg(),
     )
     .await;
-    let (_, reply) = run_one(&h, "DELETE FROM t", false).await;
+    let (_, reply) = run_one(
+        &h,
+        "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+        false,
+    )
+    .await;
     let e = reply.unwrap_err();
     assert_eq!(e.kind, ExecErrorKind::Db);
     assert_eq!(e.server.and_then(|s| s.sqlstate).as_deref(), Some("25006"));
@@ -581,6 +587,115 @@ async fn transaction_control_and_bad_input_are_refused_before_anything_is_sent()
     }
     assert_eq!(f.call_log().len(), base, "{:?}", &f.call_log()[base..]);
     assert_eq!(snap(&h).state, SessionState::Idle);
+}
+
+// ## m3a-f5-demo (DEMO-7): a read-only console refuses a write before anything is sent, on
+// every engine (the client layer; the guard's transaction stays behind it).
+#[tokio::test(start_paused = true)]
+async fn writes_are_refused_before_anything_is_sent() {
+    let pg_rows = [
+        "INSERT INTO müşteri VALUES (9,'x',1)",
+        "insert into \"Şehir\" values (1)",
+        "  -- not yet\n UPDATE müşteri SET tutar = 0",
+        "/* x */ DELETE FROM t",
+        "TRUNCATE t",
+        "CREATE TABLE ı (a int)",
+        "ALTER TABLE t ADD b int",
+        "DROP TABLE t",
+        "MERGE INTO t USING s ON true WHEN MATCHED THEN DELETE",
+        "GRANT SELECT ON t TO PUBLIC",
+        "CALL p()",
+        "DO $$ BEGIN END $$",
+        // F5 review m-1.
+        "ANALYZE t",
+        "analyze",
+    ];
+    let mysql_rows = [
+        "INSERT INTO müşteri VALUES (9,'x',1)",
+        "REPLACE INTO t VALUES (1)",
+        "/*!50000 INSERT INTO t VALUES (1) */",
+        "/*!99999 SELECT 1 */ DELETE FROM t",
+        "# c\nUPDATE t SET a = 1",
+        "RENAME TABLE t TO u",
+        "CALL hv_test.hv_t14_three()",
+        "ANALYZE TABLE t",
+    ];
+    // F5 review m-6: readings cut short (more version-gated comments than are followed) are
+    // refused by this layer on its own.
+    let cut_short = format!("{}SELECT 1", "/*!99999 x */ ".repeat(24));
+    let mysql_rows: Vec<&str> = mysql_rows
+        .iter()
+        .copied()
+        .chain([cut_short.as_str()])
+        .collect();
+    for (fake, profile, kind, rows) in [
+        (pg(Vec::new()), ro_pg(), "pg", &pg_rows[..]),
+        (mysql(), ro_mysql(), "mysql", &mysql_rows[..]),
+    ] {
+        let (h, f, base) = ro(fake, profile).await;
+        for sql in rows {
+            for suspendable in [false, true] {
+                let (o, reply) = run_one(&h, sql, suspendable).await;
+                assert_eq!(
+                    reply.unwrap_err().kind,
+                    ExecErrorKind::ReadOnlyDenied(DenyLayer::Input),
+                    "{kind} {sql:?}"
+                );
+                assert_eq!(o.stores(), 0, "{kind} {sql:?} opened a result");
+            }
+        }
+        assert_eq!(
+            f.call_log().len(),
+            base,
+            "{kind}: {:?}",
+            &f.call_log()[base..]
+        );
+        assert_eq!(snap(&h).state, SessionState::Idle, "{kind}");
+    }
+}
+
+// F5 review m-7: a read whose comment or literal holds a write word still runs (the layer reads
+// the first keyword only, as the server does), on PostgreSQL and MySQL.
+#[tokio::test(start_paused = true)]
+async fn reads_that_mention_a_write_word_still_run() {
+    const PG_READS: [&str; 4] = [
+        "/* DELETE */ SELECT 1",
+        "-- DROP\nSELECT 1",
+        "SELECT 'INSERT'",
+        "/* nested /* UPDATE */ */ SELECT 2",
+    ];
+    const MYSQL_READS: [&str; 4] = [
+        "# UPDATE\nSELECT 1",
+        "/* DELETE */ SELECT 1",
+        "-- DROP\nSELECT 1",
+        "SELECT 'INSERT'",
+    ];
+    let pg_fake =
+        pg(clean(PG_READS.len())).queries(PG_READS.iter().map(|s| select(s, 1)).collect());
+    let my_fake = mysql().queries(MYSQL_READS.iter().map(|s| select(s, 1)).collect());
+    for (fake, profile, kind, rows) in [
+        (pg_fake, ro_pg(), "pg", &PG_READS[..]),
+        (my_fake, ro_mysql(), "mysql", &MYSQL_READS[..]),
+    ] {
+        let (h, f, base) = ro(fake, profile).await;
+        for sql in rows {
+            let (o, reply) = run_one(&h, sql, false).await;
+            reply.unwrap_or_else(|e| panic!("{kind} {sql:?}: {:?}", e.kind));
+            assert_eq!(o.rows(), 1, "{kind} {sql:?}");
+        }
+        let queried: Vec<String> = f.typed_log()[..]
+            .iter()
+            .filter_map(|c| match c {
+                hacivat_driver::fake::FakeTypedCall::Query(q) => Some(q.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            rows.iter().all(|r| queried.iter().any(|q| q == r)),
+            "{kind}: {queried:?}"
+        );
+        assert!(f.call_log().len() > base, "{kind}: the reads were sent");
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -833,17 +948,19 @@ async fn mysql_write_succeeded_is_read_from_the_final_ok_packet() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_schema_write_behind_a_version_gated_comment_is_a_gap() {
+async fn a_schema_write_behind_a_version_gated_comment_is_never_sent() {
     // T14 review m14: MySQL's command tag is read from the text, so a version-gated comment
-    // can name another verb than the one a current server runs. Every reading counts. (A real
-    // server refuses the `CREATE` first, 1792; the fake has no server, so this proves the
-    // tripwire behind it, never that the write is stopped.)
-    let (h, _f, _) = ro(mysql(), ro_mysql()).await;
+    // can name another verb than the one a current server runs. Every reading counts: since
+    // m3a-f5-demo (DEMO-7) the `CREATE` reading is refused before anything is sent. (The post
+    // check's own readings stay covered on the M2b path: `readonly.rs`
+    // `a_schema_write_behind_a_version_gated_comment_is_a_gap`.)
+    let (h, f, base) = ro(mysql(), ro_mysql()).await;
     let (_, reply) = run_one(&h, "/*!99999 SELECT 1 */ CREATE TABLE x (a int)", false).await;
     assert_eq!(
         reply.unwrap_err().kind,
-        ExecErrorKind::EnforcementGap(GapReason::WriteSucceeded)
+        ExecErrorKind::ReadOnlyDenied(DenyLayer::Input)
     );
+    assert_eq!(f.call_log().len(), base);
 }
 
 #[tokio::test(start_paused = true)]
@@ -902,6 +1019,21 @@ async fn sqlite_authorizer_and_stmt_readonly_on_the_typed_path() {
     // read-only open, the hardening, the authorizer and `stmt_readonly` refuse each one, and
     // a statement SQLite cannot prepare is refused too; the session runs on after each.
     let d = dir.path().display();
+    // ## m3a-f5-demo (DEMO-7): a plain write never reaches SQLite.
+    for sql in [
+        "INSERT INTO t VALUES (2)",
+        "DELETE FROM t",
+        "VACUUM",
+        "ATTACH 'x.db' AS x",
+        "ANALYZE",
+    ] {
+        let (_, reply) = run_one(&on.s, sql, false).await;
+        assert_eq!(
+            reply.unwrap_err().kind,
+            ExecErrorKind::ReadOnlyDenied(DenyLayer::Input),
+            "{sql}"
+        );
+    }
     let rows = [
         "INSERT INTO t VALUES (2)".to_string(),
         "DELETE FROM t".to_string(),

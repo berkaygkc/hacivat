@@ -456,6 +456,22 @@ impl Workspace {
         }
     }
 
+    // ## m3a-f5-demo (DEMO-1)
+    /// Makes `tab` its pane's active tab and focuses that pane; `false` when it is not open.
+    pub fn focus_tab(&mut self, tab: TabId, cx: &mut Context<Self>) -> bool {
+        let found = self
+            .panes
+            .panes
+            .iter()
+            .find_map(|(pane, p)| Some((*pane, p.tabs.iter().position(|t| *t == tab)?)));
+        let Some((pane, idx)) = found else {
+            return false;
+        };
+        self.panes.activate(pane, idx);
+        self.layout_changed(cx);
+        true
+    }
+
     pub fn activate_next_tab(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.panes.next_tab();
         self.layout_changed(cx);

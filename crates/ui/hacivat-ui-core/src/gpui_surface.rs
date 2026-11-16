@@ -15,6 +15,9 @@ pub use gpui::{
 pub use gpui::ResizeEdge;
 // M2a Task 21: a scroll viewport's offset and size (the connection sheet's scroll thumb).
 pub use gpui::ScrollHandle;
+// ## m3a-f5-demo (review m-4): the shell's focus contexts hold their handles weakly, so a view
+// that is gone (a closed window's grid) leaves nothing behind.
+pub use gpui::WeakFocusHandle;
 // Widgets: stateful elements (`role`, `aria_label`, `aria_selected`, `on_click`, `on_drag`,
 // `tooltip` live on `StatefulInteractiveElement` at the pin), builders, pointer events.
 #[rustfmt::skip] pub use gpui::{AssetSource, DragMoveEvent, MouseMoveEvent, MouseUpEvent, Stateful, StatefulInteractiveElement, WeakEntity};

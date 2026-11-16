@@ -1789,3 +1789,56 @@ fn a_read_only_console_the_guard_cannot_verify_keeps_its_session(cx: &mut TestAp
     });
     stop_core_runtime_test(cx);
 }
+
+// ## m3a-f5-demo (DEMO-9): a MySQL `CALL` that answers three result sets shows the first in a
+// result tab, says the others were not shown (strip and Output), on the PO's exact text.
+#[gpui::test]
+fn a_call_with_three_result_sets_shows_the_first_and_notes_the_rest(cx: &mut TestAppContext) {
+    let set = |n: i64| FakeResultSet {
+        columns: vec![(
+            "n",
+            LogicalType::Int {
+                bits: 64,
+                signed: true,
+            },
+        )],
+        rows: FakeRows::Literal(vec![vec![Value::Int(n)]]),
+    };
+    let three = FakeQuery {
+        prefix: "CALL hv_test.hv_t14_three()",
+        sets: vec![set(1), set(2), set(3)],
+        ..Default::default()
+    };
+    let c = console_with(
+        cx,
+        profile("mysql84", DbmsKind::MySql),
+        mysql("ONLY_FULL_GROUP_BY").queries(vec![three]),
+    );
+    c.set_text("CALL hv_test.hv_t14_three();");
+    c.run_at(0);
+    c.wait_marks("the CALL to succeed", |m| matches!(m, [s] if succeeded(s)));
+    assert_eq!(c.queries(), ["CALL hv_test.hv_t14_three()"]);
+    let ids = c.log_ids();
+    assert!(ids.contains(&"exec-more-result-sets"), "{ids:?}");
+    let tabs = c.vcx.cx.read(|cx| {
+        Consoles::get(cx, c.id)
+            .and_then(|s| s.results.clone())
+            .map(|r| r.read(cx).tabs().len())
+    });
+    assert_eq!(tabs, Some(1), "one result tab");
+    enable_registry(c.vcx);
+    in_window(c.vcx, |window, _| window.refresh());
+    c.vcx.run_until_parked();
+    let drawn: Vec<String> = registry_frame(c.vcx)
+        .into_iter()
+        .map(|r| r.text.to_string())
+        .collect();
+    assert!(
+        drawn
+            .iter()
+            .any(|t| t.contains("2 more result sets not shown")),
+        "{drawn:?}"
+    );
+    assert!(drawn.iter().any(|t| t == "Result 1"), "{drawn:?}");
+    stop_core_runtime_test(cx);
+}

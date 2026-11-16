@@ -208,13 +208,25 @@ pub fn toggle_connect(id: ProfileId, cx: &mut App) {
     {
         return;
     }
+    // ## m3a-f5-demo (DEMO-1): a connect from here ends at a console of the profile (opened
+    // and focused when none is bound to it); a disconnect or cancel drops that.
     match state {
-        LiveState::Connected(_) => ConnectionsModel::disconnect(cx, id),
-        LiveState::Connecting(_) => ConnectionsModel::cancel_connect(cx, id),
+        LiveState::Connected(_) => {
+            crate::console::view::forget_explorer_connect(cx, id);
+            ConnectionsModel::disconnect(cx, id);
+        }
+        LiveState::Connecting(_) => {
+            crate::console::view::forget_explorer_connect(cx, id);
+            ConnectionsModel::cancel_connect(cx, id);
+        }
         // ## m2b-t01-interfaces: stopping a reconnect is a disconnect (Task 22 refines it).
-        LiveState::Reconnecting { .. } => ConnectionsModel::disconnect(cx, id),
+        LiveState::Reconnecting { .. } => {
+            crate::console::view::forget_explorer_connect(cx, id);
+            ConnectionsModel::disconnect(cx, id);
+        }
         LiveState::Disconnected | LiveState::Failed(_) | LiveState::Lost { .. } => {
             note_started(cx, id);
+            crate::console::view::note_explorer_connect(cx, id);
             ConnectionsModel::connect(cx, id, None);
         }
     }

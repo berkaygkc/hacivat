@@ -936,6 +936,54 @@ fn toolbar_run_ends_a_composition_and_keeps_the_editor_focused(cx: &mut TestAppC
     assert_eq!(runs[0].snapshot.buffer.to_string(), "SELECT ış");
     assert!(!vcx.cx.read(|cx| editor.read(cx).status().composing));
     assert!(editor_focused(vcx, &editor), "the editor keeps the focus");
+    // ## m3a-f4-ime: the button took the focus on the mouse-down, so the editor's blur ended
+    // the composition and GPUI's `FocusLost` discards the platform's copy; the editor owes no
+    // discard of its own (`end_composition` covers a Run that finds the composition still open).
+    assert_eq!(vcx.cx.read(|cx| editor.read(cx).marked_text_discards()), 0);
+    drop(runs);
+    stop_core_runtime_test(cx);
+}
+
+// ## m3a-f4-ime (E7 row B5, F15): the Run chord typed into marked text sends nothing; the
+// composition stays whole, and once committed the same chord runs the committed text.
+#[gpui::test]
+fn the_run_chord_during_a_composition_sends_nothing(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    connect_and_wait(vcx, "orders-dev");
+    let id = wait_active_console(vcx);
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    let runs = record_runs(vcx, &editor);
+    vcx.simulate_input("SELECT ");
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |v, cx| {
+            gpui::EntityInputHandler::replace_and_mark_text_in_range(
+                v,
+                None,
+                "かんじ",
+                None,
+                window,
+                cx,
+            );
+        });
+    });
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes(&primary("enter"));
+    vcx.run_until_parked();
+    assert!(runs.borrow().is_empty(), "nothing is sent while composing");
+    assert!(vcx.cx.read(|cx| editor.read(cx).status().composing));
+    assert_eq!(text(vcx, &editor), "SELECT かんじ");
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |v, cx| {
+            gpui::EntityInputHandler::replace_text_in_range(v, None, "漢字", window, cx);
+        });
+    });
+    vcx.simulate_keystrokes(&primary("enter"));
+    vcx.run_until_parked();
+    let runs = runs.borrow();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].snapshot.buffer.to_string(), "SELECT 漢字");
     drop(runs);
     stop_core_runtime_test(cx);
 }
@@ -1017,6 +1065,87 @@ fn the_menu_bar_waits_for_the_composition(cx: &mut TestAppContext) {
             .read(|cx| editor.read(cx).snapshot().selection.main().range()),
         0.."SELECT ş".len()
     );
+    stop_core_runtime_test(cx);
+}
+
+// ## m3a-f4-ime (E7 row 6b): Edit > Emoji & Symbols, last in the Edit menu, opens the system
+// character palette from the menu and from AppKit's chord, never during a composition (F15).
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn the_edit_menu_opens_the_character_palette(cx: &mut TestAppContext) {
+    use hacivat_app::menus::{MenuEntry, build_menus, menu_model};
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    let (edit, names) = vcx.cx.read(|cx| {
+        let model = menu_model(cx.global::<ActionRegistry>());
+        let edit = model
+            .iter()
+            .find(|g| g.title_id == "hv-menu-edit")
+            .expect("the Edit menu")
+            .items
+            .clone();
+        let names: Vec<String> = build_menus(&model, cx)
+            .into_iter()
+            .find(|m| m.name == "Edit")
+            .expect("the Edit menu")
+            .items
+            .into_iter()
+            .filter_map(|i| match i {
+                gpui::MenuItem::Action { name, .. } => Some(name.to_string()),
+                _ => None,
+            })
+            .collect();
+        (edit, names)
+    });
+    assert_eq!(
+        edit[edit.len() - 2..],
+        [
+            MenuEntry::Separator,
+            MenuEntry::Action("app.character_palette")
+        ]
+    );
+    assert_eq!(names.last().map(String::as_str), Some("Emoji & Symbols"));
+    let window = vcx.window_handle();
+    let requests = |vcx: &VisualTestContext| vcx.cx.character_palette_requests(window);
+    vcx.cx.dispatch_action(
+        window,
+        hacivat_ui_core::gpui_surface::RunCommand {
+            id: "app.character_palette".into(),
+        },
+    );
+    vcx.run_until_parked();
+    assert_eq!(requests(vcx), 1, "the menu item");
+    vcx.simulate_keystrokes("ctrl-cmd-space");
+    vcx.run_until_parked();
+    assert_eq!(requests(vcx), 2, "AppKit's chord");
+    // While composing in the editor: neither runs.
+    connect_and_wait(vcx, "orders-dev");
+    let id = wait_active_console(vcx);
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    // ## m3a-f4-ime (review M5): the main case, the editor focused and idle: the Workspace
+    // binding reaches through the editor's context.
+    vcx.simulate_keystrokes("ctrl-cmd-space");
+    vcx.run_until_parked();
+    assert_eq!(requests(vcx), 3, "from the focused editor");
+    assert_eq!(text(vcx, &editor), "", "the chord typed nothing");
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |v, cx| {
+            gpui::EntityInputHandler::replace_and_mark_text_in_range(
+                v, None, "ş", None, window, cx,
+            );
+        });
+    });
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("ctrl-cmd-space");
+    vcx.cx.dispatch_action(
+        window,
+        hacivat_ui_core::gpui_surface::RunCommand {
+            id: "app.character_palette".into(),
+        },
+    );
+    vcx.run_until_parked();
+    assert_eq!(requests(vcx), 3, "nothing during a composition");
     stop_core_runtime_test(cx);
 }
 
@@ -1455,5 +1584,134 @@ fn toolbar_fixtures_show_running_waiting_and_the_lock(cx: &mut TestAppContext) {
     ] {
         assert!(frame.contains(expected), "{expected}: {frame}");
     }
+    stop_core_runtime_test(cx);
+}
+
+// ## m3a-f5-demo (DEMO-1): connecting a profile from the Explorer (double-click or Connect, both
+// `connection.toggle_connect`) opens a console bound to it and focuses it when none is bound to
+// it; an existing one is focused instead; an unbound focused console still binds first.
+
+/// The Explorer's connect of `name`: select its row, then what a double-click (or the menu's
+/// Connect) runs.
+fn explorer_connect(vcx: &VisualTestContext, name: &str) {
+    let id = profile_id(vcx, name);
+    vcx.cx.update(|cx| ConnectionsModel::select(cx, Some(id)));
+    vcx.run_until_parked();
+    assert!(run(vcx, "connection.toggle_connect"), "toggle_connect ran");
+}
+
+/// The profile the active tab's console is bound to.
+fn active_binding(vcx: &VisualTestContext) -> Option<ProfileId> {
+    match with_ws(vcx, |ws, _, _| ws.active_tab_kind()) {
+        Some(TabKind::Console { profile, .. }) => profile,
+        _ => None,
+    }
+}
+
+fn console_tabs(vcx: &VisualTestContext) -> usize {
+    tab_titles(vcx).len()
+}
+
+#[gpui::test]
+fn an_explorer_connect_opens_and_focuses_a_console_for_that_profile(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    add_profile(
+        vcx,
+        test_profile("orders-stg", Some(EnvTag::Staging), "10.0.0.8"),
+    );
+    activate(vcx);
+    let (dev, stg) = (profile_id(vcx, "orders-dev"), profile_id(vcx, "orders-stg"));
+
+    // The unbound focused console binds first (R-M3-37): no new tab.
+    explorer_connect(vcx, "orders-dev");
+    wait_until(vcx, "orders-dev's console", |vcx| {
+        active_binding(vcx) == Some(dev) && active_console(vcx).is_some()
+    });
+    assert_eq!(tab_titles(vcx), vec!["orders-dev".to_string()]);
+
+    // The focused console is bound to another profile: a new console opens for orders-stg,
+    // active and focused.
+    explorer_connect(vcx, "orders-stg");
+    wait_until(vcx, "orders-stg's console", |vcx| {
+        active_binding(vcx) == Some(stg) && active_console(vcx).is_some()
+    });
+    assert_eq!(
+        tab_titles(vcx),
+        vec!["orders-dev".to_string(), "orders-stg".to_string()]
+    );
+    let stg_console = active_console(vcx).expect("the console");
+    let stg_editor = editor_of(vcx, stg_console);
+    wait_until(vcx, "its editor to take the focus", |vcx| {
+        editor_focused(vcx, &stg_editor)
+    });
+
+    // Back on orders-dev; orders-stg disconnects and connects again from the Explorer: its
+    // console exists, so it is focused, and nothing new opens.
+    vcx.cx.update(|cx| ConnectionsModel::disconnect(cx, stg));
+    wait_until(vcx, "orders-stg to disconnect", |vcx| {
+        matches!(live(vcx, "orders-stg"), LiveState::Disconnected)
+    });
+    with_ws(vcx, |ws, window, cx| ws.activate_prev_tab(window, cx));
+    vcx.run_until_parked();
+    assert_eq!(active_binding(vcx), Some(dev));
+    explorer_connect(vcx, "orders-stg");
+    wait_until(vcx, "orders-stg's console to be focused", |vcx| {
+        active_binding(vcx) == Some(stg) && editor_focused(vcx, &stg_editor)
+    });
+    assert_eq!(console_tabs(vcx), 2);
+    stop_core_runtime_test(cx);
+}
+
+/// A connect that does not come from the Explorer (the connection dialog, a test helper) keeps
+/// R-M3-37 as it was: a bound focused console opens nothing.
+#[gpui::test]
+fn another_connect_opens_no_console(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    add_profile(
+        vcx,
+        test_profile("orders-stg", Some(EnvTag::Staging), "10.0.0.8"),
+    );
+    activate(vcx);
+    connect_and_wait(vcx, "orders-dev");
+    wait_active_console(vcx);
+    connect_and_wait(vcx, "orders-stg");
+    vcx.run_until_parked();
+    assert_eq!(tab_titles(vcx), vec!["orders-dev".to_string()]);
+    stop_core_runtime_test(cx);
+}
+
+/// Review m-8: an Explorer connect cancelled from elsewhere (the capsule's or the dialog's
+/// cancel) leaves no intent behind: a later connect of that profile from elsewhere opens no
+/// console.
+#[gpui::test]
+fn an_explorer_connect_cancelled_elsewhere_leaves_no_intent(cx: &mut TestAppContext) {
+    let vcx = shell_with_fake(cx, "en", pg_fake().gated());
+    add_profile(
+        vcx,
+        test_profile("orders-dev", Some(EnvTag::Dev), "10.0.0.7"),
+    );
+    add_profile(
+        vcx,
+        test_profile("orders-stg", Some(EnvTag::Staging), "10.0.0.8"),
+    );
+    activate(vcx);
+    let stg = profile_id(vcx, "orders-stg");
+    // Held at the driver: the Explorer's connect is under way, then cancelled elsewhere.
+    explorer_connect(vcx, "orders-stg");
+    wait_until(vcx, "orders-stg to be connecting", |vcx| {
+        matches!(live(vcx, "orders-stg"), LiveState::Connecting(_))
+    });
+    vcx.cx
+        .update(|cx| ConnectionsModel::cancel_connect(cx, stg));
+    wait_until(vcx, "orders-stg to stop", |vcx| {
+        !matches!(live(vcx, "orders-stg"), LiveState::Connecting(_))
+    });
+    fake(vcx).release();
+    // orders-dev binds the unbound console; orders-stg then connects from elsewhere.
+    connect_and_wait(vcx, "orders-dev");
+    wait_active_console(vcx);
+    connect_and_wait(vcx, "orders-stg");
+    vcx.run_until_parked();
+    assert_eq!(tab_titles(vcx), vec!["orders-dev".to_string()]);
     stop_core_runtime_test(cx);
 }

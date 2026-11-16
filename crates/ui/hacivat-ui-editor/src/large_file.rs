@@ -15,17 +15,21 @@
 //!   M4b.
 //!
 //! The view keeps the longest line from the lines each edit touched (it only grows during
-//! editing; `set_text` measures it again), so a T1 entered by a long line ends when the text is
-//! replaced.
+//! editing; `set_text` measures it again). ## m3a-f4-ime (EDIT-2): it never exceeds the
+//! document (an emptied document ends a long-line T1 at once), and while a long line holds T1
+//! the whole text is measured again off the UI thread once it has rested
+//! [`REMEASURE_AFTER`] ([`after_edit`]), so deleting, shortening or splitting the line ends T1
+//! (with the 80 % margin above); a measure of an older version is dropped.
 
 use std::rc::Rc;
 
+use hacivat_text::TextBuffer;
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::l10n::UiArg;
 use hacivat_ui::text::{TextSource, paragraph};
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, Global, InteractiveElement, IntoElement, ParentElement, SharedString, Styled,
-    Window, div, px,
+    AnyElement, App, Context, Global, InteractiveElement, IntoElement, ParentElement, SharedString,
+    Styled, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 
@@ -37,6 +41,9 @@ use crate::view::EditorView;
 pub const LONG_LINE_MAX_BYTES: u64 = 64 << 10;
 /// A document returns to T0 only below this share of a limit, in percent.
 pub const RETURN_BELOW_PERCENT: u64 = 80;
+// ## m3a-f4-ime (EDIT-2)
+/// How long the text rests after an edit before a long-line T1 measures its longest line again.
+pub const REMEASURE_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// The gap between the notice's icon and its text (the inline notice's 9 px, `notice.rs`).
 const ICON_GAP_PX: f32 = 9.0;
@@ -143,6 +150,49 @@ pub fn state(v: &EditorView) -> &TierState {
     &v.tier
 }
 
+// ## m3a-f4-ime (PO finding EDIT-2)
+/// The longest line of `buf`, in bytes (lines end at `\n` or `\r`, as `set_text` measures):
+/// O(document), so only off the UI thread.
+fn longest_of(buf: &TextBuffer) -> u64 {
+    let (mut longest, mut run) = (0u64, 0u64);
+    for chunk in buf.chunks_in(0..buf.len_bytes()) {
+        for b in chunk.bytes() {
+            if b == b'\n' || b == b'\r' {
+                longest = longest.max(run);
+                run = 0;
+            } else {
+                run += 1;
+            }
+        }
+    }
+    longest.max(run)
+}
+
+/// After an edit: while a long line holds T1, the whole text is measured again once it has
+/// rested [`REMEASURE_AFTER`] (a newer edit restarts the wait), on the background executor;
+/// the answer applies only to the version it measured. Otherwise a waiting measure is dropped.
+pub(crate) fn after_edit(v: &mut EditorView, cx: &mut Context<EditorView>) {
+    if v.tier.tier != Tier::Reduced || !v.tier.by_line {
+        v.remeasure = None;
+        return;
+    }
+    let version = v.model.version();
+    let buf = v.model.buffer().clone();
+    v.remeasure = Some(cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(REMEASURE_AFTER).await;
+        let longest = cx
+            .background_executor()
+            .spawn(async move { longest_of(&buf) })
+            .await;
+        let _ = this.update(cx, |v, cx| {
+            if v.model.version() == version {
+                v.remeasure = None;
+                v.remeasured(longest, cx);
+            }
+        });
+    }));
+}
+
 /// `bytes` as the banner shows it.
 fn size_text(bytes: u64, cx: &App) -> SharedString {
     if let Some(f) = cx.try_global::<SizeText>() {
@@ -160,14 +210,22 @@ fn return_size(s: &TierState) -> u64 {
     s.limits.full_max_bytes * RETURN_BELOW_PERCENT / 100
 }
 
+// ## m3a-f4-ime (EDIT-2)
+/// The line length T1 ends below, as the copy says it: whole kilobytes under 80 % of 64 KB
+/// (51 KB, a little under the exact 52,428.8 bytes, so the promise holds).
+fn return_line(cx: &App) -> SharedString {
+    let kb = LONG_LINE_MAX_BYTES * RETURN_BELOW_PERCENT / 100 / 1024;
+    message(cx, "hui-editor-t1-line-size", &[("n", UiArg::Count(kb))])
+}
+
 /// The banner's two lines: what happened, and what it means.
 fn lines(s: &TierState, cx: &App) -> Option<(SharedString, SharedString)> {
     if s.tier == Tier::Full {
         return None;
     }
     // ## m3a-t29 fix round 1 (M1): the copy follows the cause. The size title when the size
-    // caused T1; the promise "it ends below 3.2 MB" only when the size alone did (a long line
-    // also needs the text replaced, so the line's copy promises nothing).
+    // caused T1. ## m3a-f4-ime (EDIT-2): the body says when T1 ends for each cause: below
+    // 3.2 MB, every line below 51 KB, or both.
     let by_size = s.by_size || !s.by_line;
     let title = if by_size {
         message(
@@ -178,14 +236,16 @@ fn lines(s: &TierState, cx: &App) -> Option<(SharedString, SharedString)> {
     } else {
         message(cx, "hui-editor-t1-long-title", &[])
     };
-    let body = if by_size && !s.by_line {
-        message(
+    let size = || UiArg::Text(size_text(return_size(s), cx));
+    let line = || UiArg::Text(return_line(cx));
+    let body = match (by_size, s.by_line) {
+        (true, true) => message(
             cx,
-            "hui-editor-t1-body",
-            &[("size", UiArg::Text(size_text(return_size(s), cx)))],
-        )
-    } else {
-        message(cx, "hui-editor-t1-long-body", &[])
+            "hui-editor-t1-both-body",
+            &[("size", size()), ("line", line())],
+        ),
+        (false, true) => message(cx, "hui-editor-t1-long-body", &[("size", line())]),
+        _ => message(cx, "hui-editor-t1-body", &[("size", size())]),
     };
     Some((title, body))
 }

@@ -2061,3 +2061,7 @@ hv-cmd-grid-toggle-record = Grid: show or hide the record view
 hv-cmd-results-next-tab = Next result tab
 hv-cmd-results-prev-tab = Previous result tab
 hv-cmd-history-open = Open query history
+
+## m3a-f4-ime
+# The Edit menu item (macOS) that opens the system's Emoji & Symbols palette; AppKit's own name for it.
+hv-cmd-app-character-palette = Emoji & Symbols

@@ -43,7 +43,7 @@ use hacivat_text::{
 use hacivat_ui::text::TextFn;
 use hacivat_ui_core::gpui_surface::{
     App, Bounds, Context, EventEmitter, FocusHandle, Focusable, Global, InteractiveElement,
-    IntoElement, ParentElement, Pixels, Point, Render, SharedString, Styled, Subscription,
+    IntoElement, ParentElement, Pixels, Point, Render, SharedString, Styled, Subscription, Task,
     WeakEntity, Window, div,
 };
 use smallvec::SmallVec;
@@ -150,6 +150,9 @@ pub struct EditorView {
     // ## m3a-t01b-seams (round 2): the label as last evaluated, with the UI-text generation it
     // was evaluated at (re-read only when the language changes).
     a11y_label_cache: Option<(u64, SharedString)>,
+    // ## m3a-f4-ime (EDIT-2): the waiting or running re-measure of the longest line
+    // (`large_file::after_edit`); dropping it cancels it.
+    pub(crate) remeasure: Option<Task<()>>,
     /// The text version the fan-out last saw: a `Committed` at the same version changed the
     /// selection only (Task 5's model does not bump the version for those).
     fanned_version: u64,
@@ -191,6 +194,22 @@ impl std::fmt::Debug for EditorView {
             .field("input", &self.input)
             .field("commands", &self.commands)
             .finish_non_exhaustive()
+    }
+}
+
+// ## m3a-f4-ime (EDIT-2)
+impl EditorView {
+    /// A re-measure of the longest line landed for the current version
+    /// (`large_file::after_edit`): the tier follows it, as after an edit.
+    pub(crate) fn remeasured(&mut self, longest: u64, cx: &mut Context<Self>) {
+        self.longest_line = longest;
+        let len = self.model.buffer().len_bytes() as u64;
+        if let Some(tier) =
+            large_file::update(&mut self.tier, len, self.longest_line, &self.config.tiers)
+        {
+            cx.emit(EditorEvent::TierChanged(tier));
+            cx.notify();
+        }
     }
 }
 
@@ -262,6 +281,7 @@ impl EditorView {
             fold: FoldState::default(),
             _subscriptions: subscriptions,
             a11y_label_cache: None,
+            remeasure: None,
             fanned_version: opened_version,
             sources,
             cache: LayoutCache::default(),
@@ -779,6 +799,8 @@ impl EditorView {
                     .longest_line
                     .max(longest_touched(&snap.buffer, dirty.clone()));
             }
+            // ## m3a-f4-ime (EDIT-2): no line is longer than the document.
+            self.longest_line = self.longest_line.min(text_len);
             if let Some(tier) = large_file::update(
                 &mut self.tier,
                 text_len,
@@ -787,6 +809,7 @@ impl EditorView {
             ) {
                 cx.emit(EditorEvent::TierChanged(tier));
             }
+            large_file::after_edit(self, cx);
             cx.emit(EditorEvent::Changed {
                 version: committed.version,
             });

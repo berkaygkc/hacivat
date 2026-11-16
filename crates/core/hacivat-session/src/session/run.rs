@@ -28,12 +28,12 @@ use hacivat_results::{CloseReason, Completeness};
 
 use crate::session::actor::{Core, TX_CONTROL};
 use crate::session::cursor::{Fire, Hold, Pumped, SAVEPOINT, Step, Stream, Watch, millis};
-use crate::session::readonly::{GuardFailure, guarded_query};
+use crate::session::readonly::{GuardFailure, guarded_query, may_write};
 use crate::session::recovery::{autocommit_set, track_statement};
 use crate::session::schema::{Family, family, first_keyword};
 use crate::session::{
-    ExecError, ExecErrorKind, ObserverRef, Reply, RowsOutcome, RunEvent, RunSpec, RunSummary,
-    RunUnit, TxError, TxMode, TxOwner, UnitEnd, UnitId, needs_schema_reprobe,
+    DenyLayer, ExecError, ExecErrorKind, ObserverRef, Reply, RowsOutcome, RunEvent, RunSpec,
+    RunSummary, RunUnit, TxError, TxMode, TxOwner, UnitEnd, UnitId, needs_schema_reprobe,
 };
 // ## m3b-t01c-core-seams
 use crate::session::confirm;
@@ -335,6 +335,13 @@ impl Core {
         let mut hold = Hold::None;
         let mut s;
 
+        // ## m3a-f5-demo (DEMO-7): a read-only console refuses a statement that can change data
+        // or schema before anything is sent; the guard's transaction stays behind this layer.
+        if self.read_only && may_write(self.kind, &unit.sql) {
+            return Ended::refused(ExecError::of(ExecErrorKind::ReadOnlyDenied(
+                DenyLayer::Input,
+            )));
+        }
         if self.read_only {
             // ## m3b-t01c-core-seams (P-M3b-11): step 0b, the injected classifier, before the
             // guard (a stub until Task 18).

@@ -510,6 +510,27 @@ async fn access_for_probes_only_when_read_only() {
 // ---------------------------------------------------------------------------------------------
 // Step 1a: the first keyword
 
+// ## m3a-f5-demo: moved here from `readonly_typed.rs`, where `Run` now refuses the `CREATE`
+// reading before anything is sent.
+#[tokio::test]
+async fn a_schema_write_behind_a_version_gated_comment_is_a_gap() {
+    // T14 review m14: MySQL's command tag is read from the text, so a version-gated comment
+    // can name another verb than the one a current server runs. Every reading counts. (A real
+    // server refuses the `CREATE` first, 1792; the fake has no server, so this proves the
+    // tripwire behind it, never that the write is stopped.)
+    let f = fake_mysql_ro_clean();
+    assert_eq!(
+        guarded_on(
+            &f,
+            DbmsKind::MySql,
+            "/*!99999 SELECT 1 */ CREATE TABLE x (a int)"
+        )
+        .await
+        .unwrap_err(),
+        ExecErrorKind::EnforcementGap(GapReason::WriteSucceeded)
+    );
+}
+
 #[tokio::test]
 async fn mysql_executable_comments_are_statement_text() {
     // T13 carry: MySQL runs `/*!…*/` (and MariaDB `/*M!…*/`), so its content is the statement.

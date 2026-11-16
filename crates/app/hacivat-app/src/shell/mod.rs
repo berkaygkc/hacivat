@@ -32,6 +32,8 @@ pub use hooks::{
     TabDecorFn, set_console_binding, set_console_view, set_quit_guard, set_results_view,
     set_tab_close_guard, set_tab_decor,
 };
+// ## m3a-f5-demo
+pub use hooks::unregister_focus_context;
 pub use keymap_state::{ActiveKeymap, install_with as install_keymap_with, set_keymap_preset};
 pub use layers::{Layer, Layers};
 pub use tab_content::{TabContent, TabContentRegistry, TabKind};

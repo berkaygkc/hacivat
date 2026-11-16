@@ -14,6 +14,8 @@ pub use registry::quit_requests;
 pub use registry::{close_window, request_quit, request_window_close};
 // ## m3a-t33-exec-ui (named exception)
 pub use registry::{request_restart, take_restart_intent};
+// ## m3a-f5-demo (review m-9)
+pub use registry::in_window_menu_items;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -106,8 +108,40 @@ fn run_in_workspace_window(id: &str, cx: &mut App) {
     }
     // Through the window alone: the command may update the workspace itself.
     if let Some(window) = workspace_window(cx).map(AnyWindowHandle::from) {
-        let _ = window.update(cx, |_, window, cx| ActionRegistry::run(id, window, cx));
+        let _ = window.update(cx, |_, window, cx| {
+            let id = routed_menu_command(id, window, cx);
+            ActionRegistry::run(id, window, cx)
+        });
     }
+}
+
+// ## m3a-f5-demo (DEMO-6)
+/// Edit menu items that act on whatever has the focus: `(menu command, focused context, the
+/// command that runs there)`. The menu carries the editor's commands; with a result grid
+/// focused, Copy and Select All are the grid's.
+const EDIT_MENU_ROUTES: [(&str, &str, &str); 2] = [
+    ("editor.copy", hacivat_ui_grid::GRID_CONTEXT, "grid.copy"),
+    (
+        "editor.select_all",
+        hacivat_ui_grid::GRID_CONTEXT,
+        "grid.select_all",
+    ),
+];
+
+/// The command a menu item `id` runs in `window`: its own, or the focused grid's for Copy and
+/// Select All (`EDIT_MENU_ROUTES`).
+pub(crate) fn routed_menu_command<'a>(id: &'a str, window: &Window, cx: &App) -> &'a str {
+    let Some(stack) = window
+        .root::<Workspace>()
+        .flatten()
+        .map(|ws| ws.read(cx).context_stack(window, cx))
+    else {
+        return id;
+    };
+    EDIT_MENU_ROUTES
+        .iter()
+        .find(|(menu, context, _)| *menu == id && stack.0.last() == Some(context))
+        .map_or(id, |(_, _, routed)| routed)
 }
 
 /// The workspace window the menus act on: the active window, or else the first workspace one.
