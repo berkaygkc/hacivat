@@ -593,9 +593,11 @@ the catalog read is a `hacivat-exec` Docker test, P-M3b-13), `bench-sql` and `fe
 
 **What the scan reads.** `sql_split::scan_params` lexes the unit on its own, from the initial
 state, as the server receives it. Only code tokens are read. A marker inside a string, quoted
-identifier, comment, dollar body, client command or `COPY` data is never a placeholder; after
-a `COPY`'s first `;` the rest of a unit is data. An executable comment's body is code to the
-server, so it is lexed and read too.
+identifier, comment or dollar body is never a placeholder, and after a `COPY`'s first `;` the
+rest of a unit is data. An executable comment's body is code to the server, so it is lexed and
+read too. The lexer does not recognise psql meta-commands: `\set x :y` reaches the scan as an
+unknown `\` followed by code. So a unit that holds any token the lexer could not read cleanly
+binds nothing (fix round 1, below).
 
 **One rule for refusal: if one placeholder cannot bind, none does.** When any placeholder
 cannot bind, every placeholder is `bindable: false` and `rewritten` is `None`. Run then
@@ -603,7 +605,9 @@ refuses the unit and sends nothing. `rewritten` is `Some` exactly when there is 
 placeholder and every one binds. Every refusal carries a diagnostic:
 
 - `ParamInDdl`: a placeholder in `CREATE`/`ALTER`/`DROP`, unless `in_ddl` is on. The head is
-  the caller's `StmtHead` or the unit's own first word, so a stale head cannot unlock DDL.
+  the caller's `StmtHead` or the unit's own first word, so a stale head cannot unlock DDL. An
+  `EXPLAIN` counts as DDL when it holds any `CREATE`/`ALTER`/`DROP` keyword; all three are
+  reserved, so none of them can be a bare column name.
 - `MixedStyles`: `$n`, `?` and `:name` mixed in one unit. This includes SQLite's `?NNN` beside
   names, because the rewrite would renumber them.
 - `TooManyBinds`: more than 65,535 driver slots. That is distinct names on PostgreSQL,
@@ -616,13 +620,23 @@ placeholder and every one binds. Every refusal carries a diagnostic:
   - psql `:"name"`, which substitutes an identifier: binding it would turn `WHERE :"col" = 1`
     into `WHERE $1 = 1`;
   - psql `:{?name}`;
-  - `$0`, or `$n` with trailing junk;
+  - `$0`, `$n` with trailing junk, and any positional with a leading zero (`$01`, `?01`). The
+    server reads `$01` as `$1`, so two spellings would become two plan names for one slot;
+  - any placeholder in a unit that holds a token the lexer could not read cleanly. That is an
+    unknown character (psql's `\`, as in `\set x :y`, `:a\gset` and `\g`), an error or junk, or
+    an unterminated string, quoted identifier, dollar body or comment (`SELECT :a '`,
+    `SELECT :a /* …`). The diagnostic points at that token. This also covers a comment end
+    the server decides (`AmbiguousCommentEnd`), which is flagged as an error;
+  - with `pg_question_marks` on, a PostgreSQL `?` whose reading is ambiguous:
+    - a `?` beside another `?`-operator (`WHERE ? ? 'k'`, `(j) ? ?`, `j ? ?|…`);
+    - a `?` directly followed by a literal (`first ? 'k'`, where `first` may be a column);
+    - a known `?`-operator in operand position (`a = ?-1`);
   - an SQLite `:name` while `:name` parameters are off, or a malformed SQLite variable
     (SQLite binds an unbound variable as NULL, so sending it would be silent);
   - any placeholder of a `COPY` or `PREPARE`;
   - any placeholder in a unit of several statements (a verbatim "Run as one" unit). No
-    protocol binds values across statements, and the head describes only the first;
-  - any placeholder beside a comment end the server decides (`AmbiguousCommentEnd`);
+    protocol binds values across statements, and the head describes only the first. A `;`
+    inside a MySQL/MariaDB executable comment counts, because the server runs it;
   - a PostgreSQL operator that only contains `?` (`=?`) while `?` binds;
   - every `:`, `$`, `?`, `@` byte in a dialect with no lexer profile;
   - a placeholder whose replacement would merge with a neighbouring byte. `:'v'2.5` would
@@ -634,7 +648,9 @@ jsonb and geometric `?` operators, `@`/`@@` variables, and PostgreSQL `:name` in
 (array slices). The DBeaver prefix guard also rules out a `:` right after an identifier
 character, `$`, `:`, `?`, `\`, `/` or `[`. The server reads all of these the same way whether
 or not Hacivat binds. With `pg_question_marks` off, a PostgreSQL `?` in operand position gets
-only a `QuestionMarkOff` hint (D-08).
+only a `QuestionMarkOff` hint (D-08). `ARRAY[:a]` (inside brackets) and `x/:a` (prefix guard)
+get no diagnostic; the server reports a syntax error at `:`. A hint for them needs a new
+`ParamDiag` variant and its UI, so it is noted for Task 24.
 
 **Deterministic rewrite.** Only placeholder ranges change, and `edits` lists each one. On
 PostgreSQL, `:name` and `:'name'` become `$k` by first occurrence, and a repeated name reuses
@@ -656,8 +672,12 @@ closer, `,`, `;` or keyword. Text inside strings is data: Hacivat has no "substi
 strings" switch (PARAM-05/06).
 
 **`HvNorm1` (version 1).** The text is lexed from the initial state. Whitespace and comments
-are dropped. Literals, `COPY` data and parameters become `?`, and a MySQL charset introducer
-joins its string. A parenthesised list of `?` only becomes `(?…)`, and mixed lists keep
+are dropped. Literals, `COPY` data and parameters become `?`. A MySQL charset introducer
+joins its string: always when the two touch, and across whitespace only when it names a known
+character set (`_binary X'ff'`), because `_x 'a'` is a column and its alias. A psql
+meta-command keeps its `\name`, and every argument up to the end of the line becomes one `?`,
+so no secret survives: `\connect db u password=…` → `\connect ?`. A parenthesised list of `?`
+only becomes `(?…)`, and mixed lists keep
 their shape. A hint becomes `/*+…*/`. An executable comment keeps its opener and its body is
 normalised as code. Keywords from the lexer's table are ASCII-uppercased (P-M3b-18).
 Identifiers and quoted text stay byte-exact, with no case folding and no NFC. Tokens are

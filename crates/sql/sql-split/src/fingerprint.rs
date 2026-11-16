@@ -47,7 +47,9 @@ const HINT: &str = "/*+…*/";
 ///
 /// The text is lexed from the initial state. Whitespace and comments are dropped; strings,
 /// numbers, bit and hex strings, dollar bodies, `COPY` data and parameters become `?` (a MySQL
-/// charset introducer such as `_utf8mb4` joins its string); a parenthesised list of `?` only
+/// charset introducer such as `_utf8mb4` joins its string, also across whitespace for a known
+/// character set); a psql meta-command keeps `\name` and its arguments become one `?` (no
+/// secret survives: `\connect db u password=…` → `\connect ?`); a parenthesised list of `?` only
 /// becomes `(?…)`, so `IN (1,2,3)` and `IN (9)` agree; an optimizer hint becomes `/*+…*/`; an
 /// executable comment keeps its opener and its body is normalised as code; keywords (the
 /// lexer's keyword table) are ASCII-uppercased; identifiers, quoted identifiers and every other
@@ -111,8 +113,42 @@ fn normalise<'t>(
         let r = lexed.range(i);
         &text[usize::from(r.start())..usize::from(r.end())]
     };
-    for i in 0..lexed.len() {
+    let mut next = 0;
+    while next < lexed.len() {
+        let i = next;
+        next += 1;
         let kind = lexed.kind(i);
+        // A psql meta-command (`\connect db user password=…`, `\set x 'v'`): the lexer reads
+        // `\` as an unknown character and the rest as code. Keep `\name`, mask every argument
+        // up to the end of the line with one `?`, so no secret survives normalisation.
+        if (kind == TokenKind::Unknown && tok(i) == "\\") || kind == TokenKind::ClientCommand {
+            let start = usize::from(lexed.range(i).start());
+            let (name_end, args) = if kind == TokenKind::ClientCommand {
+                let t = tok(i);
+                let name = t.find(|c: char| c.is_ascii_whitespace()).unwrap_or(t.len());
+                (start + name, !t[name..].trim().is_empty())
+            } else {
+                let mut name_end = usize::from(lexed.range(i).end());
+                if next < lexed.len()
+                    && lexed.kind(next) == TokenKind::Word
+                    && usize::from(lexed.range(next).start()) == name_end
+                {
+                    name_end = usize::from(lexed.range(next).end());
+                    next += 1;
+                }
+                let mut args = false;
+                while next < lexed.len() && lexed.kind(next) != TokenKind::Newline {
+                    args |= !lexed.is_trivia(next);
+                    next += 1;
+                }
+                (name_end, args)
+            };
+            out.push(Piece::Text(&text[start..name_end]));
+            if args {
+                out.push(Piece::Hole);
+            }
+            continue;
+        }
         let piece = match kind {
             TokenKind::Whitespace
             | TokenKind::Newline
@@ -171,15 +207,38 @@ fn normalise<'t>(
     }
 }
 
-/// Word `i` (`w`) is a MySQL charset introducer (`_utf8mb4'x'`): it starts with `_` and a
-/// string follows with nothing between.
+/// MySQL/MariaDB character sets, for introducers written apart from their string
+/// (`_binary X'ff'`).
+const CHARSETS: &[&str] = &[
+    "armscii8", "ascii", "big5", "binary", "cp1250", "cp1251", "cp1256", "cp1257", "cp850",
+    "cp852", "cp866", "cp932", "dec8", "eucjpms", "euckr", "gb18030", "gb2312", "gbk", "geostd8",
+    "greek", "hebrew", "hp8", "keybcs2", "koi8r", "koi8u", "latin1", "latin2", "latin5", "latin7",
+    "macce", "macroman", "sjis", "swe7", "tis620", "ucs2", "ujis", "utf16", "utf16le", "utf32",
+    "utf8", "utf8mb3", "utf8mb4",
+];
+
+fn is_string(k: TokenKind) -> bool {
+    matches!(
+        k,
+        TokenKind::String | TokenKind::HexString | TokenKind::BitString
+    )
+}
+
+/// Word `i` (`w`) is a MySQL charset introducer: `_name` directly before a string
+/// (`_utf8mb4'x'`), or a known character set's `_name` before one with only whitespace between
+/// (`_binary X'ff'`). A `_word` that is no character set, apart from its string, stays a word
+/// (`_x 'a'` is a column and its alias).
 fn introducer(lexed: &Lexed, i: usize, w: &str) -> bool {
-    w.starts_with('_')
-        && i + 1 < lexed.len()
-        && matches!(
-            lexed.kind(i + 1),
-            TokenKind::String | TokenKind::HexString | TokenKind::BitString
-        )
+    let Some(name) = w.strip_prefix('_') else {
+        return false;
+    };
+    if i + 1 < lexed.len() && is_string(lexed.kind(i + 1)) {
+        return true;
+    }
+    let after = (i + 1..lexed.len())
+        .find(|j| !matches!(lexed.kind(*j), TokenKind::Whitespace | TokenKind::Newline));
+    after.is_some_and(|j| is_string(lexed.kind(j)))
+        && CHARSETS.iter().any(|c| name.eq_ignore_ascii_case(c))
 }
 
 /// `( ? , ? , … )` → `( ?… )`: a parenthesised list of placeholders only.

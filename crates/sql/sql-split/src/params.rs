@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 use sql_dialect::{DialectCtx, DialectId, KeywordId, LexDialect, kw, lex_profile};
-use sql_lexer::{LexErrorCode, LexState, Lexed, TokenFlags, TokenKind, exec_comment, lex};
+use sql_lexer::{LexState, Lexed, TokenFlags, TokenKind, exec_comment, lex};
 use sql_text::{TextRange, TextSize};
 
 use crate::item::StmtHead;
@@ -102,14 +102,19 @@ pub struct ParamScan {
 /// The placeholders, templates and rewrite of `unit` (one statement) in `ctx`.
 ///
 /// Fail closed. Only code is read: a marker inside a string, quoted identifier, comment, dollar
-/// body, `COPY` data or client command is never a placeholder. A marker the server may read as
+/// body or the data after a `COPY`'s `;` is never a placeholder. The lexer does not recognise
+/// psql meta-commands (`\set x :y` reaches this scan as an unknown `\` and code), so a unit
+/// holding any token the lexer could not read cleanly (an unknown character such as `\`, an
+/// error or junk, an unterminated string or comment) binds nothing: its placeholders are
+/// refused with [`ParamDiag::Unbindable`] at that token. So is a marker the server may read as
 /// a parameter but Hacivat cannot bind (inside an executable comment, `?` under `CALL`/`EXEC`,
-/// psql `:"name"`/`:{?name}`, `$0`, a malformed `$n`, any marker in a dialect without a lexer
-/// profile, any placeholder of a `COPY`, a `PREPARE` or a unit of several statements, any
-/// placeholder beside a comment whose end the server decides, a placeholder whose replacement
-/// would merge with a neighbouring identifier byte) is an unbindable placeholder with
-/// [`ParamDiag::Unbindable`]; so
-/// are placeholders in DDL ([`ParamDiag::ParamInDdl`], unless `in_ddl`), styles mixed in one
+/// psql `:"name"`/`:{?name}`, `$0`, `$01` and other leading zeros, a malformed `$n`, any marker
+/// in a dialect without a lexer profile, any placeholder of a `COPY`, a `PREPARE` or a unit of
+/// several statements (a `;` inside an executable comment counts), a placeholder whose
+/// replacement would merge with a neighbouring identifier byte, a PostgreSQL `?` whose reading
+/// is ambiguous once `?` binds); so
+/// are placeholders in DDL ([`ParamDiag::ParamInDdl`], unless `in_ddl`; the head is the
+/// caller's or the unit's own first word, and an `EXPLAIN` of DDL counts), styles mixed in one
 /// unit ([`ParamDiag::MixedStyles`]), more than 65,535 driver slots
 /// ([`ParamDiag::TooManyBinds`]) and any placeholder beside a template variable
 /// ([`ParamDiag::TemplateVariable`]). One unbindable placeholder makes the whole unit
@@ -273,8 +278,11 @@ struct Scanner<'a> {
     ddl: bool,
     /// `CALL`/`EXEC`/`EXECUTE`: `?` keeps ODBC escape semantics and never binds.
     call: bool,
-    /// `COPY`, `PREPARE` and a unit of several statements take no bind values.
+    /// `COPY`, `PREPARE`, a unit of several statements (a `;` inside an executable comment
+    /// included) take no bind values.
     no_binds: bool,
+    /// The first code token the lexer could not read cleanly.
+    malformed: Option<TextRange>,
     /// Where code ends: after a `COPY`'s first `;` the rest is data.
     code_end: usize,
     question: u32,
@@ -302,6 +310,16 @@ impl<'a> Scanner<'a> {
             &unit[usize::from(r.start())..usize::from(r.end())]
         });
         let is = |id: KeywordId| head.first_keyword == Some(id) || own == Some(id);
+        // `EXPLAIN [ANALYZE] <statement>`: the inner statement decides DDL. Fail closed: any
+        // `CREATE`/`ALTER`/`DROP` keyword in an `EXPLAIN` counts (all three are reserved, so
+        // none is a bare column name).
+        let explain_ddl = is(kw::EXPLAIN)
+            && (0..lexed.len()).any(|i| {
+                lexed.kind(i) == TokenKind::Word
+                    && lexed
+                        .keyword(i)
+                        .is_some_and(|k| [kw::CREATE, kw::ALTER, kw::DROP].contains(&k.id))
+            });
         let copy = is(kw::COPY) || head.copy_stream;
         let code_end = if copy {
             (0..lexed.len())
@@ -316,6 +334,19 @@ impl<'a> Scanner<'a> {
             .skip_while(|i| lexed.kind(*i) != TokenKind::Semicolon)
             .skip(1)
             .any(|i| !lexed.is_trivia(i) && lexed.kind(i) != TokenKind::Semicolon);
+        // A code token the lexer could not read cleanly: an unknown character (psql's `\`
+        // meta-commands: `\set x :y`, `:a\gset`, `\g`), an error or junk, or a construct that
+        // runs to the end (`SELECT :a '`, `SELECT :a /* …`). Nothing here can say what the
+        // server reads as code, so no placeholder of the unit binds.
+        let malformed = (0..lexed.len())
+            .take_while(|i| usize::from(lexed.range(*i).start()) < code_end)
+            .find(|i| {
+                lexed.kind(*i) == TokenKind::Unknown
+                    || lexed
+                        .flags(*i)
+                        .intersects(TokenFlags::ERROR | TokenFlags::JUNK | TokenFlags::UNTERMINATED)
+            })
+            .map(|i| lexed.range(i));
         Scanner {
             unit,
             ctx,
@@ -323,9 +354,10 @@ impl<'a> Scanner<'a> {
             profile,
             lexed,
             pg: matches!(ctx.id, DialectId::Postgres | DialectId::PgWire(_)),
-            ddl: is(kw::CREATE) || is(kw::ALTER) || is(kw::DROP),
+            ddl: is(kw::CREATE) || is(kw::ALTER) || is(kw::DROP) || explain_ddl,
             call: is(kw::CALL) || is(kw::EXECUTE) || own_text.eq_ignore_ascii_case("EXEC"),
             no_binds: copy || multi || is(kw::PREPARE),
+            malformed,
             code_end,
             question: 0,
             cands: Vec::new(),
@@ -382,10 +414,18 @@ impl<'a> Scanner<'a> {
     }
 
     /// A slot number written as `digits` (`$n`, SQLite `?NNN`): the kind's number and why it
-    /// cannot bind.
+    /// cannot bind. Leading zeros are refused: `$01` is the server's `$1`, and two spellings of
+    /// one slot would become two plan names (two prompts, two values for one parameter).
     fn slot_number(digits: &str) -> (u32, Option<ParamDiag>) {
         if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
             return (0, Some(ParamDiag::Unbindable));
+        }
+        if digits.len() > 1 && digits.starts_with('0') {
+            let n = digits.parse::<u64>().unwrap_or(u64::MAX);
+            return (
+                u32::try_from(n).unwrap_or(u32::MAX),
+                Some(ParamDiag::Unbindable),
+            );
         }
         match digits.parse::<u64>() {
             Ok(0) => (0, Some(ParamDiag::Unbindable)),
@@ -500,26 +540,41 @@ impl<'a> Scanner<'a> {
     }
 
     /// A PostgreSQL operator token: `?` binds only with `pg_question_marks` and in operand
-    /// position (else it is the jsonb operator; a hint when it looks like a parameter). An
-    /// operator that merely contains `?` (`=?`) is ambiguous once `?` binds.
+    /// position (else it is the jsonb operator; a hint when it looks like a parameter). Once
+    /// `?` binds, these are ambiguous and refused: an operator that merely contains `?`
+    /// (`=?`); a `?`-operator in operand position (`a = ?-1`: `$1 - 1` or the `?-` operator);
+    /// a `?` beside another `?`-operator (`WHERE ? ? 'k'`, `(j) ? ?`); a `?` with a literal
+    /// right after it (`first ? 'k'`: `first` may be a column, the `?` the jsonb operator).
     fn pg_op(&mut self, i: usize, r: TextRange) {
         let text = self.text(r);
         if text == "?" {
             let operand = self.operand_position(i);
             if self.s.pg_question_marks {
                 if operand {
+                    let ambiguous = self.prev_is_question_op(i) || self.next_reads_ambiguous(i);
                     self.question += 1;
                     self.push(
                         r,
                         PlaceholderKind::Question(self.question),
                         Style::Question,
-                        None,
+                        ambiguous.then_some(ParamDiag::Unbindable),
+                    );
+                } else if self.next_is_question_op(i) {
+                    // `j ? ?|…`: which `?` is the operator cannot be told.
+                    self.question += 1;
+                    self.push(
+                        r,
+                        PlaceholderKind::Question(self.question),
+                        Style::Question,
+                        Some(ParamDiag::Unbindable),
                     );
                 }
             } else if operand {
                 self.diags.push((r, ParamDiag::QuestionMarkOff));
             }
-        } else if self.s.pg_question_marks && text.contains('?') && !PG_QUESTION_OPS.contains(&text)
+        } else if self.s.pg_question_marks
+            && text.contains('?')
+            && (!PG_QUESTION_OPS.contains(&text) || self.operand_position(i))
         {
             self.question += 1;
             self.push(
@@ -529,6 +584,45 @@ impl<'a> Scanner<'a> {
                 Some(ParamDiag::Unbindable),
             );
         }
+    }
+
+    fn prev_significant(&self, i: usize) -> Option<usize> {
+        (0..i).rev().find(|j| !self.lexed.is_trivia(*j))
+    }
+
+    fn next_significant(&self, i: usize) -> Option<usize> {
+        (i + 1..self.lexed.len()).find(|j| !self.lexed.is_trivia(*j))
+    }
+
+    /// Token `j` is an operator containing `?` (`?` itself, `?|`, `?&`, `@?`, `=?`, …).
+    fn question_op(&self, j: usize) -> bool {
+        self.lexed.kind(j) == TokenKind::Op && self.text(self.lexed.range(j)).contains('?')
+    }
+
+    fn prev_is_question_op(&self, i: usize) -> bool {
+        self.prev_significant(i)
+            .is_some_and(|j| self.question_op(j))
+    }
+
+    fn next_is_question_op(&self, i: usize) -> bool {
+        self.next_significant(i)
+            .is_some_and(|j| self.question_op(j))
+    }
+
+    /// After a `?` taken as a placeholder: another `?`-operator, or a literal (the `?` would
+    /// sit between two operands, where it is the jsonb operator).
+    fn next_reads_ambiguous(&self, i: usize) -> bool {
+        self.next_significant(i).is_some_and(|j| {
+            self.question_op(j)
+                || matches!(
+                    self.lexed.kind(j),
+                    TokenKind::String
+                        | TokenKind::DollarString
+                        | TokenKind::Number
+                        | TokenKind::BitString
+                        | TokenKind::HexString
+                )
+        })
     }
 
     /// The previous significant token leaves an operand position.
@@ -578,6 +672,11 @@ impl<'a> Scanner<'a> {
         let base = usize::from(ec.body.start());
         let body = &self.unit[base..usize::from(ec.body.end())];
         let sub = lex(body, self.profile, self.ctx.modes, &LexState::Initial);
+        // A `;` the server runs inside the comment starts a second statement: refused like
+        // any unit of several statements.
+        if (0..sub.len()).any(|j| sub.kind(j) == TokenKind::Semicolon) {
+            self.no_binds = true;
+        }
         let forced = Some(ParamDiag::Unbindable);
         for j in 0..sub.len() {
             let r = sub.range(j);
@@ -641,14 +740,11 @@ impl<'a> Scanner<'a> {
             diags.push((t.range, ParamDiag::TemplateVariable));
         }
         if let Some(first) = self.cands.first() {
-            // A comment whose end the server decides: nothing here can say what is code.
-            if let Some(e) = self
-                .lexed
-                .errors()
-                .iter()
-                .find(|e| e.code == LexErrorCode::AmbiguousCommentEnd)
-            {
-                diags.push((e.range, ParamDiag::Unbindable));
+            // A token the lexer could not read cleanly (this includes a comment whose end the
+            // server decides, `AmbiguousCommentEnd`, which is flagged `ERROR`): nothing here
+            // can say what is code.
+            if let Some(r) = self.malformed {
+                diags.push((r, ParamDiag::Unbindable));
                 blocked = true;
             }
             if let Some(c) = self.cands.iter().find(|c| c.style != first.style) {

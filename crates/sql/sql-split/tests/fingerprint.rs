@@ -122,6 +122,43 @@ fn executable_comments_are_code_and_hints_are_placeholders() {
     );
 }
 
+/// Review M5: psql meta-command arguments never survive normalisation.
+#[test]
+fn psql_meta_command_arguments_are_masked() {
+    let f = hv_norm1("\\connect db user password=hunter2", &pg());
+    assert!(!f.normalized.contains("hunter2"));
+    assert_eq!(&*f.normalized, "\\connect ?");
+    assert_eq!(
+        norm("\\set pw 'hunter2'\nSELECT 1", &pg()),
+        "\\set ? SELECT ?"
+    );
+    assert_eq!(norm("SELECT 1 \\g", &pg()), "SELECT ? \\g");
+    assert_eq!(norm("SELECT 1 \\gset p_", &pg()), "SELECT ? \\gset ?");
+    assert_eq!(norm("\\", &pg()), "\\");
+    // The masked forms agree whatever the arguments were.
+    assert_eq!(
+        hv_norm1("\\connect db u password=a", &pg()).hash,
+        hv_norm1("\\connect other v password=b", &pg()).hash
+    );
+}
+
+/// Review M5: a MySQL introducer joins its string across whitespace when it names a character
+/// set; another `_word` before a string is a column and its alias.
+#[test]
+fn spaced_charset_introducers_join_their_string() {
+    assert_eq!(
+        norm(
+            "SELECT _utf8mb4'x', _binary X'ff', _BINARY\n'y', _x 'a'",
+            &mysql()
+        ),
+        "SELECT ?, ?, ?, _x ?"
+    );
+    assert_eq!(
+        hv_norm1("SELECT _binary X'ff'", &mysql()).hash,
+        hv_norm1("SELECT _binary'00'", &mysql()).hash
+    );
+}
+
 #[test]
 fn never_panics_on_broken_text() {
     for s in [

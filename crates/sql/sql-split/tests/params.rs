@@ -768,6 +768,138 @@ fn a_replacement_never_merges_with_its_neighbours() {
     assert_eq!(final_text(&p), Some("SELECT ($1),$2;"));
 }
 
+fn refused(p: &ParamScan) -> bool {
+    !p.placeholders.is_empty()
+        && p.placeholders.iter().all(|x| !x.bindable)
+        && p.rewritten.is_none()
+        && diag_names(p).contains(&"Unbindable".to_string())
+}
+
+/// Review I1: `$01` is the server's `$1`; two spellings would be two plan names for one slot.
+#[test]
+fn leading_zero_positionals_are_refused() {
+    for (s, ctx) in [
+        ("SELECT $1, $01", pg()),
+        ("SELECT $01", pg()),
+        ("SELECT ?1, ?01", sqlite()),
+        ("SELECT ?007", sqlite()),
+    ] {
+        assert!(refused(&scan(s, &ctx)), "{s}");
+    }
+    // One spelling binds.
+    let r = scan("SELECT $1, $1, $10", &pg()).rewritten.unwrap();
+    let names: Vec<&str> = r.plan.names.iter().map(|n| &**n).collect();
+    assert_eq!(names, ["$1", "$10"]);
+}
+
+/// Review I2: the lexer reads psql meta-commands as an unknown `\` and code; a unit holding an
+/// unreadable or unterminated token binds nothing.
+#[test]
+fn unreadable_or_unterminated_tokens_refuse_the_unit() {
+    for (s, ctx) in [
+        ("\\set x :y", pg()),
+        ("SELECT \\x :a", pg()),
+        ("SELECT :a\\gset", pg()),
+        ("SELECT :a \\g", pg()),
+        ("SELECT :a\n\\gset", pg()),
+        ("SELECT :a '", pg()),
+        ("SELECT :a /* unterminated", pg()),
+        ("SELECT :a, \"x", pg()),
+        ("SELECT :a, $q$ x", pg()),
+        ("SELECT ? '", mysql()),
+        ("SELECT :a /*! x", mysql()),
+        ("SELECT :a '", sqlite()),
+    ] {
+        let p = scan(s, &ctx);
+        assert!(refused(&p), "{s}: {p:?}");
+    }
+    // The diagnostic points at the unreadable token.
+    let p = scan("SELECT :a \\g", &pg());
+    assert!(
+        p.diags
+            .contains(&(TextRange::at(10.into(), 1.into()), ParamDiag::Unbindable))
+    );
+}
+
+/// Review M1: a `;` the server runs inside an executable comment starts a second statement.
+#[test]
+fn a_semicolon_inside_an_executable_comment_refuses_the_unit() {
+    for (s, ctx) in [
+        ("SELECT :a /*!; DROP TABLE t */", mysql()),
+        ("SELECT ? /*!80000 ; DELETE FROM t */", mysql()),
+        ("SELECT ? /*M! ;SELECT 1 */", mariadb()),
+    ] {
+        assert!(refused(&scan(s, &ctx)), "{s}");
+    }
+    // A `;` inside a string in the body is data: the unit still binds.
+    let p = scan("SELECT :a /*! , ';' */", &mysql());
+    assert_eq!(final_text(&p), Some("SELECT ? /*! , ';' */"));
+}
+
+/// Review M2/M3: once `?` binds on PostgreSQL, a `?` whose reading is ambiguous is refused.
+#[test]
+fn ambiguous_pg_question_marks_are_refused() {
+    let on = ParamSettings {
+        pg_question_marks: true,
+        ..ParamSettings::default()
+    };
+    for s in [
+        "SELECT * FROM t WHERE ? ? 'k'",
+        "SELECT * FROM t WHERE (j) ? ?",
+        "SELECT first ? 'k' FROM t",
+        "SELECT next ? 'k', all ? 'k' FROM t",
+        "SELECT * FROM t WHERE a = ?-1",
+        "SELECT j ? ?| array['a'] FROM t",
+        "SELECT * FROM t WHERE a = ? ?& array['a']",
+    ] {
+        let p = scan_params(s, &pg(), &head_select(), &on);
+        assert!(refused(&p), "{s}: {p:?}");
+    }
+    // Unambiguous ones still bind.
+    for (s, want) in [
+        ("SELECT ?, ? FROM t", "SELECT $1, $2 FROM t"),
+        (
+            "SELECT * FROM t WHERE j ? 'k' AND a = ?",
+            "SELECT * FROM t WHERE j ? 'k' AND a = $1",
+        ),
+        (
+            "SELECT * FROM t WHERE a = ? - 1",
+            "SELECT * FROM t WHERE a = $1 - 1",
+        ),
+        (
+            "SELECT * FROM t LIMIT ? OFFSET ?",
+            "SELECT * FROM t LIMIT $1 OFFSET $2",
+        ),
+    ] {
+        let p = scan_params(s, &pg(), &head_select(), &on);
+        assert_eq!(final_text(&p), Some(want), "{s}");
+    }
+}
+
+/// Review M4: `EXPLAIN [ANALYZE]` of DDL is DDL.
+#[test]
+fn an_explain_of_ddl_is_ddl() {
+    let explain = scan_params(
+        "EXPLAIN ANALYZE CREATE TABLE t AS SELECT :a",
+        &pg(),
+        &head_of(kw::EXPLAIN),
+        &ParamSettings::default(),
+    );
+    assert_eq!(diag_names(&explain), ["ParamInDdl"]);
+    assert!(explain.rewritten.is_none());
+    // Read from the unit too, whatever head the caller passes.
+    let p = scan("explain (analyze, verbose) drop table t", &pg());
+    assert!(p.placeholders.is_empty());
+    let p = scan("EXPLAIN ALTER TABLE t ADD c int DEFAULT :v", &pg());
+    assert_eq!(diag_names(&p), ["ParamInDdl"]);
+    // An EXPLAIN of DML binds.
+    let p = scan("EXPLAIN ANALYZE DELETE FROM t WHERE id = :a", &pg());
+    assert_eq!(
+        final_text(&p),
+        Some("EXPLAIN ANALYZE DELETE FROM t WHERE id = $1")
+    );
+}
+
 #[test]
 fn a_unit_of_several_statements_never_binds() {
     // The head is the first statement's: a later `DROP` must not ride on a `SELECT`'s binds.
@@ -901,6 +1033,10 @@ const PG_FRAGMENTS: &[&str] = &[
     "*/",
     "$2",
     ":{?v}",
+    // Fix round 1: leading zeros, a psql meta-command, a `?` beside a `?`-operator.
+    "$01",
+    "\\gset",
+    "?-",
 ];
 
 const MYSQL_FRAGMENTS: &[&str] = &[
@@ -947,7 +1083,7 @@ const MYSQL_FRAGMENTS: &[&str] = &[
 const SQLITE_FRAGMENTS: &[&str] = &[
     "SELECT", "FROM", "t", "a", "1", ",", "(", ")", "=", " ", " ", "\n", ":p", ":q", ":p", "@p",
     "$p", "$a(x)", "#h", "?", "?2", "'x:y'", "-- :c\n", "/* :d */", "\":g\"", "[:i]", "2", "'",
-    ";", "::",
+    ";", "::", "?01", "?1",
 ];
 
 /// A generated unit: the dialect (0 PG, 1 MySQL, 2 SQLite), whether PG `?` binds, the text.
@@ -1005,7 +1141,7 @@ fn tokens_outside(ctx: &DialectCtx, text: &str, holes: &[TextRange]) -> Vec<Stri
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(4096))]
+    #![proptest_config(ProptestConfig::with_cases(8192))]
 
     #[test]
     fn rewrite_preserves_every_other_byte((d, qm, sql) in sql_with_params()) {
@@ -1133,7 +1269,7 @@ fn generator_reaches_every_outcome() {
     let strategy = sql_with_params();
     let mut edited = [0u32; 3];
     let (mut refused, mut nothing) = (0u32, 0u32);
-    for _ in 0..4096 {
+    for _ in 0..16_384 {
         let (d, qm, sql) = strategy.new_tree(&mut runner).unwrap().current();
         let p = scan_params(&sql, &ctx_for(d), &head_select(), &settings_for(qm));
         match &p.rewritten {
