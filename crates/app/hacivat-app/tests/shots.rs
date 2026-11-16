@@ -1016,6 +1016,22 @@ fn shots() -> Vec<Shot> {
             }
         }
     }
+    // ## m3b-t23-escalation (named exception): then Task 23's states (`m3a::M3B_T23`).
+    for state in m3a::M3B_T23 {
+        let surface = Surface::M3a(state);
+        for &size in surface.sizes() {
+            for theme in THEMES {
+                for locale in LOCALES {
+                    out.push(Shot {
+                        surface,
+                        theme,
+                        locale,
+                        size,
+                    });
+                }
+            }
+        }
+    }
     out
 }
 
@@ -1522,14 +1538,17 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
             + m3a::M3B_T22.len() * 8 * 2
             // ## m3b-t21-confirm (named exception): plus Task 21's dialog states.
             + t21_surfaces().len() * 8 * 2
+            // ## m3b-t23-escalation (named exception)
+            + m3a::M3B_T23.len() * 8 * 2
     );
     // ## m3a-t35-shots: the 1,012 M1/M2 shots first, unchanged; then 68 M3a states x 16.
     // ## m3a-f5-demo (review m-5): plus the app menu at 960x600 (8).
     // ## m3b-t22-tx-ui (named exception): plus Task 22's 7 states x 16.
     // ## m3b-t21-confirm (named exception): plus 19 dialog states x 16, after Task 22's.
-    assert_eq!(all.len(), 1020 + 68 * 16 + 7 * 16 + 19 * 16);
+    // ## m3b-t23-escalation (named exception): plus Task 23's 8 states x 16, after Task 21's.
+    assert_eq!(all.len(), 1020 + 68 * 16 + 7 * 16 + 19 * 16 + 8 * 16);
     assert!(
-        all[1020 + 68 * 16 + 7 * 16..]
+        all[1020 + 68 * 16 + 7 * 16..1020 + 68 * 16 + 7 * 16 + 19 * 16]
             .iter()
             .all(|s| s.surface.is_t21())
     );
@@ -1539,7 +1558,8 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
             .all(|s| !matches!(s.surface, Surface::M3a(_)))
     );
     // ## m3b-t22-tx-ui (named exception): Task 22's states too.
-    for state in m3a::M3A.into_iter().chain(m3a::M3B_T22) {
+    // ## m3b-t23-escalation (named exception): and Task 23's.
+    for state in m3a::M3A.into_iter().chain(m3a::M3B_T22).chain(m3a::M3B_T23) {
         let surface = Surface::M3a(state);
         assert_eq!(
             all.iter().filter(|s| s.surface == surface).count(),

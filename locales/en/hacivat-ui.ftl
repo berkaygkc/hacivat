@@ -2281,3 +2281,102 @@ hv-commit-close = Close
 # Fix round 1 (m8): the name to type holds a control character (a tab or a line break in a
 # quoted name), which the field can't take: the statement can't be confirmed here.
 hv-confirm-type-untypeable = This name contains a character that can't be typed or pasted, so it can't be confirmed here. Run this statement from another client.
+
+## m3b-t23-escalation
+
+# The slow-cancel toast (design/m3b-safe surface 6): a cancel not answered after 10 s.
+hv-cancel-slow-title = Cancelling is taking long
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+#   $duration (String) - how long it has been cancelling (an exec-dur-* message), e.g. "11 s".
+hv-cancel-slow-body = The server hasn't stopped the statement on { $name } after { $duration }.
+# The toast's one button: it opens the escalation dialog (it never ends anything itself).
+hv-cancel-options = Show options…
+# The escalation dialog (a second Stop while cancelling, or Show options…).
+hv-cancel-dlg-title = The statement isn't answering the cancel
+# Variables:
+#   $duration (String) - how long it has been cancelling (an exec-dur-* message), e.g. "14 s".
+hv-cancel-dlg-body = It has been cancelling for { $duration }. Hacivat keeps waiting unless you choose otherwise.
+hv-cancel-keep-waiting = Keep waiting
+hv-cancel-terminate = Terminate on server
+# Variables:
+#   $fn (String) - the server function or statement that ends the session (SQL, untranslated), e.g. "pg_terminate_backend".
+hv-cancel-terminate-line = Terminate on server ends this session on the server with { $fn }.
+# Variables:
+#   $n (Number) - statements in this console's open transaction, e.g. 3.
+hv-cancel-own-tx = { $n ->
+        [one] This console's open transaction ({ $n } statement) rolls back.
+       *[other] This console's open transaction ({ $n } statements) rolls back.
+    }
+# This console's running statement may have opened a transaction (Manual or Smart mode).
+hv-cancel-own-tx-maybe = This console may have an open transaction; if so, it rolls back.
+# The app's existing verb (hv-conn-menu-disconnect); the engine call stays "deactivate".
+hv-cancel-disconnect = Disconnect
+# From the profile's default console: the whole profile disconnects (R-M3-73).
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+hv-cancel-disconnect-line-all = Disconnect closes every connection of { $name } here; the statement may continue on the server.
+# From any other console: only its session.
+# Variables:
+#   $console (String) - the console's title, e.g. "orders-dev (2)".
+hv-cancel-disconnect-line-one = Disconnect closes only this console's session ({ $console }); the statement may continue on the server.
+# SQLite: a local file, nothing runs "on the server".
+# Variables:
+#   $name (String) - the database file's name, e.g. "app.db".
+hv-cancel-disconnect-line-local = Disconnect closes this console's connection to the file { $name }; SQLite stops the statement when its connection closes.
+# Another console of the profile holds a user transaction that the default console's
+# Disconnect rolls back.
+# Variables:
+#   $console (String) - the other console's title, e.g. "orders-dev (2)".
+#   $n (Number) - statements in its open transaction, e.g. 3.
+hv-cancel-other-tx = { $n ->
+        [one] { $console } also has an open transaction ({ $n } statement); the server rolls it back.
+       *[other] { $console } also has an open transaction ({ $n } statements); the server rolls it back.
+    }
+# Another console runs a statement that may have opened a transaction (T12: a running request).
+# Variables:
+#   $console (String) - the other console's title, e.g. "orders-dev (2)".
+hv-cancel-other-tx-maybe = { $console } may also have an open transaction; if so, the server rolls it back.
+# A terminate the server refused; the server's own text follows in its own box, verbatim.
+hv-cancel-terminate-failed = Couldn't terminate the session. Hacivat is still waiting for the cancel.
+# The gutter's end-of-line status of a statement whose cancel was not answered (amber hourglass).
+# Variables:
+#   $duration (String) - how long it has been cancelling (an exec-dur-* message), e.g. "14 s".
+hv-editor-mark-escalated = cancel not answered · { $duration }
+# The error-policy bar (surface 7): a statement of a multi-statement run failed (R-M3-61).
+# Variables:
+#   $i (String) - the failed statement's number in the run, e.g. "2".
+#   $n (String) - the statements in the run, e.g. "5".
+hv-errbar-failed = Statement { $i } of { $n } failed
+# Inside a failed PostgreSQL transaction (P-M3b-19).
+# Variables:
+#   $i (String) - the failed statement's number in the run, e.g. "3".
+#   $n (String) - the statements in the run, e.g. "6".
+hv-errbar-aborted = Statement { $i } of { $n } failed, and the transaction failed with it
+# Variables:
+#   $n (Number) - the statements after the failed one, e.g. 3.
+hv-errbar-waiting = { $n ->
+        [one] { $n } more waits
+       *[other] { $n } more wait
+    }
+hv-errbar-retry = Retry
+hv-errbar-ignore = Ignore
+hv-errbar-ignore-all = Ignore all
+hv-errbar-stop = Stop
+hv-errbar-rollback-continue = Roll back and continue
+# Roll back and continue's tooltip in Manual or Smart mode: the rest runs in a new transaction.
+# Variables:
+#   $n (Number) - statements in the user's open transaction, e.g. 2.
+#   $next (String) - the number of the statement that runs next, e.g. "4".
+hv-errbar-rollback-continue-tip = { $n ->
+        [one] Rolls back your open transaction ({ $n } statement), then continues with statement { $next } in a new transaction.
+       *[other] Rolls back your open transaction ({ $n } statements), then continues with statement { $next } in a new transaction.
+    }
+# As hv-errbar-rollback-continue-tip in Auto-commit mode (the user's own BEGIN).
+# Variables:
+#   $n (Number) - statements in the user's open transaction, e.g. 2.
+#   $next (String) - the number of the statement that runs next, e.g. "4".
+hv-errbar-rollback-continue-tip-auto = { $n ->
+        [one] Rolls back your open transaction ({ $n } statement), then continues with statement { $next }, committing each statement as it runs.
+       *[other] Rolls back your open transaction ({ $n } statements), then continues with statement { $next }, committing each statement as it runs.
+    }

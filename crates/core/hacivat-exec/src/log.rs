@@ -170,6 +170,27 @@ pub enum LogMsg {
     /// The profile's startup script was not run because the console's session is read-only
     /// (a read-only session never runs it, C3). Its SQL is never in the line.
     StartupScriptSkipped,
+    // ## m3b-t23-escalation (named exception): the cancel escalation's and the error bar's
+    // lines (design/m3b-safe surfaces 6 and 7), written by the app.
+    /// Terminate on server ended the session; `statements`: the user's open transaction it
+    /// rolled back, when one was open.
+    Terminated {
+        statements: Option<u32>,
+    },
+    /// Terminate on server failed (the server's text is in the dialog, verbatim).
+    TerminateFailed,
+    /// Disconnect dropped the console's connection `name` while it cancelled.
+    Disconnected {
+        name: Arc<str>,
+    },
+    /// The user answered Stop to the error bar at statement `n` (R-M3-61).
+    RunStopped {
+        n: u32,
+    },
+    /// Roll back and continue: the user's transaction was rolled back, statement `n` runs next.
+    RolledBackContinue {
+        n: u32,
+    },
 }
 
 /// A message argument. Counts are numbers the app formats in the format locale; a statement
@@ -245,6 +266,15 @@ impl LogMsg {
             LogMsg::TxEndedByStatement => "exec-tx-ended-by-statement",
             // ## m3b-t22-tx-ui (named exception)
             LogMsg::StartupScriptSkipped => "exec-startup-script-skipped-read-only",
+            // ## m3b-t23-escalation (named exception)
+            LogMsg::Terminated {
+                statements: Some(_),
+            } => "exec-terminated",
+            LogMsg::Terminated { statements: None } => "exec-terminated-no-tx",
+            LogMsg::TerminateFailed => "exec-terminate-failed",
+            LogMsg::Disconnected { .. } => "exec-disconnected",
+            LogMsg::RunStopped { .. } => "exec-run-stopped",
+            LogMsg::RolledBackContinue { .. } => "exec-run-rolled-back-continue",
         }
     }
 
@@ -328,6 +358,16 @@ impl LogMsg {
             LogMsg::TxRolledBackByServer | LogMsg::TxEndedByStatement => Vec::new(),
             // ## m3b-t22-tx-ui (named exception)
             LogMsg::StartupScriptSkipped => Vec::new(),
+            // ## m3b-t23-escalation (named exception): a statement number stays raw.
+            LogMsg::Terminated { statements } => statements
+                .iter()
+                .map(|n| ("n", LogArg::U64(u64::from(*n))))
+                .collect(),
+            LogMsg::TerminateFailed => Vec::new(),
+            LogMsg::Disconnected { name } => vec![("name", LogArg::Str(name.clone()))],
+            LogMsg::RunStopped { n } | LogMsg::RolledBackContinue { n } => {
+                vec![("i", LogArg::Str(n.to_string().into()))]
+            }
         }
     }
 
@@ -362,6 +402,10 @@ impl LogMsg {
             LogMsg::TxRolledBackByServer | LogMsg::TxEndedByStatement => Severity::Warning,
             // ## m3b-t22-tx-ui (named exception)
             LogMsg::StartupScriptSkipped => Severity::Notice,
+            // ## m3b-t23-escalation (named exception)
+            LogMsg::TerminateFailed => Severity::Error,
+            LogMsg::Terminated { .. } | LogMsg::Disconnected { .. } => Severity::Warning,
+            LogMsg::RunStopped { .. } | LogMsg::RolledBackContinue { .. } => Severity::Notice,
             LogMsg::RowsRetrieved { .. }
             | LogMsg::RowsAffected { .. }
             | LogMsg::Completed { .. }

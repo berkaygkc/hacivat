@@ -168,6 +168,11 @@ pub fn register(cx: &mut App) {
             ids::hv::CMD_WORKSPACE_FOCUS_NOTIFICATION.id,
             WORKSPACE,
             Rc::new(|window, cx| {
+                // ## m3b-t23-escalation (named exception; design/m3b-safe M6): with an
+                // error-policy bar the first F6 enters the bar, the next the toasts.
+                if crate::exec_ui::error_bar::focus_cycle(window, cx) {
+                    return;
+                }
                 toast::focus_newest_sticky(window, cx);
             }),
             always,

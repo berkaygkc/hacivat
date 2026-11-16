@@ -285,8 +285,9 @@ fn run_button(model: &ToolbarModel, actions: &ToolbarActions, cx: &App) -> AnyEl
     let disabled = match model.run {
         RunUx::Idle => !model.run_enabled,
         RunUx::Running(_) => false,
-        // Stop is disabled until the server answers.
-        RunUx::Cancelling => true,
+        // ## m3b-t23-escalation (named exception; design/m3b-safe ruling 29): Stop stays
+        // enabled while cancelling: its second press opens the escalation dialog.
+        RunUx::Cancelling => false,
     };
     let on_click = match model.run {
         RunUx::Idle => actions.run.clone(),

@@ -138,7 +138,30 @@ pub(super) enum M3a {
     TxSegmentMenu,
     TxIdleToast,
     TxShared,
+    // ## m3b-t23-escalation (named exception): design/m3b-safe surfaces 6 and 7, rendered by
+    // the M3a machinery until Task 29 moves them to `shots/m3b.rs` ([`M3B_T23`]).
+    EscSlowToast,
+    EscDialog,
+    EscDialogFailed,
+    EscDialogLocal,
+    EscKeptWaiting,
+    ErrBar,
+    ErrBarFailedTx,
+    ErrBarFocused,
 }
+
+// ## m3b-t23-escalation (named exception)
+/// The Task 23 states (after every Task 21 state).
+pub(super) const M3B_T23: [M3a; 8] = [
+    M3a::EscSlowToast,
+    M3a::EscDialog,
+    M3a::EscDialogFailed,
+    M3a::EscDialogLocal,
+    M3a::EscKeptWaiting,
+    M3a::ErrBar,
+    M3a::ErrBarFailedTx,
+    M3a::ErrBarFocused,
+];
 
 // ## m3b-t22-tx-ui (named exception)
 /// The Task 22 states (after every M3a state).
@@ -379,6 +402,15 @@ impl M3a {
             M3a::TxSegmentMenu => "tx-segment-menu",
             M3a::TxIdleToast => "tx-idle-toast",
             M3a::TxShared => "tx-shared",
+            // ## m3b-t23-escalation
+            M3a::EscSlowToast => "esc-slow-toast",
+            M3a::EscDialog => "esc-dialog",
+            M3a::EscDialogFailed => "esc-dialog-failed",
+            M3a::EscDialogLocal => "esc-dialog-local",
+            M3a::EscKeptWaiting => "esc-kept-waiting",
+            M3a::ErrBar => "errbar",
+            M3a::ErrBarFailedTx => "errbar-failed-tx",
+            M3a::ErrBarFocused => "errbar-focused",
         }
     }
 
@@ -445,6 +477,12 @@ impl M3a {
             M3a::TxBadgeFailed => ("#tx-badge-failed", None),
             M3a::TxIdleToast => (TOAST, None),
             M3a::TxShared => ("#tx-chip-mode", None),
+            // ## m3b-t23-escalation: the toast, the dialog's own labels, the gutter, the bar.
+            M3a::EscSlowToast => (TOAST, None),
+            M3a::EscDialog | M3a::EscDialogLocal => ("#escalation-title", None),
+            M3a::EscDialogFailed => ("#escalation-server-text", None),
+            M3a::EscKeptWaiting => (MARKS_RS, None),
+            M3a::ErrBar | M3a::ErrBarFailedTx | M3a::ErrBarFocused => ("#errbar-title", None),
         }
     }
 
@@ -1022,6 +1060,131 @@ impl M3a {
                 s.push(user_tx(&["BEGIN", UPD1], Some(1), false));
                 s
             }
+            // ## m3b-t23-escalation: the fixtures with fixed clocks (no server that ignores a
+            // cancel on cue).
+            EscSlowToast => {
+                let mut s = live(
+                    DEV,
+                    SCRIPT,
+                    caret(SCRIPT, "o.total"),
+                    Expect::Band(BandStyle::Run),
+                );
+                s.push(step(
+                    |window, cx| {
+                        let c = active_console(window, cx).expect("a console");
+                        exec_ui::escalation::fixtures::show_toast(c, 11, cx);
+                    },
+                    |_, cx| !ToastQueue::visible_ids(cx).is_empty(),
+                ));
+                s
+            }
+            EscDialog | EscDialogFailed | EscDialogLocal => {
+                use exec_ui::escalation::{OwnTx, Reach, fixtures};
+                let mut s = live(
+                    DEV,
+                    SCRIPT,
+                    caret(SCRIPT, "o.total"),
+                    Expect::Band(BandStyle::Run),
+                );
+                s.push(step(
+                    move |window, cx| {
+                        let c = active_console(window, cx).expect("a console");
+                        let (own, reach, others) = match self {
+                            EscDialog => (
+                                OwnTx::Open(3),
+                                Reach::Profile,
+                                vec![(format!("{DEV} (2)"), Some(3))],
+                            ),
+                            EscDialogFailed => (OwnTx::Open(3), Reach::Profile, Vec::new()),
+                            _ => (OwnTx::None, Reach::File("app.db".into()), Vec::new()),
+                        };
+                        let mut facts =
+                            fixtures::facts(c, own, reach, others, cx).expect("the facts");
+                        if self == EscDialogLocal {
+                            // SQLite: nothing can be terminated "on the server".
+                            facts.terminate = None;
+                        }
+                        let refused = (self == EscDialogFailed).then_some((
+                            "42501",
+                            "must be a superuser to terminate superuser process",
+                        ));
+                        fixtures::open(c, facts, 14, refused, window, cx);
+                    },
+                    |window, cx| {
+                        window.root::<Workspace>().flatten().is_some_and(|ws| {
+                            ws.read(cx)
+                                .layer_ids()
+                                .contains(&exec_ui::escalation::ESCALATION_LAYER_ID)
+                        })
+                    },
+                ));
+                s
+            }
+            EscKeptWaiting => {
+                let mut s = marks(
+                    MARKS,
+                    vec![
+                        (
+                            "SELECT o.id, o.total FROM orders o",
+                            succeeded(42, Some(rows(100))),
+                        ),
+                        (
+                            "UPDATE orders SET status = 'shipped' WHERE id = 1042",
+                            (UnitStatus::Cancelling, Duration::from_secs(14)),
+                        ),
+                        (
+                            "SELECT count(*) FROM order_lines",
+                            (UnitStatus::Queued { position: 1 }, Duration::ZERO),
+                        ),
+                    ],
+                );
+                s.push(instant(|window, cx| {
+                    let c = active_console(window, cx).expect("a console");
+                    exec_ui::escalation::fixtures::escalate_mark(
+                        c,
+                        exec_ui::fixtures::fixture_key(1),
+                        14,
+                        cx,
+                    );
+                }));
+                s
+            }
+            ErrBar | ErrBarFailedTx | ErrBarFocused => {
+                let mut s = live(
+                    DEV,
+                    SCRIPT,
+                    caret(SCRIPT, "o.total"),
+                    Expect::Band(BandStyle::Run),
+                );
+                s.push(instant(move |window, cx| {
+                    let c = active_console(window, cx).expect("a console");
+                    match self {
+                        ErrBarFailedTx => exec_ui::error_bar::fixtures::show(
+                            c,
+                            (3, 6),
+                            "25P02",
+                            Some((2, false)),
+                            cx,
+                        ),
+                        _ => exec_ui::error_bar::fixtures::show(c, (2, 5), "42P01", None, cx),
+                    }
+                }));
+                if self == ErrBarFocused {
+                    s.push(step(
+                        |window, cx| {
+                            exec_ui::error_bar::fixtures::focus(window, cx);
+                        },
+                        |window, cx| {
+                            active_console(window, cx).is_some_and(|c| {
+                                exec_ui::error_bar::button_focus(c, cx)
+                                    .first()
+                                    .is_some_and(|(_, h)| h.is_focused(window))
+                            })
+                        },
+                    ));
+                }
+                s
+            }
         }
     }
 
@@ -1198,6 +1361,35 @@ impl M3a {
             }),
             TxSegmentMenu => menu_open(window, cx) && tx().is_some_and(|t| t.statements == 3),
             TxIdleToast => toast("hv-tx-idle-body"),
+            // ## m3b-t23-escalation
+            EscSlowToast => toast("hv-cancel-slow-title"),
+            EscDialog => drawn(frame, "escalation-title") && drawn(frame, "escalation-other-tx"),
+            EscDialogFailed => {
+                drawn(frame, "escalation-terminate-failed")
+                    && drawn(frame, "escalation-server-text")
+            }
+            EscDialogLocal => {
+                drawn(frame, "escalation-title")
+                    && !drawn(frame, "button-label-escalation-terminate")
+            }
+            EscKeptWaiting => editor.as_ref().is_some_and(|e| {
+                matches!(
+                    e.read(cx).marks().state(exec_ui::fixtures::fixture_key(1)),
+                    Some(ExecMarkState::Escalated { .. })
+                )
+            }),
+            ErrBar | ErrBarFailedTx | ErrBarFocused => console.is_some_and(|c| {
+                let offered =
+                    exec_ui::error_bar::open_question(c, cx).map_or(0, |(_, _, o)| o.len());
+                let focus = exec_ui::error_bar::button_focus(c, cx);
+                let in_bar = focus.first().is_some_and(|(_, h)| h.is_focused(window));
+                drawn(frame, "errbar-title")
+                    && match self {
+                        ErrBarFailedTx => offered == 3 && !in_bar,
+                        ErrBarFocused => offered == 4 && in_bar,
+                        _ => offered == 4 && !in_bar,
+                    }
+            }),
         };
         (!ok).then(|| format!("{}: the state check failed", self.name()))
     }
@@ -1222,6 +1414,15 @@ fn shows_label(frame: &[RenderedText], file: &str, text: &str) -> bool {
 /// Whether a toast shows `text` (its title or body).
 fn shows_toast(frame: &[RenderedText], text: &str) -> bool {
     shows_label(frame, TOAST, text)
+}
+
+// ## m3b-t23-escalation (named exception)
+/// Whether the frame shows (visible and painted) the label with element ID `id`.
+fn drawn(frame: &[RenderedText], id: &str) -> bool {
+    let needle = format!("#{id}");
+    frame
+        .iter()
+        .any(|r| r.visible && r.painted_px > 0.0 && r.path.ends_with(&needle))
 }
 
 // ## m3b-t22-tx-ui (named exception)
