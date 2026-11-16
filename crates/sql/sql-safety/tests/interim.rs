@@ -1044,7 +1044,15 @@ fn no_sqlparser_type_in_the_interim_public_api() {
     }
     let lib = std::fs::read_to_string(src.join("lib.rs")).unwrap();
     let reexports: Vec<&str> = lib.lines().filter(|l| l.contains("backend::")).collect();
-    assert_eq!(reexports, ["pub use backend::interim::classify_interim;"]);
+    // m3b merge (T9 + T10): the PG backend's hidden test hooks are the other re-export; neither
+    // carries a sqlparser type (checked per file above).
+    assert_eq!(
+        reexports,
+        [
+            "pub use backend::interim::classify_interim;",
+            "pub use backend::pg::hooks as pg_backend_hooks;"
+        ]
+    );
 }
 
 /// Every statement table row names a real kind, effect, reason and flag (they load), and the

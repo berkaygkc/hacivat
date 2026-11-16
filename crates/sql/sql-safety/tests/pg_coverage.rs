@@ -494,6 +494,11 @@ fn pg_query_walkers_are_never_used() {
             // Generated from the schema: its field names (`m.tables`, ...) are the tree's.
             continue;
         }
+        if f.ends_with("backend/interim.rs") {
+            // m3b merge (T9 + T10): the interim backend walks sqlparser's AST (its `.tables`
+            // are sqlparser fields); it never reaches pg_query (R-M3-54, check-deps).
+            continue;
+        }
         let text = std::fs::read_to_string(&f).unwrap();
         for needle in forbidden {
             assert!(!text.contains(needle), "{}: {needle}", f.display());
