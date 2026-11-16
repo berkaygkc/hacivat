@@ -193,25 +193,37 @@ async fn kill_on(
 
 /// A side connection opened ahead of a kill that may be needed (a MySQL release drains for
 /// 250 ms first; the connect runs meanwhile). One nobody used is closed.
-struct SideSlot(Option<JoinHandle<Result<LiveConnection, ConnectError>>>);
+/// ## m3b-t12-session-carries (named exception; review m3): a connector that keeps one warm
+/// is asked only when the kill is needed, so a release that drains in time leaves it warm.
+struct SideSlot(
+    Option<JoinHandle<Result<LiveConnection, ConnectError>>>,
+    Option<Arc<dyn SideConnector>>,
+);
 
 impl SideSlot {
     fn open(side: &Arc<dyn SideConnector>) -> SideSlot {
-        SideSlot(Some(tokio::spawn(side.open_side())))
+        if side.keeps_warm() {
+            return SideSlot(None, Some(side.clone()));
+        }
+        SideSlot(Some(tokio::spawn(side.open_side())), None)
     }
 
     /// Kills `thread`'s statement on this connection.
     async fn kill(mut self, kind: DbmsKind, thread: u64) -> Result<(), ErrClass> {
-        let Some(task) = self.0.take() else {
-            return Err(ErrClass::Internal);
-        };
         let Some(sql) = kill_query_sql(kind, thread) else {
             return Err(ErrClass::Internal);
         };
-        let mut live = match task.await {
-            Ok(Ok(live)) => live,
-            Ok(Err(e)) => return Err(e.class),
-            Err(_) => return Err(ErrClass::Internal),
+        let opened = match (self.0.take(), self.1.take()) {
+            (Some(task), _) => match task.await {
+                Ok(opened) => opened,
+                Err(_) => return Err(ErrClass::Internal),
+            },
+            (None, Some(warm)) => warm.open_side().await,
+            (None, None) => return Err(ErrClass::Internal),
+        };
+        let mut live = match opened {
+            Ok(live) => live,
+            Err(e) => return Err(e.class),
         };
         let ran = live.raw().batch(&sql).await;
         live.close().await;
@@ -927,6 +939,13 @@ impl Core {
                 Ok(QueryEvent::Done(done)) => {
                     s.on_first_response();
                     s.done = Some(done);
+                    // ## m3b-t12-session-carries (named exception; the T13 carry): the
+                    // notices the driver dropped past its own cap join the unit's count, so
+                    // the log line at its end has the whole number (never their text).
+                    if let Some(live) = self.live.as_mut() {
+                        let dropped = live.raw().take_notices_dropped();
+                        s.notices_dropped = s.notices_dropped.saturating_add(dropped);
+                    }
                     return Pumped::Done;
                 }
             }

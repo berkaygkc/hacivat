@@ -57,6 +57,10 @@ use crate::pipeline::{
 use crate::profile::Profile;
 use crate::session::actor::{Reconnector, SessionHooks, SideConnector, spawn_supervised};
 use crate::session::liveness::LivenessPolicy;
+// ## m3b-t12-session-carries
+use crate::session::TxState;
+use crate::session::env::SessionZone;
+use crate::session::liveness::LivenessRole;
 // ## m3a-f1-followups
 use crate::session::liveness::ProfileActivity;
 use crate::session::{
@@ -269,6 +273,9 @@ fn copy_secrets(s: &SessionSecrets) -> SessionSecrets {
 struct Tracked {
     commands: mpsc::WeakUnboundedSender<Command>,
     state: watch::Receiver<SessionSnapshot>,
+    // ## m3b-t12-session-carries
+    /// What the session is for (`open_transactions` names it).
+    kind: SessionKind,
 }
 
 /// A reset session waiting in the pool.
@@ -316,6 +323,9 @@ struct State {
     /// `ConnectionManager` relays them as `ConnectionEvent::EnforcementGap`; its monitor
     /// already relays the default session's).
     gap_sink: Option<GapSink>,
+    // ## m3b-t12-session-carries (fix round 1, review C1)
+    /// Where a session's loss of a user transaction goes (`relay_losses`).
+    lost_sink: Option<LostSink>,
     // ## m3a-t01b-seams
     /// The manager-wide session policy (`set_policy`).
     policy: SessionPolicy,
@@ -323,6 +333,13 @@ struct State {
     /// The read-only guard's classifier every session started from now on gets (R-M3-83,
     /// P-M3b-11; `set_classifier`).
     classifier: Option<Arc<dyn StatementClassifier>>,
+    // ## m3b-t12-session-carries
+    /// The default session's liveness policy (`adopt_default`): every console session the pool
+    /// starts runs its own supervisor with it (C7, R-M3-73).
+    liveness: Option<LivenessPolicy>,
+    /// The settings' time zone every session started from now on gets (C11; `set_time_zone`),
+    /// shared, so one a server refused is sent by none (review m7).
+    time_zone: Option<Arc<SessionZone>>,
 }
 
 impl State {
@@ -346,6 +363,12 @@ pub struct SessionPolicy {
 /// Receives a session's enforcement gap (T17 carry: a pooled read-only session's gap reaches
 /// the app as the default session's does).
 pub(crate) type GapSink = Arc<dyn Fn(hacivat_guard::GapReason) + Send + Sync>;
+
+// ## m3b-t12-session-carries (fix round 1, review C1)
+/// Receives what a session lost with its connection when it held, or may have been opening, a
+/// user transaction (`SessionEvent::Lost { open_tx: true }`); the `ConnectionManager` relays it
+/// as `ConnectionEvent::SessionLost`.
+pub(crate) type LostSink = Arc<dyn Fn(crate::session::LostState) + Send + Sync>;
 
 /// A `pooled` request waiting for a released session or a permit, whichever comes first.
 struct Waiter {
@@ -473,6 +496,19 @@ fn closed() -> ConnectError {
     pipeline::error(ErrClass::Cancelled, Phase::PostConnect)
 }
 
+// ## m3b-t12-session-carries (R-M3-73; fix round 1, review I1)
+/// A user transaction a close would roll back (`SessionManager::open_transactions`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OpenTransaction {
+    pub session: SessionId,
+    pub kind: SessionKind,
+    /// The snapshot's transaction state (its statements, since when).
+    pub tx: TxState,
+    /// A user request runs on it now: it may be opening a transaction the snapshot does not
+    /// show yet.
+    pub running: bool,
+}
+
 /// One profile's sessions.
 pub struct SessionManager {
     rt: Handle,
@@ -526,9 +562,13 @@ impl SessionManager {
                 next_waiter: 0,
                 consent_gen: 0,
                 gap_sink: None,
+                lost_sink: None,
                 policy: SessionPolicy::default(),
                 // ## m3b-t01c-core-seams
                 classifier: None,
+                // ## m3b-t12-session-carries
+                liveness: None,
+                time_zone: None,
             }),
             default_lock: tokio::sync::Mutex::new(()),
             me: me.clone(),
@@ -554,6 +594,47 @@ impl SessionManager {
     /// before any session exists; `None` keeps the M2b/M3a layers alone.
     pub fn set_classifier(&self, c: Option<Arc<dyn StatementClassifier>>) {
         self.lock().classifier = c;
+    }
+
+    // ## m3b-t12-session-carries (C11)
+    /// Sets the time zone (the settings' `ui.time_zone`, shared by the manager's profiles so
+    /// that one a server refused is sent by none) every session opened from now on sends on
+    /// PostgreSQL. `ConnectionManager` calls it right after `new`; `None` keeps the server's.
+    pub fn set_time_zone(&self, zone: Option<Arc<SessionZone>>) {
+        self.lock().time_zone = zone;
+    }
+
+    // ## m3b-t12-session-carries (R-M3-73)
+    /// The user transactions open now on the profile's usable sessions, by session (the
+    /// snapshots' `TxState`: `InTx` or `Failed`, not Hacivat's own), in session order: what
+    /// closing them would roll back, so the UI names each one before it acts (Disconnect,
+    /// quit). The default session's Disconnect closes all of them; any other console's closes
+    /// only its own.
+    ///
+    /// Fix round 1 (review I1): a session that runs a user request is listed too
+    /// (`OpenTransaction::running`): its snapshot moves only when the request ends, while a
+    /// running `BEGIN` or Manual statement has already opened one on the server.
+    pub fn open_transactions(&self) -> Vec<OpenTransaction> {
+        let mut open: Vec<OpenTransaction> = self
+            .lock()
+            .sessions
+            .iter()
+            .filter_map(|(id, t)| {
+                let s = t.state.borrow();
+                let running = matches!(
+                    s.state,
+                    SessionState::Busy { .. } | SessionState::Cancelling { .. }
+                ) && self.activity.holds(*id);
+                (usable(&s.state) && (s.tx.user_open() || running)).then(|| OpenTransaction {
+                    session: *id,
+                    kind: t.kind.clone(),
+                    tx: s.tx.clone(),
+                    running,
+                })
+            })
+            .collect();
+        open.sort_by_key(|o| o.session.0);
+        open
     }
 
     /// The policy this manager's sessions follow (fix round 1).
@@ -908,15 +989,17 @@ impl SessionManager {
             read_only: spec.read_only || self.read_only_for(&profile),
             ..spec
         };
-        match self.register(
-            spec,
-            profile,
-            live,
-            permit,
-            epoch,
-            as_default,
-            Hooked::default(),
-        ) {
+        // ## m3b-t12-session-carries (C7, R-M3-73): a console session runs its own
+        // supervisor with the profile's policy; it never disconnects the profile.
+        let hooked = match spec.kind {
+            SessionKind::Console(_) => Hooked {
+                reconnect: None,
+                liveness: self.lock().liveness,
+                role: LivenessRole::Console,
+            },
+            _ => Hooked::default(),
+        };
+        match self.register(spec, profile, live, permit, epoch, as_default, hooked) {
             Ok(handle) => {
                 // ## m2b-t22-live: no monitor watches this session; its gaps go to the sink.
                 self.forward_gaps(&handle);
@@ -1029,21 +1112,26 @@ impl SessionManager {
         };
         // ## m3a-f1-followups: every session reports to the profile's activity (F1-b).
         // ## m3b-t01c-core-seams: and gets the manager's classifier (P-M3b-11).
+        // ## m3b-t12-session-carries: the supervisor's role (R-M3-73) and the time zone (C11).
+        let kind = spec.kind.clone();
         let handle = spawn_supervised(
             &self.rt,
             spec,
             profile,
             live,
             hooks,
-            hooked.liveness,
+            hooked.liveness.map(|policy| (policy, hooked.role)),
             Some(self.activity.clone()),
             st.classifier.clone(),
+            st.time_zone.clone(),
         );
         st.sessions.insert(
             handle.id,
             Tracked {
                 commands: handle.commands.downgrade(),
                 state: handle.state(),
+                // ## m3b-t12-session-carries
+                kind,
             },
         );
         if as_default {
@@ -1226,10 +1314,21 @@ impl SideConnector for Side {
 // re-review: R1 (the consent generation) and R2 (`close_all` ends requests still waiting).
 
 /// What the default session gets beyond the others: its reconnects and its liveness.
-#[derive(Default)]
+/// ## m3b-t12-session-carries: a console session gets a liveness too, as `Console` (R-M3-73).
 struct Hooked {
     reconnect: Option<Arc<dyn Reconnector>>,
     liveness: Option<LivenessPolicy>,
+    role: LivenessRole,
+}
+
+impl Default for Hooked {
+    fn default() -> Self {
+        Hooked {
+            reconnect: None,
+            liveness: None,
+            role: LivenessRole::Profile,
+        }
+    }
 }
 
 /// What a request saw when it was made: a `close_all` since then ends it (T15 R2), whether it
@@ -1313,9 +1412,12 @@ impl SessionManager {
             read_only: self.read_only_for(&profile),
             department: Department::Console,
         };
+        // ## m3b-t12-session-carries: the console sessions opened later take the same policy.
+        self.lock().liveness = liveness;
         let hooked = Hooked {
             reconnect,
             liveness,
+            role: LivenessRole::Profile,
         };
         // A fresh manager: `close_all` cannot have run, so the epoch matches; if it did, the
         // permit is already back.
@@ -1331,22 +1433,43 @@ impl SessionManager {
         self.lock().gap_sink = Some(sink);
     }
 
+    // ## m3b-t12-session-carries (fix round 1, review C1)
+    /// Sends every lost user transaction of the sessions this manager starts from now on to
+    /// `sink` (the default session's goes through the manager's own monitor).
+    pub(crate) fn relay_losses(&self, sink: LostSink) {
+        self.lock().lost_sink = Some(sink);
+    }
+
     /// Forwards `handle`'s enforcement gaps to the sink until the session ends. A gap is
     /// emitted before the session publishes `Broken` (T17 I10), so what is still queued when
     /// it ends is drained first.
+    /// ## m3b-t12-session-carries (fix round 1, review C1): and its lost user transaction
+    /// (`Lost { open_tx: true }`, emitted before `Broken` too) to the loss sink.
     fn forward_gaps(&self, handle: &SessionHandle) {
         use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
-        let Some(sink) = self.lock().gap_sink.clone() else {
-            return;
+        let (gaps, losses) = {
+            let st = self.lock();
+            (st.gap_sink.clone(), st.lost_sink.clone())
         };
+        if gaps.is_none() && losses.is_none() {
+            return;
+        }
         let mut events = handle.events();
         let mut state = handle.state();
         self.rt.spawn(async move {
-            let relay = |event: SessionEvent| {
-                if let SessionEvent::EnforcementGap(reason) = event {
-                    sink(reason);
+            let relay = |event: SessionEvent| match event {
+                SessionEvent::EnforcementGap(reason) => {
+                    if let Some(sink) = &gaps {
+                        sink(reason);
+                    }
                 }
+                SessionEvent::Lost(lost) if lost.open_tx => {
+                    if let Some(sink) = &losses {
+                        sink(lost);
+                    }
+                }
+                _ => {}
             };
             loop {
                 tokio::select! {

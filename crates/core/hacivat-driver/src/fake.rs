@@ -617,6 +617,9 @@ pub struct FakeDriver {
     // ## m3a-t01b-seams
     tracks_tx: bool,
     typed_caps: Option<TypedCaps>,
+    // ## m3b-t12-session-carries (named exception)
+    /// What every `RawConn::take_notices_dropped` answers (`notices_dropped`).
+    notices_dropped: u32,
 }
 
 impl FakeDriver {
@@ -666,6 +669,8 @@ impl FakeDriver {
             autocommit: None,
             tracks_tx: false,
             typed_caps: None,
+            // ## m3b-t12-session-carries
+            notices_dropped: 0,
         }
     }
 
@@ -870,6 +875,14 @@ impl FakeDriver {
         self
     }
 
+    // ## m3b-t12-session-carries (named exception; the T13 carry)
+    /// Every `RawConn::take_notices_dropped` answers `n`: as if the driver had dropped `n`
+    /// notices past its own cap since the last call (the session takes them after `Done`).
+    pub fn notices_dropped(mut self, n: u32) -> Self {
+        self.notices_dropped = n;
+        self
+    }
+
     /// `Rows` events delivered by typed queries, over every connection.
     pub fn chunks_sent(&self) -> u64 {
         self.counters.chunks.load(Ordering::SeqCst)
@@ -935,6 +948,8 @@ impl Driver for FakeDriver {
             typed: None,
             savepoints: Vec::new(),
             lost: false,
+            // ## m3b-t12-session-carries
+            notices_dropped: self.notices_dropped,
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
@@ -1037,6 +1052,9 @@ struct FakeConn {
     /// An `AfterKill` ran out (`kill_ignored`): the connection is gone, as the real MySQL
     /// driver abandons it; every later call answers `Io(NotConnected)`.
     lost: bool,
+    // ## m3b-t12-session-carries (named exception)
+    /// What `take_notices_dropped` answers (`FakeDriver::notices_dropped`).
+    notices_dropped: u32,
 }
 
 impl FakeConn {
@@ -1381,6 +1399,11 @@ impl RawConn for FakeConn {
 
     fn next_event(&mut self) -> BoxFuture<'_, Result<QueryEvent, RawError>> {
         Box::pin(self.next_typed_event())
+    }
+
+    // ## m3b-t12-session-carries (named exception)
+    fn take_notices_dropped(&mut self) -> u32 {
+        self.notices_dropped
     }
 
     fn fetch_more(&mut self, rows: u32) -> BoxFuture<'_, Result<(), RawError>> {

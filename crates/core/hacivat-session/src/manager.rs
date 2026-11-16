@@ -164,11 +164,25 @@ pub struct ManagerConfig {
     /// app's boot installs `hacivat-exec`'s `ClassifyPool` (Task 18). `None` (the default, and
     /// `m2b()`) keeps the M2b/M3a behaviour: the guard's layers alone.
     pub classifier: Option<Arc<dyn StatementClassifier>>,
+    // ## m3b-t12-session-carries (C11)
+    /// The settings' `ui.time_zone`: every PostgreSQL session sends `SET TIME ZONE` with an
+    /// IANA zone after connect and in its environment replay (never MySQL or MariaDB, R5).
+    /// `System` (the default) keeps the server's zone.
+    pub time_zone: hacivat_settings::TimeZonePref,
 }
 
 // ## m3b-t01c-core-seams (review M1)
 /// What equality and hashing compare: every field, the classifier by its address.
-type ConfigKey = (Duration, Duration, bool, bool, bool, Option<*const ()>);
+type ConfigKey = (
+    Duration,
+    Duration,
+    bool,
+    bool,
+    bool,
+    Option<*const ()>,
+    // ## m3b-t12-session-carries
+    hacivat_settings::TimeZonePref,
+);
 
 impl ManagerConfig {
     /// Every field, by value; the classifier by address. The destructuring names each field
@@ -181,6 +195,7 @@ impl ManagerConfig {
             reconnect,
             production_read_only,
             classifier,
+            time_zone,
         } = self;
         (
             *liveness,
@@ -189,7 +204,17 @@ impl ManagerConfig {
             *reconnect,
             *production_read_only,
             classifier.as_ref().map(|c| Arc::as_ptr(c).cast::<()>()),
+            time_zone.clone(),
         )
+    }
+
+    // ## m3b-t12-session-carries (C11)
+    /// The IANA zone sessions send, if any.
+    fn zone(&self) -> Option<String> {
+        match &self.time_zone {
+            hacivat_settings::TimeZonePref::Iana(zone) => Some(zone.clone()),
+            hacivat_settings::TimeZonePref::System => None,
+        }
     }
 }
 
@@ -219,6 +244,8 @@ impl Default for ManagerConfig {
             production_read_only: false,
             // ## m3b-t01c-core-seams
             classifier: None,
+            // ## m3b-t12-session-carries
+            time_zone: hacivat_settings::TimeZonePref::System,
         }
     }
 }
@@ -332,6 +359,10 @@ struct Shared {
     /// One lock per SSH chain generation: the dependents of a dead chain reconnect one at a
     /// time, so the first brings the chain back and the others share it (B20).
     transport_locks: Mutex<HashMap<TransportGeneration, Arc<tokio::sync::Mutex<()>>>>,
+    // ## m3b-t12-session-carries (C11; fix round 1, review m7)
+    /// The settings' time zone, shared by every profile's sessions: one a server refused is
+    /// sent by none, across reconnects too.
+    zone: Option<Arc<crate::session::env::SessionZone>>,
 }
 
 impl Shared {
@@ -458,6 +489,8 @@ impl Shared {
         });
         // ## m3b-t01c-core-seams (P-M3b-11): the read-only guard's classifier, likewise.
         sessions.set_classifier(self.config.classifier.clone());
+        // ## m3b-t12-session-carries (C11): the settings' time zone, likewise.
+        sessions.set_time_zone(self.zone.clone());
         // ## m2b-t22-live (T17 carry): the gaps of the profile's other sessions (pooled
         // read-only ones) are relayed as the default session's are (Q35).
         let weak = Arc::downgrade(self);
@@ -467,6 +500,15 @@ impl Shared {
                     profile: id,
                     reason,
                 });
+            }
+        }));
+        // ## m3b-t12-session-carries (fix round 1, review C1): a console session that loses
+        // its connection while it holds, or may be opening, a user transaction is told as
+        // the default session's loss is.
+        let weak = Arc::downgrade(self);
+        sessions.relay_losses(Arc::new(move |lost| {
+            if let Some(shared) = weak.upgrade() {
+                shared.emit(ConnectionEvent::SessionLost { profile: id, lost });
             }
         }));
         let stop = CancellationToken::new();
@@ -840,6 +882,10 @@ async fn monitor(
                         return;
                     }
                     SessionState::Broken(ErrClass::Cancelled) => {
+                        // ## m3b-t12-session-carries (fix round 1, review I1): the default's
+                        // Disconnect closes the profile (R-M3-73); `end_live` is
+                        // `end_live_with(.., None)`, so another session's user transaction,
+                        // held or maybe opening at that moment, is told as `SessionLost`.
                         shared.end_live(id, seq, LiveState::Disconnected);
                         return;
                     }
@@ -1134,6 +1180,10 @@ impl Drop for ConnectionManager {
 
 impl ConnectionManager {
     pub fn new(rt: Handle, deps: Arc<ConnectDeps>, config: ManagerConfig) -> Arc<Self> {
+        // ## m3b-t12-session-carries
+        let zone = config
+            .zone()
+            .map(|z| Arc::new(crate::session::env::SessionZone::new(&z)));
         let shared = Arc::new(Shared {
             rt,
             deps,
@@ -1149,6 +1199,7 @@ impl ConnectionManager {
             events: broadcast::Sender::new(64),
             tunnel_watch: CancellationToken::new(),
             transport_locks: Mutex::new(HashMap::new()),
+            zone,
         });
         // ## m2b-t17-liveness (B20)
         watch_tunnels(&shared);
