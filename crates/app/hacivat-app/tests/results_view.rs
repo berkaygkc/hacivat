@@ -556,6 +556,8 @@ fn error_line(log: &SessionLog, n: u32, range: Range<usize>) {
                 server_text: Some("relation \"Statement 3 failed\" does not exist".into()),
                 hint_id: None,
                 doc_offset: None,
+                // ## m3b-t25-results (named exception)
+                vendor_code: None,
             },
         },
         Some(range),
@@ -1070,6 +1072,8 @@ fn server_text_controls_are_shown_not_obeyed(cx: &mut TestAppContext) {
                 server_text: Some("near 'a\nb\u{202E}cd' at line 1".into()),
                 hint_id: None,
                 doc_offset: None,
+                // ## m3b-t25-results (named exception)
+                vendor_code: None,
             },
         },
         Some(0..4),
@@ -1158,6 +1162,8 @@ fn a_run_without_a_result_shows_the_output(cx: &mut TestAppContext) {
                 server_text: Some("relation \"nope\" does not exist".into()),
                 hint_id: None,
                 doc_offset: None,
+                // ## m3b-t25-results (named exception)
+                vendor_code: None,
             },
         },
         Some(0..4),

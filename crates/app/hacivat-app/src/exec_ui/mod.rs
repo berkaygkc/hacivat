@@ -268,12 +268,26 @@ pub fn connected(console: ConsoleId, cx: &App) -> bool {
 // ## m3b-t01b-seams
 
 /// The fetch policy of console `console`'s next run (Task 24 calls it when it builds the run;
-/// P-M3b-17). STUB: M3a's `FetchPolicy::default()`; Task 25 fills it here with
-/// `results.max_value_bytes` as the cell cap.
+/// P-M3b-17): M3a's numbers with `results.max_value_bytes` as the cell cap (R-M3-82; the
+/// default 1 MiB without settings).
 pub fn fetch_policy_for(console: ConsoleId, cx: &App) -> FetchPolicy {
-    let _ = (console, cx);
-    FetchPolicy::default()
+    // ## m3b-t25-results
+    let _ = console;
+    let limit = cx
+        .try_global::<crate::shell::AppState>()
+        .map_or_else(hacivat_settings::ValueLimit::default, |s| {
+            s.settings.results.max_value_bytes
+        });
+    FetchPolicy::default().with_cell_cap(limit.get())
 }
+
+// ## m3b-t25-results
+// The settings' value-size range and the store's cell-cap range are one range (T8 M8):
+// `hacivat-results` cannot name `ValueLimit` (no manifest edge), so the two are checked here.
+const _: () = assert!(
+    hacivat_results::window::MIN_CELL_CAP == hacivat_settings::ValueLimit::MIN
+        && hacivat_results::window::MAX_CELL_CAP == hacivat_settings::ValueLimit::MAX
+);
 
 /// A receiver that already holds `answer` (the M3b stubs' answers).
 pub(crate) fn answered<T>(answer: T) -> tokio::sync::oneshot::Receiver<T> {

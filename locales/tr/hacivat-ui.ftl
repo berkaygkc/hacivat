@@ -2100,3 +2100,69 @@ hv-commit-dropped-sp-body-unknown = Sunucu, bu ifade de içinde olmak üzere aç
 hv-commit-close = Kapat
 # Review: PO
 hv-confirm-type-untypeable = Bu ad yazılamayan ya da yapıştırılamayan bir karakter içeriyor; bu yüzden burada doğrulanamaz. Bu ifadeyi başka bir istemciden çalıştırın.
+
+## m3b-t25-results
+
+# Review: PO
+hv-results-tab-dup = { $title } ({ $n })
+# Review: PO
+hv-results-tab-pinned = Sabitlendi: bir sonraki çalıştırma yeni sekme açar
+# Review: PO
+hv-results-tab-pin = Sekmeyi sabitle
+# Review: PO
+hv-results-tab-unpin = Sabitlemeyi kaldır
+# Review: PO
+hv-results-tab-close-others = Diğer sekmeleri kapat
+# Review: PO
+hv-results-untyped = türsüz (tek parça)
+# Review: PO
+hv-results-untyped-short = türsüz
+# Review: PO
+hv-results-untyped-tip = Tek parça çalıştırma ifadeleri birlikte gönderir; bu yüzden sunucu her sütunu metin olarak döndürür. Sayılar metin gibi sıralanır.
+# Review: PO
+hv-results-set-limit = İlk { $kept } sonuç kümesi gösteriliyor; { $skipped } küme daha okundu ve tutulmadı.
+# Review: PO
+hv-results-count = Satırları say
+# Review: PO
+hv-results-count-tip = Bu sorgu üzerinde ayrı bir oturumda SELECT COUNT(*) çalıştırır.
+# Review: PO
+hv-results-count-exact = { $rows } satır (kesin)
+# Review: PO
+hv-results-counting = Sayılıyor…
+# Review: PO
+hv-results-count-cancel = Vazgeç
+# Review: PO
+hv-results-count-unavailable = Bu sorgu sayılamaz.
+# Review: PO
+hv-results-count-refused = Sayılmadı: Hacivat sayımın yalnızca okuduğunu doğrulayamadı.
+# Review: PO
+hv-results-count-timeout = 30 saniye sonra durduruldu.
+# Review: PO
+hv-results-count-failed = Sayım başarısız oldu.
+# Review: PO
+hv-results-count-offline = Sayılmadı: konsol bağlı değil.
+# Review: PO
+hv-strip-evicted = Bellek açmak için kapatıldı; ilk { $rows } satır tutuldu.
+# Review: PO
+hv-results-copy-evicted = Hiçbir şey kopyalanmadı: bu sonuç bellek açmak için kapatıldı ve seçtiğinizden daha az satır tutuyor. Yeniden seçin ya da yeniden çalıştırın.
+# Review: PO
+hv-fetchall-title = Tüm satırları getirmek bu sonucun bellek sınırını aşar
+# Review: PO
+hv-fetchall-body = Sorgunun satırları { $size } sınırına sığmıyor. Hacivat sınıra kadar getirip kalanı için imleci açık tutabilir.
+# Review: PO
+hv-fetchall-ok = Bellek sınırına kadar getir
+# Review: PO
+hv-fetchall-cancel = Vazgeç
+
+## m3b-t25-results-r1
+
+# Review: PO
+hv-results-tab-repeat = ({ $n })
+# Review: PO
+hv-results-tabs-more = +{ $n }
+# Review: PO
+hv-results-tabs-more-tip = { $n } sonuç sekmesi daha
+# Review: PO
+hv-results-count-rerun = Satırları saymak için ifadeyi yeniden çalıştırın.
+# Review: PO
+hv-results-count-context = Sayılmadı: konsolun SQL ayarları henüz bilinmiyor.

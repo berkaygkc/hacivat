@@ -34,6 +34,11 @@ pub struct ErrorView {
     /// Hacivat's hint, a Fluent ID (SQLite's busy hint, `error-exec-sqlite-busy-hint`).
     pub hint_id: Option<&'static str>,
     pub doc_offset: Option<usize>,
+    // ## m3b-t25-results (named exception, ledger 340): the MySQL chip shows both codes.
+    /// The server's vendor code when it sent a SQLSTATE too (MySQL, MariaDB): the log's chip
+    /// shows `1792 · 25006`. `code` stays the SQLSTATE (what the bypass rows judge by); `None`
+    /// when `code` already is the vendor code or there is none.
+    pub vendor_code: Option<Arc<str>>,
 }
 
 /// Where a unit is.
@@ -165,9 +170,17 @@ pub fn error_view(
             .map(Arc::from)
             .or_else(|| m.vendor_code.map(|c| Arc::from(c.to_string())))
     });
+    // ## m3b-t25-results (named exception)
+    let vendor_code = server.and_then(|m| {
+        m.sqlstate
+            .as_ref()
+            .and(m.vendor_code)
+            .map(|c| Arc::from(c.to_string()))
+    });
     ErrorView {
         title_id: error_title_id(&e.kind),
         code,
+        vendor_code,
         server_text: server.map(|m| Arc::from(m.text.as_str())),
         hint_id: error_hint_id(engine, e),
         // ## m3a-t33-exec-ui (named exception): without a caller's position, the server

@@ -902,6 +902,40 @@ wired into Run before Task 24 (R-M3-52).
   - *IME (m7):* Escape during a composition in the type field ends the composition (its text
     stays) and keeps the dialog; the next Escape cancels.
 
+## m3b-t25 — results: tabs per result set, pinning, Count rows, notices, eviction in the app
+
+- **Titles.** A result tab shows its statement's comment as the run service gave it (Task 16
+  sanitised it), as data, else the console's `Result N` (N per statement, shared by its further
+  sets). The app tells a comment from the service's own `Result n[ (k)]` by recomputing n over
+  the run's tab list (`tabs::comment_of`); a comment that reads exactly so is shown as the
+  console's `Result N`. A title an earlier tab already shows gets `(2)`, `(3)` …
+  (`hv-results-tab-dup`): further sets and repeated comments alike. Titles cap at 190 px (120 px
+  in a short strip, measured each frame; NOTES ruling 30), the whole title in the tooltip.
+- **Pinning.** A pinned tab is never reused: `apply` reuses only an unpinned tab of the key
+  (`tab_by_key` prefers it); a tab already showing the result is left alone, so a pinned tab and
+  its successor may share a key. The strip facts are keyed by key and unit for the same reason.
+  Re-run prefers the active tab (named exception in `exec_ui/orchestrator.rs`).
+- **Visibility (Task 8 carries).** Every tab reports `ResultSource::set_visible`: true at once
+  while it is the console's active tab, pinned, or claimed by another view
+  (`set_view_visible`, for Task 38); false only after `HIDE_GRACE` (30 s, executor clock) with
+  no claim. An evicted result, once shown again, moves its adapter to a new generation over the
+  same result, which clears the grid's selection to its focus cell; a copy request reaching past
+  the kept rows is refused with `hv-results-copy-evicted`. `cap_raised` is read from the source.
+- **Count rows.** Only the button sends it: the tab's unit (the run UI's `tab_units`) is lexed
+  alone under the console's known context, wrapped by `count_sql` (no parameters, so no binds
+  yet), and handed to `ExecService::count` on the live session and its connection's pool.
+  Anything uncountable says so and sends nothing. No spinner: the static amber marker,
+  "Counting…" and Cancel (design ruling 21). A count past the per-result cap makes Fetch all ask
+  first ("Fetch up to the memory limit" focused, the bounded choice).
+- **Log.** The output view reads `SessionLog::lines_since` (a change costs its new lines), keeps
+  as many lines as the ring, and heads the list with one "n events not shown" row for lines the
+  ring dropped unread. Notices are one row each with the server's text verbatim at the row's
+  end; a MySQL error chip shows `vendor · SQLSTATE` from the new `ErrorView::vendor_code`
+  (`code` stays the SQLSTATE the bypass rows judge by). ↑/↓/Enter are element-level keys.
+- **Untyped results.** A result whose every column is text of `NativeType::Unknown` is marked
+  "untyped (run as one)": PostgreSQL's simple protocol; MySQL's text protocol still types its
+  columns, so it is not marked; nor is a column of another logical type (a fake driver's).
+
 ## m3b-t28 — conformance
 
 **What the matrix is.** `crates/core/hacivat-exec/tests/docker_m3b_matrix.rs` holds twelve
@@ -1052,3 +1086,19 @@ case.
 | notice | `tablo "hv_t31_m3b_yok_ğ_…" mevcut değil, atlanıyor` |
 | Ask | unit 1, `42P01` |
 | production | typed name = the table's bytes; `UPDATE … WHERE` own form, `İstanbul` → `Ömer` after Commit |
+
+## m3b-t25 — results, fix round 1
+
+- **Crowded strips (I1).** A result tab never shrinks: it is drawn whole or not at all. The
+  strip is fitted to last frame's width: every tab whole, else every tab in its short form
+  (ruling 30), else the short form of as many as fit, in order, the active tab always among
+  them, and a "+N" button whose menu lists the rest by their whole titles. Every drawn tab,
+  with its environment swatch, is therefore inside the strip. Text widths are cached per
+  string (m12) and the titles computed in one pass.
+- **Titles (m8, m9).** The comment comes from the unit (`ExecUnit::title`, the run UI's
+  `tab_units`); the service's title is read back only for a result the run UI does not know. A
+  repeat's `(k)` is its own label after the cut title (`hv-results-tab-repeat`); the whole
+  title (`hv-results-tab-dup`) stays the accessible name.
+- **Lifecycle (m4–m7).** An eviction the shown tab has not answered is answered after the
+  tile's frame; a closed tab is hidden to eviction at once; a count stops when its console's
+  results drop; the toolbar's Clear empties the view directly.

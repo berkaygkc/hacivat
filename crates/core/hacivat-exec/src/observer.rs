@@ -757,6 +757,8 @@ impl ExecObserver {
                 server_text: None,
                 hint_id: None,
                 doc_offset: None,
+                // ## m3b-t25-results (named exception)
+                vendor_code: None,
             };
             self.set_unit(ordinal, true, UnitStatus::Failed(view));
             return;
