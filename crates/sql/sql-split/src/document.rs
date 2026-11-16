@@ -16,7 +16,7 @@ use sql_lexer::{LexState, Lexed, TokenKind, lex, lex_with_client, relex};
 use sql_text::edit::MisalignedEdit;
 use sql_text::{TextChunks, TextEdit, TextRange, TextSize};
 
-use crate::incremental::{Change, Old, resplit};
+use crate::incremental::{ApplyPath, Change, Old, resplit};
 use crate::item::{
     AmbiguityReason, AmbiguousBoundary, ClientSegment, Confidence, CopyData, Item, Split,
     SplitMode, Stmt, StmtHead, overlaps,
@@ -100,8 +100,8 @@ pub struct SqlDocument {
     execution: Arc<OnceLock<Arc<Split>>>,
     revision: u64,
     // ## m3b-t05-incremental
-    /// The last `apply` resplit a window (not the whole text).
-    incremental: bool,
+    /// How the last `apply` split the text again.
+    path: ApplyPath,
     /// The previous revision's text and lexing, written over by the next `apply` once no
     /// snapshot holds them (a 2 MB script then costs no fresh pages per keystroke).
     spare: Spare,
@@ -169,7 +169,10 @@ impl SqlDocument {
             editor: Arc::new(editor),
             execution: Arc::new(OnceLock::new()),
             revision,
-            incremental: false,
+            path: ApplyPath {
+                how: "new",
+                scan_exhausted: false,
+            },
             spare: Spare::default(),
         }
     }
@@ -258,13 +261,14 @@ impl SqlDocument {
                     editor: Arc::new(r.editor),
                     execution: Arc::new(execution),
                     revision: self.revision + 1,
-                    incremental: true,
+                    path: r.path,
                     spare: Spare::default(),
                 };
                 (std::mem::replace(self, new), r.delta)
             }
             None => {
-                let new = Self::analysed(text, self.ctx, self.flavor, lexed, self.revision + 1);
+                let mut new = Self::analysed(text, self.ctx, self.flavor, lexed, self.revision + 1);
+                new.path.how = "whole";
                 let prev = std::mem::replace(self, new);
                 let d = delta(&prev, self);
                 (prev, d)
@@ -311,7 +315,13 @@ impl SqlDocument {
     /// text (the tests' view of the fast path).
     #[doc(hidden)]
     pub fn last_apply_was_incremental(&self) -> bool {
-        self.incremental
+        matches!(self.path.how, "window" | "retried" | "to-end")
+    }
+
+    /// How the last [`SqlDocument::apply`] split the text again (the tests' view of each path).
+    #[doc(hidden)]
+    pub fn last_apply_path(&self) -> ApplyPath {
+        self.path
     }
 
     /// Changes the dialect context (a `SET sql_mode`, a reconnect) and rebuilds.

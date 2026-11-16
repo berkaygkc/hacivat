@@ -137,10 +137,17 @@ pub(crate) fn relex_text(
     for e in &mut lexed.errors[moved..] {
         e.range = TextRange::new(shift(e.range.start(), delta), shift(e.range.end(), delta));
     }
+    // ## m3b-t05-incremental fix round 1 (C1): which checkpoints stay exact. One before `cp`
+    // keeps its bytes and its line feed (both lie before the edit, and the token before it ends
+    // at that line feed). One after the old resync point `old_end` keeps the line feed before it
+    // too: that byte is at or after `old_end`, which is at or after the edit's end, so it is
+    // part of the unchanged suffix. One *at* `old_end` does not: the new resync point may be the
+    // edit's end itself, so the byte before it may be new text (a joined line). It is dropped,
+    // as is every one inside the relexed region (the new lexing records its own there).
     let lo = lexed.checkpoints.partition_point(|c| usize::from(*c) < cp);
     let hi = lexed
         .checkpoints
-        .partition_point(|c| usize::from(*c) < old_end);
+        .partition_point(|c| usize::from(*c) <= old_end);
     let moved = lo + out.checkpoints.len();
     lexed.checkpoints.splice(lo..hi, out.checkpoints);
     for c in &mut lexed.checkpoints[moved..] {
@@ -170,6 +177,15 @@ fn restart_point(lexed: &Lexed, text: &str, e0: usize) -> (usize, LexState) {
     let token_start = usize::from(lexed.starts[t]);
     let (cp, state) = lexed.checkpoint_before(text_size(token_start));
     let cp = usize::from(cp);
+    // Second guard (fix round 1, C1): a checkpoint is a line start by construction; were one
+    // not, the token before it could look past it (`U` + `&'`, `-` + `- `), so lexing would
+    // restart at the text's start rather than there.
+    let (cp, state) = if cp > 0 && text.as_bytes()[cp - 1] != b'\n' {
+        debug_assert!(false, "checkpoint {cp} is not a line start");
+        (0, lexed.start.clone())
+    } else {
+        (cp, state)
+    };
     // The bytes before the edit are the old text's.
     let line = memchr::memrchr(b'\n', &text.as_bytes()[..token_start]).map_or(0, |lf| lf + 1);
     if line > cp
@@ -209,8 +225,11 @@ fn same_prefix(old: &Lexed, i0: usize, j: usize, out: &Lexed, e0: usize) -> usiz
 const RULE_WINDOW: usize = 256;
 
 /// Whether the edit touches a client command (in the old lexing; the new one is checked as it
-/// is lexed) or a line that names `DELIMITER`, `sql_mode` or `standard_conforming_strings`:
-/// such an edit relexes to the end (R-M3-65).
+/// is lexed) or a line of the new text that is a `DELIMITER` command or a `SET` of `sql_mode`
+/// or `standard_conforming_strings` (its first word is `DELIMITER`, or `SET` with the setting's
+/// name on the line): such an edit relexes to the end (R-M3-65). A `SELECT @@sql_mode` does not
+/// (fix round 1, M4). This is a signal, never needed for exactness: the lexing does not read
+/// those statements (the session's modes are the document's context).
 fn touches_tail_rules(lexed: &Lexed, text: &str, e0: usize, e1_old: usize, e1_new: usize) -> bool {
     let old_len = usize::from(lexed.len);
     if !lexed.kinds.is_empty() {
@@ -227,14 +246,23 @@ fn touches_tail_rules(lexed: &Lexed, text: &str, e0: usize, e1_old: usize, e1_ne
     let from = memchr::memrchr(b'\n', &b[from..e0]).map_or(from, |lf| from + lf + 1);
     let to = (e1_new + RULE_WINDOW).min(b.len());
     let to = memchr::memchr(b'\n', &b[e1_new..to]).map_or(to, |lf| e1_new + lf);
-    let line = &b[from..to];
-    [
-        &b"delimiter"[..],
-        b"sql_mode",
-        b"standard_conforming_strings",
-    ]
-    .iter()
-    .any(|w| contains_ignore_ascii_case(line, w))
+    b[from..to].split(|c| *c == b'\n').any(|line| {
+        let first = line
+            .iter()
+            .position(|c| !c.is_ascii_whitespace())
+            .map_or(&line[..0], |s| {
+                let rest = &line[s..];
+                &rest[..rest
+                    .iter()
+                    .position(|c| !c.is_ascii_alphanumeric() && *c != b'_')
+                    .unwrap_or(rest.len())]
+            });
+        first.eq_ignore_ascii_case(b"delimiter")
+            || (first.eq_ignore_ascii_case(b"set")
+                && [&b"sql_mode"[..], b"standard_conforming_strings"]
+                    .iter()
+                    .any(|w| contains_ignore_ascii_case(line, w)))
+    })
 }
 
 fn contains_ignore_ascii_case(hay: &[u8], needle: &[u8]) -> bool {

@@ -646,3 +646,40 @@ is given out before the end of the stream). Fed in any chunking, it yields the e
 of the whole script. It splits the held text again whenever that has doubled since a split
 that gave out nothing (O(n) overall). A statement still open past `STREAM_STATEMENT_MAX` is
 `TooLong` and ends the stream: its end is never looked for. No consumer until M4b.
+
+**Fix round 1.**
+- **Checkpoints after a relex (C1).** A checkpoint is exact only where the token before it
+  cannot look past it: at a line start. `relex` keeps the old checkpoints before its restart
+  point (their line feed lies before the edit) and those *after* the old resync point (the
+  byte before each is at or after the edit's end, in the unchanged suffix). It used to keep
+  the one *at* the resync point too, and when the edit ends exactly there (a line joined to the
+  checkpointed line, a blank inserted at it) the byte before it is new text: the next relex
+  restarted there and lexed `U` `&'`, `-` `- ` or `$` `fn$` apart. In the whole-pass fallback
+  that lexing became the split Run reads. That checkpoint is now dropped; `restart_point` also
+  refuses a checkpoint that is not a line start (debug assertion; the text's start otherwise).
+  The tests check every checkpoint after every edit (`tests/support/edits.rs`,
+  `checkpoints_hold`), over seeded runs of up to eight edits on scripts up to 16 KiB, biased to
+  end at checkpoints, line starts and statement starts; T20's `relex_equivalence` fuzz target
+  takes the same generator (`Rng::from_bytes`).
+- **The tail-relex signal (M4)** reads the first word of the touched lines: `DELIMITER`, or
+  `SET` with `sql_mode` / `standard_conforming_strings` on the line. `SELECT @@sql_mode` no
+  longer relexes to the end on every keystroke. The signal never matters for exactness.
+- **Open items (routed by the controller).**
+  - *The stream holds unbounded text on MySQL/MariaDB.* With no block-tracked statement held,
+    `StreamSplitter` gives out nothing before `finish` (a later stray `END` would refuse back to
+    the script's start), so a plain dump is held whole in memory: the 64 MiB cap bounds one open
+    statement, not the held text. This must be settled before M4b wires "Run as script".
+  - *`DELIMITER`, `source` and sqlite3 `.cmd` arguments* still make an odd quote cost the rest
+    of the document's lexing (follow-up (b) covers backslash commands only).
+  - *A byte-order mark at a restart* (right after a client command): the splitter reads it as
+    white space when it lexes again from there, as text when the document's lexing has a token
+    there. The fast path declines it; the sound fix is a lexer entry that lexes a slice whose
+    offset 0 is not a document start. `StreamSplitter` splits without the document's lexing, so
+    there "Run as script" can split differently from the editor's preview: the same fix closes
+    both.
+- **Typing figures beside R-M3-9** (release, gen-sql 50k lines; recorded, not budgeted): B3's
+  phrase typed and erased at the end of line 25,000 (its `'İzmir'` opens a string mid-file)
+  p50 0.4–0.5 ms, p95 2.2–2.7 ms, max 22–121 ms over three runs (the keystrokes that
+  leave the rest of the file inside a string take the whole pass); typing in the middle of a
+  100,000-character line p50 5 ms, p95 6–8 ms (no line starts there: the relex and the window cover the line); in a
+  1 MiB one-line script p50 47 ms (the whole text, as in M3a). All of it runs on the worker.

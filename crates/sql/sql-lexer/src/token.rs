@@ -211,6 +211,13 @@ impl Lexed {
         &self.start
     }
 
+    /// Every checkpoint (`checkpoint_before`), in text order: the invariant checks of the
+    /// incremental tests read them (fix round 1, C1).
+    #[doc(hidden)]
+    pub fn checkpoints(&self) -> &[TextSize] {
+        &self.checkpoints
+    }
+
     /// The number of tokens.
     pub fn len(&self) -> usize {
         self.kinds.len()

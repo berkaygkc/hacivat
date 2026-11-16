@@ -68,6 +68,21 @@ pub(crate) struct Resplit {
     pub editor: Split,
     pub execution: Option<Split>,
     pub delta: DocDelta,
+    pub path: ApplyPath,
+}
+
+// ## m3b-t05-incremental fix round 1 (I1): which path an `apply` took, for the tests that show
+// the properties reach every one.
+/// How the last `SqlDocument::apply` split the text again (`SqlDocument::last_apply_path`).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ApplyPath {
+    /// `"new"` (no `apply` yet), `"whole"` (the whole pass), `"window"` (the first window),
+    /// `"retried"` (a later window), `"to-end"` (the window to the text's end).
+    pub how: &'static str,
+    /// The window's start fell back to the text's start after `ANCHOR_SCAN` items without an
+    /// anchor.
+    pub scan_exhausted: bool,
 }
 
 /// The edit as one change: `[p, old_end)` of the old text became `[p, new_end)` of the new.
@@ -90,7 +105,11 @@ pub(crate) fn resplit(old: &Old, new_text: &str, change: Change) -> Option<Respl
     let a = old.analysis;
     let cp = client_profile(old.flavor);
     let mysql = split_profile(&old.ctx).family == BlockFamily::MySql;
-    let (k, start) = window_start(old.text, a, change.p);
+    let (k, start, scan_exhausted) = window_start(old.text, a, change.p);
+    let path = |how| ApplyPath {
+        how,
+        scan_exhausted,
+    };
     // A stray `END` at or after the window's start refuses back past it.
     if mysql && a.items[k..].iter().any(|it| stray_end(old.text, it)) {
         return None;
@@ -108,12 +127,16 @@ pub(crate) fn resplit(old: &Old, new_text: &str, change: Change) -> Option<Respl
         .items
         .partition_point(|it| usize::from(smart_start(it)) <= change.old_end);
     let mut skip = 0usize;
-    for _ in 0..WINDOW_TRIES {
+    for attempt in 0..WINDOW_TRIES {
         let Some((m, end)) = anchor_from(old.text, a, first + skip, change.old_end) else {
             break;
         };
         if let Some(r) = window(old, new_text, change, (k, start), (m, end), &delim) {
-            return Some(r);
+            let how = if attempt == 0 { "window" } else { "retried" };
+            return Some(Resplit {
+                path: path(how),
+                ..r
+            });
         }
         skip = skip * 2 + 1;
     }
@@ -126,10 +149,15 @@ pub(crate) fn resplit(old: &Old, new_text: &str, change: Change) -> Option<Respl
         (a.items.len(), old.text.len()),
         &delim,
     )
+    .map(|r| Resplit {
+        path: path("to-end"),
+        ..r
+    })
 }
 
-/// The window's start: the last anchor at or before `e0` and its item, else the text's start.
-fn window_start(text: &str, a: &Analysis, e0: usize) -> (usize, usize) {
+/// The window's start: the last anchor at or before `e0` and its item, else the text's start
+/// (and whether that is because `ANCHOR_SCAN` items had no anchor).
+fn window_start(text: &str, a: &Analysis, e0: usize) -> (usize, usize, bool) {
     let mut k = a
         .items
         .partition_point(|it| usize::from(smart_start(it)) <= e0);
@@ -141,10 +169,10 @@ fn window_start(text: &str, a: &Analysis, e0: usize) -> (usize, usize) {
         if let Some(line) = anchor(text, a, c)
             && line <= e0
         {
-            return (c, line);
+            return (c, line, false);
         }
     }
-    (0, 0)
+    (0, 0, k > 0)
 }
 
 /// The first anchor after `after` among the items from `from` on: its item and line.
@@ -238,6 +266,7 @@ fn window(
         editor,
         execution,
         delta: doc_delta,
+        path: ApplyPath::default(),
     })
 }
 

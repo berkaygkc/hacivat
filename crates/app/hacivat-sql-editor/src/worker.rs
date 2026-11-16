@@ -253,3 +253,115 @@ pub(crate) async fn previews(
         }
     }
 }
+
+// ## m3b-t05-incremental fix round 1 (M2): the worker's incremental path, directly.
+#[cfg(test)]
+mod tests {
+    use sql_dialect::DialectId;
+
+    use super::*;
+
+    fn apply(old: &str, edit: &TextEdit) -> String {
+        let mut s = old.to_owned();
+        edit.apply(&mut s).unwrap();
+        s
+    }
+
+    /// The edit `change_between` finds turns `old` into `new`, on character boundaries.
+    fn check(old: &str, new: &str) {
+        let buffer = TextBuffer::from_str(new);
+        match change_between(old, &buffer) {
+            None => assert_eq!(old, new),
+            Some(e) => assert_eq!(apply(old, &e), new, "{e:?}"),
+        }
+    }
+
+    #[test]
+    fn change_between_finds_the_one_changed_range() {
+        check("", "");
+        check("SELECT 1;", "SELECT 1;");
+        assert!(change_between("SELECT 1;", &TextBuffer::from_str("SELECT 1;")).is_none());
+        check("", "SELECT 1;");
+        check("SELECT 1;", "");
+        check("SELECT 1;", "DROP TABLE t;");
+        let e = change_between("SELECT 1;", &TextBuffer::from_str("SELECT 12;")).unwrap();
+        assert_eq!(
+            (e.delete, e.insert.as_str()),
+            (TextRange::new(size(8), size(8)), "2")
+        );
+        // A change between two multi-byte characters that share their lead byte stays on
+        // character boundaries.
+        check("'ş'", "'ğ'");
+        check("ş", "ğ");
+    }
+
+    #[test]
+    fn change_between_over_a_rope_of_many_chunks() {
+        // Multi-byte characters everywhere, so chunk edges fall next to them; edits, then the
+        // undo that brings the text back.
+        let base: String = (0..4_000)
+            .map(|i| format!("SELECT 'çğİş{i}' AS ı;\n"))
+            .collect();
+        let buffer = TextBuffer::from_str(&base);
+        assert!(buffer.chunks_in(0..buffer.len_bytes()).count() > 8);
+        let mut seed = 7u64;
+        let mut next = |n: usize| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 33) as usize) % n.max(1)
+        };
+        for _ in 0..200 {
+            let mut a = next(base.len());
+            while !base.is_char_boundary(a) {
+                a -= 1;
+            }
+            let mut b = (a + next(40)).min(base.len());
+            while !base.is_char_boundary(b) {
+                b -= 1;
+            }
+            let ins = ["", "x", "ç", "İı", "\n", "'"][next(6)];
+            let new = format!("{}{ins}{}", &base[..a], &base[b..]);
+            check(&base, &new);
+            check(&new, &base);
+        }
+    }
+
+    fn job(version: u64, generation: u64, text: &str) -> Job {
+        Job {
+            version,
+            generation,
+            buffer: TextBuffer::from_str(text),
+            ctx: DialectCtx::new(DialectId::Postgres, None),
+            flavor: ClientFlavor::Psql,
+        }
+    }
+
+    #[test]
+    fn the_kept_document_is_brought_up_to_each_job() {
+        let texts = [
+            "SELECT 1;\nSELECT 2;\n".repeat(300),
+            format!("{}SELECT 3;\n", "SELECT 1;\nSELECT 2;\n".repeat(300)),
+            format!(
+                "\\set x 'a\n{}SELECT 3;\n",
+                "SELECT 1;\nSELECT 2;\n".repeat(300)
+            ),
+            "SELECT 'open\n".to_owned(),
+        ];
+        let mut kept = None;
+        for (i, text) in texts.iter().enumerate() {
+            // The context generation changes once, before the last job.
+            let generation = u64::from(i == texts.len() - 1);
+            let (a, k) = analyse_from(kept, &job(i as u64, generation, text));
+            let fresh = SqlDocument::new(text.clone(), *a.doc.ctx(), a.doc.flavor());
+            assert_eq!(a.doc.text(), text.as_str());
+            assert_eq!(a.doc.lexed(), fresh.lexed());
+            assert_eq!(a.doc.editor_split(), fresh.snapshot().editor_split());
+            assert_eq!(a.doc.execution_split(), fresh.snapshot().execution_split());
+            // Applied (a later revision), not rebuilt, while the generation is the same.
+            let applied = i > 0 && i < texts.len() - 1;
+            assert_eq!(k.doc.revision() > 0, applied, "job {i}");
+            kept = Some(k);
+        }
+    }
+}

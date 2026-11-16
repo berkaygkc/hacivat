@@ -5,13 +5,15 @@
 //! split-start answers. `StmtKey` is content-addressed (`key.rs`), so the fixtures that count
 //! keys hold distinct statements.
 
+#[path = "../../sql-lexer/tests/support/edits.rs"]
+mod edits;
 #[path = "../../sql-lexer/tests/support/gen_sql.rs"]
 mod gen_sql;
 
 use std::time::Instant;
 
 use proptest::prelude::*;
-use sql_dialect::{ClientFlavor, DialectCtx, DialectId};
+use sql_dialect::{ClientFlavor, DialectCtx, DialectId, lex_profile};
 use sql_split::{DocDelta, Item, SqlDocument};
 use sql_text::{TextEdit, TextRange, TextSize};
 
@@ -183,6 +185,12 @@ fn same_as_fresh(d: &SqlDocument, probes: &[usize]) -> Result<(), String> {
     if d.lexed() != fresh.lexed() {
         return Err("the lexing differs".into());
     }
+    // Equal lexings may keep different checkpoints; every one must still hold (fix round 1).
+    let ctx = ctx_of(d);
+    let lp = lex_profile(&ctx)
+        .or_else(|_| lex_profile(&DialectCtx::new(DialectId::Generic, None)))
+        .map_err(|e| format!("{e:?}"))?;
+    edits::checkpoints_hold(d.text(), d.lexed(), lp, ctx.modes)?;
     if d.statements() != fresh.statements() {
         return Err(format!(
             "the editor items differ:\n{:#?}\n{:#?}",
@@ -362,6 +370,156 @@ fn multi_range_edit_batches_apply_in_order() {
     same_as_fresh(&d, &[0, semis[3], semis[10], semis[40]]).unwrap();
 }
 
+// ---- fix round 1 (C1, I1) ----------------------------------------------------------------------
+
+/// The setups of the seeded runs, by index.
+fn setup_at(i: usize) -> (DialectId, ClientFlavor) {
+    let all = [
+        (DialectId::Postgres, ClientFlavor::Psql),
+        (DialectId::Postgres, ClientFlavor::None),
+        (DialectId::MySql, ClientFlavor::MySqlCli),
+        (DialectId::MySql, ClientFlavor::None),
+        (DialectId::MariaDb, ClientFlavor::MySqlCli),
+        (DialectId::Sqlite, ClientFlavor::Sqlite3),
+        (DialectId::Sqlite, ClientFlavor::None),
+        (DialectId::Generic, ClientFlavor::None),
+    ];
+    all[i % all.len()]
+}
+
+/// One seeded run: a script (up to 16 KiB, or with more statements on one line than
+/// `ANCHOR_SCAN`), then 1–8 edits biased to start or end at checkpoints, line starts and
+/// statement starts (anchors); after each, the document answers as a fresh one and every
+/// checkpoint holds. Returns the paths the edits took.
+fn resplit_run(seed: u64) -> Result<Vec<sql_split::incremental::ApplyPath>, String> {
+    let mut r = edits::Rng::new(seed);
+    let (id, flavor) = setup_at(r.below(8));
+    let text = edits::doc(&mut r);
+    let mut d = SqlDocument::new(text, DialectCtx::new(id, None), flavor);
+    let mut paths = Vec::new();
+    for step in 0..1 + r.below(8) {
+        if r.below(2) == 0 {
+            // The worker computes the execution split before the next edit arrives.
+            let _ = d.snapshot().execution_split();
+        }
+        let mut marks: Vec<usize> = d
+            .lexed()
+            .checkpoints()
+            .iter()
+            .map(|c| usize::from(*c))
+            .collect();
+        marks.extend(
+            d.statements()
+                .iter()
+                .filter_map(Item::statement)
+                .map(|s| usize::from(s.smart.start())),
+        );
+        let e = edits::edit(&mut r, d.text(), &marks);
+        d.apply(std::slice::from_ref(&e))
+            .map_err(|x| format!("seed {seed}: {x:?}"))?;
+        paths.push(d.last_apply_path());
+        let probes = [r.next() as usize, r.next() as usize, r.next() as usize];
+        same_as_fresh(&d, &probes).map_err(|x| format!("seed {seed}, edit {step} ({e:?}): {x}"))?;
+    }
+    Ok(paths)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: edits::cases(10_000), ..ProptestConfig::default() })]
+
+    /// Runs of edits over scripts of every size (fix round 1, I1); 10,000 cases in PR (each is up
+    /// to eight edits on up to 16 KiB, each compared with a fresh build), `PROPTEST_CASES`
+    /// otherwise.
+    #[test]
+    fn incremental_resplit_over_edit_runs(seed in any::<u64>()) {
+        resplit_run(seed).map_err(TestCaseError::fail)?;
+    }
+}
+
+#[test]
+fn the_edit_runs_reach_every_path() {
+    // The window, a later window, the window to the end, the whole pass, and a window start
+    // that fell back to the text's start after `ANCHOR_SCAN` items without an anchor.
+    let mut seen = std::collections::BTreeMap::new();
+    for seed in 0..400 {
+        for p in resplit_run(seed).unwrap() {
+            *seen.entry(p.how).or_insert(0) += 1;
+            if p.scan_exhausted {
+                *seen.entry("scan-exhausted").or_insert(0) += 1;
+            }
+        }
+    }
+    for path in ["window", "retried", "to-end", "whole", "scan-exhausted"] {
+        assert!(seen.contains_key(path), "{path} never taken: {seen:?}");
+    }
+}
+
+#[test]
+fn a_checkpoint_after_a_joined_line_is_dropped() {
+    // The reviewer's repros (C1): the second line starts at 2048, a lexer checkpoint. Join it to
+    // the line before (delete the line feed), then type what makes the token before the old
+    // checkpoint look past it. The MySQL case with a stray `END` takes the whole pass, which
+    // used to run over the wrong relexed tokens: a split with statements the server reads as a
+    // comment.
+    let cases = [
+        (
+            DialectId::Postgres,
+            ClientFlavor::Psql,
+            "SELECT U",
+            "&x FROM t;",
+            1,
+            "'",
+        ),
+        (
+            DialectId::Postgres,
+            ClientFlavor::Psql,
+            "SELECT $",
+            "fn x; SELECT 4;",
+            3,
+            "$",
+        ),
+        (
+            DialectId::MySql,
+            ClientFlavor::MySqlCli,
+            "SELECT 1 -",
+            "-x; SELECT 5;",
+            1,
+            " ",
+        ),
+        (
+            DialectId::MySql,
+            ClientFlavor::None,
+            "SELECT 1 -",
+            "-x; SELECT 5; END;",
+            1,
+            " ",
+        ),
+    ];
+    for (id, flavor, prev, line, offset, typed) in cases {
+        let mut text = String::new();
+        while text.len() < 2048 - 40 {
+            text.push_str("SELECT 1;\n");
+        }
+        text.push_str(&" ".repeat(2048 - text.len() - prev.len() - 1));
+        text.push_str(prev);
+        text.push('\n');
+        let c = text.len();
+        text.push_str(line);
+        text.push_str("\nSELECT 2;\nSELECT 3;\n");
+        let mut d = SqlDocument::new(text, DialectCtx::new(id, None), flavor);
+        assert!(d.lexed().checkpoints().contains(&at(c)), "{line}");
+        for e in [
+            edit(c - 1, c, ""),
+            edit(c - 1 + offset, c - 1 + offset, typed),
+        ] {
+            let _ = d.snapshot().execution_split();
+            d.apply(std::slice::from_ref(&e)).unwrap();
+            same_as_fresh(&d, &[0, c, c + 4, d.text().len()])
+                .unwrap_or_else(|x| panic!("{line}: {x}"));
+        }
+    }
+}
+
 /// The cases the equivalence property found while the fast path was built: each must equal a
 /// fresh document (the fast path declines them or handles them).
 #[test]
@@ -388,6 +546,19 @@ fn cases_the_property_found() {
         DialectId::Postgres,
         ClientFlavor::Psql,
         &[edit(26, 26, "'"), edit(23, 23, "'")],
+    );
+    // A statement that starts with a byte-order mark (not at offset 0) and runs into an
+    // unterminated hint: the stability rule ended it inside the mark (M3a: a fresh build
+    // panicked too; fix round 1).
+    check(
+        "\u{feff}/*+ SET_VAR(a=1) */",
+        DialectId::MariaDb,
+        ClientFlavor::MySqlCli,
+        &[
+            edit(6, 6, "DELIMITER $$\n"),
+            edit(0, 0, " "),
+            edit(30, 35, "/*!"),
+        ],
     );
     // A byte-order mark right after a mysql `\g`: the pass restarts there.
     check(
@@ -471,4 +642,87 @@ fn relex_typing_edit_p95_under_2ms() {
     let p95 = gen_sql::p95(&mut times);
     println!("relex + resplit p95 over 1,000 typing edits on 50k lines: {p95:?} ({fast} local)");
     assert!(p95.as_micros() <= 2_000, "{p95:?}");
+}
+
+/// Types `phrase` character by character at `at`, then erases it, timing each `apply` with the
+/// previous snapshot held (the worker's case); the document is then the text it started as.
+fn type_and_erase(d: &mut SqlDocument, at: usize, phrase: &str) -> Vec<std::time::Duration> {
+    let mut times = Vec::new();
+    let mut pos = at;
+    for ch in phrase.chars() {
+        let held = d.snapshot();
+        let _ = held.execution_split();
+        let start = Instant::now();
+        d.apply(&[edit(pos, pos, ch.encode_utf8(&mut [0; 4]))])
+            .unwrap();
+        times.push(start.elapsed());
+        pos += ch.len_utf8();
+    }
+    for ch in phrase.chars().rev() {
+        let held = d.snapshot();
+        let start = Instant::now();
+        d.apply(&[edit(pos - ch.len_utf8(), pos, "")]).unwrap();
+        times.push(start.elapsed());
+        pos -= ch.len_utf8();
+        drop(held);
+    }
+    times
+}
+
+fn figure(times: &mut [std::time::Duration]) -> String {
+    times.sort_unstable();
+    format!(
+        "p50 {:?} p95 {:?} max {:?}",
+        times[times.len() / 2],
+        times[(times.len() * 95 / 100).min(times.len() - 1)],
+        times[times.len() - 1]
+    )
+}
+
+#[test]
+#[ignore = "perf"]
+fn typing_figures_inside_an_open_string_and_on_a_long_line() {
+    if !gen_sql::perf_enabled() {
+        return;
+    }
+    // Recorded for T30/T44 next to the R-M3-9 figure (fix round 1, M3), not budgeted by it:
+    // typing B3's phrase, whose `'İzmir'` is a string opened mid-file (every keystroke until
+    // the closing quote leaves the rest of the file inside a string: the whole pass, O(tail)),
+    // and typing on a long line (no line starts there: the relex and the window cover the line).
+    const PHRASE: &str = " AND c.city = 'İzmir' OR o.total > 4200";
+    let fixture = gen_sql::gen_sql(50_000);
+    let line = fixture
+        .match_indices('\n')
+        .nth(24_999)
+        .map_or(fixture.len(), |(i, _)| i);
+    let mut d = SqlDocument::new(fixture.clone(), pg(), ClientFlavor::Psql);
+    let mut burst = Vec::new();
+    for _ in 0..3 {
+        burst.extend(type_and_erase(&mut d, line, PHRASE));
+    }
+    assert_eq!(d.text(), fixture);
+    println!(
+        "typing B3's phrase at the end of line 25,000 of 50k lines (string opened mid-file): {}",
+        figure(&mut burst)
+    );
+    // The T1 fixture: 50k lines and a 100,000-character minified line, typed into its middle.
+    let long = format!("{fixture}{}\n", gen_sql::minified_line(100_000));
+    let mid = fixture.len() + 50_000;
+    let mid = (0..=mid).rev().find(|i| long.is_char_boundary(*i)).unwrap();
+    let mut d = SqlDocument::new(long.clone(), pg(), ClientFlavor::Psql);
+    let mut times = type_and_erase(&mut d, mid, "x AND y");
+    assert_eq!(d.text(), long);
+    println!(
+        "typing in the middle of a 100,000-character line after 50k lines: {}",
+        figure(&mut times)
+    );
+    // A 1 MB script on one line (a mysqldump extended INSERT is like this).
+    let one = gen_sql::minified_line(1 << 20);
+    let mut d = SqlDocument::new(one.clone(), pg(), ClientFlavor::Psql);
+    let mut times = type_and_erase(&mut d, one.len() / 2 - 7, "x AND y");
+    println!(
+        "typing in the middle of a 1 MiB one-line script: {}",
+        figure(&mut times)
+    );
+    same_as_fresh(&d, &[0, one.len() / 2]).unwrap();
 }

@@ -165,6 +165,13 @@ pub fn gen_sql(lines: usize) -> String {
     sql
 }
 
+/// One minified statement repeated to exactly `chars` characters, with no newline (`gen-sql
+/// --long-line`).
+pub fn minified_line(chars: usize) -> String {
+    const STMT: &str = "SELECT c.full_name,c.city,count(o.id) AS orders FROM customers c JOIN orders o ON o.customer_id=c.id WHERE c.city IN ('İstanbul','Iğdır') AND o.id IN (100231,100232,100233) GROUP BY c.full_name,c.city;";
+    STMT.chars().cycle().take(chars).collect()
+}
+
 /// A deterministic PRNG for the perf tests' edit positions (SplitMix64).
 pub struct Positions(u64);
 
