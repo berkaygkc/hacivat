@@ -89,11 +89,8 @@ impl Decision {
 
 /// The verdict for `r` under `p` for `a` (`alg/13` SQL-SAFE-04; see the module docs).
 pub fn decide(r: &SafetyReport, p: Profile, a: Actor) -> Decision {
-    // T3-merge: pass value. Task 3 changes `set_allowed` to take the value
-    // (`set_allowed(d, name, value)`, P-M3b-T3-1); this becomes `decide_with(r, p, a,
-    // &set_allowed)`. Until then the value is dropped, which only refuses more (the stub list
-    // allows nothing).
-    decide_with(r, p, a, &|d, name, _value| set_allowed(d, name))
+    // Each SET target's value reaches the list (P-M3b-T3-1: PG `search_path`).
+    decide_with(r, p, a, &set_allowed)
 }
 
 // ---------------------------------------------------------------------------------------------

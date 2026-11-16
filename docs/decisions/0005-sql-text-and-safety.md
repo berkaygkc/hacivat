@@ -727,8 +727,8 @@ this section where they differ.
 - **`SET` targets.** `StmtReport` gains `set_targets: Vec<SetTarget { name, value }>`, filled by
   the backends for `SET`/`RESET`. The harmless check passes each target's value to the list,
   for P-M3b-T3-1 (`search_path` is harmless only when `pg_catalog` is absent or first). A
-  `None` value is fail-closed. Until Task 3's `set_allowed(d, name, value)` merges, `decide`
-  drops the value; the site is marked `T3-merge: pass value`. A `SET` that names no target is
+  `None` value is fail-closed. `decide` calls Task 3's `set_allowed(d, name, value)` directly
+  since Task 3 merged (`search_path_value_reaches_the_list`). A `SET` that names no target is
   refused with `SessionState`, so every `SetNotAllowlisted` names its variable.
 - **Minor fixes (M1–M5).**
   - **M1:** `Decision.class` rises with reason evidence.

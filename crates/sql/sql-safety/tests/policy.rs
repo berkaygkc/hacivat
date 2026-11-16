@@ -6,7 +6,7 @@ mod common;
 
 use common::{
     arb_parts, explain_analyze_read, reason, report, request, request_in, set_of, set_with, single,
-    stmt_full, unknown,
+    stmt_full, unknown, value_for,
 };
 use proptest::prelude::*;
 use serde::Deserialize;
@@ -566,8 +566,7 @@ fn read_only_denies_set_unless_allowlisted() {
         "idle_in_transaction_session_timeout",
         "standard_conforming_strings",
     ] {
-        // T3-merge: pass value — `set_allowed(DialectId::Postgres, name, Some(value_for(name)))`.
-        let allowed = set_allowed(DialectId::Postgres, name);
+        let allowed = set_allowed(DialectId::Postgres, name, Some(value_for(name)));
         for p in [Profile::ReadOnly, Profile::ReadOnlyPlusExplain] {
             let d = decide(&set_of(pg, &[name]), p, Actor::Human);
             if allowed {
@@ -863,11 +862,9 @@ fn a_set_off_the_read_only_profiles_is_the_session_row() {
     }
 }
 
-/// T3-merge (P-M3b-T3-1): `SET search_path` is harmless only when `pg_catalog` is absent or
-/// first. Ignored until Task 3's `set_allowed(d, name, value)` lands; the controller enables
-/// it at the merge.
+/// P-M3b-T3-1: `SET search_path` is harmless only when `pg_catalog` is absent or first; the
+/// value reaches Task 3's `set_allowed(d, name, value)` through `SetTarget`.
 #[test]
-#[ignore = "T3-merge: needs Task 3's set_allowed(d, name, value) and its PG list"]
 fn search_path_value_reaches_the_list() {
     let pg = Some(DialectId::Postgres);
     let ro = |value| {
