@@ -461,9 +461,10 @@ fn dispatch(
             chooser::open_uncertain(console, vec![reason], cx);
         }
         Resolution::Refused { at, reason } => {
+            // ## m3b-t15-gate (named exception): `RefuseReason::RunAsOne` is gone (a selection
+            // run as one runs as one unit, R-M3-60), so the copy refusal is the only reason.
             let msg = match reason {
                 RefuseReason::CopyStream => LogMsg::CopyUnsupported,
-                RefuseReason::RunAsOne => LogMsg::NotStarted(view_of(reason.fluent_id())),
             };
             log_not_sent(console, msg, at, cx);
             say(console, reason.fluent_id(), cx);

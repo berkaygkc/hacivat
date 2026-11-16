@@ -728,3 +728,117 @@ wired into Run before Task 24 (R-M3-52).
   - *Stopped early (m10).* `ClosedEarly` is logged only when more statements ran; the stop's own line covers the rest.
   - *Read-only sessions (m11).* MySQL warnings on a read-only session are not read, and their count is not logged either; the guard's `ROLLBACK` follows at once.
   - *The output log is not a chain sink (m12, ruling).* The observer writes the output log directly, keeping M3a's order and timing, instead of through an async chain sink. The M8 chain sinks (`hacivat-audit`) will consume the same `RunEvent`s through `AuditorChain::push_sink`.
+
+## m3b-t15 — gate
+
+- **Order (R-M3-55).** Per unit, the first rule that decides wins: a stale report (no report,
+  a report count that differs from the unit count, or `matches_text(final_text)` false;
+  P-M3b-2) is denied; the classifier stub's `NotImplemented` pre-decision is denied on every
+  connection (F31); a read-only connection runs only `Read`, or `Session` on the harmless-`SET`
+  list, and only when `decide(.., ReadOnlyPlusExplain, Human)` allows (R-M3-56); on
+  production `decide(.., Admin, Human)` must not deny; then the D-062 wrap; then the class row;
+  then type-to-confirm, the MySQL/MariaDB implicit commit and suppression. Production stays
+  read-only until Task 26 because its consoles are read-only connections: the gate is gated as
+  read-only first, so it unlocks nothing (R-M3-52).
+- **The production AND-check.** `decide(Admin)` is the profile whose rules R-M3-55 does not
+  contradict (`ReadWriteDml`/`Ddl` would deny what R-M3-55 runs or confirms). Its `Deny`
+  denies (its first reason is the gate's reason: a parse error, a lexical-mode change, a role
+  switch, an ambiguous boundary). Its `Confirm` on a class whose own `admin` row allows (`Read`,
+  `Lock`, `Dml`, `DmlUnsafe`, `DdlOther`, `DdlDestructive`) means it saw evidence the gate
+  class did not, so the unit becomes `Unknown` (Confirm). The request-level class, effects and
+  flags also floor the class through `gate_class` of a synthetic statement, so they never lower
+  it. Off production the AND-check does not run: R-M3-55's "everything else runs" and the
+  server decides.
+- **Type-to-confirm** comes from the destructive kinds, not the class (a `DROP` in the same
+  unit hides `DmlUnsafe`): every unsafe-DML target and every `DROP DATABASE/SCHEMA` target.
+  The name is the user's spelling (each part's bytes as written, quotes removed, never folded):
+  the pattern's range when it reads as the target, else the first dotted name in the
+  statement whose parts `ident_eq` the target's, else the classifier's spelling (PG targets
+  are server-resolved, T9 carry). A pattern without a target, or two different targets, deny
+  (`exec-unsafe-no-target`, `exec-unsafe-several-targets`): typing one name never approves
+  another table.
+- **Implicit commit.** `SessionEffects::DDL` is set for every DDL statement (temporary ones
+  included on PostgreSQL; on MySQL/MariaDB/TiDB see fix round 1: temporary `CREATE`/`DROP`
+  excluded) and, on MySQL/MariaDB/TiDB, for privilege statements. With a transaction open as the gate sees it (any status but idle,
+  or a Manual session) the unit is `Confirm` with verdict `ImplicitCommit`, never suppressible;
+  `irreversible` is set for every such DDL on those engines.
+- **Verdicts.** `Read` only when the report reads only (`reads_only`: every statement's class
+  field, effects and gate class `Read`, none opening a write, the request-level fields agreeing);
+  `Routine` and `Unknown` are `Unknown` with every session effect but `DDL`, never `Write`.
+  R-M3-23 is ANDed through `units::suspendable_for` (`apply_read_verdicts`), the same condition
+  as the `Read` verdict: `RunUnit.suspendable = prepared.unit.suspendable && verdict == Read`.
+- **D-062.** A lone `EXPLAIN ANALYZE` whose inner class is not `Read` is wrapped; an `Unknown`
+  inner gets the wrap; `Routine`/`Admin` inners are refused, and so are DDL inners on
+  MySQL/MariaDB/TiDB (their implicit commit would end the wrapping transaction). One inside a
+  unit of several statements is refused (the rollback would undo the other statements).
+- **Suppression.** `(console, fingerprint)` for a suppressible `Confirm` or `Warn`, production
+  included (NOTES ruling 4); never with type-to-confirm or an implicit commit.
+- **Parameters.** `prepare_units` refuses the first unit with any diagnostic but the
+  informational `QuestionMarkOff`, or a placeholder without a rewrite (any unbindable
+  placeholder: nothing is sent), and a bind plan with a slot no name fills (`$2` alone). Values
+  come from the store; one prompt per distinct name of the run. `masked` masks every literal and
+  comment of a text that mentions a password (`password`, `identified`, `passwd`, `pwd=`), the
+  rest of the text after an unclean token; bind values never appear in the text.
+- **Run as one.** `RefuseReason::RunAsOne` is gone: a `Verbatim` unit resolves like any other
+  and runs as one (`protocol_for` → `Protocol::Simple`, `expect_for` → `Expect::Script`).
+- **Fix round 1 (controller rulings on the review).**
+  - *Not analysed (I1).* A pre-decided report, or one with no statement, is denied on
+    production and read-only connections. Off production it never runs silently: when the
+    unit's words hold a write or DDL keyword (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `REPLACE`,
+    `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, `CALL`, `DO`, `LOAD`, `COPY`,
+    `INTO`, `EXEC`, … including the words inside MySQL executable comments, and the rest of the
+    text after a token the lexer could not read), it asks one calm confirmation
+    (`exec-gate-not-analysed`, never suppressible); otherwise it runs, so dumps such as
+    `/*!40101 SET NAMES utf8 */` keep working. A `Verbatim` unit whose only reason is
+    `AmbiguousBoundary` follows the same rule (R-M3-60 on production is denied: PO list).
+  - *D-062 on production (I2, M7).* An `Unknown` inner, a unit the AND-check made `Unknown`,
+    and on MySQL/MariaDB/TiDB every wrapped inner ask before the wrap: `Confirm` with verdict
+    `ExplainAnalyzeRollback`, never suppressible, naming what a rollback does not undo
+    (sequence advances, session advisory locks, dblink and other file or network I/O, writes to
+    non-transactional MyISAM tables; `exec-explain-analyze-not-undone`). The wrap itself is
+    unchanged off production.
+  - *DROP DATABASE/SCHEMA (I3).* The gate also reads `DROP DATABASE|SCHEMA [IF EXISTS] <name>`
+    from the statement's words and asks for the typed name whatever kind the backend gave the
+    target; no readable name denies (`exec-unsafe-no-target`). The interim backend (named
+    exception in T10's `interim.rs`) now gives a `DROP` target its object kind (`Database`,
+    `Schema`, `Table`, `View`, `Role`, `Sequence`, `Other`).
+  - *Parameters (I4, M2, M5, D8 ruling).* Remembered values only pre-fill the prompt: a
+    statement with parameters always returns `NeedsValues` first, and only this run's
+    `ParamAnswers` (`prepare_units_with`) make it `Ready`. Ordinal and anonymous parameters
+    (`?`, `?NNN`, `$n`) are never remembered (`ParamPrompt::rememberable`) and belong to their
+    unit (`ParamPrompt.unit`): two units never share one prompt. A bind plan with a slot no
+    placeholder fills (`$2` alone) is refused before any prompt.
+  - *Implicit commits on MySQL/MariaDB/TiDB (I5, M3).* One list in
+    `hacivat_exec::implicit_commit`, from MySQL 8.4 Reference Manual §15.3.3 "Statements That
+    Cause an Implicit Commit" (8.0: §13.3.3) and the MariaDB Knowledge Base page "SQL statements
+    That Cause an Implicit Commit": DDL except `CREATE`/`DROP TEMPORARY TABLE` (which do not
+    commit), `GRANT`/`REVOKE`, `CREATE`/`ALTER`/`DROP`/`RENAME USER`, roles, `SET PASSWORD`,
+    `BEGIN`/`START TRANSACTION`, `LOCK`/`UNLOCK TABLES`, `SET autocommit = 1`,
+    `ANALYZE`/`CHECK`/`OPTIMIZE`/`REPAIR TABLE`, `FLUSH`, `RESET`, `CACHE INDEX`,
+    `LOAD INDEX`, `LOAD DATA`/`XML`, `INSTALL`/`UNINSTALL`, replication start/stop/change.
+    The gate sets `SessionEffects::DDL` for exactly these statements on those engines, which is
+    how the session's T19 backstop (`TxError::ImplicitCommitUnconfirmed`) reuses the list.
+    `irreversible` covers their DDL (temporary `CREATE`/`DROP` excluded) and privilege
+    statements.
+  - *One SessionEffects mapping (M8).* `gate::session_effects_of(report, text, engine)` is the
+    single mapping; the classifier pool's `StatementClassifier::effects` (Task 14) delegates to
+    it at the merge.
+  - *Suppression (controller ruling, M4, M9).* On production "don't ask again" never covers
+    `DdlDestructive`, `Admin`, `Routine` or `Unknown` units (`Routine` added because R-M3-55
+    treats it as `Unknown`); a unit of several statements with a write is never suppressible;
+    the key (`GateItem.fingerprint`) mixes the fingerprint with the class.
+- **Fix round 2.**
+  - *Two bits (R1-I1, controller ruling).* `SessionEffects::COMMITS_FIRST = 128` (named
+    exception in `hacivat-session` `verdict.rs`) is set on MySQL/MariaDB/TiDB for exactly the
+    statements of `implicit_commit::commits` (plus privilege statements and DDL other than
+    `CREATE`/`DROP TEMPORARY TABLE`); the gate's implicit-commit rule and T19's backstop key on
+    it. `DDL` means "a DDL statement" again on every engine, temporary-table DDL included, so
+    T16's "schema change" reading holds (`LOAD DATA` keeps its row count). The round-1 bullet
+    that put the list into `DDL` is superseded.
+  - *Raw words (R1-M1).* An unanalysed report's scan reads every ASCII word of the text, strings
+    and comments included, so a lexing-mode difference (`NO_BACKSLASH_ESCAPES`) cannot hide a
+    write; over-counting asks more, never less. Added keywords (R1-M2): `COMMENT`, `NOTIFY`,
+    `XA`, `BINLOG`, `RESTART`, `CLONE`, `ANALYZE`, and `SET GLOBAL`/`PERSIST`/`PERSIST_ONLY`/
+    `@@global.`.
+  - *Listed schemas (R1-M3).* `DROP SCHEMA a, b` read from the words names no single name, so it
+    is denied on production (`exec-unsafe-no-target`).

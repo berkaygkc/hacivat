@@ -943,6 +943,21 @@ pub(crate) fn table_for(d: DialectId) -> Result<&'static Table, &'static str> {
     cell.as_ref().map_err(String::as_str)
 }
 
+// ## m3b-t15-gate (named exception, T15 fix round 1, I3)
+/// The object kind a `DROP`'s `ObjectType` (by its variant name) names; anything else is
+/// `Other`.
+fn drop_object_kind(variant: &str) -> ObjectKind {
+    match variant {
+        "Table" | "ForeignTable" => ObjectKind::Table,
+        "View" | "MaterializedView" => ObjectKind::View,
+        "Schema" => ObjectKind::Schema,
+        "Database" => ObjectKind::Database,
+        "Role" | "User" | "Group" => ObjectKind::Role,
+        "Sequence" => ObjectKind::Sequence,
+        _ => ObjectKind::Other,
+    }
+}
+
 /// The variant's name as `Debug` prints it (`Query`, `ShowVariable`, …), without formatting the
 /// rest of the value.
 fn variant_name<T: fmt::Debug>(v: &T) -> String {
@@ -989,16 +1004,27 @@ impl<'c, 'a> Walk<'c, 'a> {
     }
 
     fn destructive(&mut self, kind: DestructiveKind, target: Option<&ObjectName>) {
+        self.destructive_of(kind, target, ObjectKind::Table);
+    }
+
+    // ## m3b-t15-gate (named exception, T15 fix round 1, I3): a destructive target carries the
+    // kind of object it names (`DROP DATABASE d` → `Database`), so the gate asks for the typed
+    // name on MySQL and MariaDB as it does on PostgreSQL.
+    fn destructive_of(
+        &mut self,
+        kind: DestructiveKind,
+        target: Option<&ObjectName>,
+        object: ObjectKind,
+    ) {
         if self.plain_explain > 0 {
             return;
         }
         let Some(range) = self.range else {
             return;
         };
-        let target = target.and_then(qualified).map(|name| ObjectRef {
-            name,
-            kind: ObjectKind::Table,
-        });
+        let target = target
+            .and_then(qualified)
+            .map(|name| ObjectRef { name, kind: object });
         self.acc.destructive.push(DestructiveReason {
             kind,
             range,
@@ -1082,11 +1108,15 @@ impl<'c, 'a> Walk<'c, 'a> {
                 names,
                 ..
             } => {
-                if matches!(variant_name(object_type).as_str(), "User" | "Role") {
+                let variant = variant_name(object_type);
+                if matches!(variant.as_str(), "User" | "Role") {
                     effects |= EffectSet::PRIVILEGE;
                 }
+                // ## m3b-t15-gate (named exception, T15 fix round 1, I3)
+                let object = drop_object_kind(&variant);
                 for n in names {
-                    self.destructive(DestructiveKind::Drop { cascade: *cascade }, Some(n));
+                    let kind = DestructiveKind::Drop { cascade: *cascade };
+                    self.destructive_of(kind, Some(n), object);
                     self.write_target(n);
                 }
             }
@@ -1569,6 +1599,35 @@ mod tests {
         assert_eq!(variant_name(&s[0]), "ShowTables");
         let s = Parser::parse_sql(&MySqlDialect {}, "SELECT 1").unwrap();
         assert_eq!(variant_name(&s[0]), "Query");
+    }
+
+    // ## m3b-t15-gate (named exception, T15 fix round 1, I3)
+    #[test]
+    fn drop_targets_carry_their_object_kind() {
+        for d in [DialectId::MySql, DialectId::MariaDb] {
+            let ctx = ClassifyCtx::new(
+                DialectCtx::new(d, None),
+                sql_dialect::ClientFlavor::None,
+                crate::Expect::SingleStatement,
+            );
+            for (sql, kind) in [
+                ("DROP DATABASE shop", ObjectKind::Database),
+                ("DROP SCHEMA shop", ObjectKind::Database),
+                ("DROP TABLE t", ObjectKind::Table),
+                ("DROP VIEW v", ObjectKind::View),
+            ] {
+                let r = classify_interim(sql, &ctx);
+                let got: Vec<ObjectKind> = r
+                    .items
+                    .iter()
+                    .flat_map(|s| &s.destructive)
+                    .filter_map(|x| x.target.as_ref().map(|t| t.kind))
+                    .collect();
+                // MySQL parses `SCHEMA` as a synonym of `DATABASE` (either is a typed name).
+                let ok = got == [kind] || (sql.contains("SCHEMA") && got == [ObjectKind::Schema]);
+                assert!(ok, "{d:?} {sql}: {got:?}");
+            }
+        }
     }
 
     /// Fix round 1 (M8): the walk reads `Debug` text in three places (variant names, join

@@ -359,7 +359,8 @@ fn other_ids() -> Vec<&'static str> {
         ]
         .map(uncertain_message_id),
     );
-    ids.extend([RefuseReason::CopyStream, RefuseReason::RunAsOne].map(RefuseReason::fluent_id));
+    // ## m3b-t15-gate: `RunAsOne` is gone (R-M3-60).
+    ids.extend([RefuseReason::CopyStream].map(RefuseReason::fluent_id));
     ids
 }
 

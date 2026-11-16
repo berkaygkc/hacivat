@@ -1564,3 +1564,430 @@ pub mod m3b {
         }
     }
 }
+
+// ## m3b-t15-gate
+
+/// Task 15's report builders (P-M3b-16): the gate's tests build `SafetyReport`s by hand over
+/// the exact final text (dialect and `set_targets` set, as `classify` sets them), so the gate
+/// is tested without Task 14's classifier. `fake_stmt` reads a statement's first words the way
+/// these tests need; it is no classifier and nothing outside these tests uses it.
+pub mod gate_fx {
+    use std::sync::Arc;
+
+    use hacivat_driver::TxStatus;
+    use hacivat_exec::{
+        ConnSafety, ExecUnit, GateDecision, GateItem, ParamAnswers, ParamValueStore, Prepared,
+        PreparedUnit, SafetyReport, SuppressSet, gate, prepare_units, prepare_units_with,
+    };
+    use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
+    use hacivat_session::session::{TxMode, TxOwner};
+    use hacivat_values::{BindValue, LogicalType};
+    use sql_dialect::{DialectCtx, DialectId};
+    use sql_ident::parse_qualified;
+    use sql_safety::effects::class_of;
+    use sql_safety::{
+        Confidence, DestructiveKind, DestructiveReason, EffectSet, ObjectKind, ObjectRef, Reason,
+        ReasonCode, RiskFlags, SetTarget, StmtKind, StmtReport, TouchedObjects,
+    };
+    use sql_split::ParamSettings;
+    use sql_split::exec_range::UnitKind;
+    use sql_text::{TextRange, TextSize};
+
+    /// The dialect of `engine`.
+    pub fn dialect_of(engine: DbmsKind) -> DialectId {
+        match engine {
+            DbmsKind::MySql | DbmsKind::TiDb => DialectId::MySql,
+            DbmsKind::MariaDb => DialectId::MariaDb,
+            DbmsKind::Sqlite => DialectId::Sqlite,
+            _ => DialectId::Postgres,
+        }
+    }
+
+    pub fn ctx_of(engine: DbmsKind) -> DialectCtx {
+        DialectCtx::new(dialect_of(engine), None)
+    }
+
+    /// An object named `name` (a qualified name as written) of `kind`.
+    pub fn object(name: &str, kind: ObjectKind) -> ObjectRef {
+        ObjectRef {
+            name: parse_qualified(DialectId::Postgres, name).expect("a name"),
+            kind,
+        }
+    }
+
+    /// A statement of `kind` with `effects` (class `class_of(effects)`, as the backends write
+    /// it); `over` makes it cover the whole text.
+    pub fn stmt(kind: StmtKind, effects: EffectSet) -> StmtReport {
+        StmtReport {
+            range: TextRange::default(),
+            kind,
+            effects,
+            flags: RiskFlags::empty(),
+            class: class_of(effects),
+            touched: TouchedObjects::default(),
+            reasons: Vec::new(),
+            destructive: Vec::new(),
+            confidence: Confidence::Exact,
+            set_targets: Vec::new(),
+        }
+    }
+
+    /// The plan's builder: a statement of `kind` with `effects` and the destructive `kinds`,
+    /// each on the table `target` (written exactly so).
+    pub fn report(
+        kind: StmtKind,
+        effects: EffectSet,
+        kinds: &[DestructiveKind],
+        target: &str,
+    ) -> StmtReport {
+        let mut s = stmt(kind, effects);
+        s.touched.writes.push(object(target, ObjectKind::Table));
+        s.destructive = kinds
+            .iter()
+            .map(|k| DestructiveReason {
+                kind: *k,
+                range: TextRange::default(),
+                target: Some(object(target, ObjectKind::Table)),
+            })
+            .collect();
+        s
+    }
+
+    pub fn reason(code: ReasonCode, arg: Option<&str>) -> Reason {
+        Reason {
+            code,
+            range: None,
+            arg: arg.map(Arc::from),
+        }
+    }
+
+    /// The request of `items` over exactly `text` in `dialect`, merged and hashed the way
+    /// `classify` does (P-M3b-2); an item whose range is empty covers the whole text.
+    pub fn over(text: &str, dialect: DialectId, mut items: Vec<StmtReport>) -> SafetyReport {
+        let whole = TextRange::up_to(TextSize::from(u32::try_from(text.len()).unwrap()));
+        for s in &mut items {
+            if s.range.is_empty() {
+                s.range = whole;
+            }
+        }
+        let ctx = DialectCtx::new(dialect, None);
+        let mut r = SafetyReport::pre_decided(text, sql_split::hv_norm1(text, &ctx), Vec::new());
+        let (class, effects, flags) = sql_safety::report::merge(&items);
+        r.items = items;
+        r.request_class = class;
+        r.request_effects = effects;
+        r.flags = flags;
+        r.pre_decision = None;
+        r.dialect = Some(dialect);
+        r
+    }
+
+    /// The word after the first of `keys` in `text` (a table, schema or database name).
+    fn name_after(text: &str, keys: &[&str]) -> String {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        for (i, w) in words.iter().enumerate() {
+            if keys.iter().any(|k| w.eq_ignore_ascii_case(k)) {
+                let mut j = i + 1;
+                while words.get(j).is_some_and(|w| {
+                    ["IF", "EXISTS", "ONLY", "TABLE"].contains(&w.to_ascii_uppercase().as_str())
+                }) {
+                    j += 1;
+                }
+                if let Some(n) = words.get(j) {
+                    let n = n.trim_end_matches(';');
+                    return n.split('(').next().unwrap_or_default().to_string();
+                }
+            }
+        }
+        "t".to_string()
+    }
+
+    /// A test-only statement report of `text` by its first words (the module docs).
+    pub fn fake_stmt(text: &str) -> StmtReport {
+        let up = text.to_ascii_uppercase();
+        let has = |w: &str| up.split_whitespace().any(|x| x.trim_end_matches(';') == w);
+        let first = up.split_whitespace().next().unwrap_or_default().to_string();
+        let table = |keys: &[&str]| name_after(text, keys);
+        match first.as_str() {
+            "EXPLAIN" if has("ANALYZE") => {
+                let at = up.find("ANALYZE").unwrap() + "ANALYZE".len();
+                let mut s = fake_stmt(text[at..].trim_start());
+                s.kind = StmtKind::Explain { analyze: true };
+                s.flags |= RiskFlags::EXPLAIN_ANALYZE;
+                s.reasons.push(reason(ReasonCode::ExplainAnalyze, None));
+                s
+            }
+            "SELECT" | "WITH" | "VALUES" | "SHOW" => {
+                if up.contains("FOR UPDATE") {
+                    let mut s = stmt(StmtKind::Select, EffectSet::READ | EffectSet::LOCK_ROW);
+                    s.reasons.push(reason(ReasonCode::LockingClause, None));
+                    s
+                } else if up.contains("F_WRITE(") {
+                    let mut s = stmt(StmtKind::Select, EffectSet::READ);
+                    s.flags |= RiskFlags::VOLATILE_FN;
+                    s.reasons
+                        .push(reason(ReasonCode::FnUnknown, Some("f_write")));
+                    s
+                } else {
+                    stmt(StmtKind::Select, EffectSet::READ)
+                }
+            }
+            "INSERT" => stmt(StmtKind::Insert, EffectSet::WRITE_DATA),
+            "UPDATE" if has("WHERE") => stmt(StmtKind::Update, EffectSet::WRITE_DATA),
+            "UPDATE" => report(
+                StmtKind::Update,
+                EffectSet::WRITE_DATA,
+                &[DestructiveKind::NoWhere],
+                &table(&["UPDATE"]),
+            ),
+            "DELETE" if has("WHERE") => stmt(StmtKind::Delete, EffectSet::WRITE_DATA),
+            "DELETE" => report(
+                StmtKind::Delete,
+                EffectSet::WRITE_DATA,
+                &[DestructiveKind::NoWhere],
+                &table(&["FROM"]),
+            ),
+            "CALL" => {
+                let mut s = stmt(StmtKind::Call, EffectSet::ROUTINE_CALL);
+                s.reasons.push(reason(ReasonCode::RoutineCall, None));
+                s
+            }
+            "DO" => {
+                let mut s = stmt(StmtKind::Do, EffectSet::UNKNOWN);
+                s.reasons.push(reason(ReasonCode::ProceduralCode, None));
+                s
+            }
+            "SET" => {
+                let rest = text[3..].trim().trim_end_matches(';');
+                let (name, value) = match rest.split_once('=') {
+                    Some((n, v)) => (n.trim(), v.trim()),
+                    None => match rest.split_once(' ') {
+                        Some((n, v)) => (n.trim(), v.trim().trim_start_matches("TO ").trim()),
+                        None => (rest, ""),
+                    },
+                };
+                let mut s = stmt(StmtKind::Set, EffectSet::SESSION_STATE);
+                s.set_targets.push(SetTarget {
+                    name: Arc::from(name),
+                    value: Some(Arc::from(value)),
+                });
+                if name.eq_ignore_ascii_case("role") {
+                    s.reasons.push(reason(ReasonCode::PrivilegeChange, None));
+                } else {
+                    s.reasons.push(reason(ReasonCode::SessionState, Some(name)));
+                }
+                s
+            }
+            "BEGIN" | "COMMIT" | "ROLLBACK" | "START" => {
+                let kind = match first.as_str() {
+                    "COMMIT" => StmtKind::Commit,
+                    "ROLLBACK" => StmtKind::Rollback,
+                    _ => StmtKind::Begin,
+                };
+                stmt(kind, EffectSet::TXN_CONTROL)
+            }
+            "LOCK" => stmt(StmtKind::Lock, EffectSet::LOCK_TABLE),
+            "CREATE" if has("TEMP") || has("TEMPORARY") => {
+                stmt(StmtKind::CreateTable, EffectSet::DDL_TEMP)
+            }
+            "CREATE" if has("TABLE") => stmt(StmtKind::CreateTable, EffectSet::DDL),
+            "CREATE" => stmt(StmtKind::CreateOther, EffectSet::DDL),
+            "ALTER" => stmt(StmtKind::Alter, EffectSet::DDL),
+            "DROP" => {
+                let cascade = has("CASCADE");
+                let (kind, key) = if has("SCHEMA") {
+                    (ObjectKind::Schema, "SCHEMA")
+                } else if has("DATABASE") {
+                    (ObjectKind::Database, "DATABASE")
+                } else {
+                    (ObjectKind::Table, "DROP")
+                };
+                let mut s = stmt(StmtKind::Drop, EffectSet::DDL);
+                s.destructive.push(DestructiveReason {
+                    kind: DestructiveKind::Drop { cascade },
+                    range: TextRange::default(),
+                    target: Some(object(&table(&[key]), kind)),
+                });
+                s
+            }
+            "TRUNCATE" => {
+                let mut s = stmt(StmtKind::Truncate, EffectSet::DDL);
+                s.destructive.push(DestructiveReason {
+                    kind: DestructiveKind::Truncate,
+                    range: TextRange::default(),
+                    target: Some(object(&table(&["TRUNCATE"]), ObjectKind::Table)),
+                });
+                s
+            }
+            "GRANT" => stmt(StmtKind::Grant, EffectSet::PRIVILEGE),
+            "REVOKE" => stmt(StmtKind::Revoke, EffectSet::PRIVILEGE),
+            "COPY" if up.contains("PROGRAM") => stmt(StmtKind::Copy, EffectSet::PROCESS_EXEC),
+            _ => {
+                let mut s = stmt(StmtKind::Other, EffectSet::UNKNOWN);
+                s.reasons.push(reason(ReasonCode::EffectsUnknown, None));
+                s
+            }
+        }
+    }
+
+    /// `fake_stmt` over exactly `text` in `dialect`.
+    pub fn fake_classify(text: &str, dialect: DialectId) -> SafetyReport {
+        over(text, dialect, vec![fake_stmt(text)])
+    }
+
+    /// A connection: idle, Auto-commit, unsafe-WHERE confirmation on.
+    pub fn conn(engine: DbmsKind, env: Option<EnvTag>) -> ConnSafety {
+        ConnSafety {
+            engine,
+            env,
+            read_only: false,
+            tx_status: TxStatus::Idle,
+            tx_owner: TxOwner::None,
+            tx_mode: TxMode::Auto,
+            confirm_unsafe_where: true,
+        }
+    }
+
+    pub fn conn_dev() -> ConnSafety {
+        conn(DbmsKind::Postgres, Some(EnvTag::Dev))
+    }
+
+    pub fn conn_staging() -> ConnSafety {
+        conn(DbmsKind::Postgres, Some(EnvTag::Staging))
+    }
+
+    pub fn conn_prod() -> ConnSafety {
+        conn(DbmsKind::Postgres, Some(EnvTag::Production))
+    }
+
+    pub fn conn_prod_auto() -> ConnSafety {
+        conn_prod()
+    }
+
+    pub fn conn_prod_manual_idle() -> ConnSafety {
+        ConnSafety {
+            tx_mode: TxMode::Manual,
+            ..conn_prod()
+        }
+    }
+
+    pub fn conn_prod_user_tx() -> ConnSafety {
+        ConnSafety {
+            tx_status: TxStatus::InTx,
+            tx_owner: TxOwner::User,
+            tx_mode: TxMode::Manual,
+            ..conn_prod()
+        }
+    }
+
+    /// A read-only (toggle or guard) development connection.
+    pub fn conn_ro() -> ConnSafety {
+        ConnSafety {
+            read_only: true,
+            ..conn_dev()
+        }
+    }
+
+    /// A store holding `pairs` for every profile (none: a store with no remembered value).
+    pub struct Values(pub Vec<(String, BindValue)>);
+
+    impl Values {
+        pub fn of(pairs: &[(&str, &str)]) -> Values {
+            Values(
+                pairs
+                    .iter()
+                    .map(|(n, v)| (n.to_string(), text_value(v)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl ParamValueStore for Values {
+        fn get(&self, _: &ProfileId, name: &str) -> Option<BindValue> {
+            self.0
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+        }
+        fn put(&self, _: &ProfileId, _: &str, _: BindValue) {}
+    }
+
+    pub fn text_value(v: &str) -> BindValue {
+        BindValue::Typed {
+            hint: LogicalType::Text {
+                max_chars: None,
+                fixed: false,
+            },
+            text: Arc::from(v),
+        }
+    }
+
+    /// Statement units of `texts`, one after the other in a document (two bytes apart), each
+    /// with a read head (`suspendable`).
+    pub fn exec_units(texts: &[&str]) -> Vec<ExecUnit> {
+        let mut at = 0;
+        texts
+            .iter()
+            .map(|t| {
+                let u = ExecUnit {
+                    text: Arc::from(*t),
+                    doc_range: at..at + t.len(),
+                    kind: UnitKind::Statement,
+                    suspendable: true,
+                };
+                at += t.len() + 2;
+                u
+            })
+            .collect()
+    }
+
+    /// `texts` prepared on `engine`, every prompt answered from `values` by its name
+    /// (placeholders inside DDL bind): the prompt, then the run with the answers.
+    pub fn prepare_answered(
+        engine: DbmsKind,
+        texts: &[&str],
+        values: &[(&str, &str)],
+        s: ParamSettings,
+    ) -> Prepared {
+        let (ctx, profile) = (ctx_of(engine), ProfileId::new());
+        let store = Values(Vec::new());
+        match prepare_units(exec_units(texts), &ctx, &s, &store, &profile) {
+            Prepared::NeedsValues(prompts) => {
+                let mut answers = ParamAnswers::default();
+                for p in &prompts {
+                    if let Some((_, v)) = values.iter().find(|(n, _)| **n == *p.name) {
+                        answers.insert(p, text_value(v));
+                    }
+                }
+                prepare_units_with(exec_units(texts), &ctx, &s, &store, &profile, &answers)
+            }
+            other => other,
+        }
+    }
+
+    /// `text` prepared on `engine` with `values` (placeholders inside DDL bind).
+    pub fn prepared_on(engine: DbmsKind, text: &str, values: &[(&str, &str)]) -> PreparedUnit {
+        let s = ParamSettings {
+            in_ddl: true,
+            ..ParamSettings::default()
+        };
+        match prepare_answered(engine, &[text], values, s) {
+            Prepared::Ready(mut u) => u.remove(0),
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+
+    /// The gate's item for `text` on `conn`, `fake_stmt` over its final text.
+    pub fn item_of(text: &str, conn: &ConnSafety) -> GateItem {
+        let unit = prepared_on(conn.engine, text, &[]);
+        let report = fake_classify(&unit.final_text, dialect_of(conn.engine));
+        gate(&[unit], &[report], conn, &SuppressSet::default(), 1)
+            .items
+            .remove(0)
+    }
+
+    /// The gate's decision for `text` on `conn` (`item_of`).
+    pub fn decision(text: &str, conn: ConnSafety) -> GateDecision {
+        item_of(text, &conn).decision
+    }
+}

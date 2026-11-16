@@ -57,6 +57,12 @@ bitflags::bitflags! {
         const OPENS_WRITE = 32;
         /// A DDL statement (MySQL/MariaDB commit an open transaction before it).
         const DDL = 64;
+        // ## m3b-t15-gate (named exception, T15 fix round 2, R1-I1)
+        /// MySQL/MariaDB/TiDB commit an open transaction before this statement (the gate's
+        /// `hacivat_exec::implicit_commit` list: most DDL, privileges, `BEGIN`, `LOCK TABLES`,
+        /// `SET autocommit = 1`, `FLUSH`, …). `DDL` keeps meaning "a DDL statement"; the
+        /// session's implicit-commit backstop (Task 19) keys on this bit.
+        const COMMITS_FIRST = 128;
     }
 }
 

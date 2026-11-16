@@ -3,6 +3,10 @@
 //! 17), the classifier pool answers `sql-safety`'s stub and denies on the read-only path, Count rows
 //! without a check is refused, and a request with only one M3b field sends nothing. M3a's
 //! run shape still builds and runs.
+//!
+//! ## m3b-t15-gate (named exception): the gate's and parameter preparation's stub tests are
+//! gone with the stubs (Task 15's `tests/{gate,params,explain}.rs` replace them); the stale
+//! classification, plain-unit and suppress-set checks still hold and stay.
 
 mod common;
 
@@ -10,19 +14,21 @@ use std::sync::Arc;
 
 use common::{fake_pg, pg18, service_over};
 use hacivat_driver::TxStatus;
+use hacivat_exec::ConnSafety;
 use hacivat_exec::{
     ClassifyCtx, ClassifyPool, ErrorPolicy, ExecUnit, Expect, GateDecision, GatePlan,
     HistoryConfig, HistoryError, HistoryStore, LogMsg, OffsetMap, ParamValueStore, Prepared,
     PreparedUnit, RunRequest, SessionLog, SuppressSet, count_sql, explain_analyze_inner, gate,
     prepare_units,
 };
-use hacivat_exec::{ConnSafety, GateItem};
 use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
-use hacivat_session::session::{RoCheck, StatementClassifier, TxMode, TxOwner, UnitVerdict};
+use hacivat_session::session::{
+    ExecErrorKind, RoCheck, StatementClassifier, TxMode, TxOwner, UnitVerdict,
+};
 use hacivat_values::BindValue;
 use sql_dialect::ClientFlavor;
+use sql_split::ParamSettings;
 use sql_split::exec_range::UnitKind;
-use sql_split::{ParamDiag, ParamSettings};
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures
@@ -104,40 +110,6 @@ impl ParamValueStore for NoValues {
 // The gate (Task 15)
 
 #[test]
-fn gate_stub_denies_every_unit() {
-    let p = gate(
-        &[prepared("SELECT 1")],
-        &[stub_report()],
-        &conn_dev(),
-        &SuppressSet::default(),
-        1,
-    );
-    assert!(matches!(p.items[0].decision, GateDecision::Deny(_)));
-    // Production, read-only, a dev console with every unit's report: all denied, nothing run.
-    let both = [prepared("SELECT 1"), prepared("DELETE FROM t")];
-    let reports = [report_of("SELECT 1"), report_of("DELETE FROM t")];
-    for conn in [
-        conn_dev(),
-        ConnSafety {
-            env: Some(EnvTag::Production),
-            ..conn_dev()
-        },
-        ConnSafety {
-            read_only: true,
-            ..conn_dev()
-        },
-    ] {
-        let plan = gate(&both, &reports, &conn, &SuppressSet::default(), 1);
-        assert_eq!(plan.items.len(), 2);
-        assert!(plan.items.iter().all(|i: &GateItem| {
-            matches!(i.decision, GateDecision::Deny(_)) && i.verdict == UnitVerdict::Unknown
-        }));
-        assert_eq!(plan.first_denied().map(|i| i.unit), Some(0));
-        assert!(!plan.needs_prompt());
-    }
-}
-
-#[test]
 fn gate_stub_names_a_stale_classification() {
     // P-M3b-2: a report of other bytes (or none) is stale.
     let plan = gate(
@@ -171,40 +143,6 @@ fn suppress_set_and_explain_stub() {
 
 // ---------------------------------------------------------------------------------------------
 // Parameters (Task 15)
-
-#[test]
-fn prepare_stub_refuses_a_colon() {
-    assert!(matches!(
-        prepare_units(
-            units(&["SELECT :a"]),
-            &pg18(),
-            &ParamSettings::default(),
-            &NoValues,
-            &pid()
-        ),
-        Prepared::Refused { .. }
-    ));
-    // The first unit holding `:`, `$` or `?`, at its document offset.
-    for (text, at) in [("SELECT $1", 7), ("SELECT ?", 7), ("SELECT '10:30'", 10)] {
-        match prepare_units(
-            units(&["SELECT 1", text]),
-            &pg18(),
-            &ParamSettings::default(),
-            &NoValues,
-            &pid(),
-        ) {
-            Prepared::Refused {
-                unit,
-                at: range,
-                diag,
-            } => {
-                assert_eq!((unit, diag), (1, ParamDiag::TooManyBinds), "{text}");
-                assert_eq!(range, 10 + at..10 + at + 1, "{text}");
-            }
-            other => panic!("{text}: {other:?}"),
-        }
-    }
-}
 
 #[test]
 fn prepare_stub_passes_plain_units_through() {
