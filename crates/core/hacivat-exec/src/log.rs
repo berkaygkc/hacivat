@@ -166,6 +166,10 @@ pub enum LogMsg {
     /// statement on MySQL/MariaDB, a DDL, a unit run as one, a statement Hacivat can't read):
     /// the user checks what was committed.
     TxEndedByStatement,
+    // ## m3b-t22-tx-ui (named exception, T12 carry m9)
+    /// The profile's startup script was not run because the console's session is read-only
+    /// (a read-only session never runs it, C3). Its SQL is never in the line.
+    StartupScriptSkipped,
 }
 
 /// A message argument. Counts are numbers the app formats in the format locale; a statement
@@ -239,6 +243,8 @@ impl LogMsg {
             // ## m3b-t19-confirm-tx
             LogMsg::TxRolledBackByServer => "exec-tx-rolled-back-by-server",
             LogMsg::TxEndedByStatement => "exec-tx-ended-by-statement",
+            // ## m3b-t22-tx-ui (named exception)
+            LogMsg::StartupScriptSkipped => "exec-startup-script-skipped-read-only",
         }
     }
 
@@ -320,6 +326,8 @@ impl LogMsg {
             LogMsg::RunAsOneRolledBack | LogMsg::RunAsOneTxFailed => Vec::new(),
             // ## m3b-t19-confirm-tx
             LogMsg::TxRolledBackByServer | LogMsg::TxEndedByStatement => Vec::new(),
+            // ## m3b-t22-tx-ui (named exception)
+            LogMsg::StartupScriptSkipped => Vec::new(),
         }
     }
 
@@ -352,6 +360,8 @@ impl LogMsg {
             LogMsg::RunAsOneRolledBack | LogMsg::RunAsOneTxFailed => Severity::Warning,
             // ## m3b-t19-confirm-tx
             LogMsg::TxRolledBackByServer | LogMsg::TxEndedByStatement => Severity::Warning,
+            // ## m3b-t22-tx-ui (named exception)
+            LogMsg::StartupScriptSkipped => Severity::Notice,
             LogMsg::RowsRetrieved { .. }
             | LogMsg::RowsAffected { .. }
             | LogMsg::Completed { .. }

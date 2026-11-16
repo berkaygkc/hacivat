@@ -175,6 +175,12 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         ..ManagerConfig::m2b()
     };
     let manager = ConnectionManager::new(runtime.handle(), Arc::new(deps), config);
+    // ## m3b-t22-tx-ui (named exception, T12 concern 2): the settings' time zone reaches every
+    // session the manager opens (C11), and a later change of the setting too
+    // ([`follow_time_zone`]).
+    if let Some(state) = cx.try_global::<crate::AppState>() {
+        manager.set_time_zone(state.settings.ui.time_zone.clone());
+    }
     let LoadedProfiles {
         profiles,
         diags,
@@ -197,10 +203,26 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
     })
     .detach();
 
+    // ## m3b-t22-tx-ui (named exception)
+    follow_time_zone(cx);
     push_store_toasts(cx, &diags, quarantined.as_deref());
 }
 
 // ## m2b-t22-live
+// ## m3b-t22-tx-ui (named exception, T12 concern 2)
+/// Gives the manager the settings' time zone whenever the settings change (`AppState` is
+/// replaced by `shell::update_settings`): sessions opened afterwards send it; sessions already
+/// open keep theirs. The manager ignores a zone it already has.
+fn follow_time_zone(cx: &mut App) {
+    cx.observe_global::<crate::AppState>(|cx| {
+        let zone = cx.global::<crate::AppState>().settings.ui.time_zone.clone();
+        if let Some(m) = cx.try_global::<ConnectionsModel>() {
+            m.manager().set_time_zone(zone);
+        }
+    })
+    .detach();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

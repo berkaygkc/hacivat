@@ -930,3 +930,11 @@ exec-tx-rolled-back-by-server = The server rolled back your whole transaction: e
 exec-tx-ended-by-statement = Your transaction ended with this statement. Check whether your earlier changes were committed.
 # EXPLAIN ANALYZE ran with no transaction open, so what it changed couldn't be rolled back; the run stopped.
 exec-explain-not-rolled-back = EXPLAIN ANALYZE ran outside a transaction, so its changes couldn't be rolled back. The rest of the run wasn't sent.
+
+## m3b-t22-tx-ui
+
+# A transaction's age under a minute (the badge, the idle toast); whole minutes are exec-dur-min.
+exec-dur-lt-min = <1 min
+# Output: the profile's startup script did not run, because this console's session is
+# read-only (a read-only session never runs it). The script's SQL is never shown.
+exec-startup-script-skipped-read-only = The connection's startup script was not run: this session is read-only.

@@ -1984,23 +1984,32 @@ impl ConnectionDialog {
                 self.field_box(Field::AppName, theme, window, cx),
             ),
         );
+        // ## m3b-t22-tx-ui (named exception, NOTES surface 12, ruling 25): one session for every
+        // console says so in the Connections row; the "Sessions" row below holds the setting
+        // (written through `ConnectionsModel` when the dialog saves, as every field).
+        let budget = if p.single_session {
+            tr(cx, ids::hv::CONN_BUDGET_SINGLE, NoArgs)
+        } else {
+            tr(
+                cx,
+                ids::hv::CONN_ADV_BUDGET_V,
+                ids::hv::HvConnAdvBudgetV {
+                    max: Count(u64::from(p.max_connections)),
+                },
+            )
+        };
         content.push(
             Kind::Row,
             form_row(
                 theme,
                 tr(cx, ids::hv::CONN_ADV_BUDGET, NoArgs),
                 Label::new(
-                    tr(
-                        cx,
-                        ids::hv::CONN_ADV_BUDGET_V,
-                        ids::hv::HvConnAdvBudgetV {
-                            max: Count(u64::from(p.max_connections)),
-                        },
-                    ),
+                    budget,
                     TextSource::Fluent,
                     t.type_ramp.body,
                     c.text_2.to_hsla(),
-                ),
+                )
+                .id("conn-adv-budget"),
             ),
         );
         let well = match theme.mode {
@@ -2083,6 +2092,33 @@ impl ConnectionDialog {
             form_row(theme, tr(cx, ids::hv::CONN_ADV_EXTRA, NoArgs), extras),
         );
         self.issue_rows(&mut content, Field::AppName, theme, cx);
+        // ## m3b-t22-tx-ui (named exception): the "Sessions" row, last in Advanced, so the rows
+        // above keep their place (the Connections row above says what it changes).
+        let me_single = cx.weak_entity();
+        // SQLite always gives its consoles one connection (the pool's rule): no choice to show.
+        if p.engine != DbmsKind::Sqlite {
+            content.push(
+                Kind::Row,
+                form_row(
+                    theme,
+                    tr(cx, ids::hv::CONN_SESSIONS, NoArgs),
+                    Checkbox::new(
+                        "conn-single-session",
+                        tr(cx, ids::hv::CONN_SINGLE_SESSION, NoArgs),
+                    )
+                    .sub_label(tr(cx, ids::hv::CONN_SINGLE_SESSION_SUB, NoArgs))
+                    .checked(p.single_session)
+                    .disabled(self.read_only)
+                    .focus_handle(self.focus.single_session.clone())
+                    .on_toggle(move |on, window, cx| {
+                        let _ = me_single.update(cx, |d, cx| {
+                            d.draft.profile.single_session = on;
+                            d.after_edit(window, cx);
+                        });
+                    }),
+                ),
+            );
+        }
         let me = cx.weak_entity();
         let disclosure = Disclosure::new(
             "conn-advanced",

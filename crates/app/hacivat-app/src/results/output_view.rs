@@ -126,6 +126,8 @@ fn glyph(msg: &LogMsg) -> (IconName, bool) {
         LogMsg::TxRolledBackByServer | LogMsg::TxEndedByStatement => {
             (IconName::TriangleAlert, true)
         }
+        // ## m3b-t22-tx-ui (named exception): the read-only skip of a startup script.
+        LogMsg::StartupScriptSkipped => (IconName::Lock, false),
     }
 }
 

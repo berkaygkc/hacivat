@@ -1916,3 +1916,83 @@ hv-cmd-app-character-palette = Emoji ve Semboller
 
 # Review: PO
 hv-results-type-mysql-code = MySQL türü { $code }
+
+## m3b-t22-tx-ui
+
+# Review: PO
+hv-tx-chip-auto = Otomatik commit
+# Review: PO
+hv-tx-chip-manual = Manuel
+# Review: PO
+hv-tx-chip-smart = Akıllı
+# Review: PO
+hv-tx-chip-tip = İşlem kipi: { $mode }
+# Review: PO
+hv-tx-menu-title = İşlem kipi
+# Review: PO
+hv-tx-mode-auto-hint = her ifade çalışınca commit edilir
+# Review: PO
+hv-tx-mode-manual-hint = değişiklikler Commit'i bekler
+# Review: PO
+hv-tx-mode-smart-hint = ilk değişiklikten itibaren Manuel
+# Review: PO
+hv-tx-menu-isolation = Yalıtım düzeyi
+# Review: PO
+hv-tx-iso-default = Sunucu varsayılanı
+# Review: PO
+hv-tx-iso-default-hint = Sunucu varsayılanı · { $level }
+# Review: PO
+hv-tx-menu-reason-open = Önce commit edin ya da geri alın
+# Review: PO
+hv-tx-menu-prod-note = Üretim konsolları Manuel kipte başlar.
+# Review: PO
+hv-tx-chip-ro-reason = Salt okunur bir oturum her ifadeyi tek başına çalıştırır; bu yüzden kipi her zaman Otomatik commit'tir.
+# Review: PO
+hv-tx-badge = İşlem · { $n } ifade · { $age }
+# Review: PO
+hv-tx-badge-short = İşlem · { $n } ifade
+# Review: PO
+hv-tx-badge-failed = İşlem başarısız
+# Review: PO
+hv-tx-badge-tip = Henüz commit edilmedi: diğer oturumlar bu değişiklikleri görmez ve dokunulan satırlar kilitli kalır.
+# Review: PO
+hv-tx-badge-failed-tip = Bir hata ya da iptal işlemi durdurdu. Sunucu artık yalnızca geri almayı kabul eder.
+# Review: PO
+hv-tx-badge-commit = Commit et
+# Review: PO
+hv-tx-badge-rollback = Geri al
+# Review: PO
+hv-tx-segment-tip = Commit, geri alma ve işlem kipi için tıklayın.
+# Review: PO
+hv-tx-idle-title = { $name } üzerinde { $age } süredir açık bir işlem var
+# Review: PO
+hv-tx-idle-body = Diğer oturumları engelleyen kilitler tutuyor olabilir.
+# Review: PO
+hv-tx-idle-commit = Commit et
+# Review: PO
+hv-tx-idle-rollback = Geri al
+# Review: PO
+hv-tx-idle-keep = Açık bırak
+# Review: PO
+hv-tx-lost-maybe = Açık bir işlemi olmuş olabilir; öyleyse sunucu commit edilmemiş değişikliklerini geri aldı.
+# Review: PO
+hv-conn-sessions = Oturumlar
+# Review: PO
+hv-conn-single-session = Tüm konsollar için tek oturum kullan
+# Review: PO
+hv-conn-single-session-sub = Bu bağlantının konsolları tek oturumu paylaşır: işlemini, değişkenlerini ve geçici tablolarını.
+# Review: PO
+hv-conn-budget-single = Tüm konsolların paylaştığı tek oturum
+# Review: PO
+hv-console-shared = Paylaşılan oturum
+# Review: PO
+hv-console-shared-tip = { $name } bağlantısının tüm konsolları bu oturumu kullanır: burada açılan bir işlem hepsinde açıktır.
+
+## m3b-t22-tx-ui-r1
+
+# Review: PO
+hv-tx-idle-waits = Konsol, çalıştırmasıyla ilgili bir yanıt bekliyor. Yanıtlandıktan sonra commit edin ya da geri alın.
+# Review: PO
+hv-conn-single-session-reconnect = { $name } için oturum ayarı yeniden bağlandıktan sonra geçerli olur.
+# Review: PO
+hv-conn-zone-refused = Sunucu { $zone } saat dilimini reddetti

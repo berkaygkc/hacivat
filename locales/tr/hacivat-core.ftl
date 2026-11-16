@@ -593,3 +593,10 @@ exec-tx-rolled-back-by-server = Sunucu işleminizin tamamını geri aldı: işle
 exec-tx-ended-by-statement = İşleminiz bu ifadeyle sona erdi. Önceki değişikliklerinizin commit edilip edilmediğini denetleyin.
 # Review: PO
 exec-explain-not-rolled-back = EXPLAIN ANALYZE bir işlemin dışında çalıştı, bu yüzden değişiklikleri geri alınamadı. Çalıştırmanın geri kalanı gönderilmedi.
+
+## m3b-t22-tx-ui
+
+# Review: PO
+exec-dur-lt-min = <1 dk
+# Review: PO
+exec-startup-script-skipped-read-only = Bağlantının başlangıç betiği çalıştırılmadı: bu oturum salt okunur.

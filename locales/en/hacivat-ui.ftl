@@ -2073,3 +2073,94 @@ hv-cmd-app-character-palette = Emoji & Symbols
 # Variables:
 #   $code (Number) - the column type code, from 0 to 255.
 hv-results-type-mysql-code = MySQL type { $code }
+
+## m3b-t22-tx-ui
+
+# The transaction mode chip in the console toolbar (D-014, D-036; design/m3b-safe surface 3).
+hv-tx-chip-auto = Auto-commit
+hv-tx-chip-manual = Manual
+hv-tx-chip-smart = Smart
+# The chip's tooltip.
+# Variables:
+#   $mode (String) - the mode's name (an hv-tx-chip-* message), e.g. "Manual".
+hv-tx-chip-tip = Transaction mode: { $mode }
+# The chip's menu: its title row, the mode hints, the Isolation row.
+hv-tx-menu-title = Transaction mode
+hv-tx-mode-auto-hint = each statement commits as it runs
+hv-tx-mode-manual-hint = changes wait for Commit
+hv-tx-mode-smart-hint = Manual from the first change
+hv-tx-menu-isolation = Isolation
+# The isolation level the server picks itself; its SQL name follows in mono.
+hv-tx-iso-default = Server default
+# The Isolation row's hint while the server picks the level: its SQL name follows.
+# Variables:
+#   $level (String) - the engine's default level (SQL, untranslated), e.g. "READ COMMITTED".
+hv-tx-iso-default-hint = Server default · { $level }
+# Why a mode or the isolation can't change now (a transaction is open).
+hv-tx-menu-reason-open = Commit or roll back first
+# The note under the menu on a production console.
+hv-tx-menu-prod-note = Production consoles start in Manual.
+# The disabled chip's tooltip on a read-only session.
+hv-tx-chip-ro-reason = A read-only session runs each statement on its own, so its mode is always Auto-commit.
+# The transaction badge in the console toolbar (surface 4).
+# Variables:
+#   $n (Number) - statements in the open transaction, e.g. 3.
+#   $age (String) - how long it has been open (an exec-dur-* message), e.g. "2 min".
+hv-tx-badge = { $n ->
+        [one] Transaction · { $n } statement · { $age }
+       *[other] Transaction · { $n } statements · { $age }
+    }
+# The badge without its age (narrow toolbars).
+# Variables:
+#   $n (Number) - statements in the open transaction, e.g. 3.
+hv-tx-badge-short = { $n ->
+        [one] Transaction · { $n } statement
+       *[other] Transaction · { $n } statements
+    }
+hv-tx-badge-failed = Transaction failed
+hv-tx-badge-tip = Not committed yet: other sessions don't see these changes, and the rows they touch stay locked.
+hv-tx-badge-failed-tip = An error or a cancel stopped the transaction. The server now accepts only a rollback.
+hv-tx-badge-commit = Commit
+hv-tx-badge-rollback = Roll back
+# The status bar's transaction segment is a button that opens the chip's menu.
+hv-tx-segment-tip = Click for Commit, Roll back and the transaction mode.
+# The idle-transaction toast (surface 5).
+# Variables:
+#   $age (String) - how long the transaction has been open (an exec-dur-* message), e.g. "10 min".
+#   $name (String) - the connection's name, e.g. "orders-prod".
+hv-tx-idle-title = Transaction open for { $age } on { $name }
+hv-tx-idle-body = It may hold locks that block other sessions.
+hv-tx-idle-commit = Commit
+hv-tx-idle-rollback = Roll back
+hv-tx-idle-keep = Keep open
+# The session-lost toast's transaction line: a session counts as maybe in a transaction while
+# any request of the user's ran (T12), so the line never claims one was open.
+hv-tx-lost-maybe = It may have had an open transaction; if so, the server rolled back its uncommitted changes.
+# The connection dialog's single-session setting (Advanced; surface 12).
+hv-conn-sessions = Sessions
+hv-conn-single-session = Use one session for every console
+hv-conn-single-session-sub = Consoles of this connection share one session: its transaction, variables and temporary tables.
+# The Connections row when every console shares one session.
+hv-conn-budget-single = One session, shared by every console
+# The console toolbar's chip when the console shares its connection's one session.
+hv-console-shared = Shared session
+# Its tooltip.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+hv-console-shared-tip = Every console of { $name } uses this session: a transaction opened here is open in all of them.
+
+## m3b-t22-tx-ui-r1
+
+# The idle-transaction toast's Commit or Roll back while the console's run waits for an answer
+# (or still runs): nothing was sent.
+hv-tx-idle-waits = The console is waiting for an answer to its run. Commit or roll back once it's answered.
+# A connected profile's single-session setting changed: it applies to the sessions opened after
+# the next reconnect.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+hv-conn-single-session-reconnect = The session setting of { $name } applies after it reconnects.
+# The capsule of a connection whose server refused the time zone in Settings. Retry connects
+# without it.
+# Variables:
+#   $zone (String) - the time zone name (an IANA name, untranslated), e.g. "Europe/Istanbul".
+hv-conn-zone-refused = The server refused time zone { $zone }

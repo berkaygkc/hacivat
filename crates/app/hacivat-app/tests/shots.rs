@@ -961,7 +961,8 @@ fn shots() -> Vec<Shot> {
         }
     }
     // ## m3a-t35-shots: the M3a states, after every M1/M2 shot.
-    for state in m3a::M3A {
+    // ## m3b-t22-tx-ui (named exception): then Task 22's states (`m3a::M3B_T22`).
+    for state in m3a::M3A.into_iter().chain(m3a::M3B_T22) {
         let surface = Surface::M3a(state);
         for &size in surface.sizes() {
             for theme in THEMES {
@@ -1456,17 +1457,28 @@ fn the_matrix_covers_every_surface_locale_and_theme() {
     // M2b T22: 10 surfaces x 8 at 1280x800 and again at 960x600; M2b T24: 34 surfaces likewise.
     assert_eq!(
         all.len(),
-        8 * 4 * 2 + 4 + 8 + 26 * 8 + 4 * 8 + 10 * 8 * 2 + 34 * 8 * 2 + m3a::M3A.len() * 8 * 2
+        8 * 4 * 2
+            + 4
+            + 8
+            + 26 * 8
+            + 4 * 8
+            + 10 * 8 * 2
+            + 34 * 8 * 2
+            + m3a::M3A.len() * 8 * 2
+            // ## m3b-t22-tx-ui (named exception)
+            + m3a::M3B_T22.len() * 8 * 2
     );
     // ## m3a-t35-shots: the 1,012 M1/M2 shots first, unchanged; then 68 M3a states x 16.
     // ## m3a-f5-demo (review m-5): plus the app menu at 960x600 (8).
-    assert_eq!(all.len(), 1020 + 68 * 16);
+    // ## m3b-t22-tx-ui (named exception): plus Task 22's 7 states x 16.
+    assert_eq!(all.len(), 1020 + 68 * 16 + 7 * 16);
     assert!(
         all[..1020]
             .iter()
             .all(|s| !matches!(s.surface, Surface::M3a(_)))
     );
-    for state in m3a::M3A {
+    // ## m3b-t22-tx-ui (named exception): Task 22's states too.
+    for state in m3a::M3A.into_iter().chain(m3a::M3B_T22) {
         let surface = Surface::M3a(state);
         assert_eq!(
             all.iter().filter(|s| s.surface == surface).count(),

@@ -531,6 +531,10 @@ impl IntoElement for ToastStack {
                             div()
                                 .flex()
                                 .flex_row()
+                                // ## m3b-t22-tx-ui (named exception): a row of actions too
+                                // wide for the card wraps (the idle-transaction toast's three
+                                // in the long pseudo-locales); a row that fits is unchanged.
+                                .flex_wrap()
                                 .gap(px(t.spacing.sm))
                                 .mt(px(t.spacing.md))
                                 .children(shown.actions.into_iter().enumerate().map(
