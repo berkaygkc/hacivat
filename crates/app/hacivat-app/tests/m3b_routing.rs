@@ -33,7 +33,9 @@ use hacivat_ui::actions::ActionRegistry;
 use hacivat_ui::icon::IconName;
 use hacivat_ui::keymaps::load;
 use hacivat_ui_core::assets::BundledAssets;
-use hacivat_ui_core::keymap::{Keymap, KeymapPlatform, chord_string};
+use hacivat_ui_core::keymap::{
+    ContextStack, KeyboardLayoutId, Keymap, KeymapPlatform, Resolution, chord_string, normalize,
+};
 use hacivat_values::{ColumnMeta, LogicalType, NativeType, ResultSchema, Value};
 use support::*;
 
@@ -139,7 +141,6 @@ const BOUND: &[(&str, &str, Option<&str>, Option<&str>)] = &[
         Some("alt-down"),
         Some("alt-shift-down"),
     ),
-    ("grid.find", "Grid", Some("cmd-f"), Some("ctrl-f")),
     ("grid.goto_row", "Grid", Some("cmd-l"), Some("ctrl-g")),
     (
         "grid.open_value",
@@ -173,6 +174,8 @@ const BOUND: &[(&str, &str, Option<&str>, Option<&str>)] = &[
     ),
     // Palette-only. `editor.find` stays unbound until Task 33 binds `cmd-f`/`ctrl-f` (ruling R5).
     ("editor.find", "Editor", None, None),
+    // `grid.find` likewise until Task 37 (ruling R5).
+    ("grid.find", "Grid", None, None),
     ("editor.split_selection_into_lines", "Editor", None, None),
     ("editor.redo_selection", "Editor", None, None),
     ("editor.fold", "Editor", None, None),
@@ -573,6 +576,29 @@ fn primary_f_in_the_editor_still_reaches_the_explorer_filter(cx: &mut TestAppCon
         layout(vcx).1.explorer_visible,
         "{key} did not reach the explorer filter"
     );
+}
+
+/// Ruling R5 at the keymap level: with the editor or a grid focused, the primary-F chord resolves
+/// to `explorer.focus_filter` until Tasks 33 and 37 bind their find commands (the app test above
+/// covers the editor end to end; the grid's key context reaches the stack with m3a's F5).
+#[test]
+fn primary_f_resolves_to_the_explorer_filter_in_the_editor_and_the_grid() {
+    for (platform, chord) in [
+        (KeymapPlatform::MacOs, "cmd-f"),
+        (KeymapPlatform::Windows, "ctrl-f"),
+        (KeymapPlatform::Linux, "ctrl-f"),
+    ] {
+        let km = load(platform, "hacivat", None).0;
+        let press = normalize(&gpui::Keystroke::parse(chord).unwrap()).unwrap();
+        for inner in ["Editor", "Grid"] {
+            let stack = ContextStack(vec!["Workspace", "Console", inner]);
+            let got = km.resolve(&stack, &[], &press, &KeyboardLayoutId("us".into()), false);
+            assert!(
+                matches!(&got, Resolution::Command(c) if c == "explorer.focus_filter"),
+                "{platform:?} {inner}: {got:?}"
+            );
+        }
+    }
 }
 
 // ---- icons ----------------------------------------------------------------------------------
