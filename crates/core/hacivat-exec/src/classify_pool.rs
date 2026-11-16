@@ -74,11 +74,27 @@ pub const QUEUE_CAPACITY: usize = 256;
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
+// ## m3b-t24-exec-ui (named exception, T1c M7: the "recording fake pool" of Task 24's tests)
+/// What [`ClassifyPool::observed`] tells its hook: every text the pool classifies, with its
+/// context, on the pool thread, just before it is classified. It cannot change the answer.
+pub type ClassifyHook = Arc<dyn Fn(&str, &ClassifyCtx) + Send + Sync>;
+
 /// The classifier's threads (the module docs).
-#[derive(Debug)]
 pub struct ClassifyPool {
     threads: usize,
     queue: Mutex<Option<mpsc::SyncSender<Job>>>,
+    // ## m3b-t24-exec-ui (named exception)
+    hook: Option<ClassifyHook>,
+}
+
+// ## m3b-t24-exec-ui (named exception): the hook is a closure, so `Debug` is written out.
+impl std::fmt::Debug for ClassifyPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClassifyPool")
+            .field("threads", &self.threads)
+            .field("hook", &self.hook.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ClassifyPool {
@@ -86,6 +102,18 @@ impl ClassifyPool {
     /// stack. A thread that cannot start is not counted; with none, every request answers
     /// `Unknown`.
     pub fn new(threads: usize) -> Arc<Self> {
+        Self::with_hook(threads, None)
+    }
+
+    // ## m3b-t24-exec-ui (named exception, T1c M7)
+    /// A pool whose `hook` sees every text it classifies, with its context, on the pool thread
+    /// just before the real classifier reads it (tests record what was classified, and on
+    /// which thread). The answers are the real classifier's; the hook changes nothing.
+    pub fn observed(threads: usize, hook: ClassifyHook) -> Arc<Self> {
+        Self::with_hook(threads, Some(hook))
+    }
+
+    fn with_hook(threads: usize, hook: Option<ClassifyHook>) -> Arc<Self> {
         let (tx, rx) = mpsc::sync_channel::<Job>(QUEUE_CAPACITY);
         let rx = Arc::new(Mutex::new(rx));
         let mut started = 0;
@@ -103,6 +131,7 @@ impl ClassifyPool {
         Arc::new(ClassifyPool {
             threads: started,
             queue: Mutex::new((started > 0).then_some(tx)),
+            hook,
         })
     }
 
@@ -155,9 +184,13 @@ impl ClassifyPool {
         let (tx, rx) = oneshot::channel();
         let job_sql = Arc::clone(&sql);
         let job_ctx = ctx.clone();
+        let hook = self.hook.clone();
         let job: Job = Box::new(move || {
             if tx.is_closed() {
                 return;
+            }
+            if let Some(hook) = &hook {
+                hook(&job_sql, &job_ctx);
             }
             let report = if deadline.is_some_and(|d| Instant::now() >= d) {
                 failed(&job_sql, &job_ctx)
@@ -210,9 +243,15 @@ impl ClassifyPool {
         let (tx, rx) = oneshot::channel();
         let job_units = units.clone();
         let job_ctx = ctx.clone();
+        let hook = self.hook.clone();
         let job: Job = Box::new(move || {
             if tx.is_closed() {
                 return;
+            }
+            if let Some(hook) = &hook {
+                for u in &job_units {
+                    hook(u, &job_ctx);
+                }
             }
             let reports = catch_unwind(AssertUnwindSafe(|| {
                 sql_safety::classify_units(&job_units, &job_ctx)
@@ -314,17 +353,9 @@ fn guard_ctx(kind: DbmsKind, allow: Arc<[Arc<str>]>) -> ClassifyCtx {
 ///   assumed to reach `pg_catalog` first. MySQL/MariaDB: the current database as
 ///   `search_path[0]` (the T20 carry); unknown, empty (as before).
 pub fn guard_ctx_in(kind: DbmsKind, allow: Arc<[Arc<str>]>, c: &ClassifierContext) -> ClassifyCtx {
-    let dialect = dialect_ctx(kind, c.server_version.as_ref(), c.lex_modes.as_deref());
-    let known = match dialect.id {
-        DialectId::Postgres | DialectId::PgWire(_) => c
-            .lex_modes
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|v| v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("off")),
-        DialectId::MySql | DialectId::MariaDb => c.lex_modes.is_some(),
-        DialectId::Sqlite => true,
-        _ => false,
-    };
+    // ## m3b-t24-exec-ui (named exception): the dialect and whether its modes are known come
+    // from one function, which Run's preparation reads too.
+    let (dialect, known) = modes_of(kind, c);
     let modes = dialect.modes;
     let mut ctx = ClassifyCtx::new(dialect, ClientFlavor::None, Expect::SingleStatement);
     if known {
@@ -346,6 +377,45 @@ pub fn guard_ctx_in(kind: DbmsKind, allow: Arc<[Arc<str>]>, c: &ClassifierContex
         }
         _ => {}
     }
+    ctx
+}
+
+// ## m3b-t24-exec-ui (named exception)
+/// The dialect of a session of `kind` in its context `c` (its version and lexing modes, read
+/// as the console's SQL context reads them), and whether those modes are known: PostgreSQL
+/// `on`/`off`, any MySQL/MariaDB `sql_mode`, always on SQLite ([`guard_ctx_in`]'s rule; Run's
+/// preparation uses it too, so it scans in the context it classifies in).
+pub fn modes_of(kind: DbmsKind, c: &ClassifierContext) -> (sql_dialect::DialectCtx, bool) {
+    let dialect = dialect_ctx(kind, c.server_version.as_ref(), c.lex_modes.as_deref());
+    let known = match dialect.id {
+        DialectId::Postgres | DialectId::PgWire(_) => c
+            .lex_modes
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|v| v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("off")),
+        DialectId::MySql | DialectId::MariaDb => c.lex_modes.is_some(),
+        DialectId::Sqlite => true,
+        _ => false,
+    };
+    (dialect, known)
+}
+
+// ## m3b-t24-exec-ui (named exception: the plan amendment C2(b)/I1 on the Run path, the T24
+// I1/I2 rulings)
+/// The classification context of a run's units on a session of `kind` in that session's own
+/// context `c` (`SessionHandle::classifier_context`): exactly [`guard_ctx_in`]'s rules (one
+/// source, one parser: the modes known only when the session read them, the search path as
+/// T18 splits it, PostgreSQL unknown as one unreadable element, MySQL/MariaDB the current
+/// database), with the profile's allowlist `allow` and the unit's `expect`
+/// (`units::expect_for`: `Script` for a unit run as one).
+pub fn run_ctx_in(
+    kind: DbmsKind,
+    allow: Arc<[Arc<str>]>,
+    c: &ClassifierContext,
+    expect: Expect,
+) -> ClassifyCtx {
+    let mut ctx = guard_ctx_in(kind, allow, c);
+    ctx.expect = expect;
     ctx
 }
 

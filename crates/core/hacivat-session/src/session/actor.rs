@@ -354,6 +354,9 @@ pub(crate) fn spawn_supervised(
         // ## m3b-t18-safe06 (named exception): filled from the connect's own read (R-M3-57).
         observed_sql_mode,
         ro_context: crate::session::readonly::RoContextRead::Connect,
+        // ## m3b-t24-exec-ui (named exception): read at the first Run.
+        run_context: crate::session::run_context::RunContext::Stale,
+        context_generation: 0,
         // ## m3b-t19-confirm-tx
         table_locks: false,
         gate: gate.clone(),
@@ -458,6 +461,13 @@ pub(crate) struct Core {
     /// (`readonly::RoContextRead`): the connect's, or ones read again after a statement that
     /// may have changed them. A reconnect starts over from the new connection's.
     pub(crate) ro_context: crate::session::readonly::RoContextRead,
+    // ## m3b-t24-exec-ui (named exception: the T24 I1 ruling)
+    /// What Run classifies with on a read-write session (`run_context`): the context read
+    /// again after any request that may have changed it.
+    pub(crate) run_context: crate::session::run_context::RunContext,
+    /// Moves with every stale-marking (fix round 2): a run classified under another
+    /// generation is refused, sending nothing.
+    pub(crate) context_generation: u64,
     // ## m3b-t19-confirm-tx (fix round 1, m5)
     /// MySQL/MariaDB: the user's `LOCK TABLES` locks may be held (`confirm::note_table_locks`);
     /// a `START TRANSACTION` of Hacivat's would release them, so none is sent meanwhile.
@@ -622,7 +632,37 @@ impl Core {
         ran
     }
 
+    // ## m3b-t24-exec-ui (named exception: the T24 I1 ruling)
+    /// [`Core::handle_request`], and the context Run classifies with: answered in the queue's
+    /// order (`Request::ReadContext`), and marked stale by every request that may have changed
+    /// it, before the next request is taken.
     async fn handle(&mut self, request: Request) -> Reply {
+        if matches!(request, Request::ReadContext) {
+            if self.live.is_none() {
+                return Err(not_connected());
+            }
+            return self.answer_context().await;
+        }
+        // Fix round 2: a run classified under a context generation that has moved since
+        // (another console's request changed it in between) is refused, nothing sent.
+        if crate::session::run_context::run_moved(&request, self.context_generation)
+            && let Request::Run(spec) = &request
+        {
+            // Its observer hears the first unit refused, the rest skipped (as a run the queue
+            // refused), so the log says why it never ran.
+            let refused = ExecError::of(ExecErrorKind::ContextChanged);
+            crate::session::run::report_refused(spec, &refused);
+            return Err(refused);
+        }
+        // Fix round 2 (R1-m1): marked stale before the request runs, so a request that never
+        // finishes (a panic, a deactivation) cannot leave a context it may have changed.
+        if crate::session::run_context::changes_run_context(&request) {
+            self.mark_context_stale();
+        }
+        self.handle_request(request).await
+    }
+
+    async fn handle_request(&mut self, request: Request) -> Reply {
         if self.live.is_none() {
             return Err(not_connected());
         }
@@ -688,6 +728,8 @@ impl Core {
             | Request::FetchMore { .. }
             | Request::FetchAll { .. }
             | Request::CloseCursor { .. } => Err(ExecError::of(ExecErrorKind::Internal)),
+            // ## m3b-t24-exec-ui (named exception): `handle` answers it first.
+            Request::ReadContext => Err(ExecError::of(ExecErrorKind::Internal)),
         }
     }
 
@@ -991,6 +1033,8 @@ impl Core {
         self.stray_kill = false;
         // ## m3b-t18-safe06 (named exception): the new connection's own context read.
         self.ro_context = crate::session::readonly::RoContextRead::Connect;
+        // ## m3b-t24-exec-ui (named exception): a new connection's context is read again.
+        self.mark_context_stale();
         self.live = Some(live);
         self.broken = None;
         self.last_class = None;
@@ -1335,6 +1379,8 @@ fn is_activity(request: &Request) -> bool {
         // ## m3a-t01b-seams
         Request::Run(_) | Request::FetchMore { .. } | Request::FetchAll { .. } => true,
         Request::Ping | Request::Reset | Request::CloseCursor { .. } => false,
+        // ## m3b-t24-exec-ui (named exception): Hacivat's own read.
+        Request::ReadContext => false,
     }
 }
 
@@ -1349,6 +1395,8 @@ fn is_retryable(request: &Request) -> bool {
         | Request::FetchMore { .. }
         | Request::FetchAll { .. }
         | Request::CloseCursor { .. } => false,
+        // ## m3b-t24-exec-ui (named exception): read again on the next request instead.
+        Request::ReadContext => false,
     }
 }
 

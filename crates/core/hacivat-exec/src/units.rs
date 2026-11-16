@@ -232,7 +232,22 @@ pub fn resolve_units_with(
     remembered: Option<CandidateKind>,
     oracle: &dyn SplitOracle,
 ) -> Resolution {
-    let policy = policy_for(action);
+    resolve_units_in(doc, at, action, policy_for(action), remembered, oracle)
+}
+
+// ## m3b-t24-exec-ui (named exception: CHOOSE-06, the console's policy)
+/// [`resolve_units_with`] under `policy` instead of `action`'s default (CHOOSE-06: the
+/// console's "Customize…" choice; the caller computes it with the preview's own function, so
+/// Run and its preview ask the same question). `action` still decides how the oracle may
+/// settle an ambiguous region.
+pub fn resolve_units_in(
+    doc: &DocSnapshot,
+    at: &[CaretOrSelection],
+    action: RunAction,
+    policy: ExecPolicy,
+    remembered: Option<CandidateKind>,
+    oracle: &dyn SplitOracle,
+) -> Resolution {
     match resolve(doc, at, &policy, SplitMode::Execution, None, remembered) {
         RangeResolution::Units(spans) => units_of(doc, &spans),
         RangeResolution::Ask {

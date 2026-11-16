@@ -193,6 +193,18 @@ pub enum LogMsg {
     RolledBackContinue {
         n: u32,
     },
+    // ## m3b-t24-exec-ui (named exception)
+    /// A line the run UI writes about a run before anything of it is sent (Task 24): why a unit
+    /// was not sent (a gate denial with its reason, a parameter refusal), or what the user
+    /// answered at the parameter prompt and the confirmations (`exec-confirm-skipped`,
+    /// `exec-confirm-suppressed`, `exec-confirm-cancelled`). `id` is a `hacivat-core.ftl`
+    /// message, `args` its arguments (a statement number raw, a name as data), `warn` an ink
+    /// line the user must read (a refusal) rather than a note.
+    RunUi {
+        id: &'static str,
+        args: Vec<(&'static str, LogArg)>,
+        warn: bool,
+    },
 }
 
 /// A message argument. Counts are numbers the app formats in the format locale; a statement
@@ -278,6 +290,8 @@ impl LogMsg {
             LogMsg::Disconnected { local: true, .. } => "exec-disconnected-local",
             LogMsg::RunStopped { .. } => "exec-run-stopped",
             LogMsg::RolledBackContinue { .. } => "exec-run-rolled-back-continue",
+            // ## m3b-t24-exec-ui (named exception): the run UI names its own literal IDs.
+            LogMsg::RunUi { id, .. } => id,
         }
     }
 
@@ -371,6 +385,8 @@ impl LogMsg {
             LogMsg::RunStopped { n } | LogMsg::RolledBackContinue { n } => {
                 vec![("i", LogArg::Str(n.to_string().into()))]
             }
+            // ## m3b-t24-exec-ui (named exception)
+            LogMsg::RunUi { args, .. } => args.clone(),
         }
     }
 
@@ -409,6 +425,10 @@ impl LogMsg {
             LogMsg::TerminateFailed => Severity::Error,
             LogMsg::Terminated { .. } | LogMsg::Disconnected { .. } => Severity::Warning,
             LogMsg::RunStopped { .. } | LogMsg::RolledBackContinue { .. } => Severity::Notice,
+            // ## m3b-t24-exec-ui (named exception): a refusal is an error line (a click selects
+            // its statement), an answer a notice.
+            LogMsg::RunUi { warn: true, .. } => Severity::Error,
+            LogMsg::RunUi { warn: false, .. } => Severity::Notice,
             LogMsg::RowsRetrieved { .. }
             | LogMsg::RowsAffected { .. }
             | LogMsg::Completed { .. }

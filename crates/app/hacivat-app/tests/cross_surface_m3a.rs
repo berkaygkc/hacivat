@@ -27,7 +27,7 @@ use hacivat_driver::{RawError, RawErrorKind, ServerMessage, TxStatus};
 use hacivat_exec::LogMsg;
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_session::LiveState;
-use hacivat_session::session::{DenyLayer, TxOwner};
+use hacivat_session::session::TxOwner;
 use hacivat_ui_editor::{EditorView, ExecMarkState, preview};
 use hacivat_ui_grid::GridView;
 use hacivat_values::{LogicalType, Value};
@@ -284,10 +284,16 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
         )
     });
     let lines = log(vcx, id);
+    // ## m3b-t24-exec-ui (named exception): since Task 24 the gate refuses it before the
+    // session's input layer would (R-M3-55, read-only: every class but `Read` denied), naming
+    // the class.
     assert!(
-        lines
-            .iter()
-            .any(|m| matches!(m, LogMsg::ReadOnlyDenied(DenyLayer::Input))),
+        lines.iter().any(|m| matches!(
+            m,
+            LogMsg::RunUi { id: "exec-gate-read-only", args, warn: true }
+                if args.iter().any(|(k, v)| *k == "class"
+                    && matches!(v, hacivat_exec::LogArg::Str(c) if &**c == "dml"))
+        )),
         "{lines:?}"
     );
     // Nothing was sent for it: not the INSERT, not even the guard's transaction.
@@ -318,10 +324,10 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
             .collect()
     };
     let out = output(vcx);
+    // ## m3b-t24-exec-ui (named exception): the gate's sentence.
     assert!(
-        out.iter().any(|t| t.contains(
-            "Not sent: this console is read-only, and the statement can change data or schema."
-        )),
+        out.iter().any(|t| t
+            .contains("Not sent: this connection is read-only, and the statement changes data.")),
         "{out:?}"
     );
 
@@ -337,10 +343,20 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
         matches!(marks(vcx, id).as_slice(), [ExecMarkState::Failed { .. }])
     });
     let lines = log(vcx, id);
+    // ## m3b-t24-exec-ui (named exception): the Run path's classification (Task 24) reads the
+    // writable CTE as a write first, so the gate refuses it before the session's step 0b would.
     assert!(
-        lines.iter().any(
-            |m| matches!(m, LogMsg::Error { view, .. } if view.title_id == "exec-deny-classifier")
-        ),
+        lines
+            .iter()
+            .filter(|m| matches!(
+                m,
+                LogMsg::RunUi {
+                    id: "exec-gate-read-only",
+                    ..
+                }
+            ))
+            .count()
+            >= 2,
         "{lines:?}"
     );
     let calls = fake(vcx).call_log();
@@ -372,9 +388,14 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
     });
     refresh(vcx);
     let out = output(vcx);
+    // ## m3b-t24-exec-ui (named exception): the gate's sentence, once per refused statement.
     assert!(
         out.iter()
-            .any(|t| t.contains("Hacivat couldn't confirm that the statement only reads")),
+            .filter(|t| t.contains(
+                "Not sent: this connection is read-only, and the statement changes data."
+            ))
+            .count()
+            >= 2,
         "{out:?}"
     );
     stop_core_runtime_test(cx);

@@ -1102,3 +1102,123 @@ case.
 - **Lifecycle (m4–m7).** An eviction the shown tab has not answered is answered after the
   tile's frame; a closed tab is hidden to eviction at once; a count stops when its console's
   results drop; the toolbar's Clear empties the view directly.
+
+## m3b-t24 — execution wiring in the app
+
+- **One pipeline, nothing sent before every step agreed** (`exec_ui::orchestrator`, section
+  `m3b-t24-exec-ui`). Run's resolved units (as previewed) → `prepare_units` with a fresh
+  `ParamAnswers` (the parameter prompt on `NeedsValues`; Cancel sends nothing) → the classifier
+  pool's `classify_units` on exactly the prepared `final_text`s (P-M3b-2: the gate denies a
+  stale report) → `gate` with the connection's live `ConnSafety` → the confirmations in unit
+  order (`confirm::ask_plan_at`, R-M3-84) → one `ExecService::run` with the answered plan. Each
+  early end logs a `LogMsg::RunUi` line (a refusal with its reason and arguments, or the user's
+  answer), marks the refused units' gutter `Failed` (its tooltip the reason, its end-of-line
+  words "not sent" or M3a's "not sent: read-only"), and says it once (toast and
+  announcement). Every unit is either confirmed, sent, or refused visibly.
+- **Off the UI thread.** Preparation and the gate run on the background executor; the
+  classification on the pool's 16 MiB threads (the UI's foreground task awaits a `oneshot`). A
+  Run being prepared holds the console like a run in flight (one at a time; its gutter shows
+  nothing yet).
+- **The real context: the session's own (plan amendment C2(b)/I1, T18 carries; fix round 1,
+  I1/I2).** Run asks the session it will run on for its classification context first
+  (`SessionHandle::classifier_context`, a queued `Request::ReadContext`): the lexing-mode
+  setting, the search path (MySQL/MariaDB: the current database) and the server version, kept
+  **per session**, so every console that shares a session gets the same one. A read-only
+  session answers what its guard's classifier is told (T18); a read-write session reads T18's
+  own constant text (`readonly::read_context_again`: PostgreSQL `current_setting(...)`, split
+  by `schema::split_search_path`; MySQL/MariaDB `@@SESSION.sql_mode, DATABASE()`), a read
+  that cannot fail in an open transaction, run outside the guard and not counted as a statement
+  of the user's transaction (`observe(false)`). **Never stale:** the question is answered in
+  queue order, and every request that may change the context (a user statement, a run with a
+  unit not proved a read, a transaction command, a schema switch, a reset, a reconnect) marks
+  it stale before the next request is taken; a stale one is read again before it is answered.
+  **Fail-closed:** in a failed transaction, or while a suspended cursor holds the connection,
+  nothing is read and the answer is unknown; a Run that gets no answer within 10 s classifies
+  with unknown modes. The units were split in the console's context: when the session now reads
+  text in other modes (the `standard_conforming_strings` example: `SELECT '\'\n' ; DELETE FROM
+  t; --'`), nothing is sent (`exec-run-context-changed`) and the console reads its context
+  again. The context is asked again after the prompt and the confirmations, just before the
+  send: if another console on the same session changed it meanwhile, nothing is sent (same
+  line). **The context's generation (fix round 2):** the session's answer carries a
+  generation that moves with every stale-marking (marked before the request runs, so a request
+  that never finishes still moves it); the run carries the generation of the last answer
+  (`RunSpec::context_generation`), and the session refuses a run whose generation has moved,
+  sending nothing (`ExecErrorKind::ContextChanged`, `exec-run-context-changed`): another
+  console's request queued between that answer and the run cannot change the context the run
+  was classified in. **Unproven engines (fix round 2):** on Redshift and Cockroach the read is
+  not sent while a user transaction is open (not proven to succeed there); the answer is then
+  unknown. PostgreSQL, Timescale and Yugabyte read. A function on the profile's
+  `read_only_fn_allowlist` is a proved read and never marks the context stale: the list is the
+  user's declaration that it only reads. **One context per run (M12):** the parameter scan and the classification both use it
+  (`orchestrator::classify_ctx_in` → `classify_pool::run_ctx_in`, exactly `guard_ctx_in`'s
+  rules). Count rows checks in the context of the session it runs on, read from that session.
+  Within one run, a later unit is classified in the context a literal `USE db` (MySQL/MariaDB)
+  or `SET search_path TO <literal list>` (PostgreSQL) of an earlier unit sets; any other
+  context change leaves the later units `Unknown` (`sql-safety` `classify_units`, fix round 1,
+  I5).
+- **Unknown modes stay fail-closed for parameters too**: the units are prepared under every
+  reading of the modes, and a run whose parameters read differently is refused
+  (`exec-param-modes-unknown`).
+- **Production stays read-only until Task 26 (R-M3-52).** `ConnSafety.read_only` is the
+  session's read-only flag **or** a production profile: the gate denies every non-`Read` unit
+  there, whatever the session underneath (the guard still applies). Task 26 deletes that one
+  rule in `conn_safety`.
+- **Run as one (R-M3-60).** A unit run as one is a `Verbatim` unit: a selection under the
+  console's "As one" policy, or the uncertain chooser's "Run as one" row, whose region is the
+  execution statements holding the uncertain boundaries (Run 3: the whole text; a selection: the
+  selection), without outer white space, refused when it cuts a token or reaches a client command
+  or `COPY` rows. The row is never preselected (`PopupMenu::clear_selection`, named exception);
+  the band shows the region while it is highlighted; on a read-only session it is disabled with
+  its reason. It is classified with `Expect::Script`; a unit run as one whose verdict would be
+  `TxThenConfirm` or `ExplainAnalyzeRollback` is denied (`exec-gate-run-as-one-refused`, the T19
+  carry: the session refuses them). MySQL/MariaDB: the gate does not model a Smart
+  transaction an earlier unit of the run opens, so DML then DDL in one Smart run is refused by the
+  session (`ImplicitCommitUnconfirmed`): fail-closed (T19 m8).
+- **CHOOSE-06.** The console's `RunPolicy` (inside: Ask / Smallest / Largest / Whole script; a
+  selection as separate statements or as one) is kept until the console closes and read by Run
+  (`resolve_units_in`) and its band (`preview_with`, the service's `set_run_policy`) through one
+  table, `hacivat_sql_editor::run_policy`, so the preview-truth rule holds under any policy
+  (property `preview_equals_execution_under_the_console_policy`).
+- **Parameters (R-M3-79).** Values are remembered per `(profile, name)` for the app session
+  (`ParamMemory`, never persisted), only for named parameters; they pre-fill the prompt and
+  never skip it. Values are read machine format first: a canonical integer gets an integer
+  hint, `\x`+hex pairs bytes (malformed `\x` refused on every engine, the T13 M-6 carry), the
+  rest text (decimals stay exact). A dot-grouped number where the format locale groups with a
+  dot is ambiguous until edited or confirmed ("Use 1.234"). **Known limit (fix round 1, M11):**
+  a value that begins with `\x` or `\X` is never sent as text (read as bytes, or refused as
+  bad hex); a "send as text" choice is left for later.
+- **The run's questions.** After `run`, the port follows the run (`follow(run, choices,
+  status, masked)`), a `NeedsChoice` goes to the error bar (`error_bar::on_choice`, Task 23), a
+  `NeedsCommit` disables the transaction badge (`set_choice_pending`) and marks its unit
+  "waiting for Commit or Roll back" (or Keep or Undo). Every loss of a run that had such a
+  question reaches the port (`connection_lost`, with the statements before the confirmed one in
+  the savepoint form), whichever of the loss and the question's end the app sees first (fix
+  round 1, I3: `LossLink`; the listener outlives the run by 30 s).
+- **The observer's derived lines (T19 carry).** `PlannedUnit` carries the gate's verdict: an
+  `ImplicitCommit` unit that ends the user's transaction logs `exec-implicit-commit` (instead of
+  the generic "the transaction ended" line), and a `TxThenConfirm` unit that fails or is
+  cancelled in an open transaction before any question logs `exec-confirm-statement-failed`.
+- **History (T17 carries).** The store opens on the core runtime at boot (its integrity check
+  never holds the window) in the private `data/` directory (`create_dir_all_private`); records
+  go through a channel the run service writes from the start and are forwarded once the store
+  answers; a store recovered from a corrupt file says so once; a profile with
+  `record_history == false` gets no `HistoryMeta` and is marked do-not-record in the store too.
+- **Tests' hook (T1c M7).** `ClassifyPool::observed(threads, hook)`: the hook sees each text and
+  its context on the pool thread before the real classifier reads it (Task 24's
+  `classifier_receives_final_text`, `classification_never_runs_on_the_ui_thread`).
+- **Refusals say what happened to every unit (fix round 1).** When the gate refuses a unit,
+  nothing of the run is sent, and each other unit gets its own mark and log line naming the
+  refused statement (`exec-gate-run-refused`, I4). A selection run as one that holds a parameter
+  is refused before any prompt (`exec-param-run-as-one`, M1: one simple-query message carries
+  no bind values); the "As one" policy on a read-only session is refused at the gate
+  (`exec-gate-run-as-one-read-only`, M2: the chooser's reason). A console whose session changed
+  between the gate and the send says so (`exec-run-connection-changed`, M4). Run as one trims
+  only SQL white space (M3). The gate reads the profile as it is at gate time (M5). A history
+  store that cannot open is logged (M9).
+- **A carried context switch must take effect (fix round 2, R1-C1).** When a unit before the
+  last is a literal `USE` / `SET search_path` whose new context the later units were classified
+  in (`sql_safety::carried_switches`), the run is sent with `ErrorPolicy::StopOnError` whatever
+  the error-policy setting says (no Ignore, Skip or Retry past its failure), and skipping it at
+  a confirmation cancels the run (nothing sent): otherwise a failed `USE app` would run
+  `SELECT * FROM session` against the old database although it was classified as a read of
+  `app.session`.

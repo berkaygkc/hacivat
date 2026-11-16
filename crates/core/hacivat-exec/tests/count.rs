@@ -444,3 +444,83 @@ async fn a_parameterised_count_carries_its_binds() {
             .any(|b| b == &[common::m3b::text_bind("7")])
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// ## m3b-t24-exec-ui (fix round 1, I1; the T25 m2 carry)
+
+/// Allows every statement and keeps the context each check was given.
+#[derive(Debug, Default)]
+struct AllowSeen(std::sync::Mutex<Vec<ClassifierContext>>);
+
+impl StatementClassifier for AllowSeen {
+    fn check_read_only(
+        &self,
+        _kind: DbmsKind,
+        _sql: Arc<str>,
+        _allow: Arc<[Arc<str>]>,
+    ) -> BoxFuture<'static, RoCheck> {
+        Box::pin(async { RoCheck::Allow })
+    }
+    fn effects(&self, _: DbmsKind, _: Arc<str>) -> BoxFuture<'static, Option<SessionEffects>> {
+        Box::pin(async { None })
+    }
+    fn check_read_only_in(
+        &self,
+        _kind: DbmsKind,
+        _sql: Arc<str>,
+        _allow: Arc<[Arc<str>]>,
+        ctx: ClassifierContext,
+    ) -> BoxFuture<'static, RoAnswer> {
+        self.0.lock().unwrap().push(ctx);
+        Box::pin(async {
+            RoAnswer {
+                check: RoCheck::Allow,
+                changes_context: false,
+            }
+        })
+    }
+}
+
+/// The session's own context read (T18's constant text) answering `on` and `app, public`.
+fn context_read() -> hacivat_driver::fake::FakeExec {
+    hacivat_driver::fake::FakeExec {
+        prefix: "SELECT pg_catalog.current_setting('standard_conforming_strings')",
+        result: Ok(hacivat_driver::ExecSummary {
+            rows: vec![vec![Some("on".into()), Some("app, public".into())]],
+            row_count: 1,
+            ..hacivat_driver::ExecSummary::default()
+        }),
+        delay: Duration::ZERO,
+        tx_after: None,
+        panics: false,
+    }
+}
+
+/// A count the check allows runs, and it was checked in the context of the session it runs
+/// on (a pooled Service session here), as that session read it.
+#[tokio::test]
+async fn an_allowed_count_is_checked_in_its_sessions_context() {
+    let (_m, _console, f, req) = connected(
+        fake_pg()
+            .exec(vec![context_read(), context_read()])
+            .queries(vec![count_query(Duration::ZERO)]),
+    )
+    .await;
+    let seen = Arc::new(AllowSeen::default());
+    let svc =
+        ExecService::new(MemoryBudget::new(1 << 30, 256 << 20)).with_count_check(seen.clone());
+    let n = svc.count(req).done.await.unwrap().expect("a count");
+    assert_eq!(n, 42);
+    assert_eq!(counted(&f), 1);
+    let seen = seen.0.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].lex_modes.as_deref(), Some("on"));
+    let path: Vec<&str> = seen[0]
+        .search_path
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|s| &**s)
+        .collect();
+    assert_eq!(path, ["app", "public"]);
+}

@@ -138,6 +138,11 @@ pub struct RunRequest {
     pub history: Option<HistoryMeta>,
     /// Where confirm-in-transaction questions go (Task 21's port); `None` rolls back.
     pub confirm: Option<Arc<dyn ConfirmPort>>,
+    // ## m3b-t24-exec-ui (fix round 2, named exception)
+    /// The session's context generation the units were classified under
+    /// (`SessionHandle::run_context`): the session refuses the run, sending nothing, when it
+    /// has moved since (`RunSpec::context_generation`). `None`: not checked.
+    pub context_generation: Option<u64>,
 }
 
 // ## m3b-t16-run-service
@@ -224,6 +229,8 @@ impl RunRequest {
                     // ## m3b-t19-confirm-tx (named exception, fix round 2, R1-I1)
                     commits_first: item.effects.contains(SessionEffects::COMMITS_FIRST),
                     skipped,
+                    // ## m3b-t24-exec-ui (named exception): the log derives its lines from it.
+                    verdict: item.verdict,
                 },
                 item.verdict,
                 item.effects,
@@ -341,7 +348,8 @@ impl ExecService {
     }
 
     /// "Count rows" (R-M3-76; the module docs): `req.sql` (from `count::count_sql`) checked
-    /// again and run on a pooled `Service` session or on the console. Nothing is sent when
+    /// again (in the context of the session it runs on, read from that session) and run on a
+    /// pooled `Service` session or on the console. Nothing is sent when
     /// the check refuses it, or without a check (fail closed).
     pub fn count(&self, req: CountRequest) -> CountTicket {
         let (tx, done) = oneshot::channel();
@@ -508,6 +516,7 @@ impl ExecService {
             fetch: req.fetch,
             observer: ObserverRef(observer.clone()),
             confirm_deadline: RunSpec::CONFIRM_DEADLINE,
+            context_generation: req.context_generation,
         });
         let seq = sent.seq;
         observer.set_seq(seq);
@@ -646,13 +655,6 @@ async fn count_on(
             reasons: vec![sql_safety::ReasonCode::NotImplemented.fluent_id()],
         }));
     };
-    match check
-        .check_read_only(req.engine, sql.clone(), Arc::from(Vec::new()))
-        .await
-    {
-        RoCheck::Allow => {}
-        RoCheck::Deny(d) => return Err(CountError::Refused(d)),
-    }
     // The console's own transaction sees what the count must see; otherwise a pooled session
     // keeps the console free.
     let user_tx = {
@@ -672,6 +674,18 @@ async fn count_on(
         _ => None,
     };
     let session: SessionHandle = pooled.as_deref().unwrap_or(&req.console).clone();
+    // ## m3b-t24-exec-ui (named exception, T18 m12, the T24 I1 ruling): checked in the context
+    // of the session the count runs on, as that session reads it now (never another
+    // session's, never a stale one).
+    let ctx = session.classifier_context().await;
+    match check
+        .check_read_only_in(req.engine, sql.clone(), Arc::from(Vec::new()), ctx)
+        .await
+        .check
+    {
+        RoCheck::Allow => {}
+        RoCheck::Deny(d) => return Err(CountError::Refused(d)),
+    }
     let observer = Arc::new(crate::count::CountObserver::new(budget));
     let unit = RunUnit {
         verdict: UnitVerdict::Read,
@@ -685,6 +699,7 @@ async fn count_on(
         fetch: FetchPolicy::default(),
         observer: ObserverRef(observer.clone()),
         confirm_deadline: RunSpec::CONFIRM_DEADLINE,
+        context_generation: None,
     });
     *lock_sent(&sent) = Some((session, pooled, ticket.seq));
     let reply = ticket.reply.await;

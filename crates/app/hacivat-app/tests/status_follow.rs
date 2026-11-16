@@ -322,6 +322,7 @@ fn run_one(
         observer: ObserverRef(Stores::new()),
         // ## m3b-t01c-core-seams
         confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
+        context_generation: None,
     })
 }
 

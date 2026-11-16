@@ -2486,6 +2486,84 @@ hv-errbar-rollback-continue-tip-auto = { $n ->
        *[other] Rolls back your open transaction ({ $n } statements), then continues with statement { $next }, committing each statement as it runs.
     }
 
+## m3b-t24-exec-ui
+
+# The parameter prompt (design/m3b-safe surface 8): the values of a statement's parameters,
+# asked before the statement is checked and sent. Values are data: never translated.
+hv-params-title = Values for this statement
+# The subtitle's count of parameters asked for.
+# Variables:
+#   $n (Number) - how many parameters the prompt asks for.
+hv-params-sub = { $n ->
+        [one] { $n } parameter
+       *[other] { $n } parameters
+    }
+# Column headings of the prompt's rows.
+hv-params-col-name = Name
+hv-params-col-value = Value
+hv-params-col-type = Type
+# The tooltip of a row's NULL toggle.
+hv-params-null-tip = Send NULL
+# Under a value filled in from an earlier run of this app session.
+hv-params-remembered = remembered
+# The tooltip of "remembered".
+hv-params-remembered-tip = From an earlier run in this app session; never saved to disk.
+# A number grouped with dots where the region groups that way: it is read as a decimal unless
+# the user writes it without the dots. Run stays off until the user decides.
+# Variables:
+#   $value (String) - the value as typed, e.g. "1.234".
+#   $plain (String) - the same digits without dots, e.g. "1234".
+hv-params-ambiguous = Read as the decimal { $value }: a dot is the decimal point here. If you meant { $plain }, write it without the dot.
+# The button that accepts the decimal reading.
+# Variables:
+#   $value (String) - the value as typed, e.g. "1.234".
+hv-params-ambiguous-use = Use { $value }
+# A value written as bytes (\x…) that isn't pairs of hex digits.
+hv-params-bad-hex = Bytes written as \x must be pairs of hex digits (0–9, a–f).
+# A template variable can't be filled in as a parameter: the statement can't run as written.
+# Variables:
+#   $var (String) - the template variable as written, e.g. "${tablo}".
+hv-params-template = { $var } is a template variable, not a parameter. Hacivat doesn't fill it in, so this statement can't run as written.
+# PostgreSQL: a ? in the statement is the jsonb operator, not a parameter.
+hv-params-pg-q = On PostgreSQL ? isn't a parameter here, because jsonb operators use it. Settings › Parameters can turn it on.
+# The note at the end of the prompt.
+hv-params-note = Values are kept for this app session only and are masked in history.
+# The prompt's buttons.
+hv-params-run = Run
+hv-params-cancel = Cancel
+# The tooltip of a disabled Run.
+hv-params-resolve-first = Resolve the flagged value first
+# The type column when the statement says nothing of the parameter's type.
+hv-params-type-unknown = unknown
+# The chooser's uncertain state (R-M3-60): sends the uncertain region in one request.
+hv-chooser-run-as-one = Run as one
+# The line under "Run as one".
+hv-chooser-run-as-one-hint = Run as one sends the whole region in one request; its results come back untyped.
+# The line under a disabled "Run as one" on a read-only session.
+hv-chooser-run-as-one-ro = Not on a read-only session: its guard checks one statement at a time.
+# The chooser's last row: opens how Run picks statements in this console.
+hv-chooser-customize = Customize…
+# The policy popover (CHOOSE-06): how Run picks statements in this console.
+hv-policy-title = How Run picks statements in this console
+hv-policy-inside = Caret inside a statement
+hv-policy-inside-ask = Ask
+hv-policy-inside-smallest = Smallest statement
+hv-policy-inside-largest = Largest statement
+hv-policy-inside-whole = Whole script
+hv-policy-selection = With a selection
+hv-policy-sel-separate = As separate statements
+hv-policy-sel-as-one = As one
+hv-policy-note = Kept for this console until it closes.
+# A statement's gutter mark while its change waits for the user's answer (confirm in
+# transaction; NOTES ruling 31).
+hv-editor-mark-awaiting = waiting for Commit or Roll back
+# The same in the savepoint form (the user's own transaction stays open).
+hv-editor-mark-awaiting-sp = waiting for Keep or Undo
+# A statement Run refused before sending it (its tooltip says why), on a read-write console.
+hv-editor-mark-not-sent = not sent
+# Once, when the query history file was damaged and set aside at startup.
+hv-exec-history-recovered = The query history file was damaged, so Hacivat set it aside and started a new one.
+
 ## m3b-t27-history
 
 # The query history dialog (design/m3b-safe surface 11).

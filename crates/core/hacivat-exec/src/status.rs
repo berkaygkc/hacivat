@@ -138,6 +138,8 @@ pub fn error_title_id(kind: &ExecErrorKind) -> &'static str {
         ExecErrorKind::Tx(TxError::ExplainNotRolledBack) => "exec-explain-not-rolled-back",
         ExecErrorKind::SafetyDenied(_) => "exec-deny-classifier",
         ExecErrorKind::QueueFull => "exec-error-queue-full",
+        // ## m3b-t24-exec-ui (fix round 2)
+        ExecErrorKind::ContextChanged => "exec-run-context-changed",
     }
 }
 

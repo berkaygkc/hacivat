@@ -1000,6 +1000,7 @@ async fn the_deadline_stops_the_run() {
         let spec = RunSpec {
             policy,
             confirm_deadline: secs(2),
+            context_generation: None,
             ..spec_units(
                 &o,
                 vec![

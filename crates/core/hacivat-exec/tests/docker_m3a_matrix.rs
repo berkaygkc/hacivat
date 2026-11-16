@@ -2094,6 +2094,7 @@ async fn dml_and_ddl_report_update_counts_on_a_dev_console() {
             observer: ObserverRef(tags.clone()),
             // ## m3b-t01c-core-seams
             confirm_deadline: hacivat_session::session::RunSpec::CONFIRM_DEADLINE,
+            context_generation: None,
         };
         c.s.run(spec)
             .reply

@@ -388,6 +388,7 @@ fn badge_only_for_user_transactions(cx: &mut TestAppContext) {
         fetch: FetchPolicy::default(),
         observer: ObserverRef(std::sync::Arc::new(Stores::new())),
         confirm_deadline: RunSpec::CONFIRM_DEADLINE,
+        context_generation: None,
     });
     poll_until("the cursor to open", || snapshot(&cursor).cursor.is_some());
     let tx = snapshot(&cursor).tx;

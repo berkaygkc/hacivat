@@ -700,6 +700,8 @@ pub fn run_asking(console: ConsoleId, units: &[&str], cx: &mut App) -> Option<Ru
             run_as_one: false,
             history: None,
             confirm: None,
+            // ## m3b-t24 merge reconciliation: a test-support run checks no context.
+            context_generation: None,
         },
     );
     let version = editor.read(cx).snapshot().version;
@@ -741,6 +743,8 @@ pub fn run_asking(console: ConsoleId, units: &[&str], cx: &mut App) -> Option<Ru
             ended: false,
             cancel_asked: false,
             status: status_rx,
+            // ## m3b-t24 merge reconciliation
+            policy: ErrorPolicy::Ask,
             _tasks: vec![status, questions],
         });
     });

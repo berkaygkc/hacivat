@@ -645,6 +645,26 @@ fn classify_with(
     }
 }
 
+// ## m3b-t24-exec-ui (named exception: the T24 fix round 2, R1-C1)
+/// The units whose context switch [`classify_units`] carried into the later units (a literal
+/// `USE` / `SET search_path`, before any change that made the rest `Unknown`), by index, from
+/// the units' texts and their reports. The later units were classified as if the switch took
+/// effect, so a run must not go on past one that failed or was skipped: Task 24 runs such a
+/// run with `StopOnError` and treats a skip of one as a cancel.
+pub fn carried_switches<S: AsRef<str>>(units: &[S], reports: &[SafetyReport]) -> Vec<usize> {
+    let mut carried = Vec::new();
+    for (i, (u, r)) in units.iter().zip(reports).enumerate() {
+        if !changes_context(u.as_ref(), r) {
+            continue;
+        }
+        if literal_switch(u.as_ref(), r).is_none() {
+            break;
+        }
+        carried.push(i);
+    }
+    carried
+}
+
 /// Classifies a run's units in order, each with `ctx` (the module docs): once a unit may change
 /// the context ([`changes_context`]), every later unit is `Unknown` (`EffectsUnknown` on every
 /// item; a pre-decided report stays as it is). One report per unit, in order.
@@ -652,14 +672,22 @@ pub fn classify_units<S: AsRef<str> + Sync>(units: &[S], ctx: &ClassifyCtx) -> V
     on_classifier_stack(
         || {
             let mut stale = false;
+            // ## m3b-t24-exec-ui (named exception: the T24 I5 ruling): a change whose new value
+            // is read exactly from the text (`literal_switch`) sets the context of the later
+            // units instead of making them `Unknown`.
+            let mut cur = ctx.clone();
             units
                 .iter()
                 .map(|u| {
-                    let mut r = classify(u.as_ref(), ctx);
+                    let mut r = classify(u.as_ref(), &cur);
                     if stale {
                         mark_stale(&mut r);
+                    } else if changes_context(u.as_ref(), &r) {
+                        match literal_switch(u.as_ref(), &r) {
+                            Some(path) => cur.search_path = Arc::from(path),
+                            None => stale = true,
+                        }
                     }
-                    stale |= changes_context(u.as_ref(), &r);
                     r
                 })
                 .collect()
@@ -691,6 +719,153 @@ pub fn changes_context(sql: &str, r: &SafetyReport) -> bool {
     r.items
         .iter()
         .any(|i| item_changes_context(i, sql, dialect))
+}
+
+// ## m3b-t24-exec-ui (named exception: the T24 I5 ruling)
+/// The search path after `sql` (reported `r`) when its only context change is one read
+/// exactly from its text, so later units of the run are classified in it instead of being
+/// `Unknown`:
+/// - MySQL/MariaDB `USE <name>` (a plain ASCII name or one in backquotes): the database is
+///   `search_path[0]`, its bytes as written;
+/// - PostgreSQL `SET [SESSION] search_path {TO|=} <names>`: plain ASCII names (folded to lower
+///   case, as the server stores them), double-quoted names and string literals, separated by
+///   commas.
+///
+/// `None` (the caller treats later units as `Unknown`) for anything else: several statements,
+/// a pre-decided report, other effects, `SET LOCAL` (a later `COMMIT` would undo it),
+/// `DEFAULT`, an expression, `set_config`, a comment or any byte the forms above do not allow.
+fn literal_switch(sql: &str, r: &SafetyReport) -> Option<Vec<Arc<str>>> {
+    if r.pre_decision.is_some() || r.items.len() != 1 || !r.matches_text(sql) {
+        return None;
+    }
+    let item = &r.items[0];
+    if !item.effects.difference(EffectSet::SESSION_STATE).is_empty()
+        || item
+            .flags
+            .intersects(RiskFlags::LEX_MODE_CHANGE | RiskFlags::DYNAMIC_SQL)
+    {
+        return None;
+    }
+    let text = sql.get(usize::from(item.range.start())..usize::from(item.range.end()))?;
+    let text = text.trim_matches(|c: char| c.is_ascii_whitespace());
+    if text.contains("--") || text.contains("/*") || text.contains('#') || text.contains(';') {
+        return None;
+    }
+    let (word, rest) = split_word(text)?;
+    match r.dialect? {
+        DialectId::MySql | DialectId::MariaDb if item.kind == StmtKind::Use => {
+            if !word.eq_ignore_ascii_case("USE") {
+                return None;
+            }
+            let name = rest.trim_matches(|c: char| c.is_ascii_whitespace());
+            let db = match name.strip_prefix('`') {
+                Some(q) => {
+                    // A backquoted name: "``" is a backquote inside it, a lone one ends it.
+                    let inner = q.strip_suffix('`')?;
+                    if inner.is_empty()
+                        || inner.replace("``", "").contains('`')
+                        || inner.chars().any(char::is_control)
+                    {
+                        return None;
+                    }
+                    inner.replace("``", "`")
+                }
+                None if plain_name(name) => name.to_string(),
+                None => return None,
+            };
+            Some(vec![Arc::from(db)])
+        }
+        DialectId::Postgres | DialectId::PgWire(_) if item.kind == StmtKind::Set => {
+            if !word.eq_ignore_ascii_case("SET") {
+                return None;
+            }
+            let [target] = item.set_targets.as_slice() else {
+                return None;
+            };
+            if !target.name.eq_ignore_ascii_case("search_path") {
+                return None;
+            }
+            // Only `SET [SESSION] search_path …`: never `SET LOCAL`.
+            let (next, _) = split_word(rest.trim_start_matches(|c: char| c.is_ascii_whitespace()))?;
+            if !(next.eq_ignore_ascii_case("search_path") || next.eq_ignore_ascii_case("SESSION")) {
+                return None;
+            }
+            pg_name_list(target.value.as_deref()?)
+        }
+        _ => None,
+    }
+}
+
+/// The leading ASCII word of `text` and the rest.
+fn split_word(text: &str) -> Option<(&str, &str)> {
+    let end = text
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(text.len());
+    (end > 0).then(|| text.split_at(end))
+}
+
+/// A plain ASCII name: a letter or `_`, then letters, digits, `_` or `$`.
+fn plain_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// A PostgreSQL `search_path` value written as a list of names (see [`literal_switch`]), in
+/// the server's stored form; `None` for anything else.
+fn pg_name_list(value: &str) -> Option<Vec<Arc<str>>> {
+    let mut out = Vec::new();
+    let mut rest = value.trim_matches(|c: char| c.is_ascii_whitespace());
+    loop {
+        let (name, after) = if let Some(q) = rest.strip_prefix('"') {
+            // A quoted name: `""` is a quote inside it.
+            let mut name = String::new();
+            let mut it = q.char_indices().peekable();
+            let mut end = None;
+            while let Some((i, c)) = it.next() {
+                if c == '"' {
+                    if it.peek().is_some_and(|(_, n)| *n == '"') {
+                        name.push('"');
+                        it.next();
+                    } else {
+                        end = Some(i + 1);
+                        break;
+                    }
+                } else {
+                    name.push(c);
+                }
+            }
+            (name, &q[end?..])
+        } else if let Some(q) = rest.strip_prefix('\'') {
+            let end = q.find('\'')?;
+            let name = &q[..end];
+            if name.contains('\\') || q[end + 1..].starts_with('\'') {
+                return None;
+            }
+            (name.to_string(), &q[end + 1..])
+        } else {
+            let end = rest
+                .find(|c: char| c == ',' || c.is_ascii_whitespace())
+                .unwrap_or(rest.len());
+            let word = &rest[..end];
+            if !plain_name(word) || word.eq_ignore_ascii_case("DEFAULT") {
+                return None;
+            }
+            (word.to_ascii_lowercase(), &rest[end..])
+        };
+        if name.is_empty() || name.contains(',') || name.chars().any(char::is_control) {
+            return None;
+        }
+        out.push(Arc::from(name));
+        let after = after.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        match after.strip_prefix(',') {
+            Some(more) => rest = more.trim_start_matches(|c: char| c.is_ascii_whitespace()),
+            None if after.is_empty() => return Some(out),
+            None => return None,
+        }
+    }
 }
 
 /// `r`'s items made `Unknown` after a context change earlier in the run, and its request
