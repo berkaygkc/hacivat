@@ -476,6 +476,9 @@ async fn effects_map_to_session_effects_and_unknown_is_none() {
     );
     // The pure mapping agrees with the pool's.
     let r = classify("SELECT 1", &pg());
-    assert_eq!(session_effects(&r), Some(SessionEffects::empty()));
+    assert_eq!(
+        session_effects(&r, "SELECT 1", DbmsKind::Postgres),
+        Some(SessionEffects::empty())
+    );
     assert_eq!(read_only_check(&r), RoCheck::Allow);
 }

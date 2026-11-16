@@ -1934,6 +1934,7 @@ pub mod gate_fx {
                     doc_range: at..at + t.len(),
                     kind: UnitKind::Statement,
                     suspendable: true,
+                    title: None,
                 };
                 at += t.len() + 2;
                 u

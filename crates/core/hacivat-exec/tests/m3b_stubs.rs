@@ -22,9 +22,7 @@ use hacivat_exec::{
     prepare_units,
 };
 use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
-use hacivat_session::session::{
-    ExecErrorKind, RoCheck, StatementClassifier, TxMode, TxOwner, UnitVerdict,
-};
+use hacivat_session::session::{RoCheck, StatementClassifier, TxMode, TxOwner};
 use hacivat_values::BindValue;
 use sql_dialect::ClientFlavor;
 use sql_split::ParamSettings;

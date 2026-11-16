@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 use futures::future::BoxFuture;
 use hacivat_proto::DbmsKind;
 use hacivat_session::session::{RoCheck, SafetyDenial, SessionEffects, StatementClassifier};
-use sql_dialect::{ClientFlavor, DialectId};
+use sql_dialect::ClientFlavor;
 use sql_safety::{
     Actor, ClassifyCtx, CoarseClass, EffectSet, Expect, Profile, ReasonCode, SafetyReport, Verdict,
     decide,
@@ -268,7 +268,9 @@ fn failed(sql: &str, ctx: &ClassifyCtx) -> SafetyReport {
 
 /// The session-level effects of a report (C8, Smart, the D-062 wrap), `None` when they are
 /// unknown: a pre-decided report, an `Unknown` request, or `EffectSet::UNKNOWN` anywhere.
-pub fn session_effects(r: &SafetyReport) -> Option<SessionEffects> {
+/// Otherwise the one mapping of [`crate::gate::session_effects_of`] (merge carry, T15 M8): `text`
+/// is the classified text and `kind` the session's engine.
+pub fn session_effects(r: &SafetyReport, text: &str, kind: DbmsKind) -> Option<SessionEffects> {
     if r.pre_decision.is_some()
         || r.items.is_empty()
         || r.request_class == CoarseClass::Unknown
@@ -276,31 +278,7 @@ pub fn session_effects(r: &SafetyReport) -> Option<SessionEffects> {
     {
         return None;
     }
-    let e = r.request_effects;
-    let mysql = matches!(r.dialect, Some(DialectId::MySql | DialectId::MariaDb));
-    let mut out = SessionEffects::empty();
-    if e.contains(EffectSet::SESSION_STATE) {
-        out |= SessionEffects::SESSION_STATE;
-    }
-    if e.intersects(EffectSet::WRITE_TEMP | EffectSet::DDL_TEMP) {
-        out |= SessionEffects::WRITE_TEMP;
-    }
-    if e.contains(EffectSet::ADVISORY_LOCK) {
-        out |= SessionEffects::ADVISORY_LOCK;
-    }
-    if mysql && e.contains(EffectSet::LOCK_TABLE) {
-        out |= SessionEffects::LOCK_TABLES;
-    }
-    if e.contains(EffectSet::PREPARE) {
-        out |= SessionEffects::PREPARE;
-    }
-    if e.contains(EffectSet::DDL) {
-        out |= SessionEffects::DDL;
-    }
-    if r.items.iter().any(sql_safety::opens_write) {
-        out |= SessionEffects::OPENS_WRITE;
-    }
-    Some(out)
+    Some(crate::gate::session_effects_of(r, text, kind))
 }
 
 /// The classification context of one statement on a session of `kind` (the read-only guard's
@@ -367,10 +345,10 @@ impl StatementClassifier for ClassifyPool {
     fn effects(&self, kind: DbmsKind, sql: Arc<str>) -> BoxFuture<'static, Option<SessionEffects>> {
         let ctx = guard_ctx(kind, Arc::from(Vec::new()));
         let until = Instant::now() + READ_ONLY_CHECK_DEADLINE;
-        let rx = self.start(sql, ctx, Some(until), sql_safety::classify);
+        let rx = self.start(Arc::clone(&sql), ctx, Some(until), sql_safety::classify);
         Box::pin(async move {
             match tokio::time::timeout(READ_ONLY_CHECK_DEADLINE, rx).await {
-                Ok(Ok(r)) => session_effects(&r),
+                Ok(Ok(r)) => session_effects(&r, &sql, kind),
                 Ok(Err(_)) | Err(_) => None,
             }
         })
@@ -379,7 +357,7 @@ impl StatementClassifier for ClassifyPool {
 
 #[cfg(test)]
 mod tests {
-    use sql_dialect::DialectCtx;
+    use sql_dialect::{DialectCtx, DialectId};
 
     use super::*;
 
@@ -429,7 +407,7 @@ mod tests {
                 reasons: vec![ReasonCode::EffectsUnknown.fluent_id()],
             })
         );
-        assert_eq!(session_effects(&r), None);
+        assert_eq!(session_effects(&r, "SELECT 1", DbmsKind::Postgres), None);
         // The one thread still classifies.
         let ok = p.classify("SELECT 1".into(), pg()).await.unwrap();
         assert_eq!(ok.request_class, CoarseClass::Read);
