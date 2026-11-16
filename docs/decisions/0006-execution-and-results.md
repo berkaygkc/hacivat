@@ -482,3 +482,55 @@ wired into Run before Task 24 (R-M3-52).
 - **Ruling I2.** The app takes no `sql-safety` dependency: `hacivat-exec` re-exports
   `ClassifyCtx`, `Expect`, `FnCatalog`, `GateClass`, `Limits`, `Reason`, `ReasonCode` and
   `SafetyReport`, and the session's `CommitAnswer`, `ErrorPolicy` and `RunChoice`.
+
+## m3b-t08 — eviction
+
+- **Shared tail.** A result's rows and state (the chunk list, starts, counts, completeness)
+  move from the writer into the store, behind a mutex the writer takes per append or state
+  change. Eviction is the second publisher: it cuts a result to its first chunk under the same
+  mutex, so versions only grow and no second copy of the chunk list keeps evicted rows alive.
+  Readers still never lock (one `ArcSwap` load).
+- **Who is evicted (R-M3-68, HV-RES-07).** `admit` asks `MemoryBudget::evict_for(shortfall)`
+  before it answers `Pause(GlobalBudget)`, and pauses only if that did not make room. The
+  budget's `EvictionRegistry` (every `ResultStore` joins it in `ResultStore::new`) takes
+  hidden results whose run has ended (`Complete`, `Closed` but not `Evicted`, `Cancelled`,
+  `Truncated`) and that hold more than one chunk, longest out of sight first (a logical clock,
+  no ties). A `Streaming` or `Suspended` result is never taken: its session would keep
+  appending, and only the session closes a server cursor. The evicted result keeps chunk 0 and
+  publishes `Closed { reason: Evicted }`; its writer's later appends and states are dropped,
+  so it never reads as `Complete` again.
+- **Visible by default.** A result joins the registry visible; it becomes a candidate only
+  when the app calls `StoreSource::set_visible(false)` (Task 25: `true` for the active tab of
+  every console, `false` for the others). A console that never reports visibility loses
+  nothing — its results are simply never evicted (the run pauses as in M3a). Rejected: hidden
+  by default, which would evict an on-screen result until Task 25 is wired.
+- **Accounting (P-M3b-29).** `evict_for` answers the bytes that left `used()` during the call:
+  a chunk a held snapshot still shows is released when that snapshot drops and is not
+  counted, so the pass goes on to the next result. A held snapshot keeps every row it showed:
+  a copy or a frame in progress never changes under it. The pass holds the registry lock, so a
+  tab shown during it is either spared or finds the result evicted.
+- **Not in M3b.** HV-RES-07's 30-second grace after a tab is hidden and the pinned-result
+  exemption: the order (longest hidden first) stands in for the grace, and pins are Task 25's
+  (a pinned tab can stay `set_visible(true)`). Spill to disk stays v1.x.
+- **Coalescing (ledger 109 M4).** The ask ledger moves from `StoreSource` into the store, so
+  every source over one store shares it: per snapshot version the asks add up to what the
+  farthest reader needs, a need already asked asks nothing, and a farther need asks only for
+  the rows past those asked. The session merges queued `FetchMore`s of one result into one
+  fetch of the sum (`Ctl::coalesce`), so no row is fetched twice.
+- **Sources.** `StoreSource::cap_raised` reads the store's flag (ledger 253 M7).
+  `FetchPolicy::with_cell_cap` takes `results.max_value_bytes` (Task 25 passes it) clamped to
+  `MIN_CELL_CAP` 64 KiB ..= `MAX_CELL_CAP` 64 MiB, the cap of the value viewer's "Re-run with a
+  64 MiB value limit" (R-M3-82).
+- **Review fix round 1.**
+  - *Only what is needed (M1).* `admit` evicts until its chunk fits, and the room is re-checked
+    under the registry lock before each result. The check counts bytes already cut but not yet
+    freed (`releasing`) as free. Two runs over the budget at once cut one result, not two.
+  - *Frees outside the lock (M3).* Under the lock the pass only cuts and collects. It drops
+    the cut chunks, and the stores it upgraded, after releasing the lock, so `set_visible` on
+    the UI thread never waits for a large free.
+  - *Previous outcome (M4).* `StoreSnapshot::before_eviction()` keeps the state an evicted
+    result had ended in, so the strip can still name it beside "Closed to free memory".
+  - *Notification seam (M6).* `MemoryBudget::on_evicted(listener)` is called once per
+    eviction with `evict::Eviction { result, kept_rows, previous }`. The call comes after the
+    lock is released and the chunks are freed, on the evicting thread. Listeners must not
+    block. The run service turns it into `LogMsg::Evicted` (Task 16).

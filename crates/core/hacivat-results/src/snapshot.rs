@@ -50,6 +50,9 @@ pub struct StoreSnapshot {
     pub(crate) bytes: u64,
     pub(crate) completeness: Completeness,
     pub(crate) paused: Option<PauseReason>,
+    // ## m3b-t08-store
+    /// The state an evicted result was in before eviction cut it (`None` until then).
+    pub(crate) before_eviction: Option<Completeness>,
 }
 
 impl fmt::Debug for StoreSnapshot {
@@ -62,6 +65,7 @@ impl fmt::Debug for StoreSnapshot {
             .field("bytes", &self.bytes)
             .field("completeness", &self.completeness)
             .field("paused", &self.paused)
+            .field("before_eviction", &self.before_eviction)
             .finish_non_exhaustive()
     }
 }
@@ -79,6 +83,7 @@ impl StoreSnapshot {
             bytes: 0,
             completeness: Completeness::Streaming,
             paused: None,
+            before_eviction: None,
         }
     }
 
@@ -114,6 +119,15 @@ impl StoreSnapshot {
     /// in every state but `Suspended`.
     pub fn paused(&self) -> Option<PauseReason> {
         self.paused
+    }
+
+    // ## m3b-t08-store
+    /// For a result eviction cut (`Closed { reason: Evicted }`), the state it had ended in
+    /// before (`Complete`, `Truncated`, `Cancelled`, another `Closed` reason), so the strip
+    /// can still name that outcome beside "Closed to free memory". `None` for every result
+    /// that was not evicted.
+    pub fn before_eviction(&self) -> Option<Completeness> {
+        self.before_eviction
     }
 
     /// The cell at (`row`, `col`): a binary search over the chunk starts, then the chunk.
