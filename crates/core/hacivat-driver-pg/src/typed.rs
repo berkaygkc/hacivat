@@ -71,8 +71,11 @@
 //! only (T7 m-10: the binary decoders never see it; a cell that is not UTF-8 is an error cell).
 //! The first `max_result_sets` statements are kept, the rest read to their end, undecoded, and
 //! counted (`QueryDone::skipped_result_sets`, R-M3-66). It never suspends, takes no binds
-//! (`Unsupported`), and cannot be closed on the wire: `close_query` reads it to its end like the
-//! unnamed portal. Limits of the simple protocol: a set's `command_tag` is `None` (only the
+//! (`Unsupported`), and cannot be closed on the wire: `close_query` sends the protocol cancel at
+//! once and reads the rest, never answering `Completed` past the closed result (fix round 1,
+//! I-1: `close_simple`, `RawConn::take_close_report`). It runs as one implicit transaction
+//! unless the text has its own `BEGIN`: an error rolls back the statements before it, whose
+//! results were already handed out (M-2). Limits of the simple protocol: a set's `command_tag` is `None` (only the
 //! last tag is observed, and a later statement's may already have been read), and its
 //! `rows_affected` is the `CommandComplete` count of a column-less statement when positive, else
 //! `None` (a `CREATE TABLE` and a `DELETE` of nothing both report 0 there).
@@ -88,10 +91,10 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use hacivat_driver::{
-    CloseHow, Closed, Protocol, QueryDone, QueryEvent, QuerySpec, RawError, RawErrorKind,
-    ResultEnd, TxStatus, TypedCaps,
+    CancelHandle, CloseHow, CloseReport, Closed, Protocol, QueryDone, QueryEvent, QuerySpec,
+    RawError, RawErrorKind, ResultEnd, TxStatus, TypedCaps,
 };
 use hacivat_values::{
     BindValue, BufKind, Chunk, ChunkBuilder, ColumnMeta, ErrorVal, LogicalType, NativeType,
@@ -104,10 +107,11 @@ use tokio_postgres::{
     SimpleQueryStream, Statement,
 };
 
+use crate::cancel::PgCancel;
 use crate::connect::pg_error;
 use crate::decode::{self, Col, Plan, TEXT_FORMAT};
 use crate::exec::{
-    Notices, collect_notice_texts, drain_notices, next_notice_text, stop_notice_texts,
+    NoticeWake, Notices, collect_notice_texts, drain_notices, next_notice_text, stop_notice_texts,
 };
 use crate::wire::{SETTLE, Settled, WireState};
 
@@ -169,6 +173,11 @@ pub(crate) struct Ctx<'a> {
     pub client: &'a Client,
     pub wire: &'a WireState,
     pub notices: &'a Notices,
+    // ## m3b-t13-drivers (fix round 1, I-1)
+    /// The connection's protocol cancel: a Run as one closed early is cancelled at once.
+    pub cancel: &'a Arc<PgCancel>,
+    /// What the last close of a Run as one did beyond its result (`take_close_report`).
+    pub report: &'a mut Option<CloseReport>,
 }
 
 /// A cell's bytes as the server sent them (`None`: NULL), whatever its type.
@@ -269,6 +278,8 @@ pub(crate) struct Ext {
     // ## m3b-t13-drivers
     /// The server error `Stage::Failed` hands out.
     error: Option<RawError>,
+    /// Woken when a notice is kept (fix round 1: notices come out while a statement runs).
+    woken: NoticeWake,
 }
 
 /// What reading the current stream gave.
@@ -276,6 +287,22 @@ enum Fill {
     Chunk(Chunk),
     /// The stream ended (`rows_affected` of its last message) with no rows left to hand out.
     End(Option<u64>),
+    // ## m3b-t13-drivers (fix round 1)
+    /// A notice was kept while waiting for the server: hand it out, then read on.
+    Notice,
+}
+
+// ## m3b-t13-drivers (fix round 1)
+/// `next`'s output, unless the query is woken by a notice first (`None`; `next` is dropped
+/// unfinished, which a stream's `try_next` allows: nothing is lost). A wake signal whose
+/// sender is gone never wakes again.
+async fn or_notice<T>(next: impl Future<Output = T>, woken: &mut NoticeWake) -> Option<T> {
+    let next = std::pin::pin!(next);
+    match futures::future::select(next, woken.next()).await {
+        futures::future::Either::Left((v, _)) => Some(v),
+        futures::future::Either::Right((Some(()), _)) => None,
+        futures::future::Either::Right((None, rest)) => Some(rest.await),
+    }
 }
 
 impl Ext {
@@ -344,7 +371,10 @@ impl Ext {
             let row = match self.peeked.take() {
                 Some(row) => Some(row),
                 None => match self.stream.as_mut() {
-                    Some(s) => s.as_mut().try_next().await?,
+                    Some(s) => match or_notice(s.as_mut().try_next(), &mut self.woken).await {
+                        Some(row) => row?,
+                        None => return Ok(Fill::Notice),
+                    },
                     None => None,
                 },
             };
@@ -480,6 +510,24 @@ async fn failed(wire: &WireState, e: &tokio_postgres::Error) -> RawError {
     raw
 }
 
+/// A bytes-hinted bind whose text starts with `\x` or `\X` but is not `\x` and pairs of hex
+/// digits (fix round 1, I-2; the rule of the MySQL and SQLite drivers' `hex_bytes`). Valid `\x`
+/// hex goes as is: `bytea`'s input decodes it to the same bytes the other engines store.
+fn malformed_hex(b: &BindValue) -> bool {
+    let BindValue::Typed {
+        hint: LogicalType::Bytes { .. },
+        text,
+    } = b
+    else {
+        return false;
+    };
+    if text.starts_with("\\X") {
+        return true;
+    }
+    text.strip_prefix("\\x")
+        .is_some_and(|hex| hex.len() % 2 != 0 || !hex.bytes().all(|c| c.is_ascii_hexdigit()))
+}
+
 /// The binds of a query as text-format parameters (m3b-t13).
 fn params<'a>(binds: &'a [BindValue]) -> impl ExactSizeIterator<Item = TextParam<'a>> + use<'a> {
     binds.iter().map(TextParam)
@@ -497,6 +545,13 @@ pub(crate) async fn query(
     if open.is_some() || is_copy(spec.sql) {
         return Err(unsupported());
     }
+    *cx.report = None;
+    // Fix round 1 (I-2): a bytes value in malformed `\x` form is refused here as on MySQL and
+    // SQLite (the server would answer 22P02 for a `bytea` parameter, but store it verbatim in a
+    // `text` one).
+    if spec.binds.iter().any(malformed_hex) {
+        return Err(unsupported());
+    }
     // ## m3b-t13-drivers: Run as one; the simple protocol carries no parameters.
     if spec.protocol == Protocol::Simple {
         if !spec.binds.is_empty() {
@@ -511,7 +566,7 @@ pub(crate) async fn query(
     drain_notices(cx.notices);
     cx.wire.clear_tag();
     let _ = cx.wire.take_copy_refused();
-    collect_notice_texts(cx.notices);
+    let woken = collect_notice_texts(cx.notices);
     let limits = Limits::of(&spec);
     let statement = match cx.client.prepare(spec.sql).await {
         Ok(s) => s,
@@ -566,6 +621,7 @@ pub(crate) async fn query(
                 batch_max,
                 resumed: false,
                 error: None,
+                woken,
             }));
             Ok(())
         }
@@ -659,7 +715,20 @@ async fn next_ext(cx: Ctx<'_>, open: &mut Option<Open>) -> Result<QueryEvent, Ra
         }
         Stage::Rows => {}
     }
-    match q.fill().await {
+    // Fix round 1: a notice kept while the statement runs goes out at once; a wake whose
+    // notice already went out reads on.
+    let filled = loop {
+        match q.fill().await {
+            Ok(Fill::Notice) => {
+                if let Some(notice) = next_notice_text(cx.notices) {
+                    return Ok(QueryEvent::Notice(notice));
+                }
+            }
+            other => break other,
+        }
+    };
+    match filled {
+        Ok(Fill::Notice) => unreachable!("handled above"),
         Ok(Fill::Chunk(chunk)) => Ok(QueryEvent::Rows(chunk)),
         Ok(Fill::End(affected)) => {
             q.ended = None;
@@ -838,13 +907,10 @@ pub(crate) async fn close_query(
     };
     // ## m3b-t13-drivers: the server error held behind notices is the outcome (the rest was
     // read when it arrived).
+    // Fix round 1 (M-4): for a named portal too: the server's error already ended the query, so
+    // it is never swallowed by the close.
     if q.stage == Stage::Failed {
-        let e = q.error.take().unwrap_or_else(not_connected);
-        return if q.portal.is_none() {
-            Err(e)
-        } else {
-            Ok(Closed::Closed { rows: q.delivered })
-        };
+        return Err(q.error.take().unwrap_or_else(not_connected));
     }
     // Rows read but not handed out are dropped with the query.
     q.builder = None;
@@ -955,6 +1021,8 @@ pub(crate) struct Simple {
     /// A `ResultEnd` due right after the event just handed out.
     end: Option<ResultEnd>,
     error: Option<RawError>,
+    /// Woken when a notice is kept (fix round 1: notices come out while a statement runs).
+    woken: NoticeWake,
 }
 
 /// The plan of a simple-protocol result: every column text, of unknown native type (the
@@ -1074,7 +1142,7 @@ async fn query_simple(
     drain_notices(cx.notices);
     cx.wire.clear_tag();
     let _ = cx.wire.take_copy_refused();
-    collect_notice_texts(cx.notices);
+    let woken = collect_notice_texts(cx.notices);
     match cx.client.simple_query_raw(spec.sql).await {
         Ok(stream) => {
             *open = Some(Open::Simple(Simple {
@@ -1091,6 +1159,7 @@ async fn query_simple(
                 skipped: 0,
                 end: None,
                 error: None,
+                woken,
             }));
             Ok(())
         }
@@ -1133,7 +1202,11 @@ async fn next_simple(cx: Ctx<'_>, open: &mut Option<Open>) -> Result<QueryEvent,
             SimpleStage::Between | SimpleStage::Rows | SimpleStage::Skip => {}
         }
         let message = match q.stream.as_mut() {
-            Some(s) => s.as_mut().try_next().await,
+            // Fix round 1: a notice kept meanwhile goes out at once (the loop's top).
+            Some(s) => match or_notice(s.as_mut().try_next(), &mut q.woken).await {
+                Some(m) => m,
+                None => continue,
+            },
             None => Ok(None),
         };
         let message = match message {
@@ -1223,9 +1296,16 @@ async fn next_simple(cx: Ctx<'_>, open: &mut Option<Open>) -> Result<QueryEvent,
     }
 }
 
-/// `close_query` of a simple-protocol query: it cannot be closed on the wire, so its rest is
-/// read to the end, undecoded, whatever `how` says (as the unnamed portal's); the answer is the
-/// server's outcome. `rows` counts the current result's rows.
+/// `close_query` of a simple-protocol query closed before its end (fix round 1, I-1, controller
+/// ruling (a)). It cannot be closed on the wire, so the driver sends the connection's protocol
+/// cancel **at once**, whatever `how` and the transaction status (unless the server already
+/// answered the whole text: a cancel then could reach the next statement), and reads the rest
+/// undecoded to keep the connection in step. The answer:
+/// - the rest ended in a server error (the cancel's 57014, or a statement's own): that error,
+///   and a [`CloseReport`] with `rest_not_run`;
+/// - it ended cleanly with nothing after the closed result: `Completed { rows }`;
+/// - it ended cleanly but later statements ran (the cancel came too late): `Closed { rows:
+///   delivered }`, never `Completed`, and a [`CloseReport`] with how many ran unseen.
 async fn close_simple(cx: Ctx<'_>, mut q: Simple) -> Result<Closed, RawError> {
     match q.stage {
         SimpleStage::Failed => return Err(q.error.take().unwrap_or_else(not_connected)),
@@ -1233,17 +1313,37 @@ async fn close_simple(cx: Ctx<'_>, mut q: Simple) -> Result<Closed, RawError> {
         SimpleStage::Between | SimpleStage::Rows | SimpleStage::Skip => {}
     }
     let mut rows = q.rows;
+    // The closed result's rows are still coming; every other statement end read is one that ran.
     let mut current = q.stage == SimpleStage::Rows;
+    let mut ran = 0_u32;
     let Some(mut stream) = q.stream.take() else {
         return Ok(Closed::Completed { rows });
     };
+    if !cx.wire.synced() {
+        // Fire and forget: the outcome is read from the stream either way.
+        tokio::spawn(cx.cancel.cancel());
+    }
     loop {
         match stream.as_mut().try_next().await {
             Ok(Some(SimpleQueryMessage::Row(_))) if current => rows += 1,
-            Ok(Some(SimpleQueryMessage::CommandComplete(_))) => current = false,
+            Ok(Some(SimpleQueryMessage::CommandComplete(_))) if current => current = false,
+            Ok(Some(SimpleQueryMessage::CommandComplete(_))) => ran = ran.saturating_add(1),
             Ok(Some(_)) => {}
-            Ok(None) => return Ok(Closed::Completed { rows }),
-            Err(e) => return Err(failed(cx.wire, &e).await),
+            Ok(None) if ran == 0 => return Ok(Closed::Completed { rows }),
+            Ok(None) => {
+                *cx.report = Some(CloseReport {
+                    statements_ran: ran,
+                    rest_not_run: false,
+                });
+                return Ok(Closed::Closed { rows: q.delivered });
+            }
+            Err(e) => {
+                *cx.report = Some(CloseReport {
+                    statements_ran: ran,
+                    rest_not_run: true,
+                });
+                return Err(failed(cx.wire, &e).await);
+            }
         }
     }
 }

@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hacivat_driver::{
-    DriverConnect, Endpoint, InsecureAuth, Notice, NoticeSeverity, Protocol, QueryDone, QueryEvent,
-    QuerySpec, RawConn, RawError, RawErrorKind, ResultEnd,
+    CloseHow, CloseReport, DriverConnect, Endpoint, InsecureAuth, Notice, NoticeSeverity, Protocol,
+    QueryDone, QueryEvent, QuerySpec, RawConn, RawError, RawErrorKind, ResultEnd, TxStatus,
 };
 use hacivat_driver_pg::{PgConn, connect_conn};
 use hacivat_net::{AddressClass, Target, TlsMode, TlsSettings, build_tls_params, direct};
@@ -415,5 +415,69 @@ async fn pg_simple_protocol_yields_one_result_per_statement_untyped() {
         assert_eq!(done.skipped_result_sets, 2, "{}", t.id);
         let (sets, _, _) = ok_run(&t, &mut c, spec("SELECT count(*) FROM hv_m3b_t13_s", &[])).await;
         assert_eq!(sets[0].rows, vec![vec![Value::Int(4)]], "{}", t.id);
+    }
+}
+
+// ## m3b-t13-drivers (fix round 1, I-1)
+
+/// Closes a Run as one of `<sleep 30 s>; DELETE …` while its first statement sleeps: the
+/// driver cancels at once, so the answer is 57014 and the DELETE never runs. A driver that read
+/// on without cancelling would answer only after the sleep, with the DELETE run. (The backend
+/// flushes its output only at a statement's end or on a notice, so the sleeping statement
+/// announces itself with a `RAISE NOTICE` first: the Stop then provably lands mid-sleep.)
+async fn stop_during_sleep(t: &DockerTarget, c: &mut PgConn) {
+    let mut s = spec(
+        "DO $$ BEGIN RAISE NOTICE 'hv sleeping'; PERFORM pg_sleep(30); END $$; \
+         DELETE FROM hv_m3b_t13_stop",
+        &[],
+    );
+    s.protocol = Protocol::Simple;
+    s.max_result_sets = 100;
+    c.query(s)
+        .await
+        .unwrap_or_else(|e| panic!("{}: {:?}", t.id, e.kind));
+    match c.next_event().await {
+        Ok(QueryEvent::Notice(n)) if &*n.text == "hv sleeping" => {}
+        other => panic!("{}: {other:?}", t.id),
+    }
+    let e = c.close_query(CloseHow::Now).await.unwrap_err();
+    assert_eq!(sqlstate(&e), Some("57014"), "{}: {e:?}", t.id);
+    assert_eq!(
+        c.take_close_report(),
+        Some(CloseReport {
+            statements_ran: 0,
+            rest_not_run: true
+        }),
+        "{}",
+        t.id
+    );
+}
+
+#[tokio::test]
+#[ignore = "docker"]
+async fn stop_during_run_as_one_never_runs_the_rest() {
+    for t in version_targets() {
+        let mut c = connect(&t).await;
+        c.batch(
+            "CREATE TEMP TABLE hv_m3b_t13_stop (n int4); \
+             INSERT INTO hv_m3b_t13_stop VALUES (1), (2), (3)",
+        )
+        .await
+        .unwrap();
+        // Inside a user transaction (a Manual-mode console): failed, the user's to end.
+        c.batch("BEGIN").await.unwrap();
+        stop_during_sleep(&t, &mut c).await;
+        assert_eq!(c.tx_status(), TxStatus::Failed, "{}", t.id);
+        c.batch("ROLLBACK").await.unwrap();
+        // In autocommit: the DELETE did not run, so the rows are all there.
+        stop_during_sleep(&t, &mut c).await;
+        assert_eq!(c.tx_status(), TxStatus::Idle, "{}", t.id);
+        let (sets, _, _) = ok_run(
+            &t,
+            &mut c,
+            spec("SELECT count(*) FROM hv_m3b_t13_stop", &[]),
+        )
+        .await;
+        assert_eq!(sets[0].rows, vec![vec![Value::Int(3)]], "{}", t.id);
     }
 }

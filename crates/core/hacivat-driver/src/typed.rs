@@ -188,6 +188,21 @@ pub enum Closed {
     NeedsServerKill { thread_id: u64 },
 }
 
+// ## m3b-t13-drivers (fix round 1, I-1; controller-approved named exception)
+/// What a `close_query` of a Run as one (`Protocol::Simple`) closed before its end did beyond
+/// the result it closed (`RawConn::take_close_report`). PostgreSQL sends a protocol cancel at
+/// once and reads the rest to keep the connection in step; statements may still finish before
+/// the cancel lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CloseReport {
+    /// Statements after the closed result whose end was read: they ran, and none of their
+    /// results was shown.
+    pub statements_ran: u32,
+    /// The rest stopped (cancelled or failed) before the text's end: the statements after it
+    /// did not run.
+    pub rest_not_run: bool,
+}
+
 /// What a connection's typed path can do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypedCaps {

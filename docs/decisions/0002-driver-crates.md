@@ -1453,3 +1453,51 @@ warnings), R-M3-79 (bind values). `TypedCaps.binds` is `true` on all three drive
   open (`Unsupported`); like the other calls it poisons the connection if dropped mid-read.
 - **`Notice` is `#[non_exhaustive]`** (T1c review M4): outside `hacivat-driver` it is built only
   through `Notice::new`, so no driver can skip the 16 KiB cap; its fields stay readable.
+- **Fix round 1 (review; controller rulings).** These rules replace the earlier bullets where
+  they differ.
+  - **I-1, closing a PG Run as one** (ruling (a)). When a Run as one is closed before its end,
+    the driver sends the connection's protocol cancel at once, whatever `how` and the
+    transaction status. It skips the cancel only when the server has already answered the
+    whole text, because a late cancel could then reach the next statement. It then reads the
+    rest, undecoded. The answer:
+    - **The rest ends in a server error** (the cancel's 57014, or a statement's own): that
+      error.
+    - **It ends cleanly with nothing after the closed result:** `Completed { rows }`.
+    - **It ends cleanly but later statements ran** (the cancel came too late):
+      `Closed { rows: delivered }`, never `Completed`.
+    - In the error case and the late-cancel case, `RawConn::take_close_report()` answers
+      `CloseReport { statements_ran, rest_not_run }`, once. It gives how many statements after
+      the closed result ran unseen, and whether the rest stopped.
+    - This is a new provided `RawConn` method, a named exception in `hacivat-driver` approved
+      by the controller. It defaults to `None`: MySQL kills its batch, and SQLite never runs
+      the statements it has not reached. Its consumers (the session, and the "N statements
+      ran, not shown" log/UI) are T11's follow-up and T16.
+    - The session's `close_fire` also cancels a Run as one at once (ruling (b), T11), as
+      defence in depth.
+  - **M-2, PG Run as one is one implicit transaction.** Without its own `BEGIN`, PostgreSQL runs
+    the simple `Query` as one implicit transaction. An error (a cancel included) in statement
+    *k* rolls back statements 1…*k*−1, whose `ResultEnd`/`rows_affected` were already handed
+    out. Inside a user transaction, the transaction is failed. MySQL and SQLite keep the
+    statements that ran. T16/T25 must say so (controller carry).
+  - **M-3, dropped notices.** PostgreSQL counts the notices of a typed query past its 100-notice
+    cap. `RawConn::take_notices_dropped()` answers the count, once; it is a provided method,
+    default 0. The count restarts with each typed query.
+  - **I-2 and M-1, bind values are the same on every engine.**
+    - **Bytes hint, `\x` with pairs of hex digits:** the decoded bytes. MySQL sends `Bytes` of
+      them, SQLite a `BLOB`, and PostgreSQL the text, which `bytea` input decodes.
+    - **Bytes hint, malformed `\x` or `\X` text:** `Unsupported` before anything is sent, on all
+      three engines.
+    - **Bytes hint, no `\x`:** the text's own bytes. MySQL sends `Bytes`, SQLite a `BLOB`, and
+      PostgreSQL `bytea`'s escape-format input reads the text (its backslashes are escapes
+      there).
+    - **Integer hint:** an integer is bound only for the value's canonical decimal spelling.
+      Optional `-` for signed, no `+`, no leading zero, ASCII digits, in range:
+      `n.to_string() == text`. Anything else is the text, for the server to convert or refuse.
+  - **M-4, held errors on a named portal.** A server error held behind notices is the answer of
+    `close_query` for a named portal too; it is never swallowed.
+  - **Notices come out while a statement runs.** Found by the I-1 Docker test: the backend flushes
+    its output only at a statement's end or on a notice, and `next_event` used to wait for the
+    next protocol message. Now a kept notice wakes the open typed query through a per-query
+    signal (a `futures` channel, set up by `collect_notice_texts`), on both the extended and the
+    simple path. A PL/pgSQL loop's `RAISE NOTICE` progress therefore arrives as it is raised.
+    Waiting on the stream is cancel-safe: `try_next` dropped unfinished loses nothing.

@@ -20,6 +20,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::{StreamExt, TryStreamExt};
 use hacivat_driver::{
     ExecOpts, ExecSummary, Notice, NoticeSeverity, Protocol, RawError, RawErrorKind,
@@ -77,7 +78,16 @@ pub(crate) struct NoticeBuf {
     texts: VecDeque<Notice>,
     taken: usize,
     collect: bool,
+    // ## m3b-t13-drivers (fix round 1, M-3)
+    /// The query's notices past the cap: counted, never kept (`take_notices_dropped`).
+    dropped: u32,
+    /// Wakes the open typed query when a notice is kept, so a statement that runs long (a
+    /// PL/pgSQL loop raising progress notices) hands them out as they come, not at its end.
+    wake: Option<UnboundedSender<()>>,
 }
+
+/// The open typed query's end of [`NoticeBuf`]'s wake signal.
+pub(crate) type NoticeWake = UnboundedReceiver<()>;
 
 // The buffer holds server text: its `Debug` prints counts only.
 impl std::fmt::Debug for NoticeBuf {
@@ -126,22 +136,41 @@ fn severity_of(notice: &DbError) -> NoticeSeverity {
 fn keep_notice(notices: &Notices, notice: &DbError) {
     push_notice(notices, notice.code().code());
     let mut q = lock(notices);
-    if q.collect && q.texts.len() + q.taken < NOTICE_CAP {
+    if !q.collect {
+        return;
+    }
+    if q.texts.len() + q.taken < NOTICE_CAP {
         let kept = Notice::new(
             severity_of(notice),
             Some(notice.code().code()),
             notice.message(),
         );
         q.texts.push_back(kept);
+        if let Some(wake) = &q.wake {
+            let _ = wake.unbounded_send(());
+        }
+    } else {
+        q.dropped = q.dropped.saturating_add(1);
     }
 }
 
-/// A typed query starts: earlier texts are dropped and this query's are collected.
-pub(crate) fn collect_notice_texts(notices: &Notices) {
+/// A typed query starts: earlier texts (and their drop count) are dropped and this query's are
+/// collected; the answer wakes it when one is kept.
+pub(crate) fn collect_notice_texts(notices: &Notices) -> NoticeWake {
+    let (wake, woken) = unbounded();
     let mut q = lock(notices);
     q.texts.clear();
     q.taken = 0;
+    q.dropped = 0;
     q.collect = true;
+    q.wake = Some(wake);
+    woken
+}
+
+// ## m3b-t13-drivers (fix round 1, M-3)
+/// The notices of the current or last typed query dropped past the cap, taken once.
+pub(crate) fn take_notices_dropped(notices: &Notices) -> u32 {
+    std::mem::take(&mut lock(notices).dropped)
 }
 
 /// The typed query ended: nothing more is collected or kept.
@@ -149,6 +178,7 @@ pub(crate) fn stop_notice_texts(notices: &Notices) {
     let mut q = lock(notices);
     q.texts.clear();
     q.collect = false;
+    q.wake = None;
 }
 
 /// The oldest notice of the open typed query not yet handed out.

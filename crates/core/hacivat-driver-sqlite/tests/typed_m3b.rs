@@ -335,3 +335,89 @@ async fn run_as_one_on_read_only_refuses_a_write_before_it_runs() {
         .unwrap();
     assert_eq!(n, 1);
 }
+
+// ## m3b-t13-drivers (fix round 1)
+
+#[test]
+fn bytes_hints_read_backslash_x_hex_and_refuse_it_malformed() {
+    use hacivat_driver_sqlite::typed::{HexText, hex_bytes};
+    assert_eq!(hex_bytes("\\x00ff"), HexText::Bytes(vec![0x00, 0xff]));
+    assert_eq!(hex_bytes("\\xABcd"), HexText::Bytes(vec![0xab, 0xcd]));
+    assert_eq!(hex_bytes("\\x"), HexText::Bytes(vec![]));
+    for bad in ["\\x0", "\\x0g", "\\xzz", "\\X00", "\\x 0", "\\x00f"] {
+        assert_eq!(hex_bytes(bad), HexText::Malformed, "{bad:?}");
+    }
+    for plain in ["", "abc", "x00", "\\\\x00", "0x00"] {
+        assert_eq!(hex_bytes(plain), HexText::NotHex, "{plain:?}");
+    }
+}
+
+#[test]
+fn only_a_canonical_integer_text_binds_as_an_integer() {
+    use hacivat_driver_sqlite::typed::sqlite_value;
+    use rusqlite::types::Value as V;
+    for (text, want) in [
+        ("0", V::Integer(0)),
+        ("-5", V::Integer(-5)),
+        ("9223372036854775807", V::Integer(i64::MAX)),
+        ("-9223372036854775808", V::Integer(i64::MIN)),
+        ("+5", V::Text("+5".into())),
+        ("007", V::Text("007".into())),
+        ("-0", V::Text("-0".into())),
+        (" 5", V::Text(" 5".into())),
+        ("１", V::Text("１".into())),
+        ("9223372036854775808", V::Text("9223372036854775808".into())),
+    ] {
+        assert_eq!(sqlite_value(&int(text)), Some(want), "{text:?}");
+    }
+}
+
+#[tokio::test]
+async fn bytes_binds_store_the_same_bytes_as_the_other_engines_or_are_refused() {
+    let db = sqlite();
+    let mut c = open_rw(&db.f).await;
+    let bytes = |s: &str| typed(LogicalType::Bytes { max: None }, s);
+    let r = run(
+        &mut *c,
+        bound(
+            "SELECT ?1, ?2, typeof(?2)",
+            &[bytes("\\x00ff"), bytes("abc")],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.cell(0, 0), Value::Bytes(Arc::from(&[0x00_u8, 0xff][..])));
+    assert_eq!(r.cell(0, 1), Value::Bytes(Arc::from(&b"abc"[..])));
+    assert_eq!(r.cell(0, 2), Value::Text(Arc::from("blob")));
+    // Malformed `\x`: refused before any step, nothing stored.
+    for bad in ["\\x0", "\\xzz", "\\X00"] {
+        assert_eq!(
+            query_err(sqlite(), "INSERT INTO t(b) VALUES (?)", &[bytes(bad)])
+                .await
+                .kind,
+            RawErrorKind::Unsupported,
+            "{bad:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn run_as_one_on_read_only_refuses_what_writes_past_the_authorizer() {
+    // `VACUUM` asks the authorizer nothing; `sqlite3_stmt_readonly` refuses it per statement.
+    let f = fixture("CREATE TABLE t(a INTEGER); INSERT INTO t VALUES (1);");
+    let mut c = open_ro(&f).await;
+    c.query(as_one("SELECT a FROM t; VACUUM;", 100))
+        .await
+        .unwrap();
+    let mut ends = 0;
+    let e = loop {
+        match c.next_event().await {
+            Ok(QueryEvent::Done(_)) => panic!("VACUUM ran on a read-only connection"),
+            Ok(QueryEvent::ResultEnd(_)) => ends += 1,
+            Ok(_) => {}
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(ends, 1, "the SELECT's result came first");
+    assert_eq!((code(&e), text_of(&e).as_str()), (23, "readonly-required"));
+}

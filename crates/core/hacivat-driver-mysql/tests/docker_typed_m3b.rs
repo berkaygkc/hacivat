@@ -345,3 +345,56 @@ async fn mysql_show_warnings_after_done() {
         assert!(ro.warnings().await.unwrap().is_empty(), "{}", t.id);
     }
 }
+
+// ## m3b-t13-drivers (fix round 1, I-2)
+
+/// A bytes value in `\x` hex stores the decoded bytes (as PostgreSQL's `bytea` and SQLite do);
+/// a malformed one is refused, nothing stored.
+#[tokio::test]
+#[ignore = "docker"]
+async fn bytes_binds_store_the_decoded_hex() {
+    let bytes = |s: &str| typed(LogicalType::Bytes { max: None }, s);
+    for t in mysql_family() {
+        let mut c = connect(&t, false).await;
+        batch(
+            &t,
+            &mut c,
+            "CREATE TEMPORARY TABLE hv_m3b_t13_b (v VARBINARY(16))",
+        )
+        .await;
+        let binds = [bytes("\\x00ff")];
+        run(
+            &t,
+            &mut c,
+            spec("INSERT INTO hv_m3b_t13_b VALUES (?)", &binds),
+        )
+        .await;
+        let binds = [bytes("abc")];
+        run(
+            &t,
+            &mut c,
+            spec("INSERT INTO hv_m3b_t13_b VALUES (?)", &binds),
+        )
+        .await;
+        let (sets, _) = run(
+            &t,
+            &mut c,
+            spec("SELECT HEX(v) FROM hv_m3b_t13_b ORDER BY v", &[]),
+        )
+        .await;
+        assert_eq!(
+            sets[0].rows,
+            vec![vec![txt("00FF")], vec![txt("616263")]],
+            "{}",
+            t.id
+        );
+        let binds = [bytes("\\x0f0")];
+        let e = c
+            .query(spec("INSERT INTO hv_m3b_t13_b VALUES (?)", &binds))
+            .await
+            .unwrap_err();
+        assert_eq!(e.kind, RawErrorKind::Unsupported, "{}", t.id);
+        let (sets, _) = run(&t, &mut c, spec("SELECT count(*) FROM hv_m3b_t13_b", &[])).await;
+        assert_eq!(sets[0].rows, vec![vec![Value::Int(2)]], "{}", t.id);
+    }
+}

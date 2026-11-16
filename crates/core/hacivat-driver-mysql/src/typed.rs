@@ -69,8 +69,9 @@
 //! ## m3b-t13-drivers (HV-EXEC-03 driver half; R-M3-60, -66, -77, -79)
 //!
 //! **Binds.** `spec.binds` go out as the binary protocol's parameters of `COM_STMT_EXECUTE`
-//! ([`bind_value`]: `Int`/`UInt` when the hint is a signed/unsigned integer and the text is
-//! one, else `Bytes` of the text; NULL as NULL), never into the SQL text. Only the prepared
+//! ([`bind_value`]: `Int`/`UInt` when the hint is a signed/unsigned integer and the text is its
+//! canonical decimal, decoded bytes for a bytes hint in `\x` hex (malformed `\x`: refused),
+//! else `Bytes` of the text; NULL as NULL), never into the SQL text. Only the prepared
 //! route carries them: a text the route sends over `COM_QUERY` (a `SET`), a statement the
 //! server cannot prepare (1295) and the text-protocol test seam answer `Unsupported` when binds
 //! are given, and the prepared statement's placeholder count must equal `binds.len()` (else
@@ -188,27 +189,78 @@ pub(crate) fn caps_for(net_write_timeout: Option<Duration>) -> TypedCaps {
 /// The most `SHOW WARNINGS` rows kept (the rest are read and dropped).
 pub const MAX_WARNINGS: usize = 100;
 
-/// One bind as a binary-protocol parameter (R-M3-79): `Int`/`UInt` when the hint says a
-/// signed/unsigned integer and the text is one (machine format, no sign for `UInt`), else the
-/// text's bytes; NULL as NULL. The server converts `Bytes` to the parameter's type.
-pub fn bind_value(b: &BindValue) -> mysql_async::Value {
+/// One bind as a binary-protocol parameter (R-M3-79); `None` refuses it (nothing is sent):
+/// - a signed/unsigned integer hint with **canonical** decimal text (optional `-` for signed
+///   only, no `+`, no leading zero, ASCII digits, in range: `n.to_string() == text`) → `Int`/`UInt`;
+/// - a bytes hint with `\x` and pairs of hex digits (the raw text Hacivat shows for bytes, as
+///   PostgreSQL's `bytea` input reads it) → `Bytes` of the decoded bytes (fix round 1, I-2); a
+///   bytes hint whose text starts with `\x`/`\X` but is not that → `None`;
+/// - anything else → `Bytes` of the text (the server converts it); NULL as NULL.
+pub fn bind_value(b: &BindValue) -> Option<mysql_async::Value> {
+    use mysql_async::Value as V;
     let BindValue::Typed { hint, text } = b else {
-        return mysql_async::Value::NULL;
+        return Some(V::NULL);
     };
-    let int = match hint {
-        LogicalType::Int { signed: true, .. } => text.parse().ok().map(mysql_async::Value::Int),
-        LogicalType::Int { signed: false, .. } => text.parse().ok().map(mysql_async::Value::UInt),
+    let typed = match hint {
+        LogicalType::Int { signed: true, .. } => canonical::<i64>(text).map(V::Int),
+        LogicalType::Int { signed: false, .. } => canonical::<u64>(text).map(V::UInt),
+        LogicalType::Bytes { .. } => match hex_bytes(text) {
+            HexText::Bytes(bytes) => Some(V::Bytes(bytes)),
+            HexText::Malformed => return None,
+            HexText::NotHex => None,
+        },
         _ => None,
     };
-    int.unwrap_or_else(|| mysql_async::Value::Bytes(text.as_bytes().to_vec()))
+    Some(typed.unwrap_or_else(|| V::Bytes(text.as_bytes().to_vec())))
 }
 
-/// The parameters of a statement with `binds` (none: `Params::Empty`, as before M3b).
-fn params_of(binds: &[BindValue]) -> Params {
+/// `text` as an integer only when it is that integer's canonical decimal spelling (M-1).
+fn canonical<T: std::str::FromStr + ToString>(text: &str) -> Option<T> {
+    let n: T = text.parse().ok()?;
+    (n.to_string() == text).then_some(n)
+}
+
+/// A bytes-hinted text (fix round 1, I-2).
+#[derive(Debug, PartialEq, Eq)]
+pub enum HexText {
+    /// `\x` and pairs of hex digits (either case): these bytes (`\x` alone: none).
+    Bytes(Vec<u8>),
+    /// Starts with `\x` or `\X` but is not that: refused on every engine.
+    Malformed,
+    /// No `\x` prefix: the text's own bytes.
+    NotHex,
+}
+
+/// Reads a bytes-hinted text (the same rule on all three drivers).
+pub fn hex_bytes(text: &str) -> HexText {
+    if text.starts_with("\\X") {
+        return HexText::Malformed;
+    }
+    let Some(hex) = text.strip_prefix("\\x") else {
+        return HexText::NotHex;
+    };
+    let hex = hex.as_bytes();
+    if hex.len() % 2 != 0 {
+        return HexText::Malformed;
+    }
+    let digit = |c: u8| (c as char).to_digit(16);
+    hex.chunks(2)
+        .map(|p| Some((digit(p[0])? * 16 + digit(p[1])?) as u8))
+        .collect::<Option<Vec<u8>>>()
+        .map_or(HexText::Malformed, HexText::Bytes)
+}
+
+/// The parameters of a statement with `binds` (none: `Params::Empty`, as before M3b); `None`
+/// when one is refused.
+fn params_of(binds: &[BindValue]) -> Option<Params> {
     if binds.is_empty() {
-        Params::Empty
+        Some(Params::Empty)
     } else {
-        Params::Positional(binds.iter().map(bind_value).collect())
+        binds
+            .iter()
+            .map(bind_value)
+            .collect::<Option<Vec<_>>>()
+            .map(Params::Positional)
     }
 }
 
@@ -753,8 +805,13 @@ async fn start(
             if usize::from(statement.num_params()) != binds.len() {
                 return Err(StartFail::Binds);
             }
+            // Fix round 1 (I-2): a refused value never reaches the server; `query` checked
+            // every bind before anything was sent, so this is only the backstop.
+            let Some(params) = params_of(binds) else {
+                return Err(StartFail::Binds);
+            };
             let result = conn
-                .exec_iter(&statement, params_of(binds))
+                .exec_iter(&statement, params)
                 .await
                 .map_err(StartFail::My)?;
             Ok((Wire::Binary, result.columns().unwrap_or_else(|| [].into())))
@@ -786,6 +843,11 @@ pub(crate) async fn query(cx: Ctx<'_>, spec: QuerySpec<'_>) -> Result<(), RawErr
     // has no multi-statement capability), never with binds.
     let simple = spec.protocol == Protocol::Simple;
     if simple && (cx.read_only || !spec.binds.is_empty()) {
+        return Err(unsupported());
+    }
+    // Fix round 1 (I-2): a bytes-hinted value with a malformed `\x` is refused before anything
+    // is sent.
+    if params_of(spec.binds).is_none() {
         return Err(unsupported());
     }
     let Some(conn) = cx.conn.as_mut() else {

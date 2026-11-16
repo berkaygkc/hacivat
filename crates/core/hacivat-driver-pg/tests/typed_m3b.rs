@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hacivat_driver::{
-    DriverConnect, Endpoint, InsecureAuth, NoticeSeverity, Protocol, QueryEvent, QuerySpec,
-    RawConn, RawErrorKind, TxStatus,
+    CloseHow, CloseReport, Closed, DriverConnect, Endpoint, InsecureAuth, NoticeSeverity, Protocol,
+    QueryEvent, QuerySpec, RawConn, RawErrorKind, TxStatus,
 };
 use hacivat_driver_pg::{PgConn, connect_conn};
 use hacivat_net::{BoxedStream, StreamFactory};
@@ -342,6 +342,12 @@ fn req(factory: StreamFactory) -> DriverConnect {
 
 /// A plaintext session with a scripted server, signed in without a password, status Idle.
 async fn session() -> (PgConn, Server) {
+    let (conn, srv, _cancels) = session_with_cancels().await;
+    (conn, srv)
+}
+
+/// [`session`], and the server ends of the connections opened after it (protocol cancels).
+async fn session_with_cancels() -> (PgConn, Server, mpsc::UnboundedReceiver<DuplexStream>) {
     let (factory, mut streams) = pipes();
     let server = tokio::spawn(async move {
         let mut s = streams.recv().await.unwrap();
@@ -360,10 +366,24 @@ async fn session() -> (PgConn, Server) {
         )
         .await
         .unwrap();
-        Server { s }
+        (Server { s }, streams)
     });
     let conn = connect_conn(req(factory)).await.unwrap();
-    (conn, server.await.unwrap())
+    let (srv, streams) = server.await.unwrap();
+    (conn, srv, streams)
+}
+
+/// Reads a `CancelRequest` (length 16, code 80877102, PID, key) from a cancel connection and
+/// returns its PID and key.
+async fn cancel_request(s: &mut DuplexStream) -> (i32, i32) {
+    let read = async {
+        assert_eq!(s.read_u32().await.unwrap(), 16);
+        assert_eq!(s.read_u32().await.unwrap(), 80_877_102);
+        (s.read_i32().await.unwrap(), s.read_i32().await.unwrap())
+    };
+    tokio::time::timeout(READ_GUARD, read)
+        .await
+        .expect("the cancel request")
 }
 
 fn spec(sql: &str) -> QuerySpec<'_> {
@@ -568,8 +588,36 @@ async fn pg_notice_text_is_kept_and_capped() {
         .collect();
     assert_eq!(rest, ["start", "rows", "end", "done"]);
     assert!(matches!(evs.last(), Some(QueryEvent::Done(_))));
+    // ## m3b-t13-drivers (fix round 1, M-3): the 50 past the cap are counted, taken once.
+    assert_eq!(conn.take_notices_dropped(), 50);
+    assert_eq!(conn.take_notices_dropped(), 0);
+    // Fix round 1 (M-5): the next query starts with none of them.
+    let mut srv = server.await.unwrap();
+    let server = tokio::spawn(async move {
+        srv.close(b'S', b'I').await;
+        srv.prepare(&[], &[("a", INT4)], b'I').await;
+        srv.unnamed().await;
+        srv.send(
+            &[
+                frame(b'2', &[]),
+                data_row(&[Some(&2i32.to_be_bytes())]),
+                command_complete("SELECT 1"),
+                ready(b'I'),
+            ]
+            .concat(),
+        )
+        .await;
+        srv
+    });
+    conn.query(spec("SELECT g()")).await.unwrap();
+    let evs = events(&mut conn).await;
+    assert!(
+        !evs.iter().any(|e| matches!(e, QueryEvent::Notice(_))),
+        "{evs:?}"
+    );
+    assert_eq!(evs.len(), 4);
+    assert_eq!(conn.take_notices_dropped(), 0);
     let _srv = server.await.unwrap();
-    // The next query starts with none of them.
 }
 
 #[tokio::test]
@@ -889,4 +937,324 @@ async fn simple_protocol_takes_no_binds_and_a_later_error_ends_it() {
         err.server.as_ref().and_then(|s| s.sqlstate.as_deref()),
         Some("22012")
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m3b-t13-drivers (fix round 1)
+
+fn sqlstate(e: &hacivat_driver::RawError) -> Option<&str> {
+    e.server.as_ref().and_then(|s| s.sqlstate.as_deref())
+}
+
+/// I-1: a Stop during the first statement of a Run as one, inside a user transaction, cancels at
+/// once (the server here answers only once the cancel arrives, so a driver that waited would
+/// hang), the later DELETE never runs, and the answer is the cancel's error, never `Completed`.
+#[tokio::test]
+async fn stop_during_run_as_one_cancels_at_once_and_the_rest_never_runs() {
+    let (mut conn, mut srv, mut cancels) = session_with_cancels().await;
+    let (r, _) = tokio::join!(conn.batch("BEGIN"), async {
+        srv.query_text().await;
+        srv.send(&[command_complete("BEGIN"), ready(b'T')].concat())
+            .await;
+    });
+    r.unwrap();
+    assert_eq!(conn.tx_status(), TxStatus::InTx);
+    let sql = "SELECT pg_sleep(60); DELETE FROM t";
+    let server = tokio::spawn(async move {
+        let q = srv.query_text().await;
+        srv.send(&row_description(&[("pg_sleep", TEXT)])).await;
+        // The statement runs until the cancel arrives.
+        let mut c = tokio::time::timeout(READ_GUARD, cancels.recv())
+            .await
+            .expect("a cancel connection, at once")
+            .unwrap();
+        let key = cancel_request(&mut c).await;
+        srv.send(
+            &[
+                fields_msg(
+                    b'E',
+                    "ERROR",
+                    "57014",
+                    "canceling statement due to user request",
+                ),
+                ready(b'E'),
+            ]
+            .concat(),
+        )
+        .await;
+        (q, key, srv)
+    });
+    conn.query(simple(sql, 100)).await.unwrap();
+    assert!(matches!(
+        conn.next_event().await.unwrap(),
+        QueryEvent::ResultStart(_)
+    ));
+    let e = tokio::time::timeout(READ_GUARD, conn.close_query(CloseHow::Now))
+        .await
+        .expect("closed without waiting for the statement")
+        .unwrap_err();
+    assert_eq!(sqlstate(&e), Some("57014"));
+    let (q, key, _srv) = server.await.unwrap();
+    assert_eq!(q, sql);
+    // The session's own backend: PID 31, key 1 (`session`).
+    assert_eq!(key, (31, 1));
+    // The DELETE never ran; the user's transaction is failed (the user's to roll back).
+    assert_eq!(
+        conn.take_close_report(),
+        Some(CloseReport {
+            statements_ran: 0,
+            rest_not_run: true
+        })
+    );
+    assert_eq!(conn.take_close_report(), None);
+    assert_eq!(conn.tx_status(), TxStatus::Failed);
+}
+
+/// I-1: when later statements finished before the close (the cancel came too late), the answer
+/// is `Closed`, never `Completed`, and the report says how many ran unseen.
+#[tokio::test]
+async fn a_closed_run_as_one_whose_later_statements_ran_is_never_completed() {
+    let (mut conn, mut srv, _cancels) = session_with_cancels().await;
+    let sql = "SELECT 1; DELETE FROM t; UPDATE t SET a = 1";
+    let server = tokio::spawn(async move {
+        srv.query_text().await;
+        srv.send(
+            &[
+                row_description(&[("n", INT4)]),
+                data_row(&[Some(b"1")]),
+                command_complete("SELECT 1"),
+                command_complete("DELETE 3"),
+                command_complete("UPDATE 0"),
+                ready(b'I'),
+            ]
+            .concat(),
+        )
+        .await;
+        srv
+    });
+    conn.query(simple(sql, 100)).await.unwrap();
+    assert!(matches!(
+        conn.next_event().await.unwrap(),
+        QueryEvent::ResultStart(_)
+    ));
+    let closed = conn.close_query(CloseHow::Now).await.unwrap();
+    assert_eq!(closed, Closed::Closed { rows: 0 });
+    assert_eq!(
+        conn.take_close_report(),
+        Some(CloseReport {
+            statements_ran: 2,
+            rest_not_run: false
+        })
+    );
+    let _srv = server.await.unwrap();
+}
+
+/// I-1: a Run as one whose closed result was its last statement completed: `Completed`, no
+/// report.
+#[tokio::test]
+async fn a_closed_run_as_one_with_nothing_after_its_result_completes() {
+    let (mut conn, mut srv, _cancels) = session_with_cancels().await;
+    let server = tokio::spawn(async move {
+        srv.query_text().await;
+        srv.send(
+            &[
+                row_description(&[("n", INT4)]),
+                data_row(&[Some(b"1")]),
+                data_row(&[Some(b"2")]),
+                command_complete("SELECT 2"),
+                ready(b'I'),
+            ]
+            .concat(),
+        )
+        .await;
+        srv
+    });
+    conn.query(simple("SELECT n FROM t", 100)).await.unwrap();
+    assert!(matches!(
+        conn.next_event().await.unwrap(),
+        QueryEvent::ResultStart(_)
+    ));
+    assert_eq!(
+        conn.close_query(CloseHow::Now).await.unwrap(),
+        Closed::Completed { rows: 2 }
+    );
+    assert_eq!(conn.take_close_report(), None);
+    let _srv = server.await.unwrap();
+}
+
+/// M-4: a server error held behind a notice is the answer of a close of a named portal too.
+#[tokio::test]
+async fn a_held_error_is_never_swallowed_by_closing_a_named_portal() {
+    let (mut conn, mut srv) = session().await;
+    let (r, _) = tokio::join!(conn.batch("BEGIN"), async {
+        srv.query_text().await;
+        srv.send(&[command_complete("BEGIN"), ready(b'T')].concat())
+            .await;
+    });
+    r.unwrap();
+    let (go, wait) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        srv.prepare(&[], &[("a", INT4)], b'T').await;
+        let Msg::Bind(_) = srv.msg().await else {
+            panic!("Bind");
+        };
+        srv.sync().await;
+        srv.send(&[frame(b'2', &[]), ready(b'T')].concat()).await;
+        let Msg::Execute(..) = srv.msg().await else {
+            panic!("Execute");
+        };
+        srv.sync().await;
+        // Only once the client has its ResultStart: the notice is then still pending when the
+        // error arrives.
+        wait.await.unwrap();
+        srv.send(
+            &[
+                notice("NOTICE", "00000", "x = 41"),
+                error("P0001"),
+                ready(b'E'),
+            ]
+            .concat(),
+        )
+        .await;
+        srv
+    });
+    let mut s = spec("SELECT f() FROM t");
+    s.suspendable = true;
+    conn.query(s).await.unwrap();
+    assert!(matches!(
+        conn.next_event().await.unwrap(),
+        QueryEvent::ResultStart(_)
+    ));
+    go.send(()).unwrap();
+    let QueryEvent::Notice(n) = conn.next_event().await.unwrap() else {
+        panic!("the notice comes before the error");
+    };
+    assert_eq!(&*n.text, "x = 41");
+    let e = conn.close_query(CloseHow::Now).await.unwrap_err();
+    assert_eq!(sqlstate(&e), Some("P0001"));
+    let _srv = server.await.unwrap();
+}
+
+/// I-2: a bytes value in malformed `\x` form is refused before anything is sent (MySQL and
+/// SQLite refuse it too); valid `\x` hex goes as is for `bytea`'s input to decode.
+#[tokio::test]
+async fn a_malformed_hex_bytes_bind_is_refused_before_sending() {
+    let (mut conn, mut srv) = session().await;
+    let bytes = |s: &str| typed(LogicalType::Bytes { max: None }, s);
+    for bad in ["\\x0", "\\xzz", "\\X00", "\\x00f"] {
+        let binds = [bytes(bad)];
+        let mut s = spec("SELECT $1::bytea");
+        s.binds = &binds;
+        assert_eq!(
+            conn.query(s).await.unwrap_err().kind,
+            RawErrorKind::Unsupported,
+            "{bad:?}"
+        );
+    }
+    let (ping, q) = tokio::join!(conn.ping(), async {
+        let q = srv.query_text().await;
+        srv.send(&[frame(b'I', &[]), ready(b'I')].concat()).await;
+        q
+    });
+    ping.unwrap();
+    assert_eq!(q, "", "nothing was sent before the ping");
+    // Valid hex, and plain text, are sent as typed.
+    let server = tokio::spawn(async move {
+        srv.prepare(&[17, 17], &[], b'I').await;
+        let bind = srv.unnamed().await;
+        srv.send(&[frame(b'2', &[]), command_complete("SELECT 1"), ready(b'I')].concat())
+            .await;
+        bind
+    });
+    let binds = [bytes("\\x00ff"), bytes("abc")];
+    let mut s = spec("SELECT $1::bytea, $2::bytea");
+    s.binds = &binds;
+    conn.query(s).await.unwrap();
+    events(&mut conn).await;
+    let bind = server.await.unwrap();
+    assert_eq!(
+        bind.params,
+        [Some(b"\\x00ff".to_vec()), Some(b"abc".to_vec())]
+    );
+}
+
+/// A notice raised while the statement still runs comes out at once, not with the statement's
+/// end (a PL/pgSQL loop reporting progress; the server flushes notices as it raises them). The
+/// server here sends nothing more until the client has the notice.
+#[tokio::test]
+async fn a_notice_comes_out_while_the_statement_runs() {
+    // Run as one.
+    let (mut conn, mut srv) = session().await;
+    let (go, wait) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        srv.query_text().await;
+        srv.send(&notice("NOTICE", "00000", "step 1 of 2")).await;
+        wait.await.unwrap();
+        srv.send(&[command_complete("DO"), ready(b'I')].concat())
+            .await;
+        srv
+    });
+    conn.query(simple("DO $$ … $$", 100)).await.unwrap();
+    let first = tokio::time::timeout(READ_GUARD, conn.next_event())
+        .await
+        .expect("the notice, while the statement runs")
+        .unwrap();
+    assert!(matches!(first, QueryEvent::Notice(ref n) if &*n.text == "step 1 of 2"));
+    go.send(()).unwrap();
+    let rest = events(&mut conn).await;
+    assert_eq!(rest.len(), 3, "{rest:?}");
+    let _srv = server.await.unwrap();
+
+    // An extended-protocol statement (the unnamed portal), after its ResultStart.
+    let (mut conn, mut srv) = session().await;
+    let (go, wait) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        srv.prepare(&[], &[("a", INT4)], b'I').await;
+        srv.unnamed().await;
+        srv.send(&[frame(b'2', &[]), notice("NOTICE", "00000", "row 1 of 2")].concat())
+            .await;
+        wait.await.unwrap();
+        srv.send(
+            &[
+                data_row(&[Some(&1i32.to_be_bytes())]),
+                command_complete("SELECT 1"),
+                ready(b'I'),
+            ]
+            .concat(),
+        )
+        .await;
+        srv
+    });
+    conn.query(spec("SELECT f()")).await.unwrap();
+    let mut seen = Vec::new();
+    loop {
+        let e = tokio::time::timeout(READ_GUARD, conn.next_event())
+            .await
+            .expect("the notice, while the statement runs")
+            .unwrap();
+        let notice = matches!(e, QueryEvent::Notice(_));
+        seen.push(e);
+        if notice {
+            break;
+        }
+    }
+    go.send(()).unwrap();
+    seen.extend(events(&mut conn).await);
+    let shape: Vec<&str> = seen
+        .iter()
+        .map(|e| match e {
+            QueryEvent::Notice(_) => "notice",
+            QueryEvent::ResultStart(_) => "start",
+            QueryEvent::Rows(_) => "rows",
+            QueryEvent::ResultEnd(_) => "end",
+            QueryEvent::Done(_) => "done",
+            QueryEvent::Suspended => "suspended",
+        })
+        .collect();
+    assert!(
+        shape == ["start", "notice", "rows", "end", "done"]
+            || shape == ["notice", "start", "rows", "end", "done"],
+        "{shape:?}"
+    );
+    let _srv = server.await.unwrap();
 }

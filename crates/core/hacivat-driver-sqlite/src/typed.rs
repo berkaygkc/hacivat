@@ -54,8 +54,8 @@
 //! ## m3b-t13-drivers (HV-EXEC-03 driver half; R-M3-60, -66, -79)
 //!
 //! **Binds.** `spec.binds` are bound to the prepared statement by position ([`sqlite_value`]:
-//! by the hint, an `INTEGER`, a `REAL`, `TEXT`, a `BLOB` or `NULL`), never put into the SQL
-//! text. The statement's parameter count (`sqlite3_bind_parameter_count`, the largest index)
+//! by the hint, an `INTEGER`, a `REAL`, `TEXT`, a `BLOB` or `NULL`; a malformed `\x` bytes
+//! value is `Unsupported`), never put into the SQL text. The statement's parameter count (`sqlite3_bind_parameter_count`, the largest index)
 //! must equal `binds.len()`, else `Unsupported` before the first step: a placeholder without a
 //! bind never runs as NULL, and an extra bind is never ignored.
 //!
@@ -107,18 +107,25 @@ pub(crate) fn caps(idle_bound: Option<Duration>) -> TypedCaps {
 }
 
 // ## m3b-t13-drivers
-/// One bind as an SQLite value, by its hint (R-M3-79): an integer hint and an integer text →
-/// `INTEGER`; a float hint and a finite number → `REAL`; a bool hint and `true`/`false`/`1`/`0`
-/// (ASCII case) → `INTEGER` 1/0; a bytes hint and `\x` followed by pairs of hex digits (the
-/// raw text Hacivat shows for bytes) → `BLOB`; NULL → `NULL`; anything else `TEXT`, which the
-/// column's affinity may convert (a decimal stays exact as text).
-pub fn sqlite_value(b: &BindValue) -> rusqlite::types::Value {
+/// One bind as an SQLite value, by its hint (R-M3-79); `None` refuses it: an integer hint and
+/// the integer's canonical decimal text (no `+`, no leading zero) → `INTEGER`; a float hint
+/// and a finite number → `REAL`; a bool hint and `true`/`false`/`1`/`0` (ASCII case) →
+/// `INTEGER` 1/0; a bytes hint → `BLOB` of the decoded `\x` hex (the raw text Hacivat shows
+/// for bytes), or of the text's own bytes without `\x`, refused when `\x`/`\X` is malformed;
+/// NULL → `NULL`; anything else `TEXT`, which the column's affinity may convert (a decimal stays
+/// exact as text).
+pub fn sqlite_value(b: &BindValue) -> Option<rusqlite::types::Value> {
     use rusqlite::types::Value as V;
     let BindValue::Typed { hint, text } = b else {
-        return V::Null;
+        return Some(V::Null);
     };
     let typed = match hint {
-        LogicalType::Int { .. } => text.parse().ok().map(V::Integer),
+        // Fix round 1 (M-1): only the canonical decimal spelling is an integer.
+        LogicalType::Int { .. } => text
+            .parse::<i64>()
+            .ok()
+            .filter(|n| n.to_string() == **text)
+            .map(V::Integer),
         LogicalType::Float { .. } => text
             .parse::<f64>()
             .ok()
@@ -129,33 +136,60 @@ pub fn sqlite_value(b: &BindValue) -> rusqlite::types::Value {
             "false" | "0" => Some(V::Integer(0)),
             _ => None,
         },
-        LogicalType::Bytes { .. } => hex_bytes(text).map(V::Blob),
+        // Fix round 1 (I-2): the same bytes as MySQL and PostgreSQL store.
+        LogicalType::Bytes { .. } => match hex_bytes(text) {
+            HexText::Bytes(bytes) => Some(V::Blob(bytes)),
+            HexText::Malformed => return None,
+            HexText::NotHex => Some(V::Blob(text.as_bytes().to_vec())),
+        },
         _ => None,
     };
-    typed.unwrap_or_else(|| V::Text(text.to_string()))
+    Some(typed.unwrap_or_else(|| V::Text(text.to_string())))
 }
 
-/// `\x` and pairs of hex digits (either case) as bytes; `None` otherwise.
-fn hex_bytes(text: &str) -> Option<Vec<u8>> {
-    let hex = text.strip_prefix("\\x")?.as_bytes();
+/// A bytes-hinted text (fix round 1, I-2; the same rule on all three drivers).
+#[derive(Debug, PartialEq, Eq)]
+pub enum HexText {
+    /// `\x` and pairs of hex digits (either case): these bytes (`\x` alone: none).
+    Bytes(Vec<u8>),
+    /// Starts with `\x` or `\X` but is not that: refused on every engine.
+    Malformed,
+    /// No `\x` prefix: the text's own bytes.
+    NotHex,
+}
+
+/// Reads a bytes-hinted text.
+pub fn hex_bytes(text: &str) -> HexText {
+    if text.starts_with("\\X") {
+        return HexText::Malformed;
+    }
+    let Some(hex) = text.strip_prefix("\\x") else {
+        return HexText::NotHex;
+    };
+    let hex = hex.as_bytes();
     if hex.len() % 2 != 0 {
-        return None;
+        return HexText::Malformed;
     }
     let digit = |c: u8| (c as char).to_digit(16);
     hex.chunks(2)
         .map(|p| Some((digit(p[0])? * 16 + digit(p[1])?) as u8))
-        .collect()
+        .collect::<Option<Vec<u8>>>()
+        .map_or(HexText::Malformed, HexText::Bytes)
 }
 
-/// Binds `binds` to `stmt` by position, once its parameter count is theirs (else
-/// `Unsupported`: nothing is bound or stepped).
+/// Binds `binds` to `stmt` by position, once its parameter count is theirs and every value is
+/// one the hint allows (else `Unsupported`: nothing is bound or stepped).
 fn bind_all(stmt: &mut Statement<'_>, binds: &[BindValue]) -> Result<(), RawError> {
     if stmt.parameter_count() != binds.len() {
         return Err(unsupported());
     }
-    for (i, b) in binds.iter().enumerate() {
-        stmt.raw_bind_parameter(i + 1, sqlite_value(b))
-            .map_err(raw_error)?;
+    let values = binds
+        .iter()
+        .map(sqlite_value)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(unsupported)?;
+    for (i, v) in values.into_iter().enumerate() {
+        stmt.raw_bind_parameter(i + 1, v).map_err(raw_error)?;
     }
     Ok(())
 }
