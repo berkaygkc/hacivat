@@ -212,10 +212,19 @@ pub struct Tracked {
 /// Notes what the user statement `sql` does to the session's state (the module docs).
 ///
 /// `effects` (## m3b-t01c-core-seams, P-M3b-11): the exec gate's session effects of the unit
-/// when it classified it, else `None`. Task 18 uses them (C8) with this scan as the fallback;
-/// until then the scan alone decides, as in M3a.
+/// when it classified it, else `None`.
+///
+/// ## m3b-t18-safe06 (C8): with `effects` the classifier decides what the unit leaves behind:
+/// `WRITE_TEMP` a temporary object, `SESSION_STATE` a session variable, `ADVISORY_LOCK` and
+/// MySQL's `LOCK_TABLES` a session lock, `PREPARE` a prepared statement (counted as the scan
+/// counts it: `DEALLOCATE` lowers the count). `None` (no verdict, or an `Unknown` one, which
+/// the run never passes) falls back to the first-keyword scan, which errs toward reporting
+/// more. Each flag only ever turns on, as before.
 pub fn track_statement(t: &mut Tracked, sql: &str, effects: Option<SessionEffects>) {
-    let _ = effects;
+    if let Some(effects) = effects {
+        track_effects(t, sql, effects);
+        return;
+    }
     // A backslash in quoted text leaves the end of the string unsure: read the quotes too.
     let words = words(sql, !sql.contains('\\'));
     let word = |i: usize| words.get(i).map(String::as_str).unwrap_or_default();
@@ -244,6 +253,29 @@ pub fn track_statement(t: &mut Tracked, sql: &str, effects: Option<SessionEffect
     }
     if words.iter().any(|w| SESSION_LOCKS.contains(&w.as_str())) {
         t.locks_seen = true;
+    }
+}
+
+// ## m3b-t18-safe06 (C8)
+/// [`track_statement`] from the classifier's effects of the unit `sql`.
+fn track_effects(t: &mut Tracked, sql: &str, effects: SessionEffects) {
+    t.temp_created |= effects.contains(SessionEffects::WRITE_TEMP);
+    t.set_seen |= effects.contains(SessionEffects::SESSION_STATE);
+    t.locks_seen |= effects.intersects(SessionEffects::ADVISORY_LOCK | SessionEffects::LOCK_TABLES);
+    if effects.contains(SessionEffects::PREPARE) {
+        // `PREPARE` and `DEALLOCATE` both touch prepared statements; only the words tell which.
+        let words = words(sql, !sql.contains('\\'));
+        let word = |i: usize| words.get(i).map(String::as_str).unwrap_or_default();
+        // ## fix round 1 (m8): a unit's effects are its union, passed with each of its parts;
+        // only a part that prepares (or deallocates) moves the count.
+        match first_keyword(sql).as_str() {
+            "DEALLOCATE" => {
+                let all = word(1) == "ALL" || (word(1) == "PREPARE" && word(2) == "ALL");
+                t.prepared = if all { 0 } else { t.prepared.saturating_sub(1) };
+            }
+            "PREPARE" => t.prepared = t.prepared.saturating_add(1),
+            _ => {}
+        }
     }
 }
 

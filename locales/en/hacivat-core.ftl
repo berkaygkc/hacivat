@@ -938,3 +938,10 @@ exec-dur-lt-min = <1 min
 # Output: the profile's startup script did not run, because this console's session is
 # read-only (a read-only session never runs it). The script's SQL is never shown.
 exec-startup-script-skipped-read-only = The connection's startup script was not run: this session is read-only.
+
+## m3b-t18-safe06
+
+# A read-only console refused a statement before sending it: Hacivat's classifier couldn't
+# confirm that it only reads (or found that it doesn't). One sentence for every classifier
+# denial (T1c review M2).
+exec-deny-classifier = Not sent: this console is read-only, and Hacivat couldn't confirm that the statement only reads.

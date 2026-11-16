@@ -1992,3 +1992,135 @@ pub mod gate_fx {
         item_of(text, &conn).decision
     }
 }
+
+// ## m3b-t18-safe06
+/// Task 18's read-only consoles with the read-only guard's classifier (run A′, P-M3b-13):
+/// a profile connected read-only on a manager of its own whose `ManagerConfig::classifier` is
+/// the one given (the app's boot installs a `ClassifyPool`), as `user`.
+#[allow(
+    clippy::result_large_err,
+    reason = "Reply is the session's fixed interface"
+)]
+pub mod t18 {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use hacivat_driver::ExecOpts;
+    use hacivat_secrets::SecretString;
+    use hacivat_session::pipeline::Interaction;
+    use hacivat_session::profile::Profile;
+    use hacivat_session::session::{
+        ExecErrorKind, ExecOrigin, Reply, Request, SessionHandle, StatementClassifier,
+    };
+    use hacivat_session::{ConnectionManager, LiveState, ManagerConfig};
+
+    use super::matrix::{Line, deps, profile_of};
+
+    /// A read-only console of `line` as `user`.
+    pub struct RoConsole {
+        pub m: Arc<ConnectionManager>,
+        pub profile: Arc<Profile>,
+        pub s: SessionHandle,
+    }
+
+    impl RoConsole {
+        /// Connects `line` read-only as `user` (the test account when `None`), with
+        /// `classifier` (`None`: run B's layers alone) and the profile's function `allowlist`.
+        pub async fn open(
+            line: &Line,
+            user: Option<&str>,
+            classifier: Option<Arc<dyn StatementClassifier>>,
+            allowlist: &[&str],
+        ) -> RoConsole {
+            let mut p = profile_of(line);
+            p.read_only = true;
+            p.allow_unsupported_server = true;
+            if let Some(user) = user {
+                p.user = Some(user.to_string());
+            }
+            p.read_only_fn_allowlist = allowlist.iter().map(|s| s.to_string()).collect();
+            let config = ManagerConfig {
+                classifier,
+                ..ManagerConfig::m2b()
+            };
+            let m =
+                ConnectionManager::new(tokio::runtime::Handle::current(), Arc::new(deps()), config);
+            let profile = Arc::new(p);
+            let password = line
+                .target
+                .as_ref()
+                .map(|t| SecretString::from(t.password.clone()));
+            m.connect(profile.clone(), password, Interaction::Headless);
+            let mut changes = m.changes();
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                match m.state(profile.id) {
+                    LiveState::Connected(_) => break,
+                    LiveState::Failed(e) => {
+                        panic!("{}: the connect failed: {:?}", line.id, e.class)
+                    }
+                    LiveState::Lost { class } => panic!("{}: lost: {class:?}", line.id),
+                    _ => {}
+                }
+                assert!(Instant::now() < deadline, "{}: never connected", line.id);
+                tokio::select! {
+                    _ = changes.changed() => {}
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+            }
+            let s = m
+                .sessions(profile.id)
+                .expect("connected")
+                .default_session()
+                .expect("a default session");
+            assert!(s.state().borrow().read_only, "{}", line.id);
+            RoConsole { m, profile, s }
+        }
+
+        /// The profile's `application_name` (PostgreSQL's side channel finds the backend by it).
+        pub fn app(&self) -> &str {
+            &self.profile.application_name
+        }
+
+        /// Runs `sql` as a user statement (M2b `Exec`), reading up to 10 rows.
+        pub async fn exec(&self, sql: &str) -> Reply {
+            self.s
+                .submit(Request::Exec {
+                    sql: sql.to_string(),
+                    opts: ExecOpts::values(10),
+                    origin: ExecOrigin::User,
+                })
+                .reply
+                .await
+                .expect("the actor replies")
+        }
+
+        /// Hacivat's own constant statement (outside the guard), its first value.
+        pub async fn internal(&self, sql: &str) -> Option<String> {
+            self.s
+                .submit(Request::Exec {
+                    sql: sql.to_string(),
+                    opts: ExecOpts::values(10),
+                    origin: ExecOrigin::Internal { idempotent: true },
+                })
+                .reply
+                .await
+                .expect("the actor replies")
+                .ok()?
+                .rows
+                .first()?
+                .first()
+                .cloned()
+                .flatten()
+        }
+
+        pub fn close(self) {
+            self.m.disconnect(self.profile.id);
+        }
+    }
+
+    /// Whether `reply` is step 0b's denial.
+    pub fn safety_denied(reply: &Reply) -> bool {
+        matches!(reply, Err(e) if matches!(e.kind, ExecErrorKind::SafetyDenied(_)))
+    }
+}

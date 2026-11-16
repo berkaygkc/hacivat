@@ -326,6 +326,8 @@ pub(crate) fn spawn_supervised(
         events: events.clone(),
         next_seq: Arc::new(AtomicU64::new(1)),
     };
+    // ## m3b-t18-safe06 (named exception): the `sql_mode` this session pins (R-M3-57).
+    let observed_sql_mode = crate::session::readonly::observed_sql_mode(read_only, live.raw());
     let core = Core {
         kind,
         profile,
@@ -349,7 +351,9 @@ pub(crate) fn spawn_supervised(
         stray_kill: false,
         // ## m3b-t01c-core-seams
         classifier,
-        observed_sql_mode: None,
+        // ## m3b-t18-safe06 (named exception): filled from the connect's own read (R-M3-57).
+        observed_sql_mode,
+        ro_context: crate::session::readonly::RoContextRead::Connect,
         // ## m3b-t19-confirm-tx
         table_locks: false,
         gate: gate.clone(),
@@ -445,12 +449,15 @@ pub(crate) struct Core {
     // ## m3b-t01c-core-seams
     /// The read-only guard's classifier (R-M3-83; `step0b`, Task 18); `None`: M2b/M3a's layers
     /// only.
-    #[allow(dead_code, reason = "Task 18's step 0b reads it")]
     pub(crate) classifier: Option<Arc<dyn StatementClassifier>>,
     /// MySQL/MariaDB read-only sessions: the `sql_mode` read once after connect, pinned after
     /// every reset (P-M3b-33; Task 18 fills it).
-    #[allow(dead_code, reason = "Task 18 fills and reads it")]
     pub(crate) observed_sql_mode: Option<String>,
+    // ## m3b-t18-safe06 (named exception: one field; plan amendment C2(b)/I1)
+    /// Which session settings the read-only guard's classifier is told
+    /// (`readonly::RoContextRead`): the connect's, or ones read again after a statement that
+    /// may have changed them. A reconnect starts over from the new connection's.
+    pub(crate) ro_context: crate::session::readonly::RoContextRead,
     // ## m3b-t19-confirm-tx (fix round 1, m5)
     /// MySQL/MariaDB: the user's `LOCK TABLES` locks may be held (`confirm::note_table_locks`);
     /// a `START TRANSACTION` of Hacivat's would release them, so none is sent meanwhile.
@@ -556,13 +563,15 @@ impl Core {
     /// The session's current environment plan (its last schema included).
     pub(crate) fn env_plan(&self) -> EnvPlan {
         // ## m3b-t12-session-carries: with the settings' time zone (C11).
-        build_env_plan_with(
+        let plan = build_env_plan_with(
             self.kind,
             &self.profile,
             self.read_only,
             self.schema.as_ref(),
             self.time_zone.as_deref().and_then(SessionZone::usable),
-        )
+        );
+        // ## m3b-t18-safe06 (named exception): the observed `sql_mode` pinned (R-M3-57).
+        self.pin_observed(plan)
     }
 
     /// Classifies a driver error; a lost connection breaks the session. `sent`: the statement
@@ -813,13 +822,14 @@ impl Core {
     }
 
     /// Probes the schema context again (Q27); a failed probe keeps the last one.
-    pub(crate) async fn reprobe(&mut self) {
+    /// ## m3b-t18-safe06 (named exception, fix round 1 m3): true when the probe answered.
+    pub(crate) async fn reprobe(&mut self) -> bool {
         let sql = schema_probe_sql(self.kind);
         if sql.is_empty() {
-            return;
+            return false;
         }
         let Ok(conn) = self.conn() else {
-            return;
+            return false;
         };
         // F3: the values path; the extended protocol only counts the probe's rows.
         let probed = conn
@@ -830,11 +840,13 @@ impl Core {
                 self.observe(false);
                 let ctx = parse_schema_probe(self.kind, &answer);
                 self.schema = (ctx != SchemaCtx::default()).then_some(ctx);
+                true
             }
             Err(e) => {
                 let e = self.raw_error(&e, false);
                 self.observe(false);
                 tracing::debug!(kind = ?e.kind, "the schema probe failed");
+                false
             }
         }
     }
@@ -921,7 +933,11 @@ impl Core {
             return Err(ExecError::of(ExecErrorKind::Internal));
         }
         self.control(&sql).await?;
-        self.reprobe().await;
+        // ## m3b-t18-safe06 (named exception, fix round 1 m3): a re-probe that did not read
+        // the new schema leaves the read-only guard's context unknown for it.
+        let probed = self.reprobe().await;
+        let known = probed && self.schema.is_some();
+        self.note_schema_switch(known);
         Ok(self.summary())
     }
 
@@ -973,6 +989,8 @@ impl Core {
         // kill is on its way to it.
         self.holder = TxOwner::User;
         self.stray_kill = false;
+        // ## m3b-t18-safe06 (named exception): the new connection's own context read.
+        self.ro_context = crate::session::readonly::RoContextRead::Connect;
         self.live = Some(live);
         self.broken = None;
         self.last_class = None;

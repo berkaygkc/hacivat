@@ -174,6 +174,11 @@ pub fn install(cx: &mut App, boot: ConnectionsBoot) {
         production_read_only: true,
         ..ManagerConfig::m2b()
     };
+    // ## m3b-t18-safe06 (named exception): the read-only guard's classifier (R-M3-83).
+    let config = ManagerConfig {
+        classifier: Some(hacivat_exec::classify_pool::ClassifyPool::new(2)),
+        ..config
+    };
     let manager = ConnectionManager::new(runtime.handle(), Arc::new(deps), config);
     // ## m3b-t22-tx-ui (named exception, T12 concern 2): the settings' time zone reaches every
     // session the manager opens (C11), and a later change of the setting too

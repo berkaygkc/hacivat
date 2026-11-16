@@ -600,3 +600,8 @@ exec-explain-not-rolled-back = EXPLAIN ANALYZE bir işlemin dışında çalışt
 exec-dur-lt-min = <1 dk
 # Review: PO
 exec-startup-script-skipped-read-only = Bağlantının başlangıç betiği çalıştırılmadı: bu oturum salt okunur.
+
+## m3b-t18-safe06
+
+# Review: PO
+exec-deny-classifier = Gönderilmedi: bu konsol salt okunur ve Hacivat ifadenin yalnızca okuduğunu doğrulayamadı.

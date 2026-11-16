@@ -625,6 +625,9 @@ pub struct FakeDriver {
     // ## m3b-t12-session-carries (named exception)
     /// What every `RawConn::take_notices_dropped` answers (`notices_dropped`).
     notices_dropped: u32,
+    // ## m3b-t18-safe06 (named exception)
+    /// What every connection's `RawConn::session_settings` answers (`session_settings`).
+    session_settings: crate::driver::SessionSettings,
 }
 
 impl FakeDriver {
@@ -676,6 +679,8 @@ impl FakeDriver {
             typed_caps: None,
             // ## m3b-t12-session-carries
             notices_dropped: 0,
+            // ## m3b-t18-safe06
+            session_settings: crate::driver::SessionSettings::default(),
         }
     }
 
@@ -888,6 +893,14 @@ impl FakeDriver {
         self
     }
 
+    // ## m3b-t18-safe06 (named exception)
+    /// What every connection's `RawConn::session_settings` answers: the settings a real
+    /// driver reads at connect (the lexing modes, PostgreSQL's `search_path`).
+    pub fn session_settings(mut self, settings: crate::driver::SessionSettings) -> Self {
+        self.session_settings = settings;
+        self
+    }
+
     /// `Rows` events delivered by typed queries, over every connection.
     pub fn chunks_sent(&self) -> u64 {
         self.counters.chunks.load(Ordering::SeqCst)
@@ -955,6 +968,8 @@ impl Driver for FakeDriver {
             lost: false,
             // ## m3b-t12-session-carries
             notices_dropped: self.notices_dropped,
+            // ## m3b-t18-safe06
+            session_settings: self.session_settings.clone(),
         };
         self.counters.alive.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
@@ -1060,6 +1075,9 @@ struct FakeConn {
     // ## m3b-t12-session-carries (named exception)
     /// What `take_notices_dropped` answers (`FakeDriver::notices_dropped`).
     notices_dropped: u32,
+    // ## m3b-t18-safe06 (named exception)
+    /// What `session_settings` answers (`FakeDriver::session_settings`).
+    session_settings: crate::driver::SessionSettings,
 }
 
 impl FakeConn {
@@ -1409,6 +1427,11 @@ impl RawConn for FakeConn {
     // ## m3b-t12-session-carries (named exception)
     fn take_notices_dropped(&mut self) -> u32 {
         self.notices_dropped
+    }
+
+    // ## m3b-t18-safe06 (named exception)
+    fn session_settings(&self) -> crate::driver::SessionSettings {
+        self.session_settings.clone()
     }
 
     fn fetch_more(&mut self, rows: u32) -> BoxFuture<'_, Result<(), RawError>> {

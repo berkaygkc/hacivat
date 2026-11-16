@@ -19,8 +19,8 @@
 //! those would be lost.
 
 use std::io;
-use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, PoisonError};
 
 use hacivat_driver::{DriverConnect, DriverEvent, Endpoint, RawError, RawErrorKind, ServerMessage};
 use hacivat_net::{TlsFailure, TlsMode};
@@ -168,14 +168,19 @@ fn config_with(req: &DriverConnect, options: bool) -> Result<Config, RawError> {
 #[doc(hidden)]
 pub async fn connect_conn(req: DriverConnect) -> Result<PgConn, RawError> {
     // ## m3b-t12-session-carries (named exception): the pooler fallback (module docs).
-    match connect_once(&req, |_| {}, true).await {
+    let mut conn = match connect_once(&req, |_| {}, true).await {
         Err(e) if startup_options_refused(&req, &e) => {
             let mut conn = connect_once(&req, |_| {}, false).await?;
             hacivat_driver::RawConn::batch(&mut conn, READ_ONLY_SET_AFTER_CONNECT).await?;
-            Ok(conn)
+            conn
         }
-        other => other,
+        other => other?,
+    };
+    // ## m3b-t18-safe06 (named exception): a read-only connection's `search_path`, last.
+    if req.read_only {
+        conn.read_search_path().await;
     }
+    Ok(conn)
 }
 
 // ## m3b-t12-session-carries (named exception)
@@ -258,6 +263,11 @@ async fn connect_once(
     }
     events(DriverEvent::AuthDone);
     let notices = Notices::default();
+    // ## m3b-t18-safe06 (named exception; plan amendment C2(b)/I1): the startup
+    // `ParameterStatus` of `standard_conforming_strings`, before the task takes the connection.
+    let scs: Option<Arc<str>> = connection
+        .parameter("standard_conforming_strings")
+        .map(Arc::from);
     let task = tokio::spawn(drive(connection, notices.clone(), wire.clone()));
     let local = shared.local();
     let cancel = PgCancel::new(
@@ -270,9 +280,10 @@ async fn connect_once(
     let tls_mode = local
         .as_ref()
         .and(req.tls.as_ref().map(|t| t.settings.mode));
-    Ok(PgConn::new(
-        client, task, tls_mode, local, wire, notices, cancel,
-    ))
+    let mut conn = PgConn::new(client, task, tls_mode, local, wire, notices, cancel);
+    // ## m3b-t18-safe06 (named exception)
+    conn.note_lex_modes(scs);
+    Ok(conn)
 }
 
 fn raw(kind: RawErrorKind) -> RawError {

@@ -28,6 +28,8 @@ use hacivat_session::session::{
     UnitVerdict,
 };
 use hacivat_session::{ManagerConfig, profile::ProfileEndpoint};
+// ## m3b-t18-safe06 (merge with T19)
+use hacivat_session::session::{ClassifierContext, ExecErrorKind, RoAnswer};
 use hacivat_values::{BindValue, LogicalType};
 
 // ---------------------------------------------------------------------------------------------
@@ -111,6 +113,23 @@ impl StatementClassifier for DenyAll {
         _sql: Arc<str>,
     ) -> BoxFuture<'static, Option<SessionEffects>> {
         Box::pin(async { Some(SessionEffects::all()) })
+    }
+    // ## m3b-t18-safe06 (fix round 1, I1): the trait has no default; this fake ignores the
+    // context.
+    fn check_read_only_in(
+        &self,
+        kind: DbmsKind,
+        sql: Arc<str>,
+        allow: Arc<[Arc<str>]>,
+        _ctx: ClassifierContext,
+    ) -> BoxFuture<'static, RoAnswer> {
+        let check = self.check_read_only(kind, sql, allow);
+        Box::pin(async move {
+            RoAnswer {
+                check: check.await,
+                changes_context: false,
+            }
+        })
     }
 }
 
@@ -327,11 +346,12 @@ async fn manager_default_has_no_classifier() {
     );
 }
 
+// ## m3b-t18-safe06 (named exception): Task 18 filled step 0b, so the installed classifier is
+// now asked, and its denial is final (this test said "changes nothing until Task 18").
 #[tokio::test]
-async fn an_installed_classifier_changes_nothing_until_task_18() {
-    // `ManagerConfig::classifier` reaches the sessions the manager starts; step 0b is a stub,
-    // so a read-only session with a denying classifier still runs its reads through the guard
-    // (typed and M2b paths) and never asks the classifier.
+async fn an_installed_classifier_is_asked_from_task_18() {
+    // `ManagerConfig::classifier` reaches the sessions the manager starts; a read-only session
+    // with a denying classifier refuses its reads before the guard (typed and M2b paths).
     let deny = Arc::new(DenyAll::default());
     let config = ManagerConfig {
         classifier: Some(deny.clone()),
@@ -349,14 +369,15 @@ async fn an_installed_classifier_changes_nothing_until_task_18() {
     assert!(snap(&h).read_only);
     let o = Recorder::new();
     let reply = h.run(spec_of(&o, &["SELECT 1"])).reply.await.unwrap();
-    assert!(reply.is_ok(), "{reply:?}");
     assert!(
-        f.typed_log()
-            .contains(&FakeTypedCall::Query("SELECT 1".into()))
+        matches!(&reply, Err(e) if matches!(e.kind, ExecErrorKind::SafetyDenied(_))),
+        "{reply:?}"
     );
-    run(&h, "SELECT 2").await.unwrap();
-    assert!(f.executed().iter().any(|s| s == "SELECT 2"));
-    assert_eq!(*deny.calls.lock().unwrap(), 0);
+    assert!(f.typed_log().is_empty());
+    let e = run(&h, "SELECT 2").await.unwrap_err();
+    assert!(matches!(e.kind, ExecErrorKind::SafetyDenied(_)), "{e:?}");
+    assert!(!f.executed().iter().any(|s| s == "SELECT 2"));
+    assert_eq!(*deny.calls.lock().unwrap(), 2);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -338,15 +338,19 @@ async fn connect_in_time(req: &DriverConnect, mode: TlsMode) -> Result<MySqlConn
     // cursor may idle (ER6, R19); read once here, never set. A connection that cannot answer
     // it (an I/O or protocol failure) fails the connect.
     // ## m3b-t07-types: the same round trip reads the session `time_zone` (ledger 194).
-    let (net_write_timeout, time_zone) = match typed::read_net_write_timeout(&mut conn).await {
-        Ok(v) => v,
-        Err(e) => {
-            conn.abandon();
-            return Err(e);
-        }
-    };
+    // ## m3b-t18-safe06 (named exception): and the session `sql_mode` (R-M3-57).
+    let (net_write_timeout, time_zone, sql_mode, database) =
+        match typed::read_net_write_timeout(&mut conn).await {
+            Ok(v) => v,
+            Err(e) => {
+                conn.abandon();
+                return Err(e);
+            }
+        };
     let mut typed = typed::TypedState::new(u64::from(conn.id()), net_write_timeout);
     typed.time_zone = time_zone;
+    typed.sql_mode = sql_mode;
+    typed.database = database;
     Ok(MySqlConn {
         conn: Some(conn),
         guard,
@@ -664,6 +668,16 @@ impl RawConn for MySqlConn {
     fn autocommit(&self) -> Option<bool> {
         let ok = self.conn.as_ref()?.last_ok_packet()?;
         Some(crate::exec::autocommit_from_status(ok.status_flags()))
+    }
+
+    // ## m3b-t18-safe06 (named exception; plan amendment C2(b)/I1)
+    /// The session `sql_mode` and the current database the connect read
+    /// (`read_net_write_timeout`'s round trip).
+    fn session_settings(&self) -> hacivat_driver::SessionSettings {
+        hacivat_driver::SessionSettings {
+            lex_modes: self.typed.sql_mode.clone(),
+            search_path: self.typed.database.clone(),
+        }
     }
 
     // ## m3a-t14-mysql-typed (the bodies and their rules: `crate::typed`)

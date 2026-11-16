@@ -1499,6 +1499,12 @@ impl ConnectionManager {
         self.shared.changes.subscribe()
     }
 
+    // ## m3b-t18-safe06 (named exception: T1c review M7, the app's boot test)
+    /// The configuration this manager was made with (the boot's, in the app).
+    pub fn config(&self) -> &ManagerConfig {
+        &self.shared.config
+    }
+
     /// Starts a test of `draft` on the core runtime (HV-CONN-07): fresh resources, no budget
     /// permit, nothing stored. Dropping the handle (or `cancel`) stops it.
     pub fn test(&self, draft: ProfileDraft, ix: Interaction) -> TestHandle {

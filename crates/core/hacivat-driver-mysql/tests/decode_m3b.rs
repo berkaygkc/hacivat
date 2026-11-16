@@ -203,7 +203,12 @@ async fn the_connection_reads_the_session_time_zone_in_its_setup_query() {
         .filter(|cmd| cmd.text().contains("time_zone"))
         .map(|cmd| cmd.text())
         .collect();
-    assert_eq!(setup, ["SELECT @@net_write_timeout, @@session.time_zone"]);
+    // ## m3b-t18-safe06 (named exception): the same round trip reads the session `sql_mode`
+    // too (R-M3-57, the T18 carry: no round trip of its own).
+    assert_eq!(
+        setup,
+        ["SELECT @@net_write_timeout, @@session.time_zone, @@session.sql_mode, DATABASE()"]
+    );
     c.query(spec("SELECT ts, dt FROM t", false, 501))
         .await
         .unwrap();
@@ -277,4 +282,104 @@ fn the_plans_native_types_give_mysql_labels() {
         .map(|c| type_label(&c.native))
         .collect();
     assert_eq!(labels, ["decimal(14,2)", "bigint unsigned", "bit(5)"]);
+}
+
+// ## m3b-t18-safe06 (named exception; R-M3-57, plan amendment C2(b)/I1)
+#[tokio::test]
+async fn the_connection_reads_the_session_sql_mode_in_its_setup_query() {
+    // The third value of the same round trip is the session's `sql_mode`, verbatim, and the
+    // fourth the current database (the T20 carry); a server that answers only the first two
+    // leaves both unread.
+    for (answer, want) in [
+        (
+            Some("ANSI_QUOTES,NO_BACKSLASH_ESCAPES"),
+            Some("ANSI_QUOTES,NO_BACKSLASH_ESCAPES"),
+        ),
+        (None, None),
+    ] {
+        let (c, server, _) = scripted(true, move |cmd| {
+            if cmd.code == COM_QUERY && cmd.text().contains("@@net_write_timeout") {
+                let Some(mode) = answer else {
+                    return Some(timeout_and_zone("SYSTEM"));
+                };
+                let mut steps = header(&[
+                    column_def("@@net_write_timeout", T_LONGLONG, 0, BINARY, 21, 0),
+                    column_def("@@session.time_zone", T_VAR_STRING, 0, UTF8MB4, 256, 0),
+                    column_def("@@session.sql_mode", T_VAR_STRING, 0, UTF8MB4, 256, 0),
+                    column_def("DATABASE()", T_VAR_STRING, 0, UTF8MB4, 256, 0),
+                ]);
+                steps.push(Step::Packet(text_row(&[
+                    Some(b"60"),
+                    Some(b"SYSTEM"),
+                    Some(mode.as_bytes()),
+                    Some(b"hv_test"),
+                ])));
+                steps.push(Step::Packet(terminator(AUTOCOMMIT, 0)));
+                return Some(steps);
+            }
+            None
+        })
+        .await;
+        assert_eq!(c.session_settings().lex_modes.as_deref(), want);
+        assert_eq!(
+            c.session_settings().search_path.as_deref(),
+            want.map(|_| "hv_test")
+        );
+        // No round trip of its own.
+        let reads = server
+            .commands()
+            .iter()
+            .filter(|cmd| cmd.text().contains("sql_mode"))
+            .count();
+        assert_eq!(reads, 1);
+    }
+}
+
+// ## m3b-t18-safe06 (named exception; fix round 1, m11)
+#[tokio::test]
+async fn a_server_that_refuses_sql_mode_or_database_keeps_the_zone() {
+    // A server (or proxy) that refuses the four-value read steps down to T7's pair, so the
+    // zone is still read; `sql_mode` and the database stay unread.
+    let ts = column_def("ts", T_TIMESTAMP, 0, BINARY, 19, 0);
+    let cols = [ts];
+    let (mut c, server, _) = scripted(true, move |cmd| {
+        if cmd.code == COM_QUERY && cmd.text().contains("sql_mode") {
+            return Some(packets(vec![err_packet(
+                1193,
+                "HY000",
+                "Unknown system variable 'sql_mode'",
+            )]));
+        }
+        if cmd.code == COM_QUERY && cmd.text().contains("time_zone") {
+            return Some(timeout_and_zone("Europe/Istanbul"));
+        }
+        match cmd.code {
+            COM_STMT_PREPARE => Some(prepare_ok(&cols, 0)),
+            COM_STMT_EXECUTE => {
+                let mut steps = header(&cols);
+                steps.push(Step::Packet(terminator(AUTOCOMMIT, 0)));
+                Some(steps)
+            }
+            _ => None,
+        }
+    })
+    .await;
+    assert!(
+        server
+            .commands()
+            .iter()
+            .any(|cmd| cmd.text() == "SELECT @@net_write_timeout, @@session.time_zone")
+    );
+    assert_eq!(
+        c.session_settings(),
+        hacivat_driver::SessionSettings::default()
+    );
+    c.query(spec("SELECT ts FROM t", false, 501)).await.unwrap();
+    let QueryEvent::ResultStart(schema) = event(&mut c).await else {
+        panic!("ResultStart first");
+    };
+    assert_eq!(
+        time_zone_of(&schema.columns[0].native).as_deref(),
+        Some("Europe/Istanbul")
+    );
 }
