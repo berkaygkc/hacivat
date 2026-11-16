@@ -28,18 +28,30 @@ pub const PG_QUERY_FINGERPRINT_VERSION: u16 = 3;
 
 /// The fingerprint of a request the classifier analysed (the module docs).
 pub(crate) fn request_fingerprint(sql: &str, ctx: &DialectCtx) -> Fingerprint {
-    let norm = hv_norm1(sql, ctx);
     if !matches!(ctx.id, DialectId::Postgres | DialectId::PgWire(_)) {
-        return norm;
+        return hv_norm1(sql, ctx);
     }
-    match sql_oracle_pg::tree::fingerprint(sql) {
-        Ok(hash) => Fingerprint {
+    with_libpg_fingerprint(sql, ctx, sql_oracle_pg::tree::fingerprint(sql).ok())
+}
+
+// ## m3b-t20-differential (named exception, T14 perf carry)
+/// [`request_fingerprint`] on PostgreSQL when libpg_query's fingerprint of `sql` is already
+/// known (`hash`, from the backend's one parse; `None` where libpg_query cannot fingerprint
+/// it): no second parse.
+pub(crate) fn with_libpg_fingerprint(
+    sql: &str,
+    ctx: &DialectCtx,
+    hash: Option<u64>,
+) -> Fingerprint {
+    let norm = hv_norm1(sql, ctx);
+    match hash {
+        Some(hash) => Fingerprint {
             algo: FingerprintAlgo::PgQuery,
             hash,
             normalized: norm.normalized,
             version: PG_QUERY_FINGERPRINT_VERSION,
         },
-        Err(_) => norm,
+        None => norm,
     }
 }
 
@@ -70,6 +82,33 @@ mod tests {
         let f = request_fingerprint("SELEC 1", &pg());
         assert_eq!(f, hv_norm1("SELEC 1", &pg()));
         assert_eq!(f.algo, FingerprintAlgo::HvNorm1);
+    }
+
+    // ## m3b-t20-differential: the backend's one parse gives `classify` the same fingerprint
+    // as a second parse would.
+    #[test]
+    fn classify_fingerprints_from_its_one_parse_as_a_second_parse_would() {
+        use crate::classify::{ClassifyCtx, Expect, classify};
+        use sql_dialect::ClientFlavor;
+        let texts = [
+            "SELECT a FROM t WHERE id = 1",
+            "SELECT 1; INSERT INTO t VALUES (2)",
+            "\u{feff}SELECT 1",
+            "SELEC 1",
+            "SELECT * FROM t WHERE a IN (3, 1, 2)",
+            "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+            "COPY t TO STDOUT",
+            "SELECT ARRAY[ARRAY[ARRAY[ARRAY[ARRAY[ARRAY[1]]]]]]",
+        ];
+        for sql in texts {
+            for expect in [Expect::Script, Expect::SingleStatement] {
+                let ctx = ClassifyCtx::new(pg(), ClientFlavor::None, expect);
+                let r = classify(sql, &ctx);
+                if r.pre_decision.is_none() {
+                    assert_eq!(r.fingerprint, request_fingerprint(sql, &pg()), "{sql:?}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -1800,3 +1800,116 @@ unit tests (panic, deadline, shutdown).
   --'`), instead of an `Unknown` item a dialog would ask about.
 - **Perf tests** are load-tolerant: up to three rounds of best-of-N, asserting the 2 ms
   interim on the best.
+
+## m3b-t20 — differential and fuzz
+
+Task 20 (SQL-T13, R-M3-80) adds the evidence around the classifier and the splitter, and the
+perf levers T14 named.
+
+**Fuzzing (R-M3-80).** `fuzz/` stays its own excluded workspace. Its five targets
+(`lex_lossless`, `relex_equivalence`, `split_items`, `params_rewrite`, `classify_no_panic`)
+run 10 minutes each in the nightly `fuzz-sql` job (`cargo +nightly fuzz`), built against
+`fuzz/Cargo.lock` (checked with `cargo metadata --locked`, P-M3b-15); the job fails when the
+build touches `third_party/` or the lockfile. **`libfuzzer-sys`'s licence** is
+`(MIT OR Apache-2.0) AND NCSA` (LLVM's libFuzzer). NCSA is accepted for this workspace only: it
+is never shipped, never a dependency of a shipped crate, and the root `deny.toml` does not see
+it. Each target exists as a seeded test in its crate, so a PR runs the same property without
+nightly: `sql-lexer/tests/props.rs` (lossless), `sql-lexer/tests/incremental.rs` and
+`sql-split/tests/incremental.rs` (relex/resplit equivalence, through the one shared generator
+`sql-lexer/tests/support/edits.rs`, T5 I1), `sql-split/tests/split_props.rs`,
+`sql-split/tests/params.rs`, and the new `sql-safety/tests/mutation_props.rs`. Seeded
+generators, not proptest strategies, in the new tests (the M3a ruling); `PROPTEST_CASES`
+scales every loop (nightly 100,000).
+
+**The fuzz never weakens a verdict.** `mutation_props` holds:
+- `classify` never panics on generated text, on every dialect, both lexing-mode paths, both
+  expectations, and its report is well formed (of these bytes, this dialect, pre-decided with
+  no item, items inside the text, and a read-only allow is no more than a read or a harmless
+  session change: `SET SCHEMA 'x'` is P-M3b-T3-1's harmless `search_path`);
+- the review seeds (`sql-testkit/corpus/fuzz/classifier_seeds.toml`, 1,529 inputs of the T9,
+  T10 and T14 probe sets with their accepted verdicts) never get weaker;
+- meaning-preserving mutants (ASCII letter case, whitespace of the same kind, a comment for a
+  space) never get a weaker verdict than their original, on the read-only and Admin profiles;
+- **the libpg_query oracle**: PG mutants the read-only profile allows parse to no write
+  statement, no `INTO`, no row lock, no two-phase commit (`PREPARE TRANSACTION`, `COMMIT` /
+  `ROLLBACK PREPARED`) and no `SET` outside the classifier's harmless list (`set_allowed`, the
+  value read strictly) (fix round 1, m2; `SELECT … INTO` is found in the tree's message fields,
+  which the node counts do not visit); functions with effects are the server's to show. A
+  self-test proves the oracle sees each of these;
+- T14's escaped literals and their meaning-preserving mutants: no false denial with the modes
+  known or unknown.
+
+**The server oracle** (`hacivat-exec/tests/docker_mutation_fuzz.rs`, P-M3b-13; `alg/13`
+:399): the PG read corpus, the escaped literals, the seeds and 10,000 mutants are classified by
+the real `ClassifyPool` with pg17's modes known; each one the read-only profile allows runs on
+a read-only console as the superuser test account in a database of its own. A read-only
+violation (`25006`) or a guard gap is a finding, and so is any change the **side channel**
+sees. Every read-only request ends with the guard's `ROLLBACK` and `DISCARD ALL` before Run
+returns, so the side channel watches what outlives both (fix round 1, I1), from connections
+outside the guarded session, before and after every statement: replication slots, server files
+(`/tmp/hv_t20*`, the paths the `COPY … TO` / `lo_export` mutants write), a sentinel backend and
+the side channel's own (`pg_terminate_backend`), statistics reset times, `pg_conf_load_time()`
+(`pg_reload_conf`) and prepared transactions. The fixture rows, sequence, relations, temporary
+tables, large objects and advisory locks are probed as a belt-and-braces check of the rollback.
+A self-check proves each probe fires before the run. After a finding, slots are dropped, the
+sentinel reopened and the next statement takes its own baseline. Every outcome is explained (a
+SQLSTATE; a guard refusal before I/O; `protocol`, a `$n` unit M3a's Run cannot bind; a Run
+refusal) or the test fails, and the console must still run `SELECT 1` at the end.
+
+**The PG regression differential** (`sql-testkit::differential`, feature `differential`,
+`tests/pg_regress_differential.rs`; the P0 exit, `alg/10` :171). `cargo xtask
+fetch-pg-regress --tag REL_17_2` fetches `src/test/regress/sql/` from the PostgreSQL mirror with
+`curl` and `tar` into the git-ignored `target-pg-regress/`, and checks it against digests
+pinned in xtask over the sorted names and bytes: XXH3-64 (integrity and reproducibility only)
+and SHA-256 (through the system's `sha256sum`/`shasum`: the cryptographic pin; fix round 1, m7).
+Any other tag is refused until pinned; with the pinned files present it does nothing
+(offline-safe). The differential re-checks the files it reads against a pinned FNV-1a 64, so a
+locally edited corpus fails. The files are data, never run. They are psql scripts, so
+the comparison runs per segment (a run of our execution statements with no client command or
+`COPY` data between them): libpg_query splits the segment, or, when it holds an intentional
+syntax error, each statement alone; a statement that does not parse alone is "not comparable",
+one our split leaves uncertain (Run refuses it) is "uncertain". The rate is reported both ways:
+agreed / (agreed + disagreed), asserted ≥ 999 per mille (REL_17_2: 1000), and agreed / all
+(988.2). Every disagreement is listed, and both buckets the first rate leaves out are pinned in
+checked-in listings (`sql-testkit/corpus/differential/REL_17_2-{uncertain,not-comparable}.tsv`:
+file, byte range, FNV-1a of the text; no corpus text) with a ±1 % count tolerance: a statement
+that moves into either bucket fails, named (fix round 1, I2). `sql-safety`'s
+`tests/oracle_corpus.rs` checks the one-parse oracle against upstream's separate calls on all
+89,342 corpus texts (there, not behind `sql-testkit`'s feature: only the oracle and
+`sql-safety` may name `sql_oracle_pg::tree`, check-deps). Not a number CI
+treats as a budget elsewhere.
+
+**Perf (T14 carry).**
+- *One parse for the tree and the fingerprint, no summary walk*: `third_party/pg_query`
+  PATCHES §3 adds `pg_query_parse_protobuf_fingerprint_opts` (one raw parse, the protobuf, then
+  the fingerprint walk on the same tree) and `parse_protobuf_with_fingerprint` (no
+  `ParseResult::new`). `sql_oracle_pg::tree::analyse` makes one trip to the parser thread (the
+  guard's scan gives the tokens), the PG backend uses it (`Backend::analyse_fingerprinted`,
+  `ParsedFingerprint`), and `classify` takes the fingerprint from it instead of a second
+  `tree::fingerprint` call. The fingerprint is the same value (tests in both crates); a text with
+  a leading byte-order mark keeps `HvNorm1`, as before.
+- *Readings × length*: the interim backend gives a request a budget of 256 KiB
+  (`MAX_READING_BYTES`) for the readings of statements with executable comments (readings ×
+  statement length, summed over the request's statements with more than one reading). Past it
+  the statement is `TooComplex` before any reading is built. 16 readings of 10 KB (about 20 ms
+  in release) fit; 16 of 20 KB, or two readings of 200 KB, do not. The budget is per backend
+  call: the lexing-mode readings of `classify` (at most 4, only those that cut other tokens)
+  multiply it, up to 1 MiB of readings. Being the request's, it also runs out on a long script
+  run as one unit with many `/*!…*/` statements (a schema dump of some 450 tables): the later
+  ones are `TooComplex` (fail-closed; PO list, with the 128 KiB statement rule).
+- *Figures*: `cargo xtask bench-sql` (the `sql-safety` `bench_sql` test as a subprocess; JSON;
+  relative signal only, L2). PostgreSQL `classify` per 10 KB fell from 1.81 to 1.55–1.65 ms
+  best; libpg_query's protobuf encode and prost decode remain most of the rest (the oracle's one
+  call is ~1.17 ms of it). The 1 ms budget is still not met; the 2 ms interim assertion stays
+  load-tolerant (min over up to 3 rounds); Task 30 decides.
+
+**The T10 gap (information disclosure).** `ClassifyCtx.search_path` on MySQL and MariaDB is the
+session's current database (`DATABASE()`), one element, empty when unknown. With
+`performance_schema` or `sys` current, the unqualified `threads` / `session` are those
+schemas' tables and `Unknown` (denied on read-only). With another current database, or none
+known, they stay user tables (the T10 choice: common names); filling the current database is
+Task 18's (connect, and after `USE`, which already changes the context) and Task 24's.
+Accepted false positive (fix round 1, m3): the match takes any standalone word, so with `sys`
+current, `SESSION` as a keyword (`SET SESSION sql_mode = …`, `SET SESSION TRANSACTION …`,
+`SHOW SESSION STATUS`) also makes the statement `Unknown`. It fails closed and needs `sys` as
+the current database.

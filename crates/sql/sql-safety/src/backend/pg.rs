@@ -61,7 +61,7 @@ use sql_lexer::{LexState, Lexed, TokenKind};
 use sql_oracle_pg::tree::{self, ScanKind, pb};
 use sql_text::{TextRange, TextSize};
 
-use crate::backend::Backend;
+use crate::backend::{Backend, ParsedFingerprint};
 use crate::classify::{ClassifyCtx, Expect};
 use crate::destructive::{DestructiveKind, DestructiveReason};
 use crate::effects::{EffectSet, RiskFlags, class_of};
@@ -118,6 +118,17 @@ impl Backend for PgBackend {
         lexed: Option<&Lexed>,
     ) -> Vec<StmtReport> {
         analyse_lexed(sql, items, ctx, lexed)
+    }
+
+    // ## m3b-t20-differential (named exception, T14 perf carry)
+    fn analyse_fingerprinted(
+        &self,
+        sql: &str,
+        items: &[TextRange],
+        ctx: &ClassifyCtx,
+        lexed: Option<&Lexed>,
+    ) -> (Vec<StmtReport>, ParsedFingerprint) {
+        analyse_with_fingerprint(sql, items, ctx, lexed)
     }
 }
 
@@ -571,8 +582,25 @@ pub(crate) fn analyse_lexed(
     ctx: &ClassifyCtx,
     lexed: Option<&Lexed>,
 ) -> Vec<StmtReport> {
+    analyse_with_fingerprint(sql, items, ctx, lexed).0
+}
+
+// ## m3b-t20-differential (named exception, T14 perf carry): one trip to the parser thread
+// (`sql_oracle_pg::tree::analyse`: one scan, one raw parse for the tree and the fingerprint, no
+// `pg_query` summary walk) instead of three (`parse_tree`, `scan_tokens`, and the orchestrator's
+// `fingerprint`, each with its own scan and the last with its own parse).
+/// [`analyse_lexed`], and libpg_query's fingerprint of `sql` from the same parse
+/// (`ParsedFingerprint::Parsed`); `NotParsed` when `sql` itself never reached the parser (no
+/// item, or a leading byte-order mark, which only the blanked copy is parsed with: libpg_query
+/// cannot fingerprint `sql` as given, so `Parsed(None)`).
+pub(crate) fn analyse_with_fingerprint(
+    sql: &str,
+    items: &[TextRange],
+    ctx: &ClassifyCtx,
+    lexed: Option<&Lexed>,
+) -> (Vec<StmtReport>, ParsedFingerprint) {
     if items.is_empty() {
-        return Vec::new();
+        return (Vec::new(), ParsedFingerprint::NotParsed);
     }
     let failed = |codes: &[ReasonCode]| -> Vec<StmtReport> {
         items.iter().map(|r| unknown_report(*r, codes)).collect()
@@ -588,12 +616,18 @@ pub(crate) fn analyse_lexed(
         }
         None => sql,
     };
-    let parsed = match tree::parse_tree(text) {
-        Ok(t) => t,
-        Err(e) if tree::over_a_limit(&e) => return failed(&[ReasonCode::TooComplex]),
-        Err(_) => return failed(&[ReasonCode::ParseError]),
+    let blanked_bom = sql.starts_with('\u{feff}');
+    let (parsed, toks, fp) = match tree::analyse(text) {
+        Ok(a) => (a.tree, a.tokens.ok(), a.fingerprint),
+        Err(e) => (Err(e), None, None),
     };
-    let toks = tree::scan_tokens(text).ok();
+    // `sql` with a byte-order mark is a syntax error to libpg_query: no fingerprint (as before).
+    let fp = ParsedFingerprint::Parsed(if blanked_bom { None } else { fp });
+    let parsed = match parsed {
+        Ok(t) => t,
+        Err(e) if tree::over_a_limit(&e) => return (failed(&[ReasonCode::TooComplex]), fp),
+        Err(_) => return (failed(&[ReasonCode::ParseError]), fp),
+    };
     let agree = toks
         .as_deref()
         .is_some_and(|t| statements_agree(&parsed, items, text, t));
@@ -602,10 +636,10 @@ pub(crate) fn analyse_lexed(
         if ctx.expect == Expect::SingleStatement && parsed.stmts.len() > 1 {
             codes.push(ReasonCode::MultiStatement);
         }
-        return failed(&codes);
+        return (failed(&codes), fp);
     }
     let Some(table) = table() else {
-        return failed(&[ReasonCode::EffectsUnknown]);
+        return (failed(&[ReasonCode::EffectsUnknown]), fp);
     };
     let mut doubts = Vec::new();
     if !toks
@@ -626,7 +660,7 @@ pub(crate) fn analyse_lexed(
     let taints =
         EffectSet::UNKNOWN | EffectSet::ROUTINE_CALL | EffectSet::DDL | EffectSet::DDL_TEMP;
     let mut stale = false;
-    items
+    let reports = items
         .iter()
         .zip(&parsed.stmts)
         .map(|(range, raw)| {
@@ -640,7 +674,8 @@ pub(crate) fn analyse_lexed(
             stale |= changes_context || r.effects.intersects(taints);
             r
         })
-        .collect()
+        .collect();
+    (reports, fp)
 }
 
 /// A report that proves nothing: `Unknown`, `UNKNOWN`, with `codes`.

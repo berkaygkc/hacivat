@@ -6,8 +6,12 @@ never shipped, and not checked by the root `deny.toml`. `libfuzzer-sys` is
 
 The five targets under `fuzz_targets/` (`lex_lossless`, `relex_equivalence`, `split_items`,
 `params_rewrite`, `classify_no_panic`) are declared as `[[bin]]` rows in `Cargo.toml` by Task
-1a (fix round 1) with stub bodies that accept every input; Task 20 writes the bodies and edits
-no manifest.
+1a (fix round 1); Task 20 wrote their bodies (no manifest edit). Each states its property in
+its header and names the seeded test that runs the same property in a PR (R-M3-80).
+`relex_equivalence` includes the shared edit generator
+`crates/sql/sql-lexer/tests/support/edits.rs` by path. Good seeds: the files of
+`crates/sql/sql-testkit/corpus/read/` and `corpus/fixtures/` (the nightly job copies them), and
+the review inputs of `corpus/fuzz/classifier_seeds.toml`.
 
 ## Patches and the lockfile (P-M3b-15)
 
@@ -24,5 +28,9 @@ CI builds with `--locked` and checks that `git status --porcelain third_party` i
 ```sh
 cd fuzz
 cargo metadata --locked --format-version 1 > /dev/null   # resolves pg_query to ../third_party
-cargo +nightly fuzz run <target>                          # once Task 20 adds targets
+cargo +nightly fuzz run <target> corpus/<target> -- -max_total_time=600
 ```
+
+Without nightly, `cargo build --release --locked --bins` here builds the same targets with
+libFuzzer's driver but no coverage instrumentation: a random-input smoke run only. Point
+`-artifact_prefix=` outside the repository.
