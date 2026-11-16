@@ -121,6 +121,11 @@ fn glyph(msg: &LogMsg) -> (IconName, bool) {
         LogMsg::NoticesDropped { .. } => (IconName::Ellipsis, false),
         LogMsg::ClosedEarly { .. } => (IconName::Ban, false),
         LogMsg::RunAsOneRolledBack | LogMsg::RunAsOneTxFailed => (IconName::Info, false),
+        // ## m3b-t19-confirm-tx (merge reconciliation): the transaction ended with a failed
+        // statement — warning ink, as the user must check what happened to earlier work.
+        LogMsg::TxRolledBackByServer | LogMsg::TxEndedByStatement => {
+            (IconName::TriangleAlert, true)
+        }
     }
 }
 
