@@ -292,6 +292,15 @@ pub enum SessionEvent {
     /// The liveness supervisor closed the session after its idle threshold (B18); sent just
     /// before it publishes `Disconnected`, so a close by anyone else is never taken for one.
     IdleDisconnected,
+    // ## m3b-t23-escalation (named exception)
+    /// The cancel or the terminate of request `req` failed (its escalation's reply is
+    /// `CancelOutcome::Failed`); `server` is the server's own error when the statement that
+    /// carried it (`pg_terminate_backend`, `KILL`) answered one, shown verbatim by the UI.
+    /// Sent before the failure's reply, so a caller that got the reply finds it already queued.
+    CancelFailed {
+        req: u64,
+        server: Option<ServerMessage>,
+    },
 }
 
 /// What a handle sends its actor.

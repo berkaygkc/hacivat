@@ -149,6 +149,12 @@ fn glyph(msg: &LogMsg) -> (IconName, bool) {
         }
         // ## m3b-t22-tx-ui (named exception): the read-only skip of a startup script.
         LogMsg::StartupScriptSkipped => (IconName::Lock, false),
+        // ## m3b-t23-escalation (named exception): the escalation's and the error bar's lines
+        // (design/m3b-safe surface 6: octagon-x, unplug).
+        LogMsg::Terminated { .. } => (IconName::OctagonX, false),
+        LogMsg::TerminateFailed => (IconName::OctagonX, true),
+        LogMsg::Disconnected { .. } => (IconName::Unplug, false),
+        LogMsg::RunStopped { .. } | LogMsg::RolledBackContinue { .. } => (IconName::Info, false),
     }
 }
 

@@ -1544,6 +1544,12 @@ impl Render for ConsoleHost {
                         window,
                     )),
             )
+            // ## m3b-t23-escalation (named exception): the error-policy bar at the foot of the
+            // editor tile, above the seam to the results (design/m3b-safe surface 7).
+            .children(
+                self.console()
+                    .and_then(|c| crate::exec_ui::error_bar::render(c, cx)),
+            )
             .into_any_element()
     }
 }

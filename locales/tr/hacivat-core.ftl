@@ -605,3 +605,20 @@ exec-startup-script-skipped-read-only = Bağlantının başlangıç betiği çal
 
 # Review: PO
 exec-deny-classifier = Gönderilmedi: bu konsol salt okunur ve Hacivat ifadenin yalnızca okuduğunu doğrulayamadı.
+
+## m3b-t23-escalation
+
+# Review: PO
+exec-terminated = Oturum sunucuda sonlandırıldı; açık işlemi ({ $n } ifade) geri alındı.
+# Review: PO
+exec-terminated-no-tx = Oturum sunucuda sonlandırıldı.
+# Review: PO
+exec-terminate-failed = Oturum sunucuda sonlandırılamadı.
+# Review: PO
+exec-disconnected = { $name } bağlantısı kesildi. İfade sunucuda hâlâ çalışıyor olabilir.
+# Review: PO
+exec-disconnected-local = { $name } bağlantısı kesildi. SQLite, bağlantı kapanınca ifadeyi durdurdu.
+# Review: PO
+exec-run-stopped = { $i }. ifadede durduruldu: Durdur'u seçtiniz.
+# Review: PO
+exec-run-rolled-back-continue = İşlem geri alındı; { $i }. ifadeden devam ediliyor.

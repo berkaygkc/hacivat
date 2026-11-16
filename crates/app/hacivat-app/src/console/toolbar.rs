@@ -285,18 +285,28 @@ fn run_button(model: &ToolbarModel, actions: &ToolbarActions, cx: &App) -> AnyEl
     let disabled = match model.run {
         RunUx::Idle => !model.run_enabled,
         RunUx::Running(_) => false,
-        // Stop is disabled until the server answers.
-        RunUx::Cancelling => true,
+        // ## m3b-t23-escalation (named exception; design/m3b-safe ruling 29): Stop stays
+        // enabled while cancelling: its second press opens the escalation dialog.
+        RunUx::Cancelling => false,
     };
     let on_click = match model.run {
         RunUx::Idle => actions.run.clone(),
         _ => actions.stop.clone(),
     };
+    // ## m3b-t23-escalation (named exception, fix round 1, m7)
+    let stops = model.run != RunUx::Idle;
     let mut button = Button::new("console-run", label)
         .kind(kind)
         .on_raised(true)
         .disabled(disabled)
-        .on_click(move |_, window, cx| on_click(window, cx));
+        // ## m3b-t23-escalation (named exception, fix round 1, m7): the second click of a
+        // double-click on Stop is never the second press that opens the escalation dialog.
+        .on_click(move |event, window, cx| {
+            if stops && event.click_count() > 1 {
+                return;
+            }
+            on_click(window, cx)
+        });
     if let Some(icon) = icon {
         button = button.icon(icon);
     }

@@ -107,8 +107,8 @@ use std::time::{Instant, SystemTime};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use hacivat_driver::{
-    CancelHandle, ExecOpts, ExecSummary, Phase, RawConn, RawError, RawErrorKind, TxStatus,
-    carries_secret, classify,
+    CancelHandle, ExecOpts, ExecSummary, Phase, RawConn, RawError, RawErrorKind, ServerMessage,
+    TxStatus, carries_secret, classify,
 };
 use hacivat_proto::{AccessLabel, DbmsKind, ErrClass};
 use tokio::runtime::Handle;
@@ -1018,6 +1018,10 @@ impl Core {
     /// `autocommit = 0` (after the script, as on a reconnect; fix round 1, review I3d): `Err`
     /// with the class that breaks the session. The script's text is never logged.
     async fn connect_steps(&mut self, session: SessionId) -> Result<(), ErrClass> {
+        // ## m3b-t23-escalation (named exception, fix round 1, I4; carry T22 I4): a zone a
+        // server refused before is not why this connect fails; `refuse` notes it again only
+        // when this connect's own zone step is refused.
+        self.forget_zone_refusal();
         if let Some(script) = self.profile.startup_script.as_deref() {
             if self.read_only {
                 tracing::info!(
@@ -1061,6 +1065,14 @@ impl Core {
         }
         self.follow_autocommit(session);
         Ok(())
+    }
+
+    // ## m3b-t23-escalation (named exception, carry T22 I4)
+    /// Forgets the profile's refused-zone note ([`SessionZone::clear_server_refusal`]).
+    fn forget_zone_refusal(&self) {
+        if let Some(zone) = &self.time_zone {
+            zone.clear_server_refusal();
+        }
     }
 
     /// Sends the steps of `plan` that `want` picks, in plan order (fix round 1, review I3).
@@ -1621,6 +1633,11 @@ async fn connect_steps(core: &mut Core, ctl: &mut Ctl) -> bool {
     let manual_mysql =
         !core.read_only && core.tx.mode == TxMode::Manual && family(core.kind) == Family::MySql;
     if core.live.is_none() || !(has_env || manual_mysql || core.profile.startup_script.is_some()) {
+        // ## m3b-t23-escalation (named exception, carry T22 I4): connected, nothing to send
+        // (a refused zone is no longer sent): it is no longer why the profile is down.
+        if core.live.is_some() {
+            core.forget_zone_refusal();
+        }
         return true;
     }
     let before = (core.tx.clone(), core.schema.clone());
@@ -2395,7 +2412,8 @@ async fn run_one(core: &mut Core, ctl: &mut Ctl, job: Queued) -> Flow {
                     }
                 },
                 joined = join_slot(&mut ladder.mechanism), if ladder.mechanism.is_some() => {
-                    ladder.mechanism_done(joined);
+                    // ## m3b-t23-escalation (named exception): with the server's text.
+                    ladder.mechanism_done(ctl, joined);
                 }
                 () = sleep_opt(prewarm), if prewarm.is_some() => {
                     prewarm_at = None;
@@ -2595,6 +2613,19 @@ impl<T> Future for AbortOnDrop<T> {
     }
 }
 
+// ## m3b-t23-escalation (named exception)
+/// What a cancel or kill in flight ends with: nothing, or its class and the server's own error
+/// (when the statement that carried it answered one).
+type Mechanism = Result<(), (ErrClass, Option<ServerMessage>)>;
+
+/// A side statement's or a protocol cancel's error, classified, with the server's text.
+fn side_failure(kind: DbmsKind, e: &RawError) -> (ErrClass, Option<ServerMessage>) {
+    (
+        classify(kind, Phase::PostConnect, e).class,
+        e.server.clone(),
+    )
+}
+
 /// Waits for the task in `slot`; never, when there is none.
 async fn join_slot<T>(slot: &mut Option<JoinHandle<T>>) -> Result<T, JoinError> {
     match slot {
@@ -2629,7 +2660,8 @@ struct Ladder {
     waiters: Vec<(tokio::time::Instant, oneshot::Sender<CancelOutcome>)>,
     failed: Option<ErrClass>,
     /// The cancel or kill in flight.
-    mechanism: Option<JoinHandle<Result<(), ErrClass>>>,
+    // ## m3b-t23-escalation (named exception): a failure carries the server's own error.
+    mechanism: Option<JoinHandle<Mechanism>>,
     // ## m3a-t18-session-run
     /// The running request's stop signal: a cancel sets it.
     stop: Option<Arc<StopSignal>>,
@@ -2698,6 +2730,9 @@ impl Ladder {
                 reply,
             } if self.is_mine(seq) => {
                 self.climb(ctl, Some(CancelState::Terminating));
+                // ## m3b-t23-escalation (named exception, fix round 1, I1): an earlier failure
+                // (the cancel's) never answers the terminate; it reports its own outcome.
+                self.failed = None;
                 self.send_terminate();
                 self.wait(reply);
             }
@@ -2769,11 +2804,7 @@ impl Ladder {
         } else if let Some(handle) = &self.handle {
             let kind = self.kind;
             let cancel = handle.cancel();
-            self.spawn(async move {
-                cancel
-                    .await
-                    .map_err(|e| classify(kind, Phase::PostConnect, &e).class)
-            });
+            self.spawn(async move { cancel.await.map_err(|e| side_failure(kind, &e)) });
         } else {
             self.fail(ErrClass::Internal);
         }
@@ -2795,19 +2826,19 @@ impl Ladder {
         let side = self.side.clone();
         let kind = self.kind;
         self.spawn(async move {
-            let mut live = side.open_side().await.map_err(|e| e.class)?;
+            let mut live = side.open_side().await.map_err(|e| (e.class, None))?;
             let ran = live.raw().batch(&sql).await;
             live.close().await;
-            ran.map_err(|e| classify(kind, Phase::PostConnect, &e).class)
+            ran.map_err(|e| side_failure(kind, &e))
         });
     }
 
     /// Starts `f` after the mechanism already in flight, if any (one slot, in order).
-    fn spawn(&mut self, f: impl Future<Output = Result<(), ErrClass>> + Send + 'static) {
+    fn spawn(&mut self, f: impl Future<Output = Mechanism> + Send + 'static) {
         let before = self.mechanism.take().map(AbortOnDrop);
         self.mechanism = Some(tokio::spawn(async move {
             let first = match before {
-                Some(task) => task.await.unwrap_or(Err(ErrClass::Internal)),
+                Some(task) => task.await.unwrap_or(Err((ErrClass::Internal, None))),
                 None => Ok(()),
             };
             let second = f.await;
@@ -2815,13 +2846,21 @@ impl Ladder {
         }));
     }
 
-    fn mechanism_done(&mut self, joined: Result<Result<(), ErrClass>, JoinError>) {
+    // ## m3b-t23-escalation (named exception): a failure is told with the server's text
+    // (`SessionEvent::CancelFailed`) before its reply.
+    fn mechanism_done(&mut self, ctl: &Ctl, joined: Result<Mechanism, JoinError>) {
         self.mechanism = None;
-        match joined {
-            Ok(Ok(())) => {}
-            Ok(Err(class)) => self.fail(class),
-            Err(_) => self.fail(ErrClass::Internal),
-        }
+        let failed = match joined {
+            Ok(Ok(())) => return,
+            Ok(Err(failed)) => failed,
+            Err(_) => (ErrClass::Internal, None),
+        };
+        let (class, server) = failed;
+        ctl.emit(SessionEvent::CancelFailed {
+            req: self.seq,
+            server,
+        });
+        self.fail(class);
     }
 
     fn fail(&mut self, class: ErrClass) {

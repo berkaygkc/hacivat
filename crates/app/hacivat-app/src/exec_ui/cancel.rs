@@ -15,7 +15,7 @@ use hacivat_ui_core::gpui_surface::{App, Window};
 use hacivat_ui_editor::FocusedEditor;
 
 use crate::console::{ConsoleId, Consoles};
-use crate::exec_ui::{console_exec, marks};
+use crate::exec_ui::{console_exec, escalation, marks};
 
 /// The key context of the console commands: the console tab's (one constant, Fix round 1).
 pub(crate) const CONSOLE: &str = crate::shell::tabs::CONSOLE_CONTEXT;
@@ -48,6 +48,9 @@ fn running_request(console: ConsoleId, cx: &App) -> Option<u64> {
     let busy = match session.state().borrow().state {
         // Request 0 is an idle release; the SQL-context probe is Hacivat's own.
         SessionState::Busy { req, .. } if req != 0 && Some(req) != probe => Some(req),
+        // ## m3b-t23-escalation (named exception): a request being cancelled (a fetch whose
+        // run ended) is still the one a second press escalates.
+        SessionState::Cancelling { req, .. } if req != 0 && Some(req) != probe => Some(req),
         _ => None,
     };
     busy.or_else(|| {
@@ -71,6 +74,9 @@ pub fn cancel(console: ConsoleId, cx: &mut App) -> bool {
     let Some(session) = Consoles::get(cx, console).and_then(|s| s.session.clone()) else {
         return false;
     };
+    // ## m3b-t23-escalation (named exception): the cancel's slow-cancel toast and end are
+    // followed from before it goes out.
+    escalation::follow(console, seq, &session, cx);
     marks::note_cancel(console, cx);
     let outcome = session.cancel(seq);
     cx.spawn(async move |_| {
@@ -80,8 +86,15 @@ pub fn cancel(console: ConsoleId, cx: &mut App) -> bool {
     true
 }
 
-fn run_cancel(_window: &mut Window, cx: &mut App) {
+fn run_cancel(window: &mut Window, cx: &mut App) {
     if let Some(console) = focused_console(cx) {
+        // ## m3b-t23-escalation (named exception): a second press while the request is being
+        // cancelled opens the escalation dialog (HV-EXEC-09 step 5); it never escalates itself.
+        if running_request(console, cx).is_some_and(|req| escalation::cancelling(console, req, cx))
+        {
+            escalation::open_dialog(console, window, cx);
+            return;
+        }
         cancel(console, cx);
     }
 }

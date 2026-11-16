@@ -376,6 +376,15 @@ impl SessionZone {
             .load(std::sync::atomic::Ordering::SeqCst)
             .then_some(self.name.as_str())
     }
+
+    // ## m3b-t23-escalation (named exception, carry T22 I4)
+    /// Forgets that a server refused the zone (it stays unsent): the refusal is no longer
+    /// why the profile's connection is down. A session calls it when its connect steps
+    /// succeed, and when its startup script fails (a later cause the UI must name instead).
+    pub fn clear_server_refusal(&self) {
+        self.by_server
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// An IANA-shaped zone name (`Area/Location`), as the settings check it: 1 to 64 characters

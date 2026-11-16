@@ -2166,3 +2166,66 @@ hv-results-tabs-more-tip = { $n } sonuç sekmesi daha
 hv-results-count-rerun = Satırları saymak için ifadeyi yeniden çalıştırın.
 # Review: PO
 hv-results-count-context = Sayılmadı: konsolun SQL ayarları henüz bilinmiyor.
+
+## m3b-t23-escalation
+
+# Review: PO
+hv-cancel-slow-title = İptal uzun sürüyor
+# Review: PO
+hv-cancel-slow-body = { $duration } geçti; sunucu { $name } üzerindeki ifadeyi hâlâ durdurmadı.
+# Review: PO
+hv-cancel-options = Seçenekleri göster…
+# Review: PO
+hv-cancel-dlg-title = İfade iptale yanıt vermiyor
+# Review: PO
+hv-cancel-dlg-body = { $duration } süredir iptal ediliyor. Siz başka bir şey seçmedikçe Hacivat beklemeyi sürdürür.
+# Review: PO
+hv-cancel-keep-waiting = Beklemeyi sürdür
+# Review: PO
+hv-cancel-terminate = Sunucuda sonlandır
+# Review: PO
+hv-cancel-terminate-line = “Sunucuda sonlandır” bu oturumu sunucuda { $fn } ile kapatır.
+# Review: PO
+hv-cancel-own-tx = Bu konsolun açık işlemi ({ $n } ifade) geri alınır.
+# Review: PO
+hv-cancel-own-tx-maybe = Bu konsolun açık bir işlemi olabilir; öyleyse geri alınır.
+# Review: PO
+hv-cancel-own-tx-hacivat = Hacivat'ın bu konsolda açtığı işlem (yanıtınızı bekleyen bir değişiklik ya da açık bir imleç) geri alınır.
+# Review: PO
+hv-cancel-other-tx-hacivat = { $console } konsolunda da Hacivat'ın açtığı bir işlem var; sunucu onu geri alır.
+# Review: PO
+hv-cancel-disconnect = Bağlantıyı kes
+# Review: PO
+hv-cancel-disconnect-line-all = “Bağlantıyı kes”, { $name } için buradaki tüm bağlantıları kapatır; ifade sunucuda çalışmayı sürdürebilir.
+# Review: PO
+hv-cancel-disconnect-line-one = “Bağlantıyı kes” yalnızca bu konsolun oturumunu ({ $console }) kapatır; ifade sunucuda çalışmayı sürdürebilir.
+# Review: PO
+hv-cancel-disconnect-line-local = “Bağlantıyı kes”, bu bağlantının konsollarının paylaştığı { $name } dosyası bağlantısını kapatır; SQLite, bağlantı kapanınca ifadeyi durdurur.
+# Review: PO
+hv-cancel-other-tx = { $console } konsolunda da açık bir işlem var ({ $n } ifade); sunucu onu geri alır.
+# Review: PO
+hv-cancel-other-tx-maybe = { $console } konsolunun da açık bir işlemi olabilir; öyleyse sunucu onu geri alır.
+# Review: PO
+hv-cancel-terminate-failed = Oturum sonlandırılamadı. Hacivat iptali beklemeyi sürdürüyor.
+# Review: PO
+hv-editor-mark-escalated = iptal yanıtlanmadı · { $duration }
+# Review: PO
+hv-errbar-failed = { $i }. ifade başarısız oldu ({ $n } ifadeden)
+# Review: PO
+hv-errbar-aborted = { $i }. ifade başarısız oldu ({ $n } ifadeden); işlem de başarısız oldu
+# Review: PO
+hv-errbar-waiting = { $n } ifade daha bekliyor
+# Review: PO
+hv-errbar-retry = Yeniden dene
+# Review: PO
+hv-errbar-ignore = Yok say
+# Review: PO
+hv-errbar-ignore-all = Tümünü yok say
+# Review: PO
+hv-errbar-stop = Durdur
+# Review: PO
+hv-errbar-rollback-continue = Geri al ve devam et
+# Review: PO
+hv-errbar-rollback-continue-tip = Açık işleminizi ({ $n } ifade) geri alır, sonra { $next }. ifadeden yeni bir işlemde devam eder.
+# Review: PO
+hv-errbar-rollback-continue-tip-auto = Açık işleminizi ({ $n } ifade) geri alır, sonra { $next }. ifadeden devam eder; her ifade çalışınca commit edilir.

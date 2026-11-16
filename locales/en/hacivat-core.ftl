@@ -945,3 +945,30 @@ exec-startup-script-skipped-read-only = The connection's startup script was not 
 # confirm that it only reads (or found that it doesn't). One sentence for every classifier
 # denial (T1c review M2).
 exec-deny-classifier = Not sent: this console is read-only, and Hacivat couldn't confirm that the statement only reads.
+
+## m3b-t23-escalation
+
+# Terminate on server ended the session (design/m3b-safe surface 6).
+# Variables:
+#   $n (Number) - statements in the user's open transaction it rolled back, e.g. 3.
+exec-terminated = { $n ->
+        [one] Session terminated on the server; its open transaction ({ $n } statement) was rolled back.
+       *[other] Session terminated on the server; its open transaction ({ $n } statements) was rolled back.
+    }
+# As exec-terminated when no user transaction was open.
+exec-terminated-no-tx = Session terminated on the server.
+exec-terminate-failed = Couldn't terminate the session on the server.
+# Variables:
+#   $name (String) - the connection's name, e.g. "orders-dev".
+exec-disconnected = Disconnected { $name }. The statement may still be running on the server.
+# As exec-disconnected for a SQLite file: the statement stopped with its connection (fix round 1).
+# Variables:
+#   $name (String) - the connection's name, e.g. "app-local".
+exec-disconnected-local = Disconnected { $name }. SQLite stopped the statement when its connection closed.
+# The user answered Stop to the error bar (surface 7).
+# Variables:
+#   $i (String) - the failed statement's number in the run, e.g. "2".
+exec-run-stopped = Stopped at statement { $i }: you chose Stop.
+# Variables:
+#   $i (String) - the number of the statement that runs next, e.g. "4".
+exec-run-rolled-back-continue = Transaction rolled back; continuing with statement { $i }.

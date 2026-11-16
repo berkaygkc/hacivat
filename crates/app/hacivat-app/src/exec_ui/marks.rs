@@ -262,6 +262,12 @@ fn apply(t: &mut Tracker, st: &RunStatus, cx: &mut App) {
         let started = seen.started.unwrap_or(now);
         let elapsed = now.saturating_duration_since(started);
         let (state, label, eol) = mark_of(&entry.status, n, started, elapsed, cancelling);
+        // ## m3b-t23-escalation (named exception): a cancel not answered keeps its hourglass.
+        let escalated = crate::exec_ui::escalation::escalated_mark(t.console, cx);
+        let (state, label, eol) = match escalated.filter(|_| cancelling) {
+            Some((state, eol)) => (state, eol.clone(), eol),
+            None => (state, label, eol),
+        };
         let short = short_of(&entry.status, started, elapsed, cancelling);
         let announce = a11y::exec_announcement(cx, n, &state);
         editor.update(cx, |e, cx| {
