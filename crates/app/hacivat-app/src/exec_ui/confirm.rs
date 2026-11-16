@@ -11,9 +11,7 @@ use tokio::sync::oneshot;
 use hacivat_ui_core::gpui_surface::App;
 
 use super::answered;
-use super::pending_core::{
-    CommitAnswer, CommitQuestion, ConfirmAnswer, ConfirmPort, ConfirmQuestion,
-};
+use hacivat_exec::{CommitAnswer, CommitQuestion, ConfirmAnswer, ConfirmPort, ConfirmQuestion};
 
 /// Asks `question`; any close (Escape, window close, ⌘W, quit) answers `Cancel`.
 /// STUB: answers `Cancel` at once.

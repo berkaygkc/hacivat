@@ -20,15 +20,13 @@ pub mod chooser;
 pub mod close_prompt;
 // ## m3b-t01b-seams: the M3b run UI (stubs that draw nothing and answer the safe value):
 // confirmation and confirm-in-transaction (Task 21), cancel escalation and the error-policy bar
-// (Task 23), the parameter prompt and the run-policy popover (Task 24). `pending_core` is the
-// placeholder of Task 1c's types, deleted at that merge.
+// (Task 23), the parameter prompt and the run-policy popover (Task 24). Task 1c's types come
+// from `hacivat_exec` (ruling I2).
 pub mod commit_prompt;
 pub mod confirm;
 pub mod error_bar;
 pub mod escalation;
 pub mod params_prompt;
-#[doc(hidden)]
-pub mod pending_core;
 pub mod policy_popover;
 // ## m3a-t33-exec-ui (fix round 1): the SQL context, known or unknown.
 pub mod context;

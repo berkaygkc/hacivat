@@ -12,7 +12,7 @@ use hacivat_ui_core::gpui_surface::App;
 use hacivat_values::BindValue;
 
 use super::answered;
-use super::pending_core::ParamPrompt;
+use hacivat_exec::ParamPrompt;
 
 /// The values the user gave, by parameter name; `None` when the prompt was cancelled.
 pub type ParamValues = Option<Vec<(Arc<str>, BindValue)>>;

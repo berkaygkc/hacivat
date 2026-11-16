@@ -14,16 +14,16 @@ use gpui::{AppContext as _, AssetSource as _, Focusable as _, TestAppContext};
 use hacivat_app::console::{
     ConsoleId, ConsoleState, Consoles, find_bar, idle_toast, tx_badge, tx_chip,
 };
-use hacivat_app::exec_ui::pending_core::{
-    CommitAnswer, CommitQuestion, ConfirmAnswer, ConfirmPort as _, ConfirmQuestion, GateReason,
-    ParamPrompt, RunChoice,
-};
 use hacivat_app::exec_ui::{
     AppConfirmPort, ErrorAsk, commit_prompt, confirm, error_bar, fetch_policy_for, params_prompt,
     policy_popover,
 };
 use hacivat_app::results::view::hosts;
 use hacivat_app::results::{ConsoleResults, RESULTS_CONTEXT, count};
+use hacivat_exec::{
+    CommitAnswer, CommitQuestion, ConfirmAnswer, ConfirmPort as _, ConfirmQuestion, GateReason,
+    ParamPrompt, RunChoice,
+};
 use hacivat_exec::{ResultTab, SessionLog, TabKey};
 use hacivat_results::{
     CloseReason, Completeness, FetchControl, FetchPolicy, ResultId, ResultStore, StoreSource,
@@ -338,6 +338,7 @@ fn commit_question() -> CommitQuestion {
             run: RunId(1),
             ordinal: 0,
         },
+        question: 1,
         affected: Some(3),
         deadline: Instant::now(),
         savepoint: true,
@@ -369,6 +370,7 @@ fn error_bar_and_params_stubs_answer_stop_and_cancel(cx: &mut TestAppContext) {
             run: RunId(1),
             ordinal: 0,
         },
+        question: 1,
         error: ExecError::of(ExecErrorKind::Internal),
         rollback_and_continue: false,
     };

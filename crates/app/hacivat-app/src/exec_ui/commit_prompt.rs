@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 use hacivat_ui_core::gpui_surface::App;
 
 use super::answered;
-use super::pending_core::{CommitAnswer, CommitQuestion};
+use hacivat_exec::{CommitAnswer, CommitQuestion};
 
 /// Asks `question`; any close answers `RollBack`. STUB: answers `RollBack` at once.
 pub fn open(question: CommitQuestion, cx: &mut App) -> oneshot::Receiver<CommitAnswer> {
