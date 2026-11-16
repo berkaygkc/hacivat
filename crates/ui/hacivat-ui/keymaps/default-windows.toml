@@ -469,3 +469,131 @@ context = "Grid"
 chord = "ctrl-f2"
 command = "exec.cancel"
 context = "Console"
+
+## m3b-t01b-seams
+# M3b and M3c (Task 1b; P-M3b-21): every new chord of both milestones. Each command is
+# registered since Task 1b with a stub body (a no-op) until its task fills it: multi-cursor (31),
+# folding (32, palette-only), find (33, 37), lines and history recall (34), grid model (35), views
+# and the value viewer (38), the grid menu (39), result tabs (25), the history dialog (27).
+# `editor.find` and `grid.find` stay unbound until Tasks 33 and 37 bind them (controller ruling
+# R5): a stub must not take the explorer filter's chord (PO Q10 shadowing) before its find bar
+# exists. `results.next_tab`/`prev_tab` live in the `Results` context (the
+# results tile's root); `ctrl-tab` stays Workspace tab switching. A second `exec.cancel` while
+# cancelling escalates (Task 23): same chord, no new row. Select all occurrences is
+# `ctrl-shift-l`: DataGrip's `ctrl-alt-shift-j` types `<` through AltGr on TR-F (the
+# datagrip preset keeps it as accepted shadowing; P-M3b-T1b-2).
+
+[[binding]]
+chord = "ctrl-alt-shift-up"
+command = "editor.add_caret_above"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-alt-shift-down"
+command = "editor.add_caret_below"
+context = "Editor"
+
+[[binding]]
+chord = "alt-j"
+command = "editor.select_next_occurrence"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-shift-l"
+command = "editor.select_all_occurrences"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-u"
+command = "editor.undo_selection"
+context = "Editor"
+
+[[binding]]
+chord = "f3"
+command = "editor.find_next"
+context = "Editor"
+
+[[binding]]
+chord = "shift-f3"
+command = "editor.find_prev"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-/"
+command = "editor.toggle_comment"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-d"
+command = "editor.duplicate_line"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-y"
+command = "editor.delete_line"
+context = "Editor"
+
+[[binding]]
+chord = "alt-shift-up"
+command = "editor.move_line_up"
+context = "Editor"
+
+[[binding]]
+chord = "alt-shift-down"
+command = "editor.move_line_down"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-alt-up"
+command = "editor.history_prev"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-alt-down"
+command = "editor.history_next"
+context = "Editor"
+
+[[binding]]
+chord = "ctrl-shift-space"
+command = "grid.select_column"
+context = "Grid"
+
+[[binding]]
+chord = "alt-shift-up"
+command = "grid.grow_selection"
+context = "Grid"
+
+[[binding]]
+chord = "alt-shift-down"
+command = "grid.shrink_selection"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-g"
+command = "grid.goto_row"
+context = "Grid"
+
+[[binding]]
+chord = "shift-enter"
+command = "grid.open_value"
+context = "Grid"
+
+[[binding]]
+chord = "shift-f10"
+command = "grid.context_menu"
+context = "Grid"
+
+[[binding]]
+chord = "ctrl-pagedown"
+command = "results.next_tab"
+context = "Results"
+
+[[binding]]
+chord = "ctrl-pageup"
+command = "results.prev_tab"
+context = "Results"
+
+[[binding]]
+chord = "ctrl-shift-h"
+command = "history.open"
+context = "Workspace"

@@ -27,12 +27,16 @@
 //! quality as soon as the velocity is back under the threshold: one frame after the scroll
 //! slows.
 
+// ## m3b-t01b-seams: Task 40's AccessKit rows (`a11y_rows`) and Task 38's axis swap
+// (`transpose`), both called from `grid.rs` already.
+pub mod a11y_rows;
 mod autosize;
 mod grid;
 pub mod layers;
 mod pointer;
 pub mod scrollbar;
 pub mod text_cache;
+mod transpose;
 pub mod truncate;
 
 use hacivat_ui_core::gpui_surface::{Bounds, Pixels, SharedString};

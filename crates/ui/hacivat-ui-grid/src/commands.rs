@@ -8,7 +8,7 @@ use crate::model::Dir;
 use crate::view::GridCommand;
 
 /// Every grid command id, in palette order, and its command.
-pub static GRID_COMMANDS: [(&str, GridCommand); 26] = [
+pub static GRID_COMMANDS: [(&str, GridCommand); 35] = [
     ("grid.move_left", mv(Dir::Left, false)),
     ("grid.move_right", mv(Dir::Right, false)),
     ("grid.move_up", mv(Dir::Up, false)),
@@ -43,7 +43,7 @@ pub static GRID_COMMANDS: [(&str, GridCommand); 26] = [
     ("grid.prev_cell", GridCommand::NextCell { back: true }),
     ("grid.select_all", GridCommand::SelectAll),
     ("grid.select_row", GridCommand::SelectRow),
-    // Palette-only in M3a (R-M3-38).
+    // Palette-only in M3a (R-M3-38); bound since M3b Task 1b (P25).
     ("grid.select_column", GridCommand::SelectColumn),
     ("grid.copy", GridCommand::Copy { headers: false }),
     (
@@ -51,7 +51,40 @@ pub static GRID_COMMANDS: [(&str, GridCommand); 26] = [
         GridCommand::Copy { headers: true },
     ),
     ("grid.escape", GridCommand::Escape),
+    // ## m3b-t01b-seams: the M3b rows. The sort and view rows (`grid.sort_asc`, `sort_desc`,
+    // `clear_sort`, `view_table`, `view_transposed`, `view_text`, `toggle_record`) are not
+    // grid commands: the app registers them over its results (`results::{sort, views}`).
+    ("grid.grow_selection", GridCommand::GrowSelection),
+    ("grid.shrink_selection", GridCommand::ShrinkSelection),
+    ("grid.find", GridCommand::Find),
+    ("grid.goto_row", GridCommand::GotoRow),
+    ("grid.open_value", GridCommand::OpenValue),
+    ("grid.context_menu", GridCommand::ContextMenu),
+    ("grid.auto_fit", GridCommand::AutoFit),
+    ("grid.freeze", GridCommand::Freeze),
+    ("grid.unfreeze", GridCommand::Unfreeze),
 ];
+
+// ## m3b-t01b-seams (fix round 2, I3)
+/// The grid commands that do nothing until their task fills them (Tasks 35, 37, 38, 39): the
+/// app registers them disabled, so the palette does not list them and their keys pass through.
+/// The filling task removes its ids (a named exception).
+pub static STUB_COMMANDS: [&str; 9] = [
+    "grid.grow_selection",
+    "grid.shrink_selection",
+    "grid.find",
+    "grid.goto_row",
+    "grid.open_value",
+    "grid.context_menu",
+    "grid.auto_fit",
+    "grid.freeze",
+    "grid.unfreeze",
+];
+
+/// Whether grid command `id` is a stub ([`STUB_COMMANDS`]).
+pub fn is_stub(id: &str) -> bool {
+    STUB_COMMANDS.contains(&id)
+}
 
 const fn mv(dir: Dir, extend: bool) -> GridCommand {
     GridCommand::Move { dir, extend }

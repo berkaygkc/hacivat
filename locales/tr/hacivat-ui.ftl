@@ -1820,3 +1820,90 @@ hv-tx-failed-by-stop = İfadeyi durdurmak { $name } üzerindeki işlemi başarı
 hv-exec-pending-read-only = Hiçbir şey gönderilmedi: bu konsol, açık işlemi sona erdiğinde salt okunur olur. Önce commit edin ya da geri alın.
 # Review: PO
 hv-exec-rerun-edited = İfade çalıştırıldıktan sonra düzenlendi. Düzenleyiciden çalıştırın.
+
+## m3b-t01b-seams
+
+# Review: PO
+hv-cmd-editor-add-caret-above = Üste imleç ekle
+# Review: PO
+hv-cmd-editor-add-caret-below = Alta imleç ekle
+# Review: PO
+hv-cmd-editor-select-next-occurrence = Sonraki eşleşmeyi seç
+# Review: PO
+hv-cmd-editor-select-all-occurrences = Tüm eşleşmeleri seç
+# Review: PO
+hv-cmd-editor-split-selection-into-lines = Seçimi satırlara böl
+# Review: PO
+hv-cmd-editor-undo-selection = Seçim değişikliğini geri al
+# Review: PO
+hv-cmd-editor-redo-selection = Seçim değişikliğini yinele
+# Review: PO
+hv-cmd-editor-fold = Katla
+# Review: PO
+hv-cmd-editor-unfold = Katlamayı aç
+# Review: PO
+hv-cmd-editor-fold-all = Tümünü katla
+# Review: PO
+hv-cmd-editor-unfold-all = Tüm katlamaları aç
+# Review: PO
+hv-cmd-editor-find = Bul
+# Review: PO
+hv-cmd-editor-find-next = Sonrakini bul
+# Review: PO
+hv-cmd-editor-find-prev = Öncekini bul
+# Review: PO
+hv-cmd-editor-find-close = Bulmayı kapat
+# Review: PO
+hv-cmd-editor-toggle-comment = Yorum satırı yap veya kaldır
+# Review: PO
+hv-cmd-editor-duplicate-line = Satırı çoğalt
+# Review: PO
+hv-cmd-editor-delete-line = Satırı sil
+# Review: PO
+hv-cmd-editor-move-line-up = Satırı yukarı taşı
+# Review: PO
+hv-cmd-editor-move-line-down = Satırı aşağı taşı
+# Review: PO
+hv-cmd-editor-normalize-line-endings = Satır sonlarını eşitle
+# Review: PO
+hv-cmd-editor-history-prev = Geçmişten önceki ifade
+# Review: PO
+hv-cmd-editor-history-next = Geçmişten sonraki ifade
+# Review: PO
+hv-cmd-grid-grow-selection = Tablo: seçimi genişlet
+# Review: PO
+hv-cmd-grid-shrink-selection = Tablo: seçimi daralt
+# Review: PO
+hv-cmd-grid-find = Tablo: bul
+# Review: PO
+hv-cmd-grid-goto-row = Tablo: satıra git
+# Review: PO
+hv-cmd-grid-open-value = Tablo: değer görüntüleyiciyi aç
+# Review: PO
+hv-cmd-grid-context-menu = Tablo: menüyü göster
+# Review: PO
+hv-cmd-grid-auto-fit = Tablo: sütun genişliklerini sığdır
+# Review: PO
+hv-cmd-grid-freeze = Tablo: buraya kadar sütunları dondur
+# Review: PO
+hv-cmd-grid-unfreeze = Tablo: sütunları çöz
+# Review: PO
+hv-cmd-grid-sort-asc = Tablo: artan sırala
+# Review: PO
+hv-cmd-grid-sort-desc = Tablo: azalan sırala
+# Review: PO
+hv-cmd-grid-clear-sort = Tablo: sıralamayı kaldır
+# Review: PO
+hv-cmd-grid-view-table = Tablo: tablo görünümü
+# Review: PO
+hv-cmd-grid-view-transposed = Tablo: devrik görünüm
+# Review: PO
+hv-cmd-grid-view-text = Tablo: metin görünümü
+# Review: PO
+hv-cmd-grid-toggle-record = Tablo: kayıt görünümünü göster veya gizle
+# Review: PO
+hv-cmd-results-next-tab = Sonraki sonuç sekmesi
+# Review: PO
+hv-cmd-results-prev-tab = Önceki sonuç sekmesi
+# Review: PO
+hv-cmd-history-open = Sorgu geçmişini aç

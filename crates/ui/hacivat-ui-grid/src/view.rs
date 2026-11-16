@@ -23,14 +23,16 @@ use std::time::Duration;
 use hacivat_ui::text::{Label, TextFn, TextSource};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, AnyView, App, AppContext as _, Context, Div, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, ParentElement, Render, Role, ScrollEvent, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, Task, Window, div, px,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render, Role, ScrollEvent,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Task, Window, div, point, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
 use crate::element::{self, FrameLog, FrameStats, Geometry, PaintState};
-use crate::model::{self, ColumnLayout, KeyCtx, KeyOutcome, ScrollState, ViewMap};
-use crate::source::{ColId, ColumnSpec, GRID_CONTEXT, GridDataSource, ModelCell, RowCount};
+use crate::model::{self, ColumnLayout, KeyCtx, KeyOutcome, ScrollState, SortSpec, ViewMap};
+use crate::source::{
+    ColId, ColumnSpec, GRID_CONTEXT, GridDataSource, ModelCell, ModelRow, RowCount,
+};
 
 /// The grid's own text (the app passes Fluent text).
 #[derive(Clone)]
@@ -63,6 +65,10 @@ pub struct GridConfig {
     pub labels: GridLabels,
     /// Role `Grid` with this label (R-M3-32).
     pub a11y_label: TextFn,
+    // ## m3b-t01b-seams
+    /// Rows as columns (Task 38's Transposed view; `GridView::set_transposed` sets it, Task
+    /// 38's `element/transpose.rs` hook swaps the axes). Off: M3a.
+    pub transposed: bool,
 }
 
 impl std::fmt::Debug for GridConfig {
@@ -71,6 +77,7 @@ impl std::fmt::Debug for GridConfig {
             .field("row_height", &self.row_height)
             .field("zebra", &self.zebra)
             .field("auto_size", &self.auto_size)
+            .field("transposed", &self.transposed)
             .finish_non_exhaustive()
     }
 }
@@ -91,6 +98,18 @@ pub enum GridCommand {
     SelectColumn,
     Copy { headers: bool },
     Escape,
+    // ## m3b-t01b-seams: Task 35 fills grow/shrink, freeze/unfreeze and auto-fit (no-ops until
+    // then); Find, GotoRow, OpenValue and ContextMenu tell the host (`GridEvent`), which Tasks
+    // 37, 38 and 39 answer.
+    GrowSelection,
+    ShrinkSelection,
+    Find,
+    GotoRow,
+    OpenValue,
+    ContextMenu,
+    AutoFit,
+    Freeze,
+    Unfreeze,
 }
 
 /// What a grid tells its host.
@@ -115,6 +134,23 @@ pub enum GridEvent {
         col: ColId,
         width: f32,
     },
+    // ## m3b-t01b-seams
+    /// Sort by these keys (Task 36 sorts and publishes `ViewMap::Permuted`).
+    SortRequested(SortSpec),
+    /// `grid.find` (Task 37 opens the find bar).
+    FindRequested,
+    /// `grid.goto_row` (Task 37 opens the go-to field).
+    GotoRequested,
+    /// `grid.open_value` on the focus cell (Task 38 opens the value viewer).
+    ValueRequested(ModelCell),
+    /// `grid.context_menu` (Shift+F10: under the focus cell) or a right click (Task 39's menu).
+    ContextMenuRequested {
+        at: Point<Pixels>,
+        cell: Option<ModelCell>,
+        header: Option<ColId>,
+    },
+    /// The frozen column count changed (Task 35).
+    FrozenChanged(usize),
 }
 
 /// How long the visible region stays still before [`GridEvent::VisibleRegion`] fires.
@@ -177,6 +213,14 @@ pub struct GridView {
     visible: VisibleState,
     /// The label was read this many times (only while assistive technology is active).
     a11y_reads: u64,
+    // ## m3b-t01b-seams
+    /// The view map the host set (`set_view_map`); `None`: the identity over the loaded rows.
+    /// Until Task 35 the frame and the keys still build the identity themselves.
+    view_map: Option<ViewMap>,
+    /// The identity over the loaded rows, kept for [`GridView::view_map`] while no map is set.
+    identity_map: ViewMap,
+    /// The cells a find marks (Task 37), as model row and column.
+    pub(crate) highlights: Option<Rc<dyn Fn(ModelRow, ColId) -> bool>>,
 }
 
 impl std::fmt::Debug for GridView {
@@ -211,6 +255,9 @@ impl GridView {
             autosize,
             visible: VisibleState::default(),
             a11y_reads: 0,
+            view_map: None,
+            identity_map: ViewMap::identity(0),
+            highlights: None,
         }
     }
 
@@ -258,6 +305,10 @@ impl GridView {
 
     /// Runs `cmd`.
     pub fn dispatch(&mut self, cmd: GridCommand, window: &mut Window, cx: &mut Context<Self>) {
+        // ## m3b-t01b-seams: the M3b commands that only tell the host, and Task 35's no-ops.
+        if self.dispatch_m3b(cmd, cx) {
+            return;
+        }
         let map = ViewMap::identity(self.data.count.loaded);
         let ctx = KeyCtx {
             map: &map,
@@ -296,6 +347,107 @@ impl GridView {
                 Err(refusal) => cx.emit(GridEvent::CopyRefused(refusal)),
             },
         }
+    }
+
+    // ## m3b-t01b-seams
+    /// The M3b commands: `true` when `cmd` is one (handled here, never by the key model).
+    fn dispatch_m3b(&mut self, cmd: GridCommand, cx: &mut Context<Self>) -> bool {
+        match cmd {
+            GridCommand::Find => cx.emit(GridEvent::FindRequested),
+            GridCommand::GotoRow => cx.emit(GridEvent::GotoRequested),
+            GridCommand::OpenValue => {
+                if let Some(cell) = self.selection.focus() {
+                    cx.emit(GridEvent::ValueRequested(cell));
+                }
+            }
+            GridCommand::ContextMenu => {
+                let cell = self.selection.focus();
+                cx.emit(GridEvent::ContextMenuRequested {
+                    at: self.menu_point(cell),
+                    cell,
+                    header: None,
+                });
+            }
+            // Task 35.
+            GridCommand::GrowSelection
+            | GridCommand::ShrinkSelection
+            | GridCommand::AutoFit
+            | GridCommand::Freeze
+            | GridCommand::Unfreeze => {}
+            _ => return false,
+        }
+        true
+    }
+
+    /// Where a keyboard context menu opens: under the focus cell of the last frame, clamped
+    /// into the body; the body's corner without a focus; the origin before the first frame.
+    fn menu_point(&self, cell: Option<ModelCell>) -> Point<Pixels> {
+        let Some(g) = self.geometry.as_ref() else {
+            return Point::default();
+        };
+        let at = cell.and_then(|cell| {
+            let ix = self.layout.index_of(cell.col)?;
+            let x = f32::from(g.body.left()) + (self.layout.x_of(ix) - self.scroll.left_x) as f32;
+            let y = f32::from(g.body.top()) + self.scroll.row_top(cell.row.0) as f32 + g.row_h;
+            Some((x, y))
+        });
+        let (x, y) = at.unwrap_or((f32::from(g.body.left()), f32::from(g.body.top())));
+        let x = x.clamp(f32::from(g.body.left()), f32::from(g.body.right()));
+        let y = y.clamp(f32::from(g.body.top()), f32::from(g.body.bottom()));
+        point(px(x), px(y))
+    }
+
+    /// Sets the view map (a local sort, Task 36; filter rows, Task 37); `ViewMap::Identity`
+    /// goes back to the source order. Stored; the frame and the keys read it from Task 35 on.
+    pub fn set_view_map(&mut self, map: ViewMap, cx: &mut Context<Self>) {
+        self.view_map = match map {
+            ViewMap::Identity { .. } => None,
+            other => Some(other),
+        };
+        cx.notify();
+    }
+
+    /// The view map: the one set, else the identity over the loaded rows.
+    pub fn view_map(&self) -> &ViewMap {
+        self.view_map.as_ref().unwrap_or(&self.identity_map)
+    }
+
+    /// Follows the loaded rows in the identity map [`GridView::view_map`] answers (each
+    /// frame's data sync).
+    pub(crate) fn note_loaded(&mut self, loaded: u64) {
+        if self.identity_map.len() != loaded {
+            self.identity_map = ViewMap::identity(loaded);
+        }
+    }
+
+    /// Shows rows as columns (Task 38's Transposed view): stored in the config; Task 38's
+    /// `element/transpose.rs` hook swaps the axes at render.
+    pub fn set_transposed(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.config.transposed != on {
+            self.config.transposed = on;
+            cx.notify();
+        }
+    }
+
+    /// Whether the grid shows rows as columns.
+    pub fn transposed(&self) -> bool {
+        self.config.transposed
+    }
+
+    /// Marks the cells `cells` answers `true` for (a find's matches, Task 37); `None` clears.
+    /// Stored only: no frame paints them yet (the painting task is open, Task 1b report R3).
+    pub fn set_highlights(
+        &mut self,
+        cells: Option<Rc<dyn Fn(ModelRow, ColId) -> bool>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.highlights = cells;
+        cx.notify();
+    }
+
+    /// The cells a find marks, as last set.
+    pub fn highlights(&self) -> Option<&Rc<dyn Fn(ModelRow, ColId) -> bool>> {
+        self.highlights.as_ref()
     }
 
     /// Scrolls `cell` into view, both ways.

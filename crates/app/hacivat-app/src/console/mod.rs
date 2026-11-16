@@ -9,9 +9,16 @@
 pub mod autosave;
 pub mod commands;
 pub mod decor;
+// ## m3b-t01b-seams: the editor's find bar (Task 33).
+pub mod find_bar;
+// ## m3b-t01b-seams: the idle-transaction toast (Task 22).
+pub mod idle_toast;
 pub mod registry;
 pub mod status;
 pub mod toolbar;
+// ## m3b-t01b-seams: the transaction badge and chip (Task 22).
+pub mod tx_badge;
+pub mod tx_chip;
 pub mod view;
 
 use std::rc::Rc;

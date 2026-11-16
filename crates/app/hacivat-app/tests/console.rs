@@ -1089,8 +1089,13 @@ fn editor_commands_are_disabled_without_a_focused_editor(cx: &mut TestAppContext
     activate(vcx);
     let editor = editor_of(vcx, id);
     focus_editor(vcx, &editor);
+    // ## m3b-t01b-seams (fix round 2, I3; named exception): a stub row stays disabled until its
+    // task fills it; every other row is enabled while an editor has the focus.
     assert!(
-        registered(vcx).iter().all(|e| *e),
+        registered(vcx)
+            .iter()
+            .zip(hacivat_ui_editor::commands())
+            .all(|(enabled, c)| *enabled != c.stub),
         "an editor has the focus"
     );
     assert!(context_stack(vcx).0.contains(&"Editor"));

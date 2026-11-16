@@ -98,6 +98,21 @@ const ICONS: &[(&str, &[u8])] = lucide![
     "clipboard-x",
     "ban",
     "copy-check",
+    // ## m3b-t01b-seams (P-M3b-37): the M3b icons not bundled yet (`play`, `filter` and `sigma`
+    // are above): Pin (result tabs, history), Sort (`arrow-up-down`) and Freeze (`snowflake`).
+    "pin",
+    "arrow-up-down",
+    "snowflake",
+    // ## m3b-t01b-seams (controller ruling RC-4): the M3b mocks' icons: History, the countdown
+    // (`timer`), waiting (`hourglass`), single-session (`users`), hidden columns (`eye-off`),
+    // Terminate (`octagon-x`) and the idle-transaction toast (`clock`).
+    "history",
+    "timer",
+    "hourglass",
+    "users",
+    "eye-off",
+    "octagon-x",
+    "clock",
 ];
 const HV_MARK: &[u8] = include_bytes!("../assets/icons/hacivat/hv-mark.svg");
 

@@ -24,8 +24,12 @@
 //! menu's key hints, which only the app's keymap knows).
 
 mod edit;
+// ## m3b-t01b-seams: find (Task 33), lines (Task 34), multi-cursor (Task 31).
+mod find;
+mod lines;
 mod menu;
 mod movement;
+mod multi;
 mod run;
 mod selection;
 
@@ -57,6 +61,10 @@ pub struct EditorCommand {
     pub run: fn(&mut EditorView, &mut Window, &mut Context<EditorView>),
     /// Running it closes the open undo group (Run, select all, …).
     pub seals_history: bool,
+    // ## m3b-t01b-seams (fix round 2, I3)
+    /// A stub that does nothing until its task fills it: the app registers it disabled, so the
+    /// palette does not list it and its key passes through. The filling task clears it.
+    pub stub: bool,
 }
 
 impl std::fmt::Debug for EditorCommand {
@@ -65,6 +73,7 @@ impl std::fmt::Debug for EditorCommand {
             .field("id", &self.id)
             .field("title_id", &self.title_id)
             .field("seals_history", &self.seals_history)
+            .field("stub", &self.stub)
             .finish_non_exhaustive()
     }
 }
@@ -217,12 +226,29 @@ const fn command(
         title_id,
         run,
         seals_history,
+        stub: false,
+    }
+}
+
+// ## m3b-t01b-seams (fix round 2, I3)
+/// A stub row: no-op body, no history seal, disabled in the app until its task fills it.
+const fn stub(
+    id: &'static str,
+    title_id: &'static str,
+    run: fn(&mut EditorView, &mut Window, &mut Context<EditorView>),
+) -> EditorCommand {
+    EditorCommand {
+        id,
+        title_id,
+        run,
+        seals_history: false,
+        stub: true,
     }
 }
 
 /// Every editor command, in palette order.
 #[rustfmt::skip]
-static COMMANDS: [EditorCommand; 45] = [
+static COMMANDS: [EditorCommand; 68] = [
     command("editor.move_left", "hv-cmd-editor-move-left", movement::move_left, false),
     command("editor.move_right", "hv-cmd-editor-move-right", movement::move_right, false),
     command("editor.move_up", "hv-cmd-editor-move-up", movement::move_up, false),
@@ -268,6 +294,36 @@ static COMMANDS: [EditorCommand; 45] = [
     command("editor.run_2", "hv-cmd-editor-run-2", run::run_2, true),
     command("editor.run_3", "hv-cmd-editor-run-3", run::run_3, true),
     command("editor.describe_exec_range", "hv-cmd-editor-describe-exec-range", run::describe_exec_range, false),
+    // ## m3b-t01b-seams: the M3b rows, stubs until the named task fills them (fix round 2, I3:
+    // `stub` rows are disabled in the app, out of the palette; none seals the history). The
+    // filling task turns its rows into `command(..)` rows, a named exception.
+    // Task 31: multi-cursor.
+    stub("editor.add_caret_above", "hv-cmd-editor-add-caret-above", multi::add_caret_above),
+    stub("editor.add_caret_below", "hv-cmd-editor-add-caret-below", multi::add_caret_below),
+    stub("editor.select_next_occurrence", "hv-cmd-editor-select-next-occurrence", multi::select_next_occurrence),
+    stub("editor.select_all_occurrences", "hv-cmd-editor-select-all-occurrences", multi::select_all_occurrences),
+    stub("editor.split_selection_into_lines", "hv-cmd-editor-split-selection-into-lines", multi::split_selection_into_lines),
+    stub("editor.undo_selection", "hv-cmd-editor-undo-selection", multi::undo_selection),
+    stub("editor.redo_selection", "hv-cmd-editor-redo-selection", multi::redo_selection),
+    // Task 32: folding.
+    stub("editor.fold", "hv-cmd-editor-fold", crate::fold_gutter::fold),
+    stub("editor.unfold", "hv-cmd-editor-unfold", crate::fold_gutter::unfold),
+    stub("editor.fold_all", "hv-cmd-editor-fold-all", crate::fold_gutter::fold_all),
+    stub("editor.unfold_all", "hv-cmd-editor-unfold-all", crate::fold_gutter::unfold_all),
+    // Task 33: find.
+    stub("editor.find", "hv-cmd-editor-find", find::find),
+    stub("editor.find_next", "hv-cmd-editor-find-next", find::find_next),
+    stub("editor.find_prev", "hv-cmd-editor-find-prev", find::find_prev),
+    stub("editor.find_close", "hv-cmd-editor-find-close", find::find_close),
+    // Task 34: lines and history recall.
+    stub("editor.toggle_comment", "hv-cmd-editor-toggle-comment", lines::toggle_comment),
+    stub("editor.duplicate_line", "hv-cmd-editor-duplicate-line", lines::duplicate_line),
+    stub("editor.delete_line", "hv-cmd-editor-delete-line", lines::delete_line),
+    stub("editor.move_line_up", "hv-cmd-editor-move-line-up", lines::move_line_up),
+    stub("editor.move_line_down", "hv-cmd-editor-move-line-down", lines::move_line_down),
+    stub("editor.normalize_line_endings", "hv-cmd-editor-normalize-line-endings", lines::normalize_line_endings),
+    stub("editor.history_prev", "hv-cmd-editor-history-prev", lines::history_prev),
+    stub("editor.history_next", "hv-cmd-editor-history-next", lines::history_next),
 ];
 
 /// Every editor command (the app registers them; the keymap's `editor.*` rows name them).

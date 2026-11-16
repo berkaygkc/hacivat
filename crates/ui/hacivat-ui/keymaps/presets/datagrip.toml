@@ -54,3 +54,25 @@ chord = "ctrl-f2"
 command = "exec.cancel"
 context = "Console"
 platforms = ["windows", "linux"]
+
+## m3b-t01b-seams
+# DataGrip's chords where M3b's defaults differ (Task 1b). Fix round 2 (I1, I2): a chord that
+# works in M3a is never given to a stub. DataGrip's Delete line (cmd-backspace on macOS, today
+# `editor.delete_to_line_start`) is bound by Task 34, and Extend/Shrink selection in a grid
+# (ctrl-w/ctrl-shift-w on Windows and Linux, today `workspace.close_tab` through the Grid) by
+# Task 35, each as a named exception. Every other M3b chord is the default's.
+
+[[binding]]
+chord = "ctrl-alt-shift-j"
+command = "editor.select_all_occurrences"
+context = "Editor"
+platforms = ["windows", "linux"]
+
+# Accepted, documented AltGr shadowing (Task 1b): on TR-F AltGr+Shift+J types `<`, so there
+# DataGrip's Select all occurrences types the character instead; the command stays in the
+# palette.
+
+[[accepted_altgr_shadowing]]
+chord = "ctrl-alt-shift-j"
+layout = "tr-f"
+produces = "<"

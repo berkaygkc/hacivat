@@ -2014,3 +2014,50 @@ hv-tx-failed-by-stop = Stopping the statement failed the transaction on { $name 
 hv-exec-pending-read-only = Nothing was sent: this console becomes read-only once its open transaction ends. Commit or roll back first.
 # Toast when Re-run is refused because the statement was edited since it ran.
 hv-exec-rerun-edited = The statement was edited since it ran. Run it from the editor.
+
+## m3b-t01b-seams
+
+# Command titles of the M3b and M3c commands (palette rows, key hints). Task 1b registers them;
+# each command's task fills its body and its surface strings.
+hv-cmd-editor-add-caret-above = Add a caret above
+hv-cmd-editor-add-caret-below = Add a caret below
+hv-cmd-editor-select-next-occurrence = Select the next occurrence
+hv-cmd-editor-select-all-occurrences = Select all occurrences
+hv-cmd-editor-split-selection-into-lines = Split the selection into lines
+hv-cmd-editor-undo-selection = Undo the selection change
+hv-cmd-editor-redo-selection = Redo the selection change
+hv-cmd-editor-fold = Fold
+hv-cmd-editor-unfold = Unfold
+hv-cmd-editor-fold-all = Fold all
+hv-cmd-editor-unfold-all = Unfold all
+hv-cmd-editor-find = Find
+hv-cmd-editor-find-next = Find next
+hv-cmd-editor-find-prev = Find previous
+hv-cmd-editor-find-close = Close find
+hv-cmd-editor-toggle-comment = Comment or uncomment
+hv-cmd-editor-duplicate-line = Duplicate line
+hv-cmd-editor-delete-line = Delete line
+hv-cmd-editor-move-line-up = Move line up
+hv-cmd-editor-move-line-down = Move line down
+hv-cmd-editor-normalize-line-endings = Normalize line endings
+hv-cmd-editor-history-prev = Previous statement from history
+hv-cmd-editor-history-next = Next statement from history
+hv-cmd-grid-grow-selection = Grid: expand the selection
+hv-cmd-grid-shrink-selection = Grid: shrink the selection
+hv-cmd-grid-find = Grid: find
+hv-cmd-grid-goto-row = Grid: go to row
+hv-cmd-grid-open-value = Grid: open the value viewer
+hv-cmd-grid-context-menu = Grid: show the menu
+hv-cmd-grid-auto-fit = Grid: fit the column widths
+hv-cmd-grid-freeze = Grid: freeze the columns up to here
+hv-cmd-grid-unfreeze = Grid: unfreeze the columns
+hv-cmd-grid-sort-asc = Grid: sort ascending
+hv-cmd-grid-sort-desc = Grid: sort descending
+hv-cmd-grid-clear-sort = Grid: clear the sort
+hv-cmd-grid-view-table = Grid: table view
+hv-cmd-grid-view-transposed = Grid: transposed view
+hv-cmd-grid-view-text = Grid: text view
+hv-cmd-grid-toggle-record = Grid: show or hide the record view
+hv-cmd-results-next-tab = Next result tab
+hv-cmd-results-prev-tab = Previous result tab
+hv-cmd-history-open = Open query history

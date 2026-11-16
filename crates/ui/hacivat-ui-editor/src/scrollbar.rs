@@ -63,7 +63,10 @@ fn hue(state: &ExecMarkState, stale: bool, inks: &Inks) -> Hsla {
     match state {
         ExecMarkState::Succeeded { .. } if stale => inks.text_3,
         ExecMarkState::Succeeded { .. } => inks.green,
-        ExecMarkState::Running { .. } | ExecMarkState::Cancelling { .. } => inks.amber,
+        // ## m3b-t01b-seams: Escalated keeps the Cancelling hue.
+        ExecMarkState::Running { .. }
+        | ExecMarkState::Cancelling { .. }
+        | ExecMarkState::Escalated { .. } => inks.amber,
         ExecMarkState::Queued => inks.seam_strong,
         ExecMarkState::Failed { .. } => inks.text,
         ExecMarkState::Cancelled => inks.text_3,

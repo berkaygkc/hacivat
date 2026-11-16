@@ -79,6 +79,10 @@ pub struct ToolbarItem {
     /// The last stage: when the row still does not fit once every other item collapsed, this
     /// item's sentence wraps and the bar grows (the cursor strip, NOTES surface 11).
     pub wrap: Option<Wrap>,
+    // ## m3b-t01b-seams
+    /// The narrowest form (R-M3-75): what a pinned trust item shows below the per-locale
+    /// minimum pane width. Stored only; Task 41 lays it out (until then the bar never reads it).
+    pub narrow: Option<ItemFn>,
 }
 
 // ## m3a-f2-visual (named exception): the toolbar's wrapping stage.
@@ -109,6 +113,7 @@ impl ToolbarItem {
             pinned: false,
             on_choose: None,
             wrap: None,
+            narrow: None,
         }
     }
 
@@ -149,6 +154,13 @@ impl ToolbarItem {
     /// Makes this item the bar's wrapping stage (see [`Wrap`]); one item per bar.
     pub fn wraps(mut self, wrap: Wrap) -> Self {
         self.wrap = Some(wrap);
+        self
+    }
+
+    // ## m3b-t01b-seams
+    /// Gives this item its narrowest form (stored; Task 41 lays it out, R-M3-75).
+    pub fn narrow(mut self, element: ItemFn) -> Self {
+        self.narrow = Some(element);
         self
     }
 }

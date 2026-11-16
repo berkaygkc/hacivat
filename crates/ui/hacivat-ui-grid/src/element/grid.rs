@@ -171,6 +171,8 @@ fn sync_data(v: &mut GridView, frame: &dyn GridFrame, cx: &mut Context<GridView>
     // for a render, so the label follows the frame it belongs to.
     let showed_no_rows = v.shows_no_rows();
     v.data.count = count;
+    // ## m3b-t01b-seams: `GridView::view_map` answers the identity over the loaded rows.
+    v.note_loaded(count.loaded);
     v.data.rows = scroll_rows(&count);
     if v.shows_no_rows() != showed_no_rows {
         cx.notify();
@@ -209,6 +211,8 @@ pub(crate) fn prepaint_frame(
     }
     let snap = Snap(scale);
     let frame = v.source.begin_frame(cx);
+    // ## m3b-t01b-seams: Task 38's axis swap (identity until then).
+    let frame = super::transpose::frame(v, frame);
     sync_data(v, &*frame, cx);
 
     let row_h = v.scroll.row_height();
@@ -280,6 +284,8 @@ pub(crate) fn prepaint_frame(
     }
 
     let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+    // ## m3b-t01b-seams: Task 40's AccessKit rows and cells (nothing until then).
+    super::a11y_rows::prepaint(v, &*frame, &geom, window, cx);
     v.note_visible_region(rows, cols, cx);
     v.flush_frame_events(cx);
     v.geometry = Some(geom.clone());
