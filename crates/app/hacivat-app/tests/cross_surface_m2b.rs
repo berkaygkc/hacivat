@@ -768,11 +768,9 @@ fn connect_through_ssh_fix_end_to_end(cx: &mut TestAppContext) {
     settle_until(vcx, WAIT, || layer_open(vcx, "connection-error"));
     let fix = t(vcx, "hv-conn-fix-ssh");
     assert!(
-        texts_drawn_by(vcx, "hacivat-ui/src/button.rs")
-            .iter()
-            .any(|s| plain(s) == fix),
+        button_labels(vcx).iter().any(|s| plain(s) == fix),
         "{:?}",
-        texts_drawn_by(vcx, "hacivat-ui/src/button.rs")
+        button_labels(vcx)
     );
     assert!(vcx.debug_bounds("button-fix-ssh").is_some());
     // Edit connection has the initial focus (the SSH fix is not the primary); Shift-Tab reaches

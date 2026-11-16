@@ -415,9 +415,7 @@ fn certificate_question_opens_review_dialog(cx: &mut TestAppContext) {
         t(vcx, "hv-conn-tls-title")
     );
     assert_eq!(review(vcx, |r| r.primary_button()), "cert-pin");
-    assert!(
-        texts_drawn_by(vcx, "hacivat-ui/src/button.rs").contains(&t(vcx, "hv-conn-tls-pin-btn"))
-    );
+    assert!(button_labels(vcx).contains(&t(vcx, "hv-conn-tls-pin-btn")));
     assert_eq!(
         review(vcx, |r| r.buttons()),
         ["cert-copy", "cert-cancel", "cert-import", "cert-pin"]

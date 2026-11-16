@@ -844,3 +844,64 @@ async fn a_run_queued_behind_a_cancel_never_starts() {
             .contains(&FakeCall::Typed(FakeTypedCall::Query("SELECT 1".into())))
     );
 }
+
+/// When a run's end reaches its owner (CI run 43779216264): `RunEnded`, which the exec
+/// service's `done` follows, comes while the session is still `Busy` with the run's request;
+/// the session publishes `Idle` before it replies. An owner that reads the session when a run
+/// ended waits for the snapshot to leave the request, it does not assume it settled.
+#[tokio::test(start_paused = true)]
+async fn run_ended_comes_while_busy_and_the_reply_after_idle() {
+    use std::sync::{Arc, Mutex};
+
+    use hacivat_results::ResultWriter;
+    use hacivat_session::session::{ObserverRef, RunObserver, SessionSnapshot, UnitId};
+    use hacivat_values::ResultSchema;
+    use tokio::sync::watch;
+
+    struct AtEnd {
+        inner: Arc<Recorder>,
+        session: watch::Receiver<SessionSnapshot>,
+        at_end: Mutex<Option<SessionState>>,
+    }
+    impl RunObserver for AtEnd {
+        fn open_result(
+            &self,
+            unit: UnitId,
+            ordinal: u32,
+            schema: Arc<ResultSchema>,
+        ) -> ResultWriter {
+            self.inner.open_result(unit, ordinal, schema)
+        }
+        fn event(&self, ev: &RunEvent) {
+            if matches!(ev, RunEvent::RunEnded(_)) {
+                *self.at_end.lock().unwrap() = Some(self.session.borrow().state.clone());
+            }
+            self.inner.event(ev);
+        }
+    }
+
+    let failing = FakeQuery {
+        prefix: ")COPY",
+        sets: vec![generated(1)],
+        fail_after: Some((0, db("42601"))),
+        ..Default::default()
+    };
+    let (h, _f) = session(pg().queries(vec![failing])).await;
+    let o = Arc::new(AtEnd {
+        inner: Recorder::new(),
+        session: h.state(),
+        at_end: Mutex::new(None),
+    });
+    let mut spec = spec_of(&o.inner, &[")COPY t FROM STDIN"]);
+    spec.observer = ObserverRef(o.clone());
+    let t = h.run(spec);
+    let seq = t.seq;
+    let e = t.reply.await.expect("the actor replies").unwrap_err();
+    assert_eq!(e.kind, ExecErrorKind::Db);
+    let at_end = o.at_end.lock().unwrap().clone();
+    assert!(
+        matches!(at_end, Some(SessionState::Busy { req, .. }) if req == seq),
+        "{at_end:?}"
+    );
+    assert_eq!(snap(&h).state, SessionState::Idle, "idle before the reply");
+}

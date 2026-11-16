@@ -188,6 +188,14 @@ pub fn last_run_marks(
     run.keys.iter().map(|k| marks.state(*k).cloned()).collect()
 }
 
+// ## m3a-f3-ci (fix round 1)
+/// Whether the UI has seen the summary of console `console`'s latest run (tests).
+pub fn last_run_ended(console: ConsoleId, cx: &App) -> bool {
+    console_exec(cx, console)
+        .and_then(|e| e.run.as_ref())
+        .is_some_and(|r| r.ended)
+}
+
 /// The workspace window (the active one first).
 pub(crate) fn workspace_window(cx: &App) -> Option<AnyWindowHandle> {
     cx.active_window()

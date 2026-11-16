@@ -121,6 +121,54 @@ fn dialog_and_popup_menu_expose_roles_and_names(cx: &mut TestAppContext) {
     assert!(n.contains(&(Role::MenuItem, "Paste".into(), false)));
 }
 
+/// Where access keys show (Linux, Windows) a dialog button's label is drawn as runs around its
+/// key letter, but a screen reader still reads the whole label: the button's accessible name is
+/// never split (CI run 43779216264). Access keys are turned on so every platform checks it.
+#[gpui::test]
+fn access_key_runs_keep_a_buttons_accessible_name_whole(cx: &mut TestAppContext) {
+    use hacivat_ui::text::TextRegistry;
+    cx.update(|cx| {
+        Theme::install(cx, ThemeMode::Dark);
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    a11y_record();
+    let spec = DialogSpec {
+        title: text("Roll back?"),
+        body: text("The transaction is open."),
+        buttons: ["Commit and close", "Roll back and close", "Cancel"]
+            .into_iter()
+            .map(|l| DialogButton {
+                label: text(l),
+                kind: ButtonKind::Default,
+                accesskey: None,
+                english_accesskey: None,
+            })
+            .collect(),
+        cancel: 2,
+        primary: 0,
+        size: DialogSize::Standard,
+    };
+    let (_, vcx) = cx.add_window_view(|window, cx| {
+        let d = Dialog::new(spec, window, cx);
+        d.update(cx, |d, _| d.set_access_keys(true));
+        Wrap::Dialog(d)
+    });
+    vcx.run_until_parked();
+    let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+    let runs = support::find_label_runs(&frame, "Roll back and close").expect("drawn");
+    assert!(runs.len() > 1, "drawn as runs around its key: {runs:?}");
+    let n = a11y_nodes(vcx);
+    for name in ["Commit and close", "Roll back and close", "Cancel"] {
+        assert!(
+            n.contains(&(Role::Button, name.into(), false)),
+            "{name}: {n:?}"
+        );
+    }
+}
+
 fn declared(decls: &[A11yDecl], role: Role, name: &str) -> A11yDecl {
     decls
         .iter()
