@@ -44,6 +44,9 @@
 //! `RawConn::warnings` answers once it is `Done` (counted in `QueryDone::warnings`).
 //! `tracks_transactions` makes connections set their status from the leading keywords of
 //! `execute`/`batch` text (`BEGIN`, `COMMIT`, ...) when no script entry says otherwise.
+//! M3b (Task 11, named exception): a typed query with `Protocol::Simple` ("run as one") answers
+//! its scripted sets and never suspends; in a failed PostgreSQL transaction a typed query that
+//! ends or recovers it (`ROLLBACK`, `ABORT`, `COMMIT`, `END`) is taken, any other answers 25P02.
 //!
 //! M3a (Task 12 fix round 1, the PostgreSQL driver's behaviour, pinned by its Docker tests):
 //! - a PostgreSQL batch that returns exactly its limit suspends even when no row is left; the
@@ -309,18 +312,19 @@ const FIRST_THREAD_ID: u64 = 1_000;
 
 /// What a fake connection's typed path reports unless `with_typed_caps` says otherwise: the
 /// real drivers' shapes (MySQL: a kill to close early, `net_write_timeout` − 15 s at the
-/// server default).
+/// server default). ## m3b-t11-session-runs (fix round 1, named exception): every engine binds
+/// (`binds: true`, as Task 13's drivers report).
 fn default_typed_caps(kind: DbmsKind) -> TypedCaps {
     match kind {
         DbmsKind::MySql | DbmsKind::MariaDb | DbmsKind::TiDb => TypedCaps {
             suspend: true,
-            binds: false,
+            binds: true,
             close_needs_kill: true,
             idle_bound: Some(Duration::from_secs(45)),
         },
         _ => TypedCaps {
             suspend: true,
-            binds: false,
+            binds: true,
             close_needs_kill: false,
             idle_bound: None,
         },
@@ -417,7 +421,9 @@ impl TypedRun {
             0 => chunk_rows,
             n => u64::from(n),
         };
-        let suspends = spec.suspendable && can_suspend && single;
+        // ## m3b-t11-session-runs: nor does a query run "as one" (`Protocol::Simple`).
+        let suspends =
+            spec.suspendable && can_suspend && single && spec.protocol != Protocol::Simple;
         let notices = script.notices.iter().cloned().collect();
         TypedRun {
             notices,
@@ -1532,11 +1538,11 @@ impl FakeConn {
         if self.typed.is_some() {
             return Err(unsupported());
         }
-        // Fix round 1: M3a's drivers speak the extended protocol only (`typed.rs`).
-        if spec.protocol == Protocol::Simple {
-            return Err(unsupported());
-        }
-        if pg_wire(self.kind) && self.tx == TxStatus::Failed {
+        // ## m3b-t11-session-runs (named exception): `Protocol::Simple` is "run as one"
+        // (R-M3-60), which the M3b drivers take (Task 13): the scripted sets, never suspended.
+        // A failed PostgreSQL transaction takes the statements that end or recover it
+        // (`ROLLBACK`, its synonym `ABORT`, R-M3-74), as the server does on either protocol.
+        if pg_wire(self.kind) && self.tx == TxStatus::Failed && !ends_or_recovers_tx(spec.sql) {
             return Err(in_failed_transaction());
         }
         // P5: a portal outside a transaction block would end at its Sync.

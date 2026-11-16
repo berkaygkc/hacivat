@@ -1,0 +1,607 @@
+//! M3b Task 11: what a run sends and keeps. Bind values reach the driver in slot order
+//! (HV-EXEC-03); a unit keeps up to 100 result sets, each its own result (R-M3-66), and one
+//! with several never suspends; "run as one" sends one unit with the simple protocol (R-M3-60)
+//! and is refused on a read-only session; `ABORT` ends a failed PostgreSQL transaction like
+//! `ROLLBACK` (R-M3-74) and is nothing special elsewhere; server notices become run events, at
+//! most 100 per unit (R-M3-77). FakeDriver and a paused clock: no socket, no real time.
+
+mod common;
+
+use common::runs::*;
+use common::runs_m3b::*;
+use common::*;
+use hacivat_driver::fake::{FakeDriver, FakeQuery, FakeTypedCall};
+use hacivat_driver::{Protocol, TxStatus};
+use hacivat_results::{Completeness, TruncReason};
+use hacivat_session::session::{
+    DenyLayer, ExecErrorKind, Request, RowsOutcome, RunEvent, SessionState, TxError, UnitEnd,
+};
+use hacivat_values::BindValue;
+
+/// A PostgreSQL fake that follows `BEGIN`/`COMMIT`/`ROLLBACK`.
+fn pg() -> FakeDriver {
+    fake_pg().tracks_transactions()
+}
+
+/// The statements sent through `execute`/`batch`, without the schema probe.
+fn statements(f: &FakeDriver) -> Vec<String> {
+    f.executed()
+        .into_iter()
+        .filter(|s| !s.starts_with("SELECT current_database()"))
+        .collect()
+}
+
+fn more_sets(o: &Recorder) -> Vec<u32> {
+    o.events()
+        .into_iter()
+        .filter_map(|e| match e {
+            RunEvent::MoreResultSets { skipped, .. } => Some(skipped),
+            _ => None,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Binds
+
+#[tokio::test(start_paused = true)]
+async fn binds_reach_the_driver_in_slot_order() {
+    let (h, f) = session(fake_pg()).await;
+    let o = Recorder::new();
+    h.run(spec_binds(
+        &o,
+        "SELECT $1, $2",
+        &[text("a"), BindValue::Null],
+    ))
+    .reply
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(f.binds_seen(), vec![vec![text("a"), BindValue::Null]]);
+    // With the query, never spliced into its text.
+    assert_eq!(
+        f.typed_log(),
+        vec![
+            FakeTypedCall::Query("SELECT $1, $2".into()),
+            FakeTypedCall::Binds(vec![text("a"), BindValue::Null]),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_value_with_a_quote_is_bound_as_it_is() {
+    let (h, f) = session(fake_pg()).await;
+    let o = Recorder::new();
+    let hostile = "x'); DROP TABLE t; --";
+    run_spec(&h, spec_binds(&o, "SELECT $1", &[text(hostile)]))
+        .await
+        .unwrap();
+    assert_eq!(f.binds_seen(), vec![vec![text(hostile)]]);
+    assert_eq!(f.typed_log()[0], FakeTypedCall::Query("SELECT $1".into()));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Result sets (R-M3-66)
+
+#[tokio::test(start_paused = true)]
+async fn hundred_and_fifty_sets_give_a_hundred_results() {
+    let call = FakeQuery {
+        prefix: "CALL",
+        sets: (0..150).map(one_row).collect(),
+        ..FakeQuery::default()
+    };
+    let (h, _f) = session(fake_mysql().queries(vec![call])).await;
+    let o = Recorder::new();
+    let mut u = unit(0, "CALL many_sets()");
+    u.max_result_sets = 100;
+    run_spec(&h, spec_units(&o, vec![u])).await.unwrap();
+    assert_eq!(o.stores(), 100);
+    let ordinals: Vec<u32> = opened(&o).into_iter().map(|(_, set)| set).collect();
+    assert_eq!(ordinals, (0..100).collect::<Vec<_>>());
+    assert_eq!(more_sets(&o), vec![50]);
+    // Each set holds its own row; the last says sets followed it.
+    assert_eq!(o.snap(0).row_count(), 1);
+    assert_eq!(o.snap(99).row_count(), 1);
+    let ends = o.result_ends();
+    assert_eq!(ends.len(), 100, "every result ends once");
+    assert!(ends[..99].iter().all(|c| *c == Completeness::Complete));
+    assert_eq!(
+        ends[99],
+        Completeness::Truncated(TruncReason::FollowingResultSets)
+    );
+    assert_eq!(
+        o.unit_ends(),
+        vec![UnitEnd::Succeeded {
+            rows: Some(RowsOutcome::Fetched {
+                rows: 1,
+                more: false
+            })
+        }]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_unit_keeps_at_most_a_hundred_sets() {
+    let call = FakeQuery {
+        prefix: "CALL",
+        sets: (0..150).map(one_row).collect(),
+        ..FakeQuery::default()
+    };
+    let (h, f) = session(fake_mysql().queries(vec![call])).await;
+    let o = Recorder::new();
+    let mut u = unit(0, "CALL many_sets()");
+    u.max_result_sets = 1_000;
+    run_spec(&h, spec_units(&o, vec![u])).await.unwrap();
+    assert_eq!(o.stores(), 100);
+    assert_eq!(more_sets(&o), vec![50]);
+    assert_eq!(f.typed_log().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn multi_result_unit_never_suspends() {
+    let two = FakeQuery {
+        prefix: "SELECT",
+        sets: vec![generated(5_000), generated(5_000)],
+        ..FakeQuery::default()
+    };
+    let (h, f) = session(pg().queries(vec![two])).await;
+    let o = Recorder::new();
+    let mut spec = spec_of(&o, &["SELECT * FROM a"]);
+    let mut units = spec.units.to_vec();
+    units[0].max_result_sets = 100;
+    spec.units = units.into();
+    run_spec(&h, spec).await.unwrap();
+    assert_eq!(opened(&o), vec![(0, 0), (0, 1)]);
+    assert_eq!(o.snap(0).row_count(), 5_000);
+    assert_eq!(o.snap(1).row_count(), 5_000);
+    assert_eq!(
+        o.result_ends(),
+        vec![Completeness::Complete, Completeness::Complete]
+    );
+    // Read to its end in one pass: no fetch, no cursor, Hacivat's own transaction committed.
+    assert!(
+        !f.typed_log()
+            .iter()
+            .any(|c| matches!(c, FakeTypedCall::FetchMore(_)))
+    );
+    let s = snap(&h);
+    assert_eq!((s.cursor, s.tx.status), (None, TxStatus::Idle));
+    assert_eq!(statements(&f), vec!["BEGIN", "COMMIT"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dml_set_between_two_reads_reports_its_count() {
+    let sets = FakeQuery {
+        prefix: "CALL",
+        sets: vec![
+            one_row(1),
+            hacivat_driver::fake::FakeResultSet::default(),
+            one_row(3),
+        ],
+        // Review m7: no count scripted, as a real driver reports for reads (`None`).
+        ..FakeQuery::default()
+    };
+    let (h, _f) = session(fake_mysql().queries(vec![sets])).await;
+    let o = Recorder::new();
+    let mut u = unit(0, "CALL mixed()");
+    u.max_result_sets = 100;
+    run_spec(&h, spec_units(&o, vec![u])).await.unwrap();
+    // The set without columns opens no result; the ordinals are the sets' places.
+    assert_eq!(opened(&o), vec![(0, 0), (0, 2)]);
+    let counts: Vec<Option<u64>> = o
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            RunEvent::UpdateCount { rows, .. } => Some(rows),
+            _ => None,
+        })
+        .collect();
+    // Only the set without columns reports a count (none known), when it ends.
+    assert_eq!(counts, vec![None]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Run as one (R-M3-60)
+
+#[tokio::test(start_paused = true)]
+async fn run_as_one_uses_simple_protocol_and_one_unit() {
+    let batch = FakeQuery {
+        prefix: "INSERT",
+        sets: vec![hacivat_driver::fake::FakeResultSet::default(), one_row(1)],
+        ..FakeQuery::default()
+    };
+    let (h, f) = session(pg().queries(vec![batch])).await;
+    let o = Recorder::new();
+    let sql = "INSERT INTO t VALUES (1); SELECT v FROM t";
+    let mut u = unit(0, sql);
+    u.protocol = Protocol::Simple;
+    // A suspendable unit run as one still never suspends.
+    u.suspendable = true;
+    u.max_result_sets = 100;
+    run_spec(&h, spec_units(&o, vec![u])).await.unwrap();
+    assert_eq!(f.typed_log(), vec![FakeTypedCall::Query(sql.into())]);
+    assert_eq!(opened(&o), vec![(0, 1)]);
+    assert_eq!(o.snap(0).row_count(), 1);
+    assert_eq!(o.result_ends(), vec![Completeness::Complete]);
+    // No transaction of Hacivat's around it, no cursor.
+    assert!(statements(&f).is_empty(), "{:?}", statements(&f));
+    assert_eq!(snap(&h).cursor, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_as_one_is_refused_on_read_only() {
+    let (h, f) = ro_session(fake_pg(), pg_profile(hacivat_net::TlsMode::Disable)).await;
+    let before = f.call_log().len();
+    let o = Recorder::new();
+    let mut u = unit(0, "SELECT 1; SELECT 2");
+    u.protocol = Protocol::Simple;
+    let e = run_spec(&h, spec_units(&o, vec![u])).await.unwrap_err();
+    assert_eq!(e.kind, ExecErrorKind::ReadOnlyDenied(DenyLayer::Protocol));
+    assert!(f.call_log()[before..].is_empty(), "nothing sent");
+}
+
+// ---------------------------------------------------------------------------------------------
+// ABORT (R-M3-74)
+
+#[tokio::test(start_paused = true)]
+async fn abort_in_a_failed_tx_rolls_back() {
+    // The `Exec` path.
+    let (h, f) = session(pg().exec(vec![tx_err(
+        "SELECT * FROM missing",
+        "42P01",
+        TxStatus::Failed,
+    )]))
+    .await;
+    run(&h, "BEGIN").await.unwrap();
+    assert!(run(&h, "SELECT * FROM missing").await.is_err());
+    assert_eq!(snap(&h).tx.status, TxStatus::Failed);
+    run(&h, "abort")
+        .await
+        .expect("ABORT ends the failed transaction");
+    assert_eq!(snap(&h).tx.status, TxStatus::Idle);
+    assert!(statements(&f).contains(&"abort".to_string()));
+
+    // The typed path.
+    let abort = FakeQuery {
+        prefix: "ABORT",
+        tx_after: Some(TxStatus::Idle),
+        ..FakeQuery::default()
+    };
+    let (h, f) = session(pg().queries(vec![failing("SELECT * FROM missing"), abort])).await;
+    run(&h, "BEGIN").await.unwrap();
+    let o = Recorder::new();
+    let failed = spec_units(&o, vec![unit(0, "SELECT * FROM missing")]);
+    assert!(run_spec(&h, failed).await.is_err());
+    assert_eq!(snap(&h).tx.status, TxStatus::Failed);
+    let o = Recorder::new();
+    run_spec(&h, spec_units(&o, vec![unit(0, "ABORT")]))
+        .await
+        .expect("ABORT runs");
+    assert_eq!(snap(&h).tx.status, TxStatus::Idle);
+    assert!(o.events().contains(&RunEvent::TxChanged {
+        from: TxStatus::Failed,
+        to: TxStatus::Idle,
+    }));
+    assert!(
+        f.typed_log()
+            .contains(&FakeTypedCall::Query("ABORT".into()))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn abort_is_no_rollback_on_mysql() {
+    // MySQL has no failed transaction state and no `ABORT`: a session that sees one anyway
+    // keeps asking for a ROLLBACK.
+    let (h, f) = session(fake_mysql().exec(vec![tx_err(
+        "SELECT * FROM missing",
+        "42S02",
+        TxStatus::Failed,
+    )]))
+    .await;
+    assert!(run(&h, "SELECT * FROM missing").await.is_err());
+    assert_eq!(snap(&h).tx.status, TxStatus::Failed);
+    let e = run(&h, "ABORT").await.unwrap_err();
+    assert_eq!(e.kind, ExecErrorKind::Tx(TxError::FailedNeedsRollback));
+    assert!(!f.executed().iter().any(|s| s == "ABORT"), "nothing sent");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Notices (R-M3-77)
+
+#[tokio::test(start_paused = true)]
+async fn notices_become_run_events_capped_at_100() {
+    let chatty = FakeQuery {
+        notices: notices(150),
+        ..answering("SELECT")
+    };
+    let (h, _f) = session(pg().queries(vec![chatty])).await;
+    let o = Recorder::new();
+    let logs = capture_tracing(|| async {
+        run_spec(&h, spec_units(&o, vec![unit(0, "SELECT raise_many()")]))
+            .await
+            .unwrap();
+    })
+    .await;
+    let texts = notice_texts(&o);
+    assert_eq!(texts.len(), 100);
+    assert_eq!(texts[0], "n0");
+    assert_eq!(texts[99], "n99");
+    assert!(
+        o.events().iter().all(|e| match e {
+            RunEvent::Notice { unit, .. } => unit.ordinal == 0,
+            _ => true,
+        }),
+        "every notice names its unit"
+    );
+    // The rest are counted in a log line; no notice text is ever logged.
+    assert!(logs.contains("notices_dropped=50"), "{logs}");
+    assert!(!logs.contains("n120"), "notice text never logged");
+    assert_eq!(snap(&h).state, SessionState::Idle);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The M3a shapes stay
+
+#[tokio::test(start_paused = true)]
+async fn a_plain_unit_keeps_one_set() {
+    let two = FakeQuery {
+        prefix: "SELECT",
+        sets: vec![one_row(1), one_row(2)],
+        ..FakeQuery::default()
+    };
+    let (h, _f) = session(pg().queries(vec![two])).await;
+    let o = Recorder::new();
+    run_spec(&h, spec_units(&o, vec![unit(0, "SELECT 1")]))
+        .await
+        .unwrap();
+    assert_eq!(o.stores(), 1);
+    assert_eq!(more_sets(&o), vec![1]);
+    // `Request::Exec` is unchanged.
+    assert!(
+        ask(&h, Request::Ping).await.is_ok(),
+        "the session still serves requests"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// ## m3b-t11-session-runs, fix round 1
+
+/// Review I2: a unit run "as one" carries no parameters (a simple query or a batch would run
+/// its placeholders unbound, or as NULL): refused, nothing sent.
+#[tokio::test(start_paused = true)]
+async fn run_as_one_with_binds_is_refused_and_sends_nothing() {
+    let (h, f) = session(pg()).await;
+    let before = f.call_log().len();
+    let o = Recorder::new();
+    let mut u = unit(0, "UPDATE t SET c = $1; SELECT 1");
+    u.protocol = Protocol::Simple;
+    u.binds = vec![text("x")].into();
+    let e = run_spec(&h, spec_units(&o, vec![u])).await.unwrap_err();
+    assert_eq!(e.kind, ExecErrorKind::Internal);
+    assert!(f.call_log()[before..].is_empty(), "nothing sent");
+    assert!(f.binds_seen().is_empty());
+}
+
+/// Review I2: the session binds only where the driver says its typed path binds.
+#[tokio::test(start_paused = true)]
+async fn binds_need_a_driver_that_binds() {
+    let caps = hacivat_driver::TypedCaps {
+        binds: false,
+        ..hacivat_driver::TypedCaps {
+            suspend: true,
+            binds: true,
+            close_needs_kill: false,
+            idle_bound: None,
+        }
+    };
+    let (h, f) = session(pg().with_typed_caps(caps)).await;
+    tx_cmd(
+        &h,
+        hacivat_session::session::TxCommand::SetMode(hacivat_session::session::TxMode::Manual),
+    )
+    .await
+    .unwrap();
+    let before = f.call_log().len();
+    let o = Recorder::new();
+    let e = run_spec(&h, spec_binds(&o, "UPDATE t SET c = $1", &[text("x")]))
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind, ExecErrorKind::Internal);
+    assert!(
+        f.call_log()[before..].is_empty(),
+        "nothing sent, not even the Manual BEGIN"
+    );
+}
+
+/// Review I3: a "suspendable" query the driver never suspends (here a query with two sets; a
+/// MySQL `CALL` or a text-route statement on a real server) is admitted chunk by chunk once it
+/// runs past its first batch: past the per-result budget its rows are counted, not kept.
+#[tokio::test(start_paused = true)]
+async fn a_stream_that_never_suspends_is_admitted_chunk_by_chunk() {
+    let big = FakeQuery {
+        prefix: "CALL",
+        sets: vec![generated(200_000), generated(1)],
+        ..FakeQuery::default()
+    };
+    let (h, f) = session(fake_mysql().queries(vec![big])).await;
+    let o = Recorder::with_budget(1 << 30, 256 << 10);
+    let mut spec = spec_of(&o, &["CALL big()"]);
+    let mut units = spec.units.to_vec();
+    units[0].max_result_sets = 100;
+    spec.units = units.into();
+    run_spec(&h, spec).await.unwrap();
+    assert!(
+        !f.typed_log()
+            .iter()
+            .any(|c| matches!(c, FakeTypedCall::FetchMore(_))),
+        "the driver never suspended it"
+    );
+    let kept = o.snap(0).row_count();
+    assert!(kept > 0 && kept < 200_000, "{kept} rows kept");
+    assert_eq!(
+        o.result_ends()[0],
+        Completeness::Truncated(TruncReason::ResultCap)
+    );
+    assert_eq!(snap(&h).cursor, None);
+}
+
+/// Review m2: a batch that failed partway may have run its first statements (MySQL commits
+/// them): its schema switch is followed all the same.
+#[tokio::test(start_paused = true)]
+async fn a_failed_batch_still_follows_its_schema_switch() {
+    let (h, f) = session(fake_mysql().queries(vec![failing("USE")])).await;
+    let o = Recorder::new();
+    let mut u = unit(0, "USE db2; SELECT * FROM missing");
+    u.protocol = Protocol::Simple;
+    assert!(run_spec(&h, spec_units(&o, vec![u])).await.is_err());
+    let probe = hacivat_session::session::schema_probe_sql(hacivat_proto::DbmsKind::MySql);
+    assert!(
+        f.executed().iter().any(|s| s == probe),
+        "the schema was probed again: {:?}",
+        f.executed()
+    );
+}
+
+/// Review m3: every statement of a batch counts in the user's open transaction.
+#[tokio::test(start_paused = true)]
+async fn a_batch_counts_each_statement_in_the_users_transaction() {
+    let batch = FakeQuery {
+        prefix: "INSERT",
+        tx_after: Some(TxStatus::InTx),
+        ..FakeQuery::default()
+    };
+    let (h, _f) = session(pg().queries(vec![batch])).await;
+    run(&h, "BEGIN").await.unwrap();
+    let o = Recorder::new();
+    let mut u = unit(
+        0,
+        "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2); DELETE FROM t",
+    );
+    u.protocol = Protocol::Simple;
+    run_spec(&h, spec_units(&o, vec![u])).await.unwrap();
+    assert_eq!(snap(&h).tx.statements, 3);
+}
+
+/// A read-only MySQL fake that follows the guard's transaction.
+fn ro_mysql_fake(q: FakeQuery) -> FakeDriver {
+    fake_mysql().tracks_transactions().queries(vec![q])
+}
+
+fn closed_by_gap() -> Completeness {
+    Completeness::Closed {
+        reason: hacivat_results::CloseReason::EnforcementGap,
+    }
+}
+
+/// Review I4 (success path): the guard judges every set; a write it finds closes every
+/// result of the unit, the earlier set's too.
+#[tokio::test(start_paused = true)]
+async fn a_gap_closes_every_result_of_the_unit() {
+    let wrote = FakeQuery {
+        prefix: "SELECT",
+        sets: vec![one_row(1), one_row(2)],
+        rows_affected: Some(1),
+        ..FakeQuery::default()
+    };
+    let (h, _f) = ro_session(
+        ro_mysql_fake(wrote),
+        mysql_profile(hacivat_net::TlsMode::Disable),
+    )
+    .await;
+    let o = Recorder::new();
+    let mut u = unit(0, "SELECT f()");
+    u.max_result_sets = 100;
+    let e = run_spec(&h, spec_units(&o, vec![u])).await.unwrap_err();
+    assert!(
+        matches!(e.kind, ExecErrorKind::EnforcementGap(_)),
+        "{:?}",
+        e.kind
+    );
+    assert_eq!(o.stores(), 2);
+    assert_eq!(o.result_ends(), vec![closed_by_gap(), closed_by_gap()]);
+    assert_eq!(*o.snap(0).completeness(), closed_by_gap());
+    assert_eq!(o.snap(0).row_count(), 1, "the rows stay");
+}
+
+/// Review I4 (failure path): a later set fails, and the guard's checks after the failure find
+/// a gap (its `ROLLBACK` answers "no transaction in progress": the statement had left the
+/// guard's transaction). Every result of the unit is closed, the earlier set's too.
+#[tokio::test(start_paused = true)]
+async fn a_gap_after_a_failed_set_closes_every_result_of_the_unit() {
+    let failed_later = FakeQuery {
+        prefix: "SELECT",
+        sets: vec![one_row(1), one_row(2)],
+        fail_after: Some((1, db("HY000"))),
+        ..FakeQuery::default()
+    };
+    let left_the_tx = hacivat_driver::fake::FakeExec {
+        prefix: "ROLLBACK",
+        result: Ok(hacivat_driver::ExecSummary {
+            notice_codes: vec!["25P01".to_string()],
+            ..hacivat_driver::ExecSummary::default()
+        }),
+        delay: std::time::Duration::ZERO,
+        tx_after: Some(TxStatus::Idle),
+        panics: false,
+    };
+    let (h, _f) = ro_session(
+        ro_mysql_fake(failed_later).exec(vec![left_the_tx]),
+        mysql_profile(hacivat_net::TlsMode::Disable),
+    )
+    .await;
+    let o = Recorder::new();
+    let mut u = unit(0, "SELECT f()");
+    u.max_result_sets = 100;
+    assert!(run_spec(&h, spec_units(&o, vec![u])).await.is_err());
+    assert_eq!(o.stores(), 2);
+    assert_eq!(o.result_ends(), vec![closed_by_gap(), closed_by_gap()]);
+    assert!(matches!(snap(&h).state, SessionState::Broken(_)));
+}
+
+/// T13 review I-1, ruling (b): a Stop of a unit run "as one" sends the server cancel at once,
+/// in Manual mode and inside the user's own transaction too (no overdue wait, during which the
+/// server could run later statements of the script). The paused clock never moves while the
+/// test only yields, so a cancel that waited would never be seen.
+#[tokio::test(start_paused = true)]
+async fn stopping_a_run_as_one_cancels_at_once() {
+    for manual in [true, false] {
+        let script = FakeQuery {
+            first_delay: secs(30),
+            ..answering("UPDATE")
+        };
+        let (h, f) = session(pg().queries(vec![script])).await;
+        if manual {
+            tx_cmd(
+                &h,
+                hacivat_session::session::TxCommand::SetMode(
+                    hacivat_session::session::TxMode::Manual,
+                ),
+            )
+            .await
+            .unwrap();
+        } else {
+            run(&h, "BEGIN").await.unwrap();
+        }
+        let o = Recorder::new();
+        let mut u = unit(0, "UPDATE t SET a = 1; SELECT pg_sleep(60); DELETE FROM t");
+        u.protocol = Protocol::Simple;
+        let t = h.run(spec_units(&o, vec![u]));
+        settle_until(
+            "the batch holds the session",
+            || matches!(snap(&h).state, SessionState::Busy { req, .. } if req == t.seq),
+        )
+        .await;
+        let cancelled = h.cancel(t.seq);
+        settle_until("the server cancel went out", || f.cancel_calls() == 1).await;
+        assert_eq!(
+            cancelled.await.unwrap(),
+            hacivat_session::session::CancelOutcome::Cancelled
+        );
+        assert!(t.reply.await.unwrap().is_err(), "manual {manual}");
+        assert_eq!(f.cancel_calls(), 1, "manual {manual}: one cancel");
+        assert_eq!(
+            snap(&h).tx.mode == hacivat_session::session::TxMode::Manual,
+            manual
+        );
+    }
+}

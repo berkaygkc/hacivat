@@ -130,7 +130,8 @@ impl StopSignal {
     }
 
     /// Waits until a stop is asked for (at once when it already was).
-    async fn requested(&self) {
+    // ## m3b-t11-session-runs: `pub(crate)`: the error policy's wait selects on it.
+    pub(crate) async fn requested(&self) {
         loop {
             let notified = self.notify.notified();
             tokio::pin!(notified);
@@ -366,7 +367,24 @@ pub(crate) enum Step {
     Failed(RawError),
 }
 
-/// The first result set of one typed query on its way into the store.
+// ## m3b-t11-session-runs
+/// The most result sets a unit keeps (R-M3-66); the driver drains and counts the rest.
+pub(crate) const MAX_RESULT_SETS: u32 = 100;
+
+/// The most server notices a unit reports (R-M3-77); the rest are counted and logged.
+pub(crate) const MAX_NOTICES: u32 = 100;
+
+/// A result set of the unit that ended before the current one (R-M3-66). Its final state is
+/// published when the unit ends, after what Hacivat opened around the statement (the read-only
+/// guard's checks) held, as the last set's is.
+struct EarlierSet {
+    writer: Option<ResultWriter>,
+    rows: u64,
+    state: Completeness,
+}
+
+/// The result sets of one typed query on their way into their stores: the current one (its
+/// writer and counters), and those that ended before it (m3b-t11: R-M3-66; M3a kept one).
 pub(crate) struct Stream {
     pub(crate) unit: UnitId,
     pub(crate) observer: ObserverRef,
@@ -396,6 +414,29 @@ pub(crate) struct Stream {
     opened_at: std::time::Instant,
     /// `finish` ran: the result has its final state.
     ended: bool,
+    // ## m3b-t11-session-runs
+    /// The current set's place in the unit (0 for the first).
+    pub(crate) ordinal: u32,
+    /// Result sets kept (`RunUnit::max_result_sets`, at most [`MAX_RESULT_SETS`]); 1 by
+    /// default: a later `ResultStart` is counted, not kept, as in M3a.
+    pub(crate) max_sets: u32,
+    earlier: Vec<EarlierSet>,
+    /// The first set's end, with the most rows any set reported affected: what the read-only
+    /// guard judges a statement by ([`Stream::judged_end`]).
+    judged: Option<ResultEnd>,
+    notices: u32,
+    notices_dropped: u32,
+    // Fix round 1 (review I3, m1).
+    /// Rows the session admitted for a suspendable stream before asking for them (the first
+    /// batch, then each `fetch_more`).
+    allowed: u64,
+    /// The stream ran past `allowed` without suspending: every chunk is admitted from then on.
+    outran: bool,
+    /// A result set past `max_sets` is being read: it is counted, its rows are not kept.
+    dropping: bool,
+    /// Result sets the stream itself did not keep (a driver that emits more than it was asked
+    /// for); counted with the driver's skipped sets.
+    sets_dropped: u32,
 }
 
 /// A stream that goes away without its final state (its request was dropped by a deactivate,
@@ -403,7 +444,8 @@ pub(crate) struct Stream {
 /// Cancelled }`, rows kept, and the observer hears of it.
 impl Drop for Stream {
     fn drop(&mut self) {
-        if !self.ended && self.writer.is_some() {
+        // ## m3b-t11-session-runs: earlier sets end with it.
+        if !self.ended && (self.writer.is_some() || !self.earlier.is_empty()) {
             self.finish(Completeness::Closed {
                 reason: CloseReason::Cancelled,
             });
@@ -441,7 +483,36 @@ impl Stream {
             done: None,
             opened_at: now.into_std(),
             ended: false,
+            // ## m3b-t11-session-runs
+            ordinal: 0,
+            max_sets: 1,
+            earlier: Vec::new(),
+            judged: None,
+            notices: 0,
+            notices_dropped: 0,
+            // Fix round 1: the drivers' first batch is `first_rows` (a chunk's worth for 0).
+            allowed: u64::from(match fetch.first_rows {
+                0 => fetch.chunk_rows.max(1),
+                n => n,
+            }),
+            outran: false,
+            dropping: false,
+            sets_dropped: 0,
         }
+    }
+
+    // ## m3b-t11-session-runs (fix round 1, review I3)
+    /// `rows` more were admitted and asked for (`fetch_more`).
+    pub(crate) fn allow(&mut self, rows: u64) {
+        self.allowed = self.allowed.saturating_add(rows);
+    }
+
+    /// Result sets after the kept ones: the driver's drained ones and those the stream did
+    /// not keep (review m1).
+    pub(crate) fn skipped_sets(&self) -> u32 {
+        self.done
+            .map_or(0, |d| d.skipped_result_sets)
+            .saturating_add(self.sets_dropped)
     }
 
     pub(crate) fn result(&self) -> Option<ResultId> {
@@ -463,24 +534,113 @@ impl Stream {
 
     fn on_start(&mut self, schema: Arc<ResultSchema>) {
         if self.started {
-            // A second result set (the driver keeps one, R-M3-25): its rows are not this
-            // result's.
-            self.capped = true;
-            return;
+            // ## m3b-t11-session-runs: the next set of a unit that keeps several (R-M3-66)
+            // gets its own result once the current one ended.
+            if !self.dropping
+                && self.end.is_some()
+                && self.ordinal.saturating_add(1) < self.max_sets
+            {
+                self.next_set();
+            } else {
+                // A result set the unit does not keep (the driver keeps `max_result_sets`,
+                // R-M3-25): fix round 1 (review m1): it is counted with the driver's skipped
+                // sets, and its rows are not the kept result's.
+                self.dropping = true;
+                self.sets_dropped = self.sets_dropped.saturating_add(1);
+                return;
+            }
         }
         self.on_first_response();
         self.columns = schema.columns.len();
         if self.columns == 0 {
             return;
         }
-        let writer = self.observer.0.open_result(self.unit, 0, schema);
+        // ## m3b-t11-session-runs: the set's own ordinal.
+        let ordinal = self.ordinal;
+        let writer = self.observer.0.open_result(self.unit, ordinal, schema);
         let result = writer.id();
         self.writer = Some(writer);
         self.observer.0.event(&RunEvent::ResultOpened {
             unit: self.unit,
-            ordinal: 0,
+            ordinal,
             result,
         });
+    }
+
+    // ## m3b-t11-session-runs
+    /// The current set ended and another starts (R-M3-66): its update count is reported now,
+    /// its final state when the unit ends ([`EarlierSet`]); the counters start over.
+    fn next_set(&mut self) {
+        let end = self.end.take();
+        if let Some(end) = &end
+            && (end.rows_affected.is_some() || self.columns == 0)
+        {
+            self.observer.0.event(&RunEvent::UpdateCount {
+                unit: self.unit,
+                rows: end.rows_affected,
+                command_tag: end.command_tag.clone(),
+            });
+        }
+        let state = if self.capped && self.seen > self.rows {
+            Completeness::Truncated(TruncReason::ResultCap)
+        } else {
+            Completeness::Complete
+        };
+        self.earlier.push(EarlierSet {
+            writer: self.writer.take(),
+            rows: self.rows,
+            state,
+        });
+        self.columns = 0;
+        self.rows = 0;
+        self.seen = 0;
+        self.capped = false;
+        self.bytes = 0;
+        self.last_chunk_bytes = 0;
+        self.last_progress = None;
+        self.ordinal += 1;
+        // A query with several sets never suspends: every later chunk is admitted against the
+        // memory budgets as it comes, as for any stream that cannot stop.
+        self.suspendable = false;
+    }
+
+    /// A result set ended (`ResultEnd`): the first is kept for the unit's update count (M3a),
+    /// and the guard's view gathers every set's affected rows.
+    pub(crate) fn on_end(&mut self, end: ResultEnd) {
+        self.judged = Some(match self.judged.take() {
+            None => end.clone(),
+            Some(first) => ResultEnd {
+                rows_affected: match (first.rows_affected, end.rows_affected) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                },
+                ..first
+            },
+        });
+        // A set the unit does not keep counts for the guard only (review m1).
+        if self.end.is_none() && !self.dropping {
+            self.end = Some(end);
+        }
+    }
+
+    /// What the read-only guard judges the statement by: the first set's end, with the most
+    /// rows any set reported affected (a write in a later set is never hidden behind a read).
+    pub(crate) fn judged_end(&self) -> Option<ResultEnd> {
+        self.judged.clone()
+    }
+
+    /// A server notice (R-M3-77): reported up to [`MAX_NOTICES`] per unit; the rest are
+    /// counted, and the count is logged when the unit's result ends (never their text).
+    pub(crate) fn on_notice(&mut self, notice: hacivat_driver::Notice) {
+        if self.notices < MAX_NOTICES {
+            self.notices += 1;
+            self.observer.0.event(&RunEvent::Notice {
+                unit: self.unit,
+                notice,
+            });
+        } else {
+            self.notices_dropped = self.notices_dropped.saturating_add(1);
+        }
     }
 
     /// Takes one chunk. A suspendable query's batch was admitted before it was asked for; a
@@ -491,11 +651,24 @@ impl Stream {
         self.fetching += now.saturating_duration_since(self.mark);
         self.mark = now;
         let rows = u64::from(chunk.rows());
+        // ## m3b-t11-session-runs (fix round 1, review m1): a set the unit does not keep.
+        if self.dropping {
+            return;
+        }
         self.seen = self.seen.saturating_add(rows);
+        // Review I3: a "suspendable" stream that runs past the rows admitted for it without
+        // suspending (a driver that never suspends this query: a MySQL `CALL`, a text-route
+        // statement) is admitted chunk by chunk from then on, as a stream that cannot stop.
+        if self.suspendable && !self.outran && self.seen > self.allowed {
+            self.outran = true;
+        }
         let Some(writer) = self.writer.as_mut() else {
             return;
         };
-        if !self.suspendable && !self.capped && writer.admit(chunk.bytes()) != Admission::Ok {
+        if (!self.suspendable || self.outran)
+            && !self.capped
+            && writer.admit(chunk.bytes()) != Admission::Ok
+        {
             self.capped = true;
         }
         if self.capped {
@@ -542,6 +715,33 @@ impl Stream {
     /// The result ended in `state`: publishes it and tells the observer.
     pub(crate) fn finish(&mut self, state: Completeness) {
         self.ended = true;
+        // ## m3b-t11-session-runs: the earlier sets first, each complete as it ran (or cut at
+        // its cap), unless the guard found a gap: then every result of the unit is closed.
+        let gap = Completeness::Closed {
+            reason: CloseReason::EnforcementGap,
+        };
+        for mut set in std::mem::take(&mut self.earlier) {
+            let final_state = if state == gap { state } else { set.state };
+            if let Some(writer) = set.writer.as_mut() {
+                writer.set_state(final_state);
+                self.observer.0.event(&RunEvent::ResultEnded {
+                    result: writer.id(),
+                    rows: set.rows,
+                    completeness: final_state,
+                    exec_ms: self.exec_ms,
+                    fetch_ms: self.fetch_ms(),
+                });
+            }
+        }
+        let dropped = std::mem::take(&mut self.notices_dropped);
+        if dropped > 0 {
+            tracing::info!(
+                run = self.unit.run.0,
+                unit = self.unit.ordinal,
+                notices_dropped = dropped,
+                "notices past the cap were counted, not reported"
+            );
+        }
         self.set_state(state);
         if let Some(result) = self.result() {
             self.observer.0.event(&RunEvent::ResultEnded {
@@ -582,7 +782,7 @@ impl Stream {
     pub(crate) fn completed_state(&self) -> Completeness {
         if self.capped && self.seen > self.rows {
             Completeness::Truncated(TruncReason::ResultCap)
-        } else if self.done.is_some_and(|d| d.skipped_result_sets > 0) {
+        } else if self.skipped_sets() > 0 {
             Completeness::Truncated(TruncReason::FollowingResultSets)
         } else {
             Completeness::Complete
@@ -682,7 +882,7 @@ impl Core {
         }
     }
 
-    fn typed_caps(&mut self) -> TypedCaps {
+    pub(crate) fn typed_caps(&mut self) -> TypedCaps {
         self.live
             .as_mut()
             .map_or(TypedCaps::NONE, |live| live.raw().typed_caps())
@@ -711,17 +911,14 @@ impl Core {
                 }
                 Ok(QueryEvent::ResultEnd(end)) => {
                     s.on_first_response();
-                    if s.end.is_none() {
-                        s.end = Some(end);
-                    }
+                    // ## m3b-t11-session-runs: every set's end counts for the guard.
+                    s.on_end(end);
                 }
                 Ok(QueryEvent::Suspended) => return Pumped::Suspended,
                 // ## m3b-t01c-core-seams: a server notice goes to the run's observer as it
                 // comes (R-M3-77); it changes nothing in the stream.
-                Ok(QueryEvent::Notice(notice)) => s.observer.0.event(&RunEvent::Notice {
-                    unit: s.unit,
-                    notice,
-                }),
+                // ## m3b-t11-session-runs: at most `MAX_NOTICES` of them.
+                Ok(QueryEvent::Notice(notice)) => s.on_notice(notice),
                 Ok(QueryEvent::Done(done)) => {
                     s.on_first_response();
                     s.done = Some(done);
@@ -766,6 +963,8 @@ impl Core {
             if let Err(e) = resumed {
                 return Step::Failed(e);
             }
+            // ## m3b-t11-session-runs (fix round 1, review I3): the batch was admitted.
+            s.allow(u64::from(batch));
             pumped = self.pump(s, w).await;
         }
     }
@@ -1003,7 +1202,9 @@ impl Core {
                 (false, 0)
             }
         };
-        let (rolled_back, ended) = self.end_hold(hold, completed, s.end.as_ref()).await;
+        let (rolled_back, ended) = self
+            .end_hold(hold, completed, s.judged_end().as_ref())
+            .await;
         let gap = matches!(
             &ended,
             Err(e) if matches!(e.kind, ExecErrorKind::EnforcementGap(_))
@@ -1121,7 +1322,9 @@ impl Core {
                 (false, 0, (!cancelled).then_some(e))
             }
         };
-        let (rolled_back, ended) = self.end_hold(hold, completed, s.end.as_ref()).await;
+        let (rolled_back, ended) = self
+            .end_hold(hold, completed, s.judged_end().as_ref())
+            .await;
         let whole = completed && total == s.seen && !s.capped;
         let failure = failure.or(ended.err());
         if whole && self.broken.is_none() {
@@ -1160,10 +1363,21 @@ impl Core {
             // nothing.
             let _ = self.close_open(CloseHow::Now, Fire::Never, false, w).await;
         }
-        let (rolled_back, _) = self.end_hold(hold, false, s.end.as_ref()).await;
+        let (rolled_back, ended) = self.end_hold(hold, false, s.judged_end().as_ref()).await;
         let cancelled = w.stop.is_requested()
             && (error.kind == ExecErrorKind::Cancelled || is_cancel_code(self.kind, &error));
-        let (reason, state) = if self.broken.is_some() {
+        // ## m3b-t11-session-runs (fix round 1, review I4): a gap the guard found after the
+        // failure closes every result of the unit (`finish` closes the earlier sets too). The
+        // reply stays the statement's error (whether it should be the gap is recorded for the
+        // T18/T22 owner).
+        let gap = matches!(
+            &ended,
+            Err(e) if matches!(e.kind, ExecErrorKind::EnforcementGap(_))
+        );
+        let (reason, state) = if gap {
+            let reason = CloseReason::EnforcementGap;
+            (reason, Completeness::Closed { reason })
+        } else if self.broken.is_some() {
             let reason = CloseReason::ConnectionLost;
             (reason, Completeness::Closed { reason })
         } else if cancelled {
@@ -1208,7 +1422,7 @@ impl Core {
                 Ok(self.summary())
             }
             Step::Complete => {
-                let (_, ended) = self.end_hold(hold, true, s.end.as_ref()).await;
+                let (_, ended) = self.end_hold(hold, true, s.judged_end().as_ref()).await;
                 let state = s.state_after(&ended);
                 s.finish(state);
                 ended.map(|()| self.summary())
@@ -1243,5 +1457,105 @@ impl Core {
         }
         self.release_cursor(reason, w).await?;
         Ok(self.summary())
+    }
+}
+
+// ## m3b-t11-session-runs (fix round 1, review I4 and m1)
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::session::{RunId, RunObserver};
+
+    /// Keeps the events; opens no result (the streams here have no columns).
+    #[derive(Default)]
+    struct Events(Mutex<Vec<RunEvent>>);
+
+    impl RunObserver for Events {
+        fn open_result(&self, _: UnitId, _: u32, _: Arc<ResultSchema>) -> ResultWriter {
+            unreachable!("no result with columns here")
+        }
+
+        fn event(&self, ev: &RunEvent) {
+            self.0.lock().unwrap().push(ev.clone());
+        }
+    }
+
+    fn stream(max_sets: u32) -> (Stream, Arc<Events>) {
+        let events = Arc::new(Events::default());
+        let unit = UnitId {
+            run: RunId(1),
+            ordinal: 0,
+        };
+        let mut s = Stream::new(
+            unit,
+            ObserverRef(events.clone()),
+            FetchPolicy::default(),
+            false,
+        );
+        s.max_sets = max_sets;
+        (s, events)
+    }
+
+    fn no_columns() -> Arc<ResultSchema> {
+        Arc::new(ResultSchema {
+            columns: Arc::from(Vec::new()),
+        })
+    }
+
+    fn end(tag: &str, affected: Option<u64>) -> ResultEnd {
+        ResultEnd {
+            rows: 0,
+            kept: 0,
+            rows_affected: affected,
+            command_tag: Some(tag.to_string()),
+        }
+    }
+
+    /// The guard judges a unit by its first set's end with the most rows any set reported
+    /// affected: a write in a later set is never hidden behind a read.
+    #[test]
+    fn the_guard_sees_the_largest_affected_count_of_any_set() {
+        let (mut s, _) = stream(100);
+        for e in [
+            end("SELECT", None),
+            end("UPDATE", Some(3)),
+            end("DELETE", Some(1)),
+        ] {
+            s.on_start(no_columns());
+            s.on_end(e);
+        }
+        assert_eq!(s.judged_end(), Some(end("SELECT", Some(3))));
+        // The unit's own update count is the last set's.
+        assert_eq!(s.end, Some(end("DELETE", Some(1))));
+        assert_eq!(s.ordinal, 2);
+    }
+
+    /// A set past the ones the unit keeps is counted with the skipped sets; its end counts for
+    /// the guard only, and the kept set is not labelled cut at its cap.
+    #[test]
+    fn a_set_the_unit_does_not_keep_is_counted_not_kept() {
+        let (mut s, events) = stream(1);
+        s.on_start(no_columns());
+        s.on_end(end("SELECT", None));
+        s.on_start(no_columns());
+        s.on_end(end("UPDATE", Some(4)));
+        assert_eq!(s.skipped_sets(), 1);
+        assert_eq!(s.end, Some(end("SELECT", None)), "the kept set's end");
+        assert_eq!(s.judged_end(), Some(end("SELECT", Some(4))));
+        assert_eq!(
+            s.completed_state(),
+            Completeness::Truncated(TruncReason::FollowingResultSets)
+        );
+        assert!(
+            !events
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, RunEvent::UpdateCount { .. })),
+            "no count reported for the set not kept"
+        );
     }
 }

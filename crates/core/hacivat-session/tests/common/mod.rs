@@ -2422,3 +2422,186 @@ pub mod runs {
         h.submit(request).reply.await.expect("the actor replies")
     }
 }
+
+// ## m3b-t11-session-runs
+// Run fixtures for M3b Task 11: units with binds, result sets and protocols, `Ask` runs, the
+// questions a run asks, scripted failures and notices.
+pub mod runs_m3b {
+    use std::sync::Arc;
+
+    use hacivat_driver::fake::{FakeQuery, FakeResultSet, FakeRows};
+    use hacivat_driver::{Notice, NoticeSeverity, Protocol};
+    use hacivat_results::FetchPolicy;
+    use hacivat_session::session::{
+        ErrorPolicy, ExecError, ObserverRef, RunEvent, RunId, RunSpec, RunUnit, UnitId,
+    };
+    use hacivat_values::{BindValue, LogicalType, Value};
+
+    use super::runs::Recorder;
+    use super::{db, settle_until};
+
+    /// Unit `i` of run 1: `sql`, the extended protocol, never suspended.
+    pub fn unit(i: u32, sql: &str) -> RunUnit {
+        RunUnit::plain(
+            UnitId {
+                run: RunId(1),
+                ordinal: i,
+            },
+            sql.into(),
+            Protocol::Extended,
+            false,
+        )
+    }
+
+    /// A run of `units` (default fetch policy, `StopOnError`).
+    pub fn spec_units(o: &Arc<Recorder>, units: Vec<RunUnit>) -> RunSpec {
+        RunSpec {
+            run: RunId(1),
+            units: units.into(),
+            policy: ErrorPolicy::StopOnError,
+            fetch: FetchPolicy::default(),
+            observer: ObserverRef(o.clone()),
+            confirm_deadline: RunSpec::CONFIRM_DEADLINE,
+        }
+    }
+
+    /// An `Ask` run of `sqls`, one unit each, never suspended.
+    pub fn ask_spec(o: &Arc<Recorder>, sqls: &[&str]) -> RunSpec {
+        let units = sqls
+            .iter()
+            .enumerate()
+            .map(|(i, sql)| unit(i as u32, sql))
+            .collect();
+        RunSpec {
+            policy: ErrorPolicy::Ask,
+            ..spec_units(o, units)
+        }
+    }
+
+    /// One unit of `sql` with `binds`.
+    pub fn spec_binds(o: &Arc<Recorder>, sql: &str, binds: &[BindValue]) -> RunSpec {
+        let mut u = unit(0, sql);
+        u.binds = binds.to_vec().into();
+        spec_units(o, vec![u])
+    }
+
+    /// A text bind value.
+    pub fn text(s: &str) -> BindValue {
+        BindValue::Typed {
+            hint: LogicalType::Text {
+                max_chars: None,
+                fixed: false,
+            },
+            text: s.into(),
+        }
+    }
+
+    /// A one-row result set of one `v int4` column holding `v`.
+    pub fn one_row(v: i64) -> FakeResultSet {
+        FakeResultSet {
+            columns: vec![(
+                "v",
+                LogicalType::Int {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
+            rows: FakeRows::Literal(vec![vec![Value::Int(v)]]),
+        }
+    }
+
+    /// A typed query of `prefix` the server refuses (42P01) before its first row.
+    pub fn failing(prefix: &'static str) -> FakeQuery {
+        FakeQuery {
+            prefix,
+            sets: vec![one_row(1)],
+            fail_after: Some((0, db("42P01"))),
+            ..FakeQuery::default()
+        }
+    }
+
+    /// A typed query of `prefix` answering one row.
+    pub fn answering(prefix: &'static str) -> FakeQuery {
+        FakeQuery {
+            prefix,
+            sets: vec![one_row(1)],
+            ..FakeQuery::default()
+        }
+    }
+
+    /// `n` server notices `n0`, `n1`, …
+    pub fn notices(n: usize) -> Vec<Notice> {
+        (0..n)
+            .map(|i| Notice::new(NoticeSeverity::Notice, Some("00000"), &format!("n{i}")))
+            .collect()
+    }
+
+    /// One `NeedsChoice` as the run asked it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Asked {
+        pub unit: UnitId,
+        pub question: u64,
+        pub error: ExecError,
+        pub rollback_and_continue: bool,
+    }
+
+    /// Every `NeedsChoice` the run emitted, in order.
+    pub fn asked(o: &Recorder) -> Vec<Asked> {
+        o.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RunEvent::NeedsChoice {
+                    unit,
+                    question,
+                    error,
+                    rollback_and_continue,
+                } => Some(Asked {
+                    unit,
+                    question,
+                    error,
+                    rollback_and_continue,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Waits (yielding, never sleeping) for the run's `n`-th question; returns it.
+    pub async fn nth_question(o: &Recorder, n: usize) -> Asked {
+        settle_until("the run asks", || asked(o).len() >= n).await;
+        asked(o)[n - 1].clone()
+    }
+
+    /// The notices the run reported, by text.
+    pub fn notice_texts(o: &Recorder) -> Vec<String> {
+        o.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RunEvent::Notice { notice, .. } => Some(notice.text.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The units started, by ordinal, in order (a retried unit twice).
+    pub fn started(o: &Recorder) -> Vec<u32> {
+        o.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RunEvent::UnitStarted { unit, .. } => Some(unit.ordinal),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every result the run opened: (unit ordinal, set ordinal).
+    pub fn opened(o: &Recorder) -> Vec<(u32, u32)> {
+        o.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RunEvent::ResultOpened { unit, ordinal, .. } => Some((unit.ordinal, ordinal)),
+                _ => None,
+            })
+            .collect()
+    }
+}
