@@ -409,9 +409,9 @@ fn every_action_title_exists_in_en() {
 }
 
 /// Every bound command is in the app's registry (`init`: the workspace actions and every
-/// `connections::install` registration). The M2a pending list was emptied at the gate (T22).
-/// M3a (Task 1b): the editor, grid and console rows are bound before their commands exist;
-/// [`M3A_PENDING`] names each of them exactly, and the M3a gate (Task 37) requires it empty.
+/// `connections::install` registration). The M2a pending list was emptied at the gate (T22);
+/// the M3a pending list (the editor, grid and console rows Task 1b bound before their
+/// commands existed) was emptied by Tasks 30, 32 and 33 and deleted at the M3a gate (Task 37).
 #[gpui::test]
 fn keymap_commands_are_registered(cx: &mut TestAppContext) {
     let reg = cx.update(|cx| {
@@ -421,55 +421,11 @@ fn keymap_commands_are_registered(cx: &mut TestAppContext) {
     for p in ALL_PLATFORMS {
         for preset in PRESETS {
             for b in load(p, preset, None).0.bindings() {
-                assert!(
-                    reg.get(&b.command).is_some() || M3A_PENDING.contains(&b.command.as_str()),
-                    "{}",
-                    b.command
-                );
+                assert!(reg.get(&b.command).is_some(), "{}", b.command);
             }
         }
     }
 }
-
-/// Every [`M3A_PENDING`] id is still bound somewhere, so the list never names a command no
-/// keymap row needs (a stale entry, or a typo that would hide a missing registration).
-#[test]
-fn every_m3a_pending_id_is_bound() {
-    let bound: std::collections::HashSet<String> = ALL_PLATFORMS
-        .iter()
-        .flat_map(|p| PRESETS.iter().map(move |preset| (*p, *preset)))
-        .flat_map(|(p, preset)| {
-            load(p, preset, None)
-                .0
-                .bindings()
-                .iter()
-                .map(|b| b.command.clone())
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    for id in M3A_PENDING {
-        assert!(
-            bound.contains(*id),
-            "{id} is in M3A_PENDING but no keymap row binds it"
-        );
-    }
-}
-
-// ## m3a-t01b-seams
-/// The commands Task 1b's keymap rows bind whose registration lands later, each by its exact
-/// id: the `editor.*` ids (Task 32 registers the editor's command table), the `grid.*` ids
-/// (Task 30, from `hacivat_ui_grid::GRID_COMMANDS`) and `exec.cancel` (Task 33).
-///
-/// **Ruling (controller): the M3a gate (Task 37) requires this list to be empty** — Task 37
-/// deletes it and runs `keymap_commands_are_registered` unchanged; a registration still
-/// missing then fails the gate.
-const M3A_PENDING: &[&str] = &[
-    // ## m3a-t32-console (named exception): Task 32 registers the editor's commands; their
-    // 42 ids left this list.
-    // ## m3a-t30-results-view: the grid's commands are registered (`results::view`), so their
-    // entries left this list.
-    // ## m3a-t33-exec-ui (named exception): `exec.cancel` is registered (exec_ui::cancel).
-];
 
 #[gpui::test]
 fn menus_follow_language(cx: &mut TestAppContext) {
