@@ -3387,6 +3387,7 @@ version = "0.0.0"
 dependencies = [
  "futures",
  "hacivat-driver",
+ "hacivat-guard",
  "hacivat-net",
  "hacivat-proto",
  "hacivat-results",
@@ -3396,6 +3397,7 @@ dependencies = [
  "hacivat-values",
  "proptest",
  "rusqlite",
+ "serde",
  "sha2 0.10.9",
  "sql-dialect",
  "sql-ident",
@@ -3407,6 +3409,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "toml 1.2.1+spec-1.1.0",
  "tracing-subscriber",
 ]
 
@@ -3522,6 +3525,7 @@ dependencies = [
 name = "hacivat-session"
 version = "0.0.0"
 dependencies = [
+ "bitflags 2.13.2",
  "futures",
  "getrandom 0.3.4",
  "hacivat-driver",
@@ -3537,6 +3541,9 @@ dependencies = [
  "hacivat-testkit",
  "hacivat-values",
  "secrecy",
+ "sql-dialect",
+ "sql-lexer",
+ "sql-split",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -8468,7 +8475,6 @@ dependencies = [
  "sql-dialect",
  "sql-lexer",
  "sql-oracle-pg",
- "sql-safety",
  "sql-split",
  "toml 1.2.1+spec-1.1.0",
 ]
@@ -10927,6 +10933,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml 1.2.1+spec-1.1.0",
+ "twox-hash",
  "yaml-rust2",
 ]
 

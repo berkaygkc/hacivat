@@ -4,9 +4,10 @@ A separate cargo workspace for `cargo fuzz` (nightly). It is excluded from the r
 never shipped, and not checked by the root `deny.toml`. `libfuzzer-sys` is
 `(MIT OR Apache-2.0) AND NCSA`; NCSA is accepted for this workspace only (ADR 0005 `m3b-t20`).
 
-Task 20 adds the targets under `fuzz_targets/`: `lex_lossless`, `relex_equivalence`,
-`split_items`, `params_rewrite` and `classify_no_panic`. Until then only the skeleton
-`src/lib.rs` exists, because cargo needs one target to resolve the workspace.
+The five targets under `fuzz_targets/` (`lex_lossless`, `relex_equivalence`, `split_items`,
+`params_rewrite`, `classify_no_panic`) are declared as `[[bin]]` rows in `Cargo.toml` by Task
+1a (fix round 1) with stub bodies that accept every input; Task 20 writes the bodies and edits
+no manifest.
 
 ## Patches and the lockfile (P-M3b-15)
 

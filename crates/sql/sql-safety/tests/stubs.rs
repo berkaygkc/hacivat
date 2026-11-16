@@ -96,31 +96,37 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The crate's public surface as text: `lib.rs` whole, and every `pub` line (not `pub(crate)`)
-/// of every module.
-fn public_api_text() -> String {
+/// Every non-comment line of every module outside the private `backend/` and `visit/` trees,
+/// with its file (fix round 1, M1: a `pub`-line scan missed trait impls, aliases and wrapped
+/// signatures). Only the backends may name a backend crate or the oracle's tree.
+fn lines_outside_backends() -> Vec<(PathBuf, String)> {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_files(&src, &mut files);
     files.sort();
-    let mut text = std::fs::read_to_string(src.join("lib.rs")).unwrap();
+    let mut out = Vec::new();
     for f in files {
+        let rel = f.strip_prefix(&src).unwrap();
+        if rel.starts_with("backend") || rel.starts_with("visit") {
+            continue;
+        }
         for line in std::fs::read_to_string(&f).unwrap().lines() {
             let t = line.trim_start();
-            if t.starts_with("pub ") {
-                text.push_str(t);
-                text.push('\n');
+            if !t.starts_with("//") {
+                out.push((rel.to_path_buf(), t.to_string()));
             }
         }
     }
-    text
+    out
 }
 
 #[test]
 fn no_sqlparser_type_in_the_public_api() {
-    let api = public_api_text();
-    assert!(!api.contains("sqlparser::"));
-    assert!(!api.contains("pg_query::"));
+    for (file, line) in lines_outside_backends() {
+        for needle in ["sqlparser", "pg_query", "tree::pb", "pb::"] {
+            assert!(!line.contains(needle), "{}: {line}", file.display());
+        }
+    }
     // The backends and visitors stay private modules.
     let lib =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")).unwrap();

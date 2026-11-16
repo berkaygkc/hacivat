@@ -41,3 +41,9 @@ pub use report::{
     BackendVersion, Confidence, ObjectKind, ObjectRef, SafetyReport, StmtKind, StmtReport,
     TouchedObjects,
 };
+
+// ## m3b-t01a-seams (fix round 1, I1): the SQLite read-pragma list (Task 10) that Task 18's
+// cross-crate equality test compares with the guard's.
+pub mod pragmas;
+
+pub use pragmas::sqlite_read_pragmas;

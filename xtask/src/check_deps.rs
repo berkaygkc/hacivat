@@ -331,6 +331,11 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
                     add(name, Rule::BackendOutsideOwner, vec![backend.into()]);
                 }
             }
+            // ## m3b-t01a-seams (fix round 1, M4): a declared edge too, so an optional
+            // dependency that no feature turns on in this resolve is still seen.
+            if root.dependencies.iter().any(|d| d.name == backend) {
+                add(name, Rule::BackendOutsideOwner, vec![backend.into()]);
+            }
         }
         if name == TEXT_CORE
             && let Some(via) = normal_path_to(&root.id, &edges, &pkgs, |p| {
@@ -445,6 +450,66 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
         .collect()
 }
 
+// ## m3b-t01a-seams (fix round 1, M2)
+/// The crates that may name `sql_oracle_pg::tree` (its `pb` re-export of `pg_query`'s
+/// protobuf types): the oracle itself and the PG classifier backend.
+const TREE_OWNERS: [&str; 2] = ["sql-oracle-pg", "sql-safety"];
+
+/// `BackendOutsideOwner` at the source level: a non-comment line naming `sql_oracle_pg` and
+/// `tree` in any `crates/<layer>/<crate>/` outside [`TREE_OWNERS`] (tests included), because
+/// `tree::pb` is reachable through every crate that depends on the oracle.
+pub fn tree_violations(workspace: &Path) -> Vec<Violation> {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut found = BTreeSet::new();
+    let Ok(layers) = std::fs::read_dir(workspace.join("crates")) else {
+        return Vec::new();
+    };
+    for layer in layers.flatten() {
+        let Ok(crates) = std::fs::read_dir(layer.path()) else {
+            continue;
+        };
+        for krate in crates.flatten() {
+            let name = krate.file_name().to_string_lossy().into_owned();
+            if TREE_OWNERS.contains(&name.as_str()) {
+                continue;
+            }
+            let mut files = Vec::new();
+            walk(&krate.path(), &mut files);
+            let names_tree = files.iter().any(|f| {
+                std::fs::read_to_string(f).is_ok_and(|src| {
+                    src.lines().any(|l| {
+                        let l = l.trim_start();
+                        !l.starts_with("//") && l.contains("sql_oracle_pg") && l.contains("tree")
+                    })
+                })
+            });
+            if names_tree {
+                found.insert(name);
+            }
+        }
+    }
+    found
+        .into_iter()
+        .map(|krate| Violation {
+            krate,
+            rule: Rule::BackendOutsideOwner,
+            via: vec!["sql_oracle_pg::tree".into()],
+        })
+        .collect()
+}
+
 pub fn run() -> ExitCode {
     let metadata = match MetadataCommand::new().exec() {
         Ok(m) => m,
@@ -453,9 +518,11 @@ pub fn run() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let found = violations(&metadata, &|p| {
+    let mut found = violations(&metadata, &|p| {
         std::fs::read_to_string(p).unwrap_or_default()
     });
+    // ## m3b-t01a-seams (fix round 1, M2)
+    found.extend(tree_violations(metadata.workspace_root.as_std_path()));
     if found.is_empty() {
         println!("check-deps: ok");
         return ExitCode::SUCCESS;
@@ -1062,6 +1129,52 @@ mod tests {
         // Each backend has its own owner: sql-safety may not take pg_query directly.
         let md = fx_at(&[("sql-safety", "crates/sql", &["pg_query"])]);
         assert_eq!(rule_of(&md, "sql-safety"), Rule::BackendOutsideOwner);
+    }
+
+    /// Fix round 1 (M2): `sql_oracle_pg::tree` outside the oracle and `sql-safety` is flagged;
+    /// comments are not; the workspace itself is clean.
+    #[test]
+    fn tree_outside_its_owners_is_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |rel: &str, src: &str| {
+            let p = dir.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, src).unwrap();
+        };
+        write(
+            "crates/core/hacivat-exec/tests/t.rs",
+            "use sql_oracle_pg::tree::pb::Node;\n",
+        );
+        write(
+            "crates/sql/sql-split/src/a.rs",
+            "// sql_oracle_pg::tree is the oracle's\n",
+        );
+        write(
+            "crates/sql/sql-safety/src/backend/pg.rs",
+            "use sql_oracle_pg::tree::pb;\n",
+        );
+        let v = tree_violations(dir.path());
+        assert_eq!(names(&v), ["hacivat-exec"]);
+        assert_eq!(v[0].rule, Rule::BackendOutsideOwner);
+        assert!(tree_violations(&workspace_root()).is_empty());
+    }
+
+    /// Fix round 1 (M4): an optional backend dependency that no feature turns on has no edge
+    /// in the resolve, but its declaration is still flagged.
+    #[test]
+    fn a_declared_backend_without_a_resolved_edge_is_flagged() {
+        for backend in ["sqlparser", "pg_query"] {
+            let mut md = fx_at(&[("sql-split", "crates/sql", &[backend])]);
+            for node in &mut md.resolve.as_mut().unwrap().nodes {
+                node.deps.clear();
+                node.dependencies.clear();
+            }
+            assert_eq!(
+                rule_of(&md, "sql-split"),
+                Rule::BackendOutsideOwner,
+                "{backend}"
+            );
+        }
     }
 
     #[test]

@@ -7,8 +7,9 @@
 
 use crate::report::StmtReport;
 
-/// The gate's class of a statement.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+/// The gate's class of a statement. The default is `Unknown` (P-M3b-4; fix round 1, M3), so
+/// a defaulted carrier never reads as `Read`.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default)]
 pub enum GateClass {
     Read,
     Lock,
@@ -20,6 +21,7 @@ pub enum GateClass {
     Session,
     Tx,
     Admin,
+    #[default]
     Unknown,
 }
 
@@ -33,4 +35,14 @@ pub fn gate_class(r: &StmtReport) -> GateClass {
 pub fn opens_write(r: &StmtReport) -> bool {
     let _ = r;
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_is_unknown() {
+        assert_eq!(GateClass::default(), GateClass::Unknown);
+    }
 }

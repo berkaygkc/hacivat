@@ -574,3 +574,17 @@ the catalog read is a `hacivat-exec` Docker test, P-M3b-13), `bench-sql` and `fe
 `# owner: Task NN` header: `<engine>/{allow,deny,operators,types,set_allow}.toml` and
 `functions.digest` (Task 3), `profiles.toml` (Task 4), `pg/statements.toml` (Task 9),
 `{mysql,sqlite}/statements.toml` and `mysql/known_gaps.toml` (Task 10).
+
+**Fix round 1.**
+- **Empty is not Read.** `EffectSet::default()` is the empty set, and every mapping treats an
+  empty set as `Unknown`. `GateClass` defaults to `Unknown`.
+- **Fail-closed stub.** `sql_safety::sqlite_read_pragmas` is empty until Task 10. Task 18
+  compares it with the guard's `SQLITE_READ_PRAGMAS`.
+- **Two more ownership checks** for `BackendOutsideOwner`:
+  - a declared backend dependency counts too, so an optional one that no feature turns on is
+    still seen;
+  - only `sql-oracle-pg` and `sql-safety` may name `sql_oracle_pg::tree`. This is a source scan
+    in `check-deps`.
+- **`sql-testkit`** no longer depends on `sql-safety`. It reaches `sql-oracle-pg` only through
+  its `differential` feature, so the lexer's plain test loop builds neither libpg_query nor
+  `sqlparser`.

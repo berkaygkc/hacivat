@@ -6,6 +6,10 @@ use bitflags::bitflags;
 bitflags! {
     /// What a statement may do. `UNKNOWN` is critical: the classifier could not prove the
     /// statement's effects (L9, L10).
+    ///
+    /// **Empty is not `READ`.** `EffectSet::default()` is the empty set, which says nothing
+    /// was proved: every mapping (`gate_class`, `class_of`, the policy) must treat an empty set
+    /// as `Unknown`, never as a read (fix round 1, M3; Tasks 4, 14, 15).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct EffectSet: u32 {
         const READ = 1;

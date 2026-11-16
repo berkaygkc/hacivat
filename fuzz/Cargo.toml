@@ -29,6 +29,47 @@ libfuzzer-sys = "0.4"
 sql-lexer = { path = "../crates/sql/sql-lexer" }
 sql-split = { path = "../crates/sql/sql-split" }
 sql-safety = { path = "../crates/sql/sql-safety" }
+# ## m3b-t01a-seams (fix round 1, I4): every target needs a `DialectCtx`; `relex_equivalence`
+# needs `TextSize`/`TextRange`.
+sql-dialect = { path = "../crates/sql/sql-dialect" }
+sql-text = { path = "../crates/sql/sql-text" }
+
+# ## m3b-t01a-seams (fix round 1, I4): the five targets of Task 20, declared here so Task 20
+# fills only their bodies (cargo-fuzz targets are not auto-discovered).
+[[bin]]
+name = "lex_lossless"
+path = "fuzz_targets/lex_lossless.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relex_equivalence"
+path = "fuzz_targets/relex_equivalence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "split_items"
+path = "fuzz_targets/split_items.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "params_rewrite"
+path = "fuzz_targets/params_rewrite.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "classify_no_panic"
+path = "fuzz_targets/classify_no_panic.rs"
+test = false
+doc = false
+bench = false
 
 # Copied from the root `Cargo.toml` (P-M3b-15); keep in step with it.
 [patch.crates-io]
