@@ -976,3 +976,40 @@ impl GuardedCursor {
         post_steps(conn, self.kind, &self.plan, &self.keywords, ran, replay).await
     }
 }
+
+// ## m3b-t01a-seams (fix round 1, I1)
+/// The guard's first-keyword readings of `sql` on `kind` (what steps 1a and 7 judge), for
+/// Task 18's `guard_keywords_are_a_subset_of_lexer_readings` in
+/// `hacivat-exec/tests/cross_crate_equalities.rs`: each reading ASCII upper-cased, `Some("")`
+/// when the statement starts with something other than a word, `None` when the reading holds
+/// no statement; and whether the readings are complete (`false` when a limit cut them short).
+pub fn guard_keyword_readings(kind: DbmsKind, sql: &str) -> (Vec<Option<String>>, bool) {
+    let k = guard_keywords(kind, sql);
+    (k.readings, k.complete)
+}
+
+// ## m3b-t01a-seams (fix round 1, I1)
+#[cfg(test)]
+mod m3b_t01a_tests {
+    use super::*;
+
+    #[test]
+    fn guard_keyword_readings_expose_the_guards_readings() {
+        assert_eq!(
+            guard_keyword_readings(DbmsKind::Postgres, "  /* c */ select 1"),
+            (vec![Some("SELECT".to_string())], true)
+        );
+        // A version-gated executable comment is read both ways on MySQL.
+        let (readings, complete) =
+            guard_keyword_readings(DbmsKind::MySql, "/*!50000 BEGIN */ SELECT 1");
+        assert!(complete);
+        assert!(
+            readings.contains(&Some("BEGIN".to_string())),
+            "{readings:?}"
+        );
+        assert!(
+            readings.contains(&Some("SELECT".to_string())),
+            "{readings:?}"
+        );
+    }
+}

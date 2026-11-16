@@ -37,3 +37,7 @@ pub use exec_comment::{ExecComment, ExecMarker, GateStatus, exec_comment, exec_c
 pub use relex::{RelexDelta, relex};
 pub use state::{BodyReading, LexState, StringRule};
 pub use token::{LexError, LexErrorCode, Lexed, TokenFlags, TokenKind};
+
+// ## m3b-t01a-seams: public checkpoints (`Lexed::checkpoint_before`) for incremental relexing
+// (Task 5); a stub until then.
+pub mod incremental;

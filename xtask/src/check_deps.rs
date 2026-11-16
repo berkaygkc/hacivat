@@ -52,7 +52,8 @@ pub enum Rule {
     SqlNotRuntimeFree,
     /// A `crates/sql/*` crate depends on a `crates/core/*` crate (any edge, dev included).
     SqlReachesCore,
-    /// A crate other than `sql-oracle-pg` depends on `pg_query` directly.
+    /// A crate other than `sql-oracle-pg` depends on `pg_query` directly, or (M3b) a crate
+    /// other than `sql-safety` depends on `sqlparser` directly; any edge kind counts.
     BackendOutsideOwner,
     /// `hacivat-text` (the headless editor core) reaches `hacivat-ui-core`, GPUI or a zed
     /// crate through its normal dependencies.
@@ -144,8 +145,9 @@ const SQL_FORBIDDEN: [&str; 8] = [
 ];
 /// The dev-only SQL corpus crate: `SqlNotRuntimeFree` does not apply to it.
 const SQL_TESTKIT: &str = "sql-testkit";
-/// The one crate that may depend on `pg_query` (R-M3-1).
-const PG_BACKEND: (&str, &str) = ("pg_query", "sql-oracle-pg");
+/// Each parser backend and the one crate that may depend on it directly: `pg_query` only in
+/// `sql-oracle-pg` (R-M3-1); ## m3b-t01a-seams: `sqlparser` only in `sql-safety` (R-M3-54).
+const BACKENDS: [(&str, &str); 2] = [("pg_query", "sql-oracle-pg"), ("sqlparser", "sql-safety")];
 /// The headless editor core (`TextCoreNotHeadless`).
 const TEXT_CORE: &str = "hacivat-text";
 /// The rope under `hacivat-text`, and the features that change its line breaks.
@@ -320,14 +322,19 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
                 }
             }
         }
-        if name != PG_BACKEND.1 {
+        for (backend, owner) in BACKENDS {
+            if name == owner {
+                continue;
+            }
             for (dep_id, _) in edges.get(&root.id).into_iter().flatten() {
-                if pkgs
-                    .get(dep_id)
-                    .is_some_and(|d| d.name.as_str() == PG_BACKEND.0)
-                {
-                    add(name, Rule::BackendOutsideOwner, vec![PG_BACKEND.0.into()]);
+                if pkgs.get(dep_id).is_some_and(|d| d.name.as_str() == backend) {
+                    add(name, Rule::BackendOutsideOwner, vec![backend.into()]);
                 }
+            }
+            // ## m3b-t01a-seams (fix round 1, M4): a declared edge too, so an optional
+            // dependency that no feature turns on in this resolve is still seen.
+            if root.dependencies.iter().any(|d| d.name == backend) {
+                add(name, Rule::BackendOutsideOwner, vec![backend.into()]);
             }
         }
         if name == TEXT_CORE
@@ -443,6 +450,66 @@ pub fn violations(md: &Metadata, manifest: &dyn Fn(&Path) -> String) -> Vec<Viol
         .collect()
 }
 
+// ## m3b-t01a-seams (fix round 1, M2)
+/// The crates that may name `sql_oracle_pg::tree` (its `pb` re-export of `pg_query`'s
+/// protobuf types): the oracle itself and the PG classifier backend.
+const TREE_OWNERS: [&str; 2] = ["sql-oracle-pg", "sql-safety"];
+
+/// `BackendOutsideOwner` at the source level: a non-comment line naming `sql_oracle_pg` and
+/// `tree` in any `crates/<layer>/<crate>/` outside [`TREE_OWNERS`] (tests included), because
+/// `tree::pb` is reachable through every crate that depends on the oracle.
+pub fn tree_violations(workspace: &Path) -> Vec<Violation> {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut found = BTreeSet::new();
+    let Ok(layers) = std::fs::read_dir(workspace.join("crates")) else {
+        return Vec::new();
+    };
+    for layer in layers.flatten() {
+        let Ok(crates) = std::fs::read_dir(layer.path()) else {
+            continue;
+        };
+        for krate in crates.flatten() {
+            let name = krate.file_name().to_string_lossy().into_owned();
+            if TREE_OWNERS.contains(&name.as_str()) {
+                continue;
+            }
+            let mut files = Vec::new();
+            walk(&krate.path(), &mut files);
+            let names_tree = files.iter().any(|f| {
+                std::fs::read_to_string(f).is_ok_and(|src| {
+                    src.lines().any(|l| {
+                        let l = l.trim_start();
+                        !l.starts_with("//") && l.contains("sql_oracle_pg") && l.contains("tree")
+                    })
+                })
+            });
+            if names_tree {
+                found.insert(name);
+            }
+        }
+    }
+    found
+        .into_iter()
+        .map(|krate| Violation {
+            krate,
+            rule: Rule::BackendOutsideOwner,
+            via: vec!["sql_oracle_pg::tree".into()],
+        })
+        .collect()
+}
+
 pub fn run() -> ExitCode {
     let metadata = match MetadataCommand::new().exec() {
         Ok(m) => m,
@@ -451,9 +518,11 @@ pub fn run() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let found = violations(&metadata, &|p| {
+    let mut found = violations(&metadata, &|p| {
         std::fs::read_to_string(p).unwrap_or_default()
     });
+    // ## m3b-t01a-seams (fix round 1, M2)
+    found.extend(tree_violations(metadata.workspace_root.as_std_path()));
     if found.is_empty() {
         println!("check-deps: ok");
         return ExitCode::SUCCESS;
@@ -1037,6 +1106,120 @@ mod tests {
             &[],
         );
         assert_eq!(rule_of(&md, "hacivat-exec"), Rule::BackendOutsideOwner);
+    }
+
+    // ## m3b-t01a-seams
+    #[test]
+    fn sqlparser_outside_safety_is_flagged() {
+        let md = fx_at(&[("sql-split", "crates/sql", &["sqlparser"])]);
+        assert_eq!(rule_of(&md, "sql-split"), Rule::BackendOutsideOwner);
+        // A core crate, the oracle and a dev-dependency are flagged alike.
+        let md = fx_at(&[("hacivat-exec", "crates/core", &["sqlparser"])]);
+        assert_eq!(rule_of(&md, "hacivat-exec"), Rule::BackendOutsideOwner);
+        let md = fx_at(&[("sql-oracle-pg", "crates/sql", &["sqlparser"])]);
+        assert_eq!(rule_of(&md, "sql-oracle-pg"), Rule::BackendOutsideOwner);
+        let md = fx_kind_at(
+            "sql-testkit",
+            "crates/sql",
+            "sqlparser",
+            DepKind::Development,
+            &[],
+        );
+        assert_eq!(rule_of(&md, "sql-testkit"), Rule::BackendOutsideOwner);
+        // Each backend has its own owner: sql-safety may not take pg_query directly.
+        let md = fx_at(&[("sql-safety", "crates/sql", &["pg_query"])]);
+        assert_eq!(rule_of(&md, "sql-safety"), Rule::BackendOutsideOwner);
+    }
+
+    /// Fix round 1 (M2): `sql_oracle_pg::tree` outside the oracle and `sql-safety` is flagged;
+    /// comments are not; the workspace itself is clean.
+    #[test]
+    fn tree_outside_its_owners_is_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |rel: &str, src: &str| {
+            let p = dir.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, src).unwrap();
+        };
+        write(
+            "crates/core/hacivat-exec/tests/t.rs",
+            "use sql_oracle_pg::tree::pb::Node;\n",
+        );
+        write(
+            "crates/sql/sql-split/src/a.rs",
+            "// sql_oracle_pg::tree is the oracle's\n",
+        );
+        write(
+            "crates/sql/sql-safety/src/backend/pg.rs",
+            "use sql_oracle_pg::tree::pb;\n",
+        );
+        let v = tree_violations(dir.path());
+        assert_eq!(names(&v), ["hacivat-exec"]);
+        assert_eq!(v[0].rule, Rule::BackendOutsideOwner);
+        assert!(tree_violations(&workspace_root()).is_empty());
+    }
+
+    /// Fix round 1 (M4): an optional backend dependency that no feature turns on has no edge
+    /// in the resolve, but its declaration is still flagged.
+    #[test]
+    fn a_declared_backend_without_a_resolved_edge_is_flagged() {
+        for backend in ["sqlparser", "pg_query"] {
+            let mut md = fx_at(&[("sql-split", "crates/sql", &[backend])]);
+            for node in &mut md.resolve.as_mut().unwrap().nodes {
+                node.deps.clear();
+                node.dependencies.clear();
+            }
+            assert_eq!(
+                rule_of(&md, "sql-split"),
+                Rule::BackendOutsideOwner,
+                "{backend}"
+            );
+        }
+    }
+
+    #[test]
+    fn sqlparser_in_safety_is_allowed() {
+        let md = fx_at(&[("sql-safety", "crates/sql", &["sqlparser"])]);
+        assert!(violations(&md, &lints_ok).is_empty());
+        // Through sql-safety is fine (only direct edges count).
+        let md = fx_at(&[
+            ("hacivat-exec", "crates/core", &["sql-safety"]),
+            ("sql-safety", "crates/sql", &["sqlparser"]),
+        ]);
+        assert!(violations(&md, &lints_ok).is_empty());
+    }
+
+    /// The M3b crates are Core-layer members with no violation; `fuzz/` is its own workspace.
+    #[test]
+    fn m3b_crates_sit_in_their_layers_and_are_clean() {
+        let md = cargo_metadata::MetadataCommand::new()
+            .current_dir(crate::workspace_root())
+            .exec()
+            .unwrap();
+        let v = violations(&md, &|p| std::fs::read_to_string(p).unwrap_or_default());
+        for c in ["sql-ident", "sql-safety"] {
+            let member = md
+                .workspace_packages()
+                .into_iter()
+                .find(|p| p.name.as_str() == c)
+                .unwrap_or_else(|| panic!("{c} is not a workspace member"));
+            assert_eq!(layer_of(&md, member), Some(Layer::Core), "{c}");
+            assert!(v.iter().all(|x| x.krate != c), "{c}: {v:?}");
+        }
+        assert!(
+            md.workspace_packages()
+                .iter()
+                .all(|p| p.name.as_str() != "hacivat-fuzz"),
+            "fuzz/ must stay excluded"
+        );
+        // Only sql-safety reaches sqlparser directly.
+        let direct: Vec<&str> = md
+            .workspace_packages()
+            .iter()
+            .filter(|p| p.dependencies.iter().any(|d| d.name == "sqlparser"))
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(direct, ["sql-safety"]);
     }
 
     #[test]

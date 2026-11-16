@@ -22,6 +22,10 @@ icu_locale.workspace = true
 icu_normalizer.workspace = true
 # ## m3a-t01b-seams: `gen-sql-tables` writes the keyword tables as `phf` maps (Task 3, P6).
 phf_codegen.workspace = true
+# ## m3b-t01a-seams (fix round 1, I3): `gen-fn-catalog --check` recomputes
+# `sql-safety/data/functions.digest` with the same XXH3-64 as `sql_safety::classified_hash`
+# (Task 3). `bench-sql` runs the perf tests as subprocesses, so xtask takes no SQL crate.
+twox-hash.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
