@@ -1,6 +1,6 @@
 //! M3b Task 1c: the run service's M3b seams fail closed (F31) until their tasks: the gate
-//! denies, parameter preparation refuses placeholders, the history is disabled, the
-//! classifier pool answers `sql-safety`'s stub and denies on the read-only path, Count rows
+//! denies, parameter preparation refuses placeholders, the history was disabled (until Task
+//! 17), the classifier pool answers `sql-safety`'s stub and denies on the read-only path, Count rows
 //! answers `Internal`, and a request with M3b-only fields sends nothing. M3a's run shape
 //! still builds and runs.
 
@@ -98,10 +98,6 @@ impl ParamValueStore for NoValues {
         None
     }
     fn put(&self, _: &ProfileId, _: &str, _: BindValue) {}
-}
-
-fn tmp() -> std::path::PathBuf {
-    tempfile::tempdir().unwrap().keep().join("history.sqlite")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -223,14 +219,22 @@ fn prepare_stub_passes_plain_units_through() {
 // ---------------------------------------------------------------------------------------------
 // History (Task 17)
 
+// ## m3b-t17-history (named exception): the stub's `Disabled` became the store (Task 17);
+// the rest of its behaviour is `tests/history.rs`.
 #[tokio::test]
-async fn history_stub_is_disabled() {
-    let path = tmp();
+async fn history_opens_with_the_d061_defaults() {
+    // A folder removed at the end (the store writes a file; T1c's kept `tmp()` folder is gone).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    let store = HistoryStore::open(path.clone(), HistoryConfig::default())
+        .await
+        .expect("the history opens");
+    assert!(path.exists());
+    store.shutdown(std::time::Duration::from_secs(2)).await;
     assert!(matches!(
-        HistoryStore::open(path.clone(), HistoryConfig::default()).await,
+        store.search(Default::default()).await,
         Err(HistoryError::Disabled)
     ));
-    assert!(!path.exists(), "nothing touched on disk");
     let cfg = HistoryConfig::default();
     assert_eq!(
         (cfg.per_source, cfg.max_age_days, cfg.statement_cap),
