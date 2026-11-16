@@ -901,3 +901,86 @@ wired into Run before Task 24 (R-M3-52).
     (`hv-confirm-type-untypeable`). PO list: whether such statements need another way to run.
   - *IME (m7):* Escape during a composition in the type field ends the composition (its text
     stays) and keeps the dialog; the next Escape cancels.
+
+## m3b-t28 — conformance
+
+**What the matrix is.** `crates/core/hacivat-exec/tests/docker_m3b_matrix.rs` holds twelve
+Docker tests (the E-rows of the M3b gate), with their helpers in `tests/common/mod.rs`
+(`// ## m3b-t28-matrix`, module `t28`). Each case goes the app's M3b way:
+
+1. a console document in the context the console read at bind;
+2. `resolve_units` (Execute3), or one `Verbatim` unit sent as written (Run as one);
+3. `prepare_units`, every prompt answered by name (`prepare_units_with`);
+4. the real `ClassifyPool` (`classify_units`) over exactly the prepared bytes, in the
+   session's own context read from the server (lexing-mode setting, PostgreSQL's search path or
+   the MySQL family's `DATABASE()`, the server version; `guard_ctx_in`, modes known);
+5. `gate` on the live connection (the session snapshot's transaction status, owner and mode),
+   with `Confirm`/`Warn` answered through `apply_answer`;
+6. `ExecService::run`, a real session from a `ConnectionManager` with `ManagerConfig::m2b()`, and
+   the typed driver.
+
+An admin side channel (M3a T31's `matrix::Side`) checks what reached the server after each
+case.
+
+- **Lines.** These come from `matrix::lines()`: the `targets(Some(engine))` properties, never a
+  list. Under `full` they are PostgreSQL 14–18, MySQL 8.0 and 8.4, and MariaDB 10.6, 10.11 and
+  11.4; under `pr` they are pg17 and mysql84; SQLite (a file per test) runs in every set.
+  - Every test ends in `Table::finish`. It fails when a line of the active set recorded nothing,
+    and it writes `t28-<test>.tsv`.
+  - Per-engine differences are explicit expectations, never skips. Examples: no `CALL` on
+    SQLite; PostgreSQL's Run-as-one cells are `Text` (the simple protocol names no type, T13);
+    `EXPLAIN ANALYZE` is a syntax error on MariaDB and SQLite; no notices on SQLite.
+- **Production writes.** A production console here is `ManagerConfig::m2b()`, which keeps
+  production writable as Task 26 will. The production policy flag is never named (P-M3b-7). A
+  production profile starts in Manual (`tx::default_mode`); the test asserts that and sets Auto
+  for the own-form legs.
+- **The 2 s deadline.** `ExecService::run` always sends D-014's 5 minutes, so the deadline legs
+  use `Con::run_with_deadline`. It sends the same prepared units, with the gate's verdicts and
+  effects, straight to the session with a 2 s `confirm_deadline` (the T31 precedent of a pass
+  through `SessionHandle::run`). That reply is `Tx(ConfirmTimedOut)`, and the events carry
+  `CommitDecided { RollBack, by_deadline: true }`.
+- **Read-only, layer by layer.** The cases below run on a read-only console whose guard asks
+  the real pool:
+  - The gate denies `INSERT`, and the run service refuses a denied plan.
+  - With the gate bypassed, the session's first-keyword input layer refuses it (DEMO-7, outcome
+    `input`).
+  - A write that starts like a read is denied by the gate. With the gate bypassed, step 0b
+    denies it (`exec-deny-classifier`):
+    - PG: a writable CTE;
+    - MySQL family: `FOR UPDATE`;
+    - SQLite: `WITH … INSERT`.
+  - With a classifier that allows everything (`AllowAll`), the server's own layers stop the
+    same statement:
+    - PostgreSQL and the MySQL family answer `25006`, the read-only transaction (the MySQL
+      family's 1792, by its SQLSTATE);
+    - SQLite answers `23`, the read-only connection's authorizer.
+  - On PostgreSQL, a read that the real classifier allows still writes through a view over a
+    `VOLATILE` function. The server stops it with `25006`.
+  - The side channel's row count is unchanged after every step.
+- **Mutation check (plan Step 2).** Undo's `ROLLBACK TO SAVEPOINT` was replaced by `RELEASE`
+  only in `session/confirm.rs`. `confirm_in_tx_both_forms_per_engine` then went red on pg17
+  ("Undo keeps the user's transaction": `Failed`, not `InTx`). The mutation was reverted.
+- **Case 12** (`physical_memory_bytes_is_known`) is not in this file: `hacivat-exec` may not
+  reach `hacivat-ui-core` (layering). `hacivat-ui-core`'s
+  `physical_memory_is_known_on_this_platform` runs in `build-test` on all three OSes.
+- **Case 11** runs both offline and on Docker. Task 15's
+  `gate::gate_end_to_end_over_real_classify` is no longer `#[ignore]`d (a named exception in
+  `tests/gate.rs`), and the Docker case runs the same shapes on live production, development and
+  read-only consoles of every line. `DROP TABLE`/`TRUNCATE` on production ask without a typed
+  name (R-M3-55 types only unsafe-DML targets and `DROP DATABASE`/`SCHEMA`, which the rows
+  include).
+
+| Case (test) | pg14–18 | mysql80, mysql84 | mariadb106, 1011, 114 | SQLite |
+|---|---|---|---|---|
+| 1 `binds_round_trip_every_type_hint` | 14 hints + NULL | 11 hints + NULL | 11 hints + NULL | 9 hints + NULL |
+| 1 `value_with_quote_is_bound_not_spliced` | bound | bound | bound | bound |
+| 2 `multi_result_call_and_run_as_one` | CALL 1 tab (INOUT); as one 3 text tabs | CALL 3 tabs; as one 2 | CALL 3 tabs; as one 2 | as one 2 |
+| 3 `error_policy_ask_ignore_stop_and_rollback_and_continue` | Ignore, Stop, Roll back and continue (Auto, Manual) | Ignore, Stop, Ignore in tx (Auto, Manual) | same as MySQL | same as MySQL |
+| 4 `confirm_in_tx_both_forms_per_engine` | own ×3, savepoint ×4, Manual keep+undo, Smart | same | same | same |
+| 5 `smart_mode_opens_only_before_writes` | read: none; write: opened | same | same | same |
+| 6 `explain_analyze_dml_is_rolled_back` | wrap, ran, rows kept | wrap, ran, rows kept | wrap, 42000 (syntax), rows kept | wrap, 1 (syntax), rows kept |
+| 7 `read_only_classifier_denies_and_server_layers_hold` | gate, input, 0b, server 25006, view 25006 | gate, input, 0b, server 25006 | gate, input, 0b, server 25006 | gate, input, 0b, authorizer 23 |
+| 8 `notices_and_warnings_reach_the_log` | 2 notices | 1 warning | 1 warning | none |
+| 9 `count_rows_matches_count_star` | 20, 15 | 20, 15 | 20, 15 | 20, 15 |
+| 10 `type_goldens_match` | 72 values (T7 file) | 31 values (T7 file) | 31 values (T7 file) | 8 values |
+| 11 `gate_end_to_end_over_real_classify` | 9 × 3 consoles | 9 × 3 | 9 × 3 | 5 × 3 |
