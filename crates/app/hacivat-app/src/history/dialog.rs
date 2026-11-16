@@ -35,7 +35,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hacivat_exec::{HistoryHit, HistoryQuery, HistoryStore, Outcome};
+use hacivat_exec::{HistoryConfig, HistoryHit, HistoryQuery, HistoryRecord, HistoryStore, Outcome};
 use hacivat_l10n::ArgValue;
 use hacivat_proto::ProfileId;
 use hacivat_ui::button::{Button, ButtonKind};
@@ -46,11 +46,12 @@ use hacivat_ui::input::{InputEvent, TextInput};
 use hacivat_ui::popover::{A11yNode, Declare as _, Tip};
 use hacivat_ui::select::{Select, SelectEvent, SelectOption};
 use hacivat_ui::text::{Label, TextFn, TextSource, paragraph, scroll_viewport};
+use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Div, Entity,
-    FluentBuilder as _, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Task, Window, div, px,
+    EntityInputHandler as _, FluentBuilder as _, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyDownEvent, ParentElement, Render, Role, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Task, Window, div, px,
 };
 use hacivat_ui_core::keymap::{KeymapPlatform, display_chord, parse_chord};
 use hacivat_ui_core::theme::{Theme, ThemeMode, focus_outline};
@@ -63,7 +64,7 @@ use crate::connections::prompt_kit::{
     visible,
 };
 use crate::console::{ConsoleId, Consoles};
-use crate::exec_ui::confirm::{closes_dialog, scroll_body, sql_inset};
+use crate::exec_ui::confirm::{closes_dialog, console_facts, scroll_body, sql_inset};
 use crate::exec_ui::marks::{duration_text, message};
 use crate::shell::Workspace;
 
@@ -75,6 +76,8 @@ pub const DEBOUNCE: Duration = Duration::from_millis(150);
 const LIST_MAX_PX: f32 = 250.0;
 /// The most characters of a stored error message shown.
 const SERVER_TEXT_MAX_CHARS: usize = 4096;
+/// The most hits one search shows (the store's default).
+const SEARCH_LIMIT: u32 = 200;
 /// The most characters of the search text a no-match sentence quotes.
 const QUERY_MAX_CHARS: usize = 80;
 /// How often, and how many times, Open in new console looks for the new console's editor (the
@@ -89,6 +92,70 @@ const OUTCOMES: [Option<Outcome>; 4] = [
     Some(Outcome::Failed),
     Some(Outcome::Cancelled),
 ];
+
+// ## m3b-t27-history (fix round 1, I1 and m4)
+
+/// What the masks of the run service (`mask_secrets`: `'***'`, `/* *** */`, `-- ***`) and of
+/// the store (`'***'`, `***`) all contain.
+const MASK: &str = "***";
+
+/// What Insert appends to a statement the store cut at its size cap, so the cut text never runs
+/// as if it were whole.
+pub const TRUNCATION_MARK: &str = "\n…";
+
+/// Whether `r` holds masked values: the store or the run service took secrets (or every
+/// literal, `mask_secrets`' over-masking) out of it. Such a text never ran as it reads.
+pub fn masked(r: &HistoryRecord) -> bool {
+    r.redacted || r.statement_masked.contains(MASK)
+}
+
+/// Whether the store cut `r`'s statement at its size cap (a prefix ending on a character
+/// boundary, so within 3 bytes of the cap; a statement that long that was not cut counts too:
+/// fail-closed).
+pub fn truncated(r: &HistoryRecord) -> bool {
+    r.statement_masked.len() + 3 >= HistoryConfig::default().statement_cap
+}
+
+/// Whether `r` may be inserted and run as it was saved (review I1, m4): neither masked nor cut.
+/// Insert stays available either way.
+pub fn runnable(r: &HistoryRecord) -> bool {
+    !masked(r) && !truncated(r)
+}
+
+/// The text Insert puts in the editor: the stored statement, a cut one with
+/// [`TRUNCATION_MARK`].
+fn insert_text(r: &HistoryRecord) -> String {
+    let mut text = r.statement_masked.to_string();
+    if truncated(r) {
+        text.push_str(TRUNCATION_MARK);
+    }
+    text
+}
+
+/// Says why an action did nothing (review m3): a toast.
+fn refuse(id: &'static str, cx: &mut App) {
+    ToastQueue::push(
+        cx,
+        Toast::new(ToastKind::Error, crate::l10n_global::text_fn_id(id)),
+    );
+}
+
+// ## m3b-t27-history (fix round 1, I2)
+/// Puts console `console`'s tab in front in `window` (its pane's active tab, that pane
+/// focused): History acts only on a console the user sees. `false` when the console or its tab
+/// is gone.
+fn bring_forward(console: ConsoleId, window: &mut Window, cx: &mut App) -> bool {
+    let Some(tab) = Consoles::get(cx, console).map(|s| s.tab) else {
+        return false;
+    };
+    let Some(ws) = window.root::<Workspace>().flatten() else {
+        return false;
+    };
+    if ws.read(cx).active_tab() == Some(tab) {
+        return true;
+    }
+    ws.update(cx, |ws, cx| ws.focus_tab(tab, cx))
+}
 
 /// Where the list stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +187,8 @@ pub struct HistoryDialog {
     seq: u64,
     /// The search whose answer is shown.
     shown_seq: u64,
+    /// Searches superseded before they answered (tests).
+    stale: u64,
     /// "Today" is the day of this instant (Unix milliseconds).
     now_ms: i64,
     /// The selection moved: the list scrolls it into view at the next frame.
@@ -154,6 +223,10 @@ pub fn open(console: ConsoleId, window: &mut Window, cx: &mut App) {
     {
         let input = open.read(cx).input.read(cx).focus_handle(cx);
         window.focus(&input, cx);
+        return;
+    }
+    // Fix round 1 (I2): the console Insert goes into is the one in front.
+    if !bring_forward(console, window, cx) {
         return;
     }
     let store = super::store(cx);
@@ -262,6 +335,7 @@ impl HistoryDialog {
             answered: String::new(),
             seq: 0,
             shown_seq: 0,
+            stale: 0,
             now_ms,
             reveal: false,
             list: ScrollHandle::new(),
@@ -299,6 +373,7 @@ impl HistoryDialog {
                 .get(self.outcome.read(cx).selected())
                 .copied()
                 .flatten(),
+            limit: SEARCH_LIMIT,
             ..HistoryQuery::default()
         }
     }
@@ -309,6 +384,11 @@ impl HistoryDialog {
         let Some(store) = self.store.clone() else {
             return;
         };
+        // An older search still unanswered is superseded: its task is dropped with
+        // `searching`, and an answer already on its way is refused by the `seq` check.
+        if self.shown_seq < self.seq {
+            self.stale += 1;
+        }
         self.seq += 1;
         let seq = self.seq;
         let q = self.query(cx);
@@ -394,14 +474,22 @@ impl HistoryDialog {
     /// dialog. Insert and run then selects what it inserted and runs it with the editor's own
     /// Run, after the dialog has gone: the same orchestrator, the same gate as any Run.
     fn insert(&mut self, run: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(sql) = self
-            .selected_hit()
-            .map(|h| h.record.statement_masked.to_string())
-        else {
+        let Some(record) = self.selected_hit().map(|h| h.record.clone()) else {
             return;
         };
+        // Fix round 1 (I1, m4): a masked or cut text never runs; the preview's line says why.
+        if run && !runnable(&record) {
+            return;
+        }
         let console = self.console;
-        let Some(range) = crate::exec_ui::inserted_at_caret(console, &sql, cx) else {
+        // Fix round 1 (I2): never into a console that is not in front.
+        if !bring_forward(console, window, cx) {
+            refuse("hv-history-console-gone", cx);
+            return;
+        }
+        let Some(range) = crate::exec_ui::inserted_at_caret(console, &insert_text(&record), cx)
+        else {
+            refuse("hv-history-insert-refused", cx);
             return;
         };
         self.close(window, cx);
@@ -440,6 +528,8 @@ impl HistoryDialog {
         cx.spawn(async move |this, cx| {
             if work.await.is_ok() {
                 let _ = this.update(cx, |d, cx| d.search_now(cx));
+            } else {
+                cx.update(|cx| refuse("hv-history-pin-failed", cx));
             }
         })
         .detach();
@@ -455,7 +545,7 @@ impl HistoryDialog {
         if !self.conns.contains_key(&profile) {
             return;
         }
-        let sql = hit.record.statement_masked.to_string();
+        let sql = insert_text(&hit.record);
         self.close(window, cx);
         window.defer(cx, move |window, cx| {
             let Some(ws) = window.root::<Workspace>().flatten() else {
@@ -491,6 +581,7 @@ impl HistoryDialog {
                         return;
                     }
                 }
+                cx.update(|cx| refuse("hv-history-open-failed", cx));
             })
             .detach();
         });
@@ -547,6 +638,16 @@ impl HistoryDialog {
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let stroke = &event.keystroke;
         let m = &stroke.modifiers;
+        // Fix round 1 (m2, the T21 m7 rule): a composing field lets its keys bubble here where
+        // the platform did not give them to the IME: Escape ends the composition (its text
+        // stays, the dialog stays); Enter, ⌘↵ and Ctrl+↵ do nothing.
+        if self.input.read(cx).is_composing() && matches!(stroke.key.as_str(), "escape" | "enter") {
+            if stroke.key == "escape" {
+                self.input.update(cx, |i, cx| i.unmark_text(window, cx));
+            }
+            cx.notify();
+            return cx.stop_propagation();
+        }
         match stroke.key.as_str() {
             "escape" => self.close(window, cx),
             "w" if closes_dialog(stroke, cx) => self.close(window, cx),
@@ -720,16 +821,22 @@ impl HistoryDialog {
         };
         let mut children: Vec<AnyElement> = vec![scroll_viewport().into_any_element()];
         if self.hits.is_empty() && self.state != ListState::Loading {
-            let text = match self.state {
-                ListState::Failed => message(cx, "hv-history-failed", vec![]),
-                _ if self.answered.trim().is_empty() => message(cx, "hv-history-empty", vec![]),
-                _ => message(
-                    cx,
-                    "hv-history-nomatch",
-                    vec![(
-                        "q",
-                        ArgValue::Text(visible(self.answered.trim(), QUERY_MAX_CHARS)),
-                    )],
+            // Fix round 1 (m9): each state's sentence has its own ID.
+            let (text, id) = match self.state {
+                ListState::Failed => (message(cx, "hv-history-failed", vec![]), "history-failed"),
+                _ if self.answered.trim().is_empty() => {
+                    (message(cx, "hv-history-empty", vec![]), "history-empty")
+                }
+                _ => (
+                    message(
+                        cx,
+                        "hv-history-nomatch",
+                        vec![(
+                            "q",
+                            ArgValue::Text(visible(self.answered.trim(), QUERY_MAX_CHARS)),
+                        )],
+                    ),
+                    "history-nomatch",
                 ),
             };
             // The well restores text-3 on its own fill (NOTES cross-cutting #8).
@@ -746,7 +853,7 @@ impl HistoryDialog {
                             c.text_3.to_hsla(),
                         )
                         .centered()
-                        .id("history-empty"),
+                        .id(id),
                     )
                     .into_any_element(),
             );
@@ -965,15 +1072,15 @@ impl HistoryDialog {
                     .child(div().flex_1().min_w_0().child(meta))
                     .child(actions),
             );
-        if self.here.is_some_and(|here| here != r.profile)
-            && let Some(target) = self.here.and_then(|h| self.conn(h))
-        {
+        // Fix round 1 (I2): always says which console Insert and Insert and run go into (its
+        // title and environment mark), not only when the entry ran on another connection.
+        if let Some(target) = console_facts(cx, self.console) {
             let text = message(
                 cx,
                 "hv-history-target",
                 vec![(
                     "name",
-                    ArgValue::Text(visible(&target.name, NAME_MAX_CHARS)),
+                    ArgValue::Text(visible(&target.title, NAME_MAX_CHARS)),
                 )],
             );
             pane = pane.child(
@@ -1002,6 +1109,22 @@ impl HistoryDialog {
                         ),
                     ),
             );
+        }
+        // Fix round 1 (I1, m4): why Insert and run is off for this entry, above the inset so
+        // it stays in sight at 960 x 600.
+        if masked(r) {
+            pane = pane.child(line(
+                IconName::CircleAlert,
+                message(cx, "hv-history-masked-line", vec![]),
+                "history-masked-line",
+            ));
+        }
+        if truncated(r) {
+            pane = pane.child(line(
+                IconName::CircleAlert,
+                message(cx, "hv-history-truncated-line", vec![]),
+                "history-truncated-line",
+            ));
         }
         pane = pane.child(sql_inset(&theme, &r.statement_masked, "history-sql"));
         if r.redacted {
@@ -1077,6 +1200,8 @@ impl HistoryDialog {
                 platform,
             ));
         let none = self.selected_hit().is_none();
+        // Fix round 1 (I1, m4): a masked or cut entry is never run from here.
+        let no_run = self.selected_hit().is_none_or(|h| !runnable(&h.record));
         let copy = Button::new("history-copy", message(cx, "hv-history-copy", vec![]))
             .icon(IconName::Copy)
             .on_raised(true)
@@ -1089,7 +1214,7 @@ impl HistoryDialog {
         )
         .icon(IconName::Play)
         .on_raised(true)
-        .disabled(none)
+        .disabled(no_run)
         .focus_handle(self.insert_run.clone())
         .on_click(cx.listener(|d, event: &ClickEvent, window, cx| {
             if event.click_count() <= 1 {
@@ -1186,9 +1311,14 @@ impl Render for HistoryDialog {
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let title = message(cx, "hv-history-title", vec![]);
+        // Fix round 1 (m5): a list at the search's cap says there may be more.
         let count = message(
             cx,
-            "hv-history-count",
+            if self.hits.len() >= SEARCH_LIMIT as usize {
+                "hv-history-count-capped"
+            } else {
+                "hv-history-count"
+            },
             vec![("n", ArgValue::Count(self.hits.len() as u64))],
         );
         let sub = div().child(
@@ -1243,6 +1373,16 @@ pub struct Shown {
     pub searches: u64,
     /// The search whose answer is shown.
     pub answered: u64,
+    // ## m3b-t27-history (fix round 1)
+    /// The console Insert goes into.
+    pub console: ConsoleId,
+    /// Insert and run is offered for the selected entry.
+    pub can_run: bool,
+    /// The store query the filters make now.
+    pub query_profile: Option<ProfileId>,
+    pub query_outcome: Option<Outcome>,
+    /// Searches superseded before they answered (their answers are never shown).
+    pub stale: u64,
 }
 
 /// What the open history dialog shows; `None` when none is open.
@@ -1262,7 +1402,29 @@ pub fn shown(cx: &App) -> Option<Shown> {
         query: d.input.read(cx).value().to_string(),
         searches: d.seq,
         answered: d.shown_seq,
+        console: d.console,
+        can_run: d.selected_hit().is_some_and(|h| runnable(&h.record)),
+        query_profile: d.query(cx).profile,
+        query_outcome: d.query(cx).outcome,
+        stale: d.stale,
     })
+}
+
+/// Picks outcome choice `index` (0 = any, 1 = succeeded, 2 = failed, 3 = cancelled) as the
+/// select does when the user picks it, and searches (tests).
+#[cfg(feature = "test-support")]
+pub fn pick_outcome(index: usize, cx: &mut App) {
+    let Some(view) = cx
+        .try_global::<Open>()
+        .and_then(|o| o.0.as_ref())
+        .and_then(|v| v.upgrade())
+    else {
+        return;
+    };
+    view.update(cx, |d, cx| {
+        d.outcome.update(cx, |s, cx| s.set_selected(index, cx));
+        d.search_now(cx);
+    });
 }
 
 /// Shots fixtures for `design/m3b-safe` surface 11: the dialog over a console with given hits
@@ -1475,7 +1637,7 @@ pub mod fixtures {
         let mine = |_: usize, h: &HistoryHit| h.record.profile == here;
         let (hits, query, all_conns, outcome, selected) = match s {
             Scenario::List => (pick(&mine), "", false, 0, 0),
-            Scenario::Search => (pick(&|i, _| i == 1 || i == 7), "musteri", true, 0, 0),
+            Scenario::Search => (pick(&|i, _| i == 1 || i == 7), "musteri", true, 0, 1),
             Scenario::AllFailed => (
                 pick(&|_, h| h.record.outcome == Outcome::Failed),
                 "",

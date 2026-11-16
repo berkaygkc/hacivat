@@ -174,6 +174,9 @@ pub(crate) struct HistoryUnit {
     pub id: UnitId,
     pub masked: Arc<str>,
     pub binds: Arc<[BindValue]>,
+    // ## m3b-t27-history (named exception, T16 carry): the masked text differs from the text
+    // sent (`mask_secrets` masked a literal or comment), so the history shows its marker.
+    pub redacted: bool,
 }
 
 /// The history's sink of one run: one [`HistoryRecord`] per `UnitEnded` of a unit that ran
@@ -274,7 +277,8 @@ impl HistorySink {
             error_message,
             tx_mode: snapshot.tx.mode,
             run: Some(self.run),
-            redacted: false,
+            // ## m3b-t27-history (named exception, T16 carry)
+            redacted: u.redacted,
         }))
     }
 }
@@ -429,6 +433,8 @@ mod tests {
                 id: unit,
                 masked: "UPDATE t SET pw = ?".into(),
                 binds: Arc::from(vec![bind("s3cret")]),
+                // ## m3b-t27-history (named exception)
+                redacted: false,
             }]),
             session,
             started: HashMap::new(),
@@ -447,6 +453,24 @@ mod tests {
         assert_eq!(record.outcome, Outcome::Cancelled);
         assert_eq!(&*record.statement_masked, "UPDATE t SET pw = ?");
         assert_eq!((record.rows_affected, record.rows_fetched), (None, None));
+        // ## m3b-t27-history (named exception, T16 carry): the unit's mask flag reaches the
+        // record (the history dialog's marker and its Insert and run guard).
+        assert!(!record.redacted);
+        sink.units = Arc::from(vec![HistoryUnit {
+            id: unit,
+            masked: "ALTER ROLE app PASSWORD '***'".into(),
+            binds: Arc::from(Vec::new()),
+            redacted: true,
+        }]);
+        let masked = sink
+            .map(&RunEvent::UnitEnded {
+                unit,
+                outcome: UnitEnd::Cancelled,
+                exec_ms: 0,
+                fetch_ms: 0,
+            })
+            .expect("a record");
+        assert!(masked.redacted);
         // A skipped unit records nothing.
         assert!(
             sink.map(&RunEvent::UnitEnded {

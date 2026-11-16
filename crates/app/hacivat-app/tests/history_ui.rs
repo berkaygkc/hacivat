@@ -14,19 +14,23 @@ use hacivat_app::exec_ui;
 use hacivat_app::exec_ui::context::SqlContext;
 use hacivat_app::history::dialog::{self, DEBOUNCE, HISTORY_LAYER_ID};
 use hacivat_driver::fake::{FakeDriver, FakeTypedCall};
-use hacivat_exec::{HistoryConfig, HistoryOrigin, HistoryRecord, HistoryStore, Outcome};
+use hacivat_exec::{HistoryOrigin, HistoryQuery, HistoryRecord, HistoryStore, Outcome};
 use hacivat_proto::{DbmsKind, EnvTag, ProfileId};
 use hacivat_session::session::TxMode;
 use hacivat_ui_core::gpui_surface::EntityInputHandler as _;
 use hacivat_ui_editor::EditorView;
 use support::*;
 
-/// A console over a FakeDriver session of `orders-dev` and a history store holding records.
+/// A console over a FakeDriver session of `orders-dev` and the app's history store (opened at
+/// boot, handed to the dialog by `open_history`) holding records.
 struct History {
     vcx: &'static mut VisualTestContext,
     console: ConsoleId,
+    profile: ProfileId,
     editor: Entity<EditorView>,
     fake: Arc<FakeDriver>,
+    store: Arc<HistoryStore>,
+    rt: tokio::runtime::Handle,
 }
 
 fn now_ms() -> i64 {
@@ -60,8 +64,7 @@ fn record(profile: ProfileId, sql: &str, outcome: Outcome, ago_ms: i64) -> Histo
     }
 }
 
-/// The shell, the console and the store with `sqls` recorded (the first one newest), handed
-/// to the dialog.
+/// The shell, the console and the app's store with `sqls` recorded (the first one newest).
 fn history(cx: &mut TestAppContext, sqls: &[&str]) -> History {
     let vcx = shell_with_connections(cx, "en");
     in_window(vcx, |window, _| window.activate_window());
@@ -85,13 +88,14 @@ fn history(cx: &mut TestAppContext, sqls: &[&str]) -> History {
         vcx.cx
             .read(|cx| exec_ui::sql_context(console, cx) != SqlContext::Pending)
     });
-    let dir = temp_dir(vcx);
-    let store = futures::executor::block_on(rt.spawn(HistoryStore::open(
-        dir.join("history.sqlite"),
-        HistoryConfig::default(),
-    )))
-    .expect("the open task")
-    .expect("the history opens");
+    // Fix round 1 (the T24 merge carry): the store the app opens at boot reaches the dialog.
+    wait_until(vcx, "the history store", |vcx| {
+        vcx.cx.read(|cx| hacivat_app::history::store(cx).is_some())
+    });
+    let store = vcx
+        .cx
+        .read(hacivat_app::history::store)
+        .expect("the history store");
     let sink = store.sink();
     for (i, sql) in sqls.iter().enumerate() {
         let outcome = if sql.contains("shipmnts") {
@@ -102,8 +106,6 @@ fn history(cx: &mut TestAppContext, sqls: &[&str]) -> History {
         sink.try_send(Arc::new(record(profile, sql, outcome, 1_000 * i as i64)))
             .expect("room in the sink");
     }
-    vcx.cx
-        .update(|cx| hacivat_app::history::set_store(Some(store), cx));
     let editor = vcx.cx.read(|cx| {
         hacivat_app::console::Consoles::get(cx, console)
             .and_then(|s| s.editor.clone())
@@ -112,8 +114,11 @@ fn history(cx: &mut TestAppContext, sqls: &[&str]) -> History {
     History {
         vcx,
         console,
+        profile,
         editor,
         fake,
+        store,
+        rt,
     }
 }
 
@@ -184,6 +189,34 @@ impl History {
 
     fn closed(&self) -> bool {
         !layer_ids(self.vcx).contains(&HISTORY_LAYER_ID)
+    }
+
+    /// Records `rec` (the dialog's next search sees it).
+    fn put(&self, rec: HistoryRecord) {
+        self.store
+            .sink()
+            .try_send(Arc::new(rec))
+            .expect("room in the sink");
+    }
+
+    /// What the store holds for `q`, read on the core runtime.
+    fn stored(&self, q: HistoryQuery) -> Vec<hacivat_exec::HistoryHit> {
+        futures::executor::block_on(self.rt.spawn(self.store.search(q)))
+            .expect("the search task")
+            .expect("the search")
+    }
+
+    fn active_tab(&self) -> Option<hacivat_ui::panes::TabId> {
+        let ws = workspace(self.vcx);
+        self.vcx.cx.read(|cx| ws.read(cx).active_tab())
+    }
+
+    fn console_tab(&self) -> hacivat_ui::panes::TabId {
+        self.vcx.cx.read(|cx| {
+            hacivat_app::console::Consoles::get(cx, self.console)
+                .expect("the console")
+                .tab
+        })
     }
 }
 
@@ -309,7 +342,8 @@ fn cmd_enter_inserts_and_runs_through_the_gate(cx: &mut TestAppContext) {
     h.open();
     h.keys(run_chord());
     assert!(h.closed());
-    assert_eq!(h.text(), "SELECT 42 AS answer;");
+    // The first run was recorded (T24's history sink), as the unit it ran: the newest entry.
+    assert_eq!(h.text().trim_end_matches(';'), "SELECT 42 AS answer");
     h.vcx.run_until_parked();
     assert_eq!(h.queries().len(), sent, "Run refused it: nothing was sent");
     stop_core_runtime_test(cx);
@@ -329,11 +363,12 @@ fn redacted_entry_shows_the_marker(cx: &mut TestAppContext) {
     // The store kept only the redacted text.
     let s = h.shown();
     assert_eq!(s.selected, Some(0));
-    assert!(
-        s.statements[0].contains("PASSWORD '***'"),
-        "{:?}",
-        s.statements
-    );
+    // Fix round 1 (m8): a failure never prints the statements (a regressed redaction would
+    // print the secret).
+    assert!(s.statements[0].contains("PASSWORD '***'"));
+    // Fix round 1 (I1): never offered to run; the preview says why.
+    assert!(!s.can_run);
+    assert!(text_of(h.vcx, "history-masked-line").is_some());
     assert_eq!(
         text_of(h.vcx, "history-redacted-chip").as_deref(),
         Some("redacted")
@@ -371,7 +406,7 @@ fn empty_and_no_match_states(cx: &mut TestAppContext) {
     );
     h.search("faturalar");
     assert_eq!(
-        text_of(h.vcx, "history-empty").as_deref(),
+        text_of(h.vcx, "history-nomatch").as_deref(),
         Some("Nothing matches “faturalar”.")
     );
     // Nothing to insert: Enter does nothing and the dialog stays; Escape closes it.
@@ -379,5 +414,219 @@ fn empty_and_no_match_states(cx: &mut TestAppContext) {
     assert!(!h.closed());
     h.keys("escape");
     assert!(h.closed());
+    stop_core_runtime_test(cx);
+}
+
+// ## m3b-t27-history (fix round 1)
+
+fn secondary(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("cmd-{key}")
+    } else {
+        format!("ctrl-{key}")
+    }
+}
+
+/// I1: a text the store or the run service masked never ran as it reads: Insert and run is off
+/// (button and chord) and the preview says why; Insert still works. Both the flagged entry and
+/// an over-masked one the store did not flag (`mask_secrets` masks every literal once a
+/// `password` word appears).
+#[cfg(unix)]
+#[gpui::test]
+fn masked_entries_are_never_run(cx: &mut TestAppContext) {
+    let mut h = history(cx, &["ALTER ROLE raporcu PASSWORD 's3cret';"]);
+    h.put(record(
+        h.profile,
+        "UPDATE users SET name = '***' WHERE password IS NULL;",
+        Outcome::Ok,
+        -1_000,
+    ));
+    h.open();
+    assert_eq!(h.shown().statements.len(), 2);
+    for i in 0..2 {
+        assert_eq!(h.shown().selected, Some(i));
+        assert!(!h.shown().can_run, "an entry is offered to run");
+        assert!(text_of(h.vcx, "history-masked-line").is_some());
+        let sent = h.queries().len();
+        h.keys(run_chord());
+        assert!(!h.closed(), "Insert and run acted on a masked entry");
+        assert_eq!(h.text(), "");
+        assert_eq!(h.queries().len(), sent);
+        h.keys("down");
+    }
+    // Insert stays available.
+    h.keys("enter");
+    assert!(h.closed());
+    assert_eq!(h.text(), "ALTER ROLE raporcu PASSWORD '***';");
+    stop_core_runtime_test(cx);
+}
+
+/// m4: a statement the store cut at its size cap is never run, and Insert marks the cut.
+#[cfg(unix)]
+#[gpui::test]
+fn a_cut_entry_is_inserted_with_its_mark_and_never_run(cx: &mut TestAppContext) {
+    let mut h = history(cx, &[]);
+    let long = format!("SELECT '{}';", "x".repeat(70 << 10));
+    h.put(record(h.profile, &long, Outcome::Ok, 0));
+    h.open();
+    assert!(!h.shown().can_run);
+    assert!(text_of(h.vcx, "history-truncated-line").is_some());
+    h.keys(run_chord());
+    assert!(!h.closed());
+    h.keys("enter");
+    assert!(h.closed());
+    let text = h.text();
+    assert!(text.ends_with(dialog::TRUNCATION_MARK));
+    assert!(text.len() < long.len());
+    stop_core_runtime_test(cx);
+}
+
+/// I2: opened from another tab (Settings), History brings its console to the front and says
+/// which console Insert goes into; ⌘↵ then runs there, in sight.
+#[cfg(unix)]
+#[gpui::test]
+fn history_from_settings_brings_its_console_forward(cx: &mut TestAppContext) {
+    let mut h = history(cx, &["SELECT 7 AS seven;"]);
+    assert!(run(h.vcx, "workspace.open_settings"));
+    let console_tab = h.console_tab();
+    assert_ne!(h.active_tab(), Some(console_tab), "Settings is in front");
+    h.keys(&secondary("shift-h"));
+    wait_until(h.vcx, "the dialog's first search", |vcx| {
+        vcx.cx
+            .read(|cx| dialog::shown(cx).is_some_and(|s| s.loaded))
+    });
+    assert_eq!(h.shown().console, h.console);
+    assert_eq!(
+        h.active_tab(),
+        Some(console_tab),
+        "the console came forward"
+    );
+    assert_eq!(
+        text_of(h.vcx, "history-target").as_deref(),
+        Some("Goes into the console orders-dev; Run checks it there.")
+    );
+    h.keys(run_chord());
+    assert!(h.closed());
+    assert_eq!(h.active_tab(), Some(console_tab));
+    wait_until(h.vcx, "the run in the console in front", |_| {
+        h.queries().iter().any(|q| q.contains("SELECT 7 AS seven"))
+    });
+    stop_core_runtime_test(cx);
+}
+
+/// m7: the scope and outcome filters make the store query, and the list follows.
+#[cfg(unix)]
+#[gpui::test]
+fn filters_make_the_store_query(cx: &mut TestAppContext) {
+    let h = history(cx, &["SELECT 1 AS mine;"]);
+    let other = ProfileId::new();
+    h.put(record(other, "SELECT 2 AS theirs;", Outcome::Ok, 2_000));
+    h.put(record(
+        h.profile,
+        "SELECT * FROM shipmnts;",
+        Outcome::Failed,
+        3_000,
+    ));
+    h.open();
+    let s = h.shown();
+    assert_eq!(s.query_profile, Some(h.profile));
+    assert_eq!(s.query_outcome, None);
+    assert_eq!(s.statements.len(), 2, "this connection only");
+    click(h.vcx, "history-scope-all");
+    wait_until(h.vcx, "the all-connections answer", |_| {
+        let s = h.shown();
+        s.answered == s.searches && s.statements.len() == 3
+    });
+    assert_eq!(h.shown().query_profile, None);
+    for (index, outcome, n) in [
+        (1, Some(Outcome::Ok), 2),
+        (2, Some(Outcome::Failed), 1),
+        (3, Some(Outcome::Cancelled), 0),
+        (0, None, 3),
+    ] {
+        h.vcx.cx.update(|cx| dialog::pick_outcome(index, cx));
+        wait_until(h.vcx, "the outcome answer", |_| {
+            let s = h.shown();
+            s.answered == s.searches && s.statements.len() == n
+        });
+        assert_eq!(h.shown().query_outcome, outcome);
+    }
+    click(h.vcx, "history-scope-this");
+    wait_until(h.vcx, "this connection again", |_| {
+        let s = h.shown();
+        s.answered == s.searches && s.statements.len() == 2
+    });
+    stop_core_runtime_test(cx);
+}
+
+/// m7: Pin goes to the store, Copy SQL writes the stored text, Open in new console inserts it
+/// into a new console of the entry's connection.
+#[cfg(unix)]
+#[gpui::test]
+fn pin_copy_and_open_in_new_console(cx: &mut TestAppContext) {
+    let h = history(cx, &["SELECT 3 AS three;"]);
+    h.open();
+    click(h.vcx, "button-history-pin");
+    wait_until(h.vcx, "the pin", |_| {
+        h.stored(HistoryQuery::default())
+            .first()
+            .is_some_and(|hit| hit.pinned)
+    });
+    click(h.vcx, "button-history-copy");
+    assert_eq!(
+        h.vcx
+            .cx
+            .read_from_clipboard()
+            .and_then(|c| c.text())
+            .as_deref(),
+        Some("SELECT 3 AS three;")
+    );
+    let before = h.console_tab();
+    click(h.vcx, "button-history-open-new");
+    assert!(h.closed());
+    let ws = workspace(h.vcx);
+    settle_until(h.vcx, std::time::Duration::from_secs(10), || {
+        h.vcx.cx.read(|cx| {
+            let Some(tab) = ws.read(cx).active_tab() else {
+                return false;
+            };
+            tab != before
+                && hacivat_app::console::Consoles::by_tab(cx, tab)
+                    .and_then(|c| hacivat_app::console::Consoles::get(cx, c))
+                    .and_then(|s| s.editor.clone())
+                    .is_some_and(|e| {
+                        e.read(cx).snapshot().buffer.to_string() == "SELECT 3 AS three;"
+                    })
+        })
+    });
+    // The original console is untouched.
+    assert_eq!(h.text(), "");
+    stop_core_runtime_test(cx);
+}
+
+/// m7: an answer to an older search never replaces a newer one.
+#[cfg(unix)]
+#[gpui::test]
+fn a_stale_answer_is_dropped(cx: &mut TestAppContext) {
+    let h = history(cx, &["SELECT 1 AS mine;"]);
+    h.open();
+    // Two searches started in one update: the older (succeeded: one hit) cannot answer before
+    // the newer (failed only: none) has started.
+    let typed = h.shown().searches;
+    h.vcx.cx.update(|cx| {
+        dialog::pick_outcome(1, cx);
+        dialog::pick_outcome(2, cx);
+    });
+    wait_until(h.vcx, "the newer answer", |_| {
+        let s = h.shown();
+        s.searches > typed && s.answered == s.searches
+    });
+    h.vcx.run_until_parked();
+    let s = h.shown();
+    assert!(
+        s.statements.is_empty(),
+        "the older answer replaced the newer one"
+    );
+    assert!(s.stale >= 1, "the older answer was dropped");
     stop_core_runtime_test(cx);
 }

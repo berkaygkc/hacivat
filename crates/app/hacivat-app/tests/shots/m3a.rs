@@ -543,13 +543,15 @@ impl M3a {
             M3a::EscDialogFailed => ("#escalation-server-text", None),
             M3a::EscKeptWaiting => (MARKS_RS, None),
             M3a::ErrBar | M3a::ErrBarFailedTx | M3a::ErrBarFocused => ("#errbar-title", None),
-            // ## m3b-t27-history: the dialog's title; the empty states their sentence.
-            M3a::HistList
-            | M3a::HistSearch
-            | M3a::HistAllFailed
-            | M3a::HistRedacted
-            | M3a::HistOther => ("#history-title", None),
-            M3a::HistEmpty | M3a::HistNoMatch => ("#history-empty", None),
+            // ## m3b-t27-history (fix round 1, m9): a label only this state draws: the
+            // selected entry's ISO time (data), the empty states their own sentence.
+            M3a::HistList => ("#history-meta-time", Some("2026-11-16T11:21:00Z")),
+            M3a::HistSearch => ("#history-meta-time", Some("2026-11-15T06:30:00Z")),
+            M3a::HistAllFailed => ("#history-meta-time", Some("2026-11-16T08:04:00Z")),
+            M3a::HistRedacted => ("#history-meta-time", Some("2026-11-16T07:47:00Z")),
+            M3a::HistOther => ("#history-meta-time", Some("2026-11-16T11:32:00Z")),
+            M3a::HistEmpty => ("#history-empty", None),
+            M3a::HistNoMatch => ("#history-nomatch", None),
         }
     }
 
@@ -1534,9 +1536,15 @@ impl M3a {
                 let n = d.statements.len();
                 match self {
                     HistList => n == 5 && !d.all && drawn(frame, "history-row-sql"),
-                    HistSearch => n == 2 && d.query == "musteri",
+                    HistSearch => n == 2 && d.query == "musteri" && d.selected == Some(1),
                     HistAllFailed => n == 1 && drawn(frame, "history-server-text"),
-                    HistRedacted => d.selected == Some(2) && drawn(frame, "history-redacted-line"),
+                    // Fix round 1 (I1): a masked entry is never offered to run.
+                    HistRedacted => {
+                        d.selected == Some(2)
+                            && drawn(frame, "history-redacted-line")
+                            && drawn(frame, "history-masked-line")
+                            && !d.can_run
+                    }
                     HistOther => n == 8 && drawn(frame, "history-target"),
                     HistEmpty => n == 0 && d.query.is_empty(),
                     _ => n == 0 && d.query == "faturalar",

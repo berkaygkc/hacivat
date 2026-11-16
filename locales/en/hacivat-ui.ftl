@@ -2619,10 +2619,10 @@ hv-history-ran = { $n ->
         [one] Ran once
        *[other] Ran { $n } times
     }
-# The entry ran on another connection than the focused console's.
+# Which console Insert and Insert and run go into (always shown; fix round 1).
 # Variables:
-#   $name (String) - the focused console's connection, e.g. "orders-dev".
-hv-history-target = Goes into { $name }, the focused console; Run checks it there.
+#   $name (String) - that console's title, e.g. "orders-dev" or "orders-dev (2)".
+hv-history-target = Goes into the console { $name }; Run checks it there.
 # A row's time, in the regional format.
 # Variables:
 #   $t (DateTime) - when the statement last started, e.g. 2026-11-16T14:32:08.
@@ -2635,3 +2635,15 @@ hv-history-day = { DATETIME($t, dateStyle: "medium") }
 hv-history-conn-gone = Deleted connection
 # The history store could not answer (closed or damaged).
 hv-history-failed = The history can't be read right now.
+# Fix round 1: an entry with masked values (or one cut at the size limit) never runs as stored.
+hv-history-masked-line = Masked values: fill them in before running.
+hv-history-truncated-line = This statement was cut at 64 KiB when it was saved; it can't run as it is.
+# The header's subtitle when the search shows its most entries (there may be more).
+# Variables:
+#   $n (Number) - the entries the list shows, e.g. 200.
+hv-history-count-capped = { $n }+ entries
+# Toasts when an action did nothing.
+hv-history-console-gone = The console to insert into is closed.
+hv-history-insert-refused = The statement couldn't be inserted: the editor is read-only, composing text, or would get too large.
+hv-history-pin-failed = The pin couldn't be changed.
+hv-history-open-failed = The new console didn't open in time; nothing was inserted.

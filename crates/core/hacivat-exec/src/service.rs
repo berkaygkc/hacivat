@@ -561,6 +561,8 @@ impl ExecService {
                     // Never the text sent: its masked form (M3a's units carry no binds).
                     masked: prepared.map_or_else(|| u.text.clone(), |p| p.masked.clone()),
                     binds: prepared.map_or_else(|| Arc::from(Vec::new()), |p| p.binds.clone()),
+                    // ## m3b-t27-history (named exception, T16 carry): masked != final text.
+                    redacted: prepared.is_some_and(|p| p.masked != p.final_text),
                 }
             })
             .collect();

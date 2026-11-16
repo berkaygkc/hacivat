@@ -1152,6 +1152,8 @@ pub fn open_history(cx: &mut App) {
                     ),
                 );
             }
+            // ## m3b-t27-history (named exception): the history dialog reads the same store.
+            crate::history::set_store(Some(store.clone()), cx);
             let link = history_link(cx);
             link.store = Some(store.clone());
             if let Some(mut records) = link.rx.take() {

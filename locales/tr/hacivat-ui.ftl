@@ -2360,10 +2360,24 @@ hv-history-nomatch = “{ $q }” ile eşleşen bir şey yok.
 # Review: PO
 hv-history-ran = { $n } kez çalıştı
 # Review: PO
-hv-history-target = Odaktaki konsola, { $name } bağlantısına eklenir; Çalıştır denetimi orada yapılır.
+hv-history-target = { $name } konsoluna eklenir; Çalıştır denetimi orada yapılır.
 hv-history-time = { DATETIME($t, timeStyle: "medium") }
 hv-history-day = { DATETIME($t, dateStyle: "medium") }
 # Review: PO
 hv-history-conn-gone = Silinmiş bağlantı
 # Review: PO
 hv-history-failed = Geçmiş şu anda okunamıyor.
+# Review: PO
+hv-history-masked-line = Maskelenmiş değerler var: çalıştırmadan önce bunları doldurun.
+# Review: PO
+hv-history-truncated-line = Bu ifade kaydedilirken 64 KiB'de kesildi; olduğu gibi çalıştırılamaz.
+# Review: PO
+hv-history-count-capped = { $n }+ kayıt
+# Review: PO
+hv-history-console-gone = Eklenecek konsol kapalı.
+# Review: PO
+hv-history-insert-refused = İfade eklenemedi: düzenleyici salt okunur, metin oluşturuluyor ya da çok büyüyecek.
+# Review: PO
+hv-history-pin-failed = Sabitleme değiştirilemedi.
+# Review: PO
+hv-history-open-failed = Yeni konsol zamanında açılmadı; hiçbir şey eklenmedi.
