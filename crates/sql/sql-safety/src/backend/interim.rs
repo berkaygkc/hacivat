@@ -86,9 +86,22 @@ const MAX_EXPLAIN_DEPTH: u8 = 2;
 /// `SQLiteDialect`; every other dialect is `UnsupportedDialect`.
 pub(crate) struct InterimBackend;
 
+// ## m3b-t14-orchestrator (named exception, T10 C1 carry): a statement that is the whole text
+// (one unit, the exec path) reads the orchestrator's lexing instead of lexing again.
 impl Backend for InterimBackend {
-    fn analyse(&self, sql: &str, items: &[TextRange], ctx: &ClassifyCtx) -> Vec<StmtReport> {
-        items.iter().map(|r| analyse_stmt(sql, *r, ctx)).collect()
+    fn analyse(
+        &self,
+        sql: &str,
+        items: &[TextRange],
+        ctx: &ClassifyCtx,
+        lexed: Option<&Lexed>,
+    ) -> Vec<StmtReport> {
+        let whole =
+            |r: &TextRange| usize::from(r.start()) == 0 && usize::from(r.end()) == sql.len();
+        items
+            .iter()
+            .map(|r| analyse_stmt(sql, *r, ctx, lexed.filter(|_| whole(r))))
+            .collect()
     }
 }
 
@@ -126,7 +139,7 @@ pub fn classify_interim(sql: &str, ctx: &ClassifyCtx) -> SafetyReport {
     // The strict range is the text sent (no leading comments, no terminator): classification
     // sees exactly the bytes sent (`alg/13` :150).
     let ranges: Vec<TextRange> = stmts.iter().map(|s| s.strict).collect();
-    let mut items = InterimBackend.analyse(sql, &ranges, ctx);
+    let mut items = InterimBackend.analyse(sql, &ranges, ctx, None);
     let any_ambiguity = !split.ambiguous.is_empty();
     let several = ctx.expect == Expect::SingleStatement && items.len() > 1;
     for (item, stmt) in items.iter_mut().zip(&stmts) {
@@ -202,12 +215,14 @@ struct Reading {
 /// MySQL skips and a MariaDB server behind a MySQL profile runs.
 const NEVER_ON_MYSQL: u32 = u32::MAX;
 
-fn analyse_stmt(sql: &str, range: TextRange, ctx: &ClassifyCtx) -> StmtReport {
+// ## m3b-t14-orchestrator (named exception, T10 C1 carry): `pre`, when given, is `text`'s
+// lexing (the statement is the whole text the orchestrator lexed).
+fn analyse_stmt(sql: &str, range: TextRange, ctx: &ClassifyCtx, pre: Option<&Lexed>) -> StmtReport {
     let start = usize::from(range.start());
     let end = usize::from(range.end()).min(sql.len());
     let text = sql.get(start..end).unwrap_or("");
     let mut base = Acc::default();
-    let views = statement_views(text, ctx, &mut base);
+    let views = statement_views(text, ctx, &mut base, pre);
     let outs: Vec<Acc> = match views {
         Some((views, lexed)) => {
             if views.len() > 1 {
@@ -218,7 +233,7 @@ fn analyse_stmt(sql: &str, range: TextRange, ctx: &ClassifyCtx) -> StmtReport {
             let same = views.len() == 1 && views[0] == text;
             views
                 .iter()
-                .map(|v| analyse_view(v, ctx, 0, same.then_some(&lexed)))
+                .map(|v| analyse_view(v, ctx, 0, same.then_some(&*lexed)))
                 .collect()
         }
         None => Vec::new(),
@@ -226,9 +241,36 @@ fn analyse_stmt(sql: &str, range: TextRange, ctx: &ClassifyCtx) -> StmtReport {
     finalize(range, text, base, outs)
 }
 
-/// The readings of `text` and its lexing, or `None` when the statement is decided by `base`
-/// already (a lexing error, an unsupported mode, too many readings).
-fn statement_views(text: &str, ctx: &ClassifyCtx, base: &mut Acc) -> Option<(Vec<String>, Lexed)> {
+// ## m3b-t14-orchestrator (named exception, T10 C1 carry)
+/// A lexing this module made, or one the orchestrator lent.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one per statement analysis, never stored: boxing would add an allocation"
+)]
+enum Held<'a> {
+    Own(Lexed),
+    Lent(&'a Lexed),
+}
+
+impl std::ops::Deref for Held<'_> {
+    type Target = Lexed;
+
+    fn deref(&self) -> &Lexed {
+        match self {
+            Held::Own(l) => l,
+            Held::Lent(l) => l,
+        }
+    }
+}
+
+/// The readings of `text` and its lexing (`pre` when given), or `None` when the statement is
+/// decided by `base` already (a lexing error, an unsupported mode, too many readings).
+fn statement_views<'a>(
+    text: &str,
+    ctx: &ClassifyCtx,
+    base: &mut Acc,
+    pre: Option<&'a Lexed>,
+) -> Option<(Vec<String>, Held<'a>)> {
     let d = ctx.dialect.id;
     let whole = Some(range_of(0, text.len()));
     if !supported(d) {
@@ -244,7 +286,10 @@ fn statement_views(text: &str, ctx: &ClassifyCtx, base: &mut Acc) -> Option<(Vec
         base.doubt(ReasonCode::UnsupportedDialect, whole);
         return None;
     };
-    let lexed = lex(text, profile, ctx.dialect.modes, &LexState::Initial);
+    let lexed = match pre {
+        Some(l) => Held::Lent(l),
+        None => Held::Own(lex(text, profile, ctx.dialect.modes, &LexState::Initial)),
+    };
     let mut ambiguous_tokens = Vec::new();
     for e in lexed.errors() {
         if e.code == LexErrorCode::AmbiguousCommentEnd {

@@ -57,7 +57,7 @@ use serde::Deserialize;
 use smallvec::SmallVec;
 use sql_dialect::{DialectId, lex_profile};
 use sql_ident::{Ident, QualifiedName, parse_qualified};
-use sql_lexer::{LexState, TokenKind};
+use sql_lexer::{LexState, Lexed, TokenKind};
 use sql_oracle_pg::tree::{self, ScanKind, pb};
 use sql_text::{TextRange, TextSize};
 
@@ -105,15 +105,19 @@ const ROLE_VARIABLES: [&str; 2] = ["role", "session_authorization"];
 const DISCLOSING_RELATIONS: [&str; 2] = ["pg_stat_activity", "pg_stat_statements"];
 
 /// The PostgreSQL backend.
-#[allow(
-    dead_code,
-    reason = "Task 14's orchestrator dispatches to it (`backend::plan`)"
-)]
 pub(crate) struct PgBackend;
 
+// ## m3b-t14-orchestrator (named exception, T10 C1 carry): the orchestrator's lexing is the
+// token-agreement check's.
 impl Backend for PgBackend {
-    fn analyse(&self, sql: &str, items: &[TextRange], ctx: &ClassifyCtx) -> Vec<StmtReport> {
-        analyse(sql, items, ctx)
+    fn analyse(
+        &self,
+        sql: &str,
+        items: &[TextRange],
+        ctx: &ClassifyCtx,
+        lexed: Option<&Lexed>,
+    ) -> Vec<StmtReport> {
+        analyse_lexed(sql, items, ctx, lexed)
     }
 }
 
@@ -556,6 +560,17 @@ pub(crate) fn role(k: MsgKind) -> Role {
 /// The reports of `items` (our splitter's statement ranges in `sql`), by the combine rule of
 /// the module docs.
 pub(crate) fn analyse(sql: &str, items: &[TextRange], ctx: &ClassifyCtx) -> Vec<StmtReport> {
+    analyse_lexed(sql, items, ctx, None)
+}
+
+// ## m3b-t14-orchestrator (named exception, T10 C1 carry)
+/// [`analyse`] with `sql`'s lexing when the caller has it (`Backend::analyse`'s contract).
+pub(crate) fn analyse_lexed(
+    sql: &str,
+    items: &[TextRange],
+    ctx: &ClassifyCtx,
+    lexed: Option<&Lexed>,
+) -> Vec<StmtReport> {
     if items.is_empty() {
         return Vec::new();
     }
@@ -593,7 +608,10 @@ pub(crate) fn analyse(sql: &str, items: &[TextRange], ctx: &ClassifyCtx) -> Vec<
         return failed(&[ReasonCode::EffectsUnknown]);
     };
     let mut doubts = Vec::new();
-    if !toks.as_deref().is_some_and(|t| tokens_agree(sql, ctx, t)) {
+    if !toks
+        .as_deref()
+        .is_some_and(|t| tokens_agree(sql, ctx, t, lexed))
+    {
         doubts.push(ReasonCode::ParserDisagreement);
     }
     if ctx.dialect.version.is_some_and(|v| v.major > GRAMMAR_MAJOR) {
@@ -707,11 +725,25 @@ fn statements_agree(
 }
 
 /// Step 3 of the combine rule: our lexer and PostgreSQL's scanner cut the text alike.
-pub(crate) fn tokens_agree(sql: &str, ctx: &ClassifyCtx, pg: &[(TextRange, ScanKind)]) -> bool {
+// ## m3b-t14-orchestrator (named exception, T10 C1 carry): `pre` is `sql`'s lexing when the
+// caller has it.
+pub(crate) fn tokens_agree(
+    sql: &str,
+    ctx: &ClassifyCtx,
+    pg: &[(TextRange, ScanKind)],
+    pre: Option<&Lexed>,
+) -> bool {
     let Ok(profile) = lex_profile(&ctx.dialect) else {
         return false;
     };
-    let lexed = sql_lexer::lex(sql, profile, ctx.dialect.modes, &LexState::Initial);
+    let owned;
+    let lexed = match pre {
+        Some(l) => l,
+        None => {
+            owned = sql_lexer::lex(sql, profile, ctx.dialect.modes, &LexState::Initial);
+            &owned
+        }
+    };
     if !lexed.errors().is_empty() {
         return false;
     }

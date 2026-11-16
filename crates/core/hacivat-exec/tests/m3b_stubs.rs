@@ -1,6 +1,6 @@
 //! M3b Task 1c: the run service's M3b seams fail closed (F31) until their tasks: the gate
 //! denies, parameter preparation refuses placeholders, the history is disabled, the
-//! classifier pool answers `sql-safety`'s stub and denies on the read-only path, Count rows
+//! classifier pool is real since Task 14 (named exception), Count rows
 //! answers `Internal`, and a request with M3b-only fields sends nothing. M3a's run shape
 //! still builds and runs.
 
@@ -248,20 +248,32 @@ fn fts5_is_compiled_in() {
 // ---------------------------------------------------------------------------------------------
 // The classifier pool (Task 14)
 
+// ## m3b-t14-orchestrator (named exception): the pool is real since Task 14 (its own tests:
+// `tests/classify_pool.rs`); it answers `classify`'s report and denies on read-only only what
+// `ReadOnlyPlusExplain` denies.
 #[tokio::test]
-async fn classify_pool_stub_answers_the_safety_stub_and_denies_read_only() {
+async fn classify_pool_answers_classify_and_checks_read_only() {
     let pool = ClassifyPool::new(2);
     assert_eq!(pool.threads(), 2);
     let report = pool.classify("SELECT 1".into(), ctx()).await.unwrap();
-    assert_eq!(report, stub_report());
-    assert!(report.pre_decision.is_some());
-    assert!(matches!(
+    assert_eq!(report, report_of("SELECT 1"));
+    assert!(report.pre_decision.is_none());
+    assert_eq!(
         pool.check_read_only(DbmsKind::Postgres, "SELECT 1".into(), Arc::from(Vec::new()))
             .await,
+        RoCheck::Allow
+    );
+    assert!(matches!(
+        pool.check_read_only(
+            DbmsKind::Postgres,
+            "DELETE FROM t".into(),
+            Arc::from(Vec::new())
+        )
+        .await,
         RoCheck::Deny(_)
     ));
     assert_eq!(
-        pool.effects(DbmsKind::Postgres, "SET a = 1".into()).await,
+        pool.effects(DbmsKind::Postgres, "CALL p()".into()).await,
         None
     );
 }

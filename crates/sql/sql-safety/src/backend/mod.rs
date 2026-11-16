@@ -3,6 +3,7 @@
 //! ([`prescan`], Task 10), and the per-dialect plan the orchestrator follows ([`plan`],
 //! Task 14). Crate-private: no backend type is public (R-M3-54).
 
+use sql_lexer::Lexed;
 use sql_text::TextRange;
 
 use crate::classify::ClassifyCtx;
@@ -14,10 +15,17 @@ pub(crate) mod plan;
 pub(crate) mod prescan;
 
 /// One backend: a report per statement range of `sql`.
-#[allow(
-    dead_code,
-    reason = "implemented by Tasks 9 and 10, called by Task 14's orchestrator"
-)]
+// ## m3b-t14-orchestrator (named exception, T10 C1 carry): the orchestrator hands its lexing
+// in, so a backend does not lex the same text again.
 pub(crate) trait Backend {
-    fn analyse(&self, sql: &str, items: &[TextRange], ctx: &ClassifyCtx) -> Vec<StmtReport>;
+    /// `lexed`, when given, is `sql` lexed from `LexState::Initial` with `ctx.dialect`'s
+    /// profile and modes and no client flavor (exactly what `sql_lexer::lex` answers); a
+    /// backend that needs that lexing may use it instead of lexing again.
+    fn analyse(
+        &self,
+        sql: &str,
+        items: &[TextRange],
+        ctx: &ClassifyCtx,
+        lexed: Option<&Lexed>,
+    ) -> Vec<StmtReport>;
 }

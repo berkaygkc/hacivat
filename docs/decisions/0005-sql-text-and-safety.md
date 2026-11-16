@@ -1582,3 +1582,122 @@ CTEs, `SELECT … INTO`, `COPY … TO PROGRAM`, `CREATE TEMP`, `LOCK`, writing f
 `SELECT`, `CALL`, `PREPARE`/`EXECUTE`, Turkish identifiers) and `tests/pg_coverage.rs`; xtask's
 `gen_pg_visitor` tests. The backend is reached through the hidden `pg_backend_hooks` until Task
 14's `classify` dispatches to it.
+
+## m3b-t14 — classify
+
+Task 14 fills the orchestrator `sql_safety::classify` (`classify.rs`, `backend/plan.rs`,
+`fingerprint.rs`) and the classifier pool `hacivat_exec::classify_pool`. Nothing is wired into
+Run (R-M3-52); Tasks 15, 18, 24 and 26 do that.
+
+**Steps** (`alg/13` SQL-SAFE-02; the bytes classified are exactly the bytes passed, and
+`classified_len`/`classified_hash` describe them, P-M3b-2):
+1. **L0, before any parser** (R-M3-3). Over `Limits.max_bytes` → `TooComplex` first. A dialect
+   without a backend → `UnsupportedDialect`. One lexing (with the client flavor); any lexer
+   error → `LexError`, `AmbiguousCommentEnd` → `AmbiguousBoundary`; more than
+   `max_tokens` significant tokens, or brackets (`(`, `[`, `{` together) plus `CASE … END`
+   blocks deeper than `max_nesting` (256) → `TooComplex`. Only `CASE` is counted as a block:
+   `BEGIN` is also a transaction statement with no `END`, and an over-count would refuse long
+   transaction scripts; deeper blocks meet the backends' own limits (prost's decode depth,
+   `sqlparser`'s recursion limit 50).
+2. **Pre-pass.** A client command or `COPY … FROM STDIN` data → `ClientCommand`; a template
+   variable (scanned per statement with `scan_params`, only where a `${`, `%` or `<` byte is) →
+   `TemplateVariable`; on MySQL and MariaDB a `/*!`/`/*M!` comment outside every statement's
+   strict range → `ExecutableComment` (T10 carry: the executor sends the bytes classified, and
+   a MariaDB server behind a MySQL profile runs a trailing `/*M! INTO OUTFILE … */` the backend
+   never read).
+3. **Split** (execution mode): none → `NoStatement`; two or more with
+   `Expect::SingleStatement` → `MultiStatement`; any uncertain boundary → `AmbiguousBoundary`.
+   Steps 1–3 collect all their reasons into `pre_decision`; no backend runs.
+4. Threshold views stay the interim backend's (Task 10).
+5. **Plan** (`backend::plan`): `Postgres`, `PgWire(_)` → libpg_query; `MySql`, `MariaDb`,
+   `Sqlite` → the interim backend; every other dialect (and any added later: `DialectId` is
+   `#[non_exhaustive]`) → `UnsupportedDialect`. A backend that answers another number of
+   reports, or other ranges, proves nothing (`EffectsUnknown`, pre-decided).
+6. **Combine.** Per item: the producer contract (below), exact duplicate reasons dropped, and a
+   PostgreSQL `COPY` whose class is `Read` (`TO STDOUT`) made `Unknown` (`EffectsUnknown`, arg
+   `COPY TO STDOUT`; `alg/13` S-12: exports are not a query tool's, so read-only consoles deny
+   it; Run already refuses the unit by kind, `m3a-f1`). Then the **context rule**: after an item
+   that may change how later items read, every later item is `Unknown` (`EffectsUnknown`).
+   Such an item has `UNKNOWN`, `ROUTINE_CALL`, `DDL` or `DDL_TEMP` effects, any administrative
+   effect (`ADMIN`, `PRIVILEGE`, `PROCESS_EXEC`, `EXTERNAL_IO`: `set_config`, `UPDATE
+   pg_settings`, `pg_reload_conf()` and `LOAD` leave no other trace in a report, and a unit run
+   alone has nothing else to read; a test proves that every statement the PG backend's own rule
+   taints a later statement after also changes the context as a unit), an `Unknown` class,
+   `LEX_MODE_CHANGE` or `DYNAMIC_SQL`, a `LexModeChange`, `PrivilegeChange`,
+   `SetNotAllowlisted`, `DynamicSql`, `ProceduralCode`, `RoutineCall` or `EffectsUnknown`
+   reason, a `SET` target the dialect's harmless list refuses (or a `SET` with no target
+   read), or it is `EXECUTE`, `FETCH` or `MOVE` (they run code defined earlier, perhaps in
+   another run: Task 9 review R1-M5). The PG backend applies its own rule first; this one adds
+   `FETCH`/`MOVE` and covers the interim backend, which reads statements alone (`SET sql_mode`,
+   `SET NAMES`, `CALL`, DDL on MySQL, MariaDB and SQLite). Cost: a create-then-use script is
+   `Unknown` from the DDL on (as Task 9's R1-M2 accepted for PostgreSQL).
+   The request's class, effects and flags are `merge`d.
+7. **Fingerprint** (`fingerprint::request_fingerprint`): libpg_query's (`algo = PgQuery`,
+   version 3) on PostgreSQL and the PG-wire flavours, `HvNorm1` when libpg_query refuses the
+   text (and without asking it again once the backend saw a `ParseError`), and on every other
+   dialect. `normalized` is always `HvNorm1`'s text (literals masked).
+
+**Producer contract** (T4 review carry): every backend item has `class == class_of(effects)`,
+and an `Unknown` item carries `UNKNOWN` or a reason the policy reads as doubt (`DenyAlways`) or
+as the `Unknown`/`Routine` group. A debug build asserts both (the pool turns the panic into an
+`Unknown` report); a release build makes a violating item `Unknown` (`EffectsUnknown`). No
+backend item of the existing suites violates it.
+
+**Units one at a time** (Task 9 carry). Run classifies its units before any of them runs
+(R-M3-84), so the context cannot be refreshed between them: `classify_units` (and the pool's
+`classify_units`) makes every unit after a context-changing one `Unknown` (each item gets
+`EffectsUnknown`; the report keeps its bytes' hash). Across runs, `changes_context(sql, report)`
+tells the caller to re-read `ClassifyCtx.search_path` and `dialect.modes` (Task 18's
+connect-time read, Task 24's re-probe) before classifying again; a pre-decided report, a report
+with no dialect, or one of other bytes always answers yes. `FETCH`/`EXECUTE` answer yes even
+when their cursor or statement was declared in an earlier run.
+
+**Lexing handed to the backends** (T10 C1 carry). `Backend::analyse` takes the orchestrator's
+lexing when it is exactly `sql_lexer::lex`'s (no client flavor). The PG backend's token
+agreement uses it; the interim backend uses it for a statement that is the whole text (one
+unit: the exec path). With a client flavor every backend lexes on its own; a test proves both
+ways give the same items over the four read corpora.
+
+**Kept hooks.** `pg_backend_hooks` and `classify_interim` stay `#[doc(hidden)]` backend-only
+harnesses: the PG coverage test needs hooks `classify` cannot give (visit counts, node
+variants, the statement table), and Tasks 9 and 10 pin their backends through them. A test
+proves `classify` is never more permissive than either.
+
+**The pool** (R-M3-53). `ClassifyPool::new(2)`: two std threads, 16 MiB stacks, one queue,
+answers through `oneshot`. A panic in a job is an `Unknown` report (`EffectsUnknown`) and the
+thread lives on; a shut-down pool (or one whose threads could not start) answers `Unknown` at
+once; `classify_within` turns a missed deadline or a lost job into `Unknown`; the read-only
+guard's `check_read_only`/`effects` wait at most 10 s, then deny / answer `None`. Every
+libpg_query call goes through `sql-oracle-pg`'s serial parser thread, so the two pool threads
+never parse at once (a test classifies 64 PostgreSQL texts from both threads and compares each
+with its lone classification). `check_read_only` classifies one statement (no server version,
+default lexing modes, no client flavor) with the profile's allowlist and allows only what
+`decide(.., ReadOnlyPlusExplain, Human)` allows; denials carry Fluent IDs only. `effects` maps
+`SESSION_STATE`, `WRITE_TEMP`/`DDL_TEMP`, `ADVISORY_LOCK`, MySQL-family `LOCK_TABLE`, `PREPARE`,
+`DDL` and `opens_write` to `SessionEffects`, and is `None` whenever anything is unknown.
+
+**Stack.** The token limit lets a left-deep operator chain of ~100,000 terms through (`SELECT
+1 + 1 + …`), and `sqlparser`'s derived walk and drop recurse through it: measured here, a 2 MiB
+thread aborts the process on it (from ~50,000 terms in a debug build; at 99,000 in release),
+an 8 MiB thread in a debug build too; the pool's 16 MiB threads read every chain the limit
+allows (a test runs them). `classify` must run on the pool only.
+
+**Budget.** p50/p95 per 10 KB unit (release, 200 runs, a busy machine): PostgreSQL ~1.8–2.0 /
+2.0–2.4 ms, MySQL/MariaDB ~1.45 / 1.5–1.8 ms, SQLite ~1.25 / 1.3–1.45 ms, against SQL-SAFE-02's
+1 ms. On PostgreSQL libpg_query's parse with its protobuf decode (and `pg_query`'s own summary
+walk, which Hacivat drops unread) is ~0.9 ms and its fingerprint ~0.5 ms; on the interim path
+`sqlparser`'s tokenize and parse are ~0.85 ms. The assertion stays Task 10's interim 2 ms, on the
+fastest run; Task 20 measures and Task 30 decides against the budget.
+
+**`search_path`.** An empty `ClassifyCtx.search_path` keeps Task 9's contract (I2b: unknown,
+`pg_catalog` first as the server searches it); an unreadable one makes unqualified builtins
+unknown. Task 18's connect-time read is the producer; until then the read-only guard's
+`check_read_only` (whose seam carries no search path) classifies with the empty one.
+
+**Tests.** `sql-safety/tests/classify.rs` (the plan's tests; every failure path; `COPY … TO
+STDOUT`; the context rule in scripts and across units; hostile scripts mixing PostgreSQL,
+MySQL/MariaDB and SQLite tricks; the Task 9 and Task 10 regression probes; the four read corpora
+through `classify`, PostgreSQL's four ruled denials pinned; lent vs own lexing; the 10 KB
+budget), unit tests in `classify.rs` (injected failing backends, the producer contract),
+`backend/plan.rs` and `fingerprint.rs`; `hacivat-exec/tests/classify_pool.rs` and the pool's
+unit tests (panic, deadline, shutdown).

@@ -1,5 +1,5 @@
 //! M3b Task 1a: the classifier seams fail closed until their tasks land (F31), and no backend
-//! type leaks into the public API (`BackendOutsideOwner`, R-M3-54). Tasks 4 and 14 replace the
+//! type leaks into the public API (`BackendOutsideOwner`, R-M3-54). Tasks 4 and 14 replaced the
 //! stub assertions here when they fill `decide` and `classify`.
 
 use std::collections::BTreeSet;
@@ -24,18 +24,25 @@ fn all_reason_codes() -> [ReasonCode; 48] {
     ReasonCode::ALL
 }
 
+// ## m3b-t14-orchestrator (named exception): `classify` is real since Task 14; the stub's
+// assertions become the real classifier's (Task 14's own tests: `tests/classify.rs`).
 #[test]
-fn classify_stub_is_unknown_with_a_pre_decision() {
+fn classify_reads_a_select_and_fails_closed_on_nothing() {
     let r = classify("SELECT 1", &ctx_pg());
-    assert_eq!(r.request_class, CoarseClass::Unknown);
-    assert!(r.pre_decision.is_some());
+    assert_eq!(r.request_class, CoarseClass::Read);
+    assert!(r.pre_decision.is_none());
     assert_eq!(r.classified_len, 8);
-    // Fail closed in every field a caller might read first.
-    assert!(r.request_effects.contains(EffectSet::UNKNOWN));
-    assert!(r.items.is_empty());
-    let reasons = r.pre_decision.as_deref().unwrap();
+    assert_eq!(r.items.len(), 1);
+    assert_eq!(r.dialect, Some(DialectId::Postgres));
+    assert!(!r.request_effects.contains(EffectSet::UNKNOWN));
+    // A failure keeps the stub's fail-closed shape in every field a caller might read first.
+    let e = classify("", &ctx_pg());
+    assert_eq!(e.request_class, CoarseClass::Unknown);
+    assert!(e.request_effects.contains(EffectSet::UNKNOWN));
+    assert!(e.items.is_empty());
+    let reasons = e.pre_decision.as_deref().unwrap();
     assert_eq!(reasons.len(), 1);
-    assert_eq!(reasons[0].code, ReasonCode::NotImplemented);
+    assert_eq!(reasons[0].code, ReasonCode::NoStatement);
 }
 
 #[test]
@@ -47,20 +54,20 @@ fn classified_hash_matches_only_the_exact_bytes() {
     assert_eq!(r.classified_hash, sql_safety::classified_hash("SELECT $1"));
 }
 
-// ## m3b-t04-safety (named exception): `decide` is real since Task 4; it still denies the
-// classify stub's report in every profile, because that report is pre-decided
-// (`[NotImplemented]`) and a pre-decision denies everywhere, `Admin` included.
+// ## m3b-t04-safety (named exception): `decide` is real since Task 4; a pre-decided report
+// denies in every profile, `Admin` included.
+// ## m3b-t14-orchestrator (named exception): the classify stub's pre-decided `SELECT 1` is a
+// read now (allowed on read-only); an unterminated string is the pre-decided report.
 #[test]
-fn decide_denies_the_classify_stub() {
-    assert!(matches!(
+fn decide_denies_a_pre_decided_report_everywhere() {
+    assert!(
         decide(
             &classify("SELECT 1", &ctx_pg()),
             Profile::ReadOnly,
             Actor::Human
         )
-        .verdict,
-        Verdict::Deny(_)
-    ));
+        .allows()
+    );
     for p in [
         Profile::ReadOnly,
         Profile::ReadOnlyPlusExplain,
@@ -68,7 +75,7 @@ fn decide_denies_the_classify_stub() {
         Profile::Ddl,
         Profile::Admin,
     ] {
-        let d = decide(&classify("SELECT 1", &ctx_pg()), p, Actor::Human);
+        let d = decide(&classify("SELECT 'open", &ctx_pg()), p, Actor::Human);
         assert!(matches!(d.verdict, Verdict::Deny(_)), "{p:?}");
         assert_eq!(d.class, CoarseClass::Unknown, "{p:?}");
     }
