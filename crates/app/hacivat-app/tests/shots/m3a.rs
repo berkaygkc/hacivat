@@ -422,7 +422,11 @@ impl M3a {
         const TX_FAILED: &[&str] = &["#status-tx-failed"];
         const CURSOR: &[&str] = &["#button-label-status-cursor"];
         const CLOCK: &[&str] = &["#console-clock"];
-        const ROWS: &[&str] = &["#status-rows"];
+        // ## m3a-f2-visual (named exception): rows · timing is not a trust signal (NOTES #7);
+        // it is the status bar's last cell to give way, whole (NOTES surface 6), so where the bar
+        // has no room (960 px in the pseudo-locales) the result tile's toolbar, which says the
+        // same, must still show it: the surface never loses the count.
+        const ROWS: &[&str] = &["#status-rows", "#results-rows-timing"];
         match self {
             M3a::ConsoleProduction | M3a::ToolbarProductionWaiting | M3a::MarksDenied => {
                 &[PROD_NOTICE, ENV]
@@ -1016,6 +1020,13 @@ impl M3a {
                                 hacivat_app::results::CompletenessView::Suspended
                             )
                         })
+                    // ## m3a-f2-visual (fix round 1, M2): at 1280 the bar has room for its own
+                    // rows · timing cell; only at 960 (in the pseudo-locales) may the tile's
+                    // count stand in for it (`required`).
+                    && (f32::from(viewport.width) < 1280.0
+                        || frame.iter().any(|r| {
+                            r.visible && r.painted_px > 0.0 && r.path.ends_with("#status-rows")
+                        }))
             }
             StatusProductionResult | Results(_) | GridRange | NoticeReducedMode => true,
             NoticePasteRefused => toast("hui-editor-paste-refused-title"),

@@ -1965,6 +1965,8 @@ fn an_m3a_grid_state_without_its_grid_fails() {
         (m3a::M3a::ToolbarCancelling, "console-cancelling"),
         (m3a::M3a::ToolbarReadOnly, "console-lock-label"),
         (m3a::M3a::ToolbarWaiting, "console-waiting-text"),
+        // ## m3a-f2-visual (fix round 1, M1): the sentence never leaves the bar (it wraps).
+        (m3a::M3a::ToolbarProductionWaiting, "console-waiting-text"),
     ] {
         let surface = Surface::M3a(state);
         assert!(
@@ -2046,6 +2048,16 @@ fn trust_signals_must_be_drawn() {
     ];
     assert!(everything.trust_missing("s", &all).is_empty());
     assert_eq!(everything.trust_missing("s", &all[..1]).len(), 2);
+    // ## m3a-f2-visual: the tile's rows · timing stands in for the bar's cell that gave way
+    // (at 960 in the pseudo-locales; the state check requires the bar's own cell at 1280);
+    // with neither, the count is missing.
+    let tile = [
+        at("status-tx-open", 90.0, true),
+        at("button-label-status-cursor", 60.0, true),
+        at("results-rows-timing", 60.0, true),
+    ];
+    assert!(everything.trust_missing("s", &tile).is_empty());
+    assert_eq!(everything.trust_missing("s", &tile[..2]).len(), 1);
     let failed = Surface::M3a(m3a::M3a::PromptFailed);
     assert_eq!(failed.trust_missing("s", &all).len(), 1);
     // Every production state requires the production signals.

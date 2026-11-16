@@ -677,3 +677,53 @@ fn one_failure_in_a_long_successful_run_keeps_green_on_both_sides(cx: &mut TestA
     );
     assert!(green.iter().any(|q| q.y < 80.0) && green.iter().any(|q| q.y + q.h > 520.0));
 }
+
+// ## m3a-f2-visual: the long-line pad reaches the code area's right edge (Task 35 concern 4).
+
+/// On a long line the short form sits on a panel pad over the line's tail (NOTES surface 5):
+/// the pad runs from its `seam_soft` left edge to the code area's right edge, so no code shows
+/// to the right of the status; the status keeps its 14 px inset inside the pad.
+#[cfg(feature = "scene-check")]
+#[gpui::test]
+fn the_long_line_pad_reaches_the_right_edge(cx: &mut TestAppContext) {
+    let long = format!("SELECT '{}';", "x".repeat(200));
+    let text = format!("{long}\n");
+    let (e, _svc, vcx) = open(cx, &text, ThemeMode::Dark);
+    let c = &DARK.colors;
+    let v0 = vcx.read(|cx| e.read(cx).snapshot().version);
+    let right = vcx.read(|cx| {
+        let rows = e.read(cx).last_layout().unwrap().rows().bounds;
+        f32::from(rows.right())
+    });
+    e.update(vcx, |v, cx| {
+        v.add_exec_marks(v0, vec![(MarkKey(1), 0..long.len())], cx);
+        v.set_exec_state(
+            MarkKey(1),
+            ExecMarkState::Succeeded {
+                took: Duration::from_millis(42),
+                rows: None,
+            },
+            None,
+            Some(Rc::new(|_: &gpui::App| "executed · 42 ms".into())),
+            cx,
+        );
+        v.set_exec_short(
+            MarkKey(1),
+            Some(Rc::new(|_: &gpui::App| "42 ms".into())),
+            cx,
+        );
+    });
+    draw(vcx);
+    let qs = scene(vcx);
+    let pads: Vec<Q> = filled(&qs, c.panel.to_hsla())
+        .into_iter()
+        .filter(|q| close(q.h, 18.0) && q.w < 400.0)
+        .collect();
+    assert_eq!(pads.len(), 1, "one pad on the long line: {pads:?}");
+    let pad = pads[0];
+    assert!(close(pad.y, row_top(0)), "{pad:?}");
+    assert!(
+        close(pad.x + pad.w, right),
+        "the pad ends at the code area's right edge {right}: {pad:?}"
+    );
+}

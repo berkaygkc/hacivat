@@ -39,6 +39,8 @@ use hacivat_proto::{AccessLabel, EnvTag, ProfileId};
 use hacivat_results::{CloseReason, ResultId};
 use hacivat_session::session::{Request, SessionHandle, SessionId, SessionSnapshot, SessionState};
 use hacivat_ui::button::{Button, ButtonKind};
+// ## m3a-f2-visual
+use hacivat_ui::give_way::{GiveWayRow, Yield};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::panes::TabId;
 use hacivat_ui::popover::Tip;
@@ -268,8 +270,9 @@ fn connection_parts(
 // - **Collapse order at narrow widths** (first given way first): the version, the encryption
 //   (and the "unsupported" mark), the editor segment, the path and latency, rows · timing,
 //   the state words. The environment, the transaction and the cursor never give way; the
-//   message ellipsizes (its SQL is data) down to a floor. A cell that gives way ellipsizes
-//   with its whole text in the tooltip (the M2b rule for the bar).
+//   message ellipsizes (its SQL is data) down to a floor. ## m3a-f2-visual (named exception):
+//   a cell gives way whole (NOTES cross-cutting #7: never ellipsized chrome); the message
+//   ellipsizes only once every other cell gave way (fix round 1, I1).
 // - **Session state** is mirrored, never read on the paint path: one foreground task per
 //   console session awaits its `watch` (a `tokio::sync` receiver) and repaints only when the
 //   projection the bar shows ([`SessionView`]) changes. The projection is Task 23's
@@ -573,36 +576,33 @@ fn view_of(cx: &App, id: ConsoleId) -> Option<SessionView> {
         .map(|w| w.view)
 }
 
+// ## m3a-f2-visual (named exception in Task 34's block): a cell gives way whole, never
+// ellipsized chrome ("ş…") and never a sliver (NOTES cross-cutting #7). `hacivat_ui::give_way`
+// lays the row out; only the message, whose SQL is data, ellipsizes, down to a floor.
 /// How a cell of a followed console's bar gives way when the bar is too narrow.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Give {
-    /// A trust signal (the transaction, the cursor): never.
-    Never,
-    /// Shrinks with this weight: a larger weight gives way first (NOTES surface 6's order).
-    Weight(f32),
-    /// Shrinks with this weight, down to a floor in pixels.
-    Floor(f32, f32),
-}
+type Give = Yield;
 
-impl Give {
-    /// NOTES surface 6, first given way first: the version, the encryption, the editor
-    /// segment (selected count, Ln/Col), the path (and latency), rows · timing.
-    fn of(part: Part) -> Give {
-        match part {
-            Part::Version => Give::Weight(100_000.0),
-            Part::Encryption | Part::Unsupported => Give::Weight(10_000.0),
-            Part::Path | Part::Latency => Give::Weight(100.0),
-            Part::Env | Part::State => Give::Weight(1.0),
-        }
+/// NOTES surface 6, first given way first: the version, the encryption, the editor segment
+/// (selected count, Ln/Col), the path (and latency), rows · timing, the state words.
+fn give_of(part: Part) -> Give {
+    match part {
+        Part::Version => Yield::Whole(60),
+        Part::Encryption | Part::Unsupported => Yield::Whole(50),
+        Part::Path | Part::Latency => Yield::Whole(30),
+        Part::Env | Part::State => Yield::Whole(10),
     }
 }
 
 /// The editor segment gives way after the encryption, before the path.
-const GIVE_EDITOR: Give = Give::Weight(1_000.0);
-/// Rows · timing gives way last.
-const GIVE_ROWS: Give = Give::Weight(10.0);
-/// The message's SQL label ellipsizes; the sentence never disappears.
-const GIVE_MESSAGE: Give = Give::Floor(1.0, 160.0);
+const GIVE_EDITOR: Give = Yield::Whole(40);
+/// Rows · timing gives way after the path.
+const GIVE_ROWS: Give = Yield::Whole(20);
+/// The message ellipsizes, down to a floor, only once every cell that can give way left
+/// (rows · timing and the state words last): hide before truncate (NOTES #7; fix round 1, I1).
+const GIVE_MESSAGE: Give = Yield::Shrink {
+    floor: 160.0,
+    rank: 5,
+};
 
 /// The bar of the followed console `console`, bound to `p` (see the block comment above).
 fn console_segments(
@@ -648,7 +648,7 @@ fn console_segments(
         if part == Part::Path && parts.peek().is_some_and(|(next, _)| *next == Part::Latency) {
             let latency = parts.next().map(|(_, latency)| latency);
             cells.push((
-                Give::of(part),
+                give_of(part),
                 div()
                     .flex()
                     .flex_row()
@@ -661,7 +661,7 @@ fn console_segments(
             ));
             continue;
         }
-        cells.push((Give::of(part), segment));
+        cells.push((give_of(part), segment));
     }
     let view = view_of(cx, console);
     match view.map_or(TxSegment::None, |v| v.tx) {
@@ -678,7 +678,9 @@ fn console_segments(
                 theme,
                 rows,
                 TextSource::Fluent,
-                theme.tokens.type_ramp.mono_counter,
+                // ## m3a-f2-visual (named exception): mono 11.5, the bar's data size (DESIGN.md
+                // status bar caption; NOTES surface 6 "in mono"), not the 15 px counter.
+                theme.tokens.type_ramp.mono_data,
             )
             .truncate(true)
             .id("status-rows")
@@ -710,7 +712,7 @@ fn console_segments(
         cells.push((GIVE_EDITOR, segment.into_any_element()));
     }
     if let Some((part, segment)) = version {
-        cells.push((Give::of(part), segment));
+        cells.push((give_of(part), segment));
     }
     let mut cells = cells.into_iter();
     let Some((_, first)) = cells.next() else {
@@ -724,13 +726,17 @@ fn console_segments(
 }
 
 /// The cells after the first, as one bar segment that lays them out itself, so each gives
-/// way by its own weight instead of by its place (the bar's own rule, M2b).
+/// way by its own rank instead of by its place (the bar's own rule, M2b).
 ///
-/// - A cell is a clipping box around an inner box that holds the 12 px padding, the content
-///   and the seam at its right edge. The inner box shrinks with the cell (its labels ellipsize,
-///   the whole text in their tooltips) down to its padding and seam; a cell narrower than that
-///   clips the inner box from the right, seam included, so what is left of it is blank. No
-///   two seams ever stand side by side, however much a cell gave way.
+/// ## m3a-f2-visual (named exception in Task 34's block): the row is
+/// `hacivat_ui::give_way::GiveWayRow`. A cell that gives way leaves whole, so no chrome
+/// ellipsizes ("ş…") and no cell is ever narrower than its content: two seams are always a
+/// cell's padding apart, at any width, with no rounding (Task 33's question: the row needs
+/// none). The room left over goes to the last cell shown.
+///
+/// - A cell is a box that fills the width it is given, around an inner box that holds the
+///   12 px padding, the content and the seam at its right edge. Only the message's cell is
+///   ever narrower than its content (its SQL ellipsizes, down to its floor); it clips.
 /// - The row covers its bar segment's padding; on the right it reaches one pixel further, so
 ///   the last cell's seam lies on the bar's own seam after the segment.
 fn give_way_row(theme: &Theme, cells: Vec<(Give, AnyElement)>) -> AnyElement {
@@ -738,49 +744,46 @@ fn give_way_row(theme: &Theme, cells: Vec<(Give, AnyElement)>) -> AnyElement {
     let seam = t.colors.seam.to_hsla();
     // The least an inner box keeps: its padding and its seam.
     let inner_floor = 2.0 * t.spacing.lg + 1.0;
-    let cells = cells.into_iter().map(|(give, child)| {
-        let inner = div()
-            .relative()
-            .flex()
-            .flex_row()
-            .items_center()
-            .h_full()
-            .flex_shrink(1.0)
-            .min_w(px(inner_floor))
-            .px(px(t.spacing.lg))
-            .gap(px(t.spacing.sm))
-            .child(child)
-            .child(
-                div()
-                    .absolute()
-                    .right_0()
-                    .top_0()
-                    .h_full()
-                    .w(px(1.0))
-                    .bg(seam),
-            );
-        let cell = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .h_full()
-            .flex_none()
-            .child(inner);
-        match give {
-            Give::Never => cell,
-            Give::Weight(w) => cell.flex_shrink(w).min_w(px(0.0)).overflow_hidden(),
-            Give::Floor(w, floor) => cell.flex_shrink(w).min_w(px(floor)).overflow_hidden(),
-        }
-    });
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .h_full()
-        .min_w(px(0.0))
-        .ml(px(-t.spacing.lg))
-        .mr(px(-t.spacing.lg - 1.0))
-        .children(cells)
+    let cells = cells
+        .into_iter()
+        .map(|(give, child)| {
+            let inner = div()
+                .relative()
+                .flex()
+                .flex_row()
+                .items_center()
+                .h_full()
+                .flex_grow(1.0)
+                .flex_shrink(1.0)
+                .min_w(px(inner_floor))
+                .px(px(t.spacing.lg))
+                .gap(px(t.spacing.sm))
+                .child(child)
+                .child(
+                    div()
+                        .absolute()
+                        .right_0()
+                        .top_0()
+                        .h_full()
+                        .w(px(1.0))
+                        .bg(seam),
+                );
+            let cell = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .w_full()
+                .h_full()
+                .child(inner);
+            let cell = match give {
+                Yield::Shrink { .. } => cell.overflow_hidden(),
+                _ => cell,
+            };
+            (give, cell.into_any_element())
+        })
+        .collect();
+    GiveWayRow::new(cells)
+        .margins(-t.spacing.lg, -t.spacing.lg - 1.0)
         .into_any_element()
 }
 

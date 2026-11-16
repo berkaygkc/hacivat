@@ -13,6 +13,12 @@
 //! pinned. The production notice collapses first to its lock chip "read-only" (still red, still
 //! a button) and puts "Why this console is read-only…" in the ⋯ menu; then the waiting
 //! sentence takes its short form. Nothing else moves.
+//!
+//! ## m3a-f2-visual (named exception, fix round 1): when even that does not fit (960 px in the
+//! long pseudo-locales), the short sentence wraps between its marker and Cancel and the bar
+//! grows; in a narrow pane the whole row wraps onto lines (`Toolbar::wrap_row`). So the
+//! production notice, the lock chip and the environment mark (trust signals) are never pushed
+//! off the bar, and the sentence never leaves it.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -22,13 +28,13 @@ use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::capsule::{EnvKind, env_swatch_on_raised};
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::step_trail::run_marker;
-use hacivat_ui::text::{Label, TextFn, TextSource};
-use hacivat_ui::toolbar::{ItemFn, Toolbar, ToolbarItem};
+use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
+use hacivat_ui::toolbar::{ItemFn, Toolbar, ToolbarItem, Wrap};
 use hacivat_ui_core::gpui_surface::{
     AnyElement, App, Bounds, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
     SharedString, Styled as _, Window, canvas, div, px,
 };
-use hacivat_ui_core::theme::Theme;
+use hacivat_ui_core::theme::{Theme, TypeStyle};
 
 use crate::l10n_global::{text_fn, tr};
 use crate::shell::keymap_state::shortcut_label;
@@ -88,7 +94,9 @@ fn same(text: SharedString) -> TextFn {
 pub fn build(model: &ToolbarModel, actions: &ToolbarActions, cx: &App) -> Toolbar {
     let theme = *Theme::get(cx);
     let height = theme.tokens.spacing.editor_toolbar_height;
-    let mut bar = Toolbar::new("console-toolbar").height(height);
+    // ## m3a-f2-visual (named exception, fix round 1, I2): in a narrow pane the row wraps, so
+    // no trust signal (the production lock, the read-only chip, the environment mark) is cut.
+    let mut bar = Toolbar::new("console-toolbar").height(height).wrap_row();
 
     // Run / Stop, one slot.
     let run_model = model.clone();
@@ -123,12 +131,21 @@ pub fn build(model: &ToolbarModel, actions: &ToolbarActions, cx: &App) -> Toolba
     ));
 
     // The waiting state: the sentence, then its short form; Cancel stays.
+    // ## m3a-f2-visual (named exception, fix round 1): a trust signal never gives way to the
+    // sentence, and the sentence never leaves the bar: after its short form it wraps (the
+    // toolbar's wrapping stage), and in a narrow pane the whole row wraps (`wrap_row`).
     if let Some((name, in_use, max)) = model.waiting.clone() {
         let a = actions.clone();
         let long_name = name.clone();
         let full: TextFn = Rc::new(move |cx| waiting_text(cx, &long_name, in_use, max, false));
         let a2 = actions.clone();
         let short_name = name.clone();
+        let (a3, wrapped_name) = (actions.clone(), name.clone());
+        let wrap = Wrap {
+            text: waiting_text(cx, &name, in_use, max, true),
+            style: wrap_style(cx),
+            element: item(move |_, cx| waiting_wrapped(&wrapped_name, in_use, max, &a3, cx)),
+        };
         bar = bar.item(
             ToolbarItem::pinned(
                 item(move |_, cx| waiting(&name, in_use, max, false, &a, cx)),
@@ -137,7 +154,8 @@ pub fn build(model: &ToolbarModel, actions: &ToolbarActions, cx: &App) -> Toolba
             .priority(20)
             .compact(item(move |_, cx| {
                 waiting(&short_name, in_use, max, true, &a2, cx)
-            })),
+            }))
+            .wraps(wrap),
         );
     }
 
@@ -290,7 +308,10 @@ fn connection_label(name: SharedString, env: Option<EnvKind>, cx: &App) -> AnyEl
         // The seam before the label.
         .child(div().w(px(1.0)).h(px(16.0)).bg(c.seam.to_hsla()));
     if let Some(env) = env {
-        row = row.child(env_swatch_on_raised(env, &theme));
+        // ## m3a-f2-visual (fix round 1, I2): the swatch's selector, for the narrow-pane test.
+        row = row.child(
+            env_swatch_on_raised(env, &theme).debug_selector(|| "console-env-swatch".to_string()),
+        );
     }
     row.child(
         Label::new(
@@ -338,29 +359,80 @@ fn waiting(
     let theme = *Theme::get(cx);
     let t = theme.tokens;
     let c = &t.colors;
+    waiting_row(
+        Label::new(
+            waiting_text(cx, name, in_use, max, short),
+            TextSource::Fluent,
+            t.type_ramp.caption,
+            c.text.to_hsla(),
+        )
+        .id("console-waiting-text")
+        .into_any_element(),
+        false,
+        actions,
+        cx,
+    )
+}
+
+// ## m3a-f2-visual (named exception, fix round 1): the wrapped form (the toolbar's wrapping
+// stage): the short sentence in a paragraph that fills the room the marker and Cancel leave.
+fn waiting_wrapped(
+    name: &str,
+    in_use: u8,
+    max: u8,
+    actions: &ToolbarActions,
+    cx: &App,
+) -> AnyElement {
+    let t = Theme::get(cx).tokens;
+    waiting_row(
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .child(
+                paragraph(
+                    waiting_text(cx, name, in_use, max, true),
+                    TextSource::Fluent,
+                    wrap_style(cx),
+                    t.colors.text.to_hsla(),
+                )
+                .id("console-waiting-text"),
+            )
+            .into_any_element(),
+        true,
+        actions,
+        cx,
+    )
+}
+
+/// The wrapped sentence's style: the caption at 16 px lines (as the cursor strip's).
+fn wrap_style(cx: &App) -> TypeStyle {
+    TypeStyle {
+        line_height: 16.0,
+        ..Theme::get(cx).tokens.type_ramp.caption
+    }
+}
+
+/// The waiting row around its `sentence`: the hollow `seam-strong` marker before it, Cancel
+/// after it (one item, so the toolbar keeps them together; NOTES surface 2).
+fn waiting_row(sentence: AnyElement, fill: bool, actions: &ToolbarActions, cx: &App) -> AnyElement {
+    let t = Theme::get(cx).tokens;
     let cancel = actions.cancel_wait.clone();
-    div()
-        .id("console-waiting")
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(t.spacing.sm))
+    let row = div().id("console-waiting").flex().flex_row().items_center();
+    // The wrapped form fills the slot the toolbar sized for it.
+    let row = if fill {
+        row.flex_1().min_w(px(0.0))
+    } else {
+        row
+    };
+    row.gap(px(t.spacing.sm))
         .child(
             div()
                 .size(px(7.0))
                 .flex_none()
                 .border_1()
-                .border_color(c.seam_strong.to_hsla()),
+                .border_color(t.colors.seam_strong.to_hsla()),
         )
-        .child(
-            Label::new(
-                waiting_text(cx, name, in_use, max, short),
-                TextSource::Fluent,
-                t.type_ramp.caption,
-                c.text.to_hsla(),
-            )
-            .id("console-waiting-text"),
-        )
+        .child(sentence)
         .child(
             Button::new(
                 "console-waiting-cancel",
@@ -425,6 +497,8 @@ fn lock_chip(access: SharedString, cx: &App) -> AnyElement {
     let c = &t.colors;
     div()
         .id("console-lock")
+        // ## m3a-f2-visual (fix round 1, I2)
+        .debug_selector(|| "console-lock".to_string())
         .flex()
         .flex_row()
         .items_center()

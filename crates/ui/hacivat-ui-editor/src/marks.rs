@@ -621,6 +621,8 @@ fn eol_element(parts: Vec<Part>, pad: bool, st: &EolStyle) -> AnyElement {
         row = row
             .bg(inks.panel)
             .pl(px(PAD_LEFT))
+            // ## m3a-f2-visual (named exception): the status keeps its inset inside the pad.
+            .pr(px(EOL_RIGHT))
             .border_l_1()
             .border_color(inks.seam_soft);
     }
@@ -962,7 +964,10 @@ pub fn prepaint(
                 continue;
             }
             el = eol_element(short, true, &st);
-            x = right - fit(&mut el, window, cx);
+            // ## m3a-f2-visual (named exception in Task 28's file): the pad reaches the code
+            // area's right edge (its right padding is the status's inset), so no code shows
+            // past it.
+            x = ov.text_area.right() - fit(&mut el, window, cx);
             pad = true;
         }
         if x < ov.text_area.left() {

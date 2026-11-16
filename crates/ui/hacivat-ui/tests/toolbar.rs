@@ -12,7 +12,9 @@ use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::popover::{a11y_record, a11y_take};
 use hacivat_ui::text::{Label, TextRegistry, TextSource};
 use hacivat_ui::toolbar::{FitItem, Toolbar, ToolbarItem, ToolbarProbe, fit, stage_fit};
-use hacivat_ui_core::gpui_surface::{AnyElement, IntoElement, RunCommand};
+use hacivat_ui_core::gpui_surface::{
+    AnyElement, IntoElement, ParentElement as _, RunCommand, Styled as _,
+};
 use hacivat_ui_core::theme::Theme;
 use support::host;
 
@@ -452,6 +454,195 @@ fn a_registered_command_runs_from_its_menu_row(cx: &mut TestAppContext) {
     press(vcx, "enter");
     press(vcx, "enter");
     assert_eq!(ran.get(), 1);
+}
+
+// ## m3a-f2-visual: the wrapping stage (the cursor strip's reason, NOTES surface 11).
+
+/// A strip-like bar: a wrapping reason, then a pinned button.
+fn wrapping_bar() -> AnyElement {
+    const REASON: &str = "Cursor closed after 100 rows: another statement needed the session. \
+                          Hacivat's transaction was rolled back.";
+    let style = |cx: &gpui::App| {
+        let t = Theme::get(cx).tokens;
+        hacivat_ui_core::theme::TypeStyle {
+            line_height: 16.0,
+            ..t.type_ramp.caption
+        }
+    };
+    let wrapped: Build = Rc::new(move |_, cx| {
+        let t = Theme::get(cx).tokens;
+        gpui::div()
+            .flex_1()
+            .min_w(px(0.0))
+            .child(
+                hacivat_ui::text::paragraph(REASON, TextSource::Fluent, style(cx), {
+                    t.colors.text.to_hsla()
+                })
+                .id("reason"),
+            )
+            .into_any_element()
+    });
+    let one_line: Build = Rc::new(move |_, cx| {
+        let t = Theme::get(cx).tokens;
+        Label::new(
+            REASON,
+            TextSource::Fluent,
+            style(cx),
+            t.colors.text.to_hsla(),
+        )
+        .id("reason")
+        .into_any_element()
+    });
+    gpui::div()
+        .w_full()
+        .child(
+            Toolbar::new("strip")
+                .height(26.0)
+                .item(
+                    ToolbarItem::pinned(one_line, Rc::new(|_| REASON.into())).wraps(
+                        hacivat_ui::toolbar::Wrap {
+                            text: REASON.into(),
+                            style: hacivat_ui_core::theme::TypeStyle {
+                                line_height: 16.0,
+                                ..hacivat_ui_core::theme::DARK.type_ramp.caption
+                            },
+                            element: wrapped,
+                        },
+                    ),
+                )
+                .item(button_item("Re-run")),
+        )
+        .into_any_element()
+}
+
+/// Where the row fits, the bar keeps its height and the reason its one line; where it does
+/// not, the reason wraps in the room the button leaves and the bar grows to hold its lines
+/// (padding 4, line height 16), the button whole, nothing clipped.
+#[gpui::test]
+fn a_wrapping_item_wraps_last_and_the_bar_grows(cx: &mut TestAppContext) {
+    let vcx = host(cx, |_, _| wrapping_bar());
+    vcx.update(|_, cx| {
+        cx.set_global(TextRegistry {
+            enabled: true,
+            frame: Vec::new(),
+        });
+    });
+    vcx.simulate_resize(gpui::size(px(1400.0), px(600.0)));
+    vcx.run_until_parked();
+    let bar = vcx.debug_bounds("toolbar-strip").expect("the bar");
+    assert_eq!(bar.size.height, px(26.0));
+    for width in [700.0, 520.0, 400.0] {
+        vcx.simulate_resize(gpui::size(px(width), px(600.0)));
+        vcx.run_until_parked();
+        let bar = vcx.debug_bounds("toolbar-strip").expect("the bar");
+        let button = vcx.debug_bounds("button-Re-run").expect("the button");
+        let frame = vcx.read(|cx| cx.global::<TextRegistry>().frame.clone());
+        let reason = frame
+            .iter()
+            .find(|r| r.path.ends_with("#reason"))
+            .expect("the reason");
+        assert!(!reason.clipped && reason.visible, "{width}: {reason:?}");
+        // Fix round 1 (M5): inside the row's own edge, the bar's 10 px right padding.
+        assert!(
+            button.right() <= bar.right() - px(INNER_RIGHT),
+            "{width}: {button:?} in {bar:?}"
+        );
+        let lines = ((f32::from(bar.size.height) - 8.0) / 16.0).round();
+        assert!(lines >= 2.0, "{width}: the bar grew to its lines: {bar:?}");
+        assert_eq!(
+            bar.size.height,
+            px(lines * 16.0 + 8.0),
+            "{width}: padding 4 and 16 px lines"
+        );
+    }
+}
+
+// ## m3a-f2-visual (fix round 1)
+
+/// The bar's right padding (`spacing.lg`): the row's own edge.
+const INNER_RIGHT: f32 = 10.0;
+
+/// A console-like bar: pinned Run and name on the left, a pinned trust chip on the right,
+/// rows that wrap when nothing else is left (I2: a narrow pane).
+fn trust_bar() -> AnyElement {
+    gpui::div()
+        .w_full()
+        .child(
+            Toolbar::new("console")
+                .height(32.0)
+                .wrap_row()
+                .item(button_item("Run"))
+                .item(ToolbarItem::pinned(
+                    text_element("orders-prod".into()),
+                    Rc::new(|_| "orders-prod".into()),
+                ))
+                .trailing(ToolbarItem::pinned(
+                    Rc::new(|_, _| {
+                        Button::new("lock", "read-only".into())
+                            .kind(ButtonKind::Ghost)
+                            .into_any_element()
+                    }),
+                    Rc::new(|_| "read-only".into()),
+                )),
+        )
+        .into_any_element()
+}
+
+/// I2: in a narrow pane a row-wrapping bar puts its items on lines instead of pushing the
+/// trailing trust chip past its edge; at a wide one it keeps its height.
+#[gpui::test]
+fn a_wrapping_row_never_pushes_a_pinned_item_off_the_bar(cx: &mut TestAppContext) {
+    let vcx = host(cx, |_, _| trust_bar());
+    vcx.simulate_resize(gpui::size(px(800.0), px(600.0)));
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.debug_bounds("toolbar-console").unwrap().size.height,
+        px(32.0)
+    );
+    let mut grew = false;
+    for width in (110..=420).rev().step_by(9) {
+        vcx.simulate_resize(gpui::size(px(width as f32), px(600.0)));
+        vcx.run_until_parked();
+        let bar = vcx.debug_bounds("toolbar-console").expect("the bar");
+        for id in ["button-Run", "button-lock"] {
+            let b = vcx.debug_bounds(id).expect(id);
+            assert!(
+                b.left() >= bar.left() && b.right() <= bar.right() - px(INNER_RIGHT),
+                "{width}: {id} {b:?} outside {bar:?}"
+            );
+            assert!(
+                b.top() >= bar.top() && b.bottom() <= bar.bottom(),
+                "{width}: {id} {b:?} outside {bar:?}"
+            );
+        }
+        grew |= bar.size.height > px(32.0);
+    }
+    assert!(grew, "the narrowest bars put their items on lines");
+}
+
+/// M7: items that left the row with nothing to choose (no command, no action) offer no ⋯
+/// menu: a menu of disabled rows would take the focus with nowhere to go.
+#[gpui::test]
+fn no_more_button_without_a_row_to_choose(cx: &mut TestAppContext) {
+    let vcx = host(cx, |_, _| {
+        gpui::div()
+            .w_full()
+            .child(
+                Toolbar::new("plain")
+                    .item(button_item("Run"))
+                    .item(label_item("a crumb that can move".into(), 1)),
+            )
+            .into_any_element()
+    });
+    vcx.update(|_, cx| cx.set_global(ToolbarProbe::default()));
+    vcx.simulate_resize(gpui::size(px(140.0), px(600.0)));
+    vcx.run_until_parked();
+    let staged = probe(vcx).staged.expect("a frame");
+    assert_eq!(staged.fit.overflow, vec![1], "the crumb left the row");
+    assert!(
+        vcx.debug_bounds("toolbar-overflow").is_none(),
+        "no more-button for a menu with no row to choose"
+    );
 }
 
 #[gpui::test]
