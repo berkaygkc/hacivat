@@ -1502,3 +1502,48 @@ fn round2_search_path_control_characters_and_char_arrays() {
     let r = classify_pg("SELECT '{a}'::\"char\"[]");
     assert_eq!(r.request_class, CoarseClass::Read, "{r:?}");
 }
+
+// ## Follow-up (T10's RR-I2 ruling): other sessions' activity and statement text
+
+/// Reading other sessions' activity or statement text is information disclosure: `Unknown`,
+/// denied on read-only, in any qualification or quoting. Defence in depth only
+/// (`pg_read_all_stats`/superuser is the real control).
+#[test]
+fn other_sessions_activity_is_unknown() {
+    for s in [
+        "SELECT * FROM pg_stat_activity",
+        "SELECT query FROM pg_catalog.pg_stat_activity WHERE pid <> pg_backend_pid()",
+        "SELECT * FROM \"pg_stat_activity\"",
+        "SELECT * FROM PG_CATALOG.PG_STAT_ACTIVITY",
+        "TABLE pg_stat_activity",
+        "SELECT * FROM t WHERE x IN (SELECT pid FROM pg_stat_activity)",
+        "SELECT * FROM pg_stat_statements",
+        "SELECT query FROM public.pg_stat_statements ORDER BY calls DESC",
+        "SELECT * FROM pg_stat_statements(true)",
+        "SELECT * FROM pg_stat_get_activity(NULL)",
+        "SELECT pg_stat_get_backend_activity(1)",
+        "SELECT pg_catalog.pg_stat_get_backend_activity(s) FROM pg_stat_get_backend_idset() s",
+        "SELECT l.*, a.query FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid",
+    ] {
+        let r = classify_pg(s);
+        assert_eq!(r.request_class, CoarseClass::Unknown, "{s}: {r:?}");
+        assert_eq!(read_only(&r), "Deny", "{s}");
+    }
+    let r = one("SELECT * FROM pg_stat_activity");
+    assert!(
+        r.reasons
+            .iter()
+            .any(|x| x.code == ReasonCode::EffectsUnknown
+                && x.arg.as_deref() == Some("pg_stat_activity"))
+    );
+    // `pg_locks` alone shows pids and lock modes, not statement text: left a read.
+    assert_eq!(
+        class("SELECT locktype, mode, granted FROM pg_locks"),
+        CoarseClass::Read
+    );
+    // Similar names are other relations.
+    assert_eq!(
+        class("SELECT * FROM pg_stat_activity_archive"),
+        CoarseClass::Read
+    );
+}

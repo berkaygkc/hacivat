@@ -95,6 +95,15 @@ const LEX_VARIABLES: [&str; 3] = [
 /// GUCs that switch the session's role (`PrivilegeChange`).
 const ROLE_VARIABLES: [&str; 2] = ["role", "session_authorization"];
 
+/// Relations that show other sessions' activity or statement text (information disclosure,
+/// T10's RR-I2 ruling): reading one is `Unknown`, so a read-only session denies it. Defence in
+/// depth only: `pg_read_all_stats`/superuser is the real control. The functions behind them
+/// (`pg_stat_get_activity`, `pg_stat_get_backend_activity`, `pg_stat_statements(…)`) are not
+/// reviewed builtins in Task 3's data, so they are `Unknown` already. `pg_locks` alone shows
+/// pids and lock modes, not text, and is left a read; joined with `pg_stat_activity` the join
+/// is `Unknown` through the activity view.
+const DISCLOSING_RELATIONS: [&str; 2] = ["pg_stat_activity", "pg_stat_statements"];
+
 /// The PostgreSQL backend.
 #[allow(
     dead_code,
@@ -1644,6 +1653,14 @@ impl<'a, 's> Classifier<'a, 's> {
     }
 
     fn range_var(&mut self, rv: &pb::RangeVar) {
+        if DISCLOSING_RELATIONS
+            .iter()
+            .any(|d| rv.relname.eq_ignore_ascii_case(d))
+        {
+            // Any schema and any spelling (a quoted `"PG_STAT_ACTIVITY"` too): conservative.
+            let range = self.span_at(rv.location);
+            self.unknown(ReasonCode::EffectsUnknown, range, Some(&rv.relname));
+        }
         let ptr = rv as *const pb::RangeVar;
         if !self.write_targets.iter().any(|w| std::ptr::eq(*w, ptr)) {
             self.touched

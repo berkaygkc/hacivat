@@ -1263,6 +1263,15 @@ column as a call), and **foreign tables** (a read or write of one reaches a remo
   temp view that shadows a table, which a later name resolves to) make later items unknown.
 - **R1-M3:** a `search_path` element with a control character is unreadable (fail closed).
   **R1-M4:** `"char"[]` keeps its array suffix in the cast check.
+- **Other sessions' activity (T10's RR-I2 ruling, follow-up):** reading `pg_stat_activity` or
+  `pg_stat_statements` (any schema, any spelling, ASCII case-insensitive) is `UNKNOWN` with
+  `EffectsUnknown` naming the relation, so a read-only session denies it; the functions
+  behind them (`pg_stat_get_activity`, `pg_stat_get_backend_activity`, the
+  `pg_stat_statements(…)` function) are unreviewed or absent in Task 3's data and are `Unknown`
+  already, which this aligns with. `pg_locks` alone (pids, lock modes, no statement text)
+  stays a read; joined with `pg_stat_activity` the statement is `Unknown` through the view.
+  These denies are defence in depth: a user view over these relations is not seen, and
+  `pg_read_all_stats` (or superuser) on the server is the real control.
 - **Carry wording (R1-M5, controller):** across separately classified units the session must
   refresh the context after the unit that *executes* code which changes it (`EXECUTE`, `FETCH`
   of a cursor whose query calls `set_config`), not only after the unit that contains it.
