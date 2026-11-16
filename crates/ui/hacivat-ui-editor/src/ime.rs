@@ -12,10 +12,12 @@
 //!   edit, and a composition an app path ended without a `Committed`): `after_commit` and
 //!   [`on_composition_changed`] owe a notification, and the next frame's `on_frame` sends it
 //!   (`notify_text_input_changed` for text, `notify_text_selection_changed` for a selection
-//!   the app moved), once per frame at most.
-//! - **App edits wait for a composition to end** (the corrected R-M3-7 ruling): GPUI has no
-//!   call that discards the platform's composition except a real focus loss, so an app edit
-//!   made while composing would leave the platform's copy to land beside it. `set_text`, a
+//!   the app moved), once per frame at most. A composition an app path ended (a click in the
+//!   text above all) is also discarded on the platform ([`send_owed_discard`], F4): otherwise
+//!   the input method keeps it and its candidate window, and inserts it again at the new caret.
+//! - **App edits wait for a composition to end** (the corrected R-M3-7 ruling): an app edit
+//!   made in the middle of a composition would leave the platform's copy to land beside it
+//!   (the discard above ends a composition; it does not let an edit join one). `set_text`, a
 //!   "go to error" selection and a paste whose read lands while composing are held
 //!   ([`defer_while_composing`]) and applied, in order, once the composition ends; a held
 //!   selection is rebased over what the composition committed. While held edits wait, newer
@@ -73,6 +75,11 @@ pub struct InputState {
     flushing: bool,
     /// Ending a composition the platform already dropped is scheduled (review M4).
     end_scheduled: bool,
+    // ## m3a-f4-ime
+    /// An app path ended a composition the platform still holds: it is told to drop it.
+    discard_owed: bool,
+    /// Discards sent to the platform (`Window::discard_marked_text`).
+    discards: u64,
 }
 
 /// An app edit that must wait for a composition to end.
@@ -109,6 +116,25 @@ impl EditorView {
     /// (`notify_text_selection_changed`).
     pub fn text_selection_notifications(&self) -> u64 {
         self.input.sent.1
+    }
+
+    // ## m3a-f4-ime
+    /// How many times the editor told the platform to discard its composition
+    /// (`Window::discard_marked_text`).
+    pub fn marked_text_discards(&self) -> u64 {
+        self.input.discards
+    }
+
+    /// Ends an open composition as the app: its text is committed as it stands, and the
+    /// platform is told at once to drop its copy (the host's toolbar Run, before it runs).
+    /// Nothing happens without a composition.
+    pub fn end_composition(&mut self, window: &mut Window, cx: &mut Context<EditorView>) {
+        if !self.ime.is_composing() {
+            return;
+        }
+        self.ime.unmark(&mut self.model);
+        self.composition_changed(false, cx);
+        send_owed_discard(self, window);
     }
 }
 
@@ -214,8 +240,24 @@ pub(crate) fn on_composition_changed(
     }
     if !v.input.in_ime_call {
         v.input.text_owed = true;
+        // ## m3a-f4-ime: the platform did not end it, so it still holds the composition (and
+        // its candidate window); it must drop it, or it inserts it again later.
+        v.input.discard_owed = true;
     }
     schedule_flush(v, cx);
+}
+
+// ## m3a-f4-ime (PO finding IME-1)
+/// Tells the platform to drop a composition an app path ended (a click in the text, a command,
+/// `end_composition`): `Window::discard_marked_text` (the GPUI fork's carry; on macOS
+/// `discardMarkedText`, after the local unmark, as AppKit text views do). Sent by the path
+/// itself when it has the window (a click), else by the next frame. A focus loss owes none:
+/// the platform discards on it by itself.
+pub(crate) fn send_owed_discard(v: &mut EditorView, window: &mut Window) {
+    if std::mem::take(&mut v.input.discard_owed) && v.focus.is_focused(window) {
+        window.discard_marked_text(&v.focus);
+        v.input.discards += 1;
+    }
 }
 
 /// Once per frame, at the start of the element's prepaint: the focused input is published
@@ -231,6 +273,8 @@ pub(crate) fn on_frame(v: &mut EditorView, window: &mut Window, cx: &mut Context
     {
         publish_focused(v, cx);
     }
+    // ## m3a-f4-ime
+    send_owed_discard(v, window);
     if std::mem::take(&mut v.input.text_owed) {
         v.input.selection_owed = false;
         if focused {

@@ -1174,9 +1174,10 @@ impl ConsoleHost {
         let focus = editor.focus_handle(cx);
         window.focus(&focus, cx);
         editor.update(cx, |v, cx| {
-            if v.status().composing {
-                hacivat_ui_core::gpui_surface::EntityInputHandler::unmark_text(v, window, cx);
-            }
+            // ## m3a-f4-ime: a composition still open here (the button usually took the focus
+            // on the mouse-down, and the blur ended it) is ended as the app, so the platform
+            // drops its copy too (IME-1); before, this called the platform's own `unmark_text`.
+            v.end_composition(window, cx);
             v.run_command("editor.run", window, cx);
         });
     }
