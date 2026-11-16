@@ -16,12 +16,13 @@ use hacivat_app::connections::prompt_kit::parts;
 use hacivat_app::exec_ui::AppConfirmPort;
 use hacivat_app::exec_ui::commit_prompt::{self, CommitContext, countdown_of, open_commit_views};
 use hacivat_app::exec_ui::confirm::{
-    self, ConfirmContext, PlanAnswers, PlanFlow, answer_plan, ask_plan, confirm_open,
+    self, ARM_DELAY, ConfirmContext, PlanAnswers, PlanFlow, answer_plan, ask_plan, confirm_open,
     execute_all_covers, name_matches, offers_suppress, open_dialog_buttons, question_for,
 };
 use hacivat_exec::{
-    CommitAnswer, CommitQuestion, ConfirmAnswer, ConfirmPort as _, ConfirmQuestion, GateClass,
-    GateDecision, GateItem, GatePlan, GateReason,
+    CommitAnswer, CommitQuestion, ConfirmAnswer, ConfirmPort as _, ConfirmQuestion, ErrorView,
+    GateClass, GateDecision, GateItem, GatePlan, GateReason, RunStatus, UnitStatus,
+    UnitStatusEntry,
 };
 use hacivat_proto::EnvTag;
 use hacivat_session::session::{RunEvent, RunId, SessionEffects, UnitId, UnitVerdict};
@@ -131,7 +132,13 @@ fn ask(vcx: &VisualTestContext, q: ConfirmQuestion, c: ConfirmContext) -> Asked<
         "the dialog opened: {:?}",
         layer_ids(vcx)
     );
+    arm(vcx);
     Asked::new(rx)
+}
+
+/// Lets the run buttons of the dialog shown last arm (fix round 1, I1).
+fn arm(vcx: &VisualTestContext) {
+    advance(vcx, ARM_DELAY + Duration::from_millis(50));
 }
 
 fn commit_q(savepoint: bool, left: Duration) -> CommitQuestion {
@@ -733,19 +740,20 @@ fn tab_is_trapped_in_visual_order(cx: &mut TestAppContext) {
     assert_eq!(
         seen,
         [
-            "confirm-type",
             "confirm-copy",
+            "confirm-type",
             "confirm-skip",
             "confirm-skip-all",
             "confirm-cancel"
-        ]
+        ],
+        "visual order: Copy sits on the label line above the field"
     );
     set_field(vcx, "confirm-type", NAME);
-    focus(vcx, "confirm-copy");
+    focus(vcx, "confirm-type");
     press(vcx, "tab");
     assert_eq!(focused_id(vcx), "confirm-execute");
     press(vcx, "shift-tab");
-    assert_eq!(focused_id(vcx), "confirm-copy");
+    assert_eq!(focused_id(vcx), "confirm-type");
 }
 
 #[gpui::test]
@@ -828,11 +836,13 @@ fn ask_plan_asks_in_order_and_execute_all_still_asks_for_a_typed_name(cx: &mut T
         vcx,
         "Execute all also runs the remaining 2 statements that would ask, without asking. A statement that needs its name typed still asks, and a production change still waits for your answer after it runs."
     ));
+    arm(vcx);
     click_button(vcx, "confirm-execute-all");
     // Unit 1 still asks for its name.
     assert!(vcx.cx.read(confirm_open));
     assert!(shows(vcx, "statement 2 of 5"));
     set_field(vcx, "confirm-type", NAME);
+    arm(vcx);
     click_button(vcx, "confirm-execute");
     wait_until(vcx, "the plan", |_| out.borrow().is_some());
     let answers = out.borrow_mut().take().flatten().expect("not cancelled");
@@ -951,9 +961,13 @@ fn savepoint_prompt_says_the_transaction_stays_open(cx: &mut TestAppContext) {
     assert!(texts.iter().any(|t| t == "Undoes this statement in "));
     assert!(texts.iter().any(|t| t == "4:51"));
     assert_eq!(focused_id(vcx), "commit-safe");
-    // Tab reaches Keep; Enter keeps the change in the transaction.
+    // Tab reaches Keep; before it is armed Enter does nothing (fix round 1, I1); then Enter
+    // keeps the change in the transaction.
     press(vcx, "tab");
     assert_eq!(focused_id(vcx), "commit-keep");
+    press(vcx, "enter");
+    assert!(a.get().is_none(), "Keep answers only once armed");
+    arm(vcx);
     press(vcx, "enter");
     assert_eq!(a.get(), Some(CommitAnswer::Commit));
 }
@@ -1056,7 +1070,9 @@ fn the_port_names_the_console_s_connection_and_production(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn the_port_of_a_staging_console_draws_no_production(cx: &mut TestAppContext) {
+fn the_port_never_downgrades_production(cx: &mut TestAppContext) {
+    // Fix round 1 (m2): a question asked as production on a console whose profile was retagged
+    // off production keeps the production wording and rules.
     let (vcx, id) = console(cx, "billing-staging", EnvTag::Staging);
     let port = vcx.cx.update(|cx| AppConfirmPort::for_console(id, cx));
     let mut q = question(true);
@@ -1065,7 +1081,24 @@ fn the_port_of_a_staging_console_draws_no_production(cx: &mut TestAppContext) {
     let a = Asked::new(port.confirm(q));
     wait_until(vcx, "the dialog", |vcx| vcx.cx.read(confirm_open));
     assert!(shows(vcx, "Run this statement on billing-staging?"));
-    assert!(button_labels(vcx).contains(&"Execute and don't ask again".to_string()));
+    assert!(shows(vcx, "Nothing is sent until you choose."));
+    assert_eq!(
+        button(vcx, "confirm-suppress"),
+        None,
+        "unknown class on production"
+    );
+    press(vcx, "escape");
+    assert_eq!(a.get(), Some(ConfirmAnswer::Cancel));
+    // Off production, the staging console's own question is the calm one.
+    let mut q = question(false);
+    q.connection = Arc::from("");
+    q.suppressible = true;
+    let a = Asked::new(port.confirm(q));
+    wait_until(vcx, "the dialog", |vcx| vcx.cx.read(confirm_open));
+    assert!(shows(
+        vcx,
+        "Off production, Hacivat asks only before statements like this one. Settings › Execution can turn it off."
+    ));
     press(vcx, "escape");
     assert_eq!(a.get(), Some(ConfirmAnswer::Cancel));
 }
@@ -1087,21 +1120,78 @@ fn a_port_whose_console_is_gone_or_unbound_answers_the_safe_value(cx: &mut TestA
     assert!(matches!(rx.try_recv(), Ok(CommitAnswer::RollBack)));
 }
 
-#[gpui::test]
-fn the_port_follows_commit_decided(cx: &mut TestAppContext) {
-    let vcx = fresh(cx);
-    let port = vcx.cx.update(AppConfirmPort::unbound);
-    let q = commit_q(false, Duration::from_secs(300));
-    let waiting = RunEvent::NeedsCommit {
+/// A commit question of run `run`, unit 0.
+fn commit_q_of(run: u64, savepoint: bool) -> CommitQuestion {
+    let mut q = commit_q(savepoint, Duration::from_secs(300));
+    q.run = RunId(run);
+    q.unit = UnitId {
+        run: RunId(run),
+        ordinal: 0,
+    };
+    q
+}
+
+/// The `NeedsCommit` event of `q`.
+fn waiting(q: &CommitQuestion) -> RunEvent {
+    RunEvent::NeedsCommit {
         unit: q.unit,
         question: q.question,
         affected: q.affected,
         deadline: q.deadline,
         savepoint: q.savepoint,
-    };
-    let (tx, rx) = watch::channel(Some((11, waiting)));
-    let sql: Arc<[Arc<str>]> = Arc::from(vec![Arc::from("UPDATE orders SET archived = true")]);
-    port.follow(rx, sql);
+    }
+}
+
+/// Run `run`'s status with its unit 0 at `status`.
+fn status_of(run: u64, status: UnitStatus) -> RunStatus {
+    RunStatus {
+        run: Some(RunId(run)),
+        started: None,
+        units: Arc::from(vec![UnitStatusEntry {
+            unit: UnitId {
+                run: RunId(run),
+                ordinal: 0,
+            },
+            doc_range: 0..1,
+            status,
+        }]),
+        summary: None,
+    }
+}
+
+fn running() -> UnitStatus {
+    UnitStatus::Running {
+        since: Instant::now(),
+    }
+}
+
+fn lost_unit() -> UnitStatus {
+    UnitStatus::Failed(ErrorView {
+        title_id: "exec-error-connection-lost",
+        code: None,
+        server_text: None,
+        hint_id: None,
+        doc_offset: None,
+    })
+}
+
+fn sql_of(text: &str) -> Arc<[Arc<str>]> {
+    Arc::from(vec![Arc::from(text)])
+}
+
+#[gpui::test]
+fn the_port_follows_commit_decided(cx: &mut TestAppContext) {
+    let vcx = fresh(cx);
+    let port = vcx.cx.update(AppConfirmPort::unbound);
+    let q = commit_q_of(1, false);
+    let (tx, rx) = watch::channel(Some((11, waiting(&q))));
+    let (status_tx, status) = watch::channel(status_of(1, running()));
+    port.follow(
+        RunId(1),
+        rx,
+        status,
+        sql_of("UPDATE orders SET archived = true"),
+    );
     let a = Asked::new(port.commit_decision(q));
     wait_until(vcx, "the prompt", |vcx| {
         !vcx.cx.read(open_commit_views).is_empty()
@@ -1110,8 +1200,10 @@ fn the_port_follows_commit_decided(cx: &mut TestAppContext) {
         shows(vcx, "UPDATE orders SET archived = true"),
         "the statement is shown"
     );
-    // The session decided (by its deadline, say): `CommitDecided` clears the question.
+    // The session decided (by its deadline, say): `CommitDecided` clears the question, and the
+    // unit ends.
     tx.send_replace(None);
+    status_tx.send_replace(status_of(1, UnitStatus::Cancelled));
     wait_until(vcx, "the prompt to close", |vcx| {
         vcx.cx.read(open_commit_views).is_empty()
     });
@@ -1120,14 +1212,98 @@ fn the_port_follows_commit_decided(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_lost_connection_turns_the_prompt_into_a_notice(cx: &mut TestAppContext) {
+fn a_late_follow_attaches_to_its_own_run_only(cx: &mut TestAppContext) {
+    // Fix round 1 (I2, m9): the follow is keyed by run. Run 1's follow is registered; run 2's
+    // question comes before run 2's follow and never takes run 1's statement or watch.
     let vcx = fresh(cx);
     let port = vcx.cx.update(AppConfirmPort::unbound);
-    let a = Asked::new(port.commit_decision(commit_q(true, Duration::from_secs(300))));
+    let old = commit_q_of(1, false);
+    let (_old_tx, old_rx) = watch::channel(Some((10, waiting(&old))));
+    let (_old_status_tx, old_status) = watch::channel(status_of(1, running()));
+    port.follow(RunId(1), old_rx, old_status, sql_of("DELETE FROM old_run"));
+    let q = commit_q_of(2, true);
+    let a = Asked::new(port.commit_decision(q.clone()));
     wait_until(vcx, "the prompt", |vcx| {
         !vcx.cx.read(open_commit_views).is_empty()
     });
-    port.connection_lost(Some(3));
+    assert!(
+        !frame_texts(vcx).iter().any(|t| t.contains("old_run")),
+        "another run's statement is never shown"
+    );
+    // Run 2's follow comes late: the prompt attaches it.
+    let (tx, rx) = watch::channel(Some((12, waiting(&q))));
+    let (status_tx, status) = watch::channel(status_of(2, running()));
+    port.follow(
+        RunId(2),
+        rx,
+        status,
+        sql_of("UPDATE orders SET status = 'x'"),
+    );
+    wait_until(vcx, "the late statement", |vcx| {
+        shows(vcx, "UPDATE orders SET status = 'x'")
+    });
+    assert!(a.get().is_none());
+    // Run 1 ends: run 2's prompt stays.
+    drop(_old_tx);
+    vcx.run_until_parked();
+    assert!(!vcx.cx.read(open_commit_views).is_empty());
+    // Run 2 decides: it closes.
+    tx.send_replace(None);
+    status_tx.send_replace(status_of(2, UnitStatus::Cancelled));
+    wait_until(vcx, "the prompt to close", |vcx| {
+        vcx.cx.read(open_commit_views).is_empty()
+    });
+    assert_eq!(a.get(), Some(CommitAnswer::RollBack));
+}
+
+#[gpui::test]
+fn the_lost_form_follows_the_run_s_own_loss_in_any_order(cx: &mut TestAppContext) {
+    // Fix round 1 (I2): the run's question clears (no `CommitDecided` follows a loss) and its
+    // unit fails with a lost connection: the lost form, without any call from the app.
+    let vcx = fresh(cx);
+    let port = vcx.cx.update(AppConfirmPort::unbound);
+    let q = commit_q_of(3, true);
+    let (tx, rx) = watch::channel(Some((13, waiting(&q))));
+    let (status_tx, status) = watch::channel(status_of(3, running()));
+    port.follow(RunId(3), rx, status, sql_of("UPDATE t SET a = 1"));
+    let a = Asked::new(port.commit_decision(q));
+    wait_until(vcx, "the prompt", |vcx| {
+        !vcx.cx.read(open_commit_views).is_empty()
+    });
+    tx.send_replace(None);
+    status_tx.send_replace(status_of(3, lost_unit()));
+    wait_until(vcx, "the lost form", |vcx| {
+        shows(
+            vcx,
+            "The server rolled back your open transaction, this statement included. Nothing was committed.",
+        )
+    });
+    assert_eq!(a.get(), Some(CommitAnswer::RollBack));
+    // The app's count arrives after the run ended: the form takes it.
+    port.connection_lost(RunId(3), Some(3));
+    wait_until(vcx, "the count", |vcx| {
+        shows(
+            vcx,
+            "The server rolled back your open transaction: this statement and the 3 before it. Nothing was committed.",
+        )
+    });
+    assert_eq!(vcx.cx.read(open_commit_views).len(), 1);
+}
+
+#[gpui::test]
+fn a_lost_connection_turns_the_prompt_into_a_notice(cx: &mut TestAppContext) {
+    let vcx = fresh(cx);
+    let port = vcx.cx.update(AppConfirmPort::unbound);
+    let q = commit_q_of(4, true);
+    let a = Asked::new(port.commit_decision(q));
+    wait_until(vcx, "the prompt", |vcx| {
+        !vcx.cx.read(open_commit_views).is_empty()
+    });
+    // Another run's loss changes nothing (fix round 1, m4).
+    port.connection_lost(RunId(99), Some(1));
+    vcx.run_until_parked();
+    assert!(a.get().is_none());
+    port.connection_lost(RunId(4), Some(3));
     wait_until(vcx, "the lost form", |vcx| {
         shows(
             vcx,
@@ -1143,4 +1319,184 @@ fn a_lost_connection_turns_the_prompt_into_a_notice(cx: &mut TestAppContext) {
     assert!(layer_ids(vcx).contains(&commit_prompt::COMMIT_LAYER_ID));
     press(vcx, "enter");
     assert!(!layer_ids(vcx).contains(&commit_prompt::COMMIT_LAYER_ID));
+}
+
+// ---- fix round 1 --------------------------------------------------------------------------------
+
+/// A two-unit plan of two `DROP TABLE` confirmations of the same shape (identical layouts).
+fn two_drops() -> GatePlan {
+    GatePlan {
+        items: vec![
+            confirm_item(0, None, GateClass::DdlDestructive),
+            confirm_item(1, None, GateClass::DdlDestructive),
+        ],
+    }
+}
+
+/// Presses and releases the left button at `selector`'s centre as the `count`-th click.
+fn click_count(vcx: &mut VisualTestContext, selector: &'static str, count: usize) {
+    let at = vcx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("`{selector}` is drawn"))
+        .center();
+    vcx.simulate_event(gpui::MouseDownEvent {
+        button: gpui::MouseButton::Left,
+        position: at,
+        modifiers: gpui::Modifiers::none(),
+        click_count: count,
+        first_mouse: false,
+    });
+    vcx.simulate_event(gpui::MouseUpEvent {
+        button: gpui::MouseButton::Left,
+        position: at,
+        modifiers: gpui::Modifiers::none(),
+        click_count: count,
+    });
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_double_click_never_answers_the_next_dialog(cx: &mut TestAppContext) {
+    // Fix round 1 (I1): two queued DROP TABLE confirmations put Execute at the same pixel.
+    let vcx = fresh(cx);
+    let sql: Vec<Arc<str>> = vec![Arc::from("DROP TABLE a;"), Arc::from("DROP TABLE b;")];
+    let task = vcx.cx.update(|cx| {
+        ask_plan(
+            RunId(5),
+            two_drops(),
+            sql,
+            true,
+            Arc::from("orders-prod"),
+            ConfirmContext::default(),
+            cx,
+        )
+    });
+    let out: std::rc::Rc<RefCell<Option<Option<PlanAnswers>>>> = Default::default();
+    let slot = out.clone();
+    vcx.cx.update(|cx| {
+        cx.spawn(async move |_| {
+            *slot.borrow_mut() = Some(task.await);
+        })
+        .detach();
+    });
+    vcx.run_until_parked();
+    assert!(shows(vcx, "statement 1 of 2"));
+    // Before it arms, even a single click on Execute does nothing.
+    click_count(vcx, "button-confirm-execute", 1);
+    assert!(
+        shows(vcx, "statement 1 of 2"),
+        "unarmed Execute answers nothing"
+    );
+    arm(vcx);
+    click_count(vcx, "button-confirm-execute", 1);
+    // The double-click's second click lands on unit 2's Execute at once: nothing.
+    assert!(shows(vcx, "statement 2 of 2"));
+    click_count(vcx, "button-confirm-execute", 2);
+    assert!(
+        shows(vcx, "statement 2 of 2"),
+        "the second click never answers"
+    );
+    // Even once armed, a click counted as the second of a double-click answers nothing.
+    arm(vcx);
+    click_count(vcx, "button-confirm-execute", 2);
+    assert!(out.borrow().is_none());
+    // Keyboard Enter on a focused Execute follows the same arming.
+    focus(vcx, "confirm-execute");
+    press(vcx, "enter");
+    wait_until(vcx, "the plan", |_| out.borrow().is_some());
+    let answers = out.borrow_mut().take().flatten().expect("not cancelled");
+    assert!(
+        answers
+            .plan
+            .items
+            .iter()
+            .all(|i| i.decision == GateDecision::Run)
+    );
+}
+
+#[gpui::test]
+fn enter_on_execute_waits_for_arming(cx: &mut TestAppContext) {
+    let vcx = fresh(cx);
+    let rx = vcx
+        .cx
+        .update(|cx| confirm::open_in(question(true), ctx(GateClass::DdlDestructive), cx));
+    vcx.run_until_parked();
+    let a = Asked::new(rx);
+    focus(vcx, "confirm-execute");
+    press(vcx, "enter");
+    assert!(a.get().is_none(), "unarmed");
+    // The safe answer is live at once.
+    press(vcx, "escape");
+    assert_eq!(a.get(), Some(ConfirmAnswer::Cancel));
+}
+
+#[gpui::test]
+fn a_lower_prompt_closing_keeps_the_focus_on_the_top_dialog(cx: &mut TestAppContext) {
+    // Fix round 1 (I3, m9): two consoles; A's confirm-in-transaction prompt under B's
+    // confirmation; A's deadline closes A's prompt; B keeps the focus and its keys.
+    let (vcx, a_id) = console(cx, "billing-prod", EnvTag::Production);
+    let p = test_profile("ledger-prod", Some(EnvTag::Production), "10.0.0.2");
+    let profile = add_profile(vcx, p.clone());
+    let (session, _fake) = test_session(vcx, p);
+    let b_id = register_test_console(vcx, profile, session);
+    let port_a = vcx.cx.update(|cx| AppConfirmPort::for_console(a_id, cx));
+    let port_b = vcx.cx.update(|cx| AppConfirmPort::for_console(b_id, cx));
+    let mut q = commit_q(false, Duration::from_secs(3));
+    q.connection = Arc::from("");
+    let a = Asked::new(port_a.commit_decision(q));
+    wait_until(vcx, "A's prompt", |vcx| {
+        !vcx.cx.read(open_commit_views).is_empty()
+    });
+    let mut q = question(true);
+    q.connection = Arc::from("");
+    let b = Asked::new(port_b.confirm(q));
+    wait_until(vcx, "B's dialog", |vcx| vcx.cx.read(confirm_open));
+    assert!(shows(vcx, "Run this statement on ledger-prod?"));
+    assert!(shows(vcx, "214 rows changed on billing-prod"));
+    assert_eq!(focused_id(vcx), "confirm-cancel");
+    advance(vcx, Duration::from_secs(4));
+    assert_eq!(a.get(), Some(CommitAnswer::RollBack), "A's deadline");
+    assert_eq!(layer_ids(vcx), [confirm::CONFIRM_LAYER_ID]);
+    assert_eq!(focused_id(vcx), "confirm-cancel", "B keeps the focus");
+    press(vcx, "escape");
+    assert_eq!(b.get(), Some(ConfirmAnswer::Cancel));
+    assert!(layer_ids(vcx).is_empty());
+}
+
+#[gpui::test]
+fn escape_during_a_composition_ends_it_first(cx: &mut TestAppContext) {
+    // Fix round 1 (m7).
+    let vcx = fresh(cx);
+    let a = ask(vcx, typed_question(), ctx(GateClass::DmlUnsafe));
+    let field = input(vcx, "confirm-type");
+    focus(vcx, "confirm-type");
+    in_window(vcx, |window, cx| {
+        field.update(cx, |i, cx| {
+            i.replace_and_mark_text_in_range(None, "m", None, window, cx);
+        });
+    });
+    vcx.run_until_parked();
+    assert!(vcx.cx.read(|cx| field.read(cx).is_composing()));
+    press(vcx, "escape");
+    assert!(a.get().is_none(), "the composition ends, the dialog stays");
+    assert!(!vcx.cx.read(|cx| field.read(cx).is_composing()));
+    press(vcx, "escape");
+    assert_eq!(a.get(), Some(ConfirmAnswer::Cancel));
+}
+
+#[gpui::test]
+fn an_untypeable_name_says_why_and_stays_closed(cx: &mut TestAppContext) {
+    // Fix round 1 (m8): a tab in a quoted name can't be typed or pasted.
+    let vcx = fresh(cx);
+    let mut q = typed_question();
+    q.type_to_confirm = Some(Arc::from("a\tb"));
+    let _a = ask(vcx, q, ctx(GateClass::DmlUnsafe));
+    assert!(shows(
+        vcx,
+        "This name contains a character that can't be typed or pasted, so it can't be confirmed here. Run this statement from another client."
+    ));
+    assert_eq!(
+        button(vcx, "confirm-execute"),
+        Some((ButtonKind::Danger, false))
+    );
 }

@@ -46,12 +46,23 @@
 //! the console's profile at the moment it asks (Task 16's `CommitQuestion` carries
 //! `production: true` and an empty name, T16 m13); a console that is gone answers the safe
 //! value. A port that is not connected to the UI ([`AppConfirmPort::default`]) answers the safe
-//! value at once. [`AppConfirmPort::follow`] gives it the run's `RunTicket::choices`: an open
-//! confirm-in-transaction prompt closes once the session decided its question
-//! (`RunEvent::CommitDecided` clears it, T1c M7). Nothing here runs a statement or unlocks
-//! production (R-M3-52).
+//! value at once. The port may add production from the profile, never take it away (fix round
+//! 1, m2). [`AppConfirmPort::follow`] registers a run (its ticket's `choices` and `status`) in
+//! the port's book keyed by `RunId`; [`AppConfirmPort::connection_lost`] records a run's loss
+//! there. A confirm-in-transaction prompt attaches its own run's entries whenever they arrive
+//! (fix round 1, I2). An asker that goes away closes its prompt (m6). Nothing here runs a
+//! statement or unlocks production (R-M3-52).
+//!
+//! **Fix round 1.** Run buttons (Execute, Execute all, "don't ask again") answer only
+//! [`ARM_DELAY`] after the dialog shows (executor clock), by click or by Enter, and never on the
+//! second click of a double-click (I1): a double-click across two queued dialogs never answers
+//! the second. Cancel is live at once. A lower prompt that closes under another modal leaves
+//! the focus on the top one (I3, `Workspace::remove_layer`).
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use hacivat_exec::{
     CommitAnswer, CommitQuestion, ConfirmAnswer, ConfirmPort, ConfirmQuestion, GateClass,
@@ -68,11 +79,12 @@ use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::input::{InputEvent, TextInput};
 use hacivat_ui::popover::A11yNode;
 use hacivat_ui::text::{Label, TextSource, paragraph, scroll_viewport};
+use hacivat_ui_core::gpui_surface::EntityInputHandler as _;
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, AppContext as _, ClipboardItem, Context, Div, Entity, EntityId, FocusHandle,
-    Focusable, Global, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Role,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, WeakEntity, Window,
-    div, px,
+    AnyElement, AnyWindowHandle, App, AppContext as _, ClickEvent, ClipboardItem, Context, Div,
+    Entity, EntityId, FocusHandle, Focusable, Global, InteractiveElement, IntoElement,
+    KeyDownEvent, ParentElement, Render, Role, SharedString, StatefulInteractiveElement as _,
+    Styled, Subscription, Task, WeakEntity, Window, div, px,
 };
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -89,6 +101,11 @@ use crate::console::{ConsoleId, Consoles};
 use crate::exec_ui::commit_prompt;
 use crate::exec_ui::marks::message;
 use crate::exec_ui::orchestrator::profile_of;
+// ## m3b-t21-confirm (fix round 1)
+use crate::console::decor::console_title;
+use crate::console::view::host_binding;
+use hacivat_exec::RunStatus;
+use std::collections::HashMap;
 
 /// The confirmation dialog's layer ID.
 pub const CONFIRM_LAYER_ID: &str = "confirm-dialog";
@@ -103,6 +120,11 @@ const SQL_MAX_LINES: usize = 400;
 const NAME_MAX_CHARS: usize = 200;
 /// The stop group's Cancel is at least this wide (NOTES surface 1).
 const CANCEL_MIN_PX: f32 = 72.0;
+// ## m3b-t21-confirm (fix round 1, I1)
+/// The buttons that run or keep a change answer only once the dialog has been shown this long
+/// (executor clock): the second click of a double-click, or a click meant for the dialog that
+/// just closed, never lands on a run button of the next dialog. The safe answer is live at once.
+pub const ARM_DELAY: Duration = Duration::from_millis(400);
 
 /// The gate's reason IDs the dialog reads (`hacivat-core.ftl`, block `m3b-t15-gate`).
 const NOT_ANALYSED: &str = "exec-gate-not-analysed";
@@ -170,6 +192,13 @@ pub fn offers_suppress(q: &ConfirmQuestion, class: Option<GateClass>) -> bool {
             )
         );
     q.suppressible && q.type_to_confirm.is_none() && !unanalysed && !production_forbids
+}
+
+// ## m3b-t21-confirm (fix round 1, m8)
+/// Whether `name` holds a control character (a tab or a newline in a quoted identifier): the
+/// type field turns controls into spaces, so it can never be typed or pasted.
+pub fn untypeable(name: &str) -> bool {
+    name.chars().any(char::is_control)
 }
 
 /// Whether `typed` is the name to type: exactly its bytes (no case or Turkish İ/i folding, no
@@ -476,10 +505,33 @@ pub fn open_in(
     ctx: ConfirmContext,
     cx: &mut App,
 ) -> oneshot::Receiver<ConfirmAnswer> {
+    open_tracked(question, ctx, cx).0
+}
+
+// ## m3b-t21-confirm (fix round 1, m6)
+/// Where an opened prompt's layer is, once it is shown: an asker that goes away closes it.
+pub(crate) type Shown = Rc<RefCell<Option<(AnyWindowHandle, EntityId)>>>;
+
+/// Closes the prompt `shown` names (its view's `Drop` answers the safe value).
+pub(crate) fn close_shown(shown: &Shown, cx: &mut App) {
+    let Some((window, view)) = shown.borrow_mut().take() else {
+        return;
+    };
+    let _ = window.update(cx, |_, window, cx| remove_modal(view, window, cx));
+}
+
+/// [`open_in`], and where the dialog is once shown.
+fn open_tracked(
+    question: ConfirmQuestion,
+    ctx: ConfirmContext,
+    cx: &mut App,
+) -> (oneshot::Receiver<ConfirmAnswer>, Shown) {
+    let shown: Shown = Rc::default();
     if workspace_window(cx).is_none() {
-        return answered(ConfirmAnswer::Cancel);
+        return (answered(ConfirmAnswer::Cancel), shown);
     }
     let (reply, rx) = oneshot::channel();
+    let slot = shown.clone();
     cx.defer(move |cx| {
         let Some(handle) = workspace_window(cx) else {
             // Dropping the reply answers Cancel (`unwrap_or`), but say it.
@@ -489,7 +541,8 @@ pub fn open_in(
         let mut reply = Some(reply);
         let opened = handle.update(cx, |_, window, cx| {
             if let Some(reply) = reply.take() {
-                show(question, ctx, reply, window, cx);
+                let view = show(question, ctx, reply, window, cx);
+                *slot.borrow_mut() = Some((handle, view));
             }
         });
         if opened.is_err()
@@ -498,7 +551,7 @@ pub fn open_in(
             let _ = reply.send(ConfirmAnswer::Cancel);
         }
     });
-    rx
+    (rx, shown)
 }
 
 /// Pushes the dialog over `window`'s workspace.
@@ -508,7 +561,7 @@ fn show(
     reply: oneshot::Sender<ConfirmAnswer>,
     window: &mut Window,
     cx: &mut App,
-) {
+) -> EntityId {
     let view = cx.new(|cx| ConfirmDialog::new(question, ctx, reply, window, cx));
     track_confirm(view.downgrade(), cx);
     let cancel = view.read(cx).cancel.clone();
@@ -523,6 +576,7 @@ fn show(
         let handle = input.read(cx).focus_handle(cx);
         register_part(cx, "confirm-type", &handle, Some(&input));
     }
+    view.entity_id()
 }
 
 /// One footer button as the dialog draws it.
@@ -577,6 +631,8 @@ pub struct ConfirmDialog {
     typed: Option<Entity<TextInput>>,
     /// Enter was pressed in the field over a name that does not match: the hint shows.
     missed: bool,
+    /// When the dialog was shown (executor clock): run buttons arm [`ARM_DELAY`] later.
+    shown_at: Instant,
     root: FocusHandle,
     copy: FocusHandle,
     execute: FocusHandle,
@@ -621,6 +677,8 @@ impl ConfirmDialog {
                         this.missed = !this.name_ok(cx);
                         cx.notify();
                     }
+                    // The field emits this only when it is not composing (fix round 1, m7:
+                    // a composing field's Escape reaches `on_key`).
                     InputEvent::Cancelled => this.answer(ConfirmAnswer::Cancel, window, cx),
                     InputEvent::Changed => {
                         this.missed = false;
@@ -636,6 +694,7 @@ impl ConfirmDialog {
             reply: Some(reply),
             typed,
             missed: false,
+            shown_at: cx.background_executor().now(),
             root: cx.focus_handle(),
             copy: cx.focus_handle().tab_stop(true),
             execute: cx.focus_handle().tab_stop(true),
@@ -690,6 +749,13 @@ impl ConfirmDialog {
         self.missed || (!typed.is_empty() && !name.as_bytes().starts_with(typed.as_bytes()))
     }
 
+    /// Whether the type field holds an IME composition.
+    fn composing(&self, cx: &App) -> bool {
+        self.typed
+            .as_ref()
+            .is_some_and(|i| i.read(cx).is_composing())
+    }
+
     fn multi(&self) -> bool {
         self.q.total > 1
     }
@@ -706,13 +772,23 @@ impl ConfirmDialog {
         offers_suppress(&self.q, self.ctx.class)
     }
 
-    /// Whether `answer` may be given now (a disabled or absent button never answers).
+    /// Whether the run buttons answer yet ([`ARM_DELAY`] on the executor clock).
+    fn armed(&self, cx: &App) -> bool {
+        cx.background_executor()
+            .now()
+            .saturating_duration_since(self.shown_at)
+            >= ARM_DELAY
+    }
+
+    /// Whether `answer` may be given now (a disabled or absent button never answers; a run
+    /// button answers only once armed).
     fn allowed(&self, answer: ConfirmAnswer, cx: &App) -> bool {
+        let run = self.armed(cx) && self.name_ok(cx);
         match answer {
             ConfirmAnswer::Cancel => true,
-            ConfirmAnswer::Execute => self.name_ok(cx),
-            ConfirmAnswer::ExecuteAll => self.shows_execute_all() && self.name_ok(cx),
-            ConfirmAnswer::ExecuteAndSuppress => self.shows_suppress() && self.name_ok(cx),
+            ConfirmAnswer::Execute => run,
+            ConfirmAnswer::ExecuteAll => self.shows_execute_all() && run,
+            ConfirmAnswer::ExecuteAndSuppress => self.shows_suppress() && run,
             ConfirmAnswer::Skip => self.multi(),
             ConfirmAnswer::SkipAll => self.shows_skip_all(),
         }
@@ -823,6 +899,15 @@ impl ConfirmDialog {
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let stroke = &event.keystroke;
         match stroke.key.as_str() {
+            // Fix round 1 (m7): a composing field lets its keys bubble here (where the platform
+            // did not give Escape to the IME): Escape ends the composition, its text stays, and
+            // the dialog stays; the next Escape cancels.
+            "escape" if self.composing(cx) => {
+                if let Some(input) = self.typed.clone() {
+                    input.update(cx, |i, cx| i.unmark_text(window, cx));
+                }
+                cx.notify();
+            }
             "escape" => self.answer(ConfirmAnswer::Cancel, window, cx),
             "enter" => {
                 if !acting_enter(event) {
@@ -841,9 +926,11 @@ impl ConfirmDialog {
             "w" if closes_dialog(stroke, cx) => self.answer(ConfirmAnswer::Cancel, window, cx),
             _ if trapped_tab(event) => {
                 let mut order = Vec::new();
+                // Visual order (fix round 1, m5): the Copy button sits on the label line above
+                // the field.
                 if let Some(input) = &self.typed {
-                    order.push(input.read(cx).focus_handle(cx));
                     order.push(self.copy.clone());
+                    order.push(input.read(cx).focus_handle(cx));
                 }
                 order.extend(
                     self.buttons(cx)
@@ -895,10 +982,17 @@ impl Render for ConfirmDialog {
                 ],
             )
         });
+        // Fix round 1 (m3): the console's own title when known (two consoles of one connection
+        // are told apart).
+        let shown_name = self
+            .ctx
+            .console
+            .as_deref()
+            .map_or_else(|| name.to_string(), |c| visible(c, NAME_MAX_CHARS));
         let sub = subtitle(
             &theme,
             self.ctx.env_of(q.production),
-            &name,
+            &shown_name,
             self.ctx.engine.clone(),
             unit,
         );
@@ -964,7 +1058,16 @@ impl Render for ConfirmDialog {
                         .w_full()
                         .child(input.clone()),
                 );
-            if self.mismatch(cx) {
+            // ## m3b-t21-confirm (fix round 1, m8): a name with a control character can be
+            // neither typed nor pasted (the field turns controls into spaces): it stays
+            // fail-closed, and the dialog says why instead of hinting at letter case.
+            if untypeable(raw) {
+                block = block.child(alert_line(
+                    &theme,
+                    message(cx, "hv-confirm-type-untypeable", vec![]),
+                    "confirm-type-untypeable",
+                ));
+            } else if self.mismatch(cx) {
                 block = block.child(alert_line(
                     &theme,
                     message(cx, "hv-confirm-type-hint", vec![]),
@@ -1030,12 +1133,21 @@ impl Render for ConfirmDialog {
         let mut stop_group: Vec<AnyElement> = Vec::new();
         for spec in self.buttons(cx) {
             let answer = spec.answer;
-            let button = Button::new(spec.id, message(cx, spec.label_id, vec![]))
+            let mut button = Button::new(spec.id, message(cx, spec.label_id, vec![]))
                 .kind(spec.kind)
                 .disabled(!spec.enabled)
                 .on_raised(true)
                 .focus_handle(spec.handle.clone())
-                .on_click(cx.listener(move |this, _, window, cx| this.answer(answer, window, cx)));
+                // Fix round 1 (I1): the second click of a double-click never answers.
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if event.click_count() > 1 {
+                        return;
+                    }
+                    this.answer(answer, window, cx);
+                }));
+            if answer == ConfirmAnswer::Cancel {
+                button = button.min_width(CANCEL_MIN_PX);
+            }
             match answer {
                 ConfirmAnswer::Execute
                 | ConfirmAnswer::ExecuteAll
@@ -1043,15 +1155,7 @@ impl Render for ConfirmDialog {
                 ConfirmAnswer::Skip | ConfirmAnswer::SkipAll => {
                     stop_group.push(button.into_any_element());
                 }
-                ConfirmAnswer::Cancel => stop_group.push(
-                    div()
-                        .min_w(px(CANCEL_MIN_PX))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .child(button)
-                        .into_any_element(),
-                ),
+                ConfirmAnswer::Cancel => stop_group.push(button.into_any_element()),
             }
         }
 
@@ -1430,13 +1534,73 @@ pub(crate) fn grouped_footer(
 
 // ---- the port -----------------------------------------------------------------------------------
 
-/// What the port knows of the run it asks for ([`AppConfirmPort::follow`]).
+/// What the port knows of one run ([`AppConfirmPort::follow`]).
 #[derive(Debug, Clone)]
 pub(crate) struct Follow {
     /// The run's `RunTicket::choices`.
     pub(crate) choices: watch::Receiver<Option<(u64, RunEvent)>>,
+    /// The run's `RunTicket::status` (a unit that failed with a lost connection).
+    pub(crate) status: watch::Receiver<RunStatus>,
     /// Each unit's masked text, by ordinal (the commit prompt shows it).
     pub(crate) sql: Arc<[Arc<str>]>,
+}
+
+// ## m3b-t21-confirm (fix round 1, I2)
+/// The runs a port follows and the losses it was told of, keyed by run: a question finds its own
+/// run's entries and never another's, whichever arrives first.
+#[derive(Debug, Default)]
+struct RunBook {
+    follows: HashMap<RunId, Follow>,
+    lost: HashMap<RunId, Option<u32>>,
+}
+
+/// A port's book, shared by the port (core runtime) and its prompts (UI thread); `changed`
+/// ticks on every entry.
+#[derive(Debug)]
+pub(crate) struct Runs {
+    book: Mutex<RunBook>,
+    changed: watch::Sender<u64>,
+}
+
+impl Default for Runs {
+    fn default() -> Self {
+        Runs {
+            book: Mutex::default(),
+            changed: watch::channel(0).0,
+        }
+    }
+}
+
+impl Runs {
+    fn with<R>(&self, f: impl FnOnce(&mut RunBook) -> R) -> Option<R> {
+        self.book.lock().ok().map(|mut b| f(&mut b))
+    }
+
+    fn tick(&self) {
+        self.changed.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// Run `run`'s follow, once registered.
+    pub(crate) fn follow_of(&self, run: RunId) -> Option<Follow> {
+        self.with(|b| b.follows.get(&run).cloned()).flatten()
+    }
+
+    /// Run `run`'s loss, once reported (`Some(statements before)`, the count when known).
+    pub(crate) fn lost_of(&self, run: RunId) -> Option<Option<u32>> {
+        self.with(|b| b.lost.get(&run).copied()).flatten()
+    }
+
+    /// Ticks on every follow and loss.
+    pub(crate) fn watch(&self) -> watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+}
+
+/// A commit prompt's link to its run in its port's book.
+#[derive(Debug, Clone)]
+pub struct RunLink {
+    pub(crate) run: RunId,
+    pub(crate) runs: Arc<Runs>,
 }
 
 /// One question on its way to the UI thread.
@@ -1450,11 +1614,7 @@ enum PortRequest {
         console: Option<ConsoleId>,
         question: CommitQuestion,
         reply: oneshot::Sender<CommitAnswer>,
-        follow: Option<Follow>,
-    },
-    Lost {
-        console: Option<ConsoleId>,
-        statements_before: Option<u32>,
+        link: RunLink,
     },
 }
 
@@ -1468,7 +1628,7 @@ impl Global for PortLoop {}
 pub struct AppConfirmPort {
     console: Option<ConsoleId>,
     requests: Option<mpsc::UnboundedSender<PortRequest>>,
-    follow: Arc<Mutex<Option<Follow>>>,
+    runs: Arc<Runs>,
 }
 
 impl std::fmt::Debug for PortRequest {
@@ -1476,7 +1636,6 @@ impl std::fmt::Debug for PortRequest {
         f.write_str(match self {
             PortRequest::Confirm { .. } => "Confirm",
             PortRequest::Commit { .. } => "Commit",
-            PortRequest::Lost { .. } => "Lost",
         })
     }
 }
@@ -1489,7 +1648,7 @@ impl AppConfirmPort {
         Arc::new(AppConfirmPort {
             console: Some(console),
             requests: Some(requests),
-            follow: Arc::default(),
+            runs: Arc::default(),
         })
     }
 
@@ -1500,34 +1659,45 @@ impl AppConfirmPort {
         Arc::new(AppConfirmPort {
             console: None,
             requests: Some(requests),
-            follow: Arc::default(),
+            runs: Arc::default(),
         })
     }
 
-    /// Follows the run whose ticket gave `choices` (`RunTicket::choices`): an open
-    /// confirm-in-transaction prompt closes once its question is no longer the one waiting
-    /// (the session decided it: `CommitDecided`, the unit ended, the run ended). `sql` holds
-    /// each unit's masked text by ordinal, for the prompt.
-    pub fn follow(&self, choices: watch::Receiver<Option<(u64, RunEvent)>>, sql: Arc<[Arc<str>]>) {
-        if let Ok(mut f) = self.follow.lock() {
-            *f = Some(Follow { choices, sql });
-        }
+    /// Follows run `run` (its ticket's `choices` and `status`; `sql`: each unit's masked text by
+    /// ordinal). A commit question of that run attaches it whether it was asked before or after
+    /// this call; a question of another run never does. Runs whose ticket is gone are dropped.
+    pub fn follow(
+        &self,
+        run: RunId,
+        choices: watch::Receiver<Option<(u64, RunEvent)>>,
+        status: watch::Receiver<RunStatus>,
+        sql: Arc<[Arc<str>]>,
+    ) {
+        self.runs.with(|b| {
+            b.follows.retain(|_, f| f.choices.has_changed().is_ok());
+            let live: Vec<RunId> = b.follows.keys().copied().collect();
+            b.lost.retain(|r, _| live.contains(r));
+            b.follows.insert(
+                run,
+                Follow {
+                    choices,
+                    status,
+                    sql,
+                },
+            );
+        });
+        self.runs.tick();
     }
 
-    /// The console's connection was lost while a confirm-in-transaction prompt waited: the
-    /// prompt says the server rolled the changes back (in the savepoint form, the user's whole
-    /// transaction: this statement and `statements_before` before it), with Close only.
-    pub fn connection_lost(&self, statements_before: Option<u32>) {
-        if let Some(requests) = &self.requests {
-            let _ = requests.send(PortRequest::Lost {
-                console: self.console,
-                statements_before,
-            });
-        }
-    }
-
-    fn current_follow(&self) -> Option<Follow> {
-        self.follow.lock().ok().and_then(|f| f.clone())
+    /// Run `run`'s connection was lost while one of its confirm-in-transaction prompts may wait:
+    /// that prompt (of this port, this run, only) says the server rolled the changes back (in
+    /// the savepoint form, the user's whole transaction: this statement and `statements_before`
+    /// before it), with Close only. Whatever order this and the run's end arrive in.
+    pub fn connection_lost(&self, run: RunId, statements_before: Option<u32>) {
+        self.runs.with(|b| {
+            b.lost.insert(run, statements_before);
+        });
+        self.runs.tick();
     }
 }
 
@@ -1554,11 +1724,15 @@ impl ConfirmPort for AppConfirmPort {
             return answered(CommitAnswer::RollBack);
         };
         let (reply, rx) = oneshot::channel();
+        let link = RunLink {
+            run: q.run,
+            runs: self.runs.clone(),
+        };
         let sent = requests.send(PortRequest::Commit {
             console: self.console,
             question: q,
             reply,
-            follow: self.current_follow(),
+            link,
         });
         match sent {
             Ok(()) => rx,
@@ -1583,16 +1757,19 @@ fn install(cx: &mut App) -> mpsc::UnboundedSender<PortRequest> {
     requests
 }
 
-/// What a console's profile says when the port asks: its name, environment and engine.
+/// What a console's profile says when the port asks: its name, environment and engine, and the
+/// console's own title (`orders-prod (2)` for its second console).
 pub(crate) struct Facts {
     pub(crate) name: Arc<str>,
+    pub(crate) title: Arc<str>,
     pub(crate) env: Option<EnvTag>,
     pub(crate) engine: Option<SharedString>,
 }
 
 /// Console `console`'s facts now; `None` when the console (or its profile) is gone.
 pub(crate) fn console_facts(cx: &App, console: ConsoleId) -> Option<Facts> {
-    Consoles::get(cx, console)?;
+    let state = Consoles::get(cx, console)?;
+    let tab = state.tab;
     let profile = profile_of(cx, console)?;
     let info = cx
         .try_global::<ConnectionsModel>()
@@ -1601,14 +1778,19 @@ pub(crate) fn console_facts(cx: &App, console: ConsoleId) -> Option<Facts> {
         Some(LiveState::Connected(info)) => engine_label(&profile, Some(info)),
         _ => engine_label(&profile, None),
     };
+    let slot = host_binding(cx, tab).map_or(1, |(_, slot)| slot);
+    let title = console_title(cx, &profile, slot);
     Some(Facts {
         name: Arc::from(profile.name.as_str()),
+        title: Arc::from(title.as_ref()),
         env: profile.environment,
         engine: Some(engine),
     })
 }
 
-/// Opens the prompt of `request` and sends its answer back (the asker going away closes it).
+/// Opens the prompt of `request` and sends its answer back; the asker going away closes it.
+/// The port may add production from the console's profile but never take it away (fix round
+/// 1, m2).
 fn route(request: PortRequest, cx: &mut App) {
     match request {
         PortRequest::Confirm {
@@ -1622,20 +1804,24 @@ fn route(request: PortRequest, cx: &mut App) {
                     let _ = reply.send(ConfirmAnswer::Cancel);
                     return;
                 };
-                question.connection = facts.name.clone();
-                question.production = facts.env == Some(EnvTag::Production);
-                ctx.env = facts.env;
+                question.connection = facts.name;
+                question.production |= facts.env == Some(EnvTag::Production);
+                ctx.env = if question.production {
+                    Some(EnvTag::Production)
+                } else {
+                    facts.env
+                };
                 ctx.engine = facts.engine;
-                ctx.console = Some(facts.name);
+                ctx.console = Some(facts.title);
             }
-            let rx = open_in(question, ctx, cx);
-            forward(reply, rx, ConfirmAnswer::Cancel, cx);
+            let (rx, shown) = open_tracked(question, ctx, cx);
+            forward(reply, rx, shown, ConfirmAnswer::Cancel, cx);
         }
         PortRequest::Commit {
             console,
             mut question,
             reply,
-            follow,
+            link,
         } => {
             let mut ctx = commit_prompt::CommitContext {
                 env: question.production.then_some(EnvTag::Production),
@@ -1647,38 +1833,47 @@ fn route(request: PortRequest, cx: &mut App) {
                     return;
                 };
                 question.connection = facts.name;
-                question.production = facts.env == Some(EnvTag::Production);
-                ctx.env = facts.env;
+                question.production |= facts.env == Some(EnvTag::Production);
+                ctx.env = if question.production {
+                    Some(EnvTag::Production)
+                } else {
+                    facts.env
+                };
                 ctx.engine = facts.engine;
             }
             ctx.console = console;
-            if let Some(f) = &follow {
-                ctx.sql = usize::try_from(question.unit.ordinal)
-                    .ok()
-                    .and_then(|i| f.sql.get(i).cloned());
-                ctx.follow = Some(f.choices.clone());
-            }
-            let rx = commit_prompt::open_in(question, ctx, cx);
-            forward(reply, rx, CommitAnswer::RollBack, cx);
+            ctx.link = Some(link);
+            let (rx, shown) = commit_prompt::open_tracked(question, ctx, cx);
+            forward(reply, rx, shown, CommitAnswer::RollBack, cx);
         }
-        PortRequest::Lost {
-            console,
-            statements_before,
-        } => commit_prompt::connection_lost(console, statements_before, cx),
     }
 }
 
-/// Forwards the dialog's answer `rx` to the asker's `reply`; a dialog closed without an answer
-/// answers `safe`.
+/// Forwards the dialog's answer `rx` to the asker's `reply` (a dialog closed without an answer
+/// answers `safe`). When the asker goes away first (the run service dropped its receiver), the
+/// orphaned prompt `shown` closes (fix round 1, m6).
 fn forward<T: Send + 'static>(
     reply: oneshot::Sender<T>,
     rx: oneshot::Receiver<T>,
+    shown: Shown,
     safe: T,
     cx: &mut App,
 ) {
-    cx.spawn(async move |_| {
-        let answer = rx.await.unwrap_or(safe);
-        let _ = reply.send(answer);
+    cx.spawn(async move |cx| {
+        let mut reply = reply;
+        let answer = {
+            let closed = Box::pin(reply.closed());
+            match futures::future::select(closed, rx).await {
+                futures::future::Either::Left(_) => None,
+                futures::future::Either::Right((answer, _)) => Some(answer.unwrap_or(safe)),
+            }
+        };
+        match answer {
+            Some(answer) => {
+                let _ = reply.send(answer);
+            }
+            None => cx.update(|cx| close_shown(&shown, cx)),
+        }
     })
     .detach();
 }

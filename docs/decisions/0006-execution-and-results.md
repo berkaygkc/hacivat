@@ -878,3 +878,26 @@ wired into Run before Task 24 (R-M3-52).
   `Instant` deadline, then counted on `background_executor().now()` and repainted when its `m:ss`
   text changes (once a second). At 0:00 the prompt answers Roll back; the session's own deadline
   is what undoes the statement (D-014).
+- **Fix round 1.**
+  - *Arming (I1).* Every button that runs or keeps a change (Execute, Execute all, "don't ask
+    again", Commit, Keep) answers only `ARM_DELAY` (400 ms, executor clock) after its dialog was
+    shown, by click or by Enter, and never on a click whose `click_count > 1`. The safe answers
+    are live at once. Chained dialogs of the same shape put Execute at the same pixel, so the
+    second click of a double-click must never reach the next dialog.
+  - *Runs, not slots (I2).* The port's book keys follows and losses by `RunId`
+    (`follow(run, choices, status, sql)`, `connection_lost(run, n)`); a commit question attaches
+    its own run's follow whenever it arrives and never another run's. Once its question stops
+    waiting, the run's own `RunStatus` decides: a unit failed with a lost connection shows the
+    lost form, an ended unit or run closes the prompt. An explicit loss shows the lost form in
+    any order and supplies the statement count when it comes later.
+  - *Stack-aware focus (I3).* `Workspace::remove_layer` gives the focus back only when the top
+    layer closes; a layer removed from under another hands its restore target to the layer above
+    (named exception in `shell/{workspace,layers}.rs`).
+  - *Production is never downgraded (m2):* the port's production flag is
+    `question.production || profile is production`.
+  - *Untypeable names (m8):* a name with a control character (a tab or a line break in a quoted
+    identifier) cannot be typed or pasted (the field turns controls into spaces), so it can never
+    be confirmed. That stays fail-closed, and the dialog says why
+    (`hv-confirm-type-untypeable`). PO list: whether such statements need another way to run.
+  - *IME (m7):* Escape during a composition in the type field ends the composition (its text
+    stays) and keeps the dialog; the next Escape cancels.

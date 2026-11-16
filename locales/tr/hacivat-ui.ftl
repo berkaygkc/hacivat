@@ -2018,3 +2018,5 @@ hv-commit-dropped-sp-body = Sunucu açık işleminizi geri aldı: bu ifade ve on
 hv-commit-dropped-sp-body-unknown = Sunucu, bu ifade de içinde olmak üzere açık işleminizi geri aldı. Hiçbir şey commit edilmedi.
 # Review: PO
 hv-commit-close = Kapat
+# Review: PO
+hv-confirm-type-untypeable = Bu ad yazılamayan ya da yapıştırılamayan bir karakter içeriyor; bu yüzden burada doğrulanamaz. Bu ifadeyi başka bir istemciden çalıştırın.

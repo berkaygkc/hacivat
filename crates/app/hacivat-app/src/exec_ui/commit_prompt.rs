@@ -19,37 +19,43 @@
 //!   the question's deadline on the GPUI executor's clock and repaints once a second, when its
 //!   `m:ss` value changes; no colour or weight changes near the end. At 0:00 the prompt answers
 //!   Roll back and closes (the session's own deadline undoes the statement, D-014).
-//! - **It follows the session** ([`CommitContext::follow`], the run's `RunTicket::choices`): once
-//!   its question is no longer the one the run waits on (`CommitDecided`, the unit or the run
-//!   ended), it closes. The outcome is the session's event, never the dialog's (T1c M7).
-//! - **Connection lost** ([`connection_lost`]): the prompt says the server rolled the changes
-//!   back (in the savepoint form, the user's whole transaction), with Close only and no
-//!   countdown.
+//! - **It follows its own run** (fix round 1, I2): the port's book keyed by `RunId` gives the
+//!   prompt its run's `RunTicket::choices` and `status` (registered before or after the
+//!   question; another run's never). Once its question is no longer the one the run waits on, the
+//!   run's status decides: the unit failed with a lost connection → the lost form; it (or the
+//!   run) ended → the prompt closes. The outcome is the session's, never the dialog's (T1c M7).
+//! - **Connection lost** (that, or `AppConfirmPort::connection_lost` for the run, in any order):
+//!   the prompt says the server rolled the changes back (in the savepoint form, the user's whole
+//!   transaction), with Close only and no countdown.
+//! - **Commit / Keep arm** `confirm::ARM_DELAY` after the prompt shows, and ignore the second
+//!   click of a double-click (fix round 1, I1); Roll back / Undo is live at once.
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hacivat_exec::{CommitAnswer, CommitQuestion};
+use hacivat_exec::{CommitAnswer, CommitQuestion, RunStatus, UnitStatus};
 use hacivat_l10n::ArgValue;
 use hacivat_proto::EnvTag;
-use hacivat_session::session::RunEvent;
+use hacivat_session::session::{RunEvent, UnitId};
 use hacivat_ui::button::{Button, ButtonKind};
 use hacivat_ui::dialog::DialogSize;
 use hacivat_ui::icon::{Icon, IconName, IconSize};
 use hacivat_ui::popover::A11yNode;
 use hacivat_ui::text::{Label, TextSource, paragraph};
 use hacivat_ui_core::gpui_surface::{
-    App, AppContext as _, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, Role, SharedString, Styled, Task, WeakEntity, Window, div,
-    px,
+    App, AppContext as _, ClickEvent, Context, EntityId, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Role, SharedString,
+    Styled, Task, WeakEntity, Window, div, px,
 };
 use hacivat_ui_core::theme::Theme;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::oneshot;
 
 use super::confirm::{
-    OpenPrompts, closes_dialog, grouped_footer, scroll_body, sql_inset, subtitle, text_arg,
+    ARM_DELAY, Follow, OpenPrompts, RunLink, Shown, closes_dialog, grouped_footer, scroll_body,
+    sql_inset, subtitle, text_arg,
 };
-use super::{answered, in_workspace_window, workspace_window};
+use super::{answered, workspace_window};
 use crate::connections::prompt_kit::{
     acting_enter, card, cycle_focus, header, push_modal, register_part, remove_modal, trapped_tab,
     visible,
@@ -72,10 +78,13 @@ pub struct CommitContext {
     pub engine: Option<SharedString>,
     /// The statement's masked text (the SQL inset), when known.
     pub sql: Option<Arc<str>>,
-    /// The console the question is about (a lost connection is reported per console).
+    /// The console the question is about.
     pub console: Option<ConsoleId>,
-    /// The run's `RunTicket::choices`: the prompt closes once its question is decided.
-    pub follow: Option<watch::Receiver<Option<(u64, RunEvent)>>>,
+    // ## m3b-t21-confirm (fix round 1, I2)
+    /// The question's run in its port's book: the prompt attaches the run's follow when it is
+    /// registered (before or after the question), closes once the run decided, and shows the
+    /// lost form on that run's loss.
+    pub(crate) link: Option<RunLink>,
 }
 
 /// The time left as the countdown draws it: `m:ss` in ASCII digits, whole seconds rounded up (a
@@ -113,13 +122,24 @@ pub fn open_in(
     ctx: CommitContext,
     cx: &mut App,
 ) -> oneshot::Receiver<CommitAnswer> {
+    open_tracked(question, ctx, cx).0
+}
+
+/// [`open_in`], and where the prompt is once shown (fix round 1, m6).
+pub(crate) fn open_tracked(
+    question: CommitQuestion,
+    ctx: CommitContext,
+    cx: &mut App,
+) -> (oneshot::Receiver<CommitAnswer>, Shown) {
+    let shown: Shown = Rc::default();
     if workspace_window(cx).is_none() {
-        return answered(CommitAnswer::RollBack);
+        return (answered(CommitAnswer::RollBack), shown);
     }
     // The time left is read once from the session's deadline; the countdown then runs on the
     // executor's clock.
     let left = question.deadline.saturating_duration_since(Instant::now());
     let (reply, rx) = oneshot::channel();
+    let slot = shown.clone();
     cx.defer(move |cx| {
         let Some(handle) = workspace_window(cx) else {
             let _ = reply.send(CommitAnswer::RollBack);
@@ -128,7 +148,8 @@ pub fn open_in(
         let mut reply = Some(reply);
         let opened = handle.update(cx, |_, window, cx| {
             if let Some(reply) = reply.take() {
-                show(question, ctx, left, reply, window, cx);
+                let view = show(question, ctx, left, reply, window, cx);
+                *slot.borrow_mut() = Some((handle, view));
             }
         });
         if opened.is_err()
@@ -137,7 +158,7 @@ pub fn open_in(
             let _ = reply.send(CommitAnswer::RollBack);
         }
     });
-    rx
+    (rx, shown)
 }
 
 /// Pushes the prompt over `window`'s workspace, `left` before its deadline.
@@ -148,7 +169,7 @@ fn show(
     reply: oneshot::Sender<CommitAnswer>,
     window: &mut Window,
     cx: &mut App,
-) {
+) -> EntityId {
     let console = ctx.console;
     let view = cx.new(|cx| CommitPrompt::new(question, ctx, left, reply, window, cx));
     {
@@ -163,37 +184,7 @@ fn show(
     for (name, handle) in view.read(cx).parts() {
         register_part(cx, name, &handle, None);
     }
-}
-
-/// Console `console`'s connection was lost while its prompt waited (`None`: every open prompt):
-/// the prompt switches to the lost form (module docs).
-pub(crate) fn connection_lost(
-    console: Option<ConsoleId>,
-    statements_before: Option<u32>,
-    cx: &mut App,
-) {
-    let Some(open) = cx.try_global::<OpenPrompts>() else {
-        return;
-    };
-    let prompts: Vec<_> = open
-        .commits
-        .iter()
-        .filter(|(c, _)| console.is_none() || *c == console)
-        .filter_map(|(_, p)| p.upgrade())
-        .collect();
-    if prompts.is_empty() {
-        return;
-    }
-    in_workspace_window(cx, move |_, window, cx| {
-        for p in prompts {
-            p.update(cx, |p, cx| {
-                p.lost = Some(statements_before);
-                p.finish(CommitAnswer::RollBack);
-                window.focus(&p.close, cx);
-                cx.notify();
-            });
-        }
-    });
+    view.entity_id()
 }
 
 /// The view IDs of the open commit prompts (tests).
@@ -227,6 +218,8 @@ pub struct CommitPrompt {
     end: Instant,
     /// The connection was lost: `Some(statements before this one)`, if known.
     lost: Option<Option<u32>>,
+    /// When the prompt was shown (executor clock): Commit / Keep arm [`ARM_DELAY`] later.
+    shown_at: Instant,
     root: FocusHandle,
     /// Roll back / Undo (Primary, focused).
     safe: FocusHandle,
@@ -255,7 +248,7 @@ impl Drop for CommitPrompt {
 impl CommitPrompt {
     fn new(
         q: CommitQuestion,
-        mut ctx: CommitContext,
+        ctx: CommitContext,
         left: Duration,
         reply: oneshot::Sender<CommitAnswer>,
         window: &mut Window,
@@ -288,8 +281,8 @@ impl CommitPrompt {
                 }
             }
         }));
-        if let Some(follow) = ctx.follow.take() {
-            tasks.push(follow_session(follow, &q, window, cx));
+        if let Some(link) = ctx.link.clone() {
+            tasks.push(follow_run(link, &q, window, cx));
         }
         CommitPrompt {
             q,
@@ -297,6 +290,7 @@ impl CommitPrompt {
             reply: Some(reply),
             end,
             lost: None,
+            shown_at: cx.background_executor().now(),
             root: cx.focus_handle(),
             safe: cx.focus_handle().tab_stop(true),
             keep: cx.focus_handle().tab_stop(true),
@@ -327,8 +321,33 @@ impl CommitPrompt {
         }
     }
 
-    /// Answers `answer` and closes.
+    /// Whether Commit / Keep answer yet ([`ARM_DELAY`] on the executor clock).
+    fn armed(&self, cx: &App) -> bool {
+        cx.background_executor()
+            .now()
+            .saturating_duration_since(self.shown_at)
+            >= ARM_DELAY
+    }
+
+    /// The lost form (fix round 1, I2): Close only, the statement count when known. The prompt
+    /// takes the focus to its Close only when it had the focus (a prompt under another modal
+    /// never steals it, I3).
+    fn show_lost(&mut self, before: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+        let had_focus = self.safe.is_focused(window) || self.keep.is_focused(window);
+        self.lost = Some(before.or(self.lost.flatten()));
+        self.finish(CommitAnswer::RollBack);
+        if had_focus {
+            window.focus(&self.close, cx);
+        }
+        cx.notify();
+    }
+
+    /// Answers `answer` and closes; Commit / Keep only once armed (fix round 1, I1). The lost
+    /// form's Close answers nothing more (the reply was spent).
     fn answer(&mut self, answer: CommitAnswer, window: &mut Window, cx: &mut Context<Self>) {
+        if answer == CommitAnswer::Commit && (!self.armed(cx) || self.lost.is_some()) {
+            return;
+        }
         self.finish(answer);
         let view = cx.entity_id();
         window.defer(cx, move |window, cx| remove_modal(view, window, cx));
@@ -372,11 +391,49 @@ impl CommitPrompt {
     }
 }
 
-/// Follows the run's questions: once this prompt's question is no longer the one waiting (after
-/// it was seen), or the run's ticket is gone, the prompt closes, unless it reports a lost
-/// connection (the user closes that one).
-fn follow_session(
-    mut choices: watch::Receiver<Option<(u64, RunEvent)>>,
+/// Where the run of this prompt's question is at.
+enum UnitAt {
+    /// Still running (or not reported yet).
+    Pending,
+    /// It ended, or the run did: the session decided.
+    Ended,
+    /// It failed with a lost connection.
+    Lost,
+}
+
+/// What the run's status says of `unit`.
+fn unit_at(status: &RunStatus, unit: UnitId) -> UnitAt {
+    let entry = status.units.iter().find(|e| e.unit == unit);
+    match entry.map(|e| &e.status) {
+        Some(UnitStatus::Failed(view)) if view.title_id.starts_with(LOST_TITLE) => UnitAt::Lost,
+        Some(
+            UnitStatus::Succeeded(_)
+            | UnitStatus::Failed(_)
+            | UnitStatus::Cancelled
+            | UnitStatus::Skipped
+            | UnitStatus::Suspended { .. },
+        ) => UnitAt::Ended,
+        _ if status.summary.is_some() => UnitAt::Ended,
+        _ => UnitAt::Pending,
+    }
+}
+
+/// The title ID of a unit that failed because the connection dropped
+/// (`exec-error-connection-lost`, `…-unknown`).
+const LOST_TITLE: &str = "exec-error-connection-lost";
+
+/// Follows the question's run (fix round 1, I2) in its port's book, keyed by `RunId`:
+/// 1. waits for the run's follow (registered before or after the question; another run's is
+///    never taken) and shows its statement;
+/// 2. waits while the question is the one the run waits on;
+/// 3. then asks the run's own status: the unit failed with a lost connection → the lost form;
+///    it (or the run) ended → the prompt closes (the session decided: `CommitDecided`,
+///    `UnitEnded`, `RunEnded`).
+///
+/// An explicit loss on the run ([`AppConfirmPort::connection_lost`]) shows the lost form at
+/// any step, whatever order it arrives in.
+fn follow_run(
+    link: RunLink,
     q: &CommitQuestion,
     window: &mut Window,
     cx: &mut Context<CommitPrompt>,
@@ -387,15 +444,90 @@ fn follow_session(
             if *u == unit && *id == question)
     };
     cx.spawn_in(window, async move |view: WeakEntity<CommitPrompt>, cx| {
+        let mut book = link.runs.watch();
+        // 1. The run's follow.
+        let follow = loop {
+            if let Some(before) = link.runs.lost_of(link.run) {
+                let _ = view.update_in(cx, |p, window, cx| p.show_lost(before, window, cx));
+                return;
+            }
+            if let Some(f) = link.runs.follow_of(link.run) {
+                break f;
+            }
+            if book.changed().await.is_err() {
+                return;
+            }
+        };
+        let sql = usize::try_from(unit.ordinal)
+            .ok()
+            .and_then(|i| follow.sql.get(i).cloned());
+        let _ = view.update(cx, |p, cx| {
+            p.ctx.sql = sql;
+            cx.notify();
+        });
+        let Follow {
+            mut choices,
+            mut status,
+            ..
+        } = follow;
+        // 2. While the question waits.
         let mut seen = false;
+        let mut choices_open = true;
         loop {
-            let waiting = ours(&choices.borrow_and_update());
-            if waiting {
-                seen = true;
-            } else if seen {
+            if let Some(before) = link.runs.lost_of(link.run) {
+                let _ = view.update_in(cx, |p, window, cx| p.show_lost(before, window, cx));
+                return;
+            }
+            let waiting = choices_open && ours(&choices.borrow_and_update());
+            seen |= waiting;
+            let ended = !matches!(unit_at(&status.borrow_and_update(), unit), UnitAt::Pending);
+            if !waiting && (seen || ended || !choices_open) {
                 break;
             }
-            if choices.changed().await.is_err() {
+            // `choices` is open here (a closed one ended the wait above).
+            let a = Box::pin(async { choices.changed().await.is_ok() });
+            let b = Box::pin(async {
+                let _ = status.changed().await;
+            });
+            let c = Box::pin(async {
+                let _ = book.changed().await;
+            });
+            let open = match futures::future::select(a, futures::future::select(b, c)).await {
+                futures::future::Either::Left((open, _)) => open,
+                futures::future::Either::Right(_) => true,
+            };
+            choices_open = open;
+        }
+        // 3. Decided or lost: the run's own status says.
+        loop {
+            if let Some(before) = link.runs.lost_of(link.run) {
+                let _ = view.update_in(cx, |p, window, cx| p.show_lost(before, window, cx));
+                return;
+            }
+            match unit_at(&status.borrow_and_update(), unit) {
+                UnitAt::Lost => {
+                    let _ = view.update_in(cx, |p, window, cx| p.show_lost(None, window, cx));
+                    // The app's statement count may come after the run ended: the form takes
+                    // it when it does.
+                    while book.changed().await.is_ok() {
+                        if let Some(before) = link.runs.lost_of(link.run) {
+                            let _ =
+                                view.update_in(cx, |p, window, cx| p.show_lost(before, window, cx));
+                            return;
+                        }
+                    }
+                    return;
+                }
+                UnitAt::Ended => break,
+                UnitAt::Pending => {}
+            }
+            let b = Box::pin(async { status.changed().await.is_ok() });
+            let c = Box::pin(async {
+                let _ = book.changed().await;
+                true
+            });
+            if let futures::future::Either::Left((false, _)) = futures::future::select(b, c).await {
+                // The ticket is gone: nothing more will be said of the run.
                 break;
             }
         }
@@ -516,7 +648,13 @@ impl Render for CommitPrompt {
                 .kind(kind)
                 .on_raised(true)
                 .focus_handle(handle.clone())
-                .on_click(cx.listener(move |this, _, window, cx| this.answer(answer, window, cx)));
+                // Fix round 1 (I1): the second click of a double-click never answers.
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if event.click_count() > 1 {
+                        return;
+                    }
+                    this.answer(answer, window, cx);
+                }));
             if let Some(icon) = icon {
                 b = b.icon(icon);
             }
@@ -781,7 +919,7 @@ pub mod fixtures {
             engine: Some(SharedString::from(engine.to_string())),
             sql: Some(Arc::from(sql)),
             console: None,
-            follow: None,
+            link: None,
         };
         let (reply, rx) = oneshot::channel();
         cx.default_global::<Held>().0.push(rx);
@@ -791,12 +929,7 @@ pub mod fixtures {
             if let Some(open) = cx.try_global::<super::OpenPrompts>()
                 && let Some(p) = open.commits.iter().rev().find_map(|(_, p)| p.upgrade())
             {
-                p.update(cx, |p, cx| {
-                    p.lost = Some(before);
-                    p.finish(CommitAnswer::RollBack);
-                    window.focus(&p.close, cx);
-                    cx.notify();
-                });
+                p.update(cx, |p, cx| p.show_lost(before, window, cx));
             }
         }
     }

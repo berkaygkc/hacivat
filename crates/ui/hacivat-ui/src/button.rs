@@ -61,6 +61,8 @@ pub struct Button {
     expanded: Option<bool>,
     // ## m3a-f2-visual (named exception): the cursor strip's compact size.
     compact: bool,
+    // ## m3b-t21-confirm (named exception): a minimum outer width (the gate dialog's Cancel).
+    min_width: Option<f32>,
 }
 
 impl Button {
@@ -80,6 +82,7 @@ impl Button {
             on_raised: false,
             expanded: None,
             compact: false,
+            min_width: None,
         }
     }
 
@@ -134,6 +137,14 @@ impl Button {
     /// Fixes the outer width (the title bar's 24 px overflow button).
     pub fn fixed_width(mut self, width: f32) -> Self {
         self.fixed_width = Some(width);
+        self
+    }
+
+    // ## m3b-t21-confirm (named exception)
+    /// At least `width` px wide, the label centred (NOTES M3b surface 1: Cancel, 72 px); a
+    /// longer label grows the button, never truncates.
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.min_width = Some(width);
         self
     }
 
@@ -363,6 +374,7 @@ impl Button {
             on_raised,
             expanded,
             compact,
+            min_width,
         } = self;
 
         // Hover and focus state live with the element across frames.
@@ -412,6 +424,10 @@ impl Button {
             .border_color(look.outline);
         if let Some(width) = fixed_width {
             body = body.w(px(width)).justify_center();
+        }
+        // ## m3b-t21-confirm (named exception)
+        if let Some(width) = min_width {
+            body = body.min_w(px(width)).justify_center();
         }
         if let Some(fill) = look.fill {
             body = body.bg(fill);

@@ -2187,3 +2187,6 @@ hv-commit-dropped-sp-body = The server rolled back your open transaction: this s
 # As hv-commit-dropped-sp-body when the count is not known.
 hv-commit-dropped-sp-body-unknown = The server rolled back your open transaction, this statement included. Nothing was committed.
 hv-commit-close = Close
+# Fix round 1 (m8): the name to type holds a control character (a tab or a line break in a
+# quoted name), which the field can't take: the statement can't be confirmed here.
+hv-confirm-type-untypeable = This name contains a character that can't be typed or pasted, so it can't be confirmed here. Run this statement from another client.
