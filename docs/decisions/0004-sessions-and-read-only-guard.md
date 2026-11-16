@@ -2240,3 +2240,153 @@ fenced `// ## m3b-t12-session-carries`.
 - **Notices (the T13 carry).** After a query's `Done` the session adds
   `RawConn::take_notices_dropped` to the unit's dropped count, so the log line at its end has
   the driver's drops too.
+
+## m3b-t19 — confirm in transaction
+
+M3b Task 19 (HV-EXEC-04 session side; C2; D-014, D-062, R-M3-55, P-M3b-1, P-M3b-5,
+P-M3b-12). Code blocks are fenced `// ## m3b-t19-confirm-tx`; the bodies are
+`session/{confirm,smart}.rs`.
+
+- **The form is the session's, per unit, at execution time (P-M3b-1).** The gate's verdict
+  (`UnitVerdict::TxThenConfirm`) carries no form. After a Manual session's `BEGIN` and Smart's,
+  the session asks whether a transaction is open now: the protocol's status, and on
+  MySQL/MariaDB also Manual mode and the user's own `autocommit = 0` (a transaction is then
+  always open, MySQL 8.4 §15.3.1; `SAVEPOINT` is valid without `START TRANSACTION`).
+  - Open: **the savepoint form.** `SAVEPOINT hv_confirm`, the statement, `NeedsCommit {
+    savepoint: true }`; Keep → `RELEASE SAVEPOINT hv_confirm`; Undo, the deadline, a cancel
+    or a close → `ROLLBACK TO SAVEPOINT hv_confirm`, then `RELEASE SAVEPOINT hv_confirm` (two
+    control statements: the release is not sent when the rollback failed). The transaction
+    stays open and the user's (`TxOwner::User`) in every branch.
+  - Truly idle in Auto: **Hacivat's own transaction.** `BEGIN` (`START TRANSACTION` on
+    MySQL/MariaDB after the isolation level when one is set, `BEGIN IMMEDIATE` on SQLite) with
+    `holder = Confirm`, the statement, `NeedsCommit { savepoint: false }`; Commit → `COMMIT`,
+    anything else → `ROLLBACK`.
+  - So no confirm path sends `COMMIT` while the user's transaction is open, and MySQL/MariaDB
+    never get `START TRANSACTION` inside one (it would commit it implicitly).
+- **The wait.** The question is asked through the run gate (`RunGate::ask`, which gives it its
+  id) and `NeedsCommit` is emitted with nothing awaited in between; the run then selects,
+  biased, on the stop signal, the answer and the deadline (`RunSpec::confirm_deadline`,
+  D-014's 5 minutes; tests inject 2 s). A stale, duplicate, guessed or other-unit answer is
+  refused (`false`, T1c I1). A cancel beats an answer that raced it. A cancel, the deadline and
+  a close roll back; `CommitDecided { answer, by_deadline }` follows once the server answered
+  the `COMMIT`/`RELEASE` or the rollback. A cancel ends the unit `Cancelled` (the run stops).
+  Fix round 1 (C2) replaced "a rollback leaves the unit `Succeeded` and the run goes on": the
+  deadline's rollback ends the unit `Failed(Tx(ConfirmTimedOut))` and stops the run whatever
+  its error policy (the user is away; a pre-confirmed `DROP` after an undone copy must never
+  run); the user's Undo (and a close) ends it `Failed(Tx(ConfirmUndone))`, so the error policy
+  decides (`StopOnError` stops, `Ask` asks). Whether a run should go on after an Undo is on
+  the PO list; the error policy is the default.
+- **A close (P-M3b-12, D-014).** `RunGate::close` answers a waiting commit question
+  `RollBack`, and one asked after the close at once (as a choice is answered `Stop`), so the
+  run rolls back before the queued close runs. Hacivat's own transaction is never "the user's"
+  (`is_hacivats`): `RefuseIfOpenTx` never refuses because of it and the liveness supervisor
+  never warns about it (it does not tick while a request runs, and the transaction ends before
+  the request does). In the savepoint form the close's own policy then applies to the user's
+  transaction, which is never committed.
+- **A failure or cancel of the statement (P-M3b-5).** Nothing is asked. The savepoint form
+  rolls back to the savepoint and releases it: the user's transaction returns to `InTx`
+  (PostgreSQL's aborted state recovered) and the unit keeps the server's error; the log line
+  is `exec-confirm-statement-failed` ("only it was rolled back, the transaction is intact").
+  The own form sends `ROLLBACK`. *Accepted difference:* psql leaves the transaction aborted;
+  Hacivat's own savepoint can undo its own statement, so it does.
+- **A lost connection** at the end (or one found lost when the wrap ends): the server rolled
+  back, `CommitDecided` is not emitted, and the unit ends `Failed(ConnectionLost)`
+  (`outcome_unknown: false` after a rollback; after a `COMMIT` that met the loss the outcome is
+  reported unknown, never "committed"). The log says the server rolled back these changes.
+- **Hacivat's transaction is never left open.** A `COMMIT`/`ROLLBACK` of its own after which
+  the server still reports a transaction, or a `ROLLBACK TO SAVEPOINT` the server refused,
+  breaks the session (`Internal`; the server rolls back on close, reported like any loss), as
+  for a cursor's transaction (`m3a-t18`). Fix round 1 (m1): a refused `RELEASE` (after Keep, or
+  after a `ROLLBACK TO` that worked) is logged and the session stays, with the transaction as
+  the server reports it. A `COMMIT` the server refused (a deferred constraint)
+  rolled back: the unit fails with the server's text, no `CommitDecided`.
+- **Fail closed.** A wrapped unit run "as one" (`Protocol::Simple`; its own `COMMIT` could end
+  the wrapping transaction before the question) is refused with `Internal`, and a wrapped unit
+  on a read-only session with `ReadOnlyDenied(Transaction)`; nothing is sent.
+- **The implicit-commit backstop (P-M3b-1, T15 round 2).** Before anything of a unit is sent
+  (the Manual `BEGIN` included): a MySQL/MariaDB unit whose effects carry
+  `SessionEffects::COMMITS_FIRST` (the gate's `hacivat_exec::implicit_commit` list; the session
+  reads only the bit and has no exec dependency) and whose verdict is not `ImplicitCommit`
+  meets an open transaction (as above: status, Manual, `autocommit = 0`) → refused with
+  `ExecErrorKind::Tx(TxError::ImplicitCommitUnconfirmed)`, nothing sent. `DDL` is not the key:
+  it means "a DDL statement" on every engine. An `ImplicitCommit` unit that ended an open
+  transaction is logged (`exec-implicit-commit`).
+- **The D-062 wrap.** `ExplainAnalyzeRollback`: the same two forms with `hv_explain`, always
+  rolled back, whatever the statement's outcome: `BEGIN … ROLLBACK` when idle (`START
+  TRANSACTION … ROLLBACK` on MySQL/MariaDB, `BEGIN … ROLLBACK` on SQLite), `SAVEPOINT hv_explain
+  … ROLLBACK TO SAVEPOINT hv_explain; RELEASE SAVEPOINT hv_explain` inside a transaction. A
+  wrapped statement never suspends (its rows are read to the end inside the wrap).
+- **Savepoint names.** PostgreSQL and SQLite stack savepoints of one name, so a user's own
+  `hv_confirm`/`hv_explain` is shadowed while Hacivat's is open and intact after it.
+  *Accepted:* MySQL/MariaDB replace a savepoint of the same name, so a user's own `hv_confirm`
+  there is lost when Hacivat sets its own (a reserved-name collision; documented).
+- **Smart (C2).** Before a unit whose verdict is not `Read`, while no transaction is open, the
+  session opens the user's transaction (owner `User`): PostgreSQL `BEGIN` (isolation level),
+  SQLite `BEGIN IMMEDIATE` unless the statement reads, MySQL/MariaDB `START TRANSACTION` (Smart
+  keeps `autocommit` on). A `Read` never opens one; `Unknown` (no verdict) does, the safe
+  direction. Not before the user's transaction control, an `EXPLAIN ANALYZE` (its wrap rolls
+  back), or a MySQL/MariaDB `COMMITS_FIRST` statement (it would end the new transaction at
+  once and the backstop would refuse it). After the user's `COMMIT`/`ROLLBACK` the mode stays
+  Smart. `SetMode(Smart)` is accepted like Auto (refused with `InProgress` while a transaction
+  is open; a Manual MySQL session sends `SET autocommit = 1`), a profile's Smart mode starts as
+  Smart (it started as Manual until now), and a user `Request::Exec` (no verdict) opens before
+  any statement but the user's transaction control. `TxError::NeedsClassifier` stays in the
+  enum (the log and status texts map it) but the session no longer answers it.
+- **Never silent.** Every rollback the session makes here is logged (run, unit, form, why;
+  never the statement's text) and the transaction state is published while the request still
+  runs (`Core::publish_tx`: the snapshot and `SessionEvent::TxChanged`), before the question and
+  after the decision.
+- **Fix round 1 (controller rulings on the review).**
+  - *C1, an already-committed change is never offered Keep/Undo.* "Open" reads MySQL's own
+    `autocommit` flag (`RawConn::autocommit`, read after every round trip) before the mode: a
+    Manual session whose script ran `SET autocommit = 1` has nothing open, so the confirmed
+    statement takes Hacivat's own `START TRANSACTION`. And after any wrapped statement that
+    succeeded with nothing open (a savepoint taken outside a transaction is a no-op on MySQL;
+    a statement that ended the transaction itself), nothing is asked and no `ROLLBACK TO` is
+    sent: the unit ends `Failed(Tx(ConfirmAlreadyCommitted))`, its log title is
+    `exec-confirm-already-committed`, and the run stops whatever its policy.
+  - *C2:* above (the deadline stops the run; Undo is no success).
+  - *I1, the server rolled back the whole transaction.* A wrapped statement that failed or was
+    cancelled with nothing open any more (a SQLite interrupt of an `INSERT`/`UPDATE`/`DELETE`,
+    a MySQL deadlock 1213 roll back the whole transaction, and the savepoint with it) sends no
+    `ROLLBACK TO` (it would fail and break the session); the session publishes the state
+    (`TxChanged` to idle) and stays usable; the unit keeps its error. The run service logs
+    `exec-tx-rolled-back-by-server` after the error for any non-DDL statement that failed or
+    was cancelled while the user's transaction ended (`observer::tx_line`; a MySQL DDL commits
+    first, so it is excluded). `exec-confirm-statement-failed` ("intact") is logged only after
+    an undo that worked.
+  - *m3:* a stop asked for while the statement ran to its end rolls it back without a question
+    (`Cancelled`).
+  - *m4 (a ruled deviation from the plan):* Smart never pre-opens before a statement that cannot
+    run inside a transaction (PostgreSQL `VACUUM`, `CREATE`/`DROP DATABASE`, `CREATE`/`DROP
+    INDEX CONCURRENTLY`, `REINDEX … CONCURRENTLY`, `ALTER SYSTEM`, `CREATE`/`DROP TABLESPACE`,
+    `CLUSTER` without a table; MySQL/MariaDB `SET TRANSACTION` and `LOCK`/`UNLOCK TABLES`,
+    which end any transaction themselves; SQLite `VACUUM`), on the run and the `Exec` paths.
+  - *m5:* MySQL/MariaDB table locks. The session follows `LOCK TABLE[S]` (text, or the gate's
+    `SessionEffects::LOCK_TABLES`), released by `UNLOCK TABLES`, a transaction's start, a reset
+    and a reconnect. While they may be held, Hacivat's own `START TRANSACTION` (confirm or
+    D-062) and Smart's pre-open are refused with `Tx(TableLocksHeld)`
+    (`exec-error-tx-table-locks`), nothing sent: starting a transaction would release the locks
+    silently. The savepoint form (Manual, `autocommit = 0`) is unaffected.
+  - *Savepoint name:* `hv_confirm`/`hv_explain` stay fixed (controller ruling).
+  - *Strings:* the `exec-confirm-*`, `exec-implicit-commit` and `exec-error-tx-implicit-commit`
+    strings Task 16 left to Task 19, plus `exec-confirm-already-committed`,
+    `exec-error-confirm-timed-out`, `exec-error-confirm-undone`, `exec-error-tx-table-locks` and
+    `exec-tx-rolled-back-by-server` (en, tr marked `Review: PO`).
+- **Fix round 2 (controller rulings on the re-check).**
+  - *R1-I1.* The run service never says the server rolled back a transaction that the failed
+    statement may have committed first: a unit run as one, a unit whose gate effects carry
+    `COMMITS_FIRST`, a DDL, a statement on the implicit-commit list (`implicit_commit::commits`
+    over every word of its text, e.g. `LOCK TABLES`, `GRANT`), or one whose first word cannot be
+    read get the neutral `exec-tx-ended-by-statement` ("check whether your earlier changes were
+    committed") instead of `exec-tx-rolled-back-by-server`.
+  - *R1-m1.* Table locks are read with `smart::leading_words` (leading comments skipped, an
+    executable comment read as code); only `UNLOCK TABLE[S]`, `START TRANSACTION` and `BEGIN`
+    (not `BEGIN NOT ATOMIC`) release them, besides a reset and a reconnect; `START REPLICA` and
+    `UNLOCK INSTANCE` do not.
+  - *R1-m2.* Keep whose `RELEASE` the server refused and left the PostgreSQL transaction failed
+    is no success: no `CommitDecided`, the unit fails with the server's text, the snapshot shows
+    the failed transaction, the session stays.
+  - *R1-m3.* A D-062 `EXPLAIN ANALYZE` that left nothing open ends `Tx(ExplainNotRolledBack)`
+    (`exec-explain-not-rolled-back`) instead of the confirm wording; the run stops.
+  - *R1-m4.* Smart's "cannot run in a transaction" check reads past leading comments.

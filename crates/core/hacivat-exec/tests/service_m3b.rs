@@ -226,27 +226,83 @@ async fn an_empty_or_short_plan_never_allows_all() {
     assert!(f.call_log()[before..].is_empty());
 }
 
-/// A confirm-in-transaction unit is refused by the session until Task 19 (its `NeedsCommit`
-/// arrives then); the forwarding to the port is unit-tested on the observer
-/// (`observer::tests::needs_commit_reaches_the_confirm_port_and_answer_returns`).
+// ## m3b-t19-confirm-tx (named exception): until Task 19 the session refused this unit (the
+// test asserted the refusal); now the `NeedsCommit` reaches the console's port, its answer
+// returns to the session, and the session acts on it.
+/// The console's confirm port, answering every confirm-in-transaction question `answer`.
+#[derive(Debug)]
+struct Answers(hacivat_exec::CommitAnswer, std::sync::Mutex<Vec<bool>>);
+
+impl hacivat_exec::ConfirmPort for Answers {
+    fn confirm(
+        &self,
+        _: hacivat_exec::ConfirmQuestion,
+    ) -> tokio::sync::oneshot::Receiver<ConfirmAnswer> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(ConfirmAnswer::Cancel);
+        rx
+    }
+
+    fn commit_decision(
+        &self,
+        q: hacivat_exec::CommitQuestion,
+    ) -> tokio::sync::oneshot::Receiver<hacivat_exec::CommitAnswer> {
+        self.1.lock().unwrap().push(q.savepoint);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(self.0);
+        rx
+    }
+}
+
 #[tokio::test]
 async fn needs_commit_reaches_the_confirm_port_and_answer_returns() {
-    let (b, s, f) = service_over(fake_pg()).await;
-    let mut plan = run_all(1);
-    plan.items[0].decision = GateDecision::RunInTxThenConfirm {
-        reasons: Vec::new(),
-    };
-    plan.items[0].verdict = hacivat_session::session::UnitVerdict::TxThenConfirm;
-    let before = f.typed_log().len();
-    let mut t = b
-        .svc
-        .run(&s, request(&b, units(&["UPDATE t SET a = 1"]), plan));
-    let summary = (&mut t.done).await.unwrap();
-    assert_eq!(
-        summary.failed, 1,
-        "refused before anything is sent (Task 19)"
-    );
-    assert!(f.typed_log()[before..].is_empty());
+    for (answer, last, id) in [
+        (
+            hacivat_exec::CommitAnswer::Commit,
+            "COMMIT",
+            "exec-confirm-committed",
+        ),
+        (
+            hacivat_exec::CommitAnswer::RollBack,
+            "ROLLBACK",
+            "exec-confirm-rolled-back",
+        ),
+    ] {
+        let (b, s, f) = service_over(fake_pg()).await;
+        let mut plan = run_all(1);
+        plan.items[0].decision = GateDecision::RunInTxThenConfirm {
+            reasons: Vec::new(),
+        };
+        plan.items[0].verdict = hacivat_session::session::UnitVerdict::TxThenConfirm;
+        let port = Arc::new(Answers(answer, std::sync::Mutex::new(Vec::new())));
+        let before = f.call_log().len();
+        let mut req = request(&b, units(&["UPDATE t SET a = 1"]), plan);
+        req.confirm = Some(port.clone());
+        let mut t = b.svc.run(&s, req);
+        let summary = tokio::time::timeout(Duration::from_secs(10), &mut t.done)
+            .await
+            .expect("the answer reached the session")
+            .unwrap();
+        // Fix round 1 (C2): a rolled-back statement is no success.
+        let expected = match answer {
+            hacivat_exec::CommitAnswer::Commit => (1, 0),
+            hacivat_exec::CommitAnswer::RollBack => (0, 1),
+        };
+        assert_eq!((summary.executed, summary.failed), expected, "{answer:?}");
+        assert_eq!(*port.1.lock().unwrap(), [false], "Hacivat's own form");
+        assert_eq!(
+            f.call_log()[before..],
+            [
+                hacivat_driver::fake::FakeCall::Statement("BEGIN".into()),
+                hacivat_driver::fake::FakeCall::Typed(FakeTypedCall::Query(
+                    "UPDATE t SET a = 1".into()
+                )),
+                hacivat_driver::fake::FakeCall::Statement(last.into()),
+            ],
+            "{answer:?}"
+        );
+        assert!(b.log_ids().contains(&id), "{answer:?}: {:?}", b.log_ids());
+    }
 }
 
 #[tokio::test]

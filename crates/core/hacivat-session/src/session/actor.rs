@@ -281,14 +281,11 @@ pub(crate) fn spawn_supervised(
     let (initial_mode, initial_isolation) = if read_only {
         (TxMode::Auto, IsolationLevel::Default)
     } else {
-        // Smart needs the classifier (M3); until then it starts as the safer Manual.
-        let mode = match profile
+        // ## m3b-t19-confirm-tx (C2): a profile's Smart mode starts as Smart (`smart.rs`); it
+        // started as the safer Manual until Task 19.
+        let mode = profile
             .tx_mode
-            .unwrap_or_else(|| default_mode(profile.environment))
-        {
-            TxMode::Smart => TxMode::Manual,
-            mode => mode,
-        };
+            .unwrap_or_else(|| default_mode(profile.environment));
         (mode, profile.isolation.unwrap_or_default())
     };
     let mut tx = TxState {
@@ -353,6 +350,8 @@ pub(crate) fn spawn_supervised(
         // ## m3b-t01c-core-seams
         classifier,
         observed_sql_mode: None,
+        // ## m3b-t19-confirm-tx
+        table_locks: false,
         gate: gate.clone(),
         request_seq: 0,
         // ## m3b-t11-session-runs (fix round 1)
@@ -426,7 +425,9 @@ pub(crate) struct Core {
     /// MySQL: the server's `SERVER_STATUS_AUTOCOMMIT` as of the last round trip, when the
     /// driver reports it (fix round 4, R5): procedures, prepared statements, variables,
     /// `init_connect` and global defaults are all seen.
-    server_autocommit: Option<bool>,
+    // ## m3b-t19-confirm-tx (named exception: crate-visible for `confirm::tx_open_now`, which
+    // reads the server's own flag first; fix round 1, C1).
+    pub(crate) server_autocommit: Option<bool>,
     // ## m3a-t18-session-run
     /// The suspended query the session holds (a console cursor). No other request runs while
     /// it is open: `handle` releases it first.
@@ -450,6 +451,10 @@ pub(crate) struct Core {
     /// every reset (P-M3b-33; Task 18 fills it).
     #[allow(dead_code, reason = "Task 18 fills and reads it")]
     pub(crate) observed_sql_mode: Option<String>,
+    // ## m3b-t19-confirm-tx (fix round 1, m5)
+    /// MySQL/MariaDB: the user's `LOCK TABLES` locks may be held (`confirm::note_table_locks`);
+    /// a `START TRANSACTION` of Hacivat's would release them, so none is sent meanwhile.
+    pub(crate) table_locks: bool,
     /// Where a waiting run gets its out-of-band answers (P-M3b-3; Tasks 11 and 19 wait on it).
     pub(crate) gate: Arc<RunGate>,
     /// The sequence number of the request being handled (`run_one` sets it): a waiting run's
@@ -663,6 +668,8 @@ impl Core {
                     self.tracked = Tracked::default();
                     // `COM_RESET_CONNECTION` restores the session's `autocommit`.
                     self.autocommit_off = false;
+                    // ## m3b-t19-confirm-tx: and releases table locks.
+                    self.table_locks = false;
                 }
                 reset
             }
@@ -743,6 +750,23 @@ impl Core {
                     self.control(&statement).await?;
                 }
             }
+            // ## m3b-t19-confirm-tx (named exception, C2): a user statement of a Smart session
+            // carries no verdict, so Smart opens the user's transaction before it (`smart.rs`;
+            // fix round 1: never before a statement that cannot run inside one (m4), and never
+            // over MySQL table locks (m5)).
+            if origin == ExecOrigin::User
+                && self.tx.mode == TxMode::Smart
+                && !self.tx_open_now()
+                && !control
+                && !crate::session::smart::outside_tx_only(self.kind, sql)
+            {
+                if self.table_locks_block() {
+                    return Err(tx_error(TxError::TableLocksHeld));
+                }
+                for statement in self.smart_begin(&keyword) {
+                    self.control(&statement).await?;
+                }
+            }
             // ## m2b-t17-liveness (fix round 4, I9): a user's "autocommit off" counts whatever
             // happens next (it errs toward "off").
             if origin == ExecOrigin::User
@@ -758,6 +782,8 @@ impl Core {
         };
         // ## m2b-t17-liveness: what a reconnect would lose (B19).
         if origin == ExecOrigin::User {
+            // ## m3b-t19-confirm-tx (fix round 1, m5): the user's table locks.
+            self.note_table_locks(sql, None);
             // ## m3b-t01c-core-seams (P-M3b-11): no verdict on this path.
             track_statement(&mut self.tracked, sql, None);
             if family(self.kind) == Family::MySql
@@ -826,13 +852,14 @@ impl Core {
                     };
                 }
                 match mode {
-                    TxMode::Smart => return Err(tx_error(TxError::NeedsClassifier)),
                     TxMode::Manual => {
                         if self.tx.mode != TxMode::Manual && mysql {
                             self.control("SET autocommit = 0").await?;
                         }
                     }
-                    TxMode::Auto => {
+                    // ## m3b-t19-confirm-tx (C2): Smart is accepted like Auto (`smart.rs`); it
+                    // answered `NeedsClassifier` until Task 19.
+                    TxMode::Auto | TxMode::Smart => {
                         if self.tx.status != TxStatus::Idle {
                             return Err(tx_error(TxError::InProgress));
                         }
@@ -940,6 +967,8 @@ impl Core {
         let status = live.raw().tx_status();
         self.server_autocommit = live.raw().autocommit();
         self.autocommit_off = false;
+        // ## m3b-t19-confirm-tx: a new connection holds no table locks.
+        self.table_locks = false;
         // ## m3a-t18-session-run: a new connection has no transaction of Hacivat's, and no
         // kill is on its way to it.
         self.holder = TxOwner::User;
@@ -2027,7 +2056,8 @@ fn may_open_tx(request: &Request, mode: TxMode) -> bool {
             sql,
             origin: ExecOrigin::User,
             ..
-        } => mode == TxMode::Manual || touches_tx(sql),
+        // ## m3b-t19-confirm-tx (named exception): Smart begins one first too (C2).
+        } => mode != TxMode::Auto || touches_tx(sql),
         // ## m3a-t01b-seams (fail closed): a run may hold a user `BEGIN` unit, Hacivat's own
         // cursor transaction or a Manual session's `BEGIN`; a resumed cursor runs inside one.
         Request::Run(_) | Request::FetchMore { .. } | Request::FetchAll { .. } => true,

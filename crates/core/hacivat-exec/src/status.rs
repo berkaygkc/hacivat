@@ -124,6 +124,13 @@ pub fn error_title_id(kind: &ExecErrorKind) -> &'static str {
         // ## m3b-t01c-core-seams (named exception): their strings come with the tasks that
         // produce them (Tasks 11, 18 and 19; none is produced before).
         ExecErrorKind::Tx(TxError::ImplicitCommitUnconfirmed) => "exec-error-tx-implicit-commit",
+        // ## m3b-t19-confirm-tx (named exception, fix round 1)
+        ExecErrorKind::Tx(TxError::ConfirmAlreadyCommitted) => "exec-confirm-already-committed",
+        ExecErrorKind::Tx(TxError::ConfirmTimedOut) => "exec-error-confirm-timed-out",
+        ExecErrorKind::Tx(TxError::ConfirmUndone) => "exec-error-confirm-undone",
+        ExecErrorKind::Tx(TxError::TableLocksHeld) => "exec-error-tx-table-locks",
+        // ## m3b-t19-confirm-tx (named exception, fix round 2, R1-m3)
+        ExecErrorKind::Tx(TxError::ExplainNotRolledBack) => "exec-explain-not-rolled-back",
         ExecErrorKind::SafetyDenied(_) => "exec-deny-classifier",
         ExecErrorKind::QueueFull => "exec-error-queue-full",
     }

@@ -2605,3 +2605,191 @@ pub mod runs_m3b {
             .collect()
     }
 }
+
+// ## m3b-t19-confirm-tx
+// Confirm-in-transaction fixtures (M3b Task 19): units carrying the exec gate's verdict, the
+// `NeedsCommit` questions a run asks and their answers, and what a session sent since a mark.
+pub mod confirm {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use hacivat_driver::fake::{FakeCall, FakeDriver, FakeQuery, FakeTypedCall};
+    use hacivat_driver::{Driver, TxStatus};
+    use hacivat_session::session::{
+        CommitAnswer, RequestTicket, RunEvent, RunSpec, RunUnit, SessionEffects, SessionHandle,
+        UnitId, UnitVerdict, schema_probe_sql,
+    };
+
+    use super::runs::Recorder;
+    use super::runs_m3b::{spec_units, unit};
+    use super::settle_until;
+
+    /// Unit `i` of run 1 (`sql`, extended protocol, never suspended) carrying `verdict`, with
+    /// the effects the gate gives it (a non-read opens a write).
+    pub fn verdict_unit(i: u32, sql: &str, verdict: UnitVerdict) -> RunUnit {
+        let mut u = unit(i, sql);
+        u.verdict = verdict;
+        u.effects = match verdict {
+            UnitVerdict::Read | UnitVerdict::Unknown => SessionEffects::empty(),
+            _ => SessionEffects::OPENS_WRITE,
+        };
+        u
+    }
+
+    /// A run submitted to a session: its observer and its ticket.
+    pub struct Ran {
+        pub o: Arc<Recorder>,
+        pub ticket: RequestTicket,
+    }
+
+    /// Submits `units` with the confirm deadline `deadline`.
+    pub fn run_units(h: &SessionHandle, units: Vec<RunUnit>, deadline: Duration) -> Ran {
+        let o = Recorder::new();
+        let spec = RunSpec {
+            confirm_deadline: deadline,
+            ..spec_units(&o, units)
+        };
+        let ticket = h.run(spec);
+        Ran { o, ticket }
+    }
+
+    /// Submits one unit of `sql` carrying `verdict` (D-014's deadline).
+    pub fn run_verdict(h: &SessionHandle, sql: &str, verdict: UnitVerdict) -> Ran {
+        run_units(
+            h,
+            vec![verdict_unit(0, sql, verdict)],
+            RunSpec::CONFIRM_DEADLINE,
+        )
+    }
+
+    /// One `NeedsCommit` as the run asked it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Asked {
+        pub unit: UnitId,
+        pub question: u64,
+        pub affected: Option<u64>,
+        pub savepoint: bool,
+    }
+
+    /// Every `NeedsCommit` the run emitted, in order.
+    pub fn commit_questions(o: &Recorder) -> Vec<Asked> {
+        o.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RunEvent::NeedsCommit {
+                    unit,
+                    question,
+                    affected,
+                    savepoint,
+                    ..
+                } => Some(Asked {
+                    unit,
+                    question,
+                    affected,
+                    savepoint,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Waits (yielding, never sleeping: a paused clock stays) for the run's `n`-th question.
+    pub async fn nth_commit(o: &Recorder, n: usize) -> Asked {
+        settle_until("the run asks Commit/Roll back", || {
+            commit_questions(o).len() >= n
+        })
+        .await;
+        commit_questions(o)[n - 1]
+    }
+
+    /// Every `CommitDecided`: the answer and whether the deadline gave it.
+    pub fn decided(o: &Recorder) -> Vec<(CommitAnswer, bool)> {
+        o.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RunEvent::CommitDecided {
+                    answer,
+                    by_deadline,
+                    ..
+                } => Some((answer, by_deadline)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether the run reported `RunEnded`.
+    pub fn run_ended(o: &Recorder) -> bool {
+        o.events()
+            .iter()
+            .any(|e| matches!(e, RunEvent::RunEnded(_)))
+    }
+
+    /// Waits for the run's `RunEnded` (yielding).
+    pub async fn until_ended(o: &Recorder) {
+        settle_until("the run ends", || run_ended(o)).await;
+    }
+
+    /// Answers the run's `n`-th question with `a`; whether the session took it.
+    pub async fn answer_nth(h: &SessionHandle, ran: &Ran, n: usize, a: CommitAnswer) -> bool {
+        let q = nth_commit(&ran.o, n).await;
+        h.commit_decision(ran.ticket.seq, q.unit, q.question, a)
+            .await
+            .unwrap_or(false)
+    }
+
+    /// Answers the run's first question `Commit` (Keep) and waits for the run's end.
+    pub async fn answer_commit(h: &SessionHandle, ran: &Ran) {
+        assert!(answer_nth(h, ran, 1, CommitAnswer::Commit).await);
+        until_ended(&ran.o).await;
+    }
+
+    /// Answers the run's first question `RollBack` (Undo) and waits for the run's end.
+    pub async fn answer_rollback(h: &SessionHandle, ran: &Ran) {
+        assert!(answer_nth(h, ran, 1, CommitAnswer::RollBack).await);
+        until_ended(&ran.o).await;
+    }
+
+    /// The fake's calls from `mark` on, without the session's schema probe.
+    pub fn sent(f: &FakeDriver, mark: usize) -> Vec<FakeCall> {
+        let probe = schema_probe_sql(f.descriptor().kind);
+        f.call_log()[mark..]
+            .iter()
+            .filter(|c| !matches!(c, FakeCall::Statement(s) if !probe.is_empty() && s == probe))
+            .cloned()
+            .collect()
+    }
+
+    /// An `execute`/`batch` call of `sql`.
+    pub fn st(sql: &str) -> FakeCall {
+        FakeCall::Statement(sql.into())
+    }
+
+    /// A typed query of `sql`.
+    pub fn q(sql: &str) -> FakeCall {
+        FakeCall::Typed(FakeTypedCall::Query(sql.into()))
+    }
+
+    /// The close of a typed query that failed (the stream ends it at once).
+    pub fn closed_now() -> FakeCall {
+        FakeCall::Typed(FakeTypedCall::Close(hacivat_driver::CloseHow::Now))
+    }
+
+    /// A typed query of `prefix` after which the connection's status is `status` (the user's
+    /// `BEGIN`, `COMMIT`, … run as units).
+    pub fn leaves(prefix: &'static str, status: TxStatus) -> FakeQuery {
+        FakeQuery {
+            prefix,
+            tx_after: Some(status),
+            ..FakeQuery::default()
+        }
+    }
+
+    /// A typed DML of `prefix` that reports `n` rows affected.
+    pub fn affects(prefix: &'static str, n: u64) -> FakeQuery {
+        FakeQuery {
+            prefix,
+            rows_affected: Some(n),
+            ..FakeQuery::default()
+        }
+    }
+}
