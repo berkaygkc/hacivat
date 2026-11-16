@@ -27,8 +27,9 @@ use hacivat_driver::{RawError, RawErrorKind, ServerMessage, TxStatus};
 use hacivat_exec::LogMsg;
 use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_session::LiveState;
-use hacivat_session::session::TxOwner;
+use hacivat_session::session::{DenyLayer, TxOwner};
 use hacivat_ui_editor::{EditorView, ExecMarkState, preview};
+use hacivat_ui_grid::GridView;
 use hacivat_values::{LogicalType, Value};
 use support::*;
 
@@ -231,9 +232,14 @@ fn run_rows_then_copy_puts_raw_tsv_on_the_clipboard(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppContext) {
-    // What PostgreSQL answers a write inside `BEGIN … READ ONLY`.
+    // ## m3a-f5-demo (DEMO-7): a plain INSERT is refused before anything is sent (the client
+    // layer); a write its first keyword does not show (a writable CTE) still meets the
+    // guard's read-only transaction, where the server refuses it (what PostgreSQL answers a
+    // write inside `BEGIN … READ ONLY`).
+    let cte =
+        "WITH a AS (INSERT INTO audit (note) VALUES ('İzmir') RETURNING note) SELECT * FROM a";
     let refused = FakeQuery {
-        prefix: "INSERT INTO audit",
+        prefix: "WITH a AS (INSERT INTO audit",
         // The error comes with the first event (a set whose rows never arrive).
         sets: vec![FakeResultSet {
             columns: vec![("note", text())],
@@ -267,12 +273,60 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
         "a production console's session is read-only (R-M3-6)"
     );
     let editor = editor_of(vcx, id);
-    type_script(
-        vcx,
-        &editor,
-        "INSERT INTO audit (note) VALUES ('İzmir');\n",
-        3,
+    // The PO's demo statement (Turkish identifiers).
+    let sent_before = fake(vcx).call_log().len();
+    type_script(vcx, &editor, "INSERT INTO müşteri VALUES (9, 'x', 1);\n", 3);
+    editor_command(vcx, &editor, "editor.run");
+    wait_until(vcx, "the denied mark", |vcx| {
+        matches!(
+            marks(vcx, id).as_slice(),
+            [ExecMarkState::Failed { sqlstate: None }]
+        )
+    });
+    let lines = log(vcx, id);
+    assert!(
+        lines
+            .iter()
+            .any(|m| matches!(m, LogMsg::ReadOnlyDenied(DenyLayer::Input))),
+        "{lines:?}"
     );
+    // Nothing was sent for it: not the INSERT, not even the guard's transaction.
+    let calls = fake(vcx).call_log();
+    assert_eq!(calls.len(), sent_before, "{:?}", &calls[sent_before..]);
+    enable_registry(vcx);
+    refresh(vcx);
+    let drawn: Vec<String> = registry_frame(vcx)
+        .into_iter()
+        .map(|r| r.text.to_string())
+        .collect();
+    assert!(
+        drawn.iter().any(|t| t == "not sent: read-only"),
+        "{drawn:?}"
+    );
+    vcx.cx.update(|cx| {
+        let results = Consoles::get(cx, id)
+            .and_then(|s| s.results.clone())
+            .expect("the console's results");
+        results.update(cx, |r, cx| r.set_active(ActiveResult::Output, cx));
+    });
+    refresh(vcx);
+    let output = |vcx: &VisualTestContext| -> Vec<String> {
+        registry_frame(vcx)
+            .into_iter()
+            .filter(|r| r.path.contains("hacivat-app/src/results/output_view.rs"))
+            .map(|r| r.text.to_string())
+            .collect()
+    };
+    let out = output(vcx);
+    assert!(
+        out.iter().any(|t| t.contains(
+            "Not sent: this console is read-only, and the statement can change data or schema."
+        )),
+        "{out:?}"
+    );
+
+    // The server layer behind it.
+    type_script(vcx, &editor, &format!("{cte};\n"), 3);
     editor_command(vcx, &editor, "editor.run");
     wait_until(vcx, "the Failed mark", |vcx| {
         matches!(
@@ -292,17 +346,17 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
         "{lines:?}"
     );
     // Fix round 1 (M8): the session's read-only wrapper reached the server before the
-    // INSERT did (the 25006 is the fake's script; what the product sent is not).
+    // statement did (the 25006 is the fake's script; what the product sent is not).
     let calls = fake(vcx).call_log();
-    let insert = calls
+    let write = calls
         .iter()
         .position(|c| {
             matches!(c, hacivat_driver::fake::FakeCall::Typed(FakeTypedCall::Query(q))
-                if q.starts_with("INSERT INTO audit"))
+                if q.starts_with("WITH a AS (INSERT INTO audit"))
         })
-        .expect("the INSERT reached the fake");
+        .expect("the CTE reached the fake");
     assert!(
-        calls[..insert].iter().any(|c| matches!(
+        calls[..write].iter().any(|c| matches!(
             c,
             hacivat_driver::fake::FakeCall::Statement(sql)
                 if sql.contains("READ ONLY") || sql.contains("default_transaction_read_only = on")
@@ -312,14 +366,6 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
     // Nothing is left open or committed: the guard's read-only transaction ended.
     let tx = session.state().borrow().tx.clone();
     assert_eq!(tx.status, TxStatus::Idle, "{tx:?}");
-    // The Output tab says it: the server's text verbatim, on its own row.
-    vcx.cx.update(|cx| {
-        let results = Consoles::get(cx, id)
-            .and_then(|s| s.results.clone())
-            .expect("the console's results");
-        results.update(cx, |r, cx| r.set_active(ActiveResult::Output, cx));
-    });
-    enable_registry(vcx);
     refresh(vcx);
     // Fix round 1 (M8): the status bar says production and read-only.
     let env = text_of(vcx, "status-env-label").unwrap_or_default();
@@ -327,11 +373,15 @@ fn a_production_insert_is_refused_logged_and_marked_failed(cx: &mut TestAppConte
         env.contains("production") && env.contains("read-only"),
         "{env:?}"
     );
-    let out: Vec<String> = registry_frame(vcx)
-        .into_iter()
-        .filter(|r| r.path.contains("hacivat-app/src/results/output_view.rs"))
-        .map(|r| r.text.to_string())
-        .collect();
+    // The Output tab says it: the server's text verbatim, on its own row.
+    vcx.cx.update(|cx| {
+        let results = Consoles::get(cx, id)
+            .and_then(|s| s.results.clone())
+            .expect("the console's results");
+        results.update(cx, |r, cx| r.set_active(ActiveResult::Output, cx));
+    });
+    refresh(vcx);
+    let out = output(vcx);
     assert!(
         out.iter()
             .any(|t| t.contains("cannot execute INSERT in a read-only transaction")),
@@ -490,5 +540,269 @@ fn closing_a_console_in_a_transaction_asks_and_roll_back_closes_it(cx: &mut Test
         fake.executed()
     );
     assert!(vcx.cx.read(|cx| Consoles::get(cx, id).is_none()));
+    stop_core_runtime_test(cx);
+}
+
+// ## m3a-f5-demo: DEMO-6 — the grid's keys and Edit ▸ Copy through the real dispatch (a
+// mouse selection, then the keystroke through the window; the menu's `RunCommand`).
+
+/// The platform's chord for `key` with the command modifier.
+fn primary(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("cmd-{key}")
+    } else {
+        format!("ctrl-{key}")
+    }
+}
+
+/// The centre of body cell `(row, col)` of `grid` in its last frame.
+fn grid_cell_center(
+    vcx: &VisualTestContext,
+    grid: &Entity<GridView>,
+    row: u64,
+    col: usize,
+) -> gpui::Point<gpui::Pixels> {
+    vcx.cx.read(|cx| {
+        let v = grid.read(cx);
+        let g = v.geometry().expect("the grid painted");
+        let layout = v.column_layout();
+        let s = v.scroll_state();
+        let x = f32::from(g.body.left())
+            + (layout.x_of(col) - s.left_x) as f32
+            + layout.width_at(col) / 2.0;
+        let y = f32::from(g.body.top()) + s.row_top(row) as f32 + 10.0;
+        gpui::point(gpui::px(x), gpui::px(y))
+    })
+}
+
+fn clipboard_text(vcx: &VisualTestContext) -> String {
+    vcx.cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .unwrap_or_default()
+}
+
+fn first_grid(vcx: &VisualTestContext, id: ConsoleId) -> Option<Entity<GridView>> {
+    vcx.cx.read(|cx| {
+        hosts(cx)
+            .into_iter()
+            .find_map(|h| h.read(cx).grid_of(id, 0, cx))
+    })
+}
+
+/// A console with a 3 × 3 result in its grid; the editor keeps the focus, as after ⌘↵.
+fn three_by_three(cx: &mut TestAppContext) -> (&'static mut VisualTestContext, Entity<GridView>) {
+    let rows = FakeQuery {
+        prefix: "SELECT id, city, total FROM shops",
+        sets: vec![FakeResultSet {
+            columns: vec![("id", int8()), ("city", text()), ("total", int8())],
+            rows: FakeRows::Literal(vec![
+                vec![Value::Int(1), Value::Text("İzmir".into()), Value::Int(10)],
+                vec![Value::Int(2), Value::Null, Value::Int(20)],
+                vec![
+                    Value::Int(3),
+                    Value::Text("Şanlıurfa".into()),
+                    Value::Int(1_234_567),
+                ],
+            ]),
+        }],
+        ..Default::default()
+    };
+    let (vcx, id) = connected(cx, DEV, EnvTag::Dev, vec![rows]);
+    enable_registry(vcx);
+    let editor = editor_of(vcx, id);
+    type_script(vcx, &editor, "SELECT id, city, total FROM shops;\n", 3);
+    editor_command(vcx, &editor, "editor.run");
+    wait_until(vcx, "the statement to succeed", |vcx| {
+        matches!(marks(vcx, id).as_slice(), [ExecMarkState::Succeeded { .. }])
+    });
+    wait_until(vcx, "the grid to paint", |vcx| {
+        first_grid(vcx, id).is_some_and(|g| vcx.cx.read(|cx| g.read(cx).geometry().is_some()))
+    });
+    refresh(vcx);
+    let grid = first_grid(vcx, id).expect("the grid");
+    let handle = vcx.cx.read(|cx| editor.read(cx).focus_handle(cx));
+    in_window(vcx, |window, cx| window.focus(&handle, cx));
+    vcx.run_until_parked();
+    (vcx, grid)
+}
+
+#[gpui::test]
+fn a_click_shift_click_selection_copies_with_the_copy_chord(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    vcx.cx
+        .write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
+    let a = grid_cell_center(vcx, &grid, 0, 0);
+    let b = grid_cell_center(vcx, &grid, 2, 1);
+    vcx.simulate_click(a, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    vcx.simulate_click(b, gpui::Modifiers::shift());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes(&primary("c"));
+    vcx.run_until_parked();
+    assert_eq!(clipboard_text(vcx), "1\tİzmir\n2\t\n3\tŞanlıurfa\n");
+    refresh(vcx);
+    let toasts = toast_texts(vcx);
+    assert!(
+        toasts.iter().any(|t| t.contains("Copied 3 × 2 cells")),
+        "{toasts:?}"
+    );
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn a_dragged_selection_copies_with_the_copy_chord(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    let a = grid_cell_center(vcx, &grid, 0, 1);
+    let b = grid_cell_center(vcx, &grid, 1, 2);
+    vcx.simulate_mouse_down(a, gpui::MouseButton::Left, gpui::Modifiers::none());
+    vcx.simulate_mouse_move(b, Some(gpui::MouseButton::Left), gpui::Modifiers::none());
+    vcx.simulate_mouse_up(b, gpui::MouseButton::Left, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes(&primary("c"));
+    vcx.run_until_parked();
+    assert_eq!(clipboard_text(vcx), "İzmir\t10\n\t20\n");
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn the_grid_chords_move_select_and_copy_with_headers(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    let focus = |vcx: &VisualTestContext| {
+        vcx.cx.read(|cx| {
+            grid.read(cx)
+                .selection()
+                .focus()
+                .map(|f| (f.row.0, f.col.0))
+        })
+    };
+    vcx.simulate_click(grid_cell_center(vcx, &grid, 0, 0), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("down right");
+    vcx.run_until_parked();
+    assert_eq!(focus(vcx), Some((1, 1)));
+    vcx.simulate_keystrokes("shift-down");
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes(&primary("c"));
+    vcx.run_until_parked();
+    assert_eq!(clipboard_text(vcx), "\nŞanlıurfa\n");
+    vcx.simulate_keystrokes(&primary("a"));
+    vcx.simulate_keystrokes(&primary("shift-c"));
+    vcx.run_until_parked();
+    assert_eq!(
+        clipboard_text(vcx),
+        "id\tcity\ttotal\n1\tİzmir\t10\n2\t\t20\n3\tŞanlıurfa\t1234567\n"
+    );
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn edit_copy_and_select_all_from_the_menu_reach_the_focused_grid(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    vcx.simulate_click(grid_cell_center(vcx, &grid, 2, 2), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    // What the macOS Edit menu items deliver (F1).
+    let menu = |vcx: &mut VisualTestContext, id: &str| {
+        vcx.dispatch_action(hacivat_ui_core::gpui_surface::RunCommand {
+            id: id.to_string().into(),
+        });
+        vcx.run_until_parked();
+    };
+    menu(vcx, "editor.copy");
+    assert_eq!(clipboard_text(vcx), "1234567\n");
+    menu(vcx, "editor.select_all");
+    menu(vcx, "editor.copy");
+    assert_eq!(
+        clipboard_text(vcx),
+        "1\tİzmir\t10\n2\t\t20\n3\tŞanlıurfa\t1234567\n"
+    );
+    stop_core_runtime_test(cx);
+}
+
+// ## m3a-f5-demo (review m-4): a grid's key-context registration ends with the grid, whatever
+// ends it: a closed console tab, or its whole window.
+fn live_grids(vcx: &VisualTestContext) -> usize {
+    vcx.cx.read(|cx| {
+        hacivat_app::shell::FocusContexts::live(cx)
+            .into_iter()
+            .filter(|c| *c == hacivat_ui_grid::GRID_CONTEXT)
+            .count()
+    })
+}
+
+#[gpui::test]
+fn closing_the_console_drops_its_grids_key_context(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    assert_eq!(live_grids(vcx), 1);
+    drop(grid);
+    let tab = with_ws(vcx, |ws, _, _| ws.active_tab()).expect("the console's tab");
+    with_ws(vcx, |ws, _, cx| ws.force_close_tab(tab, cx));
+    vcx.run_until_parked();
+    wait_until(vcx, "the grid's registration to end", |vcx| {
+        live_grids(vcx) == 0
+    });
+    stop_core_runtime_test(cx);
+}
+
+#[gpui::test]
+fn closing_the_window_drops_its_grids_key_context(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    assert_eq!(live_grids(vcx), 1);
+    drop(grid);
+    let stored = vcx.cx.read(hacivat_app::shell::FocusContexts::stored);
+    assert!(stored >= 1);
+    in_window(vcx, |window, _| window.remove_window());
+    vcx.cx.run_until_parked();
+    assert_eq!(
+        live_grids(vcx),
+        0,
+        "no grid of the closed window stays registered"
+    );
+    // The next registration prunes what the closed window left behind.
+    let probe = vcx.cx.update(|cx| cx.focus_handle());
+    vcx.cx.update(|cx| {
+        hacivat_app::shell::register_focus_context(cx, probe.clone(), "Probe");
+    });
+    let live = vcx.cx.read(hacivat_app::shell::FocusContexts::live);
+    let stored = vcx.cx.read(hacivat_app::shell::FocusContexts::stored);
+    assert_eq!(
+        stored,
+        live.len(),
+        "dead registrations were dropped: {live:?}"
+    );
+    drop(probe);
+    stop_core_runtime_test(cx);
+}
+
+// Review m-9: with a result grid focused, the in-window Edit menu keeps its own labels while
+// Copy and Select All run the grid's commands.
+#[gpui::test]
+fn the_in_window_edit_menu_keeps_its_labels_over_the_grid(cx: &mut TestAppContext) {
+    let (vcx, grid) = three_by_three(cx);
+    vcx.simulate_click(grid_cell_center(vcx, &grid, 0, 0), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    let rows: Vec<(String, String, bool)> = in_window(vcx, |window, cx| {
+        hacivat_app::commands::in_window_menu_items(window, cx)
+            .expect("the menu")
+            .into_iter()
+            .filter(|i| !i.separator)
+            .map(|i| ((i.label)(cx).to_string(), i.action.to_string(), i.disabled))
+            .collect()
+    });
+    let row = |action: &str| {
+        rows.iter()
+            .find(|(_, a, _)| a == action)
+            .unwrap_or_else(|| panic!("{action}: {rows:?}"))
+            .clone()
+    };
+    assert_eq!(row("grid.copy"), ("Copy".into(), "grid.copy".into(), false));
+    assert_eq!(
+        row("grid.select_all"),
+        ("Select all".into(), "grid.select_all".into(), false)
+    );
+    assert!(
+        !rows.iter().any(|(l, _, _)| l.starts_with("Grid")),
+        "{rows:?}"
+    );
     stop_core_runtime_test(cx);
 }

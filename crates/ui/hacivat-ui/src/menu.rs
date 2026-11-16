@@ -16,9 +16,10 @@
 
 use hacivat_ui_core::gpui_surface::Entity;
 use hacivat_ui_core::gpui_surface::{
-    AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Point, Render, Role,
-    SharedString, StatefulInteractiveElement, Styled, Window, accesskit, div, px,
+    AnyElement, App, AppContext, Bounds, Context, EventEmitter, FocusHandle, Focusable, Global,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Point,
+    Render, Role, ScrollEvent, SharedString, StatefulInteractiveElement, Styled, Window, accesskit,
+    div, px,
 };
 use hacivat_ui_core::theme::{Theme, popover_surface};
 
@@ -26,7 +27,7 @@ use crate::accesskey::{AccessKey, AccessKeyAssigner, AccessKeyLocale, typed_matc
 use crate::button::key_label_from;
 use crate::icon::{Icon, IconName, IconSize};
 use crate::popover::{A11yDecl, A11yNode, Declare};
-use crate::text::{KeyFn, Label, TextFn, TextSource};
+use crate::text::{KeyFn, Label, TextFn, TextRegistry, TextSource};
 
 /// Minimum width of the menu surface.
 pub const MENU_MIN_WIDTH_PX: f32 = 200.0;
@@ -190,6 +191,12 @@ pub struct PopupMenu {
     active_tint: bool,
     /// A 24 px key-hint footer on `head`: `(chord, Fluent ID)` pairs.
     key_hints: Vec<(&'static str, &'static str)>,
+    // ## m3a-f5-demo (follow-up; review m-2): a menu taller than the room the window gives it
+    // shows a window of whole rows (separators included) above the status bar, from item
+    // `first`; the keys and the wheel move it a row at a time.
+    first: usize,
+    /// Wheel travel not yet turned into rows.
+    wheel: f32,
 }
 
 impl EventEmitter<PopupMenuEvent> for PopupMenu {}
@@ -246,6 +253,8 @@ impl PopupMenu {
                 access_keys: !cfg!(target_os = "macos"),
                 active_tint: false,
                 key_hints: Vec::new(),
+                first: 0,
+                wheel: 0.0,
             }
         })
     }
@@ -401,9 +410,142 @@ impl PopupMenu {
             }
             _ => return,
         }
+        // (A scrolling menu brings the highlighted row into its window when it draws.)
         cx.notify();
         cx.stop_propagation();
     }
+
+    // ## m3a-f5-demo (follow-up)
+    /// The height of `item` in the rows column: a row, or a separator with its margins.
+    fn entry_height(item: &MenuItemSpec, xs: f32) -> f32 {
+        if item.separator {
+            1.0 + 2.0 * xs
+        } else {
+            MENU_ROW_PX
+        }
+    }
+
+    // ## m3a-f5-demo (review m-2)
+    /// The end of the window of whole entries from `first` that fits in `room`.
+    fn window_end(entries: &[f32], first: usize, room: f32) -> usize {
+        let mut used = 0.0;
+        let mut end = first;
+        while end < entries.len() && used + entries[end] <= room {
+            used += entries[end];
+            end += 1;
+        }
+        end.max((first + 1).min(entries.len()))
+    }
+
+    /// The window of a scrolling menu: from `self.first`, clamped so the last item can be the
+    /// last shown and moved so the highlighted row is in it.
+    fn rows_window(&mut self, entries: &[f32], room: f32) -> std::ops::Range<usize> {
+        let n = entries.len();
+        // The last first item whose window reaches the end.
+        let mut last_first = n.saturating_sub(1);
+        while last_first > 0 && Self::window_end(entries, last_first - 1, room) == n {
+            last_first -= 1;
+        }
+        let mut first = self.first.min(last_first);
+        if let Some(sel) = self.selected {
+            if sel < first {
+                first = sel;
+            }
+            while Self::window_end(entries, first, room) <= sel && first < sel {
+                first += 1;
+            }
+        }
+        self.first = first;
+        first..Self::window_end(entries, first, room)
+    }
+
+    /// The wheel over a scrolling menu: a row per row's height of travel.
+    fn on_wheel(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) {
+        self.wheel += f32::from(event.delta.pixel_delta(px(MENU_ROW_PX)).y);
+        let mut moved = false;
+        while self.wheel <= -MENU_ROW_PX {
+            self.wheel += MENU_ROW_PX;
+            self.first += 1;
+            moved = true;
+        }
+        while self.wheel >= MENU_ROW_PX {
+            self.wheel -= MENU_ROW_PX;
+            self.first = self.first.saturating_sub(1);
+            moved = true;
+        }
+        if moved {
+            // The wheel moves the window, not the highlight: a highlight left outside it is
+            // dropped rather than pulling the window back.
+            self.selected = None;
+            cx.notify();
+        }
+        cx.stop_propagation();
+    }
+}
+
+// ## m3a-f5-demo (follow-up): where the last anchored menu drew, for the frame checks.
+
+/// What the last anchored menu drew, recorded while the [`TextRegistry`] is enabled (tests
+/// and the shots): its rows' column, each drawn row's item index and bounds (a scrolling menu
+/// draws only its window), the window's height and the status bar's.
+#[derive(Debug, Clone, Default)]
+pub struct MenuLayout {
+    pub viewport: Option<Bounds<Pixels>>,
+    pub rows: Vec<(usize, Bounds<Pixels>)>,
+    pub window_height: f32,
+    pub statusbar_height: f32,
+}
+
+impl Global for MenuLayout {}
+
+impl MenuLayout {
+    /// What is wrong with the last anchored menu: a row shown only in part (cut at its
+    /// column's edge), or one drawn over the status bar or past the window's bottom.
+    pub fn violations(cx: &App) -> Vec<String> {
+        let Some(layout) = cx.try_global::<MenuLayout>() else {
+            return Vec::new();
+        };
+        let slack = 0.5;
+        let floor = layout.window_height - layout.statusbar_height;
+        let mut out = Vec::new();
+        for (i, row) in &layout.rows {
+            let (top, bottom) = (f32::from(row.top()), f32::from(row.bottom()));
+            if let Some(v) = layout.viewport {
+                let (vt, vb) = (f32::from(v.top()), f32::from(v.bottom()));
+                if top < vt - slack || bottom > vb + slack {
+                    out.push(format!(
+                        "menu row {i} is cut at its column ({top}..{bottom})"
+                    ));
+                }
+            }
+            if bottom > floor + slack {
+                out.push(format!(
+                    "menu row {i} reaches the status bar or the window's bottom \
+                     ({bottom} > {floor})"
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// Records the rows of the anchored menu just prepainted (`viewport`: its rows' column).
+fn note_menu_rows(
+    cx: &mut App,
+    window: &Window,
+    statusbar: f32,
+    viewport: Option<Bounds<Pixels>>,
+    rows: Vec<(usize, Bounds<Pixels>)>,
+) {
+    if !cx.try_global::<TextRegistry>().is_some_and(|r| r.enabled) {
+        return;
+    }
+    cx.set_global(MenuLayout {
+        viewport,
+        rows,
+        window_height: f32::from(window.viewport_size().height),
+        statusbar_height: statusbar,
+    });
 }
 
 impl Render for PopupMenu {
@@ -419,20 +561,19 @@ impl Render for PopupMenu {
 
         // Keep the menu inside the window: flip to the other side of the anchor when it would
         // overflow. An embedded menu is placed by its host's `anchored()`.
+        // ## m3a-f5-demo (follow-up): the room ends above the status bar. A menu that fits on
+        // neither side of its anchor but fits the room moves up until it does (review m-3); one
+        // taller than the room stays under its anchor and shows a window of whole rows.
+        let entries: Vec<f32> = self
+            .items
+            .iter()
+            .map(|item| Self::entry_height(item, t.spacing.xs))
+            .collect();
+        let rows_height: f32 = entries.iter().sum();
+        let mut room: Option<f32> = None;
         let position = self.anchor.map(|anchor| {
             let viewport = window.viewport_size();
-            let height: f32 = self
-                .items
-                .iter()
-                .map(|item| {
-                    if item.separator {
-                        1.0 + 2.0 * t.spacing.xs
-                    } else {
-                        MENU_ROW_PX
-                    }
-                })
-                .sum::<f32>()
-                + 2.0 * t.spacing.xs
+            let chrome = 2.0 * t.spacing.xs
                 + 2.0
                 // ## m2b-t24-shots: the title row.
                 + if self.title.is_some() {
@@ -446,28 +587,43 @@ impl Render for PopupMenu {
                 } else {
                     MENU_FOOTER_PX
                 };
+            let height = chrome + rows_height;
+            let floor = f32::from(viewport.height) - t.spacing.statusbar_height - t.spacing.xs;
             let left = if anchor.x + self.min_width > viewport.width {
                 (viewport.width - self.min_width).max(px(0.0))
             } else {
                 anchor.x
             };
-            let top = if anchor.y + px(height) > viewport.height {
-                (anchor.y - px(height)).max(px(0.0))
+            let below = f32::from(anchor.y) + height <= floor;
+            let above = f32::from(anchor.y) - height >= 0.0;
+            let top = if below {
+                anchor.y
+            } else if above {
+                anchor.y - px(height)
+            } else if height <= floor {
+                px((floor - height).max(0.0))
             } else {
+                room = Some((floor - f32::from(anchor.y) - chrome).max(MENU_ROW_PX));
                 anchor.y
             };
             (left, top)
         });
+        let shown = match room {
+            Some(room) => self.rows_window(&entries, room),
+            None => 0..self.items.len(),
+        };
         let check_column = self.items.iter().any(|i| i.checked && !i.separator);
 
         let rows: Vec<AnyElement> = self
             .items
             .iter()
             .enumerate()
+            .filter(|(i, _)| shown.contains(i))
             .map(|(i, item)| {
                 if item.separator {
                     return div()
                         .h(px(1.0))
+                        .flex_none()
                         .my(px(t.spacing.xs))
                         .bg(c.seam.to_hsla())
                         .into_any_element();
@@ -522,6 +678,7 @@ impl Render for PopupMenu {
                     .justify_between()
                     .gap(px(t.spacing.xl))
                     .h(px(MENU_ROW_PX))
+                    .flex_none()
                     .px(px(t.spacing.lg))
                     .rounded(px(t.radii.xs))
                     .child(lead);
@@ -613,7 +770,29 @@ impl Render for PopupMenu {
             .or(self.title.as_ref())
             .map(|l| l(cx))
             .unwrap_or_default();
-        let mut menu = popover_surface(&theme)
+        // ## m3a-f5-demo (follow-up): the rows' column records where each row drew; an anchored
+        // menu then records it with the column's bounds ([`MenuLayout`]).
+        let drawn_rows: std::rc::Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>> = Default::default();
+        let has_title = self.title.is_some();
+        let statusbar = t.spacing.statusbar_height;
+        let surface = popover_surface(&theme);
+        let surface = if self.anchor.is_some() {
+            let drawn_rows = drawn_rows.clone();
+            let first = shown.start;
+            surface.on_children_prepainted(move |bounds, window, cx| {
+                let column = bounds.get(usize::from(has_title)).copied();
+                let rows = drawn_rows
+                    .borrow()
+                    .iter()
+                    .enumerate()
+                    .map(|(k, b)| (first + k, *b))
+                    .collect();
+                note_menu_rows(cx, window, statusbar, column, rows);
+            })
+        } else {
+            surface
+        };
+        let mut menu = surface
             .id("popup-menu")
             .debug_selector(|| "popup-menu".to_string())
             .track_focus(&self.focus)
@@ -692,7 +871,25 @@ impl Render for PopupMenu {
                 .rounded_br(px(t.radii.md))
                 .children(self.key_hints.iter().map(hint))
         });
-        menu.children(title).children(rows).children(footer)
+        // ## m3a-f5-demo (follow-up): the rows in their own column, which scrolls when the menu
+        // has less room than its rows (`rows_window`, whole rows); an anchored menu records
+        // where its rows drew for the frame checks ([`MenuLayout`]).
+        let column = div()
+            .on_children_prepainted(move |bounds, _, _| {
+                *drawn_rows.borrow_mut() = bounds;
+            })
+            .id("popup-menu-rows")
+            .flex()
+            .flex_col()
+            .flex_none();
+        // A window of whole rows: the wheel moves it a row at a time (review m-2).
+        let column = if room.is_some() {
+            column.on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| this.on_wheel(e, cx)))
+        } else {
+            column
+        };
+        let column = column.children(rows);
+        menu.children(title).child(column).children(footer)
     }
 }
 

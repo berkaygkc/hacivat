@@ -11,7 +11,7 @@ use hacivat_ui::button::ButtonKind;
 use hacivat_ui::dialog::{DialogButton, DialogSize, DialogSpec};
 use hacivat_ui::panes::Axis;
 use hacivat_ui::toast::{Toast, ToastKind, ToastQueue};
-use hacivat_ui_core::gpui_surface::{App, AppContext as _, Context, Window};
+use hacivat_ui_core::gpui_surface::{App, AppContext as _, Context, SharedString, Window};
 use hacivat_ui_core::theme::{Theme, ThemeMode};
 
 use crate::commands::palette;
@@ -379,13 +379,33 @@ fn open_about(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspac
 
 /// The Windows/Linux in-window menu: the same model as the macOS menu bar, under the title
 /// bar's app-menu button at the right end of the title bar.
+// ## m3a-f5-demo (DEMO-6; review m-9)
+/// The Windows/Linux in-window menu's rows for `window` now. With a result grid focused, Copy
+/// and Select All run the grid's commands (`routed_menu_command`) and follow their enabled
+/// state, under the Edit menu's own labels ("Copy", not the palette's "Grid: copy").
+pub fn in_window_menu_items(
+    window: &Window,
+    cx: &App,
+) -> Option<Vec<hacivat_ui::menu::MenuItemSpec>> {
+    let reg = cx.try_global::<ActionRegistry>()?;
+    let mut items = menus::popup_items(&menus::menu_model(reg), cx);
+    for item in items.iter_mut().filter(|i| !i.separator) {
+        let routed = super::routed_menu_command(item.action.as_ref(), window, cx);
+        if routed != item.action.as_ref() {
+            let enabled = reg.get(routed).is_some_and(|d| (d.enabled)(cx));
+            item.action = SharedString::from(routed);
+            item.disabled = !enabled;
+        }
+    }
+    Some(items)
+}
+
 fn show_menu(window: &mut Window, cx: &mut App) {
     let Some(ws) = window.root::<Workspace>().flatten() else {
         return;
     };
-    let items = match cx.try_global::<ActionRegistry>() {
-        Some(reg) => menus::popup_items(&menus::menu_model(reg), cx),
-        None => return,
+    let Some(items) = in_window_menu_items(window, cx) else {
+        return;
     };
     let anchor = menus::in_window_menu_anchor(&items, window, cx);
     let menu = ws.update(cx, |ws, cx| ws.open_popup_menu(anchor, items, window, cx));

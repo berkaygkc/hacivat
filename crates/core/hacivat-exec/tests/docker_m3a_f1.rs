@@ -75,6 +75,8 @@ async fn a_production_profile_connects_with_a_bound_console_on_every_server_line
         prod.ok("SELECT 1").await;
         let refused = prod.run("CREATE TABLE hv_f1_never (a int)").await;
         assert_eq!(refused.names(), ["Failed"], "{id}: the guard still refuses");
+        // ## m3a-f5-demo (DEMO-7): refused by the console, before anything is sent.
+        assert_eq!(refused.outcome(), "input", "{id}");
         assert!(
             matches!(prod.m.state(prod.profile.id), LiveState::Connected(_)),
             "{id}: {:?}",
