@@ -1912,6 +1912,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-cancel-own-tx": "This console's open transaction ({n} statements) rolls back.",
   "hv-cancel-disconnect-line-all": "Disconnect closes every connection of {name} here; the statement may continue on the server.",
   "hv-cancel-disconnect-line-one": "Disconnect closes only this console's session ({console}); the statement may continue on the server.",
+  "hv-cancel-disconnect-line-local": "Disconnect closes this console's connection to the file {name}; SQLite stops the statement when its connection closes.",
   "hv-cancel-other-tx": "{console} also has an open transaction ({n} statements); the server rolls it back.",
   "exec-disconnected": "Disconnected {name}. The statement may still be running on the server.",
   "hv-errbar-rollback-continue-tip-auto": "Rolls back your open transaction ({n} statements), then continues with statement {next}, committing each statement as it runs.",
@@ -2126,6 +2127,7 @@ body.fixed .win { width:var(--fw); height:var(--fh); outline:1px dashed var(--se
   "hv-cancel-own-tx": "Bu konsolun açık işlemi ({n} ifade) geri alınır.",
   "hv-cancel-disconnect-line-all": "“Bağlantıyı kes”, {name} için buradaki tüm bağlantıları kapatır; ifade sunucuda çalışmayı sürdürebilir.",
   "hv-cancel-disconnect-line-one": "“Bağlantıyı kes” yalnızca bu konsolun oturumunu ({console}) kapatır; ifade sunucuda çalışmayı sürdürebilir.",
+  "hv-cancel-disconnect-line-local": "“Bağlantıyı kes”, bu konsolun {name} dosyasına bağlantısını kapatır; SQLite, bağlantı kapanınca ifadeyi durdurur.",
   "hv-cancel-other-tx": "{console} konsolunda da açık bir işlem var ({n} ifade); sunucu onu geri alır.",
   "exec-disconnected": "{name} bağlantısı kesildi. İfade sunucuda hâlâ çalışıyor olabilir.",
   "hv-errbar-rollback-continue-tip-auto": "Açık işleminizi ({n} ifade) geri alır, sonra {next}. ifadeden devam eder; her ifade çalışınca commit edilir.",
@@ -2421,7 +2423,7 @@ function explorerHTML() {
     for (const c of rows) {
       const live = W.live[c.id];
       const flags = c.ro ? `<span class="flags">${ic("lock", "i12" + (c.env === "production" ? " ro" : ""))}</span>` : "";
-      const meta = live === "connected" ? `${ic("check","i12 ok")}<span class="mono">${esc(dur(c.lat))}</span>` : live === "connecting" ? `<i class="run"></i>` : `<span class="mono">${esc(ENG[c.engine].short)} ${esc(String(c.ver).split(".")[0])}</span>`;
+      const meta = live === "connected" ? `${ic("check","i12 ok")}${c.lat === undefined ? "" : `<span class="mono">${esc(dur(c.lat))}</span>`}` : live === "connecting" ? `<i class="run"></i>` : `<span class="mono">${esc(ENG[c.engine].short)} ${esc(String(c.ver).split(".")[0])}</span>`;
       h += `<div class="row${sel === c.id ? " sel" : ""}" role="option" aria-selected="${sel === c.id}">${ic(c.engine === "sqlite" ? "file-code-2" : "database","i12")}<span class="lbl${live === "connected" ? " on" : ""}">${esc(c.id)}</span>${mark(c.env)}${flags}<span class="grow"></span><span class="meta">${meta}</span></div>`;
     }
   }
@@ -2829,7 +2831,7 @@ function renderStatus() {
     h += c.env === "production" ? `<span class="s envseg">${mark("production")}${c.ro ? ic("lock","i12") : ""}<span>${esc(envTxt)}</span></span>`   /* RC-6: the lock only on read-only production */
       : `<span class="s envseg np">${mark(c.env)}<span>${esc(envTxt)}</span><span class="mono" style="color:var(--text-2)">${esc(c.id)}</span></span>`;
     if (c.engine !== "sqlite") h += seg("path", `${ic("arrow-left-right","i12")}<span>${te("path-direct")}</span><span class="mono">${esc(dur(c.lat))}</span>`, "g");
-    h += seg("enc", `${ic("lock","i12")}<span>${te("enc-verified")}</span>`);
+    if (c.engine !== "sqlite") h += seg("enc", `${ic("lock","i12")}<span>${te("enc-verified")}</span>`);     /* a local file has no TLS */
     /* M3b (surface 4): the transaction segment is a button that opens the mode menu (Commit / Roll back at its top) */
     if (k.tx) h += k.tx.failed ? `<button class="s txf" data-seg="tx" id="txSeg" data-act="txMenuStatus" aria-haspopup="menu" title="${te("hv-tx-segment-tip")}">${ic("triangle-alert","i12")}<span>${te("hv-tx-failed")}</span></button>`
       : `<button class="s tx cur" data-seg="tx" id="txSeg" data-act="txMenuStatus" aria-haspopup="menu" title="${te("hv-tx-segment-tip")}"><i class="run"></i><span>${te("hv-tx-open", { n:nf(k.tx.n) })}</span></button>`;
@@ -3022,7 +3024,7 @@ DETAIL:  Only roles with privileges of the role whose process is being terminate
   const all = k.n === 1, others = all ? W.consoles.filter(x => x !== k && x.conn === k.conn && x.tx) : [];
   const lines = [];
   if (!L.noTerm) lines.push(`<li>${th("hv-cancel-terminate-line", { fn:mn(L.fn || "pg_terminate_backend(18342)") })}${own}</li>`);
-  lines.push(`<li>${te(all ? "hv-cancel-disconnect-line-all" : "hv-cancel-disconnect-line-one", { name:c.id, console:tabTitle(k) })}${own}${others.map(o => " " + te("hv-cancel-other-tx", { console:tabTitle(o), n:nf(o.tx.n) })).join("")}</li>`);
+  lines.push(`<li>${te(c.engine === "sqlite" ? "hv-cancel-disconnect-line-local" : all ? "hv-cancel-disconnect-line-all" : "hv-cancel-disconnect-line-one", { name:c.id, console:tabTitle(k) })}${own}${others.map(o => " " + te("hv-cancel-other-tx", { console:tabTitle(o), n:nf(o.tx.n) })).join("")}</li>`);
   body += `<ul class="expl">${lines.join("")}</ul>`;
   /* M8: the Danger Disconnect alone on the far left; Terminate (Default) beside Keep waiting (Primary, focused) */
   const left = `<button class="btn danger" data-act="escDisconnect" data-fk="escDisconnect">${ic("unplug","i12")}<span>${te("hv-cancel-disconnect")}</span></button>`;
