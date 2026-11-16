@@ -213,25 +213,49 @@ fn texts_from(vcx: &VisualTestContext, file: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every drawn button's label, whole, in paint order. Where access keys show (Linux, Windows)
-/// a label is drawn as runs around its key letter (`""`, `"R"`, `"oll back"`); the runs share
-/// the label's ID (`#button-label-<id>`), so consecutive runs with one ID are joined. A run
-/// without an ID (a shortcut hint, a `(K)` access-key suffix) stays its own entry.
+/// The texts `hacivat-ui/src/button.rs` drew, in paint order, with each button's label whole.
+/// Where access keys show (Linux, Windows) a button's label is drawn as runs around its key
+/// letter (`""`, `"R"`, `"oll back"`); the runs share the label's ID (`#button-label-<id>`) and
+/// are joined, at most three of them and the middle one a single letter (the shape the key
+/// split draws), so the labels of two buttons with one ID never merge. Runs without an ID stay
+/// their own entries: a shortcut hint, a `(K)` access-key suffix, and a popup menu item's runs
+/// (the menu draws through the same function, without an ID, so its items come split).
 pub fn button_labels(vcx: &VisualTestContext) -> Vec<String> {
-    let mut labels: Vec<(Option<String>, String)> = Vec::new();
+    struct Label {
+        id: Option<String>,
+        runs: usize,
+        text: String,
+    }
+    let mut labels: Vec<Label> = Vec::new();
     for r in registry_frame(vcx)
         .into_iter()
         .filter(|r| r.path.contains("hacivat-ui/src/button.rs:"))
     {
         let id = r.path.split_once('#').map(|(_, id)| id.to_string());
+        let joins = |last: &Label| {
+            last.id.is_some()
+                && last.id == id
+                && match last.runs {
+                    // The key letter follows the part before it.
+                    1 => r.text.chars().count() == 1,
+                    // The part after the key letter.
+                    2 => true,
+                    _ => false,
+                }
+        };
         match labels.last_mut() {
-            Some((Some(last), text)) if id.as_deref() == Some(last.as_str()) => {
-                text.push_str(&r.text);
+            Some(last) if joins(last) => {
+                last.runs += 1;
+                last.text.push_str(&r.text);
             }
-            _ => labels.push((id, r.text.to_string())),
+            _ => labels.push(Label {
+                id,
+                runs: 1,
+                text: r.text.to_string(),
+            }),
         }
     }
-    labels.into_iter().map(|(_, text)| text).collect()
+    labels.into_iter().map(|l| l.text).collect()
 }
 
 /// The text of the label with element ID `id`.

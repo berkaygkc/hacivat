@@ -276,7 +276,8 @@ async fn user_transactions_are_logged_when_they_end() {
     t.done.await.unwrap();
     assert!(svc.log_ids().contains(&"exec-tx-rolled-back"));
     assert!(!svc.log_ids().contains(&"exec-tx-committed"));
-    assert_eq!(h.state().borrow().tx.status, TxStatus::Idle);
+    // `done` comes at `RunEnded`; the transaction is published when the session settles.
+    assert_eq!(settled(&h).await.tx.status, TxStatus::Idle);
 }
 
 /// A PostgreSQL result of `rows` that suspends after its first read-ahead.
@@ -308,7 +309,8 @@ async fn a_suspended_cursor_says_so_and_its_release_rolls_back() {
     };
     assert!(rows > 0 && rows < 1_000_000);
     assert_eq!(svc.log_ids(), ["exec-rows-retrieved-more"]);
-    assert!(h.state().borrow().cursor.is_some());
+    // The cursor badge is published when the session settles, after `done`.
+    assert!(settled(&h).await.cursor.is_some());
     // Another statement releases the cursor first: Hacivat's own transaction rolls back
     // (R-M3-23), and the log says so.
     let second = svc.svc.run(&h, svc.req(&["SELECT 2"]));
