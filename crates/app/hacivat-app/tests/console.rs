@@ -936,6 +936,54 @@ fn toolbar_run_ends_a_composition_and_keeps_the_editor_focused(cx: &mut TestAppC
     assert_eq!(runs[0].snapshot.buffer.to_string(), "SELECT ış");
     assert!(!vcx.cx.read(|cx| editor.read(cx).status().composing));
     assert!(editor_focused(vcx, &editor), "the editor keeps the focus");
+    // ## m3a-f4-ime: the button took the focus on the mouse-down, so the editor's blur ended
+    // the composition and GPUI's `FocusLost` discards the platform's copy; the editor owes no
+    // discard of its own (`end_composition` covers a Run that finds the composition still open).
+    assert_eq!(vcx.cx.read(|cx| editor.read(cx).marked_text_discards()), 0);
+    drop(runs);
+    stop_core_runtime_test(cx);
+}
+
+// ## m3a-f4-ime (E7 row B5, F15): the Run chord typed into marked text sends nothing; the
+// composition stays whole, and once committed the same chord runs the committed text.
+#[gpui::test]
+fn the_run_chord_during_a_composition_sends_nothing(cx: &mut TestAppContext) {
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    connect_and_wait(vcx, "orders-dev");
+    let id = wait_active_console(vcx);
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    let runs = record_runs(vcx, &editor);
+    vcx.simulate_input("SELECT ");
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |v, cx| {
+            gpui::EntityInputHandler::replace_and_mark_text_in_range(
+                v,
+                None,
+                "かんじ",
+                None,
+                window,
+                cx,
+            );
+        });
+    });
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes(&primary("enter"));
+    vcx.run_until_parked();
+    assert!(runs.borrow().is_empty(), "nothing is sent while composing");
+    assert!(vcx.cx.read(|cx| editor.read(cx).status().composing));
+    assert_eq!(text(vcx, &editor), "SELECT かんじ");
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |v, cx| {
+            gpui::EntityInputHandler::replace_text_in_range(v, None, "漢字", window, cx);
+        });
+    });
+    vcx.simulate_keystrokes(&primary("enter"));
+    vcx.run_until_parked();
+    let runs = runs.borrow();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].snapshot.buffer.to_string(), "SELECT 漢字");
     drop(runs);
     stop_core_runtime_test(cx);
 }
@@ -1017,6 +1065,81 @@ fn the_menu_bar_waits_for_the_composition(cx: &mut TestAppContext) {
             .read(|cx| editor.read(cx).snapshot().selection.main().range()),
         0.."SELECT ş".len()
     );
+    stop_core_runtime_test(cx);
+}
+
+// ## m3a-f4-ime (E7 row 6b): Edit > Emoji & Symbols, last in the Edit menu, opens the system
+// character palette from the menu and from AppKit's chord, never during a composition (F15).
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn the_edit_menu_opens_the_character_palette(cx: &mut TestAppContext) {
+    use hacivat_app::menus::{MenuEntry, build_menus, menu_model};
+    let vcx = shell_with_profile(cx, "orders-dev", Some(EnvTag::Dev), 4);
+    let (edit, names) = vcx.cx.read(|cx| {
+        let model = menu_model(cx.global::<ActionRegistry>());
+        let edit = model
+            .iter()
+            .find(|g| g.title_id == "hv-menu-edit")
+            .expect("the Edit menu")
+            .items
+            .clone();
+        let names: Vec<String> = build_menus(&model, cx)
+            .into_iter()
+            .find(|m| m.name == "Edit")
+            .expect("the Edit menu")
+            .items
+            .into_iter()
+            .filter_map(|i| match i {
+                gpui::MenuItem::Action { name, .. } => Some(name.to_string()),
+                _ => None,
+            })
+            .collect();
+        (edit, names)
+    });
+    assert_eq!(
+        edit[edit.len() - 2..],
+        [
+            MenuEntry::Separator,
+            MenuEntry::Action("app.character_palette")
+        ]
+    );
+    assert_eq!(names.last().map(String::as_str), Some("Emoji & Symbols"));
+    let window = vcx.window_handle();
+    let requests = |vcx: &VisualTestContext| vcx.cx.character_palette_requests(window);
+    vcx.cx.dispatch_action(
+        window,
+        hacivat_ui_core::gpui_surface::RunCommand {
+            id: "app.character_palette".into(),
+        },
+    );
+    vcx.run_until_parked();
+    assert_eq!(requests(vcx), 1, "the menu item");
+    vcx.simulate_keystrokes("ctrl-cmd-space");
+    vcx.run_until_parked();
+    assert_eq!(requests(vcx), 2, "AppKit's chord");
+    // While composing in the editor: neither runs.
+    connect_and_wait(vcx, "orders-dev");
+    let id = wait_active_console(vcx);
+    activate(vcx);
+    let editor = editor_of(vcx, id);
+    focus_editor(vcx, &editor);
+    in_window(vcx, |window, cx| {
+        editor.update(cx, |v, cx| {
+            gpui::EntityInputHandler::replace_and_mark_text_in_range(
+                v, None, "ş", None, window, cx,
+            );
+        });
+    });
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("ctrl-cmd-space");
+    vcx.cx.dispatch_action(
+        window,
+        hacivat_ui_core::gpui_surface::RunCommand {
+            id: "app.character_palette".into(),
+        },
+    );
+    vcx.run_until_parked();
+    assert_eq!(requests(vcx), 2, "nothing during a composition");
     stop_core_runtime_test(cx);
 }
 

@@ -79,6 +79,10 @@ fn layout() -> [(&'static str, Vec<MenuEntry>); 6] {
                 A("editor.paste"),
                 S,
                 A("editor.select_all"),
+                // ## m3a-f4-ime (E7 row 6b): last, where macOS apps have it (registered on
+                // macOS only).
+                S,
+                A("app.character_palette"),
             ],
         ),
         (

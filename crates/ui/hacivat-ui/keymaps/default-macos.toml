@@ -480,3 +480,12 @@ context = "Grid"
 chord = "cmd-."
 command = "exec.cancel"
 context = "Console"
+
+## m3a-f4-ime
+# M3a F4 (E7 row 6b, named exception): Edit > Emoji & Symbols opens the system character
+# palette with AppKit's standard chord. macOS only; no binding fires during a composition (F15).
+
+[[binding]]
+chord = "ctrl-cmd-space"
+command = "app.character_palette"
+context = "Workspace"
