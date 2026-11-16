@@ -296,11 +296,12 @@ fn choice_target(ev: &RunEvent, current: Option<(RunId, u64)>) -> Option<(u64, u
 /// the choice is not one the bar offers, or the question was already answered (a stale or
 /// duplicate answer). The answer goes to the session (or [`show`]'s caller) once; the bar
 /// closes and the badge's Commit and Roll back no longer wait.
-pub fn answer(console: ConsoleId, choice: RunChoice, cx: &mut App) -> bool {
+// ## m3b-t23-escalation (fix round 1, m2): the answer names its question.
+pub fn answer(console: ConsoleId, question: u64, choice: RunChoice, cx: &mut App) -> bool {
     let Some(bar) = cx.try_global::<Bars>().and_then(|b| b.0.get(&console)) else {
         return false;
     };
-    if !offered(bar.ask.rollback_and_continue).contains(&choice) {
+    if bar.ask.question != question || !offered(bar.ask.rollback_and_continue).contains(&choice) {
         return false;
     }
     let (run_seq, question) = (bar.run_seq, bar.ask.question);
@@ -312,16 +313,6 @@ pub fn answer(console: ConsoleId, choice: RunChoice, cx: &mut App) -> bool {
     if !first_answer(cx, console, run_seq, question) {
         return false;
     }
-    match bar.reply {
-        // The session says whether the run waited on this question; a refusal changes nothing.
-        Reply::Session(session) => drop(session.choose(run_seq, question, choice)),
-        Reply::Channel(Some(tx)) => {
-            let _ = tx.send(choice);
-        }
-        Reply::Channel(None) => {}
-        #[cfg(feature = "shots")]
-        Reply::Nowhere => {}
-    }
     let line = match choice {
         RunChoice::Stop => Some(LogMsg::RunStopped { n: bar.index }),
         RunChoice::RollbackAndContinue => Some(LogMsg::RolledBackContinue {
@@ -329,18 +320,50 @@ pub fn answer(console: ConsoleId, choice: RunChoice, cx: &mut App) -> bool {
         }),
         _ => None,
     };
-    if let (Some(line), Some(state)) = (line, Consoles::get(cx, console)) {
-        state.log.append(line, None, Some(bar.ask.unit));
-        if let Some(results) = state.results.clone() {
-            results.update(cx, |r, cx| r.note_output(cx));
+    let unit = bar.ask.unit;
+    match bar.reply {
+        // Fix round 1 (m1): the line only once the session took the answer (a run that
+        // ended meanwhile refuses it, and nothing happened).
+        Reply::Session(session) => {
+            let taken = session.choose(run_seq, question, choice);
+            cx.spawn(async move |cx| {
+                if taken.await == Ok(true)
+                    && let Some(line) = line
+                {
+                    cx.update(|cx| log_line(console, line, unit, cx));
+                }
+            })
+            .detach();
         }
+        Reply::Channel(Some(tx)) => {
+            let _ = tx.send(choice);
+        }
+        Reply::Channel(None) => {}
+        #[cfg(feature = "shots")]
+        Reply::Nowhere => {}
     }
     true
 }
 
+/// Appends `line` (about `unit`) to console `console`'s Output.
+fn log_line(console: ConsoleId, line: LogMsg, unit: UnitId, cx: &mut App) {
+    if let Some(state) = Consoles::get(cx, console) {
+        state.log.append(line, None, Some(unit));
+        if let Some(results) = state.results.clone() {
+            results.update(cx, |r, cx| r.note_output(cx));
+        }
+    }
+}
+
 /// Console `console` closes: its open question is answered Stop (R-M3-61).
 pub fn console_closed(console: ConsoleId, cx: &mut App) {
-    answer(console, RunChoice::Stop, cx);
+    if let Some(question) = cx
+        .try_global::<Bars>()
+        .and_then(|b| b.0.get(&console))
+        .map(|b| b.ask.question)
+    {
+        answer(console, question, RunChoice::Stop, cx);
+    }
 }
 
 /// The registry changed: the questions of the consoles it no longer has are answered Stop.
@@ -380,8 +403,13 @@ pub fn focus_cycle(window: &mut Window, cx: &mut App) -> bool {
     let Some(bar) = cx.try_global::<Bars>().and_then(|b| b.0.get(&console)) else {
         return false;
     };
+    // Fix round 1 (I3): from the bar, the toasts; without a sticky toast, the editor (the
+    // focus never stays trapped in the bar). A toast entered from here gives it back to the
+    // editor.
     if bar.buttons.iter().any(|(_, h)| h.is_focused(window)) {
-        return false;
+        focus_editor(console, window, cx);
+        hacivat_ui::toast::focus_newest_sticky(window, cx);
+        return true;
     }
     let Some((_, first)) = bar.buttons.first() else {
         return false;
@@ -472,7 +500,7 @@ pub fn render(console: ConsoleId, cx: &App) -> Option<AnyElement> {
                 .px(px(t.spacing.xs))
                 .border_1()
                 .border_color(c.seam_strong.to_hsla())
-                .rounded(px(3.0))
+                .rounded(px(t.radii.xs))
                 .child(
                     Label::new(
                         code,
@@ -519,6 +547,7 @@ pub fn render(console: ConsoleId, cx: &App) -> Option<AnyElement> {
         .flex_none()
         .items_center()
         .gap(px(t.spacing.sm));
+    let question = bar.ask.question;
     for (choice, handle) in &bar.buttons {
         let choice = *choice;
         let button = Button::new(element_id(choice), message(cx, label_id(choice), vec![]))
@@ -531,7 +560,7 @@ pub fn render(console: ConsoleId, cx: &App) -> Option<AnyElement> {
                     return;
                 }
                 let had_focus = bar_focused(console, window, cx);
-                if answer(console, choice, cx) && had_focus {
+                if answer(console, question, choice, cx) && had_focus {
                     focus_editor(console, window, cx);
                 }
             });
@@ -548,7 +577,6 @@ pub fn render(console: ConsoleId, cx: &App) -> Option<AnyElement> {
             _ => buttons.child(button),
         };
     }
-    let order: Vec<FocusHandle> = bar.buttons.iter().map(|(_, h)| h.clone()).collect();
     let row = div()
         .id(("errbar", console.0))
         .debug_selector(|| "errbar".to_string())
@@ -569,21 +597,10 @@ pub fn render(console: ConsoleId, cx: &App) -> Option<AnyElement> {
             let stroke = &event.keystroke;
             match stroke.key.as_str() {
                 // Escape answers Stop; it never cancels anything running (R-M3-38).
+                // Tab moves on in the window's own focus order (fix round 1, I3).
                 "escape" if !stroke.modifiers.modified() => {
-                    if answer(console, RunChoice::Stop, cx) {
+                    if answer(console, question, RunChoice::Stop, cx) {
                         focus_editor(console, window, cx);
-                    }
-                }
-                "tab" if !stroke.modifiers.control && !stroke.modifiers.alt => {
-                    let at = order.iter().position(|h| h.is_focused(window));
-                    let n = order.len();
-                    let next = match (at, stroke.modifiers.shift) {
-                        (Some(i), false) => (i + 1) % n,
-                        (Some(i), true) => (i + n - 1) % n,
-                        (None, _) => 0,
-                    };
-                    if let Some(h) = order.get(next) {
-                        window.focus(h, cx);
                     }
                 }
                 _ => return,
@@ -848,7 +865,7 @@ mod tests {
             // Nothing was noted: the question is still unanswered for any run of the console.
             assert!(cx.try_global::<Answered>().is_none_or(|a| a.0.is_empty()));
             assert!(open_question(c, cx).is_none());
-            assert!(!answer(c, RunChoice::Stop, cx), "no question is open");
+            assert!(!answer(c, 1, RunChoice::Stop, cx), "no question is open");
             assert!(first_answer(cx, c, 9, 1));
         });
     }

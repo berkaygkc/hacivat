@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 use hacivat_driver::{ServerMessage, TxStatus};
 use hacivat_exec::LogMsg;
 use hacivat_l10n::ArgValue;
-use hacivat_proto::DbmsKind;
+use hacivat_proto::{DbmsKind, EnvTag};
 use hacivat_session::profile::ProfileEndpoint;
 use hacivat_session::session::{
     CancelOutcome, Escalation, SessionEvent, SessionHandle, SessionState, TxMode, TxOwner,
@@ -56,15 +56,15 @@ use hacivat_ui::popover::A11yNode;
 use hacivat_ui::text::{Label, TextFn, TextSource, paragraph};
 use hacivat_ui::toast::{Toast, ToastAction, ToastKind, ToastQueue};
 use hacivat_ui_core::gpui_surface::{
-    App, AppContext as _, ClickEvent, Context, EntityId, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Role, SharedString,
-    Styled, Task, WeakEntity, Window, div, px,
+    App, AppContext as _, ClickEvent, Context, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyDownEvent, ParentElement, Render, Role, SharedString, Styled, Task, WeakEntity,
+    Window, div, px,
 };
 use hacivat_ui_core::theme::Theme;
 use hacivat_ui_editor::{ExecMarkState, MarkKey};
-use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+use tokio::sync::broadcast::error::RecvError;
 
-use super::confirm::{closes_dialog, console_facts, grouped_footer, scroll_body};
+use super::confirm::{closes_dialog, console_facts, grouped_footer, scroll_body, subtitle};
 use super::marks::{clock_text, message};
 use super::{console_exec, in_workspace_window};
 use crate::connections::ConnectionsModel;
@@ -98,6 +98,10 @@ struct Cancel {
     /// The session said the cancel is slow: the unit in flight shows the hourglass.
     slow: bool,
     dialog: Option<WeakEntity<EscalationDialog>>,
+    // ## m3b-t23-escalation (fix round 1, I1)
+    /// A terminate went out and its outcome is not known yet: the statements of this console's
+    /// open transaction it would roll back (for the "terminated" line).
+    terminate: Option<Option<u32>>,
     _tasks: (Task<()>, Task<()>),
 }
 
@@ -128,13 +132,19 @@ pub(crate) fn follow(console: ConsoleId, req: u64, session: &SessionHandle, cx: 
                 Ok(SessionEvent::SlowCancel { req: r }) if r == req => {
                     cx.update(|cx| on_slow_cancel(console, cx));
                 }
+                // Fix round 1 (I1): a terminate's refusal, however late it comes.
+                Ok(SessionEvent::CancelFailed { req: r, server }) if r == req => {
+                    cx.update(|cx| terminate_refused(console, req, server, cx));
+                }
                 Ok(_) | Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => break,
             }
         }
     });
     let ends = cx.spawn(async move |cx| {
-        let _ = state
+        // The state the request left the session in: a terminate that ended it leaves no
+        // working connection (broken, or reconnecting), a cancel that landed leaves it idle.
+        let left = state
             .wait_for(|s| {
                 !matches!(
                     s.state,
@@ -142,8 +152,14 @@ pub(crate) fn follow(console: ConsoleId, req: u64, session: &SessionHandle, cx: 
                         if r == req
                 )
             })
-            .await;
-        cx.update(|cx| finish(console, req, cx));
+            .await
+            .map(|s| s.state.clone())
+            .ok();
+        cx.update(|cx| {
+            let ended_by_terminate =
+                !matches!(left, Some(SessionState::Idle | SessionState::Busy { .. }));
+            finish(console, req, ended_by_terminate, cx);
+        });
     });
     let since = cx.background_executor().now();
     let old = cx.default_global::<Escalations>().cancels.insert(
@@ -155,6 +171,7 @@ pub(crate) fn follow(console: ConsoleId, req: u64, session: &SessionHandle, cx: 
             toast: None,
             slow: false,
             dialog: None,
+            terminate: None,
             _tasks: (slow, ends),
         },
     );
@@ -170,8 +187,10 @@ pub(crate) fn cancelling(console: ConsoleId, req: u64, cx: &App) -> bool {
         .is_some_and(|c| c.req == req)
 }
 
-/// Request `req` of console `console` ended: its toast and its dialog go.
-fn finish(console: ConsoleId, req: u64, cx: &mut App) {
+/// Request `req` of console `console` ended: its toast and its dialog go. A terminate still
+/// waiting for its outcome ended it when the session lost its connection with it
+/// (`by_terminate`): its line is written now (fix round 1, I1: a late success too).
+fn finish(console: ConsoleId, req: u64, by_terminate: bool, cx: &mut App) {
     let ended = {
         let e = cx.default_global::<Escalations>();
         if e.cancels.get(&console).is_some_and(|c| c.req == req) {
@@ -181,7 +200,44 @@ fn finish(console: ConsoleId, req: u64, cx: &mut App) {
         }
     };
     if let Some(c) = ended {
+        if let Some(statements) = c.terminate.filter(|_| by_terminate) {
+            log(console, LogMsg::Terminated { statements }, cx);
+        }
         drop_cancel(c, cx);
+    }
+}
+
+// ## m3b-t23-escalation (fix round 1, I1)
+/// The terminate of request `req` of console `console` was refused (its reply, or the
+/// session's `CancelFailed`, in either order): its line once, and the dialog shows the server's
+/// text (when one came) with the focus back on Keep waiting.
+fn terminate_refused(console: ConsoleId, req: u64, server: Option<ServerMessage>, cx: &mut App) {
+    let Some(c) = cx
+        .default_global::<Escalations>()
+        .cancels
+        .get_mut(&console)
+        .filter(|c| c.req == req)
+    else {
+        return;
+    };
+    let first = c.terminate.take().is_some();
+    let dialog = c.dialog.as_ref().and_then(|d| d.upgrade());
+    if first {
+        log(console, LogMsg::TerminateFailed, cx);
+    }
+    let Some(dialog) = dialog else {
+        return;
+    };
+    dialog.update(cx, |d, cx| {
+        let known = d.refused.take().and_then(|r| r.server);
+        d.refused = Some(Refused {
+            server: server.or(known),
+        });
+        cx.notify();
+    });
+    if first {
+        let keep = dialog.read(cx).keep.clone();
+        in_workspace_window(cx, move |_, window, cx| window.focus(&keep, cx));
     }
 }
 
@@ -336,7 +392,22 @@ pub enum OwnTx {
     None,
     /// The user's open transaction and its statements.
     Open(u32),
+    // ## m3b-t23-escalation (fix round 1, m3)
+    /// A transaction Hacivat opened for the console (a confirmed change waiting for its
+    /// answer, a cursor), in any mode.
+    Hacivat,
     /// The running statement may have opened one (Manual or Smart mode).
+    Maybe,
+}
+
+/// Another console's transaction a profile-wide Disconnect rolls back (fix round 1, m3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OtherTx {
+    /// The user's open transaction and its statements.
+    Open(u32),
+    /// A transaction Hacivat opened for it.
+    Hacivat,
+    /// A request of the user's runs on it: it may have opened one.
     Maybe,
 }
 
@@ -347,7 +418,8 @@ pub enum Reach {
     Profile,
     /// Any other console: only its own session.
     Console,
-    /// SQLite: the console's connection to file `name`.
+    /// SQLite: the one connection to file `name` that the profile's consoles share
+    /// (single-session, fix round 1, m4).
     File(String),
 }
 
@@ -358,13 +430,16 @@ pub struct Facts {
     pub name: String,
     /// The console's title (data), e.g. "orders-dev (2)".
     pub console: String,
+    // ## m3b-t23-escalation (fix round 1, I2): the subtitle's environment mark and engine.
+    pub env: Option<EnvTag>,
+    pub engine: Option<SharedString>,
     /// The server function or statement Terminate uses; `None`: no Terminate.
     pub terminate: Option<&'static str>,
     pub own: OwnTx,
     pub reach: Reach,
-    /// The other consoles whose transaction a profile-wide Disconnect rolls back: the title and
-    /// its statements (`None`: a request runs that may have opened one).
-    pub others: Vec<(String, Option<u32>)>,
+    /// The other consoles whose transaction a profile-wide Disconnect rolls back: their titles
+    /// and transactions.
+    pub others: Vec<(String, OtherTx)>,
 }
 
 impl Facts {
@@ -387,6 +462,11 @@ fn terminate_with(engine: DbmsKind) -> Option<&'static str> {
     }
 }
 
+/// Whether `status` is an open (or failed) transaction.
+fn tx_open(status: TxStatus) -> bool {
+    matches!(status, TxStatus::InTx | TxStatus::Failed)
+}
+
 /// What console `console`'s dialog says now.
 fn facts_of(console: ConsoleId, session: &SessionHandle, cx: &App) -> Option<Facts> {
     let profile = profile_of(cx, console)?;
@@ -394,6 +474,7 @@ fn facts_of(console: ConsoleId, session: &SessionHandle, cx: &App) -> Option<Fac
     let snap = session.state().borrow().clone();
     let own = match TxView::of(&snap).user {
         Some(u) => OwnTx::Open(u.statements),
+        None if tx_open(snap.tx.status) && snap.tx.owner != TxOwner::None => OwnTx::Hacivat,
         None if snap.tx.mode != TxMode::Auto => OwnTx::Maybe,
         None => OwnTx::None,
     };
@@ -428,9 +509,13 @@ fn facts_of(console: ConsoleId, session: &SessionHandle, cx: &App) -> Option<Fac
                     })
                     .and_then(|c| console_facts(cx, c))
                     .map_or_else(|| profile.name.clone(), |f| f.title.to_string());
-                let open = o.tx.owner == TxOwner::User
-                    && matches!(o.tx.status, TxStatus::InTx | TxStatus::Failed);
-                (title, open.then_some(o.tx.statements))
+                let tx = match o.tx.owner {
+                    TxOwner::User if tx_open(o.tx.status) => OtherTx::Open(o.tx.statements),
+                    TxOwner::None | TxOwner::User => OtherTx::Maybe,
+                    _ if tx_open(o.tx.status) => OtherTx::Hacivat,
+                    _ => OtherTx::Maybe,
+                };
+                (title, tx)
             })
             .collect(),
         _ => Vec::new(),
@@ -438,6 +523,8 @@ fn facts_of(console: ConsoleId, session: &SessionHandle, cx: &App) -> Option<Fac
     Some(Facts {
         name: profile.name.clone(),
         console: base.title.to_string(),
+        env: base.env,
+        engine: base.engine.clone(),
         terminate: terminate_with(profile.engine),
         own,
         reach,
@@ -519,8 +606,6 @@ pub struct EscalationDialog {
     since: Instant,
     /// The shots' fixed clock.
     frozen: Option<Duration>,
-    /// A terminate in flight.
-    terminating: bool,
     refused: Option<Refused>,
     root: FocusHandle,
     /// Keep waiting (Primary, focused).
@@ -567,7 +652,6 @@ impl EscalationDialog {
             facts,
             since,
             frozen,
-            terminating: false,
             refused: None,
             root: cx.focus_handle(),
             keep: cx.focus_handle().tab_stop(true),
@@ -621,68 +705,44 @@ impl EscalationDialog {
         Some((c.req, c.session.clone()))
     }
 
-    /// Terminate on server: the session ends the server session from a side connection.
+    /// Whether a terminate of this dialog's request waits for its outcome (fix round 1, I1:
+    /// the cancel's follower knows, however late the outcome comes).
+    fn terminating(&self, cx: &App) -> bool {
+        cx.try_global::<Escalations>()
+            .and_then(|e| e.cancels.get(&self.console))
+            .is_some_and(|c| c.terminate.is_some())
+    }
+
+    /// Terminate on server: the session ends the server session from a side connection. Its
+    /// outcome is the follower's (`follow`): a refusal (`CancelFailed`, or a `Failed` reply)
+    /// whenever it comes, a success when the request ends with the connection.
     fn terminate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.terminating || self.facts.terminate.is_none() {
+        if self.terminating(cx) || self.facts.terminate.is_none() {
             return;
         }
         let Some((req, session)) = self.target(cx) else {
             return self.close(window, cx);
         };
-        // Subscribed before the escalation goes out: its failure is queued before its reply.
-        let mut events = session.events();
+        let statements = self.facts.own_statements();
+        if let Some(c) = cx
+            .default_global::<Escalations>()
+            .cancels
+            .get_mut(&self.console)
+        {
+            c.terminate = Some(statements);
+        }
         let reply = session.escalate(req, Escalation::Terminate);
-        self.terminating = true;
         self.refused = None;
         cx.notify();
-        let (console, statements) = (self.console, self.facts.own_statements());
-        // Detached: the outcome is logged even when the request's end closed the dialog first.
-        cx.spawn(async move |this, cx| {
-            let outcome = reply.await.unwrap_or(CancelOutcome::Disconnected);
-            let mut server = None;
-            loop {
-                match events.try_recv() {
-                    Ok(SessionEvent::CancelFailed { req: r, server: s }) if r == req => server = s,
-                    Ok(_) | Err(TryRecvError::Lagged(_)) => {}
-                    Err(_) => break,
-                }
+        let console = self.console;
+        // Detached: a refusal without the server's text (no side connection) is a `Failed`
+        // reply with no event; the event, when there is one, goes to the follower too.
+        cx.spawn(async move |_, cx| {
+            if let Ok(CancelOutcome::Failed(_)) = reply.await {
+                cx.update(|cx| terminate_refused(console, req, None, cx));
             }
-            cx.update(|cx| match outcome {
-                CancelOutcome::Cancelled => log(console, LogMsg::Terminated { statements }, cx),
-                CancelOutcome::Failed(_) => log(console, LogMsg::TerminateFailed, cx),
-                _ => {}
-            });
-            let _ = this.update(cx, |d, cx| d.terminated(outcome, server, cx));
         })
         .detach();
-    }
-
-    fn terminated(
-        &mut self,
-        outcome: CancelOutcome,
-        server: Option<ServerMessage>,
-        cx: &mut Context<Self>,
-    ) {
-        self.terminating = false;
-        // A terminate that ended the request: the request's end closes the dialog.
-        // `StillRunning`: the statement goes on; the dialog stays.
-        if let CancelOutcome::Failed(_) = outcome {
-            self.refused = Some(Refused { server });
-            // The focus returns to Keep waiting at the next frame (the window is the
-            // dialog's own).
-            let keep = self.keep.clone();
-            let view = cx.entity_id();
-            cx.defer(move |cx| {
-                if let Some(handle) = super::workspace_window(cx) {
-                    let _ = handle.update(cx, |_, window, cx| {
-                        if open_view(cx) == Some(view) {
-                            window.focus(&keep, cx);
-                        }
-                    });
-                }
-            });
-        }
-        cx.notify();
     }
 
     /// Disconnect: the session drops its connection (`Escalation::Deactivate`); from the
@@ -691,8 +751,17 @@ impl EscalationDialog {
         let Some((req, session)) = self.target(cx) else {
             return self.close(window, cx);
         };
+        // The request ends by the disconnect, not by a terminate still on its way.
+        if let Some(c) = cx
+            .default_global::<Escalations>()
+            .cancels
+            .get_mut(&self.console)
+        {
+            c.terminate = None;
+        }
         let reply = session.escalate(req, Escalation::Deactivate);
         let (console, name) = (self.console, self.facts.name.clone());
+        let local = matches!(self.facts.reach, Reach::File(_));
         cx.spawn(async move |_, cx| {
             let outcome = reply.await.unwrap_or(CancelOutcome::Disconnected);
             if outcome != CancelOutcome::AlreadyFinished {
@@ -701,6 +770,7 @@ impl EscalationDialog {
                         console,
                         LogMsg::Disconnected {
                             name: Arc::from(name.as_str()),
+                            local,
                         },
                         cx,
                     );
@@ -748,15 +818,6 @@ impl EscalationDialog {
     }
 }
 
-/// The dialog's view ID while one is open (the first found).
-fn open_view(cx: &App) -> Option<EntityId> {
-    cx.try_global::<Escalations>()?
-        .cancels
-        .values()
-        .find_map(|c| c.dialog.as_ref()?.upgrade())
-        .map(|v| v.entity_id())
-}
-
 /// Appends `msg` to console `console`'s Output.
 fn log(console: ConsoleId, msg: LogMsg, cx: &mut App) {
     let Some(state) = Consoles::get(cx, console) else {
@@ -773,8 +834,11 @@ impl Render for EscalationDialog {
         let theme = *Theme::get(cx);
         let t = theme.tokens;
         let c = &t.colors;
+        let terminating = self.terminating(cx);
         let f = &self.facts;
         let title = message(cx, "hv-cancel-dlg-title", vec![]);
+        // Fix round 1 (I2): the environment mark and the connection, as every dialog's.
+        let sub = subtitle(&theme, f.env, &f.name, f.engine.clone(), None);
         let age = clock_text(cx, millis(self.age(cx)));
         let body_text = message(
             cx,
@@ -797,6 +861,7 @@ impl Render for EscalationDialog {
                 "hv-cancel-own-tx",
                 vec![("n", ArgValue::Count(u64::from(n)))],
             )),
+            OwnTx::Hacivat => Some(message(cx, "hv-cancel-own-tx-hacivat", vec![])),
             OwnTx::Maybe => Some(message(cx, "hv-cancel-own-tx-maybe", vec![])),
             OwnTx::None => None,
         };
@@ -845,8 +910,8 @@ impl Render for EscalationDialog {
         let others: Vec<SharedString> = f
             .others
             .iter()
-            .map(|(console, n)| match n {
-                Some(n) => message(
+            .map(|(console, tx)| match tx {
+                OtherTx::Open(n) => message(
                     cx,
                     "hv-cancel-other-tx",
                     vec![
@@ -854,7 +919,12 @@ impl Render for EscalationDialog {
                         ("n", ArgValue::Count(u64::from(*n))),
                     ],
                 ),
-                None => message(
+                OtherTx::Hacivat => message(
+                    cx,
+                    "hv-cancel-other-tx-hacivat",
+                    vec![("console", text(console))],
+                ),
+                OtherTx::Maybe => message(
                     cx,
                     "hv-cancel-other-tx-maybe",
                     vec![("console", text(console))],
@@ -930,7 +1000,7 @@ impl Render for EscalationDialog {
                 ButtonKind::Default,
                 Some(IconName::OctagonX),
                 &self.terminate,
-                self.terminating,
+                terminating,
                 Self::terminate,
                 cx,
             ));
@@ -954,7 +1024,7 @@ impl Render for EscalationDialog {
                 &theme,
                 title.clone(),
                 "escalation-title",
-                None,
+                Some(sub),
                 cx.listener(|this, _, window, cx| this.keep_waiting(window, cx)),
                 cx,
             ))
@@ -1035,7 +1105,7 @@ fn server_box(theme: &Theme, server: &ServerMessage, cx: &App) -> impl IntoEleme
                         .px(px(t.spacing.xs))
                         .border_1()
                         .border_color(c.seam_strong.to_hsla())
-                        .rounded(px(3.0))
+                        .rounded(px(t.radii.xs))
                         .child(
                             Label::new(
                                 code,
@@ -1171,7 +1241,7 @@ pub mod fixtures {
         console: ConsoleId,
         own: OwnTx,
         reach: Reach,
-        others: Vec<(String, Option<u32>)>,
+        others: Vec<(String, OtherTx)>,
         cx: &App,
     ) -> Option<Facts> {
         let profile = profile_of(cx, console)?;
@@ -1179,6 +1249,8 @@ pub mod fixtures {
         Some(Facts {
             name: profile.name.clone(),
             console: base.title.to_string(),
+            env: base.env,
+            engine: base.engine.clone(),
             terminate: terminate_with(profile.engine),
             own,
             reach,

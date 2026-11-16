@@ -1018,6 +1018,10 @@ impl Core {
     /// `autocommit = 0` (after the script, as on a reconnect; fix round 1, review I3d): `Err`
     /// with the class that breaks the session. The script's text is never logged.
     async fn connect_steps(&mut self, session: SessionId) -> Result<(), ErrClass> {
+        // ## m3b-t23-escalation (named exception, fix round 1, I4; carry T22 I4): a zone a
+        // server refused before is not why this connect fails; `refuse` notes it again only
+        // when this connect's own zone step is refused.
+        self.forget_zone_refusal();
         if let Some(script) = self.profile.startup_script.as_deref() {
             if self.read_only {
                 tracing::info!(
@@ -1060,9 +1064,6 @@ impl Core {
                 .map_err(|_| class(self))?;
         }
         self.follow_autocommit(session);
-        // ## m3b-t23-escalation (named exception, carry T22 I4): connected; a zone a server
-        // refused earlier is no longer why the profile is down.
-        self.forget_zone_refusal();
         Ok(())
     }
 
@@ -1102,9 +1103,6 @@ impl Core {
                             );
                         } else if matches!(step, EnvStep::StartupScript(_)) {
                             tracing::warn!(kind = ?e.kind, "the profile's startup script failed");
-                            // ## m3b-t23-escalation (named exception, carry T22 I4): the
-                            // script is now why the connection is down, not an earlier zone.
-                            self.forget_zone_refusal();
                         }
                     }
                     return Err(e);
@@ -1117,8 +1115,6 @@ impl Core {
                 tracing::warn!(
                     "the profile's startup script left a transaction open; the session is closed"
                 );
-                // ## m3b-t23-escalation (named exception, carry T22 I4)
-                self.forget_zone_refusal();
                 self.last_class = Some(ErrClass::ConfigInvalid);
                 return Err(ExecError::of(ExecErrorKind::Internal));
             }
@@ -2734,6 +2730,9 @@ impl Ladder {
                 reply,
             } if self.is_mine(seq) => {
                 self.climb(ctl, Some(CancelState::Terminating));
+                // ## m3b-t23-escalation (named exception, fix round 1, I1): an earlier failure
+                // (the cancel's) never answers the terminate; it reports its own outcome.
+                self.failed = None;
                 self.send_terminate();
                 self.wait(reply);
             }

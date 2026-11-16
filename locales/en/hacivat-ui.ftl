@@ -2310,6 +2310,13 @@ hv-cancel-own-tx = { $n ->
     }
 # This console's running statement may have opened a transaction (Manual or Smart mode).
 hv-cancel-own-tx-maybe = This console may have an open transaction; if so, it rolls back.
+# A transaction Hacivat opened for this console (a confirmed change waiting for its answer, a
+# cursor) rolls back (fix round 1).
+hv-cancel-own-tx-hacivat = The transaction Hacivat opened on this console (a change waiting for your answer, or an open cursor) rolls back.
+# Another console holds a transaction Hacivat opened for it (fix round 1).
+# Variables:
+#   $console (String) - the other console's title, e.g. "orders-dev (2)".
+hv-cancel-other-tx-hacivat = { $console } also has a transaction Hacivat opened; the server rolls it back.
 # The app's existing verb (hv-conn-menu-disconnect); the engine call stays "deactivate".
 hv-cancel-disconnect = Disconnect
 # From the profile's default console: the whole profile disconnects (R-M3-73).
@@ -2320,10 +2327,11 @@ hv-cancel-disconnect-line-all = Disconnect closes every connection of { $name } 
 # Variables:
 #   $console (String) - the console's title, e.g. "orders-dev (2)".
 hv-cancel-disconnect-line-one = Disconnect closes only this console's session ({ $console }); the statement may continue on the server.
-# SQLite: a local file, nothing runs "on the server".
+# SQLite: a local file, nothing runs "on the server"; the profile's consoles share its one
+# connection (single-session; fix round 1, m4).
 # Variables:
 #   $name (String) - the database file's name, e.g. "app.db".
-hv-cancel-disconnect-line-local = Disconnect closes this console's connection to the file { $name }; SQLite stops the statement when its connection closes.
+hv-cancel-disconnect-line-local = Disconnect closes the connection to the file { $name } that this connection's consoles share; SQLite stops the statement when its connection closes.
 # Another console of the profile holds a user transaction that the default console's
 # Disconnect rolls back.
 # Variables:

@@ -2124,13 +2124,17 @@ hv-cancel-own-tx = Bu konsolun açık işlemi ({ $n } ifade) geri alınır.
 # Review: PO
 hv-cancel-own-tx-maybe = Bu konsolun açık bir işlemi olabilir; öyleyse geri alınır.
 # Review: PO
+hv-cancel-own-tx-hacivat = Hacivat'ın bu konsolda açtığı işlem (yanıtınızı bekleyen bir değişiklik ya da açık bir imleç) geri alınır.
+# Review: PO
+hv-cancel-other-tx-hacivat = { $console } konsolunda da Hacivat'ın açtığı bir işlem var; sunucu onu geri alır.
+# Review: PO
 hv-cancel-disconnect = Bağlantıyı kes
 # Review: PO
 hv-cancel-disconnect-line-all = “Bağlantıyı kes”, { $name } için buradaki tüm bağlantıları kapatır; ifade sunucuda çalışmayı sürdürebilir.
 # Review: PO
 hv-cancel-disconnect-line-one = “Bağlantıyı kes” yalnızca bu konsolun oturumunu ({ $console }) kapatır; ifade sunucuda çalışmayı sürdürebilir.
 # Review: PO
-hv-cancel-disconnect-line-local = “Bağlantıyı kes”, bu konsolun { $name } dosyasına bağlantısını kapatır; SQLite, bağlantı kapanınca ifadeyi durdurur.
+hv-cancel-disconnect-line-local = “Bağlantıyı kes”, bu bağlantının konsollarının paylaştığı { $name } dosyası bağlantısını kapatır; SQLite, bağlantı kapanınca ifadeyi durdurur.
 # Review: PO
 hv-cancel-other-tx = { $console } konsolunda da açık bir işlem var ({ $n } ifade); sunucu onu geri alır.
 # Review: PO

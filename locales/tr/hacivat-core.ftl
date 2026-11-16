@@ -617,6 +617,8 @@ exec-terminate-failed = Oturum sunucuda sonlandırılamadı.
 # Review: PO
 exec-disconnected = { $name } bağlantısı kesildi. İfade sunucuda hâlâ çalışıyor olabilir.
 # Review: PO
+exec-disconnected-local = { $name } bağlantısı kesildi. SQLite, bağlantı kapanınca ifadeyi durdurdu.
+# Review: PO
 exec-run-stopped = { $i }. ifadede durduruldu: Durdur'u seçtiniz.
 # Review: PO
 exec-run-rolled-back-continue = İşlem geri alındı; { $i }. ifadeden devam ediliyor.

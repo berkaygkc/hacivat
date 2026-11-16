@@ -144,6 +144,8 @@ pub(super) enum M3a {
     EscDialog,
     EscDialogFailed,
     EscDialogLocal,
+    // ## m3b-t23-escalation (fix round 1, I2): the subtitle's production mark.
+    EscDialogProduction,
     EscKeptWaiting,
     ErrBar,
     ErrBarFailedTx,
@@ -152,11 +154,12 @@ pub(super) enum M3a {
 
 // ## m3b-t23-escalation (named exception)
 /// The Task 23 states (after every Task 21 state).
-pub(super) const M3B_T23: [M3a; 8] = [
+pub(super) const M3B_T23: [M3a; 9] = [
     M3a::EscSlowToast,
     M3a::EscDialog,
     M3a::EscDialogFailed,
     M3a::EscDialogLocal,
+    M3a::EscDialogProduction,
     M3a::EscKeptWaiting,
     M3a::ErrBar,
     M3a::ErrBarFailedTx,
@@ -407,6 +410,7 @@ impl M3a {
             M3a::EscDialog => "esc-dialog",
             M3a::EscDialogFailed => "esc-dialog-failed",
             M3a::EscDialogLocal => "esc-dialog-local",
+            M3a::EscDialogProduction => "esc-dialog-production",
             M3a::EscKeptWaiting => "esc-kept-waiting",
             M3a::ErrBar => "errbar",
             M3a::ErrBarFailedTx => "errbar-failed-tx",
@@ -479,7 +483,9 @@ impl M3a {
             M3a::TxShared => ("#tx-chip-mode", None),
             // ## m3b-t23-escalation: the toast, the dialog's own labels, the gutter, the bar.
             M3a::EscSlowToast => (TOAST, None),
-            M3a::EscDialog | M3a::EscDialogLocal => ("#escalation-title", None),
+            M3a::EscDialog | M3a::EscDialogLocal | M3a::EscDialogProduction => {
+                ("#escalation-title", None)
+            }
             M3a::EscDialogFailed => ("#escalation-server-text", None),
             M3a::EscKeptWaiting => (MARKS_RS, None),
             M3a::ErrBar | M3a::ErrBarFailedTx | M3a::ErrBarFocused => ("#errbar-title", None),
@@ -536,7 +542,11 @@ impl M3a {
     pub(super) fn shows_production(self) -> bool {
         matches!(
             self,
-            M3a::ConsoleProduction | M3a::ToolbarProductionWaiting | M3a::MarksDenied
+            M3a::ConsoleProduction
+                | M3a::ToolbarProductionWaiting
+                | M3a::MarksDenied
+                // ## m3b-t23-escalation (fix round 1, I2)
+                | M3a::EscDialogProduction
         )
     }
 
@@ -1078,10 +1088,14 @@ impl M3a {
                 ));
                 s
             }
-            EscDialog | EscDialogFailed | EscDialogLocal => {
-                use exec_ui::escalation::{OwnTx, Reach, fixtures};
+            EscDialog | EscDialogFailed | EscDialogLocal | EscDialogProduction => {
+                use exec_ui::escalation::{OtherTx, OwnTx, Reach, fixtures};
                 let mut s = live(
-                    DEV,
+                    if self == EscDialogProduction {
+                        PROD
+                    } else {
+                        DEV
+                    },
                     SCRIPT,
                     caret(SCRIPT, "o.total"),
                     Expect::Band(BandStyle::Run),
@@ -1093,9 +1107,11 @@ impl M3a {
                             EscDialog => (
                                 OwnTx::Open(3),
                                 Reach::Profile,
-                                vec![(format!("{DEV} (2)"), Some(3))],
+                                vec![(format!("{DEV} (2)"), OtherTx::Open(3))],
                             ),
-                            EscDialogFailed => (OwnTx::Open(3), Reach::Profile, Vec::new()),
+                            EscDialogFailed | EscDialogProduction => {
+                                (OwnTx::Open(3), Reach::Profile, Vec::new())
+                            }
                             _ => (OwnTx::None, Reach::File("app.db".into()), Vec::new()),
                         };
                         let mut facts =
@@ -1158,6 +1174,11 @@ impl M3a {
                 );
                 s.push(instant(move |window, cx| {
                     let c = active_console(window, cx).expect("a console");
+                    // Fix round 1 (m6): the run waits on the bar, so the toolbar shows it
+                    // running (Stop), never an idle Run.
+                    if let Some(tab) = Consoles::get(cx, c).map(|s| s.tab) {
+                        console_fixtures::show_run(tab, RunUx::Running(3), cx);
+                    }
                     match self {
                         ErrBarFailedTx => exec_ui::error_bar::fixtures::show(
                             c,
@@ -1372,6 +1393,10 @@ impl M3a {
                 drawn(frame, "escalation-title")
                     && !drawn(frame, "button-label-escalation-terminate")
             }
+            // Fix round 1 (I2): the subtitle's connection, on production.
+            EscDialogProduction => {
+                drawn(frame, "escalation-title") && drawn(frame, "confirm-connection")
+            }
             EscKeptWaiting => editor.as_ref().is_some_and(|e| {
                 matches!(
                     e.read(cx).marks().state(exec_ui::fixtures::fixture_key(1)),
@@ -1384,6 +1409,8 @@ impl M3a {
                 let focus = exec_ui::error_bar::button_focus(c, cx);
                 let in_bar = focus.first().is_some_and(|(_, h)| h.is_focused(window));
                 drawn(frame, "errbar-title")
+                    // Fix round 1 (m6): the run that waits shows Stop.
+                    && toolbar().is_some_and(|t| matches!(t.run, Some(RunUx::Running(3))))
                     && match self {
                         ErrBarFailedTx => offered == 3 && !in_bar,
                         ErrBarFocused => offered == 4 && in_bar,

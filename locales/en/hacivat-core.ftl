@@ -961,6 +961,10 @@ exec-terminate-failed = Couldn't terminate the session on the server.
 # Variables:
 #   $name (String) - the connection's name, e.g. "orders-dev".
 exec-disconnected = Disconnected { $name }. The statement may still be running on the server.
+# As exec-disconnected for a SQLite file: the statement stopped with its connection (fix round 1).
+# Variables:
+#   $name (String) - the connection's name, e.g. "app-local".
+exec-disconnected-local = Disconnected { $name }. SQLite stopped the statement when its connection closed.
 # The user answered Stop to the error bar (surface 7).
 # Variables:
 #   $i (String) - the failed statement's number in the run, e.g. "2".

@@ -179,9 +179,11 @@ pub enum LogMsg {
     },
     /// Terminate on server failed (the server's text is in the dialog, verbatim).
     TerminateFailed,
-    /// Disconnect dropped the console's connection `name` while it cancelled.
+    /// Disconnect dropped the console's connection `name` while it cancelled; `local`: a
+    /// SQLite file, whose statement stops with its connection (fix round 1, m4).
     Disconnected {
         name: Arc<str>,
+        local: bool,
     },
     /// The user answered Stop to the error bar at statement `n` (R-M3-61).
     RunStopped {
@@ -272,7 +274,8 @@ impl LogMsg {
             } => "exec-terminated",
             LogMsg::Terminated { statements: None } => "exec-terminated-no-tx",
             LogMsg::TerminateFailed => "exec-terminate-failed",
-            LogMsg::Disconnected { .. } => "exec-disconnected",
+            LogMsg::Disconnected { local: false, .. } => "exec-disconnected",
+            LogMsg::Disconnected { local: true, .. } => "exec-disconnected-local",
             LogMsg::RunStopped { .. } => "exec-run-stopped",
             LogMsg::RolledBackContinue { .. } => "exec-run-rolled-back-continue",
         }
@@ -364,7 +367,7 @@ impl LogMsg {
                 .map(|n| ("n", LogArg::U64(u64::from(*n))))
                 .collect(),
             LogMsg::TerminateFailed => Vec::new(),
-            LogMsg::Disconnected { name } => vec![("name", LogArg::Str(name.clone()))],
+            LogMsg::Disconnected { name, .. } => vec![("name", LogArg::Str(name.clone()))],
             LogMsg::RunStopped { n } | LogMsg::RolledBackContinue { n } => {
                 vec![("i", LogArg::Str(n.to_string().into()))]
             }
